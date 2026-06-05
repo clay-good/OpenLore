@@ -1,5 +1,6 @@
 # openlore
 
+[![SafeSkill 61/100](https://img.shields.io/badge/SafeSkill-61%2F100_Use%20with%20Caution-orange)](https://safeskill.dev/scan/clay-good-openlore)
 > [!NOTE]
 > **`spec-gen` has been renamed to `OpenLore`.** The npm package is now [`openlore`](https://www.npmjs.com/package/openlore) and the CLI command is `openlore`. Existing projects: rename your `.spec-gen/` directory to `.openlore/` and reinstall (`npm i -g openlore`). See [docs/RENAME-TO-OPENLORE.md](docs/RENAME-TO-OPENLORE.md) for the full migration checklist.
 
