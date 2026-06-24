@@ -21,6 +21,8 @@ import type { DecisionScope } from '../../types/index.js';
 import { handleOrient } from './mcp-handlers/orient.js';
 import { handleSelectTests } from './mcp-handlers/test-impact.js';
 import { handleBlastRadius } from './mcp-handlers/blast-radius.js';
+import { handlePlanParallelWork } from './mcp-handlers/plan-parallel-work.js';
+import type { TaskDescriptor } from './mcp-handlers/change-footprint.js';
 import { handleFindDeadCode } from './mcp-handlers/reachability.js';
 import { handleVerifyClaim } from './mcp-handlers/claim-verification.js';
 import type { ClaimKind } from './mcp-handlers/claim-verification.js';
@@ -333,6 +335,10 @@ export async function dispatchTool(
     const { directory, kind, subject, object } =
       args as { directory: string; kind: ClaimKind; subject: string; object?: string };
     return handleVerifyClaim({ directory, kind, subject, object });
+  } else if (name === 'plan_parallel_work') {
+    const { directory, tasks, readMaxDistance, affectedMaxDepth, ambientFanInPercentile } =
+      args as { directory: string; tasks: TaskDescriptor[]; readMaxDistance?: number; affectedMaxDepth?: number; ambientFanInPercentile?: number };
+    return handlePlanParallelWork({ directory, tasks, readMaxDistance, affectedMaxDepth, ambientFanInPercentile });
   }
   throw new UnknownToolError(name);
 }

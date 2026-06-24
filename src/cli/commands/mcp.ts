@@ -1469,6 +1469,39 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: 'plan_parallel_work',
+    description:
+      'USE THIS WHEN: before fanning N tasks out across agents/worktrees — "which of these tasks are ' +
+      'safe to run concurrently, and in what order?". Given a caller-supplied task list (id + seed ' +
+      'symbols/files each), returns the plan: a hazard-typed conflict graph (WAW/shared-append/RAW/WAR/' +
+      'soft-coupling), a wave schedule (wave 1 = dispatch now), and the critical path (minimum rounds ' +
+      'with unlimited agents). Stateless, advisory; re-invoke with remaining tasks to re-plan. Mark ' +
+      'registration-site touches writeMode:"append" so they are not falsely serialized. Run ' +
+      'analyze_codebase first.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        directory: { type: 'string', description: DIR_DESC },
+        tasks: {
+          type: 'array',
+          description: 'Task descriptors; each needs an id and ≥1 seed (symbol or file). The list is never invented or decomposed.',
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string', description: 'Unique task id within this call.' },
+              seedSymbols: { type: 'array', items: { type: 'string' }, description: 'Symbol names/ids the task will edit.' },
+              seedFiles: { type: 'array', items: { type: 'string' }, description: 'File paths the task will edit (every symbol in the file enters the write-set).' },
+              intent: { type: 'string', description: 'Optional intent text (widens sparse seeds only; never guesses edits).' },
+              writeMode: { type: 'string', enum: ['append', 'modify'], description: '"append" for pure registration-site additions (default "modify").' },
+            },
+            required: ['id'],
+          },
+        },
+      },
+      required: ['directory', 'tasks'],
+    },
+  },
+  {
     name: 'detect_changes',
     description:
       'Detect recently changed functions and rank them by blast radius. ' +
@@ -1717,6 +1750,7 @@ const TOOL_ANNOTATIONS: Record<string, typeof _RO | typeof _RWI | typeof _RW> = 
   approve_decision: _RWI, reject_decision: _RWI, sync_decisions: _RWI,
   remember: _RW, recall: _RO, verify_claim: _RO,
   spec_store_status: _RO, working_set_context: _RO, change_impact_certificate: _RO,
+  plan_parallel_work: _RO,
 };
 
 // Tools that touch external entities (LLM / network) → openWorldHint: true.
@@ -1778,6 +1812,14 @@ export const TOOL_PRESETS: Record<string, Set<string>> = {
   federation: new Set([
     'orient', 'federation_status', 'spec_store_status', 'working_set_context', 'change_impact_certificate',
     'analyze_impact', 'find_dead_code', 'select_tests', 'find_path',
+  ]),
+  // Parallel-work coordination (opt-in): orient to ground, then plan_parallel_work to
+  // schedule N proposed tasks into safe-to-dispatch waves + a critical path. analyze_impact
+  // and find_path help an agent name and scope the seed symbols a task will touch.
+  // Deliberately NOT in the default or `minimal` surface (mcp-quality: minimize the tools an
+  // agent must consider; change: add-parallel-work-plan).
+  coordination: new Set([
+    'orient', 'plan_parallel_work', 'analyze_impact', 'find_path',
   ]),
 };
 
@@ -2244,6 +2286,6 @@ export const mcpCommand = new Command('mcp')
   .option('--watch-debounce <ms>', 'Debounce delay in ms before re-indexing after a file change (default: 400)', '400')
   .option('--watch-no-embed', 'Watch signatures only — skip live vector re-embedding (embeddings refresh at commit). Large repos auto-degrade to this.')
   .option('--minimal', 'Expose only core 6 tools (orient, search_code, record_decision, detect_changes, check_spec_drift, get_health_map). Pair with alwaysLoad: true in Claude Code for always-visible core tools.')
-  .option('--preset <name>', 'Expose a named tool preset. Default (no preset) is the lean "navigation" surface — the benchmark-winning graph-traversal core (orient, search_code, get_subgraph, trace_execution_path, analyze_impact, suggest_insertion_points, get_function_skeleton, get_landmarks, get_map, find_path) — NOT the full registry. "minimal" = orient+search+governance; "memory" = orient+remember+recall; "verify" = orient+search+verify_claim; "federation" = orient + federation_status + spec_store_status + working_set_context + change_impact_certificate + the four cross-repo conclusion tools; "full" = all 62 tools (the prior default). Takes precedence over --minimal.')
-  .option('--all-tools', 'Expose the full surface — all 62 tools (alias for --preset full). Opt-in breadth; the lean navigation default is recommended.')
+  .option('--preset <name>', 'Expose a named tool preset. Default (no preset) is the lean "navigation" surface — the benchmark-winning graph-traversal core (orient, search_code, get_subgraph, trace_execution_path, analyze_impact, suggest_insertion_points, get_function_skeleton, get_landmarks, get_map, find_path) — NOT the full registry. "minimal" = orient+search+governance; "memory" = orient+remember+recall; "verify" = orient+search+verify_claim; "federation" = orient + federation_status + spec_store_status + working_set_context + change_impact_certificate + the four cross-repo conclusion tools; "coordination" = orient + plan_parallel_work + analyze_impact + find_path; "full" = all 63 tools (the prior default). Takes precedence over --minimal.')
+  .option('--all-tools', 'Expose the full surface — all 63 tools (alias for --preset full). Opt-in breadth; the lean navigation default is recommended.')
   .action((options: McpServerOptions) => startMcpServer(options));

@@ -107,11 +107,17 @@ export const FINDING_CODE_REGISTRY: Record<string, FindingCodeSpec> = {
     source: 'impact-certificate',
     description: 'The change opens a new path into a declared covering surface marked `critical`.',
   },
-  // ── stale-decision-reference (this change) ──
+  // ── stale-decision-reference (add-finding-enforcement-policy) ──
   'stale-decision-reference': {
     defaultClass: 'advisory',
     source: 'stale-decision-reference',
     description: 'A live, authoritative artifact references a decision that has since been superseded/retired.',
+  },
+  // ── plan_parallel_work (add-parallel-work-plan) ──
+  'parallel-work-conflict': {
+    defaultClass: 'advisory',
+    source: 'plan-parallel-work',
+    description: 'Two tasks proposed for concurrent work have a write-write (WAW) conflict; the plan schedules them into different waves.',
   },
 };
 

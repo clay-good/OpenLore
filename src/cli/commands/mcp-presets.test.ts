@@ -39,6 +39,16 @@ describe('MCP tool presets', () => {
     expect(new Set(tools)).toEqual(new Set(['orient', 'search_code', 'record_decision', 'detect_changes', 'check_spec_drift', 'get_health_map']));
   });
 
+  // change: add-parallel-work-plan — plan_parallel_work is opt-in via the `coordination`
+  // preset only; it must NOT leak into the lean/minimal/memory surfaces.
+  it('coordination preset exposes plan_parallel_work; lean/minimal/memory do not', () => {
+    const coord = selectActiveTools(TOOL_DEFINITIONS, { preset: 'coordination' }).map(t => t.name);
+    expect(new Set(coord)).toEqual(new Set(['orient', 'plan_parallel_work', 'analyze_impact', 'find_path']));
+    for (const sel of [{}, { minimal: true }, { preset: 'memory' }, { preset: 'navigation' }] as const) {
+      expect(selectActiveTools(TOOL_DEFINITIONS, sel).map(t => t.name)).not.toContain('plan_parallel_work');
+    }
+  });
+
   // Guard: the user-facing `--minimal` help text must match the actual preset — it
   // drifted to "5 tools" once after get_health_map was added to the 6-tool set.
   it('the --minimal help text matches the minimal preset (count + every member named)', () => {
@@ -356,8 +366,13 @@ describe('tools/list payload budget (spec-28)', () => {
   // change: default-to-lean-tool-surface — the full surface is now opt-in, so the
   // full-budget assertion uses the explicit full selector (no-selector `{}` resolves
   // to the lean navigation default and is asserted separately below).
+  // Bumped 64_000 → 66_000 when the `plan_parallel_work` tool was added to the full surface
+  // (spec: add-parallel-work-plan) — a read-only parallel-work coordination tool whose schema
+  // carries a nested per-task descriptor array. It joins ONLY the new opt-in `coordination`
+  // preset; it stays OUT of minimal/navigation/memory. Description trimmed first; the residual
+  // is the genuine cost of the nested task-list schema. Conscious decision, not silent drift.
   it('full surface stays within its prefix budget', () => {
-    expect(payloadBytes({ preset: 'full' })).toBeLessThan(64_000);
+    expect(payloadBytes({ preset: 'full' })).toBeLessThan(66_000);
   });
 
   it('the lean DEFAULT surface (no selector) is the lean navigation payload, not the full one', () => {

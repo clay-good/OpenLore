@@ -128,6 +128,15 @@ export const TOOL_REGISTRY: Record<string, ToolPlan> = {
   spec_store_status: { kind: 'read', buildArgs: dirOnly },
   working_set_context: { kind: 'read', buildArgs: dirOnly },
   change_impact_certificate: { kind: 'read', buildArgs: dirOnly },
+  plan_parallel_work: {
+    kind: 'read',
+    buildArgs: needFn((f, fn) => ({
+      directory: f.directory,
+      tasks: f.secondFunction && f.secondFunction !== fn
+        ? [{ id: 'a', seedSymbols: [fn] }, { id: 'b', seedSymbols: [f.secondFunction] }]
+        : [{ id: 'a', seedSymbols: [fn] }],
+    })),
+  },
   get_function_body: {
     kind: 'read',
     buildArgs: (f) =>
