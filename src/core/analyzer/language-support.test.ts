@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   CAPABILITIES,
   ALL_LANGUAGES,
@@ -209,6 +211,54 @@ describe('completeness + fail-soft + determinism', () => {
     for (const lang of IAC_LANGUAGES) {
       expect(languageSupport(lang).capabilities, `${lang} should back iacProjection`).toContain('iacProjection');
     }
+  });
+
+  // The check above is derivation-exact but TAUTOLOGICAL (iacProjection is derived from the same
+  // `isIacLanguage`/`IAC_LANGUAGES` it asserts) — it would still pass if a bogus tag with no parser
+  // were added to IAC_LANGUAGES. The other six capabilities are exercised against the live extractor;
+  // this closes the last gap behaviorally: run the REAL analyze pipeline over a fixture per ecosystem
+  // and require every IAC_LANGUAGES member to be emitted as a non-external node language. A new tag
+  // that no parser actually backs can therefore no longer silently claim iacProjection.
+  describe('iacProjection is behaviorally faithful (no silent over-claim)', () => {
+    const iacBase = join(__dirname, 'iac', 'fixtures');
+    const fx = (rel: string, language: string) => ({ path: rel, content: readFileSync(join(iacBase, rel), 'utf-8'), language });
+
+    // Inline fixtures (mirroring iac/integration.test.ts) for the ecosystems with no single file.
+    const dockerfile = ['FROM python:3.12-slim AS builder', 'RUN pip install -r requirements.txt'].join('\n');
+    const compose = ['services:', '  api:', '    build: ./api', '    depends_on:', '      - db', '  db:', '    image: postgres:16'].join('\n');
+    const workflow = ['name: CI', 'on: [push]', 'jobs:', '  build:', '    runs-on: ubuntu-latest', '    steps:', '      - uses: actions/checkout@v4'].join('\n');
+
+    // language → the fixture file(s) whose REAL parser must emit that tag. A new IAC_LANGUAGES member
+    // with no entry here fails the completeness assertion below, so this guard cannot rot.
+    const contributors: Record<string, Array<{ path: string; content: string; language: string }>> = {
+      Terraform: [fx('terraform/main.tf', 'Terraform')],
+      Kubernetes: [fx('kubernetes/app.yaml', 'Kubernetes')],
+      Helm: [fx('helm/mychart/Chart.yaml', 'Helm'), fx('helm/mychart/values.yaml', 'Helm'), fx('helm/mychart/templates/deployment.yaml', 'Helm')],
+      CloudFormation: [fx('cloudformation/template.yaml', 'CloudFormation')],
+      Ansible: [fx('ansible/site.yml', 'Ansible'), fx('ansible/roles/web/tasks/main.yml', 'Ansible')],
+      Pulumi: [fx('pulumi/index.ts', 'TypeScript')],
+      CDK: [fx('cdk/aws-cdk-app.ts', 'TypeScript')],
+      CDKTF: [fx('cdk/cdktf-main.ts', 'TypeScript')],
+      Dockerfile: [{ path: 'api/Dockerfile', content: dockerfile, language: 'Dockerfile' }],
+      'Docker Compose': [{ path: 'docker-compose.yml', content: compose, language: 'Docker Compose' }],
+      'GitHub Actions': [{ path: '.github/workflows/ci.yml', content: workflow, language: 'GitHub Actions' }],
+      Bicep: [fx('bicep/main.bicep', 'Bicep')],
+    };
+
+    it('every IAC_LANGUAGES member has a fixture contributor wired (guard cannot rot)', () => {
+      for (const lang of IAC_LANGUAGES) {
+        expect(contributors[lang], `no fixture wired for IAC_LANGUAGES member ${lang}`).toBeDefined();
+      }
+    });
+
+    it('the real analyze pipeline emits a non-external node for every IAC_LANGUAGES tag', async () => {
+      const files = Object.values(contributors).flat();
+      const graph = serializeCallGraph(await new CallGraphBuilder().build(files));
+      const emitted = new Set(graph.nodes.filter(n => !n.isExternal && n.language).map(n => n.language));
+      for (const lang of IAC_LANGUAGES) {
+        expect(emitted.has(lang), `${lang} claims iacProjection but no parser emitted a node for it`).toBe(true);
+      }
+    }, 60_000);
   });
 
   it('every code language has at least one detectLanguage extension mapping to it', () => {

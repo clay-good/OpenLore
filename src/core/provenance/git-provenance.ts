@@ -24,6 +24,7 @@ export const PROVENANCE_MAX_COMMITS = 1000; // history depth scanned per pass
 export const PROVENANCE_TOP_AUTHORS = 5;    // recent distinct authors kept per file
 export const PROVENANCE_MAX_PRS = 5;        // distinct PRs kept per file
 const GH_PR_LIMIT = 200;                    // single bounded `gh pr list` enrichment
+const GH_TIMEOUT_MS = 10_000;               // hard cap so a stalled `gh` can never block analyze
 
 const RS = '\x1e'; // record separator between commits
 const FS = '\x1f'; // field separator within a commit header
@@ -211,11 +212,15 @@ export async function enrichWithGh(
   rootPath: string,
 ): Promise<Map<number, { title: string; state: string }>> {
   const out = new Map<number, { title: string; state: string }>();
+  // A non-git directory can have no GitHub remote — short-circuit before spawning
+  // `gh` at all. This keeps the graceful-degradation path instant and deterministic
+  // (a stray `gh` subprocess in a remote-less dir can otherwise stall on the network).
+  if (!(await isGitRepository(rootPath))) return out;
   try {
     const { stdout } = await execFileAsync(
       'gh',
       ['pr', 'list', '--state', 'all', '--limit', String(GH_PR_LIMIT), '--json', 'number,title,state'],
-      { cwd: rootPath, maxBuffer: 16 * 1024 * 1024 },
+      { cwd: rootPath, maxBuffer: 16 * 1024 * 1024, timeout: GH_TIMEOUT_MS },
     );
     const prs = JSON.parse(stdout) as Array<{ number: number; title: string; state: string }>;
     for (const p of prs) out.set(p.number, { title: p.title, state: (p.state ?? '').toLowerCase() });

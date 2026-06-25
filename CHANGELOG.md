@@ -14,7 +14,8 @@ All notable changes to OpenLore are documented here. This project adheres to
   `signatures`, `callGraph`, `imports`, `cfgOverlay`, `typeInference`, `styleFingerprint`,
   `iacProjection`. The registry is **derived** from the live extractor structures (not hand-listed), so
   the coverage matrix cannot silently over-claim — a behavioral test cross-checks every cell against the
-  real extractor, and `cfgOverlay`/`iacProjection` are asserted exactly against their predicates. Two
+  real extractor (every member of every capability set, including each `IAC_LANGUAGES` ecosystem run
+  through the real analyze pipeline, plus an exact predicate assertion for `cfgOverlay`/`iacProjection`). Two
   surfaces: a **Language coverage** matrix in `.openlore/analysis/CODEBASE.md`, and the opt-in
   `get_language_support` MCP conclusion tool (repo-detected languages, or a named language as a pure
   registry lookup — fail-soft for unknown languages). Makes a quiet structural result interpretable
@@ -141,6 +142,13 @@ All notable changes to OpenLore are documented here. This project adheres to
   malformed host config rather than risk clobbering it.
 
 ### Fixed
+
+- **Provenance `gh` enrichment can no longer hang or flake CI.** `enrichWithGh` short-circuits to
+  the empty map when the path is not a git repository (a non-git dir can have no GitHub remote, so
+  there is nothing to enrich), and bounds the `gh pr list` subprocess with a hard 10s timeout. This
+  honors the documented "best-effort, never required" contract — a stalled or absent `gh` degrades
+  gracefully instead of blocking analyze — and removes a flaky 5s test timeout in CI where the
+  graceful-degradation test occasionally spawned a slow `gh` in a remote-less temp dir.
 
 - **Incremental watch now converges with `analyze --force` (substrate correctness).**
   With `--watch-auto`, each save re-resolves the changed file's reverse-dependency

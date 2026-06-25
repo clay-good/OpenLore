@@ -80,7 +80,10 @@ an existing one to a new capability:
 3. **Add `L` to the registry universe** if it is a brand-new name: `CODE_LANGUAGES` (extension-detected)
    — IaC ecosystem tags are derived automatically from `IAC_LANGUAGES`.
 4. **Drop in a fixture** so the faithfulness test in `language-support.test.ts` exercises the new
-   capability (the test asserts the claimed capability actually produces output).
+   capability (the test asserts the claimed capability actually produces output — every member of
+   every capability set is run through the live extractor). For a new `iacProjection` ecosystem, add
+   it to the `contributors` map in that file's `iacProjection is behaviorally faithful` block so the
+   real analyze pipeline must emit a node tagged with it — otherwise the guard fails, by design.
 5. Run `npm run test:run`. The registry, the coverage matrix, and the `get_language_support` tool pick
    `L` up with **no new orchestration code** for the capabilities the generic extractors already
    implement.
