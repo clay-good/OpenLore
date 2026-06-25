@@ -16,6 +16,16 @@
 > cross-checked against the real extractor on a fixture, so the sets can't silently over-claim;
 > (3) named lookup is now case-insensitive + trimmed (`resolveLanguageName`); (4) completeness guard
 > now includes `CFG_LANGUAGES` (exported from cfg.ts); (5) explicit negative-preset assertion added.
+>
+> **Round-3 verification (PR #203):** traced the cfg/iac predicates to source — both are sound by
+> construction (the pipeline invokes `buildCfgFor` per CFG language using the same `SPEC_BY_LANGUAGE`
+> `cfgSupportsLanguage` checks; every `IAC_LANGUAGES` tag is a real `language:` string an IaC extractor
+> assigns to nodes, incl. `cdk.ts` `language: c.flavor` for CDK/CDKTF and `pulumi.ts` for Pulumi). Added
+> the one remaining behavioral cross-check — `cfgOverlay` is now verified for every `CFG_LANGUAGES`
+> member via `CallGraphBuilder.build().cfgs` (6 of 7 capabilities behaviorally tested; iacProjection
+> anchored by `iac/*.test.ts` + e2e). Real-pipeline e2e (analyze a polyglot+IaC repo): `detectedLanguages`
+> EXACTLY equals the index's distinct node languages, no 0-capability detected language, dispatch==handler,
+> JSON round-trips losslessly, and the CODEBASE.md coverage section matches the tool output.
 
 ## 1. Registry model
 - [x] Define the `LanguageSupport` record: capability flags (`signatures`, `callGraph`, `imports`,

@@ -156,6 +156,38 @@ describe('every capability-set member is exercised against the real extractor (n
       expect(got, `${f.lang} claims callGraph but extracted no node from its fixture`).toBe(true);
     }
   }, 60_000);
+
+  // cfgOverlay's authoritative source is `cfgSupportsLanguage` (== keys of SPEC_BY_LANGUAGE).
+  // The registry cross-checks the cell against that predicate exactly, but the predicate is
+  // only honest if the pipeline ACTUALLY builds a CFG for each such language. This asserts it:
+  // `CallGraphBuilder.build()` invokes `buildCfgFor` per language, and `result.cfgs` must carry
+  // a CFG for every CFG_LANGUAGES member (a branch fixture) — so a SPEC entry that silently
+  // produced no overlay would fail here, not just pass the predicate tautology.
+  it('cfgOverlay: every CFG_LANGUAGES member actually yields a CFG from the pipeline', async () => {
+    const branchFixtures: Record<string, [string, string]> = {
+      TypeScript: ['cfg_TypeScript.ts', 'function f(x){ if(x>0){return x;} return -x; }'],
+      JavaScript: ['cfg_JavaScript.js', 'function f(x){ if(x>0){return x;} return -x; }'],
+      Python: ['cfg_Python.py', 'def f(x):\n    if x>0:\n        return x\n    return -x'],
+      Go: ['cfg_Go.go', 'package m\nfunc F(x int) int { if x>0 { return x }\n return -x }'],
+      Java: ['Cfg_Java.java', 'class A { int f(int x){ if(x>0){return x;} return -x; } }'],
+      'C++': ['cfg_Cpp.cpp', 'int f(int x){ if(x>0){return x;} return -x; }'],
+      C: ['cfg_C.c', 'int f(int x){ if(x>0){return x;} return -x; }'],
+      'C#': ['Cfg_Cs.cs', 'class A { int F(int x){ if(x>0){return x;} return -x; } }'],
+      PHP: ['cfg_Php.php', '<?php\nfunction f($x){ if($x>0){return $x;} return -$x; }'],
+      Rust: ['cfg_Rust.rs', 'fn f(x: i32) -> i32 { if x>0 { x } else { -x } }'],
+      Ruby: ['cfg_Ruby.rb', 'def f(x)\n  if x>0\n    x\n  else\n    -x\n  end\nend'],
+    };
+    const files = [...CFG_LANGUAGES].map(lang => {
+      const fx = branchFixtures[lang];
+      expect(fx, `missing CFG fixture for set member ${lang}`).toBeDefined();
+      return { path: fx[0], content: fx[1], language: lang };
+    });
+    const result = await new CallGraphBuilder().build(files);
+    const cfgPaths = new Set([...(result.cfgs ?? new Map()).keys()].map(k => k.split('::')[0]));
+    for (const lang of CFG_LANGUAGES) {
+      expect(cfgPaths.has(branchFixtures[lang][0]), `${lang} claims cfgOverlay but the pipeline built no CFG`).toBe(true);
+    }
+  }, 60_000);
 });
 
 // ── completeness, fail-soft, determinism ──

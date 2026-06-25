@@ -24,9 +24,13 @@ Each language backs a fixed, closed set of capabilities. A capability is either 
 The declarative registry (`src/core/analyzer/language-support.ts`) is the single source of truth for
 "what we know about language L" — but it is **computed** from the same structures the extractors
 consult at run time (the table above), never hand-maintained in parallel. So the coverage matrix
-cannot silently drift from what the analyzer actually does: a behavioral test
-(`language-support.test.ts`) cross-checks every cell against the live extractor on a fixture, and
-`cfgOverlay`/`iacProjection` are asserted exactly against their predicates for every language.
+cannot silently drift from what the analyzer actually does. `language-support.test.ts` behaviorally
+cross-checks **every member** of the `signatures`, `callGraph`, `imports`, `typeInference`, and
+`cfgOverlay` sets by running the real extractor on a per-language fixture and asserting it produces
+output (a malformed entry that produced nothing fails the test, not just the predicate tautology);
+`cfgOverlay` and `iacProjection` are additionally asserted exactly against their predicates
+(`cfgSupportsLanguage`, `isIacLanguage`) for every language, and `iacProjection`'s per-ecosystem node
+tagging is covered by the dedicated `iac/*.test.ts` suite and an end-to-end analyze check.
 
 This means an over-claimed matrix is structurally prevented — which matters, because an over-claimed
 coverage matrix is worse than none.
