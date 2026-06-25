@@ -43,6 +43,18 @@ That last rule matters: on a real repo it cut high-confidence candidates from ~4
 symbol living in a module something else imports is never flagged `high`, because the specific
 usage may be a namespace or default import this static scan doesn't resolve.
 
+### Re-export / barrel resolution raises recall (fewer false-dead)
+
+A reachability conclusion is only as sound as the call graph is complete. The TS/JS import resolver
+follows re-export chains — `export { x } from './impl'`, `export * from './x'` (and TypeScript's ESM
+`.js` specifiers) — through any depth of barrel to a symbol's **true definition**, and that resolution
+runs on every cross-file *call edge* (not just base classes). A call imported through a barrel resolves
+to the real target (labelled `re_export`) instead of stalling at the barrel and falling through to the
+ambiguous first-same-named-candidate (`name_only`). Concretely, dogfooding this repo moved **29 symbols
+off the false-dead / false-entry-point list** — e.g. `EdgeStore.open` went from a reported *zero
+callers* to its real 22 — because a method/static call through an imported receiver now binds to its
+definition. See [openspec/changes/add-call-resolution-recall/](../openspec/changes/add-call-resolution-recall/).
+
 ## Tool contract
 
 ```jsonc

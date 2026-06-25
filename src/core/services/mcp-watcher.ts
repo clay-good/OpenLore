@@ -26,7 +26,7 @@
 
 import { readFile, writeFile, readdir, rename } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import { join, relative } from 'node:path';
+import { join, relative, posix } from 'node:path';
 import { spawn } from 'node:child_process';
 import chokidar, { type FSWatcher } from 'chokidar';
 import { extractSignatures, detectLanguage } from '../analyzer/signature-extractor.js';
@@ -1150,11 +1150,50 @@ export async function buildGraphSubset(
     }
   }
 
-  const builder = new CallGraphBuilder();
-  const result = await builder.build(files, undefined, undefined, resolutionNodes);
+  // Re-export barrels a subset file imports through are neither the changed file nor a
+  // caller of it, so they are absent from the subset — without them buildResolvedImportMap
+  // cannot follow the chain and a barrel call degrades from `re_export`/`import` to
+  // `name_only`, diverging from a full rebuild (change: add-call-resolution-recall). Pull
+  // in just the barrel files (followed along the chain), for export-indexing only; their
+  // own edges are filtered out below so nothing extra is persisted.
+  const { collectReExportBarrels } = await import('../analyzer/import-resolver-bridge.js');
+  const TS_MODULE_EXTS = ['.ts', '.tsx', '.js', '.jsx', '.mts', '.cts', '.mjs', '.cjs'];
+  const readModule = async (
+    spec: string,
+    fromFile: string,
+  ): Promise<{ path: string; content: string; language: string } | undefined> => {
+    if (!spec.startsWith('.')) return undefined; // relative imports only
+    const base = posix
+      .normalize(posix.join(posix.dirname(fromFile), spec))
+      .replace(/\.(tsx?|jsx?|mts|cts|mjs|cjs)$/, '');
+    const candidates = [
+      ...TS_MODULE_EXTS.map((e) => base + e),
+      ...TS_MODULE_EXTS.map((e) => `${base}/index${e}`),
+    ];
+    for (const rel of candidates) {
+      try {
+        const modContent = await readFile(join(rootDir, rel), 'utf-8');
+        return { path: rel, content: modContent, language: detectLanguage(rel) };
+      } catch {
+        // try next candidate
+      }
+    }
+    return undefined;
+  };
+  const barrels = await collectReExportBarrels(files, readModule);
+  const barrelPaths = new Set(barrels.map((b) => b.path));
+  const buildInput = barrels.length > 0 ? [...files, ...barrels] : files;
 
-  // Only return nodes from changedFile — callerFiles nodes are already in DB and unchanged
+  const builder = new CallGraphBuilder();
+  const result = await builder.build(buildInput, undefined, undefined, resolutionNodes);
+
+  // Only return nodes from changedFile — callerFiles nodes are already in DB and unchanged.
+  // Barrel context files are resolution-only: never persist their nodes or edges.
   const changedNodes = Array.from(result.nodes.values()).filter((n) => n.filePath === changedRel);
+  const resultEdges =
+    barrelPaths.size > 0
+      ? result.edges.filter((e) => !barrelPaths.has(e.callerId.slice(0, e.callerId.indexOf('::'))))
+      : result.edges;
 
   // CFG/def-use overlay (spec: add-intraprocedural-cfg-dataflow-overlay) for the
   // changed file's functions only — intra-procedural, so caller files' overlays
@@ -1167,5 +1206,5 @@ export async function buildGraphSubset(
     }
   }
 
-  return { edges: result.edges, nodes: changedNodes, cfgs, skipped };
+  return { edges: resultEdges, nodes: changedNodes, cfgs, skipped };
 }

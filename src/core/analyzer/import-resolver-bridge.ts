@@ -234,6 +234,65 @@ export function buildResolvedImportMap(
   return { map, reExported };
 }
 
+/** A module's on-disk identity + source, as resolved from a relative specifier. */
+export interface ResolvedModuleSource {
+  path: string;
+  content: string;
+  language: string;
+}
+
+/**
+ * Collect the re-export **barrel** files reachable from `seeds` by following their
+ * relative imports and re-export sources, so an INCREMENTAL build over a file subset
+ * can resolve barrel-imported calls the same way a full build does
+ * (change: add-call-resolution-recall). An incremental subset is `{ changed file +
+ * its callers }`; a barrel an index re-exports through is neither, so without this it
+ * is absent and `buildResolvedImportMap` cannot follow the chain — the call silently
+ * degrades from `re_export`/`import` to `name_only`, breaking incremental↔full parity.
+ *
+ * Only files that *themselves re-export* are returned: a leaf definition file at a
+ * chain's end is not needed (resolveDef returns its module from the chain without its
+ * content, and the call-graph trie resolves the node). `readModule(spec, fromFile)`
+ * resolves a relative specifier to a module source, or undefined when it is a package
+ * or cannot be read. Bounded by re-export depth and a file cap (fail-soft: beyond the
+ * cap, those edges degrade rather than the build hanging).
+ */
+export async function collectReExportBarrels(
+  seeds: Array<{ path: string; content: string; language: string }>,
+  readModule: (spec: string, fromFile: string) => Promise<ResolvedModuleSource | undefined>,
+  options?: { maxFiles?: number },
+): Promise<ResolvedModuleSource[]> {
+  const maxFiles = options?.maxFiles ?? 2000;
+  const have = new Set(seeds.map(s => s.path));
+  const barrels = new Map<string, ResolvedModuleSource>();
+  let frontier = seeds
+    .filter(s => s.language === 'TypeScript' || s.language === 'JavaScript')
+    .map(s => ({ path: s.path, content: s.content }));
+  let depth = 0;
+  while (frontier.length > 0 && depth <= REEXPORT_MAX_DEPTH && barrels.size < maxFiles) {
+    const next: Array<{ path: string; content: string }> = [];
+    for (const f of frontier) {
+      // A barrel chain advances along BOTH a plain import (caller → barrel) and a
+      // re-export source (barrel → barrel/leaf); gather relative specifiers from both.
+      const specs = new Set<string>();
+      for (const imp of parseJSImports(f.content)) if (imp.isRelative) specs.add(imp.source);
+      for (const ex of parseJSExports(f.content)) if (ex.isReExport && ex.reExportSource) specs.add(ex.reExportSource);
+      for (const spec of specs) {
+        if (barrels.size >= maxFiles) break;
+        const mod = await readModule(spec, f.path);
+        if (!mod || have.has(mod.path) || barrels.has(mod.path)) continue;
+        // Only a file that itself re-exports is a barrel worth materialising.
+        if (!parseJSExports(mod.content).some(e => e.isReExport)) continue;
+        barrels.set(mod.path, mod);
+        next.push({ path: mod.path, content: mod.content });
+      }
+    }
+    frontier = next;
+    depth++;
+  }
+  return [...barrels.values()];
+}
+
 /** Build an ImportMap from TS/JS/Python FileAnalysis objects (from import-parser). */
 export function buildImportMap(analyses: FileAnalysis[]): ImportMap {
   const map: ImportMap = new Map();

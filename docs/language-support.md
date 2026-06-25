@@ -13,7 +13,7 @@ Each language backs a fixed, closed set of capabilities. A capability is either 
 |---|---|---|
 | `signatures` | A dedicated signature extractor (params/return shape) rather than the generic fallback. | `SIGNATURE_LANGUAGES` (`signature-extractor.ts`) |
 | `callGraph` | Function/method node + call-edge extraction — the substrate every reachability conclusion rests on. | `CALLGRAPH_LANGUAGES` (`call-graph.ts`) |
-| `imports` | Relative-import resolution into the `import`-confidence cross-file edge path. | `IMPORT_RESOLUTION_LANGUAGES` (`import-resolver-bridge.ts`) |
+| `imports` | Relative-import resolution into the `import`-confidence cross-file edge path; for TS/JS this follows re-export/barrel chains (`export { x } from`, `export * from`) to the true definition, labelling the recovered edge `re_export`. | `IMPORT_RESOLUTION_LANGUAGES` (`import-resolver-bridge.ts`) |
 | `cfgOverlay` | A control-flow-graph overlay (branches/loops) via the data-driven CFG `SPECS` table. | `cfgSupportsLanguage()` (`cfg.ts`) |
 | `typeInference` | Lightweight receiver-type inference, used to resolve method calls to their class. | `TYPE_INFERENCE_LANGUAGES` (`type-inference-engine.ts`) |
 | `styleFingerprint` | Codebase style / enforced-scope fingerprint. **Not yet built for any language.** | — |

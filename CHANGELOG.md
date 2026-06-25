@@ -17,9 +17,14 @@ All notable changes to OpenLore are documented here. This project adheres to
   languages; fail-soft. Strictly additive: when no re-export applies the result is identical to the direct
   target, and directly-resolved edges (`same_file`/`self_cls`/`type_inference`) are never dropped or
   downgraded. **Dogfood on this repo:** ambiguous `name_only` call edges fell 1067 → 87 (−92%), precise
-  cross-file edges rose 0 → 1326 `import` + 21 `re_export`, unresolved `external` fell 8742 → 8563 —
-  raising the soundness floor under every reachability conclusion (`find_dead_code`, `select_tests`,
-  `analyze_impact`, `blast_radius`, `report_coverage_gaps`) at once. A structural audit during
+  cross-file edges rose 0 → 1326 `import` + 21 `re_export`, unresolved `external` fell 8742 → 8563, and
+  **29 symbols moved off the false-dead / false-entry-point list** (e.g. `EdgeStore.open`, reported as
+  having zero callers, recovered its real 22) — raising the soundness floor under every reachability
+  conclusion (`find_dead_code`, `select_tests`, `analyze_impact`, `blast_radius`,
+  `report_coverage_gaps`) at once. The resolved map is also threaded into the **incremental watcher**
+  (new `collectReExportBarrels` pulls barrel files into the subset for export-indexing only), so an
+  incremental rebuild converges to `analyze --force` on barrel edges instead of degrading them to
+  `name_only` (parity oracle Scenario 4). A structural audit during
   implementation found the proposal's other edge classes — interface→implementation, override, and
   single-implementor dispatch (items 2/3) — **already delivered** by the shipped CHA pass
   (`add-type-hierarchy-resolved-dispatch`); they are cross-referenced, not re-implemented. No graph-schema

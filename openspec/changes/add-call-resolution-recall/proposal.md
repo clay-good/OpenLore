@@ -118,6 +118,12 @@ require executing build tooling or a package manager.
   edges whose name was followed through a re-export chain; a direct import stays `import`. Provenance flows
   through the existing confidence-boundary channel, so `analyze_impact` / `find_dead_code` / `select_tests`
   / `blast_radius` / `report_coverage_gaps` distinguish proven vs candidate without a new channel.
+- **Incremental-watcher parity** — an adversarial parity test surfaced that a barrel a caller imports
+  through is absent from an incremental rebuild's subset (it is neither the changed file nor a caller), so
+  re-export edges silently degraded to `name_only` on the next edit. `collectReExportBarrels`
+  (`import-resolver-bridge.ts`) follows the chain and `buildGraphSubset` pulls the barrel files into the
+  build for export-indexing only (their own edges are filtered out), so an incremental rebuild converges
+  to `analyze --force` on barrel edges (parity oracle Scenario 4).
 
 **Already satisfied (items 2 & 3 — not re-implemented):** the interface→implementation, override, and
 single-implementor-dispatch edge classes are delivered by the shipped CHA pass

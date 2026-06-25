@@ -35,6 +35,36 @@ The directly-resolved `type_inference` edges are unchanged (85 → 85), and `sam
 shrank — the regression invariant ("no directly-resolved edge dropped or downgraded") holds on the real
 graph, not just the fixtures.
 
+## 29 symbols recovered from the false-dead / false-entry-point list
+
+Comparing per-symbol `fanIn` before vs after, **29 internal symbols went from `fanIn = 0` (a reported
+dead-code candidate / entry point) to having real callers** — because a method or static call through an
+imported receiver only binds once the import map is threaded into call-edge resolution. The most
+striking:
+
+| symbol | file | fanIn before | fanIn after |
+|---|---|---:|---:|
+| `EdgeStore.open` | `src/core/services/edge-store.ts` | 0 | 22 |
+| `EdgeStore.dbPath` | `src/core/services/edge-store.ts` | 0 | 22 |
+| `logger.warning` | `src/utils/logger.ts` | 0 | 47 |
+| `logger.success` | `src/utils/logger.ts` | 0 | 34 |
+| `logger.discovery` | `src/utils/logger.ts` | 0 | 22 |
+
+`EdgeStore.open` — one of the most-called methods in the codebase — was being reported as having *zero
+callers* (a false dead-code candidate and a false entry point). This is exactly the failure mode the
+proposal set out to fix: "find_dead_code then reports live implementations as dead."
+
+## Adversarial finding: an incremental-watcher parity bug (found and fixed)
+
+A new adversarial parity scenario (`mcp-watcher-parity.test.ts` Scenario 4) revealed that a re-export
+barrel a caller imports through is **neither the changed file nor a caller of it**, so it was absent from
+an incremental rebuild's file subset. `buildResolvedImportMap` then could not follow the chain, and an
+edge a full rebuild resolved at `re_export` silently degraded to `name_only` on the next incremental
+edit — violating the incremental↔full parity (converge-or-flag) invariant. Fixed by
+`collectReExportBarrels`: `buildGraphSubset` now pulls in just the barrel files (followed along the
+chain, for export-indexing only; their own edges are filtered out so nothing extra is persisted). The
+new scenario asserts the incremental store now agrees with `analyze --force`.
+
 ## A concrete barrel resolution
 
 `src/core/generator/spec-pipeline.ts` calls `isTestFile`, imported from
@@ -45,9 +75,14 @@ followed and disclosed.
 
 ## Verification
 
-- New suite `call-resolution-recall.test.ts`: 12/12 pass.
-- Full CI-mirror suite (`vitest run src examples`): 5063 pass, 2 skipped. (Pre-existing parallel-load
-  flakiness in a few git/timing-sensitive `.test.ts` files: each fails only under full-suite contention,
-  passes in isolation, and the failing set is non-deterministic across runs — unrelated to this change,
-  whose resolution is covered by a determinism test.)
+- New suite `call-resolution-recall.test.ts`: 16/16 pass (barrel, `export *`, depth-N, direct-stays-
+  `import`, disambiguation, cycle, determinism, superset property, regression gate, plus adversarial
+  boundaries: package re-export not followed, barrel-local def wins, aliased-rename graceful
+  degradation, Python no-regression).
+- `mcp-watcher-parity.test.ts` Scenario 4 (re-export incremental parity): pass after the
+  `collectReExportBarrels` fix.
+- Full CI-mirror suite (`vitest run src examples`): 5068 pass, 2 skipped, all green. (A few
+  git/timing-sensitive `.test.ts` files show occasional parallel-load flakiness — each passes in
+  isolation and the failing set is non-deterministic across runs; unrelated to this change, whose
+  resolution is determinism-tested.)
 - `npm run lint`, `tsc --noEmit`, `npm run build`: clean.

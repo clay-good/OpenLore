@@ -36,7 +36,17 @@
 - [x] Re-export cycle terminates.
 - [x] Determinism; superset-of-`buildBaseImportMap` property; regression gate (same-file edges keep label,
       only barrel-crossed edges wear `re_export`).
+- [x] Adversarial boundaries: package re-export NOT followed (no invented internal edge); barrel-local
+      definition wins over its own re-export; aliased-rename re-export degrades gracefully (no wrong
+      edge); Python relative-dot import is unchanged (no regression).
+- [x] Incremental-watcher parity: `mcp-watcher-parity.test.ts` Scenario 4 asserts an incremental rebuild
+      of a barrel call converges to `analyze --force` (`re_export`, not degraded `name_only`).
 - [x] Interface/single-binding behavior covered by the existing `cha.test.ts` (unchanged).
+
+## 5b. Incremental-watcher parity (adversarial fix)
+- [x] `collectReExportBarrels` (`import-resolver-bridge.ts`) follows import + re-export chains to gather
+      barrel files; `buildGraphSubset` includes them for export-indexing only and filters out their own
+      edges so nothing extra is persisted. Bounded by re-export depth + a file cap (fail-soft).
 
 ## 6. Verify & dogfood
 - [x] `npm run lint`, `npm run typecheck` (tsc), `npm run test:run` (5063 pass), `npm run build` green.

@@ -84,6 +84,20 @@ deterministic.
 - **WHEN** the call graph is built twice
 - **THEN** the resolved edges (targets and provenance) are byte-identical
 
+#### Scenario: An incremental rebuild converges to a full rebuild on barrel edges
+
+- **GIVEN** a caller that calls a symbol imported through a re-export barrel, already indexed
+- **WHEN** the symbol's defining file is edited and the incremental watcher rebuilds the affected region
+- **THEN** the caller's edge still resolves to the true definition at `re_export` — matching what a full
+  `analyze --force` produces — rather than degrading to `name_only` because the barrel was outside the
+  rebuilt subset
+
+> Note: aliased re-exports (`export { internalName as publicName } from`) where the call uses the renamed
+> binding are a deferred recall limitation — the edge degrades gracefully (it is never bound to a wrong
+> target), but the rename is not yet carried through to the original symbol. Python relative-dot import
+> resolution (`from .impl import x`) is likewise a separate, pre-existing gap; this change is scoped to
+> TS/JS re-export chains.
+
 ## ALREADY SATISFIED (cross-referenced, not re-implemented)
 
 ### Requirement: InterfaceAndOverrideCandidateEdges

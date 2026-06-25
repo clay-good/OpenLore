@@ -140,6 +140,46 @@ describe('incremental watch converges to analyze --force (parity oracle)', () =>
     expect(got.join('\n')).not.toContain('external::foo');
   });
 
+  it('Scenario 4 (re-export): a caller through a barrel converges to the full-build re_export edge', async () => {
+    // caller imports doWork through an index barrel that re-exports it from impl.
+    // A full build resolves caller→impl::doWork at `re_export`. Editing impl must
+    // leave the incremental store agreeing with analyze --force — not silently
+    // degrading the edge to name_only because the barrel was outside the subset.
+    const v1: Files = {
+      'src/impl.ts': 'export function doWork() { return 1; }\n',
+      'src/index.ts': "export { doWork } from './impl.js';\n",
+      'src/caller.ts': "import { doWork } from './index.js';\nexport function run() { return doWork(); }\n",
+    };
+    await writeFiles(v1);
+    const g1 = await fullBuild(v1);
+
+    // Precondition: the full build resolves the barrel call at re_export.
+    expect(oracleOutgoingSig(g1.edges, 'src/caller.ts').join('\n')).toContain('src/impl.ts::doWork (doWork, re_export)');
+
+    const store = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    seedStore(store, v1, g1);
+    store.close();
+
+    // Edit impl.ts (add a sibling function) — caller is a caller of impl, so the
+    // incremental path re-resolves caller's edges.
+    const v2: Files = {
+      ...v1,
+      'src/impl.ts': 'export function doWork() { return 2; }\nexport function helper() { return 3; }\n',
+    };
+    await writeFiles({ 'src/impl.ts': v2['src/impl.ts'] });
+
+    const { McpWatcher } = await import('./mcp-watcher.js');
+    await new McpWatcher({ rootPath: root, outputPath, embed: false }).handleChange(join(root, 'src/impl.ts'));
+
+    const oracle = await fullBuild(v2);
+    const store2 = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    const got = outgoingSig(store2, 'src/caller.ts');
+    store2.close();
+
+    expect(got).toEqual(oracleOutgoingSig(oracle.edges, 'src/caller.ts'));
+    expect(got.join('\n')).toContain('src/impl.ts::doWork (doWork, re_export)');
+  });
+
   it('Scenario 3: all direct callers refresh past the old depth-1 limit of 10', async () => {
     // c defines target(); 15 callers each call it. Renaming target() in c must
     // leave EVERY caller resolving to external::target (the symbol is gone),

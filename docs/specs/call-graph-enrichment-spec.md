@@ -195,10 +195,24 @@ export type EdgeConfidence =
   | 'self_cls'        // self.foo() / cls.foo() — intra-classe, sans ambiguïté
   | 'type_inference'  // svc.foo() + svc: MyClass inféré dans le même corps de fonction
   | 'import'          // nom importé explicitement, fichier source connu
+  | 're_export'       // résolu à travers une chaîne de ré-exports (barrel) jusqu'à la vraie définition
   | 'http_endpoint'   // appel HTTP résolu vers un handler cross-langage
   | 'same_file'       // seul candidat dans le même fichier
-  | 'name_only';      // nom unique dans tout le projet, sans autre contexte
+  | 'type_name'       // récepteur capitalisé traité comme nom de type (Swift/C++/Java statique)
+  | 'name_only'       // nom unique dans tout le projet, sans autre contexte
+  | 'synthesized'     // edge de dispatch dynamique reconstruit par synthèse AST (CHA, route, etc.)
+  | 'external';       // appel externe/stdlib non résolu (nœud feuille synthétique)
 ```
+
+> **Ré-exports / barrels (`re_export`).** Le résolveur d'imports suit les chaînes
+> `export { x } from './impl'` / `export * from './x'` (et les spécificateurs ESM `.js` de
+> TypeScript) à travers n'importe quelle profondeur de barrel jusqu'à la vraie définition du symbole,
+> avec détection de cycle et borne de profondeur. Une arête résolue à travers un saut de ré-export
+> porte la confiance `re_export` (cible prouvée, coût de distance 1 comme un import direct, mais le
+> saut de barrel est divulgué) ; un import direct reste `import`. La carte d'imports est désormais
+> appliquée à la résolution des arêtes d'appel (Pass 2), pas seulement aux classes de base — donc un
+> appel inter-fichiers se résout précisément au lieu de retomber sur `name_only`. Voir
+> `openspec/changes/add-call-resolution-recall/`.
 
 Étendre `CallEdge` pour inclure la confiance :
 ```typescript
