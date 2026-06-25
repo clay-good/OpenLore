@@ -148,6 +148,11 @@ export const TOOL_REGISTRY: Record<string, ToolPlan> = {
     // Repo-mode coverage matrix over the cached repo's detected languages.
     buildArgs: (f) => ({ directory: f.directory }),
   },
+  report_coverage_gaps: {
+    kind: 'read',
+    // Whole-repo structural coverage gaps over the cached repo's graph.
+    buildArgs: (f) => ({ directory: f.directory }),
+  },
   get_function_body: {
     kind: 'read',
     buildArgs: (f) =>

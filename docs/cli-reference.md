@@ -40,6 +40,7 @@
 | `openlore doctor` | Check environment and configuration for common issues | No |
 | `openlore refresh-stories` | Refresh story files with latest structural context after each commit | No |
 | `openlore blast-radius` | Pre-flight structural blast-radius briefing for the current diff (advisory; `--install-hook` for a pre-commit hook) | No |
+| `openlore coverage-gaps` | Ranked structural test-coverage gaps: important code with NO reaching test (the inverse of `select_tests`), no runtime. Scope to a diff (`--base`/`--symbols`) or region (`--file-pattern`). Read-only, never blocks | Yes |
 | `openlore review` | Deterministic structural PR review (structural delta + blast radius) as a Markdown/JSON briefing; pairs with the bundled GitHub Action | No |
 | `openlore preflight` | CI staleness gate: fail when the analysis graph is stale relative to the working tree | No |
 | `openlore export scip` | Export the analysis graph as an SCIP index for the Sourcegraph / Glean ecosystem | No |
@@ -129,7 +130,7 @@ openlore mcp [options]             # start the stdio MCP server
 
   --preset <name>        # Expose a named preset (default: lean navigation, 10 tools)
   --minimal              # Expose only the core 6 governance tools
-  --all-tools            # Expose the full surface — all 65 tools (alias --preset full)
+  --all-tools            # Expose the full surface — all 66 tools (alias --preset full)
   --watch-auto           # Auto-detect + incrementally re-index the project dir
   --no-watch-auto        # Disable auto-watch (use for one-shot tool calls)
   --daemon               # Delegate tool calls to a shared `openlore serve` daemon
@@ -472,7 +473,7 @@ over plain HTTP so non-MCP clients (e.g. the [Pi](https://pi.dev) extension in
 
 ```bash
 openlore serve                          # navigation preset, ephemeral port, watch on
-openlore serve --preset all --port 7077 # all 65 tools on a fixed port
+openlore serve --preset all --port 7077 # all 66 tools on a fixed port
 openlore serve --no-watch               # transport only, no freshness lane
 openlore serve --stop                   # stop the daemon serving this directory
 ```

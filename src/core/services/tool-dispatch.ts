@@ -24,6 +24,7 @@ import { handleBlastRadius } from './mcp-handlers/blast-radius.js';
 import { handlePlanParallelWork } from './mcp-handlers/plan-parallel-work.js';
 import { handleMapInFlightConflicts } from './mcp-handlers/interference-map.js';
 import { handleGetLanguageSupport } from './mcp-handlers/language-support.js';
+import { handleReportCoverageGaps } from './mcp-handlers/coverage-gaps.js';
 import type { TaskDescriptor } from './mcp-handlers/change-footprint.js';
 import { handleFindDeadCode } from './mcp-handlers/reachability.js';
 import { handleVerifyClaim } from './mcp-handlers/claim-verification.js';
@@ -355,6 +356,10 @@ export async function dispatchTool(
   } else if (name === 'get_language_support') {
     const { directory, language } = args as { directory: string; language?: string };
     return handleGetLanguageSupport({ directory, language });
+  } else if (name === 'report_coverage_gaps') {
+    const { directory, maxResults, filePattern, changedSymbols, diffRef, directResolvedOnly } =
+      args as { directory: string; maxResults?: number; filePattern?: string; changedSymbols?: string[]; diffRef?: string; directResolvedOnly?: boolean };
+    return handleReportCoverageGaps({ directory, maxResults, filePattern, changedSymbols, diffRef, directResolvedOnly });
   }
   throw new UnknownToolError(name);
 }

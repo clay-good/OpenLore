@@ -400,8 +400,14 @@ describe('tools/list payload budget (spec-28)', () => {
   // into one surface: the two changes each bumped this budget independently (footprint-escape widened
   // `structural_diff`'s schema with declaredFootprint/peerFootprints; cross-actor added the new tool),
   // and the merge stacks both increments. No new tool here — just the realized combined surface cost.
+  // Bumped 70_000 → 72_000 when the `report_coverage_gaps` tool was added to the full
+  // surface (change: add-test-coverage-gap-report) — a read-only structural coverage-gap
+  // conclusion tool. It joins ONLY the opt-in `full` surface; it stays OUT of
+  // minimal/navigation/memory/verify/federation/coordination, so the lean default prefix
+  // is unchanged. The residual is the genuine cost of its schema. Conscious decision, not
+  // silent drift.
   it('full surface stays within its prefix budget', () => {
-    expect(payloadBytes({ preset: 'full' })).toBeLessThan(70_000);
+    expect(payloadBytes({ preset: 'full' })).toBeLessThan(72_000);
   });
 
   it('the lean DEFAULT surface (no selector) is the lean navigation payload, not the full one', () => {

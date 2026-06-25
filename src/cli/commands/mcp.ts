@@ -1594,6 +1594,32 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: 'report_coverage_gaps',
+    description:
+      'USE THIS WHEN: you need to know which important code has NO test reaching it — a reviewer ' +
+      'asking "is the risky part of this change tested?", an agent told to "improve coverage" and ' +
+      'needing where to start, or an audit wanting the untested HUBS ranked, not a flat list. ' +
+      'Computes the structural inverse of select_tests over the whole graph (functions in no test\'s ' +
+      'reachable set), ranked by hub/chokepoint significance so load-bearing untested code floats to ' +
+      'the top. SOUND DIRECTION ONLY: it reports "no reaching test" and NEVER claims a symbol is ' +
+      '"tested" — reachable-from-a-test is not behavior-verified. Distinct from find_dead_code (a gap ' +
+      'with no caller at all is labeled also-dead) and from get_test_coverage (spec-tag based). ' +
+      'No runtime, no coverage tool, deterministic. Scope to a diff (changedSymbols/diffRef) or a ' +
+      'region (filePattern). Run analyze_codebase first.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        directory: { type: 'string', description: DIR_DESC },
+        maxResults: { type: 'number', description: 'Limit reported gaps (default 100, capped 500).' },
+        filePattern: { type: 'string', description: 'Only report gaps whose file path contains this substring (region scope).' },
+        changedSymbols: { type: 'array', items: { type: 'string' }, description: 'Restrict to gaps among these changed symbols (diff scope).' },
+        diffRef: { type: 'string', description: 'Git ref to diff the working tree against for diff scope (e.g. "HEAD", "main").' },
+        directResolvedOnly: { type: 'boolean', description: 'Count only directly-resolved edges as test-reach (ignore synthesized dynamic-dispatch); reports more gaps, more certainly. Default false.' },
+      },
+      required: ['directory'],
+    },
+  },
+  {
     name: 'detect_changes',
     description:
       'Detect recently changed functions and rank them by blast radius. ' +
@@ -1843,6 +1869,7 @@ const TOOL_ANNOTATIONS: Record<string, typeof _RO | typeof _RWI | typeof _RW> = 
   remember: _RW, recall: _RO, verify_claim: _RO,
   spec_store_status: _RO, working_set_context: _RO, change_impact_certificate: _RO,
   plan_parallel_work: _RO, map_in_flight_conflicts: _RO, get_language_support: _RO,
+  report_coverage_gaps: _RO,
 };
 
 // Tools that touch external entities (LLM / network) → openWorldHint: true.
@@ -2380,6 +2407,6 @@ export const mcpCommand = new Command('mcp')
   .option('--watch-debounce <ms>', 'Debounce delay in ms before re-indexing after a file change (default: 400)', '400')
   .option('--watch-no-embed', 'Watch signatures only — skip live vector re-embedding (embeddings refresh at commit). Large repos auto-degrade to this.')
   .option('--minimal', 'Expose only core 6 tools (orient, search_code, record_decision, detect_changes, check_spec_drift, get_health_map). Pair with alwaysLoad: true in Claude Code for always-visible core tools.')
-  .option('--preset <name>', 'Expose a named tool preset. Default (no preset) is the lean "navigation" surface — the benchmark-winning graph-traversal core (orient, search_code, get_subgraph, trace_execution_path, analyze_impact, suggest_insertion_points, get_function_skeleton, get_landmarks, get_map, find_path) — NOT the full registry. "minimal" = orient+search+governance; "memory" = orient+remember+recall; "verify" = orient+search+verify_claim; "federation" = orient + federation_status + spec_store_status + working_set_context + change_impact_certificate + map_in_flight_conflicts + the four cross-repo conclusion tools; "coordination" = orient + plan_parallel_work + map_in_flight_conflicts + analyze_impact + find_path; "full" = all 65 tools (the prior default). Takes precedence over --minimal.')
-  .option('--all-tools', 'Expose the full surface — all 65 tools (alias for --preset full). Opt-in breadth; the lean navigation default is recommended.')
+  .option('--preset <name>', `Expose a named tool preset. Default (no preset) is the lean "navigation" surface — the benchmark-winning graph-traversal core (orient, search_code, get_subgraph, trace_execution_path, analyze_impact, suggest_insertion_points, get_function_skeleton, get_landmarks, get_map, find_path) — NOT the full registry. "minimal" = orient+search+governance; "memory" = orient+remember+recall; "verify" = orient+search+verify_claim; "federation" = orient + federation_status + spec_store_status + working_set_context + change_impact_certificate + map_in_flight_conflicts + the four cross-repo conclusion tools; "coordination" = orient + plan_parallel_work + map_in_flight_conflicts + analyze_impact + find_path; "full" = all ${TOOL_DEFINITIONS.length} tools (the prior default). Takes precedence over --minimal.`)
+  .option('--all-tools', `Expose the full surface — all ${TOOL_DEFINITIONS.length} tools (alias for --preset full). Opt-in breadth; the lean navigation default is recommended.`)
   .action((options: McpServerOptions) => startMcpServer(options));
