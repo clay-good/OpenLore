@@ -140,6 +140,30 @@ repos above. All clean — no code change needed:
 - **Re-export feature on a third+fourth repo** — vaulytica (`import` 1215 / `re_export` 51 / `name_only`
   23) and agent-replay (`import` 279 / `name_only` 0) both resolve cross-file calls precisely.
 
+## Full-product dogfood pass 4 (expanded scope — all parts; no new bugs)
+
+A deliberately broad sweep across subsystems the earlier passes hadn't reached:
+
+- **Language extraction (full matrix)** — a 14-file fixture covering every remaining call-graph language
+  (Go, Java, Kotlin, C++, C, Ruby, C#, PHP, Swift, Scala, Lua, Bash, Elixir, Dart): each extracts its two
+  functions and resolves the `helper()` call (`same_file`). TS/JS/Python/Rust were already covered on
+  real repos.
+- **MCP tool sweep (all 66)** — every tool called over stdio; 54 returned valid results and 12 correctly
+  rejected deliberately-wrong/absent args with `-32602` validation errors. No crashes, no malformed
+  output, no unhandled exceptions.
+- **Degenerate inputs** — an empty repo (no source) analyzes in ~100ms; a repo mixing a syntax-error
+  file, unicode identifiers (`café`), and a 100k-character line extracts the valid functions, preserves
+  unicode names, skips the malformed one (tree-sitter error recovery), and does not hang.
+- **Federation cross-repo** — `federation add`/`list` register two indexed repos; `federation_status`
+  and `map_in_flight_conflicts` return valid JSON over the multi-repo host.
+- **Decisions governance** — `record_decision` + `list_decisions` work (deterministic); `--consolidate`
+  cleanly requires an LLM provider (graceful, documented).
+
+All clean — no code change needed. Combined with passes 1–3 (Python relative imports, HTML O(N²),
+`--json` pipe truncation — all fixed), the product is exercised end-to-end across install, MCP (66 tools),
+18 languages, IaC ecosystems, CLIs, the warm daemon + viewer, on-device embeddings, the incremental
+watcher, degenerate inputs, federation, and decisions.
+
 ## Verification
 
 - New suite `call-resolution-recall.test.ts`: 19/19 pass (barrel, `export *`, depth-N, direct-stays-
