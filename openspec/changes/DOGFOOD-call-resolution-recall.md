@@ -120,6 +120,26 @@ generated — re-run with --ai-configs" moments before install's adapter creates
 with the managed block. The message is scoped to analyze's `--ai-configs` digest (a different artifact),
 but reads as misleading in the install flow; left as-is to avoid cross-flow output churn.
 
+## Full-product dogfood pass 3 (breadth sweep — no new bugs)
+
+A third pass exercised the surfaces the earlier passes hadn't, on a clean TS repo (agent-replay) plus the
+repos above. All clean — no code change needed:
+
+- **Determinism** — `analyze` then `analyze --force` produce a byte-identical edge-set hash.
+- **SCIP export** — `export scip` emits a well-formed 72KB index (46 documents / 185 symbols / 642
+  occurrences) with valid SCIP symbol descriptors (documented zero-width column-range limitation).
+- **Warm daemon** — `serve` binds, answers `/health` and `POST /tool/orient` with valid JSON, writes
+  `serve.json`, and shuts down cleanly; **`view`** serves the UI (HTTP 200, no errors).
+- **Zero-config embeddings** — `embed --local` downloads + caches Xenova/all-MiniLM-L6-v2 and flips
+  `orient` from BM25 to `searchMode: hybrid` / `retrievalMode: local-semantic`.
+- **Graceful surfaces** — `digest` (needs specs), `decisions`, `federation list`, `manifest`,
+  `plugin-manifest`, `panic-level`/`panic-check`, `preflight` all behave/exit cleanly; `node_modules` is
+  excluded from the graph.
+- **Incremental watcher (this PR's `buildGraphSubset`/`collectReExportBarrels`)** — a live edit on a real
+  repo (adding a function) was picked up and added to the graph within seconds; no normal-edit regression.
+- **Re-export feature on a third+fourth repo** — vaulytica (`import` 1215 / `re_export` 51 / `name_only`
+  23) and agent-replay (`import` 279 / `name_only` 0) both resolve cross-file calls precisely.
+
 ## Verification
 
 - New suite `call-resolution-recall.test.ts`: 19/19 pass (barrel, `export *`, depth-N, direct-stays-
