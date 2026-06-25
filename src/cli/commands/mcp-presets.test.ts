@@ -387,8 +387,12 @@ describe('tools/list payload budget (spec-28)', () => {
   // opt-in params. It joins ONLY the opt-in `federation` and `coordination` presets; it stays OUT
   // of minimal/navigation/memory. Description + task-item schema trimmed first; the residual is the
   // genuine cost of the nested task-list + federation params. Conscious decision, not silent drift.
+  // Bumped 68_000 → 70_000 on the merge of footprint-escape-detection + cross-actor-interference-map
+  // into one surface: the two changes each bumped this budget independently (footprint-escape widened
+  // `structural_diff`'s schema with declaredFootprint/peerFootprints; cross-actor added the new tool),
+  // and the merge stacks both increments. No new tool here — just the realized combined surface cost.
   it('full surface stays within its prefix budget', () => {
-    expect(payloadBytes({ preset: 'full' })).toBeLessThan(68_000);
+    expect(payloadBytes({ preset: 'full' })).toBeLessThan(70_000);
   });
 
   it('the lean DEFAULT surface (no selector) is the lean navigation payload, not the full one', () => {
