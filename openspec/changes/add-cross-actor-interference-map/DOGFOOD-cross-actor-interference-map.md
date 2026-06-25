@@ -107,3 +107,34 @@ A multi-agent adversarial review surfaced bugs; all fixed and regression-tested 
 New adversarial tests also cover the previously-untested hazard classes that the tool fully supports:
 RAW (with direction), WAR, soft-coupling (via the change-coupling store), the `maxChanges` cap, the
 response-size truncation backstop, the federation-unbound degrade, and an empty repo.
+
+## Round-2 hardening (real-git e2e review)
+
+A second review pass with a **real-git e2e harness** (throwaway repos, real `openlore analyze`, real
+git/`gh` providers — no mocks) found a structural false-negative the mocked unit tests could not see,
+plus I/O-path bugs. All fixed and regression-tested (10 new tests; real-git e2e for the two structural ones):
+
+- **FINDING 1 (false-negative, confirmed on real git):** a branch that **renamed and edited** a function
+  reported "no conflict" against a branch editing that function **in place** — a textbook merge conflict
+  missed. Cause: the base snapshot was parsed under the file's NEW path, so the renamed symbol's id
+  (`new/path::compute`) didn't match the in-place editor's (`old/path::compute`). Fix: parse base content
+  under the **base path** (`oldPath ?? path`), so a renamed symbol keeps its base identity. Real-git e2e
+  now reports `WAW [compute]` correctly.
+- **M-B (flagship gap):** a top-level **registry array/object literal** carries no function node, so two
+  PRs appending disjoint entries to it produced no member (the headline "two PRs append to a registry"
+  case, for arrays rather than function dispatchers). Fix: a module-scope **pure-insertion** hunk falls
+  back to a file-scope write member → `shared-append`. Real-git e2e: two appends to `const TOOLS = [...]`
+  → `shared-append [reg.ts]`, no false WAW. (Module-scope *modifies* are intentionally not file-scoped,
+  to avoid over-coupling — verified the re-dogfood adds only `shared-append` advisories, never a false WAW.)
+- **M-A:** a per-file `git show` failure was conflated with an empty file and silently dropped that file's
+  symbols (a potential false "no conflict"). Now distinguished (`null` vs `''`) and disclosed as a caveat.
+- **C1 (CRLF):** a CRLF-terminated `diff --git`/`+++` header could corrupt the parsed path (binary/rename
+  entries) → a trailing `\r` is now stripped from structural lines.
+- **FINDING 2:** with `gh` installed but no GitHub remote, the "PR diffs read against local base" caveat
+  fired even though zero PRs were enumerated — now it says "gh installed but no open PRs enumerated" and
+  the local-base caveat fires only when PRs were actually assessed.
+
+Re-dogfooded on this repo post-fix: branches still flag the `dispatchTool` WAW; PRs now show the richer
+(correct) graph — `WAW #200×#201 [dispatchTool]`, `shared-append #200×#202` (both append to `mcp.ts` /
+test files / the finding registry), `RAW #201×#202` (shared test infra) — with **no false WAW** from the
+file-scope fallback.

@@ -207,7 +207,12 @@ export function parseUnifiedDiff(patch: string): FileHunks[] {
   const closeHunk = () => { if (cur && curHunk) cur.hunks.push(curHunk); curHunk = null; };
   const closeFile = () => { closeHunk(); if (cur) files.push(cur); cur = null; };
 
-  for (const line of patch.split('\n')) {
+  for (const rawLine of patch.split('\n')) {
+    // Strip a trailing CR so a CRLF-terminated structural line (`diff --git …\r`,
+    // `+++ b/path\r`) parses cleanly — otherwise the path regex fails to match and the
+    // fallback captures both sides plus the CR into a corrupt path. Body content is only
+    // ever read for its first character, so dropping a trailing CR there is harmless.
+    const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
     if (line.startsWith('diff --git ')) {
       closeFile();
       // `diff --git a/<path> b/<path>` — take the b-side path (the new path).
@@ -305,6 +310,18 @@ function symbolsForHunk(h: DiffHunk, symbols: readonly BaseSymbol[]): BaseSymbol
  * per-symbol writeMode read off the diff (a symbol touched only by pure-insertion
  * hunks is `append`; any deletion/modification makes it `modify`). `modify`
  * dominates `append` when a symbol has both kinds of hunk. Pure — the testable core.
+ *
+ * `baseSymbolsByFile` keys every changed CODE file (a file with no function symbols
+ * maps to `[]`); a non-code file (docs/config) is absent, so it contributes nothing.
+ * A hunk that touches no function symbol is a MODULE-SCOPE edit (a top-level registry
+ * array/object literal has no function node). For a pure-insertion such hunk — the
+ * canonical "two PRs each append a disjoint entry to the same registry" case — we add a
+ * FILE-SCOPE write member so the collision is observed and resolves to `shared-append`
+ * (mergeable), never a false WAW. A module-scope MODIFY is deliberately NOT attributed
+ * to a file-scope member: at file granularity it would over-couple disjoint top-level
+ * edits into a spurious WAW, and the proposal prefers a missed module-scope-modify
+ * (rare) over a false "must serialize" (noisy). Function-body edits keep symbol
+ * granularity.
  */
 export function writeSetFromHunks(
   files: readonly FileHunks[],
@@ -312,15 +329,23 @@ export function writeSetFromHunks(
 ): FederatedWriteMember[] {
   const modeById = new Map<string, WriteMode>();
   const symbolById = new Map<string, BaseSymbol>();
+  const bump = (id: string, mode: WriteMode) => {
+    const prev = modeById.get(id);
+    modeById.set(id, prev === 'modify' || mode === 'modify' ? 'modify' : 'append');
+  };
   for (const f of files) {
-    const symbols = baseSymbolsByFile.get(f.path) ?? [];
-    if (symbols.length === 0) continue;
+    const symbols = baseSymbolsByFile.get(f.path);
+    if (symbols === undefined) continue; // not a parsed code file → contributes nothing
     for (const h of f.hunks) {
       const mode: WriteMode = h.hasDeletions ? 'modify' : 'append';
-      for (const s of symbolsForHunk(h, symbols)) {
-        symbolById.set(s.id, s);
-        const prev = modeById.get(s.id);
-        modeById.set(s.id, prev === 'modify' || mode === 'modify' ? 'modify' : 'append');
+      const touched = symbols.length > 0 ? symbolsForHunk(h, symbols) : [];
+      if (touched.length > 0) {
+        for (const s of touched) { symbolById.set(s.id, s); bump(s.id, mode); }
+      } else if (mode === 'append') {
+        // Module-scope pure insertion (e.g. a registry-array entry) → file-scope member.
+        const id = f.path;
+        if (!symbolById.has(id)) symbolById.set(id, { id, name: f.path, filePath: f.path, startLine: 0, endLine: 0 });
+        bump(id, 'append');
       }
     }
   }
@@ -418,6 +443,9 @@ export interface RawChange {
   baseSymbolsByFile: Map<string, BaseSymbol[]>;
   /** Set when the change's diff could not be fetched → a "not assessed" node. */
   fetchError?: string;
+  /** Changed code files whose BASE content could not be read (their symbols are absent
+   *  from the write-set) — surfaced as a caveat so the partial assessment is honest. */
+  unreadableFiles?: string[];
 }
 
 export interface InFlightProviders {
@@ -434,40 +462,68 @@ async function git(repoPath: string, args: string[]): Promise<string> {
   return stdout;
 }
 
-/** Content of a file at a git ref, or '' when it did not exist there. */
-async function fileAtRef(repoPath: string, ref: string, path: string): Promise<string> {
+/**
+ * Content of a file at a git ref. Distinguishes a genuinely EMPTY file (`''`) from a
+ * read FAILURE (`null`) — conflating them lets a transient `git show` error silently
+ * drop a changed file's symbols, which would be a false "no conflict" (the invariant
+ * this tool must never break). A missing path at the ref also returns `null`.
+ */
+async function fileAtRef(repoPath: string, ref: string, path: string): Promise<string | null> {
   try {
     return await git(repoPath, ['show', `${ref}:${path}`]);
   } catch {
-    return '';
+    return null;
   }
 }
 
-/** Build base-snapshot symbols (line ranges + stable ids) for the changed files. */
+/** Base-snapshot symbols by changed-file path, plus files whose base content could not be read. */
+interface BaseSnapshot {
+  byFile: Map<string, BaseSymbol[]>;
+  /** Code files whose base content errored — surfaced as a caveat, never silently dropped. */
+  unreadable: string[];
+}
+
+/**
+ * Build base-snapshot symbols (line ranges + stable ids) for the changed files. The
+ * snapshot is parsed from each file's BASE-REF content under its BASE path
+ * (`oldPath ?? path`), so a symbol in a renamed file keeps its base identity
+ * (`old/path::name`) — the same id a peer change editing that file in place sees, and
+ * the id the canonical index carries. Building under the NEW path instead made a
+ * rename+edit silently not-conflict with an in-place edit of the same function (a real
+ * merge conflict reported as "no conflict"). Every parsed CODE file is recorded (even
+ * with zero function symbols) so a module-scope edit can still be attributed.
+ */
 async function buildBaseSymbols(
   repoPath: string,
   baseContentRef: string,
   files: FileHunks[],
-): Promise<Map<string, BaseSymbol[]>> {
-  const out = new Map<string, BaseSymbol[]>();
+): Promise<BaseSnapshot> {
+  const byFile = new Map<string, BaseSymbol[]>();
+  const unreadable: string[] = [];
   for (const f of files.slice(0, MAX_FILES_PER_CHANGE)) {
     if (f.status === 'added') continue; // no base content — all its symbols are new
-    const lang = detectLanguage(f.path);
-    if (!lang || lang === 'Unknown' || lang === 'unknown') continue;
-    const content = await fileAtRef(repoPath, baseContentRef, f.oldPath ?? f.path);
-    if (!content) continue;
+    const basePath = f.oldPath ?? f.path; // a renamed file's base content lives at oldPath
+    const lang = detectLanguage(basePath);
+    if (!lang || lang === 'Unknown' || lang === 'unknown') continue; // non-code file → no symbols
+    const content = await fileAtRef(repoPath, baseContentRef, basePath);
+    if (content === null) { unreadable.push(f.path); continue; } // read FAILURE, not empty
     let snap: SerializedCallGraph | null = null;
     try {
-      snap = serializeCallGraph(await new CallGraphBuilder().build([{ path: f.path, content, language: lang }]));
+      // Parse under the BASE path so symbol ids are base-identity ids (rename-safe).
+      snap = serializeCallGraph(await new CallGraphBuilder().build([{ path: basePath, content, language: lang }]));
     } catch {
+      unreadable.push(f.path);
       continue;
     }
     const symbols: BaseSymbol[] = snap.nodes
       .filter(n => !n.isExternal && n.startLine !== undefined && n.endLine !== undefined)
       .map(n => ({ id: n.id, name: n.name, filePath: n.filePath, startLine: n.startLine!, endLine: n.endLine!, ...(n.stableId ? { stableId: n.stableId } : {}) }));
-    if (symbols.length > 0) out.set(f.path, symbols);
+    // Record every parsed code file (even with zero function symbols) so a module-scope
+    // append (a top-level registry array has no function node) can fall back to a
+    // file-scope write member in writeSetFromHunks.
+    byFile.set(f.path, symbols);
   }
-  return out;
+  return { byFile, unreadable };
 }
 
 /**
@@ -499,6 +555,8 @@ async function defaultEnumerateBranches(
     return [];
   }
   const baseRef = await resolveRepoBase(repoPath, baseRefIn);
+  // The currently-checked-out branch is NOT excluded: it is a legitimate in-flight change
+  // that can genuinely conflict with a teammate's branch (a true positive the user wants).
   const wanted = only && only.length > 0 ? new Set(only) : null;
   const out: RawChange[] = [];
   for (const branch of names.sort()) {
@@ -515,8 +573,8 @@ async function defaultEnumerateBranches(
     if (files.length === 0) continue;
     let actor = branch;
     try { actor = (await git(repoPath, ['log', '-1', '--format=%an', branch])).trim() || branch; } catch { /* keep branch as actor */ }
-    const baseSymbolsByFile = await buildBaseSymbols(repoPath, mergeBase, files);
-    out.push({ actor, ref: branch, repo: repoName, kind: 'branch', files, baseSymbolsByFile });
+    const { byFile, unreadable } = await buildBaseSymbols(repoPath, mergeBase, files);
+    out.push({ actor, ref: branch, repo: repoName, kind: 'branch', files, baseSymbolsByFile: byFile, ...(unreadable.length ? { unreadableFiles: unreadable } : {}) });
   }
   return out;
 }
@@ -553,8 +611,8 @@ async function defaultEnumeratePullRequests(
     if (files.length === 0) continue;
     // Old content is read from the LOCAL base ref (an approximation when the PR's base
     // has advanced past local) — disclosed in the caveats.
-    const baseSymbolsByFile = await buildBaseSymbols(repoPath, baseRef, files);
-    out.push({ actor, ref, repo: repoName, kind: 'pull-request', files, baseSymbolsByFile });
+    const { byFile, unreadable } = await buildBaseSymbols(repoPath, baseRef, files);
+    out.push({ actor, ref, repo: repoName, kind: 'pull-request', files, baseSymbolsByFile: byFile, ...(unreadable.length ? { unreadableFiles: unreadable } : {}) });
   }
   return out;
 }
@@ -679,8 +737,13 @@ export async function computeInterferenceMap(
       }
     }
   }
+  const anyPrEnumerated = raw.some(r => r.kind === 'pull-request');
   if (includePrs && !anyGh) {
     caveats.push('`gh` is not available, so open pull requests were not enumerated (branches and tasks only). Install GitHub CLI to include PRs.');
+  } else if (includePrs && anyGh && !anyPrEnumerated) {
+    // gh binary present but it returned no PRs — typically no open PRs, or this repo has
+    // no GitHub remote. Say so honestly rather than implying PRs were assessed.
+    caveats.push('`gh` is installed but no open pull requests were enumerated (none open, or this repo has no GitHub remote). PR coverage is empty.');
   }
 
   // ── 2. Derive footprints; build the node list (assessed + not-assessed) ─────
@@ -697,6 +760,7 @@ export async function computeInterferenceMap(
   interface AssessedNode { node: ChangeNode; footprint: Footprint; stableByNodeId: Map<string, string> }
   const assessed: AssessedNode[] = [];
   const notAssessed: ChangeNode[] = [];
+  const partialReads: Array<{ ref: string; files: number }> = [];
 
   // Unusable federated targets surface as a single not-assessed marker each.
   for (const u of unusable) {
@@ -722,6 +786,7 @@ export async function computeInterferenceMap(
       notAssessed.push({ actor: rc.actor, ref: rc.ref, repo: rc.repo, kind: rc.kind, assessed: false, reason: 'no-resolvable-symbols', detail: 'the diff touched no symbol resolvable in the index' });
       continue;
     }
+    if (rc.unreadableFiles && rc.unreadableFiles.length > 0) partialReads.push({ ref: rc.ref, files: rc.unreadableFiles.length });
     const footprint = footprintForChange(repo.cg, rc.ref, writeMembers, fpOptsFor(repo));
     const stableByNodeId = new Map<string, string>();
     for (const w of writeMembers) if (w.stableId) stableByNodeId.set(w.id, w.stableId);
@@ -814,8 +879,12 @@ export async function computeInterferenceMap(
   if (conflicts.some(c => c.crossRepo)) {
     caveats.push('Cross-repo conflicts are matched by content-addressed stable id (qualified name + parameter shape, no file path or body), the same identity model federation uses. Two genuinely different symbols that share a name and arity across repos could collide — confirm a cross-repo witness names the same logical symbol before acting.');
   }
-  if (anyGh) {
+  if (anyPrEnumerated) {
     caveats.push('PR diffs are read against the LOCAL base ref; if a PR\'s base has advanced past local, its hunk line mapping is approximate. Re-fetch the base for an exact result.');
+  }
+  if (partialReads.length > 0) {
+    const shown = partialReads.slice(0, 5).map(p => `${p.ref} (${p.files})`).join(', ');
+    caveats.push(`Base content for some changed files could not be read; those files' symbols were omitted from the write-set (still assessed on the rest): ${shown}${partialReads.length > 5 ? `, +${partialReads.length - 5} more` : ''}.`);
   }
 
   const map: InterferenceMap = {

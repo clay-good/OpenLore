@@ -653,3 +653,114 @@ describe('adversarial — caps, honesty, cross-repo file paths', () => {
     expect(map.caveats.some(c => /no resolvable spec-store targets/i.test(c))).toBe(true);
   });
 });
+
+// ====================================================================
+// Round-2 adversarial regression set (real-git e2e review of PR #202)
+// ====================================================================
+
+describe('round-2 — rename keeps base identity (FINDING 1: no false no-conflict)', () => {
+  // A renamed+edited symbol must conflict with an in-place edit of the same function.
+  // buildBaseSymbols parses base content under the OLD path, so a renamed file's symbol
+  // id is its base identity (`old/path::name`) — the same id the in-place editor sees.
+  it('a renamed+edited function conflicts (WAW) with an in-place edit of the same function', async () => {
+    const renamed = change({
+      ref: 'feat-rename', actor: 'Alice', repo: 'this-repo', kind: 'branch',
+      // git status renamed; the diff hunks are keyed by the NEW path, but the base
+      // symbols carry the OLD-path id (what buildBaseSymbols now produces).
+      files: [{ path: 'new.ts', status: 'renamed', oldPath: 'old.ts', hunks: [modifyHunk(5, 3)] }],
+      baseSymbolsByFile: new Map([['new.ts', [baseSym('old.ts::compute', 1, 10)]]]),
+    });
+    const inPlace = change({
+      ref: 'feat-edit', actor: 'Bob', repo: 'this-repo', kind: 'branch',
+      files: [{ path: 'old.ts', status: 'modified', hunks: [modifyHunk(6, 2)] }],
+      baseSymbolsByFile: new Map([['old.ts', [baseSym('old.ts::compute', 1, 10)]]]),
+    });
+    const map = await run(
+      { directory: '/p', includePullRequests: false },
+      providers({ branchesByRepo: { 'this-repo': [renamed, inPlace] } }),
+    );
+    expect(map.conflicts.some(c => c.hazard === 'WAW' && c.witnesses.includes('compute'))).toBe(true);
+    expect(map.findingCount).toBe(1);
+  });
+
+  it('writeSetFromHunks keys a renamed file by its new path but attributes base-identity ids', () => {
+    const files: FileHunks[] = [{ path: 'new.ts', status: 'renamed', oldPath: 'old.ts', hunks: [modifyHunk(5, 3)] }];
+    const base = new Map<string, BaseSymbol[]>([['new.ts', [baseSym('old.ts::compute', 1, 10)]]]);
+    expect(writeSetFromHunks(files, base).map(w => w.id)).toEqual(['old.ts::compute']);
+  });
+});
+
+describe('round-2 — module-scope registry (M-B: file-scope fallback)', () => {
+  it('attributes a module-scope APPEND (no function node) to a file-scope member', () => {
+    // A parsed code file with no function symbols ([]); a top-level registry append.
+    const files: FileHunks[] = [{ path: 'reg.ts', status: 'modified', hunks: [appendHunk(5)] }];
+    const base = new Map<string, BaseSymbol[]>([['reg.ts', []]]);
+    const ws = writeSetFromHunks(files, base);
+    expect(ws).toEqual([{ id: 'reg.ts', name: 'reg.ts', filePath: 'reg.ts', writeMode: 'append' }]);
+  });
+
+  it('two PRs appending to the same module-scope registry array resolve to shared-append (not WAW)', async () => {
+    const mk = (ref: string) => change({
+      ref, actor: ref, repo: 'this-repo', kind: 'pull-request',
+      files: [{ path: 'reg.ts', status: 'modified', hunks: [appendHunk(5)] }],
+      baseSymbolsByFile: new Map([['reg.ts', []]]), // parsed code, zero function symbols
+    });
+    const map = await run(
+      { directory: '/p', includeBranches: false },
+      providers({ prsByRepo: { 'this-repo': [mk('PR #1'), mk('PR #2')] }, gh: true }),
+    );
+    expect(map.conflicts[0]?.hazard).toBe('shared-append');
+    expect(map.findingCount).toBe(0);
+  });
+
+  it('does NOT create a file-scope member for a module-scope MODIFY (avoids over-coupling false WAW)', () => {
+    const files: FileHunks[] = [{ path: 'reg.ts', status: 'modified', hunks: [modifyHunk(5, 2)] }];
+    const base = new Map<string, BaseSymbol[]>([['reg.ts', []]]);
+    expect(writeSetFromHunks(files, base)).toEqual([]);
+  });
+
+  it('a non-code file (absent from the map) still contributes nothing', () => {
+    const files: FileHunks[] = [{ path: 'README.md', status: 'modified', hunks: [appendHunk(5)] }];
+    expect(writeSetFromHunks(files, new Map())).toEqual([]);
+  });
+});
+
+describe('round-2 — CRLF parsing (C1) + honest caveats (M-A, FINDING 2)', () => {
+  it('parses CRLF-terminated structural lines without corrupting the path', () => {
+    const patch = ['diff --git a/a.ts b/a.ts', '--- a/a.ts', '+++ b/a.ts', '@@ -5,1 +5,1 @@', '-old', '+new']
+      .map(l => l + '\r').join('\n'); // CRLF on every line
+    const files = parseUnifiedDiff(patch);
+    expect(files[0].path).toBe('a.ts');            // no trailing \r, no "a/.. b/.." corruption
+    expect(files[0].hunks[0].hasDeletions).toBe(true);
+  });
+
+  it('a CRLF binary/rename header with no +++ rescue line keeps a clean path', () => {
+    const patch = ['diff --git a/img.png b/img.png', 'Binary files a/img.png and b/img.png differ']
+      .map(l => l + '\r').join('\n');
+    expect(parseUnifiedDiff(patch)[0].path).toBe('img.png');
+  });
+
+  it('caveats a partial base read (unreadable file) but still assesses the rest', async () => {
+    const c = change({
+      ref: 'feat-partial', actor: 'Alice', repo: 'this-repo', kind: 'branch',
+      files: [{ path: 'a.ts', status: 'modified', hunks: [modifyHunk(4, 2)] }],
+      baseSymbolsByFile: new Map([['a.ts', [baseSym('a.ts::foo', 1, 10)]]]),
+      unreadableFiles: ['b.ts'],
+    });
+    const map = await run(
+      { directory: '/p', includePullRequests: false },
+      providers({ branchesByRepo: { 'this-repo': [c] } }),
+    );
+    expect(map.assessedCount).toBe(1); // still assessed on a.ts
+    expect(map.caveats.some(cv => /could not be read/i.test(cv) && /b\.ts|feat-partial/.test(cv))).toBe(true);
+  });
+
+  it('when gh is installed but no PRs are enumerated, says so (no misleading "read against local base")', async () => {
+    const map = await run(
+      { directory: '/p', includeBranches: false },
+      providers({ gh: true, prsByRepo: { 'this-repo': [] } }), // gh present, zero PRs
+    );
+    expect(map.caveats.some(c => /installed but no open pull requests/i.test(c))).toBe(true);
+    expect(map.caveats.some(c => /read against the LOCAL base/i.test(c))).toBe(false);
+  });
+});
