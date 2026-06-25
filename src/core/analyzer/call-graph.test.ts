@@ -1503,7 +1503,7 @@ describe('callDistance', () => {
   // Pin every confidence level to its cost. Adding an EdgeConfidence member
   // breaks compilation of CALL_DISTANCE_COSTS, forcing an explicit cost choice.
   const expected: Record<EdgeConfidence, number> = {
-    import: 1, same_file: 1, self_cls: 1, http_endpoint: 1,
+    import: 1, re_export: 1, same_file: 1, self_cls: 1, http_endpoint: 1,
     type_inference: 2, type_name: 2,
     name_only: 3,
     synthesized: 4,

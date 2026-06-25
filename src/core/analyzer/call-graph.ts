@@ -16,7 +16,7 @@ import { dirname, join as joinPath } from 'node:path';
 import type Parser from 'tree-sitter';
 import { FunctionRegistryTrie } from './function-registry-trie.js';
 import type { ImportMap } from './import-resolver-bridge.js';
-import { buildBaseImportMap } from './import-resolver-bridge.js';
+import { buildResolvedImportMap } from './import-resolver-bridge.js';
 import { inferTypesFromSource, resolveViaTypeInference } from './type-inference-engine.js';
 import {
   extractAllHttpEdges,
@@ -41,6 +41,7 @@ export type EdgeConfidence =
   | 'self_cls'       // intra-class call via self/cls
   | 'type_inference' // receiver type resolved via type inference
   | 'import'         // callee was imported from a known file
+  | 're_export'      // callee resolved through a re-export/barrel chain to its true definition (change: add-call-resolution-recall)
   | 'http_endpoint'  // cross-language HTTP route match
   | 'same_file'      // multiple candidates; same-file wins
   | 'name_only'      // last-resort: pick first candidate by name
@@ -156,6 +157,9 @@ export interface CallEdge {
 export const CALL_DISTANCE_COSTS: Record<EdgeConfidence, number> = {
   // Strongly resolved — concrete symbol/route match.
   import: 1,
+  // Re-export-resolved — a proven concrete definition reached through a barrel;
+  // as strongly resolved as a direct import (the chain was followed statically).
+  re_export: 1,
   same_file: 1,
   self_cls: 1,
   http_endpoint: 1,
@@ -185,6 +189,7 @@ const CALL_DISTANCE_FALLBACK = 3;
 export function callDistance(edge: CallEdge): number {
   switch (edge.confidence) {
     case 'import':
+    case 're_export':
     case 'same_file':
     case 'self_cls':
     case 'http_endpoint':
@@ -4466,6 +4471,16 @@ export class CallGraphBuilder {
     const fileContents = new Map<string, string>();
     for (const file of files) fileContents.set(file.path, file.content);
 
+    // Re-export-aware import resolution for Pass 2 call edges (change: add-call-resolution-recall).
+    // Production callers never thread `importMap`, so derive a re-export-following map from the
+    // sources: a cross-file call resolves to its TRUE definition (through any depth of barrel) at
+    // `import`/`re_export` confidence instead of falling through to the ambiguous name-only
+    // fallback. A caller-provided `importMap` is honoured verbatim (no re-export provenance set).
+    // Reused for base-class resolution (Pass 7) below.
+    const { map: callImportMap, reExported: reExportedNames } = importMap
+      ? { map: importMap, reExported: new Set<string>() }
+      : buildResolvedImportMap(files);
+
     const edges: CallEdge[] = [];
     for (const raw of allRawEdges) {
       const callerNode = allNodes.get(raw.callerId);
@@ -4529,13 +4544,29 @@ export class CallGraphBuilder {
         }
       }
 
-      // Strategy 3 — import resolution (TS/JS/Python/Go/Rust/Ruby/Java)
-      if (!calleeNode && importMap) {
-        const importedFile = importMap.get(callerNode.filePath)?.get(raw.calleeName)
-          ?? (raw.calleeObject ? importMap.get(callerNode.filePath)?.get(raw.calleeObject) : undefined);
+      // Strategy 3 — import resolution, re-export aware (TS/JS/Python).
+      // The map resolves an imported name to its true-definition module even when it
+      // arrives through a barrel; an anchored prefix match (`x.` / `x/`, never bare
+      // `startsWith`) avoids binding `shapes/base` to `shapes/base2.ts`. An edge whose
+      // name was followed through a re-export chain is labelled `re_export` (still a
+      // proven concrete target, but the barrel hop is disclosed); a direct import is
+      // labelled `import`.
+      if (!calleeNode) {
+        const viaName = callImportMap.get(callerNode.filePath)?.get(raw.calleeName);
+        const importedFile = viaName
+          ?? (raw.calleeObject ? callImportMap.get(callerNode.filePath)?.get(raw.calleeObject) : undefined);
         if (importedFile) {
-          const candidates = trie.findBySimpleName(raw.calleeName).filter(n => n.filePath.startsWith(importedFile));
-          if (candidates.length > 0) { calleeNode = candidates[0]; confidence = 'import'; }
+          const candidates = trie.findBySimpleName(raw.calleeName).filter(n =>
+            n.filePath === importedFile
+            || n.filePath.startsWith(`${importedFile}.`)
+            || n.filePath.startsWith(`${importedFile}/`),
+          );
+          if (candidates.length > 0) {
+            calleeNode = candidates[0];
+            confidence = (viaName && reExportedNames.has(`${callerNode.filePath}\0${raw.calleeName}`))
+              ? 're_export'
+              : 'import';
+          }
         }
       }
 
@@ -4883,11 +4914,9 @@ export class CallGraphBuilder {
     const relationships = await extractClassRelationships(files);
     // Base-class resolution needs the per-file import map so a child's explicit import
     // outranks a same-named class in its own directory (precision: avoid wiring a false
-    // base). Production callers never thread `importMap`, so derive it from the sources
-    // we already hold. Scoped to buildClassNodes — the Pass-2 callee path keeps using the
-    // caller-provided `importMap` unchanged.
-    const baseImportMap = importMap ?? buildBaseImportMap(files);
-    const { classes, inheritanceEdges } = buildClassNodes(allNodes, relationships, baseImportMap);
+    // base). Reuse the re-export-aware map derived for Pass 2 so a base class imported
+    // through a barrel resolves to its true definition too (change: add-call-resolution-recall).
+    const { classes, inheritanceEdges } = buildClassNodes(allNodes, relationships, callImportMap);
     // Merge IaC module groupings (deduped by id) into the class set.
     const classIds = new Set(classes.map(c => c.id));
     for (const c of iacClasses) if (!classIds.has(c.id)) classes.push(c);
@@ -4927,7 +4956,7 @@ export class CallGraphBuilder {
         rawMethodCalls,
         fileContents,
         directCalleeIdsByCaller,
-        importMap: baseImportMap,
+        importMap: callImportMap,
       }));
     } catch {
       // CHA is best-effort; a failure must never abort the build.

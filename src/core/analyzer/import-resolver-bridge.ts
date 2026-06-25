@@ -10,8 +10,8 @@
  */
 
 import { dirname, resolve, posix } from 'node:path';
-import type { FileAnalysis } from './import-parser.js';
-import { parseJSImports, parsePythonImports } from './import-parser.js';
+import type { FileAnalysis, ExportInfo } from './import-parser.js';
+import { parseJSImports, parsePythonImports, parseJSExports } from './import-parser.js';
 
 /** filePath → Map<localName, resolvedSourceFilePath> */
 export type ImportMap = Map<string, Map<string, string>>;
@@ -72,6 +72,166 @@ export function buildBaseImportMap(
     if (fileMap.size > 0) map.set(f.path, fileMap);
   }
   return map;
+}
+
+// ---------------------------------------------------------------------------
+// Re-export (barrel) resolution — change: add-call-resolution-recall
+// ---------------------------------------------------------------------------
+
+/** Extensionless form of a repo-relative path (the key the call graph resolves on). */
+function stripModuleExt(p: string): string {
+  return p.replace(/\.(tsx?|jsx?|mts|cts|mjs|cjs)$/, '');
+}
+
+/** Maximum re-export chain depth followed before giving up (cycle/runaway guard). */
+const REEXPORT_MAX_DEPTH = 12;
+
+/**
+ * A re-export-aware import map: like {@link buildBaseImportMap}, but a `localName`
+ * imported from a barrel that re-exports it (`export { x } from './impl'`,
+ * `export * from './impl'`, depth-N chains) resolves to the **true definition
+ * module**, not the barrel — so a call through any depth of barrel resolves to the
+ * real target instead of stalling at the index and falling through to the
+ * ambiguous name-only fallback (change: add-call-resolution-recall, item 1).
+ *
+ * `reExported` records every `${callerFile}\0${localName}` whose resolution crossed
+ * ≥1 re-export hop, so the call-graph builder can label that edge with the
+ * `re_export` provenance confidence (honesty: a barrel-crossed edge is still a
+ * proven concrete target, but the consumer can see it was resolved through a
+ * re-export rather than a direct import).
+ *
+ * Strict superset of {@link buildBaseImportMap}: when no re-export chain applies
+ * (the common case), the resolved module is byte-identical to the direct import
+ * target, so non-barrel behaviour — and the regression gate over directly-resolved
+ * edges — is preserved exactly. Re-export *chasing* is TypeScript/JavaScript only
+ * (the languages with an export parser that detects re-exports); Python relative
+ * imports still resolve directly (no `__init__` re-export chasing — deferred).
+ */
+export interface ResolvedImportMap {
+  map: ImportMap;
+  reExported: Set<string>;
+}
+
+interface ModuleExports {
+  /** Directory of the backing file (re-export sources resolve relative to this). */
+  dir: string;
+  exports: ExportInfo[];
+}
+
+export function buildResolvedImportMap(
+  files: Array<{ path: string; content: string; language: string }>,
+): ResolvedImportMap {
+  // Index TS/JS module exports, keyed by extensionless repo-relative module path.
+  // An `index` file is additionally keyed by its directory so `import … from './pkg'`
+  // (which targets `pkg/index.ts`) finds it.
+  const moduleExports = new Map<string, ModuleExports>();
+  for (const f of files) {
+    if (f.language !== 'TypeScript' && f.language !== 'JavaScript') continue;
+    const exports = parseJSExports(f.content);
+    if (exports.length === 0) continue;
+    const dir = posix.dirname(f.path);
+    const rec: ModuleExports = { dir, exports };
+    moduleExports.set(stripModuleExt(f.path), rec);
+    const base = f.path.split('/').pop() ?? '';
+    if (/^index\.(tsx?|jsx?|mts|cts|mjs|cjs)$/.test(base)) moduleExports.set(dir, rec);
+  }
+
+  /**
+   * Resolve `name` exported by `moduleKey` to the module that truly defines it,
+   * following re-export chains. Returns the resolved module (extensionless,
+   * repo-relative) and whether any hop was a re-export. Cycle-/depth-bounded.
+   */
+  function resolveDef(
+    name: string,
+    moduleKey: string,
+    visited: Set<string>,
+    depth: number,
+  ): { module: string; viaReExport: boolean } {
+    const here = `${moduleKey}\0${name}`;
+    // Default: the module itself (matches buildBaseImportMap; never worse).
+    if (depth > REEXPORT_MAX_DEPTH || visited.has(here)) return { module: moduleKey, viaReExport: false };
+    visited.add(here);
+    const rec = moduleExports.get(moduleKey);
+    if (!rec) return { module: moduleKey, viaReExport: false };
+
+    // A direct (non-re-export) export of the name → defined here.
+    if (rec.exports.some(e => !e.isReExport && e.name === name)) {
+      return { module: moduleKey, viaReExport: false };
+    }
+    // A named re-export `export { name } from './src'` → follow it.
+    const named = rec.exports.find(e => e.isReExport && e.name === name && e.reExportSource);
+    if (named?.reExportSource) {
+      const src = stripModuleExt(posix.normalize(posix.join(rec.dir, named.reExportSource)));
+      const r = resolveDef(name, src, visited, depth + 1);
+      return { module: r.module, viaReExport: true };
+    }
+    // `export * from './src'` — the name may live in any star source.
+    for (const star of rec.exports) {
+      if (!star.isReExport || star.name !== '*' || !star.reExportSource) continue;
+      const src = stripModuleExt(posix.normalize(posix.join(rec.dir, star.reExportSource)));
+      const target = moduleExports.get(src);
+      // Only descend a star source that actually surfaces the name (directly or via
+      // its own re-export) — never blindly retarget through an unrelated barrel.
+      if (target && starExposes(name, src, new Set(visited), depth + 1)) {
+        const r = resolveDef(name, src, visited, depth + 1);
+        return { module: r.module, viaReExport: true };
+      }
+    }
+    // Name not surfaced by a parsed export (e.g. re-export-after-import, or an
+    // unparsed form) — fall back to the module itself, exactly as before.
+    return { module: moduleKey, viaReExport: false };
+  }
+
+  /** Whether `name` is reachable as an export of `moduleKey` (direct or via re-export). */
+  function starExposes(name: string, moduleKey: string, visited: Set<string>, depth: number): boolean {
+    const here = `${moduleKey}\0${name}`;
+    if (depth > REEXPORT_MAX_DEPTH || visited.has(here)) return false;
+    visited.add(here);
+    const rec = moduleExports.get(moduleKey);
+    if (!rec) return false;
+    if (rec.exports.some(e => e.name === name && (!e.isReExport || e.reExportSource))) {
+      // A direct export, or a named re-export of this exact name.
+      if (rec.exports.some(e => !e.isReExport && e.name === name)) return true;
+      if (rec.exports.some(e => e.isReExport && e.name === name && e.reExportSource)) return true;
+    }
+    for (const star of rec.exports) {
+      if (!star.isReExport || star.name !== '*' || !star.reExportSource) continue;
+      const src = stripModuleExt(posix.normalize(posix.join(rec.dir, star.reExportSource)));
+      if (starExposes(name, src, visited, depth + 1)) return true;
+    }
+    return false;
+  }
+
+  const map: ImportMap = new Map();
+  const reExported = new Set<string>();
+  for (const f of files) {
+    let imports;
+    const tsjs = f.language === 'TypeScript' || f.language === 'JavaScript';
+    if (tsjs) imports = parseJSImports(f.content);
+    else if (f.language === 'Python') imports = parsePythonImports(f.content);
+    else continue;
+
+    const fileMap = new Map<string, string>();
+    const dir = posix.dirname(f.path);
+    for (const imp of imports) {
+      if (!imp.isRelative) continue;
+      // TS ESM import specifiers carry a `.js` extension that points at the `.ts`
+      // source (`import … from './x.js'`); strip it so the target is extensionless
+      // and matches the node filePaths the call graph keys on.
+      const target = stripModuleExt(posix.normalize(posix.join(dir, imp.source)));
+      for (const name of imp.importedNames) {
+        if (tsjs && moduleExports.size > 0) {
+          const r = resolveDef(name, target, new Set(), 0);
+          fileMap.set(name, r.module);
+          if (r.viaReExport) reExported.add(`${f.path}\0${name}`);
+        } else {
+          fileMap.set(name, target);
+        }
+      }
+    }
+    if (fileMap.size > 0) map.set(f.path, fileMap);
+  }
+  return { map, reExported };
 }
 
 /** Build an ImportMap from TS/JS/Python FileAnalysis objects (from import-parser). */

@@ -7,6 +7,24 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ### Added
 
+- **Call resolution recall — re-export / barrel resolution** (FEATURE-UPDATES proposal 4) — the import
+  resolver now follows re-export chains (`export { x } from`, `export * from`, and the TS ESM
+  `.js`-specifier forms) through any depth of barrel to a symbol's **true definition**, and that
+  re-export-aware map is **threaded into call-edge resolution** (Pass 2), which production builds never
+  did before — so a cross-file call resolves to its real target at `import` confidence (or the new
+  `re_export` confidence when a barrel hop was followed) instead of falling through to the ambiguous
+  first-same-named-candidate (`name_only`). Cycle-detected and depth-bounded; gated to `imports`-capable
+  languages; fail-soft. Strictly additive: when no re-export applies the result is identical to the direct
+  target, and directly-resolved edges (`same_file`/`self_cls`/`type_inference`) are never dropped or
+  downgraded. **Dogfood on this repo:** ambiguous `name_only` call edges fell 1067 → 87 (−92%), precise
+  cross-file edges rose 0 → 1326 `import` + 21 `re_export`, unresolved `external` fell 8742 → 8563 —
+  raising the soundness floor under every reachability conclusion (`find_dead_code`, `select_tests`,
+  `analyze_impact`, `blast_radius`, `report_coverage_gaps`) at once. A structural audit during
+  implementation found the proposal's other edge classes — interface→implementation, override, and
+  single-implementor dispatch (items 2/3) — **already delivered** by the shipped CHA pass
+  (`add-type-hierarchy-resolved-dispatch`); they are cross-referenced, not re-implemented. No graph-schema
+  change, no new MCP tool, no LLM. Reference: `openspec/changes/add-call-resolution-recall/`.
+
 - **Structural test-coverage gaps + `report_coverage_gaps`** (FEATURE-UPDATES proposal 5) — a
   deterministic, graph-derived report of important code with **no reaching test**, ranked by
   `hub`/`chokepoint` significance. It is the structural **inverse** of `select_tests`: seed on every

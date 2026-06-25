@@ -319,7 +319,7 @@ export function parseJSImports(content: string): ImportInfo[] {
 /**
  * Parse exports from JavaScript/TypeScript content
  */
-function parseJSExports(content: string): ExportInfo[] {
+export function parseJSExports(content: string): ExportInfo[] {
   const exports: ExportInfo[] = [];
 
   // Remove comments

@@ -22,7 +22,7 @@ or language count. None introduces a learned model, a clock-dependency, or a gra
 | 1 | `add-symbol-identity-continuity` | Moat (memory) | Peers soft-delete a renamed symbol and re-stamp it; anchored *notes* still orphan. OpenLore can carry memory across a rename instead. | analyzer + architecture |
 | 2 | `add-public-api-surface-contract` | Moat (contract) | Peers expose `EXPORTS`/overrides but don't certify "did this change break the public contract?" | analyzer + mcp-handlers |
 | 3 | `add-change-significance-briefing` | Moat (review) | A peer ranks "what changed while I was away" by structural significance with a coverage budget; OpenLore's change tools only see *your own* diff. | analyzer + mcp-handlers |
-| 4 | `add-call-resolution-recall` | Substrate correctness | A peer resolves calls through imports/re-exports/inheritance in-process (no language server); OpenLore misses these edges, so its negative conclusions are softer than they look. | analyzer |
+| 4 | `add-call-resolution-recall` **(SHIPPED 2026-06-25 — re-export/barrel resolution threaded into Pass 2 + `re_export` provenance; items 2/3 found already-delivered by the CHA pass)** | Substrate correctness | A peer resolves calls through imports/re-exports/inheritance in-process (no language server); OpenLore misses these edges, so its negative conclusions are softer than they look. | analyzer |
 | 5 | `add-test-coverage-gap-report` **(SHIPPED 2026-06-25 — `report_coverage_gaps` tool + `openlore coverage-gaps` CLI)** | Moat (quality) | Peers have test edges and dead-code; none surfaces "important code with no reaching test," ranked by significance. | analyzer + mcp-handlers |
 
 ## Why these and not the obvious others
