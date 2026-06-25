@@ -8,6 +8,17 @@
 > `tokenCount` correctly surfaced). Dogfood caught + fixed an over-broad partial-detection caveat that
 > named well-tested languages. See `tasks.md` (all checked).
 >
+> Status: HARDENED (2026-06-25, adversarial review round on PR #204). Fixed: (1) scoped denominators —
+> `analyzedSymbols`/`reachableFromTest` now range over the in-scope set, not the whole repo, so a
+> scoped call reads "1 gap of 1 analyzed"; (2) zero-resolution honesty — a diff/region scope that
+> matches nothing returns an explicit `note` ("nothing matched", not a reassuring "0 gaps"); (3)
+> `filePattern` echoed whenever applied (incl. layered on a diff); (4) `directResolvedOnly` threaded
+> into `deadCodeIds` so `alsoFlaggedDead` shares the gap partition's edge basis; (5) fuzzy
+> symbol-resolution caveat. +5 regression tests (13 total). Docs hardened: README cheat-sheet row +
+> narrative + `docs/coverage-gaps.md` deep-dive + CLI example block; 7 stale "65" doc counts fixed
+> (CLAUDE.md, install.md, agent-setup, cli-reference, cli/spec.md) and the doc-count guard broadened
+> (hyphenated `N-tool` form + CLAUDE.md/install.md now guarded) so the class can't recur.
+>
 > Status: DRAFT (2026-06-24). Part of the `FEATURE-UPDATES.md` set. Adds a deterministic,
 > graph-derived report of code with **no reaching test**, ranked by structural significance, as an
 > opt-in conclusion tool. Reuses the existing backward-reachability test-selection path and the

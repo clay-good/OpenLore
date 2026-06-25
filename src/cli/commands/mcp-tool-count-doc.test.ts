@@ -57,8 +57,14 @@ const GUARDED_DOCS: Array<{ rel: string; allowPresetCounts?: number[] }> = [
   // allowlisted preset sizes, while the file is still guarded for its full-surface claims.
   { rel: 'docs/cli-reference.md', allowPresetCounts: [LEAN_DEFAULT_COUNT, 6] },
   { rel: 'docs/governance-dogfooding.md' },
-  { rel: 'docs/agent-setup.md', allowPresetCounts: [6] },
-  { rel: 'openspec/specs/cli/spec.md' },
+  { rel: 'docs/agent-setup.md', allowPresetCounts: [LEAN_DEFAULT_COUNT, 6] },
+  { rel: 'openspec/specs/cli/spec.md', allowPresetCounts: [LEAN_DEFAULT_COUNT] },
+  // CLAUDE.md and install.md drifted to a stale "65" (in `not all 65 tools` / `full 65-tool
+  // surface` phrasings) while every guarded doc was green, because they were NOT guarded and
+  // the regex missed the hyphenated `N-tool` form. Both are now guarded and the regex below
+  // catches `N-tool` too, so this class of drift fails CI here.
+  { rel: 'CLAUDE.md', allowPresetCounts: [LEAN_DEFAULT_COUNT] },
+  { rel: 'docs/install.md', allowPresetCounts: [LEAN_DEFAULT_COUNT] },
 ];
 
 // Docs that document the lean DEFAULT surface must cite exactly its preset size, so the
@@ -70,11 +76,16 @@ describe('documented MCP tool count', () => {
 
   it.each(GUARDED_DOCS)('the "N tools" full-surface count in $rel matches TOOL_DEFINITIONS.length', ({ rel, allowPresetCounts = [] }) => {
     const text = readFileSync(join(repoRoot, rel), 'utf8');
-    // "58 tools", and also "58 MCP tools" / "58 graph-native tools" — one optional
-    // adjective word is allowed between the count and "tools" (those phrasings drifted
-    // to a stale "50" once precisely because a bare `\d+\s+tools` regex skipped them).
-    // Still excludes "7-tool" (hyphenated preset sizes) and "tool-calls" (no plural).
-    const counts = [...text.matchAll(/(\d+)\s+(?:[A-Za-z][\w-]*\s+)?tools\b/g)].map(m => Number(m[1]));
+    // Two phrasings, by design:
+    //   (a) spaced PLURAL "58 tools" / "58 MCP tools" / "58 graph-native tools" (one optional
+    //       adjective word) — the original.
+    //   (b) hyphenated "58-tool surface" (singular or plural) — added after `full 65-tool
+    //       surface` / `not all 65 tools` drifted unnoticed because the old regex skipped it.
+    // The spaced SINGULAR form is deliberately NOT matched, so the dated historical record
+    // "loading all ~45 MCP tool definitions" stays preserved (not rewritten). Preset sizes
+    // (e.g. "10-tool navigation") are permitted via allowPresetCounts; "tool-calls" (no
+    // leading count) is not matched.
+    const counts = [...text.matchAll(/(\d+)(?:-tools?\b|\s+(?:[A-Za-z][\w-]*\s+)?tools\b)/g)].map(m => Number(m[1]));
     expect(counts.length, `expected at least one "N tools" mention in ${rel}`).toBeGreaterThan(0);
     for (const n of counts) {
       if (allowPresetCounts.includes(n)) continue; // documented preset size, not the full surface
@@ -91,7 +102,7 @@ describe('documented MCP tool count', () => {
 describe('documented lean default tool count', () => {
   it.each(LEAN_DEFAULT_DOCS)('%s cites the lean default surface as the navigation preset size', (rel) => {
     const text = readFileSync(join(repoRoot, rel), 'utf8');
-    const counts = [...text.matchAll(/(\d+)\s+(?:[A-Za-z][\w-]*\s+)?tools?\b/g)].map(m => Number(m[1]));
+    const counts = [...text.matchAll(/(\d+)(?:-tools?\b|\s+(?:[A-Za-z][\w-]*\s+)?tools\b)/g)].map(m => Number(m[1]));
     expect(
       counts.includes(LEAN_DEFAULT_COUNT),
       `${rel} should state the lean default surface of ${LEAN_DEFAULT_COUNT} tools (the ${LEAN_DEFAULT_PRESET} preset size); update it if the preset membership changed`,

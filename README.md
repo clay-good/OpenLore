@@ -270,6 +270,7 @@ The default MCP surface is the lean **`navigation`** preset — 10 tools, the Sp
 | "How does request X reach function Y?" | `trace_execution_path` |
 | "I changed X — which tests should I run?" | `select_tests` — backward reachability to the reaching tests + paths (Spec 19) |
 | "What's dead / what dies if I delete X?" | `find_dead_code` — cross-language reachability, confidence-tagged candidates (Spec 20) |
+| "Which important code has NO test reaching it?" | `report_coverage_gaps` — the structural inverse of `select_tests`, ranked by hub/chokepoint significance; gaps-only (never claims "tested"); no runtime (opt-in `--preset full`; CLI `openlore coverage-gaps`) |
 | "What's the blast radius of my whole diff before I commit?" | `blast_radius` — one advisory briefing: callers/layers, tests to run, anchored memories/decisions that will drift, stale specs (CLI `openlore blast-radius`) |
 | "Does my diff open a new path into a sensitive boundary?" | `change_impact_certificate` — differential reachability into declared covering surfaces (newly-opened paths), plus blast radius, drift, and tests; decays via the freshness lease (CLI `openlore impact-certificate`; opt-in `federation` preset) |
 | "Which of my N queued tasks can run concurrently, and in what order?" | `plan_parallel_work` — a hazard-typed conflict graph + wave schedule + critical path over a caller-supplied task list (opt-in `coordination` preset) |
@@ -354,6 +355,10 @@ Compares git changes against spec mappings in milliseconds. Detects: Gap (code c
 **Reachability & dead-code** (no API key, Spec 20)
 
 `find_dead_code` runs cross-language mark-and-sweep over the call graph: reachability from roots (tests, imported symbols, route handlers, `main`), candidate-dead = the unreached remainder, and "what becomes dead if I delete X?" = the set reachable only through X. Prior art (knip, ts-prune) is TS/JS-only; this rides the unified tree-sitter graph across 15+ languages. Results are **confidence-tagged candidates, never deletion authority** — dynamic dispatch, DI, framework routing, and externally-consumed exports cause false positives, stated in the response. A conservative module-level liveness signal keeps high-confidence candidates trustworthy (it cut them from ~470 to ~35 on a real repo). See [docs/reachability-dead-code.md](docs/reachability-dead-code.md).
+
+**Test-coverage gaps** (no API key, opt-in `--preset full`)
+
+`report_coverage_gaps` answers the inverse of `select_tests`: not "which tests reach my change?" but **"which important code has no test reaching it at all?"** It walks the call graph **forward** from every test (and every `tested_by` association) to the test-reachable set, then reports the internal code *outside* it — ranked by the same `hub`/`chokepoint` significance labels the rest of the graph uses, so untested **load-bearing** code floats to the top instead of drowning in untested leaves. The graph already encodes the answer, so it needs **no test run, no coverage instrumentation, and no working runtime** — unlike line-coverage tools. It is **gaps-only and honest**: it reports "no reaching test" (the sound direction) and *never* claims a symbol is "tested" (reachable-from-a-test is not behavior-verified). A gap with no caller at all is labeled *also-dead* (keeping it distinct from `find_dead_code`); an untested entry point is reported *untested-not-dead*. A scope that resolves to nothing says so rather than reassuring you with "0 gaps". Scope to a diff (`changedSymbols`/`diffRef`) or a region (`filePattern`). Deterministic and offline. CLI: `openlore coverage-gaps`. See [docs/coverage-gaps.md](docs/coverage-gaps.md).
 
 **Structural change analysis** (no API key, Spec 21)
 
@@ -611,6 +616,7 @@ Because OpenLore requires Node ≥22.5 while OpenSpec runs on ≥20.19, a delega
 | Local provenance (git/PR, no OAuth) | [docs/provenance.md](docs/provenance.md) |
 | Test impact selection (which tests to run) | [docs/test-impact-selection.md](docs/test-impact-selection.md) |
 | Reachability & dead-code analysis | [docs/reachability-dead-code.md](docs/reachability-dead-code.md) |
+| Test-coverage gaps (untested surface) | [docs/coverage-gaps.md](docs/coverage-gaps.md) |
 | Structural change analysis (graph diff) | [docs/structural-diff.md](docs/structural-diff.md) |
 | Change-coupling & volatility (git-mined) | [docs/change-coupling.md](docs/change-coupling.md) |
 | Architecture invariant guardrails (pre-edit) | [docs/architecture-invariants.md](docs/architecture-invariants.md) |

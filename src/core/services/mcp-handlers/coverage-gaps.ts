@@ -158,19 +158,21 @@ export async function handleReportCoverageGaps(input: ReportCoverageGapsInput): 
   // ── Candidate universe: internal, non-test, non-infra, non-generated code ───
   const universe = cg.nodes.filter(n => isCodeNode(n) && !n.isTest && !isExcludedPath(n.filePath));
 
-  // ── Scope: whole repo (default) | diff | region(filePattern) ────────────────
+  // ── Scope resolution: whole repo (default) | diff | region(filePattern) ─────
   // Precedence mirrors select_tests: explicit changedSymbols → diffRef → (when a
   // diff was explicitly requested via empty diffRef) the working tree vs HEAD.
-  // With no diff inputs at all, scope is the whole repo.
+  // A `filePattern` always further narrows the result (region scope on its own, or
+  // an extra filter layered on a diff scope) and is echoed whenever applied.
   const hasSymbols = !!(input.changedSymbols && input.changedSymbols.length > 0);
   const wantsDiff = hasSymbols || input.diffRef !== undefined;
   let scope: 'repo' | 'diff' | 'region' = 'repo';
   let scopeIds: Set<string> | null = null;
   let changedDescriptor: string[] = [];
+  let baseRefUsed: string | undefined;
   let diffError: string | undefined;
   if (wantsDiff) {
     scope = 'diff';
-    const baseRef = input.diffRef && input.diffRef.length > 0 ? input.diffRef : 'HEAD';
+    baseRefUsed = input.diffRef && input.diffRef.length > 0 ? input.diffRef : 'HEAD';
     if (hasSymbols) {
       const seeds = seedsFromSymbols(cg, input.changedSymbols!);
       scopeIds = new Set(seeds.map(s => s.id));
@@ -178,12 +180,12 @@ export async function handleReportCoverageGaps(input: ReportCoverageGapsInput): 
     } else {
       try {
         const { getChangedFiles } = await import('../../drift/git-diff.js');
-        const diff = await getChangedFiles({ rootPath: absDir, baseRef, includeUnstaged: true });
+        const diff = await getChangedFiles({ rootPath: absDir, baseRef: baseRefUsed, includeUnstaged: true });
         const files = diff.files.map(f => f.path);
         changedDescriptor = files;
         scopeIds = new Set(seedsFromFiles(cg, files).map(s => s.id));
       } catch (err) {
-        diffError = `git diff failed (base ${baseRef}): ${err instanceof Error ? err.message : String(err)}`;
+        diffError = `git diff failed (base ${baseRefUsed}): ${err instanceof Error ? err.message : String(err)}`;
       }
     }
   } else if (input.filePattern) {
@@ -191,13 +193,38 @@ export async function handleReportCoverageGaps(input: ReportCoverageGapsInput): 
   }
   if (diffError) return { error: diffError };
 
-  // ── The gap set: universe minus the test-reachable set ──────────────────────
-  let gapNodes = universe.filter(n => !reachedByTest.has(n.id));
-  if (input.filePattern) gapNodes = gapNodes.filter(n => n.filePath.includes(input.filePattern!));
-  if (scopeIds) gapNodes = gapNodes.filter(n => scopeIds!.has(n.id));
+  // ── In-scope candidate set: the analysis FRAME for THIS call ────────────────
+  // The counts (analyzedSymbols / reachableFromTest) and the gap list all range
+  // over this set, so a scoped call's denominator matches its scoped gaps — never
+  // the whole repo's 2000 symbols sitting behind a single scoped gap.
+  let inScope = universe;
+  if (input.filePattern) inScope = inScope.filter(n => n.filePath.includes(input.filePattern!));
+  if (scopeIds) inScope = inScope.filter(n => scopeIds!.has(n.id));
+
+  // Honesty: a diff/region scope that matched NOTHING is "nothing resolved", which
+  // must never read as the reassuring "no gaps" of a scope that matched symbols and
+  // found them all test-reachable. Disclose the reason (mirrors select_tests' empty-
+  // seed message), so an agent never concludes "my change is covered" from a typo.
+  let unmatchedNote: string | undefined;
+  if (scope !== 'repo' && inScope.length === 0) {
+    if (hasSymbols) {
+      unmatchedNote = 'None of the given symbol(s) resolved to an in-scope production function (typo, not analyzed, or excluded as test/generated/vendored) — this is "nothing matched", NOT "no coverage gaps".';
+    } else if (scope === 'diff') {
+      unmatchedNote = changedDescriptor.length === 0
+        ? `No files changed vs ${baseRefUsed} (or the diff touched only non-code files) — "nothing changed", NOT "no coverage gaps".`
+        : 'The changed file(s) contain no in-scope production function (only tests/generated/vendored, or not yet analyzed) — "nothing matched", NOT "no coverage gaps".';
+    } else {
+      unmatchedNote = `filePattern "${input.filePattern}" matched no in-scope production symbol — "nothing matched", NOT "no coverage gaps".`;
+    }
+  }
+
+  // ── The gap set: in-scope code with no reaching test ────────────────────────
+  const gapNodes = inScope.filter(n => !reachedByTest.has(n.id));
 
   // ── Significance labels for ranking (reused classifiers, no new score) ──────
-  const deadIds = await deadCodeIds(absDir, cg);
+  // Strict mode is threaded into the dead set too, so `alsoFlaggedDead` rests on
+  // the SAME edge basis as the gap partition (no strict/non-strict disagreement).
+  const deadIds = await deadCodeIds(absDir, cg, { directResolvedOnly: input.directResolvedOnly });
   const landmarks = computeLandmarkSignals(cg, { deadIds });
   const signalsById = new Map(landmarks.map(l => [l.id, l.signals]));
 
@@ -252,25 +279,33 @@ export async function handleReportCoverageGaps(input: ReportCoverageGapsInput): 
     const langsWithoutTests = universeLangs.filter(l => !langsWithTests.has(l));
     caveats.push(`No test files were detected for these languages (${langsWithoutTests.join(', ')}); their gaps may be over-reported (every symbol looks untested where no test was detected).`);
   }
+  if (hasSymbols) {
+    // Symbol resolution prefers an exact (case-insensitive) name match but falls back
+    // to substring, so a short name can scope to more than the one function intended.
+    caveats.push('Symbol scope resolves by name (exact preferred, substring fallback); a short or partial symbol name may widen the scope to several functions.');
+  }
 
-  // Confidence boundary: the partition rests on the test-reachable edge basis;
-  // synthesized edges among reached nodes mean a "reached" verdict leaned on a
-  // heuristic. (spec: add-confidence-boundary-disclosure)
+  // Confidence boundary: the liveness partition rests on the edges traversed within
+  // the test-reachable set (the complement of the reported gaps — same posture as
+  // find_dead_code, whose basis is the live set). Synthesized edges among reached
+  // nodes mean a "reached" verdict leaned on a heuristic; disclose it. (spec:
+  // add-confidence-boundary-disclosure)
   const reachBasis = edgeBasisWithinSet(cg.edges, reachedByTest);
   const staleness = await computeStaleness(absDir);
   const confidenceBoundary = assembleBoundary({ basis: reachBasis, staleness, integrity: ctx?.integrity });
 
-  const testedCount = universe.filter(n => reachedByTest.has(n.id)).length;
+  const testedCount = inScope.filter(n => reachedByTest.has(n.id)).length;
 
   return {
     scope,
     ...(scope === 'diff' ? { changed: changedDescriptor } : {}),
-    ...(scope === 'region' ? { filePattern: input.filePattern } : {}),
-    analyzedSymbols: universe.length,
+    ...(input.filePattern ? { filePattern: input.filePattern } : {}),
+    analyzedSymbols: inScope.length,
     reachableFromTest: testedCount,
     gapCount: gaps.length,
     coverageGaps: returned,
     ...(omitted > 0 ? { omitted } : {}),
+    ...(unmatchedNote ? { note: unmatchedNote } : {}),
     soundness: { posture: 'gaps-only' as const, claim: 'no-reaching-test' as const, caveats },
     coverage: { languages: universeLangs, testDetection },
     confidenceBoundary,

@@ -728,7 +728,7 @@ infrastructure failure (no graph, no binding) SHALL never block.
 - **WHEN** a change opens a new path into a critical surface
 - **THEN** the hook blocks; and for a newly-opened path into any non-critical surface it remains advisory
 
-### Lean default MCP surface = navigation preset; full 65-tool surface is opt-in via --preset full / --all-tools
+### Lean default MCP surface = navigation preset; full 66-tool surface is opt-in via --preset full / --all-tools
 
 **Status:** Approved
 **Date:** 2026-06-22

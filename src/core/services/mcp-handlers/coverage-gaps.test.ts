@@ -49,6 +49,7 @@ interface GapResult {
   gapCount: number;
   coverageGaps: Array<{ name: string; file: string; fanIn: number; signals: Array<{ label: string }>; alsoFlaggedDead?: true }>;
   omitted?: number;
+  note?: string;
   soundness: { posture: string; claim: string; caveats: string[] };
   coverage: { languages: string[]; testDetection: string };
 }
@@ -128,10 +129,56 @@ describe('handleReportCoverageGaps', () => {
     expect(leaf.alsoFlaggedDead).toBe(true);
   });
 
-  it('scopes to a diff: only changed untested symbols are reported', async () => {
+  it('scopes to a diff: only changed untested symbols are reported, with scoped denominators', async () => {
     const r = await handleReportCoverageGaps({ directory: '/p', changedSymbols: ['untestedHub'] }) as GapResult;
     expect(r.scope).toBe('diff');
     expect(r.coverageGaps.map(g => g.name)).toEqual(['untestedHub']);
+    // counts range over the IN-SCOPE set (1 symbol), never the whole repo's universe —
+    // "1 gap of 1 analyzed", not "1 gap of <all symbols> analyzed".
+    expect(r.analyzedSymbols).toBe(1);
+    expect(r.reachableFromTest).toBe(0);
+    expect(r.note).toBeUndefined(); // it DID match — no "nothing matched" disclosure
+  });
+
+  it('discloses when a diff scope resolves to nothing (never a reassuring "0 gaps")', async () => {
+    const r = await handleReportCoverageGaps({ directory: '/p', changedSymbols: ['noSuchSymbol'] }) as GapResult;
+    expect(r.scope).toBe('diff');
+    expect(r.gapCount).toBe(0);
+    expect(r.analyzedSymbols).toBe(0);
+    expect(r.note).toMatch(/nothing matched/i);
+    expect(r.note).not.toMatch(/no coverage gaps$/i); // explicitly NOT the reassuring phrasing
+  });
+
+  it('discloses when a region (filePattern) matches nothing', async () => {
+    const r = await handleReportCoverageGaps({ directory: '/p', filePattern: 'no/such/dir' }) as GapResult;
+    expect(r.scope).toBe('region');
+    expect(r.gapCount).toBe(0);
+    expect(r.note).toMatch(/matched no in-scope production symbol/i);
+  });
+
+  it('echoes filePattern even when layered on a diff scope (so the extra filter is visible)', async () => {
+    const r = await handleReportCoverageGaps({ directory: '/p', changedSymbols: ['untestedHub'], filePattern: 'src/a.ts' }) as GapResult & { filePattern?: string };
+    expect(r.scope).toBe('diff');
+    expect(r.filePattern).toBe('src/a.ts');
+    expect(r.coverageGaps.map(g => g.name)).toEqual(['untestedHub']);
+  });
+
+  it('directResolvedOnly: a node reachable from a test ONLY via a synthesized edge becomes a gap in strict mode', async () => {
+    // test → dispatcher (real) → handler (synthesized). Non-strict: handler reached
+    // (not a gap). Strict: synthesized edge dropped, handler unreached → a gap.
+    const dispatcher = node({ id: 'src/d.ts::dispatcher', fanIn: 1, fanOut: 1 });
+    const handler = node({ id: 'src/d.ts::handler', fanIn: 1 });
+    const t = node({ id: 'src/d.test.ts::t', isTest: true, fanOut: 1 });
+    const synthEdge: CallEdge = { callerId: 'src/d.ts::dispatcher', calleeId: 'src/d.ts::handler', calleeName: 'handler', confidence: 'synthesized', kind: 'calls' };
+    const g = graph([dispatcher, handler, t], [edge('src/d.test.ts::t', 'src/d.ts::dispatcher'), synthEdge]);
+
+    vi.mocked(readCachedContext).mockResolvedValue({ callGraph: g } as never);
+    const lax = await handleReportCoverageGaps({ directory: '/p' }) as GapResult;
+    expect(lax.coverageGaps.map(x => x.name)).not.toContain('handler'); // reached via synthesized → not a gap
+
+    vi.mocked(readCachedContext).mockResolvedValue({ callGraph: g } as never);
+    const strict = await handleReportCoverageGaps({ directory: '/p', directResolvedOnly: true }) as GapResult;
+    expect(strict.coverageGaps.map(x => x.name)).toContain('handler'); // synthesized dropped → a gap
   });
 
   it('reports testDetection "none" when the graph has no tests', async () => {

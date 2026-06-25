@@ -173,11 +173,21 @@ function reachableFrom(
  * and landmark signals agree on what "dead" means. Candidate ids only — deadness
  * is a signal, never deletion authority (see module header).
  */
-export async function deadCodeIds(absDir: string, cg: SerializedCallGraph): Promise<Set<string>> {
+export async function deadCodeIds(
+  absDir: string,
+  cg: SerializedCallGraph,
+  opts?: { directResolvedOnly?: boolean },
+): Promise<Set<string>> {
+  // Strict mode (opt-in): drop synthesized dynamic-dispatch edges from both the
+  // reachability walk AND the synthesized route-handler roots, so a caller that
+  // computes its own partition with `directResolvedOnly` gets a dead set grounded
+  // on the SAME edge basis (otherwise the two conclusions can disagree). Default
+  // (no opts) preserves the prior non-strict behavior byte-for-byte.
+  const strict = opts?.directResolvedOnly === true;
   const dep = await loadDepSignals(absDir);
   const importedNames = dep?.names ?? null;
-  const { forward } = buildAdjacency(cg);
-  const handlerRootIds = externallyInvokedHandlerIds(cg);
+  const { forward } = buildAdjacency(cg, { directResolvedOnly: strict });
+  const handlerRootIds = externallyInvokedHandlerIds(cg, !strict);
   const isMainLike = (n: FunctionNode) => n.name === 'main' || n.name === 'Main' || n.name === 'default';
   const isRoot = (n: FunctionNode): boolean =>
     !!n.isTest || handlerRootIds.has(n.id) || isMainLike(n) ||

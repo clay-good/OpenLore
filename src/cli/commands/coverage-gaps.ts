@@ -31,6 +31,7 @@ interface CoverageGapsResult {
   gapCount: number;
   coverageGaps: CoverageGapItem[];
   omitted?: number;
+  note?: string;
   soundness: { posture: string; claim: string; caveats: string[] };
   coverage: { languages: string[]; testDetection: 'full' | 'partial' | 'none' };
 }
@@ -47,8 +48,11 @@ function renderHuman(r: CoverageGapsResult): string {
   if (r.coverage.testDetection === 'none') {
     lines.push('   ⚠ No tests detected — every symbol looks untested because detection found nothing, not because the code is genuinely untested.');
   }
+  if (r.note) {
+    lines.push(`   ⚠ ${r.note}`);
+  }
   if (r.coverageGaps.length === 0) {
-    lines.push('   No gaps in scope.');
+    lines.push(r.note ? '   (nothing in scope to report)' : '   No gaps in scope.');
   } else {
     lines.push('   Top untested (most load-bearing first):');
     for (const g of r.coverageGaps) {
