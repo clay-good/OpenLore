@@ -113,6 +113,22 @@ export const FINDING_CODE_REGISTRY: Record<string, FindingCodeSpec> = {
     source: 'stale-decision-reference',
     description: 'A live, authoritative artifact references a decision that has since been superseded/retired.',
   },
+  // ── footprint escape detection (add-footprint-escape-detection) ──
+  'footprint-escape': {
+    defaultClass: 'advisory',
+    source: 'footprint-escape',
+    description: 'A diff modified a symbol outside the task\'s declared write-footprint (out-of-scope write, read-set intrusion, or scope creep within a declared file).',
+  },
+  'footprint-escape-new-conflict': {
+    defaultClass: 'advisory',
+    source: 'footprint-escape',
+    description: 'An out-of-scope write landed in a peer task\'s declared write-set, opening a new write-write conflict the swarm plan did not have.',
+  },
+  'mis-declared-append': {
+    defaultClass: 'advisory',
+    source: 'footprint-escape',
+    description: 'A write declared `append` at plan time actually modified existing code (refuting the plan-time shared-append optimism).',
+  },
 };
 
 /** Whether a code is registered (so a declared policy entry is recognized). */

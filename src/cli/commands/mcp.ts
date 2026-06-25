@@ -615,7 +615,8 @@ export const TOOL_DEFINITIONS = [
       '(working tree vs a ref, or two refs): functions/edges added & removed, signature changes, ' +
       'and the existing callers now STALE because a callee signature moved under them. ' +
       'Rename/move ambiguity is flagged, not guessed. Deterministic, offline. Run analyze_codebase ' +
-      'first for stale-caller analysis.',
+      'first for stale-caller analysis. Opt-in escape check: pass declaredFootprint to also flag ' +
+      'symbols modified OUTSIDE the declared write-set and conflicts they open against peerFootprints.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -623,6 +624,36 @@ export const TOOL_DEFINITIONS = [
         baseRef: { type: 'string', description: 'Old state to diff against (default "HEAD")' },
         headRef: { type: 'string', description: 'New state (a git ref). Omit to use the working tree.' },
         maxResults: { type: 'number', description: 'Cap reported items per category (default 200)' },
+        declaredFootprint: {
+          type: 'object',
+          description:
+            'OPT-IN escape check: the task\'s declared write-footprint (a plan_parallel_work `Footprint`). ' +
+            'Shape { taskId?, writeSet: [{ id:"file::name", filePath?, writeMode?:append|modify }], readSet?:string[] }. ' +
+            'Adds an `escapeAnalysis` block; omit = unchanged behavior.',
+          properties: {
+            taskId: { type: 'string' },
+            writeSet: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  id: { type: 'string' },
+                  filePath: { type: 'string' },
+                  writeMode: { type: 'string', enum: ['append', 'modify'] },
+                },
+                required: ['id'],
+              },
+            },
+            readSet: { type: 'array', items: { type: 'string' } },
+          },
+        },
+        peerFootprints: {
+          type: 'array',
+          description:
+            'Declared footprints of OTHER in-flight tasks (same shape as declaredFootprint). An escape ' +
+            'landing in a peer\'s write-set opens a newly-reported conflict naming that peer.',
+          items: { type: 'object' },
+        },
       },
       required: ['directory'],
     },

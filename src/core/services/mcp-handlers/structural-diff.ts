@@ -29,6 +29,15 @@ import { isGitRepository, resolveBaseRef, validateGitRef, getChangedFiles } from
 import { CallGraphBuilder, serializeCallGraph } from '../../analyzer/call-graph.js';
 import { detectLanguage } from '../../analyzer/signature-extractor.js';
 import { signatureShape } from '../../scip/moniker.js';
+import { readOpenLoreConfig } from '../config-manager.js';
+import { effectivePolicy, classifyFindings } from './enforcement-policy.js';
+import {
+  analyzeEscape,
+  normalizeDeclaredFootprint,
+  type ModifiedSymbol,
+  type EditNature,
+  type DeclaredFootprintInput,
+} from './footprint-escape.js';
 import type { SerializedCallGraph, FunctionNode } from '../../analyzer/call-graph.js';
 
 const execFileAsync = promisify(execFile);
@@ -41,6 +50,21 @@ export interface StructuralDiffInput {
   headRef?: string;
   /** Cap reported items per category (default 200). */
   maxResults?: number;
+  /**
+   * Optional declared write-footprint for the change (proposal-1 `Footprint`
+   * shape, or any subset carrying `writeSet`/`readSet`). When supplied,
+   * `structural_diff` additionally computes the **escape set** — symbols the diff
+   * modified outside the declared write-set — and the conflicts an escape opens
+   * against `peerFootprints`. Absent → behavior is byte-identical to today (the
+   * extension is dormant). OpenLore holds no roster: this is a per-call input.
+   */
+  declaredFootprint?: DeclaredFootprintInput;
+  /**
+   * Optional declared footprints of *other* in-flight tasks. An out-of-scope write
+   * that lands in a peer's write-set is reported as a newly-opened write-write
+   * conflict naming that peer. Ignored unless `declaredFootprint` is also supplied.
+   */
+  peerFootprints?: DeclaredFootprintInput[];
 }
 
 interface InFile { path: string; content: string; language: string }
@@ -275,6 +299,39 @@ export async function handleStructuralDiff(input: StructuralDiffInput): Promise<
     [...sigChangedOut, ...removedOut].flatMap(x => x.staleCallers.map(c => `${c.file}::${c.name}`)),
   ).size;
 
+  // ── Footprint escape detection (add-footprint-escape-detection, proposal 3) ──
+  // Dormant unless the caller supplies a declared write-footprint. When present,
+  // compare the symbols the diff ACTUALLY modified against the declared write-set
+  // and recompute the conflicts an escape opens against supplied peer footprints.
+  let escapeBlock: Record<string, unknown> | undefined;
+  if (input.declaredFootprint) {
+    const oldContent = new Map(oldFiles.map(f => [f.path, f.content]));
+    const newContent = new Map(newFiles.map(f => [f.path, f.content]));
+    const modifiedSymbols = computeModifiedSymbols(pairs, added, removed, oldContent, newContent);
+
+    const declared = normalizeDeclaredFootprint(input.declaredFootprint);
+    const peers = (input.peerFootprints ?? []).map((p, i) => normalizeDeclaredFootprint(p, `peer-${i}`));
+    const analysis = analyzeEscape(modifiedSymbols, declared, peers);
+
+    // Resolve each finding's enforcement class against the repo policy (advisory by
+    // default). structural_diff never blocks — it surfaces what WOULD block so the
+    // harness/gate can act; `gated` is informational here.
+    const policy = effectivePolicy(await readOpenLoreConfig(absDir));
+    const gate = classifyFindings(analysis.findings, policy);
+
+    escapeBlock = {
+      declaredTaskId: analysis.declaredTaskId,
+      summary: analysis.summary,
+      escapes: analysis.escapes.slice(0, limit),
+      newlyOpenedConflicts: analysis.newlyOpenedConflicts.slice(0, limit),
+      registryResolutions: analysis.registryResolutions.slice(0, limit),
+      misDeclaredAppends: analysis.misDeclaredAppends.slice(0, limit),
+      findings: gate.classified.slice(0, limit),
+      gated: gate.gated,
+      disclosure: analysis.disclosure,
+    };
+  }
+
   return {
     base: resolvedBase,
     head: input.headRef ?? 'working tree',
@@ -294,8 +351,69 @@ export async function handleStructuralDiff(input: StructuralDiffInput): Promise<
     renameCandidates: renameCandidates.slice(0, limit),
     edges: { added: addedEdges.slice(0, limit), removed: removedEdges.slice(0, limit) },
     ...(staleCallerNote ? { note: staleCallerNote } : {}),
+    ...(escapeBlock ? { escapeAnalysis: escapeBlock } : {}),
     soundness: diffSoundness(false),
   };
+}
+
+// ── modified-symbol extraction (footprint escape detection) ─────────────────────
+/**
+ * The set of symbols the diff ACTUALLY modified, each tagged with the nature of
+ * the edit. The actual write-footprint of the diff:
+ *   - `added`   — new symbols (in the new graph, unmatched);
+ *   - `removed` — deleted symbols (in the old graph, unmatched);
+ *   - paired symbols whose source slice changed: `pure-addition` (every base line
+ *     preserved in order — a new switch case / registry element) or
+ *     `modifies-existing` (a base line changed or removed).
+ * A paired symbol whose slice is byte-identical (an untouched symbol that only
+ * moved files) is NOT a modification and is omitted. Deterministic.
+ */
+function computeModifiedSymbols(
+  pairs: Array<{ old: FunctionNode; cur: FunctionNode; via: 'stableId' | 'id' }>,
+  added: FunctionNode[],
+  removed: FunctionNode[],
+  oldContent: Map<string, string>,
+  newContent: Map<string, string>,
+): ModifiedSymbol[] {
+  const out: ModifiedSymbol[] = [];
+  for (const n of added) out.push({ id: n.id, name: n.name, filePath: n.filePath, editNature: 'added' });
+  for (const n of removed) out.push({ id: n.id, name: n.name, filePath: n.filePath, editNature: 'removed' });
+  for (const p of pairs) {
+    const oldSrc = sliceSource(oldContent.get(p.old.filePath), p.old.startIndex, p.old.endIndex);
+    const newSrc = sliceSource(newContent.get(p.cur.filePath), p.cur.startIndex, p.cur.endIndex);
+    if (oldSrc === newSrc) continue; // unchanged (possibly only moved) → not a write
+    out.push({
+      id: p.cur.id, name: p.cur.name, filePath: p.cur.filePath,
+      editNature: editNatureOf(oldSrc, newSrc),
+    });
+  }
+  return out;
+}
+
+/** Byte-correct slice of a source string by tree-sitter byte offsets, normalized to LF. */
+function sliceSource(content: string | undefined, startIndex: number, endIndex: number): string {
+  if (content === undefined) return '';
+  const buf = Buffer.from(content, 'utf8');
+  return buf.subarray(startIndex, endIndex).toString('utf8').replace(/\r\n/g, '\n');
+}
+
+/**
+ * Classify a changed symbol's edit as a `pure-addition` (every non-empty base line
+ * survives, in order — only insertions) or `modifies-existing` (a base line was
+ * changed or removed). Lines are trimmed and blank lines dropped so indentation and
+ * spacing noise don't masquerade as a logic change. The subsequence test is the
+ * deterministic equivalent of "git would 3-way-merge this as additions only".
+ */
+function editNatureOf(oldSrc: string, newSrc: string): EditNature {
+  const oldLines = oldSrc.split('\n').map(l => l.trim()).filter(Boolean);
+  const newLines = newSrc.split('\n').map(l => l.trim()).filter(Boolean);
+  if (oldLines.length === 0) return 'pure-addition'; // nothing to clobber
+  // oldLines ⊆ newLines as an in-order subsequence ⇒ only insertions happened.
+  let i = 0;
+  for (let j = 0; j < newLines.length && i < oldLines.length; j++) {
+    if (newLines[j] === oldLines[i]) i++;
+  }
+  return i === oldLines.length ? 'pure-addition' : 'modifies-existing';
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────────

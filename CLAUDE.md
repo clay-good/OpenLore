@@ -13,6 +13,7 @@
 | "Post a deterministic structural review on a PR" (CLI, no MCP/agent) | `openlore review` — composes `structural_diff` + `blast_radius` into a Markdown/JSON briefing; bundled GitHub Action posts it as one sticky comment. Advisory by default; opt-in gating via `blastRadius.block`. No new MCP tool |
 | "What's unreachable / what dies if I delete X?" | `find_dead_code` — cross-language reachability (candidates) |
 | Reviewing a change: structural delta + stale callers | `structural_diff` |
+| "Did my diff escape its declared write-footprint, and what conflict did that open?" | `structural_diff` with an opt-in `declaredFootprint` (+ `peerFootprints`) — the back-side of `plan_parallel_work`: flags symbols modified outside the declared write-set (out-of-scope / read-set-intrusion / scope-creep), names peers an escape newly conflicts with, and verifies declared `append`s against the realized diff. Advisory; opt-in blocking via `enforcement.policy`. No new tool (change: add-footprint-escape-detection) |
 | "What changes together with this / what's volatile?" | `get_change_coupling` — co-change + churn from git |
 | Lay of the land / where do regions connect? | `get_map` (region view; pass a communityId to drill in) |
 | Find the route from A to B (by name, role, or landmark) | `find_path` (cheapest call path + alternates) |

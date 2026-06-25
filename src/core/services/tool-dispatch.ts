@@ -159,9 +159,11 @@ export async function dispatchTool(
       args as { directory: string; ifDeleted?: string; maxResults?: number; filePattern?: string; directResolvedOnly?: boolean; federation?: boolean; federationRepos?: string[] };
     return handleFindDeadCode({ directory, ifDeleted, maxResults, filePattern, directResolvedOnly, federation, federationRepos });
   } else if (name === 'structural_diff') {
-    const { directory, baseRef, headRef, maxResults } =
-      args as { directory: string; baseRef?: string; headRef?: string; maxResults?: number };
-    return handleStructuralDiff({ directory, baseRef, headRef, maxResults });
+    const { directory, baseRef, headRef, maxResults, declaredFootprint, peerFootprints } =
+      args as { directory: string; baseRef?: string; headRef?: string; maxResults?: number;
+        declaredFootprint?: import('./mcp-handlers/footprint-escape.js').DeclaredFootprintInput;
+        peerFootprints?: import('./mcp-handlers/footprint-escape.js').DeclaredFootprintInput[] };
+    return handleStructuralDiff({ directory, baseRef, headRef, maxResults, declaredFootprint, peerFootprints });
   } else if (name === 'get_change_coupling') {
     const { directory, file, limit } = args as { directory: string; file?: string; limit?: number };
     return handleGetChangeCoupling({ directory, file, limit });
