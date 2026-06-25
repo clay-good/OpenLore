@@ -188,6 +188,14 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ### Fixed
 
+- **HTML inline-script extraction is now truly linear on unterminated `<script>` tags.** A file full of
+  unterminated `<script` open tags drove `extractHtmlScripts` into O(N²) — each open tag re-scanned to
+  EOF for a close tag that never came — so a large/generated HTML file could stall `analyze` (measured
+  ~24s on 100k tags; the existing "no quadratic scan" guard was too small to catch it and intermittently
+  flaked CI instead). Once the close-tag search returns "none from here to EOF", no later open tag can
+  have one either, so the scan now stops — restoring O(N) (100k tags: ~24s → ~17ms). Found by the
+  full-product dogfood/CI pass.
+
 - **Provenance `gh` enrichment can no longer hang or flake CI.** `enrichWithGh` short-circuits to
   the empty map when the path is not a git repository (a non-git dir can have no GitHub remote, so
   there is nothing to enrich), and bounds the `gh pr list` subprocess with a hard 10s timeout. This

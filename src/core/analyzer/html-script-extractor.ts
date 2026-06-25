@@ -73,9 +73,11 @@ export function extractHtmlScripts(content: string): string | null {
     // Linear search for the matching close tag — no regex backtracking.
     const closeIdx = lower.indexOf(CLOSE_TAG, bodyStart);
     if (closeIdx === -1) {
-      // No close tag: malformed / not an inline body we can bound. The regex has
-      // already advanced lastIndex past this open tag, so the scan stays O(N).
-      continue;
+      // No close tag from here to EOF. `bodyStart` only increases across iterations,
+      // so no LATER open tag can have a close tag either — stop. (A `continue` here
+      // re-scans to EOF for every remaining open tag → O(N²) on a file full of
+      // unterminated `<script` tags; `break` keeps the whole pass O(N).)
+      break;
     }
 
     if (closeIdx > bodyStart && isInlineJsScript(attrs)) {

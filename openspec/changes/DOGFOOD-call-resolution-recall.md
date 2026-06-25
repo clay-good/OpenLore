@@ -92,6 +92,13 @@ resolved, and the called functions were imported *inside function bodies*, which
 regex skipped. Fixed both; after `analyze --force`: `import` 0 → 102, `name_only` 156 → 58. This also
 makes the language-support registry's Python `imports` claim functional.
 
+**Second bug found + fixed — HTML extractor O(N²).** Widening the "no quadratic scan" guard (a flaky
+`<1s` perf test that reddened CI) exposed that `extractHtmlScripts` is genuinely quadratic on
+unterminated `<script>` tags: each open tag re-scanned to EOF for a never-coming close tag (~24s on 100k
+tags). Fixed by stopping the scan once no close tag remains from the current position to EOF (no later
+open tag can have one) — back to O(N) (~17ms on 100k). A real `analyze`-stall risk on large/generated
+HTML, latent behind a too-small test.
+
 **Minor UX note (not changed):** during `install`, the internal `analyze` prints "Agent config files: not
 generated — re-run with --ai-configs" moments before install's adapter creates `CLAUDE.md`/`AGENTS.md`
 with the managed block. The message is scoped to analyze's `--ai-configs` digest (a different artifact),
