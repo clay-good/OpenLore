@@ -66,6 +66,12 @@ describe('FINDING_CODE_REGISTRY', () => {
     }
     expect(sourceDefaultClass('not-a-real-code')).toBe('advisory');
   });
+  it('registers the footprint-escape codes so a policy can govern them (add-footprint-escape-detection)', () => {
+    for (const code of ['footprint-escape', 'footprint-escape-new-conflict', 'mis-declared-append']) {
+      expect(isKnownFindingCode(code)).toBe(true);
+      expect(FINDING_CODE_REGISTRY[code].source).toBe('footprint-escape');
+    }
+  });
 });
 
 describe('normalizeEnforcementPolicy — tolerant of malformed config', () => {

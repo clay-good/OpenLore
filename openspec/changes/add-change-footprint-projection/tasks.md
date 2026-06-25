@@ -56,9 +56,14 @@
       write to it still can.
 - [x] Unresolved seed → empty footprint + note.
 - [x] Determinism (byte-identical) test.
+- [x] **Adversarial regression set (7 cases, added in PR hardening):** WAW outranks RAW (a true
+      write-write conflict is never downgraded to ordering); the `extraSeedIds` semantic-search seam
+      widens the write-set (and an unresolved candidate is noted); partial resolution still computes a
+      full footprint while noting the bad seed; `readMaxDistance` / `affectedMaxDepth` bound the
+      forward / backward closures; combined `seedFiles` + `seedSymbols` merge and de-duplicate.
 
 ## 6. Verify
-- [x] `npm run lint`, `npm run typecheck`, `npm run test:run` (245 files, 4886 pass / 2 skip),
+- [x] `npm run lint`, `npm run typecheck`, `npm run test:run` (245 files, 4893 pass / 2 skip),
       `npm run build` — all green.
 - [x] No new MCP tool registered; `tool-contract.test.ts` unaffected (this proposal adds no tool).
 

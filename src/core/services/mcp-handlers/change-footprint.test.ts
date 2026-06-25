@@ -149,6 +149,76 @@ describe('computeFootprint — three regions', () => {
     const b = computeFootprint(g, { id: 't1', seedSymbols: ['a.ts::main'] });
     expect(JSON.stringify(a)).toBe(JSON.stringify(b));
   });
+
+  it('merges seedFiles and seedSymbols and de-duplicates an overlapping seed', () => {
+    const g = chainGraph();
+    // the file seed pulls in every symbol; the symbol seed names one already in it.
+    const f = computeFootprint(g, { id: 't1', seedFiles: ['a.ts'], seedSymbols: ['a.ts::main'] });
+    const ids = f.writeSet.map(w => w.id);
+    expect(ids.sort()).toEqual(['a.ts::entry', 'a.ts::main', 'a.ts::greet', 'a.ts::emit'].sort());
+    // 'a.ts::main' came from both seeds but appears exactly once (Set-deduped write-set).
+    expect(ids.filter(id => id === 'a.ts::main')).toHaveLength(1);
+  });
+
+  it('partial resolution: a real footprint is still computed and the bad seed is noted', () => {
+    const g = chainGraph();
+    const f = computeFootprint(g, { id: 't1', seedSymbols: ['a.ts::main', 'a.ts::ghost'] });
+    // the good seed produces a full footprint...
+    expect(f.writeSet.map(w => w.id)).toEqual(['a.ts::main']);
+    expect(f.readSet).toEqual(['a.ts::greet', 'a.ts::emit'].sort());
+    expect(f.affectedSet).toEqual(['a.ts::entry']);
+    // ...AND the unresolved seed is still disclosed (not the empty-footprint short-circuit).
+    expect(f.unresolvedSeeds).toEqual(['a.ts::ghost']);
+  });
+
+  it('widens the write-set via the caller-injected extraSeedIds seam (proposal-2 semantic search)', () => {
+    const g = chainGraph();
+    // The core never searches; the caller resolves `intent` to candidate ids and injects them here.
+    const f = computeFootprint(
+      g,
+      { id: 't1', seedSymbols: ['a.ts::main'], intent: 'greeting path' },
+      { extraSeedIds: ['a.ts::greet'] },
+    );
+    expect(f.writeSet.map(w => w.id).sort()).toEqual(['a.ts::greet', 'a.ts::main'].sort());
+    // a symbol promoted into the write-set is no longer counted as "read".
+    expect(f.readSet).not.toContain('a.ts::greet');
+    expect(f.readSet).toEqual(['a.ts::emit']);
+  });
+
+  it('an unresolved extraSeedId is disclosed under unresolvedSeeds', () => {
+    const g = chainGraph();
+    const f = computeFootprint(
+      g,
+      { id: 't1', seedSymbols: ['a.ts::main'] },
+      { extraSeedIds: ['a.ts::ghostCandidate'] },
+    );
+    expect(f.writeSet.map(w => w.id)).toEqual(['a.ts::main']);
+    expect(f.unresolvedSeeds).toEqual(['a.ts::ghostCandidate']);
+  });
+
+  it('readMaxDistance bounds the forward read closure', () => {
+    // linear chain n1 → n2 → n3 → n4, all import edges (cost 1 each).
+    const g = graph(
+      [node({ id: 'c.ts::n1' }), node({ id: 'c.ts::n2' }), node({ id: 'c.ts::n3' }), node({ id: 'c.ts::n4' })],
+      [edge('c.ts::n1', 'c.ts::n2'), edge('c.ts::n2', 'c.ts::n3'), edge('c.ts::n3', 'c.ts::n4')],
+    );
+    const tight = computeFootprint(g, { id: 't1', seedSymbols: ['c.ts::n1'] }, { readMaxDistance: 2 });
+    expect(tight.readSet).toEqual(['c.ts::n2', 'c.ts::n3']); // n4 is at distance 3, excluded
+    const wide = computeFootprint(g, { id: 't1', seedSymbols: ['c.ts::n1'] }, { readMaxDistance: 6 });
+    expect(wide.readSet).toEqual(['c.ts::n2', 'c.ts::n3', 'c.ts::n4']);
+  });
+
+  it('affectedMaxDepth bounds the backward affected closure', () => {
+    // linear chain n1 → n2 → n3 → n4; affected(n4) walks backward through callers.
+    const g = graph(
+      [node({ id: 'c.ts::n1' }), node({ id: 'c.ts::n2' }), node({ id: 'c.ts::n3' }), node({ id: 'c.ts::n4' })],
+      [edge('c.ts::n1', 'c.ts::n2'), edge('c.ts::n2', 'c.ts::n3'), edge('c.ts::n3', 'c.ts::n4')],
+    );
+    const shallow = computeFootprint(g, { id: 't1', seedSymbols: ['c.ts::n4'] }, { affectedMaxDepth: 1 });
+    expect(shallow.affectedSet).toEqual(['c.ts::n3']); // only the direct caller
+    const deep = computeFootprint(g, { id: 't1', seedSymbols: ['c.ts::n4'] }, { affectedMaxDepth: 3 });
+    expect(deep.affectedSet).toEqual(['c.ts::n1', 'c.ts::n2', 'c.ts::n3'].sort());
+  });
 });
 
 describe('computeFootprint — coupling neighbors', () => {
@@ -260,6 +330,17 @@ describe('classifyHazard', () => {
     const a = fp('A', [{ id: 'reg.ts::REG', mode: 'append' }, { id: 'p.ts::prod' }]);
     const b = fp('B', [{ id: 'reg.ts::REG', mode: 'append' }], { readSet: ['p.ts::prod'] });
     expect(classifyHazard(a, b).kind).toBe('RAW');
+  });
+
+  it('WAW outranks RAW: a true write-write conflict is never downgraded to ordering', () => {
+    // A and B both modify `shared` (WAW), AND B writes `x` that A reads (would be RAW alone).
+    // The strongest hazard must win — scheduling these as a mere ordering dependency would
+    // let a real conflict run concurrently.
+    const a = fp('A', [{ id: 's.ts::shared' }], { readSet: ['s.ts::x'] });
+    const b = fp('B', [{ id: 's.ts::shared' }, { id: 's.ts::x' }]);
+    const v = classifyHazard(a, b);
+    expect(v.kind).toBe('WAW');
+    expect(v.witnesses).toEqual(['s.ts::shared']);
   });
 
   it('WAR: same file, disjoint symbols is low-risk, not WAW', () => {

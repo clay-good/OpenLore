@@ -7,7 +7,9 @@
 > no graph-schema change, no LLM, no runtime.
 >
 > Implementation: `src/core/services/mcp-handlers/change-footprint.ts` (+ co-located
-> `change-footprint.test.ts`, 24 cases). The decision is captured in the `## Decision` section below
+> `change-footprint.test.ts`, 31 cases — 24 spec-scenario tests plus 7 adversarial regression tests
+> covering WAW-over-RAW precedence, the `extraSeedIds` semantic-search seam, partial seed resolution,
+> the distance/depth overrides, and combined file+symbol seeds). The decision is captured in the `## Decision` section below
 > and recorded through the commit-time decisions gate (the `record_decision` MCP tool is not in this
 > session's lean tool surface). Dogfood verification: `DOGFOOD-change-footprint-projection.md`.
 
