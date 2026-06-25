@@ -403,4 +403,253 @@ describe('contract + determinism', () => {
     const res = await computeInterferenceMap({ directory: '/p' }, providers({}));
     expect(res).toHaveProperty('error');
   });
+
+  it('an empty repo (no branches/PRs/tasks) returns a clean empty map', async () => {
+    const map = await run({ directory: '/p', includePullRequests: false }, providers({}));
+    expect(map.assessedCount).toBe(0);
+    expect(map.conflicts).toEqual([]);
+    expect(map.headline).toMatch(/No in-flight changes assessed/);
+  });
+});
+
+// ====================================================================
+// Adversarial regression set (bug fixes from PR #202 review)
+// ====================================================================
+
+describe('adversarial — diff parsing', () => {
+  // C1 (critical): a deleted line whose CONTENT starts with dashes (SQL `-- comment`,
+  // a Markdown `---` rule, a row of `------`) must still count as a deletion. The old
+  // `!startsWith('---')` guard silently downgraded a real WAW to a "safe" shared-append.
+  it('classifies a deleted dash-leading line as a deletion, not an append', () => {
+    const patch = [
+      'diff --git a/q.sql b/q.sql',
+      '--- a/q.sql',
+      '+++ b/q.sql',
+      '@@ -3,1 +3,1 @@',
+      '--- old SQL comment',   // a deleted line whose content is "-- old SQL comment"
+      '+-- new SQL comment',
+    ].join('\n');
+    const files = parseUnifiedDiff(patch);
+    expect(files[0].hunks[0].hasDeletions).toBe(true);
+  });
+
+  it('a deleted row of dashes and a deleted markdown rule both count as deletions', () => {
+    const patch = [
+      'diff --git a/r.md b/r.md',
+      '--- a/r.md',
+      '+++ b/r.md',
+      '@@ -1,2 +1,1 @@',
+      '------',   // deleting a line of dashes
+      '----',     // deleting a markdown-ish rule
+      '+kept',
+    ].join('\n');
+    expect(parseUnifiedDiff(patch)[0].hunks[0].hasDeletions).toBe(true);
+  });
+
+  it('an added line whose content starts with +++ is not mistaken for a file header', () => {
+    const patch = [
+      'diff --git a/c.cpp b/c.cpp',
+      '--- a/c.cpp',
+      '+++ b/c.cpp',
+      '@@ -5,0 +6,1 @@',
+      '+++counter; // pure insertion',
+    ].join('\n');
+    const f = parseUnifiedDiff(patch)[0];
+    expect(f.path).toBe('c.cpp');               // path not corrupted by the body line
+    expect(f.hunks[0].hasDeletions).toBe(false); // pure insertion → append
+  });
+
+  it('a dash-deleted symbol makes two changes WAW (must serialize), not shared-append', () => {
+    const symbols = new Map<string, BaseSymbol[]>([['q.sql', [baseSym('q.sql::query', 1, 20)]]]);
+    const patch = [
+      'diff --git a/q.sql b/q.sql', '--- a/q.sql', '+++ b/q.sql',
+      '@@ -5,1 +5,1 @@', '--- old', '+-- new',
+    ].join('\n');
+    const ws = writeSetFromHunks(parseUnifiedDiff(patch), symbols);
+    expect(ws[0].writeMode).toBe('modify');
+  });
+});
+
+describe('adversarial — nested symbols (m6)', () => {
+  it('attributes an edit inside a nested function to the innermost symbol only', () => {
+    const symbols = new Map<string, BaseSymbol[]>([
+      ['n.ts', [baseSym('n.ts::outer', 1, 30), baseSym('n.ts::inner', 10, 15)]],
+    ]);
+    const hunk: FileHunks[] = [{ path: 'n.ts', status: 'modified', hunks: [modifyHunk(12, 1)] }];
+    const ws = writeSetFromHunks(hunk, symbols);
+    expect(ws.map(w => w.id)).toEqual(['n.ts::inner']); // NOT also outer → no spurious WAW
+  });
+
+  it('a hunk spanning two symbols still attributes to both (genuine breadth)', () => {
+    const symbols = new Map<string, BaseSymbol[]>([
+      ['n.ts', [baseSym('n.ts::f1', 1, 10), baseSym('n.ts::f2', 11, 20)]],
+    ]);
+    const hunk: FileHunks[] = [{ path: 'n.ts', status: 'modified', hunks: [modifyHunk(8, 6)] }];
+    expect(writeSetFromHunks(hunk, symbols).map(w => w.id).sort()).toEqual(['n.ts::f1', 'n.ts::f2']);
+  });
+});
+
+describe('adversarial — hazard classes beyond WAW', () => {
+  it('reports RAW with a direction when one change writes what another reads', async () => {
+    // home graph: cons.ts::consumer → prod.ts::producer (a call edge = a read seam).
+    const writeProducer = change({
+      ref: 'feat-producer', actor: 'Alice', repo: 'this-repo', kind: 'branch',
+      files: [{ path: 'prod.ts', status: 'modified', hunks: [modifyHunk(2, 3)] }],
+      baseSymbolsByFile: new Map([['prod.ts', [baseSym('prod.ts::producer', 1, 10)]]]),
+    });
+    const writeConsumer = change({
+      ref: 'feat-consumer', actor: 'Bob', repo: 'this-repo', kind: 'branch',
+      files: [{ path: 'cons.ts', status: 'modified', hunks: [modifyHunk(2, 3)] }],
+      baseSymbolsByFile: new Map([['cons.ts', [baseSym('cons.ts::consumer', 1, 10)]]]),
+    });
+    const map = await run(
+      { directory: '/p', includePullRequests: false },
+      providers({ branchesByRepo: { 'this-repo': [writeProducer, writeConsumer] } }),
+    );
+    const raw = map.conflicts.find(c => c.hazard === 'RAW');
+    expect(raw).toBeDefined();
+    expect(raw!.direction).toBeDefined();
+    expect(raw!.suggestion).toMatch(/before/);
+    // RAW is an ordering hazard, not a hard conflict → no WAW finding.
+    expect(map.findingCount).toBe(0);
+  });
+
+  it('reports WAR (low risk) for disjoint symbols in the same file — no WAW finding', async () => {
+    const a = change({
+      ref: 'feat-f1', actor: 'Alice', repo: 'this-repo', kind: 'branch',
+      files: [{ path: 'multi.ts', status: 'modified', hunks: [modifyHunk(2, 3)] }],
+      baseSymbolsByFile: new Map([['multi.ts', [baseSym('multi.ts::f1', 1, 10)]]]),
+    });
+    const b = change({
+      ref: 'feat-f2', actor: 'Bob', repo: 'this-repo', kind: 'branch',
+      files: [{ path: 'multi.ts', status: 'modified', hunks: [modifyHunk(13, 3)] }],
+      baseSymbolsByFile: new Map([['multi.ts', [baseSym('multi.ts::f2', 11, 20)]]]),
+    });
+    const map = await run(
+      { directory: '/p', includePullRequests: false },
+      providers({ branchesByRepo: { 'this-repo': [a, b] } }),
+    );
+    expect(map.conflicts[0]?.hazard).toBe('WAR');
+    expect(map.findingCount).toBe(0);
+  });
+
+  it('reports soft-coupling when write-set files co-change with no call edge', async () => {
+    const cg = graph([node({ id: 'x.ts::fx' }), node({ id: 'y.ts::fy' })]);
+    vi.mocked(readCachedContext).mockResolvedValue({
+      callGraph: cg,
+      edgeStore: { getChangeCouplingForFiles: (files: string[]) =>
+        files.includes('x.ts') ? [{ filePath: 'x.ts', churn: 9, coupledWith: [{ file: 'y.ts', support: 5, confidence: 0.8 }] }] : [] },
+    } as never);
+    const a = change({
+      ref: 'feat-x', actor: 'Alice', repo: 'this-repo', kind: 'branch',
+      files: [{ path: 'x.ts', status: 'modified', hunks: [modifyHunk(2, 2)] }],
+      baseSymbolsByFile: new Map([['x.ts', [baseSym('x.ts::fx', 1, 10)]]]),
+    });
+    const b = change({
+      ref: 'feat-y', actor: 'Bob', repo: 'this-repo', kind: 'branch',
+      files: [{ path: 'y.ts', status: 'modified', hunks: [modifyHunk(2, 2)] }],
+      baseSymbolsByFile: new Map([['y.ts', [baseSym('y.ts::fy', 1, 10)]]]),
+    });
+    const map = await run(
+      { directory: '/p', includePullRequests: false },
+      providers({ branchesByRepo: { 'this-repo': [a, b] } }),
+    );
+    expect(map.conflicts[0]?.hazard).toBe('soft-coupling');
+  });
+});
+
+describe('adversarial — caps, honesty, cross-repo file paths', () => {
+  it('labels (does not silently drop) changes beyond the maxChanges cap', async () => {
+    const mk = (ref: string) => change({
+      ref, actor: 'X', repo: 'this-repo', kind: 'branch',
+      files: [{ path: 'a.ts', status: 'modified', hunks: [modifyHunk(4, 2)] }],
+      baseSymbolsByFile: new Map([['a.ts', [baseSym('a.ts::foo', 1, 10)]]]),
+    });
+    const map = await run(
+      { directory: '/p', includePullRequests: false, maxChanges: 1 },
+      providers({ branchesByRepo: { 'this-repo': [mk('b1'), mk('b2'), mk('b3')] } }),
+    );
+    expect(map.assessedCount + map.notAssessedCount).toBe(1);
+    expect(map.caveats.some(c => /capped at 1/.test(c))).toBe(true);
+  });
+
+  it('truncates the evidence lists with authoritative uncapped counts on a huge map', async () => {
+    // 22 branches all modifying foo → 231 WAW pairs > the 200 conflict / 100 finding caps.
+    const many = Array.from({ length: 22 }, (_, i) => change({
+      ref: `b${String(i).padStart(2, '0')}`, actor: 'X', repo: 'this-repo', kind: 'branch',
+      files: [{ path: 'a.ts', status: 'modified', hunks: [modifyHunk(4, 2)] }],
+      baseSymbolsByFile: new Map([['a.ts', [baseSym('a.ts::foo', 1, 10)]]]),
+    }));
+    const map = await run(
+      { directory: '/p', includePullRequests: false, maxChanges: 40 },
+      providers({ branchesByRepo: { 'this-repo': many } }),
+    );
+    expect(map.conflictCount).toBe(231);          // authoritative, uncapped
+    expect(map.conflicts.length).toBeLessThanOrEqual(200);
+    expect(map.conflictsTruncated).toBe(true);
+    expect(map.findingsTruncated).toBe(true);
+  });
+
+  it('does NOT raise a cross-repo WAR for two repos sharing a relative file path', async () => {
+    // Same relative path src/index.ts in both repos, disjoint symbols, no shared stable id.
+    const cgA = graph([node({ id: 'src/index.ts::a', startLine: 1, endLine: 10, stableId: 'SID-a' })]);
+    const cgB = graph([node({ id: 'src/index.ts::b', startLine: 1, endLine: 10, stableId: 'SID-b' })]);
+    vi.mocked(readCachedContext).mockImplementation(async (dir: string) =>
+      (dir === '/repoB' ? { callGraph: cgB } : { callGraph: cgA }) as never);
+    vi.mocked(handleSpecStoreStatus).mockResolvedValue({
+      bound: true, targets: [{ name: 'B', resolved: true, state: 'indexed', path: '/repoB' }],
+    } as never);
+    const branchA = change({
+      ref: 'feat-a', actor: 'Alice', repo: 'this-repo', kind: 'branch',
+      files: [{ path: 'src/index.ts', status: 'modified', hunks: [modifyHunk(2, 2)] }],
+      baseSymbolsByFile: new Map([['src/index.ts', [baseSym('src/index.ts::a', 1, 10, 'SID-a')]]]),
+    });
+    const prB = change({
+      ref: 'PR #5', actor: 'Bob', repo: 'B', kind: 'pull-request',
+      files: [{ path: 'src/index.ts', status: 'modified', hunks: [modifyHunk(2, 2)] }],
+      baseSymbolsByFile: new Map([['src/index.ts', [baseSym('src/index.ts::b', 1, 10, 'SID-b')]]]),
+    });
+    const map = await run(
+      { directory: '/p', federation: true },
+      providers({ branchesByRepo: { 'this-repo': [branchA] }, prsByRepo: { B: [prB] }, gh: true }),
+    );
+    // Different stable ids + namespaced file paths → no cross-repo conflict at all.
+    expect(map.conflicts.filter(c => c.crossRepo)).toEqual([]);
+  });
+
+  it('discloses the signature-shape homonym risk on any cross-repo conflict', async () => {
+    const cgA = graph([node({ id: 'a.ts::run', startLine: 1, endLine: 10, stableId: 'SID-run' })]);
+    const cgB = graph([node({ id: 'b.ts::run', startLine: 1, endLine: 10, stableId: 'SID-run' })]);
+    vi.mocked(readCachedContext).mockImplementation(async (dir: string) =>
+      (dir === '/repoB' ? { callGraph: cgB } : { callGraph: cgA }) as never);
+    vi.mocked(handleSpecStoreStatus).mockResolvedValue({
+      bound: true, targets: [{ name: 'B', resolved: true, state: 'indexed', path: '/repoB' }],
+    } as never);
+    const branchA = change({
+      ref: 'feat-a', actor: 'Alice', repo: 'this-repo', kind: 'branch',
+      files: [{ path: 'a.ts', status: 'modified', hunks: [modifyHunk(2, 2)] }],
+      baseSymbolsByFile: new Map([['a.ts', [baseSym('a.ts::run', 1, 10, 'SID-run')]]]),
+    });
+    const prB = change({
+      ref: 'PR #6', actor: 'Bob', repo: 'B', kind: 'pull-request',
+      files: [{ path: 'b.ts', status: 'modified', hunks: [modifyHunk(2, 2)] }],
+      baseSymbolsByFile: new Map([['b.ts', [baseSym('b.ts::run', 1, 10, 'SID-run')]]]),
+    });
+    const map = await run(
+      { directory: '/p', federation: true },
+      providers({ branchesByRepo: { 'this-repo': [branchA] }, prsByRepo: { B: [prB] }, gh: true }),
+    );
+    expect(map.conflicts.some(c => c.crossRepo && c.hazard === 'WAW')).toBe(true);
+    expect(map.caveats.some(c => /homonym|name and arity|signature/i.test(c))).toBe(true);
+  });
+
+  it('caveats (degrades to this-repo) when federation is requested but unbound', async () => {
+    vi.mocked(handleSpecStoreStatus).mockResolvedValue({ bound: false } as never);
+    const map = await run(
+      { directory: '/p', includeBranches: false, includePullRequests: false, federation: true },
+      providers({}),
+    );
+    expect(map.repos).toEqual(['this-repo']);
+    expect(map.caveats.some(c => /no resolvable spec-store targets/i.test(c))).toBe(true);
+  });
 });

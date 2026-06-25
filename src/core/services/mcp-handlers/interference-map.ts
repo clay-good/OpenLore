@@ -217,6 +217,31 @@ export function parseUnifiedDiff(patch: string): FileHunks[] {
       continue;
     }
     if (!cur) continue;
+    // A hunk header always starts a new hunk. Checked BEFORE the body-line branch so a
+    // `@@` is never mistaken for content.
+    const hm = HUNK_HEADER.exec(line);
+    if (hm) {
+      closeHunk();
+      curHunk = {
+        oldStart: parseInt(hm[1], 10),
+        oldCount: hm[2] === undefined ? 1 : parseInt(hm[2], 10),
+        hasDeletions: false,
+      };
+      continue;
+    }
+    if (curHunk) {
+      // Inside a hunk: classify the body line by its FIRST CHARACTER only. The `---`/`+++`
+      // file headers can only appear before the first hunk, so a body line starting with
+      // `-` is always a deletion — even when its CONTENT begins with dashes (a deleted SQL
+      // `-- comment`, a Markdown `---` rule, a row of `------`). Guarding `!startsWith('---')`
+      // here was a real bug: it silently downgraded a write-write conflict to a "safe"
+      // shared-append for any diff that deletes a dash-leading line.
+      if (line.startsWith('-')) curHunk.hasDeletions = true;
+      continue;
+    }
+    // File-header region (before the first hunk): status + path metadata. These prefixes
+    // are only meaningful here, so an added/deleted body line that happens to spell `--- `
+    // or `+++ ` later cannot reach this block.
     if (line.startsWith('new file mode')) { cur.status = 'added'; continue; }
     if (line.startsWith('deleted file mode')) { cur.status = 'deleted'; continue; }
     if (line.startsWith('rename from ')) { cur.status = 'renamed'; cur.oldPath = line.slice('rename from '.length).trim(); continue; }
@@ -231,20 +256,6 @@ export function parseUnifiedDiff(patch: string): FileHunks[] {
       const p = line.slice(4).trim();
       if (p === '/dev/null') cur.status = 'deleted';
       else if (p.startsWith('b/')) cur.path = p.slice(2);
-      continue;
-    }
-    const hm = HUNK_HEADER.exec(line);
-    if (hm) {
-      closeHunk();
-      curHunk = {
-        oldStart: parseInt(hm[1], 10),
-        oldCount: hm[2] === undefined ? 1 : parseInt(hm[2], 10),
-        hasDeletions: false,
-      };
-      continue;
-    }
-    if (curHunk && line.startsWith('-') && !line.startsWith('---')) {
-      curHunk.hasDeletions = true;
     }
   }
   closeFile();
@@ -268,10 +279,24 @@ export interface FederatedWriteMember extends WriteMember {
   stableId?: string;
 }
 
-/** Symbols whose line range intersects the hunk's old-side span. */
+/**
+ * The symbol(s) a hunk's old-side span touches. When the whole hunk fits inside one or
+ * more symbols, attribute it to the NARROWEST (innermost) one — so an edit to a nested
+ * helper or closure is charged to the helper, not also to its enclosing function (which
+ * would inflate the write-set and manufacture a false WAW against a change that only
+ * touched the outer body). When the hunk spans beyond any single symbol (a large edit
+ * crossing function boundaries, or module-level lines), fall back to every symbol it
+ * intersects — that breadth is genuine.
+ */
 function symbolsForHunk(h: DiffHunk, symbols: readonly BaseSymbol[]): BaseSymbol[] {
   const lo = h.oldStart;
   const hi = h.oldStart + Math.max(h.oldCount, 1) - 1;
+  const containing = symbols.filter(s => s.startLine <= lo && hi <= s.endLine);
+  if (containing.length > 0) {
+    let best = containing[0];
+    for (const s of containing) if (s.endLine - s.startLine < best.endLine - best.startLine) best = s;
+    return [best];
+  }
   return symbols.filter(s => s.startLine <= hi && lo <= s.endLine);
 }
 
@@ -326,17 +351,22 @@ function footprintForChange(
 
 // ── conflict graph (pure) ───────────────────────────────────────────────────
 
-/** Project a footprint's write-set onto content-addressed stable ids for cross-repo matching. */
-function projectToStableIds(fp: Footprint, stableByNodeId: Map<string, string>): Footprint {
+/**
+ * Project a footprint's write-set onto content-addressed stable ids for cross-repo
+ * matching. `filePath` is namespaced by repo so the WAR fallback in `classifyHazard`
+ * (which intersects file paths) can NEVER fire across a repo boundary on a coincidental
+ * same-relative-path (`src/index.ts` exists in both repos) — cross-repo file identity is
+ * meaningless without content addressing. Cross-repo reachability is the federation
+ * resolver's separate job, so reach regions are left empty (no cross-repo RAW).
+ */
+function projectToStableIds(fp: Footprint, repo: string, stableByNodeId: Map<string, string>): Footprint {
   const writeSet = fp.writeSet
     .map(w => {
       const sid = stableByNodeId.get(w.id);
-      return sid ? { ...w, id: sid } : null;
+      return sid ? { ...w, id: sid, filePath: `${repo} ${w.filePath}` } : null;
     })
     .filter((w): w is WriteMember => w !== null)
     .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-  // Cross-repo reachability is the federation resolver's separate job; we match
-  // write-sets (WAW / shared-append) by stable id and leave reach regions empty.
   return { ...fp, writeSet, readSet: [], ambientReadDeps: [], affectedSet: [], couplingNeighbors: [] };
 }
 
@@ -440,11 +470,25 @@ async function buildBaseSymbols(
   return out;
 }
 
+/**
+ * The base ref to diff against WITHIN a given repo. The caller resolves the base
+ * against the home repo, but that ref/SHA may not exist in a federated target — so
+ * re-resolve it per repo (main → master → HEAD~1) when it doesn't verify locally,
+ * rather than letting every `merge-base` fail and silently skip the target's branches.
+ */
+async function resolveRepoBase(repoPath: string, baseRef: string): Promise<string> {
+  try { await git(repoPath, ['rev-parse', '--verify', baseRef]); return baseRef; } catch { /* re-resolve below */ }
+  try {
+    const { resolveBaseRef } = await import('../../drift/git-diff.js');
+    return await resolveBaseRef(repoPath, 'auto');
+  } catch { return baseRef; }
+}
+
 /** Default provider: enumerate local branches ahead of base via git. */
 async function defaultEnumerateBranches(
   repoPath: string,
   repoName: string,
-  baseRef: string,
+  baseRefIn: string,
   only?: string[],
 ): Promise<RawChange[]> {
   let names: string[];
@@ -454,6 +498,7 @@ async function defaultEnumerateBranches(
   } catch {
     return [];
   }
+  const baseRef = await resolveRepoBase(repoPath, baseRefIn);
   const wanted = only && only.length > 0 ? new Set(only) : null;
   const out: RawChange[] = [];
   for (const branch of names.sort()) {
@@ -482,7 +527,7 @@ interface GhPr { number: number; headRefName: string; author?: { login?: string 
 async function defaultEnumeratePullRequests(
   repoPath: string,
   repoName: string,
-  baseRef: string,
+  baseRefIn: string,
 ): Promise<RawChange[]> {
   let prs: GhPr[];
   try {
@@ -491,6 +536,7 @@ async function defaultEnumeratePullRequests(
   } catch {
     return []; // gh absent / not a GitHub remote → no PRs (the caller adds a caveat)
   }
+  const baseRef = await resolveRepoBase(repoPath, baseRefIn);
   const out: RawChange[] = [];
   for (const pr of prs.sort((a, b) => a.number - b.number)) {
     const ref = `PR #${pr.number}`;
@@ -688,9 +734,11 @@ export async function computeInterferenceMap(
 
   // ── 3. Agent task descriptors join as first-class nodes (home repo) ─────────
   const home = repos[0];
+  let cappedTasks = 0;
+  let malformedTasks = 0;
   for (const t of input.tasks ?? []) {
-    if (assessed.length + notAssessed.length >= maxChanges) break;
-    if (!t || typeof t.id !== 'string' || t.id.length === 0) continue;
+    if (assessed.length + notAssessed.length >= maxChanges) { cappedTasks++; continue; }
+    if (!t || typeof t.id !== 'string' || t.id.length === 0) { malformedTasks++; continue; }
     const hasSeed = (t.seedSymbols && t.seedSymbols.length > 0) || (t.seedFiles && t.seedFiles.length > 0);
     if (!hasSeed) {
       notAssessed.push({ actor: 'agent', ref: t.id, repo: home.name, kind: 'agent-task', assessed: false, reason: 'no-resolvable-symbols', detail: 'task descriptor has no seedSymbols or seedFiles' });
@@ -710,6 +758,8 @@ export async function computeInterferenceMap(
       stableByNodeId,
     });
   }
+  if (cappedTasks > 0) caveats.push(`${cappedTasks} supplied task(s) were not assessed because the ${maxChanges}-change cap was reached (raise maxChanges to widen).`);
+  if (malformedTasks > 0) caveats.push(`${malformedTasks} supplied task descriptor(s) were skipped for a missing/invalid id.`);
 
   // ── 4. Pairwise hazard classification across all assessed nodes ─────────────
   const conflicts: InterferenceConflict[] = [];
@@ -726,9 +776,8 @@ export async function computeInterferenceMap(
       const nameByWitnessId = new Map<string, string>();
       if (crossRepo) {
         // Match by content-addressed stable id across the repo boundary.
-        const merged = new Map<string, string>([...A.stableByNodeId, ...B.stableByNodeId]);
-        const projA = projectToStableIds(A.footprint, merged);
-        const projB = projectToStableIds(B.footprint, merged);
+        const projA = projectToStableIds(A.footprint, A.node.repo, A.stableByNodeId);
+        const projB = projectToStableIds(B.footprint, B.node.repo, B.stableByNodeId);
         for (const w of [...projA.writeSet, ...projB.writeSet]) nameByWitnessId.set(w.id, w.name);
         v = classifyHazard(projA, projB);
       } else {
@@ -762,6 +811,9 @@ export async function computeInterferenceMap(
   findings.sort((a, b) => (a.subject < b.subject ? -1 : a.subject > b.subject ? 1 : a.message < b.message ? -1 : a.message > b.message ? 1 : 0));
   const changes = [...assessed.map(a => a.node), ...notAssessed].sort(changeOrder);
 
+  if (conflicts.some(c => c.crossRepo)) {
+    caveats.push('Cross-repo conflicts are matched by content-addressed stable id (qualified name + parameter shape, no file path or body), the same identity model federation uses. Two genuinely different symbols that share a name and arity across repos could collide — confirm a cross-repo witness names the same logical symbol before acting.');
+  }
   if (anyGh) {
     caveats.push('PR diffs are read against the LOCAL base ref; if a PR\'s base has advanced past local, its hunk line mapping is approximate. Re-fetch the base for an exact result.');
   }

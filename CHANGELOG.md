@@ -7,6 +7,20 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ### Added
 
+- **`map_in_flight_conflicts` — cross-actor interference map** (PARALLEL-WORK proposal 4). The team
+  version of `plan_parallel_work`: instead of a caller-supplied task list it harvests every change in
+  flight — local branches (git), open PRs (`gh`), and any supplied agent task descriptors — as
+  actor-attributed nodes and runs the shared hazard classifier across all of them. Each footprint is
+  derived from the change's ACTUAL diff: hunks map to the enclosing symbols of a re-parsed base
+  snapshot, and the per-symbol `writeMode` is read off the hunks (`append` iff pure-insertion, else
+  `modify`), so two PRs appending disjoint entries to the same dispatcher resolve to `shared-append`,
+  not a false WAW — with no `writeMode` declaration. A change whose diff can't be fetched or whose
+  symbols don't resolve is labeled "not assessed", never a false "no conflict". Read-only and stateless
+  (no watcher/poll/persisted store); opt-in `federation` matches in-flight changes across repository
+  boundaries by content-addressed stable id. Advisory; WAW pairs emit the policy-governable
+  `cross-actor-conflict` finding a CI check can gate on. In the opt-in `coordination` and `federation`
+  presets (not the lean default). Full surface count 63 → 64.
+
 - **Index integrity attestation** — `analyze` now writes `.openlore/analysis/index-attestation.json`
   (schema version, committed production counts, content digest) deterministically. On load the
   persisted graph index is reconciled against it into a `healthy | degraded | mismatched` verdict:

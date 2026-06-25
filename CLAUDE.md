@@ -35,7 +35,7 @@ For all other cases (reading a file, grepping, listing files) use native tools d
 
 > **The default MCP surface is lean (change `default-to-lean-tool-surface`):** a bare
 > `openlore mcp` / `openlore install` wires the 10-tool `navigation` preset — the Spec 14
-> benchmark winner — not all 63 tools. Breadth is opt-in: `--minimal` (governance core),
+> benchmark winner — not all 64 tools. Breadth is opt-in: `--minimal` (governance core),
 > `--preset memory` / `verify` / `federation` / `coordination`, or the full surface via `--preset full`
 > (`--all-tools`). The decisions-gate workflow below needs `record_decision`, which is **not**
 > in the lean default — install with `--preset full` (or `--minimal`) on repos that gate commits.

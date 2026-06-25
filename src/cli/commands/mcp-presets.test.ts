@@ -49,6 +49,16 @@ describe('MCP tool presets', () => {
     }
   });
 
+  // change: add-cross-actor-interference-map — map_in_flight_conflicts is opt-in via the
+  // `coordination` AND `federation` presets; it must NOT leak into lean/minimal/memory.
+  it('map_in_flight_conflicts is in coordination + federation only, never lean/minimal/memory', () => {
+    expect(selectActiveTools(TOOL_DEFINITIONS, { preset: 'coordination' }).map(t => t.name)).toContain('map_in_flight_conflicts');
+    expect(selectActiveTools(TOOL_DEFINITIONS, { preset: 'federation' }).map(t => t.name)).toContain('map_in_flight_conflicts');
+    for (const sel of [{}, { minimal: true }, { preset: 'memory' }, { preset: 'navigation' }, { preset: 'verify' }] as const) {
+      expect(selectActiveTools(TOOL_DEFINITIONS, sel).map(t => t.name)).not.toContain('map_in_flight_conflicts');
+    }
+  });
+
   // Guard: the user-facing `--minimal` help text must match the actual preset — it
   // drifted to "5 tools" once after get_health_map was added to the 6-tool set.
   it('the --minimal help text matches the minimal preset (count + every member named)', () => {

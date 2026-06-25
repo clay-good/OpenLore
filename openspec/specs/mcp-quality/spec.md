@@ -134,7 +134,7 @@ constrains.
 #### Scenario: Lean default is the out-of-box surface
 - **GIVEN** a new user who installs the server the documented way (`openlore install`, or a bare `openlore mcp`)
 - **WHEN** the active tool surface is resolved
-- **THEN** they get the lean, high-signal `navigation` surface (10 tools) without the full registry of 62 tools
+- **THEN** they get the lean, high-signal `navigation` surface (10 tools) without the full registry of 64 tools
 - **AND** the docs explain how to expand to the full set (`--preset full` / `--all-tools`) and why they would
 
 #### Scenario: Full surface does not dilute discovery
