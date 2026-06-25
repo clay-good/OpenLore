@@ -37,6 +37,19 @@
       `enforcement.policy`; default advisory (`resolveEnforcementClass(... , undefined) === 'advisory'`),
       blocking only if an operator opts in. Code registered in `FINDING_CODE_REGISTRY`.
 
+## 5b. Post-review hardening (adversarial e2e pass, 2026-06-24)
+- [x] **Unorderable RAW cycles** (≥3 one-directional RAW edges, reachable under bounded read-distance):
+      detected via Tarjan SCC over the RAW graph, DISCLOSED as a `parallel-work-cycle` finding, and the
+      members placed in mutually exclusive waves — never a silently-broken, confidently-wrong schedule
+      (the prior code assumed cycles couldn't survive the bidirectional downgrade; they can). Fixes the
+      one HIGH soundness finding from the adversarial review. Also keeps `criticalPath.rounds` ==
+      `chain.length` with no repeated node.
+- [x] **Coupling store hardened**: an older index lacking the `change_coupling` table made
+      `getChangeCouplingForFiles` throw; the lookup is wrapped so a missing/broken store degrades to
+      "no coupling", never a crash.
+- [x] **Task-count cap** (`MAX_TASKS = 64`): over the cap is an explicit error (no silent truncation),
+      bounding the O(N²) conflict graph + O(N·E) footprint cost and the payload.
+
 ## 6. Tests
 - [x] 3 disjoint tasks → 1 wave.
 - [x] WAW pair (≥1 `modify`) → separate waves + advisory finding.

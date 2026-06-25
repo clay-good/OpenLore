@@ -119,6 +119,11 @@ export const FINDING_CODE_REGISTRY: Record<string, FindingCodeSpec> = {
     source: 'plan-parallel-work',
     description: 'Two tasks proposed for concurrent work have a write-write (WAW) conflict; the plan schedules them into different waves.',
   },
+  'parallel-work-cycle': {
+    defaultClass: 'advisory',
+    source: 'plan-parallel-work',
+    description: 'A set of proposed tasks forms an unorderable read-after-write cycle; no wave order satisfies all dependencies, so the members are scheduled mutually exclusive and the circular dependency should be resolved.',
+  },
 };
 
 /** Whether a code is registered (so a declared policy entry is recognized). */

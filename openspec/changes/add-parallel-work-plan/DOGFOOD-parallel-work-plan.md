@@ -60,3 +60,26 @@ Determinism: PASS (byte-identical)
 No `parallel-work-conflict` findings fired here because none of these four tasks have a true write-write
 (WAW) overlap; the WAW → finding path is covered by the unit tests (a pair both seeding the same symbol
 in `modify` mode).
+
+## Adversarial hardening pass (2026-06-24)
+
+A second, adversarial review (parallel agents + real-input probes) surfaced one HIGH soundness gap and
+two robustness gaps, all now fixed and regression-tested:
+
+1. **Unorderable RAW cycle, silently broken (HIGH → fixed).** A cycle of one-directional RAW edges
+   (`A→B→C→A`) survives the bidirectional-only downgrade and *is reachable* under bounded read-distance —
+   confirmed by constructing it against the real footprint code (`readMaxDistance: 1`, a 3-node
+   call-graph cycle yields exactly `B after A`, `C after B`, `A after C`). The old scheduler broke it
+   silently into a clean-looking 3-wave plan in which a task ran before a dependency. Now Tarjan SCC
+   detects the cycle, the plan emits a `parallel-work-cycle` finding disclosing the members, and they are
+   placed in mutually exclusive waves — honest, not confidently wrong.
+
+2. **Coupling-store crash (fixed).** An older index without the `change_coupling` table made the coupling
+   lookup throw; it is now wrapped to degrade to "no coupling".
+
+3. **Unbounded task list (fixed).** A `MAX_TASKS = 64` cap returns an explicit error instead of producing
+   an O(N²) payload silently.
+
+Re-dogfooded after the fixes on the real index: the mixed-hazard plan is unchanged (2 waves), the cap
+fires at 65 tasks, an all-unresolved task degrades to one wave with its `unresolvedSeeds` reported, and
+the plan stays byte-identical across re-invocations.

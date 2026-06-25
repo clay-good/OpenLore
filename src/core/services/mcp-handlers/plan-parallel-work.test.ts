@@ -229,6 +229,116 @@ describe('computePlanParallelWork — worked-example regression', () => {
   });
 });
 
+// ---- adversarial / hardening ----
+
+describe('computePlanParallelWork — adversarial robustness', () => {
+  /** A call-graph cycle nodeB→nodeA→nodeC→nodeB; with readMaxDistance:1 the three tasks
+   *  form a one-directional RAW cycle (B after A, C after B, A after C). */
+  function rawCycleGraph(): SerializedCallGraph {
+    return graph(
+      [node({ id: 'a.ts::nodeA' }), node({ id: 'b.ts::nodeB' }), node({ id: 'c.ts::nodeC' })],
+      [edge('b.ts::nodeB', 'a.ts::nodeA'), edge('c.ts::nodeC', 'b.ts::nodeB'), edge('a.ts::nodeA', 'c.ts::nodeC')],
+    );
+  }
+
+  it('discloses an unorderable RAW cycle, separates its members, and stays self-consistent', async () => {
+    mockCtx(rawCycleGraph());
+    const p = (await computePlanParallelWork({
+      directory: '/p',
+      tasks: [
+        { id: 'A', seedSymbols: ['a.ts::nodeA'] },
+        { id: 'B', seedSymbols: ['b.ts::nodeB'] },
+        { id: 'C', seedSymbols: ['c.ts::nodeC'] },
+      ],
+      readMaxDistance: 1,
+      ambientFanInPercentile: 1.0,
+    })) as ParallelWorkPlan;
+
+    // The cycle is DISCLOSED, not silently broken.
+    const cycle = p.findings.find(f => f.code === 'parallel-work-cycle');
+    expect(cycle, 'a parallel-work-cycle finding is emitted').toBeDefined();
+    expect(cycle!.subject).toContain('→');
+
+    // Members are mutually exclusive — never two in the same wave.
+    const waveOf = new Map<string, number>();
+    for (const w of p.waves) for (const t of w.taskIds) waveOf.set(t, w.wave);
+    expect(new Set([waveOf.get('A'), waveOf.get('B'), waveOf.get('C')]).size).toBe(3);
+
+    // criticalPath stays self-consistent: rounds == chain length, no repeated node.
+    expect(p.criticalPath.chain.length).toBe(p.criticalPath.rounds);
+    expect(new Set(p.criticalPath.chain).size).toBe(p.criticalPath.chain.length);
+
+    // Determinism holds even on the cyclic input.
+    const again = JSON.stringify(
+      await computePlanParallelWork({
+        directory: '/p',
+        tasks: [
+          { id: 'A', seedSymbols: ['a.ts::nodeA'] },
+          { id: 'B', seedSymbols: ['b.ts::nodeB'] },
+          { id: 'C', seedSymbols: ['c.ts::nodeC'] },
+        ],
+        readMaxDistance: 1,
+        ambientFanInPercentile: 1.0,
+      }),
+    );
+    expect(again).toBe(JSON.stringify(p));
+  });
+
+  it('every wave honors its RAW order and WAW exclusion (invariant audit on the cycle plan)', async () => {
+    mockCtx(rawCycleGraph());
+    const p = (await computePlanParallelWork({
+      directory: '/p',
+      tasks: [
+        { id: 'A', seedSymbols: ['a.ts::nodeA'] },
+        { id: 'B', seedSymbols: ['b.ts::nodeB'] },
+        { id: 'C', seedSymbols: ['c.ts::nodeC'] },
+      ],
+      readMaxDistance: 1,
+      ambientFanInPercentile: 1.0,
+    })) as ParallelWorkPlan;
+    // No wave is empty; waves are contiguous 1..N; the schedule covers every task once.
+    const scheduled = p.waves.flatMap(w => w.taskIds);
+    expect(new Set(scheduled).size).toBe(3);
+    expect(p.waves.map(w => w.wave)).toEqual([1, 2, 3]);
+  });
+
+  it('degrades gracefully when the change-coupling store throws (older index, missing table)', async () => {
+    vi.mocked(readCachedContext).mockResolvedValue({
+      callGraph: scenarioGraph(),
+      edgeStore: {
+        getChangeCouplingForFiles: () => {
+          throw new Error('no such table: change_coupling');
+        },
+      },
+    } as never);
+    const p = (await computePlanParallelWork({
+      directory: '/p',
+      tasks: [{ id: 't1', seedSymbols: ['b.ts::funcB'] }],
+      ...OPTS,
+    })) as ParallelWorkPlan;
+    // No crash; coupling simply degrades to empty.
+    expect(p.footprints[0].couplingNeighbors).toEqual([]);
+    expect(p.waves).toHaveLength(1);
+  });
+
+  it('rejects a task list over the cap with an explicit error (no silent truncation)', async () => {
+    const tasks = Array.from({ length: 65 }, (_, i) => ({ id: `t${i}`, seedSymbols: ['a.ts::funcA1'] }));
+    const r = await computePlanParallelWork({ directory: '/p', tasks, ...OPTS });
+    expect((r as { error: string }).error).toMatch(/Too many tasks/i);
+  });
+
+  it('handles a large disjoint batch (at the cap) in a single wave, bounded', async () => {
+    // 64 distinct files → 64 disjoint tasks → one wave, no conflicts.
+    const nodes = Array.from({ length: 64 }, (_, i) => node({ id: `f${i}.ts::fn${i}` }));
+    mockCtx(graph(nodes));
+    const tasks = nodes.map((n, i) => ({ id: `t${i}`, seedSymbols: [n.id] }));
+    const p = (await computePlanParallelWork({ directory: '/p', tasks, ...OPTS })) as ParallelWorkPlan;
+    expect(p.waves).toHaveLength(1);
+    expect(p.criticalPath.rounds).toBe(1);
+    expect(p.conflicts).toEqual([]);
+  });
+});
+
 // ---- contract & wiring ----
 
 describe('plan_parallel_work — contract & wiring', () => {
@@ -246,7 +356,8 @@ describe('plan_parallel_work — contract & wiring', () => {
     expect(TOOL_OUTPUT_CLASS['plan_parallel_work']).toBe('conclusion');
   });
 
-  it('registers its governance finding code', () => {
+  it('registers its governance finding codes', () => {
     expect(isKnownFindingCode('parallel-work-conflict')).toBe(true);
+    expect(isKnownFindingCode('parallel-work-cycle')).toBe(true);
   });
 });

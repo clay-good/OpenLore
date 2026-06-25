@@ -92,7 +92,7 @@ openlore install [options]   # detect agents, wire surfaces, build the index
   --agent <name>         # Limit to one surface: claude-code, cursor, cline,
                          #   continue, agents-md
   --preset <name>        # MCP tool preset to wire: navigation (lean default),
-                         #   minimal, memory, verify, federation, or full
+                         #   minimal, memory, verify, federation, coordination, or full
   --all-tools            # Wire the full 63-tool surface (alias of --preset full)
   --dry-run              # Print planned changes without writing any files
   --force                # Overwrite OpenLore-managed blocks even if hand-edited

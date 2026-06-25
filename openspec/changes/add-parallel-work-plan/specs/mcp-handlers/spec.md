@@ -73,3 +73,12 @@ does not eliminate conflict probability, and that integration tests remain the g
 - **WHEN** no `enforcement.policy` opts the corresponding finding into blocking
 - **THEN** the tool returns the plan and blocks nothing; gating occurs only when an operator opts the
   finding into a blocking class
+
+#### Scenario: An unorderable read-after-write cycle is disclosed, never silently broken
+
+- **GIVEN** three or more task descriptors whose footprints form a read-after-write cycle (each task
+  reads a symbol the next one writes, closing back on the first)
+- **WHEN** `plan_parallel_work` is called with them
+- **THEN** the plan emits a finding disclosing the unorderable cycle and its members, and places those
+  members in mutually exclusive waves rather than asserting a wave order that violates one of the
+  dependencies, so the schedule never claims a member runs before a task it depends on

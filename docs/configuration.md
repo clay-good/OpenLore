@@ -128,6 +128,8 @@ The governable finding codes (the **finding-code catalogue** — every code defa
 | `surface-info` | impact-certificate | advisory | The change opens a new path into a declared covering surface marked `info`. |
 | `surface-warn` | impact-certificate | advisory | The change opens a new path into a declared covering surface marked `warn`. |
 | `surface-critical` | impact-certificate | advisory | The change opens a new path into a declared covering surface marked `critical`. |
+| `parallel-work-conflict` | plan-parallel-work | advisory | Two tasks proposed for concurrent work have a write-write (WAW) conflict; `plan_parallel_work` schedules them into different waves. |
+| `parallel-work-cycle` | plan-parallel-work | advisory | A set of proposed tasks forms an unorderable read-after-write cycle; `plan_parallel_work` schedules the members mutually exclusive and the circular dependency should be resolved. |
 
 > **Note on the surface codes.** The change-impact certificate's *own* `--json` finding codes are `surface-newly-reached` / `surface-critical` (see [mcp-tools.md](mcp-tools.md)); the enforcement gate governs the **per-severity** codes `surface-info` / `surface-warn` / `surface-critical` (one per declared surface severity). To block a surface via `enforcement.policy`, name the per-severity code (e.g. `"surface-critical": "blocking"`), not `surface-newly-reached` — an unrecognized code is retained but governs nothing.
 

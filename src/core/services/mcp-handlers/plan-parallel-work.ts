@@ -38,6 +38,15 @@ import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
 /** How many read/affected ids to surface per task footprint before truncating (no-silent-truncation). */
 const FOOTPRINT_LIST_CAP = 50;
 
+/**
+ * Upper bound on tasks per call. The conflict graph is O(N²) pairs and each
+ * footprint reuses graph-wide reachability, so an unbounded list would produce a
+ * huge payload and slow O(N²)+O(N·E) work. A real concurrent swarm is a handful
+ * to a few dozen tasks; 64 is comfortably above that and keeps the plan bounded.
+ * Over the cap is an explicit error, not a silent truncation (mcp-quality).
+ */
+const MAX_TASKS = 64;
+
 export interface PlanParallelWorkInput {
   directory: string;
   /** Caller-supplied task list. OpenLore schedules; it never invents or decomposes the list. */
@@ -127,6 +136,9 @@ function validateTasks(tasks: unknown): string | null {
   if (!Array.isArray(tasks) || tasks.length === 0) {
     return 'plan_parallel_work requires a non-empty `tasks` array of task descriptors.';
   }
+  if (tasks.length > MAX_TASKS) {
+    return `Too many tasks (${tasks.length}); plan_parallel_work caps a single plan at ${MAX_TASKS}. Split the work into smaller batches and re-invoke per batch.`;
+  }
   const ids = new Set<string>();
   for (const t of tasks as TaskDescriptor[]) {
     if (!t || typeof t.id !== 'string' || t.id.length === 0) {
@@ -156,8 +168,17 @@ export async function computePlanParallelWork(
     readMaxDistance: input.readMaxDistance,
     affectedMaxDepth: input.affectedMaxDepth,
     ambientFanInPercentile: input.ambientFanInPercentile,
+    // Wrapped: an older index built before the change-coupling table existed makes
+    // `getChangeCouplingForFiles` throw on the missing table. Coupling is an advisory
+    // annotation, so a missing/broken store degrades to "no coupling", never a crash.
     couplingLookup: ctx.edgeStore
-      ? (files: string[]) => ctx.edgeStore!.getChangeCouplingForFiles(files)
+      ? (files: string[]) => {
+          try {
+            return ctx.edgeStore!.getChangeCouplingForFiles(files);
+          } catch {
+            return [];
+          }
+        }
       : undefined,
   };
 
@@ -205,6 +226,37 @@ export async function computePlanParallelWork(
           witnesses: v.witnesses,
           note: advisoryNote(v.kind),
         });
+      }
+    }
+  }
+
+  // 2b. Disclose and break unorderable RAW cycles. A cycle of one-directional RAW
+  // edges (A→B→C→A) can survive `applyRaw` (which only downgrades the 2-cycle
+  // bidirectional case); bounded read-distance makes such cycles reachable. No wave
+  // order can satisfy a cyclic dependency, so rather than silently break it (a
+  // confidently-wrong schedule), we DISCLOSE it as a finding and place the members
+  // in different waves (mutual exclusion) — the conservative, honest resolution.
+  for (const cyc of detectRawCycles(taskIds, rawPred)) {
+    findings.push({
+      code: 'parallel-work-cycle',
+      severity: 'warning',
+      source: 'plan-parallel-work',
+      subject: `${cyc.join(' → ')} → ${cyc[0]}`,
+      message:
+        `Unorderable read-after-write cycle among ${cyc.join(', ')} — no wave order can satisfy all ` +
+        `dependencies. These tasks are placed in separate waves (mutually exclusive) and must not run ` +
+        `concurrently; resolve the circular dependency before parallelizing.`,
+    });
+    const members = new Set(cyc);
+    // Drop the intra-cycle RAW edges (so the schedule is acyclic) and replace them
+    // with mutual exclusion, so no two cycle members ever share a wave.
+    for (const m of cyc) {
+      for (const p of [...rawPred.get(m)!]) if (members.has(p)) rawPred.get(m)!.delete(p);
+    }
+    for (let i = 0; i < cyc.length; i++) {
+      for (let j = i + 1; j < cyc.length; j++) {
+        waw.get(cyc[i])!.add(cyc[j]);
+        waw.get(cyc[j])!.add(cyc[i]);
       }
     }
   }
@@ -316,7 +368,54 @@ function assignWaves(
   return wave;
 }
 
-/** Kahn-style topological order by RAW predecessors; ties and cycle remainder broken by id. */
+/**
+ * Strongly-connected components of size > 1 in the RAW "depends-on" graph — the
+ * unorderable cycles. Tarjan's algorithm over `rawPred` (node → its predecessors);
+ * a directed cycle exists in this graph iff one exists in its reverse, so the
+ * adjacency direction is immaterial to cycle membership. Deterministic: nodes and
+ * neighbours are visited in sorted order, and each component is returned sorted.
+ */
+function detectRawCycles(taskIds: string[], rawPred: Map<string, Set<string>>): string[][] {
+  const taskSet = new Set(taskIds);
+  const index = new Map<string, number>();
+  const low = new Map<string, number>();
+  const onStack = new Set<string>();
+  const stack: string[] = [];
+  const sccs: string[][] = [];
+  let counter = 0;
+
+  const strongconnect = (v: string): void => {
+    index.set(v, counter);
+    low.set(v, counter);
+    counter++;
+    stack.push(v);
+    onStack.add(v);
+    for (const w of [...(rawPred.get(v) ?? [])].sort()) {
+      if (!taskSet.has(w)) continue;
+      if (!index.has(w)) {
+        strongconnect(w);
+        low.set(v, Math.min(low.get(v)!, low.get(w)!));
+      } else if (onStack.has(w)) {
+        low.set(v, Math.min(low.get(v)!, index.get(w)!));
+      }
+    }
+    if (low.get(v) === index.get(v)) {
+      const comp: string[] = [];
+      let w: string;
+      do {
+        w = stack.pop()!;
+        onStack.delete(w);
+        comp.push(w);
+      } while (w !== v);
+      if (comp.length > 1) sccs.push(comp.sort());
+    }
+  };
+
+  for (const v of [...taskIds].sort()) if (!index.has(v)) strongconnect(v);
+  return sccs.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+}
+
+/** Kahn-style topological order by RAW predecessors; ties broken by id. */
 function topoOrder(taskIds: string[], rawPred: Map<string, Set<string>>): string[] {
   const sorted = [...taskIds].sort();
   const placed = new Set<string>();
@@ -334,7 +433,9 @@ function topoOrder(taskIds: string[], rawPred: Map<string, Set<string>>): string
       }
     }
   }
-  // Cycle remainder (should not occur after bidirectional downgrade): append in id order.
+  // Remainder safety net: RAW cycles are broken (→ mutual exclusion) before this runs,
+  // so the progress loop always places everything; append any straggler in id order
+  // rather than loop forever, should an unexpected cycle ever reach here.
   for (const id of sorted) if (!placed.has(id)) order.push(id);
   return order;
 }
