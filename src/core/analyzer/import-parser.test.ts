@@ -753,6 +753,26 @@ describe('ImportExportParser', () => {
         isRelative: true,
       });
     });
+
+    it('should parse function-level (indented, deferred) imports', async () => {
+      // Imports inside a function body — common in Python to break import cycles or
+      // lazy-load — must be captured, not just module-top-level ones.
+      const src = [
+        'import os',
+        '',
+        'def run():',
+        '    from .compare import compare',
+        '    import numpy as np',
+        '    return compare(np)',
+      ].join('\n');
+      const filePath = await createFile(tempDir, 'deferred.py', src);
+      const analysis = await parser.parseFile(filePath);
+      const sources = analysis.imports.map(i => i.source);
+      expect(sources).toContain('.compare'); // indented relative import captured
+      expect(sources).toContain('numpy'); // indented package import captured
+      const rel = analysis.imports.find(i => i.source === '.compare');
+      expect(rel).toMatchObject({ isRelative: true, importedNames: ['compare'] });
+    });
   });
 
   describe('Python Exports', () => {

@@ -122,15 +122,16 @@ describe('buildResolvedImportMap', () => {
     expect(reExported.has('caller.ts\0widget')).toBe(false);
   });
 
-  it('is a strict superset of buildBaseImportMap when no re-export applies', () => {
+  it('matches buildBaseImportMap for TS/JS direct imports when no re-export applies', () => {
+    // For a plain (non-barrel) TS/JS import the resolved target is identical to the
+    // legacy buildBaseImportMap. (Python leading-dot resolution intentionally diverges
+    // — buildResolvedImportMap resolves it precisely where buildBaseImportMap did not.)
     const files: Files = [
       ts('a.ts', 'export function f() {}'),
       ts('b.ts', "import { f } from './a';\nexport function g() { return f(); }"),
-      { path: 'c.py', content: 'from .a import f\n', language: 'Python' },
     ];
     const base = buildBaseImportMap(files);
     const { map } = buildResolvedImportMap(files);
-    // Same keys + same values where no re-export chain exists.
     for (const [file, names] of base) {
       for (const [name, target] of names) {
         expect(map.get(file)?.get(name)).toBe(target);
@@ -256,22 +257,39 @@ describe('call graph — re-export resolution', () => {
     expect(edge?.confidence).not.toBe('import');
   });
 
-  it('does not regress Python cross-file resolution (relative-dot import resolution is a separate deferred gap)', async () => {
-    // Python relative imports use leading-dot module syntax (`from .impl import x`),
-    // which the shared `posix.join` resolution does not turn into a matching module
-    // path — so the call still resolves by name (`name_only`), exactly as before this
-    // change. Re-export/barrel resolution is scoped to TS/JS; Python leading-dot
-    // resolution is a separate, pre-existing gap (deferred, documented).
+  it('resolves Python leading-dot relative imports to import confidence', async () => {
+    // Python relative imports use leading-dot module syntax (`from .impl import x`,
+    // `from ..pkg.mod import y`); N dots = package levels up. Resolving the dot-prefix
+    // (rather than letting posix.join treat `.impl` as a filename) binds the cross-file
+    // call precisely instead of leaving it as the ambiguous name-only fallback.
     const py = (path: string, content: string) => ({ path, content, language: 'Python' });
     const files: Files = [
-      py('impl.py', 'def do_work():\n    return 1\n'),
-      py('caller.py', 'from .impl import do_work\n\ndef run():\n    return do_work()\n'),
+      py('pkg/impl.py', 'def do_work():\n    return 1\n'),
+      py('pkg/caller.py', 'from .impl import do_work\n\ndef run():\n    return do_work()\n'),
     ];
     const result = await new CallGraphBuilder().build(files);
     const edge = findEdge(result, 'run', 'do_work');
     expect(edge).toBeDefined();
-    expect(result.nodes.get(edge!.calleeId)?.filePath).toBe('impl.py');
-    expect(edge!.confidence).toBe('name_only'); // unchanged from pre-change behaviour
+    expect(result.nodes.get(edge!.calleeId)?.filePath).toBe('pkg/impl.py');
+    expect(edge!.confidence).toBe('import');
+  });
+
+  it('resolves a Python function-level (deferred) relative import and a parent-package import', async () => {
+    // Imports inside a function body (common to break import cycles / lazy-load) and
+    // `from ..pkg import x` (parent package) both resolve.
+    const py = (path: string, content: string) => ({ path, content, language: 'Python' });
+    const files: Files = [
+      py('pkg/models.py', 'def build_model():\n    return 1\n'),
+      py('pkg/sub/impl.py', 'def work():\n    return 2\n'),
+      py(
+        'pkg/sub/caller.py',
+        'def run():\n    from .impl import work\n    from ..models import build_model\n    return work() + build_model()\n',
+      ),
+    ];
+    const result = await new CallGraphBuilder().build(files);
+    expect(findEdge(result, 'run', 'work')?.confidence).toBe('import');
+    expect(findEdge(result, 'run', 'build_model')?.confidence).toBe('import');
+    expect(result.nodes.get(findEdge(result, 'run', 'build_model')!.calleeId)?.filePath).toBe('pkg/models.py');
   });
 
   it('regression gate — same-file and direct edges are never relabelled re_export', async () => {

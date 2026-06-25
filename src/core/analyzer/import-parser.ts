@@ -521,8 +521,10 @@ export function parsePythonImports(content: string): ImportInfo[] {
 
   let match: RegExpExecArray | null;
 
-  // import X or import X, Y or import X.Y.Z
-  const importRegex = /^import[ \t]+([^\n\r]+)$/gm;
+  // import X or import X, Y or import X.Y.Z. Allow leading indentation so
+  // function-level / deferred imports (common in Python to break import cycles or
+  // lazy-load) are captured, not just module-top-level ones.
+  const importRegex = /^[ \t]*import[ \t]+([^\n\r]+)$/gm;
   while ((match = importRegex.exec(cleanContent)) !== null) {
     const modules = match[1].split(',').map(m => m.trim()).filter(Boolean);
     for (const mod of modules) {
@@ -542,8 +544,10 @@ export function parsePythonImports(content: string): ImportInfo[] {
     }
   }
 
-  // from X import Y or from X import Y, Z (including multi-line after collapsing)
-  const fromImportRegex = /^from\s+([\w.]+)\s+import\s+(.+)$/gm;
+  // from X import Y or from X import Y, Z (including multi-line after collapsing).
+  // Allow leading indentation so function-level / deferred relative imports are
+  // captured (e.g. `    from .compare import compare` inside a function body).
+  const fromImportRegex = /^[ \t]*from\s+([\w.]+)\s+import\s+(.+)$/gm;
   while ((match = fromImportRegex.exec(cleanContent)) !== null) {
     const source = match[1];
     const importsPart = match[2].trim().replace(/[()]/g, '');

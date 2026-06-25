@@ -24,7 +24,11 @@ All notable changes to OpenLore are documented here. This project adheres to
   `report_coverage_gaps`) at once. The resolved map is also threaded into the **incremental watcher**
   (new `collectReExportBarrels` pulls barrel files into the subset for export-indexing only), so an
   incremental rebuild converges to `analyze --force` on barrel edges instead of degrading them to
-  `name_only` (parity oracle Scenario 4). A structural audit during
+  `name_only` (parity oracle Scenario 4). **Python relative imports now resolve too:** the leading-dot
+  module form (`from .impl import x`, `from ..pkg.mod import y`) is resolved to the true file, and
+  function-level (deferred / cycle-breaking) imports are captured — dogfooding a real Python repo this
+  took precise cross-file `import` edges from 0 → 102 and cut ambiguous `name_only` from 156 → 58,
+  making the registry's Python `imports` capability functional. A structural audit during
   implementation found the proposal's other edge classes — interface→implementation, override, and
   single-implementor dispatch (items 2/3) — **already delivered** by the shipped CHA pass
   (`add-type-hierarchy-resolved-dispatch`); they are cross-referenced, not re-implemented. No graph-schema

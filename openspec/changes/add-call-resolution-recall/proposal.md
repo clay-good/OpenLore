@@ -118,6 +118,13 @@ require executing build tooling or a package manager.
   edges whose name was followed through a re-export chain; a direct import stays `import`. Provenance flows
   through the existing confidence-boundary channel, so `analyze_impact` / `find_dead_code` / `select_tests`
   / `blast_radius` / `report_coverage_gaps` distinguish proven vs candidate without a new channel.
+- **Python relative-import resolution** — a full-product dogfood on a real Python repo surfaced that
+  Python imports produced *zero* `import` edges: the leading-dot module form (`from .impl import x`,
+  `from ..pkg.mod import y`) was not resolved by the shared path join, and function-level (deferred)
+  imports were skipped by the parser's line-anchored regex. Fixed both (`resolvePythonRelative` +
+  allowing indented imports in `parsePythonImports`), completing the Pass-2 import threading for the
+  `imports`-capable language it was already gated to. Dogfood: `import` 0 → 102, `name_only` 156 → 58 on
+  that repo; the registry's Python `imports` capability is now functional.
 - **Incremental-watcher parity** — an adversarial parity test surfaced that a barrel a caller imports
   through is absent from an incremental rebuild's subset (it is neither the changed file nor a caller), so
   re-export edges silently degraded to `name_only` on the next edit. `collectReExportBarrels`

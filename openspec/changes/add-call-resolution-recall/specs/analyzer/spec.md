@@ -101,9 +101,26 @@ deterministic.
 >   follow-up.
 > - **Depth bound.** Re-export chains deeper than the bound (`REEXPORT_MAX_DEPTH`) stop mid-chain and the
 >   call degrades to `name_only` (which still finds a uniquely-named target); real barrels are 1–3 hops.
-> - **Python relative-dot imports** (`from .impl import x`) are a separate, pre-existing gap (the
->   leading-dot module form is not resolved by the shared path join); this change is scoped to TS/JS
->   re-export chains.
+
+### Requirement: PythonRelativeImportResolution
+
+Python relative imports — the leading-dot module form (`from .impl import x`, `from ..pkg.mod import y`,
+where N leading dots mean N package levels up) — SHALL resolve to the imported module's true file so the
+cross-file call binds at `import` confidence instead of the ambiguous name-only fallback. Imports written
+inside a function body (deferred / cycle-breaking imports) SHALL be captured, not only module-top-level
+ones. This is gated to the `imports`-capable languages and is fail-soft.
+
+#### Scenario: A Python leading-dot relative call resolves precisely
+
+- **GIVEN** `pkg/caller.py` that calls `do_work` imported via `from .impl import do_work`
+- **WHEN** the repository is analyzed
+- **THEN** the call edge resolves to `do_work` in `pkg/impl.py` at `import` confidence
+
+#### Scenario: A function-level relative import is captured
+
+- **GIVEN** a call whose relative import is written inside a function body to break an import cycle
+- **WHEN** the repository is analyzed
+- **THEN** the import is captured and the call resolves to its definition, not left as `name_only`
 
 ## ALREADY SATISFIED (cross-referenced, not re-implemented)
 

@@ -87,6 +87,23 @@ function stripModuleExt(p: string): string {
 const REEXPORT_MAX_DEPTH = 12;
 
 /**
+ * Resolve a Python leading-dot relative import to an extensionless, repo-relative
+ * module path. `from .impl import x` in `pkg/caller.py` → `pkg/impl`;
+ * `from ..util.mod import y` in `pkg/sub/caller.py` → `pkg/util/mod`;
+ * `from . import x` → the caller's package directory. N leading dots = N package
+ * levels (1 = the current package), the remainder is a dotted module path.
+ */
+export function resolvePythonRelative(callerDir: string, source: string): string {
+  const m = source.match(/^(\.+)(.*)$/);
+  if (!m) return source;
+  const levels = m[1].length;
+  let base = callerDir;
+  for (let i = 1; i < levels; i++) base = posix.dirname(base);
+  const rest = m[2].replace(/\./g, '/');
+  return rest ? posix.normalize(posix.join(base, rest)) : (base || '.');
+}
+
+/**
  * A re-export-aware import map: like {@link buildBaseImportMap}, but a `localName`
  * imported from a barrel that re-exports it (`export { x } from './impl'`,
  * `export * from './impl'`, depth-N chains) resolves to the **true definition
@@ -215,10 +232,15 @@ export function buildResolvedImportMap(
     const dir = posix.dirname(f.path);
     for (const imp of imports) {
       if (!imp.isRelative) continue;
-      // TS ESM import specifiers carry a `.js` extension that points at the `.ts`
-      // source (`import … from './x.js'`); strip it so the target is extensionless
-      // and matches the node filePaths the call graph keys on.
-      const target = stripModuleExt(posix.normalize(posix.join(dir, imp.source)));
+      // Python relative imports use leading-dot module syntax (`from .impl import x`,
+      // `from ..pkg.mod import y`) — N dots = package levels up (1 = current), the rest
+      // is a dotted path. posix.join would treat `.impl` as a filename, so resolve the
+      // dot-prefix explicitly. TS/JS use `./`-style specifiers (and ESM `.js` that points
+      // at the `.ts` source — strip it so the target matches the node filePaths).
+      const target =
+        f.language === 'Python' && imp.source.startsWith('.')
+          ? resolvePythonRelative(dir, imp.source)
+          : stripModuleExt(posix.normalize(posix.join(dir, imp.source)));
       for (const name of imp.importedNames) {
         if (tsjs && moduleExports.size > 0) {
           const r = resolveDef(name, target, new Set(), 0);

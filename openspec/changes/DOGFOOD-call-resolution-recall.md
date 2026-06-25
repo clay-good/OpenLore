@@ -73,12 +73,38 @@ from `src/core/analyzer/test-file.ts`. Before: the call fell through to `name_on
 name. After: it resolves to `test-file.ts::isTestFile` at `re_export` confidence — the barrel hop is
 followed and disclosed.
 
+## Full-product e2e dogfood (post-v2.1.3 surface)
+
+A full first-run + new-feature dogfood on two clean third-party repos (read-only fixtures, restored
+afterwards):
+
+**vaulytica (2184-file TS monorepo):** `openlore install` wired the repo and built the index in 15.5s
+(3889 functions); the MCP stdio server answered `initialize` → `tools/list` (10 nav / 66 full) →
+`tools/call`; the five post-v2.1.3 tools (`get_language_support`, `report_coverage_gaps`,
+`map_in_flight_conflicts`, `plan_parallel_work`, `change_impact_certificate`) all executed and returned
+valid JSON; `coverage-gaps --json` was pure parseable JSON; `doctor`/`enforce`/`prove --estimate` worked;
+install was idempotent (clean no-op, exactly one managed block) and `--uninstall` merge-aware. The
+re-export feature held on a *different* large TS repo: `import` 1215, `re_export` 51, `name_only` only 23.
+
+**onkos (Python + notebooks):** surfaced a real bug — Python produced **zero** `import`/`re_export`
+edges (156 `name_only`). Root cause: leading-dot relative imports (`from .impl import x`) were not
+resolved, and the called functions were imported *inside function bodies*, which the line-anchored parser
+regex skipped. Fixed both; after `analyze --force`: `import` 0 → 102, `name_only` 156 → 58. This also
+makes the language-support registry's Python `imports` claim functional.
+
+**Minor UX note (not changed):** during `install`, the internal `analyze` prints "Agent config files: not
+generated — re-run with --ai-configs" moments before install's adapter creates `CLAUDE.md`/`AGENTS.md`
+with the managed block. The message is scoped to analyze's `--ai-configs` digest (a different artifact),
+but reads as misleading in the install flow; left as-is to avoid cross-flow output churn.
+
 ## Verification
 
-- New suite `call-resolution-recall.test.ts`: 18/18 pass (barrel, `export *`, depth-N, direct-stays-
-  `import`, disambiguation, named-cycle + `export *`-cycle termination, determinism, superset property,
-  regression gate, plus adversarial boundaries: package re-export not followed, barrel-local def wins,
-  aliased-rename + default-re-export graceful degradation, Python no-regression).
+- New suite `call-resolution-recall.test.ts`: 19/19 pass (barrel, `export *`, depth-N, direct-stays-
+  `import`, disambiguation, named-cycle + `export *`-cycle termination, determinism, TS/JS superset,
+  regression gate, adversarial boundaries: package re-export not followed, barrel-local def wins,
+  aliased-rename + default-re-export graceful degradation; plus Python leading-dot, parent-package, and
+  function-level relative-import resolution). Parser regression test for indented imports in
+  `import-parser.test.ts`.
 - A second adversarial probe confirmed fail-soft behavior on `export *` cycles (resolve + terminate),
   default re-export through a barrel (graceful fallback, no wrong edge — deferred rename limitation), and
   chains deeper than `REEXPORT_MAX_DEPTH` (bounded; still finds a uniquely-named target via `name_only`).

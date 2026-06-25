@@ -38,8 +38,10 @@
       only barrel-crossed edges wear `re_export`).
 - [x] Adversarial boundaries: package re-export NOT followed (no invented internal edge); barrel-local
       definition wins over its own re-export; aliased-rename AND default re-export through a barrel degrade
-      gracefully (no wrong edge); `export *` cycle terminates while still resolving past it; Python
-      relative-dot import is unchanged (no regression).
+      gracefully (no wrong edge); `export *` cycle terminates while still resolving past it.
+- [x] Python relative-import resolution: leading-dot (`from .impl import x`), parent-package
+      (`from ..pkg import y`), and function-level (deferred) imports resolve at `import` confidence;
+      parser regression test for indented imports (`import-parser.test.ts`).
 - [x] Incremental-watcher parity: `mcp-watcher-parity.test.ts` Scenario 4 asserts an incremental rebuild
       of a barrel call converges to `analyze --force` (`re_export`, not degraded `name_only`).
 - [x] Interface/single-binding behavior covered by the existing `cha.test.ts` (unchanged).
@@ -53,6 +55,9 @@
 - [x] `npm run lint`, `npm run typecheck` (tsc), `npm run test:run` (5063 pass), `npm run build` green.
 - [x] Dogfood: re-analyzed this repo — `name_only` 1067→87, `import` 0→1326, `re_export` 0→21,
       `external` 8742→8563, `type_inference` unchanged. See `DOGFOOD-call-resolution-recall.md`.
+- [x] Full-product e2e dogfood on clean third-party repos (vaulytica TS, onkos Python): install / MCP
+      stdio / 66-tool full preset / new-feature CLIs / idempotency / uninstall. Surfaced + fixed the
+      Python import-resolution gap (`import` 0→102 on onkos). Repos restored read-only.
 
 ## 7. Docs
 - [x] Documented each resolution class, the re_export provenance, the per-language gating/fail-soft
