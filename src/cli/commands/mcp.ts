@@ -1574,6 +1574,26 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: 'get_language_support',
+    description:
+      'USE THIS WHEN: a structural result for some file looks empty/weak and you need to know whether ' +
+      'that means "nothing found" or "this language is only partly supported" — or when evaluating ' +
+      'coverage for a polyglot repo. Returns the deterministic capability matrix (signatures, callGraph, ' +
+      'imports, cfgOverlay, typeInference, styleFingerprint, iacProjection) for the repo\'s DETECTED ' +
+      'languages, or — with a `language` name — that one language (a pure registry lookup; an unknown ' +
+      'language returns an honest all-unsupported record, never an error). Fail-soft: an unsupported ' +
+      'capability yields nothing, never a guess. Read-only, deterministic. Run analyze_codebase first ' +
+      'for repo mode (named-language mode needs no analysis).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        directory: { type: 'string', description: DIR_DESC },
+        language: { type: 'string', description: 'Optional: a specific language name (e.g. "Go", "Kotlin"). Omit to report the repo\'s detected languages.' },
+      },
+      required: ['directory'],
+    },
+  },
+  {
     name: 'detect_changes',
     description:
       'Detect recently changed functions and rank them by blast radius. ' +
@@ -1822,7 +1842,7 @@ const TOOL_ANNOTATIONS: Record<string, typeof _RO | typeof _RWI | typeof _RW> = 
   approve_decision: _RWI, reject_decision: _RWI, sync_decisions: _RWI,
   remember: _RW, recall: _RO, verify_claim: _RO,
   spec_store_status: _RO, working_set_context: _RO, change_impact_certificate: _RO,
-  plan_parallel_work: _RO, map_in_flight_conflicts: _RO,
+  plan_parallel_work: _RO, map_in_flight_conflicts: _RO, get_language_support: _RO,
 };
 
 // Tools that touch external entities (LLM / network) → openWorldHint: true.
@@ -2360,6 +2380,6 @@ export const mcpCommand = new Command('mcp')
   .option('--watch-debounce <ms>', 'Debounce delay in ms before re-indexing after a file change (default: 400)', '400')
   .option('--watch-no-embed', 'Watch signatures only — skip live vector re-embedding (embeddings refresh at commit). Large repos auto-degrade to this.')
   .option('--minimal', 'Expose only core 6 tools (orient, search_code, record_decision, detect_changes, check_spec_drift, get_health_map). Pair with alwaysLoad: true in Claude Code for always-visible core tools.')
-  .option('--preset <name>', 'Expose a named tool preset. Default (no preset) is the lean "navigation" surface — the benchmark-winning graph-traversal core (orient, search_code, get_subgraph, trace_execution_path, analyze_impact, suggest_insertion_points, get_function_skeleton, get_landmarks, get_map, find_path) — NOT the full registry. "minimal" = orient+search+governance; "memory" = orient+remember+recall; "verify" = orient+search+verify_claim; "federation" = orient + federation_status + spec_store_status + working_set_context + change_impact_certificate + map_in_flight_conflicts + the four cross-repo conclusion tools; "coordination" = orient + plan_parallel_work + map_in_flight_conflicts + analyze_impact + find_path; "full" = all 64 tools (the prior default). Takes precedence over --minimal.')
-  .option('--all-tools', 'Expose the full surface — all 64 tools (alias for --preset full). Opt-in breadth; the lean navigation default is recommended.')
+  .option('--preset <name>', 'Expose a named tool preset. Default (no preset) is the lean "navigation" surface — the benchmark-winning graph-traversal core (orient, search_code, get_subgraph, trace_execution_path, analyze_impact, suggest_insertion_points, get_function_skeleton, get_landmarks, get_map, find_path) — NOT the full registry. "minimal" = orient+search+governance; "memory" = orient+remember+recall; "verify" = orient+search+verify_claim; "federation" = orient + federation_status + spec_store_status + working_set_context + change_impact_certificate + map_in_flight_conflicts + the four cross-repo conclusion tools; "coordination" = orient + plan_parallel_work + map_in_flight_conflicts + analyze_impact + find_path; "full" = all 65 tools (the prior default). Takes precedence over --minimal.')
+  .option('--all-tools', 'Expose the full surface — all 65 tools (alias for --preset full). Opt-in breadth; the lean navigation default is recommended.')
   .action((options: McpServerOptions) => startMcpServer(options));

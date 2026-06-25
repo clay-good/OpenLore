@@ -143,6 +143,11 @@ export const TOOL_REGISTRY: Record<string, ToolPlan> = {
     // in-flight changes yields an empty (but valid) map — still a covered read.
     buildArgs: (f) => ({ directory: f.directory, includePullRequests: false }),
   },
+  get_language_support: {
+    kind: 'read',
+    // Repo-mode coverage matrix over the cached repo's detected languages.
+    buildArgs: (f) => ({ directory: f.directory }),
+  },
   get_function_body: {
     kind: 'read',
     buildArgs: (f) =>

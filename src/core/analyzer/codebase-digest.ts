@@ -20,6 +20,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import type { LLMContext } from './artifact-generator.js';
 import type { DependencyGraphResult } from './dependency-graph.js';
+import { languageCoverageMatrix, renderCoverageMatrixMarkdown } from './language-support.js';
 
 // ============================================================================
 // TYPES
@@ -112,6 +113,25 @@ export async function generateCodebaseDigest(
         lines.push(`- avg fan-in: **${cg.stats.avgFanIn.toFixed(2)}**, avg fan-out: **${cg.stats.avgFanOut.toFixed(2)}**`);
       }
       lines.push('');
+    }
+
+    // ── Language coverage ─────────────────────────────────────────────────────
+    // A deterministic capability matrix over the repo's detected languages, so a
+    // quiet structural result is interpretable: "·" means the capability is not
+    // backed for that language (fail-soft), not that there were no matches.
+    if (cg) {
+      const detected = [...new Set(
+        cg.nodes.filter(n => !n.isExternal && n.language && n.language !== 'unknown').map(n => n.language),
+      )].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+      if (detected.length > 0) {
+        lines.push('## Language coverage');
+        lines.push('What OpenLore extracts per detected language (`✓` backed, `·` fail-soft / not claimed). A `·` cell means a quiet result for that capability is "unsupported here", not "nothing found".');
+        lines.push('');
+        lines.push(...renderCoverageMatrixMarkdown(languageCoverageMatrix(detected)));
+        lines.push('');
+        lines.push('> Query this at runtime with the `get_language_support` MCP tool (opt-in). See the "add a language" checklist in the docs.');
+        lines.push('');
+      }
     }
 
     // ── Entry points ──────────────────────────────────────────────────────────

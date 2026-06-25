@@ -7,6 +7,20 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ### Added
 
+- **Declarative language-support registry + `get_language_support`** — the per-language knowledge
+  OpenLore already encodes (call-graph extractor, CFG `SPECS` table, signature extractor, type-inference
+  engine, IaC projector) is now consolidated behind one declarative capability registry
+  (`src/core/analyzer/language-support.ts`), and per-language coverage is observable. Capabilities:
+  `signatures`, `callGraph`, `imports`, `cfgOverlay`, `typeInference`, `styleFingerprint`,
+  `iacProjection`. The registry is **derived** from the live extractor structures (not hand-listed), so
+  the coverage matrix cannot silently over-claim — a behavioral test cross-checks every cell against the
+  real extractor, and `cfgOverlay`/`iacProjection` are asserted exactly against their predicates. Two
+  surfaces: a **Language coverage** matrix in `.openlore/analysis/CODEBASE.md`, and the opt-in
+  `get_language_support` MCP conclusion tool (repo-detected languages, or a named language as a pure
+  registry lookup — fail-soft for unknown languages). Makes a quiet structural result interpretable
+  ("calls unsupported for L" vs. "no callers"). No extraction-output change, no new dependency, no LLM.
+  Full surface count 64 → 65. Canonical reference + "add a language" checklist: `docs/language-support.md`.
+
 - **`map_in_flight_conflicts` — cross-actor interference map** (PARALLEL-WORK proposal 4). The team
   version of `plan_parallel_work`: instead of a caller-supplied task list it harvests every change in
   flight — local branches (git), open PRs (`gh`), and any supplied agent task descriptors — as

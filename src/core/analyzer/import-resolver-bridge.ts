@@ -36,6 +36,19 @@ export type ImportMap = Map<string, Map<string, string>>;
  * through to the same-directory / global-unique layers exactly as before (additive — this
  * can only recover a correct base, never introduce a new wrong one).
  */
+/**
+ * Languages whose relative imports {@link buildBaseImportMap} actually resolves into the
+ * `confidence: 'import'` edge path (the live import-resolution pipeline). Authoritative
+ * source for the `imports` capability flag in the declarative language-support registry
+ * (change: add-declarative-language-support-registry). MUST match the dispatch in
+ * {@link buildBaseImportMap} below. (Go/Rust/Ruby/Java parsers exist elsewhere but are not
+ * wired into this live path, so the registry does not claim `imports` for them — honesty
+ * over latent capability.)
+ */
+export const IMPORT_RESOLUTION_LANGUAGES: ReadonlySet<string> = new Set<string>([
+  'TypeScript', 'JavaScript', 'Python',
+]);
+
 export function buildBaseImportMap(
   files: Array<{ path: string; content: string; language: string }>,
 ): ImportMap {

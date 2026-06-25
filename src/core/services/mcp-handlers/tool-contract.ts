@@ -107,6 +107,7 @@ export const TOOL_OUTPUT_CLASS: Record<string, ToolOutputClass> = {
   verify_claim: 'conclusion',
   plan_parallel_work: 'conclusion',
   map_in_flight_conflicts: 'conclusion',
+  get_language_support: 'conclusion',
 };
 
 /** The tools intentionally allowed to emit raw topology, sorted for stable assertions. */

@@ -23,6 +23,7 @@ import { handleSelectTests } from './mcp-handlers/test-impact.js';
 import { handleBlastRadius } from './mcp-handlers/blast-radius.js';
 import { handlePlanParallelWork } from './mcp-handlers/plan-parallel-work.js';
 import { handleMapInFlightConflicts } from './mcp-handlers/interference-map.js';
+import { handleGetLanguageSupport } from './mcp-handlers/language-support.js';
 import type { TaskDescriptor } from './mcp-handlers/change-footprint.js';
 import { handleFindDeadCode } from './mcp-handlers/reachability.js';
 import { handleVerifyClaim } from './mcp-handlers/claim-verification.js';
@@ -351,6 +352,9 @@ export async function dispatchTool(
         federation?: boolean; federationRepos?: string[];
       };
     return handleMapInFlightConflicts({ directory, baseRef, includeBranches, branches, includePullRequests, tasks, maxChanges, readMaxDistance, affectedMaxDepth, ambientFanInPercentile, federation, federationRepos });
+  } else if (name === 'get_language_support') {
+    const { directory, language } = args as { directory: string; language?: string };
+    return handleGetLanguageSupport({ directory, language });
   }
   throw new UnknownToolError(name);
 }

@@ -93,7 +93,7 @@ openlore install [options]   # detect agents, wire surfaces, build the index
                          #   continue, agents-md
   --preset <name>        # MCP tool preset to wire: navigation (lean default),
                          #   minimal, memory, verify, federation, coordination, or full
-  --all-tools            # Wire the full 64-tool surface (alias of --preset full)
+  --all-tools            # Wire the full 65-tool surface (alias of --preset full)
   --dry-run              # Print planned changes without writing any files
   --force                # Overwrite OpenLore-managed blocks even if hand-edited
   --uninstall            # Remove OpenLore-managed blocks and entries
@@ -109,7 +109,7 @@ openlore connect remove [agent]      # disconnect that agent
   <agent>                # Positional: claude-code | cursor | cline | continue |
                          #   agents-md (omit for an interactive picker)
   --preset <name>        # MCP tool preset to wire (same names as install)
-  --all-tools            # Wire the full 64-tool surface (alias of --preset full)
+  --all-tools            # Wire the full 65-tool surface (alias of --preset full)
   --dry-run              # Print planned changes without writing any files
   --force                # Overwrite OpenLore-managed blocks even if hand-edited
   --no-analyze           # Configure surfaces only; do not build the index
@@ -129,7 +129,7 @@ openlore mcp [options]             # start the stdio MCP server
 
   --preset <name>        # Expose a named preset (default: lean navigation, 10 tools)
   --minimal              # Expose only the core 6 governance tools
-  --all-tools            # Expose the full surface — all 64 tools (alias --preset full)
+  --all-tools            # Expose the full surface — all 65 tools (alias --preset full)
   --watch-auto           # Auto-detect + incrementally re-index the project dir
   --no-watch-auto        # Disable auto-watch (use for one-shot tool calls)
   --daemon               # Delegate tool calls to a shared `openlore serve` daemon
@@ -472,7 +472,7 @@ over plain HTTP so non-MCP clients (e.g. the [Pi](https://pi.dev) extension in
 
 ```bash
 openlore serve                          # navigation preset, ephemeral port, watch on
-openlore serve --preset all --port 7077 # all 64 tools on a fixed port
+openlore serve --preset all --port 7077 # all 65 tools on a fixed port
 openlore serve --no-watch               # transport only, no freshness lane
 openlore serve --stop                   # stop the daemon serving this directory
 ```

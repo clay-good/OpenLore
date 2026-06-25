@@ -846,6 +846,19 @@ function extractExtraLangSignatures(language: string, content: string): Extracte
 // MAIN EXTRACTOR
 // ============================================================================
 
+/**
+ * Languages with a DEDICATED signature extractor (vs. the best-effort `extractGeneric`
+ * fallback every other language receives). Authoritative source for the `signatures`
+ * capability flag in the declarative language-support registry (change:
+ * add-declarative-language-support-registry). MUST list exactly the non-`default` cases
+ * of the {@link extractSignatures} switch below; a behavioral test asserts a fixture in
+ * each member yields ≥1 signature entry.
+ */
+export const SIGNATURE_LANGUAGES: ReadonlySet<string> = new Set<string>([
+  'Python', 'TypeScript', 'JavaScript', 'Go', 'Rust', 'Ruby', 'C++', 'Swift', 'Java',
+  'Terraform', 'Bicep', 'C#', 'Kotlin', 'PHP', 'C', 'Scala', 'Dart', 'Lua', 'Elixir', 'Bash',
+]);
+
 export function extractSignatures(filePath: string, content: string): FileSignatureMap {
   const language = detectLanguage(filePath);
   let entries: ExtractedSignature[];

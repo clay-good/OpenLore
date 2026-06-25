@@ -17,6 +17,17 @@ import type { FunctionNode } from './call-graph.js';
 /** variableName → className */
 export type InferredTypes = Map<string, string>;
 
+/**
+ * Languages for which {@link inferTypesFromSource} returns real inferred types (rather
+ * than an empty map). Authoritative source for the `typeInference` capability flag in
+ * the declarative language-support registry (change: add-declarative-language-support-registry).
+ * MUST list exactly the non-`default` cases of the switch below; a behavioral test asserts
+ * a fixture in each member yields a non-empty map and a non-member yields an empty one.
+ */
+export const TYPE_INFERENCE_LANGUAGES: ReadonlySet<string> = new Set<string>([
+  'Python', 'C++', 'TypeScript', 'JavaScript', 'Go', 'Rust', 'Java', 'C#', 'Ruby',
+]);
+
 export function inferTypesFromSource(source: string, language: string): InferredTypes {
   switch (language) {
     case 'Python':     return inferPython(source);

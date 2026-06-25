@@ -2477,6 +2477,21 @@ const QUERY_LANG_SPECS: Record<string, QueryLangSpec> = {
   'Scala': SCALA_SPEC, 'Lua': LUA_SPEC, 'Bash': BASH_SPEC,
 };
 
+/**
+ * Languages for which `CallGraphBuilder.build()` extracts function/method nodes and
+ * call edges. The authoritative source for the `callGraph` capability flag in the
+ * declarative language-support registry (change: add-declarative-language-support-registry).
+ *
+ * MUST stay in sync with the per-language dispatch in `build()`: the native extractors
+ * (Python/TS/JS/Go/Rust/Ruby/Java/C++/Swift/Elixir/Dart) plus the data-driven
+ * `QUERY_LANG_SPECS` languages. A behavioral test asserts a fixture in each member
+ * yields ≥1 node, so this set cannot silently over-claim.
+ */
+export const CALLGRAPH_LANGUAGES: ReadonlySet<string> = new Set<string>([
+  'Python', 'TypeScript', 'JavaScript', 'Go', 'Rust', 'Ruby', 'Java', 'C++', 'Swift', 'Elixir', 'Dart',
+  ...Object.keys(QUERY_LANG_SPECS),
+]);
+
 // ── Dart (via portable WASM + web-tree-sitter) ───────────────────────────────
 //
 // No ABI-compatible native Dart grammar exists for the pinned host binding, so

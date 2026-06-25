@@ -67,6 +67,23 @@ describe('generateCodebaseDigest', () => {
     expect(content).toContain('avg fan-in');
   });
 
+  it('includes a Language coverage matrix for detected languages', async () => {
+    const tmpDir = await mkdtemp(join(tmpdir(), 'digest-test-'));
+    const cg = makeCallGraph({
+      nodes: [
+        { id: 'a::fn', name: 'fn', filePath: 'a.ts', fanIn: 0, fanOut: 0, isAsync: false, language: 'TypeScript', startIndex: 0, endIndex: 1 },
+        { id: 'b::fn', name: 'fn', filePath: 'b.go', fanIn: 0, fanOut: 0, isAsync: false, language: 'Go', startIndex: 0, endIndex: 1 },
+      ],
+      stats: { totalNodes: 2, totalEdges: 0, avgFanIn: 0, avgFanOut: 0 },
+    });
+    await generateCodebaseDigest(makeContext(cg), null, { rootPath: tmpDir, outputDir: tmpDir });
+    const content = await readFile(join(tmpDir, 'CODEBASE.md'), 'utf-8');
+    expect(content).toContain('## Language coverage');
+    expect(content).toContain('| Language | signatures | callGraph |');
+    expect(content).toMatch(/\| Go \| ✓ \| ✓ \|/);          // Go: signatures + callGraph
+    expect(content).toContain('get_language_support');       // points to the runtime tool
+  });
+
   it('includes Entry points section when entryPoints are present', async () => {
     const tmpDir = await mkdtemp(join(tmpdir(), 'digest-test-'));
     const cg = makeCallGraph({
