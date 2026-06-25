@@ -92,7 +92,23 @@ resolved, and the called functions were imported *inside function bodies*, which
 regex skipped. Fixed both; after `analyze --force`: `import` 0 → 102, `name_only` 156 → 58. This also
 makes the language-support registry's Python `imports` claim functional.
 
-**Second bug found + fixed — HTML extractor O(N²).** Widening the "no quadratic scan" guard (a flaky
+**Second full-product pass (fresh repos: invariant Rust+IaC, mantissa-log 128 Terraform).** Verified:
+install **merges** a pre-existing `CLAUDE.md` (original content kept, +18 lines, one managed block — no
+clobber); Rust extraction (4626 functions); the IaC projectors — Docker (2 nodes), GitHub Actions (21
+job nodes + 59 dependency edges), Terraform at scale (1407 nodes + 3548 edges across AWS/Azure/GCP);
+idempotent re-install; `--json` purity across `orient`/`coverage-gaps`/`impact-certificate`/`blast-radius`.
+
+**Bug found + fixed — `--json`/large output truncated at 64KB when piped.** `process.stdout` is async on
+a pipe, so a command that wrote a large payload then `process.exit()`ed lost everything past the ~64KB
+pipe buffer: `openlore review --format json` emitted a 100,535-byte briefing that arrived truncated to
+exactly **65,536 bytes** and failed to parse — but was fine redirected to a file (synchronous writes), so
+it only bit the pipe path agents actually use. `impact-certificate` was at 62,817 B — passing only by
+luck, one repo away from the same break. Fixed with a `writeStdout` helper that awaits the flush
+(resolving eagerly when the write is accepted without backpressure, awaiting the drain callback under
+backpressure — the truncating case); the eight JSON-emitting CLIs await it before exit. Regression test
+drives a 300KB payload through a real child-process pipe.
+
+**Third bug found + fixed — HTML extractor O(N²).** Widening the "no quadratic scan" guard (a flaky
 `<1s` perf test that reddened CI) exposed that `extractHtmlScripts` is genuinely quadratic on
 unterminated `<script>` tags: each open tag re-scanned to EOF for a never-coming close tag (~24s on 100k
 tags). Fixed by stopping the scan once no close tag remains from the current position to EOF (no later

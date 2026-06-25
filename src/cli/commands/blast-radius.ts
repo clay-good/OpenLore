@@ -14,6 +14,7 @@
 import { join } from 'node:path';
 import { readFile, writeFile, mkdir, chmod } from 'node:fs/promises';
 import { Command } from 'commander';
+import { writeStdout } from '../output.js';
 import { logger, configureLogger } from '../../utils/logger.js';
 import { fileExists } from '../../utils/command-helpers.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
@@ -177,18 +178,18 @@ export async function runBlastRadiusCli(opts: BlastRadiusCliOptions): Promise<nu
   if ('error' in result) {
     // Advisory: an infrastructure failure (no graph, not a repo) must NEVER block
     // a commit. Surface the reason and exit 0 in hook mode.
-    if (opts.json) process.stdout.write(JSON.stringify({ status: 'unavailable', error: result.error }, null, 2) + '\n');
+    if (opts.json) await writeStdout(JSON.stringify({ status: 'unavailable', error: result.error }, null, 2) + '\n');
     else logger.warning(`blast-radius: ${result.error}`);
     return 0;
   }
 
   if (opts.json) {
-    process.stdout.write(JSON.stringify(result, null, 2) + '\n');
+    await writeStdout(JSON.stringify(result, null, 2) + '\n');
   } else {
     // Hook mode prints to stderr so it never pollutes scripted stdout.
     const out = renderHuman(result);
     if (opts.hook) process.stderr.write(out + '\n');
-    else process.stdout.write(out + '\n');
+    else await writeStdout(out + '\n');
   }
 
   if (opts.hook) {

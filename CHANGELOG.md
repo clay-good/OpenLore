@@ -188,6 +188,16 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ### Fixed
 
+- **`--json` / large CLI output is no longer truncated when piped.** `process.stdout` is asynchronous on
+  a pipe (the normal case when an agent or shell captures `openlore … --json`), so a command that wrote a
+  large payload and then `process.exit()`ed lost everything past the ~64KB pipe buffer — e.g.
+  `openlore review --format json` on a real repo emitted a 100KB briefing that arrived truncated to
+  exactly 65536 bytes and failed to parse (it was fine when redirected to a file, where writes are
+  synchronous — so the bug only bit the pipe path agents actually use). A new `writeStdout` helper
+  (`src/cli/output.ts`) resolves only after the write has flushed; the JSON-emitting CLIs (`review`,
+  `coverage-gaps`, `blast-radius`, `impact-certificate`, `working-set`, `spec-store`, `audit`, `enforce`)
+  await it before exiting. Found by the full-product dogfood/`--json` purity sweep.
+
 - **HTML inline-script extraction is now truly linear on unterminated `<script>` tags.** A file full of
   unterminated `<script` open tags drove `extractHtmlScripts` into O(N²) — each open tag re-scanned to
   EOF for a close tag that never came — so a large/generated HTML file could stall `analyze` (measured

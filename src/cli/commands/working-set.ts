@@ -10,6 +10,7 @@
  */
 
 import { Command } from 'commander';
+import { writeStdout } from '../output.js';
 import {
   handleWorkingSetContext,
   type WorkingSetContextReport,
@@ -85,14 +86,14 @@ export async function runWorkingSetContextCli(opts: WorkingSetContextCliOptions)
     // surface cleanly and exit 0.
     configureLogger({ quiet: false });
     const message = err instanceof Error ? err.message : String(err);
-    if (opts.json) process.stdout.write(JSON.stringify({ status: 'unavailable', error: message }, null, 2) + '\n');
+    if (opts.json) await writeStdout(JSON.stringify({ status: 'unavailable', error: message }, null, 2) + '\n');
     else logger.warning(`working-set: ${message}`);
     return 0;
   }
   configureLogger({ quiet: false });
 
-  if (opts.json) process.stdout.write(JSON.stringify(report, null, 2) + '\n');
-  else process.stdout.write(renderHuman(report) + '\n');
+  if (opts.json) await writeStdout(JSON.stringify(report, null, 2) + '\n');
+  else await writeStdout(renderHuman(report) + '\n');
   return 0;
 }
 

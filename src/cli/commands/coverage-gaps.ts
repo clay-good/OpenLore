@@ -11,6 +11,7 @@
 
 import { Command } from 'commander';
 import { logger, configureLogger } from '../../utils/logger.js';
+import { writeStdout } from '../output.js';
 import { handleReportCoverageGaps } from '../../core/services/mcp-handlers/coverage-gaps.js';
 
 interface CoverageGapItem {
@@ -118,15 +119,15 @@ export async function runCoverageGapsCli(opts: CoverageGapsCliOptions): Promise<
 
   if (result && typeof result === 'object' && 'error' in result) {
     const error = (result as { error: string }).error;
-    if (opts.json) process.stdout.write(JSON.stringify({ status: 'unavailable', error }, null, 2) + '\n');
+    if (opts.json) await writeStdout(JSON.stringify({ status: 'unavailable', error }, null, 2) + '\n');
     else logger.warning(`coverage-gaps: ${error}`);
     return 1;
   }
 
   if (opts.json) {
-    process.stdout.write(JSON.stringify(result, null, 2) + '\n');
+    await writeStdout(JSON.stringify(result, null, 2) + '\n');
   } else {
-    process.stdout.write(renderHuman(result as CoverageGapsResult) + '\n');
+    await writeStdout(renderHuman(result as CoverageGapsResult) + '\n');
   }
   return 0;
 }

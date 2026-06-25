@@ -25,6 +25,7 @@ import { promisify } from 'node:util';
 import { Command } from 'commander';
 import { logger, configureLogger } from '../../utils/logger.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
+import { writeStdout } from '../output.js';
 import { computeBlastRadius, type BlastRadiusBriefing } from '../../core/services/mcp-handlers/blast-radius.js';
 import { handleStructuralDiff } from '../../core/services/mcp-handlers/structural-diff.js';
 import { isGitRepository } from '../../core/drift/git-diff.js';
@@ -371,14 +372,16 @@ export async function runReviewCli(opts: ReviewCliOptions): Promise<number> {
       process.stderr.write(`[ok] Wrote review briefing to ${opts.out}\n`);
     } catch (err) {
       process.stderr.write(`[warn] Could not write ${opts.out} (${err instanceof Error ? err.message : String(err)}); writing to stdout instead.\n`);
-      process.stdout.write(rendered);
+      await writeStdout(rendered);
     }
   } else if (format === 'json') {
-    process.stdout.write(rendered);
+    // Await the flush: a large JSON briefing piped to a consumer is truncated at the
+    // ~64KB pipe buffer if process.exit() races the async write (see writeStdout).
+    await writeStdout(rendered);
   } else {
     // Markdown to stdout (so the CI Action can capture it); a compact human summary
     // to stderr so an interactive run is readable without scraping the markdown.
-    process.stdout.write(rendered);
+    await writeStdout(rendered);
     if (process.stderr.isTTY) process.stderr.write(renderHuman(briefing) + '\n');
   }
 

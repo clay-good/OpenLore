@@ -7,6 +7,7 @@
 
 import { Command } from 'commander';
 import { join } from 'node:path';
+import { writeStdout } from '../output.js';
 import { formatDuration } from '../../utils/command-helpers.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_AUDIT_REPORT } from '../../constants.js';
 import { openloreAudit } from '../../api/audit.js';
@@ -103,7 +104,7 @@ export const auditCommand = new Command('audit')
       });
 
       if (opts.json) {
-        process.stdout.write(JSON.stringify(report, null, 2) + '\n');
+        await writeStdout(JSON.stringify(report, null, 2) + '\n');
         return;
       }
 

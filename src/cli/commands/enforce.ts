@@ -27,6 +27,7 @@ import { join } from 'node:path';
 import { readFile, writeFile, mkdir, chmod } from 'node:fs/promises';
 import { Command } from 'commander';
 import { logger, configureLogger } from '../../utils/logger.js';
+import { writeStdout } from '../output.js';
 import { fileExists } from '../../utils/command-helpers.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
 import {
@@ -271,7 +272,7 @@ export async function runEnforceCli(opts: EnforceCliOptions): Promise<number> {
   const result = classifyFindings(collected.findings, policy);
 
   if (opts.json) {
-    process.stdout.write(JSON.stringify({
+    await writeStdout(JSON.stringify({
       gated: result.gated,
       blocking: result.blocking,
       advisory: result.advisory,
@@ -282,7 +283,7 @@ export async function runEnforceCli(opts: EnforceCliOptions): Promise<number> {
   } else {
     const out = renderHuman(result, unknown, collected.caveats);
     if (opts.hook) process.stderr.write(out + '\n');
-    else process.stdout.write(out + '\n');
+    else await writeStdout(out + '\n');
   }
 
   if (opts.hook && result.gated) {
