@@ -137,6 +137,12 @@ export const TOOL_REGISTRY: Record<string, ToolPlan> = {
         : [{ id: 'a', seedSymbols: [fn] }],
     })),
   },
+  map_in_flight_conflicts: {
+    kind: 'read',
+    // Drive on the cached repo's own branches/PRs; a cloned OSS repo with no
+    // in-flight changes yields an empty (but valid) map — still a covered read.
+    buildArgs: (f) => ({ directory: f.directory, includePullRequests: false }),
+  },
   get_function_body: {
     kind: 'read',
     buildArgs: (f) =>

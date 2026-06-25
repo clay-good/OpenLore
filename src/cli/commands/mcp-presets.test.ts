@@ -43,7 +43,7 @@ describe('MCP tool presets', () => {
   // preset only; it must NOT leak into the lean/minimal/memory surfaces.
   it('coordination preset exposes plan_parallel_work; lean/minimal/memory do not', () => {
     const coord = selectActiveTools(TOOL_DEFINITIONS, { preset: 'coordination' }).map(t => t.name);
-    expect(new Set(coord)).toEqual(new Set(['orient', 'plan_parallel_work', 'analyze_impact', 'find_path']));
+    expect(new Set(coord)).toEqual(new Set(['orient', 'plan_parallel_work', 'map_in_flight_conflicts', 'analyze_impact', 'find_path']));
     for (const sel of [{}, { minimal: true }, { preset: 'memory' }, { preset: 'navigation' }] as const) {
       expect(selectActiveTools(TOOL_DEFINITIONS, sel).map(t => t.name)).not.toContain('plan_parallel_work');
     }
@@ -127,7 +127,7 @@ describe('MCP tool presets', () => {
   it('federation_status is gated to the federation preset, never in default/minimal', () => {
     const fed = selectActiveTools(TOOL_DEFINITIONS, { preset: 'federation' }).map(t => t.name);
     expect(fed).toContain('federation_status');
-    expect(new Set(fed)).toEqual(new Set(['orient', 'federation_status', 'spec_store_status', 'working_set_context', 'change_impact_certificate', 'analyze_impact', 'find_dead_code', 'select_tests', 'find_path']));
+    expect(new Set(fed)).toEqual(new Set(['orient', 'federation_status', 'spec_store_status', 'working_set_context', 'change_impact_certificate', 'analyze_impact', 'find_dead_code', 'select_tests', 'find_path', 'map_in_flight_conflicts']));
 
     expect(selectActiveTools(TOOL_DEFINITIONS, { minimal: true }).map(t => t.name)).not.toContain('federation_status');
     // Default surface DOES list the four federation-aware tools, but federation_status
@@ -371,8 +371,14 @@ describe('tools/list payload budget (spec-28)', () => {
   // carries a nested per-task descriptor array. It joins ONLY the new opt-in `coordination`
   // preset; it stays OUT of minimal/navigation/memory. Description trimmed first; the residual
   // is the genuine cost of the nested task-list schema. Conscious decision, not silent drift.
+  // Bumped 66_000 → 68_000 when the `map_in_flight_conflicts` tool was added to the full surface
+  // (spec: add-cross-actor-interference-map) — a read-only cross-actor interference map whose
+  // schema carries a nested agent-task array (mirroring plan_parallel_work) plus the federation
+  // opt-in params. It joins ONLY the opt-in `federation` and `coordination` presets; it stays OUT
+  // of minimal/navigation/memory. Description + task-item schema trimmed first; the residual is the
+  // genuine cost of the nested task-list + federation params. Conscious decision, not silent drift.
   it('full surface stays within its prefix budget', () => {
-    expect(payloadBytes({ preset: 'full' })).toBeLessThan(66_000);
+    expect(payloadBytes({ preset: 'full' })).toBeLessThan(68_000);
   });
 
   it('the lean DEFAULT surface (no selector) is the lean navigation payload, not the full one', () => {

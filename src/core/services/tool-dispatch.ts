@@ -22,6 +22,7 @@ import { handleOrient } from './mcp-handlers/orient.js';
 import { handleSelectTests } from './mcp-handlers/test-impact.js';
 import { handleBlastRadius } from './mcp-handlers/blast-radius.js';
 import { handlePlanParallelWork } from './mcp-handlers/plan-parallel-work.js';
+import { handleMapInFlightConflicts } from './mcp-handlers/interference-map.js';
 import type { TaskDescriptor } from './mcp-handlers/change-footprint.js';
 import { handleFindDeadCode } from './mcp-handlers/reachability.js';
 import { handleVerifyClaim } from './mcp-handlers/claim-verification.js';
@@ -339,6 +340,15 @@ export async function dispatchTool(
     const { directory, tasks, readMaxDistance, affectedMaxDepth, ambientFanInPercentile } =
       args as { directory: string; tasks: TaskDescriptor[]; readMaxDistance?: number; affectedMaxDepth?: number; ambientFanInPercentile?: number };
     return handlePlanParallelWork({ directory, tasks, readMaxDistance, affectedMaxDepth, ambientFanInPercentile });
+  } else if (name === 'map_in_flight_conflicts') {
+    const { directory, baseRef, includeBranches, branches, includePullRequests, tasks, maxChanges, readMaxDistance, affectedMaxDepth, ambientFanInPercentile, federation, federationRepos } =
+      args as {
+        directory: string; baseRef?: string; includeBranches?: boolean; branches?: string[];
+        includePullRequests?: boolean; tasks?: TaskDescriptor[]; maxChanges?: number;
+        readMaxDistance?: number; affectedMaxDepth?: number; ambientFanInPercentile?: number;
+        federation?: boolean; federationRepos?: string[];
+      };
+    return handleMapInFlightConflicts({ directory, baseRef, includeBranches, branches, includePullRequests, tasks, maxChanges, readMaxDistance, affectedMaxDepth, ambientFanInPercentile, federation, federationRepos });
   }
   throw new UnknownToolError(name);
 }

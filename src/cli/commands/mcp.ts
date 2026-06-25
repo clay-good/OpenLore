@@ -1502,6 +1502,47 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: 'map_in_flight_conflicts',
+    description:
+      'USE THIS WHEN: many humans/agents edit one codebase (or federation) and you want — before merge — ' +
+      'which in-flight changes collide. Builds ONE cross-actor conflict graph over every change in flight: ' +
+      'local branches, open PRs (via gh), and supplied agent task descriptors, as nodes of the same kind. ' +
+      'Each footprint is derived from the ACTUAL diff (per-symbol append vs modify read off the hunks, so ' +
+      'two PRs appending disjoint registry entries do NOT falsely conflict); the hazard classifier ' +
+      '(WAW/RAW/shared-append/WAR) then runs across all nodes. Returns per conflict: the two actors, ' +
+      'hazard, shared symbols, suggested landing order. A change whose diff can\'t be fetched or whose ' +
+      'symbols don\'t resolve is "not assessed", never "no conflict". Read-only, stateless, advisory; ' +
+      'opt-in federation matches across repos by stable id. Run analyze_codebase first.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        directory: { type: 'string', description: DIR_DESC },
+        baseRef: { type: 'string', description: 'Git ref every change is diffed against (default: resolved default branch).' },
+        includeBranches: { type: 'boolean', description: 'Include local branches ahead of base (default true).' },
+        branches: { type: 'array', items: { type: 'string' }, description: 'Restrict to these branch names (default: all ahead of base).' },
+        includePullRequests: { type: 'boolean', description: 'Include open PRs via gh (default true; absent gh degrades).' },
+        tasks: {
+          type: 'array',
+          description: 'Optional agent task descriptors that join as first-class nodes (plan_parallel_work shape: id + seedSymbols/seedFiles + optional writeMode).',
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string' },
+              seedSymbols: { type: 'array', items: { type: 'string' } },
+              seedFiles: { type: 'array', items: { type: 'string' } },
+              intent: { type: 'string' },
+              writeMode: { type: 'string', enum: ['append', 'modify'] },
+            },
+            required: ['id'],
+          },
+        },
+        maxChanges: { type: 'number', description: 'Cap on assessed changes (default 40).' },
+        ...FEDERATION_PROPS,
+      },
+      required: ['directory'],
+    },
+  },
+  {
     name: 'detect_changes',
     description:
       'Detect recently changed functions and rank them by blast radius. ' +
@@ -1750,7 +1791,7 @@ const TOOL_ANNOTATIONS: Record<string, typeof _RO | typeof _RWI | typeof _RW> = 
   approve_decision: _RWI, reject_decision: _RWI, sync_decisions: _RWI,
   remember: _RW, recall: _RO, verify_claim: _RO,
   spec_store_status: _RO, working_set_context: _RO, change_impact_certificate: _RO,
-  plan_parallel_work: _RO,
+  plan_parallel_work: _RO, map_in_flight_conflicts: _RO,
 };
 
 // Tools that touch external entities (LLM / network) → openWorldHint: true.
@@ -1811,15 +1852,17 @@ export const TOOL_PRESETS: Record<string, Set<string>> = {
   // add-multi-repo-federation; architecture: FederationScopedConclusions opt-in).
   federation: new Set([
     'orient', 'federation_status', 'spec_store_status', 'working_set_context', 'change_impact_certificate',
-    'analyze_impact', 'find_dead_code', 'select_tests', 'find_path',
+    'analyze_impact', 'find_dead_code', 'select_tests', 'find_path', 'map_in_flight_conflicts',
   ]),
   // Parallel-work coordination (opt-in): orient to ground, then plan_parallel_work to
-  // schedule N proposed tasks into safe-to-dispatch waves + a critical path. analyze_impact
-  // and find_path help an agent name and scope the seed symbols a task will touch.
-  // Deliberately NOT in the default or `minimal` surface (mcp-quality: minimize the tools an
-  // agent must consider; change: add-parallel-work-plan).
+  // schedule N proposed tasks into safe-to-dispatch waves + a critical path, or
+  // map_in_flight_conflicts to find collisions across every change already in flight
+  // (branches/PRs/tasks). analyze_impact and find_path help an agent name and scope the
+  // seed symbols a task will touch. Deliberately NOT in the default or `minimal` surface
+  // (mcp-quality: minimize the tools an agent must consider; changes: add-parallel-work-plan,
+  // add-cross-actor-interference-map).
   coordination: new Set([
-    'orient', 'plan_parallel_work', 'analyze_impact', 'find_path',
+    'orient', 'plan_parallel_work', 'map_in_flight_conflicts', 'analyze_impact', 'find_path',
   ]),
 };
 
@@ -2286,6 +2329,6 @@ export const mcpCommand = new Command('mcp')
   .option('--watch-debounce <ms>', 'Debounce delay in ms before re-indexing after a file change (default: 400)', '400')
   .option('--watch-no-embed', 'Watch signatures only — skip live vector re-embedding (embeddings refresh at commit). Large repos auto-degrade to this.')
   .option('--minimal', 'Expose only core 6 tools (orient, search_code, record_decision, detect_changes, check_spec_drift, get_health_map). Pair with alwaysLoad: true in Claude Code for always-visible core tools.')
-  .option('--preset <name>', 'Expose a named tool preset. Default (no preset) is the lean "navigation" surface — the benchmark-winning graph-traversal core (orient, search_code, get_subgraph, trace_execution_path, analyze_impact, suggest_insertion_points, get_function_skeleton, get_landmarks, get_map, find_path) — NOT the full registry. "minimal" = orient+search+governance; "memory" = orient+remember+recall; "verify" = orient+search+verify_claim; "federation" = orient + federation_status + spec_store_status + working_set_context + change_impact_certificate + the four cross-repo conclusion tools; "coordination" = orient + plan_parallel_work + analyze_impact + find_path; "full" = all 63 tools (the prior default). Takes precedence over --minimal.')
-  .option('--all-tools', 'Expose the full surface — all 63 tools (alias for --preset full). Opt-in breadth; the lean navigation default is recommended.')
+  .option('--preset <name>', 'Expose a named tool preset. Default (no preset) is the lean "navigation" surface — the benchmark-winning graph-traversal core (orient, search_code, get_subgraph, trace_execution_path, analyze_impact, suggest_insertion_points, get_function_skeleton, get_landmarks, get_map, find_path) — NOT the full registry. "minimal" = orient+search+governance; "memory" = orient+remember+recall; "verify" = orient+search+verify_claim; "federation" = orient + federation_status + spec_store_status + working_set_context + change_impact_certificate + map_in_flight_conflicts + the four cross-repo conclusion tools; "coordination" = orient + plan_parallel_work + map_in_flight_conflicts + analyze_impact + find_path; "full" = all 64 tools (the prior default). Takes precedence over --minimal.')
+  .option('--all-tools', 'Expose the full surface — all 64 tools (alias for --preset full). Opt-in breadth; the lean navigation default is recommended.')
   .action((options: McpServerOptions) => startMcpServer(options));

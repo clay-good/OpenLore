@@ -124,6 +124,12 @@ export const FINDING_CODE_REGISTRY: Record<string, FindingCodeSpec> = {
     source: 'plan-parallel-work',
     description: 'A set of proposed tasks forms an unorderable read-after-write cycle; no wave order satisfies all dependencies, so the members are scheduled mutually exclusive and the circular dependency should be resolved.',
   },
+  // ── cross-actor interference map (add-cross-actor-interference-map) ──
+  'cross-actor-conflict': {
+    defaultClass: 'advisory',
+    source: 'interference-map',
+    description: 'Two in-flight changes (branches/PRs/agent tasks, within or across a federation) have a write-write (WAW) conflict on a shared symbol; they must not land concurrently. A CI check can name this code to warn when a new PR collides with an open one.',
+  },
 };
 
 /** Whether a code is registered (so a declared policy entry is recognized). */

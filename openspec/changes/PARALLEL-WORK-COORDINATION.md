@@ -141,8 +141,8 @@ a future, clearly-fenced follow-up — never on the served path.
 |---|--------|--------------|----------------|-------------------------------------------|
 | 1 | `add-change-footprint-projection` **(SHIPPED — `feat/change-footprint-projection`)** | The borrow-analysis core: a deterministic per-task **footprint** (write-set / read-set / affected-set) and a **hazard classifier** over a pair of footprints. No new tool. | analyzer | — (foundation; reuses `blast_radius` / `analyze_impact` / `get_change_coupling`) |
 | 2 | `add-parallel-work-plan` **(SHIPPED — `feat/parallel-work-plan`)** | One conclusion tool `plan_parallel_work`: takes N task descriptors, returns the hazard-typed conflict graph, the wave schedule, the critical path, and each task's footprint. | mcp-handlers | 1 |
-| 3 | `add-footprint-escape-detection` | The back-side safety net: extend `structural_diff` to flag symbols an actual diff modified **outside** its declared write-footprint, and recompute newly-opened conflicts with peer tasks. | mcp-handlers | 1 |
-| 4 | `add-cross-actor-interference-map` | The team wedge: treat open PRs / branches **and** in-flight agent task footprints as one conflict graph across the federation — "your task collides with PR #210's blast radius." | mcp-handlers | 1, 2 |
+| 3 | `add-footprint-escape-detection` **(SHIPPED — `feat/footprint-escape-detection`)** | The back-side safety net: extend `structural_diff` to flag symbols an actual diff modified **outside** its declared write-footprint, and recompute newly-opened conflicts with peer tasks. | mcp-handlers | 1 |
+| 4 | `add-cross-actor-interference-map` **(SHIPPED — `feat/cross-actor-interference-map`; sibling tool `map_in_flight_conflicts`)** | The team wedge: treat open PRs / branches **and** in-flight agent task footprints as one conflict graph across the federation — "your task collides with PR #210's blast radius." | mcp-handlers | 1, 2 |
 
 Recommended build order is 1 → 2 → 3 → 4, but each ships on its own. Ship 1 and 2 first; they are the
 whole single-machine swarm story. 3 closes the soundness gap. 4 is the multi-human, multi-repo

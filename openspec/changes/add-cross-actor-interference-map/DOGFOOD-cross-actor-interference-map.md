@@ -1,0 +1,70 @@
+# Dogfood — `map_in_flight_conflicts`
+
+Run against this repo on 2026-06-24, from `feat/cross-actor-interference-map`, base `main`.
+The tool was driven through its real default providers (git for branches, `gh` for PRs) — no mocks.
+
+## Branches (real overlap, correctly flagged)
+
+Input: `branches: [feat/change-footprint-projection, feat/parallel-work-plan, feat/footprint-escape-detection]`,
+`includePullRequests: false`.
+
+```
+HEADLINE: 2 in-flight change(s); 1 conflict pair(s); 1 write-write (must serialize); 1 not assessed.
+repos: [ 'this-repo' ] | assessed: 2 | notAssessed: 1
+
+CHANGES:
+  [branch] feat/change-footprint-projection by sim — NOT ASSESSED (no-resolvable-symbols)
+  [branch] feat/footprint-escape-detection by sim — 2 symbols / 22 files
+  [branch] feat/parallel-work-plan by sim — 1 symbols / 28 files
+
+CONFLICTS: 1
+  WAW: feat/footprint-escape-detection × feat/parallel-work-plan
+    witnesses: dispatchTool
+    -> feat/footprint-escape-detection and feat/parallel-work-plan both modify dispatchTool —
+       land one, then rebase the other onto it; do not edit concurrently.
+
+FINDINGS: 1
+  [cross-actor-conflict] feat/footprint-escape-detection (sim) × feat/parallel-work-plan (sim)
+```
+
+**Verdict — true positive.** Both branches add a dispatch case to `dispatchTool` in
+`src/core/services/tool-dispatch.ts`; one also modifies an existing case (footprint-escape passes
+`declaredFootprint` to the `structural_diff` case), so the shared symbol is a `modify` on at least one
+side → WAW. These two genuinely conflict at merge in that function.
+
+**Verdict — honest "not assessed".** `feat/change-footprint-projection`'s diff vs `main` is almost
+entirely *new* files (the proposal-1 library + tests + proposal docs), so it touches no base symbol the
+index can resolve. The tool labels it `not-assessed (no-resolvable-symbols)` rather than reporting a
+false "no conflict" — exactly the honesty contract the proposal requires.
+
+## Open PRs via `gh` (same overlap, end-to-end)
+
+Input: `includeBranches: false`, `includePullRequests: true`, `maxChanges: 6`.
+
+```
+HEADLINE: 2 in-flight change(s); 1 conflict pair(s); 1 write-write (must serialize); 1 not assessed.
+
+CHANGES (PRs):
+  [pull-request] PR #199 by clay-good — NOT ASSESSED (no-resolvable-symbols)
+  [pull-request] PR #200 by clay-good — 3 symbols / 39 files
+  [pull-request] PR #201 by clay-good — 10 symbols / 21 files
+
+CONFLICTS: 1
+  WAW: PR #200 × PR #201 [dispatchTool]
+
+CAVEATS:
+  - PR diffs are read against the LOCAL base ref; if a PR's base has advanced past local, its hunk
+    line mapping is approximate. Re-fetch the base for an exact result.
+```
+
+**Verdict.** The `gh` enumeration path works end-to-end and reproduces the same correct WAW
+(PR #200 × #201 on `dispatchTool`), with PR #199 honestly "not assessed". The local-base caveat is
+disclosed rather than silently assumed.
+
+## What this exercised
+
+- branch enumeration + merge-base diff + per-changed-file base-snapshot re-parse + hunk→symbol mapping;
+- the observed-`writeMode` path (the `modify` on `dispatchTool` came from a real deletion-bearing hunk);
+- `gh pr list` + `gh pr diff` enumeration and parsing;
+- the "not assessed" honesty contract on a real all-new-files change;
+- deterministic, conclusion-shaped output with the standing ground-truth disclosure.
