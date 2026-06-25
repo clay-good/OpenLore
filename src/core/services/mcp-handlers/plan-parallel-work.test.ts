@@ -327,6 +327,42 @@ describe('computePlanParallelWork — adversarial robustness', () => {
     expect((r as { error: string }).error).toMatch(/Too many tasks/i);
   });
 
+  it('caps the O(N²) evidence lists and witnesses with authoritative uncapped counts', async () => {
+    // 30 tasks all writing the same symbol → 30·29/2 = 435 WAW pairs.
+    mockCtx(scenarioGraph());
+    const tasks = Array.from({ length: 30 }, (_, i) => ({ id: `t${i}`, seedSymbols: ['shared.ts::shared'] }));
+    const p = await plan(tasks);
+    expect(p.conflictCount).toBe(435);
+    expect(p.conflicts.length).toBe(200); // CONFLICT_LIST_CAP
+    expect(p.conflictsTruncated).toBe(true);
+    expect(p.findingCount).toBe(435);
+    expect(p.findings.length).toBe(100); // FINDINGS_LIST_CAP
+    expect(p.findingsTruncated).toBe(true);
+    for (const c of p.conflicts) expect(c.witnesses.length).toBeLessThanOrEqual(8); // WITNESS_CAP
+  });
+
+  it('keeps the response under the dispatch byte cap even for a large adversarial plan', async () => {
+    // 64 tasks each seeding a wide file (100 long-named symbols) → ~2,016 WAW pairs
+    // with many shared-symbol witnesses + large write-sets. The per-list caps + the
+    // byte-budget backstop must keep the serialized response well under 256 KB.
+    const longDir = 'src/core/services/mcp-handlers/some/deeply/nested/module';
+    const wide = Array.from({ length: 100 }, (_, i) =>
+      node({ id: `${longDir}/bigFileWithALongName.ts::aFairlyLongSymbolName_${i}` }),
+    );
+    mockCtx(graph(wide));
+    const tasks = Array.from({ length: 64 }, (_, i) => ({
+      id: `task-with-a-longish-id-${i}`,
+      seedFiles: [`${longDir}/bigFileWithALongName.ts`],
+    }));
+    const p = await plan(tasks);
+    const bytes = Buffer.byteLength(JSON.stringify(p));
+    expect(bytes).toBeLessThan(256 * 1024);
+    // The schedule and authoritative counts survive any shrink.
+    expect(p.waves.length).toBeGreaterThan(0);
+    expect(p.conflictCount).toBe((64 * 63) / 2);
+    if (p.truncationNote) expect(p.truncationNote).toMatch(/budget/i);
+  });
+
   it('handles a large disjoint batch (at the cap) in a single wave, bounded', async () => {
     // 64 distinct files → 64 disjoint tasks → one wave, no conflicts.
     const nodes = Array.from({ length: 64 }, (_, i) => node({ id: `f${i}.ts::fn${i}` }));

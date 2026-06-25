@@ -50,6 +50,20 @@
 - [x] **Task-count cap** (`MAX_TASKS = 64`): over the cap is an explicit error (no silent truncation),
       bounding the O(N²) conflict graph + O(N·E) footprint cost and the payload.
 
+## 5c. Output-size hardening (second adversarial e2e pass via real `dispatchTool`, 2026-06-24)
+- [x] **Response byte-bounding**: the worst-case real-dispatch response was ~1 MB (64 dense-conflict
+      tasks) and up to ~770 KB (whole-file seeds), which the dispatch-level 256 KB structured-result cap
+      would mangle into an unparseable string. Now every O(N²) list (`conflicts` / `advisories` /
+      `findings`) and every per-task footprint region is capped with an authoritative uncapped count +
+      truncation flag, witnesses are capped (`WITNESS_CAP`), and a deterministic byte-budget backstop
+      (`SOFT_BUDGET_BYTES`) collapses footprint sample lists (then trims evidence) with a
+      `truncationNote` for extreme plans. Verified via real `dispatchTool` round-trips: worst case now
+      ~193 KB, whole-file case 770 KB → 98 KB; the schedule + counts always survive.
+- [x] **Enforce-seam honesty**: clarified across the tool docstring, `docs/mcp-tools.md`, `CLAUDE.md`,
+      and `docs/configuration.md` that the `parallel-work-*` findings are policy-*shaped* for the
+      **caller** to gate on (`resolveEnforcementClass`); the bundled `openlore enforce` commit gate is
+      diff-based, never runs the planner, and never blocks on them.
+
 ## 6. Tests
 - [x] 3 disjoint tasks → 1 wave.
 - [x] WAW pair (≥1 `modify`) → separate waves + advisory finding.

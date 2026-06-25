@@ -83,3 +83,29 @@ two robustness gaps, all now fixed and regression-tested:
 Re-dogfooded after the fixes on the real index: the mixed-hazard plan is unchanged (2 waves), the cap
 fires at 65 tasks, an all-unresolved task degrades to one wave with its `unresolvedSeeds` reported, and
 the plan stays byte-identical across re-invocations.
+
+## Second adversarial pass — output size via real `dispatchTool` (2026-06-24)
+
+Exercising the **real MCP entry point** (`dispatchTool('plan_parallel_work', …)`, not just
+`computePlanParallelWork`) surfaced a severe response-size bug the first pass missed:
+
+| Adversarial plan (64 tasks, real index) | Before | After |
+|------------------------------------------|--------|-------|
+| all-WAW on `dispatchTool` | ~1,012 KB | 193 KB |
+| each seeded on a god-function (`handleOrient`) | ~1,028 KB | 192 KB |
+| each seeding a whole large file | ~770 KB | 98 KB |
+| 12 realistic tasks | — | 50 KB |
+
+A response over the dispatch-level **256 KB cap** (`MCP_TOOL_MAX_BYTES`) does not degrade gracefully —
+`capStructuredResult` falls back to wrapping the whole structured result in an unparseable `{ truncated,
+partial: "<sliced JSON>" }` string, i.e. the agent receives garbage. The fix bounds the response
+semantically *before* it returns: the O(N²) `conflicts` / `advisories` / `findings` lists and every
+per-task footprint region carry a cap + an authoritative uncapped count, witnesses are capped, and a
+deterministic byte-budget backstop collapses footprint sample lists (then trims evidence) with a
+`truncationNote` for extreme plans. The schedule (waves + critical path) and all counts are always
+complete. Malformed args through the real dispatch path (`tasks` missing / a string / an item with no
+`id`) return clean error strings.
+
+The same pass corrected an honesty gap in the docs: the `parallel-work-*` findings are *policy-shaped*
+for the **caller** to gate on; the bundled `openlore enforce` commit gate is diff-based and never runs
+the planner, so it never blocks on them.

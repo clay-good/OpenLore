@@ -18,9 +18,14 @@
  * harness owns state and dispatch (north star `c6d1ad07`: OpenLore computes
  * conclusions; it never grows a coordinator).
  *
- * Advisory by default: the plan blocks nothing on its own. A repo MAY opt the
- * `parallel-work-conflict` finding into blocking via `enforcement.policy`
- * (add-finding-enforcement-policy), but the default is pure advice.
+ * Advisory by default: the plan blocks nothing on its own. WAW conflicts and
+ * unorderable RAW cycles are emitted as policy-shaped `GovernanceFinding`s
+ * (`parallel-work-conflict` / `parallel-work-cycle`, registered in
+ * `FINDING_CODE_REGISTRY`) so the *caller* that invokes this tool can classify
+ * them with `resolveEnforcementClass(code, policy)` and choose to block in its own
+ * orchestration/CI. The bundled `openlore enforce` commit gate is diff-based and
+ * never runs the planner, so it never sees — and never blocks on — these findings
+ * (add-finding-enforcement-policy).
  */
 
 import { validateDirectory, readCachedContext } from './utils.js';
@@ -36,7 +41,31 @@ import type { GovernanceFinding } from './enforcement-policy.js';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
 
 /** How many read/affected ids to surface per task footprint before truncating (no-silent-truncation). */
-const FOOTPRINT_LIST_CAP = 50;
+const FOOTPRINT_LIST_CAP = 12;
+
+/**
+ * Caps on the O(N²) supporting-evidence lists. The schedule itself (waves +
+ * critical path) is O(N) and always complete; the conflict graph, advisories, and
+ * findings can each reach ~N²/2 entries (e.g. 64 tasks all writing one symbol →
+ * ~2,016 pairs), which would push the response into the megabytes and trip the
+ * dispatch-level 256 KB structured-result cap — whose array fallback mangles the
+ * payload into an unparseable string. So each is capped here with an authoritative
+ * uncapped count + a truncation flag (mcp-quality: no-silent-truncation). The waves
+ * still encode every conflict's scheduling consequence; the lists are evidence.
+ */
+const CONFLICT_LIST_CAP = 200;
+const FINDINGS_LIST_CAP = 100;
+/** Max witnessing symbols surfaced per conflict/advisory/finding (a whole-file WAW pair can share dozens). */
+const WITNESS_CAP = 8;
+/**
+ * Soft byte budget for the whole response. The dispatch-level hard cap is 256 KB
+ * (`MCP_TOOL_MAX_BYTES`), and its array fallback mangles an over-budget structured
+ * result into an unparseable string — so we keep a margin below it and, if a plan
+ * is still too large after the per-list caps (e.g. 64 tasks each seeding a whole
+ * file), deterministically collapse per-task footprint *sample lists* to their
+ * counts. The schedule (waves + critical path) and the counts are always retained.
+ */
+const SOFT_BUDGET_BYTES = 200 * 1024;
 
 /**
  * Upper bound on tasks per call. The conflict graph is O(N²) pairs and each
@@ -59,10 +88,15 @@ export interface PlanParallelWorkInput {
   ambientFanInPercentile?: number;
 }
 
-/** A task's footprint, rendered for the plan (write-set in full; large regions capped with counts). */
+/** A task's footprint, rendered for the plan. Every region list is capped to
+ *  {@link FOOTPRINT_LIST_CAP} with an authoritative uncapped count, so a task seeded
+ *  on a god-function (huge read-set / ambient deps) or a whole file (large write-set)
+ *  cannot bloat the response (no-silent-truncation). */
 export interface RenderedFootprint {
   taskId: string;
   writeSet: Array<{ id: string; name: string; filePath: string; writeMode: string }>;
+  writeSetCount: number;
+  writeSetTruncated: boolean;
   readSet: string[];
   readSetCount: number;
   readSetTruncated: boolean;
@@ -70,7 +104,11 @@ export interface RenderedFootprint {
   affectedSetCount: number;
   affectedSetTruncated: boolean;
   ambientReadDeps: string[];
+  ambientReadDepCount: number;
+  ambientReadDepsTruncated: boolean;
   couplingNeighbors: string[];
+  couplingNeighborCount: number;
+  couplingNeighborsTruncated: boolean;
   unresolvedSeeds: string[];
 }
 
@@ -104,19 +142,33 @@ export interface CriticalPath {
 export interface ParallelWorkPlan {
   taskCount: number;
   footprints: RenderedFootprint[];
-  /** Pairwise hazards (only the non-`none` pairs), as supporting evidence with witnesses. */
+  /** Pairwise hazards (only the non-`none` pairs), as supporting evidence with witnesses. Capped — see `conflictCount`. */
   conflicts: ConflictPair[];
-  /** The computed answer: an ordered list of dispatch waves. */
+  /** Total non-`none` pairs (uncapped); `conflicts` is truncated to {@link CONFLICT_LIST_CAP} when this exceeds it. */
+  conflictCount: number;
+  conflictsTruncated: boolean;
+  /** The computed answer: an ordered list of dispatch waves (always complete). */
   waves: Wave[];
   criticalPath: CriticalPath;
-  /** Low-risk pairs surfaced as warnings (shared-append / WAR / soft-coupling) — non-serializing. */
+  /** Low-risk pairs surfaced as warnings (shared-append / WAR / soft-coupling) — non-serializing. Capped — see `advisoryCount`. */
   advisories: Array<{ kind: HazardVerdict['kind']; taskA: string; taskB: string; witnesses: string[]; note: string }>;
-  /** Opt-in gating: WAW conflicts among the proposed tasks, as governance findings (advisory by default). */
+  advisoryCount: number;
+  advisoriesTruncated: boolean;
+  /**
+   * Governance findings (WAW conflicts / unorderable RAW cycles), shaped so a caller
+   * can classify them with `resolveEnforcementClass`. Advisory by default; capped —
+   * see `findingCount`. The bundled `openlore enforce` gate does NOT run the planner,
+   * so it never sees these — the invoking caller/CI applies the policy.
+   */
   findings: GovernanceFinding[];
+  findingCount: number;
+  findingsTruncated: boolean;
   /** Greedy + topological; not optimal — stated plainly. */
   scheduling: string;
   /** Standing known-unknowable disclosure. */
   disclosure: string;
+  /** Set only when a large plan was shrunk to fit the response budget (counts stay authoritative). */
+  truncationNote?: string;
 }
 
 const DISCLOSURE =
@@ -203,7 +255,7 @@ export async function computePlanParallelWork(
       const b = footprints[j];
       const v = classifyHazard(a, b);
       if (v.kind === 'none') continue;
-      conflicts.push({ taskA: a.taskId, taskB: b.taskId, hazard: v.kind, direction: v.direction, witnesses: v.witnesses });
+      conflicts.push({ taskA: a.taskId, taskB: b.taskId, hazard: v.kind, direction: v.direction, witnesses: capWitnesses(v.witnesses) });
 
       if (v.kind === 'WAW') {
         waw.get(a.taskId)!.add(b.taskId);
@@ -213,7 +265,7 @@ export async function computePlanParallelWork(
           severity: 'warning',
           source: 'plan-parallel-work',
           subject: `${a.taskId} × ${b.taskId}`,
-          message: `Write-write conflict on ${v.witnesses.join(', ')} — these tasks must not edit concurrently (scheduled into different waves).`,
+          message: `Write-write conflict on ${witnessSummary(v.witnesses)} — these tasks must not edit concurrently (scheduled into different waves).`,
         });
       } else if (v.kind === 'RAW') {
         applyRaw(a.taskId, b.taskId, v.direction, rawPred, waw);
@@ -223,7 +275,7 @@ export async function computePlanParallelWork(
           kind: v.kind,
           taskA: a.taskId,
           taskB: b.taskId,
-          witnesses: v.witnesses,
+          witnesses: capWitnesses(v.witnesses),
           note: advisoryNote(v.kind),
         });
       }
@@ -283,17 +335,86 @@ export async function computePlanParallelWork(
       `peak wave width is ${maxWidth}, so beyond ${maxWidth} concurrent agent(s) buys nothing.`,
   };
 
-  return {
+  return boundResponse({
     taskCount: footprints.length,
     footprints: footprints.map(renderFootprint),
-    conflicts,
+    conflicts: conflicts.slice(0, CONFLICT_LIST_CAP),
+    conflictCount: conflicts.length,
+    conflictsTruncated: conflicts.length > CONFLICT_LIST_CAP,
     waves,
     criticalPath,
-    advisories,
-    findings,
+    advisories: advisories.slice(0, CONFLICT_LIST_CAP),
+    advisoryCount: advisories.length,
+    advisoriesTruncated: advisories.length > CONFLICT_LIST_CAP,
+    findings: findings.slice(0, FINDINGS_LIST_CAP),
+    findingCount: findings.length,
+    findingsTruncated: findings.length > FINDINGS_LIST_CAP,
     scheduling: SCHEDULING_NOTE,
     disclosure: DISCLOSURE,
-  };
+  });
+}
+
+/** Cap a witness list for output; a list longer than the cap carries no extra signal. */
+function capWitnesses(witnesses: string[]): string[] {
+  return witnesses.slice(0, WITNESS_CAP);
+}
+
+/** Human-readable witness summary for a finding message, with an overflow count. */
+function witnessSummary(witnesses: string[]): string {
+  const shown = witnesses.slice(0, WITNESS_CAP).join(', ');
+  return witnesses.length > WITNESS_CAP ? `${shown} (+${witnesses.length - WITNESS_CAP} more)` : shown;
+}
+
+/**
+ * Deterministic response-size backstop. The per-list caps keep typical plans
+ * small, but a pathological large plan (e.g. 64 tasks each seeding a whole file)
+ * can still exceed {@link SOFT_BUDGET_BYTES}. Rather than let the dispatch hard cap
+ * mangle the structured result, collapse the per-task footprint *sample lists* to
+ * their (authoritative) counts — the schedule and counts are always retained — and
+ * disclose it via `truncationNote`. Idempotent and a pure function of the input.
+ */
+function boundResponse(plan: ParallelWorkPlan): ParallelWorkPlan {
+  if (jsonBytes(plan) <= SOFT_BUDGET_BYTES) return plan;
+
+  // Stage 1: collapse per-task footprint sample lists to their counts.
+  for (const f of plan.footprints) {
+    f.writeSet = f.writeSet.slice(0, 3);
+    f.writeSetTruncated = f.writeSetCount > f.writeSet.length;
+    f.readSet = [];
+    f.readSetTruncated = f.readSetCount > 0;
+    f.affectedSet = [];
+    f.affectedSetTruncated = f.affectedSetCount > 0;
+    f.ambientReadDeps = [];
+    f.ambientReadDepsTruncated = f.ambientReadDepCount > 0;
+    f.couplingNeighbors = [];
+    f.couplingNeighborsTruncated = f.couplingNeighborCount > 0;
+  }
+  plan.truncationNote =
+    'Large plan: per-task footprint sample lists were collapsed to their counts to keep the response ' +
+    'within budget. The schedule, counts, and conflict graph are authoritative; re-invoke with fewer ' +
+    'tasks for per-symbol footprint detail.';
+  if (jsonBytes(plan) <= SOFT_BUDGET_BYTES) return plan;
+
+  // Stage 2: tighten the O(N²) supporting-evidence lists (the schedule still
+  // encodes every conflict's consequence; counts remain authoritative).
+  const trim = 50;
+  const trimWit = <T extends { witnesses: string[] }>(x: T): T => ({ ...x, witnesses: x.witnesses.slice(0, 3) });
+  plan.conflicts = plan.conflicts.slice(0, trim).map(trimWit);
+  plan.conflictsTruncated = plan.conflictCount > plan.conflicts.length;
+  plan.advisories = plan.advisories.slice(0, trim).map(trimWit);
+  plan.advisoriesTruncated = plan.advisoryCount > plan.advisories.length;
+  plan.findings = plan.findings.slice(0, 25);
+  plan.findingsTruncated = plan.findingCount > plan.findings.length;
+  plan.truncationNote =
+    'Large plan: per-task footprint sample lists were collapsed to counts and the conflict / advisory / ' +
+    'finding evidence lists were further trimmed to keep the response within budget. The schedule (waves ' +
+    '+ critical path) and all counts are authoritative; re-invoke with fewer tasks for full detail.';
+  return plan;
+}
+
+/** Cheap deterministic byte estimate of a JSON-serializable value. */
+function jsonBytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value));
 }
 
 /** Apply a RAW verdict as an ordering edge; a bidirectional RAW is an unorderable cycle → mutual exclusion. */
@@ -482,17 +603,26 @@ function longestChain(
 }
 
 function renderFootprint(f: Footprint): RenderedFootprint {
+  const cap = FOOTPRINT_LIST_CAP;
   return {
     taskId: f.taskId,
-    writeSet: f.writeSet.map(w => ({ id: w.id, name: w.name, filePath: w.filePath, writeMode: w.writeMode })),
-    readSet: f.readSet.slice(0, FOOTPRINT_LIST_CAP),
+    writeSet: f.writeSet
+      .slice(0, cap)
+      .map(w => ({ id: w.id, name: w.name, filePath: w.filePath, writeMode: w.writeMode })),
+    writeSetCount: f.writeSet.length,
+    writeSetTruncated: f.writeSet.length > cap,
+    readSet: f.readSet.slice(0, cap),
     readSetCount: f.readSet.length,
-    readSetTruncated: f.readSet.length > FOOTPRINT_LIST_CAP,
-    affectedSet: f.affectedSet.slice(0, FOOTPRINT_LIST_CAP),
+    readSetTruncated: f.readSet.length > cap,
+    affectedSet: f.affectedSet.slice(0, cap),
     affectedSetCount: f.affectedSet.length,
-    affectedSetTruncated: f.affectedSet.length > FOOTPRINT_LIST_CAP,
-    ambientReadDeps: f.ambientReadDeps,
-    couplingNeighbors: f.couplingNeighbors,
+    affectedSetTruncated: f.affectedSet.length > cap,
+    ambientReadDeps: f.ambientReadDeps.slice(0, cap),
+    ambientReadDepCount: f.ambientReadDeps.length,
+    ambientReadDepsTruncated: f.ambientReadDeps.length > cap,
+    couplingNeighbors: f.couplingNeighbors.slice(0, cap),
+    couplingNeighborCount: f.couplingNeighbors.length,
+    couplingNeighborsTruncated: f.couplingNeighbors.length > cap,
     unresolvedSeeds: f.unresolvedSeeds,
   };
 }

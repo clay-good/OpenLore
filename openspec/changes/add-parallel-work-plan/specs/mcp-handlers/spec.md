@@ -24,6 +24,24 @@ preset and SHALL NOT be a member of the minimal tool set or the lean first-run d
 SHALL carry a known-unknowable disclosure that footprints are predicted, that the plan reduces but
 does not eliminate conflict probability, and that integration tests remain the ground truth.
 
+The schedule (waves and critical path) SHALL always be complete, while the supporting-evidence lists
+(the conflict graph, advisories, governance findings, and per-task footprint regions) — which can grow
+as the square of the task count — SHALL be bounded with authoritative uncapped counts so the response
+stays within the MCP transport byte budget and is never silently truncated. Governance findings (WAW
+conflicts and unorderable cycles) SHALL be emitted in the unified governable-finding shape so the
+**calling agent or CI** can resolve them against its own `enforcement.policy`; the diff-based commit
+gate does not run the planner and therefore does not block on them.
+
+#### Scenario: A very large plan stays within the response budget without losing the schedule
+
+- **GIVEN** a task list large enough that its pairwise conflict graph or footprint detail would exceed
+  the MCP response byte budget
+- **WHEN** `plan_parallel_work` is called with it
+- **THEN** the full wave schedule and critical path are returned along with authoritative uncapped
+  counts, the oversized supporting-evidence lists are capped (and per-task footprint sample lists may be
+  collapsed to their counts) with an explicit truncation disclosure, and the serialized response stays
+  within the transport budget
+
 #### Scenario: Disjoint tasks plan into a single wave
 
 - **GIVEN** three task descriptors whose footprints pairwise classify as `none`

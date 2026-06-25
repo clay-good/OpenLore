@@ -133,6 +133,8 @@ The governable finding codes (the **finding-code catalogue** — every code defa
 
 > **Note on the surface codes.** The change-impact certificate's *own* `--json` finding codes are `surface-newly-reached` / `surface-critical` (see [mcp-tools.md](mcp-tools.md)); the enforcement gate governs the **per-severity** codes `surface-info` / `surface-warn` / `surface-critical` (one per declared surface severity). To block a surface via `enforcement.policy`, name the per-severity code (e.g. `"surface-critical": "blocking"`), not `surface-newly-reached` — an unrecognized code is retained but governs nothing.
 
+> **Note on the parallel-work codes.** `parallel-work-conflict` / `parallel-work-cycle` are emitted **only** by the `plan_parallel_work` MCP tool, which `openlore enforce` never runs (the gate is diff-based; the planner needs a caller-supplied task list). Naming them in `enforcement.policy` lets the **caller that invokes the planner** classify its `findings[]` with `resolveEnforcementClass` and block in its own CI; the bundled commit gate never produces or blocks on them.
+
 ### Task-scoped context injection
 
 An optional `contextInjection` block controls the per-task orientation that `openlore install` wires as a Claude Code `UserPromptSubmit` hook (`openlore orient --inject`). It runs `orient` against your submitted prompt and places a bounded, ignorable orientation block in context *before the agent's first turn*, so the common task begins already oriented without a manual `orient` call — amortizing the per-task round-trip the [Value Scorecard](AGENT-BENCHMARKS.md) attributes the small/familiar loss case to. Omit the block entirely for the defaults below (injection enabled). See [`openlore install`](install.md#task-scoped-context-injection).
