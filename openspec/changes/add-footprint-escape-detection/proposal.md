@@ -13,10 +13,24 @@
 > `pure-addition` (a new switch case) from a `modifies-existing` edit — and runs the analysis when a
 > `declaredFootprint` is supplied. Three finding codes (`footprint-escape`,
 > `footprint-escape-new-conflict`, `mis-declared-append`) are registered in `FINDING_CODE_REGISTRY`,
-> advisory by default, opt-in blocking via `enforcement.policy`. No new MCP tool. Verified by 29
+> advisory by default, opt-in blocking via `enforcement.policy`. No new MCP tool. Verified by 40
 > co-located tests (`footprint-escape.test.ts`, `structural-diff-escape.test.ts`), the full suite
 > (247 files green), and a dogfood on this repo's real working tree (see
 > `DOGFOOD-footprint-escape-detection.md`).
+>
+> **Adversarial hardening round (post-review, 2026-06-24).** Three parallel adversarial audits drove
+> fixes: (1) **CRITICAL** — `structural_diff` sliced symbol source by tree-sitter offsets using
+> `Buffer.subarray` (BYTE offsets), but the node binding reports UTF-16 **code-unit** offsets; on any
+> multibyte file this corrupted the slice and could misclassify or silently drop a real escape. Fixed
+> to `content.slice` (matching every other slice site); proven with a heavily-multibyte end-of-function
+> regression. (2) the empty/non-code-diff early return silently dropped a supplied footprint — now
+> emits a vacuous `escapeAnalysis` with a note. (3) a degenerate (empty/malformed) declared write-set
+> is now disclosed instead of producing a silent full-diff escape storm. (4) `maxResults` truncation is
+> disclosed and **always retains blocking findings** so a `gated` result can never hide its cause. (5)
+> the opt-in blocking path is now tested end-to-end (a config `enforcement.policy` flips a code to
+> blocking → `gated: true`); the `removed`-into-peer reason wording, multi-peer, self-skip, and
+> planned-overlap-exclusion paths are covered; and the `RegistryCollisionResolution` spec was reconciled
+> to the honest stateless reality (one realized diff + the peer's *declared* append).
 
 ## Why
 

@@ -282,7 +282,9 @@ export function analyzeEscape(
       if (!escapedIds.has(sym.id)) continue;
       const reason = ourPureAddition
         ? `Out-of-scope write to "${sym.name}" lands in peer "${peer.taskId}"'s write-set; peer declared a modify, so the additions are not known to merge.`
-        : `Out-of-scope edit modifies existing code in "${sym.name}", which is in peer "${peer.taskId}"'s declared write-set — a freshly-created write-write conflict.`;
+        : sym.editNature === 'removed'
+          ? `Out-of-scope edit REMOVES "${sym.name}", which is in peer "${peer.taskId}"'s declared write-set — a freshly-created write-write conflict.`
+          : `Out-of-scope edit modifies existing code in "${sym.name}", which is in peer "${peer.taskId}"'s declared write-set — a freshly-created write-write conflict.`;
       newlyOpenedConflicts.push({
         symbol: sym.id, name: sym.name, filePath: sym.filePath, peerTaskId: peer.taskId,
         verdict: 'WAW', reason,

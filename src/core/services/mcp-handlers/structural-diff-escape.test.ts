@@ -201,3 +201,108 @@ describe('structural_diff footprint escape detection', () => {
     expect(JSON.stringify(a.escapeAnalysis)).toBe(JSON.stringify(b.escapeAnalysis));
   });
 });
+
+// ── Adversarial regression set (PR #201 audit) ──────────────────────────────────
+describe('structural_diff escape detection — adversarial regressions', () => {
+  let repo: string;
+  const init = () => {
+    repo = mkdtempSync(join(tmpdir(), 'escape-adv-'));
+    git(repo, ['init', '-q', '-b', 'main']);
+    git(repo, ['config', 'user.name', 'T']); git(repo, ['config', 'user.email', 't@e.com']);
+    git(repo, ['config', 'commit.gpgsign', 'false']);
+  };
+  const commit = (msg: string) => { git(repo, ['add', '.']); git(repo, ['commit', '-q', '-m', msg, '--no-gpg-sign']); };
+  beforeEach(init);
+  afterEach(() => rmSync(repo, { recursive: true, force: true }));
+
+  // CRITICAL regression: multibyte source. A `☕`/`é` before the function shifts byte
+  // offsets but not code-unit offsets; a byte-sliced body would corrupt the compare
+  // and could make a real modification look unchanged, silently dropping the escape.
+  const MB_BASE = `// café ☕ registry — multibyte header padding ✨\nexport function dispatch(name: string): number {\n  if (name === 'α') return 1;\n  return 0;\n}\n`;
+  const MB_HEAD = `// café ☕ registry — multibyte header padding ✨\nexport function dispatch(name: string): number {\n  if (name === 'α') return 99;\n  return 0;\n}\n`;
+
+  it('detects a body modification on a MULTIBYTE source file (byte-offset regression)', async () => {
+    write(repo, 'src/mb.ts', MB_BASE); commit('mb base');
+    write(repo, 'src/mb.ts', MB_HEAD); // existing branch rewritten (return 1 → 99)
+    const r = await handleStructuralDiff({
+      directory: repo, baseRef: 'HEAD',
+      declaredFootprint: { taskId: 't1', writeSet: [{ id: 'src/other.ts::x', filePath: 'src/other.ts' }] },
+    }) as EscapeResult;
+    const esc = r.escapeAnalysis!.escapes.find(e => e.id === 'src/mb.ts::dispatch');
+    expect(esc).toBeDefined();                       // not silently dropped
+    expect(esc!.editNature).toBe('modifies-existing'); // and correctly classed as a clobber, not a clean append
+  });
+
+  it('a pure addition near DUPLICATE lines stays pure-addition; a vanished line is modifies-existing', async () => {
+    // duplicate `return 0;` lines; HEAD inserts a new case (addition only) → pure-addition.
+    const DUP_BASE = `export function f(n: number): number {\n  if (n === 1) return 0;\n  if (n === 2) return 0;\n  return 0;\n}\n`;
+    const DUP_ADD = `export function f(n: number): number {\n  if (n === 1) return 0;\n  if (n === 2) return 0;\n  if (n === 3) return 7;\n  return 0;\n}\n`;
+    write(repo, 'src/d.ts', DUP_BASE); commit('dup base');
+    write(repo, 'src/d.ts', DUP_ADD);
+    const r = await handleStructuralDiff({
+      directory: repo, baseRef: 'HEAD',
+      declaredFootprint: { taskId: 't1', writeSet: [{ id: 'src/d.ts::f', filePath: 'src/d.ts', writeMode: 'append' }] },
+    }) as EscapeResult;
+    // declared append + actual pure addition ⇒ no mis-declared-append, no escape.
+    expect(r.escapeAnalysis!.misDeclaredAppends).toEqual([]);
+    expect(r.escapeAnalysis!.escapes).toEqual([]);
+  });
+
+  it('OPT-IN BLOCKING: an enforcement.policy entry flips a footprint finding to blocking and gates', async () => {
+    write(repo, 'src/core2.ts', `export function dispatch(n: string): number {\n  if (n === 'a') return 1;\n  return 0;\n}\n`);
+    commit('base');
+    write(repo, 'src/core2.ts', `export function dispatch(n: string): number {\n  if (n === 'a') return 5;\n  return 0;\n}\n`);
+    // Opt the newly-opened-conflict code into blocking for THIS repo.
+    write(repo, '.openlore/config.json', JSON.stringify({ enforcement: { policy: { 'footprint-escape-new-conflict': 'blocking' } } }));
+    const r = await handleStructuralDiff({
+      directory: repo, baseRef: 'HEAD',
+      declaredFootprint: { taskId: 't1', writeSet: [{ id: 'src/other.ts::x', filePath: 'src/other.ts' }] },
+      peerFootprints: [{ taskId: 't2', writeSet: [{ id: 'src/core2.ts::dispatch', filePath: 'src/core2.ts', writeMode: 'modify' }] }],
+    }) as EscapeResult;
+    expect(r.escapeAnalysis!.gated).toBe(true);
+    const blk = r.escapeAnalysis!.findings.find(f => f.code === 'footprint-escape-new-conflict');
+    expect(blk?.enforcementClass).toBe('blocking');
+  });
+
+  it('an empty/non-code diff still emits a vacuous escapeAnalysis (opt-in check never silently skipped)', async () => {
+    write(repo, 'README.md', '# hi\n'); commit('docs base');
+    write(repo, 'README.md', '# hi there\n'); // non-code change only
+    const r = await handleStructuralDiff({
+      directory: repo, baseRef: 'HEAD',
+      declaredFootprint: { taskId: 't1', writeSet: [{ id: 'src/a.ts::foo', filePath: 'src/a.ts' }] },
+    }) as EscapeResult & { escapeAnalysis?: { summary: Record<string, number>; notes?: string[] } };
+    expect(r.escapeAnalysis).toBeDefined();
+    expect(r.escapeAnalysis!.summary.escapes).toBe(0);
+    expect(r.escapeAnalysis!.notes?.some(n => /vacuously empty/i.test(n))).toBe(true);
+  });
+
+  it('a degenerate (empty) declared write-set is disclosed, not a silent escape storm', async () => {
+    write(repo, 'src/x.ts', `export function a(): number { return 1; }\nexport function b(): number { return 2; }\n`);
+    commit('base');
+    write(repo, 'src/x.ts', `export function a(): number { return 9; }\nexport function b(): number { return 8; }\n`);
+    const r = await handleStructuralDiff({
+      directory: repo, baseRef: 'HEAD',
+      declaredFootprint: { taskId: 't1', writeSet: [] }, // degenerate
+    }) as EscapeResult & { escapeAnalysis?: { notes?: string[]; escapes: unknown[] } };
+    expect(r.escapeAnalysis!.escapes.length).toBeGreaterThan(0);
+    expect(r.escapeAnalysis!.notes?.some(n => /empty or every member was malformed/i.test(n))).toBe(true);
+  });
+
+  it('maxResults truncation is disclosed and never hides a blocking finding', async () => {
+    // Two functions both modified; declare neither → 2 escapes. Cap at 1.
+    write(repo, 'src/m.ts', `export function p(): number { return 1; }\nexport function q(): number { return 2; }\n`);
+    commit('base');
+    write(repo, 'src/m.ts', `export function p(): number { return 11; }\nexport function q(): number { return 22; }\n`);
+    write(repo, '.openlore/config.json', JSON.stringify({ enforcement: { policy: { 'footprint-escape': 'blocking' } } }));
+    const r = await handleStructuralDiff({
+      directory: repo, baseRef: 'HEAD', maxResults: 1,
+      declaredFootprint: { taskId: 't1', writeSet: [{ id: 'src/other.ts::z', filePath: 'src/other.ts' }] },
+    }) as EscapeResult & { escapeAnalysis?: { summary: Record<string, number>; notes?: string[]; findings: Array<{ enforcementClass: string }>; escapes: unknown[]; gated: boolean } };
+    expect(r.escapeAnalysis!.summary.escapes).toBe(2);       // full count authoritative
+    expect(r.escapeAnalysis!.escapes.length).toBe(1);        // list capped
+    expect(r.escapeAnalysis!.notes?.some(n => /truncated/i.test(n))).toBe(true);
+    expect(r.escapeAnalysis!.gated).toBe(true);
+    // both blocking findings retained despite maxResults: 1
+    expect(r.escapeAnalysis!.findings.filter(f => f.enforcementClass === 'blocking').length).toBe(2);
+  });
+});

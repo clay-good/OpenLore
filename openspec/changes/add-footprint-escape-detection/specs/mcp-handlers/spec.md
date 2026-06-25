@@ -64,27 +64,35 @@ are the responsibility of the caller, not the system.
 
 ### Requirement: RegistryCollisionResolution
 
-When two diffs both modify the same registration symbol (a dispatcher, a registry array, a preset
-list), the system SHALL inspect the actual edits and SHALL report the collision as resolved-by-merge —
-not a conflict — when both edits are disjoint additions (new branches or elements at non-overlapping
-locations). The system SHALL report a real write-write conflict only when an edit modifies an existing
-member of that symbol, or when two additions genuinely overlap. When a seed was declared with
-`writeMode: append` at plan time but the actual diff modified existing code, the system SHALL flag the
-mis-declared append. This requirement is the back-side verification of the plan-time shared-append
-classification: the plan downgrades declared appends optimistically, and this check confirms or refutes
-them against the realized diffs.
+When this change's diff modifies a registration symbol (a dispatcher, a registry array, a preset list)
+that a peer task also declares it will write, the system SHALL inspect **this diff's actual edit** to
+that symbol and SHALL report the collision as resolved-by-merge — not a conflict — when this diff's
+edit is a pure addition (a new branch or element, no existing line of the symbol changed or removed)
+**and** the peer declared `writeMode: append`. The system SHALL report a real write-write conflict
+when this diff modifies an existing member of the symbol, or when the peer declared `writeMode: modify`
+(the additions are not known to merge). When a seed was declared `writeMode: append` at plan time but
+this diff actually modified existing code, the system SHALL flag the mis-declared append.
 
-#### Scenario: Disjoint additions to one registry symbol resolve by merge
+Because the system is stateless and holds no peer diff — only the peer's *declared* footprint (per the
+parallel-work contract) — a single call inspects the **one** realized diff it is given and trusts the
+peer's declared append. Genuine non-overlap of *two* realized diffs is therefore established by running
+the check once per diff (the harness re-invokes it for each side); the output SHALL carry a disclosure
+stating that a resolved-by-merge verdict confirms only the side whose diff it sees. This requirement is
+the back-side verification of the plan-time shared-append classification: the plan downgrades declared
+appends optimistically, and this check confirms or refutes them against the realized diff.
 
-- **GIVEN** two diffs that each add a new, non-overlapping entry to the same tool-registry array or
-  dispatcher
-- **WHEN** the escape check compares them
-- **THEN** the collision is reported as resolved-by-merge rather than a write-write conflict
+#### Scenario: This diff's disjoint addition to a declared-append registry symbol resolves by merge
+
+- **GIVEN** this diff adds a new, non-overlapping entry to a registration symbol that a peer declared
+  it will `append`
+- **WHEN** the escape check runs
+- **THEN** the collision is reported as resolved-by-merge rather than a write-write conflict, and the
+  disclosure notes that the peer's append is trusted from its declaration
 
 #### Scenario: A modification of an existing member is a real conflict
 
-- **GIVEN** two diffs touching the same registration symbol where at least one modifies an existing
-  member rather than appending
-- **WHEN** the escape check compares them
+- **GIVEN** this diff modifies an existing member of a registration symbol (rather than only appending)
+  that a peer also declares it will write
+- **WHEN** the escape check runs
 - **THEN** a real write-write conflict is reported, and if the modifying seed had been declared
   `append`, the mis-declared append is flagged

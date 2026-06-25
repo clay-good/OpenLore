@@ -141,10 +141,19 @@ export async function handleStructuralDiff(input: StructuralDiffInput): Promise<
     return lang && lang !== 'Unknown' && lang !== 'unknown';
   });
   if (codeChanged.length === 0) {
+    // When a declared footprint was supplied, still emit a (vacuously empty)
+    // escapeAnalysis so a caller can distinguish "escape check ran, clean" from
+    // "escape check never ran" — the early return otherwise silently drops the
+    // opt-in safety check (Finding: empty-diff early return).
+    const limit = Math.max(1, Math.min(input.maxResults ?? 200, 1000));
+    const escapeBlock = input.declaredFootprint
+      ? await buildEscapeBlock(absDir, input, [], limit, 'No changed code files; the escape check is vacuously empty.')
+      : undefined;
     return {
       base: resolvedBase, head: input.headRef ?? 'working tree',
       message: 'No changed code files between the two states (only non-code or no changes).',
       summary: emptySummary(),
+      ...(escapeBlock ? { escapeAnalysis: escapeBlock } : {}),
       soundness: diffSoundness(true),
     };
   }
@@ -308,28 +317,7 @@ export async function handleStructuralDiff(input: StructuralDiffInput): Promise<
     const oldContent = new Map(oldFiles.map(f => [f.path, f.content]));
     const newContent = new Map(newFiles.map(f => [f.path, f.content]));
     const modifiedSymbols = computeModifiedSymbols(pairs, added, removed, oldContent, newContent);
-
-    const declared = normalizeDeclaredFootprint(input.declaredFootprint);
-    const peers = (input.peerFootprints ?? []).map((p, i) => normalizeDeclaredFootprint(p, `peer-${i}`));
-    const analysis = analyzeEscape(modifiedSymbols, declared, peers);
-
-    // Resolve each finding's enforcement class against the repo policy (advisory by
-    // default). structural_diff never blocks — it surfaces what WOULD block so the
-    // harness/gate can act; `gated` is informational here.
-    const policy = effectivePolicy(await readOpenLoreConfig(absDir));
-    const gate = classifyFindings(analysis.findings, policy);
-
-    escapeBlock = {
-      declaredTaskId: analysis.declaredTaskId,
-      summary: analysis.summary,
-      escapes: analysis.escapes.slice(0, limit),
-      newlyOpenedConflicts: analysis.newlyOpenedConflicts.slice(0, limit),
-      registryResolutions: analysis.registryResolutions.slice(0, limit),
-      misDeclaredAppends: analysis.misDeclaredAppends.slice(0, limit),
-      findings: gate.classified.slice(0, limit),
-      gated: gate.gated,
-      disclosure: analysis.disclosure,
-    };
+    escapeBlock = await buildEscapeBlock(absDir, input, modifiedSymbols, limit);
   }
 
   return {
@@ -353,6 +341,67 @@ export async function handleStructuralDiff(input: StructuralDiffInput): Promise<
     ...(staleCallerNote ? { note: staleCallerNote } : {}),
     ...(escapeBlock ? { escapeAnalysis: escapeBlock } : {}),
     soundness: diffSoundness(false),
+  };
+}
+
+/**
+ * Build the `escapeAnalysis` block from the diff's actually-modified symbols and
+ * the caller's declared + peer footprints. Resolves each finding's enforcement
+ * class against the repo policy (advisory by default — `structural_diff` never
+ * blocks; it surfaces what WOULD block so the harness/gate can act). Assumes
+ * `input.declaredFootprint` is set.
+ *
+ * Honesty fixes baked in:
+ *  - blocking findings are ALWAYS retained even past `maxResults`, so a `gated:true`
+ *    result never hides the finding that caused it;
+ *  - truncation of any list is disclosed in `notes`, never silent;
+ *  - a degenerate (empty/all-malformed) declared write-set is disclosed, since it
+ *    makes every modified symbol look out-of-scope.
+ */
+async function buildEscapeBlock(
+  absDir: string,
+  input: StructuralDiffInput,
+  modifiedSymbols: ModifiedSymbol[],
+  limit: number,
+  extraNote?: string,
+): Promise<Record<string, unknown>> {
+  const declared = normalizeDeclaredFootprint(input.declaredFootprint);
+  const peers = (input.peerFootprints ?? []).map((p, i) => normalizeDeclaredFootprint(p, `peer-${i}`));
+  const analysis = analyzeEscape(modifiedSymbols, declared, peers);
+
+  const policy = effectivePolicy(await readOpenLoreConfig(absDir));
+  const gate = classifyFindings(analysis.findings, policy);
+
+  // Always keep every blocking finding; fill the remainder up to `limit`. A
+  // gated result must show why it gated.
+  const blocking = gate.classified.filter(f => f.enforcementClass === 'blocking');
+  const rest = gate.classified.filter(f => f.enforcementClass !== 'blocking');
+  const findings = [...blocking, ...rest].slice(0, Math.max(limit, blocking.length));
+
+  const notes: string[] = [];
+  if (extraNote) notes.push(extraNote);
+  if (declared.writeModeById.size === 0 && declared.writeFiles.size === 0 && declared.readIds.size === 0 && modifiedSymbols.length > 0) {
+    notes.push('The declared write-set was empty or every member was malformed; every modified symbol is reported as an out-of-scope write. Check that writeSet members carry a string `id`.');
+  }
+  const truncated =
+    analysis.escapes.length > limit ||
+    analysis.newlyOpenedConflicts.length > limit ||
+    analysis.registryResolutions.length > limit ||
+    analysis.misDeclaredAppends.length > limit ||
+    findings.length < gate.classified.length;
+  if (truncated) notes.push(`Some lists exceeded maxResults (${limit}) and were truncated; the counts in \`summary\` are authoritative. All blocking findings are retained.`);
+
+  return {
+    declaredTaskId: analysis.declaredTaskId,
+    summary: analysis.summary,
+    escapes: analysis.escapes.slice(0, limit),
+    newlyOpenedConflicts: analysis.newlyOpenedConflicts.slice(0, limit),
+    registryResolutions: analysis.registryResolutions.slice(0, limit),
+    misDeclaredAppends: analysis.misDeclaredAppends.slice(0, limit),
+    findings,
+    gated: gate.gated,
+    ...(notes.length > 0 ? { notes } : {}),
+    disclosure: analysis.disclosure,
   };
 }
 
@@ -390,11 +439,19 @@ function computeModifiedSymbols(
   return out;
 }
 
-/** Byte-correct slice of a source string by tree-sitter byte offsets, normalized to LF. */
+/**
+ * Slice a symbol's source by its `startIndex`/`endIndex`, normalized to LF.
+ *
+ * Despite the "byte offset" wording on {@link FunctionNode}, the tree-sitter node
+ * binding reports **UTF-16 code-unit** offsets (verified: a `☕`/`é` before a
+ * function shifts a byte-indexed slice but not a `content.slice` one). Every other
+ * slice site in the analyzer uses `content.slice(startIndex, endIndex)` — we match
+ * it. A `Buffer.subarray` (byte) slice corrupts every multibyte file and can make a
+ * real modification compare equal to its old form, silently dropping the escape.
+ */
 function sliceSource(content: string | undefined, startIndex: number, endIndex: number): string {
   if (content === undefined) return '';
-  const buf = Buffer.from(content, 'utf8');
-  return buf.subarray(startIndex, endIndex).toString('utf8').replace(/\r\n/g, '\n');
+  return content.slice(startIndex, endIndex).replace(/\r\n/g, '\n');
 }
 
 /**

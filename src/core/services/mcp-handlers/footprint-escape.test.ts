@@ -121,6 +121,59 @@ describe('analyzeEscape — registry collision resolution (back-side of shared-a
   });
 });
 
+describe('analyzeEscape — adversarial conflict cases', () => {
+  it('a REMOVED symbol that is in a peer write-set is a WAW with deletion-accurate wording', () => {
+    const d = declared('t1', [['src/a.ts::foo', 'modify']]);
+    const peer = declared('t2', [['src/b.ts::shared', 'modify']]);
+    const result = analyzeEscape([mod('src/b.ts::shared', 'removed')], d, [peer]);
+    expect(result.newlyOpenedConflicts).toHaveLength(1);
+    expect(result.newlyOpenedConflicts[0].verdict).toBe('WAW');
+    // the reason must not claim "modifies existing code" for a deletion
+    expect(result.newlyOpenedConflicts[0].reason).toMatch(/REMOVES/);
+    expect(result.newlyOpenedConflicts[0].reason).not.toMatch(/modifies existing code/);
+  });
+
+  it('an escape in TWO peers\' write-sets reports a conflict for each, deterministically ordered', () => {
+    const d = declared('t1', [['src/a.ts::foo', 'modify']]);
+    const p2 = declared('t2', [['src/shared.ts::s', 'modify']]);
+    const p3 = declared('t3', [['src/shared.ts::s', 'modify']]);
+    const result = analyzeEscape([mod('src/shared.ts::s', 'modifies-existing')], d, [p3, p2]);
+    expect(result.newlyOpenedConflicts.map(c => c.peerTaskId)).toEqual(['t2', 't3']); // sorted, both present
+  });
+
+  it('a peer explicitly sharing the declared task id is skipped (never self-conflict)', () => {
+    const d = declared('t1', [['src/a.ts::foo', 'modify']]);
+    const selfPeer = declared('t1', [['src/b.ts::shared', 'modify']]);
+    const result = analyzeEscape([mod('src/b.ts::shared', 'modifies-existing')], d, [selfPeer]);
+    expect(result.newlyOpenedConflicts).toEqual([]);
+  });
+
+  it('a PLANNED overlap (symbol in both our and the peer\'s declared write-set) is NOT a newly-opened conflict', () => {
+    // The plan already knew about this overlap; the back-side check only reports
+    // conflicts an ESCAPE newly opens. A planned, modified shared symbol is excluded.
+    const d = declared('t1', [['src/shared.ts::s', 'modify']]);
+    const peer = declared('t2', [['src/shared.ts::s', 'modify']]);
+    const result = analyzeEscape([mod('src/shared.ts::s', 'modifies-existing')], d, [peer]);
+    expect(result.newlyOpenedConflicts).toEqual([]); // distinct from a conflict the plan already had
+    expect(result.escapes).toEqual([]);              // it was in our declared write-set
+    expect(result.registryResolutions).toEqual([]);  // not a clean append on our side
+  });
+});
+
+describe('analyzeEscape — duplicate-line edit nature is git-consistent (no unsafe false-negative)', () => {
+  // editNatureOf lives in structural-diff, but the safety contract is: a real clobber
+  // (an existing line's content disappears) must never be reported as a clean append.
+  // These exercise the analyzer's reliance on that contract via the editNature it is fed.
+  it('a removed/changed line content that disappears is modifies-existing → real WAW, not resolved-by-merge', () => {
+    const d = declared('t1', [['src/reg.ts::registry', 'append']]);
+    const peer = declared('t2', [['src/reg.ts::registry', 'append']]);
+    // Caller (structural-diff) computed modifies-existing because a base line vanished.
+    const result = analyzeEscape([mod('src/reg.ts::registry', 'modifies-existing')], d, [peer]);
+    expect(result.registryResolutions).toEqual([]);            // NOT downgraded to a merge
+    expect(result.misDeclaredAppends).toHaveLength(1);         // declared append, actually modified
+  });
+});
+
 describe('analyzeEscape — mis-declared append', () => {
   it('flags a symbol declared append whose diff actually modified existing code', () => {
     const d = declared('t1', [['src/reg.ts::registry', 'append']]);
