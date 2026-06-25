@@ -91,6 +91,37 @@ describe('buildResolvedImportMap', () => {
     expect(map.get('caller.ts')?.has('ghost')).toBe(true);
   });
 
+  it('terminates on an `export *` cycle and still resolves a name reachable past it', () => {
+    // a and b re-export each other with `export *` (a star cycle, distinct from the
+    // named-cycle case — it exercises the separate starExposes visited-set), while the
+    // real definition lives in c, also star-exported from a.
+    const files: Files = [
+      ts('a.ts', "export * from './b';\nexport * from './c';"),
+      ts('b.ts', "export * from './a';"),
+      ts('c.ts', 'export function deep() { return 1; }'),
+      ts('caller.ts', "import { deep } from './a';\nexport function run() { return deep(); }"),
+    ];
+    const { map, reExported } = buildResolvedImportMap(files);
+    expect(map.get('caller.ts')?.get('deep')).toBe('c');
+    expect(reExported.has('caller.ts\0deep')).toBe(true);
+  });
+
+  it('default re-export through a barrel degrades gracefully (deferred rename limitation)', () => {
+    // `export { default } from './impl'` re-binds under the consumer's chosen local
+    // name; like an aliased re-export, the binding name differs from the export name
+    // across the hop, so it is not chased — but it must not bind to a wrong target.
+    // A DIRECT default import still resolves (covered separately by the call-graph test).
+    const files: Files = [
+      ts('impl.ts', 'export default function widget() { return 1; }'),
+      ts('index.ts', "export { default } from './impl';"),
+      ts('caller.ts', "import widget from './index';\nexport function run() { return widget(); }"),
+    ];
+    const { map, reExported } = buildResolvedImportMap(files);
+    // Falls back to the barrel module (not chased to impl); never a wrong target.
+    expect(map.get('caller.ts')?.get('widget')).toBe('index');
+    expect(reExported.has('caller.ts\0widget')).toBe(false);
+  });
+
   it('is a strict superset of buildBaseImportMap when no re-export applies', () => {
     const files: Files = [
       ts('a.ts', 'export function f() {}'),

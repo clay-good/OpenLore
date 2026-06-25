@@ -75,10 +75,13 @@ followed and disclosed.
 
 ## Verification
 
-- New suite `call-resolution-recall.test.ts`: 16/16 pass (barrel, `export *`, depth-N, direct-stays-
-  `import`, disambiguation, cycle, determinism, superset property, regression gate, plus adversarial
-  boundaries: package re-export not followed, barrel-local def wins, aliased-rename graceful
-  degradation, Python no-regression).
+- New suite `call-resolution-recall.test.ts`: 18/18 pass (barrel, `export *`, depth-N, direct-stays-
+  `import`, disambiguation, named-cycle + `export *`-cycle termination, determinism, superset property,
+  regression gate, plus adversarial boundaries: package re-export not followed, barrel-local def wins,
+  aliased-rename + default-re-export graceful degradation, Python no-regression).
+- A second adversarial probe confirmed fail-soft behavior on `export *` cycles (resolve + terminate),
+  default re-export through a barrel (graceful fallback, no wrong edge — deferred rename limitation), and
+  chains deeper than `REEXPORT_MAX_DEPTH` (bounded; still finds a uniquely-named target via `name_only`).
 - `mcp-watcher-parity.test.ts` Scenario 4 (re-export incremental parity): pass after the
   `collectReExportBarrels` fix.
 - Full CI-mirror suite (`vitest run src examples`): 5068 pass, 2 skipped, all green. (A few

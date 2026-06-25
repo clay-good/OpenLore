@@ -92,11 +92,18 @@ deterministic.
   `analyze --force` produces — rather than degrading to `name_only` because the barrel was outside the
   rebuilt subset
 
-> Note: aliased re-exports (`export { internalName as publicName } from`) where the call uses the renamed
-> binding are a deferred recall limitation — the edge degrades gracefully (it is never bound to a wrong
-> target), but the rename is not yet carried through to the original symbol. Python relative-dot import
-> resolution (`from .impl import x`) is likewise a separate, pre-existing gap; this change is scoped to
-> TS/JS re-export chains.
+> Note (deferred, all fail-soft — none ever binds a wrong target):
+> - **Rename across a hop.** Aliased re-exports (`export { internalName as publicName } from`) and default
+>   re-exports through a barrel (`export { default } from './impl'`, consumed under a chosen local name)
+>   share one root cause — the binding name differs from the export name across the hop, so the chain is
+>   not chased; the edge degrades to `name_only`/`external` rather than resolving. A *direct* default
+>   import (`import widget from './impl'`) still resolves. Carrying the original name through a rename is a
+>   follow-up.
+> - **Depth bound.** Re-export chains deeper than the bound (`REEXPORT_MAX_DEPTH`) stop mid-chain and the
+>   call degrades to `name_only` (which still finds a uniquely-named target); real barrels are 1–3 hops.
+> - **Python relative-dot imports** (`from .impl import x`) are a separate, pre-existing gap (the
+>   leading-dot module form is not resolved by the shared path join); this change is scoped to TS/JS
+>   re-export chains.
 
 ## ALREADY SATISFIED (cross-referenced, not re-implemented)
 

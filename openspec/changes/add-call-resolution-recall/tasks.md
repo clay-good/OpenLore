@@ -37,8 +37,9 @@
 - [x] Determinism; superset-of-`buildBaseImportMap` property; regression gate (same-file edges keep label,
       only barrel-crossed edges wear `re_export`).
 - [x] Adversarial boundaries: package re-export NOT followed (no invented internal edge); barrel-local
-      definition wins over its own re-export; aliased-rename re-export degrades gracefully (no wrong
-      edge); Python relative-dot import is unchanged (no regression).
+      definition wins over its own re-export; aliased-rename AND default re-export through a barrel degrade
+      gracefully (no wrong edge); `export *` cycle terminates while still resolving past it; Python
+      relative-dot import is unchanged (no regression).
 - [x] Incremental-watcher parity: `mcp-watcher-parity.test.ts` Scenario 4 asserts an incremental rebuild
       of a barrel call converges to `analyze --force` (`re_export`, not degraded `name_only`).
 - [x] Interface/single-binding behavior covered by the existing `cha.test.ts` (unchanged).
