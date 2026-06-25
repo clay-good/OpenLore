@@ -1,6 +1,6 @@
 # Literal-text search: a separate BM25-only line index for the strings symbols can't hold
 
-> Status: DRAFT (2026-06-20). Decision `fd256fde` recorded before any code.
+> Status: IMPLEMENTED (2026-06-20). Decision `fd256fde`. Shipped: `src/core/analyzer/text-line-index.ts` (`TextLineIndex`), commit `03efa06`. (Status corrected 2026-06-25 — was stale DRAFT.)
 > Motivated by a real failure: an agent asked to find a green "Message completed" banner in a web app
 > ran `orient` then churned greps and never found it; the string lived as static text in `index.html`.
 > A human's VSCode find-in-files located it in seconds.

@@ -1,6 +1,6 @@
 # HTML live in watch mode
 
-> Status: DRAFT (2026-06-20). **Stacks on `feat/watch-incremental-dependency-graph` (#173)** — uses its
+> Status: IMPLEMENTED (2026-06-20, commit `1737ad8` "feat(watcher): make HTML live in watch mode"). (Status corrected 2026-06-25 — was stale DRAFT.) **Stacks on `feat/watch-incremental-dependency-graph` (#173)** — uses its
 > `updateDependencyGraph`. Closes the shared watch-mode gap for all three HTML features at once.
 
 ## Why

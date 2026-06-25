@@ -1,6 +1,6 @@
 # Live dependency-graph edges in watch mode
 
-> Status: DRAFT (2026-06-20).
+> Status: IMPLEMENTED (2026-06-20). Shipped in the watch path: commit `7aaf377` "feat(watcher): keep dependency-graph.json import edges live in watch mode" (`src/core/services/mcp-watcher.ts`). (Status corrected 2026-06-25 — was stale DRAFT.)
 > Closes a systemic watch-mode staleness: the call graph (function→function) is kept live by the
 > watcher, but the **dependency graph** (file→file imports) was never updated incrementally — it froze
 > until a full `analyze`. This affects every language's import edits, not just HTML assets.

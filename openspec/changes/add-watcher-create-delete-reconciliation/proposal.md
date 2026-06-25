@@ -1,6 +1,6 @@
 # Reconcile file create & delete in watch mode
 
-> Status: DRAFT (2026-06-20). Stacks on the watch-mode work (dependency-graph + HTML live). Closes the
+> Status: IMPLEMENTED (2026-06-20, commit `7ea8240` "feat(watcher): reconcile file create & delete in watch mode"). (Status corrected 2026-06-25 — was stale DRAFT.) Stacks on the watch-mode work (dependency-graph + HTML live). Closes the
 > last watch-mode hole: the watcher reconciled file MODIFICATIONS across every lane, but not CREATES or
 > DELETES.
 

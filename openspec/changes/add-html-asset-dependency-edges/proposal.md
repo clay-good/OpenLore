@@ -1,6 +1,6 @@
 # HTML asset-dependency edges: link `.html` to its external JS/CSS
 
-> Status: DRAFT (2026-06-20). Decision `b555b680` recorded before any code.
+> Status: IMPLEMENTED (2026-06-20). Decision `b555b680`. Shipped: `src/core/analyzer/dependency-graph.ts` (`assetKind: script|stylesheet` HTML→asset edges) + `import-parser.ts`. (Status corrected 2026-06-25 — was stale DRAFT.)
 > Distinct from the inline-script call graph (`5b38bad2`): that adds *function nodes* for inline
 > `<script>` JS; this adds *file→file dependency edges* from an HTML page to the external assets it
 > references. Distinct again from the literal-text line index (`fd256fde`).

@@ -1,6 +1,6 @@
 # Inline `<script>` JS as call-graph symbols
 
-> Status: DRAFT (2026-06-20). Decision `5b38bad2` recorded before any code.
+> Status: IMPLEMENTED (2026-06-20). Decision `5b38bad2`. Shipped: `src/core/analyzer/html-script-extractor.ts`, commit `b2e8115` "feat(analyzer): index inline <script> JS into the call graph". (Status corrected 2026-06-25 — was stale DRAFT.)
 > Orthogonal to the literal-text line index (`fd256fde`): that makes literal strings findable; this
 > gives the structural graph (callers/callees/impact/search) reach into JavaScript defined inside HTML.
 
