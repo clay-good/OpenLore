@@ -16,6 +16,7 @@ import {
   CAPABILITY_DESCRIPTIONS,
   languageSupport,
   languageCoverageMatrix,
+  resolveLanguageName,
   type Capability,
 } from '../../analyzer/language-support.js';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
@@ -85,28 +86,32 @@ const CAP_META = CAPABILITIES.map(name => ({ name, description: CAPABILITY_DESCR
 export async function computeGetLanguageSupport(
   input: GetLanguageSupportInput,
 ): Promise<GetLanguageSupportResult | { error: string }> {
-  await validateDirectory(input.directory);
+  const absDir = await validateDirectory(input.directory);
 
   // ── Named-language mode: a pure registry lookup, no analysis required (fail-soft). ──
   if (input.language && input.language.trim()) {
-    const lang = input.language.trim();
-    const view = viewFor(lang);
+    const raw = input.language.trim();
+    // Resolve case-insensitively ("go"/"GO"/" Go " → "Go") so the lookup is not a casing
+    // foot-gun; a genuinely-unknown name stays fail-soft (known:false).
+    const canon = resolveLanguageName(raw) ?? raw;
+    const view = viewFor(canon);
     const summary = view.known
-      ? `${lang} supports ${view.supportedCount}/${CAPABILITIES.length} capabilities: ${view.supported.join(', ') || 'none'}.`
-      : `${lang} is not a recognized language; nothing is claimed for it (fail-soft).`;
+      ? `${canon} supports ${view.supportedCount}/${CAPABILITIES.length} capabilities: ${view.supported.join(', ') || 'none'}.`
+      : `${raw} is not a recognized language; nothing is claimed for it (fail-soft).`;
     return { mode: 'language', languages: [view], capabilities: CAP_META, summary, disclosure: DISCLOSURE };
   }
 
   // ── Repo mode: coverage matrix over the languages actually detected in the index. ──
-  const absDir = await validateDirectory(input.directory);
   const ctx = await readCachedContext(absDir);
   if (!ctx) return { error: 'No analysis found. Run analyze_codebase first.' };
   if (!ctx.callGraph) return { error: 'Call graph not available. Re-run analyze_codebase.' };
   const cg = ctx.callGraph as SerializedCallGraph;
 
   const detected = detectedLanguages(cg);
-  const matrix = languageCoverageMatrix(detected);
-  const languages = matrix.rows.map(r => viewFor(r.language, true));
+  // `detected` may be empty (a docs-only repo) — pass it straight through; an empty list
+  // yields NO rows (not the whole registry), so `languages` never contradicts
+  // `detectedLanguages`.
+  const languages = languageCoverageMatrix(detected).rows.map(r => viewFor(r.language, true));
 
   const fully = languages.filter(l => l.supportedCount === CAPABILITIES.length).length;
   const partial = languages.filter(l => l.known && l.supportedCount > 0 && l.supportedCount < CAPABILITIES.length).length;

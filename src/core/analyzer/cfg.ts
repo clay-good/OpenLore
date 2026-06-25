@@ -492,6 +492,14 @@ const SPEC_BY_LANGUAGE: Record<string, CfgLangSpec> = {
   Ruby: RUBY_SPEC,
 };
 
+/**
+ * Languages for which a CFG overlay is built — the keys of {@link SPEC_BY_LANGUAGE}.
+ * Authoritative source for the `cfgOverlay` capability flag in the declarative
+ * language-support registry; exported so a completeness test can assert every one is a
+ * registry key (no stealth under-claim when a CFG spec is added).
+ */
+export const CFG_LANGUAGES: ReadonlySet<string> = new Set(Object.keys(SPEC_BY_LANGUAGE));
+
 /** Languages for which CFG construction is implemented (spec v1 scope). */
 export function cfgSupportsLanguage(language: string): boolean {
   return language in SPEC_BY_LANGUAGE;

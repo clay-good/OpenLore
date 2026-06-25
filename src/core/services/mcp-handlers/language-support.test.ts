@@ -50,6 +50,17 @@ describe('get_language_support — named-language mode (pure registry, no analys
     expect(view.supported).toEqual([]);
     expect(res.summary).toMatch(/not a recognized language/i);
   });
+
+  it('resolves a language name case-insensitively + trims (go / GO / " Go " → Go)', async () => {
+    for (const input of ['go', 'GO', ' Go ', 'gO']) {
+      const view = (await run({ directory: '/p', language: input })).languages[0];
+      expect(view.known, `${JSON.stringify(input)} should resolve to Go`).toBe(true);
+      expect(view.language).toBe('Go');
+      expect(view.supported).toContain('callGraph');
+    }
+    // multi-word IaC tag resolves case-insensitively too
+    expect((await run({ directory: '/p', language: 'docker compose' })).languages[0].language).toBe('Docker Compose');
+  });
 });
 
 describe('get_language_support — repo mode (coverage over detected languages)', () => {
@@ -80,10 +91,13 @@ describe('get_language_support — repo mode (coverage over detected languages)'
     expect(res).toHaveProperty('error');
   });
 
-  it('handles a repo with no detected languages gracefully', async () => {
+  it('a docs-only / zero-detected repo returns NO languages (not the whole registry)', async () => {
     vi.mocked(readCachedContext).mockResolvedValue({ callGraph: graph([]) } as never);
     const res = await run({ directory: '/p' });
     expect(res.detectedLanguages).toEqual([]);
+    // Regression guard: the languages[] array must NOT contradict detectedLanguages by
+    // expanding to all ~30 registry languages falsely marked detectedInRepo:true.
+    expect(res.languages).toEqual([]);
     expect(res.summary).toMatch(/No languages detected/i);
   });
 });

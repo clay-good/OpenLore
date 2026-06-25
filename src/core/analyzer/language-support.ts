@@ -127,6 +127,20 @@ export function languageSupport(language: string): LanguageSupportRecord {
   return LANGUAGE_SUPPORT.get(language) ?? { language, capabilities: [], known: false };
 }
 
+/** Lower-cased canonical-name index, for case-insensitive lookup. */
+const CANONICAL_BY_LOWER = new Map(ALL_LANGUAGES.map(l => [l.toLowerCase(), l]));
+
+/**
+ * Resolve a free-form language string to its canonical registry name, case-insensitively
+ * and trimming surrounding whitespace (so `"go"`, `"GO"`, `" Go "` all resolve to `"Go"`).
+ * Returns `null` when no known language matches — the caller decides the fail-soft response.
+ * This keeps the named-language lookup from being a casing foot-gun for agents while still
+ * being honest about genuinely-unknown languages.
+ */
+export function resolveLanguageName(input: string): string | null {
+  return CANONICAL_BY_LOWER.get(input.trim().toLowerCase()) ?? null;
+}
+
 /** A single cell-resolved coverage matrix: deterministic language × capability booleans. */
 export interface CoverageMatrix {
   /** Column order (== {@link CAPABILITIES}). */
@@ -141,16 +155,18 @@ export interface CoverageMatrix {
 }
 
 /**
- * The coverage matrix (language × capability). With no argument, every known language; with
- * a language list (e.g. a repo's detected languages), exactly those — an unknown language
- * yields an all-`false` row (fail-soft, labeled `known: false`), so a quiet result is
- * interpretable ("calls unsupported for L" vs. "no callers"). Deterministic: languages are
- * sorted and capabilities are in fixed order, so two derivations are byte-identical.
+ * The coverage matrix (language × capability). With NO argument (`undefined`), every known
+ * language; with a language list (e.g. a repo's detected languages), exactly those — an
+ * unknown language yields an all-`false` row (fail-soft, labeled `known: false`). An EMPTY
+ * list (`[]`) yields NO rows — distinct from `undefined`, so a repo with zero detected
+ * languages does not silently expand to the whole registry (that bug let a docs-only repo
+ * report every language as present). Deterministic: languages are sorted and capabilities
+ * are in fixed order, so two derivations are byte-identical.
  */
 export function languageCoverageMatrix(languages?: readonly string[]): CoverageMatrix {
-  const keys = (languages && languages.length > 0
-    ? [...new Set(languages)]
-    : [...ALL_LANGUAGES]
+  const keys = (languages === undefined
+    ? [...ALL_LANGUAGES]
+    : [...new Set(languages)]
   ).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 
   const rows = keys.map(language => {

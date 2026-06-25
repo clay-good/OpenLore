@@ -7,9 +7,10 @@ import {
   languageSupport,
   languageCoverageMatrix,
   renderCoverageMatrixMarkdown,
+  resolveLanguageName,
   type Capability,
 } from './language-support.js';
-import { cfgSupportsLanguage } from './cfg.js';
+import { cfgSupportsLanguage, CFG_LANGUAGES } from './cfg.js';
 import { isIacLanguage, IAC_LANGUAGES } from './iac/types.js';
 import { CALLGRAPH_LANGUAGES, CallGraphBuilder, serializeCallGraph } from './call-graph.js';
 import { TYPE_INFERENCE_LANGUAGES as TI, inferTypesFromSource } from './type-inference-engine.js';
@@ -50,63 +51,111 @@ describe('language-support registry — faithful to live extractor sources', () 
   });
 });
 
-// ── the authoritative SETS match the live extractors' actual behavior on fixtures ──
+// ── EVERY set member is behaviorally exercised against the live extractor (no over-claim) ──
+// The feature's core promise is "the matrix cannot silently over-claim". A membership-only
+// check is a tautology (the registry is derived from the set); these tests cross-check each
+// set member against the REAL extractor producing output — and fail if a member has no
+// fixture, so the guard can't rot when a language is added to a set.
 
-describe('exported capability sets match real extractor behavior (no over-claim)', () => {
-  it('typeInference set matches inferTypesFromSource behavior (member → non-empty, non-member → empty)', () => {
-    const fixtures: Record<string, string> = {
-      Python: 'x = Foo()',
-      TypeScript: 'const x = new Foo();',
-      Go: 'x := Foo{}',
-      Java: 'Foo x = new Foo();',
-      Ruby: 'x = Foo.new',
-      'C#': 'var x = new Foo();',
-    };
-    for (const [lang, src] of Object.entries(fixtures)) {
-      expect(TI.has(lang), `${lang} should be a typeInference language`).toBe(true);
-      expect(inferTypesFromSource(src, lang).size, `${lang} infers a type`).toBeGreaterThan(0);
+// A minimal source per language that exercises each capability. One per SET member.
+const TYPE_INFERENCE_FIXTURES: Record<string, string> = {
+  Python: 'x = Foo()', 'C++': 'Foo x;', TypeScript: 'const x = new Foo();',
+  JavaScript: 'const x = new Foo();', Go: 'x := Foo{}', Rust: 'let x = Foo::new();',
+  Java: 'Foo x = new Foo();', 'C#': 'var x = new Foo();', Ruby: 'x = Foo.new',
+};
+const SIGNATURE_FIXTURES: Record<string, string> = {
+  Python: 'x.py||def foo(a):\n    return a',
+  TypeScript: 'x.ts||export function foo(a: number): number { return a; }',
+  JavaScript: 'x.js||export function foo(a) { return a; }',
+  Go: 'x.go||func Foo(a int) int { return a }',
+  Rust: 'x.rs||pub fn foo(a: i32) -> i32 { a }',
+  Ruby: 'x.rb||def foo(a)\n  a\nend',
+  'C++': 'x.cpp||int foo(int a) { return a; }',
+  Swift: 'x.swift||func foo(a: Int) -> Int { return a }',
+  Java: 'A.java||class A { int foo(int a) { return a; } }',
+  Terraform: 'x.tf||resource "aws_s3_bucket" "b" {}',
+  Bicep: "x.bicep||resource b 'Microsoft.Storage/storageAccounts@2021-09-01' = { name: 'n' }",
+  'C#': 'A.cs||class A { int Foo(int a) { return a; } }',
+  Kotlin: 'x.kt||fun foo(a: Int): Int { return a }',
+  PHP: 'x.php||<?php\nfunction foo($a) { return $a; }',
+  C: 'x.c||int foo(int a) { return a; }',
+  Scala: 'x.scala||object M { def foo(a: Int): Int = a }',
+  Dart: 'x.dart||int foo(int a) { return a; }',
+  Lua: 'x.lua||function foo(a) return a end',
+  Elixir: 'x.ex||defmodule M do\n  def foo(a), do: a\nend',
+  Bash: 'x.sh||foo() { echo "$1"; }',
+};
+const CALLGRAPH_FIXTURES: Record<string, [string, string]> = {
+  TypeScript: ['a.ts', 'function foo() { bar(); }\nfunction bar() {}'],
+  JavaScript: ['a.js', 'function foo() { bar(); }\nfunction bar() {}'],
+  Python: ['a.py', 'def foo():\n    bar()\ndef bar():\n    pass'],
+  Go: ['a.go', 'package m\nfunc Foo() { Bar() }\nfunc Bar() {}'],
+  Rust: ['a.rs', 'fn foo() { bar(); }\nfn bar() {}'],
+  Ruby: ['a.rb', 'def foo\n  bar\nend\ndef bar\nend'],
+  Java: ['A.java', 'class A { void foo() { bar(); } void bar() {} }'],
+  'C++': ['a.cpp', 'void bar() {}\nvoid foo() { bar(); }'],
+  Swift: ['a.swift', 'func bar() {}\nfunc foo() { bar() }'],
+  Elixir: ['a.ex', 'defmodule M do\n  def foo, do: bar()\n  def bar, do: :ok\nend'],
+  Dart: ['a.dart', 'void bar() {}\nvoid foo() { bar(); }'],
+  'C#': ['A.cs', 'class A { void Foo() { Bar(); } void Bar() {} }'],
+  Kotlin: ['a.kt', 'fun bar() {}\nfun foo() { bar() }'],
+  PHP: ['a.php', '<?php function bar() {}\nfunction foo() { bar(); }'],
+  C: ['a.c', 'int bar() { return 0; }\nint foo() { return bar(); }'],
+  Scala: ['a.scala', 'object M { def bar() = {}\n def foo() = { bar() } }'],
+  Lua: ['a.lua', 'function bar() end\nfunction foo() bar() end'],
+  Bash: ['a.sh', 'bar() { echo 1; }\nfoo() { bar; }'],
+};
+
+describe('every capability-set member is exercised against the real extractor (no over-claim)', () => {
+  it('typeInference: every member infers ≥1 type; a non-member yields none', () => {
+    for (const lang of TI) {
+      const fx = TYPE_INFERENCE_FIXTURES[lang];
+      expect(fx, `missing typeInference fixture for set member ${lang}`).toBeDefined();
+      expect(inferTypesFromSource(fx, lang).size, `${lang} infers a type`).toBeGreaterThan(0);
     }
-    // A non-member yields an empty map (fail-soft), proving the set isn't over-claimed.
     expect(TI.has('Kotlin')).toBe(false);
     expect(inferTypesFromSource('val x = Foo()', 'Kotlin').size).toBe(0);
   });
 
-  it('signatures set members produce ≥1 dedicated signature entry', () => {
-    const fixtures: Array<[string, string]> = [
-      ['x.ts', 'export function foo(a: number): number { return a; }'],
-      ['x.py', 'def foo(a):\n    return a'],
-      ['x.go', 'func Foo(a int) int { return a }'],
-      ['x.rb', 'def foo(a)\n  a\nend'],
-    ];
-    for (const [path, content] of fixtures) {
-      expect(SIG.has(detectLanguage(path))).toBe(true);
-      expect(extractSignatures(path, content).entries.length, `${path} signatures`).toBeGreaterThan(0);
+  it('signatures: every member produces ≥1 dedicated entry', () => {
+    for (const lang of SIG) {
+      const fx = SIGNATURE_FIXTURES[lang];
+      expect(fx, `missing signature fixture for set member ${lang}`).toBeDefined();
+      const [path, content] = fx.split('||');
+      expect(detectLanguage(path)).toBe(lang);
+      expect(extractSignatures(path, content).entries.length, `${lang} signatures`).toBeGreaterThan(0);
     }
   });
 
-  it('imports set resolves relative imports for members; a non-member yields nothing', () => {
-    const ts = buildBaseImportMap([{ path: 'a.ts', content: "import { x } from './b';", language: 'TypeScript' }]);
-    expect(ts.size).toBe(1);
-    const py = buildBaseImportMap([{ path: 'a.py', content: 'from .b import x', language: 'Python' }]);
-    expect(py.size).toBe(1);
-    // Go is NOT in the live import path (parsers exist but are unwired) — honestly unclaimed.
-    expect(IMP.has('Go')).toBe(false);
+  it('imports: every member resolves a relative import; a non-member yields nothing', () => {
+    for (const lang of IMP) {
+      const ext = lang === 'Python' ? 'py' : lang === 'JavaScript' ? 'js' : 'ts';
+      const content = lang === 'Python' ? 'from .b import x' : "import { x } from './b';";
+      expect(buildBaseImportMap([{ path: `a.${ext}`, content, language: lang }]).size, `${lang} import`).toBe(1);
+    }
+    // Go/Rust/Ruby/Java parsers exist but are unwired in the live path → honestly unclaimed.
+    for (const non of ['Go', 'Rust', 'Ruby', 'Java']) expect(IMP.has(non)).toBe(false);
     expect(buildBaseImportMap([{ path: 'a.go', content: 'import "fmt"', language: 'Go' }]).size).toBe(0);
   });
 
-  it('callGraph set members extract ≥1 node on a fixture (reliable native grammars)', async () => {
-    const fixtures: Array<[string, string, string]> = [
-      ['TypeScript', 'a.ts', 'function foo() { bar(); }\nfunction bar() {}'],
-      ['Python', 'a.py', 'def foo():\n    bar()\ndef bar():\n    pass'],
-      ['Go', 'a.go', 'package m\nfunc Foo() { Bar() }\nfunc Bar() {}'],
-      ['Java', 'A.java', 'class A { void foo() { bar(); } void bar() {} }'],
-    ];
-    for (const [language, path, content] of fixtures) {
-      expect(CALLGRAPH_LANGUAGES.has(language)).toBe(true);
-      const snap = serializeCallGraph(await new CallGraphBuilder().build([{ path, content, language }]));
-      expect(snap.nodes.filter(n => !n.isExternal).length, `${language} nodes`).toBeGreaterThan(0);
+  it('callGraph: every member extracts ≥1 node on a fixture', async () => {
+    // One build() over all fixtures amortizes per-grammar setup (18 separate builds blow
+    // the default timeout). Then assert each set member produced ≥1 node — catching any
+    // over-claim where the set lists a language the dispatch does not actually handle.
+    // Unique path per language so we can attribute nodes by FILE (the JS/TS extractor is
+    // shared, so a node's `language` tag is ambiguous, but its `filePath` is not).
+    const files = [...CALLGRAPH_LANGUAGES].map(lang => {
+      const fx = CALLGRAPH_FIXTURES[lang];
+      expect(fx, `missing callGraph fixture for set member ${lang}`).toBeDefined();
+      return { lang, path: `${lang.replace(/[^a-z0-9]/gi, '_')}/${fx[0]}`, content: fx[1], language: lang };
+    });
+    const snap = serializeCallGraph(await new CallGraphBuilder().build(files.map(f => ({ path: f.path, content: f.content, language: f.language }))));
+    const internal = snap.nodes.filter(n => !n.isExternal);
+    for (const f of files) {
+      const got = internal.some(n => n.filePath === f.path);
+      expect(got, `${f.lang} claims callGraph but extracted no node from its fixture`).toBe(true);
     }
-  });
+  }, 60_000);
 });
 
 // ── completeness, fail-soft, determinism ──
@@ -117,7 +166,7 @@ describe('completeness + fail-soft + determinism', () => {
     // Includes IAC_LANGUAGES so every IaC ecosystem (incl. Pulumi/CDK/CDKTF, which a node
     // CAN be tagged with) must have a row — a regression guard for the dogfood-found gap.
     const referenced = new Set<string>([
-      ...CALLGRAPH_LANGUAGES, ...SIG, ...TI, ...IMP, ...IAC_LANGUAGES,
+      ...CALLGRAPH_LANGUAGES, ...SIG, ...TI, ...IMP, ...IAC_LANGUAGES, ...CFG_LANGUAGES,
     ]);
     for (const lang of referenced) {
       expect(keys.has(lang), `${lang} (referenced by a capability source) is missing from the registry`).toBe(true);
@@ -161,6 +210,20 @@ describe('completeness + fail-soft + determinism', () => {
     expect(JSON.stringify(languageCoverageMatrix(sub))).toBe(JSON.stringify(languageCoverageMatrix(sub)));
     // sorted regardless of input order
     expect(languageCoverageMatrix(['Rust', 'Go', 'C']).rows.map(r => r.language)).toEqual(['C', 'Go', 'Rust']);
+  });
+
+  it('matrix: undefined means ALL, but [] means NONE (the docs-only-repo regression)', () => {
+    expect(languageCoverageMatrix().rows.length).toBe(ALL_LANGUAGES.length); // undefined → all
+    expect(languageCoverageMatrix([]).rows).toEqual([]);                      // [] → none, not all
+  });
+
+  it('resolveLanguageName is case-insensitive + trimming; unknown → null', () => {
+    expect(resolveLanguageName('go')).toBe('Go');
+    expect(resolveLanguageName('  TYPESCRIPT ')).toBe('TypeScript');
+    expect(resolveLanguageName('c++')).toBe('C++');
+    expect(resolveLanguageName('docker compose')).toBe('Docker Compose');
+    expect(resolveLanguageName('cobol')).toBeNull();
+    expect(resolveLanguageName('')).toBeNull();
   });
 
   it('markdown render is a complete table (header + separator + one row per language)', () => {

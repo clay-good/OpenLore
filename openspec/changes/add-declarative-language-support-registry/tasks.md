@@ -4,9 +4,18 @@
 > (registry + coverage matrix, DERIVED from the live extractor structures). Tool:
 > `src/core/services/mcp-handlers/language-support.ts` (`get_language_support`, conclusion,
 > full-surface/opt-in). Coverage matrix emitted into `CODEBASE.md` via `codebase-digest.ts`.
-> Tests: `analyzer/language-support.test.ts` (16, faithfulness/fail-soft/determinism) +
-> `mcp-handlers/language-support.test.ts` (7). Docs: `docs/language-support.md`. Dogfooded on this
-> repo (25 languages; caught + fixed a CDK/CDKTF/Pulumi under-claim).
+> Tests: `analyzer/language-support.test.ts` + `mcp-handlers/language-support.test.ts`.
+> Docs: `docs/language-support.md`. Dogfooded on this repo (25 languages; caught + fixed a
+> CDK/CDKTF/Pulumi under-claim).
+>
+> **Round-2 adversarial hardening (PR #203):** an e2e harness + adversarial review found and fixed —
+> (1) a docs-only/zero-detected repo returned ALL languages falsely marked `detectedInRepo:true`
+> (`languageCoverageMatrix([])` now yields NO rows, distinct from `undefined`→all); (2) the
+> faithfulness guard was only exact for cfgOverlay/iacProjection — now EVERY member of every
+> capability set (callGraph 18, signatures 20, typeInference 9, imports 3) is behaviorally
+> cross-checked against the real extractor on a fixture, so the sets can't silently over-claim;
+> (3) named lookup is now case-insensitive + trimmed (`resolveLanguageName`); (4) completeness guard
+> now includes `CFG_LANGUAGES` (exported from cfg.ts); (5) explicit negative-preset assertion added.
 
 ## 1. Registry model
 - [x] Define the `LanguageSupport` record: capability flags (`signatures`, `callGraph`, `imports`,

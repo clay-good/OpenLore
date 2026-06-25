@@ -51,9 +51,11 @@ Two surfaces expose the matrix:
   `.openlore/analysis/CODEBASE.md` (`✓` backed, `·` fail-soft), scoped to the repo's detected
   languages.
 - **The `get_language_support` MCP tool** (opt-in, `--preset full`). With no argument it returns the
-  matrix for the repo's detected languages; with a `language` it returns that one language's support
-  as a pure registry lookup (no analysis required, fail-soft for unknown languages). Classified as a
-  `conclusion` tool; not in the lean/minimal first-run surface.
+  matrix for the repo's detected languages (an empty list when none are detected — never the whole
+  registry); with a `language` it returns that one language's support as a pure registry lookup (no
+  analysis required, fail-soft for unknown languages). The `language` argument is resolved
+  **case-insensitively** and trimmed, so `"go"`, `"GO"`, and `" Go "` all resolve to `Go`. Classified
+  as a `conclusion` tool; not in the lean/minimal first-run surface.
 
 ## Checklist: adding or widening a language
 
