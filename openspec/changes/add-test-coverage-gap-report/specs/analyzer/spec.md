@@ -9,8 +9,12 @@ are in the backward-reachable set of no test node — i.e. no test transitively 
 inverse of the existing test-selection reachability run once over the whole indexed graph. This
 computation SHALL require no test execution, no coverage instrumentation, and no working runtime, and
 SHALL be a pure function of the indexed graph. The result SHALL exclude test files themselves, generated
-code, and vendored code. A symbol with no reaching test that also has no caller at all SHALL be labeled
-as untested distinctly from dead, so this conclusion stays separate from `find_dead_code`.
+code, and vendored code. A gap that is ALSO unreachable from any liveness root SHALL carry an explicit
+also-dead marker, while an untested-but-live gap (e.g. a framework-invoked entry point) SHALL NOT carry
+it; the two SHALL never be conflated, so this conclusion stays separate from `find_dead_code` (whose
+domain is the dead subset). The seeds for test-reachability SHALL be every test node together with the
+production side of every `tested_by` association, so a function a test imports/asserts on without
+directly calling it is still counted as reachable-from-a-test.
 
 #### Scenario: A function reached by no test is a coverage gap
 
@@ -23,8 +27,9 @@ as untested distinctly from dead, so this conclusion stays separate from `find_d
 
 - **GIVEN** a framework-invoked handler with no in-repo caller and no reaching test
 - **WHEN** the coverage gap is computed
-- **THEN** it is reported in the untested set, labeled untested (no reaching test) distinctly from a dead
-  symbol
+- **THEN** it is reported in the untested set WITHOUT the also-dead marker (it is a live root), while a
+  gap that is unreachable from any liveness root DOES carry the also-dead marker — the two are never
+  conflated
 
 ### Requirement: CoverageGapRankingAndSoundnessContract
 

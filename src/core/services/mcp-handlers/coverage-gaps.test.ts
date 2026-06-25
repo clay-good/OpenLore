@@ -50,6 +50,7 @@ interface GapResult {
   coverageGaps: Array<{ name: string; file: string; fanIn: number; signals: Array<{ label: string }>; alsoFlaggedDead?: true }>;
   omitted?: number;
   note?: string;
+  confidenceBoundary?: Record<string, unknown>;
   soundness: { posture: string; claim: string; caveats: string[] };
   coverage: { languages: string[]; testDetection: string };
 }
@@ -96,6 +97,27 @@ describe('handleReportCoverageGaps', () => {
     const hub = r.coverageGaps.find(g => g.name === 'untestedHub')!;
     expect(hub.signals.map(s => s.label)).toEqual(expect.arrayContaining(['hub', 'chokepoint']));
     expect(r.reachableFromTest).toBe(1); // only testedHub
+  });
+
+  it('partitions the analyzed set: gapCount + reachableFromTest == analyzedSymbols', async () => {
+    const r = await handleReportCoverageGaps({ directory: '/p' }) as GapResult;
+    // universe (5: testedHub, untestedHub, leaf1, leaf2, main) splits exactly into
+    // gaps (4) and test-reachable (1) — a complement with no overlap or omission.
+    expect(r.analyzedSymbols).toBe(5);
+    expect(r.gapCount).toBe(4);
+    expect(r.reachableFromTest).toBe(1);
+    expect(r.gapCount + r.reachableFromTest).toBe(r.analyzedSymbols);
+    expect(r.confidenceBoundary).toBeDefined(); // always returned (negative-conclusion trust signal)
+  });
+
+  it('caps at maxResults but keeps gapCount the FULL count and reports omitted', async () => {
+    const r = await handleReportCoverageGaps({ directory: '/p', maxResults: 2 }) as GapResult;
+    expect(r.coverageGaps).toHaveLength(2);   // list truncated
+    expect(r.gapCount).toBe(4);               // ...but the count is the full set, not the page
+    expect(r.omitted).toBe(2);                // and the omission is disclosed, never silent
+    // maxResults floors at 1 (0/negative clamp), never returns an empty page on a non-empty set
+    const z = await handleReportCoverageGaps({ directory: '/p', maxResults: 0 }) as GapResult;
+    expect(z.coverageGaps.length).toBeGreaterThanOrEqual(1);
   });
 
   it('claims only the sound direction — never reports a symbol as "tested"', async () => {
@@ -178,7 +200,11 @@ describe('handleReportCoverageGaps', () => {
 
     vi.mocked(readCachedContext).mockResolvedValue({ callGraph: g } as never);
     const strict = await handleReportCoverageGaps({ directory: '/p', directResolvedOnly: true }) as GapResult;
-    expect(strict.coverageGaps.map(x => x.name)).toContain('handler'); // synthesized dropped → a gap
+    const strictHandler = strict.coverageGaps.find(x => x.name === 'handler');
+    expect(strictHandler).toBeDefined(); // synthesized dropped → a gap
+    // Parity: the dead set is computed on the SAME strict basis, so a node unreachable
+    // without the synthesized edge is BOTH a gap and also-dead (no strict/non-strict split).
+    expect(strictHandler!.alsoFlaggedDead).toBe(true);
   });
 
   it('reports testDetection "none" when the graph has no tests', async () => {

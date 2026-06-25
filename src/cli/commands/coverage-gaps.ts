@@ -34,6 +34,10 @@ interface CoverageGapsResult {
   note?: string;
   soundness: { posture: string; claim: string; caveats: string[] };
   coverage: { languages: string[]; testDetection: 'full' | 'partial' | 'none' };
+  confidenceBoundary?: {
+    staleness?: { detail?: string };
+    integrity?: { verdict?: string; detail?: string };
+  };
 }
 
 /** Compact human rendering of the gap report. */
@@ -47,6 +51,21 @@ function renderHuman(r: CoverageGapsResult): string {
   );
   if (r.coverage.testDetection === 'none') {
     lines.push('   ⚠ No tests detected — every symbol looks untested because detection found nothing, not because the code is genuinely untested.');
+  }
+  // A degraded/stale index manufactures false gaps — for a tool whose entire output is
+  // NEGATIVE conclusions ("no reaching test"), the index-health caveat is the one a human
+  // reviewer most needs, so surface it in the human view (not just --json).
+  if (r.confidenceBoundary?.integrity?.detail) {
+    lines.push(`   ⚠ index integrity ${r.confidenceBoundary.integrity.verdict ?? 'degraded'}: ${r.confidenceBoundary.integrity.detail}`);
+  }
+  if (r.confidenceBoundary?.staleness?.detail) {
+    lines.push(`   ⚠ ${r.confidenceBoundary.staleness.detail}`);
+  }
+  // When test detection is partial, surface WHICH languages lack detected tests (the
+  // precise over-report scope), not just the generic posture caveat below.
+  if (r.coverage.testDetection === 'partial') {
+    const partial = r.soundness.caveats.find(c => /no test files were detected/i.test(c));
+    if (partial) lines.push(`   ⚠ ${partial}`);
   }
   if (r.note) {
     lines.push(`   ⚠ ${r.note}`);

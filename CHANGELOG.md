@@ -7,6 +7,24 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ### Added
 
+- **Structural test-coverage gaps + `report_coverage_gaps`** (FEATURE-UPDATES proposal 5) — a
+  deterministic, graph-derived report of important code with **no reaching test**, ranked by
+  `hub`/`chokepoint` significance. It is the structural **inverse** of `select_tests`: seed on every
+  test node plus the production side of every `tested_by` association, forward-reach to the
+  test-reachable set, and report the internal code outside it (test/generated/vendored/`.d.ts`
+  excluded). No test run, no coverage instrumentation, no runtime, no LLM — the graph already encodes
+  the answer. **Gaps-only and honest:** it reports "no reaching test" and never claims a symbol is
+  "tested" (reachable-from-a-test is not behavior-verified); a gap with no caller at all is labeled
+  *also-dead* (distinct from `find_dead_code`), an untested entry point is *untested-not-dead*, a scope
+  that resolves to nothing is disclosed (never a reassuring "0 gaps"), scoped counts range over the
+  in-scope set, and a stale/degraded index is surfaced in the human view (a degraded index manufactures
+  false gaps). Ranking uses labels + raw evidence — no composite score, no tuning constant. Scope to a
+  diff (`changedSymbols`/`diffRef`) or a region (`filePattern`); `directResolvedOnly` for a stricter
+  (more gaps, more certain) report whose also-dead labeling shares the gap basis. Two surfaces: the
+  opt-in `report_coverage_gaps` MCP conclusion tool (`--preset full`, not the lean default) and the
+  `openlore coverage-gaps` CLI (read-only, never blocks). Distinct from `get_test_coverage` (spec-tag
+  based). Full surface count 65 → 66. Reference: `docs/coverage-gaps.md`.
+
 - **Declarative language-support registry + `get_language_support`** — the per-language knowledge
   OpenLore already encodes (call-graph extractor, CFG `SPECS` table, signature extractor, type-inference
   engine, IaC projector) is now consolidated behind one declarative capability registry
