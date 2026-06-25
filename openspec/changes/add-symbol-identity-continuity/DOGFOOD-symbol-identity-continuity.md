@@ -62,6 +62,23 @@ A second `analyze` with no further rename logged **no** continuity line — the 
 `calculateTax` directly, so nothing disappeared and nothing was re-carried. The carry-forward is a clean
 no-op when nothing moved.
 
+## Adversarial e2e (PR #206 review — soundness)
+
+Four scenarios run through the real `analyze` pipeline after the soundness fix. The first is the
+regression that the review caught; the rest confirm the high bar holds without breaking real renames.
+
+| Scenario | Setup | Expected | Result |
+|----------|-------|----------|--------|
+| **False positive (the bug)** | anchored `isAdmin` deleted; unrelated `checkFlag` (same param shape, **different** body) added | NO carry; `isAdmin` stays orphaned | ✅ no continuity line; `recall` → `orphaned`, no `carriedAcross` |
+| **Legitimate rename** | `computeTax` → `calculateTax` (same body, new name) | carried, `drifted (carried)` | ✅ "carried 1 symbol(s)"; provenance present |
+| **Rename + rewrite** | `parseConfig` → `loadConfig` with added trim/guard logic | NO carry (body changed beyond the name) | ✅ orphaned |
+| **Clone elsewhere** | `ping` → `health`, but an identical-body `healthAlready` already exists in another file | NO carry (body not identifying) | ✅ orphaned |
+
+Before the fix, the false-positive scenario **wrongly** re-anchored the security-critical `isAdmin`
+memory onto `checkFlag` (matched on the shared `(u: { role: string })` shape). The fix — body identity
+*modulo the symbol's own name*, plus name-independent-body uniqueness — rejects it while still carrying
+the legitimate rename.
+
 ## Notes / gotchas surfaced
 
 - The carry-forward runs at **full analyze only** (the watcher path is a deferred follow-up). A rename

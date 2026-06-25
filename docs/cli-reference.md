@@ -204,6 +204,11 @@ openlore analyze [options]
                          #   (uses the configured embedding provider — local or remote — else keyword)
 ```
 
+`analyze` also carries anchored memory across refactors: if a symbol with anchored memories/decisions was
+renamed or moved since the last analysis, its anchors are re-pointed to the new symbol (deterministically,
+no LLM) and the run logs `Memory continuity: carried N symbol(s) across rename/move`. See
+[docs/mcp-tools.md](mcp-tools.md) ("Memory survives refactors").
+
 ### Embed Options
 
 ```bash

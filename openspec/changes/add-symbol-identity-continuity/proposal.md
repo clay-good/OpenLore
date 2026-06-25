@@ -53,20 +53,30 @@ into "fresh (carried across rename)" — without ever guessing.
    computes a **continuity map**: pairs `(oldSymbol → newSymbol)` where a symbol present before and
    absent after is matched to a symbol absent before and present after. A match is admitted only on
    strong, unambiguous evidence:
-   - **exact-body** — identical content hash (the body moved and/or was renamed but is byte-identical), or
-   - **exact-signature** — identical normalized signature and structural shape (the rename touched the
-     name/location but not the body in a way that changes the signature),
-   and only when the match is **one-to-one**: exactly one disappeared candidate and one appeared
-   candidate satisfy it. Git's own rename detection MAY corroborate a file move but is never sufficient
-   alone. The reason (`renamed` | `moved` | `renamed-and-moved`) and the basis (`exact-body` |
-   `exact-signature`) are recorded on each continuity pair.
+   - **exact-body** — identical content hash (the body moved to a new file but is byte-identical; the
+     name did not change), or
+   - **exact-signature** — the body is identical EXCEPT the symbol's own name changed (a rename),
+     verified by substituting the candidate's new name back to the old name and confirming the span
+     hashes to the old baseline. This is a true body-identity-modulo-name check, **not** a parameter-shape
+     match: an unrelated newcomer that merely shares a parameter shape (and appeared the same run the old
+     symbol was deleted) does **not** match, so a genuinely deleted symbol is never re-anchored onto an
+     unrelated symbol.
+   and only when the match is **one-to-one** (exactly one disappeared candidate and one appeared
+   candidate satisfy it) and, for `exact-signature`, only when the name-independent body is not shared by
+   any other new symbol (an identical-body clone elsewhere makes the body non-identifying → no pair).
+   Git's own rename detection MAY corroborate a file move but is never sufficient alone. The reason
+   (`renamed` | `moved` | `renamed-and-moved`) and the basis (`exact-body` | `exact-signature`) are
+   recorded on each continuity pair.
 
 2. **Anchor carry-forward (the payoff).** For each continuity pair, anchors that resolve to `oldSymbol`
-   — memories, decisions, and spec links pinned to its structural identity — are **re-anchored** to
-   `newSymbol`, with provenance (`carriedAcross: { from, to, reason, atCommit }`). The freshness verdict
-   for such a memory becomes `fresh` (or `drifted` if the body also changed), annotated as carried,
-   rather than `orphaned`. The carry-forward is additive and reversible: the provenance records where the
-   anchor came from, so the move is auditable and a wrong carry can be traced.
+   — memories and decisions pinned to its structural identity (spec links carry automatically if/when
+   specs become symbol-anchored; today they are file-level and carry nothing) — are **re-anchored** to
+   `newSymbol`, with provenance (`carriedAcross: { from: { symbolName?, filePath }, reason, basis,
+   atCommit? }`). The anchor's `contentHash` baseline is **preserved**, so the existing freshness engine
+   reports the verdict: `fresh` for a byte-identical `exact-body` move, or `drifted` for an
+   `exact-signature` rename (whose declaration span changed), both annotated as carried — rather than
+   `orphaned`. The carry-forward is additive and reversible: the provenance records where the anchor came
+   from, so the move is auditable and a wrong carry can be traced.
 
 3. **Ambiguity is never resolved by guessing (honesty).** When more than one appeared symbol could match
    a disappeared one (e.g. a function split into two, or two near-identical helpers), **no carry-forward
@@ -116,8 +126,19 @@ boundary (a later change).
 
 ## Implementation status
 
-Tracked in `tasks.md`. Verified by a rename fixture (a function renamed with an identical body → its
-memory is carried forward and recalls as `fresh (carried)`, not `orphaned`), a move fixture (same body,
-new file → carried), an ambiguity fixture (two candidate destinations → no carry-forward, both surfaced
-as `possiblyMovedTo`), a body-rewrite fixture (renamed *and* rewritten → correctly orphaned), and a
-determinism test.
+Tracked in `tasks.md`. Verified by: a rename fixture (renamed with an otherwise-identical body → carried,
+recalls `drifted (carried)`), a move fixture (byte-identical body, new file → carried, recalls `fresh
+(carried)`), an ambiguity fixture (two identical-body candidates → no carry, both surfaced as
+`possiblyMovedTo`), a body-rewrite fixture (renamed *and* rewritten → correctly orphaned), a determinism
+test, and the **soundness-regression fixtures added in PR review** (a deleted symbol + an unrelated
+same-parameter-shape newcomer → NOT carried; an identical-body clone elsewhere → NOT carried; a memory is
+never carried onto a test symbol). All four adversarial scenarios were also confirmed end-to-end against
+the real `openlore analyze` pipeline — see `DOGFOOD-symbol-identity-continuity.md`.
+
+> **Soundness hardening (PR #206 review).** The first cut matched `exact-signature` on the parameter
+> *shape* alone, which could re-anchor a deleted symbol's memory onto an unrelated newcomer that merely
+> shared a shape (e.g. another `(req, res)` handler). That was caught by an adversarial e2e test and
+> fixed: `exact-signature` now requires the candidate's body to equal the old body *modulo the symbol's
+> own name* (verified by name substitution against the recorded baseline hash) AND the name-independent
+> body to be unique among new symbols. Test symbols are excluded as carry targets. No tuning constant was
+> introduced.

@@ -35,7 +35,7 @@ AI coding agents are powerful but amnesiac: every task starts by re-reading the 
 
 ### What you get
 
-- 🧠 **Persistent architectural memory** — `orient()` once; agents stop re-deriving the system from dozens of file reads, across sessions.
+- 🧠 **Persistent architectural memory** — `orient()` once; agents stop re-deriving the system from dozens of file reads, across sessions. Anchored notes/decisions **survive refactors**: a renamed or moved symbol carries its memory forward at the next `analyze` (with `carriedAcross` provenance) instead of orphaning it.
 - ⚡ **Deterministic & local-first** — pure static analysis, no API key, no network, same answer every time. `orient()` runs in **~430µs p50** on a 15k-node graph.
 - 🔭 **One-call orientation** — `orient(task)` returns the relevant functions, their callers, matching spec sections, and insertion-point candidates in a single call.
 - 🕸️ **One unified graph** — application code, **Infrastructure-as-Code**, and **architectural decisions** all project onto the same node/edge primitives, so a single traversal answers questions that span all three.

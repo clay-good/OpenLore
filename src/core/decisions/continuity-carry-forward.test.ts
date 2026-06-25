@@ -27,8 +27,8 @@ describe('reanchorAnchors', () => {
 
   it('re-points an anchor across a pair and stamps carriedAcross, preserving contentHash', () => {
     const pairs = new Map([['src/a.ts::computeTax', pair({
-      from: { nodeId: 'src/a.ts::computeTax', name: 'computeTax', filePath: 'src/a.ts', signatureShape: '(a)' },
-      to: { id: 'src/a.ts::calculateTax', stableId: 'sid:calculateTax(a)', name: 'calculateTax', filePath: 'src/a.ts', contentHash: 'hNEW', signatureShape: '(a)' },
+      from: { nodeId: 'src/a.ts::computeTax', name: 'computeTax', filePath: 'src/a.ts' },
+      to: { id: 'src/a.ts::calculateTax', stableId: 'sid:calculateTax(a)', name: 'calculateTax', filePath: 'src/a.ts', contentHash: 'hNEW', spanText: 'function calculateTax(a){}', normBodyHash: 'nh' },
       reason: 'renamed', basis: 'exact-signature',
     })]]);
     const { anchors, changed } = reanchorAnchors([baseAnchor], pairs, new Map(), 'abc123');
@@ -48,7 +48,7 @@ describe('reanchorAnchors', () => {
 
   it('attaches possiblyMovedTo for an ambiguous old symbol, leaving identity intact', () => {
     const amb = new Map<string, AmbiguousContinuity>([['src/a.ts::computeTax', {
-      from: { nodeId: 'src/a.ts::computeTax', name: 'computeTax', filePath: 'src/a.ts', signatureShape: '(a)' },
+      from: { nodeId: 'src/a.ts::computeTax', name: 'computeTax', filePath: 'src/a.ts' },
       candidates: [
         { id: 'src/a.ts::calcA', name: 'calcA', filePath: 'src/a.ts' },
         { id: 'src/b.ts::calcB', name: 'calcB', filePath: 'src/b.ts' },
@@ -72,7 +72,7 @@ describe('reanchorAnchors', () => {
   it('is idempotent for an already-attached possiblyMovedTo', () => {
     const withHint: StructuralAnchor = { ...baseAnchor, possiblyMovedTo: ['src/a.ts::calcA'] };
     const amb = new Map<string, AmbiguousContinuity>([['src/a.ts::computeTax', {
-      from: { nodeId: 'src/a.ts::computeTax', name: 'computeTax', filePath: 'src/a.ts', signatureShape: '(a)' },
+      from: { nodeId: 'src/a.ts::computeTax', name: 'computeTax', filePath: 'src/a.ts' },
       candidates: [{ id: 'src/a.ts::calcA', name: 'calcA', filePath: 'src/a.ts' }],
     }]]);
     const { changed } = reanchorAnchors([withHint], new Map(), amb);
@@ -82,8 +82,8 @@ describe('reanchorAnchors', () => {
   it('clears a stale possiblyMovedTo when the symbol is now confidently carried', () => {
     const withHint: StructuralAnchor = { ...baseAnchor, possiblyMovedTo: ['src/a.ts::calcA'] };
     const pairs = new Map([['src/a.ts::computeTax', pair({
-      from: { nodeId: 'src/a.ts::computeTax', name: 'computeTax', filePath: 'src/a.ts', signatureShape: '(a)' },
-      to: { id: 'src/a.ts::calculateTax', name: 'calculateTax', filePath: 'src/a.ts', contentHash: 'hNEW', signatureShape: '(a)' },
+      from: { nodeId: 'src/a.ts::computeTax', name: 'computeTax', filePath: 'src/a.ts' },
+      to: { id: 'src/a.ts::calculateTax', name: 'calculateTax', filePath: 'src/a.ts', contentHash: 'hNEW', spanText: 'function calculateTax(a){}', normBodyHash: 'nh' },
     })]]);
     const { anchors } = reanchorAnchors([withHint], pairs, new Map());
     expect(anchors[0].possiblyMovedTo).toBeUndefined();

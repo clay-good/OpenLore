@@ -26,19 +26,18 @@
  *    pure function so it is unit-tested without disk.
  */
 
-import { join, resolve, sep } from 'node:path';
-import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR } from '../../constants.js';
 import { EdgeStore } from '../services/edge-store.js';
-import { signatureShape } from '../scip/moniker.js';
-import type { FunctionNode } from '../analyzer/call-graph.js';
 import type {
   StructuralAnchor,
   ContinuityProvenance,
 } from '../../types/index.js';
 import { hashSpan } from './anchor.js';
+import { nodeSpanText } from './anchor-adapter.js';
 import {
   computeContinuity,
+  normalizedBodyHash,
   type DisappearedSymbol,
   type AppearedSymbol,
   type ContinuityPair,
@@ -54,8 +53,6 @@ export interface OldNodeSnapshot {
   stableId?: string;
   name: string;
   filePath: string;
-  signature?: string;
-  language?: string;
 }
 
 export interface CarryForwardSummary {
@@ -106,32 +103,6 @@ export function snapshotOldNodes(storeDir: string): OldNodeSnapshot[] {
   } finally {
     try { store.close(); } catch { /* ignore */ }
   }
-}
-
-/** Read a file confined to the project root (mcp-security), or null when unreadable. */
-function readConfined(rootPath: string, filePath: string, cache: Map<string, string | null>): string | null {
-  const hit = cache.get(filePath);
-  if (hit !== undefined) return hit;
-  const abs = resolve(rootPath, filePath);
-  let content: string | null;
-  if (abs !== rootPath && !abs.startsWith(rootPath + sep)) {
-    content = null;
-  } else {
-    try { content = readFileSync(abs, 'utf-8'); } catch { content = null; }
-  }
-  cache.set(filePath, content);
-  return content;
-}
-
-/**
- * Current span hash of a node — IDENTICAL to the freshness engine's computation
- * (slice by UTF-16 code-unit offsets, then {@link hashSpan}) so a carried anchor's
- * later freshness verdict matches the hash compared here.
- */
-function currentSpanHash(rootPath: string, node: FunctionNode, cache: Map<string, string | null>): string | undefined {
-  const content = readConfined(rootPath, node.filePath, cache);
-  if (content === null) return undefined;
-  return hashSpan(content.slice(node.startIndex, node.endIndex));
 }
 
 /** Stable key identifying the old symbol an anchor points at. */
@@ -192,11 +163,13 @@ export function reanchorAnchors(
 
 /**
  * Build the disappeared / appeared symbol sets and compute the continuity map.
- * Exported for the orchestrator and tests.
  *
  * `disappeared` are the DISTINCT old symbols (by old nodeId) referenced by some
  * persisted anchor that no longer resolve in the new store. `appeared` are the new
- * internal nodes absent from the old snapshot, with their current span hash.
+ * internal NON-TEST nodes absent from the old snapshot (a memory is never carried
+ * onto a test helper). `newNormBodyCount` counts each name-independent body across
+ * ALL new internal nodes (including pre-existing and test nodes) so an
+ * `exact-signature` carry is rejected when an identical body exists elsewhere.
  */
 function buildContinuity(
   rootPath: string,
@@ -224,29 +197,34 @@ function buildContinuity(
       name: old.name,
       filePath: old.filePath,
       ...(sym.contentHash ? { contentHash: sym.contentHash } : {}),
-      signatureShape: signatureShape(old.signature, old.language, old.name),
     });
   }
   if (disappeared.length === 0) return { pairs: [], ambiguous: [] };
 
-  // Appeared: new internal nodes absent from the old snapshot (by id and stableId).
+  // Single pass over the new graph: tally name-independent body frequencies across
+  // ALL internal nodes, and collect the appeared (new, non-test) candidates.
   const appeared: AppearedSymbol[] = [];
+  const newNormBodyCount = new Map<string, number>();
   for (const node of store.getAllInternalNodes()) {
+    const spanText = nodeSpanText(rootPath, node, cache);
+    if (spanText === undefined) continue;
+    const normBodyHash = normalizedBodyHash(spanText, node.name);
+    newNormBodyCount.set(normBodyHash, (newNormBodyCount.get(normBodyHash) ?? 0) + 1);
+    if (node.isTest) continue; // never carry a memory onto a test symbol
     if (oldIds.has(node.id)) continue;
     if (node.stableId && oldStableIds.has(node.stableId)) continue;
-    const contentHash = currentSpanHash(rootPath, node, cache);
-    if (contentHash === undefined) continue;
     appeared.push({
       id: node.id,
       ...(node.stableId ? { stableId: node.stableId } : {}),
       name: node.name,
       filePath: node.filePath,
-      contentHash,
-      signatureShape: signatureShape(node.signature, node.language, node.name),
+      contentHash: hashSpan(spanText),
+      spanText,
+      normBodyHash,
     });
   }
 
-  return computeContinuity(disappeared, appeared);
+  return computeContinuity(disappeared, appeared, newNormBodyCount);
 }
 
 /**

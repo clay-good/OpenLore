@@ -5,22 +5,34 @@
 ### Requirement: AnchorCarryForwardAcrossContinuity
 
 When the analyzer's rename/move continuity map pairs `oldSymbol → newSymbol`, the system SHALL carry
-forward the code anchors pinned to `oldSymbol` — memories, decisions, and spec links — by re-anchoring
-them to `newSymbol`, so durable knowledge survives a benign rename or move instead of orphaning. Each
-carried anchor SHALL record provenance (`carriedAcross: { from, to, reason, atCommit }`), making the
-move auditable and reversible. After carry-forward, the freshness verdict for such a memory SHALL be
-`fresh` when the body is unchanged, or `drifted` when the body changed, annotated as carried — never
-`orphaned` solely because the name or file changed. Carry-forward SHALL be additive: it adds optional
-provenance to existing anchor records and changes no anchor schema field's meaning, so stores written
-before this change load without migration.
+forward the code anchors pinned to `oldSymbol` — memories and decisions (spec links carry automatically
+if and when specs become symbol-anchored; today specs are file-level and carry nothing) — by
+re-anchoring them to `newSymbol`, so durable knowledge survives a benign rename or move instead of
+orphaning. Each carried anchor SHALL record provenance (`carriedAcross: { from: { symbolName?, filePath },
+reason, basis, atCommit? }`), making the move auditable and reversible. The anchor's `contentHash`
+baseline SHALL be preserved (not re-stamped), so the existing freshness engine reports `fresh` when the
+new span is byte-identical (an `exact-body` move) or `drifted` when the span changed (an
+`exact-signature` rename changes the declaration), in both cases annotated as carried — never `orphaned`
+solely because the name or file changed. Carry-forward SHALL be additive: it adds optional provenance to
+existing anchor records and changes no anchor schema field's meaning, so stores written before this
+change load without migration.
 
-#### Scenario: A renamed symbol's memory recalls as fresh, not orphaned
+#### Scenario: A moved symbol's memory recalls as fresh, not orphaned
+
+- **GIVEN** a memory anchored to `computeTax`, and a continuity pair `computeTax → computeTax` in a new
+  file with a byte-identical body (basis `exact-body`)
+- **WHEN** the memory is recalled after the move
+- **THEN** it resolves to the new location, returns a `fresh` verdict annotated as carried, and carries
+  provenance recording the prior anchor — rather than returning `orphaned`
+
+#### Scenario: A renamed symbol's memory recalls as drifted-and-carried, not orphaned
 
 - **GIVEN** a memory anchored to `computeTax`, and a continuity pair `computeTax → calculateTax`
-  (basis `exact-body`)
+  (basis `exact-signature`)
 - **WHEN** the memory is recalled after the rename
-- **THEN** it resolves to `calculateTax`, returns a `fresh` verdict annotated as carried across the
-  rename, and carries provenance recording the prior anchor — rather than returning `orphaned`
+- **THEN** it resolves to `calculateTax`, returns a `drifted` verdict annotated as carried across the
+  rename (the declaration span changed), and carries provenance recording the prior anchor — rather than
+  returning `orphaned`
 
 #### Scenario: Carry-forward across a move preserves a decision's anchor
 

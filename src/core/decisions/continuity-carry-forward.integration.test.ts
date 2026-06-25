@@ -164,8 +164,9 @@ describe('carryForwardContinuity (integration)', () => {
 
     const oldNodes = snapshotOldNodes(storeDir);
 
-    // Two new same-shape candidates → ambiguous → no carry, both disclosed.
-    const newSrc = 'export function chooseA(a: number) {\n  return a;\n}\nexport function chooseB(a: number) {\n  return a + 1;\n}\n';
+    // Two new candidates whose bodies are IDENTICAL to pick's modulo the name →
+    // genuinely ambiguous → no carry, both disclosed.
+    const newSrc = 'export function chooseA(a: number) {\n  return a;\n}\nexport function chooseB(a: number) {\n  return a;\n}\n';
     await writeFile(join(root, file), newSrc);
     const aStart = newSrc.indexOf('export function chooseA');
     const bStart = newSrc.indexOf('export function chooseB');
@@ -182,6 +183,44 @@ describe('carryForwardContinuity (integration)', () => {
     expect(a.nodeId).toBe(`${file}::pick`); // unchanged → still orphaned
     expect(a.possiblyMovedTo).toEqual([`${file}::chooseA`, `${file}::chooseB`]);
     expect(a.carriedAcross).toBeUndefined();
+  });
+
+  it('does NOT carry onto an unrelated newcomer that shares only the signature shape', async () => {
+    // The adversarial soundness case: an anchored symbol is DELETED and an unrelated
+    // function with the SAME parameter shape but a DIFFERENT body appears the same run.
+    const oldSrc = 'export function isAdmin(u: { role: string }): boolean {\n  return u.role === "admin";\n}\n';
+    const fileA = 'src/auth.ts';
+    const fileB = 'src/flags.ts';
+    await mkdir(join(root, 'src'), { recursive: true });
+    await writeFile(join(root, fileA), oldSrc);
+    const oldNode = node({ id: `${fileA}::isAdmin`, name: 'isAdmin', filePath: fileA, signature: 'function isAdmin(u: { role: string })', startIndex: 0, endIndex: oldSrc.length });
+    { const s = EdgeStore.open(EdgeStore.dbPath(storeDir)); s.insertNodes([oldNode]); s.close(); }
+
+    const memory: AnchoredMemory = {
+      id: 'mem005', kind: 'note', content: 'isAdmin gates admin access — security critical.', recordedAt: new Date(0).toISOString(),
+      anchors: [{ nodeId: oldNode.id, stableId: oldNode.stableId, symbolName: 'isAdmin', filePath: fileA, contentHash: hashSpan(oldSrc) }],
+    };
+    await saveMemoryStore(root, { version: '1', updatedAt: '', sequence: 0, memories: [memory] });
+
+    const oldNodes = snapshotOldNodes(storeDir);
+
+    // isAdmin deleted; an unrelated checkFlag (same shape, DIFFERENT body) appears.
+    await writeFile(join(root, fileA), 'export function authenticate(token: string): boolean {\n  return token.length > 0;\n}\n');
+    const newFlag = 'export function checkFlag(u: { role: string }): boolean {\n  return u.enabled === true;\n}\n';
+    await writeFile(join(root, fileB), newFlag);
+    const nAuth = node({ id: `${fileA}::authenticate`, name: 'authenticate', filePath: fileA, signature: 'function authenticate(token: string)', startIndex: 0, endIndex: 80 });
+    const nFlag = node({ id: `${fileB}::checkFlag`, name: 'checkFlag', filePath: fileB, signature: 'function checkFlag(u: { role: string })', startIndex: 0, endIndex: newFlag.length });
+    { const s = EdgeStore.open(EdgeStore.dbPath(storeDir)); s.clearAll(); s.insertNodes([nAuth, nFlag]); s.close(); }
+
+    const summary = await carryForwardContinuity(root, oldNodes, storeDir);
+    expect(summary.carried).toHaveLength(0);
+    expect(summary.ambiguous).toHaveLength(0);
+
+    const reloaded = await loadMemoryStore(root);
+    const a = reloaded.memories[0].anchors[0];
+    expect(a.nodeId).toBe(`${fileA}::isAdmin`);  // unchanged → correctly orphaned, NOT carried onto checkFlag
+    expect(a.carriedAcross).toBeUndefined();
+    expect(a.symbolName).toBe('isAdmin');
   });
 
   it('is a no-op when nothing moved (idempotent)', async () => {

@@ -7,6 +7,24 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ### Added
 
+- **Symbol identity continuity — memory survives renames & moves** (FEATURE-UPDATES proposal 1) — a
+  renamed or moved symbol no longer orphans the memories and decisions anchored to it. At each
+  `openlore analyze`, OpenLore snapshots the prior graph, detects symbols that disappeared (anchored,
+  now-unresolved) and appeared (new), and **carries the anchors forward** to the new symbol with
+  `carriedAcross: { from, reason, basis, atCommit }` provenance — turning a silent `orphaned` into a
+  `fresh`/`drifted (carried)` recall that `recall` surfaces with the provenance. Matching is deliberately
+  conservative and threshold-free: `exact-body` (byte-identical span — a pure move) or `exact-signature`
+  (the body is identical *modulo the symbol's own name* — a rename, verified by substituting the new name
+  back to the old and checking the recorded baseline hash), admitted only on a strict one-to-one match
+  and only when the name-independent body is unique among new symbols. A genuinely deleted symbol is
+  **never** re-anchored onto an unrelated newcomer that merely shares a parameter shape; an ambiguous move
+  stays orphaned and discloses `possiblyMovedTo: [...]` candidates instead of guessing. Test symbols are
+  never carry targets. The anchor's `contentHash` baseline is preserved, so the existing freshness engine
+  remains the single source of truth. No graph-schema change, no new MCP tool, no LLM, no clock; new
+  anchor fields are additive (legacy stores load without migration). Trigger is full `analyze` (the
+  incremental-watcher path is a deferred follow-up). Reference:
+  `openspec/changes/add-symbol-identity-continuity/`.
+
 - **Call resolution recall — re-export / barrel resolution** (FEATURE-UPDATES proposal 4) — the import
   resolver now follows re-export chains (`export { x } from`, `export * from`, and the TS ESM
   `.js`-specifier forms) through any depth of barrel to a symbol's **true definition**, and that

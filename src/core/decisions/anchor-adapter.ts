@@ -68,11 +68,22 @@ function sliceNodeSpan(content: string, node: FunctionNode): string {
   return content.slice(node.startIndex, node.endIndex);
 }
 
-/** Hash a node's source span (code-unit offsets) against current file content. */
-function hashNodeSpan(rootPath: string, node: FunctionNode, cache: Map<string, string | null>): string | undefined {
+/**
+ * Read a node's current source span text (code-unit offsets) from disk, confined
+ * to the project root, or `undefined` when the file is unreadable. Exported so the
+ * continuity carry-forward computes span hashes the SAME way the freshness engine
+ * does (one slicing source — avoids a latent divergence).
+ */
+export function nodeSpanText(rootPath: string, node: FunctionNode, cache: Map<string, string | null>): string | undefined {
   const content = readFileCached(rootPath, node.filePath, cache);
   if (content === null) return undefined;
-  return hashSpan(sliceNodeSpan(content, node));
+  return sliceNodeSpan(content, node);
+}
+
+/** Hash a node's source span (code-unit offsets) against current file content. */
+function hashNodeSpan(rootPath: string, node: FunctionNode, cache: Map<string, string | null>): string | undefined {
+  const text = nodeSpanText(rootPath, node, cache);
+  return text === undefined ? undefined : hashSpan(text);
 }
 
 /**
