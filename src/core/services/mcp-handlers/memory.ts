@@ -571,6 +571,8 @@ function summarizeVerdict(v: AnchorVerdict): {
   freshness: 'fresh' | 'drifted' | 'orphaned';
   relocatedTo?: string;
   staleRegion?: boolean;
+  carriedAcross?: StructuralAnchor['carriedAcross'];
+  possiblyMovedTo?: string[];
 } {
   return {
     ...summarizeAnchor(v.anchor),
@@ -579,6 +581,12 @@ function summarizeVerdict(v: AnchorVerdict): {
     // Distinguishes "drifted because its topology wasn't recomputed yet" from
     // "drifted because the code changed" (fix-transitive-incremental-staleness).
     ...(v.staleRegion ? { staleRegion: true } : {}),
+    // This anchor was carried across a rename/move; recall surfaces the provenance
+    // so the agent sees the fact survived a refactor (add-symbol-identity-continuity).
+    ...(v.anchor.carriedAcross ? { carriedAcross: v.anchor.carriedAcross } : {}),
+    // An orphaned anchor with ambiguous candidate destinations — disclosed, never
+    // silently re-attached to a guess (add-symbol-identity-continuity).
+    ...(v.anchor.possiblyMovedTo?.length ? { possiblyMovedTo: v.anchor.possiblyMovedTo } : {}),
   };
 }
 

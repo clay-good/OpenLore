@@ -28,6 +28,7 @@ import {
 import { computeProjectFingerprint, isCacheFresh } from '../../core/services/mcp-handlers/utils.js';
 import type { AnalyzeOptions, OpenLoreConfig } from '../../types/index.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
+import { snapshotOldNodes, carryForwardContinuity } from '../../core/decisions/continuity-carry-forward.js';
 import { RepositoryMapper, type RepositoryMap } from '../../core/analyzer/repository-mapper.js';
 import type { CloneGroup, CloneInstance } from '../../core/analyzer/duplicate-detector.js';
 import {
@@ -182,6 +183,11 @@ export async function runAnalysis(
     maxValidationFiles: MAX_VALIDATION_FILES,
   });
 
+  // Snapshot the prior graph's nodes BEFORE the rebuild overwrites the store, so a
+  // symbol renamed/moved since the last analysis can be matched to its new identity
+  // and its anchored memory/decisions carried forward (add-symbol-identity-continuity).
+  const oldNodeSnapshot = snapshotOldNodes(outputPath);
+
   const artifacts = await artifactGenerator.generateAndSave(repoMap, depGraph, {
     uiComponents,
     schemas,
@@ -189,6 +195,23 @@ export async function runAnalysis(
     middleware,
     envVars,
   });
+
+  // Carry anchored memory/decisions across any rename/move detected between the
+  // snapshot and the freshly persisted graph. Deterministic, no LLM; a cheap no-op
+  // when there are no anchored symbols or no prior snapshot. Never fails analysis.
+  try {
+    const carried = await carryForwardContinuity(rootPath, oldNodeSnapshot, outputPath);
+    if (carried.memoriesUpdated + carried.decisionsUpdated > 0) {
+      logger.info(
+        'Memory continuity',
+        `carried ${carried.carried.length} symbol(s) across rename/move ` +
+          `(${carried.memoriesUpdated} memor${carried.memoriesUpdated === 1 ? 'y' : 'ies'}, ` +
+          `${carried.decisionsUpdated} decision${carried.decisionsUpdated === 1 ? '' : 's'} re-anchored)`,
+      );
+    }
+  } catch (err) {
+    logger.debug(`continuity carry-forward skipped: ${(err as Error).message}`);
+  }
 
   // Also save the raw dependency graph
   await writeFile(

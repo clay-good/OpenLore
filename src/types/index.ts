@@ -693,6 +693,47 @@ export interface StructuralAnchor {
    * legacy file anchor with no captured baseline (only existence can be checked).
    */
   contentHash?: string;
+  /**
+   * Provenance recorded when this anchor was carried across an unambiguous
+   * rename/move (add-symbol-identity-continuity). The identity fields above were
+   * re-pointed from `from` to the current symbol; `contentHash` keeps its original
+   * baseline so the freshness check still reports `fresh` (exact-body carry) or
+   * `drifted` (the rename changed the span). Additive + auditable: a wrong carry
+   * can be traced back. Absent on anchors that never moved.
+   */
+  carriedAcross?: ContinuityProvenance;
+  /**
+   * Disclosure for an orphaned symbol anchor whose disappeared symbol had MORE
+   * than one equally-plausible destination after a re-analysis
+   * (add-symbol-identity-continuity). No carry-forward occurs (ambiguity is never
+   * resolved by guessing); these are the candidate new locations
+   * (`filePath::symbolName`) for a human/agent to reconcile. Absent unless an
+   * ambiguous move was detected for this anchor.
+   */
+  possiblyMovedTo?: string[];
+}
+
+/** How a symbol's identity moved between two indexed states (add-symbol-identity-continuity). */
+export type ContinuityReason = 'renamed' | 'moved' | 'renamed-and-moved';
+
+/**
+ * The evidence basis for a continuity match (add-symbol-identity-continuity):
+ * - `exact-body` — the new symbol's source span is byte-identical to the old one.
+ * - `exact-signature` — the normalized signature shape is identical (the name
+ *   and/or location moved but the parameter shape did not).
+ * Both are admitted only on a strict one-to-one match; anything ambiguous yields
+ * no pair (see {@link StructuralAnchor.possiblyMovedTo}).
+ */
+export type ContinuityBasis = 'exact-body' | 'exact-signature';
+
+/** Recorded when an anchor is carried across a rename/move. */
+export interface ContinuityProvenance {
+  /** The prior symbol the anchor was carried from. */
+  from: { symbolName?: string; filePath: string };
+  reason: ContinuityReason;
+  basis: ContinuityBasis;
+  /** HEAD commit SHA at carry time (deterministic, read from git); absent outside a repo. */
+  atCommit?: string;
 }
 
 /** Deterministic freshness verdict for a single anchor or an aggregated memory. */
