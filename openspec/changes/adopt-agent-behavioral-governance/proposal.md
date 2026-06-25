@@ -1,6 +1,6 @@
 # Adopt the agent behavioral governance layer (from PR #83), staged toward the memory north star
 
-> Status: IN PROGRESS (2026-06-21) — adopting `laurentftech`'s Panic Response Layer (PR #83,
+> Status: IMPLEMENTED (PR #175, merged). Fully built on current `main` — the deterministic core plus all four "deferred" parts (gryph fail-open, `experimental_blocking`, `setup --hooks`/`--panic`, observe→memory loop) and the `panic-validate` gate; 101 panic/behavioral/gryph tests pass. The accuracy-gate clearing (turning intervention on by default) remains future work needing real observe-mode telemetry. (Status corrected 2026-06-25 — was a stale "IN PROGRESS".) Originally adopting `laurentftech`'s Panic Response Layer (PR #83,
 > `feat/panic-response-layer`, ~3,822 LOC) onto current `main`. PR #83 was opened against `v2.0.1`
 > and is 513 commits stale; it does not merge or compile cleanly as-is. This change rebases the work
 > onto current `main` and now builds out the **full feature** in PR #175 — everything **opt-in and

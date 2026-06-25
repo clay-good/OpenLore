@@ -4,7 +4,7 @@
 > binary is absent; `gryph-watch` exits silently on mode:'off'). The DEFERRED notes below are kept
 > for design history.
 >
-> Status: DEFERRED — carved out of the agent-behavioral-governance adoption (PR #175) to land the
+> Status: BUILT (PR #175, merged; see the UPDATE banner above). Status line corrected 2026-06-25 — was a stale "DEFERRED". History: carved out of the agent-behavioral-governance adoption (PR #175) to land the
 > deterministic core first. This proposal preserves @laurentftech's Gryph design (PR #83) so it is
 > not lost. Build only after the observe-mode accuracy gate is cleared
 > (see `adopt-agent-behavioral-governance`).

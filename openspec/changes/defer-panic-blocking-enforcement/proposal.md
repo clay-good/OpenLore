@@ -4,7 +4,7 @@
 > EXPLICIT opt-in (never default); at L4 it emits `{decision:block, advisory:true}`. Still hard-gated
 > on the accuracy gate before any default-on use. History below.
 >
-> Status: DEFERRED — removed from the mode ladder in PR #175 (now `off | observe | advisory`).
+> Status: BUILT (PR #175, merged; see the UPDATE banner above). Status line corrected 2026-06-25 — was a stale "DEFERRED". History: removed from the mode ladder in PR #175 (now `off | observe | advisory`).
 > Preserves @laurentftech's L4 enforcement design (PR #83). HARD-gated on validated signal accuracy.
 
 ## Why it was deferred
