@@ -88,11 +88,14 @@ describe('extractHtmlScripts', () => {
 
   it('does not hang or index an unterminated <script> (no quadratic scan)', () => {
     // Many open tags with no close tag — the old combined regex was O(N²) here.
-    const html = '<script>'.repeat(20_000) + 'function never(){}';
+    // 100k tags makes a quadratic scan catastrophic (tens of seconds) while the
+    // linear scan stays in the millisecond range, so the time bound discriminates
+    // linear-vs-quadratic with wide headroom — robust against CI-load jitter (a
+    // tight ~1s bound flaked on shared runners even though the scan is linear).
+    const html = '<script>'.repeat(100_000) + 'function never(){}';
     const t0 = Date.now();
     const out = extractHtmlScripts(html);
-    // Linear scan: comfortably under a second even for 20k unterminated tags.
-    expect(Date.now() - t0).toBeLessThan(1000);
+    expect(Date.now() - t0).toBeLessThan(5000);
     // No close tag anywhere → nothing is indexed.
     expect(out).toBeNull();
   });
