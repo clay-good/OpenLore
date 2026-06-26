@@ -26,6 +26,10 @@ intra-object dispatch rather than a silent absence of edges.
   resolves.
 - An unresolved `this`/`super` call SHALL be dropped, NOT recorded as a synthetic `external::this.m`
   node.
+- A function nested inside a class method (an object-literal method shorthand, a nested `function`, a
+  callback) SHALL NOT inherit the enclosing class name, so its `this.x()` SHALL NOT resolve to a false
+  intra-object edge. A direct class method or field (only `class_body` between it and the class) is
+  unaffected.
 
 #### Scenario: this.method() resolves to a sibling method of the same class
 
@@ -54,3 +58,10 @@ intra-object dispatch rather than a silent absence of edges.
   the call-noise ignore-list)
 - **WHEN** the call graph is built
 - **THEN** the edge `handle → parse` exists (the ignore-list does not suppress a `this.` receiver)
+
+#### Scenario: a this-call inside a nested object literal/function does not create a false edge
+
+- **GIVEN** a class `A` with a method `realMethod`, and another method that returns an object literal
+  whose method-shorthand body calls `this.realMethod()` (runtime `this` is the object, not `A`)
+- **WHEN** the call graph is built
+- **THEN** there is NO `self_cls` edge to `A.realMethod` from the nested object-literal method

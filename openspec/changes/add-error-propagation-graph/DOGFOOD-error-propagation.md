@@ -161,8 +161,16 @@ no-regression) and found the noise-filter swallow (`this.parse()` dropped before
 
 Composed result, dogfooded on the OpenLore repo: every `Logger.*` → `this.log()` edge now resolves
 (`self_cls`); `analyze_error_propagation` on `handleBatch` went from `escapes 2 / handled 2 /
-functionsAnalyzed 449 / unresolvedSelfCalls 39` to `escapes 3 / handled 32 / functionsAnalyzed 578 /
+functionsAnalyzed 449 / unresolvedSelfCalls 39` to `escapes 3 / handled 32 / functionsAnalyzed 580 /
 unresolvedSelfCalls 2` — the resolution traces what it can, and the §E disclosure honestly flags the
-small residue (object-literal / unindexed-parent edge cases). The disclosure and the resolution
-compose: resolved calls are analyzed, the genuinely-unresolvable ones are still never assumed
-exception-free.
+small residue (unindexed-parent edge cases). The disclosure and the resolution compose: resolved calls
+are analyzed, the genuinely-unresolvable ones are still never assumed exception-free.
+
+A third adversarial round (three agents) stress-tested the composed system: the error-prop × this/super
+interaction (18 scenarios — recursion/mutual-recursion terminate, depth bounds disclosed, super
+propagation correct, 0 unsound/hang); an exotic-syntax fuzz (30 scenarios) that found a FALSE-edge
+class — an object-literal method shorthand / nested function inside a class method inherited the class
+name and so produced a false `self_cls` edge — now FIXED by stopping the className walk at an
+object/function boundary (removed 18 false edges on the real repo, self_cls 433→415, every genuine
+edge preserved); and a real-repo correctness audit (26 sampled self_cls edges all correct, 0 false, 0
+cross-file). Full suite green (273 files / 5370 tests).

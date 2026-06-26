@@ -194,6 +194,31 @@ describe('CallGraphBuilder — TypeScript', () => {
     expect(Array.from(result.nodes.values()).some(n => n.isExternal && n.name.includes('this.'))).toBe(false);
   });
 
+  it('does NOT create a self_cls edge from a this.call inside a nested object literal / function', async () => {
+    const builder = new CallGraphBuilder();
+    const result = await builder.build([{
+      path: 'src/nest.ts',
+      language: 'TypeScript',
+      content: `
+        class A {
+          realMethod() { return 1; }
+          viaObject() {
+            const obj = { inner() { this.realMethod(); } };  // runtime this = obj, NOT A
+            return obj;
+          }
+          viaFunction() {
+            function helper() { this.realMethod(); }          // nested fn, this != A
+            return helper;
+          }
+        }
+      `,
+    }]);
+    // The nested object-method and nested function are not A's methods — their this.realMethod()
+    // must NOT resolve to A.realMethod (no false self_cls edge).
+    const falseEdges = result.edges.filter(e => e.calleeName === 'realMethod' && e.confidence === 'self_cls');
+    expect(falseEdges).toEqual([]);
+  });
+
   it('extracts class methods', async () => {
     const builder = new CallGraphBuilder();
     const result = await builder.build([{

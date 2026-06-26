@@ -53,7 +53,14 @@ JavaScript; Python `self.`/`cls.` already resolved). Deterministic, no LLM, no n
 - Additive and provenance-labeled (`self_cls`); the committed TS regression snapshot changes only by
   ADDING the two previously-missing `this.` edges — nothing removed or re-pointed.
 - Scope is TS/JS (plus the already-working Python `self.`/`cls.`). Other languages are unaffected.
-- Known residual (pre-existing, not introduced here): a function nested in a class body — e.g. an
-  object-literal method inside a method — is indexed with the enclosing class name, so its `this.x()`
-  can over-attribute to the class. Rare; left to a future extractor fix. `analyze_error_propagation`
-  still discloses any `this.` call that does not resolve, so the residue is never silently dropped.
+- Nested-scope guard (adversarial round): a function nested inside a class method — an object-literal
+  method shorthand, a nested `function`, a callback — used to inherit the enclosing class name (a
+  pre-existing extraction quirk), so its `this.x()` would resolve to a FALSE `self_cls` edge. The
+  className walk now STOPS at an object-literal / function / method boundary before the class, so such
+  a node carries no class name and produces no false edge. A direct method/field has only `class_body`
+  between it and `class_declaration`, so it is unaffected. On the OpenLore repo this removed 18 false
+  edges (self_cls 433 → 415) with every genuine intra-object edge preserved and the full suite green.
+- Known residual (safe, not a false edge): a class EXPRESSION (`const K = class { … }`) does not
+  capture a class name, so its `this.m()` produces no edge (a miss, never a wrong edge);
+  `analyze_error_propagation` discloses any unresolved `this.` call, so the residue is never silently
+  assumed exception-free.

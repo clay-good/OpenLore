@@ -1073,6 +1073,21 @@ const TS_FN_QUERY = `
     value: [(arrow_function) (function_expression)] @fn.value) @fn.node
 `;
 
+/** Node types that, encountered while walking UP from a function toward its class,
+ *  prove the function is nested inside another scope (an object literal, or another
+ *  function/method) rather than being a direct class member — so it must NOT inherit
+ *  the enclosing class name. A direct method/field has only `class_body` between it
+ *  and `class_declaration`, so it never hits one of these. */
+const CLASS_WALK_BOUNDARIES: ReadonlySet<string> = new Set([
+  'object',
+  'arrow_function',
+  'function_expression',
+  'function_declaration',
+  'generator_function',
+  'generator_function_declaration',
+  'method_definition',
+]);
+
 const TS_CALL_QUERY = `
   (call_expression
     function: [(identifier) @call.name
@@ -1123,7 +1138,14 @@ async function extractTSGraph(
     // and async lives on fnNode itself.
     const valueNode = match.captures.find(c => c.name === 'fn.value')?.node;
 
-    // Find enclosing class (walk up — skip class_body, its children are methods not the name)
+    // Find enclosing class (walk up — skip class_body, its children are methods not the name).
+    // STOP at an object-literal or an enclosing function/method scope BEFORE reaching the
+    // class: a function nested inside a class method (an object-literal method shorthand, a
+    // nested `function`, a callback) is NOT a class method — its runtime `this` is not the
+    // instance — so it must not inherit the class name. Without this guard it would, and its
+    // `this.x()` calls would resolve to false `self_cls` edges (a direct class method, by
+    // contrast, has only class_body between it and class_declaration, so it never trips a
+    // boundary). (change: add-this-super-method-resolution — adversarial round.)
     let className: string | undefined;
     let cursor = fnNode.parent;
     while (cursor) {
@@ -1132,6 +1154,7 @@ async function extractTSGraph(
         if (classNameNode) className = classNameNode.text;
         break;
       }
+      if (CLASS_WALK_BOUNDARIES.has(cursor.type)) break; // nested scope — not a class method
       cursor = cursor.parent;
     }
 
