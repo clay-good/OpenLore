@@ -23,6 +23,7 @@ import { validateDirectory, readCachedContext } from './utils.js';
 import { assembleBoundary, computeStaleness } from './confidence-boundary.js';
 import { parseJSExports } from '../../analyzer/import-parser.js';
 import { detectLanguage } from '../../analyzer/signature-extractor.js';
+import { isTestFile } from '../../analyzer/test-file.js';
 import { CallGraphBuilder, serializeCallGraph } from '../../analyzer/call-graph.js';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
 import { hashSpan } from '../../decisions/anchor.js';
@@ -57,16 +58,33 @@ export interface CertifyPublicSurfaceInput {
 
 // ── exported-name extraction (the surface predicate, computable on any content) ──
 
+/**
+ * Blank out string/template literals (and line/block comments) so the export regexes do not
+ * match an `export function …` that appears INSIDE a string (common in codegen/fixture files) —
+ * a phantom export that would otherwise read as an added/removed contract symbol. Best-effort
+ * (does not track every escape edge case), and conservative: it only removes literal CONTENT,
+ * never declaration keywords outside strings.
+ */
+function blankLiterals(content: string): string {
+  return content
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')      // block comments
+    .replace(/\/\/[^\n]*/g, ' ')             // line comments
+    .replace(/`(?:\\.|[^`\\])*`/g, '``')     // template literals
+    .replace(/'(?:\\.|[^'\\])*'/g, "''")     // single-quoted strings
+    .replace(/"(?:\\.|[^"\\])*"/g, '""');    // double-quoted strings
+}
+
 /** Top-level exported names for a file's content, per language. Fail-soft (empty set) for unsupported. */
-function exportedNames(content: string, language: string): Set<string> {
+function exportedNames(rawContent: string, language: string): Set<string> {
+  const content = blankLiterals(rawContent);
   if (language === 'TypeScript' || language === 'JavaScript') {
     const names = new Set(parseJSExports(content).map((e) => e.name).filter((n) => n && n !== 'default'));
-    // `parseJSExports`' `export function` regex does not match `export async function` /
-    // generator exports — recover those here so async exported functions (very common) are
-    // not silently dropped from the public surface. Local fix; the shared parser is unchanged.
-    const asyncFn = /\bexport\s+(?:default\s+)?async\s+function\s*\*?\s+([A-Za-z_$][\w$]*)/g;
+    // `parseJSExports`' `export function` regex matches neither `export async function` nor a
+    // GENERATOR (`export function* gen` / `export async function* agen`) — recover all of those
+    // here so async/generator exports are not silently dropped. Local fix; shared parser unchanged.
+    const fn = /\bexport\s+(?:default\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)/g;
     let m: RegExpExecArray | null;
-    while ((m = asyncFn.exec(content)) !== null) names.add(m[1]);
+    while ((m = fn.exec(content)) !== null) names.add(m[1]);
     return names;
   }
   if (language === 'Python') {
@@ -222,7 +240,7 @@ async function listSurface(absDir: string, ctx: Awaited<ReturnType<typeof readCa
     const dg = JSON.parse(raw) as { nodes?: Array<{ file?: { path?: string }; exports?: Array<{ name: string; kind?: string; isReExport?: boolean }> }> };
     for (const node of dg.nodes ?? []) {
       const file = node.file?.path;
-      if (!file || !SOURCE_RE.test(file)) continue;
+      if (!file || !SOURCE_RE.test(file) || isTestFile(file)) continue;
       for (const exp of node.exports ?? []) {
         if (!exp.name || exp.name === 'default' || exp.isReExport) continue;
         const sig = sigByKey.get(`${file}::${exp.name}`);
@@ -253,14 +271,17 @@ async function listSurface(absDir: string, ctx: Awaited<ReturnType<typeof readCa
 async function changedSourceFiles(absDir: string, base: string): Promise<Array<{ path: string; oldPath?: string; status: string }>> {
   const { getChangedFiles } = await import('../../drift/git-diff.js');
   const diff = await getChangedFiles({ rootPath: absDir, baseRef: base, includeUnstaged: true });
+  // A test file is not part of the public API surface — exclude it (it also tends to embed
+  // `export …` strings in fixtures that would otherwise read as phantom contract symbols).
+  const eligible = (p: string): boolean => SOURCE_RE.test(p) && !isTestFile(p);
   const out = diff.files
-    .filter((f) => SOURCE_RE.test(f.path))
+    .filter((f) => eligible(f.path))
     .map((f) => ({ path: f.path, status: f.status as string, ...(f.oldPath ? { oldPath: f.oldPath } : {}) }));
   const seen = new Set(out.map((c) => c.path));
   try {
     const { stdout } = await execFileAsync('git', ['ls-files', '--others', '--exclude-standard'], { cwd: absDir, maxBuffer: 16 * 1024 * 1024 });
     for (const path of stdout.split('\n').map((s) => s.trim()).filter(Boolean)) {
-      if (SOURCE_RE.test(path) && !seen.has(path)) { seen.add(path); out.push({ path, status: 'added' }); }
+      if (eligible(path) && !seen.has(path)) { seen.add(path); out.push({ path, status: 'added' }); }
     }
   } catch { /* best-effort */ }
   return out;
@@ -404,6 +425,55 @@ export async function assembleSurfaceDiff(
       after: head.signature,
       reasons: ['new export added to the public surface'],
     });
+  }
+
+  // Name-level export pass: catch removed/added EXPORTS that resolve to no function node —
+  // aliased re-exports (`export { impl as publicName }`), generators, and const/class/type
+  // exports. Without this, removing such an export reads as "no change" (a false-safe, the
+  // dangerous direction). Function-backed symbols are already handled above and are excluded
+  // here so nothing is double-counted; their internal contract change is classified above.
+  const handledKeys = new Set<string>();
+  for (const f of headSurface.exported) handledKeys.add(`${f.file}::${f.name}`);
+  for (const f of baseSurface.exported) handledKeys.add(`${headPathOf.get(f.file) ?? f.file}::${f.name}`);
+  for (const pair of continuity.pairs) {
+    handledKeys.add(`${headPathOf.get(pair.from.filePath) ?? pair.from.filePath}::${pair.from.name}`);
+    handledKeys.add(`${pair.to.filePath}::${pair.to.name}`);
+  }
+  // Exported name sets, both keyed by the HEAD-side path (so a renamed file lines up).
+  const baseNamesByPath = new Map<string, Set<string>>();
+  for (const bf of baseFiles) {
+    const hp = headPathOf.get(bf.path) ?? bf.path;
+    const set = baseNamesByPath.get(hp) ?? new Set<string>();
+    for (const n of exportedNames(bf.content, bf.language)) set.add(n);
+    baseNamesByPath.set(hp, set);
+  }
+  const headNamesByPath = new Map<string, Set<string>>();
+  for (const hf of headFiles) headNamesByPath.set(hf.path, exportedNames(hf.content, hf.language));
+  for (const path of new Set([...baseNamesByPath.keys(), ...headNamesByPath.keys()])) {
+    const baseN = baseNamesByPath.get(path) ?? new Set<string>();
+    const headN = headNamesByPath.get(path) ?? new Set<string>();
+    for (const name of baseN) {
+      if (headN.has(name) || handledKeys.has(`${path}::${name}`)) continue;
+      changes.push({
+        changeKind: 'removed',
+        class: 'breaking',
+        name,
+        file: path,
+        kind: 'unknown',
+        reasons: ['exported symbol was removed from the public surface (no signature available — non-function or aliased export)'],
+      });
+    }
+    for (const name of headN) {
+      if (baseN.has(name) || handledKeys.has(`${path}::${name}`)) continue;
+      changes.push({
+        changeKind: 'added',
+        class: 'non-breaking',
+        name,
+        file: path,
+        kind: 'unknown',
+        reasons: ['new export added to the public surface'],
+      });
+    }
   }
 
   changes.sort((a, b) => a.file.localeCompare(b.file) || a.name.localeCompare(b.name) || a.changeKind.localeCompare(b.changeKind));

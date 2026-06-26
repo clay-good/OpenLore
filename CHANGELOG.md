@@ -7,6 +7,22 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ### Added
 
+- **Public API surface contract — `certify_public_surface`** (FEATURE-UPDATES proposal 2) — certify
+  whether a working-tree diff breaks the package's exported contract. With no base ref the tool returns
+  the **public surface** (exported symbols + signatures); with a base ref it returns a deterministic
+  **breaking-change verdict** — each changed export classified `breaking` / `non-breaking` /
+  `potentially-breaking` (removed/renamed export, added required param, narrowed param/return type,
+  reduced visibility), each breaking one paired with the **in-repo consumers it breaks**, plus an
+  overall summary. **Conservative by construction**: a change it cannot *prove* compatible is
+  `potentially-breaking`, never silently safe — no type checker, no build. A renamed export is reported
+  as a rename (not remove+add) via symbol-identity continuity; external/unindexed consumers are
+  disclosed as a known-unknowable boundary. Signature classification covers TypeScript/JavaScript/Python
+  (others fail-soft to surface membership). Distinct from `change_impact_certificate` (paths *into* a
+  surface) — this certifies the exported contract's *shape*. Opt-in `certify_public_surface` MCP
+  conclusion tool (`--preset full`, not the lean default) and the `openlore certify-public-surface` CLI
+  (read-only, never blocks). Full surface count 66 → 67. Reference:
+  `openspec/changes/add-public-api-surface-contract/`.
+
 - **Symbol identity continuity — memory survives renames & moves** (FEATURE-UPDATES proposal 1) — a
   renamed or moved symbol no longer orphans the memories and decisions anchored to it. At each
   `openlore analyze`, OpenLore snapshots the prior graph, detects symbols that disappeared (anchored,

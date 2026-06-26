@@ -96,10 +96,63 @@ describe('assembleSurfaceDiff — breaking-change classification over file conte
     expect(breaking?.consumers.every((x) => x.file && x.id)).toBe(true);
   });
 
+  it('removed ALIASED export (export { impl as pub }) → breaking removal (regression: not silently no-change)', async () => {
+    const base = [ts('a.ts', 'function impl(a: number): void {}\nexport { impl as publicName };\n')];
+    const head = [ts('a.ts', 'function impl(a: number): void {}\n')];
+    const r = await assembleSurfaceDiff(base, head, noRename);
+    const c = change(r, 'publicName');
+    expect(c?.class).toBe('breaking');
+    expect(c?.changeKind).toBe('removed');
+    expect(r.overall).toBe('breaking');
+  });
+
+  it('removed exported CONST → breaking removal', async () => {
+    const base = [ts('a.ts', 'export const VERSION = "1.0";\nexport function f(): void {}\n')];
+    const head = [ts('a.ts', 'export function f(): void {}\n')];
+    const c = change(await assembleSurfaceDiff(base, head, noRename), 'VERSION');
+    expect(c?.class).toBe('breaking');
+    expect(c?.changeKind).toBe('removed');
+  });
+
+  it('removed exported GENERATOR → breaking removal (no function node, recovered at name level)', async () => {
+    const base = [ts('a.ts', 'export function* gen(): Generator<number> { yield 1; }\nexport function keep(): void {}\n')];
+    const head = [ts('a.ts', 'export function keep(): void {}\n')];
+    const c = change(await assembleSurfaceDiff(base, head, noRename), 'gen');
+    expect(c?.class).toBe('breaking');
+    expect(c?.changeKind).toBe('removed');
+  });
+
+  it('does NOT double-count a removed function export (node pass + name pass)', async () => {
+    const base = [ts('a.ts', 'export function foo(a: number): void {}\nexport function bar(): void {}\n')];
+    const head = [ts('a.ts', 'export function bar(): void {}\n')];
+    const r = await assembleSurfaceDiff(base, head, noRename);
+    expect(r.changes.filter((c) => c.name === 'foo')).toHaveLength(1);
+    expect(r.changes.filter((c) => c.name === 'foo')[0].changeKind).toBe('removed');
+  });
+
+  it('a renamed export is not also reported as a name-level removal/addition', async () => {
+    const body = 'export function computeTax(income: number): number {\n  const rate = 0.2;\n  return income * rate;\n}\n';
+    const base = [ts('a.ts', body)];
+    const head = [ts('a.ts', body.replace(/computeTax/g, 'calculateTax'))];
+    const r = await assembleSurfaceDiff(base, head, noRename);
+    expect(r.changes.filter((c) => c.changeKind === 'removed')).toHaveLength(0);
+    expect(r.changes.filter((c) => c.changeKind === 'added')).toHaveLength(0);
+    expect(r.changes.filter((c) => c.changeKind === 'renamed')).toHaveLength(1);
+  });
+
   it('an unchanged contract produces no change entry', async () => {
     const src = 'export function foo(a: number): void {}\nexport function bar(): void {}\n';
     const r = await assembleSurfaceDiff([ts('a.ts', src)], [ts('a.ts', src)], noRename);
     expect(r.changes).toEqual([]);
+    expect(r.overall).toBe('non-breaking');
+  });
+
+  it('does not treat an `export function` inside a STRING LITERAL as a real export (phantom guard)', async () => {
+    const base = [ts('a.ts', 'export function real(): void {}\nconst tmpl = "export function fake(a: number): void {}";\n')];
+    const head = [ts('a.ts', 'export function real(): void {}\n')]; // removed the string-bearing const only
+    const r = await assembleSurfaceDiff(base, head, noRename);
+    // `fake` lives only inside a string; removing it must NOT register as a breaking export removal.
+    expect(r.changes.find((c) => c.name === 'fake')).toBeUndefined();
     expect(r.overall).toBe('non-breaking');
   });
 

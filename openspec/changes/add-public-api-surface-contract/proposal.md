@@ -14,12 +14,27 @@
 > disclosure for external consumers), the CLI `src/cli/commands/certify-public-surface.ts`, and the
 > tool wiring (def/dispatch/contract-as-conclusion/tool-driver, `full`-preset only). Tool count
 > 66 → 67; `tools/list` payload budget 72k → 74k. Classification is gated to TS/JS/Python (others
-> fail-soft to surface membership). **Deferred (noted):** method-level surface within a class and
-> non-function exports (const/class/type) are surfaced but not signature-classified; package
-> `exports`-map narrowing without a source change; cross-repo federated consumer resolution is
-> disclosed-as-unknowable rather than resolved (the federation resolver hook is the follow-up).
-> A latent gap surfaced + fixed locally: `parseJSExports` misses `export async function` — the
-> handler recovers those names so async exports are not dropped (shared parser unchanged).
+> fail-soft to surface membership). Function exports are signature-classified; **all other exports
+> (const/class/type/interface, aliased `export { x as y }`, and generators) are surfaced for
+> removal/addition** via a name-level pass so a removed non-function export is never a false "no
+> change" — they are not signature-classified (no internal-contract diff).
+>
+> **Adversarial-review hardening (post-implementation, this PR):** two unsound verdicts were found
+> and fixed — a function-type parameter (`cb: (x) => void`) was mis-parsed as optional because the
+> signature splitter treated the `=>` arrow as a default `=`, so *adding a required callback* and
+> *making a callback required* both read as `non-breaking`; the splitter now consumes `=>` as a token
+> (fix in `splitTopLevel`/`parseParam`, regression-tested). Aliased/generator export *removal* (which
+> resolved to no call-graph node) silently read as "no change" — fixed by the name-level pass above.
+> Phantom exports from `export …` strings inside source were eliminated by stripping string/comment
+> literals before the export scan and excluding test files from the surface.
+>
+> **Deferred (noted):** method-level surface *within* a class; signature classification of
+> non-function exports (const/type contract changes); package `exports`-map narrowing without a source
+> change; cross-repo federated consumer resolution is disclosed-as-unknowable rather than resolved (the
+> federation resolver hook is the follow-up). Type-syntax equivalences the union-subset model can't
+> see (`Array<string>` vs `string[]`) resolve to `potentially-breaking` — the safe (over-conservative)
+> direction, by design. A latent gap surfaced + fixed locally: `parseJSExports` misses `export async
+> function` / generators — `exportedNames` recovers those (shared parser unchanged).
 
 ## Why
 

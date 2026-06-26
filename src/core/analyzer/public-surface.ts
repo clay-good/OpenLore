@@ -97,7 +97,12 @@ function splitTopLevel(s: string, sep: string): string[] {
   const out: string[] = [];
   let depth = 0;
   let cur = '';
-  for (const ch of s) {
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    // An arrow `=>` is a 2-char token, NOT a `>` bracket-close and NOT an `=` default
+    // assignment — consume it whole so a function-type param (`cb: (x) => void`) neither
+    // corrupts the bracket depth nor reads as having a default value.
+    if (ch === '=' && s[i + 1] === '>') { cur += '=>'; i++; continue; }
     if (ch === '(' || ch === '[' || ch === '{' || ch === '<') depth++;
     else if (ch === ')' || ch === ']' || ch === '}' || ch === '>') depth = Math.max(0, depth - 1);
     if (ch === sep && depth === 0) {
@@ -129,9 +134,13 @@ function findParamGroup(sig: string): { inner: string; end: number } | null {
 function parseParam(raw: string): ParsedParam {
   const rest = raw.startsWith('...');
   const body = rest ? raw.slice(3) : raw;
-  const hasDefault = splitTopLevel(body, '=').length > 1;
-  // The binding is everything before the first top-level `:` (TS) — the type follows.
-  const colonParts = splitTopLevel(body.split('=')[0], ':');
+  // A default value is a TOP-LEVEL `=` (arrows `=>` are consumed whole by splitTopLevel, so a
+  // function-type param like `cb: (x) => void` is NOT mistaken for a defaulted/optional param).
+  const eqParts = splitTopLevel(body, '=');
+  const hasDefault = eqParts.length > 1;
+  // The binding is everything before the first top-level `:` (TS); the full type follows — split
+  // on the top-level colon (not a native split, which would truncate a function-type at its `=>`).
+  const colonParts = splitTopLevel(eqParts[0], ':');
   let binding = colonParts[0]?.trim() ?? '';
   const type = colonParts.length > 1 ? colonParts.slice(1).join(':').trim() : undefined;
   const optionalMark = binding.endsWith('?');
@@ -150,13 +159,19 @@ export function parseSignature(signature: string, language: string): ParsedSigna
   const group = findParamGroup(sig);
   if (!group) return { params: [], confidence: 'unparsed' };
   const params = splitTopLevel(group.inner, ',').map(parseParam);
-  // Return type: TS uses `): T`, Python uses `) -> T`. Capture up to a body/arrow start.
+  // Return type: TS uses `): T`, Python uses `) -> T`. Capture up to the body/overload terminator.
   const after = sig.slice(group.end + 1).trim();
   let returnType: string | undefined;
   const arrow = after.indexOf('->');
   const hasColon = language !== 'Python' && after.startsWith(':');
-  if (arrow >= 0) returnType = after.slice(arrow + 2).replace(/[={].*$/, '').trim() || undefined;
-  else if (hasColon) returnType = after.slice(1).replace(/=>.*$/, '').replace(/[={].*$/, '').trim() || undefined;
+  if (arrow >= 0) {
+    // Python `) -> T:` — stop at the body colon or an overload `;`.
+    returnType = after.slice(arrow + 2).replace(/[{;].*$/, '').replace(/:\s*$/, '').trim() || undefined;
+  } else if (hasColon) {
+    // TS `): T`. Strip the body (`{`/`;`) and a TRAILING arrow (an arrow-function declaration ends
+    // in `=>`), but keep an interior `=>` so a function-typed return (`: (x) => void`) is preserved.
+    returnType = after.slice(1).replace(/[{;].*$/, '').replace(/\s*=>\s*$/, '').trim() || undefined;
+  }
   const allTyped = params.every((p) => p.rest || p.type !== undefined) && (params.length === 0 || returnType !== undefined);
   return { params, ...(returnType ? { returnType } : {}), confidence: allTyped ? 'typed' : 'untyped' };
 }

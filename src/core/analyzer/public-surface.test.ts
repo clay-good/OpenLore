@@ -31,6 +31,23 @@ describe('parseSignature', () => {
     expect(p.params[0].type).toBe('Map<string, number>');
   });
 
+  it('does NOT mistake a function-type param for an optional/defaulted one (=> is not a default)', () => {
+    const p = parseSignature('function f(cb: (x: number) => void): void', 'TypeScript');
+    expect(p.params).toEqual([{ name: 'cb', optional: false, rest: false, type: '(x: number) => void' }]);
+    expect(p.returnType).toBe('void');
+  });
+
+  it('preserves a function-typed return value (interior => not stripped)', () => {
+    const p = parseSignature('function f(): (x: number) => void', 'TypeScript');
+    expect(p.returnType).toBe('(x: number) => void');
+  });
+
+  it('still strips a trailing arrow on an arrow-function declaration', () => {
+    const p = parseSignature('const f = (a: number): void =>', 'TypeScript');
+    expect(p.returnType).toBe('void');
+    expect(p.params).toEqual([{ name: 'a', optional: false, rest: false, type: 'number' }]);
+  });
+
   it('parses a Python signature with -> return', () => {
     const p = parseSignature('def foo(a: int, b: str) -> bool', 'Python');
     expect(p.returnType).toBe('bool');
@@ -123,6 +140,26 @@ describe('classifySignatureChange', () => {
   it('non-classifiable language → potentially-breaking on any change', () => {
     const r = classifySignatureChange('func F(a int)', 'func F(a int, b string)', 'Go');
     expect(r.class).toBe('potentially-breaking');
+  });
+
+  it('added required function-type (callback) parameter → breaking (regression: => is not "optional")', () => {
+    const r = classifySignatureChange(
+      'function f(a: number): void',
+      'function f(a: number, cb: (x: number) => void): void',
+      TS,
+    );
+    expect(r.class).toBe('breaking');
+    expect(r.reasons.join(' ')).toMatch(/required parameter "cb" was added/);
+  });
+
+  it('a callback parameter becoming required → breaking (regression: optional→required under =>)', () => {
+    const r = classifySignatureChange(
+      'function f(cb?: (x: number) => void): void',
+      'function f(cb: (x: number) => void): void',
+      TS,
+    );
+    expect(r.class).toBe('breaking');
+    expect(r.reasons.join(' ')).toMatch(/became required/);
   });
 
   it('identical signature → non-breaking with no reasons', () => {

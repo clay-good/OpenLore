@@ -41,6 +41,7 @@
 | `openlore refresh-stories` | Refresh story files with latest structural context after each commit | No |
 | `openlore blast-radius` | Pre-flight structural blast-radius briefing for the current diff (advisory; `--install-hook` for a pre-commit hook) | No |
 | `openlore coverage-gaps` | Ranked structural test-coverage gaps: important code with NO reaching test (the inverse of `select_tests`), no runtime. Scope to a diff (`--base`/`--symbols`) or region (`--file-pattern`). Read-only, never blocks | Yes |
+| `openlore certify-public-surface` | Certify the public API surface (no `--base`) or the breaking-change verdict for the working-tree diff (`--base <ref>`): removed/renamed exports, incompatible signatures, each breaking change with its in-repo consumers. Read-only, deterministic, never blocks | Yes |
 | `openlore review` | Deterministic structural PR review (structural delta + blast radius) as a Markdown/JSON briefing; pairs with the bundled GitHub Action | No |
 | `openlore preflight` | CI staleness gate: fail when the analysis graph is stale relative to the working tree | No |
 | `openlore export scip` | Export the analysis graph as an SCIP index for the Sourcegraph / Glean ecosystem | No |
@@ -434,6 +435,19 @@ openlore coverage-gaps --json                       # machine-readable (stable s
 ```
 
 A gap with no caller at all is labeled *also-dead* (distinct from `find_dead_code`); an untested entry point is *untested-not-dead*. A scope that resolves to nothing returns an explicit `note` ("nothing matched", not a reassuring "0 gaps"), and the counts (`analyzedSymbols` / `reachableFromTest`) range over the in-scope set. Read-only and advisory — it is a report and never blocks. The matching MCP tool `report_coverage_gaps` is exposed under `openlore mcp --preset full`. See [coverage-gaps.md](coverage-gaps.md).
+
+#### Public API surface contract
+
+Certify whether the working-tree diff breaks the package's exported contract. With **no `--base`** it prints the public surface (exported symbols + signatures); with `--base <ref>` it prints a deterministic breaking-change verdict — each changed export classified `breaking` / `non-breaking` / `potentially-breaking`, and each breaking one paired with the in-repo consumers it breaks:
+
+```bash
+openlore certify-public-surface                     # print the public surface (exported symbols + signatures)
+openlore certify-public-surface --base main         # breaking-change verdict for the working tree vs main
+openlore certify-public-surface --max 50            # cap the surface listing in surface mode (default 200, cap 500)
+openlore certify-public-surface --base HEAD --json  # machine-readable verdict (stable shape) for CI / an orchestrator
+```
+
+The closed classification rules: a **removed** or **renamed** export, an **added required parameter**, a parameter made **required**, or a **narrowed** parameter/return type is `breaking`; an added **trailing optional** parameter, a **new export**, or a **widened** return type is `non-breaking`; anything that cannot be *proven* compatible from the available signatures (untyped/dynamically-typed, or an incomparable type change) is `potentially-breaking` — **never silently safe**, since there is no type checker and no build in the loop. A renamed export is reported as a rename (via symbol-identity continuity), not a remove+add. External/unindexed consumers are disclosed as a known-unknowable boundary, not implied absent. Signature classification covers TypeScript/JavaScript/Python; other languages fail-soft to surface membership only (a removed/added export is still reported, without a signature classification). Test files are excluded from the surface. Read-only and advisory — it is a report and never blocks. The matching MCP tool `certify_public_surface` is exposed under `openlore mcp --preset full`.
 
 #### Enforcement gate
 
