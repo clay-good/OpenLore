@@ -26,6 +26,16 @@
 > (zip-bomb guard). Regression tests cover each. The graph (`call-graph.db`) is digest-validated against
 > the attestation; other bundled artifacts are trusted to the bundle's source (documented).
 >
+> **Integration hardening (2026-06-26, round 3).** A final integration audit + e2e found that `orient` /
+> `search_code` (the search-based tools) did NOT work on an imported index: the bundle excludes the LanceDB
+> search index, and the only existing rebuild path (`openlore embed`) runs a FULL re-analyze — defeating the
+> bundle's purpose. Fix: `import` now rebuilds the keyword (BM25) search index directly from the materialized
+> graph (offline, ~150 ms, no source re-parse, no API), so a fresh import is functionally identical to a fresh
+> `analyze` for every tool; semantic embeddings remain an opt-in `openlore embed --local`. Import also clears
+> a prior index's stale `vector-index/` / `text-line-index/` (whose embeddings would mismatch the imported
+> graph) and excludes `vector-index-meta.json` from the bundle. Verified e2e: fresh checkout → import → `orient`
+> returns correct results with no re-analyze.
+>
 > **Scope note — stale path.** A valid-but-ancestor-commit artifact degrades to a full local rebuild
 > (the spec's sanctioned "or fall back to a full local rebuild"). Incremental-delta update of only the
 > changed files is a deferred optimization; the headline win (verified, no-analyze bootstrap when the

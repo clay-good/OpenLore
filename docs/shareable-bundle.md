@@ -31,9 +31,12 @@ envelope of:
 - a **payload** — the graph files (`call-graph.db`, `llm-context.json`, the JSON inventories, …),
   base64-encoded.
 
-The LanceDB embedding indexes (`vector-index/`, `text-line-index/`) are **not** bundled: they are optional,
-large, and rebuildable (`openlore embed`), and BM25 keyword search — the zero-config default — needs none of
-them. Transient SQLite WAL sidecars are excluded; the store is checkpointed before export so the bundled
+The LanceDB **search index** (`vector-index/`, `text-line-index/`, and `vector-index-meta.json`) is **not**
+bundled — it is large and a deterministic function of the graph. Instead, **import rebuilds the keyword
+(BM25) search index from the materialized graph** (offline, no API, ~150 ms), so `orient` and `search_code`
+work immediately on an imported index, exactly as they would after a fresh `openlore analyze`. Semantic
+(embedding) search stays an explicit opt-in: run `openlore embed --local` (on-device, no API key) after
+import. Transient SQLite WAL sidecars are excluded; the store is checkpointed before export so the bundled
 `call-graph.db` is self-contained.
 
 **Deterministic.** Exporting the same index twice produces a byte-identical artifact (sorted file order, no
@@ -66,6 +69,16 @@ Currency outcomes once the artifact has validated:
 
 Any *unexpected* failure during materialization or validation (e.g. a structurally-valid bundle whose
 `call-graph.db` turns out to be corrupt) also degrades to a rebuild rather than crashing the command.
+
+On a successful as-is import, any **stale search index** from a prior index in the target directory
+(`vector-index/`, `text-line-index/`) is cleared first — its embeddings would otherwise describe a graph
+that no longer matches — and the keyword (BM25) index is rebuilt for the imported graph.
+
+**What works immediately after import.** Everything that reads the call graph — `orient`, `search_code`,
+`analyze_impact`, `find_path`, `blast_radius`, `select_tests`, `report_coverage_gaps`, and the rest — works
+right away on a verified import, no re-analyze. The only thing not in the bundle is *semantic* (embedding)
+search; keyword (BM25) search is rebuilt on import, and `openlore embed --local` upgrades it to on-device
+semantic when you want it.
 
 **Exit codes.** `export` and `import` exit `0` on success — and import exits `0` on the rebuild path too,
 since a rebuild is a successful outcome, not an error. A genuine *user* error exits `2`: an artifact path

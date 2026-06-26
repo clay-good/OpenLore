@@ -12,11 +12,14 @@ import {
   verifyPayloadIntegrity,
   recomputeProductionDigest,
   materializeBundle,
+  promoteStagedIndex,
   isSafeBundleFileName,
   BundleError,
   BUNDLE_VERSION,
 } from './index-bundle.js';
 import { gzipSync } from 'node:zlib';
+import { mkdir } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import {
   preMaterializeRebuildReason,
   currencyDecision,
@@ -155,6 +158,30 @@ describe('index-bundle: round-trip materialization (the "identical index" proper
     }
     // The non-graph artifact travelled too.
     expect(JSON.parse(await readFile(join(dest, 'repo-structure.json'), 'utf-8'))).toEqual({ layers: ['core'] });
+  });
+});
+
+describe('index-bundle: promoteStagedIndex clears orphaned search indexes', () => {
+  it('removes a prior index\'s vector-index/ + text-line-index/ + vector-index-meta.json, then copies bundle files', async () => {
+    const src = join(work, 'src-analysis');
+    await buildAnalysisDir(src, 'abc1234');
+    const bundle = parseBundle((await buildBundle(src, VERSION)).buffer);
+    const staging = join(work, 'staging');
+    await materializeBundle(bundle, staging);
+
+    // A live analysis dir carrying a STALE search index from a different prior graph.
+    const live = join(work, 'live-analysis');
+    await mkdir(join(live, 'vector-index'), { recursive: true });
+    await mkdir(join(live, 'text-line-index'), { recursive: true });
+    await writeFile(join(live, 'vector-index', 'stale.lance'), 'STALE');
+    await writeFile(join(live, 'vector-index-meta.json'), '{"hasEmbeddings":true}');
+
+    await promoteStagedIndex(bundle, staging, live);
+
+    expect(existsSync(join(live, 'vector-index'))).toBe(false);     // orphan dir cleared
+    expect(existsSync(join(live, 'text-line-index'))).toBe(false);  // orphan dir cleared
+    expect(existsSync(join(live, 'vector-index-meta.json'))).toBe(false); // stale meta cleared
+    expect(existsSync(join(live, ARTIFACT_CALL_GRAPH_DB))).toBe(true);    // bundle files promoted
   });
 });
 

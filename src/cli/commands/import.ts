@@ -26,6 +26,7 @@ import { promisify } from 'node:util';
 import { logger } from '../../utils/logger.js';
 import { OPENLORE_ANALYSIS_REL_PATH, ARTIFACT_CALL_GRAPH_DB, DEFAULT_MAX_FILES } from '../../constants.js';
 import { EdgeStore, SCHEMA_VERSION } from '../../core/services/edge-store.js';
+import { VectorIndex } from '../../core/analyzer/vector-index.js';
 import { reconcile } from '../../core/analyzer/index-attestation.js';
 import { isGitRepository, validateGitRef } from '../../core/drift/git-diff.js';
 import {
@@ -128,6 +129,29 @@ async function gitIsAncestor(rootPath: string, ancestor: string, descendant: str
   }
 }
 
+/**
+ * Rebuild the keyword (BM25) search index from the just-materialized graph so `orient` and
+ * `search_code` work immediately on an imported index — matching what a fresh `openlore analyze`
+ * always produces. Offline and fast (no source re-parse, no API): the BM25 corpus is built from the
+ * graph nodes already in `call-graph.db`. Best-effort and additive — a failure (e.g. the optional
+ * LanceDB native dep is unavailable) leaves a fully-working graph index and is reported, never fatal.
+ * Semantic (embedding) search remains an explicit opt-in via `openlore embed --local`.
+ */
+async function buildKeywordSearchIndex(analysisDir: string): Promise<boolean> {
+  const store = EdgeStore.open(join(analysisDir, ARTIFACT_CALL_GRAPH_DB));
+  let nodes, hubIds, entryIds;
+  try {
+    nodes = store.getAllInternalNodes();
+    hubIds = new Set(store.getHubs(Number.MAX_SAFE_INTEGER).map(n => n.id));
+    entryIds = new Set(store.getEntryPoints(Number.MAX_SAFE_INTEGER).map(n => n.id));
+  } finally {
+    store.close();
+  }
+  if (nodes.length === 0) return false;
+  await VectorIndex.build(analysisDir, nodes, [], hubIds, entryIds, null);
+  return true;
+}
+
 async function fullRebuild(rootPath: string, analysisDir: string, detail: string): Promise<number> {
   logger.warning(`Falling back to a local rebuild — ${detail}`);
   await runAnalysis(rootPath, analysisDir, { maxFiles: DEFAULT_MAX_FILES, include: [], exclude: [] });
@@ -217,12 +241,25 @@ export async function runImport(artifact: string, opts: ImportOptions): Promise<
         rebuildReason = decision.detail;
       } else {
         await promoteStagedIndex(bundle, staging, analysisDir);
+        // Rebuild the keyword search index so orient/search_code work immediately (offline).
+        let searchBuilt = false;
+        try {
+          searchBuilt = await buildKeywordSearchIndex(analysisDir);
+        } catch (err) {
+          logger.debug(`import: keyword search index not built (${err instanceof Error ? err.message : String(err)})`);
+        }
         if (decision.action === 'import-unverified') {
           logger.success(`Imported graph bundle (${bundle.manifest.files.length} files, schema v${bundle.manifest.schemaVersion}).`);
           logger.warning(decision.detail);
         } else {
           logger.success(`Imported graph bundle — verified current at commit ${sourceCommit}.`);
         }
+        logger.info(
+          'Search',
+          searchBuilt
+            ? 'keyword (BM25) index rebuilt — orient/search_code ready. For semantic search: openlore embed --local'
+            : 'keyword index not built — run "openlore embed" (BM25) or "openlore embed --local" (semantic) to enable orient/search_code',
+        );
       }
     }
   } catch (err) {

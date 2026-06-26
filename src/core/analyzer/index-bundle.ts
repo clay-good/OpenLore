@@ -58,16 +58,29 @@ export const BUNDLE_DEFAULT_FILENAME = 'index-bundle.olbundle';
 const BUNDLE_MAX_DECOMPRESSED_BYTES = 2 * 1024 * 1024 * 1024;
 
 /**
- * Transient SQLite sidecars never bundled — they are write-ahead-log scratch folded into
- * the main db by a checkpoint before export, and a stale copy alongside an imported db
- * would mislead the reader. Subdirectories (`vector-index/`, `text-line-index/`) are also
- * skipped: the LanceDB embeddings are optional, large, and rebuildable (`openlore embed`),
- * and BM25 keyword search — the zero-config default — needs none of them.
+ * Files never bundled. Transient SQLite sidecars are WAL scratch folded into the main db by a
+ * checkpoint before export; a stale copy alongside an imported db would mislead the reader. The
+ * LanceDB search index lives in subdirectories (`vector-index/`, `text-line-index/`, skipped
+ * because `readdir` filters `isFile()`) plus `vector-index-meta.json`; it is large and a
+ * deterministic function of the graph, so it is NOT bundled — instead `import` rebuilds the
+ * keyword (BM25) search index from the materialized graph (offline, no API) so `orient` /
+ * `search_code` work immediately. `vector-index-meta.json` is excluded so a consumer never
+ * materializes metadata describing an index that isn't there.
  */
 const EXCLUDED_FILES = new Set([
   `${ARTIFACT_CALL_GRAPH_DB}-wal`,
   `${ARTIFACT_CALL_GRAPH_DB}-shm`,
+  'vector-index-meta.json',
 ]);
+
+/**
+ * Rebuildable search-index subdirectories cleared from the live analysis dir on import: they are
+ * a deterministic function of the graph, so a copy left over from a PRIOR index would point search
+ * at embeddings for a graph that no longer matches the imported `call-graph.db`. `import` rebuilds
+ * the keyword (`vector-index/`) index fresh; `text-line-index/` is left absent (rebuilt by the next
+ * `openlore analyze`; the features that use it degrade gracefully rather than serve stale results).
+ */
+const REBUILDABLE_INDEX_SUBDIRS = ['vector-index', 'text-line-index'];
 
 /** Self-describing manifest carried with every bundle. No wall-clock field → deterministic. */
 export interface BundleManifest {
@@ -333,13 +346,21 @@ export async function materializeBundle(bundle: Bundle, targetDir: string): Prom
   }
 }
 
-/** Copy the bundled files from a staging dir into the live analysis dir, clearing stale WAL sidecars. */
+/**
+ * Copy the bundled files from a staging dir into the live analysis dir. Clears stale WAL sidecars,
+ * the excluded vector-index metadata, and any rebuildable search-index subdirectory left over from
+ * a PRIOR index (whose embeddings would now mismatch the imported graph) before promoting.
+ */
 export async function promoteStagedIndex(bundle: Bundle, stagingDir: string, analysisDir: string): Promise<void> {
   await mkdir(analysisDir, { recursive: true });
-  // A stale -wal/-shm next to the freshly-copied call-graph.db would corrupt the reader's
-  // view; remove them before promoting the new db file.
+  // A stale -wal/-shm next to the freshly-copied call-graph.db would corrupt the reader's view,
+  // and a stale vector-index-meta.json would describe an index that isn't here; remove them.
   for (const sidecar of EXCLUDED_FILES) {
     await rm(join(analysisDir, sidecar), { force: true });
+  }
+  // Drop orphaned search-index subdirs from a prior index — they describe a different graph.
+  for (const sub of REBUILDABLE_INDEX_SUBDIRS) {
+    await rm(join(analysisDir, sub), { recursive: true, force: true });
   }
   for (const name of Object.keys(bundle.payload)) {
     if (!isSafeBundleFileName(name)) throw new BundleError('unreadable', `Unsafe bundled file name: ${JSON.stringify(name)}.`);
