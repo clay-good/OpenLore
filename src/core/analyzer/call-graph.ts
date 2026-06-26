@@ -4658,9 +4658,16 @@ export class CallGraphBuilder {
       const filePaths = files.map(f => f.path);
       const { edges: httpEdges } = await extractAllHttpEdges(filePaths);
       for (const he of httpEdges) {
-        // Find callee: handler function by name in handlerFile
-        const calleeNode = trie.findBySimpleName(he.route.handlerName)
-          .find(n => n.filePath === he.handlerFile);
+        // Find callee: the route handler function by name. Prefer the route's own
+        // file (FastAPI/NestJS/Express register a route on the handler's file), but
+        // fall back to a UNIQUE non-external match elsewhere — Django declares routes
+        // in urls.py while the handler lives in views.py, and Express apps often keep
+        // a routes file separate from handler modules. A unique name match is
+        // unambiguous; a name colliding across files stays unresolved (never guessed).
+        const simpleHandler = he.route.handlerName.split('.').pop() ?? he.route.handlerName;
+        const handlerCandidates = trie.findBySimpleName(simpleHandler).filter(n => !n.isExternal);
+        let calleeNode = handlerCandidates.find(n => n.filePath === he.handlerFile);
+        if (!calleeNode && handlerCandidates.length === 1) calleeNode = handlerCandidates[0];
         if (!calleeNode) continue;
 
         // Find caller: any function in callerFile that encloses the HTTP call's line

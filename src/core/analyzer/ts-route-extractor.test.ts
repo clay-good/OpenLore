@@ -135,6 +135,39 @@ export async function POST(request: Request) {
     // path should be derived from directory
     expect(routes[0].path).toBe('/users');
   });
+
+  // Regression: the analyze pipeline passes REPO-RELATIVE paths that START with the
+  // `app/` segment (e.g. `app/api/posts/route.ts`, no leading slash).
+  // `lastIndexOf('/app/')` missed that leading segment and collapsed the route to
+  // `/`, silently breaking the route inventory and the cross-service edge for every
+  // Next.js App Router repo. Reproduced by reading via a path relative to the app dir.
+  it('derives the route path from a path that starts with the app/ segment', async () => {
+    await createFile(tmpDir, 'app/api/posts/route.ts', `
+export async function GET(request: Request) { return Response.json([]); }
+`);
+    const cwd = process.cwd();
+    try {
+      process.chdir(tmpDir);
+      const routes = await extractTsRouteDefinitions('app/api/posts/route.ts');
+      expect(routes.map(r => r.path)).toEqual(['/api/posts']);
+    } finally {
+      process.chdir(cwd);
+    }
+  });
+
+  it('derives a dynamic-segment route path from an app/-leading relative path', async () => {
+    await createFile(tmpDir, 'app/users/[id]/route.ts', `
+export async function GET(request: Request) { return Response.json({}); }
+`);
+    const cwd = process.cwd();
+    try {
+      process.chdir(tmpDir);
+      const routes = await extractTsRouteDefinitions('app/users/[id]/route.ts');
+      expect(routes[0].path).toBe('/users/:id');
+    } finally {
+      process.chdir(cwd);
+    }
+  });
 });
 
 describe('extractTsRouteDefinitions – Express prefix accumulation', () => {

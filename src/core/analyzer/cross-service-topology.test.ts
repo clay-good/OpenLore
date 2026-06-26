@@ -116,6 +116,99 @@ describe('cross-service API topology — single-repo projection', () => {
     expect(callersOf(b, 'placeOrder')).toContain(idByName(b, 'createOrder'));
   });
 
+  it('Handler in a different file than the route registration links (Django urls.py → views.py)', async () => {
+    const b = await buildFixture([
+      {
+        path: 'web/things.ts',
+        language: 'TypeScript',
+        content: [
+          'export async function loadThing() {',
+          "  return fetch('/api/things/42');",
+          '}',
+        ].join('\n'),
+      },
+      {
+        path: 'srv/urls.py',
+        language: 'Python',
+        content: [
+          'urlpatterns = [',
+          "    path('api/things/<int:pk>/', views.thing_detail, name='thing'),",
+          ']',
+        ].join('\n'),
+      },
+      {
+        path: 'srv/views.py',
+        language: 'Python',
+        content: [
+          'def thing_detail(request, pk):',
+          '    return {}',
+        ].join('\n'),
+      },
+    ]);
+
+    // The route is declared in urls.py but the handler lives in views.py: Pass 2b
+    // must resolve the handler by a UNIQUE cross-file name match, not same-file only.
+    expect(crossServiceEdge(b, 'loadThing', 'thing_detail')).toBeDefined();
+    expect(callersOf(b, 'thing_detail')).toContain(idByName(b, 'loadThing'));
+  });
+
+  it('A separate Express routes file (registration apart from handler definition) links', async () => {
+    const b = await buildFixture([
+      {
+        path: 'web/cart.ts',
+        language: 'TypeScript',
+        content: [
+          'export async function addToCart(item: unknown) {',
+          "  return fetch('/api/cart', { method: 'POST', body: JSON.stringify(item) });",
+          '}',
+        ].join('\n'),
+      },
+      {
+        path: 'server/handlers.ts',
+        language: 'TypeScript',
+        content: [
+          'export function cartAdd(req, res) { res.status(201).json({}); }',
+        ].join('\n'),
+      },
+      {
+        path: 'server/routes.ts',
+        language: 'TypeScript',
+        content: [
+          'import express from "express";',
+          'import { cartAdd } from "./handlers";',
+          'const app = express();',
+          "app.post('/api/cart', cartAdd);",
+        ].join('\n'),
+      },
+    ]);
+
+    expect(crossServiceEdge(b, 'addToCart', 'cartAdd')).toBeDefined();
+  });
+
+  it('Ambiguous handler name across files stays unresolved (no guessed cross-file edge)', async () => {
+    const b = await buildFixture([
+      {
+        path: 'web/load.ts',
+        language: 'TypeScript',
+        content: [
+          'export async function loadDup() {',
+          "  return fetch('/api/dup/1');",
+          '}',
+        ].join('\n'),
+      },
+      {
+        path: 'srv/urls.py',
+        language: 'Python',
+        content: ["urlpatterns = [ path('api/dup/<int:pk>/', views.handler, name='d') ]"].join('\n'),
+      },
+      // Two functions named `handler` in different files → ambiguous → no edge.
+      { path: 'srv/a.py', language: 'Python', content: 'def handler(request, pk):\n    return 1' },
+      { path: 'srv/b.py', language: 'Python', content: 'def handler(request, pk):\n    return 2' },
+    ]);
+
+    expect(httpEdges(b)).toHaveLength(0);
+  });
+
   it('Equivalent path-parameter forms reconcile (client `${id}` ↔ route `:id`/`{id}`)', async () => {
     const b = await buildFixture([
       {

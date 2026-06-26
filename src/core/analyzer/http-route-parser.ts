@@ -1032,8 +1032,12 @@ export async function extractTsRouteDefinitions(filePath: string): Promise<Route
 
   // ── Next.js App Router ────────────────────────────────────────────────────
   if (framework === 'nextjs-app') {
-    // Derive path from file location: app/users/route.ts → /users
-    const rel = filePath.replace(/\\/g, '/');
+    // Derive path from file location: app/users/route.ts → /users.
+    // Force a leading slash first: the analyze pipeline passes REPO-RELATIVE paths
+    // (e.g. `app/api/posts/route.ts`), and `lastIndexOf('/app/')` would miss the
+    // leading `app/` segment — collapsing the route to `/` and breaking both the
+    // route inventory and the cross-service edge. The absolute form is unaffected.
+    const rel = '/' + filePath.replace(/\\/g, '/').replace(/^\/+/, '');
     const appIdx = rel.lastIndexOf('/app/');
     let routePath = '/';
     if (appIdx >= 0) {
