@@ -842,16 +842,34 @@ describe('buildHttpEdges', () => {
     expect(edges[0].route).toBe(route);
   });
 
-  it('should create one edge per (caller, handler, method, path) combination', () => {
+  it('should pair each method to its own handler, never cross-link GET↔POST', () => {
     const getCall = makeCall({ file: '/front/api.ts', url: '/items', method: 'GET' });
     const postCall = makeCall({ file: '/front/api.ts', url: '/items', method: 'POST' });
-    const getRoute = makeRoute({ file: '/back/items.py', path: '/items', method: 'GET' });
-    const postRoute = makeRoute({ file: '/back/items.py', path: '/items', method: 'POST' });
+    const getRoute = makeRoute({ file: '/back/items.py', path: '/items', method: 'GET', handlerName: 'listItems' });
+    const postRoute = makeRoute({ file: '/back/items.py', path: '/items', method: 'POST', handlerName: 'createItem' });
 
     const edges = buildHttpEdges([getCall, postCall], [getRoute, postRoute]);
     expect(edges).toHaveLength(2);
-    expect(edges.map(e => e.method)).toContain('GET');
-    expect(edges.map(e => e.method)).toContain('POST');
+    // The GET call links to the GET handler and the POST call to the POST handler —
+    // no phantom cross-link from a method mismatch on a shared path.
+    const byCall = new Map(edges.map(e => [e.call.method, e.route.handlerName]));
+    expect(byCall.get('GET')).toBe('listItems');
+    expect(byCall.get('POST')).toBe('createItem');
+  });
+
+  it('emits no edge when both methods are known and differ (no phantom path link)', () => {
+    const postCall = makeCall({ file: '/front/api.ts', url: '/items', method: 'POST' });
+    const getRoute = makeRoute({ file: '/back/items.py', path: '/items', method: 'GET', handlerName: 'listItems' });
+    // A POST client and a GET-only route on the same path are different endpoints.
+    expect(buildHttpEdges([postCall], [getRoute])).toHaveLength(0);
+  });
+
+  it('still links when one side has an UNKNOWN method (bare fetch / Django)', () => {
+    const bareCall = makeCall({ file: '/front/api.ts', url: '/items', method: 'UNKNOWN' });
+    const postRoute = makeRoute({ file: '/back/items.py', path: '/items', method: 'POST', handlerName: 'createItem' });
+    const edges = buildHttpEdges([bareCall], [postRoute]);
+    expect(edges).toHaveLength(1);
+    expect(edges[0].confidence).toBe('path');
   });
 });
 

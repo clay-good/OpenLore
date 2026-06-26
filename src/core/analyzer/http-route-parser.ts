@@ -734,17 +734,25 @@ export function buildHttpEdges(
       if (!matchingRoutes) continue;
 
       for (const route of matchingRoutes) {
-        // Determine confidence
-        let confidence: HttpEdge['confidence'];
         const methodsKnown = call.method !== 'UNKNOWN' && route.method !== 'UNKNOWN';
         const methodsMatch = call.method === route.method;
 
+        // Both methods known and different → genuinely different endpoints (a client
+        // `GET /users` and a `POST /users` handler are distinct operations, usually
+        // distinct functions). Emit NOTHING rather than a phantom 'path' edge that
+        // would mis-link the client to the wrong handler. A match still requires only
+        // method compatibility (equal, or at least one UNKNOWN — a bare `fetch`, or a
+        // Django route that dispatches methods internally).
+        if (methodsKnown && !methodsMatch) continue;
+
+        // Determine confidence.
+        let confidence: HttpEdge['confidence'];
         if (methodsKnown && methodsMatch && candidate === call.normalizedUrl) {
           confidence = 'exact';
-        } else if (!methodsKnown || !methodsMatch) {
-          confidence = candidate !== call.normalizedUrl ? 'fuzzy' : 'path';
+        } else if (candidate !== call.normalizedUrl) {
+          confidence = 'fuzzy';
         } else {
-          confidence = candidate !== call.normalizedUrl ? 'fuzzy' : 'exact';
+          confidence = 'path';
         }
 
         edges.push({
@@ -771,6 +779,9 @@ export function buildHttpEdges(
         );
         if (!allMatch) continue;
         for (const route of routeList) {
+          // Same method-compatibility rule as the exact/prefix path above: both
+          // methods known and different → not a match, even on a fuzzy segment hit.
+          if (call.method !== 'UNKNOWN' && route.method !== 'UNKNOWN' && call.method !== route.method) continue;
           edges.push({
             callerFile: call.file,
             handlerFile: route.file,
