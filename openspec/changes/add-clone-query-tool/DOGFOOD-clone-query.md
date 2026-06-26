@@ -117,3 +117,29 @@ and matches exposed no `language` field (only the file path implied it). Made th
 each match now carries `language`, the symbol-mode query carries its own, and the CLI flags a
 cross-language match with `⚠ <language>`. Spec deltas + proposal updated; new test asserts the field.
 Full suite after round 3: **270 files, 5315 passed, 2 skipped**.
+
+## Round 4 (2026-06-26) — cross-language ⚠ fixture + consolidated-spec merge
+
+Two follow-ups requested after round 3:
+
+1. **A real cross-language clone fixture exercising the ⚠ path.** Added a body that is byte-identical
+   in TypeScript and C++ (a genuine cross-language clone), at three levels:
+   - `duplicate-detector.test.ts` — `findClones` surfaces the C++ clone of a TS query with
+     `language: 'C++'`.
+   - `clone-query.test.ts` — the handler returns `query.language='TypeScript'` and a `proc.cpp` match
+     with `language='C++'`.
+   - `find-clones.test.ts` (new) — the CLI `renderHuman` emits `⚠ C++` for a cross-language match and
+     **no** `⚠` for a same-language match or when the query language is unknown (snippet mode).
+
+   Dogfooded through the **real built CLI** on a crafted temp project:
+   ```
+   $ openlore find-clones --symbol 'process::proc.ts'
+     exact      1.00  process  proc.cpp:1-8  ⚠ C++
+   ```
+
+2. **Merged the change's spec deltas into the consolidated specs.** `OneVsAllCloneQuery` →
+   `openspec/specs/analyzer/spec.md`; `CloneQueryConclusionTool` → `openspec/specs/mcp-handlers/spec.md`
+   (each with a `> Change: add-clone-query-tool` provenance footer, matching the existing consolidated
+   requirements). The change-dir deltas remain as the authoring record.
+
+Full suite after round 4: **271 files, 5320 passed, 2 skipped**.

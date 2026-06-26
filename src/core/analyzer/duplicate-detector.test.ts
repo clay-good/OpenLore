@@ -706,4 +706,33 @@ describe('findClones — one-vs-all query', () => {
     expect(res.matches.length).toBeGreaterThan(0);
     expect(res.matches.every(m => m.language === 'TypeScript')).toBe(true);
   });
+
+  it('surfaces a cross-language clone with its OWN language (query TS, clone C++)', () => {
+    // A C-family body that is byte-identical in TypeScript and C++ — a real cross-language clone the
+    // language-agnostic normalization will match. The match must report C++, not the query's language.
+    const body = `function process(items) {
+  let total = 0;
+  for (const item of items) {
+    total += item.value;
+  }
+  return total;
+}`;
+    const fts = buildFile([body]);
+    const fcpp = buildFile([body]);
+    const files = [
+      { path: '/a.ts', content: fts.content },
+      { path: '/b.cpp', content: fcpp.content },
+    ];
+    const nodes: FunctionNode[] = [
+      makeNode({ id: 'ts', name: 'process', filePath: '/a.ts', language: 'TypeScript', startIndex: fts.offsets[0].start, endIndex: fts.offsets[0].end }),
+      makeNode({ id: 'cpp', name: 'process', filePath: '/b.cpp', language: 'C++', startIndex: fcpp.offsets[0].start, endIndex: fcpp.offsets[0].end }),
+    ];
+    // Query is the TS function; exclude its own instance. The C++ clone must surface, labeled C++.
+    const res = findClones(body, 7, files, nodes, {
+      exclude: { filePath: '/a.ts', startIndex: fts.offsets[0].start, endIndex: fts.offsets[0].end },
+    });
+    const cpp = res.matches.find(m => m.file === '/b.cpp');
+    expect(cpp).toBeDefined();
+    expect(cpp!.language).toBe('C++');
+  });
 });

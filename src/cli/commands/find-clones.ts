@@ -26,7 +26,7 @@ interface CloneMatchView {
   language?: string;
 }
 
-interface CloneQueryView {
+export interface CloneQueryView {
   error?: string;
   candidates?: string[];
   hint?: string;
@@ -40,7 +40,7 @@ interface CloneQueryView {
   note?: string;
 }
 
-function renderHuman(r: CloneQueryView): string {
+export function renderHuman(r: CloneQueryView): string {
   const lines: string[] = [''];
   lines.push('🧬 Clone query');
   const q = r.query ?? {};

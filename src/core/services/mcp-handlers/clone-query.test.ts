@@ -39,6 +39,18 @@ const UNRELATED = `function greet(name) {
 }
 `;
 
+// A C-family body that is byte-identical in TypeScript and C++ (a real cross-language clone).
+// Deliberately a DIFFERENT shape from QUERY (no loop) so it does not collide with the computeTotal
+// fixtures above.
+const PROC = `function process(input) {
+  if (input == null) {
+    return false;
+  }
+  const size = input.length;
+  return size > 0;
+}
+`;
+
 interface CacheNode {
   id: string;
   name: string;
@@ -71,11 +83,17 @@ beforeEach(() => {
   writeFileSync(join(dir, 'query.ts'), QUERY, 'utf-8');
   writeFileSync(join(dir, 'exact.ts'), EXACT, 'utf-8');
   writeFileSync(join(dir, 'other.ts'), UNRELATED, 'utf-8');
+  // A C-family body byte-identical in TypeScript and C++ — a real cross-language clone, distinct from
+  // computeTotal so the existing assertions are unaffected.
+  writeFileSync(join(dir, 'proc.ts'), PROC, 'utf-8');
+  writeFileSync(join(dir, 'proc.cpp'), PROC, 'utf-8');
 
   const nodes: CacheNode[] = [
     node('q', 'computeTotal', 'query.ts', QUERY),
     node('e', 'computeTotal', 'exact.ts', EXACT),
     node('o', 'greet', 'other.ts', UNRELATED),
+    { ...node('pts', 'process', 'proc.ts', PROC), language: 'TypeScript' },
+    { ...node('pcpp', 'process', 'proc.cpp', PROC), language: 'C++' },
     // An HTML inline-script symbol — excluded from comparison (disclosed).
     { id: 'h', name: 'onClick', filePath: 'page.html', startIndex: 0, endIndex: 80, startLine: 1, endLine: 6, language: 'JavaScript' },
     // A bodyless external/synthesized symbol (startIndex >= endIndex) — not comparable.
@@ -162,6 +180,17 @@ describe('handleFindClones', () => {
     expect(res.error).toMatch(/in the index but has no comparable body/);
     // It must NOT offer the typed name back as a "did you mean" candidate.
     expect(res.candidates).toBeUndefined();
+  });
+
+  it('surfaces a cross-language clone with its own language (query TS, clone C++)', async () => {
+    const res = (await handleFindClones({ directory: dir, symbol: 'process::proc.ts' })) as {
+      query: { language?: string };
+      matches: Array<{ file: string; language?: string }>;
+    };
+    expect(res.query.language).toBe('TypeScript');
+    const cpp = res.matches.find(m => m.file === 'proc.cpp');
+    expect(cpp).toBeDefined();
+    expect(cpp!.language).toBe('C++'); // different from the query's TypeScript — the ⚠ case
   });
 
   it('discloses HTML inline-script exclusions only when present', async () => {
