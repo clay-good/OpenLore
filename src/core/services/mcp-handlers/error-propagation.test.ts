@@ -28,6 +28,7 @@ interface Node {
   endLine: number;
   language: string;
   isExternal?: boolean;
+  isTest?: boolean;
 }
 
 function node(id: string, name: string, filePath: string, body: string, language = 'TypeScript'): Node {
@@ -136,5 +137,98 @@ describe('handleAnalyzeErrorPropagation', () => {
     const a = await handleAnalyzeErrorPropagation({ directory: dir, symbol: 'caller' });
     const b = await handleAnalyzeErrorPropagation({ directory: dir, symbol: 'caller' });
     expect(JSON.stringify(a)).toBe(JSON.stringify(b));
+  });
+});
+
+// ── Adversarial regressions for the review findings ─────────────────────────
+
+function writeCache(d: string, nodes: Node[], edges: unknown[]): void {
+  const analysisDir = join(d, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
+  mkdirSync(analysisDir, { recursive: true });
+  writeFileSync(join(analysisDir, ARTIFACT_LLM_CONTEXT), JSON.stringify({ callGraph: { nodes, edges } }), 'utf-8');
+}
+
+describe('handleAnalyzeErrorPropagation — memo poisoning under depth truncation (review H1)', () => {
+  let d: string;
+  beforeEach(() => {
+    d = mkdtempSync(join(tmpdir(), 'errprop-memo-'));
+    // Deep chain q→a→b→c→d AND a shallow shortcut q→c. d throws. With maxDepth=3 the
+    // deep visit reaches c at depth 3 and truncates its call to d (depth 4); c must
+    // NOT be memoized as empty, so the shallow q→c→d path still finds the escape.
+    const Q = `function q() {\n  a();\n  c();\n}\n`;
+    const A = `function a() {\n  b();\n}\n`;
+    const B = `function b() {\n  c();\n}\n`;
+    const C = `function c() {\n  d();\n}\n`;
+    const D = `function d() {\n  throw new TypeError("deep");\n}\n`;
+    writeFileSync(join(d, 'q.ts'), Q, 'utf-8');
+    writeFileSync(join(d, 'a.ts'), A, 'utf-8');
+    writeFileSync(join(d, 'b.ts'), B, 'utf-8');
+    writeFileSync(join(d, 'c.ts'), C, 'utf-8');
+    writeFileSync(join(d, 'd.ts'), D, 'utf-8');
+    const nodes: Node[] = [
+      node('q', 'q', 'q.ts', Q),
+      node('a', 'a', 'a.ts', A),
+      node('b', 'b', 'b.ts', B),
+      node('c', 'c', 'c.ts', C),
+      node('d', 'd', 'd.ts', D),
+    ];
+    const edges = [
+      { callerId: 'q', calleeId: 'a', calleeName: 'a', line: 2, confidence: 'import' }, // deep first
+      { callerId: 'a', calleeId: 'b', calleeName: 'b', line: 2, confidence: 'import' },
+      { callerId: 'b', calleeId: 'c', calleeName: 'c', line: 2, confidence: 'import' },
+      { callerId: 'c', calleeId: 'd', calleeName: 'd', line: 2, confidence: 'import' },
+      { callerId: 'q', calleeId: 'c', calleeName: 'c', line: 3, confidence: 'import' }, // shallow shortcut
+    ];
+    writeCache(d, nodes, edges);
+  });
+  afterEach(() => rmSync(d, { recursive: true, force: true }));
+
+  it('a shallow path still finds an escape that a deep path truncated (no stale memo)', async () => {
+    const res = (await handleAnalyzeErrorPropagation({ directory: d, symbol: 'q', maxDepth: 3 })) as Result;
+    // q→c→d is within depth 3; TypeError must surface despite the deep q→a→b→c→d truncation.
+    expect(res.escapes.some(e => e.type === 'TypeError')).toBe(true);
+  });
+});
+
+describe('handleAnalyzeErrorPropagation — nested call-site guard + test-callee exclusion', () => {
+  let d: string;
+  beforeEach(() => {
+    d = mkdtempSync(join(tmpdir(), 'errprop-nest-'));
+    // Python: risky() is called inside an inner `except KeyError` try wrapped by an outer
+    // `except Exception` catch-all. A ValueError from risky is caught by the outer guard.
+    const CALLER = `def caller():\n    try:\n        try:\n            risky()\n        except KeyError:\n            pass\n    except Exception:\n        pass\n`;
+    const RISKY = `def risky():\n    raise ValueError("x")\n`;
+    // Production fn calling a test-only fn that throws.
+    const PROD = `function prod() {\n  helperTest();\n}\n`;
+    const HELPERTEST = `function helperTest() {\n  throw new TypeError("t");\n}\n`;
+    writeFileSync(join(d, 'caller.py'), CALLER, 'utf-8');
+    writeFileSync(join(d, 'risky.py'), RISKY, 'utf-8');
+    writeFileSync(join(d, 'prod.ts'), PROD, 'utf-8');
+    writeFileSync(join(d, 'helper.test.ts'), HELPERTEST, 'utf-8');
+    const nodes: Node[] = [
+      node('caller', 'caller', 'caller.py', CALLER, 'Python'),
+      node('risky', 'risky', 'risky.py', RISKY, 'Python'),
+      node('prod', 'prod', 'prod.ts', PROD),
+      { ...node('helperTest', 'helperTest', 'helper.test.ts', HELPERTEST), isTest: true } as Node,
+    ];
+    const edges = [
+      { callerId: 'caller', calleeId: 'risky', calleeName: 'risky', line: 4, confidence: 'import' },
+      { callerId: 'prod', calleeId: 'helperTest', calleeName: 'helperTest', line: 2, confidence: 'import' },
+    ];
+    writeCache(d, nodes, edges);
+  });
+  afterEach(() => rmSync(d, { recursive: true, force: true }));
+
+  it('an outer catch-all catches a ValueError the inner typed except misses (handled, not escaping)', async () => {
+    const res = (await handleAnalyzeErrorPropagation({ directory: d, symbol: 'caller' })) as Result;
+    expect(res.summary.escapes).toBe(0);
+    expect(res.summary.handledInternally).toBe(1);
+    expect(res.handledInternally[0]).toMatchObject({ type: 'ValueError', caughtIn: 'caller::caller.py' });
+  });
+
+  it('excludes a test-only callee from the production escape set, disclosed in boundaries', async () => {
+    const res = (await handleAnalyzeErrorPropagation({ directory: d, symbol: 'prod' })) as Result;
+    expect(res.summary.escapes).toBe(0);
+    expect(res.boundaries.some(b => /test-only callee/.test(b))).toBe(true);
   });
 });

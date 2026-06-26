@@ -19,6 +19,7 @@ Each language backs a fixed, closed set of capabilities. A capability is either 
 | `styleFingerprint` | Descriptive per-language idiom-frequency profile (function form, binding, conditional, async, string, naming case) with an evidence floor + enforcement-awareness. Backed for TypeScript/JavaScript/Python/Go. | `STYLE_FINGERPRINT_LANGUAGES` (`style-fingerprint.ts`) |
 | `iacProjection` | Infrastructure-as-code projection (resources/edges) onto the unified graph. | `isIacLanguage()` / `IAC_LANGUAGES` (`iac/types.ts`) |
 | `crossServiceHttp` | Cross-service API topology: outbound HTTP client call sites (`fetch`/`axios`/`ky`/`got`) and/or server route registrations are matched into `http_endpoint` edges across the process (and, under federation, the repo) boundary, so `analyze_impact`/`find_path`/`blast_radius` answer "who calls this endpoint?". Clients: TS/JS; routes: TS/JS (Express/NestJS/Next), Python (FastAPI/Flask/Django), Java (Spring/JAX-RS). | `CROSS_SERVICE_HTTP_LANGUAGES` (`http-route-parser.ts`) |
+| `errorPropagation` | Static throw/raise + typed/untyped catch extraction, so `analyze_error_propagation` can compute the exceptions that escape a function vs. those caught within it. Throw types resolved from `throw new X()` / `raise X()`; TS/JS `catch` is catch-all, Python `except` matched by exact name (no subclass hierarchy); containment is byte-precise. Backed for TypeScript/JavaScript/Python. | `ERROR_PROPAGATION_LANGUAGES` (`exception-flow.ts`) |
 
 ## The registry is derived, not hand-listed
 
@@ -27,7 +28,7 @@ The declarative registry (`src/core/analyzer/language-support.ts`) is the single
 consult at run time (the table above), never hand-maintained in parallel. So the coverage matrix
 cannot silently drift from what the analyzer actually does. `language-support.test.ts` behaviorally
 cross-checks **every member** of the `signatures`, `callGraph`, `imports`, `typeInference`,
-`cfgOverlay`, `styleFingerprint`, and `crossServiceHttp` sets by running the real extractor on a per-language fixture and asserting it produces
+`cfgOverlay`, `styleFingerprint`, `crossServiceHttp`, and `errorPropagation` sets by running the real extractor on a per-language fixture and asserting it produces
 output (a malformed entry that produced nothing fails the test, not just the predicate tautology);
 `cfgOverlay` and `iacProjection` are additionally asserted exactly against their predicates
 (`cfgSupportsLanguage`, `isIacLanguage`) for every language, and `iacProjection`'s per-ecosystem node
@@ -86,6 +87,10 @@ an existing one to a new capability:
      route extractors (`extractRouteDefinitions`/`extractTsRouteDefinitions`/`extractJavaRouteDefinitions`),
      then add `L` to `HTTP_CLIENT_LANGUAGES` and/or `HTTP_ROUTE_LANGUAGES` (`http-route-parser.ts`);
      the union `CROSS_SERVICE_HTTP_LANGUAGES` drives the registry column.
+   - `errorPropagation`: add an `L` branch to `specFor`/`getExceptionParser` in `exception-flow.ts`
+     (the per-language throw/try/catch node-type spec + a tree-sitter parser) and add `L` to
+     `ERROR_PROPAGATION_LANGUAGES`; drop an `ERRP_FIXTURES` entry in `language-support.test.ts`. Mind
+     the language's catch semantics — typed catches need exact-name matching, untyped are catch-all.
 2. **Make `detectLanguage` map the file** (extension or classification) to the canonical name `L`.
 3. **Add `L` to the registry universe** if it is a brand-new name: `CODE_LANGUAGES` (extension-detected)
    — IaC ecosystem tags are derived automatically from `IAC_LANGUAGES`.

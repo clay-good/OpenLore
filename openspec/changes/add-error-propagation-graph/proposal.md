@@ -8,6 +8,13 @@
 > counted `externalCalleesNotAnalyzed` summary (caught in dogfooding — a per-callee list buried the
 > substantive disclosures); the spec's boundary requirement is unchanged.
 >
+> Post-merge adversarial-review hardening (same PR): containment is byte-precise (not line-based) so a
+> throw in a catch body is never mis-attributed as handled; handling walks ALL enclosing guards so an
+> inner typed `except` never shadows an outer catch-all; truncated (depth/cap-bounded) traversals are
+> never memoized (no stale shallow reuse); wrapped throws (`throw (new E())` / `as Error`) resolve; and
+> test-only callees are excluded from the production escape set (disclosed). See
+> `DOGFOOD-error-propagation.md` §D.
+>
 > A net-new conclusion tool —
 > the written backlog (`FEATURE-UPDATES.md`, `STRUCTURAL-CONTEXT-PATTERNS.md`,
 > `PARALLEL-WORK-COORDINATION.md`, `HARDEN-DISTRIBUTION-AND-SUBSTRATE.md`) is fully shipped. This is

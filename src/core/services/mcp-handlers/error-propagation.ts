@@ -27,8 +27,7 @@ import {
   ERROR_PROPAGATION_LANGUAGES,
   getExceptionParser,
   extractExceptionFacts,
-  innermostGuard,
-  guardCatches,
+  guardsCatch,
   DYNAMIC_TYPE,
   type FunctionExceptionFacts,
 } from '../../analyzer/exception-flow.js';
@@ -165,10 +164,16 @@ export async function handleAnalyzeErrorPropagation(
   // External / unresolved callees are collapsed into a counted summary so a few
   // structural disclosures are not buried under dozens of stdlib-leaf names.
   const externalCallees = new Set<string>();
+  const testCallees = new Set<string>();
   let parsedCount = 0;
   let capHit = false;
+  // Set true by factsFor ONLY when it returned null because the parse cap was hit
+  // (a budget truncation) — distinct from a genuine terminal null (unsupported
+  // language / bodyless / unreadable), which is complete, not truncated.
+  let lastFactsTruncated = false;
 
   async function factsFor(n: FunctionNode): Promise<FunctionExceptionFacts | null> {
+    lastFactsTruncated = false;
     if (factsById.has(n.id)) return factsById.get(n.id)!;
     if (!ERROR_PROPAGATION_LANGUAGES.has(n.language)) {
       boundaries.add(`callee in unsupported language not analyzed (${n.language})`);
@@ -181,7 +186,8 @@ export async function handleAnalyzeErrorPropagation(
     }
     if (parsedCount >= MAX_FUNCTIONS) {
       capHit = true;
-      factsById.set(n.id, null);
+      lastFactsTruncated = true;
+      // Not cached: if budget frees on another path this node can still be parsed.
       return null;
     }
     let tree = treeByFile.get(n.filePath);
@@ -213,23 +219,50 @@ export async function handleAnalyzeErrorPropagation(
   }
 
   const handled: HandledEntry[] = [];
+  // Memo holds ONLY fully-computed (untruncated) results — a result clipped by the
+  // depth/parse bound is never cached, so a later shallower path recomputes it
+  // rather than reusing a stale incomplete answer (sound lower bound).
   const memo = new Map<string, EscapeEntry[]>();
 
-  async function escapes(n: FunctionNode, depth: number, stack: Set<string>): Promise<EscapeEntry[]> {
+  /**
+   * Is an exception of `type` propagating from a callee with edge `edge` caught at
+   * its call site(s) in caller `facts`? Joined by (calleeName, line) to the
+   * byte-precise call sites. Conservative: caught only if there IS a matching call
+   * site and EVERY matching one catches the type (a name/line that does not match
+   * any call site → not caught → it escapes — the safe direction).
+   */
+  function caughtAtCallSite(facts: FunctionExceptionFacts, edge: CallEdge, type: string): boolean {
+    const matches = facts.callSites.filter(
+      cs => cs.calleeName === edge.calleeName && cs.line === (edge.line ?? -1),
+    );
+    if (matches.length === 0) return false;
+    return matches.every(cs => guardsCatch(cs.guards, type));
+  }
+
+  async function escapes(
+    n: FunctionNode,
+    depth: number,
+    stack: Set<string>,
+  ): Promise<{ esc: EscapeEntry[]; complete: boolean }> {
     const cached = memo.get(n.id);
-    if (cached) return cached;
-    if (stack.has(n.id)) return []; // recursion cycle — no new escapes on this back-edge
+    if (cached) return { esc: cached, complete: true };
+    if (stack.has(n.id)) return { esc: [], complete: true }; // cycle back-edge — no new escapes
     if (depth > depthBound) {
       capHit = true;
       boundaries.add(`traversal bounded at depth ${depthBound}; deeper callees not analyzed`);
-      return [];
+      return { esc: [], complete: false };
     }
 
     const facts = await factsFor(n);
-    if (!facts || !facts.supported) return [];
+    if (!facts || !facts.supported) {
+      // A parse-cap truncation is incomplete; a genuine terminal (unsupported /
+      // bodyless / unreadable) is complete — there is nothing more to find here.
+      return { esc: [], complete: !lastFactsTruncated };
+    }
 
     const out: EscapeEntry[] = [];
     const selfLabel = labelOf(n);
+    let complete = true;
 
     // Direct throws that escape this function.
     for (const ts of facts.throwSites) {
@@ -253,16 +286,19 @@ export async function handleAnalyzeErrorPropagation(
         externalCallees.add(edge.calleeName);
         continue;
       }
+      if (callee.isTest) {
+        testCallees.add(edge.calleeName);
+        continue;
+      }
       if (callee.id === n.id) continue; // direct self-recursion
-      const childEsc = await escapes(callee, depth + 1, nextStack);
-      if (childEsc.length === 0) continue;
-      const guard = innermostGuard(facts.tryGuards, edge.line ?? -1);
-      for (const e of childEsc) {
-        if (guard && guardCatches(guard, e.type)) {
+      const child = await escapes(callee, depth + 1, nextStack);
+      if (!child.complete) complete = false;
+      for (const e of child.esc) {
+        if (caughtAtCallSite(facts, edge, e.type)) {
           handled.push({
             type: e.type,
             caughtIn: selfLabel,
-            caughtAtLine: edge.line ?? guard.fromLine,
+            caughtAtLine: edge.line ?? 0,
             fromCallee: labelOf(callee),
           });
         } else {
@@ -271,7 +307,7 @@ export async function handleAnalyzeErrorPropagation(
       }
     }
 
-    // Dedupe by (type, origin) keeping the shortest path — a memoized, stable set.
+    // Dedupe by (type, origin) keeping the shortest path — a stable set.
     const byKey = new Map<string, EscapeEntry>();
     for (const e of out) {
       const key = `${e.type}@@${e.originFunction}@@${e.originLine}`;
@@ -279,22 +315,29 @@ export async function handleAnalyzeErrorPropagation(
       if (!prev || e.path.length < prev.path.length) byKey.set(key, e);
     }
     const deduped = [...byKey.values()];
-    memo.set(n.id, deduped);
-    return deduped;
+    if (complete) memo.set(n.id, deduped); // never cache a truncated result
+    return { esc: deduped, complete };
   }
 
-  const escapeList = await escapes(query, 0, new Set());
+  const escapeList = (await escapes(query, 0, new Set())).esc;
 
   // Dedupe handled events.
   const handledByKey = new Map<string, HandledEntry>();
   for (const h of handled) handledByKey.set(`${h.type}@@${h.caughtIn}@@${h.fromCallee}`, h);
   const handledList = [...handledByKey.values()];
 
-  // Stable, deterministic ordering.
+  // Stable, deterministic ordering (full tiebreak set so cache edge order never
+  // perturbs output for entries that differ only in a later field).
   const sortEsc = (a: EscapeEntry, b: EscapeEntry): number =>
     a.type.localeCompare(b.type) || a.originFunction.localeCompare(b.originFunction) || a.originLine - b.originLine;
   escapeList.sort(sortEsc);
-  handledList.sort((a, b) => a.type.localeCompare(b.type) || a.caughtIn.localeCompare(b.caughtIn));
+  handledList.sort(
+    (a, b) =>
+      a.type.localeCompare(b.type) ||
+      a.caughtIn.localeCompare(b.caughtIn) ||
+      a.fromCallee.localeCompare(b.fromCallee) ||
+      a.caughtAtLine - b.caughtAtLine,
+  );
 
   if (capHit) boundaries.add(`analysis bounded (≤ ${MAX_FUNCTIONS} functions / depth ${depthBound}); some callees not analyzed`);
 
@@ -303,6 +346,12 @@ export async function handleAnalyzeErrorPropagation(
     boundaries.add(
       `${externalCallees.size} external/unresolved callee(s) not analyzed (stdlib leaves, ` +
         'unresolved names) — their exceptions are out of scope, never assumed none.',
+    );
+  }
+  if (testCallees.size > 0) {
+    boundaries.add(
+      `${testCallees.size} test-only callee(s) excluded from the production escape set ` +
+        '(a production function calling test code is itself unusual).',
     );
   }
 

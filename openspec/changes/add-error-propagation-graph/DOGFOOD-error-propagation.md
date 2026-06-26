@@ -78,3 +78,33 @@ set, so `get_language_support` cannot over-claim.
 
 Two identical runs of `--symbol caller` (and `handleFindClones`) produce byte-identical JSON
 (asserted in the handler unit test; confirmed by hand on the repo).
+
+## D. Adversarial review round (post-merge hardening)
+
+Three independent adversarial reviewers stress-tested the extractor and the propagation handler.
+They found real soundness bugs — all in the dangerous "over-claim handled / stale result" direction —
+which were fixed and pinned with regression tests:
+
+1. **CRITICAL — `locallyHandled` resolved by line, not byte/AST containment.** A `throw` in an outer
+   catch body that shared a physical line with an inner one-line swallowing try was falsely marked
+   *handled* (claimed contained when it escapes). **Fix:** containment is now byte-precise
+   (`TryGuard.fromIndex/toIndex`, `ThrowSite.index`); a throw/call is "inside" a `try` only if its
+   node lies within the body's byte span. Verified e2e:
+   `wrapAndGiveUp` → `GiveUp` correctly **escapes** (previously: wrongly handled).
+2. **Nested-guard under-resolution (extractor + handler).** Only the single *innermost* guard was
+   checked, so a throw inside an inner typed `except KeyError` wrapped by an outer `except Exception`
+   was wrongly reported escaping. **Fix:** resolution walks **all** enclosing guards
+   (`enclosingGuards` / `guardsCatch`) — an inner non-matching guard no longer shadows an outer
+   catch-all. Verified e2e: Python `caller` → `ValueError` is **handled** by the outer catch-all.
+3. **HIGH — memo poisoning under truncation.** `escapes(n)` cached results even when a child hit the
+   depth/parse bound, so a later shallow path reused a stale incomplete answer (dropped a real
+   escape). **Fix:** only fully-computed (untruncated) results are memoized; a truncated subtree is
+   recomputed on a shallower path. Regression test: `q→a→b→c→d` (deep, truncated at `maxDepth=3`) +
+   `q→c` (shallow) — `TypeError` still surfaces via the shallow path.
+
+Also fixed: wrapped throws `throw (new E())` / `throw new E() as Error` now resolve to `E` (were
+`<dynamic>`); a `handledInternally` sort tiebreak on `fromCallee`/line; **test-only callees are
+excluded** from the production escape set with disclosure (caught live: `handleFindClones` dropped 10
+spurious test-edge paths, `functionsAnalyzed` 100 → 47, cleaner production-only result).
+
+Post-fix: extractor 21 tests, handler 13 tests, registry 35 tests — all green; full suite green.

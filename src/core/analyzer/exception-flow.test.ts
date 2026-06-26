@@ -2,7 +2,9 @@ import { describe, it, expect } from 'vitest';
 import {
   extractExceptionFactsFromSource,
   innermostGuard,
+  enclosingGuards,
   guardCatches,
+  guardsCatch,
   DYNAMIC_TYPE,
   ERROR_PROPAGATION_LANGUAGES,
   type TryGuard,
@@ -127,6 +129,68 @@ describe('extractExceptionFacts — Python', () => {
   });
 });
 
+describe('extractExceptionFacts — adversarial soundness (regression for review findings)', () => {
+  it('a throw in an outer catch body is NOT marked handled by an inner one-line try on the same line', async () => {
+    // Review CRITICAL #1: line-based containment falsely marked this `throw new GiveUp()`
+    // (in the OUTER catch body) as handled because it shares line 5 with the inner try body.
+    const facts = await extractExceptionFactsFromSource(
+      [
+        'function f() {',
+        '  try {',
+        '    a();',
+        '  } catch (e) {',
+        '    try { recover(); } catch { /* swallow */ } throw new GiveUp();',
+        '  }',
+        '}',
+      ].join('\n'),
+      'TypeScript',
+    );
+    const giveUp = facts.throwSites.find(t => t.type === 'GiveUp')!;
+    expect(giveUp).toBeTruthy();
+    expect(giveUp.locallyHandled).toBe(false); // it ESCAPES f
+  });
+
+  it('an inner typed except does NOT shadow an outer catch-all (nested-guard walk)', async () => {
+    const facts = await extractExceptionFactsFromSource(
+      [
+        'def g():',
+        '    try:',
+        '        try:',
+        '            raise ValueError("x")',
+        '        except KeyError:',
+        '            pass',
+        '    except Exception:',
+        '        pass',
+      ].join('\n'),
+      'Python',
+    );
+    // ValueError is not caught by the inner `except KeyError`, but IS caught by the outer
+    // `except Exception` — so it does not escape g.
+    expect(facts.throwSites.find(t => t.type === 'ValueError')!.locallyHandled).toBe(true);
+  });
+
+  it('peels TS wrappers around a thrown new-expression', async () => {
+    const paren = await extractExceptionFactsFromSource('function f() {\n  throw (new RangeError("x"));\n}', 'TypeScript');
+    expect(paren.throwSites[0].type).toBe('RangeError');
+    const asExpr = await extractExceptionFactsFromSource('function f() {\n  throw new RangeError("x") as Error;\n}', 'TypeScript');
+    expect(asExpr.throwSites[0].type).toBe('RangeError');
+  });
+
+  it('collects call sites with their enclosing guards (byte-precise)', async () => {
+    const facts = await extractExceptionFactsFromSource(
+      'function f() {\n  try { risky(); } catch {} safe();\n}',
+      'TypeScript',
+    );
+    const risky = facts.callSites.find(c => c.calleeName === 'risky')!;
+    const safe = facts.callSites.find(c => c.calleeName === 'safe')!;
+    // `risky()` is inside the try body (guarded, catch-all); `safe()` is after it on the
+    // same line (NOT guarded) — byte containment distinguishes them where lines cannot.
+    expect(risky.guards.length).toBe(1);
+    expect(risky.guards[0].catchAll).toBe(true);
+    expect(safe.guards.length).toBe(0);
+  });
+});
+
 describe('extractExceptionFacts — fail-soft + determinism', () => {
   it('an unsupported language returns an unsupported record, not a guess', async () => {
     const facts = await extractExceptionFactsFromSource(
@@ -148,13 +212,19 @@ describe('extractExceptionFacts — fail-soft + determinism', () => {
 });
 
 describe('guard helpers', () => {
-  const outer: TryGuard = { fromLine: 1, toLine: 20, catchAll: true, caughtTypes: [], rethrows: false };
-  const inner: TryGuard = { fromLine: 5, toLine: 8, catchAll: false, caughtTypes: ['KeyError'], rethrows: false };
+  // outer catch-all spans bytes [0,200]; inner typed `except KeyError` spans [50,80].
+  const outer: TryGuard = { fromLine: 1, toLine: 20, fromIndex: 0, toIndex: 200, catchAll: true, caughtTypes: [], rethrows: false };
+  const inner: TryGuard = { fromLine: 5, toLine: 8, fromIndex: 50, toIndex: 80, catchAll: false, caughtTypes: ['KeyError'], rethrows: false };
 
-  it('innermostGuard picks the smallest enclosing span', () => {
-    expect(innermostGuard([outer, inner], 6)).toBe(inner);
-    expect(innermostGuard([outer, inner], 15)).toBe(outer);
-    expect(innermostGuard([outer, inner], 99)).toBeNull();
+  it('innermostGuard picks the smallest enclosing byte span', () => {
+    expect(innermostGuard([outer, inner], 60)).toBe(inner);
+    expect(innermostGuard([outer, inner], 150)).toBe(outer);
+    expect(innermostGuard([outer, inner], 999)).toBeNull();
+  });
+
+  it('enclosingGuards returns ALL enclosing guards innermost-first', () => {
+    expect(enclosingGuards([outer, inner], 60)).toEqual([inner, outer]);
+    expect(enclosingGuards([outer, inner], 150)).toEqual([outer]);
   });
 
   it('guardCatches honors catch-all, typed match, and <dynamic>', () => {
@@ -164,5 +234,12 @@ describe('guard helpers', () => {
     expect(guardCatches(inner, 'ValueError')).toBe(false);
     expect(guardCatches(inner, DYNAMIC_TYPE)).toBe(false);
     expect(guardCatches({ ...outer, rethrows: true }, 'Anything')).toBe(false);
+  });
+
+  it('guardsCatch: an inner non-matching guard does NOT shadow an outer catch-all', () => {
+    // ValueError at byte 60 is inside inner (except KeyError, no match) AND outer (catch-all).
+    expect(guardsCatch(enclosingGuards([outer, inner], 60), 'ValueError')).toBe(true);
+    // With only the inner typed guard, ValueError is not caught.
+    expect(guardsCatch(enclosingGuards([inner], 60), 'ValueError')).toBe(false);
   });
 });
