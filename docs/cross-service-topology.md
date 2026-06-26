@@ -24,13 +24,16 @@ createUser() ─http_endpoint──▶  addUser()       # POST /api/users
 
 ## How matching works
 
-1. **Client extraction** (`extractHttpCalls`) recognizes the common client idioms — `fetch`, `axios`,
-   `ky`, `got` — in JS/TS and recovers each call's method + path + the line it sits on. A typed
-   API-client wrapper built on one of these is captured at the wrapper's own call site (the `fetch`
-   inside it), so the wrapper's callers reach the endpoint transitively through the ordinary call
-   graph; a client over a different transport (XHR, gRPC, a generated binary SDK) is not extracted.
-2. **Route extraction** recovers server route registrations: Python (FastAPI / Flask / Django),
-   Java (Spring MVC / JAX-RS), and TS/JS (Express / NestJS / Next.js App Router / Fastify / Hono / Koa).
+1. **Client extraction** (`extractHttpCalls`) recognizes the common client idioms in JS/TS — a direct
+   `fetch(...)`, `axios.get/post/...(...)` (or `axios({ url, method })`), `ky.get/...(...)`, and
+   `got.get/...(...)` — and recovers each call's method + path + the line it sits on. A wrapper
+   *function* containing one of these direct calls is captured at that call site, so the wrapper's
+   callers reach the endpoint transitively through the ordinary call graph. An **aliased instance**
+   (`const c = axios.create(); c.get(...)`) or a different transport (XHR, gRPC, a generated binary
+   SDK) is not recognized — matching arbitrary `obj.get('/x')` would be too false-positive-prone.
+2. **Route extraction** recovers server route registrations: Python (FastAPI / Flask / Django, incl.
+   `re_path`/`url` regex routes), Java (Spring MVC / JAX-RS), and TS/JS (Express / NestJS / Next.js
+   App Router / Fastify / Hono / Koa).
 3. **Normalized route key** — both sides are reduced to `METHOD + /path/template`, with path parameters
    normalized so equivalent forms reconcile: a client `` `/users/${id}` ``, a route `/users/:id`, and a
    route `/users/{id}` all collapse to `/users/:param`. Common API prefixes (`/api`, `/api/v1`, …) are

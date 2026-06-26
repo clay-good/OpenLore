@@ -44,6 +44,15 @@
       (f) Pass 2b had no self-loop guard, so a handler that fetches its OWN endpoint produced a
           `selfHandler→selfHandler` edge inflating its fan-in/out (http_endpoint edges ARE counted in
           metrics). Now skips `caller===callee`, mirroring the route-handler synthesis guard.
+      (g) Django `re_path()`/`url()` (regex routes) were never extracted — `\bpath` doesn't match
+          inside `re_path` (the `_` blocks the word boundary), though the code comment showed re_path
+          as an example. Now matched, with a regex→template conversion ((?P<pk>…)→:param, anchors
+          stripped). Completes the claimed Django support (was path()-only).
+      (h) DETERMINISM (hardening): `extractAllHttpEdges` pushed per-file results in async-COMPLETION
+          order (a latent byte-determinism hazard the spec forbids and the shareable-bundle digest
+          relies on). Now collects via `Promise.all` (input-order results) + flatMap, so the edge set
+          is a deterministic function of the file list, not I/O timing. (Was byte-stable in practice;
+          now guaranteed by construction.)
 - [x] Confirm `analyze_impact` / `find_path` / `blast_radius` pick up the edges with no tool
       change. CONFIRMED: `reachability.ts` already treats `http_endpoint` callees as liveness
       roots / impact consumers. Proven end-to-end (`cross-service-topology.test.ts`).
@@ -88,10 +97,13 @@
 ## 7. Verify & dogfood
 - [x] `npm run lint`, `tsc --noEmit`, `npm run test:run` (5279 passed; 2 pre-existing load-flakes
       pass in isolation), `npm run build` — all green.
-- [x] Dogfood: real `openlore analyze` across FastAPI/Flask/Django/Spring/NestJS/Next.js/Express with
-      fetch/axios/ky/got clients — every framework links, dynamic + orphan targets emit no edge;
-      coverage matrix shows `crossServiceHttp`. Real cross-repo federation: `analyze_impact` on a
-      FastAPI handler surfaces a `fetch` consumer in a separate web repo.
+- [x] Dogfood: real `openlore analyze` across FastAPI/Flask/Django(path+re_path)/Spring/NestJS/
+      Next.js/Express/Fastify/Hono/Koa with fetch/axios/ky/got clients — every framework links,
+      dynamic + orphan + axios-instance + wrong-method targets emit no edge; query-string + multi-
+      method routes match; output byte-identical across runs; coverage matrix + the real
+      `get_language_support` handler show `crossServiceHttp`; `find_dead_code` keeps handlers live
+      (never flags a cross-service-reached handler dead). Real cross-repo federation: `analyze_impact`
+      on a FastAPI/Django handler surfaces a fetch/axios consumer in a separate web repo.
 
 ## 8. Docs
 - [x] `docs/language-support.md`: `crossServiceHttp` capability row + add-a-language checklist step.
