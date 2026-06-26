@@ -9,14 +9,16 @@
  * single, compact, self-describing artifact, and validates that artifact on import so a
  * stale / schema-skewed / tampered bundle is never served as current.
  *
- * Trust model (validate-or-rebuild — see the CLI `import` command for the orchestration):
- *   1. payload integrity — a SHA-256 over the canonical bundled bytes. Detects ANY corrupt /
+ * Trust model (validate-or-rebuild — see the CLI `import` command for the executed order):
+ *   1. bundle/schema version — the bundled index schema must match this OpenLore's `SCHEMA_VERSION`.
+ *   2. payload integrity — a SHA-256 over the canonical bundled bytes. Detects ANY corrupt /
  *      hand-edited / line-merged bundle (a generated artifact is regenerate-don't-merge; a
  *      hand-merge changes the bytes and is rejected here).
- *   2. schema version — the bundled index schema must match this OpenLore's `SCHEMA_VERSION`.
  *   3. graph-content digest — recomputed from the materialized store and compared to the
  *      bundled attestation's `digest` (the spec's "content digest matches its attestation").
- * Any failure degrades to a local rebuild; the bundle never leaves the consumer worse off
+ * Untrusted-artifact safety is enforced at parse: the decompressed size is bounded, every bundled
+ * file name must be a plain basename (no path traversal), and the manifest's file list must match
+ * the payload. Any failure degrades to a local rebuild; the bundle never leaves the consumer worse off
  * than having no artifact at all.
  *
  * Determinism: the artifact is a byte-stable function of the index it serializes (sorted file
@@ -27,8 +29,8 @@
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { gzipSync, gunzipSync } from 'node:zlib';
-import { readFile, readdir, mkdir, copyFile, rm, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { readFile, writeFile, readdir, mkdir, copyFile, rm, stat } from 'node:fs/promises';
+import { join, basename, isAbsolute } from 'node:path';
 import {
   ARTIFACT_CALL_GRAPH_DB,
   ARTIFACT_FINGERPRINT,
@@ -212,6 +214,14 @@ export async function buildBundle(analysisDir: string, openloreVersion: string):
   return { buffer, manifest };
 }
 
+/** True iff every required numeric count is present and finite (mirrors the attestation guard). */
+function hasAttestationCounts(c: unknown): boolean {
+  if (c === null || typeof c !== 'object') return false;
+  const r = c as Record<string, unknown>;
+  return (['files', 'functions', 'edges', 'classes'] as const)
+    .every(k => typeof r[k] === 'number' && Number.isFinite(r[k]));
+}
+
 /** True iff `v` is a structurally-valid bundle envelope (defensive parse of untrusted input). */
 function isBundleShape(v: unknown): v is Bundle {
   if (v === null || typeof v !== 'object') return false;
@@ -221,9 +231,36 @@ function isBundleShape(v: unknown): v is Bundle {
   if (typeof m.bundleVersion !== 'number') return false;
   if (typeof m.schemaVersion !== 'number') return false;
   if (typeof m.payloadDigest !== 'string') return false;
-  if (m.attestation === null || typeof m.attestation !== 'object') return false;
+  if (!Array.isArray(m.files)) return false;
+  // Validate the attestation's inner fields at the boundary rather than relying on a
+  // downstream fail-closed (a missing digest/counts must not depend on later check ordering).
+  const att = m.attestation as Record<string, unknown> | null;
+  if (att === null || typeof att !== 'object') return false;
+  if (typeof att.digest !== 'string' || typeof att.schemaVersion !== 'number' || !hasAttestationCounts(att.committed)) return false;
   if (b.payload === null || typeof b.payload !== 'object') return false;
   return Object.values(b.payload as Record<string, unknown>).every(x => typeof x === 'string');
+}
+
+/**
+ * A payload file name is safe to materialize iff it is a plain basename — no directory
+ * separator, no `..`, not absolute, not `.`/empty. A legitimate bundle only ever contains
+ * flat basenames (readdir of `.openlore/analysis/`); rejecting anything else closes a
+ * path-traversal arbitrary-write on import of an untrusted/hand-crafted artifact
+ * (mcp-security: Untrusted Artifact Deserialization Safety). `join(targetDir, name)` with a
+ * name like `../../x` or `/etc/x` would otherwise escape the target directory.
+ */
+export function isSafeBundleFileName(name: string): boolean {
+  return (
+    typeof name === 'string' &&
+    name.length > 0 &&
+    name !== '.' &&
+    name !== '..' &&
+    !name.includes('/') &&
+    !name.includes('\\') &&
+    !name.includes('\0') &&
+    !isAbsolute(name) &&
+    basename(name) === name
+  );
 }
 
 /**
@@ -246,6 +283,18 @@ export function parseBundle(raw: Buffer): Bundle {
   }
   if (!isBundleShape(parsed)) {
     throw new BundleError('unreadable', 'Not an OpenLore bundle: envelope shape is invalid.');
+  }
+  // Reject path-traversal / absolute payload names BEFORE any file is written (untrusted input).
+  const unsafe = Object.keys(parsed.payload).find(name => !isSafeBundleFileName(name));
+  if (unsafe !== undefined) {
+    throw new BundleError('unreadable', `Refusing artifact with an unsafe bundled file name: ${JSON.stringify(unsafe)}.`);
+  }
+  // The manifest's file list MUST exactly match the payload it describes (no silently-extra or
+  // omitted files riding along). Catches corruption/truncation and keeps the manifest authoritative.
+  const payloadNames = Object.keys(parsed.payload).sort();
+  const manifestNames = [...parsed.manifest.files.map(f => f.name)].sort();
+  if (payloadNames.length !== manifestNames.length || payloadNames.some((n, i) => n !== manifestNames[i])) {
+    throw new BundleError('unreadable', 'Bundle manifest file list does not match its payload.');
   }
   return parsed;
 }
@@ -276,7 +325,11 @@ export function recomputeProductionDigest(store: EdgeStore): string {
 export async function materializeBundle(bundle: Bundle, targetDir: string): Promise<void> {
   await mkdir(targetDir, { recursive: true });
   for (const [name, b64] of Object.entries(bundle.payload)) {
-    await writeFileAtomicish(join(targetDir, name), Buffer.from(b64, 'base64'));
+    // Defense in depth: parseBundle already rejects unsafe names, but never write outside the
+    // target dir even if a caller hands us an unvalidated bundle.
+    if (!isSafeBundleFileName(name)) throw new BundleError('unreadable', `Unsafe bundled file name: ${JSON.stringify(name)}.`);
+    // Safe names are flat basenames (validated above), so no parent-dir creation is needed.
+    await writeFile(join(targetDir, name), Buffer.from(b64, 'base64'));
   }
 }
 
@@ -289,6 +342,7 @@ export async function promoteStagedIndex(bundle: Bundle, stagingDir: string, ana
     await rm(join(analysisDir, sidecar), { force: true });
   }
   for (const name of Object.keys(bundle.payload)) {
+    if (!isSafeBundleFileName(name)) throw new BundleError('unreadable', `Unsafe bundled file name: ${JSON.stringify(name)}.`);
     await copyFile(join(stagingDir, name), join(analysisDir, name));
   }
 }
@@ -296,12 +350,6 @@ export async function promoteStagedIndex(bundle: Bundle, stagingDir: string, ana
 /** Best-effort directory removal (staging cleanup). */
 export async function removeDir(dir: string): Promise<void> {
   await rm(dir, { recursive: true, force: true });
-}
-
-/** Write bytes, creating parent dirs. Small wrapper kept local to avoid an extra import. */
-async function writeFileAtomicish(path: string, bytes: Buffer): Promise<void> {
-  const { writeFile } = await import('node:fs/promises');
-  await writeFile(path, bytes);
 }
 
 /** True if `path` exists (file or dir). */

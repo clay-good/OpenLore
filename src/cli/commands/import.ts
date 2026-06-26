@@ -168,8 +168,12 @@ export async function runImport(artifact: string, opts: ImportOptions): Promise<
   }
 
   // Materialize to a staging dir so the live index is never half-clobbered by a bundle that
-  // fails the deeper graph-content checks below.
+  // fails the deeper graph-content checks below. Any unexpected failure in this region degrades
+  // to a rebuild (spec: "any validation failure degrades to a local rebuild") — never a crash.
+  // The rebuild runs AFTER staging cleanup (outside this try) so it is never nested/double-run.
+  const sourceCommit = bundle.manifest.sourceCommit;
   const staging = await mkdtemp(join(tmpdir(), 'openlore-import-'));
+  let rebuildReason: string | null = null;
   try {
     await materializeBundle(bundle, staging);
 
@@ -189,43 +193,46 @@ export async function runImport(artifact: string, opts: ImportOptions): Promise<
     } finally {
       store.close();
     }
-    if (!digestOk) {
-      return fullRebuild(projectRoot, analysisDir, 'materialized graph digest does not match the bundled attestation (tampered).');
-    }
-    if (!reconcileHealthy) {
-      return fullRebuild(projectRoot, analysisDir, 'materialized index does not reconcile against its attestation.');
-    }
 
-    // (5) currency vs the working tree.
-    const isGitRepo = await isGitRepository(projectRoot);
-    const sourceCommit = bundle.manifest.sourceCommit;
-    let commitMatchesHead = false;
-    let commitIsAncestor = false;
-    if (isGitRepo && sourceCommit) {
-      const head = await gitResolveCommit(projectRoot, 'HEAD');
-      const source = await gitResolveCommit(projectRoot, sourceCommit);
-      commitMatchesHead = !!head && !!source && head === source;
-      if (!commitMatchesHead && source && head) {
-        commitIsAncestor = await gitIsAncestor(projectRoot, source, head);
+    if (!digestOk) {
+      rebuildReason = 'materialized graph digest does not match the bundled attestation (tampered).';
+    } else if (!reconcileHealthy) {
+      rebuildReason = 'materialized index does not reconcile against its attestation.';
+    } else {
+      // (5) currency vs the working tree.
+      const isGitRepo = await isGitRepository(projectRoot);
+      let commitMatchesHead = false;
+      let commitIsAncestor = false;
+      if (isGitRepo && sourceCommit) {
+        const head = await gitResolveCommit(projectRoot, 'HEAD');
+        const source = await gitResolveCommit(projectRoot, sourceCommit);
+        commitMatchesHead = !!head && !!source && head === source;
+        if (!commitMatchesHead && source && head) {
+          commitIsAncestor = await gitIsAncestor(projectRoot, source, head);
+        }
+      }
+
+      const decision = currencyDecision({ isGitRepo, sourceCommit, commitMatchesHead, commitIsAncestor });
+      if (decision.action === 'rebuild') {
+        rebuildReason = decision.detail;
+      } else {
+        await promoteStagedIndex(bundle, staging, analysisDir);
+        if (decision.action === 'import-unverified') {
+          logger.success(`Imported graph bundle (${bundle.manifest.files.length} files, schema v${bundle.manifest.schemaVersion}).`);
+          logger.warning(decision.detail);
+        } else {
+          logger.success(`Imported graph bundle — verified current at commit ${sourceCommit}.`);
+        }
       }
     }
-
-    const decision = currencyDecision({ isGitRepo, sourceCommit, commitMatchesHead, commitIsAncestor });
-    if (decision.action === 'rebuild') {
-      return fullRebuild(projectRoot, analysisDir, decision.detail);
-    }
-
-    await promoteStagedIndex(bundle, staging, analysisDir);
-    if (decision.action === 'import-unverified') {
-      logger.success(`Imported graph bundle (${bundle.manifest.files.length} files, schema v${bundle.manifest.schemaVersion}).`);
-      logger.warning(decision.detail);
-    } else {
-      logger.success(`Imported graph bundle — verified current at commit ${sourceCommit}.`);
-    }
-    return 0;
+  } catch (err) {
+    rebuildReason = `import failed during materialization/validation (${err instanceof Error ? err.message : String(err)}).`;
   } finally {
     await removeDir(staging);
   }
+
+  if (rebuildReason) return fullRebuild(projectRoot, analysisDir, rebuildReason);
+  return 0;
 }
 
 export const importCommand = new Command('import')

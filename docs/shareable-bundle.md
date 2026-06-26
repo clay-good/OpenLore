@@ -47,13 +47,13 @@ check a true tamper detector rather than a false positive on an index the increm
 this ladder and, on **any** validation failure, degrades transparently to a full local rebuild — so import
 never leaves you worse off than having no artifact:
 
-| Check | Failure → |
-|-------|-----------|
-| Bundle format version compatible | rebuild |
-| Payload byte-integrity (corrupt / hand-edited / line-merged) | rebuild |
-| Index schema version matches this OpenLore | rebuild (`mismatched`) |
-| Graph-content digest == bundled attestation, store reconciles healthy | rebuild (tampered) |
-| **Currency** vs. the working tree (below) | see below |
+| # | Check | Failure → |
+|---|-------|-----------|
+| 1 | Bundle format version compatible | rebuild |
+| 2 | Index schema version matches this OpenLore | rebuild (`mismatched`) |
+| 3 | Payload byte-integrity (corrupt / hand-edited / line-merged) | rebuild |
+| 4 | Graph-content digest == bundled attestation, store reconciles healthy | rebuild (tampered) |
+| 5 | **Currency** vs. the working tree (below) | see below |
 
 Currency outcomes once the artifact has validated:
 
@@ -64,8 +64,22 @@ Currency outcomes once the artifact has validated:
   current. (Incremental-delta update of only the changed files is a deferred optimization; the rebuild
   result is identical to a fresh analyze at the working-tree commit.)
 
-A file that is not an OpenLore bundle at all (wrong path, not a `.olbundle`) is a clean error, not a silent
-rebuild.
+Any *unexpected* failure during materialization or validation (e.g. a structurally-valid bundle whose
+`call-graph.db` turns out to be corrupt) also degrades to a rebuild rather than crashing the command.
+
+**Exit codes.** `export` and `import` exit `0` on success — and import exits `0` on the rebuild path too,
+since a rebuild is a successful outcome, not an error. A genuine *user* error exits `2`: an artifact path
+that doesn't exist, a file that isn't an OpenLore bundle at all (wrong path / not a `.olbundle`), or `export`
+run before `openlore analyze` (no index to bundle). These are clean errors, never a silent rebuild.
+
+**Untrusted-input safety.** A `.olbundle` is treated as untrusted on-disk input. Import bounds the
+decompressed artifact (2 GiB cap) and fails closed on anything larger — a crafted bundle cannot exhaust
+memory (zip-bomb guard). Every bundled file name must be a plain basename: a payload entry containing a path
+separator, `..`, or an absolute path is **rejected before anything is written to disk** (no path-traversal
+arbitrary write), and the manifest's file list must exactly match the payload it describes. The graph itself
+(`call-graph.db`) is validated against the attestation's content digest; the remaining bundled artifacts
+(JSON inventories, summaries) are trusted to the same degree as the bundle's source — treat an
+externally-supplied bundle like externally-supplied code.
 
 ## Conflict-free git discipline: regenerate, don't merge
 

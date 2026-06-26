@@ -43,6 +43,9 @@
 - [x] Stale import: ancestor commit → rebuild decision (verified e2e via a child-commit worktree).
 - [x] Version skew: incompatible-schema / incompatible-bundle-version → rebuild reason.
 - [x] Tamper: flipped payload byte → payload-digest mismatch.
+- [x] Security (adversarial review): path-traversal payload name rejected at parse (no write);
+      manifest/payload mismatch rejected; attestation missing digest / non-numeric counts rejected;
+      corrupt-but-consistent db → degrades to rebuild (not a crash). e2e-verified + unit tests.
 
 ## 7. Verify & dogfood
 - [x] `npm run lint`, `npm run typecheck`, `npm run test:run` (5252 passed), `npm run build` green.

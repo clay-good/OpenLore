@@ -16,6 +16,16 @@
 > documented as "not a load-time driver." Re-attesting makes the import-time digest check a true tamper
 > detector instead of a false positive on every incrementally-updated index.
 >
+> **Adversarial-review hardening (2026-06-26).** A second pass (adversarial code review + e2e fuzzing)
+> closed: a **path-traversal arbitrary-write** on import (a crafted payload key like `../../x` wrote
+> outside the target dir before any trust gate) — now every bundled file name must be a plain basename,
+> rejected at parse before any write; a **crash-instead-of-rebuild** on a structurally-valid-but-corrupt
+> bundle — the materialize/validate region now degrades to a rebuild on any unexpected error; a
+> **manifest/payload mismatch** is rejected; the **attestation's inner fields** (digest, counts) are
+> validated at the boundary, not relied on downstream; and the decompressed artifact is size-bounded
+> (zip-bomb guard). Regression tests cover each. The graph (`call-graph.db`) is digest-validated against
+> the attestation; other bundled artifacts are trusted to the bundle's source (documented).
+>
 > **Scope note — stale path.** A valid-but-ancestor-commit artifact degrades to a full local rebuild
 > (the spec's sanctioned "or fall back to a full local rebuild"). Incremental-delta update of only the
 > changed files is a deferred optimization; the headline win (verified, no-analyze bootstrap when the

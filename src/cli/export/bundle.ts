@@ -38,8 +38,11 @@ function checkpointStore(dbPath: string): void {
     } finally {
       store.close();
     }
-  } catch {
-    // Best-effort: a fresh analyze leaves the WAL already folded; never block export on this.
+  } catch (err) {
+    // Best-effort: a fresh analyze leaves the WAL already folded. If a checkpoint is blocked
+    // (e.g. the watcher daemon holds the WAL), the bundled db could miss unflushed rows — but
+    // the attestation is re-computed from the same db, so the bundle stays self-consistent.
+    logger.debug(`export bundle: WAL checkpoint skipped (${err instanceof Error ? err.message : String(err)})`);
   }
 }
 

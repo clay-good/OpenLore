@@ -22,6 +22,8 @@ OpenLore persists a SQLite call graph (`.openlore/analysis/call-graph.db`) plus 
 
 If you want a "block PR until everything is current" gate, chain `openlore preflight` and `openlore drift` in CI.
 
+Preflight *detects* a stale index; to *bootstrap* a fresh one quickly (instead of cold-indexing on every run), import a committed graph bundle — see [shareable-bundle.md](shareable-bundle.md).
+
 ## Usage
 
 ```

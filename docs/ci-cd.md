@@ -74,6 +74,22 @@ openlore drift --domains auth,user       # Check specific domains
 openlore drift --no-color                # Plain output for CI logs
 ```
 
+### Bootstrap the index from a shared bundle
+
+Turn per-run cold indexing into a verified import plus (at most) a small rebuild: commit a `.olbundle`
+artifact and `openlore import` it at the top of the job. Because import validates against the checked-out
+commit and falls back to a rebuild when it can't be trusted, it is safe to run unconditionally.
+
+```bash
+if [ -f .openlore/index-bundle.olbundle ]; then
+  openlore import .openlore/index-bundle.olbundle   # verified import, or transparent rebuild
+else
+  openlore analyze
+fi
+```
+
+See [shareable-bundle.md](shareable-bundle.md#ci-bootstrap-recipe).
+
 ### Deterministic vs. LLM-Enhanced
 
 | | Deterministic (Default) | LLM-Enhanced |

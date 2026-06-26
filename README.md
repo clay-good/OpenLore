@@ -344,6 +344,17 @@ Compares git changes against spec mappings in milliseconds. Detects: Gap (code c
 
 `openlore preflight` is a CI staleness gate: any pull request that edits files in the graph fails the check until the graph is refreshed. Drop-in templates for GitHub Actions, GitLab CI, and generic shell live in [`examples/ci/`](examples/ci/). Weighted scoring surfaces hubs first so a one-line leaf edit doesn't fail the same way a refactor of a top-of-stack module does. See [docs/preflight.md](docs/preflight.md).
 
+**Share the index** (no API key)
+
+The graph is a deterministic function of the committed source, so a team analyzes **once** and everyone else imports — no cold-indexing on every laptop or CI run. `openlore export bundle` serializes the persisted index into a single portable, integrity-stamped `.olbundle`; a teammate or a CI job runs `openlore import <artifact>` to bootstrap a verified index in seconds. Import is **validate-or-rebuild**: it never serves a stale, schema-skewed, or tampered bundle as current, transparently falling back to a local rebuild if the artifact can't be trusted. Git-distributed and offline — no registry, no network, no LLM.
+
+```bash
+openlore analyze && openlore export bundle          # producer: index once → .openlore/index-bundle.olbundle
+openlore import .openlore/index-bundle.olbundle      # consumer / CI: verified import, or transparent rebuild
+```
+
+See [docs/shareable-bundle.md](docs/shareable-bundle.md).
+
 **MCP** (no API key)
 
 69 graph-native tools exposed over stdio. Together they act as a persistent architectural runtime for coding agents: orientation, graph traversal, semantic retrieval, drift awareness, decision context, and structural risk analysis.
@@ -622,6 +633,7 @@ Because OpenLore requires Node ≥22.5 while OpenSpec runs on ≥20.19, a delega
 | Spec-driven tests + spec digest | [docs/spec-tests.md](docs/spec-tests.md) |
 | CI/CD integration | [docs/ci-cd.md](docs/ci-cd.md) |
 | Preflight CI staleness gate | [docs/preflight.md](docs/preflight.md) |
+| Shareable graph bundle (export/import the index) | [docs/shareable-bundle.md](docs/shareable-bundle.md) |
 | SCIP export (Sourcegraph/Glean interop) | [docs/scip-export.md](docs/scip-export.md) |
 | Cross-domain impact (code ↔ infrastructure) | [docs/cross-domain-impact.md](docs/cross-domain-impact.md) |
 | Local provenance (git/PR, no OAuth) | [docs/provenance.md](docs/provenance.md) |
