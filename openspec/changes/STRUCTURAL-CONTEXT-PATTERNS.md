@@ -69,6 +69,9 @@ test-selection *conclusion* tools, and multi-repo federation. The gaps are narro
   `CloneGroup`, `DuplicateDetectionResult`). The only gap is that this is not exposed as an agent-
   facing conclusion tool. That is a thin, separate follow-up ("expose near-clones of a symbol as a
   conclusion tool"), not a substrate gap, so it is noted here rather than specced as part of this set.
+  **SHIPPED 2026-06-26 as its own change `add-clone-query-tool` — the `find_clones` MCP tool +
+  `openlore find-clones` CLI: a symbol/snippet-scoped one-vs-all clone query, classified `conclusion`,
+  reusing this detector with no new algorithm or constant.**
 - **Co-change / behavioral coupling.** Already shipped (`get_change_coupling`).
 - **Attempted-and-reverted intent surfacing.** Already shipped (`reversals.ts`, surfaced in `orient`
   and `recall`; `add-cross-agent-intent-handoff`).

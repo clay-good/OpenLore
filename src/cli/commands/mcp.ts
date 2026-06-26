@@ -1700,6 +1700,36 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: 'find_clones',
+    description:
+      'USE THIS WHEN: you are about to write a function (or just wrote one) and want to know "does a ' +
+      'near-duplicate already exist that I should reuse or extend instead of reinventing?". Unlike ' +
+      'get_duplicate_report (the whole-repo audit of every clone group), this is SCOPED to one query: ' +
+      'a single symbol or a single snippet. Pass `symbol` (a function name, or name::path, already in ' +
+      'the index) to find clones of an existing function, OR `snippet` (raw code not necessarily in ' +
+      'the index) to check code BEFORE you write it — the pre-write question the whole-repo report ' +
+      'cannot answer. Returns the existing clones ranked: exact (identical after normalization) > ' +
+      'structural (same shape, renamed identifiers) > near (high token-overlap, Jaccard ≥ floor), each ' +
+      'naming the file, function, class, line range, type, and similarity — the canonical implementation ' +
+      'to reuse. Reuses the same detector as get_duplicate_report (no new algorithm or constant), but ' +
+      'one-vs-all so it computes near-clones even on repos where the whole-repo O(n²) pass is skipped. ' +
+      'HONEST BY CONSTRUCTION: an unknown symbol is an explicit not-found (with candidates), never an ' +
+      'empty "unique"; a query below the evidence floor reports "too small to compare", not "no clones"; ' +
+      'the query never matches itself; HTML inline-script symbols are excluded (disclosed). ' +
+      'Deterministic, offline, no LLM. Run analyze_codebase first.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        directory: { type: 'string', description: DIR_DESC },
+        symbol: { type: 'string', description: 'A function in the index to find clones of: its name, or name::path to disambiguate. Provide exactly one of symbol or snippet.' },
+        snippet: { type: 'string', description: 'Raw code to find clones of (need not be in the index) — answers the pre-write "does this already exist?". Provide exactly one of symbol or snippet.' },
+        minSimilarity: { type: 'number', description: 'Near-clone Jaccard floor for this query (default 0.7, clamped to [0.1, 1]). Exact/structural matches are always included.' },
+        maxResults: { type: 'number', description: 'Cap on returned matches (default 25, max 200).' },
+      },
+      required: ['directory'],
+    },
+  },
+  {
     name: 'detect_changes',
     description:
       'Detect recently changed functions and rank them by blast radius. ' +
@@ -1953,6 +1983,7 @@ const TOOL_ANNOTATIONS: Record<string, typeof _RO | typeof _RWI | typeof _RW> = 
   certify_public_surface: _RO,
   get_style_fingerprint: _RO,
   briefing_since: _RO,
+  find_clones: _RO,
 };
 
 // Tools that touch external entities (LLM / network) → openWorldHint: true.

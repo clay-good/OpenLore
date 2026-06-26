@@ -366,3 +366,157 @@ export function detectDuplicates(
     },
   };
 }
+
+// ============================================================================
+// ONE-VS-ALL CLONE QUERY
+// ============================================================================
+//
+// `detectDuplicates` answers the whole-repo audit question (every clone group),
+// and its near-clone (Type 3) pass is O(n²) so it is skipped above
+// MAX_NEAR_FUNCTIONS. `findClones` answers the edit-time question — "what
+// existing functions are clones of THIS one body?" — by comparing a single
+// query against every indexed function. That is O(n), so it computes near
+// clones of the query even on repos where the whole-repo pass declines to run.
+//
+// It reuses the exact same normalization, shingling, Jaccard, and evidence
+// thresholds as `detectDuplicates`: no new algorithm, clone type, or constant.
+
+/** Evidence floor (lines) for a clone-query — same threshold as the whole-repo detector. */
+export const CLONE_MIN_LINES = MIN_LINES;
+/** Evidence floor (normalized tokens) for a clone-query — same threshold as the whole-repo detector. */
+export const CLONE_MIN_TOKENS = MIN_TOKENS;
+/** Default near-clone Jaccard floor — same threshold as the whole-repo detector. */
+export const CLONE_NEAR_THRESHOLD = NEAR_THRESHOLD;
+
+/** Hard lower bound on a caller-supplied near-clone similarity floor. */
+const NEAR_FLOOR_MIN = 0.1;
+
+/** The minimum node shape `findClones` needs — satisfied by both `FunctionNode` and its serialized form. */
+export interface CloneQueryNode {
+  filePath: string;
+  name: string;
+  className?: string;
+  startIndex: number;
+  endIndex: number;
+}
+
+export interface CloneMatch {
+  type: CloneType;
+  /** 1.0 for exact/structural; rounded Jaccard for near. */
+  similarity: number;
+  file: string;
+  functionName: string;
+  className?: string;
+  startLine: number;
+  endLine: number;
+}
+
+export interface CloneQueryOptions {
+  /** Near-clone Jaccard floor for this query (default CLONE_NEAR_THRESHOLD, clamped to [0.1, 1]). */
+  minSimilarity?: number;
+  /** Cap on returned matches (default: unlimited). */
+  limit?: number;
+  /** Exclude the query's own instance (symbol mode), identified by file + name + byte offset. */
+  exclude?: { filePath: string; name: string; startIndex: number };
+}
+
+export interface CloneQueryResult {
+  matches: CloneMatch[];
+  /** Query was below the evidence floor (too few lines/tokens) — no comparison performed. */
+  belowThreshold: boolean;
+  /** Number of indexed functions actually compared against (above their own evidence floor). */
+  comparedAgainst: number;
+  /** The near-clone similarity floor used (after clamping). */
+  similarityFloor: number;
+}
+
+const CLONE_TYPE_RANK: Record<CloneType, number> = { exact: 0, structural: 1, near: 2 };
+
+/**
+ * Find the existing functions that are clones of a single query body.
+ *
+ * @param queryBody       raw source of the query (a function body, or a snippet)
+ * @param queryLineCount  line span of the query (for the evidence floor)
+ * @param files           source contents keyed by the same paths the nodes use
+ * @param nodes           indexed functions to compare against (Map values or serialized array)
+ */
+export function findClones(
+  queryBody: string,
+  queryLineCount: number,
+  files: Array<{ path: string; content: string }>,
+  nodes: Iterable<CloneQueryNode>,
+  options: CloneQueryOptions = {},
+): CloneQueryResult {
+  const floor = Math.min(1, Math.max(NEAR_FLOOR_MIN, options.minSimilarity ?? NEAR_THRESHOLD));
+
+  // ---- Fingerprint the query ----
+  const qT1 = normalizeType1(queryBody);
+  const qT2 = normalizeType2(queryBody);
+  const qTokens = tokenize(qT2);
+  if (queryLineCount < MIN_LINES || qTokens.length < MIN_TOKENS) {
+    return { matches: [], belowThreshold: true, comparedAgainst: 0, similarityFloor: floor };
+  }
+  const qT1Hash = sha16(qT1);
+  const qT2Hash = sha16(qT2);
+  const qShingles = getShingles(qTokens);
+
+  const fileContentMap = new Map(files.map(f => [f.path, f.content]));
+  const matches: CloneMatch[] = [];
+  let comparedAgainst = 0;
+
+  for (const node of nodes) {
+    const content = fileContentMap.get(node.filePath);
+    if (!content) continue;
+
+    // Skip the query's own instance (symbol mode) before any work or counting.
+    if (
+      options.exclude &&
+      node.filePath === options.exclude.filePath &&
+      node.name === options.exclude.name &&
+      node.startIndex === options.exclude.startIndex
+    ) {
+      continue;
+    }
+
+    const startLine = byteOffsetToLine(content, node.startIndex);
+    const endLine = byteOffsetToLine(content, node.endIndex);
+    if (endLine - startLine + 1 < MIN_LINES) continue;
+
+    const body = content.slice(node.startIndex, node.endIndex);
+    const tokens = tokenize(normalizeType2(body));
+    if (tokens.length < MIN_TOKENS) continue;
+
+    comparedAgainst++;
+
+    const base = {
+      file: node.filePath,
+      functionName: node.name,
+      className: node.className,
+      startLine,
+      endLine,
+    };
+
+    if (sha16(normalizeType1(body)) === qT1Hash) {
+      matches.push({ type: 'exact', similarity: 1.0, ...base });
+    } else if (sha16(normalizeType2(body)) === qT2Hash) {
+      matches.push({ type: 'structural', similarity: 1.0, ...base });
+    } else {
+      const sim = jaccard(qShingles, getShingles(tokens));
+      if (sim >= floor) {
+        matches.push({ type: 'near', similarity: Math.round(sim * 100) / 100, ...base });
+      }
+    }
+  }
+
+  // Deterministic order: exact → structural → near, similarity desc, then file/line for stable ties.
+  matches.sort(
+    (a, b) =>
+      CLONE_TYPE_RANK[a.type] - CLONE_TYPE_RANK[b.type] ||
+      b.similarity - a.similarity ||
+      (a.file < b.file ? -1 : a.file > b.file ? 1 : 0) ||
+      a.startLine - b.startLine,
+  );
+
+  const limited = options.limit && options.limit > 0 ? matches.slice(0, options.limit) : matches;
+  return { matches: limited, belowThreshold: false, comparedAgainst, similarityFloor: floor };
+}

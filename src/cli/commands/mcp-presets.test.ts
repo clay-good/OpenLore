@@ -77,6 +77,13 @@ describe('MCP tool presets', () => {
     }
   });
 
+  it('find_clones is full-surface only, never in any curated preset', () => {
+    expect(selectActiveTools(TOOL_DEFINITIONS, { allTools: true }).map(t => t.name)).toContain('find_clones');
+    for (const sel of [{}, { minimal: true }, { preset: 'navigation' }, { preset: 'memory' }, { preset: 'verify' }, { preset: 'federation' }, { preset: 'coordination' }] as const) {
+      expect(selectActiveTools(TOOL_DEFINITIONS, sel).map(t => t.name)).not.toContain('find_clones');
+    }
+  });
+
   // Guard: the user-facing `--minimal` help text must match the actual preset — it
   // drifted to "5 tools" once after get_health_map was added to the 6-tool set.
   it('the --minimal help text matches the minimal preset (count + every member named)', () => {
@@ -429,8 +436,14 @@ describe('tools/list payload budget (spec-28)', () => {
   // (change: add-change-significance-briefing) — a read-only change-significance catch-up conclusion
   // tool. It joins ONLY the opt-in `full` surface; it stays OUT of the lean navigation default, so the
   // lean prefix is unchanged. The residual is the genuine cost of its schema. Conscious decision.
+  // Bumped 78_000 → 81_000 when the `find_clones` tool was added to the full surface
+  // (change: add-clone-query-tool) — a read-only symbol/snippet-scoped clone-query conclusion tool
+  // (the edit-time "does a near-duplicate already exist?" companion to the whole-repo
+  // get_duplicate_report). It joins ONLY the opt-in `full` surface; it stays OUT of the lean
+  // navigation default, so the lean prefix is unchanged. The residual is the genuine cost of its
+  // schema. Conscious decision, not silent drift.
   it('full surface stays within its prefix budget', () => {
-    expect(payloadBytes({ preset: 'full' })).toBeLessThan(78_000);
+    expect(payloadBytes({ preset: 'full' })).toBeLessThan(81_000);
   });
 
   it('the lean DEFAULT surface (no selector) is the lean navigation payload, not the full one', () => {

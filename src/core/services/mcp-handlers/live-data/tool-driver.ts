@@ -168,6 +168,11 @@ export const TOOL_REGISTRY: Record<string, ToolPlan> = {
     // Change-significance briefing since the default base ref over the cached graph.
     buildArgs: (f) => ({ directory: f.directory }),
   },
+  find_clones: {
+    kind: 'read',
+    // Clone query for a known function symbol over the cached graph (symbol mode).
+    buildArgs: needFn((f, fn) => ({ directory: f.directory, symbol: fn })),
+  },
   get_function_body: {
     kind: 'read',
     buildArgs: (f) =>

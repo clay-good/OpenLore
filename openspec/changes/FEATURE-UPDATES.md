@@ -58,6 +58,7 @@ contract (2) makes OpenLore answer the single highest-value question for a libra
   anti-pattern the conclusion-over-graph contract exists to prevent. Excluded on principle.
 - **Exposing the existing near-clone detector as a conclusion tool.** Still worth doing (noted in the
   first set), but it is a thin exposure of `duplicate-detector.ts`, not a moat, so it stays a one-off.
+  **SHIPPED 2026-06-26 as the one-off change `add-clone-query-tool` (`find_clones` tool + CLI).**
 
 ## Constraints inherited by every proposal here (same as the first set)
 

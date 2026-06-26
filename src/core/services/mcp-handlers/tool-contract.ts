@@ -62,6 +62,7 @@ export const TOOL_OUTPUT_CLASS: Record<string, ToolOutputClass> = {
   get_leaf_functions: 'conclusion',
   get_critical_hubs: 'conclusion',
   get_duplicate_report: 'conclusion',
+  find_clones: 'conclusion',
   get_function_skeleton: 'conclusion',
   get_god_functions: 'conclusion',
   check_spec_drift: 'conclusion',
