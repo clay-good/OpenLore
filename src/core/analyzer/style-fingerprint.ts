@@ -194,12 +194,20 @@ export function classifyNamingCase(name: string): 'camelCase' | 'PascalCase' | '
 // Per-file tally — a single recursive walk over the already-parsed tree
 // ============================================================================
 
-/** Minimal structural view of a tree-sitter node (avoids a hard tree-sitter type import). */
+/**
+ * Minimal structural view of a tree-sitter node (avoids a hard tree-sitter type import). The
+ * index accessors (`namedChildCount`/`namedChild`) are optional: the real tree-sitter `SyntaxNode`
+ * provides them and the walk prefers them because they DON'T allocate a fresh child array per node
+ * (the `.namedChildren` getter does, which dominated the tally cost); a plain test object that only
+ * supplies `namedChildren` still works via the fallback.
+ */
 export interface StyleAstNode {
   type: string;
   text: string;
   children: StyleAstNode[];
   namedChildren: StyleAstNode[];
+  namedChildCount?: number;
+  namedChild?(i: number): StyleAstNode | null;
 }
 
 function bump(tally: RawIdiomTally, key: string): void {
@@ -215,7 +223,18 @@ function isStringConcat(node: StyleAstNode): boolean {
 
 function walk(node: StyleAstNode, visit: (n: StyleAstNode) => void): void {
   visit(node);
-  for (const c of node.namedChildren) walk(c, visit);
+  // Prefer the allocation-free index accessors (real tree-sitter SyntaxNode); the `.namedChildren`
+  // getter builds a new array on every node, which made this whole-tree walk the tally's dominant
+  // cost. Fall back to `.namedChildren` for plain test objects.
+  if (typeof node.namedChildCount === 'number' && typeof node.namedChild === 'function') {
+    const n = node.namedChildCount;
+    for (let i = 0; i < n; i++) {
+      const c = node.namedChild(i);
+      if (c) walk(c, visit);
+    }
+  } else {
+    for (const c of node.namedChildren) walk(c, visit);
+  }
 }
 
 /**
@@ -441,11 +460,14 @@ export function assembleFromRegions(
   const files = rawFiles.slice().sort((a, b) => (a.filePath < b.filePath ? -1 : a.filePath > b.filePath ? 1 : 0));
   const byLanguage = profilesByLanguage(files, floor);
 
-  // Only retain region attributions for files that still exist (deletions prune the map).
+  // Only retain region attributions for files that still exist (deletions prune the map). Keys are
+  // emitted in SORTED order so the serialized `fileRegions` is byte-identical regardless of the
+  // order files were enumerated in — without this, object key-insertion order tracks input order
+  // and the persisted artifact would diff spuriously across re-analyses (the determinism contract).
   const present = new Set(files.map(f => f.filePath));
   const prunedRegions: Record<string, string> = {};
-  for (const [file, region] of Object.entries(fileRegions)) {
-    if (present.has(file)) prunedRegions[file] = region;
+  for (const file of Object.keys(fileRegions).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))) {
+    if (present.has(file)) prunedRegions[file] = fileRegions[file];
   }
 
   const filesByRegion = new Map<string, FileStyleRaw[]>();

@@ -370,12 +370,17 @@ export class AnalysisArtifactGenerator {
     }
 
     // Style fingerprint (change: add-codebase-style-fingerprint) — its own artifact so the hot
-    // llm-context.json stays lean. Absent when no supported language is present.
+    // llm-context.json stays lean. Absent when no supported language is present. Fail-soft: a
+    // descriptive side artifact must never reject `Promise.all(saves)` and thereby abort analysis
+    // or skip the SQLite edge-store write below — so its write failure is swallowed (matching the
+    // non-fatal treatment of the edge store), unlike the source-of-truth artifacts above.
     if (artifacts.styleFingerprint) {
-      saves.push(writeFile(
-        join(this.options.outputDir, ARTIFACT_STYLE_FINGERPRINT),
-        JSON.stringify(artifacts.styleFingerprint, null, 2)
-      ));
+      saves.push(
+        writeFile(
+          join(this.options.outputDir, ARTIFACT_STYLE_FINGERPRINT),
+          JSON.stringify(artifacts.styleFingerprint, null, 2)
+        ).catch(() => {})
+      );
     }
 
     await Promise.all(saves);

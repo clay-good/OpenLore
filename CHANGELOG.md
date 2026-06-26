@@ -7,6 +7,24 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ### Added
 
+- **Codebase style fingerprint — `get_style_fingerprint`** (STRUCTURAL-CONTEXT-PATTERNS proposal 1) —
+  a **descriptive, deterministic per-language idiom profile** so an agent matches the house style
+  instead of its training-prior default. During the *existing* tree-sitter walk (no second parse, no
+  LLM) the analyzer tallies a fixed, closed set of idiom counters — function form (arrow / declaration
+  / method), binding (`const` / `let`; Go `:=` / `var`), conditional (ternary / `if`), async (`await` /
+  `.then`), string (template / concatenation), function-naming case — and rolls them up to the
+  repository, each community/region, and (on request) a single file, each reported as
+  `{ dominant, ratio, samples }`. **Honest by construction**: a counter below a fixed evidence floor
+  reports a null signal, and a choice the language/formatter *enforces* (Go ties identifier case to
+  visibility) reports `enforced` rather than a tautological `1.0`. **Descriptive, not prescriptive** —
+  no lint judgment, no composite style score. Persisted as its own `style-fingerprint.json` (the hot
+  `llm-context.json` stays lean) and incrementally refreshed under the watcher. `orient` also carries a
+  compact `regionStyle` line for the touched region, and the `get_language_support` matrix now derives
+  the `styleFingerprint` capability from the live extractor set (TypeScript/JavaScript/Python/Go).
+  Opt-in `get_style_fingerprint` MCP conclusion tool (`--preset full`, not the lean default) and the
+  `openlore style-fingerprint` CLI (read-only, never blocks). Full surface count 67 → 68. Reference:
+  `openspec/changes/add-codebase-style-fingerprint/`.
+
 - **Public API surface contract — `certify_public_surface`** (FEATURE-UPDATES proposal 2) — certify
   whether a working-tree diff breaks the package's exported contract. With no base ref the tool returns
   the **public surface** (exported symbols + signatures); with a base ref it returns a deterministic

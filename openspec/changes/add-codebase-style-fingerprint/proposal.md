@@ -31,10 +31,15 @@ what the code *is*. An agent reads it before editing and matches the dominant id
 it to spot a diff that diverges from the local norm. Because it is recomputed on every analyze, it
 never goes stale the way a checked-in `STYLE.md` does.
 
-The peer system this borrows from computes the profile in the same pass as complexity at under 1%
-overhead, slices it per language, rolls it up to the community level, and — crucially — **withholds a
-signal when there is not enough evidence or when the choice is not the author's to make**. We adopt
-all three properties.
+The peer system this borrows from computes the profile cheaply alongside its other per-file work,
+slices it per language, rolls it up to the community level, and — crucially — **withholds a signal
+when there is not enough evidence or when the choice is not the author's to make**. We adopt all
+three properties. (Cost note, measured 2026-06: our tally is a second linear AST pass over the
+already-parsed tree — no re-parse — using the allocation-free `namedChild(i)` accessors. On a dense
+synthetic corpus it adds a single-digit-percent to the per-file extraction phase, negligible against
+the full analyze pipeline; it is NOT literally "<1% of the parse." If that cost ever matters, the
+pass can be reframed as a tree-sitter query so the native engine, not a JS walk, finds the idiom
+nodes.)
 
 ## What changes
 

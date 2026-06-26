@@ -166,6 +166,16 @@ describe('region attribution + determinism', () => {
     // regions present and sorted
     expect(f1.regions.map(r => r.communityId)).toEqual(['c1', 'c2']);
   });
+
+  it('is byte-identical regardless of input file/node ORDER (fileRegions keys sorted)', () => {
+    // Determinism must not depend on enumeration order — file walks can vary, and the watcher
+    // rebuilds fileRegions in a different order than a full analyze.
+    const a = buildStyleFingerprint(rawFiles, nodes);
+    const b = buildStyleFingerprint([...rawFiles].reverse(), [...nodes].reverse());
+    expect(JSON.stringify(b)).toEqual(JSON.stringify(a));
+    // fileRegions keys are emitted in sorted order.
+    expect(Object.keys(b.fileRegions)).toEqual([...Object.keys(b.fileRegions)].sort());
+  });
 });
 
 describe('single-file profile + compact summary', () => {
