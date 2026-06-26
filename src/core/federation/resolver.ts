@@ -16,12 +16,16 @@
  * See decisions bf5aff2d (registry) + 67ca60fe (resolution contract).
  */
 
-import { resolve } from 'node:path';
+import { resolve, isAbsolute, extname } from 'node:path';
 import { readCachedContext } from '../services/mcp-handlers/utils.js';
 import { isTestFile } from '../analyzer/test-file.js';
 import type { SerializedCallGraph, FunctionNode } from '../analyzer/call-graph.js';
+import { extractHttpCalls, buildHttpEdges, type RouteDefinition } from '../analyzer/http-route-parser.js';
 import { listRepos, repoStatus } from './registry.js';
 import type { ConsultedRepo, FederationCoverage, FederationRepoEntry } from './types.js';
+
+/** JS/TS extensions OpenLore extracts outbound HTTP client call sites from. */
+const HTTP_CLIENT_EXTS = new Set(['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs']);
 
 /** Default cap on cross-repo consumers returned, to keep conclusions bounded. */
 export const DEFAULT_MAX_CONSUMERS = 200;
@@ -245,6 +249,134 @@ export async function locateSymbolProducers(
     }
   }
   return { producers, coverage: { applied: true, reposConsulted, reposSkipped, caveats: [] } };
+}
+
+/** A cross-repo client call site that targets a home-repo route handler. */
+export interface CrossRepoClientCaller {
+  repo: string;
+  repoPath: string;
+  /** The enclosing function of the client call in the consuming repo. */
+  caller: { id: string; name: string; file: string };
+  /** The HTTP method + normalized path the call targets (the matched route key). */
+  method: string;
+  path: string;
+  /** Match strength, identical to the single-repo `http_endpoint` tiers. */
+  confidence: 'exact' | 'path' | 'fuzzy';
+}
+
+export interface CrossRepoClientCallerResult {
+  callers: CrossRepoClientCaller[];
+  /** Number of callers dropped by the cap, if any. */
+  truncated: number;
+  coverage: FederationCoverage;
+}
+
+/**
+ * Find outbound HTTP client call sites across the scoped repos that target one of
+ * the given home-repo route handlers. This is the cross-service counterpart to
+ * {@link findCrossRepoConsumersBatch}: federation's name-based resolver cannot
+ * bridge a client→handler hop, because the call site references a URL, not the
+ * handler's symbol — so we match on the normalized ROUTE KEY instead, via the exact
+ * same {@link buildHttpEdges} the single-repo `http_endpoint` edge is built from
+ * (identical exact/path/fuzzy semantics, no divergent matcher).
+ *
+ * Each scoped repo's index is loaded once; its JS/TS source files are re-read to
+ * extract client call sites (calls are not persisted in the index) and matched
+ * against `homeRoutes`, with the enclosing function reported as the consumer.
+ * Read-only, deterministic, opt-in; unindexed/stale/unreadable repos are reported,
+ * never guessed. (Re-reading source per query, rather than a persisted client-call
+ * index, keeps this self-contained in the federation layer; persisting the index is
+ * a future optimization.)
+ */
+export async function findCrossRepoClientCallers(
+  scope: FederationScope,
+  homeRoutes: RouteDefinition[],
+  opts: { maxConsumers?: number } = {},
+): Promise<CrossRepoClientCallerResult> {
+  const cap = Math.max(1, opts.maxConsumers ?? DEFAULT_MAX_CONSUMERS);
+  const callers: CrossRepoClientCaller[] = [];
+  const reposConsulted: ConsultedRepo[] = [];
+  const reposSkipped: ConsultedRepo[] = [];
+  let truncated = 0;
+  if (homeRoutes.length === 0) {
+    return { callers, truncated, coverage: { applied: true, reposConsulted, reposSkipped, caveats: [] } };
+  }
+
+  for (const entry of scope.repos) {
+    const status = repoStatus(entry, true);
+    if (status.state !== 'indexed') { reposSkipped.push(status); continue; }
+    // Per-repo isolation: a malformed index / mid-query throw must not abort the fleet query.
+    try {
+      const ctx = await readCachedContext(resolve(entry.path));
+      const cg = ctx?.callGraph as SerializedCallGraph | undefined;
+      if (!cg) {
+        reposSkipped.push({ ...status, consulted: false, reason: 'no call graph — re-run "openlore analyze"' });
+        continue;
+      }
+      // Group the repo's non-external, non-test JS/TS nodes by file — the files that
+      // could hold a client call site. Sorted for a deterministic read order.
+      const nodesByFile = new Map<string, FunctionNode[]>();
+      for (const n of cg.nodes) {
+        if (n.isExternal || n.isTest || isTestFile(n.filePath)) continue;
+        if (!HTTP_CLIENT_EXTS.has(extname(n.filePath).toLowerCase())) continue;
+        (nodesByFile.get(n.filePath) ?? nodesByFile.set(n.filePath, []).get(n.filePath)!).push(n);
+      }
+      for (const file of [...nodesByFile.keys()].sort()) {
+        const abs = isAbsolute(file) ? file : resolve(entry.path, file);
+        let calls;
+        try { calls = await extractHttpCalls(abs); }
+        catch { continue; } // a single unreadable file never aborts the repo
+        // Match this file's calls against the home routes with the single-repo matcher.
+        for (const he of buildHttpEdges(calls, homeRoutes)) {
+          const enclosing = enclosingByLine(nodesByFile.get(file)!, he.call.line);
+          if (!enclosing) continue;
+          if (callers.length >= cap) { truncated++; continue; }
+          callers.push({
+            repo: entry.name,
+            repoPath: entry.path,
+            caller: { id: enclosing.id, name: enclosing.name, file },
+            method: he.method,
+            path: he.path,
+            confidence: he.confidence,
+          });
+        }
+      }
+      reposConsulted.push(status); // only after a full, successful read
+    } catch (err) {
+      reposSkipped.push({ ...status, consulted: false, reason: `index unreadable mid-query — skipped: ${(err as Error).message}` });
+    }
+  }
+
+  // Deterministic order, independent of file-read scheduling.
+  callers.sort((a, b) =>
+    a.repo < b.repo ? -1 : a.repo > b.repo ? 1 :
+    a.caller.id < b.caller.id ? -1 : a.caller.id > b.caller.id ? 1 :
+    a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+
+  const caveats: string[] = [];
+  if (callers.length > 0) {
+    caveats.push(
+      'Cross-service consumers are matched by normalized HTTP route key (method + path) at client ' +
+        'call sites; a dynamically-constructed path or base URL resolves to nothing and is never linked.',
+    );
+  }
+  if (scope.unknownNames.length > 0) {
+    caveats.push(`Requested repos not in the registry (ignored): ${scope.unknownNames.join(', ')}.`);
+  }
+  return { callers, truncated, coverage: { applied: true, reposConsulted, reposSkipped, caveats } };
+}
+
+/** Innermost enclosing function of a 1-based line, by node start/end line ranges. */
+function enclosingByLine(nodes: FunctionNode[], line: number): FunctionNode | undefined {
+  let best: FunctionNode | undefined;
+  let bestSpan = Infinity;
+  for (const n of nodes) {
+    if (n.startLine === undefined || n.endLine === undefined) continue;
+    if (line < n.startLine || line > n.endLine) continue;
+    const span = n.endLine - n.startLine;
+    if (span < bestSpan) { best = n; bestSpan = span; }
+  }
+  return best;
 }
 
 /**

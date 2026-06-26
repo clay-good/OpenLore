@@ -707,6 +707,20 @@ export async function extractJavaRouteDefinitions(filePath: string): Promise<Rou
 // ============================================================================
 
 /**
+ * Extract server route definitions from one file, dispatching by extension to the
+ * language's route extractor (Python / Java / TS-JS). Returns `[]` for a file no
+ * route extractor handles. Used to recover the route key a single handler serves —
+ * e.g. to drive cross-repo client→handler matching under federation.
+ */
+export async function extractRoutesFromFile(filePath: string): Promise<RouteDefinition[]> {
+  const ext = extname(filePath).toLowerCase();
+  if (['.py', '.pyw'].includes(ext)) return extractRouteDefinitions(filePath);
+  if (ext === '.java') return extractJavaRouteDefinitions(filePath);
+  if (['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs'].includes(ext)) return extractTsRouteDefinitions(filePath);
+  return [];
+}
+
+/**
  * Match HTTP calls from JS/TS files against route definitions from Python files
  * and return cross-language edges.
  *

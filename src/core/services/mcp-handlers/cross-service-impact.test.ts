@@ -1,0 +1,97 @@
+/**
+ * Cross-service API topology — end-to-end through analyze_impact under federation
+ * (change: add-cross-service-api-topology).
+ *
+ * The headline scenario: a client call site in repo A targets a route registered in
+ * repo B; cross-repo impact on the repo-B handler surfaces the repo-A client as a
+ * cross-service consumer. Real on-disk indexes + source for both repos; no mock —
+ * this exercises deriveSeedRoutes + findCrossRepoClientCallers wired into the
+ * analyze_impact federation block.
+ */
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, dirname } from 'node:path';
+import { EdgeStore } from '../edge-store.js';
+import { OPENLORE_ANALYSIS_REL_PATH, ARTIFACT_LLM_CONTEXT } from '../../../constants.js';
+import { addRepo } from '../../federation/registry.js';
+import { handleAnalyzeImpact } from './graph.js';
+import type { FunctionNode, CallEdge } from '../../analyzer/call-graph.js';
+
+const created: string[] = [];
+
+function node(id: string, name: string, filePath: string, extra: Partial<FunctionNode> = {}): FunctionNode {
+  return { id, name, filePath, isAsync: true, language: 'TypeScript', startIndex: 0, endIndex: 1, fanIn: 0, fanOut: 0, ...extra };
+}
+
+/** Materialize a repo: .openlore index (edge store + llm-context) + real source files. */
+function makeRepo(prefix: string, nodes: FunctionNode[], edges: CallEdge[], sources: Record<string, string>): string {
+  const dir = mkdtempSync(join(tmpdir(), `xsvc-e2e-${prefix}-`));
+  created.push(dir);
+  const adir = join(dir, OPENLORE_ANALYSIS_REL_PATH);
+  mkdirSync(adir, { recursive: true });
+  const store = EdgeStore.open(EdgeStore.dbPath(adir));
+  store.clearAll();
+  store.insertNodes(nodes.filter(n => !n.isExternal && !n.isTest));
+  store.insertEdges(edges);
+  store.close();
+  const callGraph = {
+    nodes, edges, classes: [], inheritanceEdges: [], hubFunctions: [], entryPoints: [], layerViolations: [],
+    stats: { totalNodes: nodes.length, totalEdges: edges.length, avgFanIn: 0, avgFanOut: 0 },
+  };
+  writeFileSync(join(adir, ARTIFACT_LLM_CONTEXT), JSON.stringify({ callGraph }));
+  writeFileSync(join(adir, 'fingerprint.json'), JSON.stringify({ hash: `fp-${prefix}`, computedAt: '2026-06-26T00:00:00.000Z', fileCount: nodes.length }));
+  for (const [rel, content] of Object.entries(sources)) {
+    const fp = join(dir, rel);
+    mkdirSync(dirname(fp), { recursive: true });
+    writeFileSync(fp, content, 'utf-8');
+  }
+  return dir;
+}
+
+afterEach(() => { for (const d of created.splice(0)) rmSync(d, { recursive: true, force: true }); });
+
+describe('analyze_impact cross-service consumers across a federation', () => {
+  let api: string; // repo B: registers GET /api/users/:id → getUser
+
+  beforeEach(() => {
+    const serverSrc = [
+      'import express from "express";',
+      'const app = express();',
+      'function getUser(req, res) { res.json({}); }',
+      "app.get('/api/users/:id', getUser);",
+    ].join('\n');
+    api = makeRepo('api', [node('src/api.ts::getUser', 'getUser', 'src/api.ts', { startLine: 3, endLine: 3 })], [], { 'src/api.ts': serverSrc });
+  });
+
+  it('surfaces a client consumer in another repo as a cross-service consumer', async () => {
+    const webSrc = [
+      'export async function loadUser(id: string) {',
+      '  return fetch(`/api/users/${id}`);',
+      '}',
+    ].join('\n');
+    const web = makeRepo('web', [node('src/users.ts::loadUser', 'loadUser', 'src/users.ts', { startLine: 1, endLine: 3 })], [], { 'src/users.ts': webSrc });
+    addRepo(api, web, { name: 'web' });
+
+    const result = await handleAnalyzeImpact(api, 'getUser', 2, false, false, undefined, true) as {
+      federation?: { crossServiceConsumers?: Array<{ repo: string; caller: string; method: string; path: string }>; crossServiceConsumerCount?: number };
+    };
+
+    const xsvc = result.federation?.crossServiceConsumers ?? [];
+    expect(xsvc).toHaveLength(1);
+    expect(xsvc[0]).toMatchObject({ repo: 'web', caller: 'loadUser', method: 'GET', path: '/api/users/:param' });
+    expect(result.federation?.crossServiceConsumerCount).toBe(1);
+  });
+
+  it('omits the cross-service block when no client targets the endpoint', async () => {
+    const webSrc = 'export async function loadWidgets() {\n  return fetch("/api/widgets");\n}';
+    const web = makeRepo('web2', [node('src/w.ts::loadWidgets', 'loadWidgets', 'src/w.ts', { startLine: 1, endLine: 3 })], [], { 'src/w.ts': webSrc });
+    addRepo(api, web, { name: 'web' });
+
+    const result = await handleAnalyzeImpact(api, 'getUser', 2, false, false, undefined, true) as {
+      federation?: { crossServiceConsumers?: unknown };
+    };
+    expect(result.federation).toBeDefined();
+    expect(result.federation?.crossServiceConsumers).toBeUndefined();
+  });
+});
