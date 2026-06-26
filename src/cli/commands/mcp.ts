@@ -1710,7 +1710,8 @@ export const TOOL_DEFINITIONS = [
       'the index) to check code BEFORE you write it — the pre-write question the whole-repo report ' +
       'cannot answer. Returns the existing clones ranked: exact (identical after normalization) > ' +
       'structural (same shape, renamed identifiers) > near (high token-overlap, Jaccard ≥ floor), each ' +
-      'naming the file, function, class, line range, type, and similarity — the canonical implementation ' +
+      'naming the file, function, class, line range, type, similarity, and language (so a cross-language ' +
+      'match is visible) — the canonical implementation ' +
       'to reuse. Reuses the same detector as get_duplicate_report (no new algorithm or constant), but ' +
       'one-vs-all so it computes near-clones even on repos where the whole-repo O(n²) pass is skipped. ' +
       'HONEST BY CONSTRUCTION: an unknown symbol is an explicit not-found (with candidates), never an ' +

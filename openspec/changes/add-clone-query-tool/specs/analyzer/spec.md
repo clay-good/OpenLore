@@ -32,7 +32,7 @@ SHALL NOT require any new persisted artifact.
 - **WHEN** the clone query runs for that query body
 - **THEN** it returns all three, classified `exact`, `structural`, and `near` respectively, ordered
   `exact` → `structural` → `near` and then by similarity descending, each carrying its file, function
-  name, optional class, line range, clone type, and similarity
+  name, optional class, line range, clone type, similarity, and source language
 
 #### Scenario: A below-threshold query is reported, not silently empty
 

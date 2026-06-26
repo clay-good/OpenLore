@@ -398,6 +398,8 @@ export interface CloneQueryNode {
   className?: string;
   startIndex: number;
   endIndex: number;
+  /** Source language of the node, surfaced on each match so cross-language matches are visible. */
+  language?: string;
 }
 
 export interface CloneMatch {
@@ -409,6 +411,12 @@ export interface CloneMatch {
   className?: string;
   startLine: number;
   endLine: number;
+  /**
+   * The match's source language. Normalization is language-agnostic, so a `near` match CAN be in a
+   * different language than the query (cross-language clones are out of scope — see the tool docs);
+   * surfacing the language makes that disclosed limitation actionable rather than implied by the path.
+   */
+  language?: string;
 }
 
 export interface CloneQueryOptions {
@@ -505,6 +513,7 @@ export function findClones(
       className: node.className,
       startLine,
       endLine,
+      language: node.language,
     };
 
     if (sha16(normalizeType1(body)) === qT1Hash) {

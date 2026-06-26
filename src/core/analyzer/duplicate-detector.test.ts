@@ -699,4 +699,11 @@ describe('findClones — one-vs-all query', () => {
     const res = findClones(queryBody, 7, files, nodes, { limit: 1 });
     expect(res.matches).toHaveLength(1);
   });
+
+  it('carries each match\'s source language (so cross-language matches are visible)', () => {
+    const { files, nodes } = fixture();
+    const res = findClones(queryBody, 7, files, nodes);
+    expect(res.matches.length).toBeGreaterThan(0);
+    expect(res.matches.every(m => m.language === 'TypeScript')).toBe(true);
+  });
 });

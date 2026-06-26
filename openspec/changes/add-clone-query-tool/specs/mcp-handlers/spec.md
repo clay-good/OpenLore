@@ -10,8 +10,11 @@ tool SHALL accept exactly one of two query forms: a `symbol` (the name, or `name
 already in the indexed call graph) or a `snippet` (a raw code string not necessarily in the index).
 For a `symbol`, the tool SHALL extract the function's body from its persisted byte range; for a
 `snippet`, it SHALL use the supplied text. It SHALL then return the ranked clone matches (each naming
-file, function, optional class, line range, clone type, and similarity), the similarity floor in
-effect, and the number of functions compared against.
+file, function, optional class, line range, clone type, similarity, and source language), the
+similarity floor in effect, and the number of functions compared against. Because the normalization is
+language-agnostic, a match MAY be in a different language than the query (cross-language clones are out
+of scope); the per-match `language` (and the query's own language, in symbol mode) SHALL be surfaced so
+a consumer can distinguish a same-language reuse candidate from a cross-language coincidence.
 
 The tool SHALL compute live from the already-persisted call graph and a re-read of the source it
 spans — it SHALL NOT require a new persisted artifact and SHALL NOT introduce a schema migration. It

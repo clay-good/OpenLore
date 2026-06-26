@@ -89,3 +89,31 @@ not just the CLI) found and fixed six issues. All verified on the real index aft
 
 New regression tests cover all six (NaN floor/max, bodyless-symbol message, HTML-exclusion disclosure,
 reversed-input determinism). Full suite after hardening: **270 files, 5314 passed, 2 skipped**.
+
+## Hardening round 3 (2026-06-26) — parity audit + real-world e2e + cross-language honesty
+
+A third pass focused on *parity surfaces* and *real-world inputs* rather than the handler internals.
+
+**Parity audit (does any surface silently omit the tool?)** — a dedicated agent checked every place
+that enumerates tools: the Pi extension (`NAV_TOOLS`), `openlore serve` / serve-client, the `tools/list`
+ListTools handler, `TOOL_PRESETS`/`MINIMAL_TOOLS`, `CHAT_TOOLS`, the plugin manifest / `.mcp.json`, and
+the language-support matrix. Verdict: **no missed surface.** Every registry that must list every tool
+(tool-contract, tool-driver, epistemic-lease, TOOL_DEFINITIONS + annotation) already has `find_clones`;
+every curated/navigation allowlist (NAV_TOOLS, CHAT_TOOLS, the six presets, MINIMAL_TOOLS) *correctly*
+excludes it, exactly as every comparable recent full-preset tool (`get_style_fingerprint`,
+`briefing_since`, `report_coverage_gaps`, `certify_public_surface`) is excluded. tools/list, serve, and
+the Pi host all dispatch generically from `TOOL_DEFINITIONS`, so the tool flows through under
+`--preset full` with no further wiring.
+
+**Real-world e2e battery (via `dispatchTool`, real index, 2,430 comparable fns):**
+- Method with a class → ambiguity correctly reported (`constructor` matches 43); `className` present on matches.
+- 400-line synthetic snippet → 354 ms, bounded, correct (performance sane).
+- Unicode snippet (`grüße`, CJK) → no crash, handled.
+- Two real runs → byte-identical (determinism holds on the live graph).
+
+**Gap found & fixed — cross-language visibility.** The proposal documents cross-language clones as
+out of scope, but normalization is language-agnostic, so a `near` match *can* land in another language,
+and matches exposed no `language` field (only the file path implied it). Made the caveat actionable:
+each match now carries `language`, the symbol-mode query carries its own, and the CLI flags a
+cross-language match with `⚠ <language>`. Spec deltas + proposal updated; new test asserts the field.
+Full suite after round 3: **270 files, 5315 passed, 2 skipped**.

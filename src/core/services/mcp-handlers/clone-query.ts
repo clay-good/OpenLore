@@ -173,6 +173,7 @@ export async function handleFindClones(input: FindClonesInput): Promise<unknown>
       mode: 'symbol',
       symbol: `${node.name}::${node.filePath}`,
       className: node.className,
+      language: node.language,
       startLine,
       endLine,
     };

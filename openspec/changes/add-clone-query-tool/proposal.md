@@ -90,7 +90,10 @@ graph, reads the source it spans, and calls it.
 
 - **Cross-language clones.** Comparison is over normalized tokens; it does not attempt to match a
   Python function to a Go one. (The detector's normalization is language-agnostic but the value is in
-  same-language reuse; no cross-language claim is made.)
+  same-language reuse; no cross-language claim is made.) Because the normalization *can* nonetheless
+  produce a cross-language `near` match, each match carries its `language` and the query carries its
+  own, so a consumer can see and disregard a cross-language hit — the limitation is disclosed and
+  actionable, not silent.
 - **Refactor synthesis.** The tool reports the canonical existing implementation; it does not propose
   or apply a deduplicating refactor. That remains the agent's job.
 - **A new persisted fingerprint index.** Considered (it would make repeated queries cheaper) but

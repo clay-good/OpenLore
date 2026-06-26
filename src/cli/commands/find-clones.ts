@@ -23,6 +23,7 @@ interface CloneMatchView {
   className?: string;
   startLine: number;
   endLine: number;
+  language?: string;
 }
 
 interface CloneQueryView {
@@ -57,9 +58,13 @@ function renderHuman(r: CloneQueryView): string {
     `   compared against ${r.comparedAgainst ?? 0} functions · floor ${r.similarityFloor} · ` +
       `${s.total} match${s.total === 1 ? '' : 'es'} (exact ${s.exact}, structural ${s.structural}, near ${s.near})`,
   );
+  const queryLang = typeof (r.query ?? {}).language === 'string' ? (r.query as { language: string }).language : undefined;
   for (const m of r.matches ?? []) {
     const where = m.className ? `${m.className}.${m.functionName}` : m.functionName;
-    lines.push(`     ${m.type.padEnd(10)} ${m.similarity.toFixed(2)}  ${where}  ${m.file}:${m.startLine}-${m.endLine}`);
+    // Flag a cross-language match (the query is one language, this match another) — the documented
+    // out-of-scope case made visible exactly when it occurs.
+    const crossLang = queryLang && m.language && m.language !== queryLang ? `  ⚠ ${m.language}` : '';
+    lines.push(`     ${m.type.padEnd(10)} ${m.similarity.toFixed(2)}  ${where}  ${m.file}:${m.startLine}-${m.endLine}${crossLang}`);
   }
   if ((r.matches ?? []).length === 0) lines.push('     (no clones found above the floor)');
   if (r.htmlExcluded) lines.push(`   · ${r.htmlExcluded} HTML inline-script symbol(s) excluded from comparison`);
