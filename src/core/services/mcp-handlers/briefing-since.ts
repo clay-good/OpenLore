@@ -27,6 +27,7 @@ import { validateDirectory, readCachedContext } from './utils.js';
 import { seedsFromFiles, handleSelectTests } from './test-impact.js';
 import { computeLandmarkSignals } from '../../analyzer/landmark-signals.js';
 import { analyzeChangeCoupling } from '../../provenance/change-coupling.js';
+import { refExists } from '../../drift/git-diff.js';
 import { assembleBoundary, computeStaleness } from './confidence-boundary.js';
 import {
   labelChangeSignificance,
@@ -78,6 +79,14 @@ export async function handleBriefingSince(input: BriefingSinceInput): Promise<un
   const cg = ctx.callGraph as SerializedCallGraph;
   const maxResults = Math.max(1, Math.min(input.maxResults ?? MAX_RESULTS_DEFAULT, MAX_RESULTS_CAP));
   const baseRefInput = input.baseRef && input.baseRef.length > 0 ? input.baseRef : 'auto';
+
+  // ── Honesty: detect a SILENT base-ref fallback ──────────────────────────────
+  // `getChangedFiles`→`resolveBaseRef` silently falls back to main → master →
+  // HEAD~1 → empty-tree when an EXPLICIT ref can't be resolved. Briefing against a
+  // base the caller did not ask for (a typo'd `--base`) would make every number
+  // below authoritative-looking but wrong, so we detect the unresolved ref up front
+  // and disclose it rather than letting the fallback pass unannounced.
+  const requestedRefUnresolved = baseRefInput !== 'auto' && !(await refExists(absDir, baseRefInput));
 
   // ── 1. Changed files since the base ref ─────────────────────────────────────
   let resolvedBase: string;
@@ -172,8 +181,19 @@ export async function handleBriefingSince(input: BriefingSinceInput): Promise<un
     'Changed symbols are at FILE granularity: every production function in a file changed since the base ref is briefed, even if that specific function was not edited.',
     'Significance is a tier label from existing classifiers (hub/orchestrator/chokepoint) plus raw evidence — not a weighted score. The caller makes the final judgment.',
   ];
+  // The unresolved-ref disclosure leads the caveats — it changes which base every
+  // number below was computed against, so it must not be buried.
+  if (requestedRefUnresolved) {
+    caveats.unshift(`Requested base ref "${baseRefInput}" could not be resolved; briefed against "${resolvedBase}" instead (git's silent fallback). Pass a ref that exists to target the base you meant.`);
+  }
   if (!historyAvailable) {
     caveats.push(`Git history is too shallow (${coupling.stats.commitsScanned} commit(s) scanned) to establish "rarely changed before" — the surprising-change label is withheld and those hubs rank as hub-change.`);
+  }
+  // Surprise rests on per-file churn matched by exact path. git history does not
+  // follow renames, so a just-renamed (or non-ASCII-path) hub can read low churn and
+  // be over-flagged surprising-change. Only disclose when the signal is actually live.
+  if (counts['surprising-change'] > 0) {
+    caveats.push('The surprising-change signal uses per-file churn matched by exact path; git history does not follow renames, so a just-renamed file may read as low-churn and be over-flagged surprising. Confirm against its rename history.');
   }
 
   const staleness = await computeStaleness(absDir);
@@ -181,6 +201,7 @@ export async function handleBriefingSince(input: BriefingSinceInput): Promise<un
 
   return {
     baseRef: resolvedBase,
+    ...(requestedRefUnresolved ? { baseRefFallback: { requested: baseRefInput, resolved: resolvedBase } } : {}),
     scope,
     ...(input.filePattern ? { filePattern: input.filePattern } : {}),
     changedFiles: scopedFiles.length,

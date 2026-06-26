@@ -68,6 +68,15 @@ describe('MCP tool presets', () => {
     }
   });
 
+  // change: add-change-significance-briefing — briefing_since is FULL-surface only. The
+  // spec requires it SHALL NOT enter the minimal or first-run (lean) tool surface.
+  it('briefing_since is full-surface only, never in any curated preset', () => {
+    expect(selectActiveTools(TOOL_DEFINITIONS, { allTools: true }).map(t => t.name)).toContain('briefing_since');
+    for (const sel of [{}, { minimal: true }, { preset: 'navigation' }, { preset: 'memory' }, { preset: 'verify' }, { preset: 'federation' }, { preset: 'coordination' }] as const) {
+      expect(selectActiveTools(TOOL_DEFINITIONS, sel).map(t => t.name)).not.toContain('briefing_since');
+    }
+  });
+
   // Guard: the user-facing `--minimal` help text must match the actual preset — it
   // drifted to "5 tools" once after get_health_map was added to the 6-tool set.
   it('the --minimal help text matches the minimal preset (count + every member named)', () => {

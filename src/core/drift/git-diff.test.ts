@@ -4,7 +4,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { classifyFile, isSkippableFile, validateGitRef,
-  isGitRepository, getCurrentBranch, resolveBaseRef,
+  isGitRepository, getCurrentBranch, resolveBaseRef, refExists,
   getFileDiff, getChangedFiles } from './git-diff.js';
 import { execFile } from 'node:child_process';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
@@ -336,6 +336,39 @@ describe('resolveBaseRef', () => {
     await execFileAsync('git', ['branch', '-m', 'main', 'master'], { cwd: tmpDir });
     const ref = await resolveBaseRef(tmpDir, 'auto');
     expect(ref).toBe('master');
+  });
+});
+
+describe('refExists', () => {
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), 'openlore-refexists-'));
+    await initRepo(tmpDir);
+    await writeFile(join(tmpDir, 'a.ts'), 'v1', 'utf-8');
+    await commit(tmpDir, 'initial');
+  });
+  afterEach(async () => { await rm(tmpDir, { recursive: true, force: true }); });
+
+  it('returns true for a resolvable ref (HEAD)', async () => {
+    expect(await refExists(tmpDir, 'HEAD')).toBe(true);
+  });
+
+  it('returns false for a ref that does not exist (no silent fallback)', async () => {
+    expect(await refExists(tmpDir, 'totally-bogus-ref-xyz')).toBe(false);
+  });
+
+  it('returns false (never throws) for an injection-shaped ref', async () => {
+    expect(await refExists(tmpDir, '--upload-pack=evil')).toBe(false);
+  });
+
+  it('returns false for a non-git directory rather than throwing', async () => {
+    const nonRepo = await mkdtemp(join(tmpdir(), 'openlore-norepo-'));
+    try {
+      expect(await refExists(nonRepo, 'HEAD')).toBe(false);
+    } finally {
+      await rm(nonRepo, { recursive: true, force: true });
+    }
   });
 });
 

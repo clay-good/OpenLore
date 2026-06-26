@@ -15,6 +15,15 @@
 > granular (disclosed); `surprising-change` is withheld when `< 2` non-bulk commits of history exist;
 > truncation always carries a receipt (omitted count + lowest tier) and never drops a higher tier.
 > Tool count 68 → 69. Decision recorded at the commit gate.
+>
+> Review hardening (adversarial e2e + spec audit, 2026-06-26): added two honesty
+> disclosures the first pass missed — (1) a **silent base-ref fallback** is now surfaced
+> (`baseRefFallback` + a lead caveat) instead of quietly briefing against `main` when a
+> `baseRef`/`--base` can't be resolved (new `refExists` helper in `git-diff.ts`), and
+> (2) a caveat for the **file-path-exact churn join** (git history does not follow renames,
+> so a just-renamed file can read low-churn and be over-flagged `surprising-change`).
+> Plus a dedicated full-surface-only preset guard for `briefing_since`, a CLI-surface test,
+> and `refExists` unit tests. Test count 13 → 26.
 
 ## Why
 

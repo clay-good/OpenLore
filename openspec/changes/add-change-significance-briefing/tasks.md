@@ -2,7 +2,11 @@
 
 > SHIPPED 2026-06-26. Pure module `src/core/analyzer/change-significance.ts`, handler
 > `src/core/services/mcp-handlers/briefing-since.ts`, MCP tool `briefing_since` (full preset), CLI
-> `openlore briefing-since`. Tests: `change-significance.test.ts` (8) + `briefing-since.test.ts` (5).
+> `openlore briefing-since`. Tests (26): `change-significance.test.ts` (8) + `briefing-since.test.ts`
+> (8, handler) + `briefing-since.test.ts` (5, CLI) + `git-diff.test.ts refExists` (4) + preset guard (1).
+> Review-hardened 2026-06-26 (adversarial e2e + spec audit): silent base-ref fallback now disclosed
+> (`baseRefFallback` + lead caveat, new `refExists` helper); file-path-exact churn join (git doesn't
+> follow renames) caveated when surprise is live; full-surface-only preset guard + CLI test added.
 
 ## 1. Significance labeling
 - [x] Compute changed symbols between a base ref and the current state. (File-level granularity via

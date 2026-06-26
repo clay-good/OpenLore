@@ -19,6 +19,14 @@ input and structured output schemas and SHALL NOT enter the minimal or first-run
 - **THEN** it receives the changed symbols grouped by region and ordered by significance tier, each with
   its labels and raw evidence and the tests to run — not a flat list of changed lines and not a graph
 
+#### Scenario: An unresolvable base ref is disclosed, never silently substituted
+
+- **GIVEN** an explicit base ref that git cannot resolve (e.g. a typo)
+- **WHEN** an agent calls `briefing_since`
+- **THEN** the briefing reports that the requested ref was not found and which base it was actually
+  computed against (a `baseRefFallback` disclosure + a leading caveat), rather than silently briefing
+  against the default branch as if it were the requested base
+
 ### Requirement: NoSilentTruncationOfTheBriefing
 
 When the briefing bounds its size, it SHALL report what it dropped: the count of omitted changes and the

@@ -178,6 +178,23 @@ export function validateGitRef(ref: string): void {
 }
 
 /**
+ * True iff `ref` resolves to a commit in the repo at `rootPath`. Unlike
+ * `resolveBaseRef` (which silently falls back to main/master/HEAD~1), this answers
+ * the plain question "does the caller's ref exist?" so a consumer can disclose a
+ * fallback instead of briefing against a base the caller never asked for. Validates
+ * the ref first (argument-injection guard); any failure → false, never throws.
+ */
+export async function refExists(rootPath: string, ref: string): Promise<boolean> {
+  try {
+    validateGitRef(ref);
+    await execFileAsync('git', ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], { cwd: rootPath });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Resolve a base ref, falling back through main → master → HEAD~1
  */
 export async function resolveBaseRef(rootPath: string, preferredRef: string): Promise<string> {

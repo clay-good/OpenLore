@@ -25,6 +25,7 @@ interface BriefingItem {
 
 interface BriefingResult {
   baseRef: string;
+  baseRefFallback?: { requested: string; resolved: string };
   scope: 'repo' | 'region';
   filePattern?: string;
   changedFiles: number;
@@ -63,6 +64,9 @@ function renderHuman(r: BriefingResult): string {
     `   scope: ${r.scope}${r.filePattern ? ` (${r.filePattern})` : ''} · ` +
     `${r.changedSymbols} changed symbol(s) in ${r.changedFiles} file(s) · ${tierSummary}`,
   );
+  if (r.baseRefFallback) {
+    lines.push(`   ⚠ requested base "${r.baseRefFallback.requested}" not found — briefed against "${r.baseRefFallback.resolved}" instead`);
+  }
   if (!r.surprisingChange.available) {
     lines.push(`   ⚠ surprising-change withheld: ${r.surprisingChange.reason ?? 'shallow history'}`);
   }

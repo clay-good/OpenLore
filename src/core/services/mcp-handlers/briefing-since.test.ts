@@ -16,6 +16,8 @@ vi.mock('./utils.js', () => ({
 
 vi.mock('../../drift/git-diff.js', () => ({
   getChangedFiles: vi.fn(),
+  // Default: any explicit ref resolves; individual tests override to force a fallback.
+  refExists: vi.fn(async () => true),
 }));
 
 // Keep volatilityLevel real; stub only the git-history miner.
@@ -42,7 +44,7 @@ vi.mock('./confidence-boundary.js', () => ({
 
 import { handleBriefingSince } from './briefing-since.js';
 import { readCachedContext } from './utils.js';
-import { getChangedFiles } from '../../drift/git-diff.js';
+import { getChangedFiles, refExists } from '../../drift/git-diff.js';
 import { analyzeChangeCoupling } from '../../provenance/change-coupling.js';
 import type { FunctionNode, SerializedCallGraph, CallEdge } from '../../analyzer/call-graph.js';
 
@@ -76,6 +78,7 @@ const FIXTURE = () => graph(NODES, { hubFunctions: [coreHub, orchHub] });
 
 interface BriefingResult {
   baseRef: string;
+  baseRefFallback?: { requested: string; resolved: string };
   scope: string;
   changedFiles: number;
   changedSymbols: number;
@@ -92,6 +95,7 @@ interface BriefingResult {
 const mockedReadCtx = vi.mocked(readCachedContext);
 const mockedDiff = vi.mocked(getChangedFiles);
 const mockedCoupling = vi.mocked(analyzeChangeCoupling);
+const mockedRefExists = vi.mocked(refExists);
 
 function diffFiles(paths: string[], resolvedBase = 'mainsha') {
   return {
@@ -112,6 +116,7 @@ function coupling(churn: Record<string, number>, commitsScanned: number) {
 beforeEach(() => {
   vi.clearAllMocks();
   mockedReadCtx.mockResolvedValue({ callGraph: FIXTURE() } as unknown as Awaited<ReturnType<typeof readCachedContext>>);
+  mockedRefExists.mockResolvedValue(true); // explicit refs resolve unless a test overrides
 });
 
 describe('handleBriefingSince', () => {
@@ -189,5 +194,44 @@ describe('handleBriefingSince', () => {
     const b = (await handleBriefingSince({ directory: '/repo' })) as BriefingResult;
     const core = (x: BriefingResult) => JSON.stringify({ briefing: x.briefing, tierCounts: x.tierCounts, truncation: x.truncation, regions: x.regions });
     expect(core(a)).toBe(core(b));
+  });
+
+  it('discloses a SILENT base-ref fallback when an explicit ref cannot be resolved', async () => {
+    mockedRefExists.mockResolvedValue(false); // git can't resolve the requested ref
+    mockedDiff.mockResolvedValue(diffFiles(['src/core.ts'], 'main')); // resolveBaseRef fell back to main
+    mockedCoupling.mockResolvedValue(coupling({ 'src/core.ts': 1 }, 40));
+
+    const r = (await handleBriefingSince({ directory: '/repo', baseRef: 'totally-bogus-ref' })) as BriefingResult;
+    expect(r.baseRefFallback).toEqual({ requested: 'totally-bogus-ref', resolved: 'main' });
+    expect(r.caveats[0]).toMatch(/could not be resolved.*briefed against "main"/i);
+  });
+
+  it('does NOT report a fallback when the explicit ref resolves', async () => {
+    mockedRefExists.mockResolvedValue(true);
+    mockedDiff.mockResolvedValue(diffFiles(['src/core.ts'], 'abc123'));
+    mockedCoupling.mockResolvedValue(coupling({ 'src/core.ts': 1 }, 40));
+
+    const r = (await handleBriefingSince({ directory: '/repo', baseRef: 'abc123' })) as BriefingResult;
+    expect(r.baseRefFallback).toBeUndefined();
+    // 'auto' base never triggers a resolve-check at all
+    mockedRefExists.mockClear();
+    await handleBriefingSince({ directory: '/repo' });
+    expect(mockedRefExists).not.toHaveBeenCalled();
+  });
+
+  it('discloses the rename/exact-path churn limitation only when surprising-change is live', async () => {
+    // Live surprise: a low-churn hub with sufficient history → caveat present
+    mockedDiff.mockResolvedValue(diffFiles(['src/core.ts']));
+    mockedCoupling.mockResolvedValue(coupling({ 'src/core.ts': 1 }, 40));
+    const live = (await handleBriefingSince({ directory: '/repo' })) as BriefingResult;
+    expect(live.tierCounts['surprising-change']).toBeGreaterThan(0);
+    expect(live.caveats.some(c => /does not follow renames/i.test(c))).toBe(true);
+
+    // No surprise (only a volatile hub) → the rename caveat is suppressed as noise
+    mockedDiff.mockResolvedValue(diffFiles(['src/orch.ts']));
+    mockedCoupling.mockResolvedValue(coupling({ 'src/orch.ts': 50 }, 40));
+    const quiet = (await handleBriefingSince({ directory: '/repo' })) as BriefingResult;
+    expect(quiet.tierCounts['surprising-change']).toBe(0);
+    expect(quiet.caveats.some(c => /does not follow renames/i.test(c))).toBe(false);
   });
 });
