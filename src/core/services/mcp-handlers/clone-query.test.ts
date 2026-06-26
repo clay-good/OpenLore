@@ -76,6 +76,10 @@ beforeEach(() => {
     node('q', 'computeTotal', 'query.ts', QUERY),
     node('e', 'computeTotal', 'exact.ts', EXACT),
     node('o', 'greet', 'other.ts', UNRELATED),
+    // An HTML inline-script symbol — excluded from comparison (disclosed).
+    { id: 'h', name: 'onClick', filePath: 'page.html', startIndex: 0, endIndex: 80, startLine: 1, endLine: 6, language: 'JavaScript' },
+    // A bodyless external/synthesized symbol (startIndex >= endIndex) — not comparable.
+    { id: 'x', name: 'externalThing', filePath: 'ext.ts', startIndex: 0, endIndex: 0, startLine: 0, endLine: 0, language: 'TypeScript' },
   ];
   const analysisDir = join(dir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
   mkdirSync(analysisDir, { recursive: true });
@@ -148,6 +152,41 @@ describe('handleFindClones', () => {
     };
     expect(res.belowThreshold).toBe(true);
     expect(res.matches).toHaveLength(0);
+  });
+
+  it('reports "exists but not comparable" for a bodyless/external symbol (not a false not-found)', async () => {
+    const res = (await handleFindClones({ directory: dir, symbol: 'externalThing' })) as {
+      error: string;
+      candidates?: string[];
+    };
+    expect(res.error).toMatch(/in the index but has no comparable body/);
+    // It must NOT offer the typed name back as a "did you mean" candidate.
+    expect(res.candidates).toBeUndefined();
+  });
+
+  it('discloses HTML inline-script exclusions only when present', async () => {
+    const res = (await handleFindClones({ directory: dir, symbol: 'computeTotal::query.ts' })) as {
+      htmlExcluded?: number;
+      note: string;
+    };
+    expect(res.htmlExcluded).toBe(1);
+    expect(res.note).toMatch(/HTML inline-script/);
+  });
+
+  it('a NaN maxResults does not produce unlimited results (NaN-safe)', async () => {
+    const res = (await handleFindClones({ directory: dir, snippet: QUERY, maxResults: NaN })) as {
+      matches: unknown[];
+    };
+    // Defaults to the bounded limit rather than slicing with NaN (which would return everything).
+    expect(Array.isArray(res.matches)).toBe(true);
+    expect(res.matches.length).toBeLessThanOrEqual(25);
+  });
+
+  it('a NaN minSimilarity falls back to the default floor (not a null floor)', async () => {
+    const res = (await handleFindClones({ directory: dir, snippet: QUERY, minSimilarity: NaN })) as {
+      similarityFloor: number;
+    };
+    expect(res.similarityFloor).toBe(0.7);
   });
 
   it('guards on missing analysis', async () => {

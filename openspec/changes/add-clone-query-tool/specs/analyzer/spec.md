@@ -20,8 +20,10 @@ SHALL be able to compute near-clones of the query even on repositories large eno
 whole-repo `O(n²)` near pass declines to run.
 
 The query SHALL be a deterministic function of the indexed state and the query — byte-identical across
-re-evaluations of a fixed repository state and query, with a stable tie-break (file path, then start
-line). It SHALL NOT call an LLM and SHALL NOT require any new persisted artifact.
+re-evaluations of a fixed repository state and query. Its match ordering SHALL be a total order whose
+tie-break (file path, then start line, then end line, then function name) fully disambiguates any two
+distinct matches, so the result never depends on input iteration order. It SHALL NOT call an LLM and
+SHALL NOT require any new persisted artifact.
 
 #### Scenario: Exact, structural, and near clones of a function are returned ranked
 

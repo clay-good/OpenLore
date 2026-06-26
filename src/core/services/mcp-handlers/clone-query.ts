@@ -107,7 +107,7 @@ export async function handleFindClones(input: FindClonesInput): Promise<unknown>
   // ── Resolve the query ──────────────────────────────────────────────────────
   let queryBody: string;
   let queryLineCount: number;
-  let exclude: { filePath: string; name: string; startIndex: number } | undefined;
+  let exclude: { filePath: string; startIndex: number; endIndex: number } | undefined;
   let queryLabel: Record<string, unknown>;
 
   if (hasSymbol) {
@@ -122,6 +122,20 @@ export async function handleFindClones(input: FindClonesInput): Promise<unknown>
     }
 
     if (candidates.length === 0) {
+      // Distinguish "exists but not comparable" from "absent". A symbol present in the FULL node set
+      // but absent from the comparable set was filtered out as an HTML inline-script symbol or a
+      // bodyless external/synthesized symbol — saying "not found" while offering its own name as a
+      // candidate would be self-contradicting. Report the real reason instead.
+      const existsButNotComparable = allNodes.some(
+        n => n.name === namePart && (pathPart ? (n.filePath === pathPart || n.filePath.endsWith(pathPart)) : true),
+      );
+      if (existsButNotComparable) {
+        return {
+          error:
+            `"${sym}" is in the index but has no comparable body — it is an HTML inline-script symbol ` +
+            'or an external/synthesized symbol with no source span. It cannot be clone-compared.',
+        };
+      }
       const nameLower = namePart.toLowerCase();
       const near = [...new Set(allNodes.map(n => n.name))]
         .filter(nm => nm.toLowerCase().includes(nameLower))
@@ -154,7 +168,7 @@ export async function handleFindClones(input: FindClonesInput): Promise<unknown>
     const startLine = node.startLine ?? 1;
     const endLine = node.endLine ?? startLine + queryBody.split('\n').length - 1;
     queryLineCount = endLine - startLine + 1;
-    exclude = { filePath: node.filePath, name: node.name, startIndex: node.startIndex };
+    exclude = { filePath: node.filePath, startIndex: node.startIndex, endIndex: node.endIndex };
     queryLabel = {
       mode: 'symbol',
       symbol: `${node.name}::${node.filePath}`,
@@ -168,7 +182,9 @@ export async function handleFindClones(input: FindClonesInput): Promise<unknown>
     queryLabel = { mode: 'snippet', lines: queryLineCount };
   }
 
-  const limit = Math.max(1, Math.min(input.maxResults ?? DEFAULT_LIMIT, MAX_LIMIT));
+  // NaN-safe (a CLI `--max foo` → parseInt → NaN would otherwise pass an unlimited limit through).
+  const requestedMax = Number.isFinite(input.maxResults as number) ? (input.maxResults as number) : DEFAULT_LIMIT;
+  const limit = Math.max(1, Math.min(requestedMax, MAX_LIMIT));
   const result = findClones(queryBody, queryLineCount, files, nodes, {
     minSimilarity: input.minSimilarity,
     limit,
@@ -196,7 +212,9 @@ export async function handleFindClones(input: FindClonesInput): Promise<unknown>
   const note =
     'Each match is an existing function that is a clone of the query — reuse or extend the canonical ' +
     'one instead of reinventing. exact = identical after normalization, structural = same shape with ' +
-    'renamed identifiers, near = high token-overlap (Jaccard ≥ similarityFloor).' +
+    'renamed identifiers, near = high token-overlap (Jaccard ≥ similarityFloor). Bodies are sliced ' +
+    'from current source by the indexed byte ranges, so re-run analyze_codebase after edits or a ' +
+    'match span may be stale.' +
     (htmlExcluded > 0
       ? ` ${htmlExcluded} HTML inline-script symbol(s) were excluded from comparison.`
       : '');

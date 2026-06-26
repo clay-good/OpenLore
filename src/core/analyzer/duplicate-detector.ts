@@ -416,8 +416,12 @@ export interface CloneQueryOptions {
   minSimilarity?: number;
   /** Cap on returned matches (default: unlimited). */
   limit?: number;
-  /** Exclude the query's own instance (symbol mode), identified by file + name + byte offset. */
-  exclude?: { filePath: string; name: string; startIndex: number };
+  /**
+   * Exclude the query's own instance (symbol mode), identified by its file + byte range. The byte
+   * range (not the name) is the identity: it is unique per file and collision-proof, so the query is
+   * never wrongly matched against itself and a different function is never wrongly excluded.
+   */
+  exclude?: { filePath: string; startIndex: number; endIndex: number };
 }
 
 export interface CloneQueryResult {
@@ -447,7 +451,13 @@ export function findClones(
   nodes: Iterable<CloneQueryNode>,
   options: CloneQueryOptions = {},
 ): CloneQueryResult {
-  const floor = Math.min(1, Math.max(NEAR_FLOOR_MIN, options.minSimilarity ?? NEAR_THRESHOLD));
+  // NaN-safe: `??` only catches null/undefined, so a non-finite minSimilarity (e.g. a CLI
+  // `--min foo` → parseFloat → NaN, or Infinity) would otherwise propagate to a NaN floor that
+  // silently drops every near match and serializes as `null`. Coerce non-finite to the default.
+  const requestedFloor = Number.isFinite(options.minSimilarity as number)
+    ? (options.minSimilarity as number)
+    : NEAR_THRESHOLD;
+  const floor = Math.min(1, Math.max(NEAR_FLOOR_MIN, requestedFloor));
 
   // ---- Fingerprint the query ----
   const qT1 = normalizeType1(queryBody);
@@ -468,12 +478,13 @@ export function findClones(
     const content = fileContentMap.get(node.filePath);
     if (!content) continue;
 
-    // Skip the query's own instance (symbol mode) before any work or counting.
+    // Skip the query's own instance (symbol mode) before any work or counting. Identity is the
+    // file + byte range (collision-proof), never the name.
     if (
       options.exclude &&
       node.filePath === options.exclude.filePath &&
-      node.name === options.exclude.name &&
-      node.startIndex === options.exclude.startIndex
+      node.startIndex === options.exclude.startIndex &&
+      node.endIndex === options.exclude.endIndex
     ) {
       continue;
     }
@@ -508,13 +519,19 @@ export function findClones(
     }
   }
 
-  // Deterministic order: exact → structural → near, similarity desc, then file/line for stable ties.
+  // Fully deterministic order: exact → structural → near, similarity desc, then a tie-break that
+  // disambiguates every distinct match — file, startLine, endLine, then function name — so two
+  // functions can never collide on the sort key (which would otherwise leave the final order at the
+  // mercy of input iteration order). Byte-identical across re-evaluations of a fixed query/index.
+  const cmpStr = (x: string, y: string): number => (x < y ? -1 : x > y ? 1 : 0);
   matches.sort(
     (a, b) =>
       CLONE_TYPE_RANK[a.type] - CLONE_TYPE_RANK[b.type] ||
       b.similarity - a.similarity ||
-      (a.file < b.file ? -1 : a.file > b.file ? 1 : 0) ||
-      a.startLine - b.startLine,
+      cmpStr(a.file, b.file) ||
+      a.startLine - b.startLine ||
+      a.endLine - b.endLine ||
+      cmpStr(a.functionName, b.functionName),
   );
 
   const limited = options.limit && options.limit > 0 ? matches.slice(0, options.limit) : matches;

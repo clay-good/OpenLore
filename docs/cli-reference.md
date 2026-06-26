@@ -44,6 +44,7 @@
 | `openlore certify-public-surface` | Certify the public API surface (no `--base`) or the breaking-change verdict for the working-tree diff (`--base <ref>`): removed/renamed exports, incompatible signatures, each breaking change with its in-repo consumers. Read-only, deterministic, never blocks | Yes |
 | `openlore style-fingerprint` | Descriptive per-language idiom profile (function form, binding, conditional, async, string, naming case) for the repo, a region (`--community <id>`), or a file (`--file <path>`); `--language` filters, `--json` for machine output. Evidence-floor + enforcement-aware nulls. Read-only, deterministic, never blocks | Yes |
 | `openlore briefing-since` | Catch-up briefing of what changed since a base ref (`--base <ref>`), ranked by significance tier — surprising-change (a stable hub moved) > hub-change > chokepoint-change > ordinary-change — from existing labels (not a score); grouped by region, with tests-to-run and a no-silent-truncation receipt. Scope with `--file-pattern`, bound with `--max`, `--json` for machine output. Read-only, deterministic, never blocks | Yes |
+| `openlore find-clones` | Existing clones of ONE query — a function `--symbol <name>` (or `name::path`) in the index, or raw `--snippet <code>` (even code not yet written) — ranked exact > structural > near. The edit-time "does this already exist? reuse it" companion to the whole-repo `get_duplicate_report`. `--min <ratio>` sets the near floor (default 0.7), `--max <n>` bounds the list, `--json` for machine output. Read-only, deterministic, never blocks | Yes |
 | `openlore review` | Deterministic structural PR review (structural delta + blast radius) as a Markdown/JSON briefing; pairs with the bundled GitHub Action | No |
 | `openlore preflight` | CI staleness gate: fail when the analysis graph is stale relative to the working tree | No |
 | `openlore export scip` | Export the analysis graph as an SCIP index for the Sourcegraph / Glean ecosystem | No |
@@ -439,6 +440,20 @@ openlore coverage-gaps --json                       # machine-readable (stable s
 ```
 
 A gap with no caller at all is labeled *also-dead* (distinct from `find_dead_code`); an untested entry point is *untested-not-dead*. A scope that resolves to nothing returns an explicit `note` ("nothing matched", not a reassuring "0 gaps"), and the counts (`analyzedSymbols` / `reachableFromTest`) range over the in-scope set. Read-only and advisory — it is a report and never blocks. The matching MCP tool `report_coverage_gaps` is exposed under `openlore mcp --preset full`. See [coverage-gaps.md](coverage-gaps.md).
+
+#### Find clones of a symbol or snippet
+
+Answer the edit-time question "does a near-duplicate of **this** already exist that I should reuse?" — scoped to one query, where `get_duplicate_report` is the whole-repo audit. Reuses the same detector (exact / structural / near), one-vs-all so it finds near-clones even on repos large enough that the whole-repo near pass is skipped:
+
+```bash
+openlore find-clones --symbol getPyParser                 # clones of an indexed function
+openlore find-clones --symbol 'getPyParser::src/core/analyzer/call-graph.ts'  # disambiguate by path
+openlore find-clones --snippet "$(cat candidate.ts)"      # clones of code you're about to write
+openlore find-clones --symbol handleFoo --min 0.6 --max 5 # lower the near floor, cap the list
+openlore find-clones --symbol handleFoo --json            # machine-readable (stable shape)
+```
+
+Honest by construction: an unknown symbol is an explicit not-found (with candidates), never an empty "unique"; an ambiguous bare name lists `name::path` candidates; a query below the evidence floor reports "too small to compare", not "no clones"; the query never matches itself. The matching MCP tool `find_clones` is exposed under `openlore mcp --preset full`.
 
 #### Public API surface contract
 

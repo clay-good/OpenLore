@@ -617,14 +617,54 @@ describe('findClones — one-vs-all query', () => {
     expect(res.belowThreshold).toBe(false);
   });
 
-  it('excludes the query\'s own instance (symbol mode)', () => {
+  it('excludes the query\'s own instance (symbol mode) by byte range', () => {
     const { files, nodes, fSelf } = fixture();
     const res = findClones(queryBody, 7, files, nodes, {
-      exclude: { filePath: '/self.ts', name: 'computeTotal', startIndex: fSelf.offsets[0].start },
+      exclude: { filePath: '/self.ts', startIndex: fSelf.offsets[0].start, endIndex: fSelf.offsets[0].end },
     });
     expect(res.matches.map(m => m.file)).not.toContain('/self.ts');
     // The /self.ts node would otherwise be an exact self-match; only /exact.ts remains exact.
     expect(res.matches.filter(m => m.type === 'exact').map(m => m.file)).toEqual(['/exact.ts']);
+  });
+
+  it('coerces a non-finite similarity floor to the default (NaN-safe)', () => {
+    const { files, nodes } = fixture();
+    // A NaN floor must NOT silently drop every near match or report a NaN/null floor.
+    const nan = findClones(queryBody, 7, files, nodes, { minSimilarity: NaN });
+    expect(nan.similarityFloor).toBe(0.7);
+    expect(Number.isFinite(nan.similarityFloor)).toBe(true);
+    // Infinity is also non-finite → falls back to the default floor (not clamped to 1).
+    const inf = findClones(queryBody, 7, files, nodes, { minSimilarity: Infinity });
+    expect(inf.similarityFloor).toBe(0.7);
+    // The default-floor result still finds the structural clone.
+    expect(nan.matches.some(m => m.type === 'structural')).toBe(true);
+  });
+
+  it('tie-break is fully deterministic for distinct matches on the same line', () => {
+    // Two structurally-identical functions sharing a startLine (different files) must order by file,
+    // not by input iteration order.
+    const body = `function alpha(items) {
+  let acc = 0;
+  for (const it of items) {
+    acc += it.v;
+  }
+  return acc;
+}`;
+    const fa = buildFile([body]);
+    const fb = buildFile([body]);
+    const files = [
+      { path: '/z.ts', content: fb.content },
+      { path: '/a.ts', content: fa.content },
+    ];
+    const fwd: FunctionNode[] = [
+      makeNode({ id: 'z', name: 'beta', filePath: '/z.ts', startIndex: fb.offsets[0].start, endIndex: fb.offsets[0].end }),
+      makeNode({ id: 'a', name: 'gamma', filePath: '/a.ts', startIndex: fa.offsets[0].start, endIndex: fa.offsets[0].end }),
+    ];
+    const rev: FunctionNode[] = [...fwd].reverse();
+    const r1 = findClones(body, 7, files, fwd);
+    const r2 = findClones(body, 7, files, rev);
+    expect(r1.matches.map(m => m.file)).toEqual(['/a.ts', '/z.ts']);
+    expect(JSON.stringify(r1.matches)).toBe(JSON.stringify(r2.matches));
   });
 
   it('reports belowThreshold for a too-small query without comparing', () => {

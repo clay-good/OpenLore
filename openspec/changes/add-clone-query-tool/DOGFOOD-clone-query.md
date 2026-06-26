@@ -59,3 +59,33 @@ note clause is emitted only when `htmlExcluded > 0`. Re-ran: the false HTML line
 `npx vitest run src examples` → **270 files, 5308 passed, 2 skipped**. New tests: 13 for the
 `findClones` primitive + the handler (`duplicate-detector.test.ts`, `clone-query.test.ts`), plus the
 full-surface-only preset guard and the bumped payload-budget ceiling (78k → 81k for the new schema).
+
+## Hardening round 2 (2026-06-26) — adversarial review + e2e via the MCP dispatch path
+
+A second adversarial pass (a dedicated reviewer agent + e2e through `dispatchTool('find_clones', …)`,
+not just the CLI) found and fixed six issues. All verified on the real index after the fix:
+
+1. **HIGH — NaN similarity floor.** `--min foo` → `parseFloat` → `NaN`; `?? ` does not catch `NaN`, so
+   the floor became `NaN`, `sim >= NaN` dropped *every* near match, and `similarityFloor` serialized as
+   `null` — the exact "empty reads as unique" failure the tool swears off. Fixed: non-finite
+   `minSimilarity` (and `maxResults`) coerce to the default via `Number.isFinite`. Verified:
+   `dispatchTool` with `minSimilarity: NaN` → `floor 0.7, near 3`; CLI `--min foo --max bar` →
+   `floor 0.7, 10 matches` (bounded), not unlimited.
+2. **MEDIUM — bodyless/HTML symbol gave a self-contradicting not-found.** Asking for a symbol that
+   exists only as an external/synthesized (`startIndex >= endIndex`) or HTML node returned "No indexed
+   function matching X" while offering `X` as a candidate. Fixed: a distinct "in the index but has no
+   comparable body" message. Verified on the real index: `find-clones --symbol 'fh.sync'` →
+   "is in the index but has no comparable body … cannot be clone-compared."
+3. **MEDIUM — stale byte ranges undisclosed.** Bodies are sliced from current source by indexed
+   offsets; if a file changed since analyze the slice is stale. Now disclosed in every result's `note`
+   ("re-run analyze_codebase after edits or a match span may be stale").
+4. **LOW/MED — incomplete tie-break vs. spec over-claim.** The sort key (type, similarity, file,
+   startLine) did not fully disambiguate two functions on the same line; the spec claimed a fully
+   stable order. Fixed: tie-break now adds `endLine` then `functionName` (a total order); the analyzer
+   spec delta updated to match. New test: same matches in reversed input order → byte-identical output.
+5. **LOW — exclude key carried an unnecessary `name`.** Switched the self-exclusion key to
+   `(filePath, startIndex, endIndex)` — collision-proof, name-independent.
+6. **LOW — NaN `maxResults`** (same class as #1) → fixed alongside it.
+
+New regression tests cover all six (NaN floor/max, bodyless-symbol message, HTML-exclusion disclosure,
+reversed-input determinism). Full suite after hardening: **270 files, 5314 passed, 2 skipped**.
