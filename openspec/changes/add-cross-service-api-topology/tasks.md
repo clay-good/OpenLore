@@ -22,9 +22,16 @@
 
 ## 3. Projection (no schema/tool change)
 - [x] Project matched pairs as `http_endpoint` function→function edges. ALREADY PRESENT
-      (call-graph Pass 2b). FIXED two defects that dropped the edge for Express / same-language
-      full-stack: (a) Express route line off-by-one mis-resolved the handler name; (b)
-      `extractAllHttpEdges` never extracted TS/JS routes, only Python/Java.
+      (call-graph Pass 2b). FIXED FOUR defects (all found by adversarial dogfooding on real
+      `openlore analyze`, each silently dropped the edge):
+      (a) Express route line off-by-one mis-resolved the handler name;
+      (b) `extractAllHttpEdges` never extracted TS/JS routes, only Python/Java (same-language);
+      (c) Pass 2b required the handler node in the SAME file as the route, so any framework with
+          a routing table separate from handler defs (Django `urls.py`→`views.py`, separate Express
+          routes files) never resolved — now falls back to a UNIQUE cross-file name match;
+      (d) Next.js App Router route-path derivation used `lastIndexOf('/app/')`, which missed a
+          leading `app/` segment in the REPO-RELATIVE paths the analyze pipeline passes — collapsing
+          the route to `/` (also broke the route inventory). Now forces a leading slash first.
 - [x] Confirm `analyze_impact` / `find_path` / `blast_radius` pick up the edges with no tool
       change. CONFIRMED: `reachability.ts` already treats `http_endpoint` callees as liveness
       roots / impact consumers. Proven end-to-end (`cross-service-topology.test.ts`).
@@ -45,9 +52,12 @@
 
 ## 6. Tests & fixtures
 - [x] Single-repo full-stack fixture: client `fetch` → handler; impact surfaces the client caller
-      (`cross-service-topology.test.ts`, 6 cases).
+      (`cross-service-topology.test.ts`).
 - [x] Path-parameter normalization (`${id}` ↔ `:id`/`{id}`).
 - [x] Dynamic target → no edge; unmatched route → no edge.
+- [x] Separate-file handler resolution (Django `urls.py`→`views.py`, separate Express routes file)
+      + the ambiguous-name negative (a name colliding across files stays unresolved, no guessed edge).
+- [x] Next.js App Router route-path from a repo-relative `app/...` path (`ts-route-extractor.test.ts`).
 - [x] Cross-repo federation: client in one indexed repo → handler in another
       (`cross-service-resolver.test.ts` + e2e `cross-service-impact.test.ts`).
 - [x] Determinism (both layers).
@@ -55,8 +65,10 @@
 ## 7. Verify & dogfood
 - [x] `npm run lint`, `tsc --noEmit`, `npm run test:run` (5279 passed; 2 pre-existing load-flakes
       pass in isolation), `npm run build` — all green.
-- [x] Dogfood: real `openlore analyze` on a TS+Express full-stack repo emits `loadUser→getUser`
-      and `createUser→addUser` as `http_endpoint` edges; coverage matrix shows `crossServiceHttp`.
+- [x] Dogfood: real `openlore analyze` across FastAPI/Flask/Django/Spring/NestJS/Next.js/Express with
+      fetch/axios/ky/got clients — every framework links, dynamic + orphan targets emit no edge;
+      coverage matrix shows `crossServiceHttp`. Real cross-repo federation: `analyze_impact` on a
+      FastAPI handler surfaces a `fetch` consumer in a separate web repo.
 
 ## 8. Docs
 - [x] `docs/language-support.md`: `crossServiceHttp` capability row + add-a-language checklist step.

@@ -36,6 +36,11 @@ createUser() ─http_endpoint──▶  addUser()       # POST /api/users
 4. **The match** is exact/structural (`buildHttpEdges`, tiers `exact` / `path` / `fuzzy`). An ambiguous
    or unresolved target emits **no edge**, never a guessed one.
 
+The handler is resolved by name, preferring the route registration's own file but falling back to a
+**unique** match elsewhere — so a framework whose routing table is separate from its handler
+definitions still links (Django's `urls.py` → `views.py`, or an Express app with a dedicated routes
+file). A handler name that collides across files stays unresolved rather than guessed.
+
 ## The honesty contract (no edge on dynamic)
 
 A client call whose target cannot be statically resolved — a non-literal URL (`fetch(endpoint)`), a
