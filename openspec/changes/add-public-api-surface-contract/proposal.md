@@ -38,16 +38,29 @@
 > implemented: a symbol still defined in HEAD but no longer exported classifies `visibility-reduced`
 > (distinct from a true `removed`), satisfying the analyzer spec's reduced-visibility requirement.
 >
+> **Third adversarial round (this PR) — `blankLiterals` regex/string edge cases + parser glitches.**
+> Two more false-`non-breaking` paths were found in the literal-stripper and closed: a **regex literal
+> containing a quote** (`/can't/`) opened string mode and blanked every real export to EOF, and an
+> **unterminated string** did the same. `blankLiterals` is now regex-aware (a `/` is treated as a
+> regex only when one can legally begin AND a closing `/` exists on the line, so a division operator
+> never blanks a line) and a `'`/`"` string terminates at a raw newline. Two parser-glitch fixes in
+> `exportedNames` (shared `parseJSExports` left untouched): a **barrel re-export** (`export { x } from
+> …`) is now filtered from the diff name-level pass — it was double-counting a definition-site change
+> (and turning a definition rename into a phantom remove+add at the barrel) — and a mis-parsed
+> `export const enum X` (which `parseJSExports` names `"enum"`) is recovered under its real name.
+>
 > **Deferred (noted):** method-level surface *within* a class; signature classification of
 > non-function exports (const/type contract changes); propagating a function's signature change to its
 > `export { fn as Alias }` aliases; package `exports`-map narrowing without a source change; cross-repo
 > federated consumer resolution is disclosed-as-unknowable rather than resolved (the federation resolver
-> hook is the follow-up). Re-exports (`export { X } from …`) count toward the diff verdict (their
-> removal is breaking) but are omitted from the no-base surface *listing* (whose definitions live
-> elsewhere) — an intentional asymmetry. Type-syntax equivalences the union-subset model can't see
-> (`Array<string>` vs `string[]`) resolve to `potentially-breaking` — the safe (over-conservative)
-> direction, by design. A latent gap surfaced + fixed locally: `parseJSExports` misses `export async
-> function` / generators — `exportedNames` recovers those (shared parser unchanged).
+> hook is the follow-up). A **re-export** follows its definition: it is tracked at the definition site
+> and filtered from both the surface listing and the diff name-level pass, so a re-export-only change
+> whose definition is untouched is not separately flagged. `visibility-reduced` applies to TS/JS; a
+> Python symbol made private (`f` → `_f`) reads as `removed` (the `_` convention removes it from the
+> name census). Type-syntax equivalences the union-subset model can't see (`Array<string>` vs
+> `string[]`) resolve to `potentially-breaking` — the safe (over-conservative) direction, by design.
+> A latent gap surfaced + fixed locally: `parseJSExports` misses `export async function` / generators
+> and mis-names `const enum` — `exportedNames` recovers those (shared parser unchanged).
 
 ## Why
 

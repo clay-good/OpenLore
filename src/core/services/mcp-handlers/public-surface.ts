@@ -58,22 +58,31 @@ export interface CertifyPublicSurfaceInput {
 
 // ── exported-name extraction (the surface predicate, computable on any content) ──
 
+/** A `/` may legally begin a regex literal only after one of these single-char (value-NOT-expected)
+ *  tokens, or at line/file start. A `/` after an identifier, number, `)` or `]` is division. */
+const REGEX_PRECEDERS = new Set(['', '(', ',', '=', ':', '[', '!', '&', '|', '?', '{', '}', ';', '+', '-', '*', '%', '<', '>', '~', '^']);
+
 /**
- * Blank out the CONTENT of string/template literals and line/block comments so the export
+ * Blank out the CONTENT of string/template/regex literals and line/block comments so the export
  * regexes never match an `export …` that appears inside one (common in codegen/fixture source) —
  * a phantom that would otherwise read as an added/removed contract symbol.
  *
- * This is a single left-to-right state scan, NOT a pipeline of independent regexes: a string can
- * contain `//` (a URL) and a comment can contain a quote, so the only correct way to decide
- * "am I in a string vs a comment" is positionally. (The earlier regex pipeline stripped a `//`
- * inside a double-quoted string as if it were a line comment, eating the closing quote and
- * cascading into real declarations — a false-`non-breaking`.) Delimiters are preserved and newlines
- * kept, so byte positions and quote balance are not disturbed.
+ * Single left-to-right state scan, NOT a pipeline of independent regexes: a string can contain
+ * `//` (a URL), a comment can contain a quote, and a regex can contain a quote (`/can't/`), so the
+ * only correct way to decide "am I in a string vs comment vs regex" is positionally. Hardening
+ * history (each was a false-`non-breaking`): the original regex pipeline stripped `//` inside a
+ * string; a string with no closing quote (or a regex's stray quote) then blanked to EOF, hiding
+ * real declarations below. Fixes: a `'`/`"` string TERMINATES at a raw newline (JS strings can't
+ * span one), and a regex literal is recognized only when a regex can legally start AND a closing
+ * `/` exists on the same line — so a division operator never blanks a line. Delimiters and newlines
+ * are preserved so positions/quote-balance are undisturbed.
  */
 function blankLiterals(content: string): string {
   let out = '';
   let i = 0;
   const n = content.length;
+  let lastSig = ''; // last significant emitted char(s), for regex-vs-division disambiguation
+  const setSig = (s: string): void => { lastSig = s; };
   while (i < n) {
     const c = content[i];
     const c2 = content[i + 1];
@@ -84,31 +93,83 @@ function blankLiterals(content: string): string {
       out += '  '; i += 2;
       while (i < n && !(content[i] === '*' && content[i + 1] === '/')) { out += content[i] === '\n' ? '\n' : ' '; i++; }
       if (i < n) { out += '  '; i += 2; }
-    } else if (c === '"' || c === "'" || c === '`') {
-      const q = c; out += q; i++;
-      while (i < n && content[i] !== q) {
+    } else if (c === '"' || c === "'") {
+      out += c; i++;
+      while (i < n && content[i] !== c && content[i] !== '\n') {
+        if (content[i] === '\\') { out += '  '; i += 2; continue; }
+        out += ' '; i++;
+      }
+      if (i < n && content[i] === c) { out += c; i++; }
+      setSig(c);
+    } else if (c === '`') {
+      out += '`'; i++;
+      while (i < n && content[i] !== '`') {
         if (content[i] === '\\') { out += '  '; i += 2; continue; }
         out += content[i] === '\n' ? '\n' : ' '; i++;
       }
-      if (i < n) { out += q; i++; }
+      if (i < n) { out += '`'; i++; }
+      setSig('`');
+    } else if (c === '/' && REGEX_PRECEDERS.has(lastSig) && hasClosingSlashOnLine(content, i + 1, n)) {
+      // Regex literal: blank its body (so `/export function x/` is not a phantom export, and a quote
+      // inside it does not open a string), then keep its flags.
+      out += '/'; i++;
+      let inClass = false;
+      while (i < n && content[i] !== '\n' && !(content[i] === '/' && !inClass)) {
+        if (content[i] === '\\') { out += '  '; i += 2; continue; }
+        if (content[i] === '[') inClass = true;
+        else if (content[i] === ']') inClass = false;
+        out += ' '; i++;
+      }
+      if (i < n && content[i] === '/') { out += '/'; i++; }
+      while (i < n && /[a-z]/i.test(content[i])) { out += content[i]; i++; } // flags
+      setSig('/');
     } else {
       out += c; i++;
+      if (!/\s/.test(c)) setSig(c);
     }
   }
   return out;
 }
 
+/** Is there an unescaped, non-char-class `/` (regex close) before the next newline starting at `from`? */
+function hasClosingSlashOnLine(s: string, from: number, n: number): boolean {
+  let inClass = false;
+  for (let j = from; j < n && s[j] !== '\n'; j++) {
+    if (s[j] === '\\') { j++; continue; }
+    if (s[j] === '[') inClass = true;
+    else if (s[j] === ']') inClass = false;
+    else if (s[j] === '/' && !inClass) return true;
+  }
+  return false;
+}
+
+/** Reserved words that, when returned as an export "name" by parseJSExports, signal a parse glitch
+ *  (e.g. `export const enum X` mis-parses to name "enum") and must not be treated as a contract symbol. */
+const RESERVED_NAMES = new Set(['enum', 'interface', 'class', 'function', 'const', 'let', 'var', 'type', 'default', 'async', 'abstract', 'declare']);
+
 /** Top-level exported names for a file's content, per language. Fail-soft (empty set) for unsupported. */
 function exportedNames(rawContent: string, language: string): Set<string> {
   const content = blankLiterals(rawContent);
   if (language === 'TypeScript' || language === 'JavaScript') {
-    const names = new Set(parseJSExports(content).map((e) => e.name).filter((n) => n && n !== 'default'));
+    // Skip RE-EXPORTS (`export { x } from './a'`): their identity and breaking-ness are governed at
+    // the definition site (tracked there), and counting them here double-reports a barrel'd symbol
+    // (and turns a definition-site rename into a phantom remove+add at the barrel). Matches the
+    // surface-listing path, which also filters re-exports.
+    const names = new Set(
+      parseJSExports(content)
+        .filter((e) => !e.isReExport && e.name && e.name !== 'default' && !RESERVED_NAMES.has(e.name))
+        .map((e) => e.name),
+    );
     // `parseJSExports`' `export function` regex matches neither `export async function` nor a
     // GENERATOR (`export function* gen` / `export async function* agen`) — recover all of those
     // here so async/generator exports are not silently dropped. Local fix; shared parser unchanged.
     const fn = /\bexport\s+(?:default\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)/g;
+    // `parseJSExports` also mis-names `export const enum X` (and `export enum X`) — recover the real
+    // enum name (the bare `enum` token was filtered out above as a reserved-word glitch).
+    const en = /\bexport\s+(?:declare\s+)?(?:const\s+)?enum\s+([A-Za-z_$][\w$]*)/g;
     let m: RegExpExecArray | null;
     while ((m = fn.exec(content)) !== null) names.add(m[1]);
+    while ((m = en.exec(content)) !== null) names.add(m[1]);
     return names;
   }
   if (language === 'Python') {
