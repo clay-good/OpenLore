@@ -36,6 +36,17 @@
 > graph) and excludes `vector-index-meta.json` from the bundle. Verified e2e: fresh checkout → import → `orient`
 > returns correct results with no re-analyze.
 >
+> **Fidelity hardening (2026-06-26, round 4).** A fidelity audit found the round-3 search-index rebuild
+> was a *subset* of a fresh analyze: it passed `signatures=[]`, so ~997 non-callable symbols (constants,
+> types, interfaces, enums with no call-graph node) were missing from the code index, and it never rebuilt
+> the spec index, so `search_specs` was broken after import. Both are now closed using only bundled data +
+> the checkout (no re-parse): `import` reads the per-file `signatures` the bundle carries in
+> `llm-context.json` and the checked-out source for body text, so the code index matches a fresh analyze
+> exactly (measured: 2735→3734 records), and it rebuilds the keyword spec index (`search_specs` works).
+> Verified e2e: imported index has functions=3734 / specs=559 tables; `orient` returns code + matchingSpecs
+> and finds non-function symbols. The only un-restored search feature is the literal-text `text-line-index/`
+> (rebuilt by the next analyze) — documented.
+>
 > **Scope note — stale path.** A valid-but-ancestor-commit artifact degrades to a full local rebuild
 > (the spec's sanctioned "or fall back to a full local rebuild"). Incremental-delta update of only the
 > changed files is a deferred optimization; the headline win (verified, no-analyze bootstrap when the

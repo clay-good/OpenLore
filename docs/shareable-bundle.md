@@ -33,11 +33,15 @@ envelope of:
 
 The LanceDB **search index** (`vector-index/`, `text-line-index/`, and `vector-index-meta.json`) is **not**
 bundled — it is large and a deterministic function of the graph. Instead, **import rebuilds the keyword
-(BM25) search index from the materialized graph** (offline, no API, ~150 ms), so `orient` and `search_code`
-work immediately on an imported index, exactly as they would after a fresh `openlore analyze`. Semantic
-(embedding) search stays an explicit opt-in: run `openlore embed --local` (on-device, no API key) after
-import. Transient SQLite WAL sidecars are excluded; the store is checkpointed before export so the bundled
-`call-graph.db` is self-contained.
+(BM25) search index from the materialized graph** (offline, no API, well under a second): the code index
+over every symbol — functions *and* the non-callable ones (constants, types, interfaces, enums), drawn from
+the per-file signatures the bundle carries in `llm-context.json` and the checked-out source for body text —
+and the spec index. So `orient`, `search_code`, and `search_specs` work immediately on an imported index,
+returning the same results a fresh `openlore analyze` would. Semantic (embedding) search stays an explicit
+opt-in: run `openlore embed --local` (on-device, no API key) after import. The one search feature not
+restored on import is the literal-text line index (`text-line-index/`, used by some `find_dead_code` /
+literal-string lookups); it is rebuilt by the next `openlore analyze`. Transient SQLite WAL sidecars are
+excluded; the store is checkpointed before export so the bundled `call-graph.db` is self-contained.
 
 **Deterministic.** Exporting the same index twice produces a byte-identical artifact (sorted file order, no
 wall-clock field, fixed compression level). The bundled attestation is **re-computed from the live store at
@@ -75,10 +79,11 @@ On a successful as-is import, any **stale search index** from a prior index in t
 that no longer matches — and the keyword (BM25) index is rebuilt for the imported graph.
 
 **What works immediately after import.** Everything that reads the call graph — `orient`, `search_code`,
-`analyze_impact`, `find_path`, `blast_radius`, `select_tests`, `report_coverage_gaps`, and the rest — works
-right away on a verified import, no re-analyze. The only thing not in the bundle is *semantic* (embedding)
-search; keyword (BM25) search is rebuilt on import, and `openlore embed --local` upgrades it to on-device
-semantic when you want it.
+`search_specs`, `analyze_impact`, `find_path`, `blast_radius`, `select_tests`, `report_coverage_gaps`, and
+the rest — works right away on a verified import, no re-analyze: the keyword (BM25) code and spec search
+indexes are rebuilt on import over the full symbol set. Two things are *not* restored on import and wait for
+the next `openlore analyze`: *semantic* (embedding) search (opt in any time with `openlore embed --local`),
+and the literal-text line index (`text-line-index/`). Everything else matches a fresh analyze.
 
 **Exit codes.** `export` and `import` exit `0` on success — and import exits `0` on the rebuild path too,
 since a rebuild is a successful outcome, not an error. A genuine *user* error exits `2`: an artifact path

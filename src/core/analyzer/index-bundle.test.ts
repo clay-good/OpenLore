@@ -23,6 +23,7 @@ import { existsSync } from 'node:fs';
 import {
   preMaterializeRebuildReason,
   currencyDecision,
+  readBundledSignatures,
 } from '../../cli/commands/import.js';
 
 const VERSION = '9.9.9-test';
@@ -285,6 +286,26 @@ describe('index-bundle: preMaterializeRebuildReason (version + schema gates)', (
     const bundle = parseBundle((await buildBundle(src, VERSION)).buffer);
     bundle.manifest.schemaVersion = SCHEMA_VERSION + 1;
     expect(preMaterializeRebuildReason(bundle)?.reason).toBe('schema-mismatch');
+  });
+});
+
+describe('index-bundle: import reads bundled signatures (full-symbol search parity)', () => {
+  it('returns the signatures the bundle carries in llm-context.json (so non-function symbols are indexed)', async () => {
+    const dir = join(work, 'sig-analysis');
+    await mkdir(dir, { recursive: true });
+    const signatures = [
+      { path: 'src/a.ts', language: 'TypeScript', entries: [{ kind: 'interface', name: 'Widget', signature: 'export interface Widget' }] },
+    ];
+    await writeFile(join(dir, 'llm-context.json'), JSON.stringify({ callGraph: { nodes: [] }, signatures }));
+    expect(await readBundledSignatures(dir)).toEqual(signatures);
+  });
+
+  it('degrades to [] when llm-context.json is absent or malformed (never throws)', async () => {
+    const dir = join(work, 'sig-missing');
+    await mkdir(dir, { recursive: true });
+    expect(await readBundledSignatures(dir)).toEqual([]);
+    await writeFile(join(dir, 'llm-context.json'), 'not json');
+    expect(await readBundledSignatures(dir)).toEqual([]);
   });
 });
 

@@ -24,9 +24,14 @@ import { tmpdir } from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { logger } from '../../utils/logger.js';
-import { OPENLORE_ANALYSIS_REL_PATH, ARTIFACT_CALL_GRAPH_DB, DEFAULT_MAX_FILES } from '../../constants.js';
+import {
+  OPENLORE_ANALYSIS_REL_PATH, ARTIFACT_CALL_GRAPH_DB, DEFAULT_MAX_FILES,
+  OPENSPEC_DIR, OPENSPEC_SPECS_SUBDIR, OPENSPEC_DECISIONS_SUBDIR,
+} from '../../constants.js';
 import { EdgeStore, SCHEMA_VERSION } from '../../core/services/edge-store.js';
 import { VectorIndex } from '../../core/analyzer/vector-index.js';
+import { SpecVectorIndex } from '../../core/analyzer/spec-vector-index.js';
+import type { FileSignatureMap } from '../../core/analyzer/signature-extractor.js';
 import { reconcile } from '../../core/analyzer/index-attestation.js';
 import { isGitRepository, validateGitRef } from '../../core/drift/git-diff.js';
 import {
@@ -129,15 +134,28 @@ async function gitIsAncestor(rootPath: string, ancestor: string, descendant: str
   }
 }
 
+/** Read the per-file signature maps the bundle persisted in llm-context.json (best-effort). */
+export async function readBundledSignatures(analysisDir: string): Promise<FileSignatureMap[]> {
+  try {
+    const raw = await readFile(join(analysisDir, 'llm-context.json'), 'utf-8');
+    const sigs = (JSON.parse(raw) as { signatures?: unknown }).signatures;
+    return Array.isArray(sigs) ? sigs as FileSignatureMap[] : [];
+  } catch {
+    return [];
+  }
+}
+
 /**
  * Rebuild the keyword (BM25) search index from the just-materialized graph so `orient` and
- * `search_code` work immediately on an imported index — matching what a fresh `openlore analyze`
- * always produces. Offline and fast (no source re-parse, no API): the BM25 corpus is built from the
- * graph nodes already in `call-graph.db`. Best-effort and additive — a failure (e.g. the optional
- * LanceDB native dep is unavailable) leaves a fully-working graph index and is reported, never fatal.
- * Semantic (embedding) search remains an explicit opt-in via `openlore embed --local`.
+ * `search_code` work immediately on an imported index — and so the imported index is the SAME index a
+ * fresh `openlore analyze` would produce, not a subset. Offline and fast (no source re-parse, no API):
+ * the corpus is built from the graph already in `call-graph.db`, the per-file `signatures` the bundle
+ * carries in `llm-context.json` (so non-call-graph symbols — constants, types, interfaces — are indexed,
+ * not just functions), and the checked-out source for body-skeleton text (read, not parsed). Best-effort
+ * and additive — a failure (e.g. the optional LanceDB native dep is unavailable) leaves a fully-working
+ * graph index and is reported, never fatal. Semantic search remains an opt-in via `openlore embed --local`.
  */
-async function buildKeywordSearchIndex(analysisDir: string): Promise<boolean> {
+async function buildKeywordSearchIndex(rootPath: string, analysisDir: string): Promise<boolean> {
   const store = EdgeStore.open(join(analysisDir, ARTIFACT_CALL_GRAPH_DB));
   let nodes, hubIds, entryIds;
   try {
@@ -148,8 +166,32 @@ async function buildKeywordSearchIndex(analysisDir: string): Promise<boolean> {
     store.close();
   }
   if (nodes.length === 0) return false;
-  await VectorIndex.build(analysisDir, nodes, [], hubIds, entryIds, null);
+
+  const signatures = await readBundledSignatures(analysisDir);
+  // Body-skeleton text needs the source (read, not parsed). It is present in the checkout we are
+  // importing into; a missing file is skipped (that symbol is still indexed by name/signature/docstring).
+  const fileContents = new Map<string, string>();
+  await Promise.all([...new Set(nodes.map(n => n.filePath))].map(async fp => {
+    try { fileContents.set(fp, await readFile(join(rootPath, fp), 'utf-8')); } catch { /* skip unreadable */ }
+  }));
+
+  await VectorIndex.build(analysisDir, nodes, signatures, hubIds, entryIds, null, fileContents);
   return true;
+}
+
+/**
+ * Rebuild the keyword (BM25) SPEC search index so `search_specs` works after import — the spec index
+ * (`specs` table) shares the `vector-index/` directory that the function-index rebuild recreates, and a
+ * fresh analyze builds it too. Best-effort and gated on an `openspec/specs/` directory in the checkout;
+ * a missing specs dir (or any failure) simply means no spec index, exactly as on a repo without specs.
+ */
+async function buildSpecSearchIndex(rootPath: string, analysisDir: string): Promise<boolean> {
+  const specsDir = join(rootPath, OPENSPEC_DIR, OPENSPEC_SPECS_SUBDIR);
+  if (!existsSync(specsDir)) return false;
+  const mappingJsonPath = join(analysisDir, 'mapping.json');
+  const decisionsDir = join(rootPath, OPENSPEC_DIR, OPENSPEC_DECISIONS_SUBDIR);
+  const { recordCount } = await SpecVectorIndex.build(analysisDir, specsDir, null, mappingJsonPath, decisionsDir);
+  return recordCount > 0;
 }
 
 async function fullRebuild(rootPath: string, analysisDir: string, detail: string): Promise<number> {
@@ -241,12 +283,18 @@ export async function runImport(artifact: string, opts: ImportOptions): Promise<
         rebuildReason = decision.detail;
       } else {
         await promoteStagedIndex(bundle, staging, analysisDir);
-        // Rebuild the keyword search index so orient/search_code work immediately (offline).
+        // Rebuild the keyword search indexes so orient/search_code/search_specs work immediately
+        // (offline, no re-parse) — making the imported index equivalent to a fresh analyze.
         let searchBuilt = false;
         try {
-          searchBuilt = await buildKeywordSearchIndex(analysisDir);
+          searchBuilt = await buildKeywordSearchIndex(projectRoot, analysisDir);
         } catch (err) {
           logger.debug(`import: keyword search index not built (${err instanceof Error ? err.message : String(err)})`);
+        }
+        try {
+          await buildSpecSearchIndex(projectRoot, analysisDir);
+        } catch (err) {
+          logger.debug(`import: spec search index not built (${err instanceof Error ? err.message : String(err)})`);
         }
         if (decision.action === 'import-unverified') {
           logger.success(`Imported graph bundle (${bundle.manifest.files.length} files, schema v${bundle.manifest.schemaVersion}).`);
