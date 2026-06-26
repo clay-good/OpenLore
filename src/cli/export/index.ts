@@ -8,6 +8,7 @@
 
 import { Command } from 'commander';
 import { runScipExport, type ScipExportOptions } from './scip.js';
+import { runBundleExport, type BundleExportOptions } from './bundle.js';
 
 /** Commander collector for repeatable options (`--include a --include b`). */
 function collect(value: string, previous: string[]): string[] {
@@ -25,6 +26,16 @@ const scipSubcommand = new Command('scip')
     process.exit(code);
   });
 
+const bundleSubcommand = new Command('bundle')
+  .description('Export the persisted graph index as a single portable, integrity-stamped artifact a teammate or CI can import without re-analyzing.')
+  .option('--out <path>', `Output path for the artifact (default: <project-root>/.openlore/index-bundle.olbundle)`)
+  .option('--project-root <path>', 'Project root to export (default: current directory)')
+  .action(async (opts: BundleExportOptions) => {
+    const code = await runBundleExport(opts);
+    process.exit(code);
+  });
+
 export const exportCommand = new Command('export')
-  .description('Export the analysis graph to an interop format (scip).')
-  .addCommand(scipSubcommand);
+  .description('Export the analysis graph to an interop format (scip) or a portable shareable bundle.')
+  .addCommand(scipSubcommand)
+  .addCommand(bundleSubcommand);

@@ -376,6 +376,17 @@ export class EdgeStore {
     ).map(rawToCallEdge);
   }
 
+  /**
+   * Every production call edge. Used to recompute the production-graph content digest
+   * when validating an imported portable artifact against its bundled attestation
+   * (change: add-shareable-graph-artifact) — read-only, mirrors getAllInternalNodes().
+   */
+  getAllEdges(): CallEdge[] {
+    return (
+      this.db.prepare('SELECT * FROM edges').all() as unknown as RawEdge[]
+    ).map(rawToCallEdge);
+  }
+
   // ── Edge mutations ────────────────────────────────────────────────────────────
 
   /** Remove all edges where this file is caller or callee. */
@@ -647,6 +658,17 @@ export class EdgeStore {
   getClass(id: string): ClassNode | null {
     const row = this.db.prepare('SELECT * FROM classes WHERE id = ?').get(id) as RawClass | undefined;
     return row ? rawToClassNode(row) : null;
+  }
+
+  /**
+   * Every class/module node. Used to recompute the production-graph content digest
+   * when validating an imported portable artifact against its bundled attestation
+   * (change: add-shareable-graph-artifact) — read-only, mirrors getAllInternalNodes().
+   */
+  getAllClasses(): ClassNode[] {
+    return (
+      this.db.prepare('SELECT * FROM classes').all() as unknown as RawClass[]
+    ).map(rawToClassNode);
   }
 
   getClassesForFile(file: string): ClassNode[] {

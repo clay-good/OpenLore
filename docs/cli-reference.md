@@ -47,6 +47,8 @@
 | `openlore review` | Deterministic structural PR review (structural delta + blast radius) as a Markdown/JSON briefing; pairs with the bundled GitHub Action | No |
 | `openlore preflight` | CI staleness gate: fail when the analysis graph is stale relative to the working tree | No |
 | `openlore export scip` | Export the analysis graph as an SCIP index for the Sourcegraph / Glean ecosystem | No |
+| `openlore export bundle` | Export the persisted graph index as a single portable, integrity-stamped artifact a teammate or CI imports without re-analyzing (`--out <path>`). Deterministic, offline. See [Shareable bundle](shareable-bundle.md) | No |
+| `openlore import <artifact>` | Import a portable graph artifact (validate-or-rebuild): materializes a verified index when the artifact's commit matches the working tree, else falls back to a local rebuild. Never serves a stale/schema-skewed/tampered artifact as current | No |
 | `openlore telemetry` | Analyze EpistemicLease cognitive-load telemetry | No |
 | `openlore panic-*` | Agent behavioral-governance ("panic") commands — `panic-check`/`panic-level`/`panic-validate`/`panic-hotspots`/`panic-calibrate`/`panic-replay`. Opt-in, off by default; install hooks via `openlore setup --hooks` | No |
 | `openlore gryph-watch` | Background Gryph behavioral observer (opt-in; install via `openlore setup --hooks`) | No |

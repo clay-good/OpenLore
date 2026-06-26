@@ -1,0 +1,78 @@
+/**
+ * `openlore export bundle` — serialize the persisted graph index into a single portable,
+ * integrity-stamped artifact (change: add-shareable-graph-artifact).
+ *
+ * A team analyzes once and commits the artifact; a teammate or a CI job imports it
+ * (`openlore import`) and bootstraps a verified index in seconds instead of cold-indexing.
+ * The artifact is a deterministic function of the index — exporting the same index twice is
+ * byte-identical — so it is a generated, regenerate-don't-merge file (see docs).
+ */
+
+import { existsSync } from 'node:fs';
+import { writeFile } from 'node:fs/promises';
+import { resolve, join, relative } from 'node:path';
+import { createRequire } from 'node:module';
+import { logger } from '../../utils/logger.js';
+import { OPENLORE_DIR, OPENLORE_ANALYSIS_REL_PATH, ARTIFACT_CALL_GRAPH_DB } from '../../constants.js';
+import { EdgeStore } from '../../core/services/edge-store.js';
+import { buildBundle, BundleError, BUNDLE_DEFAULT_FILENAME } from '../../core/analyzer/index-bundle.js';
+
+const require = createRequire(import.meta.url);
+
+export interface BundleExportOptions {
+  out?: string;
+  projectRoot?: string;
+}
+
+function toolVersion(): string {
+  const pkg = require('../../../package.json') as { version: string };
+  return pkg.version;
+}
+
+/** Fold any lagging write-ahead log into the main db so the bundled call-graph.db is self-contained. */
+function checkpointStore(dbPath: string): void {
+  try {
+    const store = EdgeStore.open(dbPath);
+    try {
+      store.checkpoint();
+    } finally {
+      store.close();
+    }
+  } catch {
+    // Best-effort: a fresh analyze leaves the WAL already folded; never block export on this.
+  }
+}
+
+export async function runBundleExport(opts: BundleExportOptions): Promise<number> {
+  const projectRoot = resolve(opts.projectRoot ?? process.cwd());
+  const analysisDir = join(projectRoot, OPENLORE_ANALYSIS_REL_PATH);
+  const outPath = resolve(opts.out ?? join(projectRoot, OPENLORE_DIR, BUNDLE_DEFAULT_FILENAME));
+
+  const dbPath = join(analysisDir, ARTIFACT_CALL_GRAPH_DB);
+  if (existsSync(dbPath)) checkpointStore(dbPath);
+
+  let result;
+  try {
+    result = await buildBundle(analysisDir, toolVersion());
+  } catch (err) {
+    if (err instanceof BundleError) {
+      logger.error(err.message);
+      return 2;
+    }
+    throw err;
+  }
+
+  await writeFile(outPath, result.buffer);
+
+  const { manifest, buffer } = result;
+  const sizeMb = (buffer.length / (1024 * 1024)).toFixed(2);
+  const relOut = relative(projectRoot, outPath) || outPath;
+  logger.success(
+    `Exported graph bundle → ${relOut}\n` +
+    `  ${manifest.files.length} files, ${sizeMb} MB, schema v${manifest.schemaVersion}, ` +
+    `commit ${manifest.sourceCommit ?? 'unknown'}\n` +
+    '  Tip: this is a generated, regenerate-don\'t-merge artifact. Add to .gitattributes:\n' +
+    `    ${relative(projectRoot, outPath) || BUNDLE_DEFAULT_FILENAME} -diff -merge`,
+  );
+  return 0;
+}
