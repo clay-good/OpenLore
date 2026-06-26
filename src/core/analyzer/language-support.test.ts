@@ -1,5 +1,7 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { readFileSync } from 'node:fs';
+import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   CAPABILITIES,
@@ -19,6 +21,13 @@ import { TYPE_INFERENCE_LANGUAGES as TI, inferTypesFromSource } from './type-inf
 import { SIGNATURE_LANGUAGES as SIG, extractSignatures, detectLanguage } from './signature-extractor.js';
 import { IMPORT_RESOLUTION_LANGUAGES as IMP, buildBaseImportMap } from './import-resolver-bridge.js';
 import { STYLE_FINGERPRINT_LANGUAGES as STY } from './style-fingerprint.js';
+import {
+  CROSS_SERVICE_HTTP_LANGUAGES as XSVC,
+  extractHttpCalls,
+  extractRouteDefinitions,
+  extractTsRouteDefinitions,
+  extractJavaRouteDefinitions,
+} from './http-route-parser.js';
 
 // ── registry is DERIVED from the live sources: exact cross-checks ──
 
@@ -53,6 +62,13 @@ describe('language-support registry — faithful to live extractor sources', () 
       expect(claims, `styleFingerprint mismatch for ${lang}`).toBe(STY.has(lang));
     }
   });
+
+  it('crossServiceHttp cell === CROSS_SERVICE_HTTP_LANGUAGES membership for EVERY language (exact, drift-proof)', () => {
+    for (const lang of ALL_LANGUAGES) {
+      const claims = languageSupport(lang).capabilities.includes('crossServiceHttp');
+      expect(claims, `crossServiceHttp mismatch for ${lang}`).toBe(XSVC.has(lang));
+    }
+  });
 });
 
 // styleFingerprint is behaviorally exercised against the live tally (no silent over-claim): every
@@ -72,6 +88,45 @@ describe('styleFingerprint is behaviorally faithful (no silent over-claim)', () 
       const style = await extractFileStyle({ path, content, language: lang });
       expect(style, `${lang} should tally a fingerprint`).toBeTruthy();
       expect(Object.keys(style!.counters).length, `${lang} produced no counters`).toBeGreaterThan(0);
+    });
+  }
+});
+
+// crossServiceHttp is behaviorally exercised against the live extractors: every
+// CROSS_SERVICE_HTTP_LANGUAGES member must actually extract a client call site OR a
+// server route on a fixture (the two halves of a cross-service edge). The HTTP
+// extractors read from disk by path, so fixtures are written to a temp dir.
+// `kind` selects the half a language genuinely backs; a member that extracts
+// neither would fail, so the union cannot silently over-claim a language.
+const CROSS_SERVICE_FIXTURES: Record<string, { name: string; content: string; kind: 'client' | 'route' }> = {
+  TypeScript: { name: 'client.ts', content: 'export async function load() {\n  return fetch("/api/items");\n}', kind: 'client' },
+  JavaScript: { name: 'client.js', content: 'export async function load() {\n  return fetch("/api/items");\n}', kind: 'client' },
+  Python: { name: 'api.py', content: '@app.get("/api/items")\nasync def list_items():\n    return []', kind: 'route' },
+  Java: { name: 'Api.java', content: '@RestController\nclass Api {\n  @GetMapping("/api/items")\n  public String list() { return ""; }\n}', kind: 'route' },
+};
+describe('crossServiceHttp is behaviorally faithful (no silent over-claim)', () => {
+  let dir: string;
+  beforeAll(async () => { dir = await mkdtemp(join(tmpdir(), 'xsvc-cap-')); });
+  afterAll(async () => { await rm(dir, { recursive: true, force: true }); });
+
+  it('every CROSS_SERVICE_HTTP_LANGUAGES member has a fixture wired (guard cannot rot)', () => {
+    for (const lang of XSVC) {
+      expect(CROSS_SERVICE_FIXTURES[lang], `add a CROSS_SERVICE_FIXTURES entry for ${lang}`).toBeDefined();
+    }
+  });
+
+  for (const lang of XSVC) {
+    it(`${lang}: extracts a real client call or route from its fixture`, async () => {
+      const fx = CROSS_SERVICE_FIXTURES[lang];
+      expect(fx, `missing crossServiceHttp fixture for set member ${lang}`).toBeDefined();
+      const fp = join(dir, fx.name);
+      await writeFile(fp, fx.content, 'utf-8');
+      const count = fx.kind === 'client'
+        ? (await extractHttpCalls(fp)).length
+        : fp.endsWith('.py') ? (await extractRouteDefinitions(fp)).length
+        : fp.endsWith('.java') ? (await extractJavaRouteDefinitions(fp)).length
+        : (await extractTsRouteDefinitions(fp)).length;
+      expect(count, `${lang} claims crossServiceHttp but extracted nothing from its fixture`).toBeGreaterThan(0);
     });
   }
 });
