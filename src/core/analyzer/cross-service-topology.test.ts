@@ -236,6 +236,61 @@ describe('cross-service API topology — single-repo projection', () => {
     expect(crossServiceEdge(b, 'fetchProfile', 'getProfile')).toBeDefined();
   });
 
+  it('Comments before a client call do not drift its line / drop its edge', async () => {
+    const b = await buildFixture([
+      {
+        path: 'web/commented.ts',
+        language: 'TypeScript',
+        content: [
+          'export async function first() {',
+          "  return fetch('/api/first');   // a trailing comment",
+          '}',
+          '// a standalone comment line',
+          'export async function second() {',
+          "  return fetch('/api/second');", // its line must not drift onto the comment
+          '}',
+        ].join('\n'),
+      },
+      {
+        path: 'server/routes.ts',
+        language: 'TypeScript',
+        content: [
+          'import express from "express";',
+          'const app = express();',
+          'function handleFirst(req, res) { res.end(); }',
+          'function handleSecond(req, res) { res.end(); }',
+          "app.get('/api/first', handleFirst);",
+          "app.get('/api/second', handleSecond);",
+        ].join('\n'),
+      },
+    ]);
+
+    expect(crossServiceEdge(b, 'first', 'handleFirst')).toBeDefined();
+    expect(crossServiceEdge(b, 'second', 'handleSecond')).toBeDefined();
+  });
+
+  it('A handler that calls its own endpoint produces no self-loop edge', async () => {
+    const b = await buildFixture([
+      {
+        path: 'server/self.ts',
+        language: 'TypeScript',
+        content: [
+          'import express from "express";',
+          'const app = express();',
+          'function selfHandler(req, res) {',
+          "  fetch('/api/self');", // the handler fetches its own route
+          '  res.json({});',
+          '}',
+          "app.get('/api/self', selfHandler);",
+        ].join('\n'),
+      },
+    ]);
+
+    // caller (enclosing fn of the fetch) === callee (handler) → must be skipped.
+    expect(crossServiceEdge(b, 'selfHandler', 'selfHandler')).toBeUndefined();
+    expect(httpEdges(b)).toHaveLength(0);
+  });
+
   it('A dynamic target emits no edge (non-literal URL is never guessed)', async () => {
     const b = await buildFixture([
       {

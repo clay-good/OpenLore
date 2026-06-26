@@ -181,15 +181,17 @@ export async function extractHttpCalls(filePath: string): Promise<HttpCall[]> {
 
   const calls: HttpCall[] = [];
 
-  // Strip comments to avoid false matches.
-  // The line-comment regex must NOT match `://` inside URLs — we only strip
-  // `//` that is preceded by whitespace, punctuation, brackets, or the start
-  // of the line (i.e. genuine JS/TS comments, not protocol separators).
-  // The character class intentionally includes ) and ] so that patterns like
-  // `fetch('/api/items') // comment` are correctly stripped.
+  // Mask comments (to avoid false matches) LENGTH-PRESERVINGLY: blank them to spaces
+  // and keep newlines, so `clean` stays byte-aligned with `content` and every
+  // regex `m.index` below feeds getLine() the correct line. Removing comment text
+  // instead (the old behavior) shifted offsets, so a call AFTER any comment got a
+  // wrong (earlier) line — which then mis-resolved or dropped its enclosing-function
+  // edge in the call-graph HTTP pass. The line-comment regex must NOT match `://`
+  // inside URLs — only `//` preceded by whitespace, punctuation, brackets, or the
+  // start of line (the prefix char is preserved; only the comment body is blanked).
   const clean = content
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/(^|[\s,;()[\]{}])\/\/.*$/gm, '$1');
+    .replace(/\/\*[\s\S]*?\*\//g, blankKeepNewlines)
+    .replace(/(^|[\s,;()[\]{}])(\/\/.*)$/gm, (_m, prefix, comment) => prefix + ' '.repeat(comment.length));
 
   const lines = content.split('\n'); // keep original for line numbers
 

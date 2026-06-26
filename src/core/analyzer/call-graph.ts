@@ -4685,6 +4685,11 @@ export class CallGraphBuilder {
             })()
           : undefined;
         if (!callerNode) continue;
+        // No self-loop: a handler that calls its OWN endpoint (e.g. SSR fetching
+        // its own route) would otherwise resolve caller===callee and inflate that
+        // node's fan-in/out (http_endpoint edges, unlike synthesized ones, ARE
+        // counted in the structural metrics). Mirrors the route-handler synth guard.
+        if (callerNode.id === calleeNode.id) continue;
 
         edges.push({
           callerId: callerNode.id,

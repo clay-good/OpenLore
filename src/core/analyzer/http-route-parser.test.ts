@@ -263,6 +263,27 @@ describe('extractHttpCalls', () => {
     expect(await extractHttpCalls(filePath)).toHaveLength(0);
   });
 
+  it('reports correct line numbers for calls AFTER a comment (length-preserving mask)', async () => {
+    // A line comment earlier in the file must not shift the reported line of a later
+    // call — comment masking is length/line preserving. Regression: a non-preserving
+    // strip drifted later calls one line early, breaking enclosing-function resolution.
+    const src = [
+      'export async function a() {',                       // 1
+      "  return fetch('/api/a');   // an inline comment",  // 2
+      '}',                                                 // 3
+      '/* a block',                                        // 4
+      '   comment */',                                     // 5
+      'export async function b() {',                       // 6
+      "  return fetch('/api/b');",                         // 7
+      '}',                                                 // 8
+    ].join('\n');
+    const filePath = await createFile(tempDir, 'client.ts', src);
+    const calls = await extractHttpCalls(filePath);
+    const byUrl = new Map(calls.map(c => [c.normalizedUrl, c.line]));
+    expect(byUrl.get('/api/a')).toBe(2);
+    expect(byUrl.get('/api/b')).toBe(7); // not 6 — the comment lines didn't shift it
+  });
+
   it('should return empty for file with no HTTP calls', async () => {
     const filePath = await createFile(tempDir, 'utils.ts', 'export const add = (a: number, b: number) => a + b;');
     expect(await extractHttpCalls(filePath)).toHaveLength(0);
