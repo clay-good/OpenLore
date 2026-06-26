@@ -10,9 +10,11 @@ SHALL return the repository profile by default, the profile for a named communit
 or a single file's profile on request. Each idiom in the result SHALL be reported either as
 `{ dominant, ratio, samples }` or, when below the evidence floor or for a compiler-enforced choice, as
 a null signal — so a consumer can always distinguish a measured idiom from an absent one. The tool
-SHALL declare a complete input schema and a structured output schema per the MCP quality requirements,
-and SHALL NOT enter `MINIMAL_TOOLS` or the first-run default surface; it lands only in an opt-in
-preset.
+SHALL declare a complete input schema and SHALL return structured output (the labeled profile object,
+classified `conclusion`) per the MCP quality requirements — consistent with the repo's tool
+convention, which declares input schemas and returns structured conclusions rather than a separate
+`outputSchema` field. It SHALL NOT enter `MINIMAL_TOOLS` or the first-run default surface; it lands
+only in an opt-in preset.
 
 #### Scenario: The tool returns a labeled profile, not a graph
 

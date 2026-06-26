@@ -22,9 +22,12 @@ import {
 
 export interface GetStyleFingerprintInput {
   directory: string;
-  /** Profile for one community/region id (from `get_map`). Overrides `filePath`. */
+  /** Profile for one community/region id (from `get_map`). */
   communityId?: string;
-  /** Profile for a single file (exact path or unique path suffix). */
+  /**
+   * Profile for a single file (exact path or unique path suffix). Most specific scope: when both
+   * `filePath` and `communityId` are supplied, `filePath` wins.
+   */
   filePath?: string;
   /** Restrict the returned languages to this one (canonical name, e.g. "TypeScript"). */
   language?: string;
@@ -35,15 +38,28 @@ const DESCRIPTIVE_NOTE =
   'style rule. Ratios carry sample sizes; an idiom below the evidence floor or enforced by the ' +
   'language/formatter reports a null signal rather than a misleading or tautological ratio.';
 
-/** Read the persisted fingerprint, fail-soft (null when absent/unreadable/wrong shape). */
+/**
+ * Read the persisted fingerprint, fail-soft (null when absent/unreadable/wrong shape). The shape
+ * check validates EVERY field the handler later dereferences — `byLanguage`/`files`/`regions`
+ * (arrays) and `fileRegions` (object) — so a truncated or stale partial artifact degrades to the
+ * graceful "run analyze" guidance rather than throwing a raw TypeError downstream.
+ */
+function isWellFormed(fp: unknown): fp is StyleFingerprint {
+  if (!fp || typeof fp !== 'object') return false;
+  const o = fp as Record<string, unknown>;
+  return (
+    Array.isArray(o.byLanguage) &&
+    Array.isArray(o.files) &&
+    Array.isArray(o.regions) &&
+    typeof o.fileRegions === 'object' && o.fileRegions !== null && !Array.isArray(o.fileRegions)
+  );
+}
+
 async function readStyleFingerprint(absDir: string): Promise<StyleFingerprint | null> {
   try {
     const path = join(absDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_STYLE_FINGERPRINT);
     const parsed: unknown = JSON.parse(await readFile(path, 'utf-8'));
-    if (!parsed || typeof parsed !== 'object' || !Array.isArray((parsed as StyleFingerprint).byLanguage)) {
-      return null;
-    }
-    return parsed as StyleFingerprint;
+    return isWellFormed(parsed) ? parsed : null;
   } catch {
     return null;
   }

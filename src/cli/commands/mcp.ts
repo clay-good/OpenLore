@@ -1664,8 +1664,8 @@ export const TOOL_DEFINITIONS = [
       type: 'object',
       properties: {
         directory: { type: 'string', description: DIR_DESC },
-        communityId: { type: 'string', description: 'Profile one community/region by id (list ids with get_map). Overrides filePath.' },
-        filePath: { type: 'string', description: 'Profile a single file (exact path or a unique path suffix).' },
+        communityId: { type: 'string', description: 'Profile one community/region by id (list ids with get_map).' },
+        filePath: { type: 'string', description: 'Profile a single file (exact path or a unique path suffix). Most specific scope: if both filePath and communityId are given, filePath wins.' },
         language: { type: 'string', description: 'Restrict the returned languages to this one (e.g. "TypeScript").' },
       },
       required: ['directory'],

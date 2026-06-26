@@ -22,6 +22,30 @@ describe('classifyNamingCase', () => {
     expect(classifyNamingCase('MAX_RETRIES')).toBeNull(); // screaming const, not a fn-name style
     expect(classifyNamingCase('')).toBeNull();
   });
+
+  it('a leading/trailing underscore run (privacy/dunder) does not drive the verdict', () => {
+    // The privacy prefix is not a naming-CASE choice — strip it, then classify the core.
+    expect(classifyNamingCase('_privateHelper')).toBe('camelCase');
+    expect(classifyNamingCase('_snake_private')).toBe('snake_case');
+    expect(classifyNamingCase('_')).toBeNull(); // bare underscore — NOT snake_case
+    expect(classifyNamingCase('__')).toBeNull();
+    expect(classifyNamingCase('__init__')).toBeNull(); // dunder → single word `init` → null
+    expect(classifyNamingCase('value_')).toBeNull(); // trailing-underscore single word
+  });
+
+  it('a name mixing an interior underscore and uppercase is neither convention → null', () => {
+    expect(classifyNamingCase('mixed_Case')).toBeNull();
+    expect(classifyNamingCase('snake_And_Camel')).toBeNull();
+  });
+
+  it('handles non-letter starts and acronyms without crashing or misleading', () => {
+    expect(classifyNamingCase('$jquery')).toBeNull(); // starts with non-letter
+    expect(classifyNamingCase('2fast')).toBeNull();
+    expect(classifyNamingCase('getURLPath')).toBe('camelCase');
+    expect(classifyNamingCase('HTTPServer')).toBe('PascalCase');
+    expect(classifyNamingCase('a')).toBeNull();
+    expect(classifyNamingCase('A')).toBeNull();
+  });
 });
 
 // A deliberately skewed TypeScript fixture: arrow + const + ternary + await + template + camelCase

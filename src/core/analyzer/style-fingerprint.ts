@@ -166,20 +166,27 @@ export const STYLE_FINGERPRINT_LANGUAGES: ReadonlySet<string> = new Set(Object.k
 
 /**
  * Classify a name's case ONLY when it expresses a multi-word convention (a case boundary: an
- * interior uppercase or an underscore). A single all-lowercase word (`handle`) exercises no
- * camel-vs-snake discretion, so it returns null and is excluded from the ratio — honest, not a
- * thumb on the scale. Screaming `CONSTANT_CASE` is not a function-naming style → null too.
+ * interior uppercase or an interior underscore). Honesty rules baked in so a name can't be
+ * mis-bucketed and skew the house-style ratio:
+ *   - A leading/trailing underscore RUN is stripped first — a privacy prefix (`_helper`) or a
+ *     dunder (`__init__`) is not a naming-CASE choice, so it must not drive the verdict (a bare
+ *     `_` then classifies as null, not snake_case).
+ *   - A name mixing an interior underscore AND an uppercase letter (`mixed_Case`) follows neither
+ *     convention cleanly → null, rather than being forced into snake_case.
+ *   - A single all-lowercase word (`handle`) or SCREAMING_CASE (`MAX_RETRIES`) exercises no
+ *     camel-vs-snake discretion → null (excluded from the ratio, not a thumb on the scale).
  */
 export function classifyNamingCase(name: string): 'camelCase' | 'PascalCase' | 'snake_case' | null {
-  if (!name || !/^[A-Za-z_]/.test(name)) return null;
-  const hasUnderscore = name.includes('_');
-  const hasInteriorUpper = /[a-z0-9][A-Z]/.test(name);
-  const startsUpper = /^[A-Z]/.test(name);
-  const allUpper = /^[A-Z][A-Z0-9_]*$/.test(name);
-  if (allUpper) return null; // SCREAMING_CASE / single upper word — not a discretionary fn-name style
-  if (hasUnderscore && !hasInteriorUpper) return 'snake_case';
-  if (startsUpper) return 'PascalCase';
-  if (hasInteriorUpper) return 'camelCase';
+  if (!name) return null;
+  const core = name.replace(/^_+/, '').replace(/_+$/, ''); // drop privacy/dunder underscore runs
+  if (!core || !/^[A-Za-z]/.test(core)) return null; // empty, or starts with a non-letter ($, digit)
+  if (/^[A-Z][A-Z0-9_]*$/.test(core)) return null; // SCREAMING_CASE / single upper word
+  const hasInteriorUnderscore = core.includes('_');
+  const hasUpper = /[A-Z]/.test(core);
+  if (hasInteriorUnderscore && hasUpper) return null; // mixed convention — not a single choice
+  if (hasInteriorUnderscore) return 'snake_case';
+  if (/^[A-Z]/.test(core)) return 'PascalCase';
+  if (/[a-z0-9][A-Z]/.test(core)) return 'camelCase'; // interior upper, lower start
   return null; // single lowercase word — no case discretion expressed
 }
 

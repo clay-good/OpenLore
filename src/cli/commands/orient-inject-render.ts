@@ -97,6 +97,14 @@ interface OrientCallPath {
   callees?: CallNeighbour[];
 }
 
+/** Compact house-style summary for the touched region (change: add-codebase-style-fingerprint). */
+interface RegionStyle {
+  scope?: string;
+  language?: string;
+  communityId?: string;
+  dominantIdioms?: string[];
+}
+
 export interface LeanOrientResult {
   task?: string;
   searchMode?: string;
@@ -106,6 +114,7 @@ export interface LeanOrientResult {
   specDomains?: string[];
   callPaths?: OrientCallPath[];
   suggestedTools?: string[];
+  regionStyle?: RegionStyle;
 }
 
 /**
@@ -177,6 +186,17 @@ export function renderInjectionBlock(result: LeanOrientResult, cfg: ResolvedInje
 
   const files = clean(result.relevantFiles, 8);
   if (files.length > 0) optional.push(`Relevant files: ${files.join(', ')}`);
+
+  // House style for the area in scope — the payoff of the style fingerprint on the Pi surface, so
+  // an agent matches the local idioms without a second tool call. One bounded, budget-gated line;
+  // defensively filtered against a partial payload (change: add-codebase-style-fingerprint).
+  const rs = result.regionStyle;
+  const idioms = clean(rs?.dominantIdioms, 4);
+  if (rs && idioms.length > 0) {
+    const lang = typeof rs.language === 'string' ? rs.language : 'code';
+    const scope = rs.scope === 'repository' ? 'repo' : 'region';
+    optional.push(`House style (${lang}, ${scope}): ${idioms.join(', ')}`);
+  }
 
   const names = (ns: CallNeighbour[] | undefined): string =>
     [...new Set((ns ?? []).map(n => n?.name).filter((x): x is string => typeof x === 'string' && x.length > 0))]

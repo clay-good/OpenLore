@@ -959,8 +959,11 @@ export class McpWatcher {
       for (const f of changedFiles) {
         const language = detectLanguage(f.rel);
         const style = await extractFileStyle({ path: f.rel, content: f.content, language });
+        // A supported-but-empty edit still yields a defined (empty-counter) style, matching a full
+        // analyze — so this drop branch only fires if extractFileStyle returns undefined, i.e. an
+        // unsupported language (extension-keyed, so rare for an in-place edit). Defensive, not hot.
         if (style) { byPath.set(f.rel, style); touched = true; }
-        else if (byPath.delete(f.rel)) touched = true; // became unsupported / unparseable
+        else if (byPath.delete(f.rel)) touched = true;
       }
       if (!touched) return;
 

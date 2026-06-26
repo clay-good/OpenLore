@@ -105,4 +105,35 @@ describe('handleGetStyleFingerprint', () => {
       await rm(empty, { recursive: true, force: true });
     }
   });
+
+  it('a partial/stale artifact (byLanguage present, files/regions/fileRegions missing) fails soft', async () => {
+    // Regression: the guard must validate EVERY field the handler dereferences, so a half-written
+    // or schema-v0 artifact degrades to the analyze-guidance error rather than a raw TypeError.
+    const partialDir = await mkdtemp(join(tmpdir(), 'openlore-partial-'));
+    const ad = join(partialDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
+    await mkdir(ad, { recursive: true });
+    await writeFile(join(ad, ARTIFACT_STYLE_FINGERPRINT), JSON.stringify({ evidenceFloor: 12, byLanguage: [] }));
+    try {
+      for (const args of [{}, { filePath: 'x.ts' }, { communityId: 'c1' }]) {
+        const res = (await handleGetStyleFingerprint({ directory: partialDir, ...args })) as Record<string, unknown>;
+        expect(typeof res.error, `scope ${JSON.stringify(args)} should error, not throw`).toBe('string');
+        expect(res.error).toMatch(/analyze/i);
+      }
+    } finally {
+      await rm(partialDir, { recursive: true, force: true });
+    }
+  });
+
+  it('truncated/garbage JSON fails soft to the guidance error', async () => {
+    const garbageDir = await mkdtemp(join(tmpdir(), 'openlore-garbage-'));
+    const ad = join(garbageDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
+    await mkdir(ad, { recursive: true });
+    await writeFile(join(ad, ARTIFACT_STYLE_FINGERPRINT), '{ this is not json');
+    try {
+      const res = (await handleGetStyleFingerprint({ directory: garbageDir })) as Record<string, unknown>;
+      expect(typeof res.error).toBe('string');
+    } finally {
+      await rm(garbageDir, { recursive: true, force: true });
+    }
+  });
 });

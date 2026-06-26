@@ -146,6 +146,26 @@ describe('renderInjectionBlock', () => {
     expect(large).toContain('Suggested tools');
   });
 
+  it('surfaces the regionStyle house-style line (Pi parity) when present, bounded', () => {
+    const withStyle = {
+      ...richResult,
+      regionStyle: {
+        scope: 'region',
+        language: 'TypeScript',
+        communityId: 'src/api/run.ts::openloreRun',
+        dominantIdioms: ['binding=const (0.99)', 'functionNaming=camelCase (0.98)', 'asyncForm=await (0.97)'],
+      },
+    };
+    const block = renderInjectionBlock(withStyle, cfg());
+    expect(block).toContain('House style (TypeScript, region): binding=const (0.99)');
+  });
+
+  it('omits the house-style line when regionStyle is absent or empty (lean orient result)', () => {
+    expect(renderInjectionBlock(richResult, cfg())).not.toContain('House style');
+    const emptyStyle = { ...richResult, regionStyle: { scope: 'repository', language: 'Go', dominantIdioms: [] } };
+    expect(renderInjectionBlock(emptyStyle, cfg())).not.toContain('House style');
+  });
+
   it('never leaks "undefined", "[object Object]", or stray commas from a partial result', () => {
     // A forward-incompatible / partial orient payload: missing names, null array
     // elements, a call path with no function name. None must reach the agent.
