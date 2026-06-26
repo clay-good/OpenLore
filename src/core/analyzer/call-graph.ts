@@ -32,6 +32,7 @@ import { buildFunctionCfg, type FunctionCfg, type CfgNode } from './cfg.js';
 import { stableSymbolId, stableClassId } from '../scip/moniker.js';
 import { synthesizeTypeHierarchyEdges, type RawMethodCall } from './cha.js';
 import { logger } from '../../utils/logger.js';
+import { tallyFileStyle, type FileStyleRaw, type StyleAstNode } from './style-fingerprint.js';
 
 // ============================================================================
 // TYPES
@@ -326,6 +327,14 @@ export interface CallGraphResult {
     avgFanIn: number;
     avgFanOut: number;
   };
+  /**
+   * Raw per-file style idiom counters (change: add-codebase-style-fingerprint), keyed by file
+   * path. Tallied in the same per-file AST walk that extracts nodes/edges — no second parse.
+   * Present only for languages with a declared counter set (fail-soft otherwise). Transient
+   * build-time data: rolled up into the persisted `style-fingerprint.json` by the artifact
+   * generator, not carried into {@link SerializedCallGraph}.
+   */
+  styleByFile?: Map<string, FileStyleRaw>;
 }
 
 /** Serializable version (Maps replaced by arrays) for JSON storage */
@@ -448,6 +457,27 @@ function isIgnoredCallee(name: string, language?: string): boolean {
   if (set) return set.has(name);
   if (ALL_IGNORED_CALLEES.has(name)) return true;
   return false;
+}
+
+/**
+ * Tally the style fingerprint for one file over its already-parsed tree (no second parse). Reuses
+ * the function names the extractor already collected for the naming-case counter. Fail-soft: any
+ * error or unsupported language yields `undefined`, never a thrown build (change:
+ * add-codebase-style-fingerprint).
+ */
+function tallyStyle(language: string, tree: Parser.Tree, nodes: FunctionNode[], filePath: string): FileStyleRaw | undefined {
+  try {
+    const raw = tallyFileStyle({
+      language,
+      rootNode: tree.rootNode as unknown as StyleAstNode,
+      functionNames: nodes.map(n => n.name),
+    });
+    if (!raw) return undefined;
+    raw.filePath = filePath;
+    return raw;
+  } catch {
+    return undefined;
+  }
 }
 
 // ============================================================================
@@ -1044,7 +1074,7 @@ const TS_CALL_QUERY = `
 async function extractTSGraph(
   filePath: string,
   content: string
-): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[]; cfg: Map<string, FunctionCfg> }> {
+): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[]; cfg: Map<string, FunctionCfg>; style?: FileStyleRaw }> {
   const r = await getTSParser();
   if (!r) return { nodes: [], rawEdges: [], cfg: new Map() };
   const { parser, lang } = r;
@@ -1154,7 +1184,8 @@ async function extractTSGraph(
     });
   }
 
-  return { nodes, rawEdges, cfg };
+  const style = tallyStyle('TypeScript', tree, nodes, filePath);
+  return { nodes, rawEdges, cfg, style };
 }
 
 // ============================================================================
@@ -1196,7 +1227,7 @@ const PY_METHOD_CALL_QUERY = `
 async function extractPyGraph(
   filePath: string,
   content: string
-): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[]; cfg: Map<string, FunctionCfg> }> {
+): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[]; cfg: Map<string, FunctionCfg>; style?: FileStyleRaw }> {
   const r = await getPyParser();
   if (!r) return { nodes: [], rawEdges: [], cfg: new Map() };
   const { parser, lang } = r;
@@ -1316,7 +1347,8 @@ async function extractPyGraph(
     });
   }
 
-  return { nodes, rawEdges, cfg };
+  const style = tallyStyle('Python', tree, nodes, filePath);
+  return { nodes, rawEdges, cfg, style };
 }
 
 // ============================================================================
@@ -1344,7 +1376,7 @@ const GO_CALL_QUERY = `
 async function extractGoGraph(
   filePath: string,
   content: string
-): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[]; cfg: Map<string, FunctionCfg> }> {
+): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[]; cfg: Map<string, FunctionCfg>; style?: FileStyleRaw }> {
   const r = await getGoParser();
   if (!r) return { nodes: [], rawEdges: [], cfg: new Map() };
   const { parser, lang } = r;
@@ -1407,7 +1439,8 @@ async function extractGoGraph(
     rawEdges.push({ callerId: caller.id, calleeName, line: nodeCapture.node.startPosition.row + 1, calleeObject: objectCapture?.node.text });
   }
 
-  return { nodes, rawEdges, cfg };
+  const style = tallyStyle('Go', tree, nodes, filePath);
+  return { nodes, rawEdges, cfg, style };
 }
 
 // ============================================================================
@@ -4388,11 +4421,12 @@ export class CallGraphBuilder {
     const allNodes = new Map<string, FunctionNode>();
     const allRawEdges: RawEdge[] = [];
     const allCfgs = new Map<string, FunctionCfg>();
+    const styleByFile = new Map<string, FileStyleRaw>();
 
     // Pass 1: Extract nodes and raw edges from each file
     for (const file of files) {
       try {
-        let result: { nodes: FunctionNode[]; rawEdges: RawEdge[]; cfg?: Map<string, FunctionCfg> };
+        let result: { nodes: FunctionNode[]; rawEdges: RawEdge[]; cfg?: Map<string, FunctionCfg>; style?: FileStyleRaw };
 
         if (file.language === 'Python') {
           result = await extractPyGraph(file.path, file.content);
@@ -4441,6 +4475,12 @@ export class CallGraphBuilder {
         }
         allRawEdges.push(...result.rawEdges);
         if (result.cfg) for (const [id, fnCfg] of result.cfg) allCfgs.set(id, fnCfg);
+        if (result.style) {
+          // The TS extractor handles both TS and JS; relabel to the real file language so the
+          // fingerprint slices JS and TS apart (their counter sets are identical).
+          result.style.language = file.language;
+          styleByFile.set(file.path, result.style);
+        }
       } catch (error) {
         // Skip files that fail to parse (syntax errors, encoding issues, etc.)
         if (process.env.DEBUG) {
@@ -4983,6 +5023,7 @@ export class CallGraphBuilder {
         avgFanIn: internalNodes.length > 0 ? totalFanIn / internalNodes.length : 0,
         avgFanOut: internalNodes.length > 0 ? totalFanOut / internalNodes.length : 0,
       },
+      styleByFile: styleByFile.size > 0 ? styleByFile : undefined,
     };
   }
 
@@ -5043,6 +5084,28 @@ function assignClassStableIds(classes: ClassNode[]): void {
   for (const c of classes) {
     const sid = stableClassId(c.name, c.isModule);
     if (sid) c.stableId = sid;
+  }
+}
+
+/**
+ * Tally ONE file's style fingerprint in isolation (change: add-codebase-style-fingerprint).
+ * Reuses the same per-language extractor (and its single parse) the full build uses, returning
+ * only the style counters. Used by the watcher to refresh a changed file's fingerprint without a
+ * whole-graph rebuild. Fail-soft: an unsupported language or parse failure returns `undefined`.
+ */
+export async function extractFileStyle(
+  file: { path: string; content: string; language: string },
+): Promise<FileStyleRaw | undefined> {
+  try {
+    let result: { style?: FileStyleRaw } | undefined;
+    if (file.language === 'Python') result = await extractPyGraph(file.path, file.content);
+    else if (file.language === 'TypeScript' || file.language === 'JavaScript') result = await extractTSGraph(file.path, file.content);
+    else if (file.language === 'Go') result = await extractGoGraph(file.path, file.content);
+    else return undefined;
+    if (result?.style) result.style.language = file.language;
+    return result?.style;
+  } catch {
+    return undefined;
   }
 }
 

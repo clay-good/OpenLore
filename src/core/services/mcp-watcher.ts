@@ -31,6 +31,8 @@ import { spawn } from 'node:child_process';
 import chokidar, { type FSWatcher } from 'chokidar';
 import { extractSignatures, detectLanguage } from '../analyzer/signature-extractor.js';
 import type { FunctionNode } from '../analyzer/call-graph.js';
+import { extractFileStyle } from '../analyzer/call-graph.js';
+import { assembleFromRegions, type StyleFingerprint, type FileStyleRaw } from '../analyzer/style-fingerprint.js';
 import { isTestFile } from '../analyzer/test-file.js';
 import { EdgeStore } from './edge-store.js';
 import { refreshAttestationCounts } from '../analyzer/index-attestation.js';
@@ -40,6 +42,7 @@ import {
   OPENLORE_ANALYSIS_SUBDIR,
   ARTIFACT_LLM_CONTEXT,
   ARTIFACT_DEPENDENCY_GRAPH,
+  ARTIFACT_STYLE_FINGERPRINT,
   WATCH_DEBOUNCE_MS,
   WATCH_MAX_BATCH_MS,
   WATCH_BULK_THRESHOLD,
@@ -616,6 +619,12 @@ export class McpWatcher {
     //      betweenness) are O(graph) and left to the next full `analyze`.
     await this.updateDependencyGraph(changedFiles);
 
+    // 3.7. Style fingerprint — keep style-fingerprint.json's per-file idiom counters live for the
+    //      changed files (change: add-codebase-style-fingerprint). Incremental: re-tally only the
+    //      changed files, reuse the stored file→region map (communities are O(graph), recomputed
+    //      on the next full analyze). byLanguage and per-file profiles stay exact.
+    await this.updateStyleFingerprint(changedFiles);
+
     // 4. Vector update — decoupled from signature freshness (Step 4).
     const isBulk = consumedVcsBulk || changedFiles.length >= this.bulkThreshold;
     if (this.embed && !this.embedDegraded && context.callGraph) {
@@ -925,6 +934,53 @@ export class McpWatcher {
   }
 
   /**
+   * Keep style-fingerprint.json live for the changed (and deleted) files (change:
+   * add-codebase-style-fingerprint). Re-tally each changed file's idioms with the same extractor
+   * the full build uses; splice it into the persisted raw per-file counters; drop deleted/now-
+   * unsupported files; then re-roll-up byLanguage + per-file + regions, reusing the STORED
+   * file→region map (communities are O(graph), refreshed on the next full analyze — a brand-new
+   * file is simply unattributed to a region until then). Best-effort + atomic; never throws into
+   * the batch. No-op when no fingerprint exists yet (a full analyze creates it).
+   */
+  private async updateStyleFingerprint(changedFiles: ChangedFile[], deletedRels: string[] = []): Promise<void> {
+    const fpPath = join(this.outputPath, ARTIFACT_STYLE_FINGERPRINT);
+    try {
+      const raw = await readFile(fpPath, 'utf-8').catch(() => null);
+      if (!raw) return; // no fingerprint yet — next full analyze will create it
+      const fp = JSON.parse(raw) as StyleFingerprint;
+      if (!Array.isArray(fp.files)) return;
+
+      const byPath = new Map<string, FileStyleRaw>(fp.files.map(f => [f.filePath, f]));
+      let touched = false;
+
+      for (const rel of deletedRels) {
+        if (byPath.delete(rel)) touched = true;
+      }
+      for (const f of changedFiles) {
+        const language = detectLanguage(f.rel);
+        const style = await extractFileStyle({ path: f.rel, content: f.content, language });
+        if (style) { byPath.set(f.rel, style); touched = true; }
+        else if (byPath.delete(f.rel)) touched = true; // became unsupported / unparseable
+      }
+      if (!touched) return;
+
+      // Reconstruct region labels from the existing regions so re-roll-up keeps them.
+      const labels: Record<string, string> = {};
+      for (const r of fp.regions ?? []) if (r.label) labels[r.communityId] = r.label;
+
+      const updated = assembleFromRegions([...byPath.values()], fp.fileRegions ?? {}, labels, fp.evidenceFloor);
+      const tmp = `${fpPath}.${process.pid}.tmp`;
+      await writeFile(tmp, JSON.stringify(updated, null, 2));
+      await rename(tmp, fpPath);
+      if (this.debug) {
+        process.stderr.write(`[mcp-watcher] style fingerprint: refreshed ${changedFiles.length} changed / ${deletedRels.length} deleted\n`);
+      }
+    } catch (err) {
+      process.stderr.write(`[mcp-watcher] style-fingerprint error: ${(err as Error).message}\n`);
+    }
+  }
+
+  /**
    * Reconcile file DELETIONS across every lane so a removed file leaves no
    * phantom state: call-graph nodes/edges (incoming and outgoing), signatures,
    * text-line rows, vector rows, and dependency-graph node + edges. Best-effort;
@@ -1003,6 +1059,9 @@ export class McpWatcher {
 
     // 5. Dependency graph — remove the deleted nodes and every edge touching them.
     await this.removeFromDependencyGraph(absPaths);
+
+    // 6. Style fingerprint — drop the deleted files' counters and re-roll-up.
+    await this.updateStyleFingerprint([], rels);
 
     if (this.debug) {
       process.stderr.write(`[mcp-watcher] reconciled ${rels.length} deletion(s)\n`);

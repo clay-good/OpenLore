@@ -121,6 +121,9 @@ export const ARTIFACT_UI_INVENTORY = 'ui-inventory.json';
 /** Filename for the environment variable inventory artifact */
 export const ARTIFACT_ENV_INVENTORY = 'env-inventory.json';
 
+/** Filename for the codebase style fingerprint artifact (change: add-codebase-style-fingerprint) */
+export const ARTIFACT_STYLE_FINGERPRINT = 'style-fingerprint.json';
+
 /** Filename for the external package inventory artifact */
 export const ARTIFACT_EXTERNAL_PACKAGES = 'external-packages.json';
 

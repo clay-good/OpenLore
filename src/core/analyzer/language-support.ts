@@ -15,7 +15,7 @@
  *   - `cfgOverlay`     ← {@link cfgSupportsLanguage}        (cfg.ts)
  *   - `typeInference`  ← {@link TYPE_INFERENCE_LANGUAGES}   (type-inference-engine.ts)
  *   - `iacProjection`  ← {@link isIacLanguage}              (iac/types.ts)
- *   - `styleFingerprint` is unbuilt → unsupported for every language.
+ *   - `styleFingerprint`← {@link STYLE_FINGERPRINT_LANGUAGES} (style-fingerprint.ts)
  * A behavioral test (`language-support.test.ts`) cross-checks each flag against the live
  * extractor on a fixture, so the registry cannot silently drift from reality.
  *
@@ -33,6 +33,7 @@ import { CALLGRAPH_LANGUAGES } from './call-graph.js';
 import { SIGNATURE_LANGUAGES } from './signature-extractor.js';
 import { TYPE_INFERENCE_LANGUAGES } from './type-inference-engine.js';
 import { IMPORT_RESOLUTION_LANGUAGES } from './import-resolver-bridge.js';
+import { STYLE_FINGERPRINT_LANGUAGES } from './style-fingerprint.js';
 
 /** The closed set of capabilities the registry tracks, in deterministic column order. */
 export const CAPABILITIES = [
@@ -54,7 +55,7 @@ export const CAPABILITY_DESCRIPTIONS: Record<Capability, string> = {
   imports: 'Relative-import resolution into the `import`-confidence cross-file edge path (raises call-resolution recall).',
   cfgOverlay: 'A control-flow-graph overlay (branches/loops) via the data-driven CFG SPECS table.',
   typeInference: 'Lightweight receiver-type inference, used to resolve method calls to their class.',
-  styleFingerprint: 'Codebase style/enforced-scope fingerprint (not yet built for any language).',
+  styleFingerprint: 'Descriptive idiom fingerprint (function form, binding, naming case, …) with an evidence floor + enforcement-awareness.',
   iacProjection: 'Infrastructure-as-code projection (resources/edges) onto the unified graph.',
 };
 
@@ -102,7 +103,7 @@ function deriveCapabilities(language: string): Capability[] {
   if (IMPORT_RESOLUTION_LANGUAGES.has(language)) out.push('imports');
   if (cfgSupportsLanguage(language)) out.push('cfgOverlay');
   if (TYPE_INFERENCE_LANGUAGES.has(language)) out.push('typeInference');
-  // styleFingerprint: unbuilt → never supported (see CAPABILITY_DESCRIPTIONS).
+  if (STYLE_FINGERPRINT_LANGUAGES.has(language)) out.push('styleFingerprint');
   if (isIacLanguage(language)) out.push('iacProjection');
   // Return in canonical CAPABILITIES order for determinism.
   return CAPABILITIES.filter(c => out.includes(c));

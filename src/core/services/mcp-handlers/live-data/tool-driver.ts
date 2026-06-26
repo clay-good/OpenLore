@@ -158,6 +158,11 @@ export const TOOL_REGISTRY: Record<string, ToolPlan> = {
     // Whole-repo public-surface listing over the cached repo's graph (surface mode).
     buildArgs: (f) => ({ directory: f.directory }),
   },
+  get_style_fingerprint: {
+    kind: 'read',
+    // Whole-repo descriptive idiom profile over the cached repo's fingerprint.
+    buildArgs: (f) => ({ directory: f.directory }),
+  },
   get_function_body: {
     kind: 'read',
     buildArgs: (f) =>

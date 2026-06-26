@@ -14,10 +14,11 @@ import {
 } from './language-support.js';
 import { cfgSupportsLanguage, CFG_LANGUAGES } from './cfg.js';
 import { isIacLanguage, IAC_LANGUAGES } from './iac/types.js';
-import { CALLGRAPH_LANGUAGES, CallGraphBuilder, serializeCallGraph } from './call-graph.js';
+import { CALLGRAPH_LANGUAGES, CallGraphBuilder, serializeCallGraph, extractFileStyle } from './call-graph.js';
 import { TYPE_INFERENCE_LANGUAGES as TI, inferTypesFromSource } from './type-inference-engine.js';
 import { SIGNATURE_LANGUAGES as SIG, extractSignatures, detectLanguage } from './signature-extractor.js';
 import { IMPORT_RESOLUTION_LANGUAGES as IMP, buildBaseImportMap } from './import-resolver-bridge.js';
+import { STYLE_FINGERPRINT_LANGUAGES as STY } from './style-fingerprint.js';
 
 // ── registry is DERIVED from the live sources: exact cross-checks ──
 
@@ -46,11 +47,33 @@ describe('language-support registry — faithful to live extractor sources', () 
     }
   });
 
-  it('styleFingerprint is unsupported for every language (unbuilt)', () => {
+  it('styleFingerprint cell === STYLE_FINGERPRINT_LANGUAGES membership for EVERY language (exact, drift-proof)', () => {
     for (const lang of ALL_LANGUAGES) {
-      expect(languageSupport(lang).capabilities).not.toContain('styleFingerprint');
+      const claims = languageSupport(lang).capabilities.includes('styleFingerprint');
+      expect(claims, `styleFingerprint mismatch for ${lang}`).toBe(STY.has(lang));
     }
   });
+});
+
+// styleFingerprint is behaviorally exercised against the live tally (no silent over-claim): every
+// STYLE_FINGERPRINT_LANGUAGES member must actually produce idiom counters on a real fixture.
+const STYLE_FIXTURES: Record<string, string> = {
+  TypeScript: 'a.ts||const f = () => { const x = c ? 1 : 2; return `v${x}`; };',
+  JavaScript: 'a.js||const f = () => { const x = c ? 1 : 2; return `v${x}`; };',
+  Python: 'a.py||def my_fn():\n    return 1 if c else 2',
+  Go: 'a.go||package m\nfunc Foo() { x := 1; var y int = 2 }',
+};
+describe('styleFingerprint is behaviorally faithful (no silent over-claim)', () => {
+  for (const lang of STY) {
+    it(`${lang}: the live tally produces counters`, async () => {
+      const fx = STYLE_FIXTURES[lang];
+      expect(fx, `add a STYLE_FIXTURES entry for ${lang}`).toBeTruthy();
+      const [path, content] = fx.split('||');
+      const style = await extractFileStyle({ path, content, language: lang });
+      expect(style, `${lang} should tally a fingerprint`).toBeTruthy();
+      expect(Object.keys(style!.counters).length, `${lang} produced no counters`).toBeGreaterThan(0);
+    });
+  }
 });
 
 // ── EVERY set member is behaviorally exercised against the live extractor (no over-claim) ──

@@ -36,9 +36,10 @@ describe('get_language_support — named-language mode (pure registry, no analys
     expect(view.supported).toContain('callGraph');
     expect(view.supported).toContain('cfgOverlay');
     expect(view.supported).toContain('typeInference');
+    // Go HAS a style fingerprint (binding := vs var measured; naming-case enforced → null).
+    expect(view.supported).toContain('styleFingerprint');
     // Go is NOT in the live import path → honestly unclaimed.
     expect(view.unsupported).toContain('imports');
-    expect(view.unsupported).toContain('styleFingerprint');
     // named mode never reads the index
     expect(readCachedContext).not.toHaveBeenCalled();
   });

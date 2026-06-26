@@ -31,7 +31,7 @@ test-selection *conclusion* tools, and multi-repo federation. The gaps are narro
 
 | # | Change | Depends on (makes better, does not block) |
 |---|--------|--------------------------------------------|
-| 1 | `add-codebase-style-fingerprint` | — |
+| 1 | `add-codebase-style-fingerprint` **(SHIPPED 2026-06-26 — `get_style_fingerprint` tool + `openlore style-fingerprint` CLI + `orient` `regionStyle`; descriptive idiom profile tallied in the call-graph walk; registry now derives the `styleFingerprint` capability; TS/JS/Python/Go)** | — |
 | 2 | `add-declarative-language-support-registry` **(SHIPPED — PR #203; `get_language_support` tool + coverage matrix)** | — (foundation; widens 1 and 5 for free as languages land) |
 | 3 | `add-index-integrity-attestation` | — |
 | 4 | `add-shareable-graph-artifact` | 3 (the integrity stamp is what a consumer validates) |

@@ -20,7 +20,9 @@ import {
   ARTIFACT_ROUTE_INVENTORY,
   ARTIFACT_UI_INVENTORY,
   ARTIFACT_CALL_GRAPH_DB,
+  ARTIFACT_STYLE_FINGERPRINT,
 } from '../../constants.js';
+import { buildStyleFingerprint, type StyleFingerprint } from './style-fingerprint.js';
 import type { ScoredFile, ProjectType } from '../../types/index.js';
 import type { RepositoryMap } from './repository-mapper.js';
 import type { DependencyGraphResult } from './dependency-graph.js';
@@ -171,6 +173,13 @@ export interface AnalysisArtifacts {
   summaryMarkdown: string;
   dependencyDiagram: string;
   llmContext: LLMContext;
+  /**
+   * Descriptive per-language idiom profile (change: add-codebase-style-fingerprint), computed in
+   * the call-graph AST walk and rolled up to repo/region/file. Absent when no supported language
+   * is present (fail-soft). Persisted as its own `style-fingerprint.json` to keep the hot
+   * llm-context.json lean.
+   */
+  styleFingerprint?: StyleFingerprint;
 }
 
 /**
@@ -251,6 +260,8 @@ export function repoStructureToRepoMap(rs: RepoStructure): RepositoryMap {
  */
 export class AnalysisArtifactGenerator {
   private options: Required<ArtifactGeneratorOptions>;
+  /** Style fingerprint computed during the last generateLLMContext (call-graph walk). */
+  private _styleFingerprint?: StyleFingerprint;
 
   constructor(options: ArtifactGeneratorOptions) {
     this.options = {
@@ -281,6 +292,7 @@ export class AnalysisArtifactGenerator {
       summaryMarkdown,
       dependencyDiagram,
       llmContext,
+      styleFingerprint: this._styleFingerprint,
     };
   }
 
@@ -354,6 +366,15 @@ export class AnalysisArtifactGenerator {
       saves.push(writeFile(
         join(this.options.outputDir, ARTIFACT_ENV_INVENTORY),
         JSON.stringify(enrichment.envVars, null, 2)
+      ));
+    }
+
+    // Style fingerprint (change: add-codebase-style-fingerprint) — its own artifact so the hot
+    // llm-context.json stays lean. Absent when no supported language is present.
+    if (artifacts.styleFingerprint) {
+      saves.push(writeFile(
+        join(this.options.outputDir, ARTIFACT_STYLE_FINGERPRINT),
+        JSON.stringify(artifacts.styleFingerprint, null, 2)
       ));
     }
 
@@ -1198,6 +1219,21 @@ export class AnalysisArtifactGenerator {
     const builder = new CallGraphBuilder();
     const callGraphResult = await builder.build(callGraphFiles);
     const callGraph = serializeCallGraph(callGraphResult);
+
+    // Style fingerprint (change: add-codebase-style-fingerprint): roll the raw per-file idiom
+    // counters tallied in the call-graph walk up to repo/region/file, attributing files to the
+    // community holding the plurality of their functions. Absent when no supported language is
+    // present (fail-soft). Stashed for generate()/generateAndSave() to persist.
+    this._styleFingerprint = callGraphResult.styleByFile
+      ? buildStyleFingerprint(
+          [...callGraphResult.styleByFile.values()],
+          callGraph.nodes.map(n => ({
+            filePath: n.filePath,
+            communityId: n.communityId,
+            communityLabel: n.communityLabel,
+          })),
+        )
+      : undefined;
 
     // Intra-procedural CFG/def-use overlay (spec: add-intraprocedural-cfg-dataflow-overlay).
     // Transient: persisted to SQLite by writeEdgesToSQLite, then stripped before

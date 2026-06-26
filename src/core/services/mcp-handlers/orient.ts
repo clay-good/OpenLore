@@ -22,8 +22,14 @@ import { expandHandle, applyTokenBudget, collapseExactDuplicates, omissionNote }
 import { readOpenLoreConfig } from '../config-manager.js';
 import { isIacLanguage } from '../../analyzer/iac/types.js';
 import type { RagManifest } from '../../generator/rag-manifest-generator.js';
-import { ARTIFACT_RAG_MANIFEST } from '../../../constants.js';
+import { ARTIFACT_RAG_MANIFEST, ARTIFACT_STYLE_FINGERPRINT } from '../../../constants.js';
 import { loadArchitectureRules } from '../../architecture/rules.js';
+import {
+  compactIdiomSummary,
+  STYLE_FINGERPRINT_LANGUAGES,
+  type StyleFingerprint,
+  type LanguageProfile,
+} from '../../analyzer/style-fingerprint.js';
 import { scanViolations } from '../../architecture/check.js';
 import {
   classifyRole,
@@ -786,6 +792,51 @@ export async function handleOrient(
     }
   }
 
+  // ── Local house style for the touched region (change: add-codebase-style-fingerprint) ──
+  // So an agent that never calls get_style_fingerprint still arrives knowing the dominant idioms
+  // of the area it is about to edit. Drawn from the SAME computed fingerprint, obeying the SAME
+  // evidence floor + enforcement-awareness (compactIdiomSummary omits null/enforced idioms).
+  // Bounded (≤4 idioms), region-scoped where the region has strong evidence, else repo-scoped for
+  // the touched language. Additive + fail-open — orient never breaks on it.
+  let regionStyle:
+    | { scope: 'region' | 'repository'; language: string; communityId?: string; dominantIdioms: string[] }
+    | undefined;
+  if (!lean && relevantFunctions.length > 0) {
+    try {
+      const raw = await readFile(join(outputDir, ARTIFACT_STYLE_FINGERPRINT), 'utf-8').catch(() => null);
+      const fp = raw ? (JSON.parse(raw) as StyleFingerprint) : null;
+      if (fp && Array.isArray(fp.byLanguage)) {
+        // Dominant supported language among the matched functions.
+        const langCounts = new Map<string, number>();
+        for (const f of relevantFunctions) {
+          if (f.language && STYLE_FINGERPRINT_LANGUAGES.has(f.language)) {
+            langCounts.set(f.language, (langCounts.get(f.language) ?? 0) + 1);
+          }
+        }
+        const lang = [...langCounts.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))[0]?.[0];
+        if (lang) {
+          // Prefer the region of the top-matched function's file; fall back to the repo profile.
+          const regionId = fp.fileRegions?.[relevantFunctions[0].filePath];
+          let profile: LanguageProfile | undefined;
+          let scope: 'region' | 'repository' = 'repository';
+          let communityId: string | undefined;
+          if (regionId) {
+            const region = fp.regions.find(r => r.communityId === regionId);
+            const lp = region?.byLanguage.find(p => p.language === lang);
+            if (lp) { profile = lp; scope = 'region'; communityId = regionId; }
+          }
+          if (!profile) profile = fp.byLanguage.find(p => p.language === lang);
+          const dominantIdioms = profile ? compactIdiomSummary(profile) : [];
+          if (dominantIdioms.length > 0) {
+            regionStyle = { scope, language: lang, ...(communityId ? { communityId } : {}), dominantIdioms };
+          }
+        }
+      }
+    } catch {
+      // additive enrichment — never fail orient over the style summary
+    }
+  }
+
   // Minimal-sufficient navigation core — always returned (Spec 27).
   const core = {
     task,
@@ -831,6 +882,7 @@ export async function handleOrient(
     ...(architectureViolations !== undefined ? { architectureViolations } : {}),
     ...(landmarks !== undefined ? { landmarks } : {}),
     ...(behavioralHotspots !== undefined ? { behavioralHotspots } : {}),
+    ...(regionStyle !== undefined ? { regionStyle } : {}),
     nextSteps,
   };
 }

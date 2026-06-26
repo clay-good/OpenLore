@@ -26,6 +26,7 @@ import { handleMapInFlightConflicts } from './mcp-handlers/interference-map.js';
 import { handleGetLanguageSupport } from './mcp-handlers/language-support.js';
 import { handleReportCoverageGaps } from './mcp-handlers/coverage-gaps.js';
 import { handleCertifyPublicSurface } from './mcp-handlers/public-surface.js';
+import { handleGetStyleFingerprint } from './mcp-handlers/style-fingerprint.js';
 import type { TaskDescriptor } from './mcp-handlers/change-footprint.js';
 import { handleFindDeadCode } from './mcp-handlers/reachability.js';
 import { handleVerifyClaim } from './mcp-handlers/claim-verification.js';
@@ -364,6 +365,10 @@ export async function dispatchTool(
   } else if (name === 'certify_public_surface') {
     const { directory, baseRef, maxResults } = args as { directory: string; baseRef?: string; maxResults?: number };
     return handleCertifyPublicSurface({ directory, baseRef, maxResults });
+  } else if (name === 'get_style_fingerprint') {
+    const { directory, communityId, filePath, language } =
+      args as { directory: string; communityId?: string; filePath?: string; language?: string };
+    return handleGetStyleFingerprint({ directory, communityId, filePath, language });
   }
   throw new UnknownToolError(name);
 }

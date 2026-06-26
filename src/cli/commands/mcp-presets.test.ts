@@ -412,8 +412,12 @@ describe('tools/list payload budget (spec-28)', () => {
   // it stays OUT of minimal/navigation/memory/verify/federation/coordination, so the lean default
   // prefix is unchanged. The residual is the genuine cost of its schema. Conscious decision, not
   // silent drift.
+  // Bumped 74_000 → 76_000 when the `get_style_fingerprint` tool was added to the full surface
+  // (change: add-codebase-style-fingerprint) — a read-only descriptive-idiom conclusion tool. It
+  // joins ONLY the opt-in `full` surface; it stays OUT of the lean navigation default, so the lean
+  // prefix is unchanged. The residual is the genuine cost of its schema. Conscious decision.
   it('full surface stays within its prefix budget', () => {
-    expect(payloadBytes({ preset: 'full' })).toBeLessThan(74_000);
+    expect(payloadBytes({ preset: 'full' })).toBeLessThan(76_000);
   });
 
   it('the lean DEFAULT surface (no selector) is the lean navigation payload, not the full one', () => {

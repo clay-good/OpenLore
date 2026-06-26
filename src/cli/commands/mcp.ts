@@ -1646,6 +1646,32 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: 'get_style_fingerprint',
+    description:
+      'USE THIS WHEN: you are about to write or edit code and want to match the codebase\'s house ' +
+      'style instead of your training-prior default. Returns a DESCRIPTIVE, deterministic idiom ' +
+      'profile measured from the AST: per language, the dominant choice for each of a fixed set of ' +
+      'idioms (arrow vs. declared function, const vs. let, ternary vs. if, await vs. .then, template ' +
+      'vs. concatenation, function-naming case) reported as { dominant, ratio, samples }. Repository ' +
+      'profile by default; pass communityId for a region (from get_map) or filePath for one file. ' +
+      'HONEST BY CONSTRUCTION: an idiom below the evidence floor, or one the language/formatter ' +
+      'enforces (e.g. Go ties identifier case to visibility), reports a null signal rather than a ' +
+      'misleading or tautological ratio — never a guess. Descriptive, not prescriptive: it measures ' +
+      'what the code IS, emits no lint judgment and no composite style score. Supported languages: ' +
+      'TypeScript, JavaScript, Python, Go (others contribute nothing, fail-soft). No LLM, offline. ' +
+      'Run analyze_codebase first.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        directory: { type: 'string', description: DIR_DESC },
+        communityId: { type: 'string', description: 'Profile one community/region by id (list ids with get_map). Overrides filePath.' },
+        filePath: { type: 'string', description: 'Profile a single file (exact path or a unique path suffix).' },
+        language: { type: 'string', description: 'Restrict the returned languages to this one (e.g. "TypeScript").' },
+      },
+      required: ['directory'],
+    },
+  },
+  {
     name: 'detect_changes',
     description:
       'Detect recently changed functions and rank them by blast radius. ' +
@@ -1897,6 +1923,7 @@ const TOOL_ANNOTATIONS: Record<string, typeof _RO | typeof _RWI | typeof _RW> = 
   plan_parallel_work: _RO, map_in_flight_conflicts: _RO, get_language_support: _RO,
   report_coverage_gaps: _RO,
   certify_public_surface: _RO,
+  get_style_fingerprint: _RO,
 };
 
 // Tools that touch external entities (LLM / network) → openWorldHint: true.
