@@ -3,7 +3,8 @@ import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EdgeStore, SCHEMA_VERSION } from '../services/edge-store.js';
-import { ARTIFACT_CALL_GRAPH_DB, ARTIFACT_FINGERPRINT } from '../../constants.js';
+import { ARTIFACT_CALL_GRAPH_DB, ARTIFACT_FINGERPRINT, OPENLORE_ANALYSIS_REL_PATH } from '../../constants.js';
+import { runBundleExport } from '../../cli/export/bundle.js';
 import { computeAttestation, writeAttestation, reconcile } from './index-attestation.js';
 import type { FunctionNode, CallEdge, ClassNode } from './call-graph.js';
 import {
@@ -118,6 +119,16 @@ describe('index-bundle: export', () => {
     // A fresh attestation was synthesized describing the exported store.
     expect(manifest.attestation.committed).toEqual({ files: 2, functions: 3, edges: 2, classes: 1 });
     expect(manifest.files.map(f => f.name)).toContain('index-attestation.json');
+  });
+
+  it('writes the artifact into a not-yet-existing --out directory (creates parents, no ENOENT)', async () => {
+    const projectRoot = join(work, 'proj');
+    await buildAnalysisDir(join(projectRoot, OPENLORE_ANALYSIS_REL_PATH), 'abc1234');
+    const out = join(work, 'nested', 'deep', 'index-bundle.olbundle');
+    expect(existsSync(out)).toBe(false);
+    const code = await runBundleExport({ out, projectRoot });
+    expect(code).toBe(0);
+    expect(existsSync(out)).toBe(true);
   });
 
   it('refuses to export when no call-graph.db is present', async () => {

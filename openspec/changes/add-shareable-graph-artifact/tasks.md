@@ -48,7 +48,13 @@
       corrupt-but-consistent db → degrades to rebuild (not a crash). e2e-verified + unit tests.
 
 ## 7. Verify & dogfood
-- [x] `npm run lint`, `npm run typecheck`, `npm run test:run` (5252 passed), `npm run build` green.
+- [x] `npm run lint`, `npm run typecheck`, `npm run test:run` (5258 passed; the 3 intermittent
+      failures are the pre-existing property-based `memory-invariant` flake, unrelated — pass in
+      isolation), `npm run build` green.
+- [x] `export bundle --out` into a not-yet-existing directory creates the parent dir instead of
+      throwing an uncaught `ENOENT`; the `.gitattributes` hint falls back to the `*.olbundle` glob
+      when the artifact is written outside the repo (no meaningless `../…` pattern). Regression test
+      added (`writes the artifact into a not-yet-existing --out directory`).
 - [x] Dogfood: exported OpenLore's own index (22 files, 5.92 MB), imported into a fresh worktree at the
       same commit → verified `import-fresh`, 5728 nodes / 13958 edges, no re-analyze; ancestor-commit and
       diverged-commit worktrees → rebuild; corrupt/missing file → clean error.

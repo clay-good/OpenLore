@@ -9,8 +9,8 @@
  */
 
 import { existsSync } from 'node:fs';
-import { writeFile } from 'node:fs/promises';
-import { resolve, join, relative } from 'node:path';
+import { writeFile, mkdir } from 'node:fs/promises';
+import { resolve, join, relative, dirname } from 'node:path';
 import { createRequire } from 'node:module';
 import { logger } from '../../utils/logger.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_REL_PATH, ARTIFACT_CALL_GRAPH_DB } from '../../constants.js';
@@ -65,17 +65,24 @@ export async function runBundleExport(opts: BundleExportOptions): Promise<number
     throw err;
   }
 
+  // Create the output's parent dir so `--out dist/x.olbundle` into a not-yet-existing folder
+  // writes cleanly instead of throwing an uncaught ENOENT (the default path always exists).
+  await mkdir(dirname(outPath), { recursive: true });
   await writeFile(outPath, result.buffer);
 
   const { manifest, buffer } = result;
   const sizeMb = (buffer.length / (1024 * 1024)).toFixed(2);
   const relOut = relative(projectRoot, outPath) || outPath;
+  // The .gitattributes hint only makes sense for an in-repo path; if the artifact was written
+  // outside the repo (relative path escapes with `..`), recommend the default glob instead of a
+  // meaningless `../…` pattern git can't apply.
+  const gitattrPath = relOut.startsWith('..') ? `*.olbundle` : (relOut || BUNDLE_DEFAULT_FILENAME);
   logger.success(
     `Exported graph bundle → ${relOut}\n` +
     `  ${manifest.files.length} files, ${sizeMb} MB, schema v${manifest.schemaVersion}, ` +
     `commit ${manifest.sourceCommit ?? 'unknown'}\n` +
     '  Tip: this is a generated, regenerate-don\'t-merge artifact. Add to .gitattributes:\n' +
-    `    ${relative(projectRoot, outPath) || BUNDLE_DEFAULT_FILENAME} -diff -merge`,
+    `    ${gitattrPath} -diff -merge`,
   );
   return 0;
 }
