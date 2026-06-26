@@ -718,9 +718,12 @@ export type ContinuityReason = 'renamed' | 'moved' | 'renamed-and-moved';
 
 /**
  * The evidence basis for a continuity match (add-symbol-identity-continuity):
- * - `exact-body` — the new symbol's source span is byte-identical to the old one.
- * - `exact-signature` — the normalized signature shape is identical (the name
- *   and/or location moved but the parameter shape did not).
+ * - `exact-body` — the new symbol's source span is byte-identical to the old one
+ *   (a pure move; the name did not change).
+ * - `exact-signature` — the new span is identical to the old one EXCEPT the symbol's
+ *   own name changed (a rename), verified by substituting the new name back to the
+ *   old name and confirming it hashes to the recorded baseline span — NOT a mere
+ *   parameter-shape match.
  * Both are admitted only on a strict one-to-one match; anything ambiguous yields
  * no pair (see {@link StructuralAnchor.possiblyMovedTo}).
  */

@@ -7,8 +7,10 @@
 ## 1. Continuity detection
 - [x] Compute disappeared/appeared symbol sets between two adjacent indexed states.
       (`src/core/decisions/continuity-carry-forward.ts` `buildContinuity`)
-- [x] Match on `exact-body` (content-hash identity) or `exact-signature` (normalized signature + shape);
-      admit only one-to-one matches; record `reason` + `basis`. (`src/core/analyzer/continuity.ts`)
+- [x] Match on `exact-body` (content-hash identity) or `exact-signature` (body identical *modulo the
+      symbol's own name*, verified by name substitution against the recorded baseline hash — not a
+      parameter-shape match); admit only one-to-one matches; record `reason` + `basis`.
+      (`src/core/analyzer/continuity.ts`)
 - [x] Optionally corroborate file moves with git rename detection (never sufficient alone). — the
       detector matches on content/signature directly; a git-rename corroboration is unnecessary because
       `exact-body`/`exact-signature` already prove identity. (Left as the stronger basis, not used alone.)

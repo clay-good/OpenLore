@@ -261,7 +261,13 @@ describe('carryForwardContinuity (disk)', () => {
       consequences: 'Do not add side-channel permission checks elsewhere.',
       proposedRequirement: null,
       affectedDomains: ['auth'], affectedFiles: [file],
-      anchors: [{ nodeId: oldNode.id, stableId: oldNode.stableId, symbolName: 'authorize', filePath: file, contentHash: hashSpan(oldSrc) }],
+      // A real decision carries BOTH a symbol anchor and a file-level anchor
+      // (resolveDecisionAnchors). The carry must re-point the symbol anchor and
+      // leave the file anchor untouched.
+      anchors: [
+        { nodeId: oldNode.id, stableId: oldNode.stableId, symbolName: 'authorize', filePath: file, contentHash: hashSpan(oldSrc) },
+        { filePath: file, contentHash: hashSpan(oldSrc) },
+      ],
       sessionId: 's1', recordedAt: new Date(0).toISOString(), confidence: 'high', syncedToSpecs: [],
     };
     const ds = await loadDecisionStore(root);
@@ -277,10 +283,16 @@ describe('carryForwardContinuity (disk)', () => {
     expect(summary.carried).toHaveLength(1);
 
     const reloaded = await loadDecisionStore(root);
-    const a = reloaded.decisions[0].anchors!.find((x) => x.nodeId);
+    const anchors = reloaded.decisions[0].anchors!;
+    const a = anchors.find((x) => x.nodeId);
     expect(a?.nodeId).toBe(`${file}::checkAccess`);
     expect(a?.symbolName).toBe('checkAccess');
     expect(a?.carriedAcross).toMatchObject({ from: { symbolName: 'authorize' }, reason: 'renamed', basis: 'exact-signature' });
+    // The file-level anchor (no nodeId) is preserved untouched — not carried, not dropped.
+    const fileAnchor = anchors.find((x) => !x.nodeId);
+    expect(fileAnchor).toBeDefined();
+    expect(fileAnchor?.filePath).toBe(file);
+    expect(fileAnchor?.carriedAcross).toBeUndefined();
   });
 
   it('does NOT carry onto an unrelated newcomer that merely references the deleted symbol (C2)', async () => {

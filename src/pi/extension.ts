@@ -768,7 +768,7 @@ export const NAV_TOOLS: NavToolSpec[] = [
     name: 'recall',
     label: 'openlore recall',
     description: 'Recall code-anchored memories for what you are about to work on, each with a freshness verdict (fresh / drifted / orphaned).',
-    guideline: 'When starting work on code, call openlore_recall with a short `task` to surface durable notes left by earlier sessions. Drifted memories need verifying; orphaned ones are never authoritative.',
+    guideline: 'When starting work on code, call openlore_recall with a short `task` to surface durable notes left by earlier sessions. Drifted memories need verifying; orphaned ones are never authoritative. A memory whose anchored symbol was renamed/moved is carried forward (re-pointed) at the next `openlore analyze` and recalls with a `carriedAcross` note; an orphaned memory may list `possiblyMovedTo` candidates to reconcile.',
     parameters: Type.Object({
       task: Type.Optional(Type.String({ description: 'What you are about to work on (optional) — scopes the recall; omit to scan all.' })),
       type: Type.Optional(Type.String({ description: 'Restrict notes to this type (decisions excluded when set).' })),
