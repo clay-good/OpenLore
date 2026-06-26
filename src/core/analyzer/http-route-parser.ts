@@ -792,8 +792,17 @@ export async function extractAllHttpEdges(filePaths: string[]): Promise<{
     filePaths.map(async fp => {
       const ext = extname(fp).toLowerCase();
       if (['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs'].includes(ext)) {
-        const calls = await extractHttpCalls(fp);
+        // A JS/TS file can be a client (fetch/axios calls), a server (route
+        // registrations), or both (a full-stack monorepo). Extract BOTH so a
+        // SAME-LANGUAGE client→server link (TS frontend → TS Express/NestJS/Next
+        // backend) is matched — not only the cross-language JS/TS→Python/Java
+        // case. Routes in .py/.java files are already extracted below.
+        const [calls, routes] = await Promise.all([
+          extractHttpCalls(fp),
+          extractTsRouteDefinitions(fp),
+        ]);
         allCalls.push(...calls);
+        allRoutes.push(...routes);
       } else if (['.py', '.pyw'].includes(ext)) {
         const routes = await extractRouteDefinitions(fp);
         allRoutes.push(...routes);
@@ -1089,8 +1098,18 @@ export async function extractTsRouteDefinitions(filePath: string): Promise<Route
       path = `${prefixes[0]}/${path}`;
     }
 
-    // Find the handler name from the same line
-    const lineText = lines[lineOf(m.index) - 1] ?? '';
+    // EXPRESS_ROUTE_RE opens with `(?:^|[\s;(,])` so the match can start on the
+    // character BEFORE the receiver — and when a route registration begins a line
+    // (the common top-level `app.get(...)` idiom), that leading char is the prior
+    // line's newline, so `m.index` lands one line early. Advance to the actual
+    // receiver token before computing the line, or the handler-name lookup reads
+    // the previous line (e.g. a `function h(req, res)` def → grabs `res`) and the
+    // cross-service edge / route-handler synthesis silently fails to wire.
+    const recOffset = Math.max(0, m[0].search(/(?:app|router|server|api|fastify|r)\s*\./));
+    const routeLine = lineOf(m.index + recOffset);
+
+    // Find the handler name from the route registration line
+    const lineText = lines[routeLine - 1] ?? '';
     const handlerMatch = lineText.match(/,\s*(?:async\s+)?(?:function\s+)?(\w+)\s*[,)]/);
     const handlerName = handlerMatch?.[1] ?? 'handler';
 
@@ -1105,7 +1124,7 @@ export async function extractTsRouteDefinitions(filePath: string): Promise<Route
       normalizedPath: normalizeUrl(path),
       handlerName,
       framework,
-      line: lineOf(m.index),
+      line: routeLine,
       ...contract,
     });
   }
