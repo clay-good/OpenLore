@@ -24,6 +24,13 @@
 > so a just-renamed file can read low-churn and be over-flagged `surprising-change`).
 > Plus a dedicated full-surface-only preset guard for `briefing_since`, a CLI-surface test,
 > and `refExists` unit tests. Test count 13 → 26.
+>
+> Review round 3 (2026-06-26): fixed a region-scope note that misreported "nothing changed" when a
+> `filePattern` matched no file, and a false `baseRefFallback` on a self-resolving base (the empty-tree
+> SHA). Scoped the briefing to **hand-authored source code** — IaC resources and generated/vendored
+> files are now excluded, matching the significance-ranking sibling `report_coverage_gaps`; the shared
+> `isCodeNode`/`isExcludedPath` predicates were extracted to `mcp-handlers/code-node.ts` so the two
+> scopes can't drift. Added a README prose feature section (sibling parity). Test count → 29.
 
 ## Why
 

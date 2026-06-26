@@ -25,6 +25,7 @@
 
 import { validateDirectory, readCachedContext } from './utils.js';
 import { seedsFromFiles, handleSelectTests } from './test-impact.js';
+import { isCodeNode, isExcludedPath } from './code-node.js';
 import { computeLandmarkSignals } from '../../analyzer/landmark-signals.js';
 import { analyzeChangeCoupling } from '../../provenance/change-coupling.js';
 import { refExists } from '../../drift/git-diff.js';
@@ -112,7 +113,14 @@ export async function handleBriefingSince(input: BriefingSinceInput): Promise<un
   const scopedFiles = input.filePattern
     ? changedFiles.filter(f => f.includes(input.filePattern!))
     : changedFiles;
-  let changedSymbols = seedsFromFiles(cg, scopedFiles);
+  // Scope to hand-authored SOURCE CODE only — the same candidate set the significance-
+  // ranking sibling `report_coverage_gaps` uses (`code-node.ts`). The tiers (call-graph
+  // hub/orchestrator/chokepoint) and the tests-to-run are code concepts, so infrastructure
+  // (IaC) resources and generated/vendored shims do not belong in this ranking; infra
+  // change-impact has its own lens (`blast_radius` / `analyze_impact`). `seedsFromFiles`
+  // already drops external + test nodes.
+  let changedSymbols = seedsFromFiles(cg, scopedFiles)
+    .filter(n => isCodeNode(n) && !isExcludedPath(n.filePath));
   if (input.filePattern) {
     changedSymbols = changedSymbols.filter(n => n.filePath.includes(input.filePattern!));
   }
@@ -190,6 +198,7 @@ export async function handleBriefingSince(input: BriefingSinceInput): Promise<un
   const caveats: string[] = [
     'Changed symbols are at FILE granularity: every production function in a file changed since the base ref is briefed, even if that specific function was not edited.',
     'Significance is a tier label from existing classifiers (hub/orchestrator/chokepoint) plus raw evidence — not a weighted score. The caller makes the final judgment.',
+    'Scope is hand-authored source code: infrastructure (IaC) resources and generated/vendored files are excluded (their change-impact has its own lens — blast_radius / analyze_impact). Non-code changed files still count toward changedFiles.',
   ];
   // The unresolved-ref disclosure leads the caveats — it changes which base every
   // number below was computed against, so it must not be buried.

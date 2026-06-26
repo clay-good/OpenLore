@@ -32,9 +32,9 @@ import { buildAdjacency } from './graph.js';
 import { deadCodeIds } from './reachability.js';
 import { seedsFromSymbols, seedsFromFiles } from './test-impact.js';
 import { computeLandmarkSignals, type LandmarkSignal } from '../../analyzer/landmark-signals.js';
-import { isIacLanguage } from '../../analyzer/iac/types.js';
+import { isCodeNode, isExcludedPath } from './code-node.js';
 import { assembleBoundary, computeStaleness, edgeBasisWithinSet } from './confidence-boundary.js';
-import type { SerializedCallGraph, FunctionNode } from '../../analyzer/call-graph.js';
+import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
 
 export interface ReportCoverageGapsInput {
   directory: string;
@@ -62,32 +62,6 @@ export interface ReportCoverageGapsInput {
 
 /** Hard cap on returned gaps — over-large requests are clamped, overflow reported. */
 const MAX_RESULTS_CAP = 500;
-
-/** A code node we can reason about: not external, not infrastructure. */
-function isCodeNode(n: FunctionNode): boolean {
-  return !n.isExternal && !isIacLanguage(n.language);
-}
-
-/**
- * Generated / vendored paths are excluded from the untested surface — a generated
- * binding or a `.d.ts` shim need not carry its own test. The analyzer already
- * skips most of these at walk time; this is a defensive second pass so a stray
- * generated node never inflates the gap count.
- */
-function isExcludedPath(filePath: string): boolean {
-  // Prefix a slash so a leading path segment (e.g. "vendor/lib.ts") matches the
-  // same "/segment/" tests as a nested one ("src/vendor/lib.ts").
-  const p = '/' + filePath.replace(/^\/+/, '');
-  return (
-    p.endsWith('.d.ts') ||
-    p.includes('.generated.') ||
-    p.includes('/generated/') ||
-    p.includes('/__generated__/') ||
-    p.includes('/node_modules/') ||
-    p.includes('/vendor/') ||
-    p.includes('/vendored/')
-  );
-}
 
 /** Unbounded forward reach from seeds over the adjacency (BFS). */
 function reachAll(seeds: Iterable<string>, forward: Map<string, Set<string>>): Set<string> {

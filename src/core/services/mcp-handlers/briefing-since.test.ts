@@ -233,6 +233,28 @@ describe('handleBriefingSince', () => {
     expect(r.caveats.some(c => /could not be resolved/i.test(c))).toBe(false);
   });
 
+  it('briefs source code only — excludes IaC resources and generated/vendored files', async () => {
+    // A changed bicep (IaC) hub, a changed .d.ts shim hub, and a real code hub all in
+    // the diff. Only the code hub should be briefed — the tiers (call-graph fan-in) and
+    // tests-to-run are code concepts; infra/generated change-impact has its own lens.
+    const codeHub = node({ id: 'src/real.ts::realHub', fanIn: 9, fanOut: 2 });
+    const iacHub = node({ id: 'infra/main.bicep::storageAccount', language: 'Bicep', fanIn: 9, fanOut: 2 });
+    const dtsHub = node({ id: 'src/types.d.ts::ShimType', fanIn: 9, fanOut: 2 });
+    mockedReadCtx.mockResolvedValue({
+      callGraph: graph([codeHub, iacHub, dtsHub], { hubFunctions: [codeHub, iacHub, dtsHub] }),
+    } as unknown as Awaited<ReturnType<typeof readCachedContext>>);
+    mockedDiff.mockResolvedValue(diffFiles(['src/real.ts', 'infra/main.bicep', 'src/types.d.ts']));
+    mockedCoupling.mockResolvedValue(coupling({ 'src/real.ts': 1, 'infra/main.bicep': 1, 'src/types.d.ts': 1 }, 40));
+
+    const r = (await handleBriefingSince({ directory: '/repo' })) as BriefingResult;
+    const names = r.briefing.map(b => b.name);
+    expect(names).toContain('realHub');
+    expect(names).not.toContain('storageAccount'); // IaC excluded
+    expect(names).not.toContain('ShimType');       // .d.ts excluded
+    expect(r.changedSymbols).toBe(1);
+    expect(r.caveats.some(c => /infrastructure \(IaC\)/.test(c))).toBe(true);
+  });
+
   it('a region scope that matched no changed file says "nothing matched", not "nothing changed"', async () => {
     // Production code DID change (src/core.ts), but the region filter excludes it —
     // the note must not claim "nothing changed" (a false all-clear).
