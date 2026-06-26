@@ -43,6 +43,7 @@
 | `openlore coverage-gaps` | Ranked structural test-coverage gaps: important code with NO reaching test (the inverse of `select_tests`), no runtime. Scope to a diff (`--base`/`--symbols`) or region (`--file-pattern`). Read-only, never blocks | Yes |
 | `openlore certify-public-surface` | Certify the public API surface (no `--base`) or the breaking-change verdict for the working-tree diff (`--base <ref>`): removed/renamed exports, incompatible signatures, each breaking change with its in-repo consumers. Read-only, deterministic, never blocks | Yes |
 | `openlore style-fingerprint` | Descriptive per-language idiom profile (function form, binding, conditional, async, string, naming case) for the repo, a region (`--community <id>`), or a file (`--file <path>`); `--language` filters, `--json` for machine output. Evidence-floor + enforcement-aware nulls. Read-only, deterministic, never blocks | Yes |
+| `openlore briefing-since` | Catch-up briefing of what changed since a base ref (`--base <ref>`), ranked by significance tier — surprising-change (a stable hub moved) > hub-change > chokepoint-change > ordinary-change — from existing labels (not a score); grouped by region, with tests-to-run and a no-silent-truncation receipt. Scope with `--file-pattern`, bound with `--max`, `--json` for machine output. Read-only, deterministic, never blocks | Yes |
 | `openlore review` | Deterministic structural PR review (structural delta + blast radius) as a Markdown/JSON briefing; pairs with the bundled GitHub Action | No |
 | `openlore preflight` | CI staleness gate: fail when the analysis graph is stale relative to the working tree | No |
 | `openlore export scip` | Export the analysis graph as an SCIP index for the Sourcegraph / Glean ecosystem | No |
@@ -96,7 +97,7 @@ openlore install [options]   # detect agents, wire surfaces, build the index
                          #   continue, agents-md
   --preset <name>        # MCP tool preset to wire: navigation (lean default),
                          #   minimal, memory, verify, federation, coordination, or full
-  --all-tools            # Wire the full 68-tool surface (alias of --preset full)
+  --all-tools            # Wire the full 69-tool surface (alias of --preset full)
   --dry-run              # Print planned changes without writing any files
   --force                # Overwrite OpenLore-managed blocks even if hand-edited
   --uninstall            # Remove OpenLore-managed blocks and entries
@@ -112,7 +113,7 @@ openlore connect remove [agent]      # disconnect that agent
   <agent>                # Positional: claude-code | cursor | cline | continue |
                          #   agents-md (omit for an interactive picker)
   --preset <name>        # MCP tool preset to wire (same names as install)
-  --all-tools            # Wire the full 68-tool surface (alias of --preset full)
+  --all-tools            # Wire the full 69-tool surface (alias of --preset full)
   --dry-run              # Print planned changes without writing any files
   --force                # Overwrite OpenLore-managed blocks even if hand-edited
   --no-analyze           # Configure surfaces only; do not build the index
@@ -132,7 +133,7 @@ openlore mcp [options]             # start the stdio MCP server
 
   --preset <name>        # Expose a named preset (default: lean navigation, 10 tools)
   --minimal              # Expose only the core 6 governance tools
-  --all-tools            # Expose the full surface — all 68 tools (alias --preset full)
+  --all-tools            # Expose the full surface — all 69 tools (alias --preset full)
   --watch-auto           # Auto-detect + incrementally re-index the project dir
   --no-watch-auto        # Disable auto-watch (use for one-shot tool calls)
   --daemon               # Delegate tool calls to a shared `openlore serve` daemon
@@ -450,6 +451,18 @@ openlore certify-public-surface --base HEAD --json  # machine-readable verdict (
 
 The closed classification rules: a **removed** or **renamed** export, an **added required parameter**, a parameter made **required**, or a **narrowed** parameter/return type is `breaking`; an added **trailing optional** parameter, a **new export**, or a **widened** return type is `non-breaking`; anything that cannot be *proven* compatible from the available signatures (untyped/dynamically-typed, or an incomparable type change) is `potentially-breaking` — **never silently safe**, since there is no type checker and no build in the loop. A renamed export is reported as a rename (via symbol-identity continuity), not a remove+add. A symbol still defined but no longer exported is reported as `visibility-reduced` (public → private); a re-export (`export { X } from …`) follows its definition — it is tracked at the definition site, not separately at the barrel, so a barrel'd symbol is never double-counted. External/unindexed consumers are disclosed as a known-unknowable boundary, not implied absent. Signature classification covers TypeScript/JavaScript/Python; other languages fail-soft to surface membership only (a removed/added export is still reported, without a signature classification). Test files are excluded from the surface. Read-only and advisory — it is a report and never blocks. The matching MCP tool `certify_public_surface` is exposed under `openlore mcp --preset full`.
 
+#### Change significance briefing
+
+```bash
+openlore briefing-since                              # what changed since the auto base (main → master → HEAD~1)
+openlore briefing-since --base HEAD~20               # brief everything that changed in the last 20 commits
+openlore briefing-since --file-pattern src/core/auth # region scope
+openlore briefing-since --max 25                     # bound the briefing (default 50, capped 200)
+openlore briefing-since --base main --json           # machine-readable (stable shape) for CI / an orchestrator
+```
+
+`briefing-since` answers the reviewer / catch-up / onboarding question the other change tools don't — not "what does *my* pending diff do?" but **"a lot changed since I last looked; which of it structurally matters?"** Each changed production symbol is labeled with exactly one **tier**, ordered highest-first: `surprising-change` (a high-fan-in **hub** whose file **rarely changed before** — a normally-stable, widely-depended-on symbol that suddenly moved) > `hub-change` (a broad high-fan-in/high-fan-out hub) > `chokepoint-change` (a high-fan-in funnel) > `ordinary-change`. The tiers come **entirely from existing classifiers** (`landmark-signals` hub/orchestrator/chokepoint + the `volatilityLevel` churn classifier) plus raw evidence (fan-in, fan-out, prior churn) — there is **no weighted significance score and no new tuning constant**; the caller makes the final judgment from the evidence. **Honest by construction**: changed symbols are at **file granularity** (every function in a changed file is briefed, disclosed in a caveat); the `surprising-change` label is **withheld** when git history is too shallow (`< 2` non-bulk commits) to say "rarely changed before"; a bounded briefing always carries a **truncation receipt** (omitted count + per-tier breakdown + lowest tier reached) and **never drops a higher tier for a lower one**. The cursor is the **base ref**, never wall-clock time. It also includes the tests to run for the whole change set (via `select_tests`), grouped by region/community. Deterministic and offline. The matching MCP tool `briefing_since` is exposed under `openlore mcp --preset full`.
+
 #### Enforcement gate
 
 `openlore enforce` is the **unified** finding-enforcement gate. It collects governance findings from every in-scope source, resolves each finding's enforcement class through the single declared [`enforcement.policy`](configuration.md#enforcement-policy) (with the legacy `blastRadius.block` / `impactCertificate.block` sugar lowered onto it), and — in `--hook` mode — fails the commit only when at least one finding resolves to `blocking`:
@@ -508,7 +521,7 @@ over plain HTTP so non-MCP clients (e.g. the [Pi](https://pi.dev) extension in
 
 ```bash
 openlore serve                          # navigation preset, ephemeral port, watch on
-openlore serve --preset all --port 7077 # all 68 tools on a fixed port
+openlore serve --preset all --port 7077 # all 69 tools on a fixed port
 openlore serve --no-watch               # transport only, no freshness lane
 openlore serve --stop                   # stop the daemon serving this directory
 ```

@@ -111,6 +111,7 @@ export const TOOL_OUTPUT_CLASS: Record<string, ToolOutputClass> = {
   report_coverage_gaps: 'conclusion',
   certify_public_surface: 'conclusion',
   get_style_fingerprint: 'conclusion',
+  briefing_since: 'conclusion',
 };
 
 /** The tools intentionally allowed to emit raw topology, sorted for stable assertions. */

@@ -1672,6 +1672,34 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: 'briefing_since',
+    description:
+      'USE THIS WHEN: a lot changed in this repo since you last looked (a large PR to review, ' +
+      'returning after time away, onboarding onto an active codebase) and you want to know which ' +
+      'changes STRUCTURALLY MATTER — not a flat wall of changed lines. Unlike blast_radius / ' +
+      'change_impact_certificate (which brief YOUR pending diff), this briefs everything that ' +
+      'changed SINCE a base ref. Returns the changed production symbols ranked into a fixed tier ' +
+      'order — surprising-change (a high-fan-in hub whose file rarely changed before) > hub-change ' +
+      '(a broad high-fan-in/high-fan-out hub) > chokepoint-change (a high-fan-in funnel) > ' +
+      'ordinary-change — using labels OpenLore already computes, NOT a weighted score. Each briefed ' +
+      'symbol carries its labels and raw evidence (fan-in, fan-out, prior churn), grouped by region, ' +
+      'with the tests to run for the whole change set. HONEST BY CONSTRUCTION: changed symbols are ' +
+      'file-granular (disclosed); the surprising-change label is withheld when git history is too ' +
+      'shallow to say "rarely changed before"; a bounded briefing always carries a truncation receipt ' +
+      '(omitted count + lowest tier reached) and never drops a higher tier for a lower one. The cursor ' +
+      'is the base ref, never wall-clock time. Deterministic, offline, no LLM. Run analyze_codebase first.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        directory: { type: 'string', description: DIR_DESC },
+        baseRef: { type: 'string', description: 'Git ref to brief changes SINCE (e.g. "main", a PR base, "HEAD~20"). Default "auto": resolves main → master → HEAD~1 → empty tree.' },
+        filePattern: { type: 'string', description: 'Region scope — only brief changes whose file path contains this substring.' },
+        maxResults: { type: 'number', description: 'Bound on briefed symbols, highest-tier-first (default 50, max 200). Overflow is reported in the truncation receipt.' },
+      },
+      required: ['directory'],
+    },
+  },
+  {
     name: 'detect_changes',
     description:
       'Detect recently changed functions and rank them by blast radius. ' +
@@ -1924,6 +1952,7 @@ const TOOL_ANNOTATIONS: Record<string, typeof _RO | typeof _RWI | typeof _RW> = 
   report_coverage_gaps: _RO,
   certify_public_surface: _RO,
   get_style_fingerprint: _RO,
+  briefing_since: _RO,
 };
 
 // Tools that touch external entities (LLM / network) → openWorldHint: true.

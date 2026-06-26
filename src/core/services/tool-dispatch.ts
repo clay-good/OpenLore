@@ -27,6 +27,7 @@ import { handleGetLanguageSupport } from './mcp-handlers/language-support.js';
 import { handleReportCoverageGaps } from './mcp-handlers/coverage-gaps.js';
 import { handleCertifyPublicSurface } from './mcp-handlers/public-surface.js';
 import { handleGetStyleFingerprint } from './mcp-handlers/style-fingerprint.js';
+import { handleBriefingSince } from './mcp-handlers/briefing-since.js';
 import type { TaskDescriptor } from './mcp-handlers/change-footprint.js';
 import { handleFindDeadCode } from './mcp-handlers/reachability.js';
 import { handleVerifyClaim } from './mcp-handlers/claim-verification.js';
@@ -369,6 +370,10 @@ export async function dispatchTool(
     const { directory, communityId, filePath, language } =
       args as { directory: string; communityId?: string; filePath?: string; language?: string };
     return handleGetStyleFingerprint({ directory, communityId, filePath, language });
+  } else if (name === 'briefing_since') {
+    const { directory, baseRef, filePattern, maxResults } =
+      args as { directory: string; baseRef?: string; filePattern?: string; maxResults?: number };
+    return handleBriefingSince({ directory, baseRef, filePattern, maxResults });
   }
   throw new UnknownToolError(name);
 }

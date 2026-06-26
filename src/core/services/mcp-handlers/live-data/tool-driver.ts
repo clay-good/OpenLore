@@ -163,6 +163,11 @@ export const TOOL_REGISTRY: Record<string, ToolPlan> = {
     // Whole-repo descriptive idiom profile over the cached repo's fingerprint.
     buildArgs: (f) => ({ directory: f.directory }),
   },
+  briefing_since: {
+    kind: 'read',
+    // Change-significance briefing since the default base ref over the cached graph.
+    buildArgs: (f) => ({ directory: f.directory }),
+  },
   get_function_body: {
     kind: 'read',
     buildArgs: (f) =>
