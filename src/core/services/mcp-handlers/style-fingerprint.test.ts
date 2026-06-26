@@ -124,6 +124,23 @@ describe('handleGetStyleFingerprint', () => {
     }
   });
 
+  it('an artifact from a future incompatible schema is rejected (not mis-read)', async () => {
+    const futureDir = await mkdtemp(join(tmpdir(), 'openlore-future-'));
+    const ad = join(futureDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
+    await mkdir(ad, { recursive: true });
+    // Same top-level shape but a newer schemaVersion → must fail soft, not silently mis-read.
+    await writeFile(join(ad, ARTIFACT_STYLE_FINGERPRINT), JSON.stringify({
+      schemaVersion: 999, evidenceFloor: 12, byLanguage: [], regions: [], files: [], fileRegions: {},
+    }));
+    try {
+      const res = (await handleGetStyleFingerprint({ directory: futureDir })) as Record<string, unknown>;
+      expect(typeof res.error).toBe('string');
+      expect(res.error).toMatch(/analyze/i);
+    } finally {
+      await rm(futureDir, { recursive: true, force: true });
+    }
+  });
+
   it('truncated/garbage JSON fails soft to the guidance error', async () => {
     const garbageDir = await mkdtemp(join(tmpdir(), 'openlore-garbage-'));
     const ad = join(garbageDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);

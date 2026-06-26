@@ -75,6 +75,11 @@ import { SpecVectorIndex } from '../../analyzer/spec-vector-index.js';
 import { loadMappingIndex, specsForFile, functionsForDomain, readCachedContext } from './utils.js';
 import { readOpenLoreConfig } from '../config-manager.js';
 import { loadDecisionStore } from '../../decisions/store.js';
+import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { buildStyleFingerprint } from '../../analyzer/style-fingerprint.js';
+import { ARTIFACT_STYLE_FINGERPRINT } from '../../../constants.js';
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -147,6 +152,56 @@ describe('handleOrient', () => {
     expect(Array.isArray(result.insertionPoints)).toBe(true);
     expect(Array.isArray(result.nextSteps)).toBe(true);
     expect((result.relevantFunctions as unknown[]).length).toBeGreaterThan(0);
+  });
+
+  // regionStyle PRODUCER (change: add-codebase-style-fingerprint). The renderer is covered in
+  // orient-inject.test.ts; this exercises the producer in handleOrient end-to-end: it reads the
+  // persisted fingerprint, picks the dominant supported language of the matched functions, resolves
+  // the region of the top file, and attaches a bounded dominant-idioms summary.
+  async function seedFingerprintDir(): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), 'orient-style-'));
+    const ad = join(dir, '.openlore', 'analysis');
+    await mkdir(ad, { recursive: true });
+    const raw = [{
+      filePath: 'src/auth.ts',
+      language: 'TypeScript',
+      counters: { binding: { const: 30, let: 2 }, functionForm: { arrow: 14, declaration: 6 } },
+      functionsSampled: 20,
+    }];
+    const nodes = [{ filePath: 'src/auth.ts', communityId: 'c1', communityLabel: 'Auth' }];
+    await writeFile(join(ad, ARTIFACT_STYLE_FINGERPRINT), JSON.stringify(buildStyleFingerprint(raw, nodes)));
+    return dir;
+  }
+
+  it('produces a regionStyle summary for the touched region from the persisted fingerprint', async () => {
+    const dir = await seedFingerprintDir();
+    vi.mocked(VectorIndex.exists).mockReturnValue(true);
+    vi.mocked(VectorIndex.search).mockResolvedValue([makeSearchResult({ name: 'handleAuth', filePath: 'src/auth.ts' })]);
+    try {
+      const result = await handleOrient(dir, 'auth handler', 5) as {
+        regionStyle?: { scope: string; language: string; communityId?: string; dominantIdioms: string[] };
+      };
+      expect(result.regionStyle, 'handleOrient should populate regionStyle').toBeDefined();
+      expect(result.regionStyle!.language).toBe('TypeScript');
+      expect(result.regionStyle!.scope).toBe('region'); // src/auth.ts is attributed to community c1
+      expect(result.regionStyle!.communityId).toBe('c1');
+      expect(result.regionStyle!.dominantIdioms.length).toBeGreaterThan(0);
+      expect(result.regionStyle!.dominantIdioms.some(s => s.startsWith('binding=const'))).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('omits regionStyle in lean mode even when a fingerprint exists', async () => {
+    const dir = await seedFingerprintDir();
+    vi.mocked(VectorIndex.exists).mockReturnValue(true);
+    vi.mocked(VectorIndex.search).mockResolvedValue([makeSearchResult({ name: 'handleAuth', filePath: 'src/auth.ts' })]);
+    try {
+      const lean = await handleOrient(dir, 'auth handler', 5, undefined, true) as Record<string, unknown>;
+      expect(lean.regionStyle).toBeUndefined();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it('lean mode (Spec 27) returns the navigation core only and drops enrichment', async () => {

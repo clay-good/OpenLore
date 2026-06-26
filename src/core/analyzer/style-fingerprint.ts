@@ -54,18 +54,8 @@ export const IDIOM_KEYS = [
 
 export type IdiomKey = (typeof IDIOM_KEYS)[number];
 
-/** Agent-facing description of what each idiom counter measures. */
-export const IDIOM_DESCRIPTIONS: Record<IdiomKey, string> = {
-  functionForm: 'How named functions are written: arrow expression vs. function declaration vs. method shorthand.',
-  binding: 'Local binding keyword: const vs. let (var excluded as legacy).',
-  conditionalForm: 'Conditional expression form: ternary vs. if/else statement.',
-  asyncForm: 'Asynchronous form: await vs. a .then promise chain.',
-  stringForm: 'String construction: template literal vs. + concatenation.',
-  functionNaming: 'Multi-word function-name case: camelCase vs. PascalCase vs. snake_case.',
-};
-
 /** Why a counter withheld its ratio. */
-export type NullReason = 'below_floor' | 'enforced' | 'not_applicable';
+export type NullReason = 'below_floor' | 'enforced';
 
 /** A measured idiom (with evidence) or an honestly-withheld null signal. */
 export type IdiomSignal =

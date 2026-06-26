@@ -206,9 +206,61 @@ describe('extractFileStyle (single-file tally, used by the watcher)', () => {
     expect(style!.counters.binding).toEqual({ short: 2, var: 1 });
   });
 
+  it('Python: ternary (conditional_expression) and snake_case naming via the real extractor', async () => {
+    const style = await extractFileStyle({
+      path: 'a.py',
+      language: 'Python',
+      content: 'def get_user_name():\n    return 1 if c else 2\ndef do_work():\n    x = 9 if d else 0\n    return x',
+    });
+    expect(style).toBeTruthy();
+    expect(style!.language).toBe('Python');
+    expect(style!.counters.conditionalForm).toEqual({ ternary: 2 });
+    expect(style!.counters.functionNaming).toEqual({ snake_case: 2 });
+  });
+
   it('an unsupported language yields undefined (fail-soft)', async () => {
     const style = await extractFileStyle({ path: 'x.rs', language: 'Rust', content: 'fn main() {}' });
     expect(style).toBeUndefined();
+  });
+});
+
+describe('compactIdiomSummary (used by orient regionStyle)', () => {
+  const profile = {
+    language: 'TypeScript',
+    functionsSampled: 100,
+    idioms: {
+      binding: { dominant: 'const', ratio: 0.95, samples: 200, options: { const: 190, let: 10 } },
+      asyncForm: { dominant: 'await', ratio: 0.99, samples: 100, options: { await: 99, then: 1 } },
+      conditionalForm: { dominant: 'if', ratio: 0.6, samples: 50, options: { if: 30, ternary: 20 } },
+      functionForm: { dominant: 'arrow', ratio: 0.7, samples: 80, options: { arrow: 56, declaration: 24 } },
+      stringForm: { dominant: 'template', ratio: 0.5, samples: 40, options: { template: 20, concat: 20 } },
+      functionNaming: { signal: null as null, reason: 'below_floor' as const },
+    },
+  };
+
+  it('returns measured idioms only, sorted by ratio desc, capped at the limit, omitting nulls', () => {
+    const out = compactIdiomSummary(profile, 3);
+    expect(out).toHaveLength(3);
+    expect(out[0]).toBe('asyncForm=await (0.99)'); // highest ratio first
+    expect(out[1]).toBe('binding=const (0.95)');
+    expect(out[2]).toBe('functionForm=arrow (0.7)');
+    expect(out.every(s => !s.includes('functionNaming'))).toBe(true); // null omitted
+  });
+
+  it('an all-null profile yields an empty summary (orient then omits regionStyle)', () => {
+    const allNull = { language: 'Go', functionsSampled: 2, idioms: { binding: { signal: null as null, reason: 'below_floor' as const } } };
+    expect(compactIdiomSummary(allNull)).toEqual([]);
+  });
+});
+
+describe('attributeFilesToRegions tie-break', () => {
+  it('an equal split between two communities resolves to the smallest community id (deterministic)', () => {
+    const nodes = [
+      { filePath: 'x.ts', communityId: 'cB' },
+      { filePath: 'x.ts', communityId: 'cA' }, // 1 vs 1 — tie
+    ];
+    const { fileRegions } = attributeFilesToRegions(nodes);
+    expect(fileRegions['x.ts']).toBe('cA'); // lexicographically smallest wins the tie
   });
 });
 

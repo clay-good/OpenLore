@@ -16,6 +16,7 @@ import { validateDirectory } from './utils.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_STYLE_FINGERPRINT } from '../../../constants.js';
 import {
   fileProfile,
+  STYLE_SCHEMA_VERSION,
   type StyleFingerprint,
   type LanguageProfile,
 } from '../../analyzer/style-fingerprint.js';
@@ -47,6 +48,10 @@ const DESCRIPTIVE_NOTE =
 function isWellFormed(fp: unknown): fp is StyleFingerprint {
   if (!fp || typeof fp !== 'object') return false;
   const o = fp as Record<string, unknown>;
+  // Reject an artifact from a future, incompatible schema rather than silently mis-reading it
+  // (a same-shape v2 with different inner semantics would otherwise slip past the structural
+  // checks). An absent version is treated as the current schema for backward tolerance.
+  if (o.schemaVersion !== undefined && o.schemaVersion !== STYLE_SCHEMA_VERSION) return false;
   return (
     Array.isArray(o.byLanguage) &&
     Array.isArray(o.files) &&
