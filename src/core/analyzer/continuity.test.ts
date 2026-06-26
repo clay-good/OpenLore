@@ -54,6 +54,14 @@ describe('renameIdentifier', () => {
   it('leaves embedded substrings alone', () => {
     expect(renameIdentifier('computeTaxRate + computeTax', 'computeTax', 'X')).toBe('computeTaxRate + X');
   });
+  it('does not split a name adjacent to a Unicode identifier char (C1 regression)', () => {
+    // An ASCII-only boundary would wrongly rewrite the `tax` inside `taxé`.
+    expect(renameIdentifier('taxé + tax', 'tax', 'X')).toBe('taxé + X');
+  });
+  it('handles a Unicode symbol name', () => {
+    expect(renameIdentifier('function café(x){ return café(x); }', 'café', 'coffee'))
+      .toBe('function coffee(x){ return coffee(x); }');
+  });
 });
 
 describe('bodyMatchesModuloName', () => {
@@ -63,12 +71,24 @@ describe('bodyMatchesModuloName', () => {
     const newSpan = 'function calculateTax(a){ return a * 0.2; }';
     expect(bodyMatchesModuloName(newSpan, 'calculateTax', 'computeTax', oldHash)).toBe(true);
   });
+  it('matches a recursive rename (self-call renamed too)', () => {
+    const oldRec = 'function fact(n){ return n<=1?1:n*fact(n-1); }';
+    const newRec = 'function factorial(n){ return n<=1?1:n*factorial(n-1); }';
+    expect(bodyMatchesModuloName(newRec, 'factorial', 'fact', hashSpan(oldRec))).toBe(true);
+  });
   it('rejects a body that differs beyond the name', () => {
     const newSpan = 'function calculateTax(a){ return a * 0.3; }'; // 0.2 -> 0.3
     expect(bodyMatchesModuloName(newSpan, 'calculateTax', 'computeTax', oldHash)).toBe(false);
   });
   it('rejects when the name did not change (that is the exact-body case)', () => {
     expect(bodyMatchesModuloName(oldSpan, 'computeTax', 'computeTax', oldHash)).toBe(false);
+  });
+  it('rejects when the new span already references the old name (C2 false-carry regression)', () => {
+    // Unrelated `b` that CALLS the deleted `a()`; substituting b→a would spuriously
+    // reconstruct a's recursive body. The old-name-present guard must reject it.
+    const oldRec = 'function a(){ helper(); a(); }';
+    const unrelated = 'function b(){ helper(); a(); }';
+    expect(bodyMatchesModuloName(unrelated, 'b', 'a', hashSpan(oldRec))).toBe(false);
   });
 });
 

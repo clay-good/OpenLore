@@ -15,7 +15,12 @@ rather than deleted and re-added. A pair SHALL be admitted only on unambiguous e
   confirming the result hashes to the old baseline span — a true body-identity-modulo-name check, NOT a
   mere parameter-shape match. A symbol that only shares a parameter shape with the old one (e.g. an
   unrelated newcomer that appeared the same run the old symbol was deleted) SHALL NOT be matched, so a
-  genuinely deleted symbol is never re-anchored onto an unrelated symbol.
+  genuinely deleted symbol is never re-anchored onto an unrelated symbol. Identifier substitution SHALL use
+  Unicode-aware whole-word boundaries (a name adjacent to a non-ASCII identifier character is not a match),
+  and SHALL be rejected when the OLD name already appears as a whole-word token in the new span — the
+  newcomer references the old symbol (e.g. an unrelated function that merely calls the deleted one), so a
+  substitution could spuriously reconstruct the old span. A genuine full rename removes every occurrence of
+  the old name, so this guard never rejects a real rename.
 
 A pair SHALL be admitted only when the match is one-to-one — exactly one disappeared candidate and one
 appeared candidate satisfy it — AND, for `exact-signature`, only when the name-independent body is not
@@ -46,6 +51,15 @@ git-history reconstruction.
 - **WHEN** continuity is computed
 - **THEN** no continuity pair is emitted — the bodies differ beyond the name — and the deleted symbol's
   anchor stays orphaned rather than being carried onto the unrelated newcomer
+
+#### Scenario: A newcomer that references the deleted symbol is NOT matched
+
+- **GIVEN** an anchored symbol `a` is deleted and, the same re-analysis, an unrelated symbol whose body
+  contains a whole-word reference to `a` appears (so substituting its name back to `a` could spuriously
+  reconstruct `a`'s body)
+- **WHEN** continuity is computed
+- **THEN** no continuity pair is emitted — the old name is present in the new span — and `a`'s anchor stays
+  orphaned
 
 #### Scenario: Ambiguous matches produce no pair
 

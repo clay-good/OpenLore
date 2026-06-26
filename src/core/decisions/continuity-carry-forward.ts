@@ -38,6 +38,7 @@ import { nodeSpanText } from './anchor-adapter.js';
 import {
   computeContinuity,
   normalizedBodyHash,
+  bodyMatchesModuloName,
   type DisappearedSymbol,
   type AppearedSymbol,
   type ContinuityPair,
@@ -95,8 +96,6 @@ export function snapshotOldNodes(storeDir: string): OldNodeSnapshot[] {
       ...(n.stableId ? { stableId: n.stableId } : {}),
       name: n.name,
       filePath: n.filePath,
-      ...(n.signature ? { signature: n.signature } : {}),
-      language: n.language,
     }));
   } catch {
     return [];
@@ -201,18 +200,17 @@ function buildContinuity(
   }
   if (disappeared.length === 0) return { pairs: [], ambiguous: [] };
 
-  // Single pass over the new graph: tally name-independent body frequencies across
-  // ALL internal nodes, and collect the appeared (new, non-test) candidates.
+  const allNew = store.getAllInternalNodes();
+
+  // Pass 1 (cheap): read + hash spans ONLY for the appeared (new, non-test) nodes —
+  // the carry candidates. On a rename this is a handful of nodes, not the whole graph.
   const appeared: AppearedSymbol[] = [];
-  const newNormBodyCount = new Map<string, number>();
-  for (const node of store.getAllInternalNodes()) {
-    const spanText = nodeSpanText(rootPath, node, cache);
-    if (spanText === undefined) continue;
-    const normBodyHash = normalizedBodyHash(spanText, node.name);
-    newNormBodyCount.set(normBodyHash, (newNormBodyCount.get(normBodyHash) ?? 0) + 1);
+  for (const node of allNew) {
     if (node.isTest) continue; // never carry a memory onto a test symbol
     if (oldIds.has(node.id)) continue;
     if (node.stableId && oldStableIds.has(node.stableId)) continue;
+    const spanText = nodeSpanText(rootPath, node, cache);
+    if (spanText === undefined) continue;
     appeared.push({
       id: node.id,
       ...(node.stableId ? { stableId: node.stableId } : {}),
@@ -220,8 +218,29 @@ function buildContinuity(
       filePath: node.filePath,
       contentHash: hashSpan(spanText),
       spanText,
-      normBodyHash,
+      normBodyHash: normalizedBodyHash(spanText, node.name),
     });
+  }
+
+  // The name-independent-body uniqueness guard is only consulted for an
+  // `exact-signature` (rename) candidate that has no `exact-body` (move) match.
+  // Computing it requires normalizing EVERY new node's body — expensive on a large
+  // graph — so do it ONLY when such a candidate actually exists (a real rename),
+  // never on the common no-rename / move-only / delete-only path.
+  const needsFullCount = disappeared.some(
+    (d) =>
+      d.contentHash !== undefined &&
+      !appeared.some((a) => a.contentHash === d.contentHash) && // no exact-body match
+      appeared.some((a) => bodyMatchesModuloName(a.spanText, a.name, d.name, d.contentHash!)),
+  );
+  const newNormBodyCount = new Map<string, number>();
+  if (needsFullCount) {
+    for (const node of allNew) {
+      const spanText = nodeSpanText(rootPath, node, cache); // cached from Pass 1 where overlapping
+      if (spanText === undefined) continue;
+      const normBodyHash = normalizedBodyHash(spanText, node.name);
+      newNormBodyCount.set(normBodyHash, (newNormBodyCount.get(normBodyHash) ?? 0) + 1);
+    }
   }
 
   return computeContinuity(disappeared, appeared, newNormBodyCount);

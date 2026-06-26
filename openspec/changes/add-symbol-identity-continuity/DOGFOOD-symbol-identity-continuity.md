@@ -79,6 +79,26 @@ memory onto `checkFlag` (matched on the shared `(u: { role: string })` shape). T
 *modulo the symbol's own name*, plus name-independent-body uniqueness — rejects it while still carrying
 the legitimate rename.
 
+## Second-pass adversarial e2e (PR #206 review 2)
+
+Run through the real `analyze` pipeline after the second hardening round.
+
+| Scenario | Setup | Expected | Result |
+|----------|-------|----------|--------|
+| **Cross-language (Python)** | `compute_tax` → `calculate_tax` in a `.py` file | carried | ✅ "carried 1 symbol(s)"; recall `drifted`, basis `exact-signature` |
+| **Ambiguous (real analyzer)** | `pick` split into two byte-identical clones `chooseA`/`chooseB` | no carry; both disclosed | ✅ orphaned + `possiblyMovedTo: [chooseA, chooseB]` |
+| **Decision carry (disk test)** | decision anchored to `authorize` → renamed `checkAccess` | decision re-anchored | ✅ `decisionsUpdated=1`, `carriedAcross` provenance |
+| **C2 false-carry (newcomer references old name)** | anchored `a()` deleted; unrelated `b()` that calls `a()` | no carry | ✅ stays orphaned (old-name-present guard) |
+| **Unicode boundary** | `renameIdentifier("taxé + tax", tax→X)` | only the standalone `tax` replaced | ✅ `"taxé + X"` (was `"Xé + X"` before the fix) |
+| **Recursive rename** | `fact`→`factorial` (self-call renamed too) | carried | ✅ matches modulo name |
+
+### Performance
+
+Measured `carryForwardContinuity` over this repo's real **2,638-node** graph:
+
+- **delete-only / no-rename path:** ~**8.7 ms** (the full name-independent-body pass is gated off — no rename candidate).
+- **rename path:** pays the one full normalized-body pass (~**850 ms** on 2.6k nodes) only on the analysis where an anchored symbol is actually renamed — the operation that is doing the useful carry. The common no-rename analyze and the move-only / delete-only paths never pay it.
+
 ## Notes / gotchas surfaced
 
 - The carry-forward runs at **full analyze only** (the watcher path is a deferred follow-up). A rename

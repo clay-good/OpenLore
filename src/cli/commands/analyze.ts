@@ -200,13 +200,19 @@ export async function runAnalysis(
   // snapshot and the freshly persisted graph. Deterministic, no LLM; a cheap no-op
   // when there are no anchored symbols or no prior snapshot. Never fails analysis.
   try {
-    const carried = await carryForwardContinuity(rootPath, oldNodeSnapshot, outputPath);
-    if (carried.memoriesUpdated + carried.decisionsUpdated > 0) {
+    const cont = await carryForwardContinuity(rootPath, oldNodeSnapshot, outputPath);
+    if (cont.carried.length > 0) {
       logger.info(
         'Memory continuity',
-        `carried ${carried.carried.length} symbol(s) across rename/move ` +
-          `(${carried.memoriesUpdated} memor${carried.memoriesUpdated === 1 ? 'y' : 'ies'}, ` +
-          `${carried.decisionsUpdated} decision${carried.decisionsUpdated === 1 ? '' : 's'} re-anchored)`,
+        `carried ${cont.carried.length} symbol(s) across rename/move ` +
+          `(${cont.memoriesUpdated} memor${cont.memoriesUpdated === 1 ? 'y' : 'ies'}, ` +
+          `${cont.decisionsUpdated} decision${cont.decisionsUpdated === 1 ? '' : 's'} re-anchored)`,
+      );
+    } else if (cont.ambiguous.length > 0) {
+      logger.info(
+        'Memory continuity',
+        `${cont.ambiguous.length} anchored symbol(s) moved ambiguously — left orphaned with ` +
+          `possiblyMovedTo candidates for review (no guess made)`,
       );
     }
   } catch (err) {

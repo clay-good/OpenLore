@@ -55,13 +55,21 @@ function escapeRegExp(s: string): string {
 }
 
 /**
- * Replace whole-identifier occurrences of `from` with `to` in source text. Word
- * boundaries are JS-identifier boundaries (`A-Za-z0-9_$`), so a name embedded in a
- * larger identifier is left alone. Used to test body-identity-modulo-name.
+ * Identifier-character class for whole-word boundaries. Unicode-aware (`\p{L}\p{N}`)
+ * so a name adjacent to a non-ASCII identifier char (e.g. `taxé`, or a Unicode
+ * function name in Python/Ruby) is correctly treated as part of a larger identifier
+ * and left alone — an ASCII-only class would mis-split `taxé` into `tax` + `é`.
+ */
+const IDENT_CHAR = '[\\p{L}\\p{N}_$]';
+
+/**
+ * Replace whole-identifier occurrences of `from` with `to` in source text. A name
+ * embedded in a larger identifier (ASCII or Unicode) is left alone. Used to test
+ * body-identity-modulo-name. Requires the `u` flag for the Unicode property escapes.
  */
 export function renameIdentifier(text: string, from: string, to: string): string {
   if (!from) return text;
-  return text.replace(new RegExp(`(?<![A-Za-z0-9_$])${escapeRegExp(from)}(?![A-Za-z0-9_$])`, 'g'), to);
+  return text.replace(new RegExp(`(?<!${IDENT_CHAR})${escapeRegExp(from)}(?!${IDENT_CHAR})`, 'gu'), to);
 }
 
 /**
@@ -86,6 +94,13 @@ export function bodyMatchesModuloName(
   oldContentHash: string,
 ): boolean {
   if (appearedName === oldName) return false;
+  // Guard: if the OLD name ALREADY appears as a whole-word token in the new span,
+  // we cannot cleanly attribute the body to a rename — the newcomer references (or
+  // mentions) the old symbol, so substituting newName→oldName could spuriously
+  // reconstruct the old span (e.g. an unrelated `b()` that calls the deleted `a()`).
+  // A genuine full rename removes every occurrence of the old name, so this never
+  // rejects a real rename; it only declines an ambiguous coincidence (safe: no carry).
+  if (renameIdentifier(appearedSpan, oldName, NAME_SENTINEL) !== appearedSpan) return false;
   return spanHash(renameIdentifier(appearedSpan, appearedName, oldName)) === oldContentHash;
 }
 

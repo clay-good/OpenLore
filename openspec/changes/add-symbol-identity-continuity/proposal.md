@@ -135,10 +135,26 @@ same-parameter-shape newcomer → NOT carried; an identical-body clone elsewhere
 never carried onto a test symbol). All four adversarial scenarios were also confirmed end-to-end against
 the real `openlore analyze` pipeline — see `DOGFOOD-symbol-identity-continuity.md`.
 
-> **Soundness hardening (PR #206 review).** The first cut matched `exact-signature` on the parameter
+> **Soundness hardening (PR #206 review 1).** The first cut matched `exact-signature` on the parameter
 > *shape* alone, which could re-anchor a deleted symbol's memory onto an unrelated newcomer that merely
 > shared a shape (e.g. another `(req, res)` handler). That was caught by an adversarial e2e test and
 > fixed: `exact-signature` now requires the candidate's body to equal the old body *modulo the symbol's
 > own name* (verified by name substitution against the recorded baseline hash) AND the name-independent
 > body to be unique among new symbols. Test symbols are excluded as carry targets. No tuning constant was
 > introduced.
+>
+> **Second-pass hardening (PR #206 review 2).** A deeper adversarial pass found and fixed three more
+> issues: (1) the identifier-substitution boundary was ASCII-only and mis-split a name adjacent to a
+> Unicode character (`taxé`) — now Unicode-aware (`\p{L}\p{N}`); (2) `exact-signature` could still
+> false-match when the newcomer's body *referenced* the deleted symbol's name (substituting could
+> reconstruct the old span) — now rejected when the old name appears as a whole-word token in the new
+> span; (3) the name-independent-body uniqueness pass hashed *every* node on every disappeared-symbol
+> analyze (~850 ms on a 2.6k-node graph) — now gated to run ONLY when a real rename candidate exists, so
+> the no-rename / move-only / delete-only paths are ~8 ms. Also: the disk-level carry-forward tests were
+> moved into a plain `.test.ts` so CI guards them (the soundness regressions were previously
+> integration-only and CI-excluded), DECISION carry-forward gained explicit test coverage, and `recall`
+> now surfaces `possiblyMovedTo` only while the anchor is still orphaned (a stale hint is not shown once
+> the anchor resolves). Recursive and Unicode-named renames are confirmed to carry. **Known limitation:**
+> a carried memory keeps its original `id` (a stable reference), so re-recording the *identical* note on
+> the renamed symbol via `remember` would create a second record (the dedup id is content+anchor-derived);
+> surfaced by the `unreconciled` detector, not data loss.

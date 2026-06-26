@@ -27,21 +27,29 @@
 - [x] Preserve authoritative-recall: never serve an orphaned memory against a guessed target.
 
 ## 4. Tests & fixtures
-- [x] Rename (identical/changed body) → memory carries, recalls re-pointed with provenance.
-      (`continuity.test.ts`, `continuity-carry-forward.integration.test.ts`)
+- [x] Rename (otherwise-identical body) → memory carries, recalls re-pointed with provenance.
+      (`continuity.test.ts`, `continuity-carry-forward.disk.test.ts`)
 - [x] Move (same body, new file) → carried / resolved (exact-body or stableId).
-- [x] Ambiguous (two candidates) → no carry, both surfaced as `possiblyMovedTo`.
-- [x] Rename + body rewrite (shape also changed) → correctly no pair (stays orphaned).
+- [x] Ambiguous (two identical-body candidates) → no carry, both surfaced as `possiblyMovedTo`.
+- [x] Rename + body rewrite → correctly no pair (stays orphaned).
 - [x] Determinism: continuity map byte-identical across two runs / input orderings.
 - [x] Legacy stores (no provenance field) load without migration. (additive optional fields;
       file-level + unmatched anchors left untouched — `continuity-carry-forward.test.ts`)
+- [x] **CI-guarded disk tests** moved to a plain `.test.ts` (`continuity-carry-forward.disk.test.ts`) so
+      the soundness guarantees run in CI (were integration-only/CI-excluded).
+- [x] **Decision** carry-forward covered (symbol-anchored decision renamed → `decisionsUpdated=1`).
+- [x] Second-pass regressions: C2 false-carry when the newcomer references the deleted name → no carry;
+      Unicode-adjacent identifier boundary (`taxé`); recursive rename carries.
 
 ## 5. Verify & dogfood
-- [x] `npm run lint`, `npm run typecheck`, `npm run test:run` (5090 passed), `npm run build` green.
+- [x] `npm run lint`, `npm run typecheck`, `npm run test:run` (5108 passed), `npm run build` green.
 - [x] Dogfood: recorded a memory anchored to `computeTax`, renamed it to `calculateTax`, re-analyzed —
       `analyze` logged "carried 1 symbol(s)", the memory re-pointed to `calculateTax` with
       `carriedAcross` provenance and recalled `drifted (carried)` instead of `orphaned`; a second
-      re-analyze was a clean no-op (idempotent). See `DOGFOOD-symbol-identity-continuity.md`.
+      re-analyze was a clean no-op (idempotent).
+- [x] Second-pass dogfood: Python cross-language rename carries; ambiguous split → `possiblyMovedTo`;
+      C2 false-carry rejected; perf gated (delete-only ~8.7 ms vs ~850 ms full pass only on a real
+      rename over a 2.6k-node graph). See `DOGFOOD-symbol-identity-continuity.md`.
 
 ## 6. Docs
 - [x] Documented continuity, carry-forward provenance, the exact-match-only/no-guess contract, and the

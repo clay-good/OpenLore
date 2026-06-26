@@ -585,8 +585,10 @@ function summarizeVerdict(v: AnchorVerdict): {
     // so the agent sees the fact survived a refactor (add-symbol-identity-continuity).
     ...(v.anchor.carriedAcross ? { carriedAcross: v.anchor.carriedAcross } : {}),
     // An orphaned anchor with ambiguous candidate destinations — disclosed, never
-    // silently re-attached to a guess (add-symbol-identity-continuity).
-    ...(v.anchor.possiblyMovedTo?.length ? { possiblyMovedTo: v.anchor.possiblyMovedTo } : {}),
+    // silently re-attached to a guess (add-symbol-identity-continuity). Only meaningful
+    // while the anchor is still orphaned; once it resolves (carried, or the symbol came
+    // back), a previously-stored hint is stale and is not surfaced.
+    ...(v.freshness === 'orphaned' && v.anchor.possiblyMovedTo?.length ? { possiblyMovedTo: v.anchor.possiblyMovedTo } : {}),
   };
 }
 

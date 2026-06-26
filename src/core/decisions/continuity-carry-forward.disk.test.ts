@@ -5,8 +5,10 @@
  * Simulates a re-analysis where a symbol was renamed: snapshot the old graph,
  * overwrite the store with the new graph, then carry the anchored memory forward.
  *
- * NOTE: integration tests are excluded from CI (`*.integration.test.ts`); run
- * locally with `npx vitest run src/core/decisions/continuity-carry-forward.integration.test.ts`.
+ * This is a PLAIN `.test.ts` (not `*.integration.test.ts`) ON PURPOSE: the carry-
+ * forward soundness guarantees must be guarded in CI, and these cases use only a
+ * temp EdgeStore + temp stores (fast, deterministic, offline) — so they belong in
+ * the CI suite, per the project rule that CI-protected guards live in plain tests.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -17,10 +19,11 @@ import { EdgeStore } from '../services/edge-store.js';
 import { stableSymbolId } from '../scip/moniker.js';
 import { hashSpan } from './anchor.js';
 import { loadMemoryStore, saveMemoryStore } from './memory-store.js';
+import { loadDecisionStore, saveDecisionStore } from './store.js';
 import { snapshotOldNodes, carryForwardContinuity } from './continuity-carry-forward.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_MEMORY_SUBDIR } from '../../constants.js';
 import type { FunctionNode } from '../analyzer/call-graph.js';
-import type { AnchoredMemory } from '../../types/index.js';
+import type { AnchoredMemory, PendingDecision } from '../../types/index.js';
 
 function node(p: Partial<FunctionNode> & Pick<FunctionNode, 'id' | 'name' | 'filePath' | 'signature'>): FunctionNode {
   const base: FunctionNode = {
@@ -35,12 +38,12 @@ function node(p: Partial<FunctionNode> & Pick<FunctionNode, 'id' | 'name' | 'fil
   return { ...base, stableId: stableSymbolId(base) };
 }
 
-describe('carryForwardContinuity (integration)', () => {
+describe('carryForwardContinuity (disk)', () => {
   let root: string;
   let storeDir: string;
 
   beforeEach(async () => {
-    root = await mkdtemp(join(tmpdir(), 'continuity-int-'));
+    root = await mkdtemp(join(tmpdir(), 'continuity-disk-'));
     storeDir = join(root, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
     await mkdir(storeDir, { recursive: true });
     await mkdir(join(root, OPENLORE_DIR, OPENLORE_MEMORY_SUBDIR), { recursive: true });
@@ -241,5 +244,71 @@ describe('carryForwardContinuity (integration)', () => {
     const summary = await carryForwardContinuity(root, oldNodes, storeDir);
     expect(summary.carried).toHaveLength(0);
     expect(summary.memoriesUpdated).toBe(0);
+  });
+
+  it('carries a symbol-anchored DECISION across a rename', async () => {
+    const oldSrc = 'export function authorize(user: string, scope: string): boolean {\n  return user.length > 0 && scope.length > 0;\n}\n';
+    const newSrc = 'export function checkAccess(user: string, scope: string): boolean {\n  return user.length > 0 && scope.length > 0;\n}\n';
+    const file = 'src/authz.ts';
+    await writeFile(join(root, file), oldSrc);
+    const oldNode = node({ id: `${file}::authorize`, name: 'authorize', filePath: file, signature: 'function authorize(user: string, scope: string)', startIndex: 0, endIndex: oldSrc.length });
+    { const s = EdgeStore.open(EdgeStore.dbPath(storeDir)); s.insertNodes([oldNode]); s.close(); }
+
+    const decision: PendingDecision = {
+      id: 'dec00001', status: 'approved',
+      title: 'authorize() is the single authz entry point',
+      rationale: 'All access checks funnel through authorize so policy lives in one place.',
+      consequences: 'Do not add side-channel permission checks elsewhere.',
+      proposedRequirement: null,
+      affectedDomains: ['auth'], affectedFiles: [file],
+      anchors: [{ nodeId: oldNode.id, stableId: oldNode.stableId, symbolName: 'authorize', filePath: file, contentHash: hashSpan(oldSrc) }],
+      sessionId: 's1', recordedAt: new Date(0).toISOString(), confidence: 'high', syncedToSpecs: [],
+    };
+    const ds = await loadDecisionStore(root);
+    await saveDecisionStore(root, { ...ds, decisions: [decision] });
+
+    const oldNodes = snapshotOldNodes(storeDir);
+    await writeFile(join(root, file), newSrc);
+    const newNode = node({ id: `${file}::checkAccess`, name: 'checkAccess', filePath: file, signature: 'function checkAccess(user: string, scope: string)', startIndex: 0, endIndex: newSrc.length });
+    { const s = EdgeStore.open(EdgeStore.dbPath(storeDir)); s.clearAll(); s.insertNodes([newNode]); s.close(); }
+
+    const summary = await carryForwardContinuity(root, oldNodes, storeDir);
+    expect(summary.decisionsUpdated).toBe(1);
+    expect(summary.carried).toHaveLength(1);
+
+    const reloaded = await loadDecisionStore(root);
+    const a = reloaded.decisions[0].anchors!.find((x) => x.nodeId);
+    expect(a?.nodeId).toBe(`${file}::checkAccess`);
+    expect(a?.symbolName).toBe('checkAccess');
+    expect(a?.carriedAcross).toMatchObject({ from: { symbolName: 'authorize' }, reason: 'renamed', basis: 'exact-signature' });
+  });
+
+  it('does NOT carry onto an unrelated newcomer that merely references the deleted symbol (C2)', async () => {
+    // `a` is anchored and deleted; unrelated `b` survives and CALLS `a()`. Substituting
+    // b→a in b's span would spuriously reconstruct a's recursive body — the old-name
+    // guard must reject it.
+    const oldSrc = 'export function a(): number {\n  return helper() + a();\n}\n';
+    const file = 'src/rec.ts';
+    await writeFile(join(root, file), oldSrc);
+    const oldNode = node({ id: `${file}::a`, name: 'a', filePath: file, signature: 'function a()', startIndex: 0, endIndex: oldSrc.length });
+    { const s = EdgeStore.open(EdgeStore.dbPath(storeDir)); s.insertNodes([oldNode]); s.close(); }
+    const memory: AnchoredMemory = {
+      id: 'mem006', kind: 'note', content: 'a memoizes; never call it in a hot loop', recordedAt: new Date(0).toISOString(),
+      anchors: [{ nodeId: oldNode.id, stableId: oldNode.stableId, symbolName: 'a', filePath: file, contentHash: hashSpan(oldSrc) }],
+    };
+    await saveMemoryStore(root, { version: '1', updatedAt: '', sequence: 0, memories: [memory] });
+
+    const oldNodes = snapshotOldNodes(storeDir);
+    // `a` deleted; unrelated `b` that calls the (now-gone) `a()`.
+    const newSrc = 'export function b(): number {\n  return helper() + a();\n}\n';
+    await writeFile(join(root, file), newSrc);
+    const newNode = node({ id: `${file}::b`, name: 'b', filePath: file, signature: 'function b()', startIndex: 0, endIndex: newSrc.length });
+    { const s = EdgeStore.open(EdgeStore.dbPath(storeDir)); s.clearAll(); s.insertNodes([newNode]); s.close(); }
+
+    const summary = await carryForwardContinuity(root, oldNodes, storeDir);
+    expect(summary.carried).toHaveLength(0);
+    const reloaded = await loadMemoryStore(root);
+    expect(reloaded.memories[0].anchors[0].nodeId).toBe(`${file}::a`); // stays orphaned, not carried onto b
+    expect(reloaded.memories[0].anchors[0].carriedAcross).toBeUndefined();
   });
 });
