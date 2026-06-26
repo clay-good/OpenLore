@@ -7,7 +7,7 @@
 
 import { validateDirectory, readCachedContext } from './utils.js';
 import { resolveFederationScope, findCrossRepoConsumersBatch, findCrossRepoClientCallers } from '../../federation/resolver.js';
-import { extractRoutesFromFile, type RouteDefinition } from '../../analyzer/http-route-parser.js';
+import { extractRoutesFromFile, normalizeUrl, type RouteDefinition, type RouteInventory } from '../../analyzer/http-route-parser.js';
 import type { CachedContext } from './utils.js';
 import { join, resolve, isAbsolute } from 'node:path';
 import {
@@ -35,6 +35,7 @@ import {
   HUB_HIGH_FAN_OUT_THRESHOLD,
   OPENLORE_DIR,
   OPENLORE_ANALYSIS_SUBDIR,
+  ARTIFACT_ROUTE_INVENTORY,
   TRACE_PATH_DEFAULT_MAX_DEPTH,
   TRACE_PATH_MAX_PATHS,
 } from '../../../constants.js';
@@ -779,22 +780,51 @@ export async function handleAnalyzeImpact(
 }
 
 /**
- * Derive the route definition(s) each seed handler serves, by extracting routes from
- * the seed's own source file and keeping those whose handler simple-name matches the
- * seed. Deduped on method+path; a seed that registers no route contributes nothing,
- * so a non-handler analyze_impact does no extra work.
+ * Derive the route definition(s) each seed handler serves, so the federation bridge
+ * can match other repos' client call sites against them. Deduped on method+path; a
+ * seed that registers no route contributes nothing, so a non-handler analyze_impact
+ * does no extra work.
+ *
+ * Primary source: the home repo's persisted route inventory (`route-inventory.json`).
+ * It lists EVERY route (method, raw path, handler), so a handler whose route is
+ * registered in a DIFFERENT file than its definition — Django (`urls.py`→`views.py`),
+ * a dedicated Express routes file — is still found, matching the single-repo
+ * `http_endpoint` projection. Falls back to parsing each seed's own file when the
+ * inventory artifact is absent (an older index).
  */
 async function deriveSeedRoutes(
   seeds: Array<{ name: string; filePath: string }>,
   absDir: string,
 ): Promise<RouteDefinition[]> {
+  const seedNames = new Set(seeds.map(s => s.name));
+  const seen = new Set<string>();
+  const out: RouteDefinition[] = [];
+  const add = (method: string, rawPath: string, handler: string, file: string, framework: string): void => {
+    const normalizedPath = normalizeUrl(rawPath);
+    const key = `${method}\0${normalizedPath}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push({ file, method, path: rawPath, normalizedPath, handlerName: handler, framework, line: 0, contractSource: 'none' });
+  };
+
+  try {
+    const invPath = join(absDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_ROUTE_INVENTORY);
+    const { readFile } = await import('node:fs/promises');
+    const inv = JSON.parse(await readFile(invPath, 'utf-8')) as RouteInventory;
+    if (Array.isArray(inv?.routes)) {
+      for (const r of inv.routes) {
+        const simple = (r.handler ?? '').split('.').pop() ?? r.handler;
+        if (simple && seedNames.has(simple)) add(r.method, r.path, r.handler, r.file, r.framework);
+      }
+      return out; // the inventory is complete — no per-file fallback needed
+    }
+  } catch { /* no/unreadable inventory → fall back to per-seed-file extraction below */ }
+
   const byFile = new Map<string, Set<string>>(); // file → seed handler names in it
   for (const s of seeds) {
     if (!byFile.has(s.filePath)) byFile.set(s.filePath, new Set());
     byFile.get(s.filePath)!.add(s.name);
   }
-  const seen = new Set<string>();
-  const out: RouteDefinition[] = [];
   for (const [file, names] of byFile) {
     const abs = isAbsolute(file) ? file : resolve(absDir, file);
     let routes;
@@ -802,11 +832,7 @@ async function deriveSeedRoutes(
     catch { continue; }
     for (const r of routes) {
       const simple = r.handlerName.split('.').pop() ?? r.handlerName;
-      if (!names.has(simple)) continue;
-      const k = `${r.method}\0${r.normalizedPath}`;
-      if (seen.has(k)) continue;
-      seen.add(k);
-      out.push(r);
+      if (names.has(simple)) add(r.method, r.path, r.handlerName, r.file, r.framework);
     }
   }
   return out;

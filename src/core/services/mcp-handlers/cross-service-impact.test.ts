@@ -13,7 +13,7 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { EdgeStore } from '../edge-store.js';
-import { OPENLORE_ANALYSIS_REL_PATH, ARTIFACT_LLM_CONTEXT } from '../../../constants.js';
+import { OPENLORE_ANALYSIS_REL_PATH, ARTIFACT_LLM_CONTEXT, ARTIFACT_ROUTE_INVENTORY } from '../../../constants.js';
 import { addRepo } from '../../federation/registry.js';
 import { handleAnalyzeImpact } from './graph.js';
 import type { FunctionNode, CallEdge } from '../../analyzer/call-graph.js';
@@ -24,8 +24,11 @@ function node(id: string, name: string, filePath: string, extra: Partial<Functio
   return { id, name, filePath, isAsync: true, language: 'TypeScript', startIndex: 0, endIndex: 1, fanIn: 0, fanOut: 0, ...extra };
 }
 
-/** Materialize a repo: .openlore index (edge store + llm-context) + real source files. */
-function makeRepo(prefix: string, nodes: FunctionNode[], edges: CallEdge[], sources: Record<string, string>): string {
+interface RouteInvEntry { method: string; path: string; framework: string; file: string; handler: string; contractSource: string }
+
+/** Materialize a repo: .openlore index (edge store + llm-context) + real source files
+ *  + an optional persisted route inventory (the real artifact federation reads first). */
+function makeRepo(prefix: string, nodes: FunctionNode[], edges: CallEdge[], sources: Record<string, string>, routes?: RouteInvEntry[]): string {
   const dir = mkdtempSync(join(tmpdir(), `xsvc-e2e-${prefix}-`));
   created.push(dir);
   const adir = join(dir, OPENLORE_ANALYSIS_REL_PATH);
@@ -41,6 +44,9 @@ function makeRepo(prefix: string, nodes: FunctionNode[], edges: CallEdge[], sour
   };
   writeFileSync(join(adir, ARTIFACT_LLM_CONTEXT), JSON.stringify({ callGraph }));
   writeFileSync(join(adir, 'fingerprint.json'), JSON.stringify({ hash: `fp-${prefix}`, computedAt: '2026-06-26T00:00:00.000Z', fileCount: nodes.length }));
+  if (routes) {
+    writeFileSync(join(adir, ARTIFACT_ROUTE_INVENTORY), JSON.stringify({ total: routes.length, byMethod: {}, byFramework: {}, routes }));
+  }
   for (const [rel, content] of Object.entries(sources)) {
     const fp = join(dir, rel);
     mkdirSync(dirname(fp), { recursive: true });
@@ -93,5 +99,28 @@ describe('analyze_impact cross-service consumers across a federation', () => {
     };
     expect(result.federation).toBeDefined();
     expect(result.federation?.crossServiceConsumers).toBeUndefined();
+  });
+
+  it('finds a cross-repo consumer when the handler is registered in a different file (Django)', async () => {
+    // The handler `thing_detail` lives in views.py, but its route is registered in
+    // urls.py — so the seed's own file has no route. The persisted route inventory
+    // (which lists every route) is what lets federation derive the route key here.
+    const dj = makeRepo(
+      'dj',
+      [node('src/views.py::thing_detail', 'thing_detail', 'src/views.py', { language: 'Python', startLine: 1, endLine: 2 })],
+      [],
+      { 'src/views.py': 'def thing_detail(request, pk):\n    return {}' },
+      [{ method: 'UNKNOWN', path: '/api/things/<int:pk>/', framework: 'django', file: 'src/urls.py', handler: 'thing_detail', contractSource: 'none' }],
+    );
+    const webSrc = 'export async function loadThing(id) {\n  return fetch(`/api/things/${id}`);\n}';
+    const web = makeRepo('djweb', [node('src/t.ts::loadThing', 'loadThing', 'src/t.ts', { startLine: 1, endLine: 3 })], [], { 'src/t.ts': webSrc });
+    addRepo(dj, web, { name: 'web' });
+
+    const result = await handleAnalyzeImpact(dj, 'thing_detail', 2, false, false, undefined, true) as {
+      federation?: { crossServiceConsumers?: Array<{ repo: string; caller: string; path: string }> };
+    };
+    const xsvc = result.federation?.crossServiceConsumers ?? [];
+    expect(xsvc).toHaveLength(1);
+    expect(xsvc[0]).toMatchObject({ repo: 'web', caller: 'loadThing', path: '/api/things/:param' });
   });
 });
