@@ -671,6 +671,21 @@ describe('extractRouteDefinitions', () => {
       const routes = await extractRouteDefinitions(filePath);
       expect(routes.every(r => r.framework === 'django')).toBe(true);
     });
+
+    it('should detect re_path()/url() regex routes (not just path())', async () => {
+      const src = [
+        'urlpatterns = [',
+        "    re_path(r'^api/items/(?P<pk>[0-9]+)/$', views.item_detail),",
+        "    url(r'^api/legacy/$', views.legacy_view),",
+        ']',
+      ].join('\n');
+      const filePath = await createFile(tempDir, 'urls.py', src);
+      const routes = await extractRouteDefinitions(filePath);
+      const byHandler = new Map(routes.map(r => [r.handlerName, r.normalizedPath]));
+      // named capture group → :param; anchors stripped
+      expect(byHandler.get('item_detail')).toBe('/api/items/:param');
+      expect(byHandler.get('legacy_view')).toBe('/api/legacy');
+    });
   });
 
   // ── Non-code masking: docstrings & comments ──────────────────────────────────
@@ -917,6 +932,15 @@ describe('extractAllHttpEdges', () => {
     expect(result.calls).toHaveLength(1);
     expect(result.routes).toHaveLength(0);
     expect(result.edges).toHaveLength(0);
+  });
+
+  it('aggregates calls in filePaths order, not I/O completion order (determinism)', async () => {
+    const a = await createFile(tempDir, 'a.ts', `export function fa() { return fetch('/api/a'); }`);
+    const b = await createFile(tempDir, 'b.ts', `export function fb() { return fetch('/api/b'); }`);
+    // Result order follows the INPUT order regardless of which read finishes first,
+    // so re-analysis is byte-stable. Swapping inputs swaps the output order.
+    expect((await extractAllHttpEdges([a, b])).calls.map(c => c.normalizedUrl)).toEqual(['/api/a', '/api/b']);
+    expect((await extractAllHttpEdges([b, a])).calls.map(c => c.normalizedUrl)).toEqual(['/api/b', '/api/a']);
   });
 
   it('should find no edges when there are only backend files', async () => {

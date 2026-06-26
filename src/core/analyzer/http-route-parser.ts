@@ -420,11 +420,20 @@ export async function extractRouteDefinitions(filePath: string): Promise<RouteDe
   // matched against a Django route will receive confidence='path' at best —
   // never 'exact'. This may produce false-positive edges when multiple HTTP
   // methods share the same URL pattern. Filter by confidence if this matters.
+  // Match `path(...)` (Django 2.0+ simple converters) AND `re_path(...)` / the legacy
+  // `url(...)` (regex routes). `\bpath` alone never matched `re_path` (the `_` blocks
+  // the word boundary), so regex routes were silently unextracted.
   const djangoPathRegex =
-    /\bpath\s*\(\s*r?(['"])(.*?)\1\s*,\s*([\w.]+)/gm;
+    /\b(re_path|path|url)\s*\(\s*r?(['"])(.*?)\2\s*,\s*([\w.]+)/gm;
   while ((m = djangoPathRegex.exec(clean)) !== null) {
-    const path = '/' + m[2].replace(/\$$/, '').replace(/^\^/, '');
-    const handlerName = m[3].split('.').pop() ?? m[3];
+    const keyword = m[1];
+    const rawPattern = m[3];
+    // `path()` uses simple `<int:pk>` converters (normalizeUrl handles those);
+    // `re_path()`/`url()` use a regex — convert capture groups to a path template.
+    const path = keyword === 'path'
+      ? '/' + rawPattern.replace(/\$$/, '').replace(/^\^/, '')
+      : djangoRegexToTemplate(rawPattern);
+    const handlerName = m[4].split('.').pop() ?? m[4];
     const lineNum = getLine(lines, m.index);
     routes.push({
       file: filePath,
@@ -822,11 +831,14 @@ export async function extractAllHttpEdges(filePaths: string[]): Promise<{
   routes: RouteDefinition[];
   edges: HttpEdge[];
 }> {
-  const allCalls: HttpCall[] = [];
-  const allRoutes: RouteDefinition[] = [];
-
-  await Promise.all(
-    filePaths.map(async fp => {
+  // Collect per-file results and flatten in filePaths order. `Promise.all` resolves
+  // in INPUT order regardless of completion order, so the aggregated calls/routes
+  // (and therefore the edges) are a deterministic function of the file list — NOT of
+  // filesystem I/O timing. Pushing into shared arrays inside the callbacks would
+  // append in completion order, a latent byte-determinism hazard the spec forbids
+  // (and the shareable-bundle digest relies on).
+  const perFile = await Promise.all(
+    filePaths.map(async (fp): Promise<{ calls: HttpCall[]; routes: RouteDefinition[] }> => {
       const ext = extname(fp).toLowerCase();
       if (['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs'].includes(ext)) {
         // A JS/TS file can be a client (fetch/axios calls), a server (route
@@ -838,17 +850,17 @@ export async function extractAllHttpEdges(filePaths: string[]): Promise<{
           extractHttpCalls(fp),
           extractTsRouteDefinitions(fp),
         ]);
-        allCalls.push(...calls);
-        allRoutes.push(...routes);
+        return { calls, routes };
       } else if (['.py', '.pyw'].includes(ext)) {
-        const routes = await extractRouteDefinitions(fp);
-        allRoutes.push(...routes);
+        return { calls: [], routes: await extractRouteDefinitions(fp) };
       } else if (ext === '.java') {
-        const routes = await extractJavaRouteDefinitions(fp);
-        allRoutes.push(...routes);
+        return { calls: [], routes: await extractJavaRouteDefinitions(fp) };
       }
+      return { calls: [], routes: [] };
     })
   );
+  const allCalls: HttpCall[] = perFile.flatMap(r => r.calls);
+  const allRoutes: RouteDefinition[] = perFile.flatMap(r => r.routes);
 
   const edges = buildHttpEdges(allCalls, allRoutes);
   return { calls: allCalls, routes: allRoutes, edges };
@@ -857,6 +869,23 @@ export async function extractAllHttpEdges(filePaths: string[]): Promise<{
 // ============================================================================
 // PRIVATE UTILITIES
 // ============================================================================
+
+/**
+ * Convert a Django `re_path`/`url` regex pattern to a comparable path template:
+ * strip the `^`/`$` anchors, replace each capture group (named `(?P<pk>…)`,
+ * non-capturing `(?:…)`, or plain `(…)`) with a `:param` placeholder, and unescape
+ * `\.`/`\/`. e.g. `^api/items/(?P<pk>[0-9]+)/$` → `/api/items/:param/`. Best-effort:
+ * a nested-group pattern degrades to a partial template (over-masking only drops a
+ * potential match, never invents one).
+ */
+function djangoRegexToTemplate(re: string): string {
+  let p = re.replace(/^\^/, '').replace(/\$$/, '');
+  p = p.replace(/\(\?P<[^>]+>[^)]*\)/g, ':param'); // named group
+  p = p.replace(/\(\?:[^)]*\)/g, ':param');        // non-capturing group
+  p = p.replace(/\([^)]*\)/g, ':param');           // plain group
+  p = p.replace(/\\([./])/g, '$1');                // unescape \. and \/
+  return '/' + p.replace(/^\/+/, '');
+}
 
 /** Replace every non-newline char of `match` with a space (length- and line-preserving). */
 function blankKeepNewlines(match: string): string {
