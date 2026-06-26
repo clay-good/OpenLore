@@ -90,32 +90,15 @@ export interface HttpEdge {
   confidence: 'exact' | 'path' | 'fuzzy';
 }
 
-// ============================================================================
-// CROSS-SERVICE HTTP CAPABILITY SURFACE
-// ============================================================================
-// The authoritative declaration of which languages participate in cross-service
-// API topology — the language-support registry derives its `crossServiceHttp`
-// capability column from these sets, and a behavioral test
-// (language-support.test.ts) proves each member actually extracts a client call
-// or a route on a fixture, so the registry cannot silently over-claim.
-
-/** Languages OpenLore extracts outbound HTTP CLIENT call sites from (fetch/axios/ky/got). */
-export const HTTP_CLIENT_LANGUAGES: ReadonlySet<string> = new Set(['TypeScript', 'JavaScript']);
-
-/** Languages OpenLore extracts server ROUTE registrations from (the handler half of an edge). */
-export const HTTP_ROUTE_LANGUAGES: ReadonlySet<string> = new Set([
-  'TypeScript', 'JavaScript', 'Python', 'Java',
-]);
-
-/**
- * Languages that contribute to a cross-service edge — as a client call site, a
- * server route handler, or both. The union of the two halves above; the registry's
- * `crossServiceHttp` capability is exactly membership in this set.
- */
-export const CROSS_SERVICE_HTTP_LANGUAGES: ReadonlySet<string> = new Set([
-  ...HTTP_CLIENT_LANGUAGES,
-  ...HTTP_ROUTE_LANGUAGES,
-]);
+// The cross-service HTTP capability surface (which languages contribute client
+// call sites / server routes) lives in a dependency-free leaf module so the
+// language-support registry can derive its column without importing this module
+// (several tests vi.mock it). Re-exported here for the public extraction API.
+export {
+  HTTP_CLIENT_LANGUAGES,
+  HTTP_ROUTE_LANGUAGES,
+  CROSS_SERVICE_HTTP_LANGUAGES,
+} from './http-capability.js';
 
 // ============================================================================
 // NORMALISATION HELPERS

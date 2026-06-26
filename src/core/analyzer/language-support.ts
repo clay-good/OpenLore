@@ -34,7 +34,7 @@ import { SIGNATURE_LANGUAGES } from './signature-extractor.js';
 import { TYPE_INFERENCE_LANGUAGES } from './type-inference-engine.js';
 import { IMPORT_RESOLUTION_LANGUAGES } from './import-resolver-bridge.js';
 import { STYLE_FINGERPRINT_LANGUAGES } from './style-fingerprint.js';
-import { CROSS_SERVICE_HTTP_LANGUAGES } from './http-route-parser.js';
+import { CROSS_SERVICE_HTTP_LANGUAGES } from './http-capability.js';
 
 /** The closed set of capabilities the registry tracks, in deterministic column order. */
 export const CAPABILITIES = [
