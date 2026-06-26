@@ -1,0 +1,59 @@
+# Resolve `this.method()` / `super.method()` calls in the call graph
+
+> Status: IMPLEMENTED (2026-06-26, branch `feat/error-propagation-graph`, folded into PR #213).
+> `npm run build` clean; `vitest run src examples` green (273 files / 5369 tests). Dogfooded e2e on
+> the OpenLore repo + crafted corpora.
+
+## Why
+
+The call graph is the substrate every edge-traversing tool stands on — `analyze_impact`,
+`select_tests`, `find_dead_code`, `find_path`, `blast_radius`, and (the motivating case here)
+`analyze_error_propagation`. It had a silent, pervasive hole: a `this.method()` call produced **no
+edge at all** — not a resolved edge, not even an `external::` leaf.
+
+Root cause: the TypeScript/JavaScript call query matched only `member_expression object: (identifier)`.
+A `this`/`super` receiver is its own grammar node (`this` / `super`), not an `identifier`, so the
+call was never captured. Every tool that walks edges was therefore blind to intra-object dispatch —
+a class method calling a sibling via `this.sibling()` looked like it called nothing. On a class-heavy
+repo this is a large fraction of the real call structure (e.g. every `Logger.warning()` →
+`this.log()` edge was missing).
+
+This surfaced concretely while hardening `analyze_error_propagation`: an exception thrown by
+`this.sibling()` was reported as `escapes: 0` — a silent claim of exception-freedom. That tool was
+given a disclosure (`unresolvedSelfCalls`) as a stopgap; this change fixes the gap at the source, so
+the disclosure now fires only for the genuinely-unresolvable residue.
+
+## What
+
+Resolve `this.method()` and `super.method()` to indexed methods in the call graph (TypeScript /
+JavaScript; Python `self.`/`cls.` already resolved). Deterministic, no LLM, no new artifact.
+
+1. **Capture** — extend `TS_CALL_QUERY` with `member_expression` arms for `object: (this)` and
+   `object: (super)`. The receiver text (`"this"` / `"super"`) flows through the existing
+   `calleeObject` field.
+2. **Resolve (Strategy 1a)** — `this.m()` binds to method `m` on the caller's enclosing class, then
+   walks `extends` ancestors transitively (cycle-guarded) for inherited methods; `super.m()` skips
+   the caller's own class and resolves against its parents (a super call never targets the caller's
+   own class). Confidence `self_cls`. Class relationships are computed once before the resolution loop
+   and reused by the later hierarchy pass.
+3. **File affinity (soundness)** — `findByQualifiedName(Class, method)` keys on `Class.method` with no
+   file dimension. When two files declare a same-named class, prefer a candidate in the caller's OWN
+   file (the same-class / same-file family), then the file the caller imports the class from
+   (cross-file parent). A single candidate is unambiguous; an ambiguous match with no affinity is
+   SKIPPED, never guessed — so the change never mints a false cross-file edge.
+4. **Receiver-aware noise filter** — the name-only ignore-list (which suppresses `arr.map()` /
+   `JSON.parse()` noise) is bypassed for `this`/`super`/`self`/`cls` receivers, so a class method
+   named like a builtin (`parse`, `map`, `filter`, `resolve`, …) still resolves instead of being
+   dropped before resolution.
+5. **No junk leaves** — an unresolved `this`/`super` call is dropped, not turned into a meaningless
+   `external::this.m` node (which would also mask `analyze_error_propagation`'s targeted disclosure).
+
+## Soundness / non-goals
+
+- Additive and provenance-labeled (`self_cls`); the committed TS regression snapshot changes only by
+  ADDING the two previously-missing `this.` edges — nothing removed or re-pointed.
+- Scope is TS/JS (plus the already-working Python `self.`/`cls.`). Other languages are unaffected.
+- Known residual (pre-existing, not introduced here): a function nested in a class body — e.g. an
+  object-literal method inside a method — is indexed with the enclosing class name, so its `this.x()`
+  can over-attribute to the class. Rare; left to a future extractor fix. `analyze_error_propagation`
+  still discloses any `this.` call that does not resolve, so the residue is never silently dropped.

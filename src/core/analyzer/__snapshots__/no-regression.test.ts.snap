@@ -30,6 +30,8 @@ exports[`spec-08 no-regression — TypeScript extraction is unperturbed > matche
     },
   ],
   "edges": [
+    "regression/sample.ts::Repository.add -> regression/sample.ts::Repository.validate",
+    "regression/sample.ts::Repository.findAll -> regression/sample.ts::Repository.load",
     "regression/sample.ts::bootstrap -> external::repo.add",
     "regression/sample.ts::bootstrap -> regression/sample.ts::createRepo",
   ],

@@ -143,3 +143,26 @@ genuinely-unresolved TS/JS `this.method()` is disclosed. Verified e2e: `caller` 
 throws) now reports `unresolvedSelfCalls: 1` with the boundary; the resolving control reports `0`.
 Regression tests: extractor receiver classification (TS + Python), handler disclosure + no-false-
 positive (review S2).
+
+## F. Upstream fix: the `this.method()` gap closed at the source (call graph)
+
+The §E disclosure was the honest stopgap; the root cause was an upstream call-graph hole — `this.`/
+`super.` receiver calls were never captured as edges (the TS call query only matched an `(identifier)`
+receiver). That hole was blinding **every** edge-traversing tool, not just this one. It is now fixed
+in the call graph (change `add-this-super-method-resolution`, same PR): `this.m()` resolves to the
+enclosing class (then `extends` ancestors), `super.m()` to the parent, with file/import affinity to
+avoid false cross-file edges, a receiver-aware noise filter (so `this.parse()`/`this.map()` are not
+dropped), and unresolved this/super calls dropped rather than turned into junk `external::` leaves.
+
+Two adversarial agents drove the fix: one hunted false edges (found + fixed cross-file same-named-class
+mis-binding and cross-file parent decoys via file affinity), one confirmed the cross-tool benefit
+(`analyze_impact` fan-in, `find_dead_code` false-dead removed, `find_path`, JS parity, Python
+no-regression) and found the noise-filter swallow (`this.parse()` dropped before resolution — fixed).
+
+Composed result, dogfooded on the OpenLore repo: every `Logger.*` → `this.log()` edge now resolves
+(`self_cls`); `analyze_error_propagation` on `handleBatch` went from `escapes 2 / handled 2 /
+functionsAnalyzed 449 / unresolvedSelfCalls 39` to `escapes 3 / handled 32 / functionsAnalyzed 578 /
+unresolvedSelfCalls 2` — the resolution traces what it can, and the §E disclosure honestly flags the
+small residue (object-literal / unindexed-parent edge cases). The disclosure and the resolution
+compose: resolved calls are analyzed, the genuinely-unresolvable ones are still never assumed
+exception-free.
