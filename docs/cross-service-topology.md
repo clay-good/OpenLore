@@ -63,8 +63,12 @@ boundaries.
 
 This is **not** "free" from federation's symbol-name resolution: a client call references a URL, not the
 handler's symbol, so the name-based cross-repo resolver can never see it. The route-key bridge is the
-piece that makes cross-repo cross-service impact work. (It re-extracts client call sites from each
-scoped repo's source per query; a persisted client-call index is a future optimization.)
+piece that makes cross-repo cross-service impact work. The handler's route key is read from B's persisted
+route inventory (`route-inventory.json`), so it resolves even when the route is registered in a different
+file than the handler (Django `urls.py`→`views.py`, a separate Express routes file) — matching the
+single-repo projection. (Client call sites are re-extracted from each scoped repo's source per query; a
+persisted client-call index is a future optimization. A scoped repo whose index is stale relative to its
+registration is skipped, never queried out of date.)
 
 ## Observability
 

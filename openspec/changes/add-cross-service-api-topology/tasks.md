@@ -19,6 +19,11 @@
 - [x] Normalized route key + path-parameter normalization (`:id`/`{id}`/concrete reconcile).
       ALREADY PRESENT: `normalizeUrl` + `candidatePaths` + `buildHttpEdges` (exact/path/fuzzy).
 - [x] Exact structural match; ambiguous/dynamic → no edge. ALREADY PRESENT; now proven by tests.
+- [x] METHOD PRECISION (found in review): `buildHttpEdges` previously created a low-confidence
+      edge on a method MISMATCH (a `POST` client linking to a `GET` handler on the same path) AND
+      its dedup key omitted the handler, so two handlers for one path collapsed — dropping the
+      correct edge. Now: both methods known and different → no edge (a match needs method
+      compatibility, equal or one UNKNOWN). A `GET` client → its `GET` handler, `POST` → `POST`.
 
 ## 3. Projection (no schema/tool change)
 - [x] Project matched pairs as `http_endpoint` function→function edges. ALREADY PRESENT
@@ -41,6 +46,12 @@
       resolver) matches a federated repo's client calls against a home handler's route key via
       the same `buildHttpEdges`; surfaced as `crossServiceConsumers` in `analyze_impact`'s
       federation block. Single-repo links need no federation (unchanged).
+- [x] SEPARATE-FILE handlers cross-repo (found in review): `deriveSeedRoutes` now reads the home
+      repo's persisted `route-inventory.json` (every route, by handler name) instead of parsing
+      only the seed's own file — so a Django (`urls.py`→`views.py`) or separate-Express-routes
+      handler resolves its route key cross-repo too, matching the single-repo projection. Falls
+      back to per-seed-file parsing when no inventory artifact exists. Stale scoped repos are
+      skipped by fingerprint (verified by dogfood), never queried out of date.
 
 ## 5. Honesty / determinism
 - [x] Dynamic/unresolved targets emit nothing. Proven (single-repo + cross-repo tests).
@@ -58,8 +69,11 @@
 - [x] Separate-file handler resolution (Django `urls.py`→`views.py`, separate Express routes file)
       + the ambiguous-name negative (a name colliding across files stays unresolved, no guessed edge).
 - [x] Next.js App Router route-path from a repo-relative `app/...` path (`ts-route-extractor.test.ts`).
-- [x] Cross-repo federation: client in one indexed repo → handler in another
+- [x] Cross-repo federation: client in one indexed repo → handler in another, incl. a
+      SEPARATE-FILE (Django via route inventory) case and a negative
       (`cross-service-resolver.test.ts` + e2e `cross-service-impact.test.ts`).
+- [x] Method precision: a GET client and a POST client on one path link to their OWN handlers,
+      never cross-linked; UNKNOWN-method side still links (`http-route-parser.test.ts`).
 - [x] Determinism (both layers).
 
 ## 7. Verify & dogfood
