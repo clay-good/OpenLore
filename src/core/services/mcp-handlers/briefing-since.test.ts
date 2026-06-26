@@ -219,6 +219,33 @@ describe('handleBriefingSince', () => {
     expect(mockedRefExists).not.toHaveBeenCalled();
   });
 
+  it('does NOT false-flag a fallback for a usable base that resolves to itself (e.g. empty-tree SHA)', async () => {
+    // The empty-tree SHA is a valid git-diff base but is not a commit, so refExists
+    // (which peels ^{commit}) is false — yet resolveBaseRef returns it verbatim, so it
+    // is NOT a fallback. The resolvedBase===input short-circuit must suppress the flag.
+    const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf899d15f71049056';
+    mockedRefExists.mockResolvedValue(false);
+    mockedDiff.mockResolvedValue(diffFiles(['src/core.ts'], EMPTY_TREE)); // resolved === requested
+    mockedCoupling.mockResolvedValue(coupling({ 'src/core.ts': 1 }, 40));
+
+    const r = (await handleBriefingSince({ directory: '/repo', baseRef: EMPTY_TREE })) as BriefingResult;
+    expect(r.baseRefFallback).toBeUndefined();
+    expect(r.caveats.some(c => /could not be resolved/i.test(c))).toBe(false);
+  });
+
+  it('a region scope that matched no changed file says "nothing matched", not "nothing changed"', async () => {
+    // Production code DID change (src/core.ts), but the region filter excludes it —
+    // the note must not claim "nothing changed" (a false all-clear).
+    mockedDiff.mockResolvedValue(diffFiles(['src/core.ts', 'src/orch.ts']));
+    mockedCoupling.mockResolvedValue(coupling({ 'src/core.ts': 1 }, 40));
+
+    const r = (await handleBriefingSince({ directory: '/repo', filePattern: 'no-such-dir' })) as BriefingResult;
+    expect(r.scope).toBe('region');
+    expect(r.changedSymbols).toBe(0);
+    expect(r.note).toMatch(/nothing matched.*NOT.*nothing changed/i);
+    expect(r.note).not.toMatch(/No production code changed/i);
+  });
+
   it('discloses the rename/exact-path churn limitation only when surprising-change is live', async () => {
     // Live surprise: a low-churn hub with sufficient history → caveat present
     mockedDiff.mockResolvedValue(diffFiles(['src/core.ts']));

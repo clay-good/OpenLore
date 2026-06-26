@@ -80,14 +80,6 @@ export async function handleBriefingSince(input: BriefingSinceInput): Promise<un
   const maxResults = Math.max(1, Math.min(input.maxResults ?? MAX_RESULTS_DEFAULT, MAX_RESULTS_CAP));
   const baseRefInput = input.baseRef && input.baseRef.length > 0 ? input.baseRef : 'auto';
 
-  // ── Honesty: detect a SILENT base-ref fallback ──────────────────────────────
-  // `getChangedFiles`→`resolveBaseRef` silently falls back to main → master →
-  // HEAD~1 → empty-tree when an EXPLICIT ref can't be resolved. Briefing against a
-  // base the caller did not ask for (a typo'd `--base`) would make every number
-  // below authoritative-looking but wrong, so we detect the unresolved ref up front
-  // and disclose it rather than letting the fallback pass unannounced.
-  const requestedRefUnresolved = baseRefInput !== 'auto' && !(await refExists(absDir, baseRefInput));
-
   // ── 1. Changed files since the base ref ─────────────────────────────────────
   let resolvedBase: string;
   let changedFiles: string[];
@@ -101,6 +93,17 @@ export async function handleBriefingSince(input: BriefingSinceInput): Promise<un
   } catch (err) {
     return { error: `git diff failed (base ${baseRefInput}): ${err instanceof Error ? err.message : String(err)}` };
   }
+
+  // ── Honesty: detect a SILENT base-ref fallback ──────────────────────────────
+  // `resolveBaseRef` (inside getChangedFiles) returns an explicit ref verbatim when
+  // it verifies, and SILENTLY substitutes main → master → HEAD~1 → empty-tree when it
+  // does not — so `resolvedBase !== baseRefInput` is exactly "a fallback happened".
+  // We additionally confirm the requested ref is genuinely unresolvable, so a valid
+  // base that simply isn't a commit (e.g. the empty-tree SHA, which resolves to
+  // itself) is never mis-flagged. Briefing against a base the caller never asked for
+  // (a typo'd `--base`) would make every number below authoritative-looking but wrong.
+  const requestedRefUnresolved =
+    baseRefInput !== 'auto' && resolvedBase !== baseRefInput && !(await refExists(absDir, baseRefInput));
 
   // ── 2. Changed production symbols (file-level granularity) ──────────────────
   // A region scope (filePattern) narrows BOTH the briefed symbols and the file
@@ -170,11 +173,18 @@ export async function handleBriefingSince(input: BriefingSinceInput): Promise<un
   // never the reassuring "nothing significant changed". ───────────────────────
   let note: string | undefined;
   if (changedSymbols.length === 0) {
-    note = scopedFiles.length === 0
-      ? `No production code changed since ${resolvedBase} (the diff touched only tests/config/non-code files) — "nothing changed", NOT "nothing significant".`
-      : scope === 'region'
-        ? `No changed production symbol matched filePattern "${input.filePattern}" — "nothing matched", NOT "nothing significant".`
+    if (scope === 'region') {
+      // A region scope that emptied the set is "nothing matched the filter", NOT
+      // "nothing changed" — production code may well have changed elsewhere. Saying
+      // "nothing changed" here would be a false all-clear.
+      note = scopedFiles.length === 0
+        ? `No changed file matched filePattern "${input.filePattern}" (production code may have changed elsewhere) — "nothing matched", NOT "nothing changed".`
+        : `No changed production symbol matched filePattern "${input.filePattern}" — "nothing matched", NOT "nothing significant".`;
+    } else {
+      note = changedFiles.length === 0
+        ? `No production code changed since ${resolvedBase} (the diff touched only tests/config/non-code files) — "nothing changed", NOT "nothing significant".`
         : 'The changed file(s) contain no analyzed production symbol (not yet analyzed, or only tests/generated) — "nothing matched", NOT "nothing significant".';
+    }
   }
 
   const caveats: string[] = [
