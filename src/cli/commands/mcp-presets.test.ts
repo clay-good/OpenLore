@@ -442,8 +442,13 @@ describe('tools/list payload budget (spec-28)', () => {
   // get_duplicate_report). It joins ONLY the opt-in `full` surface; it stays OUT of the lean
   // navigation default, so the lean prefix is unchanged. The residual is the genuine cost of its
   // schema. Conscious decision, not silent drift.
+  // Bumped 81_000 → 82_000 when the `analyze_error_propagation` tool was added to the full surface
+  // (change: add-error-propagation-graph) — a read-only symbol-scoped exception escape/handled
+  // conclusion tool (the error-handling analogue of analyze_impact). It joins ONLY the opt-in `full`
+  // surface; it stays OUT of the lean navigation default, so the lean prefix is unchanged. The
+  // residual is the genuine cost of its schema. Conscious decision, not silent drift.
   it('full surface stays within its prefix budget', () => {
-    expect(payloadBytes({ preset: 'full' })).toBeLessThan(81_000);
+    expect(payloadBytes({ preset: 'full' })).toBeLessThan(82_000);
   });
 
   it('the lean DEFAULT surface (no selector) is the lean navigation payload, not the full one', () => {

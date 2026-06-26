@@ -22,6 +22,10 @@ import { SIGNATURE_LANGUAGES as SIG, extractSignatures, detectLanguage } from '.
 import { IMPORT_RESOLUTION_LANGUAGES as IMP, buildBaseImportMap } from './import-resolver-bridge.js';
 import { STYLE_FINGERPRINT_LANGUAGES as STY } from './style-fingerprint.js';
 import {
+  ERROR_PROPAGATION_LANGUAGES as ERRP,
+  extractExceptionFactsFromSource,
+} from './exception-flow.js';
+import {
   CROSS_SERVICE_HTTP_LANGUAGES as XSVC,
   extractHttpCalls,
   extractRouteDefinitions,
@@ -69,6 +73,36 @@ describe('language-support registry — faithful to live extractor sources', () 
       expect(claims, `crossServiceHttp mismatch for ${lang}`).toBe(XSVC.has(lang));
     }
   });
+
+  it('errorPropagation cell === ERROR_PROPAGATION_LANGUAGES membership for EVERY language (exact, drift-proof)', () => {
+    for (const lang of ALL_LANGUAGES) {
+      const claims = languageSupport(lang).capabilities.includes('errorPropagation');
+      expect(claims, `errorPropagation mismatch for ${lang}`).toBe(ERRP.has(lang));
+    }
+  });
+});
+
+// errorPropagation is behaviorally exercised against the live extractor: every member
+// must actually extract a throw site from a fixture, so the registry cannot silently over-claim.
+const ERRP_FIXTURES: Record<string, string> = {
+  TypeScript: 'function f() {\n  throw new TypeError("x");\n}',
+  JavaScript: 'function f() {\n  throw new TypeError("x");\n}',
+  Python: 'def f():\n    raise ValueError("x")',
+};
+describe('errorPropagation is behaviorally faithful (no silent over-claim)', () => {
+  it('every ERROR_PROPAGATION_LANGUAGES member has a fixture wired (guard cannot rot)', () => {
+    for (const lang of ERRP) {
+      expect(ERRP_FIXTURES[lang], `add an ERRP_FIXTURES entry for ${lang}`).toBeDefined();
+    }
+  });
+
+  for (const lang of ERRP) {
+    it(`${lang}: the live extractor finds a throw site`, async () => {
+      const facts = await extractExceptionFactsFromSource(ERRP_FIXTURES[lang], lang);
+      expect(facts.supported, `${lang} should be supported`).toBe(true);
+      expect(facts.throwSites.length, `${lang} extracted no throw site`).toBeGreaterThan(0);
+    });
+  }
 });
 
 // styleFingerprint is behaviorally exercised against the live tally (no silent over-claim): every

@@ -25,7 +25,7 @@ and LLM/embedding setup, and prints the exact command to fix anything that is mi
 | Flag | Effect |
 |------|--------|
 | `--agent <name>` | Install only for one surface. Names: `claude-code`, `cursor`, `cline`, `continue`, `agents-md`. |
-| `--preset <name>` | Wire the MCP server to a tool preset: `navigation` (the lean default), `minimal`, `memory`, `verify`, `federation`, `coordination`, or `full`. Omit it for the lean navigation surface; pass `--preset full` to wire all 70 tools (the prior default). |
+| `--preset <name>` | Wire the MCP server to a tool preset: `navigation` (the lean default), `minimal`, `memory`, `verify`, `federation`, `coordination`, or `full`. Omit it for the lean navigation surface; pass `--preset full` to wire all 71 tools (the prior default). |
 | `--dry-run` | Print the planned changes; write nothing. |
 | `--force` | Overwrite OpenLore-managed blocks even when hand-edited. |
 | `--uninstall` | Remove every OpenLore-managed block / entry. Files OpenLore created (and never had non-OpenLore content) are deleted. |

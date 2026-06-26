@@ -29,6 +29,7 @@ import { handleCertifyPublicSurface } from './mcp-handlers/public-surface.js';
 import { handleGetStyleFingerprint } from './mcp-handlers/style-fingerprint.js';
 import { handleBriefingSince } from './mcp-handlers/briefing-since.js';
 import { handleFindClones } from './mcp-handlers/clone-query.js';
+import { handleAnalyzeErrorPropagation } from './mcp-handlers/error-propagation.js';
 import type { TaskDescriptor } from './mcp-handlers/change-footprint.js';
 import { handleFindDeadCode } from './mcp-handlers/reachability.js';
 import { handleVerifyClaim } from './mcp-handlers/claim-verification.js';
@@ -379,6 +380,10 @@ export async function dispatchTool(
     const { directory, symbol, snippet, minSimilarity, maxResults } =
       args as { directory: string; symbol?: string; snippet?: string; minSimilarity?: number; maxResults?: number };
     return handleFindClones({ directory, symbol, snippet, minSimilarity, maxResults });
+  } else if (name === 'analyze_error_propagation') {
+    const { directory, symbol, maxDepth } =
+      args as { directory: string; symbol?: string; maxDepth?: number };
+    return handleAnalyzeErrorPropagation({ directory, symbol, maxDepth });
   }
   throw new UnknownToolError(name);
 }

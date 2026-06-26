@@ -35,6 +35,7 @@ import { TYPE_INFERENCE_LANGUAGES } from './type-inference-engine.js';
 import { IMPORT_RESOLUTION_LANGUAGES } from './import-resolver-bridge.js';
 import { STYLE_FINGERPRINT_LANGUAGES } from './style-fingerprint.js';
 import { CROSS_SERVICE_HTTP_LANGUAGES } from './http-capability.js';
+import { ERROR_PROPAGATION_LANGUAGES } from './exception-flow.js';
 
 /** The closed set of capabilities the registry tracks, in deterministic column order. */
 export const CAPABILITIES = [
@@ -46,6 +47,7 @@ export const CAPABILITIES = [
   'styleFingerprint',
   'iacProjection',
   'crossServiceHttp',
+  'errorPropagation',
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];
@@ -60,6 +62,7 @@ export const CAPABILITY_DESCRIPTIONS: Record<Capability, string> = {
   styleFingerprint: 'Descriptive idiom fingerprint (function form, binding, naming case, …) with an evidence floor + enforcement-awareness.',
   iacProjection: 'Infrastructure-as-code projection (resources/edges) onto the unified graph.',
   crossServiceHttp: 'Cross-service API topology: outbound HTTP client call sites and/or server route registrations matched into `http_endpoint` edges across the process (and, under federation, the repo) boundary.',
+  errorPropagation: 'Exception escape/handled analysis (`analyze_error_propagation`): static throw/raise + typed/untyped catch extraction, so the exceptions that escape a function vs. those caught within it can be computed.',
 };
 
 /**
@@ -109,6 +112,7 @@ function deriveCapabilities(language: string): Capability[] {
   if (STYLE_FINGERPRINT_LANGUAGES.has(language)) out.push('styleFingerprint');
   if (isIacLanguage(language)) out.push('iacProjection');
   if (CROSS_SERVICE_HTTP_LANGUAGES.has(language)) out.push('crossServiceHttp');
+  if (ERROR_PROPAGATION_LANGUAGES.has(language)) out.push('errorPropagation');
   // Return in canonical CAPABILITIES order for determinism.
   return CAPABILITIES.filter(c => out.includes(c));
 }
