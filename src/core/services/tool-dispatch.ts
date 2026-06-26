@@ -25,6 +25,7 @@ import { handlePlanParallelWork } from './mcp-handlers/plan-parallel-work.js';
 import { handleMapInFlightConflicts } from './mcp-handlers/interference-map.js';
 import { handleGetLanguageSupport } from './mcp-handlers/language-support.js';
 import { handleReportCoverageGaps } from './mcp-handlers/coverage-gaps.js';
+import { handleCertifyPublicSurface } from './mcp-handlers/public-surface.js';
 import type { TaskDescriptor } from './mcp-handlers/change-footprint.js';
 import { handleFindDeadCode } from './mcp-handlers/reachability.js';
 import { handleVerifyClaim } from './mcp-handlers/claim-verification.js';
@@ -360,6 +361,9 @@ export async function dispatchTool(
     const { directory, maxResults, filePattern, changedSymbols, diffRef, directResolvedOnly } =
       args as { directory: string; maxResults?: number; filePattern?: string; changedSymbols?: string[]; diffRef?: string; directResolvedOnly?: boolean };
     return handleReportCoverageGaps({ directory, maxResults, filePattern, changedSymbols, diffRef, directResolvedOnly });
+  } else if (name === 'certify_public_surface') {
+    const { directory, baseRef, maxResults } = args as { directory: string; baseRef?: string; maxResults?: number };
+    return handleCertifyPublicSurface({ directory, baseRef, maxResults });
   }
   throw new UnknownToolError(name);
 }

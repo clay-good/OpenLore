@@ -1,0 +1,121 @@
+import { describe, it, expect } from 'vitest';
+import { assembleSurfaceDiff } from './public-surface.js';
+
+type File = { path: string; content: string; language: string };
+const ts = (path: string, content: string): File => ({ path, content, language: 'TypeScript' });
+const noRename = new Map<string, string>();
+
+/** Find the change for a symbol by name. */
+function change(result: Awaited<ReturnType<typeof assembleSurfaceDiff>>, name: string) {
+  return result.changes.find((c) => c.name === name);
+}
+
+describe('assembleSurfaceDiff — breaking-change classification over file contents', () => {
+  it('removed export → breaking', async () => {
+    const base = [ts('a.ts', 'export function foo(a: number): void {}\nexport function bar(): void {}\n')];
+    const head = [ts('a.ts', 'export function bar(): void {}\n')];
+    const r = await assembleSurfaceDiff(base, head, noRename);
+    const c = change(r, 'foo');
+    expect(c?.class).toBe('breaking');
+    expect(c?.changeKind).toBe('removed');
+    expect(r.overall).toBe('breaking');
+  });
+
+  it('added required parameter → breaking', async () => {
+    const base = [ts('a.ts', 'export function foo(a: number): void {}\n')];
+    const head = [ts('a.ts', 'export function foo(a: number, b: string): void {}\n')];
+    const c = change(await assembleSurfaceDiff(base, head, noRename), 'foo');
+    expect(c?.class).toBe('breaking');
+    expect(c?.reasons.join(' ')).toMatch(/required parameter "b" was added/);
+  });
+
+  it('added trailing optional parameter → non-breaking', async () => {
+    const base = [ts('a.ts', 'export function foo(a: number): void {}\n')];
+    const head = [ts('a.ts', 'export function foo(a: number, b?: string): void {}\n')];
+    const c = change(await assembleSurfaceDiff(base, head, noRename), 'foo');
+    expect(c?.class).toBe('non-breaking');
+  });
+
+  it('narrowed return type → breaking', async () => {
+    const base = [ts('a.ts', 'export function foo(): string | number { return 1; }\n')];
+    const head = [ts('a.ts', 'export function foo(): string { return ""; }\n')];
+    const c = change(await assembleSurfaceDiff(base, head, noRename), 'foo');
+    expect(c?.class).toBe('breaking');
+    expect(c?.reasons.join(' ')).toMatch(/return type narrowed/);
+  });
+
+  it('new export added → non-breaking', async () => {
+    const base = [ts('a.ts', 'export function foo(): void {}\n')];
+    const head = [ts('a.ts', 'export function foo(): void {}\nexport function baz(): void {}\n')];
+    const r = await assembleSurfaceDiff(base, head, noRename);
+    const c = change(r, 'baz');
+    expect(c?.class).toBe('non-breaking');
+    expect(c?.changeKind).toBe('added');
+    expect(r.overall).toBe('non-breaking');
+  });
+
+  it('untyped signature change → potentially-breaking (never silently safe)', async () => {
+    const base = [{ path: 'a.js', content: 'export function foo(a) { return a; }\n', language: 'JavaScript' }];
+    const head = [{ path: 'a.js', content: 'export function foo(a, b) { return a + b; }\n', language: 'JavaScript' }];
+    // adding a 2nd untyped positional param with no default is a required add → breaking,
+    // but a type-only ambiguity stays potentially-breaking. Verify the typed-loss case instead:
+    const baseT = [ts('a.ts', 'export function foo(a: number): void {}\n')];
+    const headT = [ts('a.ts', 'export function foo(a): void {}\n')];
+    const c = change(await assembleSurfaceDiff(baseT, headT, noRename), 'foo');
+    expect(c?.class).toBe('potentially-breaking');
+    // the untyped-required-add is still detected structurally:
+    const c2 = change(await assembleSurfaceDiff(base, head, noRename), 'foo');
+    expect(c2?.class).toBe('breaking');
+  });
+
+  it('renamed export → reported as a rename (not remove+add) via continuity', async () => {
+    const body = 'export function computeTax(income: number): number {\n  const rate = 0.2;\n  return income * rate;\n}\n';
+    const base = [ts('a.ts', body)];
+    const head = [ts('a.ts', body.replace(/computeTax/g, 'calculateTax'))];
+    const r = await assembleSurfaceDiff(base, head, noRename);
+    const renamed = r.changes.find((c) => c.changeKind === 'renamed');
+    expect(renamed).toBeTruthy();
+    expect(renamed?.name).toBe('computeTax');
+    expect(renamed?.rename?.to).toBe('calculateTax');
+    expect(renamed?.class).toBe('breaking');
+    // it is NOT double-counted as a removal + addition:
+    expect(r.changes.filter((c) => c.changeKind === 'removed').length).toBe(0);
+    expect(r.changes.filter((c) => c.changeKind === 'added').length).toBe(0);
+  });
+
+  it('names the in-repo consumers a breaking change affects (stub edge store)', async () => {
+    const base = [ts('a.ts', 'export function foo(a: number): void {}\n')];
+    const head = [ts('a.ts', 'export function foo(a: number, b: string): void {}\n')];
+    const edgeStore = {
+      getCallers: (id: string) =>
+        id === 'a.ts::foo' ? [{ callerId: 'b.ts::useFoo' }, { callerId: 'c.ts::alsoFoo' }] : [],
+    };
+    const r = await assembleSurfaceDiff(base, head, noRename, edgeStore);
+    const breaking = r.breaking.find((c) => c.name === 'foo');
+    expect(breaking?.consumers.map((x) => x.name).sort()).toEqual(['alsoFoo', 'useFoo']);
+    expect(breaking?.consumers.every((x) => x.file && x.id)).toBe(true);
+  });
+
+  it('an unchanged contract produces no change entry', async () => {
+    const src = 'export function foo(a: number): void {}\nexport function bar(): void {}\n';
+    const r = await assembleSurfaceDiff([ts('a.ts', src)], [ts('a.ts', src)], noRename);
+    expect(r.changes).toEqual([]);
+    expect(r.overall).toBe('non-breaking');
+  });
+
+  it('is deterministic — byte-identical verdict across runs', async () => {
+    const base = [ts('a.ts', 'export function foo(a: number): void {}\nexport function gone(): void {}\n')];
+    const head = [ts('a.ts', 'export function foo(a: number, b: string): void {}\n')];
+    const r1 = await assembleSurfaceDiff(base, head, noRename);
+    const r2 = await assembleSurfaceDiff(base, head, noRename);
+    expect(JSON.stringify(r1)).toBe(JSON.stringify(r2));
+  });
+
+  it('discloses unindexed/external consumers as a known-unknowable boundary when breaking', async () => {
+    const base = [ts('a.ts', 'export function foo(): void {}\n')];
+    const head = [ts('a.ts', '\n')];
+    const r = await assembleSurfaceDiff(base, head, noRename);
+    expect(r.extraCrossings.length).toBe(1);
+    expect(r.extraCrossings[0].kind).toBe('unindexed-repo');
+  });
+});

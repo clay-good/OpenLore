@@ -406,8 +406,14 @@ describe('tools/list payload budget (spec-28)', () => {
   // minimal/navigation/memory/verify/federation/coordination, so the lean default prefix
   // is unchanged. The residual is the genuine cost of its schema. Conscious decision, not
   // silent drift.
+  // Bumped 72_000 → 74_000 when the `certify_public_surface` tool was added to the full
+  // surface (change: add-public-api-surface-contract) — a read-only public-API breaking-change
+  // conclusion tool (surface listing + diff verdict). It joins ONLY the opt-in `full` surface;
+  // it stays OUT of minimal/navigation/memory/verify/federation/coordination, so the lean default
+  // prefix is unchanged. The residual is the genuine cost of its schema. Conscious decision, not
+  // silent drift.
   it('full surface stays within its prefix budget', () => {
-    expect(payloadBytes({ preset: 'full' })).toBeLessThan(72_000);
+    expect(payloadBytes({ preset: 'full' })).toBeLessThan(74_000);
   });
 
   it('the lean DEFAULT surface (no selector) is the lean navigation payload, not the full one', () => {

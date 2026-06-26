@@ -1620,6 +1620,32 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: 'certify_public_surface',
+    description:
+      'USE THIS WHEN: you are about to ship a change to a library/package/module and need to know ' +
+      '"did I break my consumers\' contract?" — a removed or renamed export, an added required ' +
+      'parameter, a narrowed parameter/return type, reduced visibility. With NO base ref it returns ' +
+      'the PUBLIC SURFACE (exported symbols + signatures); with a base ref it returns a deterministic ' +
+      'breaking-change VERDICT for the working-tree diff: each changed public symbol classified ' +
+      'breaking | non-breaking | potentially-breaking, each breaking one paired with its in-repo ' +
+      'consumers, plus an overall summary. Conservative by construction: a change that cannot be ' +
+      'proven compatible from the available signatures is potentially-breaking, NEVER silently safe. ' +
+      'A renamed export is reported as a rename (not remove+add) via symbol-identity continuity. ' +
+      'Distinct from change_impact_certificate (which certifies newly-opened paths into a surface; ' +
+      'this certifies the exported contract\'s shape). No type checker, no build, no LLM, deterministic. ' +
+      'Signature classification supported for TypeScript/JavaScript/Python; other languages fail-soft. ' +
+      'Run analyze_codebase first.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        directory: { type: 'string', description: DIR_DESC },
+        baseRef: { type: 'string', description: 'Git ref to diff the working tree\'s public surface against (e.g. "HEAD", "main"). Omit to return the surface itself.' },
+        maxResults: { type: 'number', description: 'Limit the surface listing in surface mode (default 200, capped 500).' },
+      },
+      required: ['directory'],
+    },
+  },
+  {
     name: 'detect_changes',
     description:
       'Detect recently changed functions and rank them by blast radius. ' +
@@ -1870,6 +1896,7 @@ const TOOL_ANNOTATIONS: Record<string, typeof _RO | typeof _RWI | typeof _RW> = 
   spec_store_status: _RO, working_set_context: _RO, change_impact_certificate: _RO,
   plan_parallel_work: _RO, map_in_flight_conflicts: _RO, get_language_support: _RO,
   report_coverage_gaps: _RO,
+  certify_public_surface: _RO,
 };
 
 // Tools that touch external entities (LLM / network) → openWorldHint: true.
