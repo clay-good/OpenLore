@@ -46,6 +46,7 @@ export interface ErrorPropagationView {
     dynamic: number;
     handledInternally: number;
     functionsAnalyzed: number;
+    unresolvedSelfCalls?: number;
   };
   escapes?: EscapeView[];
   handledInternally?: HandledView[];

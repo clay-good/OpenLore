@@ -39,6 +39,10 @@ The tool SHALL be honest about what it does not know (soundness over coverage):
 - a `symbol` that is external or has no extractable body SHALL say so explicitly;
 - a callee that cannot be analyzed (external, bodyless, unsupported language, or beyond the depth/size
   bound) SHALL be disclosed as a boundary and SHALL NOT be assumed exception-free;
+- an intra-object call site (`this.`/`super.` in TS/JS, `self.`/`cls.` in Python) whose callee the call
+  graph resolved to NO edge — neither a resolved method edge nor an `external::` edge — SHALL be
+  disclosed (counted, with a sample, in `unresolvedSelfCalls` and a boundary) and SHALL NOT be silently
+  assumed exception-free; a clean `escapes` set does not clear these paths;
 - a bare re-raise / re-throw of a caught variable SHALL be surfaced as `<dynamic>`, never dropped;
 - Python typed-`except` catch resolution SHALL match by exact type name (plus the catch-all forms),
   and the absence of subclass-hierarchy modeling SHALL be disclosed when a typed handler is present;
@@ -73,3 +77,12 @@ The tool SHALL be honest about what it does not know (soundness over coverage):
 - **WHEN** an agent calls `analyze_error_propagation`
 - **THEN** that callee is named in `boundaries` as not analyzed, and the result does not silently
   claim the callee raises nothing
+
+#### Scenario: An unresolved intra-object call site is disclosed, never assumed exception-free
+
+- **GIVEN** a query function with a `this.method()` (or `self.method()`) call whose callee the call
+  graph resolved to no edge at all (the call shape that gets neither a resolved nor an `external::`
+  edge)
+- **WHEN** an agent calls `analyze_error_propagation`
+- **THEN** the result discloses that call site in `unresolvedSelfCalls` and a boundary, and does NOT
+  return an empty `escapes` set that would read as a proof the method throws nothing

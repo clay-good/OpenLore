@@ -211,6 +211,32 @@ describe('extractExceptionFacts — fail-soft + determinism', () => {
   });
 });
 
+describe('extractExceptionFacts — call-site receiver classification', () => {
+  it('classifies TS this./super. as self, obj. as other, bare as none', async () => {
+    const facts = await extractExceptionFactsFromSource(
+      `class K {\n  m() {\n    this.a();\n    super.b();\n    obj.c();\n    d();\n  }\n}`,
+      'TypeScript',
+    );
+    const r = (name: string) => facts.callSites.find(c => c.calleeName === name)?.receiver;
+    expect(r('a')).toBe('self');
+    expect(r('b')).toBe('self');
+    expect(r('c')).toBe('other');
+    expect(r('d')).toBe('none');
+  });
+
+  it('classifies Python self./cls. as self, obj. as other, bare as none', async () => {
+    const facts = await extractExceptionFactsFromSource(
+      `class K:\n    def m(self):\n        self.a()\n        cls.b()\n        obj.c()\n        d()\n`,
+      'Python',
+    );
+    const r = (name: string) => facts.callSites.find(c => c.calleeName === name)?.receiver;
+    expect(r('a')).toBe('self');
+    expect(r('b')).toBe('self');
+    expect(r('c')).toBe('other');
+    expect(r('d')).toBe('none');
+  });
+});
+
 describe('guard helpers', () => {
   // outer catch-all spans bytes [0,200]; inner typed `except KeyError` spans [50,80].
   const outer: TryGuard = { fromLine: 1, toLine: 20, fromIndex: 0, toIndex: 200, catchAll: true, caughtTypes: [], rethrows: false };

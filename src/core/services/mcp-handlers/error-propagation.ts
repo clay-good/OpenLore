@@ -165,6 +165,11 @@ export async function handleAnalyzeErrorPropagation(
   // structural disclosures are not buried under dozens of stdlib-leaf names.
   const externalCallees = new Set<string>();
   const testCallees = new Set<string>();
+  // Intra-object call sites (`this.x()` / `super.x()` / `self.x()` / `cls.x()`)
+  // the call graph produced NO edge for — the one call shape that gets neither a
+  // resolved nor an `external::` edge, so without this it would be silently
+  // assumed exception-free. Disclosed, never dropped. Keyed by caller+line+name.
+  const unresolvedSelfCalls = new Map<string, string>();
   let parsedCount = 0;
   let capHit = false;
   // Set true by factsFor ONLY when it returned null because the parse cap was hit
@@ -264,6 +269,18 @@ export async function handleAnalyzeErrorPropagation(
     const selfLabel = labelOf(n);
     let complete = true;
 
+    // Disclose intra-object call sites (`this.x()` / `self.x()` …) the call graph
+    // resolved to NO edge: an in-project method we cannot reach and so cannot
+    // clear of throwing. Joined to the caller's edges by (calleeName, line); a
+    // self-call with a matching edge DID resolve and is analyzed normally.
+    const myEdges = calleesByCaller.get(n.id) ?? [];
+    const resolvedHere = new Set(myEdges.map(e => `${e.calleeName}@${e.line ?? -1}`));
+    for (const cs of facts.callSites) {
+      if (cs.receiver !== 'self') continue;
+      if (resolvedHere.has(`${cs.calleeName}@${cs.line}`)) continue;
+      unresolvedSelfCalls.set(`${n.id}@${cs.line}@${cs.calleeName}`, `${selfLabel}:${cs.line} (${cs.calleeName})`);
+    }
+
     // Direct throws that escape this function.
     for (const ts of facts.throwSites) {
       if (ts.locallyHandled) continue;
@@ -354,6 +371,14 @@ export async function handleAnalyzeErrorPropagation(
         '(a production function calling test code is itself unusual).',
     );
   }
+  const unresolvedSelfSample = [...unresolvedSelfCalls.values()].sort();
+  if (unresolvedSelfCalls.size > 0) {
+    boundaries.add(
+      `${unresolvedSelfCalls.size} intra-object call site(s) (this./super./self./cls.) could not be ` +
+        'resolved to an indexed method (a call-graph resolution limit) — their exceptions are out of ' +
+        'scope, NEVER assumed none. A clean escape set does not clear these paths.',
+    );
+  }
 
   const directCount = escapeList.filter(e => e.kind === 'direct').length;
   const dynamicCount = escapeList.filter(e => e.type === DYNAMIC_TYPE).length;
@@ -368,12 +393,16 @@ export async function handleAnalyzeErrorPropagation(
       handledInternally: handledList.length,
       functionsAnalyzed: parsedCount,
       externalCalleesNotAnalyzed: externalCallees.size,
+      unresolvedSelfCalls: unresolvedSelfCalls.size,
     },
     escapes: escapeList,
     handledInternally: handledList,
     boundaries: [...boundaries].sort(),
     ...(externalCallees.size > 0
       ? { externalCalleesNotAnalyzed: { count: externalCallees.size, sample: externalSample.slice(0, 15) } }
+      : {}),
+    ...(unresolvedSelfCalls.size > 0
+      ? { unresolvedSelfCalls: { count: unresolvedSelfCalls.size, sample: unresolvedSelfSample.slice(0, 15) } }
       : {}),
     note:
       'escapes = exception types that can propagate OUT of this function to its callers (each with ' +

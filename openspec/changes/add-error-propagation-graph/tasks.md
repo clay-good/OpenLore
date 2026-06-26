@@ -52,6 +52,14 @@
 - [x] `mcp-tool-count-doc.test.ts`: update any doc tool-count figure the guard checks.
 - [x] Update `CLAUDE.md` tool table + `docs/mcp-tools.md` / `docs/language-support.md` as needed.
 
+## 7b. Second adversarial round (e2e dogfooding)
+- [x] ~73 e2e scenarios (TS/JS 24, Python 27, traversal 22) via real `init`→`analyze`→query.
+- [x] Fix: disclose unresolved intra-object calls (`this.`/`super.`/`self.`/`cls.`) the call graph
+      resolved to no edge — extractor `CallSite.receiver` + handler `unresolvedSelfCalls` count/sample
+      + boundary. Closes the one found soundness gap (silent exception-free claim through `this.m()`).
+- [x] Regressions: extractor receiver classification (TS + Python); handler disclosure + no-false-
+      positive on a resolved self-call. See DOGFOOD §E.
+
 ## 8. Verify
 - [x] `npm run build`; `npm run test:run` (+ `examples`) green.
 - [x] Dogfood e2e on this repo + a fixture: run `openlore error-propagation --symbol <known-thrower>`;

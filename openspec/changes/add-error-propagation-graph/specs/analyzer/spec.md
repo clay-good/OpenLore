@@ -20,7 +20,13 @@ For a supported function the extractor SHALL report:
 - **try regions** — for each `try` in the body, the span its guarded block covers, whether its
   handler is a catch-all (every TypeScript/JavaScript `catch`; Python bare `except` /
   `except Exception` / `except BaseException`), the exact exception type names a typed Python `except`
-  matches, and whether the handler re-throws (a re-throwing handler does not swallow).
+  matches, and whether the handler re-throws (a re-throwing handler does not swallow);
+- **call sites** — each call in the body, with the callee name as written, the line, the enclosing
+  `try` guards (innermost first), and how the callee is addressed: `self` for an intra-object call
+  (TS/JS `this.`/`super.`, Python `self.`/`cls.`), `other` for a member call on any other receiver,
+  or `none` for a bare call. The `self` classification lets the propagation tool disclose an
+  intra-object call the call graph could not resolve — the one call shape that otherwise gets no edge
+  at all — rather than silently treating it as exception-free.
 
 The extractor SHALL NOT descend into nested closures or nested function definitions: a throw inside a
 nested function is attributed to that nested function, not the enclosing one — consistent with the CFG

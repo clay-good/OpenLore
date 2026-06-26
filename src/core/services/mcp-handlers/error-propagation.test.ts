@@ -73,11 +73,12 @@ interface Result {
   unsupported?: boolean;
   error?: string;
   candidates?: string[];
-  summary: { escapes: number; direct: number; propagated: number; handledInternally: number };
+  summary: { escapes: number; direct: number; propagated: number; handledInternally: number; unresolvedSelfCalls: number };
   escapes: Array<{ type: string; kind: string; originFunction: string; path: string[] }>;
   handledInternally: Array<{ type: string; caughtIn: string; fromCallee: string }>;
   boundaries: string[];
   externalCalleesNotAnalyzed?: { count: number; sample: string[] };
+  unresolvedSelfCalls?: { count: number; sample: string[] };
 }
 
 describe('handleAnalyzeErrorPropagation', () => {
@@ -230,5 +231,52 @@ describe('handleAnalyzeErrorPropagation — nested call-site guard + test-callee
     const res = (await handleAnalyzeErrorPropagation({ directory: d, symbol: 'prod' })) as Result;
     expect(res.summary.escapes).toBe(0);
     expect(res.boundaries.some(b => /test-only callee/.test(b))).toBe(true);
+  });
+});
+
+describe('handleAnalyzeErrorPropagation — unresolved intra-object call disclosure (review S2)', () => {
+  let d: string;
+  // A `this.method()` call the call graph resolves to NO edge (neither a resolved
+  // method edge nor an `external::` edge) is the one call shape that would otherwise
+  // be silently assumed exception-free. It must be DISCLOSED, never dropped.
+  const CALLER = `class K {\n  caller() {\n    this.callee();\n  }\n}\n`;
+  const CALLEE = `class K {\n  callee() {\n    throw new TypeError("boom");\n  }\n}\n`;
+  const OKCALLER = `class K {\n  okCaller() {\n    this.callee();\n  }\n}\n`;
+
+  beforeEach(() => {
+    d = mkdtempSync(join(tmpdir(), 'errprop-self-'));
+    writeFileSync(join(d, 'caller.ts'), CALLER, 'utf-8');
+    writeFileSync(join(d, 'callee.ts'), CALLEE, 'utf-8');
+    writeFileSync(join(d, 'okcaller.ts'), OKCALLER, 'utf-8');
+    const nodes: Node[] = [
+      node('caller', 'caller', 'caller.ts', CALLER),
+      node('callee', 'callee', 'callee.ts', CALLEE),
+      node('okCaller', 'okCaller', 'okcaller.ts', OKCALLER),
+    ];
+    // `caller` has NO edge for its this.callee() (the resolution gap). `okCaller`
+    // DOES have a resolved edge for its this.callee() at the matching line.
+    const edges = [
+      { callerId: 'okCaller', calleeId: 'callee', calleeName: 'callee', line: 3, confidence: 'type_inference' },
+    ];
+    writeCache(d, nodes, edges);
+  });
+  afterEach(() => rmSync(d, { recursive: true, force: true }));
+
+  it('discloses an unresolved this.method() call site instead of silently claiming exception-free', async () => {
+    const res = (await handleAnalyzeErrorPropagation({ directory: d, symbol: 'caller' })) as Result;
+    expect(res.summary.escapes).toBe(0);
+    expect(res.summary.unresolvedSelfCalls).toBe(1);
+    expect(res.unresolvedSelfCalls?.count).toBe(1);
+    expect(res.unresolvedSelfCalls?.sample.some(s => /caller::caller\.ts:3 \(callee\)/.test(s))).toBe(true);
+    expect(res.boundaries.some(b => /intra-object call site/.test(b))).toBe(true);
+  });
+
+  it('does NOT disclose a this.method() call site that the call graph resolved', async () => {
+    const res = (await handleAnalyzeErrorPropagation({ directory: d, symbol: 'okCaller' })) as Result;
+    // okCaller→callee resolves; callee throws TypeError, so it escapes (analyzed),
+    // and there is NO unresolved-self-call disclosure.
+    expect(res.summary.unresolvedSelfCalls).toBe(0);
+    expect(res.unresolvedSelfCalls).toBeUndefined();
+    expect(res.escapes.some(e => e.type === 'TypeError')).toBe(true);
   });
 });

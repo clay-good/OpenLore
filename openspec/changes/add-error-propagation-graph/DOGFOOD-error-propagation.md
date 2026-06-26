@@ -108,3 +108,38 @@ excluded** from the production escape set with disclosure (caught live: `handleF
 spurious test-edge paths, `functionsAnalyzed` 100 → 47, cleaner production-only result).
 
 Post-fix: extractor 21 tests, handler 13 tests, registry 35 tests — all green; full suite green.
+
+## E. Second adversarial round (e2e dogfooding, real `init`→`analyze`→query)
+
+Three more independent adversarial agents ran ~73 crafted e2e scenarios end-to-end against the **built
+CLI** (fresh `init` → `analyze --no-embed` → `error-propagation --json`), each writing the runtime
+ground truth *before* running and flagging only the dangerous directions (over-claim handled / dropped
+escape / crash / wrong type):
+
+- **TypeScript/JavaScript exception semantics — 24 scenarios.** try/finally-no-catch, conditional
+  rethrow, throw in a nested closure, throw in a catch body, async/await, one-line same-line
+  swallow-vs-throw, 3-level nesting, ternary throw, class methods, `.js` parity. **0 unsound** in the
+  exception logic itself.
+- **Python exception semantics — 27 scenarios.** typed/tuple/`as`/bare `except`, `except Exception`,
+  re-raise non-swallow, subclass-not-modeled (conservative escape + disclosed), `raise … from`,
+  multi-hop shielding, `try/else` (raise in `else` correctly escapes), qualified raise/except. **0
+  unsound.**
+- **Cross-function traversal/handler — 22 scenarios.** mutual/self recursion (terminates), diamond
+  dedup, call-site-specific catch (same callee guarded at one site, unguarded at another → escapes),
+  depth-bound disclosure, memo-not-poisoned-by-truncation (both edge orders), test-callee exclusion,
+  external-callee disclosure, `--max-depth` clamping. **0 unsound, 0 hang/crash.**
+
+**One real soundness gap found and fixed (this round):** a method calling a sibling via
+`this.method()` produced **no call-graph edge at all** — neither a resolved method edge nor an
+`external::` edge — so a throw reachable only through `this.method()` was silently reported as
+`escapes: 0, boundaries: []` (reads as a proof of exception-freedom). Confirmed at the source of
+truth (the `caller→callee` edge is absent from `call-graph.db` while the typed-param control
+`o.callee()` resolves). **Fix:** the extractor now classifies each call site's receiver
+(`self` / `other` / `none`); the handler joins the query's own `this.`/`super.`/`self.`/`cls.` call
+sites against the resolved edges and discloses any with no edge in a new `unresolvedSelfCalls` count +
+sample and a boundary — never assuming them exception-free. Precisely targeted: Python `self.method()`
+*does* resolve in the call graph, so it is correctly **not** flagged (no false positives); only the
+genuinely-unresolved TS/JS `this.method()` is disclosed. Verified e2e: `caller` (`this.callee()` that
+throws) now reports `unresolvedSelfCalls: 1` with the boundary; the resolving control reports `0`.
+Regression tests: extractor receiver classification (TS + Python), handler disclosure + no-false-
+positive (review S2).

@@ -71,12 +71,28 @@ export interface ThrowSite {
   locallyHandled: boolean;
 }
 
+/** How a call's callee is addressed.
+ *  - `self`  : an intra-object call — TS/JS `this.x()` / `super.x()`, Python
+ *              `self.x()` / `cls.x()`. The callee is provably an in-project
+ *              method, so a MISSING call-graph edge for it is a true unresolved
+ *              in-project callee (not an external), to be disclosed — never
+ *              silently assumed exception-free.
+ *  - `other` : a member call on some other receiver (`obj.x()`) — resolves to an
+ *              internal edge or an `external::obj.x` edge (already disclosable).
+ *  - `none`  : a bare call (`x()`) — resolves to an internal or external edge. */
+export type CallReceiver = 'self' | 'other' | 'none';
+
 /** One call site within a function body, tagged with the guards that enclose it. */
 export interface CallSite {
   /** The callee name as it appears in source (for joining to a call-graph edge). */
   calleeName: string;
   /** 1-based line of the call. */
   line: number;
+  /** How the callee is addressed — see {@link CallReceiver}. Used to disclose an
+   *  intra-object (`this.`/`self.`) call site that the call graph failed to
+   *  resolve, the one call shape that otherwise gets NEITHER a resolved nor an
+   *  external edge and so would be silently assumed exception-free. */
+  receiver: CallReceiver;
   /** The `try` guards that enclose this call, innermost first. An exception
    *  propagating from the callee is caught here iff one of these guards catches
    *  its type. */
@@ -330,6 +346,30 @@ function calleeNameOf(callNode: Node, spec: LangSpec): string {
   return n === DYNAMIC_TYPE ? '' : n;
 }
 
+/** Python receiver identifiers that denote the enclosing object/class. */
+const PY_SELF_RECEIVERS = new Set(['self', 'cls']);
+
+/** How the callee of a call node is addressed (see {@link CallReceiver}). A
+ *  `this.x()` / `super.x()` (TS/JS) or `self.x()` / `cls.x()` (Python) call is
+ *  `self` — an intra-object call whose callee is provably in-project. */
+function receiverKindOf(callNode: Node, spec: LangSpec): CallReceiver {
+  const fn =
+    callNode.childForFieldName('constructor') ??
+    callNode.childForFieldName(spec.callNameField) ??
+    callNode.namedChildren[0] ??
+    null;
+  if (!fn) return 'none';
+  // Member access: `<object>.<prop>`. TS member_expression / Python attribute.
+  if (fn.type === 'member_expression' || fn.type === 'attribute') {
+    const obj = fn.childForFieldName('object') ?? fn.namedChildren[0] ?? null;
+    if (!obj) return 'other';
+    if (obj.type === 'this' || obj.type === 'super') return 'self';
+    if (obj.type === 'identifier' && PY_SELF_RECEIVERS.has(obj.text)) return 'self';
+    return 'other';
+  }
+  return 'none';
+}
+
 // ── Body scan helpers ────────────────────────────────────────────────────────
 
 function blockBody(node: Node, spec: LangSpec): Node | null {
@@ -436,7 +476,7 @@ export function extractExceptionFacts(
 
   const throwSites: ThrowSite[] = [];
   const tryGuards: TryGuard[] = [];
-  const rawCallSites: Array<{ calleeName: string; line: number; index: number }> = [];
+  const rawCallSites: Array<{ calleeName: string; line: number; index: number; receiver: CallReceiver }> = [];
 
   // Walk the function subtree counting function-type nodes along each path: the
   // FIRST is the function we are analyzing; a deeper one is a nested closure and
@@ -452,7 +492,13 @@ export function extractExceptionFacts(
         tryGuards.push(tryGuardOf(node, language, spec));
       } else if (spec.callTypes.has(node.type)) {
         const name = calleeNameOf(node, spec);
-        if (name) rawCallSites.push({ calleeName: name, line: node.startPosition.row + 1, index: node.startIndex });
+        if (name)
+          rawCallSites.push({
+            calleeName: name,
+            line: node.startPosition.row + 1,
+            index: node.startIndex,
+            receiver: receiverKindOf(node, spec),
+          });
       }
     }
     for (const c of node.namedChildren) walk(c, depth);
@@ -471,6 +517,7 @@ export function extractExceptionFacts(
   const callSites: CallSite[] = rawCallSites.map(c => ({
     calleeName: c.calleeName,
     line: c.line,
+    receiver: c.receiver,
     guards: enclosingGuards(tryGuards, c.index),
   }));
 
