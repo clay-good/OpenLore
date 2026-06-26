@@ -25,7 +25,10 @@ createUser() ─http_endpoint──▶  addUser()       # POST /api/users
 ## How matching works
 
 1. **Client extraction** (`extractHttpCalls`) recognizes the common client idioms — `fetch`, `axios`,
-   `ky`, `got` — in JS/TS and recovers each call's method + path + the line it sits on.
+   `ky`, `got` — in JS/TS and recovers each call's method + path + the line it sits on. A typed
+   API-client wrapper built on one of these is captured at the wrapper's own call site (the `fetch`
+   inside it), so the wrapper's callers reach the endpoint transitively through the ordinary call
+   graph; a client over a different transport (XHR, gRPC, a generated binary SDK) is not extracted.
 2. **Route extraction** recovers server route registrations: Python (FastAPI / Flask / Django),
    Java (Spring MVC / JAX-RS), and TS/JS (Express / NestJS / Next.js App Router / Fastify / Hono / Koa).
 3. **Normalized route key** — both sides are reduced to `METHOD + /path/template`, with path parameters

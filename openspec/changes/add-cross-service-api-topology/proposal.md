@@ -46,8 +46,9 @@ existing primitives.
 ## What changes
 
 1. **Client call-site extraction (the missing half).** A framework-aware, static scanner recognizes
-   outbound HTTP call sites — the common client idioms (`fetch`, the standard HTTP client libraries,
-   typed API-client wrappers) — and extracts the **method + path template** each targets, plus the
+   outbound HTTP call sites — the common JS/TS client idioms (`fetch`, `axios`, `ky`, `got`; a typed
+   API-client wrapper built on one of these is captured at its own call site, callers reaching the
+   endpoint transitively) — and extracts the **method + path template** each targets, plus the
    enclosing function (so the edge has a real source node). This mirrors how `http-route-parser.ts`
    already extracts server routes, and is gated per framework/language through the
    `add-declarative-language-support-registry` seam so coverage is observable and extends as languages

@@ -7,8 +7,9 @@
 The system SHALL link outbound HTTP client call sites to the server route handlers they target,
 projecting the relationship onto the existing `FunctionNode`/`CallEdge` primitives via the same
 projector path the IaC subsystem uses, with no graph-schema change and no new MCP tool. The system
-SHALL statically extract client call sites — the common client idioms (`fetch`, standard HTTP client
-libraries, typed API-client wrappers) — recovering each call's HTTP method, path template, and
+SHALL statically extract client call sites — the common JS/TS client idioms (`fetch`, `axios`, `ky`,
+`got`; a typed API-client wrapper built on one of these is captured at the wrapper's own call site, so
+its callers reach the endpoint transitively) — recovering each call's HTTP method, path template, and
 enclosing function, mirroring how server route registrations are already parsed. Client call-site
 extraction SHALL be gated through the language-support registry so its coverage is observable and
 extends as languages and frameworks are added. The system SHALL perform no runtime tracing, network

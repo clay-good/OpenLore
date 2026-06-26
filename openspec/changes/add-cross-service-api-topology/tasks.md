@@ -37,6 +37,13 @@
       (d) Next.js App Router route-path derivation used `lastIndexOf('/app/')`, which missed a
           leading `app/` segment in the REPO-RELATIVE paths the analyze pipeline passes — collapsing
           the route to `/` (also broke the route inventory). Now forces a leading slash first.
+      (e) `extractHttpCalls` comment-stripping was NOT length-preserving, so any client call AFTER a
+          comment got a drifted (earlier) line → wrong/empty enclosing function → dropped edge. This
+          hit most real client files (comments are ubiquitous) and broke multi-call files. Now masks
+          comments to equal-length spaces (line/byte aligned), like the Python masker.
+      (f) Pass 2b had no self-loop guard, so a handler that fetches its OWN endpoint produced a
+          `selfHandler→selfHandler` edge inflating its fan-in/out (http_endpoint edges ARE counted in
+          metrics). Now skips `caller===callee`, mirroring the route-handler synthesis guard.
 - [x] Confirm `analyze_impact` / `find_path` / `blast_radius` pick up the edges with no tool
       change. CONFIRMED: `reachability.ts` already treats `http_endpoint` callees as liveness
       roots / impact consumers. Proven end-to-end (`cross-service-topology.test.ts`).
@@ -74,6 +81,8 @@
       (`cross-service-resolver.test.ts` + e2e `cross-service-impact.test.ts`).
 - [x] Method precision: a GET client and a POST client on one path link to their OWN handlers,
       never cross-linked; UNKNOWN-method side still links (`http-route-parser.test.ts`).
+- [x] Comment line-preservation (a call after a line/block comment keeps its real line) + self-loop
+      guard (a handler fetching its own route → no self-edge) + query-string + multi-method routes.
 - [x] Determinism (both layers).
 
 ## 7. Verify & dogfood
