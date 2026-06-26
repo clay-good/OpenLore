@@ -59,19 +59,43 @@ export interface CertifyPublicSurfaceInput {
 // ── exported-name extraction (the surface predicate, computable on any content) ──
 
 /**
- * Blank out string/template literals (and line/block comments) so the export regexes do not
- * match an `export function …` that appears INSIDE a string (common in codegen/fixture files) —
- * a phantom export that would otherwise read as an added/removed contract symbol. Best-effort
- * (does not track every escape edge case), and conservative: it only removes literal CONTENT,
- * never declaration keywords outside strings.
+ * Blank out the CONTENT of string/template literals and line/block comments so the export
+ * regexes never match an `export …` that appears inside one (common in codegen/fixture source) —
+ * a phantom that would otherwise read as an added/removed contract symbol.
+ *
+ * This is a single left-to-right state scan, NOT a pipeline of independent regexes: a string can
+ * contain `//` (a URL) and a comment can contain a quote, so the only correct way to decide
+ * "am I in a string vs a comment" is positionally. (The earlier regex pipeline stripped a `//`
+ * inside a double-quoted string as if it were a line comment, eating the closing quote and
+ * cascading into real declarations — a false-`non-breaking`.) Delimiters are preserved and newlines
+ * kept, so byte positions and quote balance are not disturbed.
  */
 function blankLiterals(content: string): string {
-  return content
-    .replace(/\/\*[\s\S]*?\*\//g, ' ')      // block comments
-    .replace(/\/\/[^\n]*/g, ' ')             // line comments
-    .replace(/`(?:\\.|[^`\\])*`/g, '``')     // template literals
-    .replace(/'(?:\\.|[^'\\])*'/g, "''")     // single-quoted strings
-    .replace(/"(?:\\.|[^"\\])*"/g, '""');    // double-quoted strings
+  let out = '';
+  let i = 0;
+  const n = content.length;
+  while (i < n) {
+    const c = content[i];
+    const c2 = content[i + 1];
+    if (c === '/' && c2 === '/') {
+      out += '  '; i += 2;
+      while (i < n && content[i] !== '\n') { out += ' '; i++; }
+    } else if (c === '/' && c2 === '*') {
+      out += '  '; i += 2;
+      while (i < n && !(content[i] === '*' && content[i + 1] === '/')) { out += content[i] === '\n' ? '\n' : ' '; i++; }
+      if (i < n) { out += '  '; i += 2; }
+    } else if (c === '"' || c === "'" || c === '`') {
+      const q = c; out += q; i++;
+      while (i < n && content[i] !== q) {
+        if (content[i] === '\\') { out += '  '; i += 2; continue; }
+        out += content[i] === '\n' ? '\n' : ' '; i++;
+      }
+      if (i < n) { out += q; i++; }
+    } else {
+      out += c; i++;
+    }
+  }
+  return out;
 }
 
 /** Top-level exported names for a file's content, per language. Fail-soft (empty set) for unsupported. */
@@ -141,15 +165,18 @@ async function mergeBase(rootPath: string, base: string): Promise<string> {
  */
 async function buildSurface(
   files: Array<{ path: string; content: string; language: string }>,
-): Promise<{ exported: SurfaceFn[]; normBodyCount: Map<string, number> }> {
+): Promise<{ exported: SurfaceFn[]; normBodyCount: Map<string, number>; allFnNames: Map<string, Set<string>> }> {
   const exported: SurfaceFn[] = [];
   const normBodyCount = new Map<string, number>();
-  if (files.length === 0) return { exported, normBodyCount };
+  // All top-level function names per file (exported OR not) — lets the diff tell a removed export
+  // (the symbol is gone) apart from a visibility reduction (still defined, no longer exported).
+  const allFnNames = new Map<string, Set<string>>();
+  if (files.length === 0) return { exported, normBodyCount, allFnNames };
   let snap: SerializedCallGraph | null = null;
   try {
     snap = serializeCallGraph(await new CallGraphBuilder().build(files));
   } catch {
-    return { exported, normBodyCount };
+    return { exported, normBodyCount, allFnNames };
   }
   const contentByFile = new Map(files.map((f) => [f.path, f.content]));
   const exportsByFile = new Map(files.map((f) => [f.path, exportedNames(f.content, f.language)]));
@@ -159,6 +186,7 @@ async function buildSurface(
     if (content === undefined) continue;
     const spanText = content.slice(node.startIndex, node.endIndex);
     if (!spanText) continue;
+    (allFnNames.get(node.filePath) ?? allFnNames.set(node.filePath, new Set()).get(node.filePath)!).add(node.name);
     const nbh = normalizedBodyHash(spanText, node.name);
     normBodyCount.set(nbh, (normBodyCount.get(nbh) ?? 0) + 1);
     if (!(exportsByFile.get(node.filePath)?.has(node.name))) continue;
@@ -173,7 +201,7 @@ async function buildSurface(
       normBodyHash: nbh,
     });
   }
-  return { exported, normBodyCount };
+  return { exported, normBodyCount, allFnNames };
 }
 
 function kindFromSignature(sig: string): SurfaceKind {
@@ -203,15 +231,22 @@ interface EdgeStoreLike {
   getCallers(nodeId: string): Array<{ callerId: string; calleeName?: string }>;
 }
 
-/** In-repo callers of a node, deduped + bounded; null edgeStore → empty (disclosed upstream). */
-function resolveConsumers(edgeStore: EdgeStoreLike | undefined, nodeId: string): { consumers: Consumer[]; truncated: number } {
+/**
+ * In-repo callers of one or more node ids, deduped + bounded; null edgeStore → empty (disclosed
+ * upstream). Multiple ids are unioned so a RENAME can be looked up under BOTH the old id (the
+ * index was built at the base, where the old name still resolves) AND the new id (the index was
+ * built at HEAD) — either way the consumers that bind the symbol are surfaced.
+ */
+function resolveConsumers(edgeStore: EdgeStoreLike | undefined, nodeIds: string[]): { consumers: Consumer[]; truncated: number } {
   if (!edgeStore) return { consumers: [], truncated: 0 };
   const seen = new Set<string>();
   const all: Consumer[] = [];
-  for (const e of edgeStore.getCallers(nodeId)) {
-    if (seen.has(e.callerId)) continue;
-    seen.add(e.callerId);
-    all.push(callerToConsumer(e.callerId));
+  for (const nodeId of nodeIds) {
+    for (const e of edgeStore.getCallers(nodeId)) {
+      if (seen.has(e.callerId)) continue;
+      seen.add(e.callerId);
+      all.push(callerToConsumer(e.callerId));
+    }
   }
   all.sort((a, b) => a.id.localeCompare(b.id));
   return { consumers: all.slice(0, MAX_CONSUMERS), truncated: Math.max(0, all.length - MAX_CONSUMERS) };
@@ -399,17 +434,23 @@ export async function assembleSurfaceDiff(
     });
   }
 
-  // Genuine removals (not a confident rename) → breaking.
+  // Genuine removals (not a confident rename) → breaking. A symbol that is STILL defined in the
+  // head file but no longer exported is a VISIBILITY REDUCTION (public → private), not a removal —
+  // both break consumers, but the distinction is reported honestly.
   for (const base of removedFns) {
     if (renamedFrom.has(base.nodeId)) continue;
+    const headPath = headPathOf.get(base.file) ?? base.file;
+    const stillDefined = headSurface.allFnNames.get(headPath)?.has(base.name) ?? false;
     changes.push({
-      changeKind: 'removed',
+      changeKind: stillDefined ? 'visibility-reduced' : 'removed',
       class: 'breaking',
       name: base.name,
-      file: base.file,
+      file: headPath,
       kind: kindFromSignature(base.signature),
       before: base.signature,
-      reasons: ['exported symbol was removed from the public surface'],
+      reasons: [stillDefined
+        ? 'exported symbol is still defined but no longer exported (visibility reduced: public → private)'
+        : 'exported symbol was removed from the public surface'],
     });
   }
 
@@ -478,11 +519,15 @@ export async function assembleSurfaceDiff(
 
   changes.sort((a, b) => a.file.localeCompare(b.file) || a.name.localeCompare(b.name) || a.changeKind.localeCompare(b.changeKind));
 
-  // Attach the in-repo consumers each breaking change affects.
+  // Attach the in-repo consumers each breaking change affects. For a RENAME, look up BOTH the old
+  // id (`file::name`, resolved when the index is at the base) AND the new id (resolved when the
+  // index is at HEAD) so the broken consumers surface regardless of which side the index was built.
   const breaking = changes
     .filter((c) => c.class === 'breaking')
     .map((c) => {
-      const { consumers, truncated } = resolveConsumers(edgeStore, `${c.file}::${c.name}`);
+      const ids = [`${c.file}::${c.name}`];
+      if (c.changeKind === 'renamed' && c.rename) ids.push(`${c.rename.file}::${c.rename.to}`);
+      const { consumers, truncated } = resolveConsumers(edgeStore, ids);
       return { ...c, consumers, consumersTruncated: truncated };
     });
 

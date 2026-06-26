@@ -156,6 +156,46 @@ describe('assembleSurfaceDiff — breaking-change classification over file conte
     expect(r.overall).toBe('non-breaking');
   });
 
+  it('a string containing `//` does NOT swallow a following real export (regression: literal scan, not regex pipeline)', async () => {
+    // The `//` inside the URL string previously read as a line comment, ate the closing quote, and
+    // cascaded into blanking the real `alpha` export — a false non-breaking.
+    const base = [ts('a.ts', 'const url = "http://example.com/x"; // doc\nexport function alpha(p: number): void {}\nexport function beta(): void {}\n')];
+    const head = [ts('a.ts', 'const url = "http://example.com/x"; // doc\nexport function alpha(p: number, q: string): void {}\nexport function beta(): void {}\n')];
+    const c = change(await assembleSurfaceDiff(base, head, noRename), 'alpha');
+    expect(c?.class).toBe('breaking'); // added required param must still be seen
+    expect(c?.reasons.join(' ')).toMatch(/required parameter "q" was added/);
+  });
+
+  it('a removed-but-still-defined export → visibility-reduced (public → private), breaking', async () => {
+    const base = [ts('a.ts', 'export function api(a: number): void {}\n')];
+    const head = [ts('a.ts', 'function api(a: number): void {}\n')]; // still defined, no longer exported
+    const r = await assembleSurfaceDiff(base, head, noRename);
+    const c = change(r, 'api');
+    expect(c?.class).toBe('breaking');
+    expect(c?.changeKind).toBe('visibility-reduced');
+    expect(c?.reasons.join(' ')).toMatch(/visibility reduced/);
+  });
+
+  it('a genuinely deleted export stays `removed`, not visibility-reduced', async () => {
+    const base = [ts('a.ts', 'export function api(a: number): void {}\nexport function keep(): void {}\n')];
+    const head = [ts('a.ts', 'export function keep(): void {}\n')];
+    expect(change(await assembleSurfaceDiff(base, head, noRename), 'api')?.changeKind).toBe('removed');
+  });
+
+  it('a renamed export resolves consumers via BOTH old and new id (index built at base OR head)', async () => {
+    const body = 'export function computeTax(income: number): number {\n  const rate = 0.2;\n  return income * rate;\n}\n';
+    const base = [ts('a.ts', body)];
+    const head = [ts('a.ts', body.replace(/computeTax/g, 'calculateTax'))];
+    // Index built at HEAD: only the NEW id resolves. The union must still surface the consumer.
+    const headIndex = { getCallers: (id: string) => (id === 'a.ts::calculateTax' ? [{ callerId: 'b.ts::useIt' }] : []) };
+    const rHead = await assembleSurfaceDiff(base, head, noRename, headIndex);
+    expect(rHead.breaking.find((c) => c.changeKind === 'renamed')?.consumers.map((x) => x.name)).toEqual(['useIt']);
+    // Index built at base: only the OLD id resolves. Still surfaced.
+    const baseIndex = { getCallers: (id: string) => (id === 'a.ts::computeTax' ? [{ callerId: 'b.ts::useIt' }] : []) };
+    const rBase = await assembleSurfaceDiff(base, head, noRename, baseIndex);
+    expect(rBase.breaking.find((c) => c.changeKind === 'renamed')?.consumers.map((x) => x.name)).toEqual(['useIt']);
+  });
+
   it('is deterministic — byte-identical verdict across runs', async () => {
     const base = [ts('a.ts', 'export function foo(a: number): void {}\nexport function gone(): void {}\n')];
     const head = [ts('a.ts', 'export function foo(a: number, b: string): void {}\n')];

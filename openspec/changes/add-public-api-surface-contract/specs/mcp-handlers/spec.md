@@ -9,9 +9,10 @@ The system SHALL expose public-surface certification through an opt-in MCP tool
 base, the tool SHALL return the current public surface (symbols with signatures). Given a base ref, the
 tool SHALL return the breaking-change verdict for the current diff: the classified changes, each
 `breaking` change paired with the consumers it breaks, and an overall summary of `breaking`,
-`non-breaking`, or `potentially-breaking`. In-repo consumers SHALL be resolved via the call graph; under
-federation, consumers in other indexed repos SHALL be resolved via cross-repo resolution; consumers
-outside any indexed repo SHALL be disclosed as a known-unknowable boundary rather than implied absent.
+`non-breaking`, or `potentially-breaking`. In-repo consumers SHALL be resolved via the call graph;
+consumers outside the indexed repo — closed-source/external downstreams, and (until cross-repo federated
+resolution lands as a follow-up) sibling federated repos — SHALL be disclosed as a known-unknowable
+boundary rather than implied absent.
 The tool SHALL declare full input and structured output schemas, reuse the existing
 confidence-boundary/staleness disclosure, and SHALL NOT enter the minimal or first-run tool surface.
 

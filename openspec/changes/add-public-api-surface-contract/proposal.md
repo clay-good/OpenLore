@@ -28,11 +28,24 @@
 > Phantom exports from `export …` strings inside source were eliminated by stripping string/comment
 > literals before the export scan and excluding test files from the surface.
 >
+> **Second adversarial round (this PR) — three more fixes:** (1) the literal-stripper was a pipeline of
+> independent regexes that stripped a `//` *inside* a string (a URL) as a line comment, eating the
+> closing quote and cascading into real declarations — another false-`non-breaking`; replaced with a
+> single-pass string/comment tokenizer (`blankLiterals`), regression-tested with a `//`-bearing string.
+> (2) a **renamed** export reported zero consumers because it looked up the old id while a HEAD-built
+> index only has the new id — consumer resolution now unions the old and new ids. (3) the
+> `visibility-reduced` (public → private) breaking rule, previously declared but never emitted, is now
+> implemented: a symbol still defined in HEAD but no longer exported classifies `visibility-reduced`
+> (distinct from a true `removed`), satisfying the analyzer spec's reduced-visibility requirement.
+>
 > **Deferred (noted):** method-level surface *within* a class; signature classification of
-> non-function exports (const/type contract changes); package `exports`-map narrowing without a source
-> change; cross-repo federated consumer resolution is disclosed-as-unknowable rather than resolved (the
-> federation resolver hook is the follow-up). Type-syntax equivalences the union-subset model can't
-> see (`Array<string>` vs `string[]`) resolve to `potentially-breaking` — the safe (over-conservative)
+> non-function exports (const/type contract changes); propagating a function's signature change to its
+> `export { fn as Alias }` aliases; package `exports`-map narrowing without a source change; cross-repo
+> federated consumer resolution is disclosed-as-unknowable rather than resolved (the federation resolver
+> hook is the follow-up). Re-exports (`export { X } from …`) count toward the diff verdict (their
+> removal is breaking) but are omitted from the no-base surface *listing* (whose definitions live
+> elsewhere) — an intentional asymmetry. Type-syntax equivalences the union-subset model can't see
+> (`Array<string>` vs `string[]`) resolve to `potentially-breaking` — the safe (over-conservative)
 > direction, by design. A latent gap surfaced + fixed locally: `parseJSExports` misses `export async
 > function` / generators — `exportedNames` recovers those (shared parser unchanged).
 
