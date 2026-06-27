@@ -8,8 +8,11 @@
  *   C — context injection (before_agent_start): model starts grounded with the
  *       architecture digest + spec index + task-grounded orient call, so weak
  *       tool-callers benefit even without calling a tool.
- *   B — native tools (registerTool): navigation surface for on-demand structural
- *       queries, each round-tripping to the warm daemon via fetch.
+ *   B — native tools (registerTool): the substrate surface for on-demand structural
+ *       queries — NAV_TOOLS spans navigate + change + remember + verify + governance
+ *       (it already supersets the MCP `substrate` preset; the family taxonomy and the
+ *       preset/breadth selectors are MCP-wire concepts the native Pi host does not use),
+ *       each round-tripping to the warm daemon via fetch.
  *
  * Uses ctx.mode (0.78.1+): full injection in tui/rpc (interactive), none in
  * json/print (one-shot). rpc = headless interactive over stdin/stdout (IDE,

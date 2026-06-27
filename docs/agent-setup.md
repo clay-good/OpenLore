@@ -137,6 +137,8 @@ The recommended setup uses two server entries: one always-visible core server an
 
 If you only need one server entry and want every tool searchable, use `alwaysLoad: false` (the default) with `openlore mcp --preset full` — all 72 tools are deferred and searchable via Tool Search. A bare `openlore mcp` instead gives the lean 10-tool navigation surface (the recommended eager default).
 
+The full surface stays navigable despite its size because every tool declares one of six **capability families** — `navigate` · `change` · `remember` · `verify` · `coordinate` · `federate` — carried in its MCP `annotations.family`, so a client (or Tool Search) can group rather than face a flat list. Inspect any surface grouped by family with `openlore mcp --preset full --list-tools`.
+
 **Cline / Roo Code / Kilocode** — create `.clinerules/openlore.md`:
 
 ```markdown

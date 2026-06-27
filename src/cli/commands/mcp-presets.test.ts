@@ -7,7 +7,7 @@
  * surface), and the selector's precedence/error behaviour must hold.
  */
 import { describe, it, expect } from 'vitest';
-import { selectActiveTools, TOOL_PRESETS, TOOL_DEFINITIONS, mcpCommand, BREADTH_POINTER, leanDefaultActive, resolvePresetName, renderToolSurfaceByFamily } from './mcp.js';
+import { selectActiveTools, TOOL_PRESETS, TOOL_DEFINITIONS, mcpCommand, BREADTH_POINTER, leanDefaultActive, resolvePresetName, renderToolSurfaceByFamily, renderActiveToolSurface } from './mcp.js';
 import { LEAN_DEFAULT_PRESET } from '../../constants.js';
 
 const NAV = [
@@ -112,6 +112,30 @@ describe('MCP tool presets', () => {
     for (const label of ['Navigate —', 'Change —', 'Remember —', 'Verify —', 'Coordinate —', 'Federate —']) {
       expect(text).toContain(label);
     }
+  });
+
+  // renderActiveToolSurface is the testable core of `--list-tools`: it composes the
+  // preset selection with the family grouping, so a regression in either is caught in CI
+  // (the CLI short-circuit in startMcpServer is thin glue over it).
+  it('renderActiveToolSurface groups a multi-family preset (minimal spans navigate+change+remember)', () => {
+    const text = renderActiveToolSurface({ minimal: true });
+    expect(text).toMatch(/minimal \(6 tools, 3 families\)/);
+    expect(text).toContain('Navigate —');
+    expect(text).toContain('Change —'); // detect_changes
+    expect(text).toContain('Remember —'); // record_decision
+    // Tool placement follows the capability taxonomy, not the preset name.
+    expect(text).toMatch(/Change —[\s\S]*- detect_changes/);
+    expect(text).toMatch(/Remember —[\s\S]*- record_decision/);
+  });
+
+  it('renderActiveToolSurface throws on an unknown preset (so --list-tools exits 2, never starts the server)', () => {
+    expect(() => renderActiveToolSurface({ preset: 'bogus' })).toThrow(/Unknown --preset/);
+  });
+
+  // Guard the CLI wiring itself: the `--list-tools` option must stay registered, mirroring
+  // the existing --minimal/--preset guards. Without this, dropping the option line ships green.
+  it('mcp command registers the --list-tools option', () => {
+    expect(mcpCommand.options.find(o => o.long === '--list-tools')).toBeDefined();
   });
 
   // change: add-declarative-language-support-registry — get_language_support is FULL-surface

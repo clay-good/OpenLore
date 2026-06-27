@@ -2102,6 +2102,18 @@ export function renderToolSurfaceByFamily(tools: Array<{ name: string }>, preset
   return lines.join('\n');
 }
 
+/**
+ * Resolve the active tool surface for a selector and render it grouped by family,
+ * for `openlore mcp --list-tools`. Pure (throws on an unknown preset, exactly as
+ * `selectActiveTools` does) so the grouping + selection composition is unit-testable
+ * without driving the CLI process. The short-circuit in `startMcpServer` is thin glue
+ * over this.
+ */
+export function renderActiveToolSurface(selectorOpts: { minimal?: boolean; preset?: string; allTools?: boolean }): string {
+  const tools = selectActiveTools(TOOL_DEFINITIONS, selectorOpts);
+  return renderToolSurfaceByFamily(tools, resolvePresetName(selectorOpts));
+}
+
 const MINIMAL_TOOLS = new Set([
   'orient', 'search_code', 'record_decision', 'detect_changes', 'check_spec_drift', 'get_health_map',
 ]);
@@ -2267,14 +2279,15 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
   // protocol stream (mcp-quality: CapabilityFamilyTaxonomy discoverability).
   if (options.listTools) {
     const selectorOpts = { minimal: options.minimal, preset: options.preset, allTools: options.allTools };
-    let tools: typeof TOOL_DEFINITIONS;
+    let surface: string;
     try {
-      tools = selectActiveTools(TOOL_DEFINITIONS, selectorOpts);
+      surface = renderActiveToolSurface(selectorOpts);
     } catch (e) {
+      // Unknown preset: fail like a CLI usage error (clean message, exit 2), never start the server.
       process.stderr.write(`${(e as Error).message}\n`);
       process.exit(2);
     }
-    process.stdout.write(renderToolSurfaceByFamily(tools, resolvePresetName(selectorOpts)) + '\n');
+    process.stdout.write(surface + '\n');
     return;
   }
 
