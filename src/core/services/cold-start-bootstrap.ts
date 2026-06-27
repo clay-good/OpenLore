@@ -31,25 +31,37 @@ export function hasAnalysis(directory: string): boolean {
 }
 
 export interface BootstrapOptions {
+  /**
+   * The index builder to run for a cold directory. REQUIRED and injected by the
+   * caller — this module deliberately stays dependency-light and never imports
+   * the analyzer or install layer itself, so it cannot pick a builder for you.
+   *
+   * Production passes install's `buildIndex` (init + structural analyze + the
+   * BM25 search corpus, no API key) so `orient` warms to FULL parity. A builder
+   * that skips the BM25/search index would leave keyword retrieval cold while
+   * the graph looks warm — a silent half-build. Making this required turns that
+   * footgun into a compile-time decision the caller must make explicitly, rather
+   * than a wrong-by-default fallback hidden in this module.
+   */
+  analyze: (directory: string) => Promise<void>;
   /** Opt out entirely (env OPENLORE_NO_AUTO_ANALYZE, or a caller flag). */
   disabled?: boolean;
   /** Status sink (defaults to process.stderr). Never stdout — that is protocol. */
   log?: (msg: string) => void;
-  /** Injected analyze runner (tests). Defaults to the real openloreRun. */
-  analyze?: (directory: string) => Promise<void>;
   /** Injected guard set (tests). */
   seen?: Set<string>;
 }
 
 /**
- * Kick a one-time background index build for `directory` if none exists yet.
+ * Kick a one-time background index build for `directory` if none exists yet,
+ * using the caller-supplied `opts.analyze` builder.
  * Returns the in-flight build promise (so tests can await it), or null when
  * nothing was started (already analyzed, already bootstrapped, or disabled).
  * NEVER throws and NEVER blocks the caller.
  */
 export function bootstrapAnalysisInBackground(
   directory: string,
-  opts: BootstrapOptions = {},
+  opts: BootstrapOptions,
 ): Promise<void> | null {
   const seen = opts.seen ?? bootstrapped;
   if (opts.disabled || process.env.OPENLORE_NO_AUTO_ANALYZE) return null;
@@ -66,19 +78,7 @@ export function bootstrapAnalysisInBackground(
   const run = async (): Promise<void> => {
     try {
       log('[openlore] No index found — building it in the background (first run, no API key)…');
-      const analyze =
-        opts.analyze ??
-        (async (dir: string) => {
-          // Mirror `openlore install`'s index build: init (silent, idempotent)
-          // then structural analyze. openloreAnalyze builds the call graph and
-          // artifacts with NO LLM and NO API key. (openloreRun would also run
-          // spec generation, which throws without a key — wrong for a cold start.)
-          const { openloreInit } = await import('../../api/init.js');
-          await openloreInit({ rootPath: dir });
-          const { openloreAnalyze } = await import('../../api/analyze.js');
-          await openloreAnalyze({ rootPath: dir });
-        });
-      await analyze(directory);
+      await opts.analyze(directory);
       log('[openlore] Index built — orient() and the other tools are now warm.');
     } catch (err) {
       // Fail-soft: leave the graceful "run analyze" guidance in place; allow a

@@ -1,7 +1,8 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { bootstrapAnalysisInBackground } from './cold-start-bootstrap.js';
 import { OPENLORE_ANALYSIS_REL_PATH } from '../../constants.js';
 
@@ -71,5 +72,29 @@ describe('bootstrapAnalysisInBackground', () => {
 
   it('ignores an empty directory', () => {
     expect(bootstrapAnalysisInBackground('', { seen: new Set(), analyze: async () => {} })).toBeNull();
+  });
+
+  it('runs exactly the injected builder and nothing else (no hidden default)', async () => {
+    const dir = freshDir(false);
+    let ran: string[] = [];
+    await bootstrapAnalysisInBackground(dir, {
+      seen: new Set(),
+      analyze: async (d) => { ran.push(d); },
+      log: () => {},
+    });
+    // The directory is built once, by the caller's builder — there is no
+    // module-internal fallback that could run a different (e.g. BM25-less) build.
+    expect(ran).toEqual([dir]);
+  });
+
+  // Architectural invariant: this module must stay dependency-light and never
+  // pick an index builder itself. A wrong-by-default builder hidden here (e.g.
+  // one that skips the BM25 search corpus) silently half-warms orient. The
+  // builder is REQUIRED and injected by the caller; guard that it never sneaks
+  // an analyzer/install import back in.
+  it('never imports the analyzer or install layer (builder is injected, not chosen)', () => {
+    const src = readFileSync(fileURLToPath(new URL('./cold-start-bootstrap.ts', import.meta.url)), 'utf8');
+    expect(src).not.toMatch(/api\/(analyze|init|run)/);
+    expect(src).not.toMatch(/install\/index/);
   });
 });
