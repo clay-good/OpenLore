@@ -260,7 +260,7 @@ One graph query replaces most exploratory file reads. The agent knows exactly wh
 
 ## Agent Cheat Sheet
 
-The default MCP surface is the lean **`navigation`** preset — 10 tools, the Spec 14 benchmark winner; the full surface of 72 tools is opt-in via `--preset full` (or `--all-tools`). Day-to-day work needs a handful — reach for the right one by situation:
+The default MCP surface is the lean **`navigation`** preset — 10 tools, the Spec 14 benchmark winner; the full surface of 72 tools is opt-in via `--preset full` (or `--all-tools`). For both faces of the substrate out of the box, `--preset substrate` adds the three highest-value governance *reads* — `recall`, `verify_claim`, `blast_radius` — to the navigation core (the active default stays `navigation` until a benchmark clears the wider one). Every tool also declares one of six **capability families** — `navigate` · `change` · `remember` · `verify` · `coordinate` · `federate` — surfaced in its MCP `annotations.family` and via `openlore mcp --list-tools`, so a wide surface stays discoverable by family rather than as a flat list. Day-to-day work needs a handful — reach for the right one by situation:
 
 | Situation | Tool |
 |-----------|------|

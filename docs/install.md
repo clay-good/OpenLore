@@ -34,7 +34,7 @@ The happy path needs no flags and never touches your repo on `npm install`:
 | Flag | Effect |
 |------|--------|
 | `--agent <name>` | Install only for one surface. Names: `claude-code`, `cursor`, `cline`, `continue`, `agents-md`. |
-| `--preset <name>` | Wire the MCP server to a tool preset: `navigation` (the lean default), `minimal`, `memory`, `verify`, `federation`, `coordination`, or `full`. Omit it for the lean navigation surface; pass `--preset full` to wire all 72 tools (the prior default). |
+| `--preset <name>` | Wire the MCP server to a tool preset: `navigation` (the lean default), `substrate` (both faces — the navigation core + `recall` + `verify_claim` + `blast_radius`), `minimal`, `memory`, `verify`, `federation`, `coordination`, or `full`. Omit it for the lean navigation surface; pass `--preset full` to wire all 72 tools (the prior default). |
 | `--dry-run` | Print the planned changes; write nothing. |
 | `--force` | Overwrite OpenLore-managed blocks even when hand-edited. |
 | `--uninstall` | Remove every OpenLore-managed block / entry. Files OpenLore created (and never had non-OpenLore content) are deleted. |

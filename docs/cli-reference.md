@@ -102,6 +102,7 @@ openlore install [options]   # detect agents, wire surfaces, build the index
   --agent <name>         # Limit to one surface: claude-code, cursor, cline,
                          #   continue, agents-md
   --preset <name>        # MCP tool preset to wire: navigation (lean default),
+                         #   substrate (both faces: nav + recall + verify_claim + blast_radius),
                          #   minimal, memory, verify, federation, coordination, or full
   --all-tools            # Wire the full 72-tool surface (alias of --preset full)
   --dry-run              # Print planned changes without writing any files
@@ -140,6 +141,7 @@ openlore mcp [options]             # start the stdio MCP server
   --preset <name>        # Expose a named preset (default: lean navigation, 10 tools)
   --minimal              # Expose only the core 6 governance tools
   --all-tools            # Expose the full surface — all 72 tools (alias --preset full)
+  --list-tools           # Print the active surface grouped by capability family and exit
   --watch-auto           # Auto-detect + incrementally re-index the project dir
   --no-watch-auto        # Disable auto-watch (use for one-shot tool calls)
   --daemon               # Delegate tool calls to a shared `openlore serve` daemon

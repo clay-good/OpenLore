@@ -7,7 +7,7 @@
  * surface), and the selector's precedence/error behaviour must hold.
  */
 import { describe, it, expect } from 'vitest';
-import { selectActiveTools, TOOL_PRESETS, TOOL_DEFINITIONS, mcpCommand, BREADTH_POINTER, leanDefaultActive, resolvePresetName } from './mcp.js';
+import { selectActiveTools, TOOL_PRESETS, TOOL_DEFINITIONS, mcpCommand, BREADTH_POINTER, leanDefaultActive, resolvePresetName, renderToolSurfaceByFamily } from './mcp.js';
 import { LEAN_DEFAULT_PRESET } from '../../constants.js';
 
 const NAV = [
@@ -80,6 +80,38 @@ describe('MCP tool presets', () => {
     expect(LEAN_DEFAULT_PRESET).toBe('navigation');
     expect(selectActiveTools(TOOL_DEFINITIONS, {}).map(t => t.name)).not.toContain('recall');
     expect(selectActiveTools(TOOL_DEFINITIONS, {}).map(t => t.name)).not.toContain('verify_claim');
+  });
+
+  // change: unify-navigation-and-governance-substrate — `--list-tools` renders the active
+  // surface grouped by capability family (the human-facing counterpart to the on-the-wire
+  // annotations.family). It is the production consumer of groupToolsByFamily.
+  it('renderToolSurfaceByFamily groups the substrate surface by family, covering every tool', () => {
+    const tools = selectActiveTools(TOOL_DEFINITIONS, { preset: 'substrate' });
+    const text = renderToolSurfaceByFamily(tools, 'substrate');
+    // Header states the surface, tool count, and family count (both faces → 4 families).
+    expect(text).toMatch(/substrate \(13 tools, 4 families\)/);
+    // Family group headers appear, in canonical order; every tool is listed exactly once.
+    expect(text).toContain('Navigate —');
+    expect(text).toContain('Change —');
+    expect(text).toContain('Remember —');
+    expect(text).toContain('Verify —');
+    for (const t of tools) expect(text).toContain(`  - ${t.name}`);
+    const listed = [...text.matchAll(/^ {2}- (.+)$/gm)].map(m => m[1]).sort();
+    expect(listed).toEqual(tools.map(t => t.name).sort());
+  });
+
+  it('renderToolSurfaceByFamily pluralizes a single-family surface correctly', () => {
+    const navTools = selectActiveTools(TOOL_DEFINITIONS, { preset: 'navigation' });
+    const text = renderToolSurfaceByFamily(navTools, 'navigation');
+    expect(text).toMatch(/navigation \(10 tools, 1 family\)/); // "family", not "families"
+  });
+
+  it('renderToolSurfaceByFamily lists all six families for the full surface', () => {
+    const text = renderToolSurfaceByFamily(TOOL_DEFINITIONS, 'full');
+    expect(text).toMatch(/full \(\d+ tools, 6 families\)/);
+    for (const label of ['Navigate —', 'Change —', 'Remember —', 'Verify —', 'Coordinate —', 'Federate —']) {
+      expect(text).toContain(label);
+    }
   });
 
   // change: add-declarative-language-support-registry — get_language_support is FULL-surface

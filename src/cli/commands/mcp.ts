@@ -48,7 +48,7 @@ import { readPanicState, mutatePanicStateLocked, getPanicSignalText } from '../.
 import { emit } from '../../core/services/telemetry.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
 import { MCP_TOOL_MAX_BYTES, LEAN_DEFAULT_PRESET, FULL_PRESET, FULL_PRESET_ALIAS } from '../../constants.js';
-import { capabilityFamily } from '../../core/services/mcp-handlers/tool-contract.js';
+import { capabilityFamily, groupToolsByFamily } from '../../core/services/mcp-handlers/tool-contract.js';
 import {
   handleGetCallGraph,
   handleGetSubgraph,
@@ -2082,6 +2082,26 @@ export function toolAnnotations(name: string): Record<string, unknown> {
   };
 }
 
+/**
+ * Render a tool surface grouped by capability family, for `openlore mcp --list-tools`
+ * (mcp-quality: CapabilityFamilyTaxonomy — "the full surface SHALL be discoverable by
+ * family"). This is the human-facing counterpart to the machine-readable
+ * `annotations.family` carried on the wire: an operator inspecting the surface sees ~6
+ * family groups and the tools within one, not a flat list. Pure; returns the text.
+ */
+export function renderToolSurfaceByFamily(tools: Array<{ name: string }>, presetLabel: string): string {
+  const groups = groupToolsByFamily(tools);
+  const toolWord = tools.length === 1 ? 'tool' : 'tools';
+  const familyWord = groups.length === 1 ? 'family' : 'families';
+  const lines: string[] = [`OpenLore MCP tool surface — ${presetLabel} (${tools.length} ${toolWord}, ${groups.length} ${familyWord}):`];
+  for (const { label, tools: familyTools } of groups) {
+    lines.push('');
+    lines.push(label);
+    for (const t of familyTools) lines.push(`  - ${t.name}`);
+  }
+  return lines.join('\n');
+}
+
 const MINIMAL_TOOLS = new Set([
   'orient', 'search_code', 'record_decision', 'detect_changes', 'check_spec_drift', 'get_health_map',
 ]);
@@ -2205,6 +2225,9 @@ interface McpServerOptions {
   minimal?: boolean;
   preset?: string;
   allTools?: boolean;
+  /** Print the active tool surface grouped by capability family to stdout and exit,
+   * without starting the JSON-RPC transport (change: unify-navigation-and-governance-substrate). */
+  listTools?: boolean;
 }
 
 /**
@@ -2238,6 +2261,23 @@ export function leanDefaultActive(opts: { minimal?: boolean; preset?: string; al
 }
 
 async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
+  // --list-tools: print the active surface grouped by capability family and exit,
+  // WITHOUT starting the JSON-RPC transport. This runs before the stdout→stderr
+  // redirection below precisely because here stdout is a normal terminal, not the
+  // protocol stream (mcp-quality: CapabilityFamilyTaxonomy discoverability).
+  if (options.listTools) {
+    const selectorOpts = { minimal: options.minimal, preset: options.preset, allTools: options.allTools };
+    let tools: typeof TOOL_DEFINITIONS;
+    try {
+      tools = selectActiveTools(TOOL_DEFINITIONS, selectorOpts);
+    } catch (e) {
+      process.stderr.write(`${(e as Error).message}\n`);
+      process.exit(2);
+    }
+    process.stdout.write(renderToolSurfaceByFamily(tools, resolvePresetName(selectorOpts)) + '\n');
+    return;
+  }
+
   // The MCP stdio transport uses stdout EXCLUSIVELY for the JSON-RPC stream.
   // Any stray write to stdout — e.g. logger.success("Successfully validated
   // directory…") from validateDirectory(), which runs on nearly every tool
@@ -2630,4 +2670,5 @@ export const mcpCommand = new Command('mcp')
   .option('--minimal', 'Expose only core 6 tools (orient, search_code, record_decision, detect_changes, check_spec_drift, get_health_map). Pair with alwaysLoad: true in Claude Code for always-visible core tools.')
   .option('--preset <name>', `Expose a named tool preset. Default (no preset) is the lean "navigation" surface — the benchmark-winning graph-traversal core (orient, search_code, get_subgraph, trace_execution_path, analyze_impact, suggest_insertion_points, get_function_skeleton, get_landmarks, get_map, find_path) — NOT the full registry. "substrate" = the navigation core + recall + verify_claim + blast_radius (both faces of the substrate; the evidence-gated wider default); "minimal" = orient+search+governance; "memory" = orient+remember+recall; "verify" = orient+search+verify_claim; "federation" = orient + federation_status + spec_store_status + working_set_context + change_impact_certificate + map_in_flight_conflicts + the four cross-repo conclusion tools; "coordination" = orient + plan_parallel_work + map_in_flight_conflicts + analyze_impact + find_path; "full" = all ${TOOL_DEFINITIONS.length} tools (the prior default). Takes precedence over --minimal.`)
   .option('--all-tools', `Expose the full surface — all ${TOOL_DEFINITIONS.length} tools (alias for --preset full). Opt-in breadth; the lean navigation default is recommended.`)
+  .option('--list-tools', 'Print the active tool surface grouped by capability family (navigate/change/remember/verify/coordinate/federate) and exit — does not start the server. Respects --preset / --all-tools.')
   .action((options: McpServerOptions) => startMcpServer(options));

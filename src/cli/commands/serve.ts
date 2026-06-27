@@ -700,7 +700,7 @@ export const serveCommand = new Command('serve')
   .option('--host <host>', 'Host to bind', '127.0.0.1')
   .option(
     '--preset <name>',
-    'Advisory tool surface reported by /health (minimal, navigation, or all/full). The daemon still ' +
+    'Advisory tool surface reported by /health (navigation, substrate, minimal, or all/full). The daemon still ' +
       'dispatches any known tool; clients curate their own surface. Default: navigation',
     'navigation',
   )

@@ -217,6 +217,10 @@ export const TOOL_CAPABILITY_FAMILY: Record<string, CapabilityFamily> = {
   get_env_vars: 'navigate',
   get_external_packages: 'navigate',
   audit_spec_coverage: 'navigate',
+  // check_spec_drift reads the existing spec↔code graph for parity (like its sibling
+  // audit_spec_coverage), not a specific diff's contents — so it sits with the spec reads,
+  // not in `change`. detect_changes (genuinely diff-scoped) stays in `change`.
+  check_spec_drift: 'navigate',
   generate_tests: 'navigate',
   get_test_coverage: 'navigate',
   get_minimal_context: 'navigate',
@@ -237,7 +241,6 @@ export const TOOL_CAPABILITY_FAMILY: Record<string, CapabilityFamily> = {
   certify_public_surface: 'change',
   briefing_since: 'change',
   detect_changes: 'change',
-  check_spec_drift: 'change',
 
   // --- remember: durable, code-anchored facts (memory + decision lifecycle) ---
   remember: 'remember',
