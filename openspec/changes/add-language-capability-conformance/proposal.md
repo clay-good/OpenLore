@@ -39,14 +39,21 @@ language sets, each with a coverage guard that fails if the registry adds a lang
 6. **Type inference** (9 languages) — a local variable resolves to its class type; a non-claimed language returns an empty inference.
 7. **Style fingerprint** (4 languages) — a file above the evidence floor tallies idioms; a non-claimed language tallies nothing.
 8. **Cross-service HTTP** (4 languages) — a server route definition is extracted (Express/Flask/Spring); outbound client calls are extracted for the 2 client languages.
+9. **IaC projection** (12 ecosystems) — for every ecosystem in `IAC_LANGUAGES`, the real projector
+   (`buildProjectedIac`) turns a minimal realistic fixture's resources/jobs/tasks into graph nodes,
+   and where the ecosystem models a cross-reference produces a `references`/`depends_on` edge. A
+   coverage guard fails if `IAC_LANGUAGES` grows without a fixture.
 
 ## Findings from the sweep (2026-06-26)
 
-The engine is **sound across all 18 call-graph languages and every richer overlay's claimed language
-set** — basic calls, intra-class method dispatch, cross-file resolution, CFG, type inference, style,
-and cross-service HTTP all fire; no correctness gaps were found, the claimed matrix does not
-over-claim, and non-claimed languages degrade honestly (empty/absent, never a guess). One
-**precision** difference was surfaced and is now asserted rather than hidden:
+The engine is **sound across all 18 call-graph languages, every richer overlay's claimed language
+set, and all 12 IaC ecosystems** — basic calls, intra-class method dispatch, cross-file resolution,
+CFG, type inference, style, cross-service HTTP, and IaC projection all fire; no correctness gaps were
+found, the claimed matrix does not over-claim, and non-claimed languages degrade honestly
+(empty/absent, never a guess). All 12 IaC ecosystems project nodes; 8 produce reference/dependency
+edges from a simple two-resource fixture (Terraform, Kubernetes, CloudFormation, Ansible, Dockerfile,
+Docker Compose, GitHub Actions, Bicep). One **precision** difference was surfaced and is now asserted
+rather than hidden:
 
 - **Cross-file call provenance varies by language.** TypeScript resolves a cross-file call via precise
   **`import`** resolution; Python and Go resolve the same shape via **`name_only`** (name match, no
@@ -66,6 +73,7 @@ the `mcp-quality` NoFalseCompleteness requirement and the substrate's honesty co
 ## Impact
 
 - New: `src/core/analyzer/language-capability-conformance.test.ts` (73 cases — call graph, method
-  dispatch, cross-file, error-propagation, CFG, type inference, style, cross-service HTTP).
+  dispatch, cross-file, error-propagation, CFG, type inference, style, cross-service HTTP) and
+  `src/core/analyzer/iac/iac-projection-conformance.test.ts` (21 cases — all 12 IaC ecosystems).
 - Specs: `analyzer` — 1 ADDED requirement (CapabilityMatrixIsConformanceVerified).
 - Risk: none (test-only).

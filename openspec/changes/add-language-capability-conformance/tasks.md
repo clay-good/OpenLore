@@ -10,6 +10,7 @@
 - [x] Type inference: variable→class type for all 9 claimed languages + honest empty for non-claimed
 - [x] Style fingerprint: idioms tallied above floor for all 4 claimed languages + honest absent
 - [x] Cross-service HTTP: route extraction (TS/JS/Python/Java) + client calls (TS/JS) + coverage guard
+- [x] IaC projection: all 12 ecosystems project nodes (+ 8 reference/dependency edges) + coverage guard (`iac/iac-projection-conformance.test.ts`)
 
 ## Spec
 - [x] `analyzer` spec: ADD CapabilityMatrixIsConformanceVerified

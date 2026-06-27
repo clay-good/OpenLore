@@ -12,9 +12,12 @@ functions and the resolved edge. The conformance suite SHALL also fail if the re
 `callGraph` language for which no fixture exists, so the matrix can never silently grow to over-claim.
 
 The conformance suite SHALL additionally verify intra-class method dispatch for class-bearing
-languages and the error-propagation overlay's claimed languages, and SHALL assert known cross-language
-*precision* differences explicitly (e.g. import-precise versus name-only cross-file resolution) rather
-than leaving them implicit.
+languages, the richer overlays (CFG, type inference, style fingerprint, cross-service HTTP) for each
+of their claimed languages, the IaC projection for every ecosystem in `IAC_LANGUAGES`, and the
+error-propagation overlay's claimed languages, and SHALL assert known cross-language *precision*
+differences explicitly (e.g. import-precise versus name-only cross-file resolution) rather than
+leaving them implicit. For every capability with a closed claimed-language set, the suite SHALL fail
+if that set grows without a corresponding fixture, so no capability can silently over-claim.
 
 #### Scenario: A claimed callGraph language is proven on real code
 
@@ -29,6 +32,13 @@ than leaving them implicit.
 - **WHEN** the conformance suite drives that capability's real extractor against a representative fixture
 - **THEN** the capability produces a non-empty result for the claimed language
 - **AND** a non-claimed language yields an empty/absent result (never a guessed signal), and any claimed language without a fixture fails the suite
+
+#### Scenario: Every claimed IaC ecosystem projects onto graph primitives
+
+- **GIVEN** an ecosystem in `IAC_LANGUAGES` and a minimal realistic fixture for it
+- **WHEN** the conformance suite runs the real projector over the fixture
+- **THEN** the fixture's resources/jobs/tasks become graph nodes, and where the ecosystem models a cross-reference a `references`/`depends_on` edge is produced
+- **AND** if `IAC_LANGUAGES` grows without a fixture, the suite fails
 
 #### Scenario: A cross-language precision difference is asserted, not hidden
 
