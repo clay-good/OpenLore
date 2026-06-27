@@ -194,6 +194,25 @@ describe('CallGraphBuilder — TypeScript', () => {
     expect(Array.from(result.nodes.values()).some(n => n.isExternal && n.name.includes('this.'))).toBe(false);
   });
 
+  it('captures the class name for a class EXPRESSION so this.method() resolves', async () => {
+    const builder = new CallGraphBuilder();
+    const result = await builder.build([{
+      path: 'src/ce.ts',
+      language: 'TypeScript',
+      content: `
+        const K = class { caller() { this.callee(); } callee() {} };
+        const N = class Named { run() { this.work(); } work() {} };
+      `,
+    }]);
+    // Anonymous class expr takes the binding name (K); a named class expr keeps its own name.
+    expect(edgePairs(result)).toContain('caller→callee');
+    expect(edgePairs(result)).toContain('run→work');
+    const e = result.edges.find(x => x.calleeName === 'callee' && x.confidence === 'self_cls');
+    expect(e?.calleeId).toBe('src/ce.ts::K.callee');
+    const e2 = result.edges.find(x => x.calleeName === 'work' && x.confidence === 'self_cls');
+    expect(e2?.calleeId).toBe('src/ce.ts::Named.work');
+  });
+
   it('does NOT create a self_cls edge from a this.call inside a nested object literal / function', async () => {
     const builder = new CallGraphBuilder();
     const result = await builder.build([{

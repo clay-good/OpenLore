@@ -30,6 +30,9 @@ intra-object dispatch rather than a silent absence of edges.
   callback) SHALL NOT inherit the enclosing class name, so its `this.x()` SHALL NOT resolve to a false
   intra-object edge. A direct class method or field (only `class_body` between it and the class) is
   unaffected.
+- A class EXPRESSION SHALL contribute a class name to its methods: a named expression
+  (`class Named { … }`) uses its own name; an anonymous one bound to a variable (`const K = class …`)
+  or assigned (`X = class …`) takes that binding name, so its methods' `this.m()` resolve.
 
 #### Scenario: this.method() resolves to a sibling method of the same class
 
@@ -65,3 +68,10 @@ intra-object dispatch rather than a silent absence of edges.
   whose method-shorthand body calls `this.realMethod()` (runtime `this` is the object, not `A`)
 - **WHEN** the call graph is built
 - **THEN** there is NO `self_cls` edge to `A.realMethod` from the nested object-literal method
+
+#### Scenario: a class expression's method resolves its this-call
+
+- **GIVEN** `const K = class { caller() { this.callee(); } callee() {} }`
+- **WHEN** the call graph is built
+- **THEN** there is a `self_cls` edge `K.caller → K.callee` (the anonymous class expression takes the
+  binding name `K`)

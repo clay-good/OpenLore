@@ -60,7 +60,32 @@ JavaScript; Python `self.`/`cls.` already resolved). Deterministic, no LLM, no n
   a node carries no class name and produces no false edge. A direct method/field has only `class_body`
   between it and `class_declaration`, so it is unaffected. On the OpenLore repo this removed 18 false
   edges (self_cls 433 → 415) with every genuine intra-object edge preserved and the full suite green.
-- Known residual (safe, not a false edge): a class EXPRESSION (`const K = class { … }`) does not
-  capture a class name, so its `this.m()` produces no edge (a miss, never a wrong edge);
-  `analyze_error_propagation` discloses any unresolved `this.` call, so the residue is never silently
-  assumed exception-free.
+- Class EXPRESSION support (enhancement round): the className walk now also handles a `class`
+  expression — `const K = class { … }` takes the binding name `K`, `X = class { … }` takes the LHS,
+  and a named expression `class Named { … }` keeps its own name — so methods of a class expression
+  resolve their `this.m()` calls like any class method. Previously this was a safe miss; now it is
+  resolved.
+
+## Deliberately deferred: unique identity for nested functions
+
+A sibling idea — give same-named NESTED functions (a `function helper(){}` inside one method and
+another inside a second method, or a nested one colliding with a top-level same-named function)
+distinct node ids instead of collapsing them at id-keyed aggregation — was implemented and then
+**reverted** after testing. It is NOT a small change: it conflicts with the analyzer's deliberate,
+documented collapse-on-collision behavior and its stable-identity model.
+
+- Several collapses are INTENTIONAL and pinned by tests: a re-assigned member (`obj.fn = …; obj.fn =
+  …`) is meant to be one node; a same-file container homonym (`namespace A { class C { m } }` vs
+  `namespace B { class C { m } }`) is a documented completeness limit ("not a wrong resolution").
+  Narrowing the dedup to only byte-contained (genuinely nested) functions preserved those, but still
+  broke ~30 tests across `structural-diff`, `impact-certificate`, `stable-id`, `scip-export`,
+  `cross-service-topology`, and anchoring.
+- The breakage is fundamental, not cosmetic: those subsystems require identity to be STABLE across
+  edits, and a positional discriminator (`name@byteOffset`) shifts whenever code above changes — a
+  nested function would read as removed+added on every diff. A stable discriminator (e.g.
+  `enclosingFn.nested`) is a much larger per-extractor change that ripples through stable-id / scip /
+  structural-diff / anchoring.
+
+Conclusion: the nested-function collision is rare and pre-existing, and resolving it correctly is its
+own dedicated change with a stable-identity design — out of scope here. It is recorded as a known
+limitation rather than folded into this PR.

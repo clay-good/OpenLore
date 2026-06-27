@@ -14,6 +14,13 @@
 - [x] Nested-scope guard (adversarial round 2): the className walk STOPS at an object-literal /
       function / method boundary before the class, so an object-literal-method/nested-function inside a
       class method does not inherit the class name and produce a false `self_cls` edge.
+- [x] Class-expression className capture (enhancement round): the walk handles a `class` expression —
+      named keeps its own name, anonymous takes the `const`/assignment binding — so class-expression
+      methods resolve their `this.m()` calls.
+- [~] Unique identity for nested functions: implemented, then REVERTED — conflicts with intentional
+      collapse semantics (member re-assignment, container homonyms) and the stable-identity model
+      (~30 tests across structural-diff/impact-certificate/stable-id/scip/cross-service/anchoring; a
+      positional discriminator is unstable across edits). Deferred to its own change. See proposal.
 
 ## 3. Tests
 - [x] `call-graph.test.ts`: this→sibling (self_cls), this→inherited, super→parent (not child),

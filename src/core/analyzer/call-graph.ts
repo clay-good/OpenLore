@@ -1154,6 +1154,24 @@ async function extractTSGraph(
         if (classNameNode) className = classNameNode.text;
         break;
       }
+      // Class EXPRESSION (`const K = class {…}`, `X = class {…}`, `class Named {…}` as a
+      // value): named expressions carry their own name; an anonymous one takes the binding
+      // it is assigned to, so its methods' `this.m()` resolve like any class method.
+      if (cursor.type === 'class') {
+        const named = cursor.childForFieldName('name');
+        if (named) {
+          className = named.text;
+        } else {
+          const par = cursor.parent;
+          if (par?.type === 'variable_declarator') {
+            className = par.childForFieldName('name')?.text;
+          } else if (par?.type === 'assignment_expression') {
+            const lhs = par.childForFieldName('left') ?? par.namedChildren[0];
+            if (lhs?.type === 'identifier') className = lhs.text;
+          }
+        }
+        break;
+      }
       if (CLASS_WALK_BOUNDARIES.has(cursor.type)) break; // nested scope — not a class method
       cursor = cursor.parent;
     }
