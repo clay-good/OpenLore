@@ -41,14 +41,20 @@ After that, `openlore init`, `openlore analyze`, etc. all work. Re-run `npm run 
 
 ## Agent Context Setup (one-time, after cloning)
 
-`CLAUDE.md` references `.openlore/analysis/CODEBASE.md`, which is git-ignored and must be generated locally:
+This repo **dogfoods OpenLore's own tools**, so your coding agent can be oriented from the first task. The tracked `CLAUDE.md` / `AGENTS.md` reference two things a fresh clone doesn't have yet — both regenerated locally, never committed:
+
+1. **`.openlore/analysis/CODEBASE.md`** (git-ignored) — the architecture digest `CLAUDE.md` loads at session start.
+2. **The OpenLore MCP server** — `CLAUDE.md` instructs your agent to call tools like `orient`, `search_code`, and `record_decision`. These live in a `.mcp.json` that is **intentionally git-ignored** (it's regenerated per machine; it merges with, never overwrites, the tracked `CLAUDE.md`).
+
+One command wires both, with no API key:
 
 ```bash
 npm run build
-npm run dev -- analyze    # or: openlore analyze if installed globally
+npm install -g . && openlore install --preset full   # or, without a global link:
+node dist/cli/index.js install --preset full
 ```
 
-See [Agent Setup](README.md#agent-setup) in the README for the full explanation of what this file contains and why it matters.
+`--preset full` is recommended for contributors because the **decisions-gate workflow** below needs `record_decision`, `search_specs`, and `check_spec_drift`, which the lean default preset omits. This also builds the index (generating `CODEBASE.md`). See [Agent Setup](README.md#agent-setup) in the README for what these files contain and why they matter.
 
 ## Running Tests
 
@@ -75,8 +81,7 @@ The e2e suite (`src/core/analyzer/e2e.integration.test.ts`) runs the full `analy
 **Prerequisites:**
 
 ```bash
-npm run embed:up              # start the embedding server (Docker)
-openlore analyze --embed      # build / refresh the vector index
+openlore embed --local        # switch to the on-device embedder and build the semantic index (no Docker, no API key)
 ```
 
 **Run:**
@@ -154,8 +159,20 @@ For each `beforeEach`, reset `process.exitCode = undefined` and call `vi.clearAl
 1. Fork the repository and create a branch: `git checkout -b my-feature`
 2. Make your changes — keep PRs focused on a single concern
 3. Ensure `npm run typecheck`, `npm run lint`, and `npm run test:run` all pass
-4. If touching `src/core/analyzer/`, `src/core/generator/stages/`, or `src/core/services/mcp-handlers/`: run `npm run test:e2e` (requires `npm run embed:up` and a fresh index)
+4. If touching `src/core/analyzer/`, `src/core/generator/stages/`, or `src/core/services/mcp-handlers/`: run `npm run test:e2e` (requires a semantic index — `openlore embed --local`)
 5. Open a pull request with a clear description of the change and why
+
+## The commit gate (decisions)
+
+This repo ships a **decisions pre-commit gate** (installed by `openlore install`). When you `git commit` after changing source, it can block the commit and print JSON containing `"gated": true` — this is expected, not a crash. It means OpenLore detected an architectural decision that should be recorded before the change lands.
+
+What to do when a commit is blocked:
+
+- Read the `reason` field. Common ones: `verified` (decisions are waiting for you to approve), `approved_not_synced` (run `openlore decisions --sync`), `no_decisions_recorded` (source changed but nothing was recorded — run `openlore decisions --consolidate --gate` to check for undocumented decisions).
+- To record a decision proactively (and keep commits instant), call `record_decision` **before** writing the code — see the checklist in [`CLAUDE.md`](CLAUDE.md).
+- Escape hatch: `git commit --no-verify` skips the gate for a commit that genuinely introduces no architectural decision.
+
+The gate adds no LLM latency on the happy path; it only triggers extraction when source changed without a recorded decision.
 
 ## Reporting Bugs
 

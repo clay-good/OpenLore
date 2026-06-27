@@ -705,9 +705,11 @@ Because OpenLore requires Node ≥22.5 while OpenSpec runs on ≥20.19, a delega
 ```bash
 npm install
 npm run build
-npm test          # 5500+ unit tests
+npm run test:run  # 5500+ unit tests, one-shot (npm test is watch mode)
 npm run typecheck
 ```
+
+New contributor? See **[CONTRIBUTING.md](CONTRIBUTING.md)** for the full setup, the agent-context / MCP wiring, and the commit gate. Please also read our [Code of Conduct](CODE_OF_CONDUCT.md); to report a vulnerability, see [SECURITY.md](SECURITY.md).
 
 ---
 
