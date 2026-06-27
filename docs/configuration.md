@@ -37,6 +37,9 @@
 | `EMBED_API_KEY` | embedding (remote) | API key for the remote embedding service (defaults to `OPENAI_API_KEY`) |
 | `DEBUG` | -- | Enable stack traces on errors |
 | `CI` | -- | Auto-detected; enables timestamps in output |
+| `OPENLORE_NO_AUTO_ANALYZE` | -- | Disable the MCP server's cold-start self-bootstrap (no background index build on first run) |
+| `OPENLORE_NO_UPDATE_NOTIFIER` | -- | Silence the passive "update available" banner (`NO_UPDATE_NOTIFIER` is also honored) |
+| `OPENLORE_SKIP_POSTINSTALL` | -- | Suppress the post-install next-step hint |
 
 > The `EMBED_*` variables configure the **remote** embedding provider only. For on-device embeddings with no endpoint or key, run `openlore embed --local` (or set `embedding.provider: "local"` in `.openlore/config.json`). Keyword (BM25) search is the first-class default and needs none of these. See [docs/semantic-search.md](semantic-search.md#retrieval-modes) for the full embedding/retrieval-mode reference.
 

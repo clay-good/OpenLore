@@ -22,5 +22,5 @@
 
 ## Verification
 - [x] `tsc --noEmit` clean
-- [ ] full suite green (`vitest run src examples`)
+- [x] full suite green (`vitest run` — integration excluded per vitest.config.ts)
 - [ ] decisions recorded + gate synced

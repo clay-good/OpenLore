@@ -20,6 +20,15 @@ and LLM/embedding setup, and prints the exact command to fix anything that is mi
 > bundle: `openlore import .openlore/index-bundle.olbundle` — a verified index in seconds (or a
 > transparent rebuild if it's stale). See [shareable-bundle.md](shareable-bundle.md).
 
+## Zero-interaction onboarding
+
+The happy path needs no flags and never touches your repo on `npm install`:
+
+- **Post-install hint.** Installing the package prints a single next-step line (`cd your-project && openlore install`) — no analysis, no config writes, no API key. It is silent in CI, non-TTY, and dependency/in-tree installs, and always exits 0. Suppress it with `OPENLORE_SKIP_POSTINSTALL=1`.
+- **Non-interactive wiring.** `openlore connect --yes` (alias `-y`) skips the interactive agent picker and wires every detected surface, exactly like a bare `openlore install`.
+- **Cold-start self-bootstrap.** If an agent wires the MCP server without ever running `openlore install`, the server builds the full index once **in the background** on first run — non-blocking, fail-soft, and with **no API key**. Opt out with `OPENLORE_NO_AUTO_ANALYZE=1`.
+- **Staying current.** A passive, cached, fail-silent banner notes when a newer version is published (human-facing commands only; silenced by `OPENLORE_NO_UPDATE_NOTIFIER=1`). Upgrade explicitly with [`openlore update`](cli-reference.md#commands), which detects npm-global / Homebrew / npx and runs the right command (`--check` / `--dry-run` to preview).
+
 ## Flags
 
 | Flag | Effect |
@@ -32,10 +41,10 @@ and LLM/embedding setup, and prints the exact command to fix anything that is mi
 
 > **Default tool surface (since `default-to-lean-tool-surface`).** A plain `openlore install` wires the
 > MCP server to the lean **`navigation`** preset — 10 graph-traversal tools, the Spec 14 benchmark
-> winner — not all 69. This is per-session token savings with no capability loss: every tool stays one
+> winner — not all 72. This is per-session token savings with no capability loss: every tool stays one
 > opt-in away. Note the lean default does **not** include the governance tools the decisions pre-commit
 > gate uses (`record_decision`, `check_spec_drift`, `detect_changes`); on a repo that gates commits,
-> install with **`--preset full`** (all 69) or **`--preset minimal`** (the governance core) to wire them.
+> install with **`--preset full`** (all 72) or **`--preset minimal`** (the governance core) to wire them.
 
 ## What it actually writes
 
