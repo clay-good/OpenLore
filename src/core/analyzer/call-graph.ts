@@ -693,6 +693,83 @@ async function getSwiftParser(): Promise<{ parser: Parser; lang: object } | null
  * Given a list of function nodes (with startIndex/endIndex) and a call position,
  * find the narrowest enclosing function node.
  */
+/**
+ * Give NESTED functions a unique, STABLE node id so same-named nested functions —
+ * or a nested function colliding with a same-named top-level one — are not collapsed
+ * into a single node at id aggregation (`allNodes.set(node.id, …)`, last-write-wins),
+ * which silently drops a real function and merges its edges/metrics.
+ *
+ * A node is re-keyed ONLY when its bare id collides AND it is byte-CONTAINED within
+ * another function node (a genuinely nested function). Its id becomes the immediate
+ * enclosing function's id segment + `/name` (`file::A.m1/helper`) — a discriminator
+ * derived from the enclosing scope, NOT a byte offset, so it is STABLE across edits to
+ * surrounding code (a positional offset would shift and read as removed+added on every
+ * diff). Same-scope twins get a deterministic document-order ordinal (`…/helper#2`).
+ *
+ * Sibling collisions (non-contained nodes sharing an id — a re-assigned member
+ * `obj.fn = …; obj.fn = …`, a same-file container homonym across namespaces) are left
+ * collapsed: that is an intentional, separately-tested behavior. Nodes are processed
+ * outermost→innermost (by span) so an enclosing function's id is final before a child
+ * is qualified against it, composing across multiple nesting levels.
+ *
+ * MUST run after node extraction and BEFORE call extraction, so findEnclosingFunction
+ * returns the disambiguated node and the rawEdge it produces carries the unique
+ * callerId. Deterministic; a no-op when no bare id collides (the common case).
+ * (change: add-stable-nested-function-identity.)
+ */
+function ensureUniqueNodeIds(nodes: FunctionNode[]): void {
+  const counts = new Map<string, number>();
+  for (const n of nodes) counts.set(n.id, (counts.get(n.id) ?? 0) + 1);
+  let anyCollision = false;
+  for (const c of counts.values()) if (c > 1) { anyCollision = true; break; }
+  if (!anyCollision) return;
+
+  // Immediate enclosing function node = the smallest OTHER node strictly containing n.
+  const enclosingOf = (n: FunctionNode): FunctionNode | undefined => {
+    let best: FunctionNode | undefined;
+    let bestSize = Infinity;
+    for (const m of nodes) {
+      if (m === n) continue;
+      const contains =
+        m.startIndex <= n.startIndex &&
+        n.endIndex <= m.endIndex &&
+        (m.startIndex !== n.startIndex || m.endIndex !== n.endIndex);
+      if (!contains) continue;
+      const size = m.endIndex - m.startIndex;
+      if (size < bestSize) { bestSize = size; best = m; }
+    }
+    return best;
+  };
+
+  // Outermost→innermost AND document order for siblings: a container has a smaller (or
+  // equal-start, larger) span, so it sorts first; same-scope twins keep source order.
+  const order = [...nodes].sort(
+    (a, b) => a.startIndex - b.startIndex || b.endIndex - a.endIndex,
+  );
+  const taken = new Set(nodes.map(n => n.id));
+  for (const n of order) {
+    if ((counts.get(n.id) ?? 0) < 2) continue; // bare id is unique — leave it
+    const m = enclosingOf(n);
+    // Skip a sibling collision (no container — an intentional collapse) AND a
+    // same-id container, which is the SAME logical function matched twice: an
+    // `export function` / decorated-definition wrapper byte-contains its inner
+    // declaration, both carry the same id, and they are MEANT to collapse. Only a
+    // container with a DIFFERENT id is a genuine enclosing function.
+    if (!m || m.id === n.id) continue;
+    const sep = m.id.indexOf('::');
+    const filePrefix = sep >= 0 ? m.id.slice(0, sep + 2) : '';
+    const scope = sep >= 0 ? m.id.slice(sep + 2) : m.id;
+    let qualified = `${filePrefix}${scope}/${n.name}`;
+    if (taken.has(qualified)) {
+      let ord = 2;
+      while (taken.has(`${qualified}#${ord}`)) ord++;
+      qualified = `${qualified}#${ord}`;
+    }
+    n.id = qualified;
+    taken.add(qualified);
+  }
+}
+
 function findEnclosingFunction(
   nodes: FunctionNode[],
   callPos: number
@@ -1153,6 +1230,7 @@ async function extractTSGraph(
   }
 
   // --- Extract calls ---
+  ensureUniqueNodeIds(nodes);
   const rawEdges: RawEdge[] = [];
   const callMatches = callQuery.matches(tree.rootNode);
 
@@ -1295,6 +1373,7 @@ async function extractPyGraph(
   }
 
   // --- Extract calls ---
+  ensureUniqueNodeIds(nodes);
   const rawEdges: RawEdge[] = [];
 
   const directCallQuery = new _NativeQuery!(lang as unknown as Parser.Language, PY_DIRECT_CALL_QUERY);
@@ -1423,6 +1502,7 @@ async function extractGoGraph(
     if (fnCfg) cfg.set(id, fnCfg);
   }
 
+  ensureUniqueNodeIds(nodes);
   const rawEdges: RawEdge[] = [];
   for (const match of callQuery.matches(tree.rootNode)) {
     const nameCapture = match.captures.find(c => c.name === 'call.name');
@@ -1521,6 +1601,7 @@ async function extractRustGraph(
     if (fnCfg) cfg.set(id, fnCfg);
   }
 
+  ensureUniqueNodeIds(nodes);
   const rawEdges: RawEdge[] = [];
   for (const match of callQuery.matches(tree.rootNode)) {
     const nameCapture = match.captures.find(c => c.name === 'call.name');
@@ -1712,6 +1793,7 @@ function dedupeOverlappingCalls(
     }
   }
 
+  ensureUniqueNodeIds(nodes);
   const rawEdges: RawEdge[] = [];
   for (const call of callByNode.values()) {
     if (isIgnoredCallee(call.calleeName, language)) continue;
@@ -1972,6 +2054,7 @@ async function extractCppGraph(
     }
   }
 
+  ensureUniqueNodeIds(nodes);
   const rawEdges: RawEdge[] = [];
 
   // Plain calls: foo()
@@ -2083,6 +2166,7 @@ async function extractSwiftGraph(
     });
   }
 
+  ensureUniqueNodeIds(nodes);
   const rawEdges: RawEdge[] = [];
 
   // Direct calls: foo()
@@ -2360,6 +2444,7 @@ async function extractByQueries(
     }
 
     const definedNames = new Set(nodes.map(n => n.name));
+    ensureUniqueNodeIds(nodes);
     const rawEdges: RawEdge[] = [];
     const seen = new Set<string>();
     for (const match of runQuery(spec.callQuery)) {
@@ -2583,6 +2668,7 @@ async function extractDartGraph(
   };
   collectFns(root);
 
+  ensureUniqueNodeIds(nodes);
   const rawEdges: RawEdge[] = [];
   const seen = new Set<string>();
   const collectCalls = (n: TsNodeLike): void => {
@@ -2688,6 +2774,7 @@ async function extractElixirGraph(
   };
   walk(root, undefined);
 
+  ensureUniqueNodeIds(nodes);
   const rawEdges: RawEdge[] = [];
   const seen = new Set<string>();
   for (const c of calls) {

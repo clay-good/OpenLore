@@ -145,6 +145,65 @@ describe('CallGraphBuilder — TypeScript', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Nested-function identity (change: add-stable-nested-function-identity)
+// ---------------------------------------------------------------------------
+
+describe('CallGraphBuilder — stable nested-function identity', () => {
+  const NESTED = `
+    function helper() { return 'top'; }
+    class A {
+      m1() { function helper() { sideEffect1(); } return helper(); }
+      m2() { function helper() { sideEffect2(); } return helper(); }
+    }
+    function sideEffect1() {}
+    function sideEffect2() {}
+  `;
+
+  it('gives same-named nested functions distinct, scope-qualified ids (no merge)', async () => {
+    const result = await new CallGraphBuilder().build([{ path: 'src/n.ts', language: 'TypeScript', content: NESTED }]);
+    const helperIds = Array.from(result.nodes.values()).filter(n => n.name === 'helper').map(n => n.id).sort();
+    // top-level keeps the bare id; each nested helper is qualified by its enclosing method.
+    expect(helperIds).toEqual([
+      'src/n.ts::A.m1/helper',
+      'src/n.ts::A.m2/helper',
+      'src/n.ts::helper',
+    ]);
+    // Each nested helper keeps its OWN outgoing edge — not merged.
+    expect(edgePairs(result)).toContain('helper→sideEffect1');
+    expect(edgePairs(result)).toContain('helper→sideEffect2');
+  });
+
+  it('keeps nested-function ids STABLE when unrelated code shifts above them', async () => {
+    const a = await new CallGraphBuilder().build([{ path: 'src/n.ts', language: 'TypeScript', content: NESTED }]);
+    const b = await new CallGraphBuilder().build([{ path: 'src/n.ts', language: 'TypeScript', content: `const X = 1;\nfunction unrelated(){}\n${NESTED}` }]);
+    const ids = (r: Awaited<ReturnType<CallGraphBuilder['build']>>) =>
+      Array.from(r.nodes.values()).filter(n => n.name === 'helper').map(n => n.id).sort();
+    // Scope-qualified (not byte-offset) → unchanged by an unrelated edit.
+    expect(ids(b)).toEqual(ids(a));
+  });
+
+  it('disambiguates two same-named functions in the SAME scope by document-order ordinal', async () => {
+    const result = await new CallGraphBuilder().build([{
+      path: 'src/d.ts', language: 'TypeScript',
+      content: `function outer() { function dup(){} function dup(){} }`,
+    }]);
+    const ids = Array.from(result.nodes.values()).filter(n => n.name === 'dup').map(n => n.id).sort();
+    expect(ids).toEqual(['src/d.ts::outer/dup', 'src/d.ts::outer/dup#2']);
+  });
+
+  // Scope contract: a same-id container is the SAME function matched twice (export
+  // wrapper / decorator), NOT a nested function — it must still collapse to one node.
+  it('does NOT split an `export function` double-match into a nested node', async () => {
+    const result = await new CallGraphBuilder().build([{
+      path: 'src/e.ts', language: 'TypeScript',
+      content: `export async function createOrder() { return 1; }`,
+    }]);
+    const ids = Array.from(result.nodes.values()).filter(n => n.name === 'createOrder').map(n => n.id);
+    expect(ids).toEqual(['src/e.ts::createOrder']); // one node, no `createOrder/createOrder`
+  });
+});
+
+// ---------------------------------------------------------------------------
 // JavaScript
 // ---------------------------------------------------------------------------
 
