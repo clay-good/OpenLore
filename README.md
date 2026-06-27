@@ -20,10 +20,6 @@
 </p>
 
 <p align="center">
-  <img src="docs/openlore-gallery.png" alt="OpenLore — memory & knowledge graph for AI agents" width="640">
-</p>
-
-<p align="center">
   <img src="docs/openlore-demo.gif" alt="A real terminal recording (no edits, no narration) of the full lifecycle on a real Rust repo: `openlore install` sets it up in one command with no API key, `openlore orient` finds the code a task touches, `openlore blast-radius` flags a risky change before commit, and `openlore prove` shows it cuts cost ~84% and round-trips ~82% on this repo" width="100%">
 </p>
 
