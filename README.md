@@ -24,10 +24,10 @@
 </p>
 
 <p align="center">
-  <img src="docs/openlore-demo.gif" alt="A real terminal recording: `openlore orient` answers a task with the relevant functions, their orchestration, and insertion points in one deterministic call (no API key); then the 72 tools grouped into 6 capability families" width="100%">
+  <img src="docs/openlore-demo.gif" alt="A real terminal recording of the full fresh-user onboarding: a brand-new repo, `openlore install` detects your agent, wires MCP, and builds the index in under a second (no API key), then `openlore orient` returns the relevant functions and where to add code in one deterministic call" width="100%">
 </p>
 
-<p align="center"><em>A real terminal — no edits, no cuts. One <code>orient</code> call returns the relevant functions and where to add code, deterministically and with no API key; the surface is 72 conclusion tools grouped into 6 capability families.</em></p>
+<p align="center"><em>The full new-user onboarding, recorded in a real terminal — no edits, no cuts. <code>openlore install</code> wires your agent and builds the index in well under a second (no API key, no network), then every task starts with one deterministic <code>orient</code> call that returns the relevant functions and exactly where to work — replacing grep-and-read.</em></p>
 
 ---
 
