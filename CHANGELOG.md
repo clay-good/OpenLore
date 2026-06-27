@@ -279,6 +279,11 @@ server read the version from `package.json`, so both report `2.1.4`.
 
 ### Fixed
 
+- **`openlore orient "<task>"` now honors a bare positional task.** Previously only `--task` was read,
+  so the most natural invocation — a positional task — silently fell through to the no-task session
+  primer and exited `0`, doing no orientation (and a stray `--limit` went unvalidated). A positional
+  task is now accepted (`--task` still wins if both are given); with no task, the install SessionStart
+  hook's `orient --json` still prints the primer, unchanged. (v2.1.4 pre-release QA dogfood.)
 - **Same-named nested functions no longer collapse into one call-graph node.** Two `function helper(){}`
   in different methods, two `const cleanup = () => {}` arrows in one function, or a nested function
   colliding with a same-named top-level one previously shared one id and were merged at id aggregation

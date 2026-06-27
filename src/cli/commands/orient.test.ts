@@ -73,6 +73,37 @@ describe('orient command', () => {
     });
   });
 
+  // Regression (v2.1.4 QA): `openlore orient "<task>"` — the most natural thing a user/agent
+  // types — used to silently fall through to the no-task session primer and exit 0, doing no
+  // orientation. A bare positional task must now be honored, while NO task still prints the
+  // primer (so the install SessionStart hook `orient --json` is unaffected).
+  describe('positional [task] argument', () => {
+    it('honors a bare positional task instead of printing the no-task primer', async () => {
+      mockHandleOrient.mockResolvedValue({
+        task: 'add rate limiting',
+        searchMode: 'keyword',
+        relevantFiles: ['src/rl.ts'],
+        relevantFunctions: [{ name: 'rateLimit', filePath: 'src/rl.ts', score: 0.9, fanIn: 3 }],
+        specDomains: [],
+        callPaths: [],
+        suggestedTools: ['orient'],
+      });
+      await orientCommand.parseAsync(['add rate limiting'], { from: 'user' });
+      const out = output();
+      expect(mockHandleOrient).toHaveBeenCalled();
+      expect(out).toContain('rateLimit'); // it actually oriented…
+      expect(out).not.toContain('architectural memory is active'); // …NOT the no-task primer
+    });
+
+    it('with NO task still prints the session-start primer (install hook unaffected)', async () => {
+      await orientCommand.parseAsync([], { from: 'user' });
+      // Both primer variants (analysis present / absent) guide to `orient --task`,
+      // and neither runs an orientation — that's what keeps the SessionStart hook safe.
+      expect(output()).toContain('orient --task');
+      expect(output()).not.toContain('rateLimit');
+    });
+  });
+
   describe('--inject (task-scoped injection hook)', () => {
     it('emits an attributed, ignorable block for a strong match and never errors', async () => {
       mockHandleOrient.mockResolvedValue({

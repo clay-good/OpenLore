@@ -1,63 +1,69 @@
-# Reproduces docs/openlore-demo.gif with charmbracelet/vhs (https://github.com/charmbracelet/vhs).
+# Reproduces the flow in docs/openlore-demo.gif with charmbracelet/vhs (https://github.com/charmbracelet/vhs).
 #
-#   npm i -g openlore                                   # or: npm link from this repo
-#   git clone --depth 1 https://github.com/django/django /tmp/demo-repo
-#   cd /tmp/demo-repo && cp <repo>/.openlore/config.json .openlore/config.json   # (openlore init also works)
-#   brew install vhs                                     # needs ffmpeg + ttyd
-#   vhs docs/openlore-demo.tape                          # writes /tmp/openlore-demo.gif
+# The hero GIF is a real terminal recording of the full lifecycle on a large real Rust repo —
+# no edits, no narration. `prove --estimate` is a DETERMINISTIC per-repo projection, so the
+# headline "−84% cost / −82% round-trips" is that repo's number; yours will differ (the MEASURED
+# agent benchmark in the README's Value Scorecard is −26% round-trips). Every line below is real
+# openlore output — nothing is faked.
 #
-# Every command below is real openlore output — no edits, no fabricated numbers.
+# Setup (substitute your own Rust checkout for <REPO>; the GIF used a ~5k-function one):
+#   npm i -g openlore                                   # v2.1.4+ (the four-beat lifecycle)
+#   git clone --depth 1 https://github.com/BurntSushi/ripgrep /tmp/demo-repo   # any real Rust repo
+#   brew install vhs                                    # needs ffmpeg + ttyd
+#   # blast-radius needs an uncommitted edit to a hub function — make a small one to a
+#   # frequently-called fn in /tmp/demo-repo before recording (the Hide block below is a placeholder).
+#   vhs docs/openlore-demo.tape                         # writes /tmp/openlore-demo.gif
 
 Output "/tmp/openlore-demo.gif"
 
 Set Shell "bash"
-Set FontSize 19
+Set FontSize 17
 Set Width 1240
-Set Height 720
+Set Height 680
 Set Padding 22
-Set Theme "Catppuccin Mocha"
+Set Theme "Dracula"
 Set TypingSpeed 22ms
 
 Hide
-Type "cd /tmp/demo-repo && clear"
+Type "cd /tmp/demo-repo && export PS1='❯ ' && clear"
 Enter
 Show
 
+# 1. Set up — one command, no API key. Static analysis indexes the whole repo.
 Sleep 500ms
-Type "# Django — a genuinely massive repo: 7,066 files, 2,922 Python modules."
-Sleep 400ms
+Type "openlore install"
 Enter
-Sleep 700ms
-Type "# Onboard once: static analysis indexes the whole repo. No LLM, no network."
-Sleep 300ms
-Enter
-Type "openlore analyze --no-embed 2>&1 | grep -om1 'Built.*functions)'"
-Enter
-Sleep 4800ms
-
-Sleep 600ms
-Type "# Your agent must change mark_safe(). WITHOUT OpenLore it greps, then reads every hit:"
-Sleep 300ms
-Enter
-Type "grep -rl mark_safe --include='*.py' . | head -n 10"
-Enter
-Sleep 2200ms
-Type "#   ...75 files, 291 references to open and reason about — dozens of round-trips."
-Sleep 300ms
-Enter
-Sleep 1600ms
+Sleep 6000ms
 
 Hide
 Type "clear"
 Enter
 Show
-Type "# WITH OpenLore — one deterministic call:"
-Sleep 300ms
-Enter
-Type "openlore orient --task 'change how mark_safe escapes HTML' --limit 3"
-Enter
-Sleep 4200ms
-Type "#  -> exact file + the 160-caller blast radius + where to edit, in ~0.6s. No guessing."
+
+# 2. Memory — one deterministic call finds the code a task touches.
 Sleep 400ms
+Type "openlore orient --task 'enforce the rate limit'"
 Enter
-Sleep 3200ms
+Sleep 4500ms
+
+Hide
+Type "clear"
+Enter
+Show
+
+# 3. Governance — with an uncommitted edit to a hub, blast-radius flags the risk before commit.
+Sleep 400ms
+Type "openlore blast-radius"
+Enter
+Sleep 4000ms
+
+Hide
+Type "clear"
+Enter
+Show
+
+# 4. Proof — prove --estimate projects the payoff on this repo (deterministic, no agent run).
+Sleep 400ms
+Type "openlore prove --estimate"
+Enter
+Sleep 4500ms

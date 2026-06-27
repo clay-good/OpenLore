@@ -20,10 +20,10 @@
 </p>
 
 <p align="center">
-  <img src="docs/openlore-demo.gif" alt="A real terminal recording (no edits, no narration) of the full lifecycle on a real Rust repo: `openlore install` sets it up in one command with no API key, `openlore orient` finds the code a task touches, `openlore blast-radius` flags a risky change before commit, and `openlore prove` shows it cuts cost ~84% and round-trips ~82% on this repo" width="100%">
+  <img src="docs/openlore-demo.gif" alt="A real terminal recording (no edits, no narration) of the full lifecycle on a real Rust repo: `openlore install` sets it up in one command with no API key, `openlore orient` finds the code a task touches, `openlore blast-radius` flags a risky change before commit, and `openlore prove` estimates a ~84% cost / ~82% round-trip saving on this repo (a deterministic projection; the measured agent benchmark is ~26% fewer round-trips)" width="100%">
 </p>
 
-<p align="center"><em>The whole lifecycle on a real repo, straight from the terminal — no edits, no narration. <strong>Set up</strong> in one command (<code>openlore install</code>, no API key); then <strong>memory</strong> — <code>orient</code> finds the code a task touches; <strong>governance</strong> — <code>blast-radius</code> flags a risky change before you commit; <strong>proof</strong> — <code>prove</code> measures the payoff (here, <strong>−84% cost, −82% round-trips</strong>). Deterministic and local.</em></p>
+<p align="center"><em>The whole lifecycle on a real repo, straight from the terminal — no edits, no narration. <strong>Set up</strong> in one command (<code>openlore install</code>, no API key); then <strong>memory</strong> — <code>orient</code> finds the code a task touches; <strong>governance</strong> — <code>blast-radius</code> flags a risky change before you commit; <strong>proof</strong> — <code>prove</code> projects the payoff on your own repo (here a deterministic estimate: <strong>−84% cost / −82% round-trips</strong>; the <a href="#value-scorecard--does-it-pay-for-itself">measured agent benchmark</a> is <strong>−26% round-trips</strong>). Deterministic and local.</em></p>
 
 ---
 
@@ -468,7 +468,7 @@ An optional layer built on the same EpistemicLease tracker that detects behavior
 
 Mode ladder, all **off by default**: `off` (zero overhead) · `observe` (score + record, no intervention) · `advisory` (surface a signal at L2+) · `experimental_blocking` (emit a runtime block signal at L4, `advisory:true` always present — the runtime decides; OpenLore never mandates). Commands: `panic-check` (PreToolUse hook consumer, always exits 0), `panic-level` (status line), `panic-validate` (the accuracy gate), `panic-hotspots` (per-module destabilization → memory), `panic-replay` / `panic-calibrate` (replay + accuracy measurement). Optional `gryph-watch` observes agents working purely via Bash/Edit/Read (fail-open when the `gryph` binary is absent).
 
-> **The gate**: a panic signal is a *judgment*, and a wrong one costs the tokens OpenLore exists to save. So **no interventional posture ships enabled-by-default until its accuracy is validated on data** — not asserted in code. `openlore panic-validate` reports the false-positive proxy, per-trigger attribution, and intervention follow-through from real `observe`-mode telemetry; `openlore panic-calibrate` measures discrimination against a labeled ground-truth corpus (and honestly documents where the signal is over-sensitive). The default is, and stays, `off`. See [`openspec/changes/adopt-agent-behavioral-governance/`](openspec/changes/adopt-agent-behavioral-governance/).
+> **The gate**: a panic signal is a *judgment*, and a wrong one costs the tokens OpenLore exists to save. So **no interventional posture ships enabled-by-default until its accuracy is validated on data** — not asserted in code. `openlore panic-validate` reports the false-positive proxy, per-trigger attribution, and intervention follow-through from real `observe`-mode telemetry; `openlore panic-calibrate` measures discrimination against a labeled ground-truth corpus (and honestly documents where the signal is over-sensitive). The default is, and stays, `off`. See [`openspec/changes/archive/adopt-agent-behavioral-governance/`](openspec/changes/archive/adopt-agent-behavioral-governance/).
 
 ---
 
@@ -661,7 +661,6 @@ Because OpenLore requires Node ≥22.5 while OpenSpec runs on ≥20.19, a delega
 | Agentic workflows (BMAD, Vibe, GSD, spec-kit) | [docs/agentic-workflows.md](docs/agentic-workflows.md) |
 | Troubleshooting | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) |
 | Philosophy | [docs/PHILOSOPHY.md](docs/PHILOSOPHY.md) |
-| Telemetry & cognitive metrics | [docs/telemetry.md](docs/telemetry.md) |
 
 ---
 

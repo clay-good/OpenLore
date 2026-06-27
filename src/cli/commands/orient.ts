@@ -188,6 +188,10 @@ function printHuman(result: Record<string, unknown>): void {
 
 export const orientCommand = new Command('orient')
   .description('Get the relevant functions, callers, specs, and insertion points for a task')
+  // Accept the task as a bare positional too (`openlore orient "add rate limiting"`) — the
+  // most natural thing a user/agent types. Without it (and without --task) we still print
+  // the session-start primer, so the install SessionStart hook (`orient --json`) is unaffected.
+  .argument('[task]', 'Natural-language task (positional alternative to --task)')
   .option('--task <task>', 'Natural-language task description (e.g. "add rate limiting to the API")')
   .option('--directory <path>', 'Project directory to orient in (default: current directory)')
   .option('--limit <n>', 'Number of relevant functions to return (default: 5)')
@@ -209,10 +213,11 @@ Requires "openlore analyze" to have been run at least once. With no --task,
 prints a short session-start primer (used by the install SessionStart hook).
 `
   )
-  .action(async (opts: OrientCliOptions) => {
+  .action(async (taskArg: string | undefined, opts: OrientCliOptions) => {
     const directory = opts.directory ?? process.cwd();
     const asJson = opts.json ?? false;
-    const task = opts.task?.trim();
+    // --task wins; otherwise a bare positional task is honored.
+    const task = (opts.task ?? taskArg)?.trim();
 
     // Task-scoped injection hook mode: emit a bounded orientation block (or a
     // pointer line) to stdout and always exit 0 — a pre-turn hook must never
