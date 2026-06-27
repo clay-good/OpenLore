@@ -11,12 +11,20 @@
 > `CallGraphResult`/`SerializedCallGraph`, `CALL_DISTANCE_COSTS`/`callDistance`, the layer helpers
 > `layerOf`/`classifyLayerEdge`) moved out behind the barrel; `call-graph.ts` re-exports every public
 > name (`RawEdge`/`CALL_DISTANCE_FALLBACK` stay internal, off the surface). call-graph.ts: 5,425 → 5,150
-> lines. **Verified:** export surface byte-for-byte identical (multi-line-aware diff), build/lint/typecheck
-> clean, full suite green (279 files / 5531 tests), and a byte-level graph+helper snapshot oracle hashes
-> identically before/after (SHA-256 `131ba4c6…`). A new `stable call-graph barrel` test locks the
-> invariant (re-export identity + moved-helper behavior) for the remaining slices.
-> Remaining slices (nodes / extract / dispatch / grammar-loader) are unstarted — to be taken one per
-> change, each gated on the same snapshot oracle + full suite.
+> lines. Snapshot `131ba4c6…`. A `stable call-graph barrel` test locks the re-export invariant.
+>
+> **Slice 3 — `call-graph-extract.ts` (DONE).** The DOCSTRING / SIGNATURE EXTRACTION HELPERS section
+> (`extractDocstringBefore`, `extractDeclaration`) moved out — two pure string-scanning functions with
+> zero dependency on the rest of the analyzer. They were file-internal (never on `call-graph.ts`'s
+> public surface), so they are imported back, NOT re-exported: the surface is unchanged. Taken before
+> slice 2 as the safest small slice. call-graph.ts: 5,150 → 4,951 lines. The snapshot oracle was first
+> strengthened to serialize each node's `docstring` + `signature` (so both moved functions are exercised
+> across TS + Python), then captured before/after: identical (SHA-256 `58107ac0…`).
+>
+> **Each slice is verified the same four ways:** export surface byte-for-byte identical (multi-line-aware
+> diff), build/lint/typecheck clean, full suite green (279 files / 5534 tests), and the byte-level
+> snapshot oracle hashes identically before/after. Remaining slices (`call-graph-nodes.ts`,
+> `call-graph-dispatch.ts`, `grammar-loader.ts`) are unstarted — one per commit, same gates.
 
 ## The gap
 
