@@ -76,7 +76,7 @@ describe('bootstrapAnalysisInBackground', () => {
 
   it('runs exactly the injected builder and nothing else (no hidden default)', async () => {
     const dir = freshDir(false);
-    let ran: string[] = [];
+    const ran: string[] = [];
     await bootstrapAnalysisInBackground(dir, {
       seen: new Set(),
       analyze: async (d) => { ran.push(d); },
