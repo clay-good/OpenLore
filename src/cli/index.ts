@@ -51,6 +51,7 @@ import { certifyPublicSurfaceCommand } from './commands/certify-public-surface.j
 import { styleFingerprintCommand } from './commands/style-fingerprint.js';
 import { briefingSinceCommand } from './commands/briefing-since.js';
 import { findClonesCommand } from './commands/find-clones.js';
+import { errorPropagationCommand } from './commands/error-propagation.js';
 import { enforceCommand } from './commands/enforce.js';
 import { exportCommand } from './export/index.js';
 import { importCommand } from './commands/import.js';
@@ -182,6 +183,7 @@ program.addCommand(certifyPublicSurfaceCommand);
 program.addCommand(styleFingerprintCommand);
 program.addCommand(briefingSinceCommand);
 program.addCommand(findClonesCommand);
+program.addCommand(errorPropagationCommand);
 program.addCommand(enforceCommand);
 program.addCommand(exportCommand);
 program.addCommand(importCommand);

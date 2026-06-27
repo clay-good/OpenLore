@@ -112,7 +112,7 @@ Three layers, each usable independently:
 |-------|-------------|----------|
 | **1. Static Analysis** | Call graph, clusters, McCabe CC, external deps → `CODEBASE.md` digest | No |
 | **2. Spec Layer** | LLM-generated living specs, ADRs, drift detection, decision gates | For generation |
-| **3. Agent Runtime** | 70 MCP tools — `orient()`, semantic search, graph expansion | No |
+| **3. Agent Runtime** | 71 MCP tools — `orient()`, semantic search, graph expansion | No |
 
 You can use layer 1 alone to give agents structural context. Add layer 2 for semantic intent and architectural governance through OpenSpec-compatible living specifications. Layer 3 keeps that context continuously accessible through graph-native MCP tools once `openlore mcp` is running.
 
@@ -256,7 +256,7 @@ One graph query replaces most exploratory file reads. The agent knows exactly wh
 
 ## Agent Cheat Sheet
 
-The default MCP surface is the lean **`navigation`** preset — 10 tools, the Spec 14 benchmark winner; the full surface of 70 tools is opt-in via `--preset full` (or `--all-tools`). Day-to-day work needs a handful — reach for the right one by situation:
+The default MCP surface is the lean **`navigation`** preset — 10 tools, the Spec 14 benchmark winner; the full surface of 71 tools is opt-in via `--preset full` (or `--all-tools`). Day-to-day work needs a handful — reach for the right one by situation:
 
 | Situation | Tool |
 |-----------|------|
@@ -277,10 +277,11 @@ The default MCP surface is the lean **`navigation`** preset — 10 tools, the Sp
 | "Did my change break my consumers' public API contract?" | `certify_public_surface` — deterministic breaking-change verdict over the diff: each changed export classified `breaking`/`non-breaking`/`potentially-breaking`, each breaking one paired with the in-repo consumers it breaks; conservative (never silently "safe"); renamed exports detected via continuity. No base ref → the public surface itself (CLI `openlore certify-public-surface`; opt-in `--preset full`) |
 | "Which of my N queued tasks can run concurrently, and in what order?" | `plan_parallel_work` — a hazard-typed conflict graph + wave schedule + critical path over a caller-supplied task list (opt-in `coordination` preset) |
 | "Which changes already in flight — teammates' branches/PRs and my agents' tasks — collide right now?" | `map_in_flight_conflicts` — one cross-actor conflict graph over branches/PRs/agent tasks, footprints derived from actual diffs; per conflict the actors, hazard, shared symbols, and a suggested landing order; "not assessed" is never a false "no conflict"; `federation: true` matches across repos (opt-in `coordination`/`federation` preset) |
-| "Is this language fully supported, or is a quiet result just 'unsupported here'?" | `get_language_support` — the deterministic per-language capability matrix (signatures · callGraph · imports · cfgOverlay · typeInference · styleFingerprint · iacProjection · crossServiceHttp) for the repo's detected languages, or a named language; fail-soft and derived from the live extractors so it can't over-claim (opt-in `--preset full`; see [docs/language-support.md](docs/language-support.md)) |
+| "Is this language fully supported, or is a quiet result just 'unsupported here'?" | `get_language_support` — the deterministic per-language capability matrix (signatures · callGraph · imports · cfgOverlay · typeInference · styleFingerprint · iacProjection · crossServiceHttp · errorPropagation) for the repo's detected languages, or a named language; fail-soft and derived from the live extractors so it can't over-claim (opt-in `--preset full`; see [docs/language-support.md](docs/language-support.md)) |
 | "How does this codebase write code — so my edit matches the house style?" | `get_style_fingerprint` — a descriptive, deterministic idiom profile measured from the AST (arrow vs. declared function, `const`/`let`, ternary vs. `if`, `await` vs. `.then`, template vs. concat, naming case) as `{ dominant, ratio, samples }`; repo / region (`communityId`) / file scopes; an idiom below the evidence floor or compiler-enforced (Go) reports a null signal, never a guess; not prescriptive, no style score. `orient` also carries a compact `regionStyle` line (opt-in `--preset full`; CLI `openlore style-fingerprint`) |
 | "A lot changed since I last looked — what actually matters?" | `briefing_since` — catch-up briefing of the changed symbols since a base ref, ranked into a fixed tier order (surprising-change = a stable hub moved > hub-change > chokepoint-change > ordinary-change) from existing labels, **not** a weighted score; grouped by region, with tests-to-run; surprise withheld on shallow history; no-silent-truncation receipt. The cursor is the base ref, never wall-clock (opt-in `--preset full`; CLI `openlore briefing-since`) |
 | "I'm about to write this — does a near-duplicate already exist to reuse?" | `find_clones` — the edit-time, SCOPED companion to the whole-repo `get_duplicate_report`. One query: a `symbol` (a function in the index) or a `snippet` (raw code not yet written — the pre-write check the whole-repo report can't do). Returns existing clones ranked exact > structural > near; reuses the same detector (no new algorithm), one-vs-all so it finds near-clones even where the whole-repo O(n²) pass is skipped; unknown symbol → explicit not-found, never an empty "unique" (opt-in `--preset full`; CLI `openlore find-clones`) |
+| "What exceptions can escape this function — and is any already caught?" | `analyze_error_propagation` — the error-handling analogue of `analyze_impact`: given a `symbol` (TS/JS/Python), the exception types that propagate OUT to callers (each with origin + call path, direct vs propagated) and those thrown in the subtree but caught within it (`handledInternally`). A sound lower bound — an un-analyzable callee is disclosed, never assumed exception-free; `<dynamic>` re-raises kept; byte-precise catch containment. Computed live from the cached graph + a source re-read (opt-in `--preset full`; CLI `openlore error-propagation`) |
 | "Block my commit only on the findings I've classed as blocking" | CLI `openlore enforce` — the unified finding-enforcement gate: resolves every governance finding through `enforcement.policy` and blocks only on a `blocking`-classed one (advisory by default; CLI-only, no MCP tool) |
 | "What changed structurally / whose callers are now stale?" | `structural_diff` — graph diff, stale callers, rename flags (Spec 21) |
 | "What changes together with this / what's volatile?" | `get_change_coupling` — co-change + churn from git history (Spec 22) |
@@ -359,7 +360,7 @@ See [docs/shareable-bundle.md](docs/shareable-bundle.md).
 
 **MCP** (no API key)
 
-70 graph-native tools exposed over stdio. Together they act as a persistent architectural runtime for coding agents: orientation, graph traversal, semantic retrieval, drift awareness, decision context, and structural risk analysis.
+71 graph-native tools exposed over stdio. Together they act as a persistent architectural runtime for coding agents: orientation, graph traversal, semantic retrieval, drift awareness, decision context, and structural risk analysis.
 `orient()` is the main entry point — it collapses the discovery loop into one call (measured: **−26% round-trips** on deep traces; see the [Value Scorecard](#value-scorecard--does-it-pay-for-itself)). `detect_changes` risk-scores changed functions using call graph centrality × change type multiplier. Every tool call runs the same guards — input validation against its schema (bad args → JSON-RPC `-32602`), a per-tool timeout, a deterministic output-size cap, and normalized error codes — and the surface carries complete MCP `annotations`. See [docs/mcp-tools.md](docs/mcp-tools.md).
 
 `orient()` runs in **~430µs p50** against a 15k-node codebase (TypeScript compiler, ~79k edges). Full benchmark results: [scripts/BENCHMARKS.md](scripts/BENCHMARKS.md).
@@ -493,7 +494,7 @@ flowchart TD
     Iac --> DB
     Dec --> DB
 
-    DB --> MCP[70 MCP tools<br/>orient · BFS · search · analyze_impact]
+    DB --> MCP[71 MCP tools<br/>orient · BFS · search · analyze_impact]
     MCP --> Agent((Coding Agent))
 
     Code -. optional, API key .-> Gen[openlore generate]
@@ -530,7 +531,7 @@ OpenLore dogfoods its own decision system. These ADRs were recorded with `record
 | **EdgeStore uses SCHEMA_VERSION rebuild-on-bump, not migrations** | The graph is fully derivable from source, so a schema change drops and rebuilds — no migration code, no drift | `analyzer` spec · `src/core/services/edge-store.ts` |
 | **BM25 keyword retrieval is the zero-network floor** | `orient`/`search_code` work with no API key or embedding server; dense embeddings are an optional upgrade, never a requirement | `analyzer` spec · Spec 06 |
 | **SCIP is a one-way export, not a round-trip format** | The SQLite graph stays canonical; SCIP exports only the subset it can model, avoiding a lossy bidirectional contract | `cli` spec · `src/cli/export/scip.ts` |
-| **The default MCP surface is the lean `navigation` preset, not all 70 tools** | A lean graph-traversal surface is what wins the Spec 14 agent benchmark, so `openlore install` wires it by default; the full set stays one opt-in away (`--preset full`) | `cli` spec · Spec 14 |
+| **The default MCP surface is the lean `navigation` preset, not all 71 tools** | A lean graph-traversal surface is what wins the Spec 14 agent benchmark, so `openlore install` wires it by default; the full set stays one opt-in away (`--preset full`) | `cli` spec · Spec 14 |
 | **The `tools/list` prefix is trimmed losslessly + bounded by a guard, not byte-shaved** | Spec 28 measured it: MCP has no server-side schema deferral and the lossless byte-lever is ~2%; the real levers are the client (deferred schemas) and tool count, so we trim safely, guard against bloat, and report the limit | `cli` spec · Spec 28 |
 | **Lean orientation skips enrichment compute, not just its payload** | `orient --lean` returns the navigation core for shallow lookups and skips the work behind the dropped blocks (extra embedding search, manifest/git reads); the rich default is unchanged | `cli` spec · Spec 27 |
 | **Decision consolidation is serialized with a cross-process file lock** | Concurrent `record_decision` calls were losing drafts; a lock makes consolidation safe and every commit instant | `cli` spec · Spec 15 |
@@ -628,7 +629,7 @@ Because OpenLore requires Node ≥22.5 while OpenSpec runs on ≥20.19, a delega
 
 | Topic | Doc |
 |-------|-----|
-| MCP tools reference (70 tools + parameters) | [docs/mcp-tools.md](docs/mcp-tools.md) |
+| MCP tools reference (71 tools + parameters) | [docs/mcp-tools.md](docs/mcp-tools.md) |
 | Language support + the "add a language" checklist | [docs/language-support.md](docs/language-support.md) |
 | Agent setup (Claude Code, Cline, OpenCode, Vibe…) | [docs/agent-setup.md](docs/agent-setup.md) |
 | `openlore install` — auto-configure agent surfaces | [docs/install.md](docs/install.md) |

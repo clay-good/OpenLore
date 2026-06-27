@@ -59,6 +59,185 @@ describe('CallGraphBuilder — TypeScript', () => {
     expect(fanOut(result, 'main')).toBe(2);
   });
 
+  // this./super. method resolution (change: add-this-super-method-resolution).
+  // A `this.method()` call historically produced NO edge at all — the call query
+  // only captured an `(identifier)` receiver, so `this`/`super` receivers were
+  // dropped, leaving every edge-traversing tool blind to intra-object dispatch.
+  it('resolves this.method() to a sibling method of the same class (self_cls)', async () => {
+    const builder = new CallGraphBuilder();
+    const result = await builder.build([{
+      path: 'src/k.ts',
+      language: 'TypeScript',
+      content: `
+        class K {
+          caller() { this.callee(); }
+          callee() { return 1; }
+        }
+      `,
+    }]);
+    expect(edgePairs(result)).toContain('caller→callee');
+    const e = result.edges.find(x => x.calleeName === 'callee' && result.nodes.get(x.callerId)?.name === 'caller');
+    expect(e?.confidence).toBe('self_cls');
+    expect(fanIn(result, 'callee')).toBe(1);
+  });
+
+  it('resolves this.method() to an inherited method on a parent class', async () => {
+    const builder = new CallGraphBuilder();
+    const result = await builder.build([{
+      path: 'src/h.ts',
+      language: 'TypeScript',
+      content: `
+        class Base { shared() { return 1; } }
+        class Child extends Base {
+          run() { this.shared(); }
+        }
+      `,
+    }]);
+    expect(edgePairs(result)).toContain('run→shared');
+  });
+
+  it('resolves super.method() to the PARENT class method, not the overriding child', async () => {
+    const builder = new CallGraphBuilder();
+    const result = await builder.build([{
+      path: 'src/s.ts',
+      language: 'TypeScript',
+      content: `
+        class Base { greet() { return 'base'; } }
+        class Child extends Base {
+          greet() { super.greet(); return 'child'; }
+        }
+      `,
+    }]);
+    // super.greet() must target Base.greet, NOT Child.greet (no self-loop).
+    const superEdge = result.edges.find(
+      e => e.calleeName === 'greet' && result.nodes.get(e.callerId)?.id === 'src/s.ts::Child.greet',
+    );
+    expect(superEdge).toBeDefined();
+    expect(superEdge!.calleeId).toBe('src/s.ts::Base.greet');
+    expect(superEdge!.confidence).toBe('self_cls');
+  });
+
+  it('does not resolve this.method() to an unrelated class with the same method name', async () => {
+    const builder = new CallGraphBuilder();
+    const result = await builder.build([{
+      path: 'src/two.ts',
+      language: 'TypeScript',
+      content: `
+        class A { run() { this.work(); } work() {} }
+        class B { work() {} }
+      `,
+    }]);
+    // A.run's this.work() must bind to A.work, never B.work.
+    const e = result.edges.find(x => x.calleeName === 'work' && result.nodes.get(x.callerId)?.id === 'src/two.ts::A.run');
+    expect(e?.calleeId).toBe('src/two.ts::A.work');
+  });
+
+  it('binds this.method() to the caller’s OWN file when a same-named class exists in another file', async () => {
+    const builder = new CallGraphBuilder();
+    const result = await builder.build([
+      { path: 'src/a.ts', language: 'TypeScript', content: `class Dup { method() { return 'a'; } }` },
+      { path: 'src/b.ts', language: 'TypeScript', content: `class Dup { caller() { this.method(); } method() { return 'b'; } }` },
+    ]);
+    // b.ts::Dup.caller's this.method() must bind to b.ts::Dup.method, never a.ts::Dup.method.
+    const e = result.edges.find(
+      x => x.calleeName === 'method' && result.nodes.get(x.callerId)?.id === 'src/b.ts::Dup.caller' && x.confidence === 'self_cls',
+    );
+    expect(e?.calleeId).toBe('src/b.ts::Dup.method');
+  });
+
+  it('resolves super.method() to the IMPORTED parent, not a same-named decoy in another file', async () => {
+    const builder = new CallGraphBuilder();
+    const result = await builder.build([
+      { path: 'src/decoy.ts', language: 'TypeScript', content: `export class Base { inherited() { return 'decoy'; } }` },
+      { path: 'src/real.ts', language: 'TypeScript', content: `export class Base { inherited() { return 'real'; } }` },
+      {
+        path: 'src/child.ts',
+        language: 'TypeScript',
+        content: `import { Base } from './real';\nclass Child extends Base { run() { super.inherited(); } }`,
+      },
+    ]);
+    const e = result.edges.find(
+      x => x.calleeName === 'inherited' && result.nodes.get(x.callerId)?.id === 'src/child.ts::Child.run' && x.confidence === 'self_cls',
+    );
+    // Must bind the imported ./real Base, not the decoy.
+    expect(e?.calleeId).toBe('src/real.ts::Base.inherited');
+  });
+
+  it('resolves this.method() whose name collides with the call-noise ignore list (e.g. parse/map)', async () => {
+    const builder = new CallGraphBuilder();
+    const result = await builder.build([{
+      path: 'src/p.ts',
+      language: 'TypeScript',
+      content: `
+        class Svc {
+          handle() { this.parse(); this.map(); }
+          parse() {}
+          map() {}
+        }
+      `,
+    }]);
+    // 'parse' and 'map' are in the noise ignore-list, but as this.* calls they are
+    // real intra-object methods and must resolve.
+    expect(edgePairs(result)).toContain('handle→parse');
+    expect(edgePairs(result)).toContain('handle→map');
+  });
+
+  it('drops an unresolved this.method() rather than minting an external::this.x leaf', async () => {
+    const builder = new CallGraphBuilder();
+    const result = await builder.build([{
+      path: 'src/u.ts',
+      language: 'TypeScript',
+      content: `class K { run() { this.notAMethodHere(); } }`,
+    }]);
+    // No edge, and no synthetic external node for the this-receiver call.
+    expect(result.edges.some(e => e.calleeName === 'notAMethodHere')).toBe(false);
+    expect(Array.from(result.nodes.values()).some(n => n.isExternal && n.name.includes('this.'))).toBe(false);
+  });
+
+  it('captures the class name for a class EXPRESSION so this.method() resolves', async () => {
+    const builder = new CallGraphBuilder();
+    const result = await builder.build([{
+      path: 'src/ce.ts',
+      language: 'TypeScript',
+      content: `
+        const K = class { caller() { this.callee(); } callee() {} };
+        const N = class Named { run() { this.work(); } work() {} };
+      `,
+    }]);
+    // Anonymous class expr takes the binding name (K); a named class expr keeps its own name.
+    expect(edgePairs(result)).toContain('caller→callee');
+    expect(edgePairs(result)).toContain('run→work');
+    const e = result.edges.find(x => x.calleeName === 'callee' && x.confidence === 'self_cls');
+    expect(e?.calleeId).toBe('src/ce.ts::K.callee');
+    const e2 = result.edges.find(x => x.calleeName === 'work' && x.confidence === 'self_cls');
+    expect(e2?.calleeId).toBe('src/ce.ts::Named.work');
+  });
+
+  it('does NOT create a self_cls edge from a this.call inside a nested object literal / function', async () => {
+    const builder = new CallGraphBuilder();
+    const result = await builder.build([{
+      path: 'src/nest.ts',
+      language: 'TypeScript',
+      content: `
+        class A {
+          realMethod() { return 1; }
+          viaObject() {
+            const obj = { inner() { this.realMethod(); } };  // runtime this = obj, NOT A
+            return obj;
+          }
+          viaFunction() {
+            function helper() { this.realMethod(); }          // nested fn, this != A
+            return helper;
+          }
+        }
+      `,
+    }]);
+    // The nested object-method and nested function are not A's methods — their this.realMethod()
+    // must NOT resolve to A.realMethod (no false self_cls edge).
+    const falseEdges = result.edges.filter(e => e.calleeName === 'realMethod' && e.confidence === 'self_cls');
+    expect(falseEdges).toEqual([]);
+  });
+
   it('extracts class methods', async () => {
     const builder = new CallGraphBuilder();
     const result = await builder.build([{

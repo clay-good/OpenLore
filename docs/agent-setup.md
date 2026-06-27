@@ -109,7 +109,7 @@ Wire the generated digest into your agent's context:
 
 **Claude Code — MCP config (token-efficient two-server setup)**
 
-MCP clients load all tool schemas at session start. With 70 tools, this costs ~16k tokens of `tools/list` before any work begins (Spec 28 measured it; the lossless server-side trim is only ~2%, so the real lever is deferral). Claude Code supports `alwaysLoad: false` (deferred, default) — tools load only when the agent searches for them via Tool Search.
+MCP clients load all tool schemas at session start. With 71 tools, this costs ~16k tokens of `tools/list` before any work begins (Spec 28 measured it; the lossless server-side trim is only ~2%, so the real lever is deferral). Claude Code supports `alwaysLoad: false` (deferred, default) — tools load only when the agent searches for them via Tool Search.
 
 The recommended setup uses two server entries: one always-visible core server and one deferred full server:
 
@@ -133,9 +133,9 @@ The recommended setup uses two server entries: one always-visible core server an
 ```
 
 - **`openlore-core`** exposes 6 tools always visible in context (~600 tokens): `orient`, `search_code`, `record_decision`, `detect_changes`, `check_spec_drift`, `get_health_map`. These are the tools most likely to be called at session start.
-- **`openlore`** exposes all 70 tools deferred — loaded on demand when the agent uses Tool Search (e.g. "find tool for BFS graph traversal"). The `--preset full` is required here: since the `default-to-lean-tool-surface` change a bare `openlore mcp` exposes only the lean 10-tool `navigation` surface, so without it the deferred server would advertise only the 10-tool navigation surface, not the full 69 you want searchable. (Deferral makes the full surface's up-front schema cost ~0, so wiring `full` on the *deferred* server is the right trade — the lean default targets the *eager* case.)
+- **`openlore`** exposes all 71 tools deferred — loaded on demand when the agent uses Tool Search (e.g. "find tool for BFS graph traversal"). The `--preset full` is required here: since the `default-to-lean-tool-surface` change a bare `openlore mcp` exposes only the lean 10-tool `navigation` surface, so without it the deferred server would advertise only the 10-tool navigation surface, not the full 71 you want searchable. (Deferral makes the full surface's up-front schema cost ~0, so wiring `full` on the *deferred* server is the right trade — the lean default targets the *eager* case.)
 
-If you only need one server entry and want every tool searchable, use `alwaysLoad: false` (the default) with `openlore mcp --preset full` — all 70 tools are deferred and searchable via Tool Search. A bare `openlore mcp` instead gives the lean 10-tool navigation surface (the recommended eager default).
+If you only need one server entry and want every tool searchable, use `alwaysLoad: false` (the default) with `openlore mcp --preset full` — all 71 tools are deferred and searchable via Tool Search. A bare `openlore mcp` instead gives the lean 10-tool navigation surface (the recommended eager default).
 
 **Cline / Roo Code / Kilocode** — create `.clinerules/openlore.md`:
 

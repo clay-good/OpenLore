@@ -45,6 +45,7 @@
 | `openlore style-fingerprint` | Descriptive per-language idiom profile (function form, binding, conditional, async, string, naming case) for the repo, a region (`--community <id>`), or a file (`--file <path>`); `--language` filters, `--json` for machine output. Evidence-floor + enforcement-aware nulls. Read-only, deterministic, never blocks | Yes |
 | `openlore briefing-since` | Catch-up briefing of what changed since a base ref (`--base <ref>`), ranked by significance tier — surprising-change (a stable hub moved) > hub-change > chokepoint-change > ordinary-change — from existing labels (not a score); grouped by region, with tests-to-run and a no-silent-truncation receipt. Scope with `--file-pattern`, bound with `--max`, `--json` for machine output. Read-only, deterministic, never blocks | Yes |
 | `openlore find-clones` | Existing clones of ONE query — a function `--symbol <name>` (or `name::path`) in the index, or raw `--snippet <code>` (even code not yet written) — ranked exact > structural > near. The edit-time "does this already exist? reuse it" companion to the whole-repo `get_duplicate_report`. `--min <ratio>` sets the near floor (default 0.7), `--max <n>` bounds the list, `--json` for machine output. Read-only, deterministic, never blocks | Yes |
+| `openlore error-propagation` | The exceptions that escape a function (`--symbol <name>`, or `name::path`) to its callers vs. those caught within it — the error-handling analogue of `analyze_impact`, for TS/JS/Python. A sound lower bound: byte-precise catch containment, un-analyzable callees disclosed, `<dynamic>` re-raises kept, unsupported language explicit. `--max-depth <n>` bounds the callee traversal (default 10), `--json` for machine output. Read-only, deterministic, never blocks | Yes |
 | `openlore review` | Deterministic structural PR review (structural delta + blast radius) as a Markdown/JSON briefing; pairs with the bundled GitHub Action | No |
 | `openlore preflight` | CI staleness gate: fail when the analysis graph is stale relative to the working tree | No |
 | `openlore export scip` | Export the analysis graph as an SCIP index for the Sourcegraph / Glean ecosystem | No |
@@ -100,7 +101,7 @@ openlore install [options]   # detect agents, wire surfaces, build the index
                          #   continue, agents-md
   --preset <name>        # MCP tool preset to wire: navigation (lean default),
                          #   minimal, memory, verify, federation, coordination, or full
-  --all-tools            # Wire the full 70-tool surface (alias of --preset full)
+  --all-tools            # Wire the full 71-tool surface (alias of --preset full)
   --dry-run              # Print planned changes without writing any files
   --force                # Overwrite OpenLore-managed blocks even if hand-edited
   --uninstall            # Remove OpenLore-managed blocks and entries
@@ -116,7 +117,7 @@ openlore connect remove [agent]      # disconnect that agent
   <agent>                # Positional: claude-code | cursor | cline | continue |
                          #   agents-md (omit for an interactive picker)
   --preset <name>        # MCP tool preset to wire (same names as install)
-  --all-tools            # Wire the full 70-tool surface (alias of --preset full)
+  --all-tools            # Wire the full 71-tool surface (alias of --preset full)
   --dry-run              # Print planned changes without writing any files
   --force                # Overwrite OpenLore-managed blocks even if hand-edited
   --no-analyze           # Configure surfaces only; do not build the index
@@ -136,7 +137,7 @@ openlore mcp [options]             # start the stdio MCP server
 
   --preset <name>        # Expose a named preset (default: lean navigation, 10 tools)
   --minimal              # Expose only the core 6 governance tools
-  --all-tools            # Expose the full surface — all 70 tools (alias --preset full)
+  --all-tools            # Expose the full surface — all 71 tools (alias --preset full)
   --watch-auto           # Auto-detect + incrementally re-index the project dir
   --no-watch-auto        # Disable auto-watch (use for one-shot tool calls)
   --daemon               # Delegate tool calls to a shared `openlore serve` daemon
@@ -455,6 +456,19 @@ openlore find-clones --symbol handleFoo --json            # machine-readable (st
 
 Honest by construction: an unknown symbol is an explicit not-found (with candidates), never an empty "unique"; an ambiguous bare name lists `name::path` candidates; a query below the evidence floor reports "too small to compare", not "no clones"; the query never matches itself. The matching MCP tool `find_clones` is exposed under `openlore mcp --preset full`.
 
+#### Error propagation
+
+Answer "what exceptions can blow out of this function — and is any already handled?" (and the inverse: "I changed this to throw; who's exposed, and where is it caught?"). The error-handling analogue of `analyze_impact`: given a function `--symbol`, the exception types that propagate OUT to its callers vs. those caught within it. TypeScript / JavaScript / Python:
+
+```bash
+openlore error-propagation --symbol handleRequest                 # exceptions that escape this function
+openlore error-propagation --symbol 'handleRequest::src/api/handler.ts'  # disambiguate by path
+openlore error-propagation --symbol parseConfig --max-depth 5     # bound the callee traversal (default 10)
+openlore error-propagation --symbol parseConfig --json            # machine-readable (stable shape)
+```
+
+`escapes` lists each escaping type with its origin function/file/line, whether it is a direct throw or propagated from a callee, and the call path; `handledInternally` lists exceptions thrown in the reachable subtree but caught within the function (callers shielded). Honest by construction — a **sound lower bound**: containment is byte-precise (a throw in a catch body or after a one-line nested try is never mis-attributed as handled), an inner typed `except` never shadows an outer catch-all, an un-analyzable callee (external / bodyless / unsupported-language / over-bound) is disclosed in `boundaries` and never assumed exception-free, an intra-object `this.`/`super.`/`self.`/`cls.` call site the call graph could not resolve to an indexed method is disclosed too (`unresolvedSelfCalls` — the one call shape that gets neither a resolved nor an `external::` edge, so a clean escape set does not silently clear it), a re-raise of unknowable static type is surfaced as `<dynamic>`, and a symbol in any other language returns an explicit `unsupported` result rather than an empty escape set. Computed live from the cached call graph plus a re-read of the source it spans — no new persisted artifact. The matching MCP tool `analyze_error_propagation` is exposed under `openlore mcp --preset full`.
+
 #### Public API surface contract
 
 Certify whether the working-tree diff breaks the package's exported contract. With **no `--base`** it prints the public surface (exported symbols + signatures); with `--base <ref>` it prints a deterministic breaking-change verdict — each changed export classified `breaking` / `non-breaking` / `potentially-breaking`, and each breaking one paired with the in-repo consumers it breaks:
@@ -538,7 +552,7 @@ over plain HTTP so non-MCP clients (e.g. the [Pi](https://pi.dev) extension in
 
 ```bash
 openlore serve                          # navigation preset, ephemeral port, watch on
-openlore serve --preset all --port 7077 # all 70 tools on a fixed port
+openlore serve --preset all --port 7077 # all 71 tools on a fixed port
 openlore serve --no-watch               # transport only, no freshness lane
 openlore serve --stop                   # stop the daemon serving this directory
 ```

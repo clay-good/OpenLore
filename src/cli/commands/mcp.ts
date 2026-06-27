@@ -1731,6 +1731,33 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: 'analyze_error_propagation',
+    description:
+      'USE THIS WHEN: you are about to call a function and want to know "what exceptions can blow out ' +
+      'of here, and is any already handled?" — or you changed a function to throw and need "who is ' +
+      'exposed, and where (if anywhere) is it caught?". The error-handling analogue of analyze_impact: ' +
+      'given a `symbol` (a function name, or name::path, in the index), it returns `escapes` (the ' +
+      'exception types that can propagate OUT of the function to its callers — each with the origin ' +
+      'function/file/line, whether it is a direct throw or propagated from a callee, and the call ' +
+      'path) and `handledInternally` (exceptions thrown in the reachable subtree but caught within ' +
+      'this function, so callers are shielded). Computed live from the cached call graph + a re-read ' +
+      'of the source it spans (no new artifact). SCOPE: TypeScript / JavaScript / Python — a symbol in ' +
+      'any other language returns an explicit `unsupported` result, never an empty escape set. HONEST: ' +
+      'a SOUND LOWER BOUND — an un-analyzable callee (external/bodyless/unsupported/over-bound) is ' +
+      'disclosed in `boundaries`, never assumed exception-free; a re-raise/throw whose static type is ' +
+      'unknowable is surfaced as `<dynamic>`, never dropped; Python typed `except` is matched by exact ' +
+      'name only (no subclass hierarchy), disclosed. Deterministic, offline, no LLM. Run analyze_codebase first.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        directory: { type: 'string', description: DIR_DESC },
+        symbol: { type: 'string', description: 'The function to analyze: its name, or name::path to disambiguate.' },
+        maxDepth: { type: 'number', description: 'Callee-traversal depth bound (default 10, clamped to [1, 30]). Truncation is disclosed in boundaries.' },
+      },
+      required: ['directory', 'symbol'],
+    },
+  },
+  {
     name: 'detect_changes',
     description:
       'Detect recently changed functions and rank them by blast radius. ' +
@@ -1985,6 +2012,7 @@ const TOOL_ANNOTATIONS: Record<string, typeof _RO | typeof _RWI | typeof _RW> = 
   get_style_fingerprint: _RO,
   briefing_since: _RO,
   find_clones: _RO,
+  analyze_error_propagation: _RO,
 };
 
 // Tools that touch external entities (LLM / network) → openWorldHint: true.

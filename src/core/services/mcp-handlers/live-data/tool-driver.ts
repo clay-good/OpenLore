@@ -173,6 +173,11 @@ export const TOOL_REGISTRY: Record<string, ToolPlan> = {
     // Clone query for a known function symbol over the cached graph (symbol mode).
     buildArgs: needFn((f, fn) => ({ directory: f.directory, symbol: fn })),
   },
+  analyze_error_propagation: {
+    kind: 'read',
+    // Exception escape/handled analysis for a known function symbol over the cached graph.
+    buildArgs: needFn((f, fn) => ({ directory: f.directory, symbol: fn })),
+  },
   get_function_body: {
     kind: 'read',
     buildArgs: (f) =>

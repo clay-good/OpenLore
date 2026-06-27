@@ -459,6 +459,16 @@ function isIgnoredCallee(name: string, language?: string): boolean {
   return false;
 }
 
+/** Receivers that denote the enclosing object/class — a member call through one is
+ *  an intra-object method call, not the arbitrary-receiver noise (`arr.map()`,
+ *  `JSON.parse()`) the ignore-list targets. So `this.parse()` / `self.map()` must
+ *  bypass the name-only ignore filter: the class may genuinely define that method,
+ *  and the resolver will bind it (or drop it if not). */
+const SELF_CALL_RECEIVERS: ReadonlySet<string> = new Set(['this', 'super', 'self', 'cls']);
+function isSelfReceiver(receiver: string | undefined): boolean {
+  return receiver !== undefined && SELF_CALL_RECEIVERS.has(receiver);
+}
+
 /**
  * Tally the style fingerprint for one file over its already-parsed tree (no second parse). Reuses
  * the function names the extractor already collected for the naming-case counter. Fail-soft: any
@@ -1140,11 +1150,32 @@ const TS_FN_QUERY = `
     value: [(arrow_function) (function_expression)] @fn.value) @fn.node
 `;
 
+/** Node types that, encountered while walking UP from a function toward its class,
+ *  prove the function is nested inside another scope (an object literal, or another
+ *  function/method) rather than being a direct class member — so it must NOT inherit
+ *  the enclosing class name. A direct method/field has only `class_body` between it
+ *  and `class_declaration`, so it never hits one of these. */
+const CLASS_WALK_BOUNDARIES: ReadonlySet<string> = new Set([
+  'object',
+  'arrow_function',
+  'function_expression',
+  'function_declaration',
+  'generator_function',
+  'generator_function_declaration',
+  'method_definition',
+]);
+
 const TS_CALL_QUERY = `
   (call_expression
     function: [(identifier) @call.name
                (member_expression
                  object: (identifier) @call.object
+                 property: (property_identifier) @call.name)
+               (member_expression
+                 object: (this) @call.object
+                 property: (property_identifier) @call.name)
+               (member_expression
+                 object: (super) @call.object
                  property: (property_identifier) @call.name)]) @call.node
 `;
 
@@ -1184,7 +1215,14 @@ async function extractTSGraph(
     // and async lives on fnNode itself.
     const valueNode = match.captures.find(c => c.name === 'fn.value')?.node;
 
-    // Find enclosing class (walk up — skip class_body, its children are methods not the name)
+    // Find enclosing class (walk up — skip class_body, its children are methods not the name).
+    // STOP at an object-literal or an enclosing function/method scope BEFORE reaching the
+    // class: a function nested inside a class method (an object-literal method shorthand, a
+    // nested `function`, a callback) is NOT a class method — its runtime `this` is not the
+    // instance — so it must not inherit the class name. Without this guard it would, and its
+    // `this.x()` calls would resolve to false `self_cls` edges (a direct class method, by
+    // contrast, has only class_body between it and class_declaration, so it never trips a
+    // boundary). (change: add-this-super-method-resolution — adversarial round.)
     let className: string | undefined;
     let cursor = fnNode.parent;
     while (cursor) {
@@ -1193,6 +1231,25 @@ async function extractTSGraph(
         if (classNameNode) className = classNameNode.text;
         break;
       }
+      // Class EXPRESSION (`const K = class {…}`, `X = class {…}`, `class Named {…}` as a
+      // value): named expressions carry their own name; an anonymous one takes the binding
+      // it is assigned to, so its methods' `this.m()` resolve like any class method.
+      if (cursor.type === 'class') {
+        const named = cursor.childForFieldName('name');
+        if (named) {
+          className = named.text;
+        } else {
+          const par = cursor.parent;
+          if (par?.type === 'variable_declarator') {
+            className = par.childForFieldName('name')?.text;
+          } else if (par?.type === 'assignment_expression') {
+            const lhs = par.childForFieldName('left') ?? par.namedChildren[0];
+            if (lhs?.type === 'identifier') className = lhs.text;
+          }
+        }
+        break;
+      }
+      if (CLASS_WALK_BOUNDARIES.has(cursor.type)) break; // nested scope — not a class method
       cursor = cursor.parent;
     }
 
@@ -1241,7 +1298,10 @@ async function extractTSGraph(
     if (!nameCapture || !nodeCapture) continue;
 
     const calleeName = nameCapture.node.text;
-    if (isIgnoredCallee(calleeName, 'TypeScript')) continue;
+    // A `this.parse()` / `super.map()` is a real intra-object method call — bypass the
+    // name-only noise filter (which targets `arr.map()` / `JSON.parse()`), or common
+    // method names would be dropped before resolution ever sees them.
+    if (!isSelfReceiver(objectCapture?.node.text) && isIgnoredCallee(calleeName, 'TypeScript')) continue;
 
     const callPos = nodeCapture.node.startIndex;
     const caller = findEnclosingFunction(nodes, callPos);
@@ -1410,7 +1470,9 @@ async function extractPyGraph(
     if (!objectCapture || !nameCapture || !nodeCapture) continue;
 
     const calleeName = nameCapture.node.text;
-    if (isIgnoredCallee(calleeName, 'Python')) continue;
+    // `self.parse()` / `cls.map()` are real intra-object calls — bypass the name-only
+    // noise filter so a class method named like a builtin still resolves.
+    if (!isSelfReceiver(objectCapture.node.text) && isIgnoredCallee(calleeName, 'Python')) continue;
 
     const callPos = nodeCapture.node.startIndex;
     const caller = findEnclosingFunction(nodes, callPos);
@@ -4608,6 +4670,66 @@ export class CallGraphBuilder {
       ? { map: importMap, reExported: new Set<string>() }
       : buildResolvedImportMap(files);
 
+    // Class inheritance (`filePath::ClassName` → parent simple-names), computed once
+    // here so the resolution loop can resolve `this.m()` / `super.m()` against the
+    // enclosing class AND its ancestors, and reused for the Pass 7 hierarchy build.
+    const relationships = await extractClassRelationships(files);
+
+    /** Resolve an intra-object method call (`this.m()` / `self.m()` / `super.m()`) to
+     *  a concrete indexed method by walking the enclosing class chain. For `this`/
+     *  `self`/`cls` the chain starts at the enclosing class; for `super` it starts at
+     *  the parents (a super call never targets the caller's own class). Ancestors are
+     *  followed transitively (cycle-guarded) so an inherited method still resolves.
+     *
+     *  `findByQualifiedName` keys on `Class.method` with NO file dimension, so when
+     *  two files declare a same-named class it would otherwise bind to an arbitrary
+     *  one. Disambiguate by FILE AFFINITY: prefer a candidate in the caller's own file
+     *  (the same-class / same-file family — the dominant case), then the file the
+     *  caller imports the class from (cross-file parent); a single candidate is
+     *  unambiguous; an ambiguous match with no affinity is SKIPPED, never guessed. */
+    const resolveSelfMethod = (
+      callerNode: FunctionNode,
+      methodName: string,
+      includeSelf: boolean,
+    ): FunctionNode | undefined => {
+      if (!callerNode.className) return undefined;
+      const pick = (cls: string): FunctionNode | undefined => {
+        const cands = trie.findByQualifiedName(cls, methodName);
+        if (cands.length === 0) return undefined;
+        const own = cands.find(c => c.filePath === callerNode.filePath);
+        if (own) return own;
+        const importedFrom = callImportMap.get(callerNode.filePath)?.get(cls);
+        if (importedFrom) {
+          const m = cands.find(
+            c =>
+              c.filePath === importedFrom ||
+              c.filePath.startsWith(`${importedFrom}.`) ||
+              c.filePath.startsWith(`${importedFrom}/`),
+          );
+          if (m) return m;
+        }
+        // Unambiguous single target → safe; ambiguous with no affinity → skip (the
+        // wrong-file guess was the source of false cross-file edges).
+        return cands.length === 1 ? cands[0] : undefined;
+      };
+      const seen = new Set<string>();
+      const queue: string[] = includeSelf
+        ? [callerNode.className]
+        : [...(relationships.get(`${callerNode.filePath}::${callerNode.className}`)?.parentClasses ?? [])];
+      while (queue.length > 0) {
+        const cls = queue.shift()!;
+        if (seen.has(cls)) continue;
+        seen.add(cls);
+        const hit = pick(cls);
+        if (hit) return hit;
+        // Walk to this class's parents. The relationship map is keyed by file::Class;
+        // probe the caller's file key (same-file class families — the common case).
+        const rel = relationships.get(`${callerNode.filePath}::${cls}`);
+        for (const p of rel?.parentClasses ?? []) if (!seen.has(p)) queue.push(p);
+      }
+      return undefined;
+    };
+
     const edges: CallEdge[] = [];
     for (const raw of allRawEdges) {
       const callerNode = allNodes.get(raw.callerId);
@@ -4622,6 +4744,17 @@ export class CallGraphBuilder {
           const candidates = trie.findByQualifiedName(callerNode.className, raw.calleeName);
           if (candidates.length > 0) { calleeNode = candidates[0]; confidence = 'self_cls'; }
         }
+      }
+
+      // Strategy 1a — `this.m()` / `super.m()` intra-class (TS/JS). `this` walks the
+      // enclosing class then its ancestors; `super` walks ancestors only (a super
+      // call targets the parent's method, never the caller's own class). Without this
+      // a `this.method()` call is the one shape that gets NO edge at all — neither
+      // resolved nor external — because the call query historically only captured an
+      // `(identifier)` receiver. (change: add-this-super-method-resolution)
+      if (!calleeNode && (raw.calleeObject === 'this' || raw.calleeObject === 'super')) {
+        const resolved = resolveSelfMethod(callerNode, raw.calleeName, raw.calleeObject === 'this');
+        if (resolved) { calleeNode = resolved; confidence = 'self_cls'; }
       }
 
       // Strategy 1b — type-name resolution (capitalized receiver = type/class reference).
@@ -4716,6 +4849,13 @@ export class CallGraphBuilder {
           else { calleeNode = candidates[0]; confidence = 'name_only'; }
         }
       }
+
+      // An unresolved `this.`/`super.` call is an intra-object call we could not pin
+      // to an indexed method — NOT an external object. Minting `external::this.m`
+      // would be meaningless noise and would also mask error-propagation's targeted
+      // "unresolved intra-object call" disclosure (which keys off the ABSENCE of an
+      // edge). Drop it instead; the call site is still observable from source.
+      if (!calleeNode && (raw.calleeObject === 'this' || raw.calleeObject === 'super')) continue;
 
       if (!calleeNode) {
         // Unresolved receiver-based call (e.g. redis_client.get()) — synthetic external node
@@ -5049,8 +5189,8 @@ export class CallGraphBuilder {
       );
     }
 
-    // Pass 7: Build class hierarchy (inheritance + grouping)
-    const relationships = await extractClassRelationships(files);
+    // Pass 7: Build class hierarchy (inheritance + grouping). `relationships` was
+    // computed once before the Pass 2 resolution loop (reused here).
     // Base-class resolution needs the per-file import map so a child's explicit import
     // outranks a same-named class in its own directory (precision: avoid wiring a false
     // base). Reuse the re-export-aware map derived for Pass 2 so a base class imported

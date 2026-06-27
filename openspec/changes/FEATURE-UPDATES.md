@@ -48,6 +48,12 @@ contract (2) makes OpenLore answer the single highest-value question for a libra
   sharply across languages (checked vs. unchecked, `finally`, `Result`/`Option` types, panics), so a
   sound version is narrow and a broad version risks unsound edges. Worth a focused follow-up scoped to
   the CFG-overlay languages, not this set.
+  **SHIPPED 2026-06-26 as the change `add-error-propagation-graph` — the `analyze_error_propagation`
+  MCP tool + `openlore error-propagation` CLI: a symbol-scoped conclusion (the exceptions that escape a
+  function vs. those caught within it, with provenance), scoped — per this note — to TypeScript /
+  JavaScript / Python (a sound, narrow subset), with every un-analyzable callee disclosed as a boundary
+  rather than assumed exception-free. New analyzer module `exception-flow.ts`; new `errorPropagation`
+  language capability; computed live (no persisted artifact).**
 - **Configuration / environment usage graph** (env var and config-key reads as edges; "what breaks if I
   remove this flag"). Real value, but largely an extension of the existing `get_env_vars` inventory into
   edges; lower novelty than the five above.
