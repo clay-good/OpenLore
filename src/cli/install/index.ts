@@ -87,7 +87,7 @@ export interface InstallOptions {
  * Failures are non-fatal: the surfaces are already wired, so we warn and tell
  * the user to run analyze themselves rather than failing the whole install.
  */
-async function buildIndex(cwd: string): Promise<void> {
+export async function buildIndex(cwd: string): Promise<void> {
   const prevCwd = process.cwd();
   // analyze prints its own multi-line CLI output ("Next step: run generate",
   // etc.) via console.log — noise inside install. Capture it to stderr so

@@ -43,6 +43,7 @@
     "format": "eslint src --fix",
     "lint": "eslint src",
     "typecheck": "tsc --noEmit",
+    "postinstall": "node scripts/postinstall.mjs",
     "prepublishOnly": "npm run build && npm run test:run"
   },
   "keywords": [
@@ -110,6 +111,7 @@
   "files": [
     "dist",
     "!dist/**/*.test.*",
+    "scripts/postinstall.mjs",
     "src/viewer",
     "examples",
     "skills/openlore-orient",

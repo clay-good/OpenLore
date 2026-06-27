@@ -74,6 +74,21 @@ describe('install --preset (PresetAwareConnect)', () => {
   });
 });
 
+describe('connect --yes (zero-interaction)', () => {
+  it('wires detected agents with no prompt when --yes is passed', async () => {
+    // A claude-code marker so detection has something to find.
+    await mkdir(join(dir, '.claude'), { recursive: true });
+    const code = await runConnect(undefined, { yes: true, analyze: false, cwd: dir });
+    expect(code).toBe(0);
+    // The MCP server was wired without any interactive picker.
+    expect(await exists('.mcp.json')).toBe(true);
+    const mcp = await readJson('.mcp.json');
+    expect((mcp.mcpServers as Record<string, { args: string[] }>).openlore.args).toEqual([
+      '--yes', 'openlore', 'mcp', '--preset', 'navigation',
+    ]);
+  });
+});
+
 describe('claude-code permission wiring (CapabilityGatedWiring)', () => {
   it('adds Bash(openlore:*) to settings.local.json, idempotently', async () => {
     await runConnect('claude-code', { analyze: false, cwd: dir });

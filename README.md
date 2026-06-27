@@ -13,8 +13,8 @@
   <img src="https://img.shields.io/node/v/openlore?color=339933&logo=node.js&logoColor=white" alt="Node >=22.5">
   <br>
   <img src="https://img.shields.io/badge/MCP-ready-7c3aed?logo=anthropic&logoColor=white" alt="MCP ready">
-  <img src="https://img.shields.io/badge/languages-18-f97316" alt="18 languages">
-  <img src="https://img.shields.io/badge/tests-4400%2B-success" alt="4400+ tests">
+  <img src="https://img.shields.io/badge/languages-18%20%2B%2012%20IaC-f97316" alt="18 languages + 12 IaC ecosystems">
+  <img src="https://img.shields.io/badge/tests-5400%2B-success" alt="5400+ tests">
   <img src="https://img.shields.io/badge/API_key-not_required-0ea5e9" alt="No API key required">
   <a href="https://github.com/clay-good/OpenLore/stargazers"><img src="https://img.shields.io/github/stars/clay-good/OpenLore?style=social" alt="GitHub stars"></a>
 </p>
@@ -40,7 +40,7 @@ AI coding agents are powerful but amnesiac: every task starts by re-reading the 
 - 🔭 **One-call orientation** — `orient(task)` returns the relevant functions, their callers, matching spec sections, and insertion-point candidates in a single call.
 - 🕸️ **One unified graph** — application code, **Infrastructure-as-Code**, and **architectural decisions** all project onto the same node/edge primitives, so a single traversal answers questions that span all three.
 - 🧪 **Test-impact selection** — "I changed `parseConfig()` — which tests should I run?" answered by backward call-graph reachability.
-- ☠️ **Dead-code & reachability** — cross-language mark-and-sweep over **18 languages**, confidence-tagged, never deletion authority.
+- ☠️ **Dead-code & reachability** — cross-language mark-and-sweep over every call-graph language, confidence-tagged, never deletion authority.
 - 🧭 **Context-freshness tracking (Epistemic Lease)** — every response carries a factual freshness note when your cached context ages or the repo moves.
 - 🛡️ **Safety-gated governance** — architectural decisions recorded, gated at commit, and synced into living specs; spec/code **drift detected in milliseconds**, no API key.
 - 📊 **Benchmarked & honest** — **−26% agent round-trips** on deep traces in large repos; we publish the losses next to the wins and every claim traces to a command you can run.
@@ -173,6 +173,10 @@ openlore install --dry-run      # preview every change without writing
 ```
 
 **Verify it worked:** run `openlore doctor` — it checks your config, index, MCP wiring, and LLM/embedding setup, and tells you exactly what to fix.
+
+**Zero-interaction by design.** Nothing prompts you and nothing touches your repo on `npm install` (best practice — no heavy postinstall). `openlore install` auto-detects your agent and never asks a question; `openlore connect --yes` does the same without the picker. And if an agent wires the MCP server *without* a prior `openlore install`, the server **self-bootstraps** — it builds the index once in the background on first run, so the session warms up on its own (opt out with `OPENLORE_NO_AUTO_ANALYZE=1`).
+
+**Stays current automatically.** Human-facing commands print a once-a-day, non-blocking "update available" line; upgrade with **`openlore update`** (it detects npm vs. Homebrew vs. npx and runs the right command). Silence the notice with `OPENLORE_NO_UPDATE_NOTIFIER=1`.
 
 See [docs/install.md](docs/install.md). The MCP server keeps the index fresh as you edit (file watcher on by default — large build dirs like `target/`, `node_modules/`, `dist/` are pruned automatically; disable entirely with `openlore mcp --no-watch-auto`).
 
@@ -706,7 +710,7 @@ Because OpenLore requires Node ≥22.5 while OpenSpec runs on ≥20.19, a delega
 ```bash
 npm install
 npm run build
-npm test          # 4400+ unit tests
+npm test          # 5400+ unit tests
 npm run typecheck
 ```
 

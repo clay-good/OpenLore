@@ -24,6 +24,8 @@ interface ConnectOpts {
   dryRun?: boolean;
   force?: boolean;
   analyze?: boolean;
+  /** Skip the interactive picker and wire every detected agent (zero-interaction). */
+  yes?: boolean;
   /** Project root; defaults to process.cwd() in runInstall. Used by tests. */
   cwd?: string;
 }
@@ -36,6 +38,12 @@ interface ConnectOpts {
 export async function runConnect(agent: string | undefined, opts: ConnectOpts): Promise<number> {
   if (agent) {
     return runInstall({ agent: agent as AgentName, ...opts });
+  }
+
+  // Zero-interaction: --yes (or a non-interactive terminal) wires every detected
+  // agent with no prompt, exactly like bare `openlore install`.
+  if (opts.yes) {
+    return runInstall(opts);
   }
 
   if (process.stdout.isTTY) {
@@ -69,6 +77,7 @@ export const connectCommand = new Command('connect')
   .option('--all-tools', 'Wire the full surface (alias of --preset full). Matches `openlore mcp --all-tools`.')
   .option('--dry-run', 'Print the planned changes without writing any files', false)
   .option('--force', 'Overwrite OpenLore-managed blocks even if hand-edited', false)
+  .option('-y, --yes', 'Skip the interactive picker; wire every detected agent', false)
   .option('--no-analyze', 'Configure surfaces only; do not build the index')
   .addHelpText(
     'after',

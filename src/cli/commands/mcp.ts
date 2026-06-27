@@ -2316,6 +2316,18 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
         const ep = await resolveDaemon(dir);
         if (!ep) {
           const { resolve } = await import('node:path');
+          // Cold-start self-bootstrap: if the agent wired the server without ever
+          // running `openlore install`, build the index once in the background so
+          // the session warms up on its own. Non-blocking and fail-soft. We inject
+          // install's full buildIndex (init + analyze + BM25 search index, no API
+          // key) so orient is warmed to full parity, not just the structural graph.
+          const { bootstrapAnalysisInBackground } = await import('../../core/services/cold-start-bootstrap.js');
+          bootstrapAnalysisInBackground(resolve(dir), {
+            analyze: async (d) => {
+              const { buildIndex } = await import('../install/index.js');
+              await buildIndex(d);
+            },
+          });
           const { McpWatcher } = await import('../../core/services/mcp-watcher.js');
           const debounceMs = parseInt(options.watchDebounce ?? '400', 10);
           autoWatcher = new McpWatcher({

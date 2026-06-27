@@ -66,7 +66,9 @@ import { panicHotspotsCommand } from './commands/panic-hotspots.js';
 import { panicCalibrateCommand } from './commands/panic-calibrate.js';
 import { panicReplayCommand } from './commands/panic-replay.js';
 import { gryphWatchCommand } from './commands/gryph-watch.js';
+import { updateCommand } from './commands/update.js';
 import { configureLogger } from '../utils/logger.js';
+import { notifyIfUpdateAvailable } from '../core/services/update-notifier.js';
 
 // Read version from package.json at runtime so it never drifts from the published version
 const require = createRequire(import.meta.url);
@@ -74,8 +76,16 @@ const { version } = require('../../package.json') as { version: string };
 
 const program = new Command();
 
+// Commands where a human is watching and a once-a-day "update available" line
+// on stderr is welcome. Deliberately excludes the hot paths an agent drives —
+// `orient`, `mcp`, `serve`, hooks, the panic/gryph daemons — so their output is
+// never polluted. The notifier is also self-suppressing (non-TTY / CI / opt-out).
+const UPDATE_NOTIFY_COMMANDS = new Set([
+  'install', 'connect', 'update', 'doctor', 'prove', 'analyze', 'init',
+]);
+
 // Hook to configure logger before any command runs
-program.hook('preAction', (thisCommand) => {
+program.hook('preAction', (thisCommand, actionCommand) => {
   const opts = thisCommand.opts();
 
   configureLogger({
@@ -84,6 +94,16 @@ program.hook('preAction', (thisCommand) => {
     noColor: opts.color === false,
     timestamps: process.env.CI === 'true' || opts.color === false,
   });
+
+  // Passive update notifier — cached, non-blocking, fail-silent. Only for
+  // human-interactive commands, and never when --quiet.
+  if (!opts.quiet && UPDATE_NOTIFY_COMMANDS.has(actionCommand.name())) {
+    try {
+      notifyIfUpdateAvailable(version);
+    } catch {
+      /* the notifier must never break a command */
+    }
+  }
 
   // Warn when SSL verification is disabled — it's a security trade-off
   if (opts.insecure) {
@@ -199,6 +219,7 @@ program.addCommand(panicHotspotsCommand);
 program.addCommand(panicCalibrateCommand);
 program.addCommand(panicReplayCommand);
 program.addCommand(gryphWatchCommand);
+program.addCommand(updateCommand);
 
 // A bare `openlore` (no command) is the most natural way a new user explores the tool.
 // Show help on stdout and exit 0 instead of Commander's default (help on stderr, exit 1).
