@@ -28,7 +28,7 @@ import {
 import { buildProjectedIac } from './iac/index.js';
 import { isIacLanguage } from './iac/types.js';
 import { isTestFile } from './test-file.js';
-import { buildFunctionCfg, type FunctionCfg, type CfgNode } from './cfg.js';
+import { type FunctionCfg, type CfgNode } from './cfg.js';
 import { stableSymbolId, stableClassId } from '../scip/moniker.js';
 import { synthesizeTypeHierarchyEdges, type RawMethodCall } from './cha.js';
 import { logger } from '../../utils/logger.js';
@@ -68,6 +68,10 @@ import { getOrCreateExternalNode } from './call-graph-external.js';
 // Cyclomatic-complexity estimator — extracted to ./call-graph-complexity.ts. Used
 // internally AND re-exported below (it was on call-graph.ts's public surface).
 import { computeCyclomaticComplexity } from './call-graph-complexity.js';
+
+// CFG / data-flow overlay helper — extracted to ./call-graph-cfg.ts (internal, not
+// re-exported); wraps buildFunctionCfg with body-resolution + fail-soft.
+import { buildCfgFor } from './call-graph-cfg.js';
 
 // Stable barrel: re-export the full public type/edge model + distance/layer helpers.
 export type {
@@ -634,49 +638,10 @@ function linkCodeToInfra(
 // ============================================================================
 
 // ============================================================================
-// CFG / DATA-FLOW OVERLAY HELPER (spec: add-intraprocedural-cfg-dataflow-overlay)
+// CFG / DATA-FLOW OVERLAY HELPER — buildCfgFor extracted to ./call-graph-cfg.ts
+// (change: modularize-call-graph-builder; spec: add-intraprocedural-cfg-dataflow-overlay).
+// Imported at the top of this file; file-internal, not re-exported.
 // ============================================================================
-
-/**
- * Build the per-function CFG + reaching-definitions overlay for one function
- * while its parse tree is still live. `fnNode` is the node captured as the
- * function (may be a declaration wrapper, e.g. a `const f = () => {}`
- * lexical_declaration); this resolves to the node that actually owns the body
- * so arrow/function-expression bodies and params are analyzed too. Fail-soft:
- * returns undefined for unsupported languages or any analysis surprise.
- */
-function buildCfgFor(fnNode: CfgNode, language: string): FunctionCfg | undefined {
-  // The overlay is strictly additive: a CFG-builder surprise (an unexpected
-  // grammar shape, a partially-loaded optional grammar after the tree-sitter
-  // deps became optional) must never propagate and drop the function's node/edge
-  // data from the call graph — or, in watch mode, roll back the per-file swap.
-  // Fail soft to no overlay; the base call graph is unaffected.
-  try {
-    let target = fnNode;
-    if (!fnNode.childForFieldName('body')) {
-      // Dig (breadth-first) for the node that actually owns the body: a TS arrow/
-      // function-expression assigned to a variable, or — crucially — the inner
-      // `function_definition` of a Python `@decorator`'d function, whose captured
-      // node is the `decorated_definition` wrapper (no `body` field of its own).
-      const stack = [...fnNode.namedChildren];
-      while (stack.length) {
-        const n = stack.shift()!;
-        if (
-          (n.type === 'arrow_function' || n.type === 'function_expression' ||
-           n.type === 'function' || n.type === 'function_definition') &&
-          n.childForFieldName('body')
-        ) { target = n; break; }
-        stack.push(...n.namedChildren);
-      }
-    }
-    return buildFunctionCfg(target as unknown as CfgNode, language);
-  } catch (error) {
-    if (process.env.DEBUG) {
-      console.debug(`[cfg] overlay skipped for a ${language} function: ${(error as Error).message}`);
-    }
-    return undefined;
-  }
-}
 
 // ============================================================================
 // TYPESCRIPT EXTRACTOR

@@ -37,11 +37,21 @@
 > call-graph.ts: 4,887 → 4,879 lines. Oracle first extended to exercise `cyclomaticComplexity > 1` via
 > branchy TS + Python fixtures; before/after identical (SHA-256 `7b765f31…`).
 >
+> **Slice 3d — `call-graph-cfg.ts` (DONE).** The CFG / DATA-FLOW OVERLAY HELPER section (`buildCfgFor`)
+> moved out — a pure, fail-soft wrapper around `buildFunctionCfg` (./cfg.js) that body-resolves a
+> declaration wrapper (const-arrow, decorated-Python def) before building the per-function CFG overlay.
+> File-internal (referenced only in test comments, never imported), so imported back, not re-exported;
+> the now-unused `buildFunctionCfg` import was dropped from `call-graph.ts`. call-graph.ts: 4,879 → 4,846
+> lines. The oracle was first extended to serialize the full `cfgs` overlay (blocks/edges/defUse/params)
+> and to exercise the arrow + decorated body-digging paths; before/after identical (SHA-256 `34c7bce5…`).
+>
 > **Each slice is verified the same four ways:** export surface byte-for-byte identical (multi-line-aware
 > diff), build/lint/typecheck clean, full suite green (279 files / 5534 tests), and the byte-level
-> snapshot oracle hashes identically before/after. `call-graph.ts` is now **5,425 → 4,879 lines** across
-> five extracted sibling modules. Remaining slices (`call-graph-dispatch.ts`, `grammar-loader.ts`,
-> `call-graph-nodes.ts`) are unstarted — one per commit, same gates.
+> snapshot oracle hashes identically before/after. `call-graph.ts` is now **5,425 → 4,846 lines** across
+> five extracted sibling modules (types, extract, external, complexity, cfg). Remaining slices
+> (`call-graph-dispatch.ts`, `grammar-loader.ts`, `call-graph-nodes.ts`) are unstarted — one per commit,
+> same gates. (The SERIALIZATION HELPER section is deliberately NOT a slice: its `extractFileStyle` calls
+> the in-file language extractors, so extracting it would create a circular import.)
 
 ## The gap
 
