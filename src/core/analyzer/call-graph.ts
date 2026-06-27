@@ -65,6 +65,10 @@ import { extractDocstringBefore, extractDeclaration } from './call-graph-extract
 // re-exported; classifyExternal + the EXTERNAL_* tables stay private to that module).
 import { getOrCreateExternalNode } from './call-graph-external.js';
 
+// Cyclomatic-complexity estimator — extracted to ./call-graph-complexity.ts. Used
+// internally AND re-exported below (it was on call-graph.ts's public surface).
+import { computeCyclomaticComplexity } from './call-graph-complexity.js';
+
 // Stable barrel: re-export the full public type/edge model + distance/layer helpers.
 export type {
   EdgeConfidence,
@@ -80,6 +84,8 @@ export type {
   SerializedCallGraph,
 } from './call-graph-types.js';
 export { CALL_DISTANCE_COSTS, callDistance, layerOf, classifyLayerEdge } from './call-graph-types.js';
+// Re-export the extracted complexity estimator so it stays importable from call-graph.ts.
+export { computeCyclomaticComplexity } from './call-graph-complexity.js';
 
 // ============================================================================
 // CONSTANTS
@@ -2901,21 +2907,10 @@ function buildClassNodes(
 // `tested_by` edges for those layouts.)
 
 // ============================================================================
-// CYCLOMATIC COMPLEXITY
+// CYCLOMATIC COMPLEXITY — extracted to ./call-graph-complexity.ts
+// (change: modularize-call-graph-builder). computeCyclomaticComplexity is imported
+// at the top of this file and re-exported there to keep the public surface stable.
 // ============================================================================
-
-const CC_PATTERN_PYTHON = /\bif\s|\belif\s|\bwhile\s|\bfor\s|\bexcept\b|\band\s|\bor\s/g;
-const CC_PATTERN_DEFAULT = /\bif\s*\(|\bwhile\s*\(|\bfor\s*[(]|\bdo\s*[{]|\bcase\s+|\bcatch\s*\(|&&|\|\|/g;
-
-/**
- * McCabe cyclomatic complexity via regex over function body.
- * CC = 1 + decision points (if, while, for, case, catch, &&, ||).
- * Approximate (regex, not AST), suitable for triage/ranking.
- */
-export function computeCyclomaticComplexity(body: string, language: string): number {
-  const source = language === 'Python' ? CC_PATTERN_PYTHON.source : CC_PATTERN_DEFAULT.source;
-  return 1 + (body.match(new RegExp(source, 'g'))?.length ?? 0);
-}
 
 // ============================================================================
 // CALL GRAPH BUILDER

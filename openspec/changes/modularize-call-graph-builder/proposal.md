@@ -30,10 +30,18 @@
 > `externalKind` across http/db/unknown; before/after identical (SHA-256 `3a118017…`). (An additional
 > clean section-banner seam beyond the proposal's illustrative module list.)
 >
+> **Slice 3c — `call-graph-complexity.ts` (DONE).** The CYCLOMATIC COMPLEXITY section
+> (`computeCyclomaticComplexity` + the `CC_PATTERN_*` regex tables) moved out — a pure, dependency-free
+> McCabe estimator. `computeCyclomaticComplexity` was exported (though no external importer), so it is
+> imported back AND re-exported on the barrel to preserve the surface exactly; the patterns stay private.
+> call-graph.ts: 4,887 → 4,879 lines. Oracle first extended to exercise `cyclomaticComplexity > 1` via
+> branchy TS + Python fixtures; before/after identical (SHA-256 `7b765f31…`).
+>
 > **Each slice is verified the same four ways:** export surface byte-for-byte identical (multi-line-aware
 > diff), build/lint/typecheck clean, full suite green (279 files / 5534 tests), and the byte-level
-> snapshot oracle hashes identically before/after. Remaining slices (`call-graph-nodes.ts`,
-> `call-graph-dispatch.ts`, `grammar-loader.ts`) are unstarted — one per commit, same gates.
+> snapshot oracle hashes identically before/after. `call-graph.ts` is now **5,425 → 4,879 lines** across
+> five extracted sibling modules. Remaining slices (`call-graph-dispatch.ts`, `grammar-loader.ts`,
+> `call-graph-nodes.ts`) are unstarted — one per commit, same gates.
 
 ## The gap
 
