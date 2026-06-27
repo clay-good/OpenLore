@@ -14,7 +14,7 @@
   <br>
   <img src="https://img.shields.io/badge/MCP-ready-7c3aed?logo=anthropic&logoColor=white" alt="MCP ready">
   <img src="https://img.shields.io/badge/languages-18%20%2B%2012%20IaC-f97316" alt="18 languages + 12 IaC ecosystems">
-  <img src="https://img.shields.io/badge/tests-5400%2B-success" alt="5400+ tests">
+  <img src="https://img.shields.io/badge/tests-5500%2B-success" alt="5500+ tests">
   <img src="https://img.shields.io/badge/API_key-not_required-0ea5e9" alt="No API key required">
   <a href="https://github.com/clay-good/OpenLore/stargazers"><img src="https://img.shields.io/github/stars/clay-good/OpenLore?style=social" alt="GitHub stars"></a>
 </p>
@@ -24,10 +24,10 @@
 </p>
 
 <p align="center">
-  <img src="docs/openlore-demo.gif" alt="OpenLore on Django (7,066 files): onboard once, then one deterministic orient() call replaces grepping and reading 75 files to find a function's 160-caller blast radius" width="100%">
+  <img src="docs/openlore-demo.gif" alt="A real terminal recording: `openlore orient` answers a task with the relevant functions, their orchestration, and insertion points in one deterministic call (no API key); then the 72 tools grouped into 6 capability families" width="100%">
 </p>
 
-<p align="center"><em>Onboard a 7,066-file repo once, then replace "grep 75 files and hope" with one deterministic call that returns the exact blast radius.</em></p>
+<p align="center"><em>A real terminal — no edits, no cuts. One <code>orient</code> call returns the relevant functions and where to add code, deterministically and with no API key; the surface is 72 conclusion tools grouped into 6 capability families.</em></p>
 
 ---
 

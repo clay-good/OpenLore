@@ -1,6 +1,6 @@
 {
   "name": "openlore",
-  "version": "2.1.3",
+  "version": "2.1.4",
   "description": "Persistent architectural memory and structural cognition for AI coding agents.",
   "type": "module",
   "main": "dist/api/index.js",
@@ -80,16 +80,40 @@
     ],
     "openspecCompat": ">=0.1.0",
     "commands": [
-      { "name": "generate", "summary": "Reverse-engineer OpenSpec specs from existing code" },
-      { "name": "drift", "summary": "Detect code/spec drift" },
-      { "name": "verify", "summary": "Verify specs against the codebase" },
-      { "name": "analyze", "summary": "Build the structural analysis graph (no API key)" },
-      { "name": "orient", "summary": "One-shot structural orientation for a task" },
-      { "name": "digest", "summary": "Emit the compact codebase digest" },
-      { "name": "decisions", "summary": "Manage architectural decision records" }
+      {
+        "name": "generate",
+        "summary": "Reverse-engineer OpenSpec specs from existing code"
+      },
+      {
+        "name": "drift",
+        "summary": "Detect code/spec drift"
+      },
+      {
+        "name": "verify",
+        "summary": "Verify specs against the codebase"
+      },
+      {
+        "name": "analyze",
+        "summary": "Build the structural analysis graph (no API key)"
+      },
+      {
+        "name": "orient",
+        "summary": "One-shot structural orientation for a task"
+      },
+      {
+        "name": "digest",
+        "summary": "Emit the compact codebase digest"
+      },
+      {
+        "name": "decisions",
+        "summary": "Manage architectural decision records"
+      }
     ],
     "skills": [
-      { "dir": "openlore-orient", "source": "skills/openlore-orient" }
+      {
+        "dir": "openlore-orient",
+        "source": "skills/openlore-orient"
+      }
     ],
     "ownsConfigKeys": [
       "openlore"

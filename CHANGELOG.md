@@ -5,7 +5,34 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ## [Unreleased]
 
+_Nothing yet — the next release accumulates here._
+
+## [2.1.4] - 2026-06-27
+
+The largest release since v2.1.2: everything merged since the `v2.1.3` tag (PRs #183–#216) plus the
+**capability-family taxonomy + `substrate` preset + `openlore mcp --list-tools`** and the
+behavior-preserving **call-graph modularization** (PR #217). All changes are **additive and
+backward-compatible** — no breaking changes to tools, schemas, or stored data — and **deterministic and
+local-first** (no LLM in any serving path), per the north-star decision `c6d1ad07`. The CLI and the MCP
+server read the version from `package.json`, so both report `2.1.4`.
+
 ### Added
+
+- **Capability-family taxonomy + `substrate` preset + `openlore mcp --list-tools`** (PR #217;
+  change `unify-navigation-and-governance-substrate`) — names what OpenLore already is: **one
+  structural substrate with two faces** — a *read* face that navigates the graph and a *write/check*
+  face that anchors facts and weighs changes — not two products. Every one of the **72** MCP tools now
+  declares exactly one of six **closed capability families** — `navigate` · `change` · `remember` ·
+  `verify` · `coordinate` · `federate` — surfaced in each tool's MCP `annotations.family`, so a wide
+  surface stays discoverable by family instead of a flat list of 72 names. A new **`substrate` preset**
+  spans both faces out of the box — the `navigation` graph-traversal core plus the three highest-value
+  governance *reads* (`recall`, `verify_claim`, `blast_radius`). Per ADR-0022's evidence rule the
+  **active default stays `navigation`** until an agent benchmark clears the wider one; `substrate` ships
+  as a selectable preset. New **`openlore mcp --list-tools`** prints the active surface grouped by
+  family. Adjacent tools that answer genuinely distinct questions now cross-reference each other in
+  their descriptions (`NoRedundantConclusions`), and `tool-contract.test.ts` fails CI if a tool forgets
+  a family or an adjacent tool drops its sibling reference. **No new tool, dependency, LLM, or persisted
+  artifact.** Reference: `openspec/changes/unify-navigation-and-governance-substrate/`.
 
 - **Codebase style fingerprint — `get_style_fingerprint`** (STRUCTURAL-CONTEXT-PATTERNS proposal 1) —
   a **descriptive, deterministic per-language idiom profile** so an agent matches the house style
@@ -203,6 +230,18 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ### Changed
 
+- **Call-graph builder modularized behind a stable barrel** (PR #217; change
+  `modularize-call-graph-builder`) — `src/core/analyzer/call-graph.ts` (the repo's most-imported file,
+  ~155 importers) was **5,425 → 4,745 lines**, decomposed into six cohesive sibling modules
+  (`call-graph-types`, `-extract`, `-external`, `-complexity`, `-cfg`, `-builtins`). **`call-graph.ts`
+  re-exports every previously-importable name**, so none of the 155 importers moved and the public
+  import surface is byte-for-byte identical (23 exported names, 0 added/removed). Each extraction was
+  verified **byte-identical** by a graph+helper snapshot oracle (and the full analyzer suite), so graph
+  output is unchanged. A `stable call-graph barrel` test locks the invariant. The remaining
+  higher-coupling sections (dispatch-synthesis, grammar loading, the attribution hub) are intentionally
+  deferred/out-of-scope — see the proposal for the value-vs-risk rationale. Pure internal hygiene: no
+  feature, dependency, LLM, or persisted artifact.
+
 - **CLI front door now describes the product and steers to one-command setup.**
   Bare `openlore` / `openlore --help` previously opened with the legacy spec-gen
   framing ("Reverse-engineer OpenSpec specifications…") and a Quick start that sent
@@ -326,6 +365,8 @@ All notable changes to OpenLore are documented here. This project adheres to
   API key previously told the user only to set `ANTHROPIC_API_KEY`/etc., never
   mentioning that the Claude Code CLI (which `openlore doctor` detects) is a no-key
   provider. The error now points to `generation.provider: "claude-code"` (#188).
+
+**Full Changelog**: https://github.com/clay-good/OpenLore/compare/v2.1.3...v2.1.4
 
 ## [2.1.3] - 2026-06-22
 
