@@ -240,6 +240,25 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ### Fixed
 
+- **Same-named nested functions no longer collapse into one call-graph node.** Two `function helper(){}`
+  in different methods, two `const cleanup = () => {}` arrows in one function, or a nested function
+  colliding with a same-named top-level one previously shared one id and were merged at id aggregation
+  (last-write-wins) — one real function was silently dropped and its edges/fan-in/out folded into the
+  survivor. Pre-existing across every language; it surfaced while making `this.method()` resolution
+  load-bearing. A genuinely nested function (byte-contained in another function node with a *different*
+  id) now gets a stable, scope-qualified id derived from its enclosing scope — `file::A.m1/helper`, with
+  a document-order ordinal `…/helper#2` for same-scope twins — never a byte offset, so it is **not**
+  reported removed-and-re-added by `structural_diff` / `change_impact_certificate` when unrelated code
+  shifts. Intentional collapses are preserved: an `export function` / decorated-definition wrapper
+  (a same-id container = the same function matched twice) and sibling collisions (re-assigned members,
+  same-file container homonyms) stay one node. The re-keyed node also carries its **CFG overlay** with
+  it (collected by start byte, re-attached to the final id), so `analyze_error_propagation` / def-use
+  resolve a nested function's control flow by its node id with no last-write-wins loss or orphaned
+  overlay. Internal to the call-graph builder — no new MCP tool, no new CLI command, surface count
+  unchanged. Dogfooded on the OpenLore repo (e.g. two `cleanup` arrows in `startMcpServer`, two `getDiff`
+  arrows in `extractFromDiff` now resolve distinctly) — a handful repo-wide, no churn elsewhere.
+  Reference: `openspec/changes/add-stable-nested-function-identity/`.
+
 - **`--json` / large CLI output is no longer truncated when piped.** `process.stdout` is asynchronous on
   a pipe (the normal case when an agent or shell captures `openlore … --json`), so a command that wrote a
   large payload and then `process.exit()`ed lost everything past the ~64KB pipe buffer — e.g.

@@ -30,6 +30,13 @@ one node at id aggregation.
   `stableId` continues to derive from `className.name(signature)`; two nested twins therefore share a
   `stableId` — the existing homonym completeness limit, resolved only when unique (qualifying
   `stableId` by enclosing scope is a deferred refinement, not required here).
+- A re-keyed nested function's per-node side tables — specifically the intraprocedural CFG overlay —
+  SHALL follow the FINAL node id, not the pre-disambiguation bare id. The CFG overlay SHALL be
+  collected during extraction keyed by a per-node-stable value (the function's start byte) and
+  re-attached to the final id, so that (a) each of two same-named nested functions keeps its OWN CFG
+  (no last-write-wins loss against the colliding bare id) and (b) no CFG is orphaned under an id that
+  no node carries. CFG-dependent capabilities (def-use dataflow, `analyze_error_propagation`) SHALL
+  therefore resolve a re-keyed nested function's overlay by its node id.
 - Applies to every language whose extractor produces function nodes; an extractor that does not emit
   nested-function nodes is unaffected (a no-op).
 
@@ -61,3 +68,11 @@ one node at id aggregation.
   the inner declaration, both with id `file::createOrder`)
 - **WHEN** the call graph is built
 - **THEN** there is exactly ONE `createOrder` node (the same-id container is not treated as nested)
+
+#### Scenario: a re-keyed nested function keeps its CFG overlay
+
+- **GIVEN** two methods each with their own nested `function helper(){ … }`, each with a distinct
+  control-flow body (so each has its own CFG overlay)
+- **WHEN** the call graph is built and the two nested `helper`s are re-keyed to distinct ids
+- **THEN** each re-keyed `helper` node has its OWN CFG entry under its final id, and there is no CFG
+  keyed under the pre-disambiguation bare `file::helper` (no orphan, no last-write-wins loss)

@@ -780,6 +780,31 @@ function ensureUniqueNodeIds(nodes: FunctionNode[]): void {
   }
 }
 
+/**
+ * Materialize the function-id → CFG overlay map AFTER `ensureUniqueNodeIds` may have
+ * re-keyed nested function nodes. CFGs MUST be collected during extraction keyed by the
+ * node's start byte (`fnNode.startIndex` — unique per AST function node, and unchanged by
+ * re-keying) rather than by the function id, because the bare id is non-unique for a
+ * nested collision: a same-id `cfg.set(id, …)` would last-write-wins one CFG away before
+ * disambiguation, and the surviving CFG would then orphan under the pre-disambiguation id
+ * (no node carries it). Re-attaching by start byte to the FINAL node id keeps every
+ * re-keyed nested function's CFG overlay addressable by its node id — the form every
+ * downstream consumer (def-use dataflow, analyze_error_propagation) looks it up by.
+ * (change: add-stable-nested-function-identity.)
+ */
+function materializeCfgByNodeId(
+  nodes: FunctionNode[],
+  cfgByStart: Map<number, FunctionCfg>,
+): Map<string, FunctionCfg> {
+  const cfg = new Map<string, FunctionCfg>();
+  if (cfgByStart.size === 0) return cfg;
+  for (const n of nodes) {
+    const c = cfgByStart.get(n.startIndex);
+    if (c) cfg.set(n.id, c);
+  }
+  return cfg;
+}
+
 function findEnclosingFunction(
   nodes: FunctionNode[],
   callPos: number
@@ -1193,7 +1218,7 @@ async function extractTSGraph(
 
   // --- Extract function nodes ---
   const nodes: FunctionNode[] = [];
-  const cfg = new Map<string, FunctionCfg>();
+  const cfgByStart = new Map<number, FunctionCfg>();
   const fnMatches = fnQuery.matches(tree.rootNode);
 
   for (const match of fnMatches) {
@@ -1283,7 +1308,7 @@ async function extractTSGraph(
     });
 
     const fnCfg = buildCfgFor(fnNode, 'TypeScript');
-    if (fnCfg) cfg.set(id, fnCfg);
+    if (fnCfg) cfgByStart.set(fnNode.startIndex, fnCfg);
   }
 
   // --- Extract calls ---
@@ -1323,6 +1348,7 @@ async function extractTSGraph(
   }
 
   const style = tallyStyle('TypeScript', tree, nodes, filePath);
+  const cfg = materializeCfgByNodeId(nodes, cfgByStart);
   return { nodes, rawEdges, cfg, style };
 }
 
@@ -1375,7 +1401,7 @@ async function extractPyGraph(
 
   // --- Extract function nodes ---
   const nodes: FunctionNode[] = [];
-  const cfg = new Map<string, FunctionCfg>();
+  const cfgByStart = new Map<number, FunctionCfg>();
   const seen = new Set<number>(); // avoid duplicates from decorated_definition + function_definition
   const fnMatches = fnQuery.matches(tree.rootNode);
 
@@ -1429,7 +1455,7 @@ async function extractPyGraph(
     });
 
     const fnCfg = buildCfgFor(fnNode, 'Python');
-    if (fnCfg) cfg.set(id, fnCfg);
+    if (fnCfg) cfgByStart.set(fnNode.startIndex, fnCfg);
   }
 
   // --- Extract calls ---
@@ -1489,6 +1515,7 @@ async function extractPyGraph(
   }
 
   const style = tallyStyle('Python', tree, nodes, filePath);
+  const cfg = materializeCfgByNodeId(nodes, cfgByStart);
   return { nodes, rawEdges, cfg, style };
 }
 
@@ -1527,7 +1554,7 @@ async function extractGoGraph(
   const callQuery = new _NativeQuery!(lang as unknown as Parser.Language, GO_CALL_QUERY);
 
   const nodes: FunctionNode[] = [];
-  const cfg = new Map<string, FunctionCfg>();
+  const cfgByStart = new Map<number, FunctionCfg>();
   for (const match of fnQuery.matches(tree.rootNode)) {
     const nameCapture = match.captures.find(c => c.name === 'fn.name');
     const nodeCapture = match.captures.find(c => c.name === 'fn.node');
@@ -1561,7 +1588,7 @@ async function extractGoGraph(
     });
 
     const fnCfg = buildCfgFor(fnNode, 'Go');
-    if (fnCfg) cfg.set(id, fnCfg);
+    if (fnCfg) cfgByStart.set(fnNode.startIndex, fnCfg);
   }
 
   ensureUniqueNodeIds(nodes);
@@ -1582,6 +1609,7 @@ async function extractGoGraph(
   }
 
   const style = tallyStyle('Go', tree, nodes, filePath);
+  const cfg = materializeCfgByNodeId(nodes, cfgByStart);
   return { nodes, rawEdges, cfg, style };
 }
 
@@ -1617,7 +1645,7 @@ async function extractRustGraph(
   const callQuery = new _NativeQuery!(lang as unknown as Parser.Language, RUST_CALL_QUERY);
 
   const nodes: FunctionNode[] = [];
-  const cfg = new Map<string, FunctionCfg>();
+  const cfgByStart = new Map<number, FunctionCfg>();
   for (const match of fnQuery.matches(tree.rootNode)) {
     const nameCapture = match.captures.find(c => c.name === 'fn.name');
     const nodeCapture = match.captures.find(c => c.name === 'fn.node');
@@ -1660,7 +1688,7 @@ async function extractRustGraph(
     });
 
     const fnCfg = buildCfgFor(fnNode, 'Rust');
-    if (fnCfg) cfg.set(id, fnCfg);
+    if (fnCfg) cfgByStart.set(fnNode.startIndex, fnCfg);
   }
 
   ensureUniqueNodeIds(nodes);
@@ -1680,6 +1708,7 @@ async function extractRustGraph(
     rawEdges.push({ callerId: caller.id, calleeName, line: nodeCapture.node.startPosition.row + 1, calleeObject: objectCapture?.node.text });
   }
 
+  const cfg = materializeCfgByNodeId(nodes, cfgByStart);
   return { nodes, rawEdges, cfg };
 }
 
@@ -1727,7 +1756,7 @@ async function extractRubyGraph(
   const barewordQuery = new _NativeQuery!(lang as unknown as Parser.Language, RUBY_BAREWORD_QUERY);
 
   const nodes: FunctionNode[] = [];
-  const cfg = new Map<string, FunctionCfg>();
+  const cfgByStart = new Map<number, FunctionCfg>();
   for (const match of fnQuery.matches(tree.rootNode)) {
     const nameCapture = match.captures.find(c => c.name === 'fn.name');
     const nodeCapture = match.captures.find(c => c.name === 'fn.node');
@@ -1761,7 +1790,7 @@ async function extractRubyGraph(
     });
 
     const fnCfg = buildCfgFor(fnNode, 'Ruby');
-    if (fnCfg) cfg.set(id, fnCfg);
+    if (fnCfg) cfgByStart.set(fnNode.startIndex, fnCfg);
   }
 
   // Explicit calls: fn(), obj.method(). RUBY_CALL_QUERY has the same two-pattern
@@ -1783,6 +1812,7 @@ async function extractRubyGraph(
     rawEdges.push({ callerId: caller.id, calleeName, line: nameCapture.node.startPosition.row + 1 });
   }
 
+  const cfg = materializeCfgByNodeId(nodes, cfgByStart);
   return { nodes, rawEdges, cfg };
 }
 
@@ -1930,7 +1960,7 @@ async function extractJavaGraph(
   const callQuery = new _NativeQuery!(lang as unknown as Parser.Language, JAVA_CALL_QUERY);
 
   const nodes: FunctionNode[] = [];
-  const cfg = new Map<string, FunctionCfg>();
+  const cfgByStart = new Map<number, FunctionCfg>();
   for (const match of fnQuery.matches(tree.rootNode)) {
     const nameCapture = match.captures.find(c => c.name === 'fn.name');
     const nodeCapture = match.captures.find(c => c.name === 'fn.node');
@@ -1973,7 +2003,7 @@ async function extractJavaGraph(
     });
 
     const fnCfg = buildCfgFor(fnNode, 'Java');
-    if (fnCfg) cfg.set(id, fnCfg);
+    if (fnCfg) cfgByStart.set(fnNode.startIndex, fnCfg);
   }
 
   // JAVA_CALL_QUERY has two patterns: a qualified `object.name(...)` pattern and a
@@ -1987,6 +2017,7 @@ async function extractJavaGraph(
   // super(...) constructor-chain edges (this(...) intentionally omitted).
   rawEdges.push(...synthesizeJavaSuperCalls(tree.rootNode, nodes, lang));
 
+  const cfg = materializeCfgByNodeId(nodes, cfgByStart);
   return { nodes, rawEdges, cfg };
 }
 
@@ -2056,7 +2087,7 @@ async function extractCppGraph(
   const tree = (parser as Parser).parse(content);
 
   const nodes: FunctionNode[] = [];
-  const cfg = new Map<string, FunctionCfg>();
+  const cfgByStart = new Map<number, FunctionCfg>();
   const seen = new Set<number>(); // deduplicate by name-node start position
 
   for (const queryStr of [CPP_FN_BASIC_QUERY, CPP_FN_QUALIFIED_QUERY]) {
@@ -2112,7 +2143,7 @@ async function extractCppGraph(
       });
 
       const fnCfg = buildCfgFor(fnNode, 'C++');
-      if (fnCfg) cfg.set(id, fnCfg);
+      if (fnCfg) cfgByStart.set(fnNode.startIndex, fnCfg);
     }
   }
 
@@ -2150,6 +2181,7 @@ async function extractCppGraph(
     rawEdges.push({ callerId: caller.id, calleeName, line: nodeCapture.node.startPosition.row + 1, calleeObject: objectCapture?.node.text });
   }
 
+  const cfg = materializeCfgByNodeId(nodes, cfgByStart);
   return { nodes, rawEdges, cfg };
 }
 
@@ -2478,7 +2510,7 @@ async function extractByQueries(
 
   return handle.withTree(content, (_root, runQuery) => {
     const nodes: FunctionNode[] = [];
-    const cfg = new Map<string, FunctionCfg>();
+    const cfgByStart = new Map<number, FunctionCfg>();
     for (const match of runQuery(spec.fnQuery)) {
       const nameCapture = match.captures.find(c => c.name === 'fn.name');
       const nodeCapture = match.captures.find(c => c.name === 'fn.node');
@@ -2493,7 +2525,7 @@ async function extractByQueries(
       // spec-08 languages that have a CfgLangSpec; others fail soft to no overlay.
       // Built inside withTree while the (possibly WASM) tree is live.
       const fnCfg = buildCfgFor(fnNode as unknown as CfgNode, spec.language);
-      if (fnCfg) cfg.set(id, fnCfg);
+      if (fnCfg) cfgByStart.set(fnNode.startIndex, fnCfg);
       nodes.push({
         id, name, filePath, className,
         isAsync: false,
@@ -2525,6 +2557,7 @@ async function extractByQueries(
       seen.add(key);
       rawEdges.push({ callerId: caller.id, calleeName, line: nodeCapture.node.startPosition.row + 1, calleeObject });
     }
+    const cfg = materializeCfgByNodeId(nodes, cfgByStart);
     return { nodes, rawEdges, cfg };
   });
 }

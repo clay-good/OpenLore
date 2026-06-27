@@ -13,6 +13,12 @@
       `dedupeOverlappingCalls`, C++, Swift, generic `extractByQueries`, Dart, Elixir) AFTER node
       extraction, BEFORE call extraction — so `rawEdge.callerId` carries the unique id.
 - [x] Outermost→innermost processing so an enclosing function's id is final before a child qualifies.
+- [x] CFG side-table keyed by the FINAL id (avoid the CFG-mismatch a re-key would otherwise leave):
+      `materializeCfgByNodeId` collects each function's CFG during extraction keyed by its start byte
+      (unique per AST node, unchanged by re-keying), then re-attaches it to the final node id in every
+      cfg-bearing extractor (TS/JS, Python, Go, Rust, Ruby, Java, C++, generic `extractByQueries`). So
+      two same-named nested functions each keep their OWN CFG (no last-write-wins loss against the
+      colliding bare id) and no CFG orphans under the pre-disambiguation id — verified TS/Python/Ruby.
 
 ## 3. Stable-id scope
 - [x] PATH id is now unique + stable for nested functions (the structural fix). `stableId` continues to
@@ -32,9 +38,10 @@
 - [x] Stability-across-edit test (path id unchanged when unrelated code shifts).
 - [x] Same-scope twin ordinal test.
 - [x] Export-wrapper scope-contract test.
+- [x] CFG-overlay survives re-key: each re-keyed nested function keeps its OWN CFG, no orphan key.
 
 ## 6. Verify
-- [x] `npm run build`; `vitest run src examples` green (271 files / 5320+ tests).
+- [x] `npm run build`; `vitest run src examples` green (273 files / 5376 tests).
 - [x] Dogfood on the OpenLore repo: genuine nested collisions now distinct (e.g. two `cleanup` arrows
       in `startMcpServer`, two `getDiff` arrows in `extractFromDiff`); a handful repo-wide, no churn
       elsewhere.

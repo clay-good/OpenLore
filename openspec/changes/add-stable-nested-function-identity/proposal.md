@@ -1,7 +1,7 @@
 # Stable identity for nested functions: stop collapsing same-named nested functions into one node
 
 > Status: IMPLEMENTED (branch `feat/stable-nested-function-identity`, off main). `npm run build` clean;
-> `vitest run src examples` green (271 files / 5320+ tests). A first attempt in PR #213 used an unstable
+> `vitest run src examples` green (273 files / 5376 tests). A first attempt in PR #213 used an unstable
 > positional discriminator and was reverted; this delivers the stable enclosing-scope approach. The
 > live build re-keys genuine nested collisions only (e.g. two `cleanup` arrows in `startMcpServer`, two
 > `getDiff` arrows in `extractFromDiff`) — a handful on the OpenLore repo, no churn elsewhere.
@@ -64,7 +64,14 @@ which shifts and makes the node read as removed+added on every diff).
    it every `export`/decorated function spuriously split.)
 4. **Secondary discriminator for the rare in-scope twin.** Two same-named functions nested in the SAME
    enclosing scope get a deterministic document-order ordinal (`…/helper`, `…/helper#2`).
-5. **`stableId` scope.** The PATH id (`file::…`) is now unique and stable for nested functions — the
+5. **Re-key the CFG side-table with the node.** The intraprocedural CFG overlay is built per-function
+   in the same extraction loop; keying it by the bare id would lose one of two colliding nested CFGs to
+   last-write-wins and orphan the survivor under the pre-disambiguation id (no node would carry it).
+   `materializeCfgByNodeId` collects each CFG keyed by the function's start byte (unique per AST node,
+   unchanged by re-keying) and re-attaches it to the FINAL node id after disambiguation, in every
+   cfg-bearing extractor. So `analyze_error_propagation` / def-use resolve a re-keyed nested function's
+   overlay by its node id — exactly the nodes this change makes addressable.
+6. **`stableId` scope.** The PATH id (`file::…`) is now unique and stable for nested functions — the
    structural fix every node-id and edge consumer needs. The content-addressed `stableId`
    (`scip/moniker.ts`) is derived from `className.name(signature)`, not the path id, so two nested
    twins still share a `stableId` — the SAME documented "homonym" completeness limit

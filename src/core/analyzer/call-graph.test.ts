@@ -380,6 +380,26 @@ describe('CallGraphBuilder — stable nested-function identity', () => {
     const ids = Array.from(result.nodes.values()).filter(n => n.name === 'createOrder').map(n => n.id);
     expect(ids).toEqual(['src/e.ts::createOrder']); // one node, no `createOrder/createOrder`
   });
+
+  // Re-keying a nested node must carry its CFG overlay with it. The CFG is collected by
+  // start byte during extraction and re-attached to the FINAL node id, so a re-keyed
+  // nested function is NOT left without a CFG (and no stale CFG orphans under the
+  // pre-disambiguation bare id). Guards the def-use / analyze_error_propagation consumers.
+  it('keeps each re-keyed nested function reachable by its CFG overlay (no orphan, no loss)', async () => {
+    const result = await new CallGraphBuilder().build([{
+      path: 'src/cfg.ts', language: 'TypeScript',
+      content:
+        `function outer(){ function helper(){ if (Math.random() > 0.5) { return 1; } return 2; } return helper(); }\n` +
+        `function other(){ function helper(){ for (let i = 0; i < 3; i++) {} return 3; } return helper(); }`,
+    }]);
+    const nodeIds = new Set(Array.from(result.nodes.values()).map(n => n.id));
+    const nested = [...nodeIds].filter(id => id === 'src/cfg.ts::outer/helper' || id === 'src/cfg.ts::other/helper');
+    expect(nested.sort()).toEqual(['src/cfg.ts::other/helper', 'src/cfg.ts::outer/helper']);
+    // BOTH nested helpers keep their OWN CFG (not collapsed to one by last-write-wins).
+    for (const id of nested) expect(result.cfgs?.has(id)).toBe(true);
+    // No CFG keyed under an id that no node carries (the stale bare `::helper`).
+    for (const key of result.cfgs?.keys() ?? []) expect(nodeIds.has(key)).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------
