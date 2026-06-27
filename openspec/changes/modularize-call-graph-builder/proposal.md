@@ -1,11 +1,22 @@
 # Modularize the call-graph builder behind a stable barrel
 
-> Status: PROPOSED (2026-06-26). Spec-only change describing a behavior-preserving refactor.
-> `src/core/analyzer/call-graph.ts` is 5,425 lines and is simultaneously the repository's most-imported
-> file (155 importers) and a high-churn hotspot. This change proposes decomposing it into cohesive
-> sibling modules **behind an unchanged public barrel**, so the 155 importers do not move and behavior
-> is byte-identical. No feature, no dependency, no LLM. Medium priority — best done opportunistically
-> while already working in the file, not as an urgent stop-the-world refactor.
+> Status: IN PROGRESS (first slice landed 2026-06-27). Behavior-preserving refactor, taken in safe
+> slices (the proposal explicitly wants this opportunistic, not a stop-the-world rewrite).
+> `src/core/analyzer/call-graph.ts` was 5,425 lines and is the repository's most-imported file
+> (155 importers) and a high-churn hotspot. It is being decomposed into cohesive sibling modules
+> **behind an unchanged public barrel**, so the 155 importers do not move and behavior is byte-identical.
+> No feature, no dependency, no LLM.
+>
+> **Slice 1 — `call-graph-types.ts` (DONE).** The full TYPES section (the edge/node/class model,
+> `CallGraphResult`/`SerializedCallGraph`, `CALL_DISTANCE_COSTS`/`callDistance`, the layer helpers
+> `layerOf`/`classifyLayerEdge`) moved out behind the barrel; `call-graph.ts` re-exports every public
+> name (`RawEdge`/`CALL_DISTANCE_FALLBACK` stay internal, off the surface). call-graph.ts: 5,425 → 5,150
+> lines. **Verified:** export surface byte-for-byte identical (multi-line-aware diff), build/lint/typecheck
+> clean, full suite green (279 files / 5531 tests), and a byte-level graph+helper snapshot oracle hashes
+> identically before/after (SHA-256 `131ba4c6…`). A new `stable call-graph barrel` test locks the
+> invariant (re-export identity + moved-helper behavior) for the remaining slices.
+> Remaining slices (nodes / extract / dispatch / grammar-loader) are unstarted — to be taken one per
+> change, each gated on the same snapshot oracle + full suite.
 
 ## The gap
 

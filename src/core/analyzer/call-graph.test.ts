@@ -9,8 +9,10 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { CallGraphBuilder, callDistance, CALL_DISTANCE_COSTS } from './call-graph.js';
+import { CallGraphBuilder, callDistance, CALL_DISTANCE_COSTS, layerOf, classifyLayerEdge } from './call-graph.js';
 import type { CallEdge, EdgeConfidence } from './call-graph.js';
+import * as barrel from './call-graph.js';
+import * as cgTypes from './call-graph-types.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -35,6 +37,40 @@ function fanIn(result: Awaited<ReturnType<CallGraphBuilder['build']>>, name: str
 function fanOut(result: Awaited<ReturnType<CallGraphBuilder['build']>>, name: string) {
   return Array.from(result.nodes.values()).find(n => n.name === name)?.fanOut;
 }
+
+// ---------------------------------------------------------------------------
+// Stable barrel (change: modularize-call-graph-builder; analyzer:
+// StableCallGraphBarrel). The type/edge model now lives in ./call-graph-types.ts
+// and is re-exported from ./call-graph.ts. These guards lock the invariant for
+// the remaining slices: every moved name stays importable from the barrel and is
+// the SAME binding as the source module (a re-export, not a divergent copy).
+// ---------------------------------------------------------------------------
+describe('stable call-graph barrel', () => {
+  it('re-exports the moved value symbols from call-graph.ts (same binding as the source module)', () => {
+    expect(barrel.callDistance).toBe(cgTypes.callDistance);
+    expect(barrel.layerOf).toBe(cgTypes.layerOf);
+    expect(barrel.classifyLayerEdge).toBe(cgTypes.classifyLayerEdge);
+    expect(barrel.CALL_DISTANCE_COSTS).toBe(cgTypes.CALL_DISTANCE_COSTS);
+  });
+
+  it('callDistance agrees with CALL_DISTANCE_COSTS for every confidence (incl. external = Infinity)', () => {
+    for (const confidence of Object.keys(CALL_DISTANCE_COSTS) as EdgeConfidence[]) {
+      const edge = { callerId: 'a', calleeId: 'b', calleeName: 'b', confidence };
+      expect(callDistance(edge)).toBe(CALL_DISTANCE_COSTS[confidence]);
+    }
+    expect(callDistance({ callerId: 'a', calleeId: 'b', calleeName: 'b', confidence: 'external' })).toBe(Infinity);
+  });
+
+  it('layerOf / classifyLayerEdge resolve layers by path-prefix and flag wrong-direction edges', () => {
+    const layers = { api: ['src/api'], db: ['src/db'] };
+    expect(layerOf('src/api/main.ts', layers)).toBe('api');
+    expect(layerOf('src/db/store.ts', layers)).toBe('db');
+    expect(layerOf('src/other/x.ts', layers)).toBeUndefined();
+    // db (lower) → api (upper) is a violation; api → db is legal.
+    expect(classifyLayerEdge('src/db/store.ts', 'src/api/main.ts', layers)).toEqual({ fromLayer: 'db', toLayer: 'api' });
+    expect(classifyLayerEdge('src/api/main.ts', 'src/db/store.ts', layers)).toBeNull();
+  });
+});
 
 // ---------------------------------------------------------------------------
 // TypeScript
