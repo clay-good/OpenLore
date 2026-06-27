@@ -123,6 +123,185 @@ export const EXPLICIT_TOPOLOGY_TOOLS: readonly string[] = Object.entries(TOOL_OU
   .map(([name]) => name)
   .sort();
 
+/* ===========================================================================
+ * Capability families (spec domain: `mcp-quality`, requirement
+ * CapabilityFamilyTaxonomy; architecture: UnifiedStructuralSubstrate).
+ *
+ * OpenLore is one structural substrate with two faces — a READ face that
+ * navigates the graph and a WRITE/CHECK face that anchors facts and gates
+ * changes. The surface has grown to ~70 flat tools, several answering adjacent
+ * questions, which degrades an agent's selection accuracy. The fix is not to
+ * merge distinct conclusions (see ADJACENT_TOOL_GROUPS) but to give the surface
+ * a *taxonomy*: every tool declares exactly one of a small, closed set of
+ * capability families, the way it already declares `conclusion` vs
+ * `explicit-topology` above. An agent then chooses among ~6 families and a
+ * handful of tools per family, never among the whole undifferentiated registry.
+ *
+ * The set is CLOSED: a new tool joins an existing family, or the change must
+ * justify and add a new family here. `tool-contract.test.ts` fails CI if any
+ * registered tool is missing a family or declares one outside this set.
+ * =========================================================================== */
+
+export type CapabilityFamily =
+  | 'navigate' // read the structural/spec graph, return a conclusion about existing structure
+  | 'change' // reason about a specific diff or change set (your pending work)
+  | 'remember' // record / recall durable, code-anchored facts (memory + decision lifecycle)
+  | 'verify' // settle a claim or a decision's currency against the graph before a human sees it
+  | 'coordinate' // schedule or deconflict parallel work across agents/actors
+  | 'federate'; // cross-repo / spec-store conclusions
+
+/** The closed, source-declared family set, in presentation order. */
+export const CAPABILITY_FAMILIES: readonly CapabilityFamily[] = [
+  'navigate',
+  'change',
+  'remember',
+  'verify',
+  'coordinate',
+  'federate',
+];
+
+/** One-line human label per family, for grouped rendering in docs and `--help`. */
+export const CAPABILITY_FAMILY_LABELS: Record<CapabilityFamily, string> = {
+  navigate: 'Navigate — read the structural graph, return a conclusion',
+  change: 'Change — reason about a specific diff or change set',
+  remember: 'Remember — record & recall durable, code-anchored facts',
+  verify: 'Verify — settle a claim before it reaches a human',
+  coordinate: 'Coordinate — schedule & deconflict parallel work',
+  federate: 'Federate — cross-repo / spec-store conclusions',
+};
+
+/**
+ * Every dispatched MCP tool and its capability family. Parallel to
+ * {@link TOOL_OUTPUT_CLASS}: adding a tool without an entry here makes the
+ * completeness test fail, forcing the author to declare a family.
+ */
+export const TOOL_CAPABILITY_FAMILY: Record<string, CapabilityFamily> = {
+  // --- navigate: read the structural/spec graph, return a conclusion ---
+  get_subgraph: 'navigate',
+  get_call_graph: 'navigate',
+  orient: 'navigate',
+  analyze_codebase: 'navigate',
+  get_architecture_overview: 'navigate',
+  get_refactor_report: 'navigate',
+  get_signatures: 'navigate',
+  trace_execution_path: 'navigate',
+  get_mapping: 'navigate',
+  analyze_impact: 'navigate',
+  select_tests: 'navigate',
+  find_dead_code: 'navigate',
+  get_change_coupling: 'navigate',
+  check_architecture: 'navigate',
+  get_low_risk_refactor_candidates: 'navigate',
+  get_leaf_functions: 'navigate',
+  get_critical_hubs: 'navigate',
+  get_duplicate_report: 'navigate',
+  find_clones: 'navigate',
+  analyze_error_propagation: 'navigate',
+  analyze_env_impact: 'navigate',
+  get_function_skeleton: 'navigate',
+  get_god_functions: 'navigate',
+  search_code: 'navigate',
+  suggest_insertion_points: 'navigate',
+  search_specs: 'navigate',
+  search_unified: 'navigate',
+  list_spec_domains: 'navigate',
+  get_spec: 'navigate',
+  get_function_body: 'navigate',
+  get_file_dependencies: 'navigate',
+  generate_change_proposal: 'navigate',
+  annotate_story: 'navigate',
+  get_route_inventory: 'navigate',
+  get_middleware_inventory: 'navigate',
+  get_schema_inventory: 'navigate',
+  get_ui_components: 'navigate',
+  get_env_vars: 'navigate',
+  get_external_packages: 'navigate',
+  audit_spec_coverage: 'navigate',
+  generate_tests: 'navigate',
+  get_test_coverage: 'navigate',
+  get_minimal_context: 'navigate',
+  get_cluster: 'navigate',
+  get_landmarks: 'navigate',
+  get_map: 'navigate',
+  find_path: 'navigate',
+  get_health_map: 'navigate',
+  get_surprising_connections: 'navigate',
+  get_language_support: 'navigate',
+  report_coverage_gaps: 'navigate',
+  get_style_fingerprint: 'navigate',
+
+  // --- change: reason about a specific diff or change set ---
+  structural_diff: 'change',
+  blast_radius: 'change',
+  change_impact_certificate: 'change',
+  certify_public_surface: 'change',
+  briefing_since: 'change',
+  detect_changes: 'change',
+  check_spec_drift: 'change',
+
+  // --- remember: durable, code-anchored facts (memory + decision lifecycle) ---
+  remember: 'remember',
+  recall: 'remember',
+  record_decision: 'remember',
+  list_decisions: 'remember',
+  approve_decision: 'remember',
+  reject_decision: 'remember',
+  sync_decisions: 'remember',
+
+  // --- verify: settle a claim/decision currency before a human sees it ---
+  verify_claim: 'verify',
+
+  // --- coordinate: schedule / deconflict parallel work ---
+  plan_parallel_work: 'coordinate',
+  map_in_flight_conflicts: 'coordinate',
+
+  // --- federate: cross-repo / spec-store conclusions ---
+  federation_status: 'federate',
+  spec_store_status: 'federate',
+  working_set_context: 'federate',
+};
+
+/** The capability family of a tool, or `undefined` if it is unclassified. */
+export function capabilityFamily(name: string): CapabilityFamily | undefined {
+  return TOOL_CAPABILITY_FAMILY[name];
+}
+
+/**
+ * Adjacent tool groups (NoRedundantConclusions, `mcp-quality`). Each group is a
+ * set of tools IN THE SAME FAMILY whose purposes could be read as answering the
+ * same question. These are deliberately NOT merged — each returns a separately
+ * useful conclusion — so the contract instead requires each member's description
+ * to name a near-sibling, making the distinction legible to a selecting agent.
+ * `tool-contract.test.ts` fails if a member does not cross-reference its group.
+ */
+export const ADJACENT_TOOL_GROUPS: ReadonlyArray<readonly string[]> = [
+  // Same graph, four diff conclusions: advisory briefing vs. graph delta + stale
+  // callers vs. paths newly opened into a covering surface.
+  ['blast_radius', 'structural_diff', 'change_impact_certificate'],
+  // Same hazard classifier, different input: caller-supplied tasks vs. harvested
+  // in-flight branches/PRs.
+  ['plan_parallel_work', 'map_in_flight_conflicts'],
+  // Same detector, different shape: pre-write one-vs-all query vs. whole-repo audit.
+  ['find_clones', 'get_duplicate_report'],
+  // Exact inverses: untested code vs. the reaching tests.
+  ['report_coverage_gaps', 'select_tests'],
+];
+
+/**
+ * Group a tool list by capability family, preserving {@link CAPABILITY_FAMILIES}
+ * order and dropping empty families. Used to render the full surface grouped by
+ * family (docs / `--help`) instead of as a flat list (CapabilityFamilyTaxonomy).
+ */
+export function groupToolsByFamily<T extends { name: string }>(
+  tools: T[],
+): Array<{ family: CapabilityFamily; label: string; tools: T[] }> {
+  return CAPABILITY_FAMILIES.map(family => ({
+    family,
+    label: CAPABILITY_FAMILY_LABELS[family],
+    tools: tools.filter(t => capabilityFamily(t.name) === family),
+  })).filter(group => group.tools.length > 0);
+}
+
 /** Thrown when a `conclusion` tool's response violates the contract. */
 export class ToolContractViolationError extends Error {
   constructor(

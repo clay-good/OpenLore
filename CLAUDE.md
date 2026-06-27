@@ -44,10 +44,22 @@ For all other cases (reading a file, grepping, listing files) use native tools d
 
 > **The default MCP surface is lean (change `default-to-lean-tool-surface`):** a bare
 > `openlore mcp` / `openlore install` wires the 10-tool `navigation` preset — the Spec 14
-> benchmark winner — not all 72 tools. Breadth is opt-in: `--minimal` (governance core),
+> benchmark winner — not all 72 tools. Breadth is opt-in: `--preset substrate` (both faces — the
+> navigation core + `recall` + `verify_claim` + `blast_radius`), `--minimal` (governance core),
 > `--preset memory` / `verify` / `federation` / `coordination`, or the full surface via `--preset full`
 > (`--all-tools`). The decisions-gate workflow below needs `record_decision`, which is **not**
 > in the lean default — install with `--preset full` (or `--minimal`) on repos that gate commits.
+
+> **OpenLore is one substrate with two faces (change `unify-navigation-and-governance-substrate`).**
+> Navigation (read the graph) and governance/memory (anchor facts, weigh changes) share one graph, one
+> anchored-fact store, one freshness lease (`architecture` `UnifiedStructuralSubstrate`). Every tool
+> declares exactly one of six **closed capability families** — `navigate` · `change` · `remember` ·
+> `verify` · `coordinate` · `federate` — in `TOOL_CAPABILITY_FAMILY` (`tool-contract.ts`), emitted in
+> each tool's MCP `annotations.family` so the full surface is discoverable by family, not as a flat
+> list. Adjacent tools in one family are NOT merged when each returns a distinct conclusion; each names
+> its near-sibling instead (`NoRedundantConclusions`). `tool-contract.test.ts` fails CI if a new tool
+> forgets a family, or an adjacent tool fails to cross-reference its sibling. The active out-of-box
+> default stays `navigation`; `substrate` flips to default only on benchmark evidence (ADR-0022).
 
 > **Memory tools (`remember`/`recall`) are opt-in:** they ship in the `memory` preset
 > (`openlore mcp --preset memory`), not the default or `minimal` surface, per the

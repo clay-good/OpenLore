@@ -34,7 +34,7 @@ or for local development:
 
 ### Recommended lean surface (cost, Spec 25 P1 · Spec 28)
 
-MCP clients send every tool's JSON Schema on every request, so tools the agent never calls are pure per-request overhead. The full surface is **72 tools / ~78 KB / ~20k tokens** of `tools/list`. The Spec 14 benchmark showed this prefix is what made openlore *lose* on small repos — and that a lean, navigation-focused surface flips it to a win (see the [Value Scorecard](../README.md#value-scorecard--does-it-pay-for-itself)).
+MCP clients send every tool's JSON Schema on every request, so tools the agent never calls are pure per-request overhead. The full surface is **72 tools / ~83 KB / ~21k tokens** of `tools/list`. The Spec 14 benchmark showed this prefix is what made openlore *lose* on small repos — and that a lean, navigation-focused surface flips it to a win (see the [Value Scorecard](../README.md#value-scorecard--does-it-pay-for-itself)).
 
 **Since `default-to-lean-tool-surface`, the lean surface is the default**, not an extra step: `openlore install` (and a bare `openlore mcp`) wires the **`navigation`** preset — 10 tools, the benchmark winner — so the byte win is the out-of-box experience. The full surface is one explicit opt-in away (`--preset full` / `--all-tools`), and every governance/memory/verify/federation/coordination capability stays reachable via its named preset. When the lean default is active, the server advertises this once via its `instructions` channel (no extra tool schemas) so an agent never concludes a capability is absent. To restore the prior all-tools default: `openlore install --preset full`.
 
@@ -44,6 +44,23 @@ MCP clients send every tool's JSON Schema on every request, so tools the agent n
 2. **`--preset navigation` (server-side, navigation-only — now the default).** This is what a bare `openlore mcp` / `openlore install` already wires: a graph-traversal surface of 10 tools (orient, search_code, get_subgraph, trace_execution_path, analyze_impact, suggest_insertion_points, get_function_skeleton, get_landmarks, get_map, find_path). It is exactly the configuration the benchmark measured (−7%→−21% cost, −26% round-trips on deep traces). Note it omits the governance tools (`record_decision`, `check_architecture`, inventories), so if you use the decision gate or architecture checks during a session, prefer option 1 (deferred schemas) or wire a governance-bearing preset (`--minimal`, or the full surface with `--preset full`).
 
 The tool list and schemas are emitted in a fixed, deterministic order with no per-request variation, so the provider KV-cache holds the surface and its cost drops sharply after the first call (guarded by a regression test).
+
+### Capability families (one substrate, two faces)
+
+OpenLore is **one structural substrate with two faces** — a *read* face that navigates the graph and a *write/check* face that anchors facts and weighs changes — not two products (architecture spec: `UnifiedStructuralSubstrate`). To keep a wide surface selectable rather than overwhelming, **every tool declares exactly one of six closed capability families** (`mcp-quality`: `CapabilityFamilyTaxonomy`), the way it already declares conclusion-vs-topology. The family is emitted in each tool's MCP `annotations.family`, so a client can present the full surface **grouped by family** — an agent chooses among ~6 families and a handful of tools per family, never the flat registry:
+
+| Family | What it answers | Examples |
+|---|---|---|
+| `navigate` | read the structural/spec graph, return a conclusion | `orient`, `find_path`, `analyze_impact`, `select_tests`, `find_dead_code`, `get_map`, the inventories/specs |
+| `change` | reason about a specific diff or change set | `structural_diff`, `blast_radius`, `change_impact_certificate`, `certify_public_surface`, `briefing_since` |
+| `remember` | record & recall durable, code-anchored facts | `remember`, `recall`, `record_decision` + its lifecycle |
+| `verify` | settle a claim before it reaches a human | `verify_claim` |
+| `coordinate` | schedule & deconflict parallel work | `plan_parallel_work`, `map_in_flight_conflicts` |
+| `federate` | cross-repo / spec-store conclusions | `federation_status`, `spec_store_status`, `working_set_context` |
+
+Adjacent tools within a family are **not merged** when each returns a separately-useful conclusion (`NoRedundantConclusions`); instead each states its distinct question and names its near-sibling in its own description (e.g. `find_clones` ↔ `get_duplicate_report`, `select_tests` ↔ `report_coverage_gaps`, `blast_radius` ↔ `structural_diff` ↔ `change_impact_certificate`, `plan_parallel_work` ↔ `map_in_flight_conflicts`). A CI guard (`tool-contract.test.ts`) fails if a tool forgets a family or an adjacent tool fails to cross-reference its sibling.
+
+**`--preset substrate` — both faces, out of the box.** The `navigation` graph-traversal core plus the three highest-value governance *reads* — `recall` (what is known about the code I'm touching), `verify_claim` (settle an assertion before it reaches a human), and `blast_radius` (weigh a diff). It holds governance reads only (no `remember`/`record_decision` write, no commit gate). The **active out-of-box default stays `navigation`** until an agent benchmark shows the wider `substrate` default does not regress selection accuracy or token economy (ADR-0022's evidence-backed-default rule); until then `substrate` is a selectable preset.
 
 ### Watch mode (keep search_code and orient fresh)
 

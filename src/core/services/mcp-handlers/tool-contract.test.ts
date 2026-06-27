@@ -17,10 +17,16 @@ import {
   EXPLICIT_TOPOLOGY_TOOLS,
   assertConclusionShape,
   ToolContractViolationError,
+  TOOL_CAPABILITY_FAMILY,
+  CAPABILITY_FAMILIES,
+  ADJACENT_TOOL_GROUPS,
+  capabilityFamily,
+  groupToolsByFamily,
 } from './tool-contract.js';
 import { MAX_PROVENANCE_EDGES } from '../../../constants.js';
 
 const registeredToolNames = TOOL_DEFINITIONS.map(t => t.name);
+const toolByName = new Map(TOOL_DEFINITIONS.map(t => [t.name, t]));
 
 describe('TOOL_OUTPUT_CLASS completeness', () => {
   it('classifies every registered tool (no tool is unclassified)', () => {
@@ -44,6 +50,90 @@ describe('TOOL_OUTPUT_CLASS completeness', () => {
 describe('explicit-topology set', () => {
   it('is exactly { get_call_graph, get_subgraph }', () => {
     expect([...EXPLICIT_TOPOLOGY_TOOLS]).toEqual(['get_call_graph', 'get_subgraph']);
+  });
+});
+
+// ============================================================================
+// CapabilityFamilyTaxonomy (mcp-quality; change: unify-navigation-and-governance-
+// substrate). Every tool declares exactly one family from the closed set, the way
+// it already declares conclusion vs explicit-topology. These guards fail CI if a
+// new tool forgets a family or invents one outside the closed set.
+// ============================================================================
+describe('TOOL_CAPABILITY_FAMILY completeness', () => {
+  it('classifies every registered tool into a family (no tool is unclassified)', () => {
+    const unclassified = registeredToolNames.filter(name => !(name in TOOL_CAPABILITY_FAMILY));
+    expect(unclassified).toEqual([]);
+  });
+
+  it('has no stale entries for tools that are no longer registered', () => {
+    const registered = new Set(registeredToolNames);
+    const stale = Object.keys(TOOL_CAPABILITY_FAMILY).filter(name => !registered.has(name));
+    expect(stale).toEqual([]);
+  });
+
+  it('declares only families from the closed set', () => {
+    const closed = new Set<string>(CAPABILITY_FAMILIES);
+    for (const [name, family] of Object.entries(TOOL_CAPABILITY_FAMILY)) {
+      expect(closed.has(family), `tool "${name}" declares unknown family "${family}"`).toBe(true);
+    }
+  });
+
+  it('the closed family set is exactly the six documented families', () => {
+    expect([...CAPABILITY_FAMILIES]).toEqual([
+      'navigate', 'change', 'remember', 'verify', 'coordinate', 'federate',
+    ]);
+  });
+});
+
+describe('groupToolsByFamily', () => {
+  it('partitions the full surface into family groups covering every tool, in family order', () => {
+    const groups = groupToolsByFamily(TOOL_DEFINITIONS);
+    // Group order follows CAPABILITY_FAMILIES.
+    const order = groups.map(g => g.family);
+    expect(order).toEqual(CAPABILITY_FAMILIES.filter(f => order.includes(f)));
+    // Every registered tool appears in exactly one group.
+    const grouped = groups.flatMap(g => g.tools.map(t => t.name)).sort();
+    expect(grouped).toEqual([...registeredToolNames].sort());
+    // An agent chooses among a handful of families, not the flat registry.
+    expect(groups.length).toBeLessThanOrEqual(CAPABILITY_FAMILIES.length);
+  });
+});
+
+// ============================================================================
+// NoRedundantConclusions (mcp-quality). Tools in the same family with adjacent
+// purposes are NOT merged — each returns a separately-useful conclusion — so the
+// contract instead requires each member to name a near-sibling in its description,
+// making the distinction legible to a selecting agent.
+// ============================================================================
+describe('NoRedundantConclusions: adjacent tools disambiguate themselves', () => {
+  it('every adjacency group is intra-family (a group spans exactly one family)', () => {
+    for (const group of ADJACENT_TOOL_GROUPS) {
+      const families = new Set(group.map(name => capabilityFamily(name)));
+      expect(families.size, `adjacency group [${group.join(', ')}] spans families ${[...families].join(', ')}`).toBe(1);
+    }
+  });
+
+  it('every adjacency-group member is a registered tool', () => {
+    for (const group of ADJACENT_TOOL_GROUPS) {
+      for (const name of group) {
+        expect(toolByName.has(name), `adjacency group references unknown tool "${name}"`).toBe(true);
+      }
+    }
+  });
+
+  it('each member names at least one near-sibling in its own description', () => {
+    for (const group of ADJACENT_TOOL_GROUPS) {
+      for (const name of group) {
+        const description = toolByName.get(name)?.description ?? '';
+        const siblings = group.filter(s => s !== name);
+        const namesASibling = siblings.some(s => description.includes(s));
+        expect(
+          namesASibling,
+          `tool "${name}" is adjacent to {${siblings.join(', ')}} but its description names none of them ` +
+            `(NoRedundantConclusions: state the distinct question and cross-reference the near-sibling)`,
+        ).toBe(true);
+      }
+    }
   });
 });
 

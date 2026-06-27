@@ -1,12 +1,22 @@
 # Unify navigation and governance as two faces of one structural substrate
 
-> Status: PROPOSED (2026-06-26). Spec-only change. Establishes that OpenLore's navigation tools and
-> its governance/memory tools are not two products but two faces of a single deterministic substrate —
-> one graph, one anchored-fact store, one freshness lease — and turns that model into three enforceable
-> requirements: a capability-family taxonomy over the full tool surface, a no-redundant-conclusions
-> discipline, and a both-faces default surface gated on the existing benchmark guardrail. No new tool,
-> no new dependency, no LLM. Grounded in the north star (`overview/spec.md`, decision `c6d1ad07`):
-> deterministic, locally-computed structural context, conclusion over graph.
+> Status: IMPLEMENTED (2026-06-27). The spec deltas (`architecture` UnifiedStructuralSubstrate;
+> `mcp-quality` CapabilityFamilyTaxonomy + NoRedundantConclusions + the `substrate` both-faces default)
+> are now realized in code: a closed, source-declared capability family per tool
+> (`TOOL_CAPABILITY_FAMILY` in `tool-contract.ts`, parallel to `TOOL_OUTPUT_CLASS`), the `family`
+> emitted in each tool's MCP `annotations` so the full surface is discoverable by family on the wire,
+> the `substrate` preset (`navigation` core + `recall` + `verify_claim` + `blast_radius`), the
+> `NoRedundantConclusions` distinct-question cross-references on the four adjacent tool groups, and the
+> `tool-contract.test.ts` guards that fail CI if a tool forgets a family or an adjacent tool fails to
+> name its near-sibling. Per the evidence-gated rule, the ACTIVE out-of-box default REMAINS `navigation`;
+> `substrate` ships as a selectable preset until an agent benchmark clears the wider default. No new tool,
+> no new dependency, no LLM, no persisted artifact. `npm run build` clean; `vitest run src examples` green
+> (279 files / 5525 tests); e2e-dogfooded over a live stdio `tools/list`. Grounded in the north star
+> (`overview/spec.md`, decision `c6d1ad07`): deterministic, locally-computed structural context,
+> conclusion over graph.
+>
+> History: PROPOSED (2026-06-26) as a spec-only change that carved the implementation out as "a later,
+> separate change"; that implementation is what landed here.
 
 ## The gap
 
