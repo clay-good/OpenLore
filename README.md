@@ -24,10 +24,10 @@
 </p>
 
 <p align="center">
-  <img src="docs/openlore-demo.gif" alt="A real terminal recording on a real TypeScript project: `openlore orient` finds the code a task touches in one call (memory); `openlore blast-radius` flags that a change hits a critical hub before you commit (governance); `openlore prove` shows it cuts cost ~37% and round-trips ~50% on this repo (proof)" width="100%">
+  <img src="docs/openlore-demo.gif" alt="A real terminal recording (no edits, no narration) of the full lifecycle on a real Rust repo: `openlore install` sets it up in one command with no API key, `openlore orient` finds the code a task touches, `openlore blast-radius` flags a risky change before commit, and `openlore prove` shows it cuts cost ~84% and round-trips ~82% on this repo" width="100%">
 </p>
 
-<p align="center"><em>Three commands on a real project — no edits, no cuts.&nbsp; <strong>Memory:</strong> <code>orient</code> returns the code a task touches in one call (no grep-and-read).&nbsp; <strong>Governance:</strong> <code>blast-radius</code> flags a risky change before you commit.&nbsp; <strong>Proof:</strong> <code>prove</code> shows the token savings on your own repo. Deterministic, local, no API key.</em></p>
+<p align="center"><em>The whole lifecycle on a real repo, straight from the terminal — no edits, no narration. <strong>Set up</strong> in one command (<code>openlore install</code>, no API key); then <strong>memory</strong> — <code>orient</code> finds the code a task touches; <strong>governance</strong> — <code>blast-radius</code> flags a risky change before you commit; <strong>proof</strong> — <code>prove</code> measures the payoff (here, <strong>−84% cost, −82% round-trips</strong>). Deterministic and local.</em></p>
 
 ---
 
