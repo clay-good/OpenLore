@@ -11,7 +11,7 @@ import { mkdtemp, rm, readFile, writeFile, mkdir, access } from 'node:fs/promise
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runInstall, surfaceStatus } from '../install/index.js';
-import { runConnect } from './connect.js';
+import { runConnect, connectCommand } from './connect.js';
 
 let dir: string;
 
@@ -27,6 +27,22 @@ const readJson = async (rel: string): Promise<Record<string, unknown>> =>
 const exists = async (rel: string): Promise<boolean> => {
   try { await access(join(dir, rel)); return true; } catch { return false; }
 };
+
+// Guard the `--preset` help string against the count/preset drift a v2.1.4 QA pass
+// caught (it said "all 62 tools" and omitted substrate + coordination, contradicting
+// every other surface that says 72). The full surface is 72; the preset list must stay
+// current. Mirrors the install command's wording.
+describe('connect --preset help is current', () => {
+  it('lists the current presets (incl. substrate + coordination) and 72 tools, not the stale 62', () => {
+    const opt = connectCommand.options.find(o => o.long === '--preset');
+    expect(opt, 'connect must register a --preset option').toBeDefined();
+    const desc = opt!.description;
+    expect(desc).toContain('substrate');
+    expect(desc).toContain('coordination');
+    expect(desc).toContain('72 tools');
+    expect(desc).not.toContain('62');
+  });
+});
 
 describe('install --preset (PresetAwareConnect)', () => {
   it('wires `openlore mcp --preset <name>` into .mcp.json when a preset is given', async () => {

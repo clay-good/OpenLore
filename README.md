@@ -710,7 +710,7 @@ Because OpenLore requires Node ≥22.5 while OpenSpec runs on ≥20.19, a delega
 ```bash
 npm install
 npm run build
-npm test          # 5400+ unit tests
+npm test          # 5500+ unit tests
 npm run typecheck
 ```
 

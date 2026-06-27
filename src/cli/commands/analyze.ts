@@ -5,7 +5,7 @@
  * Outputs repository map, dependency graph, and file significance scores.
  */
 
-import { Command } from 'commander';
+import { Command, Option } from 'commander';
 import { writeFile, mkdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { logger } from '../../utils/logger.js';
@@ -60,6 +60,12 @@ interface ExtendedAnalyzeOptions extends AnalyzeOptions {
   embed?: boolean;
   reindexSpecs?: boolean;
   aiConfigs?: boolean;
+  /** Internal: set when `openlore install` invokes analyze. Suppresses the
+   * agent-onboarding tips (the "add @CODEBASE.md to CLAUDE.md" block, the
+   * "Agent config files: not generated" tip, and the "run openlore generate"
+   * next-step) — install does the agent wiring itself, so those would be
+   * redundant and contradictory on the install path. */
+  embedded?: boolean;
 }
 
 interface AnalysisResult {
@@ -294,6 +300,9 @@ export const analyzeCommand = new Command('analyze')
     'Generate AI tool config files (.cursorrules, .clinerules/openlore.md, CLAUDE.md) if they do not already exist',
     false
   )
+  // Internal flag set by `openlore install` (hidden from help): install does the
+  // agent wiring itself, so analyze must not also print its agent-onboarding tips.
+  .addOption(new Option('--embedded').hideHelp())
   .addHelpText(
     'after',
     `
@@ -456,7 +465,7 @@ After analysis, run 'openlore generate' to create OpenSpec files.
               }
             }
 
-            logger.info('Next step', "Run 'openlore generate' to create OpenSpec files");
+            if (!options.embedded) logger.info('Next step', "Run 'openlore generate' to create OpenSpec files");
             return;
           } catch (readErr) {
             logger.debug(`Could not read existing analysis summary: ${(readErr as Error).message}`);
@@ -733,34 +742,42 @@ After analysis, run 'openlore generate' to create OpenSpec files.
       }
       if (digestWritten) {
         console.log(`    └─ ${opts.output}CODEBASE.md`);
-        console.log('');
-        console.log('  Agent setup (one-time):');
-        console.log(`    Add to your CLAUDE.md or .clinerules:`);
-        console.log('');
-        console.log(`    @.openlore/analysis/CODEBASE.md`);
-        console.log('');
-        console.log('    ## openlore MCP tools — when to use them');
-        console.log('    | Situation                                       | Tool                              |');
-        console.log('    |-------------------------------------------------|-----------------------------------|');
-        console.log("    | Don't know which file/function handles a concept | search_code                      |");
-        console.log('    | Need call topology across many files            | get_subgraph / analyze_impact     |');
-        console.log('    | Starting a new task on an unfamiliar codebase   | orient                            |');
-        console.log('    | Planning where to add a feature                 | suggest_insertion_points          |');
-        console.log('    | Checking if code still matches spec             | check_spec_drift                  |');
-        console.log('    | Finding spec requirements by meaning            | search_specs                      |');
-      }
-      console.log('');
-      if (aiConfigsCreated.length > 0) {
-        console.log('  Agent config files:');
-        for (const { rel, created } of aiConfigsCreated) {
-          const tag = created ? '(created)' : '(already exists)';
-          console.log(`    ├─ ${rel}  ${tag}`);
+        // Agent-onboarding tip — skipped when `openlore install` runs analyze
+        // (install wires CLAUDE.md/.mcp.json/hooks itself, so this would contradict it).
+        if (!options.embedded) {
+          console.log('');
+          console.log('  Agent setup (one-time):');
+          console.log(`    Add to your CLAUDE.md or .clinerules:`);
+          console.log('');
+          console.log(`    @.openlore/analysis/CODEBASE.md`);
+          console.log('');
+          console.log('    ## openlore MCP tools — when to use them');
+          console.log('    | Situation                                       | Tool                              |');
+          console.log('    |-------------------------------------------------|-----------------------------------|');
+          console.log("    | Don't know which file/function handles a concept | search_code                      |");
+          console.log('    | Need call topology across many files            | get_subgraph / analyze_impact     |');
+          console.log('    | Starting a new task on an unfamiliar codebase   | orient                            |');
+          console.log('    | Planning where to add a feature                 | suggest_insertion_points          |');
+          console.log('    | Checking if code still matches spec             | check_spec_drift                  |');
+          console.log('    | Finding spec requirements by meaning            | search_specs                      |');
         }
-      } else {
-        console.log('  Agent config files: not generated');
-        console.log('    Tip: Re-run with --ai-configs to generate CLAUDE.md, .cursorrules, AGENTS.md, etc.');
       }
-      console.log('');
+      // "Agent config files" is install's concern; skip it on the embedded path so a
+      // user running `openlore install` never sees the contradictory "not generated" tip.
+      if (!options.embedded) {
+        console.log('');
+        if (aiConfigsCreated.length > 0) {
+          console.log('  Agent config files:');
+          for (const { rel, created } of aiConfigsCreated) {
+            const tag = created ? '(created)' : '(already exists)';
+            console.log(`    ├─ ${rel}  ${tag}`);
+          }
+        } else {
+          console.log('  Agent config files: not generated');
+          console.log('    Tip: Re-run with --ai-configs to generate CLAUDE.md, .cursorrules, AGENTS.md, etc.');
+        }
+        console.log('');
+      }
 
       // ========================================================================
       // PHASE 5: BUILD SEARCH INDEX
@@ -776,7 +793,7 @@ After analysis, run 'openlore generate' to create OpenSpec files.
 
       logger.success('Ready for generation!');
       logger.blank();
-      logger.info('Next step', "Run 'openlore generate' to create OpenSpec files");
+      if (!options.embedded) logger.info('Next step', "Run 'openlore generate' to create OpenSpec files");
 
     } catch (error) {
       logger.error(`Analysis failed: ${(error as Error).message}`);

@@ -72,4 +72,29 @@ describe('openlore install — auto index build', () => {
     expect(code).toBe(0);
     expect(await exists(join(dir, '.openlore'))).toBe(false);
   });
+
+  // Regression (v2.1.4 QA): install runs analyze with `--embedded`, so analyze must NOT
+  // print its agent-onboarding epilogue. Before the fix, a user running `openlore install`
+  // saw "Agent config files: not generated / Re-run with --ai-configs" and "Run 'openlore
+  // generate'" — directly contradicting install's own "[did create] AGENTS.md" / "Index
+  // built" output. Capture every stream install/analyze write to (buildIndex routes
+  // analyze's console.log through process.stderr.write) and assert those lines are gone.
+  it('does NOT print analyze\'s contradictory agent-onboarding epilogue (it wires agents itself)', async () => {
+    const chunks: string[] = [];
+    const push = (...a: unknown[]): boolean => { chunks.push(a.map(String).join(' ')); return true; };
+    const so = vi.spyOn(process.stdout, 'write').mockImplementation(push as unknown as typeof process.stdout.write);
+    const se = vi.spyOn(process.stderr, 'write').mockImplementation(push as unknown as typeof process.stderr.write);
+    const cl = vi.spyOn(console, 'log').mockImplementation(push);
+    const ce = vi.spyOn(console, 'error').mockImplementation(push);
+    try {
+      const code = await runInstall({ cwd: dir, agent: 'claude-code' });
+      expect(code).toBe(0);
+    } finally {
+      so.mockRestore(); se.mockRestore(); cl.mockRestore(); ce.mockRestore();
+    }
+    const out = chunks.join('\n');
+    expect(out).not.toContain('Agent config files: not generated');
+    expect(out).not.toContain('Agent setup (one-time)');
+    expect(out).not.toContain("Run 'openlore generate'");
+  }, 30_000);
 });

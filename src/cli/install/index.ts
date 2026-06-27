@@ -105,7 +105,10 @@ export async function buildIndex(cwd: string): Promise<void> {
     const { analyzeCommand } = await import('../commands/analyze.js');
     logger.discovery('Building search index (BM25; no network required)…');
     console.log = toStderr;
-    await analyzeCommand.parseAsync([], { from: 'user' });
+    // `--embedded`: install does the agent wiring (CLAUDE.md/.mcp.json/hooks) itself,
+    // so analyze must NOT also print its agent-onboarding tips or the "run generate"
+    // next-step — those contradict install's own output on the first-run path.
+    await analyzeCommand.parseAsync(['--embedded'], { from: 'user' });
     console.log = origLog;
     logger.success('Index built — orient() will return results in your next session.');
   } catch (err) {

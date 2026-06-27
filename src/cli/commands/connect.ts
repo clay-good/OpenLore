@@ -73,7 +73,7 @@ export const connectCommand = new Command('connect')
     'and SessionStart hook, and set the run permission. Omit the agent for an interactive picker.'
   )
   .argument('[agent]', 'Agent to connect (claude-code, cursor, cline, continue, agents-md)')
-  .option('--preset <name>', 'Wire the MCP server to a tool preset (minimal, navigation, memory, verify, federation, or full). Default (no preset) wires the lean navigation surface; pass "full" to wire all 62 tools (the prior default).')
+  .option('--preset <name>', 'Wire the MCP server to a tool preset (navigation, substrate, minimal, memory, verify, federation, coordination, or full). Default (no preset) wires the lean navigation surface; "substrate" adds the governance reads recall + verify_claim + blast_radius; pass "full" to wire all 72 tools (the prior default).')
   .option('--all-tools', 'Wire the full surface (alias of --preset full). Matches `openlore mcp --all-tools`.')
   .option('--dry-run', 'Print the planned changes without writing any files', false)
   .option('--force', 'Overwrite OpenLore-managed blocks even if hand-edited', false)
