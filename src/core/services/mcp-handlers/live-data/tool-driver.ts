@@ -40,6 +40,8 @@ export interface RepoFacts {
   specDomain?: string;
   /** A decision id captured from a prior record_decision run (mutating tools). */
   decisionId?: string;
+  /** A real environment variable name from the repo's inventory (env-impact). */
+  envVar?: string;
 }
 
 export interface ToolPlan {
@@ -66,6 +68,10 @@ const needQuery =
   (build: (f: RepoFacts, q: string) => Record<string, unknown>) =>
   (f: RepoFacts): Record<string, unknown> | null =>
     f.searchTerm ? build(f, f.searchTerm) : null;
+const needEnvVar =
+  (build: (f: RepoFacts, v: string) => Record<string, unknown>) =>
+  (f: RepoFacts): Record<string, unknown> | null =>
+    f.envVar ? build(f, f.envVar) : null;
 
 export const TOOL_REGISTRY: Record<string, ToolPlan> = {
   // ── directory-only read tools ────────────────────────────────────────────
@@ -177,6 +183,12 @@ export const TOOL_REGISTRY: Record<string, ToolPlan> = {
     kind: 'read',
     // Exception escape/handled analysis for a known function symbol over the cached graph.
     buildArgs: needFn((f, fn) => ({ directory: f.directory, symbol: fn })),
+  },
+  analyze_env_impact: {
+    kind: 'read',
+    // Blast radius of removing a real env var from the repo's inventory (derive-skips
+    // when the repo declares/reads no env vars in a supported language).
+    buildArgs: needEnvVar((f, v) => ({ directory: f.directory, name: v })),
   },
   get_function_body: {
     kind: 'read',

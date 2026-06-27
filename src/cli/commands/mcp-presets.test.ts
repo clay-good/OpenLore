@@ -447,8 +447,13 @@ describe('tools/list payload budget (spec-28)', () => {
   // conclusion tool (the error-handling analogue of analyze_impact). It joins ONLY the opt-in `full`
   // surface; it stays OUT of the lean navigation default, so the lean prefix is unchanged. The
   // residual is the genuine cost of its schema. Conscious decision, not silent drift.
+  // Bumped 82_000 → 84_000 when the `analyze_env_impact` tool was added to the full surface
+  // (change: add-env-config-impact-graph) — a read-only env-var-scoped impact conclusion tool (the
+  // configuration analogue of analyze_impact: "what breaks if I remove this env var?"). It joins ONLY
+  // the opt-in `full` surface; it stays OUT of the lean navigation default, so the lean prefix is
+  // unchanged. The residual is the genuine cost of its schema. Conscious decision, not silent drift.
   it('full surface stays within its prefix budget', () => {
-    expect(payloadBytes({ preset: 'full' })).toBeLessThan(82_000);
+    expect(payloadBytes({ preset: 'full' })).toBeLessThan(84_000);
   });
 
   it('the lean DEFAULT surface (no selector) is the lean navigation payload, not the full one', () => {

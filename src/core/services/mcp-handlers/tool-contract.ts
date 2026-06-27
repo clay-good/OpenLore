@@ -64,6 +64,7 @@ export const TOOL_OUTPUT_CLASS: Record<string, ToolOutputClass> = {
   get_duplicate_report: 'conclusion',
   find_clones: 'conclusion',
   analyze_error_propagation: 'conclusion',
+  analyze_env_impact: 'conclusion',
   get_function_skeleton: 'conclusion',
   get_god_functions: 'conclusion',
   check_spec_drift: 'conclusion',

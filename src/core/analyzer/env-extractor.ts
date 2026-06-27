@@ -223,3 +223,110 @@ export function summarizeEnvVars(vars: EnvVar[]): string {
   });
   return `Environment variables (${vars.length}):\n${lines.join('\n')}`;
 }
+
+// ============================================================================
+// LINE-PRECISE READ SITES (change: add-env-config-impact-graph)
+// ============================================================================
+
+/**
+ * One environment-variable READ in source, located to a line, with a per-site
+ * fallback verdict. The read-site refinement of {@link extractFromSource}: same
+ * per-language patterns, but it keeps WHERE each read is and whether THAT site
+ * has an immediate fallback — the input `analyze_env_impact` needs to map a read
+ * to its enclosing function and classify the break as hard vs. soft.
+ */
+export interface EnvReadSite {
+  /** Environment variable name, e.g. DATABASE_URL */
+  name: string;
+  /** Repo-relative path of the file the read is in */
+  file: string;
+  /** 1-based line of the read */
+  line: number;
+  /**
+   * True when no immediate fallback was detected AT THIS site (a hard break if
+   * the var is removed). A fallback elsewhere does not clear it — per-site only.
+   * A documented heuristic, not a guarantee.
+   */
+  required: boolean;
+}
+
+/** Build a sorted array of newline byte/char offsets for O(log n) line lookup. */
+function lineLookup(source: string): (idx: number) => number {
+  const starts: number[] = [0];
+  for (let i = 0; i < source.length; i++) {
+    if (source.charCodeAt(i) === 10 /* \n */) starts.push(i + 1);
+  }
+  return (idx: number): number => {
+    // Largest start <= idx → its 1-based line.
+    let lo = 0, hi = starts.length - 1, ans = 0;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (starts[mid] <= idx) { ans = mid; lo = mid + 1; } else hi = mid - 1;
+    }
+    return ans + 1;
+  };
+}
+
+/** JS/TS: a read has a site-local fallback when `?? `/`||` immediately follows. */
+function tsSiteRequired(source: string, afterIdx: number): boolean {
+  // Skip optional TS non-null `!` and whitespace, then look for ?? or ||.
+  const tail = source.slice(afterIdx).replace(/^\s*!?\s*/, '');
+  return !(tail.startsWith('??') || tail.startsWith('||'));
+}
+
+/** Ruby `ENV.fetch('X'…)`: a second argument is a default → not required. */
+function rubyFetchRequired(source: string, afterIdx: number): boolean {
+  const tail = source.slice(afterIdx).replace(/^\s*/, '');
+  // afterIdx is just past `ENV.fetch('X'` — a comma means a default follows.
+  return !tail.startsWith(',');
+}
+
+/**
+ * Extract every environment-variable READ site in one file, line-precise, reusing
+ * the existing per-language patterns (no new grammar). Returns [] for a file in a
+ * language the patterns do not cover — an honest absence, never a guessed read.
+ * Deterministic: stable order (line, then name).
+ */
+export function extractEnvReadSites(source: string, relPath: string, ext: string): EnvReadSite[] {
+  const sites: EnvReadSite[] = [];
+  const lineOf = lineLookup(source);
+  let m: RegExpExecArray | null;
+
+  if (['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'].includes(ext)) {
+    const re = new RegExp(TS_ENV_RE.source, 'g');
+    while ((m = re.exec(source)) !== null) {
+      const name = m[1] ?? m[2];
+      if (!name) continue;
+      const afterIdx = m.index + m[0].length;
+      sites.push({ name, file: relPath, line: lineOf(m.index), required: tsSiteRequired(source, afterIdx) });
+    }
+  } else if (['.py', '.pyw'].includes(ext)) {
+    const re = new RegExp(PY_ENV_RE.source, 'g');
+    while ((m = re.exec(source)) !== null) {
+      const name = m[1] ?? m[2] ?? m[3];
+      if (!name) continue;
+      // Only os.environ["X"] (m[1]) is a strict, defaultless read.
+      sites.push({ name, file: relPath, line: lineOf(m.index), required: m[1] !== undefined });
+    }
+  } else if (ext === '.go') {
+    const re = new RegExp(GO_ENV_RE.source, 'g');
+    while ((m = re.exec(source)) !== null) {
+      if (!m[1]) continue;
+      // os.Getenv returns "" rather than failing — never a hard break.
+      sites.push({ name: m[1], file: relPath, line: lineOf(m.index), required: false });
+    }
+  } else if (ext === '.rb') {
+    const re = new RegExp(RUBY_ENV_RE.source, 'g');
+    while ((m = re.exec(source)) !== null) {
+      const name = m[1] ?? m[2];
+      if (!name) continue;
+      const afterIdx = m.index + m[0].length;
+      // ENV["X"] (m[1]) is strict; ENV.fetch("X") (m[2]) is strict only without a default arg.
+      const required = m[1] !== undefined ? true : rubyFetchRequired(source, afterIdx);
+      sites.push({ name, file: relPath, line: lineOf(m.index), required });
+    }
+  }
+
+  sites.sort((a, b) => a.line - b.line || a.name.localeCompare(b.name));
+  return sites;
+}

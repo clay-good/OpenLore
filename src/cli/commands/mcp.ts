@@ -1758,6 +1758,32 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: 'analyze_env_impact',
+    description:
+      'USE THIS WHEN: you are about to remove or rename an environment variable and want to know ' +
+      '"what breaks?" — the configuration analogue of analyze_impact. Given an env var `name` (e.g. ' +
+      'DATABASE_URL), it returns the line-precise `readSites` (file/line/enclosing function; a read ' +
+      'outside any function is reported module-level), the `affectedFunctions` (upstream callers that ' +
+      'transitively reach a read — the blast radius), the `reachingTests` to run, whether the var is ' +
+      'declared with a default, and per-site `required` (a read with no site-local fallback is a hard ' +
+      'break). Computed live from the cached call graph + a re-read of the files the env inventory ' +
+      'flags for the var (no new artifact). SCOPE: environment-variable reads in TypeScript / ' +
+      'JavaScript / Python / Go / Ruby — config-object key reads are a disclosed out-of-scope ' +
+      'boundary, never guessed. HONEST: an unknown var returns not-found + candidates (never an empty ' +
+      '"unused"); a module-level read and the call graph\'s resolution limits are disclosed in ' +
+      '`boundaries`, so the blast radius is a SOUND LOWER BOUND. Deterministic, offline, no LLM. Run ' +
+      'analyze_codebase first.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        directory: { type: 'string', description: DIR_DESC },
+        name: { type: 'string', description: 'The environment variable to analyze, e.g. DATABASE_URL.' },
+        maxDepth: { type: 'number', description: 'Backward-reachability depth bound (default 12, clamped to [1, 30]). Truncation is disclosed in boundaries.' },
+      },
+      required: ['directory', 'name'],
+    },
+  },
+  {
     name: 'detect_changes',
     description:
       'Detect recently changed functions and rank them by blast radius. ' +
@@ -2013,6 +2039,7 @@ const TOOL_ANNOTATIONS: Record<string, typeof _RO | typeof _RWI | typeof _RW> = 
   briefing_since: _RO,
   find_clones: _RO,
   analyze_error_propagation: _RO,
+  analyze_env_impact: _RO,
 };
 
 // Tools that touch external entities (LLM / network) → openWorldHint: true.

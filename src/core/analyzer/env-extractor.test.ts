@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { extractEnvVars, summarizeEnvVars } from './env-extractor.js';
+import { extractEnvVars, summarizeEnvVars, extractEnvReadSites } from './env-extractor.js';
 
 vi.mock('node:fs/promises', () => ({
   readFile: vi.fn(),
@@ -140,5 +140,62 @@ describe('summarizeEnvVars', () => {
     expect(summary).toContain('PORT');
     expect(summary).toContain('[has-default]');
     expect(summary).toContain('HTTP port');
+  });
+});
+
+describe('extractEnvReadSites (change: add-env-config-impact-graph)', () => {
+  it('reports a required TS read with no fallback', () => {
+    const src = 'const a = 1;\nconst url = process.env.DATABASE_URL;\n';
+    const sites = extractEnvReadSites(src, 'src/db.ts', '.ts');
+    expect(sites).toEqual([{ name: 'DATABASE_URL', file: 'src/db.ts', line: 2, required: true }]);
+  });
+
+  it('marks a TS read with a ?? fallback not required', () => {
+    const src = "const port = process.env.PORT ?? '3000';\n";
+    const sites = extractEnvReadSites(src, 'src/server.ts', '.ts');
+    expect(sites[0]).toMatchObject({ name: 'PORT', required: false });
+  });
+
+  it('marks a TS read with a || fallback not required', () => {
+    const src = "const host = process.env.HOST || 'localhost';\n";
+    expect(extractEnvReadSites(src, 'a.ts', '.ts')[0]).toMatchObject({ name: 'HOST', required: false });
+  });
+
+  it('handles the bracket form and TS non-null before fallback', () => {
+    const src = "const x = process.env['API_KEY']!;\nconst y = process.env.OPT! ?? 'd';\n";
+    const sites = extractEnvReadSites(src, 'a.ts', '.ts');
+    expect(sites.find(s => s.name === 'API_KEY')).toMatchObject({ required: true, line: 1 });
+    expect(sites.find(s => s.name === 'OPT')).toMatchObject({ required: false, line: 2 });
+  });
+
+  it('distinguishes Python strict subscript from .get/.getenv per site', () => {
+    const src = "import os\nsecret = os.environ['SECRET']\nregion = os.getenv('REGION')\nx = os.environ.get('OPT')\n";
+    const sites = extractEnvReadSites(src, 'app.py', '.py');
+    expect(sites.find(s => s.name === 'SECRET')).toMatchObject({ required: true });
+    expect(sites.find(s => s.name === 'REGION')).toMatchObject({ required: false });
+    expect(sites.find(s => s.name === 'OPT')).toMatchObject({ required: false });
+  });
+
+  it('treats Go os.Getenv as never-required', () => {
+    const src = 'package main\nvar p = os.Getenv("PORT")\n';
+    expect(extractEnvReadSites(src, 'main.go', '.go')[0]).toMatchObject({ name: 'PORT', required: false });
+  });
+
+  it('treats Ruby ENV[] strict and ENV.fetch default-aware', () => {
+    const src = "a = ENV['SECRET']\nb = ENV.fetch('REGION')\nc = ENV.fetch('OPT', 'd')\n";
+    const sites = extractEnvReadSites(src, 'app.rb', '.rb');
+    expect(sites.find(s => s.name === 'SECRET')).toMatchObject({ required: true });
+    expect(sites.find(s => s.name === 'REGION')).toMatchObject({ required: true });
+    expect(sites.find(s => s.name === 'OPT')).toMatchObject({ required: false });
+  });
+
+  it('returns nothing for an unsupported language', () => {
+    expect(extractEnvReadSites('let x = os.Getenv("X")', 'a.rs', '.rs')).toEqual([]);
+  });
+
+  it('is deterministic and line-precise across multiple reads', () => {
+    const src = 'a\nb\nprocess.env.B_VAR\nc\nprocess.env.A_VAR\n';
+    const sites = extractEnvReadSites(src, 'a.ts', '.ts');
+    expect(sites.map(s => [s.name, s.line])).toEqual([['B_VAR', 3], ['A_VAR', 5]]);
   });
 });

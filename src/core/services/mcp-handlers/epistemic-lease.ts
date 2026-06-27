@@ -169,6 +169,7 @@ const TOOL_WEIGHTS: Record<string, number> = {
   get_duplicate_report: 3,
   find_clones: 3,
   analyze_error_propagation: 3,
+  analyze_env_impact: 3,
   check_spec_drift: 3,
   detect_changes: 3,
   audit_spec_coverage: 3,

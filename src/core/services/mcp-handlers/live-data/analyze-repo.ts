@@ -136,6 +136,14 @@ export async function deriveFacts(dir: string): Promise<RepoFacts> {
   collectStrings(domains, 'name', domainList);
   if (domainList[0]) facts.specDomain = domainList[0];
 
+  // Env var only if the repo declares/reads one (for analyze_env_impact). Pick the
+  // alphabetical-first name for a stable, deterministic arg.
+  const envResult = await safeDispatch('get_env_vars', dir);
+  const envNames: string[] = [];
+  collectStrings(envResult, 'name', envNames);
+  const sortedEnv = [...envNames].sort((a, b) => a.localeCompare(b));
+  if (sortedEnv[0]) facts.envVar = sortedEnv[0];
+
   return facts;
 }
 
