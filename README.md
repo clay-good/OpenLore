@@ -1,9 +1,9 @@
 <h1 align="center">OpenLore</h1>
 
 <p align="center">
-  <strong>A local-first, deterministic intelligence graph that eliminates repetitive file reads for AI coding agents</strong><br>
-  tracks context freshness, and unifies code, infrastructure, and architectural decisions<br>
-  into a single, safety-gated governance runtime.
+  <strong>Deterministic, local-first memory &amp; governance for AI coding agents.</strong><br>
+  Stop your agent re-reading the same files every task — one call returns the code a task touches and<br>
+  the risk of changing it. No API key, no LLM in the hot path.
 </p>
 
 <p align="center">
