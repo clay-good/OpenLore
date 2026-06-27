@@ -424,6 +424,39 @@ describe('CallGraphBuilder — stable nested-function identity', () => {
       e.callerId === 'src/rec.ts::T.b/visit' && e.calleeId === 'src/rec.ts::T.a/visit')).toBe(false);
   });
 
+  // The shared query-spec extractor (C#/Kotlin/Scala/…) dedupes colliding ids at
+  // extraction; a genuinely NESTED twin must still survive to be re-keyed (it used to be
+  // dropped before disambiguation, leaving those languages merging nested twins) while a
+  // true overload at the same scope must still collapse to one node.
+  it('disambiguates nested twins in a query-spec language (C#) yet still collapses overloads', async () => {
+    const nested = await new CallGraphBuilder().build([{
+      path: 'x.cs', language: 'C#',
+      content:
+        `class Order {\n` +
+        `  void Process() { void Validate() { SinkA(); } Validate(); }\n` +
+        `  void Submit() { void Validate() { SinkB(); } Validate(); }\n` +
+        `  void SinkA() {} void SinkB() {}\n` +
+        `}`,
+    }]);
+    const vids = Array.from(nested.nodes.values()).filter(n => n.name === 'Validate').map(n => n.id).sort();
+    expect(vids).toEqual(['x.cs::Order.Process/Validate', 'x.cs::Order.Submit/Validate']);
+    const byId = new Map(Array.from(nested.nodes.values()).map(n => [n.id, n]));
+    const edge = (caller: string) => nested.edges.find(e => e.callerId === caller && byId.get(e.calleeId)?.name === 'Validate')?.calleeId;
+    expect(edge('x.cs::Order.Process')).toBe('x.cs::Order.Process/Validate');
+    expect(edge('x.cs::Order.Submit')).toBe('x.cs::Order.Submit/Validate');
+
+    // Overloads (same id at class scope, not nested) MUST still collapse to one node.
+    const overload = await new CallGraphBuilder().build([{
+      path: 'o.cs', language: 'C#',
+      content:
+        `class Calc {\n` +
+        `  int Add(int a, int b) { return a + b; }\n` +
+        `  string Add(string a, string b) { return a + b; }\n` +
+        `}`,
+    }]);
+    expect(Array.from(overload.nodes.values()).filter(n => n.name === 'Add').map(n => n.id)).toEqual(['o.cs::Calc.Add']);
+  });
+
   // Re-keying a nested node must carry its CFG overlay with it. The CFG is collected by
   // start byte during extraction and re-attached to the FINAL node id, so a re-keyed
   // nested function is NOT left without a CFG (and no stale CFG orphans under the

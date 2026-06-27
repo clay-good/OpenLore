@@ -2520,7 +2520,20 @@ async function extractByQueries(
       const className = (spec.classTypes.size ? enclosingGroupName(fnNode, spec.classTypes) : undefined)
         ?? spec.extraClassName?.(fnNode);
       const id = className ? `${filePath}::${className}.${name}` : `${filePath}::${name}`;
-      if (nodes.some(n => n.id === id)) continue; // collapse multi-clause/overloads to one node
+      if (nodes.some(n => n.id === id)) {
+        // A colliding id is normally a multi-clause definition / overload and collapses
+        // to one node. But a genuinely NESTED function — byte-contained in an already-seen
+        // function with a DIFFERENT id — must survive so ensureUniqueNodeIds can re-key it
+        // to a distinct scope-qualified id (change: add-stable-nested-function-identity).
+        // Without this, query-spec languages (C#/Kotlin/Scala/…) keep merging same-named
+        // nested twins and misrouting their calls — the exact bug this change fixes for the
+        // dedicated extractors. The enclosing function is matched before its nested child
+        // (document order), so it is present here. A same-id container (the same function
+        // matched twice) has no different-id container and still collapses.
+        const container = nodes.find(n =>
+          n.id !== id && n.startIndex <= fnNode.startIndex && fnNode.endIndex <= n.endIndex);
+        if (!container) continue; // true sibling overload / multi-clause — collapse to one node
+      }
       // CFG/def-use overlay (spec: add-intraprocedural-cfg-dataflow-overlay) for
       // spec-08 languages that have a CfgLangSpec; others fail soft to no overlay.
       // Built inside withTree while the (possibly WASM) tree is live.

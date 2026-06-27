@@ -44,8 +44,13 @@ one node at id aggregation.
   (no last-write-wins loss against the colliding bare id) and (b) no CFG is orphaned under an id that
   no node carries. CFG-dependent capabilities (def-use dataflow, `analyze_error_propagation`) SHALL
   therefore resolve a re-keyed nested function's overlay by its node id.
-- Applies to every language whose extractor produces function nodes; an extractor that does not emit
-  nested-function nodes is unaffected (a no-op).
+- Applies to every language whose extractor produces function nodes — the dedicated extractors
+  (TypeScript/JavaScript, Python, Go, Rust, Ruby, Java, C++, Swift, Dart, Elixir) AND the shared
+  query-spec extractor (C#, Kotlin, Scala, PHP, Lua, …). The query-spec extractor's extraction-time
+  id-dedup (which collapses multi-clause definitions / overloads) SHALL NOT drop a genuinely nested
+  twin before disambiguation: a colliding node byte-contained in a different-id function survives to be
+  re-keyed, while a true same-scope overload still collapses to one node. An extractor that does not
+  emit nested-function nodes is unaffected (a no-op).
 
 #### Scenario: same-named nested functions get distinct nodes
 
@@ -75,6 +80,14 @@ one node at id aggregation.
   the inner declaration, both with id `file::createOrder`)
 - **WHEN** the call graph is built
 - **THEN** there is exactly ONE `createOrder` node (the same-id container is not treated as nested)
+
+#### Scenario: a query-spec language splits nested twins yet collapses overloads
+
+- **GIVEN** a C# class with two methods each containing a nested local `void Validate(){}` (distinct
+  bodies), and separately a class with two `Add` method overloads
+- **WHEN** the call graph is built
+- **THEN** the two nested `Validate`s become distinct nodes (`…Process/Validate`, `…Submit/Validate`)
+  with their calls routed lexically, while the two `Add` overloads still collapse to one node
 
 #### Scenario: an incoming nested call resolves by lexical scope
 

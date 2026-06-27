@@ -245,8 +245,12 @@ All notable changes to OpenLore are documented here. This project adheres to
   colliding with a same-named top-level one previously shared one id and were merged at id aggregation
   (last-write-wins) — one real function was silently dropped and its edges/fan-in/out folded into the
   survivor. Pre-existing across every language; it surfaced while making `this.method()` resolution
-  load-bearing. A genuinely nested function (byte-contained in another function node with a *different*
-  id) now gets a stable, scope-qualified id derived from its enclosing scope — `file::A.m1/helper`, with
+  load-bearing. Fixed for both the dedicated extractors (TS/JS, Python, Go, Rust, Ruby, Java, C++,
+  Swift, Dart, Elixir) and the shared query-spec extractor (C#, Kotlin, Scala, PHP, Lua) — whose
+  extraction-time overload-dedup no longer drops a genuinely nested twin before disambiguation, so C#/
+  Kotlin/Scala nested functions split too (true overloads still collapse). A genuinely nested function
+  (byte-contained in another function node with a *different* id) now gets a stable, scope-qualified id
+  derived from its enclosing scope — `file::A.m1/helper`, with
   a document-order ordinal `…/helper#2` for same-scope twins — never a byte offset, so it is **not**
   reported removed-and-re-added by `structural_diff` / `change_impact_certificate` when unrelated code
   shifts. Intentional collapses are preserved: an `export function` / decorated-definition wrapper
