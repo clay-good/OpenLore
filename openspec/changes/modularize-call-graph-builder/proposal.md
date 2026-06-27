@@ -21,6 +21,15 @@
 > strengthened to serialize each node's `docstring` + `signature` (so both moved functions are exercised
 > across TS + Python), then captured before/after: identical (SHA-256 `58107ac0…`).
 >
+> **Slice 3b — `call-graph-external.ts` (DONE).** The EXTERNAL NODE HELPER section (`classifyExternal`,
+> the `EXTERNAL_*` regex/set tables, `getOrCreateExternalNode`) moved out — pure external-call
+> classification + leaf-node interning, depending only on the `ExternalKind`/`FunctionNode` types. All
+> file-internal; only `getOrCreateExternalNode` is imported back, `classifyExternal` + the tables stay
+> private to the new module. The now-unused internal `ExternalKind` binding was dropped (still
+> re-exported on the barrel). call-graph.ts: 4,951 → 4,887 lines. Oracle first extended to exercise
+> `externalKind` across http/db/unknown; before/after identical (SHA-256 `3a118017…`). (An additional
+> clean section-banner seam beyond the proposal's illustrative module list.)
+>
 > **Each slice is verified the same four ways:** export surface byte-for-byte identical (multi-line-aware
 > diff), build/lint/typecheck clean, full suite green (279 files / 5534 tests), and the byte-level
 > snapshot oracle hashes identically before/after. Remaining slices (`call-graph-nodes.ts`,
