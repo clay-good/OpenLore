@@ -45,13 +45,22 @@
 > lines. The oracle was first extended to serialize the full `cfgs` overlay (blocks/edges/defUse/params)
 > and to exercise the arrow + decorated body-digging paths; before/after identical (SHA-256 `34c7bce5…`).
 >
+> **Slice 3e — `call-graph-builtins.ts` (DONE).** The callee-filtering sub-part of the grab-bag CONSTANTS
+> section (the `*_IGNORED` per-language tables, `IGNORED_BY_LANGUAGE`/`ALL_IGNORED_CALLEES`, the
+> `isIgnoredCallee` predicate, and `SELF_CALL_RECEIVERS`/`isSelfReceiver`) moved out — pure data + string
+> predicates, zero deps, zero state. File-internal; only the two predicates are imported back, the tables
+> stay private. `HUB_THRESHOLD` and the style-tally helper stay put (different concerns). call-graph.ts:
+> 4,846 → 4,741 lines. The oracle was first extended with ignored-builtin calls (print/len/JSON/Math) so
+> `isIgnoredCallee`'s drop-or-keep outcome is captured; before/after identical (SHA-256 `5fbe0719…`).
+>
 > **Each slice is verified the same four ways:** export surface byte-for-byte identical (multi-line-aware
 > diff), build/lint/typecheck clean, full suite green (279 files / 5534 tests), and the byte-level
-> snapshot oracle hashes identically before/after. `call-graph.ts` is now **5,425 → 4,846 lines** across
-> five extracted sibling modules (types, extract, external, complexity, cfg). Remaining slices
-> (`call-graph-dispatch.ts`, `grammar-loader.ts`, `call-graph-nodes.ts`) are unstarted — one per commit,
-> same gates. (The SERIALIZATION HELPER section is deliberately NOT a slice: its `extractFileStyle` calls
-> the in-file language extractors, so extracting it would create a circular import.)
+> snapshot oracle hashes identically before/after. `call-graph.ts` is now **5,425 → 4,741 lines** across
+> six extracted sibling modules (types, extract, external, complexity, cfg, builtins). Remaining slices
+> (`grammar-loader.ts`, `call-graph-dispatch.ts`, `call-graph-nodes.ts`) are unstarted — one per commit,
+> same gates; `call-graph-nodes.ts` (a 27-fan-in hub + CFG side-table + IaC coupling) is the riskiest and
+> is deliberately last. (The SERIALIZATION HELPER section is deliberately NOT a slice: its
+> `extractFileStyle` calls the in-file language extractors, so extracting it would create a circular import.)
 
 ## The gap
 
