@@ -4877,7 +4877,24 @@ export class CallGraphBuilder {
           calleeNode = getOrCreateExternalNode(raw.calleeName, allNodes);
           confidence = 'external';
         } else {
-          const sameFile = candidates.find(c => c.filePath === callerNode.filePath);
+          const sameFileCands = candidates.filter(c => c.filePath === callerNode.filePath);
+          // Lexical preference: a call to a same-named function resolves to the twin
+          // NESTED within the caller's own span (byte-contained), not merely the first
+          // same-file homonym. Two same-named nested functions are now distinct nodes
+          // (change: add-stable-nested-function-identity); without this a nested call
+          // would bind to whichever twin sorts first and misroute into a sibling scope
+          // (e.g. processB()'s validate() resolving to processA's). Among contained
+          // candidates prefer the NARROWEST (most-local) enclosing definition; the
+          // caller itself is excluded so genuine recursion still falls through.
+          const nested = sameFileCands
+            .filter(c => c !== callerNode && c.startIndex >= callerNode.startIndex && c.endIndex <= callerNode.endIndex)
+            .sort((a, b) => (a.endIndex - a.startIndex) - (b.endIndex - b.startIndex));
+          // A function nested in the caller shadows the caller's own name, so it wins;
+          // otherwise a self-named candidate is a recursive call and binds to the caller
+          // itself (a nested `visit(){ … visit() … }` recurses, it does not jump to a
+          // sibling scope's `visit`); only then fall back to the first same-file homonym.
+          const recursive = sameFileCands.find(c => c === callerNode);
+          const sameFile = nested[0] ?? recursive ?? sameFileCands[0];
           if (sameFile) { calleeNode = sameFile; confidence = 'same_file'; }
           else { calleeNode = candidates[0]; confidence = 'name_only'; }
         }

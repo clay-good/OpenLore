@@ -1,7 +1,7 @@
 # Stable identity for nested functions: stop collapsing same-named nested functions into one node
 
 > Status: IMPLEMENTED (branch `feat/stable-nested-function-identity`, off main). `npm run build` clean;
-> `vitest run src examples` green (273 files / 5376 tests). A first attempt in PR #213 used an unstable
+> `vitest run src examples` green (273 files / 5378 tests). A first attempt in PR #213 used an unstable
 > positional discriminator and was reverted; this delivers the stable enclosing-scope approach. The
 > live build re-keys genuine nested collisions only (e.g. two `cleanup` arrows in `startMcpServer`, two
 > `getDiff` arrows in `extractFromDiff`) — a handful on the OpenLore repo, no churn elsewhere.
@@ -71,7 +71,15 @@ which shifts and makes the node read as removed+added on every diff).
    unchanged by re-keying) and re-attaches it to the FINAL node id after disambiguation, in every
    cfg-bearing extractor. So `analyze_error_propagation` / def-use resolve a re-keyed nested function's
    overlay by its node id — exactly the nodes this change makes addressable.
-6. **`stableId` scope.** The PATH id (`file::…`) is now unique and stable for nested functions — the
+6. **Resolve incoming calls by lexical scope.** Splitting the twins is only half the fix: the same-file
+   call resolver picked the FIRST same-named candidate, so once two nested `validate`s became distinct
+   nodes, `processB()`'s `validate()` misrouted to `processA`'s. The resolver now prefers the twin
+   byte-NESTED in the caller (narrowest, since an inner def shadows the name), treats a self-named
+   candidate as recursion (binds to the caller — a nested `visit(){ … visit() … }` recurses, it does
+   not jump scopes), and otherwise keeps the first-same-file fallback. Localized to the same-file
+   strategy; a no-op when there is a single candidate. Verified end-to-end via `analyze_error_propagation`
+   (processB now reports its own `TypeError`, not processA's `RangeError`).
+7. **`stableId` scope.** The PATH id (`file::…`) is now unique and stable for nested functions — the
    structural fix every node-id and edge consumer needs. The content-addressed `stableId`
    (`scip/moniker.ts`) is derived from `className.name(signature)`, not the path id, so two nested
    twins still share a `stableId` — the SAME documented "homonym" completeness limit

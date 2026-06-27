@@ -21,6 +21,13 @@ one node at id aggregation.
   both are intentional, separately-specified behavior.
 - Disambiguation SHALL occur before call edges are resolved, so an edge whose caller is a nested
   function carries that nested function's unique id (not the merged twin's).
+- A call to a same-named function with multiple same-file candidates SHALL resolve by lexical scope: a
+  twin byte-NESTED within the caller's own span wins (the narrowest such, since an inner definition
+  shadows an outer name), and a self-named candidate is a recursive call that binds to the CALLER
+  itself — so a method's `validate()` reaches its OWN nested `validate` and a recursive nested
+  `visit(){ … visit() … }` recurses rather than jumping to a sibling scope's twin. Absent a nested or
+  recursive match the existing first-same-file fallback applies. (Without this, the now-distinct twins
+  would misroute every incoming nested call to whichever twin sorts first.)
 - Two same-named functions nested in the SAME enclosing scope SHALL be disambiguated by a
   deterministic, document-order ordinal that is stable as long as the enclosing scope's preceding
   structure is unchanged.
@@ -68,6 +75,14 @@ one node at id aggregation.
   the inner declaration, both with id `file::createOrder`)
 - **WHEN** the call graph is built
 - **THEN** there is exactly ONE `createOrder` node (the same-id container is not treated as nested)
+
+#### Scenario: an incoming nested call resolves by lexical scope
+
+- **GIVEN** two methods `processA`/`processB` that each contain their own nested `validate`, plus a
+  third method whose nested `visit` calls itself recursively
+- **WHEN** the call graph is built
+- **THEN** `processA`'s `validate()` edge targets `…processA/validate`, `processB`'s targets
+  `…processB/validate` (no cross-scope misroute), and the recursive `visit` edge targets its own node
 
 #### Scenario: a re-keyed nested function keeps its CFG overlay
 

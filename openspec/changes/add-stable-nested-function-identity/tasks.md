@@ -13,6 +13,10 @@
       `dedupeOverlappingCalls`, C++, Swift, generic `extractByQueries`, Dart, Elixir) AFTER node
       extraction, BEFORE call extraction — so `rawEdge.callerId` carries the unique id.
 - [x] Outermost→innermost processing so an enclosing function's id is final before a child qualifies.
+- [x] Lexical incoming-call resolution: the same-file strategy prefers the twin byte-nested in the
+      caller (narrowest), binds a self-named candidate as recursion to the caller, else first-same-file.
+      Stops the now-distinct twins from misrouting every incoming nested call to the first one
+      (`processB()`'s `validate()` reaching `processA`'s). No-op for the single-candidate common case.
 - [x] CFG side-table keyed by the FINAL id (avoid the CFG-mismatch a re-key would otherwise leave):
       `materializeCfgByNodeId` collects each function's CFG during extraction keyed by its start byte
       (unique per AST node, unchanged by re-keying), then re-attaches it to the final node id in every
@@ -39,9 +43,13 @@
 - [x] Same-scope twin ordinal test.
 - [x] Export-wrapper scope-contract test.
 - [x] CFG-overlay survives re-key: each re-keyed nested function keeps its OWN CFG, no orphan key.
+- [x] Incoming nested call resolves to the caller's own twin; recursive nested call binds to itself.
 
 ## 6. Verify
-- [x] `npm run build`; `vitest run src examples` green (273 files / 5376 tests).
+- [x] `npm run build`; `vitest run src examples` green (273 files / 5378 tests).
+- [x] End-to-end via the real `openlore error-propagation` CLI: `processB` reports its own `TypeError`
+      (not `processA`'s `RangeError`); real-repo dogfood of `cfg.ts`'s recursive `visit` twins drops
+      cross-scope misroutes 7→0.
 - [x] Dogfood on the OpenLore repo: genuine nested collisions now distinct (e.g. two `cleanup` arrows
       in `startMcpServer`, two `getDiff` arrows in `extractFromDiff`); a handful repo-wide, no churn
       elsewhere.

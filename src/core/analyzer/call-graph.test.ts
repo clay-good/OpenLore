@@ -381,6 +381,49 @@ describe('CallGraphBuilder — stable nested-function identity', () => {
     expect(ids).toEqual(['src/e.ts::createOrder']); // one node, no `createOrder/createOrder`
   });
 
+  // A call to a same-named function must bind to the twin nested in the CALLER's own
+  // scope, not merely the first same-file homonym. The node-split makes the two `validate`
+  // distinct nodes; the resolver must then route each method's `validate()` call to its own
+  // nested validate (else processB would misroute into processA's scope).
+  it('routes a nested call to the twin in the callers own scope (lexical resolution)', async () => {
+    const result = await new CallGraphBuilder().build([{
+      path: 'src/svc.ts', language: 'TypeScript',
+      content:
+        `class Service {\n` +
+        `  processA() { function validate(x: number) { return sinkA(x); } return validate(1); }\n` +
+        `  processB() { function validate(y: string) { return sinkB(y); } return validate('z'); }\n` +
+        `}\n` +
+        `function sinkA(n: number){ return n; }\nfunction sinkB(s: string){ return s; }`,
+    }]);
+    const byId = new Map(Array.from(result.nodes.values()).map(n => [n.id, n]));
+    const edgeFrom = (callerId: string, calleeName: string) =>
+      result.edges.find(e => e.callerId === callerId && byId.get(e.calleeId)?.name === calleeName);
+    // Each method calls ITS OWN nested validate, not the first one.
+    expect(edgeFrom('src/svc.ts::Service.processA', 'validate')?.calleeId).toBe('src/svc.ts::Service.processA/validate');
+    expect(edgeFrom('src/svc.ts::Service.processB', 'validate')?.calleeId).toBe('src/svc.ts::Service.processB/validate');
+    // And each validate keeps its own distinct downstream (no cross-wiring).
+    expect(edgePairs(result)).toContain('validate→sinkA');
+    expect(edgePairs(result)).toContain('validate→sinkB');
+  });
+
+  it('binds a recursive nested function to ITSELF, not a same-named sibling-scope twin', async () => {
+    const result = await new CallGraphBuilder().build([{
+      path: 'src/rec.ts', language: 'TypeScript',
+      content:
+        `class T {\n` +
+        `  a() { function visit(n: number){ if (n) visit(n - 1); } return visit(3); }\n` +
+        `  b() { function visit(n: number){ if (n) visit(n - 1); } return visit(3); }\n` +
+        `}`,
+    }]);
+    const recursesToSelf = (id: string) =>
+      result.edges.some(e => e.callerId === id && e.calleeId === id);
+    expect(recursesToSelf('src/rec.ts::T.a/visit')).toBe(true);
+    expect(recursesToSelf('src/rec.ts::T.b/visit')).toBe(true);
+    // The recursive call must NOT cross into the other method's visit.
+    expect(result.edges.some(e =>
+      e.callerId === 'src/rec.ts::T.b/visit' && e.calleeId === 'src/rec.ts::T.a/visit')).toBe(false);
+  });
+
   // Re-keying a nested node must carry its CFG overlay with it. The CFG is collected by
   // start byte during extraction and re-attached to the FINAL node id, so a re-keyed
   // nested function is NOT left without a CFG (and no stale CFG orphans under the
