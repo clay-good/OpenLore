@@ -1,7 +1,7 @@
 # Modularize the call-graph builder behind a stable barrel
 
-> Status: IN PROGRESS (first slice landed 2026-06-27). Behavior-preserving refactor, taken in safe
-> slices (the proposal explicitly wants this opportunistic, not a stop-the-world rewrite).
+> Status: SUBSTANTIALLY COMPLETE — intentionally bounded (2026-06-27). Behavior-preserving refactor,
+> taken in safe slices (the proposal explicitly wants this opportunistic, not a stop-the-world rewrite).
 > `src/core/analyzer/call-graph.ts` was 5,425 lines and is the repository's most-imported file
 > (155 importers) and a high-churn hotspot. It is being decomposed into cohesive sibling modules
 > **behind an unchanged public barrel**, so the 155 importers do not move and behavior is byte-identical.
@@ -55,12 +55,36 @@
 >
 > **Each slice is verified the same four ways:** export surface byte-for-byte identical (multi-line-aware
 > diff), build/lint/typecheck clean, full suite green (279 files / 5534 tests), and the byte-level
-> snapshot oracle hashes identically before/after. `call-graph.ts` is now **5,425 → 4,741 lines** across
-> six extracted sibling modules (types, extract, external, complexity, cfg, builtins). Remaining slices
-> (`grammar-loader.ts`, `call-graph-dispatch.ts`, `call-graph-nodes.ts`) are unstarted — one per commit,
-> same gates; `call-graph-nodes.ts` (a 27-fan-in hub + CFG side-table + IaC coupling) is the riskiest and
-> is deliberately last. (The SERIALIZATION HELPER section is deliberately NOT a slice: its
-> `extractFileStyle` calls the in-file language extractors, so extracting it would create a circular import.)
+> snapshot oracle hashes identically before/after. `call-graph.ts` is now **5,425 → 4,741 lines** (−684)
+> across six extracted sibling modules (types, extract, external, complexity, cfg, builtins).
+>
+> **Scope decision (2026-06-27): this change is SUBSTANTIALLY COMPLETE and intentionally bounded.** The
+> spec's deliverable — the `StableCallGraphBarrel` *invariant* plus a proven, repeatable,
+> byte-identical-verified extraction methodology — is satisfied (demonstrated six times). That invariant
+> governs HOW to extract, not a mandate to extract every section, and the illustrative module table below
+> is "for example," not a checklist. All the clean, low-risk, single-concern seams are now out. The three
+> remaining candidates are deliberately NOT taken here, on a value-vs-risk basis (the dominant real
+> benefit is merge-contention + cognitive-load relief, which tracks churn — not recompile blast radius,
+> which TypeScript's transitive rebuild largely negates):
+> - **`call-graph-nodes.ts` — WON'T DO.** A 27-fan-in hub (`findEnclosingFunction`) plus mutable CFG
+>   side-table machinery (`ensureUniqueNodeIds`/`materializeCfgByNodeId`) and IaC coupling
+>   (`linkCodeToInfra`). Low-churn *core* machinery, so little merge-contention value, and the highest-risk
+>   code in the file — a CFG side-table regression already occurred here earlier in this PR's history.
+>   Relocating it behind the barrel would not reduce its coupling, only move it: net-negative ROI.
+> - **`grammar-loader.ts` — DEFERRED (and NOT the clean leaf the table below implies).** On inspection,
+>   grammar loading is TWO subsystems split across the file — the native parser singletons + ~13 getters
+>   (~200 lines) AND a separate `_grammarHandleCache`/`warnUnavailable` handle system (~120 lines, ~1,500
+>   lines away) — tied together by the shared `__resetGrammarCacheForTests` reset that a test imports.
+>   Extracting it cleanly is a two-location, stateful job, not a small slice; worth doing only when
+>   someone is already working in grammar loading.
+> - **`call-graph-dispatch.ts` — DEFERRED (opportunistic).** The largest, highest-churn remaining section
+>   (dynamic-dispatch edge synthesis) — the best *future* size + merge-contention payoff, but a big,
+>   careful job whose verification needs the snapshot oracle first extended to cover synthesized edges.
+>
+> The barrel pattern + the snapshot-oracle recipe are documented here and across the slice commits, so any
+> deferred extraction can be picked up opportunistically later — exactly the trigger this proposal always
+> wanted. (The SERIALIZATION HELPER section also stays out of scope: its `extractFileStyle` calls the
+> in-file language extractors, so extracting it would create a circular import.)
 
 ## The gap
 
