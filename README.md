@@ -24,10 +24,10 @@
 </p>
 
 <p align="center">
-  <img src="docs/openlore-demo.gif" alt="A real terminal recording of the full fresh-user onboarding: a brand-new repo, `openlore install` detects your agent, wires MCP, and builds the index in under a second (no API key), then `openlore orient` returns the relevant functions and where to add code in one deterministic call" width="100%">
+  <img src="docs/openlore-demo.gif" alt="A real terminal recording on a real TypeScript project: `openlore orient` finds the code a task touches in one call (memory); `openlore blast-radius` flags that a change hits a critical hub before you commit (governance); `openlore prove` shows it cuts cost ~37% and round-trips ~50% on this repo (proof)" width="100%">
 </p>
 
-<p align="center"><em>The full new-user onboarding, recorded in a real terminal — no edits, no cuts. <code>openlore install</code> wires your agent and builds the index in well under a second (no API key, no network), then every task starts with one deterministic <code>orient</code> call that returns the relevant functions and exactly where to work — replacing grep-and-read.</em></p>
+<p align="center"><em>Three commands on a real project — no edits, no cuts.&nbsp; <strong>Memory:</strong> <code>orient</code> returns the code a task touches in one call (no grep-and-read).&nbsp; <strong>Governance:</strong> <code>blast-radius</code> flags a risky change before you commit.&nbsp; <strong>Proof:</strong> <code>prove</code> shows the token savings on your own repo. Deterministic, local, no API key.</em></p>
 
 ---
 
