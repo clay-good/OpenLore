@@ -168,12 +168,21 @@ describe('extractEnvReadSites (change: add-env-config-impact-graph)', () => {
     expect(sites.find(s => s.name === 'OPT')).toMatchObject({ required: false, line: 2 });
   });
 
-  it('distinguishes Python strict subscript from .get/.getenv per site', () => {
-    const src = "import os\nsecret = os.environ['SECRET']\nregion = os.getenv('REGION')\nx = os.environ.get('OPT')\n";
+  it('Python strict subscript and defaultless .get/.getenv are required; with a default they are not', () => {
+    const src = [
+      'import os',
+      "secret = os.environ['SECRET']",      // strict subscript → required
+      "region = os.getenv('REGION')",        // getenv, no default → required (returns None)
+      "x = os.environ.get('OPT')",           // get, no default → required (returns None)
+      "y = os.getenv('TZ', 'UTC')",          // getenv with default → not required
+      "z = os.environ.get('LANG', 'C')",     // get with default → not required
+    ].join('\n') + '\n';
     const sites = extractEnvReadSites(src, 'app.py', '.py');
     expect(sites.find(s => s.name === 'SECRET')).toMatchObject({ required: true });
-    expect(sites.find(s => s.name === 'REGION')).toMatchObject({ required: false });
-    expect(sites.find(s => s.name === 'OPT')).toMatchObject({ required: false });
+    expect(sites.find(s => s.name === 'REGION')).toMatchObject({ required: true });
+    expect(sites.find(s => s.name === 'OPT')).toMatchObject({ required: true });
+    expect(sites.find(s => s.name === 'TZ')).toMatchObject({ required: false });
+    expect(sites.find(s => s.name === 'LANG')).toMatchObject({ required: false });
   });
 
   it('treats Go os.Getenv as never-required', () => {
@@ -181,12 +190,22 @@ describe('extractEnvReadSites (change: add-env-config-impact-graph)', () => {
     expect(extractEnvReadSites(src, 'main.go', '.go')[0]).toMatchObject({ name: 'PORT', required: false });
   });
 
-  it('treats Ruby ENV[] strict and ENV.fetch default-aware', () => {
-    const src = "a = ENV['SECRET']\nb = ENV.fetch('REGION')\nc = ENV.fetch('OPT', 'd')\n";
+  it('treats Ruby ENV[] strict and ENV.fetch default-aware (positional and block defaults)', () => {
+    const src = [
+      "a = ENV['SECRET']",                   // strict subscript → required
+      "b = ENV.fetch('REGION')",             // fetch, no default → required
+      "c = ENV.fetch('OPT', 'd')",           // fetch with positional default → not required
+      "d = ENV.fetch('BRACE') { 'x' }",      // fetch with block default → not required
+      "e = ENV.fetch('DOO') do",             // fetch with do-block default → not required
+      "  'y'",
+      'end',
+    ].join('\n') + '\n';
     const sites = extractEnvReadSites(src, 'app.rb', '.rb');
     expect(sites.find(s => s.name === 'SECRET')).toMatchObject({ required: true });
     expect(sites.find(s => s.name === 'REGION')).toMatchObject({ required: true });
     expect(sites.find(s => s.name === 'OPT')).toMatchObject({ required: false });
+    expect(sites.find(s => s.name === 'BRACE')).toMatchObject({ required: false });
+    expect(sites.find(s => s.name === 'DOO')).toMatchObject({ required: false });
   });
 
   it('returns nothing for an unsupported language', () => {

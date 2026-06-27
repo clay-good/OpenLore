@@ -65,11 +65,49 @@ listed. Honest, not silently dropped.
 - **Not-found candidate fallback:** a single-letter typo (`DATABSE_URL`) matches no substring, so the
   handler falls back to listing the inventory — the real var is always surfaced, never a dead end.
 
+## D'. Post-review adversarial hardening (same PR)
+
+Two parallel adversarial reviews ran against the PR. Wiring audit: complete, zero misses. Correctness
+review found three real soundness/honesty gaps, all fixed here and re-dogfooded on a purpose-built
+**multi-language corpus** (Python / Ruby / Go / TypeScript with every read form):
+
+| Var | Form | required | Fix |
+|-----|------|----------|-----|
+| `REGION` | `os.getenv("REGION")` no default (module-level) | **true** | M2 |
+| `CACHE_TTL` | `os.getenv("CACHE_TTL", "60")` | false | M2 |
+| `DB_SECRET` | `os.environ["DB_SECRET"]` | true | — |
+| `RB_REGION` | `ENV.fetch("RB_REGION")` | true | — |
+| `RB_OPT` | `ENV.fetch("RB_OPT") { "x" }` (block default) | **false** | m3 |
+| `RB_TZ` | `ENV.fetch("RB_TZ", "UTC")` | false | — |
+| `GO_PORT` | `os.Getenv("GO_PORT")` | false | — |
+| `TS_DB_URL` | `process.env.TS_DB_URL` | true | — |
+| `TS_LOG_LEVEL` | `process.env.TS_LOG_LEVEL \|\| "info"` (module-level) | false | — |
+
+Blast radius verified on the corpus: `DB_SECRET` → `connect` → `boot` (affected: 1); `TS_DB_URL` →
+`start` → `main` (affected: 1).
+
+- **M1 (major) — stale-span misattribution, now disclosed.** Read-site lines come from the *current*
+  source but are mapped to *cached* function spans; if the file changed since `analyze`, a read can be
+  attributed to the wrong function or falsely reported module-level. **Reproduced**: inserting 3 lines
+  atop `app.py` post-analyze made the `DB_SECRET` read (now line 9) attribute to `cache` instead of
+  `connect`. **Fix**: the handler now calls the git-based `computeStaleness` (the same signal the other
+  conclusion tools use) and, when stale, emits a `staleness` marker + a boundary —
+  *"Index may be stale … enclosing-function attribution (and any module-level classification) may be
+  off until you re-run analyze_codebase."* Verified the boundary + marker fire after the edit and stay
+  absent on a clean index.
+- **M2 (major, Python) — defaultless `os.getenv`/`os.environ.get` under-reported as soft.** Now
+  `get("X")` / `getenv("X")` with no default → `required` (returns `None`, a deferred hard break),
+  symmetric with the TS/Ruby per-site checks; `get("X", d)` stays soft.
+- **m3 (minor, Ruby) — `ENV.fetch("X") { block }` mis-flagged required.** A block (or `do … end`)
+  default now correctly resolves to not-required, alongside the positional-default case.
+
 ## D. Verification
 
 - `npm run build` clean.
 - `vitest run src examples`: 274 files, 5393 passed, 2 skipped.
-- New tests: `env-extractor.test.ts` (read-site extractor, all 5 languages + determinism),
-  `env-impact.test.ts` (resolve / not-found / module-level / missing-name / out-of-scope boundary).
+- New tests: `env-extractor.test.ts` (read-site extractor, all 5 languages + determinism + Python
+  default-presence + Ruby positional/block defaults), `env-impact.test.ts` (resolve / not-found /
+  module-level / missing-name / out-of-scope boundary / **stale-index disclosure + clean-index
+  absence**).
 - Guards updated: full-surface payload budget 82_000 → 84_000; documented tool count 71 → 72 across
   guarded docs (the `~N KB / ~Nk tokens` band check stays green).

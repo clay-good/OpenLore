@@ -33,7 +33,12 @@ For a resolved variable the tool SHALL:
 
 The result SHALL be a sound lower bound on the blast radius: dynamic dispatch, reflection, and
 module-level reads, and the call graph's existing resolution limits, SHALL be disclosed in
-`boundaries` rather than assumed away. The tool SHALL be scoped to the environment-variable read
+`boundaries` rather than assumed away. Because read-site lines are obtained from the current source
+but mapped to functions via the cached graph's line spans, the tool SHALL detect index staleness
+(the same git-based signal the other conclusion tools use) and, when the index is stale, SHALL
+disclose it (a `staleness` marker plus a boundary) noting that enclosing-function attribution and any
+module-level classification may be off until the index is rebuilt — never presenting a
+possibly-misattributed result as clean. The tool SHALL be scoped to the environment-variable read
 patterns the analyzer supports (TypeScript / JavaScript / Python / Go / Ruby); it SHALL NOT claim to
 resolve config-object key reads, which are a disclosed out-of-scope boundary.
 
@@ -61,6 +66,14 @@ lean default (`navigation`) preset or `MINIMAL_TOOLS`.
 - **WHEN** `analyze_env_impact` is called with `name` `LOG_LEVEL`
 - **THEN** the read site is reported as a module-level read and a boundary discloses that its blast
   radius is every importer of the module, computed at import time
+
+#### Scenario: A stale index is disclosed, not presented as clean
+
+- **GIVEN** a project whose source changed after the last `analyze` (so the cached function spans are
+  stale relative to the re-read source)
+- **WHEN** `analyze_env_impact` is called
+- **THEN** the result carries a `staleness` marker and a boundary stating that enclosing-function
+  attribution and any module-level classification may be off until the index is rebuilt
 
 #### Scenario: The tool is opt-in, not on the lean default surface
 

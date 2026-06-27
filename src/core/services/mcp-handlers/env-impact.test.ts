@@ -6,11 +6,18 @@
  * deterministic and offline.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+
+// Mock the git-based staleness signal so the disclosure path is deterministic and
+// offline (real computeStaleness reads a build commit + git diff). Default: clean
+// (undefined) so the non-stale tests see no false staleness boundary.
+vi.mock('./confidence-boundary.js', () => ({ computeStaleness: vi.fn(async () => undefined) }));
+
 import { handleAnalyzeEnvImpact } from './env-impact.js';
+import { computeStaleness } from './confidence-boundary.js';
 import {
   OPENLORE_DIR,
   OPENLORE_ANALYSIS_SUBDIR,
@@ -121,5 +128,22 @@ describe('handleAnalyzeEnvImpact', () => {
   it('always discloses the config-key out-of-scope boundary', async () => {
     const r = (await handleAnalyzeEnvImpact({ directory: dir, name: 'DATABASE_URL' })) as Record<string, any>;
     expect(r.boundaries.some((b: string) => /Config-object key reads.*OUT OF SCOPE/.test(b))).toBe(true);
+  });
+
+  it('discloses a staleness boundary + marker when the index is stale (attribution may be off)', async () => {
+    vi.mocked(computeStaleness).mockResolvedValueOnce({
+      indexCommit: 'abc1234',
+      filesChangedSince: 3,
+      detail: 'Computed against the index built at commit abc1234; 3 source file(s) changed since.',
+    });
+    const r = (await handleAnalyzeEnvImpact({ directory: dir, name: 'DATABASE_URL' })) as Record<string, any>;
+    expect(r.staleness).toMatchObject({ indexCommit: 'abc1234', filesChangedSince: 3 });
+    expect(r.boundaries.some((b: string) => /Index may be stale.*attribution.*may be off/s.test(b))).toBe(true);
+  });
+
+  it('does NOT add a staleness boundary on a clean index', async () => {
+    const r = (await handleAnalyzeEnvImpact({ directory: dir, name: 'DATABASE_URL' })) as Record<string, any>;
+    expect(r.staleness).toBeUndefined();
+    expect(r.boundaries.some((b: string) => /Index may be stale/.test(b))).toBe(false);
   });
 });

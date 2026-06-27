@@ -25,6 +25,7 @@ import { join } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { validateDirectory, readCachedContext } from './utils.js';
 import { buildAdjacency } from './graph.js';
+import { computeStaleness } from './confidence-boundary.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_ENV_INVENTORY } from '../../../constants.js';
 import { extractEnvReadSites, type EnvVar, type EnvReadSite } from '../../analyzer/env-extractor.js';
 import type { SerializedCallGraph, FunctionNode } from '../../analyzer/call-graph.js';
@@ -177,6 +178,21 @@ export async function handleAnalyzeEnvImpact(input: AnalyzeEnvImpactInput): Prom
     );
   }
 
+  // Honesty: read-site LINES come from the current source (re-read above) but are
+  // mapped to enclosing functions via the CACHED graph's line spans. If source
+  // changed since `analyze`, a read can be attributed to the wrong function — or,
+  // if its new line falls outside every stale span, FALSELY reported module-level.
+  // Disclose the staleness (git-based, same signal the other conclusion tools use)
+  // rather than presenting a possibly-misattributed result as clean.
+  const staleness = await computeStaleness(absDir);
+  if (staleness) {
+    boundaries.add(
+      `Index may be stale: ${staleness.detail} Read-site lines come from the current source but are ` +
+        'mapped to functions via the cached spans, so enclosing-function attribution (and any ' +
+        'module-level classification) may be off until you re-run analyze_codebase.',
+    );
+  }
+
   // ── Blast radius: backward BFS from each reading function ────────────────────
   const { nodeMap, backward } = buildAdjacency(cg);
   const distOf = new Map<string, number>();
@@ -248,6 +264,7 @@ export async function handleAnalyzeEnvImpact(input: AnalyzeEnvImpactInput): Prom
     affectedFiles: [...affectedFiles].sort(),
     ...(affectedFunctions.length > MAX_LIST ? { affectedFunctionsTruncated: affectedFunctions.length - MAX_LIST } : {}),
     ...(reachingTests.length > MAX_LIST ? { reachingTestsTruncated: reachingTests.length - MAX_LIST } : {}),
+    ...(staleness ? { staleness } : {}),
     boundaries: [...boundaries].sort(),
     note:
       'readSites = where this env var is read (file/line/enclosing function; module-level = read at ' +

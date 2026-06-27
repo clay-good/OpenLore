@@ -49,6 +49,7 @@ export interface EnvImpactView {
   affectedFunctions?: Array<{ symbol: string; file: string; distance: number }>;
   reachingTests?: Array<{ test: string; file: string }>;
   affectedFiles?: string[];
+  staleness?: { indexCommit: string; filesChangedSince: number; detail: string };
   boundaries?: string[];
   note?: string;
 }

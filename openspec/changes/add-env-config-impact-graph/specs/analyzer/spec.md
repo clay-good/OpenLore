@@ -22,11 +22,13 @@ site, and false otherwise:
 
 - TypeScript / JavaScript: a `process.env.X` immediately followed (ignoring whitespace) by `??` or
   `||` has a fallback at the site → not required; otherwise required.
-- Python: a strict subscript `os.environ['X']` is required; `os.environ.get(...)` and `os.getenv(...)`
-  have an optional default → not required.
+- Python: a strict subscript `os.environ['X']` is required; `os.environ.get('X')` / `os.getenv('X')`
+  with no default argument are required (they return `None`, a deferred hard break); the same calls
+  with a default argument (`os.getenv('X', d)`) are not required.
 - Go: `os.Getenv("X")` returns an empty string rather than failing → not required.
-- Ruby: a strict subscript `ENV['X']` and `ENV.fetch('X')` with no default argument are required;
-  `ENV.fetch('X', default)` is not required.
+- Ruby: a strict subscript `ENV['X']` and `ENV.fetch('X')` with no default are required;
+  `ENV.fetch('X', default)` and `ENV.fetch('X') { block }` / `ENV.fetch('X') do … end` are not
+  required (a positional or block default suppresses the `KeyError`).
 
 A fallback present elsewhere in the file SHALL NOT clear a site's `required` flag — the flag is a
 per-site signal. The per-site `required` determination is a documented heuristic, not a guarantee.
@@ -46,11 +48,13 @@ read-site records on every run, in a stable order (by line, then variable name).
 - **WHEN** the read-site extractor runs
 - **THEN** it reports a read site for `PORT` at that line with `required` false
 
-#### Scenario: Python optional and strict reads are distinguished per site
+#### Scenario: Python reads are distinguished per site by default presence
 
-- **GIVEN** a Python file containing both `os.environ['SECRET']` and `os.getenv('REGION')`
+- **GIVEN** a Python file containing `os.environ['SECRET']`, `os.getenv('REGION')`, and
+  `os.getenv('TZ', 'UTC')`
 - **WHEN** the read-site extractor runs
-- **THEN** `SECRET` is reported `required` true and `REGION` is reported `required` false
+- **THEN** `SECRET` and `REGION` are reported `required` true (strict subscript / no default) and `TZ`
+  is reported `required` false (it has a default)
 
 #### Scenario: A file in an unsupported language yields no read sites
 

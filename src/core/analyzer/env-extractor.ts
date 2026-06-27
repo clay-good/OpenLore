@@ -274,11 +274,27 @@ function tsSiteRequired(source: string, afterIdx: number): boolean {
   return !(tail.startsWith('??') || tail.startsWith('||'));
 }
 
-/** Ruby `ENV.fetch('X'…)`: a second argument is a default → not required. */
-function rubyFetchRequired(source: string, afterIdx: number): boolean {
+/**
+ * A call-form read (`os.environ.get('X'…)`, `os.getenv('X'…)`, `ENV.fetch('X'…)`)
+ * is required only when it has NO default. `afterIdx` is just past the matched
+ * `…('X'` — a comma before the close means a positional default follows → soft.
+ */
+function callHasNoDefaultArg(source: string, afterIdx: number): boolean {
   const tail = source.slice(afterIdx).replace(/^\s*/, '');
-  // afterIdx is just past `ENV.fetch('X'` — a comma means a default follows.
   return !tail.startsWith(',');
+}
+
+/**
+ * Ruby `ENV.fetch('X'…)`: required only with no default. A default can be a second
+ * positional arg (`ENV.fetch('X', d)`) OR a block (`ENV.fetch('X') { d }` /
+ * `ENV.fetch('X') do … end`) — both suppress the KeyError, so neither is a hard break.
+ */
+function rubyFetchRequired(source: string, afterIdx: number): boolean {
+  if (!callHasNoDefaultArg(source, afterIdx)) return false; // positional default
+  // After the closing paren, a `{` or `do` is a block default.
+  const afterParen = source.slice(afterIdx).replace(/^\s*\)\s*/, '');
+  if (afterParen.startsWith('{') || /^do\b/.test(afterParen)) return false;
+  return true;
 }
 
 /**
@@ -305,8 +321,13 @@ export function extractEnvReadSites(source: string, relPath: string, ext: string
     while ((m = re.exec(source)) !== null) {
       const name = m[1] ?? m[2] ?? m[3];
       if (!name) continue;
-      // Only os.environ["X"] (m[1]) is a strict, defaultless read.
-      sites.push({ name, file: relPath, line: lineOf(m.index), required: m[1] !== undefined });
+      // os.environ["X"] (m[1]) is a strict subscript (raises KeyError) → required.
+      // os.environ.get("X") / os.getenv("X") (m[2]/m[3]) are required only without a
+      // default arg: `get("X")` returns None (a deferred hard break), `get("X", d)`
+      // returns the default (soft). Symmetric with the TS/Ruby per-site checks.
+      const afterIdx = m.index + m[0].length;
+      const required = m[1] !== undefined ? true : callHasNoDefaultArg(source, afterIdx);
+      sites.push({ name, file: relPath, line: lineOf(m.index), required });
     }
   } else if (ext === '.go') {
     const re = new RegExp(GO_ENV_RE.source, 'g');

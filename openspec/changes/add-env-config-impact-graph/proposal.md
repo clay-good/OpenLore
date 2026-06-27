@@ -13,6 +13,15 @@
 > byte-vs-UTF-16-offset mismatch a regex `.index` would carry); the not-found candidate list falls
 > back to the full inventory when a single-letter typo matches no substring.
 >
+> Post-merge adversarial-review hardening (same PR, re-dogfooded on a Python/Ruby/Go/TS corpus —
+> `DOGFOOD-env-config-impact-graph.md` §D'): (M1) read-site lines come from current source but map to
+> cached spans, so when the index is stale the attribution can be wrong / falsely module-level — the
+> handler now emits a `staleness` marker + boundary via the git-based `computeStaleness` (reproduced
+> and verified); (M2) Python `os.getenv("X")` / `os.environ.get("X")` with no default are now
+> `required` (a deferred `None` hard break), symmetric with the TS/Ruby per-site checks; (M3) Ruby
+> `ENV.fetch("X") { block }` / `do … end` defaults now resolve to not-required. Wiring audit: complete,
+> zero misses.
+>
 > Net-new conclusion tool — the written backlog (`FEATURE-UPDATES.md`, `STRUCTURAL-CONTEXT-PATTERNS.md`,
 > `PARALLEL-WORK-COORDINATION.md`, `HARDEN-DISTRIBUTION-AND-SUBSTRATE.md`) is fully shipped. This is
 > the explicitly-earmarked follow-up from `FEATURE-UPDATES.md` ("Deliberately considered and
