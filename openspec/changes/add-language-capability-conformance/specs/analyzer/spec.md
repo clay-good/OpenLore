@@ -23,6 +23,13 @@ than leaving them implicit.
 - **THEN** both functions are extracted and the `caller→callee` edge is resolved
 - **AND** if any claimed callGraph language has no conformance fixture, the suite fails
 
+#### Scenario: A richer overlay is proven on each claimed language and honestly absent otherwise
+
+- **GIVEN** one of the richer capabilities (CFG, type inference, style fingerprint, cross-service HTTP) and a language the registry claims supports it
+- **WHEN** the conformance suite drives that capability's real extractor against a representative fixture
+- **THEN** the capability produces a non-empty result for the claimed language
+- **AND** a non-claimed language yields an empty/absent result (never a guessed signal), and any claimed language without a fixture fails the suite
+
 #### Scenario: A cross-language precision difference is asserted, not hidden
 
 - **GIVEN** a cross-file call in TypeScript versus in a name-only-resolved language (e.g. Python, Go)

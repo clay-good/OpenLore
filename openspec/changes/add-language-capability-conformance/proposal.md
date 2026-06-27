@@ -32,11 +32,21 @@ tools (the call graph underpins `orient`, `analyze_impact`, `find_path`, `get_su
 4. **Error-propagation overlay** — TS/JS/Python extract the thrown/raised type; a non-claimed language
    is honestly reported `supported: false`, never silently empty.
 
+The sweep then drives the four **richer per-capability overlays** against their narrower claimed
+language sets, each with a coverage guard that fails if the registry adds a language without a fixture:
+
+5. **CFG overlay** (11 languages) — a branchy function yields a structurally-valid CFG (`isStructurallyValid`).
+6. **Type inference** (9 languages) — a local variable resolves to its class type; a non-claimed language returns an empty inference.
+7. **Style fingerprint** (4 languages) — a file above the evidence floor tallies idioms; a non-claimed language tallies nothing.
+8. **Cross-service HTTP** (4 languages) — a server route definition is extracted (Express/Flask/Spring); outbound client calls are extracted for the 2 client languages.
+
 ## Findings from the sweep (2026-06-26)
 
-The engine is **sound across all 18 call-graph languages** — basic calls, intra-class method
-dispatch, and cross-file resolution all fire; no correctness gaps were found, and the claimed matrix
-does not over-claim. One **precision** difference was surfaced and is now asserted rather than hidden:
+The engine is **sound across all 18 call-graph languages and every richer overlay's claimed language
+set** — basic calls, intra-class method dispatch, cross-file resolution, CFG, type inference, style,
+and cross-service HTTP all fire; no correctness gaps were found, the claimed matrix does not
+over-claim, and non-claimed languages degrade honestly (empty/absent, never a guess). One
+**precision** difference was surfaced and is now asserted rather than hidden:
 
 - **Cross-file call provenance varies by language.** TypeScript resolves a cross-file call via precise
   **`import`** resolution; Python and Go resolve the same shape via **`name_only`** (name match, no
@@ -55,6 +65,7 @@ the `mcp-quality` NoFalseCompleteness requirement and the substrate's honesty co
 
 ## Impact
 
-- New: `src/core/analyzer/language-capability-conformance.test.ts` (37 cases).
+- New: `src/core/analyzer/language-capability-conformance.test.ts` (73 cases — call graph, method
+  dispatch, cross-file, error-propagation, CFG, type inference, style, cross-service HTTP).
 - Specs: `analyzer` — 1 ADDED requirement (CapabilityMatrixIsConformanceVerified).
 - Risk: none (test-only).
