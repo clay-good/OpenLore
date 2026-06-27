@@ -55,8 +55,10 @@
 >
 > **Each slice is verified the same four ways:** export surface byte-for-byte identical (multi-line-aware
 > diff), build/lint/typecheck clean, full suite green (279 files / 5534 tests), and the byte-level
-> snapshot oracle hashes identically before/after. `call-graph.ts` is now **5,425 → 4,741 lines** (−684)
-> across six extracted sibling modules (types, extract, external, complexity, cfg, builtins).
+> snapshot oracle hashes identically before/after. `call-graph.ts` is now **5,425 → 4,745 lines** (−680,
+> `wc -l`) across six extracted sibling modules (types, extract, external, complexity, cfg, builtins). (The
+> per-slice end counts above are the post-extraction assembly snapshots that match each commit message; the
+> few-line differences from the running `wc -l` are the import-back lines re-added at the top of the barrel.)
 >
 > **Scope decision (2026-06-27): this change is SUBSTANTIALLY COMPLETE and intentionally bounded.** The
 > spec's deliverable — the `StableCallGraphBarrel` *invariant* plus a proven, repeatable,
