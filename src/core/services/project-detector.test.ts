@@ -138,6 +138,23 @@ describe('project-detector', () => {
       expect(result.confidence).toBe('low');
     });
 
+    it('detects a pure-TS project (tsconfig.json, no package.json) as Node.js, not Unknown (fix-cli-output-hygiene)', async () => {
+      await writeFile(join(testDir, 'tsconfig.json'), '{}');
+      const result = await detectProjectType(testDir);
+
+      expect(result.projectType).toBe('nodejs');
+      expect(result.manifestFile).toBe('tsconfig.json');
+    });
+
+    it('prefers package.json over a co-located tsconfig.json', async () => {
+      await writeFile(join(testDir, 'package.json'), '{}');
+      await writeFile(join(testDir, 'tsconfig.json'), '{}');
+      const result = await detectProjectType(testDir);
+
+      expect(result.projectType).toBe('nodejs');
+      expect(result.manifestFile).toBe('package.json');
+    });
+
     it('should prefer higher priority manifest files', async () => {
       // pyproject.toml has higher priority than setup.py
       await writeFile(join(testDir, 'pyproject.toml'), '');

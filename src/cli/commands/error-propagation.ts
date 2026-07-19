@@ -15,6 +15,7 @@
 import { Command } from 'commander';
 import { logger, configureLogger } from '../../utils/logger.js';
 import { writeStdout } from '../output.js';
+import { toCliVocabulary } from '../surface-vocabulary.js';
 import { handleAnalyzeErrorPropagation } from '../../core/services/mcp-handlers/error-propagation.js';
 
 interface EscapeView {
@@ -116,15 +117,15 @@ export async function runErrorPropagationCli(opts: ErrorPropagationCliOptions): 
     const r = result as ErrorPropagationView;
     if (opts.json) await writeStdout(JSON.stringify(result, null, 2) + '\n');
     else {
-      logger.warning(`error-propagation: ${r.error}`);
+      logger.warning(`error-propagation: ${toCliVocabulary(r.error ?? '')}`);
       if (r.candidates?.length) logger.info('candidates', r.candidates.join(', '));
-      if (r.hint) logger.info('hint', r.hint);
+      if (r.hint) logger.info('hint', toCliVocabulary(r.hint));
     }
     return 1;
   }
 
   if (opts.json) await writeStdout(JSON.stringify(result, null, 2) + '\n');
-  else await writeStdout(renderHuman(result as ErrorPropagationView) + '\n');
+  else await writeStdout(toCliVocabulary(renderHuman(result as ErrorPropagationView)) + '\n');
   return 0;
 }
 

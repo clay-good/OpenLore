@@ -17,6 +17,7 @@ const emitSubcommand = new Command('emit')
   .option('--project-root <path>', 'Project root to describe (default: current directory)')
   .option('--include-private', 'Include non-public symbols (produces a larger manifest)', false)
   .option('--max-symbols <int>', 'Truncate public_symbols to this many (sets "truncated": true)', (v) => parseInt(v, 10))
+  .option('--dry-run', 'Show the destination and manifest size without writing the file', false)
   .action(async (opts: ManifestEmitOptions) => {
     process.exit(await runManifestEmit(opts));
   });

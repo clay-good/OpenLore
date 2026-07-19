@@ -13,6 +13,7 @@
 import { Command } from 'commander';
 import { logger, configureLogger } from '../../utils/logger.js';
 import { writeStdout } from '../output.js';
+import { toCliVocabulary } from '../surface-vocabulary.js';
 import { handleFindClones } from '../../core/services/mcp-handlers/clone-query.js';
 
 interface CloneMatchView {
@@ -103,15 +104,15 @@ export async function runFindClonesCli(opts: FindClonesCliOptions): Promise<numb
     const r = result as CloneQueryView;
     if (opts.json) await writeStdout(JSON.stringify(result, null, 2) + '\n');
     else {
-      logger.warning(`find-clones: ${r.error}`);
+      logger.warning(`find-clones: ${toCliVocabulary(r.error ?? '')}`);
       if (r.candidates?.length) logger.info('candidates', r.candidates.join(', '));
-      if (r.hint) logger.info('hint', r.hint);
+      if (r.hint) logger.info('hint', toCliVocabulary(r.hint));
     }
     return 1;
   }
 
   if (opts.json) await writeStdout(JSON.stringify(result, null, 2) + '\n');
-  else await writeStdout(renderHuman(result as CloneQueryView) + '\n');
+  else await writeStdout(toCliVocabulary(renderHuman(result as CloneQueryView)) + '\n');
   return 0;
 }
 

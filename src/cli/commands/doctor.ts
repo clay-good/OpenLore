@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { logger } from '../../utils/logger.js';
+import { palette } from '../../utils/colors.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
 import { validateOpenLoreConfig } from '../../core/services/config-schema.js';
 import { EdgeStore } from '../../core/services/edge-store.js';
@@ -553,19 +554,18 @@ async function checkDiskSpace(rootPath: string): Promise<CheckResult> {
 // ============================================================================
 
 function printResult(r: CheckResult, useColor: boolean): void {
-  const icons: Record<CheckStatus, string> = { ok: '✓', warn: '⚠', fail: '✗' };
-  const colors: Record<CheckStatus, string> = {
-    ok: useColor ? '\x1b[32m' : '',
-    warn: useColor ? '\x1b[33m' : '',
-    fail: useColor ? '\x1b[31m' : '',
+  const c = palette(useColor);
+  const paint: Record<CheckStatus, (s: string) => string> = {
+    ok: (s) => c.green(s),
+    warn: (s) => c.yellow(s),
+    fail: (s) => c.red(s),
   };
-  const reset = useColor ? '\x1b[0m' : '';
-  const dim = useColor ? '\x1b[2m' : '';
+  const glyph: Record<CheckStatus, string> = { ok: '✓', warn: '⚠', fail: '✗' };
 
-  const icon = `${colors[r.status]}${icons[r.status]}${reset}`;
-  console.log(`  ${icon}  ${r.name.padEnd(22)} ${dim}${r.detail}${reset}`);
+  const icon = paint[r.status](glyph[r.status]);
+  console.log(`  ${icon}  ${r.name.padEnd(22)} ${c.dim(r.detail)}`);
   if (r.fix) {
-    console.log(`       ${' '.repeat(22)} ${colors.warn}→ ${r.fix}${reset}`);
+    console.log(`       ${' '.repeat(22)} ${c.yellow(`→ ${r.fix}`)}`);
   }
 }
 
@@ -655,7 +655,10 @@ Checks performed:
       logger.error(`${failures.length} check(s) failed${warnSuffix} — fix the failures above before proceeding`);
       process.exitCode = 1;
     } else if (warnings.length > 0) {
-      logger.warning(`${warnings.length} warning(s) — optional features (LLM generate, embeddings) may be limited`);
+      // Summarize the checks that actually warned, not a hardcoded assumption
+      // (a staleness warning must not read as "LLM/embeddings may be limited").
+      const warned = warnings.map(w => w.name).join(', ');
+      logger.warning(`${warnings.length} warning(s): ${warned} — see the details above`);
     } else {
       logger.success('All checks passed!');
     }

@@ -74,11 +74,14 @@ export async function runBundleExport(opts: BundleExportOptions): Promise<number
 
   const { manifest, buffer } = result;
   const sizeMb = (buffer.length / (1024 * 1024)).toFixed(2);
-  const relOut = relative(projectRoot, outPath) || outPath;
+  // Show a repo-relative path when the artifact lands inside the repo; otherwise
+  // show the absolute path, never a meaningless `../../../..` chain.
+  const rel = relative(projectRoot, outPath);
+  const insideRepo = rel !== '' && !rel.startsWith('..');
+  const relOut = insideRepo ? rel : outPath;
   // The .gitattributes hint only makes sense for an in-repo path; if the artifact was written
-  // outside the repo (relative path escapes with `..`), recommend the default glob instead of a
-  // meaningless `../…` pattern git can't apply.
-  const gitattrPath = relOut.startsWith('..') ? `*.olbundle` : (relOut || BUNDLE_DEFAULT_FILENAME);
+  // outside the repo, recommend the default glob instead of a pattern git can't apply.
+  const gitattrPath = insideRepo ? (rel || BUNDLE_DEFAULT_FILENAME) : `*.olbundle`;
   logger.success(
     `Exported graph bundle → ${relOut}\n` +
     `  ${manifest.files.length} files, ${sizeMb} MB, schema v${manifest.schemaVersion}, ` +

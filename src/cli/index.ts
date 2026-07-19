@@ -69,7 +69,9 @@ import { gryphWatchCommand } from './commands/gryph-watch.js';
 import { updateCommand } from './commands/update.js';
 import { featuresCommand } from './commands/features.js';
 import { groupedFormatHelp } from './help-groups.js';
-import { configureLogger } from '../utils/logger.js';
+import { configureLogger, logger } from '../utils/logger.js';
+import { colorForStderr } from '../utils/colors.js';
+import { checkExplicitConfig, type OptionValueSource } from './config-guard.js';
 import { notifyIfUpdateAvailable } from '../core/services/update-notifier.js';
 
 // Read version from package.json at runtime so it never drifts from the published version
@@ -97,6 +99,19 @@ program.hook('preAction', (thisCommand, actionCommand) => {
     timestamps: process.env.CI === 'true' || opts.color === false,
   });
 
+  // An explicitly-passed --config that does not resolve is a fatal error naming
+  // the path — never a silent fallback to the default config (which would run,
+  // e.g., without the enforcement policy the user asked for). Only fires when the
+  // value came from the CLI, not the built-in default (OutputContractsAreUniform).
+  const configGuard = checkExplicitConfig(
+    thisCommand.getOptionValueSource('config') as OptionValueSource,
+    opts.config as string | undefined,
+  );
+  if (!configGuard.ok) {
+    logger.error(configGuard.message!);
+    process.exit(1);
+  }
+
   // Passive update notifier — cached, non-blocking, fail-silent. Only for
   // human-interactive commands, and never when --quiet.
   if (!opts.quiet && UPDATE_NOTIFY_COMMANDS.has(actionCommand.name())) {
@@ -112,8 +127,9 @@ program.hook('preAction', (thisCommand, actionCommand) => {
     process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
     // Only print if we're not in quiet mode
     if (!opts.quiet) {
+      const c = colorForStderr();
       process.stderr.write(
-        '\x1b[33m[warn]\x1b[0m --insecure: SSL certificate verification is disabled. ' +
+        `${c.yellow('[warn]')} --insecure: SSL certificate verification is disabled. ` +
         'Only use this on trusted networks.\n'
       );
     }

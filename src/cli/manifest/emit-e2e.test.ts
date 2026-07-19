@@ -11,7 +11,7 @@
 
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { configureLogger } from '../../utils/logger.js';
@@ -116,6 +116,13 @@ describe('runManifestEmit (end-to-end)', () => {
     expect(validateManifest(manifest)).toEqual([]);
     expect(manifest.repo.git_commit).toBeNull();
     expect(manifest.links.repo).toBeNull();
+  });
+
+  it('--dry-run previews the destination without writing the file (fix-cli-output-hygiene)', async () => {
+    const out = join(dir, '.well-known', 'openlore.json');
+    const code = await runManifestEmit({ projectRoot: dir, dryRun: true });
+    expect(code).toBe(0);
+    expect(existsSync(out)).toBe(false);
   });
 
   it('--include-private widens the surface; --max-symbols truncates', async () => {

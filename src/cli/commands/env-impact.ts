@@ -15,6 +15,7 @@
 import { Command } from 'commander';
 import { logger, configureLogger } from '../../utils/logger.js';
 import { writeStdout } from '../output.js';
+import { toCliVocabulary } from '../surface-vocabulary.js';
 import { handleAnalyzeEnvImpact } from '../../core/services/mcp-handlers/env-impact.js';
 
 interface ReadSiteView {
@@ -121,15 +122,15 @@ export async function runEnvImpactCli(opts: EnvImpactCliOptions): Promise<number
     const r = result as EnvImpactView;
     if (opts.json) await writeStdout(JSON.stringify(result, null, 2) + '\n');
     else {
-      logger.warning(`env-impact: ${r.error}`);
+      logger.warning(`env-impact: ${toCliVocabulary(r.error ?? '')}`);
       if (r.candidates?.length) logger.info('candidates', r.candidates.join(', '));
-      if (r.hint) logger.info('hint', r.hint);
+      if (r.hint) logger.info('hint', toCliVocabulary(r.hint));
     }
     return 1;
   }
 
   if (opts.json) await writeStdout(JSON.stringify(result, null, 2) + '\n');
-  else await writeStdout(renderHuman(result as EnvImpactView) + '\n');
+  else await writeStdout(toCliVocabulary(renderHuman(result as EnvImpactView)) + '\n');
   return 0;
 }
 

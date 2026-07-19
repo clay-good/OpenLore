@@ -23,6 +23,7 @@ import type { FunctionNode } from './call-graph.js';
 import type { FileSignatureMap } from './signature-extractor.js';
 import type { Embedder } from './embedding-service.js';
 import { getSkeletonContent, isSkeletonWorthIncluding } from './code-shaper.js';
+import { quietNativeLoggingOnce } from './lance-logging.js';
 
 // ============================================================================
 // TYPES
@@ -496,6 +497,7 @@ export class VectorIndex {
     /** When true, reuse cached vectors for unchanged functions */
     incremental = false
   ): Promise<{ embedded: number; reused: number; total: number; hasEmbeddings: boolean }> {
+    quietNativeLoggingOnce();
     const { connect } = await import('@lancedb/lancedb');
 
     if (nodes.length === 0) {
@@ -801,6 +803,8 @@ export class VectorIndex {
       }
     }
 
+    quietNativeLoggingOnce();
+
     const { connect } = await import('@lancedb/lancedb');
     const db = await connect(dbPath);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -901,6 +905,7 @@ export class VectorIndex {
     const dbPath = join(outputDir, DB_FOLDER);
     let tableEntry = _tableCache.get(dbPath);
     if (!tableEntry) {
+      quietNativeLoggingOnce();
       const { connect } = await import('@lancedb/lancedb');
       const db = await connect(dbPath);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any

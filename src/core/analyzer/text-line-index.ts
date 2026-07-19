@@ -26,6 +26,7 @@
 
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { quietNativeLoggingOnce } from './lance-logging.js';
 import {
   buildBm25Corpus,
   tokenize,
@@ -147,6 +148,7 @@ export class TextLineIndex {
     }
 
     const dbPath = join(outputDir, DB_FOLDER);
+    quietNativeLoggingOnce();
     const { connect } = await import('@lancedb/lancedb');
     const db = await connect(dbPath);
 
@@ -182,6 +184,7 @@ export class TextLineIndex {
     if (!TextLineIndex.exists(outputDir)) return { lines: 0 };
 
     const dbPath = join(outputDir, DB_FOLDER);
+    quietNativeLoggingOnce();
     const { connect } = await import('@lancedb/lancedb');
     const db = await connect(dbPath);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -229,6 +232,7 @@ export class TextLineIndex {
     const dbPath = join(outputDir, DB_FOLDER);
     let cached = _bm25Cache.get(dbPath);
     if (!cached) {
+      quietNativeLoggingOnce();
       const { connect } = await import('@lancedb/lancedb');
       const db = await connect(dbPath);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any

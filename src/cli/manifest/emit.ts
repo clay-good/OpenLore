@@ -44,6 +44,7 @@ export interface ManifestEmitOptions {
   projectRoot?: string;
   includePrivate?: boolean;
   maxSymbols?: number;
+  dryRun?: boolean;
 }
 
 export interface Manifest {
@@ -340,11 +341,17 @@ export async function runManifestEmit(opts: ManifestEmitOptions): Promise<number
   );
 
   const outPath = resolve(opts.out ?? join(projectRoot, '.well-known', 'openlore.json'));
-  await mkdir(dirname(outPath), { recursive: true });
   const bytes = serializeManifest(manifest);
-  await writeFile(outPath, bytes);
 
-  logger.success(`Wrote ${outPath} (${Buffer.byteLength(bytes)} bytes)`);
+  if (opts.dryRun) {
+    // Preview only: never touch the working tree (manifest emit writes into the
+    // repo, so a dry run lets a user see the destination and size first).
+    logger.success(`Dry run — would write ${outPath} (${Buffer.byteLength(bytes)} bytes); nothing written`);
+  } else {
+    await mkdir(dirname(outPath), { recursive: true });
+    await writeFile(outPath, bytes);
+    logger.success(`Wrote ${outPath} (${Buffer.byteLength(bytes)} bytes)`);
+  }
   logger.info('public symbols', manifest.exports.public_symbols.length + (manifest.exports.truncated ? ' (truncated)' : ''));
   logger.info('http routes', manifest.exports.http_routes.length);
   logger.info('external packages', manifest.imports.external_packages.length);

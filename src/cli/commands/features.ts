@@ -13,7 +13,9 @@
  */
 
 import { Command } from 'commander';
+import type { ChalkInstance } from 'chalk';
 import { logger } from '../../utils/logger.js';
+import { palette } from '../../utils/colors.js';
 import {
   collectFeatureInventory,
   type FeatureStatus,
@@ -26,39 +28,17 @@ const GROUP_ORDER: FeatureGroup[] = [
   'Multi-repo',
 ];
 
-interface Palette {
-  active: string;
-  inactive: string;
-  defaultOn: string;
-  hint: string;
-  dim: string;
-  reset: string;
-  bold: string;
-}
-
-function palette(useColor: boolean): Palette {
-  return {
-    active: useColor ? '\x1b[32m' : '', // green
-    inactive: useColor ? '\x1b[2m' : '', // dim
-    defaultOn: useColor ? '\x1b[36m' : '', // cyan
-    hint: useColor ? '\x1b[33m' : '', // yellow
-    dim: useColor ? '\x1b[2m' : '',
-    reset: useColor ? '\x1b[0m' : '',
-    bold: useColor ? '\x1b[1m' : '',
-  };
-}
-
-function printFeature(f: FeatureStatus, p: Palette): void {
+function printFeature(f: FeatureStatus, c: ChalkInstance): void {
   const icon =
     f.state === 'active'
-      ? `${p.active}✓${p.reset}`
+      ? c.green('✓')
       : f.state === 'default-on'
-        ? `${p.defaultOn}•${p.reset}`
-        : `${p.inactive}○${p.reset}`;
-  console.log(`  ${icon}  ${f.title.padEnd(38)} ${p.dim}${f.detail}${p.reset}`);
+        ? c.cyan('•')
+        : c.dim('○');
+  console.log(`  ${icon}  ${f.title.padEnd(38)} ${c.dim(f.detail)}`);
   // Show the activation hint only when there is an action to take.
   if (f.state === 'inactive' && f.activate) {
-    console.log(`         ${' '.repeat(38)} ${p.hint}→ ${f.activate}${p.reset}`);
+    console.log(`         ${' '.repeat(38)} ${c.yellow(`→ ${f.activate}`)}`);
   }
 }
 
@@ -88,7 +68,7 @@ the whole structural graph work with no keys set. The features below are all opt
     }
 
     const useColor = Boolean(process.stdout.isTTY);
-    const p = palette(useColor);
+    const c = palette(useColor);
 
     logger.section('openlore features');
     console.log('');
@@ -99,7 +79,7 @@ the whole structural graph work with no keys set. The features below are all opt
     }
 
     console.log(
-      `  ${p.dim}Core value needs zero config: orient, search, blast-radius, and the full graph work with no keys set.${p.reset}`
+      `  ${c.dim('Core value needs zero config: orient, search, blast-radius, and the full graph work with no keys set.')}`
     );
     console.log('');
 
@@ -110,8 +90,8 @@ the whole structural graph work with no keys set. The features below are all opt
     for (const group of GROUP_ORDER) {
       const inGroup = shown.filter((f) => f.group === group);
       if (inGroup.length === 0) continue;
-      console.log(`  ${p.bold}${group}${p.reset}`);
-      for (const f of inGroup) printFeature(f, p);
+      console.log(`  ${c.bold(group)}`);
+      for (const f of inGroup) printFeature(f, c);
       console.log('');
     }
 
@@ -121,7 +101,8 @@ the whole structural graph work with no keys set. The features below are all opt
     }
 
     console.log(
-      `  ${p.dim}${inventory.activeCount} of ${inventory.optInCount} opt-in features active · legend: ${p.reset}${p.active}✓ on${p.reset} ${p.defaultOn}• default-on${p.reset} ${p.inactive}○ off${p.reset}`
+      `  ${c.dim(`${inventory.activeCount} of ${inventory.optInCount} opt-in features active · legend:`)} ` +
+        `${c.green('✓ on')} ${c.cyan('• default-on')} ${c.dim('○ off')}`
     );
     console.log('');
   });

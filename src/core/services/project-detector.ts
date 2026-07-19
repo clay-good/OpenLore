@@ -39,6 +39,11 @@ const MANIFEST_MAP: { file: string; type: ProjectType; priority: number }[] = [
   { file: 'build.gradle.kts', type: 'java', priority: 2 },
   { file: 'Gemfile', type: 'ruby', priority: 1 },
   { file: 'composer.json', type: 'php', priority: 1 },
+  // A pure-TS/JS project (no package.json — e.g. a Deno or config-only repo) is
+  // still Node.js/TypeScript, not "Unknown". Lowest priority so a real language
+  // manifest above always wins when both are present.
+  { file: 'tsconfig.json', type: 'nodejs', priority: 9 },
+  { file: 'jsconfig.json', type: 'nodejs', priority: 9 },
 ];
 
 /**

@@ -542,6 +542,37 @@ describe('doctor command', () => {
       expect(vi.mocked(loggerModule.logger.error)).toHaveBeenCalled();
       expect(process.exitCode).toBe(1);
     });
+
+    it('non-JSON summary names the warned check, not a hardcoded "optional features" line (fix-cli-output-hygiene)', async () => {
+      doctorCommand.setOptionValue('json', false);
+
+      // Valid config so nothing FAILS; drop every provider key so the LLM check WARNS.
+      const configManager = await import('../../core/services/config-manager.js');
+      vi.mocked(configManager.readOpenLoreConfig).mockResolvedValue({
+        projectType: 'nodejs', createdAt: '2024-01-01T00:00:00Z', openspecPath: './openspec', maxFiles: 500,
+      } as never);
+      const keyVars = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'OPENAI_COMPAT_API_KEY'];
+      const saved: Record<string, string | undefined> = {};
+      for (const k of keyVars) { saved[k] = process.env[k]; delete process.env[k]; }
+
+      const llmService = await import('../../core/services/llm-service.js');
+      vi.mocked(llmService.createLLMService).mockImplementationOnce(() => { throw new Error('No API key'); });
+
+      const loggerModule = await import('../../utils/logger.js');
+      vi.mocked(loggerModule.logger.warning).mockClear();
+
+      try {
+        await doctorCommand.parseAsync(['node', 'doctor'], { from: 'user' });
+        const warnCalls = vi.mocked(loggerModule.logger.warning).mock.calls.map(c => String(c[0]));
+        const summary = warnCalls.find(m => /\d+ warning\(s\):/.test(m));
+        expect(summary, `expected a summary warning; got: ${JSON.stringify(warnCalls)}`).toBeTruthy();
+        // Derived from the actual warned checks, not the old hardcoded assumption.
+        expect(summary).toContain('LLM connection');
+        expect(summary).not.toContain('optional features (LLM generate, embeddings) may be limited');
+      } finally {
+        for (const k of keyVars) { if (saved[k] !== undefined) process.env[k] = saved[k]; else delete process.env[k]; }
+      }
+    });
   });
 
   // --------------------------------------------------------------------------

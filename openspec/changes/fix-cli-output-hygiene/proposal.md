@@ -1,9 +1,20 @@
 # CLI output hygiene: color contract, config errors, honest summaries, one vocabulary
 
-> Status: PROPOSED (2026-07-03, e2e audit). A live dogfood of all ~50 CLI commands surfaced a
-> batch of small output/UX defects — none dangerous alone, together they erode the polish the
-> happy-path work just shipped. One change, one review, all of them fixed, each with a regression
-> test.
+> Status: SHIPPED (2026-07-18). All six gaps fixed, each with a regression test. Notes on how it
+> landed: (1) color now flows through a shared layer `src/utils/colors.ts` (chalk-backed,
+> `--no-color`/non-TTY aware) — `decisions.ts` and the `--insecure` warning in `index.ts` moved off
+> raw ANSI, and the already-gated `doctor.ts`/`features.ts` were converted too so the repo-wide
+> guard (`src/cli/output-hygiene.test.ts`) needs only one exemption: the full-screen interactive
+> `tui-approval.ts`. (2) An explicit `--config` that can't be read is fatal (`src/cli/config-guard.ts`,
+> unit-tested); this scopes to fatal-on-missing — fully redirecting every `readOpenLoreConfig` call
+> site to an arbitrary path stays out of scope. (3) `doctor`'s summary now names the checks that
+> actually warned. (4) CLI hints translate MCP tool names to CLI commands via
+> `src/cli/surface-vocabulary.ts` (`analyze_codebase` → `openlore analyze`). (5) `decisions --list`
+> renders `verified` as `⧖` "awaiting review" with a legend, distinct from approved/synced.
+> (6) Cosmetics: the LanceDB native-log knob is `LANCEDB_LOG` (NOT `RUST_LOG`, verified empirically) —
+> defaulted to `error` before the first addon import at both call sites; export prints an absolute
+> path instead of a `../../..` chain when the artifact lands outside the repo; `init` detects a
+> pure-TS project (`tsconfig.json`, no `package.json`); `manifest emit` gains `--dry-run`.
 
 ## The gaps (all live-reproduced, v2.1.5)
 

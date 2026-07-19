@@ -16,6 +16,7 @@ const execFileAsync = promisify(execFile);
 import { join } from 'node:path';
 
 import { logger } from '../../utils/logger.js';
+import { colorForStdout } from '../../utils/colors.js';
 import { redirectConsoleToStderr } from '../../utils/quiet-stdout.js';
 import { fileExists, resolveLLMProvider } from '../../utils/command-helpers.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
@@ -472,26 +473,31 @@ async function runAutopilotGate(
 // DISPLAY HELPERS
 // ============================================================================
 
-function displayDecision(d: PendingDecision, verbose = false): void {
+export function displayDecision(d: PendingDecision, verbose = false): void {
+  const c = colorForStdout();
+
+  // Glyphs are visually distinct across statuses AND across the "done vs not
+  // done" divide: `verified` gate-BLOCKS a commit awaiting human review, so it
+  // must never read as a done checkmark (✓/✔). See printDecisionLegend.
   const icon =
-    d.status === 'verified'      ? '✓' :
-    d.status === 'phantom'       ? '↗' :
-    d.status === 'approved'      ? '●' :
-    d.status === 'auto-approved' ? '◉' :
-    d.status === 'synced'        ? '✔' :
-    d.status === 'rejected'      ? '✗' : '○';
+    d.status === 'verified'      ? c.yellow('⧖') :   // awaiting review (blocks the gate)
+    d.status === 'phantom'       ? c.yellow('↗') :   // recorded but not in the diff
+    d.status === 'approved'      ? c.blue('●')   :
+    d.status === 'auto-approved' ? c.blue('◉')   :
+    d.status === 'synced'        ? c.green('✔')  :
+    d.status === 'rejected'      ? c.red('✗')    : c.dim('○');
 
   const confidence =
-    d.confidence === 'high'   ? '\x1b[32mhigh\x1b[0m' :
-    d.confidence === 'medium' ? '\x1b[33mmedium\x1b[0m' :
-                                '\x1b[31mlow\x1b[0m';
+    d.confidence === 'high'   ? c.green('high') :
+    d.confidence === 'medium' ? c.yellow('medium') :
+                                c.red('low');
 
   const scopeLabel = d.scope ?? 'component';
   const scopeBadge =
-    scopeLabel === 'system'       ? `\x1b[31m[${scopeLabel}]\x1b[0m` :
-    scopeLabel === 'cross-domain' ? `\x1b[33m[${scopeLabel}]\x1b[0m` :
-    scopeLabel === 'component'    ? `\x1b[34m[${scopeLabel}]\x1b[0m` :
-                                    `\x1b[90m[${scopeLabel}]\x1b[0m`;
+    scopeLabel === 'system'       ? c.red(`[${scopeLabel}]`) :
+    scopeLabel === 'cross-domain' ? c.yellow(`[${scopeLabel}]`) :
+    scopeLabel === 'component'    ? c.blue(`[${scopeLabel}]`) :
+                                    c.gray(`[${scopeLabel}]`);
 
   console.log(`${icon} [${d.id}] ${scopeBadge} ${d.title}`);
   if (verbose) {
@@ -501,6 +507,21 @@ function displayDecision(d: PendingDecision, verbose = false): void {
     if (d.proposedRequirement) console.log(`   Requirement: ${d.proposedRequirement}`);
     if (d.evidenceFile) console.log(`   Evidence   : ${d.evidenceFile}`);
   }
+}
+
+/**
+ * One-line glyph legend printed beneath any decision listing. Its job is to make
+ * a gate-blocking `verified` status legible as "awaiting review" — visually
+ * distinct from the done statuses (approved/synced) — rather than a bare glyph
+ * a reader has to guess at.
+ */
+export function printDecisionLegend(): void {
+  const c = colorForStdout();
+  console.log(
+    `\nLegend: ${c.yellow('⧖')} awaiting review   ${c.blue('●')} approved   ` +
+      `${c.blue('◉')} auto-accepted   ${c.green('✔')} synced   ${c.red('✗')} rejected   ` +
+      `${c.yellow('↗')} phantom`,
+  );
 }
 
 function displayMissing(missing: Array<{ file: string; description: string }>): void {
@@ -879,6 +900,8 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
         for (const d of phantom) displayDecision(d, options.verbose);
       }
 
+      if (verified.length > 0 || phantom.length > 0) printDecisionLegend();
+
       displayMissing(missing);
 
       console.log('\nApprove with: openlore decisions --approve <id>');
@@ -1135,6 +1158,7 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
 
     logger.section('Architectural Decisions');
     for (const d of all) displayDecision(d, options.verbose);
+    printDecisionLegend();
     console.log(`\nTotal: ${all.length}`);
     } catch (err) {
       logger.error(`decisions command failed: ${(err as Error).message}`);
