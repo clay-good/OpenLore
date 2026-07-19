@@ -72,6 +72,7 @@ import { groupedFormatHelp } from './help-groups.js';
 import { configureLogger, logger } from '../utils/logger.js';
 import { colorForStderr } from '../utils/colors.js';
 import { checkExplicitConfig, type OptionValueSource } from './config-guard.js';
+import { setPrimaryConfigPath } from '../core/services/config-manager.js';
 import { notifyIfUpdateAvailable } from '../core/services/update-notifier.js';
 
 // Read version from package.json at runtime so it never drifts from the published version
@@ -103,13 +104,18 @@ program.hook('preAction', (thisCommand, actionCommand) => {
   // the path — never a silent fallback to the default config (which would run,
   // e.g., without the enforcement policy the user asked for). Only fires when the
   // value came from the CLI, not the built-in default (OutputContractsAreUniform).
-  const configGuard = checkExplicitConfig(
-    thisCommand.getOptionValueSource('config') as OptionValueSource,
-    opts.config as string | undefined,
-  );
+  const configSource = thisCommand.getOptionValueSource('config') as OptionValueSource;
+  const configGuard = checkExplicitConfig(configSource, opts.config as string | undefined);
   if (!configGuard.ok) {
     logger.error(configGuard.message!);
     process.exit(1);
+  }
+  // The explicit path is readable — honor it. Config reads/writes for the current
+  // project root now resolve to this file instead of the default
+  // <root>/.openlore/config.json (ExplicitConfigPathIsHonored). Keyed to cwd so peer
+  // (federation / spec-store) reads of other repos are never redirected.
+  if (configSource === 'cli' && typeof opts.config === 'string') {
+    setPrimaryConfigPath(process.cwd(), opts.config);
   }
 
   // Passive update notifier — cached, non-blocking, fail-silent. Only for

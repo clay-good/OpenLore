@@ -7,12 +7,12 @@
 
 import { Command } from 'commander';
 import { access, stat, readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { logger } from '../../utils/logger.js';
 import { palette } from '../../utils/colors.js';
-import { readOpenLoreConfig } from '../../core/services/config-manager.js';
+import { readOpenLoreConfig, resolveOpenLoreConfigPath } from '../../core/services/config-manager.js';
 import { validateOpenLoreConfig } from '../../core/services/config-schema.js';
 import { EdgeStore } from '../../core/services/edge-store.js';
 import { createLLMService, ProviderName } from '../../core/services/llm-service.js';
@@ -24,7 +24,6 @@ import {
   MIN_DISK_SPACE_WARN_MB,
   OPENLORE_DIR,
   OPENLORE_ANALYSIS_SUBDIR,
-  OPENLORE_CONFIG_FILENAME,
   OPENLORE_CONFIG_REL_PATH,
   OPENSPEC_DIR,
   OPENSPEC_SPECS_SUBDIR,
@@ -112,7 +111,12 @@ async function checkGit(rootPath: string): Promise<CheckResult> {
 }
 
 async function checkConfig(rootPath: string): Promise<CheckResult> {
-  const configPath = join(rootPath, OPENLORE_DIR, OPENLORE_CONFIG_FILENAME);
+  const configPath = resolveOpenLoreConfigPath(rootPath);
+  // Report the path actually read: the relative form for the default in-repo
+  // location, the real path when --config redirected it elsewhere (never a
+  // hardcoded ".openlore/config.json" that would misname an explicit --config).
+  const rel = relative(rootPath, configPath);
+  const shown = rel && !rel.startsWith('..') ? rel : configPath;
   try {
     await access(configPath);
     const config = await readOpenLoreConfig(rootPath);
@@ -120,20 +124,20 @@ async function checkConfig(rootPath: string): Promise<CheckResult> {
       return {
         name: 'openlore config',
         status: 'fail',
-        detail: `${OPENLORE_CONFIG_REL_PATH} exists but could not be parsed`,
-        fix: `Delete ${OPENLORE_CONFIG_REL_PATH} and run 'openlore init'`,
+        detail: `${shown} exists but could not be parsed`,
+        fix: `Delete ${shown} and run 'openlore init'`,
       };
     }
     return {
       name: 'openlore config',
       status: 'ok',
-      detail: `${OPENLORE_CONFIG_REL_PATH} (project: ${config.projectType})`,
+      detail: `${shown} (project: ${config.projectType})`,
     };
   } catch {
     return {
       name: 'openlore config',
       status: 'warn',
-      detail: `${OPENLORE_CONFIG_REL_PATH} not found`,
+      detail: `${shown} not found`,
       fix: "Run 'openlore install' for one-command setup (wires your agent + builds the index), or 'openlore init' to configure manually",
     };
   }
@@ -147,7 +151,7 @@ async function checkConfig(rootPath: string): Promise<CheckResult> {
  * report ok. Complements `checkConfig`, which only reports parse success.
  */
 async function checkConfigSchema(rootPath: string): Promise<CheckResult> {
-  const configPath = join(rootPath, OPENLORE_DIR, OPENLORE_CONFIG_FILENAME);
+  const configPath = resolveOpenLoreConfigPath(rootPath);
   let parsed: unknown;
   try {
     parsed = JSON.parse(await readFile(configPath, 'utf-8'));

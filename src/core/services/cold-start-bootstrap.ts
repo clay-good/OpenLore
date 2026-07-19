@@ -30,9 +30,8 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   OPENLORE_ANALYSIS_REL_PATH,
-  OPENLORE_DIR,
-  OPENLORE_CONFIG_FILENAME,
 } from '../../constants.js';
+import { resolveOpenLoreConfigPath } from './config-manager.js';
 
 /**
  * Why a background repair was started. `index-absent` is the original cold-start
@@ -84,7 +83,7 @@ export function hasAnalysis(directory: string): boolean {
 /** True when `.openlore/config.json` explicitly sets `autoInit: false`. Fail-open. */
 function autoInitDisabled(directory: string): boolean {
   try {
-    const raw = readFileSync(join(directory, OPENLORE_DIR, OPENLORE_CONFIG_FILENAME), 'utf-8');
+    const raw = readFileSync(resolveOpenLoreConfigPath(directory), 'utf-8');
     return (JSON.parse(raw) as { autoInit?: unknown }).autoInit === false;
   } catch {
     return false; // no config / unreadable → auto-init not disabled

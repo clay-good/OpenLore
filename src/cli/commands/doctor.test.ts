@@ -40,6 +40,8 @@ vi.mock('../../core/services/config-manager.js', () => ({
     openspecPath: './openspec',
     maxFiles: 500,
   }),
+  // Default resolution: <root>/.openlore/config.json (no --config override in tests).
+  resolveOpenLoreConfigPath: (rootPath: string) => `${rootPath}/.openlore/config.json`,
 }));
 
 vi.mock('../../core/services/llm-service.js', () => ({

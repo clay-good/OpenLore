@@ -5,7 +5,7 @@
  */
 
 import { mkdir, readFile, writeFile, readdir } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import YAML from 'yaml';
 import type { ProjectType, OpenLoreConfig } from '../../types/index.js';
 import { logger } from '../../utils/logger.js';
@@ -33,6 +33,45 @@ export interface OpenSpecConfig {
     sourceProject?: string;
   };
   [key: string]: unknown;
+}
+
+/**
+ * Process-scoped override for the primary root's config-file location, set by the
+ * CLI when the user passes an explicit global `--config <path>` (change:
+ * wire-global-config-path). It is keyed to the resolved primary root so it
+ * redirects ONLY that root's config file — a federation / spec-store read of a
+ * different repository never matches and always resolves to the peer's own
+ * `.openlore/config.json`. With no explicit `--config`, this stays null and every
+ * path resolves exactly as the default.
+ */
+let primaryConfigOverride: { root: string; configPath: string } | null = null;
+
+/**
+ * Register the explicit config-file path for a primary root. Both arguments are
+ * resolved to absolute paths so a later `resolveOpenLoreConfigPath` comparison is
+ * stable regardless of how a caller spells the root (`.`, cwd, absolute).
+ */
+export function setPrimaryConfigPath(rootPath: string, configPath: string): void {
+  primaryConfigOverride = { root: resolve(rootPath), configPath: resolve(configPath) };
+}
+
+/** Clear the primary-config override (test hook; also for a host reusing the process). */
+export function clearPrimaryConfigPath(): void {
+  primaryConfigOverride = null;
+}
+
+/**
+ * The single source of truth for "where is this root's config file". Returns the
+ * registered override ONLY when its root matches the resolved `rootPath`; otherwise
+ * the default `<rootPath>/.openlore/config.json`. Every config read/write/exists
+ * check — and the two direct readers outside this module — routes through here so
+ * an explicit `--config` is honored uniformly.
+ */
+export function resolveOpenLoreConfigPath(rootPath: string): string {
+  if (primaryConfigOverride && resolve(rootPath) === primaryConfigOverride.root) {
+    return primaryConfigOverride.configPath;
+  }
+  return join(rootPath, OPENLORE_DIR, OPENLORE_CONFIG_FILENAME);
 }
 
 /**
@@ -114,7 +153,7 @@ function emitConfigValidationWarnings(configPath: string, parsed: unknown): void
  * Read openlore configuration from .openlore/config.json
  */
 export async function readOpenLoreConfig(rootPath: string): Promise<OpenLoreConfig | null> {
-  const configPath = join(rootPath, OPENLORE_DIR, OPENLORE_CONFIG_FILENAME);
+  const configPath = resolveOpenLoreConfigPath(rootPath);
   let content: string;
   try {
     content = await readFile(configPath, 'utf-8');
@@ -126,7 +165,7 @@ export async function readOpenLoreConfig(rootPath: string): Promise<OpenLoreConf
     parsed = JSON.parse(content) as OpenLoreConfig;
   } catch (err) {
     logger.warning(`Failed to parse ${configPath}: ${(err as Error).message}`);
-    logger.warning(`Delete ${OPENLORE_CONFIG_REL_PATH} and run 'openlore init' to recreate it.`);
+    logger.warning(`Delete ${configPath} and run 'openlore init' to recreate it.`);
     return null;
   }
   emitConfigValidationWarnings(configPath, parsed);
@@ -140,10 +179,9 @@ export async function writeOpenLoreConfig(
   rootPath: string,
   config: OpenLoreConfig
 ): Promise<void> {
-  const configDir = join(rootPath, OPENLORE_DIR);
-  const configPath = join(configDir, OPENLORE_CONFIG_FILENAME);
+  const configPath = resolveOpenLoreConfigPath(rootPath);
 
-  await ensureDir(configDir);
+  await ensureDir(dirname(configPath));
   await writeFile(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
 }
 
@@ -151,7 +189,7 @@ export async function writeOpenLoreConfig(
  * Check if openlore config already exists
  */
 export async function openloreConfigExists(rootPath: string): Promise<boolean> {
-  return fileExists(join(rootPath, OPENLORE_DIR, OPENLORE_CONFIG_FILENAME));
+  return fileExists(resolveOpenLoreConfigPath(rootPath));
 }
 
 /**
