@@ -375,7 +375,8 @@ export interface CallGraphResult {
    * optimize-parallel-extraction-pool). Transient build-time data: it describes HOW the
    * facts were computed, never WHAT they are, so it is deliberately not carried into
    * {@link SerializedCallGraph} or any artifact. Read by the analyze summary to disclose a
-   * degraded lane.   *
+   * degraded lane.
+   *
    * "Byte-identical" is the contract for every fact the extractors produce, and it is
    * verified end to end. One residual asymmetry is inherent rather than a gap: a worker
    * thread gets a larger default stack than the main thread, so a pathological

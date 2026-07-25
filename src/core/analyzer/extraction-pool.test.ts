@@ -214,8 +214,16 @@ describe('extraction pool — lane selection', () => {
     expect(describeExtractionLane(disclosure({ lane: 'pooled', poolSize: 4 }))).toBeUndefined();
     // An empty re-check is routine work, not a degradation — it must stay silent.
     expect(describeExtractionLane(disclosure({ lane: 'pooled', poolSize: 4, unprovenRechecks: 9 }))).toBeUndefined();
-    expect(describeExtractionLane(disclosure({ lane: 'pooled', poolSize: 4, workerFallbackFiles: ['a.ts'] }))).toMatch(/re-extracted on the main thread/);
+    expect(describeExtractionLane(disclosure({ lane: 'pooled', poolSize: 4, workerFallbackFiles: ['a.ts'] })))
+      .toMatch(/extraction pool degraded: 1 file\(s\) re-extracted on the main thread/);
     expect(describeExtractionLane(disclosure({ lane: 'pooled', poolSize: 4, laneDefectFiles: ['a.ts'] }))).toMatch(/no symbols for 1 file/);
+    // Both happened: neither may swallow the other — an earlier revision dropped the
+    // fallback count whenever a defect was also present.
+    const both = describeExtractionLane(disclosure({
+      lane: 'pooled', poolSize: 4, laneDefectFiles: ['a.ts'], workerFallbackFiles: ['b.ts', 'c.ts'],
+    }));
+    expect(both).toMatch(/no symbols for 1 file/);
+    expect(both).toMatch(/2 file\(s\) re-extracted on the main thread/);
     expect(describeExtractionLane(disclosure({ serialReason: 'pool-unavailable' }))).toMatch(/serial lane/);
   }, 30_000);
 

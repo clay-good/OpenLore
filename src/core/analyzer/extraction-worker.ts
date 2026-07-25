@@ -92,10 +92,16 @@ async function probeFailureReason(language: string | undefined): Promise<string 
 }
 
 async function main(): Promise<void> {
-  if (!parentPort) return; // not running as a worker — nothing to serve
+  // Serve only when this thread is an extraction worker THIS pool spawned. Importing this
+  // module for its `PROBES` table (the probe-snippet guard test does) must never attach a
+  // message handler — and `parentPort !== null` cannot tell "I am an extraction worker"
+  // from "I am running inside someone else's worker thread", e.g. a test runner using a
+  // thread pool rather than forked processes.
+  const data = workerData as ExtractionWorkerData | null;
+  if (!parentPort || data?.openloreExtractionWorker !== true) return;
   relayLogging();
 
-  const failure = await probeFailureReason((workerData as ExtractionWorkerData | null)?.probeLanguage);
+  const failure = await probeFailureReason(data.probeLanguage);
   if (failure) {
     post({ type: 'unhealthy', reason: failure });
     return;

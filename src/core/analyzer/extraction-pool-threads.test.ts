@@ -16,9 +16,8 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { CallGraphBuilder, serializeCallGraph } from './call-graph.js';
+import { CallGraphBuilder, serializeCallGraph, dispatchFileExtract } from './call-graph.js';
 import { resolveWorkerEntry, type ExtractionFile } from './extraction-pool.js';
-import { dispatchFileExtract } from './call-graph.js';
 import { PROBES } from './extraction-worker.js';
 
 const fixtures = join(__dirname, 'fixtures');
@@ -87,7 +86,8 @@ describe('extraction pool — the entry that actually ships', () => {
     }
     const { Worker } = await import('node:worker_threads');
     const worker = new Worker(pathToFileURL(compiled), {
-      workerData: { probeLanguage: 'TypeScript' },
+      // The sentinel the pool sends; without it the entry stays inert by design.
+      workerData: { openloreExtractionWorker: true, probeLanguage: 'TypeScript' },
       stdout: true,
     });
     worker.stdout.resume();

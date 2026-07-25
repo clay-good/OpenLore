@@ -139,6 +139,16 @@ export interface ExtractionLaneOptions {
 /** Handed to a worker at construction. */
 export interface ExtractionWorkerData {
   /**
+   * Marks this thread as an extraction worker spawned by THIS pool.
+   *
+   * The worker entry serves requests on `parentPort` as a top-level side effect of being
+   * imported, so anything else that imports it while running inside some other worker
+   * thread would hijack that thread's message channel. `parentPort !== null` is not enough
+   * to tell the two apart (a test runner using a thread pool looks identical), so the
+   * module stays inert unless it finds this sentinel.
+   */
+  openloreExtractionWorker: true;
+  /**
    * The language the worker should prove it can parse before accepting work. Chosen from
    * the build's own files so the probe never gates on a grammar this repo does not use —
    * every grammar is an optional dependency. Absent, or a language with no probe snippet,
@@ -353,7 +363,7 @@ async function runSerial<T>(
 function createNodeWorker(entry: ResolvedWorkerEntry, probeLanguage?: string): ExtractionWorkerHandle {
   const worker = new Worker(entry.specifier, {
     ...(entry.execArgv ? { execArgv: entry.execArgv } : {}),
-    workerData: { probeLanguage } satisfies ExtractionWorkerData,
+    workerData: { openloreExtractionWorker: true, probeLanguage } satisfies ExtractionWorkerData,
     stdout: true,
   });
   worker.stdout.resume();
@@ -654,7 +664,7 @@ export function describeExtractionLane(d: ExtractionLaneDisclosure): string | un
       );
     }
     if (d.workerFallbackFiles.length > 0) {
-      parts.push(`${d.workerFallbackFiles.length} file(s) re-extracted on the main thread after a worker failed`);
+      parts.push(`extraction pool degraded: ${d.workerFallbackFiles.length} file(s) re-extracted on the main thread after a worker failed`);
     }
     return parts.length > 0 ? parts.join('; ') : undefined;
   }
