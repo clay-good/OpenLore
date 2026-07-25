@@ -19,6 +19,7 @@
  */
 
 import { Command } from 'commander';
+import { sanitizeForTerminal as safe } from '../../utils/misc.js';
 import { join } from 'node:path';
 import { logger } from '../../utils/logger.js';
 import { parseList, resolveLLMProvider } from '../../utils/command-helpers.js';
@@ -76,7 +77,7 @@ function displayCoverageReport(report: TestCoverageReport, json: boolean): void 
     console.log('');
     console.log('   Uncovered scenarios:');
     for (const s of report.uncovered.slice(0, 20)) {
-      console.log(`     ${s.domain}/${s.requirement}/${s.scenarioName}`);
+      console.log(`     ${safe(s.domain)}/${safe(s.requirement)}/${safe(s.scenarioName)}`);
     }
     if (report.uncovered.length > 20) {
       console.log(`     ... and ${report.uncovered.length - 20} more`);

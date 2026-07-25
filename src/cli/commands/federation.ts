@@ -8,6 +8,7 @@
  */
 
 import { Command } from 'commander';
+import { sanitizeForTerminal as safe } from '../../utils/misc.js';
 import { resolve } from 'node:path';
 import {
   addRepo,
@@ -35,7 +36,7 @@ export const federationCommand = new Command('federation')
         try {
           const { entry } = addRepo(process.cwd(), repoPath, { name: options.name });
           const fp = entry.fingerprint ? entry.fingerprint.slice(0, 12) : '(no index yet — run "openlore analyze" there)';
-          console.log(`✓ Registered "${entry.name}" → ${entry.path}`);
+          console.log(`✓ Registered "${safe(entry.name)}" → ${safe(entry.path)}`);
           console.log(`  fingerprint: ${fp}`);
         } catch (err) {
           console.error(`✗ ${(err as Error).message}`);
@@ -78,8 +79,8 @@ export const federationCommand = new Command('federation')
           console.log(`Federation registry (${repos.length} repo${repos.length === 1 ? '' : 's'}) — home: ${resolve(process.cwd())}\n`);
           for (const r of repos) {
             const state = evaluateRepoState(r);
-            console.log(`  ${r.name.padEnd(20)} ${STATE_LABEL[state] ?? state}`);
-            console.log(`  ${''.padEnd(20)} ${r.path}`);
+            console.log(`  ${safe(r.name).padEnd(20)} ${STATE_LABEL[state] ?? state}`);
+            console.log(`  ${''.padEnd(20)} ${safe(r.path)}`);
           }
         } catch (err) {
           // A corrupt manifest makes loadRegistry throw; surface it cleanly

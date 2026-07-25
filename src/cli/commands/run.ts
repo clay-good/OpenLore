@@ -6,6 +6,7 @@
  */
 
 import { Command } from 'commander';
+import { sanitizeForTerminal as safe } from '../../utils/misc.js';
 import { stat, mkdir, writeFile } from 'node:fs/promises';
 import { join, basename } from 'node:path';
 import { createRequire } from 'node:module';
@@ -387,7 +388,7 @@ The pipeline saves run metadata to .openlore/runs/ for tracking.
         if (analysisData) {
           const { repoStructure } = analysisData;
           console.log(`   Using existing analysis: ${repoStructure.statistics.analyzedFiles} files, ${repoStructure.domains.length} domains`);
-          console.log(`   Detected domains: ${repoStructure.domains.map(d => d.name).join(', ') || 'None'}`);
+          console.log(`   Detected domains: ${safe(repoStructure.domains.map(d => d.name).join(', ')) || 'None'}`);
           metadata.steps.analyze = {
             status: 'skipped',
             reason: `Recent analysis (${formatAge(analysisAge)})`,
@@ -421,7 +422,7 @@ The pipeline saves run metadata to .openlore/runs/ for tracking.
 
           console.log(`   ✓ Analyzed ${result.repoMap.summary.analyzedFiles} files`);
           console.log(`   ✓ Found ${result.depGraph.statistics.clusterCount} clusters`);
-          console.log(`   Detected domains: ${result.artifacts.repoStructure.domains.map(d => d.name).join(', ') || 'None'}`);
+          console.log(`   Detected domains: ${safe(result.artifacts.repoStructure.domains.map(d => d.name).join(', ')) || 'None'}`);
 
           metadata.steps.analyze = {
             status: 'completed',
@@ -490,7 +491,7 @@ The pipeline saves run metadata to .openlore/runs/ for tracking.
         console.log(`   ├─ ${openspecPath}/specs/architecture/spec.md`);
         if (analysisData) {
           for (const domain of analysisData.repoStructure.domains.slice(0, 5)) {
-            console.log(`   ├─ ${openspecPath}/specs/${domain.name}/spec.md`);
+            console.log(`   ├─ ${openspecPath}/specs/${safe(domain.name)}/spec.md`);
           }
         }
         console.log(`   └─ ${openspecPath}/specs/api/spec.md (if applicable)`);

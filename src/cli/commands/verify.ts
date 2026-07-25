@@ -6,6 +6,7 @@
  */
 
 import { Command } from 'commander';
+import { sanitizeForTerminal as safe } from '../../utils/misc.js';
 import { join } from 'node:path';
 import { logger } from '../../utils/logger.js';
 import { redirectConsoleToStderr } from '../../utils/quiet-stdout.js';
@@ -105,7 +106,7 @@ function displayResult(
 ): void {
   const status = getStatusEmoji(result.overallScore, threshold);
   console.log('');
-  console.log(`   [${index}/${total}] ${result.filePath}`);
+  console.log(`   [${index}/${total}] ${safe(result.filePath)}`);
 
   // Purpose match
   const purposeStatus = result.purposeMatch.similarity >= 0.5 ? '✓' : '⚠';
@@ -184,7 +185,7 @@ function displaySummary(report: VerificationReport, _threshold: number): void {
   // Suggested improvements
   if (report.suggestedImprovements.length > 0) {
     for (const improvement of report.suggestedImprovements) {
-      console.log(`   ${improvement.domain}: ${improvement.issue}`);
+      console.log(`   ${safe(improvement.domain)}: ${safe(improvement.issue)}`);
       console.log(`      → ${improvement.suggestion}`);
     }
     console.log('');

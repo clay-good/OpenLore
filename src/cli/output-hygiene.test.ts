@@ -88,3 +88,43 @@ describe('CLI output hygiene — untrusted terminal control sequences', () => {
     ).toEqual([]);
   });
 });
+
+describe('CLI output hygiene — repository-derived values reaching the terminal', () => {
+  /**
+   * A file name may legally contain ESC on Linux and macOS, so any repository-derived
+   * value OpenLore echoes back can carry cursor-movement or screen-clear sequences.
+   * Printed raw, the repository being analyzed can overwrite OpenLore's own output.
+   *
+   * `writeStdout` and the logger sanitize centrally. `console.log` does not — so a
+   * command that prints a path or symbol through it bypasses both. That is not
+   * hypothetical: it is how `orient` and then `audit` were each found leaking, the
+   * second only after widening a manual survey from 11 commands to 27.
+   *
+   * Hence the rule: in a command module, a bare `console.log` template may not
+   * interpolate a repository-derived field unless it goes through
+   * `sanitizeForTerminal` (imported as `safe`).
+   */
+  const REPO_DERIVED = /console\.log\(`[^`]*\$\{[^}]*\.(name|file|filePath|path|symbol|requirement|domain|reason|id)\b/;
+
+  it('sanitizes repo-derived values printed with bare console.log', () => {
+    const commandsDir = join(import.meta.dirname, 'commands');
+    const offenders: string[] = [];
+    for (const file of walkTsFiles(commandsDir)) {
+      readFileSync(file, 'utf-8')
+        .split('\n')
+        .forEach((line, i) => {
+          if (!REPO_DERIVED.test(line)) return;
+          if (line.includes('safe(') || line.includes('sanitizeForTerminal(')) return;
+          offenders.push(`${file.split('/commands/')[1]}:${i + 1}  ${line.trim().slice(0, 80)}`);
+        });
+    }
+    expect(
+      offenders,
+      'These print repository-derived values with bare console.log, which neither\n' +
+        'writeStdout nor the logger sanitizes. An analyzed repository can smuggle\n' +
+        'terminal control sequences through them and forge OpenLore output.\n' +
+        "Wrap the value: `${safe(value)}` (import { sanitizeForTerminal as safe }).\n\n" +
+        offenders.join('\n'),
+    ).toEqual([]);
+  });
+});

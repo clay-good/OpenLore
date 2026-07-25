@@ -9,6 +9,7 @@
  */
 
 import { Command } from 'commander';
+import { sanitizeForTerminal as safe } from '../../utils/misc.js';
 import { readFile, writeFile, mkdir, chmod } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -501,7 +502,7 @@ export function displayDecision(d: PendingDecision, verbose = false): void {
     scopeLabel === 'component'    ? c.blue(`[${scopeLabel}]`) :
                                     c.gray(`[${scopeLabel}]`);
 
-  console.log(`${icon} [${d.id}] ${scopeBadge} ${d.title}`);
+  console.log(`${icon} [${safe(d.id)}] ${scopeBadge} ${safe(d.title)}`);
   if (verbose) {
     console.log(`   Status     : ${d.status}  Confidence: ${confidence}  Scope: ${scopeLabel}`);
     console.log(`   Rationale  : ${d.rationale}`);
@@ -1222,7 +1223,7 @@ decisionsCommand
       for (const e of entries) {
         const when = e.at.replace('T', ' ').slice(0, 19);
         const commit = e.commit ? ` @${e.commit}` : '';
-        console.log(`${when}  [${e.id}] ${e.from ?? '∅'} → ${e.to}  by ${e.actor}${commit}  ${e.title}`);
+        console.log(`${when}  [${safe(e.id)}] ${safe(e.from ?? '∅')} → ${safe(e.to)}  by ${safe(e.actor)}${commit}  ${safe(e.title)}`);
       }
       console.log(`\nTotal: ${entries.length} transition(s)`);
     } catch (err) {

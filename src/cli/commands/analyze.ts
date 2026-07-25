@@ -6,6 +6,7 @@
  */
 
 import { Command, Option } from 'commander';
+import { sanitizeForTerminal as safe } from '../../utils/misc.js';
 import { writeFile, mkdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { logger } from '../../utils/logger.js';
@@ -664,7 +665,7 @@ After analysis, run 'openlore generate' to create OpenSpec files.
           const domain = artifacts.repoStructure.domains[i];
           const isLast = i === Math.min(artifacts.repoStructure.domains.length, 6) - 1;
           const prefix = isLast ? '└─' : '├─';
-          console.log(`    ${prefix} ${domain.name} (${domain.files.length} files)`);
+          console.log(`    ${prefix} ${safe(domain.name)} (${domain.files.length} files)`);
         }
         if (artifacts.repoStructure.domains.length > 6) {
           console.log(`       ... and ${artifacts.repoStructure.domains.length - 6} more`);

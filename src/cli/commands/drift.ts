@@ -6,6 +6,7 @@
  */
 
 import { Command } from 'commander';
+import { sanitizeForTerminal as safe } from '../../utils/misc.js';
 import { mkdir, readFile, writeFile, chmod } from 'node:fs/promises';
 import { join } from 'node:path';
 import { logger } from '../../utils/logger.js';
@@ -77,10 +78,10 @@ function displayIssue(issue: DriftIssue, verbose: boolean): void {
   const sev = severityLabel(issue.severity);
 
   console.log('');
-  console.log(`   ${icon} [${sev}] ${kindLabel(issue.kind)}: ${issue.filePath}`);
+  console.log(`   ${icon} [${sev}] ${kindLabel(issue.kind)}: ${safe(issue.filePath)}`);
 
   if (issue.domain) {
-    console.log(`      Spec: ${issue.specPath ?? issue.domain}`);
+    console.log(`      Spec: ${safe(issue.specPath ?? issue.domain)}`);
   }
 
   if (verbose || issue.severity === 'error') {
@@ -636,7 +637,7 @@ Pre-commit hook:
           console.log('   Suggested tests for affected domains:');
           console.log('');
           for (const d of suggestion.domains) {
-            console.log(`   ${d.domain}  (${d.testFiles.length} file${d.testFiles.length !== 1 ? 's' : ''})`);
+            console.log(`   ${safe(d.domain)}  (${d.testFiles.length} file${d.testFiles.length !== 1 ? 's' : ''})`);
             for (const f of d.testFiles) {
               console.log(`     → ${f}`);
             }
