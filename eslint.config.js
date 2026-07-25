@@ -6,6 +6,25 @@ export default tseslint.config(
   eslint.configs.recommended,
   ...tseslint.configs.recommended,
   {
+    // @eslint/js 10 promoted two rules into `recommended`. Both flag real hygiene
+    // issues, and both are off HERE ONLY so that adopting them is its own reviewed
+    // change rather than 48 edits across 31 files riding along with a version bump.
+    //
+    //   preserve-caught-error  — 12 sites / 7 files. Wants `{ cause }` when rethrowing
+    //                            from a catch. Genuinely worth adopting: it preserves
+    //                            the diagnostic chain.
+    //   no-useless-assignment  — 36 sites / 24 files. Mostly defensive initializers
+    //                            (`let x = []` where every branch reassigns) and dead
+    //                            stores. Sampled several; none indicated a bug.
+    //
+    // Turning these on is a code change, not a config change. Remove these two lines
+    // in the PR that does the fixes.
+    rules: {
+      'preserve-caught-error': 'off',
+      'no-useless-assignment': 'off',
+    },
+  },
+  {
     files: ['src/**/*.ts'],
     ignores: ['src/**/*.test.ts'],
     languageOptions: {
