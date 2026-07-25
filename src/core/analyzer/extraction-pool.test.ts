@@ -18,14 +18,16 @@ import {
   plannedPoolSize,
   resolveWorkerEntry,
   describeExtractionLane,
+  __resetExtractionPoolStateForTests,
   type ExtractionFile,
+  type ExtractionLaneDisclosure,
   type ExtractionWorkerFactory,
   type ExtractionWorkerHandle,
   type ExtractionRequest,
   type ExtractionResponse,
 } from './extraction-pool.js';
-import { CallGraphBuilder, serializeCallGraph, dispatchFileExtract } from './call-graph.js';
-import { EXTRACTION_POOL_MIN_FILES } from '../../constants.js';
+import { CallGraphBuilder, serializeCallGraph, dispatchFileExtract, type FileExtractResult } from './call-graph.js';
+import { EXTRACTION_POOL_MIN_FILES, EXTRACTION_POOL_STARTUP_TIMEOUT_MS } from '../../constants.js';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -72,6 +74,13 @@ interface StubOptions {
   silentStartup?: boolean;
   /** Warnings each worker relays at startup — used to prove parent-side dedupe. */
   relayWarnings?: string[];
+  /**
+   * Answer with an EMPTY result for these languages instead of extracting — a worker whose
+   * grammar for that language failed to load in its own thread.
+   */
+  blindTo?: (language: string) => boolean;
+  /** Reply with an id that does not match the request — an off-protocol worker. */
+  wrongId?: boolean;
   /** Records the input index of every answer, in the order the parent received it. */
   completionLog?: number[];
 }
@@ -104,9 +113,15 @@ function stubWorkerFactory(opts: StubOptions = {}): ExtractionWorkerFactory {
             emit('exit', 1);
             return;
           }
+          const replyId = opts.wrongId ? id + 1000 : id;
+          if (opts.blindTo?.(file.language)) {
+            opts.completionLog?.push(id);
+            send({ type: 'result', id: replyId, value: { nodes: [], rawEdges: [], cfg: new Map() } });
+            return;
+          }
           void dispatchFileExtract(file).then(
-            (value) => { opts.completionLog?.push(id); send({ type: 'result', id, value }); },
-            (err: Error) => { opts.completionLog?.push(id); send({ type: 'failed', id, message: err.message }); },
+            (value) => { opts.completionLog?.push(id); send({ type: 'result', id: replyId, value }); },
+            (err: Error) => { opts.completionLog?.push(id); send({ type: 'failed', id: replyId, message: err.message }); },
           );
         }, opts.delayFor?.(id) ?? 0);
       },
@@ -136,14 +151,28 @@ async function buildJson(
   return JSON.stringify(serializeCallGraph(result));
 }
 
-afterEach(() => { vi.restoreAllMocks(); });
+/**
+ * The same emptiness predicate production uses: a result carrying no facts at all. Only
+ * ever used to decide whether a worker's SILENCE has been proven trustworthy.
+ */
+function isEmpty(result: FileExtractResult | undefined): boolean {
+  if (!result) return false;
+  return result.nodes.length === 0 && result.rawEdges.length === 0 && !result.parseHealth && !result.style;
+}
+
+/** A disclosure with the routine fields filled in, for the describe-only assertions. */
+function disclosure(partial: Partial<ExtractionLaneDisclosure>): ExtractionLaneDisclosure {
+  return { lane: 'serial', poolSize: 0, workerFallbackFiles: [], laneDefectFiles: [], emptyRechecks: 0, ...partial };
+}
+
+afterEach(() => { vi.restoreAllMocks(); __resetExtractionPoolStateForTests(); });
 
 // ---------------------------------------------------------------------------
 
 describe('extraction pool — lane selection', () => {
   it('stays serial below the file-count floor, and says why', async () => {
     const files = corpus(EXTRACTION_POOL_MIN_FILES - 1);
-    const { disclosure } = await extractFilesForPass1(files, dispatchFileExtract);
+    const { disclosure } = await extractFilesForPass1(files, dispatchFileExtract, isEmpty);
     expect(disclosure.lane).toBe('serial');
     expect(disclosure.serialReason).toBe('too-few-files');
     expect(plannedPoolSize(files.length)).toBe(0);
@@ -152,16 +181,21 @@ describe('extraction pool — lane selection', () => {
   it('OPENLORE_NO_WORKERS forces the serial lane even for a large build', async () => {
     // The suite already sets this flag; assert the contract rather than assuming it.
     expect(process.env.OPENLORE_NO_WORKERS).toBe('1');
-    const { disclosure } = await extractFilesForPass1(corpus(EXTRACTION_POOL_MIN_FILES + 8), dispatchFileExtract);
+    const { disclosure } = await extractFilesForPass1(corpus(EXTRACTION_POOL_MIN_FILES + 8), dispatchFileExtract, isEmpty);
     expect(disclosure.lane).toBe('serial');
     expect(disclosure.serialReason).toBe('disabled-by-env');
   }, 30_000);
 
   it('a normal serial choice is not reported as a degradation', () => {
-    expect(describeExtractionLane({ lane: 'serial', poolSize: 0, serialReason: 'too-few-files', workerFallbackFiles: [] })).toBeUndefined();
-    expect(describeExtractionLane({ lane: 'pooled', poolSize: 4, workerFallbackFiles: [] })).toBeUndefined();
-    expect(describeExtractionLane({ lane: 'pooled', poolSize: 4, workerFallbackFiles: ['a.ts'] })).toMatch(/re-extracted on the main thread/);
-    expect(describeExtractionLane({ lane: 'serial', poolSize: 0, serialReason: 'pool-unavailable', workerFallbackFiles: [] })).toMatch(/serial lane/);
+    expect(describeExtractionLane(disclosure({ serialReason: 'too-few-files' }))).toBeUndefined();
+    expect(describeExtractionLane(disclosure({ serialReason: 'insufficient-cores' }))).toBeUndefined();
+    expect(describeExtractionLane(disclosure({ serialReason: 'pool-saturated' }))).toBeUndefined();
+    expect(describeExtractionLane(disclosure({ lane: 'pooled', poolSize: 4 }))).toBeUndefined();
+    // An empty re-check is routine work, not a degradation — it must stay silent.
+    expect(describeExtractionLane(disclosure({ lane: 'pooled', poolSize: 4, emptyRechecks: 9 }))).toBeUndefined();
+    expect(describeExtractionLane(disclosure({ lane: 'pooled', poolSize: 4, workerFallbackFiles: ['a.ts'] }))).toMatch(/re-extracted on the main thread/);
+    expect(describeExtractionLane(disclosure({ lane: 'pooled', poolSize: 4, laneDefectFiles: ['a.ts'] }))).toMatch(/no symbols for 1 file/);
+    expect(describeExtractionLane(disclosure({ serialReason: 'pool-unavailable' }))).toMatch(/serial lane/);
   }, 30_000);
 
   it('resolves a worker entry for the current runtime', () => {
@@ -178,7 +212,7 @@ describe('extraction pool — determinism', () => {
     // Later files answer sooner: the completion order is deliberately inverted.
     const factory = stubWorkerFactory({ delayFor: (i) => (files.length - i), completionLog });
 
-    const { outcomes, disclosure } = await extractFilesForPass1(files, dispatchFileExtract, {
+    const { outcomes, disclosure } = await extractFilesForPass1(files, dispatchFileExtract, isEmpty, {
       workerFactory: factory,
       poolSize: 4,
     });
@@ -224,7 +258,7 @@ describe('extraction pool — fail-soft ladder', () => {
     const victim = files[7].path;
     const factory = stubWorkerFactory({ dieOn: (f) => f.path === victim });
 
-    const { outcomes, disclosure } = await extractFilesForPass1(files, dispatchFileExtract, {
+    const { outcomes, disclosure } = await extractFilesForPass1(files, dispatchFileExtract, isEmpty, {
       workerFactory: factory,
       poolSize: 3,
     });
@@ -241,7 +275,7 @@ describe('extraction pool — fail-soft ladder', () => {
   it('survives every worker dying — no file is lost', async () => {
     const files = corpus();
     const factory = stubWorkerFactory({ dieOn: () => true });
-    const { outcomes, disclosure } = await extractFilesForPass1(files, dispatchFileExtract, {
+    const { outcomes, disclosure } = await extractFilesForPass1(files, dispatchFileExtract, isEmpty, {
       workerFactory: factory,
       poolSize: 4,
     });
@@ -252,7 +286,7 @@ describe('extraction pool — fail-soft ladder', () => {
 
   it('falls back to the serial lane wholesale when no worker comes up healthy', async () => {
     const files = corpus();
-    const { outcomes, disclosure } = await extractFilesForPass1(files, dispatchFileExtract, {
+    const { outcomes, disclosure } = await extractFilesForPass1(files, dispatchFileExtract, isEmpty, {
       workerFactory: stubWorkerFactory({ unhealthy: true }),
       poolSize: 4,
     });
@@ -262,7 +296,7 @@ describe('extraction pool — fail-soft ladder', () => {
   }, 30_000);
 
   it('falls back when the worker factory itself throws', async () => {
-    const { disclosure, outcomes } = await extractFilesForPass1(corpus(), dispatchFileExtract, {
+    const { disclosure, outcomes } = await extractFilesForPass1(corpus(), dispatchFileExtract, isEmpty, {
       workerFactory: () => { throw new Error('spawn refused'); },
       poolSize: 4,
     });
@@ -280,6 +314,7 @@ describe('extraction pool — fail-soft ladder', () => {
     const { outcomes, disclosure } = await extractFilesForPass1(
       files,
       async (f) => { if (f.path === boom) throw new Error('synthetic parse failure'); return dispatchFileExtract(f); },
+      isEmpty,
       { workerFactory: factory, poolSize: 2 },
     );
     // The stub calls the real dispatch, so the injected failure only affects the serial
@@ -314,15 +349,15 @@ describe('extraction pool — fail-soft ladder', () => {
   it('drops a worker that never reports ready instead of hanging', async () => {
     const files = corpus();
     vi.useFakeTimers();
-    const promise = extractFilesForPass1(files, dispatchFileExtract, {
+    const promise = extractFilesForPass1(files, dispatchFileExtract, isEmpty, {
       workerFactory: stubWorkerFactory({ silentStartup: true }),
       poolSize: 2,
     });
-    await vi.advanceTimersByTimeAsync(31_000);
+    await vi.advanceTimersByTimeAsync(EXTRACTION_POOL_STARTUP_TIMEOUT_MS + 1_000);
     vi.useRealTimers();
-    const { disclosure, outcomes } = await promise;
-    expect(disclosure.lane).toBe('serial');
-    expect(disclosure.serialReason).toBe('pool-unavailable');
+    const { disclosure: d, outcomes } = await promise;
+    expect(d.lane).toBe('serial');
+    expect(d.serialReason).toBe('pool-unavailable');
     expect(outcomes).toHaveLength(files.length);
   }, 30_000);
 });
@@ -331,11 +366,137 @@ describe('extraction pool — worker log relay', () => {
   it('prints a relayed grammar warning once, not once per worker', async () => {
     const { logger } = await import('../../utils/logger.js');
     const warn = vi.spyOn(logger, 'warning').mockImplementation(() => {});
-    await extractFilesForPass1(corpus(), dispatchFileExtract, {
+    await extractFilesForPass1(corpus(), dispatchFileExtract, isEmpty, {
       workerFactory: stubWorkerFactory({ relayWarnings: ['language Lua grammar unavailable'] }),
       poolSize: 4,
     });
     const relayed = warn.mock.calls.filter(c => String(c[0]).includes('Lua grammar unavailable'));
     expect(relayed).toHaveLength(1);
+  }, 30_000);
+});
+
+describe('extraction pool — never trust an unproven silence', () => {
+  it('re-checks a worker that reports nothing for a language it has not proven, and discloses the defect', async () => {
+    // The exact silent-loss shape: the grammar loaded on the main thread but not in the
+    // worker, so the worker returns EMPTY rather than throwing.
+    const files = corpus();
+    const { outcomes, disclosure: d } = await extractFilesForPass1(files, dispatchFileExtract, isEmpty, {
+      workerFactory: stubWorkerFactory({ blindTo: (l) => l === 'TypeScript' }),
+      poolSize: 2,
+    });
+
+    expect(d.lane).toBe('pooled');
+    // Every file was re-checked, and every re-check found facts the worker had missed.
+    expect(d.emptyRechecks).toBe(files.length);
+    expect(d.laneDefectFiles).toHaveLength(files.length);
+    expect(outcomes.every(o => o.status === 'ok' && (o.value?.nodes.length ?? 0) > 0)).toBe(true);
+    expect(describeExtractionLane(d)).toMatch(/no symbols for \d+ file/);
+  }, 30_000);
+
+  it('a blind worker still yields a graph byte-identical to the serial lane', async () => {
+    const files = corpus();
+    const pooled = await buildJson(files, {
+      workerFactory: stubWorkerFactory({ blindTo: () => true }),
+      poolSize: 2,
+    });
+    expect(pooled).toBe(await buildJson(files));
+  }, 30_000);
+
+  it('costs nothing on a healthy worker: a file that merely has no functions is not a silence', async () => {
+    // The predicate matches the no-grammar SIGNATURE (no nodes, no edges, no style, no
+    // parse health) — not "no functions". A real parse of a comment- or types-only file
+    // still yields style counters, so ordinary empty files never trigger a re-check.
+    const files: ExtractionFile[] = [
+      { path: 'src/blank0.ts', language: 'TypeScript', content: '// nothing here\n' },
+      { path: 'src/types.ts', language: 'TypeScript', content: 'export interface X { a: number }\n' },
+      ...corpus(6),
+    ];
+    const { disclosure: d } = await extractFilesForPass1(files, dispatchFileExtract, isEmpty, {
+      workerFactory: stubWorkerFactory({}),
+      poolSize: 1,
+    });
+    expect(d.lane).toBe('pooled');
+    expect(d.emptyRechecks).toBe(0);
+    expect(d.laneDefectFiles).toEqual([]);
+    expect(describeExtractionLane(d)).toBeUndefined();
+  }, 30_000);
+
+  it('re-checks only until the worker proves the language, for a language with no style counters', async () => {
+    // Java carries no style tally, so a genuinely empty Java file IS indistinguishable from
+    // a missing grammar — and is re-checked, until a real Java file proves the worker can
+    // parse Java. That bounded cost is the price of never trusting an unproven silence.
+    const blank = (i: number): ExtractionFile => ({ path: `Blank${i}.java`, language: 'Java', content: '// nothing\n' });
+    const real: ExtractionFile = {
+      path: 'Svc.java', language: 'Java',
+      content: 'class Svc {\n  static int helper(int x) { return x + 1; }\n  int run() { return helper(2); }\n}\n',
+    };
+    const files = [blank(0), blank(1), real, blank(2), blank(3)];
+    const { disclosure: d } = await extractFilesForPass1(files, dispatchFileExtract, isEmpty, {
+      workerFactory: stubWorkerFactory({}),
+      poolSize: 1,
+    });
+    expect(d.lane).toBe('pooled');
+    // The two before the proof are re-checked; the two after are trusted.
+    expect(d.emptyRechecks).toBe(2);
+    expect(d.laneDefectFiles).toEqual([]);
+    expect(describeExtractionLane(d)).toBeUndefined();
+  }, 30_000);
+
+  it('treats a language with no extractor as a deterministic answer, not a silence', async () => {
+    // `undefined` (no extractor for this language) is identical on both lanes, so it must
+    // NOT trigger a main-thread re-check on every single file.
+    const files: ExtractionFile[] = Array.from({ length: 6 }, (_, i) => ({
+      path: `notes${i}.txt`, language: 'PlainText', content: 'nothing to extract\n',
+    }));
+    const { outcomes, disclosure: d } = await extractFilesForPass1(files, dispatchFileExtract, isEmpty, {
+      workerFactory: stubWorkerFactory({}),
+      poolSize: 2,
+    });
+    expect(d.emptyRechecks).toBe(0);
+    expect(outcomes.every(o => o.status === 'ok' && o.value === undefined)).toBe(true);
+  }, 30_000);
+});
+
+describe('extraction pool — protocol and budget', () => {
+  it('retires an off-protocol worker instead of waiting forever for the reply it owes', async () => {
+    // A reply whose id does not match the one outstanding request. Ignoring it would leave
+    // the request armed and hang the whole pass; the worker is retired instead.
+    const files = corpus();
+    const { outcomes, disclosure: d } = await extractFilesForPass1(files, dispatchFileExtract, isEmpty, {
+      workerFactory: stubWorkerFactory({ wrongId: true }),
+      poolSize: 2,
+    });
+    expect(d.lane).toBe('pooled');
+    expect(d.workerFallbackFiles).toHaveLength(files.length);
+    expect(outcomes.every(o => o.status === 'ok')).toBe(true);
+  }, 30_000);
+
+  it('caps workers across the process, not per build', async () => {
+    // Two builds in flight at once must not each plan a full pool: a worker's resident cost
+    // is per process, and the MCP daemon does run builds concurrently (a background
+    // self-heal rebuild alongside a tool-call build).
+    const many = EXTRACTION_POOL_MIN_FILES + 64;
+    const first = plannedPoolSize(many);
+    expect(first).toBeGreaterThan(0);
+
+    // Workers that spawn and then say nothing, so they stay live while we look at the budget.
+    const silent: ExtractionWorkerFactory = () => ({
+      postMessage() { /* never answers */ },
+      on() { /* no events */ },
+      terminate() { /* nothing to stop */ },
+    });
+    const trivial = async (): Promise<FileExtractResult | undefined> => undefined;
+
+    vi.useFakeTimers();
+    const holding = extractFilesForPass1(corpus(4), trivial, isEmpty, { workerFactory: silent, poolSize: first });
+    await Promise.resolve();
+    // Those workers are alive, so a build starting now plans a smaller pool.
+    expect(plannedPoolSize(many)).toBeLessThan(first);
+
+    await vi.advanceTimersByTimeAsync(EXTRACTION_POOL_STARTUP_TIMEOUT_MS + 1_000);
+    vi.useRealTimers();
+    await holding;
+    // …and the budget comes back once they are gone.
+    expect(plannedPoolSize(many)).toBe(first);
   }, 30_000);
 });

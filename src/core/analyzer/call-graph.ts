@@ -37,11 +37,7 @@ import { tallyParseHealth, type FileParseHealth, type ParseHealthNode } from './
 // Pass-1 extraction lane (change: optimize-parallel-extraction-pool). The pool holds no
 // extraction logic of its own — it dispatches `dispatchFileExtract` to worker threads and
 // merges by input index, with the serial loop as both reference and fallback.
-import {
-  extractFilesForPass1,
-  describeExtractionLane,
-  type ExtractionWorkerFactory,
-} from './extraction-pool.js';
+import { extractFilesForPass1, type ExtractionLaneOptions } from './extraction-pool.js';
 
 // ============================================================================
 // TYPES — extracted to ./call-graph-types.ts and re-exported here so this file
@@ -3959,15 +3955,30 @@ export async function synthesizeDynamicDispatchEdges(
   return results.flat();
 }
 
+/**
+ * Does a Pass-1 extraction result carry no facts at all? Used only to decide whether a
+ * WORKER's silence has been proven trustworthy (see `extraction-pool.ts`) — never to alter
+ * a result. `undefined` (a language with no extractor) is not emptiness: it is the same
+ * deterministic answer on both lanes.
+ */
+function isEmptyExtractResult(result: FileExtractResult | undefined): boolean {
+  if (!result) return false;
+  return result.nodes.length === 0
+    && result.rawEdges.length === 0
+    && !result.parseHealth
+    && !result.style;
+}
+
 /** Construction-time options for {@link CallGraphBuilder}. */
 export interface CallGraphBuilderOptions {
   /**
-   * Overrides for the Pass-1 extraction lane (change: optimize-parallel-extraction-pool).
-   * Production never passes this — the lane decides for itself from core count, file
-   * count, and `OPENLORE_NO_WORKERS`. Tests use it to drive a stub pool whose completion
-   * order and failure modes are deterministic.
+   * Controls for the Pass-1 extraction lane (change: optimize-parallel-extraction-pool).
+   * Production passes at most `disabled` (the watcher's interactive subset rebuild);
+   * otherwise the lane decides for itself from core count, file count, and
+   * `OPENLORE_NO_WORKERS`. Tests use the rest to drive a stub pool whose completion order
+   * and failure modes are deterministic.
    */
-  extraction?: { workerFactory?: ExtractionWorkerFactory; poolSize?: number };
+  extraction?: ExtractionLaneOptions;
 }
 
 export class CallGraphBuilder {
@@ -4016,10 +4027,9 @@ export class CallGraphBuilder {
     const { outcomes: extractOutcomes, disclosure: extractionLane } = await extractFilesForPass1(
       files,
       dispatchFileExtract,
+      isEmptyExtractResult,
       this.extractionOptions ?? {},
     );
-    const laneNote = describeExtractionLane(extractionLane);
-    if (laneNote) logger.warning(laneNote);
 
     for (let fileIndex = 0; fileIndex < files.length; fileIndex++) {
       const file = files[fileIndex];
@@ -4066,6 +4076,11 @@ export class CallGraphBuilder {
         // Record it as a structured parse-health failure so downstream conclusions disclose it
         // instead of treating the missing symbols as genuinely absent (change:
         // add-parse-health-boundary-disclosure). Still fail-soft — the build proceeds.
+        //
+        // Only `error.message` may be relied on here. A throw that happened inside an
+        // extraction worker crossed a structured-clone boundary, so its class, `code`, and
+        // stack did not survive — an `instanceof`/`.code` check added below would behave
+        // differently on the two lanes (change: optimize-parallel-extraction-pool).
         parseHealthByFile.set(file.path, {
           filePath: file.path,
           language: file.language,

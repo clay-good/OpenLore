@@ -1,8 +1,8 @@
 # Tasks — optimize-parallel-extraction-pool
 
-> Status: BUILT. Measured on this repo (macOS, 10 cores, pool size 8):
-> call-graph build **19.1s → 7.3s** (2.6×); full `openlore analyze --no-embed` **24.6s → 18.1s**.
-> Pass 1 was 14.3s of the 20.2s serial build (71%) before the change.
+> Status: BUILT + adversarially reviewed. Measured on this repo (macOS, 10 cores, pool size 8):
+> call-graph build **18.9s → 7.2s** (2.6×); full `openlore analyze --no-embed` **24.7s → 12.6s**
+> (2.0×). Pass 1 was 14.3s of the 20.2s serial build (71%) before the change.
 
 ## Implementation
 - [x] Worker entry module (`src/core/analyzer/extraction-worker.ts`): receives the build's file
@@ -34,6 +34,34 @@
 - [x] Serial path kept as the reference implementation — it is also the fallback executor, and the
       pool module contains no extraction logic at all
 
+## Hardening from adversarial review (two independent reviewers)
+- [x] **Never trust an unproven silence.** The startup probe covers ONE grammar; the other ~20 load
+      lazily and independently per thread, and an unavailable grammar returns EMPTY rather than
+      throwing. So a worker's empty result is re-checked on the main thread until that worker has
+      demonstrably extracted that language, and a disagreement is disclosed as a lane defect.
+      Measured cost on this repo: **0 re-checks** on a healthy run (a real parse of a
+      function-less file still yields style counters, so ordinary empty files are never mistaken
+      for silence)
+- [x] **Probe a language the build actually contains.** Every grammar is an optional dependency, so
+      probing TypeScript in a Python repo could disable the pool over a grammar that repo never
+      needed. The parent names the build's dominant language; a language with no probe snippet
+      skips the probe and relies on the per-language guard
+- [x] **No hang paths.** A reply whose id does not match the outstanding request retires the worker
+      (previously it was ignored, leaving the request armed forever); every per-file request has a
+      deadline; startup has one too, lowered to 10s since a healthy worker reports in well under a
+      second; a process that has proven workers cannot start remembers it instead of paying that
+      stall on every later build
+- [x] **Nothing writes to stdout.** `openlore mcp` speaks JSON-RPC over stdout and runs builds
+      in-process; a worker inherits no console patching. Workers now keep their stdout off the
+      parent's (drained, stderr still inherited), and the lane note is returned on the build result
+      for the CLI to render instead of being logged from the builder
+- [x] **Worker count is bounded per PROCESS, not per build.** The daemon runs builds concurrently
+      (a background self-heal rebuild alongside a tool-call build); each would otherwise plan a full
+      pool and double the resident isolate count. A build that finds the budget spent runs serial
+- [x] Worker handle registration moved inside the try that terminates it; `poolSize` documented as
+      "workers that came up", not "workers still alive"; a note at the merge catch that only
+      `error.message` survives the worker boundary
+
 ## Verification
 - [x] Byte-equality oracle: `openlore analyze` on a clean checkout of this repo, pooled and with
       `OPENLORE_NO_WORKERS=1` — every content artifact byte-identical (llm-context, repo-structure,
@@ -52,7 +80,16 @@
 - [x] Real-thread test: `worker_threads` workers spawn, probe, extract, and match serial byte for
       byte (`extraction-pool-threads.test.ts`)
 - [x] Wall-clock measured and reported above; no unmeasured speedup claims anywhere in docs
-- [x] Full suite green (321 files / 6137 tests), lint + typecheck clean
+- [x] Unproven-silence tests: a blind worker's graph is byte-identical to serial and its defect is
+      disclosed; an ordinary function-less file costs zero re-checks; a language with no style
+      counters is re-checked only until the worker proves it; a language with no extractor is a
+      deterministic answer, not a silence
+- [x] Protocol/budget tests: an off-protocol worker is retired instead of hanging the pass; the
+      worker budget is shared across concurrent builds and returned when they finish
+- [x] Shipped-entry test: `dist/core/analyzer/extraction-worker.js` — the file the npm package
+      ships, which no other test loads because vitest always resolves the `.ts` entry — starts and
+      reports ready (and says so loudly if the checkout is unbuilt, rather than passing quietly)
+- [x] Full suite green (321 files / 6146 tests), lint + typecheck clean
 
 ## Spec
 - [x] `analyzer` delta: ADD ExtractionPoolPreservesDeterministicOutput

@@ -730,16 +730,30 @@ export const EXTRACTION_POOL_MAX = 8;
 
 /**
  * Minimum Pass-1 file count before the pool is worth starting. Below this the worker
- * spawn + module-load cost exceeds the parse work the pool would absorb, so small
- * builds (including the single-file builds the watcher and tests perform) stay on the
- * serial lane.
+ * spawn + module-load cost exceeds the parse work the pool would absorb, so small builds
+ * stay on the serial lane. This is a cost heuristic only — it is NOT what keeps the
+ * watcher off the pool. The watcher's per-save subset rebuild can exceed any such floor
+ * (its closure budget alone is INCREMENTAL_CLOSURE_BUDGET files), so it opts out
+ * explicitly instead of relying on this number.
  */
 export const EXTRACTION_POOL_MIN_FILES = 32;
 
 /**
- * How long a freshly spawned extraction worker has to load its modules, pass its
- * parse-health probe, and report ready. A worker that neither reports ready nor dies
- * within this window (a hung module load or grammar dlopen) is dropped from the pool
- * rather than allowed to stall analyze — a liveness bound, not a performance weight.
+ * How long a freshly spawned extraction worker has to load its modules, pass its parse
+ * probe, and report ready. A worker that neither reports ready nor dies within this window
+ * (a hung module load or grammar dlopen) is dropped from the pool rather than allowed to
+ * stall analyze — a liveness bound, not a performance weight. Kept modest because this is
+ * also the stall an environment where workers CANNOT start pays before falling back: a
+ * healthy worker reports ready in well under a second, so a slow one is a broken one.
  */
-export const EXTRACTION_POOL_STARTUP_TIMEOUT_MS = 30_000;
+export const EXTRACTION_POOL_STARTUP_TIMEOUT_MS = 10_000;
+
+/**
+ * How long a worker has to answer for ONE file before it is retired and that file is
+ * re-extracted on the main thread. Deliberately generous — a pathological source file can
+ * legitimately take seconds to parse, and a false timeout costs correctness nothing but
+ * does cost the pool a worker. The serial lane needs no equivalent bound because it cannot
+ * go silent; a wedged worker emits neither a reply nor an exit, so without this the pass
+ * would wait on it forever while its siblings finish and the process looks idle.
+ */
+export const EXTRACTION_POOL_REQUEST_TIMEOUT_MS = 120_000;

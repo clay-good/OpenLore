@@ -13,11 +13,23 @@ merged strictly in the input file order so every downstream pass receives input 
 serial path. The pooled path SHALL produce analysis artifacts byte-identical to the serial path for
 the same input. A worker failure SHALL fall back to serial extraction for the affected file(s), and
 an environment where workers cannot start SHALL fall back to the serial path wholesale — both
-disclosed in the analyze output, neither changing any extracted fact. Because the extractors report
-an unavailable grammar as an empty result rather than an error, a worker SHALL prove it can parse
-before it accepts work, and SHALL relay its grammar-unavailable warnings to the parent: an
-extraction lane that can produce nothing SHALL never be silently mistaken for files that contain
-nothing.
+disclosed in the analyze output, neither changing any extracted fact.
+
+Because the extractors report an unavailable grammar as an EMPTY result rather than an error, a
+worker's silence SHALL NOT be trusted until that worker has demonstrably extracted that language:
+an empty result for a language the worker has not yet produced facts for SHALL be re-checked on
+the serial path, and a case where the serial path then finds facts SHALL be disclosed as a lane
+defect. A worker SHALL additionally prove it can parse — in a language the build actually contains
+— before accepting work, and SHALL relay its grammar-unavailable warnings to the parent for
+deduplicated reporting. An extraction lane that can produce nothing SHALL never be mistaken for
+files that contain nothing.
+
+The lane SHALL bound its own cost and liveness: worker startup and each per-file request SHALL have
+deadlines after which the worker is retired and its file re-extracted on the serial path; worker
+count SHALL be bounded per PROCESS, not per build, so concurrent builds cannot multiply the resident
+worker set. Neither the pool nor the builder SHALL write to stdout — the same code path runs inside
+the stdio MCP server, whose stdout is the protocol channel — so lane disclosure SHALL be returned on
+the build result for the CLI to render.
 
 #### Scenario: Pooled and serial extraction are byte-identical
 
@@ -40,6 +52,23 @@ nothing.
 - **WHEN** the pool starts that worker
 - **THEN** the worker fails its startup parse probe and is dropped from the pool, and if no worker
   comes up healthy the whole pass falls back to the serial lane, disclosed
+
+#### Scenario: A worker that goes blind mid-run loses no symbols
+
+- **GIVEN** a worker that passed its startup probe but returns an empty result for a language it
+  has not yet extracted — the shape of a grammar that loaded on the main thread but not in that
+  thread
+- **WHEN** the pass completes
+- **THEN** those files were re-extracted on the serial path, the graph is identical to a fully
+  serial run, and the disagreement is disclosed as a lane defect rather than recorded as files
+  that contain no symbols
+
+#### Scenario: A worker that stops answering does not stall the run
+
+- **GIVEN** a worker that neither replies nor exits — during startup, or while holding a file
+- **WHEN** its deadline passes
+- **THEN** the worker is retired, its file is re-extracted on the serial path, and the run
+  completes
 
 #### Scenario: Parse health is lane-independent
 

@@ -224,6 +224,15 @@ export interface AnalysisArtifacts {
    * artifact written), so a healthy repo pays zero. Persisted as its own `parse-health.json`.
    */
   parseHealth?: ParseHealthReport;
+  /**
+   * A one-line note about the Pass-1 extraction lane, present ONLY when something degraded
+   * (change: optimize-parallel-extraction-pool) — a worker failed, or the worker pool could
+   * not be used at all. It describes HOW the facts were computed, never WHAT they are: the
+   * pooled and serial lanes are byte-identical by contract. Returned rather than logged
+   * because `build()` also runs inside `openlore mcp`, whose stdout is the JSON-RPC channel;
+   * only the CLI renders it.
+   */
+  extractionLaneNote?: string;
 }
 
 /**
@@ -308,6 +317,8 @@ export class AnalysisArtifactGenerator {
   private _styleFingerprint?: StyleFingerprint;
   /** Parse-health report computed during the last generateLLMContext (call-graph walk). */
   private _parseHealth?: ParseHealthReport;
+  /** Pass-1 extraction-lane degradation note from the last generateLLMContext, if any. */
+  private _extractionLaneNote?: string;
 
   constructor(options: ArtifactGeneratorOptions) {
     this.options = {
@@ -340,6 +351,7 @@ export class AnalysisArtifactGenerator {
       llmContext,
       styleFingerprint: this._styleFingerprint,
       parseHealth: this._parseHealth,
+      extractionLaneNote: this._extractionLaneNote,
     };
   }
 
@@ -1200,6 +1212,7 @@ export class AnalysisArtifactGenerator {
     // All dynamic imports grouped here; CALL_GRAPH_LANGS hoisted out of the loop.
     const { extractSignatures, detectLanguage, resolveHeaderLanguage } = await import('./signature-extractor.js');
     const { CallGraphBuilder, serializeCallGraph } = await import('./call-graph.js');
+    const { describeExtractionLane } = await import('./extraction-pool.js');
     const { extractHtmlScripts } = await import('./html-script-extractor.js');
     const { detectDuplicates } = await import('./duplicate-detector.js');
     const { analyzeForRefactoring } = await import('./refactor-analyzer.js');
@@ -1298,6 +1311,11 @@ export class AnalysisArtifactGenerator {
     // Build call graph
     const builder = new CallGraphBuilder();
     const callGraphResult = await builder.build(callGraphFiles);
+    // Stash the lane note for the CLI to render. Never logged from here: this code path
+    // also runs inside the stdio MCP server (change: optimize-parallel-extraction-pool).
+    this._extractionLaneNote = callGraphResult.extractionLane
+      ? describeExtractionLane(callGraphResult.extractionLane)
+      : undefined;
     const callGraph = serializeCallGraph(callGraphResult);
 
     // Style fingerprint (change: add-codebase-style-fingerprint): roll the raw per-file idiom

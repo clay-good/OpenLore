@@ -16,26 +16,43 @@
  * Two honesty rules are implemented here:
  *
  *  - **Startup probe.** The extractors return an empty result (they do not throw) when a
- *    grammar cannot be loaded, so a worker whose native bindings failed would silently
- *    contribute nothing to the graph. Before accepting any work this thread parses a
- *    known-good snippet and requires the expected node and edge; a worker that cannot do
- *    that reports itself `unhealthy` and is dropped from the pool instead of returning
- *    plausible-looking emptiness.
+ *    grammar cannot be loaded, so a worker whose bindings failed would silently contribute
+ *    nothing to the graph. Before accepting work this thread parses a known-good snippet in
+ *    the language the parent named and requires the expected node and edge; a worker that
+ *    cannot do that reports itself `unhealthy` and is dropped. This is a FAST-FAIL, not the
+ *    guarantee: it covers one language, and the pool's per-language unproven-silence guard
+ *    is what actually makes an empty result trustworthy.
  *  - **Log relay.** A grammar that is genuinely unavailable warns once per thread. Left
- *    alone that prints N times and interleaves with the parent's spinner, so the logger's
- *    output is redirected to the parent, which dedupes and prints it once.
+ *    alone that prints N times, interleaves with the parent's spinner, and — because a
+ *    worker inherits no console patching — could write to a stdout that is carrying
+ *    JSON-RPC. So the logger is redirected to the parent, which dedupes and prints once.
  */
 
-import { parentPort } from 'node:worker_threads';
+import { parentPort, workerData } from 'node:worker_threads';
 import { dispatchFileExtract } from './call-graph.js';
 import { logger } from '../../utils/logger.js';
-import type { ExtractionRequest, ExtractionResponse } from './extraction-pool.js';
+import type { ExtractionRequest, ExtractionResponse, ExtractionWorkerData } from './extraction-pool.js';
 
-/** The probe source: one function containing one call — the minimum that proves a real parse. */
-const PROBE_FILE = {
-  path: '__openlore_extraction_probe__.ts',
-  content: 'export function __openloreProbe(): void { __openloreProbeCallee(); }\n',
-  language: 'TypeScript',
+/**
+ * Probe sources, per language: one function containing one call — the minimum that proves a
+ * real parse produced both a node and an edge.
+ *
+ * The parent picks which language to probe from the build's OWN files, because every
+ * grammar is an optional dependency: probing TypeScript in a Python repo could disable the
+ * pool over a grammar that repo never needed. A language absent from this table simply
+ * skips the probe — the per-language unproven-silence guard in the pool still covers it,
+ * so the probe is a fast-fail optimization, never the sole line of defense.
+ */
+const PROBES: Record<string, { path: string; content: string }> = {
+  TypeScript: { path: '__openlore_probe__.ts', content: 'export function olProbe(): void { olProbeCallee(); }\n' },
+  JavaScript: { path: '__openlore_probe__.js', content: 'export function olProbe() { olProbeCallee(); }\n' },
+  Python: { path: '__openlore_probe__.py', content: 'def ol_probe():\n    ol_probe_callee()\n' },
+  Go: { path: '__openlore_probe__.go', content: 'package p\n\nfunc OlProbe() { olProbeCallee() }\n' },
+  Rust: { path: '__openlore_probe__.rs', content: 'fn ol_probe() { ol_probe_callee(); }\n' },
+  Ruby: { path: '__openlore_probe__.rb', content: 'def ol_probe\n  ol_probe_callee\nend\n' },
+  Java: { path: '__openlore_probe__.java', content: 'class OlProbe { void probe() { callee(); } }\n' },
+  'C++': { path: '__openlore_probe__.cpp', content: 'void olProbe() { olProbeCallee(); }\n' },
+  Swift: { path: '__openlore_probe__.swift', content: 'func olProbe() { olProbeCallee() }\n' },
 };
 
 function post(message: ExtractionResponse): void {
@@ -57,17 +74,20 @@ function relayLogging(): void {
 
 /**
  * Prove this thread can actually parse before it accepts work. Returns the reason it
- * cannot, or `undefined` when healthy.
+ * cannot, or `undefined` when healthy (including when there is nothing to probe).
  */
-async function probeFailureReason(): Promise<string | undefined> {
+async function probeFailureReason(language: string | undefined): Promise<string | undefined> {
+  if (!language) return undefined; // nothing named — the pool's per-language guard covers it
+  const probe = PROBES[language];
+  if (!probe) return undefined; // no probe for this language — same guard covers it
   try {
-    const result = await dispatchFileExtract(PROBE_FILE);
-    if (!result) return 'probe language has no extractor in this worker';
-    if (result.nodes.length === 0) return 'probe parse produced no function node (grammar unavailable in worker)';
-    if (result.rawEdges.length === 0) return 'probe parse produced no call edge (query support unavailable in worker)';
+    const result = await dispatchFileExtract({ ...probe, language });
+    if (!result) return `${language} has no extractor in this worker`;
+    if (result.nodes.length === 0) return `${language} probe produced no function node (grammar unavailable in worker)`;
+    if (result.rawEdges.length === 0) return `${language} probe produced no call edge (query support unavailable in worker)`;
     return undefined;
   } catch (err) {
-    return `probe parse threw: ${(err as Error).message}`;
+    return `${language} probe threw: ${(err as Error).message}`;
   }
 }
 
@@ -75,7 +95,7 @@ async function main(): Promise<void> {
   if (!parentPort) return; // not running as a worker — nothing to serve
   relayLogging();
 
-  const failure = await probeFailureReason();
+  const failure = await probeFailureReason((workerData as ExtractionWorkerData | null)?.probeLanguage);
   if (failure) {
     post({ type: 'unhealthy', reason: failure });
     return;

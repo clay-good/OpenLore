@@ -15,6 +15,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { CallGraphBuilder, serializeCallGraph } from './call-graph.js';
 import { resolveWorkerEntry, type ExtractionFile } from './extraction-pool.js';
 
@@ -65,6 +66,38 @@ async function buildJson(files: ExtractionFile[], poolSize?: number): Promise<st
   }
   return JSON.stringify(serializeCallGraph(result));
 }
+
+describe('extraction pool — the entry that actually ships', () => {
+  it('the compiled worker entry starts and reports ready', async () => {
+    // Under vitest `resolveWorkerEntry()` always picks the `.ts` + tsx branch, so every
+    // other test here exercises the SOURCE entry. `dist/core/analyzer/extraction-worker.js`
+    // is the file the npm package ships and the one `openlore analyze` actually loads —
+    // without this, a compile or packaging regression would degrade silently to the serial
+    // lane with a green suite.
+    const compiled = join(__dirname, 'extraction-worker.js');
+    if (!existsSync(compiled)) {
+      // Not built in this checkout. Say so rather than passing quietly.
+      console.warn('[extraction-pool] dist entry absent — compiled-worker check skipped (run `npm run build`)');
+      return;
+    }
+    const { Worker } = await import('node:worker_threads');
+    const worker = new Worker(pathToFileURL(compiled), {
+      workerData: { probeLanguage: 'TypeScript' },
+      stdout: true,
+    });
+    worker.stdout.resume();
+    try {
+      const first = await new Promise<{ type: string; reason?: string }>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('compiled worker never reported')), 30_000);
+        worker.on('message', (m) => { clearTimeout(timer); resolve(m as { type: string }); });
+        worker.on('error', (e) => { clearTimeout(timer); reject(e); });
+      });
+      expect(first.type).toBe('ready');
+    } finally {
+      await worker.terminate();
+    }
+  }, 60_000);
+});
 
 describe('extraction pool — real worker threads', () => {
   it('extracts on real threads and matches the serial lane byte for byte', async () => {
