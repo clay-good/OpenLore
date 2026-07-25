@@ -223,6 +223,9 @@ function mockResponse(body: object, ok = true, status = 200): Response {
     arrayBuffer: () => Promise.resolve(new ArrayBuffer(0)),
     blob: () => Promise.resolve(new Blob([])),
     formData: () => Promise.resolve(new FormData()),
+    // Added to `Response` by @types/node 26 (tracking the undici/WHATWG surface).
+    // Unused by these tests, but the mock is typed as a full `Response`.
+    bytes: () => Promise.resolve(new Uint8Array()),
   };
 }
 
