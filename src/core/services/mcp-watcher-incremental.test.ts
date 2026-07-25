@@ -43,6 +43,23 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
+/**
+ * Wait until `done()` reports the debounced flush has landed, or give up after `budget` ms.
+ *
+ * These tests used to sleep a fixed 150-200ms and assert immediately. That encodes a guess
+ * about how fast the machine is: on a loaded CI runner the flush had not run yet and the
+ * assertion failed for a reason that has nothing to do with the behavior under test. Polling
+ * for the observable outcome keeps the same assertions while removing the guess — a fast
+ * machine still finishes in one tick, and a slow one is simply given room.
+ */
+async function until(done: () => boolean | Promise<boolean>, budget = 5_000): Promise<void> {
+  const deadline = Date.now() + budget;
+  while (Date.now() < deadline) {
+    if (await done()) return;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+
 describe('McpWatcher — Spec 13.1 freshness', () => {
   it('G6: a save patches the just-changed signature into llm-context.json on disk', async () => {
     await writeContext([]);
@@ -117,7 +134,7 @@ describe('McpWatcher — Spec 13.1 freshness', () => {
     const watcher = new McpWatcher({ rootPath: root, embed: false, debounceMs: 30, maxBatchMs: 1000 });
     for (const f of files) (watcher as unknown as { enqueue(p: string): void }).enqueue(join(root, f));
 
-    await new Promise((r) => setTimeout(r, 200));
+    await until(() => summaries.length > 0);
 
     expect(summaries.length).toBe(1);
     expect(summaries[0]).toContain('updated 4 files');
@@ -145,7 +162,7 @@ describe('McpWatcher — Spec 13.1 freshness', () => {
 
     const watcher = new McpWatcher({ rootPath: root, embed: false, debounceMs: 20, maxBatchMs: 1000 });
     (watcher as unknown as { enqueue(p: string): void }).enqueue(fooAbs);
-    await new Promise((r) => setTimeout(r, 150));
+    await until(() => primeSpy.mock.calls.length > 0);
 
     // The flush handed the patched context to the read cache exactly once.
     expect(primeSpy).toHaveBeenCalledTimes(1);
@@ -172,7 +189,7 @@ describe('McpWatcher — Spec 13.1 freshness', () => {
 
     const watcher = new McpWatcher({ rootPath: root, embed: false, debounceMs: 30, bulkThreshold: 3 });
     for (const f of files) (watcher as unknown as { enqueue(p: string): void }).enqueue(join(root, f));
-    await new Promise((r) => setTimeout(r, 200));
+    await until(() => summaries.length > 0);
 
     expect(summaries.length).toBe(1);
     expect(summaries[0]).toContain('coalesced 3 changes');
@@ -185,7 +202,9 @@ describe('McpWatcher — Spec 13.1 freshness', () => {
 
     const watcher = new McpWatcher({ rootPath: root, embed: false, debounceMs: 20, maxBatchMs: 1000 });
     (watcher as unknown as { enqueue(p: string): void }).enqueue(fooAbs);
-    await new Promise((r) => setTimeout(r, 150));
+    await until(async () => {
+      try { return (await readFile(contextPath, 'utf-8')).includes('delta'); } catch { return false; }
+    });
 
     const onDisk = JSON.parse(await readFile(contextPath, 'utf-8')) as { signatures: Array<{ path: string; entries: Array<{ name: string }> }> };
     const foo = onDisk.signatures.find((s) => s.path === 'foo.ts');
