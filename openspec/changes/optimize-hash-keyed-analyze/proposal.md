@@ -1,6 +1,6 @@
 # Batch analyze is all-or-nothing: one changed file re-parses the entire repo
 
-> Status: PROPOSED (2026-07-23, competitive substrate sweep). `openlore analyze` has exactly two
+> Status: BUILT (2026-07-25). `openlore analyze` has exactly two
 > speeds: skip everything (project fingerprint unchanged) or re-parse everything. The per-file
 > content-hash table that would let it re-extract only the diff already exists — the watcher
 > uses it — but batch analyze never reads it. The convergent design across the fast-indexer

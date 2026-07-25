@@ -173,6 +173,9 @@ export async function openloreAnalyze(options: AnalyzeApiOptions = {}): Promise<
     outputDir: outputPath,
     maxDeepAnalysisFiles: Math.min(20, Math.ceil(repoMap.highValueFiles.length * 0.3)),
     maxValidationFiles: 5,
+    // `force` means the same thing here as on the CLI: re-extract every file rather than
+    // reusing memoized Pass-1 facts (change: optimize-hash-keyed-analyze).
+    force,
   });
   const artifacts = await artifactGenerator.generateAndSave(repoMap, depGraph);
 

@@ -27,6 +27,14 @@ the lane is never silent.
 - **WHEN** analyze runs with extractor stamp v2
 - **THEN** no v1 fact is reused, every file re-extracts, and the cache is repopulated under v2
 
+#### Scenario: The stamp is derived from evidence, not declared by hand
+
+- **GIVEN** the extractor version stamp
+- **THEN** it is computed from a digest of the extraction code on disk plus the installed
+  grammar package versions (including a grammar's ABSENCE), so an extractor edit or a grammar
+  change invalidates the cache with no constant to remember, and the covered code roots are
+  themselves verified against the extraction entry point's real import closure
+
 #### Scenario: A deleted file leaves no ghost facts
 
 - **GIVEN** a cached file that is deleted from the working tree

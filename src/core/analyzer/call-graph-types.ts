@@ -13,6 +13,7 @@ import type { FunctionCfg } from './cfg.js';
 import type { FileStyleRaw } from './style-fingerprint.js';
 import type { FileParseHealth } from './parse-health.js';
 import type { ExtractionLaneDisclosure } from './extraction-pool.js';
+import type { Pass1CacheDisclosure } from './pass1-fact-cache.js';
 
 export type EdgeConfidence =
   | 'self_cls'       // intra-class call via self/cls
@@ -318,6 +319,20 @@ export interface InheritanceEdge {
   kind: 'extends' | 'implements' | 'embeds' | 'overrides';
 }
 
+/**
+ * The per-file result of Pass-1 extraction (before cross-file resolution). Lives here, in the
+ * dependency-light type barrel, because it crosses two module boundaries besides the builder:
+ * the extraction workers (as a structured clone) and the Pass-1 fact cache (as JSON). Every
+ * field is plain data for exactly that reason.
+ */
+export type FileExtractResult = {
+  nodes: FunctionNode[];
+  rawEdges: RawEdge[];
+  cfg?: Map<string, FunctionCfg>;
+  style?: FileStyleRaw;
+  parseHealth?: FileParseHealth;
+};
+
 export interface CallGraphResult {
   nodes: Map<string, FunctionNode>;
   edges: CallEdge[];
@@ -385,6 +400,14 @@ export interface CallGraphResult {
    * different interpretation of a file that parsed.
    */
   extractionLane?: ExtractionLaneDisclosure;
+  /**
+   * How many files reused memoized Pass-1 facts vs. were re-extracted (change:
+   * optimize-hash-keyed-analyze). Present only when the caller supplied a fact cache. Like
+   * {@link extractionLane} this describes HOW the facts were computed, never what they are —
+   * the two lanes are byte-identical by construction — and is transient build-time data the
+   * analyze summary renders so the lane is never silent.
+   */
+  pass1Cache?: Pass1CacheDisclosure;
 }
 
 /** Serializable version (Maps replaced by arrays) for JSON storage */

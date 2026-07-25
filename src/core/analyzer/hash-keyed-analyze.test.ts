@@ -1,0 +1,190 @@
+/**
+ * The end-to-end contract of the Pass-1 fact memo (change: optimize-hash-keyed-analyze),
+ * exercised through the REAL analyze pipeline rather than the builder in isolation.
+ *
+ * The oracle is the one the proposal names: an analyze that reused memoized facts must
+ * produce artifacts byte-identical to `analyze --force` on the same working tree. Everything
+ * else here — the memo surviving the graph rebuild, deleted files leaving no rows, a stamp
+ * change forcing a full re-extraction — is a way for that equality to fail LOUDLY instead of
+ * silently, which is the only failure mode a cache is allowed to have.
+ */
+
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { EdgeStore } from '../services/edge-store.js';
+import { computeExtractorStamp } from './pass1-fact-cache.js';
+
+const ARTIFACTS = ['llm-context.json', 'repo-structure.json', 'style-fingerprint.json'] as const;
+
+let dir: string;
+let out: string;
+
+/** A small but structurally real repo: cross-file calls, a test file, an unsupported file. */
+async function plantRepo(root: string): Promise<void> {
+  await mkdir(join(root, 'src', 'core'), { recursive: true });
+  await writeFile(join(root, 'src', 'core', 'math.ts'),
+    'export function add(a: number, b: number): number {\n  if (a > b) { return a + b; }\n  return b + a;\n}\n' +
+    'export function scale(n: number): number { return add(n, n); }\n');
+  await writeFile(join(root, 'src', 'core', 'report.ts'),
+    'import { scale } from "./math.js";\nexport class Report {\n  render(n: number): number { return scale(n) + 1; }\n}\n');
+  await writeFile(join(root, 'src', 'app.ts'),
+    'import { Report } from "./core/report.js";\nexport function main(): number { return new Report().render(2); }\n');
+  await writeFile(join(root, 'src', 'app.test.ts'),
+    'import { main } from "./app.js";\nimport { describe, it, expect } from "vitest";\ndescribe("app", () => { it("runs", () => { expect(main()).toBe(9); }); });\n');
+  await writeFile(join(root, 'src', 'helper.py'),
+    'def helper(x):\n    if x > 0:\n        return x\n    return -x\n');
+  await writeFile(join(root, 'README.md'), '# fixture\n');
+}
+
+async function analyze(opts: { force?: boolean } = {}): Promise<void> {
+  const { runAnalysis } = await import('../../cli/commands/analyze.js');
+  await runAnalysis(dir, out, { maxFiles: 200, include: [], exclude: [], force: opts.force ?? false });
+}
+
+/** The artifact bytes that must not depend on which lane produced them. */
+async function artifactBytes(): Promise<Record<string, string>> {
+  const snapshot: Record<string, string> = {};
+  for (const name of ARTIFACTS) {
+    snapshot[name] = await readFile(join(out, name), 'utf-8').catch(() => '<absent>');
+  }
+  return snapshot;
+}
+
+/**
+ * The names of the functions the graph actually holds for one file. Asserted structurally
+ * rather than by substring: a callee NAME appears in the graph whenever some other file calls
+ * it, so `contains("scale")` would still pass with the defining file's facts wiped out.
+ */
+async function definedIn(fileSuffix: string): Promise<string[]> {
+  const ctx = JSON.parse(await readFile(join(out, 'llm-context.json'), 'utf-8')) as {
+    callGraph?: { nodes: Array<{ name: string; filePath: string; isExternal?: boolean }> };
+  };
+  return (ctx.callGraph?.nodes ?? [])
+    .filter(n => !n.isExternal && n.filePath.replace(/\\/g, '/').endsWith(fileSuffix))
+    .map(n => n.name)
+    .sort();
+}
+
+function memoRows(): Array<{ filePath: string; contentHash: string; stamp: string }> {
+  const store = EdgeStore.open(EdgeStore.dbPath(out));
+  try {
+    return store.listPass1FactKeys();
+  } finally {
+    store.close();
+  }
+}
+
+beforeEach(async () => {
+  dir = await mkdtemp(join(tmpdir(), 'hash-keyed-analyze-'));
+  out = join(dir, '.openlore', 'analysis');
+  await plantRepo(dir);
+});
+
+afterEach(async () => {
+  await rm(dir, { recursive: true, force: true });
+});
+
+describe('analyze cost scales with the diff', () => {
+  it('populates the memo on the first run and keeps it across the graph rebuild', async () => {
+    await analyze();
+    const first = memoRows();
+    // Every call-graph-bearing file is memoized (README.md is never handed to the builder).
+    expect(first.map(r => r.filePath).some(p => p.endsWith('math.ts'))).toBe(true);
+    expect(first.map(r => r.filePath).some(p => p.endsWith('helper.py'))).toBe(true);
+    expect(first.map(r => r.filePath).some(p => p.endsWith('README.md'))).toBe(false);
+    expect(first.every(r => r.stamp === computeExtractorStamp())).toBe(true);
+
+    // The second analyze runs a FULL graph rebuild (clearAll) — the memo must survive it.
+    await writeFile(join(dir, 'src', 'app.ts'),
+      'import { Report } from "./core/report.js";\nexport function main(): number { return new Report().render(3); }\n');
+    await analyze();
+    expect(memoRows().map(r => r.filePath)).toEqual(first.map(r => r.filePath));
+  });
+
+  it('a reused-lane analyze is byte-identical to --force on the same tree', async () => {
+    await analyze();
+    await writeFile(join(dir, 'src', 'core', 'math.ts'),
+      'export function add(a: number, b: number): number {\n  if (a > b) { return a + b; }\n  return b + a;\n}\n' +
+      'export function scale(n: number): number { return add(n, n) * 2; }\n' +
+      'export function shrink(n: number): number { return add(n, -n); }\n');
+
+    await analyze();                       // the reused lane: one file re-extracted
+    const reused = await artifactBytes();
+
+    await analyze({ force: true });        // the reference lane: everything re-extracted
+    const forced = await artifactBytes();
+
+    for (const name of ARTIFACTS) {
+      expect(reused[name], `${name} differs between the reused and forced lanes`).toBe(forced[name]);
+    }
+    // …and the edit really landed, so the equality above is not comparing two stale files.
+    expect(await definedIn('src/core/math.ts')).toEqual(['add', 'scale', 'shrink']);
+  });
+
+  it('an added and a deleted file both land, and the deleted one leaves no memo row', async () => {
+    await analyze();
+
+    await writeFile(join(dir, 'src', 'extra.ts'),
+      'import { add } from "./core/math.js";\nexport function extra(): number { return add(1, 2); }\n');
+    await rm(join(dir, 'src', 'core', 'report.ts'));
+    await writeFile(join(dir, 'src', 'app.ts'), 'export function main(): number { return 0; }\n');
+
+    await analyze();
+    const paths = memoRows().map(r => r.filePath);
+    expect(paths.some(p => p.endsWith('extra.ts'))).toBe(true);
+    expect(paths.some(p => p.endsWith('report.ts'))).toBe(false);
+
+    // No ghost: the deleted file contributes no symbols; the added one does.
+    expect(await definedIn('src/core/report.ts')).toEqual([]);
+    expect(await definedIn('src/extra.ts')).toEqual(['extra']);
+
+    const reused = await artifactBytes();
+    await analyze({ force: true });
+    expect(reused).toEqual(await artifactBytes());
+  });
+
+  it('a stamp change re-extracts everything rather than serving foreign rows', async () => {
+    await analyze();
+    const before = memoRows();
+    expect(before.length).toBeGreaterThan(0);
+
+    // Simulate an OpenLore whose extraction code changed: re-stamp every row, then analyze.
+    const store = EdgeStore.openForAnalyze(EdgeStore.dbPath(out));
+    try {
+      store.putPass1Facts(
+        before.map(r => ({ filePath: r.filePath, contentHash: r.contentHash, facts: '{"v":1,"n":[],"e":[]}' })),
+        'a-stamp-from-a-different-openlore',
+      );
+    } finally {
+      store.close();
+    }
+
+    await analyze();
+    // Had the foreign rows been served, math.ts would have contributed no symbols at all.
+    expect(await definedIn('src/core/math.ts')).toEqual(['add', 'scale']);
+    expect(memoRows().every(r => r.stamp === computeExtractorStamp())).toBe(true);
+  });
+
+  it('a hostile memo row for an UNCHANGED file cannot be served under the real key', async () => {
+    await analyze();
+    const rows = memoRows();
+    const target = rows.find(r => r.filePath.endsWith('math.ts'))!;
+
+    // Poison the row under a content hash that does NOT match the file on disk. A correct
+    // implementation misses on the key and re-extracts; a path-keyed one would serve it.
+    const store = EdgeStore.openForAnalyze(EdgeStore.dbPath(out));
+    try {
+      store.putPass1Facts(
+        [{ filePath: target.filePath, contentHash: 'not-the-hash-of-anything', facts: '{"v":1,"n":[],"e":[]}' }],
+        computeExtractorStamp(),
+      );
+    } finally {
+      store.close();
+    }
+
+    await analyze();
+    expect(await definedIn('src/core/math.ts')).toEqual(['add', 'scale']);
+  });
+});

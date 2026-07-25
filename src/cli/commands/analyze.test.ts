@@ -145,10 +145,13 @@ describe('analyze command', () => {
       expect(excludeOption?.description).toContain('repeatable');
     });
 
-    it('should have --force option', () => {
+    it('should have --force option, described by what it actually does', () => {
       const forceOption = analyzeCommand.options.find(o => o.long === '--force');
       expect(forceOption).toBeDefined();
-      expect(forceOption?.description).toContain('Force');
+      // Since the Pass-1 fact memo (change: optimize-hash-keyed-analyze), an ordinary
+      // analyze already re-runs; what `--force` uniquely buys is a full re-extraction, so
+      // that is what the help must promise.
+      expect(forceOption?.description).toMatch(/re-extract/i);
     });
   });
 

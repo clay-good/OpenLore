@@ -122,6 +122,12 @@ export async function runAnalysis(
     maxFiles: number;
     include: string[];
     exclude: string[];
+    /**
+     * Re-extract every file rather than reusing memoized Pass-1 facts, then repopulate the
+     * memo (change: optimize-hash-keyed-analyze). Defaults to false: an ordinary analyze pays
+     * only for the diff. This is the reference lane the reused one is verified against.
+     */
+    force?: boolean;
   }
 ): Promise<AnalysisResult> {
   const startTime = Date.now();
@@ -188,6 +194,7 @@ export async function runAnalysis(
     outputDir: outputPath,
     maxDeepAnalysisFiles: Math.min(MAX_DEEP_ANALYSIS_FILES, Math.ceil(repoMap.highValueFiles.length * DEEP_ANALYSIS_FILE_RATIO)),
     maxValidationFiles: MAX_VALIDATION_FILES,
+    force: options.force ?? false,
   });
 
   // Snapshot the prior graph's nodes BEFORE the rebuild overwrites the store, so a
@@ -209,6 +216,13 @@ export async function runAnalysis(
   // Present only when something actually degraded; a clean run says nothing.
   if (artifacts.extractionLaneNote) {
     logger.warning(artifacts.extractionLaneNote);
+  }
+
+  // Disclose the Pass-1 memo lane (change: optimize-hash-keyed-analyze). Unlike the lane
+  // note this is not a degradation report: it is present on every run that consulted the
+  // memo, so an operator can always see which lane ran and how much work it removed.
+  if (artifacts.pass1CacheNote) {
+    logger.info('Extraction', artifacts.pass1CacheNote);
   }
 
   // Carry anchored memory/decisions across any rename/move detected between the
@@ -287,7 +301,7 @@ export const analyzeCommand = new Command('analyze')
   )
   .option(
     '--force',
-    'Force re-analysis even if recent analysis exists',
+    'Re-analyze from scratch: re-extract every file instead of reusing cached extraction',
     false
   )
   .option(
@@ -325,7 +339,7 @@ Examples:
                                      Exclude specific directories
   $ openlore analyze --output ./my-analysis
                                      Custom output location
-  $ openlore analyze --force         Force re-analysis
+  $ openlore analyze --force         Re-extract every file (ignore the extraction cache)
   $ openlore analyze --no-embed      Build keyword-only (BM25) index, no embeddings
   $ openlore analyze --reindex-specs Re-index specs only (no full re-analysis)
 
@@ -495,6 +509,7 @@ After analysis, run 'openlore generate' to create OpenSpec files.
         maxFiles: opts.maxFiles,
         include: opts.include,
         exclude: opts.exclude,
+        force: opts.force ?? false,
       });
 
       // ========================================================================
