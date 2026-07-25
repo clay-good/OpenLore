@@ -7,9 +7,10 @@ status line. Two signals, both cheap to re-check:
   requirement its delta adds is already in `openspec/specs/<domain>/spec.md`
 - **archivable** — `openspec archive <name>` completes
 
-As of 2026-07-25, **106 changes are open**. 21 were archived in this pass.
+As of 2026-07-25, **105 changes are open**. 22 were archived in this pass — the newest being
+`optimize-hash-keyed-analyze` (PR #288: Pass-1 extraction memoized by content hash).
 
-## Not built — 81
+## Not built — 80
 
 The real backlog. No code, no spec entry.
 
@@ -82,7 +83,6 @@ The real backlog. No code, no spec entry.
 | `harden-view-server-file-confinement` | The view server's file access is lexical-only — a symlink in a cloned repo escapes the proje |
 | `harden-walker-corpus-boundary` | Harden the walker corpus boundary: no silently smaller graph |
 | `optimize-analyze-pipeline-passes` | One analyze makes 3-4 full passes over the corpus, re-parsing (and re-reading from disk) tre |
-| `optimize-hash-keyed-analyze` | Batch analyze is all-or-nothing: one changed file re-parses the entire repo |
 | `optimize-incremental-and-coldstart-scale` | A branch switch grinds through the per-file incremental pipeline with no bulk fallback, relo |
 | `optimize-reachability-precompute` | Every reachability conclusion re-runs BFS over adjacency rebuilt for that call |
 | `optimize-serving-hot-path-caches` | The default tools rebuild derived graph structures and re-parse multi-MB artifacts on every  |
