@@ -6,7 +6,7 @@
  */
 
 import { Command } from 'commander';
-import { allowInsecureTls } from '../../core/services/tls-scope.js';
+import { allowInsecureTls, withRelaxedTls } from '../../core/services/tls-scope.js';
 import { access, stat, readFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { execFile } from 'node:child_process';
@@ -496,12 +496,12 @@ async function checkEmbeddingConnection(rootPath: string): Promise<CheckResult |
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), DOCTOR_TIMEOUT_MS);
-    const response = await fetch(`${url}/embeddings`, {
+    const response = await withRelaxedTls(() => fetch(`${url}/embeddings`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
       body: JSON.stringify({ model, input: 'ping' }),
       signal: controller.signal,
-    }).finally(() => clearTimeout(timeout));
+    })).finally(() => clearTimeout(timeout));
 
     const ms = Date.now() - t0;
     if (!response.ok) {
