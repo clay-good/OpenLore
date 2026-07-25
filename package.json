@@ -179,7 +179,7 @@
     "@huggingface/transformers": "^3.8.1",
     "@lancedb/lancedb": "0.22.4-beta.3",
     "apache-arrow": "^21.1.0",
-    "protobufjs": "^8.6.3",
+    "protobufjs": "^8.6.6",
     "tree-sitter": "^0.22.4",
     "tree-sitter-bash": "^0.23.3",
     "tree-sitter-c": "^0.23.6",
@@ -200,15 +200,20 @@
   "overrides": {
     "tree-sitter-cli": "file:stubs/tree-sitter-cli-stub",
     "@google/genai": {
-      "protobufjs": "^7.6.4"
+      "protobufjs": "^7.6.5"
     },
     "ws": "^8.21.0",
     "undici": "^8.5.0",
     "js-yaml": "^4.3.0",
     "hono": "^4.12.32",
+    "@hono/node-server": "^2.0.5",
+    "sharp": "^0.35.0",
+    "onnxruntime-web": {
+      "protobufjs": "^7.6.5"
+    },
     "@earendil-works/pi-coding-agent": {
       "@google/genai": {
-        "protobufjs": "^7.6.4"
+        "protobufjs": "^7.6.5"
       },
       "ws": "^8.21.0",
       "undici": "^8.5.0"
