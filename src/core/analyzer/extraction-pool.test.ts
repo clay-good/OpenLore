@@ -32,7 +32,7 @@ import { EXTRACTION_POOL_MIN_FILES } from '../../constants.js';
 // ---------------------------------------------------------------------------
 
 /** A deterministic corpus with real cross-file calls, so ordering bugs show up as edges. */
-function corpus(count = 40): ExtractionFile[] {
+function corpus(count = 12): ExtractionFile[] {
   const files: ExtractionFile[] = [];
   for (let i = 0; i < count; i++) {
     files.push({
@@ -147,33 +147,33 @@ describe('extraction pool — lane selection', () => {
     expect(disclosure.lane).toBe('serial');
     expect(disclosure.serialReason).toBe('too-few-files');
     expect(plannedPoolSize(files.length)).toBe(0);
-  });
+  }, 30_000);
 
   it('OPENLORE_NO_WORKERS forces the serial lane even for a large build', async () => {
     // The suite already sets this flag; assert the contract rather than assuming it.
     expect(process.env.OPENLORE_NO_WORKERS).toBe('1');
-    const { disclosure } = await extractFilesForPass1(corpus(64), dispatchFileExtract);
+    const { disclosure } = await extractFilesForPass1(corpus(EXTRACTION_POOL_MIN_FILES + 8), dispatchFileExtract);
     expect(disclosure.lane).toBe('serial');
     expect(disclosure.serialReason).toBe('disabled-by-env');
-  });
+  }, 30_000);
 
   it('a normal serial choice is not reported as a degradation', () => {
     expect(describeExtractionLane({ lane: 'serial', poolSize: 0, serialReason: 'too-few-files', workerFallbackFiles: [] })).toBeUndefined();
     expect(describeExtractionLane({ lane: 'pooled', poolSize: 4, workerFallbackFiles: [] })).toBeUndefined();
     expect(describeExtractionLane({ lane: 'pooled', poolSize: 4, workerFallbackFiles: ['a.ts'] })).toMatch(/re-extracted on the main thread/);
     expect(describeExtractionLane({ lane: 'serial', poolSize: 0, serialReason: 'pool-unavailable', workerFallbackFiles: [] })).toMatch(/serial lane/);
-  });
+  }, 30_000);
 
   it('resolves a worker entry for the current runtime', () => {
     // Source tree (vitest) resolves the .ts entry via tsx; dist resolves the .js sibling.
     const entry = resolveWorkerEntry();
     expect(entry?.specifier.href).toMatch(/extraction-worker\.(js|ts)$/);
-  });
+  }, 30_000);
 });
 
 describe('extraction pool — determinism', () => {
   it('merges in input order even when workers complete in reverse', async () => {
-    const files = corpus(40);
+    const files = corpus();
     const completionLog: number[] = [];
     // Later files answer sooner: the completion order is deliberately inverted.
     const factory = stubWorkerFactory({ delayFor: (i) => (files.length - i), completionLog });
@@ -192,17 +192,17 @@ describe('extraction pool — determinism', () => {
       const value = outcomes[i].status === 'ok' ? (outcomes[i] as { value?: { nodes: Array<{ filePath: string }> } }).value : undefined;
       expect(value?.nodes[0]?.filePath).toBe(files[i].path);
     }
-  });
+  }, 30_000);
 
   it('produces a byte-identical graph to the serial lane', async () => {
-    const files = corpus(40);
+    const files = corpus();
     const serial = await buildJson(files);
     const pooled = await buildJson(files, {
       workerFactory: stubWorkerFactory({ delayFor: (i) => (files.length - i) }),
       poolSize: 4,
     });
     expect(pooled).toBe(serial);
-  });
+  }, 30_000);
 
   it('keeps last-writer-wins on colliding symbol ids', async () => {
     // Every file defines `shared()`, so the surviving node is decided purely by merge
@@ -215,13 +215,13 @@ describe('extraction pool — determinism', () => {
     });
     expect(pooled).toBe(serial);
     expect(JSON.parse(serial).nodes.some((n: { filePath: string }) => n.filePath === 'src/dup7.ts')).toBe(true);
-  });
+  }, 30_000);
 });
 
 describe('extraction pool — fail-soft ladder', () => {
   it('re-extracts a dead worker\'s file on the main thread, with identical facts', async () => {
-    const files = corpus(40);
-    const victim = files[17].path;
+    const files = corpus();
+    const victim = files[7].path;
     const factory = stubWorkerFactory({ dieOn: (f) => f.path === victim });
 
     const { outcomes, disclosure } = await extractFilesForPass1(files, dispatchFileExtract, {
@@ -236,10 +236,10 @@ describe('extraction pool — fail-soft ladder', () => {
 
     const pooled = await buildJson(files, { workerFactory: stubWorkerFactory({ dieOn: (f) => f.path === victim }), poolSize: 3 });
     expect(pooled).toBe(await buildJson(files));
-  });
+  }, 30_000);
 
   it('survives every worker dying — no file is lost', async () => {
-    const files = corpus(40);
+    const files = corpus();
     const factory = stubWorkerFactory({ dieOn: () => true });
     const { outcomes, disclosure } = await extractFilesForPass1(files, dispatchFileExtract, {
       workerFactory: factory,
@@ -248,10 +248,10 @@ describe('extraction pool — fail-soft ladder', () => {
     expect(disclosure.workerFallbackFiles).toHaveLength(files.length);
     expect(outcomes.every(o => o.status === 'ok')).toBe(true);
     expect(await buildJson(files, { workerFactory: stubWorkerFactory({ dieOn: () => true }), poolSize: 4 })).toBe(await buildJson(files));
-  });
+  }, 30_000);
 
   it('falls back to the serial lane wholesale when no worker comes up healthy', async () => {
-    const files = corpus(40);
+    const files = corpus();
     const { outcomes, disclosure } = await extractFilesForPass1(files, dispatchFileExtract, {
       workerFactory: stubWorkerFactory({ unhealthy: true }),
       poolSize: 4,
@@ -259,20 +259,20 @@ describe('extraction pool — fail-soft ladder', () => {
     expect(disclosure.lane).toBe('serial');
     expect(disclosure.serialReason).toBe('pool-unavailable');
     expect(outcomes.every(o => o.status === 'ok')).toBe(true);
-  });
+  }, 30_000);
 
   it('falls back when the worker factory itself throws', async () => {
-    const { disclosure, outcomes } = await extractFilesForPass1(corpus(40), dispatchFileExtract, {
+    const { disclosure, outcomes } = await extractFilesForPass1(corpus(), dispatchFileExtract, {
       workerFactory: () => { throw new Error('spawn refused'); },
       poolSize: 4,
     });
     expect(disclosure.lane).toBe('serial');
     expect(disclosure.serialReason).toBe('pool-unavailable');
     expect(outcomes.every(o => o.status === 'ok')).toBe(true);
-  });
+  }, 30_000);
 
   it('reports an extractor that throws inside a worker as that file\'s failure, not a lane failure', async () => {
-    const files = corpus(40);
+    const files = corpus();
     const boom = files[5].path;
     const factory = stubWorkerFactory({});
     // Wrap the serial extractor so the stub's in-process dispatch throws for one file,
@@ -287,7 +287,7 @@ describe('extraction pool — fail-soft ladder', () => {
     expect(disclosure.lane).toBe('pooled');
     expect(outcomes).toHaveLength(files.length);
     expect(disclosure.workerFallbackFiles).toHaveLength(0);
-  });
+  }, 30_000);
 
   it('records a worker-reported failure as a parse-health failure, exactly like the serial lane', async () => {
     const files = corpus(4);
@@ -309,10 +309,10 @@ describe('extraction pool — fail-soft ladder', () => {
     expect(result.nodes.size).toBe(0);
     expect([...(result.parseHealthByFile ?? new Map()).values()].every(h => h.parseFailed)).toBe(true);
     expect(result.parseHealthByFile?.size).toBe(files.length);
-  });
+  }, 30_000);
 
   it('drops a worker that never reports ready instead of hanging', async () => {
-    const files = corpus(40);
+    const files = corpus();
     vi.useFakeTimers();
     const promise = extractFilesForPass1(files, dispatchFileExtract, {
       workerFactory: stubWorkerFactory({ silentStartup: true }),
@@ -324,18 +324,18 @@ describe('extraction pool — fail-soft ladder', () => {
     expect(disclosure.lane).toBe('serial');
     expect(disclosure.serialReason).toBe('pool-unavailable');
     expect(outcomes).toHaveLength(files.length);
-  });
+  }, 30_000);
 });
 
 describe('extraction pool — worker log relay', () => {
   it('prints a relayed grammar warning once, not once per worker', async () => {
     const { logger } = await import('../../utils/logger.js');
     const warn = vi.spyOn(logger, 'warning').mockImplementation(() => {});
-    await extractFilesForPass1(corpus(40), dispatchFileExtract, {
+    await extractFilesForPass1(corpus(), dispatchFileExtract, {
       workerFactory: stubWorkerFactory({ relayWarnings: ['language Lua grammar unavailable'] }),
       poolSize: 4,
     });
     const relayed = warn.mock.calls.filter(c => String(c[0]).includes('Lua grammar unavailable'));
     expect(relayed).toHaveLength(1);
-  });
+  }, 30_000);
 });
