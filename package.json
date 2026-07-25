@@ -160,7 +160,7 @@
     }
   },
   "dependencies": {
-    "@inquirer/prompts": "^7.2.1",
+    "@inquirer/prompts": "^8.5.2",
     "@modelcontextprotocol/sdk": "^1.27.1",
     "@modelcontextprotocol/server-memory": "^2026.1.26",
     "@vitejs/plugin-react": "^6.0.4",
