@@ -448,6 +448,506 @@ The canonical statement of this decision lives in the `analyzer` domain — see 
 
 The canonical statement of this decision lives in the `analyzer` domain — see [analyzer/spec.md](../analyzer/spec.md) (decision `c79ec7ca`).
 
+### Requirement: SpecStoreStatusCommand
+
+The system SHALL provide a CLI command `openlore spec-store status` that resolves a configured spec-store
+binding and emits its health check. The command SHALL support a `--json` flag whose output carries
+stable finding codes documented in the agent-facing contract, so an external orchestrator can consume
+the result without parsing prose. The command SHALL be read-only and SHALL exit zero whether or not
+findings are present; it SHALL NOT block any workflow.
+
+#### Scenario: Status emits machine-readable findings
+
+- **GIVEN** a configured spec-store binding with one unresolved target
+- **WHEN** `openlore spec-store status --json` is run
+- **THEN** the command exits zero and emits a finding with the stable code `target-unresolved` and a
+  remediation
+
+#### Scenario: No binding configured
+
+- **GIVEN** an environment with no spec-store binding
+- **WHEN** `openlore spec-store status` is run
+- **THEN** the command reports that no binding is configured and exits zero without error
+
+### Requirement: WorkingSetContextCommand
+
+The system SHALL provide a CLI command `openlore working-set context` that assembles and emits the
+working-set structural briefing for an active change in a configured spec-store binding. The command
+SHALL accept the change to brief (`--change <id>`) and SHALL support a `--json` flag whose output is
+documented in the agent-facing contract, so an external orchestrator can request the briefing and splice
+it into the context it hands its agent. The command MAY accept an optional token budget (`--token-budget
+<n>`) bounding the merged briefing. The command SHALL be read-only and SHALL exit zero whether or not
+the change is briefable; it SHALL NOT block any workflow.
+
+#### Scenario: Briefing emitted as machine-readable context
+
+- **GIVEN** a bound store with an active change targeting at least one resolved, indexed repository
+- **WHEN** `openlore working-set context --change <id> --json` is run
+- **THEN** the command emits one budgeted briefing whose items are attributed to each target repository,
+  in the documented JSON shape, and exits zero
+
+#### Scenario: No change specified
+
+- **GIVEN** a configured spec-store binding and no `--change` argument
+- **WHEN** `openlore working-set context` is run
+- **THEN** the command reports a `change-unspecified` finding and exits zero without briefing
+
+### Requirement: ImpactCertificateCommand
+
+The system SHALL provide a CLI command `openlore impact-certificate` that computes and emits the impact
+certificate for a proposed change in a configured spec-store binding. The command SHALL support
+`--change <id>` to select the change, `--json` whose output carries stable surface and path codes
+documented in the agent-facing contract, and the advisory git-hook flags (`--hook`, `--install-hook`,
+`--uninstall-hook`) following the existing pre-flight hook pattern. The certificate SHALL be advisory by
+default: the command and its hook SHALL NOT block. A repository MAY opt into blocking for specific
+high-severity surface findings via configuration, but blocking SHALL never be the default, and
+infrastructure failure (no graph, no binding) SHALL never block.
+
+> Implemented by `add-change-impact-certificate` (2026-06-21). Blocking is opt-in via
+> `impactCertificate.block` (e.g. `["critical"]`); the hook persists the certificate (`--save` elsewhere)
+> so the spec-store health check can re-fire it. Verified e2e: blocked at exit 1 under
+> `block: ["critical"]`, advisory at exit 0 without it. Tool count rises 62→63. Decision: `187224b0`.
+
+#### Scenario: Default certificate is advisory
+
+- **GIVEN** the impact-certificate hook installed with default configuration
+- **WHEN** a commit is made for a change that opens a new path into a declared surface
+- **THEN** the certificate is emitted and the commit is not blocked
+
+#### Scenario: Opt-in blocking fires only on its configured severity
+
+- **GIVEN** a repository configured to block when a change opens a new path into a surface marked
+  critical
+- **WHEN** a change opens a new path into a critical surface
+- **THEN** the hook blocks; and for a newly-opened path into any non-critical surface it remains advisory
+
+### Requirement: OrientInjectMode
+
+The system SHALL provide an `--inject` mode on the `openlore orient` command that emits an
+injection-shaped orientation block for a single task. The task SHALL be taken from `--task` when
+present, otherwise read from the command's stdin (the prompt payload a pre-turn agent hook supplies).
+The emitted block SHALL reuse the lean orientation output (Spec 27), SHALL be bounded by a documented
+token budget, SHALL be clearly attributed to OpenLore, and SHALL open with a one-line statement that
+it is informational and may be ignored (the same facts-not-coercion posture as the Epistemic Lease,
+decision `8e95746d`). The mode SHALL be deterministic with no LLM. Any failure — missing graph, parse
+error, empty match, or empty prompt — SHALL degrade to a single pointer line and exit 0, so a hook
+that invokes it can never break the user's turn.
+
+> Implemented by `add-task-scoped-context-injection` (2026-06-22). `orient --inject` reuses
+> `handleOrient(lean=true)`; stdin is parsed for a Claude Code `UserPromptSubmit` JSON payload
+> (`.prompt`) or treated as raw text. stdout is kept clean (diagnostics → stderr) so only the block
+> is injected. Default budget 600 tokens. Verified e2e on this repo: strong match emits the block at
+> exit 0, no-graph/empty prompt emit the pointer line at exit 0. Adds no MCP tool. Decisions:
+> `27c4bb53`, `0fc964d3`.
+
+#### Scenario: Inject emits a budgeted, ignorable block for a real task
+
+- **GIVEN** an analyzed repository and a task supplied via `--task`
+- **WHEN** `openlore orient --inject` runs
+- **THEN** it emits a lean, OpenLore-attributed orientation block that opens with an
+  informational/ignorable framing line and does not exceed the configured token budget
+
+#### Scenario: Inject never breaks the turn
+
+- **GIVEN** a repository with no analysis graph
+- **WHEN** `openlore orient --inject` runs from a hook
+- **THEN** it emits a single pointer line indicating OpenLore is available and exits 0, emitting no
+  error to the harness
+
+### Requirement: OrientationRelevanceGate
+
+The `--inject` mode SHALL compute a deterministic, local orientation-relevance signal from the
+orientation result — the matched-function count, the fan-in / hub centrality of the matches, and
+(only on the bounded semantic/hybrid score scale) the top match score — and SHALL compare it to a
+documented threshold. When the signal is at or above the threshold, `--inject` SHALL emit the full
+orientation block; when below it, `--inject` SHALL emit only a single pointer line. The threshold and
+its inputs SHALL be documented and overridable in repository configuration, and SHALL never be
+learned or LLM-derived.
+
+> Implemented by `add-task-scoped-context-injection` (2026-06-22). The gate passes when matched-count
+> ≥ `relevanceMinMatches` (default 2) AND there is structural centrality (a match with fan-in ≥
+> `relevanceMinFanIn` (default 2), or a hub) — or, only on the bounded semantic/hybrid score scale, a
+> top score ≥ `relevanceMinScore` (default 0.3). BM25-fallback scores are corpus-relative and
+> unbounded, so the score path is disabled there and the gate relies on count + centrality. Decision:
+> `0fc964d3`.
+
+#### Scenario: A weak-orientation task gates down to a pointer
+
+- **GIVEN** a task whose graph match is sparse or low-scoring (the small/familiar/shallow case)
+- **WHEN** `openlore orient --inject` runs
+- **THEN** it emits only the single pointer line, not a full orientation block
+
+#### Scenario: A strong-orientation task emits the full block
+
+- **GIVEN** a deep task with a strong, high-fan-in graph match
+- **WHEN** `openlore orient --inject` runs
+- **THEN** it emits the full lean orientation block within budget
+
+### Requirement: TaskScopedInjectionInstallWiring
+
+`openlore install` SHALL wire, in addition to the existing whole-repo `SessionStart` orientation hook,
+a task-scoped first-prompt injection hook for each agent adapter that exposes a pre-turn hook
+mechanism (for Claude Code, a `UserPromptSubmit` hook running `openlore orient --inject`). The wired
+group SHALL be marker-identified (`_openlore: true`) so re-running install replaces only the OpenLore
+group in place — a stale OpenLore group self-heals to the current command and re-install never
+duplicates it — while user-authored sibling hooks are left byte-identical. (Unlike the fingerprinted
+managed paths in `CLAUDE.md` and `.mcp.json`, the marker-identified hook group carries no fingerprint
+and is not hand-edit-protected: edits inside the OpenLore group are overwritten on the next install by
+design.) `--uninstall` SHALL remove the group cleanly, deleting now-empty parent objects and the file
+when it was OpenLore-only. `--dry-run` SHALL preview the change. Adapters with no pre-turn hook
+mechanism SHALL fall back to the existing instruction block without error. The wiring SHALL preserve
+the user's other configuration byte-for-byte (merge-not-clobber, decision `df27e8ef`).
+
+> Implemented by `add-task-scoped-context-injection` (2026-06-22). The claude-code adapter generalizes
+> its SessionStart merge/strip helpers over both hook keys (`SessionStart`, `UserPromptSubmit`).
+> Cursor/Cline/Continue/AGENTS.md have no settings/hook channel and keep the instruction-block
+> fallback. Verified e2e: install wires both marker-identified groups, re-install is byte-identical,
+> uninstall removes both and deletes an OpenLore-only file. Decision: `1d35a27b`.
+
+#### Scenario: Install wires task-scoped injection idempotently
+
+- **GIVEN** a project with Claude Code present
+- **WHEN** `openlore install` runs, then runs again
+- **THEN** a single marker-identified `UserPromptSubmit` OpenLore group is present after both runs, and
+  any user-authored hooks are left byte-identical
+
+#### Scenario: Uninstall removes task-scoped injection
+
+- **GIVEN** a project where `openlore install` wired the task-scoped injection hook
+- **WHEN** `openlore install --uninstall` runs
+- **THEN** the OpenLore `UserPromptSubmit` group is removed, empty parents are pruned, and the file is
+  deleted only if it held nothing but OpenLore entries
+
+### Requirement: ContextInjectionOptOut
+
+The system SHALL read a repository configuration switch controlling task-scoped context injection
+(default: enabled), and when injection is disabled `openlore orient --inject` SHALL emit nothing and
+exit 0. Disabling injection SHALL NOT affect the MCP server registration or the `SessionStart` primer.
+The injected block's data SHALL never exceed the configured token budget regardless of match size
+(detail lines are added only while they fit); the small fixed framing floor — the attribution header
+and the task line, which must always be present for the block to be safely attributable and ignorable
+— is exempt, so a pathologically small budget yields just that floor.
+
+> Implemented by `add-task-scoped-context-injection` (2026-06-22). Read from
+> `.openlore/config.json` `contextInjection.mode` (`task-scoped` default | `off`); `tokenBudget`
+> caps the block. Verified e2e: `mode: "off"` yields empty stdout at exit 0; a custom small budget
+> drops lower-priority detail to stay within cap. Decision: `27c4bb53`.
+
+#### Scenario: Injection can be turned off without disabling the rest
+
+- **GIVEN** a repository configured with context injection disabled
+- **WHEN** `openlore orient --inject` runs
+- **THEN** it emits nothing and exits 0, while the MCP server and SessionStart primer remain wired
+
+### Requirement: GateConsultsTheUnifiedEnforcementPolicy
+
+> Status: Implemented (change: add-finding-enforcement-policy, 2026-06-23)
+
+The pre-commit / pre-merge gate (`openlore enforce`) SHALL collect governance findings from all in-scope
+installed sources (the stale-decision-reference check always; the blast-radius guard and the change
+impact certificate when the repository has configured them), resolve each finding's enforcement class
+through the single declared `enforcement.policy` using the deterministic resolver, and fail the gate only
+when at least one finding resolves to the `blocking` class. Findings SHALL be sorted by a stable key so
+identical inputs produce identical, reproducible output. The gate SHALL add no LLM latency for this
+resolution — it is a pure policy pass. Every source SHALL be advisory-safe: a throw degrades to a caveat
+and NEVER blocks a commit.
+
+> Implemented as `openlore enforce` (`src/cli/commands/enforce.ts`), installable as a pre-commit hook that
+> coexists with the decisions gate. Verified e2e in a real git repo: a `stale-decision-reference: blocking`
+> policy blocks the commit; the same change passes with no policy. The diff-heavy blast-radius/impact-cert
+> sources are collected only when configured, keeping the common-case gate cheap.
+
+#### Scenario: A blocking-classed finding fails the gate
+
+- **GIVEN** a repository whose `enforcement.policy` maps `stale-decision-reference` to `blocking`, and a
+  staged change introducing a live artifact that references a superseded decision
+- **WHEN** the gate runs
+- **THEN** the gate fails, citing the `stale-decision-reference` finding, and reports it as `blocking`
+
+#### Scenario: The same finding stays advisory by default
+
+- **GIVEN** the same staged change but a repository with no `enforcement.policy`
+- **WHEN** the gate runs
+- **THEN** the gate does not fail, and the `stale-decision-reference` finding is reported as advisory
+
+### Requirement: SilencedFindingsRemainVisible
+
+> Status: Implemented (change: add-finding-enforcement-policy, 2026-06-23)
+
+A finding whose resolved enforcement class is `off` SHALL NOT fail the gate, and SHALL still be listed in
+the gate's output as informational, so that a deliberately silenced finding is visible to a reviewer and a
+silence is never invisible. The gate output SHALL distinguish `blocking`, `advisory`, and `off` findings.
+
+#### Scenario: An off-classed finding is shown but does not block
+
+- **GIVEN** a repository whose `enforcement.policy` maps a finding code to `off`, and a change that
+  produces that finding
+- **WHEN** the gate runs
+- **THEN** the gate does not fail, and the finding appears in the output marked as silenced (`off`),
+  distinct from advisory findings
+
+### Requirement: ReviewCommandRendersADeterministicChangeBriefing
+
+The CLI SHALL provide an `openlore review` command that, for a `base..head` git range, composes the
+existing deterministic analyses — structural diff and blast radius (which already folds in spec/ADR/
+anchored-memory drift) — into a single conclusion-shaped briefing. The command SHALL support
+`--base <ref>` (default: resolved via the standard fallback chain requested → main → master → HEAD~1),
+`--head <ref>` (default: working tree), and `--format markdown|json` (default: `markdown`). The
+briefing SHALL be a briefing (named risks, counts, and the tests to run), never a graph dump, and
+SHALL invoke no LLM and add no new structural computation beyond the analyses it composes.
+
+> Implemented by `add-pr-review-surface` (2026-06-23). `src/cli/commands/review.ts` composes
+> `handleStructuralDiff` + `computeBlastRadius`; `computeBlastRadius` already folds change-scoped drift
+> (its memory/specs/decisions fields), so `review` does not separately re-run `detectDrift`. Markdown
+> default; `--format json` is pure JSON on stdout. Decision: `4f3efb11`.
+
+#### Scenario: A change is briefed for human review
+
+- **GIVEN** a repository with an analysis index and a diff that removes a symbol with live callers
+  and changes another symbol's signature
+- **WHEN** the user runs `openlore review --base main`
+- **THEN** the command emits a markdown briefing naming the removed and signature-changed symbols,
+  their stale callers, the hubs and layers crossed, the tests to run, and any governing decision or
+  spec the change makes stale
+
+#### Scenario: JSON output for programmatic consumers
+
+- **GIVEN** the same change
+- **WHEN** the user runs `openlore review --base main --format json`
+- **THEN** the command emits the composed briefing as JSON on stdout
+
+### Requirement: ReviewDegradesHonestlyWhenItCannotCompute
+
+When `openlore review` cannot compute a complete briefing — no analysis index, a base ref that is
+unreachable (for example, a shallow CI checkout), or no git range — it SHALL state in the briefing
+what it could not compute and why, and SHALL NOT emit a misleading empty or partial briefing as if it
+were complete.
+
+> Implemented by `add-pr-review-surface` (2026-06-23). No index → the structural delta still renders
+> (it builds the old/new graphs from just the changed files) and a note says to run `openlore analyze`;
+> a non-git directory exits 0 with a clear message; a base-ref fallback is surfaced as a caveat.
+
+#### Scenario: Missing index is disclosed, not hidden
+
+- **GIVEN** a repository with no analysis index
+- **WHEN** `openlore review` is run
+- **THEN** the briefing states that no index is present and that `openlore analyze` is required,
+  rather than reporting zero structural changes
+
+#### Scenario: Unreachable base on a shallow checkout is disclosed
+
+- **GIVEN** a shallow checkout where the requested base ref is not present
+- **WHEN** `openlore review --base <ref>` is run
+- **THEN** the briefing states that the base was unreachable and which fallback (if any) was used
+
+### Requirement: PrReviewActionPostsOneStickyAdvisoryComment
+
+The project SHALL ship a bundled GitHub Action (and a copy-paste `pull_request` workflow) that runs
+`openlore review` for the pull request's `base..head` range and posts the briefing as a single sticky
+PR comment, identified by a hidden marker. On the first run for a PR it SHALL create the comment; on
+every subsequent run it SHALL update that same comment in place rather than posting a new one. The
+Action SHALL be advisory by default and exit 0 (it informs, it does not fail the check). A repository
+MAY opt into failing the job on configured high-severity findings, reusing the `.openlore/config.json`
+block-pattern convention defined for the blast-radius hook; blocking SHALL never be the default posture.
+
+> Implemented by `add-pr-review-surface` (2026-06-23). `.github/actions/openlore-review/action.yml`
+> (composite: analyze → `openlore review --out` → `actions/github-script` find-or-update by the
+> `<!-- openlore-review -->` marker) + `.github/workflows/openlore-review.yml.example`. Advisory unless
+> `--hook` + a configured `blastRadius.block` pattern fires.
+
+#### Scenario: Sticky comment is updated, not duplicated
+
+- **GIVEN** the OpenLore review Action installed on a repository
+- **WHEN** a pull request receives a first push and then a second push
+- **THEN** the first push creates one review comment and the second push updates that same comment in
+  place, leaving exactly one OpenLore review comment on the PR
+
+#### Scenario: Advisory by default
+
+- **GIVEN** the Action installed with default configuration
+- **WHEN** a pull request introduces a high-blast-radius change
+- **THEN** the briefing is posted and the check exits 0 (the PR is not blocked)
+
+#### Scenario: Opt-in gating fires only on its configured pattern
+
+- **GIVEN** a repository configured to fail the job when a change orphans a governing decision
+- **WHEN** a pull request orphans a governing decision
+- **THEN** the job fails; and for any other high-blast-radius change it remains advisory
+
+### Requirement: FirstRunNeverBlocksOnEmbeddings
+
+The first-run flow (`openlore install` and `openlore analyze`) SHALL complete with a fully working
+first-class keyword index without any embedding configuration, network access, or API key. Embeddings
+SHALL never be on the critical path of obtaining a working index; the semantic upgrade SHALL be offered
+but never required.
+
+> Implemented by `make-embeddings-zero-config` (2026-06-23). `analyze`/`install` build the keyword
+> index when no provider is configured; when the local provider is selected but the optional
+> `@huggingface/transformers` package is unavailable, the build catches the embedder error and falls
+> back to a keyword index with an actionable install hint (validated by hiding the dependency).
+
+#### Scenario: Clean install with no embedding setup produces a working index
+
+- **GIVEN** a fresh repository with no embedding configuration
+- **WHEN** the user runs `openlore install`
+- **THEN** a first-class keyword index is built and `orient` / `search_code` work, with no embedding
+  endpoint, key, or network required
+
+### Requirement: LocalEmbeddingsEnabledByOneCommand
+
+The CLI SHALL provide a single command to enable on-device semantic embeddings with no endpoint and no
+API key (for example `openlore embed --local`), which configures the local provider and builds (or
+rebuilds) the semantic index, lazily fetching and caching the pinned local model on first use. Enabling
+local embeddings SHALL require no further configuration beyond that one command.
+
+> Implemented by `make-embeddings-zero-config` (2026-06-23). `openlore embed --local`
+> (`src/cli/commands/embed.ts`) writes `embedding.provider: "local"` and runs `analyze --force`,
+> rebuilding the index on-device. `--model <id>` overrides the pinned default.
+
+#### Scenario: One command turns on local semantic search
+
+- **GIVEN** a repository with a working keyword index
+- **WHEN** the user runs `openlore embed --local`
+- **THEN** the local model is fetched and cached, the semantic index is built on-device, and
+  subsequent searches use semantic ranking — with no endpoint or API key configured
+
+### Requirement: RetrievalModeIsStatedPlainlyAndLowNoise
+
+The CLI SHALL state the active retrieval mode (`keyword`, `local-semantic`, or `remote-semantic`)
+plainly where it is useful (for example in `analyze` and `orient` summaries), and SHALL NOT emit
+repeated degraded-fallback warnings for the keyword default. A one-time notice SHALL be emitted only
+when a *configured* expectation fails — specifically, when a remote embedding endpoint is configured
+but unreachable — not when keyword mode is simply the unconfigured default.
+
+> Implemented by `make-embeddings-zero-config` (2026-06-23). `analyze` prints a `[keyword]` /
+> `[local-semantic]` / `[remote-semantic]` mode tag; `orient` (CLI) prints "Retrieval mode:" and the
+> orient/search_code/search_specs JSON carries a `retrievalMode` field. The keyword default emits an
+> optional-upgrade hint, never a warning; the configured-but-unreachable remote notice is the existing
+> `analyze` build-time message.
+
+#### Scenario: Keyword default is stated, not warned
+
+- **GIVEN** a repository using the keyword default
+- **WHEN** the user runs `openlore analyze`
+- **THEN** the active mode is stated once as `keyword`, with no degraded-fallback warning
+
+#### Scenario: A configured-but-unreachable remote endpoint is surfaced
+
+- **GIVEN** a configured remote embedding endpoint that is unreachable
+- **WHEN** the index is built
+- **THEN** a one-time notice states the configured endpoint failed and that keyword mode is in use
+
+### Requirement: BaseRefResolutionIsDisclosedOrFatal
+
+Every CLI command accepting a `--base` ref SHALL resolve it through one shared helper
+(`resolveBaseRefDisclosed`). When the requested ref does not resolve, an advisory command (blast
+radius, briefing, coverage-gaps) SHALL return a structured fallback disclosure (`requested`,
+`resolved`) alongside its conclusion, and a certification command (`certify-public-surface`,
+`impact-certificate`) SHALL fail with a non-zero exit naming the unresolvable ref — a verdict
+computed against a base the user did not ask for is never presented as a certificate — unless the
+user explicitly opts into disclosed fallback with `--allow-base-fallback`. A composer that forwards
+`--base` to a helper-routed handler inherits the disclosure. A parity test SHALL fail when a
+`--base` command does not route through the helper.
+
+#### Scenario: A typo'd tag cannot produce a clean certificate
+
+- **GIVEN** `openlore certify-public-surface --base v2.1.5-typo`
+- **WHEN** the ref does not resolve
+- **THEN** the command exits non-zero naming the ref, and no verdict is printed
+
+#### Scenario: An advisory command falls back with a receipt
+
+- **GIVEN** `openlore blast-radius --base not-a-ref`
+- **WHEN** the ref does not resolve and the fallback chain selects `main`
+- **THEN** the output carries the structured fallback disclosure naming both refs
+
+#### Scenario: The opt-in flag restores disclosed fallback for a certificate
+
+- **GIVEN** `openlore certify-public-surface --base not-a-ref --allow-base-fallback`
+- **WHEN** the ref does not resolve
+- **THEN** the certificate is computed against the fallback base and carries the `baseRefFallback` disclosure
+
+### Requirement: ConclusionCommandsDiscloseIndexStaleness
+
+Every CLI command whose conclusion is computed from the cached graph SHALL disclose index
+staleness through one shared boundary shape (the index's build commit and the count of source files
+changed since) whenever the working tree has moved past the index. No conclusion command may present
+a risk headline or ranked briefing over a stale graph without the disclosure. A parity test SHALL
+enumerate cached-graph commands and fail when one lacks the boundary path.
+
+#### Scenario: A stale blast radius says so
+
+- **GIVEN** an index built 90 commits ago and a `blast-radius` invocation
+- **WHEN** the conclusion is printed
+- **THEN** it carries the staleness boundary (build commit, changed-file count) alongside the risk headline
+
+#### Scenario: Unknown enum inputs are not quiet-empty
+
+- **GIVEN** `openlore style-fingerprint --language <unrecognized>`
+- **WHEN** the language matches no known language
+- **THEN** the command exits non-zero with a not-found shape listing the known languages, matching the honesty of its file-path counterpart
+
+### Requirement: NodeFloorMatchesSqliteCapability
+
+The declared Node.js floor (`engines.node`, the runtime guard's `MIN_NODE`, doctor's constants,
+and user-facing documentation) SHALL be a version on which every statically imported builtin —
+in particular `node:sqlite` — is available without runtime flags, and all floor declarations SHALL
+be kept equal by an automated test. The runtime guard and `openlore doctor` SHALL verify
+`node:sqlite` availability by probing the module itself (e.g.
+`process.getBuiltinModule('node:sqlite')`), not by version arithmetic alone; a probe failure SHALL
+produce the established one-line legible failure (stderr message + stable exit code 78), never an
+uncaught import crash, and doctor SHALL report it as a failing check naming the missing capability.
+
+#### Scenario: A Node inside the old declared range but below the working floor is rejected legibly
+
+- **GIVEN** openlore launched under Node 22.10 (where `node:sqlite` requires a flag nobody passes)
+- **WHEN** the CLI entry guard runs
+- **THEN** the process exits with code 78 and one stderr line naming the required Node floor,
+  before any `node:sqlite` import can throw a stack trace
+
+#### Scenario: Capability probe overrides version arithmetic
+
+- **GIVEN** a Node build whose version number satisfies the floor but on which the `node:sqlite`
+  probe fails (re-flagged or stripped builtin)
+- **WHEN** the guard or `openlore doctor` evaluates the environment
+- **THEN** the verdict is failure with a message naming `node:sqlite` unavailability — the passing
+  version number is never presented as evidence the product can run
+
+#### Scenario: Floor declarations cannot drift apart
+
+- **GIVEN** the floor is declared in package.json `engines`, the version guard, and constants
+- **WHEN** any one declaration is changed without the others
+- **THEN** an automated test fails, keeping one floor across all declarations and doctor/README copy
+
+### Requirement: LiveTelemetryTailSurvivesErrorsAndRotation
+
+The `telemetry --live` tail SHALL attach an `'error'` handler to every read stream it opens: a
+stream error MUST NOT crash the live session and MUST clear the per-file in-flight guard so the
+file's tail can retry on the next watch event, with a one-line diagnostic disclosure. Before
+opening a stream at a stored offset, the tail SHALL detect log rotation structurally — a current
+file size smaller than the stored offset means the writer rotated the file and restarted it small —
+and reset the offset to the start of the new file, so rotation never produces a silently empty
+tail that reads past end-of-file forever.
+
+#### Scenario: A stream error does not end the live session
+
+- **GIVEN** `openlore telemetry --live` tailing a telemetry file
+- **WHEN** the read stream emits `'error'` (for example, the file was renamed away by rotation
+  between the watch event and the open)
+- **THEN** the session keeps running, one diagnostic line is printed, the in-flight guard is
+  cleared, and a later event on the same file is rendered
+
+#### Scenario: Rotation resets the offset instead of wedging the tail
+
+- **GIVEN** a telemetry file that was rotated (renamed at the size threshold and restarted small)
+  while a stale byte offset is stored for it
+- **WHEN** the next watch event triggers a tail of that file
+- **THEN** the size-below-offset condition is detected, the offset resets to 0, and the new file's
+  lines are rendered — the tail never reads silently past end-of-file forever
+
+> Change: harden-runtime-event-resilience
+> Date: 2026-07-19
+
 ## Technical Notes
 
 - **Dependencies**: ora, logger, ProgressIndicator, showNextSteps, @inquirer/prompts
@@ -632,27 +1132,6 @@ Multi-repo federation needs a registry that references each repo's independently
 
 **Consequences:** A new src/core/federation/ module owns registry load/save/add/remove/list. Federated queries load per-repo CachedContext lazily via readCachedContext on demand; no union graph is materialized. Remote (git-remote) repos and a global ~/.openlore registry are deferred to a follow-up.
 
-### Requirement: SpecStoreStatusCommand
-
-The system SHALL provide a CLI command `openlore spec-store status` that resolves a configured spec-store
-binding and emits its health check. The command SHALL support a `--json` flag whose output carries
-stable finding codes documented in the agent-facing contract, so an external orchestrator can consume
-the result without parsing prose. The command SHALL be read-only and SHALL exit zero whether or not
-findings are present; it SHALL NOT block any workflow.
-
-#### Scenario: Status emits machine-readable findings
-
-- **GIVEN** a configured spec-store binding with one unresolved target
-- **WHEN** `openlore spec-store status --json` is run
-- **THEN** the command exits zero and emits a finding with the stable code `target-unresolved` and a
-  remediation
-
-#### Scenario: No binding configured
-
-- **GIVEN** an environment with no spec-store binding
-- **WHEN** `openlore spec-store status` is run
-- **THEN** the command reports that no binding is configured and exits zero without error
-
 ### Spec-store binding resolves declared targets by name against the federation registry
 
 **Status:** Approved
@@ -662,58 +1141,6 @@ findings are present; it SHALL NOT block any workflow.
 A spec-store binding adds an optional OpenLoreConfig.specStore block { name, path, targets[], references? } where targets/references are NAMES that must match entries already in the federation registry (.openlore/federation.json). Resolution and index-state reuse the federation registry verbatim (loadRegistry/listRepos/evaluateRepoState), so the binding adds no new index machinery — it is a thin declarative layer over the shipped index-of-indexes. The health check is read-only and returns conclusion-shaped findings with stable codes (store-path-missing, target-unresolved, target-missing, index-missing, index-stale, reference-missing); it never throws and never blocks. The MCP tool spec_store_status follows the federation_status precedent: present in the full TOOL_DEFINITIONS surface and additionally in the opt-in federation preset, kept out of minimal/navigation/memory.
 
 **Consequences:** Using a spec-store binding requires the target repos to also be registered via `openlore federation add`; a declared name with no registry entry surfaces as a target-unresolved finding with a pasteable remediation rather than an error. Tool count rises 60→61, requiring updates to the count-guarded docs and the --preset help string. Future working-set and impact-certificate tools will extend this binding.
-
-### Requirement: WorkingSetContextCommand
-
-The system SHALL provide a CLI command `openlore working-set context` that assembles and emits the
-working-set structural briefing for an active change in a configured spec-store binding. The command
-SHALL accept the change to brief (`--change <id>`) and SHALL support a `--json` flag whose output is
-documented in the agent-facing contract, so an external orchestrator can request the briefing and splice
-it into the context it hands its agent. The command MAY accept an optional token budget (`--token-budget
-<n>`) bounding the merged briefing. The command SHALL be read-only and SHALL exit zero whether or not
-the change is briefable; it SHALL NOT block any workflow.
-
-#### Scenario: Briefing emitted as machine-readable context
-
-- **GIVEN** a bound store with an active change targeting at least one resolved, indexed repository
-- **WHEN** `openlore working-set context --change <id> --json` is run
-- **THEN** the command emits one budgeted briefing whose items are attributed to each target repository,
-  in the documented JSON shape, and exits zero
-
-#### Scenario: No change specified
-
-- **GIVEN** a configured spec-store binding and no `--change` argument
-- **WHEN** `openlore working-set context` is run
-- **THEN** the command reports a `change-unspecified` finding and exits zero without briefing
-
-### Requirement: ImpactCertificateCommand
-
-The system SHALL provide a CLI command `openlore impact-certificate` that computes and emits the impact
-certificate for a proposed change in a configured spec-store binding. The command SHALL support
-`--change <id>` to select the change, `--json` whose output carries stable surface and path codes
-documented in the agent-facing contract, and the advisory git-hook flags (`--hook`, `--install-hook`,
-`--uninstall-hook`) following the existing pre-flight hook pattern. The certificate SHALL be advisory by
-default: the command and its hook SHALL NOT block. A repository MAY opt into blocking for specific
-high-severity surface findings via configuration, but blocking SHALL never be the default, and
-infrastructure failure (no graph, no binding) SHALL never block.
-
-> Implemented by `add-change-impact-certificate` (2026-06-21). Blocking is opt-in via
-> `impactCertificate.block` (e.g. `["critical"]`); the hook persists the certificate (`--save` elsewhere)
-> so the spec-store health check can re-fire it. Verified e2e: blocked at exit 1 under
-> `block: ["critical"]`, advisory at exit 0 without it. Tool count rises 62→63. Decision: `187224b0`.
-
-#### Scenario: Default certificate is advisory
-
-- **GIVEN** the impact-certificate hook installed with default configuration
-- **WHEN** a commit is made for a change that opens a new path into a declared surface
-- **THEN** the certificate is emitted and the commit is not blocked
-
-#### Scenario: Opt-in blocking fires only on its configured severity
-
-- **GIVEN** a repository configured to block when a change opens a new path into a surface marked
-  critical
-- **WHEN** a change opens a new path into a critical surface
-- **THEN** the hook blocks; and for a newly-opened path into any non-critical surface it remains advisory
 
 ### Lean default MCP surface = navigation preset; full 73-tool surface is opt-in via --preset full / --all-tools
 
@@ -744,171 +1171,6 @@ Adversarial e2e on the default-to-lean-tool-surface change (a6c916ed) found four
 jsonc-parser modify() throws when indexing into a non-container parent (e.g. mcpServers is a string/number/null/array instead of an object). Since mergeEntries already coerces the non-object value to {} and produces the correct nextObject, serializeManaged wraps the format-preserving path in try/catch and falls back to JSON.stringify(nextObject) — the same fresh-write path used for unparseable files. This trades formatting preservation (only in the hostile case) for never crashing or half-installing.
 
 **Consequences:** A malformed/hostile .mcp.json no longer crashes install mid-flight; the OpenLore server is wired correctly (exit 0) and existing content is reconstructed from the merged object. Formatting is preserved in every normal case; only the previously-crashing non-container-parent case loses byte-exact formatting.
-
-### Requirement: OrientInjectMode
-
-The system SHALL provide an `--inject` mode on the `openlore orient` command that emits an
-injection-shaped orientation block for a single task. The task SHALL be taken from `--task` when
-present, otherwise read from the command's stdin (the prompt payload a pre-turn agent hook supplies).
-The emitted block SHALL reuse the lean orientation output (Spec 27), SHALL be bounded by a documented
-token budget, SHALL be clearly attributed to OpenLore, and SHALL open with a one-line statement that
-it is informational and may be ignored (the same facts-not-coercion posture as the Epistemic Lease,
-decision `8e95746d`). The mode SHALL be deterministic with no LLM. Any failure — missing graph, parse
-error, empty match, or empty prompt — SHALL degrade to a single pointer line and exit 0, so a hook
-that invokes it can never break the user's turn.
-
-> Implemented by `add-task-scoped-context-injection` (2026-06-22). `orient --inject` reuses
-> `handleOrient(lean=true)`; stdin is parsed for a Claude Code `UserPromptSubmit` JSON payload
-> (`.prompt`) or treated as raw text. stdout is kept clean (diagnostics → stderr) so only the block
-> is injected. Default budget 600 tokens. Verified e2e on this repo: strong match emits the block at
-> exit 0, no-graph/empty prompt emit the pointer line at exit 0. Adds no MCP tool. Decisions:
-> `27c4bb53`, `0fc964d3`.
-
-#### Scenario: Inject emits a budgeted, ignorable block for a real task
-
-- **GIVEN** an analyzed repository and a task supplied via `--task`
-- **WHEN** `openlore orient --inject` runs
-- **THEN** it emits a lean, OpenLore-attributed orientation block that opens with an
-  informational/ignorable framing line and does not exceed the configured token budget
-
-#### Scenario: Inject never breaks the turn
-
-- **GIVEN** a repository with no analysis graph
-- **WHEN** `openlore orient --inject` runs from a hook
-- **THEN** it emits a single pointer line indicating OpenLore is available and exits 0, emitting no
-  error to the harness
-
-### Requirement: OrientationRelevanceGate
-
-The `--inject` mode SHALL compute a deterministic, local orientation-relevance signal from the
-orientation result — the matched-function count, the fan-in / hub centrality of the matches, and
-(only on the bounded semantic/hybrid score scale) the top match score — and SHALL compare it to a
-documented threshold. When the signal is at or above the threshold, `--inject` SHALL emit the full
-orientation block; when below it, `--inject` SHALL emit only a single pointer line. The threshold and
-its inputs SHALL be documented and overridable in repository configuration, and SHALL never be
-learned or LLM-derived.
-
-> Implemented by `add-task-scoped-context-injection` (2026-06-22). The gate passes when matched-count
-> ≥ `relevanceMinMatches` (default 2) AND there is structural centrality (a match with fan-in ≥
-> `relevanceMinFanIn` (default 2), or a hub) — or, only on the bounded semantic/hybrid score scale, a
-> top score ≥ `relevanceMinScore` (default 0.3). BM25-fallback scores are corpus-relative and
-> unbounded, so the score path is disabled there and the gate relies on count + centrality. Decision:
-> `0fc964d3`.
-
-#### Scenario: A weak-orientation task gates down to a pointer
-
-- **GIVEN** a task whose graph match is sparse or low-scoring (the small/familiar/shallow case)
-- **WHEN** `openlore orient --inject` runs
-- **THEN** it emits only the single pointer line, not a full orientation block
-
-#### Scenario: A strong-orientation task emits the full block
-
-- **GIVEN** a deep task with a strong, high-fan-in graph match
-- **WHEN** `openlore orient --inject` runs
-- **THEN** it emits the full lean orientation block within budget
-
-### Requirement: TaskScopedInjectionInstallWiring
-
-`openlore install` SHALL wire, in addition to the existing whole-repo `SessionStart` orientation hook,
-a task-scoped first-prompt injection hook for each agent adapter that exposes a pre-turn hook
-mechanism (for Claude Code, a `UserPromptSubmit` hook running `openlore orient --inject`). The wired
-group SHALL be marker-identified (`_openlore: true`) so re-running install replaces only the OpenLore
-group in place — a stale OpenLore group self-heals to the current command and re-install never
-duplicates it — while user-authored sibling hooks are left byte-identical. (Unlike the fingerprinted
-managed paths in `CLAUDE.md` and `.mcp.json`, the marker-identified hook group carries no fingerprint
-and is not hand-edit-protected: edits inside the OpenLore group are overwritten on the next install by
-design.) `--uninstall` SHALL remove the group cleanly, deleting now-empty parent objects and the file
-when it was OpenLore-only. `--dry-run` SHALL preview the change. Adapters with no pre-turn hook
-mechanism SHALL fall back to the existing instruction block without error. The wiring SHALL preserve
-the user's other configuration byte-for-byte (merge-not-clobber, decision `df27e8ef`).
-
-> Implemented by `add-task-scoped-context-injection` (2026-06-22). The claude-code adapter generalizes
-> its SessionStart merge/strip helpers over both hook keys (`SessionStart`, `UserPromptSubmit`).
-> Cursor/Cline/Continue/AGENTS.md have no settings/hook channel and keep the instruction-block
-> fallback. Verified e2e: install wires both marker-identified groups, re-install is byte-identical,
-> uninstall removes both and deletes an OpenLore-only file. Decision: `1d35a27b`.
-
-#### Scenario: Install wires task-scoped injection idempotently
-
-- **GIVEN** a project with Claude Code present
-- **WHEN** `openlore install` runs, then runs again
-- **THEN** a single marker-identified `UserPromptSubmit` OpenLore group is present after both runs, and
-  any user-authored hooks are left byte-identical
-
-#### Scenario: Uninstall removes task-scoped injection
-
-- **GIVEN** a project where `openlore install` wired the task-scoped injection hook
-- **WHEN** `openlore install --uninstall` runs
-- **THEN** the OpenLore `UserPromptSubmit` group is removed, empty parents are pruned, and the file is
-  deleted only if it held nothing but OpenLore entries
-
-### Requirement: ContextInjectionOptOut
-
-The system SHALL read a repository configuration switch controlling task-scoped context injection
-(default: enabled), and when injection is disabled `openlore orient --inject` SHALL emit nothing and
-exit 0. Disabling injection SHALL NOT affect the MCP server registration or the `SessionStart` primer.
-The injected block's data SHALL never exceed the configured token budget regardless of match size
-(detail lines are added only while they fit); the small fixed framing floor — the attribution header
-and the task line, which must always be present for the block to be safely attributable and ignorable
-— is exempt, so a pathologically small budget yields just that floor.
-
-> Implemented by `add-task-scoped-context-injection` (2026-06-22). Read from
-> `.openlore/config.json` `contextInjection.mode` (`task-scoped` default | `off`); `tokenBudget`
-> caps the block. Verified e2e: `mode: "off"` yields empty stdout at exit 0; a custom small budget
-> drops lower-priority detail to stay within cap. Decision: `27c4bb53`.
-
-#### Scenario: Injection can be turned off without disabling the rest
-
-- **GIVEN** a repository configured with context injection disabled
-- **WHEN** `openlore orient --inject` runs
-- **THEN** it emits nothing and exits 0, while the MCP server and SessionStart primer remain wired
-
-### Requirement: GateConsultsTheUnifiedEnforcementPolicy
-
-> Status: Implemented (change: add-finding-enforcement-policy, 2026-06-23)
-
-The pre-commit / pre-merge gate (`openlore enforce`) SHALL collect governance findings from all in-scope
-installed sources (the stale-decision-reference check always; the blast-radius guard and the change
-impact certificate when the repository has configured them), resolve each finding's enforcement class
-through the single declared `enforcement.policy` using the deterministic resolver, and fail the gate only
-when at least one finding resolves to the `blocking` class. Findings SHALL be sorted by a stable key so
-identical inputs produce identical, reproducible output. The gate SHALL add no LLM latency for this
-resolution — it is a pure policy pass. Every source SHALL be advisory-safe: a throw degrades to a caveat
-and NEVER blocks a commit.
-
-> Implemented as `openlore enforce` (`src/cli/commands/enforce.ts`), installable as a pre-commit hook that
-> coexists with the decisions gate. Verified e2e in a real git repo: a `stale-decision-reference: blocking`
-> policy blocks the commit; the same change passes with no policy. The diff-heavy blast-radius/impact-cert
-> sources are collected only when configured, keeping the common-case gate cheap.
-
-#### Scenario: A blocking-classed finding fails the gate
-
-- **GIVEN** a repository whose `enforcement.policy` maps `stale-decision-reference` to `blocking`, and a
-  staged change introducing a live artifact that references a superseded decision
-- **WHEN** the gate runs
-- **THEN** the gate fails, citing the `stale-decision-reference` finding, and reports it as `blocking`
-
-#### Scenario: The same finding stays advisory by default
-
-- **GIVEN** the same staged change but a repository with no `enforcement.policy`
-- **WHEN** the gate runs
-- **THEN** the gate does not fail, and the `stale-decision-reference` finding is reported as advisory
-
-### Requirement: SilencedFindingsRemainVisible
-
-> Status: Implemented (change: add-finding-enforcement-policy, 2026-06-23)
-
-A finding whose resolved enforcement class is `off` SHALL NOT fail the gate, and SHALL still be listed in
-the gate's output as informational, so that a deliberately silenced finding is visible to a reviewer and a
-silence is never invisible. The gate output SHALL distinguish `blocking`, `advisory`, and `off` findings.
-
-#### Scenario: An off-classed finding is shown but does not block
-
-- **GIVEN** a repository whose `enforcement.policy` maps a finding code to `off`, and a change that
-  produces that finding
-- **WHEN** the gate runs
-- **THEN** the gate does not fail, and the finding appears in the output marked as silenced (`off`),
-  distinct from advisory findings
 
 ### Serialize the prove scorecard as versioned, stable-keyed JSON
 
@@ -950,157 +1212,6 @@ Round-3 adversarial QA found two saveScorecard defects: an existsSync-then-write
 
 **Consequences:** Concurrent --save calls never clobber; a filesystem failure never crashes the process. Docs (cli-reference, AGENT-BENCHMARKS, --json schema) aligned with shipped behavior. Refines the prove persistence decision (670b5f0b).
 
-### Requirement: ReviewCommandRendersADeterministicChangeBriefing
-
-The CLI SHALL provide an `openlore review` command that, for a `base..head` git range, composes the
-existing deterministic analyses — structural diff and blast radius (which already folds in spec/ADR/
-anchored-memory drift) — into a single conclusion-shaped briefing. The command SHALL support
-`--base <ref>` (default: resolved via the standard fallback chain requested → main → master → HEAD~1),
-`--head <ref>` (default: working tree), and `--format markdown|json` (default: `markdown`). The
-briefing SHALL be a briefing (named risks, counts, and the tests to run), never a graph dump, and
-SHALL invoke no LLM and add no new structural computation beyond the analyses it composes.
-
-> Implemented by `add-pr-review-surface` (2026-06-23). `src/cli/commands/review.ts` composes
-> `handleStructuralDiff` + `computeBlastRadius`; `computeBlastRadius` already folds change-scoped drift
-> (its memory/specs/decisions fields), so `review` does not separately re-run `detectDrift`. Markdown
-> default; `--format json` is pure JSON on stdout. Decision: `4f3efb11`.
-
-#### Scenario: A change is briefed for human review
-
-- **GIVEN** a repository with an analysis index and a diff that removes a symbol with live callers
-  and changes another symbol's signature
-- **WHEN** the user runs `openlore review --base main`
-- **THEN** the command emits a markdown briefing naming the removed and signature-changed symbols,
-  their stale callers, the hubs and layers crossed, the tests to run, and any governing decision or
-  spec the change makes stale
-
-#### Scenario: JSON output for programmatic consumers
-
-- **GIVEN** the same change
-- **WHEN** the user runs `openlore review --base main --format json`
-- **THEN** the command emits the composed briefing as JSON on stdout
-
-### Requirement: ReviewDegradesHonestlyWhenItCannotCompute
-
-When `openlore review` cannot compute a complete briefing — no analysis index, a base ref that is
-unreachable (for example, a shallow CI checkout), or no git range — it SHALL state in the briefing
-what it could not compute and why, and SHALL NOT emit a misleading empty or partial briefing as if it
-were complete.
-
-> Implemented by `add-pr-review-surface` (2026-06-23). No index → the structural delta still renders
-> (it builds the old/new graphs from just the changed files) and a note says to run `openlore analyze`;
-> a non-git directory exits 0 with a clear message; a base-ref fallback is surfaced as a caveat.
-
-#### Scenario: Missing index is disclosed, not hidden
-
-- **GIVEN** a repository with no analysis index
-- **WHEN** `openlore review` is run
-- **THEN** the briefing states that no index is present and that `openlore analyze` is required,
-  rather than reporting zero structural changes
-
-#### Scenario: Unreachable base on a shallow checkout is disclosed
-
-- **GIVEN** a shallow checkout where the requested base ref is not present
-- **WHEN** `openlore review --base <ref>` is run
-- **THEN** the briefing states that the base was unreachable and which fallback (if any) was used
-
-### Requirement: PrReviewActionPostsOneStickyAdvisoryComment
-
-The project SHALL ship a bundled GitHub Action (and a copy-paste `pull_request` workflow) that runs
-`openlore review` for the pull request's `base..head` range and posts the briefing as a single sticky
-PR comment, identified by a hidden marker. On the first run for a PR it SHALL create the comment; on
-every subsequent run it SHALL update that same comment in place rather than posting a new one. The
-Action SHALL be advisory by default and exit 0 (it informs, it does not fail the check). A repository
-MAY opt into failing the job on configured high-severity findings, reusing the `.openlore/config.json`
-block-pattern convention defined for the blast-radius hook; blocking SHALL never be the default posture.
-
-> Implemented by `add-pr-review-surface` (2026-06-23). `.github/actions/openlore-review/action.yml`
-> (composite: analyze → `openlore review --out` → `actions/github-script` find-or-update by the
-> `<!-- openlore-review -->` marker) + `.github/workflows/openlore-review.yml.example`. Advisory unless
-> `--hook` + a configured `blastRadius.block` pattern fires.
-
-#### Scenario: Sticky comment is updated, not duplicated
-
-- **GIVEN** the OpenLore review Action installed on a repository
-- **WHEN** a pull request receives a first push and then a second push
-- **THEN** the first push creates one review comment and the second push updates that same comment in
-  place, leaving exactly one OpenLore review comment on the PR
-
-#### Scenario: Advisory by default
-
-- **GIVEN** the Action installed with default configuration
-- **WHEN** a pull request introduces a high-blast-radius change
-- **THEN** the briefing is posted and the check exits 0 (the PR is not blocked)
-
-#### Scenario: Opt-in gating fires only on its configured pattern
-
-- **GIVEN** a repository configured to fail the job when a change orphans a governing decision
-- **WHEN** a pull request orphans a governing decision
-- **THEN** the job fails; and for any other high-blast-radius change it remains advisory
-
-### Requirement: FirstRunNeverBlocksOnEmbeddings
-
-The first-run flow (`openlore install` and `openlore analyze`) SHALL complete with a fully working
-first-class keyword index without any embedding configuration, network access, or API key. Embeddings
-SHALL never be on the critical path of obtaining a working index; the semantic upgrade SHALL be offered
-but never required.
-
-> Implemented by `make-embeddings-zero-config` (2026-06-23). `analyze`/`install` build the keyword
-> index when no provider is configured; when the local provider is selected but the optional
-> `@huggingface/transformers` package is unavailable, the build catches the embedder error and falls
-> back to a keyword index with an actionable install hint (validated by hiding the dependency).
-
-#### Scenario: Clean install with no embedding setup produces a working index
-
-- **GIVEN** a fresh repository with no embedding configuration
-- **WHEN** the user runs `openlore install`
-- **THEN** a first-class keyword index is built and `orient` / `search_code` work, with no embedding
-  endpoint, key, or network required
-
-### Requirement: LocalEmbeddingsEnabledByOneCommand
-
-The CLI SHALL provide a single command to enable on-device semantic embeddings with no endpoint and no
-API key (for example `openlore embed --local`), which configures the local provider and builds (or
-rebuilds) the semantic index, lazily fetching and caching the pinned local model on first use. Enabling
-local embeddings SHALL require no further configuration beyond that one command.
-
-> Implemented by `make-embeddings-zero-config` (2026-06-23). `openlore embed --local`
-> (`src/cli/commands/embed.ts`) writes `embedding.provider: "local"` and runs `analyze --force`,
-> rebuilding the index on-device. `--model <id>` overrides the pinned default.
-
-#### Scenario: One command turns on local semantic search
-
-- **GIVEN** a repository with a working keyword index
-- **WHEN** the user runs `openlore embed --local`
-- **THEN** the local model is fetched and cached, the semantic index is built on-device, and
-  subsequent searches use semantic ranking — with no endpoint or API key configured
-
-### Requirement: RetrievalModeIsStatedPlainlyAndLowNoise
-
-The CLI SHALL state the active retrieval mode (`keyword`, `local-semantic`, or `remote-semantic`)
-plainly where it is useful (for example in `analyze` and `orient` summaries), and SHALL NOT emit
-repeated degraded-fallback warnings for the keyword default. A one-time notice SHALL be emitted only
-when a *configured* expectation fails — specifically, when a remote embedding endpoint is configured
-but unreachable — not when keyword mode is simply the unconfigured default.
-
-> Implemented by `make-embeddings-zero-config` (2026-06-23). `analyze` prints a `[keyword]` /
-> `[local-semantic]` / `[remote-semantic]` mode tag; `orient` (CLI) prints "Retrieval mode:" and the
-> orient/search_code/search_specs JSON carries a `retrievalMode` field. The keyword default emits an
-> optional-upgrade hint, never a warning; the configured-but-unreachable remote notice is the existing
-> `analyze` build-time message.
-
-#### Scenario: Keyword default is stated, not warned
-
-- **GIVEN** a repository using the keyword default
-- **WHEN** the user runs `openlore analyze`
-- **THEN** the active mode is stated once as `keyword`, with no degraded-fallback warning
-
-#### Scenario: A configured-but-unreachable remote endpoint is surfaced
-
-- **GIVEN** a configured remote embedding endpoint that is unreachable
-- **WHEN** the index is built
-- **THEN** a one-time notice states the configured endpoint failed and that keyword mode is in use
-
 ### Flip default MCP surface to the substrate (both-faces) preset
 
 **Status:** Approved
@@ -1110,114 +1221,3 @@ but unreachable — not when keyword mode is simply the unconfigured default.
 Benchmark-cleared. The DefaultSurfaceRevealsAllFaces gate ran all three quantities and none regressed: (1) token economy — substrate ~4.5k tokens, +1.2k over navigation, within the ~10k tool-search threshold; (2) face coverage — substrate exposes navigate+change+remember+verify, navigation only navigate; (3) selection accuracy — substrate 90% vs navigation 80% on shared tool selection (no regression) and 100% vs 0% on governance, plus end-to-end task COMPLETION on the pinned real-repo corpus across TWO models (sonnet + haiku) on BOTH tiers: 100% correctness everywhere, substrate cheaper on 3 of 4 model×tier cells. The lean navigation default under-sold the substrate: agents installed the documented way never discovered recall/verify_claim/blast_radius.
 
 **Consequences:** The out-of-box default install now exposes the substrate preset (navigation core + recall + verify_claim + blast_radius, 13 tools) instead of navigation (10). No tool removed; navigation stays a named preset and is a one-flag reversible escape (--preset navigation). Reverses ADR-0022 (a6c916ed). Lean-default payload budget rises ~13.2KB to ~17.7KB. The BREADTH_POINTER now describes the substrate default and points to full/federation/navigation. Docs/guards updated to the 13-tool default.
-
-### Requirement: BaseRefResolutionIsDisclosedOrFatal
-
-Every CLI command accepting a `--base` ref SHALL resolve it through one shared helper
-(`resolveBaseRefDisclosed`). When the requested ref does not resolve, an advisory command (blast
-radius, briefing, coverage-gaps) SHALL return a structured fallback disclosure (`requested`,
-`resolved`) alongside its conclusion, and a certification command (`certify-public-surface`,
-`impact-certificate`) SHALL fail with a non-zero exit naming the unresolvable ref — a verdict
-computed against a base the user did not ask for is never presented as a certificate — unless the
-user explicitly opts into disclosed fallback with `--allow-base-fallback`. A composer that forwards
-`--base` to a helper-routed handler inherits the disclosure. A parity test SHALL fail when a
-`--base` command does not route through the helper.
-
-#### Scenario: A typo'd tag cannot produce a clean certificate
-
-- **GIVEN** `openlore certify-public-surface --base v2.1.5-typo`
-- **WHEN** the ref does not resolve
-- **THEN** the command exits non-zero naming the ref, and no verdict is printed
-
-#### Scenario: An advisory command falls back with a receipt
-
-- **GIVEN** `openlore blast-radius --base not-a-ref`
-- **WHEN** the ref does not resolve and the fallback chain selects `main`
-- **THEN** the output carries the structured fallback disclosure naming both refs
-
-#### Scenario: The opt-in flag restores disclosed fallback for a certificate
-
-- **GIVEN** `openlore certify-public-surface --base not-a-ref --allow-base-fallback`
-- **WHEN** the ref does not resolve
-- **THEN** the certificate is computed against the fallback base and carries the `baseRefFallback` disclosure
-
-### Requirement: ConclusionCommandsDiscloseIndexStaleness
-
-Every CLI command whose conclusion is computed from the cached graph SHALL disclose index
-staleness through one shared boundary shape (the index's build commit and the count of source files
-changed since) whenever the working tree has moved past the index. No conclusion command may present
-a risk headline or ranked briefing over a stale graph without the disclosure. A parity test SHALL
-enumerate cached-graph commands and fail when one lacks the boundary path.
-
-#### Scenario: A stale blast radius says so
-
-- **GIVEN** an index built 90 commits ago and a `blast-radius` invocation
-- **WHEN** the conclusion is printed
-- **THEN** it carries the staleness boundary (build commit, changed-file count) alongside the risk headline
-
-#### Scenario: Unknown enum inputs are not quiet-empty
-
-- **GIVEN** `openlore style-fingerprint --language <unrecognized>`
-- **WHEN** the language matches no known language
-- **THEN** the command exits non-zero with a not-found shape listing the known languages, matching the honesty of its file-path counterpart
-
-### Requirement: NodeFloorMatchesSqliteCapability
-
-The declared Node.js floor (`engines.node`, the runtime guard's `MIN_NODE`, doctor's constants,
-and user-facing documentation) SHALL be a version on which every statically imported builtin —
-in particular `node:sqlite` — is available without runtime flags, and all floor declarations SHALL
-be kept equal by an automated test. The runtime guard and `openlore doctor` SHALL verify
-`node:sqlite` availability by probing the module itself (e.g.
-`process.getBuiltinModule('node:sqlite')`), not by version arithmetic alone; a probe failure SHALL
-produce the established one-line legible failure (stderr message + stable exit code 78), never an
-uncaught import crash, and doctor SHALL report it as a failing check naming the missing capability.
-
-#### Scenario: A Node inside the old declared range but below the working floor is rejected legibly
-
-- **GIVEN** openlore launched under Node 22.10 (where `node:sqlite` requires a flag nobody passes)
-- **WHEN** the CLI entry guard runs
-- **THEN** the process exits with code 78 and one stderr line naming the required Node floor,
-  before any `node:sqlite` import can throw a stack trace
-
-#### Scenario: Capability probe overrides version arithmetic
-
-- **GIVEN** a Node build whose version number satisfies the floor but on which the `node:sqlite`
-  probe fails (re-flagged or stripped builtin)
-- **WHEN** the guard or `openlore doctor` evaluates the environment
-- **THEN** the verdict is failure with a message naming `node:sqlite` unavailability — the passing
-  version number is never presented as evidence the product can run
-
-#### Scenario: Floor declarations cannot drift apart
-
-- **GIVEN** the floor is declared in package.json `engines`, the version guard, and constants
-- **WHEN** any one declaration is changed without the others
-- **THEN** an automated test fails, keeping one floor across all declarations and doctor/README copy
-
-### Requirement: LiveTelemetryTailSurvivesErrorsAndRotation
-
-The `telemetry --live` tail SHALL attach an `'error'` handler to every read stream it opens: a
-stream error MUST NOT crash the live session and MUST clear the per-file in-flight guard so the
-file's tail can retry on the next watch event, with a one-line diagnostic disclosure. Before
-opening a stream at a stored offset, the tail SHALL detect log rotation structurally — a current
-file size smaller than the stored offset means the writer rotated the file and restarted it small —
-and reset the offset to the start of the new file, so rotation never produces a silently empty
-tail that reads past end-of-file forever.
-
-#### Scenario: A stream error does not end the live session
-
-- **GIVEN** `openlore telemetry --live` tailing a telemetry file
-- **WHEN** the read stream emits `'error'` (for example, the file was renamed away by rotation
-  between the watch event and the open)
-- **THEN** the session keeps running, one diagnostic line is printed, the in-flight guard is
-  cleared, and a later event on the same file is rendered
-
-#### Scenario: Rotation resets the offset instead of wedging the tail
-
-- **GIVEN** a telemetry file that was rotated (renamed at the size threshold and restarted small)
-  while a stale byte offset is stored for it
-- **WHEN** the next watch event triggers a tail of that file
-- **THEN** the size-below-offset condition is detected, the offset resets to 0, and the new file's
-  lines are rendered — the tail never reads silently past end-of-file forever
-
-> Change: harden-runtime-event-resilience
-> Date: 2026-07-19
