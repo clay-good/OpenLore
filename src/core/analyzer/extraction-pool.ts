@@ -52,6 +52,7 @@ import {
   EXTRACTION_POOL_MIN_FILES,
   EXTRACTION_POOL_STARTUP_TIMEOUT_MS,
   EXTRACTION_POOL_REQUEST_TIMEOUT_MS,
+  EXTRACTION_POOL_TERMINATE_TIMEOUT_MS,
 } from '../../constants.js';
 import { logger } from '../../utils/logger.js';
 
@@ -104,11 +105,11 @@ export interface ExtractionLaneDisclosure {
    */
   laneDefectFiles: string[];
   /**
-   * How many empty worker results were re-checked on the main thread because that worker
-   * had not yet proven it can extract that language. Routine, not a degradation — the
-   * cost of never trusting an unproven silence. See {@link runPooled}.
+   * How many worker answers were re-checked on the main thread because that worker had not
+   * yet proven it can extract that language — an empty result, or a throw. Routine, not a
+   * degradation: the cost of never trusting an unproven worker. See {@link runPooled}.
    */
-  emptyRechecks: number;
+  unprovenRechecks: number;
 }
 
 /**
@@ -214,10 +215,12 @@ function remainingWorkerBudget(): number {
 }
 
 /**
- * Sticky "workers do not work here". Set once a pool comes up with zero healthy workers
- * (restricted sandbox, thread rlimit, broken native install). Without it every subsequent
- * build in a long-lived process would pay the full startup timeout again before falling
- * back to the lane it already knows it needs.
+ * Sticky "workers do not work here". Set once a pool comes up with zero healthy workers for
+ * a DETERMINISTIC reason — every worker refused to spawn, or reported itself unhealthy.
+ * Without it, every later build in a long-lived process would re-pay the startup cost to
+ * learn what this one already knows. A pool that came up empty only because its workers ran
+ * out of time does NOT set it: that is a transient load spike, and permanently dropping the
+ * daemon to the serial lane over one bad moment would be worse than re-trying.
  */
 let workersProvenUnavailable = false;
 
@@ -274,7 +277,7 @@ export async function extractFilesForPass1<T>(
       outcomes,
       disclosure: {
         lane: 'serial', poolSize: 0, serialReason: reason,
-        workerFallbackFiles: [], laneDefectFiles: [], emptyRechecks: 0,
+        workerFallbackFiles: [], laneDefectFiles: [], unprovenRechecks: 0,
       },
     };
   };
@@ -303,13 +306,13 @@ export async function extractFilesForPass1<T>(
   }
 
   const pooled = await runPooled(files, factory, size, serialExtract, isEmptyResult);
-  if (!pooled) {
-    // Zero healthy workers. Remember it: in a long-lived process (the MCP daemon) every
-    // later build would otherwise pay the same startup timeout to learn the same thing.
-    if (!explicitFactory) workersProvenUnavailable = true;
+  if (!pooled.disclosure) {
+    // Zero healthy workers. Remember it only when the cause was deterministic — see
+    // `workersProvenUnavailable`.
+    if (!explicitFactory && pooled.deterministicFailure) workersProvenUnavailable = true;
     return serial('pool-unavailable');
   }
-  return pooled;
+  return { outcomes: pooled.outcomes!, disclosure: pooled.disclosure };
 }
 
 /** The language most of this build's files are written in — the one worth probing. */
@@ -357,8 +360,10 @@ function createNodeWorker(entry: ResolvedWorkerEntry, probeLanguage?: string): E
   return worker as unknown as ExtractionWorkerHandle;
 }
 
-/** Why a slot was left for the main thread to fill. */
-type UnfilledReason = 'worker-died' | 'unproven-empty';
+/** Why a slot was left for the main thread to fill, and what the worker had said. */
+type UnfilledSlot<T> =
+  | { reason: 'worker-died' }
+  | { reason: 'unproven'; worker: ExtractOutcome<T> };
 
 /**
  * Drive the pool. Returns `undefined` when not a single worker could be brought up
@@ -389,12 +394,19 @@ async function runPooled<T>(
   size: number,
   serialExtract: (file: ExtractionFile) => Promise<T | undefined>,
   isEmptyResult: (value: T | undefined) => boolean,
-): Promise<{ outcomes: Array<ExtractOutcome<T>>; disclosure: ExtractionLaneDisclosure } | undefined> {
+): Promise<{
+  outcomes?: Array<ExtractOutcome<T>>;
+  disclosure?: ExtractionLaneDisclosure;
+  /** Set when no worker came up AND the cause was deterministic rather than a timeout. */
+  deterministicFailure?: boolean;
+}> {
   const slots: Array<ExtractOutcome<T> | undefined> = new Array(files.length).fill(undefined);
-  const unfilled: Array<UnfilledReason | undefined> = new Array(files.length).fill(undefined);
+  const unfilled: Array<UnfilledSlot<T> | undefined> = new Array(files.length).fill(undefined);
   /** Next unclaimed input index. Shared across workers; each claims by post-increment. */
   let cursor = 0;
   let started = 0;
+  /** A worker was dropped because it ran out of time, not because it refused to work. */
+  let sawStartupTimeout = false;
   /** Grammar-unavailable warnings relayed from workers, deduped across the pool. */
   const relayedWarnings = new Set<string>();
 
@@ -479,6 +491,7 @@ async function runPooled<T>(
     try {
       await new Promise<void>((resolve, reject) => {
         const timer = setTimeout(() => {
+          sawStartupTimeout = true;
           settleStartup?.(new Error(`extraction worker did not start within ${EXTRACTION_POOL_STARTUP_TIMEOUT_MS}ms`));
         }, EXTRACTION_POOL_STARTUP_TIMEOUT_MS);
         timer.unref?.();
@@ -507,17 +520,24 @@ async function runPooled<T>(
         } catch {
           // The worker died (or wedged past its deadline) holding this file. Leave the slot
           // for the main thread and stop feeding this worker.
-          unfilled[index] = 'worker-died';
+          unfilled[index] = { reason: 'worker-died' };
           break;
         }
-        if (outcome.status === 'ok' && isEmptyResult(outcome.value)) {
+        // A worker that cannot handle a language reports it two ways, and BOTH are
+        // indistinguishable from a real answer: an empty result (the core binding failed to
+        // load) or a throw (the per-language grammar `import` failed — those loads are not
+        // wrapped). Neither is trusted until this worker has actually produced facts for the
+        // language; until then the main thread decides.
+        const producedFacts = outcome.status === 'ok'
+          && outcome.value !== undefined
+          && !isEmptyResult(outcome.value);
+        if (producedFacts) {
+          proven.add(file.language);
+        } else if (outcome.status !== 'ok' || isEmptyResult(outcome.value)) {
           if (!proven.has(file.language)) {
-            // Unproven silence — the main thread decides, below.
-            unfilled[index] = 'unproven-empty';
+            unfilled[index] = { reason: 'unproven', worker: outcome };
             continue;
           }
-        } else if (outcome.status === 'ok') {
-          proven.add(file.language);
         }
         slots[index] = outcome;
       }
@@ -534,32 +554,37 @@ async function runPooled<T>(
   // `runOne` costs that worker's share, which the main-thread fallback below picks up.
   await Promise.all(Array.from({ length: size }, () => runOne().catch(() => undefined)));
 
-  if (started === 0) return undefined;
+  // No worker survived startup. Distinguish "this environment cannot run workers" from
+  // "everything was slow just now" — only the former is worth remembering for the process.
+  if (started === 0) return { deterministicFailure: !sawStartupTimeout };
 
   // Fill every slot the pool left, on the main thread, in input order.
   const workerFallbackFiles: string[] = [];
   const laneDefectFiles: string[] = [];
-  let emptyRechecks = 0;
+  let unprovenRechecks = 0;
   for (let i = 0; i < files.length; i++) {
     if (slots[i] !== undefined) continue;
     // A slot with no recorded reason belongs to a file no worker ever claimed (every
     // worker died first) — the same situation as a worker dying while holding it.
-    const reason = unfilled[i] ?? 'worker-died';
+    const record = unfilled[i];
     const outcome = await runSerial(files[i], serialExtract);
-    if (reason === 'worker-died') {
+    if (!record || record.reason === 'worker-died') {
       workerFallbackFiles.push(files[i].path);
     } else {
-      emptyRechecks++;
-      // The worker said "nothing here" and the main thread disagrees: a worker-local
-      // extraction defect, not an empty file.
-      if (outcome.status !== 'ok' || !isEmptyResult(outcome.value)) laneDefectFiles.push(files[i].path);
+      unprovenRechecks++;
+      // The worker reported nothing (empty, or a throw) and the main thread found real
+      // facts: a worker-local extraction defect, not an empty or unparseable file.
+      const mainThreadFoundFacts = outcome.status === 'ok'
+        && outcome.value !== undefined
+        && !isEmptyResult(outcome.value);
+      if (mainThreadFoundFacts) laneDefectFiles.push(files[i].path);
     }
     slots[i] = outcome;
   }
 
   return {
     outcomes: slots as Array<ExtractOutcome<T>>,
-    disclosure: { lane: 'pooled', poolSize: started, workerFallbackFiles, laneDefectFiles, emptyRechecks },
+    disclosure: { lane: 'pooled', poolSize: started, workerFallbackFiles, laneDefectFiles, unprovenRechecks },
   };
 }
 
@@ -587,9 +612,26 @@ function requestExtract<T>(
   });
 }
 
+/**
+ * Ask a worker to stop, and do not wait indefinitely for it to comply.
+ *
+ * `Worker.terminate()` resolves when the thread actually exits, and V8 can only interrupt a
+ * thread at a JS boundary — so a thread blocked inside a synchronous native call (a hung
+ * grammar `dlopen`, a pathological parse) may never exit. Awaiting that unbounded would
+ * re-create the exact hang the startup and request deadlines exist to prevent, and would
+ * strand this worker's process budget forever. So the wait is bounded; past the bound the
+ * slot is returned even though the thread may still be resident. That is the honest trade:
+ * a lingering thread is a leak the OS reclaims at exit, an unresolvable await is a hang.
+ */
 async function terminateQuietly(worker: ExtractionWorkerHandle): Promise<void> {
   try {
-    await worker.terminate();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const bounded = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, EXTRACTION_POOL_TERMINATE_TIMEOUT_MS);
+      timer.unref?.();
+    });
+    await Promise.race([Promise.resolve(worker.terminate()).then(() => undefined), bounded]);
+    if (timer) clearTimeout(timer);
   } catch {
     /* nothing left to terminate */
   }

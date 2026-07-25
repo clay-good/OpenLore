@@ -34,7 +34,7 @@
 - [x] Serial path kept as the reference implementation — it is also the fallback executor, and the
       pool module contains no extraction logic at all
 
-## Hardening from adversarial review (two independent reviewers)
+## Hardening from adversarial review (three review passes)
 - [x] **Never trust an unproven silence.** The startup probe covers ONE grammar; the other ~20 load
       lazily and independently per thread, and an unavailable grammar returns EMPTY rather than
       throwing. So a worker's empty result is re-checked on the main thread until that worker has
@@ -62,6 +62,28 @@
       "workers that came up", not "workers still alive"; a note at the merge catch that only
       `error.message` survives the worker boundary
 
+### Round 3 (re-review of the hardened code)
+- [x] **The guard covered only half the hazard.** A per-language grammar load that fails inside a
+      worker does NOT return empty — `getPyParser` and friends do not wrap their `import`, so it
+      THROWS. That error was trusted unconditionally, which would have written `parseFailed` and
+      dropped every symbol for files the serial lane extracts fully — a graph that depends on which
+      lane ran, and on scheduling. An error from an unproven worker is now re-checked exactly like
+      an empty result; an error from a PROVEN worker is still a real per-file parse failure
+- [x] **`terminate()` was an unbounded await on all three release paths.** V8 can only interrupt a
+      thread at a JS boundary, so a thread wedged in a synchronous native call may never exit —
+      re-creating the hang the deadlines exist to prevent and stranding its process-budget slot
+      forever. The wait is now bounded and the slot is returned regardless
+- [x] **The lane disclosure was dead plumbing** — computed, carried on `AnalysisArtifacts`, and read
+      by nobody, so `laneDefectFiles` never reached a human. `openlore analyze` now renders it
+- [x] Sticky "workers do not work here" is set only for a DETERMINISTIC failure (every worker
+      refused to spawn or reported unhealthy), not for a startup timeout — a load spike must not
+      drop a long-lived daemon to the serial lane for good
+- [x] Two comments claimed a watcher opt-out that does not exist. Corrected to state what is true:
+      the watcher DOES use the pool (measured 516ms → 292ms on a 33-file subset rebuild), and what
+      bounds the daemon is the per-process worker cap, not the file-count floor
+- [x] `proven` now requires a defined, non-empty result, so `undefined` (a language with no
+      extractor) no longer marks a language proven
+
 ## Verification
 - [x] Byte-equality oracle: `openlore analyze` on a clean checkout of this repo, pooled and with
       `OPENLORE_NO_WORKERS=1` — every content artifact byte-identical (llm-context, repo-structure,
@@ -86,10 +108,19 @@
       deterministic answer, not a silence
 - [x] Protocol/budget tests: an off-protocol worker is retired instead of hanging the pass; the
       worker budget is shared across concurrent builds and returned when they finish
+- [x] Worker-error tests: a worker that THROWS for an unproven language has every file re-checked
+      and the defect disclosed; a worker that fails everything still yields a graph byte-identical
+      to serial with no invented `parseFailed` records; an error from a PROVEN worker is still
+      recorded as that file's parse failure
+- [x] Scheduling-independence test: across 12 runs at pool sizes 1-4 with randomized interleavings
+      over a mixed-language corpus, the re-check set genuinely VARIES (asserted) and the serialized
+      graph never does — the exact question the unproven-silence guard raises
 - [x] Shipped-entry test: `dist/core/analyzer/extraction-worker.js` — the file the npm package
       ships, which no other test loads because vitest always resolves the `.ts` entry — starts and
       reports ready (and says so loudly if the checkout is unbuilt, rather than passing quietly)
-- [x] Full suite green (321 files / 6146 tests), lint + typecheck clean
+- [x] MCP stdio purity: drove `openlore mcp` over stdio through a cold-start pooled build plus
+      an `orient` call — every stdout line a valid JSON-RPC frame, build noise on stderr
+- [x] Full suite green (321 files / 6150 tests), lint + typecheck clean
 
 ## Spec
 - [x] `analyzer` delta: ADD ExtractionPoolPreservesDeterministicOutput

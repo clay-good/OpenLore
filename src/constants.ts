@@ -731,10 +731,13 @@ export const EXTRACTION_POOL_MAX = 8;
 /**
  * Minimum Pass-1 file count before the pool is worth starting. Below this the worker
  * spawn + module-load cost exceeds the parse work the pool would absorb, so small builds
- * stay on the serial lane. This is a cost heuristic only — it is NOT what keeps the
- * watcher off the pool. The watcher's per-save subset rebuild can exceed any such floor
- * (its closure budget alone is INCREMENTAL_CLOSURE_BUDGET files), so it opts out
- * explicitly instead of relying on this number.
+ * stay on the serial lane.
+ *
+ * This is a cost heuristic, not a safety boundary. The watcher's per-save subset rebuild can
+ * exceed it (its closure budget alone is INCREMENTAL_CLOSURE_BUDGET files) and so does use
+ * the pool — measured on this repo, a 33-file subset rebuild goes 516ms serial → 292ms
+ * pooled, so it is a win on the interactive path too. What bounds the daemon's exposure is
+ * EXTRACTION_POOL_MAX applied per PROCESS, not this floor.
  */
 export const EXTRACTION_POOL_MIN_FILES = 32;
 
@@ -757,3 +760,11 @@ export const EXTRACTION_POOL_STARTUP_TIMEOUT_MS = 10_000;
  * would wait on it forever while its siblings finish and the process looks idle.
  */
 export const EXTRACTION_POOL_REQUEST_TIMEOUT_MS = 120_000;
+
+/**
+ * How long to wait for a terminated extraction worker to actually exit before reclaiming its
+ * slot in the process budget anyway. V8 can only interrupt a thread at a JS boundary, so a
+ * thread wedged inside a synchronous native call may never exit; waiting forever would turn
+ * cleanup into the hang the other deadlines exist to prevent.
+ */
+export const EXTRACTION_POOL_TERMINATE_TIMEOUT_MS = 5_000;

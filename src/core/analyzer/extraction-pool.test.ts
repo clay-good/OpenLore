@@ -81,6 +81,14 @@ interface StubOptions {
   blindTo?: (language: string) => boolean;
   /** Reply with an id that does not match the request — an off-protocol worker. */
   wrongId?: boolean;
+  /**
+   * Report a THROW for these languages. The per-language grammar `import`s are not wrapped,
+   * so a grammar that loads on the main thread but not in this thread surfaces as an error,
+   * not as an empty result.
+   */
+  throwsFor?: (language: string) => boolean;
+  /** Answer normally for the first N files, then throw — a worker that degrades mid-run. */
+  throwsAfter?: number;
   /** Records the input index of every answer, in the order the parent received it. */
   completionLog?: number[];
 }
@@ -94,6 +102,7 @@ function stubWorkerFactory(opts: StubOptions = {}): ExtractionWorkerFactory {
   return () => {
     const listeners: Record<string, Array<(v: never) => void>> = { message: [], error: [], exit: [] };
     let dead = false;
+    let answered = 0;
     const emit = (event: 'message' | 'error' | 'exit', value: unknown): void => {
       if (dead && event === 'message') return;
       for (const l of listeners[event]) (l as (v: unknown) => void)(value);
@@ -114,6 +123,16 @@ function stubWorkerFactory(opts: StubOptions = {}): ExtractionWorkerFactory {
             return;
           }
           const replyId = opts.wrongId ? id + 1000 : id;
+          if (opts.throwsAfter !== undefined && answered++ >= opts.throwsAfter) {
+            opts.completionLog?.push(id);
+            send({ type: 'failed', id: replyId, message: 'degraded mid-run' });
+            return;
+          }
+          if (opts.throwsFor?.(file.language)) {
+            opts.completionLog?.push(id);
+            send({ type: 'failed', id: replyId, message: `Cannot find module 'tree-sitter-${file.language}'` });
+            return;
+          }
           if (opts.blindTo?.(file.language)) {
             opts.completionLog?.push(id);
             send({ type: 'result', id: replyId, value: { nodes: [], rawEdges: [], cfg: new Map() } });
@@ -162,7 +181,7 @@ function isEmpty(result: FileExtractResult | undefined): boolean {
 
 /** A disclosure with the routine fields filled in, for the describe-only assertions. */
 function disclosure(partial: Partial<ExtractionLaneDisclosure>): ExtractionLaneDisclosure {
-  return { lane: 'serial', poolSize: 0, workerFallbackFiles: [], laneDefectFiles: [], emptyRechecks: 0, ...partial };
+  return { lane: 'serial', poolSize: 0, workerFallbackFiles: [], laneDefectFiles: [], unprovenRechecks: 0, ...partial };
 }
 
 afterEach(() => { vi.restoreAllMocks(); __resetExtractionPoolStateForTests(); });
@@ -192,7 +211,7 @@ describe('extraction pool — lane selection', () => {
     expect(describeExtractionLane(disclosure({ serialReason: 'pool-saturated' }))).toBeUndefined();
     expect(describeExtractionLane(disclosure({ lane: 'pooled', poolSize: 4 }))).toBeUndefined();
     // An empty re-check is routine work, not a degradation — it must stay silent.
-    expect(describeExtractionLane(disclosure({ lane: 'pooled', poolSize: 4, emptyRechecks: 9 }))).toBeUndefined();
+    expect(describeExtractionLane(disclosure({ lane: 'pooled', poolSize: 4, unprovenRechecks: 9 }))).toBeUndefined();
     expect(describeExtractionLane(disclosure({ lane: 'pooled', poolSize: 4, workerFallbackFiles: ['a.ts'] }))).toMatch(/re-extracted on the main thread/);
     expect(describeExtractionLane(disclosure({ lane: 'pooled', poolSize: 4, laneDefectFiles: ['a.ts'] }))).toMatch(/no symbols for 1 file/);
     expect(describeExtractionLane(disclosure({ serialReason: 'pool-unavailable' }))).toMatch(/serial lane/);
@@ -324,7 +343,11 @@ describe('extraction pool — fail-soft ladder', () => {
     expect(disclosure.workerFallbackFiles).toHaveLength(0);
   }, 30_000);
 
-  it('records a worker-reported failure as a parse-health failure, exactly like the serial lane', async () => {
+  it('does not let a worker that fails everything write parse failures the serial lane never would', async () => {
+    // A worker that reports a failure for every file has proven nothing, so nothing it says
+    // is believed: each file is re-extracted on the main thread. Believing it would have
+    // written `parseFailed` records and dropped every symbol — a graph that depends on which
+    // lane ran, which is the one thing this change may not do.
     const files = corpus(4);
     const failing: ExtractionWorkerFactory = () => {
       const listeners: Record<string, Array<(v: never) => void>> = { message: [], error: [], exit: [] };
@@ -340,10 +363,12 @@ describe('extraction pool — fail-soft ladder', () => {
       setTimeout(() => emit('message', { type: 'ready' }), 0);
       return h;
     };
-    const result = await new CallGraphBuilder({ extraction: { workerFactory: failing, poolSize: 1 } }).build(files);
-    expect(result.nodes.size).toBe(0);
-    expect([...(result.parseHealthByFile ?? new Map()).values()].every(h => h.parseFailed)).toBe(true);
-    expect(result.parseHealthByFile?.size).toBe(files.length);
+    const result = await new CallGraphBuilder({ extraction: { workerFactory: failing, poolSize: 1 } })
+      .build(files.map(f => ({ ...f })));
+    expect(result.nodes.size).toBeGreaterThan(0);
+    expect(result.parseHealthByFile).toBeUndefined();
+    expect(result.extractionLane?.laneDefectFiles).toHaveLength(files.length);
+    expect(JSON.stringify(serializeCallGraph(result))).toBe(await buildJson(files));
   }, 30_000);
 
   it('drops a worker that never reports ready instead of hanging', async () => {
@@ -387,7 +412,7 @@ describe('extraction pool — never trust an unproven silence', () => {
 
     expect(d.lane).toBe('pooled');
     // Every file was re-checked, and every re-check found facts the worker had missed.
-    expect(d.emptyRechecks).toBe(files.length);
+    expect(d.unprovenRechecks).toBe(files.length);
     expect(d.laneDefectFiles).toHaveLength(files.length);
     expect(outcomes.every(o => o.status === 'ok' && (o.value?.nodes.length ?? 0) > 0)).toBe(true);
     expect(describeExtractionLane(d)).toMatch(/no symbols for \d+ file/);
@@ -416,7 +441,7 @@ describe('extraction pool — never trust an unproven silence', () => {
       poolSize: 1,
     });
     expect(d.lane).toBe('pooled');
-    expect(d.emptyRechecks).toBe(0);
+    expect(d.unprovenRechecks).toBe(0);
     expect(d.laneDefectFiles).toEqual([]);
     expect(describeExtractionLane(d)).toBeUndefined();
   }, 30_000);
@@ -437,9 +462,52 @@ describe('extraction pool — never trust an unproven silence', () => {
     });
     expect(d.lane).toBe('pooled');
     // The two before the proof are re-checked; the two after are trusted.
-    expect(d.emptyRechecks).toBe(2);
+    expect(d.unprovenRechecks).toBe(2);
     expect(d.laneDefectFiles).toEqual([]);
     expect(describeExtractionLane(d)).toBeUndefined();
+  }, 30_000);
+
+
+  it('re-checks a worker that THROWS for a language it has not proven', async () => {
+    // The other half of the same hazard: `getPyParser` and friends do NOT wrap their
+    // per-language `import`, so a grammar that loads on the main thread but not in this
+    // worker surfaces as a throw. Trusting it would record `parseFailed` and zero symbols
+    // for files the serial lane extracts fully — a lane-dependent graph.
+    const files = corpus();
+    const { outcomes, disclosure: d } = await extractFilesForPass1(files, dispatchFileExtract, isEmpty, {
+      workerFactory: stubWorkerFactory({ throwsFor: (l) => l === 'TypeScript' }),
+      poolSize: 2,
+    });
+
+    expect(d.lane).toBe('pooled');
+    expect(d.unprovenRechecks).toBe(files.length);
+    expect(d.laneDefectFiles).toHaveLength(files.length);
+    expect(outcomes.every(o => o.status === 'ok' && (o.value?.nodes.length ?? 0) > 0)).toBe(true);
+  }, 30_000);
+
+  it('a throwing worker still yields a graph byte-identical to the serial lane', async () => {
+    const files = corpus();
+    const pooled = await buildJson(files, {
+      workerFactory: stubWorkerFactory({ throwsFor: () => true }),
+      poolSize: 2,
+    });
+    expect(pooled).toBe(await buildJson(files));
+  }, 30_000);
+
+  it('trusts an error from a worker that has already proven the language', async () => {
+    // The guard must not launder every error into a re-check: once a worker has shown it
+    // can extract a language, a throw from it is a real per-file parse failure and is
+    // recorded as one — exactly as the serial lane would.
+    const files = corpus(6);
+    const { outcomes, disclosure: d } = await extractFilesForPass1(files, dispatchFileExtract, isEmpty, {
+      workerFactory: stubWorkerFactory({ throwsAfter: 3 }),
+      poolSize: 1,
+    });
+    expect(d.lane).toBe('pooled');
+    // The first three prove TypeScript; the throws that follow are believed, not re-checked.
+    expect(d.unprovenRechecks).toBe(0);
+    expect(d.laneDefectFiles).toEqual([]);
+    expect(outcomes.slice(3).every(o => o.status === 'error')).toBe(true);
   }, 30_000);
 
   it('treats a language with no extractor as a deterministic answer, not a silence', async () => {
@@ -452,9 +520,53 @@ describe('extraction pool — never trust an unproven silence', () => {
       workerFactory: stubWorkerFactory({}),
       poolSize: 2,
     });
-    expect(d.emptyRechecks).toBe(0);
+    expect(d.unprovenRechecks).toBe(0);
     expect(outcomes.every(o => o.status === 'ok' && o.value === undefined)).toBe(true);
   }, 30_000);
+});
+
+describe('extraction pool — scheduling independence', () => {
+  it('varies which files it re-checks, and never varies the output', async () => {
+    // The subtlest hazard the unproven-silence guard introduces: WHICH files get re-checked
+    // on the main thread depends on scheduling (a language is proven at a different point in
+    // each run). This asserts both halves — that the re-check set really does vary, and that
+    // the merged graph does not — across pool sizes and randomized interleavings.
+    const languages: Array<[string, string, (i: number) => string]> = [
+      ['ts', 'TypeScript', (i) => `export function h${i}(x: number): number { return x + ${i}; }\n`],
+      ['java', 'Java', (i) => `class S${i} {\n  static int h(int x) { return x + ${i}; }\n  int r() { return h(2); }\n}\n`],
+      // Empty AND carrying no style counters — the shape that takes the re-check path.
+      ['java', 'Java', () => '// nothing at all\n'],
+      ['py', 'Python', (i) => `def h${i}(x):\n    return x + ${i}\n`],
+    ];
+    const files: ExtractionFile[] = [];
+    for (let i = 0; i < 6; i++) {
+      for (const [ext, language, gen] of languages) {
+        files.push({ path: `sched${i}_${files.length}.${ext}`, language, content: gen(i) });
+      }
+    }
+
+    const baseline = await buildJson(files);
+    const observedRecheckCounts = new Set<number>();
+
+    for (let run = 0; run < 12; run++) {
+      // A deterministic pseudo-random delay per file: the interleaving differs per run, but
+      // the test itself does not depend on wall-clock timing.
+      let seed = run * 7919 + 13;
+      const nextDelay = (): number => {
+        seed = (seed * 1664525 + 1013904223) >>> 0;
+        return (seed / 2 ** 32) * 5;
+      };
+      const result = await new CallGraphBuilder({
+        extraction: { workerFactory: stubWorkerFactory({ delayFor: nextDelay }), poolSize: 1 + (run % 4) },
+      }).build(files.map(f => ({ ...f })));
+
+      observedRecheckCounts.add(result.extractionLane?.unprovenRechecks ?? 0);
+      expect(JSON.stringify(serializeCallGraph(result))).toBe(baseline);
+    }
+
+    // If the re-check count never varied, this test would not be exercising the hazard.
+    expect(observedRecheckCounts.size).toBeGreaterThan(1);
+  }, 60_000);
 });
 
 describe('extraction pool — protocol and budget', () => {

@@ -3973,10 +3973,9 @@ function isEmptyExtractResult(result: FileExtractResult | undefined): boolean {
 export interface CallGraphBuilderOptions {
   /**
    * Controls for the Pass-1 extraction lane (change: optimize-parallel-extraction-pool).
-   * Production passes at most `disabled` (the watcher's interactive subset rebuild);
-   * otherwise the lane decides for itself from core count, file count, and
-   * `OPENLORE_NO_WORKERS`. Tests use the rest to drive a stub pool whose completion order
-   * and failure modes are deterministic.
+   * Production passes nothing: the lane decides for itself from core count, file count, the
+   * process-wide worker budget, and `OPENLORE_NO_WORKERS`. Tests use these to drive a stub
+   * pool whose completion order and failure modes are deterministic.
    */
   extraction?: ExtractionLaneOptions;
 }
