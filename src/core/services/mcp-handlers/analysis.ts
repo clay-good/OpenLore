@@ -11,6 +11,7 @@ import { join, relative } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, openSync, closeSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { escapeRegExp } from '../../../utils/misc.js';
 import {
   DEFAULT_MAX_FILES,
   DEFAULT_DRIFT_MAX_FILES,
@@ -497,7 +498,9 @@ export async function handleGetFunctionBody(
 
   // Fallback: find the function by scanning for its declaration line
   const lines = source.split('\n');
-  const declPattern = new RegExp(`\\b${functionName}\\s*[(<]`);
+  // `functionName` is a caller-supplied MCP argument: escape it so a value containing
+  // regex metacharacters cannot change what this matches or backtrack pathologically.
+  const declPattern = new RegExp(`\\b${escapeRegExp(functionName)}\\s*[(<]`);
   const startLine = lines.findIndex(l => declPattern.test(l));
   if (startLine === -1) {
     return { error: `Function "${functionName}" not found in ${filePath}. Run analyze_codebase first for exact byte-range extraction.` };

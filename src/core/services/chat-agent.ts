@@ -19,6 +19,7 @@
  */
 
 import { CHAT_TOOLS, toChatToolDefinitions } from './chat-tools.js';
+import { withRelaxedTls } from './tls-scope.js';
 import { readOpenLoreConfig } from './config-manager.js';
 import {
   DEFAULT_ANTHROPIC_MODEL,
@@ -206,7 +207,7 @@ async function fetchWithRetry(
       await new Promise(r => setTimeout(r, delay));
       if (signal?.aborted) throw new Error('Aborted');
     }
-    const response = await fetch(url, { ...init, signal });
+    const response = await withRelaxedTls(() => fetch(url, { ...init, signal }));
     if (response.ok || !isRetryable(response.status)) return response;
     const errText = await response.text().catch(() => '');
     lastError = new Error(`${response.status}: ${errText.slice(0, 200)}`);

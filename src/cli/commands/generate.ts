@@ -6,6 +6,7 @@
  */
 
 import { Command } from 'commander';
+import { allowInsecureTls } from '../../core/services/tls-scope.js';
 import { confirm } from '@inquirer/prompts';
 import { stat, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -386,8 +387,7 @@ Each spec.md follows OpenSpec conventions:
 
       // Apply SSL verification setting (CLI --insecure or config skipSslVerify)
       if (globalOpts.insecure || openloreConfig.generation.skipSslVerify || openloreConfig.embedding?.skipSslVerify) {
-        process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
-        logger.warning('SSL verification disabled');
+        allowInsecureTls('--insecure or config skipSslVerify');
       }
 
       // Estimate cost

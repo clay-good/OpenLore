@@ -6,6 +6,7 @@
  */
 
 import { Command } from 'commander';
+import { allowInsecureTls, withRelaxedTls } from '../../core/services/tls-scope.js';
 import { access, stat, readFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { execFile } from 'node:child_process';
@@ -418,7 +419,7 @@ async function checkLLMConnection(rootPath: string): Promise<CheckResult> {
   // Apply SSL setting before creating provider
   const sslVerify = config?.llm?.sslVerify ?? true;
   if (!sslVerify || gen?.skipSslVerify) {
-    process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+    allowInsecureTls('llm.sslVerify=false or generation.skipSslVerify');
   }
 
   const baseUrl = gen?.openaiCompatBaseUrl ?? process.env.OPENAI_COMPAT_BASE_URL;
@@ -484,7 +485,7 @@ async function checkEmbeddingConnection(rootPath: string): Promise<CheckResult |
   if (!baseUrl) return null; // Embedding not configured — keyword default; skip
 
   if (emb?.skipSslVerify) {
-    process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+    allowInsecureTls('embedding.skipSslVerify');
   }
 
   const apiKey = emb?.apiKey ?? process.env.EMBED_API_KEY ?? 'none';
@@ -495,12 +496,12 @@ async function checkEmbeddingConnection(rootPath: string): Promise<CheckResult |
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), DOCTOR_TIMEOUT_MS);
-    const response = await fetch(`${url}/embeddings`, {
+    const response = await withRelaxedTls(() => fetch(`${url}/embeddings`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
       body: JSON.stringify({ model, input: 'ping' }),
       signal: controller.signal,
-    }).finally(() => clearTimeout(timeout));
+    })).finally(() => clearTimeout(timeout));
 
     const ms = Date.now() - t0;
     if (!response.ok) {

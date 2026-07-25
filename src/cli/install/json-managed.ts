@@ -8,6 +8,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { isProtoPollutingKey } from '../../utils/misc.js';
 import { modify, applyEdits, type FormattingOptions } from 'jsonc-parser';
 
 /** A minimal edit into an existing JSON document: set `path` to `value`, or delete it when `value` is undefined. */
@@ -106,12 +107,25 @@ export function readMeta(doc: Record<string, unknown>): ManagedJsonMeta | null {
 }
 
 /**
+ * A managed path taken from the DOCUMENT rather than from our own constants.
+ *
+ * `_openlore.paths` is read back off disk, so it is user-editable data, not a value
+ * this code chose. It can therefore name a prototype-polluting path — and OpenLore
+ * never writes one, so such an entry cannot describe anything we manage. Dropping it
+ * is the correct reading; `setPath`/`deletePath` still throw for internal callers,
+ * where an unsafe path would be a programmer error rather than untrusted input.
+ */
+function managedPathsFrom(meta: ManagedJsonMeta): string[] {
+  return meta.paths.filter((p) => !p.split('.').some(isProtoPollutingKey));
+}
+
+/**
  * Verify the meta fingerprint still matches the values we previously wrote.
  * If not, the user has hand-edited one of our managed paths.
  */
 export function isHandEdited(doc: Record<string, unknown>, meta: ManagedJsonMeta): boolean {
   const subset: Record<string, unknown> = {};
-  for (const path of meta.paths) {
+  for (const path of managedPathsFrom(meta)) {
     const value = getPath(doc, path);
     if (value !== undefined) setPath(subset, path, value);
   }
@@ -158,7 +172,7 @@ export function removeManaged(doc: Record<string, unknown>): {
   const meta = readMeta(doc);
   if (!meta) return { next: doc, removed: false };
   const next = structuredClone(doc) as Record<string, unknown>;
-  for (const path of meta.paths) deletePath(next, path);
+  for (const path of managedPathsFrom(meta)) deletePath(next, path);
   delete next[META_KEY];
   return { next, removed: true };
 }
@@ -177,6 +191,14 @@ function getPath(obj: Record<string, unknown>, path: string): unknown {
 
 function setPath(obj: Record<string, unknown>, path: string, value: unknown): void {
   const parts = path.split('.');
+  // A `__proto__` / `constructor` / `prototype` segment would walk out of `obj` and
+  // mutate the prototype chain instead, so every process that later reads an
+  // unrelated object sees the injected value. Refuse rather than silently skip: a
+  // caller asking to write that path is either confused or hostile, and these paths
+  // are internal constants, so a throw can only surface a bug.
+  if (parts.some(isProtoPollutingKey)) {
+    throw new Error(`Refusing to write unsafe config path "${path}" (prototype-polluting segment)`);
+  }
   let cur: Record<string, unknown> = obj;
   for (let i = 0; i < parts.length - 1; i++) {
     const k = parts[i];
@@ -191,6 +213,10 @@ function setPath(obj: Record<string, unknown>, path: string, value: unknown): vo
 
 function deletePath(obj: Record<string, unknown>, path: string): void {
   const parts = path.split('.');
+  // Same guard as setPath: `delete Object.prototype.x` is as damaging as writing it.
+  if (parts.some(isProtoPollutingKey)) {
+    throw new Error(`Refusing to delete unsafe config path "${path}" (prototype-polluting segment)`);
+  }
   const chain: Array<{ container: Record<string, unknown>; key: string }> = [];
   let cur: Record<string, unknown> = obj;
   for (let i = 0; i < parts.length - 1; i++) {

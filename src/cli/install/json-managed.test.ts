@@ -72,4 +72,45 @@ describe('json-managed', () => {
   it('canonicalJsonHash is stable across key order', () => {
     expect(canonicalJsonHash({ a: 1, b: 2 })).toBe(canonicalJsonHash({ b: 2, a: 1 }));
   });
+
+  // A managed path is written key-by-key into a plain object, so a `__proto__`
+  // segment would assign onto Object.prototype and leak into every object in the
+  // process rather than into the config document.
+  //
+  // The two directions are treated differently ON PURPOSE, because the paths come
+  // from different places:
+  //   - entries[].path is chosen by OUR code (install adapters, internal constants),
+  //     so an unsafe value there is a programmer error and should be loud.
+  //   - _openlore.paths is read back off the user's config file, so it is untrusted
+  //     data. Throwing on it would turn a hand-edited file into a crashed install;
+  //     OpenLore never writes such a path, so it cannot describe anything we manage
+  //     and is simply ignored.
+  it('throws on a prototype-polluting path supplied by our own code', () => {
+    expect(() => mergeEntries({}, [{ path: '__proto__.polluted', value: 'x' }])).toThrow(
+      /prototype-polluting/
+    );
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+  });
+
+  it('ignores a prototype-polluting path found in the document, without crashing', () => {
+    const doc = {
+      _openlore: {
+        managed: true,
+        version: 1,
+        fingerprint: 'x',
+        paths: ['__proto__.bad', 'mcpServers.openlore'],
+      },
+      mcpServers: { openlore: { command: 'x' } },
+    } as Record<string, unknown>;
+
+    // Uninstall proceeds and still removes the real managed path.
+    const { next, removed } = removeManaged(doc);
+    expect(removed).toBe(true);
+    expect(next.mcpServers).toBeUndefined();
+
+    // Install-over also proceeds rather than throwing.
+    expect(() => mergeEntries(doc, [{ path: 'mcpServers.openlore', value: { command: 'y' } }])).not.toThrow();
+
+    expect(({} as Record<string, unknown>).bad).toBeUndefined();
+  });
 });

@@ -9,6 +9,7 @@
 import { ImportExportParser, resolveImport, type ExportInfo, type FileAnalysis } from './import-parser.js';
 import { extractAllHttpEdges, type HttpEdge } from './http-route-parser.js';
 import { deriveDomainFromPath } from './domain-naming.js';
+import { escapeDotString } from '../../utils/misc.js';
 import type { ScoredFile } from '../../types/index.js';
 import {
   PAGERANK_DAMPING_FACTOR,
@@ -999,17 +1000,24 @@ export function toDotFormat(result: DependencyGraphResult): string {
   lines.push('    rankdir=LR;');
   lines.push('    node [shape=box];');
 
-  // Create node definitions with labels
+  // Every value below is a repository-derived path or symbol name interpolated into a
+  // double-quoted DOT string, so all of them go through the same escape. Escaping only
+  // the visible label (the previous behaviour) left the node/edge ids able to terminate
+  // their own quoted string and corrupt the rest of the graph.
   for (const node of result.nodes) {
-    const name = node.file.name.replace(/"/g, '\\"');
+    const name = escapeDotString(node.file.name);
     const color = node.metrics.pageRank > 0.5 ? 'lightblue' : 'white';
-    lines.push(`    "${node.id}" [label="${name}" fillcolor="${color}" style="filled"];`);
+    lines.push(
+      `    "${escapeDotString(node.id)}" [label="${name}" fillcolor="${color}" style="filled"];`
+    );
   }
 
   // Create edges
   for (const edge of result.edges) {
     const style = edge.isTypeOnly ? 'dashed' : 'solid';
-    lines.push(`    "${edge.source}" -> "${edge.target}" [style="${style}"];`);
+    lines.push(
+      `    "${escapeDotString(edge.source)}" -> "${escapeDotString(edge.target)}" [style="${style}"];`
+    );
   }
 
   lines.push('}');
