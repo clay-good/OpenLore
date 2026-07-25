@@ -98,7 +98,7 @@ function extractFromSource(source: string, relPath: string, ext: string): Array<
   const found: Array<{ name: string; required: boolean }> = [];
 
   let re: RegExp;
-  let hasFallback = false;
+  let hasFallback: boolean;
 
   if (['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'].includes(ext)) {
     re = new RegExp(TS_ENV_RE.source, 'g');

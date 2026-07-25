@@ -84,7 +84,7 @@ function findConstructions(content: string, names: Map<string, Flavor>, syntax: 
 
   for (const m of content.matchAll(re)) {
     const varName = m[1];
-    let dotted = m[2];
+    const dotted = m[2];
     const id = m[3];
     // Go constructors are `pkg.NewService` → strip the `New` prefix.
     const segs = dotted.split('.');
@@ -92,7 +92,8 @@ function findConstructions(content: string, names: Map<string, Flavor>, syntax: 
       const last = segs[segs.length - 1];
       if (!last.startsWith('New')) continue;
       segs[segs.length - 1] = last.slice(3);
-      dotted = segs.join('.');
+      // No write back to `dotted`: everything below reads `segs`, so re-joining it
+      // was a dead store left from an earlier shape of this loop.
     }
     const root = segs[0];
     const service = segs[segs.length - 1];

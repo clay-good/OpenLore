@@ -512,7 +512,7 @@ The pipeline saves run metadata to .openlore/runs/ for tracking.
           logDir: join(rootPath, OPENLORE_DIR, OPENLORE_LOGS_SUBDIR),
         });
       } catch (error) {
-        throw new Error(`Failed to create LLM service: ${(error as Error).message}`);
+        throw new Error(`Failed to create LLM service: ${(error as Error).message}`, { cause: error });
       }
 
       console.log('');
@@ -534,7 +534,7 @@ The pipeline saves run metadata to .openlore/runs/ for tracking.
         );
       } catch (error) {
         await llm.saveLogs().catch((e) => logger.debug(`Failed to save LLM logs: ${(e as Error).message}`));
-        throw new Error(`Pipeline failed: ${(error as Error).message}`);
+        throw new Error(`Pipeline failed: ${(error as Error).message}`, { cause: error });
       }
 
       console.log('   ├─ Project Survey ✓');
@@ -584,7 +584,7 @@ The pipeline saves run metadata to .openlore/runs/ for tracking.
       try {
         report = await writer.writeSpecs(generatedSpecs, pipelineResult.survey);
       } catch (error) {
-        throw new Error(`Failed to write specs: ${(error as Error).message}`);
+        throw new Error(`Failed to write specs: ${(error as Error).message}`, { cause: error });
       }
 
       // Display written files

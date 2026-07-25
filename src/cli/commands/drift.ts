@@ -184,7 +184,7 @@ async function installPreCommitHook(rootPath: string): Promise<void> {
   await mkdir(hooksDir, { recursive: true });
 
   // Check if hook already exists
-  let existingContent = '';
+  let existingContent: string;
   if (await fileExists(hookPath)) {
     existingContent = await readFile(hookPath, 'utf-8');
 

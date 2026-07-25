@@ -42,7 +42,7 @@ async function installPostCommitHook(rootPath: string): Promise<void> {
 
   await mkdir(hooksDir, { recursive: true });
 
-  let existingContent = '';
+  let existingContent: string;
   if (await fileExists(hookPath)) {
     existingContent = await readFile(hookPath, 'utf-8');
 

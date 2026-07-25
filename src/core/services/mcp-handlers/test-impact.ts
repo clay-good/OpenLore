@@ -114,7 +114,7 @@ export async function handleSelectTests(input: SelectTestsInput): Promise<unknow
   const baseRef = input.diffRef && input.diffRef.length > 0 ? input.diffRef : 'HEAD';
   const defaultedToHead = !hasSymbols && (input.diffRef === undefined || input.diffRef === '');
 
-  let seeds: FunctionNode[] = [];
+  let seeds: FunctionNode[];
   let changedFiles: string[] = [];
   if (hasSymbols) {
     seeds = seedsFromSymbols(cg, input.changedSymbols!);

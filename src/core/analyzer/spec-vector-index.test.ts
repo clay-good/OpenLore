@@ -106,7 +106,9 @@ function makeMockEmbedSvc(): EmbeddingService {
   const callCount = 0;
   return {
     embed: vi.fn().mockImplementation(async (texts: string[]) =>
-      texts.map((_, i) => makeVector(callCount + i++))
+      // `i++` here incremented the map callback's own index parameter and threw the
+      // result away; the expression value is unchanged by dropping it.
+      texts.map((_, i) => makeVector(callCount + i))
     ),
   } as unknown as EmbeddingService;
 }

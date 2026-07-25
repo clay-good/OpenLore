@@ -236,7 +236,7 @@ async function buildSurface(
   // (the symbol is gone) apart from a visibility reduction (still defined, no longer exported).
   const allFnNames = new Map<string, Set<string>>();
   if (files.length === 0) return { exported, normBodyCount, allFnNames };
-  let snap: SerializedCallGraph | null = null;
+  let snap: SerializedCallGraph | null;
   try {
     snap = serializeCallGraph(await new CallGraphBuilder().build(files));
   } catch {

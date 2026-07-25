@@ -216,7 +216,7 @@ export async function installPreCommitHook(rootPath: string): Promise<void> {
 
   await mkdir(hooksDir, { recursive: true });
 
-  let existingContent = '';
+  let existingContent: string;
   if (await fileExists(hookPath)) {
     existingContent = await readFile(hookPath, 'utf-8');
     if (existingContent.includes(HOOK_MARKER)) {
@@ -247,7 +247,7 @@ export async function installPreCommitHook(rootPath: string): Promise<void> {
 
   // Install post-commit hook to detect --no-verify bypass
   const postCommitPath = join(hooksDir, 'post-commit');
-  let existingPostContent = '';
+  let existingPostContent: string;
   if (await fileExists(postCommitPath)) {
     existingPostContent = await readFile(postCommitPath, 'utf-8');
     if (!existingPostContent.includes(POST_COMMIT_HOOK_MARKER)) {

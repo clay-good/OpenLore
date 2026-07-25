@@ -281,9 +281,16 @@ export const DEFAULT_CHAT_OPENAI_MODEL = 'gpt-4o-mini';
  * Minimum Node.js version required. The floor is 22.13, not 20: the EdgeStore
  * refactor moved onto `node:sqlite` / `DatabaseSync`, which was available only
  * behind `--experimental-sqlite` until Node 22.13.0 / 23.4.0 (unflagged in
- * nodejs/node#55854) — and nothing in the tree passes that flag. Must equal
- * `engines.node` in package.json and `MIN_NODE` in node-version-guard.ts (a test
- * asserts all three). doctor checks the minor version AND probes `node:sqlite`
+ * nodejs/node#55854) — and nothing in the tree passes that flag. Must equal the
+ * FLOOR declared by `engines.node` in package.json and `MIN_NODE` in
+ * node-version-guard.ts (a test asserts all three).
+ *
+ * `engines.node` is a two-branch range (`^22.13.0 || >=23.5.0`) rather than a bare
+ * `>=22.13.0`, because that floor alone also admits 23.0-23.4, where `node:sqlite`
+ * was still flagged. The 23.x branch sits at 23.5 rather than 23.4 because
+ * @inquirer/prompts requires it. This constant is the 22.x floor; the capability
+ * probe below is what actually rejects a version that satisfies the arithmetic but
+ * cannot load the builtin. doctor checks the minor version AND probes `node:sqlite`
  * so an unsupported Node fails fast with a clear `nvm use` remediation instead of
  * a cryptic module-load crash (Spec 26 B7).
  */

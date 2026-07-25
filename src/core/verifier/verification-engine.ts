@@ -609,7 +609,8 @@ Respond in JSON:
     for (let i = 0; i < lines.length; i++) {
       const trimmed = lines[i].trim();
       if (trimmed.startsWith('/**')) { inBlockComment = true; continue; }
-      if (trimmed.startsWith('*/') || trimmed.endsWith('*/')) { inBlockComment = false; break; }
+      // `break` ends the scan, so clearing the flag here would be a dead store.
+      if (trimmed.startsWith('*/') || trimmed.endsWith('*/')) break;
       if (inBlockComment) {
         const comment = trimmed.replace(/^\*\s*/, '').trim();
         if (comment && !comment.startsWith('@')) parts.push(comment);

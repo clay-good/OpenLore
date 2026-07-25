@@ -85,7 +85,8 @@ export class LocalEmbeddingService implements Embedder {
           `Local embeddings need the optional "${TRANSFORMERS_PACKAGE}" package, which is not available ` +
             `(${(err as Error).message}). Install it with:\n` +
             `  npm install ${TRANSFORMERS_PACKAGE}\n` +
-            `Keyword (BM25) search continues to work without it.`
+            `Keyword (BM25) search continues to work without it.`,
+          { cause: err }
         );
       }
       // Resolve weights from the on-disk cache or the HF hub; never from an
@@ -101,7 +102,8 @@ export class LocalEmbeddingService implements Embedder {
         throw new Error(
           `Could not load the local embedding model "${this.model}" (${(err as Error).message}). ` +
             `Check the model id (--model) and your network for the one-time download. ` +
-            `Keyword (BM25) search continues to work without it.`
+            `Keyword (BM25) search continues to work without it.`,
+          { cause: err }
         );
       }
     })();

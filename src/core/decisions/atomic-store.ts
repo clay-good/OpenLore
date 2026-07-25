@@ -126,6 +126,10 @@ async function withCommitLock<T>(lockPath: string, fn: () => Promise<T>): Promis
         throw new Error(
           `store lock: timed out after ${LOCK_MAX_WAIT_MS}ms waiting for ${lockPath} ` +
             `(sustained write contention) — retry the operation`,
+          // `err` is the EEXIST from the last failed acquisition, i.e. the reason we
+          // kept waiting. Carrying it forward surfaces the errno and path behind a
+          // timeout that otherwise reads as unexplained.
+          { cause: err },
         );
       }
       await sleep(LOCK_POLL_MS);

@@ -507,7 +507,7 @@ async function buildBaseSymbols(
     if (!lang || lang === 'Unknown' || lang === 'unknown') continue; // non-code file → no symbols
     const content = await fileAtRef(repoPath, baseContentRef, basePath);
     if (content === null) { unreadable.push(f.path); continue; } // read FAILURE, not empty
-    let snap: SerializedCallGraph | null = null;
+    let snap: SerializedCallGraph | null;
     try {
       // Parse under the BASE path so symbol ids are base-identity ids (rename-safe).
       snap = serializeCallGraph(await new CallGraphBuilder().build([{ path: basePath, content, language: lang }]));
@@ -562,12 +562,12 @@ async function defaultEnumerateBranches(
   for (const branch of names.sort()) {
     if (branch === baseRef) continue;
     if (wanted && !wanted.has(branch)) continue;
-    let mergeBase = '';
+    let mergeBase: string;
     try { mergeBase = (await git(repoPath, ['merge-base', baseRef, branch])).trim(); } catch { continue; }
-    let tip = '';
+    let tip: string;
     try { tip = (await git(repoPath, ['rev-parse', branch])).trim(); } catch { continue; }
     if (!mergeBase || mergeBase === tip) continue; // branch not ahead of base → nothing in flight
-    let patch = '';
+    let patch: string;
     try { patch = await git(repoPath, ['diff', '--unified=0', '--no-color', `${mergeBase}..${branch}`]); } catch { continue; }
     const files = parseUnifiedDiff(patch);
     if (files.length === 0) continue;
@@ -599,7 +599,7 @@ async function defaultEnumeratePullRequests(
   for (const pr of prs.sort((a, b) => a.number - b.number)) {
     const ref = `PR #${pr.number}`;
     const actor = pr.author?.login || 'unknown';
-    let patch = '';
+    let patch: string;
     try {
       const { stdout } = await execFileAsync('gh', ['pr', 'diff', String(pr.number), '--patch'], { cwd: repoPath, maxBuffer: 64 * 1024 * 1024 });
       patch = stdout;
@@ -663,7 +663,7 @@ async function resolveRepos(
   if (!input.federation) return { repos, unusable, caveats };
 
   interface SpecStoreStatusLike { bound?: boolean; targets?: Array<{ name: string; resolved: boolean; state?: string; path?: string }> }
-  let status: SpecStoreStatusLike | null = null;
+  let status: SpecStoreStatusLike | null;
   try {
     const { handleSpecStoreStatus } = await import('./spec-store.js');
     status = (await handleSpecStoreStatus(absDir)) as unknown as SpecStoreStatusLike;
