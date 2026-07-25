@@ -19,7 +19,7 @@
  *   5. Every job declares its own `permissions` block.
  */
 import { describe, it, expect } from 'vitest';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { parse } from 'yaml';
@@ -40,8 +40,35 @@ const workflowFiles = readdirSync(WORKFLOW_DIR)
   .filter(f => f.endsWith('.yml') || f.endsWith('.yaml'))
   .sort();
 
-/** Composite actions live outside `workflows/` and cannot declare `permissions`. */
-const COMPOSITE_ACTIONS = [join(REPO_ROOT, '.github', 'actions', 'openlore-review', 'action.yml')];
+/**
+ * Composite actions live outside `workflows/` and cannot declare `permissions`.
+ *
+ * DISCOVERED, never listed. A hardcoded path only guards the actions that existed when
+ * the list was written: adding a second composite action would silently escape the
+ * pinning, version-comment, and Dependabot-coverage checks below — the exact drift
+ * these guards exist to catch, and a guard that quietly under-covers is worse than no
+ * guard, because the green check implies coverage it does not have.
+ */
+function findActionManifests(dir: string): string[] {
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return []; // directory absent is fine — nothing to guard
+  }
+  return entries.flatMap(e => {
+    const full = join(dir, e.name);
+    if (e.isDirectory()) return findActionManifests(full);
+    return e.name === 'action.yml' || e.name === 'action.yaml' ? [full] : [];
+  });
+}
+
+const COMPOSITE_ACTIONS = [
+  ...findActionManifests(join(REPO_ROOT, '.github', 'actions')),
+  // A repo can also publish a single action from its root. Checked directly rather than
+  // by walking from REPO_ROOT, which would descend into node_modules.
+  ...['action.yml', 'action.yaml'].map(f => join(REPO_ROOT, f)).filter(existsSync),
+].sort();
 
 const ALL_ACTION_FILES = [...workflowFiles.map(f => join(WORKFLOW_DIR, f)), ...COMPOSITE_ACTIONS];
 

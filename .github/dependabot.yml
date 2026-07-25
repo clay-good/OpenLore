@@ -47,10 +47,11 @@ updates:
       # Why they qualified as "minor" at all: for a 0.x package semver treats
       # 0.22 -> 0.25 as a MINOR bump, so `update-types: [minor, patch]` does not mean
       # "non-breaking" for anything below 1.0. Most of this repo's parser stack is 0.x.
+      # `tree-sitter-*` covers the grammars AND `tree-sitter-wasms`; the bare
+      # `tree-sitter` needs its own line because the wildcard requires the hyphen.
       - dependency-name: web-tree-sitter
       - dependency-name: tree-sitter
       - dependency-name: 'tree-sitter-*'
-      - dependency-name: tree-sitter-wasms
       - dependency-name: '@lancedb/lancedb'
 
   # ------------------------------------------------------- github actions
