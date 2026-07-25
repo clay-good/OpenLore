@@ -19,7 +19,7 @@
  *   5. Every job declares its own `permissions` block.
  */
 import { describe, it, expect } from 'vitest';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { parse } from 'yaml';
@@ -40,8 +40,35 @@ const workflowFiles = readdirSync(WORKFLOW_DIR)
   .filter(f => f.endsWith('.yml') || f.endsWith('.yaml'))
   .sort();
 
-/** Composite actions live outside `workflows/` and cannot declare `permissions`. */
-const COMPOSITE_ACTIONS = [join(REPO_ROOT, '.github', 'actions', 'openlore-review', 'action.yml')];
+/**
+ * Composite actions live outside `workflows/` and cannot declare `permissions`.
+ *
+ * DISCOVERED, never listed. A hardcoded path only guards the actions that existed when
+ * the list was written: adding a second composite action would silently escape the
+ * pinning, version-comment, and Dependabot-coverage checks below — the exact drift
+ * these guards exist to catch, and a guard that quietly under-covers is worse than no
+ * guard, because the green check implies coverage it does not have.
+ */
+function findActionManifests(dir: string): string[] {
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return []; // directory absent is fine — nothing to guard
+  }
+  return entries.flatMap(e => {
+    const full = join(dir, e.name);
+    if (e.isDirectory()) return findActionManifests(full);
+    return e.name === 'action.yml' || e.name === 'action.yaml' ? [full] : [];
+  });
+}
+
+const COMPOSITE_ACTIONS = [
+  ...findActionManifests(join(REPO_ROOT, '.github', 'actions')),
+  // A repo can also publish a single action from its root. Checked directly rather than
+  // by walking from REPO_ROOT, which would descend into node_modules.
+  ...['action.yml', 'action.yaml'].map(f => join(REPO_ROOT, f)).filter(existsSync),
+].sort();
 
 const ALL_ACTION_FILES = [...workflowFiles.map(f => join(WORKFLOW_DIR, f)), ...COMPOSITE_ACTIONS];
 
@@ -241,6 +268,46 @@ describe('workflow security: supply-chain automation is wired', () => {
     expect(ecosystems, 'dependabot.yml must cover npm and github-actions').toEqual(
       expect.arrayContaining(['npm', 'github-actions'])
     );
+  });
+
+  it('watches every directory that references a third-party action', () => {
+    const cfg = parse(read(join(REPO_ROOT, '.github', 'dependabot.yml'))) as {
+      updates?: { 'package-ecosystem'?: string; directory?: string; directories?: string[] }[];
+    };
+
+    // Normalize to a set of watched directories, minus trailing slashes.
+    const watched = new Set(
+      (cfg.updates ?? [])
+        .filter(u => u['package-ecosystem'] === 'github-actions')
+        .flatMap(u => u.directories ?? [u.directory ?? '/'])
+        .map(d => (d === '/' ? '/' : d.replace(/\/$/, '')))
+    );
+
+    // A `directory: /` entry covers `.github/workflows` and nothing else. A composite
+    // action lives in its own directory and needs its own entry, or its SHA pins are
+    // frozen with nothing proposing upgrades. This is how the composite action went
+    // unmonitored initially — the config looked complete because the workflows were.
+    const offenders: string[] = [];
+    for (const file of COMPOSITE_ACTIONS) {
+      const hasThirdParty = read(file)
+        .split('\n')
+        .some(l => {
+          const m = l.match(/^\s*(?:-\s+)?uses:\s*(\S+)/);
+          return !!m && !m[1].replace(/['"]/g, '').startsWith('./');
+        });
+      if (!hasThirdParty) continue;
+      const dir = '/' + rel(dirname(file)).replace(/\\/g, '/');
+      if (!watched.has(dir)) offenders.push(`${dir} (from ${rel(file)})`);
+    }
+
+    expect(
+      offenders,
+      `These directories reference third-party actions but no github-actions Dependabot ` +
+        `entry watches them, so their pins will never be proposed for upgrade. Add to ` +
+        `.github/dependabot.yml:\n` +
+        offenders.map(d => `  - package-ecosystem: github-actions\n    directory: ${d.split(' ')[0]}`).join('\n') +
+        '\n'
+    ).toEqual([]);
   });
 
   it('runs CodeQL on pull requests and on a schedule', () => {
