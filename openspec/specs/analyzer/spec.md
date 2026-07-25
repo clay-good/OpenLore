@@ -1611,9 +1611,7 @@ Manages graceful shutdown processes, including state management and cleanup call
 ### CleanupCallback
 
 Function type for cleanup operations during shutdown.
-
 ## Requirements
-
 ### Requirement: LanguageBreakdownValidation
 
 The system SHALL validate LanguageBreakdown according to these rules:
@@ -3655,6 +3653,497 @@ salience score, and the matched functions themselves SHALL NOT appear as their o
   proximity, each entry carrying its `signals` (e.g. `hub`, `volatile`) with evidence and its
   `distance`/`hops`
 
+### Requirement: ArtifactBytesAreAPureFunctionOfInput
+
+Every generated analysis artifact — including `llm-context.json` and inventory outputs —
+SHALL be a pure function of the analyzed input tree and configuration: byte-identical
+across repeated runs over identical input (modulo explicitly-designated timestamp fields).
+Where an artifact intentionally samples its input, the sampling SHALL use a deterministic
+generator seeded from the input itself (e.g. a hash of the sorted candidate list), never an
+unseeded random source.
+
+#### Scenario: Two analyzes of the same tree agree byte-for-byte
+
+- **GIVEN** an unchanged repository analyzed twice
+- **WHEN** the generated artifacts are compared with timestamps normalized
+- **THEN** `llm-context.json`, the route inventory, and the env-var inventory are
+  byte-identical, and the bundle digest over them is stable
+
+#### Scenario: Sampling is seeded, not random
+
+- **GIVEN** the phase-3 validation-file sample embedded in `llm-context.json`
+- **WHEN** the same input tree is analyzed on two machines
+- **THEN** both select the same validation files in the same order, because the shuffle is
+  seeded from the sorted candidate list
+
+### Requirement: ConcurrentExtractorsAggregateInInputOrder
+
+An extractor that fans out over files concurrently SHALL aggregate its results in input
+(file-list) order, not I/O-completion order: per-file results are collected individually
+and flattened or upserted sequentially after the concurrent phase resolves. No serialized
+output — inventory entries, synthesized edges, an env var's `files[]` list or its
+first-wins description — SHALL depend on filesystem timing.
+
+#### Scenario: Route inventory order survives adversarial latency
+
+- **GIVEN** per-file route extraction stubbed with randomized delays
+- **WHEN** the route inventory is built repeatedly over the same file list
+- **THEN** the aggregated route order is identical on every run and equals the input-order
+  flatten
+
+#### Scenario: Synthesized edge bytes are stable
+
+- **GIVEN** a repository with route-handler registrations across several files
+- **WHEN** synthesized route-handler edges are generated on two runs
+- **THEN** the serialized edge order is identical, keeping the graph bytes a pure function
+  of the input
+
+#### Scenario: An env var's provenance is input-ordered
+
+- **GIVEN** an env var read in several files, more than one carrying a declaration comment
+- **WHEN** the env inventory is extracted repeatedly
+- **THEN** the var's `files[]` order and its winning description are the same every run,
+  determined by file-list order rather than read-completion order
+
+### Requirement: CapabilityMatrixIsConformanceVerified
+
+The per-language capability matrix surfaced by `get_language_support` (derived from the per-capability
+`*_LANGUAGES` constants) SHALL be verified against the real extractors, not merely asserted. For every
+language the registry claims supports `callGraph`, a committed conformance fixture SHALL drive the
+actual call-graph builder and demonstrate that a realistic `caller→callee` fixture yields both
+functions and the resolved edge. The conformance suite SHALL also fail if the registry adds a
+`callGraph` language for which no fixture exists, so the matrix can never silently grow to over-claim.
+
+The conformance suite SHALL additionally verify intra-class method dispatch for class-bearing
+languages, the richer overlays (CFG, type inference, style fingerprint, cross-service HTTP) for each
+of their claimed languages, the IaC projection for every ecosystem in `IAC_LANGUAGES`, and the
+error-propagation overlay's claimed languages, and SHALL assert known cross-language *precision*
+differences explicitly (e.g. import-precise versus name-only cross-file resolution) rather than
+leaving them implicit. For every capability with a closed claimed-language set, the suite SHALL fail
+if that set grows without a corresponding fixture, so no capability can silently over-claim.
+
+The suite SHALL further verify **cross-file resolution for every claimed callGraph language** (not a
+sample), and SHALL include **adversarial name-collision fixtures** for each first-match-prone
+resolution strategy (bare cross-file call, `self`/`cls` dispatch, capitalized-receiver) asserting
+that an ambiguous candidate set yields the unresolved-ambiguous disposition, never an arbitrary
+first-match edge. (Overload-arity disambiguation is a node-identity concern tracked by a separate
+change and is not required here.)
+
+#### Scenario: A claimed callGraph language is proven on real code
+
+- **GIVEN** a language the registry lists in `CALLGRAPH_LANGUAGES`
+- **WHEN** the conformance suite builds the call graph from a `caller→callee` fixture in that language
+- **THEN** both functions are extracted and the `caller→callee` edge is resolved
+- **AND** if any claimed callGraph language has no conformance fixture, the suite fails
+
+#### Scenario: A richer overlay is proven on each claimed language and honestly absent otherwise
+
+- **GIVEN** one of the richer capabilities (CFG, type inference, style fingerprint, cross-service HTTP) and a language the registry claims supports it
+- **WHEN** the conformance suite drives that capability's real extractor against a representative fixture
+- **THEN** the capability produces a non-empty result for the claimed language
+- **AND** a non-claimed language yields an empty/absent result (never a guessed signal), and any claimed language without a fixture fails the suite
+
+#### Scenario: Every claimed IaC ecosystem projects onto graph primitives
+
+- **GIVEN** an ecosystem in `IAC_LANGUAGES` and a minimal realistic fixture for it
+- **WHEN** the conformance suite runs the real projector over the fixture
+- **THEN** the fixture's resources/jobs/tasks become graph nodes, and where the ecosystem models a cross-reference a `references`/`depends_on` edge is produced
+- **AND** if `IAC_LANGUAGES` grows without a fixture, the suite fails
+
+#### Scenario: A cross-language precision difference is asserted, not hidden
+
+- **GIVEN** a cross-file call in TypeScript versus in a name-only-resolved language (e.g. Python, Go)
+- **WHEN** the conformance suite resolves each
+- **THEN** the edge is found in every case
+- **AND** TypeScript's provenance is asserted as import-precise while the name-only languages' lower-confidence provenance is documented explicitly
+
+#### Scenario: Cross-file resolution is proven for every claimed language
+
+- **GIVEN** any language in `CALLGRAPH_LANGUAGES`
+- **WHEN** the conformance suite resolves a call whose callee lives in another file
+- **THEN** the edge is found with the strategy and confidence expected for that language
+- **AND** a claimed language without a cross-file fixture fails the suite
+
+#### Scenario: A name-collision fixture proves the resolver refuses to guess
+
+- **GIVEN** a fixture with two same-named cross-file definitions and a bare call to that name
+- **WHEN** the conformance suite builds the call graph
+- **THEN** the call yields the unresolved-ambiguous disposition with both candidates listed, and no
+  arbitrary edge is emitted
+
+### Requirement: StableNestedFunctionIdentity
+
+The call-graph builder SHALL give each NESTED function (a named function declared inside another
+function or method — a `function` declaration or a name-bound `const f = …` whose span is strictly
+contained within another function node) a unique, stable node id, so that two same-named nested
+functions, or a nested function colliding with a same-named top-level function, are NOT collapsed into
+one node at id aggregation.
+
+- The disambiguating id SHALL be derived from the enclosing-scope chain (e.g. `file::A.m1/helper`),
+  NOT from a byte offset or any value that changes when unrelated code shifts. The id SHALL be stable
+  across edits to surrounding code, a body edit, and a file move, to the same degree top-level symbols
+  are today.
+- Only a function whose span is STRICTLY CONTAINED within ANOTHER function node WITH A DIFFERENT ID
+  SHALL be re-keyed. A same-id container is the SAME logical function matched twice (an `export
+  function` / decorated-definition wrapper byte-containing its inner declaration) and SHALL remain
+  collapsed. Sibling collisions (non-contained nodes sharing an id) SHALL likewise remain collapsed —
+  both are intentional, separately-specified behavior.
+- Disambiguation SHALL occur before call edges are resolved, so an edge whose caller is a nested
+  function carries that nested function's unique id (not the merged twin's).
+- A call to a same-named function with multiple same-file candidates SHALL resolve by lexical scope: a
+  twin byte-NESTED within the caller's own span wins (the narrowest such, since an inner definition
+  shadows an outer name), and a self-named candidate is a recursive call that binds to the CALLER
+  itself — so a method's `validate()` reaches its OWN nested `validate` and a recursive nested
+  `visit(){ … visit() … }` recurses rather than jumping to a sibling scope's twin. Absent a nested or
+  recursive match the existing first-same-file fallback applies. (Without this, the now-distinct twins
+  would misroute every incoming nested call to whichever twin sorts first.)
+- Two same-named functions nested in the SAME enclosing scope SHALL be disambiguated by a
+  deterministic, document-order ordinal that is stable as long as the enclosing scope's preceding
+  structure is unchanged.
+- The disambiguated PATH id SHALL be stable across edits to surrounding code (derived from the
+  enclosing scope, not a byte offset), so a nested function is not reported removed-and-re-added by
+  `structural_diff` / `change_impact_certificate` on an unrelated edit. The content-addressed
+  `stableId` continues to derive from `className.name(signature)`; two nested twins therefore share a
+  `stableId` — the existing homonym completeness limit, resolved only when unique (qualifying
+  `stableId` by enclosing scope is a deferred refinement, not required here).
+- A re-keyed nested function's per-node side tables — specifically the intraprocedural CFG overlay —
+  SHALL follow the FINAL node id, not the pre-disambiguation bare id. The CFG overlay SHALL be
+  collected during extraction keyed by a per-node-stable value (the function's start byte) and
+  re-attached to the final id, so that (a) each of two same-named nested functions keeps its OWN CFG
+  (no last-write-wins loss against the colliding bare id) and (b) no CFG is orphaned under an id that
+  no node carries. CFG-dependent capabilities (def-use dataflow, `analyze_error_propagation`) SHALL
+  therefore resolve a re-keyed nested function's overlay by its node id.
+- Applies to every language whose extractor produces function nodes — the dedicated extractors
+  (TypeScript/JavaScript, Python, Go, Rust, Ruby, Java, C++, Swift, Dart, Elixir) AND the shared
+  query-spec extractor (C#, Kotlin, Scala, PHP, Lua, …). The query-spec extractor's extraction-time
+  id-dedup (which collapses multi-clause definitions / overloads) SHALL NOT drop a genuinely nested
+  twin before disambiguation: a colliding node byte-contained in a different-id function survives to be
+  re-keyed, while a true same-scope overload still collapses to one node. An extractor that does not
+  emit nested-function nodes is unaffected (a no-op).
+
+#### Scenario: same-named nested functions get distinct nodes
+
+- **GIVEN** a file with a top-level `function helper(){}` and two methods each containing their own
+  nested `function helper(){}`
+- **WHEN** the call graph is built
+- **THEN** there are three distinct `helper` nodes with distinct ids, and each nested helper keeps its
+  own outgoing edges (no merge)
+
+#### Scenario: a nested function id is stable across an unrelated edit
+
+- **GIVEN** a nested function whose id is assigned
+- **WHEN** an unrelated line is inserted earlier in the file and the graph is rebuilt
+- **THEN** the nested function's PATH id is unchanged — it is not reported as removed-and-re-added by
+  `structural_diff` / `change_impact_certificate`
+
+#### Scenario: intentional sibling collapses are preserved
+
+- **GIVEN** a re-assigned member (`obj.fn = function(){}; obj.fn = function(){}`) or a same-file
+  container homonym (`namespace A { class Config { load } }` vs `namespace B { class Config { load } }`)
+- **WHEN** the call graph is built
+- **THEN** each still collapses to exactly one node (the contained-only rule does not touch siblings)
+
+#### Scenario: an export/decorated double-match is not split
+
+- **GIVEN** an `export async function createOrder()` (matched twice — the export wrapper byte-contains
+  the inner declaration, both with id `file::createOrder`)
+- **WHEN** the call graph is built
+- **THEN** there is exactly ONE `createOrder` node (the same-id container is not treated as nested)
+
+#### Scenario: a query-spec language splits nested twins yet collapses overloads
+
+- **GIVEN** a C# class with two methods each containing a nested local `void Validate(){}` (distinct
+  bodies), and separately a class with two `Add` method overloads
+- **WHEN** the call graph is built
+- **THEN** the two nested `Validate`s become distinct nodes (`…Process/Validate`, `…Submit/Validate`)
+  with their calls routed lexically, while the two `Add` overloads still collapse to one node
+
+#### Scenario: an incoming nested call resolves by lexical scope
+
+- **GIVEN** two methods `processA`/`processB` that each contain their own nested `validate`, plus a
+  third method whose nested `visit` calls itself recursively
+- **WHEN** the call graph is built
+- **THEN** `processA`'s `validate()` edge targets `…processA/validate`, `processB`'s targets
+  `…processB/validate` (no cross-scope misroute), and the recursive `visit` edge targets its own node
+
+#### Scenario: a re-keyed nested function keeps its CFG overlay
+
+- **GIVEN** two methods each with their own nested `function helper(){ … }`, each with a distinct
+  control-flow body (so each has its own CFG overlay)
+- **WHEN** the call graph is built and the two nested `helper`s are re-keyed to distinct ids
+- **THEN** each re-keyed `helper` node has its OWN CFG entry under its final id, and there is no CFG
+  keyed under the pre-disambiguation bare `file::helper` (no orphan, no last-write-wins loss)
+
+### Requirement: StringLiteralSafeCloneNormalization
+
+Clone-detection normalization SHALL NOT alter string-literal contents when stripping comments:
+comment rules SHALL be evaluated against a length-preserving string-masked view so a comment
+marker inside a literal (`//` in a URL, `#` in a hex color or anchor, Ruby `#{...}`
+interpolation, JS `#private` access) never truncates the literal; the `#` line-comment rule
+SHALL apply only to languages where `#` is a comment; and a reported clone-group similarity
+SHALL be what was computed — an all-pairs group floor, or a value explicitly labeled
+seed-relative — never a seed-relative number presented as group-wide.
+
+#### Scenario: Functions differing only in a URL are not identical clones
+
+- **GIVEN** two TypeScript functions identical except for the host and path inside a string
+  literal `"https://..."`
+- **WHEN** clone detection runs
+- **THEN** the pair is not reported as an exact or structural clone at similarity 1.0
+- **AND** any reported similarity reflects the literal difference
+
+#### Scenario: Functions differing only in constants are not identical clones
+
+- **GIVEN** two Python functions identical except for hex-color string constants (`"#ff0000"`
+  vs `"#00ff00"`)
+- **WHEN** clone detection runs
+- **THEN** the pair is not reported as an exact or structural clone at similarity 1.0
+
+#### Scenario: The hash-comment rule is language-selected
+
+- **GIVEN** a TypeScript function whose string literals contain `#`
+- **WHEN** normalization strips comments
+- **THEN** no text is removed by the `#` rule and the literals survive intact
+
+#### Scenario: True clones are still detected
+
+- **GIVEN** two copy-pasted functions that differ only in their comments
+- **WHEN** clone detection runs
+- **THEN** the pair is reported as an exact clone at similarity 1.0
+
+#### Scenario: Group similarity is honest
+
+- **GIVEN** a near-clone group whose members are 0.85-similar to the seed but less similar to
+  each other
+- **WHEN** the group's similarity is reported
+- **THEN** the number is either the all-pairs minimum or is explicitly labeled seed-relative
+
+### Requirement: ExportParserRecognizesModifierPrefixedExports
+
+The shared import/export parser SHALL recognize modifier-prefixed JavaScript/TypeScript
+exports — `export async function`, `export function*`, `export async function*`, and
+`export abstract class` — as exports of the declared name, and SHALL name a
+`export default async function foo` declaration `foo`, never the modifier token. The
+recognition SHALL live in the shared parser itself so every consumer (dependency graph,
+spec verifier, mapping generator, public-surface certification) receives the same export
+set; no consumer SHALL carry a local recovery patch for a gap the shared parser owns.
+
+#### Scenario: An async export reaches the export index
+
+- **GIVEN** a file containing `export async function handleOrient() {}`
+- **WHEN** the dependency graph and the mapping generator run
+- **THEN** `handleOrient` appears in the file's exports and in the requirement→function
+  `exportIndex`, with kind `function`
+
+#### Scenario: A generator and an abstract class are exports
+
+- **GIVEN** a file containing `export function* walk() {}` and `export abstract class Base {}`
+- **WHEN** `parseJSExports` runs
+- **THEN** both `walk` (kind `function`) and `Base` (kind `class`) are returned
+
+#### Scenario: A default async function is named correctly
+
+- **GIVEN** a file containing `export default async function bootstrap() {}`
+- **WHEN** `parseJSExports` runs
+- **THEN** the default export's name is `bootstrap`, not `async`
+
+#### Scenario: Consumers share one implementation
+
+- **GIVEN** the shared parser recognizes modifier-prefixed exports
+- **WHEN** the public-surface certifier computes exported names
+- **THEN** it obtains async/generator exports from the shared parser without a local
+  recovery regex, and its breaking-change verdicts are unchanged
+
+### Requirement: ImportExportLineNumbersMatchOriginalSource
+
+Import and export line numbers emitted by the shared parser SHALL refer to the line in the
+ORIGINAL file content. Comment stripping (and any multi-line normalization) performed before
+regex matching SHALL preserve the line structure of the input — blanking with same-length
+whitespace that keeps newlines — so that a match offset converts to the true source line.
+A statement spanning multiple physical lines SHALL be attributed to its first line, and
+this attribution rule SHALL be documented at the parser.
+
+#### Scenario: A block-comment header does not shift lines
+
+- **GIVEN** a TypeScript file whose first 12 lines are a block comment and whose line 14 is
+  `import { x } from './y'`
+- **WHEN** imports are parsed
+- **THEN** the import is recorded at line 14, not a comment-stripped offset near line 2
+
+#### Scenario: A multi-line Python import is attributed to its first line
+
+- **GIVEN** a Python file with `from x import (\n  A,\n  B\n)` starting at line 20
+- **WHEN** imports are parsed
+- **THEN** the import is recorded at line 20 and later imports in the file keep their true
+  line numbers
+
+#### Scenario: Parenthesized non-import code does not perturb lines
+
+- **GIVEN** a Python file with a multi-line function call above an import
+- **WHEN** imports are parsed
+- **THEN** the import's recorded line equals its line in the original file
+
+### Requirement: SingleSourceLanguageDetection
+
+The system SHALL have exactly one canonical extension→language detection function, defined once in
+the analyzer's dedicated detection module and exported (re-exported) from the language-support
+registry as its public surface, and every analyzer component that maps a file path to a language
+(signature extraction, AST-aware chunking, skeleton reduction, route parsing, and any future
+consumer) SHALL resolve through it. A conformance test SHALL assert (a) every language in
+`CODE_LANGUAGES` is resolvable from a representative extension through the single source, and (b) no
+second language-detection definition or extension→language literal map exists outside the canonical
+module, so a copy-paste fork fails CI rather than silently diverging. A file whose extension the
+canonical map does not know SHALL resolve to an explicit `unknown` (an honest fallback), never to a
+guessed language.
+
+#### Scenario: Every claimed code language resolves through the single source
+
+- **GIVEN** any language listed in `CODE_LANGUAGES`
+- **WHEN** the conformance test resolves a representative file extension for that language through
+  the canonical `detectLanguage`
+- **THEN** the canonical function returns that language
+- **AND** the test fails if `CODE_LANGUAGES` gains a language with no resolvable extension
+
+#### Scenario: A second detection implementation fails CI
+
+- **GIVEN** a source tree containing a `detectLanguage` definition or an extension→language
+  literal detection map outside the canonical detection module
+- **WHEN** the singularity guard test runs
+- **THEN** the test fails, naming the offending file
+
+#### Scenario: Detection divergence no longer forces a false generic-chunking fallback
+
+- **GIVEN** a file whose extension a formerly-incomplete detection copy missed but the canonical map
+  resolves — and for which the AST chunker has a parser (e.g. the `.mts` / `.cts` / `.jsx`
+  extension variants of TypeScript/JavaScript)
+- **WHEN** the AST chunker processes the file
+- **THEN** the file is chunked with the language-aware AST strategy, not the generic-text fallback
+  it previously received because detection returned `unknown`
+- **AND** a file the canonical map detects but the chunker has no parser for continues to fall back
+  honestly (the chunker's AST coverage is bounded by its available parsers, not by detection)
+
+#### Scenario: An unknown extension degrades honestly
+
+- **GIVEN** a file whose extension appears in no canonical mapping
+- **WHEN** language detection runs
+- **THEN** the result is `unknown` and consumers apply their disclosed generic fallback, never a
+  guessed language
+
+### Requirement: RouteLineFidelityIsLengthPreserving
+
+TS/JS route extraction SHALL compute every route's line number against text that is byte-aligned
+with the original file: comment masking MUST be length-preserving (blanked, newlines kept),
+never line-removing, so that `route.line` consumed by original-byte consumers — enclosing-function
+anchoring for route-handler edge synthesis, dead-code liveness roots, the route inventory, and
+the registration-line handler lookup — is exact, not approximate. Masking SHALL still prevent
+route patterns inside comments from matching as real routes.
+
+#### Scenario: Comments above a route do not drift its line
+
+- **GIVEN** a TS file with a multi-line copyright block, a line comment, and a log line above a
+  function containing `app.get('/users', listUsers)`
+- **WHEN** route definitions are extracted
+- **THEN** the route's reported line equals its actual line in the original file
+
+#### Scenario: The route-handler edge anchors to the true enclosing function
+
+- **GIVEN** the same fixture, with `listUsers` defined in the repo
+- **WHEN** route-handler edges are synthesized
+- **THEN** an edge from the function enclosing the registration to `listUsers` exists
+- **AND** the edge is neither silently dropped nor attributed to a preceding function
+
+#### Scenario: A framework-invoked handler is never a false dead-code candidate
+
+- **GIVEN** a handler referenced only by a route registration preceded by long comments
+- **WHEN** dead-code reachability runs with synthesized routes included
+- **THEN** the handler is a liveness root and is not reported as a dead-code candidate
+
+#### Scenario: Commented-out routes still do not match
+
+- **GIVEN** a comment line containing `app.get('/example', handler)`
+- **WHEN** route definitions are extracted
+- **THEN** no route is produced for the commented pattern
+
+### Requirement: NoFirstMatchBindingOnAmbiguity
+
+The call-resolution ladder SHALL never bind a call edge by arbitrary first-match when more than one
+candidate definition is viable. Every resolution strategy that resolves against a multi-candidate
+symbol set — bare-name (`name_only`), Python `self.`/`cls.` method dispatch, and capitalized-receiver
+(`type_name`) — SHALL either single out a unique candidate via a defined affinity ladder (own-file
+containment → the file the caller imports the qualifier from → a single remaining candidate) or
+record the call site as **unresolved-ambiguous**, carrying a bounded candidate list, instead of
+emitting an edge. A unique candidate MAY still bind at the strategy's declared confidence.
+Conclusion tools whose soundness depends on edge precision (`find_dead_code`,
+`analyze_error_propagation`, `analyze_impact`, `select_tests`) SHALL disclose relevant
+unresolved-ambiguous sites as boundaries rather than silently treating them as resolved or absent.
+
+> **Overloaded names are out of scope for this requirement and tracked separately.** Same-name,
+> different-arity overloads (Java/C#/Scala/C++) do not reach the resolution ladder as a multi-candidate
+> set: they collapse earlier, at *node identity* — two overloads share the id `file::Class.method`, so
+> only one survives in the graph and the resolution ladder sees a single candidate. Making overloads
+> distinct nodes (arity-qualified identity) and resolving them by call-site argument count is a
+> node-identity change with a different, larger blast radius (stable ids, the CFG side-table, symbol
+> continuity, every node-count consumer) and is deferred to a dedicated follow-up. This requirement
+> therefore governs the three resolution-ladder strategies that genuinely bound by first-match; the
+> overload collapse is a disclosed known limitation, not a first-match guess this change introduces.
+
+#### Scenario: An ambiguous bare cross-file call is not bound arbitrarily
+
+- **GIVEN** a bare call `run()` whose name matches two or more function definitions in different
+  files, none reachable via an import binding or same-file affinity
+- **WHEN** the call graph is built
+- **THEN** no `name_only` edge is emitted for that call
+- **AND** the call site is recorded as unresolved-ambiguous with its candidate list (bounded, with
+  the truncated count disclosed if capped)
+
+#### Scenario: A unique cross-file candidate still binds
+
+- **GIVEN** a bare call whose name matches exactly one cross-file definition
+- **WHEN** the call graph is built
+- **THEN** the edge is emitted at `name_only` confidence, as today
+
+#### Scenario: Python self-dispatch uses the same affinity ladder as this/super
+
+- **GIVEN** two classes with the same name in different files, each defining `process()`
+- **WHEN** `self.process()` is resolved inside one of them
+- **THEN** the edge binds to the method in the caller's own file, not to whichever candidate sorts
+  first
+
+#### Scenario: Dead-code confidence respects ambiguity
+
+- **GIVEN** a function whose only potential caller is an unresolved-ambiguous site listing it as a
+  candidate
+- **WHEN** `find_dead_code` runs
+- **THEN** the function is not reported in the highest-confidence dead tier, and the ambiguous-site
+  reason is disclosed
+
+### Requirement: StableCallGraphBarrel
+
+The call-graph builder MAY be decomposed across multiple source modules for maintainability, but
+`call-graph.ts` SHALL remain the stable public barrel for the call-graph subsystem. Every symbol that
+is importable from `call-graph.ts` before such a decomposition SHALL remain importable from
+`call-graph.ts` after it — extracted internals SHALL be re-exported from the barrel so that no module
+importing `call-graph.ts` is required to change its import path.
+
+The decomposition SHALL be behavior-preserving: for a fixed repository state, the call graph produced
+after the decomposition SHALL be identical to the graph produced before it (same nodes, edges, edge
+confidences, CFG overlay, and serialization). The decomposition SHALL NOT change extraction ordering or
+node identity. The existing analyzer test suite SHALL serve as the regression oracle and SHALL pass
+unchanged.
+
+#### Scenario: The public import surface is preserved
+
+- **GIVEN** a module that imports a symbol from `call-graph.ts`
+- **WHEN** the call-graph builder is decomposed into sibling modules
+- **THEN** that symbol is still importable from `call-graph.ts` (re-exported from the barrel)
+- **AND** the importing module requires no change to its import path
+
+#### Scenario: Graph output is byte-identical after decomposition
+
+- **GIVEN** a fixed repository state and the call graph it produced before decomposition
+- **WHEN** the call graph is rebuilt after decomposition
+- **THEN** the resulting nodes, edges, edge confidences, CFG overlay, and serialized form are identical
+- **AND** the analyzer test suite passes unchanged
 
 ## Sub-components
 
@@ -3780,7 +4269,9 @@ The system SHALL the function shall extract function signatures and comments fro
 - **WHEN** The extractGeneric function is called with the file content
 - **THEN** The function SHALL return the extracted function signatures and comments
 
-### Requirement: Generateartifacts
+### Sub-component: Generateartifacts
+
+#### Requirement: Generateartifacts
 
 The system SHALL generates all analysis artifacts including repository structure, dependency diagrams, and llm context.
 
@@ -3794,7 +4285,9 @@ The system SHALL generates all analysis artifacts including repository structure
 - **WHEN** generateArtifacts is called
 - **THEN** An error is thrown indicating the directory does not exist
 
-### Requirement: IstestfileSpecAware
+### Sub-component: IstestfileSpecAware
+
+#### Requirement: IstestfileSpecAware
 
 The system SHALL determines if a file is a test/spec file based on its path and name.
 
@@ -3808,7 +4301,9 @@ The system SHALL determines if a file is a test/spec file based on its path and 
 - **WHEN** isTestFile is called
 - **THEN** Returns false
 
-### Requirement: Repostructuretorepomap
+### Sub-component: Repostructuretorepomap
+
+#### Requirement: Repostructuretorepomap
 
 The system SHALL converts a serialized repostructure to a minimal repositorymap-compatible object.
 
@@ -3822,7 +4317,9 @@ The system SHALL converts a serialized repostructure to a minimal repositorymap-
 - **WHEN** repoStructureToRepoMap is called
 - **THEN** An error is thrown indicating invalid input
 
-### Requirement: Generate
+### Sub-component: Generate
+
+#### Requirement: Generate
 
 The system SHALL generates all analysis artifacts including repository structure, summary markdown, dependency diagram, and llm context.
 
@@ -3831,7 +4328,9 @@ The system SHALL generates all analysis artifacts including repository structure
 - **WHEN** generate is called
 - **THEN** All artifacts are generated and returned
 
-### Requirement: Generateandsave
+### Sub-component: Generateandsave
+
+#### Requirement: Generateandsave
 
 The system SHALL generates all analysis artifacts and saves them to disk.
 
@@ -3840,7 +4339,9 @@ The system SHALL generates all analysis artifacts and saves them to disk.
 - **WHEN** generateAndSave is called
 - **THEN** All artifacts are generated, saved to disk, and returned
 
-### Requirement: Generaterepostructure
+### Sub-component: Generaterepostructure
+
+#### Requirement: Generaterepostructure
 
 The system SHALL generates the repository structure including architecture pattern, layers, domains, entry points, data flow, and key files.
 
@@ -3849,7 +4350,9 @@ The system SHALL generates the repository structure including architecture patte
 - **WHEN** generateRepoStructure is called
 - **THEN** Repository structure is generated and returned
 
-### Requirement: Generatesummarymarkdown
+### Sub-component: Generatesummarymarkdown
+
+#### Requirement: Generatesummarymarkdown
 
 The system SHALL generates a summary markdown file with project overview, architecture pattern, language breakdown, detected domains, dependency insights, and recommendations.
 
@@ -3858,7 +4361,9 @@ The system SHALL generates a summary markdown file with project overview, archit
 - **WHEN** generateSummaryMarkdown is called
 - **THEN** Summary markdown is generated and returned
 
-### Requirement: Generatedependencydiagram
+### Sub-component: Generatedependencydiagram
+
+#### Requirement: Generatedependencydiagram
 
 The system SHALL generates a dependency diagram in mermaid format.
 
@@ -3867,7 +4372,9 @@ The system SHALL generates a dependency diagram in mermaid format.
 - **WHEN** generateDependencyDiagram is called
 - **THEN** Dependency diagram in Mermaid format is generated and returned
 
-### Requirement: Generatellmcontext
+### Sub-component: Generatellmcontext
+
+#### Requirement: Generatellmcontext
 
 The system SHALL generates llm context preparation including survey, deep analysis, validation, signatures, call graph, and refactoring priorities.
 
@@ -3876,7 +4383,9 @@ The system SHALL generates llm context preparation including survey, deep analys
 - **WHEN** generateLLMContext is called
 - **THEN** LLM context is generated and returned
 
-### Requirement: Parsecppincludes
+### Sub-component: Parsecppincludes
+
+#### Requirement: Parsecppincludes
 
 The system SHALL parses #include directives from a c++ source file and categorizes them as relative, system, or unknown.
 
@@ -3890,7 +4399,9 @@ The system SHALL parses #include directives from a c++ source file and categoriz
 - **WHEN** parseCppIncludes is called
 - **THEN** The directive is parsed and marked as system
 
-### Requirement: Buildheadertoimplmap
+### Sub-component: Buildheadertoimplmap
+
+#### Requirement: Buildheadertoimplmap
 
 The system SHALL builds a map from header file paths to their corresponding implementation file paths based on naming conventions.
 
@@ -3899,7 +4410,9 @@ The system SHALL builds a map from header file paths to their corresponding impl
 - **WHEN** buildHeaderToImplMap is called
 - **THEN** A map is created with header paths as keys and implementation paths as values
 
-### Requirement: Buildcppimportmap
+### Sub-component: Buildcppimportmap
+
+#### Requirement: Buildcppimportmap
 
 The system SHALL builds a map from c++ source files to sets of implementation files reachable via their #include directives.
 
@@ -3909,7 +4422,9 @@ The system SHALL builds a map from c++ source files to sets of implementation fi
 - **THEN** A map is created with the source file path as key and a set of accessible implementation files as
 value
 
-### Requirement: Buildcallgraph
+### Sub-component: Buildcallgraph
+
+#### Requirement: Buildcallgraph
 
 The system SHALL constructs a call graph from source files, including function calls, class relationships, and http edges.
 
@@ -3923,7 +4438,9 @@ The system SHALL constructs a call graph from source files, including function c
 - **WHEN** build is called
 - **THEN** Call graph with nodes and edges populated without layer violations
 
-### Requirement: Detectlayerviolations
+### Sub-component: Detectlayerviolations
+
+#### Requirement: Detectlayerviolations
 
 The system SHALL identifies architectural violations where calls cross layer boundaries.
 
@@ -3937,7 +4454,9 @@ The system SHALL identifies architectural violations where calls cross layer bou
 - **WHEN** detectLayerViolations is called
 - **THEN** Empty array is returned
 
-### Requirement: Extractclassrelationships
+### Sub-component: Extractclassrelationships
+
+#### Requirement: Extractclassrelationships
 
 The system SHALL extracts inheritance and implementation relationships between classes.
 
@@ -3950,7 +4469,6 @@ The system SHALL extracts inheritance and implementation relationships between c
 - **GIVEN** Files without class definitions
 - **WHEN** extractClassRelationships is called
 - **THEN** Empty arrays are returned
-
 
 ## Sub-components
 
@@ -4301,7 +4819,9 @@ The system SHALL the function shall build class nodes from class relationships.
 - **WHEN** The function is called with the class relationships
 - **THEN** Class nodes are returned
 
-### Requirement: Detectduplicates
+### Sub-component: Detectduplicates
+
+#### Requirement: Detectduplicates
 
 The system SHALL analyzes a call graph to identify duplicate functions across the codebase.
 
@@ -4320,7 +4840,9 @@ The system SHALL analyzes a call graph to identify duplicate functions across th
 - **WHEN** detectDuplicates is called
 - **THEN** The functions are grouped as 'near' clones
 
-### Requirement: Normalizecode
+### Sub-component: Normalizecode
+
+#### Requirement: Normalizecode
 
 The system SHALL normalizes code content to facilitate duplicate detection.
 
@@ -4334,7 +4856,9 @@ The system SHALL normalizes code content to facilitate duplicate detection.
 - **WHEN** normalizeCode is called
 - **THEN** Whitespace is collapsed to single spaces
 
-### Requirement: Normalizeidentifiers
+### Sub-component: Normalizeidentifiers
+
+#### Requirement: Normalizeidentifiers
 
 The system SHALL normalizes identifiers in code to facilitate structural duplicate detection.
 
@@ -4348,7 +4872,9 @@ The system SHALL normalizes identifiers in code to facilitate structural duplica
 - **WHEN** normalizeIdentifiers is called
 - **THEN** Identifiers are replaced with sequential placeholders
 
-### Requirement: Computeshingles
+### Sub-component: Computeshingles
+
+#### Requirement: Computeshingles
 
 The system SHALL computes shingles from tokenized code for near-duplicate detection.
 
@@ -4357,7 +4883,9 @@ The system SHALL computes shingles from tokenized code for near-duplicate detect
 - **WHEN** computeShingles is called
 - **THEN** A set of shingles is generated
 
-### Requirement: Computejaccardsimilarity
+### Sub-component: Computejaccardsimilarity
+
+#### Requirement: Computejaccardsimilarity
 
 The system SHALL computes jaccard similarity between two sets of shingles.
 
@@ -4371,7 +4899,9 @@ The system SHALL computes jaccard similarity between two sets of shingles.
 - **WHEN** computeJaccardSimilarity is called
 - **THEN** The Jaccard similarity is computed and returned
 
-### Requirement: Convertbyteoffsettoline
+### Sub-component: Convertbyteoffsettoline
+
+#### Requirement: Convertbyteoffsettoline
 
 The system SHALL converts a byte offset to a line number in source code.
 
@@ -4380,7 +4910,9 @@ The system SHALL converts a byte offset to a line number in source code.
 - **WHEN** convertByteOffsetToLine is called
 - **THEN** The corresponding line number is returned
 
-### Requirement: Infertypesfromsource
+### Sub-component: Infertypesfromsource
+
+#### Requirement: Infertypesfromsource
 
 The system SHALL infers variable types from source code based on the specified programming language.
 
@@ -4419,7 +4951,9 @@ The system SHALL infers variable types from source code based on the specified p
 - **WHEN** inferTypesFromSource is called with language 'Ruby'
 - **THEN** Returns a map of variable names to inferred class names
 
-### Requirement: Resolveviatypeinference
+### Sub-component: Resolveviatypeinference
+
+#### Requirement: Resolveviatypeinference
 
 The system SHALL resolves a method call to a function node using inferred types.
 
@@ -4433,7 +4967,9 @@ The system SHALL resolves a method call to a function node using inferred types.
 - **WHEN** resolveViaTypeInference is called with valid inputs
 - **THEN** Returns undefined
 
-### Requirement: Calculatenamescore
+### Sub-component: Calculatenamescore
+
+#### Requirement: Calculatenamescore
 
 The system SHALL calculates a score for a file based on its name, considering high-value and negative name patterns.
 
@@ -4447,7 +4983,9 @@ The system SHALL calculates a score for a file based on its name, considering hi
 - **WHEN** calculateNameScore is called
 - **THEN** The score should be -10
 
-### Requirement: Calculatepathscore
+### Sub-component: Calculatepathscore
+
+#### Requirement: Calculatepathscore
 
 The system SHALL calculates a score for a file based on its path location, considering high-value paths and depth penalties.
 
@@ -4461,7 +4999,9 @@ The system SHALL calculates a score for a file based on its path location, consi
 - **WHEN** calculatePathScore is called
 - **THEN** The score should be reduced by 10
 
-### Requirement: Calculatestructurescore
+### Sub-component: Calculatestructurescore
+
+#### Requirement: Calculatestructurescore
 
 The system SHALL calculates a score for a file based on its structure, considering class definitions, interface definitions, export statements, decorators, and import statements.
 
@@ -4475,7 +5015,9 @@ The system SHALL calculates a score for a file based on its structure, consideri
 - **WHEN** calculateStructureScore is called
 - **THEN** The score should be increased by 10
 
-### Requirement: Buildfilerelationships
+### Sub-component: Buildfilerelationships
+
+#### Requirement: Buildfilerelationships
 
 The system SHALL builds a map of file relationships based on import analysis.
 
@@ -4484,7 +5026,9 @@ The system SHALL builds a map of file relationships based on import analysis.
 - **WHEN** buildFileRelationships is called
 - **THEN** A map of file relationships should be created
 
-### Requirement: Calculateconnectivityscore
+### Sub-component: Calculateconnectivityscore
+
+#### Requirement: Calculateconnectivityscore
 
 The system SHALL calculates a score for a file based on its connectivity, considering the number of files that import it and the number of files it imports.
 
@@ -4498,7 +5042,9 @@ The system SHALL calculates a score for a file based on its connectivity, consid
 - **WHEN** calculateConnectivityScore is called
 - **THEN** The score should be reduced by 10
 
-### Requirement: Normalizeurl
+### Sub-component: Normalizeurl
+
+#### Requirement: Normalizeurl
 
 The system SHALL normalizes a url or path to a canonical form for comparison.
 
@@ -4527,7 +5073,9 @@ The system SHALL normalizes a url or path to a canonical form for comparison.
 - **WHEN** normalizeUrl is called
 - **THEN** Trailing slash is removed unless it is the root (e.g., '/users')
 
-### Requirement: Candidatepaths
+### Sub-component: Candidatepaths
+
+#### Requirement: Candidatepaths
 
 The system SHALL generates candidate normalized paths for a given url by stripping known api prefixes.
 
@@ -4541,7 +5089,9 @@ The system SHALL generates candidate normalized paths for a given url by strippi
 - **WHEN** candidatePaths is called
 - **THEN** The URL is included in candidates (e.g., ['/users'])
 
-### Requirement: Extracthttpcalls
+### Sub-component: Extracthttpcalls
+
+#### Requirement: Extracthttpcalls
 
 The system SHALL extracts http calls from frontend files using various http clients (fetch, axios, ky, got).
 
@@ -4560,7 +5110,9 @@ The system SHALL extracts http calls from frontend files using various http clie
 - **WHEN** extractHttpCalls is called
 - **THEN** An empty array is returned
 
-### Requirement: Start
+### Sub-component: Start
+
+#### Requirement: Start
 
 The system SHALL initializes the file watcher and begins monitoring for changes.
 
@@ -4574,7 +5126,9 @@ The system SHALL initializes the file watcher and begins monitoring for changes.
 - **WHEN** start is called
 - **THEN** Error is caught and logged
 
-### Requirement: Stop
+### Sub-component: Stop
+
+#### Requirement: Stop
 
 The system SHALL stops the file watcher and cleans up resources.
 
@@ -4583,7 +5137,9 @@ The system SHALL stops the file watcher and cleans up resources.
 - **WHEN** stop is called
 - **THEN** File watcher is stopped and resources are cleaned up
 
-### Requirement: Handlechange
+### Sub-component: Handlechange
+
+#### Requirement: Handlechange
 
 The system SHALL re-indexes a single changed file, updating signatures and optionally vector embeddings.
 
@@ -4602,7 +5158,9 @@ The system SHALL re-indexes a single changed file, updating signatures and optio
 - **WHEN** handleChange is called
 - **THEN** File is skipped
 
-### Requirement: Getparserforlanguage
+### Sub-component: Getparserforlanguage
+
+#### Requirement: Getparserforlanguage
 
 The system SHALL retrieves or initializes a tree-sitter parser for a given programming language.
 
@@ -4616,7 +5174,9 @@ The system SHALL retrieves or initializes a tree-sitter parser for a given progr
 - **WHEN** getParserForLanguage is called
 - **THEN** Returns null
 
-### Requirement: Blanklinechunk
+### Sub-component: Blanklinechunk
+
+#### Requirement: Blanklinechunk
 
 The system SHALL splits content into chunks based on blank lines as a fallback mechanism.
 
@@ -4630,7 +5190,9 @@ The system SHALL splits content into chunks based on blank lines as a fallback m
 - **WHEN** blankLineChunk is called
 - **THEN** Returns an array of chunks split by blank lines with specified overlap
 
-### Requirement: Astchunkcontent
+### Sub-component: Astchunkcontent
+
+#### Requirement: Astchunkcontent
 
 The system SHALL splits content into chunks based on ast declaration boundaries using tree-sitter, with fallback to blank-line chunking.
 
@@ -4650,7 +5212,9 @@ chunks
 - **WHEN** astChunkContent is called
 - **THEN** Returns an array of chunks split by blank lines with specified overlap
 
-### Requirement: Generatedigest
+### Sub-component: Generatedigest
+
+#### Requirement: Generatedigest
 
 The system SHALL creates a comprehensive analysis of the codebase structure and dependencies.
 
@@ -4664,7 +5228,9 @@ The system SHALL creates a comprehensive analysis of the codebase structure and 
 - **WHEN** generateDigest is called
 - **THEN** An error is thrown indicating the invalid path
 
-### Requirement: Rel
+### Sub-component: Rel
+
+#### Requirement: Rel
 
 The system SHALL converts an absolute path to a relative path based on the project root.
 
@@ -4678,7 +5244,9 @@ The system SHALL converts an absolute path to a relative path based on the proje
 - **WHEN** rel is called
 - **THEN** The original absolute path is returned
 
-### Requirement: Filecoupling
+### Sub-component: Filecoupling
+
+#### Requirement: Filecoupling
 
 The system SHALL extracts file coupling metrics from a dependency graph.
 
@@ -4692,7 +5260,9 @@ The system SHALL extracts file coupling metrics from a dependency graph.
 - **WHEN** fileCoupling is called
 - **THEN** An empty array is returned
 
-### Requirement: Buildadjacency
+### Sub-component: Buildadjacency
+
+#### Requirement: Buildadjacency
 
 The system SHALL constructs forward and backward adjacency maps from a serialized call graph.
 
@@ -4701,7 +5271,9 @@ The system SHALL constructs forward and backward adjacency maps from a serialize
 - **WHEN** buildAdjacency is called
 - **THEN** Forward and backward adjacency maps are constructed
 
-### Requirement: Bfs
+### Sub-component: Bfs
+
+#### Requirement: Bfs
 
 The system SHALL performs a breadth-first search on the adjacency map starting from seed nodes.
 
@@ -4710,7 +5282,9 @@ The system SHALL performs a breadth-first search on the adjacency map starting f
 - **WHEN** bfs is called
 - **THEN** Visited nodes within max depth are returned
 
-### Requirement: Computeriskscore
+### Sub-component: Computeriskscore
+
+#### Requirement: Computeriskscore
 
 The system SHALL computes a risk score for a function node based on blast radius and hub status.
 
@@ -4719,7 +5293,9 @@ The system SHALL computes a risk score for a function node based on blast radius
 - **WHEN** computeRiskScore is called
 - **THEN** A risk score between 0 and 100 is returned
 
-### Requirement: Recommendstrategy
+### Sub-component: Recommendstrategy
+
+#### Requirement: Recommendstrategy
 
 The system SHALL recommends a refactoring strategy based on risk score, fan-in, and fan-out.
 
@@ -4728,7 +5304,9 @@ The system SHALL recommends a refactoring strategy based on risk score, fan-in, 
 - **WHEN** recommendStrategy is called
 - **THEN** A refactoring strategy is recommended
 
-### Requirement: Nodetosummary
+### Sub-component: Nodetosummary
+
+#### Requirement: Nodetosummary
 
 The system SHALL converts a function node to a summary object.
 
@@ -4737,7 +5315,9 @@ The system SHALL converts a function node to a summary object.
 - **WHEN** nodeToSummary is called
 - **THEN** A summary object is returned
 
-### Requirement: Handlegetcallgraph
+### Sub-component: Handlegetcallgraph
+
+#### Requirement: Handlegetcallgraph
 
 The system SHALL retrieves the call graph summary from cached analysis for a given directory.
 
@@ -4746,7 +5326,9 @@ The system SHALL retrieves the call graph summary from cached analysis for a giv
 - **WHEN** handleGetCallGraph is called
 - **THEN** The call graph summary is returned
 
-### Requirement: Handlegetsubgraph
+### Sub-component: Handlegetsubgraph
+
+#### Requirement: Handlegetsubgraph
 
 The system SHALL extracts a depth-limited subgraph centered on a named function.
 
@@ -4755,7 +5337,9 @@ The system SHALL extracts a depth-limited subgraph centered on a named function.
 - **WHEN** handleGetSubgraph is called
 - **THEN** A depth-limited subgraph is returned
 
-### Requirement: Handleanalyzeimpact
+### Sub-component: Handleanalyzeimpact
+
+#### Requirement: Handleanalyzeimpact
 
 The system SHALL performs a deep impact analysis for a single symbol in the call graph.
 
@@ -4764,7 +5348,9 @@ The system SHALL performs a deep impact analysis for a single symbol in the call
 - **WHEN** handleAnalyzeImpact is called
 - **THEN** An impact analysis is returned
 
-### Requirement: Handlegetlowriskrefactorcandidates
+### Sub-component: Handlegetlowriskrefactorcandidates
+
+#### Requirement: Handlegetlowriskrefactorcandidates
 
 The system SHALL retrieves the safest functions to refactor based on risk score.
 
@@ -4773,7 +5359,9 @@ The system SHALL retrieves the safest functions to refactor based on risk score.
 - **WHEN** handleGetLowRiskRefactorCandidates is called
 - **THEN** Low-risk refactoring candidates are returned
 
-### Requirement: Handlegetleaffunctions
+### Sub-component: Handlegetleaffunctions
+
+#### Requirement: Handlegetleaffunctions
 
 The system SHALL retrieves leaf functions (functions with no outgoing calls).
 
@@ -4782,7 +5370,9 @@ The system SHALL retrieves leaf functions (functions with no outgoing calls).
 - **WHEN** handleGetLeafFunctions is called
 - **THEN** Leaf functions are returned
 
-### Requirement: Handlegetcriticalhubs
+### Sub-component: Handlegetcriticalhubs
+
+#### Requirement: Handlegetcriticalhubs
 
 The system SHALL retrieves critical hub functions ranked by composite criticality.
 
@@ -4791,7 +5381,9 @@ The system SHALL retrieves critical hub functions ranked by composite criticalit
 - **WHEN** handleGetCriticalHubs is called
 - **THEN** Critical hub functions are returned
 
-### Requirement: Handlegetgodfunctions
+### Sub-component: Handlegetgodfunctions
+
+#### Requirement: Handlegetgodfunctions
 
 The system SHALL detects god functions (functions with high fan-out) and returns their call-graph neighborhood.
 
@@ -4800,7 +5392,9 @@ The system SHALL detects god functions (functions with high fan-out) and returns
 - **WHEN** handleGetGodFunctions is called
 - **THEN** God functions and their neighborhoods are returned
 
-### Requirement: Handlegetfiledependencies
+### Sub-component: Handlegetfiledependencies
+
+#### Requirement: Handlegetfiledependencies
 
 The system SHALL retrieves the file-level import dependencies for a given file.
 
@@ -4809,7 +5403,9 @@ The system SHALL retrieves the file-level import dependencies for a given file.
 - **WHEN** handleGetFileDependencies is called
 - **THEN** File-level import dependencies are returned
 
-### Requirement: Handletraceexecutionpath
+### Sub-component: Handletraceexecutionpath
+
+#### Requirement: Handletraceexecutionpath
 
 The system SHALL finds all execution paths between two functions in the call graph.
 
@@ -4817,7 +5413,6 @@ The system SHALL finds all execution paths between two functions in the call gra
 - **GIVEN** Valid directory, entry function, target function, max depth, and max paths
 - **WHEN** handleTraceExecutionPath is called
 - **THEN** Execution paths between the functions are returned
-
 
 ## Sub-components
 
@@ -4942,56 +5537,74 @@ The system SHALL the function shall recommend a refactoring strategy based on th
 - **GIVEN** valid riskScore, fanIn, fanOut, and isHub
 - **WHEN** the function is called
 - **THEN** it SHALL return the recommended refactoring strategy
-### Requirement: IacResourcesProjectOntoTheExistingCallgraphPrimitives
+### Sub-component: IacResourcesProjectOntoTheExistingCallgraphPrimitives
+
+#### Requirement: IacResourcesProjectOntoTheExistingCallgraphPrimitives
 
 The system SHALL model infrastructure-as-code resources as nodes and edges in the existing call graph rather than a separate schema.
 
 > Decision recorded: 8e1f10e6
 > Date: 2026-06-01
-### Requirement: EdgestoreUsesSchemaversionRebuildonbumpInsteadOfMigrations
+### Sub-component: EdgestoreUsesSchemaversionRebuildonbumpInsteadOfMigrations
+
+#### Requirement: EdgestoreUsesSchemaversionRebuildonbumpInsteadOfMigrations
 
 The system SHALL invalidate and rebuild the EdgeStore cache when its schema version changes, rather than applying incremental migrations.
 
 > Decision recorded: 81ba22ca
 > Date: 2026-06-01
-### Requirement: Bm25KeywordRetrievalIsTheZeronetworkFloorEmbeddingsAreOptional
+### Sub-component: Bm25KeywordRetrievalIsTheZeronetworkFloorEmbeddingsAreOptional
+
+#### Requirement: Bm25KeywordRetrievalIsTheZeronetworkFloorEmbeddingsAreOptional
 
 The system SHALL provide BM25 keyword retrieval as the default search index, requiring no network access or API keys, with embedding-based retrieval as an optional enhancement.
 
 > Decision recorded: 06a6e545
 > Date: 2026-06-01
-### Requirement: DecisionsProjectedAsFirstclassGraphNodesWithDedicatedSqliteTables
+### Sub-component: DecisionsProjectedAsFirstclassGraphNodesWithDedicatedSqliteTables
+
+#### Requirement: DecisionsProjectedAsFirstclassGraphNodesWithDedicatedSqliteTables
 
 The system SHALL project active architectural decisions from the JSON decision store into the code graph as first-class nodes with `affects` edges, stored in dedicated SQLite tables that do not interfere with code-node statistics or call-edge traversal.
 
 > Decision recorded: bf450b1c
 > Date: 2026-06-02
-### Requirement: CrossdomainCodeinfraEdgesViaLinecontainmentLinkage
+### Sub-component: CrossdomainCodeinfraEdgesViaLinecontainmentLinkage
+
+#### Requirement: CrossdomainCodeinfraEdgesViaLinecontainmentLinkage
 
 The system SHALL emit a `references` edge from the narrowest enclosing code function to each embedded IaC resource declared within the same file, enabling end-to-end code↔infra graph traversal.
 
 > Decision recorded: 708a8436
 > Date: 2026-06-02
-### Requirement: LocalGitgithubProvenanceStoredAsPerfileRowsInTheEdgestoreSqliteDb
+### Sub-component: LocalGitgithubProvenanceStoredAsPerfileRowsInTheEdgestoreSqliteDb
+
+#### Requirement: LocalGitgithubProvenanceStoredAsPerfileRowsInTheEdgestoreSqliteDb
 
 The system SHALL store per-file git provenance (last author, recent authors, pull requests) in the edge-store SQLite database, extracted from local git history during analysis, and SHALL treat extraction failures as non-blocking.
 
 > Decision recorded: f8778883
 > Date: 2026-06-02
-### Requirement: EdgestoreExposesWasresetFlagAfterSchemaMigrationWipe
+### Sub-component: EdgestoreExposesWasresetFlagAfterSchemaMigrationWipe
+
+#### Requirement: EdgestoreExposesWasresetFlagAfterSchemaMigrationWipe
 
 The system SHALL expose whether the edge store was reset due to a schema version bump so that read-only callers can detect stale data and prompt for re-analysis.
 
 > Decision recorded: 8365f6f8
 > Date: 2026-06-02
-### Requirement: ComputeCfgdefuseOverlayInsideLivetreeExtractorsExtendReturnContractToNodesRawedgesCfg
+### Sub-component: ComputeCfgdefuseOverlayInsideLivetreeExtractorsExtendReturnContractToNodesRawedgesCfg
+
+#### Requirement: ComputeCfgdefuseOverlayInsideLivetreeExtractorsExtendReturnContractToNodesRawedgesCfg
 
 The system SHALL compute intraprocedural control-flow graphs and reaching-definition def-use edges inside language extractors while the parse tree is live, storing the overlay in the database only.
 
 > Decision recorded: c8f2b9bf
 > Date: 2026-06-12
 
-### Requirement: ContentAddressedStableSymbolId
+### Sub-component: ContentAddressedStableSymbolId
+
+#### Requirement: ContentAddressedStableSymbolId
 
 The system SHALL compute, for every named function and class symbol, a content-addressed stable identity (`stableId`) that is independent of the symbol's file path, derived deterministically from the symbol's qualified name (class.method or function) and a normalized parameter-list signature shape (empty parentheses when no signature was captured). The shape SHALL exclude the function body and the return type, so the `stableId` is invariant to body edits and to leading-modifier/return-type changes. The `stableId` SHALL be a pure function of the symbol's own static structure — no file path and no position-dependent discriminator — so it is identical across runs, machines, and full-vs-incremental builds, and is preserved when a symbol's file is renamed or moved. Symbols whose identity cannot be derived deterministically (anonymous or dynamically-generated) SHALL NOT receive a `stableId`. Two distinct symbols sharing a qualified name and parameter shape (homonyms) MAY share a `stableId`; the system SHALL resolve a `stableId` to a symbol only when it identifies a unique symbol, and SHALL fall back rather than guess when it is ambiguous. Full scenarios: `openspec/changes/add-content-addressed-stable-symbol-ids/specs/analyzer/spec.md`.
 
@@ -5006,140 +5619,190 @@ The system SHALL compute, for every named function and class symbol, a content-a
 >
 > Signature-shape sensitivity: the normalized shape is the source text of the parameter group with whitespace collapsed; it does not strip comments physically inside the parameter list nor canonicalize default-value expressions, so editing an in-parameter comment or a brace-delimited default value changes the `stableId`. This only weakens body/edit-invariance in those narrow cases and always fails *safe* — the symbol falls back to remove+add (diff) or `orphaned` (anchor), never to a wrong identity. A literal-aware comment stripper was deliberately not added (a naive strip would corrupt string-literal defaults such as URLs, *creating* collisions).
 
-### Requirement: AdditiveStableIdentity
+### Sub-component: AdditiveStableIdentity
+
+#### Requirement: AdditiveStableIdentity
 
 The system SHALL introduce `stableId` additively, without changing the existing path-based symbol `id`, which SHALL remain the canonical key for the call graph, the store primary keys, edge endpoints, the file-from-id derivation, the serialized graph, and all existing path-based consumers. `stableId` SHALL be persisted as a nullable serialized-node field and a nullable indexed store column, introduced by bumping the store schema version so existing caches drop-and-rebuild with no data-migration code. A graph or store that predates `stableId` SHALL remain valid, with an absent `stableId` treated as "no stable identity available".
 
-### Requirement: RenameStableStructuralDiff
+### Sub-component: RenameStableStructuralDiff
+
+#### Requirement: RenameStableStructuralDiff
 
 The system SHALL use `stableId` as the primary cross-version node matcher in structural diffing, matching two nodes as the same symbol when their `stableId`s are equal and falling back to the path-based `id` only for nodes that have no `stableId`. A purely moved or renamed-file symbol (same `stableId`) SHALL be reported as the same symbol (an exact move/rename candidate), not a removal plus an addition. The system SHALL retain the signature-shape rename-recovery heuristic for the leftover removed/added set (identifier renames and symbols with no `stableId`), and SHALL continue to surface both interpretations rather than silently merging them.
 
-### Requirement: RenameStableMemoryAnchoring
+### Sub-component: RenameStableMemoryAnchoring
+
+#### Requirement: RenameStableMemoryAnchoring
 
 The system SHALL record an optional `stableId` on a code-anchored memory alongside its path-based `nodeId`, and SHALL resolve a memory's anchor by first attempting the `nodeId` (current behavior) and, only on a miss, resolving by `stableId`. A memory anchored to a symbol later moved/renamed-file but otherwise unchanged SHALL resolve via `stableId` to the relocated symbol and report `fresh` (or `drifted` if its content changed) instead of `orphaned`. A memory recorded before this change (carrying only `nodeId`) SHALL behave exactly as today, with no migration.
-### Requirement: AnchorPersistedMemoryToCallgraphSymbolsWithDeterministicFreshness
+### Sub-component: AnchorPersistedMemoryToCallgraphSymbolsWithDeterministicFreshness
+
+#### Requirement: AnchorPersistedMemoryToCallgraphSymbolsWithDeterministicFreshness
 
 The canonical statement of this decision lives in the `mcp-handlers` domain — see [mcp-handlers/spec.md](../mcp-handlers/spec.md) (decision `34b178df`).
-### Requirement: CodeanchoredMemoryToolsRememberrecallAreOptinViaADedicatedPreset
+### Sub-component: CodeanchoredMemoryToolsRememberrecallAreOptinViaADedicatedPreset
+
+#### Requirement: CodeanchoredMemoryToolsRememberrecallAreOptinViaADedicatedPreset
 
 The system SHALL expose remember and recall tools only through the opt-in memory preset, not in the default or minimal tool surfaces.
 
 > Decision recorded: b92dada4
 > Date: 2026-06-16
-### Requirement: SynthesizeDynamicdispatchCallEdgesWithExplicitProvenance
+### Sub-component: SynthesizeDynamicdispatchCallEdgesWithExplicitProvenance
+
+#### Requirement: SynthesizeDynamicdispatchCallEdgesWithExplicitProvenance
 
 The system SHALL synthesize dynamic-dispatch call edges (event channels, route handlers) deterministically from the AST and tag each with explicit provenance so they are distinguishable from directly-resolved edges.
 
 > Decision recorded: b7395127
 > Date: 2026-06-16
-### Requirement: ExposeValuelevelPrecisionAsOptinValuelevelvalueparamFlagsOnExistingImpactTools
+### Sub-component: ExposeValuelevelPrecisionAsOptinValuelevelvalueparamFlagsOnExistingImpactTools
+
+#### Requirement: ExposeValuelevelPrecisionAsOptinValuelevelvalueparamFlagsOnExistingImpactTools
 
 The system SHALL expose value-level precision in analyze_impact and trace_execution_path via opt-in valueLevel and valueParam parameters, falling back to function granularity when no CFG overlay exists.
 
 > Decision recorded: 4cf203d7
 > Date: 2026-06-16
-### Requirement: ModelTrycatchSwitchAndClosuresAsBranchingalternativepathStructuresInTheCfg
+### Sub-component: ModelTrycatchSwitchAndClosuresAsBranchingalternativepathStructuresInTheCfg
+
+#### Requirement: ModelTrycatchSwitchAndClosuresAsBranchingalternativepathStructuresInTheCfg
 
 The system SHALL model try/catch, switch, and closure captures as branching/alternative-path CFG structures so that reaching-definitions never spuriously kills a definition visible along an alternative control-flow path.
 
 > Decision recorded: 3db9424d
 > Date: 2026-06-16
-### Requirement: DowngradeEscapedClosuremutatedAddresstakenVariablesToMaySoExactIsNeverUnsound
+### Sub-component: DowngradeEscapedClosuremutatedAddresstakenVariablesToMaySoExactIsNeverUnsound
+
+#### Requirement: DowngradeEscapedClosuremutatedAddresstakenVariablesToMaySoExactIsNeverUnsound
 
 The system SHALL downgrade reaching-definition precision to may for any variable that is assigned inside a nested closure or whose address is taken, ensuring the exact label is never applied unsoundly.
 
 > Decision recorded: 8192f32f
 > Date: 2026-06-16
-### Requirement: AddLexicalScopeResolutionToTheDefuseOverlaySoShadowedVariablesNeverConflate
+### Sub-component: AddLexicalScopeResolutionToTheDefuseOverlaySoShadowedVariablesNeverConflate
+
+#### Requirement: AddLexicalScopeResolutionToTheDefuseOverlaySoShadowedVariablesNeverConflate
 
 The system SHALL resolve lexical scopes so that identically-named variables in different scopes are never conflated in the reaching-definitions overlay.
 
 > Decision recorded: 84cc2af4
 > Date: 2026-06-16
-### Requirement: CompareTreesitterAstNodesByPositionNotObjectIdentityFailsoftOnPathologicalCfgsFixMultilineValueflowChainingAndGlobalnonlocalEscape
+### Sub-component: CompareTreesitterAstNodesByPositionNotObjectIdentityFailsoftOnPathologicalCfgsFixMultilineValueflowChainingAndGlobalnonlocalEscape
+
+#### Requirement: CompareTreesitterAstNodesByPositionNotObjectIdentityFailsoftOnPathologicalCfgsFixMultilineValueflowChainingAndGlobalnonlocalEscape
 
 The system SHALL compare tree-sitter AST nodes by source position (startIndex, endIndex), never by object identity, and SHALL fail soft with no overlay when a function exceeds 4000 CFG blocks or 128 reaching-defs sweeps.
 
 > Decision recorded: a95c5c98
 > Date: 2026-06-16
-### Requirement: ExtendCfgOverlayToCCPhpDivergentcontrolflowLanguagesRemainFailsoft
+### Sub-component: ExtendCfgOverlayToCCPhpDivergentcontrolflowLanguagesRemainFailsoft
+
+#### Requirement: ExtendCfgOverlayToCCPhpDivergentcontrolflowLanguagesRemainFailsoft
 
 The system SHALL build intraprocedural CFG overlays for C, C#, and PHP using their respective language specs, and SHALL fail soft with no overlay for languages lacking a CFG spec.
 
 > Decision recorded: 04831b41
 > Date: 2026-06-16
-### Requirement: V1CfgOverlayCovers11FieldmappableLanguagesDivergentgrammarLanguagesStayFailsoft
+### Sub-component: V1CfgOverlayCovers11FieldmappableLanguagesDivergentgrammarLanguagesStayFailsoft
+
+#### Requirement: V1CfgOverlayCovers11FieldmappableLanguagesDivergentgrammarLanguagesStayFailsoft
 
 The system SHALL limit the v1 CFG data-flow overlay to the 11 languages whose tree-sitter grammars expose field-named control-flow children, and SHALL fail soft for all other languages rather than risk unsound edges.
 
 > Decision recorded: 27680bb9
 > Date: 2026-06-16
-### Requirement: ValuelevelImpacttraceFallsBackToFunctionGranularityOnIllposedQueriesInsteadOfReportingZero
+### Sub-component: ValuelevelImpacttraceFallsBackToFunctionGranularityOnIllposedQueriesInsteadOfReportingZero
+
+#### Requirement: ValuelevelImpacttraceFallsBackToFunctionGranularityOnIllposedQueriesInsteadOfReportingZero
 
 The system SHALL fall back to function-granularity impact when a value-level query target cannot be resolved in the overlay, reporting applied:false with a reason rather than an empty narrowed result.
 
 > Decision recorded: a37d851f
 > Date: 2026-06-16
-### Requirement: CfgOverlayBuildAndValuelevelConsumersAreExceptionisolatedSilentfailRouting
+### Sub-component: CfgOverlayBuildAndValuelevelConsumersAreExceptionisolatedSilentfailRouting
+
+#### Requirement: CfgOverlayBuildAndValuelevelConsumersAreExceptionisolatedSilentfailRouting
 
 The system SHALL isolate CFG overlay build and read failures so they degrade to function-granularity results rather than dropping base call-graph data or failing MCP tools.
 
 > Decision recorded: fda9fc24
 > Date: 2026-06-16
-### Requirement: InfiniteLoopsDropThePhantomSkipbodyEdgeInTheCfgNoUnsoundExact
+### Sub-component: InfiniteLoopsDropThePhantomSkipbodyEdgeInTheCfgNoUnsoundExact
+
+#### Requirement: InfiniteLoopsDropThePhantomSkipbodyEdgeInTheCfgNoUnsoundExact
 
 The system SHALL model infinite loops (loop {}, for(;;), for {}) without a skip-body edge so that a pre-loop definition is never labeled exact when the loop body unconditionally reassigns it.
 
 > Decision recorded: 7b1d823d
 > Date: 2026-06-16
-### Requirement: RustImplExtractionKeysMethodsOnImplementingTypeNotTrait
+### Sub-component: RustImplExtractionKeysMethodsOnImplementingTypeNotTrait
+
+#### Requirement: RustImplExtractionKeysMethodsOnImplementingTypeNotTrait
 
 The system SHALL attribute Rust impl methods to the implementing type (not the trait) and strip generic parameters from the type name.
 
 > Decision recorded: 2ec9dd45
 > Date: 2026-06-16
-### Requirement: PersonalizedPagerankAsQueryconditionedRetrievalRankingNotGlobalSalience
+### Sub-component: PersonalizedPagerankAsQueryconditionedRetrievalRankingNotGlobalSalience
+
+#### Requirement: PersonalizedPagerankAsQueryconditionedRetrievalRankingNotGlobalSalience
 
 The system SHALL support an opt-in personalized-PageRank ranking mode for query-conditioned retrieval in orient and get_minimal_context, seeded by task-matched symbols rather than global salience.
 
 > Decision recorded: 0bdd4319
 > Date: 2026-06-16
 
-### Requirement: EpistemicLeaseEmitsNeutralFreshnessFactsNotCoerciveImperatives
+### Sub-component: EpistemicLeaseEmitsNeutralFreshnessFactsNotCoerciveImperatives
+
+#### Requirement: EpistemicLeaseEmitsNeutralFreshnessFactsNotCoerciveImperatives
 
 The canonical statement of this decision lives in the `mcp-handlers` domain — see [mcp-handlers/spec.md](../mcp-handlers/spec.md) (decision `8e95746d`).
-### Requirement: UnifyDomainnameDerivationBehindASingleLeaffirstHelper
+### Sub-component: UnifyDomainnameDerivationBehindASingleLeaffirstHelper
+
+#### Requirement: UnifyDomainnameDerivationBehindASingleLeaffirstHelper
 
 The system SHALL derive domain names using a leaf-first path walk with shared noise-directory filtering, ensuring consistent domain naming across dependency-graph clustering and repository mapping.
 
 > Decision recorded: 201ace19
 > Date: 2026-06-16
-### Requirement: AddJpahibernateEntityParserToSchemaExtractor
+### Sub-component: AddJpahibernateEntityParserToSchemaExtractor
+
+#### Requirement: AddJpahibernateEntityParserToSchemaExtractor
 
 The system SHALL extract schema models from Java files annotated with JPA @Entity or @MappedSuperclass, parsing table names, field names, types, and nullable status.
 
 > Decision recorded: 6af4d045
 > Date: 2026-06-16
-### Requirement: GeneralizeFileextensionStrippingAndJavaMethodSignatureExtractionForMultilanguageSupport
+### Sub-component: GeneralizeFileextensionStrippingAndJavaMethodSignatureExtractionForMultilanguageSupport
+
+#### Requirement: GeneralizeFileextensionStrippingAndJavaMethodSignatureExtractionForMultilanguageSupport
 
 The system SHALL extract Java method signatures including modifiers, generic type parameters, and throws clauses, while rejecting block-comment contents and body-level statements as false positives.
 
 > Decision recorded: 8f94535c
 > Date: 2026-06-16
-### Requirement: InjectCallgraphEdgesIntoTheDependencyGraphForJvmLanguages
+### Sub-component: InjectCallgraphEdgesIntoTheDependencyGraphForJvmLanguages
+
+#### Requirement: InjectCallgraphEdgesIntoTheDependencyGraphForJvmLanguages
 
 The system SHALL inject call-graph edges into the file-level dependency graph for JVM languages whose same-package references produce no import statements.
 
 > Decision recorded: 67580817
 > Date: 2026-06-17
-### Requirement: JaxrsRouteDetectionRequiresJavaxjakartawsrsImportToAvoidFalsePositivesFromHttpClientLibraries
+### Sub-component: JaxrsRouteDetectionRequiresJavaxjakartawsrsImportToAvoidFalsePositivesFromHttpClientLibraries
+
+#### Requirement: JaxrsRouteDetectionRequiresJavaxjakartawsrsImportToAvoidFalsePositivesFromHttpClientLibraries
 
 The system SHALL only classify a Java/Kotlin file as a JAX-RS server endpoint when it imports from the javax.ws.rs or jakarta.ws.rs package, to prevent false positives from HTTP client annotation libraries.
 
 > Decision recorded: f9de2e30
 > Date: 2026-06-17
 
-### Requirement: SynthesizedDynamicDispatchEdges
+### Sub-component: SynthesizedDynamicDispatchEdges
+
+#### Requirement: SynthesizedDynamicDispatchEdges
 
 The system SHALL augment the directly-resolved call graph with a deterministic synthesis pass that
 adds call edges for dynamic-dispatch patterns that direct name resolution cannot recover, deriving
@@ -5185,7 +5848,9 @@ isolation and adding a rule does not alter the output of existing rules.
 - **THEN** every directly-resolved edge is identical in both, and the synthesis-enabled graph differs
   only by added edges
 
-### Requirement: MultiLanguageEventChannelSynthesis
+### Sub-component: MultiLanguageEventChannelSynthesis
+
+#### Requirement: MultiLanguageEventChannelSynthesis
 
 The system SHALL recover event-channel edges across the languages it parses, not only
 JavaScript/TypeScript, applying the same high-precision discipline per language: an edge is emitted
@@ -5225,7 +5890,9 @@ kind never pairs with a same-text key of another.
 - **THEN** the JavaScript/TypeScript synthesized edges are identical to those produced when no Python
   source is present, and the Python edges are added independently
 
-### Requirement: TypeBasedEventSynthesis
+### Sub-component: TypeBasedEventSynthesis
+
+#### Requirement: TypeBasedEventSynthesis
 
 The system SHALL recover **type-based** event edges in languages whose event systems key on an event
 **type** rather than a string channel: a handler is registered by an annotation or a typed interface,
@@ -5262,7 +5929,9 @@ edge rather than guess.
 - **WHEN** the call graph is built
 - **THEN** no synthesized edge is created between them
 
-### Requirement: CallbackRegistrationSynthesis
+### Sub-component: CallbackRegistrationSynthesis
+
+#### Requirement: CallbackRegistrationSynthesis
 
 The system SHALL recover edges for handlers that are **registered as callbacks** with a framework or
 runtime that later invokes them, where there is no in-code dispatch site to pair against. When a
@@ -5308,7 +5977,9 @@ declaration with no body, does not resolve and is left alone).
 - **WHEN** the call graph is built
 - **THEN** no `callback-registration` edge is synthesized for it
 
-### Requirement: ActorMessageSynthesis
+### Sub-component: ActorMessageSynthesis
+
+#### Requirement: ActorMessageSynthesis
 
 The system SHALL recover edges for the actor/message-passing model where it is statically pairable to
 a named handler: a message dispatch and a message handler keyed on the message tag. In Elixir, a
@@ -5333,7 +6004,9 @@ pair — Go channels, and Akka/Scala `receive` blocks — SHALL NOT synthesize e
 - **WHEN** the call graph is built
 - **THEN** no synthesized edge is created between them (cast pairs only with `handle_cast`)
 
-### Requirement: EdgeProvenanceLabeling
+### Sub-component: EdgeProvenanceLabeling
+
+#### Requirement: EdgeProvenanceLabeling
 
 The system SHALL label every synthesized edge with a provenance distinct from directly-resolved
 edges, by setting its `confidence` to `synthesized` and recording the rule that produced it in an
@@ -5360,7 +6033,9 @@ absent `synthesizedBy` treated as a directly-resolved edge.
 - **WHEN** call distance is computed for each path
 - **THEN** the path traversing the synthesized edge has the greater total cost
 
-### Requirement: HighPrecisionSynthesisBounds
+### Sub-component: HighPrecisionSynthesisBounds
+
+#### Requirement: HighPrecisionSynthesisBounds
 
 The system SHALL bias edge synthesis toward false-negatives over false-positives: it SHALL emit an
 edge only when a registration site and a dispatch site are statically paired on a shared key or
@@ -5381,7 +6056,9 @@ wired, and the drop SHALL be logged with the channel key and count.
 - **WHEN** the synthesis pass runs
 - **THEN** no synthesized edges are emitted for that channel and the drop is logged with the key and count
 
-### Requirement: TypeHierarchyResolvedDispatch
+### Sub-component: TypeHierarchyResolvedDispatch
+
+#### Requirement: TypeHierarchyResolvedDispatch
 
 The system SHALL augment the call graph with a deterministic Class Hierarchy Analysis (CHA) pass that
 resolves polymorphic (virtual) method dispatch through inheritance and interface implementation,
@@ -5436,7 +6113,9 @@ and adding a rule does not alter the output of existing rules.
 - **THEN** every directly-resolved edge is identical in both, and the CHA-enabled graph differs only
   by added edges
 
-### Requirement: MethodLevelOverrideEdges
+### Sub-component: MethodLevelOverrideEdges
+
+#### Requirement: MethodLevelOverrideEdges
 
 The system SHALL materialize a method-level override edge for each base method `B.m` that is
 overridden by a derived method `D.m`, where `D` is a subtype of `B` in the class hierarchy and both
@@ -5480,7 +6159,9 @@ class pairs, and was applied inconsistently across reachability paths.
 - **THEN** override edges are still emitted for every name-and-arity-matched override pair, and none
   are silently dropped
 
-### Requirement: CHAProvenanceLabeling
+### Sub-component: CHAProvenanceLabeling
+
+#### Requirement: CHAProvenanceLabeling
 
 The system SHALL label every CHA-synthesized edge with a provenance distinct from directly-resolved
 edges by setting its `confidence` to `synthesized` and recording the producing rule in the
@@ -5518,7 +6199,9 @@ unchanged.
 - **THEN** the path traversing the virtual-dispatch edge has the greater total cost, and the
   `callDistance` confidence switch remains exhaustive without a new arm
 
-### Requirement: HighPrecisionCHABounds
+### Sub-component: HighPrecisionCHABounds
+
+#### Requirement: HighPrecisionCHABounds
 
 The system SHALL bias CHA edge synthesis toward false-negatives over false-positives. It SHALL emit a
 virtual-dispatch edge only when the called method name resolves to at least one implementation in the
@@ -5542,7 +6225,9 @@ achieved by resolving only against user-defined hierarchy types and by the fan-o
 - **WHEN** the CHA pass runs
 - **THEN** no virtual-dispatch edge is emitted for that call site
 
-### Requirement: ProvenanceAwareReachability
+### Sub-component: ProvenanceAwareReachability
+
+#### Requirement: ProvenanceAwareReachability
 
 The system SHALL prevent synthesized edges from manufacturing false dead-code positives while still
 benefiting from them: a symbol reachable from a root only through one or more synthesized edges
@@ -5590,14 +6275,18 @@ between reachability paths).
 - **WHEN** `B.m` is changed and tests are selected with synthesized edges included
 - **THEN** the test exercising `D.m` is selected, reached through the override edge
 
-### Requirement: LengthpreservingMaskingOfPythonNoncodeRegionsBeforeRouteExtraction
+### Sub-component: LengthpreservingMaskingOfPythonNoncodeRegionsBeforeRouteExtraction
+
+#### Requirement: LengthpreservingMaskingOfPythonNoncodeRegionsBeforeRouteExtraction
 
 The system SHALL mask Python triple-quoted strings and line comments length-preservingly before route-pattern matching so that character offsets remain byte-aligned with the original source.
 
 > Decision recorded: 65d4ac12
 > Date: 2026-06-17
 
-### Requirement: RouteLineFidelityIsLengthPreserving
+### Sub-component: RouteLineFidelityIsLengthPreserving
+
+#### Requirement: RouteLineFidelityIsLengthPreserving
 
 TS/JS route extraction SHALL compute every route's line number against text that is byte-aligned with the original file: comment masking MUST be length-preserving (blanked to spaces, newlines kept), never line-removing, so that `route.line` consumed by original-byte consumers — enclosing-function anchoring for route-handler edge synthesis, dead-code liveness roots, the route inventory, and the registration-line handler lookup — is exact, not approximate. Masking SHALL still prevent route patterns inside comments from matching as real routes.
 
@@ -5626,141 +6315,189 @@ TS/JS route extraction SHALL compute every route's line number against text that
 - **WHEN** route definitions are extracted
 - **THEN** no route is produced for the commented pattern
 
-### Requirement: HardenChaPrecisionFromRealooDogfoodingSamefileBaseResolutionVarnewtTypeRecoveryCHierarchyExtraction
+### Sub-component: HardenChaPrecisionFromRealooDogfoodingSamefileBaseResolutionVarnewtTypeRecoveryCHierarchyExtraction
+
+#### Requirement: HardenChaPrecisionFromRealooDogfoodingSamefileBaseResolutionVarnewtTypeRecoveryCHierarchyExtraction
 
 The system SHALL resolve base-class references to same-file declarations before falling back to global name matching, and SHALL recover types from `var x = new T()` patterns in Java and C#.
 
 > Decision recorded: 66e47bb4
 > Date: 2026-06-17
-### Requirement: ExtendChaHierarchyExtractionToKotlinphpswiftscalaWithAmbiguityskipAndQualifiedsupertypeskipGuards
+### Sub-component: ExtendChaHierarchyExtractionToKotlinphpswiftscalaWithAmbiguityskipAndQualifiedsupertypeskipGuards
+
+#### Requirement: ExtendChaHierarchyExtractionToKotlinphpswiftscalaWithAmbiguityskipAndQualifiedsupertypeskipGuards
 
 The system SHALL extract class-hierarchy relationships for Kotlin, PHP, Swift, and Scala, skipping ambiguous cross-file base names and qualified supertypes to avoid false-positive dispatch edges.
 
 > Decision recorded: 9d87726f
 > Date: 2026-06-17
-### Requirement: ExtendChaTypehierarchyExtractionToKotlinPhpSwiftAndScala
+### Sub-component: ExtendChaTypehierarchyExtractionToKotlinPhpSwiftAndScala
+
+#### Requirement: ExtendChaTypehierarchyExtractionToKotlinPhpSwiftAndScala
 
 The system SHALL extract class-hierarchy relationships (extends/implements/mixin edges) from Kotlin, PHP, Swift, and Scala source files using tree-sitter grammars.
 
 > Decision recorded: bf52c392
 > Date: 2026-06-17
-### Requirement: AmbiguousCrossfileParentResolutionPrefersFalsenegativeOverFalsepositive
+### Sub-component: AmbiguousCrossfileParentResolutionPrefersFalsenegativeOverFalsepositive
+
+#### Requirement: AmbiguousCrossfileParentResolutionPrefersFalsenegativeOverFalsepositive
 
 The system SHALL skip cross-file parent resolution when the parent name is ambiguous (declared in more than one file), preferring false-negatives over false-positives in inheritance edges.
 
 > Decision recorded: d5967a48
 > Date: 2026-06-17
-### Requirement: ResolveChaBaseClassesByLayeredEvidenceSamefileImportSamedirectoryGlobaluniqueInsteadOfBarenamethenskip
+### Sub-component: ResolveChaBaseClassesByLayeredEvidenceSamefileImportSamedirectoryGlobaluniqueInsteadOfBarenamethenskip
+
+#### Requirement: ResolveChaBaseClassesByLayeredEvidenceSamefileImportSamedirectoryGlobaluniqueInsteadOfBarenamethenskip
 
 The system SHALL resolve CHA base-class references using layered evidence (same-file, import, same-directory, global-unique) before falling back to ambiguity-skip.
 
 > Decision recorded: 320bf215
 > Date: 2026-06-17
-### Requirement: DetectGoStructEmbedsByAnonymousFieldNotFieldTypeAndUnwrapPointerEmbeds
+### Sub-component: DetectGoStructEmbedsByAnonymousFieldNotFieldTypeAndUnwrapPointerEmbeds
+
+#### Requirement: DetectGoStructEmbedsByAnonymousFieldNotFieldTypeAndUnwrapPointerEmbeds
 
 The system SHALL detect Go struct embedding only via anonymous fields (with pointer unwrapping), never via named fields.
 
 > Decision recorded: db3b354b
 > Date: 2026-06-17
-### Requirement: UseADeterministicFieldweightedRankerForRecallNoLearnedModel
+### Sub-component: UseADeterministicFieldweightedRankerForRecallNoLearnedModel
+
+#### Requirement: UseADeterministicFieldweightedRankerForRecallNoLearnedModel
 
 The system SHALL rank recalled memories using a deterministic field-weighted scoring algorithm with identifier-aware normalization, without requiring LLM inference or embedding lookups.
 
 > Decision recorded: 08005eb9
 > Date: 2026-06-18
-### Requirement: WidenTsjsFunctionnodeExtractionToMemberassignedAndVarboundFunctions
+### Sub-component: WidenTsjsFunctionnodeExtractionToMemberassignedAndVarboundFunctions
+
+#### Requirement: WidenTsjsFunctionnodeExtractionToMemberassignedAndVarboundFunctions
 
 The system SHALL extract member-assigned functions (obj.prop = function, exports.x = function, X.prototype.y = function) and var-bound functions as first-class call-graph nodes in JS/TS analysis.
 
 > Decision recorded: d8b81a9b
 > Date: 2026-06-18
-### Requirement: IndexClassfieldArrowfunctionMembersViaAPublicfielddefinitionQueryArm
+### Sub-component: IndexClassfieldArrowfunctionMembersViaAPublicfielddefinitionQueryArm
+
+#### Requirement: IndexClassfieldArrowfunctionMembersViaAPublicfielddefinitionQueryArm
 
 The system SHALL index class fields bound to arrow or function expressions as named functions in the call graph, using the same naming convention as method definitions.
 
 > Decision recorded: efcd981c
 > Date: 2026-06-19
-### Requirement: ResolveSamefileMembermethodCallsToTheirDottednameNodesViaExactIdLookup
+### Sub-component: ResolveSamefileMembermethodCallsToTheirDottednameNodesViaExactIdLookup
+
+#### Requirement: ResolveSamefileMembermethodCallsToTheirDottednameNodesViaExactIdLookup
 
 The system SHALL resolve same-file member-method calls to their dotted-name call-graph nodes via exact id lookup before falling back to type inference or external resolution.
 
 > Decision recorded: 527e0f1f
 > Date: 2026-06-19
-### Requirement: DetectAsyncFromTheCapturedRhsValueNodeForBindingassignmentfieldFunctions
+### Sub-component: DetectAsyncFromTheCapturedRhsValueNodeForBindingassignmentfieldFunctions
+
+#### Requirement: DetectAsyncFromTheCapturedRhsValueNodeForBindingassignmentfieldFunctions
 
 The system SHALL detect the async keyword from the RHS value node of binding, assignment, and class-field function expressions rather than from the enclosing statement node.
 
 > Decision recorded: 1a926c8a
-### Requirement: UseGitCommitAncestryForBitemporalMemoryValidityValidfromcommitDeterministicNoLlm
+### Sub-component: UseGitCommitAncestryForBitemporalMemoryValidityValidfromcommitDeterministicNoLlm
+
+#### Requirement: UseGitCommitAncestryForBitemporalMemoryValidityValidfromcommitDeterministicNoLlm
 
 The system SHALL use git commit ancestry (merge-base --is-ancestor) rather than wall-clock timestamps for bitemporal memory valid-time comparison, ensuring reproducible history for a fixed repo state.
 
 > Decision recorded: 48771c59
 > Date: 2026-06-18
-### Requirement: MemoryIdentityIsHashcontentanchorsNotTheStoredIdField
+### Sub-component: MemoryIdentityIsHashcontentanchorsNotTheStoredIdField
+
+#### Requirement: MemoryIdentityIsHashcontentanchorsNotTheStoredIdField
 
 The system SHALL deduplicate memories by content-anchor identity (hash of content and anchors) so that re-recording the same fact for the same code updates in place regardless of the original id scheme.
 
 > Decision recorded: 0e96eca1
-### Requirement: NameThePreflightBlastradiusGuardBlastradiusMcpBlastradiusCliDistinctFromTheExistingPreflightStalenessGate
+### Sub-component: NameThePreflightBlastradiusGuardBlastradiusMcpBlastradiusCliDistinctFromTheExistingPreflightStalenessGate
+
+#### Requirement: NameThePreflightBlastradiusGuardBlastradiusMcpBlastradiusCliDistinctFromTheExistingPreflightStalenessGate
 
 The system SHALL provide a `blast_radius` tool (MCP) and `blast-radius` command (CLI) that computes the structural blast radius of a diff by orchestrating existing deterministic analyses into a single conclusion-shaped briefing.
 
 > Decision recorded: 987286eb
 > Date: 2026-06-18
-### Requirement: BlastradiusHookUsesCapabilityDetectionInsteadOfFileexistenceCheck
+### Sub-component: BlastradiusHookUsesCapabilityDetectionInsteadOfFileexistenceCheck
+
+#### Requirement: BlastradiusHookUsesCapabilityDetectionInsteadOfFileexistenceCheck
 
 The system SHALL The pre-commit hook SHALL verify that the openlore binary supports the blast-radius --hook flag before invoking it, falling back to exit 0 when it does not.
 
 > Decision recorded: 51c2603d
 > Date: 2026-06-19
-### Requirement: BlastradiusPipelineTreatsAllInternalErrorsAsAdvisoryNeverblockGuarantee
+### Sub-component: BlastradiusPipelineTreatsAllInternalErrorsAsAdvisoryNeverblockGuarantee
+
+#### Requirement: BlastradiusPipelineTreatsAllInternalErrorsAsAdvisoryNeverblockGuarantee
 
 The system SHALL The blast-radius pipeline SHALL catch exceptions from all composed handlers and degrade to advisory caveats, ensuring a zero exit code regardless of internal errors.
 
 > Decision recorded: 215092bc
 > Date: 2026-06-19
-### Requirement: BlastradiusBriefingReportsTheResolvedBaseRefNotJustTheRequestedOne
+### Sub-component: BlastradiusBriefingReportsTheResolvedBaseRefNotJustTheRequestedOne
+
+#### Requirement: BlastradiusBriefingReportsTheResolvedBaseRefNotJustTheRequestedOne
 
 The system SHALL include the resolved base ref in blast-radius briefings and emit a caveat when it differs from the requested ref.
 
 > Decision recorded: c7ddcd1f
 > Date: 2026-06-19
-### Requirement: ConfidenceboundaryResponseShapeCategoricalEdgebasisKnownunknowableCrossingsStalenessNeverABlendedScore
+### Sub-component: ConfidenceboundaryResponseShapeCategoricalEdgebasisKnownunknowableCrossingsStalenessNeverABlendedScore
+
+#### Requirement: ConfidenceboundaryResponseShapeCategoricalEdgebasisKnownunknowableCrossingsStalenessNeverABlendedScore
 
 The system SHALL attach a deterministic confidenceBoundary object (edge provenance counts, known-unknowable crossings, staleness, and a complete flag) to every conclusion-tool response, computed solely from static analysis metadata without LLM inference.
 
 > Decision recorded: 08e71184
 > Date: 2026-06-18
-### Requirement: CrossrepoFederationResolvesConsumerCallSitesByMatchingProducerStableidNameDescriptorsAgainstExternalEdges
+### Sub-component: CrossrepoFederationResolvesConsumerCallSitesByMatchingProducerStableidNameDescriptorsAgainstExternalEdges
+
+#### Requirement: CrossrepoFederationResolvesConsumerCallSitesByMatchingProducerStableidNameDescriptorsAgainstExternalEdges
 
 The system SHALL resolve cross-repo consumer call sites by matching producer stable-ID name descriptors against external-confidence edges, disclosing unconfirmed arity and possible name collisions.
 
 > Decision recorded: 67ca60fe
 > Date: 2026-06-19
-### Requirement: ExcludeSupersededDecisionsFromAuthoritativeRecallViaOneSharedSupersessionPredicate
+### Sub-component: ExcludeSupersededDecisionsFromAuthoritativeRecallViaOneSharedSupersessionPredicate
+
+#### Requirement: ExcludeSupersededDecisionsFromAuthoritativeRecallViaOneSharedSupersessionPredicate
 
 The canonical statement of this decision lives in the `mcp-handlers` domain — see [mcp-handlers/spec.md](../mcp-handlers/spec.md) (decision `6c32e6c6`).
-### Requirement: LeanDefaultMcpSurfaceNavigationPresetFull62toolSurfaceIsOptinViaPresetFullAlltools
+### Sub-component: LeanDefaultMcpSurfaceNavigationPresetFull62toolSurfaceIsOptinViaPresetFullAlltools
+
+#### Requirement: LeanDefaultMcpSurfaceNavigationPresetFull62toolSurfaceIsOptinViaPresetFullAlltools
 
 **[SUPERSEDED by c79ec7ca / ADR-0023.]** This requirement (the `navigation` preset as the default MCP surface; full surface via `--preset full` / `--all-tools`) is superseded: the default is now the `substrate` preset (the navigation core plus `recall` + `verify_claim` + `blast_radius`, 13 tools), and `--preset navigation` remains the lean navigate-only escape.
 
 > Decision recorded: a6c916ed
 > Date: 2026-06-22
-### Requirement: PersistProveScorecardsAsDatedNonclobberingFilesUnderOpenloreprove
+### Sub-component: PersistProveScorecardsAsDatedNonclobberingFilesUnderOpenloreprove
+
+#### Requirement: PersistProveScorecardsAsDatedNonclobberingFilesUnderOpenloreprove
 
 The system SHALL persist prove scorecards as dated, non-clobbering JSON files under .openlore/prove/ when invoked with --save.
 
 > Decision recorded: 670b5f0b
 > Date: 2026-06-22
-### Requirement: ProveSavescorecardWritesAtomicallyWxAndDegradesFsErrorsInsteadOfCrashing
+### Sub-component: ProveSavescorecardWritesAtomicallyWxAndDegradesFsErrorsInsteadOfCrashing
+
+#### Requirement: ProveSavescorecardWritesAtomicallyWxAndDegradesFsErrorsInsteadOfCrashing
 
 The system SHALL write prove scorecards atomically with O_CREAT|O_EXCL and degrade filesystem errors to stderr + exit 1 without discarding the printed scorecard.
 
 > Decision recorded: dfe33d94
 > Date: 2026-06-23
 
-### Requirement: IncrementalUpdateConvergesToFullAnalyzeOrMarksStale
+### Sub-component: IncrementalUpdateConvergesToFullAnalyzeOrMarksStale
+
+#### Requirement: IncrementalUpdateConvergesToFullAnalyzeOrMarksStale
 
 The incremental call-graph update path (the file watcher's per-batch update) SHALL, for the region affected by a change, converge to the same graph that a full `analyze --force` would produce. It SHALL re-parse and re-resolve the changed file's direct dependents — its direct callers AND prior non-callers whose previously-`external` call sites a newly-added symbol should now bind — rather than re-parsing only the changed file and a fixed-size slice of its direct callers. (Because a batch fully determines the set of symbols it adds or removes, this single bounded expansion is sufficient to converge the affected region; no multi-hop fixpoint iteration is required.) Where the update cannot complete that expansion within a bounded work budget (`INCREMENTAL_CLOSURE_BUDGET`), it SHALL explicitly mark the un-recomputed files as `stale` in the graph metadata; it SHALL NOT leave a divergent region unmarked. The update SHALL be sound: it MAY mark more than the minimal dirty set as stale, but it SHALL NOT report a stale region as current.
 
@@ -5782,7 +6519,9 @@ The incremental call-graph update path (the file watcher's per-batch update) SHA
 - **WHEN** the incremental watcher processes the save
 - **THEN** the un-recomputed region is explicitly marked `stale` in the graph metadata, and no part of that region is served as current
 
-### Requirement: FreshnessVerdictsHonorTheStaleRegion
+### Sub-component: FreshnessVerdictsHonorTheStaleRegion
+
+#### Requirement: FreshnessVerdictsHonorTheStaleRegion
 
 A freshness verdict over a symbol SHALL account for the staleness of the symbol's surrounding topology, not only the symbol's own existence and content hash. A symbol that lies within an explicitly-marked stale region SHALL NOT be reported as `fresh`/authoritative; it SHALL be reported as `drifted` (or otherwise non-authoritative) until the region is reconciled. A downgrade caused ONLY by the stale region (the anchored code is byte-identical) SHALL be distinguishable from a genuine content change — it carries a `staleRegion` marker — so consumers can label it "not yet reconciled" rather than asserting the code changed. In particular, the code-vs-memory drift detector SHALL NOT report a pure stale-region downgrade as drift (it is not a code change and it self-heals).
 
@@ -5792,7 +6531,9 @@ A freshness verdict over a symbol SHALL account for the staleness of the symbol'
 - **WHEN** the memory's freshness is evaluated
 - **THEN** the verdict is not `fresh`; it reflects that `A`'s topology is stale, and it is marked as a stale-region downgrade (not a code change)
 
-### Requirement: StaleRegionsAreReconciledWithoutAManualFullAnalyze
+### Sub-component: StaleRegionsAreReconciledWithoutAManualFullAnalyze
+
+#### Requirement: StaleRegionsAreReconciledWithoutAManualFullAnalyze
 
 An explicitly-marked stale region SHALL be reconciled over time — opportunistically as later edits touch it — so the stale region shrinks toward empty without requiring the user to run `analyze --force` manually. A full `analyze --force` SHALL clear all stale markings and SHALL remain the authoritative ground truth against which incremental convergence is defined and tested.
 
@@ -5805,7 +6546,9 @@ An explicitly-marked stale region SHALL be reconciled over time — opportunisti
 > Change: fix-transitive-incremental-staleness
 > Date: 2026-06-23
 
-### Requirement: OneVsAllCloneQuery
+### Sub-component: OneVsAllCloneQuery
+
+#### Requirement: OneVsAllCloneQuery
 
 The system SHALL provide a deterministic **one-vs-all clone query** over the existing near-clone
 detector: given a single query body (the source of one function, or a raw snippet) and the indexed
@@ -5860,7 +6603,9 @@ SHALL NOT require any new persisted artifact.
 > Change: add-clone-query-tool
 > Date: 2026-06-26
 
-### Requirement: StringLiteralSafeCloneNormalization
+### Sub-component: StringLiteralSafeCloneNormalization
+
+#### Requirement: StringLiteralSafeCloneNormalization
 
 Clone-detection normalization SHALL NOT alter string-literal contents when stripping comments:
 comment rules SHALL be evaluated so a comment marker inside a literal (`//` in a URL, `#` in a hex
@@ -5905,14 +6650,18 @@ labeled seed-relative — never a seed-relative number presented as group-wide.
 > Change: fix-clone-string-normalization
 > Date: 2026-07-19
 
-### Requirement: FlipDefaultMcpSurfaceToTheSubstrateBothfacesPreset
+### Sub-component: FlipDefaultMcpSurfaceToTheSubstrateBothfacesPreset
+
+#### Requirement: FlipDefaultMcpSurfaceToTheSubstrateBothfacesPreset
 
 The system SHALL expose the substrate preset (navigation core plus recall, verify_claim, and blast_radius) as the default MCP tool surface.
 
 > Decision recorded: c79ec7ca
 > Date: 2026-06-28
 
-### Requirement: ExportParserRecognizesModifierPrefixedExports
+### Sub-component: ExportParserRecognizesModifierPrefixedExports
+
+#### Requirement: ExportParserRecognizesModifierPrefixedExports
 
 The shared JavaScript/TypeScript export parser (`parseJSExports`) SHALL recognize modifier-prefixed
 exports so that no exported symbol is silently dropped or mis-named: `export async function`,
@@ -5952,7 +6701,9 @@ SHALL inherit this recognition without per-consumer recovery.
 > Change: fix-export-parser-fidelity
 > Date: 2026-07-19
 
-### Requirement: ImportExportLineNumbersMatchOriginalSource
+### Sub-component: ImportExportLineNumbersMatchOriginalSource
+
+#### Requirement: ImportExportLineNumbersMatchOriginalSource
 
 The import/export parser SHALL compute every recorded import and export line number against text
 that is line-aligned with the original file. Comment removal in the JavaScript/TypeScript and Java

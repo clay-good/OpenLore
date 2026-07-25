@@ -746,16 +746,24 @@ The system SHALL the function shall determine if a changed file is relevant for 
 - **THEN** The function SHALL return true if the file is relevant for specification drift detection, otherwise
 false
 - **AND** The function SHALL consider the file path and content
-### Requirement: UseGitCommitAncestryForBitemporalMemoryValidityValidfromcommitDeterministicNoLlm
+### Sub-component: UseGitCommitAncestryForBitemporalMemoryValidityValidfromcommitDeterministicNoLlm
+
+#### Requirement: UseGitCommitAncestryForBitemporalMemoryValidityValidfromcommitDeterministicNoLlm
 
 The canonical statement of this decision lives in the `analyzer` domain — see [analyzer/spec.md](../analyzer/spec.md) (decision `48771c59`).
-### Requirement: ExcludeSupersededDecisionsFromAuthoritativeRecallViaOneSharedSupersessionPredicate
+### Sub-component: ExcludeSupersededDecisionsFromAuthoritativeRecallViaOneSharedSupersessionPredicate
+
+#### Requirement: ExcludeSupersededDecisionsFromAuthoritativeRecallViaOneSharedSupersessionPredicate
 
 The canonical statement of this decision lives in the `mcp-handlers` domain — see [mcp-handlers/spec.md](../mcp-handlers/spec.md) (decision `6c32e6c6`).
-### Requirement: LeanDefaultMcpSurfaceNavigationPresetFull62toolSurfaceIsOptinViaPresetFullAlltools
+### Sub-component: LeanDefaultMcpSurfaceNavigationPresetFull62toolSurfaceIsOptinViaPresetFullAlltools
+
+#### Requirement: LeanDefaultMcpSurfaceNavigationPresetFull62toolSurfaceIsOptinViaPresetFullAlltools
 
 The canonical statement of this decision lives in the `analyzer` domain — see [analyzer/spec.md](../analyzer/spec.md) (decision `a6c916ed`).
-### Requirement: FlipDefaultMcpSurfaceToTheSubstrateBothfacesPreset
+### Sub-component: FlipDefaultMcpSurfaceToTheSubstrateBothfacesPreset
+
+#### Requirement: FlipDefaultMcpSurfaceToTheSubstrateBothfacesPreset
 
 The canonical statement of this decision lives in the `analyzer` domain — see [analyzer/spec.md](../analyzer/spec.md) (decision `c79ec7ca`).
 

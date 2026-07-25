@@ -13,6 +13,8 @@
  *   2. Dead intra-corpus links — a link to `../<domain>/spec.md` with no file on disk.
  *   3. Duplicate requirement names within a single domain — two `### Requirement: X` in one spec.
  *   4. A domain-table row in `overview` whose linked spec file does not exist on disk.
+ *   5. A `### Requirement:` header outside the domain's `## Requirements` section — the defect that
+ *      silently broke `openspec archive` for the WHOLE corpus (change: fix-spec-corpus-archivability).
  *
  * It also guards the decision-sync scoping repaired in this change (and enforced going forward by
  * the syncer fix in `delegate-lifecycle-scope-decision-sync`): a decision-synced requirement (one
@@ -47,6 +49,31 @@ const specOf = (domain: string) => readFileSync(join(SPECS_DIR, domain, 'spec.md
 function requirementNames(text: string): string[] {
   return [...text.matchAll(/^### Requirement: (.+)$/gm)].map(m => m[1].trim());
 }
+
+describe('spec-corpus lint: every requirement lives in the Requirements section', () => {
+  // openspec parses a main spec's requirements ONLY from inside `## Requirements`. A
+  // `### Requirement:` header anywhere else is invisible to validate/list — and, worse, makes
+  // the whole spec structurally invalid, so `openspec archive` aborts for EVERY change that
+  // touches that domain. The corpus reached 175 such headers across four domains before anyone
+  // noticed, because nothing failed loudly: archiving simply stopped working.
+  //
+  // Sub-component blocks are the legitimate nested form and use `#### Requirement:` under a
+  // `### Sub-component:` header; only the level-3 header is constrained here.
+  for (const domain of DOMAINS) {
+    it(`${domain} has no requirement header outside ## Requirements`, () => {
+      const lines = specOf(domain).split('\n');
+      let section: string | undefined;
+      const strays: string[] = [];
+      lines.forEach((line, i) => {
+        if (line.startsWith('## ') && !line.startsWith('###')) section = line.slice(3).trim();
+        else if (line.startsWith('### Requirement:') && section !== 'Requirements') {
+          strays.push(`${domain}/spec.md:${i + 1} in "## ${section}" — ${line.trim()}`);
+        }
+      });
+      expect(strays, `requirement headers outside "## Requirements" (openspec archive aborts on these)`).toEqual([]);
+    });
+  }
+});
 
 describe('spec-corpus lint: no vacuous placeholder scenarios', () => {
   // These two lines are the generated placeholder template. Real scenarios name concrete
