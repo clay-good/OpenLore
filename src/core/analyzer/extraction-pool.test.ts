@@ -27,7 +27,7 @@ import {
   type ExtractionResponse,
 } from './extraction-pool.js';
 import { CallGraphBuilder, serializeCallGraph, dispatchFileExtract, type FileExtractResult } from './call-graph.js';
-import { EXTRACTION_POOL_MIN_FILES, EXTRACTION_POOL_STARTUP_TIMEOUT_MS } from '../../constants.js';
+import { EXTRACTION_POOL_MAX, EXTRACTION_POOL_MIN_FILES, EXTRACTION_POOL_STARTUP_TIMEOUT_MS } from '../../constants.js';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -477,7 +477,8 @@ describe('extraction pool — protocol and budget', () => {
     // self-heal rebuild alongside a tool-call build).
     const many = EXTRACTION_POOL_MIN_FILES + 64;
     const first = plannedPoolSize(many);
-    expect(first).toBeGreaterThan(0);
+    // A machine too small for any pool has nothing to cap; the cores test covers that case.
+    if (first === 0) return;
 
     // Workers that spawn and then say nothing, so they stay live while we look at the budget.
     const silent: ExtractionWorkerFactory = () => ({
@@ -488,10 +489,14 @@ describe('extraction pool — protocol and budget', () => {
     const trivial = async (): Promise<FileExtractResult | undefined> => undefined;
 
     vi.useFakeTimers();
-    const holding = extractFilesForPass1(corpus(4), trivial, isEmpty, { workerFactory: silent, poolSize: first });
+    // Hold the whole process budget. Sizing is otherwise core-bound, so this — not a
+    // partial hold — is what proves the budget is the thing doing the capping.
+    const holding = extractFilesForPass1(corpus(4), trivial, isEmpty, {
+      workerFactory: silent,
+      poolSize: EXTRACTION_POOL_MAX,
+    });
     await Promise.resolve();
-    // Those workers are alive, so a build starting now plans a smaller pool.
-    expect(plannedPoolSize(many)).toBeLessThan(first);
+    expect(plannedPoolSize(many)).toBe(0);
 
     await vi.advanceTimersByTimeAsync(EXTRACTION_POOL_STARTUP_TIMEOUT_MS + 1_000);
     vi.useRealTimers();
