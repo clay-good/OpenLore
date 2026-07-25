@@ -29,11 +29,15 @@ const FORBIDDEN = [
   { pattern: /(^|\/)(id_rsa|id_ed25519|.*\.pem|.*\.p12|.*\.pfx|.*\.key)$/i, why: 'private key material' },
   { pattern: /(^|\/)\.aws\//i, why: 'cloud credentials' },
   { pattern: /(^|\/)\.ssh\//i, why: 'SSH material' },
-  // Scoped to the package's OWN code. `examples/` is deliberately exempt: those
-  // directories are self-contained sample repositories (drift-demo, the opencode
-  // plugins) whose test files are part of the corpus the demos analyze — shipping
-  // them is the point, not a leak.
-  { pattern: /^(dist|src)\/.*\.test\.(ts|js|mjs|cjs|tsx|jsx)$/i, why: "the package's own test file — excluded by the files allowlist; presence means the allowlist widened" },
+  // Any test file OUTSIDE `examples/`. The exemption is deliberate and narrow:
+  // `examples/` holds self-contained sample repositories (drift-demo, the opencode
+  // plugins) whose test files are part of the corpus the demos analyze, so shipping
+  // those is the point. Everywhere else — dist, src, stubs, schemas, skills, scripts —
+  // a test file means the allowlist widened.
+  {
+    pattern: /^(?!examples\/).*\.test\.(ts|js|mjs|cjs|tsx|jsx)$/i,
+    why: "the package's own test file — excluded by the files allowlist; presence means the allowlist widened",
+  },
   { pattern: /(^|\/)coverage\//i, why: 'coverage report' },
   { pattern: /(^|\/)\.claude\//i, why: 'local agent configuration' },
 ];
@@ -48,17 +52,43 @@ const REQUIRED = [
   'scripts/postinstall.mjs', // referenced by the postinstall lifecycle script
 ];
 
+/**
+ * Fails CLOSED, like the audit gate: if the manifest cannot be produced or does not
+ * contain a file list, that is reported as "could not verify" rather than passing on
+ * an empty list. A check that cannot run must not report success.
+ */
+function fatal(message, detail = '') {
+  console.error(`✖ ${message}`);
+  if (detail) console.error(`  ${String(detail).trim().split('\n').slice(0, 6).join('\n  ')}`);
+  console.error('\naudit-packlist: FAILED (could not verify the published file list).');
+  process.exit(1);
+}
+
 function packManifest() {
-  // --dry-run so nothing is written; --json gives the exact file list npm would ship.
-  const raw = execFileSync('npm', ['pack', '--dry-run', '--json'], {
-    encoding: 'utf-8',
-    maxBuffer: 64 * 1024 * 1024,
-    // npm prints the human-readable tarball summary to stderr; keep it out of stdout.
-    stdio: ['ignore', 'pipe', 'ignore'],
-  });
-  const parsed = JSON.parse(raw);
+  let raw;
+  try {
+    // --dry-run so nothing is written; --json gives the exact file list npm would ship.
+    raw = execFileSync('npm', ['pack', '--dry-run', '--json'], {
+      encoding: 'utf-8',
+      maxBuffer: 64 * 1024 * 1024,
+      // npm prints the human-readable tarball summary to stderr; keep it out of stdout.
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch (err) {
+    fatal('`npm pack --dry-run --json` failed.', err.stderr || err.message);
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    fatal('`npm pack --json` did not return JSON.', raw.slice(0, 400));
+  }
+
   const entry = Array.isArray(parsed) ? parsed[0] : parsed;
-  if (!entry?.files) throw new Error('npm pack --json returned no file list');
+  if (!Array.isArray(entry?.files) || entry.files.length === 0) {
+    fatal('`npm pack --json` returned no file list — treating as "did not run".');
+  }
   return entry.files.map(f => f.path.replace(/\\/g, '/'));
 }
 

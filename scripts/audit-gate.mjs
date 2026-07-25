@@ -43,8 +43,52 @@ function runAudit() {
   }
 }
 
-const report = JSON.parse(runAudit());
-const vulnerabilities = report.vulnerabilities ?? {};
+/**
+ * Fail CLOSED when the audit did not actually run.
+ *
+ * `npm audit` exits non-zero both when it finds advisories AND when it cannot run at
+ * all (no lockfile, registry unreachable, an output-shape change). Those look alike
+ * from the outside, so the report has to be validated rather than trusted: a missing
+ * `vulnerabilities` map would otherwise read as "nothing found" and the gate would
+ * report OK without having checked anything.
+ */
+function parseReport(raw) {
+  let report;
+  try {
+    report = JSON.parse(raw);
+  } catch {
+    fatal('npm audit did not return JSON.', raw.slice(0, 400));
+  }
+  if (report.error) {
+    fatal(
+      `npm audit could not run: ${report.error.code ?? 'unknown error'}.`,
+      report.error.summary ?? report.error.detail ?? ''
+    );
+  }
+  // Both keys are present on every successful `npm audit --json`, including a clean
+  // tree (where `vulnerabilities` is an empty object). Absence means "did not run".
+  if (typeof report.vulnerabilities !== 'object' || report.vulnerabilities === null) {
+    fatal('npm audit returned no `vulnerabilities` map — treating as "did not run".');
+  }
+  if (typeof report.metadata !== 'object' || report.metadata === null) {
+    fatal('npm audit returned no `metadata` block — treating as "did not run".');
+  }
+  return report;
+}
+
+function fatal(message, detail = '') {
+  console.error(`✖ ${message}`);
+  if (detail) console.error(`  ${String(detail).trim().split('\n').join('\n  ')}`);
+  console.error(
+    '\naudit-gate: FAILED (could not verify the dependency tree).\n' +
+      'This is deliberate — a gate that cannot run must not report success. ' +
+      'Fix the underlying npm error and re-run.'
+  );
+  process.exit(1);
+}
+
+const report = parseReport(runAudit());
+const vulnerabilities = report.vulnerabilities;
 
 // Collect root advisories: a `via` entry that is an object is an advisory itself,
 // whereas a string entry only names a dependent that inherits one.

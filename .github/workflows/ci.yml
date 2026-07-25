@@ -20,7 +20,9 @@ permissions:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # Superseded pull-request runs are cancelled; runs on main are not, so a push to the
+  # default branch always ends up with a completed run rather than a cancelled one.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   lint:

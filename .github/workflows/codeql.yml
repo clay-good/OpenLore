@@ -25,11 +25,13 @@ permissions:
 
 concurrency:
   group: codeql-${{ github.ref }}
-  cancel-in-progress: true
+  # Superseded pull-request runs are cancelled; runs on main are not, so the default
+  # branch always ends up with a completed analysis rather than a cancelled one.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   analyze:
-    name: Analyze (javascript-typescript)
+    name: Analyze (${{ matrix.language }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -37,19 +39,30 @@ jobs:
       security-events: write # upload the SARIF results
       actions: read # read workflow run metadata
 
+    strategy:
+      fail-fast: false
+      matrix:
+        # `actions` analyzes the workflow files themselves — the expression-injection
+        # class this repo also guards structurally in `src/workflow-security.test.ts`.
+        # The guard checks the shapes it knows to look for; this checks dataflow, and
+        # the two catch different mistakes.
+        language: [javascript-typescript, actions]
+
     steps:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
         with:
-          languages: javascript-typescript
+          languages: ${{ matrix.language }}
           config-file: ./.github/codeql/codeql-config.yml
 
-      # No build step: `javascript-typescript` is extracted directly from source, so
+      # No build step: both languages are extracted directly from source, so
       # `autobuild` would only add a failure mode without changing what is analyzed.
       - name: Perform CodeQL analysis
         uses: github/codeql-action/analyze@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
         with:
-          category: '/language:javascript-typescript'
+          category: '/language:${{ matrix.language }}'

@@ -130,13 +130,20 @@ describe('workflow security: no shell injection via run:', () => {
       // `run: |` opens one, and it ends at the first line indented no deeper than the
       // `run:` key itself. Parsing the YAML instead would lose the line numbers that
       // make a failure actionable.
+      //
+      // The column that matters is where the `run` KEY starts, not where the line's
+      // whitespace ends. In the list-item form (`- run: |`) the `- ` shifts the key
+      // right, and sibling keys of that step (`env:`, `shell:`) align with the key
+      // rather than with the dash. Measuring from the dash would put those siblings
+      // "inside" the block and flag `env: ${{ ... }}` — the very pattern this guard
+      // exists to encourage.
       let runIndent: number | null = null;
 
       lines.forEach((line, i) => {
-        const runMatch = line.match(/^(\s*)(?:-\s+)?run:\s*(.*)$/);
+        const runMatch = line.match(/^(\s*)(-\s+)?run:\s*(.*)$/);
         if (runMatch) {
-          const indent = runMatch[1].length;
-          const inline = runMatch[2];
+          const indent = runMatch[1].length + (runMatch[2]?.length ?? 0);
+          const inline = runMatch[3];
           // Single-line `run: cmd` — check it right here, no block to track.
           if (inline && !/^[|>]/.test(inline.trim())) {
             for (const expr of inline.matchAll(/\$\{\{\s*([^}]+?)\s*\}\}/g)) {
