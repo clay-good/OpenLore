@@ -168,7 +168,7 @@
     "chokidar": "^5.0.0",
     "commander": "^12.1.0",
     "glob": "^13.0.6",
-    "ignore": "^6.0.2",
+    "ignore": "^7.0.6",
     "jsonc-parser": "^3.3.1",
     "ora": "^8.1.1",
     "react": "^19.1.1",
