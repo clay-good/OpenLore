@@ -11,7 +11,31 @@
  * callback fires on drain), so a caller can `await writeStdout(x)` before exiting and
  * the full payload is guaranteed delivered.
  */
+
+import { sanitizeForTerminal } from '../utils/misc.js';
+/**
+ * Strip terminal control sequences, keeping newlines.
+ *
+ * Everything written through here is either JSON or a plain-text report built from
+ * repository-derived values — paths, symbol names, extracted source. A file name may
+ * legally contain ESC on Linux and macOS, so an analyzed repository can otherwise
+ * smuggle cursor-movement or screen-clear sequences into OpenLore's own output and
+ * forge a verdict. Newline is the one control these reports rely on for structure, so
+ * it is preserved; ESC (and therefore every CSI/OSC sequence it introduces), CR, and
+ * the rest of C0/C1 are removed.
+ *
+ * Safe to do centrally because no caller colorizes through this path: all 14 command
+ * modules that use `writeStdout` build plain text, and colored output goes through the
+ * logger / `src/utils/colors.ts` instead. A guard in `output-hygiene.test.ts` keeps
+ * that true. On the JSON path this is a no-op, since `JSON.stringify` already escapes
+ * control characters to `\uXXXX`.
+ */
+function stripTerminalControls(text: string): string {
+  return sanitizeForTerminal(text, { keepNewlines: true });
+}
+
 export function writeStdout(text: string): Promise<void> {
+  text = stripTerminalControls(text);
   return new Promise<void>((resolve, reject) => {
     // `write` returns false ONLY under backpressure — the case where data is buffered
     // internally and a racing process.exit() would truncate it; there we must await the

@@ -6,6 +6,7 @@
  */
 
 import { Command } from 'commander';
+import { sanitizeForTerminal as safe } from '../../utils/misc.js';
 import { allowInsecureTls, withRelaxedTls } from '../../core/services/tls-scope.js';
 import { access, stat, readFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
@@ -581,7 +582,7 @@ function printResult(r: CheckResult, useColor: boolean): void {
   const glyph: Record<CheckStatus, string> = { ok: '✓', warn: '⚠', fail: '✗' };
 
   const icon = paint[r.status](glyph[r.status]);
-  console.log(`  ${icon}  ${r.name.padEnd(22)} ${c.dim(r.detail)}`);
+  console.log(`  ${icon}  ${safe(r.name).padEnd(22)} ${c.dim(safe(r.detail))}`);
   if (r.fix) {
     console.log(`       ${' '.repeat(22)} ${c.yellow(`→ ${r.fix}`)}`);
   }

@@ -6,7 +6,12 @@
  * passes just as well when it stops escaping.
  */
 import { describe, it, expect } from 'vitest';
-import { escapeRegExp, escapeDotString, isProtoPollutingKey } from './misc.js';
+import {
+  escapeRegExp,
+  escapeDotString,
+  isProtoPollutingKey,
+  sanitizeForTerminal,
+} from './misc.js';
 
 describe('escapeRegExp', () => {
   it('stops a crafted identifier from matching a different symbol', () => {
@@ -64,5 +69,47 @@ describe('isProtoPollutingKey', () => {
     for (const k of ['mcpServers', 'openlore', 'hooks', 'proto', 'protoype']) {
       expect(isProtoPollutingKey(k), k).toBe(false);
     }
+  });
+});
+
+describe('sanitizeForTerminal', () => {
+  const ESC = String.fromCharCode(27);
+
+  it('neutralizes an escape sequence smuggled through a file name', () => {
+    // A file name may legally contain ESC on Linux/macOS. Printed raw, this one
+    // clears the line and rewrites it, letting an analyzed repository forge a
+    // success line over OpenLore's own output.
+    const hostile = `zz${ESC}[2K${ESC}[1G[ok] ALL CHECKS PASSED${ESC}[0m.ts`;
+    const safe = sanitizeForTerminal(hostile);
+
+    expect(safe).not.toContain(ESC);
+    // The visible text is kept — the value is still identifiable, just inert.
+    expect(safe).toBe('zz[2K[1G[ok] ALL CHECKS PASSED[0m.ts');
+  });
+
+  it('strips newline and tab, because these are single-line display values', () => {
+    // A newline in a path is itself a way to forge an extra output line.
+    expect(sanitizeForTerminal('a\nb\tc')).toBe('abc');
+  });
+
+  it('strips DEL and C1 controls', () => {
+    const s = 'a' + String.fromCharCode(0x7f) + 'b' + String.fromCharCode(0x9b) + 'c';
+    expect(sanitizeForTerminal(s)).toBe('abc');
+  });
+
+  it('keeps template newlines when the caller asks, but never ESC', () => {
+    // Logger messages are OpenLore-authored templates whose newlines are real
+    // formatting (decisions.ts opens a gate warning with one).
+    const msg = `\nCommit gated — see src/zz${ESC}[2Kevil.ts`;
+    const safe = sanitizeForTerminal(msg, { keepNewlines: true });
+    expect(safe.startsWith('\n')).toBe(true);
+    expect(safe).not.toContain(ESC);
+  });
+
+  it('leaves ordinary paths and symbols untouched', () => {
+    expect(sanitizeForTerminal('src/core/analyzer/file-walker.ts')).toBe(
+      'src/core/analyzer/file-walker.ts'
+    );
+    expect(sanitizeForTerminal('handleOrient::src/a.ts')).toBe('handleOrient::src/a.ts');
   });
 });

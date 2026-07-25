@@ -12,6 +12,7 @@
 
 import chalk from 'chalk';
 import ora, { type Ora } from 'ora';
+import { sanitizeForTerminal } from './misc.js';
 
 export type LogLevel = 'discovery' | 'analysis' | 'inference' | 'success' | 'warning' | 'error' | 'debug';
 
@@ -100,7 +101,10 @@ export class Logger {
     const prefix = isTTY && !this.options.noColor ? PREFIXES_EMOJI[level] : PREFIXES_ASCII[level];
     const colorFn = this.options.noColor ? (s: string) => s : COLORS[level];
 
-    let formattedMessage = `${prefix} ${message}`;
+    // Messages routinely carry repository-derived text (paths, symbol names). Strip
+    // control sequences here, once, rather than at every call site — the prefix and
+    // the color wrapper below are added afterwards, so OpenLore's own color survives.
+    let formattedMessage = `${prefix} ${sanitizeForTerminal(message, { keepNewlines: true })}`;
 
     if (this.options.timestamps) {
       const timestamp = new Date().toISOString();
@@ -259,6 +263,7 @@ export class Logger {
    * Print a section header
    */
   section(title: string): void {
+    title = sanitizeForTerminal(title);
     if (this.options.quiet) return;
 
     this.blank();
@@ -274,6 +279,8 @@ export class Logger {
    * Print a key-value pair for summaries
    */
   info(key: string, value: string | number): void {
+    key = sanitizeForTerminal(key);
+    if (typeof value === 'string') value = sanitizeForTerminal(value);
     if (this.options.quiet) return;
 
     if (this.options.noColor) {
@@ -287,6 +294,7 @@ export class Logger {
    * Print a list item
    */
   listItem(item: string, indent: number = 0): void {
+    item = sanitizeForTerminal(item);
     if (this.options.quiet) return;
 
     const prefix = '  '.repeat(indent) + '•';

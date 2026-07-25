@@ -15,6 +15,10 @@ import { Command } from 'commander';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { logger } from '../../utils/logger.js';
+// Repo-derived values are printed here with bare console.log (not via logger), so
+// they are neutralized explicitly. Whole-line sanitizing is not an option: these
+// lines carry intentional \n spacing that the sanitizer would strip.
+import { sanitizeForTerminal as safe } from '../../utils/misc.js';
 import { withQuietStdout } from '../../utils/quiet-stdout.js';
 import { handleOrient } from '../../core/services/mcp-handlers/orient.js';
 import { estimateTokens } from '../../core/services/llm-service.js';
@@ -127,22 +131,22 @@ function printHuman(result: Record<string, unknown>): void {
     (result.insertionPoints as Array<{ rank: number; name: string; filePath: string; reason: string }>) ?? [];
   const next = (result.nextSteps as string[]) ?? [];
 
-  console.log(`Task: ${result.task}`);
+  console.log(`Task: ${safe(String(result.task))}`);
   // State the honest, served retrieval mode (keyword / local-semantic /
   // remote-semantic) — not the internal score-scale token.
-  console.log(`Retrieval mode: ${result.retrievalMode ?? result.searchMode}`);
+  console.log(`Retrieval mode: ${safe(String(result.retrievalMode ?? result.searchMode))}`);
 
   if (fns.length > 0) {
     console.log('\nRelevant functions:');
-    for (const f of fns) console.log(`  ${f.name}  (${f.filePath})`);
+    for (const f of fns) console.log(`  ${safe(f.name)}  (${safe(f.filePath)})`);
   }
   if (ips.length > 0) {
     console.log('\nInsertion points:');
-    for (const ip of ips) console.log(`  ${ip.rank}. ${ip.name}  (${ip.filePath}) — ${ip.reason}`);
+    for (const ip of ips) console.log(`  ${ip.rank}. ${safe(ip.name)}  (${safe(ip.filePath)}) — ${safe(ip.reason)}`);
   }
   if (next.length > 0) {
     console.log('\nNext steps:');
-    for (const s of next) console.log(`  - ${s}`);
+    for (const s of next) console.log(`  - ${safe(s)}`);
   }
 }
 

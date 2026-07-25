@@ -48,3 +48,43 @@ describe('writeStdout', () => {
     expect(out.length).toBe(N); // full payload, not truncated at the 64KB pipe buffer
   });
 });
+
+describe('writeStdout — untrusted control sequences', () => {
+  const ESC = String.fromCharCode(27);
+
+  function capture(): { out: string[]; restore: () => void } {
+    const out: string[] = [];
+    const orig = process.stdout.write.bind(process.stdout);
+    (process.stdout as { write: unknown }).write = ((c: string, cb?: (e?: Error) => void) => {
+      out.push(String(c));
+      if (typeof cb === 'function') cb();
+      return true;
+    }) as never;
+    return { out, restore: () => { (process.stdout as { write: unknown }).write = orig as never; } };
+  }
+
+  it('strips escapes that arrived from an analyzed repository', async () => {
+    const { out, restore } = capture();
+    try {
+      await writeStdout(`   query: symbol BEACON::src/zz${ESC}[2K${ESC}[1GFAKE${ESC}[0m.ts\n`);
+    } finally { restore(); }
+    const written = out.join('');
+    expect(written).not.toContain(ESC);
+    // The path is still reported — the fix neutralizes, it does not hide.
+    expect(written).toContain('BEACON::src/zz');
+    expect(written.endsWith('\n')).toBe(true);
+  });
+
+  it('preserves the newlines these reports are structured with', async () => {
+    const { out, restore } = capture();
+    try { await writeStdout('line one\nline two\n'); } finally { restore(); }
+    expect(out.join('')).toBe('line one\nline two\n');
+  });
+
+  it('is a no-op for JSON, which already escapes control characters', async () => {
+    const payload = JSON.stringify({ path: `a${ESC}[2Kb` }) + '\n';
+    const { out, restore } = capture();
+    try { await writeStdout(payload); } finally { restore(); }
+    expect(out.join('')).toBe(payload);
+  });
+});
