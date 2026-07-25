@@ -6,6 +6,14 @@ export default defineConfig({
     environment: 'node',
     include: ['src/**/*.test.ts', 'test/**/*.test.ts', 'examples/**/*.test.ts'],
     exclude: ['**/*.integration.test.ts', 'node_modules/**'],
+    env: {
+      // Keep the suite on the serial Pass-1 extraction lane by default
+      // (change: optimize-parallel-extraction-pool): spawning real worker threads under
+      // vitest would add seconds per multi-file build for zero coverage value. The pool
+      // itself is covered deliberately — by a stub-worker lane for ordering/failure
+      // semantics, and by one test that clears this flag to exercise real threads.
+      OPENLORE_NO_WORKERS: '1',
+    },
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html'],

@@ -710,3 +710,36 @@ export const PAGERANK_CONVERGENCE_TOLERANCE = 1e-6;
 
 /** Hard cap on power-iteration passes — a termination bound, not a tuning weight. */
 export const PAGERANK_MAX_ITERATIONS = 100;
+
+// ============================================================================
+// PASS-1 EXTRACTION POOL
+// ============================================================================
+// Bounds for the worker-thread lane that runs per-file tree-sitter extraction
+// (change: optimize-parallel-extraction-pool). Pass 1 is embarrassingly parallel
+// per file; these are the only tuning knobs — everything else about the lane is a
+// determinism or fail-soft rule, not a weight.
+
+/**
+ * Hard ceiling on extraction worker threads, regardless of core count. Each worker
+ * holds its own tree-sitter parsers and grammar handles (native `.node` bindings
+ * plus, for Lua/Dart, an isolated web-tree-sitter WASM heap), so pool size is
+ * bounded by memory, not just cores. Beyond this the marginal parse throughput no
+ * longer pays for the resident grammar set.
+ */
+export const EXTRACTION_POOL_MAX = 8;
+
+/**
+ * Minimum Pass-1 file count before the pool is worth starting. Below this the worker
+ * spawn + module-load cost exceeds the parse work the pool would absorb, so small
+ * builds (including the single-file builds the watcher and tests perform) stay on the
+ * serial lane.
+ */
+export const EXTRACTION_POOL_MIN_FILES = 32;
+
+/**
+ * How long a freshly spawned extraction worker has to load its modules, pass its
+ * parse-health probe, and report ready. A worker that neither reports ready nor dies
+ * within this window (a hung module load or grammar dlopen) is dropped from the pool
+ * rather than allowed to stall analyze — a liveness bound, not a performance weight.
+ */
+export const EXTRACTION_POOL_STARTUP_TIMEOUT_MS = 30_000;
