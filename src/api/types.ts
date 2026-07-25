@@ -90,6 +90,14 @@ export interface AnalyzeApiOptions extends BaseOptions {
   excludePatterns?: string[];
   /** Force re-analysis even if recent analysis exists */
   force?: boolean;
+  /**
+   * Also re-extract every file rather than reusing the per-file extraction cache
+   * (change: optimize-hash-keyed-analyze). Default false, because the reused lane is
+   * byte-identical and `force` alone is what a rebuilding daemon or a healing watcher
+   * wants — re-analysis without re-parsing. Set this only to verify the cache or to work
+   * around a suspected one; `openlore analyze --force` sets it.
+   */
+  reExtract?: boolean;
   /** Output directory for analysis artifacts. Default: '.openlore/analysis/' */
   outputPath?: string;
 }

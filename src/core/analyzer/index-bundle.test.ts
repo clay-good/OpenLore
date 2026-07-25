@@ -106,6 +106,54 @@ describe('index-bundle: export', () => {
     expect(Buffer.compare(a.buffer, b.buffer)).toBe(0);
   });
 
+  /**
+   * A bundle is a portable GRAPH index. The Pass-1 fact memo (change:
+   * optimize-hash-keyed-analyze) is this machine's record of what it has already parsed —
+   * ~44% of the compressed payload, and useful to a consumer only under an exact
+   * commit-plus-version-plus-grammar match. It must not ride along, and stripping it must
+   * leave the live store untouched.
+   */
+  it('strips the local Pass-1 fact memo, without mutating the exported store', async () => {
+    const src = join(work, 'with-memo');
+    await buildAnalysisDir(src, 'abc1234');
+    const dbPath = join(src, ARTIFACT_CALL_GRAPH_DB);
+
+    const store = EdgeStore.openForAnalyze(dbPath);
+    try {
+      store.putPass1Facts(
+        Array.from({ length: 40 }, (_, i) => ({
+          filePath: `src/f${i}.ts`,
+          contentHash: `hash-${i}`,
+          facts: JSON.stringify({ v: 1, n: [], e: [], s: { filler: 'x'.repeat(2000) } }),
+        })),
+        'stamp-1',
+      );
+      expect(store.countPass1Facts()).toBe(40);
+    } finally {
+      store.close();
+    }
+
+    const { buffer } = await buildBundle(src, VERSION);
+    const target = join(work, 'materialized');
+    await materializeBundle(parseBundle(buffer), target);
+
+    const exported = EdgeStore.openForAnalyze(join(target, ARTIFACT_CALL_GRAPH_DB));
+    try {
+      expect(exported.countPass1Facts()).toBe(0);       // the memo did not travel
+      expect(exported.countNodes()).toBeGreaterThan(0); // the graph did
+    } finally {
+      exported.close();
+    }
+
+    // The live store still has its memo — an export is a read, not a cache eviction.
+    const live = EdgeStore.openForAnalyze(dbPath);
+    try {
+      expect(live.countPass1Facts()).toBe(40);
+    } finally {
+      live.close();
+    }
+  });
+
   it('re-attests from the store at export time, even with no on-disk attestation', async () => {
     const src = join(work, 'no-att');
     const { mkdir } = await import('node:fs/promises');

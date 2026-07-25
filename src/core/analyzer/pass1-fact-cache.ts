@@ -75,6 +75,8 @@ export interface Pass1FactCache {
   lookup(file: ExtractionInput): { facts: FileExtractResult | undefined } | undefined;
   /** Record what a fresh extraction produced for this file's exact content. */
   record(file: ExtractionInput, facts: FileExtractResult | undefined): void;
+  /** Why no row could be reused at all, when that is known up front. */
+  readonly noReuseReason?: NoReuseReason;
 }
 
 /** The Pass-1 input record (kept structural so this module stays dependency-light). */
@@ -84,10 +86,29 @@ export interface ExtractionInput {
   language: string;
 }
 
+/**
+ * Why a build reused nothing. Modeled on the extraction lane's `serialReason` for the same
+ * reason it exists there: "reused 0" alone cannot tell an operator whether they asked for a
+ * full re-extraction or the memo is quietly broken.
+ */
+export type NoReuseReason =
+  | 'requested'      // --force, or OPENLORE_NO_FACT_CACHE
+  | 'no-index-yet'   // a first-ever analyze: there is no store to read
+  | 'index-not-ready'// schema mismatch or a quarantined store — reads are refused
+  | 'store-unreadable'// the store could not be opened at all
+  | 'no-stamp';      // the extractor stamp could not be computed, so nothing may be trusted
+
 /** How many files the last build reused vs. re-extracted — always disclosed, never silent. */
 export interface Pass1CacheDisclosure {
   reused: number;
+  /**
+   * Files handed to the extraction lane. A file whose extraction threw, or that produced no
+   * facts at all, is counted here but deliberately NOT memoized, so it re-extracts on every
+   * later run too — which is why `reused` may never reach the full file count.
+   */
   extracted: number;
+  /** Present only when the memo was bypassed or unavailable wholesale. */
+  noReuseReason?: NoReuseReason;
 }
 
 // ── Key ──────────────────────────────────────────────────────────────────────
@@ -220,19 +241,60 @@ function grammarPackageNames(moduleDir: string): string[] {
 }
 
 /**
+ * The installed version of one package, or `undefined` if it is genuinely not installed.
+ *
+ * Two lookups, because one is not enough. `require.resolve('<pkg>/package.json')` is the
+ * direct route, but it obeys the package's `exports` map — and a package that does not export
+ * `./package.json` (`web-tree-sitter` is one) throws `ERR_PACKAGE_PATH_NOT_EXPORTED` while
+ * being perfectly well installed. Reading the manifest beside the resolved ENTRY point
+ * recovers exactly those. A package that fails both is the one that is really absent.
+ */
+export function resolvePackageVersion(require: NodeRequire, name: string): string | undefined {
+  const read = (file: string): string | undefined => {
+    try {
+      return (JSON.parse(readFileSync(file, 'utf-8')) as { version?: string }).version;
+    } catch {
+      return undefined;
+    }
+  };
+  try {
+    const direct = read(require.resolve(`${name}/package.json`));
+    if (direct) return direct;
+  } catch {
+    /* the exports map forbids the subpath — fall through to the entry point */
+  }
+  try {
+    // Walk up from the resolved entry to the package root, stopping at the first manifest
+    // that names this package (a nested manifest inside the package would name it too, but
+    // a `name` check keeps a hoisted parent from answering for it).
+    let dir = dirname(require.resolve(name));
+    for (let up = 0; up < 6; up++) {
+      const manifest = join(dir, 'package.json');
+      try {
+        const pkg = JSON.parse(readFileSync(manifest, 'utf-8')) as { name?: string; version?: string };
+        if (pkg.name === name && pkg.version) return pkg.version;
+      } catch {
+        /* keep walking */
+      }
+      const parent = dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+  } catch {
+    /* not installed */
+  }
+  return undefined;
+}
+
+/**
  * The installed version of each grammar package, or `absent` for one that is not installed.
  * "Absent" is a first-class part of the key: a language with no grammar extracts nothing, and
  * installing the grammar later must not keep serving that nothing from cache.
  */
 function grammarVersions(require: NodeRequire, moduleDir: string): string[] {
-  return grammarPackageNames(moduleDir).map((name) => {
-    try {
-      const pkg = JSON.parse(readFileSync(require.resolve(`${name}/package.json`), 'utf-8')) as { version?: string };
-      return `${name}@${pkg.version ?? 'unknown'}`;
-    } catch {
-      return `${name}@absent`;
-    }
-  });
+  return grammarPackageNames(moduleDir).map(
+    (name) => `${name}@${resolvePackageVersion(require, name) ?? 'absent'}`,
+  );
 }
 
 /**
@@ -251,18 +313,21 @@ export function digestStampRoots(baseDir: string, roots: readonly string[]): str
   const files: string[] = [];
   for (const root of roots) {
     const resolved = join(baseDir, root);
-    // A root may name a file whose extension depends on the layout (`../../constants`).
-    let matchedAsFile = false;
+    // A root may name a FILE whose extension depends on the layout (`../../constants` is
+    // `constants.ts` from source and `constants.js` when installed) or a DIRECTORY. Both are
+    // collected, never one instead of the other: were a matching sibling file to suppress the
+    // directory walk, a stray `core/analyzer.js` next to `core/analyzer/` would silently drop
+    // the entire extractor tree out of the digest while still returning a plausible hash —
+    // the "makes the stamp LESS specific" direction this function must not have.
     for (const ext of ['.js', '.ts', '.cjs', '.mjs']) {
       try {
         readFileSync(resolved + ext);
         files.push(resolved + ext);
-        matchedAsFile = true;
       } catch {
         /* not this extension */
       }
     }
-    if (!matchedAsFile) collectStampFiles(resolved, files);
+    collectStampFiles(resolved, files);
   }
 
   const rel = files.map((f) => [relative(baseDir, f).split(sep).join('/'), f] as const);
@@ -317,6 +382,11 @@ export function __resetExtractorStampForTests(): void {
 /** The stamp roots, for the import-closure coverage test. */
 export const __STAMP_ROOTS_FOR_TESTS = STAMP_ROOTS;
 
+/** The grammar packages folded into the stamp, for the coverage test. */
+export function __grammarPackageNamesForTests(moduleDir: string): string[] {
+  return grammarPackageNames(moduleDir);
+}
+
 // ── EdgeStore-backed cache ───────────────────────────────────────────────────
 
 /** The subset of the graph store this cache needs — narrow so tests need no SQLite. */
@@ -334,23 +404,26 @@ export interface Pass1FactStorage {
  * incremental runs this change exists for, the buffer holds only the diff.
  */
 export class BufferedPass1FactCache implements Pass1FactCache {
-  private readonly keys = new Map<string, string>();
   private readonly writes: Pass1FactRow[] = [];
 
   constructor(
     private readonly storage: Pass1FactStorage | null,
     private readonly stamp: string,
-    /** When true, every lookup misses; writes still accumulate so the cache repopulates. */
-    private readonly bypassReads = false,
+    /**
+     * Why this cache will reuse nothing, when that is decided before the build. Present
+     * exactly when reads are off (`--force`/the env escape) or there is no readable store;
+     * absent means the memo is live and any miss is a per-file miss.
+     */
+    readonly noReuseReason?: NoReuseReason,
   ) {}
 
   lookup(file: ExtractionInput): { facts: FileExtractResult | undefined } | undefined {
-    const key = factKey(file);
-    this.keys.set(file.path, key);
-    if (this.bypassReads || !this.storage) return undefined;
+    // A declared reason means this cache can never hit — reads are off wholesale, and the
+    // reason is what the epilogue reports instead of a bare "reused 0".
+    if (this.noReuseReason !== undefined || !this.storage) return undefined;
     let raw: string | undefined;
     try {
-      raw = this.storage.getPass1Facts(file.path, key, this.stamp);
+      raw = this.storage.getPass1Facts(file.path, factKey(file), this.stamp);
     } catch {
       return undefined; // an unreadable store is a miss, never a failed build
     }
@@ -359,14 +432,46 @@ export class BufferedPass1FactCache implements Pass1FactCache {
   }
 
   record(file: ExtractionInput, facts: FileExtractResult | undefined): void {
-    const contentHash = this.keys.get(file.path) ?? factKey(file);
-    this.writes.push({ filePath: file.path, contentHash, facts: serializeFacts(facts) });
+    // Re-derived from the file rather than remembered from `lookup`. Caching the key by path
+    // would save one hash per re-extracted file and buy an invariant nothing enforces: two
+    // input entries sharing a path would store one file's facts under the other's hash.
+    this.writes.push({
+      filePath: file.path,
+      contentHash: factKey(file),
+      facts: serializeFacts(facts),
+    });
   }
 
-  /** The rows to persist, and the stamp they were computed under. */
-  drain(): { stamp: string; rows: Pass1FactRow[] } {
-    return { stamp: this.stamp, rows: this.writes };
+  /**
+   * Take the rows to persist, and the stamp they were computed under. The buffer is emptied:
+   * these rows can be tens of megabytes on a full build, and the caller holds them only until
+   * the graph write. Calling twice yields the second call nothing, which is the honest
+   * behavior for a hand-off.
+   */
+  take(): { stamp: string; rows: Pass1FactRow[] } {
+    return { stamp: this.stamp, rows: this.writes.splice(0, this.writes.length) };
   }
+}
+
+/** Plain-language cause, for the epilogue. */
+const NO_REUSE_TEXT: Record<NoReuseReason, string> = {
+  'requested': 'full re-extraction requested',
+  'no-index-yet': 'first analysis of this repository',
+  'index-not-ready': 'the existing index was built by a different OpenLore, or was quarantined',
+  'store-unreadable': 'the existing index could not be read',
+  'no-stamp': 'the extractor version could not be determined',
+};
+
+/**
+ * One line naming what the Pass-1 memo did — always rendered when a memo was consulted, so
+ * the lane is never silent. When nothing was reused, the CAUSE is named: "reused 0" on its
+ * own cannot distinguish an operator who asked for a full re-extraction from a memo that is
+ * quietly unavailable, and only one of those is worth acting on.
+ */
+export function describePass1Cache(d: Pass1CacheDisclosure | undefined): string | undefined {
+  if (!d) return undefined;
+  const counts = `re-extracted ${d.extracted} file(s), reused ${d.reused} cached`;
+  return d.noReuseReason ? `${counts} — ${NO_REUSE_TEXT[d.noReuseReason]}` : counts;
 }
 
 /** True when the environment escape hatch is set. */

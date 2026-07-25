@@ -173,9 +173,11 @@ export async function openloreAnalyze(options: AnalyzeApiOptions = {}): Promise<
     outputDir: outputPath,
     maxDeepAnalysisFiles: Math.min(20, Math.ceil(repoMap.highValueFiles.length * 0.3)),
     maxValidationFiles: 5,
-    // `force` means the same thing here as on the CLI: re-extract every file rather than
-    // reusing memoized Pass-1 facts (change: optimize-hash-keyed-analyze).
-    force,
+    // NOT keyed off `force` (change: optimize-hash-keyed-analyze). `force` here means "do
+    // not skip this run", which is what the serve daemon's post-edit rebuild asks for — and
+    // that rebuild is exactly the incremental workload the extraction memo exists to make
+    // cheap. Re-extraction is its own opt-in.
+    reExtract: options.reExtract ?? false,
   });
   const artifacts = await artifactGenerator.generateAndSave(repoMap, depGraph);
 

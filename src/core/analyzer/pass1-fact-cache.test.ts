@@ -14,7 +14,8 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -24,6 +25,8 @@ import {
   deserializeFacts,
   digestStampRoots,
   factKey,
+  resolvePackageVersion,
+  __grammarPackageNamesForTests,
   serializeFacts,
   __STAMP_ROOTS_FOR_TESTS,
   type ExtractionInput,
@@ -33,6 +36,8 @@ import { CallGraphBuilder, serializeCallGraph, dispatchFileExtract } from './cal
 import type { ExtractionWorkerHandle } from './extraction-pool.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
+/** `<repo>/src/core/analyzer` → the repo root. */
+const REPO_ROOT = resolve(HERE, '../../..');
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -70,7 +75,7 @@ class MemoryStorage implements Pass1FactStorage {
   }
 
   absorb(cache: BufferedPass1FactCache): void {
-    const { stamp, rows } = cache.drain();
+    const { stamp, rows } = cache.take();
     for (const r of rows) this.rows.set(r.filePath, { contentHash: r.contentHash, stamp, facts: r.facts });
   }
 }
@@ -99,14 +104,43 @@ function recordingWorker(log: string[]): ExtractionWorkerHandle {
   };
 }
 
+/**
+ * A worker that extracts the first file for real and then reports every later one as
+ * containing nothing — a grammar that dies mid-run.
+ *
+ * The first real answer matters: it is what makes the pool PROVE the language, after which
+ * the pool trusts that worker's empty results and passes them straight to the merge. That is
+ * the one reachable path on which a "nothing here" answer reaches the memo, so it is the path
+ * the memo's own guard has to hold.
+ */
+function dyingWorker(): ExtractionWorkerHandle {
+  const listeners: Record<string, Array<(v: never) => void>> = { message: [], error: [], exit: [] };
+  const emit = (msg: unknown): void => { for (const l of listeners.message) (l as (v: unknown) => void)(msg); };
+  setTimeout(() => emit({ type: 'ready' }), 0);
+  let answered = 0;
+  return {
+    postMessage(raw: unknown) {
+      const msg = raw as { type: string; id: number; file: ExtractionInput };
+      if (msg.type !== 'extract') return;
+      if (answered++ === 0) {
+        void dispatchFileExtract(msg.file).then((value) => emit({ type: 'result', id: msg.id, value }));
+        return;
+      }
+      emit({ type: 'result', id: msg.id, value: { nodes: [], rawEdges: [], cfg: new Map() } });
+    },
+    on(event: string, listener: (v: never) => void) { listeners[event].push(listener); },
+    terminate() { /* nothing to stop */ },
+  };
+}
+
 /** Build once with a memo, returning the serialized graph and what the memo did. */
 async function buildWith(
   files: ExtractionInput[],
   storage: Pass1FactStorage | null,
   stamp: string,
-  bypassReads = false,
+  noReuseReason?: 'requested',
 ): Promise<{ graph: string; cache: BufferedPass1FactCache; reused: number; extracted: number }> {
-  const cache = new BufferedPass1FactCache(storage, stamp, bypassReads);
+  const cache = new BufferedPass1FactCache(storage, stamp, noReuseReason);
   const result = await new CallGraphBuilder({ pass1Cache: cache }).build(files);
   return {
     graph: JSON.stringify(serializeCallGraph(result)),
@@ -250,10 +284,10 @@ describe('the memo refuses to serve what it cannot prove', () => {
     const storage = new MemoryStorage();
     storage.absorb((await buildWith(files, storage, 'stamp-v1')).cache);
 
-    const forced = await buildWith(files, storage, 'stamp-v1', /* bypassReads */ true);
+    const forced = await buildWith(files, storage, 'stamp-v1', 'requested');
     expect(forced.extracted).toBe(files.length);
     expect(storage.lookups).toHaveLength(files.length); // the warm run's reads, not the forced one's
-    expect(forced.cache.drain().rows).toHaveLength(files.length);
+    expect(forced.cache.take().rows).toHaveLength(files.length);
     expect(forced.graph).toBe(await buildFresh(files));
   });
 
@@ -264,7 +298,44 @@ describe('the memo refuses to serve what it cannot prove', () => {
 
     const edited = files.map((f, i) => (i === 1 ? { ...f, content: f.content + '\nexport const extra = 1;\n' } : f));
     const run = await buildWith(edited, storage, 'stamp-v1');
-    expect(run.cache.drain().rows.map(r => r.filePath)).toEqual(['src/mod1.ts']);
+    expect(run.cache.take().rows.map(r => r.filePath)).toEqual(['src/mod1.ts']);
+  });
+
+  /**
+   * The hazard: the extractors report an unloadable grammar by returning an EMPTY result, not
+   * by throwing — and loadability is a property of the RUNNING PROCESS (Node ABI, prebuilt
+   * binaries, a transient dlopen failure) that no content hash or code digest can see.
+   * Persisting one empty result would serve an empty graph from cache forever, and repairing
+   * the environment would never undo it. This is the memo's version of the pool's "never
+   * trust an unproven silence".
+   */
+  it('a grammar that dies mid-run cannot make its empty answers permanent', async () => {
+    // Grammar loadability is a property of the RUNNING PROCESS — Node ABI, prebuilt binaries,
+    // a transient dlopen failure — that no content hash or code digest can see. The
+    // extractors report it by returning an EMPTY result rather than throwing, so persisting
+    // one would serve an empty graph from cache forever, and repairing the environment would
+    // never undo it. Only the file that really parsed may be memoized.
+    const cache = new BufferedPass1FactCache(null, 'stamp-v1');
+    const files = corpus(3);
+    await new CallGraphBuilder({
+      pass1Cache: cache,
+      extraction: { poolSize: 1, workerFactory: () => dyingWorker() },
+    }).build(files);
+    expect(cache.take().rows.map(r => r.filePath)).toEqual(['src/mod0.ts']);
+  });
+
+  it('a file that PARSED and simply has no symbols is still a real answer', async () => {
+    // The distinction that makes the guard above safe: an empty result carrying evidence the
+    // parse happened (style counters) is trustworthy and memoized; one carrying nothing at
+    // all is not. Otherwise every symbol-free file would re-parse forever.
+    const barren: ExtractionInput = { path: 'src/empty.ts', language: 'TypeScript', content: '\n' };
+    const facts = await dispatchFileExtract(barren);
+    expect(facts!.nodes).toHaveLength(0);
+    expect(facts!.style, 'a real parse leaves style counters behind').toBeDefined();
+
+    const cache = new BufferedPass1FactCache(null, 'stamp-v1');
+    await new CallGraphBuilder({ pass1Cache: cache }).build([barren]);
+    expect(cache.take().rows.map(r => r.filePath)).toEqual(['src/empty.ts']);
   });
 
   it('a language with no extractor is memoized as a real answer, not re-dispatched forever', async () => {
@@ -273,8 +344,9 @@ describe('the memo refuses to serve what it cannot prove', () => {
     ];
     const storage = new MemoryStorage();
     const cold = await buildWith(files, storage, 'stamp-v1');
-    expect(cold.cache.drain().rows[0].facts).toBe('null');
-    storage.absorb(cold.cache);
+    const { stamp, rows } = cold.cache.take();
+    expect(rows[0].facts).toBe('null');
+    for (const r of rows) storage.rows.set(r.filePath, { contentHash: r.contentHash, stamp, facts: r.facts });
 
     const warm = await buildWith(files, storage, 'stamp-v1');
     expect(warm.reused).toBe(1);
@@ -372,6 +444,31 @@ describe('the extractor stamp', () => {
 
     expect(seen.size).toBeGreaterThan(5); // the walk actually walked
     expect(uncovered).toEqual([]);
+  });
+
+  /**
+   * The grammar half of the stamp. A package that is installed but reports `absent` is worse
+   * than useless: upgrading or removing it would not move the stamp, so its facts would be
+   * served stale forever — and `web-tree-sitter` is exactly that case, because its `exports`
+   * map forbids `require.resolve('web-tree-sitter/package.json')`.
+   */
+  it('resolves a real version for every grammar package that is actually installed', () => {
+    const require = createRequire(import.meta.url);
+    const names = __grammarPackageNamesForTests(HERE);
+    expect(names).toContain('web-tree-sitter');
+    expect(names).toContain('tree-sitter-wasms');
+
+    const installed = names.filter(n => existsSync(join(REPO_ROOT, 'node_modules', n)));
+    expect(installed.length).toBeGreaterThan(1);
+    for (const name of installed) {
+      expect(resolvePackageVersion(require, name), `${name} is installed but stamps as absent`)
+        .toMatch(/^\d+\.\d+/);
+    }
+  });
+
+  it('reports a genuinely missing package as absent rather than inventing a version', () => {
+    const require = createRequire(import.meta.url);
+    expect(resolvePackageVersion(require, 'tree-sitter-not-a-real-grammar')).toBeUndefined();
   });
 
   describe('the code digest under it', () => {

@@ -4069,7 +4069,11 @@ export class CallGraphBuilder {
     for (let i = 0; i < toExtractAt.length; i++) extractOutcomes[toExtractAt[i]] = laneOutcomes[i];
 
     const pass1Cache: Pass1CacheDisclosure | undefined = cache
-      ? { reused: files.length - toExtract.length, extracted: toExtract.length }
+      ? {
+          reused: files.length - toExtract.length,
+          extracted: toExtract.length,
+          ...(cache.noReuseReason ? { noReuseReason: cache.noReuseReason } : {}),
+        }
       : undefined;
 
     for (let fileIndex = 0; fileIndex < files.length; fileIndex++) {
@@ -4079,10 +4083,28 @@ export class CallGraphBuilder {
         if (outcome.status === 'error') throw outcome.error;
         const result = outcome.value;
         // Record what a FRESH extraction produced, before the relabeling below mutates it,
-        // so the stored facts are exactly the extractor's own answer. A file that THREW is
-        // not recorded: a deterministic parse failure costs the same on every run, and a
-        // transient one must never be frozen into the memo.
-        if (cache && reusedFacts[fileIndex] === undefined) cache.record(file, result);
+        // so the stored facts are exactly the extractor's own answer.
+        //
+        // Two answers are deliberately NOT recorded, both for the same reason — the memo is
+        // permanent, so it must never freeze an answer the process might not be able to
+        // reproduce:
+        //
+        //  - A file that THREW. A deterministic parse failure costs the same on every run;
+        //    a transient one must not become permanent.
+        //  - A result carrying NO FACTS AT ALL. This is the pool's "never trust an unproven
+        //    silence" rule (see extraction-pool.ts), and it matters more here than there.
+        //    The extractors report an unloadable grammar by returning an EMPTY result rather
+        //    than throwing, and grammar loadability is a property of the RUNNING PROCESS
+        //    (Node ABI, prebuilt binaries, a transient dlopen failure) that no content hash
+        //    or code digest can see. Persisting one empty result would serve an empty graph
+        //    from cache forever, and a repaired environment would never undo it. An
+        //    genuinely empty file costs one re-parse per run instead — exactly today's cost.
+        //
+        // `undefined` (a language with no extractor) is NOT emptiness: it is a decision made
+        // by the dispatch code, which the stamp does cover, so it is recorded.
+        if (cache && reusedFacts[fileIndex] === undefined && !isEmptyExtractResult(result)) {
+          cache.record(file, result);
+        }
         if (!result) continue;
 
         // Compute startLine (1-based) from byte offset — cheap, done once at build time

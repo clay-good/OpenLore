@@ -181,9 +181,10 @@ export async function openloreRun(options: RunApiOptions = {}): Promise<RunResul
       outputDir: analysisPath,
       maxDeepAnalysisFiles: Math.min(20, Math.ceil(repoMap.highValueFiles.length * 0.3)),
       maxValidationFiles: 5,
-      // `force` means the same thing here as on the CLI: re-extract every file rather than
-      // reusing memoized Pass-1 facts (change: optimize-hash-keyed-analyze).
-      force,
+      // NOT keyed off `force` (change: optimize-hash-keyed-analyze) — here `force` means
+      // "reinitialize / do not skip", never "re-parse every file". The reused extraction
+      // lane is byte-identical, so there is nothing for a forced run to distrust.
+      reExtract: false,
     });
     const artifacts = await artifactGenerator.generateAndSave(repoMap, depGraph);
 

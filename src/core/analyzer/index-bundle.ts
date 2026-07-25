@@ -28,6 +28,7 @@
 
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { readFile, writeFile, readdir, mkdir, copyFile, rm, stat } from 'node:fs/promises';
 import { join, basename, isAbsolute } from 'node:path';
@@ -177,6 +178,44 @@ export interface BuildBundleResult {
 }
 
 /**
+ * Tables that are a LOCAL BUILD CACHE rather than graph data, and are stripped from the
+ * exported store. A bundle is a portable graph index; `pass1_facts` (change:
+ * optimize-hash-keyed-analyze) is this machine's memo of what it has already parsed, worth
+ * ~44% of the compressed payload and useful to a consumer only under an exact
+ * commit-plus-version-plus-grammar match. Nothing downstream reads it: `import` materializes
+ * the graph, and the consumer's next `analyze` refills its own memo.
+ */
+const LOCAL_CACHE_TABLES = ['pass1_facts'];
+
+/**
+ * The graph store as it should travel: a compacted copy with {@link LOCAL_CACHE_TABLES}
+ * dropped. Works on a COPY so the live store is never mutated by an export, and stays
+ * byte-stable — `VACUUM` rebuilds the same file for the same rows, so exporting an unchanged
+ * index twice still produces identical bytes.
+ *
+ * Fail-soft: if the copy cannot be opened or rewritten, the original bytes are bundled. A
+ * larger bundle is a cost; a failed export would be a regression.
+ */
+async function readStoreWithoutLocalCaches(dbPath: string): Promise<Buffer> {
+  const scratch = `${dbPath}.export-${process.pid}`;
+  try {
+    await copyFile(dbPath, scratch);
+    const db = new DatabaseSync(scratch);
+    try {
+      for (const table of LOCAL_CACHE_TABLES) db.exec(`DROP TABLE IF EXISTS ${table}`);
+      db.exec('VACUUM');
+    } finally {
+      db.close();
+    }
+    return await readFile(scratch);
+  } catch {
+    return readFile(dbPath);
+  } finally {
+    await rm(scratch, { force: true }).catch(() => {});
+  }
+}
+
+/**
  * Serialize the persisted index under `analysisDir` (plus a fresh integrity attestation) into
  * a single gzipped, self-describing artifact. Byte-stable: the same index serializes
  * identically. The caller SHOULD checkpoint the store's WAL into the main db before calling so
@@ -213,7 +252,9 @@ export async function buildBundle(analysisDir: string, openloreVersion: string):
   for (const name of names) {
     const bytes = name === ARTIFACT_INDEX_ATTESTATION
       ? freshAttestationBytes
-      : await readFile(join(analysisDir, name));
+      : name === ARTIFACT_CALL_GRAPH_DB
+        ? await readStoreWithoutLocalCaches(dbPath)
+        : await readFile(join(analysisDir, name));
     payload[name] = bytes.toString('base64');
     manifestFiles.push({ name, bytes: bytes.length });
     rawFiles.push({ name, bytes });

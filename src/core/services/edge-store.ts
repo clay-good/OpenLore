@@ -237,22 +237,6 @@ export class EdgeStore {
         updated_at   INTEGER NOT NULL
       );
 
-      -- Memoized Pass-1 extraction facts (change: optimize-hash-keyed-analyze). One row per
-      -- file: the extractor's own output for EXACTLY this content, under EXACTLY this
-      -- extractor stamp. A row is served only on a three-way key match, so a changed file, a
-      -- changed extractor, or a changed grammar set all miss and re-extract.
-      --
-      -- This is a CACHE, not graph data: it is deliberately excluded from clearAll() (a
-      -- rebuild patches the memo rather than destroying the thing that makes it cheap), and
-      -- dropping it costs only time. It is dropped on a SCHEMA_VERSION bump with everything
-      -- else, which is the conservative direction.
-      CREATE TABLE IF NOT EXISTS pass1_facts (
-        file_path       TEXT PRIMARY KEY,
-        content_hash    TEXT NOT NULL,
-        extractor_stamp TEXT NOT NULL,
-        facts           TEXT NOT NULL  -- JSON FileExtractResult, or the JSON literal null
-      );
-
       CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(node_id UNINDEXED, name, tokenize='trigram');
 
       -- Architectural decisions projected as first-class graph nodes (spec-16).
@@ -327,6 +311,35 @@ export class EdgeStore {
         marked_at  INTEGER NOT NULL
       );
     `);
+
+    // Memoized Pass-1 extraction facts (change: optimize-hash-keyed-analyze). One row per
+    // file: the extractor's own output for EXACTLY this content, under EXACTLY this extractor
+    // stamp. A row is served only on a three-way key match, so a changed file, a changed
+    // extractor, or a changed grammar set all miss and re-extract.
+    //
+    // This is a CACHE, not graph data: it is deliberately excluded from clearAll() (a rebuild
+    // patches the memo rather than destroying the thing that makes it cheap), and dropping it
+    // costs only time. Every analyze REPLACES the rows for files it re-extracted and PRUNES
+    // the rows for files that left the analyzed set. A SCHEMA_VERSION bump drops it with
+    // everything else, which is the conservative direction.
+    //
+    // Created on the ANALYZE path only, and deliberately outside the block above. Adding a
+    // table that a store built by a previous OpenLore does not have would make the FIRST
+    // read-mode open after an upgrade take SQLite's write lock — turning a read into a
+    // writer, contradicting `EdgeStore.open`'s "never mutates the store" contract, and
+    // letting a tool call fail with `database is locked` while a rebuild holds it. A legacy
+    // store simply has no table to read; the memo treats that as a miss (see
+    // `BufferedPass1FactCache.lookup`) and the next analyze creates it.
+    if (mode === 'analyze') {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS pass1_facts (
+          file_path       TEXT PRIMARY KEY,
+          content_hash    TEXT NOT NULL,
+          extractor_stamp TEXT NOT NULL,
+          facts           TEXT NOT NULL  -- JSON FileExtractResult, or the JSON literal null
+        );
+      `);
+    }
   }
 
   // ── Edge queries ──────────────────────────────────────────────────────────────
@@ -1019,11 +1032,6 @@ export class EdgeStore {
   countPass1Facts(): number {
     const row = this.db.prepare('SELECT COUNT(*) as n FROM pass1_facts').get() as { n: number };
     return row.n;
-  }
-
-  /** Drop every memoized fact — the explicit invalidation an operator can always reach for. */
-  clearPass1Facts(): void {
-    this.db.exec('DELETE FROM pass1_facts');
   }
 
   // ── Explicit stale region (fix-transitive-incremental-staleness) ───────────────

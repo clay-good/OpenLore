@@ -126,8 +126,11 @@ export async function runAnalysis(
      * Re-extract every file rather than reusing memoized Pass-1 facts, then repopulate the
      * memo (change: optimize-hash-keyed-analyze). Defaults to false: an ordinary analyze pays
      * only for the diff. This is the reference lane the reused one is verified against.
+     *
+     * Distinct from the caller's own "force" (skip nothing, re-analyze now) — see
+     * {@link ArtifactGeneratorOptions.reExtract}. `analyze --force` sets both.
      */
-    force?: boolean;
+    reExtract?: boolean;
   }
 ): Promise<AnalysisResult> {
   const startTime = Date.now();
@@ -194,7 +197,7 @@ export async function runAnalysis(
     outputDir: outputPath,
     maxDeepAnalysisFiles: Math.min(MAX_DEEP_ANALYSIS_FILES, Math.ceil(repoMap.highValueFiles.length * DEEP_ANALYSIS_FILE_RATIO)),
     maxValidationFiles: MAX_VALIDATION_FILES,
-    force: options.force ?? false,
+    reExtract: options.reExtract ?? false,
   });
 
   // Snapshot the prior graph's nodes BEFORE the rebuild overwrites the store, so a
@@ -301,7 +304,7 @@ export const analyzeCommand = new Command('analyze')
   )
   .option(
     '--force',
-    'Re-analyze from scratch: re-extract every file instead of reusing cached extraction',
+    'Re-analyze from scratch: analyze even if the source is unchanged, and re-extract every file instead of reusing cached extraction',
     false
   )
   .option(
@@ -509,7 +512,7 @@ After analysis, run 'openlore generate' to create OpenSpec files.
         maxFiles: opts.maxFiles,
         include: opts.include,
         exclude: opts.exclude,
-        force: opts.force ?? false,
+        reExtract: opts.force ?? false,
       });
 
       // ========================================================================

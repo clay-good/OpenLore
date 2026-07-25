@@ -43,7 +43,7 @@ import type { EnvVar } from './env-extractor.js';
 // same shared definition so the two can no longer drift.
 export { isTestFile } from './test-file.js';
 import { isTestFile } from './test-file.js';
-import type { BufferedPass1FactCache } from './pass1-fact-cache.js';
+import { describePass1Cache, type BufferedPass1FactCache } from './pass1-fact-cache.js';
 
 /**
  * Deterministically shuffle `items`, seeded from a hash of the sorted string keys.
@@ -235,11 +235,15 @@ export interface AnalysisArtifacts {
    */
   extractionLaneNote?: string;
   /**
-   * A one-line note naming how many files reused memoized Pass-1 facts and how many were
-   * re-extracted (change: optimize-hash-keyed-analyze). Always present when a memo was
-   * consulted — unlike the lane note, this is not a degradation report but the standing
-   * disclosure that keeps the reused lane from ever being silent. Rendered by the CLI, for
-   * the same stdout reason as {@link extractionLaneNote}.
+   * A one-line note naming how many files reused memoized Pass-1 facts, how many were
+   * re-extracted, and — when nothing was reused — why (change: optimize-hash-keyed-analyze).
+   * Set whenever a memo was consulted; unlike the lane note this is not a degradation report
+   * but the standing disclosure that keeps the reused lane from being silent.
+   *
+   * RETURNED, never logged, for the same stdout reason as {@link extractionLaneNote}: this
+   * code path also runs inside the stdio MCP server. Today only the CLI epilogue renders it,
+   * so an embedded caller that wants the disclosure must read it from here — exactly as with
+   * {@link extractionLaneNote}.
    */
   pass1CacheNote?: string;
 }
@@ -278,10 +282,17 @@ export interface ArtifactGeneratorOptions {
   tokensPerChar?: number;
   /**
    * Re-extract every file instead of reusing memoized Pass-1 facts, then repopulate the memo
-   * (change: optimize-hash-keyed-analyze). This is what `analyze --force` means at this
-   * layer, and the reference output the reused lane is verified against.
+   * (change: optimize-hash-keyed-analyze). The reference output the reused lane is verified
+   * against.
+   *
+   * Deliberately NOT called `force`. "Force" already means "do not skip this run" to every
+   * caller that has one, and most of those callers — a daemon rebuilding after an edit batch,
+   * a watcher healing a stale store — want exactly the re-analysis and none of the re-parsing.
+   * Conflating the two would have removed the benefit from precisely the incremental workload
+   * this exists for. `analyze --force` on the command line sets both, because a human typing
+   * it is asking to trust nothing.
    */
-  force?: boolean;
+  reExtract?: boolean;
 }
 
 /**
@@ -357,7 +368,7 @@ export class AnalysisArtifactGenerator {
       maxDeepAnalysisFiles: options.maxDeepAnalysisFiles ?? 20,
       maxValidationFiles: options.maxValidationFiles ?? 5,
       tokensPerChar: options.tokensPerChar ?? TOKENS_PER_CHAR_DEFAULT,
-      force: options.force ?? false,
+      reExtract: options.reExtract ?? false,
     };
   }
 
@@ -505,6 +516,11 @@ export class AnalysisArtifactGenerator {
         );
       } catch {
         // Non-fatal — JSON artifacts are the source of truth
+      } finally {
+        // Release the serialized memo rows: on a cold or forced build they are the whole
+        // corpus (tens of MB), and everything after this point — continuity carry-forward,
+        // the dependency-graph write, the fingerprint — has no use for them.
+        this._pass1Memo = undefined;
       }
     }
 
@@ -1358,11 +1374,9 @@ export class AnalysisArtifactGenerator {
       memo?.close();
     }
     this._pass1Memo = memo
-      ? { ...memo.cache.drain(), analyzedPaths: callGraphFiles.map(f => f.path) }
+      ? { ...memo.cache.take(), analyzedPaths: callGraphFiles.map(f => f.path) }
       : undefined;
-    this._pass1CacheNote = callGraphResult.pass1Cache
-      ? `re-extracted ${callGraphResult.pass1Cache.extracted} file(s), reused ${callGraphResult.pass1Cache.reused} cached`
-      : undefined;
+    this._pass1CacheNote = describePass1Cache(callGraphResult.pass1Cache);
     // Stash the lane note for the CLI to render. Never logged from here: this code path
     // also runs inside the stdio MCP server (change: optimize-parallel-extraction-pool).
     this._extractionLaneNote = callGraphResult.extractionLane
@@ -1485,40 +1499,47 @@ export class AnalysisArtifactGenerator {
    *
    * Every failure mode here degrades to "extract everything", which is exactly today's
    * behavior — the memo is an optimization and is never allowed to be the reason a build
-   * fails or answers differently. `--force` (and `OPENLORE_NO_FACT_CACHE`) still open the
-   * memo, with reads bypassed, so a forced run REPOPULATES it rather than leaving the next
-   * run to pay full price.
+   * fails or answers differently. But each mode NAMES itself (`noReuseReason`) so the
+   * epilogue can tell an operator who asked for a full re-extraction apart from one whose
+   * memo is quietly unavailable. Even a bypassed memo still buffers writes, so a forced run
+   * REPOPULATES it rather than leaving the next run to pay full price.
    */
   private async openPass1Memo(): Promise<{ cache: BufferedPass1FactCache; close: () => void } | undefined> {
     const { BufferedPass1FactCache, computeExtractorStamp, factCacheDisabledByEnv } =
       await import('./pass1-fact-cache.js');
     const { EdgeStore } = await import('../services/edge-store.js');
-    const bypassReads = this.options.force || factCacheDisabledByEnv();
+    const requested = this.options.reExtract || factCacheDisabledByEnv();
 
     let stamp: string;
     try {
       stamp = computeExtractorStamp();
     } catch {
-      return undefined; // no trustworthy stamp means no trustworthy memo
+      return undefined; // no trustworthy stamp means no trustworthy memo, and nothing to write
     }
 
     // No store yet (a first-ever analyze) means no rows to read. Opening one here would
     // create an empty graph DB before the graph exists, which a concurrent reader would see
     // as an index that is present and empty — the one thing the store lifecycle forbids.
     if (!EdgeStore.exists(this.options.outputDir)) {
-      return { cache: new BufferedPass1FactCache(null, stamp, bypassReads), close: () => {} };
+      return {
+        cache: new BufferedPass1FactCache(null, stamp, requested ? 'requested' : 'no-index-yet'),
+        close: () => {},
+      };
     }
     try {
       const store = EdgeStore.open(EdgeStore.dbPath(this.options.outputDir));
       // A not-ready store (schema mismatch / quarantined corruption) must not be queried.
       // Keep the write buffer so this run repopulates the memo the rebuild will own.
-      const readable = store.notReady ? null : store;
+      const reason = requested ? 'requested' : store.notReady ? 'index-not-ready' : undefined;
       return {
-        cache: new BufferedPass1FactCache(readable, stamp, bypassReads),
+        cache: new BufferedPass1FactCache(store.notReady ? null : store, stamp, reason),
         close: () => { try { store.close(); } catch { /* already closed */ } },
       };
     } catch {
-      return { cache: new BufferedPass1FactCache(null, stamp, bypassReads), close: () => {} };
+      return {
+        cache: new BufferedPass1FactCache(null, stamp, requested ? 'requested' : 'store-unreadable'),
+        close: () => {},
+      };
     }
   }
 
@@ -1645,8 +1666,14 @@ export async function writeEdgesToSQLite(
     // full extraction, never a wrong answer.
     if (pass1Memo) {
       try {
-        store.putPass1Facts(pass1Memo.rows, pass1Memo.stamp);
-        store.prunePass1Facts(pass1Memo.analyzedPaths);
+        // One transaction: replace-then-prune is a single "the memo now describes THIS tree"
+        // step, and a crash between the halves would otherwise leave rows for files that are
+        // gone (harmless — they are key-guarded and never looked up — but it would make the
+        // sentence above literally untrue).
+        store.transaction(() => {
+          store.putPass1Facts(pass1Memo.rows, pass1Memo.stamp);
+          store.prunePass1Facts(pass1Memo.analyzedPaths);
+        });
       } catch {
         // A memo that cannot be written is simply a memo the next run will not find.
       }

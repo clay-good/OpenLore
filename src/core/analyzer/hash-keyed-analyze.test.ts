@@ -40,7 +40,7 @@ async function plantRepo(root: string): Promise<void> {
 
 async function analyze(opts: { force?: boolean } = {}): Promise<void> {
   const { runAnalysis } = await import('../../cli/commands/analyze.js');
-  await runAnalysis(dir, out, { maxFiles: 200, include: [], exclude: [], force: opts.force ?? false });
+  await runAnalysis(dir, out, { maxFiles: 200, include: [], exclude: [], reExtract: opts.force ?? false });
 }
 
 /** The artifact bytes that must not depend on which lane produced them. */
@@ -165,6 +165,38 @@ describe('analyze cost scales with the diff', () => {
     // Had the foreign rows been served, math.ts would have contributed no symbols at all.
     expect(await definedIn('src/core/math.ts')).toEqual(['add', 'scale']);
     expect(memoRows().every(r => r.stamp === computeExtractorStamp())).toBe(true);
+  });
+
+  /**
+   * The watcher patches the graph per file and never touches the memo, which raises the
+   * question this pins: after a daemon has patched the store for an edit it saw, does a later
+   * batch analyze still converge on the same artifacts a clean run would produce? It must —
+   * the memo is keyed by the file's CURRENT bytes, so a patched file misses and re-extracts,
+   * and the graph is rebuilt from the merged facts either way.
+   */
+  it('converges with a graph a watcher has already patched', async () => {
+    await analyze();
+
+    // Stand in for the watcher's per-file patch: rewrite the graph rows for one file, as a
+    // daemon would after seeing it change, and mark the file's new content hash.
+    const edited =
+      'export function add(a: number, b: number): number { return a + b; }\n' +
+      'export function scale(n: number): number { return add(n, n); }\n' +
+      'export function patched(n: number): number { return scale(n); }\n';
+    await writeFile(join(dir, 'src', 'core', 'math.ts'), edited);
+    const store = EdgeStore.openForAnalyze(EdgeStore.dbPath(out));
+    try {
+      store.deleteNodesForFile('src/core/math.ts');
+      store.setFileHash('src/core/math.ts', 'whatever-the-watcher-computed');
+    } finally {
+      store.close();
+    }
+
+    await analyze();
+    const reused = await artifactBytes();
+    await analyze({ force: true });
+    expect(reused).toEqual(await artifactBytes());
+    expect(await definedIn('src/core/math.ts')).toEqual(['add', 'patched', 'scale']);
   });
 
   it('a hostile memo row for an UNCHANGED file cannot be served under the real key', async () => {
