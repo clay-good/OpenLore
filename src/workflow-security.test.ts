@@ -243,6 +243,46 @@ describe('workflow security: supply-chain automation is wired', () => {
     );
   });
 
+  it('watches every directory that references a third-party action', () => {
+    const cfg = parse(read(join(REPO_ROOT, '.github', 'dependabot.yml'))) as {
+      updates?: { 'package-ecosystem'?: string; directory?: string; directories?: string[] }[];
+    };
+
+    // Normalize to a set of watched directories, minus trailing slashes.
+    const watched = new Set(
+      (cfg.updates ?? [])
+        .filter(u => u['package-ecosystem'] === 'github-actions')
+        .flatMap(u => u.directories ?? [u.directory ?? '/'])
+        .map(d => (d === '/' ? '/' : d.replace(/\/$/, '')))
+    );
+
+    // A `directory: /` entry covers `.github/workflows` and nothing else. A composite
+    // action lives in its own directory and needs its own entry, or its SHA pins are
+    // frozen with nothing proposing upgrades. This is how the composite action went
+    // unmonitored initially — the config looked complete because the workflows were.
+    const offenders: string[] = [];
+    for (const file of COMPOSITE_ACTIONS) {
+      const hasThirdParty = read(file)
+        .split('\n')
+        .some(l => {
+          const m = l.match(/^\s*(?:-\s+)?uses:\s*(\S+)/);
+          return !!m && !m[1].replace(/['"]/g, '').startsWith('./');
+        });
+      if (!hasThirdParty) continue;
+      const dir = '/' + rel(dirname(file)).replace(/\\/g, '/');
+      if (!watched.has(dir)) offenders.push(`${dir} (from ${rel(file)})`);
+    }
+
+    expect(
+      offenders,
+      `These directories reference third-party actions but no github-actions Dependabot ` +
+        `entry watches them, so their pins will never be proposed for upgrade. Add to ` +
+        `.github/dependabot.yml:\n` +
+        offenders.map(d => `  - package-ecosystem: github-actions\n    directory: ${d.split(' ')[0]}`).join('\n') +
+        '\n'
+    ).toEqual([]);
+  });
+
   it('runs CodeQL on pull requests and on a schedule', () => {
     const wf = parse(read(join(WORKFLOW_DIR, 'codeql.yml'))) as { on?: Record<string, unknown> };
     // `parse` turns the YAML key `on` into the string key 'on' (not boolean true) for

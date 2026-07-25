@@ -34,17 +34,34 @@ updates:
         dependency-type: production
         update-types: [minor, patch]
     ignore:
-      # Pinned intentionally, not drifting. tree-sitter grammars are matched to the
-      # web-tree-sitter/ABI version the analyzer loads, and a grammar bump has to be
-      # validated against the parse fixtures rather than merged on green CI alone.
+      # Pinned intentionally, not drifting. Every parser package is matched to the
+      # ABI/grammar version the analyzer loads, so a bump has to be validated against
+      # the parse fixtures rather than merged on green CI alone.
+      #
+      # The wildcard matters. The first version of this file listed only
+      # `web-tree-sitter` and `tree-sitter-wasms`, which left the native `tree-sitter`
+      # and all 18 `tree-sitter-*` grammars unignored — they landed in the
+      # production-minor-patch group and broke the build (`Cannot find module
+      # 'tree-sitter'`, then a cascade of implicit-any errors).
+      #
+      # Why they qualified as "minor" at all: for a 0.x package semver treats
+      # 0.22 -> 0.25 as a MINOR bump, so `update-types: [minor, patch]` does not mean
+      # "non-breaking" for anything below 1.0. Most of this repo's parser stack is 0.x.
       - dependency-name: web-tree-sitter
+      - dependency-name: tree-sitter
+      - dependency-name: 'tree-sitter-*'
       - dependency-name: tree-sitter-wasms
       - dependency-name: '@lancedb/lancedb'
 
   # ------------------------------------------------------- github actions
-  # Covers `.github/workflows/*` and the composite action in
-  # `.github/actions/openlore-review/action.yml`. Grouped: these are almost always
-  # the same handful of first-party actions moving together.
+  # Two entries, because one does not cover both places actions are referenced.
+  #
+  # `directory: /` covers `.github/workflows/*` ONLY. The composite action at
+  # `.github/actions/openlore-review/action.yml` is a separate Dependabot directory and
+  # was silently unmonitored — the first github-actions PR (#270) bumped every workflow
+  # to checkout v7 / setup-node v7 and left the composite action on setup-node v4.4.0
+  # and github-script v7.1.0. Actions there are pinned to commit SHAs like everywhere
+  # else, and a pinned SHA with nothing proposing upgrades just freezes.
   - package-ecosystem: github-actions
     directory: /
     schedule:
@@ -53,5 +70,16 @@ updates:
     open-pull-requests-limit: 5
     groups:
       github-actions:
+        applies-to: version-updates
+        patterns: ['*']
+
+  - package-ecosystem: github-actions
+    directory: /.github/actions/openlore-review
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      composite-action:
         applies-to: version-updates
         patterns: ['*']
