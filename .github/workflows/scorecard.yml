@@ -1,0 +1,65 @@
+name: OpenSSF Scorecard
+
+# Continuously scores this repo against the OpenSSF supply-chain checks (action
+# pinning, token permissions, release provenance, dangerous workflow patterns,
+# vulnerability hygiene, …) and uploads the result to the Security tab.
+#
+# The point is drift detection, not the score. A hardening baseline decays quietly:
+# a `permissions:` block gets dropped, an action gets re-pinned to a tag, a new
+# workflow copies an unsafe pattern. This notices.
+#
+# NOTE ON TRIGGERS: Scorecard must run on the default branch of the upstream repo —
+# it reads branch and workflow configuration, which a PR context cannot provide.
+# It therefore does not run on pull requests, including the one that adds it.
+# `workflow_dispatch` is here so it can be verified on demand.
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    # Mondays 08:00 UTC, after the CodeQL run.
+    - cron: '0 8 * * 1'
+  workflow_dispatch:
+
+permissions: read-all
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+      security-events: write # upload the SARIF results
+      id-token: write # publish the score to the public OpenSSF API
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Run analysis
+        uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc # v2.4.4
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          # Publishes to the public OpenSSF dataset, which is what makes the score
+          # externally checkable (and enables the README badge). Nothing private is
+          # published — every input is already public repo metadata.
+          publish_results: true
+
+      # Kept because SARIF upload only retains the most recent result; the artifact
+      # is what lets a regression be diffed against the previous week.
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: scorecard-results
+          path: results.sarif
+          retention-days: 7
+
+      - name: Upload to code scanning
+        uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        with:
+          sarif_file: results.sarif

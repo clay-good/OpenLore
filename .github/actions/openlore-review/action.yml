@@ -4,6 +4,20 @@ description: >
   Advisory by default — informs, never fails the check (unless you opt into blastRadius.block).
 author: 'OpenLore'
 
+# SECURITY NOTE — why every input below reaches the shell through `env:` and never
+# through `${{ }}` inside a `run:` block.
+#
+# Actions expression interpolation is a TEXTUAL substitution performed before the
+# shell starts, so a `${{ inputs.x }}` written inline in a script is not an argument —
+# it becomes part of the program, and any shell metacharacter in the value is executed
+# rather than compared.
+#
+# The defaults here are commit SHAs, but a caller controls every input, and this
+# action can be wired to `pull_request_target` to comment on fork pull requests —
+# a trigger where the values are externally influenced and the job holds a write
+# token. Passed via `env:` they are ordinary shell variables, so quoting keeps them
+# inert as data.
+
 inputs:
   github-token:
     description: 'Token used to create/update the sticky PR comment.'
@@ -34,41 +48,50 @@ runs:
   using: composite
   steps:
     - name: Set up Node
-      uses: actions/setup-node@v4
+      uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
       with:
         node-version: '22'
 
     - name: Build the OpenLore index (optional, for full blast radius)
       if: ${{ inputs.analyze == 'true' }}
       shell: bash
-      run: npx --yes openlore@${{ inputs.openlore-version }} analyze --no-embed || echo "analyze failed — review will show the structural delta only"
+      env:
+        OPENLORE_VERSION: ${{ inputs.openlore-version }}
+      run: |
+        npx --yes "openlore@$OPENLORE_VERSION" analyze --no-embed \
+          || echo "analyze failed — review will show the structural delta only"
 
     - name: Run openlore review
       id: review
       shell: bash
+      env:
+        OPENLORE_VERSION: ${{ inputs.openlore-version }}
+        REVIEW_BASE: ${{ inputs.base }}
+        REVIEW_HEAD: ${{ inputs.head }}
+        REVIEW_GATE: ${{ inputs.gate }}
       run: |
         OUT="$RUNNER_TEMP/openlore-review.md"
-        ARGS=(review --base "${{ inputs.base }}" --head "${{ inputs.head }}" --format markdown --out "$OUT")
-        if [ "${{ inputs.gate }}" = "true" ]; then ARGS+=(--hook); fi
+        ARGS=(review --base "$REVIEW_BASE" --head "$REVIEW_HEAD" --format markdown --out "$OUT")
+        if [ "$REVIEW_GATE" = "true" ]; then ARGS+=(--hook); fi
         set +e
-        npx --yes openlore@${{ inputs.openlore-version }} "${ARGS[@]}"
+        npx --yes "openlore@$OPENLORE_VERSION" "${ARGS[@]}"
         RC=$?
         set -e
         # Distinguish a REAL gate (review ran and a blastRadius.block pattern fired:
         # the briefing file was written AND exit was non-zero) from review being unable
         # to run at all (a published openlore without `review`, an unreachable range, a
         # crash → no briefing file). Only the former fails the job; the latter is advisory.
-        if [ "${{ inputs.gate }}" = "true" ] && [ "$RC" -ne 0 ] && [ -s "$OUT" ]; then
+        if [ "$REVIEW_GATE" = "true" ] && [ "$RC" -ne 0 ] && [ -s "$OUT" ]; then
           echo "openlore review: a configured blastRadius.block pattern fired — failing the job (gate mode)."
           exit "$RC"
         fi
         if [ ! -s "$OUT" ]; then
-          echo "openlore review produced no briefing — the published 'openlore' (openlore-version: ${{ inputs.openlore-version }}) may not yet ship the 'review' command, or the base..head range was unreachable. Skipping the comment (advisory)."
+          echo "openlore review produced no briefing — the published 'openlore' (openlore-version: $OPENLORE_VERSION) may not yet ship the 'review' command, or the base..head range was unreachable. Skipping the comment (advisory)."
         fi
 
     - name: Post or update the sticky review comment
       if: ${{ github.event_name == 'pull_request' }}
-      uses: actions/github-script@v7
+      uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
       with:
         github-token: ${{ inputs.github-token }}
         script: |

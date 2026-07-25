@@ -1,0 +1,68 @@
+name: CodeQL
+
+# Static application security testing. `npm audit` covers known-vulnerable
+# dependencies, which says nothing about a defect written here. CodeQL covers the
+# other half: injection, path traversal, unsafe regex, prototype pollution, and
+# similar, in first-party code.
+#
+# The weekly run matters as much as the per-PR one. New queries ship continuously,
+# so unchanged code can become newly-detectable; without a schedule, a finding only
+# surfaces the next time someone happens to touch that file.
+#
+# Findings surface in the Security tab and as pull-request annotations.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Mondays 07:00 UTC, offset from the Dependabot run so review load is spread.
+    - cron: '0 7 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  # Superseded pull-request runs are cancelled; runs on main are not, so the default
+  # branch always ends up with a completed analysis rather than a cancelled one.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write # upload the SARIF results
+      actions: read # read workflow run metadata
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # `actions` analyzes the workflow files themselves — the expression-injection
+        # class this repo also guards structurally in `src/workflow-security.test.ts`.
+        # The guard checks the shapes it knows to look for; this checks dataflow, and
+        # the two catch different mistakes.
+        language: [javascript-typescript, actions]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        with:
+          languages: ${{ matrix.language }}
+          config-file: ./.github/codeql/codeql-config.yml
+
+      # No build step: both languages are extracted directly from source, so
+      # `autobuild` would only add a failure mode without changing what is analyzed.
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        with:
+          category: '/language:${{ matrix.language }}'

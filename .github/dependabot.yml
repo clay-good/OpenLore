@@ -1,0 +1,57 @@
+# Dependabot configuration.
+#
+# Dependabot SECURITY updates (advisory-driven) are enabled in repo settings and are
+# deliberately NOT grouped below — each arrives as its own PR so a fix can be reviewed
+# and landed fast. What this file adds is scheduled VERSION updates, grouped to keep the
+# routine noise to a few reviewable PRs a week.
+#
+# The `github-actions` ecosystem is the important half. Every action in this repo is
+# pinned to an immutable commit SHA (a tag can be moved to point at new code, a SHA
+# cannot), and a pinned SHA only stays safe if something keeps proposing the upgrade.
+# That something is this file.
+
+version: 2
+
+updates:
+  # ---------------------------------------------------------------- npm
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    versioning-strategy: increase-if-necessary
+    groups:
+      # One PR for routine dev-tooling drift (eslint, vitest, tsx, types).
+      dev-dependencies:
+        applies-to: version-updates
+        dependency-type: development
+        update-types: [minor, patch]
+      # One PR for low-risk runtime drift. Majors stay individual: they are the ones
+      # that can change behavior, so they deserve their own review and CI run.
+      production-minor-patch:
+        applies-to: version-updates
+        dependency-type: production
+        update-types: [minor, patch]
+    ignore:
+      # Pinned intentionally, not drifting. tree-sitter grammars are matched to the
+      # web-tree-sitter/ABI version the analyzer loads, and a grammar bump has to be
+      # validated against the parse fixtures rather than merged on green CI alone.
+      - dependency-name: web-tree-sitter
+      - dependency-name: tree-sitter-wasms
+      - dependency-name: '@lancedb/lancedb'
+
+  # ------------------------------------------------------- github actions
+  # Covers `.github/workflows/*` and the composite action in
+  # `.github/actions/openlore-review/action.yml`. Grouped: these are almost always
+  # the same handful of first-party actions moving together.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        applies-to: version-updates
+        patterns: ['*']
