@@ -46,6 +46,44 @@ export function escapeDotString(s: string): string {
 }
 
 /**
+ * Neutralize terminal control sequences in a value that came from an analyzed
+ * repository, before it is printed.
+ *
+ * OpenLore's job is to read repositories it does not trust and report on them, and
+ * SECURITY.md scopes exactly that. A file name may legally contain ESC on Linux and
+ * macOS, so a hostile repository can smuggle cursor-movement, screen-clear or OSC
+ * sequences through any path/symbol OpenLore echoes back. Printed raw, those let the
+ * repository being analyzed overwrite OpenLore's own output — for a tool whose value
+ * is a trustworthy verdict, a forged "[ok] all checks passed" line is the attack,
+ * not a cosmetic glitch.
+ *
+ * Everything in C0, DEL and C1 is removed, which includes ESC and therefore every
+ * sequence introduced by it (CSI, OSC, DCS) without needing to parse them. Newline
+ * and tab go too: these are single-line display values (a path, a symbol name), so a
+ * newline in one is itself a way to forge an extra output line.
+ *
+ * This is for UNTRUSTED values only. OpenLore's own color codes are applied by the
+ * shared color layer AFTER this runs, so they are unaffected.
+ */
+export function sanitizeForTerminal(
+  value: string,
+  opts: { keepNewlines?: boolean } = {},
+): string {
+  // Two shapes, because the caller knows what it is holding:
+  //   - a single VALUE (a path, a symbol name): a newline in it is itself a way to
+  //     forge an extra output line, so it goes too. This is the default.
+  //   - an assembled MESSAGE built from an OpenLore-authored template: its newlines
+  //     are the template's own formatting, so they are kept. ESC is removed either
+  //     way, which is what blocks the cursor/screen/OSC attacks.
+  const pattern = opts.keepNewlines
+    // eslint-disable-next-line no-control-regex -- C0 except \n, plus DEL and C1
+    ? /[\x00-\x09\x0b-\x1f\x7f-\x9f]/g
+    // eslint-disable-next-line no-control-regex -- all of C0, plus DEL and C1
+    : /[\x00-\x1f\x7f-\x9f]/g;
+  return value.replace(pattern, '');
+}
+
+/**
  * Keys that must never be written through a caller-supplied path, because
  * assigning them mutates the prototype chain rather than the target object.
  */

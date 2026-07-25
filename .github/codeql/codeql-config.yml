@@ -38,11 +38,21 @@ paths-ignore:
   - '**/*.test.ts'
   - '**/*.spec.ts'
 
+  # ---- sample corpora ------------------------------------------------------
+  # `examples/` holds self-contained SAMPLE APPLICATIONS (drift-demo, the opencode
+  # plugins) that exist to be analyzed BY OpenLore in demos and tests. Findings there
+  # describe the sample, not OpenLore: the two js/missing-rate-limiting alerts in the
+  # first baseline were about drift-demo's Express routes, which are deliberately a
+  # small imperfect app. Scanning them measures the fixture, not the product.
+  - examples
+
   # ---- fixtures and vendored code -----------------------------------------
   # Deliberately malformed / adversarial inputs that exist to be parsed by tests.
   # Scanning them reports the fixture, never the code under test.
   - src/core/analyzer/fixtures
   - src/core/analyzer/iac/fixtures
+  # (its Dockerfile is intentionally unpinned so the IaC projector has input —
+  #  Scorecard reports that as an unpinned dependency; it is a fixture, not our CI)
   - src/core/scip/fixtures
   # Third-party protobuf runtime shipped as-is; upgrades come from upstream, and
   # advisories against it are dependency-scanning's job, not SAST's.

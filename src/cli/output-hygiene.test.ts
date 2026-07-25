@@ -62,3 +62,29 @@ describe('CLI output hygiene — shared color layer', () => {
     expect(/\x1b\[/.test(painted)).toBe(false);
   });
 });
+
+describe('CLI output hygiene — untrusted terminal control sequences', () => {
+  /**
+   * `writeStdout` strips terminal control sequences centrally, which is only safe
+   * while nothing colorizes through it. If a command starts emitting chalk/colors
+   * down that path, the strip would eat its escapes and the colour would silently
+   * vanish — so pin the assumption rather than leaving it as a comment.
+   */
+  it('keeps writeStdout a color-free path', () => {
+    const commandsDir = join(import.meta.dirname, 'commands');
+    const offenders: string[] = [];
+    for (const file of walkTsFiles(commandsDir)) {
+      const src = readFileSync(file, 'utf-8');
+      if (!src.includes('writeStdout')) continue;
+      if (/from 'chalk'|colorForStdout|palette\(/.test(src)) {
+        offenders.push(file.split('/src/')[1] ?? file);
+      }
+    }
+    expect(
+      offenders,
+      'These modules both write through writeStdout and emit colour. writeStdout strips\n' +
+        'control characters (including the ESC that colour needs), so either route the\n' +
+        'coloured output through the logger, or narrow the strip:\n' + offenders.join('\n'),
+    ).toEqual([]);
+  });
+});
