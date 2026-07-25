@@ -12,6 +12,7 @@
 import type { FunctionCfg } from './cfg.js';
 import type { FileStyleRaw } from './style-fingerprint.js';
 import type { FileParseHealth } from './parse-health.js';
+import type { ExtractionLaneDisclosure } from './extraction-pool.js';
 
 export type EdgeConfidence =
   | 'self_cls'       // intra-class call via self/cls
@@ -368,6 +369,22 @@ export interface CallGraphResult {
    * (undefined) when the graph has no ambiguous sites.
    */
   ambiguousSites?: AmbiguousCallSite[];
+  /**
+   * Which lane Pass-1 extraction actually ran on — the worker pool or the serial
+   * reference path — and whether anything degraded (change:
+   * optimize-parallel-extraction-pool). Transient build-time data: it describes HOW the
+   * facts were computed, never WHAT they are, so it is deliberately not carried into
+   * {@link SerializedCallGraph} or any artifact. Read by the analyze summary to disclose a
+   * degraded lane.
+   *
+   * "Byte-identical" is the contract for every fact the extractors produce, and it is
+   * verified end to end. One residual asymmetry is inherent rather than a gap: a worker
+   * thread gets a larger default stack than the main thread, so a pathological
+   * deep-recursion parse can succeed on one lane and fail on the other. That is a
+   * different FILE failing to parse, disclosed through parse health either way — not a
+   * different interpretation of a file that parsed.
+   */
+  extractionLane?: ExtractionLaneDisclosure;
 }
 
 /** Serializable version (Maps replaced by arrays) for JSON storage */

@@ -202,6 +202,14 @@ export async function runAnalysis(
     envVars,
   });
 
+  // Disclose a degraded Pass-1 extraction lane (change: optimize-parallel-extraction-pool).
+  // The builder deliberately does not log this itself — the same code path runs inside the
+  // stdio MCP server, whose stdout carries JSON-RPC — so the CLI is where it surfaces.
+  // Present only when something actually degraded; a clean run says nothing.
+  if (artifacts.extractionLaneNote) {
+    logger.warning(artifacts.extractionLaneNote);
+  }
+
   // Carry anchored memory/decisions across any rename/move detected between the
   // snapshot and the freshly persisted graph. Deterministic, no LLM; a cheap no-op
   // when there are no anchored symbols or no prior snapshot. Never fails analysis.

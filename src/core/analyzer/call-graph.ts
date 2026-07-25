@@ -34,6 +34,10 @@ import { synthesizeTypeHierarchyEdges, type RawMethodCall } from './cha.js';
 import { logger } from '../../utils/logger.js';
 import { tallyFileStyle, type FileStyleRaw, type StyleAstNode } from './style-fingerprint.js';
 import { tallyParseHealth, type FileParseHealth, type ParseHealthNode } from './parse-health.js';
+// Pass-1 extraction lane (change: optimize-parallel-extraction-pool). The pool holds no
+// extraction logic of its own — it dispatches `dispatchFileExtract` to worker threads and
+// merges by input index, with the serial loop as both reference and fallback.
+import { extractFilesForPass1, type ExtractionLaneOptions } from './extraction-pool.js';
 
 // ============================================================================
 // TYPES — extracted to ./call-graph-types.ts and re-exported here so this file
@@ -3951,7 +3955,38 @@ export async function synthesizeDynamicDispatchEdges(
   return results.flat();
 }
 
+/**
+ * Does a Pass-1 extraction result carry no facts at all? Used only to decide whether a
+ * WORKER's silence has been proven trustworthy (see `extraction-pool.ts`) — never to alter
+ * a result. `undefined` (a language with no extractor) is not emptiness: it is the same
+ * deterministic answer on both lanes.
+ */
+function isEmptyExtractResult(result: FileExtractResult | undefined): boolean {
+  if (!result) return false;
+  return result.nodes.length === 0
+    && result.rawEdges.length === 0
+    && !result.parseHealth
+    && !result.style;
+}
+
+/** Construction-time options for {@link CallGraphBuilder}. */
+export interface CallGraphBuilderOptions {
+  /**
+   * Controls for the Pass-1 extraction lane (change: optimize-parallel-extraction-pool).
+   * Production passes nothing: the lane decides for itself from core count, file count, the
+   * process-wide worker budget, and `OPENLORE_NO_WORKERS`. Tests use these to drive a stub
+   * pool whose completion order and failure modes are deterministic.
+   */
+  extraction?: ExtractionLaneOptions;
+}
+
 export class CallGraphBuilder {
+  private readonly extractionOptions: CallGraphBuilderOptions['extraction'];
+
+  constructor(options: CallGraphBuilderOptions = {}) {
+    this.extractionOptions = options.extraction;
+  }
+
   /**
    * Build a call graph from a list of source files.
    *
@@ -3976,10 +4011,31 @@ export class CallGraphBuilder {
     const styleByFile = new Map<string, FileStyleRaw>();
     const parseHealthByFile = new Map<string, FileParseHealth>();
 
-    // Pass 1: Extract nodes and raw edges from each file
-    for (const file of files) {
+    // Pass 1: Extract nodes and raw edges from each file.
+    //
+    // Extraction runs on a worker-thread pool when one is available and the build is large
+    // enough to pay for the spawn (change: optimize-parallel-extraction-pool); otherwise it
+    // runs on the serial lane, which stays the reference implementation and the fallback
+    // executor — `dispatchFileExtract` is the single extractor for both lanes.
+    //
+    // The EXTRACT step and the MERGE step below are separated on purpose. Extraction may
+    // complete in any order; the merge walks `files` by index and applies each result in
+    // input order, so worker scheduling can never reach the graph. Every determinism
+    // property downstream (node overwrite order, raw-edge sequence) is a property of this
+    // loop, not of the extraction lane.
+    const { outcomes: extractOutcomes, disclosure: extractionLane } = await extractFilesForPass1(
+      files,
+      dispatchFileExtract,
+      isEmptyExtractResult,
+      this.extractionOptions ?? {},
+    );
+
+    for (let fileIndex = 0; fileIndex < files.length; fileIndex++) {
+      const file = files[fileIndex];
+      const outcome = extractOutcomes[fileIndex];
       try {
-        const result = await dispatchFileExtract(file);
+        if (outcome.status === 'error') throw outcome.error;
+        const result = outcome.value;
         if (!result) continue;
 
         // Compute startLine (1-based) from byte offset — cheap, done once at build time
@@ -4019,6 +4075,11 @@ export class CallGraphBuilder {
         // Record it as a structured parse-health failure so downstream conclusions disclose it
         // instead of treating the missing symbols as genuinely absent (change:
         // add-parse-health-boundary-disclosure). Still fail-soft — the build proceeds.
+        //
+        // Only `error.message` may be relied on here. A throw that happened inside an
+        // extraction worker crossed a structured-clone boundary, so its class, `code`, and
+        // stack did not survive — an `instanceof`/`.code` check added below would behave
+        // differently on the two lanes (change: optimize-parallel-extraction-pool).
         parseHealthByFile.set(file.path, {
           filePath: file.path,
           language: file.language,
@@ -4746,6 +4807,7 @@ export class CallGraphBuilder {
       styleByFile: styleByFile.size > 0 ? styleByFile : undefined,
       parseHealthByFile: parseHealthByFile.size > 0 ? parseHealthByFile : undefined,
       ambiguousSites: ambiguousSites.length > 0 ? ambiguousSites : undefined,
+      extractionLane,
     };
   }
 
@@ -4810,7 +4872,7 @@ function assignClassStableIds(classes: ClassNode[]): void {
 }
 
 /** The per-file result of Pass-1 extraction (before cross-file resolution). */
-type FileExtractResult = {
+export type FileExtractResult = {
   nodes: FunctionNode[];
   rawEdges: RawEdge[];
   cfg?: Map<string, FunctionCfg>;
@@ -4821,10 +4883,11 @@ type FileExtractResult = {
 /**
  * Dispatch ONE file to its per-language extractor (Pass-1 only — nodes/edges/cfg/style/parseHealth,
  * no cross-file resolution). The single source of truth for the language→extractor mapping, shared
- * by the full build and the watcher's per-file refreshers so the dispatch is never duplicated.
- * Returns `undefined` for a language with no extractor.
+ * by the full build, the watcher's per-file refreshers, AND the extraction-pool worker
+ * (change: optimize-parallel-extraction-pool) so the dispatch is never duplicated and the pooled
+ * lane cannot drift from the serial one. Returns `undefined` for a language with no extractor.
  */
-async function dispatchFileExtract(
+export async function dispatchFileExtract(
   file: { path: string; content: string; language: string },
 ): Promise<FileExtractResult | undefined> {
   if (file.language === 'Python') return extractPyGraph(file.path, file.content);

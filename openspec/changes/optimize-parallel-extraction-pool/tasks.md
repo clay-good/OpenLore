@@ -1,0 +1,151 @@
+# Tasks — optimize-parallel-extraction-pool
+
+> Status: BUILT + adversarially reviewed. Measured on this repo (macOS, 10 cores, pool size 8):
+> call-graph build **18.9s → 7.2s** (2.6×); full `openlore analyze --no-embed` **24.7s → 12.6s**
+> (2.0×). Pass 1 was 14.3s of the 20.2s serial build (71%) before the change.
+
+## Implementation
+- [x] Worker entry module (`src/core/analyzer/extraction-worker.ts`): receives the build's file
+      record and runs the SAME `dispatchFileExtract` the serial lane runs (per-worker parser
+      singletons come free from the per-thread module registry; the Lua/Dart WASM grammars keep
+      their isolated-module discipline per worker), then posts plain fact objects (nodes, raw
+      edges, CFG, style, parse-health)
+- [x] Deviation from the proposal, deliberate: workers receive the file's CONTENT, not just its
+      path. `build`'s input content is authoritative and is not always what is on disk — HTML
+      pages arrive inline-script-blanked, the incremental path passes in-memory content, and test
+      builds pass synthetic files — so a worker-side re-read would change facts, not just I/O
+- [x] Startup parse probe in the worker: the extractors return EMPTY (they do not throw) when a
+      grammar is unavailable, so a worker proves it can parse one known snippet before it accepts
+      work; an unhealthy worker is dropped rather than silently contributing nothing
+- [x] Worker→parent log relay: grammar-unavailable warnings are posted to the parent and deduped
+      there, so an unavailable language is disclosed once per run, not once per worker
+- [x] Pool lane in `CallGraphBuilder.build`: Pass 1 split into an EXTRACT step (pooled or serial)
+      and a MERGE step that walks `files` by index — completion order can never reach the graph
+- [x] Pool sizing constants in `src/constants.ts` (`EXTRACTION_POOL_MAX`,
+      `EXTRACTION_POOL_MIN_FILES`, `EXTRACTION_POOL_STARTUP_TIMEOUT_MS`); size =
+      `min(availableParallelism() - 1, EXTRACTION_POOL_MAX, fileCount)`; pool created once per
+      build, terminated after Pass 1
+- [x] Fail-soft ladder: per-file worker death → serial re-extract of that file on the main thread;
+      an extractor that THROWS inside a worker is recorded as that file's parse failure (identical
+      to the serial lane, no retry); no healthy worker / unresolvable worker entry /
+      `OPENLORE_NO_WORKERS=1` → wholesale serial; a worker that never reports ready is dropped on
+      a startup timeout instead of hanging analyze. Every degraded outcome is disclosed on the
+      build result (`CallGraphResult.extractionLane`) and warned in the analyze output
+- [x] Serial path kept as the reference implementation — it is also the fallback executor, and the
+      pool module contains no extraction logic at all
+
+## Hardening from adversarial review (three review passes)
+- [x] **Never trust an unproven silence.** The startup probe covers ONE grammar; the other ~20 load
+      lazily and independently per thread, and an unavailable grammar returns EMPTY rather than
+      throwing. So a worker's empty result is re-checked on the main thread until that worker has
+      demonstrably extracted that language, and a disagreement is disclosed as a lane defect.
+      Measured cost on this repo: **0 re-checks** on a healthy run (a real parse of a
+      function-less file still yields style counters, so ordinary empty files are never mistaken
+      for silence)
+- [x] **Probe a language the build actually contains.** Every grammar is an optional dependency, so
+      probing TypeScript in a Python repo could disable the pool over a grammar that repo never
+      needed. The parent names the build's dominant language; a language with no probe snippet
+      skips the probe and relies on the per-language guard
+- [x] **No hang paths.** A reply whose id does not match the outstanding request retires the worker
+      (previously it was ignored, leaving the request armed forever); every per-file request has a
+      deadline; startup has one too, lowered to 10s since a healthy worker reports in well under a
+      second; a process that has proven workers cannot start remembers it instead of paying that
+      stall on every later build
+- [x] **Nothing writes to stdout.** `openlore mcp` speaks JSON-RPC over stdout and runs builds
+      in-process; a worker inherits no console patching. Workers now keep their stdout off the
+      parent's (drained, stderr still inherited), and the lane note is returned on the build result
+      for the CLI to render instead of being logged from the builder
+- [x] **Worker count is bounded per PROCESS, not per build.** The daemon runs builds concurrently
+      (a background self-heal rebuild alongside a tool-call build); each would otherwise plan a full
+      pool and double the resident isolate count. A build that finds the budget spent runs serial
+- [x] Worker handle registration moved inside the try that terminates it; `poolSize` documented as
+      "workers that came up", not "workers still alive"; a note at the merge catch that only
+      `error.message` survives the worker boundary
+
+### Round 3 (re-review of the hardened code)
+- [x] **The guard covered only half the hazard.** A per-language grammar load that fails inside a
+      worker does NOT return empty — `getPyParser` and friends do not wrap their `import`, so it
+      THROWS. That error was trusted unconditionally, which would have written `parseFailed` and
+      dropped every symbol for files the serial lane extracts fully — a graph that depends on which
+      lane ran, and on scheduling. An error from an unproven worker is now re-checked exactly like
+      an empty result; an error from a PROVEN worker is still a real per-file parse failure
+- [x] **`terminate()` was an unbounded await on all three release paths.** V8 can only interrupt a
+      thread at a JS boundary, so a thread wedged in a synchronous native call may never exit —
+      re-creating the hang the deadlines exist to prevent and stranding its process-budget slot
+      forever. The wait is now bounded and the slot is returned regardless
+- [x] **The lane disclosure was dead plumbing** — computed, carried on `AnalysisArtifacts`, and read
+      by nobody, so `laneDefectFiles` never reached a human. `openlore analyze` now renders it
+- [x] Sticky "workers do not work here" is set only for a DETERMINISTIC failure (every worker
+      refused to spawn or reported unhealthy), not for a startup timeout — a load spike must not
+      drop a long-lived daemon to the serial lane for good
+- [x] Two comments claimed a watcher opt-out that does not exist. Corrected to state what is true:
+      the watcher DOES use the pool (measured 516ms → 292ms on a 33-file subset rebuild), and what
+      bounds the daemon is the per-process worker cap, not the file-count floor
+- [x] `proven` now requires a defined, non-empty result, so `undefined` (a language with no
+      extractor) no longer marks a language proven
+
+### Round 4 (convergence review — test honesty)
+- [x] The shipped-entry guard resolved a sibling `.js` tsc never emits, so it skipped silently in
+      a fully built checkout. Repointed at repo-root `dist/`, wired into the CI Build job, and
+      verified to fail on a corrupted compiled entry
+- [x] Deleted a test that asserted nothing about its own name: it injected a throwing extractor as
+      `serialExtract`, which a healthy stub worker never calls, so it would have passed with the
+      worker error path deleted outright. The behavior is covered by the proven-worker error test
+- [x] Probe-table guard: every snippet in `PROBES` is checked against the real extractor for a node
+      AND an edge. A snippet that quietly stops yielding both would disable the pool process-wide
+      with no failing test
+- [x] Deleted the write-only `worker` payload on the unfilled-slot record (and the generic it
+      forced); the disclosure now reports lane defects AND worker fallbacks when both occurred,
+      and says "reported no symbols" since the defect covers a throw as well as a silence
+- [x] Qualified the "byte-identical" comments: a worker thread's larger default stack means a
+      pathological deep-recursion parse can fail on one lane and not the other — a different FILE
+      failing to parse, disclosed through parse health either way, not a different reading of a
+      file that parsed
+- [ ] KNOWN LIMIT (not fixed here): the lane note is rendered by `openlore analyze` only, so a
+      lane defect during the daemon's cold-start or self-heal rebuild is not surfaced to a human.
+      Matches the spec as written; a counter on `parse-health.json` or `openlore status` would
+      close it
+
+## Verification
+- [x] Byte-equality oracle: `openlore analyze` on a clean checkout of this repo, pooled and with
+      `OPENLORE_NO_WORKERS=1` — every content artifact byte-identical (llm-context, repo-structure,
+      dependency-graph, style-fingerprint, parse-health, all inventories, CODEBASE/ARCHITECTURE).
+      The four artifacts that do differ (SUMMARY.md, fingerprint.json, refactor-priorities.json,
+      vector-index-meta.json) differ ONLY in a wall-clock timestamp, and differ identically
+      between two SAME-lane runs — pre-existing, not lane-dependent
+- [x] Order-independence test: a stub pool that answers later files FIRST (asserting the
+      completion order really was inverted) still yields a byte-identical serialized graph,
+      including the colliding-symbol case where merge order decides which node survives
+- [x] Worker-crash test: one worker dies mid-file, and separately all workers die — every file is
+      accounted for, facts identical to serial, fallback disclosed
+- [x] WASM-in-worker test: Lua and Dart fixtures interleaved with TypeScript extract identically
+      on real threads and on the main thread (asserted non-empty, so the comparison cannot pass by
+      both lanes finding nothing)
+- [x] Real-thread test: `worker_threads` workers spawn, probe, extract, and match serial byte for
+      byte (`extraction-pool-threads.test.ts`)
+- [x] Wall-clock measured and reported above; no unmeasured speedup claims anywhere in docs
+- [x] Unproven-silence tests: a blind worker's graph is byte-identical to serial and its defect is
+      disclosed; an ordinary function-less file costs zero re-checks; a language with no style
+      counters is re-checked only until the worker proves it; a language with no extractor is a
+      deterministic answer, not a silence
+- [x] Protocol/budget tests: an off-protocol worker is retired instead of hanging the pass; the
+      worker budget is shared across concurrent builds and returned when they finish
+- [x] Worker-error tests: a worker that THROWS for an unproven language has every file re-checked
+      and the defect disclosed; a worker that fails everything still yields a graph byte-identical
+      to serial with no invented `parseFailed` records; an error from a PROVEN worker is still
+      recorded as that file's parse failure
+- [x] Scheduling-independence test: across 12 runs at pool sizes 1-4 with randomized interleavings
+      over a mixed-language corpus, the re-check set genuinely VARIES (asserted) and the serialized
+      graph never does — the exact question the unproven-silence guard raises
+- [x] Shipped-entry test: `dist/core/analyzer/extraction-worker.js` — the file the npm package
+      ships, which no other test loads because vitest always resolves the `.ts` entry — starts and
+      reports ready. CI runs it in the Build job, the only job where `dist/` exists. Verified it
+      FAILS on a deliberately corrupted compiled entry (the first version of this guard looked for
+      a sibling `.js` that tsc never emits, so it silently skipped in a built checkout — caught by
+      review, not by the suite)
+- [x] MCP stdio purity: drove `openlore mcp` over stdio through a cold-start pooled build plus
+      an `orient` call — every stdout line a valid JSON-RPC frame, build noise on stderr
+- [x] Full suite green (321 files / 6150 tests), lint + typecheck clean
+
+## Spec
+- [x] `analyzer` delta: ADD ExtractionPoolPreservesDeterministicOutput

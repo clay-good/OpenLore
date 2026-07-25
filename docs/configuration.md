@@ -44,6 +44,7 @@
 | `OPENLORE_NO_AUTO_ANALYZE` | -- | Disable the MCP server's cold-start self-bootstrap (no background index build on first run) |
 | `OPENLORE_NO_UPDATE_NOTIFIER` | -- | Silence the passive "update available" banner (`NO_UPDATE_NOTIFIER` is also honored) |
 | `OPENLORE_SKIP_POSTINSTALL` | -- | Suppress the post-install next-step hint |
+| `OPENLORE_NO_WORKERS` | `analyze` | Run per-file extraction on a single thread instead of the worker pool. Both lanes produce byte-identical analysis output, so this only costs wall-clock — set it to isolate a worker-related problem, or in an environment where extra threads are unwelcome |
 
 > The `EMBED_*` variables configure the **remote** embedding provider only. For on-device embeddings with no endpoint or key, run `openlore embed --local` (or set `embedding.provider: "local"` in `.openlore/config.json`). Keyword (BM25) search is the first-class default and needs none of these. See [docs/semantic-search.md](semantic-search.md#retrieval-modes) for the full embedding/retrieval-mode reference.
 

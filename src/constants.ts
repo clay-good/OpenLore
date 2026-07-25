@@ -710,3 +710,61 @@ export const PAGERANK_CONVERGENCE_TOLERANCE = 1e-6;
 
 /** Hard cap on power-iteration passes — a termination bound, not a tuning weight. */
 export const PAGERANK_MAX_ITERATIONS = 100;
+
+// ============================================================================
+// PASS-1 EXTRACTION POOL
+// ============================================================================
+// Bounds for the worker-thread lane that runs per-file tree-sitter extraction
+// (change: optimize-parallel-extraction-pool). Pass 1 is embarrassingly parallel
+// per file; these are the only tuning knobs — everything else about the lane is a
+// determinism or fail-soft rule, not a weight.
+
+/**
+ * Hard ceiling on extraction worker threads, regardless of core count. Each worker
+ * holds its own tree-sitter parsers and grammar handles (native `.node` bindings
+ * plus, for Lua/Dart, an isolated web-tree-sitter WASM heap), so pool size is
+ * bounded by memory, not just cores. Beyond this the marginal parse throughput no
+ * longer pays for the resident grammar set.
+ */
+export const EXTRACTION_POOL_MAX = 8;
+
+/**
+ * Minimum Pass-1 file count before the pool is worth starting. Below this the worker
+ * spawn + module-load cost exceeds the parse work the pool would absorb, so small builds
+ * stay on the serial lane.
+ *
+ * This is a cost heuristic, not a safety boundary. The watcher's per-save subset rebuild can
+ * exceed it (its closure budget alone is INCREMENTAL_CLOSURE_BUDGET files) and so does use
+ * the pool — measured on this repo, a 33-file subset rebuild goes 516ms serial → 292ms
+ * pooled, so it is a win on the interactive path too. What bounds the daemon's exposure is
+ * EXTRACTION_POOL_MAX applied per PROCESS, not this floor.
+ */
+export const EXTRACTION_POOL_MIN_FILES = 32;
+
+/**
+ * How long a freshly spawned extraction worker has to load its modules, pass its parse
+ * probe, and report ready. A worker that neither reports ready nor dies within this window
+ * (a hung module load or grammar dlopen) is dropped from the pool rather than allowed to
+ * stall analyze — a liveness bound, not a performance weight. Kept modest because this is
+ * also the stall an environment where workers CANNOT start pays before falling back: a
+ * healthy worker reports ready in well under a second, so a slow one is a broken one.
+ */
+export const EXTRACTION_POOL_STARTUP_TIMEOUT_MS = 10_000;
+
+/**
+ * How long a worker has to answer for ONE file before it is retired and that file is
+ * re-extracted on the main thread. Deliberately generous — a pathological source file can
+ * legitimately take seconds to parse, and a false timeout costs correctness nothing but
+ * does cost the pool a worker. The serial lane needs no equivalent bound because it cannot
+ * go silent; a wedged worker emits neither a reply nor an exit, so without this the pass
+ * would wait on it forever while its siblings finish and the process looks idle.
+ */
+export const EXTRACTION_POOL_REQUEST_TIMEOUT_MS = 120_000;
+
+/**
+ * How long to wait for a terminated extraction worker to actually exit before reclaiming its
+ * slot in the process budget anyway. V8 can only interrupt a thread at a JS boundary, so a
+ * thread wedged inside a synchronous native call may never exit; waiting forever would turn
+ * cleanup into the hang the other deadlines exist to prevent.
+ */
+export const EXTRACTION_POOL_TERMINATE_TIMEOUT_MS = 5_000;
