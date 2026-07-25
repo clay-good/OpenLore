@@ -468,7 +468,7 @@ export class OpenSpecConfigManager {
       version: '1.0.0',
     }
   ): Promise<OpenSpecConfig> {
-    let raw: string | null = null;
+    let raw: string | null;
     try {
       raw = await readFile(this.configPath, 'utf-8');
     } catch {

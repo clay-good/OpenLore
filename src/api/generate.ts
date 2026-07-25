@@ -187,7 +187,7 @@ export async function openloreGenerate(options: GenerateApiOptions = {}): Promis
       logDir: join(rootPath, OPENLORE_DIR, OPENLORE_LOGS_SUBDIR),
     });
   } catch (error) {
-    throw new Error(`Failed to create LLM service: ${(error as Error).message}`);
+    throw new Error(`Failed to create LLM service: ${(error as Error).message}`, { cause: error });
   }
   progress(onProgress, 'Creating LLM service', 'complete', `${effectiveProvider}/${effectiveModel}`);
 
@@ -231,7 +231,7 @@ export async function openloreGenerate(options: GenerateApiOptions = {}): Promis
     pipelineResult = await pipeline.run(repoStructure, llmContext, depGraph, refactorReport);
   } catch (error) {
     await llm.saveLogs().catch(() => {});
-    throw new Error(`Pipeline failed: ${(error as Error).message}`);
+    throw new Error(`Pipeline failed: ${(error as Error).message}`, { cause: error });
   }
   progress(onProgress, 'Running LLM generation pipeline', 'complete');
 

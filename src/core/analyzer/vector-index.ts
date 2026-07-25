@@ -103,7 +103,7 @@ function metaFilePath(outputDir: string): string {
 function readMeta(outputDir: string): VectorIndexMeta | null {
   const dbPath = join(outputDir, DB_FOLDER);
   if (_metaCache.has(dbPath)) return _metaCache.get(dbPath) ?? null;
-  let meta: VectorIndexMeta | null = null;
+  let meta: VectorIndexMeta | null;
   try {
     meta = JSON.parse(readFileSync(metaFilePath(outputDir), 'utf-8')) as VectorIndexMeta;
   } catch {
@@ -364,7 +364,7 @@ function deleteCorpusSidecar(dbPath: string): void {
  * incremental patch deletes it).
  */
 function loadOrBuildBm25Corpus(dbPath: string, allRows: Record<string, unknown>[]): Bm25Corpus {
-  let loaded: Bm25Corpus | null = null;
+  let loaded: Bm25Corpus | null;
   try {
     loaded = deserializeBm25Corpus(readFileSync(corpusFilePath(dbPath), 'utf-8'));
   } catch {

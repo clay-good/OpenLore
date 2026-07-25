@@ -75,7 +75,7 @@ export function extractPrompt(stdin: string): string {
  * invokes it cannot break the user's turn.
  */
 export async function buildInjection(directory: string, prompt: string): Promise<string> {
-  let cfg = INJECTION_DEFAULTS;
+  let cfg: ReturnType<typeof resolveInjectionConfig>;
   try {
     const loaded = await readOpenLoreConfig(directory);
     cfg = resolveInjectionConfig(loaded?.contextInjection);

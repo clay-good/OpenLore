@@ -104,7 +104,7 @@ export async function openloreVerify(options: VerifyApiOptions = {}): Promise<Ve
       logDir: join(rootPath, OPENLORE_DIR, OPENLORE_LOGS_SUBDIR),
     });
   } catch (error) {
-    throw new Error(`Failed to create LLM service: ${(error as Error).message}`);
+    throw new Error(`Failed to create LLM service: ${(error as Error).message}`, { cause: error });
   }
 
   // Run verification

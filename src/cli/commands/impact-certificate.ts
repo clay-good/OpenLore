@@ -191,7 +191,7 @@ export async function runImpactCertificateCli(opts: ImpactCertificateCliOptions)
 
   if (opts.hook) {
     // Config read is advisory-safe: a throw or wrong-typed `block` must never block.
-    let block: CoveringSurfaceSeverity[] = [];
+    let block: CoveringSurfaceSeverity[];
     try {
       const config = await readOpenLoreConfig(cwd);
       const raw = config?.impactCertificate?.block;

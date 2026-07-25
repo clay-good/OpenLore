@@ -17,8 +17,14 @@
 /** Minimum supported Node. This is the first line where `node:sqlite` — imported
  * at module load by EdgeStore, the epistemic lease, and preflight scoring — is
  * available WITHOUT `--experimental-sqlite` (unflagged in Node 22.13.0 / 23.4.0,
- * nodejs/node#55854). MUST stay in sync with package.json `engines.node` and
- * constants.ts's `MIN_NODE_*` (a test asserts all three). */
+ * nodejs/node#55854). MUST stay in sync with the FLOOR in package.json
+ * `engines.node` (`^22.13.0 || >=23.5.0`) and constants.ts's `MIN_NODE_*` (a test
+ * asserts all three).
+ *
+ * This is a major.minor floor, so it admits 23.0-23.4 even though `node:sqlite` was
+ * still flagged there. That gap is deliberate and covered: the capability probe
+ * below has the final word, so such a runtime fails naming the missing builtin
+ * rather than passing the arithmetic and crashing later. */
 export const MIN_NODE = { major: 22, minor: 13 } as const;
 
 /** Stable, dedicated exit code for "unsupported Node" (documented contract). */

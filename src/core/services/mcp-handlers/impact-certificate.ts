@@ -666,7 +666,7 @@ export interface CertificateLeaseStatus {
  * be treated as silently still-true (mcp-handlers: ImpactCertificateDecaysWithLease).
  */
 export function recheckCertificate(absDir: string, cert: ImpactCertificate): CertificateLeaseStatus {
-  let anchorCtx: ReturnType<typeof AnchorContext.open> = null;
+  let anchorCtx: ReturnType<typeof AnchorContext.open>;
   try { anchorCtx = AnchorContext.open(absDir); } catch { anchorCtx = null; }
   if (!anchorCtx) {
     // No graph to check against → cannot prove fresh; treat as stale (never silently current).
@@ -705,7 +705,7 @@ export function recheckPersistedCertificates(absDir: string): StaleCertificate[]
   const dir = certDir(absDir);
   if (!existsSync(dir)) return [];
   const out: StaleCertificate[] = [];
-  let entries: string[] = [];
+  let entries: string[];
   try { entries = readdirSync(dir).filter(f => f.endsWith('.json')); } catch { return []; }
   for (const file of entries) {
     let cert: ImpactCertificate;
@@ -803,7 +803,7 @@ export async function computeImpactCertificate(
   }
 
   // ── 1. Declared surfaces config (additive; absent = nothing to assess against) ─
-  let surfaceCfg: CoveringSurfaceConfig[] = [];
+  let surfaceCfg: CoveringSurfaceConfig[];
   try {
     const cfg = await readOpenLoreConfig(absDir);
     surfaceCfg = surfacesFromConfig(cfg?.impactCertificate);

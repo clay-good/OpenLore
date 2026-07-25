@@ -178,7 +178,7 @@ function extractTemplateManifests(f: InFile, chartName: string, module: IacModul
     return;
   }
   for (const doc of docs) {
-    let obj: Record<string, unknown> | null = null;
+    let obj: Record<string, unknown> | null;
     try { obj = doc.toJS() as Record<string, unknown> | null; } catch { continue; }
     if (!obj || typeof obj !== 'object') continue;
     const kind = typeof obj.kind === 'string' ? obj.kind : '';

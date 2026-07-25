@@ -69,7 +69,7 @@ export const cursorAdapter: Adapter = {
 
     const mdcPath = join(ctx.root, MDC_FILE);
     const desired = await renderMdc(ctx.instructionTemplate);
-    let existing: string | null = null;
+    let existing: string | null;
     try {
       existing = await readFile(mdcPath, 'utf8');
     } catch {

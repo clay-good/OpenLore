@@ -81,7 +81,7 @@ export function loadRegistry(homeDir: string): FederationRegistry {
   try {
     parsed = JSON.parse(readFileSync(manifest, 'utf8'));
   } catch (err) {
-    throw new Error(`Federation manifest is not valid JSON (${manifest}): ${(err as Error).message}`);
+    throw new Error(`Federation manifest is not valid JSON (${manifest}): ${(err as Error).message}`, { cause: err });
   }
   if (!parsed || typeof parsed !== 'object' || !Array.isArray((parsed as FederationRegistry).repos)) {
     throw new Error(`Federation manifest has an unexpected shape (${manifest}); expected { schemaVersion, repos[] }.`);

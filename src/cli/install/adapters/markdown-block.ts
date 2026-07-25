@@ -45,7 +45,7 @@ export async function applyMarkdownBlock(
 ): Promise<ApplyResult> {
   const filePath = join(ctx.root, opts.fileName);
   const warnings: string[] = [];
-  let existing: string | null = null;
+  let existing: string | null;
   try {
     existing = await readFile(filePath, 'utf8');
   } catch {

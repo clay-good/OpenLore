@@ -254,7 +254,7 @@ export async function runEnforceCli(opts: EnforceCliOptions): Promise<number> {
   if (opts.uninstallHook) { await uninstallEnforcementHook(cwd); return 0; }
 
   configureLogger({ quiet: true });
-  let config: OpenLoreConfig | null = null;
+  let config: OpenLoreConfig | null;
   try { config = await readOpenLoreConfig(cwd); } catch { config = null; }
   const policy = effectivePolicy(config);
   const unknown = unknownPolicyCodes(normalizeEnforcementPolicy(config?.enforcement));

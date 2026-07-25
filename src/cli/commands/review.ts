@@ -388,7 +388,7 @@ export async function runReviewCli(opts: ReviewCliOptions): Promise<number> {
   // Opt-in gating: reuse the exact `blastRadius.block` convention — no second config
   // dialect. Advisory unless --hook AND a configured pattern actually fires.
   if (opts.hook && !('error' in briefing.blast)) {
-    let block: BlastRadiusBlockPattern[] = [];
+    let block: BlastRadiusBlockPattern[];
     try {
       const config = await readOpenLoreConfig(cwd);
       const raw = config?.blastRadius?.block;

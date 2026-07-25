@@ -328,7 +328,7 @@ export async function handleSpecStoreStatus(directory: string): Promise<SpecStor
     // nothing for repos that never opted into certificates. An expired certificate is
     // surfaced as a finding so it is never trusted past the state it was computed against.
     if (status.resolved && status.state === 'indexed' && status.path) {
-      let stales: ReturnType<typeof recheckPersistedCertificates> = [];
+      let stales: ReturnType<typeof recheckPersistedCertificates>;
       // Hard no-throw boundary: a target repo's corrupt anchor graph / certificate
       // must never break this read-only health check (handler contract: never throws).
       try { stales = recheckPersistedCertificates(status.path); } catch { stales = []; }

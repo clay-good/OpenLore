@@ -1203,7 +1203,7 @@ export class GeminiCLIProvider implements LLMProvider {
     }
 
     // Format: {response: string, stats: {models: {[name]: {tokens: {input, candidates, total}}}}}
-    let content = '';
+    let content: string;
     let inputTokens: number | undefined;
     let outputTokens: number | undefined;
     let modelUsed = this.model ?? 'gemini-cli';
@@ -1293,7 +1293,7 @@ export class CursorAgentProvider implements LLMProvider {
       throw Object.assign(new Error(`cursor-agent CLI failed: ${detail}`), { retryable: false });
     }
 
-    let content = '';
+    let content: string;
     let inputTokens: number | undefined;
     let outputTokens: number | undefined;
 

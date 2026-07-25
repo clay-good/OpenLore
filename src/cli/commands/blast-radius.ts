@@ -201,7 +201,7 @@ export async function runBlastRadiusCli(opts: BlastRadiusCliOptions): Promise<nu
     // never block a commit. `readOpenLoreConfig` already tolerates unparseable JSON
     // (returns null); we additionally coerce `block` to an array so a valid-JSON but
     // wrong-typed value (e.g. `"block": {}` or a bare string) cannot throw on iteration.
-    let block: BlastRadiusBlockPattern[] = [];
+    let block: BlastRadiusBlockPattern[];
     try {
       const config = await readOpenLoreConfig(cwd);
       const raw = config?.blastRadius?.block;

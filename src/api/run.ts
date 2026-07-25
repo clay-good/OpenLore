@@ -272,7 +272,7 @@ export async function openloreRun(options: RunApiOptions = {}): Promise<RunResul
       logDir: join(rootPath, OPENLORE_DIR, OPENLORE_LOGS_SUBDIR),
     });
   } catch (error) {
-    throw new Error(`Failed to create LLM service: ${(error as Error).message}`);
+    throw new Error(`Failed to create LLM service: ${(error as Error).message}`, { cause: error });
   }
 
   // Load analysis data for pipeline
@@ -302,7 +302,7 @@ export async function openloreRun(options: RunApiOptions = {}): Promise<RunResul
     pipelineResult = await pipeline.run(repoStructure, llmContext, analyzeResult.depGraph);
   } catch (error) {
     await llm.saveLogs().catch(() => {});
-    throw new Error(`Pipeline failed: ${(error as Error).message}`);
+    throw new Error(`Pipeline failed: ${(error as Error).message}`, { cause: error });
   }
 
   // Format and write specs

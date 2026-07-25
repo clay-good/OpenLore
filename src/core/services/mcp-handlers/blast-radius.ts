@@ -151,12 +151,12 @@ export async function computeBlastRadius(
   const maxSymbols = Math.max(1, Math.min(input.maxSymbols ?? DEFAULT_MAX_SYMBOLS, 50));
 
   // ── 1. Resolve the diff → changed files → seed production symbols ───────────
-  let changedFiles: string[] = [];
+  let changedFiles: string[];
   // Resolve-or-disclose through the one shared helper (fix-cli-conclusion-honesty):
   // an explicit ref that git can't resolve falls back (main → master → HEAD~1) and is
   // disclosed, so the advisory briefing never misrepresents the base it diffed against.
-  let resolvedBaseRef = baseRef;
-  let baseFellBack = false;
+  let resolvedBaseRef: string;
+  let baseFellBack: boolean;
   try {
     const { getChangedFiles, resolveBaseRefDisclosed } = await import('../../drift/git-diff.js');
     const base = await resolveBaseRefDisclosed(absDir, baseRef);
