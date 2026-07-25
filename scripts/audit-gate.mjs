@@ -20,11 +20,17 @@ const ALLOWLIST = {
   'GHSA-mh99-v99m-4gvg': {
     package: 'brace-expansion',
     reason:
-      'Affects <=5.0.7 with its only patch at 5.0.8, so the 1.x line has no fix. ' +
-      'Reached solely via eslint -> minimatch@3.1.4, which calls the v1 API ' +
-      '(`module.exports = expand`); brace-expansion 5.x exports `{ expand }`, so ' +
-      'forcing it breaks lint at runtime. Dev-only, absent from the published files list.',
-    clearsWhen: 'eslint raises its minimatch floor past 3.x.',
+      'Affects <=5.0.7, patched in 5.0.8. The eslint path that previously carried this ' +
+      'is gone (eslint 10 raised its minimatch floor). It now survives only under ' +
+      '@earendil-works/pi-coding-agent -> minimatch -> brace-expansion@5.0.7, and that ' +
+      'package publishes an npm-shrinkwrap.json. npm honours a dependency\'s shrinkwrap, ' +
+      'and `overrides` cannot rewrite a shrinkwrapped subtree — verified: a top-level ' +
+      'override, a nested one, and a depth-targeted `minimatch` override all left it at ' +
+      '5.0.7, so pinning it here would be dead config that reads as a fix. Dev-only ' +
+      '(absent from the published `files` list) and reached only by developer-authored ' +
+      'glob input.',
+    clearsWhen:
+      'pi-coding-agent bumps brace-expansion in its shrinkwrap, or drops the shrinkwrap.',
   },
 };
 
