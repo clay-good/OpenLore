@@ -1,5 +1,14 @@
 name: CI
 
+# Every action is pinned to an immutable commit SHA with the human-readable version
+# in a trailing comment. A tag like `@v6` is a moving pointer: whoever controls the
+# action repo can re-point it at new code, and it runs here with this workflow's
+# token. Dependabot's `github-actions` ecosystem proposes the SHA bumps.
+#
+# `persist-credentials: false` on checkout: by default it writes the job token into
+# `.git/config`, leaving it readable by every later step (including anything a
+# dependency's install script does). No job here pushes, so none of them need it.
+
 on:
   push:
     branches: [main]
@@ -9,14 +18,23 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   lint:
     name: Lint & Type Check
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: '24'
           cache: 'npm'
@@ -40,10 +58,15 @@ jobs:
   test:
     name: Unit Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: '24'
           cache: 'npm'
@@ -56,10 +79,15 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: '24'
           cache: 'npm'
@@ -69,8 +97,15 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Verify the published tarball contents
+        # Runs here rather than in `lint` because it asserts the built entrypoints are
+        # present, which needs `dist/`. `files` is an allowlist, so a stray new
+        # directory is excluded by default — but widening `files` itself is a one-line
+        # diff, and this checks the real `npm pack` manifest rather than the intent.
+        run: npm run audit:packlist
+
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dist
           path: dist/
@@ -81,6 +116,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: [lint, test, build]
     if: always()
+    permissions:
+      contents: read
     steps:
       - name: Check all jobs passed
         run: |

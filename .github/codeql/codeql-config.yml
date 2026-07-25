@@ -1,0 +1,19 @@
+name: 'OpenLore CodeQL config'
+
+# `security-extended` over the default suite: it adds the lower-precision security
+# queries, which is the right trade for a tool whose whole job is reading untrusted
+# repository contents (paths, source text, git output, YAML/JSON from analyzed repos).
+# `security-and-quality` is deliberately NOT used — it folds in maintainability
+# queries, and a baseline that reports style as "security" gets tuned out.
+queries:
+  - uses: security-extended
+
+paths-ignore:
+  # Deliberately malformed / adversarial inputs that exist to be parsed by tests.
+  # Scanning them reports the fixture, never the code under test.
+  - src/core/analyzer/fixtures
+  - src/core/analyzer/iac/fixtures
+  - src/core/scip/fixtures
+  # Third-party protobuf runtime shipped as-is; upgrades come from upstream, and
+  # advisories against it are dependency-scanning's job, not SAST's.
+  - src/core/scip/vendor

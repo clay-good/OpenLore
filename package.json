@@ -46,6 +46,7 @@
     "format": "eslint src --fix",
     "lint": "eslint src",
     "audit:gate": "node scripts/audit-gate.mjs",
+    "audit:packlist": "node scripts/audit-packlist.mjs",
     "typecheck": "tsc --noEmit",
     "postinstall": "node scripts/postinstall.mjs",
     "prepublishOnly": "npm run build && npm run test:run"
@@ -142,6 +143,7 @@
     "!dist/**/*.test.*",
     "scripts/postinstall.mjs",
     "src/viewer",
+    "!src/viewer/**/*.test.*",
     "examples",
     "skills/openlore-orient",
     "stubs",

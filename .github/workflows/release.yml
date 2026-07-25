@@ -28,18 +28,30 @@ on:
         required: true
         type: string
 
+# Workflow-level floor. Individual jobs widen this only where they must:
+# `create-release` needs `contents: write`, `publish` needs `id-token: write`.
+# Without a floor here, every job inherits the repo-wide default — a setting that
+# can be changed outside this file, so the least-privilege guarantee would not be
+# visible in (or enforced by) the workflow itself.
+permissions:
+  contents: read
+
 jobs:
   validate:
     name: Validate Release
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           # workflow_dispatch → the explicitly-named tag.
           # push (tag) and release events → github.ref already points at the tag.
           ref: ${{ github.event.inputs.tag || github.ref }}
+          persist-credentials: false
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: '24'
           cache: 'npm'
@@ -51,9 +63,18 @@ jobs:
       # sails through validate and dies late in `npm publish` with the cryptic
       # "cannot publish over the previously published version" (this is exactly
       # how the first v2.0.6 publish failed). Catch it here with a clear message.
+      #
+      # The tag reaches the shell via `env:`, never inline `${{ }}`: interpolation is
+      # substituted into the script text before bash parses it, so a tag name carrying
+      # shell metacharacters would execute rather than compare. Pushing a tag takes
+      # write access, so this hardens a latent pattern rather than closing an external
+      # hole — but it is the pattern that gets copied into the next workflow, where
+      # the input may not be trusted.
       - name: Verify tag matches package.json version
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
-          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          TAG="$RELEASE_TAG"
           PKG="v$(node -p "require('./package.json').version")"
           if [ "$TAG" != "$PKG" ]; then
             echo "::error::Release tag '$TAG' does not match package.json version '$PKG'. Bump package.json + package-lock.json in a chore(release) commit, retag at that commit, and re-run."
@@ -80,12 +101,16 @@ jobs:
     # Only the tag-push path creates the Release. On `release: published` the
     # Release already exists; on workflow_dispatch we re-publish an existing tag.
     if: github.event_name == 'push'
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           ref: ${{ github.ref }}
+          # `gh release create` authenticates with GH_TOKEN from the env, not with git
+          # credentials, so nothing here needs the token written into .git/config.
+          persist-credentials: false
 
       # Create the Release for this tag, unless one already exists (idempotent —
       # safe to re-run). Created with GITHUB_TOKEN, so it deliberately does NOT
@@ -140,12 +165,15 @@ jobs:
     environment:
       name: npm-publish
       url: https://www.npmjs.com/package/openlore
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
+          # Publishing authenticates via OIDC, never via the git-stored token.
+          persist-credentials: false
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: '24'
           cache: 'npm'
@@ -155,6 +183,13 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      # Last gate before the one step that cannot be undone. CI already ran this on
+      # the PR, but the tarball is assembled from THIS checkout of THIS tag, so the
+      # only assertion that counts is the one made against the artifact about to be
+      # uploaded.
+      - name: Verify the published tarball contents
+        run: npm run audit:packlist
 
       # No NODE_AUTH_TOKEN — npm picks up the OIDC token automatically when
       # `id-token: write` is set and the package is configured for Trusted
