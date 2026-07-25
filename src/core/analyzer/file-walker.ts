@@ -9,7 +9,13 @@ import { opendir, readFile, stat } from 'node:fs/promises';
 import { join, relative, basename, extname, dirname } from 'node:path';
 import ignoreModule from 'ignore';
 import { DEFAULT_MAX_FILES, OPENLORE_DIR, OPENSPEC_DIR } from '../../constants.js';
-const ignore = ignoreModule.default ?? ignoreModule;
+// `ignore` ships as CJS with `module.exports = ignore` plus a self-referencing
+// `.default`, and which of the two an interop path hands back varies. The runtime
+// unwrap is kept exactly as it was — v7 only dropped `.default` from its published
+// types, so the cast restores the type while leaving resolution behaviour identical.
+// This decides which files get analyzed, so it is deliberately not "simplified".
+const ignore =
+  (ignoreModule as typeof ignoreModule & { default?: typeof ignoreModule }).default ?? ignoreModule;
 type Ignore = ReturnType<typeof ignore>;
 import type { FileMetadata, FileWalkerResult } from '../../types/index.js';
 
