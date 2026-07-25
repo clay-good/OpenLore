@@ -550,11 +550,9 @@ New contributor? See **[CONTRIBUTING.md](CONTRIBUTING.md)** for setup, the agent
 If OpenLore saves your agents from re-reading the same files — or catches one risky change before it lands — **star the repo**. It's the signal that tells us to keep building, and it helps other engineers find it.
 
 <p align="center">
-  <a href="https://star-history.com/#clay-good/OpenLore&Date">
-    <img src="https://api.star-history.com/svg?repos=clay-good/OpenLore&type=Date" alt="OpenLore star history — open the live chart on star-history.com" width="70%">
-  </a>
+  <a href="https://github.com/clay-good/OpenLore/stargazers"><img src="https://img.shields.io/github/stars/clay-good/OpenLore?style=flat-square&logo=github&label=stars" alt="GitHub stars"></a>
   <br>
-  <sub><a href="https://star-history.com/#clay-good/OpenLore&Date">Live star history</a> · <a href="https://github.com/clay-good/OpenLore/stargazers">stargazers</a> — the chart above is rendered by star-history.com; if their API is rate-limited, these links still work.</sub>
+  <sub><a href="https://www.star-history.com/clay-good/openlore">Star history chart</a> · <a href="https://github.com/clay-good/OpenLore/stargazers">stargazers</a></sub>
 </p>
 
 - ⭐ **Star** to follow along: [github.com/clay-good/OpenLore](https://github.com/clay-good/OpenLore)
