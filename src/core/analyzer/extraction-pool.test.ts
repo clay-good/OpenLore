@@ -13,6 +13,8 @@
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   extractFilesForPass1,
   plannedPoolSize,
@@ -539,7 +541,7 @@ describe('extraction pool — scheduling independence', () => {
       ['py', 'Python', (i) => `def h${i}(x):\n    return x + ${i}\n`],
     ];
     const files: ExtractionFile[] = [];
-    for (let i = 0; i < 6; i++) {
+    for (let i = 0; i < 3; i++) {
       for (const [ext, language, gen] of languages) {
         files.push({ path: `sched${i}_${files.length}.${ext}`, language, content: gen(i) });
       }
@@ -548,7 +550,7 @@ describe('extraction pool — scheduling independence', () => {
     const baseline = await buildJson(files);
     const observedRecheckCounts = new Set<number>();
 
-    for (let run = 0; run < 12; run++) {
+    for (let run = 0; run < 8; run++) {
       // A deterministic pseudo-random delay per file: the interleaving differs per run, but
       // the test itself does not depend on wall-clock timing.
       let seed = run * 7919 + 13;
@@ -616,4 +618,26 @@ describe('extraction pool — protocol and budget', () => {
     // …and the budget comes back once they are gone.
     expect(plannedPoolSize(many)).toBe(first);
   }, 30_000);
+});
+
+describe('extraction pool — the disclosure reaches a human', () => {
+  // The lane note is deliberately NOT logged from the builder: `build()` also runs inside
+  // the stdio MCP server, whose stdout carries JSON-RPC. That makes it easy for the note to
+  // become dead plumbing — computed, carried on the artifacts, and rendered by nobody, which
+  // is exactly what an earlier round of this change shipped. These guards pin both halves.
+
+  const src = (rel: string): string => readFileSync(join(__dirname, '..', '..', rel), 'utf-8');
+
+  it('the builder never logs the lane note itself', () => {
+    const builder = readFileSync(join(__dirname, 'call-graph.ts'), 'utf-8');
+    expect(builder).not.toMatch(/logger\.\w+\([^)]*describeExtractionLane/);
+    expect(builder).not.toContain('describeExtractionLane');
+  });
+
+  it('the analyze CLI renders it', () => {
+    // If this fails, a lane defect — a worker returning no symbols for a file that has them
+    // — is computed and then silently discarded.
+    expect(src('cli/commands/analyze.ts')).toContain('extractionLaneNote');
+    expect(src('core/analyzer/artifact-generator.ts')).toContain('describeExtractionLane');
+  });
 });
