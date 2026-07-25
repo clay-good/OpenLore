@@ -204,8 +204,8 @@
     },
     "ws": "^8.21.0",
     "undici": "^8.5.0",
-    "js-yaml": "^4.2.0",
-    "hono": "^4.12.25",
+    "js-yaml": "^4.3.0",
+    "hono": "^4.12.32",
     "@earendil-works/pi-coding-agent": {
       "@google/genai": {
         "protobufjs": "^7.6.4"
