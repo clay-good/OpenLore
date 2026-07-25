@@ -3705,6 +3705,446 @@ first-wins description — SHALL depend on filesystem timing.
 - **THEN** the var's `files[]` order and its winning description are the same every run,
   determined by file-list order rather than read-completion order
 
+### Requirement: CapabilityMatrixIsConformanceVerified
+
+The per-language capability matrix surfaced by `get_language_support` (derived from the per-capability
+`*_LANGUAGES` constants) SHALL be verified against the real extractors, not merely asserted. For every
+language the registry claims supports `callGraph`, a committed conformance fixture SHALL drive the
+actual call-graph builder and demonstrate that a realistic `caller→callee` fixture yields both
+functions and the resolved edge. The conformance suite SHALL also fail if the registry adds a
+`callGraph` language for which no fixture exists, so the matrix can never silently grow to over-claim.
+
+The conformance suite SHALL additionally verify intra-class method dispatch for class-bearing
+languages, the richer overlays (CFG, type inference, style fingerprint, cross-service HTTP) for each
+of their claimed languages, the IaC projection for every ecosystem in `IAC_LANGUAGES`, and the
+error-propagation overlay's claimed languages, and SHALL assert known cross-language *precision*
+differences explicitly (e.g. import-precise versus name-only cross-file resolution) rather than
+leaving them implicit. For every capability with a closed claimed-language set, the suite SHALL fail
+if that set grows without a corresponding fixture, so no capability can silently over-claim.
+
+The suite SHALL further verify **cross-file resolution for every claimed callGraph language** (not a
+sample), and SHALL include **adversarial name-collision fixtures** for each first-match-prone
+resolution strategy (bare cross-file call, `self`/`cls` dispatch, capitalized-receiver) asserting
+that an ambiguous candidate set yields the unresolved-ambiguous disposition, never an arbitrary
+first-match edge. (Overload-arity disambiguation is a node-identity concern tracked by a separate
+change and is not required here.)
+
+#### Scenario: A claimed callGraph language is proven on real code
+
+- **GIVEN** a language the registry lists in `CALLGRAPH_LANGUAGES`
+- **WHEN** the conformance suite builds the call graph from a `caller→callee` fixture in that language
+- **THEN** both functions are extracted and the `caller→callee` edge is resolved
+- **AND** if any claimed callGraph language has no conformance fixture, the suite fails
+
+#### Scenario: A richer overlay is proven on each claimed language and honestly absent otherwise
+
+- **GIVEN** one of the richer capabilities (CFG, type inference, style fingerprint, cross-service HTTP) and a language the registry claims supports it
+- **WHEN** the conformance suite drives that capability's real extractor against a representative fixture
+- **THEN** the capability produces a non-empty result for the claimed language
+- **AND** a non-claimed language yields an empty/absent result (never a guessed signal), and any claimed language without a fixture fails the suite
+
+#### Scenario: Every claimed IaC ecosystem projects onto graph primitives
+
+- **GIVEN** an ecosystem in `IAC_LANGUAGES` and a minimal realistic fixture for it
+- **WHEN** the conformance suite runs the real projector over the fixture
+- **THEN** the fixture's resources/jobs/tasks become graph nodes, and where the ecosystem models a cross-reference a `references`/`depends_on` edge is produced
+- **AND** if `IAC_LANGUAGES` grows without a fixture, the suite fails
+
+#### Scenario: A cross-language precision difference is asserted, not hidden
+
+- **GIVEN** a cross-file call in TypeScript versus in a name-only-resolved language (e.g. Python, Go)
+- **WHEN** the conformance suite resolves each
+- **THEN** the edge is found in every case
+- **AND** TypeScript's provenance is asserted as import-precise while the name-only languages' lower-confidence provenance is documented explicitly
+
+#### Scenario: Cross-file resolution is proven for every claimed language
+
+- **GIVEN** any language in `CALLGRAPH_LANGUAGES`
+- **WHEN** the conformance suite resolves a call whose callee lives in another file
+- **THEN** the edge is found with the strategy and confidence expected for that language
+- **AND** a claimed language without a cross-file fixture fails the suite
+
+#### Scenario: A name-collision fixture proves the resolver refuses to guess
+
+- **GIVEN** a fixture with two same-named cross-file definitions and a bare call to that name
+- **WHEN** the conformance suite builds the call graph
+- **THEN** the call yields the unresolved-ambiguous disposition with both candidates listed, and no
+  arbitrary edge is emitted
+
+### Requirement: StableNestedFunctionIdentity
+
+The call-graph builder SHALL give each NESTED function (a named function declared inside another
+function or method — a `function` declaration or a name-bound `const f = …` whose span is strictly
+contained within another function node) a unique, stable node id, so that two same-named nested
+functions, or a nested function colliding with a same-named top-level function, are NOT collapsed into
+one node at id aggregation.
+
+- The disambiguating id SHALL be derived from the enclosing-scope chain (e.g. `file::A.m1/helper`),
+  NOT from a byte offset or any value that changes when unrelated code shifts. The id SHALL be stable
+  across edits to surrounding code, a body edit, and a file move, to the same degree top-level symbols
+  are today.
+- Only a function whose span is STRICTLY CONTAINED within ANOTHER function node WITH A DIFFERENT ID
+  SHALL be re-keyed. A same-id container is the SAME logical function matched twice (an `export
+  function` / decorated-definition wrapper byte-containing its inner declaration) and SHALL remain
+  collapsed. Sibling collisions (non-contained nodes sharing an id) SHALL likewise remain collapsed —
+  both are intentional, separately-specified behavior.
+- Disambiguation SHALL occur before call edges are resolved, so an edge whose caller is a nested
+  function carries that nested function's unique id (not the merged twin's).
+- A call to a same-named function with multiple same-file candidates SHALL resolve by lexical scope: a
+  twin byte-NESTED within the caller's own span wins (the narrowest such, since an inner definition
+  shadows an outer name), and a self-named candidate is a recursive call that binds to the CALLER
+  itself — so a method's `validate()` reaches its OWN nested `validate` and a recursive nested
+  `visit(){ … visit() … }` recurses rather than jumping to a sibling scope's twin. Absent a nested or
+  recursive match the existing first-same-file fallback applies. (Without this, the now-distinct twins
+  would misroute every incoming nested call to whichever twin sorts first.)
+- Two same-named functions nested in the SAME enclosing scope SHALL be disambiguated by a
+  deterministic, document-order ordinal that is stable as long as the enclosing scope's preceding
+  structure is unchanged.
+- The disambiguated PATH id SHALL be stable across edits to surrounding code (derived from the
+  enclosing scope, not a byte offset), so a nested function is not reported removed-and-re-added by
+  `structural_diff` / `change_impact_certificate` on an unrelated edit. The content-addressed
+  `stableId` continues to derive from `className.name(signature)`; two nested twins therefore share a
+  `stableId` — the existing homonym completeness limit, resolved only when unique (qualifying
+  `stableId` by enclosing scope is a deferred refinement, not required here).
+- A re-keyed nested function's per-node side tables — specifically the intraprocedural CFG overlay —
+  SHALL follow the FINAL node id, not the pre-disambiguation bare id. The CFG overlay SHALL be
+  collected during extraction keyed by a per-node-stable value (the function's start byte) and
+  re-attached to the final id, so that (a) each of two same-named nested functions keeps its OWN CFG
+  (no last-write-wins loss against the colliding bare id) and (b) no CFG is orphaned under an id that
+  no node carries. CFG-dependent capabilities (def-use dataflow, `analyze_error_propagation`) SHALL
+  therefore resolve a re-keyed nested function's overlay by its node id.
+- Applies to every language whose extractor produces function nodes — the dedicated extractors
+  (TypeScript/JavaScript, Python, Go, Rust, Ruby, Java, C++, Swift, Dart, Elixir) AND the shared
+  query-spec extractor (C#, Kotlin, Scala, PHP, Lua, …). The query-spec extractor's extraction-time
+  id-dedup (which collapses multi-clause definitions / overloads) SHALL NOT drop a genuinely nested
+  twin before disambiguation: a colliding node byte-contained in a different-id function survives to be
+  re-keyed, while a true same-scope overload still collapses to one node. An extractor that does not
+  emit nested-function nodes is unaffected (a no-op).
+
+#### Scenario: same-named nested functions get distinct nodes
+
+- **GIVEN** a file with a top-level `function helper(){}` and two methods each containing their own
+  nested `function helper(){}`
+- **WHEN** the call graph is built
+- **THEN** there are three distinct `helper` nodes with distinct ids, and each nested helper keeps its
+  own outgoing edges (no merge)
+
+#### Scenario: a nested function id is stable across an unrelated edit
+
+- **GIVEN** a nested function whose id is assigned
+- **WHEN** an unrelated line is inserted earlier in the file and the graph is rebuilt
+- **THEN** the nested function's PATH id is unchanged — it is not reported as removed-and-re-added by
+  `structural_diff` / `change_impact_certificate`
+
+#### Scenario: intentional sibling collapses are preserved
+
+- **GIVEN** a re-assigned member (`obj.fn = function(){}; obj.fn = function(){}`) or a same-file
+  container homonym (`namespace A { class Config { load } }` vs `namespace B { class Config { load } }`)
+- **WHEN** the call graph is built
+- **THEN** each still collapses to exactly one node (the contained-only rule does not touch siblings)
+
+#### Scenario: an export/decorated double-match is not split
+
+- **GIVEN** an `export async function createOrder()` (matched twice — the export wrapper byte-contains
+  the inner declaration, both with id `file::createOrder`)
+- **WHEN** the call graph is built
+- **THEN** there is exactly ONE `createOrder` node (the same-id container is not treated as nested)
+
+#### Scenario: a query-spec language splits nested twins yet collapses overloads
+
+- **GIVEN** a C# class with two methods each containing a nested local `void Validate(){}` (distinct
+  bodies), and separately a class with two `Add` method overloads
+- **WHEN** the call graph is built
+- **THEN** the two nested `Validate`s become distinct nodes (`…Process/Validate`, `…Submit/Validate`)
+  with their calls routed lexically, while the two `Add` overloads still collapse to one node
+
+#### Scenario: an incoming nested call resolves by lexical scope
+
+- **GIVEN** two methods `processA`/`processB` that each contain their own nested `validate`, plus a
+  third method whose nested `visit` calls itself recursively
+- **WHEN** the call graph is built
+- **THEN** `processA`'s `validate()` edge targets `…processA/validate`, `processB`'s targets
+  `…processB/validate` (no cross-scope misroute), and the recursive `visit` edge targets its own node
+
+#### Scenario: a re-keyed nested function keeps its CFG overlay
+
+- **GIVEN** two methods each with their own nested `function helper(){ … }`, each with a distinct
+  control-flow body (so each has its own CFG overlay)
+- **WHEN** the call graph is built and the two nested `helper`s are re-keyed to distinct ids
+- **THEN** each re-keyed `helper` node has its OWN CFG entry under its final id, and there is no CFG
+  keyed under the pre-disambiguation bare `file::helper` (no orphan, no last-write-wins loss)
+
+### Requirement: StringLiteralSafeCloneNormalization
+
+Clone-detection normalization SHALL NOT alter string-literal contents when stripping comments:
+comment rules SHALL be evaluated against a length-preserving string-masked view so a comment
+marker inside a literal (`//` in a URL, `#` in a hex color or anchor, Ruby `#{...}`
+interpolation, JS `#private` access) never truncates the literal; the `#` line-comment rule
+SHALL apply only to languages where `#` is a comment; and a reported clone-group similarity
+SHALL be what was computed — an all-pairs group floor, or a value explicitly labeled
+seed-relative — never a seed-relative number presented as group-wide.
+
+#### Scenario: Functions differing only in a URL are not identical clones
+
+- **GIVEN** two TypeScript functions identical except for the host and path inside a string
+  literal `"https://..."`
+- **WHEN** clone detection runs
+- **THEN** the pair is not reported as an exact or structural clone at similarity 1.0
+- **AND** any reported similarity reflects the literal difference
+
+#### Scenario: Functions differing only in constants are not identical clones
+
+- **GIVEN** two Python functions identical except for hex-color string constants (`"#ff0000"`
+  vs `"#00ff00"`)
+- **WHEN** clone detection runs
+- **THEN** the pair is not reported as an exact or structural clone at similarity 1.0
+
+#### Scenario: The hash-comment rule is language-selected
+
+- **GIVEN** a TypeScript function whose string literals contain `#`
+- **WHEN** normalization strips comments
+- **THEN** no text is removed by the `#` rule and the literals survive intact
+
+#### Scenario: True clones are still detected
+
+- **GIVEN** two copy-pasted functions that differ only in their comments
+- **WHEN** clone detection runs
+- **THEN** the pair is reported as an exact clone at similarity 1.0
+
+#### Scenario: Group similarity is honest
+
+- **GIVEN** a near-clone group whose members are 0.85-similar to the seed but less similar to
+  each other
+- **WHEN** the group's similarity is reported
+- **THEN** the number is either the all-pairs minimum or is explicitly labeled seed-relative
+
+### Requirement: ExportParserRecognizesModifierPrefixedExports
+
+The shared import/export parser SHALL recognize modifier-prefixed JavaScript/TypeScript
+exports — `export async function`, `export function*`, `export async function*`, and
+`export abstract class` — as exports of the declared name, and SHALL name a
+`export default async function foo` declaration `foo`, never the modifier token. The
+recognition SHALL live in the shared parser itself so every consumer (dependency graph,
+spec verifier, mapping generator, public-surface certification) receives the same export
+set; no consumer SHALL carry a local recovery patch for a gap the shared parser owns.
+
+#### Scenario: An async export reaches the export index
+
+- **GIVEN** a file containing `export async function handleOrient() {}`
+- **WHEN** the dependency graph and the mapping generator run
+- **THEN** `handleOrient` appears in the file's exports and in the requirement→function
+  `exportIndex`, with kind `function`
+
+#### Scenario: A generator and an abstract class are exports
+
+- **GIVEN** a file containing `export function* walk() {}` and `export abstract class Base {}`
+- **WHEN** `parseJSExports` runs
+- **THEN** both `walk` (kind `function`) and `Base` (kind `class`) are returned
+
+#### Scenario: A default async function is named correctly
+
+- **GIVEN** a file containing `export default async function bootstrap() {}`
+- **WHEN** `parseJSExports` runs
+- **THEN** the default export's name is `bootstrap`, not `async`
+
+#### Scenario: Consumers share one implementation
+
+- **GIVEN** the shared parser recognizes modifier-prefixed exports
+- **WHEN** the public-surface certifier computes exported names
+- **THEN** it obtains async/generator exports from the shared parser without a local
+  recovery regex, and its breaking-change verdicts are unchanged
+
+### Requirement: ImportExportLineNumbersMatchOriginalSource
+
+Import and export line numbers emitted by the shared parser SHALL refer to the line in the
+ORIGINAL file content. Comment stripping (and any multi-line normalization) performed before
+regex matching SHALL preserve the line structure of the input — blanking with same-length
+whitespace that keeps newlines — so that a match offset converts to the true source line.
+A statement spanning multiple physical lines SHALL be attributed to its first line, and
+this attribution rule SHALL be documented at the parser.
+
+#### Scenario: A block-comment header does not shift lines
+
+- **GIVEN** a TypeScript file whose first 12 lines are a block comment and whose line 14 is
+  `import { x } from './y'`
+- **WHEN** imports are parsed
+- **THEN** the import is recorded at line 14, not a comment-stripped offset near line 2
+
+#### Scenario: A multi-line Python import is attributed to its first line
+
+- **GIVEN** a Python file with `from x import (\n  A,\n  B\n)` starting at line 20
+- **WHEN** imports are parsed
+- **THEN** the import is recorded at line 20 and later imports in the file keep their true
+  line numbers
+
+#### Scenario: Parenthesized non-import code does not perturb lines
+
+- **GIVEN** a Python file with a multi-line function call above an import
+- **WHEN** imports are parsed
+- **THEN** the import's recorded line equals its line in the original file
+
+### Requirement: SingleSourceLanguageDetection
+
+The system SHALL have exactly one canonical extension→language detection function, defined once in
+the analyzer's dedicated detection module and exported (re-exported) from the language-support
+registry as its public surface, and every analyzer component that maps a file path to a language
+(signature extraction, AST-aware chunking, skeleton reduction, route parsing, and any future
+consumer) SHALL resolve through it. A conformance test SHALL assert (a) every language in
+`CODE_LANGUAGES` is resolvable from a representative extension through the single source, and (b) no
+second language-detection definition or extension→language literal map exists outside the canonical
+module, so a copy-paste fork fails CI rather than silently diverging. A file whose extension the
+canonical map does not know SHALL resolve to an explicit `unknown` (an honest fallback), never to a
+guessed language.
+
+#### Scenario: Every claimed code language resolves through the single source
+
+- **GIVEN** any language listed in `CODE_LANGUAGES`
+- **WHEN** the conformance test resolves a representative file extension for that language through
+  the canonical `detectLanguage`
+- **THEN** the canonical function returns that language
+- **AND** the test fails if `CODE_LANGUAGES` gains a language with no resolvable extension
+
+#### Scenario: A second detection implementation fails CI
+
+- **GIVEN** a source tree containing a `detectLanguage` definition or an extension→language
+  literal detection map outside the canonical detection module
+- **WHEN** the singularity guard test runs
+- **THEN** the test fails, naming the offending file
+
+#### Scenario: Detection divergence no longer forces a false generic-chunking fallback
+
+- **GIVEN** a file whose extension a formerly-incomplete detection copy missed but the canonical map
+  resolves — and for which the AST chunker has a parser (e.g. the `.mts` / `.cts` / `.jsx`
+  extension variants of TypeScript/JavaScript)
+- **WHEN** the AST chunker processes the file
+- **THEN** the file is chunked with the language-aware AST strategy, not the generic-text fallback
+  it previously received because detection returned `unknown`
+- **AND** a file the canonical map detects but the chunker has no parser for continues to fall back
+  honestly (the chunker's AST coverage is bounded by its available parsers, not by detection)
+
+#### Scenario: An unknown extension degrades honestly
+
+- **GIVEN** a file whose extension appears in no canonical mapping
+- **WHEN** language detection runs
+- **THEN** the result is `unknown` and consumers apply their disclosed generic fallback, never a
+  guessed language
+
+### Requirement: RouteLineFidelityIsLengthPreserving
+
+TS/JS route extraction SHALL compute every route's line number against text that is byte-aligned
+with the original file: comment masking MUST be length-preserving (blanked, newlines kept),
+never line-removing, so that `route.line` consumed by original-byte consumers — enclosing-function
+anchoring for route-handler edge synthesis, dead-code liveness roots, the route inventory, and
+the registration-line handler lookup — is exact, not approximate. Masking SHALL still prevent
+route patterns inside comments from matching as real routes.
+
+#### Scenario: Comments above a route do not drift its line
+
+- **GIVEN** a TS file with a multi-line copyright block, a line comment, and a log line above a
+  function containing `app.get('/users', listUsers)`
+- **WHEN** route definitions are extracted
+- **THEN** the route's reported line equals its actual line in the original file
+
+#### Scenario: The route-handler edge anchors to the true enclosing function
+
+- **GIVEN** the same fixture, with `listUsers` defined in the repo
+- **WHEN** route-handler edges are synthesized
+- **THEN** an edge from the function enclosing the registration to `listUsers` exists
+- **AND** the edge is neither silently dropped nor attributed to a preceding function
+
+#### Scenario: A framework-invoked handler is never a false dead-code candidate
+
+- **GIVEN** a handler referenced only by a route registration preceded by long comments
+- **WHEN** dead-code reachability runs with synthesized routes included
+- **THEN** the handler is a liveness root and is not reported as a dead-code candidate
+
+#### Scenario: Commented-out routes still do not match
+
+- **GIVEN** a comment line containing `app.get('/example', handler)`
+- **WHEN** route definitions are extracted
+- **THEN** no route is produced for the commented pattern
+
+### Requirement: NoFirstMatchBindingOnAmbiguity
+
+The call-resolution ladder SHALL never bind a call edge by arbitrary first-match when more than one
+candidate definition is viable. Every resolution strategy that resolves against a multi-candidate
+symbol set — bare-name (`name_only`), Python `self.`/`cls.` method dispatch, and capitalized-receiver
+(`type_name`) — SHALL either single out a unique candidate via a defined affinity ladder (own-file
+containment → the file the caller imports the qualifier from → a single remaining candidate) or
+record the call site as **unresolved-ambiguous**, carrying a bounded candidate list, instead of
+emitting an edge. A unique candidate MAY still bind at the strategy's declared confidence.
+Conclusion tools whose soundness depends on edge precision (`find_dead_code`,
+`analyze_error_propagation`, `analyze_impact`, `select_tests`) SHALL disclose relevant
+unresolved-ambiguous sites as boundaries rather than silently treating them as resolved or absent.
+
+> **Overloaded names are out of scope for this requirement and tracked separately.** Same-name,
+> different-arity overloads (Java/C#/Scala/C++) do not reach the resolution ladder as a multi-candidate
+> set: they collapse earlier, at *node identity* — two overloads share the id `file::Class.method`, so
+> only one survives in the graph and the resolution ladder sees a single candidate. Making overloads
+> distinct nodes (arity-qualified identity) and resolving them by call-site argument count is a
+> node-identity change with a different, larger blast radius (stable ids, the CFG side-table, symbol
+> continuity, every node-count consumer) and is deferred to a dedicated follow-up. This requirement
+> therefore governs the three resolution-ladder strategies that genuinely bound by first-match; the
+> overload collapse is a disclosed known limitation, not a first-match guess this change introduces.
+
+#### Scenario: An ambiguous bare cross-file call is not bound arbitrarily
+
+- **GIVEN** a bare call `run()` whose name matches two or more function definitions in different
+  files, none reachable via an import binding or same-file affinity
+- **WHEN** the call graph is built
+- **THEN** no `name_only` edge is emitted for that call
+- **AND** the call site is recorded as unresolved-ambiguous with its candidate list (bounded, with
+  the truncated count disclosed if capped)
+
+#### Scenario: A unique cross-file candidate still binds
+
+- **GIVEN** a bare call whose name matches exactly one cross-file definition
+- **WHEN** the call graph is built
+- **THEN** the edge is emitted at `name_only` confidence, as today
+
+#### Scenario: Python self-dispatch uses the same affinity ladder as this/super
+
+- **GIVEN** two classes with the same name in different files, each defining `process()`
+- **WHEN** `self.process()` is resolved inside one of them
+- **THEN** the edge binds to the method in the caller's own file, not to whichever candidate sorts
+  first
+
+#### Scenario: Dead-code confidence respects ambiguity
+
+- **GIVEN** a function whose only potential caller is an unresolved-ambiguous site listing it as a
+  candidate
+- **WHEN** `find_dead_code` runs
+- **THEN** the function is not reported in the highest-confidence dead tier, and the ambiguous-site
+  reason is disclosed
+
+### Requirement: StableCallGraphBarrel
+
+The call-graph builder MAY be decomposed across multiple source modules for maintainability, but
+`call-graph.ts` SHALL remain the stable public barrel for the call-graph subsystem. Every symbol that
+is importable from `call-graph.ts` before such a decomposition SHALL remain importable from
+`call-graph.ts` after it — extracted internals SHALL be re-exported from the barrel so that no module
+importing `call-graph.ts` is required to change its import path.
+
+The decomposition SHALL be behavior-preserving: for a fixed repository state, the call graph produced
+after the decomposition SHALL be identical to the graph produced before it (same nodes, edges, edge
+confidences, CFG overlay, and serialization). The decomposition SHALL NOT change extraction ordering or
+node identity. The existing analyzer test suite SHALL serve as the regression oracle and SHALL pass
+unchanged.
+
+#### Scenario: The public import surface is preserved
+
+- **GIVEN** a module that imports a symbol from `call-graph.ts`
+- **WHEN** the call-graph builder is decomposed into sibling modules
+- **THEN** that symbol is still importable from `call-graph.ts` (re-exported from the barrel)
+- **AND** the importing module requires no change to its import path
+
+#### Scenario: Graph output is byte-identical after decomposition
+
+- **GIVEN** a fixed repository state and the call graph it produced before decomposition
+- **WHEN** the call graph is rebuilt after decomposition
+- **THEN** the resulting nodes, edges, edge confidences, CFG overlay, and serialized form are identical
+- **AND** the analyzer test suite passes unchanged
+
 ## Sub-components
 
 > `SignatureExtractor` is an orchestrator. Each sub-component below implements one logical block.
