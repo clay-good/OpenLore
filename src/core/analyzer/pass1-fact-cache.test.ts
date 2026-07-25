@@ -269,14 +269,21 @@ describe('the memo refuses to serve what it cannot prove', () => {
     expect(built.graph).toBe(await buildFresh(files));
   });
 
-  it('a storage that throws degrades to full extraction rather than failing the build', async () => {
+  it('a storage that throws degrades to full extraction, and is asked exactly once', async () => {
+    // An index materialized from a bundle, or built before this feature, has no memo table at
+    // all — so the FIRST read throws and every later one would too. Raising and swallowing one
+    // exception per file for an answer already known is pure waste, so the store is retired.
     const files = corpus(3);
+    let asked = 0;
     const angry: Pass1FactStorage = {
-      getPass1Facts() { throw new Error('database is locked'); },
+      getPass1Facts() { asked++; throw new Error('no such table: pass1_facts'); },
     };
     const built = await buildWith(files, angry, 'stamp-v1');
     expect(built.extracted).toBe(files.length);
+    expect(asked).toBe(1);
     expect(built.graph).toBe(await buildFresh(files));
+    // …and the run still refills the memo, so the next one is cheap.
+    expect(built.cache.take().rows).toHaveLength(files.length);
   });
 
   it('bypassed reads (--force) extract everything and still refill the memo', async () => {
@@ -370,7 +377,7 @@ describe('the memo refuses to serve what it cannot prove', () => {
     }).build(edited);
 
     expect(dispatched).toEqual(['src/mod7.ts']);
-    expect(result.pass1Cache).toEqual({ reused: 19, extracted: 1 });
+    expect(result.pass1Cache).toEqual({ reused: 19, extracted: 1, uncacheable: 0 });
     expect(JSON.stringify(serializeCallGraph(result))).toBe(await buildFresh(edited));
   });
 });

@@ -222,6 +222,12 @@ export interface RunApiOptions extends BaseOptions {
   force?: boolean;
   /** Force fresh analysis even if recent exists */
   reanalyze?: boolean;
+  /**
+   * Also re-extract every file rather than reusing the per-file extraction cache
+   * (change: optimize-hash-keyed-analyze). Default false: the reused lane is byte-identical,
+   * so `reanalyze` alone already produces a complete, current analysis.
+   */
+  reExtract?: boolean;
   /** LLM provider to use */
   provider?: 'anthropic' | 'openai' | 'openai-compat' | 'copilot' | 'gemini' | 'gemini-cli' | 'claude-code' | 'mistral-vibe' | 'cursor-agent';
   /** LLM model name */

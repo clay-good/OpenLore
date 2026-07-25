@@ -50,9 +50,11 @@
 > **The extraction cache costs disk.** `analyze` memoizes each file's extracted facts inside
 > `call-graph.db`, keyed by content hash, so a later run re-parses only what changed. It is
 > the largest table in the store — roughly **10 MB per 800 source files** (about +55% on the
-> graph index) — and it is a pure cache: deleting `.openlore/analysis/` or running
-> `analyze --force` costs only time, never correctness. It is stripped from `openlore export`
-> bundles, which carry the graph and not this machine's build cache.
+> graph index). It is a pure cache: deleting `.openlore/analysis/` reclaims it and costs only
+> time, never correctness. (`analyze --force` re-extracts everything and then *refills* the
+> cache, so it reclaims nothing — it is the correctness escape, not the disk one.) The cache
+> is stripped from `openlore export` bundles, which carry the graph and not this machine's
+> build cache.
 
 > The `EMBED_*` variables configure the **remote** embedding provider only. For on-device embeddings with no endpoint or key, run `openlore embed --local` (or set `embedding.provider: "local"` in `.openlore/config.json`). Keyword (BM25) search is the first-class default and needs none of these. See [docs/semantic-search.md](semantic-search.md#retrieval-modes) for the full embedding/retrieval-mode reference.
 

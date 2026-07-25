@@ -214,6 +214,8 @@ openlore analyze [options]
   --force                # Re-analyze from scratch: analyze even when the source is unchanged,
                          #   and re-extract every file instead of reusing the extraction cache.
                          #   An ordinary `analyze` already re-parses only what changed.
+  --reanalyze            # Analyze even when the source is unchanged, but keep reusing the
+                         #   extraction cache — the cheap half of --force.
   --ai-configs           # Generate AI tool config files (CLAUDE.md, .cursorrules, .clinerules/openlore.md,
                          #   .github/copilot-instructions.md, .windsurf/rules.md, .vibe/skills/openlore.md)
                          #   Safe to re-run — skips files that already exist, marks pre-existing ones.

@@ -134,6 +134,16 @@ describe('index-bundle: export', () => {
     }
 
     const { buffer } = await buildBundle(src, VERSION);
+
+    // The staging copy must never be written into the directory the exporter SCANS. A scratch
+    // file left there by a killed export would be bundled by every later export — and it is a
+    // full, UN-stripped copy of the store, so the leak would re-bundle the very table this
+    // strips, into the consumer's analysis dir, forever.
+    const { readdir } = await import('node:fs/promises');
+    expect(await readdir(src)).toEqual(
+      expect.not.arrayContaining([expect.stringContaining(`${ARTIFACT_CALL_GRAPH_DB}.`)]),
+    );
+
     const target = join(work, 'materialized');
     await materializeBundle(parseBundle(buffer), target);
 

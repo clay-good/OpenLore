@@ -92,21 +92,33 @@ export interface ExtractionInput {
  * full re-extraction or the memo is quietly broken.
  */
 export type NoReuseReason =
-  | 'requested'      // --force, or OPENLORE_NO_FACT_CACHE
-  | 'no-index-yet'   // a first-ever analyze: there is no store to read
-  | 'index-not-ready'// schema mismatch or a quarantined store — reads are refused
+  | 'requested'       // --force, or OPENLORE_NO_FACT_CACHE
+  | 'no-index-yet'    // a first-ever analyze: there is no store to read
+  | 'memo-absent'     // the index predates the memo, or came from a bundle (which strips it)
+  | 'index-not-ready' // schema mismatch or a quarantined store — reads are refused
   | 'store-unreadable'// the store could not be opened at all
-  | 'no-stamp';      // the extractor stamp could not be computed, so nothing may be trusted
+  | 'no-stamp';       // the extractor stamp could not be computed, so nothing may be trusted
 
 /** How many files the last build reused vs. re-extracted — always disclosed, never silent. */
 export interface Pass1CacheDisclosure {
   reused: number;
-  /**
-   * Files handed to the extraction lane. A file whose extraction threw, or that produced no
-   * facts at all, is counted here but deliberately NOT memoized, so it re-extracts on every
-   * later run too — which is why `reused` may never reach the full file count.
-   */
+  /** Files handed to the extraction lane. */
   extracted: number;
+  /**
+   * Files that were extracted but could NOT be memoized: the extraction threw, or it produced
+   * no facts at all (the shape an unloadable grammar returns, which must never be persisted).
+   * These re-extract on every later run, so `reused` will never reach the full file count
+   * while they exist.
+   *
+   * Reported because the population is language-skewed and would otherwise be invisible. A
+   * cleanly-parsed file is distinguishable from a failed parse only by the evidence it leaves
+   * behind, and style counters — the usual evidence — are tallied only for TypeScript,
+   * JavaScript, Python and Go. In a C-, Java- or Ruby-heavy repository, a header, an
+   * interface-only file, or a constants file can legitimately yield nothing and so is
+   * permanently re-parsed. That is bounded by today's cost, but an operator should be able to
+   * tell "14 files cannot be cached" from "the memo is broken".
+   */
+  uncacheable: number;
   /** Present only when the memo was bypassed or unavailable wholesale. */
   noReuseReason?: NoReuseReason;
 }
@@ -405,6 +417,13 @@ export interface Pass1FactStorage {
  */
 export class BufferedPass1FactCache implements Pass1FactCache {
   private readonly writes: Pass1FactRow[] = [];
+  /**
+   * Set once a read throws. A store that cannot answer one lookup cannot answer the next
+   * thousand either — most often it has no memo table at all (an index materialized from a
+   * bundle, or one built before this feature), and occasionally it is locked. Latching stops
+   * the build from raising and swallowing one exception per file for an answer already known.
+   */
+  private storageUnusable = false;
 
   constructor(
     private readonly storage: Pass1FactStorage | null,
@@ -420,21 +439,28 @@ export class BufferedPass1FactCache implements Pass1FactCache {
   lookup(file: ExtractionInput): { facts: FileExtractResult | undefined } | undefined {
     // A declared reason means this cache can never hit — reads are off wholesale, and the
     // reason is what the epilogue reports instead of a bare "reused 0".
-    if (this.noReuseReason !== undefined || !this.storage) return undefined;
+    if (this.noReuseReason !== undefined || !this.storage || this.storageUnusable) return undefined;
     let raw: string | undefined;
     try {
       raw = this.storage.getPass1Facts(file.path, factKey(file), this.stamp);
     } catch {
-      return undefined; // an unreadable store is a miss, never a failed build
+      // An unreadable store is a miss, never a failed build — and it stays a miss.
+      this.storageUnusable = true;
+      return undefined;
     }
     if (raw === undefined) return undefined;
     return deserializeFacts(raw);
   }
 
   record(file: ExtractionInput, facts: FileExtractResult | undefined): void {
-    // Re-derived from the file rather than remembered from `lookup`. Caching the key by path
-    // would save one hash per re-extracted file and buy an invariant nothing enforces: two
-    // input entries sharing a path would store one file's facts under the other's hash.
+    // Without a stamp there is no key a later run could reproduce, so writing would only
+    // leave rows nothing can ever match. Every other reason still writes: a bypassed read
+    // (`--force`) or an index with no memo yet must still leave one behind.
+    if (this.noReuseReason === 'no-stamp') return;
+    // The hash is re-derived from the file rather than remembered from `lookup`. Caching the
+    // key by path would save one hash per re-extracted file and buy an invariant nothing
+    // enforces: two input entries sharing a path would store one file's facts under the
+    // other's hash.
     this.writes.push({
       filePath: file.path,
       contentHash: factKey(file),
@@ -457,6 +483,7 @@ export class BufferedPass1FactCache implements Pass1FactCache {
 const NO_REUSE_TEXT: Record<NoReuseReason, string> = {
   'requested': 'full re-extraction requested',
   'no-index-yet': 'first analysis of this repository',
+  'memo-absent': 'the existing index carries no extraction cache yet',
   'index-not-ready': 'the existing index was built by a different OpenLore, or was quarantined',
   'store-unreadable': 'the existing index could not be read',
   'no-stamp': 'the extractor version could not be determined',
@@ -470,8 +497,10 @@ const NO_REUSE_TEXT: Record<NoReuseReason, string> = {
  */
 export function describePass1Cache(d: Pass1CacheDisclosure | undefined): string | undefined {
   if (!d) return undefined;
-  const counts = `re-extracted ${d.extracted} file(s), reused ${d.reused} cached`;
-  return d.noReuseReason ? `${counts} — ${NO_REUSE_TEXT[d.noReuseReason]}` : counts;
+  let line = `re-extracted ${d.extracted} file(s), reused ${d.reused} cached`;
+  if (d.noReuseReason) line += ` — ${NO_REUSE_TEXT[d.noReuseReason]}`;
+  if (d.uncacheable > 0) line += `; ${d.uncacheable} file(s) yielded nothing to cache and will re-extract each run`;
+  return line;
 }
 
 /** True when the environment escape hatch is set. */

@@ -1000,6 +1000,17 @@ export class EdgeStore {
   }
 
   /**
+   * Does this store carry the Pass-1 memo at all? False for an index built before the memo
+   * existed, or materialized from a bundle (which strips it) — a whole-store condition worth
+   * naming once rather than rediscovering as a swallowed error on every file.
+   */
+  hasPass1Facts(): boolean {
+    return this.db
+      .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pass1_facts' LIMIT 1")
+      .get() !== undefined;
+  }
+
+  /**
    * The KEYS of every memoized file — path, content hash, stamp — never the payloads, so
    * this stays cheap enough to call for an inventory. Deterministically ordered.
    */
@@ -1086,8 +1097,9 @@ export class EdgeStore {
    * no graph data: it is the per-file extraction memo that makes the very rebuild running
    * here cost only the diff, and wiping it would make every rebuild a full re-parse again.
    * The rebuild REPLACES the rows for files it re-extracted and prunes the rows for files
-   * that are gone, so the memo never outlives the tree it describes. Invalidate it explicitly
-   * with {@link clearPass1Facts}; a SCHEMA_VERSION bump drops it with everything else.
+   * that are gone, so the memo never outlives the tree it describes. There is no separate
+   * eviction call: `analyze --force` rewrites every row, deleting the analysis directory
+   * removes it with the index, and a SCHEMA_VERSION bump drops it with everything else.
    */
   clearAll(): void {
     this.db.exec('DELETE FROM edges; DELETE FROM inheritance_edges; DELETE FROM nodes; DELETE FROM classes; DELETE FROM nodes_fts; DELETE FROM file_hashes; DELETE FROM decisions; DELETE FROM decision_edges; DELETE FROM provenance; DELETE FROM change_coupling; DELETE FROM cfg_overlay; DELETE FROM stale_files;');

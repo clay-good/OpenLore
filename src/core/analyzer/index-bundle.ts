@@ -30,7 +30,8 @@ import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { gzipSync, gunzipSync } from 'node:zlib';
-import { readFile, writeFile, readdir, mkdir, copyFile, rm, stat } from 'node:fs/promises';
+import { readFile, writeFile, readdir, mkdir, mkdtemp, copyFile, rm, stat } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join, basename, isAbsolute } from 'node:path';
 import {
   ARTIFACT_CALL_GRAPH_DB,
@@ -193,12 +194,25 @@ const LOCAL_CACHE_TABLES = ['pass1_facts'];
  * byte-stable — `VACUUM` rebuilds the same file for the same rows, so exporting an unchanged
  * index twice still produces identical bytes.
  *
- * Fail-soft: if the copy cannot be opened or rewritten, the original bytes are bundled. A
- * larger bundle is a cost; a failed export would be a regression.
+ * The copy is staged in a private temp DIRECTORY, never beside the original. Two reasons, and
+ * both are failure modes rather than tidiness:
+ *  - The analysis dir is the directory this exporter itself scans. A scratch file left there
+ *    by a killed export would be picked up by every later export as just another artifact —
+ *    and it is a full, UN-stripped copy of the store, so the leak would re-bundle the very
+ *    table this function exists to remove, into the consumer's analysis dir, forever.
+ *  - An open SQLite file grows `-wal`/`-shm` siblings for the duration, which would be
+ *    visible to a concurrent export scanning the same directory.
+ * `mkdtemp` also makes the path unique, so concurrent exports — in one process or several —
+ * cannot collide on it.
+ *
+ * Fail-soft: if the copy cannot be made or rewritten, the original bytes are bundled. A larger
+ * bundle is a cost; a failed export would be a regression.
  */
 async function readStoreWithoutLocalCaches(dbPath: string): Promise<Buffer> {
-  const scratch = `${dbPath}.export-${process.pid}`;
+  let stage: string | undefined;
   try {
+    stage = await mkdtemp(join(tmpdir(), 'openlore-export-'));
+    const scratch = join(stage, basename(dbPath));
     await copyFile(dbPath, scratch);
     const db = new DatabaseSync(scratch);
     try {
@@ -211,7 +225,7 @@ async function readStoreWithoutLocalCaches(dbPath: string): Promise<Buffer> {
   } catch {
     return readFile(dbPath);
   } finally {
-    await rm(scratch, { force: true }).catch(() => {});
+    if (stage) await rm(stage, { recursive: true, force: true }).catch(() => {});
   }
 }
 

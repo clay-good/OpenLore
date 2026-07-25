@@ -199,6 +199,32 @@ describe('analyze cost scales with the diff', () => {
     expect(await definedIn('src/core/math.ts')).toEqual(['add', 'patched', 'scale']);
   });
 
+  /**
+   * Every store built by the currently-released OpenLore lacks the memo table, as does one
+   * materialized from a bundle (export strips it). That is a whole-store condition, and it
+   * must be NAMED once — not rediscovered as a swallowed error per file, and never reported
+   * as a bare "reused 0" the operator cannot distinguish from a broken cache.
+   */
+  it('names an index that carries no memo yet, instead of a bare "reused 0"', async () => {
+    await analyze();
+    const store = EdgeStore.openForAnalyze(EdgeStore.dbPath(out));
+    try {
+      (store as unknown as { db: { exec(sql: string): void } }).db.exec('DROP TABLE pass1_facts');
+    } finally {
+      store.close();
+    }
+
+    const { runAnalysis } = await import('../../cli/commands/analyze.js');
+    const result = await runAnalysis(dir, out, { maxFiles: 200, include: [], exclude: [] });
+    expect(result.artifacts.pass1CacheNote).toContain('reused 0 cached');
+    expect(result.artifacts.pass1CacheNote).toContain('carries no extraction cache yet');
+
+    // …and the run leaves the memo behind, so the next one is cheap.
+    expect(memoRows().length).toBeGreaterThan(0);
+    const next = await runAnalysis(dir, out, { maxFiles: 200, include: [], exclude: [] });
+    expect(next.artifacts.pass1CacheNote).toMatch(/re-extracted 0 file\(s\), reused \d+ cached$/);
+  });
+
   it('a hostile memo row for an UNCHANGED file cannot be served under the real key', async () => {
     await analyze();
     const rows = memoRows();

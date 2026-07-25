@@ -183,8 +183,9 @@ export async function openloreRun(options: RunApiOptions = {}): Promise<RunResul
       maxValidationFiles: 5,
       // NOT keyed off `force` (change: optimize-hash-keyed-analyze) — here `force` means
       // "reinitialize / do not skip", never "re-parse every file". The reused extraction
-      // lane is byte-identical, so there is nothing for a forced run to distrust.
-      reExtract: false,
+      // lane is byte-identical, so there is nothing for a forced run to distrust; a caller
+      // that genuinely wants a full re-parse asks for it.
+      reExtract: options.reExtract ?? false,
     });
     const artifacts = await artifactGenerator.generateAndSave(repoMap, depGraph);
 

@@ -4068,13 +4068,8 @@ export class CallGraphBuilder {
     }
     for (let i = 0; i < toExtractAt.length; i++) extractOutcomes[toExtractAt[i]] = laneOutcomes[i];
 
-    const pass1Cache: Pass1CacheDisclosure | undefined = cache
-      ? {
-          reused: files.length - toExtract.length,
-          extracted: toExtract.length,
-          ...(cache.noReuseReason ? { noReuseReason: cache.noReuseReason } : {}),
-        }
-      : undefined;
+    /** Extracted files the memo refused to store — counted so the epilogue can say so. */
+    let uncacheable = 0;
 
     for (let fileIndex = 0; fileIndex < files.length; fileIndex++) {
       const file = files[fileIndex];
@@ -4102,8 +4097,9 @@ export class CallGraphBuilder {
         //
         // `undefined` (a language with no extractor) is NOT emptiness: it is a decision made
         // by the dispatch code, which the stamp does cover, so it is recorded.
-        if (cache && reusedFacts[fileIndex] === undefined && !isEmptyExtractResult(result)) {
-          cache.record(file, result);
+        if (cache && reusedFacts[fileIndex] === undefined) {
+          if (isEmptyExtractResult(result)) uncacheable++;
+          else cache.record(file, result);
         }
         if (!result) continue;
 
@@ -4140,6 +4136,8 @@ export class CallGraphBuilder {
           parseHealthByFile.set(file.path, result.parseHealth);
         }
       } catch (error) {
+        // A throw is never memoized either (see above), so it re-extracts on every run.
+        if (cache && reusedFacts[fileIndex] === undefined) uncacheable++;
         // A file that threw here contributed ZERO nodes/edges — the "swallowed parse failure" leak.
         // Record it as a structured parse-health failure so downstream conclusions disclose it
         // instead of treating the missing symbols as genuinely absent (change:
@@ -4162,6 +4160,15 @@ export class CallGraphBuilder {
         }
       }
     }
+
+    const pass1Cache: Pass1CacheDisclosure | undefined = cache
+      ? {
+          reused: files.length - toExtract.length,
+          extracted: toExtract.length,
+          uncacheable,
+          ...(cache.noReuseReason ? { noReuseReason: cache.noReuseReason } : {}),
+        }
+      : undefined;
 
     // Pass 2: Resolve raw edges — multi-strategy resolution
     const trie = new FunctionRegistryTrie();

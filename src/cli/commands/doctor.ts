@@ -709,7 +709,10 @@ async function runRemediation(rootPath: string, r: Remediation): Promise<string>
   switch (r.kind) {
     case 'analyze': {
       const { openloreAnalyze } = await import('../../api/analyze.js');
-      await openloreAnalyze({ rootPath, force: true });
+      // `reExtract` too, so this runs exactly the `analyze --force` it printed. This is the
+      // operator's repair path: if the graph is wrong BECAUSE the extraction cache is wrong,
+      // a run that reuses that cache cannot fix it (change: optimize-hash-keyed-analyze).
+      await openloreAnalyze({ rootPath, force: true, reExtract: true });
       return 'analysis rebuilt';
     }
     case 'rewire-mcp': {

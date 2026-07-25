@@ -507,21 +507,21 @@ export class AnalysisArtifactGenerator {
     });
 
     // Write SQLite edge store alongside JSON artifacts (additive, non-fatal)
-    if (artifacts.llmContext.callGraph) {
-      try {
+    try {
+      if (artifacts.llmContext.callGraph) {
         const dbPath = join(this.options.outputDir, ARTIFACT_CALL_GRAPH_DB);
         await writeEdgesToSQLite(
           artifacts.llmContext.callGraph, dbPath, this.options.rootDir, artifacts.llmContext.cfgs,
           this._pass1Memo,
         );
-      } catch {
-        // Non-fatal — JSON artifacts are the source of truth
-      } finally {
-        // Release the serialized memo rows: on a cold or forced build they are the whole
-        // corpus (tens of MB), and everything after this point — continuity carry-forward,
-        // the dependency-graph write, the fingerprint — has no use for them.
-        this._pass1Memo = undefined;
       }
+    } catch {
+      // Non-fatal — JSON artifacts are the source of truth
+    } finally {
+      // Release the serialized memo rows unconditionally: on a cold or forced build they are
+      // the whole corpus (tens of MB), and nothing after this point — continuity
+      // carry-forward, the dependency-graph write, the fingerprint — has any use for them.
+      this._pass1Memo = undefined;
     }
 
     return artifacts;
@@ -1514,7 +1514,11 @@ export class AnalysisArtifactGenerator {
     try {
       stamp = computeExtractorStamp();
     } catch {
-      return undefined; // no trustworthy stamp means no trustworthy memo, and nothing to write
+      // No trustworthy stamp means nothing may be reused AND nothing may be written under a
+      // key that cannot be reproduced. Still return a cache, with no storage and no writes to
+      // persist, so the epilogue reports the cause instead of falling silent — this is the
+      // failure that most needs saying out loud.
+      return { cache: new BufferedPass1FactCache(null, '', 'no-stamp'), close: () => {} };
     }
 
     // No store yet (a first-ever analyze) means no rows to read. Opening one here would
@@ -1528,9 +1532,16 @@ export class AnalysisArtifactGenerator {
     }
     try {
       const store = EdgeStore.open(EdgeStore.dbPath(this.options.outputDir));
-      // A not-ready store (schema mismatch / quarantined corruption) must not be queried.
-      // Keep the write buffer so this run repopulates the memo the rebuild will own.
-      const reason = requested ? 'requested' : store.notReady ? 'index-not-ready' : undefined;
+      // A not-ready store (schema mismatch / quarantined corruption) must not be queried, and
+      // an index that predates the memo — or came from a bundle, which strips it — has no
+      // table to query. Both are whole-store conditions, established once here rather than
+      // rediscovered as a swallowed error on every file. Either way the write buffer is kept,
+      // so this run leaves the memo behind for the next one.
+      const reason = requested
+        ? 'requested'
+        : store.notReady
+          ? 'index-not-ready'
+          : store.hasPass1Facts() ? undefined : 'memo-absent';
       return {
         cache: new BufferedPass1FactCache(store.notReady ? null : store, stamp, reason),
         close: () => { try { store.close(); } catch { /* already closed */ } },

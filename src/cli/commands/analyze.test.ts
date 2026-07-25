@@ -3,10 +3,11 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { analyzeCommand, runAnalysis } from './analyze.js';
 import { ARTIFACT_FINGERPRINT } from '../../constants.js';
 
@@ -152,6 +153,33 @@ describe('analyze command', () => {
       // analyze already re-runs; what `--force` uniquely buys is a full re-extraction, so
       // that is what the help must promise.
       expect(forceOption?.description).toMatch(/re-extract/i);
+    });
+
+    it('should have --reanalyze: re-run without re-extracting', () => {
+      const option = analyzeCommand.options.find(o => o.long === '--reanalyze');
+      expect(option).toBeDefined();
+      expect(option?.description).toMatch(/reuse cached extraction/i);
+    });
+
+    /**
+     * The action handler rebuilds its options object from an explicit WHITELIST, so a flag
+     * that is declared but not listed there parses fine, shows up in `--help`, and is then
+     * silently dropped — the failure has no symptom until someone notices the behavior never
+     * changed. Bind every declared flag to that list.
+     */
+    it('every declared flag survives the handler’s option whitelist', () => {
+      const declared = analyzeCommand.options
+        .map(o => o.attributeName())
+        .filter(name => name !== 'help');
+      const handler = readFileSync(
+        join(dirname(fileURLToPath(import.meta.url)), 'analyze.ts'),
+        'utf-8',
+      );
+      const mapped = handler.slice(handler.indexOf('.action(async (options'));
+      for (const name of declared) {
+        expect(mapped, `--${name} is declared but never read from \`options\``)
+          .toMatch(new RegExp(`options\\.${name}\\b`));
+      }
     });
   });
 

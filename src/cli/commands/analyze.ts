@@ -57,7 +57,14 @@ import { generateAiConfigs, AI_TOOL_TARGETS, type AiTool, type AiConfigResult } 
 // ============================================================================
 
 interface ExtendedAnalyzeOptions extends AnalyzeOptions {
+  /** Re-analyze AND re-extract every file — the human "trust nothing" lever. */
   force?: boolean;
+  /**
+   * Re-analyze without re-extracting: defeat the source-unchanged skip while still reusing
+   * cached extraction for files that did not change (change: optimize-hash-keyed-analyze).
+   * What the watcher's self-heal rebuild wants — the index is stale, the extractor is not.
+   */
+  reanalyze?: boolean;
   embed?: boolean;
   reindexSpecs?: boolean;
   aiConfigs?: boolean;
@@ -308,6 +315,11 @@ export const analyzeCommand = new Command('analyze')
     false
   )
   .option(
+    '--reanalyze',
+    'Analyze even if the source is unchanged, but still reuse cached extraction for files that did not change (the cheap half of --force)',
+    false
+  )
+  .option(
     '--embed',
     'Build a semantic vector index after analysis using the configured embedding provider (local on-device, or remote EMBED_*). Falls back to the first-class keyword (BM25) index when none is configured.',
     true
@@ -369,6 +381,7 @@ After analysis, run 'openlore generate' to create OpenSpec files.
       include: options.include ?? [],
       exclude: options.exclude ?? [],
       force: options.force ?? false,
+      reanalyze: options.reanalyze ?? false,
       embed: options.embed ?? false,
       reindexSpecs: options.reindexSpecs ?? false,
       aiConfigs: options.aiConfigs ?? false,
@@ -435,10 +448,13 @@ After analysis, run 'openlore generate' to create OpenSpec files.
       // freshness window; an unchanged tree skips regardless of age. (isCacheFresh
       // falls back to the TTL only for a legacy analysis written without a fingerprint.)
       const cacheFresh = analysisAge !== null && (await isCacheFresh(rootPath));
-      if (analysisAge !== null && !opts.force) {
+      // `--reanalyze` and `--force` both defeat the skip; they differ only in whether the
+      // per-file extraction cache is also thrown away (change: optimize-hash-keyed-analyze).
+      const skipSuppressed = (opts.force ?? false) || (opts.reanalyze ?? false);
+      if (analysisAge !== null && !skipSuppressed) {
         if (cacheFresh) {
           logger.discovery(`Analysis is up to date — source unchanged (${formatAge(analysisAge)})`);
-          logger.info('Tip', 'Use --force to re-analyze anyway');
+          logger.info('Tip', 'Use --reanalyze to run anyway, or --force to also re-extract every file');
           logger.blank();
 
           // Show existing analysis stats
