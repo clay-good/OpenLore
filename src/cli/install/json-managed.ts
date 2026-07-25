@@ -8,6 +8,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { isProtoPollutingKey } from '../../utils/misc.js';
 import { modify, applyEdits, type FormattingOptions } from 'jsonc-parser';
 
 /** A minimal edit into an existing JSON document: set `path` to `value`, or delete it when `value` is undefined. */
@@ -177,6 +178,14 @@ function getPath(obj: Record<string, unknown>, path: string): unknown {
 
 function setPath(obj: Record<string, unknown>, path: string, value: unknown): void {
   const parts = path.split('.');
+  // A `__proto__` / `constructor` / `prototype` segment would walk out of `obj` and
+  // mutate the prototype chain instead, so every process that later reads an
+  // unrelated object sees the injected value. Refuse rather than silently skip: a
+  // caller asking to write that path is either confused or hostile, and these paths
+  // are internal constants, so a throw can only surface a bug.
+  if (parts.some(isProtoPollutingKey)) {
+    throw new Error(`Refusing to write unsafe config path "${path}" (prototype-polluting segment)`);
+  }
   let cur: Record<string, unknown> = obj;
   for (let i = 0; i < parts.length - 1; i++) {
     const k = parts[i];
@@ -191,6 +200,10 @@ function setPath(obj: Record<string, unknown>, path: string, value: unknown): vo
 
 function deletePath(obj: Record<string, unknown>, path: string): void {
   const parts = path.split('.');
+  // Same guard as setPath: `delete Object.prototype.x` is as damaging as writing it.
+  if (parts.some(isProtoPollutingKey)) {
+    throw new Error(`Refusing to delete unsafe config path "${path}" (prototype-polluting segment)`);
+  }
   const chain: Array<{ container: Record<string, unknown>; key: string }> = [];
   let cur: Record<string, unknown> = obj;
   for (let i = 0; i < parts.length - 1; i++) {

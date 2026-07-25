@@ -36,6 +36,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { escapeRegExp } from '../../utils/misc.js';
 import type { ContinuityReason, ContinuityBasis } from '../../types/index.js';
 
 /**
@@ -49,10 +50,6 @@ function spanHash(text: string): string {
 
 /** A sentinel that cannot occur in source — used to name-normalize a body. */
 const NAME_SENTINEL = '\uFFFF'; // U+FFFF noncharacter — cannot occur in source identifiers, ASCII-safe in this file
-
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
 
 /**
  * Identifier-character class for whole-word boundaries. Unicode-aware (`\p{L}\p{N}`)

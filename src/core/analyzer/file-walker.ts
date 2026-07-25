@@ -387,7 +387,13 @@ export class FileWalker {
   private skippedReasons: Record<string, number> = {};
   private directoriesScanned = 0;
   private extensionCounts: Record<string, number> = {};
-  private directoryCounts: Record<string, number> = {};
+  /**
+   * Keyed by directory path, which comes from the scanned repository — so a directory
+   * literally named `__proto__` would otherwise read and write `Object.prototype`
+   * instead of this table. `Object.create(null)` has no prototype to reach, and still
+   * serializes as a plain object for `byDirectory`.
+   */
+  private directoryCounts: Record<string, number> = Object.create(null) as Record<string, number>;
 
   constructor(rootPath: string, options: FileWalkerOptions = {}) {
     this.rootPath = rootPath;

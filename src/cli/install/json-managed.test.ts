@@ -72,4 +72,21 @@ describe('json-managed', () => {
   it('canonicalJsonHash is stable across key order', () => {
     expect(canonicalJsonHash({ a: 1, b: 2 })).toBe(canonicalJsonHash({ b: 2, a: 1 }));
   });
+
+  // A managed path is written key-by-key into a plain object, so a `__proto__`
+  // segment would assign onto Object.prototype and leak into every object in the
+  // process rather than into the config document.
+  it('refuses a prototype-polluting managed path', () => {
+    expect(() => mergeEntries({}, [{ path: '__proto__.polluted', value: 'x' }])).toThrow(
+      /prototype-polluting/
+    );
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+  });
+
+  it('refuses to remove through a prototype-polluting path', () => {
+    const doc = {
+      _openlore: { managed: true, version: 1, fingerprint: 'x', paths: ['constructor.bad'] },
+    } as Record<string, unknown>;
+    expect(() => removeManaged(doc)).toThrow(/prototype-polluting/);
+  });
 });
