@@ -416,7 +416,7 @@ export class SpecVerificationEngine {
     // 2. Path-based matching against known spec domains
     const knownDomains = this.specs.map(s => s.domain);
     const structural = new Set(['src', 'lib', 'app', 'core', 'utils', 'helpers', 'common', 'shared']);
-    const rawParts = filePath.split('/');
+    const rawParts = filePath.replace(/\\/g, '/').split('/');
     const segments = rawParts.map((p, i) =>
       i === rawParts.length - 1 ? p.replace(/\.[^.]+$/, '').toLowerCase() : p.toLowerCase()
     );
@@ -744,6 +744,7 @@ Respond in JSON:
    */
   private normalizeImport(importPath: string): string {
     const normalized = importPath
+      .replace(/\\/g, '/')
       .replace(/\.(js|ts|jsx|tsx|mjs|cjs)$/, '')
       .replace(/^\.\//, '')
       .replace(/^\.\.\//, '');

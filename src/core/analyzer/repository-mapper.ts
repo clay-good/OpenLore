@@ -476,7 +476,7 @@ function inferDomains(files: ScoredFile[]): Record<string, ScoredFile[]> {
     // (src/main/java/com/example/inventory/Foo.java) at the business package
     // ("inventory") instead of collapsing every source file into the org root
     // ("com"/"springframework"). See issue #138.
-    const dirParts = file.path.split('/').slice(0, -1);
+    const dirParts = file.path.replace(/\\/g, '/').split('/').slice(0, -1);
     const domain = deriveDomainFromPath(dirParts);
     if (domain) {
       if (!domains[domain]) {

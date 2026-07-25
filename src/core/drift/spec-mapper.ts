@@ -124,7 +124,7 @@ export function parseSpecReferences(content: string): {
  * should match "auth-service.ts" but not "authorize.ts").
  */
 export function inferDomainFromPath(filePath: string, knownDomains: string[]): string | null {
-  const normalizedPath = filePath.toLowerCase();
+  const normalizedPath = filePath.toLowerCase().replace(/\\/g, '/');
   const parts = normalizedPath.split('/');
 
   // Sort domains by length (longest first) so more specific names match first
