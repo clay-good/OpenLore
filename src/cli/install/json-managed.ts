@@ -107,12 +107,25 @@ export function readMeta(doc: Record<string, unknown>): ManagedJsonMeta | null {
 }
 
 /**
+ * A managed path taken from the DOCUMENT rather than from our own constants.
+ *
+ * `_openlore.paths` is read back off disk, so it is user-editable data, not a value
+ * this code chose. It can therefore name a prototype-polluting path — and OpenLore
+ * never writes one, so such an entry cannot describe anything we manage. Dropping it
+ * is the correct reading; `setPath`/`deletePath` still throw for internal callers,
+ * where an unsafe path would be a programmer error rather than untrusted input.
+ */
+function managedPathsFrom(meta: ManagedJsonMeta): string[] {
+  return meta.paths.filter((p) => !p.split('.').some(isProtoPollutingKey));
+}
+
+/**
  * Verify the meta fingerprint still matches the values we previously wrote.
  * If not, the user has hand-edited one of our managed paths.
  */
 export function isHandEdited(doc: Record<string, unknown>, meta: ManagedJsonMeta): boolean {
   const subset: Record<string, unknown> = {};
-  for (const path of meta.paths) {
+  for (const path of managedPathsFrom(meta)) {
     const value = getPath(doc, path);
     if (value !== undefined) setPath(subset, path, value);
   }
@@ -159,7 +172,7 @@ export function removeManaged(doc: Record<string, unknown>): {
   const meta = readMeta(doc);
   if (!meta) return { next: doc, removed: false };
   const next = structuredClone(doc) as Record<string, unknown>;
-  for (const path of meta.paths) deletePath(next, path);
+  for (const path of managedPathsFrom(meta)) deletePath(next, path);
   delete next[META_KEY];
   return { next, removed: true };
 }

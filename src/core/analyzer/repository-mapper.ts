@@ -461,7 +461,13 @@ function detectLayer(file: ScoredFile): keyof typeof LAYER_PATTERNS | null {
  * Infer domains from file paths and names
  */
 function inferDomains(files: ScoredFile[]): Record<string, ScoredFile[]> {
-  const domains: Record<string, ScoredFile[]> = {};
+  // Prototype-less: keys are domain names derived from repository directory names,
+  // so the `!domains[domain]` guard below would otherwise read Object.prototype for a
+  // directory named `__proto__` and then throw on `.push`.
+  const domains: Record<string, ScoredFile[]> = Object.create(null) as Record<
+    string,
+    ScoredFile[]
+  >;
 
   // Common domain prefixes to look for
   const domainPrefixes = new Map<string, string[]>();
@@ -716,8 +722,15 @@ export class RepositoryMapper {
    * Cluster files by various dimensions
    */
   private clusterFiles(files: ScoredFile[]): FileClusters {
-    // By directory
-    const byDirectory: Record<string, ScoredFile[]> = {};
+    // By directory. Prototype-less for the same reason as FileWalker.directoryCounts:
+    // the keys are directory names from the scanned repository, and for a directory
+    // named `__proto__` the guard below would read Object.prototype (truthy), skip the
+    // array init, and then throw on `.push`. `Object.create(null)` has no prototype to
+    // hit, and still serializes as a plain object.
+    const byDirectory: Record<string, ScoredFile[]> = Object.create(null) as Record<
+      string,
+      ScoredFile[]
+    >;
     for (const file of files) {
       const dir = file.directory || '(root)';
       if (!byDirectory[dir]) {

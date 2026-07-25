@@ -8,6 +8,7 @@
 import { writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import logger from '../../utils/logger.js';
+import { allowInsecureTls, withRelaxedTls } from './tls-scope.js';
 import {
   CLAUDE_MAX_CONTEXT_TOKENS,
   CLAUDE_MAX_OUTPUT_TOKENS,
@@ -335,22 +336,12 @@ interface RetryConfig {
 // ============================================================================
 
 /**
- * Disable TLS certificate verification for all fetch requests in this process.
- *
- * Node.js native fetch does not support per-request TLS configuration.
- * The only reliable cross-version approach is the NODE_TLS_REJECT_UNAUTHORIZED
- * environment variable, which is process-global.  This is set once and logged
- * prominently so the user is aware.
+ * Record the user's TLS opt-out. The relaxation itself is applied per request by
+ * `withRelaxedTls` around each `fetch`, so verification is not left off for the
+ * lifetime of the process (see tls-scope.ts).
  */
 function disableSslVerification(): void {
-  if (process.env.NODE_TLS_REJECT_UNAUTHORIZED === '0') return; // already disabled
-  process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
-  // Warn prominently: this is process-global and affects all fetch calls.
-  console.warn(
-    '[openlore] WARNING: TLS certificate verification is DISABLED for this process.' +
-    ' All HTTPS connections (including LLM API calls) are vulnerable to MITM attacks.' +
-    ' Only use --insecure on trusted private networks with self-signed certificates.'
-  );
+  allowInsecureTls('--insecure or llm.sslVerify=false');
 }
 
 /**
@@ -585,7 +576,7 @@ export class AnthropicProvider implements LLMProvider {
   }
 
   async generateCompletion(request: CompletionRequest): Promise<CompletionResponse> {
-    const response = await fetch(`${this.baseUrl}/messages`, {
+    const response = await withRelaxedTls(() => fetch(`${this.baseUrl}/messages`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -602,7 +593,7 @@ export class AnthropicProvider implements LLMProvider {
         ],
         stop_sequences: request.stopSequences,
       }),
-    });
+    }));
 
     if (!response.ok) {
       const error = await response.text();
@@ -802,14 +793,14 @@ export class OpenAIProvider implements LLMProvider {
       body.response_format = { type: 'json_object' };
     }
 
-    const response = await fetch(`${this.baseUrl}/chat/completions`, {
+    const response = await withRelaxedTls(() => fetch(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${this.apiKey}`,
       },
       body: JSON.stringify(body),
-    });
+    }));
 
     if (!response.ok) {
       const error = await response.text();
@@ -894,13 +885,13 @@ export class OpenAICompatibleProvider implements LLMProvider {
    */
   private async fetchAvailableModels(): Promise<string[]> {
     try {
-      const response = await fetch(`${this.baseUrl}/models`, {
+      const response = await withRelaxedTls(() => fetch(`${this.baseUrl}/models`, {
         method: 'GET',
         headers: {
           'Authorization': `Bearer ${this.apiKey}`,
           'Content-Type': 'application/json',
         },
-      });
+      }));
 
       if (!response.ok) {
         return [];
@@ -984,14 +975,14 @@ export class OpenAICompatibleProvider implements LLMProvider {
       }
     }
 
-    const response = await fetch(`${this.baseUrl}/chat/completions`, {
+    const response = await withRelaxedTls(() => fetch(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${this.apiKey}`,
       },
       body: JSON.stringify(body),
-    });
+    }));
 
     if (!response.ok) {
       const error = await response.text();
@@ -1111,14 +1102,14 @@ export class CopilotProvider implements LLMProvider {
       body.response_format = { type: 'json_object' };
     }
 
-    const response = await fetch(`${this.baseUrl}/chat/completions`, {
+    const response = await withRelaxedTls(() => fetch(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${this.apiKey}`,
       },
       body: JSON.stringify(body),
-    });
+    }));
 
     if (!response.ok) {
       const error = await response.text();
@@ -1382,11 +1373,11 @@ export class GeminiProvider implements LLMProvider {
     };
 
     const url = `${this.baseUrl}/${this.model}:generateContent?key=${this.apiKey}`;
-    const response = await fetch(url, {
+    const response = await withRelaxedTls(() => fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-    });
+    }));
 
     if (!response.ok) {
       const error = await response.text();

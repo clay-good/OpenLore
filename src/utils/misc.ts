@@ -18,12 +18,31 @@ export function escapeRegExp(s: string): string {
 /**
  * Quote a value for use inside a double-quoted Graphviz DOT string.
  *
- * The backslash must be escaped BEFORE the quote, or a trailing `\` in the input
- * escapes the closing `"` that follows it and corrupts the rest of the document.
- * Escaping only quotes (the obvious-looking fix) leaves exactly that hole.
+ * Three things have to happen, in this order:
+ *
+ *  1. `\` first. Escaping quotes first would leave a trailing `\` escaping the
+ *     closing `"` that follows it, swallowing the rest of the document.
+ *  2. `"`, so the value cannot terminate its own string.
+ *  3. Control characters. The emitter is line-oriented (statements are joined with
+ *     `\n`), and a file name may legally contain a newline on Linux and macOS — so
+ *     an unescaped one splits the statement in two and the tail is parsed as new
+ *     DOT. Escaping quotes alone does not prevent that, which is why this is done
+ *     here rather than left to the caller.
+ *
+ * Newline/CR/tab become their DOT escape sequences (the backslash is emitted after
+ * step 1, so it stays a real escape). Any other control character has no DOT
+ * representation and is dropped; two names differing only by such a character would
+ * collide, which is accepted as strictly better than emitting a corrupt graph.
  */
 export function escapeDotString(s: string): string {
-  return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  return s
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r')
+    .replace(/\t/g, '\\t')
+    // eslint-disable-next-line no-control-regex -- deliberately matching C0/C7F controls
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
 }
 
 /**

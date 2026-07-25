@@ -15,6 +15,7 @@
 // `openspec lore generate` under Node 20) gets one legible stderr line and a
 // stable exit code, never a stack trace. Keep this the first import.
 import './node-version-bootstrap.js';
+import { allowInsecureTls } from '../core/services/tls-scope.js';
 
 import { Command } from 'commander';
 import { createRequire } from 'node:module';
@@ -130,7 +131,9 @@ program.hook('preAction', (thisCommand, actionCommand) => {
 
   // Warn when SSL verification is disabled — it's a security trade-off
   if (opts.insecure) {
-    process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+    // The CLI prints its own colorized, quiet-aware notice below, so the shared
+    // helper stays silent here rather than duplicating it (and writing in --quiet).
+    allowInsecureTls('--insecure', { announce: false });
     // Only print if we're not in quiet mode
     if (!opts.quiet) {
       const c = colorForStderr();

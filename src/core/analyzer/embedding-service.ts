@@ -13,6 +13,7 @@
  */
 
 import type { OpenLoreConfig } from '../../types/index.js';
+import { allowInsecureTls, withRelaxedTls } from '../services/tls-scope.js';
 
 // ============================================================================
 // TYPES
@@ -71,8 +72,8 @@ export class EmbeddingService implements Embedder {
     this.model = config.model;
     this.apiKey = config.apiKey ?? '';
     this.batchSize = config.batchSize ?? 64;
-    if (config.skipSslVerify && process.env.NODE_TLS_REJECT_UNAUTHORIZED !== '0') {
-      process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+    if (config.skipSslVerify) {
+      allowInsecureTls('embedding.skipSslVerify');
     }
   }
 
@@ -154,11 +155,11 @@ export class EmbeddingService implements Embedder {
       headers['Authorization'] = `Bearer ${this.apiKey}`;
     }
 
-    const response = await fetch(url, {
+    const response = await withRelaxedTls(() => fetch(url, {
       method: 'POST',
       headers,
       body: JSON.stringify({ input: truncated, model: this.model }),
-    });
+    }));
 
     if (!response.ok) {
       const body = await response.text().catch(() => '');
