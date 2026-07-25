@@ -24,11 +24,12 @@ jobs:
       - run: npm ci
 
       - name: Audit dependencies
-        # Gate ALL dependencies (prod + dev) at high severity. Transitive advisories
-        # inside dev tooling (@earendil-works/pi-coding-agent → @google/genai →
-        # protobufjs/ws) are pinned to patched versions via `overrides`, so the full
-        # tree is clean — no need to scope dev out.
-        run: npm audit --audit-level=high
+        # Gate ALL dependencies (prod + dev) at high severity. Most transitive
+        # advisories are pinned to patched versions via `overrides`; the few with no
+        # applicable fix are listed, with a reason and a clearing condition, in the
+        # gate's ALLOWLIST. The gate also fails on a stale allowlist entry, so an
+        # exception cannot outlive its cause.
+        run: npm run audit:gate
 
       - name: Run ESLint
         run: npm run lint

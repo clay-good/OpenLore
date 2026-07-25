@@ -45,6 +45,7 @@
     "skill:install-local": "node scripts/install-skill.js",
     "format": "eslint src --fix",
     "lint": "eslint src",
+    "audit:gate": "node scripts/audit-gate.mjs",
     "typecheck": "tsc --noEmit",
     "postinstall": "node scripts/postinstall.mjs",
     "prepublishOnly": "npm run build && npm run test:run"
