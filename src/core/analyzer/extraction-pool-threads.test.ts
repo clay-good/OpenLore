@@ -102,6 +102,32 @@ describe('extraction pool — the entry that actually ships', () => {
       await worker.terminate();
     }
   }, 60_000);
+
+  it('stays inert when spawned without the pool\'s sentinel', async () => {
+    // The closed direction of the same gate. Without it, anything that imports this module
+    // while running inside SOME OTHER worker thread (a test runner using a thread pool, say)
+    // would attach a message handler to that thread's channel and patch its logger. Asserting
+    // only the ready path would leave the gate itself free to be deleted.
+    const compiled = join(__dirname, '..', '..', '..', 'dist', 'core', 'analyzer', 'extraction-worker.js');
+    if (!existsSync(compiled)) return; // covered by the sibling test's warning
+
+    const { Worker } = await import('node:worker_threads');
+    const worker = new Worker(pathToFileURL(compiled), {
+      workerData: { probeLanguage: 'TypeScript' }, // no sentinel
+      stdout: true,
+    });
+    worker.stdout.resume();
+    try {
+      const spoke = await new Promise<boolean>((resolve) => {
+        const timer = setTimeout(() => resolve(false), 5_000);
+        worker.on('message', () => { clearTimeout(timer); resolve(true); });
+        worker.on('error', () => { clearTimeout(timer); resolve(true); });
+      });
+      expect(spoke, 'a worker without the sentinel must not speak').toBe(false);
+    } finally {
+      await worker.terminate();
+    }
+  }, 60_000);
 });
 
 describe('extraction pool — real worker threads', () => {
