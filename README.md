@@ -20,10 +20,10 @@
 </p>
 
 <p align="center">
-  <img src="docs/openlore-demo.gif" alt="A real terminal recording (no edits, no narration) of the full lifecycle on a real Rust repo: `openlore install` sets it up in one command with no API key, `openlore orient` finds the code a task touches, `openlore blast-radius` flags a risky change before commit, and `openlore prove` estimates the cost / round-trip saving on this repo" width="100%">
+  <img src="docs/openlore-demo.gif" alt="An unedited terminal recording of the published openlore v2.1.6 on a fresh clone of ripgrep: `openlore install` wires the agent and indexes 235 files live in 14 seconds with no API key, `openlore orient` returns the functions a task touches, `openlore review` reports a changed signature that left 39 callers stale, and `openlore prove --estimate` projects the payoff on that repo" width="100%">
 </p>
 
-<p align="center"><em>The whole lifecycle on a real repo, straight from the terminal — no edits, no narration. <strong>Install</strong> in one command (no API key) → <strong>orient</strong> finds the code a task touches → <strong>blast-radius</strong> flags a risky change before you commit → <strong>prove</strong> projects the payoff on <em>your</em> repo. Deterministic and local.</em></p>
+<p align="center"><em>A real, unedited recording — the published <code>openlore</code> on a fresh clone of <a href="https://github.com/BurntSushi/ripgrep">ripgrep</a>. <strong>install</strong> wires your agent and indexes the repo live — 235 files, 2,978 functions, 4,329 call edges in <strong>14 seconds</strong>, no API key → <strong>orient</strong> returns the code a task touches → <strong>review</strong> catches a signature change that left <strong>39 callers</strong> stale → <strong>prove</strong> projects the payoff. Re-record it yourself: <a href="docs/openlore-demo.tape"><code>docs/openlore-demo.tape</code></a>.</em></p>
 
 <p align="center">
   <strong><a href="#install-in-one-command">Install</a> · <a href="#what-you-get">What you get</a> · <a href="#value-scorecard--does-it-pay-for-itself">Benchmarks</a> · <a href="#governance--guardrails-on-what-your-agent-changes">Governance</a> · <a href="#how-it-works">How it works</a> · <a href="#openlore-vs-alternatives">vs. Alternatives</a> · <a href="#documentation">Docs</a></strong>
@@ -78,36 +78,37 @@ OpenLore does two things for an agent, both deterministic and local — it **rem
 ## See it in action
 
 <details open>
-<summary><strong>orient("add a payment method")</strong> — one query replaces most exploratory file reads</summary>
+<summary><strong>orient("add a --since flag to the blast-radius command")</strong> — one query replaces most exploratory file reads</summary>
+
+Real output — `openlore orient --json "add a --since flag to the blast-radius command"`, run on **this** repo (abridged: fields elided, caller lists flattened to names):
 
 ```json
 {
-  "functions": [
-    {
-      "name": "processPayment",
-      "file": "src/payments/processor.ts",
-      "risk": "medium",
-      "fanIn": 4,
-      "callers": ["handleCheckout", "retryFailedCharge"],
-      "callType": "direct"
-    },
-    {
-      "name": "validateCard",
-      "file": "src/payments/validator.ts",
-      "risk": "low",
-      "fanIn": 1,
-      "testedBy": [{ "name": "validateCard.test.ts", "confidence": "called" }]
-    }
+  "relevantFiles": ["src/cli/commands/blast-radius.ts", "src/core/services/mcp-handlers/blast-radius.ts"],
+  "relevantFunctions": [
+    { "name": "computeBlastRadius", "filePath": "src/core/services/mcp-handlers/blast-radius.ts",
+      "signature": "async function computeBlastRadius(input: BlastRadiusInput): Promise<BlastRadiusBriefing>",
+      "fanIn": 5, "isHub": true, "language": "TypeScript" }
   ],
-  "specDomains": ["payments — §CardValidation, §PaymentFlow"],
+  "callPaths": [
+    { "function": "computeBlastRadius",
+      "callers": ["handleBlastRadius", "computeImpactCertificate", "runBlastRadiusCli",
+                  "composeReview", "collectGovernanceFindings"] }
+  ],
+  "landmarks": [
+    { "name": "runBlastRadiusCli", "hops": 1,
+      "signals": [{ "label": "orchestrator", "evidence": { "fanOut": 11 } },
+                  { "label": "volatile", "evidence": { "level": "medium", "commits": 6, "coChangedWith": 5 } }] }
+  ],
   "insertionPoints": [
-    "src/payments/processor.ts:87 — after existing charge logic"
+    { "rank": 2, "name": "computeBlastRadius", "role": "hub", "strategy": "cross_cutting_hook",
+      "reason": "computeBlastRadius is called by 5 functions -- adding logic here affects the entire callsite surface." }
   ],
-  "callPath": "POST /charge → handleCheckout → processPayment → validateCard → stripeClient.charge"
+  "suggestedTools": ["record_decision", "analyze_impact", "get_subgraph", "check_spec_drift"]
 }
 ```
 
-The agent knows exactly where to look, what it touches, and what risks to consider — before reading a single file.
+The agent knows exactly where to look, what it touches, and what's risky to touch — before reading a single file. Every field is computed from the graph; nothing is inferred by a model.
 
 </details>
 
@@ -275,7 +276,7 @@ npm run skill:install-local           # → ~/.claude/skills/openlore-orient/
 cp -R skills/openlore-orient /path/to/your-project/.claude/skills/   # or per-project
 ```
 
-The 8 multi-agent **workflow** skills (brainstorm, plan-refactor, write-tests, review-changes, debug, …) install via `openlore setup` into `.claude/`, `.opencode/`, or `.vibe/`. See [`skills/openlore-orient/README.md`](skills/openlore-orient/README.md).
+The 8 multi-agent **workflow** skills (brainstorm, plan-refactor, write-tests, implement-story, debug, …) install via `openlore setup` into `.claude/`, `.opencode/`, or `.vibe/`. See [`skills/openlore-orient/README.md`](skills/openlore-orient/README.md).
 
 ---
 
@@ -345,7 +346,9 @@ Crucially, application code, Infrastructure-as-Code, and architectural **decisio
 
 ## Core Features
 
-**Analyze** *(no API key)* — Continuously maintains a structural representation using pure static analysis: a full call graph in SQLite, label-propagation community detection, McCabe complexity per function, and extracted DB schemas, HTTP routes, UI components, middleware, and env vars. Outputs `.openlore/analysis/CODEBASE.md` — a ~600-token digest that compresses tens of thousands of exploratory tokens. With `--watch-auto` the graph updates incrementally on every save and **converges to what `analyze --force` would produce**; when a change's reverse-dependency closure exceeds the per-save budget, the un-recomputed files are marked **explicitly stale** rather than left silently divergent.
+*Skimmable by design: each bold lead-in is one capability, with the command that runs it and the doc that explains it. Everything is deterministic and local; only the two entries marked "API key" ever talk to a model.*
+
+**Analyze** *(no API key)* — Continuously maintains a structural representation using pure static analysis: a full call graph in SQLite, label-propagation community detection, McCabe complexity per function, and extracted DB schemas, HTTP routes, UI components, middleware, and env vars. Outputs `.openlore/analysis/CODEBASE.md` — a ~600-token digest that compresses tens of thousands of exploratory tokens. The MCP server's file watcher (`--watch-auto`, on by default) updates the graph incrementally on every save and **converges to what `analyze --force` would produce**; when a change's reverse-dependency closure exceeds the per-save budget, the un-recomputed files are marked **explicitly stale** rather than left silently divergent.
 
 **Generate** *(API key)* — Sends the analysis to an LLM in 6 structured stages (survey → entities → services → APIs → architecture → ADRs), producing `openspec/specs/` living specifications in RFC 2119 with Given/When/Then scenarios.
 
@@ -468,7 +471,7 @@ This is the live decision log the pre-commit gate enforces. See [docs/governance
 We'd rather you know these up front than discover them mid-task.
 
 - **Incremental updates converge or flag, never silently diverge.** The watcher re-indexes the changed file's reverse-dependency closure on save; when that exceeds the per-save budget (default 40 files) the un-recomputed files are marked **explicitly stale** (freshness verdicts report non-authoritative) instead of left wrong. A full `analyze --force` clears the region.
-- **The index is integrity-checked, never served half-built.** Every `analyze` writes an attestation (schema version, counts, content digest); on load the store is reconciled into `healthy` / `degraded` / `mismatched`, and a non-healthy index is disclosed in the conclusion tools whose soundness depends on completeness — never silently answered over.
+- **The index is integrity-checked, never served half-built — and it repairs itself.** Every `analyze` writes an attestation (schema version, counts, content digest); on load the store is reconciled into `healthy` / `degraded` / `mismatched`, and a non-healthy index is disclosed in the conclusion tools whose soundness depends on completeness — never silently answered over. When a read notices the index has drifted from the code, it kicks off an at-most-once background repair *and says so*, rather than answering from stale structure (`openlore doctor --fix` covers the rest). A read never destroys the store: a schema mismatch reports "not ready" and a corrupt store is quarantined, never dropped.
 - **Static analysis only.** Dynamic dispatch, runtime metaprogramming, and `eval`-based patterns are not captured in the call graph.
 - **LLM spec quality varies.** Generated specs reflect the model's understanding — review complex business logic before treating it as authoritative.
 - **Keyword (BM25) is the first-class default; semantic is an opt-in upgrade.** `orient`/`search_code` work immediately with no API key. Upgrade to hybrid dense+BM25 with `openlore embed --local` (a bundled, CPU-only, no-API-key on-device embedder, ~23 MB pinned model) or a remote `EMBED_BASE_URL`. Each surface states its active mode (`keyword` / `local-semantic` / `remote-semantic`).
@@ -548,8 +551,10 @@ If OpenLore saves your agents from re-reading the same files — or catches one 
 
 <p align="center">
   <a href="https://star-history.com/#clay-good/OpenLore&Date">
-    <img src="https://api.star-history.com/svg?repos=clay-good/OpenLore&type=Date" alt="OpenLore star history" width="70%">
+    <img src="https://api.star-history.com/svg?repos=clay-good/OpenLore&type=Date" alt="OpenLore star history — open the live chart on star-history.com" width="70%">
   </a>
+  <br>
+  <sub><a href="https://star-history.com/#clay-good/OpenLore&Date">Live star history</a> · <a href="https://github.com/clay-good/OpenLore/stargazers">stargazers</a> — the chart above is rendered by star-history.com; if their API is rate-limited, these links still work.</sub>
 </p>
 
 - ⭐ **Star** to follow along: [github.com/clay-good/OpenLore](https://github.com/clay-good/OpenLore)
