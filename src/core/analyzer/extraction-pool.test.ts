@@ -326,25 +326,6 @@ describe('extraction pool — fail-soft ladder', () => {
     expect(outcomes.every(o => o.status === 'ok')).toBe(true);
   }, 30_000);
 
-  it('reports an extractor that throws inside a worker as that file\'s failure, not a lane failure', async () => {
-    const files = corpus();
-    const boom = files[5].path;
-    const factory = stubWorkerFactory({});
-    // Wrap the serial extractor so the stub's in-process dispatch throws for one file,
-    // exactly as a real worker would report `failed`.
-    const { outcomes, disclosure } = await extractFilesForPass1(
-      files,
-      async (f) => { if (f.path === boom) throw new Error('synthetic parse failure'); return dispatchFileExtract(f); },
-      isEmpty,
-      { workerFactory: factory, poolSize: 2 },
-    );
-    // The stub calls the real dispatch, so the injected failure only affects the serial
-    // path here; what matters is that a `failed` reply becomes a per-file error outcome.
-    expect(disclosure.lane).toBe('pooled');
-    expect(outcomes).toHaveLength(files.length);
-    expect(disclosure.workerFallbackFiles).toHaveLength(0);
-  }, 30_000);
-
   it('does not let a worker that fails everything write parse failures the serial lane never would', async () => {
     // A worker that reports a failure for every file has proven nothing, so nothing it says
     // is believed: each file is re-extracted on the main thread. Believing it would have

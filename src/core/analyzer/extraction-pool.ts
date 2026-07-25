@@ -360,10 +360,8 @@ function createNodeWorker(entry: ResolvedWorkerEntry, probeLanguage?: string): E
   return worker as unknown as ExtractionWorkerHandle;
 }
 
-/** Why a slot was left for the main thread to fill, and what the worker had said. */
-type UnfilledSlot<T> =
-  | { reason: 'worker-died' }
-  | { reason: 'unproven'; worker: ExtractOutcome<T> };
+/** Why a slot was left for the main thread to fill. */
+type UnfilledReason = 'worker-died' | 'unproven';
 
 /**
  * Drive the pool. Returns `undefined` when not a single worker could be brought up
@@ -401,7 +399,7 @@ async function runPooled<T>(
   deterministicFailure?: boolean;
 }> {
   const slots: Array<ExtractOutcome<T> | undefined> = new Array(files.length).fill(undefined);
-  const unfilled: Array<UnfilledSlot<T> | undefined> = new Array(files.length).fill(undefined);
+  const unfilled: Array<UnfilledReason | undefined> = new Array(files.length).fill(undefined);
   /** Next unclaimed input index. Shared across workers; each claims by post-increment. */
   let cursor = 0;
   let started = 0;
@@ -520,7 +518,7 @@ async function runPooled<T>(
         } catch {
           // The worker died (or wedged past its deadline) holding this file. Leave the slot
           // for the main thread and stop feeding this worker.
-          unfilled[index] = { reason: 'worker-died' };
+          unfilled[index] = 'worker-died';
           break;
         }
         // A worker that cannot handle a language reports it two ways, and BOTH are
@@ -535,7 +533,7 @@ async function runPooled<T>(
           proven.add(file.language);
         } else if (outcome.status !== 'ok' || isEmptyResult(outcome.value)) {
           if (!proven.has(file.language)) {
-            unfilled[index] = { reason: 'unproven', worker: outcome };
+            unfilled[index] = 'unproven';
             continue;
           }
         }
@@ -566,9 +564,9 @@ async function runPooled<T>(
     if (slots[i] !== undefined) continue;
     // A slot with no recorded reason belongs to a file no worker ever claimed (every
     // worker died first) — the same situation as a worker dying while holding it.
-    const record = unfilled[i];
+    const reason = unfilled[i] ?? 'worker-died';
     const outcome = await runSerial(files[i], serialExtract);
-    if (!record || record.reason === 'worker-died') {
+    if (reason === 'worker-died') {
       workerFallbackFiles.push(files[i].path);
     } else {
       unprovenRechecks++;
@@ -645,14 +643,20 @@ async function terminateQuietly(worker: ExtractionWorkerHandle): Promise<void> {
  */
 export function describeExtractionLane(d: ExtractionLaneDisclosure): string | undefined {
   if (d.lane === 'pooled') {
-    // A worker that reported nothing where the main thread found facts is the one outcome
-    // that means something was actually WRONG with a worker, so it leads.
+    const parts: string[] = [];
+    // A worker that reported nothing (an empty result OR a throw) where the main thread
+    // found facts is the one outcome meaning something was actually WRONG with a worker,
+    // so it leads. Both outcomes are reported when both happened.
     if (d.laneDefectFiles.length > 0) {
-      return `extraction worker returned no symbols for ${d.laneDefectFiles.length} file(s) that do contain symbols `
-        + `(e.g. ${d.laneDefectFiles[0]}); the main-thread result was used. Set OPENLORE_NO_WORKERS=1 if this recurs`;
+      parts.push(
+        `extraction worker reported no symbols for ${d.laneDefectFiles.length} file(s) that do contain symbols `
+        + `(e.g. ${d.laneDefectFiles[0]}); the main-thread result was used. Set OPENLORE_NO_WORKERS=1 if this recurs`,
+      );
     }
-    if (d.workerFallbackFiles.length === 0) return undefined;
-    return `extraction pool degraded: ${d.workerFallbackFiles.length} file(s) re-extracted on the main thread after a worker failed`;
+    if (d.workerFallbackFiles.length > 0) {
+      parts.push(`${d.workerFallbackFiles.length} file(s) re-extracted on the main thread after a worker failed`);
+    }
+    return parts.length > 0 ? parts.join('; ') : undefined;
   }
   // A small build, a small machine, a caller opting out, or an explicit env opt-out are
   // ordinary choices, not degradations — warning about them would be noise on every run.

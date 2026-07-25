@@ -43,7 +43,7 @@ import type { ExtractionRequest, ExtractionResponse, ExtractionWorkerData } from
  * skips the probe — the per-language unproven-silence guard in the pool still covers it,
  * so the probe is a fast-fail optimization, never the sole line of defense.
  */
-const PROBES: Record<string, { path: string; content: string }> = {
+export const PROBES: Record<string, { path: string; content: string }> = {
   TypeScript: { path: '__openlore_probe__.ts', content: 'export function olProbe(): void { olProbeCallee(); }\n' },
   JavaScript: { path: '__openlore_probe__.js', content: 'export function olProbe() { olProbeCallee(); }\n' },
   Python: { path: '__openlore_probe__.py', content: 'def ol_probe():\n    ol_probe_callee()\n' },

@@ -18,6 +18,8 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { CallGraphBuilder, serializeCallGraph } from './call-graph.js';
 import { resolveWorkerEntry, type ExtractionFile } from './extraction-pool.js';
+import { dispatchFileExtract } from './call-graph.js';
+import { PROBES } from './extraction-worker.js';
 
 const fixtures = join(__dirname, 'fixtures');
 /** Two workers is enough to prove the lane; more only buys spawn cost in CI. */
@@ -74,10 +76,13 @@ describe('extraction pool — the entry that actually ships', () => {
     // is the file the npm package ships and the one `openlore analyze` actually loads —
     // without this, a compile or packaging regression would degrade silently to the serial
     // lane with a green suite.
-    const compiled = join(__dirname, 'extraction-worker.js');
+    // Repo-root `dist/`, not a sibling of this file: tsc emits src/ -> dist/, so a sibling
+    // `.js` never exists and looking for one made this guard silently skip in a fully built
+    // checkout — which is exactly the failure it is supposed to catch.
+    const compiled = join(__dirname, '..', '..', '..', 'dist', 'core', 'analyzer', 'extraction-worker.js');
     if (!existsSync(compiled)) {
-      // Not built in this checkout. Say so rather than passing quietly.
-      console.warn('[extraction-pool] dist entry absent — compiled-worker check skipped (run `npm run build`)');
+      // Unbuilt checkout. CI runs this file again inside the Build job, where dist exists.
+      console.warn(`[extraction-pool] compiled-worker check skipped — ${compiled} absent (run \`npm run build\`)`);
       return;
     }
     const { Worker } = await import('node:worker_threads');
@@ -178,4 +183,20 @@ describe('extraction pool — real worker threads', () => {
     const present = new Set(nodes.filter(n => !n.isExternal).map(n => n.language));
     expect(present.size).toBeGreaterThanOrEqual(4);
   }, 180_000);
+});
+
+describe('extraction pool — the startup probe table', () => {
+  // A probe snippet that stops yielding a node and an edge does not fail loudly: every
+  // worker reports `unhealthy`, the pool is disabled for the whole process, and analyze
+  // just gets slower. So the table is checked against the real extractor.
+  for (const [language, probe] of Object.entries(PROBES)) {
+    it(`the ${language} probe snippet yields a node and an edge`, async () => {
+      const result = await dispatchFileExtract({ ...probe, language });
+      // A grammar genuinely unavailable in this environment yields nothing on the main
+      // thread too — that is the case the probe is allowed to fail on, so skip it here.
+      if (!result || (result.nodes.length === 0 && result.rawEdges.length === 0)) return;
+      expect(result.nodes.length, `${language} probe produced no function node`).toBeGreaterThan(0);
+      expect(result.rawEdges.length, `${language} probe produced no call edge`).toBeGreaterThan(0);
+    }, 30_000);
+  }
 });

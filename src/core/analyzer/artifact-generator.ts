@@ -227,8 +227,8 @@ export interface AnalysisArtifacts {
   /**
    * A one-line note about the Pass-1 extraction lane, present ONLY when something degraded
    * (change: optimize-parallel-extraction-pool) — a worker failed, or the worker pool could
-   * not be used at all. It describes HOW the facts were computed, never WHAT they are: the
-   * pooled and serial lanes are byte-identical by contract. Returned rather than logged
+   * not be used at all. It describes HOW the facts were computed, never WHAT they are.
+   * Returned rather than logged
    * because `build()` also runs inside `openlore mcp`, whose stdout is the JSON-RPC channel;
    * only the CLI renders it.
    */

@@ -84,6 +84,28 @@
 - [x] `proven` now requires a defined, non-empty result, so `undefined` (a language with no
       extractor) no longer marks a language proven
 
+### Round 4 (convergence review — test honesty)
+- [x] The shipped-entry guard resolved a sibling `.js` tsc never emits, so it skipped silently in
+      a fully built checkout. Repointed at repo-root `dist/`, wired into the CI Build job, and
+      verified to fail on a corrupted compiled entry
+- [x] Deleted a test that asserted nothing about its own name: it injected a throwing extractor as
+      `serialExtract`, which a healthy stub worker never calls, so it would have passed with the
+      worker error path deleted outright. The behavior is covered by the proven-worker error test
+- [x] Probe-table guard: every snippet in `PROBES` is checked against the real extractor for a node
+      AND an edge. A snippet that quietly stops yielding both would disable the pool process-wide
+      with no failing test
+- [x] Deleted the write-only `worker` payload on the unfilled-slot record (and the generic it
+      forced); the disclosure now reports lane defects AND worker fallbacks when both occurred,
+      and says "reported no symbols" since the defect covers a throw as well as a silence
+- [x] Qualified the "byte-identical" comments: a worker thread's larger default stack means a
+      pathological deep-recursion parse can fail on one lane and not the other — a different FILE
+      failing to parse, disclosed through parse health either way, not a different reading of a
+      file that parsed
+- [ ] KNOWN LIMIT (not fixed here): the lane note is rendered by `openlore analyze` only, so a
+      lane defect during the daemon's cold-start or self-heal rebuild is not surfaced to a human.
+      Matches the spec as written; a counter on `parse-health.json` or `openlore status` would
+      close it
+
 ## Verification
 - [x] Byte-equality oracle: `openlore analyze` on a clean checkout of this repo, pooled and with
       `OPENLORE_NO_WORKERS=1` — every content artifact byte-identical (llm-context, repo-structure,
@@ -117,7 +139,10 @@
       graph never does — the exact question the unproven-silence guard raises
 - [x] Shipped-entry test: `dist/core/analyzer/extraction-worker.js` — the file the npm package
       ships, which no other test loads because vitest always resolves the `.ts` entry — starts and
-      reports ready (and says so loudly if the checkout is unbuilt, rather than passing quietly)
+      reports ready. CI runs it in the Build job, the only job where `dist/` exists. Verified it
+      FAILS on a deliberately corrupted compiled entry (the first version of this guard looked for
+      a sibling `.js` that tsc never emits, so it silently skipped in a built checkout — caught by
+      review, not by the suite)
 - [x] MCP stdio purity: drove `openlore mcp` over stdio through a cold-start pooled build plus
       an `orient` call — every stdout line a valid JSON-RPC frame, build noise on stderr
 - [x] Full suite green (321 files / 6150 tests), lint + typecheck clean

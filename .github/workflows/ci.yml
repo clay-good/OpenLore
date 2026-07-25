@@ -106,6 +106,14 @@ jobs:
         # diff, and this checks the real `npm pack` manifest rather than the intent.
         run: npm run audit:packlist
 
+      # The Pass-1 extraction worker is loaded by runtime path resolution, and under vitest
+      # the .ts entry is always the one resolved — so the COMPILED entry that the npm package
+      # actually ships is exercised by no other job. A compile or packaging regression there
+      # degrades every installed user to the serial lane silently, so it is checked here,
+      # where dist/ exists (change: optimize-parallel-extraction-pool).
+      - name: Verify the compiled extraction worker
+        run: npx vitest run src/core/analyzer/extraction-pool-threads.test.ts
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
