@@ -51,6 +51,7 @@ import { buildRouteInventory } from '../../core/analyzer/http-route-parser.js';
 import { extractMiddleware } from '../../core/analyzer/middleware-extractor.js';
 import { extractEnvVars } from '../../core/analyzer/env-extractor.js';
 import { generateAiConfigs, AI_TOOL_TARGETS, type AiTool, type AiConfigResult } from '../../core/analyzer/ai-config-generator.js';
+import { describeExclusions, EXCLUSION_REASON_LABEL } from '../../core/analyzer/parse-health.js';
 
 // ============================================================================
 // TYPES
@@ -163,7 +164,20 @@ export async function runAnalysis(
 
   logger.info('Files found', repoMap.summary.totalFiles);
   logger.info('Files analyzed', repoMap.summary.analyzedFiles);
-  logger.info('Files skipped', repoMap.summary.skippedFiles);
+  // A bare "Files skipped: 3" reads like a parse problem and is not actionable. The walker has
+  // always known WHY each file was skipped; report that instead (change:
+  // fix-analyze-native-abort-and-file-cost-budget). Reasons are ordered by count then name so the
+  // line is deterministic for a fixed repository state.
+  const skipReasons = Object.entries(repoMap.summary.skippedReasons ?? {})
+    .filter(([, n]) => n > 0)
+    .sort(([an, a], [bn, b]) => b - a || (an < bn ? -1 : 1))
+    .map(([reason, n]) => `${reason} ${n}`);
+  logger.info(
+    'Files skipped',
+    skipReasons.length > 0
+      ? `${repoMap.summary.skippedFiles} (${skipReasons.join(', ')})`
+      : repoMap.summary.skippedFiles,
+  );
   logger.blank();
 
   // Phase 2: Dependency Graph
@@ -226,6 +240,20 @@ export async function runAnalysis(
   // Present only when something actually degraded; a clean run says nothing.
   if (artifacts.extractionLaneNote) {
     logger.warning(artifacts.extractionLaneNote);
+  }
+
+  // Disclose files EXCLUDED from extraction, with their cause (change:
+  // fix-analyze-native-abort-and-file-cost-budget). Read from the same parse-health record
+  // `doctor` reads, so the two surfaces cannot give this repository different answers. Silent
+  // when nothing was excluded.
+  const excludedNote = describeExclusions(artifacts.parseHealth);
+  if (excludedNote) {
+    const worst = (artifacts.parseHealth?.files ?? []).filter(f => f.exclusion).slice(0, 3);
+    logger.warning(
+      `${excludedNote} — symbols and edges from these files are a LOWER BOUND: `
+      + worst.map(f => `${f.filePath} (${EXCLUSION_REASON_LABEL[f.exclusion!] ?? f.exclusion}`
+        + `${f.budgetMs !== undefined ? ` of ${(f.budgetMs / 1000).toFixed(1)}s` : ''})`).join('; '),
+    );
   }
 
   // Disclose the Pass-1 memo lane (change: optimize-hash-keyed-analyze). Unlike the lane

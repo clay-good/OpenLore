@@ -13,11 +13,19 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { Worker } from 'node:worker_threads';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { CallGraphBuilder, serializeCallGraph, dispatchFileExtract } from './call-graph.js';
-import { resolveWorkerEntry, type ExtractionFile } from './extraction-pool.js';
+import {
+  resolveWorkerEntry,
+  isWorkerFaultMessage,
+  WORKER_FAULT_MESSAGE_PREFIX,
+  type ExtractionFile,
+} from './extraction-pool.js';
+
 import { PROBES } from './extraction-worker.js';
 
 const fixtures = join(__dirname, 'fixtures');
@@ -225,4 +233,92 @@ describe('extraction pool — the startup probe table', () => {
       expect(result.rawEdges.length, `${language} probe produced no call edge`).toBeGreaterThan(0);
     }, 30_000);
   }
+});
+
+describe('extraction pool — the worker fault boundary, on a real thread', () => {
+  /**
+   * The boundary this exercises exists to stop a fault inside a worker from killing the PROCESS
+   * (change: fix-analyze-native-abort-and-file-cost-budget). `extraction-pool.test.ts` proves the
+   * parent handles the resulting message, but it does so with a stub that *fabricates* the message
+   * — it cannot prove the worker ever sends one. Only a real thread can, because
+   * `process.on('uncaughtException')` is per-thread and a stub has no thread.
+   *
+   * The fault is induced by loading the REAL worker entry through a shim that throws from a timer
+   * callback. That throw is genuine: it originates outside the request handler's `try`/`catch`
+   * (which is exactly the class of fault the boundary was added for), and a worker with no
+   * listener would simply die there, taking its in-flight file with it.
+   *
+   * WHEN it is induced matters, and two earlier attempts at this test got it wrong in instructive
+   * ways. Scheduling the throw on a fixed delay while a large file extracted never fired DURING the
+   * extraction: the parse is one synchronous native call, so the worker's event loop does not run
+   * until it returns, and the parse budget always won the race — the very property that makes the
+   * budget in-band rather than a timer, demonstrated here rather than asserted. Deferring it to the
+   * next macrotask instead lost the opposite race: a small file's extraction completes entirely
+   * within microtasks, so the request was already answered by the time the throw landed.
+   *
+   * So the shim throws SYNCHRONOUSLY from its own `message` listener. Both listeners run in the
+   * same `emit`, the production one first — and it sets `inFlight` before its first `await` — so
+   * when this one throws, a file is in flight by construction, with no timing assumption at all.
+   * A throw out of an EventEmitter listener is a genuine `uncaughtException`.
+   */
+
+  it('answers for the in-flight file with the worker-fault marker instead of dying silently', async () => {
+    const entry = resolveWorkerEntry();
+    if (!entry) return; // no worker lane in this environment; the serial lane covers it
+
+    // A shim that IS the production worker (it imports and runs it), plus a genuine async throw.
+    // Its own `message` listener runs AFTER the production one, which sets `inFlight`
+    // synchronously before its first `await` — so by the time this schedules, a file is in flight.
+    const dir = mkdtempSync(join(tmpdir(), 'wfault-'));
+    const shim = join(dir, 'fault-shim.mjs');
+    writeFileSync(
+      shim,
+      `import { parentPort } from 'node:worker_threads';\n`
+      + `import ${JSON.stringify(entry.specifier.href)};\n`
+      + `parentPort.on('message', (m) => {\n`
+      + `  if (m && m.type === 'extract') throw new Error('induced worker fault');\n`
+      + `});\n`,
+    );
+
+    const worker = new Worker(pathToFileURL(shim), {
+      ...(entry.execArgv ? { execArgv: entry.execArgv } : {}),
+      workerData: { openloreExtractionWorker: true },
+      stdout: true,
+    });
+    worker.stdout.resume();
+
+    try {
+      const messages: Array<{ type: string; id?: number; message?: string }> = [];
+      const settled = new Promise<void>((resolve) => {
+        worker.on('message', (m: { type: string; id?: number; message?: string }) => {
+          messages.push(m);
+          if (m.type === 'ready') {
+            worker.postMessage({
+              type: 'extract',
+              id: 7,
+              file: { path: 'src/in-flight.ts', content: 'export function a(): void { b(); }\nfunction b(): void {}\n', language: 'TypeScript' },
+            });
+          }
+          if (m.type === 'failed') resolve();
+        });
+        worker.on('exit', () => resolve());
+      });
+
+      await settled;
+
+      const failure = messages.find(m => m.type === 'failed');
+      expect(failure, 'the worker answered for its in-flight file rather than vanishing').toBeDefined();
+      expect(failure!.id, 'attributed to the in-flight request, not an arbitrary one').toBe(7);
+      expect(failure!.message).toContain(WORKER_FAULT_MESSAGE_PREFIX);
+      // Attributed to the FILE, so the pool can route that one file to the main thread.
+      expect(failure!.message).toContain('src/in-flight.ts');
+      expect(failure!.message).toContain('induced worker fault');
+      // And the parent classifies it — the message is the only thing that survives the
+      // structured-clone boundary, so this is the whole contract.
+      expect(isWorkerFaultMessage(failure!.message)).toBe(true);
+    } finally {
+      await worker.terminate();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 120_000);
 });

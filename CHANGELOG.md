@@ -5,6 +5,93 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ## [Unreleased]
 
+## [2.1.7] - 2026-07-26
+
+**The release where `analyze` stopped dying and started explaining itself.**
+
+Three things this time: analysis got faster, it got harder to crash, and — the theme —
+it got much better at admitting what it *didn't* do. Everything is additive and
+backward-compatible. If OpenLore has been working for you, upgrade and it keeps working.
+
+### `openlore analyze` no longer dies on a hostile file
+
+One 300 KB file could kill the whole run with a single line of C++ and exit code 134:
+
+```
+libc++abi: terminating due to uncaught exception of type Napi::Error
+```
+
+No stack, no error line, no artifacts, no clue which file did it. Delightful.
+
+The culprit was a file that parsed into a tree **100,002 nodes deep**, which overflowed
+the stack inside a native call — where a JavaScript `try`/`catch` can't reach. Two fixes:
+the tree walk no longer uses the call stack, and every parse is now bounded by a per-file
+budget (20 s, generous on purpose; the slowest real file in this repo is under a second).
+A file that blows the budget is set aside and *reported*, not waited on.
+
+Same repository, before and after: **exit 134 → exit 0**, and **217 s → 52 s**.
+
+If you'd rather wait than be told, `OPENLORE_PARSE_BUDGET_MS=0` turns the bound off
+entirely and restores the old behavior exactly.
+
+### Fewer files skipped in silence
+
+"Files skipped: 3" told you nothing and worried you slightly. Now it says *why*
+(`pattern 2, gitignore 1`), and any file the analyzer set aside is recorded with a
+machine-readable reason that `analyze`, `doctor`, and the MCP tools all read from the
+same place — so they can't tell you three different stories about one repository.
+
+While a run is going, a file that's taking unusually long gets named on stderr, so
+"why is this slow" has an answer that isn't "attach a debugger."
+
+### Analysis got quicker
+
+- **Pass-1 extraction runs on a worker pool** — call-graph build 19.1 s → 7.3 s on this
+  repo; full `analyze --no-embed` 24.6 s → 18.1 s. Byte-identical output.
+- **Unchanged files aren't re-parsed.** A content-hash memo takes `--force` 45–54 s down
+  to 36–39 s on a re-run.
+- **Reachability is precomputed at analyze time**, so the tools that traverse it just look
+  things up: coverage-gaps 346 ms → 6.4 ms (54×), test selection 575 ms → 117 ms (4.9×),
+  measured at 50k nodes / 200k edges.
+
+### Security: analyzing a repo you don't trust
+
+OpenLore reads whatever you point it at, which means a repository can try things. Ten
+findings closed against that threat model, plus a separate fix for terminal control
+sequences. Highlights:
+
+- A cloned repo's `.openlore/config.json` could redirect the LLM endpoint and switch off
+  certificate verification — collecting your `ANTHROPIC_API_KEY` on your next `generate`,
+  `drift`, or commit. Repo-supplied values are now ignored unless they point at loopback;
+  your own `--api-base` / env vars still work, because those come from you.
+- A filename could carry raw terminal escapes into OpenLore's output. A forged
+  `[ok] all checks passed` is an attack, not a cosmetic glitch.
+- Two regexes could be made to hang on crafted input.
+
+Dependency and workflow scanning now run automatically in CI.
+
+### Also
+
+- Windows paths with backslashes no longer split incorrectly.
+- Four places where a tool reported `0` for something it had never actually computed.
+
+### Known issues
+
+Two defects an end-to-end pass found are **not** fixed here. Both are tracked and queued for the
+next release; neither is a regression from this one.
+
+- **The MCP stdio server doesn't exit when its client closes stdin**, once a call has started the
+  file watcher. Every agent session leaves a process holding a watcher and its caches. Workaround:
+  kill stray `openlore mcp` processes, or use `openlore serve`, which reaps itself when idle.
+- **A config missing its `analysis` section crashes `analyze`** with an internal `TypeError`, and
+  `doctor` reports that same config as healthy. If you hand-edit `.openlore/config.json`, keep the
+  `analysis` block — or re-run `openlore init`.
+
+---
+
+**Upgrade:** `npm i -g openlore@2.1.7` — or `openlore update`.
+
+
 ## [2.1.6] - 2026-07-19
 
 **The boring release. We mean that as the highest compliment.**

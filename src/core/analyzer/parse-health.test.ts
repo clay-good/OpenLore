@@ -8,14 +8,24 @@
  *      signal fires end-to-end AND that a clean file produces no record (clean repos pay zero).
  */
 import { describe, it, expect } from 'vitest';
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { checkParseHealth } from '../../cli/commands/doctor.js';
+import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_PARSE_HEALTH } from '../../constants.js';
 import {
   tallyParseHealth,
   isLossyUtf8,
   buildParseHealthReport,
   isDegraded,
   compactParseHealthSummary,
+  describeExclusions,
+  totalExcluded,
+  EXCLUSION_REASON_LABEL,
   type ParseHealthNode,
   type FileParseHealth,
+  type FileExclusionReason,
+  type ParseHealthReport,
 } from './parse-health.js';
 import { CallGraphBuilder } from './call-graph.js';
 
@@ -136,5 +146,132 @@ describe('CallGraphBuilder parse-health capture (build integration)', () => {
     const content = `function a() { return b(); }\nfunction b() { return 1; }\n`;
     const r = await new CallGraphBuilder().build([{ path: 'y.ts', content, language: 'TypeScript' }]);
     expect(r.parseHealthByFile?.get('y.ts')).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Exclusion reasons (change: fix-analyze-native-abort-and-file-cost-budget)
+// ---------------------------------------------------------------------------
+
+describe('exclusion reasons', () => {
+  const excluded = (path: string, exclusion: FileExclusionReason, budgetMs?: number): FileParseHealth => ({
+    filePath: path, language: 'TypeScript', errorCount: 0, missingCount: 0, errorLines: [],
+    exclusion, ...(budgetMs !== undefined ? { budgetMs } : {}),
+  });
+
+  it('counts exclusions per reason in the rolled-up report', () => {
+    const report = buildParseHealthReport([
+      excluded('a.ts', 'budget-exceeded', 20_000),
+      excluded('b.ts', 'budget-exceeded', 21_000),
+      excluded('c.ts', 'parse-failure'),
+    ]);
+    expect(report?.excludedByReason).toEqual({ 'budget-exceeded': 2, 'parse-failure': 1 });
+    expect(totalExcluded(report)).toBe(3);
+  });
+
+  it('omits the tally entirely when nothing was excluded, so an ordinary report is unchanged', () => {
+    // A repo whose only signal is error regions must not grow an empty tally — the artifact stays
+    // byte-identical to what it was before this change.
+    const report = buildParseHealthReport([
+      { filePath: 'a.ts', language: 'TypeScript', errorCount: 2, missingCount: 0, errorLines: [3, 9] },
+    ]);
+    expect(report).toBeDefined();
+    expect('excludedByReason' in report!).toBe(false);
+    expect(totalExcluded(report)).toBe(0);
+    expect(describeExclusions(report)).toBeUndefined();
+  });
+
+  it('describes exclusions in a fixed reason order so the line is deterministic', () => {
+    const report = buildParseHealthReport([
+      excluded('c.ts', 'size-cap'),
+      excluded('a.ts', 'budget-exceeded', 20_000),
+      excluded('b.ts', 'parse-failure'),
+    ]);
+    expect(describeExclusions(report)).toBe('3 files excluded (1 budget-exceeded, 1 parse-failure, 1 size-cap)');
+  });
+
+  it('treats an excluded file as degraded even with no error regions', () => {
+    // A budget-exceeded file has zero ERROR nodes — the parse never got far enough to produce any.
+    // If exclusion did not count as degradation it would vanish from the report entirely.
+    expect(isDegraded(excluded('a.ts', 'budget-exceeded', 20_000))).toBe(true);
+  });
+
+  it.each(['parse-failure', 'budget-exceeded', 'size-cap'] as FileExclusionReason[])(
+    'has a human label for %s, so no surface has to invent its own wording',
+    (reason) => expect(EXCLUSION_REASON_LABEL[reason]).toBeTruthy(),
+  );
+
+  it('never reports a worker fault as a file-level exclusion', () => {
+    // A worker fault degrades the LANE: the pool hands the file to the main thread, which is the
+    // reference implementation, so the file is not excluded at all. Recording it here would blame
+    // the source for a defect in the thread reading it.
+    expect(Object.keys(EXCLUSION_REASON_LABEL)).not.toContain('worker-fault');
+  });
+});
+
+describe('doctor reports exclusions from the shared record, behaviorally', () => {
+  // The previous version of this block was three source greps for an identifier. They passed with
+  // both CLI surfaces rendering nothing at all, which is exactly the failure they claimed to
+  // prevent. These drive the real check over a real artifact.
+  const withReport = (report: ParseHealthReport | null): string => {
+    const dir = mkdtempSync(join(tmpdir(), 'doc-'));
+    if (report) {
+      const analysisDir = join(dir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
+      mkdirSync(analysisDir, { recursive: true });
+      writeFileSync(join(analysisDir, ARTIFACT_PARSE_HEALTH), JSON.stringify(report));
+    }
+    return dir;
+  };
+  const excludedReport = buildParseHealthReport([{
+    filePath: 'src/huge.html', language: 'HTML', errorCount: 0, missingCount: 0, errorLines: [],
+    exclusion: 'size-cap',
+  }])!;
+
+  it('WARNS about a repository whose analysis excluded a file', async () => {
+    const r = await checkParseHealth(withReport(excludedReport));
+    expect(r.status).toBe('warn');
+    expect(r.detail).toContain('1 file excluded (1 size-cap)');
+    expect(r.detail).toContain('not analyzed at all');
+  });
+
+  it('does NOT call an excluded file "parsed with errors" — it was never parsed', async () => {
+    // Mixing an exclusion into a parse-error count sent the reader after a tree-sitter grammar
+    // bump for a file the grammar never saw.
+    const r = await checkParseHealth(withReport(excludedReport));
+    expect(r.detail).not.toMatch(/\d+ file\(s\) parsed with errors/);
+    expect(r.fix).not.toContain('tree-sitter');
+  });
+
+  it('still reports a genuine parse degradation as such, with the grammar remedy', async () => {
+    const degraded = buildParseHealthReport([{
+      filePath: 'src/broken.ts', language: 'TypeScript', errorCount: 3, missingCount: 0, errorLines: [7],
+    }])!;
+    const r = await checkParseHealth(withReport(degraded));
+    expect(r.status).toBe('warn');
+    expect(r.detail).toContain('1 file(s) parsed with errors');
+    expect(r.fix).toContain('tree-sitter');
+  });
+
+  it('reports a clean repository as clean', async () => {
+    const r = await checkParseHealth(withReport(null));
+    expect(r.status).toBe('ok');
+  });
+});
+
+describe('analyze renders the skip and exclusion breakdowns', () => {
+  // Kept as source guards ONLY because rendering runs deep inside `runAnalysis`; they are paired
+  // with the behavioral doctor tests above so the shared record has coverage on both sides.
+  const src = (rel: string): string => readFileSync(join(__dirname, '..', '..', rel), 'utf-8');
+
+  it('analyze renders the exclusion line, not merely imports the helper', () => {
+    const analyze = src('cli/commands/analyze.ts');
+    expect(analyze).toMatch(/const excludedNote = describeExclusions\(/);
+    expect(analyze).toMatch(/logger\.warning\(\s*`\$\{excludedNote\}/);
+  });
+
+  it('analyze renders the per-reason skip breakdown, not a bare count', () => {
+    const analyze = src('cli/commands/analyze.ts');
+    expect(analyze).toContain('skippedReasons');
+    expect(analyze).toMatch(/logger\.info\(\s*'Files skipped',\s*\n?\s*skipReasons\.length/);
   });
 });

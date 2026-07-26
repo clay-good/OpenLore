@@ -784,3 +784,51 @@ export const EXTRACTION_POOL_REQUEST_TIMEOUT_MS = 120_000;
  * cleanup into the hang the other deadlines exist to prevent.
  */
 export const EXTRACTION_POOL_TERMINATE_TIMEOUT_MS = 5_000;
+
+/**
+ * Wall-clock ceiling on the tree-sitter PARSE of ONE file (change:
+ * fix-analyze-native-abort-and-file-cost-budget).
+ *
+ * `MAX_READ_SIZE` bounds how much of a file is read; nothing bounded how long one file may
+ * be *worked on*. A 300 KB file of a repeated unterminated block-comment opener parses for
+ * 84 s and yields a 100,002-deep tree — measured, not hypothetical — and a minified bundle
+ * or generated client in an ordinary repository reaches the same path. So the parse itself
+ * is bounded, in-band: tree-sitter checks this deadline inside its own parse loop and
+ * returns no tree, which is the only bound that can actually interrupt a synchronous native
+ * parse (a `setTimeout` cannot preempt one, and terminating a worker mid-parse is what turns
+ * the failure into a process-level abort).
+ *
+ * Generous on purpose: it is a runaway bound, not a performance weight. The slowest file in
+ * this repository parses in well under a second, and the largest ordinary generated files
+ * measured (1.5 MB) stay far below it — so no real source file is affected, and any file that
+ * IS abandoned is disclosed with its elapsed time rather than silently dropped. Override with
+ * `OPENLORE_PARSE_BUDGET_MS`; `0` disables the bound entirely.
+ */
+export const PER_FILE_PARSE_BUDGET_MS = 20_000;
+
+/**
+ * Operator override for {@link PER_FILE_PARSE_BUDGET_MS}, in milliseconds. `0` disables the
+ * bound (restoring the pre-change unbounded behavior byte-for-byte).
+ */
+export const PARSE_BUDGET_ENV = 'OPENLORE_PARSE_BUDGET_MS';
+
+/**
+ * How long ONE file's extraction may run before the CLI names it in progress output. Purely a
+ * disclosure threshold — nothing is abandoned at this point — so a user waiting on a slow run
+ * can identify the responsible file without attaching a debugger. Well below
+ * {@link PER_FILE_PARSE_BUDGET_MS} so a file that will eventually be abandoned is named long
+ * before it is.
+ */
+export const SLOW_FILE_DISCLOSURE_MS = 5_000;
+
+/**
+ * Largest HTML file whose inline `<script>` blocks are extracted. Bounds the same-length
+ * char-array allocation in `extractHtmlScripts` (the scan itself is O(N)).
+ *
+ * Shared rather than local to the analyzer because the incremental watcher must apply the SAME
+ * bound: it re-derives a changed file's parse-health record, and without this it would clear a
+ * `size-cap` exclusion the full build had recorded — leaving `doctor` reporting a clean repository
+ * that the next `analyze` excludes a file from again (change:
+ * fix-analyze-native-abort-and-file-cost-budget).
+ */
+export const MAX_HTML_INLINE_SCRIPT_CHARS = 1_000_000;

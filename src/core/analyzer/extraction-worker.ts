@@ -31,6 +31,7 @@
 import { parentPort, workerData } from 'node:worker_threads';
 import { dispatchFileExtract } from './call-graph.js';
 import { logger } from '../../utils/logger.js';
+import { WORKER_FAULT_MESSAGE_PREFIX } from './extraction-pool.js';
 import type { ExtractionRequest, ExtractionResponse, ExtractionWorkerData } from './extraction-pool.js';
 
 /**
@@ -91,6 +92,51 @@ async function probeFailureReason(language: string | undefined): Promise<string 
   }
 }
 
+/**
+ * Convert the faults a plain `try`/`catch` around `dispatchFileExtract` cannot see into a
+ * structured per-file failure (change: fix-analyze-native-abort-and-file-cost-budget).
+ *
+ * The `catch` in the request handler covers a throw the extractor *returns through*. It does not
+ * cover a throw raised from a callback the native binding invoked, a rejection that escaped an
+ * un-awaited promise, or an error raised between turns — those reach the thread's top level, and
+ * a worker with no `uncaughtException` listener dies there. The parent notices (it listens for
+ * `error` and `exit`) but only as "the worker holding file N vanished", which costs the pool a
+ * worker and re-runs the file on the main thread — where, if the fault is deterministic, the same
+ * thing happens with no thread boundary left to absorb it.
+ *
+ * So the fault is answered for the file it happened on, with the marker that makes the parent
+ * record `worker-fault` rather than blaming the source. Then the thread retires: an
+ * `uncaughtException` means unknown state, and a worker that keeps serving from unknown state
+ * could return facts that are wrong rather than absent — which is the worse failure by this
+ * codebase's rules. Retiring is cheap; the parent already handles a worker leaving mid-run.
+ */
+function installFaultBoundaries(
+  peek: () => { id: number; path: string } | undefined,
+  clear: () => void,
+): void {
+  let retiring = false;
+  const onFault = (kind: string, err: unknown): void => {
+    if (retiring) return;
+    retiring = true;
+    const current = peek();
+    clear();
+    const detail = err instanceof Error ? err.message : String(err);
+    if (current) {
+      post({
+        type: 'failed',
+        id: current.id,
+        message: `${WORKER_FAULT_MESSAGE_PREFIX}: ${kind} while extracting ${current.path} — ${detail}`,
+      });
+    }
+    // Close the channel rather than `process.exit`: closing lets the queued `failed` message
+    // above actually flush, and the parent sees a clean `exit` it already knows how to handle.
+    // `process.exit` here would race the post and strip the file's attribution.
+    parentPort?.close();
+  };
+  process.on('uncaughtException', (err) => onFault('uncaught exception', err));
+  process.on('unhandledRejection', (reason) => onFault('unhandled rejection', reason));
+}
+
 async function main(): Promise<void> {
   // Serve only when this thread is an extraction worker THIS pool spawned. Importing this
   // module for its `PROBES` table (the probe-snippet guard test does) must never attach a
@@ -107,6 +153,12 @@ async function main(): Promise<void> {
     return;
   }
 
+  // The file this thread is currently working on. Read by the fault boundaries below so a fault
+  // can be attributed to a file rather than reaching the parent as an anonymous thread death.
+  let inFlight: { id: number; path: string } | undefined;
+
+  installFaultBoundaries(() => inFlight, () => { inFlight = undefined; });
+
   // Requests are served strictly one at a time: the parent never has more than one
   // in-flight file per worker, so no queueing or interleaving is needed here.
   parentPort.on('message', (raw: unknown) => {
@@ -118,6 +170,7 @@ async function main(): Promise<void> {
     }
     if (msg.type !== 'extract') return;
     void (async () => {
+      inFlight = { id: msg.id, path: msg.file.path };
       try {
         const value = await dispatchFileExtract(msg.file);
         post({ type: 'result', id: msg.id, value });
@@ -125,6 +178,8 @@ async function main(): Promise<void> {
         // Mirrors the serial lane: a throwing extractor is a parse failure for THIS file,
         // recorded as such by the parent — not a reason to fall back or retry.
         post({ type: 'failed', id: msg.id, message: (err as Error).message });
+      } finally {
+        inFlight = undefined;
       }
     })();
   });

@@ -11,6 +11,7 @@
 
 import type Parser from 'tree-sitter';
 import { detectLanguage } from './language-detection.js';
+import { parseWithBudget, type BudgetableParser } from './parse-budget.js';
 
 // ── Lazy parser singletons (one per language, created on first use) ─────────
 
@@ -181,7 +182,11 @@ export async function astChunkContent(
 
   let tree: Parser.Tree;
   try {
-    tree = parser.parse(content);
+    // Bounded like every other parse (change: fix-analyze-native-abort-and-file-cost-budget). This
+    // one only runs on content ALREADY over the chunk size, so it is exactly where a pathological
+    // file shows up; on the budget it falls through to the blank-line chunker below, which needs
+    // no grammar. Degraded chunking, never a stalled run.
+    tree = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, content);
   } catch {
     return blankLineChunk(content, maxChars, overlapLines);
   }

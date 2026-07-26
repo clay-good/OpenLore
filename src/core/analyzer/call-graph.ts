@@ -33,7 +33,15 @@ import { stableSymbolId, stableClassId } from '../scip/moniker.js';
 import { synthesizeTypeHierarchyEdges, type RawMethodCall } from './cha.js';
 import { logger } from '../../utils/logger.js';
 import { tallyFileStyle, type FileStyleRaw, type StyleAstNode } from './style-fingerprint.js';
-import { tallyParseHealth, type FileParseHealth, type ParseHealthNode } from './parse-health.js';
+import {
+  tallyParseHealth,
+  type FileParseHealth,
+  type FileExclusionReason,
+  type ParseHealthNode,
+} from './parse-health.js';
+// Per-file parse budget (change: fix-analyze-native-abort-and-file-cost-budget). Bounds the one
+// synchronous native call nothing else can interrupt.
+import { parseWithBudget, parseBudgetOverrunMs, parseBudgetMs, type BudgetableParser } from './parse-budget.js';
 // Pass-1 extraction lane (change: optimize-parallel-extraction-pool). The pool holds no
 // extraction logic of its own — it dispatches `dispatchFileExtract` to worker threads and
 // merges by input index, with the serial loop as both reference and fallback.
@@ -620,7 +628,7 @@ async function extractTSGraph(
   const r = await getTSParser();
   if (!r) return { nodes: [], rawEdges: [], cfg: new Map() };
   const { parser, lang } = r;
-  const tree = (parser as Parser).parse(content);
+  const tree = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, content);
 
   const fnQuery = new _NativeQuery!(lang as unknown as Parser.Language, TS_FN_QUERY);
   const callQuery = new _NativeQuery!(lang as unknown as Parser.Language, TS_CALL_QUERY);
@@ -805,7 +813,7 @@ async function extractPyGraph(
   const r = await getPyParser();
   if (!r) return { nodes: [], rawEdges: [], cfg: new Map() };
   const { parser, lang } = r;
-  const tree = (parser as Parser).parse(content);
+  const tree = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, content);
 
   const fnQuery = new _NativeQuery!(lang as unknown as Parser.Language, PY_FN_QUERY);
 
@@ -959,7 +967,7 @@ async function extractGoGraph(
   const r = await getGoParser();
   if (!r) return { nodes: [], rawEdges: [], cfg: new Map() };
   const { parser, lang } = r;
-  const tree = (parser as Parser).parse(content);
+  const tree = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, content);
 
   const fnQuery = new _NativeQuery!(lang as unknown as Parser.Language, GO_FN_QUERY);
   const callQuery = new _NativeQuery!(lang as unknown as Parser.Language, GO_CALL_QUERY);
@@ -1051,7 +1059,7 @@ async function extractRustGraph(
   const r = await getRustParser();
   if (!r) return { nodes: [], rawEdges: [], cfg: new Map() };
   const { parser, lang } = r;
-  const tree = (parser as Parser).parse(content);
+  const tree = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, content);
   const parseHealth = tallyParseHealth('', tree.rootNode as unknown as ParseHealthNode, filePath);
 
   const fnQuery = new _NativeQuery!(lang as unknown as Parser.Language, RUST_FN_QUERY);
@@ -1162,7 +1170,7 @@ async function extractRubyGraph(
   const r = await getRubyParser();
   if (!r) return { nodes: [], rawEdges: [], cfg: new Map() };
   const { parser, lang } = r;
-  const tree = (parser as Parser).parse(content);
+  const tree = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, content);
   const parseHealth = tallyParseHealth('', tree.rootNode as unknown as ParseHealthNode, filePath);
 
   const fnQuery = new _NativeQuery!(lang as unknown as Parser.Language, RUBY_FN_QUERY);
@@ -1368,7 +1376,7 @@ async function extractJavaGraph(
   const r = await getJavaParser();
   if (!r) return { nodes: [], rawEdges: [], cfg: new Map() };
   const { parser, lang } = r;
-  const tree = (parser as Parser).parse(content);
+  const tree = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, content);
   const parseHealth = tallyParseHealth('', tree.rootNode as unknown as ParseHealthNode, filePath);
 
   const fnQuery = new _NativeQuery!(lang as unknown as Parser.Language, JAVA_FN_QUERY);
@@ -1499,7 +1507,7 @@ async function extractCppGraph(
   const r = await getCppParser();
   if (!r) return { nodes: [], rawEdges: [], cfg: new Map() };
   const { parser, lang } = r;
-  const tree = (parser as Parser).parse(content);
+  const tree = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, content);
   const parseHealth = tallyParseHealth('', tree.rootNode as unknown as ParseHealthNode, filePath);
 
   const nodes: FunctionNode[] = [];
@@ -1634,7 +1642,7 @@ async function extractSwiftGraph(
   const r = await getSwiftParser();
   if (!r) return { nodes: [], rawEdges: [] };
   const { parser, lang } = r;
-  const tree = (parser as Parser).parse(content);
+  const tree = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, content);
   const parseHealth = tallyParseHealth('', tree.rootNode as unknown as ParseHealthNode, filePath);
 
   const fnQuery = new _NativeQuery!(lang as unknown as Parser.Language, SWIFT_FN_QUERY);
@@ -1794,7 +1802,7 @@ async function loadGrammarSoft(
     parser.setLanguage(lang as unknown as Parser.Language);
     const handle: GrammarHandle = {
       withTree: (content, fn) => {
-        const tree = (parser as Parser).parse(content);
+        const tree = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, content);
         const root = tree.rootNode as unknown as TsNodeLike;
         const runQuery = (src: string): TsMatch[] => {
           if (!_NativeQuery) return [];
@@ -1858,7 +1866,16 @@ async function loadWasmGrammarSoft(
         // parse tree in WASM heap, which corrupts the next parse if not freed.
         const p = new ParserCtor() as { setLanguage(l: unknown): void; parse(s: string): { rootNode: TsNodeLike; delete?: () => void }; delete?: () => void };
         p.setLanguage(lang);
-        const tree = p.parse(content);
+        // The budget applies here only if this web-tree-sitter build exposes the deadline; it is
+        // feature-detected, never assumed. A throw (budget or otherwise) must still free the WASM
+        // parser — the tree/query disposal below cannot run if `tree` was never assigned.
+        let tree: { rootNode: TsNodeLike; delete?: () => void };
+        try {
+          tree = parseWithBudget(p as unknown as BudgetableParser<{ rootNode: TsNodeLike; delete?: () => void }>, content);
+        } catch (err) {
+          p.delete?.();
+          throw err;
+        }
         const queries: Array<{ delete?: () => void }> = [];
         const runQuery = (src: string): TsMatch[] => {
           try {
@@ -2346,6 +2363,14 @@ async function extractElixirGraph(
  */
 async function extractClassRelationships(
   files: Array<{ path: string; content: string; language: string }>,
+  /**
+   * Collects files this pass abandoned at the parse budget (change:
+   * fix-analyze-native-abort-and-file-cost-budget). A file can squeak under the budget in Pass 1
+   * and overrun HERE — the per-file `catch` below would then drop its inheritance data with no
+   * record anywhere, which is the silent loss this change exists to prevent. Reported so the
+   * builder can record it like any other exclusion.
+   */
+  budgetExceeded?: Set<string>,
 ): Promise<Map<string, { parentClasses: string[]; interfaces: string[] }>> {
   const out = new Map<string, { parentClasses: string[]; interfaces: string[] }>();
 
@@ -2369,7 +2394,7 @@ async function extractClassRelationships(
         const r = await getTSParser();
         if (!r) continue;
         const { parser, lang } = r;
-        const tree = (parser as Parser).parse(file.content);
+        const tree = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, file.content);
 
         // class Foo extends Bar implements Baz, Qux
         const EXTENDS_Q = `
@@ -2396,7 +2421,7 @@ async function extractClassRelationships(
         const r = await getPyParser();
         if (!r) continue;
         const { parser, lang } = r;
-        const tree = (parser as Parser).parse(file.content);
+        const tree = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, file.content);
 
         // class Foo(Bar, Baz):
         const Q = `
@@ -2413,7 +2438,7 @@ async function extractClassRelationships(
         const r = await getJavaParser();
         if (!r) continue;
         const { parser, lang } = r;
-        const tree = (parser as Parser).parse(file.content);
+        const tree = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, file.content);
 
         const EXTENDS_Q = `
           (class_declaration
@@ -2439,7 +2464,7 @@ async function extractClassRelationships(
         const r = await getCppParser();
         if (!r) continue;
         const { parser, lang } = r;
-        const tree = (parser as Parser).parse(file.content);
+        const tree = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, file.content);
 
         // class Foo : public Bar
         const Q = `
@@ -2456,7 +2481,7 @@ async function extractClassRelationships(
         const r = await getCSharpParser();
         if (!r) continue;
         const { parser, lang } = r;
-        const tree = (parser as Parser).parse(file.content);
+        const tree = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, file.content);
 
         // C# `class D : B, IFoo, IBar<T>` / `interface I : IBase` — the base_list holds
         // the base class AND interfaces with no syntactic distinction. Capture every
@@ -2481,7 +2506,7 @@ async function extractClassRelationships(
         const r = await getKotlinParser();
         if (!r) continue;
         const { parser, lang } = r;
-        const tree = (parser as Parser).parse(file.content);
+        const tree = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, file.content);
 
         // Kotlin `class C : Base(), IFace` — every supertype is a `delegation_specifier`
         // with no syntactic class/interface distinction (a superclass may carry a
@@ -2507,7 +2532,7 @@ async function extractClassRelationships(
         const r = await getPhpParser();
         if (!r) continue;
         const { parser, lang } = r;
-        const tree = (parser as Parser).parse(file.content);
+        const tree = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, file.content);
 
         // PHP distinguishes `extends` (base_clause, one parent) from `implements`
         // (class_interface_clause, many interfaces).
@@ -2528,7 +2553,7 @@ async function extractClassRelationships(
         const r = await getSwiftParser();
         if (!r) continue;
         const { parser, lang } = r;
-        const tree = (parser as Parser).parse(file.content);
+        const tree = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, file.content);
 
         // Swift `class C: Base, Proto` — every supertype/protocol is an
         // `inheritance_specifier` with no syntactic distinction. (class_declaration in
@@ -2550,7 +2575,7 @@ async function extractClassRelationships(
         const r = await getScalaParser();
         if (!r) continue;
         const { parser, lang } = r;
-        const tree = (parser as Parser).parse(file.content);
+        const tree = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, file.content);
 
         // Scala `class C extends Base with Trait` — the superclass and every mixed-in
         // trait sit in one `extends_clause`. Treat each as a subtype edge.
@@ -2567,7 +2592,7 @@ async function extractClassRelationships(
         const r = await getRubyParser();
         if (!r) continue;
         const { parser, lang } = r;
-        const tree = (parser as Parser).parse(file.content);
+        const tree = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, file.content);
 
         // class Foo < Bar
         const Q = `
@@ -2585,7 +2610,7 @@ async function extractClassRelationships(
         const r = await getGoParser();
         if (!r) continue;
         const { parser, lang } = r;
-        const tree = (parser as Parser).parse(file.content);
+        const tree = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, file.content);
 
         // An EMBEDDED field is an ANONYMOUS field (a type with no field name):
         // `type Foo struct { Bar }` or `{ *Bar }`. A NAMED field `Name Bar` is NOT an
@@ -2622,8 +2647,13 @@ async function extractClassRelationships(
         }
       }
       // Rust: trait impls are structural but less like OOP inheritance; skip for now
-    } catch {
-      // Best-effort; skip unparseable files
+    } catch (err) {
+      // Best-effort; skip unparseable files — but a file abandoned at the BUDGET is reported, not
+      // swallowed. "We ran out of time on this file" and "the grammar rejected it" call for
+      // different actions, and only one of them used to leave any trace.
+      if (parseBudgetOverrunMs((err as Error | undefined)?.message) !== undefined) {
+        budgetExceeded?.add(file.path);
+      }
     }
   }
 
@@ -3537,7 +3567,7 @@ async function synthesizeEventChannelEdges(
       const { parser } = r;
       const sites: EventSites = { registrations: [], dispatches: [] };
       for (const file of tsFiles) {
-        try { collectTsEventSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
+        try { collectTsEventSites(parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
         catch { /* skip unparseable file */ }
       }
       edges.push(...pairAndEmitEventEdges(sites, allNodes, 'event-channel'));
@@ -3551,7 +3581,7 @@ async function synthesizeEventChannelEdges(
       const { parser } = r;
       const sites: EventSites = { registrations: [], dispatches: [] };
       for (const file of pyFiles) {
-        try { collectPyEventSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
+        try { collectPyEventSites(parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
         catch { /* skip unparseable file */ }
       }
       edges.push(...pairAndEmitEventEdges(sites, allNodes, 'event-channel'));
@@ -3565,7 +3595,7 @@ async function synthesizeEventChannelEdges(
       const { parser } = r;
       const sites: EventSites = { registrations: [], dispatches: [] };
       for (const file of rubyFiles) {
-        try { collectRubyEventSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
+        try { collectRubyEventSites(parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
         catch { /* skip unparseable file */ }
       }
       edges.push(...pairAndEmitEventEdges(sites, allNodes, 'event-channel'));
@@ -3579,7 +3609,7 @@ async function synthesizeEventChannelEdges(
       const { parser } = r;
       const sites: EventSites = { registrations: [], dispatches: [] };
       for (const file of phpFiles) {
-        try { collectPhpEventSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
+        try { collectPhpEventSites(parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
         catch { /* skip unparseable file */ }
       }
       edges.push(...pairAndEmitEventEdges(sites, allNodes, 'event-channel'));
@@ -3594,7 +3624,7 @@ async function synthesizeEventChannelEdges(
       const { parser } = r;
       const sites: EventSites = { registrations: [], dispatches: [] };
       for (const file of javaFiles) {
-        try { collectJavaTypeEventSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
+        try { collectJavaTypeEventSites(parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
         catch { /* skip unparseable file */ }
       }
       edges.push(...pairAndEmitEventEdges(sites, allNodes, 'type-event'));
@@ -3608,7 +3638,7 @@ async function synthesizeEventChannelEdges(
       const { parser } = r;
       const sites: EventSites = { registrations: [], dispatches: [] };
       for (const file of csFiles) {
-        try { collectCSharpTypeEventSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
+        try { collectCSharpTypeEventSites(parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
         catch { /* skip unparseable file */ }
       }
       edges.push(...pairAndEmitEventEdges(sites, allNodes, 'type-event'));
@@ -3622,7 +3652,7 @@ async function synthesizeEventChannelEdges(
       const { parser } = r;
       const sites: EventSites = { registrations: [], dispatches: [] };
       for (const file of ktFiles) {
-        try { collectKotlinTypeEventSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
+        try { collectKotlinTypeEventSites(parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
         catch { /* skip unparseable file */ }
       }
       edges.push(...pairAndEmitEventEdges(sites, allNodes, 'type-event'));
@@ -3636,7 +3666,7 @@ async function synthesizeEventChannelEdges(
       const { parser } = r;
       const sites: EventSites = { registrations: [], dispatches: [] };
       for (const file of swiftFiles) {
-        try { collectSwiftEventSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
+        try { collectSwiftEventSites(parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
         catch { /* skip unparseable file */ }
       }
       edges.push(...pairAndEmitEventEdges(sites, allNodes, 'event-channel'));
@@ -3834,7 +3864,7 @@ async function synthesizeCallbackRegistrationEdges(
     if (r) {
       const { parser } = r;
       for (const file of tsFiles) {
-        try { collectTsCallbackEdges((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, out, seen); }
+        try { collectTsCallbackEdges(parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, out, seen); }
         catch { /* skip */ }
       }
     }
@@ -3846,7 +3876,7 @@ async function synthesizeCallbackRegistrationEdges(
     if (r) {
       const { parser } = r;
       for (const file of goFiles) {
-        try { collectGoCallbackEdges((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, out, seen); }
+        try { collectGoCallbackEdges(parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, out, seen); }
         catch { /* skip */ }
       }
     }
@@ -3858,7 +3888,7 @@ async function synthesizeCallbackRegistrationEdges(
     if (r) {
       const { parser } = r;
       for (const file of cppFiles) {
-        try { collectCppCallbackEdges((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, out, seen); }
+        try { collectCppCallbackEdges(parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, out, seen); }
         catch { /* skip */ }
       }
     }
@@ -3937,7 +3967,7 @@ async function synthesizeActorMessageEdges(
   const { parser } = r;
   const sites: EventSites = { registrations: [], dispatches: [] };
   for (const file of exFiles) {
-    try { collectElixirActorSites((parser as Parser).parse(file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
+    try { collectElixirActorSites(parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
     catch { /* skip */ }
   }
   return pairAndEmitEventEdges(sites, allNodes, 'actor-message');
@@ -4151,6 +4181,18 @@ export class CallGraphBuilder {
         // extraction worker crossed a structured-clone boundary, so its class, `code`, and
         // stack did not survive — an `instanceof`/`.code` check added below would behave
         // differently on the two lanes (change: optimize-parallel-extraction-pool).
+        //
+        // Which is exactly why the one cause that IS distinguishable from a message is read off it
+        // (change: fix-analyze-native-abort-and-file-cost-budget): a file abandoned at the parse
+        // budget carries its own reason and its elapsed time, rather than being flattened into a
+        // generic parse failure. Anything else stays `parse-failure` — a cause we cannot prove is
+        // never guessed at. A worker fault never reaches here: the pool routes that file to the
+        // main thread instead, so this message is always the main thread's own verdict.
+        const message = (error as Error | undefined)?.message;
+        const overrunBudgetMs = parseBudgetOverrunMs(message);
+        const exclusion: FileExclusionReason = overrunBudgetMs !== undefined
+          ? 'budget-exceeded'
+          : 'parse-failure';
         parseHealthByFile.set(file.path, {
           filePath: file.path,
           language: file.language,
@@ -4158,12 +4200,40 @@ export class CallGraphBuilder {
           missingCount: 0,
           errorLines: [],
           parseFailed: true,
+          exclusion,
+          ...(overrunBudgetMs !== undefined ? { budgetMs: overrunBudgetMs } : {}),
         });
         if (process.env.DEBUG) {
           console.debug(`[call-graph] Failed to parse ${file.path}: ${(error as Error).message}`);
         }
       }
     }
+
+    // A file abandoned at the parse budget contributed nothing to Pass 1, and several later passes
+    // RE-PARSE the same content (class relationships, and the event/callback/route/actor
+    // synthesizers). Left in, each would spend the whole budget on it again — the cost is per PASS,
+    // not per file, which is how one 300 KB file turned a 20 s bound into a 92 s build. Dropping it
+    // from those passes costs nothing in facts: its parse cannot complete there either, so it would
+    // contribute exactly the same nothing, only slower.
+    //
+    // This filter is deliberately NOT applied to `buildResolvedImportMap`. That pass is a REGEX
+    // scan (`parseJSExports`), not a parse — it reads a file tree-sitter gave up on perfectly well,
+    // and the parse budget was never what bounded it. An earlier revision of this change did filter
+    // it, and an adversarial review reproduced the consequence: a re-export barrel abandoned at the
+    // budget silently dropped `re_export` edges belonging to OTHER, perfectly-parsed files, which
+    // then resolved by name only or not at all. The loss landed on files carrying no parse-health
+    // record, so nothing connected the missing edge to the abandoned file — the exact
+    // absence-read-as-evidence-of-absence failure this change exists to prevent. Correctness over
+    // the few seconds it saves.
+    //
+    // When nothing was abandoned this is the same array, so ordinary runs are byte-identical
+    // (change: fix-analyze-native-abort-and-file-cost-budget).
+    const abandonedPaths = new Set(
+      [...parseHealthByFile.values()].filter(h => h.exclusion === 'budget-exceeded').map(h => h.filePath),
+    );
+    const reparsableFiles = abandonedPaths.size > 0
+      ? files.filter(f => !abandonedPaths.has(f.path))
+      : files;
 
     const pass1Cache: Pass1CacheDisclosure | undefined = cache
       ? {
@@ -4204,12 +4274,32 @@ export class CallGraphBuilder {
     // Reused for base-class resolution (Pass 7) below.
     const { map: callImportMap, reExported: reExportedNames } = importMap
       ? { map: importMap, reExported: new Set<string>() }
+      // NOT `reparsableFiles` — see the note there. This is a regex scan, and an abandoned file's
+      // exports are still readable and still load-bearing for OTHER files' resolution.
       : buildResolvedImportMap(files);
 
     // Class inheritance (`filePath::ClassName` → parent simple-names), computed once
     // here so the resolution loop can resolve `this.m()` / `super.m()` against the
     // enclosing class AND its ancestors, and reused for the Pass 7 hierarchy build.
-    const relationships = await extractClassRelationships(files);
+    // A file can pass Pass 1 under the budget and overrun HERE; that loss is recorded below
+    // rather than dropped (change: fix-analyze-native-abort-and-file-cost-budget).
+    const lateBudgetExceeded = new Set<string>();
+    const relationships = await extractClassRelationships(reparsableFiles, lateBudgetExceeded);
+    for (const path of lateBudgetExceeded) {
+      if (parseHealthByFile.has(path)) continue; // already recorded by Pass 1
+      const language = files.find(f => f.path === path)?.language ?? 'unknown';
+      parseHealthByFile.set(path, {
+        filePath: path,
+        language,
+        errorCount: 0,
+        missingCount: 0,
+        errorLines: [],
+        // NOT `parseFailed`: Pass 1 extracted this file fine. What was lost is its inheritance
+        // data, so its symbols are present but its class hierarchy is a lower bound.
+        exclusion: 'budget-exceeded',
+        budgetMs: parseBudgetMs(),
+      });
+    }
 
     /** Resolve an intra-object method call (`this.m()` / `self.m()` / `super.m()`) to
      *  a concrete indexed method by walking the enclosing class chain. For `this`/
@@ -4590,7 +4680,7 @@ export class CallGraphBuilder {
         if (inFile) return inFile;
         return candidates.length === 1 ? candidates[0] : undefined;
       };
-      edges.push(...await synthesizeDynamicDispatchEdges(files, allNodes, resolveHandler));
+      edges.push(...await synthesizeDynamicDispatchEdges(reparsableFiles, allNodes, resolveHandler));
     } catch {
       // Synthesis is best-effort; a failure must never abort the build.
     }

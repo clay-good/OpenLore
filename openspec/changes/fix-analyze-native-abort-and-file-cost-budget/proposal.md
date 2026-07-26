@@ -1,6 +1,6 @@
 # Analyze must not die of a native abort, and no single file may cost unbounded time
 
-> Status: PROPOSED (2026-07-26). Found by an adversarial end-to-end pass against a 622-file hostile
+> Status: **BUILT** (2026-07-26). Found by an adversarial end-to-end pass against a 622-file hostile
 > repository, then isolated to a 601-file minimal reproducer and **verified against an `origin/main`
 > build** — both failures predate the security-hardening work in PR #292 and are not regressions
 > from it. Deterministic, no LLM, no new dependency.
@@ -35,13 +35,17 @@ tool whose contract is that a quiet result means "nothing there" rather than "we
 | The 600 files without it | exit 0, 14 s |
 | The full hostile repo minus that file | exit 0, 424 s |
 
-So it requires the parallel extraction pool (`extraction-pool.ts`, change
-`add-parallel-extraction-pool`) to be engaged: a worker raises a `Napi::Error` that no boundary
-catches, and the process aborts rather than the pool degrading that one file.
+**Root cause, isolated during the build (this replaces the guess above).** The payload parses into a
+right-leaning chain **100,002 nodes deep**, and `tallyParseHealth` — which runs precisely on trees
+that carry errors — walked it recursively. It exhausts the stack, and the `RangeError` is raised
+while executing inside `unmarshalNode` / `new SyntaxNode`, i.e. inside the native binding. A throw
+raised in a native frame is not catchable as a JavaScript error; it becomes the C++ exception that
+`libc++abi` aborts on. The extraction pool is implicated only because a worker's stack is where it
+lands first — the same overflow is reachable on the main thread.
 
-The pool already has the right instinct elsewhere — its own guard comments describe never trusting
-"an unproven silence OR error" — but a native exception thrown across the worker boundary bypasses
-the JavaScript `try`/`catch` that would otherwise contain it.
+That makes the fix structural rather than probabilistic: the walk is iterative (depth stops being a
+correctness cliff), and the parse is bounded in-band so a 100,000-deep tree is never built in the
+first place.
 
 ### 2. One file can consume unbounded wall-clock, with no budget and no progress
 

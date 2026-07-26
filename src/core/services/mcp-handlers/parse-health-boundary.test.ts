@@ -64,3 +64,42 @@ describe('parseHealthBoundary', () => {
     expect(note).toContain('1 file');
   });
 });
+
+describe('boundary text names WHY a file was excluded (change: fix-analyze-native-abort-and-file-cost-budget)', () => {
+  const report = (files: ParseHealthReport['files']): ParseHealthReport => ({
+    version: 1, totalDegradedFiles: files.length, totalErrorRegions: 0, byLanguage: [], topFiles: files, files,
+  });
+
+  it('reports a budget-exceeded file with its elapsed time, not as a generic parse failure', () => {
+    // "parse failed" and "we gave up after 20 seconds" call for different actions from the reader,
+    // so a conclusion built over the file must say which one happened.
+    const text = parseHealthBoundary(report([{
+      filePath: 'src/vendor.js', language: 'JavaScript', errorCount: 0, missingCount: 0, errorLines: [],
+      parseFailed: true, exclusion: 'budget-exceeded', budgetMs: 20_000,
+    }]), ['src/vendor.js']);
+    expect(text).toContain('LOWER BOUND');
+    expect(text).toContain('abandoned at the per-file parse budget');
+    expect(text).toContain('of 20.0s');
+    expect(text).not.toContain('parse failed —');
+  });
+
+  it('still describes an ordinary parse failure the way it always did', () => {
+    const text = parseHealthBoundary(report([{
+      filePath: 'src/broken.ts', language: 'TypeScript', errorCount: 0, missingCount: 0, errorLines: [],
+      parseFailed: true,
+    }]), ['src/broken.ts']);
+    expect(text).toContain('parse failed — contributed no symbols');
+  });
+
+  it('echoes an exclusion reason it has no label for, rather than rendering "undefined"', () => {
+    // The record comes off disk and may have been written by a newer OpenLore. A boundary that
+    // reads "src/x.ts (undefined)" would be worse than one naming a reason this build cannot
+    // explain.
+    const text = parseHealthBoundary(report([{
+      filePath: 'src/x.ts', language: 'TypeScript', errorCount: 0, missingCount: 0, errorLines: [],
+      exclusion: 'reason-from-the-future' as never,
+    }]), ['src/x.ts']);
+    expect(text).toContain('reason-from-the-future');
+    expect(text).not.toContain('undefined');
+  });
+});

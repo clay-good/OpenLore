@@ -53,8 +53,11 @@ import {
   EXTRACTION_POOL_STARTUP_TIMEOUT_MS,
   EXTRACTION_POOL_REQUEST_TIMEOUT_MS,
   EXTRACTION_POOL_TERMINATE_TIMEOUT_MS,
+  SLOW_FILE_DISCLOSURE_MS,
 } from '../../constants.js';
 import { logger } from '../../utils/logger.js';
+import { sanitizeForTerminal } from '../../utils/misc.js';
+import { parseBudgetOverrunMs } from './parse-budget.js';
 
 /** One Pass-1 input record — the same shape `CallGraphBuilder.build` receives. */
 export interface ExtractionFile {
@@ -110,6 +113,38 @@ export interface ExtractionLaneDisclosure {
    * degradation: the cost of never trusting an unproven worker. See {@link runPooled}.
    */
   unprovenRechecks: number;
+  /**
+   * Files whose extraction took longer than {@link SLOW_FILE_DISCLOSURE_MS}, with their elapsed
+   * time — sorted slowest first and bounded (change: fix-analyze-native-abort-and-file-cost-budget).
+   *
+   * Attribution, not degradation: these files were extracted normally. Before this existed, a run
+   * that sat for minutes gave no way to learn WHICH file was responsible short of attaching a
+   * debugger. Empty on an ordinary run, so nothing is printed when there is nothing to say.
+   */
+  slowFiles: Array<{ path: string; ms: number }>;
+}
+
+/** How many slow files the disclosure retains. A bound on the payload, not on the measurement. */
+const SLOW_FILE_DISCLOSURE_CAP = 5;
+
+/**
+ * Keep the slowest {@link SLOW_FILE_DISCLOSURE_CAP} entries, slowest first, path-tiebroken.
+ *
+ * Deduplicated by path, keeping the worst time. One file can be timed TWICE — once in a worker and
+ * again on the main thread when the pool hands it back (a worker fault, an unproven language, a
+ * dead worker) — and listing it twice would spend two of the five slots on one file and silently
+ * evict genuinely distinct slow files, which is the opposite of the attribution this exists for.
+ */
+export function boundSlowFiles(slow: Array<{ path: string; ms: number }>): Array<{ path: string; ms: number }> {
+  const worstByPath = new Map<string, number>();
+  for (const { path, ms } of slow) {
+    const prev = worstByPath.get(path);
+    if (prev === undefined || ms > prev) worstByPath.set(path, ms);
+  }
+  return [...worstByPath]
+    .map(([path, ms]) => ({ path, ms }))
+    .sort((a, b) => b.ms - a.ms || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
+    .slice(0, SLOW_FILE_DISCLOSURE_CAP);
 }
 
 /**
@@ -172,6 +207,22 @@ export type ExtractionResponse =
 
 /** Set to `1`/`true` to force the serial lane (the documented escape hatch). */
 const NO_WORKERS_ENV = 'OPENLORE_NO_WORKERS';
+
+/**
+ * Stable prefix on the message of a per-file failure caused by a WORKER FAULT rather than by the
+ * file itself (change: fix-analyze-native-abort-and-file-cost-budget).
+ *
+ * A throw crossing the `worker_threads` boundary is structured-cloned, so only its message
+ * survives — the same constraint that makes the parse-budget signal message-keyed. This prefix is
+ * what lets the builder record `worker-fault` instead of blaming the source file for a defect in
+ * the thread that was reading it.
+ */
+export const WORKER_FAULT_MESSAGE_PREFIX = 'openlore:extraction-worker-fault';
+
+/** Read a failure message as a worker fault. Any other message is not one. */
+export function isWorkerFaultMessage(message: string | undefined): boolean {
+  return !!message && message.startsWith(WORKER_FAULT_MESSAGE_PREFIX);
+}
 
 /** Resolved worker entry: the module a worker loads, plus any exec args it needs. */
 export interface ResolvedWorkerEntry {
@@ -282,12 +333,14 @@ export async function extractFilesForPass1<T>(
     disclosure: ExtractionLaneDisclosure;
   }> => {
     const outcomes: Array<ExtractOutcome<T>> = [];
-    for (const file of files) outcomes.push(await runSerial(file, serialExtract));
+    const slow: Array<{ path: string; ms: number }> = [];
+    for (const file of files) outcomes.push(await runSerial(file, serialExtract, slow));
     return {
       outcomes,
       disclosure: {
         lane: 'serial', poolSize: 0, serialReason: reason,
         workerFallbackFiles: [], laneDefectFiles: [], unprovenRechecks: 0,
+        slowFiles: boundSlowFiles(slow),
       },
     };
   };
@@ -338,14 +391,28 @@ function dominantLanguage(files: ExtractionFile[]): string | undefined {
   return best;
 }
 
+/**
+ * Run one file on the main thread, recording it in `slow` when it takes longer than
+ * {@link SLOW_FILE_DISCLOSURE_MS}.
+ *
+ * The measurement is taken AROUND the extraction, not by a timer: a main-thread parse is one
+ * synchronous native call, so no timer scheduled here could fire while it runs. That is why the
+ * serial lane names a slow file once it finishes rather than while it is running — and with the
+ * per-file parse budget in place, "once it finishes" is now bounded.
+ */
 async function runSerial<T>(
   file: ExtractionFile,
   serialExtract: (file: ExtractionFile) => Promise<T | undefined>,
+  slow?: Array<{ path: string; ms: number }>,
 ): Promise<ExtractOutcome<T>> {
+  const startedAt = Date.now();
   try {
     return { status: 'ok', value: await serialExtract(file) };
   } catch (error) {
     return { status: 'error', error };
+  } finally {
+    const ms = Date.now() - startedAt;
+    if (slow && ms >= SLOW_FILE_DISCLOSURE_MS) slow.push({ path: file.path, ms });
   }
 }
 
@@ -417,6 +484,8 @@ async function runPooled<T>(
   let sawStartupTimeout = false;
   /** Grammar-unavailable warnings relayed from workers, deduped across the pool. */
   const relayedWarnings = new Set<string>();
+  /** Files that took longer than the disclosure threshold, on either lane. */
+  const slow: Array<{ path: string; ms: number }> = [];
 
   const runOne = async (): Promise<void> => {
     let worker: ExtractionWorkerHandle;
@@ -486,7 +555,16 @@ async function runPooled<T>(
         else p.resolve({ status: 'error', error: new Error(msg.message) });
       });
       worker.on('error', (err) => die(err instanceof Error ? err : new Error(String(err))));
-      worker.on('exit', () => die(deadReason ?? new Error('extraction worker exited')));
+      // A non-zero exit code is named, so the file that fell to the main thread is attributable
+      // to a worker that died rather than to an unexplained gap. An already-recorded cause wins:
+      // it is the more specific one.
+      worker.on('exit', (code) => die(
+        deadReason ?? new Error(
+          typeof code === 'number' && code !== 0
+            ? `extraction worker exited with code ${code}`
+            : 'extraction worker exited',
+        ),
+      ));
     } catch (err) {
       await terminateQuietly(worker);
       release();
@@ -523,14 +601,40 @@ async function runPooled<T>(
         cursor = index + 1;
         const file = files[index];
         let outcome: ExtractOutcome<T>;
+        const startedAt = Date.now();
         try {
-          outcome = await requestExtract<T>(worker, index, file, (p) => { pending = p; });
+          outcome = await requestExtract<T>(worker, index, file, (p) => { pending = p; }, slow);
         } catch {
           // The worker died (or wedged past its deadline) holding this file. Leave the slot
           // for the main thread and stop feeding this worker.
           unfilled[index] = 'worker-died';
           break;
         }
+        {
+          const ms = Date.now() - startedAt;
+          if (ms >= SLOW_FILE_DISCLOSURE_MS) slow.push({ path: file.path, ms });
+        }
+        // A fault INSIDE the thread is evidence about the worker, not about the file — so it is
+        // never trusted as this file's answer, proven language or not, and the main thread (the
+        // reference implementation) extracts it instead (change:
+        // fix-analyze-native-abort-and-file-cost-budget). Recording the file as failed here would
+        // blame the source for a defect in the thread that was reading it.
+        if (outcome.status === 'error' && isWorkerFaultMessage((outcome.error as Error | undefined)?.message)) {
+          unfilled[index] = 'worker-died';
+          // BREAK, not continue — this worker is gone. Its fault boundary closes the message
+          // channel right after answering, so every later `postMessage` to it is a silent no-op:
+          // continuing would claim the next index off the shared cursor, get no reply, and either
+          // steal that file from a healthy sibling (measured) or stall the lane for the full
+          // request timeout. Matches how every other worker-death path exits this loop.
+          break;
+        }
+        // A file abandoned at the PARSE BUDGET is a property of the file, not of the worker, and
+        // the main thread would spend the identical budget reaching the identical nothing. Trust
+        // it — the unproven-language recheck below must not turn one bound into two (change:
+        // fix-analyze-native-abort-and-file-cost-budget). It is still recorded and disclosed by
+        // the builder, exactly as a serial-lane overrun is.
+        const budgetOverrun = outcome.status === 'error'
+          && parseBudgetOverrunMs((outcome.error as Error | undefined)?.message) !== undefined;
         // A worker that cannot handle a language reports it two ways, and BOTH are
         // indistinguishable from a real answer: an empty result (the core binding failed to
         // load) or a throw (the per-language grammar `import` failed — those loads are not
@@ -541,7 +645,7 @@ async function runPooled<T>(
           && !isEmptyResult(outcome.value);
         if (producedFacts) {
           proven.add(file.language);
-        } else if (outcome.status !== 'ok' || isEmptyResult(outcome.value)) {
+        } else if (!budgetOverrun && (outcome.status !== 'ok' || isEmptyResult(outcome.value))) {
           if (!proven.has(file.language)) {
             unfilled[index] = 'unproven';
             continue;
@@ -575,7 +679,7 @@ async function runPooled<T>(
     // A slot with no recorded reason belongs to a file no worker ever claimed (every
     // worker died first) — the same situation as a worker dying while holding it.
     const reason = unfilled[i] ?? 'worker-died';
-    const outcome = await runSerial(files[i], serialExtract);
+    const outcome = await runSerial(files[i], serialExtract, slow);
     if (reason === 'worker-died') {
       workerFallbackFiles.push(files[i].path);
     } else {
@@ -592,7 +696,10 @@ async function runPooled<T>(
 
   return {
     outcomes: slots as Array<ExtractOutcome<T>>,
-    disclosure: { lane: 'pooled', poolSize: started, workerFallbackFiles, laneDefectFiles, unprovenRechecks },
+    disclosure: {
+      lane: 'pooled', poolSize: started, workerFallbackFiles, laneDefectFiles, unprovenRechecks,
+      slowFiles: boundSlowFiles(slow),
+    },
   };
 }
 
@@ -608,13 +715,37 @@ function requestExtract<T>(
   index: number,
   file: ExtractionFile,
   arm: (pending: { id: number; resolve: (v: ExtractOutcome<T>) => void; reject: (e: Error) => void }) => void,
+  slow?: Array<{ path: string; ms: number }>,
 ): Promise<ExtractOutcome<T>> {
   return new Promise<ExtractOutcome<T>>((resolve, reject) => {
     const timer = setTimeout(() => {
       reject(new Error(`extraction worker did not answer for ${file.path} within ${EXTRACTION_POOL_REQUEST_TIMEOUT_MS}ms`));
     }, EXTRACTION_POOL_REQUEST_TIMEOUT_MS);
     timer.unref?.();
-    const settle = <R>(fn: (v: R) => void) => (v: R): void => { clearTimeout(timer); fn(v); };
+    // Live attribution: the parse runs in the WORKER, so unlike the serial lane this parent-side
+    // timer really does fire while the file is still being worked on — which is what lets the user
+    // see the responsible path before the run ends rather than after. Warning only; nothing is
+    // abandoned here (that is the parse budget's job). Only armed when the caller is collecting.
+    //
+    // Written straight to stderr rather than through `logger`, whose non-error levels go to
+    // STDOUT — and `build()` also runs inside `openlore mcp`, whose stdout carries JSON-RPC
+    // frames. This is the module's "nothing here writes to stdout" rule, and a per-file line is
+    // exactly the frequency at which breaking it would corrupt the protocol. The path comes from
+    // the analyzed repository, so it is sanitized before it reaches a terminal.
+    const slowTimer = slow
+      ? setTimeout(() => {
+          process.stderr.write(
+            `[warn] still extracting ${sanitizeForTerminal(file.path)} `
+            + `after ${Math.round(SLOW_FILE_DISCLOSURE_MS / 1000)}s\n`,
+          );
+        }, SLOW_FILE_DISCLOSURE_MS)
+      : undefined;
+    slowTimer?.unref?.();
+    const settle = <R>(fn: (v: R) => void) => (v: R): void => {
+      clearTimeout(timer);
+      if (slowTimer) clearTimeout(slowTimer);
+      fn(v);
+    };
     arm({ id: index, resolve: settle(resolve), reject: settle(reject) });
     worker.postMessage({ type: 'extract', id: index, file } satisfies ExtractionRequest);
   });
@@ -652,6 +783,14 @@ async function terminateQuietly(worker: ExtractionWorkerHandle): Promise<void> {
  * means analysis was slower than it should have been — never that it was less complete.
  */
 export function describeExtractionLane(d: ExtractionLaneDisclosure): string | undefined {
+  // Attribution for a slow run, on either lane. Not a degradation — these files were extracted
+  // normally — but it is the answer to "why did that take so long", which previously had none.
+  const slowNote = d.slowFiles.length > 0
+    ? `slowest file(s) to extract: ${d.slowFiles.map(s => `${s.path} (${(s.ms / 1000).toFixed(1)}s)`).join(', ')}`
+    : undefined;
+  const withSlow = (note: string | undefined): string | undefined =>
+    note && slowNote ? `${note}; ${slowNote}` : (note ?? slowNote);
+
   if (d.lane === 'pooled') {
     const parts: string[] = [];
     // A worker that reported nothing (an empty result OR a throw) where the main thread
@@ -666,7 +805,7 @@ export function describeExtractionLane(d: ExtractionLaneDisclosure): string | un
     if (d.workerFallbackFiles.length > 0) {
       parts.push(`extraction pool degraded: ${d.workerFallbackFiles.length} file(s) re-extracted on the main thread after a worker failed`);
     }
-    return parts.length > 0 ? parts.join('; ') : undefined;
+    return withSlow(parts.length > 0 ? parts.join('; ') : undefined);
   }
   // A small build, a small machine, a caller opting out, or an explicit env opt-out are
   // ordinary choices, not degradations — warning about them would be noise on every run.
@@ -675,6 +814,6 @@ export function describeExtractionLane(d: ExtractionLaneDisclosure): string | un
     d.serialReason === 'insufficient-cores' ||
     d.serialReason === 'pool-saturated' ||
     d.serialReason === 'disabled-by-env'
-  ) return undefined;
-  return `extraction ran on the serial lane (${d.serialReason}) — analysis is complete but slower`;
+  ) return withSlow(undefined);
+  return withSlow(`extraction ran on the serial lane (${d.serialReason}) — analysis is complete but slower`);
 }
