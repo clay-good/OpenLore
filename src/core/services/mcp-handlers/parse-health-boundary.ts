@@ -12,7 +12,7 @@
 import { join } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_PARSE_HEALTH } from '../../../constants.js';
-import type { ParseHealthReport, FileParseHealth } from '../../analyzer/parse-health.js';
+import { EXCLUSION_REASON_LABEL, type ParseHealthReport, type FileParseHealth } from '../../analyzer/parse-health.js';
 
 /** Load the persisted parse-health report, or `null` when absent/unreadable (a clean repo). */
 export async function loadParseHealthReport(absDir: string): Promise<ParseHealthReport | null> {
@@ -29,6 +29,16 @@ export async function loadParseHealthReport(absDir: string): Promise<ParseHealth
 const BOUNDARY_FILE_CAP = 5;
 
 function describe(h: FileParseHealth): string {
+  // An EXCLUDED file names its cause (change: fix-analyze-native-abort-and-file-cost-budget) —
+  // "abandoned at the per-file parse budget of 20.0s" is actionable in a way "parse failed" is
+  // not, and it distinguishes a file the analyzer gave up on from one the grammar rejected.
+  //
+  // The reason comes off a file on disk, which a newer OpenLore (or a hand edit) may have written
+  // with a value this build has no label for. Echoing the raw reason beats rendering `undefined`.
+  if (h.exclusion) {
+    const bound = h.budgetMs !== undefined ? ` of ${(h.budgetMs / 1000).toFixed(1)}s` : '';
+    return `${h.filePath} (${EXCLUSION_REASON_LABEL[h.exclusion] ?? h.exclusion}${bound})`;
+  }
   if (h.parseFailed) return `${h.filePath} (parse failed — contributed no symbols)`;
   const parts: string[] = [];
   if (h.errorCount) parts.push(`${h.errorCount} error region${h.errorCount === 1 ? '' : 's'}`);

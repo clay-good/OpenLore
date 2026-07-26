@@ -35,8 +35,12 @@ waiting on a slow run SHALL be able to identify the responsible file without att
 - **WHEN** `openlore analyze` runs in a terminal
 - **THEN** the progress output names that file before the run completes
 
-#### Scenario: Machine-output modes stay clean
+#### Scenario: Protocol stdout stays clean
 
-- **GIVEN** the same repository
-- **WHEN** `openlore analyze --json` runs with stdout captured
-- **THEN** the progress disclosure is written to stderr and stdout remains valid JSON
+- **GIVEN** the same repository, analyzed by a host whose stdout carries a protocol rather than
+  human output — the stdio MCP server, which runs the same build
+- **WHEN** extraction of one file passes the disclosure threshold
+- **THEN** the disclosure is written to stderr and no protocol frame on stdout is disturbed
+
+> Note: `analyze` has no `--json` mode; the proposal named one. The real machine-output surface for
+> this code path is the stdio MCP server, and the requirement is stated against it.

@@ -89,6 +89,17 @@ export interface RepositoryMapSummary {
   totalFiles: number;
   analyzedFiles: number;
   skippedFiles: number;
+  /**
+   * Why each skipped file was skipped, keyed by reason (`gitignore`, `pattern`, `error`,
+   * `directory:<name>`). The walker has always tallied this; it stopped here and never reached a
+   * user, so `analyze` reported a bare count that read like a parse problem (change:
+   * fix-analyze-native-abort-and-file-cost-budget).
+   *
+   * Optional because a map reconstructed from a persisted `RepoStructure` genuinely does not know
+   * the breakdown — that artifact only ever stored the count. Absent there means "not recorded",
+   * which the renderer treats as "say nothing extra" rather than fabricating an empty tally.
+   */
+  skippedReasons?: Record<string, number>;
   languages: LanguageBreakdown[];
   frameworks: DetectedFramework[];
   directories: DirectoryStats[];
@@ -829,6 +840,7 @@ export class RepositoryMapper {
         totalFiles: walkResult.summary.totalFiles + walkResult.summary.skippedCount,
         analyzedFiles: walkResult.summary.totalFiles,
         skippedFiles: walkResult.summary.skippedCount,
+        skippedReasons: walkResult.summary.skippedReasons,
         languages,
         frameworks,
         directories,

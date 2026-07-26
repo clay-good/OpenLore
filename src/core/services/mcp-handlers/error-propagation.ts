@@ -32,6 +32,7 @@ import {
   type FunctionExceptionFacts,
 } from '../../analyzer/exception-flow.js';
 import type { SerializedCallGraph, FunctionNode, CallEdge, AmbiguousCallSite } from '../../analyzer/call-graph.js';
+import { parseWithBudget, type BudgetableParser } from '../../analyzer/parse-budget.js';
 
 export interface AnalyzeErrorPropagationInput {
   directory: string;
@@ -214,14 +215,17 @@ export async function handleAnalyzeErrorPropagation(
       try {
         const content = await readFile(join(absDir, n.filePath), 'utf-8');
         const parser = await getExceptionParser(n.language);
-        tree = parser ? parser.parse(content) : null;
+        // Bounded (change: fix-analyze-native-abort-and-file-cost-budget): this parse runs inside
+        // the long-lived daemon, so one pathological file must not be able to wedge it. On the
+        // budget the file becomes a disclosed boundary below, never a silent "no exceptions".
+        tree = parser ? parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, content) : null;
       } catch {
         tree = null;
       }
       treeByFile.set(n.filePath, tree);
     }
     if (!tree) {
-      boundaries.add(`source unreadable since analysis — re-run analyze_codebase (${n.filePath})`);
+      boundaries.add(`source unreadable or too costly to parse — re-run analyze_codebase (${n.filePath})`);
       factsById.set(n.id, null);
       return null;
     }

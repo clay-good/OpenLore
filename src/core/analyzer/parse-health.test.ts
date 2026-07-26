@@ -8,14 +8,20 @@
  *      signal fires end-to-end AND that a clean file produces no record (clean repos pay zero).
  */
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   tallyParseHealth,
   isLossyUtf8,
   buildParseHealthReport,
   isDegraded,
   compactParseHealthSummary,
+  describeExclusions,
+  totalExcluded,
+  EXCLUSION_REASON_LABEL,
   type ParseHealthNode,
   type FileParseHealth,
+  type FileExclusionReason,
 } from './parse-health.js';
 import { CallGraphBuilder } from './call-graph.js';
 
@@ -136,5 +142,85 @@ describe('CallGraphBuilder parse-health capture (build integration)', () => {
     const content = `function a() { return b(); }\nfunction b() { return 1; }\n`;
     const r = await new CallGraphBuilder().build([{ path: 'y.ts', content, language: 'TypeScript' }]);
     expect(r.parseHealthByFile?.get('y.ts')).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Exclusion reasons (change: fix-analyze-native-abort-and-file-cost-budget)
+// ---------------------------------------------------------------------------
+
+describe('exclusion reasons', () => {
+  const excluded = (path: string, exclusion: FileExclusionReason, budgetMs?: number): FileParseHealth => ({
+    filePath: path, language: 'TypeScript', errorCount: 0, missingCount: 0, errorLines: [],
+    exclusion, ...(budgetMs !== undefined ? { budgetMs } : {}),
+  });
+
+  it('counts exclusions per reason in the rolled-up report', () => {
+    const report = buildParseHealthReport([
+      excluded('a.ts', 'budget-exceeded', 20_000),
+      excluded('b.ts', 'budget-exceeded', 21_000),
+      excluded('c.ts', 'parse-failure'),
+    ]);
+    expect(report?.excludedByReason).toEqual({ 'budget-exceeded': 2, 'parse-failure': 1 });
+    expect(totalExcluded(report)).toBe(3);
+  });
+
+  it('omits the tally entirely when nothing was excluded, so an ordinary report is unchanged', () => {
+    // A repo whose only signal is error regions must not grow an empty tally — the artifact stays
+    // byte-identical to what it was before this change.
+    const report = buildParseHealthReport([
+      { filePath: 'a.ts', language: 'TypeScript', errorCount: 2, missingCount: 0, errorLines: [3, 9] },
+    ]);
+    expect(report).toBeDefined();
+    expect('excludedByReason' in report!).toBe(false);
+    expect(totalExcluded(report)).toBe(0);
+    expect(describeExclusions(report)).toBeUndefined();
+  });
+
+  it('describes exclusions in a fixed reason order so the line is deterministic', () => {
+    const report = buildParseHealthReport([
+      excluded('c.ts', 'size-cap'),
+      excluded('a.ts', 'budget-exceeded', 20_000),
+      excluded('b.ts', 'parse-failure'),
+    ]);
+    expect(describeExclusions(report)).toBe('3 files excluded (1 budget-exceeded, 1 parse-failure, 1 size-cap)');
+  });
+
+  it('treats an excluded file as degraded even with no error regions', () => {
+    // A budget-exceeded file has zero ERROR nodes — the parse never got far enough to produce any.
+    // If exclusion did not count as degradation it would vanish from the report entirely.
+    expect(isDegraded(excluded('a.ts', 'budget-exceeded', 20_000))).toBe(true);
+  });
+
+  it.each(['parse-failure', 'budget-exceeded', 'size-cap'] as FileExclusionReason[])(
+    'has a human label for %s, so no surface has to invent its own wording',
+    (reason) => expect(EXCLUSION_REASON_LABEL[reason]).toBeTruthy(),
+  );
+
+  it('never reports a worker fault as a file-level exclusion', () => {
+    // A worker fault degrades the LANE: the pool hands the file to the main thread, which is the
+    // reference implementation, so the file is not excluded at all. Recording it here would blame
+    // the source for a defect in the thread reading it.
+    expect(Object.keys(EXCLUSION_REASON_LABEL)).not.toContain('worker-fault');
+  });
+});
+
+describe('analyze and doctor cannot disagree about exclusions', () => {
+  // The requirement is that any surface reporting extraction health reads the SAME record. These
+  // are structural guards: the previous shape had `doctor` judging independently, which let it
+  // report a clean bill of health for a repository whose analysis had excluded files.
+  const src = (rel: string): string => readFileSync(join(__dirname, '..', '..', rel), 'utf-8');
+
+  it('doctor reads the shared record through the shared helper', () => {
+    const doctor = src('cli/commands/doctor.ts');
+    expect(doctor).toContain('describeExclusions');
+  });
+
+  it('analyze reports the same exclusions from the same helper', () => {
+    expect(src('cli/commands/analyze.ts')).toContain('describeExclusions');
+  });
+
+  it('analyze reports skipped files broken down by reason, not as a bare count', () => {
+    expect(src('cli/commands/analyze.ts')).toContain('skippedReasons');
   });
 });

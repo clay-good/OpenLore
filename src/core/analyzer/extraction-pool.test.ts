@@ -20,6 +20,8 @@ import {
   plannedPoolSize,
   resolveWorkerEntry,
   describeExtractionLane,
+  isWorkerFaultMessage,
+  WORKER_FAULT_MESSAGE_PREFIX,
   __resetExtractionPoolStateForTests,
   type ExtractionFile,
   type ExtractionLaneDisclosure,
@@ -91,6 +93,12 @@ interface StubOptions {
   throwsFor?: (language: string) => boolean;
   /** Answer normally for the first N files, then throw — a worker that degrades mid-run. */
   throwsAfter?: number;
+  /**
+   * Report a WORKER FAULT for these files — what the worker's `uncaughtException` boundary sends
+   * when something faults inside the thread rather than inside the file's extraction (change:
+   * fix-analyze-native-abort-and-file-cost-budget).
+   */
+  faultsOn?: (file: ExtractionFile) => boolean;
   /** Records the input index of every answer, in the order the parent received it. */
   completionLog?: number[];
 }
@@ -128,6 +136,15 @@ function stubWorkerFactory(opts: StubOptions = {}): ExtractionWorkerFactory {
           if (opts.throwsAfter !== undefined && answered++ >= opts.throwsAfter) {
             opts.completionLog?.push(id);
             send({ type: 'failed', id: replyId, message: 'degraded mid-run' });
+            return;
+          }
+          if (opts.faultsOn?.(file)) {
+            opts.completionLog?.push(id);
+            send({
+              type: 'failed',
+              id: replyId,
+              message: `${WORKER_FAULT_MESSAGE_PREFIX}: uncaught exception while extracting ${file.path} — Maximum call stack size exceeded`,
+            });
             return;
           }
           if (opts.throwsFor?.(file.language)) {
@@ -183,7 +200,10 @@ function isEmpty(result: FileExtractResult | undefined): boolean {
 
 /** A disclosure with the routine fields filled in, for the describe-only assertions. */
 function disclosure(partial: Partial<ExtractionLaneDisclosure>): ExtractionLaneDisclosure {
-  return { lane: 'serial', poolSize: 0, workerFallbackFiles: [], laneDefectFiles: [], unprovenRechecks: 0, ...partial };
+  return {
+    lane: 'serial', poolSize: 0, workerFallbackFiles: [], laneDefectFiles: [], unprovenRechecks: 0,
+    slowFiles: [], ...partial,
+  };
 }
 
 afterEach(() => { vi.restoreAllMocks(); __resetExtractionPoolStateForTests(); });
@@ -628,5 +648,85 @@ describe('extraction pool — the disclosure reaches a human', () => {
     // — is computed and then silently discarded.
     expect(src('cli/commands/analyze.ts')).toContain('extractionLaneNote');
     expect(src('core/analyzer/artifact-generator.ts')).toContain('describeExtractionLane');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Worker faults (change: fix-analyze-native-abort-and-file-cost-budget)
+// ---------------------------------------------------------------------------
+
+describe('extraction pool — a worker fault degrades the LANE, never the file', () => {
+  it('re-extracts a faulted file on the main thread even for a language the worker had proven', async () => {
+    // The pool trusts an ordinary throw from a worker that has proven the language — that is a
+    // real per-file parse failure. A WORKER FAULT is different in kind: it is evidence about the
+    // thread, not about the file. Trusting it would blame the source for a defect in the thread
+    // reading it, and would silently shrink the graph by exactly one file.
+    const files = corpus();
+    const faulted = files[files.length - 1].path; // last, so TypeScript is long since proven
+    const { outcomes, disclosure: d } = await extractFilesForPass1(files, dispatchFileExtract, isEmpty, {
+      workerFactory: stubWorkerFactory({ faultsOn: (f) => f.path === faulted }),
+      poolSize: 1,
+    });
+
+    expect(d.lane).toBe('pooled');
+    expect(d.workerFallbackFiles).toContain(faulted);
+    // Every file, including the faulted one, carries real facts from the main thread.
+    expect(outcomes.every(o => o.status === 'ok' && (o.value?.nodes.length ?? 0) > 0)).toBe(true);
+  }, 30_000);
+
+  it('yields a graph byte-identical to the serial lane when a worker faults', async () => {
+    const files = corpus();
+    const pooled = await buildJson(files, {
+      workerFactory: stubWorkerFactory({ faultsOn: (f) => f.path.endsWith('mod3.ts') }),
+      poolSize: 2,
+    });
+    expect(pooled).toBe(await buildJson(files));
+  }, 30_000);
+
+  it('classifies a fault message only by its marker, so an ordinary failure is never mistaken for one', () => {
+    // The marker is message-keyed because a throw crossing the worker boundary is
+    // structured-cloned — its class and properties do not survive.
+    expect(isWorkerFaultMessage(`${WORKER_FAULT_MESSAGE_PREFIX}: uncaught exception while extracting a.ts — x`)).toBe(true);
+    for (const m of [undefined, '', 'Unexpected token', "Cannot find module 'tree-sitter-python'"]) {
+      expect(isWorkerFaultMessage(m)).toBe(false);
+    }
+  });
+
+  it('the worker entry installs boundaries for the faults a try/catch cannot see', () => {
+    // A structural guard, because the failure it prevents is a PROCESS-level abort: a fault that
+    // reaches a worker's top level with no listener kills the thread, and (when raised inside a
+    // native frame) the process, with no JavaScript error anywhere to attribute it.
+    const worker = readFileSync(join(__dirname, 'extraction-worker.ts'), 'utf-8');
+    expect(worker).toContain("process.on('uncaughtException'");
+    expect(worker).toContain("process.on('unhandledRejection'");
+    expect(worker).toContain('WORKER_FAULT_MESSAGE_PREFIX');
+  });
+});
+
+describe('extraction pool — a slow file is attributable', () => {
+  it('names the slowest files in the lane note, and says nothing when none were slow', () => {
+    expect(describeExtractionLane(disclosure({ lane: 'pooled', poolSize: 4 }))).toBeUndefined();
+    const note = describeExtractionLane(disclosure({
+      lane: 'pooled', poolSize: 4, slowFiles: [{ path: 'src/big.ts', ms: 7_400 }],
+    }));
+    expect(note).toContain('src/big.ts');
+    expect(note).toContain('7.4s');
+  });
+
+  it('carries the slow-file note even on an otherwise ordinary serial run', () => {
+    // "too-few-files" is a routine choice and says nothing on its own — but a user who waited
+    // still deserves to know WHICH file they waited on.
+    const note = describeExtractionLane(disclosure({
+      lane: 'serial', serialReason: 'too-few-files', slowFiles: [{ path: 'src/vendor.js', ms: 12_000 }],
+    }));
+    expect(note).toContain('src/vendor.js');
+  });
+
+  it('writes the live in-flight disclosure to stderr, never stdout', () => {
+    // `logger`'s non-error levels go to STDOUT, and `build()` also runs inside `openlore mcp`,
+    // whose stdout carries JSON-RPC frames. A per-file line there would corrupt the protocol.
+    const pool = readFileSync(join(__dirname, 'extraction-pool.ts'), 'utf-8');
+    expect(pool).toContain('process.stderr.write');
+    expect(pool).not.toMatch(/logger\.\w+\([^)]*still extracting/);
   });
 });

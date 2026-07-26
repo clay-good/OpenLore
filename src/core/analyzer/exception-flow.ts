@@ -26,6 +26,7 @@
  */
 
 import type Parser from 'tree-sitter';
+import { parseWithBudget, type BudgetableParser } from './parse-budget.js';
 
 /** The languages whose exception flow is statically extractable here. This is the
  *  single authoritative source the language-support registry derives the
@@ -539,7 +540,11 @@ export async function extractExceptionFactsFromSource(
   if (!parser) {
     return { language, supported: false, throwSites: [], tryGuards: [], callSites: [], dynamicThrowCount: 0 };
   }
-  const tree = parser.parse(source);
+  // Bounded like every other parse (change: fix-analyze-native-abort-and-file-cost-budget). This
+  // runs at TOOL time inside the long-lived daemon, where an unbounded parse of one hostile file
+  // would wedge the whole server, not just one build. On the budget it throws, and the caller
+  // records the file as an analysis boundary rather than as "no exceptions here".
+  const tree = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, source);
   return extractExceptionFacts(tree.rootNode, 0, source.length, language);
 }
 

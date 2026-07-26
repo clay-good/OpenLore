@@ -1345,6 +1345,10 @@ export class AnalysisArtifactGenerator {
     // one central read, since the call-graph extractors never see the raw bytes (change:
     // add-parse-health-boundary-disclosure).
     const encodingFallback = new Map<string, string>(); // path → language
+    // HTML files dropped whole because they exceeded MAX_HTML_INLINE_SCRIPT_CHARS. This was a
+    // silent exclusion — the file simply never reached the graph, and nothing said so (change:
+    // fix-analyze-native-abort-and-file-cost-budget).
+    const sizeCapped: Array<{ path: string; language: string }> = [];
 
     for (const file of repoMap.allFiles) {
       try {
@@ -1370,15 +1374,21 @@ export class AnalysisArtifactGenerator {
         if (CALL_GRAPH_LANGS.has(lang)) {
           if (isLossyUtf8(bytes)) encodingFallback.set(file.path, lang);
           callGraphFiles.push({ path: file.path, content, language: lang });
-        } else if (/\.html?$/i.test(file.path) && content.length <= MAX_HTML_INLINE_SCRIPT_CHARS) {
-          // Inline <script> JS (decision 5b38bad2): blank everything outside the
-          // script bodies (newlines preserved) so the JS extractor parses the
-          // islands at their true offsets and node line numbers map to the HTML
-          // file. Skip files with no inline JS. Oversized HTML is skipped (a
-          // bound on the per-file char-array allocation; the scan itself is O(N)).
-          const blanked = extractHtmlScripts(content);
-          if (blanked !== null) {
-            callGraphFiles.push({ path: file.path, content: blanked, language: 'JavaScript' });
+        } else if (/\.html?$/i.test(file.path)) {
+          if (content.length > MAX_HTML_INLINE_SCRIPT_CHARS) {
+            // Oversized HTML is skipped (a bound on the per-file char-array allocation; the scan
+            // itself is O(N)) — and now SAYS so. Dropping it silently made any inline script it
+            // contained read as genuinely absent.
+            sizeCapped.push({ path: file.path, language: lang === 'unknown' ? 'HTML' : lang });
+          } else {
+            // Inline <script> JS (decision 5b38bad2): blank everything outside the
+            // script bodies (newlines preserved) so the JS extractor parses the
+            // islands at their true offsets and node line numbers map to the HTML
+            // file. Skip files with no inline JS.
+            const blanked = extractHtmlScripts(content);
+            if (blanked !== null) {
+              callGraphFiles.push({ path: file.path, content: blanked, language: 'JavaScript' });
+            }
           }
         }
       } catch {
@@ -1436,6 +1446,12 @@ export class AnalysisArtifactGenerator {
       const existing = parseHealthRecords.get(path);
       if (existing) existing.encodingFallback = true;
       else parseHealthRecords.set(path, { filePath: path, language, errorCount: 0, missingCount: 0, errorLines: [], encodingFallback: true });
+    }
+    for (const { path, language } of sizeCapped) {
+      parseHealthRecords.set(path, {
+        filePath: path, language, errorCount: 0, missingCount: 0, errorLines: [],
+        exclusion: 'size-cap',
+      });
     }
     this._parseHealth = buildParseHealthReport([...parseHealthRecords.values()]);
 

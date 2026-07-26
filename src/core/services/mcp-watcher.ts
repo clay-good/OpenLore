@@ -36,6 +36,7 @@ import type { FunctionNode } from '../analyzer/call-graph.js';
 import { extractFileStyle, extractFileParseHealth } from '../analyzer/call-graph.js';
 import { assembleFromRegions, type StyleFingerprint, type FileStyleRaw } from '../analyzer/style-fingerprint.js';
 import { buildParseHealthReport, type ParseHealthReport, type FileParseHealth } from '../analyzer/parse-health.js';
+import { parseBudgetOverrunMs } from '../analyzer/parse-budget.js';
 import { isTestFile } from '../analyzer/test-file.js';
 import { EdgeStore } from './edge-store.js';
 import { refreshAttestationCounts } from '../analyzer/index-attestation.js';
@@ -1231,8 +1232,18 @@ export class McpWatcher {
           // (ERROR/MISSING, parse failure); the byte-level encoding-fallback signal is recomputed at
           // the next full analyze. A prior encoding-fallback flag on this file is preserved.
           health = await extractFileParseHealth({ path: f.rel, content: f.content, language });
-        } catch {
-          health = { filePath: f.rel, language, errorCount: 0, missingCount: 0, errorLines: [], parseFailed: true };
+        } catch (err) {
+          // Classify the same way the full build does, off the same message marker, so the record
+          // this splices into `parse-health.json` is indistinguishable from the one a full analyze
+          // would have written for the same file (change:
+          // fix-analyze-native-abort-and-file-cost-budget). Two producers, one vocabulary.
+          const overrunBudgetMs = parseBudgetOverrunMs((err as Error | undefined)?.message);
+          health = {
+            filePath: f.rel, language, errorCount: 0, missingCount: 0, errorLines: [],
+            parseFailed: true,
+            exclusion: overrunBudgetMs !== undefined ? 'budget-exceeded' : 'parse-failure',
+            ...(overrunBudgetMs !== undefined ? { budgetMs: overrunBudgetMs } : {}),
+          };
         }
         const priorEncoding = byPath.get(f.rel)?.encodingFallback;
         if (health && priorEncoding) health.encodingFallback = true;
