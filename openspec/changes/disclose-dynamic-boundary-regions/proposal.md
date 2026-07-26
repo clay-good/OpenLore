@@ -50,9 +50,10 @@
 
 ## What changes
 
-**1. A dynamic-dispatch site becomes an extracted fact.** During the Pass-1 tree walk (the same
-walk that already tallies the style fingerprint with an explicit "no second parse" discipline),
-a small per-language matcher records each construct that performs dispatch the resolver cannot
+**1. A dynamic-dispatch site becomes an extracted fact.** Over each file's already-parsed tree
+(no second parse; note the extraction path is tree-sitter **Query**-driven, and three kinds are
+not reachable from any existing call query, so the matcher adds its own capture rather than
+riding one), a per-language matcher records each construct that performs dispatch the resolver cannot
 follow. Each site is `{ filePath, line, enclosingSymbolId, kind, evidence }` where `kind` comes
 from a **closed, source-declared vocabulary** — no free-text, so it is queryable and testable:
 
@@ -65,16 +66,23 @@ from a **closed, source-declared vocabulary** — no free-text, so it is queryab
 | `metaprogrammed-definition` | Ruby `define_method` / `method_missing`, Python `setattr` on a class / metaclass `__getattr__`, JS `Proxy` / `Reflect.defineProperty` |
 | `container-resolution` | DI resolution by token: `container.get/resolve/make(...)`, Spring `getBean`, `@Inject`-style construction with no statically-visible binding |
 
-A construct whose argument **is** a static literal is NOT a boundary — it is the sibling
-change's business (`resolve-literal-reflective-dispatch`), which resolves it into a real edge.
-Only the undecidable residue is recorded here. The two changes share one matcher and partition
-its output; neither can double-count.
+**The partition is decided by resolution outcome, not by argument form.** The matcher records a
+**candidate** for every recognized construct during extraction; the sidecar is finalized *after*
+the Pass-2d synthesis pass, which retracts every candidate the sibling change resolved to exactly
+one internal symbol. Every other candidate — including a static literal that resolves to nothing
+(an external/stdlib target), resolves ambiguously, or is dropped by a fan-out cap — is persisted
+as a site with its refusal reason. A syntactic partition (literal vs. not) would leave all three
+of those in a silent hole: no edge and no site, which reads as "no dynamic dispatch here" — the
+worst possible outcome and the exact failure this change exists to remove.
 
 **2. The sites are persisted and roll up to a region view.** Sites are stored alongside the
 existing per-file analysis artifacts (no schema change to `nodes`/`edges`: a sidecar keyed by
 file, mirroring how `parse-health.json` already discloses per-file parse boundaries). A symbol
 is `dynamicBoundaryAdjacent` when it *contains* a site; a region (community) carries a count.
-Aggregate counts land in the `parse-health`-adjacent disclosure surface and in `openlore status`.
+Aggregate counts land in the `parse-health`-adjacent disclosure surface. Sites are part of the
+memoized Pass-1 fact set — a fact-cache hit must never yield an empty site set — and the
+incremental watcher maintains the sidecar in its own lane, as it already does for parse-health
+and the style fingerprint.
 
 **3. The conclusion tools disclose the boundary they are standing next to — per answer, not
 per README.** Every tool whose soundness rests on reachability completeness gains a
@@ -82,10 +90,13 @@ per README.** Every tool whose soundness rests on reachability completeness gain
 line, and `kind` of the sites *inside the subgraph it just traversed* (bounded, deduped by
 kind+file, with a truncation receipt):
 
-- `find_dead_code` — a candidate whose file or whose callers' files contain a
-  `container-resolution` / `reflective-invoke` site is **downgraded in confidence** and carries
-  the site as its reason. It never becomes "not dead" (that would be a guess), but it stops
-  being presented at the same confidence as a symbol with no dynamic neighborhood.
+- `find_dead_code` — this **refines the shipped downgrades rather than adding a third**:
+  `reachability.ts:306-329` already caps every candidate in a dynamic language at `low` and
+  already downgrades synthesized-dispatch targets. The site-based treatment replaces the blanket
+  language caveat with a per-site reason naming the file and line; a candidate is never
+  downgraded twice, and the shipped language-level cap remains the floor for languages with no
+  matcher. Scope is the candidate's own file or its module's transitive import closure — never
+  the whole repository, which would collapse into the blanket caveat it replaces.
 - `report_coverage_gaps` — the `also-dead` label is withheld (falling back to the plain gap
   label) when the symbol sits behind a dynamic boundary, since `also-dead` asserts the absence
   of any caller.
@@ -99,9 +110,10 @@ kind+file, with a truncation receipt):
 
 **4. A registered governance finding, advisory by default.** A new
 `dynamic-boundary-in-conclusion-scope` code in `FINDING_CODE_REGISTRY`
-(`src/core/services/mcp-handlers/enforcement-policy.ts`) with source-declared severity `info`,
-so a team that wants CI to notice "this deletion candidate sits behind a DI container" can
-class it `blocking` — and everyone else sees nothing change.
+(`src/core/services/mcp-handlers/enforcement-policy.ts`) registered with `defaultClass: 'advisory'` (the registry's
+invariant — blocking is always opt-in) and emitted with `severity: 'info'` on the governance
+finding itself, so a team that wants CI to notice "this deletion candidate sits behind a DI
+container" can class it `blocking` — and everyone else sees nothing change.
 
 **Explicitly NOT built:** any attempt to *resolve* these sites (points-to analysis, string
 solving, dynamic tracing, an LLM guess at intent). The whole value here is that the boundary is
@@ -127,14 +139,19 @@ dependency, and no hot-path cost; it converts a README paragraph into a per-answ
   downgrade + reason), `mcp-handlers/coverage-gaps.ts` (`also-dead` withholding),
   `mcp-handlers/claim-verification.ts` (verdict cap), the shared boundary-disclosure helper used
   by impact/blast-radius/error-propagation, `enforcement-policy.ts` (one finding code),
-  `openlore status`, `docs/reachability-dead-code.md`, `docs/language-support.md`.
+  the Pass-1 fact-cache payload (new field + format-version bump), the watcher's sidecar lane,
+  `docs/reachability-dead-code.md`, `docs/language-support.md`. (NOT `openlore status` — that
+  command is not on `main`; PR #224 never landed.)
 - **Specs:** `analyzer` — 2 ADDED (DynamicBoundarySitesAreExtractedAndPersisted,
   DynamicBoundaryVocabularyIsClosedAndPartitioned); `mcp-handlers` — 2 ADDED
   (ConclusionsDiscloseDynamicBoundariesInScope, DeadAndSafeVerdictsAreCappedNearADynamicBoundary).
 - **Tool surface:** unchanged — no new tool, no preset change. Existing responses gain a
   bounded `dynamicBoundaries` array inside the disclosure field they already carry.
-- **Performance:** one node-type check per call/subscript node on the existing walk; no second
-  parse, no new artifact read on the serving path (the sidecar is loaded with the graph).
+- **Performance:** the extraction walk is Query-driven, and three of the six kinds
+  (`computed-member`, `metaprogrammed-definition`, `dynamic-import`) are **not reachable from any
+  existing call query** — the matcher must add its own capture over the same already-parsed tree.
+  No second parse, but the per-language traversal cost is real and must be measured and bounded,
+  not asserted to be free.
 - **Risk:** (a) *matcher noise* — a language whose idiom uses `send`/`get` innocuously inflates
   the site count; mitigated by a closed, per-language vocabulary with a false-negative bias (an
   unrecognized construct is simply not recorded, exactly as today) and by the fact that a site

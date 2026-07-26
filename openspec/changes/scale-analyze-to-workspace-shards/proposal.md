@@ -45,30 +45,54 @@ packages is exactly one shard — i.e. today's behavior, byte-identically.
 
 **2. Shard-scoped analyze that stays a whole graph.** `openlore analyze --shard <name>` (and the
 automatic selection of affected shards from a diff) recomputes only that shard's files, then
-**re-resolves the cross-shard edge frontier**: edges whose caller or callee lies in the
-recomputed shard. Everything outside the frontier is retained from the store, unmodified. The
-soundness obligation is stated in the spec and enforced in test: *a shard-scoped analyze SHALL
-produce the same graph as a full `analyze --force` for the recomputed shard and its frontier, and
-SHALL mark anything it could not reconcile explicitly stale* — the same converge-or-flag contract
+**re-resolves the cross-shard resolution frontier**, which is *three* classes, not one: stored
+edges touching a recomputed shard; outside files whose previously-external call sites a newly
+added symbol now binds; and outside files whose name-only call sites change resolution because
+the recompute changed a name's definition *multiplicity* — a case where neither endpoint is in
+the recomputed shard. The last two are derivable only from the added/removed symbol-name diff,
+not from the stored edge set. Everything else is retained unmodified. The soundness obligation is
+asserted **over the whole repository**: *a shard-scoped analyze SHALL produce the graph a full
+rebuild would produce, except for regions explicitly marked stale* — scoping that obligation to
+the frontier would make it vacuously satisfiable by a buggy frontier — the same converge-or-flag contract
 the incremental watcher already lives under, applied at shard granularity. It never silently
 narrows the graph, which is what a naive include-pattern scope does today.
 
-**3. A portable warm cache.** The Pass-1 fact cache gains an **export/import** path: its entries
-are already keyed by content hash plus an extractor-purity stamp, so they are inherently portable
-to any machine running the same OpenLore version. `openlore cache export/import` writes and reads
+**3. A portable warm cache.** The Pass-1 fact cache gains an **export/import** path. Portability
+is NOT simply "the same OpenLore version": the purity stamp digests extractor source bytes on
+disk, so a source checkout and a built distribution of the same version produce different stamps,
+and grammar loadability is a property of the running process that no hash can see. The key
+therefore covers runtime layout, Node ABI, and platform triple, and a mismatch costs a cache miss
+rather than a divergence. `openlore cache export/import` writes and reads
 a single content-addressed archive (reusing the shipped `.olbundle` validate-or-rebuild
 discipline), so CI restores it as an ordinary build-cache artifact and a new engineer's first
-analyze is warm. Trust rules are inherited, not invented: a mismatched purity stamp, a mismatched
-schema version, or a corrupt entry is **ignored and recomputed**, never served — the same posture
-`harden-bundle-import-trust` established for graph bundles. No server, no network protocol, no
-hosted service: OpenLore writes a file, and the user's existing cache infrastructure moves it.
+analyze is warm. **Trust is a dependency, not an inheritance:** the archive's checks prove
+integrity, never authenticity — the stored fact value is opaque and covered by no digest, so an
+attacker with the repo can compute an honest key and attach fabricated facts. `harden-bundle-import-trust`
+is PROPOSED, not shipped, so this change **depends on** it: an unsigned cache is disclosed as
+unverified and is bypassed entirely by any analyze feeding a blocking gate, and the import path
+does not ship before signature verification does. No server, no hosted service.
+
+**Supersedes a shipped decision.** `index-bundle.ts:205-213` deliberately strips `pass1_facts`
+from every exported bundle — "~44% of the compressed payload and useful to a consumer only under
+an exact commit-plus-version-plus-grammar match." This change proposes the inverse and must
+therefore carry a measured hit rate under a realistic CI matrix and a measured archive size that
+overturn that reasoning, recorded via `record_decision`. If the measurement does not overturn it,
+the cache half does not ship.
 
 **4. Honest reporting of what was skipped.** Every shard-scoped analyze reports the shards it
 recomputed, the shards it retained, the frontier size, and any region it marked stale — so a
-partial analyze is never mistaken for a full one, and `openlore status` shows per-shard freshness.
+partial analyze is never mistaken for a full one. Freshness is recorded **per shard**: a scoped
+run must not write the repository-wide fingerprint, which would declare 39 untouched packages
+current.
 
-**Explicitly NOT built:** distributed/remote *execution* (only cache transport); a hosted cache
-service; a build-system integration or plugin (Bazel/Nx rule authoring is a user's job, and
+**Split note.** This is two changes in one directory: shard detection + scoped analyze, and the
+portable cache. The cache half additionally overlaps `add-incremental-bundle-delta` (cross-machine
+warm start over a shipped transport) and `add-incremental-early-cutoff` (which already proposes a
+position-normalized extraction-fact digest). Recommended: land the shard half first and split the
+cache half into its own change that first justifies itself against those two.
+
+**Explicitly NOT built / deliberately NOT borrowed:** distributed/remote *execution* (only cache
+transport); a hosted cache service; a build-system integration or plugin (Bazel/Nx rule authoring is a user's job, and
 `openlore analyze --shard` is the primitive it would call); cross-repository sharding (that is
 federation, already shipped); and any change to the single-package path, which must stay
 byte-identical.
@@ -87,7 +111,8 @@ polyglot, private codebases — is disproportionately the audience running a mon
 
 - **Files:** a `workspace-shards.ts` detector (manifest readers, deterministic ordering), shard
   awareness in the file walker and analyze pipeline, frontier re-resolution in the call-graph
-  builder, per-shard attestation/freshness in the store and `openlore status`, an export/import
+  builder, per-shard attestation/freshness in the store (no `openlore status` — that command is not
+  on `main`), an export/import
   path on `pass1-fact-cache.ts` plus an `openlore cache` command, config
   (`workspace.shards`), and `docs/cli-reference.md` / `docs/ci-cd.md` / `docs/configuration.md`.
 - **Specs:** `analyzer` — 2 ADDED (WorkspaceShardsAreDetectedDeterministically,

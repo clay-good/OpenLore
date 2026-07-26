@@ -25,39 +25,45 @@
   currently arbitrary. Editing a 75-caller hub like `validateDirectory` can, on the same save
   with the same budget, either leave 40 leaves stale or leave the graph's busiest funnel stale.
   The product ships every input needed to tell those cases apart and does not use them.
-- **The stale region is reported as a number.** The watcher's summary counts files
-  (`mcp-watcher.ts:658-662`); `openlore status` reports state. Neither says *what* went stale, so
-  a user cannot tell a stale region of 40 test files from a stale region containing three hubs —
-  and cannot decide whether to run `analyze --force` now or ignore it.
-- **The classifiers already exist and are already trusted.** `landmark-signals` computes
-  hub / orchestrator / chokepoint labels and `change-significance` already ranks changed symbols
-  into tiers from those same signals plus churn — shipped, deterministic, and reused across
-  `orient`, `briefing_since`, and `report_coverage_gaps`. Reusing them here adds **no new score,
-  no new weighting, and no new tuning constant**.
+- **The stale region is reported as a number, and barely reported at all.** The watcher's summary
+  counts files (`mcp-watcher.ts:658-662`) and is debug-gated; the only other consumer reads the
+  count solely to decide whether to trigger a background repair, so it reaches no user. (There is
+  no `openlore status` — PR #224 never landed on `main`.) Nothing says *what* went stale, so a
+  reader cannot tell a stale region of 40 test files from one containing three hubs.
+- **The raw signal is already resident on the hot path.** The update already loads the internal
+  node table to seed cross-file resolution, and every row carries `fanIn`/`fanOut` — the same
+  counters the shipped hub/orchestrator/chokepoint labels are defined over. Ordering by them adds
+  **no new score, no new weighting, no new tuning constant, and no new query**. (The label
+  *classifiers* themselves are not usable here — one needs a serialized graph, the other needs
+  per-file git churn — so this change orders from the counters and uses the labels only to
+  describe the result.)
 
 ## What changes
 
-**1. Significance-ordered budget spending.** Before the closure walk consumes the budget, its
-candidate files are ordered by the existing structural signals — fan-in first, with the shipped
-hub/chokepoint/orchestrator labels breaking ties, and a stable secondary sort on path so the
-ordering is fully deterministic. The budget is then spent top-down. The budget value, the
+**1. Significance-ordered budget spending, within each phase.** The closure is discovered in two
+phases (direct callers, then the prior non-callers a newly-added symbol rebinds), and phase two
+is not enumerable until phase one is built — so ordering applies *within* a phase, never across
+them, and the existing budget split is untouched. Candidates are ordered by a strict
+lexicographic tuple: descending fan-in, descending fan-out, ascending path. The hub/chokepoint
+labels are used for *reporting*, not as tie-breaks — each is a monotone function of those same
+counters, so a label can never break a tie the counters did not already break. The budget value, the
 convergence contract, and the stale-marking behavior are all unchanged: the same number of files
 is recomputed and the same remainder is marked stale. **Only the choice of which files fall on
 which side changes** — from arbitrary to "the ones the rest of the graph depends on."
 
 **2. The stale region reports its structural cost.** The stale summary carries, alongside the
 count, the number of hub / chokepoint symbols inside it and the highest-significance symbol it
-contains — so the watcher line, `openlore status`, and the freshness disclosure can say "12 files
-stale, including 2 hubs (`readCachedContext`)" rather than "12 files stale." The rendering reuses
-the tier vocabulary `briefing_since` already established, so a user meets one significance
-vocabulary in the product, not two.
+contains — so the watcher summary and the per-anchor freshness marker can say "12 files stale,
+including 2 hubs (`readCachedContext`)" rather than "12 files stale." The rendering reuses the
+tier vocabulary `briefing_since` already established, so a user meets one significance vocabulary
+in the product, not two. This constrains the *shape* of an existing report; it adds no new
+command or tool.
 
-**3. Rebuild urgency follows significance, not just the file count.** The debounced background
-rebuild already fires on a stale region; its coalescing window is chosen by whether the stale
-region contains high-significance symbols — a stale hub converges promptly, a stale leaf region
-waits and coalesces. Both paths remain bounded, debounced, and at-most-once; nothing new is
-spawned, and a repository whose stale regions are all low-significance sees strictly fewer
-rebuilds than today.
+**3. Rebuild urgency follows significance — monotonically.** The coalescing window may be chosen
+from the stale region's composition, but a later trigger may only ever **lengthen** an
+already-armed window, never shorten it. Shortening is what breaks coalescing: a HEAD-change arms
+the bulk-operation settle window, a hub-region trigger 200 ms later re-arms a shorter one, and the
+rebuild fires into a half-applied pull — producing two full re-analyzes where one sufficed.
 
 **4. The ordering is testable and cannot silently regress.** The ordering function is a pure,
 exported function over the candidate set. A test asserts that a fixture whose closure exceeds the
@@ -82,15 +88,23 @@ composition.
 
 - **Files:** `src/core/services/mcp-watcher.ts` (candidate ordering before budget consumption,
   stale summary composition, rebuild-window selection), reuse of `landmark-signals` /
-  `change-significance` classifiers, the stale-region reporting path in `openlore status` and the
-  freshness disclosure, and `docs/TROUBLESHOOTING.md`.
+  the raw fan-in/fan-out already carried on the loaded node table, the stale-region reporting path
+  on the watcher summary and the per-anchor freshness marker, and `docs/TROUBLESHOOTING.md`.
+  (NOT `openlore status`, which is not on `main`; and NOT `computeLandmarkSignals` /
+  `labelChangeSignificance`, which need a serialized graph and git churn respectively — neither
+  belongs on a per-save hot path.)
 - **Specs:** `analyzer` — 2 ADDED (IncrementalBudgetIsSpentInSignificanceOrder,
   StaleRegionsReportTheirStructuralComposition).
-- **Tool surface:** unchanged. The freshness disclosure gains composition fields it already has
-  room for.
+- **Tool surface:** unchanged — no new tool and no new command. The composition rides the stale
+  marking and the existing per-anchor freshness marker.
 - **Performance:** one sort over the candidate set (bounded by the closure, already enumerated)
   per over-budget save; no additional parsing, no additional store reads — the signals are
   already resident.
+- **Known pre-existing defect this change sits on:** the node reader drops `is_hub`, and the
+  watcher re-inserts every edited file's nodes with `is_hub = 0` and a *subset-local* fan-in — so
+  an over-budget hub edit deflates the very signal that would have prioritized it next time. Either
+  fix the deflation or bind the ordering to disclosed-lower-bound semantics; do not build on the
+  signal without doing one of the two.
 - **Risk:** (a) *ordering instability across runs* — mitigated by a total, deterministic
   comparator with a path tie-break and a test asserting stability. (b) *a rebuild storm from
   significance-driven urgency* — mitigated by keeping the existing debounce, coalescing, and

@@ -15,14 +15,28 @@
         must be evidenced
 - [ ] Persist the lexicon as a version-stamped sidecar next to the BM25 corpus, atomic write,
       stable ordering; reuse the tokenizer-version mismatch discipline (ignore-and-rebuild)
-- [ ] Query-side expansion in the BM25 query paths (`vector-index.ts`, `spec-vector-index.ts`):
-      bounded terms per original token, expansion terms scored at a lower weight than originals;
-      the index is never expanded and never rebuilt for this
+- [ ] **Two-tier ranking, NOT a weight multiplier** (a scalar weight provably cannot guarantee
+      the invariant — `bm25Score` sums over terms without bound): compute originalScore and
+      expansionScore separately, order by `(originalScore>0) desc, originalScore desc,
+      expansionScore desc, id asc`, and apply it BEFORE candidate truncation (`limit*5`/`limit*3`)
+      and BEFORE RRF (`vector-index.ts:1009-1018` fuses RANKS and discards magnitudes)
+- [ ] Apply at ALL tokenizer-sharing query paths incl. `text-line-index.ts:257` (the `search_code`
+      text fallback — exactly the under-recall case) or enumerate the exclusions with reasons
 - [ ] Return the applied expansion set with results; thread it through `search_code`,
       `search_specs`, and `orient`
-- [ ] Extend the served-mode vocabulary (`mcp-handlers/semantic.ts:206-207`, `:292-293`,
-      `:538-539`) to distinguish keyword from keyword+vocabulary; keep both existing semantic
-      upgrade hints verbatim
+- [ ] Extend the served-mode vocabulary — owner is `src/core/analyzer/embedder.ts:17` +
+      `servedRetrievalMode` (`:87-96`), NOT semantic.ts. Six live `retrievalMode === 'keyword'`
+      equality checks must become family tests (`semantic.ts:207`, `:293`, `:539`, `:551`,
+      `orient.ts:206`, `:860`) or the flip silently sets `searchMode:'hybrid'` (false — the scale
+      is still unbounded BM25) and DROPS the `embed --local` hint the spec requires to remain
+- [ ] Bucketed-join candidate generation (first char + length band); 4 mining guards (len≥3,
+      first-char anchor, ≤3× length, ≥2 binding sites); both forms must be in the corpus df table
+- [ ] Content stamp (not just version stamp) on the lexicon; invalidate it wherever
+      `patchBm25Cache` deletes the corpus sidecar (`vector-index.ts:277`)
+- [ ] Register the config flag in `CONFIG_FIELD_KINDS` (`config-schema.ts:40`) — the
+      `Record<keyof OpenLoreConfig, …>` binding fails compilation otherwise
+- [ ] MCP ↔ Pi parity (CLAUDE.md): `orient`/`search_code` output shape changes → mirror in
+      `src/pi/extension.ts` or record the skip
 - [ ] Config flag to disable expansion (documented in `docs/configuration.md`)
 - [ ] `openlore prove --estimate`: add a retrieval-recall comparison over the repository's own
       symbol ↔ doc-comment pairs, labeled `estimate`, so the gain is measured on the user's repo
@@ -34,8 +48,9 @@
 - [ ] Determinism: two analyses produce byte-identical lexicons; the analyze-twice byte-diff e2e
       still passes
 - [ ] Stale-stamp test: a lexicon under an old stamp is ignored and rebuilt, never served
-- [ ] Ranking-safety test: for a corpus of exact-identifier queries, the exact match ranks first
-      with expansion on — no regression versus expansion off
+- [ ] Ranking-safety test: exact-identifier queries rank the exact match first with expansion on;
+      plus an eviction test (expansion-only matches must not push an original match out of the
+      truncated candidate window)
 - [ ] Disabled-expansion test: ranking byte-identical to the pre-change ranking, no re-index
 - [ ] Recall test: a natural-language task query matches the abbreviated symbol it describes, and
       the response names the expansion terms responsible
@@ -43,6 +58,12 @@
       size
 - [ ] Disclosure test: mode is `keyword` with an empty lexicon and `keyword+vocabulary` with a
       populated one; the semantic upgrade hint is unchanged in both
-- [ ] Benchmark: re-run the `orient` retrieval benchmark on the published loss-case repos and
-      record the measured delta (wins and losses) in `docs/AGENT-BENCHMARKS.md`
+- [ ] Benchmark: report retrieval recall@k on symbol ↔ doc-comment pairs before/after. Do **NOT**
+      re-run the agent cost benchmark against the published loss case —
+      `AGENT-BENCHMARKS.md:139-166` establishes that loss is round-trip-forced, not recall-bound,
+      and recording expansion against it would be a claim the benchmark cannot support
+- [ ] Ranking-invariant test built as a COUNTEREXAMPLE search: one weak original match vs. max
+      expansion terms at high idf/tf — the original must win
+- [ ] Mining-cost test: bucketed generation stays within the declared budget; assert the naive
+      all-pairs path is not taken
 - [ ] Full suite green; docs updated (`providers.md`, `configuration.md`)

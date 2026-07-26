@@ -4,80 +4,104 @@
 
 ### Requirement: SpecGroundingIsCheckedDeterministicallyAgainstTheGraph
 
-The system SHALL provide a deterministic spec-grounding check that requires no LLM, no API key,
-and no network. For each requirement in the spec corpus it SHALL resolve every cited symbol
-against the call graph and assign exactly one verdict:
+The system SHALL provide a deterministic spec-grounding check requiring no LLM, no API key, and
+no network. For each requirement in the spec corpus it SHALL resolve every cited symbol against
+the call graph and assign exactly one verdict: `grounded`, `partially-grounded`, `ungrounded`,
+`ambiguous`, `unresolved-boundary`, `not-assessed`, or `uncited`.
 
-- `grounded` — every cited symbol resolves to a symbol present in the graph;
-- `partially-grounded` — at least one citation resolves and at least one does not, with the
-  unresolved citations named;
-- `ungrounded` — the requirement carries citations and none of them resolve;
-- `uncited` — the requirement carries no citation.
+`ungrounded` SHALL be reserved for a citation the check can **positively assert** the graph does
+not contain. `uncited`, `ambiguous`, `unresolved-boundary`, and `not-assessed` SHALL each be
+reported as distinct verdicts, SHALL NEVER be aggregated into or counted with `ungrounded`, and
+SHALL NOT emit a finding. The denominator of any reported rate SHALL be the full requirement set,
+and requirements excluded from a category SHALL be reported rather than dropped.
 
-`uncited` SHALL be reported as a distinct verdict and SHALL NEVER be reported as, aggregated
-into, or counted with `ungrounded`: the absence of a citation is not evidence that a requirement
-is false. The denominator of any reported grounding rate SHALL be the full requirement set, and
-requirements excluded from a category SHALL be reported rather than dropped.
+**Resolution.** A citation SHALL resolve exactly against the graph's canonical symbol id — never
+by substring or fuzzy match. The written form is `<symbol>::<path>`, where `<symbol>` is exactly
+the id's symbol part (`Class.method` for a method, the scope-qualified form for a nested
+function) and `<path>` the repo-relative file path. A citation matching more than one symbol — a
+collapsed overload set, or a bare name written without a path — SHALL be reported `ambiguous`
+with the candidates named, never resolved by picking one.
 
-A citation whose symbol was renamed or moved SHALL be carried forward through the existing
-symbol-identity continuity mechanism and resolved against its current identity, with the
-carry-forward disclosed — a refactor SHALL NOT be reported as ungrounding.
+**Boundaries are disclosed, never converted into accusations.** A citation into a file whose
+language the graph does not extract symbols for, into a file disclosed by parse-health as a lower
+bound, or resolved against an index staler than the working tree SHALL be reported `not-assessed`
+with the boundary named. The report SHALL name the languages and files excluded on this basis.
 
-The check SHALL be read-only: it SHALL NOT rewrite, delete, or reorder any requirement. Its
-findings SHALL be emitted as the registered governance finding `spec-requirement-ungrounded` with
-a source-declared severity, advisory by default and blockable only through an operator's
-enforcement policy.
+**Renames.** A citation whose symbol was renamed or moved SHALL be re-resolved through the
+existing symbol-identity continuity map where one is available, with the carry-forward disclosed.
+Where continuity is unavailable — no pre-rebuild snapshot, an ambiguous move, or a language
+without normalized body extraction — the citation SHALL be `unresolved-boundary`, never
+`ungrounded`, and the report SHALL name which boundary applied.
 
-Grounding SHALL be stated as an existence proof and never as a correctness proof: a `grounded`
-verdict asserts only that the requirement concerns symbols the repository contains.
+**The check is read-only.** It SHALL NOT rewrite, delete, or reorder any requirement, and SHALL
+NOT write to any store: re-pointing is computed at read time from the graph and the continuity
+map.
+
+**Ceiling.** The report SHALL state that a `grounded` verdict asserts only that the cited symbols
+exist and were in the slice the requirement was generated from. It does not assert that they are
+the symbols the requirement is about, nor that the prose is accurate. Grounding SHALL NEVER be
+rendered as a spec-quality score.
+
+Findings SHALL be emitted as the registered code `spec-requirement-ungrounded` with
+`defaultClass: 'advisory'`; the emitted severity SHALL play no part in classing it. This finding
+SHALL NOT supersede the shipped corpus lint, which continues to fail the build on the
+corpus-corruption classes it already gates.
 
 #### Scenario: A requirement citing a deleted symbol is caught with no API key
 
-- **GIVEN** a spec requirement citing `parseLegacyConfig::src/config.ts`, a symbol no longer in
-  the repository, and no configured LLM provider
+- **GIVEN** a requirement citing a symbol no longer in the repository, in an extracted language,
+  against a fresh index, and no configured LLM provider
 - **WHEN** the grounding check runs
-- **THEN** the requirement is reported `ungrounded`, the unresolved citation is named, and a
+- **THEN** the requirement is `ungrounded`, the unresolved citation is named, and a
   `spec-requirement-ungrounded` finding is emitted advisorily
+
+#### Scenario: An unextracted language is not accused
+
+- **GIVEN** a requirement citing a symbol in a file whose language the graph extracts no symbols
+  for
+- **WHEN** the grounding check runs
+- **THEN** the verdict is `not-assessed` naming the language boundary, it is not counted as
+  `ungrounded`, and no finding is emitted
 
 #### Scenario: Hand-written requirements are not accused
 
-- **GIVEN** a corpus of 40 requirements, 25 of them hand-written with no citations
-- **WHEN** the grounding check runs
-- **THEN** the 25 are reported `uncited`, they are not counted as `ungrounded`, and the reported
-  grounding rate discloses the full denominator
+- **GIVEN** a corpus of 40 requirements, 25 hand-written with no citations
+- **WHEN** the check runs
+- **THEN** the 25 are `uncited`, are not counted as `ungrounded`, and the reported rate discloses
+  the full denominator
 
-#### Scenario: A rename does not unground a requirement
+#### Scenario: An unbridgeable rename is a boundary, not an accusation
 
-- **GIVEN** a `grounded` requirement whose cited symbol is renamed in a later commit
-- **WHEN** the repository is re-analyzed and the grounding check runs
-- **THEN** the citation resolves to the renamed symbol via identity continuity, the verdict stays
-  `grounded`, and the carry-forward is disclosed
+- **GIVEN** a `grounded` requirement whose cited symbol is renamed, analyzed on a fresh clone
+  with no pre-rebuild snapshot
+- **WHEN** the check runs
+- **THEN** the verdict is `unresolved-boundary` naming the missing-snapshot cause, not
+  `ungrounded`
+
+#### Scenario: An ambiguous citation is never silently resolved
+
+- **GIVEN** a citation written as a bare name matching three symbols
+- **WHEN** the check runs
+- **THEN** the verdict is `ambiguous`, all three candidates are named, and no single one is
+  chosen
 
 #### Scenario: Grounding does not claim correctness
 
-- **GIVEN** a requirement that cites live symbols but describes their behavior incorrectly
-- **WHEN** the grounding check runs
-- **THEN** the verdict is `grounded`, and the report states that grounding establishes existence
+- **GIVEN** a requirement citing live symbols but describing their behavior incorrectly
+- **WHEN** the check runs
+- **THEN** the verdict is `grounded`, and the output states that grounding establishes existence
   of the cited code, not the accuracy of the description
 
-### Requirement: LlmJudgedScoresAreLabeledAndNeverAuthoritative
+## MODIFIED Requirements
 
-Where spec verification uses a language model to score how well a spec describes a file, those
-scores SHALL be labeled as LLM-judged wherever they are surfaced, and SHALL be reported alongside
-the deterministic grounding verdict rather than merged into it. No composite score SHALL blend an
-LLM-judged value with a deterministic one, and no LLM-judged value SHALL be presented as the
-system's verdict on spec quality.
+### Requirement: LlmJudgedScoresCarryProvenance
 
-When no LLM provider is configured, the deterministic grounding report SHALL still be produced in
-full, and its absence of LLM-judged scores SHALL be stated rather than rendered as a zero or an
-omission.
-
-#### Scenario: The two signals stay separated
-
-- **GIVEN** a verification run with a configured provider
-- **WHEN** the report is rendered
-- **THEN** the grounding verdict and the LLM-judged accuracy score appear as distinct, labeled
-  fields, and no field combines them
+The existing requirement is extended with a no-provider clause: when no LLM provider is
+configured, the deterministic grounding report SHALL still be produced in full, and the absence
+of LLM-judged scores SHALL be **stated** rather than rendered as a zero, an omission, or a
+default. The existing obligations — the `llm-judged` label, the judging model's id, and the
+prohibition on blending an LLM-judged value into a deterministic one — are unchanged and are not
+restated here.
 
 #### Scenario: No key still yields a quality signal
 

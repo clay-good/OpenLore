@@ -2,59 +2,89 @@
 
 ## ADDED Requirements
 
-### Requirement: GeneratedRequirementsCiteTheSymbolsTheyDescribe
+### Requirement: SliceBackedRequirementsCiteTheirSymbolsThroughTheExistingAnchor
 
-Every requirement produced by spec generation SHALL cite the concrete symbols it describes, drawn
-from the graph slice supplied to the generator and expressed as stable `name::path` identifiers.
-The citation SHALL be emitted into the spec file as a machine-readable provenance line
-immediately beneath the requirement heading, in the same style the corpus already uses for
-decision provenance, so that it is valid OpenSpec markdown, legible to a human reader, and
-recoverable by a parser without ambiguity.
+A requirement generated from a model response **over a supplied symbol slice** SHALL cite the
+concrete symbols it describes, drawn from that slice and written in the repository's canonical
+symbol-id form.
 
-The output contract SHALL be schema-checked: a response missing the citation field SHALL be
-handled by the existing schema-guarded parse path rather than crashing or silently producing a
-citation-free requirement without a record. A requirement the model declines to cite SHALL be
-written without a provenance line and SHALL be treated downstream as uncited — never as a
-fabricated citation.
+The citation SHALL extend the **existing** implementation-provenance line to carry every cited
+symbol rather than only the single best-scoring one. A second provenance line type SHALL NOT be
+introduced: a requirement carries one anchor, so a reader and a parser are never asked to
+disambiguate two.
 
-The generator SHALL NOT invent a citation for a symbol absent from the slice it was given, and
-SHALL NOT emit a citation the requirement's text does not concern.
+Requirements the generator emits from a template, or from a model response with no symbol slice —
+the overview's capability and data-flow requirements, the domain-overview and endpoint fallbacks,
+and entity-validation requirements — SHALL be written without a citation and reported as
+**uncited-by-construction**, distinguished in the report from a citation a model declined to
+supply.
 
-#### Scenario: A generated requirement carries its symbols
+The slice supplied for a requirement SHALL be recorded, and the writer SHALL drop any cited
+symbol not present in that slice **before** the provenance line is written, so an out-of-slice
+citation is never persisted and can never later be graded. Relevance beyond slice membership is
+NOT deterministically checkable and SHALL NOT be claimed.
 
-- **GIVEN** a generation run over a domain whose slice contains `EdgeStore.open` and
-  `EdgeStore.dbPath`
-- **WHEN** a requirement describing store opening is generated
-- **THEN** the written requirement is followed by a provenance line naming those symbols as
-  `name::path` identifiers
+A response missing the citation field SHALL be handled by the existing schema-guarded parse path;
+the requirement is written uncited and the omission reported. No citation SHALL be fabricated and
+no run SHALL be aborted.
 
-#### Scenario: A missing citation degrades, never fails
+#### Scenario: A slice-backed requirement carries every cited symbol
 
-- **GIVEN** a model response that omits the citation field for one requirement
-- **WHEN** the response is parsed and written
-- **THEN** the requirement is written without a provenance line, the run completes, and the
-  omission is reported — no citation is fabricated and no run is aborted
+- **GIVEN** a generation run over a domain whose slice contains three functions the requirement
+  describes
+- **WHEN** the requirement is generated
+- **THEN** its provenance line names all three in canonical id form, through the existing
+  implementation-provenance line rather than a second line type
 
-### Requirement: CitationsSurviveWriteAndMerge
+#### Scenario: A template requirement is uncited by construction
 
-The spec writer SHALL preserve requirement provenance lines across every write mode. A merge
-SHALL NOT drop, reorder, or duplicate a provenance line; a regeneration that produces the same
-requirement with the same citations SHALL produce a byte-identical provenance line; and the
-corpus structure check SHALL accept the provenance line as valid content rather than reporting it
-as malformed.
+- **GIVEN** a domain-overview fallback requirement, emitted from a template with no model
+  response and no slice
+- **WHEN** the spec is written
+- **THEN** it carries no provenance line and is reported uncited-by-construction, distinct from a
+  declined citation
 
-Hand-written requirements without a provenance line SHALL be left exactly as they are.
+#### Scenario: An out-of-slice citation is dropped before it is written
 
-#### Scenario: Merge preserves provenance
+- **GIVEN** a model response citing a high-fan-in symbol that was not in the requirement's slice
+- **WHEN** the spec is written
+- **THEN** that symbol does not appear in the provenance line, so it can never be graded as
+  grounding
 
-- **GIVEN** a spec file containing generated requirements with provenance lines and human-written
-  requirements without them
-- **WHEN** the spec is regenerated in merge mode
-- **THEN** every provenance line is preserved for requirements that remain, and no provenance
-  line is added to the human-written requirements
+### Requirement: ProvenanceIsPlacedBelowNormativeTextAndIsParserSafe
 
-#### Scenario: Provenance is deterministic
+The provenance line SHALL be emitted **after** the requirement's normative text, matching the
+placement the decision syncer already uses, so a parser that recovers a requirement's description
+from the lines following its heading is unaffected.
 
-- **GIVEN** two generation runs producing the same requirement with the same cited symbols
-- **WHEN** the outputs are compared
-- **THEN** the provenance lines are byte-identical, including symbol order
+The requirement parser SHALL skip `>`-prefixed provenance lines when recovering a description,
+and SHALL recover requirements at both the `### Requirement:` and the nested `#### Requirement:`
+(sub-component) heading levels, so no requirement is absent from a grounding denominator that is
+required to be the full requirement set.
+
+Provenance lines are **regenerated**, not preserved: the writer replaces the generated section
+wholesale, so a re-generation producing the same cited symbols SHALL produce a byte-identical
+provenance line, and a re-generation yielding no citation for a requirement that previously
+carried one SHALL be reported as a citation regression rather than silently written. Content
+outside the generated section, including hand-written requirements, is governed by the existing
+merge-fidelity requirement in the `openspec` domain and is out of scope here.
+
+#### Scenario: The description is the requirement text, not the provenance
+
+- **GIVEN** a generated requirement carrying a provenance line
+- **WHEN** the requirement is parsed
+- **THEN** its recovered description is its `The system SHALL …` text, and the provenance line is
+  skipped
+
+#### Scenario: Sub-component requirements are counted
+
+- **GIVEN** a spec containing requirements at both heading levels
+- **WHEN** the corpus is enumerated for grounding
+- **THEN** both levels appear in the denominator
+
+#### Scenario: A lost citation is reported, not silently dropped
+
+- **GIVEN** a requirement that carried a citation in a prior generation and receives none in the
+  next
+- **WHEN** the spec is regenerated
+- **THEN** the loss is reported as a citation regression
