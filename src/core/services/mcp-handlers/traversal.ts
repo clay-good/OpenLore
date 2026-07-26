@@ -38,7 +38,12 @@
 
 import { open, stat, type FileHandle } from 'node:fs/promises';
 import { join } from 'node:path';
-import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_TRAVERSAL_INDEX } from '../../../constants.js';
+import {
+  OPENLORE_DIR,
+  OPENLORE_ANALYSIS_SUBDIR,
+  ARTIFACT_TRAVERSAL_INDEX,
+  ARTIFACT_LLM_CONTEXT,
+} from '../../../constants.js';
 import {
   buildTraversalIndex,
   deserializeTraversalIndex,
@@ -62,15 +67,32 @@ function indexPath(absDir: string): string {
 }
 
 /**
- * Whether a persisted structure exists for `absDir`. Lets the read path skip
- * digesting the (multi-MB) analysis artifact when there is nothing to unlock —
- * see the call site in `readCachedContext`.
+ * Cheap (two-stat) pre-check: could the persisted structure possibly belong to the
+ * current `llm-context.json`? Only then is it worth digesting a multi-MB artifact
+ * to find out for certain — see the call site in `readCachedContext`.
+ *
+ * The test is mtime ordering. `analyze` writes the structure strictly AFTER the
+ * context (see `artifact-generator.ts`), so a structure older than the context can
+ * only be left over from a previous generation. That is exactly the steady state in
+ * watch mode: the watcher rewrites `llm-context.json` on every flush and
+ * deliberately does not rebuild the structure, so without this check every cold read
+ * would pay a full digest plus a full artifact read only to reject the result —
+ * measured at ~40 ms per read on this repo, forever, until the next full `analyze`.
+ *
+ * A false NEGATIVE (clock skew, a filesystem with coarse timestamps) costs an
+ * in-memory rebuild — the correct answer, slightly slower. A false POSITIVE costs
+ * nothing but the digest, because `contextDigest` still has to agree before the
+ * structure is used. Neither can produce a wrong answer.
  */
-export async function traversalIndexExists(analysisDir: string): Promise<boolean> {
+export async function traversalIndexMayBeCurrent(analysisDir: string): Promise<boolean> {
   try {
-    return (await stat(join(analysisDir, ARTIFACT_TRAVERSAL_INDEX))).isFile();
+    const [ix, ctx] = await Promise.all([
+      stat(join(analysisDir, ARTIFACT_TRAVERSAL_INDEX)),
+      stat(join(analysisDir, ARTIFACT_LLM_CONTEXT)),
+    ]);
+    return ix.isFile() && ix.mtimeMs >= ctx.mtimeMs;
   } catch {
-    return false;
+    return false; // no structure (or no context) — nothing to unlock
   }
 }
 

@@ -443,24 +443,6 @@ export class AnalysisArtifactGenerator {
         ),
       ];
 
-      // Precomputed reachability structure (change: optimize-reachability-precompute):
-      // SCC condensation + topological order + CSR adjacency, so the reachability
-      // tools traverse a lookup instead of rebuilding adjacency per call. Written
-      // under the same atomic-write + analysis-lock discipline as its siblings, and
-      // stamped with the digest of the exact llm-context.json bytes above — a reader
-      // refuses any structure whose digest does not match the graph it is serving,
-      // so the pair can never come from different generations. Fail-soft like the
-      // other side artifacts: a write failure means the next read builds in memory,
-      // never that analysis aborts.
-      if (artifacts.llmContext.callGraph) {
-        saves.push(
-          writeTraversalIndexArtifact(
-            this.options.outputDir,
-            artifacts.llmContext.callGraph,
-            contextJson,
-          ).catch(() => {})
-        );
-      }
 
       if (enrichment?.schemas) {
         saves.push(atomicWriteFile(
@@ -526,6 +508,28 @@ export class AnalysisArtifactGenerator {
       }
 
       await Promise.all(saves);
+
+      // Precomputed reachability structure (change: optimize-reachability-precompute):
+      // SCC condensation + CSR adjacency, so the reachability tools traverse a lookup
+      // instead of rebuilding adjacency per call. Stamped with the digest of the exact
+      // llm-context.json bytes written above, so a reader refuses any structure that
+      // does not belong to the graph it is serving.
+      //
+      // Written AFTER the set above, not concurrently with it, so its mtime is never
+      // older than llm-context.json's. That ordering is what lets a reader rule out a
+      // stale structure with one stat instead of digesting a multi-MB artifact — see
+      // `traversalIndexMayBeCurrent`. Racing the two writes would make the mtime
+      // comparison meaningless in about half of all analyses.
+      //
+      // Fail-soft like the other side artifacts: a write failure means the next read
+      // builds in memory, never that analysis aborts.
+      if (artifacts.llmContext.callGraph) {
+        await writeTraversalIndexArtifact(
+          this.options.outputDir,
+          artifacts.llmContext.callGraph,
+          contextJson,
+        ).catch(() => {});
+      }
     });
 
     // Write SQLite edge store alongside JSON artifacts (additive, non-fatal)

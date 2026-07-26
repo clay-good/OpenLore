@@ -23,7 +23,17 @@
 - [x] Load-once path (`mcp-handlers/traversal.ts`): memoized in a `WeakMap` keyed on
       the `SerializedCallGraph` object, so a new generation is a new object is a
       reload — no separate generation bookkeeping that could drift. Read is
-      size-bounded, matching the `ARTIFACT_MAX_BYTES` guard its sibling carries.
+      size-bounded through a single file handle (stat-then-open-by-path was a real
+      TOCTOU, CodeQL `js/file-system-race`), matching the `ARTIFACT_MAX_BYTES` guard
+      its sibling carries.
+- [x] Two-stat staleness pre-check before paying to validate the structure. Analyze
+      writes the structure strictly AFTER `llm-context.json`, so a structure older
+      than the context is provably from a previous generation. Without it, the
+      combination of "watcher rewrites the context but not the structure" and
+      "gate on mere existence" made every cold read after a flush pay a full digest
+      plus a full artifact read only to reject the result — ~40 ms per read, forever,
+      until the next full analyze. A false negative costs a rebuild; a false positive
+      costs nothing, because `contextDigest` still has to agree.
 - [x] Migrate traversals: `test-impact.ts`, `coverage-gaps.ts`, `reachability.ts`,
       `change-footprint.ts`, `pathfind.ts`, `graph.ts` (`trace_execution_path`),
       `env-impact.ts`, `claim-verification.ts`; every production `buildAdjacency` call
@@ -60,14 +70,20 @@
 - [x] End-to-end on the REAL analyzed graph (`npm run verify:reachability`): 7,349
       nodes / 18,973 edges, all 15 checks pass under both filters, including the
       persisted artifact's digest binding and rehydrated equivalence
-- [x] Scale benchmark (`npm run bench:reachability`), 50,000 nodes / 200,000 edges,
-      answers asserted equal before timing:
-      | conclusion | before | after | |
-      |---|---|---|---|
-      | `report_coverage_gaps` whole-graph reach | 340.8 ms | 6.6 ms | 51.6x |
-      | `select_tests` backward walk (depth 12) | 686.0 ms | 114.5 ms | 6.0x |
-      Structure build, paid once per generation, is 224 ms at that scale; the persisted
-      artifact is 1.1 MB against an 11.7 MB `llm-context.json` on this repo.
+- [x] Scale benchmark (`npm run bench:reachability`), 50,000 nodes / 200,000 edges.
+      Answers — including `select_tests`' parent chains — are asserted equal before
+      timing, and each phase reports the MEDIAN of 5 trials with its range, because a
+      single batch varies ~2x run to run on this workload:
+      | conclusion | before (median) | after (median) | speedup | worst observed |
+      |---|---|---|---|---|
+      | `report_coverage_gaps` whole-graph reach | 356.6 ms | 5.9 ms | 60x | 35x |
+      | `select_tests` backward walk (depth 12) | 1875.3 ms | 119.6 ms | 15x | 13x |
+      Both "before" figures run the walk the handler ACTUALLY ran — `select_tests`
+      included the `[...set].sort()` and parent tracking its `viaPath` is rebuilt
+      from, which an earlier draft of this benchmark omitted and thereby flattered
+      the replacement (it reported 6.0x for what is really ~15x).
+      Structure build, paid once per generation, is ~190-250 ms at that scale; the
+      persisted artifact is 1.1 MB against an 11.7 MB `llm-context.json` on this repo.
 - [x] Full suite green (329 files, 6,338 tests)
 
 ## Deferred, with the measurement that deferred it

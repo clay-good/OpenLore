@@ -25,7 +25,12 @@ import {
   writeTraversalIndexArtifact,
   serializeTraversalIndex,
 } from '../../analyzer/condensation.js';
-import { loadTraversalIndex, traversalIndexFor, recordArtifactDigest } from './traversal.js';
+import {
+  loadTraversalIndex,
+  traversalIndexFor,
+  recordArtifactDigest,
+  traversalIndexMayBeCurrent,
+} from './traversal.js';
 import type { CallEdge, FunctionNode, SerializedCallGraph } from '../../analyzer/call-graph.js';
 
 function node(id: string): FunctionNode {
@@ -132,6 +137,53 @@ describe('persisted traversal structure', () => {
     writeFileSync(indexPath(), serializeTraversalIndex(graph(GEN_B), 'some-digest'));
     const ix = await loadTraversalIndex(dir, cg);
     expect([...ix.reachAll(['x.ts::a'], 'forward')].sort()).toEqual(['x.ts::a', 'x.ts::b', 'x.ts::c']);
+  });
+});
+
+describe('staleness pre-check (cost, not correctness)', () => {
+  // Validating the structure means digesting a multi-MB context (~29 ms here) and
+  // reading the structure (~10 ms). That is worth paying only when the structure
+  // could still be current. The watcher rewrites `llm-context.json` on every flush
+  // and deliberately does NOT rebuild the structure, so without this check every
+  // cold read after a flush would pay the full cost only to reject the result —
+  // permanently, until the next full `analyze`.
+  const contextPath = () => join(analysisDir, 'llm-context.json');
+
+  it('says yes when the structure was written after the context (the analyze order)', async () => {
+    writeFileSync(contextPath(), '{}');
+    await new Promise(r => setTimeout(r, 12));
+    await writeTraversalIndexArtifact(analysisDir, graph(GEN_A), '{}');
+    expect(await traversalIndexMayBeCurrent(analysisDir)).toBe(true);
+  });
+
+  it('says no when the context was rewritten after it — the post-flush steady state', async () => {
+    await writeTraversalIndexArtifact(analysisDir, graph(GEN_A), '{}');
+    await new Promise(r => setTimeout(r, 12));
+    writeFileSync(contextPath(), '{"changed":true}'); // what a watcher flush does
+    expect(await traversalIndexMayBeCurrent(analysisDir)).toBe(false);
+  });
+
+  it('says no when either file is missing', async () => {
+    expect(await traversalIndexMayBeCurrent(analysisDir)).toBe(false); // neither
+    writeFileSync(contextPath(), '{}');
+    expect(await traversalIndexMayBeCurrent(analysisDir)).toBe(false); // no structure
+    rmSync(contextPath());
+    await writeTraversalIndexArtifact(analysisDir, graph(GEN_A), '{}');
+    expect(await traversalIndexMayBeCurrent(analysisDir)).toBe(false); // no context
+  });
+
+  it('is only a cost gate — a structure that passes it is still digest-checked', async () => {
+    // Same mtime ordering as a real analyze, but the structure belongs to a
+    // different generation. The pre-check waves it through; the digest must not.
+    writeFileSync(contextPath(), '{}');
+    await new Promise(r => setTimeout(r, 12));
+    await writeTraversalIndexArtifact(analysisDir, graph(GEN_A), '{"other":"generation"}');
+    expect(await traversalIndexMayBeCurrent(analysisDir)).toBe(true);
+
+    const cg = graph(GEN_B);
+    recordArtifactDigest(cg, artifactDigest('{}'));
+    const ix = await loadTraversalIndex(dir, cg);
+    expect([...ix.reachAll(['x.ts::a'], 'forward')].sort()).toEqual(['x.ts::a', 'x.ts::b']);
   });
 });
 

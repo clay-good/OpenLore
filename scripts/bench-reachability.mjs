@@ -97,27 +97,55 @@ function oldReachAll(seeds, forward) {
   }
   return live;
 }
-function oldBfsDepth(seeds, adjacency, maxDepth) {
-  const visited = new Map();
-  const queue = seeds.map(id => ({ id, depth: 0 }));
-  for (const id of seeds) visited.set(id, 0);
-  while (queue.length > 0) {
+/**
+ * test-impact.ts's pre-change backward walk, verbatim: sorted neighbours AND parent
+ * tracking. Both matter — `select_tests` reconstructs its `viaPath` from `parent`,
+ * and the `[...set].sort()` is real work the old code paid. Benchmarking against an
+ * unsorted, parentless variant would flatter the replacement.
+ */
+function oldSortedBfs(seeds, adjacency, maxDepth) {
+  const depthOf = new Map();
+  const parent = new Map();
+  const queue = [];
+  for (const s of seeds) { depthOf.set(s, 0); queue.push({ id: s, depth: 0 }); }
+  while (queue.length) {
     const { id, depth } = queue.shift();
     if (depth >= maxDepth) continue;
-    for (const nId of adjacency.get(id) ?? []) {
-      if (!visited.has(nId)) { visited.set(nId, depth + 1); queue.push({ id: nId, depth: depth + 1 }); }
+    for (const caller of [...(adjacency.get(id) ?? [])].sort()) {
+      if (!depthOf.has(caller)) {
+        depthOf.set(caller, depth + 1);
+        parent.set(caller, id);
+        queue.push({ id: caller, depth: depth + 1 });
+      }
     }
   }
-  return visited;
+  return { depthOf, parent };
 }
 
 const ms = (t) => `${t.toFixed(1)} ms`;
+
+/**
+ * Median per-call time over TRIALS independent batches, with the observed spread.
+ * A single batch on this workload varies by ~2x run to run (GC, allocation
+ * pressure from the Map/Set rebuild), so a point estimate would not reproduce —
+ * the median and the min-max range are what a reader can check against.
+ */
+const TRIALS = 5;
 function time(label, calls, fn) {
   fn(); // warm
-  const t0 = performance.now();
-  for (let i = 0; i < calls; i++) fn();
-  const total = performance.now() - t0;
-  return { label, perCall: total / calls, total };
+  const samples = [];
+  for (let t = 0; t < TRIALS; t++) {
+    const t0 = performance.now();
+    for (let i = 0; i < calls; i++) fn();
+    samples.push((performance.now() - t0) / calls);
+  }
+  samples.sort((a, b) => a - b);
+  return {
+    label,
+    perCall: samples[Math.floor(samples.length / 2)],
+    lo: samples[0],
+    hi: samples[samples.length - 1],
+  };
 }
 
 console.log(`Graph: ${NODES.toLocaleString()} nodes, ~${(NODES * AVG_FANOUT).toLocaleString()} edges; ${CALLS} calls per phase\n`);
@@ -138,16 +166,17 @@ console.log(`Structure build (once per analyze): ${ms(buildMs)}  ` +
   const { forward, backward } = buildAdjacency(cg);
   const oldFwd = oldReachAll(testSeeds, forward);
   const newFwd = ix.reachAll(testSeeds, 'forward');
-  const oldBwd = oldBfsDepth(changeSeeds, backward, 12);
-  const newBwd = ix.bfsDepths(changeSeeds, 'backward', 12);
+  const oldBwd = oldSortedBfs(changeSeeds, backward, 12);
+  const newBwd = ix.bfsWithParents(changeSeeds, 'backward', 12, undefined, { sortNeighbors: true });
+  const eqMap = (a, b) => a.size === b.size && [...a].every(([k, v]) => b.get(k) === v);
   const sameSet = oldFwd.size === newFwd.size && [...oldFwd].every(x => newFwd.has(x));
-  const sameMap = oldBwd.size === newBwd.size && [...oldBwd].every(([k, v]) => newBwd.get(k) === v);
-  if (!sameSet || !sameMap) {
+  if (!sameSet || !eqMap(oldBwd.depthOf, newBwd.depth) || !eqMap(oldBwd.parent, newBwd.parent)) {
     console.error('ANSWERS DIVERGED — benchmark aborted.');
     process.exit(1);
   }
-  console.log(`Equivalence: forward reach ${newFwd.size.toLocaleString()} nodes, ` +
-    `backward depth-12 ${newBwd.size.toLocaleString()} nodes — identical to the per-call BFS.\n`);
+  console.log(`Equivalence: forward reach ${newFwd.size.toLocaleString()} nodes; ` +
+    `backward depth-12 ${newBwd.depth.size.toLocaleString()} nodes with ` +
+    `${newBwd.parent.size.toLocaleString()} parent links — all identical to the per-call BFS.\n`);
 }
 
 const rows = [];
@@ -158,19 +187,22 @@ rows.push(time('report_coverage_gaps  before (rebuild + BFS)', CALLS, () => {
 rows.push(time('report_coverage_gaps  after  (condensation walk)', CALLS, () => {
   ix.reachAll(testSeeds, 'forward');
 }));
-rows.push(time('select_tests          before (rebuild + BFS)', CALLS, () => {
+rows.push(time('select_tests          before (rebuild + sorted BFS)', CALLS, () => {
   const { backward } = buildAdjacency(cg);
-  oldBfsDepth(changeSeeds, backward, 12);
+  oldSortedBfs(changeSeeds, backward, 12);
 }));
-rows.push(time('select_tests          after  (CSR BFS)', CALLS, () => {
-  ix.bfsDepths(changeSeeds, 'backward', 12, undefined, { sortNeighbors: true });
+rows.push(time('select_tests          after  (CSR sorted BFS)', CALLS, () => {
+  ix.bfsWithParents(changeSeeds, 'backward', 12, undefined, { sortNeighbors: true });
 }));
 
 const width = Math.max(...rows.map(r => r.label.length));
+console.log(`median of ${TRIALS} trials x ${CALLS} calls (range in brackets)\n`);
 for (let i = 0; i < rows.length; i += 2) {
   const [before, after] = [rows[i], rows[i + 1]];
-  console.log(`${before.label.padEnd(width)}  ${ms(before.perCall).padStart(10)}`);
-  console.log(`${after.label.padEnd(width)}  ${ms(after.perCall).padStart(10)}` +
-    `   ${(before.perCall / after.perCall).toFixed(1)}x`);
+  const range = r => `[${r.lo.toFixed(1)}-${r.hi.toFixed(1)}]`;
+  console.log(`${before.label.padEnd(width)}  ${ms(before.perCall).padStart(10)}  ${range(before)}`);
+  console.log(`${after.label.padEnd(width)}  ${ms(after.perCall).padStart(10)}  ${range(after)}` +
+    `   ${(before.perCall / after.perCall).toFixed(1)}x` +
+    `  (worst case ${(before.lo / after.hi).toFixed(1)}x)`);
   console.log();
 }
