@@ -15,12 +15,26 @@ Because forward and backward adjacency are not transposes of one another — an 
 is not itself a node of the graph contributes to backward adjacency only — a condensation SHALL
 be computed per direction, over exactly the adjacency that direction traverses.
 
+Analyze SHALL write the structure strictly after the artifact it is stamped against, not
+concurrently with it, so the structure's modification time can never precede the context's. That
+ordering is what lets a reader rule out a superseded structure with a stat instead of digesting a
+multi-MB artifact; written concurrently the comparison would be meaningless, so the ordering is a
+requirement rather than an incidental detail.
+
 The watcher's incremental flush SHALL NOT rebuild the structure, because that lane never changes
-the call graph: rebuilding it would produce a bit-identical structure at measured cost
-(+40-53% on a flush of this repo, and seconds of event-loop-blocking CPU at monorepo scale) while
-holding the analysis lock. A flush therefore leaves the persisted structure stamped for the
-previous context bytes, and a later cold read rebuilds it in memory until the next full analyze —
-a slower answer, never a stale one.
+the call graph: rebuilding it would produce a bit-identical structure while holding the analysis
+lock, at a cost that grows with the graph. A flush therefore leaves the persisted structure
+stamped for superseded context bytes, and a later read builds in memory until the next full
+analyze — a slower answer, never a stale one.
+
+#### Scenario: A superseded structure is ruled out without reading it
+
+- **GIVEN** a persisted structure and an incremental flush that has rewritten the analysis
+  context since it was written
+- **WHEN** a reader considers using it
+- **THEN** the modification times alone establish that it is superseded, so neither the context
+  digest nor the structure itself is read — the cost of rejecting it does not scale with the
+  size of the artifacts
 
 #### Scenario: The structure tracks the graph, never leads or trails it
 

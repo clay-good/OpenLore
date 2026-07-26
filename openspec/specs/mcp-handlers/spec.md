@@ -1024,10 +1024,14 @@ All reachability-answering handlers (`select_tests`, `report_coverage_gaps`, `fi
 loaded once per artifact generation, rather than rebuilding per-call adjacency. An unfiltered
 whole-graph reach SHALL run as a topological sweep of the condensation DAG; a reach restricted to
 directly-resolved edges runs an allocation-free CSR walk instead, because the condensation
-describes the whole graph and a filtered graph can have strictly finer components. Every tool's conclusion payload SHALL be
-unchanged: for any input, the served answer SHALL equal the answer of the per-call BFS over the
-same artifact — including the ORDER-dependent parts of a payload (a reconstructed `viaPath`, the
-first N paths a bounded enumeration returns), not merely the set of results.
+describes the whole graph and a filtered graph can have strictly finer components. Every tool's
+conclusion payload SHALL be unchanged: for any input, the served answer SHALL equal the answer of
+the per-call BFS over the same artifact — including the ORDER-dependent parts of a payload (a
+reconstructed `viaPath`, the first N paths a bounded enumeration returns), not merely the set of
+results.
+
+Establishing whether a persisted structure is current SHALL cost less than rebuilding it. A
+handler that never traverses SHALL NOT pay for the structure's existence at all.
 
 `get_subgraph` and `analyze_impact` traverse the SQLite edge store one batched query per BFS
 level and never built per-call adjacency; they are therefore out of scope here, and this

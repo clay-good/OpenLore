@@ -73,3 +73,56 @@ describe('harden-artifact-write-atomicity: every artifact writer adopts the shar
     expect(body).not.toMatch(/withAnalysisLock|acquireAnalysisLock/);
   });
 });
+
+/**
+ * optimize-reachability-precompute — the write-ORDER guard.
+ *
+ * The read path decides whether the persisted traversal structure is worth
+ * validating by comparing mtimes: a structure older than `llm-context.json` is
+ * provably from a previous generation (`traversalIndexMayBeCurrent`). That
+ * inference is only sound because `analyze` writes the structure strictly AFTER
+ * the context — sequentially, not as another entry in the concurrent `saves`
+ * array. Racing them put the structure FIRST in 80 of 100 measured runs.
+ *
+ * Nothing else catches a regression here: moving the write back into `saves`
+ * breaks no test and changes no answer, it just makes the pre-check ~always
+ * false, silently disabling the persisted structure. A source scan is the right
+ * shape for that — the ordering is structural, and a runtime test would have to
+ * run a full analyze to observe it.
+ *
+ * Guards analyzer-spec requirement ReachabilityStructureIsComputedAtAnalyzeTime.
+ */
+describe('optimize-reachability-precompute: the traversal structure is written after the context', () => {
+  it('writes the structure sequentially after the concurrent artifact set, not inside it', () => {
+    const src = read(ARTIFACT_GENERATOR);
+
+    const barrier = src.indexOf('await Promise.all(saves)');
+    const structureWrite = src.indexOf('writeTraversalIndexArtifact(');
+    const contextWrite = src.indexOf('ARTIFACT_LLM_CONTEXT');
+    expect(barrier).toBeGreaterThan(-1);
+    expect(structureWrite).toBeGreaterThan(-1);
+    expect(contextWrite).toBeGreaterThan(-1);
+
+    // The context is written in the concurrent set; the structure is written after
+    // that set has fully settled, so its mtime can never precede the context's.
+    expect(contextWrite).toBeLessThan(barrier);
+    expect(structureWrite).toBeGreaterThan(barrier);
+
+    // And it must be awaited — a floating promise would reintroduce the race the
+    // sequencing exists to remove.
+    expect(src.slice(barrier)).toMatch(/await\s+writeTraversalIndexArtifact\(/);
+  });
+
+  it('never pushes the structure write into the concurrent saves array', () => {
+    const src = read(ARTIFACT_GENERATOR);
+    expect(src).not.toMatch(/saves\.push\([^)]*writeTraversalIndexArtifact/s);
+  });
+
+  it('keeps the structure write inside the analysis-lock fence', () => {
+    const src = read(ARTIFACT_GENERATOR);
+    const fence = src.indexOf('withAnalysisLock(this.options.outputDir');
+    const structureWrite = src.indexOf('writeTraversalIndexArtifact(', src.indexOf('await Promise.all(saves)'));
+    expect(fence).toBeGreaterThan(-1);
+    expect(structureWrite).toBeGreaterThan(fence);
+  });
+});
