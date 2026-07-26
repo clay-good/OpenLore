@@ -15,24 +15,28 @@
  * garbage-collected context takes its structure with it.
  *
  * The persisted artifact is an optimization on top of that, never a source of
- * truth: it is accepted only when its `contextDigest` matches the digest of the
- * `llm-context.json` bytes the served graph was parsed from. Anything else —
- * absent, stale, truncated, wrong schema version, foreign endianness — falls back
- * to building the structure in memory. A slower correct answer always wins.
+ * truth. Anything it cannot prove about itself — absent, oversized, stale-digest,
+ * truncated, altered in its own bytes, addressing outside its own arrays, written
+ * by another schema version, byte-ordered for another host — falls back to building
+ * the structure in memory. A slower correct answer always wins.
  *
- * TRUST BOUNDARY, stated plainly. The digest check proves the structure was
- * written alongside THESE artifact bytes; it is not a signature, so it does not
- * prove the structure faithfully describes that graph. A writer with a lying
- * digest could serve a wrong traversal — but such a writer already has write
- * access to `.openlore/analysis/`, where `llm-context.json` (the graph itself) sits
- * beside it and is exactly as forgeable. This artifact therefore adds no new trust
- * surface: it is trusted precisely as far as the graph artifact is, and never
- * further. Verifying the structure against the graph would cost the O(N+E) rebuild
- * it exists to avoid, and would buy nothing an attacker could not get by editing
- * the graph directly.
+ * TRUST BOUNDARY, stated plainly. Two different properties, deliberately not
+ * conflated:
+ *  - CORRUPTION is caught. `contextDigest` proves the structure belongs to the
+ *    graph being served, `payloadDigest` proves its own bytes are intact, and the
+ *    bounds checks prove no index escapes the array it addresses. Bitrot, a partial
+ *    write, and a careless hand edit are all refused, not answered.
+ *  - FORGERY is not, and cannot be here. A writer that recomputes both digests
+ *    could serve a structure that lies about the graph. But that writer already has
+ *    write access to `.openlore/analysis/`, where `llm-context.json` — the graph
+ *    itself — sits beside it and is exactly as forgeable. This artifact adds no new
+ *    trust surface: it is trusted precisely as far as the graph artifact is, never
+ *    further, and verifying it against the graph would cost the O(N+E) rebuild it
+ *    exists to avoid while buying nothing an attacker could not get by editing the
+ *    graph directly.
  */
 
-import { readFile, stat } from 'node:fs/promises';
+import { open, stat, type FileHandle } from 'node:fs/promises';
 import { join } from 'node:path';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_TRAVERSAL_INDEX } from '../../../constants.js';
 import {
@@ -114,11 +118,16 @@ export async function loadTraversalIndex(
 
   const digest = digestByGraph.get(cg);
   if (digest !== undefined) {
+    let handle: FileHandle | undefined;
     try {
-      const path = indexPath(absDir);
-      const st = await stat(path);
+      // Size-check and read through ONE open handle, so the bytes measured are the
+      // bytes read. A stat-then-read pair would leave a window in which the file is
+      // swapped for a larger one after passing the ceiling — a real TOCTOU on an
+      // artifact directory the threat model treats as untrusted.
+      handle = await open(indexPath(absDir), 'r');
+      const st = await handle.stat();
       if (st.size > TRAVERSAL_INDEX_MAX_BYTES) return traversalIndexFor(cg);
-      const raw = await readFile(path, 'utf-8');
+      const raw = await handle.readFile('utf-8');
       const loaded = deserializeTraversalIndex(raw, digest);
       if (loaded) {
         // Re-check the memo: a concurrent request may have built one across our
@@ -131,6 +140,8 @@ export async function loadTraversalIndex(
       }
     } catch {
       // No artifact, unreadable, or not parseable — build it instead.
+    } finally {
+      await handle?.close().catch(() => {});
     }
   }
   return traversalIndexFor(cg);
