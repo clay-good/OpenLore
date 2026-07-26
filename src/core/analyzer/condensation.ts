@@ -16,11 +16,15 @@
  *    runs on `Int32Array`s, never on Maps of Sets of strings.
  *  - **CSR adjacency, forward and backward.** `offsets[i]..offsets[i+1]` slices
  *    `targets`, with a parallel `flags` byte per edge slot carrying the
- *    kind/confidence bits the existing filters need (today: `synthesized`, so
- *    `directResolvedOnly` stays expressible). Slots are stored in the original
- *    `cg.edges` order within each source group and are NOT pre-deduplicated, so
- *    any filtered view reproduces `buildAdjacency`'s insertion-ordered `Set`
- *    exactly — see {@link TraversalIndex.neighborIds}.
+ *    kind/confidence bits the existing filters need (`synthesized`, so
+ *    `directResolvedOnly` stays expressible) plus the per-filter forward
+ *    *eligibility* bits — `buildAdjacency` grows its forward key set as it walks
+ *    the filtered edge list, so whether a forward edge is emitted depends on the
+ *    filter AND the edge's position, and that verdict is resolved at build time
+ *    per slot. Slots are stored in the original `cg.edges` order within each
+ *    source group and are NOT pre-deduplicated, so any filtered view reproduces
+ *    `buildAdjacency`'s insertion-ordered `Set` exactly — see
+ *    {@link TraversalIndex.neighborIds}.
  *  - **SCC condensation + topological order.** Tarjan (iterative, on the dense
  *    ids) collapses cycles; whole-graph reaches then run as a single array scan
  *    over the condensation DAG in topological order — linear and allocation-free,
@@ -40,6 +44,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { atomicWriteFile } from '../decisions/atomic-store.js';
 import { ARTIFACT_TRAVERSAL_INDEX } from '../../constants.js';
@@ -72,11 +77,25 @@ export interface TraversalFilter {
   directResolvedOnly?: boolean;
 }
 
-/** Edge-slot flag bits carried in the parallel per-edge mask. */
+/**
+ * Edge-slot flag bits carried in the parallel per-edge mask.
+ *
+ * `FWD_ELIGIBLE_*` exist because `buildAdjacency` creates forward-map KEYS as it
+ * walks the (already filtered) edge list, so whether a forward edge is emitted at
+ * all depends on both the filter and the edge's POSITION in `cg.edges`: an edge
+ * out of a caller that is not a `cg.nodes` member is dropped unless some earlier
+ * surviving edge already made that caller a key (by naming it as a callee). That
+ * predicate is therefore per-slot and per-filter, and is resolved at build time
+ * into these bits rather than approximated by a whole-graph pre-pass.
+ */
 const FLAG_SYNTHESIZED = 1 << 0;
+/** This forward slot is emitted in the unfiltered view. */
+const FLAG_FWD_ELIGIBLE_ALL = 1 << 1;
+/** This forward slot is emitted under `directResolvedOnly`. */
+const FLAG_FWD_ELIGIBLE_DIRECT = 1 << 2;
 
 /** Serialized-artifact schema version. Bumped when the layout changes. */
-export const TRAVERSAL_INDEX_VERSION = 1;
+export const TRAVERSAL_INDEX_VERSION = 2;
 
 interface Csr {
   offsets: Int32Array;
@@ -88,7 +107,7 @@ interface Csr {
 export interface TraversalIndex {
   /** Number of distinct node ids in the traversal universe. */
   readonly nodeCount: number;
-  /** Number of forward edge slots (== the number of usable `cg.edges`). */
+  /** Number of edge slots — the count of `cg.edges` that carry a `calleeId`. */
   readonly edgeCount: number;
   /** Number of strongly-connected components in the condensation. */
   readonly componentCount: number;
@@ -163,7 +182,15 @@ export interface TraversalIndex {
     dir: Direction,
     maxDepth: number,
     filter?: TraversalFilter,
-    opts?: { sortNeighbors?: boolean },
+    opts?: {
+      sortNeighbors?: boolean;
+      /**
+       * Stop as soon as this id is reached. The result then covers only what was
+       * explored up to that point — enough to reconstruct the path TO `stopAt`,
+       * which is all a single-target reachability question needs.
+       */
+      stopAt?: string;
+    },
   ): { depth: Map<string, number>; parent: Map<string, string> };
 }
 
@@ -205,23 +232,30 @@ function buildIndexParts(cg: SerializedCallGraph): IndexParts {
     return i;
   };
   for (const n of nodes) intern(n.id);
-  // `forwardEligible` = the ids that are KEYS in buildAdjacency's forward map:
-  // the graph's own nodes plus every callee (which gets an entry created for it).
-  const forwardEligible = new Set<number>();
-  for (const n of nodes) forwardEligible.add(indexById.get(n.id)!);
   for (const e of edges) {
     if (!e.calleeId) continue;
-    forwardEligible.add(intern(e.calleeId));
-  }
-  for (const e of edges) {
-    if (!e.calleeId) continue;
+    intern(e.calleeId);
     intern(e.callerId);
   }
 
   const nodeCount = nodeIds.length;
 
   // ── Usable edge slots, in cg.edges order. `flags` carries the per-edge
-  //    kind/confidence bits the filters read.
+  //    kind/confidence bits and the per-filter forward-eligibility bits.
+  //
+  //    Forward-key sets are grown here in exactly the order — and with exactly
+  //    the interleaving — `buildAdjacency` grows its `forward` map: the callee's
+  //    key is created BEFORE the caller's add is attempted (so a self-edge from an
+  //    unindexed id lands), and a filtered-out edge never creates a key at all
+  //    (so the strict view's key set is strictly smaller, not merely its edges).
+  const fwdKeysAll = new Set<number>();
+  const fwdKeysDirect = new Set<number>();
+  for (const n of nodes) {
+    const i = indexById.get(n.id)!;
+    fwdKeysAll.add(i);
+    fwdKeysDirect.add(i);
+  }
+
   const srcF: number[] = [];
   const dstF: number[] = [];
   const flagF: number[] = [];
@@ -232,10 +266,17 @@ function buildIndexParts(cg: SerializedCallGraph): IndexParts {
     if (!e.calleeId) continue;
     const caller = indexById.get(e.callerId)!;
     const callee = indexById.get(e.calleeId)!;
-    const flags = e.confidence === 'synthesized' ? FLAG_SYNTHESIZED : 0;
-    if (forwardEligible.has(caller)) {
-      srcF.push(caller); dstF.push(callee); flagF.push(flags);
+    const synthesized = e.confidence === 'synthesized';
+    let flags = synthesized ? FLAG_SYNTHESIZED : 0;
+
+    fwdKeysAll.add(callee);
+    if (fwdKeysAll.has(caller)) flags |= FLAG_FWD_ELIGIBLE_ALL;
+    if (!synthesized) {
+      fwdKeysDirect.add(callee);
+      if (fwdKeysDirect.has(caller)) flags |= FLAG_FWD_ELIGIBLE_DIRECT;
     }
+
+    srcF.push(caller); dstF.push(callee); flagF.push(flags);
     srcB.push(callee); dstB.push(caller); flagB.push(flags);
   }
 
@@ -250,8 +291,11 @@ function buildIndexParts(cg: SerializedCallGraph): IndexParts {
   // `condensation.test.ts`.
   return {
     nodeIds, indexById, forward, backward,
-    condForward: condense(nodeCount, forward),
-    condBackward: condense(nodeCount, backward),
+    // The condensation serves only the UNFILTERED walk, so it is built over the
+    // slots that view actually traverses: forward drops slots the caller was not
+    // yet a key for; backward traverses every slot.
+    condForward: condense(nodeCount, forward, f => (f & FLAG_FWD_ELIGIBLE_ALL) !== 0),
+    condBackward: condense(nodeCount, backward, () => true),
   };
 }
 
@@ -263,8 +307,8 @@ function buildIndexParts(cg: SerializedCallGraph): IndexParts {
  * DAG. `topoOrder` materializes the source→sink order rather than leaving that
  * invariant implicit at every read site; `condensation.test.ts` pins it.
  */
-function condense(nodeCount: number, csr: Csr): Condensation {
-  const { component, componentCount } = tarjanScc(nodeCount, csr);
+function condense(nodeCount: number, csr: Csr, slotOk: (flags: number) => boolean): Condensation {
+  const { component, componentCount } = tarjanScc(nodeCount, csr, slotOk);
   const topoOrder = new Int32Array(componentCount);
   for (let c = 0; c < componentCount; c++) topoOrder[c] = componentCount - 1 - c;
   return {
@@ -272,7 +316,7 @@ function condense(nodeCount: number, csr: Csr): Condensation {
     componentCount,
     topoOrder,
     members: buildMembers(nodeCount, componentCount, component),
-    compAdj: buildComponentCsr(componentCount, component, csr),
+    compAdj: buildComponentCsr(componentCount, component, csr, slotOk),
   };
 }
 
@@ -295,7 +339,11 @@ function buildCsr(nodeCount: number, src: number[], dst: number[], flag: number[
 }
 
 /** node → component id, numbered in Tarjan completion (reverse topological) order. */
-function tarjanScc(nodeCount: number, fwd: Csr): { component: Int32Array; componentCount: number } {
+function tarjanScc(
+  nodeCount: number,
+  fwd: Csr,
+  slotOk: (flags: number) => boolean,
+): { component: Int32Array; componentCount: number } {
   const UNVISITED = -1;
   const index = new Int32Array(nodeCount).fill(UNVISITED);
   const lowlink = new Int32Array(nodeCount);
@@ -322,7 +370,9 @@ function tarjanScc(nodeCount: number, fwd: Csr): { component: Int32Array; compon
     while (top >= 0) {
       const v = frameNode[top];
       if (frameEdge[top] < fwd.offsets[v + 1]) {
-        const w = fwd.targets[frameEdge[top]++];
+        const slot = frameEdge[top]++;
+        if (!slotOk(fwd.flags[slot])) continue;
+        const w = fwd.targets[slot];
         if (index[w] === UNVISITED) {
           index[w] = lowlink[w] = counter++;
           stack[stackTop++] = w;
@@ -370,7 +420,12 @@ function buildMembers(nodeCount: number, componentCount: number, component: Int3
  * (intra-component edges) are dropped; duplicate component pairs are collapsed so
  * a topological scan touches each condensation edge exactly once.
  */
-function buildComponentCsr(componentCount: number, component: Int32Array, csr: Csr): Csr {
+function buildComponentCsr(
+  componentCount: number,
+  component: Int32Array,
+  csr: Csr,
+  slotOk: (flags: number) => boolean,
+): Csr {
   const src: number[] = [];
   const dst: number[] = [];
   const nodeCount = component.length;
@@ -378,6 +433,7 @@ function buildComponentCsr(componentCount: number, component: Int32Array, csr: C
   for (let v = 0; v < nodeCount; v++) {
     const cv = component[v];
     for (let k = csr.offsets[v]; k < csr.offsets[v + 1]; k++) {
+      if (!slotOk(csr.flags[k])) continue;
       const cw = component[csr.targets[k]];
       if (cv === cw) continue;
       // Pair key: componentCount ≤ nodeCount, and a graph with > 2^26 nodes is far
@@ -423,8 +479,18 @@ function makeIndex(p: IndexParts): TraversalIndex {
 
   const csrFor = (dir: Direction) => (dir === 'forward' ? forward : backward);
   const condFor = (dir: Direction) => (dir === 'forward' ? p.condForward : p.condBackward);
-  const keep = (flags: number, filter?: TraversalFilter): boolean =>
-    !(filter?.directResolvedOnly && (flags & FLAG_SYNTHESIZED) !== 0);
+  /**
+   * Whether an edge slot is part of `dir`'s adjacency under `filter`.
+   *
+   * Forward reads the precomputed per-filter eligibility bit (see the flag
+   * definitions: forward emission is position- and filter-dependent). Backward
+   * needs no eligibility bit — `buildAdjacency` creates the callee's backward key
+   * immediately before adding to it, so a surviving backward edge always lands.
+   */
+  const keep = (flags: number, filter: TraversalFilter | undefined, dir: Direction): boolean =>
+    dir === 'forward'
+      ? (flags & (filter?.directResolvedOnly ? FLAG_FWD_ELIGIBLE_DIRECT : FLAG_FWD_ELIGIBLE_ALL)) !== 0
+      : !(filter?.directResolvedOnly && (flags & FLAG_SYNTHESIZED) !== 0);
 
   function neighborIds(id: string, dir: Direction, filter?: TraversalFilter): string[] {
     const v = indexById.get(id);
@@ -433,7 +499,7 @@ function makeIndex(p: IndexParts): TraversalIndex {
     const out: string[] = [];
     const seen = new Set<number>();
     for (let k = csr.offsets[v]; k < csr.offsets[v + 1]; k++) {
-      if (!keep(csr.flags[k], filter)) continue;
+      if (!keep(csr.flags[k], filter, dir)) continue;
       const w = csr.targets[k];
       if (seen.has(w)) continue;
       seen.add(w);
@@ -462,7 +528,7 @@ function makeIndex(p: IndexParts): TraversalIndex {
     while (head < tail) {
       const v = queue[head++];
       for (let k = csr.offsets[v]; k < csr.offsets[v + 1]; k++) {
-        if (!keep(csr.flags[k], filter)) continue;
+        if (!keep(csr.flags[k], filter, dir)) continue;
         const w = csr.targets[k];
         if (w === excludeIdx || visited[w]) continue;
         visited[w] = 1;
@@ -530,6 +596,7 @@ function makeIndex(p: IndexParts): TraversalIndex {
     filter: TraversalFilter | undefined,
     sortNeighbors: boolean,
     wantParents: boolean,
+    stopAt?: string,
   ): { depth: Map<string, number>; parent: Map<string, string> } {
     const csr = csrFor(dir);
     const depth = new Map<string, number>();
@@ -561,7 +628,7 @@ function makeIndex(p: IndexParts): TraversalIndex {
         scratch.length = 0;
         const seen = new Set<number>();
         for (let k = from; k < to; k++) {
-          if (!keep(csr.flags[k], filter)) continue;
+          if (!keep(csr.flags[k], filter, dir)) continue;
           const w = csr.targets[k];
           if (seen.has(w)) continue;
           seen.add(w);
@@ -573,12 +640,17 @@ function makeIndex(p: IndexParts): TraversalIndex {
         slots = csr.targets.subarray(from, to);
       }
       for (let s = 0; s < slots.length; s++) {
-        if (!sortNeighbors && !keep(csr.flags[from + s], filter)) continue;
+        if (!sortNeighbors && !keep(csr.flags[from + s], filter, dir)) continue;
         const w = slots[s];
         if (depthOf[w] !== -1) continue;
         depthOf[w] = d + 1;
         depth.set(nodeIds[w], d + 1);
         if (wantParents) parent.set(nodeIds[w], nodeIds[v]);
+        // Early exit: a caller looking for ONE node (verify_claim's reach kinds)
+        // stops the moment it is discovered. The node's depth and predecessor are
+        // already final — BFS never revisits — so the reconstructed path is the
+        // same one a full walk would produce, for strictly less work.
+        if (stopAt !== undefined && nodeIds[w] === stopAt) return { depth, parent };
         queue[tail++] = w;
       }
     }
@@ -606,7 +678,7 @@ function makeIndex(p: IndexParts): TraversalIndex {
       if (from === to) return 0;
       const seen = new Set<number>();
       for (let k = from; k < to; k++) {
-        if (keep(csr.flags[k], filter)) seen.add(csr.targets[k]);
+        if (keep(csr.flags[k], filter, dir)) seen.add(csr.targets[k]);
       }
       return seen.size;
     },
@@ -614,7 +686,7 @@ function makeIndex(p: IndexParts): TraversalIndex {
     bfsDepths: (seeds, dir, maxDepth, filter, opts) =>
       bfsCore(seeds, dir, maxDepth, filter, opts?.sortNeighbors === true, false).depth,
     bfsWithParents: (seeds, dir, maxDepth, filter, opts) =>
-      bfsCore(seeds, dir, maxDepth, filter, opts?.sortNeighbors === true, true),
+      bfsCore(seeds, dir, maxDepth, filter, opts?.sortNeighbors === true, true, opts?.stopAt),
   };
 }
 
@@ -633,6 +705,19 @@ export interface SerializedTraversalIndex {
   version: number;
   /** SHA-256 of the llm-context.json content this structure was built from. */
   contextDigest: string;
+  /**
+   * SHA-256 over this structure's OWN payload (`nodeIds` + every array).
+   *
+   * `contextDigest` binds the structure to the right graph; it says nothing about
+   * whether the structure's own bytes survived the trip. Length checks alone do
+   * not close that: a single flipped base64 character keeps every array the right
+   * length and silently changes reachability answers — an out-of-range `targets`
+   * entry made `neighborIds` yield `undefined`, and a corrupted `component` made a
+   * live node report as unreachable, i.e. a false "dead code" conclusion. Hashing
+   * the payload (~2 ms on a 1.2 MB artifact) turns that whole class into a clean
+   * refusal-and-rebuild.
+   */
+  payloadDigest: string;
   /** Typed arrays are host-endian; a foreign-endian artifact is rejected. */
   littleEndian: boolean;
   nodeCount: number;
@@ -643,6 +728,20 @@ export interface SerializedTraversalIndex {
 }
 
 const IS_LITTLE_ENDIAN = new Uint8Array(new Uint16Array([1]).buffer)[0] === 1;
+
+/**
+ * Canonical serialization of the payload for {@link SerializedTraversalIndex.payloadDigest}.
+ * Independent of JSON key order so a re-serialized artifact still verifies.
+ */
+function payloadDigestOf(nodeIds: string[], arrays: Record<string, string>): string {
+  const h = createHash('sha256');
+  h.update(String(nodeIds.length));
+  for (const id of nodeIds) { h.update('\u0000'); h.update(id); }
+  for (const key of Object.keys(arrays).sort()) {
+    h.update('\u0000'); h.update(key); h.update('='); h.update(arrays[key]);
+  }
+  return h.digest('hex');
+}
 
 function encode(a: Int32Array | Uint8Array): string {
   return Buffer.from(a.buffer, a.byteOffset, a.byteLength).toString('base64');
@@ -666,15 +765,25 @@ export function serializeTraversalIndex(cg: SerializedCallGraph, contextDigest: 
   const parts = buildIndexParts(cg);
   const cond = (prefix: string, c: Condensation): Record<string, string> => ({
     [`${prefix}Component`]: encode(c.component),
-    [`${prefix}TopoOrder`]: encode(c.topoOrder),
     [`${prefix}MemberOffsets`]: encode(c.members.offsets),
     [`${prefix}MemberTargets`]: encode(c.members.targets),
     [`${prefix}CompOffsets`]: encode(c.compAdj.offsets),
     [`${prefix}CompTargets`]: encode(c.compAdj.targets),
   });
+  const arrays: Record<string, string> = {
+    fwdOffsets: encode(parts.forward.offsets),
+    fwdTargets: encode(parts.forward.targets),
+    fwdFlags: encode(parts.forward.flags),
+    bwdOffsets: encode(parts.backward.offsets),
+    bwdTargets: encode(parts.backward.targets),
+    bwdFlags: encode(parts.backward.flags),
+    ...cond('fwd', parts.condForward),
+    ...cond('bwd', parts.condBackward),
+  };
   const payload: SerializedTraversalIndex = {
     version: TRAVERSAL_INDEX_VERSION,
     contextDigest,
+    payloadDigest: payloadDigestOf(parts.nodeIds, arrays),
     littleEndian: IS_LITTLE_ENDIAN,
     nodeCount: parts.nodeIds.length,
     componentCounts: {
@@ -682,16 +791,7 @@ export function serializeTraversalIndex(cg: SerializedCallGraph, contextDigest: 
       backward: parts.condBackward.componentCount,
     },
     nodeIds: parts.nodeIds,
-    arrays: {
-      fwdOffsets: encode(parts.forward.offsets),
-      fwdTargets: encode(parts.forward.targets),
-      fwdFlags: encode(parts.forward.flags),
-      bwdOffsets: encode(parts.backward.offsets),
-      bwdTargets: encode(parts.backward.targets),
-      bwdFlags: encode(parts.backward.flags),
-      ...cond('fwd', parts.condForward),
-      ...cond('bwd', parts.condBackward),
-    },
+    arrays,
   };
   return JSON.stringify(payload);
 }
@@ -710,17 +810,36 @@ export async function writeTraversalIndexArtifact(
   cg: SerializedCallGraph,
   contextJson: string,
 ): Promise<void> {
-  await atomicWriteFile(
-    join(outputDir, ARTIFACT_TRAVERSAL_INDEX),
-    serializeTraversalIndex(cg, artifactDigest(contextJson)),
-  );
+  const path = join(outputDir, ARTIFACT_TRAVERSAL_INDEX);
+  try {
+    await atomicWriteFile(path, serializeTraversalIndex(cg, artifactDigest(contextJson)));
+  } catch (err) {
+    // The write is atomic, so a failure leaves the PREVIOUS generation's structure
+    // on disk. Its digest can never match again, so it would sit there indefinitely
+    // — dead weight that every cold read pays a stat, a digest, and a read to
+    // reject. Remove it, so a failed write degrades to "no structure" (rebuild in
+    // memory) rather than "a structure nothing can ever use".
+    await rm(path, { force: true }).catch(() => {});
+    throw err;
+  }
 }
 
 /**
  * Rehydrate a persisted index, or return null when it cannot be trusted: wrong
  * schema version, foreign endianness, a `contextDigest` that does not match the
- * graph being served, or any structural inconsistency. Null means "rebuild in
- * memory" — a wrong structure is never preferred to a slower correct one.
+ * graph being served, a payload that does not match its own digest, or any
+ * structural inconsistency. Null means "rebuild in memory" — a wrong structure is
+ * never preferred to a slower correct one.
+ *
+ * Validation is deliberately layered, because each layer catches a class the one
+ * before it cannot:
+ *  - `contextDigest`  — the structure belongs to ANOTHER graph generation.
+ *  - `payloadDigest`  — the structure's own bytes were altered (bitrot, a partial
+ *                       write, a hand edit that kept every length intact).
+ *  - shape + range    — a hand-edited artifact whose digest was recomputed. Every
+ *                       array that INDEXES another is bounds-checked here, so no
+ *                       traversal can read past the end of a typed array and hand
+ *                       back an `undefined` id or a silently truncated reach.
  */
 export function deserializeTraversalIndex(raw: string, expectedDigest: string): TraversalIndex | null {
   try {
@@ -737,8 +856,11 @@ export function deserializeTraversalIndex(raw: string, expectedDigest: string): 
     const a = p.arrays;
     if (a === null || typeof a !== 'object') return null;
     const nodeIds = p.nodeIds as string[];
+    if (nodeIds.some(id => typeof id !== 'string')) return null;
     const nodeCount = nodeIds.length;
     if (p.nodeCount !== nodeCount) return null;
+    if (typeof p.payloadDigest !== 'string') return null;
+    if (p.payloadDigest !== payloadDigestOf(nodeIds, a)) return null;
 
     const forward: Csr = {
       offsets: decodeI32(a.fwdOffsets), targets: decodeI32(a.fwdTargets), flags: decodeU8(a.fwdFlags),
@@ -747,19 +869,26 @@ export function deserializeTraversalIndex(raw: string, expectedDigest: string): 
       offsets: decodeI32(a.bwdOffsets), targets: decodeI32(a.bwdTargets), flags: decodeU8(a.bwdFlags),
     };
 
-    // Structural coherence: a truncated or hand-edited artifact must fail closed
-    // rather than index out of bounds mid-traversal.
-    const csrOk = (c: Csr, n: number, withFlags: boolean) =>
-      c.offsets.length === n + 1 &&
-      c.offsets[0] === 0 &&
-      c.offsets[n] === c.targets.length &&
-      (!withFlags || c.flags.length === c.targets.length);
-    if (!csrOk(forward, nodeCount, true)) return null;
-    if (!csrOk(backward, nodeCount, true)) return null;
+    /** Every value in `arr` is a valid index into an array of length `limit`. */
+    const inRange = (arr: Int32Array, limit: number): boolean => {
+      for (let i = 0; i < arr.length; i++) if (arr[i] < 0 || arr[i] >= limit) return false;
+      return true;
+    };
+    /** Offsets must be non-negative, non-decreasing, and span exactly `targets`. */
+    const csrOk = (c: Csr, n: number, targetLimit: number, withFlags: boolean): boolean => {
+      if (c.offsets.length !== n + 1) return false;
+      if (c.offsets[0] !== 0) return false;
+      if (c.offsets[n] !== c.targets.length) return false;
+      if (withFlags && c.flags.length !== c.targets.length) return false;
+      for (let i = 0; i < n; i++) if (c.offsets[i] > c.offsets[i + 1]) return false;
+      return inRange(c.targets, targetLimit);
+    };
+    if (!csrOk(forward, nodeCount, nodeCount, true)) return null;
+    if (!csrOk(backward, nodeCount, nodeCount, true)) return null;
 
     const readCond = (prefix: string, componentCount: number): Condensation | null => {
+      if (!Number.isInteger(componentCount) || componentCount < 0 || componentCount > nodeCount) return null;
       const component = decodeI32(a[`${prefix}Component`]);
-      const topoOrder = decodeI32(a[`${prefix}TopoOrder`]);
       const members: Csr = {
         offsets: decodeI32(a[`${prefix}MemberOffsets`]),
         targets: decodeI32(a[`${prefix}MemberTargets`]),
@@ -771,10 +900,16 @@ export function deserializeTraversalIndex(raw: string, expectedDigest: string): 
         flags: new Uint8Array(0),
       };
       if (component.length !== nodeCount) return null;
-      if (topoOrder.length !== componentCount) return null;
+      if (!inRange(component, componentCount)) return null;
       if (members.targets.length !== nodeCount) return null;
-      if (!csrOk(members, componentCount, false)) return null;
-      if (!csrOk(compAdj, componentCount, false)) return null;
+      if (!csrOk(members, componentCount, nodeCount, false)) return null;
+      if (!csrOk(compAdj, componentCount, componentCount, false)) return null;
+      // `topoOrder` is derived, never shipped: Tarjan numbers components in reverse
+      // topological order, so the source→sink order is just the reverse sequence.
+      // Deriving it removes a redundant array — and with it a way for a tampered
+      // artifact to reorder the sweep.
+      const topoOrder = new Int32Array(componentCount);
+      for (let c = 0; c < componentCount; c++) topoOrder[c] = componentCount - 1 - c;
       return { component, componentCount, topoOrder, members, compAdj };
     };
     const condForward = readCond('fwd', counts.forward);

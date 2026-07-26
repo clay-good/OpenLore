@@ -10,7 +10,7 @@ import type { LLMContext } from '../../analyzer/artifact-generator.js';
 import { EdgeStore } from '../edge-store.js';
 import { readAttestation, reconcile, type IndexIntegrity } from '../../analyzer/index-attestation.js';
 import { artifactDigest } from '../../analyzer/condensation.js';
-import { recordArtifactDigest } from './traversal.js';
+import { recordArtifactDigest, traversalIndexExists } from './traversal.js';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
 import { ANALYSIS_AGE_WARNING_HOURS, ANALYSIS_STALE_THRESHOLD_MS, ARTIFACT_FINGERPRINT, ARTIFACT_LLM_CONTEXT, MAX_QUERY_LENGTH, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR, OPENSPEC_DIR, STALE_REGION_REPAIR_THRESHOLD } from '../../../constants.js';
 import { repairInBackground, type RepairReason } from '../cold-start-bootstrap.js';
@@ -396,7 +396,17 @@ export async function readCachedContext(directory: string, timeout?: number): Pr
           // so the persisted traversal structure can be accepted only when it was
           // built from THESE bytes (change: optimize-reachability-precompute).
           // Recorded on the parsed object, never on the context we might re-serialize.
-          recordArtifactDigest(ctx.callGraph as SerializedCallGraph, artifactDigest(raw));
+          //
+          // Gated on the structure actually existing, because this hash is charged to
+          // EVERY cache miss and every tool — `orient`, `search_code`, `get_spec` —
+          // not only the traversal ones. Measured on this repo it is ~16-50 ms over an
+          // 11.5 MB artifact, against ~40 ms saved by loading the structure instead of
+          // rebuilding it: worth paying only where there is a structure to unlock. A
+          // repo that has never run this version of `analyze`, or one materialized by
+          // `openlore import`, therefore pays nothing at all.
+          if (await traversalIndexExists(analysisDir)) {
+            recordArtifactDigest(ctx.callGraph as SerializedCallGraph, artifactDigest(raw));
+          }
         } else {
           ctx.callGraph = undefined;
         }

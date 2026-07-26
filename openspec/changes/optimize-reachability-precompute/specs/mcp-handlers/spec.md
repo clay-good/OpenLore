@@ -6,9 +6,11 @@
 
 All reachability-answering handlers (`select_tests`, `report_coverage_gaps`, `find_dead_code`,
 `blast_radius`/`change_footprint`, `find_path`, `trace_execution_path`, `analyze_env_impact`, and
-`verify_claim`'s reach kinds) SHALL traverse the single precomputed condensation/adjacency
-structure loaded once per artifact generation, rather than rebuilding per-call adjacency.
-Whole-graph reaches SHALL run on the condensation DAG. Every tool's conclusion payload SHALL be
+`verify_claim`'s reach kinds) SHALL traverse a single condensation/adjacency structure built or
+loaded once per artifact generation, rather than rebuilding per-call adjacency. An unfiltered
+whole-graph reach SHALL run as a topological sweep of the condensation DAG; a reach restricted to
+directly-resolved edges runs an allocation-free CSR walk instead, because the condensation
+describes the whole graph and a filtered graph can have strictly finer components. Every tool's conclusion payload SHALL be
 unchanged: for any input, the served answer SHALL equal the answer of the per-call BFS over the
 same artifact — including the ORDER-dependent parts of a payload (a reconstructed `viaPath`, the
 first N paths a bounded enumeration returns), not merely the set of results.

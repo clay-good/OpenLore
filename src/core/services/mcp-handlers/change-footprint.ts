@@ -295,10 +295,12 @@ export function computeFootprint(
   ambientReadDeps.sort();
 
   // --- affected-set: hop-depth backward reachability (== blast radius) ---
-  // Over the traversal structure precomputed for this graph generation rather than
-  // adjacency rebuilt per task (change: optimize-reachability-precompute). It
-  // matters most here: `plan_parallel_work` and `map_in_flight_conflicts` call
-  // this once PER TASK, so the rebuild was paid N times for one graph.
+  // Over the traversal structure built once for this graph generation rather than
+  // adjacency rebuilt per task (change: optimize-reachability-precompute):
+  // `plan_parallel_work` and `map_in_flight_conflicts` call this once PER TASK, so
+  // the hop-depth rebuild was paid N times for one graph. The call-distance-weighted
+  // read-set closure above is a DIFFERENT structure and is still built per task —
+  // this halves the per-task rebuild, it does not remove it.
   const affectedMaxDepth = opts.affectedMaxDepth ?? FOOTPRINT_AFFECTED_MAX_DEPTH;
   const backwardReach = traversalIndexFor(graph).bfsDepths([...writeIds], 'backward', affectedMaxDepth);
   const affectedSet = [...backwardReach.keys()]

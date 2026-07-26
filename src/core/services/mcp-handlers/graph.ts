@@ -57,7 +57,7 @@ import {
 } from './confidence-boundary.js';
 
 // ============================================================================
-// SHARED GRAPH HELPERS (also exported for chat-tools.ts)
+// SHARED GRAPH HELPERS
 // ============================================================================
 
 /**
@@ -68,10 +68,11 @@ import {
  * Every reachability handler now traverses the precomputed structure
  * (`analyzer/condensation.ts`, loaded once per artifact generation) instead of
  * rebuilding these Maps of Sets per tool call. This function is retained as the
- * REFERENCE IMPLEMENTATION the equivalence suites pin against — `condensation.test.ts`
- * asserts the index reproduces it edge-for-edge and order-for-order, and
- * `graph.test.ts` uses it as the oracle for the DB-backed {@link bfsFromDB} path.
- * Change it only together with the index, or the two silently diverge.
+ * REFERENCE IMPLEMENTATION the equivalence suite pins against: `condensation.test.ts`
+ * freezes a verbatim copy of it and asserts the index reproduces it edge-for-edge
+ * and order-for-order. `graph.test.ts` also asserts it agrees with the DB-backed
+ * {@link bfsFromDB} path. Change it only together with the index, or the two
+ * silently diverge.
  *
  * Inheritance propagation rides on the materialized, provenance-labeled override
  * edges (`kind: 'overrides'`, `confidence: 'synthesized'`) the CHA pass writes into
@@ -107,7 +108,13 @@ export function buildAdjacency(cg: SerializedCallGraph, opts?: { directResolvedO
   return { nodeMap, forward, backward };
 }
 
-/** BFS up to `maxDepth`. Returns a map of visited node-id → depth reached. */
+/**
+ * BFS up to `maxDepth`. Returns a map of visited node-id → depth reached.
+ *
+ * Like {@link buildAdjacency}, no longer on the serving path — kept as the frozen
+ * reference the traversal index's `bfsDepths` is pinned against
+ * (change: optimize-reachability-precompute).
+ */
 export function bfs(
   seeds: string[],
   adjacency: Map<string, Set<string>>,

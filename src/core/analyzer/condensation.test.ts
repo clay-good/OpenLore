@@ -15,6 +15,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { createHash } from 'node:crypto';
 import {
   buildTraversalIndex,
   serializeTraversalIndex,
@@ -181,9 +182,26 @@ function randomGraph(seed: number, nodeCount = 40): SerializedCallGraph {
   if (ids.length >= 4) {
     edges.push(edge(ids[0], ids[1]), edge(ids[1], ids[2]), edge(ids[2], ids[3]), edge(ids[3], ids[0]));
   }
-  // A guaranteed edge whose caller is absent from `nodes` — it must contribute to
-  // backward adjacency only (buildAdjacency's optional-chain drop on forward).
-  edges.push(edge('ghost.ts::ghostCaller', ids[0] ?? 'x'));
+  // Callers absent from `nodes`. `buildAdjacency` creates forward KEYS as it walks
+  // the filtered edge list, so for these ids whether an out-edge is emitted depends
+  // on the edge's POSITION and on the filter. All four orderings are generated:
+  //
+  //   ghostPlain   — never a callee: every out-edge dropped from forward
+  //   ghostBefore  — out-edge BEFORE the edge that makes it a key: that one dropped
+  //   ghostAfter   — out-edge AFTER  it becomes a key: that one kept
+  //   ghostSynth   — made a key only by a SYNTHESIZED edge: in strict mode it never
+  //                  becomes a key at all, so its out-edges vanish there but not in
+  //                  the unfiltered view
+  const a = ids[0] ?? 'x';
+  const b = ids[1] ?? a;
+  edges.push(edge('ghost.ts::ghostPlain', a));
+  edges.push(edge('ghost.ts::ghostBefore', b));            // out-edge first…
+  edges.push(edge(a, 'ghost.ts::ghostBefore'));            // …then becomes a key
+  edges.push(edge(a, 'ghost.ts::ghostAfter'));             // becomes a key first…
+  edges.push(edge('ghost.ts::ghostAfter', b));             // …then the out-edge
+  edges.push(edge(a, 'ghost.ts::ghostSynth', true));       // key only via synthesized
+  edges.push(edge('ghost.ts::ghostSynth', b));
+  edges.push(edge('ghost.ts::ghostSelf', 'ghost.ts::ghostSelf')); // self-edge from an unindexed id
   return makeGraph(nodes, edges);
 }
 
@@ -217,6 +235,46 @@ describe('traversal index — neighbour equivalence with buildAdjacency', () => 
         }
       }
     }
+  });
+
+  // Regression: forward-map KEYS are created as `buildAdjacency` walks the filtered
+  // edge list, so forward emission is position- AND filter-dependent. A first cut
+  // approximated it with an unfiltered whole-graph pre-pass, which over-reported
+  // forward reach in both directions of that mistake. Each case is pinned directly
+  // (the randomized generator now produces them too, but these name the defect).
+  it('an out-edge from an unindexed caller is dropped until that caller becomes a key', () => {
+    // `X` is a callerId that is not in `cg.nodes`. It becomes a forward key only
+    // when an edge INTO it is processed — so `X→Y`, which comes first, is dropped,
+    // and `X→Z`, which comes after, is kept.
+    const cg = makeGraph(['A', 'Y', 'Z'].map(n => makeNode(`x.ts::${n}`)), [
+      edge('x.ts::X', 'x.ts::Y'),
+      edge('x.ts::A', 'x.ts::X'),
+      edge('x.ts::X', 'x.ts::Z'),
+    ]);
+    const ix = buildTraversalIndex(cg);
+    const adj = oracleAdjacency(cg);
+    expect([...(adj.forward.get('x.ts::X') ?? [])]).toEqual(['x.ts::Z']); // the oracle's behaviour
+    expect(ix.neighborIds('x.ts::X', 'forward')).toEqual(['x.ts::Z']);
+    expect([...ix.reachAll(['x.ts::A'], 'forward')].sort())
+      .toEqual([...oracleReach(['x.ts::A'], adj.forward)].sort());
+  });
+
+  it('a caller made a key only by a synthesized edge has no forward edges in strict mode', () => {
+    // Strict mode skips the synthesized edge BEFORE the key is created, so `X` never
+    // becomes a forward key there — `X→B` disappears entirely, not just the
+    // synthesized edge. Filtering only the edges (and not the key set) would keep it.
+    const cg = makeGraph(['A', 'B'].map(n => makeNode(`x.ts::${n}`)), [
+      edge('x.ts::A', 'x.ts::X', true),
+      edge('x.ts::X', 'x.ts::B'),
+    ]);
+    const ix = buildTraversalIndex(cg);
+    const strict = { directResolvedOnly: true };
+    const adj = oracleAdjacency(cg, strict);
+    expect([...(adj.forward.get('x.ts::X') ?? [])]).toEqual([]); // the oracle's behaviour
+    expect(ix.neighborIds('x.ts::X', 'forward', strict)).toEqual([]);
+    expect([...ix.reachAll(['x.ts::X'], 'forward', strict)]).toEqual(['x.ts::X']);
+    // …while the unfiltered view still sees it.
+    expect(ix.neighborIds('x.ts::X', 'forward')).toEqual(['x.ts::B']);
   });
 
   it('an id outside the graph has no neighbours (matches `adjacency.get(x) ?? []`)', () => {
@@ -410,6 +468,79 @@ describe('traversal index — persistence round-trip', () => {
     if (dupIds.length > 1) {
       dupIds[1] = dupIds[0];
       expect(deserializeTraversalIndex(JSON.stringify({ ...parsed, nodeIds: dupIds }), 'd')).toBeNull();
+    }
+  });
+});
+
+describe('traversal index — a corrupted artifact is refused, never served', () => {
+  // A digest over the GRAPH proves the structure belongs to this generation; it says
+  // nothing about whether the structure's own bytes survived. Length checks alone do
+  // not close that gap — a single flipped base64 character keeps every array the
+  // right length and silently changes answers (an out-of-range `targets` entry made
+  // `neighborIds` yield `undefined`; a corrupted `component` made a live node report
+  // as unreachable, i.e. a false "dead code" conclusion). Both layers are pinned here.
+
+  it('a single flipped character in ANY array is rejected — never silently answered', () => {
+    const cg = randomGraph(11);
+    const raw = serializeTraversalIndex(cg, 'd');
+    const parsed = JSON.parse(raw) as { arrays: Record<string, string> };
+    const keys = Object.keys(parsed.arrays);
+    expect(keys.length).toBeGreaterThan(8); // guards against silently testing nothing
+
+    let mutated = 0;
+    for (const key of keys) {
+      const original = parsed.arrays[key];
+      if (original.length === 0) continue;
+      for (const pos of [0, Math.floor(original.length / 2), original.length - 1]) {
+        const ch = original[pos];
+        const swapped = ch === 'A' ? 'B' : 'A';
+        if (swapped === ch) continue;
+        const arrays = { ...parsed.arrays, [key]: original.slice(0, pos) + swapped + original.slice(pos + 1) };
+        mutated++;
+        expect(deserializeTraversalIndex(JSON.stringify({ ...parsed, arrays }), 'd')).toBeNull();
+      }
+    }
+    expect(mutated).toBeGreaterThan(20);
+  });
+
+  it('a tampered node-id list is rejected', () => {
+    const cg = randomGraph(3);
+    const parsed = JSON.parse(serializeTraversalIndex(cg, 'd')) as { nodeIds: string[] };
+    const nodeIds = [...parsed.nodeIds];
+    nodeIds[0] = 'not::the::original::id';
+    expect(deserializeTraversalIndex(JSON.stringify({ ...parsed, nodeIds }), 'd')).toBeNull();
+    expect(deserializeTraversalIndex(JSON.stringify({ ...parsed, payloadDigest: 'nope' }), 'd')).toBeNull();
+  });
+
+  it('out-of-range indices are rejected even when the payload digest is recomputed', () => {
+    // The determined hand-edit: rewrite an array AND fix the digest. The range
+    // checks are the layer that still catches it, so no traversal can read past the
+    // end of a typed array and hand back an undefined id or a truncated reach.
+    // The canonical digest form is replicated here on purpose — if the writer ever
+    // changes it, this test stops rejecting and fails, which is the signal we want.
+    const canonicalDigest = (nodeIds: string[], arrays: Record<string, string>): string => {
+      const h = createHash('sha256');
+      h.update(String(nodeIds.length));
+      for (const id of nodeIds) { h.update('\u0000'); h.update(id); }
+      for (const key of Object.keys(arrays).sort()) {
+        h.update('\u0000'); h.update(key); h.update('='); h.update(arrays[key]);
+      }
+      return h.digest('hex');
+    };
+
+    const cg = randomGraph(7);
+    const parsed = JSON.parse(serializeTraversalIndex(cg, 'd')) as {
+      nodeIds: string[]; arrays: Record<string, string>; payloadDigest: string;
+    };
+    // Sanity: the replicated canonical form matches the writer's.
+    expect(canonicalDigest(parsed.nodeIds, parsed.arrays)).toBe(parsed.payloadDigest);
+
+    for (const key of ['fwdTargets', 'bwdTargets', 'fwdComponent', 'fwdMemberTargets', 'fwdCompTargets']) {
+      const len = Buffer.from(parsed.arrays[key], 'base64').byteLength / 4;
+      const poisoned = new Int32Array(len).fill(999_999); // far outside every bound
+      const arrays = { ...parsed.arrays, [key]: Buffer.from(poisoned.buffer).toString('base64') };
+      const forged = { ...parsed, arrays, payloadDigest: canonicalDigest(parsed.nodeIds, arrays) };
+      expect(deserializeTraversalIndex(JSON.stringify(forged), 'd')).toBeNull();
     }
   });
 });

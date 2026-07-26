@@ -156,7 +156,9 @@ async function readIndexCommit(absDir: string): Promise<string | null> {
  * predecessor so a path can be rebuilt (change: optimize-reachability-precompute).
  * The predecessor of each node is its first discoverer in CSR (edge) order —
  * identical to the per-call `Map<string, Set<string>>` walk this replaced, so the
- * cited path is the same one, not merely an equally valid alternative.
+ * cited path is the same one, not merely an equally valid alternative. `stopAt`
+ * preserves that walk's early exit: a nearby target must not pay for a full
+ * traversal of everything it happens to reach.
  */
 function reachWithPath(
   seedId: string,
@@ -165,7 +167,9 @@ function reachWithPath(
   dir: Direction,
 ): string[] | null {
   if (seedId === targetId) return [seedId];
-  const { depth, parent } = traversal.bfsWithParents([seedId], dir, Number.MAX_SAFE_INTEGER);
+  const { depth, parent } = traversal.bfsWithParents(
+    [seedId], dir, Number.MAX_SAFE_INTEGER, undefined, { stopAt: targetId },
+  );
   if (!depth.has(targetId)) return null;
   const path: string[] = [targetId];
   let cur = targetId;

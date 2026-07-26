@@ -32,7 +32,7 @@
  * the graph directly.
  */
 
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_TRAVERSAL_INDEX } from '../../../constants.js';
 import {
@@ -41,6 +41,34 @@ import {
   type TraversalIndex,
 } from '../../analyzer/condensation.js';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
+
+/**
+ * Hard ceiling on the persisted structure before we read it, mirroring the
+ * `ARTIFACT_MAX_BYTES` guard `llm-context.json` already carries (mcp-security:
+ * Untrusted Artifact Deserialization). The structure lives in the same untrusted
+ * `.openlore/analysis/` directory but was, unlike its sibling, unbounded — a
+ * genuinely new size surface. Real structures run ~10% of the context they
+ * accompany; this exists only to fail closed on a poisoned or runaway file.
+ */
+const TRAVERSAL_INDEX_MAX_BYTES = 512 * 1024 * 1024;
+
+/** The path the structure is persisted at for `absDir`. */
+function indexPath(absDir: string): string {
+  return join(absDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_TRAVERSAL_INDEX);
+}
+
+/**
+ * Whether a persisted structure exists for `absDir`. Lets the read path skip
+ * digesting the (multi-MB) analysis artifact when there is nothing to unlock —
+ * see the call site in `readCachedContext`.
+ */
+export async function traversalIndexExists(analysisDir: string): Promise<boolean> {
+  try {
+    return (await stat(join(analysisDir, ARTIFACT_TRAVERSAL_INDEX))).isFile();
+  } catch {
+    return false;
+  }
+}
 
 /** Loaded/built structures, one per graph generation. */
 const indexByGraph = new WeakMap<SerializedCallGraph, TraversalIndex>();
@@ -87,10 +115,10 @@ export async function loadTraversalIndex(
   const digest = digestByGraph.get(cg);
   if (digest !== undefined) {
     try {
-      const raw = await readFile(
-        join(absDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_TRAVERSAL_INDEX),
-        'utf-8',
-      );
+      const path = indexPath(absDir);
+      const st = await stat(path);
+      if (st.size > TRAVERSAL_INDEX_MAX_BYTES) return traversalIndexFor(cg);
+      const raw = await readFile(path, 'utf-8');
       const loaded = deserializeTraversalIndex(raw, digest);
       if (loaded) {
         // Re-check the memo: a concurrent request may have built one across our
