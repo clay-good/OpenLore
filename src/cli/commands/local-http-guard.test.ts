@@ -17,6 +17,8 @@ import {
   checkLocalHttpRequest,
   createApiGuardMiddleware,
   OPENLORE_TOKEN_HEADER,
+  createBrowserSessionGuard,
+  readCookie,
 } from './local-http-guard.js';
 
 /** Minimal IncomingMessage stand-in — only headers/url are read by the guard. */
@@ -202,5 +204,98 @@ describe('createApiGuardMiddleware', () => {
   it('treats /chat/models like an ordinary route (no token needed on loopback)', () => {
     const r = runMiddleware(mw, fakeReq({ host: '127.0.0.1:5173' }, '/chat/models'));
     expect(r.nexted).toBe(true);
+  });
+});
+
+// ============================================================================
+// Browser session handshake — the gate on `/`, not just `/api`
+// ============================================================================
+
+describe('createBrowserSessionGuard', () => {
+  const TOKEN = 'a'.repeat(48);
+  const bound = '127.0.0.1';
+
+  /** Minimal ServerResponse capture. */
+  function fakeRes(): {
+    statusCode: number; headers: Record<string, string>; body: string; ended: boolean;
+    setHeader(k: string, v: string): void; end(b?: string): void;
+  } {
+    return {
+      statusCode: 200, headers: {}, body: '', ended: false,
+      setHeader(k: string, v: string) { this.headers[k.toLowerCase()] = v; },
+      end(b?: string) { this.body = b ?? ''; this.ended = true; },
+    };
+  }
+
+  function run(headers: Record<string, string | undefined>, url: string) {
+    const guard = createBrowserSessionGuard({ boundHost: bound, token: TOKEN });
+    const res = fakeRes();
+    let passed = false;
+    guard(fakeReq(headers, url), res as never, () => { passed = true; });
+    return { res, passed };
+  }
+
+  it('refuses an unauthenticated request for the page itself', () => {
+    // `curl http://127.0.0.1:PORT/` — the exact attack. It used to return the page
+    // WITH the token in it; it must now return nothing useful.
+    const { res, passed } = run({ host: '127.0.0.1:5173' }, '/');
+    expect(passed).toBe(false);
+    expect(res.statusCode).toBe(401);
+    expect(res.body).not.toContain(TOKEN);
+  });
+
+  it('exchanges a valid ?token= for an HttpOnly SameSite cookie and redirects it away', () => {
+    const { res, passed } = run({ host: '127.0.0.1:5173' }, `/?token=${TOKEN}`);
+    expect(passed).toBe(false);              // the handshake answers; it does not fall through
+    expect(res.statusCode).toBe(302);
+    const cookie = res.headers['set-cookie'];
+    expect(cookie).toContain(`openlore_session=${TOKEN}`);
+    expect(cookie).toMatch(/HttpOnly/);      // page script cannot read it back out
+    expect(cookie).toMatch(/SameSite=Strict/); // never sent cross-site → not CSRF-able
+    // The token must not survive in the URL (address bar, history, Referer).
+    expect(res.headers['location']).toBe('/');
+    expect(res.headers['location']).not.toContain(TOKEN);
+  });
+
+  it('preserves other query parameters across the handshake redirect', () => {
+    const { res } = run({ host: '127.0.0.1:5173' }, `/x?a=1&token=${TOKEN}&b=2`);
+    expect(res.headers['location']).toBe('/x?a=1&b=2');
+  });
+
+  it('admits a request carrying the session cookie', () => {
+    const { passed } = run({ host: '127.0.0.1:5173', cookie: `openlore_session=${TOKEN}` }, '/assets/app.js');
+    expect(passed).toBe(true);
+  });
+
+  it('rejects a wrong token and a wrong cookie', () => {
+    expect(run({ host: '127.0.0.1:5173' }, `/?token=${'b'.repeat(48)}`).res.statusCode).toBe(401);
+    expect(run({ host: '127.0.0.1:5173', cookie: 'openlore_session=nope' }, '/').res.statusCode).toBe(401);
+  });
+
+  it('applies the rebinding/Origin defense BEFORE issuing a credential', () => {
+    // A valid token must not be exchangeable for a cookie by a page on another origin.
+    const { res } = run(
+      { host: '127.0.0.1:5173', origin: 'https://evil.example.com' },
+      `/?token=${TOKEN}`,
+    );
+    expect(res.statusCode).toBe(403);
+    expect(res.headers['set-cookie']).toBeUndefined();
+  });
+
+  it('lets an explicit header through, for non-browser clients', () => {
+    expect(run({ host: '127.0.0.1:5173', 'x-openlore-token': TOKEN }, '/').passed).toBe(true);
+  });
+});
+
+describe('readCookie', () => {
+  it('reads one value out of a Cookie header, ignoring neighbours', () => {
+    expect(readCookie('a=1; openlore_session=xyz; b=2', 'openlore_session')).toBe('xyz');
+    expect(readCookie('openlore_session=xyz', 'openlore_session')).toBe('xyz');
+    expect(readCookie('other=1', 'openlore_session')).toBeUndefined();
+    expect(readCookie(undefined, 'openlore_session')).toBeUndefined();
+  });
+
+  it('does not confuse a cookie whose name merely ends with the target', () => {
+    expect(readCookie('not_openlore_session=evil', 'openlore_session')).toBeUndefined();
   });
 });

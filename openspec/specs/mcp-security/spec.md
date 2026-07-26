@@ -262,6 +262,27 @@ spends the user's money or executes an agent (e.g. the viewer's chat endpoint) S
 token even on loopback. No API route may be mounted outside the guard. Each surface SHALL install
 graceful-shutdown handlers and a descriptor for stale-instance detection.
 
+A surface a HUMAN opens in a browser SHALL NOT embed its token in the page it serves, and SHALL
+gate the page itself — not only its API routes. A browser cannot attach a header to the navigation
+that loads a page, so such a surface SHALL authenticate that first request by exchanging a
+one-time token carried in the URL for an `HttpOnly`, `SameSite=Strict` session cookie, and SHALL
+redirect so the token does not persist in the address bar, history, or a `Referer` header. The
+guard SHALL accept either the header or that cookie as the credential.
+
+#### Scenario: The viewer does not hand its token to a local process
+
+- **GIVEN** any process on the machine requesting `/` from a running `openlore view`
+- **WHEN** it presents no session cookie and no token
+- **THEN** it receives 401 and the response contains no credential — the page cannot be used as a
+  token oracle against the gate that protects the chat endpoint
+
+#### Scenario: A one-time link admits the browser exactly once, then leaves the URL clean
+
+- **GIVEN** the link printed by `openlore view`, carrying `?token=<t>`
+- **WHEN** the browser opens it
+- **THEN** the server sets an `HttpOnly`, `SameSite=Strict` session cookie and redirects to the
+  same path with the token removed, and every later request authenticates with the cookie
+
 #### Scenario: DNS rebinding cannot reach the viewer's APIs
 
 - **GIVEN** a browser request arriving at `127.0.0.1:<port>` with a non-loopback Host or Origin

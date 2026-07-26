@@ -26,6 +26,28 @@ import { LOOPBACK_HOSTNAMES, isLoopbackHost } from '../../utils/loopback.js';
 /** Header a client presents to authenticate to a local OpenLore HTTP surface. */
 export const OPENLORE_TOKEN_HEADER = 'x-openlore-token';
 
+/**
+ * Cookie a BROWSER presents instead of the header.
+ *
+ * A browser cannot attach a custom header to the navigation that loads a page, so a
+ * surface a human opens has to authenticate that first request some other way. The
+ * viewer does it by handing the token over once in the URL and exchanging it for this
+ * cookie (see `view.ts`) — which is why the guard accepts either credential.
+ */
+export const OPENLORE_SESSION_COOKIE = 'openlore_session';
+
+/** Read one cookie value from a `Cookie:` header. Returns undefined when absent. */
+export function readCookie(header: string | undefined, name: string): string | undefined {
+  if (!header) return undefined;
+  for (const part of header.split(';')) {
+    const eq = part.indexOf('=');
+    if (eq === -1) continue;
+    if (part.slice(0, eq).trim() !== name) continue;
+    return decodeURIComponent(part.slice(eq + 1).trim());
+  }
+  return undefined;
+}
+
 // Loopback recognition lives in `src/utils/loopback.ts` so the non-HTTP consumer
 // (the repo-config trust boundary) can share it without importing the CLI layer.
 // Imported (not re-exported blind) because this module's own guards call it.
@@ -154,6 +176,10 @@ export interface LocalHttpGuardRejection {
  * Token policy: a token is required when a token is configured AND either the
  * binding is non-loopback (anyone on the network can reach the port) or the
  * caller marked the route `requireToken` (a money/agent endpoint).
+ *
+ * The credential may arrive as the `x-openlore-token` header (programmatic clients)
+ * or as the session cookie (a browser, which cannot set headers on a navigation).
+ * Both are compared in constant time.
  */
 export function checkLocalHttpRequest(
   req: IncomingMessage,
@@ -165,12 +191,105 @@ export function checkLocalHttpRequest(
   const tokenRequired =
     cfg.token !== undefined && (cfg.requireToken === true || !isLoopbackHost(cfg.boundHost));
   if (tokenRequired) {
-    const presented = req.headers[cfg.tokenHeader ?? OPENLORE_TOKEN_HEADER];
-    if (typeof presented !== 'string' || !constantTimeEqual(presented, cfg.token as string)) {
-      return { status: 401, error: `invalid or missing ${cfg.tokenHeader ?? OPENLORE_TOKEN_HEADER}` };
+    const headerName = cfg.tokenHeader ?? OPENLORE_TOKEN_HEADER;
+    const fromHeader = req.headers[headerName];
+    const fromCookie = readCookie(req.headers.cookie, OPENLORE_SESSION_COOKIE);
+    const expected = cfg.token as string;
+    const ok =
+      (typeof fromHeader === 'string' && constantTimeEqual(fromHeader, expected)) ||
+      (typeof fromCookie === 'string' && constantTimeEqual(fromCookie, expected));
+    if (!ok) {
+      return { status: 401, error: `invalid or missing ${headerName}` };
     }
   }
   return null;
+}
+
+/**
+ * Build the middleware that gates EVERY route of a browser-facing surface, and
+ * performs the one-time URL-token → cookie handshake that lets a browser in.
+ *
+ * WHY THIS EXISTS. The viewer used to embed its token in the HTML it served and gate
+ * only `/api`, which meant `/` was unauthenticated: any other process on the machine
+ * could `curl http://127.0.0.1:PORT/`, read the token out of the page, and then drive
+ * the token-gated, LLM-backed chat route. The token was the mitigation against exactly
+ * that attacker, and the page handed it out.
+ *
+ * The exchange (the model Jupyter uses): the CLI opens the browser at `/?token=<t>`;
+ * the first request presenting a valid token gets an HttpOnly, SameSite=Strict cookie
+ * and a redirect that strips the token from the URL (so it does not linger in history
+ * or leak via Referer). Every later request — the page, its assets, its `/api` calls —
+ * authenticates with the cookie the browser now holds. A process that curls `/` with no
+ * credential gets a 401 instead of the key.
+ *
+ * HttpOnly keeps the cookie out of `document.cookie`, so injected page script cannot
+ * read it back out; SameSite=Strict means it is never attached to a cross-site request,
+ * which (with the Origin/Host checks above) is what keeps a cookie-authenticated
+ * surface from being CSRF-able.
+ *
+ * RESIDUAL, stated plainly: the token appears once in the URL, so it is briefly visible
+ * in the argv of the browser-open process (world-readable on Linux) and in the browser's
+ * own history. That is a much narrower window than a page that serves the token to
+ * anyone who asks, but it is not zero — the same trade Jupyter makes.
+ */
+export function createBrowserSessionGuard(opts: {
+  boundHost: string;
+  token: string;
+  /** Paths that skip the gate entirely (health probes). Compared after query strip. */
+  publicPaths?: ReadonlySet<string>;
+}): ConnectMiddleware {
+  return (req, res, next) => {
+    const rawUrl = req.url ?? '/';
+    const [pathname, query] = rawUrl.split('?');
+
+    if (opts.publicPaths?.has(pathname)) {
+      next();
+      return;
+    }
+
+    // Origin/Host defense runs first, before any credential is read or issued.
+    const originErr = originDefenseError(req, opts.boundHost);
+    if (originErr) {
+      res.statusCode = 403;
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      res.end(JSON.stringify({ error: originErr }));
+      return;
+    }
+
+    // Already authenticated (cookie from a previous handshake, or an explicit header).
+    const fromCookie = readCookie(req.headers.cookie, OPENLORE_SESSION_COOKIE);
+    const fromHeader = req.headers[OPENLORE_TOKEN_HEADER];
+    if (
+      (typeof fromCookie === 'string' && constantTimeEqual(fromCookie, opts.token)) ||
+      (typeof fromHeader === 'string' && constantTimeEqual(fromHeader, opts.token))
+    ) {
+      next();
+      return;
+    }
+
+    // Handshake: a valid ?token= is exchanged for the cookie, then redirected away.
+    const params = new URLSearchParams(query ?? '');
+    const presented = params.get('token');
+    if (presented !== null && constantTimeEqual(presented, opts.token)) {
+      params.delete('token');
+      const rest = params.toString();
+      res.statusCode = 302;
+      res.setHeader(
+        'Set-Cookie',
+        `${OPENLORE_SESSION_COOKIE}=${encodeURIComponent(opts.token)}; Path=/; HttpOnly; SameSite=Strict`,
+      );
+      res.setHeader('Location', rest ? `${pathname}?${rest}` : pathname);
+      res.end();
+      return;
+    }
+
+    res.statusCode = 401;
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.end(
+      'openlore view: this page requires the one-time link printed by the command that ' +
+        'started it. Re-open that URL (it contains ?token=...), or restart `openlore view`.\n',
+    );
+  };
 }
 
 /** Minimal connect-style middleware signature (a subset of what vite/connect pass). */

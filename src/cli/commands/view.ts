@@ -32,7 +32,7 @@ import {
 } from '../../constants.js';
 import {
   createApiGuardMiddleware,
-  OPENLORE_TOKEN_HEADER,
+  createBrowserSessionGuard,
   writeInstanceDescriptor,
 } from './local-http-guard.js';
 import { VectorIndex } from '../../core/analyzer/vector-index.js';
@@ -71,29 +71,6 @@ export function safePath(rootPath: string, userPath: string): string | null {
   }
 }
 
-/**
- * Build the inline script injected into the served UI so its same-origin `/api`
- * requests authenticate. It publishes the instance token and wraps `fetch` to
- * attach the `x-openlore-token` header to relative `/api/*` requests only. The
- * token is a fresh random hex string embedded via `JSON.stringify` (no injection
- * risk); the wrapper is defensively wrapped in try/catch so it can never break
- * the app's own fetches.
- */
-export function buildTokenInjectionScript(token: string): string {
-  // Escape `<` so the embedded token can never close the surrounding <script>
-  // tag (defense in depth; the real token is hex-only).
-  const embedded = JSON.stringify(token).replace(/</g, '\\u003c');
-  return (
-    `window.__OPENLORE_TOKEN__=${embedded};` +
-    `(function(){var t=window.__OPENLORE_TOKEN__;if(!t||!window.fetch)return;` +
-    `var o=window.fetch.bind(window);window.fetch=function(i,n){try{` +
-    `var u=typeof i==='string'?i:(i&&i.url)||'';` +
-    `if(typeof u==='string'&&u.indexOf('/api/')===0){` +
-    `n=n||{};var h=new Headers((n&&n.headers)||(typeof i!=='string'&&i&&i.headers)||undefined);` +
-    `h.set(${JSON.stringify(OPENLORE_TOKEN_HEADER)},t);n.headers=h;}}catch(e){}return o(i,n);};})();`
-  );
-}
-
 function openBrowser(url: string): void {
   const platform = process.platform;
   const cmd = platform === 'darwin' ? 'open' : platform === 'win32' ? 'cmd' : 'xdg-open';
@@ -109,12 +86,7 @@ export const viewCommand = new Command('view')
   .option('--analysis <path>', 'Path to analysis directory', `${OPENLORE_ANALYSIS_REL_PATH}/`)
   .option('--spec <path>', 'Path to spec files directory', `./${OPENSPEC_DIR}/${OPENSPEC_SPECS_SUBDIR}/`)
   .option('--port <n>', 'Port to run the viewer on', String(DEFAULT_VIEWER_PORT))
-  .option('--host <host>', 'Loopback host to bind (non-loopback binds are refused)', DEFAULT_VIEWER_HOST)
-  .option(
-    '--allow-remote-unauthenticated',
-    'Permit a non-loopback --host. The served page contains the instance token, so anyone who can reach the port can use it',
-    false,
-  )
+  .option('--host <host>', 'Host to bind (default loopback; every route requires the one-time link)', DEFAULT_VIEWER_HOST)
   .option('--no-open', 'Do not open the browser automatically', false)
   .action(
     async (options: {
@@ -123,7 +95,6 @@ export const viewCommand = new Command('view')
       port: string;
       host: string;
       open: boolean;
-      allowRemoteUnauthenticated?: boolean;
     }) => {
       const rootPath = process.cwd();
       const analysisDir = resolve(rootPath, options.analysis);
@@ -162,35 +133,14 @@ export const viewCommand = new Command('view')
       const port = isNaN(parsedPort) ? DEFAULT_VIEWER_PORT : parsedPort;
       const host = options.host || DEFAULT_VIEWER_HOST;
 
-      // The viewer authenticates its own page by EMBEDDING the instance token in the
-      // served HTML, and the guard is mounted at `/api` — so `/` itself is
-      // unauthenticated. On a non-loopback bind that means anyone who can reach the
-      // port can fetch the page, read the token out of it, and then call the guarded
-      // routes (including the LLM-backed /api/chat). A token gate cannot defend a
-      // surface that publishes its own key, so the bind is refused BY DEFAULT.
-      //
-      // This is stricter than `serve`, which accepts a non-loopback bind with a
-      // --token, because the viewer has no token to withhold. But binding a container
-      // interface so a published port works (`docker run -p 5173:5173`) is a real
-      // workflow that loopback-only cannot serve, so there is an explicit opt-in —
-      // named for what it costs, not for what it enables.
-      if (!isLoopbackHost(host) && !options.allowRemoteUnauthenticated) {
-        logger.error(
-          `Refusing to bind non-loopback host "${host}": the viewer embeds its auth token ` +
-            `in the page it serves, so a non-loopback bind hands that token to anyone who ` +
-            `can reach the port. Forward the port instead ` +
-            `(ssh -L ${port}:localhost:${port} <host>), or pass ` +
-            `--allow-remote-unauthenticated if the network is already trusted (e.g. a ` +
-            `container port you publish yourself).`,
-        );
-        process.exitCode = 1;
-        return;
-      }
+      // A non-loopback bind is now the same posture as `serve`: the token is required
+      // on every route (below), and the page no longer contains it — so binding a
+      // container interface for a published port is safe as long as the operator keeps
+      // the one-time URL to themselves. Warn, rather than refuse.
       if (!isLoopbackHost(host)) {
         logger.warning(
-          `Serving on non-loopback host "${host}" with --allow-remote-unauthenticated: ` +
-            `anyone who can reach this port can read the instance token from the page and ` +
-            `drive the LLM-backed chat endpoint.`,
+          `Binding non-loopback host "${host}": anyone who can reach this port needs the ` +
+            `one-time link below to use the viewer. Treat that URL as a password.`,
         );
       }
 
@@ -215,23 +165,20 @@ export const viewCommand = new Command('view')
           react(),
           {
             name: 'openlore-graph-api',
-            // Inject the instance token + fetch shim into the served page so the
-            // browser UI's same-origin /api requests carry x-openlore-token.
-            transformIndexHtml() {
-              return [
-                {
-                  tag: 'script',
-                  injectTo: 'head-prepend' as const,
-                  children: buildTokenInjectionScript(token),
-                },
-              ];
-            },
             configureServer(devServer) {
-              // SECURITY: one guard in front of every /api/* route. Mounted at the
-              // '/api' prefix and registered FIRST so no route below can be reached
-              // without passing it: DNS-rebinding / cross-origin requests are rejected
-              // (403), and the money/agent chat route requires the instance token even
-              // on loopback (401) — as does every route on a non-loopback binding.
+              // SECURITY, first gate: EVERY route, including `/` and its assets. This
+              // is what stops another local process from simply fetching the page. It
+              // also performs the one-time ?token= → HttpOnly-cookie handshake that
+              // lets the browser in; see createBrowserSessionGuard.
+              devServer.middlewares.use(
+                createBrowserSessionGuard({ boundHost: host, token }),
+              );
+
+              // SECURITY, second gate: one guard in front of every /api/* route.
+              // Redundant with the session guard for authentication, kept because it
+              // is the shared policy both local surfaces apply (mcp-security:
+              // AllLocalHttpSurfacesShareTheGuard) and it keeps `serve` and `view`
+              // from drifting.
               devServer.middlewares.use(
                 '/api',
                 createApiGuardMiddleware({
@@ -742,8 +689,14 @@ export const viewCommand = new Command('view')
         return;
       }
 
+      // The one-time link. It carries the token exactly once: opening it exchanges the
+      // token for an HttpOnly cookie and redirects to the bare URL, so the token does
+      // not linger in the address bar, in history, or in a Referer header.
       const url = `http://${host}:${port}/`;
+      const entryUrl = `${url}?token=${token}`;
       logger.success(`Viewer running at ${url}`);
+      logger.info('Open this link', entryUrl);
+      logger.info('Note', 'the link is the credential — anyone who has it can use this viewer');
 
       // Discovery + stale-instance detection (parity with the `serve` daemon):
       // record where the viewer is listening so a later invocation / tool can
@@ -776,7 +729,7 @@ export const viewCommand = new Command('view')
       process.on('SIGTERM', () => void shutdown());
 
       if (options.open) {
-        openBrowser(url);
+        openBrowser(entryUrl);
       }
 
       // Vite keeps the event loop alive; nothing else to do here.

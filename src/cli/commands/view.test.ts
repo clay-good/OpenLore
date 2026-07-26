@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { viewCommand, sanitizeErrorMessage, safePath, buildTokenInjectionScript } from './view.js';
+import { viewCommand, sanitizeErrorMessage, safePath } from './view.js';
 
 // ============================================================================
 // MOCKS
@@ -302,30 +302,6 @@ describe('safePath', () => {
 });
 
 // ============================================================================
-// buildTokenInjectionScript — the token/fetch shim injected into the served UI
-// ============================================================================
-
-describe('buildTokenInjectionScript', () => {
-  it('publishes the token and attaches x-openlore-token to /api requests', () => {
-    const script = buildTokenInjectionScript('deadbeef');
-    expect(script).toContain('window.__OPENLORE_TOKEN__="deadbeef"');
-    expect(script).toContain('x-openlore-token');
-    expect(script).toContain("indexOf('/api/')");
-    // Wraps fetch and is defensive (never throws into the app).
-    expect(script).toContain('window.fetch=function');
-    expect(script).toContain('try{');
-  });
-
-  it('escapes < so an odd token cannot close the <script> tag', () => {
-    const script = buildTokenInjectionScript('a"b</script>');
-    // The quote is JSON-escaped and every `<` is turned into <, so the
-    // literal </script> sequence never appears in the emitted script.
-    expect(script).toContain('\\u003c/script>');
-    expect(script).not.toContain('</script>');
-  });
-});
-
-// ============================================================================
 // API guard wiring — every /api route sits behind the shared guard
 // ============================================================================
 
@@ -365,11 +341,18 @@ describe('view server API guard wiring', () => {
       .find((p) => p && p.name === 'openlore-graph-api');
     expect(plugin).toBeDefined();
 
+    // `use` is called either as use(mw) — the root session guard — or use(path, mw).
     const registrations: Array<{ path: string }> = [];
     const fakeDevServer = {
-      middlewares: { use: (path: string) => registrations.push({ path }) },
+      middlewares: {
+        use: (a: unknown) => registrations.push({ path: typeof a === 'string' ? a : '/' }),
+      },
     };
     plugin!.configureServer!(fakeDevServer);
+
+    // The root session guard is registered FIRST, so `/` and its assets — not just
+    // `/api` — are gated. That is what stops another local process fetching the page.
+    expect(registrations[0].path).toBe('/');
 
     const guardIdx = registrations.findIndex((r) => r.path === '/api');
     const firstRouteIdx = registrations.findIndex((r) => r.path.startsWith('/api/'));
@@ -384,15 +367,15 @@ describe('view server API guard wiring', () => {
     expect(routesBeforeGuard).toEqual([]);
   });
 
-  it('injects the token + fetch shim into the served page', async () => {
+  it('does NOT put the token in the page it serves', async () => {
+    // The whole point of the session handshake: the page used to embed the token, so
+    // `curl http://127.0.0.1:PORT/` handed the credential to any local process — the
+    // very attacker the token exists to stop.
     const cfg = await captureViteConfig();
-    const plugin = (cfg.plugins.flat() as Array<{ name?: string; transformIndexHtml?: () => unknown }>)
+    const plugin = (cfg.plugins.flat() as Array<{ name?: string; transformIndexHtml?: unknown }>)
       .find((p) => p && p.name === 'openlore-graph-api');
-    const tags = plugin!.transformIndexHtml!() as Array<{ tag: string; children: string; injectTo: string }>;
-    expect(tags).toHaveLength(1);
-    expect(tags[0].tag).toBe('script');
-    expect(tags[0].children).toContain('x-openlore-token');
-    expect(tags[0].children).toContain('window.__OPENLORE_TOKEN__');
+    expect(plugin).toBeDefined();
+    expect(plugin!.transformIndexHtml).toBeUndefined();
   });
 
   it('writes a discovery descriptor on start', async () => {
