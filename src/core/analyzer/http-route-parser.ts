@@ -423,9 +423,13 @@ export async function extractRouteDefinitions(filePath: string): Promise<RouteDe
   // `url(...)` (regex routes). `\bpath` alone never matched `re_path` (the `_` blocks
   // the word boundary), so regex routes were silently unextracted.
   const djangoPathRegex =
-    // The route literal is bounded and cannot span lines: `(.*?)` rescanned to EOF
-    // from every `path(` when the closing quote never arrived.
-    /\b(re_path|path|url)\s*\(\s*r?(['"])([^'"\n]{0,2000})\2\s*,\s*([\w.]+)/gm;
+    // Bounded, but still `.` rather than `[^'"]`: a Django route legitimately contains
+    // a quote character (`path("it's/")`, or a regex route with a `[^"]+` class), and
+    // excluding quotes dropped those routes entirely. `.` excludes newline and there is
+    // no `s` flag, so an unterminated `path(` rescanned to end-of-LINE from every
+    // opener — quadratic on one long line (measured 68s on 420KB), which the bound is
+    // what actually fixes.
+    /\b(re_path|path|url)\s*\(\s*r?(['"])(.{0,2000}?)\2\s*,\s*([\w.]+)/gm;
   while ((m = djangoPathRegex.exec(clean)) !== null) {
     const keyword = m[1];
     const rawPattern = m[3];

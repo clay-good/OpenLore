@@ -59,6 +59,7 @@ import {
 // (mcp-security: ServeDescriptorValidatedAtEveryReader).
 import { readServeDescriptor, type ServeDescriptor } from '../cli/commands/serve-descriptor.js';
 import type { ContextInjectionConfig } from '../types/index.js';
+import { discloseRepoConfiguredEndpoint } from '../core/services/repo-config-trust.js';
 
 // ── Config types & helpers ────────────────────────────────────────────────────
 
@@ -239,6 +240,10 @@ async function runConfigWizard(ctx: ExtensionContext, existing?: OpenLoreConfig 
       row('Model', generation.model ?? '—', async () => {
         const apiBase = generation.provider === 'openai' ? 'https://api.openai.com' : (generation.openaiCompatBaseUrl ?? '');
         const apiKey = generation.provider ? process.env[PROVIDER_ENV_VARS[generation.provider] ?? ''] : undefined;
+        // `generation` is seeded from the ANALYZED REPO's config, and fetchModels sends
+        // `Authorization: Bearer <operator key>` to whatever it names — so opening this
+        // row on a hostile repo would hand over the key. Say where it is going.
+        discloseRepoConfiguredEndpoint('generation.openaiCompatBaseUrl', generation.openaiCompatBaseUrl);
         const models = apiBase ? await fetchModels(apiBase, apiKey) : null;
         if (models && models.length > 0) {
           const modelList = generation.model && models.includes(generation.model)

@@ -53,13 +53,21 @@ const REACT_FORWARD_REF = /^export\s+const\s+([A-Z][A-Za-z0-9_]*)\s*=\s*(?:forwa
 
 // TypeScript interface/type props extraction: interface XxxProps { ... }
 // Bounded body: an unbounded `[^}]+` is quadratic on repeated `interface Props {`.
-const TS_PROPS_INTERFACE = /interface\s+\w*Props\s*\{([^}]{0,20000})\}/gs;
+const TS_PROPS_INTERFACE = /interface\s+\w*Props\s*\{([^}]{0,4000})\}/gs;
 const TS_PROP_LINE = /^\s+(\w+)(\?)?:\s*([^;,\n]+)/m;
 
 // Vue SFC
 const VUE_TEMPLATE_BLOCK = /<template[\s>]/;
 const VUE_SCRIPT_SETUP_PROPS = /defineProps\s*[<(]/;
-const VUE_OPTIONS_PROPS = /\bprops\s*:\s*\{([^}]+)\}/s;
+// Bounded like TS_PROPS_INTERFACE above: `[^}]+` rescans to EOF from every
+// `props:{` when the brace never closes (measured 5.5s on a 164KB .vue file).
+//
+// The bound has to stay modest rather than merely large. Unlike an import body, a
+// props block legitimately NESTS braces (`props: { x: { type: String } }`), so the
+// opener cannot be excluded from the class — which means the cost is O(n x bound),
+// linear but with the bound as its constant. 4000 characters is far past any real
+// props declaration while keeping a hostile file's cost in the low seconds.
+const VUE_OPTIONS_PROPS = /\bprops\s*:\s*\{([^}]{0,4000})\}/s;
 // const VUE_PROP_NAME = /^\s+(\w+)\s*:/m; // reserved for future use
 
 // Angular
@@ -101,7 +109,7 @@ function extractVueProps(source: string): ComponentProp[] {
   // Composition API: defineProps<{ name: string; ... }>()
   const setupMatch = VUE_SCRIPT_SETUP_PROPS.exec(source);
   if (setupMatch) {
-    const genericMatch = source.slice(setupMatch.index).match(/defineProps\s*<\s*\{([^}]+)\}>/s);
+    const genericMatch = source.slice(setupMatch.index).match(/defineProps\s*<\s*\{([^}]{0,4000})\}>/s);
     if (genericMatch) {
       const lines = genericMatch[1].split('\n');
       for (const line of lines) {

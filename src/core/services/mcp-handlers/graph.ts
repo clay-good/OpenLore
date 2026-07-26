@@ -1271,10 +1271,15 @@ export async function handleTraceExecutionPath(
   // paths. Enumeration order is edge-insertion order and the sort by hop count runs
   // AFTER the cap, so a truncated result's first path is only the shortest of the
   // ones that happened to be found — not necessarily the shortest that exists.
-  let truncated = false;
+
+
+  // Enumerate ONE past the cap: finding maxPaths+1 is the only way to distinguish
+  // "exactly maxPaths exist" from "more exist and were dropped". Reporting truncation
+  // on the first is an honesty feature over-claiming, which is its own defect.
+  const enumerationCap = maxPaths + 1;
 
   function dfs(currentId: string, path: string[], visited: Set<string>): void {
-    if (allPaths.length >= maxPaths) { truncated = true; return; }
+    if (allPaths.length >= enumerationCap) return;
     if (targetIds.has(currentId) && path.length > 1) {
       allPaths.push([...path]);
       return; // don't traverse past the target
@@ -1295,9 +1300,11 @@ export async function handleTraceExecutionPath(
   }
 
   for (const entry of entryNodes) {
-    if (allPaths.length >= maxPaths) { truncated = true; break; }
+    if (allPaths.length >= enumerationCap) break;
     dfs(entry.id, [entry.id], new Set([entry.id]));
   }
+  const truncated = allPaths.length > maxPaths;
+  if (truncated) allPaths.length = maxPaths;
 
   // Confidence boundary: the returned paths ARE the answer; their edges are the
   // basis. A path that crosses a synthesized edge leaned on heuristic dispatch.

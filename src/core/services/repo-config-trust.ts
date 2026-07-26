@@ -72,7 +72,8 @@ export function rejectRepoConfiguredTlsOptOut(field: string, value: boolean | un
   if (value) {
     logger.warning(
       `Ignoring ${field}=true from .openlore/config.json: a repository may not disable ` +
-        'TLS verification. Pass --insecure to do so deliberately.',
+        'TLS verification. Set it outside the repo to do so deliberately — ' +
+        '--insecure for the LLM path, EMBED_SKIP_SSL_VERIFY=1 for embeddings.',
     );
   }
   return false;
@@ -88,8 +89,16 @@ export function rejectRepoConfiguredTlsOptOut(field: string, value: boolean | un
  * honest move for those is to make the destination visible rather than silent; a
  * refusal belongs only where a default exists to fall back to.
  */
+const disclosed = new Set<string>();
+
 export function discloseRepoConfiguredEndpoint(field: string, url: string | undefined): void {
   if (!url || isLoopbackUrl(url)) return;
+  // Once per (field, endpoint) per process. `resolveEmbedder` runs on EVERY orient /
+  // search_code / semantic call, so an unlatched warning buried a team using a
+  // legitimate self-hosted endpoint under one line per MCP request.
+  const key = `${field}\u0000${url}`;
+  if (disclosed.has(key)) return;
+  disclosed.add(key);
   logger.warning(
     `${field} from .openlore/config.json points at ${url} — requests (and any API key ` +
       'for them) go to that host. Confirm you trust this repository.',

@@ -365,7 +365,8 @@ export function parseJSExports(content: string): ExportInfo[] {
   }
 
   // export { X, Y } or export { X } from 'module'
-  // Bounded for the same reason as namedImportRegex above.
+  // Brace-excluded for the same reason as namedImportRegex above (and, like it,
+  // deliberately NOT length-bounded).
   const namedExportRegex = /export\s+\{([^{}]+)\}(?:\s+from\s+['"]([^'"]+)['"])?/g;
   while ((match = namedExportRegex.exec(cleanContent)) !== null) {
     const names = parseNamedImports(match[1]);

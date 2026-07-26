@@ -110,6 +110,11 @@ export const viewCommand = new Command('view')
   .option('--spec <path>', 'Path to spec files directory', `./${OPENSPEC_DIR}/${OPENSPEC_SPECS_SUBDIR}/`)
   .option('--port <n>', 'Port to run the viewer on', String(DEFAULT_VIEWER_PORT))
   .option('--host <host>', 'Loopback host to bind (non-loopback binds are refused)', DEFAULT_VIEWER_HOST)
+  .option(
+    '--allow-remote-unauthenticated',
+    'Permit a non-loopback --host. The served page contains the instance token, so anyone who can reach the port can use it',
+    false,
+  )
   .option('--no-open', 'Do not open the browser automatically', false)
   .action(
     async (options: {
@@ -118,6 +123,7 @@ export const viewCommand = new Command('view')
       port: string;
       host: string;
       open: boolean;
+      allowRemoteUnauthenticated?: boolean;
     }) => {
       const rootPath = process.cwd();
       const analysisDir = resolve(rootPath, options.analysis);
@@ -159,19 +165,33 @@ export const viewCommand = new Command('view')
       // The viewer authenticates its own page by EMBEDDING the instance token in the
       // served HTML, and the guard is mounted at `/api` — so `/` itself is
       // unauthenticated. On a non-loopback bind that means anyone who can reach the
-      // port can simply fetch the page, read the token out of it, and then call the
-      // guarded routes (including the LLM-backed /api/chat). The token gate cannot
-      // defend a surface that publishes its own key, so refuse the bind instead —
-      // parity with `serve`, which refuses a tokenless non-loopback bind.
-      if (!isLoopbackHost(host)) {
+      // port can fetch the page, read the token out of it, and then call the guarded
+      // routes (including the LLM-backed /api/chat). A token gate cannot defend a
+      // surface that publishes its own key, so the bind is refused BY DEFAULT.
+      //
+      // This is stricter than `serve`, which accepts a non-loopback bind with a
+      // --token, because the viewer has no token to withhold. But binding a container
+      // interface so a published port works (`docker run -p 5173:5173`) is a real
+      // workflow that loopback-only cannot serve, so there is an explicit opt-in —
+      // named for what it costs, not for what it enables.
+      if (!isLoopbackHost(host) && !options.allowRemoteUnauthenticated) {
         logger.error(
           `Refusing to bind non-loopback host "${host}": the viewer embeds its auth token ` +
             `in the page it serves, so a non-loopback bind hands that token to anyone who ` +
-            `can reach the port. Bind loopback and forward the port instead ` +
-            `(ssh -L ${port}:localhost:${port} <host>).`,
+            `can reach the port. Forward the port instead ` +
+            `(ssh -L ${port}:localhost:${port} <host>), or pass ` +
+            `--allow-remote-unauthenticated if the network is already trusted (e.g. a ` +
+            `container port you publish yourself).`,
         );
         process.exitCode = 1;
         return;
+      }
+      if (!isLoopbackHost(host)) {
+        logger.warning(
+          `Serving on non-loopback host "${host}" with --allow-remote-unauthenticated: ` +
+            `anyone who can reach this port can read the instance token from the page and ` +
+            `drive the LLM-backed chat endpoint.`,
+        );
       }
 
       // Per-instance token. Injected into the served UI so its same-origin /api

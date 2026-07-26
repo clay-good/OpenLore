@@ -44,7 +44,7 @@ import {
   ARTIFACT_REFACTOR_PRIORITIES,
   ARTIFACT_RAG_MANIFEST,
 } from '../constants.js';
-import { resolveTrustedApiBase, resolveTrustedSslVerify, rejectRepoConfiguredTlsOptOut } from '../core/services/repo-config-trust.js';
+import { resolveTrustedApiBase, resolveTrustedSslVerify, rejectRepoConfiguredTlsOptOut, discloseRepoConfiguredEndpoint } from '../core/services/repo-config-trust.js';
 import { safeOpenspecDir } from '../utils/path-confinement.js';
 
 function progress(onProgress: ProgressCallback | undefined, step: string, status: 'start' | 'progress' | 'complete' | 'skip', detail?: string): void {
@@ -170,6 +170,16 @@ export async function openloreGenerate(options: GenerateApiOptions = {}): Promis
     ?? process.env.OPENAI_COMPAT_BASE_URL
     ?? openloreConfig.generation.openaiCompatBaseUrl
     ?? rootConfig['openaiCompatBaseUrl'];
+  // Disclose when the endpoint came from the analyzed repo's config rather than the
+  // host process or the environment. Both spellings are covered — the undeclared
+  // top-level `openaiCompatBaseUrl` key is read here and nowhere else, so it had no
+  // disclosure at all.
+  if (!options.openaiCompatBaseUrl && !process.env.OPENAI_COMPAT_BASE_URL) {
+    discloseRepoConfiguredEndpoint(
+      'generation.openaiCompatBaseUrl',
+      openloreConfig.generation.openaiCompatBaseUrl ?? rootConfig['openaiCompatBaseUrl'],
+    );
+  }
 
   // `options.*` is supplied by the HOST PROCESS embedding OpenLore, so it is trusted
   // like a CLI flag; the config file is the analyzed repo's and is not.

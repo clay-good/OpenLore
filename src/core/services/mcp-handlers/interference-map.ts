@@ -731,7 +731,11 @@ export async function computeInterferenceMap(
   for (const repo of repos) {
     if (includeBranches) {
       try { raw.push(...await providers.enumerateBranches(repo.path, repo.name, resolvedBaseRef, input.branches)); }
-      catch { caveats.push(`Branch enumeration failed for ${repo.name}.`); }
+      catch (err) {
+        // Carry the reason: "not a git worktree" and "safe.directory rejected" need
+        // different fixes, and a bare failure notice is not actionable.
+        caveats.push(`Branch enumeration failed for ${repo.name}: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
     if (includePrs) {
       const has = await providers.ghAvailable(repo.path).catch(() => false);

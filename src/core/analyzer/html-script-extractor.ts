@@ -24,7 +24,11 @@
 // Matches just the OPENING `<script ...>` tag. `[^>]*` stops at the first `>`,
 // which is a known limitation when an attribute value itself contains `>`
 // (rare; documented). Case-insensitive, global.
-const OPEN_SCRIPT_RE = /<script\b([^>]*)>/gi;
+// `[^<>]` (not `[^>]`): excluding `<` stops the scan at the next tag rather than at
+// EOF, so a file of repeated `<script ` with no `>` is linear, not quadratic. The
+// header above claims this class of blow-up was already fixed — it was fixed for the
+// body scan, and survived here in the opening-tag scan (measured 20s on 240KB).
+const OPEN_SCRIPT_RE = /<script\b([^<>]*)>/gi;
 const CLOSE_TAG = '</script';
 
 /** JS `type` values (besides "no type") that we treat as executable JavaScript. */

@@ -206,7 +206,7 @@ function maskHelm(content: string): string {
         return '';
       }
       // Replace inline expressions with a placeholder scalar.
-      return line.replace(/\{\{-?[\s\S]*?-?\}\}/g, 'helmval');
+      return line.replace(/\{\{-?[\s\S]{0,10000}?-?\}\}/g, 'helmval');
     })
     .join('\n');
 }

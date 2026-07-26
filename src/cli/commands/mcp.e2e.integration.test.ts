@@ -983,7 +983,8 @@ describe('RIG-19 — MCP e2e integration on real openlore codebase', () => {
       targetFunction: string;
       pathsFound:     number;
       maxDepth:       number;
-      shortestPath:   string;
+      shortestPath?:  string;
+      shortestPathFound?: string;
       paths: Array<{
         hops:  number;
         chain: string;
@@ -996,8 +997,10 @@ describe('RIG-19 — MCP e2e integration on real openlore codebase', () => {
     expect(data.pathsFound).toBeGreaterThan(0);
     expect(data.maxDepth).toBe(6);
 
-    // Shortest path must end with detectLanguage
-    expect(data.shortestPath).toMatch(/detectLanguage$/);
+    // Shortest path must end with detectLanguage. The key is `shortestPathFound` when
+    // enumeration stopped at maxPaths — the field is renamed precisely because it can
+    // no longer claim to be the global shortest — so accept either spelling.
+    expect(data.shortestPath ?? data.shortestPathFound).toMatch(/detectLanguage$/);
 
     // Known path must be ≤ 4 hops
     expect(data.paths[0].hops).toBeLessThanOrEqual(4);

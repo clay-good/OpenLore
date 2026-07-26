@@ -124,7 +124,9 @@ describe('every credential-bearing config read goes through the trust boundary',
   it('has no raw `?? config.llm?.apiBase` / `?? config.llm?.sslVerify` fallback left', async () => {
     const { readFileSync, readdirSync, statSync } = await import('node:fs');
     const { join } = await import('node:path');
-    const roots = ['src/api', 'src/cli/commands', 'src/core/services'];
+    // Every face that can construct an LLM/embedding client, not just the CLI — the
+    // first pass guarded `src/cli/commands` and left `src/api` and `src/pi` open.
+    const roots = ['src/api', 'src/cli/commands', 'src/core', 'src/pi', 'src/utils'];
     const offenders: string[] = [];
     const walk = (dir: string): void => {
       for (const name of readdirSync(dir)) {
@@ -132,10 +134,16 @@ describe('every credential-bearing config read goes through the trust boundary',
         if (statSync(full).isDirectory()) { walk(full); continue; }
         if (!name.endsWith('.ts') || name.includes('.test.')) continue;
         const src = readFileSync(full, 'utf-8');
-        src.split('\n').forEach((line, i) => {
-          if (/\?\?\s*\w*[Cc]onfig\??\.llm\?\.(apiBase|sslVerify)/.test(line)) {
-            offenders.push(`${full}:${i + 1} — ${line.trim().slice(0, 90)}`);
-          }
+        const lines = src.split('\n');
+        lines.forEach((line, i) => {
+          // Any read of the untrusted field, however it is spelled or bound — not just
+          // the `?? config.llm?.apiBase` shape the first version matched.
+          if (!/\.llm\??\.(apiBase|sslVerify)/.test(line)) return;
+          // Clean when the resolver wraps it. The call is often multi-line (the config
+          // argument on its own line), so look back a couple of lines for the wrapper.
+          const window = lines.slice(Math.max(0, i - 2), i + 1).join('\n');
+          if (/resolveTrusted(ApiBase|SslVerify)\s*\(/.test(window)) return;
+          offenders.push(`${full}:${i + 1} — ${line.trim().slice(0, 90)}`);
         });
       }
     };
@@ -158,6 +166,18 @@ describe('every credential-bearing config read goes through the trust boundary',
         'rejectRepoConfiguredTlsOptOut first, so it can only ever arrive here as false.',
     },
   ];
+
+  it('EmbeddingService.fromConfig still routes its TLS opt-out through the rejecter', async () => {
+    // The exemption above is FILE-granular, and that file also contains the one
+    // config-fed TLS path in the codebase — so without this positive assertion,
+    // reverting `fromConfig` reopens the bypass and the suite stays green.
+    const { readFileSync } = await import('node:fs');
+    const src = readFileSync('src/core/analyzer/embedding-service.ts', 'utf-8');
+    const fromConfig = src.slice(src.indexOf('static fromConfig'));
+    const body = fromConfig.slice(0, fromConfig.indexOf('\n  }'));
+    expect(body).toMatch(/rejectRepoConfiguredTlsOptOut\(/);
+    expect(body).not.toMatch(/skipSslVerify:\s*cfg\.embedding\.skipSslVerify/);
+  });
 
   it('never calls allowInsecureTls on a repo-config `skipSslVerify`', async () => {
     const { readFileSync, readdirSync, statSync } = await import('node:fs');

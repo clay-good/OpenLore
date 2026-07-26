@@ -418,7 +418,17 @@ export async function rewriteSyncedDecisionStatus(
   const modified: string[] = [];
 
   for (const relPath of decision.syncedToSpecs) {
-    const absPath = join(rootPath, relPath);
+    // `syncedToSpecs` comes from the repo-committed decision store, so it is as
+    // untrusted as the spec map `syncDecision` confines above — a store entry of
+    // `"../../../../.zshenv"` (or an in-root symlink) would otherwise be read and
+    // rewritten in place. Same guard, same reason; this sibling was missed first time.
+    let absPath: string;
+    try {
+      absPath = safeJoin(rootPath, relPath);
+    } catch {
+      logger.warning(`Decision ${decision.id}: synced spec path "${relPath}" resolves outside the project — skipping status rewrite`);
+      continue;
+    }
     if (!(await fileExists(absPath))) continue;
     let content = await readFile(absPath, 'utf-8');
     const before = content;

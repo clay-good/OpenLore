@@ -66,9 +66,11 @@ function lineOfIndex(source: string, index: number): number {
 // ============================================================================
 
 // model User { ... }
-// Bounded body — see the note on JPA_FIELD_RE below; an unbounded `[^}]+` makes a
-// file of repeated `model X {` quadratic to scan.
-const PRISMA_MODEL_RE = /^model\s+(\w+)\s*\{([^}]{0,20000})\}/gm;
+// Body EXCLUDES `{` rather than being length-bounded: a Prisma model body contains no
+// nested braces, so excluding the opener makes the scan stop at the next `model X {`
+// instead of running to EOF (measured 2ms vs 4.8s for the bounded form on a hostile
+// file) — and, unlike a bound, it cannot silently drop a genuinely large model.
+const PRISMA_MODEL_RE = /^model\s+(\w+)\s*\{([^{}]+)\}/gm;
 // field line: fieldName  FieldType? @...
 const PRISMA_FIELD_RE = /^\s{1,4}(\w+)\s+(\w+)(\?)?/m;
 

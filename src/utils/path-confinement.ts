@@ -13,8 +13,11 @@
  * motivated this file happened in the first place.
  */
 
-import { realpathSync } from 'node:fs';
+import { realpathSync, lstatSync, readlinkSync } from 'node:fs';
 import { dirname, resolve, sep } from 'node:path';
+
+/** Upper bound on a symlink chain, so a cycle cannot spin the resolver. */
+const MAX_SYMLINK_HOPS = 64;
 import { OPENSPEC_DIR } from '../constants.js';
 
 /**
@@ -24,16 +27,39 @@ import { OPENSPEC_DIR } from '../constants.js';
  */
 function realPathOrNearestExisting(p: string): string {
   let cur = p;
-  for (;;) {
+  // Bounds a symlink chain (including a cycle) so this can never spin.
+  for (let hops = 0; hops < MAX_SYMLINK_HOPS; hops++) {
     try {
       return realpathSync(cur);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+
+      // ENOENT means one of two very different things, and conflating them is a
+      // confinement hole: either `cur` genuinely does not exist (walk up to the
+      // nearest existing ancestor, which is what a write target needs), or `cur`
+      // IS a symlink whose TARGET does not exist. In the second case `realpath`
+      // fails but `writeFile` still follows the link and creates the file at the
+      // target — so a repo committing `openspec/specs/d/spec.md -> ~/.zshenv`
+      // would be confined against its in-root PARENT and pass. Resolve the link
+      // ourselves and keep confining on where the write would actually land.
+      try {
+        if (lstatSync(cur).isSymbolicLink()) {
+          const target = resolve(dirname(cur), readlinkSync(cur));
+          if (target !== cur) {
+            cur = target;
+            continue;
+          }
+        }
+      } catch {
+        // lstat failed too — `cur` really is absent; fall through to the ancestor.
+      }
+
       const parent = dirname(cur);
       if (parent === cur) return cur; // reached filesystem root
       cur = parent;
     }
   }
+  return cur;
 }
 
 /**
@@ -93,10 +119,21 @@ export function isConfinedPath(absRoot: string, absPath: string): boolean {
  * `openspec/` dir — a legitimate in-root path (default or custom) passes through
  * unchanged, so only an escaping value is neutralized.
  */
-export function safeOpenspecDir(absRoot: string, configuredPath: string | undefined): string {
+export function safeOpenspecDir(
+  absRoot: string,
+  configuredPath: string | undefined,
+  onFallback?: (message: string) => void,
+): string {
   try {
     return safeJoin(absRoot, configuredPath && configuredPath.length > 0 ? configuredPath : OPENSPEC_DIR);
   } catch {
+    // Say so. A monorepo pointing `openspecPath` at `../shared-specs` is a real
+    // configuration, and falling back in silence made the decisions gate operate
+    // against a nonexistent `./openspec` and write nothing, with no clue why.
+    // (Reported through a callback so this module stays a dependency-free leaf.)
+    onFallback?.(
+      `openspecPath "${configuredPath}" resolves outside the project root — using the default "${OPENSPEC_DIR}" instead.`,
+    );
     return safeJoin(absRoot, OPENSPEC_DIR);
   }
 }

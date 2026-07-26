@@ -30,6 +30,10 @@ beforeAll(async () => {
   // The hostile commits.
   await symlink(join(outside, 'secret.md'), join(root, 'openspec', 'escaping-spec.md'));
   await symlink(outside, join(root, 'openspec', 'escaping-dir'));
+  // A DANGLING link: the target does not exist yet. `realpath` throws ENOENT on it,
+  // which is the same error a plain not-yet-created write target produces — conflating
+  // the two let a write follow the link and land outside the root.
+  await symlink(join(outside, 'not-created-yet.md'), join(root, 'openspec', 'dangling.md'));
 });
 
 afterAll(async () => {
@@ -58,6 +62,15 @@ describe('safeJoin', () => {
     expect(() => safeJoin(root, 'openspec/escaping-dir/adr-0001-x.md')).toThrow(
       /Path escape blocked/,
     );
+  });
+
+  it('blocks a DANGLING symlink whose target does not exist yet', async () => {
+    // The realistic payload is a dotfile that does not exist on the victim's machine
+    // (`~/.zshenv`), so the write CREATES it — code execution on the next shell start.
+    expect(() => safeJoin(root, 'openspec/dangling.md')).toThrow(/Path escape blocked/);
+    // And prove the primitive: the file must not appear outside the root.
+    const { existsSync } = await import('node:fs');
+    expect(existsSync(join(outside, 'not-created-yet.md'))).toBe(false);
   });
 
   it('allows a not-yet-created write target inside the root', () => {

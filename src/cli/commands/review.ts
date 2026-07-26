@@ -196,7 +196,11 @@ function headline(b: ReviewBriefing): string {
   }
   if (!('error' in blast)) {
     if (blast.impact.hubsTouched.length) parts.push(`touches ${blast.impact.hubsTouched.length} hub${blast.impact.hubsTouched.length === 1 ? '' : 's'}`);
-    if (blast.tests.unavailable) parts.push('tests to run could not be computed');
+    // Phrased as a CLAUSE, not a bare fragment: `parts` is joined into
+    // "This change <parts>." — pushing "tests to run could not be computed" alone
+    // rendered "This change tests to run could not be computed." at the top of a PR
+    // comment, and displaced the clean "No structural changes detected." headline.
+    if (blast.tests.unavailable) parts.push('has a test set that could not be computed');
     else if (blast.tests.count) parts.push(`${blast.tests.count} test${blast.tests.count === 1 ? '' : 's'} to run`);
   }
   return parts.length ? `This change ${parts.join(', ')}.` : 'No structural changes detected.';
@@ -345,7 +349,8 @@ export function renderHuman(b: ReviewBriefing): string {
   else {
     if (blast.impact.hubsTouched.length) L.push('   Hubs: ' + blast.impact.hubsTouched.map(h => `${h.symbol} (${h.fanIn})`).join(', '));
     if (blast.impact.layersCrossed.length) L.push('   Layers crossed: ' + blast.impact.layersCrossed.join(', '));
-    if (blast.tests.count) L.push(`   Tests to run (${blast.tests.count}): ${blast.tests.toRun.slice(0, 8).map(t => t.test).join(', ')}${blast.tests.count > 8 ? ', …' : ''}`);
+    if (blast.tests.unavailable) L.push('   Tests to run: could not be computed — not the same as "none impacted".');
+    else if (blast.tests.count) L.push(`   Tests to run (${blast.tests.count}): ${blast.tests.toRun.slice(0, 8).map(t => t.test).join(', ')}${blast.tests.count > 8 ? ', …' : ''}`);
     if (blast.impact.governingDecisions.length) L.push('   Governing decisions: ' + blast.impact.governingDecisions.join('; '));
   }
   for (const c of b.caveats) L.push(`   ⚠ ${c}`);
