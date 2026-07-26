@@ -26,8 +26,21 @@
 <p align="center"><em>A real, unedited recording — the published <code>openlore</code> on a fresh clone of <a href="https://github.com/BurntSushi/ripgrep">ripgrep</a>. <strong>install</strong> wires your agent and indexes the repo live — 235 files, 2,978 functions, 4,329 call edges in <strong>14 seconds</strong>, no API key → <strong>orient</strong> returns the code a task touches → <strong>review</strong> catches a signature change that left <strong>39 callers</strong> stale → <strong>prove</strong> projects the payoff. Re-record it yourself: <a href="docs/openlore-demo.tape"><code>docs/openlore-demo.tape</code></a>.</em></p>
 
 <p align="center">
-  <strong><a href="#install-in-one-command">Install</a> · <a href="#what-you-get">What you get</a> · <a href="#value-scorecard--does-it-pay-for-itself">Benchmarks</a> · <a href="#governance--guardrails-on-what-your-agent-changes">Governance</a> · <a href="#how-it-works">How it works</a> · <a href="#openlore-vs-alternatives">vs. Alternatives</a> · <a href="#documentation">Docs</a></strong>
+  <strong><a href="#install-in-one-command">Install</a> · <a href="#what-you-get">What you get</a> · <a href="#value-scorecard--does-it-pay-for-itself">Benchmarks</a> · <a href="#governance--guardrails-on-what-your-agent-changes">Governance</a> · <a href="#how-it-works">How it works</a> · <a href="#openlore-vs-alternatives">vs. Alternatives</a> · <a href="#documentation">Docs</a> · <a href="#star-history--community">Community</a></strong>
 </p>
+
+<details>
+<summary><strong>Full table of contents</strong></summary>
+
+**Start here:** [Install in one command](#install-in-one-command) · [What you get](#what-you-get) · [Is OpenLore for you?](#is-openlore-for-you) · [See it in action](#see-it-in-action) · [5-Minute Quickstart](#5-minute-quickstart) · [What it costs to adopt](#what-it-costs-to-adopt)
+
+**Evaluate it:** [Value Scorecard (wins *and* losses)](#value-scorecard--does-it-pay-for-itself) · [OpenLore vs. Alternatives](#openlore-vs-alternatives) · [Known Limitations](#known-limitations) · [We dogfood our own governance](#we-dogfood-our-own-governance)
+
+**Understand it:** [How It Works](#how-it-works) · [Governance](#governance--guardrails-on-what-your-agent-changes) · [Core Features](#core-features) · [Languages & IaC](#languages--infrastructure-as-code) · [Federation, Interop & PR review](#federation-interop--pr-review)
+
+**Use it:** [Agent Cheat Sheet](#agent-cheat-sheet) · [Claude Code Skill](#use-openlore-as-a-claude-code-skill) · [Requirements](#requirements) · [Documentation](#documentation) · [Development](#development) · [Community](#star-history--community)
+
+</details>
 
 ---
 
@@ -75,7 +88,32 @@ OpenLore does two things for an agent, both deterministic and local — it **rem
 
 ---
 
+## Is OpenLore for you?
+
+The fastest way to evaluate a tool is to find out quickly that it isn't for you. So:
+
+| | |
+|---|---|
+| ✅ **Strong fit** | A codebase big enough that *you* can't hold it in your head — and neither can the model. Private or niche code the model never memorized. Long agent sessions where stale assumptions compound. Polyglot repos, or code plus the IaC that deploys it. Anywhere "the agent changed something it shouldn't have" is a real cost, not a hypothetical. |
+| 🤔 **Try it, but measure** | Mid-size repos and mixed workloads. The orientation win scales with size and depth, so run **`openlore prove --estimate`** (seconds, no API key) before you commit to it. |
+| ❌ **Probably not yet** | A small repo the model already knows, answering shallow questions like "who calls `parseArgs`" — your agent's built-in search is cheaper, and we [publish the measurement that says so](#value-scorecard--does-it-pay-for-itself). Also: if you want something to *perform* the refactor, OpenLore is the wrong layer — it locates and certifies, it never edits your code. |
+
+**One idea, if you only read one line of this README:** an agent's expensive failure mode isn't ignorance — it's *confidence*. A model that doesn't know a function exists will go look. A model that "knows" a stale fact will confidently build on it, and you pay for that at review time. OpenLore is built so the agent can be told **"that fact is stale"** and **"this change opens a path you said was sensitive"** — deterministically, from the graph, with no second model in the loop guessing about the first.
+
+---
+
 ## See it in action
+
+**The same task, twice.** Ask an agent to add a flag to a command it has never seen:
+
+| | Without OpenLore | With OpenLore |
+|---|---|---|
+| **Opening move** | grep a guessed name → open a file → wrong layer → open three more | `orient("add a --since flag to the blast-radius command")` |
+| **What it learns** | file contents, one at a time, in whatever order it guessed | the functions, their callers, the matching spec sections, and the ranked insertion points — in one call |
+| **What it misses** | the five callers living in files it never opened | every caller the graph can see — statically resolvable ones, at least; dynamic dispatch is still nobody's friend |
+| **Before it commits** | "looks right to me" | `blast_radius` → tests to run; `certify_public_surface` → the consumers this signature change breaks, by name |
+
+The measured effect of that shape change on deep, multi-hop tasks: **25 → 16 round-trips** on excalidraw, **−26%** aggregate. It is not magic — it is the difference between *rediscovering* structure per task and *querying* it. Full numbers, including where this **doesn't** pay off, in the [Value Scorecard](#value-scorecard--does-it-pay-for-itself).
 
 <details open>
 <summary><strong>orient("add a --since flag to the blast-radius command")</strong> — one query replaces most exploratory file reads</summary>
@@ -219,6 +257,26 @@ environment.systemPackages = [ openlore.packages.x86_64-linux.default ];
 
 </details>
 
+### What it costs to adopt
+
+Every tool asks for something. Here is exactly what OpenLore asks for, measured on a **fresh clone of [ripgrep](https://github.com/BurntSushi/ripgrep)** with the published `openlore@2.1.6` — reproduce it in about a minute:
+
+```bash
+git clone --depth 1 https://github.com/BurntSushi/ripgrep && cd ripgrep
+npx openlore init && time npx openlore analyze && du -sh .openlore
+```
+
+| What it costs | On ripgrep (232 source files indexed) |
+|---|---|
+| **One-time index build** | **13.6 s**, entirely local — no API key, no network call |
+| **Disk** | **27 MB** under `.openlore/` (gitignorable; the graph is a pure function of your source, so it's always rebuildable) |
+| **Per-query latency** | **~430 µs p50** in-process via the MCP server; a *cold* one-shot CLI call is ~2 s, nearly all of it Node startup and opening the index |
+| **Keeping it fresh** | automatic — the file watcher re-indexes the changed file's dependency closure on save |
+| **Your source code** | never leaves the machine. No account, no telemetry (opt-in only), no hosted index |
+| **Lock-in** | none — it's one gitignored directory. Delete `.openlore/` and nothing about your repo has changed. |
+
+Large monorepos take minutes rather than seconds; that limit is stated plainly in [Known Limitations](#known-limitations).
+
 > Migrating from `spec-gen`? The package is now [`openlore`](https://www.npmjs.com/package/openlore) and the command is `openlore` — see [docs/RENAME-TO-OPENLORE.md](docs/RENAME-TO-OPENLORE.md) for the short checklist.
 
 ---
@@ -282,20 +340,39 @@ The 8 multi-agent **workflow** skills (brainstorm, plan-refactor, write-tests, i
 
 ## OpenLore vs. Alternatives
 
-| | Cursor / Claude Code | Sourcegraph | OpenLore |
-|---|---|---|---|
-| Graph-aware MCP context | ❌ file-based reads | Partial | ✓ call graph + clusters |
-| Persistent cross-session architectural memory | ❌ | Partial | ✓ |
-| Token-efficient `orient()` | ❌ | ❌ | ✓ −7%→−21% cost, −26% round-trips on deep tasks † |
-| Change-impact certificate (paths into sensitive boundaries) | ❌ | ❌ | ✓ deterministic, pre-commit |
-| Breaking-change verdict over a diff | ❌ | ❌ | ✓ consumers named |
-| Architecture invariants, pre-edit | ❌ | ❌ | ✓ cross-language |
-| Governance commit gate (decisions + findings) | ❌ | ❌ | ✓ `enforcement.policy` |
-| Spec/code drift detection | ❌ | ❌ | ✓ milliseconds, no API |
-| Long-session confidence decay (Epistemic Lease) | ❌ | ❌ | ✓ |
-| Offline structural analysis, no LLM in the hot path | ❌ | ❌ | ✓ |
+A good tool should tell you when *not* to use it. So here is the honest map of the space.
+
+Everyone in this category is answering the same first question: **"how does the agent see the codebase without reading it file by file?"** LSP toolkits answer it with symbols. Graph MCP servers answer it with a parsed graph. Search platforms answer it with an index. They are all real answers, and several of them are good.
+
+OpenLore answers it too — and then keeps going into the **second question almost nobody is answering: what happens when the agent starts writing?** A retrieval layer makes an agent *informed*. It does not make the agent *safe*. Nothing in a symbol index tells you that this diff just opened a path into your auth boundary, that this signature change breaks four consumers by name, that the decision governing this module was superseded last month, or that the fact your agent has been confidently using for the last 40 tool calls went stale 12 commits ago. That half of the problem — **governance, on the same graph, with no LLM in the loop** — is the part OpenLore was built for.
+
+| | Agent built-ins<br>*(Cursor, Claude Code)* | LSP toolkits<br>*(e.g. Serena)* | Graph MCP servers<br>*(e.g. CodeGraph)* | Search platforms<br>*(e.g. Sourcegraph)* | **OpenLore** |
+|---|---|---|---|---|---|
+| Structural context instead of file reads | ❌ grep + file reads | ✓ symbols via LSP | ✓ parsed graph | ✓ index | ✓ call graph + clusters + **IaC + decisions on one graph** |
+| Local, no API key, deterministic | Partial | ✓ | ✓ | ❌ hosted/indexed service | ✓ no LLM in the hot path |
+| Cross-session memory anchored to code | ❌ | Partial (notes) | ✓ stored notes | ❌ | ✓ anchored to a symbol — **carried across renames/moves**, self-invalidating |
+| Told when a cached fact goes **stale** | ❌ | ❌ | ❌ | ❌ | ✓ Epistemic Lease |
+| Blast radius + which tests to run | ❌ | ❌ references only | Partial | Partial | ✓ backward reachability, with reaching paths |
+| Breaking-change **verdict** over a diff | ❌ | ❌ | Partial (impact heuristics) | ❌ | ✓ per export, **consumers named**, conservative by construction |
+| "Did this diff open a new path into a sensitive boundary?" | ❌ | ❌ | ❌ | ❌ | ✓ differential reachability, pre-commit |
+| Architecture invariants **before** the import is written | ❌ | ❌ | ❌ | ❌ | ✓ cross-language |
+| Spec/code drift + ADRs gated at commit | ❌ | ❌ | ❌ | ❌ | ✓ milliseconds, no API key |
+| One policy-driven commit gate | ❌ | ❌ | ❌ | ❌ | ✓ `enforcement.policy`, advisory by default |
+| Claims backed by a citation receipt | ❌ | ❌ | ❌ | ❌ | ✓ `confirmed / refuted / unverifiable` |
+| Cost/round-trip effect **published with the losses** | ❌ | ❌ | ❌ | ❌ | ✓ −7%→−21% cost, −26% round-trips on deep tasks † |
+
+**Where the others are genuinely the better pick** — we would rather you use the right tool than ours:
+
+- **Doing surgical, symbol-level *edits*** (rename across files, move a symbol, replace a body) — that is an **LSP toolkit's** home turf. OpenLore is deliberately **read-only**: it locates and certifies, it does not refactor for you. The two compose well.
+- **Search across hundreds of repos, org-wide, in a browser, with an audit trail** — that is a **code search platform**. OpenLore is local-first and repo-scoped by default (federation is opt-in and read-only).
+- **You just want fast graph retrieval and nothing else** — a **graph MCP server** is a smaller surface to adopt, and several are excellent at it. OpenLore's extra weight is governance; if you do not want a commit gate, drift detection, or change certificates, you are paying for capability you will not use.
+- **A small, familiar repo and shallow questions** ("who calls X") — your agent's built-in search is often *cheaper*. We measured this and published it below; we did not hide it.
+
+**What you cannot get anywhere else:** one graph where your **code, your infrastructure, and your architectural decisions are the same node type** — so a single traversal answers "what breaks, what does it cost, what governs it, and is that still true?" — and a substrate that would rather tell you *"I don't know, this is stale"* than hand your agent a confident guess.
 
 † **Measured, and it depends on the task** — full numbers in the [Value Scorecard](#value-scorecard--does-it-pay-for-itself). Small/familiar repos + shallow queries *add* overhead; larger codebases + deep questions are a net win (−7%→−21% cost, −26% tool-calls, scaling with repo size), at 100% answer correctness in both arms. The savings hold where OpenLore is designed to help, not on toy queries.
+
+*Comparisons reflect each project's publicly documented capabilities as of July 2026 and describe categories, not verdicts on quality; these are fast-moving projects, and a correction PR is always welcome. Named examples: [Serena](https://github.com/oraios/serena) (MIT), [CodeGraph](https://github.com/codegraph-ai/CodeGraph) (Apache-2.0), [codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp), [Sourcegraph](https://sourcegraph.com). OpenLore [exports SCIP](docs/scip-export.md), so it sits alongside them rather than against them.*
 
 ---
 
