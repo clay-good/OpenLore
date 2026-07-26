@@ -364,3 +364,41 @@ describe('parseAuthority — authorities whose real host is not the prefix', () 
     expect(parseAuthority('https://example.com')).toEqual({ hostname: 'example.com', port: 443 });
   });
 });
+
+// ============================================================================
+// Ambient credentials need an Origin; header credentials do not
+// ============================================================================
+
+describe('checkLocalHttpRequest — cookie is ambient, header is not', () => {
+  const TOKEN = 'c'.repeat(32);
+  const cfg = { boundHost: '127.0.0.1', boundPort: 5302, token: TOKEN, requireToken: true };
+  const req = (h: Record<string, string | undefined>, method = 'POST'): IncomingMessage =>
+    ({ headers: { host: '127.0.0.1:5302', ...h }, url: '/', method }) as unknown as IncomingMessage;
+
+  it('rejects a cookie-only state-changing request with no Origin', () => {
+    // A cookie is attached by the browser without the page proving it could construct
+    // the request — that is what makes CSRF possible. Absence of Origin must not be a
+    // way to skip the check.
+    const r = checkLocalHttpRequest(req({ cookie: `openlore_session=${TOKEN}` }), cfg);
+    expect(r?.status).toBe(403);
+    expect(r?.error).toMatch(/must carry an Origin/);
+  });
+
+  it('accepts the same request when the Origin matches', () => {
+    expect(checkLocalHttpRequest(
+      req({ cookie: `openlore_session=${TOKEN}`, origin: 'http://127.0.0.1:5302' }), cfg,
+    )).toBeNull();
+  });
+
+  it('accepts cookie-only for SAFE methods (a browser navigation sends no Origin)', () => {
+    for (const m of ['GET', 'HEAD']) {
+      expect(checkLocalHttpRequest(req({ cookie: `openlore_session=${TOKEN}` }, m), cfg), m).toBeNull();
+    }
+  });
+
+  it('accepts a HEADER-authenticated state-changing request with no Origin', () => {
+    // Not ambient: a cross-site page cannot set this header, so it is not CSRF-able.
+    // The serve daemon's own client and the Pi extension rely on exactly this.
+    expect(checkLocalHttpRequest(req({ 'x-openlore-token': TOKEN }), cfg)).toBeNull();
+  });
+});

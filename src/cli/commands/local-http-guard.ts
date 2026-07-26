@@ -162,23 +162,44 @@ export function originDefenseError(
     return `Host header "${req.headers.host ?? ''}" does not name this listener's port ${boundPort}`;
   }
 
-  const origin = req.headers.origin;
-  if (origin !== undefined) {
-    const o = parseAuthority(origin);
-    if (!o || !allowedHost(o.hostname)) {
-      return `cross-site Origin "${origin}" is not permitted`;
-    }
-    // The PORT is the load-bearing half here. A "site" for cookie purposes is
-    // scheme + registrable domain — the port is NOT part of it — so a page served
-    // from ANY other port on localhost is same-site, and the browser attaches this
-    // surface's SameSite=Strict session cookie to its requests. Matching on hostname
-    // alone therefore let any other local dev server (or any localhost page the user
-    // happened to visit) read the viewer's API and drive its LLM-backed chat route.
-    if (boundPort !== undefined && o.port !== boundPort) {
-      return `cross-site Origin "${origin}" is not permitted (different port from this listener)`;
-    }
+  // Evaluated for EVERY request, not only those that carry the header — the verdict
+  // below is unconditional, so a client cannot skip the check by omitting `Origin`.
+  // An absent Origin is its own case, not an early exit: browsers omit it on
+  // same-origin navigations and GETs, and non-browser clients (the serve daemon's own
+  // client, the Pi extension) never send it, so absence is allowed here and the
+  // ambient-credential rule in `checkLocalHttpRequest` is what constrains it.
+  const originVerdict = classifyOrigin(req.headers.origin, allowedHost, boundPort);
+  if (originVerdict !== 'ok' && originVerdict !== 'absent') {
+    return `cross-site Origin "${req.headers.origin ?? ''}" is not permitted${
+      originVerdict === 'wrong-port' ? ' (different port from this listener)' : ''
+    }`;
   }
   return null;
+}
+
+/** How an `Origin` header relates to this listener. `absent` is not `ok`'s synonym. */
+export type OriginVerdict = 'ok' | 'absent' | 'foreign' | 'wrong-port';
+
+/**
+ * Classify an Origin against the bound listener.
+ *
+ * The PORT is the load-bearing half. A "site" for cookie purposes is scheme +
+ * registrable domain — the port is NOT part of it — so a page served from ANY other
+ * port on localhost is same-site, and a browser attaches this surface's
+ * SameSite=Strict session cookie to its requests. Matching on hostname alone let any
+ * other local dev server (or any localhost page the user visited) read the viewer's
+ * API and drive its LLM-backed chat route.
+ */
+export function classifyOrigin(
+  origin: string | undefined,
+  allowedHost: (name: string) => boolean,
+  boundPort?: number,
+): OriginVerdict {
+  if (origin === undefined) return 'absent';
+  const o = parseAuthority(origin);
+  if (!o || !allowedHost(o.hostname)) return 'foreign';
+  if (boundPort !== undefined && o.port !== boundPort) return 'wrong-port';
+  return 'ok';
 }
 
 /** Per-request guard configuration. */
@@ -233,11 +254,22 @@ export function checkLocalHttpRequest(
     const fromHeader = req.headers[headerName];
     const fromCookie = readCookie(req.headers.cookie, OPENLORE_SESSION_COOKIE);
     const expected = cfg.token as string;
-    const ok =
-      (typeof fromHeader === 'string' && constantTimeEqual(fromHeader, expected)) ||
-      (typeof fromCookie === 'string' && constantTimeEqual(fromCookie, expected));
-    if (!ok) {
+    const headerOk = typeof fromHeader === 'string' && constantTimeEqual(fromHeader, expected);
+    const cookieOk = typeof fromCookie === 'string' && constantTimeEqual(fromCookie, expected);
+    if (!headerOk && !cookieOk) {
       return { status: 401, error: `invalid or missing ${headerName}` };
+    }
+    // A COOKIE is an ambient credential: the browser attaches it to a request the
+    // page did not have to prove it could construct, which is what makes CSRF
+    // possible. A header token is not ambient — a cross-site page cannot set it — so
+    // it needs no Origin. So: when the ONLY credential is the cookie and the request
+    // is state-changing, require a matching Origin rather than accepting its absence.
+    // Same-origin browser fetches send it; the non-browser clients that omit it
+    // (serve-client, the Pi extension) authenticate by header and are unaffected.
+    const method = (req.method ?? 'GET').toUpperCase();
+    const stateChanging = method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS';
+    if (cookieOk && !headerOk && stateChanging && req.headers.origin === undefined) {
+      return { status: 403, error: 'a cookie-authenticated state-changing request must carry an Origin' };
     }
   }
   return null;
