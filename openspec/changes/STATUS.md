@@ -7,9 +7,15 @@ status line. Two signals, both cheap to re-check:
   requirement its delta adds is already in `openspec/specs/<domain>/spec.md`
 - **archivable** — `openspec archive <name>` completes
 
-As of 2026-07-26, **104 changes are open**. 23 have been archived — the newest being
-`optimize-reachability-precompute` (PR #290: reachability precomputed at analyze, traversals
-served as lookups), which leaves 79 unbuilt.
+As of 2026-07-26, **105 changes are open** and 86 sit in `archive/`. The four tables below now
+account for every open directory exactly — that is checkable, and worth re-checking, because it
+was not true before this pass (`optimize-parallel-extraction-pool` had shipped in PR #268 and was
+missing from every table, so it was invisible to both the counts and the archive sweep).
+
+Archived in this pass: `optimize-reachability-precompute` (PR #290 — reachability precomputed at
+analyze, traversals served as lookups) and `optimize-parallel-extraction-pool` (PR #268 — the
+row that had gone missing). #290 also produced one net-new proposal,
+`shrink-traversal-index-invalidation-scope`, listed under "Not built".
 
 Note on the archive step: `openspec validate` still fails on `cli`, `config`, `mcp-handlers`,
 and `overview` because those main specs are missing a `## Purpose` header — a pre-existing
@@ -17,7 +23,7 @@ corpus defect, unrelated to any one change, and the reason most of the "built, b
 bookkeeping" rows below cannot be archived. It needs its own corpus-repair change; do not
 brute-force it per-proposal.
 
-## Not built — 79
+## Not built — 80
 
 The real backlog. No code, no spec entry.
 
@@ -98,6 +104,7 @@ The real backlog. No code, no spec entry.
 | `refine-public-surface-certification` | Refine public-surface certification: rule codes + semver bump, an accepted-breakage baseline |
 | `refine-search-serving-quality` | Refine search serving quality: filters that filter, scores that say what they are, an index  |
 | `shrink-receiver-resolution-boundary` | Shrink the intra-object receiver boundary with deterministic per-file type registries |
+| `shrink-traversal-index-invalidation-scope` | Key the precomputed traversal structure to the graph it describes, not to the bytes of the artifact it travels in |
 | `unify-onboarding-entrypoint` | One entrypoint: install once, auto-init on every repo you touch |
 | `widen-architecture-rule-vocabulary` | Widen the architecture rule vocabulary: required, circular, reachable/orphan, captures, inst |
 | `widen-import-resolution` | Widen import-precise cross-file resolution beyond TS/JS/Python |
