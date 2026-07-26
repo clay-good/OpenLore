@@ -34,6 +34,16 @@ beforeAll(async () => {
   // which is the same error a plain not-yet-created write target produces — conflating
   // the two let a write follow the link and land outside the root.
   await symlink(join(outside, 'not-created-yet.md'), join(root, 'openspec', 'dangling.md'));
+  // `self -> .` lets a path reach a link through a directory whose LEXICAL dirname
+  // differs from its REAL one — the difference `readlink` is relative to.
+  await symlink('.', join(root, 'self'));
+  await symlink(join('..', 'victim', 'escaped.md'), join(root, 'rel-escape.md'));
+  // An existing directory symlink pointing outside, for the hop-budget case.
+  await symlink(outside, join(root, 'dirlink'));
+  // Legitimate in-root links, including through a symlinked directory.
+  await mkdir(join(root, 'sub', 'sub2'), { recursive: true });
+  await symlink(join('sub', 'sub2'), join(root, 'godeep'));
+  await symlink(join('..', '..', 'inroot-notyet.md'), join(root, 'sub', 'sub2', 'rel'));
 });
 
 afterAll(async () => {
@@ -71,6 +81,32 @@ describe('safeJoin', () => {
     // And prove the primitive: the file must not appear outside the root.
     const { existsSync } = await import('node:fs');
     expect(existsSync(join(outside, 'not-created-yet.md'))).toBe(false);
+  });
+
+  it('resolves a link target against its REAL directory, not its lexical one', () => {
+    // `root/self -> .` + `root/rel-escape.md -> ../victim/escaped.md`. Lexically,
+    // `self/rel-escape.md`'s dirname is `root/self`, so `../victim` looks in-root —
+    // while the kernel resolves it from the real dir and lands outside. Blocked via
+    // the padded path exactly as via the direct one.
+    expect(() => safeJoin(root, 'rel-escape.md')).toThrow(/Path escape blocked/);
+    expect(() => safeJoin(root, 'self/rel-escape.md')).toThrow(/Path escape blocked/);
+    expect(() => safeJoin(root, 'self/self/self/rel-escape.md')).toThrow(/Path escape blocked/);
+  });
+
+  it('refuses rather than allows when the hop budget is exhausted', () => {
+    // Depth is attacker-chosen, so exhaustion must fail CLOSED: returning the
+    // un-canonicalized path would sail through the caller's startsWith check.
+    const deep = (n: number): string => 'dirlink/' + 'x/'.repeat(n) + 'target.md';
+    for (const n of [62, 63, 100, 200]) {
+      expect(() => safeJoin(root, deep(n)), `depth ${n}`).toThrow(/Path escape blocked/);
+    }
+  });
+
+  it('still allows a legitimate in-root link reached through a symlinked directory', () => {
+    // The mirror of the lexical-dirname bug: resolving against the real directory
+    // must not start REJECTING in-root links (it did, before the fix).
+    expect(safeJoin(root, 'godeep/rel')).toBe(join(root, 'godeep/rel'));
+    expect(safeJoin(root, 'sub/sub2/rel')).toBe(join(root, 'sub/sub2/rel'));
   });
 
   it('allows a not-yet-created write target inside the root', () => {

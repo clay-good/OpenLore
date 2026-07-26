@@ -10,6 +10,7 @@
 import { readFile } from 'node:fs/promises';
 import { extname, relative, basename } from 'node:path';
 import { isTestFile } from './test-file.js';
+import { blankCommentsPreservingLayout } from './comment-blanking.js';
 
 // ============================================================================
 // TYPES
@@ -111,16 +112,6 @@ function detectFramework(source: string, filePath: string): string {
 // HELPERS
 // ============================================================================
 
-/**
- * Replace comment bodies with spaces, preserving length and newlines so every index
- * into the result still maps to the same offset (and therefore line) in the original.
- */
-function blankComments(source: string): string {
-  return source
-    .replace(/\/\*[\s\S]{0,20000}?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
-    .replace(/\/\/[^\n]*/g, (m) => ' '.repeat(m.length));
-}
-
 function lineNumberOf(source: string, index: number): number {
   return source.slice(0, index).split('\n').length;
 }
@@ -190,10 +181,14 @@ function extractFromSource(
   // span between `app.use(` and the middleware name (a hostile file of unterminated
   // `app.use(` is quadratic otherwise), and a comment sitting in that span — which is
   // exactly where people explain their middleware wiring — would otherwise eat the
-  // budget and silently drop a real `cors`/`morgan`/`rateLimit` entry. Blanking is
-  // length- and newline-preserving, so `lineNumberOf(source, m.index)` still reports
-  // the true line.
-  const scanSource = blankComments(source);
+  // budget and silently drop a real `cors`/`morgan`/`rateLimit` entry.
+  //
+  // The blanker is a STRING-AWARE scanner, not a regex: `app.use('/static/*', …)` is a
+  // glob route, and a regex blanker reads that `/*` as a comment opener and erases
+  // everything up to the next `*/` — the file's next JSDoc — taking the whole
+  // inventory with it. Blanking preserves length and newlines, so
+  // `lineNumberOf(source, m.index)` still reports the true line.
+  const scanSource = blankCommentsPreservingLayout(source);
   for (const pat of EXPRESS_PATTERNS) {
     const re = new RegExp(pat.re.source, 'gm');
     let m: RegExpExecArray | null;

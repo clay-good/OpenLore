@@ -35,25 +35,58 @@ const LARGE = 240_000;
 
 /**
  * Ratio above which growth is not credibly linear. Doubling the input doubles a
- * linear scan (~2.0) and quadruples a quadratic one (~4.0); 3.0 sits between them
- * with room for measurement noise.
+ * linear scan (~2.0) and quadruples a quadratic one (~4.0); 3.0 sits between them.
  */
 const MAX_GROWTH = 3;
 
-/** Wall time is only ever compared against ITSELF at the other size. */
-async function growth(run: (bytes: number) => void | Promise<void>): Promise<number> {
-  const time = async (bytes: number): Promise<number> => {
+/**
+ * Absolute ceiling for one hostile file, checked ALONGSIDE the ratio.
+ *
+ * The ratio alone has a structural blind spot: a bounded quantifier costs
+ * O(n x bound), which is LINEAR — ratio ~2.0 — no matter how large the bound is. A
+ * `{0,100000}` bound would burn ~12s on a single 240KB file and the ratio would call
+ * it clean. So the ratio catches an unbounded quantifier, and this ceiling catches an
+ * over-generous bound; neither subsumes the other.
+ *
+ * Sized off the measured cost of the slowest legitimate case (the middleware
+ * extractor, a dozen patterns each scanning the file, ~0.6s) with room for a loaded
+ * CI box — not so tight that contention trips it, not so loose that a 12s bound hides.
+ */
+const MAX_ABSOLUTE_MS = 4_000;
+
+/**
+ * Measure the cost at two sizes, taking the MINIMUM of several samples at each.
+ *
+ * Single samples are unusable here: a GC pause landing in one window and not the
+ * other produced ~12% false failures per measurement (a 1.1ms case measured at
+ * 30.7ms). The minimum is the sample least contaminated by pauses, which is what we
+ * want when the question is "how much work does this do", not "how loaded is the box".
+ */
+async function measure(run: (bytes: number) => void | Promise<void>): Promise<{ ratio: number; ms: number }> {
+  const SAMPLES = 5;
+  const timeOnce = async (bytes: number): Promise<number> => {
     const t0 = performance.now();
     await run(bytes);
     return performance.now() - t0;
   };
-  await time(SMALL); // warm up, so JIT does not inflate the first measurement
-  const small = await time(SMALL);
-  const large = await time(LARGE);
-  // Below a few milliseconds the clock is noisier than the signal, and anything that
-  // fast on a 240KB hostile file is self-evidently not quadratic.
-  if (large < 20) return 1;
-  return large / Math.max(small, 0.05);
+  const best = async (bytes: number): Promise<number> => {
+    let min = Infinity;
+    for (let i = 0; i < SAMPLES; i++) min = Math.min(min, await timeOnce(bytes));
+    return min;
+  };
+  await timeOnce(SMALL); // warm up so JIT compilation is not charged to sample 1
+  const small = await best(SMALL);
+  const large = await best(LARGE);
+  // Under a millisecond the clock is coarser than the signal, and a quadratic cannot
+  // hide there: on these payloads it would need ~0.35 picoseconds per byte-pair.
+  const ratio = large < 1 ? 1 : large / Math.max(small, 0.05);
+  return { ratio, ms: large };
+}
+
+/** Assert BOTH properties: growth is linear, and the absolute cost is sane. */
+function expectLinearAndFast({ ratio, ms }: { ratio: number; ms: number }, label: string): void {
+  expect(ratio, `${label}: growth ratio (quadratic if ~4x)`).toBeLessThan(MAX_GROWTH);
+  expect(ms, `${label}: absolute cost on one ${LARGE / 1000}KB file`).toBeLessThan(MAX_ABSOLUTE_MS);
 }
 
 /** Generous: these tests are ABOUT slow code, and CI runs them under contention. */
@@ -74,41 +107,49 @@ afterAll(async () => {
 
 describe('extractors are not quadratic on an unterminated-opener file', () => {
   it('parseJSImports survives repeated `import {`', async () => {
-    expect(await growth(b => { parseJSImports(payload('import {', b)); })).toBeLessThan(MAX_GROWTH);
+    expectLinearAndFast(await measure(b => { parseJSImports(payload('import {', b)); }), 'parseJSImports');
   }, TIMEOUT_MS);
 
   it('parseJSImports survives repeated `import X, {` and `const {`', async () => {
-    expect(await growth(b => { parseJSImports(payload('import X, {', b)); })).toBeLessThan(MAX_GROWTH);
-    expect(await growth(b => { parseJSImports(payload('const {', b)); })).toBeLessThan(MAX_GROWTH);
+    expectLinearAndFast(await measure(b => { parseJSImports(payload('import X, {', b)); }), 'mixed import');
+    expectLinearAndFast(await measure(b => { parseJSImports(payload('const {', b)); }), 'require');
   }, TIMEOUT_MS);
 
   it('parseJSExports survives repeated `export {`', async () => {
-    expect(await growth(b => { parseJSExports(payload('export {', b)); })).toBeLessThan(MAX_GROWTH);
+    expectLinearAndFast(await measure(b => { parseJSExports(payload('export {', b)); }), 'parseJSExports');
   }, TIMEOUT_MS);
 
   it('the middleware extractor survives repeated `app.use(`', async () => {
-    const ratio = await growth(async (b) => {
+    expectLinearAndFast(await measure(async (b) => {
       await writeFile(hostileFile, payload('app.use(', b));
       await extractMiddleware([hostileFile], dir);
-    });
-    expect(ratio).toBeLessThan(MAX_GROWTH);
+    }), 'middleware');
+  }, TIMEOUT_MS);
+
+  it('the middleware extractor survives an unterminated block comment', async () => {
+    // The comment blanker is itself an extractor input, and its first (regex) form
+    // cost 5.6s on this payload — a cost added while fixing a cost, and untested.
+    // The scanner form is linear by construction; this pins that.
+    expectLinearAndFast(await measure(async (b) => {
+      await writeFile(hostileFile, payload('/*x', b));
+      await extractMiddleware([hostileFile], dir);
+    }), 'unterminated block comment');
   }, TIMEOUT_MS);
 
   it('the HTML script scanner survives repeated `<script `', async () => {
     // Its own header claimed this blow-up class was already fixed — it was, for the
     // BODY scan; the opening-tag scan still ran `[^>]*` to EOF per opener (20s/240KB).
-    expect(await growth(b => { extractHtmlScripts(payload('<script ', b)); })).toBeLessThan(MAX_GROWTH);
+    expectLinearAndFast(await measure(b => { extractHtmlScripts(payload('<script ', b)); }), 'html scripts');
   }, TIMEOUT_MS);
 
   it('the Vue props extractor survives repeated `props:{`', async () => {
     // Sibling of a regex the first pass bounded ONE LINE ABOVE, and reachable from any
     // `.vue` file with no framework classification needed.
     const vue = join(dir, 'Widget.vue');
-    const ratio = await growth(async (b) => {
+    expectLinearAndFast(await measure(async (b) => {
       await writeFile(vue, '<template><div/></template>\n<script>\nexport default { ' + payload('props:{', b));
       await extractUIComponents([vue], dir);
-    });
-    expect(ratio).toBeLessThan(MAX_GROWTH);
+    }), 'vue props');
   }, TIMEOUT_MS);
 
   it('still detects middleware wrapped in explanatory comments', async () => {

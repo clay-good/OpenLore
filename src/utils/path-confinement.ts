@@ -44,14 +44,21 @@ function realPathOrNearestExisting(p: string): string {
       // ourselves and keep confining on where the write would actually land.
       try {
         if (lstatSync(cur).isSymbolicLink()) {
-          const target = resolve(dirname(cur), readlinkSync(cur));
+          // Resolve the target against the link's REAL directory, not its lexical
+          // one. `readlink` is relative to where the link actually lives, so with
+          // `root/self -> .` the path `root/self/M` has lexical dirname `root/self`
+          // — and a target of `../evil` then resolves to the in-root `root/evil`
+          // while the kernel resolves it from the real dir to `<outside>/evil`.
+          // That difference is an escape, and it is in the ALLOW direction.
+          const target = resolve(realpathSync(dirname(cur)), readlinkSync(cur));
           if (target !== cur) {
             cur = target;
             continue;
           }
         }
       } catch {
-        // lstat failed too — `cur` really is absent; fall through to the ancestor.
+        // lstat (or the parent realpath) failed — `cur` is genuinely absent, or its
+        // parent is unresolvable; fall through to the ancestor walk.
       }
 
       const parent = dirname(cur);
@@ -59,7 +66,10 @@ function realPathOrNearestExisting(p: string): string {
       cur = parent;
     }
   }
-  return cur;
+  // Hop budget exhausted. Returning `cur` here would hand back a path that was never
+  // canonicalized, and the caller's `startsWith(realRoot)` check would then pass it —
+  // fail-open, on input an attacker chooses the depth of. Refuse instead.
+  throw new Error(`Path escape blocked: exceeded ${MAX_SYMLINK_HOPS} link/ancestor hops resolving "${p}"`);
 }
 
 /**
@@ -76,18 +86,41 @@ export function safeJoin(absDir: string, filePath: string): string {
   if (!resolved.startsWith(absDir + sep) && resolved !== absDir) {
     throw new Error(`Path traversal blocked: "${filePath}" resolves outside project directory`);
   }
-  // Canonical (symlink-aware) confinement. realpath the root (it exists — it was
-  // validated) and the target's real location; reject if the real target escapes.
+  // Canonical (symlink-aware) confinement: compare the target's real location against
+  // the root's.
+  let realRoot: string;
   try {
-    const realRoot = realpathSync(absDir);
-    const realTarget = realPathOrNearestExisting(resolved);
-    if (realTarget !== realRoot && !realTarget.startsWith(realRoot + sep)) {
-      throw new Error(`Path escape blocked: "${filePath}" canonicalizes outside the project directory`);
-    }
+    realRoot = realpathSync(absDir);
   } catch (err) {
-    // A "Path escape blocked" error must propagate; only swallow realpath I/O errors
-    // on the root itself (which would be unexpected for a validated root).
+    // A root that does not exist is a caller error, not an attack — nothing can be
+    // inside it, and an embedding host may legitimately pass one (a path it is about
+    // to create, or a mocked filesystem). The lexical check above is then the whole
+    // answer. Any OTHER failure to resolve the root (EACCES, ELOOP, ENAMETOOLONG) is
+    // a condition an attacker can arrange, so it fails closed below.
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return resolved;
+    throw new Error(
+      `Path escape blocked: project root "${absDir}" could not be canonically resolved (${err instanceof Error ? err.message : String(err)})`,
+      { cause: err },
+    );
+  }
+
+  let realTarget: string;
+  try {
+    realTarget = realPathOrNearestExisting(resolved);
+  } catch (err) {
+    // FAIL CLOSED. This used to swallow everything that was not a "Path escape
+    // blocked" error and return the lexically-checked path, so a symlink cycle
+    // (ELOOP) or an unreadable parent (EACCES) skipped the canonical check entirely
+    // and the path was ALLOWED. "We could not verify" is not "it is inside the root".
     if (err instanceof Error && err.message.startsWith('Path escape blocked')) throw err;
+    throw new Error(
+      `Path escape blocked: "${filePath}" could not be canonically resolved (${err instanceof Error ? err.message : String(err)})`,
+      { cause: err },
+    );
+  }
+
+  if (realTarget !== realRoot && !realTarget.startsWith(realRoot + sep)) {
+    throw new Error(`Path escape blocked: "${filePath}" canonicalizes outside the project directory`);
   }
   return resolved;
 }

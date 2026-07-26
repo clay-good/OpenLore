@@ -203,7 +203,15 @@ function headline(b: ReviewBriefing): string {
     if (blast.tests.unavailable) parts.push('has a test set that could not be computed');
     else if (blast.tests.count) parts.push(`${blast.tests.count} test${blast.tests.count === 1 ? '' : 's'} to run`);
   }
-  return parts.length ? `This change ${parts.join(', ')}.` : 'No structural changes detected.';
+  if (parts.length) return `This change ${parts.join(', ')}.`;
+  // "No structural changes detected." is an affirmative all-clear, and it is the line
+  // a reviewer acts on. Only say it when both halves actually ran: with the blast
+  // radius unavailable (a shallow CI checkout, no index) an empty `parts` means
+  // "half the analysis is missing", not "nothing changed".
+  if ('error' in blast) {
+    return 'Structural delta is clean, but the blast radius could not be computed (see notes below).';
+  }
+  return 'No structural changes detected.';
 }
 
 function mdList(items: string[], cap = 12): string[] {
