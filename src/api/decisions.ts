@@ -9,7 +9,6 @@ import { join } from 'node:path';
 import {
   OPENLORE_DIR,
   OPENLORE_LOGS_SUBDIR,
-  OPENSPEC_DIR,
   OPENSPEC_SPECS_SUBDIR,
   DECISIONS_EXTRACTION_MAX_FILES,
   DECISIONS_DIFF_MAX_CHARS,
@@ -33,6 +32,8 @@ import { syncApprovedDecisions } from '../core/decisions/syncer.js';
 import type { PendingDecision, DecisionStore } from '../types/index.js';
 import type { SyncResult } from '../core/decisions/syncer.js';
 import type { BaseOptions, ProgressCallback } from './types.js';
+import { resolveOpenspecDir } from '../utils/openspec-dir.js';
+import { resolveTrustedApiBase, resolveTrustedSslVerify } from '../core/services/repo-config-trust.js';
 
 function progress(cb: ProgressCallback | undefined, step: string, status: 'start' | 'complete' | 'skip', detail?: string): void {
   cb?.({ phase: 'decisions', step, status, detail });
@@ -143,15 +144,18 @@ export async function openloreConsolidateDecisions(
   const llm = createLLMService({
     provider: provider as ProviderName,
     model: options.model ?? openloreConfig.generation?.model,
-    apiBase: options.apiBase ?? openloreConfig.llm?.apiBase,
-    sslVerify: options.sslVerify ?? openloreConfig.llm?.sslVerify ?? true,
+    apiBase: resolveTrustedApiBase(options.apiBase, openloreConfig.llm?.apiBase),
+    sslVerify: resolveTrustedSslVerify(
+        options.sslVerify === undefined ? undefined : !options.sslVerify,
+        openloreConfig.llm?.sslVerify,
+      ),
     enableLogging: true,
     logDir: join(rootPath, OPENLORE_DIR, OPENLORE_LOGS_SUBDIR),
   });
 
   const store = await loadDecisionStore(rootPath);
 
-  const openspecPath = join(rootPath, openloreConfig.openspecPath ?? OPENSPEC_DIR);
+  const openspecPath = resolveOpenspecDir(rootPath, openloreConfig.openspecPath);
   const specMap = await buildSpecMap({ rootPath, openspecPath }).catch(() => undefined);
 
   progress(onProgress, 'Consolidating drafts', 'start');
@@ -215,7 +219,7 @@ export async function openloreSyncDecisions(
   const openloreConfig = await readOpenLoreConfig(rootPath);
   if (!openloreConfig) throw new Error('No openlore configuration found.');
 
-  const openspecPath = join(rootPath, openloreConfig.openspecPath ?? OPENSPEC_DIR);
+  const openspecPath = resolveOpenspecDir(rootPath, openloreConfig.openspecPath);
   const specsPath = join(openspecPath, OPENSPEC_SPECS_SUBDIR);
   if (!(await fileExists(specsPath))) throw new Error('No specs found. Run openloreGenerate() first.');
 

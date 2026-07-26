@@ -6,7 +6,7 @@
  *   - isCacheFresh
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -183,9 +183,21 @@ describe('sanitizeMcpError', () => {
 // ============================================================================
 
 describe('safeJoin', () => {
+  // A REAL directory, because safeJoin's contract is a validated (existing) root and
+  // it now fails closed when the root cannot be canonically resolved — "we could not
+  // verify" is not "inside the root". The traversal cases below still use a fictional
+  // root: those reject lexically, before any filesystem call.
+  let realRoot: string;
+  beforeAll(async () => {
+    const { mkdtemp, mkdir } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    realRoot = await mkdtemp(join(tmpdir(), 'openlore-safejoin-'));
+    await mkdir(join(realRoot, 'src', 'core', 'services', 'mcp-handlers'), { recursive: true });
+  });
+
   it('resolves a relative path within the project root', () => {
-    const result = safeJoin('/projects/myapp', 'src/auth.ts');
-    expect(result).toBe('/projects/myapp/src/auth.ts');
+    expect(safeJoin(realRoot, 'src/auth.ts')).toBe(`${realRoot}/src/auth.ts`);
   });
 
   it('throws on path traversal via ../', () => {
@@ -197,8 +209,8 @@ describe('safeJoin', () => {
   });
 
   it('allows nested paths within project root', () => {
-    const result = safeJoin('/projects/myapp', 'src/core/services/mcp-handlers/utils.ts');
-    expect(result).toBe('/projects/myapp/src/core/services/mcp-handlers/utils.ts');
+    expect(safeJoin(realRoot, 'src/core/services/mcp-handlers/utils.ts'))
+      .toBe(`${realRoot}/src/core/services/mcp-handlers/utils.ts`);
   });
 
   it('blocks traversal that starts within root but escapes', () => {

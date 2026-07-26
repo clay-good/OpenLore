@@ -2,6 +2,7 @@
  * Human-readable + JSON renderers for preflight results.
  */
 
+import { sanitizeForTerminal } from '../../utils/misc.js';
 import type { DiffResult } from './diff.js';
 import type { ScoreResult } from './score.js';
 
@@ -149,15 +150,20 @@ export function renderHuman(s: PreflightSummary): string {
 }
 
 function formatFileLine(f: PerFileEntry): string {
+  // Paths come from `git diff` — i.e. from the analyzed repository — so a filename
+  // may carry ESC and repaint the terminal. This report is built from git output
+  // directly rather than from the sanitizing index path, so it has to neutralize
+  // them itself (SECURITY.md: any path that reads untrusted repository contents).
+  const filePath = sanitizeForTerminal(f.filePath);
   if (f.unknown) {
-    return `${f.filePath}  (new/untracked, weight 0)`;
+    return `${filePath}  (new/untracked, weight 0)`;
   }
   const tags: string[] = [];
   if (f.hub) tags.push('hub');
   if (f.maxFanIn > 0 && !f.hub) tags.push(`fan-in ${f.maxFanIn}`);
   else if (f.hub && f.maxFanIn > 0) tags.push(`fan-in ${f.maxFanIn}`);
   const tagStr = tags.length ? tags.join(', ') + ', ' : '';
-  return `${f.filePath}  (${tagStr}weight ${f.weight})`;
+  return `${filePath}  (${tagStr}weight ${f.weight})`;
 }
 
 /**

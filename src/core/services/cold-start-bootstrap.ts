@@ -137,7 +137,21 @@ export function repairInBackground(
     try {
       log(`[openlore] Index repair (${reason}) — rebuilding in the background (non-blocking, no API key)…`);
       await build(directory);
-      log('[openlore] Index rebuilt — the next tool call serves fresh results.');
+      // Verify, do not assume. The builder reports some failures (an unwritable
+      // directory, EACCES on `.openlore`) by LOGGING and returning normally rather
+      // than throwing, so the catch below never fires and this line would claim
+      // "Index rebuilt" over the top of the builder's own error — the exact
+      // false-success this substrate is supposed to never produce. Ask the
+      // filesystem whether an artifact actually exists now.
+      if (hasAnalysis(directory)) {
+        log('[openlore] Index rebuilt — the next tool call serves fresh results.');
+      } else {
+        // Deliberately does NOT clear the at-most-once latch. A build that completed
+        // without producing an artifact (an unwritable `.openlore`, an empty repo)
+        // will fail the same way every time, and retrying it on each tool call is the
+        // thrashing the latch exists to prevent. Report honestly and stop.
+        log('[openlore] Background index repair completed without producing an index — results stay stale. See the error above.');
+      }
       // Guard stays set: a completed repair that still observes its trigger
       // discloses and stops (at-most-once latch), never thrashes.
     } catch (err) {

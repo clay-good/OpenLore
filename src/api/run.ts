@@ -35,6 +35,7 @@ import { OpenSpecFormatGenerator } from '../core/generator/openspec-format-gener
 import { OpenSpecWriter } from '../core/generator/openspec-writer.js';
 import { ADRGenerator } from '../core/generator/adr-generator.js';
 import type { RunApiOptions, RunResult, InitResult, AnalyzeResult, ProgressCallback } from './types.js';
+import { resolveTrustedApiBase, resolveTrustedSslVerify } from '../core/services/repo-config-trust.js';
 
 function progress(onProgress: ProgressCallback | undefined, step: string, status: 'start' | 'progress' | 'complete' | 'skip', detail?: string): void {
   onProgress?.({ phase: 'run', step, status, detail });
@@ -269,8 +270,11 @@ export async function openloreRun(options: RunApiOptions = {}): Promise<RunResul
     llm = createLLMService({
       provider,
       model,
-      apiBase: options.apiBase ?? openloreConfig.llm?.apiBase,
-      sslVerify: options.sslVerify ?? openloreConfig.llm?.sslVerify ?? true,
+      apiBase: resolveTrustedApiBase(options.apiBase, openloreConfig.llm?.apiBase),
+      sslVerify: resolveTrustedSslVerify(
+        options.sslVerify === undefined ? undefined : !options.sslVerify,
+        openloreConfig.llm?.sslVerify,
+      ),
       openaiCompatBaseUrl: options.openaiCompatBaseUrl,
       timeout: options.timeout ?? openloreConfig.generation?.timeout,
       enableLogging: true,

@@ -41,14 +41,14 @@ const SRC = join(REPO_ROOT, 'src');
  */
 const EXEMPT: { file: string; line: number; why: string }[] = [
   { file: 'src/core/services/serve-client.ts', line: 64, why: 'loopback http:// health probe' },
-  { file: 'src/core/services/serve-client.ts', line: 132, why: 'loopback http:// daemon call' },
-  { file: 'src/cli/commands/serve.ts', line: 187, why: 'loopback http:// health probe' },
-  { file: 'src/pi/extension.ts', line: 414, why: 'loopback http:// health probe' },
-  { file: 'src/pi/extension.ts', line: 463, why: 'loopback http:// daemon call' },
-  { file: 'src/pi/extension.ts', line: 1206, why: 'loopback http:// health probe' },
+  { file: 'src/core/services/serve-client.ts', line: 136, why: 'loopback http:// daemon call' },
+  { file: 'src/cli/commands/serve.ts', line: 188, why: 'loopback http:// health probe' },
+  { file: 'src/pi/extension.ts', line: 421, why: 'loopback http:// health probe' },
+  { file: 'src/pi/extension.ts', line: 470, why: 'loopback http:// daemon call' },
+  { file: 'src/pi/extension.ts', line: 1215, why: 'loopback http:// health probe' },
   {
     file: 'src/pi/extension.ts',
-    line: 165,
+    line: 166,
     why: 'pre-existing: the Pi host never opts in, so skipSslVerify is not honoured there at all',
   },
 ];

@@ -187,7 +187,7 @@ export function parseJSImports(content: string): ImportInfo[] {
   }
 
   // ES Module: import X, { Y, Z } from 'module' (mixed import - default + named)
-  const mixedImportRegex = /import\s+(\w+)\s*,\s*\{([^}]+)\}\s+from\s+['"]([^'"]+)['"]/g;
+  const mixedImportRegex = /import\s+(\w+)\s*,\s*\{([^{}]+)\}\s+from\s+['"]([^'"]+)['"]/g;
   while ((match = mixedImportRegex.exec(cleanContent)) !== null) {
     const source = match[3];
     const names = [match[1], ...parseNamedImports(match[2])];
@@ -206,7 +206,18 @@ export function parseJSImports(content: string): ImportInfo[] {
   }
 
   // ES Module: import { X, Y } from 'module'
-  const namedImportRegex = /import\s+\{([^}]+)\}\s+from\s+['"]([^'"]+)['"]/g;
+  // The brace body EXCLUDES `{`. A plain `[^}]+` rescans to end-of-file from every one
+  // of O(n) start positions when no `}` ever arrives, so a file of repeated `import {`
+  // costs quadratic time — and this regex runs on every JS/TS file in the repo, making
+  // it the cheapest denial-of-service to plant in an analyzed repository. Excluding `{`
+  // fixes that completely: a named-import body cannot legally contain a brace, so the
+  // scan stops at the next opener instead of running to EOF.
+  //
+  // Deliberately NOT also length-bounded. A generated icon/barrel re-export of a few
+  // hundred names runs past any bound worth setting, and a bound that misses drops the
+  // whole re-export from the graph silently (false dead code, missing edges) — a real
+  // recall loss for no measurable safety: the brace exclusion alone is already linear.
+  const namedImportRegex = /import\s+\{([^{}]+)\}\s+from\s+['"]([^'"]+)['"]/g;
   while ((match = namedImportRegex.exec(cleanContent)) !== null) {
     const source = match[2];
     const names = parseNamedImports(match[1]);
@@ -261,7 +272,7 @@ export function parseJSImports(content: string): ImportInfo[] {
   }
 
   // Type-only imports: import type { X } from 'module'
-  const typeImportRegex = /import\s+type\s+(?:\{([^}]+)\}|(\w+))\s+from\s+['"]([^'"]+)['"]/g;
+  const typeImportRegex = /import\s+type\s+(?:\{([^{}]+)\}|(\w+))\s+from\s+['"]([^'"]+)['"]/g;
   while ((match = typeImportRegex.exec(cleanContent)) !== null) {
     const source = match[3];
     const names = match[1] ? parseNamedImports(match[1]) : [match[2]];
@@ -280,7 +291,7 @@ export function parseJSImports(content: string): ImportInfo[] {
   }
 
   // CommonJS: require('module')
-  const requireRegex = /(?:const|let|var)\s+(?:(\w+)|\{([^}]+)\})\s*=\s*require\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
+  const requireRegex = /(?:const|let|var)\s+(?:(\w+)|\{([^{}]+)\})\s*=\s*require\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
   while ((match = requireRegex.exec(cleanContent)) !== null) {
     const source = match[3];
     const names = match[1] ? [match[1]] : parseNamedImports(match[2]);
@@ -354,7 +365,9 @@ export function parseJSExports(content: string): ExportInfo[] {
   }
 
   // export { X, Y } or export { X } from 'module'
-  const namedExportRegex = /export\s+\{([^}]+)\}(?:\s+from\s+['"]([^'"]+)['"])?/g;
+  // Brace-excluded for the same reason as namedImportRegex above (and, like it,
+  // deliberately NOT length-bounded).
+  const namedExportRegex = /export\s+\{([^{}]+)\}(?:\s+from\s+['"]([^'"]+)['"])?/g;
   while ((match = namedExportRegex.exec(cleanContent)) !== null) {
     const names = parseNamedImports(match[1]);
     const reExportSource = match[2];
@@ -835,7 +848,9 @@ function parseJavaExports(content: string): ExportInfo[] {
   // The return-type capture is non-greedy and excludes keywords that start
   // type declarations (class/interface/enum/record) to avoid false matches.
   const methodRegex =
-    /\bpublic\s+(?:static\s+|final\s+|abstract\s+|synchronized\s+|default\s+|native\s+)*(?!class\b|interface\b|enum\b|record\b|@interface\b)(?:<[^>]+>\s+)?[\w<>[\], ?.]+?\s+(\w+)\s*\(/g;
+    // Type capture excludes SPACE — a ' ' inside the class overlapping the following
+    // `\s+` made `public final final …` quadratic to scan.
+    /\bpublic\s+(?:static\s+|final\s+|abstract\s+|synchronized\s+|default\s+|native\s+)*(?!class\b|interface\b|enum\b|record\b|@interface\b)(?:<[^>]+>\s+)?[\w<>[\],?.]+(?:\s+[\w<>[\],?.]+)*?\s+(\w+)\s*\(/g;
   while ((match = methodRegex.exec(clean)) !== null) {
     const name = match[1];
     // Filter obvious non-methods (the regex can match some constructors or

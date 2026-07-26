@@ -10,6 +10,7 @@
 import { readFile } from 'node:fs/promises';
 import { extname, relative, basename } from 'node:path';
 import { isTestFile } from './test-file.js';
+import { blankCommentsPreservingLayout } from './comment-blanking.js';
 
 // ============================================================================
 // TYPES
@@ -51,24 +52,24 @@ interface Pattern {
 // Express / Hono app.use(...) patterns
 const EXPRESS_PATTERNS: Pattern[] = [
   // CORS
-  { re: /app\.use\s*\([^)]*cors\s*\(/,          type: 'cors',         name: 'cors',        framework: 'express' },
-  { re: /app\.use\s*\([^)]*cors\)/,              type: 'cors',         name: 'cors',        framework: 'express' },
+  { re: /app\.use\s*\([^)]{0,300}cors\s*\(/,          type: 'cors',         name: 'cors',        framework: 'express' },
+  { re: /app\.use\s*\([^)]{0,300}cors\)/,              type: 'cors',         name: 'cors',        framework: 'express' },
   // Auth
-  { re: /app\.use\s*\([^)]*helmet\s*\(/,         type: 'auth',         name: 'helmet',      framework: 'express' },
+  { re: /app\.use\s*\([^)]{0,300}helmet\s*\(/,         type: 'auth',         name: 'helmet',      framework: 'express' },
   { re: /passport\.authenticate\s*\(/,           type: 'auth',         name: 'passport',    framework: 'express' },
   { re: /\bjwt\s*\(/,                            type: 'auth',         name: 'jwt',         framework: 'express' },
-  { re: /app\.use\s*\([^)]*session\s*\(/,        type: 'auth',         name: 'session',     framework: 'express' },
+  { re: /app\.use\s*\([^)]{0,300}session\s*\(/,        type: 'auth',         name: 'session',     framework: 'express' },
   // Rate-limit
-  { re: /app\.use\s*\([^)]*rateLimit\s*\(/,      type: 'rate-limit',   name: 'rateLimit',   framework: 'express' },
-  { re: /app\.use\s*\([^)]*slowDown\s*\(/,       type: 'rate-limit',   name: 'slowDown',    framework: 'express' },
-  { re: /app\.use\s*\([^)]*throttle\s*\(/,       type: 'rate-limit',   name: 'throttle',    framework: 'express' },
+  { re: /app\.use\s*\([^)]{0,300}rateLimit\s*\(/,      type: 'rate-limit',   name: 'rateLimit',   framework: 'express' },
+  { re: /app\.use\s*\([^)]{0,300}slowDown\s*\(/,       type: 'rate-limit',   name: 'slowDown',    framework: 'express' },
+  { re: /app\.use\s*\([^)]{0,300}throttle\s*\(/,       type: 'rate-limit',   name: 'throttle',    framework: 'express' },
   // Logging
-  { re: /app\.use\s*\([^)]*morgan\s*\(/,         type: 'logging',      name: 'morgan',      framework: 'express' },
-  { re: /app\.use\s*\([^)]*pino\s*\(/,           type: 'logging',      name: 'pino',        framework: 'express' },
-  { re: /app\.use\s*\([^)]*winston\s*\(/,        type: 'logging',      name: 'winston',     framework: 'express' },
+  { re: /app\.use\s*\([^)]{0,300}morgan\s*\(/,         type: 'logging',      name: 'morgan',      framework: 'express' },
+  { re: /app\.use\s*\([^)]{0,300}pino\s*\(/,           type: 'logging',      name: 'pino',        framework: 'express' },
+  { re: /app\.use\s*\([^)]{0,300}winston\s*\(/,        type: 'logging',      name: 'winston',     framework: 'express' },
   // Validation
-  { re: /app\.use\s*\([^)]*express\.json/,       type: 'validation',   name: 'express.json', framework: 'express' },
-  { re: /app\.use\s*\([^)]*bodyParser/,          type: 'validation',   name: 'bodyParser',  framework: 'express' },
+  { re: /app\.use\s*\([^)]{0,300}express\.json/,       type: 'validation',   name: 'express.json', framework: 'express' },
+  { re: /app\.use\s*\([^)]{0,300}bodyParser/,          type: 'validation',   name: 'bodyParser',  framework: 'express' },
   // NOTE: zod is detected separately (see extractFromSource), gated on a real zod import —
   // a bare `.parse(` matches JSON.parse/Date.parse/etc. and produced phantom "zod" entries.
   { re: /\bcelebrate\s*\(/,                      type: 'validation',   name: 'celebrate',   framework: 'express' },
@@ -176,10 +177,22 @@ function extractFromSource(
   }
 
   // ── Express / Hono / unknown ───────────────────────────────────────────────
+  // Matched against a COMMENT-BLANKED copy. The `app.use(...)` patterns bound the
+  // span between `app.use(` and the middleware name (a hostile file of unterminated
+  // `app.use(` is quadratic otherwise), and a comment sitting in that span — which is
+  // exactly where people explain their middleware wiring — would otherwise eat the
+  // budget and silently drop a real `cors`/`morgan`/`rateLimit` entry.
+  //
+  // The blanker is a STRING-AWARE scanner, not a regex: `app.use('/static/*', …)` is a
+  // glob route, and a regex blanker reads that `/*` as a comment opener and erases
+  // everything up to the next `*/` — the file's next JSDoc — taking the whole
+  // inventory with it. Blanking preserves length and newlines, so
+  // `lineNumberOf(source, m.index)` still reports the true line.
+  const scanSource = blankCommentsPreservingLayout(source);
   for (const pat of EXPRESS_PATTERNS) {
     const re = new RegExp(pat.re.source, 'gm');
     let m: RegExpExecArray | null;
-    while ((m = re.exec(source)) !== null) {
+    while ((m = re.exec(scanSource)) !== null) {
       entries.push({
         type: pat.type,
         framework: framework === 'unknown' ? 'express' : framework,

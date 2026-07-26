@@ -31,6 +31,14 @@ const SECRET_VALUE_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   // covers bare `Bearer <token>` occurrences outside a header context.
   [/Authorization:[^\n\r]*/gi, 'Authorization: [REDACTED]'],
   [/api[_-]?key["']?\s*[=:]\s*["']?\S{8,}/gi, 'api_key=[REDACTED]'],
+  // Provider header forms that carry the raw key. Anthropic sends `x-api-key`, Google
+  // sends `x-goog-api-key`; a proxy that echoes the inbound request in its error body
+  // puts the header (name and value) verbatim into text we then log.
+  [/x-api-key:[^\n\r]*/gi, 'x-api-key: [REDACTED]'],
+  [/x-goog-api-key:[^\n\r]*/gi, 'x-goog-api-key: [REDACTED]'],
+  // Google API keys are self-identifying by prefix, so they can be caught free-standing
+  // (e.g. embedded in a URL that has already been reshaped by a proxy).
+  [/AIza[0-9A-Za-z\-_]{35}/g, '[REDACTED]'],
   // Google-style `?key=...` in a provider URL (e.g. Gemini generateContent).
   [/([?&]key=)[A-Za-z0-9\-_]{8,}/gi, '$1[REDACTED]'],
 ];

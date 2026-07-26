@@ -22,6 +22,7 @@ import { Command } from 'commander';
 import { sanitizeForTerminal as safe } from '../../utils/misc.js';
 import { join } from 'node:path';
 import { logger } from '../../utils/logger.js';
+import { resolveTrustedApiBase, resolveTrustedSslVerify } from '../../core/services/repo-config-trust.js';
 import { parseList, resolveLLMProvider } from '../../utils/command-helpers.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
 import { createLLMService } from '../../core/services/llm-service.js';
@@ -169,9 +170,8 @@ To write tests, use the openlore-write-tests skill:
         llm = createLLMService({
           provider: resolved.provider,
           openaiCompatBaseUrl: resolved.openaiCompatBaseUrl,
-          apiBase: globalOpts.apiBase ?? config?.llm?.apiBase,
-          sslVerify:
-            globalOpts.insecure != null ? !globalOpts.insecure : (config?.llm?.sslVerify ?? true),
+          apiBase: resolveTrustedApiBase(globalOpts.apiBase, config?.llm?.apiBase),
+          sslVerify: resolveTrustedSslVerify(globalOpts.insecure, config?.llm?.sslVerify),
           timeout: globalOpts.timeout ?? config?.generation?.timeout,
           enableLogging: true,
           logDir: join(rootPath, OPENLORE_DIR, OPENLORE_LOGS_SUBDIR),

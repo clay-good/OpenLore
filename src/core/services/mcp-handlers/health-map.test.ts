@@ -438,3 +438,33 @@ describe('get_health_map tool surface', () => {
     expect(TOOL_OUTPUT_CLASS.get_health_map).toBe('conclusion');
   });
 });
+
+// ============================================================================
+// Summary counts must be totals, not display-capped
+// ============================================================================
+
+describe('handleGetHealthMap — summary counts are not capped by `limit`', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('reports the TRUE untested-hotspot count when more exist than `limit` shows', async () => {
+    // 25 untested functions, each above UNTESTED_MIN_DEGREE (10), with limit 5.
+    // `untestedHotspotCount` sits in the same object as the genuinely uncapped
+    // hubCount/godFunctionCount, so capping it silently understates the repo's
+    // health problem by whatever the display limit happens to be.
+    const nodes: FunctionNode[] = [];
+    const edges: CallEdge[] = [];
+    for (let i = 0; i < 25; i++) {
+      nodes.push(node({ id: `f${i}.ts::fn${i}`, fanIn: 6, fanOut: 6 }));
+    }
+    mockCtx.mockResolvedValue({ callGraph: graph(nodes, edges) } as never);
+
+    const r = await handleGetHealthMap({ directory: '/p', limit: 5 }) as {
+      summary: { untestedHotspotCount: number };
+      hotspots: { untestedHotspots: unknown[] };
+    };
+
+    expect(r.summary.untestedHotspotCount).toBe(25);
+    // …while the DISPLAY list stays capped, which is the point of `limit`.
+    expect(r.hotspots.untestedHotspots.length).toBeLessThanOrEqual(5);
+  });
+});

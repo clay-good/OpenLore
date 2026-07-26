@@ -9,6 +9,7 @@ import { dirname, join, resolve } from 'node:path';
 import YAML from 'yaml';
 import type { ProjectType, OpenLoreConfig } from '../../types/index.js';
 import { logger } from '../../utils/logger.js';
+import { colorForStderr } from '../../utils/colors.js';
 import {
   DEFAULT_MAX_FILES,
   DEFAULT_ANTHROPIC_MODEL,
@@ -138,9 +139,13 @@ export function resetConfigValidationWarnings(): void {
 function emitConfigValidationWarnings(configPath: string, parsed: unknown): void {
   const findings = validateOpenLoreConfig(parsed);
   if (findings.length === 0) return;
-  const { quiet, noColor } = logger.getOptions();
+  const { quiet } = logger.getOptions();
   if (quiet) return; // errors-only mode — match logger.warning's suppression
-  const prefix = noColor ? '[warn]' : '\x1b[33m[warn]\x1b[0m';
+  // Through the shared color layer, which keys off STDERR's own TTY state. A
+  // hand-rolled escape honoured `--no-color` but not redirection, so this was the one
+  // line that wrote raw ANSI into a piped/captured stderr while every other output
+  // path stripped it.
+  const prefix = `${colorForStderr().yellow('[warn]')}`;
   for (const finding of findings) {
     const signature = `${configPath} ${finding.kind} ${finding.key ?? ''}`;
     if (emittedConfigWarnings.has(signature)) continue;

@@ -29,6 +29,7 @@ import {
 } from '../../constants.js';
 import { confirm } from '@inquirer/prompts';
 import { logger } from '../../utils/logger.js';
+import { resolveTrustedApiBase, resolveTrustedSslVerify } from '../../core/services/repo-config-trust.js';
 import {
   detectProjectType,
   getProjectTypeName,
@@ -506,8 +507,8 @@ The pipeline saves run metadata to .openlore/runs/ for tracking.
           provider: resolved.provider,
           openaiCompatBaseUrl: resolved.openaiCompatBaseUrl,
           model: opts.model,
-          apiBase: globalOpts.apiBase ?? openloreConfig?.llm?.apiBase,
-          sslVerify: globalOpts.insecure != null ? !globalOpts.insecure : openloreConfig?.llm?.sslVerify ?? true,
+          apiBase: resolveTrustedApiBase(globalOpts.apiBase, openloreConfig?.llm?.apiBase),
+          sslVerify: resolveTrustedSslVerify(globalOpts.insecure, openloreConfig?.llm?.sslVerify),
           timeout: globalOpts.timeout ?? openloreConfig?.generation?.timeout,
           enableLogging: true,
           logDir: join(rootPath, OPENLORE_DIR, OPENLORE_LOGS_SUBDIR),

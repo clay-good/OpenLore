@@ -8,6 +8,7 @@
 
 import { readFile, readdir } from 'node:fs/promises';
 import { join, relative } from 'node:path';
+import { isConfinedPath } from '../../utils/path-confinement.js';
 import type { SpecMapping, SpecMap } from '../../types/index.js';
 import logger from '../../utils/logger.js';
 
@@ -187,6 +188,13 @@ export async function buildSpecMap(options: SpecMapperOptions): Promise<SpecMap>
 
     const domain = String(entry.name);
     const specPath = join(specsDir, domain, 'spec.md');
+    // The mapping produced here becomes a WRITE target in the decision syncer, so a
+    // committed `spec.md -> ~/.zshrc` must be dropped at the source rather than
+    // mapped and later appended to.
+    if (!isConfinedPath(rootPath, specPath)) {
+      logger.debug(`Spec path escapes the project root, skipping: ${specPath}`);
+      continue;
+    }
     const relativeSpecPath = relative(rootPath, specPath);
 
     let content: string;

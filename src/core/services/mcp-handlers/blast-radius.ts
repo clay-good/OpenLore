@@ -89,6 +89,12 @@ export interface BlastRadiusBriefing {
     count: number;
     toRun: Array<{ test: string; file: string; confidence: string }>;
     soundness: unknown;
+    /**
+     * Present when test selection THREW. `count: 0` alongside this means "not
+     * computed", not "no tests are impacted" — the two are different claims and a
+     * pre-commit reader acts differently on each.
+     */
+    unavailable?: string;
   };
   memory: {
     drifted: number;
@@ -179,6 +185,9 @@ export async function computeBlastRadius(
   const governing = new Set<string>();
   let highestRank = 0;
   let maxAffectedCallers = 0;
+  // Symbols whose impact analysis threw. `analyzedSymbolCount` is documented below as
+  // authoritative, so it must count symbols actually ANALYZED, not merely attempted.
+  let impactFailures = 0;
 
   for (const seed of analyzed) {
     // Per-symbol best-effort: one symbol whose impact analysis throws must not
@@ -186,7 +195,7 @@ export async function computeBlastRadius(
     let raw: unknown;
     try {
       raw = await handleAnalyzeImpact(absDir, seed.name, depth);
-    } catch { continue; }
+    } catch { impactFailures++; continue; }
     const candidates = impactResults(raw);
     // Prefer the resolution whose file matches the changed seed (names can collide).
     const r = candidates.find(c => c.file === seed.filePath) ?? candidates[0];
@@ -214,6 +223,7 @@ export async function computeBlastRadius(
   let testCount = 0;
   let testToRun: Array<{ test: string; file: string; confidence: string }> = [];
   let testSoundness: unknown;
+  let testsUnavailable: string | null = null;
   try {
     const sel = await handleSelectTests({ directory: absDir, diffRef: resolvedBaseRef }) as {
       selectedTests?: Array<{ test: string; file: string; confidence: string }>;
@@ -223,7 +233,13 @@ export async function computeBlastRadius(
     testCount = tests.length;
     testToRun = tests.slice(0, 15);
     testSoundness = sel.soundness;
-  } catch { /* tests are best-effort; absence is reported as count 0 */ }
+  } catch (err) {
+    // Tests are best-effort, but "0 tests" and "tests could not be computed" are
+    // different claims and a reader acts differently on each: an unrecorded throw
+    // renders as "no tests are impacted" on a hub change. Degrade to a caveat, the
+    // same way the drift path below does.
+    testsUnavailable = err instanceof Error ? err.message : String(err);
+  }
 
   // ── 4. Spec / memory / decision drift (reuse check_spec_drift, one pass) ─────
   // check_spec_drift already computes anchored-memory freshness (memory-drifted /
@@ -272,6 +288,12 @@ export async function computeBlastRadius(
   if (driftUnavailable) {
     caveats.push(`Spec/memory drift could not be evaluated: ${driftUnavailable}`);
   }
+  if (testsUnavailable) {
+    caveats.push(`Tests to run could not be computed: ${testsUnavailable} — tests.count 0 means "not computed", not "none impacted".`);
+  }
+  if (impactFailures > 0) {
+    caveats.push(`Impact analysis failed for ${impactFailures} of the ${analyzed.length} selected symbols; the risk figures below cover the ${analyzed.length - impactFailures} that succeeded.`);
+  }
   // Detail lists are display-capped; report any that drop items so a reader never
   // mistakes a short list for a complete one (mcp-quality: no-silent-truncation).
   // The counts (tests.count / memory.* / specs.willGoStale / decisions.affected+orphaned /
@@ -309,12 +331,12 @@ export async function computeBlastRadius(
       layersCrossed: [...layers].sort(),
       governingDecisions: [...governing].sort(),
       topSymbols: topSymbols.slice(0, 15),
-      analyzedSymbolCount: analyzed.length,
+      analyzedSymbolCount: analyzed.length - impactFailures,
       ...(seeds.length > analyzed.length
         ? { truncated: { omitted: seeds.length - analyzed.length, reason: `only the ${analyzed.length} highest-fan-in symbols were analyzed` } }
         : {}),
     },
-    tests: { count: testCount, toRun: testToRun, soundness: testSoundness },
+    tests: { count: testCount, toRun: testToRun, soundness: testSoundness, ...(testsUnavailable ? { unavailable: testsUnavailable } : {}) },
     memory: { drifted: memDrifted, orphaned: memOrphaned, willDrift: memWillDrift.slice(0, 20) },
     specs: { willGoStale: specItems.length, items: specItems.slice(0, 20) },
     decisions: { affected: decisionItems.length, orphaned: decisionsOrphaned, items: decisionItems.slice(0, 20) },
@@ -338,7 +360,10 @@ function renderHeadline(b: BlastRadiusBriefing): string {
   ];
   if (b.impact.highestRiskLevel !== 'none') parts.push(`highest risk: ${b.impact.highestRiskLevel}`);
   if (b.impact.hubsTouched.length > 0) parts.push(`${b.impact.hubsTouched.length} hub${b.impact.hubsTouched.length === 1 ? '' : 's'} affected`);
-  if (b.tests.count > 0) parts.push(`${b.tests.count} test${b.tests.count === 1 ? '' : 's'} to run`);
+  // The headline is the line a reader acts on, so an uncomputed test set must appear
+  // there rather than silently dropping out and reading as "no tests impacted".
+  if (b.tests.unavailable) parts.push('tests to run could not be computed');
+  else if (b.tests.count > 0) parts.push(`${b.tests.count} test${b.tests.count === 1 ? '' : 's'} to run`);
   const willDrift = b.memory.drifted + b.memory.orphaned;
   if (willDrift > 0) parts.push(`${willDrift} anchored memor${willDrift === 1 ? 'y' : 'ies'} will drift/orphan`);
   if (b.decisions.affected > 0) parts.push(`${b.decisions.affected} decision${b.decisions.affected === 1 ? '' : 's'} affected`);

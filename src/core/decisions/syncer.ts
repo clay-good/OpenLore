@@ -9,6 +9,7 @@
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileExists } from '../../utils/command-helpers.js';
+import { safeJoin } from '../../utils/path-confinement.js';
 import { logger } from '../../utils/logger.js';
 import { parseSpecHeader } from '../drift/spec-mapper.js';
 import type { PendingDecision, DecisionStore, SpecMap, DecisionScope } from '../../types/index.js';
@@ -139,7 +140,18 @@ async function syncDecision(
       continue;
     }
 
-    const specAbsPath = join(options.rootPath, mapping.specPath);
+    // A repo can COMMIT a symlink at `openspec/specs/<domain>/spec.md`; git checks it
+    // out, and this path is read, appended to and rewritten. Confine canonically so a
+    // link pointing at ~/.zshrc resolves outside the root and is skipped.
+    let specAbsPath: string;
+    try {
+      specAbsPath = safeJoin(options.rootPath, mapping.specPath);
+    } catch {
+      logger.warning(
+        `Decision "${decision.title}": spec path for domain "${domain}" resolves outside the project — skipping sync to spec`,
+      );
+      continue;
+    }
     if (!(await fileExists(specAbsPath))) continue;
 
     resolved.push({ specPath: mapping.specPath, specAbsPath });
@@ -317,7 +329,16 @@ async function createADR(
   decision: PendingDecision,
   options: SyncOptions,
 ): Promise<string | null> {
-  const decisionsDir = join(options.openspecPath, 'decisions');
+  // Same symlink vector as the spec write above: a committed
+  // `openspec/decisions -> ../../../.claude/commands` would otherwise plant an ADR
+  // outside the repo. Confine before the mkdir that would follow the link.
+  let decisionsDir: string;
+  try {
+    decisionsDir = safeJoin(options.rootPath, join(options.openspecPath, 'decisions'));
+  } catch {
+    logger.warning('openspec/decisions resolves outside the project — skipping ADR creation');
+    return null;
+  }
   await mkdir(decisionsDir, { recursive: true });
 
   // Find next ADR number
@@ -397,7 +418,17 @@ export async function rewriteSyncedDecisionStatus(
   const modified: string[] = [];
 
   for (const relPath of decision.syncedToSpecs) {
-    const absPath = join(rootPath, relPath);
+    // `syncedToSpecs` comes from the repo-committed decision store, so it is as
+    // untrusted as the spec map `syncDecision` confines above — a store entry of
+    // `"../../../../.zshenv"` (or an in-root symlink) would otherwise be read and
+    // rewritten in place. Same guard, same reason; this sibling was missed first time.
+    let absPath: string;
+    try {
+      absPath = safeJoin(rootPath, relPath);
+    } catch {
+      logger.warning(`Decision ${decision.id}: synced spec path "${relPath}" resolves outside the project — skipping status rewrite`);
+      continue;
+    }
     if (!(await fileExists(absPath))) continue;
     let content = await readFile(absPath, 'utf-8');
     const before = content;

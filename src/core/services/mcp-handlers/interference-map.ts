@@ -551,8 +551,13 @@ async function defaultEnumerateBranches(
   try {
     names = (await git(repoPath, ['for-each-ref', '--format=%(refname:short)', 'refs/heads/']))
       .split('\n').map(s => s.trim()).filter(Boolean);
-  } catch {
-    return [];
+  } catch (err) {
+    // Propagate rather than returning []. The caller has a caveat for exactly this
+    // ("Branch enumeration failed for X"), and swallowing the throw here made that
+    // caveat unreachable for its most likely causes — not a git worktree, no `git` on
+    // PATH, a safe.directory ownership rejection — so the map reported "no in-flight
+    // work interferes" when nothing had been enumerated at all.
+    throw err instanceof Error ? err : new Error(String(err));
   }
   const baseRef = await resolveRepoBase(repoPath, baseRefIn);
   // The currently-checked-out branch is NOT excluded: it is a legitimate in-flight change
@@ -726,7 +731,11 @@ export async function computeInterferenceMap(
   for (const repo of repos) {
     if (includeBranches) {
       try { raw.push(...await providers.enumerateBranches(repo.path, repo.name, resolvedBaseRef, input.branches)); }
-      catch { caveats.push(`Branch enumeration failed for ${repo.name}.`); }
+      catch (err) {
+        // Carry the reason: "not a git worktree" and "safe.directory rejected" need
+        // different fixes, and a bare failure notice is not actionable.
+        caveats.push(`Branch enumeration failed for ${repo.name}: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
     if (includePrs) {
       const has = await providers.ghAvailable(repo.path).catch(() => false);

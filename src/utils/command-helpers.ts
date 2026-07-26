@@ -15,6 +15,7 @@ import {
 } from '../constants.js';
 import { lookupPricing } from '../core/services/llm-service.js';
 import type { LLMContext } from '../core/analyzer/artifact-generator.js';
+import { discloseRepoConfiguredEndpoint } from '../core/services/repo-config-trust.js';
 
 /**
  * Check whether a file or directory exists at the given path.
@@ -96,6 +97,17 @@ export function resolveLLMProvider(openloreConfig?: {
   const provider = configProvider ?? envProvider;
   const openaiCompatBaseUrl = process.env.OPENAI_COMPAT_BASE_URL
     ?? openloreConfig?.generation?.openaiCompatBaseUrl;
+
+  // Only when this endpoint will actually be used. Disclosing it while the resolved
+  // provider is anthropic/openai told the operator their key was going to a host the
+  // run never contacts — beside the correctly-worded `Ignoring llm.apiBase …` refusal,
+  // which made the two lines contradict each other.
+  if (provider === 'openai-compat' && !process.env.OPENAI_COMPAT_BASE_URL) {
+    discloseRepoConfiguredEndpoint(
+      'generation.openaiCompatBaseUrl',
+      openloreConfig?.generation?.openaiCompatBaseUrl,
+    );
+  }
 
   return { provider, openaiCompatBaseUrl };
 }

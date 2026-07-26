@@ -7,7 +7,7 @@
 
 import { Command } from 'commander';
 import { sanitizeForTerminal as safe } from '../../utils/misc.js';
-import { allowInsecureTls, withRelaxedTls } from '../../core/services/tls-scope.js';
+import { withRelaxedTls } from '../../core/services/tls-scope.js';
 import { access, stat, readFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { execFile } from 'node:child_process';
@@ -38,6 +38,7 @@ import {
   DEFAULT_GEMINI_MODEL,
   DEFAULT_COPILOT_MODEL,
 } from '../../constants.js';
+import { resolveTrustedSslVerify, rejectRepoConfiguredTlsOptOut, discloseRepoConfiguredEndpoint } from '../../core/services/repo-config-trust.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -417,13 +418,13 @@ async function checkLLMConnection(rootPath: string): Promise<CheckResult> {
     }
   }
 
-  // Apply SSL setting before creating provider
-  const sslVerify = config?.llm?.sslVerify ?? true;
-  if (!sslVerify || gen?.skipSslVerify) {
-    allowInsecureTls('llm.sslVerify=false or generation.skipSslVerify');
-  }
+  // A repo-supplied TLS opt-out is refused here as it is on every other LLM path:
+  // `doctor` runs against a clone just like `generate` does.
+  const sslVerify = resolveTrustedSslVerify(undefined, config?.llm?.sslVerify);
+  rejectRepoConfiguredTlsOptOut('generation.skipSslVerify', gen?.skipSslVerify);
 
   const baseUrl = gen?.openaiCompatBaseUrl ?? process.env.OPENAI_COMPAT_BASE_URL;
+  discloseRepoConfiguredEndpoint('generation.openaiCompatBaseUrl', gen?.openaiCompatBaseUrl);
 
   let llm;
   try {
@@ -485,9 +486,8 @@ async function checkEmbeddingConnection(rootPath: string): Promise<CheckResult |
   const baseUrl = emb?.baseUrl ?? process.env.EMBED_BASE_URL;
   if (!baseUrl) return null; // Embedding not configured — keyword default; skip
 
-  if (emb?.skipSslVerify) {
-    allowInsecureTls('embedding.skipSslVerify');
-  }
+  // Refused, not honoured: this value comes from the analyzed repo's config.
+  rejectRepoConfiguredTlsOptOut('embedding.skipSslVerify', emb?.skipSslVerify);
 
   const apiKey = emb?.apiKey ?? process.env.EMBED_API_KEY ?? 'none';
   const model = emb?.model ?? process.env.EMBED_MODEL ?? 'text-embedding-ada-002';

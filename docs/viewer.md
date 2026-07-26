@@ -11,11 +11,24 @@ openlore view
 
 # Options
 openlore view --port 4000          # custom port (default: 5173)
-openlore view --host 0.0.0.0       # expose on LAN
+openlore view --host 127.0.0.1     # bind host (default loopback)
 openlore view --no-open            # don't open browser automatically
 openlore view --analysis <path>    # custom analysis dir (default: .openlore/analysis/)
 openlore view --spec <path>        # custom spec dir (default: ./openspec/specs/)
 ```
+
+### The entry link
+
+The viewer prints a URL containing a `?token=`. Opening it exchanges that token for a
+session cookie and redirects to the clean URL, so the token does not stay in your address
+bar or history. `--no-open` prints the link instead of launching a browser — paste it into
+whichever browser you want. The link stays usable while the viewer is running (so you can
+open a second browser); restarting issues a fresh one and invalidates the old.
+
+**Treat the link as a password.** Every route, including the page itself, requires it: the
+viewer exposes a chat endpoint that spends your LLM API key and can read the analyzed repo,
+so anyone who can reach the port *and* has the link can use both. Without the link they get
+a 401. If you lose it, stop and re-run `openlore view` for a fresh one.
 
 ### Views
 
@@ -81,7 +94,7 @@ openlore view [options]
   --analysis <path>    Analysis directory (default: .openlore/analysis/)
   --spec <path>        Spec files directory (default: ./openspec/specs/)
   --port <n>           Port (default: 5173)
-  --host <host>        Bind host (default: 127.0.0.1; use 0.0.0.0 for LAN)
+  --host <host>        Bind host (default: 127.0.0.1)
   --no-open            Skip automatic browser open
 ```
 

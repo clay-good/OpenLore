@@ -4,15 +4,14 @@
 
 import { createHash } from 'node:crypto';
 import { readFile, readdir, stat } from 'node:fs/promises';
-import { realpathSync } from 'node:fs';
-import { dirname, extname, join, relative, resolve, sep } from 'node:path';
+import { extname, join, relative, resolve } from 'node:path';
 import type { LLMContext } from '../../analyzer/artifact-generator.js';
 import { EdgeStore } from '../edge-store.js';
 import { readAttestation, reconcile, type IndexIntegrity } from '../../analyzer/index-attestation.js';
 import { artifactDigest } from '../../analyzer/condensation.js';
 import { recordArtifactDigest, traversalIndexMayBeCurrent } from './traversal.js';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
-import { ANALYSIS_AGE_WARNING_HOURS, ANALYSIS_STALE_THRESHOLD_MS, ARTIFACT_FINGERPRINT, ARTIFACT_LLM_CONTEXT, MAX_QUERY_LENGTH, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR, OPENSPEC_DIR, STALE_REGION_REPAIR_THRESHOLD } from '../../../constants.js';
+import { ANALYSIS_AGE_WARNING_HOURS, ANALYSIS_STALE_THRESHOLD_MS, ARTIFACT_FINGERPRINT, ARTIFACT_LLM_CONTEXT, MAX_QUERY_LENGTH, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR, STALE_REGION_REPAIR_THRESHOLD } from '../../../constants.js';
 import { repairInBackground, type RepairReason } from '../cold-start-bootstrap.js';
 
 /**
@@ -178,54 +177,11 @@ export function sanitizeMcpError(err: unknown, format: 'string' | 'json' = 'stri
   return sanitized;
 }
 
-/**
- * The canonical (symlink-resolved) path of `p`, or — when `p` does not exist (a
- * write target) — the canonical path of its nearest existing ancestor. Used to
- * confine on the REAL filesystem location rather than the lexical path.
- */
-function realPathOrNearestExisting(p: string): string {
-  let cur = p;
-  for (;;) {
-    try {
-      return realpathSync(cur);
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-      const parent = dirname(cur);
-      if (parent === cur) return cur; // reached filesystem root
-      cur = parent;
-    }
-  }
-}
-
-/**
- * Resolve a user-supplied relative file path against a validated project root and
- * ensure the result stays within that root — by BOTH a lexical check (cheap, blocks
- * `../` traversal) AND a canonical, symlink-resolved check (mcp-security:
- * Symlink-Aware Path Confinement). The canonical check defeats an in-root symlink
- * that points outside the root: confinement is enforced on the real path of the
- * target where it exists, and on the real path of its nearest existing ancestor
- * where it does not (so a not-yet-created write target is confined too).
- */
-export function safeJoin(absDir: string, filePath: string): string {
-  const resolved = resolve(absDir, filePath);
-  if (!resolved.startsWith(absDir + sep) && resolved !== absDir) {
-    throw new Error(`Path traversal blocked: "${filePath}" resolves outside project directory`);
-  }
-  // Canonical (symlink-aware) confinement. realpath the root (it exists — it was
-  // validated) and the target's real location; reject if the real target escapes.
-  try {
-    const realRoot = realpathSync(absDir);
-    const realTarget = realPathOrNearestExisting(resolved);
-    if (realTarget !== realRoot && !realTarget.startsWith(realRoot + sep)) {
-      throw new Error(`Path escape blocked: "${filePath}" canonicalizes outside the project directory`);
-    }
-  } catch (err) {
-    // A "Path escape blocked" error must propagate; only swallow realpath I/O errors
-    // on the root itself (which would be unexpected for a validated root).
-    if (err instanceof Error && err.message.startsWith('Path escape blocked')) throw err;
-  }
-  return resolved;
-}
+// Path confinement lives in `src/utils/path-confinement.ts` — a leaf module, so the
+// CLI, the decision syncer and the analyzer can share this one guard rather than
+// re-deriving it (they previously had no guard at all). Re-exported here because
+// these names are part of the handlers' established surface.
+export { safeJoin, safeOpenspecDir, isConfinedPath } from '../../../utils/path-confinement.js';
 
 /**
  * Bound a free-text query/description argument before it drives an embedding call
@@ -271,25 +227,6 @@ export interface NotReadyResult {
  */
 export function notReadyResult(error: string, reason: NotReadyReason): NotReadyResult {
   return { error, notReady: true, reason, remedy: 'openlore analyze' };
-}
-
-/**
- * Resolve the project's openspec directory, confined to the validated root.
- *
- * `config.openspecPath` is read from `.openlore/config.json` — an untrusted on-disk
- * artifact (mcp-security threat model). A poisoned value (`../../etc`, an absolute
- * escape) must not redirect the reads/writes that derive from it (spec/manifest
- * reads, decision ADR reads, decision sync writes) outside the project root. We
- * confine via safeJoin; a value that escapes the root falls back to the default
- * `openspec/` dir — a legitimate in-root path (default or custom) passes through
- * unchanged, so only an escaping value is neutralized.
- */
-export function safeOpenspecDir(absRoot: string, configuredPath: string | undefined): string {
-  try {
-    return safeJoin(absRoot, configuredPath && configuredPath.length > 0 ? configuredPath : OPENSPEC_DIR);
-  } catch {
-    return safeJoin(absRoot, OPENSPEC_DIR);
-  }
 }
 
 interface ContextCacheEntry {

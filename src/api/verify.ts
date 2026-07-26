@@ -6,7 +6,7 @@
  */
 
 import { join } from 'node:path';
-import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_LOGS_SUBDIR, OPENLORE_OUTPUTS_SUBDIR, OPENLORE_VERIFICATION_SUBDIR, OPENSPEC_DIR, OPENSPEC_SPECS_SUBDIR, ARTIFACT_DEPENDENCY_GRAPH, ARTIFACT_GENERATION_REPORT, DEFAULT_ANTHROPIC_MODEL, DEFAULT_OPENAI_MODEL, DEFAULT_GEMINI_MODEL, DEFAULT_OPENAI_COMPAT_MODEL } from '../constants.js';
+import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_LOGS_SUBDIR, OPENLORE_OUTPUTS_SUBDIR, OPENLORE_VERIFICATION_SUBDIR, OPENSPEC_SPECS_SUBDIR, ARTIFACT_DEPENDENCY_GRAPH, ARTIFACT_GENERATION_REPORT, DEFAULT_ANTHROPIC_MODEL, DEFAULT_OPENAI_MODEL, DEFAULT_GEMINI_MODEL, DEFAULT_OPENAI_COMPAT_MODEL } from '../constants.js';
 import { fileExists, readJsonFile } from '../utils/command-helpers.js';
 import { readOpenLoreConfig } from '../core/services/config-manager.js';
 import { createLLMService } from '../core/services/llm-service.js';
@@ -15,6 +15,8 @@ import { SpecVerificationEngine } from '../core/verifier/verification-engine.js'
 import type { DependencyGraphResult } from '../core/analyzer/dependency-graph.js';
 import type { GenerationReport } from '../core/generator/openspec-writer.js';
 import type { VerifyApiOptions, VerifyResult, ProgressCallback } from './types.js';
+import { resolveOpenspecDir } from '../utils/openspec-dir.js';
+import { resolveTrustedApiBase, resolveTrustedSslVerify } from '../core/services/repo-config-trust.js';
 
 function progress(onProgress: ProgressCallback | undefined, step: string, status: 'start' | 'progress' | 'complete' | 'skip', detail?: string): void {
   onProgress?.({ phase: 'verify', step, status, detail });
@@ -45,7 +47,7 @@ export async function openloreVerify(options: VerifyApiOptions = {}): Promise<Ve
   }
 
   // Check specs exist
-  const openspecPath = join(rootPath, openloreConfig.openspecPath ?? OPENSPEC_DIR);
+  const openspecPath = resolveOpenspecDir(rootPath, openloreConfig.openspecPath);
   const specsPath = join(openspecPath, OPENSPEC_SPECS_SUBDIR);
   if (!(await fileExists(specsPath))) {
     throw new Error('No specs found. Run openloreGenerate() first.');
@@ -96,8 +98,11 @@ export async function openloreVerify(options: VerifyApiOptions = {}): Promise<Ve
     llm = createLLMService({
       provider,
       model: effectiveModel,
-      apiBase: options.apiBase ?? openloreConfig.llm?.apiBase,
-      sslVerify: options.sslVerify ?? openloreConfig.llm?.sslVerify ?? true,
+      apiBase: resolveTrustedApiBase(options.apiBase, openloreConfig.llm?.apiBase),
+      sslVerify: resolveTrustedSslVerify(
+        options.sslVerify === undefined ? undefined : !options.sslVerify,
+        openloreConfig.llm?.sslVerify,
+      ),
       openaiCompatBaseUrl: options.openaiCompatBaseUrl,
       timeout: options.timeout ?? openloreConfig.generation?.timeout,
       enableLogging: true,

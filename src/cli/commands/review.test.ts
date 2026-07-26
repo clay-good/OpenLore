@@ -204,3 +204,46 @@ describe('runReviewCli (output + advisory posture)', () => {
     expect(await runReviewCli({ cwd: '/p', base: 'main', hook: true })).toBe(0);
   });
 });
+
+// ============================================================================
+// The headline is the line a PR reviewer acts on
+// ============================================================================
+
+describe('headline (the bolded first line of the PR comment)', () => {
+  const cleanStructural = {
+    ...structuralWithDelta,
+    summary: { addedFunctions: 0, removedFunctions: 0, signatureChanges: 0, addedEdges: 0, removedEdges: 0, staleCallers: 0, renameCandidates: 0 },
+    added: [], removed: [], signatureChanged: [],
+  };
+  const line = (b: ReviewBriefing): string =>
+    renderMarkdown(b).split('\n').find(l => l.includes('This change') || l.includes('No structural') || l.includes('could not')) ?? '';
+
+  it('phrases an uncomputed test set as a clause, not a bare fragment', () => {
+    // It read "This change tests to run could not be computed." — a broken sentence
+    // at the top of a public PR comment.
+    const blast = { ...blastBriefing, tests: { count: 0, toRun: [], soundness: undefined, unavailable: 'tested_by missing' } } as unknown as BlastRadiusBriefing;
+    const md = line({ base: 'main', head: 'working tree', structural: structuralWithDelta, blast, caveats: [], status: 'ok' });
+    expect(md).toContain('This change');
+    expect(md).toMatch(/test set that could not be computed/);
+    expect(md).not.toMatch(/This change tests to run/);
+  });
+
+  it('does NOT claim an all-clear when the blast radius never ran', () => {
+    // Empty `parts` with a failed blast radius means "half the analysis is missing",
+    // not "nothing changed" — and the headline is what gets acted on.
+    const md = line({
+      base: 'main', head: 'working tree',
+      structural: cleanStructural,
+      blast: { error: 'no index' } as unknown as BlastRadiusBriefing,
+      caveats: ['Blast radius unavailable (no index)'], status: 'ok',
+    });
+    expect(md).not.toMatch(/^No structural changes detected\./);
+    expect(md).toMatch(/blast radius could not be computed/i);
+  });
+
+  it('still says the clean thing when both halves ran and found nothing', () => {
+    const blast = { ...blastBriefing, impact: { ...blastBriefing.impact, hubsTouched: [] }, tests: { count: 0, toRun: [], soundness: {} } } as unknown as BlastRadiusBriefing;
+    const md = line({ base: 'main', head: 'working tree', structural: cleanStructural, blast, caveats: [], status: 'ok' });
+    expect(md).toContain('No structural changes detected.');
+  });
+});

@@ -10,6 +10,7 @@ import { sanitizeForTerminal as safe } from '../../utils/misc.js';
 import { mkdir, readFile, writeFile, chmod } from 'node:fs/promises';
 import { join } from 'node:path';
 import { logger } from '../../utils/logger.js';
+import { resolveTrustedApiBase, resolveTrustedSslVerify } from '../../core/services/repo-config-trust.js';
 import { redirectConsoleToStderr } from '../../utils/quiet-stdout.js';
 import { fileExists, formatDuration, parseList, resolveLLMProvider } from '../../utils/command-helpers.js';
 import {
@@ -26,6 +27,7 @@ import type { DriftOptions, DriftIssue, DriftResult, DriftSeverity } from '../..
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
 import {
   getChangedFiles,
+  resolveBaseRefDisclosed,
   isGitRepository,
   buildSpecMap,
   buildADRMap,
@@ -34,6 +36,7 @@ import {
 import { suggestTestsForDrift } from '../../core/drift/test-suggester.js';
 import { createLLMService } from '../../core/services/llm-service.js';
 import type { LLMService } from '../../core/services/llm-service.js';
+import { resolveOpenspecDir } from '../../utils/openspec-dir.js';
 
 // ============================================================================
 // TYPES
@@ -423,8 +426,8 @@ Pre-commit hook:
             provider: resolved.provider,
             model: openloreConfig.generation?.model,
             openaiCompatBaseUrl: resolved.openaiCompatBaseUrl,
-            apiBase: globalOpts.apiBase ?? openloreConfig.llm?.apiBase,
-            sslVerify: globalOpts.insecure != null ? !globalOpts.insecure : openloreConfig.llm?.sslVerify ?? true,
+            apiBase: resolveTrustedApiBase(globalOpts.apiBase, openloreConfig?.llm?.apiBase),
+            sslVerify: resolveTrustedSslVerify(globalOpts.insecure, openloreConfig?.llm?.sslVerify),
             timeout: globalOpts.timeout ?? openloreConfig.generation?.timeout,
             enableLogging: true,
             logDir: join(rootPath, OPENLORE_DIR, OPENLORE_LOGS_SUBDIR),
@@ -440,7 +443,7 @@ Pre-commit hook:
       }
 
       // Determine openspec path
-      const openspecPath = join(rootPath, openloreConfig.openspecPath ?? OPENSPEC_DIR);
+      const openspecPath = resolveOpenspecDir(rootPath, openloreConfig.openspecPath);
       const specsPath = join(openspecPath, OPENSPEC_SPECS_SUBDIR);
 
       // Check if specs exist
@@ -455,6 +458,19 @@ Pre-commit hook:
       // ========================================================================
       if (!opts.json) {
         logger.discovery('Analyzing git changes...');
+      }
+
+      // Disclose a base-ref fallback instead of quietly diffing against something the
+      // caller did not ask for. `resolveBaseRefDisclosed` is the shared home of this
+      // verdict (fix-cli-conclusion-honesty); `blast-radius` already surfaces it and
+      // `certify-public-surface` is fatal on it — `drift` was the one --base command
+      // that silently substituted `main` for a typo'd ref and reported success.
+      const baseDisclosure = await resolveBaseRefDisclosed(rootPath, opts.base);
+      if (baseDisclosure.fellBack && !opts.json) {
+        logger.warning(
+          `Base ref "${baseDisclosure.requested}" did not resolve — comparing against ` +
+            `"${baseDisclosure.resolved}" instead.`,
+        );
       }
 
       const gitResult = await getChangedFiles({

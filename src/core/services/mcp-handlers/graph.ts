@@ -1267,9 +1267,13 @@ export async function handleTraceExecutionPath(
 
   const targetIds = new Set(targetNodes.map(n => n.id));
   const allPaths: string[][] = [];
+  // Enumerate ONE past the cap: finding maxPaths+1 is the only way to distinguish
+  // "exactly maxPaths exist" from "more exist and were dropped". Reporting truncation
+  // on the first is an honesty feature over-claiming, which is its own defect.
+  const enumerationCap = maxPaths + 1;
 
   function dfs(currentId: string, path: string[], visited: Set<string>): void {
-    if (allPaths.length >= maxPaths) return;
+    if (allPaths.length >= enumerationCap) return;
     if (targetIds.has(currentId) && path.length > 1) {
       allPaths.push([...path]);
       return; // don't traverse past the target
@@ -1290,8 +1294,17 @@ export async function handleTraceExecutionPath(
   }
 
   for (const entry of entryNodes) {
-    if (allPaths.length >= maxPaths) break;
+    if (allPaths.length >= enumerationCap) break;
     dfs(entry.id, [entry.id], new Set([entry.id]));
+  }
+  const truncated = allPaths.length > maxPaths;
+  // Sort BEFORE dropping the surplus. Enumeration is depth-first, so the extra path
+  // is simply the last one found — and it can be the SHORTEST. Trimming by
+  // enumeration order and then sorting would discard a better answer that had
+  // already been computed, and report a longer chain as `shortestPathFound`.
+  if (truncated) {
+    allPaths.sort((a, b) => a.length - b.length);
+    allPaths.length = maxPaths;
   }
 
   // Confidence boundary: the returned paths ARE the answer; their edges are the
@@ -1333,7 +1346,17 @@ export async function handleTraceExecutionPath(
     targetFunction: targetNodes[0].name,
     pathsFound: paths.length,
     maxDepth,
-    shortestPath: paths[0].chain,
+    maxPaths,
+    // Name the claim honestly: with enumeration truncated this is the shortest path
+    // FOUND, and a shorter one may exist among those never enumerated.
+    ...(truncated
+      ? {
+          truncated: {
+            reason: `path enumeration stopped at maxPaths=${maxPaths}; more paths may exist and a shorter one may not have been enumerated`,
+          },
+          shortestPathFound: paths[0].chain,
+        }
+      : { shortestPath: paths[0].chain }),
     paths,
     ...(valueLevelInfo ? { valueLevel: valueLevelInfo } : {}),
     confidenceBoundary: assembleBoundary({ basis: edgeBasisForChains(allPaths, pairIndex), staleness: traceStaleness, integrity: ctx?.integrity, repair: repairDisclosure(absDir) }),

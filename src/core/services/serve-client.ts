@@ -63,6 +63,10 @@ async function healthy(desc: ServeDescriptor): Promise<boolean> {
   try {
     const res = await fetch(`http://${desc.host}:${desc.port}/health`, {
       signal: AbortSignal.timeout(HEALTH_PROBE_TIMEOUT_MS),
+      // The descriptor is confined to loopback, but a local listener answering a
+      // redirect would otherwise pull this probe (and the call below, with its
+      // token and tool arguments) off the machine. A daemon never redirects.
+      redirect: 'error',
     });
     if (!res.ok) return false;
     const body = (await res.json().catch(() => null)) as { ok?: boolean } | null;
@@ -134,6 +138,9 @@ export async function callServeTool(
     headers,
     body: JSON.stringify({ directory, args }),
     signal,
+    // Never follow a redirect: this request carries `x-openlore-token` and the tool
+    // arguments, and Node's fetch re-sends custom headers cross-origin.
+    redirect: 'error',
   });
   const body = await res.json().catch(() => null);
   if (!res.ok) {

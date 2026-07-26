@@ -7,13 +7,15 @@
 
 import { Command } from 'commander';
 import { withRelaxedTls } from '../../core/services/tls-scope.js';
-import { readFile, writeFile, unlink, mkdir } from 'node:fs/promises';
+import { readFile, unlink } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { fileExists } from '../../utils/command-helpers.js';
-import { join, resolve, sep } from 'node:path';
+import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { logger } from '../../utils/logger.js';
+import { safeJoin } from '../../utils/path-confinement.js';
+import { isLoopbackHost } from '../../utils/loopback.js';
 import {
   MAX_QUERY_LENGTH,
   MAX_CHAT_BODY_BYTES,
@@ -28,7 +30,11 @@ import {
   ARTIFACT_REFACTOR_PRIORITIES,
   ARTIFACT_MAPPING,
 } from '../../constants.js';
-import { createApiGuardMiddleware, OPENLORE_TOKEN_HEADER } from './local-http-guard.js';
+import {
+  createApiGuardMiddleware,
+  createBrowserSessionGuard,
+  writeInstanceDescriptor,
+} from './local-http-guard.js';
 import { VectorIndex } from '../../core/analyzer/vector-index.js';
 import { resolveEmbedder } from '../../core/analyzer/embedder.js';
 import { getSkeletonContent } from '../../core/analyzer/code-shaper.js';
@@ -48,37 +54,21 @@ export function sanitizeErrorMessage(msg: string): string {
     .replace(/x-api-key:\s*\S{10,}/gi, 'x-api-key: [REDACTED]');
 }
 
-/** Ensure a resolved path stays within the project root. Returns null if invalid. */
+/**
+ * Ensure a resolved path stays within the project root. Returns null if invalid.
+ *
+ * Delegates to the shared `safeJoin` so this surface gets the same SYMLINK-aware
+ * containment the MCP handlers have (mcp-security: Symlink-Aware Path Confinement).
+ * The lexical-only check this used to do accepted an in-repo symlink pointing
+ * outside the root, which the `/api/skeleton` and `/api/spec-requirements` routes
+ * would then read.
+ */
 export function safePath(rootPath: string, userPath: string): string | null {
-  const root = resolve(rootPath);
-  const abs = resolve(rootPath, userPath);
-  if (abs !== root && !abs.startsWith(root + sep)) {
+  try {
+    return safeJoin(resolve(rootPath), userPath);
+  } catch {
     return null;
   }
-  return abs;
-}
-
-/**
- * Build the inline script injected into the served UI so its same-origin `/api`
- * requests authenticate. It publishes the instance token and wraps `fetch` to
- * attach the `x-openlore-token` header to relative `/api/*` requests only. The
- * token is a fresh random hex string embedded via `JSON.stringify` (no injection
- * risk); the wrapper is defensively wrapped in try/catch so it can never break
- * the app's own fetches.
- */
-export function buildTokenInjectionScript(token: string): string {
-  // Escape `<` so the embedded token can never close the surrounding <script>
-  // tag (defense in depth; the real token is hex-only).
-  const embedded = JSON.stringify(token).replace(/</g, '\\u003c');
-  return (
-    `window.__OPENLORE_TOKEN__=${embedded};` +
-    `(function(){var t=window.__OPENLORE_TOKEN__;if(!t||!window.fetch)return;` +
-    `var o=window.fetch.bind(window);window.fetch=function(i,n){try{` +
-    `var u=typeof i==='string'?i:(i&&i.url)||'';` +
-    `if(typeof u==='string'&&u.indexOf('/api/')===0){` +
-    `n=n||{};var h=new Headers((n&&n.headers)||(typeof i!=='string'&&i&&i.headers)||undefined);` +
-    `h.set(${JSON.stringify(OPENLORE_TOKEN_HEADER)},t);n.headers=h;}}catch(e){}return o(i,n);};})();`
-  );
 }
 
 function openBrowser(url: string): void {
@@ -96,7 +86,7 @@ export const viewCommand = new Command('view')
   .option('--analysis <path>', 'Path to analysis directory', `${OPENLORE_ANALYSIS_REL_PATH}/`)
   .option('--spec <path>', 'Path to spec files directory', `./${OPENSPEC_DIR}/${OPENSPEC_SPECS_SUBDIR}/`)
   .option('--port <n>', 'Port to run the viewer on', String(DEFAULT_VIEWER_PORT))
-  .option('--host <host>', 'Host to bind (use 0.0.0.0 for LAN)', DEFAULT_VIEWER_HOST)
+  .option('--host <host>', 'Host to bind (default loopback; every route requires the entry link)', DEFAULT_VIEWER_HOST)
   .option('--no-open', 'Do not open the browser automatically', false)
   .action(
     async (options: {
@@ -143,6 +133,31 @@ export const viewCommand = new Command('view')
       const port = isNaN(parsedPort) ? DEFAULT_VIEWER_PORT : parsedPort;
       const host = options.host || DEFAULT_VIEWER_HOST;
 
+      // A non-loopback bind is now the same posture as `serve`: the token is required
+      // on every route (below), and the page no longer contains it — so binding a
+      // container interface for a published port is safe as long as the operator keeps
+      // the entry URL to themselves. Warn, rather than refuse.
+      // A WILDCARD bind cannot work: the rebinding guard compares the request's Host
+      // against the bound name, and no client ever sends "0.0.0.0" as a Host — so the
+      // server would start, print a URL nobody can open, and 403 every request
+      // including the handshake. Refuse with the address the user actually wants.
+      if (host === '0.0.0.0' || host === '::' || host === '[::]') {
+        logger.error(
+          `Cannot bind the wildcard address "${host}": the viewer authenticates each request ` +
+            `against the host it was started with, and a client never sends "${host}" as its ` +
+            `Host header — every request would be rejected. Bind the address you will actually ` +
+            `open (e.g. --host 127.0.0.1, or --host <this machine's IP> to reach it from the network).`,
+        );
+        process.exitCode = 1;
+        return;
+      }
+      if (!isLoopbackHost(host)) {
+        logger.warning(
+          `Binding non-loopback host "${host}": anyone who can reach this port needs the ` +
+            `entry link below to use the viewer. Treat that URL as a password.`,
+        );
+      }
+
       // Per-instance token. Injected into the served UI so its same-origin /api
       // requests authenticate; required by the money/agent chat route (always)
       // and by every route when bound to a non-loopback host. See local-http-guard.ts.
@@ -164,27 +179,25 @@ export const viewCommand = new Command('view')
           react(),
           {
             name: 'openlore-graph-api',
-            // Inject the instance token + fetch shim into the served page so the
-            // browser UI's same-origin /api requests carry x-openlore-token.
-            transformIndexHtml() {
-              return [
-                {
-                  tag: 'script',
-                  injectTo: 'head-prepend' as const,
-                  children: buildTokenInjectionScript(token),
-                },
-              ];
-            },
             configureServer(devServer) {
-              // SECURITY: one guard in front of every /api/* route. Mounted at the
-              // '/api' prefix and registered FIRST so no route below can be reached
-              // without passing it: DNS-rebinding / cross-origin requests are rejected
-              // (403), and the money/agent chat route requires the instance token even
-              // on loopback (401) — as does every route on a non-loopback binding.
+              // SECURITY, first gate: EVERY route, including `/` and its assets. This
+              // is what stops another local process from simply fetching the page. It
+              // also performs the one-time ?token= → HttpOnly-cookie handshake that
+              // lets the browser in; see createBrowserSessionGuard.
+              devServer.middlewares.use(
+                createBrowserSessionGuard({ boundHost: host, boundPort: port, token }),
+              );
+
+              // SECURITY, second gate: one guard in front of every /api/* route.
+              // Redundant with the session guard for authentication, kept because it
+              // is the shared policy both local surfaces apply (mcp-security:
+              // AllLocalHttpSurfacesShareTheGuard) and it keeps `serve` and `view`
+              // from drifting.
               devServer.middlewares.use(
                 '/api',
                 createApiGuardMiddleware({
                   boundHost: host,
+                  boundPort: port,
                   token,
                   requireTokenFor: (rel) => rel === '/chat',
                 }),
@@ -691,24 +704,30 @@ export const viewCommand = new Command('view')
         return;
       }
 
+      // The entry link. It carries the token, which the first request exchanges for an
+      // HttpOnly cookie before redirecting to the bare URL — so the token does not
+      // linger in the address bar, in history, or in a Referer header. The link stays
+      // usable for the life of this process (so a second browser can be pointed at it);
+      // a restart issues a fresh token and invalidates the old one.
       const url = `http://${host}:${port}/`;
+      const entryUrl = `${url}?token=${token}`;
       logger.success(`Viewer running at ${url}`);
+      logger.info('Open this link', entryUrl);
+      logger.info('Note', 'the link is the credential — anyone who has it can use this viewer');
 
       // Discovery + stale-instance detection (parity with the `serve` daemon):
       // record where the viewer is listening so a later invocation / tool can
       // detect a live or stale instance instead of a mystery port occupant.
       const descriptorPath = join(rootPath, OPENLORE_DIR, 'view.json');
       try {
-        await mkdir(join(rootPath, OPENLORE_DIR), { recursive: true });
-        await writeFile(
-          descriptorPath,
-          JSON.stringify(
-            { port, pid: process.pid, host, token, startedAt: new Date().toISOString() },
-            null,
-            2,
-          ) + '\n',
-          'utf-8',
-        );
+        // 0600 — the descriptor carries the instance token that gates /api/chat.
+        await writeInstanceDescriptor(descriptorPath, {
+          port,
+          pid: process.pid,
+          host,
+          token,
+          startedAt: new Date().toISOString(),
+        });
       } catch {
         // Discovery is best-effort; a read-only .openlore must not stop the viewer.
       }
@@ -727,7 +746,7 @@ export const viewCommand = new Command('view')
       process.on('SIGTERM', () => void shutdown());
 
       if (options.open) {
-        openBrowser(url);
+        openBrowser(entryUrl);
       }
 
       // Vite keeps the event loop alive; nothing else to do here.

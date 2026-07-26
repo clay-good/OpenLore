@@ -9,8 +9,10 @@ import { Command } from 'commander';
 import { allowInsecureTls } from '../../core/services/tls-scope.js';
 import { confirm } from '@inquirer/prompts';
 import { stat, rm } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { logger } from '../../utils/logger.js';
+import { resolveTrustedApiBase, resolveTrustedSslVerify, rejectRepoConfiguredTlsOptOut } from '../../core/services/repo-config-trust.js';
+import { resolveOpenspecDir } from '../../utils/openspec-dir.js';
 import { fileExists, formatDuration, formatAge, parseList, readJsonFile, resolveLLMProvider, estimateCost } from '../../utils/command-helpers.js';
 import {
   DEFAULT_ANTHROPIC_MODEL,
@@ -309,7 +311,15 @@ Each spec.md follows OpenSpec conventions:
 
       // Determine openspec path
       const openspecPath = opts.outputDir ?? openloreConfig.openspecPath ?? OPENSPEC_DIR;
-      const fullOpenspecPath = join(rootPath, openspecPath);
+      // NOTE: `openspecPath` is the REQUESTED value (used for messages that describe
+      // the request). `fullOpenspecPath` below is the confined, real destination —
+      // anything describing where files went must use that one.
+      // `--output-dir` is operator-supplied and may legitimately point anywhere;
+      // `openspecPath` comes from the repo's own config.json and may not — it ends up
+      // as a write target (the RAG manifest, synced specs) further down.
+      const fullOpenspecPath = opts.outputDir
+        ? join(rootPath, opts.outputDir)
+        : resolveOpenspecDir(rootPath, openloreConfig.openspecPath);
 
       // Load existing OpenSpec config if present
       const openspecConfig = await readOpenSpecConfig(fullOpenspecPath);
@@ -385,9 +395,14 @@ Each spec.md follows OpenSpec conventions:
       };
       const effectiveModel = opts.model || openloreConfig.generation.model || defaultModels[effectiveProvider];
 
-      // Apply SSL verification setting (CLI --insecure or config skipSslVerify)
-      if (globalOpts.insecure || openloreConfig.generation.skipSslVerify || openloreConfig.embedding?.skipSslVerify) {
-        allowInsecureTls('--insecure or config skipSslVerify');
+      // Only `--insecure` (operator-supplied) may relax TLS. A repo-committed
+      // `skipSslVerify` is refused — see repo-config-trust.ts. This sits ~85 lines
+      // above the createLLMService call that also resolves sslVerify; both doors have
+      // to be shut or the guarded one is decoration.
+      rejectRepoConfiguredTlsOptOut('generation.skipSslVerify', openloreConfig.generation.skipSslVerify);
+      rejectRepoConfiguredTlsOptOut('embedding.skipSslVerify', openloreConfig.embedding?.skipSslVerify);
+      if (globalOpts.insecure) {
+        allowInsecureTls('--insecure');
       }
 
       // Estimate cost
@@ -472,8 +487,8 @@ Each spec.md follows OpenSpec conventions:
           provider: effectiveProvider,
           model: effectiveModel,
           openaiCompatBaseUrl: effectiveBaseUrl,
-          apiBase: globalOpts.apiBase ?? openloreConfig.llm?.apiBase,
-          sslVerify: globalOpts.insecure != null ? !globalOpts.insecure : openloreConfig.llm?.sslVerify ?? true,
+          apiBase: resolveTrustedApiBase(globalOpts.apiBase, openloreConfig?.llm?.apiBase),
+          sslVerify: resolveTrustedSslVerify(globalOpts.insecure, openloreConfig?.llm?.sslVerify),
           timeout: globalOpts.timeout ?? openloreConfig.generation?.timeout,
           enableLogging: true,
           logDir: join(rootPath, OPENLORE_DIR, OPENLORE_LOGS_SUBDIR),
@@ -563,7 +578,7 @@ Each spec.md follows OpenSpec conventions:
       let mappingArtifact: MappingArtifact | undefined;
       if (depGraph) {
         try {
-          const mapper = new MappingGenerator(rootPath, openloreConfig.openspecPath, semanticSearch);
+          const mapper = new MappingGenerator(rootPath, relative(rootPath, fullOpenspecPath) || OPENSPEC_DIR, semanticSearch);
           mappingArtifact = await mapper.generate(pipelineResult, depGraph);
           logger.success(
             `Requirement mapping: ${mappingArtifact.stats.mappedRequirements}/${mappingArtifact.stats.totalRequirements} requirements mapped, ${mappingArtifact.stats.orphanCount} orphan functions → ${OPENLORE_ANALYSIS_REL_PATH}/${ARTIFACT_MAPPING}`
@@ -652,7 +667,10 @@ Each spec.md follows OpenSpec conventions:
           JSON.stringify(manifest, null, 2),
           'utf-8',
         );
-        logger.success(`RAG manifest: ${manifest.domains.length} domains → ${openloreConfig.openspecPath ?? OPENSPEC_DIR}/${ARTIFACT_RAG_MANIFEST}`);
+        // Report where it ACTUALLY went. `openloreConfig.openspecPath` is the
+        // requested value, which may have been clamped back into the root — printing
+        // it made the tool claim a destination it had deliberately refused to use.
+        logger.success(`RAG manifest: ${manifest.domains.length} domains → ${relative(rootPath, join(fullOpenspecPath, ARTIFACT_RAG_MANIFEST)) || ARTIFACT_RAG_MANIFEST}`);
       } catch (error) {
         logger.warning(`Could not generate RAG manifest: ${(error as Error).message}`);
       }

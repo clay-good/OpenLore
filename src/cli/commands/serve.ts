@@ -32,7 +32,7 @@
 import { Command } from 'commander';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createRequire } from 'node:module';
-import { writeFile, unlink, mkdir } from 'node:fs/promises';
+import { unlink } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { logger } from '../../utils/logger.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, FULL_PRESET, FULL_PRESET_ALIAS, LEAN_DEFAULT_PRESET } from '../../constants.js';
@@ -49,6 +49,7 @@ import {
   constantTimeEqual,
   originDefenseError,
   OPENLORE_TOKEN_HEADER,
+  writeInstanceDescriptor,
 } from './local-http-guard.js';
 import { readServeDescriptor, type ServeDescriptor } from './serve-descriptor.js';
 
@@ -186,6 +187,8 @@ async function daemonAlive(desc: ServeDescriptor): Promise<boolean> {
   try {
     const res = await fetch(`http://${desc.host}:${desc.port}/health`, {
       signal: AbortSignal.timeout(HEALTH_PROBE_TIMEOUT_MS),
+      // A daemon never redirects; following one would take this probe off-machine.
+      redirect: 'error',
     });
     if (!res.ok) return false;
     const body = (await res.json().catch(() => null)) as { ok?: boolean } | null;
@@ -355,7 +358,7 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
 
     // DNS-rebinding / cross-origin defense — runs before ANY dispatch, including
     // /health, so a malicious page can't even probe the daemon's existence.
-    const originErr = originDefenseError(req, host);
+    const originErr = originDefenseError(req, host, boundPort);
     if (originErr) {
       sendJson(res, 403, { error: originErr });
       return;
@@ -501,8 +504,15 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
     startedAt,
     version: _pkgVersion,
   };
-  await mkdir(join(root, OPENLORE_DIR), { recursive: true });
-  await writeFile(serveFilePath(root), JSON.stringify(descriptor, null, 2) + '\n', 'utf-8');
+  // 0600 — the descriptor carries the daemon token that gates /tool/*. Discovery is
+  // best-effort (parity with the viewer): a descriptor left by another local user can
+  // make the chmod fail with EPERM, and that must not stop a daemon that is already
+  // listening — the token gate does not depend on the file being written.
+  try {
+    await writeInstanceDescriptor(serveFilePath(root), descriptor);
+  } catch (err) {
+    logger.warning(`Could not write ${serveFilePath(root)} (${err instanceof Error ? err.message : String(err)}); discovery by other clients may fail.`);
+  }
 
   logger.success(`openlore serve listening on http://${host}:${boundPort} (preset: ${presetName})`);
   logger.discovery(`Discovery file: ${serveFilePath(root)}`);

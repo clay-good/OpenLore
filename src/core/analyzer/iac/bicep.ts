@@ -260,12 +260,12 @@ function addBodyRefs(
   const masked = maskBicep(decl.body);
 
   // dependsOn: [ a, b ] — Bicep arrays may be comma- or newline-separated.
-  const depMatch = masked.match(/(^|[^.\w])dependsOn\s*:\s*\[([\s\S]*?)\]/);
+  const depMatch = masked.match(/(^|[^.\w])dependsOn\s*:\s*\[([\s\S]{0,20000}?)\]/);
   if (depMatch) {
     for (const sym of depMatch[2].matchAll(/[A-Za-z_]\w*/g)) emit(sym[0], 'depends_on');
   }
   // Remove the dependsOn array from the general scan so it isn't double-counted.
-  const general = masked.replace(/(^|[^.\w])(dependsOn\s*:\s*)\[[\s\S]*?\]/, (_m, p) => p + ' ');
+  const general = masked.replace(/(^|[^.\w])(dependsOn\s*:\s*)\[[\s\S]{0,20000}?\]/, (_m, p) => p + ' ');
 
   for (const sym of scanRefSymbols(general)) emit(sym, 'references');
 }
