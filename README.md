@@ -29,6 +29,19 @@
   <strong><a href="#install-in-one-command">Install</a> · <a href="#what-you-get">What you get</a> · <a href="#value-scorecard--does-it-pay-for-itself">Benchmarks</a> · <a href="#governance--guardrails-on-what-your-agent-changes">Governance</a> · <a href="#how-it-works">How it works</a> · <a href="#openlore-vs-alternatives">vs. Alternatives</a> · <a href="#documentation">Docs</a> · <a href="#star-history--community">Community</a></strong>
 </p>
 
+<details>
+<summary><strong>Full table of contents</strong></summary>
+
+**Start here:** [Install in one command](#install-in-one-command) · [What you get](#what-you-get) · [Is OpenLore for you?](#is-openlore-for-you) · [See it in action](#see-it-in-action) · [5-Minute Quickstart](#5-minute-quickstart) · [What it costs to adopt](#what-it-costs-to-adopt)
+
+**Evaluate it:** [Value Scorecard (wins *and* losses)](#value-scorecard--does-it-pay-for-itself) · [OpenLore vs. Alternatives](#openlore-vs-alternatives) · [Known Limitations](#known-limitations) · [We dogfood our own governance](#we-dogfood-our-own-governance)
+
+**Understand it:** [How It Works](#how-it-works) · [Governance](#governance--guardrails-on-what-your-agent-changes) · [Core Features](#core-features) · [Languages & IaC](#languages--infrastructure-as-code) · [Federation, Interop & PR review](#federation-interop--pr-review)
+
+**Use it:** [Agent Cheat Sheet](#agent-cheat-sheet) · [Claude Code Skill](#use-openlore-as-a-claude-code-skill) · [Requirements](#requirements) · [Documentation](#documentation) · [Development](#development) · [Community](#star-history--community)
+
+</details>
+
 ---
 
 AI coding agents are powerful but **amnesiac and ungoverned**. Every task starts by re-reading the same files to rediscover structure; every long session quietly drifts toward confident-but-stale assumptions; and nothing tells the agent when a change is about to break a contract, cross an architectural boundary, or open a path into sensitive code.
@@ -75,7 +88,32 @@ OpenLore does two things for an agent, both deterministic and local — it **rem
 
 ---
 
+## Is OpenLore for you?
+
+The fastest way to evaluate a tool is to find out quickly that it isn't for you. So:
+
+| | |
+|---|---|
+| ✅ **Strong fit** | A codebase big enough that *you* can't hold it in your head — and neither can the model. Private or niche code the model never memorized. Long agent sessions where stale assumptions compound. Polyglot repos, or code plus the IaC that deploys it. Anywhere "the agent changed something it shouldn't have" is a real cost, not a hypothetical. |
+| 🤔 **Try it, but measure** | Mid-size repos and mixed workloads. The orientation win scales with size and depth, so run **`openlore prove --estimate`** (seconds, no API key) before you commit to it. |
+| ❌ **Probably not yet** | A small repo the model already knows, answering shallow questions like "who calls `parseArgs`" — your agent's built-in search is cheaper, and we [publish the measurement that says so](#value-scorecard--does-it-pay-for-itself). Also: if you want something to *perform* the refactor, OpenLore is the wrong layer — it locates and certifies, it never edits your code. |
+
+**One idea, if you only read one line of this README:** an agent's expensive failure mode isn't ignorance — it's *confidence*. A model that doesn't know a function exists will go look. A model that "knows" a stale fact will confidently build on it, and you pay for that at review time. OpenLore is built so the agent can be told **"that fact is stale"** and **"this change opens a path you said was sensitive"** — deterministically, from the graph, with no second model in the loop guessing about the first.
+
+---
+
 ## See it in action
+
+**The same task, twice.** Ask an agent to add a flag to a command it has never seen:
+
+| | Without OpenLore | With OpenLore |
+|---|---|---|
+| **Opening move** | grep a guessed name → open a file → wrong layer → open three more | `orient("add a --since flag to the blast-radius command")` |
+| **What it learns** | file contents, one at a time, in whatever order it guessed | the functions, their callers, the matching spec sections, and the ranked insertion points — in one call |
+| **What it misses** | the five callers living in files it never opened | every caller the graph can see — statically resolvable ones, at least; dynamic dispatch is still nobody's friend |
+| **Before it commits** | "looks right to me" | `blast_radius` → tests to run; `certify_public_surface` → the consumers this signature change breaks, by name |
+
+The measured effect of that shape change on deep, multi-hop tasks: **25 → 16 round-trips** on excalidraw, **−26%** aggregate. It is not magic — it is the difference between *rediscovering* structure per task and *querying* it. Full numbers, including where this **doesn't** pay off, in the [Value Scorecard](#value-scorecard--does-it-pay-for-itself).
 
 <details open>
 <summary><strong>orient("add a --since flag to the blast-radius command")</strong> — one query replaces most exploratory file reads</summary>
@@ -218,6 +256,26 @@ environment.systemPackages = [ openlore.packages.x86_64-linux.default ];
 ```
 
 </details>
+
+### What it costs to adopt
+
+Every tool asks for something. Here is exactly what OpenLore asks for, measured on a **fresh clone of [ripgrep](https://github.com/BurntSushi/ripgrep)** with the published `openlore@2.1.6` — reproduce it in about a minute:
+
+```bash
+git clone --depth 1 https://github.com/BurntSushi/ripgrep && cd ripgrep
+npx openlore init && time npx openlore analyze && du -sh .openlore
+```
+
+| What it costs | On ripgrep (232 source files indexed) |
+|---|---|
+| **One-time index build** | **13.6 s**, entirely local — no API key, no network call |
+| **Disk** | **27 MB** under `.openlore/` (gitignorable; the graph is a pure function of your source, so it's always rebuildable) |
+| **Per-query latency** | **~430 µs p50** in-process via the MCP server; a *cold* one-shot CLI call is ~2 s, nearly all of it Node startup and opening the index |
+| **Keeping it fresh** | automatic — the file watcher re-indexes the changed file's dependency closure on save |
+| **Your source code** | never leaves the machine. No account, no telemetry (opt-in only), no hosted index |
+| **Lock-in** | none — it's one gitignored directory. Delete `.openlore/` and nothing about your repo has changed. |
+
+Large monorepos take minutes rather than seconds; that limit is stated plainly in [Known Limitations](#known-limitations).
 
 > Migrating from `spec-gen`? The package is now [`openlore`](https://www.npmjs.com/package/openlore) and the command is `openlore` — see [docs/RENAME-TO-OPENLORE.md](docs/RENAME-TO-OPENLORE.md) for the short checklist.
 
