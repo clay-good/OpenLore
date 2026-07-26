@@ -20,6 +20,7 @@ import {
   plannedPoolSize,
   resolveWorkerEntry,
   describeExtractionLane,
+  boundSlowFiles,
   isWorkerFaultMessage,
   WORKER_FAULT_MESSAGE_PREFIX,
   __resetExtractionPoolStateForTests,
@@ -31,7 +32,13 @@ import {
   type ExtractionResponse,
 } from './extraction-pool.js';
 import { CallGraphBuilder, serializeCallGraph, dispatchFileExtract, type FileExtractResult } from './call-graph.js';
-import { EXTRACTION_POOL_MAX, EXTRACTION_POOL_MIN_FILES, EXTRACTION_POOL_STARTUP_TIMEOUT_MS } from '../../constants.js';
+import { ParseBudgetExceededError } from './parse-budget.js';
+import {
+  EXTRACTION_POOL_MAX,
+  EXTRACTION_POOL_MIN_FILES,
+  EXTRACTION_POOL_STARTUP_TIMEOUT_MS,
+  SLOW_FILE_DISCLOSURE_MS,
+} from '../../constants.js';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -99,6 +106,8 @@ interface StubOptions {
    * fix-analyze-native-abort-and-file-cost-budget).
    */
   faultsOn?: (file: ExtractionFile) => boolean;
+  /** Report a PARSE BUDGET overrun for these files — what a worker sends when the bound fires. */
+  budgetOverrunOn?: (file: ExtractionFile) => boolean;
   /** Records the input index of every answer, in the order the parent received it. */
   completionLog?: number[];
 }
@@ -138,6 +147,11 @@ function stubWorkerFactory(opts: StubOptions = {}): ExtractionWorkerFactory {
             send({ type: 'failed', id: replyId, message: 'degraded mid-run' });
             return;
           }
+          if (opts.budgetOverrunOn?.(file)) {
+            opts.completionLog?.push(id);
+            send({ type: 'failed', id: replyId, message: new ParseBudgetExceededError(20_001, 20_000).message });
+            return;
+          }
           if (opts.faultsOn?.(file)) {
             opts.completionLog?.push(id);
             send({
@@ -145,6 +159,13 @@ function stubWorkerFactory(opts: StubOptions = {}): ExtractionWorkerFactory {
               id: replyId,
               message: `${WORKER_FAULT_MESSAGE_PREFIX}: uncaught exception while extracting ${file.path} — Maximum call stack size exceeded`,
             });
+            // Model the REAL worker: its fault boundary answers and then closes the channel, so
+            // the thread stops serving and exits shortly after. Without this the stub kept
+            // answering after "faulting" and the parent's retire-vs-continue distinction was
+            // invisible — which is how a `continue` that steals a file from a healthy sibling
+            // survived the stub suite while failing on a real thread.
+            dead = true;
+            setTimeout(() => emit('exit', 0), 0);
             return;
           }
           if (opts.throwsFor?.(file.language)) {
@@ -683,6 +704,54 @@ describe('extraction pool — a worker fault degrades the LANE, never the file',
     expect(pooled).toBe(await buildJson(files));
   }, 30_000);
 
+  it('a faulting worker retires without stealing a file from its siblings', async () => {
+    // The earlier version of this test induced no fault at all and was a strictly weaker duplicate
+    // of the byte-identity test above — it passed with the worker-fault routing deleted outright.
+    // This one drives the real routing through the stub lane, where the fault is deterministic.
+    //
+    // The specific regression: the worker's boundary closes its channel right after answering, so
+    // every later `postMessage` to it is a silent no-op. Continuing the loop would claim another
+    // index off the shared cursor and never get a reply — taking a file away from a healthy
+    // sibling and reporting it as a worker failure (measured on a real thread before the fix).
+    const files = corpus(12);
+    const faulted = files[3].path;
+    const { outcomes, disclosure: d } = await extractFilesForPass1(files, dispatchFileExtract, isEmpty, {
+      // TWO workers, so there IS a sibling to steal from: the faulted worker must retire and let
+      // the survivor drain the queue, rather than claiming indices it can no longer serve.
+      workerFactory: stubWorkerFactory({ faultsOn: (f) => f.path === faulted }),
+      poolSize: 2,
+    });
+
+    // Exactly the faulted file falls back — not it plus whatever the dead worker grabbed next.
+    expect(d.workerFallbackFiles).toEqual([faulted]);
+    // And every file still carries real facts, because the main thread re-extracted that one.
+    expect(outcomes.every(o => o.status === 'ok' && (o.value?.nodes.length ?? 0) > 0)).toBe(true);
+  }, 60_000);
+
+  it('does NOT re-run a budget-exceeded file on the main thread — one bound, not two', async () => {
+    // A budget overrun is a property of the FILE: the main thread would spend the identical
+    // budget reaching the identical nothing. The unproven-language recheck used to fire on it
+    // anyway (the language is unproven precisely because the file yielded nothing), turning one
+    // 20 s bound into two — against this change's own spec text.
+    let serialCalls = 0;
+    const files = corpus(4);
+    const budgetFile = files[0].path;
+    const serialExtract = async (f: ExtractionFile): Promise<FileExtractResult | undefined> => {
+      serialCalls++;
+      return dispatchFileExtract(f);
+    };
+    const { disclosure: d } = await extractFilesForPass1(files, serialExtract, isEmpty, {
+      workerFactory: stubWorkerFactory({ budgetOverrunOn: (f) => f.path === budgetFile }),
+      poolSize: 1,
+    });
+    expect(d.lane).toBe('pooled');
+    // The abandoned file was NOT handed back to the main thread…
+    expect(d.workerFallbackFiles).not.toContain(budgetFile);
+    expect(d.unprovenRechecks).toBe(0);
+    // …and the main thread ran for nothing at all on this corpus.
+    expect(serialCalls).toBe(0);
+  }, 30_000);
+
   it('classifies a fault message only by its marker, so an ordinary failure is never mistaken for one', () => {
     // The marker is message-keyed because a throw crossing the worker boundary is
     // structured-cloned — its class and properties do not survive.
@@ -722,11 +791,68 @@ describe('extraction pool — a slow file is attributable', () => {
     expect(note).toContain('src/vendor.js');
   });
 
-  it('writes the live in-flight disclosure to stderr, never stdout', () => {
-    // `logger`'s non-error levels go to STDOUT, and `build()` also runs inside `openlore mcp`,
-    // whose stdout carries JSON-RPC frames. A per-file line there would corrupt the protocol.
-    const pool = readFileSync(join(__dirname, 'extraction-pool.ts'), 'utf-8');
-    expect(pool).toContain('process.stderr.write');
-    expect(pool).not.toMatch(/logger\.\w+\([^)]*still extracting/);
+  it('writes the live in-flight disclosure to stderr, and SANITIZES the repo-supplied path', async () => {
+    // Two hazards in one line. `logger`'s non-error levels go to STDOUT, and `build()` also runs
+    // inside `openlore mcp` whose stdout carries JSON-RPC frames — so this must not use `logger`.
+    // And the path comes from the analyzed repository: printed raw, a crafted filename can emit
+    // terminal escapes and forge OpenLore's own output (change: fix terminal-escape injection).
+    const stderrWrites: string[] = [];
+    const stdoutWrites: string[] = [];
+    const errSpy = vi.spyOn(process.stderr, 'write').mockImplementation((c: unknown) => { stderrWrites.push(String(c)); return true; });
+    const outSpy = vi.spyOn(process.stdout, 'write').mockImplementation((c: unknown) => { stdoutWrites.push(String(c)); return true; });
+    const logSpy = vi.spyOn(console, 'log').mockImplementation((...a: unknown[]) => { stdoutWrites.push(a.join(' ')); });
+    try {
+      // One file, named hostilely, whose worker answer arrives after the disclosure threshold.
+      const hostilePath = 'src/\u001b[2Kevil\u0007.ts';
+      const files: ExtractionFile[] = [{ path: hostilePath, language: 'TypeScript', content: 'export function z(): void {}\n' }];
+      await extractFilesForPass1(files, dispatchFileExtract, isEmpty, {
+        workerFactory: stubWorkerFactory({ delayFor: () => SLOW_FILE_DISCLOSURE_MS + 200 }),
+        poolSize: 1,
+      });
+      const line = stderrWrites.find(w => w.includes('still extracting'));
+      expect(line, 'the in-flight disclosure fired past the threshold').toBeDefined();
+      expect(line).toContain('evil.ts');
+      // The escapes are gone — ESC and BEL must never reach a terminal from a repo-supplied path.
+      expect(line).not.toContain('\u001b');
+      expect(line).not.toContain('\u0007');
+      expect(stdoutWrites.join(''), 'nothing about this went to stdout').not.toContain('still extracting');
+    } finally {
+      errSpy.mockRestore(); outSpy.mockRestore(); logSpy.mockRestore();
+    }
+  }, 30_000);
+
+  it('measures slow files past the threshold, dedupes them, and keeps the slowest first', async () => {
+    // The measurement itself was untested: deleting both `slow.push` sites, or unsorting/uncapping
+    // the result, used to leave the suite green.
+    const slowMs = SLOW_FILE_DISCLOSURE_MS + 150;
+    const files: ExtractionFile[] = [
+      { path: 'src/fast.ts', language: 'TypeScript', content: 'export function f(): void {}\n' },
+      { path: 'src/slow.ts', language: 'TypeScript', content: 'export function s(): void {}\n' },
+    ];
+    const { disclosure: d } = await extractFilesForPass1(files, dispatchFileExtract, isEmpty, {
+      workerFactory: stubWorkerFactory({ delayFor: (i) => (i === 1 ? slowMs : 0) }),
+      poolSize: 1,
+    });
+    expect(d.slowFiles.map(s => s.path)).toEqual(['src/slow.ts']);
+    expect(d.slowFiles[0].ms).toBeGreaterThanOrEqual(SLOW_FILE_DISCLOSURE_MS);
+  }, 30_000);
+
+  it('never lists one file twice, even when it is timed on BOTH lanes', () => {
+    // A file handed back to the main thread (worker fault, unproven language, dead worker) is
+    // timed twice. Listing it twice spends two of the five slots on one file and evicts genuinely
+    // distinct slow files — the opposite of the attribution this exists for.
+    const d = disclosure({
+      lane: 'pooled',
+      poolSize: 2,
+      slowFiles: boundSlowFiles([
+        { path: 'src/dup.ts', ms: 5_200 },
+        { path: 'src/dup.ts', ms: 7_100 },
+        { path: 'src/other.ts', ms: 6_000 },
+      ]),
+    });
+    expect(d.slowFiles).toEqual([
+      { path: 'src/dup.ts', ms: 7_100 },   // deduped, worst time kept
+      { path: 'src/other.ts', ms: 6_000 }, // slowest-first ordering preserved
+    ]);
   });
 });

@@ -54,6 +54,7 @@ import {
   WATCH_EMBED_FILE_CEILING,
   WATCH_VCS_SETTLE_MS,
   INCREMENTAL_CLOSURE_BUDGET,
+  MAX_HTML_INLINE_SCRIPT_CHARS,
 } from '../../constants.js';
 
 // Languages the watcher incrementally re-graphs on edit. MUST include every
@@ -1246,6 +1247,19 @@ export class McpWatcher {
           };
         }
         const priorEncoding = byPath.get(f.rel)?.encodingFallback;
+        // A size-capped HTML file is EXCLUDED before extraction, so `extractFileParseHealth`
+        // returns nothing for it and the delete below would silently clear the exclusion the full
+        // build recorded — `doctor` would then bless a repository the next `analyze` excludes a
+        // file from again. The watcher applies the same bound rather than assuming the file became
+        // healthy (change: fix-analyze-native-abort-and-file-cost-budget).
+        if (/\.html?$/i.test(f.rel) && f.content.length > MAX_HTML_INLINE_SCRIPT_CHARS) {
+          byPath.set(f.rel, {
+            filePath: f.rel, language, errorCount: 0, missingCount: 0, errorLines: [],
+            exclusion: 'size-cap',
+          });
+          touched = true;
+          continue;
+        }
         if (health && priorEncoding) health.encodingFallback = true;
         if (health) { health.language = language; byPath.set(f.rel, health); touched = true; }
         else if (priorEncoding) { byPath.set(f.rel, { filePath: f.rel, language, errorCount: 0, missingCount: 0, errorLines: [], encodingFallback: true }); touched = true; }

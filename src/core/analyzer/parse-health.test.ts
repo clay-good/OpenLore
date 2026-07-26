@@ -8,8 +8,11 @@
  *      signal fires end-to-end AND that a clean file produces no record (clean repos pay zero).
  */
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { checkParseHealth } from '../../cli/commands/doctor.js';
+import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_PARSE_HEALTH } from '../../constants.js';
 import {
   tallyParseHealth,
   isLossyUtf8,
@@ -22,6 +25,7 @@ import {
   type ParseHealthNode,
   type FileParseHealth,
   type FileExclusionReason,
+  type ParseHealthReport,
 } from './parse-health.js';
 import { CallGraphBuilder } from './call-graph.js';
 
@@ -205,22 +209,69 @@ describe('exclusion reasons', () => {
   });
 });
 
-describe('analyze and doctor cannot disagree about exclusions', () => {
-  // The requirement is that any surface reporting extraction health reads the SAME record. These
-  // are structural guards: the previous shape had `doctor` judging independently, which let it
-  // report a clean bill of health for a repository whose analysis had excluded files.
+describe('doctor reports exclusions from the shared record, behaviorally', () => {
+  // The previous version of this block was three source greps for an identifier. They passed with
+  // both CLI surfaces rendering nothing at all, which is exactly the failure they claimed to
+  // prevent. These drive the real check over a real artifact.
+  const withReport = (report: ParseHealthReport | null): string => {
+    const dir = mkdtempSync(join(tmpdir(), 'doc-'));
+    if (report) {
+      const analysisDir = join(dir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
+      mkdirSync(analysisDir, { recursive: true });
+      writeFileSync(join(analysisDir, ARTIFACT_PARSE_HEALTH), JSON.stringify(report));
+    }
+    return dir;
+  };
+  const excludedReport = buildParseHealthReport([{
+    filePath: 'src/huge.html', language: 'HTML', errorCount: 0, missingCount: 0, errorLines: [],
+    exclusion: 'size-cap',
+  }])!;
+
+  it('WARNS about a repository whose analysis excluded a file', async () => {
+    const r = await checkParseHealth(withReport(excludedReport));
+    expect(r.status).toBe('warn');
+    expect(r.detail).toContain('1 file excluded (1 size-cap)');
+    expect(r.detail).toContain('not analyzed at all');
+  });
+
+  it('does NOT call an excluded file "parsed with errors" — it was never parsed', async () => {
+    // Mixing an exclusion into a parse-error count sent the reader after a tree-sitter grammar
+    // bump for a file the grammar never saw.
+    const r = await checkParseHealth(withReport(excludedReport));
+    expect(r.detail).not.toMatch(/\d+ file\(s\) parsed with errors/);
+    expect(r.fix).not.toContain('tree-sitter');
+  });
+
+  it('still reports a genuine parse degradation as such, with the grammar remedy', async () => {
+    const degraded = buildParseHealthReport([{
+      filePath: 'src/broken.ts', language: 'TypeScript', errorCount: 3, missingCount: 0, errorLines: [7],
+    }])!;
+    const r = await checkParseHealth(withReport(degraded));
+    expect(r.status).toBe('warn');
+    expect(r.detail).toContain('1 file(s) parsed with errors');
+    expect(r.fix).toContain('tree-sitter');
+  });
+
+  it('reports a clean repository as clean', async () => {
+    const r = await checkParseHealth(withReport(null));
+    expect(r.status).toBe('ok');
+  });
+});
+
+describe('analyze renders the skip and exclusion breakdowns', () => {
+  // Kept as source guards ONLY because rendering runs deep inside `runAnalysis`; they are paired
+  // with the behavioral doctor tests above so the shared record has coverage on both sides.
   const src = (rel: string): string => readFileSync(join(__dirname, '..', '..', rel), 'utf-8');
 
-  it('doctor reads the shared record through the shared helper', () => {
-    const doctor = src('cli/commands/doctor.ts');
-    expect(doctor).toContain('describeExclusions');
+  it('analyze renders the exclusion line, not merely imports the helper', () => {
+    const analyze = src('cli/commands/analyze.ts');
+    expect(analyze).toMatch(/const excludedNote = describeExclusions\(/);
+    expect(analyze).toMatch(/logger\.warning\(\s*`\$\{excludedNote\}/);
   });
 
-  it('analyze reports the same exclusions from the same helper', () => {
-    expect(src('cli/commands/analyze.ts')).toContain('describeExclusions');
-  });
-
-  it('analyze reports skipped files broken down by reason, not as a bare count', () => {
-    expect(src('cli/commands/analyze.ts')).toContain('skippedReasons');
+  it('analyze renders the per-reason skip breakdown, not a bare count', () => {
+    const analyze = src('cli/commands/analyze.ts');
+    expect(analyze).toContain('skippedReasons');
+    expect(analyze).toMatch(/logger\.info\(\s*'Files skipped',\s*\n?\s*skipReasons\.length/);
   });
 });

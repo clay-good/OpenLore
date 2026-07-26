@@ -25,6 +25,7 @@ import {
   ARTIFACT_CALL_GRAPH_DB,
   ARTIFACT_STYLE_FINGERPRINT,
   ARTIFACT_PARSE_HEALTH,
+  MAX_HTML_INLINE_SCRIPT_CHARS,
 } from '../../constants.js';
 import { writeTraversalIndexArtifact } from './condensation.js';
 import { buildStyleFingerprint, type StyleFingerprint } from './style-fingerprint.js';
@@ -1309,9 +1310,6 @@ export class AnalysisArtifactGenerator {
       // Azure IaC DSL (add-bicep-iac-graph).
       'Bicep',
     ]);
-    // Skip inline-script extraction for very large HTML files: bounds the
-    // same-length char-array allocation in extractHtmlScripts (the scan is O(N)).
-    const MAX_HTML_INLINE_SCRIPT_CHARS = 1_000_000;
     // Helm charts: every file under a directory containing Chart.yaml is Helm.
     const chartDirs = repoMap.allFiles
       .filter(f => /(^|\/)Chart\.ya?ml$/.test(f.path.replace(/\\/g, '/')))

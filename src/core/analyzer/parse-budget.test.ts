@@ -117,6 +117,33 @@ describe('parseWithBudget', () => {
     expect(parseBudgetSupported(parser)).toBe(false);
   });
 
+  it('demotes the whole BINDING, not one instance — the WASM lane builds a fresh parser per file', () => {
+    // The lane this fallback was written for (`loadWasmGrammarSoft`) constructs a new parser for
+    // every file, because its WASM heap must not be shared. Recording the refusal against the
+    // INSTANCE therefore never helped: the entry from file N was never consulted on file N+1, and
+    // the throw was re-paid on every file — precisely what the demotion claims to avoid.
+    let arms = 0;
+    class WasmLikeParser {
+      setTimeoutMicros(): void { arms++; throw new TypeError('Cannot convert 0 to a BigInt'); }
+      parse(): { ok: boolean } { return { ok: true }; }
+    }
+    // Two files, two fresh parsers, one shared prototype — the real shape.
+    expect(parseWithBudget(new WasmLikeParser(), 'file-1')).toEqual({ ok: true });
+    expect(parseWithBudget(new WasmLikeParser(), 'file-2')).toEqual({ ok: true });
+    expect(parseWithBudget(new WasmLikeParser(), 'file-3')).toEqual({ ok: true });
+    expect(arms, 'the binding refused once and was not asked again').toBe(1);
+    // And a DIFFERENT binding is unaffected — this is a per-binding fact, not a global switch.
+    // (Keying on the prototype rather than the constructor got this wrong: every plain object
+    // literal shares `Object.prototype`, so one refusal demoted every unrelated parser.)
+    let healthyArms = 0;
+    class NativeLikeParser {
+      setTimeoutMicros(): void { healthyArms++; }
+      parse(): { ok: boolean } { return { ok: true }; }
+    }
+    parseWithBudget(new NativeLikeParser(), 'x');
+    expect(healthyArms, 'a healthy binding still arms and clears').toBe(2);
+  });
+
   it('a parser that cannot arm a deadline reports a missing tree honestly, not as a budget overrun', () => {
     const parser = {
       setTimeoutMicros: () => { throw new TypeError('nope'); },
@@ -262,20 +289,73 @@ describe('reproducer: the parse-health walk survives a tree deeper than any call
     expect(health?.errorLines).toEqual([100_001]);
   });
 
-  it('visits children in source order, so the capped errorLines list is unchanged by the rewrite', () => {
-    const kid = (row: number, type: string): ParseHealthNode =>
-      ({ type, startPosition: { row }, children: [], hasError: true });
+  /**
+   * Source order, on BOTH child-access shapes.
+   *
+   * The walk prefers the allocation-free `childCount`/`child(i)` accessors that a real
+   * `SyntaxNode` exposes, and falls back to `.children` for plain test objects. An earlier version
+   * of this test supplied only `.children`, so it exercised the fallback and left the branch that
+   * actually ships free to be reversed with no failure. Both are covered now.
+   */
+  it.each([
+    ['index accessors (the shape production takes)', true],
+    ['.children array (the test-double fallback)', false],
+  ])('visits children in source order via %s', (_label, useAccessors) => {
+    const kid = (row: number): ParseHealthNode =>
+      ({ type: 'ERROR', startPosition: { row }, children: [], hasError: true });
+    const kids = Array.from({ length: 40 }, (_, i) => kid(i));
     const root: ParseHealthNode = {
       type: 'program',
       startPosition: { row: 0 },
       hasError: true,
       // Deliberately more error regions than the cap, in ascending source order: if the walk ran
       // children in reverse, the retained lines would be the LAST 25, not the first.
-      children: Array.from({ length: 40 }, (_, i) => kid(i, 'ERROR')),
+      children: useAccessors ? [] : kids,
+      ...(useAccessors ? { childCount: kids.length, child: (i: number) => kids[i] ?? null } : {}),
     };
     const health = tallyParseHealth('TypeScript', root, 'a.ts');
     expect(health?.errorCount).toBe(40);
     expect(health?.truncated).toBe(true);
     expect(health?.errorLines).toEqual(Array.from({ length: 25 }, (_, i) => i + 1));
   });
+});
+
+// ---------------------------------------------------------------------------
+// Regressions found by adversarial review of the first revision of this change
+// ---------------------------------------------------------------------------
+
+describe('an abandoned file must not cost OTHER files their edges', () => {
+  /**
+   * The first revision dropped budget-exceeded files from `buildResolvedImportMap` to save time.
+   * `parseJSExports` is a REGEX scan — it reads a file tree-sitter gave up on perfectly well — so
+   * that filter deleted re-export information belonging to files that parsed cleanly. The loss
+   * landed on files carrying no parse-health record, so nothing connected the missing edge to the
+   * abandoned one: absence read as evidence of absence, which is the failure this change exists to
+   * prevent.
+   */
+  it('resolves a call through a barrel that was abandoned at the budget', async () => {
+    process.env[PARSE_BUDGET_ENV] = '700';
+    // The barrel is a re-export AND pathological: tree-sitter will abandon it, but its
+    // `export { … } from` line is still perfectly readable by the regex export scan.
+    const barrel = `export { realThing } from './impl';\n${HOSTILE_TS}`;
+    const files = [
+      { path: 'src/barrel.ts', content: barrel, language: 'TypeScript' },
+      { path: 'src/impl.ts', content: 'export function realThing(): number { return 1; }\n', language: 'TypeScript' },
+      { path: 'src/consumer.ts', content: "import { realThing } from './barrel';\nexport function consume(): number { return realThing(); }\n", language: 'TypeScript' },
+      // A same-named decoy elsewhere: without the barrel's re-export the resolver has two
+      // candidates and must fall back to name-only or refuse.
+      { path: 'src/decoy.ts', content: 'export function realThing(): string { return "x"; }\n', language: 'TypeScript' },
+    ];
+
+    const result = await new CallGraphBuilder({}).build(files);
+
+    // The barrel itself is abandoned and disclosed…
+    expect(result.parseHealthByFile?.get('src/barrel.ts')?.exclusion).toBe('budget-exceeded');
+    // …but consumer.ts parsed cleanly, and its call must still reach the true definition.
+    const edge = result.edges.find(e => e.callerId === 'src/consumer.ts::consume');
+    expect(edge, 'the call through the abandoned barrel still resolves').toBeDefined();
+    expect(edge!.calleeId).toBe('src/impl.ts::realThing');
+    // And the healthy files carry no parse-health record — they were never degraded.
+    expect(result.parseHealthByFile?.has('src/consumer.ts')).toBe(false);
+  }, 60_000);
 });

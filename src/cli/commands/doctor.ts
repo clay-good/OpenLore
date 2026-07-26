@@ -39,7 +39,7 @@ import {
   DEFAULT_COPILOT_MODEL,
 } from '../../constants.js';
 import { resolveTrustedSslVerify, rejectRepoConfiguredTlsOptOut, discloseRepoConfiguredEndpoint } from '../../core/services/repo-config-trust.js';
-import { describeExclusions, type ParseHealthReport } from '../../core/analyzer/parse-health.js';
+import { describeExclusions, totalExcluded, type ParseHealthReport } from '../../core/analyzer/parse-health.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -60,7 +60,7 @@ type Remediation =
   | { kind: 'analyze'; label: string }
   | { kind: 'rewire-mcp'; label: string };
 
-interface CheckResult {
+export interface CheckResult {
   name: string;
   status: CheckStatus;
   detail: string;
@@ -271,23 +271,37 @@ async function checkGraphStore(rootPath: string): Promise<CheckResult> {
  * this check cannot bless a repository whose analysis excluded files — the contradiction the
  * `EveryExcludedFileIsRecordedWithAReason` requirement exists to prevent.
  */
-async function checkParseHealth(rootPath: string): Promise<CheckResult> {
+/** Exported for test: the exclusion-vs-degradation verdict must be pinned behaviorally. */
+export async function checkParseHealth(rootPath: string): Promise<CheckResult> {
   const path = join(rootPath, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_PARSE_HEALTH);
   try {
     const report = JSON.parse(await readFile(path, 'utf-8')) as ParseHealthReport;
-    const n = report.totalDegradedFiles ?? 0;
     const excluded = describeExclusions(report);
-    if (n === 0 && !excluded) return { name: 'Parse health', status: 'ok', detail: 'no files parsed with errors' };
+    const excludedCount = totalExcluded(report);
+    // A file the analyzer NEVER PARSED (size cap, budget) must not be counted as one that "parsed
+    // with errors" — it is a different cause with a different remedy, and the grammar-bump advice
+    // below would send the reader after the wrong subsystem entirely.
+    const degradedByParse = Math.max(0, (report.totalDegradedFiles ?? 0) - excludedCount);
+    if (degradedByParse === 0 && !excluded) {
+      return { name: 'Parse health', status: 'ok', detail: 'no files parsed with errors' };
+    }
     const langs = (report.byLanguage ?? [])
       .slice(0, 3)
       .map(l => `${l.language} (${l.degradedFiles})`)
       .join(', ');
+    const parts: string[] = [];
+    if (degradedByParse > 0) {
+      parts.push(`${degradedByParse} file(s) parsed with errors — symbols/edges there are a lower bound: ${langs}`);
+    }
+    if (excluded) parts.push(`${excluded} — those files were not analyzed at all`);
     return {
       name: 'Parse health',
       status: 'warn',
-      detail: `${n} file(s) parsed with errors — symbols/edges there are a lower bound: ${langs}`
-        + (excluded ? `; ${excluded}` : ''),
-      fix: "Inspect via get_language_support; if this spiked after a grammar bump, revert or re-pin the tree-sitter-* dep",
+      detail: parts.join('; '),
+      // Only a genuine parse degradation points at a grammar; an exclusion points at cost or size.
+      fix: degradedByParse > 0
+        ? "Inspect via get_language_support; if this spiked after a grammar bump, revert or re-pin the tree-sitter-* dep"
+        : 'Raise or disable the per-file bound with OPENLORE_PARSE_BUDGET_MS, or exclude the file from analysis',
     };
   } catch {
     // No artifact → nothing degraded (clean repos don't write it).

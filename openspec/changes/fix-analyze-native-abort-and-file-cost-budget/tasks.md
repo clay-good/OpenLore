@@ -1,7 +1,10 @@
 # Tasks — contain worker faults, bound per-file cost, disclose every skip
 
 > Status: **BUILT** (2026-07-26). Measured on the 601-file reproducer: **exit 134 → exit 0**, and
-> **217 s → 44 s**. Full suite (6,458 tests), lint, typecheck and build pass.
+> **217 s → 52 s**. Full suite (6,480 tests), lint, typecheck and build pass.
+>
+> Hardened after four independent adversarial reviews found eight confirmed defects in the first
+> revision — see "Defects adversarial review found" below. Every fix is mutation-checked.
 
 ## Reproducers (written first — they are the acceptance criteria)
 - [x] Minimal abort reproducer: one 300 KB file of repeated `/*x` plus ~600 trivial `.ts` files.
@@ -53,6 +56,39 @@
       stays the separate `encodingFallback` signal it has always been
 - [x] **`analyze --json` does not exist**; the CLI requirement is stated against the real
       machine-output surface for this code path, the stdio MCP server
+
+## Defects adversarial review found in the FIRST revision (each now has a mutation-checked test)
+- [x] **The cost optimization silently deleted call edges in healthy files.** Dropping
+      budget-exceeded files from `buildResolvedImportMap` removed re-export information belonging
+      to files that parsed cleanly — `parseJSExports` is a REGEX scan and reads an abandoned file
+      perfectly well. Reproduced by two reviewers independently. The filter no longer applies to
+      that pass; it stays only on the passes that genuinely re-parse (where the file would
+      contribute the same nothing anyway). Correctness over the seconds it saved
+- [x] **The budget was charged twice on the pooled lane.** A budget overrun for a language the
+      worker had not yet proven fell through to the main-thread recheck, spending a second full
+      bound. A budget overrun is a property of the FILE, so it is trusted
+- [x] **A faulting worker stole a file from a healthy sibling.** The fault path used `continue`;
+      the worker's boundary closes its channel immediately after answering, so every later request
+      to it was a silent no-op. Now `break`, matching every other worker-death path. The stub lane
+      was also unfaithful here (it kept answering after "faulting") and now models the close
+- [x] **`slowFiles` double-counted** a file timed on both lanes, evicting genuinely distinct slow
+      files from the cap. Deduped, worst time kept
+- [x] **The WASM demotion never fired.** `deadlineUnsupported` was keyed on the parser INSTANCE,
+      and the WASM lane builds a fresh parser per file — so the throw was re-paid on every file,
+      exactly what the comment claimed it avoided. Keyed on the constructor now (not the prototype:
+      every object literal shares `Object.prototype`, which would demote unrelated parsers)
+- [x] **A budget overrun in a LATER pass was swallowed with no record.** A file that squeaks under
+      the bound in Pass 1 and overruns in the class-relationships pass now carries an exclusion
+- [x] **The watcher erased a `size-cap` exclusion**, so `doctor` reverted to a clean bill of health
+      after a touch. It applies the same bound instead of assuming the file became healthy
+- [x] **Excluded files were counted as "parsed with errors"** — a never-parsed file, with a remedy
+      pointing at tree-sitter grammars. Counted and worded separately now
+- [x] **Nine surviving mutations closed**, including: `reparsableFiles` was entirely untested; the
+      `sanitizeForTerminal` call on the stderr path was untested (this repo has a terminal-escape
+      history); the "worker faults, graph stays whole" test induced no fault and was a weaker
+      duplicate; the source-order test covered only the branch production never takes; the
+      analyze/doctor agreement tests were source greps that passed with both surfaces rendering
+      nothing; and the `size-cap` producer had no test at all
 
 ## Defects this change's own controls caught (each has a regression test)
 - [x] A timed-out tree-sitter parse is SUSPENDED, not discarded — the next file resumed it and

@@ -19,7 +19,12 @@ import { mkdtempSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { McpWatcher } from './mcp-watcher.js';
-import { ARTIFACT_PARSE_HEALTH, PARSE_BUDGET_ENV, PER_FILE_PARSE_BUDGET_MS } from '../../constants.js';
+import {
+  ARTIFACT_PARSE_HEALTH,
+  PARSE_BUDGET_ENV,
+  PER_FILE_PARSE_BUDGET_MS,
+  MAX_HTML_INLINE_SCRIPT_CHARS,
+} from '../../constants.js';
 import type { ParseHealthReport } from '../analyzer/parse-health.js';
 
 /** The payload that reproduced the abort: a 300 KB unterminated block comment. */
@@ -105,6 +110,34 @@ describe('watcher parse-health lane — the exclusion vocabulary matches the ful
       { rel: 'src/hostile.ts', content: 'export function a(): void { b(); }\nfunction b(): void {}\n' },
     ]);
     expect(readReport(outputPath), 'the last degraded file was repaired — artifact removed').toBeNull();
+  }, 60_000);
+
+
+  it('does NOT erase a size-cap exclusion when the oversized file is touched', async () => {
+    // The watcher re-derives a changed file's record. An oversized HTML file is excluded BEFORE
+    // extraction, so `extractFileParseHealth` returns nothing for it — and the lane used to read
+    // that as "now clean" and delete the record, leaving `doctor` blessing a repository the next
+    // `analyze` excludes a file from again. The watcher applies the same bound instead.
+    const { watcher, outputPath } = watcherIn();
+    const huge = `<html><body>${'<p>x</p>'.repeat(200_000)}</body></html>`;
+    expect(huge.length).toBeGreaterThan(MAX_HTML_INLINE_SCRIPT_CHARS);
+
+    await spliceParseHealth(watcher, [{ rel: 'src/huge.html', content: huge }]);
+    const rec = readReport(outputPath)?.files.find(f => f.filePath === 'src/huge.html');
+    expect(rec?.exclusion).toBe('size-cap');
+    expect(readReport(outputPath)!.excludedByReason).toEqual({ 'size-cap': 1 });
+  }, 60_000);
+
+  it('clears the size-cap once the file actually shrinks below the bound', async () => {
+    // The other direction: the bound is re-evaluated, not merely remembered, so a genuinely
+    // repaired file stops being reported.
+    const { watcher, outputPath } = watcherIn();
+    const huge = `<html><body>${'<p>x</p>'.repeat(200_000)}</body></html>`;
+    await spliceParseHealth(watcher, [{ rel: 'src/huge.html', content: huge }]);
+    expect(readReport(outputPath)?.excludedByReason).toEqual({ 'size-cap': 1 });
+
+    await spliceParseHealth(watcher, [{ rel: 'src/huge.html', content: '<html><body>ok</body></html>' }]);
+    expect(readReport(outputPath)).toBeNull();
   }, 60_000);
 
   it('CONTROL: an ordinary file is unaffected by the default budget', async () => {

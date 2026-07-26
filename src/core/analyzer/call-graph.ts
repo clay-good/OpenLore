@@ -41,7 +41,7 @@ import {
 } from './parse-health.js';
 // Per-file parse budget (change: fix-analyze-native-abort-and-file-cost-budget). Bounds the one
 // synchronous native call nothing else can interrupt.
-import { parseWithBudget, parseBudgetOverrunMs, type BudgetableParser } from './parse-budget.js';
+import { parseWithBudget, parseBudgetOverrunMs, parseBudgetMs, type BudgetableParser } from './parse-budget.js';
 // Pass-1 extraction lane (change: optimize-parallel-extraction-pool). The pool holds no
 // extraction logic of its own — it dispatches `dispatchFileExtract` to worker threads and
 // merges by input index, with the serial loop as both reference and fallback.
@@ -2363,6 +2363,14 @@ async function extractElixirGraph(
  */
 async function extractClassRelationships(
   files: Array<{ path: string; content: string; language: string }>,
+  /**
+   * Collects files this pass abandoned at the parse budget (change:
+   * fix-analyze-native-abort-and-file-cost-budget). A file can squeak under the budget in Pass 1
+   * and overrun HERE — the per-file `catch` below would then drop its inheritance data with no
+   * record anywhere, which is the silent loss this change exists to prevent. Reported so the
+   * builder can record it like any other exclusion.
+   */
+  budgetExceeded?: Set<string>,
 ): Promise<Map<string, { parentClasses: string[]; interfaces: string[] }>> {
   const out = new Map<string, { parentClasses: string[]; interfaces: string[] }>();
 
@@ -2639,8 +2647,13 @@ async function extractClassRelationships(
         }
       }
       // Rust: trait impls are structural but less like OOP inheritance; skip for now
-    } catch {
-      // Best-effort; skip unparseable files
+    } catch (err) {
+      // Best-effort; skip unparseable files — but a file abandoned at the BUDGET is reported, not
+      // swallowed. "We ran out of time on this file" and "the grammar rejected it" call for
+      // different actions, and only one of them used to leave any trace.
+      if (parseBudgetOverrunMs((err as Error | undefined)?.message) !== undefined) {
+        budgetExceeded?.add(file.path);
+      }
     }
   }
 
@@ -4196,16 +4209,25 @@ export class CallGraphBuilder {
       }
     }
 
-    // A file abandoned at the parse budget contributed nothing to Pass 1, and several LATER passes
-    // re-read the same content (class relationships, event/callback/route/actor synthesis, and the
-    // export scan behind re-export-aware import resolution). Left in, each of those would spend the
-    // whole budget on it again — the cost is per PASS, not per file, which is how one 300 KB file
-    // turned a 20 s bound into a 92 s build. Dropped once, here, so the budget means roughly what
-    // it says. The export scan matters as much as the parses: it is a regex scan, so the parse
-    // budget cannot bound it at all — only not running it can.
-    // Everything about it is already recorded (parse-health, the CLI disclosure), so nothing goes
-    // silent — and when nothing was abandoned this is the same array, so ordinary runs are
-    // byte-identical (change: fix-analyze-native-abort-and-file-cost-budget).
+    // A file abandoned at the parse budget contributed nothing to Pass 1, and several later passes
+    // RE-PARSE the same content (class relationships, and the event/callback/route/actor
+    // synthesizers). Left in, each would spend the whole budget on it again — the cost is per PASS,
+    // not per file, which is how one 300 KB file turned a 20 s bound into a 92 s build. Dropping it
+    // from those passes costs nothing in facts: its parse cannot complete there either, so it would
+    // contribute exactly the same nothing, only slower.
+    //
+    // This filter is deliberately NOT applied to `buildResolvedImportMap`. That pass is a REGEX
+    // scan (`parseJSExports`), not a parse — it reads a file tree-sitter gave up on perfectly well,
+    // and the parse budget was never what bounded it. An earlier revision of this change did filter
+    // it, and an adversarial review reproduced the consequence: a re-export barrel abandoned at the
+    // budget silently dropped `re_export` edges belonging to OTHER, perfectly-parsed files, which
+    // then resolved by name only or not at all. The loss landed on files carrying no parse-health
+    // record, so nothing connected the missing edge to the abandoned file — the exact
+    // absence-read-as-evidence-of-absence failure this change exists to prevent. Correctness over
+    // the few seconds it saves.
+    //
+    // When nothing was abandoned this is the same array, so ordinary runs are byte-identical
+    // (change: fix-analyze-native-abort-and-file-cost-budget).
     const abandonedPaths = new Set(
       [...parseHealthByFile.values()].filter(h => h.exclusion === 'budget-exceeded').map(h => h.filePath),
     );
@@ -4252,12 +4274,32 @@ export class CallGraphBuilder {
     // Reused for base-class resolution (Pass 7) below.
     const { map: callImportMap, reExported: reExportedNames } = importMap
       ? { map: importMap, reExported: new Set<string>() }
-      : buildResolvedImportMap(reparsableFiles);
+      // NOT `reparsableFiles` — see the note there. This is a regex scan, and an abandoned file's
+      // exports are still readable and still load-bearing for OTHER files' resolution.
+      : buildResolvedImportMap(files);
 
     // Class inheritance (`filePath::ClassName` → parent simple-names), computed once
     // here so the resolution loop can resolve `this.m()` / `super.m()` against the
     // enclosing class AND its ancestors, and reused for the Pass 7 hierarchy build.
-    const relationships = await extractClassRelationships(reparsableFiles);
+    // A file can pass Pass 1 under the budget and overrun HERE; that loss is recorded below
+    // rather than dropped (change: fix-analyze-native-abort-and-file-cost-budget).
+    const lateBudgetExceeded = new Set<string>();
+    const relationships = await extractClassRelationships(reparsableFiles, lateBudgetExceeded);
+    for (const path of lateBudgetExceeded) {
+      if (parseHealthByFile.has(path)) continue; // already recorded by Pass 1
+      const language = files.find(f => f.path === path)?.language ?? 'unknown';
+      parseHealthByFile.set(path, {
+        filePath: path,
+        language,
+        errorCount: 0,
+        missingCount: 0,
+        errorLines: [],
+        // NOT `parseFailed`: Pass 1 extracted this file fine. What was lost is its inheritance
+        // data, so its symbols are present but its class hierarchy is a lower bound.
+        exclusion: 'budget-exceeded',
+        budgetMs: parseBudgetMs(),
+      });
+    }
 
     /** Resolve an intra-object method call (`this.m()` / `self.m()` / `super.m()`) to
      *  a concrete indexed method by walking the enclosing class chain. For `this`/

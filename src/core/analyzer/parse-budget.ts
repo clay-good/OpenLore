@@ -24,10 +24,11 @@
  * bound is disabled by setting `OPENLORE_PARSE_BUDGET_MS=0`, which reproduces the previous
  * behavior exactly — the escape hatch for anyone who would rather wait than be told.
  *
- * A binding whose `setTimeoutMicros` is unavailable (older native builds, and the web-tree-sitter
- * WASM lane) simply parses unbounded, as it did before. That is disclosed by
- * {@link parseBudgetSupported} rather than assumed away: an unenforceable budget must not read
- * as an enforced one.
+ * A binding whose `setTimeoutMicros` is unavailable or unusable (older native builds, and the
+ * web-tree-sitter WASM lane) simply parses unbounded, as it did before — {@link parseBudgetSupported}
+ * reports which. That is a real limit of the bound, not a covered case: those languages keep the
+ * pre-change behaviour, including the unbounded cost. It is called out in the change's spec rather
+ * than papered over here.
  */
 
 import { PER_FILE_PARSE_BUDGET_MS, PARSE_BUDGET_ENV } from '../../constants.js';
@@ -104,22 +105,41 @@ export interface BudgetableParser<TTree> {
 }
 
 /**
- * Parsers whose `setTimeoutMicros` EXISTS but does not work.
+ * Constructors whose `setTimeoutMicros` EXISTS but does not work.
  *
  * Presence is not capability. `web-tree-sitter@0.25` exposes `setTimeoutMicros` and throws
  * `TypeError: Cannot convert 0 to a BigInt` from inside it — its WASM shim passes a Number where
  * the import demands a BigInt. Left to propagate, arming the deadline made every file in the
  * WASM-grammar languages (Dart, Lua) fail to extract: a bound that silently deleted real work,
  * which is the exact failure mode this change exists to prevent. So the first refusal demotes that
- * parser to unbounded for the rest of the process rather than being paid, and thrown, per file.
+ * KIND of parser to unbounded rather than being paid, and thrown, per file.
  *
- * A `WeakSet` so a parser that is discarded is not kept alive by this record.
+ * Keyed on the parser's PROTOTYPE, not the instance. Keying the instance looked right and was
+ * useless on the one lane it was written for: the WASM grammar handle constructs a fresh parser
+ * for every file (its heap must not be shared), so the instance recorded on file N was never
+ * consulted on file N+1 and the throw was re-paid every time. All instances from one binding share
+ * a prototype, so this records the binding's capability, which is what is actually being learned.
+ *
+ * A `WeakSet` so nothing here keeps a discarded binding alive.
  */
 const deadlineUnsupported = new WeakSet<object>();
 
+/**
+ * The key under which a parser's deadline capability is remembered — see above.
+ *
+ * The CONSTRUCTOR, so every instance from one binding shares an entry. Not the prototype: a plain
+ * object literal's prototype is `Object.prototype`, shared with every other object literal in the
+ * process, so one refusing parser would demote unrelated ones. Anything without a distinct
+ * constructor falls back to its own identity — narrower, and never wrong.
+ */
+function capabilityKey(parser: object): object {
+  const ctor = (parser as { constructor?: unknown }).constructor;
+  return typeof ctor === 'function' && ctor !== Object ? (ctor as object) : parser;
+}
+
 /** Can this parser actually enforce a deadline? `false` means it parses unbounded, as before. */
 export function parseBudgetSupported(parser: object): boolean {
-  if (deadlineUnsupported.has(parser)) return false;
+  if (deadlineUnsupported.has(capabilityKey(parser))) return false;
   return typeof (parser as { setTimeoutMicros?: unknown }).setTimeoutMicros === 'function';
 }
 
@@ -132,7 +152,7 @@ function setDeadline(parser: { setTimeoutMicros?(micros: number): void }, micros
     parser.setTimeoutMicros!(micros);
     return true;
   } catch {
-    deadlineUnsupported.add(parser);
+    deadlineUnsupported.add(capabilityKey(parser));
     return false;
   }
 }
@@ -165,7 +185,14 @@ export function parseWithBudget<TTree>(parser: BudgetableParser<TTree>, content:
   } finally {
     // Always clear the deadline, including on a throw: leaving it armed would apply this
     // file's remaining budget to the NEXT file on the same singleton parser.
-    if (bounded) setDeadline(parser, 0);
+    //
+    // A failure to CLEAR must not demote the parser. Arming already succeeded, so the binding
+    // demonstrably supports deadlines; demoting here would mean every later expiry of the
+    // still-armed deadline came back as a generic "no tree" and got filed as `parse-failure`
+    // instead of `budget-exceeded` — a wrong cause on top of a leaked deadline.
+    if (bounded) {
+      try { parser.setTimeoutMicros!(0); } catch { /* deadline leaked; the reset below still runs */ }
+    }
   }
   if (tree === null || tree === undefined) {
     // CRITICAL: a timed-out parse is SUSPENDED, not discarded. tree-sitter keeps the partial state

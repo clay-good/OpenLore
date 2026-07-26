@@ -57,6 +57,7 @@ import {
 } from '../../constants.js';
 import { logger } from '../../utils/logger.js';
 import { sanitizeForTerminal } from '../../utils/misc.js';
+import { parseBudgetOverrunMs } from './parse-budget.js';
 
 /** One Pass-1 input record — the same shape `CallGraphBuilder.build` receives. */
 export interface ExtractionFile {
@@ -126,9 +127,22 @@ export interface ExtractionLaneDisclosure {
 /** How many slow files the disclosure retains. A bound on the payload, not on the measurement. */
 const SLOW_FILE_DISCLOSURE_CAP = 5;
 
-/** Keep the slowest {@link SLOW_FILE_DISCLOSURE_CAP} entries, slowest first, path-tiebroken. */
-function boundSlowFiles(slow: Array<{ path: string; ms: number }>): Array<{ path: string; ms: number }> {
-  return [...slow]
+/**
+ * Keep the slowest {@link SLOW_FILE_DISCLOSURE_CAP} entries, slowest first, path-tiebroken.
+ *
+ * Deduplicated by path, keeping the worst time. One file can be timed TWICE — once in a worker and
+ * again on the main thread when the pool hands it back (a worker fault, an unproven language, a
+ * dead worker) — and listing it twice would spend two of the five slots on one file and silently
+ * evict genuinely distinct slow files, which is the opposite of the attribution this exists for.
+ */
+export function boundSlowFiles(slow: Array<{ path: string; ms: number }>): Array<{ path: string; ms: number }> {
+  const worstByPath = new Map<string, number>();
+  for (const { path, ms } of slow) {
+    const prev = worstByPath.get(path);
+    if (prev === undefined || ms > prev) worstByPath.set(path, ms);
+  }
+  return [...worstByPath]
+    .map(([path, ms]) => ({ path, ms }))
     .sort((a, b) => b.ms - a.ms || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
     .slice(0, SLOW_FILE_DISCLOSURE_CAP);
 }
@@ -607,8 +621,20 @@ async function runPooled<T>(
         // blame the source for a defect in the thread that was reading it.
         if (outcome.status === 'error' && isWorkerFaultMessage((outcome.error as Error | undefined)?.message)) {
           unfilled[index] = 'worker-died';
-          continue;
+          // BREAK, not continue — this worker is gone. Its fault boundary closes the message
+          // channel right after answering, so every later `postMessage` to it is a silent no-op:
+          // continuing would claim the next index off the shared cursor, get no reply, and either
+          // steal that file from a healthy sibling (measured) or stall the lane for the full
+          // request timeout. Matches how every other worker-death path exits this loop.
+          break;
         }
+        // A file abandoned at the PARSE BUDGET is a property of the file, not of the worker, and
+        // the main thread would spend the identical budget reaching the identical nothing. Trust
+        // it — the unproven-language recheck below must not turn one bound into two (change:
+        // fix-analyze-native-abort-and-file-cost-budget). It is still recorded and disclosed by
+        // the builder, exactly as a serial-lane overrun is.
+        const budgetOverrun = outcome.status === 'error'
+          && parseBudgetOverrunMs((outcome.error as Error | undefined)?.message) !== undefined;
         // A worker that cannot handle a language reports it two ways, and BOTH are
         // indistinguishable from a real answer: an empty result (the core binding failed to
         // load) or a throw (the per-language grammar `import` failed — those loads are not
@@ -619,7 +645,7 @@ async function runPooled<T>(
           && !isEmptyResult(outcome.value);
         if (producedFacts) {
           proven.add(file.language);
-        } else if (outcome.status !== 'ok' || isEmptyResult(outcome.value)) {
+        } else if (!budgetOverrun && (outcome.status !== 'ok' || isEmptyResult(outcome.value))) {
           if (!proven.has(file.language)) {
             unfilled[index] = 'unproven';
             continue;

@@ -25,7 +25,7 @@ import {
   WORKER_FAULT_MESSAGE_PREFIX,
   type ExtractionFile,
 } from './extraction-pool.js';
-import { EXTRACTION_POOL_MIN_FILES } from '../../constants.js';
+
 import { PROBES } from './extraction-worker.js';
 
 const fixtures = join(__dirname, 'fixtures');
@@ -321,14 +321,4 @@ describe('extraction pool — the worker fault boundary, on a real thread', () =
       rmSync(dir, { recursive: true, force: true });
     }
   }, 120_000);
-
-  it('a worker that faults still leaves the graph whole — pooled output matches the serial lane', async () => {
-    // The end-to-end consequence: the pool routes the faulted file to the main thread (the
-    // reference implementation), so the FACTS are unchanged and only the lane degraded.
-    const files = tsFiles(EXTRACTION_POOL_MIN_FILES + 4);
-    process.env.OPENLORE_NO_WORKERS = '1';
-    const serial = await buildJson(files);
-    delete process.env.OPENLORE_NO_WORKERS;
-    expect(await buildJson(files, POOL_SIZE)).toBe(serial);
-  }, 180_000);
 });

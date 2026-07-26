@@ -13,6 +13,7 @@ import {
 import type { RepositoryMap, DetectedFramework, LanguageBreakdown, DirectoryStats } from './repository-mapper.js';
 import type { DependencyGraphResult, DependencyNode, DependencyEdge, FileCluster } from './dependency-graph.js';
 import type { ScoredFile, ProjectType } from '../../types/index.js';
+import { MAX_HTML_INLINE_SCRIPT_CHARS } from '../../constants.js';
 
 // ============================================================================
 // TEST HELPERS
@@ -239,6 +240,46 @@ describe('AnalysisArtifactGenerator', () => {
       const pathsB = b.llmContext.phase3_validation.files.map(f => f.path);
       expect(pathsA.length).toBe(8);
       expect(pathsA).toEqual(pathsB);
+    });
+  });
+
+  describe('size-cap exclusion (fix-analyze-native-abort-and-file-cost-budget)', () => {
+    it('records an oversized HTML file as size-cap instead of dropping it silently', async () => {
+      // HTML over MAX_HTML_INLINE_SCRIPT_CHARS never reaches the graph — the bound on the
+      // same-length char-array allocation in extractHtmlScripts. It used to vanish with no trace,
+      // so any inline <script> it contained read as genuinely absent.
+      await mkdir(join(tempDir, 'src'), { recursive: true });
+      const rel = 'src/huge.html';
+      const huge = `<html><body><script>function inlineFn(){ return 1; }</script>${'<p>x</p>'.repeat(200_000)}</body></html>`;
+      expect(huge.length).toBeGreaterThan(MAX_HTML_INLINE_SCRIPT_CHARS);
+      await writeFile(join(tempDir, rel), huge);
+
+      const repoMap = createMockRepoMap({
+        allFiles: [createScoredFile({ name: 'huge.html', path: rel, absolutePath: join(tempDir, rel) })],
+        highValueFiles: [],
+      });
+      const artifacts = await generateArtifacts(repoMap, createMockDepGraph({}), {
+        rootDir: tempDir, outputDir, maxDeepAnalysisFiles: 0, maxValidationFiles: 0,
+      });
+
+      const rec = artifacts.parseHealth?.files.find(f => f.filePath === rel);
+      expect(rec, 'the dropped file is recorded, not silent').toBeDefined();
+      expect(rec!.exclusion).toBe('size-cap');
+      expect(artifacts.parseHealth!.excludedByReason).toEqual({ 'size-cap': 1 });
+    });
+
+    it('leaves an ordinary HTML file alone — the cap must not catch real pages', async () => {
+      await mkdir(join(tempDir, 'src'), { recursive: true });
+      const rel = 'src/page.html';
+      await writeFile(join(tempDir, rel), '<html><body><script>function f(){ return g(); }</script></body></html>');
+      const repoMap = createMockRepoMap({
+        allFiles: [createScoredFile({ name: 'page.html', path: rel, absolutePath: join(tempDir, rel) })],
+        highValueFiles: [],
+      });
+      const artifacts = await generateArtifacts(repoMap, createMockDepGraph({}), {
+        rootDir: tempDir, outputDir, maxDeepAnalysisFiles: 0, maxValidationFiles: 0,
+      });
+      expect(artifacts.parseHealth?.files.find(f => f.filePath === rel)).toBeUndefined();
     });
   });
 

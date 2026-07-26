@@ -820,3 +820,15 @@ export const PARSE_BUDGET_ENV = 'OPENLORE_PARSE_BUDGET_MS';
  * before it is.
  */
 export const SLOW_FILE_DISCLOSURE_MS = 5_000;
+
+/**
+ * Largest HTML file whose inline `<script>` blocks are extracted. Bounds the same-length
+ * char-array allocation in `extractHtmlScripts` (the scan itself is O(N)).
+ *
+ * Shared rather than local to the analyzer because the incremental watcher must apply the SAME
+ * bound: it re-derives a changed file's parse-health record, and without this it would clear a
+ * `size-cap` exclusion the full build had recorded — leaving `doctor` reporting a clean repository
+ * that the next `analyze` excludes a file from again (change:
+ * fix-analyze-native-abort-and-file-cost-budget).
+ */
+export const MAX_HTML_INLINE_SCRIPT_CHARS = 1_000_000;
