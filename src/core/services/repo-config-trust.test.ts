@@ -111,3 +111,78 @@ describe('discloseRepoConfiguredEndpoint', () => {
     expect(vi.mocked(logger.warning)).not.toHaveBeenCalled();
   });
 });
+
+// ============================================================================
+// Coverage: no unguarded door is left open
+// ============================================================================
+
+describe('every credential-bearing config read goes through the trust boundary', () => {
+  // A structural test, because the first pass at this fix guarded the CLI commands
+  // and left the embeddable API (`src/api/*`) and the viewer's chat agent reading the
+  // same untrusted fields directly — the guard existing is not the same as the guard
+  // being applied, which is the failure mode this whole change is about.
+  it('has no raw `?? config.llm?.apiBase` / `?? config.llm?.sslVerify` fallback left', async () => {
+    const { readFileSync, readdirSync, statSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const roots = ['src/api', 'src/cli/commands', 'src/core/services'];
+    const offenders: string[] = [];
+    const walk = (dir: string): void => {
+      for (const name of readdirSync(dir)) {
+        const full = join(dir, name);
+        if (statSync(full).isDirectory()) { walk(full); continue; }
+        if (!name.endsWith('.ts') || name.includes('.test.')) continue;
+        const src = readFileSync(full, 'utf-8');
+        src.split('\n').forEach((line, i) => {
+          if (/\?\?\s*\w*[Cc]onfig\??\.llm\?\.(apiBase|sslVerify)/.test(line)) {
+            offenders.push(`${full}:${i + 1} — ${line.trim().slice(0, 90)}`);
+          }
+        });
+      }
+    };
+    for (const r of roots) walk(r);
+    expect(offenders, `Unguarded repo-config endpoint/TLS reads:\n${offenders.join('\n')}`).toEqual([]);
+  });
+
+  /**
+   * Sites that legitimately act on a `skipSslVerify` that did NOT come from the repo's
+   * config file. Same convention as `tls-coverage.test.ts`'s EXEMPT list: an entry is a
+   * claim about provenance, and it must name why.
+   */
+  const TLS_EXEMPT: ReadonlyArray<{ file: string; why: string }> = [
+    {
+      file: 'src/core/analyzer/embedding-service.ts',
+      why:
+        'The EmbeddingService CONSTRUCTOR acts on its EmbeddingConfig argument, which ' +
+        'reaches it from `fromEnv` (EMBED_SKIP_SSL_VERIFY — operator-supplied) or from a ' +
+        'host process. The one repo-config path, `fromConfig`, passes the value through ' +
+        'rejectRepoConfiguredTlsOptOut first, so it can only ever arrive here as false.',
+    },
+  ];
+
+  it('never calls allowInsecureTls on a repo-config `skipSslVerify`', async () => {
+    const { readFileSync, readdirSync, statSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const offenders: string[] = [];
+    const walk = (dir: string): void => {
+      for (const name of readdirSync(dir)) {
+        const full = join(dir, name);
+        if (statSync(full).isDirectory()) { walk(full); continue; }
+        if (!name.endsWith('.ts') || name.includes('.test.')) continue;
+        if (TLS_EXEMPT.some(e => full.endsWith(e.file))) continue;
+        const src = readFileSync(full, 'utf-8');
+        // `allowInsecureTls(...)` guarded by, or passed, a skipSslVerify value.
+        src.split('\n').forEach((line, i) => {
+          if (/allowInsecureTls\s*\(/.test(line) && /skipSslVerify/.test(line)) {
+            offenders.push(`${full}:${i + 1} — ${line.trim().slice(0, 90)}`);
+          }
+          if (/if\s*\(.*skipSslVerify.*\)\s*\{?\s*$/.test(line) && /skipSslVerify/.test(line)
+              && !/rejectRepoConfiguredTlsOptOut/.test(line)) {
+            offenders.push(`${full}:${i + 1} — ${line.trim().slice(0, 90)}`);
+          }
+        });
+      }
+    };
+    for (const r of ['src/api', 'src/cli/commands', 'src/core']) walk(r);
+    expect(offenders, `Repo-config TLS opt-outs still honoured:\n${offenders.join('\n')}`).toEqual([]);
+  });
+});

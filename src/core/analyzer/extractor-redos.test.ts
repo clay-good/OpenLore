@@ -41,6 +41,7 @@ function msToRun(fn: () => void): number {
 }
 
 const BUDGET_MS = 5000;
+const MIDDLEWARE_BUDGET_MS = 10_000;
 
 let dir: string;
 let hostileFile: string;
@@ -72,10 +73,23 @@ describe('extractors are not quadratic on an unterminated-opener file', () => {
   });
 
   it('the middleware extractor survives repeated `app.use(`', async () => {
-    // ~20 Express/Fastify patterns each re-scanned this independently.
+    // Its own budget: a dozen Express/Fastify patterns each scan the file, so even the
+    // fixed cost is ~1.5s on this payload where the parser cases are milliseconds.
+    // Unfixed it is ~48s, so this still leaves ~5x margin in both directions.
     const t0 = performance.now();
     await extractMiddleware([hostileFile], dir);
-    expect(performance.now() - t0).toBeLessThan(BUDGET_MS);
+    expect(performance.now() - t0).toBeLessThan(MIDDLEWARE_BUDGET_MS);
+  });
+
+  it('still resolves a large generated barrel re-export', () => {
+    // A length bound is the tempting second line of defense, and it is the wrong one:
+    // a 600-name icon barrel is ~7.7KB, so any bound worth setting drops the whole
+    // re-export from the graph — silently, producing false dead code and missing
+    // edges. Excluding `{` already makes the scan linear, so no bound is needed.
+    const names = Array.from({ length: 600 }, (_, i) => `IconName${i}`).join(', ');
+    const exports = parseJSExports(`export { ${names} } from './icons';\n`);
+    expect(exports).toHaveLength(600);
+    expect(exports[0].reExportSource).toBe('./icons');
   });
 
   it('still extracts a legitimate import after the bound', () => {

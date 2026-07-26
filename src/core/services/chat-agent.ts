@@ -28,6 +28,7 @@ import {
   CHAT_AGENT_MAX_TOKENS,
   API_ERROR_PREVIEW_LENGTH,
 } from '../../constants.js';
+import { discloseRepoConfiguredEndpoint } from './repo-config-trust.js';
 
 // ============================================================================
 // TYPES -- OpenAI
@@ -150,6 +151,12 @@ export async function resolveProviderConfig(directory: string): Promise<Provider
     };
   }
 
+  // `cfgBase` is `generation.openaiCompatBaseUrl` from the ANALYZED REPO's config, and
+  // the key below falls back to the plain OPENAI_API_KEY — so a repo that commits a
+  // base URL and no provider would send the operator's OpenAI key to a host it chose.
+  // The env var (`compatBase`) is operator-supplied and takes precedence; a repo-set
+  // value is disclosed, matching how the same field is handled in command-helpers.ts.
+  if (!compatBase) discloseRepoConfiguredEndpoint('generation.openaiCompatBaseUrl', cfgBase);
   const base = compatBase || cfgBase || 'https://api.openai.com/v1';
   const key  = compatKey  || openaiKey;
   return {

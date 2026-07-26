@@ -72,8 +72,11 @@ export function constantTimeEqual(a: string, b: string): boolean {
  * on a loopback bind for money/agent routes, precisely because a loopback port is
  * reachable by every process on the machine. Written at the default 0644 the secret
  * sits in the repo where that same attacker can simply read it, so the gate guards a
- * door whose key is on the mat. 0600 on the file (and 0700 on `.openlore/`) keeps the
- * token to the user who started the surface.
+ * door whose key is on the mat. 0600 on the file keeps the token to the user who
+ * started the surface. (The 0700 on `.openlore/` only applies when this call is what
+ * CREATES the directory — `mkdir` does not re-mode an existing one, and by the time a
+ * surface starts the directory usually exists. The file mode is what carries the
+ * guarantee.)
  *
  * The explicit `chmod` is not redundant with the `mode` option: `mode` applies only
  * when `open` CREATES the file, so a descriptor left behind by an older OpenLore (or

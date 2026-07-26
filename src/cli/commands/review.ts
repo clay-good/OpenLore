@@ -137,6 +137,12 @@ export async function composeReview(opts: { cwd: string; base?: string; head?: s
   if (!structural.error && blast && 'error' in blast) {
     caveats.push(`Blast radius unavailable (${blast.error}) — showing the structural delta only. Run \`openlore analyze\` for the full briefing.`);
   }
+  // This review is posted as a PR comment, so a briefing caveat that never reaches it
+  // is a caveat nobody sees. In particular an uncomputed test set must not render as
+  // an absent "Tests to run" section, which reads as "no tests are impacted".
+  if (blast && !('error' in blast) && blast.tests.unavailable) {
+    caveats.push(`Tests to run could not be computed (${blast.tests.unavailable}) — this is not the same as "no tests are impacted".`);
+  }
 
   const resolvedBase = (!('error' in blast) && blast.resolvedBaseRef) || structural.base || opts.base || 'HEAD';
   return {
@@ -190,7 +196,8 @@ function headline(b: ReviewBriefing): string {
   }
   if (!('error' in blast)) {
     if (blast.impact.hubsTouched.length) parts.push(`touches ${blast.impact.hubsTouched.length} hub${blast.impact.hubsTouched.length === 1 ? '' : 's'}`);
-    if (blast.tests.count) parts.push(`${blast.tests.count} test${blast.tests.count === 1 ? '' : 's'} to run`);
+    if (blast.tests.unavailable) parts.push('tests to run could not be computed');
+    else if (blast.tests.count) parts.push(`${blast.tests.count} test${blast.tests.count === 1 ? '' : 's'} to run`);
   }
   return parts.length ? `This change ${parts.join(', ')}.` : 'No structural changes detected.';
 }
@@ -256,7 +263,7 @@ export function renderMarkdown(b: ReviewBriefing): string {
     L.push('');
   } else {
     const hasImpact = blast.impact.hubsTouched.length || blast.impact.layersCrossed.length ||
-      blast.impact.governingDecisions.length || blast.tests.count;
+      blast.impact.governingDecisions.length || blast.tests.count || blast.tests.unavailable;
     if (hasImpact) {
       L.push('### Blast radius');
       if (blast.impact.hubsTouched.length) {
@@ -268,7 +275,9 @@ export function renderMarkdown(b: ReviewBriefing): string {
       if (blast.impact.governingDecisions.length) {
         L.push(`- **Governing decisions:** ${inlineList(blast.impact.governingDecisions.map(d => clip(d, 200)), INLINE_CAP, '; ')}`);
       }
-      if (blast.tests.count) {
+      if (blast.tests.unavailable) {
+        L.push(`- **Tests to run:** could not be computed (${clip(blast.tests.unavailable, 200)}) — not the same as "none impacted".`);
+      } else if (blast.tests.count) {
         const tests = blast.tests.toRun.slice(0, 10).map(t => `\`${t.test}\``).join(', ');
         L.push(`- **Tests to run (${blast.tests.count}):** ${tests}${blast.tests.count > 10 ? ', …' : ''}`);
       }

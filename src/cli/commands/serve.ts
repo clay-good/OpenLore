@@ -504,8 +504,15 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
     startedAt,
     version: _pkgVersion,
   };
-  // 0600 — the descriptor carries the daemon token that gates /tool/*.
-  await writeInstanceDescriptor(serveFilePath(root), descriptor);
+  // 0600 — the descriptor carries the daemon token that gates /tool/*. Discovery is
+  // best-effort (parity with the viewer): a descriptor left by another local user can
+  // make the chmod fail with EPERM, and that must not stop a daemon that is already
+  // listening — the token gate does not depend on the file being written.
+  try {
+    await writeInstanceDescriptor(serveFilePath(root), descriptor);
+  } catch (err) {
+    logger.warning(`Could not write ${serveFilePath(root)} (${err instanceof Error ? err.message : String(err)}); discovery by other clients may fail.`);
+  }
 
   logger.success(`openlore serve listening on http://${host}:${boundPort} (preset: ${presetName})`);
   logger.discovery(`Discovery file: ${serveFilePath(root)}`);

@@ -44,6 +44,8 @@ import {
   ARTIFACT_REFACTOR_PRIORITIES,
   ARTIFACT_RAG_MANIFEST,
 } from '../constants.js';
+import { resolveTrustedApiBase, resolveTrustedSslVerify, rejectRepoConfiguredTlsOptOut } from '../core/services/repo-config-trust.js';
+import { safeOpenspecDir } from '../utils/path-confinement.js';
 
 function progress(onProgress: ProgressCallback | undefined, step: string, status: 'start' | 'progress' | 'complete' | 'skip', detail?: string): void {
   onProgress?.({ phase: 'generate', step, status, detail });
@@ -110,7 +112,10 @@ export async function openloreGenerate(options: GenerateApiOptions = {}): Promis
   }
 
   const openspecRelPath = openloreConfig.openspecPath ?? OPENSPEC_DIR;
-  const fullOpenspecPath = join(rootPath, openspecRelPath);
+  // Confined: this becomes a WRITE target (the RAG manifest, the generated specs), and
+  // `openspecPath` comes from the analyzed repo's own config. The CLI twin does the
+  // same; leaving the API twin unguarded would just move the escape one layer down.
+  const fullOpenspecPath = safeOpenspecDir(rootPath, openloreConfig.openspecPath);
   await readOpenSpecConfig(fullOpenspecPath); // Ensure it's readable
   progress(onProgress, 'Loading configuration', 'complete');
 
@@ -166,10 +171,16 @@ export async function openloreGenerate(options: GenerateApiOptions = {}): Promis
     ?? openloreConfig.generation.openaiCompatBaseUrl
     ?? rootConfig['openaiCompatBaseUrl'];
 
-  // Apply SSL verification setting
-  const sslVerify = options.sslVerify ?? openloreConfig.llm?.sslVerify ?? true;
-  if (!sslVerify || openloreConfig.generation.skipSslVerify || openloreConfig.embedding?.skipSslVerify) {
-    allowInsecureTls('sslVerify=false or config skipSslVerify');
+  // `options.*` is supplied by the HOST PROCESS embedding OpenLore, so it is trusted
+  // like a CLI flag; the config file is the analyzed repo's and is not.
+  const sslVerify = resolveTrustedSslVerify(
+    options.sslVerify === undefined ? undefined : !options.sslVerify,
+    openloreConfig.llm?.sslVerify,
+  );
+  rejectRepoConfiguredTlsOptOut('generation.skipSslVerify', openloreConfig.generation.skipSslVerify);
+  rejectRepoConfiguredTlsOptOut('embedding.skipSslVerify', openloreConfig.embedding?.skipSslVerify);
+  if (!sslVerify) {
+    allowInsecureTls('sslVerify=false');
   }
 
   // Create LLM service
@@ -180,7 +191,7 @@ export async function openloreGenerate(options: GenerateApiOptions = {}): Promis
       provider: effectiveProvider,
       model: effectiveModel,
       openaiCompatBaseUrl: effectiveBaseUrl,
-      apiBase: options.apiBase ?? openloreConfig.llm?.apiBase,
+      apiBase: resolveTrustedApiBase(options.apiBase, openloreConfig.llm?.apiBase),
       sslVerify,
       timeout: options.timeout ?? openloreConfig.generation?.timeout,
       disableResponseFormat: openloreConfig.generation?.disableResponseFormat,

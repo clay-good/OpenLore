@@ -16,6 +16,7 @@ import type { DependencyGraphResult } from '../core/analyzer/dependency-graph.js
 import type { GenerationReport } from '../core/generator/openspec-writer.js';
 import type { VerifyApiOptions, VerifyResult, ProgressCallback } from './types.js';
 import { safeOpenspecDir } from '../utils/path-confinement.js';
+import { resolveTrustedApiBase, resolveTrustedSslVerify } from '../core/services/repo-config-trust.js';
 
 function progress(onProgress: ProgressCallback | undefined, step: string, status: 'start' | 'progress' | 'complete' | 'skip', detail?: string): void {
   onProgress?.({ phase: 'verify', step, status, detail });
@@ -97,8 +98,11 @@ export async function openloreVerify(options: VerifyApiOptions = {}): Promise<Ve
     llm = createLLMService({
       provider,
       model: effectiveModel,
-      apiBase: options.apiBase ?? openloreConfig.llm?.apiBase,
-      sslVerify: options.sslVerify ?? openloreConfig.llm?.sslVerify ?? true,
+      apiBase: resolveTrustedApiBase(options.apiBase, openloreConfig.llm?.apiBase),
+      sslVerify: resolveTrustedSslVerify(
+        options.sslVerify === undefined ? undefined : !options.sslVerify,
+        openloreConfig.llm?.sslVerify,
+      ),
       openaiCompatBaseUrl: options.openaiCompatBaseUrl,
       timeout: options.timeout ?? openloreConfig.generation?.timeout,
       enableLogging: true,

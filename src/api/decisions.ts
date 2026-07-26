@@ -33,6 +33,7 @@ import type { PendingDecision, DecisionStore } from '../types/index.js';
 import type { SyncResult } from '../core/decisions/syncer.js';
 import type { BaseOptions, ProgressCallback } from './types.js';
 import { safeOpenspecDir } from '../utils/path-confinement.js';
+import { resolveTrustedApiBase, resolveTrustedSslVerify } from '../core/services/repo-config-trust.js';
 
 function progress(cb: ProgressCallback | undefined, step: string, status: 'start' | 'complete' | 'skip', detail?: string): void {
   cb?.({ phase: 'decisions', step, status, detail });
@@ -143,8 +144,11 @@ export async function openloreConsolidateDecisions(
   const llm = createLLMService({
     provider: provider as ProviderName,
     model: options.model ?? openloreConfig.generation?.model,
-    apiBase: options.apiBase ?? openloreConfig.llm?.apiBase,
-    sslVerify: options.sslVerify ?? openloreConfig.llm?.sslVerify ?? true,
+    apiBase: resolveTrustedApiBase(options.apiBase, openloreConfig.llm?.apiBase),
+    sslVerify: resolveTrustedSslVerify(
+        options.sslVerify === undefined ? undefined : !options.sslVerify,
+        openloreConfig.llm?.sslVerify,
+      ),
     enableLogging: true,
     logDir: join(rootPath, OPENLORE_DIR, OPENLORE_LOGS_SUBDIR),
   });

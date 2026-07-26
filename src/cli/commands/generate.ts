@@ -11,7 +11,7 @@ import { confirm } from '@inquirer/prompts';
 import { stat, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { logger } from '../../utils/logger.js';
-import { resolveTrustedApiBase, resolveTrustedSslVerify } from '../../core/services/repo-config-trust.js';
+import { resolveTrustedApiBase, resolveTrustedSslVerify, rejectRepoConfiguredTlsOptOut } from '../../core/services/repo-config-trust.js';
 import { safeOpenspecDir } from '../../utils/path-confinement.js';
 import { fileExists, formatDuration, formatAge, parseList, readJsonFile, resolveLLMProvider, estimateCost } from '../../utils/command-helpers.js';
 import {
@@ -392,9 +392,14 @@ Each spec.md follows OpenSpec conventions:
       };
       const effectiveModel = opts.model || openloreConfig.generation.model || defaultModels[effectiveProvider];
 
-      // Apply SSL verification setting (CLI --insecure or config skipSslVerify)
-      if (globalOpts.insecure || openloreConfig.generation.skipSslVerify || openloreConfig.embedding?.skipSslVerify) {
-        allowInsecureTls('--insecure or config skipSslVerify');
+      // Only `--insecure` (operator-supplied) may relax TLS. A repo-committed
+      // `skipSslVerify` is refused — see repo-config-trust.ts. This sits ~85 lines
+      // above the createLLMService call that also resolves sslVerify; both doors have
+      // to be shut or the guarded one is decoration.
+      rejectRepoConfiguredTlsOptOut('generation.skipSslVerify', openloreConfig.generation.skipSslVerify);
+      rejectRepoConfiguredTlsOptOut('embedding.skipSslVerify', openloreConfig.embedding?.skipSslVerify);
+      if (globalOpts.insecure) {
+        allowInsecureTls('--insecure');
       }
 
       // Estimate cost

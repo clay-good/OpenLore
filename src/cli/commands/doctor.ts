@@ -7,7 +7,7 @@
 
 import { Command } from 'commander';
 import { sanitizeForTerminal as safe } from '../../utils/misc.js';
-import { allowInsecureTls, withRelaxedTls } from '../../core/services/tls-scope.js';
+import { withRelaxedTls } from '../../core/services/tls-scope.js';
 import { access, stat, readFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { execFile } from 'node:child_process';
@@ -486,9 +486,8 @@ async function checkEmbeddingConnection(rootPath: string): Promise<CheckResult |
   const baseUrl = emb?.baseUrl ?? process.env.EMBED_BASE_URL;
   if (!baseUrl) return null; // Embedding not configured — keyword default; skip
 
-  if (emb?.skipSslVerify) {
-    allowInsecureTls('embedding.skipSslVerify');
-  }
+  // Refused, not honoured: this value comes from the analyzed repo's config.
+  rejectRepoConfiguredTlsOptOut('embedding.skipSslVerify', emb?.skipSslVerify);
 
   const apiKey = emb?.apiKey ?? process.env.EMBED_API_KEY ?? 'none';
   const model = emb?.model ?? process.env.EMBED_MODEL ?? 'text-embedding-ada-002';

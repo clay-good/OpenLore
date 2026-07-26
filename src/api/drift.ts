@@ -21,6 +21,7 @@ import type { LLMService } from '../core/services/llm-service.js';
 import type { DriftResult } from '../types/index.js';
 import type { DriftApiOptions, ProgressCallback } from './types.js';
 import { safeOpenspecDir } from '../utils/path-confinement.js';
+import { resolveTrustedApiBase, resolveTrustedSslVerify } from '../core/services/repo-config-trust.js';
 
 function progress(onProgress: ProgressCallback | undefined, step: string, status: 'start' | 'progress' | 'complete' | 'skip', detail?: string): void {
   onProgress?.({ phase: 'drift', step, status, detail });
@@ -90,9 +91,12 @@ export async function openloreDrift(options: DriftApiOptions = {}): Promise<Drif
     llm = createLLMService({
       provider,
       model: options.model ?? defaultModels[provider] ?? DEFAULT_ANTHROPIC_MODEL,
-      apiBase: options.apiBase ?? openloreConfig.llm?.apiBase,
+      apiBase: resolveTrustedApiBase(options.apiBase, openloreConfig.llm?.apiBase),
       openaiCompatBaseUrl: options.openaiCompatBaseUrl,
-      sslVerify: options.sslVerify ?? openloreConfig.llm?.sslVerify ?? true,
+      sslVerify: resolveTrustedSslVerify(
+        options.sslVerify === undefined ? undefined : !options.sslVerify,
+        openloreConfig.llm?.sslVerify,
+      ),
       timeout: options.timeout ?? openloreConfig.generation?.timeout,
       enableLogging: true,
       logDir: join(rootPath, OPENLORE_DIR, OPENLORE_LOGS_SUBDIR),
