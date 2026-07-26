@@ -7,10 +7,17 @@ status line. Two signals, both cheap to re-check:
   requirement its delta adds is already in `openspec/specs/<domain>/spec.md`
 - **archivable** — `openspec archive <name>` completes
 
-As of 2026-07-25, **105 changes are open**. 22 were archived in this pass — the newest being
-`optimize-hash-keyed-analyze` (PR #288: Pass-1 extraction memoized by content hash).
+As of 2026-07-26, **104 changes are open**. 23 have been archived — the newest being
+`optimize-reachability-precompute` (PR #290: reachability precomputed at analyze, traversals
+served as lookups), which leaves 79 unbuilt.
 
-## Not built — 80
+Note on the archive step: `openspec validate` still fails on `cli`, `config`, `mcp-handlers`,
+and `overview` because those main specs are missing a `## Purpose` header — a pre-existing
+corpus defect, unrelated to any one change, and the reason most of the "built, blocked on
+bookkeeping" rows below cannot be archived. It needs its own corpus-repair change; do not
+brute-force it per-proposal.
+
+## Not built — 79
 
 The real backlog. No code, no spec entry.
 
@@ -84,7 +91,6 @@ The real backlog. No code, no spec entry.
 | `harden-walker-corpus-boundary` | Harden the walker corpus boundary: no silently smaller graph |
 | `optimize-analyze-pipeline-passes` | One analyze makes 3-4 full passes over the corpus, re-parsing (and re-reading from disk) tre |
 | `optimize-incremental-and-coldstart-scale` | A branch switch grinds through the per-file incremental pipeline with no bulk fallback, relo |
-| `optimize-reachability-precompute` | Every reachability conclusion re-runs BFS over adjacency rebuilt for that call |
 | `optimize-serving-hot-path-caches` | The default tools rebuild derived graph structures and re-parse multi-MB artifacts on every  |
 | `promote-backed-language-visibility` | Promote backed-language visibility: the generated matrix discloses its scope, the docs get o |
 | `refine-first-run-partial-serving` | The first index is all-or-nothing: minutes of "no index found" before the first answer |

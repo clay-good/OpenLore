@@ -35,15 +35,6 @@
       components). Disclosed in the code and in the spec delta rather than claimed away.
 - [x] Excluded from `openlore export` bundles, on the vector index's reasoning: a pure,
       millisecond-scale function of the bundled graph is not worth the bundle bytes.
-- [ ] **NOT DONE — EdgeStore `mmap_size` / `cache_size` pragmas.** Attempted and
-      reverted on measurement. Over this repo's 29 MB store, 8 concurrent handles ×
-      (3 count queries + a full edge scan): no pragma 63-74 ms, `mmap_size` only
-      62-63 ms, `cache_size` only 70-75 ms, both 64-71 ms — all inside run-to-run
-      noise — while costing +16 MB (cache) to +35 MB (mmap) RSS, repeated per served
-      repo by the uncapped context cache. The proposal's rationale (page-fault cost on
-      the DB-backed traversals) may hold at a scale this repo cannot exercise; it stays
-      open as its own item so it can ship with its own measurement instead of an
-      unmeasured claim.
 
 ## Verification
 - [x] Golden equivalence suite (`condensation.test.ts`, 71 tests): randomized graphs
@@ -78,6 +69,17 @@
       Structure build, paid once per generation, is 224 ms at that scale; the persisted
       artifact is 1.1 MB against an 11.7 MB `llm-context.json` on this repo.
 - [x] Full suite green (329 files, 6,338 tests)
+
+## Deferred, with the measurement that deferred it
+
+**EdgeStore `mmap_size` / `cache_size` pragmas — attempted, measured, reverted.** Over this
+repo's 29 MB store, 8 concurrent handles x (3 count queries + a full edge scan): no pragma
+63-74 ms, `mmap_size` only 62-63 ms, `cache_size` only 70-75 ms, both 64-71 ms — all inside
+run-to-run noise — while costing +16 MB (cache) to +35 MB (mmap) RSS, repeated per served repo
+by the uncapped context cache. The proposal's rationale (page-fault cost on the DB-backed
+traversals) may hold at a scale this repo cannot exercise. It is not part of this change and is
+not claimed by either spec delta; it belongs to a follow-up that can ship with its own
+measurement rather than an unmeasured claim.
 
 ## Spec
 - [x] `analyzer` delta: ADD ReachabilityStructureIsComputedAtAnalyzeTime
