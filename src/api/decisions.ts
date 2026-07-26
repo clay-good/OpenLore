@@ -32,7 +32,7 @@ import { syncApprovedDecisions } from '../core/decisions/syncer.js';
 import type { PendingDecision, DecisionStore } from '../types/index.js';
 import type { SyncResult } from '../core/decisions/syncer.js';
 import type { BaseOptions, ProgressCallback } from './types.js';
-import { safeOpenspecDir } from '../utils/path-confinement.js';
+import { resolveOpenspecDir } from '../utils/openspec-dir.js';
 import { resolveTrustedApiBase, resolveTrustedSslVerify } from '../core/services/repo-config-trust.js';
 
 function progress(cb: ProgressCallback | undefined, step: string, status: 'start' | 'complete' | 'skip', detail?: string): void {
@@ -155,7 +155,7 @@ export async function openloreConsolidateDecisions(
 
   const store = await loadDecisionStore(rootPath);
 
-  const openspecPath = safeOpenspecDir(rootPath, openloreConfig.openspecPath);
+  const openspecPath = resolveOpenspecDir(rootPath, openloreConfig.openspecPath);
   const specMap = await buildSpecMap({ rootPath, openspecPath }).catch(() => undefined);
 
   progress(onProgress, 'Consolidating drafts', 'start');
@@ -219,7 +219,7 @@ export async function openloreSyncDecisions(
   const openloreConfig = await readOpenLoreConfig(rootPath);
   if (!openloreConfig) throw new Error('No openlore configuration found.');
 
-  const openspecPath = safeOpenspecDir(rootPath, openloreConfig.openspecPath);
+  const openspecPath = resolveOpenspecDir(rootPath, openloreConfig.openspecPath);
   const specsPath = join(openspecPath, OPENSPEC_SPECS_SUBDIR);
   if (!(await fileExists(specsPath))) throw new Error('No specs found. Run openloreGenerate() first.');
 

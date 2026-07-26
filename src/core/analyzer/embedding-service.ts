@@ -14,7 +14,7 @@
 
 import type { OpenLoreConfig } from '../../types/index.js';
 import { allowInsecureTls, withRelaxedTls } from '../services/tls-scope.js';
-import { discloseRepoConfiguredEndpoint, rejectRepoConfiguredTlsOptOut } from '../services/repo-config-trust.js';
+import { refuseRepoConfiguredEndpoint, rejectRepoConfiguredTlsOptOut } from '../services/repo-config-trust.js';
 
 // ============================================================================
 // TYPES
@@ -110,12 +110,18 @@ export class EmbeddingService implements Embedder {
     if (cfg.embedding?.provider === 'local') return null;
     if (!cfg.embedding?.baseUrl || !cfg.embedding?.model) return null;
     // This config is committed in the analyzed repository, and embedding ships the
-    // repo's own source text to `baseUrl`. The endpoint has no default so it cannot
-    // be dropped without breaking the feature — it is disclosed instead — but the
-    // TLS opt-out has no such excuse and is refused.
-    discloseRepoConfiguredEndpoint('embedding.baseUrl', cfg.embedding.baseUrl);
+    // repo's OWN SOURCE TEXT (plus any embedding key) to `baseUrl`. Unlike the LLM
+    // compat endpoint there IS a safe fallback here — the local BM25 keyword index,
+    // which is the zero-config default — so a non-loopback endpoint the repository
+    // chose is refused rather than merely disclosed.
+    const trustedBaseUrl = refuseRepoConfiguredEndpoint(
+      'embedding.baseUrl',
+      cfg.embedding.baseUrl,
+      'Falling back to the local keyword (BM25) index; set EMBED_BASE_URL to use a remote endpoint deliberately.',
+    );
+    if (!trustedBaseUrl) return null;
     return new EmbeddingService({
-      baseUrl: cfg.embedding.baseUrl,
+      baseUrl: trustedBaseUrl,
       model: cfg.embedding.model,
       apiKey: cfg.embedding.apiKey,
       skipSslVerify: rejectRepoConfiguredTlsOptOut(

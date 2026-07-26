@@ -64,6 +64,29 @@ export function resolveTrustedApiBase(
 }
 
 /**
+ * Refuse a repo-configured endpoint outright when the caller has a safe fallback.
+ *
+ * The disclose-instead-of-refuse compromise elsewhere exists because those endpoints
+ * have NO default — refusing would break the feature entirely. That reasoning does not
+ * apply where a fallback exists: the embedding path degrades to the local BM25 keyword
+ * index, which is the documented zero-config default anyway. So there the honest
+ * answer is to refuse and say what happens instead, rather than warn and then ship the
+ * repository's own source text to a host it chose.
+ */
+export function refuseRepoConfiguredEndpoint(
+  field: string,
+  url: string | undefined,
+  fallbackDescription: string,
+): string | undefined {
+  if (!url || isLoopbackUrl(url)) return url;
+  logger.warning(
+    `Ignoring ${field} "${url}" from .openlore/config.json: a repository's config may not ` +
+      `choose where its own contents are sent. ${fallbackDescription}`,
+  );
+  return undefined;
+}
+
+/**
  * Refuse a TLS opt-out that came from the repository's config, whatever spelling it
  * uses (`generation.skipSslVerify`, `embedding.skipSslVerify`). Always returns
  * `false` — "do not skip verification" — and says so once when the field was set.
@@ -92,6 +115,11 @@ export function rejectRepoConfiguredTlsOptOut(field: string, value: boolean | un
 const disclosed = new Set<string>();
 
 export function discloseRepoConfiguredEndpoint(field: string, url: string | undefined): void {
+  // Callers MUST only call this when the endpoint will actually be used. The message
+  // asserts that requests go to that host, and firing it for a value the run never
+  // touches (a compat base URL while the provider is anthropic) tells the operator
+  // their key is being exfiltrated when it is not — beside a correctly-worded refusal
+  // for a different field, which makes the pair read as contradictory.
   if (!url || isLoopbackUrl(url)) return;
   // Once per (field, endpoint) per process. `resolveEmbedder` runs on EVERY orient /
   // search_code / semantic call, so an unlatched warning buried a team using a

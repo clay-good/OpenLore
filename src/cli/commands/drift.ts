@@ -36,7 +36,7 @@ import {
 import { suggestTestsForDrift } from '../../core/drift/test-suggester.js';
 import { createLLMService } from '../../core/services/llm-service.js';
 import type { LLMService } from '../../core/services/llm-service.js';
-import { safeOpenspecDir } from '../../utils/path-confinement.js';
+import { resolveOpenspecDir } from '../../utils/openspec-dir.js';
 
 // ============================================================================
 // TYPES
@@ -443,7 +443,7 @@ Pre-commit hook:
       }
 
       // Determine openspec path
-      const openspecPath = safeOpenspecDir(rootPath, openloreConfig.openspecPath);
+      const openspecPath = resolveOpenspecDir(rootPath, openloreConfig.openspecPath);
       const specsPath = join(openspecPath, OPENSPEC_SPECS_SUBDIR);
 
       // Check if specs exist

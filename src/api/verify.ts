@@ -15,7 +15,7 @@ import { SpecVerificationEngine } from '../core/verifier/verification-engine.js'
 import type { DependencyGraphResult } from '../core/analyzer/dependency-graph.js';
 import type { GenerationReport } from '../core/generator/openspec-writer.js';
 import type { VerifyApiOptions, VerifyResult, ProgressCallback } from './types.js';
-import { safeOpenspecDir } from '../utils/path-confinement.js';
+import { resolveOpenspecDir } from '../utils/openspec-dir.js';
 import { resolveTrustedApiBase, resolveTrustedSslVerify } from '../core/services/repo-config-trust.js';
 
 function progress(onProgress: ProgressCallback | undefined, step: string, status: 'start' | 'progress' | 'complete' | 'skip', detail?: string): void {
@@ -47,7 +47,7 @@ export async function openloreVerify(options: VerifyApiOptions = {}): Promise<Ve
   }
 
   // Check specs exist
-  const openspecPath = safeOpenspecDir(rootPath, openloreConfig.openspecPath);
+  const openspecPath = resolveOpenspecDir(rootPath, openloreConfig.openspecPath);
   const specsPath = join(openspecPath, OPENSPEC_SPECS_SUBDIR);
   if (!(await fileExists(specsPath))) {
     throw new Error('No specs found. Run openloreGenerate() first.');

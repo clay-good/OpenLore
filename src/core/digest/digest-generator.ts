@@ -6,6 +6,7 @@
 import { readFile, readdir } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { OPENSPEC_DIR, OPENSPEC_SPECS_SUBDIR } from '../../constants.js';
+import { isConfinedPath } from '../../utils/path-confinement.js';
 
 // ============================================================================
 // TYPES
@@ -181,6 +182,12 @@ export async function generateDigest(opts: {
   for (const entry of entries.sort()) {
     if (domainFilter && !domainFilter.has(entry.toLowerCase())) continue;
     const specFile = join(specsDir, entry, 'spec.md');
+    // A repo can COMMIT `openspec/specs/<domain>/spec.md -> ~/.ssh/id_rsa`, and this
+    // command PRINTS what it reads — so an unconfined read here is a direct
+    // exfiltration primitive, not just a boundary violation. The analyzer's spec
+    // indexer and the MCP `get_spec` handler already drop escaping entries; digest
+    // was the one reader that still followed them.
+    if (!isConfinedPath(absRoot, specFile)) continue;
     let content: string;
     try {
       content = await readFile(specFile, 'utf-8');

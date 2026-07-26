@@ -7,12 +7,13 @@
 
 import { Command } from 'commander';
 import { sanitizeForTerminal as safe } from '../../utils/misc.js';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { logger } from '../../utils/logger.js';
 import { resolveTrustedApiBase, resolveTrustedSslVerify } from '../../core/services/repo-config-trust.js';
 import { redirectConsoleToStderr } from '../../utils/quiet-stdout.js';
 import { fileExists, formatDuration, parseList, readJsonFile, resolveLLMProvider } from '../../utils/command-helpers.js';
 import {
+  OPENSPEC_DIR,
   OPENLORE_DIR,
   OPENLORE_ANALYSIS_SUBDIR,
   OPENLORE_LOGS_SUBDIR,
@@ -33,7 +34,7 @@ import {
 } from '../../core/verifier/verification-engine.js';
 import type { DependencyGraphResult } from '../../core/analyzer/dependency-graph.js';
 import type { GenerationReport } from '../../core/generator/openspec-writer.js';
-import { safeOpenspecDir } from '../../utils/path-confinement.js';
+import { resolveOpenspecDir } from '../../utils/openspec-dir.js';
 
 // ============================================================================
 // TYPES
@@ -336,7 +337,7 @@ A score >= threshold indicates specs are production-ready.
       }
 
       // Determine openspec path
-      const openspecPath = safeOpenspecDir(rootPath, openloreConfig.openspecPath);
+      const openspecPath = resolveOpenspecDir(rootPath, openloreConfig.openspecPath);
       const specsPath = join(openspecPath, OPENSPEC_SPECS_SUBDIR);
 
       // Check if specs exist
@@ -347,7 +348,7 @@ A score >= threshold indicates specs are production-ready.
       }
 
       if (!opts.json) {
-        logger.discovery(`Loading generated specs from ${openloreConfig.openspecPath}/specs/`);
+        logger.discovery(`Loading generated specs from ${relative(rootPath, openspecPath) || OPENSPEC_DIR}/specs/`);
       }
 
       // Load generation report to get context files

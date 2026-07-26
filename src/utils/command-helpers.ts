@@ -98,9 +98,11 @@ export function resolveLLMProvider(openloreConfig?: {
   const openaiCompatBaseUrl = process.env.OPENAI_COMPAT_BASE_URL
     ?? openloreConfig?.generation?.openaiCompatBaseUrl;
 
-  // The env var is operator-supplied; a value that came from the repo's committed
-  // config decides where OPENAI_COMPAT_API_KEY is sent, so name the host out loud.
-  if (!process.env.OPENAI_COMPAT_BASE_URL) {
+  // Only when this endpoint will actually be used. Disclosing it while the resolved
+  // provider is anthropic/openai told the operator their key was going to a host the
+  // run never contacts — beside the correctly-worded `Ignoring llm.apiBase …` refusal,
+  // which made the two lines contradict each other.
+  if (provider === 'openai-compat' && !process.env.OPENAI_COMPAT_BASE_URL) {
     discloseRepoConfiguredEndpoint(
       'generation.openaiCompatBaseUrl',
       openloreConfig?.generation?.openaiCompatBaseUrl,

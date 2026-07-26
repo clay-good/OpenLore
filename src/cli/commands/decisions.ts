@@ -54,7 +54,7 @@ import {
 import type { PendingDecision } from '../../types/index.js';
 import { runTuiApproval } from '../tui-approval.js';
 import { emit } from '../../core/services/telemetry.js';
-import { safeOpenspecDir } from '../../utils/path-confinement.js';
+import { resolveOpenspecDir } from '../../utils/openspec-dir.js';
 
 // ============================================================================
 // AGENT INSTRUCTION FILES
@@ -427,7 +427,7 @@ async function runAutopilotGate(
     let syncedCount = 0;
     let syncErrors: Array<{ id: string; error: string }> = [];
     if (accepted.length > 0 || approved.length > 0) {
-      const openspecPath = safeOpenspecDir(rootPath, config.openspecPath);
+      const openspecPath = resolveOpenspecDir(rootPath, config.openspecPath);
       if (await fileExists(join(openspecPath, OPENSPEC_SPECS_SUBDIR))) {
         const specMap = await buildSpecMap({ rootPath, openspecPath });
         const { result } = await syncApprovedDecisions(store, {
@@ -649,7 +649,7 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
       if (!options.json) {
         const openloreConfig = await readOpenLoreConfig(rootPath);
         if (openloreConfig) {
-          const openspecPath = safeOpenspecDir(rootPath, openloreConfig.openspecPath);
+          const openspecPath = resolveOpenspecDir(rootPath, openloreConfig.openspecPath);
           const specsExist = await fileExists(join(openspecPath, OPENSPEC_SPECS_SUBDIR));
           if (specsExist) {
             const specMap = await buildSpecMap({ rootPath, openspecPath }).catch(() => undefined);
@@ -736,7 +736,7 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
       });
 
       // Step 1 — Consolidate drafts OR extract from diff as fallback
-      const openspecPath = safeOpenspecDir(rootPath, openloreConfig.openspecPath);
+      const openspecPath = resolveOpenspecDir(rootPath, openloreConfig.openspecPath);
       const specMapResult = await buildSpecMap({ rootPath, openspecPath }).catch(() => undefined);
       let consolidated: PendingDecision[];
       let supersededIds: string[] = [];
@@ -1093,7 +1093,7 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
         return;
       }
 
-      const openspecPath = safeOpenspecDir(rootPath, openloreConfig.openspecPath);
+      const openspecPath = resolveOpenspecDir(rootPath, openloreConfig.openspecPath);
       const specsPath = join(openspecPath, OPENSPEC_SPECS_SUBDIR);
       if (!(await fileExists(specsPath))) {
         logger.error('No specs found. Run "openlore generate" first.');

@@ -45,7 +45,7 @@ import {
   ARTIFACT_RAG_MANIFEST,
 } from '../constants.js';
 import { resolveTrustedApiBase, resolveTrustedSslVerify, rejectRepoConfiguredTlsOptOut, discloseRepoConfiguredEndpoint } from '../core/services/repo-config-trust.js';
-import { safeOpenspecDir } from '../utils/path-confinement.js';
+import { resolveOpenspecDir } from '../utils/openspec-dir.js';
 
 function progress(onProgress: ProgressCallback | undefined, step: string, status: 'start' | 'progress' | 'complete' | 'skip', detail?: string): void {
   onProgress?.({ phase: 'generate', step, status, detail });
@@ -115,7 +115,7 @@ export async function openloreGenerate(options: GenerateApiOptions = {}): Promis
   // Confined: this becomes a WRITE target (the RAG manifest, the generated specs), and
   // `openspecPath` comes from the analyzed repo's own config. The CLI twin does the
   // same; leaving the API twin unguarded would just move the escape one layer down.
-  const fullOpenspecPath = safeOpenspecDir(rootPath, openloreConfig.openspecPath);
+  const fullOpenspecPath = resolveOpenspecDir(rootPath, openloreConfig.openspecPath);
   await readOpenSpecConfig(fullOpenspecPath); // Ensure it's readable
   progress(onProgress, 'Loading configuration', 'complete');
 
