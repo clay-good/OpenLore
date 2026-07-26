@@ -38,6 +38,7 @@ import {
   DEFAULT_GEMINI_MODEL,
   DEFAULT_COPILOT_MODEL,
 } from '../../constants.js';
+import { resolveTrustedSslVerify, rejectRepoConfiguredTlsOptOut, discloseRepoConfiguredEndpoint } from '../../core/services/repo-config-trust.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -417,13 +418,13 @@ async function checkLLMConnection(rootPath: string): Promise<CheckResult> {
     }
   }
 
-  // Apply SSL setting before creating provider
-  const sslVerify = config?.llm?.sslVerify ?? true;
-  if (!sslVerify || gen?.skipSslVerify) {
-    allowInsecureTls('llm.sslVerify=false or generation.skipSslVerify');
-  }
+  // A repo-supplied TLS opt-out is refused here as it is on every other LLM path:
+  // `doctor` runs against a clone just like `generate` does.
+  const sslVerify = resolveTrustedSslVerify(undefined, config?.llm?.sslVerify);
+  rejectRepoConfiguredTlsOptOut('generation.skipSslVerify', gen?.skipSslVerify);
 
   const baseUrl = gen?.openaiCompatBaseUrl ?? process.env.OPENAI_COMPAT_BASE_URL;
+  discloseRepoConfiguredEndpoint('generation.openaiCompatBaseUrl', gen?.openaiCompatBaseUrl);
 
   let llm;
   try {

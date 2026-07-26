@@ -15,6 +15,7 @@ import {
 } from '../constants.js';
 import { lookupPricing } from '../core/services/llm-service.js';
 import type { LLMContext } from '../core/analyzer/artifact-generator.js';
+import { discloseRepoConfiguredEndpoint } from '../core/services/repo-config-trust.js';
 
 /**
  * Check whether a file or directory exists at the given path.
@@ -96,6 +97,15 @@ export function resolveLLMProvider(openloreConfig?: {
   const provider = configProvider ?? envProvider;
   const openaiCompatBaseUrl = process.env.OPENAI_COMPAT_BASE_URL
     ?? openloreConfig?.generation?.openaiCompatBaseUrl;
+
+  // The env var is operator-supplied; a value that came from the repo's committed
+  // config decides where OPENAI_COMPAT_API_KEY is sent, so name the host out loud.
+  if (!process.env.OPENAI_COMPAT_BASE_URL) {
+    discloseRepoConfiguredEndpoint(
+      'generation.openaiCompatBaseUrl',
+      openloreConfig?.generation?.openaiCompatBaseUrl,
+    );
+  }
 
   return { provider, openaiCompatBaseUrl };
 }

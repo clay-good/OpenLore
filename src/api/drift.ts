@@ -20,6 +20,7 @@ import { createLLMService } from '../core/services/llm-service.js';
 import type { LLMService } from '../core/services/llm-service.js';
 import type { DriftResult } from '../types/index.js';
 import type { DriftApiOptions, ProgressCallback } from './types.js';
+import { safeOpenspecDir } from '../utils/path-confinement.js';
 
 function progress(onProgress: ProgressCallback | undefined, step: string, status: 'start' | 'progress' | 'complete' | 'skip', detail?: string): void {
   onProgress?.({ phase: 'drift', step, status, detail });
@@ -59,7 +60,7 @@ export async function openloreDrift(options: DriftApiOptions = {}): Promise<Drif
   }
 
   // Check specs exist
-  const openspecPath = join(rootPath, openloreConfig.openspecPath ?? OPENSPEC_DIR);
+  const openspecPath = safeOpenspecDir(rootPath, openloreConfig.openspecPath);
   const specsPath = join(openspecPath, OPENSPEC_SPECS_SUBDIR);
   if (!(await fileExists(specsPath))) {
     throw new Error('No specs found. Run openloreGenerate() first.');

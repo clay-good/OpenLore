@@ -7,7 +7,7 @@
 
 import { Command } from 'commander';
 import { withRelaxedTls } from '../../core/services/tls-scope.js';
-import { readFile, writeFile, unlink, mkdir } from 'node:fs/promises';
+import { readFile, unlink } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { fileExists } from '../../utils/command-helpers.js';
 import { join, resolve, sep } from 'node:path';
@@ -28,7 +28,11 @@ import {
   ARTIFACT_REFACTOR_PRIORITIES,
   ARTIFACT_MAPPING,
 } from '../../constants.js';
-import { createApiGuardMiddleware, OPENLORE_TOKEN_HEADER } from './local-http-guard.js';
+import {
+  createApiGuardMiddleware,
+  OPENLORE_TOKEN_HEADER,
+  writeInstanceDescriptor,
+} from './local-http-guard.js';
 import { VectorIndex } from '../../core/analyzer/vector-index.js';
 import { resolveEmbedder } from '../../core/analyzer/embedder.js';
 import { getSkeletonContent } from '../../core/analyzer/code-shaper.js';
@@ -699,16 +703,14 @@ export const viewCommand = new Command('view')
       // detect a live or stale instance instead of a mystery port occupant.
       const descriptorPath = join(rootPath, OPENLORE_DIR, 'view.json');
       try {
-        await mkdir(join(rootPath, OPENLORE_DIR), { recursive: true });
-        await writeFile(
-          descriptorPath,
-          JSON.stringify(
-            { port, pid: process.pid, host, token, startedAt: new Date().toISOString() },
-            null,
-            2,
-          ) + '\n',
-          'utf-8',
-        );
+        // 0600 — the descriptor carries the instance token that gates /api/chat.
+        await writeInstanceDescriptor(descriptorPath, {
+          port,
+          pid: process.pid,
+          host,
+          token,
+          startedAt: new Date().toISOString(),
+        });
       } catch {
         // Discovery is best-effort; a read-only .openlore must not stop the viewer.
       }

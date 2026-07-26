@@ -19,26 +19,15 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
+import { LOOPBACK_HOSTNAMES, isLoopbackHost } from '../../utils/loopback.js';
 
 /** Header a client presents to authenticate to a local OpenLore HTTP surface. */
 export const OPENLORE_TOKEN_HEADER = 'x-openlore-token';
 
-/** Hostnames that denote the loopback interface (no DNS resolution involved). */
-export const LOOPBACK_HOSTNAMES = new Set([
-  'localhost',
-  '127.0.0.1',
-  '::1',
-  '0:0:0:0:0:0:0:1',
-  '0000:0000:0000:0000:0000:0000:0000:0001',
-]);
-
-/** True if `host` is a loopback literal/name (127.0.0.0/8, ::1, localhost). */
-export function isLoopbackHost(host: string): boolean {
-  const h = host.trim().replace(/^\[|\]$/g, '').toLowerCase();
-  if (LOOPBACK_HOSTNAMES.has(h)) return true;
-  // Any 127.x.y.z address is loopback.
-  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
-}
+// Loopback recognition lives in `src/utils/loopback.ts` so the non-HTTP consumer
+// (the repo-config trust boundary) can share it without importing the CLI layer.
+// Imported (not re-exported blind) because this module's own guards call it.
+export { LOOPBACK_HOSTNAMES, isLoopbackHost };
 
 /** Extract the hostname (sans port, sans brackets) from a Host/Origin authority. */
 export function hostnameOf(authority: string): string {
@@ -70,6 +59,36 @@ export function constantTimeEqual(a: string, b: string): boolean {
     return false;
   }
   return timingSafeEqual(ab, bb);
+}
+
+/**
+ * Write an instance descriptor (`serve.json` / `view.json`) so only its owner can
+ * read it.
+ *
+ * The descriptor carries the surface's `token`, and that token IS the mitigation
+ * against the other-local-process attacker: `checkLocalHttpRequest` demands it even
+ * on a loopback bind for money/agent routes, precisely because a loopback port is
+ * reachable by every process on the machine. Written at the default 0644 the secret
+ * sits in the repo where that same attacker can simply read it, so the gate guards a
+ * door whose key is on the mat. 0600 on the file (and 0700 on `.openlore/`) keeps the
+ * token to the user who started the surface.
+ *
+ * The explicit `chmod` is not redundant with the `mode` option: `mode` applies only
+ * when `open` CREATES the file, so a descriptor left behind by an older OpenLore (or
+ * pre-created by another local user) would otherwise keep its permissive mode.
+ */
+export async function writeInstanceDescriptor(
+  descriptorPath: string,
+  value: unknown,
+): Promise<void> {
+  const { mkdir, writeFile, chmod } = await import('node:fs/promises');
+  const { dirname } = await import('node:path');
+  await mkdir(dirname(descriptorPath), { recursive: true, mode: 0o700 });
+  await writeFile(descriptorPath, JSON.stringify(value, null, 2) + '\n', {
+    encoding: 'utf-8',
+    mode: 0o600,
+  });
+  await chmod(descriptorPath, 0o600);
 }
 
 /**

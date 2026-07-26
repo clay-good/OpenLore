@@ -11,6 +11,8 @@ import { confirm } from '@inquirer/prompts';
 import { stat, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { logger } from '../../utils/logger.js';
+import { resolveTrustedApiBase, resolveTrustedSslVerify } from '../../core/services/repo-config-trust.js';
+import { safeOpenspecDir } from '../../utils/path-confinement.js';
 import { fileExists, formatDuration, formatAge, parseList, readJsonFile, resolveLLMProvider, estimateCost } from '../../utils/command-helpers.js';
 import {
   DEFAULT_ANTHROPIC_MODEL,
@@ -309,7 +311,12 @@ Each spec.md follows OpenSpec conventions:
 
       // Determine openspec path
       const openspecPath = opts.outputDir ?? openloreConfig.openspecPath ?? OPENSPEC_DIR;
-      const fullOpenspecPath = join(rootPath, openspecPath);
+      // `--output-dir` is operator-supplied and may legitimately point anywhere;
+      // `openspecPath` comes from the repo's own config.json and may not — it ends up
+      // as a write target (the RAG manifest, synced specs) further down.
+      const fullOpenspecPath = opts.outputDir
+        ? join(rootPath, opts.outputDir)
+        : safeOpenspecDir(rootPath, openloreConfig.openspecPath);
 
       // Load existing OpenSpec config if present
       const openspecConfig = await readOpenSpecConfig(fullOpenspecPath);
@@ -472,8 +479,8 @@ Each spec.md follows OpenSpec conventions:
           provider: effectiveProvider,
           model: effectiveModel,
           openaiCompatBaseUrl: effectiveBaseUrl,
-          apiBase: globalOpts.apiBase ?? openloreConfig.llm?.apiBase,
-          sslVerify: globalOpts.insecure != null ? !globalOpts.insecure : openloreConfig.llm?.sslVerify ?? true,
+          apiBase: resolveTrustedApiBase(globalOpts.apiBase, openloreConfig?.llm?.apiBase),
+          sslVerify: resolveTrustedSslVerify(globalOpts.insecure, openloreConfig?.llm?.sslVerify),
           timeout: globalOpts.timeout ?? openloreConfig.generation?.timeout,
           enableLogging: true,
           logDir: join(rootPath, OPENLORE_DIR, OPENLORE_LOGS_SUBDIR),

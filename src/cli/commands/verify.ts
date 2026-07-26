@@ -9,6 +9,7 @@ import { Command } from 'commander';
 import { sanitizeForTerminal as safe } from '../../utils/misc.js';
 import { join } from 'node:path';
 import { logger } from '../../utils/logger.js';
+import { resolveTrustedApiBase, resolveTrustedSslVerify } from '../../core/services/repo-config-trust.js';
 import { redirectConsoleToStderr } from '../../utils/quiet-stdout.js';
 import { fileExists, formatDuration, parseList, readJsonFile, resolveLLMProvider } from '../../utils/command-helpers.js';
 import {
@@ -18,7 +19,6 @@ import {
   OPENLORE_VERIFICATION_SUBDIR,
   OPENLORE_OUTPUTS_SUBDIR,
   OPENLORE_CONFIG_REL_PATH,
-  OPENSPEC_DIR,
   OPENSPEC_SPECS_SUBDIR,
   ARTIFACT_DEPENDENCY_GRAPH,
   ARTIFACT_GENERATION_REPORT,
@@ -33,6 +33,7 @@ import {
 } from '../../core/verifier/verification-engine.js';
 import type { DependencyGraphResult } from '../../core/analyzer/dependency-graph.js';
 import type { GenerationReport } from '../../core/generator/openspec-writer.js';
+import { safeOpenspecDir } from '../../utils/path-confinement.js';
 
 // ============================================================================
 // TYPES
@@ -335,7 +336,7 @@ A score >= threshold indicates specs are production-ready.
       }
 
       // Determine openspec path
-      const openspecPath = join(rootPath, openloreConfig.openspecPath ?? OPENSPEC_DIR);
+      const openspecPath = safeOpenspecDir(rootPath, openloreConfig.openspecPath);
       const specsPath = join(openspecPath, OPENSPEC_SPECS_SUBDIR);
 
       // Check if specs exist
@@ -385,8 +386,8 @@ A score >= threshold indicates specs are production-ready.
           provider: resolved.provider,
           model: openloreConfig.generation?.model,
           openaiCompatBaseUrl: resolved.openaiCompatBaseUrl,
-          apiBase: globalOpts.apiBase ?? openloreConfig.llm?.apiBase,
-          sslVerify: globalOpts.insecure != null ? !globalOpts.insecure : openloreConfig.llm?.sslVerify ?? true,
+          apiBase: resolveTrustedApiBase(globalOpts.apiBase, openloreConfig?.llm?.apiBase),
+          sslVerify: resolveTrustedSslVerify(globalOpts.insecure, openloreConfig?.llm?.sslVerify),
           timeout: globalOpts.timeout ?? openloreConfig.generation?.timeout,
           enableLogging: true,
           logDir: join(rootPath, OPENLORE_DIR, OPENLORE_LOGS_SUBDIR),

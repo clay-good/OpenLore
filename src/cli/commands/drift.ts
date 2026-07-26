@@ -10,6 +10,7 @@ import { sanitizeForTerminal as safe } from '../../utils/misc.js';
 import { mkdir, readFile, writeFile, chmod } from 'node:fs/promises';
 import { join } from 'node:path';
 import { logger } from '../../utils/logger.js';
+import { resolveTrustedApiBase, resolveTrustedSslVerify } from '../../core/services/repo-config-trust.js';
 import { redirectConsoleToStderr } from '../../utils/quiet-stdout.js';
 import { fileExists, formatDuration, parseList, resolveLLMProvider } from '../../utils/command-helpers.js';
 import {
@@ -34,6 +35,7 @@ import {
 import { suggestTestsForDrift } from '../../core/drift/test-suggester.js';
 import { createLLMService } from '../../core/services/llm-service.js';
 import type { LLMService } from '../../core/services/llm-service.js';
+import { safeOpenspecDir } from '../../utils/path-confinement.js';
 
 // ============================================================================
 // TYPES
@@ -423,8 +425,8 @@ Pre-commit hook:
             provider: resolved.provider,
             model: openloreConfig.generation?.model,
             openaiCompatBaseUrl: resolved.openaiCompatBaseUrl,
-            apiBase: globalOpts.apiBase ?? openloreConfig.llm?.apiBase,
-            sslVerify: globalOpts.insecure != null ? !globalOpts.insecure : openloreConfig.llm?.sslVerify ?? true,
+            apiBase: resolveTrustedApiBase(globalOpts.apiBase, openloreConfig?.llm?.apiBase),
+            sslVerify: resolveTrustedSslVerify(globalOpts.insecure, openloreConfig?.llm?.sslVerify),
             timeout: globalOpts.timeout ?? openloreConfig.generation?.timeout,
             enableLogging: true,
             logDir: join(rootPath, OPENLORE_DIR, OPENLORE_LOGS_SUBDIR),
@@ -440,7 +442,7 @@ Pre-commit hook:
       }
 
       // Determine openspec path
-      const openspecPath = join(rootPath, openloreConfig.openspecPath ?? OPENSPEC_DIR);
+      const openspecPath = safeOpenspecDir(rootPath, openloreConfig.openspecPath);
       const specsPath = join(openspecPath, OPENSPEC_SPECS_SUBDIR);
 
       // Check if specs exist

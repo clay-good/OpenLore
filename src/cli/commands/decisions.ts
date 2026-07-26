@@ -17,13 +17,14 @@ const execFileAsync = promisify(execFile);
 import { join } from 'node:path';
 
 import { logger } from '../../utils/logger.js';
+import { resolveTrustedApiBase, resolveTrustedSslVerify } from '../../core/services/repo-config-trust.js';
 import { colorForStdout } from '../../utils/colors.js';
 import { gitPathArgs } from '../../utils/git-args.js';
 import { redirectConsoleToStderr } from '../../utils/quiet-stdout.js';
 import { fileExists, resolveLLMProvider } from '../../utils/command-helpers.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
 import { createLLMService } from '../../core/services/llm-service.js';
-import { isGitRepository, getChangedFiles, getFileDiff, getCommitMessages, resolveBaseRef, buildSpecMap } from '../../core/drift/index.js';
+import { isGitRepository, getChangedFiles, getFileDiff, getCommitMessages, resolveBaseRef, buildSpecMap, validateGitRef } from '../../core/drift/index.js';
 import {
   loadDecisionStore,
   updateDecisionStore,
@@ -44,7 +45,6 @@ import { syncApprovedDecisions } from '../../core/decisions/syncer.js';
 import {
   OPENLORE_DIR,
   OPENLORE_LOGS_SUBDIR,
-  OPENSPEC_DIR,
   OPENSPEC_SPECS_SUBDIR,
   DECISIONS_EXTRACTION_MAX_FILES,
   DECISIONS_DIFF_MAX_CHARS,
@@ -54,6 +54,7 @@ import {
 import type { PendingDecision } from '../../types/index.js';
 import { runTuiApproval } from '../tui-approval.js';
 import { emit } from '../../core/services/telemetry.js';
+import { safeOpenspecDir } from '../../utils/path-confinement.js';
 
 // ============================================================================
 // AGENT INSTRUCTION FILES
@@ -426,7 +427,7 @@ async function runAutopilotGate(
     let syncedCount = 0;
     let syncErrors: Array<{ id: string; error: string }> = [];
     if (accepted.length > 0 || approved.length > 0) {
-      const openspecPath = join(rootPath, config.openspecPath ?? OPENSPEC_DIR);
+      const openspecPath = safeOpenspecDir(rootPath, config.openspecPath);
       if (await fileExists(join(openspecPath, OPENSPEC_SPECS_SUBDIR))) {
         const specMap = await buildSpecMap({ rootPath, openspecPath });
         const { result } = await syncApprovedDecisions(store, {
@@ -648,7 +649,7 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
       if (!options.json) {
         const openloreConfig = await readOpenLoreConfig(rootPath);
         if (openloreConfig) {
-          const openspecPath = join(rootPath, openloreConfig.openspecPath ?? OPENSPEC_DIR);
+          const openspecPath = safeOpenspecDir(rootPath, openloreConfig.openspecPath);
           const specsExist = await fileExists(join(openspecPath, OPENSPEC_SPECS_SUBDIR));
           if (specsExist) {
             const specMap = await buildSpecMap({ rootPath, openspecPath }).catch(() => undefined);
@@ -728,14 +729,14 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
         provider: resolved.provider,
         model: openloreConfig.generation?.model,
         openaiCompatBaseUrl: resolved.openaiCompatBaseUrl,
-        apiBase: globalOpts.apiBase ?? openloreConfig.llm?.apiBase,
-        sslVerify: globalOpts.insecure != null ? !globalOpts.insecure : (openloreConfig.llm?.sslVerify ?? true),
+        apiBase: resolveTrustedApiBase(globalOpts.apiBase, openloreConfig?.llm?.apiBase),
+        sslVerify: resolveTrustedSslVerify(globalOpts.insecure, openloreConfig?.llm?.sslVerify),
         enableLogging: true,
         logDir: join(rootPath, OPENLORE_DIR, OPENLORE_LOGS_SUBDIR),
       });
 
       // Step 1 — Consolidate drafts OR extract from diff as fallback
-      const openspecPath = join(rootPath, openloreConfig.openspecPath ?? OPENSPEC_DIR);
+      const openspecPath = safeOpenspecDir(rootPath, openloreConfig.openspecPath);
       const specMapResult = await buildSpecMap({ rootPath, openspecPath }).catch(() => undefined);
       let consolidated: PendingDecision[];
       let supersededIds: string[] = [];
@@ -1092,7 +1093,7 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
         return;
       }
 
-      const openspecPath = join(rootPath, openloreConfig.openspecPath ?? OPENSPEC_DIR);
+      const openspecPath = safeOpenspecDir(rootPath, openloreConfig.openspecPath);
       const specsPath = join(openspecPath, OPENSPEC_SPECS_SUBDIR);
       if (!(await fileExists(specsPath))) {
         logger.error('No specs found. Run "openlore generate" first.');
@@ -1184,6 +1185,10 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
 async function resolveSinceCutoff(rootPath: string, since: string): Promise<number> {
   const asDate = Date.parse(since);
   if (!Number.isNaN(asDate)) return asDate;
+  // `Date.parse` returning NaN is not validation: it lets `--output=/path` through to
+  // git, which reads it as a diff OPTION and truncates that file. Every other
+  // ref-consuming path in the repo validates first; this one is the exception.
+  validateGitRef(since);
   const { stdout } = await execFileAsync('git', ['show', '-s', '--format=%cI', since], { cwd: rootPath });
   const t = Date.parse(stdout.trim().split('\n').pop() ?? '');
   if (Number.isNaN(t)) throw new Error(`--since "${since}" is neither an ISO date nor a resolvable git ref`);

@@ -20,6 +20,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { readdir, readFile, writeFile } from 'node:fs/promises';
 import { join, basename, dirname } from 'node:path';
 import { fileExists } from '../../utils/command-helpers.js';
+import { isConfinedPath } from '../../utils/path-confinement.js';
 import type { Embedder } from './embedding-service.js';
 import { tokenize, buildBm25Corpus, bm25Score } from './vector-index.js';
 
@@ -248,7 +249,9 @@ async function findAdrFiles(decisionsDir: string): Promise<string[]> {
     const entries = await readdir(decisionsDir);
     return entries
       .filter((f) => /^adr-\d+.*\.md$/i.test(f))
-      .map((f) => join(decisionsDir, f));
+      .map((f) => join(decisionsDir, f))
+      // Same symlink vector as findSpecFiles: an ADR-named link out of the repo.
+      .filter((p) => isConfinedPath(decisionsDir, p));
   } catch {
     return [];
   }
@@ -584,6 +587,10 @@ async function findSpecFiles(specsDir: string): Promise<string[]> {
   for (const entry of entries) {
     const domainDir = join(specsDir, entry);
     const specFile = join(domainDir, 'spec.md');
+    // `fileExists` stats THROUGH a symlink, so a committed
+    // `openspec/specs/notes/spec.md -> ~/private.md` would otherwise be read and
+    // chunked into the vector index — an artifact `openlore export` ships.
+    if (!isConfinedPath(specsDir, specFile)) continue;
     if (await fileExists(specFile)) {
       results.push(specFile);
     }

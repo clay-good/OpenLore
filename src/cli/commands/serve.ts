@@ -32,7 +32,7 @@
 import { Command } from 'commander';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createRequire } from 'node:module';
-import { writeFile, unlink, mkdir } from 'node:fs/promises';
+import { unlink } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { logger } from '../../utils/logger.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, FULL_PRESET, FULL_PRESET_ALIAS, LEAN_DEFAULT_PRESET } from '../../constants.js';
@@ -49,6 +49,7 @@ import {
   constantTimeEqual,
   originDefenseError,
   OPENLORE_TOKEN_HEADER,
+  writeInstanceDescriptor,
 } from './local-http-guard.js';
 import { readServeDescriptor, type ServeDescriptor } from './serve-descriptor.js';
 
@@ -501,8 +502,8 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
     startedAt,
     version: _pkgVersion,
   };
-  await mkdir(join(root, OPENLORE_DIR), { recursive: true });
-  await writeFile(serveFilePath(root), JSON.stringify(descriptor, null, 2) + '\n', 'utf-8');
+  // 0600 — the descriptor carries the daemon token that gates /tool/*.
+  await writeInstanceDescriptor(serveFilePath(root), descriptor);
 
   logger.success(`openlore serve listening on http://${host}:${boundPort} (preset: ${presetName})`);
   logger.discovery(`Discovery file: ${serveFilePath(root)}`);

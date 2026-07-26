@@ -14,6 +14,7 @@
 
 import type { OpenLoreConfig } from '../../types/index.js';
 import { allowInsecureTls, withRelaxedTls } from '../services/tls-scope.js';
+import { discloseRepoConfiguredEndpoint, rejectRepoConfiguredTlsOptOut } from '../services/repo-config-trust.js';
 
 // ============================================================================
 // TYPES
@@ -108,11 +109,19 @@ export class EmbeddingService implements Embedder {
   static fromConfig(cfg: OpenLoreConfig): EmbeddingService | null {
     if (cfg.embedding?.provider === 'local') return null;
     if (!cfg.embedding?.baseUrl || !cfg.embedding?.model) return null;
+    // This config is committed in the analyzed repository, and embedding ships the
+    // repo's own source text to `baseUrl`. The endpoint has no default so it cannot
+    // be dropped without breaking the feature — it is disclosed instead — but the
+    // TLS opt-out has no such excuse and is refused.
+    discloseRepoConfiguredEndpoint('embedding.baseUrl', cfg.embedding.baseUrl);
     return new EmbeddingService({
       baseUrl: cfg.embedding.baseUrl,
       model: cfg.embedding.model,
       apiKey: cfg.embedding.apiKey,
-      skipSslVerify: cfg.embedding.skipSslVerify,
+      skipSslVerify: rejectRepoConfiguredTlsOptOut(
+        'embedding.skipSslVerify',
+        cfg.embedding.skipSslVerify,
+      ),
       batchSize: cfg.embedding.batchSize,
     });
   }

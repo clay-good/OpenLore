@@ -8,6 +8,7 @@
 import { writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import logger from '../../utils/logger.js';
+import { redactSecrets } from './secret-redaction.js';
 import { allowInsecureTls, withRelaxedTls } from './tls-scope.js';
 import {
   CLAUDE_MAX_CONTEXT_TOKENS,
@@ -342,6 +343,24 @@ interface RetryConfig {
  */
 function disableSslVerification(): void {
   allowInsecureTls('--insecure or llm.sslVerify=false');
+}
+
+/**
+ * Blank long opaque alphanumeric runs in the PROMPTS only.
+ *
+ * The shared redactor matches credential SHAPES (`sk-…`, `AIza…`, header forms). A
+ * prompt additionally carries the repository's own source text, where a hardcoded key
+ * for some provider OpenLore knows nothing about has no recognizable shape — so this
+ * keeps the blanket heuristic the removed private redactor applied. It stays scoped to
+ * the two prompt fields because it is lossy (it also blanks legitimate hashes), and a
+ * mangled response/error would make the log useless for its actual purpose.
+ */
+function blankLongOpaqueTokens(request: CompletionRequest): CompletionRequest {
+  const blank = (s: string): string =>
+    s
+      .replace(/(?:api[_-]?key|password|secret|token|auth)['":\s]*[=:]\s*['"]?[\w-]{20,}['"]?/gi, '[REDACTED]')
+      .replace(/['"]?[a-zA-Z0-9]{32,}['"]?/g, '[REDACTED]');
+  return { ...request, systemPrompt: blank(request.systemPrompt), userPrompt: blank(request.userPrompt) };
 }
 
 /**
@@ -1775,34 +1794,21 @@ export class LLMService {
    * Log request/response
    */
   private logRequest(request: CompletionRequest, response?: CompletionResponse, error?: string): void {
-    const logEntry = {
+    // Scrub the WHOLE entry, not just the request. `error` is the provider's response
+    // body verbatim (`HTTP ${status}: ${detail}`), and an OpenAI-compatible gateway
+    // that echoes the inbound request in its diagnostics puts the Authorization /
+    // x-api-key header we just sent into that text — which then lands in a file on
+    // disk. This is the channel mcp-security's "Secret Confinement Across All Output
+    // Paths" names ("or written artifact"), so it uses the shared redactor rather
+    // than a private, request-only copy that had drifted from it.
+    const logEntry = redactSecrets({
       timestamp: new Date().toISOString(),
-      request: this.redactSecrets(request),
+      request: blankLongOpaqueTokens(request),
       response,
       error,
-    };
+    });
 
     this.requestLog.push(logEntry);
-  }
-
-  /**
-   * Redact potential secrets from request
-   */
-  private redactSecrets(request: CompletionRequest): CompletionRequest {
-    const secretPatterns = [
-      /(?:api[_-]?key|password|secret|token|auth)['":\s]*[=:]\s*['"]?[\w-]{20,}['"]?/gi,
-      /['"]?[a-zA-Z0-9]{32,}['"]?/g, // Long alphanumeric strings
-    ];
-
-    let systemPrompt = request.systemPrompt;
-    let userPrompt = request.userPrompt;
-
-    for (const pattern of secretPatterns) {
-      systemPrompt = systemPrompt.replace(pattern, '[REDACTED]');
-      userPrompt = userPrompt.replace(pattern, '[REDACTED]');
-    }
-
-    return { ...request, systemPrompt, userPrompt };
   }
 
   /**
@@ -1847,13 +1853,16 @@ export class LLMService {
     const filename = `llm-log-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
     const filepath = join(this.options.logDir, filename);
 
+    // 0600: the log holds the full prompt corpus (i.e. the repository's source) and
+    // provider diagnostics. Redaction is the first defense; not leaving it
+    // world-readable to every other local process is the second.
     await writeFile(filepath, JSON.stringify({
       summary: {
         tokenUsage: this.tokenUsage,
         costTracking: this.costTracking,
       },
       requests: this.requestLog,
-    }, null, 2));
+    }, null, 2), { mode: 0o600 });
 
     logger.debug(`Saved LLM logs to ${filepath}`);
   }

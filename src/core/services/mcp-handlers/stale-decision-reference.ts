@@ -30,7 +30,7 @@ import { loadMemoryStore } from '../../decisions/memory-store.js';
 import { memoryFreshness, type GraphFreshnessView } from '../../decisions/anchor.js';
 import { AnchorContext } from '../../decisions/anchor-adapter.js';
 import { readOpenLoreConfig } from '../config-manager.js';
-import { validateDirectory } from './utils.js';
+import { validateDirectory, safeOpenspecDir } from './utils.js';
 
 /** Decision ids are sha1(...).slice(0,8) — exactly 8 lowercase-hex chars. */
 const DECISION_ID = /\b[0-9a-f]{8}\b/g;
@@ -310,8 +310,10 @@ export async function detectStaleDecisionReferences(directory: string): Promise<
   const freshnessOf = (m: AnchoredMemory): MemoryFreshness => memoryFreshness(m.anchors, view).freshness;
 
   try {
-    const openspecPath = config?.openspecPath ?? 'openspec';
-    const specsRoot = join(rootPath, openspecPath, 'specs');
+    // `openspecPath` comes from the repo's own `.openlore/config.json`, and this
+    // check runs from the pre-commit hook — so an unconfined join reads out-of-repo
+    // `.md` files on the victim's first commit in a hostile clone.
+    const specsRoot = join(safeOpenspecDir(rootPath, config?.openspecPath), 'specs');
     const specFiles = await collectSpecFiles(specsRoot);
     const specs = await Promise.all(
       specFiles.map(async (f) => ({
