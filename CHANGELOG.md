@@ -75,6 +75,18 @@ Dependency and workflow scanning now run automatically in CI.
 - Windows paths with backslashes no longer split incorrectly.
 - Four places where a tool reported `0` for something it had never actually computed.
 
+### Known issues
+
+Two defects an end-to-end pass found are **not** fixed here. Both are tracked and queued for the
+next release; neither is a regression from this one.
+
+- **The MCP stdio server doesn't exit when its client closes stdin**, once a call has started the
+  file watcher. Every agent session leaves a process holding a watcher and its caches. Workaround:
+  kill stray `openlore mcp` processes, or use `openlore serve`, which reaps itself when idle.
+- **A config missing its `analysis` section crashes `analyze`** with an internal `TypeError`, and
+  `doctor` reports that same config as healthy. If you hand-edit `.openlore/config.json`, keep the
+  `analysis` block — or re-run `openlore init`.
+
 ---
 
 **Upgrade:** `npm i -g openlore@2.1.7` — or `openlore update`.
