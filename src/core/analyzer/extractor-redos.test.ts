@@ -9,9 +9,9 @@
  * every JS/TS file in the repo. The extractors run under `Promise.all` on the main
  * thread during `analyze`, so one planted file stalls the whole run.
  *
- * These assert a WALL-CLOCK budget rather than an exact shape. The budgets are
- * ~100x the post-fix measurement, so they cannot flake on a slow CI box but still
- * fail loudly if an unbounded quantifier comes back.
+ * These assert a WALL-CLOCK budget rather than an exact shape. See `payload` for how
+ * the size and budget are chosen so the assertion cannot flake on a loaded CI box and
+ * still fails loudly if an unbounded quantifier comes back.
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
@@ -21,8 +21,16 @@ import { join } from 'node:path';
 import { parseJSImports, parseJSExports } from './import-parser.js';
 import { extractMiddleware } from './middleware-extractor.js';
 
-/** ~120 KB of an opening token with no closer — the whole attack. */
-function payload(token: string, bytes = 120_000): string {
+/**
+ * ~480 KB of an opening token with no closer — the whole attack.
+ *
+ * Sized deliberately: the cost is quadratic, so at this size the UNFIXED code takes
+ * tens of seconds while the fixed code stays in the low milliseconds. That gap is
+ * what makes a wall-clock assertion safe — the budget below sits ~100x above the
+ * fixed cost (so a loaded CI box cannot flake it) and well under the broken cost
+ * (so it still fails loudly if an unbounded quantifier returns).
+ */
+function payload(token: string, bytes = 480_000): string {
   return token.repeat(Math.ceil(bytes / token.length));
 }
 
@@ -32,7 +40,7 @@ function msToRun(fn: () => void): number {
   return performance.now() - t0;
 }
 
-const BUDGET_MS = 2000;
+const BUDGET_MS = 5000;
 
 let dir: string;
 let hostileFile: string;

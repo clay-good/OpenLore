@@ -187,7 +187,7 @@ export function parseJSImports(content: string): ImportInfo[] {
   }
 
   // ES Module: import X, { Y, Z } from 'module' (mixed import - default + named)
-  const mixedImportRegex = /import\s+(\w+)\s*,\s*\{([^}]{0,4000})\}\s+from\s+['"]([^'"]+)['"]/g;
+  const mixedImportRegex = /import\s+(\w+)\s*,\s*\{([^{}]{0,4000})\}\s+from\s+['"]([^'"]+)['"]/g;
   while ((match = mixedImportRegex.exec(cleanContent)) !== null) {
     const source = match[3];
     const names = [match[1], ...parseNamedImports(match[2])];
@@ -206,12 +206,14 @@ export function parseJSImports(content: string): ImportInfo[] {
   }
 
   // ES Module: import { X, Y } from 'module'
-  // The brace body is BOUNDED: an unbounded `[^}]+` rescans to end-of-file from every
-  // one of O(n) start positions when no `}` ever arrives, so a file of repeated
-  // `import {` costs quadratic time. This regex runs on every JS/TS file in the repo,
-  // which makes it the cheapest denial-of-service to plant in an analyzed repository.
-  // No real import list approaches 4000 characters.
-  const namedImportRegex = /import\s+\{([^}]{0,4000})\}\s+from\s+['"]([^'"]+)['"]/g;
+  // The brace body EXCLUDES `{` and is length-bounded. An unbounded `[^}]+` rescans to
+  // end-of-file from every one of O(n) start positions when no `}` ever arrives, so a
+  // file of repeated `import {` costs quadratic time — and this regex runs on every
+  // JS/TS file in the repo, making it the cheapest denial-of-service to plant in an
+  // analyzed repository. Excluding `{` is the load-bearing half (a named-import body
+  // cannot legally contain a brace, so the scan now stops at the next opener instead
+  // of running to EOF); the length bound is a second line of defense.
+  const namedImportRegex = /import\s+\{([^{}]{0,4000})\}\s+from\s+['"]([^'"]+)['"]/g;
   while ((match = namedImportRegex.exec(cleanContent)) !== null) {
     const source = match[2];
     const names = parseNamedImports(match[1]);
@@ -266,7 +268,7 @@ export function parseJSImports(content: string): ImportInfo[] {
   }
 
   // Type-only imports: import type { X } from 'module'
-  const typeImportRegex = /import\s+type\s+(?:\{([^}]{0,4000})\}|(\w+))\s+from\s+['"]([^'"]+)['"]/g;
+  const typeImportRegex = /import\s+type\s+(?:\{([^{}]{0,4000})\}|(\w+))\s+from\s+['"]([^'"]+)['"]/g;
   while ((match = typeImportRegex.exec(cleanContent)) !== null) {
     const source = match[3];
     const names = match[1] ? parseNamedImports(match[1]) : [match[2]];
@@ -285,7 +287,7 @@ export function parseJSImports(content: string): ImportInfo[] {
   }
 
   // CommonJS: require('module')
-  const requireRegex = /(?:const|let|var)\s+(?:(\w+)|\{([^}]{0,4000})\})\s*=\s*require\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
+  const requireRegex = /(?:const|let|var)\s+(?:(\w+)|\{([^{}]{0,4000})\})\s*=\s*require\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
   while ((match = requireRegex.exec(cleanContent)) !== null) {
     const source = match[3];
     const names = match[1] ? [match[1]] : parseNamedImports(match[2]);
@@ -360,7 +362,7 @@ export function parseJSExports(content: string): ExportInfo[] {
 
   // export { X, Y } or export { X } from 'module'
   // Bounded for the same reason as namedImportRegex above.
-  const namedExportRegex = /export\s+\{([^}]{0,4000})\}(?:\s+from\s+['"]([^'"]+)['"])?/g;
+  const namedExportRegex = /export\s+\{([^{}]{0,4000})\}(?:\s+from\s+['"]([^'"]+)['"])?/g;
   while ((match = namedExportRegex.exec(cleanContent)) !== null) {
     const names = parseNamedImports(match[1]);
     const reExportSource = match[2];
