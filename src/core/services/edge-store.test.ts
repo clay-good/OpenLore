@@ -484,6 +484,100 @@ describe('EdgeStore', () => {
     });
   });
 
+  // ── Pass-1 fact memo (optimize-hash-keyed-analyze) ────────────────────────────
+  describe('pass-1 fact memo', () => {
+    const row = (p: string, h = 'hash-1', facts = '{"v":1,"n":[],"e":[]}') =>
+      ({ filePath: p, contentHash: h, facts });
+
+    // The memo table is created on the ANALYZE path only (a read must never take the write
+    // lock — see the read-mode test below), so these exercise an analyze-mode handle.
+    beforeEach(() => {
+      store.close();
+      store = EdgeStore.openForAnalyze(dbPath);
+    });
+
+    it('serves a row only on an exact path + content + stamp match', () => {
+      store.putPass1Facts([row('src/a.ts')], 'stamp-1');
+      expect(store.getPass1Facts('src/a.ts', 'hash-1', 'stamp-1')).toBe('{"v":1,"n":[],"e":[]}');
+      expect(store.getPass1Facts('src/a.ts', 'hash-2', 'stamp-1')).toBeUndefined();
+      expect(store.getPass1Facts('src/a.ts', 'hash-1', 'stamp-2')).toBeUndefined();
+      expect(store.getPass1Facts('src/other.ts', 'hash-1', 'stamp-1')).toBeUndefined();
+    });
+
+    it('keeps one row per file — a re-extraction replaces, never accumulates', () => {
+      store.putPass1Facts([row('src/a.ts', 'hash-1')], 'stamp-1');
+      store.putPass1Facts([row('src/a.ts', 'hash-2')], 'stamp-1');
+      expect(store.countPass1Facts()).toBe(1);
+      expect(store.getPass1Facts('src/a.ts', 'hash-1', 'stamp-1')).toBeUndefined();
+      expect(store.getPass1Facts('src/a.ts', 'hash-2', 'stamp-1')).toBeDefined();
+    });
+
+    it('SURVIVES clearAll — it is the memo the rebuild depends on, not graph data', () => {
+      store.putPass1Facts([row('src/a.ts')], 'stamp-1');
+      store.clearAll();
+      expect(store.countNodes()).toBe(0);
+      expect(store.getPass1Facts('src/a.ts', 'hash-1', 'stamp-1')).toBeDefined();
+    });
+
+    it('prunes exactly the files that left the analyzed set', () => {
+      store.putPass1Facts([row('src/a.ts'), row('src/b.ts'), row('src/c.ts')], 'stamp-1');
+      expect(store.prunePass1Facts(['src/a.ts', 'src/c.ts'])).toBe(1);
+      expect(store.listPass1FactKeys().map(r => r.filePath)).toEqual(['src/a.ts', 'src/c.ts']);
+      expect(store.prunePass1Facts(['src/a.ts', 'src/c.ts'])).toBe(0);
+    });
+
+    /**
+     * A read must never become a writer. Adding a table a previously-built store lacks would
+     * make the first read-mode open after an upgrade take SQLite's write lock — so a tool
+     * call landing while a rebuild holds that lock would fail with `database is locked` on a
+     * path that never needed the lock before.
+     */
+    it('is NOT created by a read-mode open — reads never take the write lock', () => {
+      store.close();
+      // A store as a previous OpenLore left it: same schema version, no memo table.
+      const raw = new DatabaseSync(dbPath);
+      raw.exec('DROP TABLE IF EXISTS pass1_facts');
+      raw.close();
+
+      const reader = EdgeStore.open(dbPath);
+      try {
+        expect(reader.notReady).toBeNull();
+        expect(() => reader.countPass1Facts()).toThrow(); // absent, not silently created
+      } finally {
+        reader.close();
+      }
+      const check = new DatabaseSync(dbPath);
+      const present = check
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='pass1_facts'")
+        .get();
+      check.close();
+      expect(present).toBeUndefined();
+
+      // The analyze path is the one that creates it.
+      store = EdgeStore.openForAnalyze(dbPath);
+      expect(store.countPass1Facts()).toBe(0);
+    });
+
+    it('is dropped by a SCHEMA_VERSION bump — the conservative direction', () => {
+      store.putPass1Facts([row('src/a.ts')], 'stamp-1');
+      store.close();
+      const raw = new DatabaseSync(dbPath);
+      raw.exec(`UPDATE schema_version SET version = ${SCHEMA_VERSION - 1}`);
+      raw.close();
+
+      store = EdgeStore.openForAnalyze(dbPath);
+      expect(store.wasReset).toBe(true);
+      expect(store.countPass1Facts()).toBe(0);
+    });
+
+    it('pruning to an empty analyzed set clears it, and touches nothing else', () => {
+      store.putPass1Facts([row('src/a.ts')], 'stamp-1');
+      expect(store.prunePass1Facts([])).toBe(1);
+      expect(store.countPass1Facts()).toBe(0);
+      expect(store.getEdgesForFile('src/a.ts').outgoing.length).toBeGreaterThan(0);
+    });
+  });
+
   // ── Provenance (spec-18) ──────────────────────────────────────────────────────
   describe('provenance', () => {
     const rec = {

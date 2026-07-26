@@ -28,8 +28,10 @@
 
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 import { gzipSync, gunzipSync } from 'node:zlib';
-import { readFile, writeFile, readdir, mkdir, copyFile, rm, stat } from 'node:fs/promises';
+import { readFile, writeFile, readdir, mkdir, mkdtemp, copyFile, rm, stat } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join, basename, isAbsolute } from 'node:path';
 import {
   ARTIFACT_CALL_GRAPH_DB,
@@ -72,6 +74,22 @@ const EXCLUDED_FILES = new Set([
   `${ARTIFACT_CALL_GRAPH_DB}-shm`,
   'vector-index-meta.json',
 ]);
+
+/**
+ * Local-only debris that must never be bundled, matched by SHAPE rather than by exact name
+ * because the names carry a counter or a pid.
+ *
+ * These are copies of the graph store that this machine left beside the real one: a
+ * `*.corrupt-<n>` file preserved when a store was quarantined (`quarantineCorruptSync`), and
+ * a `*.export-<pid>` staging file from an export that was killed before it could clean up.
+ * Both are FULL, UNPROCESSED copies of a store — so bundling one does not merely bloat the
+ * artifact, it re-imports the local build cache that {@link LOCAL_CACHE_TABLES} exists to
+ * strip, and drops a corrupt or stale graph into the consumer's analysis directory where
+ * their own next export would pass it on again.
+ */
+function isLocalOnlyDebris(name: string): boolean {
+  return new RegExp(`^${ARTIFACT_CALL_GRAPH_DB.replace('.', '\\.')}\\.(corrupt|export)-`).test(name);
+}
 
 /**
  * Rebuildable search-index subdirectories cleared from the live analysis dir on import: they are
@@ -174,6 +192,93 @@ function attestExportedStore(dbPath: string): IndexAttestation {
 export interface BuildBundleResult {
   buffer: Buffer;
   manifest: BundleManifest;
+  /**
+   * Present only when something about the export degraded — today, that the graph store could
+   * not be staged for stripping, so the bundle carries this machine's extraction cache and is
+   * larger than it needs to be. RETURNED rather than logged: this module must not write to
+   * stdout, which is the JSON-RPC channel wherever it is imported by a server process. The
+   * CLI renders it, exactly as it does the extraction-lane note.
+   */
+  note?: string;
+}
+
+/**
+ * Tables that are a LOCAL BUILD CACHE rather than graph data, and are stripped from the
+ * exported store. A bundle is a portable graph index; `pass1_facts` (change:
+ * optimize-hash-keyed-analyze) is this machine's memo of what it has already parsed, worth
+ * ~44% of the compressed payload and useful to a consumer only under an exact
+ * commit-plus-version-plus-grammar match. Nothing downstream reads it: `import` materializes
+ * the graph, and the consumer's next `analyze` refills its own memo.
+ */
+const LOCAL_CACHE_TABLES = ['pass1_facts'];
+
+/**
+ * The graph store as it should travel: a compacted copy with {@link LOCAL_CACHE_TABLES}
+ * dropped. Works on a COPY so the live store is never mutated by an export, and stays
+ * byte-stable — `VACUUM` rebuilds the same file for the same rows, so exporting an unchanged
+ * index twice still produces identical bytes.
+ *
+ * The copy is staged in a private temp DIRECTORY by preference, not beside the original. Two
+ * reasons, and both are failure modes rather than tidiness:
+ *  - The analysis dir is the directory this exporter itself scans. A scratch file left there
+ *    by a killed export would be picked up by every later export as just another artifact —
+ *    and it is a full, UN-stripped copy of the store, so the leak would re-bundle the very
+ *    table this function exists to remove, into the consumer's analysis dir, forever.
+ *  - An open SQLite file grows `-wal`/`-shm` siblings for the duration, which would be
+ *    visible to a concurrent export scanning the same directory.
+ * `mkdtemp` also makes the path unique, so concurrent exports cannot collide on it.
+ *
+ * `os.tmpdir()` is not guaranteed usable, though (an unset or read-only `TMPDIR`, a full
+ * volume), and silently shipping the local build cache would be worse than staging next to the
+ * store — so there is a fallback that does exactly that, under a name {@link isLocalOnlyDebris}
+ * matches, so even a leaked one can never be bundled. Its name carries the pid AND a
+ * per-process counter, because unlike `mkdtemp` a fixed name would let two concurrent exports
+ * of the same directory delete each other's scratch mid-read.
+ *
+ * Fail-soft: if neither location works, the original bytes are bundled and the caller is told
+ * (`degraded`). A larger bundle is a cost; a failed export would be a regression.
+ */
+/** Distinguishes concurrent in-process fallback stagings, which share a pid. */
+let exportScratchSeq = 0;
+
+async function readStoreWithoutLocalCaches(
+  dbPath: string,
+): Promise<{ bytes: Buffer; degraded?: boolean }> {
+  // Preferred: a private temp directory. Fallback: beside the store, under a name
+  // `isLocalOnlyDebris` matches — because `os.tmpdir()` is not guaranteed to be usable
+  // (an unset or read-only `TMPDIR`, a full volume), and silently shipping the local build
+  // cache would be a worse outcome than staging next to the original. The analysis dir is
+  // writable by construction here: analyze just wrote the store into it.
+  for (const stageIn of [() => mkdtemp(join(tmpdir(), 'openlore-export-')), null]) {
+    let stage: string | undefined;
+    let scratch: string | undefined;
+    try {
+      if (stageIn) {
+        stage = await stageIn();
+        scratch = join(stage, basename(dbPath));
+      } else {
+        scratch = `${dbPath}.export-${process.pid}-${exportScratchSeq++}`;
+      }
+      await copyFile(dbPath, scratch);
+      const db = new DatabaseSync(scratch);
+      try {
+        for (const table of LOCAL_CACHE_TABLES) db.exec(`DROP TABLE IF EXISTS ${table}`);
+        db.exec('VACUUM');
+      } finally {
+        db.close();
+      }
+      return { bytes: await readFile(scratch) };
+    } catch {
+      continue; // try the next staging location
+    } finally {
+      if (stage) await rm(stage, { recursive: true, force: true }).catch(() => {});
+      else if (scratch) await rm(scratch, { force: true }).catch(() => {});
+    }
+  }
+  // Neither location worked. Bundling the store as-is keeps the export working; the memo
+  // rides along, which costs size only — never correctness, since a consumer's own analyze
+  // re-keys it against their own content and stamp. Disclosed rather than silent.
+  return { bytes: await readFile(dbPath), degraded: true };
 }
 
 /**
@@ -196,7 +301,7 @@ export async function buildBundle(analysisDir: string, openloreVersion: string):
 
   const entries = await readdir(analysisDir, { withFileTypes: true });
   const names = entries
-    .filter(e => e.isFile() && !EXCLUDED_FILES.has(e.name))
+    .filter(e => e.isFile() && !EXCLUDED_FILES.has(e.name) && !isLocalOnlyDebris(e.name))
     .map(e => e.name)
     .sort();
 
@@ -210,10 +315,21 @@ export async function buildBundle(analysisDir: string, openloreVersion: string):
   const payload: Record<string, string> = {};
   const manifestFiles: Array<{ name: string; bytes: number }> = [];
   const rawFiles: Array<{ name: string; bytes: Buffer }> = [];
+  let note: string | undefined;
   for (const name of names) {
-    const bytes = name === ARTIFACT_INDEX_ATTESTATION
-      ? freshAttestationBytes
-      : await readFile(join(analysisDir, name));
+    let bytes: Buffer;
+    if (name === ARTIFACT_INDEX_ATTESTATION) {
+      bytes = freshAttestationBytes;
+    } else if (name === ARTIFACT_CALL_GRAPH_DB) {
+      const stripped = await readStoreWithoutLocalCaches(dbPath);
+      bytes = stripped.bytes;
+      if (stripped.degraded) {
+        note = 'could not stage a stripped copy of the graph store — the bundle includes this '
+          + 'machine\'s extraction cache and is larger than necessary';
+      }
+    } else {
+      bytes = await readFile(join(analysisDir, name));
+    }
     payload[name] = bytes.toString('base64');
     manifestFiles.push({ name, bytes: bytes.length });
     rawFiles.push({ name, bytes });
@@ -232,7 +348,7 @@ export async function buildBundle(analysisDir: string, openloreVersion: string):
   // Fixed key order + sorted payload keys + fixed gzip level → byte-stable output.
   const json = JSON.stringify({ manifest, payload });
   const buffer = gzipSync(Buffer.from(json, 'utf-8'), { level: 9 });
-  return { buffer, manifest };
+  return { buffer, manifest, ...(note ? { note } : {}) };
 }
 
 /** True iff every required numeric count is present and finite (mirrors the attestation guard). */
@@ -349,6 +465,11 @@ export async function materializeBundle(bundle: Bundle, targetDir: string): Prom
     // Defense in depth: parseBundle already rejects unsafe names, but never write outside the
     // target dir even if a caller hands us an unvalidated bundle.
     if (!isSafeBundleFileName(name)) throw new BundleError('unreadable', `Unsafe bundled file name: ${JSON.stringify(name)}.`);
+    // Drop the producer's local-only debris. Exporters filter this out, but a bundle built by
+    // an OpenLore that predates that filter carries it — and materializing one would plant a
+    // full, un-stripped copy of THEIR store (extraction cache and all) permanently in this
+    // analysis dir. The graph itself is unaffected: nothing reads these names.
+    if (isLocalOnlyDebris(name)) continue;
     // Safe names are flat basenames (validated above), so no parent-dir creation is needed.
     await writeFile(join(targetDir, name), Buffer.from(b64, 'base64'));
   }

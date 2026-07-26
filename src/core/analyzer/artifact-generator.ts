@@ -43,6 +43,7 @@ import type { EnvVar } from './env-extractor.js';
 // same shared definition so the two can no longer drift.
 export { isTestFile } from './test-file.js';
 import { isTestFile } from './test-file.js';
+import { describePass1Cache, type BufferedPass1FactCache } from './pass1-fact-cache.js';
 
 /**
  * Deterministically shuffle `items`, seeded from a hash of the sorted string keys.
@@ -233,6 +234,25 @@ export interface AnalysisArtifacts {
    * only the CLI renders it.
    */
   extractionLaneNote?: string;
+  /**
+   * A one-line note naming how many files reused memoized Pass-1 facts, how many were
+   * re-extracted, and — when nothing was reused — why (change: optimize-hash-keyed-analyze).
+   * Set whenever a memo was consulted; unlike the lane note this is not a degradation report
+   * but the standing disclosure that keeps the reused lane from being silent.
+   *
+   * RETURNED, never logged, for the same stdout reason as {@link extractionLaneNote}: this
+   * code path also runs inside the stdio MCP server. Today only the CLI epilogue renders it,
+   * so an embedded caller that wants the disclosure must read it from here — exactly as with
+   * {@link extractionLaneNote}.
+   */
+  pass1CacheNote?: string;
+}
+
+/** Pass-1 memo rows to persist, plus the live path set the memo is pruned against. */
+interface Pass1MemoWrite {
+  stamp: string;
+  rows: Array<{ filePath: string; contentHash: string; facts: string }>;
+  analyzedPaths: string[];
 }
 
 /**
@@ -260,6 +280,19 @@ export interface ArtifactGeneratorOptions {
   maxValidationFiles?: number;
   /** Approximate tokens per character for estimation */
   tokensPerChar?: number;
+  /**
+   * Re-extract every file instead of reusing memoized Pass-1 facts, then repopulate the memo
+   * (change: optimize-hash-keyed-analyze). The reference output the reused lane is verified
+   * against.
+   *
+   * Deliberately NOT called `force`. "Force" already means "do not skip this run" to every
+   * caller that has one, and most of those callers — a daemon rebuilding after an edit batch,
+   * a watcher healing a stale store — want exactly the re-analysis and none of the re-parsing.
+   * Conflating the two would have removed the benefit from precisely the incremental workload
+   * this exists for. `analyze --force` on the command line sets both, because a human typing
+   * it is asking to trust nothing.
+   */
+  reExtract?: boolean;
 }
 
 /**
@@ -319,6 +352,14 @@ export class AnalysisArtifactGenerator {
   private _parseHealth?: ParseHealthReport;
   /** Pass-1 extraction-lane degradation note from the last generateLLMContext, if any. */
   private _extractionLaneNote?: string;
+  /**
+   * Pass-1 memo rows produced by the last generateLLMContext, plus the paths that were
+   * analyzed (so rows for deleted files can be pruned). Persisted by generateAndSave through
+   * the same store handle that rebuilds the graph (change: optimize-hash-keyed-analyze).
+   */
+  private _pass1Memo?: Pass1MemoWrite;
+  /** Files reused vs. re-extracted on the last build — surfaced by the analyze summary. */
+  private _pass1CacheNote?: string;
 
   constructor(options: ArtifactGeneratorOptions) {
     this.options = {
@@ -327,6 +368,7 @@ export class AnalysisArtifactGenerator {
       maxDeepAnalysisFiles: options.maxDeepAnalysisFiles ?? 20,
       maxValidationFiles: options.maxValidationFiles ?? 5,
       tokensPerChar: options.tokensPerChar ?? TOKENS_PER_CHAR_DEFAULT,
+      reExtract: options.reExtract ?? false,
     };
   }
 
@@ -352,6 +394,7 @@ export class AnalysisArtifactGenerator {
       styleFingerprint: this._styleFingerprint,
       parseHealth: this._parseHealth,
       extractionLaneNote: this._extractionLaneNote,
+      pass1CacheNote: this._pass1CacheNote,
     };
   }
 
@@ -464,13 +507,21 @@ export class AnalysisArtifactGenerator {
     });
 
     // Write SQLite edge store alongside JSON artifacts (additive, non-fatal)
-    if (artifacts.llmContext.callGraph) {
-      try {
+    try {
+      if (artifacts.llmContext.callGraph) {
         const dbPath = join(this.options.outputDir, ARTIFACT_CALL_GRAPH_DB);
-        await writeEdgesToSQLite(artifacts.llmContext.callGraph, dbPath, this.options.rootDir, artifacts.llmContext.cfgs);
-      } catch {
-        // Non-fatal — JSON artifacts are the source of truth
+        await writeEdgesToSQLite(
+          artifacts.llmContext.callGraph, dbPath, this.options.rootDir, artifacts.llmContext.cfgs,
+          this._pass1Memo,
+        );
       }
+    } catch {
+      // Non-fatal — JSON artifacts are the source of truth
+    } finally {
+      // Release the serialized memo rows unconditionally: on a cold or forced build they are
+      // the whole corpus (tens of MB), and nothing after this point — continuity
+      // carry-forward, the dependency-graph write, the fingerprint — has any use for them.
+      this._pass1Memo = undefined;
     }
 
     return artifacts;
@@ -1308,9 +1359,24 @@ export class AnalysisArtifactGenerator {
       }
     }
 
-    // Build call graph
-    const builder = new CallGraphBuilder();
-    const callGraphResult = await builder.build(callGraphFiles);
+    // Build call graph. Pass-1 extraction consults the per-file fact memo (change:
+    // optimize-hash-keyed-analyze) so an unchanged file is not re-parsed: the memo is read
+    // through a READ-mode store handle, which never mutates the store on a schema mismatch or
+    // a corrupt DB — both simply read as "no memo", costing a full extraction and nothing
+    // else. Writes are buffered and persisted by generateAndSave through the same handle that
+    // rebuilds the graph.
+    const memo = await this.openPass1Memo();
+    let callGraphResult: import('./call-graph.js').CallGraphResult;
+    try {
+      const builder = new CallGraphBuilder(memo ? { pass1Cache: memo.cache } : {});
+      callGraphResult = await builder.build(callGraphFiles);
+    } finally {
+      memo?.close();
+    }
+    this._pass1Memo = memo
+      ? { ...memo.cache.take(), analyzedPaths: callGraphFiles.map(f => f.path) }
+      : undefined;
+    this._pass1CacheNote = describePass1Cache(callGraphResult.pass1Cache);
     // Stash the lane note for the CLI to render. Never logged from here: this code path
     // also runs inside the stdio MCP server (change: optimize-parallel-extraction-pool).
     this._extractionLaneNote = callGraphResult.extractionLane
@@ -1427,6 +1493,75 @@ export class AnalysisArtifactGenerator {
     };
   }
 
+  /**
+   * Open the Pass-1 fact memo for one build (change: optimize-hash-keyed-analyze), or
+   * `undefined` when there is nothing to memoize against and nothing to gain.
+   *
+   * Every failure mode here degrades to "extract everything", which is exactly today's
+   * behavior — the memo is an optimization and is never allowed to be the reason a build
+   * fails or answers differently. But each mode NAMES itself (`noReuseReason`) so the
+   * epilogue can tell an operator who asked for a full re-extraction apart from one whose
+   * memo is quietly unavailable. Even a bypassed memo still buffers writes, so a forced run
+   * REPOPULATES it rather than leaving the next run to pay full price.
+   */
+  private async openPass1Memo(): Promise<{ cache: BufferedPass1FactCache; close: () => void } | undefined> {
+    const { BufferedPass1FactCache, computeExtractorStamp, factCacheDisabledByEnv } =
+      await import('./pass1-fact-cache.js');
+    const { EdgeStore } = await import('../services/edge-store.js');
+    const requested = this.options.reExtract || factCacheDisabledByEnv();
+
+    let stamp: string;
+    try {
+      stamp = computeExtractorStamp();
+    } catch {
+      // No trustworthy stamp means nothing may be reused AND nothing may be written under a
+      // key that cannot be reproduced. Still return a cache, with no storage and no writes to
+      // persist, so the epilogue reports the cause instead of falling silent — this is the
+      // failure that most needs saying out loud.
+      return { cache: new BufferedPass1FactCache(null, '', 'no-stamp'), close: () => {} };
+    }
+
+    // No store yet (a first-ever analyze) means no rows to read. Opening one here would
+    // create an empty graph DB before the graph exists, which a concurrent reader would see
+    // as an index that is present and empty — the one thing the store lifecycle forbids.
+    if (!EdgeStore.exists(this.options.outputDir)) {
+      return {
+        cache: new BufferedPass1FactCache(null, stamp, requested ? 'requested' : 'no-index-yet'),
+        close: () => {},
+      };
+    }
+    try {
+      const store = EdgeStore.open(EdgeStore.dbPath(this.options.outputDir));
+      const close = (): void => { try { store.close(); } catch { /* already closed */ } };
+      try {
+        // A not-ready store (schema mismatch / quarantined corruption) must not be queried,
+        // and an index that predates the memo — or came from a bundle, which strips it — has
+        // no table to query. Both are whole-store conditions, established once here rather
+        // than rediscovered as a swallowed error on every file. Either way the write buffer
+        // is kept, so this run leaves the memo behind for the next one.
+        const reason = requested
+          ? 'requested'
+          : store.notReady
+            ? 'index-not-ready'
+            : store.hasPass1Facts() ? undefined : 'memo-absent';
+        return {
+          cache: new BufferedPass1FactCache(store.notReady ? null : store, stamp, reason),
+          close,
+        };
+      } catch (err) {
+        // The handle is open but unusable — close it here, or it leaks for the life of the
+        // process (which, in the serve/MCP daemon, is every analyze it ever runs).
+        close();
+        throw err;
+      }
+    } catch {
+      return {
+        cache: new BufferedPass1FactCache(null, stamp, requested ? 'requested' : 'store-unreadable'),
+        close: () => {},
+      };
+    }
+  }
+
 }
 
 // ============================================================================
@@ -1443,6 +1578,7 @@ export async function writeEdgesToSQLite(
   dbPath: string,
   rootPath?: string,
   cfgs?: Array<{ functionId: string; filePath: string; cfg: import('./cfg.js').FunctionCfg }>,
+  pass1Memo?: Pass1MemoWrite,
 ): Promise<void> {
   const { EdgeStore } = await import('../services/edge-store.js');
   // Analyze/write path: this is the one site allowed to drop-and-rebuild on a
@@ -1537,6 +1673,28 @@ export async function writeEdgesToSQLite(
         if (coupling.churn.size > 0) store.insertChangeCoupling(coupling);
       } catch {
         // Change-coupling is additive and local-only; never block the graph write.
+      }
+    }
+
+    // Persist the Pass-1 fact memo (change: optimize-hash-keyed-analyze) through the handle
+    // that just rebuilt the graph, so the memo and the graph it produced are written in the
+    // same operation and cannot disagree about which revision they describe. `clearAll` above
+    // deliberately left the memo intact; here it is REPLACED for every re-extracted file and
+    // PRUNED for every file that left the analyzed set — a deleted file leaves no facts a
+    // later run could serve. Additive + best-effort: losing the memo costs the next run a
+    // full extraction, never a wrong answer.
+    if (pass1Memo) {
+      try {
+        // One transaction: replace-then-prune is a single "the memo now describes THIS tree"
+        // step, and a crash between the halves would otherwise leave rows for files that are
+        // gone (harmless — they are key-guarded and never looked up — but it would make the
+        // sentence above literally untrue).
+        store.transaction(() => {
+          store.putPass1Facts(pass1Memo.rows, pass1Memo.stamp);
+          store.prunePass1Facts(pass1Memo.analyzedPaths);
+        });
+      } catch {
+        // A memo that cannot be written is simply a memo the next run will not find.
       }
     }
 

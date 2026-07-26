@@ -37,7 +37,8 @@ import { tallyParseHealth, type FileParseHealth, type ParseHealthNode } from './
 // Pass-1 extraction lane (change: optimize-parallel-extraction-pool). The pool holds no
 // extraction logic of its own — it dispatches `dispatchFileExtract` to worker threads and
 // merges by input index, with the serial loop as both reference and fallback.
-import { extractFilesForPass1, type ExtractionLaneOptions } from './extraction-pool.js';
+import { extractFilesForPass1, type ExtractionLaneOptions, type ExtractOutcome } from './extraction-pool.js';
+import type { Pass1FactCache, Pass1CacheDisclosure } from './pass1-fact-cache.js';
 
 // ============================================================================
 // TYPES — extracted to ./call-graph-types.ts and re-exported here so this file
@@ -61,6 +62,7 @@ import type {
   SerializedCallGraph,
   AmbiguousCallSite,
   AmbiguousStrategy,
+  FileExtractResult,
 } from './call-graph-types.js';
 import { classifyLayerEdge, AMBIGUOUS_CANDIDATE_CAP } from './call-graph-types.js';
 
@@ -99,6 +101,7 @@ export type {
   SerializedCallGraph,
   AmbiguousCallSite,
   AmbiguousStrategy,
+  FileExtractResult,
 } from './call-graph-types.js';
 export { CALL_DISTANCE_COSTS, callDistance, layerOf, classifyLayerEdge, AMBIGUOUS_CANDIDATE_CAP } from './call-graph-types.js';
 // Re-export the extracted complexity estimator so it stays importable from call-graph.ts.
@@ -3978,13 +3981,23 @@ export interface CallGraphBuilderOptions {
    * pool whose completion order and failure modes are deterministic.
    */
   extraction?: ExtractionLaneOptions;
+  /**
+   * Memo of per-file Pass-1 facts (change: optimize-hash-keyed-analyze). When supplied, a file
+   * whose content and extractor stamp match a stored row skips extraction entirely and its
+   * cached facts are merged in its input position — the merge, and therefore every downstream
+   * pass, cannot tell the two apart. Absent (the watcher's per-file rebuilds, tests, any
+   * embedded caller) means today's behavior: extract everything.
+   */
+  pass1Cache?: Pass1FactCache;
 }
 
 export class CallGraphBuilder {
   private readonly extractionOptions: CallGraphBuilderOptions['extraction'];
+  private readonly pass1Cache: Pass1FactCache | undefined;
 
   constructor(options: CallGraphBuilderOptions = {}) {
     this.extractionOptions = options.extraction;
+    this.pass1Cache = options.pass1Cache;
   }
 
   /**
@@ -4023,19 +4036,73 @@ export class CallGraphBuilder {
     // input order, so worker scheduling can never reach the graph. Every determinism
     // property downstream (node overwrite order, raw-edge sequence) is a property of this
     // loop, not of the extraction lane.
-    const { outcomes: extractOutcomes, disclosure: extractionLane } = await extractFilesForPass1(
-      files,
+    // A supplied memo removes files from the extraction input entirely (change:
+    // optimize-hash-keyed-analyze). The reused facts are spliced back into their INPUT
+    // positions below, so the merge loop — and every determinism property it owns — runs
+    // over the same sequence it would have run over with no cache at all.
+    const cache = this.pass1Cache;
+    const reusedFacts: Array<{ facts: FileExtractResult | undefined } | undefined> = new Array(files.length);
+    const toExtract: Array<{ path: string; content: string; language: string }> = [];
+    const toExtractAt: number[] = [];
+    if (cache) {
+      for (let i = 0; i < files.length; i++) {
+        const hit = cache.lookup(files[i]);
+        if (hit) reusedFacts[i] = hit;
+        else { toExtract.push(files[i]); toExtractAt.push(i); }
+      }
+    } else {
+      for (let i = 0; i < files.length; i++) { toExtract.push(files[i]); toExtractAt.push(i); }
+    }
+
+    const { outcomes: laneOutcomes, disclosure: extractionLane } = await extractFilesForPass1(
+      toExtract,
       dispatchFileExtract,
       isEmptyExtractResult,
       this.extractionOptions ?? {},
     );
 
+    const extractOutcomes: Array<ExtractOutcome<FileExtractResult>> = new Array(files.length);
+    for (let i = 0; i < files.length; i++) {
+      const hit = reusedFacts[i];
+      if (hit) extractOutcomes[i] = { status: 'ok', value: hit.facts };
+    }
+    for (let i = 0; i < toExtractAt.length; i++) extractOutcomes[toExtractAt[i]] = laneOutcomes[i];
+
+    /** Extracted files the memo refused to store — counted so the epilogue can say so. */
+    let uncacheable = 0;
+
     for (let fileIndex = 0; fileIndex < files.length; fileIndex++) {
       const file = files[fileIndex];
       const outcome = extractOutcomes[fileIndex];
+      /** Did this file's facts reach the memo? Read by the catch, which runs AFTER the record. */
+      let memoized = false;
       try {
         if (outcome.status === 'error') throw outcome.error;
         const result = outcome.value;
+        // Record what a FRESH extraction produced, before the relabeling below mutates it,
+        // so the stored facts are exactly the extractor's own answer.
+        //
+        // Two answers are deliberately NOT recorded, both for the same reason — the memo is
+        // permanent, so it must never freeze an answer the process might not be able to
+        // reproduce:
+        //
+        //  - A file that THREW. A deterministic parse failure costs the same on every run;
+        //    a transient one must not become permanent.
+        //  - A result carrying NO FACTS AT ALL. This is the pool's "never trust an unproven
+        //    silence" rule (see extraction-pool.ts), and it matters more here than there.
+        //    The extractors report an unloadable grammar by returning an EMPTY result rather
+        //    than throwing, and grammar loadability is a property of the RUNNING PROCESS
+        //    (Node ABI, prebuilt binaries, a transient dlopen failure) that no content hash
+        //    or code digest can see. Persisting one empty result would serve an empty graph
+        //    from cache forever, and a repaired environment would never undo it. An
+        //    genuinely empty file costs one re-parse per run instead — exactly today's cost.
+        //
+        // `undefined` (a language with no extractor) is NOT emptiness: it is a decision made
+        // by the dispatch code, which the stamp does cover, so it is recorded.
+        if (cache && reusedFacts[fileIndex] === undefined) {
+          if (isEmptyExtractResult(result)) uncacheable++;
+          else { cache.record(file, result); memoized = true; }
+        }
         if (!result) continue;
 
         // Compute startLine (1-based) from byte offset — cheap, done once at build time
@@ -4071,6 +4138,10 @@ export class CallGraphBuilder {
           parseHealthByFile.set(file.path, result.parseHealth);
         }
       } catch (error) {
+        // A throw is never memoized either (see above), so it re-extracts on every run —
+        // unless the record already happened and the throw came from the MERGE below it, in
+        // which case a row exists and counting it would misreport a cached file as uncacheable.
+        if (cache && reusedFacts[fileIndex] === undefined && !memoized) uncacheable++;
         // A file that threw here contributed ZERO nodes/edges — the "swallowed parse failure" leak.
         // Record it as a structured parse-health failure so downstream conclusions disclose it
         // instead of treating the missing symbols as genuinely absent (change:
@@ -4093,6 +4164,15 @@ export class CallGraphBuilder {
         }
       }
     }
+
+    const pass1Cache: Pass1CacheDisclosure | undefined = cache
+      ? {
+          reused: files.length - toExtract.length,
+          extracted: toExtract.length,
+          uncacheable,
+          ...(cache.noReuseReason ? { noReuseReason: cache.noReuseReason } : {}),
+        }
+      : undefined;
 
     // Pass 2: Resolve raw edges — multi-strategy resolution
     const trie = new FunctionRegistryTrie();
@@ -4808,6 +4888,7 @@ export class CallGraphBuilder {
       parseHealthByFile: parseHealthByFile.size > 0 ? parseHealthByFile : undefined,
       ambiguousSites: ambiguousSites.length > 0 ? ambiguousSites : undefined,
       extractionLane,
+      pass1Cache,
     };
   }
 
@@ -4870,15 +4951,6 @@ function assignClassStableIds(classes: ClassNode[]): void {
     if (sid) c.stableId = sid;
   }
 }
-
-/** The per-file result of Pass-1 extraction (before cross-file resolution). */
-export type FileExtractResult = {
-  nodes: FunctionNode[];
-  rawEdges: RawEdge[];
-  cfg?: Map<string, FunctionCfg>;
-  style?: FileStyleRaw;
-  parseHealth?: FileParseHealth;
-};
 
 /**
  * Dispatch ONE file to its per-language extractor (Pass-1 only — nodes/edges/cfg/style/parseHealth,

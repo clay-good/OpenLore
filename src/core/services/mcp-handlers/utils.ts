@@ -485,7 +485,7 @@ export async function readCachedContext(directory: string, timeout?: number): Pr
  * Wait for graph rebuild to complete after schema mismatch.
  *
  * When a schema version change is detected, EdgeStore resets itself and
- * McpWatcher spawns a background `openlore analyze --force`. This helper
+ * McpWatcher spawns a background `openlore analyze --reanalyze`. This helper
  * polls until the rebuild completes (edgeStore is populated) or timeout.
  *
  * Used by graph tools (analyze_impact, trace_execution_path) to auto-heal

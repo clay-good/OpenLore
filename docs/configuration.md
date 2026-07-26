@@ -45,6 +45,16 @@
 | `OPENLORE_NO_UPDATE_NOTIFIER` | -- | Silence the passive "update available" banner (`NO_UPDATE_NOTIFIER` is also honored) |
 | `OPENLORE_SKIP_POSTINSTALL` | -- | Suppress the post-install next-step hint |
 | `OPENLORE_NO_WORKERS` | `analyze` | Run per-file extraction on a single thread instead of the worker pool. Both lanes produce byte-identical analysis output, so this only costs wall-clock — set it to isolate a worker-related problem, or in an environment where extra threads are unwelcome |
+| `OPENLORE_NO_FACT_CACHE` | `analyze` | Re-extract every file instead of reusing the per-file extraction cache, exactly as `--force` does (and, like `--force`, the cache is refilled afterwards). Both lanes produce byte-identical analysis output, so this only costs wall-clock — reach for it when a CLI flag is not available, e.g. from an embedded caller |
+
+> **The extraction cache costs disk.** `analyze` memoizes each file's extracted facts inside
+> `call-graph.db`, keyed by content hash, so a later run re-parses only what changed. It is
+> the largest table in the store — roughly **10 MB per 800 source files** (about +55% on the
+> graph index). It is a pure cache: deleting `.openlore/analysis/` reclaims it and costs only
+> time, never correctness. (`analyze --force` re-extracts everything and then *refills* the
+> cache, so it reclaims nothing — it is the correctness escape, not the disk one.) The cache
+> is stripped from `openlore export` bundles, which carry the graph and not this machine's
+> build cache.
 
 > The `EMBED_*` variables configure the **remote** embedding provider only. For on-device embeddings with no endpoint or key, run `openlore embed --local` (or set `embedding.provider: "local"` in `.openlore/config.json`). Keyword (BM25) search is the first-class default and needs none of these. See [docs/semantic-search.md](semantic-search.md#retrieval-modes) for the full embedding/retrieval-mode reference.
 

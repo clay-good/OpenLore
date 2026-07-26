@@ -143,6 +143,7 @@ export class EdgeStore {
         DROP TABLE IF EXISTS nodes;
         DROP TABLE IF EXISTS classes;
         DROP TABLE IF EXISTS file_hashes;
+        DROP TABLE IF EXISTS pass1_facts;
         DROP TABLE IF EXISTS decisions;
         DROP TABLE IF EXISTS decision_edges;
         DROP TABLE IF EXISTS provenance;
@@ -310,6 +311,35 @@ export class EdgeStore {
         marked_at  INTEGER NOT NULL
       );
     `);
+
+    // Memoized Pass-1 extraction facts (change: optimize-hash-keyed-analyze). One row per
+    // file: the extractor's own output for EXACTLY this content, under EXACTLY this extractor
+    // stamp. A row is served only on a three-way key match, so a changed file, a changed
+    // extractor, or a changed grammar set all miss and re-extract.
+    //
+    // This is a CACHE, not graph data: it is deliberately excluded from clearAll() (a rebuild
+    // patches the memo rather than destroying the thing that makes it cheap), and dropping it
+    // costs only time. Every analyze REPLACES the rows for files it re-extracted and PRUNES
+    // the rows for files that left the analyzed set. A SCHEMA_VERSION bump drops it with
+    // everything else, which is the conservative direction.
+    //
+    // Created on the ANALYZE path only, and deliberately outside the block above. Adding a
+    // table that a store built by a previous OpenLore does not have would make the FIRST
+    // read-mode open after an upgrade take SQLite's write lock — turning a read into a
+    // writer, contradicting `EdgeStore.open`'s "never mutates the store" contract, and
+    // letting a tool call fail with `database is locked` while a rebuild holds it. A legacy
+    // store simply has no table to read; the memo treats that as a miss (see
+    // `BufferedPass1FactCache.lookup`) and the next analyze creates it.
+    if (mode === 'analyze') {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS pass1_facts (
+          file_path       TEXT PRIMARY KEY,
+          content_hash    TEXT NOT NULL,
+          extractor_stamp TEXT NOT NULL,
+          facts           TEXT NOT NULL  -- JSON FileExtractResult, or the JSON literal null
+        );
+      `);
+    }
   }
 
   // ── Edge queries ──────────────────────────────────────────────────────────────
@@ -939,6 +969,82 @@ export class EdgeStore {
       .run(filePath, hash, Date.now());
   }
 
+  // ── Pass-1 fact memo (optimize-hash-keyed-analyze) ────────────────────────────
+
+  /**
+   * The memoized Pass-1 facts for this file, but ONLY on an exact three-way key match:
+   * same path, same content, same extractor stamp. Anything else — including a row written
+   * by a different OpenLore or a different grammar set — reads as absent, which costs a
+   * re-extraction and never a wrong answer.
+   */
+  getPass1Facts(filePath: string, contentHash: string, stamp: string): string | undefined {
+    const row = this.db
+      .prepare('SELECT facts FROM pass1_facts WHERE file_path = ? AND content_hash = ? AND extractor_stamp = ?')
+      .get(filePath, contentHash, stamp) as { facts: string } | undefined;
+    return row?.facts;
+  }
+
+  /**
+   * Persist freshly extracted facts. One row per file (the path is the primary key), so a
+   * re-extraction REPLACES the previous content's row rather than accumulating a row per
+   * historical revision — the memo tracks the working tree, not its history.
+   */
+  putPass1Facts(rows: ReadonlyArray<{ filePath: string; contentHash: string; facts: string }>, stamp: string): void {
+    if (rows.length === 0) return;
+    const stmt = this.db.prepare(
+      'INSERT OR REPLACE INTO pass1_facts (file_path, content_hash, extractor_stamp, facts) VALUES (?, ?, ?, ?)'
+    );
+    runTransaction(this.db, () => {
+      for (const r of rows) stmt.run(r.filePath, r.contentHash, stamp, r.facts);
+    });
+  }
+
+  /**
+   * Does this store carry the Pass-1 memo at all? False for an index built before the memo
+   * existed, or materialized from a bundle (which strips it) — a whole-store condition worth
+   * naming once rather than rediscovering as a swallowed error on every file.
+   */
+  hasPass1Facts(): boolean {
+    return this.db
+      .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pass1_facts' LIMIT 1")
+      .get() !== undefined;
+  }
+
+  /**
+   * The KEYS of every memoized file — path, content hash, stamp — never the payloads, so
+   * this stays cheap enough to call for an inventory. Deterministically ordered.
+   */
+  listPass1FactKeys(): Array<{ filePath: string; contentHash: string; stamp: string }> {
+    return (
+      this.db
+        .prepare('SELECT file_path, content_hash, extractor_stamp FROM pass1_facts ORDER BY file_path')
+        .all() as unknown as Array<{ file_path: string; content_hash: string; extractor_stamp: string }>
+    ).map((r) => ({ filePath: r.file_path, contentHash: r.content_hash, stamp: r.extractor_stamp }));
+  }
+
+  /**
+   * Drop memo rows for files that are no longer in the analyzed set — a deleted file must
+   * leave no facts behind that a later run could serve. Diffed in JS rather than with a
+   * `NOT IN (…)` of every live path, which would be a parameter list the size of the repo.
+   * Returns the number of rows removed.
+   */
+  prunePass1Facts(keepPaths: Iterable<string>): number {
+    const keep = keepPaths instanceof Set ? keepPaths : new Set(keepPaths);
+    const drop = this.listPass1FactKeys().map((r) => r.filePath).filter((p) => !keep.has(p));
+    if (drop.length === 0) return 0;
+    const stmt = this.db.prepare('DELETE FROM pass1_facts WHERE file_path = ?');
+    runTransaction(this.db, () => {
+      for (const p of drop) stmt.run(p);
+    });
+    return drop.length;
+  }
+
+  /** How many files currently hold memoized Pass-1 facts. */
+  countPass1Facts(): number {
+    const row = this.db.prepare('SELECT COUNT(*) as n FROM pass1_facts').get() as { n: number };
+    return row.n;
+  }
+
   // ── Explicit stale region (fix-transitive-incremental-staleness) ───────────────
 
   /**
@@ -984,7 +1090,17 @@ export class EdgeStore {
     return row.n;
   }
 
-  /** Drop all graph data — used by full analyze rebuild. */
+  /**
+   * Drop all graph data — used by the full analyze rebuild.
+   *
+   * `pass1_facts` is deliberately NOT cleared (change: optimize-hash-keyed-analyze). It holds
+   * no graph data: it is the per-file extraction memo that makes the very rebuild running
+   * here cost only the diff, and wiping it would make every rebuild a full re-parse again.
+   * The rebuild REPLACES the rows for files it re-extracted and prunes the rows for files
+   * that are gone, so the memo never outlives the tree it describes. There is no separate
+   * eviction call: `analyze --force` rewrites every row, deleting the analysis directory
+   * removes it with the index, and a SCHEMA_VERSION bump drops it with everything else.
+   */
   clearAll(): void {
     this.db.exec('DELETE FROM edges; DELETE FROM inheritance_edges; DELETE FROM nodes; DELETE FROM classes; DELETE FROM nodes_fts; DELETE FROM file_hashes; DELETE FROM decisions; DELETE FROM decision_edges; DELETE FROM provenance; DELETE FROM change_coupling; DELETE FROM cfg_overlay; DELETE FROM stale_files;');
   }

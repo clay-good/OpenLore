@@ -106,6 +106,168 @@ describe('index-bundle: export', () => {
     expect(Buffer.compare(a.buffer, b.buffer)).toBe(0);
   });
 
+  /**
+   * A bundle is a portable GRAPH index. The Pass-1 fact memo (change:
+   * optimize-hash-keyed-analyze) is this machine's record of what it has already parsed —
+   * ~44% of the compressed payload, and useful to a consumer only under an exact
+   * commit-plus-version-plus-grammar match. It must not ride along, and stripping it must
+   * leave the live store untouched.
+   */
+  it('strips the local Pass-1 fact memo, without mutating the exported store', async () => {
+    const src = join(work, 'with-memo');
+    await buildAnalysisDir(src, 'abc1234');
+    const dbPath = join(src, ARTIFACT_CALL_GRAPH_DB);
+
+    const store = EdgeStore.openForAnalyze(dbPath);
+    try {
+      store.putPass1Facts(
+        Array.from({ length: 40 }, (_, i) => ({
+          filePath: `src/f${i}.ts`,
+          contentHash: `hash-${i}`,
+          facts: JSON.stringify({ v: 1, n: [], e: [], s: { filler: 'x'.repeat(2000) } }),
+        })),
+        'stamp-1',
+      );
+      expect(store.countPass1Facts()).toBe(40);
+    } finally {
+      store.close();
+    }
+
+    const { buffer } = await buildBundle(src, VERSION);
+    const target = join(work, 'materialized');
+    await materializeBundle(parseBundle(buffer), target);
+
+    const exported = EdgeStore.openForAnalyze(join(target, ARTIFACT_CALL_GRAPH_DB));
+    try {
+      expect(exported.countPass1Facts()).toBe(0);       // the memo did not travel
+      expect(exported.countNodes()).toBeGreaterThan(0); // the graph did
+    } finally {
+      exported.close();
+    }
+
+    // The live store still has its memo — an export is a read, not a cache eviction.
+    const live = EdgeStore.openForAnalyze(dbPath);
+    try {
+      expect(live.countPass1Facts()).toBe(40);
+    } finally {
+      live.close();
+    }
+  });
+
+  /**
+   * The analysis directory accumulates FULL, UNPROCESSED copies of the graph store that
+   * belong to this machine alone: a `*.corrupt-<n>` preserved when a store was quarantined,
+   * and a `*.export-<pid>` left by an export that was killed before it could clean up.
+   * Bundling one does not merely bloat the artifact — it re-imports the local build cache the
+   * strip exists to remove, and drops a corrupt or stale graph into the consumer's analysis
+   * dir, where their own next export would pass it on again.
+   *
+   * Asserted on PLANTED debris rather than on "the directory is clean after a successful
+   * export", which the pre-fix implementation also satisfied (it deleted its scratch in a
+   * `finally`) and which therefore proves nothing about a killed one.
+   */
+  it('never bundles a quarantined or leftover-scratch copy of the store', async () => {
+    const src = join(work, 'with-debris');
+    await buildAnalysisDir(src, 'abc1234');
+    const dbPath = join(src, ARTIFACT_CALL_GRAPH_DB);
+
+    const store = EdgeStore.openForAnalyze(dbPath);
+    try {
+      store.putPass1Facts([{ filePath: 'src/a.ts', contentHash: 'h', facts: '{"v":1,"n":[],"e":[]}' }], 's');
+    } finally {
+      store.close();
+    }
+    // Two full copies of a store carrying the memo, exactly as the two real producers leave them.
+    await writeFile(`${dbPath}.corrupt-0`, await readFile(dbPath));
+    await writeFile(`${dbPath}.export-99999`, await readFile(dbPath));
+
+    const { manifest } = await buildBundle(src, VERSION);
+    const bundled = manifest.files.map(f => f.name);
+    expect(bundled).toContain(ARTIFACT_CALL_GRAPH_DB);
+    expect(bundled).not.toContain(`${ARTIFACT_CALL_GRAPH_DB}.corrupt-0`);
+    expect(bundled).not.toContain(`${ARTIFACT_CALL_GRAPH_DB}.export-99999`);
+
+    // And the debris does not sneak the memo in by the back door.
+    const target = join(work, 'materialized-debris');
+    await materializeBundle(parseBundle((await buildBundle(src, VERSION)).buffer), target);
+    const exported = EdgeStore.openForAnalyze(join(target, ARTIFACT_CALL_GRAPH_DB));
+    try {
+      expect(exported.countPass1Facts()).toBe(0);
+    } finally {
+      exported.close();
+    }
+  });
+
+  /**
+   * The strip stages its copy under `os.tmpdir()`, which is not guaranteed to be usable — an
+   * unset or read-only `TMPDIR`, a full volume. Silently shipping the local build cache in
+   * that case would be the worse outcome, so it falls back to staging beside the store under
+   * a name the debris filter matches, and says so when even that fails.
+   */
+  it('still strips the memo when the temp directory is unusable', async () => {
+    const src = join(work, 'no-tmpdir');
+    await buildAnalysisDir(src, 'abc1234');
+    const store = EdgeStore.openForAnalyze(join(src, ARTIFACT_CALL_GRAPH_DB));
+    try {
+      store.putPass1Facts([{ filePath: 'src/a.ts', contentHash: 'h', facts: '{"v":1,"n":[],"e":[]}' }], 's');
+    } finally {
+      store.close();
+    }
+
+    const previous = process.env.TMPDIR;
+    process.env.TMPDIR = join(work, 'definitely-not-a-directory');
+    let buffer: Buffer;
+    let note: string | undefined;
+    try {
+      const built = await buildBundle(src, VERSION);
+      buffer = built.buffer;
+      note = built.note;
+    } finally {
+      if (previous === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = previous;
+    }
+
+    const target = join(work, 'materialized-no-tmpdir');
+    await materializeBundle(parseBundle(buffer), target);
+    const exported = EdgeStore.openForAnalyze(join(target, ARTIFACT_CALL_GRAPH_DB));
+    try {
+      // The STRONG property: the fallback ran and the memo was stripped anyway. Asserting
+      // "either it stripped or it said so" would be satisfied by the degraded path the
+      // fallback exists to avoid — i.e. it would pass with no fallback at all.
+      expect(exported.countPass1Facts()).toBe(0);
+      expect(exported.countNodes()).toBeGreaterThan(0);
+      expect(note).toBeUndefined();
+    } finally {
+      exported.close();
+    }
+    // Whatever happened, no staging file was left in the analysis dir.
+    const { readdir } = await import('node:fs/promises');
+    expect((await readdir(src)).filter(n => n.includes('.export-'))).toEqual([]);
+  });
+
+  /**
+   * The export-side filter cannot help with a bundle that already contains debris — every
+   * OpenLore released before that filter produced them. Materializing one must not plant a
+   * full, un-stripped copy of the PRODUCER's store (extraction cache and all) permanently in
+   * this machine's analysis dir.
+   */
+  it('drops debris carried by a bundle built before the export filter existed', async () => {
+    const src = join(work, 'legacy-bundle');
+    await buildAnalysisDir(src, 'abc1234');
+    const { buffer } = await buildBundle(src, VERSION);
+    const bundle = parseBundle(buffer);
+
+    // Forge the shape an older exporter produced: the quarantine copy alongside the store.
+    bundle.payload[`${ARTIFACT_CALL_GRAPH_DB}.corrupt-0`] = bundle.payload[ARTIFACT_CALL_GRAPH_DB];
+
+    const target = join(work, 'materialized-legacy');
+    await materializeBundle(bundle, target);
+    const { readdir } = await import('node:fs/promises');
+    const written = await readdir(target);
+    expect(written).toContain(ARTIFACT_CALL_GRAPH_DB);
+    expect(written).not.toContain(`${ARTIFACT_CALL_GRAPH_DB}.corrupt-0`);
+  });
+
   it('re-attests from the store at export time, even with no on-disk attestation', async () => {
     const src = join(work, 'no-att');
     const { mkdir } = await import('node:fs/promises');

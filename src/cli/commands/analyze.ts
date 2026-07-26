@@ -57,7 +57,14 @@ import { generateAiConfigs, AI_TOOL_TARGETS, type AiTool, type AiConfigResult } 
 // ============================================================================
 
 interface ExtendedAnalyzeOptions extends AnalyzeOptions {
+  /** Re-analyze AND re-extract every file — the human "trust nothing" lever. */
   force?: boolean;
+  /**
+   * Re-analyze without re-extracting: defeat the source-unchanged skip while still reusing
+   * cached extraction for files that did not change (change: optimize-hash-keyed-analyze).
+   * What the watcher's self-heal rebuild wants — the index is stale, the extractor is not.
+   */
+  reanalyze?: boolean;
   embed?: boolean;
   reindexSpecs?: boolean;
   aiConfigs?: boolean;
@@ -122,6 +129,15 @@ export async function runAnalysis(
     maxFiles: number;
     include: string[];
     exclude: string[];
+    /**
+     * Re-extract every file rather than reusing memoized Pass-1 facts, then repopulate the
+     * memo (change: optimize-hash-keyed-analyze). Defaults to false: an ordinary analyze pays
+     * only for the diff. This is the reference lane the reused one is verified against.
+     *
+     * Distinct from the caller's own "force" (skip nothing, re-analyze now) — see
+     * {@link ArtifactGeneratorOptions.reExtract}. `analyze --force` sets both.
+     */
+    reExtract?: boolean;
   }
 ): Promise<AnalysisResult> {
   const startTime = Date.now();
@@ -188,6 +204,7 @@ export async function runAnalysis(
     outputDir: outputPath,
     maxDeepAnalysisFiles: Math.min(MAX_DEEP_ANALYSIS_FILES, Math.ceil(repoMap.highValueFiles.length * DEEP_ANALYSIS_FILE_RATIO)),
     maxValidationFiles: MAX_VALIDATION_FILES,
+    reExtract: options.reExtract ?? false,
   });
 
   // Snapshot the prior graph's nodes BEFORE the rebuild overwrites the store, so a
@@ -209,6 +226,13 @@ export async function runAnalysis(
   // Present only when something actually degraded; a clean run says nothing.
   if (artifacts.extractionLaneNote) {
     logger.warning(artifacts.extractionLaneNote);
+  }
+
+  // Disclose the Pass-1 memo lane (change: optimize-hash-keyed-analyze). Unlike the lane
+  // note this is not a degradation report: it is present on every run that consulted the
+  // memo, so an operator can always see which lane ran and how much work it removed.
+  if (artifacts.pass1CacheNote) {
+    logger.info('Extraction', artifacts.pass1CacheNote);
   }
 
   // Carry anchored memory/decisions across any rename/move detected between the
@@ -287,7 +311,12 @@ export const analyzeCommand = new Command('analyze')
   )
   .option(
     '--force',
-    'Force re-analysis even if recent analysis exists',
+    'Re-analyze from scratch: analyze even if the source is unchanged, and re-extract every file instead of reusing cached extraction',
+    false
+  )
+  .option(
+    '--reanalyze',
+    'Analyze even if the source is unchanged, but still reuse cached extraction for files that did not change (the cheap half of --force)',
     false
   )
   .option(
@@ -325,7 +354,7 @@ Examples:
                                      Exclude specific directories
   $ openlore analyze --output ./my-analysis
                                      Custom output location
-  $ openlore analyze --force         Force re-analysis
+  $ openlore analyze --force         Re-extract every file (ignore the extraction cache)
   $ openlore analyze --no-embed      Build keyword-only (BM25) index, no embeddings
   $ openlore analyze --reindex-specs Re-index specs only (no full re-analysis)
 
@@ -352,6 +381,7 @@ After analysis, run 'openlore generate' to create OpenSpec files.
       include: options.include ?? [],
       exclude: options.exclude ?? [],
       force: options.force ?? false,
+      reanalyze: options.reanalyze ?? false,
       embed: options.embed ?? false,
       reindexSpecs: options.reindexSpecs ?? false,
       aiConfigs: options.aiConfigs ?? false,
@@ -418,10 +448,13 @@ After analysis, run 'openlore generate' to create OpenSpec files.
       // freshness window; an unchanged tree skips regardless of age. (isCacheFresh
       // falls back to the TTL only for a legacy analysis written without a fingerprint.)
       const cacheFresh = analysisAge !== null && (await isCacheFresh(rootPath));
-      if (analysisAge !== null && !opts.force) {
+      // `--reanalyze` and `--force` both defeat the skip; they differ only in whether the
+      // per-file extraction cache is also thrown away (change: optimize-hash-keyed-analyze).
+      const skipSuppressed = (opts.force ?? false) || (opts.reanalyze ?? false);
+      if (analysisAge !== null && !skipSuppressed) {
         if (cacheFresh) {
           logger.discovery(`Analysis is up to date — source unchanged (${formatAge(analysisAge)})`);
-          logger.info('Tip', 'Use --force to re-analyze anyway');
+          logger.info('Tip', 'Use --reanalyze to run anyway, or --force to also re-extract every file');
           logger.blank();
 
           // Show existing analysis stats
@@ -495,6 +528,7 @@ After analysis, run 'openlore generate' to create OpenSpec files.
         maxFiles: opts.maxFiles,
         include: opts.include,
         exclude: opts.exclude,
+        reExtract: opts.force ?? false,
       });
 
       // ========================================================================

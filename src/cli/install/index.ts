@@ -87,7 +87,7 @@ export interface InstallOptions {
  * Failures are non-fatal: the surfaces are already wired, so we warn and tell
  * the user to run analyze themselves rather than failing the whole install.
  */
-export async function buildIndex(cwd: string, opts: { force?: boolean } = {}): Promise<void> {
+export async function buildIndex(cwd: string, opts: { repair?: boolean } = {}): Promise<void> {
   const prevCwd = process.cwd();
   // analyze prints its own multi-line CLI output ("Next step: run generate",
   // etc.) via console.log — noise inside install. Capture it to stderr so
@@ -108,10 +108,20 @@ export async function buildIndex(cwd: string, opts: { force?: boolean } = {}): P
     // `--embedded`: install does the agent wiring (CLAUDE.md/.mcp.json/hooks) itself,
     // so analyze must NOT also print its agent-onboarding tips or the "run generate"
     // next-step — those contradict install's own output on the first-run path.
-    // `--force` (background repair path): a mismatched/schema-reset index can have a
-    // fingerprint that still matches source, so a non-forced analyze would skip the
-    // rebuild and leave the index broken — force guarantees the heal actually runs.
-    const analyzeArgs = opts.force ? ['--force', '--embedded'] : ['--embedded'];
+    // `--reanalyze` (background repair path): a mismatched/schema-reset index can have a
+    // fingerprint that still matches source, so a plain analyze would skip the rebuild and
+    // leave the index broken. `--reanalyze` guarantees the heal runs — and deliberately NOT
+    // `--force`, which would additionally re-parse every file. What is broken here is the
+    // STORE; the per-file extraction cache is keyed by content hash and is not implicated,
+    // so re-parsing the repo would only make the most frequent repair path the slowest
+    // (change: optimize-hash-keyed-analyze).
+    // `analyzeCommand` is a module singleton and commander RETAINS an option's value across
+    // parses — so a repair build in this process would leave `--reanalyze` set for every
+    // later cold-start build, silently defeating the source-unchanged skip. Set both lanes
+    // explicitly rather than relying on absence to mean false.
+    analyzeCommand.setOptionValue('force', false);
+    analyzeCommand.setOptionValue('reanalyze', opts.repair === true);
+    const analyzeArgs = opts.repair ? ['--reanalyze', '--embedded'] : ['--embedded'];
     await analyzeCommand.parseAsync(analyzeArgs, { from: 'user' });
     console.log = origLog;
     logger.success('Index built — orient() will return results in your next session.');
