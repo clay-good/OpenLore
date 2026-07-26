@@ -11,7 +11,7 @@ openlore view
 
 # Options
 openlore view --port 4000          # custom port (default: 5173)
-openlore view --host 0.0.0.0       # expose on LAN
+openlore view --host 127.0.0.1     # loopback only (non-loopback binds are refused)
 openlore view --no-open            # don't open browser automatically
 openlore view --analysis <path>    # custom analysis dir (default: .openlore/analysis/)
 openlore view --spec <path>        # custom spec dir (default: ./openspec/specs/)
@@ -81,7 +81,7 @@ openlore view [options]
   --analysis <path>    Analysis directory (default: .openlore/analysis/)
   --spec <path>        Spec files directory (default: ./openspec/specs/)
   --port <n>           Port (default: 5173)
-  --host <host>        Bind host (default: 127.0.0.1; use 0.0.0.0 for LAN)
+  --host <host>        Loopback bind host (default: 127.0.0.1)
   --no-open            Skip automatic browser open
 ```
 
