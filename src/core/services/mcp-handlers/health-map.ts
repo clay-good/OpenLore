@@ -137,13 +137,20 @@ export async function handleGetHealthMap(input: GetHealthMapInput): Promise<unkn
   const volatileFileSet = new Set(allVolatileFiles.map(v => v.file));
 
   // --- Bridge nodes (sampled betweenness centrality on the call graph) ---
-  const { entries: bridgeNodes, sourcesUsed: betweennessSourceCount } = computeBridgeNodes(codeNodes, directEdges, limit);
+  // Compute the FULL ranking, then slice for display — the same shape the volatility
+  // block above uses, and for the same reason: `summary.bridgeCount` sits beside the
+  // genuinely uncapped hubCount/godFunctionCount, so counting a display-capped list
+  // there reports `limit` (10) for a repo that has hundreds.
+  const { entries: allBridgeNodes, sourcesUsed: betweennessSourceCount } =
+    computeBridgeNodes(codeNodes, directEdges, Number.POSITIVE_INFINITY);
+  const bridgeCount = allBridgeNodes.filter(b => b.betweenness >= BRIDGE_MIN_BETWEENNESS).length;
+  const bridgeNodes = allBridgeNodes.slice(0, limit);
   const bridgeNodeIds = new Set(bridgeNodes.map(b => b.id));
-  const bridgeCount = bridgeNodes.filter(b => b.betweenness >= BRIDGE_MIN_BETWEENNESS).length;
   const bridgeMap = new Map(bridgeNodes.map(b => [b.id, b]));
 
   // --- Untested hotspots (high-degree nodes not directly called by any test) ---
-  const untestedHotspots = computeUntestedHotspots(cg.nodes, directEdges, limit);
+  const allUntestedHotspots = computeUntestedHotspots(cg.nodes, directEdges, Number.POSITIVE_INFINITY);
+  const untestedHotspots = allUntestedHotspots.slice(0, limit);
   const untestedHotspotIds = new Set(untestedHotspots.map(u => u.id));
   const untestedMap = new Map(untestedHotspots.map(u => [u.id, u]));
 
@@ -194,7 +201,7 @@ export async function handleGetHealthMap(input: GetHealthMapInput): Promise<unkn
       layerViolationCount: violations.length,
       volatileFileCount: allVolatileFiles.length,
       bridgeCount,
-      untestedHotspotCount: untestedHotspots.length,
+      untestedHotspotCount: allUntestedHotspots.length,
       betweennessApprox: codeNodes.length > MAX_BETWEENNESS_SOURCES,
       betweennessSourceCount,
     },

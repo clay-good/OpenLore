@@ -1267,9 +1267,14 @@ export async function handleTraceExecutionPath(
 
   const targetIds = new Set(targetNodes.map(n => n.id));
   const allPaths: string[][] = [];
+  // True once enumeration stopped at the cap rather than because it ran out of
+  // paths. Enumeration order is edge-insertion order and the sort by hop count runs
+  // AFTER the cap, so a truncated result's first path is only the shortest of the
+  // ones that happened to be found — not necessarily the shortest that exists.
+  let truncated = false;
 
   function dfs(currentId: string, path: string[], visited: Set<string>): void {
-    if (allPaths.length >= maxPaths) return;
+    if (allPaths.length >= maxPaths) { truncated = true; return; }
     if (targetIds.has(currentId) && path.length > 1) {
       allPaths.push([...path]);
       return; // don't traverse past the target
@@ -1290,7 +1295,7 @@ export async function handleTraceExecutionPath(
   }
 
   for (const entry of entryNodes) {
-    if (allPaths.length >= maxPaths) break;
+    if (allPaths.length >= maxPaths) { truncated = true; break; }
     dfs(entry.id, [entry.id], new Set([entry.id]));
   }
 
@@ -1333,7 +1338,17 @@ export async function handleTraceExecutionPath(
     targetFunction: targetNodes[0].name,
     pathsFound: paths.length,
     maxDepth,
-    shortestPath: paths[0].chain,
+    maxPaths,
+    // Name the claim honestly: with enumeration truncated this is the shortest path
+    // FOUND, and a shorter one may exist among those never enumerated.
+    ...(truncated
+      ? {
+          truncated: {
+            reason: `path enumeration stopped at maxPaths=${maxPaths}; more paths may exist and a shorter one may not have been enumerated`,
+          },
+          shortestPathFound: paths[0].chain,
+        }
+      : { shortestPath: paths[0].chain }),
     paths,
     ...(valueLevelInfo ? { valueLevel: valueLevelInfo } : {}),
     confidenceBoundary: assembleBoundary({ basis: edgeBasisForChains(allPaths, pairIndex), staleness: traceStaleness, integrity: ctx?.integrity, repair: repairDisclosure(absDir) }),

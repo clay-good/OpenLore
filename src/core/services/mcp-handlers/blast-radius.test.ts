@@ -33,6 +33,13 @@ vi.mock('./analysis.js', () => ({
   handleCheckSpecDrift: vi.fn(),
 }));
 
+// Partial mock: stub handleSelectTests so a throwing test-selection can be driven;
+// seedsFromFiles stays real (the briefing's changed-symbol seeding depends on it).
+vi.mock('./test-impact.js', async (importActual) => {
+  const actual = await importActual<typeof import('./test-impact.js')>();
+  return { ...actual, handleSelectTests: vi.fn(actual.handleSelectTests) };
+});
+
 // Real staleness reads disk; stub ONLY computeStaleness so we can drive it
 // deterministically, keeping every other confidence-boundary export (assembleBoundary,
 // edgeBasisWithinSet, …) real — other reachable handlers depend on them. Default: index
@@ -48,6 +55,7 @@ import { readCachedContext } from './utils.js';
 import { handleAnalyzeImpact } from './graph.js';
 import { handleCheckSpecDrift } from './analysis.js';
 import { computeStaleness } from './confidence-boundary.js';
+import { handleSelectTests } from './test-impact.js';
 import { assertConclusionShape } from './tool-contract.js';
 import type { FunctionNode, SerializedCallGraph, CallEdge } from '../../analyzer/call-graph.js';
 import type { DriftResult } from '../../../types/index.js';
@@ -241,6 +249,25 @@ describe('computeBlastRadius', () => {
     const b = await computeBlastRadius({ directory: '/p' }) as BlastRadiusBriefing;
     expect(b.posture).toBe('advisory');
     expect(b.impact.topSymbols).toHaveLength(0);       // the throwing symbol contributes nothing
+  });
+
+  it('says tests could not be COMPUTED when select_tests throws, rather than reporting zero', async () => {
+    // "0 tests to run" and "test selection failed" are different claims. Reported as a
+    // bare 0 on a hub change, a pre-commit reader concludes nothing is impacted.
+    vi.mocked(handleSelectTests).mockRejectedValueOnce(new Error('tested_by table missing'));
+    const b = await computeBlastRadius({ directory: '/p' }) as BlastRadiusBriefing;
+    expect(b.tests.count).toBe(0);
+    expect(b.tests.unavailable).toMatch(/tested_by table missing/);
+    expect(b.caveats.join(' ')).toMatch(/could not be computed/i);
+    // The headline is the line acted on, so it must not silently drop the clause.
+    expect(b.headline).toMatch(/tests to run could not be computed/i);
+  });
+
+  it('counts symbols actually ANALYZED, not merely attempted, and discloses failures', async () => {
+    vi.mocked(handleAnalyzeImpact).mockRejectedValueOnce(new Error('boom'));
+    const b = await computeBlastRadius({ directory: '/p' }) as BlastRadiusBriefing;
+    expect(b.impact.analyzedSymbolCount).toBe(0);
+    expect(b.caveats.join(' ')).toMatch(/Impact analysis failed for 1/);
   });
 
   it('degrades to drift-unavailable (caveat) when check_spec_drift throws (advisory — never block)', async () => {

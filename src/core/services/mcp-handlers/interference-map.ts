@@ -551,8 +551,13 @@ async function defaultEnumerateBranches(
   try {
     names = (await git(repoPath, ['for-each-ref', '--format=%(refname:short)', 'refs/heads/']))
       .split('\n').map(s => s.trim()).filter(Boolean);
-  } catch {
-    return [];
+  } catch (err) {
+    // Propagate rather than returning []. The caller has a caveat for exactly this
+    // ("Branch enumeration failed for X"), and swallowing the throw here made that
+    // caveat unreachable for its most likely causes — not a git worktree, no `git` on
+    // PATH, a safe.directory ownership rejection — so the map reported "no in-flight
+    // work interferes" when nothing had been enumerated at all.
+    throw err instanceof Error ? err : new Error(String(err));
   }
   const baseRef = await resolveRepoBase(repoPath, baseRefIn);
   // The currently-checked-out branch is NOT excluded: it is a legitimate in-flight change
