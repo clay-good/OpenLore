@@ -17,12 +17,13 @@ openlore view --analysis <path>    # custom analysis dir (default: .openlore/ana
 openlore view --spec <path>        # custom spec dir (default: ./openspec/specs/)
 ```
 
-### The one-time link
+### The entry link
 
 The viewer prints a URL containing a `?token=`. Opening it exchanges that token for a
 session cookie and redirects to the clean URL, so the token does not stay in your address
 bar or history. `--no-open` prints the link instead of launching a browser — paste it into
-whichever browser you want.
+whichever browser you want. The link stays usable while the viewer is running (so you can
+open a second browser); restarting issues a fresh one and invalidates the old.
 
 **Treat the link as a password.** Every route, including the page itself, requires it: the
 viewer exposes a chat endpoint that spends your LLM API key and can read the analyzed repo,

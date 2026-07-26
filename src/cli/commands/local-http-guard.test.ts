@@ -19,6 +19,7 @@ import {
   OPENLORE_TOKEN_HEADER,
   createBrowserSessionGuard,
   readCookie,
+  parseAuthority,
 } from './local-http-guard.js';
 
 /** Minimal IncomingMessage stand-in — only headers/url are read by the guard. */
@@ -297,5 +298,69 @@ describe('readCookie', () => {
 
   it('does not confuse a cookie whose name merely ends with the target', () => {
     expect(readCookie('not_openlore_session=evil', 'openlore_session')).toBeUndefined();
+  });
+});
+
+// ============================================================================
+// Same-host, different-PORT origins — a "site" does not include the port
+// ============================================================================
+
+describe('originDefenseError — port is part of the identity, not just the host', () => {
+  const bound = '127.0.0.1';
+  const PORT = 5302;
+
+  it('rejects a page served from another port on the same loopback host', () => {
+    // The load-bearing case. For cookie purposes a "site" is scheme + registrable
+    // domain — the PORT is not part of it — so `http://127.0.0.1:5399` is same-site
+    // with this listener and a browser DOES attach the SameSite=Strict session
+    // cookie. Matching on hostname alone made every other local dev server (or any
+    // localhost page the user visited) a full-read attacker against the viewer.
+    for (const origin of ['http://127.0.0.1:5399', 'http://localhost:9999', 'http://[::1]:1']) {
+      expect(
+        originDefenseError(fakeReq({ host: '127.0.0.1:5302', origin }), bound, PORT),
+        origin,
+      ).toMatch(/different port/);
+    }
+  });
+
+  it('rejects a Host header naming another port', () => {
+    expect(originDefenseError(fakeReq({ host: '127.0.0.1:5399' }), bound, PORT))
+      .toMatch(/does not name this listener's port/);
+  });
+
+  it('still admits the listener’s own origin, by any loopback spelling', () => {
+    for (const [host, origin] of [
+      ['127.0.0.1:5302', 'http://127.0.0.1:5302'],
+      ['localhost:5302', 'http://localhost:5302'],
+      ['[::1]:5302', 'http://[::1]:5302'],
+    ]) {
+      expect(originDefenseError(fakeReq({ host, origin }), bound, PORT), origin).toBeNull();
+    }
+    // No Origin at all (curl, a native client) is still fine.
+    expect(originDefenseError(fakeReq({ host: '127.0.0.1:5302' }), bound, PORT)).toBeNull();
+  });
+
+  it('is unchanged when no port is supplied, so existing callers keep working', () => {
+    expect(originDefenseError(fakeReq({ host: '127.0.0.1:5399' }), bound)).toBeNull();
+  });
+});
+
+describe('parseAuthority — authorities whose real host is not the prefix', () => {
+  it('refuses userinfo and malformed ports instead of reading them as loopback', () => {
+    // `http://127.0.0.1:5302@evil.com` — the loopback-looking part is USERINFO; the
+    // host is evil.com. `…:5302.evil.com` — the "port" is a domain. Both read as
+    // loopback under hand-rolled string splitting.
+    expect(parseAuthority('http://127.0.0.1:5302@evil.com')).toBeNull();
+    expect(parseAuthority('http://127.0.0.1:5302.evil.com')).toBeNull();
+    expect(originDefenseError(
+      fakeReq({ host: '127.0.0.1:5302', origin: 'http://127.0.0.1:5302@evil.com' }), '127.0.0.1', 5302,
+    )).toMatch(/not permitted/);
+  });
+
+  it('parses the ordinary forms', () => {
+    expect(parseAuthority('http://127.0.0.1:5302')).toEqual({ hostname: '127.0.0.1', port: 5302 });
+    expect(parseAuthority('localhost:5302')).toEqual({ hostname: 'localhost', port: 5302 });
+    expect(parseAuthority('http://[::1]:5302')).toEqual({ hostname: '::1', port: 5302 });
+    expect(parseAuthority('https://example.com')).toEqual({ hostname: 'example.com', port: 443 });
   });
 });

@@ -358,7 +358,7 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
 
     // DNS-rebinding / cross-origin defense — runs before ANY dispatch, including
     // /health, so a malicious page can't even probe the daemon's existence.
-    const originErr = originDefenseError(req, host);
+    const originErr = originDefenseError(req, host, boundPort);
     if (originErr) {
       sendJson(res, 403, { error: originErr });
       return;

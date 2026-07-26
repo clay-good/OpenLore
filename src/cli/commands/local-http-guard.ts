@@ -53,21 +53,37 @@ export function readCookie(header: string | undefined, name: string): string | u
 // Imported (not re-exported blind) because this module's own guards call it.
 export { LOOPBACK_HOSTNAMES, isLoopbackHost };
 
+/**
+ * Split a `Host` or `Origin` authority into its hostname and port, using a real URL
+ * parser rather than string surgery.
+ *
+ * Hand-rolled splitting failed OPEN on authorities whose real host is not the prefix:
+ * `http://127.0.0.1:5302@evil.com` (the `127.0.0.1:5302` is USERINFO — the host is
+ * `evil.com`) and `http://127.0.0.1:5302.evil.com` (the "port" is a domain) both
+ * read as loopback. Returns null when the value cannot be parsed or carries
+ * credentials, and null is treated as "reject".
+ */
+export function parseAuthority(value: string): { hostname: string; port: number | null } | null {
+  const raw = value.trim();
+  if (!raw) return null;
+  try {
+    const hasScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw);
+    const u = new URL(hasScheme ? raw : `http://${raw}`);
+    // Userinfo means the authority is not what a naive read of it suggests.
+    if (u.username !== '' || u.password !== '') return null;
+    const defaultPort = u.protocol === 'https:' ? 443 : u.protocol === 'http:' ? 80 : null;
+    return {
+      hostname: u.hostname.replace(/^\[|\]$/g, '').toLowerCase(),
+      port: u.port === '' ? defaultPort : Number(u.port),
+    };
+  } catch {
+    return null;
+  }
+}
+
 /** Extract the hostname (sans port, sans brackets) from a Host/Origin authority. */
 export function hostnameOf(authority: string): string {
-  let a = authority.trim();
-  // Strip scheme if this came from an Origin (e.g. http://host:port).
-  const scheme = a.indexOf('://');
-  if (scheme !== -1) a = a.slice(scheme + 3);
-  // Bracketed IPv6: [::1]:port
-  if (a.startsWith('[')) {
-    const close = a.indexOf(']');
-    if (close !== -1) return a.slice(1, close).toLowerCase();
-  }
-  // host:port → host (IPv4 / name only; bare IPv6 has no port form here)
-  const colon = a.indexOf(':');
-  if (colon !== -1 && a.indexOf(':') === a.lastIndexOf(':')) a = a.slice(0, colon);
-  return a.toLowerCase();
+  return parseAuthority(authority)?.hostname ?? '';
 }
 
 /**
@@ -130,17 +146,37 @@ export async function writeInstanceDescriptor(
  * with a simple, preflight-free `text/plain` POST. The spec's requirement is to
  * reject a cross-site Origin, and an opaque one is cross-site.
  */
-export function originDefenseError(req: IncomingMessage, boundHost: string): string | null {
+export function originDefenseError(
+  req: IncomingMessage,
+  boundHost: string,
+  boundPort?: number,
+): string | null {
   const boundName = hostnameOf(boundHost);
-  const allowed = (name: string): boolean => isLoopbackHost(name) || name === boundName;
+  const allowedHost = (name: string): boolean => isLoopbackHost(name) || name === boundName;
 
-  const hostHeader = req.headers.host;
-  if (hostHeader === undefined || !allowed(hostnameOf(hostHeader))) {
-    return `Host header "${hostHeader ?? ''}" is not an allowed loopback name (DNS-rebinding guard)`;
+  const host = parseAuthority(req.headers.host ?? '');
+  if (!host || !allowedHost(host.hostname)) {
+    return `Host header "${req.headers.host ?? ''}" is not an allowed loopback name (DNS-rebinding guard)`;
   }
+  if (boundPort !== undefined && host.port !== boundPort) {
+    return `Host header "${req.headers.host ?? ''}" does not name this listener's port ${boundPort}`;
+  }
+
   const origin = req.headers.origin;
-  if (origin !== undefined && !allowed(hostnameOf(origin))) {
-    return `cross-site Origin "${origin}" is not permitted`;
+  if (origin !== undefined) {
+    const o = parseAuthority(origin);
+    if (!o || !allowedHost(o.hostname)) {
+      return `cross-site Origin "${origin}" is not permitted`;
+    }
+    // The PORT is the load-bearing half here. A "site" for cookie purposes is
+    // scheme + registrable domain — the port is NOT part of it — so a page served
+    // from ANY other port on localhost is same-site, and the browser attaches this
+    // surface's SameSite=Strict session cookie to its requests. Matching on hostname
+    // alone therefore let any other local dev server (or any localhost page the user
+    // happened to visit) read the viewer's API and drive its LLM-backed chat route.
+    if (boundPort !== undefined && o.port !== boundPort) {
+      return `cross-site Origin "${origin}" is not permitted (different port from this listener)`;
+    }
   }
   return null;
 }
@@ -149,6 +185,8 @@ export function originDefenseError(req: IncomingMessage, boundHost: string): str
 export interface LocalHttpGuardConfig {
   /** The host the server is bound to (from the surface's --host). */
   boundHost: string;
+  /** The port it listens on. Required to reject a same-host, different-port origin. */
+  boundPort?: number;
   /** The instance token, if one is configured. */
   token?: string;
   /**
@@ -185,7 +223,7 @@ export function checkLocalHttpRequest(
   req: IncomingMessage,
   cfg: LocalHttpGuardConfig,
 ): LocalHttpGuardRejection | null {
-  const originErr = originDefenseError(req, cfg.boundHost);
+  const originErr = originDefenseError(req, cfg.boundHost, cfg.boundPort);
   if (originErr) return { status: 403, error: originErr };
 
   const tokenRequired =
@@ -207,7 +245,7 @@ export function checkLocalHttpRequest(
 
 /**
  * Build the middleware that gates EVERY route of a browser-facing surface, and
- * performs the one-time URL-token → cookie handshake that lets a browser in.
+ * performs the URL-token → cookie handshake that lets a browser in.
  *
  * WHY THIS EXISTS. The viewer used to embed its token in the HTML it served and gate
  * only `/api`, which meant `/` was unauthenticated: any other process on the machine
@@ -234,6 +272,7 @@ export function checkLocalHttpRequest(
  */
 export function createBrowserSessionGuard(opts: {
   boundHost: string;
+  boundPort?: number;
   token: string;
   /** Paths that skip the gate entirely (health probes). Compared after query strip. */
   publicPaths?: ReadonlySet<string>;
@@ -248,7 +287,7 @@ export function createBrowserSessionGuard(opts: {
     }
 
     // Origin/Host defense runs first, before any credential is read or issued.
-    const originErr = originDefenseError(req, opts.boundHost);
+    const originErr = originDefenseError(req, opts.boundHost, opts.boundPort);
     if (originErr) {
       res.statusCode = 403;
       res.setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -286,7 +325,7 @@ export function createBrowserSessionGuard(opts: {
     res.statusCode = 401;
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     res.end(
-      'openlore view: this page requires the one-time link printed by the command that ' +
+      'openlore view: this page requires the entry link printed by the command that ' +
         'started it. Re-open that URL (it contains ?token=...), or restart `openlore view`.\n',
     );
   };
@@ -310,6 +349,7 @@ export type ConnectMiddleware = (
  */
 export function createApiGuardMiddleware(opts: {
   boundHost: string;
+  boundPort?: number;
   token?: string;
   requireTokenFor?: (relativePathname: string) => boolean;
   tokenHeader?: string;
@@ -320,6 +360,7 @@ export function createApiGuardMiddleware(opts: {
     const rel = (req.url ?? '/').split('?')[0].replace(/\/+$/, '') || '/';
     const rejection = checkLocalHttpRequest(req, {
       boundHost: opts.boundHost,
+      boundPort: opts.boundPort,
       token: opts.token,
       requireToken: opts.requireTokenFor ? opts.requireTokenFor(rel) : false,
       tokenHeader: opts.tokenHeader,

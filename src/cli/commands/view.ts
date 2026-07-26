@@ -86,7 +86,7 @@ export const viewCommand = new Command('view')
   .option('--analysis <path>', 'Path to analysis directory', `${OPENLORE_ANALYSIS_REL_PATH}/`)
   .option('--spec <path>', 'Path to spec files directory', `./${OPENSPEC_DIR}/${OPENSPEC_SPECS_SUBDIR}/`)
   .option('--port <n>', 'Port to run the viewer on', String(DEFAULT_VIEWER_PORT))
-  .option('--host <host>', 'Host to bind (default loopback; every route requires the one-time link)', DEFAULT_VIEWER_HOST)
+  .option('--host <host>', 'Host to bind (default loopback; every route requires the entry link)', DEFAULT_VIEWER_HOST)
   .option('--no-open', 'Do not open the browser automatically', false)
   .action(
     async (options: {
@@ -136,11 +136,25 @@ export const viewCommand = new Command('view')
       // A non-loopback bind is now the same posture as `serve`: the token is required
       // on every route (below), and the page no longer contains it — so binding a
       // container interface for a published port is safe as long as the operator keeps
-      // the one-time URL to themselves. Warn, rather than refuse.
+      // the entry URL to themselves. Warn, rather than refuse.
+      // A WILDCARD bind cannot work: the rebinding guard compares the request's Host
+      // against the bound name, and no client ever sends "0.0.0.0" as a Host — so the
+      // server would start, print a URL nobody can open, and 403 every request
+      // including the handshake. Refuse with the address the user actually wants.
+      if (host === '0.0.0.0' || host === '::' || host === '[::]') {
+        logger.error(
+          `Cannot bind the wildcard address "${host}": the viewer authenticates each request ` +
+            `against the host it was started with, and a client never sends "${host}" as its ` +
+            `Host header — every request would be rejected. Bind the address you will actually ` +
+            `open (e.g. --host 127.0.0.1, or --host <this machine's IP> to reach it from the network).`,
+        );
+        process.exitCode = 1;
+        return;
+      }
       if (!isLoopbackHost(host)) {
         logger.warning(
           `Binding non-loopback host "${host}": anyone who can reach this port needs the ` +
-            `one-time link below to use the viewer. Treat that URL as a password.`,
+            `entry link below to use the viewer. Treat that URL as a password.`,
         );
       }
 
@@ -171,7 +185,7 @@ export const viewCommand = new Command('view')
               // also performs the one-time ?token= → HttpOnly-cookie handshake that
               // lets the browser in; see createBrowserSessionGuard.
               devServer.middlewares.use(
-                createBrowserSessionGuard({ boundHost: host, token }),
+                createBrowserSessionGuard({ boundHost: host, boundPort: port, token }),
               );
 
               // SECURITY, second gate: one guard in front of every /api/* route.
@@ -183,6 +197,7 @@ export const viewCommand = new Command('view')
                 '/api',
                 createApiGuardMiddleware({
                   boundHost: host,
+                  boundPort: port,
                   token,
                   requireTokenFor: (rel) => rel === '/chat',
                 }),
@@ -689,9 +704,11 @@ export const viewCommand = new Command('view')
         return;
       }
 
-      // The one-time link. It carries the token exactly once: opening it exchanges the
-      // token for an HttpOnly cookie and redirects to the bare URL, so the token does
-      // not linger in the address bar, in history, or in a Referer header.
+      // The entry link. It carries the token, which the first request exchanges for an
+      // HttpOnly cookie before redirecting to the bare URL — so the token does not
+      // linger in the address bar, in history, or in a Referer header. The link stays
+      // usable for the life of this process (so a second browser can be pointed at it);
+      // a restart issues a fresh token and invalidates the old one.
       const url = `http://${host}:${port}/`;
       const entryUrl = `${url}?token=${token}`;
       logger.success(`Viewer running at ${url}`);
