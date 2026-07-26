@@ -49,7 +49,9 @@
     "audit:packlist": "node scripts/audit-packlist.mjs",
     "typecheck": "tsc --noEmit",
     "postinstall": "node scripts/postinstall.mjs",
-    "prepublishOnly": "npm run build && npm run test:run"
+    "prepublishOnly": "npm run build && npm run test:run",
+    "bench:reachability": "node scripts/bench-reachability.mjs",
+    "verify:reachability": "node scripts/verify-reachability-equivalence.mjs"
   },
   "keywords": [
     "architectural-memory",

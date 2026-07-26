@@ -4,9 +4,7 @@
 > beyond the cross-cutting tool-quality rules in `mcp-quality`. Tool output classification and the
 > conclusion-over-graph contract live in `mcp-quality`; this domain captures handler-specific
 > navigation semantics.
-
 ## Requirements
-
 ### Requirement: CoarseToFineMapNavigation
 
 The system SHALL expose a two-tier map of the call graph: a region tier where each community is a
@@ -92,21 +90,25 @@ The system SHALL verify every registered MCP tool against real codebases via a l
 
 > Decision recorded: f4bb8a8f
 > Date: 2026-06-10
+
 ### Requirement: ComputeCfgdefuseOverlayInsideLivetreeExtractorsExtendReturnContractToNodesRawedgesCfg
 
 The canonical statement of this decision lives in the `analyzer` domain — see [analyzer/spec.md](../analyzer/spec.md) (decision `c8f2b9bf`).
+
 ### Requirement: AnchorPersistedMemoryToCallgraphSymbolsWithDeterministicFreshness
 
 The system SHALL anchor persisted memories to call-graph symbols and compute deterministic fresh/drifted/orphaned verdicts on recall without LLM inference.
 
 > Decision recorded: 34b178df
 > Date: 2026-06-16
+
 ### Requirement: CodeanchoredMemoryStoreIsSeparateFromTheDecisionStore
 
 The system SHALL persist agent memories in a dedicated store (.openlore/memory/notes.json) separate from the decision store, and SHALL surface both memory kinds through the recall tool with per-anchor freshness verdicts.
 
 > Decision recorded: 517ab4c6
 > Date: 2026-06-16
+
 ### Requirement: OrphanedMemoriesAreNeverServedAsAuthoritativeContext
 
 The system SHALL The recall tool SHALL partition returned memories into authoritative and needsReanchoring sets, and SHALL never include orphaned memories in the authoritative set.
@@ -185,33 +187,40 @@ The system SHALL resolve structural anchors against the call graph when recordin
 
 > Decision recorded: 10e6a55e
 > Date: 2026-06-16
+
 ### Requirement: ValuelevelImpacttraceFallsBackToFunctionGranularityOnIllposedQueriesInsteadOfReportingZero
 
 The canonical statement of this decision lives in the `analyzer` domain — see [analyzer/spec.md](../analyzer/spec.md) (decision `a37d851f`).
+
 ### Requirement: DowngradeStableidMoveConfidenceFromExactToStableidWithVerifySemantics
 
 The system SHALL report cross-file stable-id matches with confidence 'stable-id' and instruct the consumer to verify, rather than asserting the match is exact.
 
 > Decision recorded: a3ede102
 > Date: 2026-06-16
+
 ### Requirement: AnchorStableidParametergroupDetectionToTheSymbolsOwnNameNotTheFirstParenthesis
 
 The system SHALL anchor stableId parameter-group detection to the symbol's own name so that body edits never alter the identifier.
 
 > Decision recorded: 52b10e56
 > Date: 2026-06-16
+
 ### Requirement: PersonalizedPagerankAsQueryconditionedRetrievalRankingNotGlobalSalience
 
 The canonical statement of this decision lives in the `analyzer` domain — see [analyzer/spec.md](../analyzer/spec.md) (decision `0bdd4319`).
+
 ### Requirement: EpistemicLeaseEmitsNeutralFreshnessFactsNotCoerciveImperatives
 
 The system SHALL surface epistemic-lease freshness as neutral factual signals (elapsed time, cognitive load, index-behind-HEAD) rather than imperative commands directed at the consuming agent.
 
 > Decision recorded: 8e95746d
 > Date: 2026-06-16
+
 ### Requirement: UseADeterministicFieldweightedRankerForRecallNoLearnedModel
 
 The canonical statement of this decision lives in the `analyzer` domain — see [analyzer/spec.md](../analyzer/spec.md) (decision `08005eb9`).
+
 ### Requirement: BitemporalMemoryValidity
 
 Every memory SHALL carry, in addition to its transaction time (`recordedAt`), a deterministic
@@ -311,6 +320,7 @@ merge distinct memories or judge relative importance.
 - **GIVEN** a memory recorded with content X and anchor A
 - **WHEN** `remember` is called again with the same content X and anchor A
 - **THEN** the store contains one memory for (X, A); the same content on a different anchor B is distinct
+
 ### Requirement: PreflightStructuralBriefing
 
 The system SHALL provide a pre-flight capability that, given a staged or working diff, returns a
@@ -348,6 +358,7 @@ posture.
 - **GIVEN** a repository configured to block when a commit orphans an anchored decision
 - **WHEN** a commit would orphan an anchored decision
 - **THEN** the hook blocks; and for any other high-blast-radius diff it remains advisory
+
 ### Requirement: ConfidenceBoundaryOnConclusions
 
 Every conclusion-shaped answer (`analyze_impact`, `find_path`, `find_dead_code`, `get_subgraph`,
@@ -392,18 +403,21 @@ stay silent rather than emit a false-positive marker.
 
 > Decision recorded: 08e71184
 > Date: 2026-06-18
+
 ### Requirement: ExcludeAllOpenloreprefixedDirsFromTheProjectFingerprintSoOpenloresOwnCachesDontInvalidateTheAnalysisCache
 
 The system SHALL exclude all directories whose name starts with `.openlore` from project fingerprint computation so that OpenLore-managed caches do not invalidate analysis freshness.
 
 > Decision recorded: cd5ff82c
 > Date: 2026-06-18
+
 ### Requirement: ExcludeSupersededDecisionsFromAuthoritativeRecallViaOneSharedSupersessionPredicate
 
 The system SHALL exclude superseded decisions from authoritative recall and orient context using a single shared supersession predicate, surfacing them only as reversal warnings.
 
 > Decision recorded: 6c32e6c6
 > Date: 2026-06-19
+
 ### Requirement: SpecstoreBindingResolvesDeclaredTargetsByNameAgainstTheFederationRegistry
 
 The canonical statement of this decision lives in the `config` domain — see [config/spec.md](../config/spec.md) (decision `c6e36101`).
@@ -1001,6 +1015,49 @@ SHALL be disclosed rather than silently swallowed.
 
 > Change: harden-runtime-event-resilience
 > Date: 2026-07-19
+
+### Requirement: TraversalToolsShareOnePrecomputedRepresentation
+
+All reachability-answering handlers (`select_tests`, `report_coverage_gaps`, `find_dead_code`,
+`blast_radius`/`change_footprint`, `find_path`, `trace_execution_path`, `analyze_env_impact`, and
+`verify_claim`'s reach kinds) SHALL traverse a single condensation/adjacency structure built or
+loaded once per artifact generation, rather than rebuilding per-call adjacency. An unfiltered
+whole-graph reach SHALL run as a topological sweep of the condensation DAG; a reach restricted to
+directly-resolved edges runs an allocation-free CSR walk instead, because the condensation
+describes the whole graph and a filtered graph can have strictly finer components. Every tool's
+conclusion payload SHALL be unchanged: for any input, the served answer SHALL equal the answer of
+the per-call BFS over the same artifact — including the ORDER-dependent parts of a payload (a
+reconstructed `viaPath`, the first N paths a bounded enumeration returns), not merely the set of
+results.
+
+Establishing whether a persisted structure is current SHALL cost less than rebuilding it. A
+handler that never traverses SHALL NOT pay for the structure's existence at all.
+
+`get_subgraph` and `analyze_impact` traverse the SQLite edge store one batched query per BFS
+level and never built per-call adjacency; they are therefore out of scope here, and this
+requirement does not silently claim them.
+
+#### Scenario: Answers are equivalent, only faster
+
+- **GIVEN** a fixed analyzed graph and any `select_tests` / `find_dead_code` /
+  `report_coverage_gaps` / `blast_radius` invocation
+- **WHEN** the answer is served from the precomputed structure
+- **THEN** it is element-for-element equal to the per-call BFS answer over the same artifact
+
+#### Scenario: A stale structure is never served
+
+- **GIVEN** an external `openlore analyze` that regenerated the artifacts while a daemon holds
+  a loaded structure
+- **WHEN** the next traversal tool call arrives
+- **THEN** the daemon reloads the structure for the new generation before answering (same
+  invalidation the context cache uses), never serving a traversal over the old graph
+
+#### Scenario: Repeated conclusions over one graph pay the build once
+
+- **GIVEN** a caller that computes many footprints over one graph in a single call
+  (`plan_parallel_work`, `map_in_flight_conflicts`)
+- **WHEN** each footprint's backward reachability runs
+- **THEN** they share one structure for that graph rather than rebuilding adjacency per task
 
 ## Decisions
 

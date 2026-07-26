@@ -7,8 +7,21 @@ status line. Two signals, both cheap to re-check:
   requirement its delta adds is already in `openspec/specs/<domain>/spec.md`
 - **archivable** — `openspec archive <name>` completes
 
-As of 2026-07-25, **105 changes are open**. 22 were archived in this pass — the newest being
-`optimize-hash-keyed-analyze` (PR #288: Pass-1 extraction memoized by content hash).
+As of 2026-07-26, **105 changes are open** and 86 sit in `archive/`. The four tables below now
+account for every open directory exactly — that is checkable, and worth re-checking, because it
+was not true before this pass (`optimize-parallel-extraction-pool` had shipped in PR #268 and was
+missing from every table, so it was invisible to both the counts and the archive sweep).
+
+Archived in this pass: `optimize-reachability-precompute` (PR #290 — reachability precomputed at
+analyze, traversals served as lookups) and `optimize-parallel-extraction-pool` (PR #268 — the
+row that had gone missing). #290 also produced one net-new proposal,
+`shrink-traversal-index-invalidation-scope`, listed under "Not built".
+
+Note on the archive step: `openspec validate` still fails on `cli`, `config`, `mcp-handlers`,
+and `overview` because those main specs are missing a `## Purpose` header — a pre-existing
+corpus defect, unrelated to any one change, and the reason most of the "built, blocked on
+bookkeeping" rows below cannot be archived. It needs its own corpus-repair change; do not
+brute-force it per-proposal.
 
 ## Not built — 80
 
@@ -84,7 +97,6 @@ The real backlog. No code, no spec entry.
 | `harden-walker-corpus-boundary` | Harden the walker corpus boundary: no silently smaller graph |
 | `optimize-analyze-pipeline-passes` | One analyze makes 3-4 full passes over the corpus, re-parsing (and re-reading from disk) tre |
 | `optimize-incremental-and-coldstart-scale` | A branch switch grinds through the per-file incremental pipeline with no bulk fallback, relo |
-| `optimize-reachability-precompute` | Every reachability conclusion re-runs BFS over adjacency rebuilt for that call |
 | `optimize-serving-hot-path-caches` | The default tools rebuild derived graph structures and re-parse multi-MB artifacts on every  |
 | `promote-backed-language-visibility` | Promote backed-language visibility: the generated matrix discloses its scope, the docs get o |
 | `refine-first-run-partial-serving` | The first index is all-or-nothing: minutes of "no index found" before the first answer |
@@ -92,6 +104,7 @@ The real backlog. No code, no spec entry.
 | `refine-public-surface-certification` | Refine public-surface certification: rule codes + semver bump, an accepted-breakage baseline |
 | `refine-search-serving-quality` | Refine search serving quality: filters that filter, scores that say what they are, an index  |
 | `shrink-receiver-resolution-boundary` | Shrink the intra-object receiver boundary with deterministic per-file type registries |
+| `shrink-traversal-index-invalidation-scope` | Key the precomputed traversal structure to the graph it describes, not to the bytes of the artifact it travels in |
 | `unify-onboarding-entrypoint` | One entrypoint: install once, auto-init on every repo you touch |
 | `widen-architecture-rule-vocabulary` | Widen the architecture rule vocabulary: required, circular, reachable/orphan, captures, inst |
 | `widen-import-resolution` | Widen import-precise cross-file resolution beyond TS/JS/Python |

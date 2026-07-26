@@ -130,6 +130,15 @@ export const ARTIFACT_PARSE_HEALTH = 'parse-health.json';
 /** Filename for the external package inventory artifact */
 export const ARTIFACT_EXTERNAL_PACKAGES = 'external-packages.json';
 
+/**
+ * Filename for the precomputed reachability structure — SCC condensation, topological
+ * order, and CSR forward/backward adjacency over the resolved call graph
+ * (change: optimize-reachability-precompute). Bound to the `llm-context.json` it was
+ * built from by a content digest; a mismatch means "rebuild in memory", never "serve
+ * the stale one".
+ */
+export const ARTIFACT_TRAVERSAL_INDEX = 'traversal-index.json';
+
 // ============================================================================
 // LLM / PROVIDER LIMITS
 // ============================================================================

@@ -14,7 +14,9 @@
 import { relative, isAbsolute } from 'node:path';
 import { validateDirectory, readCachedContext, notReadyResult } from './utils.js';
 import { resolveFederationScope, locateSymbolProducers } from '../../federation/resolver.js';
-import { buildAdjacency, buildWeightedAdjacency, weightedBfs } from './graph.js';
+import { buildWeightedAdjacency, weightedBfs } from './graph.js';
+import { loadTraversalIndex, traversalIndexFor } from './traversal.js';
+import type { TraversalIndex, TraversalFilter } from '../../analyzer/condensation.js';
 import type { WeightedReach } from './graph.js';
 import { assembleBoundary, buildPairEdgeIndex, computeStaleness, edgeBasisForChains } from './confidence-boundary.js';
 import { SUBGRAPH_MAX_DEPTH_LIMIT } from '../../../constants.js';
@@ -39,7 +41,8 @@ export interface ResolvedEndpoint {
 export function resolveEndpoint(
   spec: string,
   cg: SerializedCallGraph,
-  forward: Map<string, Set<string>>,
+  traversal: TraversalIndex,
+  filter?: TraversalFilter,
 ): ResolvedEndpoint {
   const real = (ns: FunctionNode[]) => ns.filter(n => !n.isExternal && !n.isTest);
 
@@ -49,7 +52,7 @@ export function resolveEndpoint(
     if (role === 'hub') return { kind: 'role:hub', nodes: real(cg.hubFunctions) };
     if (role === 'sink') {
       // A called leaf: terminates an internal call chain and has at least one caller.
-      const nodes = real(cg.nodes).filter(n => (n.fanIn ?? 0) >= 1 && (forward.get(n.id)?.size ?? 0) === 0);
+      const nodes = real(cg.nodes).filter(n => (n.fanIn ?? 0) >= 1 && traversal.degree(n.id, 'forward', filter) === 0);
       return { kind: 'role:sink', nodes };
     }
     return { kind: 'error', nodes: [] };
@@ -79,10 +82,22 @@ export interface PathResult {
   reached: number;
 }
 
-/** Convert a node->Set adjacency to unit-cost weighted adjacency (distance == hops). */
-function unitAdjacency(forward: Map<string, Set<string>>): Map<string, Array<{ to: string; cost: number }>> {
+/**
+ * Unit-cost weighted adjacency (distance == hops) read off the precomputed
+ * traversal structure. Only the `useCallDistance: false` branch needs it; the
+ * default call-distance branch uses {@link buildWeightedAdjacency}, a different
+ * structure (per-edge call-distance weights), which is deliberately outside the
+ * reachability index — it is not a reachability question.
+ */
+function unitAdjacency(
+  traversal: TraversalIndex,
+  filter?: TraversalFilter,
+): Map<string, Array<{ to: string; cost: number }>> {
   const out = new Map<string, Array<{ to: string; cost: number }>>();
-  for (const [k, set] of forward) out.set(k, [...set].map(to => ({ to, cost: 1 })));
+  for (let i = 0; i < traversal.nodeCount; i++) {
+    const id = traversal.idAt(i);
+    out.set(id, traversal.neighborIds(id, 'forward', filter).map(to => ({ to, cost: 1 })));
+  }
   return out;
 }
 
@@ -105,10 +120,10 @@ export function findCheapestPath(
   cg: SerializedCallGraph,
   fromSeeds: string[],
   toSeeds: string[],
-  opts: { useCallDistance?: boolean; maxDistance?: number; forward?: Map<string, Set<string>> } = {},
+  opts: { useCallDistance?: boolean; maxDistance?: number; traversal?: TraversalIndex; filter?: TraversalFilter } = {},
 ): PathResult {
   const adjacency = opts.useCallDistance === false
-    ? unitAdjacency(opts.forward ?? buildAdjacency(cg).forward)
+    ? unitAdjacency(opts.traversal ?? traversalIndexFor(cg), opts.filter)
     : buildWeightedAdjacency(cg).forward;
   const maxDistance = opts.useCallDistance === false
     ? SUBGRAPH_MAX_DEPTH_LIMIT
@@ -142,14 +157,21 @@ export async function handleFindPath(
   const cg = opts.directResolvedOnly
     ? { ...rawCg, edges: rawCg.edges.filter(e => e.confidence !== 'synthesized') }
     : rawCg;
-  const { nodeMap, forward } = buildAdjacency(cg);
+  const nodeMap = new Map(cg.nodes.map(n => [n.id, n]));
+  // The traversal structure precomputed for this generation, replacing the
+  // per-call adjacency rebuild (change: optimize-reachability-precompute). Strict
+  // mode filters `cg.edges` above into a fresh object, so the index is loaded for
+  // the ORIGINAL graph (the generation's identity) and the filter is applied at
+  // traversal time — the two are equivalent, and only this way is it memoizable.
+  const traversal = await loadTraversalIndex(absDir, rawCg);
+  const filtered: TraversalFilter | undefined = opts.directResolvedOnly ? { directResolvedOnly: true } : undefined;
   // Confidence boundary: the returned path's edges are the basis; the staleness
   // marker is shared by every exit. (spec: add-confidence-boundary-disclosure)
   const staleness = await computeStaleness(absDir);
   const pairIndex = buildPairEdgeIndex(cg.edges);
 
-  const fromRes = resolveEndpoint(from, cg, forward);
-  const toRes = resolveEndpoint(to, cg, forward);
+  const fromRes = resolveEndpoint(from, cg, traversal, filtered);
+  const toRes = resolveEndpoint(to, cg, traversal, filtered);
   const SELECTOR_HELP = 'Use a function name, landmark:<id>, role:entrypoint|hub|sink, or file:<path>.';
   if (fromRes.kind === 'error') return { error: `Unknown "from" selector "${from}". ${SELECTOR_HELP}` };
   if (toRes.kind === 'error') return { error: `Unknown "to" selector "${to}". ${SELECTOR_HELP}` };
@@ -240,7 +262,7 @@ export async function handleFindPath(
   }
 
   const useCallDistance = opts.useCallDistance !== false;
-  const result = findCheapestPath(cg, fromRes.nodes.map(n => n.id), toRes.nodes.map(n => n.id), { useCallDistance, forward });
+  const result = findCheapestPath(cg, fromRes.nodes.map(n => n.id), toRes.nodes.map(n => n.id), { useCallDistance, traversal, filter: filtered });
   // Call-graph node paths are already repo-relative (e.g. "src/app.ts"); only an
   // absolute path needs relativizing. The bare `relative(absDir, …)` mis-resolved a
   // repo-relative path against process.cwd(), emitting "../../…/abs/cwd/src/app.ts"

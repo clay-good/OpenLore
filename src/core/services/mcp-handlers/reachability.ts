@@ -33,7 +33,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { validateDirectory, readCachedContext } from './utils.js';
 import { resolveFederationScope, findCrossRepoConsumersBatch } from '../../federation/resolver.js';
-import { buildAdjacency } from './graph.js';
+import { loadTraversalIndex } from './traversal.js';
 import { assembleBoundary, computeStaleness, edgeBasisWithinSet } from './confidence-boundary.js';
 import { loadParseHealthReport, parseHealthBoundary } from './parse-health-boundary.js';
 import { isIacLanguage } from '../../analyzer/iac/types.js';
@@ -143,31 +143,6 @@ function fileImported(filePath: string, importedFiles: Set<string>): boolean {
 }
 
 /**
- * Compute the live (reachable) node-id set by forward BFS from seed roots.
- * `excludeId` removes a node from both the seeds and the traversal (delete mode).
- */
-function reachableFrom(
-  seeds: string[],
-  forward: Map<string, Set<string>>,
-  excludeId?: string,
-): Set<string> {
-  const live = new Set<string>();
-  const queue: string[] = [];
-  for (const s of seeds) {
-    if (s === excludeId || live.has(s)) continue;
-    live.add(s); queue.push(s);
-  }
-  while (queue.length) {
-    const id = queue.shift()!;
-    for (const next of forward.get(id) ?? []) {
-      if (next === excludeId || live.has(next)) continue;
-      live.add(next); queue.push(next);
-    }
-  }
-  return live;
-}
-
-/**
  * The candidate dead-code id set: code nodes (excluding tests) not reachable from
  * any liveness root (tests, by-name imports, HTTP handlers, main-like). Shares the
  * documented roots definition with {@link handleFindDeadCode} so `find_dead_code`
@@ -187,7 +162,7 @@ export async function deadCodeIds(
   const strict = opts?.directResolvedOnly === true;
   const dep = await loadDepSignals(absDir);
   const importedNames = dep?.names ?? null;
-  const { forward } = buildAdjacency(cg, { directResolvedOnly: strict });
+  const traversal = await loadTraversalIndex(absDir, cg);
   const handlerRootIds = externallyInvokedHandlerIds(cg, !strict);
   const isMainLike = (n: FunctionNode) => n.name === 'main' || n.name === 'Main' || n.name === 'default';
   const isRoot = (n: FunctionNode): boolean =>
@@ -195,7 +170,7 @@ export async function deadCodeIds(
     (importedNames !== null && importedNames.has(n.name));
   const codeNodes = cg.nodes.filter(isCodeNode);
   const seedIds = codeNodes.filter(isRoot).map(r => r.id).sort();
-  const live = reachableFrom(seedIds, forward);
+  const live = traversal.reachAll(seedIds, 'forward', { directResolvedOnly: strict });
   return new Set(codeNodes.filter(n => !n.isTest && !live.has(n.id)).map(n => n.id));
 }
 
@@ -209,7 +184,9 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
   const dep = await loadDepSignals(absDir);
   const importedNames = dep?.names ?? null;
   const importedFiles = dep?.files ?? null;
-  const { nodeMap, forward } = buildAdjacency(cg, { directResolvedOnly: input.directResolvedOnly });
+  const nodeMap = new Map(cg.nodes.map(n => [n.id, n]));
+  const traversal = await loadTraversalIndex(absDir, cg);
+  const edgeFilter = { directResolvedOnly: input.directResolvedOnly };
 
   // Map each node reached *into* by a synthesized edge → the rule that produced it.
   // Used (in non-strict mode) to cap confidence at `low` for any candidate-dead
@@ -250,7 +227,7 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
   const codeNodes = cg.nodes.filter(isCodeNode);
   const roots = codeNodes.filter(isRoot);
   const seedIds = [...roots].map(r => r.id).sort();
-  const live = reachableFrom(seedIds, forward);
+  const live = traversal.reachAll(seedIds, 'forward', edgeFilter);
 
   const exportSignal: 'dependency-graph' | 'none' = importedNames !== null ? 'dependency-graph' : 'none';
   const languages = [...new Set(codeNodes.map(n => n.language))].sort();
@@ -269,7 +246,7 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
       ?? codeNodes.find(n => n.name.toLowerCase() === input.ifDeleted!.toLowerCase());
     if (!target) return { error: `Symbol "${input.ifDeleted}" not found in the code graph.` };
 
-    const liveWithout = reachableFrom(seedIds, forward, target.id);
+    const liveWithout = traversal.reachAll(seedIds, 'forward', edgeFilter, target.id);
     const becomesDead = [...live]
       .filter(id => id !== target.id && !liveWithout.has(id))
       .map(id => nodeMap.get(id))

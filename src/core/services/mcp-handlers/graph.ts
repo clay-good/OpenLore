@@ -6,6 +6,7 @@
  */
 
 import { validateDirectory, readCachedContext, notReadyResult } from './utils.js';
+import { loadTraversalIndex } from './traversal.js';
 import { resolveFederationScope, findCrossRepoConsumersBatch, findCrossRepoClientCallers } from '../../federation/resolver.js';
 import { extractRoutesFromFile, normalizeUrl, type RouteDefinition, type RouteInventory } from '../../analyzer/http-route-parser.js';
 import type { CachedContext } from './utils.js';
@@ -56,12 +57,22 @@ import {
 } from './confidence-boundary.js';
 
 // ============================================================================
-// SHARED GRAPH HELPERS (also exported for chat-tools.ts)
+// SHARED GRAPH HELPERS
 // ============================================================================
 
 /**
  * Build forward (caller→callees) and backward (callee→callers) adjacency maps
  * from a serialised call graph, returning both maps and a node lookup.
+ *
+ * NOT ON THE SERVING PATH ANY MORE (change: optimize-reachability-precompute).
+ * Every reachability handler now traverses the precomputed structure
+ * (`analyzer/condensation.ts`, loaded once per artifact generation) instead of
+ * rebuilding these Maps of Sets per tool call. This function is retained as the
+ * REFERENCE IMPLEMENTATION the equivalence suite pins against: `condensation.test.ts`
+ * freezes a verbatim copy of it and asserts the index reproduces it edge-for-edge
+ * and order-for-order. `graph.test.ts` also asserts it agrees with the DB-backed
+ * {@link bfsFromDB} path. Change it only together with the index, or the two
+ * silently diverge.
  *
  * Inheritance propagation rides on the materialized, provenance-labeled override
  * edges (`kind: 'overrides'`, `confidence: 'synthesized'`) the CHA pass writes into
@@ -97,7 +108,13 @@ export function buildAdjacency(cg: SerializedCallGraph, opts?: { directResolvedO
   return { nodeMap, forward, backward };
 }
 
-/** BFS up to `maxDepth`. Returns a map of visited node-id → depth reached. */
+/**
+ * BFS up to `maxDepth`. Returns a map of visited node-id → depth reached.
+ *
+ * Like {@link buildAdjacency}, no longer on the serving path — kept as the frozen
+ * reference the traversal index's `bfsDepths` is pinned against
+ * (change: optimize-reachability-precompute).
+ */
 export function bfs(
   seeds: string[],
   adjacency: Map<string, Set<string>>,
@@ -1177,7 +1194,13 @@ export async function handleTraceExecutionPath(
   if (!ctx.callGraph) return notReadyResult('Call graph not available. Re-run analyze_codebase.', 'graph-unavailable');
 
   const cg = ctx.callGraph as SerializedCallGraph;
-  const { nodeMap, forward } = buildAdjacency(cg, { directResolvedOnly });
+  // The one traversal structure for this artifact generation; the DFS below walks
+  // it instead of a per-call adjacency rebuild (change: optimize-reachability-precompute).
+  // `neighborIds` preserves the edge-insertion order the old `Set` yielded, so the
+  // first `maxPaths` paths enumerated — and hence the payload — are unchanged.
+  const nodeMap = new Map(cg.nodes.map(n => [n.id, n]));
+  const traversal = await loadTraversalIndex(absDir, cg);
+  const edgeFilter = { directResolvedOnly };
 
   const entryLower  = entryFunction.toLowerCase();
   const targetLower = targetFunction.toLowerCase();
@@ -1254,7 +1277,7 @@ export async function handleTraceExecutionPath(
     if (path.length > maxDepth) return;
     // At the first hop from an entry, honor the value-level data-dependence filter.
     const firstHopFilter = path.length === 1 && allowedFirstHop?.has(path[0]) ? allowedFirstHop.get(path[0]) : undefined;
-    for (const neighborId of forward.get(currentId) ?? []) {
+    for (const neighborId of traversal.neighborIds(currentId, 'forward', edgeFilter)) {
       if (firstHopFilter && !firstHopFilter.has(neighborId)) continue;
       if (!visited.has(neighborId)) {
         visited.add(neighborId);
