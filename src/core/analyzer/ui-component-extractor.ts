@@ -52,7 +52,8 @@ const REACT_FORWARD_REF = /^export\s+const\s+([A-Z][A-Za-z0-9_]*)\s*=\s*(?:forwa
 // const REACT_DEFAULT_EXPORT_ANON = /^export\s+default\s+(?:function|class)\s*\(/m; // reserved for future use
 
 // TypeScript interface/type props extraction: interface XxxProps { ... }
-const TS_PROPS_INTERFACE = /interface\s+\w*Props\s*\{([^}]+)\}/gs;
+// Bounded body: an unbounded `[^}]+` is quadratic on repeated `interface Props {`.
+const TS_PROPS_INTERFACE = /interface\s+\w*Props\s*\{([^}]{0,20000})\}/gs;
 const TS_PROP_LINE = /^\s+(\w+)(\?)?:\s*([^;,\n]+)/m;
 
 // Vue SFC

@@ -197,7 +197,7 @@ export async function extractHttpCalls(filePath: string): Promise<HttpCall[]> {
   // ── fetch ──────────────────────────────────────────────────────────────────
   // fetch('/api/search')
   // fetch(`/api/search/${id}`, { method: 'POST' })
-  const fetchRegex = /\bfetch\s*\(\s*(`[^`]+`|'[^']+'|"[^"]+")\s*(?:,\s*\{([^}]*)\})?\s*\)/g;
+  const fetchRegex = /\bfetch\s*\(\s*(`[^`]+`|'[^']+'|"[^"]+")\s*(?:,\s*\{([^}]{0,4000})\})?\s*\)/g;
   let m: RegExpExecArray | null;
   while ((m = fetchRegex.exec(clean)) !== null) {
     const rawUrl = m[1].replace(/^[`'"]/,'').replace(/[`'"]$/,'');
@@ -423,7 +423,9 @@ export async function extractRouteDefinitions(filePath: string): Promise<RouteDe
   // `url(...)` (regex routes). `\bpath` alone never matched `re_path` (the `_` blocks
   // the word boundary), so regex routes were silently unextracted.
   const djangoPathRegex =
-    /\b(re_path|path|url)\s*\(\s*r?(['"])(.*?)\2\s*,\s*([\w.]+)/gm;
+    // The route literal is bounded and cannot span lines: `(.*?)` rescanned to EOF
+    // from every `path(` when the closing quote never arrived.
+    /\b(re_path|path|url)\s*\(\s*r?(['"])([^'"\n]{0,2000})\2\s*,\s*([\w.]+)/gm;
   while ((m = djangoPathRegex.exec(clean)) !== null) {
     const keyword = m[1];
     const rawPattern = m[3];
@@ -529,7 +531,9 @@ function extractNextJavaMethodName(lines: string[], annotationLine: number): str
     // return-type position (e.g. Spring's `public @ResponseBody Vets list()`),
     // so allow and skip them — otherwise the handler name resolves to "unknown".
     const match = l.match(
-      /\b(?:public|private|protected)\s+(?:static\s+|final\s+|abstract\s+|synchronized\s+|default\s+|native\s+)*(?:@[\w.]+(?:\([^)]*\))?\s+)*(?:<[^>]+>\s+)?[\w<>[\], ?.]+?\s+(\w+)\s*\(/
+      // Type capture excludes SPACE — see JPA_FIELD_RE in schema-extractor.ts for why
+      // the ' ' inside the class overlapping the following `\s+` is quadratic.
+      /\b(?:public|private|protected)\s+(?:static\s+|final\s+|abstract\s+|synchronized\s+|default\s+|native\s+)*(?:@[\w.]+(?:\([^)]{0,400}\))?\s+)*(?:<[^>]+>\s+)?[\w<>[\],?.]+(?:\s+[\w<>[\],?.]+)*?\s+(\w+)\s*\(/
     );
     if (match && !skipNames.has(match[1])) return match[1];
   }

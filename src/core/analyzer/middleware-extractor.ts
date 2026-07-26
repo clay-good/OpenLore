@@ -51,24 +51,24 @@ interface Pattern {
 // Express / Hono app.use(...) patterns
 const EXPRESS_PATTERNS: Pattern[] = [
   // CORS
-  { re: /app\.use\s*\([^)]*cors\s*\(/,          type: 'cors',         name: 'cors',        framework: 'express' },
-  { re: /app\.use\s*\([^)]*cors\)/,              type: 'cors',         name: 'cors',        framework: 'express' },
+  { re: /app\.use\s*\([^)]{0,400}cors\s*\(/,          type: 'cors',         name: 'cors',        framework: 'express' },
+  { re: /app\.use\s*\([^)]{0,400}cors\)/,              type: 'cors',         name: 'cors',        framework: 'express' },
   // Auth
-  { re: /app\.use\s*\([^)]*helmet\s*\(/,         type: 'auth',         name: 'helmet',      framework: 'express' },
+  { re: /app\.use\s*\([^)]{0,400}helmet\s*\(/,         type: 'auth',         name: 'helmet',      framework: 'express' },
   { re: /passport\.authenticate\s*\(/,           type: 'auth',         name: 'passport',    framework: 'express' },
   { re: /\bjwt\s*\(/,                            type: 'auth',         name: 'jwt',         framework: 'express' },
-  { re: /app\.use\s*\([^)]*session\s*\(/,        type: 'auth',         name: 'session',     framework: 'express' },
+  { re: /app\.use\s*\([^)]{0,400}session\s*\(/,        type: 'auth',         name: 'session',     framework: 'express' },
   // Rate-limit
-  { re: /app\.use\s*\([^)]*rateLimit\s*\(/,      type: 'rate-limit',   name: 'rateLimit',   framework: 'express' },
-  { re: /app\.use\s*\([^)]*slowDown\s*\(/,       type: 'rate-limit',   name: 'slowDown',    framework: 'express' },
-  { re: /app\.use\s*\([^)]*throttle\s*\(/,       type: 'rate-limit',   name: 'throttle',    framework: 'express' },
+  { re: /app\.use\s*\([^)]{0,400}rateLimit\s*\(/,      type: 'rate-limit',   name: 'rateLimit',   framework: 'express' },
+  { re: /app\.use\s*\([^)]{0,400}slowDown\s*\(/,       type: 'rate-limit',   name: 'slowDown',    framework: 'express' },
+  { re: /app\.use\s*\([^)]{0,400}throttle\s*\(/,       type: 'rate-limit',   name: 'throttle',    framework: 'express' },
   // Logging
-  { re: /app\.use\s*\([^)]*morgan\s*\(/,         type: 'logging',      name: 'morgan',      framework: 'express' },
-  { re: /app\.use\s*\([^)]*pino\s*\(/,           type: 'logging',      name: 'pino',        framework: 'express' },
-  { re: /app\.use\s*\([^)]*winston\s*\(/,        type: 'logging',      name: 'winston',     framework: 'express' },
+  { re: /app\.use\s*\([^)]{0,400}morgan\s*\(/,         type: 'logging',      name: 'morgan',      framework: 'express' },
+  { re: /app\.use\s*\([^)]{0,400}pino\s*\(/,           type: 'logging',      name: 'pino',        framework: 'express' },
+  { re: /app\.use\s*\([^)]{0,400}winston\s*\(/,        type: 'logging',      name: 'winston',     framework: 'express' },
   // Validation
-  { re: /app\.use\s*\([^)]*express\.json/,       type: 'validation',   name: 'express.json', framework: 'express' },
-  { re: /app\.use\s*\([^)]*bodyParser/,          type: 'validation',   name: 'bodyParser',  framework: 'express' },
+  { re: /app\.use\s*\([^)]{0,400}express\.json/,       type: 'validation',   name: 'express.json', framework: 'express' },
+  { re: /app\.use\s*\([^)]{0,400}bodyParser/,          type: 'validation',   name: 'bodyParser',  framework: 'express' },
   // NOTE: zod is detected separately (see extractFromSource), gated on a real zod import —
   // a bare `.parse(` matches JSON.parse/Date.parse/etc. and produced phantom "zod" entries.
   { re: /\bcelebrate\s*\(/,                      type: 'validation',   name: 'celebrate',   framework: 'express' },

@@ -66,7 +66,9 @@ function lineOfIndex(source: string, index: number): number {
 // ============================================================================
 
 // model User { ... }
-const PRISMA_MODEL_RE = /^model\s+(\w+)\s*\{([^}]+)\}/gm;
+// Bounded body — see the note on JPA_FIELD_RE below; an unbounded `[^}]+` makes a
+// file of repeated `model X {` quadratic to scan.
+const PRISMA_MODEL_RE = /^model\s+(\w+)\s*\{([^}]{0,20000})\}/gm;
 // field line: fieldName  FieldType? @...
 const PRISMA_FIELD_RE = /^\s{1,4}(\w+)\s+(\w+)(\?)?/m;
 
@@ -106,7 +108,7 @@ function parsePrisma(source: string, rel: string): SchemaTable[] {
 
 // @Entity() ... class ClassName { ... }
 // We capture class name after @Entity decorator region.
-const TYPEORM_ENTITY_RE = /@Entity\s*\([^)]*\)[^]*?class\s+(\w+)/g;
+const TYPEORM_ENTITY_RE = /@Entity\s*\([^)]{0,400}\)[^]{0,20000}?class\s+(\w+)/g;
 // @Column() / @PrimaryGeneratedColumn() etc before fieldName: FieldType
 const TYPEORM_COLUMN_RE = /@(?:Column|PrimaryGeneratedColumn|PrimaryColumn|CreateDateColumn|UpdateDateColumn|DeleteDateColumn|ManyToOne|OneToMany|ManyToMany|OneToOne|JoinColumn|JoinTable)\s*\([^)]*\)\s*\n\s*(\w+)\s*[?!]?\s*:\s*([^;\n]+)/g;
 const TYPEORM_CLASS_BODY_RE = /class\s+\w+[^{]*\{([^]*?)^}/m;
@@ -150,7 +152,7 @@ function parseTypeOrm(source: string, rel: string): SchemaTable[] {
 // ============================================================================
 
 // export const users = pgTable('users', { ... })
-const DRIZZLE_TABLE_RE = /(?:export\s+(?:const|let)\s+(\w+)\s*=\s*)?(?:pgTable|mysqlTable|sqliteTable)\s*\(\s*['"`](\w+)['"`]\s*,\s*\{([^}]+)\}/g;
+const DRIZZLE_TABLE_RE = /(?:export\s+(?:const|let)\s+(\w+)\s*=\s*)?(?:pgTable|mysqlTable|sqliteTable)\s*\(\s*['"`](\w+)['"`]\s*,\s*\{([^}]{0,20000})\}/g;
 // fieldName: columnType(...)
 const DRIZZLE_FIELD_RE = /^\s{1,6}(\w+)\s*:\s*([\w.]+)\s*\(/m;
 
@@ -242,8 +244,12 @@ const JPA_ENTITY_CLASS_RE = /@(?:Entity|MappedSuperclass)\b[\s\S]*?\bclass\s+(\w
 const JPA_TABLE_RE = /@Table\s*\([^)]*\bname\s*=\s*"([^"]+)"/;
 // A persistent field: `[modifiers] Type name [= …];` at class-body level.
 // Methods never match because a `;`/`=` must follow the name (methods have `(`).
+// The type capture excludes SPACE. With ' ' inside the class and `\s+` immediately
+// after it, every space was claimable by either side — an ambiguity that, combined
+// with the `(?:final\s+|…)*` prefix, made a long `private final final …` line
+// quadratic. Multi-word generic types still match via the explicit space group.
 const JPA_FIELD_RE =
-  /^(?:private|protected|public)\s+(?:final\s+|transient\s+|volatile\s+)*([\w.<>[\], ]+?)\s+(\w+)\s*[;=]/;
+  /^(?:private|protected|public)\s+(?:final\s+|transient\s+|volatile\s+)*([\w.<>[\],]+(?:\s+[\w.<>[\],]+)*?)\s+(\w+)\s*[;=]/;
 
 /**
  * Parse JPA / Hibernate entities from a Java source file. Captures the table

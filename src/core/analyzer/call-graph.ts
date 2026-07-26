@@ -4646,7 +4646,7 @@ export class CallGraphBuilder {
     // Catches mocked functions that are imported but never directly called in the test.
     // Build a lightweight import map from file content (only test files, TS/JS).
     const allFilePaths = files.map(f => f.path);
-    const NAMED_IMPORT_RE = /^\s*import\s+(?:type\s+)?\{([^}]+)\}\s+from\s+['"](\.[^'"]+)['"]/gm;
+    const NAMED_IMPORT_RE = /^\s*import\s+(?:type\s+)?\{([^}]{0,4000})\}\s+from\s+['"](\.[^'"]+)['"]/gm;
     const DEFAULT_IMPORT_RE = /^\s*import\s+(?:type\s+)?(\w+)\s+from\s+['"](\.[^'"]+)['"]/gm;
     for (const file of files) {
       if (!isTestFile(file.path)) continue;

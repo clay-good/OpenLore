@@ -208,7 +208,8 @@ function addRefs(
   };
 
   // depends_on = [ a.b, module.c ]
-  const dep = block.body.match(/depends_on\s*=\s*\[([\s\S]*?)\]/);
+  // Bounded: `[\s\S]*?` rescanned to EOF from every `depends_on = [` with no closer.
+  const dep = block.body.match(/depends_on\s*=\s*\[([\s\S]{0,20000}?)\]/);
   if (dep) {
     for (const raw of dep[1].split(',')) {
       const ref = classifyRef(raw.trim());
