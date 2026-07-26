@@ -10,10 +10,12 @@ import { withRelaxedTls } from '../../core/services/tls-scope.js';
 import { readFile, unlink } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { fileExists } from '../../utils/command-helpers.js';
-import { join, resolve, sep } from 'node:path';
+import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { logger } from '../../utils/logger.js';
+import { safeJoin } from '../../utils/path-confinement.js';
+import { isLoopbackHost } from '../../utils/loopback.js';
 import {
   MAX_QUERY_LENGTH,
   MAX_CHAT_BODY_BYTES,
@@ -52,14 +54,21 @@ export function sanitizeErrorMessage(msg: string): string {
     .replace(/x-api-key:\s*\S{10,}/gi, 'x-api-key: [REDACTED]');
 }
 
-/** Ensure a resolved path stays within the project root. Returns null if invalid. */
+/**
+ * Ensure a resolved path stays within the project root. Returns null if invalid.
+ *
+ * Delegates to the shared `safeJoin` so this surface gets the same SYMLINK-aware
+ * containment the MCP handlers have (mcp-security: Symlink-Aware Path Confinement).
+ * The lexical-only check this used to do accepted an in-repo symlink pointing
+ * outside the root, which the `/api/skeleton` and `/api/spec-requirements` routes
+ * would then read.
+ */
 export function safePath(rootPath: string, userPath: string): string | null {
-  const root = resolve(rootPath);
-  const abs = resolve(rootPath, userPath);
-  if (abs !== root && !abs.startsWith(root + sep)) {
+  try {
+    return safeJoin(resolve(rootPath), userPath);
+  } catch {
     return null;
   }
-  return abs;
 }
 
 /**
@@ -100,7 +109,7 @@ export const viewCommand = new Command('view')
   .option('--analysis <path>', 'Path to analysis directory', `${OPENLORE_ANALYSIS_REL_PATH}/`)
   .option('--spec <path>', 'Path to spec files directory', `./${OPENSPEC_DIR}/${OPENSPEC_SPECS_SUBDIR}/`)
   .option('--port <n>', 'Port to run the viewer on', String(DEFAULT_VIEWER_PORT))
-  .option('--host <host>', 'Host to bind (use 0.0.0.0 for LAN)', DEFAULT_VIEWER_HOST)
+  .option('--host <host>', 'Loopback host to bind (non-loopback binds are refused)', DEFAULT_VIEWER_HOST)
   .option('--no-open', 'Do not open the browser automatically', false)
   .action(
     async (options: {
@@ -146,6 +155,24 @@ export const viewCommand = new Command('view')
       }
       const port = isNaN(parsedPort) ? DEFAULT_VIEWER_PORT : parsedPort;
       const host = options.host || DEFAULT_VIEWER_HOST;
+
+      // The viewer authenticates its own page by EMBEDDING the instance token in the
+      // served HTML, and the guard is mounted at `/api` — so `/` itself is
+      // unauthenticated. On a non-loopback bind that means anyone who can reach the
+      // port can simply fetch the page, read the token out of it, and then call the
+      // guarded routes (including the LLM-backed /api/chat). The token gate cannot
+      // defend a surface that publishes its own key, so refuse the bind instead —
+      // parity with `serve`, which refuses a tokenless non-loopback bind.
+      if (!isLoopbackHost(host)) {
+        logger.error(
+          `Refusing to bind non-loopback host "${host}": the viewer embeds its auth token ` +
+            `in the page it serves, so a non-loopback bind hands that token to anyone who ` +
+            `can reach the port. Bind loopback and forward the port instead ` +
+            `(ssh -L ${port}:localhost:${port} <host>).`,
+        );
+        process.exitCode = 1;
+        return;
+      }
 
       // Per-instance token. Injected into the served UI so its same-origin /api
       // requests authenticate; required by the money/agent chat route (always)

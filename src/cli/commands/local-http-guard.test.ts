@@ -79,8 +79,12 @@ describe('originDefenseError', () => {
     );
     expect(err).toMatch(/cross-site Origin/);
   });
-  it('accepts the literal "null" Origin (opaque origin, e.g. file://)', () => {
-    expect(originDefenseError(fakeReq({ host: '127.0.0.1:5173', origin: 'null' }), bound)).toBeNull();
+  it('rejects the opaque "null" Origin (a sandboxed cross-site iframe sends it)', () => {
+    // A sandboxed iframe on an attacker page sends `Origin: null`; allowing it let a
+    // web page drive the tokenless loopback daemon with a preflight-free POST.
+    expect(
+      originDefenseError(fakeReq({ host: '127.0.0.1:5173', origin: 'null' }), bound),
+    ).toMatch(/cross-site Origin/);
   });
 });
 

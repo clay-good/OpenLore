@@ -66,6 +66,7 @@ vi.mock('node:fs/promises', () => ({
   writeFile: vi.fn().mockResolvedValue(undefined),
   mkdir: vi.fn().mockResolvedValue(undefined),
   unlink: vi.fn().mockResolvedValue(undefined),
+  chmod: vi.fn().mockResolvedValue(undefined),
 }));
 
 // ============================================================================
@@ -403,5 +404,11 @@ describe('view server API guard wiring', () => {
     expect(payload).toMatchObject({ pid: process.pid, host: expect.any(String) });
     expect(typeof payload.token).toBe('string');
     expect(payload.token.length).toBeGreaterThan(0);
+    // The descriptor carries the token that gates /api/chat, so it must not be
+    // world-readable: another local process could otherwise read it and drive the
+    // LLM-backed route the token exists to protect.
+    expect(wrote![2]).toMatchObject({ mode: 0o600 });
+    const { chmod } = await import('node:fs/promises');
+    expect(vi.mocked(chmod).mock.calls.some(([p, m]) => String(p).endsWith('view.json') && m === 0o600)).toBe(true);
   });
 });

@@ -411,7 +411,9 @@ async function readDescriptor(cwd: string): Promise<ServeDescriptor | null> {
 
 async function healthy(desc: ServeDescriptor): Promise<boolean> {
   try {
-    const res = await fetch(`http://${desc.host}:${desc.port}/health`, { signal: AbortSignal.timeout(HEALTH_PROBE_TIMEOUT_MS) });
+    // `redirect: 'error'` — a daemon never redirects, and following one would take
+    // this probe (and, at the call site below, the token) off the machine.
+    const res = await fetch(`http://${desc.host}:${desc.port}/health`, { signal: AbortSignal.timeout(HEALTH_PROBE_TIMEOUT_MS), redirect: 'error' });
     if (!res.ok) return false;
     return ((await res.json().catch(() => null)) as { ok?: boolean } | null)?.ok === true;
   } catch { return false; }
@@ -462,6 +464,8 @@ async function callTool(daemon: Daemon, name: string, args: Record<string, unkno
   try {
     const res = await fetch(`${daemon.baseUrl}/tool/${encodeURIComponent(name)}`, {
       method: 'POST', headers, body: JSON.stringify({ directory: cwd, args }), signal,
+      // Carries x-openlore-token; Node's fetch re-sends custom headers across a redirect.
+      redirect: 'error',
     });
     const body = await res.json().catch(() => ({ error: `non-JSON (${res.status})` }));
     if (!res.ok) return { error: (body as { error?: string }).error ?? `HTTP ${res.status}` };
@@ -1203,7 +1207,7 @@ export default function openlore(pi: ExtensionAPI): void {
     keepalive = setInterval(() => {
       for (const [cwd, daemon] of daemons) {
         const headers = daemon.token ? { 'x-openlore-token': daemon.token } : undefined;
-        void fetch(`${daemon.baseUrl}/health`, { headers, signal: AbortSignal.timeout(HEALTH_PROBE_TIMEOUT_MS) })
+        void fetch(`${daemon.baseUrl}/health`, { headers, signal: AbortSignal.timeout(HEALTH_PROBE_TIMEOUT_MS), redirect: 'error' })
           .then((res) => { if (!res.ok) daemons.delete(cwd); })
           .catch(() => daemons.delete(cwd));
       }

@@ -19,6 +19,8 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
+import { mkdir, writeFile, chmod } from 'node:fs/promises';
+import { dirname } from 'node:path';
 import { LOOPBACK_HOSTNAMES, isLoopbackHost } from '../../utils/loopback.js';
 
 /** Header a client presents to authenticate to a local OpenLore HTTP surface. */
@@ -81,8 +83,6 @@ export async function writeInstanceDescriptor(
   descriptorPath: string,
   value: unknown,
 ): Promise<void> {
-  const { mkdir, writeFile, chmod } = await import('node:fs/promises');
-  const { dirname } = await import('node:path');
   await mkdir(dirname(descriptorPath), { recursive: true, mode: 0o700 });
   await writeFile(descriptorPath, JSON.stringify(value, null, 2) + '\n', {
     encoding: 'utf-8',
@@ -97,6 +97,13 @@ export async function writeInstanceDescriptor(
  * the `Host` header (and an attacker page sends a cross-site `Origin`). We accept a
  * request only when both the Host and any Origin name the loopback interface or the
  * exact bound host. Returns an error string to reject with, or null to allow.
+ *
+ * The opaque origin (`Origin: null`) is rejected along with the rest. It used to be
+ * allowed for hypothetical `file://` clients — there are none in-tree — but a
+ * sandboxed cross-site iframe sends exactly that header, which made it a way for a
+ * web page to drive the tokenless loopback daemon (`approve_decision`, `remember`)
+ * with a simple, preflight-free `text/plain` POST. The spec's requirement is to
+ * reject a cross-site Origin, and an opaque one is cross-site.
  */
 export function originDefenseError(req: IncomingMessage, boundHost: string): string | null {
   const boundName = hostnameOf(boundHost);
@@ -107,7 +114,7 @@ export function originDefenseError(req: IncomingMessage, boundHost: string): str
     return `Host header "${hostHeader ?? ''}" is not an allowed loopback name (DNS-rebinding guard)`;
   }
   const origin = req.headers.origin;
-  if (origin !== undefined && origin !== 'null' && !allowed(hostnameOf(origin))) {
+  if (origin !== undefined && !allowed(hostnameOf(origin))) {
     return `cross-site Origin "${origin}" is not permitted`;
   }
   return null;
