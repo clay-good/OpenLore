@@ -26,6 +26,7 @@ import {
   ARTIFACT_STYLE_FINGERPRINT,
   ARTIFACT_PARSE_HEALTH,
 } from '../../constants.js';
+import { writeTraversalIndexArtifact } from './condensation.js';
 import { buildStyleFingerprint, type StyleFingerprint } from './style-fingerprint.js';
 import { buildParseHealthReport, isLossyUtf8, type ParseHealthReport, type FileParseHealth } from './parse-health.js';
 import type { ScoredFile, ProjectType } from '../../types/index.js';
@@ -417,6 +418,11 @@ export class AnalysisArtifactGenerator {
     // harden-artifact-write-atomicity). Each individual write is already atomic (temp +
     // rename via atomicWriteFile); the lock adds set-level serialization on top.
     await withAnalysisLock(this.options.outputDir, async () => {
+      // Strip the CFG/def-use overlay before persisting: it is DB-only and must
+      // never enter the resident llm-context.json or the hot cache (spec:
+      // add-intraprocedural-cfg-dataflow-overlay).
+      const contextJson = JSON.stringify({ ...artifacts.llmContext, cfgs: undefined }, null, 2);
+
       // Save each artifact
       const saves: Promise<void>[] = [
         atomicWriteFile(
@@ -433,12 +439,28 @@ export class AnalysisArtifactGenerator {
         ),
         atomicWriteFile(
           join(this.options.outputDir, ARTIFACT_LLM_CONTEXT),
-          // Strip the CFG/def-use overlay before persisting: it is DB-only and must
-          // never enter the resident llm-context.json or the hot cache (spec:
-          // add-intraprocedural-cfg-dataflow-overlay).
-          JSON.stringify({ ...artifacts.llmContext, cfgs: undefined }, null, 2)
+          contextJson
         ),
       ];
+
+      // Precomputed reachability structure (change: optimize-reachability-precompute):
+      // SCC condensation + topological order + CSR adjacency, so the reachability
+      // tools traverse a lookup instead of rebuilding adjacency per call. Written
+      // under the same atomic-write + analysis-lock discipline as its siblings, and
+      // stamped with the digest of the exact llm-context.json bytes above — a reader
+      // refuses any structure whose digest does not match the graph it is serving,
+      // so the pair can never come from different generations. Fail-soft like the
+      // other side artifacts: a write failure means the next read builds in memory,
+      // never that analysis aborts.
+      if (artifacts.llmContext.callGraph) {
+        saves.push(
+          writeTraversalIndexArtifact(
+            this.options.outputDir,
+            artifacts.llmContext.callGraph,
+            contextJson,
+          ).catch(() => {})
+        );
+      }
 
       if (enrichment?.schemas) {
         saves.push(atomicWriteFile(

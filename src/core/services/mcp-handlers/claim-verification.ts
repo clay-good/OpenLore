@@ -38,7 +38,8 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { validateDirectory, readCachedContext } from './utils.js';
-import { buildAdjacency } from './graph.js';
+import { traversalIndexFor } from './traversal.js';
+import type { TraversalIndex, Direction } from '../../analyzer/condensation.js';
 import { deadCodeIds } from './reachability.js';
 import {
   assembleBoundary,
@@ -150,32 +151,31 @@ async function readIndexCommit(absDir: string): Promise<string | null> {
   }
 }
 
-/** Forward BFS from a seed, tracking the predecessor so a path can be rebuilt. */
+/**
+ * BFS from a seed over the precomputed traversal structure, tracking the
+ * predecessor so a path can be rebuilt (change: optimize-reachability-precompute).
+ * The predecessor of each node is its first discoverer in CSR (edge) order —
+ * identical to the per-call `Map<string, Set<string>>` walk this replaced, so the
+ * cited path is the same one, not merely an equally valid alternative.
+ */
 function reachWithPath(
   seedId: string,
   targetId: string,
-  adjacency: Map<string, Set<string>>,
+  traversal: TraversalIndex,
+  dir: Direction,
 ): string[] | null {
   if (seedId === targetId) return [seedId];
-  const parent = new Map<string, string>();
-  const seen = new Set<string>([seedId]);
-  const queue: string[] = [seedId];
-  while (queue.length) {
-    const id = queue.shift()!;
-    for (const next of adjacency.get(id) ?? []) {
-      if (seen.has(next)) continue;
-      seen.add(next);
-      parent.set(next, id);
-      if (next === targetId) {
-        const path: string[] = [next];
-        let cur = next;
-        while (cur !== seedId) { cur = parent.get(cur)!; path.push(cur); }
-        return path.reverse();
-      }
-      queue.push(next);
-    }
+  const { depth, parent } = traversal.bfsWithParents([seedId], dir, Number.MAX_SAFE_INTEGER);
+  if (!depth.has(targetId)) return null;
+  const path: string[] = [targetId];
+  let cur = targetId;
+  while (cur !== seedId) {
+    const prev = parent.get(cur);
+    if (prev === undefined) return null; // unreachable in practice; never loop forever
+    cur = prev;
+    path.push(cur);
   }
-  return null;
+  return path.reverse();
 }
 
 const SYNTH_DISPATCH_DETAIL =
@@ -221,13 +221,12 @@ function verifyReach(
   object: FunctionNode,
   kind: 'reaches' | 'impacts',
 ): ClaimResult {
-  const { forward, backward } = buildAdjacency(cg);
+  const traversal = traversalIndexFor(cg);
   const pairIndex = buildPairEdgeIndex(cg.edges);
   // `reaches`: does subject call through to object (forward from subject)?
   // `impacts`: does changing subject affect object — i.e. object transitively
   // calls subject, so we walk backward from subject and look for object.
-  const adjacency = kind === 'reaches' ? forward : backward;
-  const path = reachWithPath(subject.id, object.id, adjacency);
+  const path = reachWithPath(subject.id, object.id, traversal, kind === 'reaches' ? 'forward' : 'backward');
   if (!path) {
     return {
       verdict: 'refuted',

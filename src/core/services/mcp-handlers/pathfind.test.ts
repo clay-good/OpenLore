@@ -12,7 +12,7 @@ vi.mock('./utils.js', () => ({
 }));
 
 import { resolveEndpoint, findCheapestPath, handleFindPath } from './pathfind.js';
-import { buildAdjacency } from './graph.js';
+import { buildTraversalIndex } from '../../analyzer/condensation.js';
 import { readCachedContext } from './utils.js';
 import { TOOL_PRESETS } from '../../../cli/commands/mcp.js';
 import { TOOL_OUTPUT_CLASS, assertConclusionShape } from './tool-contract.js';
@@ -42,28 +42,28 @@ describe('resolveEndpoint', () => {
   const sink = node({ id: 'b.ts::writeDb', fanIn: 3, fanOut: 0 });   // called leaf
   const orphan = node({ id: 'b.ts::orphanLeaf', fanIn: 0, fanOut: 0 }); // uncalled leaf
   const cg = graph([entry, hub, sink, orphan], [edgeC(hub.id, sink.id, 'import')], { entryPoints: [entry], hubFunctions: [hub] });
-  const { forward } = buildAdjacency(cg);
+  const traversal = buildTraversalIndex(cg);
 
   it('resolves role:entrypoint / role:hub from existing classifiers', () => {
-    expect(resolveEndpoint('role:entrypoint', cg, forward).nodes.map(n => n.name)).toEqual(['main']);
-    expect(resolveEndpoint('role:hub', cg, forward).nodes.map(n => n.name)).toEqual(['hubFn']);
+    expect(resolveEndpoint('role:entrypoint', cg, traversal).nodes.map(n => n.name)).toEqual(['main']);
+    expect(resolveEndpoint('role:hub', cg, traversal).nodes.map(n => n.name)).toEqual(['hubFn']);
   });
 
   it('resolves role:sink as a called leaf (fan-in >= 1, no outgoing) and excludes uncalled leaves', () => {
-    const names = resolveEndpoint('role:sink', cg, forward).nodes.map(n => n.name);
+    const names = resolveEndpoint('role:sink', cg, traversal).nodes.map(n => n.name);
     expect(names).toContain('writeDb');     // called leaf
     expect(names).not.toContain('orphanLeaf'); // uncalled leaf — not a sink
     expect(names).not.toContain('main');    // has an outgoing edge → not a leaf
   });
 
   it('resolves file: and fuzzy name selectors', () => {
-    expect(resolveEndpoint('file:b.ts', cg, forward).nodes.map(n => n.name).sort()).toEqual(['orphanLeaf', 'writeDb']);
-    expect(resolveEndpoint('hub', cg, forward).nodes.map(n => n.name)).toEqual(['hubFn']);
-    expect(resolveEndpoint('landmark:a.ts::hubFn', cg, forward).nodes.map(n => n.name)).toEqual(['hubFn']);
+    expect(resolveEndpoint('file:b.ts', cg, traversal).nodes.map(n => n.name).sort()).toEqual(['orphanLeaf', 'writeDb']);
+    expect(resolveEndpoint('hub', cg, traversal).nodes.map(n => n.name)).toEqual(['hubFn']);
+    expect(resolveEndpoint('landmark:a.ts::hubFn', cg, traversal).nodes.map(n => n.name)).toEqual(['hubFn']);
   });
 
   it('returns an error kind for an unknown role', () => {
-    expect(resolveEndpoint('role:bogus', cg, forward).kind).toBe('error');
+    expect(resolveEndpoint('role:bogus', cg, traversal).kind).toBe('error');
   });
 });
 

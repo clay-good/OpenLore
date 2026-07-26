@@ -26,6 +26,7 @@
 
 import { readFile, readdir, unlink } from 'node:fs/promises';
 import { atomicWriteFile } from '../decisions/atomic-store.js';
+import { writeTraversalIndexArtifact } from '../analyzer/condensation.js';
 import { withAnalysisLock } from '../decisions/lock.js';
 import { createHash } from 'node:crypto';
 import { join, relative, posix } from 'node:path';
@@ -911,7 +912,20 @@ export class McpWatcher {
     // harden-artifact-write-atomicity). Set-level serialization against a full analyze is
     // owned by the caller's analysis lock — persist itself stays lock-free (it runs inside a
     // lane that already holds the lock, so it must never re-acquire it).
-    await atomicWriteFile(this.contextPath, JSON.stringify(serializable, null, 2));
+    const contextJson = JSON.stringify(serializable, null, 2);
+    await atomicWriteFile(this.contextPath, contextJson);
+    // Rebuild the precomputed reachability structure from the graph we just wrote
+    // (change: optimize-reachability-precompute). It is stamped with the digest of
+    // `contextJson`, so it tracks the flush exactly: a reader accepts it only
+    // alongside these bytes, and a failure here degrades to an in-memory rebuild on
+    // the next traversal — never to a structure from the previous generation.
+    if (serializable.callGraph) {
+      try {
+        await writeTraversalIndexArtifact(this.outputPath, serializable.callGraph, contextJson);
+      } catch {
+        // Fail-soft: the watcher must never die on a side-artifact write.
+      }
+    }
     // Hand the patched object back to the read cache, aligned to the new on-disk
     // mtime, so the next tool call is a cache hit (no cold re-parse). This is the
     // fix for root-cause item 2 (mtime bump forcing a full re-read). Only valid

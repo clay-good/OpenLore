@@ -15,7 +15,7 @@
 
 import { validateDirectory, readCachedContext } from './utils.js';
 import { resolveFederationScope, findCrossRepoTests } from '../../federation/resolver.js';
-import { buildAdjacency } from './graph.js';
+import { loadTraversalIndex } from './traversal.js';
 import type { SerializedCallGraph, FunctionNode } from '../../analyzer/call-graph.js';
 import { SUBGRAPH_MAX_DEPTH_LIMIT } from '../../../constants.js';
 import { assembleBoundary, computeStaleness, edgeBasisWithinSet } from './confidence-boundary.js';
@@ -148,23 +148,20 @@ export async function handleSelectTests(input: SelectTestsInput): Promise<unknow
   }
 
   // ── Backward reachability with path tracking (calls + inheritance) ──────────
-  const { nodeMap, backward } = buildAdjacency(cg, { directResolvedOnly: input.directResolvedOnly });
+  // Served from the precomputed traversal structure for this artifact generation
+  // rather than a per-call adjacency rebuild (change: optimize-reachability-precompute).
+  // `sortNeighbors` preserves the ascending-caller-id expansion order the `viaPath`
+  // chains below are reconstructed from, so the payload is unchanged.
+  const nodeMap = new Map(cg.nodes.map(n => [n.id, n]));
+  const traversal = await loadTraversalIndex(absDir, cg);
   const seedIds = new Set(seeds.map(s => s.id));
-  const depthOf = new Map<string, number>();
-  const parent = new Map<string, string>(); // node → next node toward a seed
-  const queue: Array<{ id: string; depth: number }> = [];
-  for (const s of seeds) { depthOf.set(s.id, 0); queue.push({ id: s.id, depth: 0 }); }
-  while (queue.length) {
-    const { id, depth } = queue.shift()!;
-    if (depth >= maxDepth) continue;
-    for (const caller of [...(backward.get(id) ?? [])].sort()) {
-      if (!depthOf.has(caller)) {
-        depthOf.set(caller, depth + 1);
-        parent.set(caller, id);
-        queue.push({ id: caller, depth: depth + 1 });
-      }
-    }
-  }
+  const { depth: depthOf, parent } = traversal.bfsWithParents(
+    seeds.map(s => s.id),
+    'backward',
+    maxDepth,
+    { directResolvedOnly: input.directResolvedOnly },
+    { sortNeighbors: true },
+  );
 
   // Path from a reached node down to its seed: [node, …, changedFn].
   const pathToSeed = (id: string): string[] => {

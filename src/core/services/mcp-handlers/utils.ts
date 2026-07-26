@@ -9,6 +9,9 @@ import { dirname, extname, join, relative, resolve, sep } from 'node:path';
 import type { LLMContext } from '../../analyzer/artifact-generator.js';
 import { EdgeStore } from '../edge-store.js';
 import { readAttestation, reconcile, type IndexIntegrity } from '../../analyzer/index-attestation.js';
+import { artifactDigest } from '../../analyzer/condensation.js';
+import { recordArtifactDigest } from './traversal.js';
+import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
 import { ANALYSIS_AGE_WARNING_HOURS, ANALYSIS_STALE_THRESHOLD_MS, ARTIFACT_FINGERPRINT, ARTIFACT_LLM_CONTEXT, MAX_QUERY_LENGTH, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR, OPENSPEC_DIR, STALE_REGION_REPAIR_THRESHOLD } from '../../../constants.js';
 import { repairInBackground, type RepairReason } from '../cold-start-bootstrap.js';
 
@@ -389,6 +392,11 @@ export async function readCachedContext(directory: string, timeout?: number): Pr
           const cg = ctx.callGraph as { nodes?: unknown; edges?: unknown };
           if (!Array.isArray(cg.nodes)) cg.nodes = [];
           if (!Array.isArray(cg.edges)) cg.edges = [];
+          // Bind this generation's graph to the exact artifact bytes it came from,
+          // so the persisted traversal structure can be accepted only when it was
+          // built from THESE bytes (change: optimize-reachability-precompute).
+          // Recorded on the parsed object, never on the context we might re-serialize.
+          recordArtifactDigest(ctx.callGraph as SerializedCallGraph, artifactDigest(raw));
         } else {
           ctx.callGraph = undefined;
         }

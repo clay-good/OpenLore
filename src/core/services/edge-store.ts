@@ -42,6 +42,20 @@ function isCorruptionError(err: unknown): boolean {
   return /malformed|not a database|file is encrypted|disk image|not a valid|corrupt/.test(m);
 }
 
+/**
+ * Memory-map ceiling for the edge store, in bytes (256 MB). An upper bound, not a
+ * reservation: SQLite maps at most the database's actual size, so a 4 MB store maps
+ * 4 MB. Sized to cover a large monorepo's graph while staying well inside a 64-bit
+ * address space.
+ */
+const SQLITE_MMAP_SIZE_BYTES = 256 * 1024 * 1024;
+/**
+ * Page-cache ceiling, as a NEGATIVE value — SQLite reads that as kibibytes rather
+ * than a page count, so the budget does not silently change with `page_size`.
+ * -65536 == 64 MiB, up from the 2 MB default; pages are allocated on demand.
+ */
+const SQLITE_CACHE_SIZE_KIB = -65536;
+
 function openDatabase(dbPath: string): DatabaseSync {
   const db = new DatabaseSync(dbPath);
   db.exec('PRAGMA journal_mode = WAL');
@@ -52,6 +66,24 @@ function openDatabase(dbPath: string): DatabaseSync {
   // loser of the race throws on open/write and silently drops its work
   // (fix-transitive-incremental-staleness widened this contention).
   db.exec('PRAGMA busy_timeout = 5000');
+  // Serving floor (change: optimize-reachability-precompute). The DB-backed
+  // traversals (`get_subgraph` / `analyze_impact`, one batched query per BFS level)
+  // were paying avoidable page-fault and page-cache-miss cost because the store
+  // opened with no memory-map and SQLite's 2 MB default page cache — smaller than a
+  // real repo's edge table, so a hub's backward walk re-read pages it had just used.
+  //
+  // Both pragmas are advisory: SQLite silently ignores an mmap request it cannot
+  // satisfy (build without SQLITE_MAX_MMAP_SIZE, a filesystem that refuses it), and
+  // a cache_size is only a ceiling — pages are allocated on demand, so a tiny store
+  // never reserves the full amount. Neither changes a single query's RESULT, only
+  // its cost, so this is wrapped fail-soft: an environment that rejects either
+  // pragma opens exactly as before rather than failing to open at all.
+  try {
+    db.exec(`PRAGMA mmap_size = ${SQLITE_MMAP_SIZE_BYTES}`);
+    db.exec(`PRAGMA cache_size = ${SQLITE_CACHE_SIZE_KIB}`);
+  } catch {
+    // Advisory only — keep the connection.
+  }
   return db;
 }
 

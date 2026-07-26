@@ -24,7 +24,7 @@
 import { join } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { validateDirectory, readCachedContext } from './utils.js';
-import { buildAdjacency } from './graph.js';
+import { loadTraversalIndex } from './traversal.js';
 import { computeStaleness } from './confidence-boundary.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_ENV_INVENTORY } from '../../../constants.js';
 import { extractEnvReadSites, type EnvVar, type EnvReadSite } from '../../analyzer/env-extractor.js';
@@ -194,15 +194,19 @@ export async function handleAnalyzeEnvImpact(input: AnalyzeEnvImpactInput): Prom
   }
 
   // ── Blast radius: backward BFS from each reading function ────────────────────
-  const { nodeMap, backward } = buildAdjacency(cg);
-  const distOf = new Map<string, number>();
-  const queue: Array<{ id: string; depth: number }> = [];
-  for (const id of readingFnIds) { distOf.set(id, 0); queue.push({ id, depth: 0 }); }
-  while (queue.length) {
-    const { id, depth } = queue.shift()!;
-    if (depth >= depthBound) { boundaries.add(`backward traversal bounded at depth ${depthBound}; deeper callers not enumerated`); continue; }
-    for (const caller of [...(backward.get(id) ?? [])].sort()) {
-      if (!distOf.has(caller)) { distOf.set(caller, depth + 1); queue.push({ id: caller, depth: depth + 1 }); }
+  // Over the precomputed traversal structure (change: optimize-reachability-precompute);
+  // `sortNeighbors` keeps the ascending-caller expansion order this walk always used.
+  const nodeMap = new Map(cg.nodes.map(n => [n.id, n]));
+  const traversal = await loadTraversalIndex(absDir, cg);
+  const distOf = traversal.bfsDepths(
+    [...readingFnIds], 'backward', depthBound, undefined, { sortNeighbors: true },
+  );
+  // The depth cap stays a disclosed boundary, fired on exactly the prior condition:
+  // the walk reached a node AT the cap and therefore declined to expand it.
+  for (const d of distOf.values()) {
+    if (d >= depthBound) {
+      boundaries.add(`backward traversal bounded at depth ${depthBound}; deeper callers not enumerated`);
+      break;
     }
   }
 

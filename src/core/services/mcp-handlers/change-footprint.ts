@@ -31,7 +31,8 @@
 
 import type { SerializedCallGraph, FunctionNode } from '../../analyzer/call-graph.js';
 import type { FileChangeCoupling } from '../../provenance/change-coupling.js';
-import { buildAdjacency, bfs, buildWeightedAdjacency, weightedBfs } from './graph.js';
+import { buildWeightedAdjacency, weightedBfs } from './graph.js';
+import { traversalIndexFor } from './traversal.js';
 
 /** Whether a declared write is a pure append to a registration site or a modify of existing code. */
 export type WriteMode = 'append' | 'modify';
@@ -294,9 +295,12 @@ export function computeFootprint(
   ambientReadDeps.sort();
 
   // --- affected-set: hop-depth backward reachability (== blast radius) ---
-  const { backward } = buildAdjacency(graph);
+  // Over the traversal structure precomputed for this graph generation rather than
+  // adjacency rebuilt per task (change: optimize-reachability-precompute). It
+  // matters most here: `plan_parallel_work` and `map_in_flight_conflicts` call
+  // this once PER TASK, so the rebuild was paid N times for one graph.
   const affectedMaxDepth = opts.affectedMaxDepth ?? FOOTPRINT_AFFECTED_MAX_DEPTH;
-  const backwardReach = bfs([...writeIds], backward, affectedMaxDepth);
+  const backwardReach = traversalIndexFor(graph).bfsDepths([...writeIds], 'backward', affectedMaxDepth);
   const affectedSet = [...backwardReach.keys()]
     .filter(id => !writeIds.has(id) && nodeById.has(id))
     .sort();

@@ -5,12 +5,17 @@
 ### Requirement: TraversalToolsShareOnePrecomputedRepresentation
 
 All reachability-answering handlers (`select_tests`, `report_coverage_gaps`, `find_dead_code`,
-`blast_radius`/`change_footprint`, `find_path`, and the graph traversal behind `get_subgraph` /
-`analyze_impact` where the artifact graph is the source) SHALL traverse the single precomputed
-condensation/adjacency structure loaded once per artifact generation, rather than rebuilding
-per-call adjacency. Whole-graph reaches SHALL run on the condensation DAG. Every tool's
-conclusion payload SHALL be unchanged: for any input, the served answer SHALL equal the answer
-of the per-call BFS over the same artifact.
+`blast_radius`/`change_footprint`, `find_path`, `trace_execution_path`, `analyze_env_impact`, and
+`verify_claim`'s reach kinds) SHALL traverse the single precomputed condensation/adjacency
+structure loaded once per artifact generation, rather than rebuilding per-call adjacency.
+Whole-graph reaches SHALL run on the condensation DAG. Every tool's conclusion payload SHALL be
+unchanged: for any input, the served answer SHALL equal the answer of the per-call BFS over the
+same artifact — including the ORDER-dependent parts of a payload (a reconstructed `viaPath`, the
+first N paths a bounded enumeration returns), not merely the set of results.
+
+`get_subgraph` and `analyze_impact` traverse the SQLite edge store one batched query per BFS
+level and never built per-call adjacency; they are therefore out of scope here, and this
+requirement does not silently claim them.
 
 #### Scenario: Answers are equivalent, only faster
 
@@ -26,3 +31,10 @@ of the per-call BFS over the same artifact.
 - **WHEN** the next traversal tool call arrives
 - **THEN** the daemon reloads the structure for the new generation before answering (same
   invalidation the context cache uses), never serving a traversal over the old graph
+
+#### Scenario: Repeated conclusions over one graph pay the build once
+
+- **GIVEN** a caller that computes many footprints over one graph in a single call
+  (`plan_parallel_work`, `map_in_flight_conflicts`)
+- **WHEN** each footprint's backward reachability runs
+- **THEN** they share one structure for that graph rather than rebuilding adjacency per task

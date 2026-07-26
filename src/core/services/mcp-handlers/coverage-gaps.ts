@@ -28,7 +28,7 @@
  */
 
 import { validateDirectory, readCachedContext } from './utils.js';
-import { buildAdjacency } from './graph.js';
+import { loadTraversalIndex } from './traversal.js';
 import { deadCodeIds } from './reachability.js';
 import { seedsFromSymbols, seedsFromFiles } from './test-impact.js';
 import { computeLandmarkSignals, type LandmarkSignal } from '../../analyzer/landmark-signals.js';
@@ -63,26 +63,6 @@ export interface ReportCoverageGapsInput {
 /** Hard cap on returned gaps — over-large requests are clamped, overflow reported. */
 const MAX_RESULTS_CAP = 500;
 
-/** Unbounded forward reach from seeds over the adjacency (BFS). */
-function reachAll(seeds: Iterable<string>, forward: Map<string, Set<string>>): Set<string> {
-  const live = new Set<string>();
-  const queue: string[] = [];
-  for (const s of seeds) {
-    if (live.has(s)) continue;
-    live.add(s);
-    queue.push(s);
-  }
-  while (queue.length) {
-    const id = queue.shift()!;
-    for (const next of forward.get(id) ?? []) {
-      if (live.has(next)) continue;
-      live.add(next);
-      queue.push(next);
-    }
-  }
-  return live;
-}
-
 interface CoverageGap {
   name: string;
   file: string;
@@ -112,7 +92,10 @@ export async function handleReportCoverageGaps(input: ReportCoverageGapsInput): 
 
   const cg = ctx.callGraph as SerializedCallGraph;
   const maxResults = Math.max(1, Math.min(input.maxResults ?? 100, MAX_RESULTS_CAP));
-  const { forward } = buildAdjacency(cg, { directResolvedOnly: input.directResolvedOnly });
+  // One precomputed traversal structure for this artifact generation, not a
+  // per-call adjacency rebuild (change: optimize-reachability-precompute). The
+  // whole-graph reach below runs as a topological scan of the condensation DAG.
+  const traversal = await loadTraversalIndex(absDir, cg);
 
   // ── Test reachability seeds (the exact inverse of select_tests) ─────────────
   // Source 1: every test node — a test transitively reaches the production code
@@ -127,7 +110,7 @@ export async function handleReportCoverageGaps(input: ReportCoverageGapsInput): 
   for (const e of cg.edges) {
     if (e.kind === 'tested_by' && e.callerId) testSeeds.add(e.callerId);
   }
-  const reachedByTest = reachAll(testSeeds, forward);
+  const reachedByTest = traversal.reachAll(testSeeds, 'forward', { directResolvedOnly: input.directResolvedOnly });
 
   // ── Candidate universe: internal, non-test, non-infra, non-generated code ───
   const universe = cg.nodes.filter(n => isCodeNode(n) && !n.isTest && !isExcludedPath(n.filePath));
