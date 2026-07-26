@@ -218,20 +218,29 @@ const LOCAL_CACHE_TABLES = ['pass1_facts'];
  * byte-stable — `VACUUM` rebuilds the same file for the same rows, so exporting an unchanged
  * index twice still produces identical bytes.
  *
- * The copy is staged in a private temp DIRECTORY, never beside the original. Two reasons, and
- * both are failure modes rather than tidiness:
+ * The copy is staged in a private temp DIRECTORY by preference, not beside the original. Two
+ * reasons, and both are failure modes rather than tidiness:
  *  - The analysis dir is the directory this exporter itself scans. A scratch file left there
  *    by a killed export would be picked up by every later export as just another artifact —
  *    and it is a full, UN-stripped copy of the store, so the leak would re-bundle the very
  *    table this function exists to remove, into the consumer's analysis dir, forever.
  *  - An open SQLite file grows `-wal`/`-shm` siblings for the duration, which would be
  *    visible to a concurrent export scanning the same directory.
- * `mkdtemp` also makes the path unique, so concurrent exports — in one process or several —
- * cannot collide on it.
+ * `mkdtemp` also makes the path unique, so concurrent exports cannot collide on it.
  *
- * Fail-soft: if the copy cannot be made or rewritten, the original bytes are bundled. A larger
- * bundle is a cost; a failed export would be a regression.
+ * `os.tmpdir()` is not guaranteed usable, though (an unset or read-only `TMPDIR`, a full
+ * volume), and silently shipping the local build cache would be worse than staging next to the
+ * store — so there is a fallback that does exactly that, under a name {@link isLocalOnlyDebris}
+ * matches, so even a leaked one can never be bundled. Its name carries the pid AND a
+ * per-process counter, because unlike `mkdtemp` a fixed name would let two concurrent exports
+ * of the same directory delete each other's scratch mid-read.
+ *
+ * Fail-soft: if neither location works, the original bytes are bundled and the caller is told
+ * (`degraded`). A larger bundle is a cost; a failed export would be a regression.
  */
+/** Distinguishes concurrent in-process fallback stagings, which share a pid. */
+let exportScratchSeq = 0;
+
 async function readStoreWithoutLocalCaches(
   dbPath: string,
 ): Promise<{ bytes: Buffer; degraded?: boolean }> {
@@ -242,13 +251,13 @@ async function readStoreWithoutLocalCaches(
   // writable by construction here: analyze just wrote the store into it.
   for (const stageIn of [() => mkdtemp(join(tmpdir(), 'openlore-export-')), null]) {
     let stage: string | undefined;
-    let scratch: string;
+    let scratch: string | undefined;
     try {
       if (stageIn) {
         stage = await stageIn();
         scratch = join(stage, basename(dbPath));
       } else {
-        scratch = `${dbPath}.export-${process.pid}`;
+        scratch = `${dbPath}.export-${process.pid}-${exportScratchSeq++}`;
       }
       await copyFile(dbPath, scratch);
       const db = new DatabaseSync(scratch);
@@ -263,7 +272,7 @@ async function readStoreWithoutLocalCaches(
       continue; // try the next staging location
     } finally {
       if (stage) await rm(stage, { recursive: true, force: true }).catch(() => {});
-      else if (!stageIn) await rm(`${dbPath}.export-${process.pid}`, { force: true }).catch(() => {});
+      else if (scratch) await rm(scratch, { force: true }).catch(() => {});
     }
   }
   // Neither location worked. Bundling the store as-is keeps the export working; the memo
@@ -456,6 +465,11 @@ export async function materializeBundle(bundle: Bundle, targetDir: string): Prom
     // Defense in depth: parseBundle already rejects unsafe names, but never write outside the
     // target dir even if a caller hands us an unvalidated bundle.
     if (!isSafeBundleFileName(name)) throw new BundleError('unreadable', `Unsafe bundled file name: ${JSON.stringify(name)}.`);
+    // Drop the producer's local-only debris. Exporters filter this out, but a bundle built by
+    // an OpenLore that predates that filter carries it — and materializing one would plant a
+    // full, un-stripped copy of THEIR store (extraction cache and all) permanently in this
+    // analysis dir. The graph itself is unaffected: nothing reads these names.
+    if (isLocalOnlyDebris(name)) continue;
     // Safe names are flat basenames (validated above), so no parent-dir creation is needed.
     await writeFile(join(targetDir, name), Buffer.from(b64, 'base64'));
   }

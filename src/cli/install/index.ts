@@ -115,6 +115,12 @@ export async function buildIndex(cwd: string, opts: { repair?: boolean } = {}): 
     // STORE; the per-file extraction cache is keyed by content hash and is not implicated,
     // so re-parsing the repo would only make the most frequent repair path the slowest
     // (change: optimize-hash-keyed-analyze).
+    // `analyzeCommand` is a module singleton and commander RETAINS an option's value across
+    // parses — so a repair build in this process would leave `--reanalyze` set for every
+    // later cold-start build, silently defeating the source-unchanged skip. Set both lanes
+    // explicitly rather than relying on absence to mean false.
+    analyzeCommand.setOptionValue('force', false);
+    analyzeCommand.setOptionValue('reanalyze', opts.repair === true);
     const analyzeArgs = opts.repair ? ['--reanalyze', '--embedded'] : ['--embedded'];
     await analyzeCommand.parseAsync(analyzeArgs, { from: 'user' });
     console.log = origLog;

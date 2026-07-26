@@ -231,15 +231,41 @@ describe('index-bundle: export', () => {
     await materializeBundle(parseBundle(buffer), target);
     const exported = EdgeStore.openForAnalyze(join(target, ARTIFACT_CALL_GRAPH_DB));
     try {
-      // Either the fallback stripped it, or the export disclosed that it could not.
-      if (exported.countPass1Facts() > 0) expect(note).toMatch(/extraction cache/);
-      else expect(exported.countNodes()).toBeGreaterThan(0);
+      // The STRONG property: the fallback ran and the memo was stripped anyway. Asserting
+      // "either it stripped or it said so" would be satisfied by the degraded path the
+      // fallback exists to avoid — i.e. it would pass with no fallback at all.
+      expect(exported.countPass1Facts()).toBe(0);
+      expect(exported.countNodes()).toBeGreaterThan(0);
+      expect(note).toBeUndefined();
     } finally {
       exported.close();
     }
     // Whatever happened, no staging file was left in the analysis dir.
     const { readdir } = await import('node:fs/promises');
     expect((await readdir(src)).filter(n => n.includes('.export-'))).toEqual([]);
+  });
+
+  /**
+   * The export-side filter cannot help with a bundle that already contains debris — every
+   * OpenLore released before that filter produced them. Materializing one must not plant a
+   * full, un-stripped copy of the PRODUCER's store (extraction cache and all) permanently in
+   * this machine's analysis dir.
+   */
+  it('drops debris carried by a bundle built before the export filter existed', async () => {
+    const src = join(work, 'legacy-bundle');
+    await buildAnalysisDir(src, 'abc1234');
+    const { buffer } = await buildBundle(src, VERSION);
+    const bundle = parseBundle(buffer);
+
+    // Forge the shape an older exporter produced: the quarantine copy alongside the store.
+    bundle.payload[`${ARTIFACT_CALL_GRAPH_DB}.corrupt-0`] = bundle.payload[ARTIFACT_CALL_GRAPH_DB];
+
+    const target = join(work, 'materialized-legacy');
+    await materializeBundle(bundle, target);
+    const { readdir } = await import('node:fs/promises');
+    const written = await readdir(target);
+    expect(written).toContain(ARTIFACT_CALL_GRAPH_DB);
+    expect(written).not.toContain(`${ARTIFACT_CALL_GRAPH_DB}.corrupt-0`);
   });
 
   it('re-attests from the store at export time, even with no on-disk attestation', async () => {

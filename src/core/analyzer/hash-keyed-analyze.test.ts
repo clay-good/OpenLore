@@ -16,7 +16,15 @@ import { tmpdir } from 'node:os';
 import { EdgeStore } from '../services/edge-store.js';
 import { computeExtractorStamp } from './pass1-fact-cache.js';
 
-const ARTIFACTS = ['llm-context.json', 'repo-structure.json', 'style-fingerprint.json'] as const;
+/**
+ * The artifact bytes that must not depend on which lane produced them. `parse-health.json` is
+ * here deliberately: it is the memoized `parseHealth` payload, and the merge loop MUTATES it
+ * (`result.parseHealth.language = file.language`) immediately after the row is recorded — so
+ * it is the field most able to differ between a stored and a freshly-extracted answer.
+ */
+const ARTIFACTS = [
+  'llm-context.json', 'repo-structure.json', 'style-fingerprint.json', 'parse-health.json',
+] as const;
 
 let dir: string;
 let out: string;
@@ -67,6 +75,18 @@ async function definedIn(fileSuffix: string): Promise<string[]> {
     .sort();
 }
 
+/** The persisted CFG/def-use overlay, which no JSON artifact carries. */
+function cfgOverlay(): Array<{ function_id: string; cfg: string }> {
+  const store = EdgeStore.open(EdgeStore.dbPath(out));
+  try {
+    return (store as unknown as { db: { prepare(sql: string): { all(): unknown } } }).db
+      .prepare('SELECT function_id, cfg FROM cfg_overlay ORDER BY function_id')
+      .all() as Array<{ function_id: string; cfg: string }>;
+  } finally {
+    store.close();
+  }
+}
+
 function memoRows(): Array<{ filePath: string; contentHash: string; stamp: string }> {
   const store = EdgeStore.open(EdgeStore.dbPath(out));
   try {
@@ -112,13 +132,20 @@ describe('analyze cost scales with the diff', () => {
 
     await analyze();                       // the reused lane: one file re-extracted
     const reused = await artifactBytes();
+    const reusedOverlay = cfgOverlay();
 
     await analyze({ force: true });        // the reference lane: everything re-extracted
     const forced = await artifactBytes();
+    const forcedOverlay = cfgOverlay();
 
     for (const name of ARTIFACTS) {
       expect(reused[name], `${name} differs between the reused and forced lanes`).toBe(forced[name]);
     }
+    // The CFG overlay lives only in SQLite, never in a JSON artifact — and it is the one
+    // memoized field with a non-trivial encoding (a `Map`, round-tripped as array-of-entries),
+    // so the JSON comparison above would miss a serialization bug in it entirely.
+    expect(reusedOverlay).toEqual(forcedOverlay);
+    expect(reusedOverlay.length).toBeGreaterThan(0);
     // …and the edit really landed, so the equality above is not comparing two stale files.
     expect(await definedIn('src/core/math.ts')).toEqual(['add', 'scale', 'shrink']);
   });
