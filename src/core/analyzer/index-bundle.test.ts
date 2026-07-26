@@ -134,16 +134,6 @@ describe('index-bundle: export', () => {
     }
 
     const { buffer } = await buildBundle(src, VERSION);
-
-    // The staging copy must never be written into the directory the exporter SCANS. A scratch
-    // file left there by a killed export would be bundled by every later export — and it is a
-    // full, UN-stripped copy of the store, so the leak would re-bundle the very table this
-    // strips, into the consumer's analysis dir, forever.
-    const { readdir } = await import('node:fs/promises');
-    expect(await readdir(src)).toEqual(
-      expect.not.arrayContaining([expect.stringContaining(`${ARTIFACT_CALL_GRAPH_DB}.`)]),
-    );
-
     const target = join(work, 'materialized');
     await materializeBundle(parseBundle(buffer), target);
 
@@ -162,6 +152,94 @@ describe('index-bundle: export', () => {
     } finally {
       live.close();
     }
+  });
+
+  /**
+   * The analysis directory accumulates FULL, UNPROCESSED copies of the graph store that
+   * belong to this machine alone: a `*.corrupt-<n>` preserved when a store was quarantined,
+   * and a `*.export-<pid>` left by an export that was killed before it could clean up.
+   * Bundling one does not merely bloat the artifact — it re-imports the local build cache the
+   * strip exists to remove, and drops a corrupt or stale graph into the consumer's analysis
+   * dir, where their own next export would pass it on again.
+   *
+   * Asserted on PLANTED debris rather than on "the directory is clean after a successful
+   * export", which the pre-fix implementation also satisfied (it deleted its scratch in a
+   * `finally`) and which therefore proves nothing about a killed one.
+   */
+  it('never bundles a quarantined or leftover-scratch copy of the store', async () => {
+    const src = join(work, 'with-debris');
+    await buildAnalysisDir(src, 'abc1234');
+    const dbPath = join(src, ARTIFACT_CALL_GRAPH_DB);
+
+    const store = EdgeStore.openForAnalyze(dbPath);
+    try {
+      store.putPass1Facts([{ filePath: 'src/a.ts', contentHash: 'h', facts: '{"v":1,"n":[],"e":[]}' }], 's');
+    } finally {
+      store.close();
+    }
+    // Two full copies of a store carrying the memo, exactly as the two real producers leave them.
+    await writeFile(`${dbPath}.corrupt-0`, await readFile(dbPath));
+    await writeFile(`${dbPath}.export-99999`, await readFile(dbPath));
+
+    const { manifest } = await buildBundle(src, VERSION);
+    const bundled = manifest.files.map(f => f.name);
+    expect(bundled).toContain(ARTIFACT_CALL_GRAPH_DB);
+    expect(bundled).not.toContain(`${ARTIFACT_CALL_GRAPH_DB}.corrupt-0`);
+    expect(bundled).not.toContain(`${ARTIFACT_CALL_GRAPH_DB}.export-99999`);
+
+    // And the debris does not sneak the memo in by the back door.
+    const target = join(work, 'materialized-debris');
+    await materializeBundle(parseBundle((await buildBundle(src, VERSION)).buffer), target);
+    const exported = EdgeStore.openForAnalyze(join(target, ARTIFACT_CALL_GRAPH_DB));
+    try {
+      expect(exported.countPass1Facts()).toBe(0);
+    } finally {
+      exported.close();
+    }
+  });
+
+  /**
+   * The strip stages its copy under `os.tmpdir()`, which is not guaranteed to be usable — an
+   * unset or read-only `TMPDIR`, a full volume. Silently shipping the local build cache in
+   * that case would be the worse outcome, so it falls back to staging beside the store under
+   * a name the debris filter matches, and says so when even that fails.
+   */
+  it('still strips the memo when the temp directory is unusable', async () => {
+    const src = join(work, 'no-tmpdir');
+    await buildAnalysisDir(src, 'abc1234');
+    const store = EdgeStore.openForAnalyze(join(src, ARTIFACT_CALL_GRAPH_DB));
+    try {
+      store.putPass1Facts([{ filePath: 'src/a.ts', contentHash: 'h', facts: '{"v":1,"n":[],"e":[]}' }], 's');
+    } finally {
+      store.close();
+    }
+
+    const previous = process.env.TMPDIR;
+    process.env.TMPDIR = join(work, 'definitely-not-a-directory');
+    let buffer: Buffer;
+    let note: string | undefined;
+    try {
+      const built = await buildBundle(src, VERSION);
+      buffer = built.buffer;
+      note = built.note;
+    } finally {
+      if (previous === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = previous;
+    }
+
+    const target = join(work, 'materialized-no-tmpdir');
+    await materializeBundle(parseBundle(buffer), target);
+    const exported = EdgeStore.openForAnalyze(join(target, ARTIFACT_CALL_GRAPH_DB));
+    try {
+      // Either the fallback stripped it, or the export disclosed that it could not.
+      if (exported.countPass1Facts() > 0) expect(note).toMatch(/extraction cache/);
+      else expect(exported.countNodes()).toBeGreaterThan(0);
+    } finally {
+      exported.close();
+    }
+    // Whatever happened, no staging file was left in the analysis dir.
+    const { readdir } = await import('node:fs/promises');
+    expect((await readdir(src)).filter(n => n.includes('.export-'))).toEqual([]);
   });
 
   it('re-attests from the store at export time, even with no on-disk attestation', async () => {

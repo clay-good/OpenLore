@@ -1532,20 +1532,28 @@ export class AnalysisArtifactGenerator {
     }
     try {
       const store = EdgeStore.open(EdgeStore.dbPath(this.options.outputDir));
-      // A not-ready store (schema mismatch / quarantined corruption) must not be queried, and
-      // an index that predates the memo — or came from a bundle, which strips it — has no
-      // table to query. Both are whole-store conditions, established once here rather than
-      // rediscovered as a swallowed error on every file. Either way the write buffer is kept,
-      // so this run leaves the memo behind for the next one.
-      const reason = requested
-        ? 'requested'
-        : store.notReady
-          ? 'index-not-ready'
-          : store.hasPass1Facts() ? undefined : 'memo-absent';
-      return {
-        cache: new BufferedPass1FactCache(store.notReady ? null : store, stamp, reason),
-        close: () => { try { store.close(); } catch { /* already closed */ } },
-      };
+      const close = (): void => { try { store.close(); } catch { /* already closed */ } };
+      try {
+        // A not-ready store (schema mismatch / quarantined corruption) must not be queried,
+        // and an index that predates the memo — or came from a bundle, which strips it — has
+        // no table to query. Both are whole-store conditions, established once here rather
+        // than rediscovered as a swallowed error on every file. Either way the write buffer
+        // is kept, so this run leaves the memo behind for the next one.
+        const reason = requested
+          ? 'requested'
+          : store.notReady
+            ? 'index-not-ready'
+            : store.hasPass1Facts() ? undefined : 'memo-absent';
+        return {
+          cache: new BufferedPass1FactCache(store.notReady ? null : store, stamp, reason),
+          close,
+        };
+      } catch (err) {
+        // The handle is open but unusable — close it here, or it leaks for the life of the
+        // process (which, in the serve/MCP daemon, is every analyze it ever runs).
+        close();
+        throw err;
+      }
     } catch {
       return {
         cache: new BufferedPass1FactCache(null, stamp, requested ? 'requested' : 'store-unreadable'),

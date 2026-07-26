@@ -2383,7 +2383,7 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
   // light read path never imports the analyzer/install layer itself.
   registerRepairBuilder(async (dir) => {
     const { buildIndex } = await import('../install/index.js');
-    await buildIndex(dir, { force: true });
+    await buildIndex(dir, { repair: true });
   });
 
   const selectorOpts = { minimal: options.minimal, preset: options.preset, allTools: options.allTools };

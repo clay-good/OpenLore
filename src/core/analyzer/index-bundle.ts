@@ -76,6 +76,22 @@ const EXCLUDED_FILES = new Set([
 ]);
 
 /**
+ * Local-only debris that must never be bundled, matched by SHAPE rather than by exact name
+ * because the names carry a counter or a pid.
+ *
+ * These are copies of the graph store that this machine left beside the real one: a
+ * `*.corrupt-<n>` file preserved when a store was quarantined (`quarantineCorruptSync`), and
+ * a `*.export-<pid>` staging file from an export that was killed before it could clean up.
+ * Both are FULL, UNPROCESSED copies of a store — so bundling one does not merely bloat the
+ * artifact, it re-imports the local build cache that {@link LOCAL_CACHE_TABLES} exists to
+ * strip, and drops a corrupt or stale graph into the consumer's analysis directory where
+ * their own next export would pass it on again.
+ */
+function isLocalOnlyDebris(name: string): boolean {
+  return new RegExp(`^${ARTIFACT_CALL_GRAPH_DB.replace('.', '\\.')}\\.(corrupt|export)-`).test(name);
+}
+
+/**
  * Rebuildable search-index subdirectories cleared from the live analysis dir on import: they are
  * a deterministic function of the graph, so a copy left over from a PRIOR index would point search
  * at embeddings for a graph that no longer matches the imported `call-graph.db`. `import` rebuilds
@@ -176,6 +192,14 @@ function attestExportedStore(dbPath: string): IndexAttestation {
 export interface BuildBundleResult {
   buffer: Buffer;
   manifest: BundleManifest;
+  /**
+   * Present only when something about the export degraded — today, that the graph store could
+   * not be staged for stripping, so the bundle carries this machine's extraction cache and is
+   * larger than it needs to be. RETURNED rather than logged: this module must not write to
+   * stdout, which is the JSON-RPC channel wherever it is imported by a server process. The
+   * CLI renders it, exactly as it does the extraction-lane note.
+   */
+  note?: string;
 }
 
 /**
@@ -208,25 +232,44 @@ const LOCAL_CACHE_TABLES = ['pass1_facts'];
  * Fail-soft: if the copy cannot be made or rewritten, the original bytes are bundled. A larger
  * bundle is a cost; a failed export would be a regression.
  */
-async function readStoreWithoutLocalCaches(dbPath: string): Promise<Buffer> {
-  let stage: string | undefined;
-  try {
-    stage = await mkdtemp(join(tmpdir(), 'openlore-export-'));
-    const scratch = join(stage, basename(dbPath));
-    await copyFile(dbPath, scratch);
-    const db = new DatabaseSync(scratch);
+async function readStoreWithoutLocalCaches(
+  dbPath: string,
+): Promise<{ bytes: Buffer; degraded?: boolean }> {
+  // Preferred: a private temp directory. Fallback: beside the store, under a name
+  // `isLocalOnlyDebris` matches — because `os.tmpdir()` is not guaranteed to be usable
+  // (an unset or read-only `TMPDIR`, a full volume), and silently shipping the local build
+  // cache would be a worse outcome than staging next to the original. The analysis dir is
+  // writable by construction here: analyze just wrote the store into it.
+  for (const stageIn of [() => mkdtemp(join(tmpdir(), 'openlore-export-')), null]) {
+    let stage: string | undefined;
+    let scratch: string;
     try {
-      for (const table of LOCAL_CACHE_TABLES) db.exec(`DROP TABLE IF EXISTS ${table}`);
-      db.exec('VACUUM');
+      if (stageIn) {
+        stage = await stageIn();
+        scratch = join(stage, basename(dbPath));
+      } else {
+        scratch = `${dbPath}.export-${process.pid}`;
+      }
+      await copyFile(dbPath, scratch);
+      const db = new DatabaseSync(scratch);
+      try {
+        for (const table of LOCAL_CACHE_TABLES) db.exec(`DROP TABLE IF EXISTS ${table}`);
+        db.exec('VACUUM');
+      } finally {
+        db.close();
+      }
+      return { bytes: await readFile(scratch) };
+    } catch {
+      continue; // try the next staging location
     } finally {
-      db.close();
+      if (stage) await rm(stage, { recursive: true, force: true }).catch(() => {});
+      else if (!stageIn) await rm(`${dbPath}.export-${process.pid}`, { force: true }).catch(() => {});
     }
-    return await readFile(scratch);
-  } catch {
-    return readFile(dbPath);
-  } finally {
-    if (stage) await rm(stage, { recursive: true, force: true }).catch(() => {});
   }
+  // Neither location worked. Bundling the store as-is keeps the export working; the memo
+  // rides along, which costs size only — never correctness, since a consumer's own analyze
+  // re-keys it against their own content and stamp. Disclosed rather than silent.
+  return { bytes: await readFile(dbPath), degraded: true };
 }
 
 /**
@@ -249,7 +292,7 @@ export async function buildBundle(analysisDir: string, openloreVersion: string):
 
   const entries = await readdir(analysisDir, { withFileTypes: true });
   const names = entries
-    .filter(e => e.isFile() && !EXCLUDED_FILES.has(e.name))
+    .filter(e => e.isFile() && !EXCLUDED_FILES.has(e.name) && !isLocalOnlyDebris(e.name))
     .map(e => e.name)
     .sort();
 
@@ -263,12 +306,21 @@ export async function buildBundle(analysisDir: string, openloreVersion: string):
   const payload: Record<string, string> = {};
   const manifestFiles: Array<{ name: string; bytes: number }> = [];
   const rawFiles: Array<{ name: string; bytes: Buffer }> = [];
+  let note: string | undefined;
   for (const name of names) {
-    const bytes = name === ARTIFACT_INDEX_ATTESTATION
-      ? freshAttestationBytes
-      : name === ARTIFACT_CALL_GRAPH_DB
-        ? await readStoreWithoutLocalCaches(dbPath)
-        : await readFile(join(analysisDir, name));
+    let bytes: Buffer;
+    if (name === ARTIFACT_INDEX_ATTESTATION) {
+      bytes = freshAttestationBytes;
+    } else if (name === ARTIFACT_CALL_GRAPH_DB) {
+      const stripped = await readStoreWithoutLocalCaches(dbPath);
+      bytes = stripped.bytes;
+      if (stripped.degraded) {
+        note = 'could not stage a stripped copy of the graph store — the bundle includes this '
+          + 'machine\'s extraction cache and is larger than necessary';
+      }
+    } else {
+      bytes = await readFile(join(analysisDir, name));
+    }
     payload[name] = bytes.toString('base64');
     manifestFiles.push({ name, bytes: bytes.length });
     rawFiles.push({ name, bytes });
@@ -287,7 +339,7 @@ export async function buildBundle(analysisDir: string, openloreVersion: string):
   // Fixed key order + sorted payload keys + fixed gzip level → byte-stable output.
   const json = JSON.stringify({ manifest, payload });
   const buffer = gzipSync(Buffer.from(json, 'utf-8'), { level: 9 });
-  return { buffer, manifest };
+  return { buffer, manifest, ...(note ? { note } : {}) };
 }
 
 /** True iff every required numeric count is present and finite (mirrors the attestation guard). */

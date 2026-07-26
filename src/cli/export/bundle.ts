@@ -67,6 +67,11 @@ export async function runBundleExport(opts: BundleExportOptions): Promise<number
     throw err;
   }
 
+  // Surface an export that degraded (today: the graph store could not be staged for
+  // stripping, so the bundle carries this machine's extraction cache). The codec returns it
+  // rather than logging, for the same stdout reason the extraction lane does.
+  if (result.note) logger.warning(`export bundle: ${result.note}`);
+
   // Create the output's parent dir so `--out dist/x.olbundle` into a not-yet-existing folder
   // writes cleanly instead of throwing an uncaught ENOENT (the default path always exists).
   await mkdir(dirname(outPath), { recursive: true });

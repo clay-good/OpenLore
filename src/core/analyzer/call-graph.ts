@@ -4074,6 +4074,8 @@ export class CallGraphBuilder {
     for (let fileIndex = 0; fileIndex < files.length; fileIndex++) {
       const file = files[fileIndex];
       const outcome = extractOutcomes[fileIndex];
+      /** Did this file's facts reach the memo? Read by the catch, which runs AFTER the record. */
+      let memoized = false;
       try {
         if (outcome.status === 'error') throw outcome.error;
         const result = outcome.value;
@@ -4099,7 +4101,7 @@ export class CallGraphBuilder {
         // by the dispatch code, which the stamp does cover, so it is recorded.
         if (cache && reusedFacts[fileIndex] === undefined) {
           if (isEmptyExtractResult(result)) uncacheable++;
-          else cache.record(file, result);
+          else { cache.record(file, result); memoized = true; }
         }
         if (!result) continue;
 
@@ -4136,8 +4138,10 @@ export class CallGraphBuilder {
           parseHealthByFile.set(file.path, result.parseHealth);
         }
       } catch (error) {
-        // A throw is never memoized either (see above), so it re-extracts on every run.
-        if (cache && reusedFacts[fileIndex] === undefined) uncacheable++;
+        // A throw is never memoized either (see above), so it re-extracts on every run —
+        // unless the record already happened and the throw came from the MERGE below it, in
+        // which case a row exists and counting it would misreport a cached file as uncacheable.
+        if (cache && reusedFacts[fileIndex] === undefined && !memoized) uncacheable++;
         // A file that threw here contributed ZERO nodes/edges — the "swallowed parse failure" leak.
         // Record it as a structured parse-health failure so downstream conclusions disclose it
         // instead of treating the missing symbols as genuinely absent (change:

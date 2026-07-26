@@ -148,9 +148,12 @@ export async function runPreflight(opts: PreflightOptions): Promise<{
 
 async function runAnalyzeFix(cwd: string): Promise<number> {
   return new Promise((resolveProm) => {
-    // TODO(spec-03-followup): when `openlore analyze --incremental` exists,
-    // prefer that — it should be a fraction of the cost of the full re-run.
-    const child = spawn(process.execPath, [process.argv[1], 'analyze'], {
+    // `--reanalyze`: this runs BECAUSE the graph was judged stale, and staleness is not
+    // always a source change — a bare `analyze` would hit the source-unchanged skip and
+    // silently do nothing, leaving the gate to fail again. It is deliberately not `--force`:
+    // the per-file extraction cache is keyed by content, so unchanged files are reused and
+    // the fix costs the diff (change: optimize-hash-keyed-analyze).
+    const child = spawn(process.execPath, [process.argv[1], 'analyze', '--reanalyze'], {
       cwd,
       stdio: 'inherit',
     });

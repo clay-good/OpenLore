@@ -134,7 +134,7 @@ export interface McpWatcherOptions {
   onGraphStale?: (reason: GraphStaleReason) => void;
   /**
    * When true AND no `onGraphStale` host handler is provided, the watcher itself
-   * spawns the debounced, coalesced background `analyze --force` on a graph-stale
+   * spawns the debounced, coalesced background `analyze --reanalyze` on a graph-stale
    * trigger (a repeatable singleflight, distinct from the once-per-process schema-
    * reset heal). Set by the in-process MCP watcher, which — unlike `serve` — has no
    * rebuild coordinator of its own, so its graph would otherwise age with every
@@ -688,7 +688,7 @@ export class McpWatcher {
     // The whole artifact-mutation section (load → patch → persist → the four
     // update* lanes) runs under the analysis lock so this read-modify-write of the
     // JSON artifact set cannot interleave with a full `analyze` writing the same
-    // directory — including the watcher's own self-heal `analyze --force` spawn
+    // directory — including the watcher's own self-heal `analyze --reanalyze` spawn
     // (change: harden-artifact-write-atomicity). loadContext is INSIDE the lock so
     // our persist can never clobber a fresh full write that landed after we read.
     const context = await withAnalysisLock(this.outputPath, async (): Promise<CachedContext | null> => {
@@ -778,11 +778,15 @@ export class McpWatcher {
     try {
       const child = spawn(
         process.execPath,
-        // `--reanalyze`, not `--force`: what is stale here is the graph STORE, never the
-        // per-file extraction cache, which is keyed by content hash and independent of the
-        // store's integrity. Re-parsing the whole repo to heal an index would throw away the
-        // exact saving the cache exists for, on the path that repeats most
-        // (change: optimize-hash-keyed-analyze).
+        // `--reanalyze`, not `--force`: what this heal needs is to RUN — a schema-reset index
+        // can carry a fingerprint that still matches source, which a plain analyze would skip
+        // — not to re-parse the repo (change: optimize-hash-keyed-analyze).
+        //
+        // On THIS path the extraction cache is lost anyway: it lives in the same store, and a
+        // SCHEMA_VERSION bump drops it along with everything else, so the run re-extracts and
+        // then repopulates. The flag is still the honest one to use, and the sibling heal
+        // below — which fires on ordinary staleness and is the one that repeats — does keep
+        // its cache.
         [cli, 'analyze', '--reanalyze', '--no-embed', '--output', this.outputPath],
         { cwd: this.rootPath, stdio: 'ignore', detached: true }
       );
@@ -828,7 +832,7 @@ export class McpWatcher {
   }
 
   /**
-   * Repeatable singleflight full `analyze --force` (BM25-only, no network) for the
+   * Repeatable singleflight full `analyze --reanalyze` (BM25-only, no network) for the
    * in-process watcher, which has no host rebuild coordinator. Distinct from the
    * once-per-process schema-reset heal: this must re-fire across a session (every
    * branch switch), so it coalesces a trigger that arrives mid-rebuild into one
@@ -846,10 +850,10 @@ export class McpWatcher {
       const child = spawn(
         process.execPath,
         // `--reanalyze`, not `--force`: what is stale here is the graph STORE, never the
-        // per-file extraction cache, which is keyed by content hash and independent of the
-        // store's integrity. Re-parsing the whole repo to heal an index would throw away the
-        // exact saving the cache exists for, on the path that repeats most
-        // (change: optimize-hash-keyed-analyze).
+        // per-file extraction cache, which is keyed by content hash and survives a rebuild.
+        // Re-parsing the whole repo to heal an index would throw away the exact saving the
+        // cache exists for, on the path that repeats most — this one re-fires on every branch
+        // switch for the life of the session (change: optimize-hash-keyed-analyze).
         [cli, 'analyze', '--reanalyze', '--no-embed', '--output', this.outputPath],
         { cwd: this.rootPath, stdio: 'ignore', detached: true }
       );
