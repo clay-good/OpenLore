@@ -27,6 +27,7 @@ import type { DriftOptions, DriftIssue, DriftResult, DriftSeverity } from '../..
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
 import {
   getChangedFiles,
+  resolveBaseRefDisclosed,
   isGitRepository,
   buildSpecMap,
   buildADRMap,
@@ -457,6 +458,19 @@ Pre-commit hook:
       // ========================================================================
       if (!opts.json) {
         logger.discovery('Analyzing git changes...');
+      }
+
+      // Disclose a base-ref fallback instead of quietly diffing against something the
+      // caller did not ask for. `resolveBaseRefDisclosed` is the shared home of this
+      // verdict (fix-cli-conclusion-honesty); `blast-radius` already surfaces it and
+      // `certify-public-surface` is fatal on it — `drift` was the one --base command
+      // that silently substituted `main` for a typo'd ref and reported success.
+      const baseDisclosure = await resolveBaseRefDisclosed(rootPath, opts.base);
+      if (baseDisclosure.fellBack && !opts.json) {
+        logger.warning(
+          `Base ref "${baseDisclosure.requested}" did not resolve — comparing against ` +
+            `"${baseDisclosure.resolved}" instead.`,
+        );
       }
 
       const gitResult = await getChangedFiles({
