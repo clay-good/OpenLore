@@ -1,3 +1,5 @@
+[![MCP Toplist](https://mcptoplist.com/badge/glama%2Fclay-good%2FOpenLore.svg)](https://mcptoplist.com/server/glama%2Fclay-good%2FOpenLore)
+
 <h1 align="center">OpenLore</h1>
 
 <p align="center">
