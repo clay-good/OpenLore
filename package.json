@@ -181,7 +181,7 @@
     "yaml": "^2.6.1"
   },
   "optionalDependencies": {
-    "@huggingface/transformers": "^3.8.1",
+    "@huggingface/transformers": "^4.2.0",
     "@lancedb/lancedb": "0.22.4-beta.3",
     "apache-arrow": "^21.1.0",
     "protobufjs": "^8.6.6",
