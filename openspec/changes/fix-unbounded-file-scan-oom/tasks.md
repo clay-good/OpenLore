@@ -58,9 +58,14 @@
       `llm-context.json` (call graph, signatures, all three phases) are **byte-identical** to
       `origin/main`'s output
 
-## Out of scope (recorded, not fixed)
-- [ ] The call-graph build holds all file content resident for Pass 2 (type inference, import
-      resolution, class hierarchy). On a 6,000-file / 234 MB repository this OOMs at a 2 GB heap on
-      `main` and on this branch alike — the ceiling moves one phase later, it does not move away.
-      Bounding it is a redesign (stream per-file facts through the store between passes), not a
-      limiter, and belongs in its own change
+## Out of scope (measured, recorded, not fixed)
+- [ ] The call-graph build has its own ceiling, and it is NOT this defect. Measured on a
+      4,000-file / 203 MB repository (32,001 functions): peak **2,323 MB** = 196 MB retained file
+      content + 18 MB nodes/edges + **1,594 MB intra-procedural CFG/def-use overlay**. The overlay
+      is built unconditionally for every function (~50 KB live each), accumulated for the whole
+      repository, written to SQLite, then discarded — transient by design, never needing to be
+      fully resident. Retaining it pre-serialized does NOT help (JSON measures 1,819 MB, larger
+      than the live form). It cannot simply be streamed into the store either: `clearAll()` runs
+      only AFTER the build, deliberately, so a failed build cannot leave a wiped index
+      (change: harden-index-store-lifecycle). Needs its own change — spill-to-disk hand-off, an
+      opt-in gate, or a more compact overlay representation
