@@ -79,11 +79,26 @@ line later on an extension test.
 
 ## Deliberately NOT in this change
 
-The call-graph build (`analyze` phase 4) holds every file's content resident because Pass 2 type
-inference, import resolution, and class-hierarchy extraction all read it after Pass 1. That is a
-real ceiling on very large repositories and it is **architectural** — bounding it means streaming
-per-file facts through the store between passes, not adding a limiter. It is out of scope here and
-should be its own change; this one fixes the reported crash and the shape that caused it.
+The call-graph build (`analyze` phase 4) has its own ceiling on very large repositories, and it is
+NOT the same defect. Measured on a 4,000-file / 203 MB repository (32,001 functions), peak was
+**2,323 MB**, composed of:
+
+| Term | Retained |
+|---|---|
+| File content held for Pass 2 (type inference, import resolution, class hierarchy) | 196 MB |
+| Serialized nodes + edges | 18 MB |
+| **Intra-procedural CFG / def-use overlay** | **1,594 MB** |
+
+The overlay dominates by an order of magnitude: it is built unconditionally for every function in
+every supported language (~50 KB live per function), accumulated for the WHOLE repository, written
+to SQLite, and then discarded. It is transient by design and never needs to be fully resident.
+
+Bounding it is a distinct change with its own risk: the store is opened and `clearAll()`-ed only
+after the build completes — deliberately, so a failed build cannot leave a wiped index
+(change: harden-index-store-lifecycle) — so the overlay cannot simply be streamed into the store as
+it is produced. It needs either a spill-to-disk hand-off or a gate, and it touches the artifact the
+whole product reads. This change fixes the reported crash and the unbounded-scan shape that caused
+it; the overlay belongs in its own change.
 
 ## Why it stays fixed
 
