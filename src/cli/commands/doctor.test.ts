@@ -71,7 +71,7 @@ async function runDoctorJson(): Promise<Array<{ name: string; status: string; de
   const outputs: string[] = [];
   const spy = vi.spyOn(console, 'log').mockImplementation((msg: string) => { outputs.push(msg); });
   try {
-    await doctorCommand.parseAsync(['node', 'doctor', '--json'], { from: 'user' });
+    await doctorCommand.parseAsync(['--json'], { from: 'user' });
   } finally {
     spy.mockRestore();
   }
@@ -483,7 +483,7 @@ describe('doctor command', () => {
       mockExecSuccess();
 
       try {
-        await doctorCommand.parseAsync(['node', 'doctor'], { from: 'user' });
+        await doctorCommand.parseAsync([], { from: 'user' });
         expect(process.exitCode).not.toBe(1);
       } finally {
         if (saved['ANTHROPIC_API_KEY'] === undefined) delete process.env.ANTHROPIC_API_KEY;
@@ -519,7 +519,7 @@ describe('doctor command', () => {
       vi.mocked(loggerModule.logger.success).mockClear();
 
       try {
-        await doctorCommand.parseAsync(['node', 'doctor'], { from: 'user' });
+        await doctorCommand.parseAsync([], { from: 'user' });
         expect(vi.mocked(loggerModule.logger.success)).toHaveBeenCalledWith('All checks passed!');
       } finally {
         if (saved === undefined) delete process.env.ANTHROPIC_API_KEY;
@@ -540,7 +540,7 @@ describe('doctor command', () => {
       const loggerModule = await import('../../utils/logger.js');
       vi.mocked(loggerModule.logger.error).mockClear();
 
-      await doctorCommand.parseAsync(['node', 'doctor'], { from: 'user' });
+      await doctorCommand.parseAsync([], { from: 'user' });
       expect(vi.mocked(loggerModule.logger.error)).toHaveBeenCalled();
       expect(process.exitCode).toBe(1);
     });
@@ -564,7 +564,7 @@ describe('doctor command', () => {
       vi.mocked(loggerModule.logger.warning).mockClear();
 
       try {
-        await doctorCommand.parseAsync(['node', 'doctor'], { from: 'user' });
+        await doctorCommand.parseAsync([], { from: 'user' });
         const warnCalls = vi.mocked(loggerModule.logger.warning).mock.calls.map(c => String(c[0]));
         const summary = warnCalls.find(m => /\d+ warning\(s\):/.test(m));
         expect(summary, `expected a summary warning; got: ${JSON.stringify(warnCalls)}`).toBeTruthy();

@@ -80,7 +80,7 @@ describe('init command', () => {
 
     it('should reject openspec paths outside the project root', async () => {
       const { logger } = await import('../../utils/logger.js');
-      await initCommand.parseAsync(['node', 'init', '--openspec-path', '../outside'], { from: 'user' });
+      await initCommand.parseAsync(['--openspec-path', '../outside'], { from: 'user' });
       expect(logger.error).toHaveBeenCalledWith(
         expect.stringContaining('within the project directory')
       );
@@ -89,7 +89,7 @@ describe('init command', () => {
 
     it('should reject deeply nested traversal paths', async () => {
       const { logger } = await import('../../utils/logger.js');
-      await initCommand.parseAsync(['node', 'init', '--openspec-path', '../../way/outside'], { from: 'user' });
+      await initCommand.parseAsync(['--openspec-path', '../../way/outside'], { from: 'user' });
       expect(logger.error).toHaveBeenCalledWith(
         expect.stringContaining('within the project directory')
       );
@@ -97,7 +97,7 @@ describe('init command', () => {
     });
 
     it('should accept paths within the project root', async () => {
-      await initCommand.parseAsync(['node', 'init', '--openspec-path', './docs/specs'], { from: 'user' });
+      await initCommand.parseAsync(['--openspec-path', './docs/specs'], { from: 'user' });
       expect(process.exitCode).not.toBe(1);
     });
   });
@@ -125,13 +125,13 @@ describe('init command', () => {
 
     it('should write config when no config exists', async () => {
       const configManager = await import('../../core/services/config-manager.js');
-      await initCommand.parseAsync(['node', 'init'], { from: 'user' });
+      await initCommand.parseAsync([], { from: 'user' });
       expect(configManager.writeOpenLoreConfig).toHaveBeenCalled();
     });
 
     it('should create openspec structure when directory does not exist', async () => {
       const configManager = await import('../../core/services/config-manager.js');
-      await initCommand.parseAsync(['node', 'init'], { from: 'user' });
+      await initCommand.parseAsync([], { from: 'user' });
       expect(configManager.createOpenSpecStructure).toHaveBeenCalled();
     });
 
@@ -139,12 +139,12 @@ describe('init command', () => {
       const configManager = await import('../../core/services/config-manager.js');
       vi.mocked(configManager.openspecDirExists).mockResolvedValue(true);
 
-      await initCommand.parseAsync(['node', 'init'], { from: 'user' });
+      await initCommand.parseAsync([], { from: 'user' });
       expect(configManager.createOpenSpecStructure).not.toHaveBeenCalled();
     });
 
     it('should not set process.exitCode on success', async () => {
-      await initCommand.parseAsync(['node', 'init'], { from: 'user' });
+      await initCommand.parseAsync([], { from: 'user' });
       expect(process.exitCode).not.toBe(1);
     });
   });
@@ -183,7 +183,7 @@ describe('init command', () => {
       Object.defineProperty(process.stdin, 'isTTY', { value: false, configurable: true });
 
       try {
-        await initCommand.parseAsync(['node', 'init'], { from: 'user' });
+        await initCommand.parseAsync([], { from: 'user' });
         expect(process.exitCode).toBe(1);
       } finally {
         Object.defineProperty(process.stdin, 'isTTY', { value: originalIsTTY, configurable: true });
@@ -192,7 +192,7 @@ describe('init command', () => {
 
     it('should overwrite config when --force is passed', async () => {
       const configManager = await import('../../core/services/config-manager.js');
-      await initCommand.parseAsync(['node', 'init', '--force'], { from: 'user' });
+      await initCommand.parseAsync(['--force'], { from: 'user' });
       expect(configManager.writeOpenLoreConfig).toHaveBeenCalled();
       expect(process.exitCode).not.toBe(1);
     });
@@ -226,7 +226,7 @@ describe('init command', () => {
       Object.defineProperty(process.stdin, 'isTTY', { value: false, configurable: true });
 
       try {
-        await initCommand.parseAsync(['node', 'init'], { from: 'user' });
+        await initCommand.parseAsync([], { from: 'user' });
         expect(gitignoreManager.ensureGitignored).toHaveBeenCalled();
       } finally {
         Object.defineProperty(process.stdin, 'isTTY', { value: originalIsTTY, configurable: true });
@@ -238,7 +238,7 @@ describe('init command', () => {
       vi.mocked(gitignoreManager.gitignoreExists).mockResolvedValue(true);
       vi.mocked(gitignoreManager.isInGitignore).mockResolvedValue(true);
 
-      await initCommand.parseAsync(['node', 'init'], { from: 'user' });
+      await initCommand.parseAsync([], { from: 'user' });
       expect(gitignoreManager.ensureGitignored).not.toHaveBeenCalled();
     });
 
@@ -252,7 +252,7 @@ describe('init command', () => {
       Object.defineProperty(process.stdin, 'isTTY', { value: false, configurable: true });
 
       try {
-        await initCommand.parseAsync(['node', 'init'], { from: 'user' });
+        await initCommand.parseAsync([], { from: 'user' });
         expect(gitignoreManager.ensureGitignored).toHaveBeenCalledWith(
           expect.any(String),
           '.openlore/',
@@ -286,7 +286,7 @@ describe('init command', () => {
         confidence: 'low',
       });
 
-      await initCommand.parseAsync(['node', 'init'], { from: 'user' });
+      await initCommand.parseAsync([], { from: 'user' });
       expect(logger.warning).toHaveBeenCalledWith(expect.stringContaining('detect project type'));
     });
 
@@ -301,7 +301,7 @@ describe('init command', () => {
       });
       vi.mocked(detector.getProjectTypeName).mockReturnValue('Python');
 
-      await initCommand.parseAsync(['node', 'init'], { from: 'user' });
+      await initCommand.parseAsync([], { from: 'user' });
       expect(logger.warning).toHaveBeenCalledWith(expect.stringContaining('.git'));
     });
   });
