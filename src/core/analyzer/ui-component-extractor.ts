@@ -11,8 +11,13 @@
  *   - Angular: @Component decorator
  */
 
-import { readFile } from 'node:fs/promises';
 import { basename, extname, relative } from 'node:path';
+
+import {
+  mapFilesBounded,
+  readSourceCapped,
+  type OversizedFileObserver,
+} from './bounded-file-scan.js';
 
 // ============================================================================
 // TYPES
@@ -146,16 +151,15 @@ function lineOfIndex(source: string, index: number): number {
 // PER-FILE EXTRACTOR
 // ============================================================================
 
-async function extractFromFile(filePath: string, rootDir: string): Promise<UIComponent[]> {
+async function extractFromFile(
+  filePath: string,
+  rootDir: string,
+  onOversized?: OversizedFileObserver,
+): Promise<UIComponent[]> {
   const ext = extname(filePath).toLowerCase();
   const rel = relative(rootDir, filePath);
-  let source: string;
-
-  try {
-    source = await readFile(filePath, 'utf-8');
-  } catch {
-    return [];
-  }
+  const source = await readSourceCapped(filePath, undefined, onOversized);
+  if (source === null) return [];
 
   // ── Svelte ────────────────────────────────────────────────────────────────
   if (ext === '.svelte') {
@@ -281,15 +285,14 @@ async function extractFromFile(filePath: string, rootDir: string): Promise<UICom
  */
 export async function extractUIComponents(
   filePaths: string[],
-  rootDir: string
+  rootDir: string,
+  onOversized?: OversizedFileObserver,
 ): Promise<UIComponent[]> {
   const UI_EXTENSIONS = new Set(['.tsx', '.jsx', '.vue', '.svelte', '.ts', '.js']);
 
   const candidates = filePaths.filter(f => UI_EXTENSIONS.has(extname(f).toLowerCase()));
 
-  const results = await Promise.all(
-    candidates.map(f => extractFromFile(f, rootDir))
-  );
+  const results = await mapFilesBounded(candidates, f => extractFromFile(f, rootDir, onOversized));
 
   return results.flat();
 }

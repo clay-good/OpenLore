@@ -25,7 +25,14 @@ import {
   OPENSPEC_DECISIONS_SUBDIR,
   OPENLORE_ANALYSIS_REL_PATH,
   OPENLORE_CONFIG_REL_PATH,
+  SOURCE_SCAN_MAX_FILE_BYTES,
 } from '../../constants.js';
+import {
+  isScannedByEnrichment,
+  mapFilesBounded,
+  readSourceCapped,
+  type OversizedFileObserver,
+} from '../../core/analyzer/bounded-file-scan.js';
 import { computeProjectFingerprint, isCacheFresh } from '../../core/services/mcp-handlers/utils.js';
 import type { AnalyzeOptions, OpenLoreConfig } from '../../types/index.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
@@ -197,18 +204,47 @@ export async function runAnalysis(
   }
   logger.blank();
 
-  // Phase 3: Run new enrichment extractors in parallel
+  // Phase 3: Run the enrichment extractors
   logger.analysis('Extracting UI components, schemas, routes, and env vars...');
 
   const allFilePaths = repoMap.allFiles.map(f => f.path);
+  const oversizedByPath = new Map<string, number>();
+  const observeOversized: OversizedFileObserver = (path, bytes) => {
+    if (!isScannedByEnrichment(path)) return;
+    oversizedByPath.set(path, Math.max(bytes, oversizedByPath.get(path) ?? 0));
+  };
 
-  const [uiComponents, schemas, routeInventory, middleware, envVars] = await Promise.all([
-    extractUIComponents(allFilePaths, rootPath),
-    extractSchemas(allFilePaths, rootPath),
-    buildRouteInventory(allFilePaths, rootPath),
-    extractMiddleware(allFilePaths, rootPath),
-    extractEnvVars(allFilePaths, rootPath),
-  ]);
+  // SEQUENTIALLY, not `Promise.all` (change: fix-unbounded-file-scan-oom). Each extractor is
+  // now an internally bounded scan, but running five of them together multiplies that bound by
+  // five — and the five together are what exhausted the heap on a large repository (issue #302).
+  // Serialized, the peak is one scan's bound no matter how many extractors are added here.
+  //
+  // This costs no extra I/O: the five always read the same files, so overlapping them shared
+  // nothing beyond what the OS page cache already gives the later passes for free.
+  const uiComponents = await extractUIComponents(allFilePaths, rootPath, observeOversized);
+  const schemas = await extractSchemas(allFilePaths, rootPath, observeOversized);
+  const routeInventory = await buildRouteInventory(allFilePaths, rootPath, observeOversized);
+  const middleware = await extractMiddleware(allFilePaths, rootPath, observeOversized);
+  const envVars = await extractEnvVars(allFilePaths, rootPath, observeOversized);
+
+  // Disclose files the extractors ACTUALLY skipped. These observations come from the same
+  // open-handle stat that enforced the cap, rather than the walker's earlier size snapshot.
+  // A watcher or generator can rewrite a file between those phases; rebuilding the warning from
+  // stale metadata would silently omit a file that grew, or falsely report one that shrank.
+  const oversized = [...oversizedByPath]
+    .map(([path, size]) => ({ path, size }));
+  if (oversized.length > 0) {
+    const worst = [...oversized].sort((a, b) => b.size - a.size || (a.path < b.path ? -1 : 1)).slice(0, 3);
+    logger.warning(
+      `${oversized.length} file${oversized.length === 1 ? '' : 's'} exceeded the `
+      + `${(SOURCE_SCAN_MAX_FILE_BYTES / 1024 / 1024).toFixed(0)} MB scan cap — components, schemas, `
+      + `routes, middleware and env vars from them are a LOWER BOUND: `
+      // `safe()`, not the raw path: the filename comes from the repository, and the logger's own
+      // sanitizer keeps newlines (correct for an OpenLore-authored template, wrong for a value
+      // interpolated into one) — so an unsanitized path could forge an extra output line.
+      + worst.map(f => `${safe(f.path)} (${(f.size / 1024 / 1024).toFixed(1)} MB)`).join('; '),
+    );
+  }
 
   // Phase 4: Generate Artifacts
   logger.analysis('Generating analysis artifacts...');
@@ -926,13 +962,18 @@ async function runEmbedStep(
       const hubIds = new Set(cg.hubFunctions.map(f => f.id));
       const entryIds = new Set(cg.entryPoints.map(f => f.id));
 
-      const fileContents = new Map<string, string>();
-      const uniquePaths = new Set(cg.nodes.map(n => n.filePath));
-      await Promise.all([...uniquePaths].map(async fp => {
+      const paths = [...new Set(cg.nodes.map(n => n.filePath))];
+      const contents = await mapFilesBounded(paths, async fp => {
         try {
-          fileContents.set(fp, await readFile(join(rootPath, fp), 'utf-8'));
-        } catch { /* skip unreadable files */ }
-      }));
+          return await readFile(join(rootPath, fp), 'utf-8');
+        } catch {
+          return null; // skip unreadable files
+        }
+      });
+      const fileContents = new Map<string, string>();
+      for (const [i, content] of contents.entries()) {
+        if (content !== null) fileContents.set(paths[i], content);
+      }
 
       // Build with the embedder when available; if a configured embedder fails
       // at runtime (endpoint unreachable), warn and fall back to a BM25 index
@@ -997,20 +1038,13 @@ async function runTextLineIndexing(rootPath: string, outputPath: string): Promis
   try {
     const { FileWalker } = await import('../../core/analyzer/file-walker.js');
     const { TextLineIndex } = await import('../../core/analyzer/text-line-index.js');
-    const { readFile: read } = await import('node:fs/promises');
-
     const walk = await new FileWalker(rootPath).walk();
-    const files: { filePath: string; content: string }[] = [];
-    await Promise.all(
-      walk.files.map(async (f) => {
-        if (f.size > TEXT_INDEX_MAX_FILE_BYTES) return;
-        try {
-          files.push({ filePath: f.path, content: await read(f.absolutePath, 'utf-8') });
-        } catch {
-          /* skip unreadable files */
-        }
-      }),
-    );
+    const candidates = walk.files.filter(f => f.size <= TEXT_INDEX_MAX_FILE_BYTES);
+    const perFile = await mapFilesBounded(candidates.map(f => f.absolutePath), async (absolutePath, i) => {
+      const content = await readSourceCapped(absolutePath, TEXT_INDEX_MAX_FILE_BYTES);
+      return content === null ? null : { filePath: candidates[i].path, content };
+    });
+    const files = perFile.filter((f): f is { filePath: string; content: string } => f !== null);
 
     const { lines, files: indexedFiles } = await TextLineIndex.build(outputPath, files);
     console.log(`    ✓ Text line index built (${lines} lines across ${indexedFiles} files)`);

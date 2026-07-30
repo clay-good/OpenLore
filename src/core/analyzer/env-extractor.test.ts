@@ -1,17 +1,44 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { extractEnvVars, summarizeEnvVars, extractEnvReadSites } from './env-extractor.js';
 
+// The extractor sizes and reads a file through ONE open handle, so the cap cannot be raced
+// (change: fix-unbounded-file-scan-oom). The mock models that handle; `mockReadFile` still
+// stands in for the file's content so every case below reads as it did before.
 vi.mock('node:fs/promises', () => ({
-  readFile: vi.fn(),
+  open: vi.fn(),
 }));
 
-import { readFile } from 'node:fs/promises';
+import { open } from 'node:fs/promises';
 
-const mockReadFile = readFile as ReturnType<typeof vi.fn>;
+const mockReadFile = vi.fn();
+const mockOpen = open as ReturnType<typeof vi.fn>;
+
+/**
+ * A stand-in for the `FileHandle` the bounded scan opens. It models `read()` — NOT `readFile()` —
+ * because the scan reads exactly the number of bytes it stat'd, so that a file growing under it
+ * cannot be read past its checked size (change: fix-unbounded-file-scan-oom).
+ */
+function fakeHandle(content: string): {
+  stat: () => Promise<{ isFile: () => boolean; size: number }>;
+  read: (buf: Buffer, offset: number, length: number, position: number) => Promise<{ bytesRead: number }>;
+  close: () => Promise<void>;
+} {
+  const bytes = Buffer.from(content, 'utf-8');
+  return {
+    stat: () => Promise.resolve({ isFile: () => true, size: bytes.length }),
+    read: (buf, offset, length, position) => {
+      const copied = bytes.copy(buf, offset, position, Math.min(position + length, bytes.length));
+      return Promise.resolve({ bytesRead: copied });
+    },
+    close: () => Promise.resolve(),
+  };
+}
 
 describe('extractEnvVars', () => {
   beforeEach(() => {
     mockReadFile.mockReset();
+    mockOpen.mockReset();
+    mockOpen.mockImplementation(async (p: string) => fakeHandle(String(await mockReadFile(p) ?? '')));
   });
 
   it('should return empty array when no files provided', async () => {

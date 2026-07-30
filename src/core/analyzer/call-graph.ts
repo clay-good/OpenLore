@@ -25,6 +25,7 @@ import {
   extractJavaRouteDefinitions,
   type RouteDefinition,
 } from './http-route-parser.js';
+import { mapFilesBounded } from './bounded-file-scan.js';
 import { buildProjectedIac } from './iac/index.js';
 import { isIacLanguage } from './iac/types.js';
 import { isTestFile } from './test-file.js';
@@ -3704,18 +3705,30 @@ async function synthesizeRouteHandlerEdges(
   resolveHandler: HandlerResolver,
 ): Promise<CallEdge[]> {
   const contentByPath = new Map(files.map(f => [f.path, f.content]));
-  // Per-file-then-flatten: `Promise.all` resolves in INPUT (file-list) order, so the
-  // synthesized edge order is a pure function of the input — pushing into a shared
-  // `routes` array inside the callbacks would order routes by I/O completion, making
-  // the serialized graph bytes non-deterministic (decision c6d1ad07).
-  const perFileRoutes = await Promise.all(files.map(async (f): Promise<RouteDefinition[]> => {
-    try {
-      if (/\.(py|pyw)$/.test(f.path)) return await extractRouteDefinitions(f.path);
-      if (/\.(ts|tsx|js|jsx|mjs)$/.test(f.path)) return await extractTsRouteDefinitions(f.path);
-      if (/\.java$/.test(f.path)) return await extractJavaRouteDefinitions(f.path);
-    } catch { /* best-effort per file */ }
-    return [];
-  }));
+  // Per-file-then-flatten over a BOUNDED scan: `mapFilesBounded` resolves in INPUT (file-list)
+  // order regardless of its concurrency, so the synthesized edge order is a pure function of the
+  // input — pushing into a shared `routes` array inside the callbacks would order routes by I/O
+  // completion, making the serialized graph bytes non-deterministic (decision c6d1ad07). The
+  // bound matters here too: these extractors re-read each file from disk, so an unbounded
+  // `Promise.all` made the whole repository resident at once (issue #302).
+  // The content is ALREADY resident here — `contentByPath` was just built from it — so each
+  // extractor is handed the text rather than re-reading it. That is not only cheaper (one fewer
+  // full pass over the repository); it is what keeps the enrichment scans' per-file SIZE CAP from
+  // reaching the graph. Re-reading through the capped reader silently dropped the route-handler
+  // edges of every file above the cap, which turns a live handler into a `find_dead_code`
+  // candidate — and it bought no memory back, because the content was resident either way.
+  const perFileRoutes = await mapFilesBounded(
+    files.map(f => f.path),
+    async (path): Promise<RouteDefinition[]> => {
+      const resident = contentByPath.get(path);
+      try {
+        if (/\.(py|pyw)$/.test(path)) return await extractRouteDefinitions(path, resident);
+        if (/\.(ts|tsx|js|jsx|mjs)$/.test(path)) return await extractTsRouteDefinitions(path, resident);
+        if (/\.java$/.test(path)) return await extractJavaRouteDefinitions(path, resident);
+      } catch { /* best-effort per file */ }
+      return [];
+    },
+  );
   const routes: RouteDefinition[] = perFileRoutes.flat();
   if (routes.length === 0) return [];
 

@@ -30,6 +30,7 @@ import {
 } from '../../constants.js';
 import { EdgeStore, SCHEMA_VERSION } from '../../core/services/edge-store.js';
 import { VectorIndex } from '../../core/analyzer/vector-index.js';
+import { mapFilesBounded } from '../../core/analyzer/bounded-file-scan.js';
 import { SpecVectorIndex } from '../../core/analyzer/spec-vector-index.js';
 import type { FileSignatureMap } from '../../core/analyzer/signature-extractor.js';
 import { reconcile } from '../../core/analyzer/index-attestation.js';
@@ -176,10 +177,18 @@ async function buildKeywordSearchIndex(rootPath: string, analysisDir: string): P
   const signatures = await readBundledSignatures(analysisDir);
   // Body-skeleton text needs the source (read, not parsed). It is present in the checkout we are
   // importing into; a missing file is skipped (that symbol is still indexed by name/signature/docstring).
+  const paths = [...new Set(nodes.map(n => n.filePath))];
+  const contents = await mapFilesBounded(paths, async fp => {
+    try {
+      return await readFile(join(rootPath, fp), 'utf-8');
+    } catch {
+      return null;
+    }
+  });
   const fileContents = new Map<string, string>();
-  await Promise.all([...new Set(nodes.map(n => n.filePath))].map(async fp => {
-    try { fileContents.set(fp, await readFile(join(rootPath, fp), 'utf-8')); } catch { /* skip unreadable */ }
-  }));
+  for (const [i, content] of contents.entries()) {
+    if (content !== null) fileContents.set(paths[i], content);
+  }
 
   await VectorIndex.build(analysisDir, nodes, signatures, hubIds, entryIds, null, fileContents);
   return true;

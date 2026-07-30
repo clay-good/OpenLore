@@ -10,9 +10,13 @@
  * Uses regex-based analysis without requiring tree-sitter.
  */
 
-import { readFile } from 'node:fs/promises';
 import { extname, relative } from 'node:path';
 import { getSkeletonContent } from './code-shaper.js';
+import {
+  mapFilesBounded,
+  readSourceCapped,
+  type OversizedFileObserver,
+} from './bounded-file-scan.js';
 
 // ============================================================================
 // TYPES
@@ -337,48 +341,44 @@ function parseJpaEntity(source: string, rel: string): SchemaTable[] {
  */
 export async function extractSchemas(
   filePaths: string[],
-  rootDir: string
+  rootDir: string,
+  onOversized?: OversizedFileObserver,
 ): Promise<SchemaTable[]> {
-  const results: SchemaTable[] = [];
+  // Per-file-then-flatten, over a BOUNDED scan. Returning each file's tables and flattening in
+  // `filePaths` order keeps the inventory a pure function of the file list; pushing into a shared
+  // array from inside the callbacks appended in I/O-completion order, which made the artifact's
+  // bytes depend on disk timing (change: fix-artifact-output-determinism) and would additionally
+  // have made the order depend on the scan's concurrency.
+  const perFile = await mapFilesBounded(filePaths, async (filePath): Promise<SchemaTable[]> => {
+    const ext = extname(filePath).toLowerCase();
+    const rel = relative(rootDir, filePath);
 
-  await Promise.all(
-    filePaths.map(async filePath => {
-      const ext = extname(filePath).toLowerCase();
-      const rel = relative(rootDir, filePath);
-      let raw: string;
+    const raw = await readSourceCapped(filePath, undefined, onOversized);
+    if (raw === null) return [];
 
-      try {
-        raw = await readFile(filePath, 'utf-8');
-      } catch {
-        return;
+    // Java entities are parsed from raw source — annotations and field
+    // declarations must survive intact (the TS/Py skeletonizer would mangle them).
+    if (ext === '.java') {
+      return /@(?:Entity|MappedSuperclass)\b/.test(raw) ? parseJpaEntity(raw, rel) : [];
+    }
+
+    const source = getSkeletonContent(raw, ext === '.py' ? 'python' : 'typescript');
+
+    if (ext === '.prisma') {
+      return parsePrisma(source, rel);
+    } else if (ext === '.py' && (source.includes('Column(') || source.includes('mapped_column('))) {
+      return parseSqlAlchemy(source, rel);
+    } else if (ext === '.ts' || ext === '.tsx') {
+      if (source.includes('@Entity(') || source.includes('@Entity()')) {
+        return parseTypeOrm(source, rel);
+      } else if (/pgTable|mysqlTable|sqliteTable/.test(source)) {
+        return parseDrizzle(source, rel);
       }
+    }
+    return [];
+  });
 
-      // Java entities are parsed from raw source — annotations and field
-      // declarations must survive intact (the TS/Py skeletonizer would mangle them).
-      if (ext === '.java') {
-        if (/@(?:Entity|MappedSuperclass)\b/.test(raw)) {
-          results.push(...parseJpaEntity(raw, rel));
-        }
-        return;
-      }
-
-      const source = getSkeletonContent(raw, ext === '.py' ? 'python' : 'typescript');
-
-      if (ext === '.prisma') {
-        results.push(...parsePrisma(source, rel));
-      } else if (ext === '.py' && (source.includes('Column(') || source.includes('mapped_column('))) {
-        results.push(...parseSqlAlchemy(source, rel));
-      } else if (ext === '.ts' || ext === '.tsx') {
-        if (source.includes('@Entity(') || source.includes('@Entity()')) {
-          results.push(...parseTypeOrm(source, rel));
-        } else if (/pgTable|mysqlTable|sqliteTable/.test(source)) {
-          results.push(...parseDrizzle(source, rel));
-        }
-      }
-    })
-  );
-
-  return results;
+  return perFile.flat();
 }
 
 /**
