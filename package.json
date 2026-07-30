@@ -166,7 +166,7 @@
     "@modelcontextprotocol/sdk": "^1.27.1",
     "@modelcontextprotocol/server-memory": "^2026.1.26",
     "@vitejs/plugin-react": "^6.0.4",
-    "chalk": "^5.3.0",
+    "chalk": "^6.0.0",
     "chokidar": "^5.0.0",
     "commander": "^12.1.0",
     "glob": "^13.0.6",
