@@ -36,18 +36,36 @@ const mockOpen = open as ReturnType<typeof vi.fn>;
 const mockReadFile = vi.fn();
 
 /**
+ * A stand-in for the `FileHandle` the bounded scan opens. It models `read()` — NOT `readFile()` —
+ * because the scan reads exactly the number of bytes it stat'd, so that a file growing under it
+ * cannot be read past its checked size (change: fix-unbounded-file-scan-oom).
+ */
+function fakeHandle(content: string): {
+  stat: () => Promise<{ isFile: () => boolean; size: number }>;
+  read: (buf: Buffer, offset: number, length: number, position: number) => Promise<{ bytesRead: number }>;
+  close: () => Promise<void>;
+} {
+  const bytes = Buffer.from(content, 'utf-8');
+  return {
+    stat: () => Promise.resolve({ isFile: () => true, size: bytes.length }),
+    read: (buf, offset, length, position) => {
+      const copied = bytes.copy(buf, offset, position, Math.min(position + length, bytes.length));
+      return Promise.resolve({ bytesRead: copied });
+    },
+    close: () => Promise.resolve(),
+  };
+}
+
+
+/**
  * Resolve each path's content after a delay that DECREASES with input index, so
  * the last file in the list resolves first — completion order is the reverse of
  * input order. `index` is the file's position in the caller's `filePaths` array.
  */
 function withReversedCompletion(contentByPath: Map<string, string>, order: string[]): void {
-  // The size gate must never be what decides the outcome here — every fixture is tiny, and
-  // stat resolves immediately, so all the adversarial latency stays on the read.
-  mockOpen.mockImplementation((p: string) => Promise.resolve({
-    stat: () => Promise.resolve({ isFile: () => true, size: (contentByPath.get(p) ?? '').length }),
-    readFile: () => mockReadFile(p),
-    close: () => Promise.resolve(),
-  }));
+  // The size gate must never be what decides the outcome here — every fixture is tiny, so the
+  // handle always passes the cap and the adversarial latency is what orders completion.
+  mockOpen.mockImplementation(async (p: string) => fakeHandle(String(await mockReadFile(p) ?? '')));
   mockReadFile.mockImplementation((p: string) => {
     const content = contentByPath.get(p) ?? '';
     const idx = order.indexOf(p);

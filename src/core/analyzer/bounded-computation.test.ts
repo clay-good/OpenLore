@@ -8,7 +8,7 @@
  * the actual parsers plus regression guards on the documented caps.
  */
 import { describe, it, expect, afterEach } from 'vitest';
-import { readFileSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { readFileSync, statSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -159,6 +159,12 @@ describe('Bounded Computation — documented caps are present (regression guards
  * `bounded-file-scan.test.ts`.
  */
 describe('Bounded Computation — repository-wide scans stay bounded (issue #302)', () => {
+  let repo: string | undefined;
+  afterEach(() => {
+    if (repo) rmSync(repo, { recursive: true, force: true });
+    repo = undefined;
+  });
+
   /** Every module that scans a whole repository's files. Add new ones here. */
   const SCAN_MODULES = [
     'ui-component-extractor.ts',
@@ -168,32 +174,95 @@ describe('Bounded Computation — repository-wide scans stay bounded (issue #302
     'env-extractor.ts',
   ];
 
-  /** `Promise.all(<expr>.map(` — the unbounded fan-out shape, across line breaks. */
-  const UNBOUNDED_FANOUT = /Promise\.all\(\s*[\w.]+\s*\.map\(/;
+  /** Strip comments so prose explaining the rejected shape cannot fail the guard. */
+  const codeOf = (file: string): string =>
+    readFileSync(join(ANALYZER_DIR, file), 'utf-8')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/(^|[^:])\/\/.*$/gm, '$1');
 
-  it.each(SCAN_MODULES)('%s reads through the bounded scan, never a raw readFile', file => {
-    const src = readFileSync(join(ANALYZER_DIR, file), 'utf-8');
-    // A raw `readFile` in a scan module is unbounded by construction — no size cap.
-    expect(src, `${file} must read via readSourceCapped, not readFile`).not.toMatch(/\breadFile\s*\(/);
-    expect(src).toMatch(/from '\.\/bounded-file-scan\.js'/);
+  /**
+   * Any `Promise.all` whose argument reaches a `.map(` — the unbounded fan-out shape.
+   *
+   * Deliberately loose. An earlier version required a bare dotted identifier
+   * (`Promise\.all\(\s*[\w.]+\s*\.map\(`), which every natural way of reintroducing the bug
+   * walked straight past: `Promise.all(paths.filter(…).map(…))`, a line-broken chain, or the
+   * two-step `const jobs = paths.map(…); await Promise.all(jobs)`. A guard that only catches the
+   * one spelling nobody would write is not a guard. The two-step form is caught separately below,
+   * since no regex over one expression can see it.
+   */
+  const UNBOUNDED_FANOUT = /Promise\.all\([\s\S]{0,200}?\.map\(/;
+
+  /** Every way to spell "read a whole file" that is NOT the bounded reader. */
+  const RAW_READ = /\breadFile\s*\(|\breadFileSync\s*\(|\bcreateReadStream\s*\(/;
+
+  it.each(SCAN_MODULES)('%s reads through the bounded scan, never a raw read', file => {
+    const code = codeOf(file);
+    // A raw read in a scan module is unbounded by construction — no size cap. `readFileSync` is
+    // included because it is the single easiest way to reintroduce the defect while satisfying
+    // a naive `readFile(`-only guard.
+    expect(code, `${file} must read via readSourceCapped, not a raw read`).not.toMatch(RAW_READ);
+    // …and must not smuggle one in under an alias.
+    expect(code, `${file} must not alias an fs read`).not.toMatch(/from 'node:fs(\/promises)?'/);
+    expect(code).toMatch(/from '\.\/bounded-file-scan\.js'/);
   });
 
   it.each(SCAN_MODULES)('%s fans out through mapFilesBounded, not Promise.all', file => {
-    const src = readFileSync(join(ANALYZER_DIR, file), 'utf-8');
-    // Comments legitimately mention `Promise.all` when explaining why it is not used; strip
-    // them so prose cannot fail the guard and code cannot hide behind it.
-    const code = src
-      .replace(/\/\*[\s\S]*?\*\//g, '')
-      .replace(/(^|[^:])\/\/.*$/gm, '$1');
+    const code = codeOf(file);
     expect(code, `${file} must scan via mapFilesBounded`).not.toMatch(UNBOUNDED_FANOUT);
+    // The two-step form — `const jobs = xs.map(async …); await Promise.all(jobs)` — is invisible
+    // to any single-expression regex, so catch its ingredient: an async `.map(` callback that is
+    // not immediately consumed. In these modules every legitimate `.map(` is a synchronous
+    // projection over already-computed results.
+    expect(code, `${file} must not build an async .map() array to hand to Promise.all`)
+      .not.toMatch(/\.map\(\s*async\b/);
     expect(code).toMatch(/mapFilesBounded\(/);
   });
 
   it('the call graph synthesizes route-handler edges through the bounded scan', () => {
     const src = readFileSync(join(ANALYZER_DIR, 'call-graph.ts'), 'utf-8');
-    // This pass re-reads every file from disk to re-extract routes, so it carries the same
-    // hazard as the extractors even though it is handed the content already.
+    // This pass fans out over every file, so it carries the same fan-out hazard as the extractors.
     expect(src).toMatch(/const perFileRoutes = await mapFilesBounded\(/);
+  });
+
+  it('the call graph feeds route extraction its RESIDENT content, never a capped re-read', () => {
+    const src = readFileSync(join(ANALYZER_DIR, 'call-graph.ts'), 'utf-8');
+    // The enrichment size cap must not reach the graph. This pass already holds every file's
+    // text (`contentByPath`), so re-reading through the capped reader bought no memory back and
+    // silently dropped the route-handler edges of any file above the cap — turning live handlers
+    // into `find_dead_code` candidates.
+    expect(src).toMatch(/const resident = contentByPath\.get\(path\)/);
+    for (const fn of ['extractRouteDefinitions', 'extractTsRouteDefinitions', 'extractJavaRouteDefinitions']) {
+      expect(src, `${fn} must be handed the resident source`).toMatch(
+        new RegExp(`${fn}\\(path, resident\\)`),
+      );
+    }
+  });
+
+  it('an oversized file still yields routes when its source is already in memory', async () => {
+    // The behavioural half of the guard above: the cap applies to a re-read, never to text the
+    // caller already has. Without the `residentSource` path, a route in a 5 MB router silently
+    // disappears from the call graph.
+    const { extractTsRouteDefinitions } = await import('./http-route-parser.js');
+    const { SOURCE_SCAN_MAX_FILE_BYTES } = await import('../../constants.js');
+
+    repo = mkdtempSync(join(tmpdir(), 'ol-resident-'));
+    const big = join(repo, 'router.ts');
+    const head =
+      "import express from 'express';\n"
+      + 'const app = express();\n'
+      + "app.get('/oversized-route', (req, res) => res.send('ok'));\n";
+    // Pad past the cap by MEASURED length, not by an assumed line width — a fixture that
+    // silently lands under the cap would make this test assert nothing.
+    const padLine = `// ${'pad '.repeat(20)}\n`;
+    const body = head + padLine.repeat(Math.ceil((SOURCE_SCAN_MAX_FILE_BYTES + 1024) / padLine.length));
+    writeFileSync(big, body);
+    expect(statSync(big).size).toBeGreaterThan(SOURCE_SCAN_MAX_FILE_BYTES);
+
+    // Re-read through the cap: nothing (this is the capped path, and it is correct there).
+    expect(await extractTsRouteDefinitions(big)).toEqual([]);
+    // Handed the resident text: the route survives, which is what the graph gets.
+    const withResident = await extractTsRouteDefinitions(big, body);
+    expect(withResident.map(r => r.path)).toContain('/oversized-route');
   });
 
   it('analyze runs the enrichment extractors sequentially, not five at once', () => {
@@ -218,27 +287,41 @@ describe('Bounded Computation — repository-wide scans stay bounded (issue #302
     expect(src).toMatch(/LOWER BOUND/);
     // …and scopes the report to files an extractor would actually have opened, so a large
     // image or data blob does not train the operator to ignore the line.
-    expect(src).toMatch(/SCANNED_SOURCE_EXTENSIONS\.has/);
+    expect(src).toMatch(/isScannedByEnrichment\(/);
+    // …and the repo-controlled path is sanitized before it reaches the terminal.
+    expect(src).toMatch(/safe\(f\.path\)/);
   });
 
   it('the disclosure covers every extension the scan modules read', async () => {
-    const { SCANNED_SOURCE_EXTENSIONS } = await import('./bounded-file-scan.js');
-    // Harvest the extension literals each scan module tests against. An extension a module
-    // reads but the disclosure set omits would hide a genuinely dropped component/route/env
-    // var — the failure the disclosure exists to prevent — so the set must be a superset.
+    const { isScannedByEnrichment } = await import('./bounded-file-scan.js');
+    // Harvest EVERY extension literal each scan module mentions, with no allowlist.
+    //
+    // A previous version of this test filtered candidates through a hardcoded pattern that
+    // enumerated exactly the members of the disclosure set — so `missing` was provably always
+    // empty and the test could not fail. A guard that cannot fail is worse than no guard: it
+    // reads as coverage. Harvesting blind means adding `.kt` to any scan module fails this test
+    // until the disclosure predicate covers it, which is the whole point.
     const missing: string[] = [];
     for (const file of SCAN_MODULES) {
-      const src = readFileSync(join(ANALYZER_DIR, file), 'utf-8');
-      for (const m of src.matchAll(/'(\.[a-z0-9]{1,7})'/g)) {
-        const ext = m[1];
-        // Only extensions that appear in an accept-list position (a Set/array of extensions),
-        // which is how every one of these modules spells its filter.
-        if (!/^\.(ts|tsx|js|jsx|mjs|cjs|py|pyw|go|rb|java|vue|svelte|prisma|html|htm|env)$/.test(ext)) continue;
-        if (ext === '.html' || ext === '.htm' || ext === '.env') continue; // not enrichment-scanned
-        if (!SCANNED_SOURCE_EXTENSIONS.has(ext)) missing.push(`${file}: ${ext}`);
+      for (const m of codeOf(file).matchAll(/'(\.[A-Za-z0-9]{1,8})'/g)) {
+        if (!isScannedByEnrichment(`x${m[1]}`)) missing.push(`${file}: ${m[1]}`);
       }
     }
-    expect(missing, 'extensions read by a scan module but absent from the disclosure set').toEqual([]);
+    expect(missing, 'extensions read by a scan module but absent from the disclosure predicate').toEqual([]);
+  });
+
+  it('the disclosure predicate covers env declaration files, which have no usable extension', async () => {
+    const { isScannedByEnrichment, ENV_DECLARATION_FILES } = await import('./bounded-file-scan.js');
+    // `extname('.env')` is `''` and `extname('.env.production')` is `'.production'`, so an
+    // extension-only predicate drops an oversized `.env` with no disclosure at all — the exact
+    // silent loss the design forbids. Every file the env scan opens must be reportable.
+    for (const name of ENV_DECLARATION_FILES) {
+      expect(isScannedByEnrichment(`/repo/${name}`), `${name} must be disclosable`).toBe(true);
+    }
+    // …and it still excludes what no extractor opens, so the warning stays worth reading.
+    for (const noise of ['/repo/assets.bin', '/repo/data.json', '/repo/logo.png', '/repo/notes.md']) {
+      expect(isScannedByEnrichment(noise), `${noise} must not be reported`).toBe(false);
+    }
   });
 
   it('the size cap is measured on the same file handle it reads from (no TOCTOU)', () => {
@@ -253,9 +336,15 @@ describe('Bounded Computation — repository-wide scans stay bounded (issue #302
     // handle closes it by construction.
     expect(code).toMatch(/await open\(path, 'r'\)/);
     expect(code).toMatch(/handle\.stat\(\)/);
-    expect(code).toMatch(/handle\.readFile\(/);
     expect(code, 'must not re-resolve the path for the read').not.toMatch(/\breadFile\(path/);
     expect(code, 'must not stat the path separately from the read').not.toMatch(/[^.]\bstat\(path\)/);
+    // …and the read must be LENGTH-BOUNDED by the size just checked. `handle.readFile()` reads to
+    // CURRENT end-of-file, so one handle alone does not bound anything: a file appended to during
+    // the await window comes back in full, straight through the cap (measured: 1 KB -> 20 MB).
+    expect(code, 'the read must be bounded to the checked size, not readFile-to-EOF')
+      .not.toMatch(/handle\.readFile\(/);
+    expect(code).toMatch(/handle\.read\(buf/);
+    expect(code).toMatch(/Buffer\.allocUnsafe\(s\.size\)/);
     // The handle is always released, including on the oversized/unreadable paths.
     expect(code).toMatch(/finally\s*\{[\s\S]{0,200}handle\?\.close\(\)/);
   });

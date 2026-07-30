@@ -8,7 +8,7 @@
 import { Command, Option } from 'commander';
 import { sanitizeForTerminal as safe } from '../../utils/misc.js';
 import { writeFile, mkdir, readFile } from 'node:fs/promises';
-import { extname, join } from 'node:path';
+import { join } from 'node:path';
 import { logger } from '../../utils/logger.js';
 import { fileExists, formatDuration, formatAge, getAnalysisAge } from '../../utils/command-helpers.js';
 import {
@@ -27,7 +27,7 @@ import {
   OPENLORE_CONFIG_REL_PATH,
   SOURCE_SCAN_MAX_FILE_BYTES,
 } from '../../constants.js';
-import { isOversizedForScan, SCANNED_SOURCE_EXTENSIONS } from '../../core/analyzer/bounded-file-scan.js';
+import { isOversizedForScan, isScannedByEnrichment } from '../../core/analyzer/bounded-file-scan.js';
 import { computeProjectFingerprint, isCacheFresh } from '../../core/services/mcp-handlers/utils.js';
 import type { AnalyzeOptions, OpenLoreConfig } from '../../types/index.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
@@ -220,11 +220,12 @@ export async function runAnalysis(
   // Disclose files the extractors were too large to scan. The walker already stat'd every file,
   // so this is the same predicate the scan applies, evaluated for free — and saying nothing
   // would leave a component/route/env var that genuinely exists reading as genuinely absent.
-  // Scoped to extensions an extractor actually reads: `allFiles` also carries assets and data
-  // blobs, and reporting a 6 MB `.bin` as "excluded" is noise that teaches operators to ignore
-  // the line.
+  // Scoped by `isScannedByEnrichment` — the SAME predicate that describes what the scans open, so
+  // the two cannot drift. `allFiles` also carries assets and data blobs, and reporting a 6 MB
+  // `.bin` as "excluded" is noise that teaches operators to ignore the line; conversely an
+  // oversized `.env` must NOT slip through just because `extname('.env')` is empty.
   const oversized = repoMap.allFiles.filter(
-    f => isOversizedForScan(f.size) && SCANNED_SOURCE_EXTENSIONS.has(extname(f.path).toLowerCase()),
+    f => isOversizedForScan(f.size) && isScannedByEnrichment(f.path),
   );
   if (oversized.length > 0) {
     const worst = [...oversized].sort((a, b) => b.size - a.size || (a.path < b.path ? -1 : 1)).slice(0, 3);
@@ -232,7 +233,10 @@ export async function runAnalysis(
       `${oversized.length} file${oversized.length === 1 ? '' : 's'} exceeded the `
       + `${(SOURCE_SCAN_MAX_FILE_BYTES / 1024 / 1024).toFixed(0)} MB scan cap — components, schemas, `
       + `routes, middleware and env vars from them are a LOWER BOUND: `
-      + worst.map(f => `${f.path} (${(f.size / 1024 / 1024).toFixed(1)} MB)`).join('; '),
+      // `safe()`, not the raw path: the filename comes from the repository, and the logger's own
+      // sanitizer keeps newlines (correct for an OpenLore-authored template, wrong for a value
+      // interpolated into one) — so an unsanitized path could forge an extra output line.
+      + worst.map(f => `${safe(f.path)} (${(f.size / 1024 / 1024).toFixed(1)} MB)`).join('; '),
     );
   }
 

@@ -13,15 +13,32 @@ import { open } from 'node:fs/promises';
 const mockReadFile = vi.fn();
 const mockOpen = open as ReturnType<typeof vi.fn>;
 
+/**
+ * A stand-in for the `FileHandle` the bounded scan opens. It models `read()` — NOT `readFile()` —
+ * because the scan reads exactly the number of bytes it stat'd, so that a file growing under it
+ * cannot be read past its checked size (change: fix-unbounded-file-scan-oom).
+ */
+function fakeHandle(content: string): {
+  stat: () => Promise<{ isFile: () => boolean; size: number }>;
+  read: (buf: Buffer, offset: number, length: number, position: number) => Promise<{ bytesRead: number }>;
+  close: () => Promise<void>;
+} {
+  const bytes = Buffer.from(content, 'utf-8');
+  return {
+    stat: () => Promise.resolve({ isFile: () => true, size: bytes.length }),
+    read: (buf, offset, length, position) => {
+      const copied = bytes.copy(buf, offset, position, Math.min(position + length, bytes.length));
+      return Promise.resolve({ bytesRead: copied });
+    },
+    close: () => Promise.resolve(),
+  };
+}
+
 describe('extractEnvVars', () => {
   beforeEach(() => {
     mockReadFile.mockReset();
     mockOpen.mockReset();
-    mockOpen.mockImplementation((p: string) => Promise.resolve({
-      stat: () => Promise.resolve({ isFile: () => true, size: 1024 }),
-      readFile: () => mockReadFile(p),
-      close: () => Promise.resolve(),
-    }));
+    mockOpen.mockImplementation(async (p: string) => fakeHandle(String(await mockReadFile(p) ?? '')));
   });
 
   it('should return empty array when no files provided', async () => {

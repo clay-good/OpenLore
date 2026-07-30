@@ -13,7 +13,7 @@
 
 import { extname, relative, basename } from 'node:path';
 
-import { mapFilesBounded, readSourceCapped } from './bounded-file-scan.js';
+import { ENV_DECLARATION_FILES, mapFilesBounded, readSourceCapped } from './bounded-file-scan.js';
 
 // ============================================================================
 // TYPES
@@ -141,7 +141,8 @@ function extractFromSource(source: string, relPath: string, ext: string): Array<
 // PUBLIC API
 // ============================================================================
 
-const ENV_DECLARATION_FILES = new Set(['.env', '.env.example', '.env.local', '.env.test', '.env.production']);
+// ENV_DECLARATION_FILES is imported from bounded-file-scan: the disclosure predicate must be
+// built from the SAME list this scan reads, or an oversized `.env` is dropped without a word.
 const SOURCE_EXTENSIONS = new Set(['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.py', '.pyw', '.go', '.rb']);
 const SKIP_DIRS = ['/node_modules/', '/.openlore/', '/dist/', '/build/', '/coverage/'];
 

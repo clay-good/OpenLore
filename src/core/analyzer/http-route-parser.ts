@@ -294,11 +294,19 @@ export async function extractHttpCalls(filePath: string): Promise<HttpCall[]> {
  * Extract all route definitions from a Python source file.
  * Supports FastAPI, Starlette, Flask, and Django (urls.py path/re_path).
  */
-export async function extractRouteDefinitions(filePath: string): Promise<RouteDefinition[]> {
+/**
+ * `residentSource` lets a caller that ALREADY holds the file's text pass it in instead of having
+ * it re-read and re-capped. The call-graph build is exactly that caller: it read every file into
+ * memory before Pass 1, so re-reading here bought nothing and the per-file size cap silently cost
+ * it the route-handler edges of any file above the cap — turning live handlers into `find_dead_code`
+ * candidates, the precise failure the length-preserving masking below exists to prevent
+ * (change: fix-unbounded-file-scan-oom).
+ */
+export async function extractRouteDefinitions(filePath: string, residentSource?: string): Promise<RouteDefinition[]> {
   const ext = extname(filePath).toLowerCase();
   if (!['.py', '.pyw'].includes(ext)) return [];
 
-  const content = await readSourceCapped(filePath);
+  const content = residentSource ?? await readSourceCapped(filePath);
   if (content === null) return [];
 
   const routes: RouteDefinition[] = [];
@@ -541,11 +549,11 @@ function extractNextJavaMethodName(lines: string[], annotationLine: number): str
  * Supports Spring MVC (@RestController / @Controller + @RequestMapping and the
  * shorthand @GetMapping / @PostMapping / …) and JAX-RS (@Path + @GET / @POST).
  */
-export async function extractJavaRouteDefinitions(filePath: string): Promise<RouteDefinition[]> {
+export async function extractJavaRouteDefinitions(filePath: string, residentSource?: string): Promise<RouteDefinition[]> {
   const ext = extname(filePath).toLowerCase();
   if (ext !== '.java') return [];
 
-  const content = await readSourceCapped(filePath);
+  const content = residentSource ?? await readSourceCapped(filePath);
   if (content === null) return [];
 
   const routes: RouteDefinition[] = [];
@@ -1051,8 +1059,8 @@ function detectTsFramework(source: string, filePath: string): string {
  * Extract HTTP route definitions from a TypeScript/JavaScript server file.
  * Handles Express-style, NestJS decorators, and Next.js App Router.
  */
-export async function extractTsRouteDefinitions(filePath: string): Promise<RouteDefinition[]> {
-  const raw = await readSourceCapped(filePath);
+export async function extractTsRouteDefinitions(filePath: string, residentSource?: string): Promise<RouteDefinition[]> {
+  const raw = residentSource ?? await readSourceCapped(filePath);
   if (raw === null) return [];
   // Mask comments LENGTH-PRESERVINGLY (blank to spaces, keep newlines) rather than
   // skeletonizing. The skeleton REMOVES pure-comment/log/blank lines and shrinks the
@@ -1063,9 +1071,20 @@ export async function extractTsRouteDefinitions(filePath: string): Promise<Route
   // with the original, so `route.line` is exact by construction while route pattern
   // strings inside comments still never match. Same length-preserving discipline as
   // extractHttpCalls (:193-195) and maskPythonNonCode (:906-908).
-  const source = raw
-    .replace(/\/\*[\s\S]*?\*\//g, blankKeepNewlines)
-    .replace(/(^|[\s,;()[\]{}])(\/\/.*)$/gm, (_m, prefix, comment) => prefix + ' '.repeat(comment.length));
+  //
+  // Masking stays INSIDE a guard. Before the bounded reader existed, this and the read shared one
+  // `try` and any failure here yielded `[]`; narrowing the guard to the read alone would let a
+  // throw from these regexes (a `RangeError` on a pathological string, say) propagate into
+  // `buildRouteInventory`, which does not catch per file. Today's per-file size cap makes that
+  // hard to reach — but the guard costs nothing and the cap is a tunable constant.
+  let source: string;
+  try {
+    source = raw
+      .replace(/\/\*[\s\S]*?\*\//g, blankKeepNewlines)
+      .replace(/(^|[\s,;()[\]{}])(\/\/.*)$/gm, (_m, prefix, comment) => prefix + ' '.repeat(comment.length));
+  } catch {
+    return [];
+  }
 
   const framework = detectTsFramework(source, filePath);
   const routes: RouteDefinition[] = [];

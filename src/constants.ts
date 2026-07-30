@@ -851,6 +851,17 @@ export const MAX_HTML_INLINE_SCRIPT_CHARS = 1_000_000;
 export const SOURCE_SCAN_CONCURRENCY = 8;
 
 /**
+ * Hard ceiling on a source scan's width, whatever a caller asks for (change:
+ * fix-unbounded-file-scan-oom).
+ *
+ * Without it the clamp is one-sided: `mapFilesBounded(paths, fn, 1_000_000)` would open a million
+ * files at once — the exact fan-out this module exists to prevent, from the function that is
+ * supposed to prevent it. A caller asking for more than this is asking for something the module
+ * does not offer, so it is clamped rather than honoured.
+ */
+export const SOURCE_SCAN_MAX_CONCURRENCY = 32;
+
+/**
  * Largest file a repository-wide source scan will read (change: fix-unbounded-file-scan-oom).
  *
  * The companion bound to {@link SOURCE_SCAN_CONCURRENCY}: concurrency bounds how MANY files are
@@ -866,9 +877,15 @@ export const SOURCE_SCAN_CONCURRENCY = 8;
  *
  * 4 MB of hand-written source is on the order of 100,000 lines; a file above it is generated,
  * minified, or vendored in practice. This is deliberately BELOW the file-walker's 10 MB read cap,
- * which gates cheap single-pass reads (line counting) rather than multi-copy text scanning. A file
- * excluded here is disclosed by `analyze`, never silently dropped, and it is excluded only from
- * the enrichment inventories (components, schemas, routes, middleware, env vars) — the call graph
- * has its own bounds and is unaffected.
+ * which gates cheap single-pass reads (line counting) rather than multi-copy text scanning.
+ *
+ * A file excluded here is disclosed by `analyze`, never silently dropped, and it is excluded only
+ * from the enrichment inventories (components, schemas, routes, middleware, env vars). The CALL
+ * GRAPH is unaffected — but not automatically, and it is worth saying how. Its route-handler
+ * synthesis calls the same route extractors, so it would have inherited this cap and lost the
+ * edges of every file above it, surfacing live handlers as dead code. It does not, because it
+ * passes those extractors the source it ALREADY holds in memory instead of having them re-read
+ * it: the cap exists to stop a scan allocating, and there is nothing to allocate for text that is
+ * already resident. `bounded-computation.test.ts` fails the build if that wiring is undone.
  */
 export const SOURCE_SCAN_MAX_FILE_BYTES = 4 * 1024 * 1024;

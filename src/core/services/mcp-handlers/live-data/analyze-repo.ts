@@ -70,11 +70,13 @@ async function buildKeywordIndex(
   const hubIds = new Set(cg.hubFunctions.map((f) => f.id));
   const entryIds = new Set(cg.entryPoints.map((f) => f.id));
 
-  // Bounded scan, not `Promise.all` over every path: issuing one read per file at once made the
-  // transient peak the whole repository's bytes ON TOP OF the map this retains — the fan-out OOM
-  // (issue #302). Only the fan-out is bounded here, deliberately: the scan's per-file SIZE cap is
-  // not applied, because dropping a large file would quietly remove it from the search index, and
-  // this path has nowhere to disclose that. Retention is therefore unchanged from before.
+  // Bounded scan, not `Promise.all` over every path: issuing one read per file at once put a
+  // second copy of the whole repository on the heap as a transient spike, on top of the map this
+  // builds (issue #302). Only the DECODE SPIKE is removed — be precise about that: this index
+  // retains every file's text by design, so peak residency here is still a function of repository
+  // size, and a single very large file is still read whole. The per-file SIZE cap is deliberately
+  // NOT applied, because dropping a large file would quietly remove it from the search index and
+  // this path has nowhere to disclose that.
   const fileContents = new Map<string, string>();
   const paths = [...new Set(cg.nodes.map((n) => n.filePath))];
   const contents = await mapFilesBounded(paths, async (fp) => {
