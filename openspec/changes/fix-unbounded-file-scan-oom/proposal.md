@@ -1,4 +1,4 @@
-# A repository-wide scan must not hold the whole repository in memory
+# A repository-wide enrichment scan must not hold the whole repository in memory
 
 > Status: **BUILT** (2026-07-30). Full suite green (6,511 passed / 336 files), lint, typecheck,
 > build. Reported as issue #302: `openlore install` dies with
@@ -52,9 +52,9 @@ The peak stopped being a function of the repository and became a function of the
 
 ## What changes
 
-One module, `bounded-file-scan.ts`, is now the only way this codebase fans a read across a
-repository. It carries the two bounds the failure needs, plus the ordering guarantee the artifacts
-already depended on:
+One module, `bounded-file-scan.ts`, is now the shared way analyzer and indexing entry points fan
+reads across repository files. It carries the bounds the failure needs, plus the ordering guarantee
+the artifacts already depended on:
 
 - **`mapFilesBounded`** — at most `SOURCE_SCAN_CONCURRENCY` (8) callbacks in flight, results
   returned in **input order** exactly like `Promise.all`. Input ordering is load-bearing: several
@@ -69,9 +69,14 @@ already depended on:
 internally bounded, but running five together multiplies that bound by five. This costs no extra
 I/O — all five always read the same files.
 
-An oversized file is **disclosed**, never silently dropped: `analyze` reports the count and the
-worst offenders and marks the affected inventories a LOWER BOUND, using the sizes the walker
-already recorded and the same predicate the scan applies.
+An oversized enrichment file is **disclosed**, never silently dropped: `analyze` reports the count
+and the worst offenders and marks the affected inventories a LOWER BOUND. The observation comes
+from the exact open-handle `stat` that enforced the cap, so a file rewritten after repository
+walking but before that scan-time observation cannot be silently omitted or falsely reported.
+
+The production CLI/install function index, the MCP live-data function index, the import rebuild,
+and text-line indexing also use the bounded worker pool. These indexes retain their corpus by
+design, but they no longer issue every repository read simultaneously.
 
 The env-var scan additionally decides whether a file can contribute **before** reading it. It used
 to decode every file in the repository — images, archives, model weights — only to discard it one
@@ -97,8 +102,9 @@ Bounding it is a distinct change with its own risk: the store is opened and `cle
 after the build completes — deliberately, so a failed build cannot leave a wiped index
 (change: harden-index-store-lifecycle) — so the overlay cannot simply be streamed into the store as
 it is produced. It needs either a spill-to-disk hand-off or a gate, and it touches the artifact the
-whole product reads. This change fixes the reported crash and the unbounded-scan shape that caused
-it; the overlay belongs in its own change.
+whole product reads. This change fixes the reported phase-3 crash site and the unbounded-scan shape
+that caused it; the overlay belongs in its own change, and issue #302 must remain open until that
+follow-up makes the reporter's full `install` path complete.
 
 ## Why it stays fixed
 

@@ -9,7 +9,11 @@
 
 import { extname, relative, basename } from 'node:path';
 import { isTestFile } from './test-file.js';
-import { mapFilesBounded, readSourceCapped } from './bounded-file-scan.js';
+import {
+  mapFilesBounded,
+  readSourceCapped,
+  type OversizedFileObserver,
+} from './bounded-file-scan.js';
 import { blankCommentsPreservingLayout } from './comment-blanking.js';
 
 // ============================================================================
@@ -261,7 +265,8 @@ function extractFromSource(
  */
 export async function extractMiddleware(
   filePaths: string[],
-  rootDir: string
+  rootDir: string,
+  onOversized?: OversizedFileObserver,
 ): Promise<MiddlewareEntry[]> {
   // Per-file-then-flatten, over a BOUNDED scan. Flattening in `filePaths` order keeps the
   // inventory a pure function of the file list; pushing into a shared array from inside the
@@ -275,7 +280,7 @@ export async function extractMiddleware(
     const ext = extname(fp).toLowerCase();
     if (!['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'].includes(ext)) return [];
 
-    const source = await readSourceCapped(fp);
+    const source = await readSourceCapped(fp, undefined, onOversized);
     if (source === null) return [];
 
     return extractFromSource(source, relative(rootDir, fp), fp);

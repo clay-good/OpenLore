@@ -28,7 +28,11 @@
 
 import { extname } from 'node:path';
 import { isTestFile } from './test-file.js';
-import { mapFilesBounded, readSourceCapped } from './bounded-file-scan.js';
+import {
+  mapFilesBounded,
+  readSourceCapped,
+  type OversizedFileObserver,
+} from './bounded-file-scan.js';
 
 // ============================================================================
 // TYPES
@@ -302,11 +306,15 @@ export async function extractHttpCalls(filePath: string): Promise<HttpCall[]> {
  * candidates, the precise failure the length-preserving masking below exists to prevent
  * (change: fix-unbounded-file-scan-oom).
  */
-export async function extractRouteDefinitions(filePath: string, residentSource?: string): Promise<RouteDefinition[]> {
+export async function extractRouteDefinitions(
+  filePath: string,
+  residentSource?: string,
+  onOversized?: OversizedFileObserver,
+): Promise<RouteDefinition[]> {
   const ext = extname(filePath).toLowerCase();
   if (!['.py', '.pyw'].includes(ext)) return [];
 
-  const content = residentSource ?? await readSourceCapped(filePath);
+  const content = residentSource ?? await readSourceCapped(filePath, undefined, onOversized);
   if (content === null) return [];
 
   const routes: RouteDefinition[] = [];
@@ -549,11 +557,15 @@ function extractNextJavaMethodName(lines: string[], annotationLine: number): str
  * Supports Spring MVC (@RestController / @Controller + @RequestMapping and the
  * shorthand @GetMapping / @PostMapping / …) and JAX-RS (@Path + @GET / @POST).
  */
-export async function extractJavaRouteDefinitions(filePath: string, residentSource?: string): Promise<RouteDefinition[]> {
+export async function extractJavaRouteDefinitions(
+  filePath: string,
+  residentSource?: string,
+  onOversized?: OversizedFileObserver,
+): Promise<RouteDefinition[]> {
   const ext = extname(filePath).toLowerCase();
   if (ext !== '.java') return [];
 
-  const content = residentSource ?? await readSourceCapped(filePath);
+  const content = residentSource ?? await readSourceCapped(filePath, undefined, onOversized);
   if (content === null) return [];
 
   const routes: RouteDefinition[] = [];
@@ -1059,8 +1071,12 @@ function detectTsFramework(source: string, filePath: string): string {
  * Extract HTTP route definitions from a TypeScript/JavaScript server file.
  * Handles Express-style, NestJS decorators, and Next.js App Router.
  */
-export async function extractTsRouteDefinitions(filePath: string, residentSource?: string): Promise<RouteDefinition[]> {
-  const raw = residentSource ?? await readSourceCapped(filePath);
+export async function extractTsRouteDefinitions(
+  filePath: string,
+  residentSource?: string,
+  onOversized?: OversizedFileObserver,
+): Promise<RouteDefinition[]> {
+  const raw = residentSource ?? await readSourceCapped(filePath, undefined, onOversized);
   if (raw === null) return [];
   // Mask comments LENGTH-PRESERVINGLY (blank to spaces, keep newlines) rather than
   // skeletonizing. The skeleton REMOVES pure-comment/log/blank lines and shrinks the
@@ -1254,7 +1270,8 @@ export interface RouteInventory {
  */
 export async function buildRouteInventory(
   filePaths: string[],
-  rootDir: string
+  rootDir: string,
+  onOversized?: OversizedFileObserver,
 ): Promise<RouteInventory> {
   const { relative } = await import('node:path');
 
@@ -1270,9 +1287,11 @@ export async function buildRouteInventory(
     // inventory doesn't report phantom endpoints.
     if (isTestFile(fp)) return [];
     const ext = extname(fp).toLowerCase();
-    if (['.py', '.pyw'].includes(ext)) return extractRouteDefinitions(fp);
-    if (['.ts', '.tsx', '.js', '.jsx', '.mjs'].includes(ext)) return extractTsRouteDefinitions(fp);
-    if (ext === '.java') return extractJavaRouteDefinitions(fp);
+    if (['.py', '.pyw'].includes(ext)) return extractRouteDefinitions(fp, undefined, onOversized);
+    if (['.ts', '.tsx', '.js', '.jsx', '.mjs'].includes(ext)) {
+      return extractTsRouteDefinitions(fp, undefined, onOversized);
+    }
+    if (ext === '.java') return extractJavaRouteDefinitions(fp, undefined, onOversized);
     return [];
   });
   const allRoutes: RouteDefinition[] = perFile.flat();

@@ -1,4 +1,4 @@
-# Tasks — bound every repository-wide file scan
+# Tasks — bound enrichment and indexing read fan-out
 
 > Status: **BUILT** (2026-07-30). Issue #302. Full suite green — **6,511 passed, 0 failed,
 > 336/336 files** — plus lint, typecheck and build. (Earlier runs showed a handful of timeouts in
@@ -28,10 +28,14 @@
 - [x] All five enrichment extractors converted: UI components, schemas, routes, middleware, env vars
 - [x] `call-graph.ts` `synthesizeRouteHandlerEdges` — re-reads every file from disk, same hazard
 - [x] `live-data/analyze-repo.ts` — read every node's file at once to build the vector index
+- [x] `analyze.ts` function-index and text-line-index paths — the production CLI/install path also
+      read every file at once; both now use the bounded pool
+- [x] `import.ts` keyword-index rebuild — bounded for parity with fresh analysis
 - [x] `extractAllHttpEdges` — its nested `Promise.all` read the SAME file twice concurrently,
       doubling per-slot residency; now sequential
 - [x] `analyze.ts` phase 3: five extractors run sequentially, not as one `Promise.all`
-- [x] `analyze.ts`: oversized files disclosed with path + size, inventories marked a LOWER BOUND
+- [x] `analyze.ts`: oversized files disclosed with path + size from the exact scan-time stat,
+      inventories marked a LOWER BOUND even when a file changes after repository walking
 - [x] env scan: decide from the extension BEFORE reading — it used to decode every binary asset in
       the repository and discard it one line later
 - [x] Schema and middleware scans changed from shared-array push to per-file-then-flatten. They

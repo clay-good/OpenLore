@@ -1,7 +1,7 @@
 /**
  * Bounded repository-wide file scanning (change: fix-unbounded-file-scan-oom).
  *
- * This is the one way this codebase fans out a read across every file in a repository.
+ * Shared primitive for analyzer and indexing paths that fan reads across repository files.
  *
  * Every such scan used to be written `await Promise.all(files.map(async f => { const src =
  * await readFile(f, 'utf-8'); ... }))`. That issues one read per file *simultaneously*, so at
@@ -29,6 +29,9 @@ import type { FileHandle } from 'node:fs/promises';
 import { basename, extname } from 'node:path';
 
 import { SOURCE_SCAN_CONCURRENCY, SOURCE_SCAN_MAX_CONCURRENCY, SOURCE_SCAN_MAX_FILE_BYTES } from '../../constants.js';
+
+/** Called from the exact scan-time stat that caused a file to be excluded. */
+export type OversizedFileObserver = (path: string, bytes: number) => void;
 
 /**
  * Run `fn` over every path with at most `concurrency` calls in flight, returning results in
@@ -172,19 +175,24 @@ export function isScannedByEnrichment(filePath: string): boolean {
  * is exact and no character can be split.
  *
  * `null` deliberately does not distinguish "too large" from "unreadable" — a scan callback can
- * do nothing different about either. The user-facing distinction is made by the caller, which
- * reports oversized files from the sizes the walker recorded, so the exclusion is disclosed
- * rather than silent.
+ * do nothing different about either. Callers that render user-facing disclosure pass
+ * `onOversized`; it fires from the exact open-handle stat that enforced the cap, so the warning
+ * does not depend on the repository walker's earlier size snapshot.
  */
 export async function readSourceCapped(
   path: string,
   maxBytes = SOURCE_SCAN_MAX_FILE_BYTES,
+  onOversized?: OversizedFileObserver,
 ): Promise<string | null> {
   let handle: FileHandle | undefined;
   try {
     handle = await open(path, 'r');
     const s = await handle.stat();
-    if (!s.isFile() || isOversizedForScan(s.size, maxBytes)) return null;
+    if (!s.isFile()) return null;
+    if (isOversizedForScan(s.size, maxBytes)) {
+      onOversized?.(path, s.size);
+      return null;
+    }
 
     // Read at most the bytes we just checked for. NOT `handle.readFile()`, which reads to EOF and
     // would hand back whatever the file has become since (see the docblock above).

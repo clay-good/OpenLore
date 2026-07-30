@@ -13,7 +13,12 @@
 
 import { extname, relative, basename } from 'node:path';
 
-import { ENV_DECLARATION_FILES, mapFilesBounded, readSourceCapped } from './bounded-file-scan.js';
+import {
+  ENV_DECLARATION_FILES,
+  mapFilesBounded,
+  readSourceCapped,
+  type OversizedFileObserver,
+} from './bounded-file-scan.js';
 
 // ============================================================================
 // TYPES
@@ -151,7 +156,8 @@ const SKIP_DIRS = ['/node_modules/', '/.openlore/', '/dist/', '/build/', '/cover
  */
 export async function extractEnvVars(
   filePaths: string[],
-  rootDir: string
+  rootDir: string,
+  onOversized?: OversizedFileObserver,
 ): Promise<EnvVar[]> {
   const map = new Map<string, EnvVar>();
 
@@ -199,7 +205,7 @@ export async function extractEnvVars(
         if (fp.includes('.test.') || fp.includes('.spec.') || fp.includes('_test.') || fp.includes('_spec.')) return [];
       }
 
-      const source = await readSourceCapped(fp);
+      const source = await readSourceCapped(fp, undefined, onOversized);
       if (source === null) return [];
 
       // Env declaration files

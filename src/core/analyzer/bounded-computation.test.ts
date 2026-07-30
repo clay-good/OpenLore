@@ -283,13 +283,60 @@ describe('Bounded Computation — repository-wide scans stay bounded (issue #302
 
   it('analyze discloses files the scan was too large to read (no silent capping)', () => {
     const src = readFileSync(join(ANALYZER_DIR, '..', '..', 'cli', 'commands', 'analyze.ts'), 'utf-8');
-    expect(src).toMatch(/isOversizedForScan/);
+    expect(src).toMatch(/const observeOversized: OversizedFileObserver/);
+    expect(src).toMatch(/oversizedByPath\.set\(/);
+    for (const fn of [
+      'extractUIComponents',
+      'extractSchemas',
+      'buildRouteInventory',
+      'extractMiddleware',
+      'extractEnvVars',
+    ]) {
+      expect(src, `${fn} must report scan-time exclusions`).toMatch(
+        new RegExp(`${fn}\\([^\\n]+observeOversized\\)`),
+      );
+    }
     expect(src).toMatch(/LOWER BOUND/);
     // …and scopes the report to files an extractor would actually have opened, so a large
     // image or data blob does not train the operator to ignore the line.
     expect(src).toMatch(/isScannedByEnrichment\(/);
     // …and the repo-controlled path is sanitized before it reaches the terminal.
     expect(src).toMatch(/safe\(f\.path\)/);
+  });
+
+  it('the production function and text indexes do not reintroduce all-file fan-out', () => {
+    const analyze = codeOf(join('..', '..', 'cli', 'commands', 'analyze.ts'));
+    const liveData = readFileSync(
+      join(ANALYZER_DIR, '..', 'services', 'mcp-handlers', 'live-data', 'analyze-repo.ts'),
+      'utf-8',
+    );
+    const importCommand = readFileSync(
+      join(ANALYZER_DIR, '..', '..', 'cli', 'commands', 'import.ts'),
+      'utf-8',
+    );
+
+    // All three function-index entry points read every call-graph file. The CLI path was missed
+    // by the original fix even though it is the path `openlore install` actually runs.
+    for (const [name, src] of [
+      ['analyze.ts', analyze],
+      ['live-data/analyze-repo.ts', liveData],
+      ['import.ts', importCommand],
+    ] as const) {
+      expect(src, `${name} must use the shared bounded pool`).toMatch(/mapFilesBounded\(/);
+      expect(src, `${name} must not fan out reads with Promise.all`).not.toMatch(
+        /Promise\.all\([\s\S]{0,300}?readFile\(/,
+      );
+    }
+    for (const [name, src] of [
+      ['analyze.ts', analyze],
+      ['live-data/analyze-repo.ts', liveData],
+      ['import.ts', importCommand],
+    ] as const) {
+      expect(src, `${name} must route the function-index file list through the bounded pool`)
+        .toMatch(/const contents = await mapFilesBounded\(paths/);
+    }
+    expect(analyze, 'text-line indexing must use the shared bounded pool')
+      .toMatch(/const perFile = await mapFilesBounded\(candidates\.map\(/);
   });
 
   it('the disclosure covers every extension the scan modules read', async () => {

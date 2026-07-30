@@ -12,7 +12,11 @@
 
 import { extname, relative } from 'node:path';
 import { getSkeletonContent } from './code-shaper.js';
-import { mapFilesBounded, readSourceCapped } from './bounded-file-scan.js';
+import {
+  mapFilesBounded,
+  readSourceCapped,
+  type OversizedFileObserver,
+} from './bounded-file-scan.js';
 
 // ============================================================================
 // TYPES
@@ -337,7 +341,8 @@ function parseJpaEntity(source: string, rel: string): SchemaTable[] {
  */
 export async function extractSchemas(
   filePaths: string[],
-  rootDir: string
+  rootDir: string,
+  onOversized?: OversizedFileObserver,
 ): Promise<SchemaTable[]> {
   // Per-file-then-flatten, over a BOUNDED scan. Returning each file's tables and flattening in
   // `filePaths` order keeps the inventory a pure function of the file list; pushing into a shared
@@ -348,7 +353,7 @@ export async function extractSchemas(
     const ext = extname(filePath).toLowerCase();
     const rel = relative(rootDir, filePath);
 
-    const raw = await readSourceCapped(filePath);
+    const raw = await readSourceCapped(filePath, undefined, onOversized);
     if (raw === null) return [];
 
     // Java entities are parsed from raw source — annotations and field

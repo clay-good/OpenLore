@@ -235,6 +235,30 @@ describe('readSourceCapped — one file cannot exhaust the heap', () => {
     expect(await readSourceCapped(big, Number.MAX_SAFE_INTEGER)).not.toBeNull();
   });
 
+  it('reports the exact scan-time size that caused an exclusion', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'ol-scan-observe-'));
+    const p = join(dir, 'grows.ts');
+    writeFileSync(p, 'small');
+
+    // Model a file that was small during repository walking, then grew before the
+    // enrichment scan opened it. Disclosure must use this scan-time observation,
+    // not the walker's stale size.
+    writeFileSync(p, 'x'.repeat(SOURCE_SCAN_MAX_FILE_BYTES + 17));
+    const observed: Array<{ path: string; bytes: number }> = [];
+    expect(await readSourceCapped(p, SOURCE_SCAN_MAX_FILE_BYTES, (path, bytes) => {
+      observed.push({ path, bytes });
+    })).toBeNull();
+    expect(observed).toEqual([{ path: p, bytes: SOURCE_SCAN_MAX_FILE_BYTES + 17 }]);
+
+    // The inverse race must not produce a false warning.
+    writeFileSync(p, 'small again');
+    observed.length = 0;
+    expect(await readSourceCapped(p, SOURCE_SCAN_MAX_FILE_BYTES, (path, bytes) => {
+      observed.push({ path, bytes });
+    })).toBe('small again');
+    expect(observed).toEqual([]);
+  });
+
   it('reads no more than the size it checked, even if the file grows mid-read', async () => {
     // THE cap's soundness property. `handle.readFile()` reads to CURRENT end-of-file, so sizing
     // and reading one handle is NOT sufficient on its own: a file appended to during the await

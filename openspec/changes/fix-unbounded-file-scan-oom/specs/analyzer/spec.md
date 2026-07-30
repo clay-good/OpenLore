@@ -4,16 +4,16 @@
 
 ### Requirement: RepositoryWideScansAreBoundedInConcurrencyAndFileSize
 
-A scan that reads every file in a repository SHALL bound both the number of files it holds in
-memory at once and the size of any single file it will read. Neither bound alone is sufficient: a
-repository of many ordinary files exhausts the heap through fan-out, and a repository containing
-one generated blob exhausts it through a single read.
+An enrichment scan that reads source files across a repository SHALL bound both the number of
+files it holds in memory at once and the size of any single file it will read. Neither bound alone
+is sufficient: a repository of many ordinary files exhausts the heap through fan-out, and a
+repository containing one generated blob exhausts it through a single read.
 
 The per-file size SHALL be measured BEFORE the file is read. Reading first and measuring after has
 already allocated exactly what the cap exists to prevent.
 
-Peak residency SHALL be a function of the bounds, not of the repository's file count or total
-bytes.
+Transient source-read residency during enrichment SHALL be a function of the bounds, not of the
+repository's file count or total bytes.
 
 #### Scenario: A large repository is scanned under a small heap
 
@@ -53,8 +53,8 @@ BOUND.
 
 A silently dropped file makes a component, route, or environment variable that genuinely exists
 read as genuinely absent — the failure mode the analyzer's disclosure discipline exists to prevent.
-The disclosure SHALL be derived from the same threshold the scan applies, so the two surfaces
-cannot report different answers for the same repository.
+The disclosure SHALL be emitted from the same scan-time size observation that applies the
+threshold, so an earlier repository-walk snapshot cannot make the two surfaces disagree.
 
 #### Scenario: An oversized file is reported rather than dropped
 
