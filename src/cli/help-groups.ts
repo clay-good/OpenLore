@@ -11,13 +11,21 @@
  *
  * It only changes PRESENTATION. Every command stays invocable, and any command not
  * yet categorized falls through to an "Other" group, so a newly-added command is
- * never hidden — it just shows ungrouped until it is placed. The override is a
- * faithful reproduction of Commander 12's `formatHelp`, delegating every other
- * section (usage, description, arguments, options, global options) to the supplied
- * helper unchanged; only the Commands section is grouped.
+ * never hidden — it just shows ungrouped until it is placed.
+ *
+ * Grouping is delegated to Commander's own `.helpGroup()` support (added in
+ * Commander 14): each subcommand is tagged with its job heading and Commander renders
+ * the groups. We previously hand-reproduced Commander 12's `formatHelp` to do this,
+ * which broke on upgrade when `Help.wrap()` was removed. Tagging instead of
+ * reproducing means every other part of help rendering — wrapping, padding, styling,
+ * usage, options — stays Commander's, so it cannot drift again.
+ *
+ * The one thing Commander does not decide for us is group ORDER: it emits groups in
+ * the order subcommands were registered. `orderCommandGroups` reorders them into the
+ * job order declared below.
  */
 
-import type { Command, Help } from 'commander';
+import { Help, type Command, type Option } from 'commander';
 
 /** Job groups, in display order. Each lists the command names it contains. */
 export const COMMAND_GROUPS: ReadonlyArray<{ title: string; commands: readonly string[] }> = [
@@ -71,88 +79,83 @@ export function groupForCommand(name: string): string {
 }
 
 /**
- * A Commander `formatHelp` replacement that groups the Commands section by job.
- * Faithful to Commander 12's default for every other section.
+ * Commander renders a group heading verbatim, so match its built-in section style
+ * ("Commands:", "Options:") and give every job group a trailing colon.
  */
-export function groupedFormatHelp(cmd: Command, helper: Help): string {
-  const termWidth = helper.padWidth(cmd, helper);
-  const helpWidth = helper.helpWidth || 80;
-  const itemIndentWidth = 2;
-  const itemSeparatorWidth = 2;
+export function groupHeading(title: string): string {
+  return `${title}:`;
+}
 
-  function formatItem(term: string, description: string): string {
-    if (description) {
-      const fullText = `${term.padEnd(termWidth + itemSeparatorWidth)}${description}`;
-      return helper.wrap(fullText, helpWidth - itemIndentWidth, termWidth + itemSeparatorWidth);
-    }
-    return term;
-  }
-  function formatList(textArray: string[]): string {
-    return textArray.join('\n').replace(/^/gm, ' '.repeat(itemIndentWidth));
-  }
+/** Job headings in display order, with the catch-all last. */
+const GROUP_ORDER: readonly string[] = [
+  ...COMMAND_GROUPS.map((g) => groupHeading(g.title)),
+  groupHeading(OTHER_GROUP_TITLE),
+];
 
-  // Usage
-  let output: string[] = [`Usage: ${helper.commandUsage(cmd)}`, ''];
+/** Heading → the order its commands are declared in, so members sort by intent too. */
+const MEMBER_ORDER = new Map<string, readonly string[]>(
+  COMMAND_GROUPS.map((g) => [groupHeading(g.title), g.commands])
+);
 
-  // Description
-  const commandDescription = helper.commandDescription(cmd);
-  if (commandDescription.length > 0) {
-    output = output.concat([helper.wrap(commandDescription, helpWidth, 0), '']);
-  }
+/**
+ * A Commander `groupItems` override that emits our job groups — and the commands
+ * inside them — in declared order rather than in subcommand-registration order.
+ *
+ * Member order matters as much as group order: `install` is the front door and is
+ * declared first in "Set up & run" for that reason, but it is registered late in
+ * `index.ts`. A command not named in the group (the "Other" catch-all) keeps its
+ * registration order, after any named ones.
+ *
+ * Headings we do not own (Commander's own "Options:", or any option group) keep their
+ * original position and member order, so this only touches the Commands section.
+ */
+export function orderCommandGroups<T extends Command | Option>(
+  this: Help,
+  unsortedItems: T[],
+  visibleItems: T[],
+  getGroup: (item: T) => string
+): Map<string, T[]> {
+  // Bind rather than `.call` so the generic instantiation survives.
+  const groupAsCommanderWould: (
+    unsortedItems: T[],
+    visibleItems: T[],
+    getGroup: (item: T) => string
+  ) => Map<string, T[]> = Help.prototype.groupItems.bind(this);
+  const grouped = groupAsCommanderWould(unsortedItems, visibleItems, getGroup);
+  const entries = [...grouped.entries()];
+  const rank = (heading: string): number => GROUP_ORDER.indexOf(heading);
+  const ours = entries.filter(([heading]) => rank(heading) !== -1);
+  if (ours.length === 0) return grouped;
+  const theirs = entries.filter(([heading]) => rank(heading) === -1);
+  ours.sort((a, b) => rank(a[0]) - rank(b[0]));
 
-  // Arguments
-  const argumentList = helper.visibleArguments(cmd).map((argument) =>
-    formatItem(helper.argumentTerm(argument), helper.argumentDescription(argument))
-  );
-  if (argumentList.length > 0) {
-    output = output.concat(['Arguments:', formatList(argumentList), '']);
-  }
-
-  // Options
-  const optionList = helper.visibleOptions(cmd).map((option) =>
-    formatItem(helper.optionTerm(option), helper.optionDescription(option))
-  );
-  if (optionList.length > 0) {
-    output = output.concat(['Options:', formatList(optionList), '']);
-  }
-
-  // Global Options
-  // (Help.showGlobalOptions is set via configureHelp; reproduce the same gate.)
-  if ((helper as unknown as { showGlobalOptions?: boolean }).showGlobalOptions) {
-    const globalOptionList = helper
-      .visibleGlobalOptions(cmd)
-      .map((option) => formatItem(helper.optionTerm(option), helper.optionDescription(option)));
-    if (globalOptionList.length > 0) {
-      output = output.concat(['Global Options:', formatList(globalOptionList), '']);
-    }
-  }
-
-  // Commands — GROUPED BY JOB (the only departure from the default).
-  const visible = helper.visibleCommands(cmd);
-  if (visible.length > 0) {
-    output.push('Commands:');
-    output.push('');
-    const byName = new Map(visible.map((c) => [c.name(), c]));
-    const used = new Set<string>();
-
-    const renderGroup = (title: string, cmds: Command[]): void => {
-      if (cmds.length === 0) return;
-      output.push(`  ${title}`);
-      const items = cmds.map((c) => formatItem(helper.subcommandTerm(c), helper.subcommandDescription(c)));
-      // Indent group members one level deeper than the group title.
-      output.push(formatList(items).replace(/^/gm, '  '));
-      output.push('');
+  const ordered = ours.map(([heading, items]): [string, T[]] => {
+    const declared = MEMBER_ORDER.get(heading);
+    if (!declared) return [heading, items];
+    const memberRank = (item: T): number => {
+      const i = declared.indexOf(item.name());
+      return i === -1 ? declared.length : i;
     };
+    // Stable sort: unnamed members keep registration order behind the named ones.
+    return [heading, [...items].sort((a, b) => memberRank(a) - memberRank(b))];
+  });
 
-    for (const group of COMMAND_GROUPS) {
-      const cmds = group.commands.map((n) => byName.get(n)).filter((c): c is Command => Boolean(c));
-      cmds.forEach((c) => used.add(c.name()));
-      renderGroup(group.title, cmds);
-    }
-    // Safety net: any visible command not yet placed (e.g. a newly-added one).
-    const leftover = visible.filter((c) => !used.has(c.name()));
-    renderGroup(OTHER_GROUP_TITLE, leftover);
+  return new Map([...theirs, ...ordered]);
+}
+
+/**
+ * Tag every registered subcommand with its job group and install the ordering
+ * override. Call once, AFTER all subcommands have been added to `program`.
+ */
+export function applyJobGroupedHelp(program: Command): void {
+  program.configureHelp({ groupItems: orderCommandGroups });
+  // Anything not explicitly grouped — including Commander's built-in `help` command,
+  // which is created lazily and never appears in `program.commands` — lands in Other,
+  // so a command can never be hidden. `.helpCommand(true)` materializes that built-in
+  // now so it picks up the default group.
+  program.commandsGroup(groupHeading(OTHER_GROUP_TITLE));
+  program.helpCommand(true);
+  for (const sub of program.commands) {
+    sub.helpGroup(groupHeading(groupForCommand(sub.name())));
   }
-
-  return output.join('\n');
 }
