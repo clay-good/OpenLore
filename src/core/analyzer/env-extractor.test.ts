@@ -1,23 +1,27 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { extractEnvVars, summarizeEnvVars, extractEnvReadSites } from './env-extractor.js';
 
-// The extractor stats a file before reading it, so a read cannot materialize a string larger
-// than the scan's per-file cap (change: fix-unbounded-file-scan-oom). The mock models both.
+// The extractor sizes and reads a file through ONE open handle, so the cap cannot be raced
+// (change: fix-unbounded-file-scan-oom). The mock models that handle; `mockReadFile` still
+// stands in for the file's content so every case below reads as it did before.
 vi.mock('node:fs/promises', () => ({
-  readFile: vi.fn(),
-  stat: vi.fn(),
+  open: vi.fn(),
 }));
 
-import { readFile, stat } from 'node:fs/promises';
+import { open } from 'node:fs/promises';
 
-const mockReadFile = readFile as ReturnType<typeof vi.fn>;
-const mockStat = stat as ReturnType<typeof vi.fn>;
+const mockReadFile = vi.fn();
+const mockOpen = open as ReturnType<typeof vi.fn>;
 
 describe('extractEnvVars', () => {
   beforeEach(() => {
     mockReadFile.mockReset();
-    mockStat.mockReset();
-    mockStat.mockResolvedValue({ isFile: () => true, size: 1024 });
+    mockOpen.mockReset();
+    mockOpen.mockImplementation((p: string) => Promise.resolve({
+      stat: () => Promise.resolve({ isFile: () => true, size: 1024 }),
+      readFile: () => mockReadFile(p),
+      close: () => Promise.resolve(),
+    }));
   });
 
   it('should return empty array when no files provided', async () => {

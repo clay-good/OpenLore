@@ -241,6 +241,25 @@ describe('Bounded Computation — repository-wide scans stay bounded (issue #302
     expect(missing, 'extensions read by a scan module but absent from the disclosure set').toEqual([]);
   });
 
+  it('the size cap is measured on the same file handle it reads from (no TOCTOU)', () => {
+    // Comments stripped first: the module's own docblock explains the hazard by NAMING the
+    // rejected `stat(path)` / `readFile(path)` shape, and prose must not fail the guard.
+    const code = readFileSync(join(ANALYZER_DIR, 'bounded-file-scan.ts'), 'utf-8')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/(^|[^:])\/\/.*$/gm, '$1');
+    // A separate `stat(path)` then `readFile(path)` resolves the name twice, so a file that grew
+    // or was replaced in between is read at a size that was never checked — the cap can be
+    // stepped around by a repository being written to concurrently. Sizing and reading ONE open
+    // handle closes it by construction.
+    expect(code).toMatch(/await open\(path, 'r'\)/);
+    expect(code).toMatch(/handle\.stat\(\)/);
+    expect(code).toMatch(/handle\.readFile\(/);
+    expect(code, 'must not re-resolve the path for the read').not.toMatch(/\breadFile\(path/);
+    expect(code, 'must not stat the path separately from the read').not.toMatch(/[^.]\bstat\(path\)/);
+    // The handle is always released, including on the oversized/unreadable paths.
+    expect(code).toMatch(/finally\s*\{[\s\S]{0,200}handle\?\.close\(\)/);
+  });
+
   it('both bounds are defined, documented, and small enough to matter', async () => {
     const { SOURCE_SCAN_CONCURRENCY, SOURCE_SCAN_MAX_FILE_BYTES } = await import('../../constants.js');
     // A bound large enough to admit an ordinary repository wholesale is not a bound.

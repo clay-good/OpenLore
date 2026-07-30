@@ -24,7 +24,8 @@
  * state (change: fix-artifact-output-determinism). Ordering by completion instead would make
  * the serialized graph a function of I/O timing.
  */
-import { readFile, stat } from 'node:fs/promises';
+import { open } from 'node:fs/promises';
+import type { FileHandle } from 'node:fs/promises';
 
 import { SOURCE_SCAN_CONCURRENCY, SOURCE_SCAN_MAX_FILE_BYTES } from '../../constants.js';
 
@@ -103,9 +104,15 @@ export const SCANNED_SOURCE_EXTENSIONS: ReadonlySet<string> = new Set([
  * Read a source file as UTF-8, or return `null` if it is unreadable or exceeds the scan's
  * per-file size cap.
  *
- * The size is checked with `stat` BEFORE the read, which is the whole point: reading first and
- * measuring after would already have materialized the buffer and the string that the cap exists
- * to prevent.
+ * The size is measured BEFORE the read, which is the whole point: reading first and measuring
+ * after would already have materialized the buffer and the string that the cap exists to prevent.
+ *
+ * The measurement and the read go through ONE open file handle rather than a `stat(path)`
+ * followed by a `readFile(path)`. Those are two independent resolutions of the same name, so
+ * anything that grew, replaced, or symlinked the path in between would be read at a size that was
+ * never checked — the cap could be stepped around by a repository being written to concurrently,
+ * which for a tool that analyzes untrusted repositories is a real boundary rather than a
+ * theoretical one. Sizing and reading the same file description closes it by construction.
  *
  * `null` deliberately does not distinguish "too large" from "unreadable" — a scan callback can
  * do nothing different about either. The user-facing distinction is made by `analyze`, which
@@ -116,11 +123,15 @@ export async function readSourceCapped(
   path: string,
   maxBytes = SOURCE_SCAN_MAX_FILE_BYTES,
 ): Promise<string | null> {
+  let handle: FileHandle | undefined;
   try {
-    const s = await stat(path);
+    handle = await open(path, 'r');
+    const s = await handle.stat();
     if (!s.isFile() || isOversizedForScan(s.size, maxBytes)) return null;
-    return await readFile(path, 'utf-8');
+    return await handle.readFile('utf-8');
   } catch {
     return null;
+  } finally {
+    await handle?.close().catch(() => { /* closing a handle we are done with cannot fail usefully */ });
   }
 }

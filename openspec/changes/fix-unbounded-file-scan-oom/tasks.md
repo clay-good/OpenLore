@@ -17,7 +17,12 @@
 
 ## The fix
 - [x] `bounded-file-scan.ts`: `mapFilesBounded` (bounded width, input-order results),
-      `readSourceCapped` (stat-before-read), `isOversizedForScan` (the threshold, defined once)
+      `readSourceCapped` (size-before-read), `isOversizedForScan` (the threshold, defined once)
+- [x] `readSourceCapped` sizes and reads through ONE open handle, not `stat(path)` +
+      `readFile(path)`. CodeQL flagged the two-resolution form (`js/file-system-race`, high) and
+      it is a real boundary for a tool that analyzes untrusted repositories: a file grown or
+      replaced between the two calls is read at a size that was never checked, stepping around
+      the cap. Guarded and mutation-tested
 - [x] `SOURCE_SCAN_CONCURRENCY` (8) and `SOURCE_SCAN_MAX_FILE_BYTES` (4 MB) in `constants.ts`, each
       documented with why it is that size and why the other bound cannot replace it
 - [x] All five enrichment extractors converted: UI components, schemas, routes, middleware, env vars

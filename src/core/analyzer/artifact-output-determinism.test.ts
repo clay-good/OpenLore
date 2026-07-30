@@ -21,20 +21,19 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-// Both fs entry points the bounded scan uses: it stats a file before reading it, so one
-// oversized file cannot materialize a string large enough to exhaust the heap.
+// The bounded scan sizes and reads through ONE open handle, so the size it checked and the
+// bytes it read cannot come from different files. The mock models that handle.
 vi.mock('node:fs/promises', () => ({
-  readFile: vi.fn(),
-  stat: vi.fn(),
+  open: vi.fn(),
 }));
 
-import { readFile, stat } from 'node:fs/promises';
+import { open } from 'node:fs/promises';
 import { buildRouteInventory } from './http-route-parser.js';
 import { extractEnvVars } from './env-extractor.js';
 import { SOURCE_SCAN_CONCURRENCY } from '../../constants.js';
 
-const mockReadFile = readFile as ReturnType<typeof vi.fn>;
-const mockStat = stat as ReturnType<typeof vi.fn>;
+const mockOpen = open as ReturnType<typeof vi.fn>;
+const mockReadFile = vi.fn();
 
 /**
  * Resolve each path's content after a delay that DECREASES with input index, so
@@ -43,9 +42,12 @@ const mockStat = stat as ReturnType<typeof vi.fn>;
  */
 function withReversedCompletion(contentByPath: Map<string, string>, order: string[]): void {
   // The size gate must never be what decides the outcome here — every fixture is tiny, and
-  // the stat resolves immediately so all the adversarial latency stays on the read.
-  mockStat.mockImplementation((p: string) =>
-    Promise.resolve({ isFile: () => true, size: (contentByPath.get(p) ?? '').length }));
+  // stat resolves immediately, so all the adversarial latency stays on the read.
+  mockOpen.mockImplementation((p: string) => Promise.resolve({
+    stat: () => Promise.resolve({ isFile: () => true, size: (contentByPath.get(p) ?? '').length }),
+    readFile: () => mockReadFile(p),
+    close: () => Promise.resolve(),
+  }));
   mockReadFile.mockImplementation((p: string) => {
     const content = contentByPath.get(p) ?? '';
     const idx = order.indexOf(p);
@@ -55,7 +57,7 @@ function withReversedCompletion(contentByPath: Map<string, string>, order: strin
 }
 
 describe('buildRouteInventory — input-order aggregation', () => {
-  beforeEach(() => { mockReadFile.mockReset(); mockStat.mockReset(); });
+  beforeEach(() => { mockReadFile.mockReset(); mockOpen.mockReset(); });
 
   it('orders routes by file-list order under adversarial completion latency', async () => {
     // Three FastAPI files, each with one distinct route.
@@ -112,7 +114,7 @@ describe('buildRouteInventory — input-order aggregation', () => {
 });
 
 describe('extractEnvVars — input-order aggregation', () => {
-  beforeEach(() => { mockReadFile.mockReset(); mockStat.mockReset(); });
+  beforeEach(() => { mockReadFile.mockReset(); mockOpen.mockReset(); });
 
   it("orders a var's files[] by file-list order under adversarial latency", async () => {
     // Same var read in three source files, listed a → b → c.
