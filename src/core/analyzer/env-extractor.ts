@@ -11,8 +11,9 @@
  * are marked required=true (no known default).
  */
 
-import { readFile } from 'node:fs/promises';
 import { extname, relative, basename } from 'node:path';
+
+import { mapFilesBounded, readSourceCapped } from './bounded-file-scan.js';
 
 // ============================================================================
 // TYPES
@@ -171,29 +172,37 @@ export async function extractEnvVars(
     }
   }
 
-  // Collect per-file upsert ops concurrently, then apply them sequentially in
-  // filePaths order. `Promise.all` resolves in INPUT order regardless of I/O
-  // completion, so a var's `files[]` order and its first-wins `description` are a
-  // pure function of the file list — upserting from inside the callbacks would make
-  // both depend on read-completion timing (decision c6d1ad07).
+  // Collect per-file upsert ops over a BOUNDED scan, then apply them sequentially in
+  // filePaths order. `mapFilesBounded` resolves in INPUT order regardless of I/O
+  // completion (and regardless of its concurrency), so a var's `files[]` order and its
+  // first-wins `description` are a pure function of the file list — upserting from inside
+  // the callbacks would make both depend on read-completion timing (decision c6d1ad07).
   type UpsertOp = { name: string; rel: string; patch: Partial<EnvVar> };
-  const perFileOps = await Promise.all(
-    filePaths.map(async (fp): Promise<UpsertOp[]> => {
+  const perFileOps = await mapFilesBounded(
+    filePaths,
+    async (fp): Promise<UpsertOp[]> => {
       if (SKIP_DIRS.some(d => fp.replace(/\\/g, '/').includes(d))) return [];
 
       const name = basename(fp);
       const ext = extname(fp).toLowerCase();
       const rel = relative(rootDir, fp);
 
-      let source: string;
-      try {
-        source = await readFile(fp, 'utf-8');
-      } catch {
-        return [];
+      const isDeclaration = ENV_DECLARATION_FILES.has(name);
+      // Decide whether this file can contribute BEFORE reading it. The read used to come
+      // first, so every file in the repository — images, archives, model weights — was
+      // decoded into a UTF-8 string only to be discarded one line later by the extension
+      // test. On a repository with large binary assets that alone could exhaust the heap.
+      if (!isDeclaration) {
+        if (!SOURCE_EXTENSIONS.has(ext)) return [];
+        // Skip test files
+        if (fp.includes('.test.') || fp.includes('.spec.') || fp.includes('_test.') || fp.includes('_spec.')) return [];
       }
 
+      const source = await readSourceCapped(fp);
+      if (source === null) return [];
+
       // Env declaration files
-      if (ENV_DECLARATION_FILES.has(name)) {
+      if (isDeclaration) {
         return parseEnvFile(source, rel).map(v => ({
           name: v.name,
           rel,
@@ -201,17 +210,12 @@ export async function extractEnvVars(
         }));
       }
 
-      // Source files
-      if (!SOURCE_EXTENSIONS.has(ext)) return [];
-      // Skip test files
-      if (fp.includes('.test.') || fp.includes('.spec.') || fp.includes('_test.') || fp.includes('_spec.')) return [];
-
       return extractFromSource(source, rel, ext).map(({ name: varName, required }) => ({
         name: varName,
         rel,
         patch: { required },
       }));
-    })
+    },
   );
 
   for (const op of perFileOps.flat()) {

@@ -7,9 +7,9 @@
  * Detection is purely regex-based — no AST parsing required.
  */
 
-import { readFile } from 'node:fs/promises';
 import { extname, relative, basename } from 'node:path';
 import { isTestFile } from './test-file.js';
+import { mapFilesBounded, readSourceCapped } from './bounded-file-scan.js';
 import { blankCommentsPreservingLayout } from './comment-blanking.js';
 
 // ============================================================================
@@ -263,28 +263,23 @@ export async function extractMiddleware(
   filePaths: string[],
   rootDir: string
 ): Promise<MiddlewareEntry[]> {
-  const results: MiddlewareEntry[] = [];
+  // Per-file-then-flatten, over a BOUNDED scan. Flattening in `filePaths` order keeps the
+  // inventory a pure function of the file list; pushing into a shared array from inside the
+  // callbacks appended in I/O-completion order, which made the artifact's bytes depend on disk
+  // timing (change: fix-artifact-output-determinism) and would additionally have made the order
+  // depend on the scan's concurrency.
+  const perFile = await mapFilesBounded(filePaths, async (fp): Promise<MiddlewareEntry[]> => {
+    // Middleware/validation declared in test files are fixtures/assertions, not the
+    // app's real middleware surface — exclude them (they produced phantom entries).
+    if (isTestFile(fp)) return [];
+    const ext = extname(fp).toLowerCase();
+    if (!['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'].includes(ext)) return [];
 
-  await Promise.all(
-    filePaths.map(async fp => {
-      // Middleware/validation declared in test files are fixtures/assertions, not the
-      // app's real middleware surface — exclude them (they produced phantom entries).
-      if (isTestFile(fp)) return;
-      const ext = extname(fp).toLowerCase();
-      if (!['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'].includes(ext)) return;
+    const source = await readSourceCapped(fp);
+    if (source === null) return [];
 
-      let source: string;
-      try {
-        source = await readFile(fp, 'utf-8');
-      } catch {
-        return;
-      }
+    return extractFromSource(source, relative(rootDir, fp), fp);
+  });
 
-      const rel = relative(rootDir, fp);
-      const entries = extractFromSource(source, rel, fp);
-      results.push(...entries);
-    })
-  );
-
-  return results;
+  return perFile.flat();
 }

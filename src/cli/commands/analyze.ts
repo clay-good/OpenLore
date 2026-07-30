@@ -8,7 +8,7 @@
 import { Command, Option } from 'commander';
 import { sanitizeForTerminal as safe } from '../../utils/misc.js';
 import { writeFile, mkdir, readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { extname, join } from 'node:path';
 import { logger } from '../../utils/logger.js';
 import { fileExists, formatDuration, formatAge, getAnalysisAge } from '../../utils/command-helpers.js';
 import {
@@ -25,7 +25,9 @@ import {
   OPENSPEC_DECISIONS_SUBDIR,
   OPENLORE_ANALYSIS_REL_PATH,
   OPENLORE_CONFIG_REL_PATH,
+  SOURCE_SCAN_MAX_FILE_BYTES,
 } from '../../constants.js';
+import { isOversizedForScan, SCANNED_SOURCE_EXTENSIONS } from '../../core/analyzer/bounded-file-scan.js';
 import { computeProjectFingerprint, isCacheFresh } from '../../core/services/mcp-handlers/utils.js';
 import type { AnalyzeOptions, OpenLoreConfig } from '../../types/index.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
@@ -197,18 +199,42 @@ export async function runAnalysis(
   }
   logger.blank();
 
-  // Phase 3: Run new enrichment extractors in parallel
+  // Phase 3: Run the enrichment extractors
   logger.analysis('Extracting UI components, schemas, routes, and env vars...');
 
   const allFilePaths = repoMap.allFiles.map(f => f.path);
 
-  const [uiComponents, schemas, routeInventory, middleware, envVars] = await Promise.all([
-    extractUIComponents(allFilePaths, rootPath),
-    extractSchemas(allFilePaths, rootPath),
-    buildRouteInventory(allFilePaths, rootPath),
-    extractMiddleware(allFilePaths, rootPath),
-    extractEnvVars(allFilePaths, rootPath),
-  ]);
+  // SEQUENTIALLY, not `Promise.all` (change: fix-unbounded-file-scan-oom). Each extractor is
+  // now an internally bounded scan, but running five of them together multiplies that bound by
+  // five — and the five together are what exhausted the heap on a large repository (issue #302).
+  // Serialized, the peak is one scan's bound no matter how many extractors are added here.
+  //
+  // This costs no extra I/O: the five always read the same files, so overlapping them shared
+  // nothing beyond what the OS page cache already gives the later passes for free.
+  const uiComponents = await extractUIComponents(allFilePaths, rootPath);
+  const schemas = await extractSchemas(allFilePaths, rootPath);
+  const routeInventory = await buildRouteInventory(allFilePaths, rootPath);
+  const middleware = await extractMiddleware(allFilePaths, rootPath);
+  const envVars = await extractEnvVars(allFilePaths, rootPath);
+
+  // Disclose files the extractors were too large to scan. The walker already stat'd every file,
+  // so this is the same predicate the scan applies, evaluated for free — and saying nothing
+  // would leave a component/route/env var that genuinely exists reading as genuinely absent.
+  // Scoped to extensions an extractor actually reads: `allFiles` also carries assets and data
+  // blobs, and reporting a 6 MB `.bin` as "excluded" is noise that teaches operators to ignore
+  // the line.
+  const oversized = repoMap.allFiles.filter(
+    f => isOversizedForScan(f.size) && SCANNED_SOURCE_EXTENSIONS.has(extname(f.path).toLowerCase()),
+  );
+  if (oversized.length > 0) {
+    const worst = [...oversized].sort((a, b) => b.size - a.size || (a.path < b.path ? -1 : 1)).slice(0, 3);
+    logger.warning(
+      `${oversized.length} file${oversized.length === 1 ? '' : 's'} exceeded the `
+      + `${(SOURCE_SCAN_MAX_FILE_BYTES / 1024 / 1024).toFixed(0)} MB scan cap — components, schemas, `
+      + `routes, middleware and env vars from them are a LOWER BOUND: `
+      + worst.map(f => `${f.path} (${(f.size / 1024 / 1024).toFixed(1)} MB)`).join('; '),
+    );
+  }
 
   // Phase 4: Generate Artifacts
   logger.analysis('Generating analysis artifacts...');

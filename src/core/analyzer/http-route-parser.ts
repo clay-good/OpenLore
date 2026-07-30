@@ -26,9 +26,9 @@
  *   fuzzy   — normalised path matches after prefix stripping
  */
 
-import { readFile } from 'node:fs/promises';
 import { extname } from 'node:path';
 import { isTestFile } from './test-file.js';
+import { mapFilesBounded, readSourceCapped } from './bounded-file-scan.js';
 
 // ============================================================================
 // TYPES
@@ -171,12 +171,8 @@ export async function extractHttpCalls(filePath: string): Promise<HttpCall[]> {
   const ext = extname(filePath).toLowerCase();
   if (!['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs'].includes(ext)) return [];
 
-  let content: string;
-  try {
-    content = await readFile(filePath, 'utf8');
-  } catch {
-    return [];
-  }
+  const content = await readSourceCapped(filePath);
+  if (content === null) return [];
 
   const calls: HttpCall[] = [];
 
@@ -302,12 +298,8 @@ export async function extractRouteDefinitions(filePath: string): Promise<RouteDe
   const ext = extname(filePath).toLowerCase();
   if (!['.py', '.pyw'].includes(ext)) return [];
 
-  let content: string;
-  try {
-    content = await readFile(filePath, 'utf8');
-  } catch {
-    return [];
-  }
+  const content = await readSourceCapped(filePath);
+  if (content === null) return [];
 
   const routes: RouteDefinition[] = [];
   const lines = content.split('\n');
@@ -553,12 +545,8 @@ export async function extractJavaRouteDefinitions(filePath: string): Promise<Rou
   const ext = extname(filePath).toLowerCase();
   if (ext !== '.java') return [];
 
-  let content: string;
-  try {
-    content = await readFile(filePath, 'utf8');
-  } catch {
-    return [];
-  }
+  const content = await readSourceCapped(filePath);
+  if (content === null) return [];
 
   const routes: RouteDefinition[] = [];
   const lines = content.split('\n');
@@ -838,14 +826,16 @@ export async function extractAllHttpEdges(filePaths: string[]): Promise<{
   routes: RouteDefinition[];
   edges: HttpEdge[];
 }> {
-  // Collect per-file results and flatten in filePaths order. `Promise.all` resolves
-  // in INPUT order regardless of completion order, so the aggregated calls/routes
-  // (and therefore the edges) are a deterministic function of the file list — NOT of
-  // filesystem I/O timing. Pushing into shared arrays inside the callbacks would
-  // append in completion order, a latent byte-determinism hazard the spec forbids
-  // (and the shareable-bundle digest relies on).
-  const perFile = await Promise.all(
-    filePaths.map(async (fp): Promise<{ calls: HttpCall[]; routes: RouteDefinition[] }> => {
+  // Collect per-file results over a BOUNDED scan and flatten in filePaths order.
+  // `mapFilesBounded` resolves in INPUT order regardless of completion order (and
+  // regardless of its concurrency), so the aggregated calls/routes (and therefore the
+  // edges) are a deterministic function of the file list — NOT of filesystem I/O timing.
+  // Pushing into shared arrays inside the callbacks would append in completion order, a
+  // latent byte-determinism hazard the spec forbids (and the shareable-bundle digest
+  // relies on).
+  const perFile = await mapFilesBounded(
+    filePaths,
+    async (fp): Promise<{ calls: HttpCall[]; routes: RouteDefinition[] }> => {
       const ext = extname(fp).toLowerCase();
       if (['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs'].includes(ext)) {
         // A JS/TS file can be a client (fetch/axios calls), a server (route
@@ -853,10 +843,12 @@ export async function extractAllHttpEdges(filePaths: string[]): Promise<{
         // SAME-LANGUAGE client→server link (TS frontend → TS Express/NestJS/Next
         // backend) is matched — not only the cross-language JS/TS→Python/Java
         // case. Routes in .py/.java files are already extracted below.
-        const [calls, routes] = await Promise.all([
-          extractHttpCalls(fp),
-          extractTsRouteDefinitions(fp),
-        ]);
+        //
+        // Sequentially, not as a nested `Promise.all`: both passes read the SAME file, so
+        // running them together held two copies of it per scan slot and doubled the bound
+        // this scan exists to enforce.
+        const calls = await extractHttpCalls(fp);
+        const routes = await extractTsRouteDefinitions(fp);
         return { calls, routes };
       } else if (['.py', '.pyw'].includes(ext)) {
         return { calls: [], routes: await extractRouteDefinitions(fp) };
@@ -864,7 +856,7 @@ export async function extractAllHttpEdges(filePaths: string[]): Promise<{
         return { calls: [], routes: await extractJavaRouteDefinitions(fp) };
       }
       return { calls: [], routes: [] };
-    })
+    },
   );
   const allCalls: HttpCall[] = perFile.flatMap(r => r.calls);
   const allRoutes: RouteDefinition[] = perFile.flatMap(r => r.routes);
@@ -1060,24 +1052,20 @@ function detectTsFramework(source: string, filePath: string): string {
  * Handles Express-style, NestJS decorators, and Next.js App Router.
  */
 export async function extractTsRouteDefinitions(filePath: string): Promise<RouteDefinition[]> {
-  let source: string;
-  try {
-    const raw = await readFile(filePath, 'utf-8');
-    // Mask comments LENGTH-PRESERVINGLY (blank to spaces, keep newlines) rather than
-    // skeletonizing. The skeleton REMOVES pure-comment/log/blank lines and shrinks the
-    // text, so every `route.line` was computed in a coordinate system offset from the
-    // ORIGINAL file that synthesizeRouteHandlerEdges (call-graph.ts) and find_dead_code
-    // consume it against — silently dropping or mis-attributing route-handler edges and
-    // surfacing live handlers as false dead-code. Blanking keeps the string byte-aligned
-    // with the original, so `route.line` is exact by construction while route pattern
-    // strings inside comments still never match. Same length-preserving discipline as
-    // extractHttpCalls (:193-195) and maskPythonNonCode (:906-908).
-    source = raw
-      .replace(/\/\*[\s\S]*?\*\//g, blankKeepNewlines)
-      .replace(/(^|[\s,;()[\]{}])(\/\/.*)$/gm, (_m, prefix, comment) => prefix + ' '.repeat(comment.length));
-  } catch {
-    return [];
-  }
+  const raw = await readSourceCapped(filePath);
+  if (raw === null) return [];
+  // Mask comments LENGTH-PRESERVINGLY (blank to spaces, keep newlines) rather than
+  // skeletonizing. The skeleton REMOVES pure-comment/log/blank lines and shrinks the
+  // text, so every `route.line` was computed in a coordinate system offset from the
+  // ORIGINAL file that synthesizeRouteHandlerEdges (call-graph.ts) and find_dead_code
+  // consume it against — silently dropping or mis-attributing route-handler edges and
+  // surfacing live handlers as false dead-code. Blanking keeps the string byte-aligned
+  // with the original, so `route.line` is exact by construction while route pattern
+  // strings inside comments still never match. Same length-preserving discipline as
+  // extractHttpCalls (:193-195) and maskPythonNonCode (:906-908).
+  const source = raw
+    .replace(/\/\*[\s\S]*?\*\//g, blankKeepNewlines)
+    .replace(/(^|[\s,;()[\]{}])(\/\/.*)$/gm, (_m, prefix, comment) => prefix + ' '.repeat(comment.length));
 
   const framework = detectTsFramework(source, filePath);
   const routes: RouteDefinition[] = [];
@@ -1251,24 +1239,23 @@ export async function buildRouteInventory(
 ): Promise<RouteInventory> {
   const { relative } = await import('node:path');
 
-  // Collect per-file routes and flatten in filePaths order. `Promise.all` resolves
-  // in INPUT order regardless of completion order, so the inventory is a deterministic
-  // function of the file list — pushing into a shared array inside the callbacks would
-  // append in I/O-completion order (the byte-determinism hazard `extractAllHttpEdges`
-  // documents and fixes above).
-  const perFile = await Promise.all(
-    filePaths.map(async (fp): Promise<RouteDefinition[]> => {
-      // Routes declared inside test files (e.g. a `fastify.get('/error')` set up by a
-      // test harness) are fixtures, not the app's real API surface — exclude them so the
-      // inventory doesn't report phantom endpoints.
-      if (isTestFile(fp)) return [];
-      const ext = extname(fp).toLowerCase();
-      if (['.py', '.pyw'].includes(ext)) return extractRouteDefinitions(fp);
-      if (['.ts', '.tsx', '.js', '.jsx', '.mjs'].includes(ext)) return extractTsRouteDefinitions(fp);
-      if (ext === '.java') return extractJavaRouteDefinitions(fp);
-      return [];
-    })
-  );
+  // Collect per-file routes over a BOUNDED scan and flatten in filePaths order.
+  // `mapFilesBounded` resolves in INPUT order regardless of completion order (and
+  // regardless of its concurrency), so the inventory is a deterministic function of the
+  // file list — pushing into a shared array inside the callbacks would append in
+  // I/O-completion order (the byte-determinism hazard `extractAllHttpEdges` documents
+  // and fixes above).
+  const perFile = await mapFilesBounded(filePaths, async (fp): Promise<RouteDefinition[]> => {
+    // Routes declared inside test files (e.g. a `fastify.get('/error')` set up by a
+    // test harness) are fixtures, not the app's real API surface — exclude them so the
+    // inventory doesn't report phantom endpoints.
+    if (isTestFile(fp)) return [];
+    const ext = extname(fp).toLowerCase();
+    if (['.py', '.pyw'].includes(ext)) return extractRouteDefinitions(fp);
+    if (['.ts', '.tsx', '.js', '.jsx', '.mjs'].includes(ext)) return extractTsRouteDefinitions(fp);
+    if (ext === '.java') return extractJavaRouteDefinitions(fp);
+    return [];
+  });
   const allRoutes: RouteDefinition[] = perFile.flat();
 
   const byMethod: Record<string, number> = {};

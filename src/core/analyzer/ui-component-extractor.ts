@@ -11,8 +11,9 @@
  *   - Angular: @Component decorator
  */
 
-import { readFile } from 'node:fs/promises';
 import { basename, extname, relative } from 'node:path';
+
+import { mapFilesBounded, readSourceCapped } from './bounded-file-scan.js';
 
 // ============================================================================
 // TYPES
@@ -149,13 +150,8 @@ function lineOfIndex(source: string, index: number): number {
 async function extractFromFile(filePath: string, rootDir: string): Promise<UIComponent[]> {
   const ext = extname(filePath).toLowerCase();
   const rel = relative(rootDir, filePath);
-  let source: string;
-
-  try {
-    source = await readFile(filePath, 'utf-8');
-  } catch {
-    return [];
-  }
+  const source = await readSourceCapped(filePath);
+  if (source === null) return [];
 
   // ── Svelte ────────────────────────────────────────────────────────────────
   if (ext === '.svelte') {
@@ -287,9 +283,7 @@ export async function extractUIComponents(
 
   const candidates = filePaths.filter(f => UI_EXTENSIONS.has(extname(f).toLowerCase()));
 
-  const results = await Promise.all(
-    candidates.map(f => extractFromFile(f, rootDir))
-  );
+  const results = await mapFilesBounded(candidates, f => extractFromFile(f, rootDir));
 
   return results.flat();
 }

@@ -832,3 +832,43 @@ export const SLOW_FILE_DISCLOSURE_MS = 5_000;
  * fix-analyze-native-abort-and-file-cost-budget).
  */
 export const MAX_HTML_INLINE_SCRIPT_CHARS = 1_000_000;
+
+/**
+ * How many files ONE repository-wide source scan may hold open at a time (change:
+ * fix-unbounded-file-scan-oom).
+ *
+ * The enrichment extractors used to fan out with `Promise.all(files.map(...))`, which issues
+ * every read simultaneously — so peak heap was a function of the REPOSITORY's size, not of any
+ * bound, and `analyze` ran five such scans at once. Past a few hundred megabytes of source that
+ * is a fatal OOM rather than a slowdown: V8 dies inside the read-completion path with no partial
+ * result and no diagnosis (issue #302).
+ *
+ * Small on purpose. File scanning is I/O plus regex over the decoded text, and eight concurrent
+ * reads already saturate a local disk; raising it buys no throughput and costs residency
+ * linearly. Bounding concurrency alone is not sufficient — see
+ * {@link SOURCE_SCAN_MAX_FILE_BYTES}, which bounds the other axis.
+ */
+export const SOURCE_SCAN_CONCURRENCY = 8;
+
+/**
+ * Largest file a repository-wide source scan will read (change: fix-unbounded-file-scan-oom).
+ *
+ * The companion bound to {@link SOURCE_SCAN_CONCURRENCY}: concurrency bounds how MANY files are
+ * resident, this bounds how large ONE may be. Both are required, because either alone still
+ * admits an OOM — a repository of many ordinary files exhausts the heap through fan-out, and a
+ * repository with one generated blob exhausts it through a single read.
+ *
+ * The multiplier is what makes this small. A scanned file is resident several times over at the
+ * peak: the decoded string, the length-preserving comment mask each parser builds beside it, and
+ * the `split('\n')` line array it measures offsets against. So the real ceiling is roughly
+ * `SOURCE_SCAN_CONCURRENCY × SOURCE_SCAN_MAX_FILE_BYTES × ~5`, and 4 MB keeps that inside a few
+ * hundred megabytes on the default heap.
+ *
+ * 4 MB of hand-written source is on the order of 100,000 lines; a file above it is generated,
+ * minified, or vendored in practice. This is deliberately BELOW the file-walker's 10 MB read cap,
+ * which gates cheap single-pass reads (line counting) rather than multi-copy text scanning. A file
+ * excluded here is disclosed by `analyze`, never silently dropped, and it is excluded only from
+ * the enrichment inventories (components, schemas, routes, middleware, env vars) — the call graph
+ * has its own bounds and is unaffected.
+ */
+export const SOURCE_SCAN_MAX_FILE_BYTES = 4 * 1024 * 1024;

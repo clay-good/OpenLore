@@ -12,6 +12,7 @@
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { mapFilesBounded } from '../../../analyzer/bounded-file-scan.js';
 import { openloreInit } from '../../../../api/init.js';
 import { openloreAnalyze } from '../../../../api/analyze.js';
 import { VectorIndex } from '../../../analyzer/vector-index.js';
@@ -69,16 +70,23 @@ async function buildKeywordIndex(
   const hubIds = new Set(cg.hubFunctions.map((f) => f.id));
   const entryIds = new Set(cg.entryPoints.map((f) => f.id));
 
+  // Bounded scan, not `Promise.all` over every path: issuing one read per file at once made the
+  // transient peak the whole repository's bytes ON TOP OF the map this retains — the fan-out OOM
+  // (issue #302). Only the fan-out is bounded here, deliberately: the scan's per-file SIZE cap is
+  // not applied, because dropping a large file would quietly remove it from the search index, and
+  // this path has nowhere to disclose that. Retention is therefore unchanged from before.
   const fileContents = new Map<string, string>();
-  await Promise.all(
-    [...new Set(cg.nodes.map((n) => n.filePath))].map(async (fp) => {
-      try {
-        fileContents.set(fp, await readFile(join(dir, fp), 'utf-8'));
-      } catch {
-        /* skip unreadable files */
-      }
-    }),
-  );
+  const paths = [...new Set(cg.nodes.map((n) => n.filePath))];
+  const contents = await mapFilesBounded(paths, async (fp) => {
+    try {
+      return await readFile(join(dir, fp), 'utf-8');
+    } catch {
+      return null; // skip unreadable files
+    }
+  });
+  for (const [i, content] of contents.entries()) {
+    if (content !== null) fileContents.set(paths[i], content);
+  }
 
   await VectorIndex.build(analysisDir, cg.nodes as Parameters<typeof VectorIndex.build>[1], sigs, hubIds, entryIds, null, fileContents, false);
 }
