@@ -73,6 +73,33 @@ const TABLE_NAME = 'text_lines';
 /** Lines longer than this are truncated (not dropped) to keep rows bounded. */
 const MAX_LINE_LEN = 1000;
 
+/**
+ * How many line records accumulate before {@link TextLineIndex.build} flushes them to the table.
+ *
+ * The build used to hold one record object per source line for the WHOLE repository before
+ * writing anything, which is what exhausted the heap on a large repository. Flushing in batches
+ * makes peak residency a function of this constant instead of the corpus.
+ *
+ * Large enough that the per-append overhead stays amortized (a flush is a LanceDB write, not a
+ * per-row cost), small enough that a batch is a few tens of MB rather than gigabytes.
+ */
+let BUILD_FLUSH_LINES = 200_000;
+
+/**
+ * Test-only: lower the flush threshold so a small fixture exercises the MULTI-BATCH path.
+ *
+ * Without this a test would need ~500k lines to cross the production threshold twice, because a
+ * file's lines are appended whole before the threshold is checked. A fixture that never crosses
+ * it twice silently tests only the single-flush path — which is exactly how a mutation that
+ * re-created the table on every flush (clobbering earlier batches) passed a first draft of these
+ * tests. Returns the previous value so callers can restore it.
+ */
+export function _setBuildFlushLinesForTesting(n: number): number {
+  const previous = BUILD_FLUSH_LINES;
+  BUILD_FLUSH_LINES = n;
+  return previous;
+}
+
 // Module-level BM25 corpus cache, keyed by dbPath. Invalidated by build();
 // patched in place by updateFiles().
 const _bm25Cache = new Map<
@@ -137,25 +164,62 @@ export class TextLineIndex {
    * Build (or rebuild) the text-line index from a set of files. Overwrites any
    * existing table. Files that yield no indexable lines contribute nothing.
    * Returns the number of lines indexed.
+   *
+   * `files` may be an array OR an async iterable, and the async form is the one that matters at
+   * scale: this used to materialize ONE RECORD OBJECT PER SOURCE LINE for the entire repository
+   * before handing the whole array to LanceDB. On a large repository that is millions of live
+   * objects on top of every file's text, and it was the point at which `openlore install` ran out
+   * of heap — measured on microsoft/TypeScript (80,113 files), which died here after the call
+   * graph and the keyword index had both completed successfully.
+   *
+   * Records are now flushed to the table every {@link BUILD_FLUSH_LINES} lines, so peak residency
+   * is one batch rather than the whole corpus. Passing an async iterable additionally lets the
+   * CALLER avoid holding every file's content at once; an array argument keeps working unchanged
+   * (every existing caller and test passes one) but retains whatever it was already holding.
    */
-  static async build(outputDir: string, files: TextFileInput[]): Promise<{ lines: number; files: number }> {
-    const records: TextLineRecord[] = [];
-    let indexedFiles = 0;
-    for (const f of files) {
-      const lines = extractLines(f.filePath, f.content);
-      if (lines.length > 0) indexedFiles++;
-      for (const l of lines) records.push(l);
-    }
-
+  static async build(
+    outputDir: string,
+    files: Iterable<TextFileInput> | AsyncIterable<TextFileInput>,
+  ): Promise<{ lines: number; files: number }> {
     const dbPath = join(outputDir, DB_FOLDER);
     quietNativeLoggingOnce();
     const { connect } = await import('@lancedb/lancedb');
     const db = await connect(dbPath);
 
-    if (records.length === 0) {
-      // Nothing to index. If a stale table exists, overwrite it with an empty
-      // schema-bearing row set by dropping it; otherwise leave it absent.
-      _bm25Cache.delete(dbPath);
+    let batch: TextLineRecord[] = [];
+    let table: Awaited<ReturnType<typeof db.createTable>> | null = null;
+    let total = 0;
+    let indexedFiles = 0;
+
+    // The FIRST flush creates the table with `mode: 'overwrite'` — that is what replaces any
+    // previous index, and it must not happen until there is at least one record, or an empty
+    // repository would leave behind an empty table where the old code left none.
+    const flush = async (): Promise<void> => {
+      if (batch.length === 0) return;
+      const rows = batch as unknown as Record<string, unknown>[];
+      if (table === null) {
+        table = await db.createTable(TABLE_NAME, rows, { mode: 'overwrite' });
+      } else {
+        await table.add(rows);
+      }
+      total += batch.length;
+      batch = []; // a fresh array, so the flushed one can be collected immediately
+    };
+
+    // `for await` accepts a plain sync iterable too, so array callers are unaffected.
+    for await (const f of files) {
+      const lines = extractLines(f.filePath, f.content);
+      if (lines.length === 0) continue;
+      indexedFiles++;
+      for (const l of lines) batch.push(l);
+      if (batch.length >= BUILD_FLUSH_LINES) await flush();
+    }
+    await flush();
+
+    _bm25Cache.delete(dbPath);
+
+    if (total === 0) {
+      // Nothing to index. If a stale table exists, drop it; otherwise leave it absent.
       try {
         await db.dropTable(TABLE_NAME);
       } catch {
@@ -164,11 +228,7 @@ export class TextLineIndex {
       return { lines: 0, files: 0 };
     }
 
-    await db.createTable(TABLE_NAME, records as unknown as Record<string, unknown>[], {
-      mode: 'overwrite',
-    });
-    _bm25Cache.delete(dbPath);
-    return { lines: records.length, files: indexedFiles };
+    return { lines: total, files: indexedFiles };
   }
 
   /**

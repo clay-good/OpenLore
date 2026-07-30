@@ -1039,14 +1039,36 @@ async function runTextLineIndexing(rootPath: string, outputPath: string): Promis
     const { FileWalker } = await import('../../core/analyzer/file-walker.js');
     const { TextLineIndex } = await import('../../core/analyzer/text-line-index.js');
     const walk = await new FileWalker(rootPath).walk();
-    const candidates = walk.files.filter(f => f.size <= TEXT_INDEX_MAX_FILE_BYTES);
-    const perFile = await mapFilesBounded(candidates.map(f => f.absolutePath), async (absolutePath, i) => {
-      const content = await readSourceCapped(absolutePath, TEXT_INDEX_MAX_FILE_BYTES);
-      return content === null ? null : { filePath: candidates[i].path, content };
-    });
-    const files = perFile.filter((f): f is { filePath: string; content: string } => f !== null);
 
-    const { lines, files: indexedFiles } = await TextLineIndex.build(outputPath, files);
+    // Stream the files in fixed-size chunks rather than collecting them all first.
+    //
+    // The bounded scan (change: fix-unbounded-file-scan-oom) already stopped this issuing every
+    // read at once, but it still RETAINED the result: one array holding every file's text, handed
+    // whole to a builder that then materialized a record per source line on top of it. Bounding
+    // concurrency does not bound retention, and on a large repository the retention is what runs
+    // the heap out — measured on microsoft/TypeScript (80,113 files), which died here after the
+    // call graph and the keyword index had both completed.
+    //
+    // Chunking keeps the reads bounded AND lets each chunk's text be collected as soon as its
+    // lines have been extracted. Chunks are consumed in walk order and each resolves in input
+    // order, so the indexed row order is unchanged.
+    const CHUNK = 32;
+    const candidates = walk.files.filter(f => f.size <= TEXT_INDEX_MAX_FILE_BYTES);
+    async function* streamFiles(): AsyncGenerator<{ filePath: string; content: string }> {
+      for (let i = 0; i < candidates.length; i += CHUNK) {
+        const slice = candidates.slice(i, i + CHUNK);
+        const contents = await mapFilesBounded(
+          slice.map(f => f.absolutePath),
+          absolutePath => readSourceCapped(absolutePath, TEXT_INDEX_MAX_FILE_BYTES),
+        );
+        for (let j = 0; j < slice.length; j++) {
+          const content = contents[j];
+          if (content !== null) yield { filePath: slice[j].path, content };
+        }
+      }
+    }
+
+    const { lines, files: indexedFiles } = await TextLineIndex.build(outputPath, streamFiles());
     console.log(`    ✓ Text line index built (${lines} lines across ${indexedFiles} files)`);
     console.log(`    → ${outputPath.replace(rootPath + '/', '')}text-line-index/`);
   } catch (err) {
