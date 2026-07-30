@@ -27,8 +27,13 @@ describe('CLI onboarding front door', () => {
   it('groups the command surface by job in --help (CommandSurfaceGroupedByJob)', () => {
     // The ~49 commands must render grouped by job, not as one flat list, so the
     // front door is legible. Lock the wiring so it cannot be silently dropped.
-    expect(source).toContain('groupedFormatHelp');
-    expect(source).toMatch(/configureHelp\(\{\s*formatHelp:\s*groupedFormatHelp\s*\}\)/);
+    expect(source).toContain('applyJobGroupedHelp');
+    expect(source).toMatch(/^applyJobGroupedHelp\(program\);$/m);
+    // The grouping pass tags each registered subcommand, so it must run after the last
+    // addCommand() — otherwise late-registered commands silently fall out of their group.
+    expect(source.lastIndexOf('program.addCommand(')).toBeLessThan(
+      source.indexOf('applyJobGroupedHelp(program);')
+    );
   });
 
   it('surfaces `openlore features` so opt-in capabilities are discoverable from the front door', () => {

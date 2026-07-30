@@ -126,7 +126,7 @@ describe('view command', () => {
       const { fileExists } = await import('../../utils/command-helpers.js');
       vi.mocked(fileExists).mockResolvedValue(false);
 
-      await viewCommand.parseAsync(['node', 'view'], { from: 'user' });
+      await viewCommand.parseAsync([], { from: 'user' });
 
       expect(process.exitCode).toBe(1);
     });
@@ -136,7 +136,7 @@ describe('view command', () => {
       vi.mocked(fileExists).mockResolvedValue(false);
       const { logger } = await import('../../utils/logger.js');
 
-      await viewCommand.parseAsync(['node', 'view'], { from: 'user' });
+      await viewCommand.parseAsync([], { from: 'user' });
 
       expect(logger.error).toHaveBeenCalled();
     });
@@ -150,7 +150,7 @@ describe('view command', () => {
       // First call (graph): true, second call (viewer index.html): false
       vi.mocked(fileExists).mockResolvedValueOnce(true).mockResolvedValue(false);
 
-      await viewCommand.parseAsync(['node', 'view', '--port', 'abc'], { from: 'user' });
+      await viewCommand.parseAsync(['--port', 'abc'], { from: 'user' });
 
       expect(process.exitCode).toBe(1);
     });
@@ -159,7 +159,7 @@ describe('view command', () => {
       const { fileExists } = await import('../../utils/command-helpers.js');
       vi.mocked(fileExists).mockResolvedValueOnce(true).mockResolvedValue(false);
 
-      await viewCommand.parseAsync(['node', 'view', '--port', '0'], { from: 'user' });
+      await viewCommand.parseAsync(['--port', '0'], { from: 'user' });
 
       expect(process.exitCode).toBe(1);
     });
@@ -168,7 +168,7 @@ describe('view command', () => {
       const { fileExists } = await import('../../utils/command-helpers.js');
       vi.mocked(fileExists).mockResolvedValueOnce(true).mockResolvedValue(false);
 
-      await viewCommand.parseAsync(['node', 'view', '--port', '99999'], { from: 'user' });
+      await viewCommand.parseAsync(['--port', '99999'], { from: 'user' });
 
       expect(process.exitCode).toBe(1);
     });
@@ -324,10 +324,11 @@ describe('view server API guard wiring', () => {
     vi.mocked(fileExists).mockResolvedValue(true);
     const { createServer } = await import('vite');
 
-    // Pass an explicit valid port: the shared viewCommand instance retains the
-    // last-parsed --port from the port-validation tests above, so an omitted
-    // --port would inherit their invalid value and bail before createServer.
-    await viewCommand.parseAsync(['node', 'view', '--no-open', '--port', '5199'], { from: 'user' });
+    // Pass an explicit valid port. Commander >=13 restores pre-parse state on each
+    // parse, so the shared viewCommand instance no longer leaks the last-parsed --port
+    // from the port-validation tests above — but being explicit keeps this test
+    // independent of that ordering either way.
+    await viewCommand.parseAsync(['--no-open', '--port', '5199'], { from: 'user' });
 
     expect(vi.mocked(createServer)).toHaveBeenCalled();
     return vi.mocked(createServer).mock.calls[0][0] as {

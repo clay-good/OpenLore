@@ -69,7 +69,7 @@ import { panicReplayCommand } from './commands/panic-replay.js';
 import { gryphWatchCommand } from './commands/gryph-watch.js';
 import { updateCommand } from './commands/update.js';
 import { featuresCommand } from './commands/features.js';
-import { groupedFormatHelp } from './help-groups.js';
+import { applyJobGroupedHelp } from './help-groups.js';
 import { configureLogger, logger } from '../utils/logger.js';
 import { colorForStderr } from '../utils/colors.js';
 import { checkExplicitConfig, type OptionValueSource } from './config-guard.js';
@@ -155,9 +155,6 @@ program
       'New here? Run `openlore install` to wire your coding agent and build the index in one step.'
   )
   .version(version)
-  // Group the ~49 commands by job in `openlore --help` so the front door is legible
-  // (CommandSurfaceGroupedByJob). Presentation only — every command stays invocable.
-  .configureHelp({ formatHelp: groupedFormatHelp })
   .option('-q, --quiet', 'Minimal output (errors only)', false)
   .option('-v, --verbose', 'Show debug information', false)
   .option('--no-color', 'Disable colored output (also enables timestamps)')
@@ -252,6 +249,11 @@ program.addCommand(panicCalibrateCommand);
 program.addCommand(panicReplayCommand);
 program.addCommand(gryphWatchCommand);
 program.addCommand(updateCommand);
+
+// Group the ~49 commands by job in `openlore --help` so the front door is legible
+// (CommandSurfaceGroupedByJob). Presentation only — every command stays invocable.
+// Must run after the last addCommand(): it tags each registered subcommand with its group.
+applyJobGroupedHelp(program);
 
 // A bare `openlore` (no command) is the most natural way a new user explores the tool.
 // Show help on stdout and exit 0 instead of Commander's default (help on stderr, exit 1).
