@@ -333,8 +333,17 @@ describe('Bounded Computation — repository-wide scans stay bounded (issue #302
       ['import.ts', importCommand],
     ] as const) {
       expect(src, `${name} must route the function-index file list through the bounded pool`)
-        .toMatch(/const contents = await mapFilesBounded\(paths/);
+        .toMatch(/const contents = await mapFilesBounded\(/);
     }
+
+    // …and in `analyze`, the pool's RESULT must be consumed in chunks rather than retained.
+    //
+    // This is the lesson the text-line index taught the hard way: a bounded pool still returns an
+    // array of every result, so `mapFilesBounded(paths, …)` over the whole repository held every
+    // graph-bearing file's text — twice, once in that array and once in the Map it was copied
+    // into — for the entire index build. BOUNDING CONCURRENCY DOES NOT BOUND RETENTION.
+    expect(analyze, 'the function index must read its files in chunks, not all at once')
+      .toMatch(/for \(let i = 0; i < paths\.length; i \+= READ_CHUNK\)/);
     // Text-line indexing must be bounded in BOTH axes (change: fix-text-line-index-oom).
     // Bounding concurrency alone was not enough here: the reads were already pooled, and the
     // build still ran the heap out because it RETAINED every file's text in one array and then

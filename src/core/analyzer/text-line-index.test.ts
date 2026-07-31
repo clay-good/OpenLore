@@ -9,6 +9,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
+import { readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -188,6 +189,48 @@ describe('TextLineIndex.build — streaming and batching', () => {
       .toEqual({ lines: 0, files: 0 });
     expect(await TextLineIndex.searchText(outputDir, 'anything')).toEqual([]);
   });
+
+  it('a build that throws part-way leaves the PREVIOUS index intact', async () => {
+    // Flushing straight into the live table would make the first flush destroy the old index and
+    // every later failure leave a truncated one — verified against that shape: the old markers
+    // were gone, some new ones were present, and `exists()` still reported a healthy index, so
+    // the watcher would have gone on patching a permanently partial corpus. The staged build +
+    // rename means the only observable states are "the old index" and "the new one".
+    await TextLineIndex.build(outputDir, [
+      bigFile('old-a.ts', 'zebracrossing'),
+      bigFile('old-b.ts', 'plumbago'),
+    ]);
+    _resetTextLineIndexCachesForTesting();
+    expect((await TextLineIndex.searchText(outputDir, 'zebracrossing')).length).toBeGreaterThan(0);
+
+    async function* explodes(): AsyncGenerator<{ filePath: string; content: string }> {
+      yield bigFile('new-a.ts', 'quixotry');
+      yield bigFile('new-b.ts', 'sphygmomanometer');
+      throw new Error('read failed part-way');
+    }
+    await expect(TextLineIndex.build(outputDir, explodes())).rejects.toThrow('read failed');
+
+    // The old index must be exactly as it was — not replaced, not truncated, not empty.
+    _resetTextLineIndexCachesForTesting();
+    expect((await TextLineIndex.searchText(outputDir, 'zebracrossing')).length).toBeGreaterThan(0);
+    expect((await TextLineIndex.searchText(outputDir, 'plumbago')).length).toBeGreaterThan(0);
+    // …and nothing from the failed build leaked into it.
+    expect(await TextLineIndex.searchText(outputDir, 'quixotry')).toEqual([]);
+  }, 120_000);
+
+  it('leaves no staging directory behind, on success or on failure', async () => {
+    const staged = () => readdirSync(outputDir).filter(n => n.includes('.building-'));
+
+    await TextLineIndex.build(outputDir, [bigFile('ok.ts', 'zebracrossing')]);
+    expect(staged(), 'staging survived a successful build').toEqual([]);
+
+    async function* explodes(): AsyncGenerator<{ filePath: string; content: string }> {
+      yield bigFile('a.ts', 'quixotry');
+      throw new Error('boom');
+    }
+    await expect(TextLineIndex.build(outputDir, explodes())).rejects.toThrow('boom');
+    expect(staged(), 'staging survived a failed build').toEqual([]);
+  }, 120_000);
 
   it('an empty rebuild drops a previously built index rather than leaving it stale', async () => {
     await TextLineIndex.build(outputDir, [{ filePath: 'a.txt', content: 'findableToken here' }]);

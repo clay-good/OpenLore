@@ -25,6 +25,7 @@
  */
 
 import { existsSync } from 'node:fs';
+import { rm, rename } from 'node:fs/promises';
 import { join } from 'node:path';
 import { quietNativeLoggingOnce } from './lance-logging.js';
 import {
@@ -172,63 +173,87 @@ export class TextLineIndex {
    * of heap — measured on microsoft/TypeScript (80,113 files), which died here after the call
    * graph and the keyword index had both completed successfully.
    *
-   * Records are now flushed to the table every {@link BUILD_FLUSH_LINES} lines, so peak residency
-   * is one batch rather than the whole corpus. Passing an async iterable additionally lets the
-   * CALLER avoid holding every file's content at once; an array argument keeps working unchanged
-   * (every existing caller and test passes one) but retains whatever it was already holding.
+   * Records are flushed every {@link BUILD_FLUSH_LINES} lines, so peak residency is one batch
+   * rather than the whole corpus. Passing an async iterable additionally lets the CALLER avoid
+   * holding every file's content at once; an array argument keeps working unchanged.
+   *
+   * The build is ATOMIC, and that is not incidental. Flushing incrementally into the live table
+   * would mean the first flush destroys the previous index and every later failure leaves a
+   * TRUNCATED one — verified by killing a build mid-flush: the old rows were gone, some new ones
+   * were present, and `exists()` still reported a healthy index, so the watcher would have gone
+   * on patching a permanently partial corpus forever. It also meant a concurrent reader saw a
+   * half-built index for the whole build, and two concurrent builds failed outright on a LanceDB
+   * commit conflict.
+   *
+   * So the batches go into a private per-process directory and the finished index is moved into
+   * place with a single rename. A build that throws, is killed, or races another build leaves the
+   * previous index untouched; the only observable states are "the old index" and "the new one".
    */
   static async build(
     outputDir: string,
     files: Iterable<TextFileInput> | AsyncIterable<TextFileInput>,
   ): Promise<{ lines: number; files: number }> {
     const dbPath = join(outputDir, DB_FOLDER);
+    // Sibling of the real index, not the OS temp dir: the rename below must stay on one
+    // filesystem to be atomic. The pid keeps two concurrent builds from sharing a staging area.
+    const stagePath = join(outputDir, `${DB_FOLDER}.building-${process.pid}`);
     quietNativeLoggingOnce();
     const { connect } = await import('@lancedb/lancedb');
-    const db = await connect(dbPath);
 
     let batch: TextLineRecord[] = [];
-    let table: Awaited<ReturnType<typeof db.createTable>> | null = null;
     let total = 0;
     let indexedFiles = 0;
 
-    // The FIRST flush creates the table with `mode: 'overwrite'` — that is what replaces any
-    // previous index, and it must not happen until there is at least one record, or an empty
-    // repository would leave behind an empty table where the old code left none.
-    const flush = async (): Promise<void> => {
-      if (batch.length === 0) return;
-      const rows = batch as unknown as Record<string, unknown>[];
-      if (table === null) {
-        table = await db.createTable(TABLE_NAME, rows, { mode: 'overwrite' });
-      } else {
-        await table.add(rows);
+    try {
+      const stageDb = await connect(stagePath);
+      let table: Awaited<ReturnType<typeof stageDb.createTable>> | null = null;
+
+      const flush = async (): Promise<void> => {
+        if (batch.length === 0) return;
+        const rows = batch as unknown as Record<string, unknown>[];
+        batch = []; // a fresh array, so the flushed one can be collected immediately
+        if (table === null) {
+          table = await stageDb.createTable(TABLE_NAME, rows, { mode: 'overwrite' });
+        } else {
+          await table.add(rows);
+        }
+        total += rows.length;
+      };
+
+      // `for await` accepts a plain sync iterable too, so array callers are unaffected.
+      for await (const f of files) {
+        const lines = extractLines(f.filePath, f.content);
+        if (lines.length === 0) continue;
+        indexedFiles++;
+        // Checked per LINE, not per file. Testing only after a whole file is appended makes the
+        // real bound `BUILD_FLUSH_LINES + (lines in the largest file)`, which is not the bound
+        // this is documented to provide.
+        for (const l of lines) {
+          batch.push(l);
+          if (batch.length >= BUILD_FLUSH_LINES) await flush();
+        }
       }
-      total += batch.length;
-      batch = []; // a fresh array, so the flushed one can be collected immediately
-    };
+      await flush();
 
-    // `for await` accepts a plain sync iterable too, so array callers are unaffected.
-    for await (const f of files) {
-      const lines = extractLines(f.filePath, f.content);
-      if (lines.length === 0) continue;
-      indexedFiles++;
-      for (const l of lines) batch.push(l);
-      if (batch.length >= BUILD_FLUSH_LINES) await flush();
-    }
-    await flush();
-
-    _bm25Cache.delete(dbPath);
-
-    if (total === 0) {
-      // Nothing to index. If a stale table exists, drop it; otherwise leave it absent.
-      try {
-        await db.dropTable(TABLE_NAME);
-      } catch {
-        /* table did not exist */
+      if (total === 0) {
+        // Nothing to index: remove any previous index rather than leaving a stale one, and leave
+        // no empty table behind where the old code left none.
+        await rm(stagePath, { recursive: true, force: true });
+        await rm(dbPath, { recursive: true, force: true });
+        _bm25Cache.delete(dbPath);
+        return { lines: 0, files: 0 };
       }
-      return { lines: 0, files: 0 };
-    }
 
-    return { lines: total, files: indexedFiles };
+      // Swap. The previous index is removed only once the replacement is complete on disk, so a
+      // failure anywhere above leaves it exactly as it was.
+      await rm(dbPath, { recursive: true, force: true });
+      await rename(stagePath, dbPath);
+      _bm25Cache.delete(dbPath);
+      return { lines: total, files: indexedFiles };
+    } catch (err) {
+      await rm(stagePath, { recursive: true, force: true }).catch(() => { /* best effort */ });
+      throw err;
+    }
   }
 
   /**

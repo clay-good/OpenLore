@@ -726,6 +726,44 @@ export class EdgeStore {
   }
 
   /** Bulk-insert per-function overlays in a single transaction. */
+  /**
+   * Insert overlay rows whose CFG is ALREADY serialized, streamed from an async source (issue
+   * #304). Batched so neither the source nor a transaction has to hold the whole corpus.
+   *
+   * Batches are separate transactions on purpose: this runs after `clearAll()`, so a failure
+   * part-way leaves a PARTIAL overlay. That is the same state every consumer already handles —
+   * `getCfg` returns `null` for a missing row and both call sites degrade to a disclosed
+   * function-granularity answer — whereas holding one transaction over millions of rows would
+   * reintroduce the unbounded memory this change exists to remove.
+   */
+  async insertCfgRowsStreaming(
+    rows: AsyncIterable<{ functionId: string; filePath: string; cfgJson: string }>,
+    batchSize = 20_000,
+  ): Promise<number> {
+    const stmt: StatementSync = this.db.prepare(
+      'INSERT OR REPLACE INTO cfg_overlay (function_id, file_path, cfg) VALUES (@functionId, @filePath, @cfg)'
+    );
+    let batch: Array<{ functionId: string; filePath: string; cfgJson: string }> = [];
+    let written = 0;
+    const flush = (): void => {
+      if (batch.length === 0) return;
+      const pending = batch;
+      batch = [];
+      runTransaction(this.db, () => {
+        for (const r of pending) {
+          stmt.run({ '@functionId': r.functionId, '@filePath': r.filePath, '@cfg': r.cfgJson });
+        }
+      });
+      written += pending.length;
+    };
+    for await (const row of rows) {
+      batch.push(row);
+      if (batch.length >= batchSize) flush();
+    }
+    flush();
+    return written;
+  }
+
   insertCfgs(cfgs: Array<{ functionId: string; filePath: string; cfg: FunctionCfg }>): void {
     if (cfgs.length === 0) return;
     const stmt: StatementSync = this.db.prepare(

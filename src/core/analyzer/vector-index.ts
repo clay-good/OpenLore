@@ -535,12 +535,22 @@ export class VectorIndex {
     });
 
     // Also index signature entries that have no call graph node (constants, type aliases, etc.)
+    //
+    // The (file, name) pairs are indexed ONCE up front. This used to be a `nodes.some(...)` scan
+    // per signature entry, and the `nodeIds` short-circuit above it does not save you: node ids
+    // are `path::Class.method` while the synthetic id is `path::name`, so every class method
+    // misses and falls through to a linear scan of every node in the repository. On a large
+    // codebase that is entries × nodes — on the order of 10^10 comparisons — and it dominated the
+    // wall clock of the whole index build.
+    const nodeFileNames = new Set<string>();
+    for (const n of nodes) nodeFileNames.add(`${n.filePath}\u0000${n.name}`);
+
     for (const fsm of signatures) {
       for (const entry of fsm.entries) {
         const syntheticId = `${fsm.path}::${entry.name}`;
         if (nodeIds.has(syntheticId)) continue; // already covered by call graph
         // Skip if any call graph node from this file matches the name
-        if (nodes.some(n => n.filePath === fsm.path && n.name === entry.name)) continue;
+        if (nodeFileNames.has(`${fsm.path}\u0000${entry.name}`)) continue;
         const sig = entry.signature ?? '';
         const doc = entry.docstring ?? '';
         candidates.push({
