@@ -22,7 +22,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CallGraphBuilder } from './call-graph.js';
-import { CALLGRAPH_LANGUAGES } from './call-graph.js';
+import { CALLGRAPH_LANGUAGES, grammarLoadFailed } from './call-graph.js';
 import { ERROR_PROPAGATION_LANGUAGES, extractExceptionFactsFromSource } from './exception-flow.js';
 import { cfgSupportsLanguage, isStructurallyValid } from './cfg.js';
 import { inferTypesFromSource, TYPE_INFERENCE_LANGUAGES } from './type-inference-engine.js';
@@ -68,6 +68,33 @@ const BASIC: Basic[] = [
   { language: 'Elixir', path: 'm.ex', caller: 'main', callee: 'helper', content: `defmodule M do\n  def helper(), do: 1\n  def main(), do: helper()\nend\n` },
   { language: 'Bash', path: 'm.sh', caller: 'main', callee: 'helper', content: `helper() { echo hi; }\nmain() { helper; }\n` },
 ];
+
+/**
+ * Runs FIRST, so that when a grammar is missing this is the failure an engineer reads rather than
+ * a dozen `expected [] to include 'main'` assertions further down.
+ *
+ * The grammars are `optionalDependencies` loaded through `loadGrammarSoft` — by design, so
+ * `npm install` still succeeds in restricted environments. That means an install can legitimately
+ * come up short, and when `tree-sitter-kotlin` did exactly that in CI, nine tests failed with
+ * messages indistinguishable from a broken extractor. The absence and the breakage produce the
+ * same empty result; only the loader knows which happened, and this asks it.
+ */
+describe('language conformance — grammar availability (diagnostic, runs first)', () => {
+  it('reports which claimed call-graph grammars failed to LOAD, separately from what they extract', async () => {
+    const unavailable: string[] = [];
+    for (const f of BASIC) {
+      await build([{ path: f.path, language: f.language, content: f.content }]);
+      if (grammarLoadFailed(f.language)) unavailable.push(f.language);
+    }
+
+    expect(
+      unavailable,
+      `these grammars did not LOAD, so every capability assertion for them below is about a missing `
+      + `optional dependency rather than a code defect: ${unavailable.join(', ')}. `
+      + `Reinstall (npm ci) and re-run before investigating the extractor.`,
+    ).toEqual([]);
+  });
+});
 
 describe('language conformance — basic call graph (every claimed callGraph language)', () => {
   // Guard: if the registry adds a callGraph language, this sweep must cover it.
