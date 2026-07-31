@@ -35,6 +35,49 @@
       calls keep only the last rows; `createTable` + `add` keeps both
 - [x] Full suite 6,484 passed / 335 files; lint; typecheck; build
 
+## Folded in after adversarial review
+
+- [x] **CFG/def-use overlay (issue #304).** Pure write-through, yet accumulated for the whole
+      repository and held across every later pass. Spilled to a file as each file is merged and
+      drained into `cfg_overlay` after `clearAll()` — it cannot be written during the build,
+      because that clear is deliberately late so a failed build cannot wipe the index
+      (change: harden-index-store-lifecycle). `cfg_overlay` verified **byte-identical to main**
+      (2,871 rows, 7,045,787 bytes)
+- [x] **An atomicity regression this PR introduced.** Flushing into the live table meant the first
+      flush destroyed the previous index and any later failure left a truncated one — reproduced
+      by killing a build mid-flush: old rows gone, some new rows present, `exists()` still
+      reporting a healthy index, so the watcher would patch a partial corpus forever. It also
+      exposed partial state to concurrent readers for the whole build and made two concurrent
+      builds fail on a LanceDB commit conflict. Now staged into a private directory and renamed
+      into place, so the only observable states are the old index and the new one
+- [x] **BM25 corpus (measured 1,575 MB).** The build path held the corpus (648 MB), a second
+      array-shaped copy (661 MB) and the finished JSON string (265 MB) at once, purely to write
+      the sidecar. Now tokenized, written and dropped per record; only the document-frequency map
+      (keyed by distinct token, ~31k entries) stays resident. Corpus and search hits verified
+      **identical to main**
+- [x] **Whole-repo double retention in the function index.** `mapFilesBounded` bounded the reads
+      but its result array was retained alongside the Map it was copied into. Consumed in chunks
+- [x] **A quadratic scan.** `vector-index.ts` ran `nodes.some(...)` per signature entry; the
+      `nodeIds` short-circuit misses every class method, so it fell through to a linear scan of
+      every node — order 10^10 comparisons on a large repository. Replaced with a prebuilt set
+- [x] Flush threshold checked per LINE, so the documented bound is exact rather than
+      `threshold + largest file`
+
+## Test-quality traps hit here (all caught by mutation testing, never by a green run)
+
+- [x] A spill fixture of 5,000 small rows was 1.13 MB against a 4 MB read chunk, so the
+      partial-line carry it claimed to test was never exercised. The chunk size is now overridable
+      for tests, and the fixture asserts it spans several chunks
+- [x] A mutation that never applied: shell escaping silently voided a `python3 -c` replacement, so
+      a "passing" mutation run proved nothing. Mutations are now applied from script files that
+      `assert` the pattern was found
+- [x] A `df` fixture in which no token repeated within a document, making "count documents" and
+      "count occurrences" numerically identical. The fixture now contains a repeating node and
+      asserts that property before relying on it
+- [x] New fixtures were heavy enough (an 8 MB spill, repeated LanceDB builds) to tip an unrelated
+      60s-budget test over in CI. Timed on both branches uncontended it was unchanged, so the fix
+      was to shrink the fixtures — not to touch someone else's test
+
 ## Two traps this work hit, recorded so they are not repeated
 - [x] **A vacuous assertion.** The first draft used markers `alphaMarker` / `gammaUniqueMarker`.
       The BM25 tokenizer is identifier-aware, so both yield the token `marker` and a search for one
