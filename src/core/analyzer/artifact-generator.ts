@@ -28,6 +28,7 @@ import {
   MAX_HTML_INLINE_SCRIPT_CHARS,
 } from '../../constants.js';
 import { writeTraversalIndexArtifact } from './condensation.js';
+import { CfgSpill, sweepLeakedCfgSpills } from './cfg-spill.js';
 import { buildStyleFingerprint, type StyleFingerprint } from './style-fingerprint.js';
 import { buildParseHealthReport, isLossyUtf8, type ParseHealthReport, type FileParseHealth } from './parse-health.js';
 import type { ScoredFile, ProjectType } from '../../types/index.js';
@@ -360,6 +361,8 @@ export class AnalysisArtifactGenerator {
    * the same store handle that rebuilds the graph (change: optimize-hash-keyed-analyze).
    */
   private _pass1Memo?: Pass1MemoWrite;
+  /** Off-heap overlay hand-off for this build; drained into `cfg_overlay` after `clearAll()`. */
+  private _cfgSpill: CfgSpill | undefined;
   /** Files reused vs. re-extracted on the last build — surfaced by the analyze summary. */
   private _pass1CacheNote?: string;
 
@@ -540,7 +543,7 @@ export class AnalysisArtifactGenerator {
         const dbPath = join(this.options.outputDir, ARTIFACT_CALL_GRAPH_DB);
         await writeEdgesToSQLite(
           artifacts.llmContext.callGraph, dbPath, this.options.rootDir, artifacts.llmContext.cfgs,
-          this._pass1Memo,
+          this._pass1Memo, this._cfgSpill,
         );
       }
     } catch {
@@ -550,6 +553,10 @@ export class AnalysisArtifactGenerator {
       // the whole corpus (tens of MB), and nothing after this point — continuity
       // carry-forward, the dependency-graph write, the fingerprint — has any use for them.
       this._pass1Memo = undefined;
+      // The spill has either been drained into the table or abandoned; either way the file is
+      // temporary and must not outlive the build.
+      await this._cfgSpill?.dispose();
+      this._cfgSpill = undefined;
     }
 
     return artifacts;
@@ -1403,8 +1410,23 @@ export class AnalysisArtifactGenerator {
     const memo = await this.openPass1Memo();
     let callGraphResult: import('./call-graph.js').CallGraphResult;
     try {
-      const builder = new CallGraphBuilder(memo ? { pass1Cache: memo.cache } : {});
+      // Hand the overlay off to disk as it is produced (issue #304). It is pure write-through —
+      // built, persisted to `cfg_overlay`, then stripped — so holding it across the whole build
+      // made its footprint a function of total analyzed source for no functional reason. A spill
+      // that cannot be opened is simply absent, and the in-memory path is used unchanged.
+      // Clear debris from any earlier build that was killed before it could clean up. Both
+      // artifacts are process-owned, so only those whose owner is gone are removed.
+      await sweepLeakedCfgSpills(this.options.outputDir);
+      const { TextLineIndex } = await import('./text-line-index.js');
+      await TextLineIndex.sweepLeakedStaging(this.options.outputDir);
+
+      this._cfgSpill = (await CfgSpill.open(this.options.outputDir)) ?? undefined;
+      const builder = new CallGraphBuilder({
+        ...(memo ? { pass1Cache: memo.cache } : {}),
+        ...(this._cfgSpill ? { cfgSpill: this._cfgSpill } : {}),
+      });
       callGraphResult = await builder.build(callGraphFiles);
+      await this._cfgSpill?.finish();
     } finally {
       memo?.close();
     }
@@ -1620,6 +1642,7 @@ export async function writeEdgesToSQLite(
   rootPath?: string,
   cfgs?: Array<{ functionId: string; filePath: string; cfg: import('./cfg.js').FunctionCfg }>,
   pass1Memo?: Pass1MemoWrite,
+  cfgSpill?: CfgSpill,
 ): Promise<void> {
   const { EdgeStore } = await import('../services/edge-store.js');
   // Analyze/write path: this is the one site allowed to drop-and-rebuild on a
@@ -1665,7 +1688,19 @@ export async function writeEdgesToSQLite(
 
     // CFG/def-use overlay (spec: add-intraprocedural-cfg-dataflow-overlay).
     // Production functions only — keyed by the same normalized ids as nodes.
-    if (cfgs && cfgs.length > 0) {
+    if (cfgSpill && !cfgSpill.failed) {
+      // Drained here, AFTER `clearAll()` above — rows written during the build would have been
+      // erased by it (change: harden-index-store-lifecycle). Normalization and the test-function
+      // filter are applied identically to the in-memory path below, so the resulting table is the
+      // same either way.
+      await store.insertCfgRowsStreaming((async function* () {
+        for await (const row of cfgSpill.drain()) {
+          const functionId = norm(row.functionId);
+          if (testNodeIds.has(functionId)) continue;
+          yield { functionId, filePath: norm(row.filePath), cfgJson: row.cfgJson };
+        }
+      })());
+    } else if (cfgs && cfgs.length > 0) {
       const normCfgs = cfgs
         .map(c => ({ functionId: norm(c.functionId), filePath: norm(c.filePath), cfg: c.cfg }))
         .filter(c => !testNodeIds.has(c.functionId));

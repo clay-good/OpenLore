@@ -333,10 +333,41 @@ describe('Bounded Computation — repository-wide scans stay bounded (issue #302
       ['import.ts', importCommand],
     ] as const) {
       expect(src, `${name} must route the function-index file list through the bounded pool`)
-        .toMatch(/const contents = await mapFilesBounded\(paths/);
+        .toMatch(/const contents = await mapFilesBounded\(/);
     }
-    expect(analyze, 'text-line indexing must use the shared bounded pool')
-      .toMatch(/const perFile = await mapFilesBounded\(candidates\.map\(/);
+
+    // …and in `analyze`, the pool's RESULT must be consumed in chunks rather than retained.
+    //
+    // This is the lesson the text-line index taught the hard way: a bounded pool still returns an
+    // array of every result, so `mapFilesBounded(paths, …)` over the whole repository held every
+    // graph-bearing file's text — twice, once in that array and once in the Map it was copied
+    // into — for the entire index build. BOUNDING CONCURRENCY DOES NOT BOUND RETENTION.
+    expect(analyze, 'the function index must read its files in chunks, not all at once')
+      .toMatch(/for \(let i = 0; i < paths\.length; i \+= READ_CHUNK\)/);
+    // Text-line indexing must be bounded in BOTH axes (change: fix-text-line-index-oom).
+    // Bounding concurrency alone was not enough here: the reads were already pooled, and the
+    // build still ran the heap out because it RETAINED every file's text in one array and then
+    // amplified it into one record per source line before writing anything. So the guard is on
+    // the streaming shape, not on any single call spelling.
+    expect(analyze, 'text-line indexing must read through the shared bounded pool')
+      .toMatch(/const contents = await mapFilesBounded\(/);
+    expect(analyze, 'text-line indexing must STREAM files, not collect them all first')
+      .toMatch(/async function\* streamFiles\(\)/);
+    expect(analyze, 'text-line indexing must hand the index a stream, not an array')
+      .toMatch(/TextLineIndex\.build\(outputPath, streamFiles\(\)\)/);
+  });
+
+  it('the text-line index writes in batches instead of materializing every line first', () => {
+    const src = readFileSync(join(ANALYZER_DIR, 'text-line-index.ts'), 'utf-8');
+    // One record object per source line, for the whole repository, before the first write — that
+    // is an AMPLIFICATION of the text, and it is what exhausted the heap on a large repository
+    // even though every earlier phase had succeeded. The build must flush as it goes.
+    expect(src, 'build must accept a stream').toMatch(/AsyncIterable<TextFileInput>/);
+    expect(src, 'build must flush at a bounded interval').toMatch(/batch\.length >= BUILD_FLUSH_LINES/);
+    // …and the first flush creates the table while later ones APPEND — re-creating per flush
+    // would keep only the final batch.
+    expect(src).toMatch(/if \(table === null\)/);
+    expect(src).toMatch(/await table\.add\(rows\)/);
   });
 
   it('the disclosure covers every extension the scan modules read', async () => {

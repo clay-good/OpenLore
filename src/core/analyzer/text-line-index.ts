@@ -25,6 +25,7 @@
  */
 
 import { existsSync } from 'node:fs';
+import { readdir, rm, rename } from 'node:fs/promises';
 import { join } from 'node:path';
 import { quietNativeLoggingOnce } from './lance-logging.js';
 import {
@@ -68,10 +69,44 @@ export interface TextFileInput {
 // ============================================================================
 
 const DB_FOLDER = 'text-line-index';
+
+/**
+ * Prefix of a staging directory. Exported so a leaked one can be recognised: the build stages the
+ * new index here and renames it into place, so a process killed mid-build (an OOM-kill, a Ctrl-C)
+ * leaves a directory the size of a full index behind.
+ */
+export const STAGING_PREFIX = `${DB_FOLDER}.building-`;
 const TABLE_NAME = 'text_lines';
 
 /** Lines longer than this are truncated (not dropped) to keep rows bounded. */
 const MAX_LINE_LEN = 1000;
+
+/**
+ * How many line records accumulate before {@link TextLineIndex.build} flushes them to the table.
+ *
+ * The build used to hold one record object per source line for the WHOLE repository before
+ * writing anything, which is what exhausted the heap on a large repository. Flushing in batches
+ * makes peak residency a function of this constant instead of the corpus.
+ *
+ * Large enough that the per-append overhead stays amortized (a flush is a LanceDB write, not a
+ * per-row cost), small enough that a batch is a few tens of MB rather than gigabytes.
+ */
+let BUILD_FLUSH_LINES = 200_000;
+
+/**
+ * Test-only: lower the flush threshold so a small fixture exercises the MULTI-BATCH path.
+ *
+ * Without this a test would need ~500k lines to cross the production threshold twice, because a
+ * file's lines are appended whole before the threshold is checked. A fixture that never crosses
+ * it twice silently tests only the single-flush path — which is exactly how a mutation that
+ * re-created the table on every flush (clobbering earlier batches) passed a first draft of these
+ * tests. Returns the previous value so callers can restore it.
+ */
+export function _setBuildFlushLinesForTesting(n: number): number {
+  const previous = BUILD_FLUSH_LINES;
+  BUILD_FLUSH_LINES = n;
+  return previous;
+}
 
 // Module-level BM25 corpus cache, keyed by dbPath. Invalidated by build();
 // patched in place by updateFiles().
@@ -128,6 +163,35 @@ function recordsToCorpusInput(rows: TextLineRecord[]): Array<{ id: string; text:
 // ============================================================================
 
 export class TextLineIndex {
+  /**
+   * Remove staging directories left by builds that died before they could rename or clean up.
+   *
+   * Only directories whose owning process is gone are removed — a staging directory belongs to a
+   * live build until it is renamed, and a build on a large repository legitimately runs for a long
+   * time, so age alone is not a safe signal. Best effort: a sweep that cannot run must never stop
+   * an analysis.
+   */
+  static async sweepLeakedStaging(outputDir: string): Promise<void> {
+    try {
+      for (const name of await readdir(outputDir)) {
+        if (!name.startsWith(STAGING_PREFIX)) continue;
+        const pid = Number(name.slice(STAGING_PREFIX.length));
+        if (pid === process.pid) continue;
+        if (Number.isInteger(pid) && pid > 0) {
+          try {
+            process.kill(pid, 0);
+            continue; // still running — not ours to remove
+          } catch {
+            /* no such process: the owner is gone */
+          }
+        }
+        await rm(join(outputDir, name), { recursive: true, force: true }).catch(() => {});
+      }
+    } catch {
+      /* unreadable output dir — nothing to sweep */
+    }
+  }
+
   /** Returns true if a text-line index has been built for this output dir. */
   static exists(outputDir: string): boolean {
     return existsSync(join(outputDir, DB_FOLDER));
@@ -137,38 +201,95 @@ export class TextLineIndex {
    * Build (or rebuild) the text-line index from a set of files. Overwrites any
    * existing table. Files that yield no indexable lines contribute nothing.
    * Returns the number of lines indexed.
+   *
+   * `files` may be an array OR an async iterable, and the async form is the one that matters at
+   * scale: this used to materialize ONE RECORD OBJECT PER SOURCE LINE for the entire repository
+   * before handing the whole array to LanceDB. On a large repository that is millions of live
+   * objects on top of every file's text, and it was the point at which `openlore install` ran out
+   * of heap — measured on microsoft/TypeScript (80,113 files), which died here after the call
+   * graph and the keyword index had both completed successfully.
+   *
+   * Records are flushed every {@link BUILD_FLUSH_LINES} lines, so peak residency is one batch
+   * rather than the whole corpus. Passing an async iterable additionally lets the CALLER avoid
+   * holding every file's content at once; an array argument keeps working unchanged.
+   *
+   * The build is ATOMIC, and that is not incidental. Flushing incrementally into the live table
+   * would mean the first flush destroys the previous index and every later failure leaves a
+   * TRUNCATED one — verified by killing a build mid-flush: the old rows were gone, some new ones
+   * were present, and `exists()` still reported a healthy index, so the watcher would have gone
+   * on patching a permanently partial corpus forever. It also meant a concurrent reader saw a
+   * half-built index for the whole build, and two concurrent builds failed outright on a LanceDB
+   * commit conflict.
+   *
+   * So the batches go into a private per-process directory and the finished index is moved into
+   * place with a single rename. A build that throws, is killed, or races another build leaves the
+   * previous index untouched; the only observable states are "the old index" and "the new one".
    */
-  static async build(outputDir: string, files: TextFileInput[]): Promise<{ lines: number; files: number }> {
-    const records: TextLineRecord[] = [];
-    let indexedFiles = 0;
-    for (const f of files) {
-      const lines = extractLines(f.filePath, f.content);
-      if (lines.length > 0) indexedFiles++;
-      for (const l of lines) records.push(l);
-    }
-
+  static async build(
+    outputDir: string,
+    files: Iterable<TextFileInput> | AsyncIterable<TextFileInput>,
+  ): Promise<{ lines: number; files: number }> {
     const dbPath = join(outputDir, DB_FOLDER);
+    // Sibling of the real index, not the OS temp dir: the rename below must stay on one
+    // filesystem to be atomic. The pid keeps two concurrent builds from sharing a staging area.
+    const stagePath = join(outputDir, `${STAGING_PREFIX}${process.pid}`);
     quietNativeLoggingOnce();
     const { connect } = await import('@lancedb/lancedb');
-    const db = await connect(dbPath);
 
-    if (records.length === 0) {
-      // Nothing to index. If a stale table exists, overwrite it with an empty
-      // schema-bearing row set by dropping it; otherwise leave it absent.
-      _bm25Cache.delete(dbPath);
-      try {
-        await db.dropTable(TABLE_NAME);
-      } catch {
-        /* table did not exist */
+    let batch: TextLineRecord[] = [];
+    let total = 0;
+    let indexedFiles = 0;
+
+    try {
+      const stageDb = await connect(stagePath);
+      let table: Awaited<ReturnType<typeof stageDb.createTable>> | null = null;
+
+      const flush = async (): Promise<void> => {
+        if (batch.length === 0) return;
+        const rows = batch as unknown as Record<string, unknown>[];
+        batch = []; // a fresh array, so the flushed one can be collected immediately
+        if (table === null) {
+          table = await stageDb.createTable(TABLE_NAME, rows, { mode: 'overwrite' });
+        } else {
+          await table.add(rows);
+        }
+        total += rows.length;
+      };
+
+      // `for await` accepts a plain sync iterable too, so array callers are unaffected.
+      for await (const f of files) {
+        const lines = extractLines(f.filePath, f.content);
+        if (lines.length === 0) continue;
+        indexedFiles++;
+        // Checked per LINE, not per file. Testing only after a whole file is appended makes the
+        // real bound `BUILD_FLUSH_LINES + (lines in the largest file)`, which is not the bound
+        // this is documented to provide.
+        for (const l of lines) {
+          batch.push(l);
+          if (batch.length >= BUILD_FLUSH_LINES) await flush();
+        }
       }
-      return { lines: 0, files: 0 };
-    }
+      await flush();
 
-    await db.createTable(TABLE_NAME, records as unknown as Record<string, unknown>[], {
-      mode: 'overwrite',
-    });
-    _bm25Cache.delete(dbPath);
-    return { lines: records.length, files: indexedFiles };
+      if (total === 0) {
+        // Nothing to index: remove any previous index rather than leaving a stale one, and leave
+        // no empty table behind where the old code left none.
+        await rm(stagePath, { recursive: true, force: true });
+        await rm(dbPath, { recursive: true, force: true });
+        _bm25Cache.delete(dbPath);
+        return { lines: 0, files: 0 };
+      }
+
+      // Swap. The previous index is removed only once the replacement is complete on disk, so a
+      // failure anywhere above leaves it exactly as it was.
+      await rm(dbPath, { recursive: true, force: true });
+      await rename(stagePath, dbPath);
+      _bm25Cache.delete(dbPath);
+      return { lines: total, files: indexedFiles };
+    } catch (err) {
+      await rm(stagePath, { recursive: true, force: true }).catch(() => { /* best effort */ });
+      throw err;
+    }
   }
 
   /**

@@ -22,6 +22,10 @@ function node(id: string, name: string, filePath: string): FunctionNode {
 const NODES: FunctionNode[] = [
   node('src/users.ts::getUserById', 'getUserById', 'src/users.ts'),
   node('src/db.ts::connectDatabase', 'connectDatabase', 'src/db.ts'),
+  // `user` occurs three times in this one document (path, and twice in the name), so a document
+  // frequency that counted OCCURRENCES rather than DOCUMENTS would differ here. Without such a
+  // node the two are numerically identical and the distinction cannot be tested at all.
+  node('src/user/user.ts::userFromUser', 'userFromUser', 'src/user/user.ts'),
 ];
 const SIGS: FileSignatureMap[] = [];
 const MARKER = 'zzuniquemarkerzz'; // a token that appears in no node's raw text
@@ -48,6 +52,55 @@ describe('BM25 corpus persistence', () => {
     p.df.push([MARKER, 1]);
     await writeFile(sidecar, JSON.stringify(p), 'utf-8');
   }
+
+  it('the streamed sidecar agrees with the documents it wrote', async () => {
+    // The build path no longer materializes a corpus at all — it tokenizes each record, writes
+    // it, and drops it, because holding the corpus, its array-reshaped payload, and the finished
+    // JSON string at once measured 1,575 MB on a 152,046-function repository.
+    //
+    // The risk that introduces is in the ACCUMULATION: `df`, `avgLength` and `N` are now built
+    // incrementally and emitted after the documents, so this re-derives all three from the
+    // documents actually written and requires them to agree. A mis-accumulated `df` silently
+    // corrupts every ranking, and nothing else in this file would notice.
+    await VectorIndex.build(tmpDir, NODES, SIGS, new Set(), new Set(), null);
+    const p = JSON.parse(await readFile(sidecar, 'utf-8'));
+
+    expect(p.docs.length).toBeGreaterThan(0);
+    expect(p.N).toBe(p.docs.length);
+
+    const expectedAvg = p.docs.reduce((a: number, d: { length: number }) => a + d.length, 0) / p.docs.length;
+    expect(p.avgLength).toBeCloseTo(expectedAvg, 10);
+
+    // Document frequency = how many documents contain the token at all, and its entry order is
+    // first-appearance order across documents — both properties of the incremental build.
+    //
+    // Guard the fixture first: if no document repeats a token, "count documents" and "count
+    // occurrences" produce identical numbers and the assertion below proves nothing.
+    const repeated = (p.docs as Array<{ tf: Array<[string, number]> }>)
+      .some(d => d.tf.some(([, c]) => c > 1));
+    expect(repeated, 'fixture cannot distinguish per-document from per-occurrence df').toBe(true);
+
+    const expectedDf = new Map<string, number>();
+    for (const d of p.docs as Array<{ tf: Array<[string, number]> }>) {
+      for (const [t] of d.tf) expectedDf.set(t, (expectedDf.get(t) ?? 0) + 1);
+    }
+    expect(p.df).toEqual([...expectedDf]);
+
+    // Each document's token counts must be a proper tally of its own length.
+    for (const d of p.docs as Array<{ id: string; length: number; tf: Array<[string, number]> }>) {
+      const counted = d.tf.reduce((a, [, c]) => a + c, 0);
+      expect(counted, `${d.id}: tf counts must sum to the document length`).toBe(d.length);
+      expect(new Set(d.tf.map(([t]) => t)).size, `${d.id}: duplicate token entries`).toBe(d.tf.length);
+    }
+  });
+
+  it('a sidecar written by streaming is readable by the normal search path', async () => {
+    // End-to-end: the cold-start hydration path must accept what the build path now writes.
+    await VectorIndex.build(tmpDir, NODES, SIGS, new Set(), new Set(), null);
+    _resetVectorIndexCachesForTesting();
+    const results = await VectorIndex.search(tmpDir, 'getUserById', null, { limit: 5 });
+    expect(results.some((r) => r.record.name === 'getUserById')).toBe(true);
+  });
 
   it('build() writes a stamped corpus sidecar', async () => {
     await VectorIndex.build(tmpDir, NODES, SIGS, new Set(), new Set(), null);

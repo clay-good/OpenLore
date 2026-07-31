@@ -26,6 +26,7 @@ import {
   type RouteDefinition,
 } from './http-route-parser.js';
 import { mapFilesBounded } from './bounded-file-scan.js';
+import type { CfgSpill } from './cfg-spill.js';
 import { buildProjectedIac } from './iac/index.js';
 import { isIacLanguage } from './iac/types.js';
 import { isTestFile } from './test-file.js';
@@ -4032,15 +4033,25 @@ export interface CallGraphBuilderOptions {
    * embedded caller) means today's behavior: extract everything.
    */
   pass1Cache?: Pass1FactCache;
+  /**
+   * Off-heap destination for the CFG/def-use overlay (issue #304). When supplied, each file's
+   * overlay is serialized into the spill as the file is merged and then DROPPED, so the overlay
+   * never accumulates across the repository; `cfgs` comes back `undefined` and the caller drains
+   * the spill into `cfg_overlay` instead. Absent (the watcher's per-file rebuilds, tests, any
+   * embedded caller) means today's behavior: the overlay is returned in memory.
+   */
+  cfgSpill?: CfgSpill;
 }
 
 export class CallGraphBuilder {
   private readonly extractionOptions: CallGraphBuilderOptions['extraction'];
   private readonly pass1Cache: Pass1FactCache | undefined;
+  private readonly cfgSpill: CfgSpill | undefined;
 
   constructor(options: CallGraphBuilderOptions = {}) {
     this.extractionOptions = options.extraction;
     this.pass1Cache = options.pass1Cache;
+    this.cfgSpill = options.cfgSpill;
   }
 
   /**
@@ -4064,6 +4075,7 @@ export class CallGraphBuilder {
     const allNodes = new Map<string, FunctionNode>();
     const allRawEdges: RawEdge[] = [];
     const allCfgs = new Map<string, FunctionCfg>();
+    const cfgSpill = this.cfgSpill;
     const styleByFile = new Map<string, FileStyleRaw>();
     const parseHealthByFile = new Map<string, FileParseHealth>();
 
@@ -4167,7 +4179,18 @@ export class CallGraphBuilder {
           allNodes.set(node.id, node);
         }
         allRawEdges.push(...result.rawEdges);
-        if (result.cfg) for (const [id, fnCfg] of result.cfg) allCfgs.set(id, fnCfg);
+        if (result.cfg) {
+          if (cfgSpill) {
+            // Serialize this file's overlay now and drop it. The CFG objects become collectable
+            // as soon as the extraction outcome is released, instead of being held for the whole
+            // build across every later pass (issue #304). `file.path` is the authoritative owner
+            // for the row — the same value `deleteCfgForFile` keys the watcher's invalidation on.
+            cfgSpill.write(file.path, result.cfg);
+            result.cfg = new Map();
+          } else {
+            for (const [id, fnCfg] of result.cfg) allCfgs.set(id, fnCfg);
+          }
+        }
         if (result.style) {
           // The TS extractor handles both TS and JS; relabel to the real file language so the
           // fingerprint slices JS and TS apart (their counter sets are identical).
@@ -4975,7 +4998,8 @@ export class CallGraphBuilder {
     return {
       nodes: allNodes,
       edges,
-      cfgs: allCfgs,
+      // Spilled overlays are on disk, not here — the caller drains them into `cfg_overlay`.
+      cfgs: cfgSpill ? undefined : allCfgs,
       classes,
       inheritanceEdges,
       hubFunctions,
