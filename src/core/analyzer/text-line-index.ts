@@ -25,7 +25,7 @@
  */
 
 import { existsSync } from 'node:fs';
-import { rm, rename } from 'node:fs/promises';
+import { readdir, rm, rename } from 'node:fs/promises';
 import { join } from 'node:path';
 import { quietNativeLoggingOnce } from './lance-logging.js';
 import {
@@ -69,6 +69,13 @@ export interface TextFileInput {
 // ============================================================================
 
 const DB_FOLDER = 'text-line-index';
+
+/**
+ * Prefix of a staging directory. Exported so a leaked one can be recognised: the build stages the
+ * new index here and renames it into place, so a process killed mid-build (an OOM-kill, a Ctrl-C)
+ * leaves a directory the size of a full index behind.
+ */
+export const STAGING_PREFIX = `${DB_FOLDER}.building-`;
 const TABLE_NAME = 'text_lines';
 
 /** Lines longer than this are truncated (not dropped) to keep rows bounded. */
@@ -156,6 +163,35 @@ function recordsToCorpusInput(rows: TextLineRecord[]): Array<{ id: string; text:
 // ============================================================================
 
 export class TextLineIndex {
+  /**
+   * Remove staging directories left by builds that died before they could rename or clean up.
+   *
+   * Only directories whose owning process is gone are removed — a staging directory belongs to a
+   * live build until it is renamed, and a build on a large repository legitimately runs for a long
+   * time, so age alone is not a safe signal. Best effort: a sweep that cannot run must never stop
+   * an analysis.
+   */
+  static async sweepLeakedStaging(outputDir: string): Promise<void> {
+    try {
+      for (const name of await readdir(outputDir)) {
+        if (!name.startsWith(STAGING_PREFIX)) continue;
+        const pid = Number(name.slice(STAGING_PREFIX.length));
+        if (pid === process.pid) continue;
+        if (Number.isInteger(pid) && pid > 0) {
+          try {
+            process.kill(pid, 0);
+            continue; // still running — not ours to remove
+          } catch {
+            /* no such process: the owner is gone */
+          }
+        }
+        await rm(join(outputDir, name), { recursive: true, force: true }).catch(() => {});
+      }
+    } catch {
+      /* unreadable output dir — nothing to sweep */
+    }
+  }
+
   /** Returns true if a text-line index has been built for this output dir. */
   static exists(outputDir: string): boolean {
     return existsSync(join(outputDir, DB_FOLDER));
@@ -196,7 +232,7 @@ export class TextLineIndex {
     const dbPath = join(outputDir, DB_FOLDER);
     // Sibling of the real index, not the OS temp dir: the rename below must stay on one
     // filesystem to be atomic. The pid keeps two concurrent builds from sharing a staging area.
-    const stagePath = join(outputDir, `${DB_FOLDER}.building-${process.pid}`);
+    const stagePath = join(outputDir, `${STAGING_PREFIX}${process.pid}`);
     quietNativeLoggingOnce();
     const { connect } = await import('@lancedb/lancedb');
 

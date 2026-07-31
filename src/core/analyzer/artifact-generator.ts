@@ -28,7 +28,7 @@ import {
   MAX_HTML_INLINE_SCRIPT_CHARS,
 } from '../../constants.js';
 import { writeTraversalIndexArtifact } from './condensation.js';
-import { CfgSpill } from './cfg-spill.js';
+import { CfgSpill, sweepLeakedCfgSpills } from './cfg-spill.js';
 import { buildStyleFingerprint, type StyleFingerprint } from './style-fingerprint.js';
 import { buildParseHealthReport, isLossyUtf8, type ParseHealthReport, type FileParseHealth } from './parse-health.js';
 import type { ScoredFile, ProjectType } from '../../types/index.js';
@@ -1414,6 +1414,12 @@ export class AnalysisArtifactGenerator {
       // built, persisted to `cfg_overlay`, then stripped — so holding it across the whole build
       // made its footprint a function of total analyzed source for no functional reason. A spill
       // that cannot be opened is simply absent, and the in-memory path is used unchanged.
+      // Clear debris from any earlier build that was killed before it could clean up. Both
+      // artifacts are process-owned, so only those whose owner is gone are removed.
+      await sweepLeakedCfgSpills(this.options.outputDir);
+      const { TextLineIndex } = await import('./text-line-index.js');
+      await TextLineIndex.sweepLeakedStaging(this.options.outputDir);
+
       this._cfgSpill = (await CfgSpill.open(this.options.outputDir)) ?? undefined;
       const builder = new CallGraphBuilder({
         ...(memo ? { pass1Cache: memo.cache } : {}),

@@ -27,6 +27,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { CFG_SPILL_PREFIX } from './cfg-spill.js';
 import { existsSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { gzipSync, gunzipSync } from 'node:zlib';
@@ -96,6 +97,10 @@ const EXCLUDED_FILES = new Set([
  * their own next export would pass it on again.
  */
 function isLocalOnlyDebris(name: string): boolean {
+  // A CFG spill is a build-local temp file that holds the whole overlay. A build killed mid-flight
+  // leaves one behind, and it must never be shipped in a bundle — it is neither part of the index
+  // nor reproducible for a consumer.
+  if (name.startsWith(CFG_SPILL_PREFIX)) return true;
   return new RegExp(`^${ARTIFACT_CALL_GRAPH_DB.replace('.', '\\.')}\\.(corrupt|export)-`).test(name);
 }
 

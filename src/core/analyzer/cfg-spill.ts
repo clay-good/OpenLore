@@ -21,7 +21,7 @@
  * parse, no re-stringify, and no chance of the round-trip altering the persisted bytes.
  */
 import { createWriteStream, type WriteStream } from 'node:fs';
-import { open, unlink } from 'node:fs/promises';
+import { open, readdir, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import type { FunctionCfg } from './cfg.js';
@@ -38,6 +38,13 @@ export interface CfgSpillRow {
  * syscall per function.
  */
 const WRITE_BUFFER_ROWS = 512;
+
+/**
+ * Filename prefix for a spill. Exported so the bundle exporter can refuse to ship one and the
+ * sweep can recognise a leaked one: a build killed mid-flight (an OOM-kill, a Ctrl-C) leaves the
+ * file behind, and it holds the entire overlay.
+ */
+export const CFG_SPILL_PREFIX = '.cfg-spill-';
 
 /** How many bytes of the spill file are read at a time when draining. */
 let DRAIN_CHUNK_BYTES = 4 * 1024 * 1024;
@@ -77,7 +84,7 @@ export class CfgSpill {
     // Inside the analysis directory, not the OS temp dir: this is the one place the run has
     // already proven it can write, and `rm -rf .openlore` / `analyze --force` clean it up with
     // everything else. The pid keeps concurrent analyses from colliding.
-    const path = join(outputDir, `.cfg-spill-${process.pid}.ndjson`);
+    const path = join(outputDir, `${CFG_SPILL_PREFIX}${process.pid}.ndjson`);
     try {
       const handle = await open(path, 'w');
       await handle.close();
@@ -174,6 +181,37 @@ export class CfgSpill {
       this.stream.destroy();
     } catch { /* already closed */ }
     await unlink(this.path).catch(() => { /* already gone */ });
+  }
+}
+
+/**
+ * Remove spill files left by builds that died before they could clean up.
+ *
+ * Only files whose owning process is gone are removed: a spill belongs to a live analysis until
+ * that analysis ends, and a long build on a large repository can legitimately run for hours, so
+ * age alone is not a safe signal. `kill(pid, 0)` tests liveness without signalling.
+ *
+ * Best effort throughout — a sweep that cannot run must never stop an analysis.
+ */
+export async function sweepLeakedCfgSpills(outputDir: string): Promise<void> {
+  try {
+    for (const name of await readdir(outputDir)) {
+      if (!name.startsWith(CFG_SPILL_PREFIX) || !name.endsWith('.ndjson')) continue;
+      const pid = Number(name.slice(CFG_SPILL_PREFIX.length, -'.ndjson'.length));
+      if (Number.isInteger(pid) && pid > 0 && pid !== process.pid) {
+        try {
+          process.kill(pid, 0);
+          continue; // still running — not ours to remove
+        } catch {
+          /* no such process: the owner is gone */
+        }
+      } else if (pid === process.pid) {
+        continue;
+      }
+      await unlink(join(outputDir, name)).catch(() => { /* raced with another sweep */ });
+    }
+  } catch {
+    /* unreadable output dir — nothing to sweep */
   }
 }
 

@@ -9,7 +9,8 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
-import { readdirSync } from 'node:fs';
+import { readdirSync, existsSync, mkdirSync } from 'node:fs';
+import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -17,6 +18,7 @@ import {
   extractLines,
   _resetTextLineIndexCachesForTesting,
   _setBuildFlushLinesForTesting,
+  STAGING_PREFIX,
 } from './text-line-index.js';
 
 let outputDir: string;
@@ -241,6 +243,38 @@ describe('TextLineIndex.build — streaming and batching', () => {
     expect(await TextLineIndex.build(outputDir, nothing())).toEqual({ lines: 0, files: 0 });
     _resetTextLineIndexCachesForTesting();
     expect(await TextLineIndex.searchText(outputDir, 'findableToken')).toEqual([]);
+  });
+});
+
+describe('TextLineIndex — leaked staging directories are swept', () => {
+  it('removes staging from a dead process but never from a live one', async () => {
+    // The build stages the replacement index and renames it into place, so a killed build leaves
+    // a directory the size of a full index behind. Nothing else removes it, and it would sit in
+    // the analysis directory forever.
+    // The live pid must be a real OTHER process: `process.pid` only exercises the "don't delete
+    // your own" early return, so a mutation removing the liveness check entirely would still pass.
+    const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: 'ignore' });
+    try {
+      await new Promise<void>(r => child.once('spawn', () => r()));
+      const dead = join(outputDir, `${STAGING_PREFIX}999999`);
+      const live = join(outputDir, `${STAGING_PREFIX}${child.pid}`);
+      mkdirSync(dead, { recursive: true });
+      mkdirSync(live, { recursive: true });
+
+      await TextLineIndex.sweepLeakedStaging(outputDir);
+
+      expect(existsSync(dead), 'staging from a dead build survived').toBe(false);
+      expect(existsSync(live), 'staging from a LIVE build was deleted').toBe(true);
+    } finally {
+      child.kill('SIGKILL');
+    }
+  });
+
+  it('leaves the real index alone', async () => {
+    await TextLineIndex.build(outputDir, [{ filePath: 'a.txt', content: 'findableToken here' }]);
+    await TextLineIndex.sweepLeakedStaging(outputDir);
+    _resetTextLineIndexCachesForTesting();
+    expect((await TextLineIndex.searchText(outputDir, 'findableToken')).length).toBeGreaterThan(0);
   });
 });
 

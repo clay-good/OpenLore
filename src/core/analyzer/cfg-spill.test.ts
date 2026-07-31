@@ -8,11 +8,12 @@
  * inert rather than destructive.
  */
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, existsSync, readdirSync, statSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { spawn } from 'node:child_process';
 
-import { CfgSpill, _setDrainChunkBytesForTesting } from './cfg-spill.js';
+import { CfgSpill, CFG_SPILL_PREFIX, sweepLeakedCfgSpills, _setDrainChunkBytesForTesting } from './cfg-spill.js';
 import type { FunctionCfg } from './cfg.js';
 
 let dir: string | undefined;
@@ -109,6 +110,48 @@ describe('CfgSpill — round-trip', () => {
     await spill!.finish();
     expect(await drainAll(spill!)).toEqual([]);
     await spill!.dispose();
+  });
+});
+
+describe('CfgSpill — leaked files are swept, live ones are not', () => {
+  it('removes a spill whose owning process is gone', async () => {
+    // A build killed mid-flight (OOM-kill, Ctrl-C) leaves its spill behind, holding the entire
+    // overlay. Nothing else would ever remove it, and the bundle exporter reads this directory.
+    dir = mkdtempSync(join(tmpdir(), 'ol-cfgspill-sweep-'));
+    // pid 999999 is above the default pid_max on macOS/Linux, so it cannot be running.
+    const orphan = join(dir, `${CFG_SPILL_PREFIX}999999.ndjson`);
+    writeFileSync(orphan, 'garbage\n');
+    await sweepLeakedCfgSpills(dir);
+    expect(existsSync(orphan)).toBe(false);
+  });
+
+  it('leaves a spill belonging to ANOTHER live process alone', async () => {
+    // A concurrent analysis owns its spill until it finishes, and a build on a large repository
+    // can legitimately run for hours — so liveness, not age, is what decides.
+    //
+    // The pid must be a real OTHER process. Using `process.pid` only exercises the "don't delete
+    // your own" branch, which is a separate early return — a first draft did that and a mutation
+    // removing the liveness check entirely still passed.
+    dir = mkdtempSync(join(tmpdir(), 'ol-cfgspill-live-'));
+    const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: 'ignore' });
+    try {
+      await new Promise<void>(r => child.once('spawn', () => r()));
+      const other = join(dir, `${CFG_SPILL_PREFIX}${child.pid}.ndjson`);
+      writeFileSync(other, 'another build\'s\n');
+      await sweepLeakedCfgSpills(dir);
+      expect(existsSync(other), "the sweep deleted a live build's spill").toBe(true);
+    } finally {
+      child.kill('SIGKILL');
+    }
+  });
+
+  it('leaves unrelated files alone and never throws on a missing directory', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'ol-cfgspill-other-'));
+    const keep = join(dir, 'llm-context.json');
+    writeFileSync(keep, '{}');
+    await sweepLeakedCfgSpills(dir);
+    expect(existsSync(keep)).toBe(true);
+    await expect(sweepLeakedCfgSpills(join(dir, 'nope'))).resolves.toBeUndefined();
   });
 });
 
