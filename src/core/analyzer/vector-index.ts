@@ -16,7 +16,7 @@
  *   const results = await VectorIndex.search(outputDir, "authenticate user with JWT", embedSvc);
  */
 
-import { existsSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, rmSync, openSync, writeSync, closeSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { FunctionNode } from './call-graph.js';
@@ -346,6 +346,71 @@ function persistCorpusSidecar(dbPath: string, corpus: Bm25Corpus): void {
   }
 }
 
+/** How many bytes of sidecar text buffer before a write syscall. */
+const CORPUS_WRITE_BUFFER_BYTES = 1 << 20;
+
+/**
+ * Persist the sidecar WITHOUT ever holding the corpus, its serialized payload, or the finished
+ * JSON string in memory (issue #304 follow-up).
+ *
+ * The index-build path only ever built a corpus in order to write it out, and did so by keeping
+ * three whole-repository copies alive at once: the corpus (one `Map` of token counts per indexed
+ * function, plus the document-frequency map), a complete second copy reshaped into arrays, and
+ * then `JSON.stringify` of that — measured at 648 MB + 661 MB + 265 MB = **1,575 MB** on a
+ * 152,046-function repository. Nothing read the corpus afterwards.
+ *
+ * So each record is tokenized, written, and dropped. What remains resident is the document
+ * frequency map, which is keyed by DISTINCT TOKEN (~31,000 entries on that same repository) rather
+ * than by function, and one document's token counts.
+ *
+ * `df` and the totals land at the END of the object because they are only known once every
+ * document has been seen. JSON objects are unordered and the reader takes fields by name, so the
+ * parsed result is identical to what {@link serializeBm25Corpus} produces — which
+ * `bm25-corpus-persistence.test.ts` pins by comparing the two.
+ */
+function persistCorpusSidecarStreaming(
+  dbPath: string,
+  records: Iterable<{ id: string; text: string }>,
+): void {
+  let fd: number | undefined;
+  try {
+    fd = openSync(corpusFilePath(dbPath), 'w');
+    const df = new Map<string, number>();
+    let totalLen = 0;
+    let n = 0;
+    let buf = `{"schemaVersion":${JSON.stringify(CORPUS_SCHEMA_VERSION)},`
+      + `"tokenizerVersion":${JSON.stringify(TOKENIZER_VERSION)},"docs":[`;
+    const flush = (force: boolean): void => {
+      if (!force && buf.length < CORPUS_WRITE_BUFFER_BYTES) return;
+      writeSync(fd!, buf);
+      buf = '';
+    };
+
+    for (const r of records) {
+      const tokens = tokenize(r.text);
+      const tfMap = new Map<string, number>();
+      for (const t of tokens) tfMap.set(t, (tfMap.get(t) ?? 0) + 1);
+      // Same accumulation order as buildBm25Corpus, so `df`'s entry order matches too.
+      for (const t of tfMap.keys()) df.set(t, (df.get(t) ?? 0) + 1);
+      totalLen += tokens.length;
+      buf += `${n > 0 ? ',' : ''}{"id":${JSON.stringify(r.id)},"length":${tokens.length},`
+        + `"tf":${JSON.stringify([...tfMap])}}`;
+      n++;
+      flush(false);
+    }
+
+    buf += `],"df":${JSON.stringify([...df])},`
+      + `"avgLength":${JSON.stringify(n > 0 ? totalLen / n : 1)},"N":${n}}`;
+    flush(true);
+  } catch {
+    /* optional cache — ignore */
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch { /* already closed */ }
+    }
+  }
+}
+
 function deleteCorpusSidecar(dbPath: string): void {
   try {
     rmSync(corpusFilePath(dbPath), { force: true });
@@ -592,9 +657,10 @@ export class VectorIndex {
       });
       // Persist the tokenized corpus so a cold-start query hydrates it instead of
       // re-tokenizing the whole `text` column.
-      persistCorpusSidecar(dbPath, buildBm25Corpus(
-        candidates.map((r) => ({ id: r.id, text: r.text }))
-      ));
+      persistCorpusSidecarStreaming(
+        dbPath,
+        (function* () { for (const r of candidates) yield { id: r.id, text: r.text }; })(),
+      );
       _tableCache.delete(dbPath);
       _bm25Cache.delete(dbPath);
       _metaCache.delete(dbPath);
@@ -693,9 +759,10 @@ export class VectorIndex {
     });
     // Persist the tokenized corpus for cold-start hydration (hybrid search still
     // uses the BM25 sparse half, so the corpus is needed here too).
-    persistCorpusSidecar(dbPath, buildBm25Corpus(
-      fullRecords.map((r) => ({ id: r.id, text: r.text }))
-    ));
+    persistCorpusSidecarStreaming(
+      dbPath,
+      (function* () { for (const r of fullRecords) yield { id: r.id, text: r.text }; })(),
+    );
 
     // Invalidate search caches — index was just rebuilt
     _tableCache.delete(dbPath);
