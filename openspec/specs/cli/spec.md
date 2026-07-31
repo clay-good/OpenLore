@@ -5,9 +5,7 @@
 ## Purpose
 
 Manages and displays progress indicators for CLI operations, including spinners and progress bars.
-
 ## Requirements
-
 ### Requirement: Start
 
 The system SHALL starts a new spinner with a message.
@@ -268,24 +266,43 @@ The system SHALL enables or disables interactive mode.
 - **GIVEN** The application is running
 - **WHEN** setInteractiveMode is called
 - **THEN** Sets the interactive mode to the specified value
+
 ### Requirement: ScipIsAOnewayExportNotARoundtripFormat
 
 The system SHALL export call-graph data in SCIP format as a one-way snapshot without importing or depending on external SCIP indices.
 
 > Decision recorded: 540e8fa7
 > Date: 2026-06-01
+
+#### Scenario: SCIP export is a one-way snapshot
+
+- **WHEN** call-graph data is exported in SCIP format
+- **THEN** the export completes without importing or depending on any external SCIP index
+
 ### Requirement: McpExposesACuratedNavigationToolPresetNotAll45Tools
 
 The system SHALL support a --preset navigation flag on the MCP server that exposes only the curated graph-traversal tool surface (orient, search_code, get_subgraph, trace_execution_path, analyze_impact, suggest_insertion_points, get_function_skeleton).
 
 > Decision recorded: c04f2b0c
 > Date: 2026-06-01
+
+#### Scenario: The navigation preset exposes only the curated surface
+
+- **WHEN** the MCP server starts with `--preset navigation`
+- **THEN** tools/list contains only the curated graph-traversal tools, not the full registry
+
 ### Requirement: SerializeDecisionConsolidationWithACrossprocessFileLock
 
 The system SHALL serialize concurrent decision consolidation processes using a cross-process advisory file lock to prevent draft loss.
 
 > Decision recorded: 412817d2
 > Date: 2026-06-01
+
+#### Scenario: Concurrent consolidations serialize
+
+- **GIVEN** two decision consolidation processes starting concurrently
+- **WHEN** both attempt to consolidate
+- **THEN** the cross-process advisory file lock serializes them and no draft is lost
 
 ### Requirement: GateReasonMachineIsAPureTotalClassifier
 
@@ -329,69 +346,142 @@ the store by any production writer is prohibited.
 
 > Decision recorded: 412817d2
 > Date: 2026-06-01
+
 ### Requirement: AddSelecttestsMcpToolForCallgraphbasedTestImpactSelection
 
 The system SHALL expose a select_tests MCP tool that walks the call graph backward from changed symbols or a git diff ref to identify transitively reachable test files, returning reaching paths and confidence metadata.
 
 > Decision recorded: 0859edf6
 > Date: 2026-06-02
+
+#### Scenario: Reaching tests are selected from changed symbols
+
+- **WHEN** `select_tests` is called with changed symbols or a git diff ref
+- **THEN** it returns the transitively reaching test files with reaching paths and confidence metadata
+
 ### Requirement: ExposeMarkandsweepReachabilityAsMcpToolFinddeadcode
 
 The system SHALL expose a find_dead_code MCP tool that performs mark-and-sweep reachability over the call graph and returns confidence-tagged dead-code candidates, with an optional ifDeleted mode for deletion-impact analysis.
 
 > Decision recorded: bee7ef06
 > Date: 2026-06-02
+
+#### Scenario: Dead-code candidates are confidence-tagged
+
+- **WHEN** `find_dead_code` runs over an analyzed repository
+- **THEN** it returns mark-and-sweep dead-code candidates tagged with confidence, and `ifDeleted` mode reports deletion impact
+
 ### Requirement: McpServerRegistrationMovesFromClaudesettingsjsonToMcpjson
 
 The system SHALL register the OpenLore MCP server in `.mcp.json` and migrate any stale `mcpServers.openlore` entry from `.claude/settings.json` during install.
 
 > Decision recorded: e3d3214e
 > Date: 2026-06-03
+
+#### Scenario: Install registers the server in .mcp.json
+
+- **GIVEN** a repository with a stale `mcpServers.openlore` entry in `.claude/settings.json`
+- **WHEN** `openlore install` runs
+- **THEN** the server is registered in `.mcp.json` and the stale settings entry is migrated
+
 ### Requirement: TokenbudgetParameterForOrientAndSearchcodeMcpTools
 
-The system SHALL The orient and search_code tools SHALL accept an optional tokenBudget parameter that caps returned results to approximately the specified token count, retaining highest-scored items and collapsing exact duplicates.
+The orient and search_code tools SHALL accept an optional tokenBudget parameter that caps returned results to approximately the specified token count, retaining highest-scored items and collapsing exact duplicates.
 
 > Decision recorded: dbe1a253
 > Date: 2026-06-03
+
+#### Scenario: A token budget caps the payload
+
+- **WHEN** `orient` or `search_code` is called with `tokenBudget`
+- **THEN** the result is capped to approximately that budget, keeping highest-scored items and collapsing exact duplicates
+
 ### Requirement: OrientToolSupportsLeanModeToStripEnrichmentSections
 
-The system SHALL The orient command SHALL accept a `lean` flag that, when set, returns only the navigation core (relevantFunctions, callPaths, specDomains) and omits provenance, change-coupling, insertion-points, specs, and decisions enrichment.
+The orient command SHALL accept a `lean` flag that, when set, returns only the navigation core (relevantFunctions, callPaths, specDomains) and omits provenance, change-coupling, insertion-points, specs, and decisions enrichment.
 
 > Decision recorded: e57091fb
 > Date: 2026-06-03
+
+#### Scenario: Lean mode returns the navigation core only
+
+- **WHEN** `orient` is called with the `lean` flag
+- **THEN** the response contains relevantFunctions, callPaths, and specDomains, and omits the enrichment sections
+
 ### Requirement: LeanMcpToolSurfaceViaLosslessTrimPayloadsizeGuardNotServerdrivenLazySchemas
 
 The system SHALL enforce a payload-size budget guard on the MCP tools/list response to prevent unbounded tool-surface growth.
 
 > Decision recorded: d54af0d3
 > Date: 2026-06-03
+
+#### Scenario: The tools/list payload budget is enforced
+
+- **WHEN** the MCP tools/list response is generated
+- **THEN** a payload-size budget guard bounds it, and exceeding the budget fails the guard rather than growing silently
+
 ### Requirement: KeepPerformanceMetricsOutOfAlwaysloadedSkillContextMakeOrientMeasurementOptinViaMetricsFlag
 
 The system SHALL keep performance metrics out of always-loaded skill context and provide orient measurement only via an opt-in --metrics flag.
 
 > Decision recorded: 37206feb
 > Date: 2026-06-05
+
+#### Scenario: Metrics are opt-in
+
+- **WHEN** `orient` runs without `--metrics`
+- **THEN** no performance measurement is taken or printed; with `--metrics`, the readout goes to stderr
+
 ### Requirement: ServeDaemonOwnsSchemaresetRebuildTrigger
 
 The system SHALL trigger a background `analyze --force` rebuild from the serve daemon whenever a schema-version reset is detected, deduplicating concurrent rebuilds per directory.
 
 > Decision recorded: 55d797b9
 > Date: 2026-06-07
+
+#### Scenario: A schema reset triggers one background rebuild
+
+- **GIVEN** a serve daemon detecting a schema-version reset
+- **WHEN** the reset is observed
+- **THEN** a background `analyze --force` is triggered, deduplicated per directory
+
 ### Requirement: UnifySchemaresetAndWatcherRebuildsThroughASingleflightCoordinator
 
 The system SHALL ensure that at most one forced graph rebuild runs per directory at a time, coalescing additional triggers into a single follow-up run.
 
 > Decision recorded: f0885af9
 > Date: 2026-06-07
+
+#### Scenario: Rebuild triggers coalesce
+
+- **GIVEN** a forced rebuild already running for a directory
+- **WHEN** additional rebuild triggers arrive
+- **THEN** they coalesce into a single follow-up run; at most one rebuild runs per directory at a time
+
 ### Requirement: InstallJsonMergesPreserveUserFormattingViaJsoncparserPathEdits
 
 The system SHALL preserve user formatting in existing JSON configuration files by applying minimal path-level edits to only OpenLore-managed keys.
 
 > Decision recorded: df27e8ef
 > Date: 2026-06-16
+
+#### Scenario: JSON merges touch only managed keys
+
+- **GIVEN** an existing user JSON configuration file with custom formatting
+- **WHEN** install merges OpenLore-managed keys
+- **THEN** only the managed paths change and the user's formatting elsewhere is preserved
+
 ### Requirement: ConfidenceboundaryResponseShapeCategoricalEdgebasisKnownunknowableCrossingsStalenessNeverABlendedScore
 
-The canonical statement of this decision lives in the `analyzer` domain — see [analyzer/spec.md](../analyzer/spec.md) (decision `08e71184`).
+This domain SHALL conform to the canonical statement of decision `08e71184`, which lives in the
+`analyzer` domain — see [analyzer/spec.md](../analyzer/spec.md).
+
+#### Scenario: The canonical statement governs
+
+- **GIVEN** decision `08e71184` recorded in the `analyzer` domain
+- **WHEN** this domain's behavior touches that decision's surface
+- **THEN** it satisfies the canonical requirement as stated in [analyzer/spec.md](../analyzer/spec.md)
+
 ### Requirement: PreflightHookIsOptInAndAdvisory
 
 The CLI SHALL provide explicit installation of an advisory pre-flight git hook that emits the structural
@@ -414,39 +504,97 @@ be an explicit opt-in command (`openlore blast-radius --install-hook`), never au
 - **GIVEN** an installed advisory pre-flight hook
 - **WHEN** `.openlore/config.json` enables blocking for a named high-risk pattern
 - **THEN** the hook blocks only on that pattern and stays advisory otherwise
+
 ### Requirement: FederationRegistryIsAProjectlocalIndexofindexesManifest
 
 The system SHALL maintain a project-local federation registry at .openlore/federation.json that references external repos' independently-built indexes without materializing a union graph.
 
 > Decision recorded: bf5aff2d
 > Date: 2026-06-19
+
+#### Scenario: The registry references, never materializes
+
+- **WHEN** external repositories are registered in `.openlore/federation.json`
+- **THEN** the registry references their independently-built indexes and no union graph is materialized
+
 ### Requirement: SpecstoreBindingResolvesDeclaredTargetsByNameAgainstTheFederationRegistry
 
-The canonical statement of this decision lives in the `config` domain — see [config/spec.md](../config/spec.md) (decision `c6e36101`).
+This domain SHALL conform to the canonical statement of decision `c6e36101`, which lives in the
+`config` domain — see [config/spec.md](../config/spec.md).
+
+#### Scenario: The canonical statement governs
+
+- **GIVEN** decision `c6e36101` recorded in the `config` domain
+- **WHEN** this domain's behavior touches that decision's surface
+- **THEN** it satisfies the canonical requirement as stated in [config/spec.md](../config/spec.md)
+
 ### Requirement: LeanDefaultMcpSurfaceNavigationPresetFull62toolSurfaceIsOptinViaPresetFullAlltools
 
-The canonical statement of this decision lives in the `analyzer` domain — see [analyzer/spec.md](../analyzer/spec.md) (decision `a6c916ed`).
+This domain SHALL conform to the canonical statement of decision `a6c916ed`, which lives in the
+`analyzer` domain — see [analyzer/spec.md](../analyzer/spec.md).
+
+#### Scenario: The canonical statement governs
+
+- **GIVEN** decision `a6c916ed` recorded in the `analyzer` domain
+- **WHEN** this domain's behavior touches that decision's surface
+- **THEN** it satisfies the canonical requirement as stated in [analyzer/spec.md](../analyzer/spec.md)
+
 ### Requirement: SerializeTheProveScorecardAsVersionedStablekeyedJson
 
 The system SHALL serialize the prove scorecard as a versioned JSON object with a stable key set so that external tooling and CI pipelines can consume and gate on it.
 
 > Decision recorded: 581a90bf
 > Date: 2026-06-22
+
+#### Scenario: The scorecard is stable-keyed JSON
+
+- **WHEN** a prove scorecard is serialized
+- **THEN** it is a versioned JSON object with a stable key set consumable by external tooling and CI
+
 ### Requirement: PersistProveScorecardsAsDatedNonclobberingFilesUnderOpenloreprove
 
-The canonical statement of this decision lives in the `analyzer` domain — see [analyzer/spec.md](../analyzer/spec.md) (decision `670b5f0b`).
+This domain SHALL conform to the canonical statement of decision `670b5f0b`, which lives in the
+`analyzer` domain — see [analyzer/spec.md](../analyzer/spec.md).
+
+#### Scenario: The canonical statement governs
+
+- **GIVEN** decision `670b5f0b` recorded in the `analyzer` domain
+- **WHEN** this domain's behavior touches that decision's surface
+- **THEN** it satisfies the canonical requirement as stated in [analyzer/spec.md](../analyzer/spec.md)
+
 ### Requirement: ComputeTheProveEstimateArmAsADeterministicGraphderivedProxyLabeledNevermeasured
 
 The system SHALL compute a deterministic, graph-derived estimate scorecard when invoked with prove --estimate, clearly labeled as never-measured.
 
 > Decision recorded: 66feae62
 > Date: 2026-06-22
+
+#### Scenario: The estimate arm is labeled never-measured
+
+- **WHEN** `prove --estimate` runs
+- **THEN** the scorecard is computed deterministically from the graph and is clearly labeled as never-measured
+
 ### Requirement: ProveSavescorecardWritesAtomicallyWxAndDegradesFsErrorsInsteadOfCrashing
 
-The canonical statement of this decision lives in the `analyzer` domain — see [analyzer/spec.md](../analyzer/spec.md) (decision `dfe33d94`).
+This domain SHALL conform to the canonical statement of decision `dfe33d94`, which lives in the
+`analyzer` domain — see [analyzer/spec.md](../analyzer/spec.md).
+
+#### Scenario: The canonical statement governs
+
+- **GIVEN** decision `dfe33d94` recorded in the `analyzer` domain
+- **WHEN** this domain's behavior touches that decision's surface
+- **THEN** it satisfies the canonical requirement as stated in [analyzer/spec.md](../analyzer/spec.md)
+
 ### Requirement: FlipDefaultMcpSurfaceToTheSubstrateBothfacesPreset
 
-The canonical statement of this decision lives in the `analyzer` domain — see [analyzer/spec.md](../analyzer/spec.md) (decision `c79ec7ca`).
+This domain SHALL conform to the canonical statement of decision `c79ec7ca`, which lives in the
+`analyzer` domain — see [analyzer/spec.md](../analyzer/spec.md).
+
+#### Scenario: The canonical statement governs
+
+- **GIVEN** decision `c79ec7ca` recorded in the `analyzer` domain
+- **WHEN** this domain's behavior touches that decision's surface
+- **THEN** it satisfies the canonical requirement as stated in [analyzer/spec.md](../analyzer/spec.md)
 
 ### Requirement: SpecStoreStatusCommand
 
@@ -947,6 +1095,413 @@ tail that reads past end-of-file forever.
 
 > Change: harden-runtime-event-resilience
 > Date: 2026-07-19
+
+### Requirement: DecisionAutopilotMode
+
+When `governance.autopilot` is enabled, the decisions gate SHALL auto-accept: decisions
+reaching `verified` transition to a distinct `auto-approved` status (actor `autopilot`, with
+timestamp and triggering commit) and are synced to specs in the background; the pre-commit
+gate SHALL never block a commit — it emits a single advisory line naming the count of
+auto-accepted decisions and the trail command, and exits 0. Infrastructure failure in
+consolidation or sync SHALL degrade to a caveat and exit 0, never a block. With autopilot
+disabled, gate behavior SHALL be unchanged from the blocking human-review flow.
+`auto-approved` SHALL be a distinct status, never conflated with human `approved`, and
+autopilot SHALL never transition a human-`rejected` decision.
+
+#### Scenario: A commit sails through with a trail
+
+- **GIVEN** `governance.autopilot: true` and two verified decisions pending
+- **WHEN** the user runs `git commit`
+- **THEN** the commit succeeds, both decisions become `auto-approved` and sync in the
+  background, and stderr carries one advisory line pointing at `openlore decisions log`
+
+#### Scenario: Autopilot cannot resurrect a rejection
+
+- **GIVEN** a decision a human explicitly rejected
+- **WHEN** any number of autopilot gate runs occur
+- **THEN** the decision remains `rejected` and never re-enters specs
+
+### Requirement: DecisionLedgerIsAppendOnly
+
+Every decision status transition — in every mode — SHALL append one entry
+`{ id, title, from, to, actor: human|autopilot|agent|sync, at, commit }` to an append-only ledger
+(`.openlore/decisions/ledger.jsonl`). `openlore decisions log` SHALL render the ledger
+newest-first with `--json` and `--since <ref>` filters. Ledger writes SHALL use the same
+cross-process serialization as the decision store, and existing entries SHALL never be
+rewritten or deleted.
+
+#### Scenario: The trail answers "what did you accept for me?"
+
+- **GIVEN** a week of autopilot commits
+- **WHEN** the user runs `openlore decisions log --since main@{1.week.ago}`
+- **THEN** every auto-accepted decision appears with actor `autopilot`, its commit, and its
+  timestamp
+
+### Requirement: AutoApprovedDecisionsAreReviewableAndReversible
+
+`openlore decisions review` SHALL list every `auto-approved` decision not yet human-reviewed
+and support bulk disposition: promote (transition to human `approved`) or reject. Rejecting
+an auto-approved decision SHALL retire it from specs through the existing supersession
+machinery — remaining queryable via `asOf` — never by deletion.
+
+#### Scenario: Reverting a bad auto-acceptance
+
+- **GIVEN** an auto-approved decision the user disagrees with
+- **WHEN** they reject it in `openlore decisions review`
+- **THEN** it leaves the authoritative spec surface, `recall`/`verify_claim` stop serving it
+  as current, and `asOf` queries before the rejection still return it
+
+### Requirement: ZeroInteractionOnboarding
+
+The onboarding path SHALL reach a working setup with no required user interaction and without modifying
+the user's project on package install. Installing the package (`npm install`) SHALL NOT analyze, write
+configuration, or modify any project file; it MAY print a single non-interactive next-step hint, and
+that hint SHALL be suppressed in CI, in non-interactive (non-TTY) contexts, when opted out via
+`OPENLORE_SKIP_POSTINSTALL`, and when the package is installed as a transitive dependency. The
+post-install step SHALL always exit 0 and SHALL never fail an install.
+
+The setup commands SHALL offer a fully non-interactive path: `openlore install` SHALL auto-detect agent
+surfaces and wire them with no prompt, and `openlore connect --yes` SHALL wire every detected agent
+without the interactive picker. These wiring operations SHALL remain idempotent and SHALL preserve
+user-authored content (merge, not clobber).
+
+#### Scenario: Installing the package does not touch the project
+
+- **GIVEN** a user runs `npm install -g openlore` (or `npm install openlore`)
+- **WHEN** the install completes
+- **THEN** no project file is created or modified and no index is built by the install itself
+- **AND** at most a single next-step hint is printed, suppressed in CI / non-TTY / opt-out / dependency contexts
+- **AND** the post-install step exits 0 regardless
+
+#### Scenario: Connect is non-interactive with --yes
+
+- **GIVEN** a project with a detectable agent and no TTY picker desired
+- **WHEN** `openlore connect --yes` runs
+- **THEN** every detected agent is wired with no prompt, idempotently, preserving existing content
+
+### Requirement: ColdStartSelfBootstrap
+
+When the MCP server begins serving a directory that has no analysis index, it SHALL build the index
+once, automatically, so the first session is not permanently degraded. The build SHALL run in the
+background (it SHALL NOT block the tool call or hang the agent's turn), SHALL be attempted at most once
+per directory per process, SHALL be fail-soft (a build failure SHALL NOT propagate to the caller), and
+SHALL be disableable via `OPENLORE_NO_AUTO_ANALYZE`. The server SHALL NOT perform a blocking full
+analyze on a synchronous tool-call or hook path.
+
+#### Scenario: A wired-but-unanalyzed server warms itself
+
+- **GIVEN** an agent has wired the MCP server but never ran `openlore install` (no index exists)
+- **WHEN** the server starts watching the directory on the first tool call
+- **THEN** it begins building the index once in the background, without blocking the call
+- **AND** the build is not retried while one is in flight, and a failure leaves the graceful "no analysis yet" guidance in place
+
+### Requirement: PassiveUpdateNotifier
+
+The CLI SHALL passively inform a human when a newer published version is available, without blocking,
+and SHALL provide an explicit upgrade command. The version check SHALL be cached and refreshed at most
+about once per day, the cached result SHALL be read and printed synchronously while any stale refresh
+runs in the background un-awaited, and every network and disk operation SHALL be fail-silent (never
+throwing, never breaking a command). The notice SHALL be suppressed in CI, in non-TTY contexts, when
+`OPENLORE_NO_UPDATE_NOTIFIER` or `NO_UPDATE_NOTIFIER` is set, and under `--quiet`, and SHALL be shown
+only for human-facing commands — never on the hot paths an agent drives (`orient`, `mcp`, `serve`,
+hooks). The CLI SHALL NOT update itself automatically. `openlore update` SHALL detect the install
+method (Homebrew, global npm, or npx) and run the correct upgrade, with `--check` and `--dry-run`
+reporting without changing anything.
+
+#### Scenario: A human-facing command notes an available update without blocking
+
+- **GIVEN** a cached check showing a newer version and an interactive terminal
+- **WHEN** a human-facing command runs
+- **THEN** a one-line "update available — run openlore update" notice is printed to stderr instantly from cache
+- **AND** the command is not delayed by any network call
+- **AND** the notice is absent in CI, non-TTY, opt-out, and `--quiet` contexts, and on agent hot paths
+
+#### Scenario: openlore update upgrades by install method
+
+- **GIVEN** openlore was installed globally via npm (or via Homebrew)
+- **WHEN** `openlore update` runs and a newer version exists
+- **THEN** it runs `npm install -g openlore@latest` (or `brew upgrade openlore`) respectively
+- **AND** for an npx invocation it reports that npx already floats to the latest and changes nothing
+
+### Requirement: AnalyzeFailsThroughTheNormalErrorPath
+
+`openlore analyze` SHALL report every failure through its own error path — a rendered `[error]` line
+and a non-zero exit status — rather than allowing a runtime-level abort to reach the user. Output
+that identifies a failure SHALL name what failed, where, and what to do next. A run that produces no
+artifacts SHALL say so explicitly rather than exiting after partial progress messages.
+
+#### Scenario: An extraction fault is legible to the user
+
+- **GIVEN** a repository containing a file that faults the extraction worker
+- **WHEN** `openlore analyze` runs and cannot complete
+- **THEN** stderr carries an `[error]` line naming the file and a remedy, the exit status is non-zero,
+  and the output contains no unhandled native runtime text
+
+#### Scenario: A partial run states what was produced
+
+- **GIVEN** a run in which some files were excluded but artifacts were still written
+- **WHEN** the command finishes
+- **THEN** it reports success, the count of analyzed files, and the excluded count broken down by
+  reason — so "fewer symbols than expected" is attributable rather than mysterious
+
+### Requirement: LongRunningExtractionIsAttributable
+
+While analyzing, the CLI SHALL make a long-running file attributable: when extraction of a single
+file exceeds a disclosure threshold, the file's path SHALL be surfaced in progress output. A user
+waiting on a slow run SHALL be able to identify the responsible file without attaching a debugger.
+
+#### Scenario: The slow file is named while the run is still going
+
+- **GIVEN** a repository containing one file whose extraction takes far longer than any other
+- **WHEN** `openlore analyze` runs in a terminal
+- **THEN** the progress output names that file before the run completes
+
+#### Scenario: Protocol stdout stays clean
+
+- **GIVEN** the same repository, analyzed by a host whose stdout carries a protocol rather than
+  human output — the stdio MCP server, which runs the same build
+- **WHEN** extraction of one file passes the disclosure threshold
+- **THEN** the disclosure is written to stderr and no protocol frame on stdout is disturbed
+
+> Note: `analyze` has no `--json` mode; the proposal named one. The real machine-output surface for
+> this code path is the stdio MCP server, and the requirement is stated against it.
+
+### Requirement: OutputContractsAreUniform
+
+CLI output SHALL honor a uniform set of contracts across every command: (1) color output flows
+through the shared logger/color layer and respects `--no-color` and non-TTY streams — no raw ANSI
+escape literals in command modules, enforced by a guard test; (2) an explicitly-passed `--config`
+path that does not resolve is a fatal error naming the path, never a silent fallback to defaults;
+(3) summary lines describe the warnings actually emitted, not a hardcoded assumption; (4) hints and
+error messages name commands in the vocabulary of the surface that produced them (CLI hints name
+CLI commands, MCP hints name MCP tools); (5) status glyphs are visually distinct and accompanied by
+a legend wherever a status can gate a workflow (a decision awaiting review is never rendered with a
+done-reading glyph).
+
+#### Scenario: Piped output is clean
+
+- **GIVEN** `openlore --no-color decisions --list` piped to a file
+- **WHEN** the output is inspected
+- **THEN** it contains no ANSI escape bytes
+
+#### Scenario: A missing explicit config cannot be silently ignored
+
+- **GIVEN** `openlore --config /path/that/does/not/exist.json enforce`
+- **WHEN** the command starts
+- **THEN** it exits non-zero naming the path before evaluating any policy
+
+#### Scenario: A gate-blocking status reads as such
+
+- **GIVEN** a decision store whose decisions are all `verified` (awaiting human review)
+- **WHEN** `openlore decisions --list` renders them
+- **THEN** the rows read as awaiting review, visually distinct from approved/synced, with a legend
+
+### Requirement: DefaultPresetHasOneSource
+
+The active default MCP tool preset SHALL be defined by exactly one source-of-truth constant
+(`LEAN_DEFAULT_PRESET`), and every entry point that resolves a preset when none is given — the MCP
+stdio server, the HTTP daemon (`serve`), `install` and its agent adapters, and `connect` — SHALL
+resolve through that constant rather than a preset-name literal. User-facing help text that names
+the default preset SHALL derive the name from the constant (never a hardcoded string), and a guard
+test SHALL fail if any entry point reintroduces a literal fallback default or if help text names a
+default other than the constant's value.
+
+#### Scenario: All entry points serve the same default surface
+
+- **GIVEN** no `--preset` selector on any entry point
+- **WHEN** `openlore mcp`, `openlore serve`, and an `openlore install`-wired agent each start
+- **THEN** all three expose the preset named by `LEAN_DEFAULT_PRESET`, with identical tool lists
+
+#### Scenario: Help text cannot drift from the active default
+
+- **GIVEN** a future benchmark-gated default flip that changes `LEAN_DEFAULT_PRESET`
+- **WHEN** the constant changes and no help string is manually edited
+- **THEN** `--help` output for `mcp`, `install`, and `connect` names the new default automatically
+- **AND** the guard test fails if any entry point still resolves a hardcoded preset literal
+
+### Requirement: PanicBlockingNeverBlocksItsOwnRecovery
+
+When the opt-in `experimental_blocking` mode emits a block decision, the PreToolUse hook SHALL
+parse the pending tool name from the hook payload and SHALL NOT block the recovery actions its own
+message prescribes (orient and the designated read-only recovery tools). If the payload's tool name
+cannot be determined, a bounded auto-deescalation — derived from the existing decay constants, not
+a new tuning value — SHALL guarantee the block lifts without human config edits. Blocking remains
+opt-in, carries `advisory: true`, and the hook continues to exit 0 in every case.
+
+#### Scenario: The prescribed recovery call is allowed through at L4
+
+- **GIVEN** panic level 4 in `experimental_blocking` mode
+- **WHEN** the PreToolUse hook receives a payload whose tool is orient (or a designated read-only
+  recovery tool)
+- **THEN** the hook does not emit a block decision for that call, so the agent can execute the
+  recovery its block message demanded
+
+#### Scenario: An arbitrary tool is still blocked at L4
+
+- **GIVEN** panic level 4 in `experimental_blocking` mode
+- **WHEN** the hook receives a payload for a non-recovery tool
+- **THEN** the block decision is emitted with `advisory: true`, exit code 0, as today
+
+#### Scenario: An unparseable payload cannot trap the agent
+
+- **GIVEN** panic level 4 and a hook payload from which no tool name can be parsed
+- **WHEN** tool calls continue to arrive
+- **THEN** the bounded auto-deescalation lifts the block within its disclosed window, with no
+  human config edit required
+
+### Requirement: WatcherSingletonIsAtomic
+
+The background watcher's one-per-directory singleton SHALL be enforced with an atomic
+create-exclusive claim on the PID file (the claim fails if the file exists), not a check-then-write
+sequence, so two concurrent launches can never both proceed. Liveness of an existing claim SHALL
+NOT be inferred from PID signal-0 aliveness alone: the PID file SHALL carry a staleness heuristic
+(process start time or heartbeat) disclosed in the file, so a recycled PID does not suppress a
+legitimate watcher indefinitely. A stale claim SHALL be replaceable without manual cleanup.
+
+#### Scenario: Concurrent launches yield exactly one watcher
+
+- **GIVEN** no watcher running for a directory
+- **WHEN** two watcher processes start simultaneously
+- **THEN** exactly one wins the atomic PID-file claim and runs; the other exits
+
+#### Scenario: A recycled PID does not suppress a new watcher
+
+- **GIVEN** a PID file whose PID now belongs to an unrelated process and whose staleness heuristic
+  marks the claim stale
+- **WHEN** a new watcher starts
+- **THEN** the stale claim is replaced and the new watcher runs
+
+### Requirement: InterventionalModeRequiresValidationAcknowledgement
+
+Activating an interventional panic mode (`advisory` or `experimental_blocking`) via setup SHALL
+consult the stored accuracy-gate verdict. The gate SHALL define a `CLEARED` verdict, emitted when
+and only when every gate criterion is met — the gate itself never auto-activates anything. When the
+verdict is not CLEARED, setup SHALL require an explicit acknowledgement flag (e.g.
+`--acknowledge-unvalidated`) to proceed, stating which criteria are unmet — a disclosed, sayable
+override, never a silent refusal or a silent activation. The false-positive measure SHALL be
+presented as a resolved-by-decay proxy (an upper bound), never as a true false-positive rate, and
+the validator SHALL read rotated telemetry files so the gate's minimum-episode floor is reachable
+under telemetry rotation.
+
+#### Scenario: Activation without a cleared gate requires acknowledgement
+
+- **GIVEN** a project whose panic accuracy gate has not emitted CLEARED
+- **WHEN** the user runs `setup --panic experimental_blocking` without the acknowledgement flag
+- **THEN** setup declines to activate, lists the unmet criteria, and names the override flag
+- **AND** with the flag, activation proceeds and the override is recorded/disclosed
+
+#### Scenario: CLEARED is emitted only on full criteria
+
+- **GIVEN** telemetry meeting the episode floor, FP-proxy target, and follow-through target
+- **WHEN** the validation gate is computed
+- **THEN** the verdict is CLEARED
+- **AND** with any criterion unmet the verdict remains INSUFFICIENT_DATA or REVIEW_REQUIRED
+
+#### Scenario: Rotated telemetry still counts
+
+- **GIVEN** panic telemetry that has rotated the live file into numbered archives
+- **WHEN** the validator computes the gate
+- **THEN** episodes from rotated files are included, so long-running observation is not discarded
+
+### Requirement: UpdateDetectsInstallMethodCorrectly
+
+`openlore update` SHALL determine how the running openlore was installed from deterministic local
+evidence (resolved package root compared against the npm global prefix, project `package.json`
+dependency declaration, npx-cache and Homebrew path signals), with path matching agnostic to
+separator style so Windows paths classify identically to POSIX paths. The command SHALL only
+execute a mutating upgrade whose scope matches the proven install method: a global upgrade
+(`npm install -g`) only for a proven global install, and for a project-local dependency it SHALL
+print the per-project command (`npm install openlore@latest`) rather than mutating global state.
+When the evidence is absent or contradictory the verdict SHALL be `unknown`, disclosed to the user
+with manual upgrade instructions — never a guessed method that runs a mutating command.
+
+#### Scenario: A project-local install is not upgraded globally
+
+- **GIVEN** openlore running from `<project>/node_modules/openlore/` as a declared project
+  dependency, with a newer version published
+- **WHEN** the user runs `openlore update`
+- **THEN** no `npm install -g` is executed
+- **AND** the command reports the newer version and prints `npm install openlore@latest` as the
+  project-scoped upgrade command
+
+#### Scenario: A Windows global install is detected
+
+- **GIVEN** openlore running from a Windows global npm path (backslash separators, under the npm
+  global prefix)
+- **WHEN** install-method detection runs
+- **THEN** the method resolves to `npm-global`, identically to the equivalent POSIX path
+
+#### Scenario: Indeterminate evidence is disclosed, not guessed
+
+- **GIVEN** a module path matching no known install signal, or signals that contradict each other
+- **WHEN** the user runs `openlore update`
+- **THEN** the method is `unknown`, the user receives the manual upgrade instructions, and no
+  mutating command is executed
+
+#### Scenario: npx stays a no-op
+
+- **GIVEN** openlore running from an npx cache path
+- **WHEN** the user runs `openlore update`
+- **THEN** the command explains that npx floats to the latest version and executes nothing
+
+### Requirement: ExplicitConfigPathIsHonored
+
+When the user passes the global `--config <path>` option on the command line, OpenLore SHALL read
+(and, for commands that persist config, write) the current project's configuration from that path,
+not from the default `<root>/.openlore/config.json`. The redirection applies only to the config
+file for the primary invocation root; the `.openlore/` artifact directory is unchanged, and reads of
+other repositories' configs (federation / spec-store peers) are never redirected. When `--config` is
+not passed, resolution is byte-identical to the default.
+
+#### Scenario: An explicit config path is read
+
+- **GIVEN** a readable config file at `/elsewhere/config.json` and a project whose
+  `.openlore/config.json` differs (or is absent)
+- **WHEN** a command runs with `openlore --config /elsewhere/config.json …`
+- **THEN** the command reads its configuration from `/elsewhere/config.json`
+
+#### Scenario: The default is unchanged
+
+- **GIVEN** no `--config` on the command line
+- **WHEN** any command resolves configuration
+- **THEN** it reads `<root>/.openlore/config.json` exactly as before
+
+#### Scenario: Peer configs are not redirected
+
+- **GIVEN** an explicit `--config` for the primary root
+- **WHEN** a federation or spec-store operation reads a *different* repository's config
+- **THEN** that peer read resolves to the peer's own `.openlore/config.json`, unaffected by the flag
+
+### Requirement: CallGraphFreshnessWithoutTheCommitHook
+
+The watcher (and the serve daemon) SHALL schedule a debounced background full rebuild when
+the incremental stale region crosses its work budget or the repository's `.git` HEAD ref
+changes (branch switch, pull), so call-graph freshness no longer depends on the post-commit
+hook being installed. The rebuild rides the existing singleflight coordinator and atomic
+swap; rapid successive triggers coalesce into one rebuild. The post-commit hook remains
+supported as the fast path.
+
+#### Scenario: A branch switch refreshes the graph unprompted
+
+- **GIVEN** a repo with the watcher running and no post-commit hook installed
+- **WHEN** the user switches branches, changing many files
+- **THEN** one debounced background rebuild is scheduled, reads during it disclose
+  staleness with the repair marker, and the graph converges without any manual command
+
+### Requirement: DoctorCanApplyItsOwnRemediations
+
+`openlore doctor --fix` SHALL execute exactly the remediations the corresponding read-only
+checks print (re-running analysis, re-wiring a detected mis-wire via the install engine) —
+nothing a check did not surface. In a TTY each mutating fix asks one confirmation;
+`--yes` runs non-interactively. Bare `openlore doctor` SHALL remain read-only and
+byte-compatible with its current output contract.
+
+#### Scenario: One command from diagnosed to healthy
+
+- **GIVEN** a repo where doctor reports a stale analysis and the legacy settings mis-wire
+- **WHEN** the user runs `openlore doctor --fix --yes`
+- **THEN** analysis is rebuilt and the wiring corrected, a re-run of `doctor` passes, and
+  no other state was touched
 
 ## Technical Notes
 
