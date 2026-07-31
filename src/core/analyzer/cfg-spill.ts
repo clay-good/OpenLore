@@ -40,7 +40,20 @@ export interface CfgSpillRow {
 const WRITE_BUFFER_ROWS = 512;
 
 /** How many bytes of the spill file are read at a time when draining. */
-const DRAIN_CHUNK_BYTES = 4 * 1024 * 1024;
+let DRAIN_CHUNK_BYTES = 4 * 1024 * 1024;
+
+/**
+ * Test-only: shrink the drain chunk so a small fixture straddles it.
+ *
+ * Without this, exercising the partial-line carry — the only subtle part of the reader — needs a
+ * spill larger than 4 MB, which is slow enough to destabilize neighbouring tests. Returns the
+ * previous value so callers can restore it.
+ */
+export function _setDrainChunkBytesForTesting(n: number): number {
+  const previous = DRAIN_CHUNK_BYTES;
+  DRAIN_CHUNK_BYTES = n;
+  return previous;
+}
 
 export class CfgSpill {
   private readonly stream: WriteStream;

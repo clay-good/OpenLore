@@ -12,7 +12,7 @@ import { mkdtempSync, rmSync, existsSync, readdirSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { CfgSpill } from './cfg-spill.js';
+import { CfgSpill, _setDrainChunkBytesForTesting } from './cfg-spill.js';
 import type { FunctionCfg } from './cfg.js';
 
 let dir: string | undefined;
@@ -56,38 +56,34 @@ describe('CfgSpill — round-trip', () => {
     await spill!.dispose();
   });
 
-  it('reassembles rows that straddle the 4 MB read chunks', async () => {
+  it('reassembles rows that straddle the read chunks', async () => {
     // The spill must be LARGER than one drain chunk, or the partial-line carry — the only tricky
-    // part of the reader — is never exercised. A first draft used 5,000 small rows (1.13 MB) and
-    // a mutation that dropped the carry entirely still passed. Fat CFGs get past 4 MB quickly.
+    // part of the reader — is never exercised. A first draft used 5,000 small rows against the
+    // 4 MB production chunk (1.13 MB total) and a mutation that dropped the carry entirely still
+    // passed. Shrinking the chunk crosses it many times over for a fraction of the I/O.
     dir = mkdtempSync(join(tmpdir(), 'ol-cfgspill-many-'));
-    const spill = await CfgSpill.open(dir);
-    const fat = (i: number): FunctionCfg => ({
-      blocks: [{ id: 0, kind: 'entry' }, { id: 1, kind: 'exit' }],
-      edges: [{ from: 0, to: 1, kind: 'normal' }],
-      defUse: Array.from({ length: 200 }, (_, k) => ({
-        variable: `someLongVariableName_${i}_${k}`, defLine: k + 1, useLine: k + 2, precision: 'exact' as const,
-      })),
-      params: [`p${i}`],
-      paramLine: 1,
-    });
+    const restoreChunk = _setDrainChunkBytesForTesting(1024);
+    try {
+      const spill = await CfgSpill.open(dir);
+      const n = 200;
+      for (let i = 0; i < n; i++) spill!.write(`src/f${i}.ts`, [[`src/f${i}.ts::fn${i}`, cfg(`v${i}`)]]);
+      await spill!.finish();
+      expect(statSync(spill!.path).size, 'fixture must span many drain chunks')
+        .toBeGreaterThan(1024 * 8);
 
-    const n = 1_000;
-    for (let i = 0; i < n; i++) spill!.write(`src/f${i}.ts`, [[`src/f${i}.ts::fn${i}`, fat(i)]]);
-    await spill!.finish();
-    expect(statSync(spill!.path).size, 'fixture must exceed one 4 MB drain chunk')
-      .toBeGreaterThan(8 * 1024 * 1024);
-
-    const rows = await drainAll(spill!);
-    expect(rows).toHaveLength(n);
-    expect(rows[0].functionId).toBe('src/f0.ts::fn0');
-    expect(rows[n - 1].functionId).toBe(`src/f${n - 1}.ts::fn${n - 1}`);
-    // No row may be dropped, duplicated, or corrupted by a chunk boundary.
-    expect(new Set(rows.map(r => r.functionId)).size).toBe(n);
-    for (const [i, row] of rows.entries()) {
-      expect(row.cfgJson, `row ${i} corrupted at a chunk boundary`).toBe(JSON.stringify(fat(i)));
+      const rows = await drainAll(spill!);
+      expect(rows).toHaveLength(n);
+      expect(rows[0].functionId).toBe('src/f0.ts::fn0');
+      expect(rows[n - 1].functionId).toBe(`src/f${n - 1}.ts::fn${n - 1}`);
+      // No row may be dropped, duplicated, or corrupted by a chunk boundary.
+      expect(new Set(rows.map(r => r.functionId)).size).toBe(n);
+      for (const [i, row] of rows.entries()) {
+        expect(row.cfgJson, `row ${i} corrupted at a chunk boundary`).toBe(JSON.stringify(cfg(`v${i}`)));
+      }
+      await spill!.dispose();
+    } finally {
+      _setDrainChunkBytesForTesting(restoreChunk);
     }
-    await spill!.dispose();
   });
 
   it('cannot have its framing broken by a repository-controlled path', async () => {
