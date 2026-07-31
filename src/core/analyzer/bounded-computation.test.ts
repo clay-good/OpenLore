@@ -335,8 +335,30 @@ describe('Bounded Computation — repository-wide scans stay bounded (issue #302
       expect(src, `${name} must route the function-index file list through the bounded pool`)
         .toMatch(/const contents = await mapFilesBounded\(paths/);
     }
-    expect(analyze, 'text-line indexing must use the shared bounded pool')
-      .toMatch(/const perFile = await mapFilesBounded\(candidates\.map\(/);
+    // Text-line indexing must be bounded in BOTH axes (change: fix-text-line-index-oom).
+    // Bounding concurrency alone was not enough here: the reads were already pooled, and the
+    // build still ran the heap out because it RETAINED every file's text in one array and then
+    // amplified it into one record per source line before writing anything. So the guard is on
+    // the streaming shape, not on any single call spelling.
+    expect(analyze, 'text-line indexing must read through the shared bounded pool')
+      .toMatch(/const contents = await mapFilesBounded\(/);
+    expect(analyze, 'text-line indexing must STREAM files, not collect them all first')
+      .toMatch(/async function\* streamFiles\(\)/);
+    expect(analyze, 'text-line indexing must hand the index a stream, not an array')
+      .toMatch(/TextLineIndex\.build\(outputPath, streamFiles\(\)\)/);
+  });
+
+  it('the text-line index writes in batches instead of materializing every line first', () => {
+    const src = readFileSync(join(ANALYZER_DIR, 'text-line-index.ts'), 'utf-8');
+    // One record object per source line, for the whole repository, before the first write — that
+    // is an AMPLIFICATION of the text, and it is what exhausted the heap on a large repository
+    // even though every earlier phase had succeeded. The build must flush as it goes.
+    expect(src, 'build must accept a stream').toMatch(/AsyncIterable<TextFileInput>/);
+    expect(src, 'build must flush at a bounded interval').toMatch(/batch\.length >= BUILD_FLUSH_LINES/);
+    // …and the first flush creates the table while later ones APPEND — re-creating per flush
+    // would keep only the final batch.
+    expect(src).toMatch(/if \(table === null\)/);
+    expect(src).toMatch(/await table\.add\(rows\)/);
   });
 
   it('the disclosure covers every extension the scan modules read', async () => {

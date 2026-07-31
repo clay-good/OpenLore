@@ -19,10 +19,10 @@ FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memor
 The next step is the text-line index, and it materializes the entire repository twice over:
 
 ```ts
-// analyze.ts — every read issued at once, every file's text held simultaneously
-await Promise.all(walk.files.map(async f => {
-  files.push({ filePath: f.path, content: await read(f.absolutePath, 'utf-8') });
-}));
+// analyze.ts — reads are POOLED (change: fix-unbounded-file-scan-oom) but the result is not:
+// one array holding every file's text
+const perFile = await mapFilesBounded(candidates.map(f => f.absolutePath), …);
+const files = perFile.filter(f => f !== null);
 
 // text-line-index.ts — then ONE RECORD OBJECT PER SOURCE LINE, for the whole corpus,
 // before anything is written
@@ -31,9 +31,11 @@ for (const f of files) for (const l of extractLines(f.filePath, f.content)) reco
 await db.createTable(TABLE_NAME, records, { mode: 'overwrite' });
 ```
 
-This is the same shape as issue #302 — an unbounded fan-out plus unbounded retention — in a phase
-that change did not reach. It is worse here because the line records are an *amplification* of the
-text: millions of small objects on top of the bytes they came from.
+Note what this is NOT: the fan-out here was already bounded by the fix for issue #302. **Bounding
+concurrency does not bound retention.** A pooled read that collects every result into one array
+still holds the whole repository, and this path then amplifies it — millions of small record
+objects on top of the bytes they came from. That amplification is why this phase, and not the
+call-graph build, is where a large repository actually runs out of heap.
 
 ## What changes
 

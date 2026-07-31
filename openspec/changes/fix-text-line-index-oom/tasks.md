@@ -15,7 +15,9 @@
 
 ## The fix
 - [x] `analyze.ts` `runTextLineIndexing`: stream files in chunks of 32 via an async generator,
-      instead of `Promise.all(walk.files.map(read))` collecting every file's text into one array
+      instead of collecting every file's text into one array. The reads were ALREADY pooled by
+      the #302 fix — the point here is that a bounded pool still returns an unbounded result, so
+      concurrency and retention had to be bounded separately
 - [x] `text-line-index.ts` `TextLineIndex.build`: accept `Iterable | AsyncIterable`, flush every
       `BUILD_FLUSH_LINES` (200,000) records. First flush creates the table (`mode: 'overwrite'`),
       later flushes `add`. Array callers unchanged — `for await` accepts sync iterables
