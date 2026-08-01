@@ -57,7 +57,7 @@ export const HEAP_SIZED_COMMANDS: ReadonlySet<string> = new Set([
  * command and silently skip heap sizing for a config-guarded analyze. The `=`-joined form
  * (`--config=prod.json`) already starts with `-`, so only the space form needs this.
  */
-const GLOBAL_VALUE_FLAGS: ReadonlySet<string> = new Set([
+export const GLOBAL_VALUE_FLAGS: ReadonlySet<string> = new Set([
   '--config', '--api-base', '--timeout',
 ]);
 

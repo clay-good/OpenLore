@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { doctorCommand } from './doctor.js';
+import { doctorCommand, checkParseHealth } from './doctor.js';
 
 // ============================================================================
 // MOCKS
@@ -429,6 +429,64 @@ describe('doctor command', () => {
       expect(artifactCheck.status).toBe('warn');
       // Onboarding: steer to the one-command setup before the manual analyze.
       expect(artifactCheck.fix).toContain('openlore install');
+    });
+  });
+
+  // --------------------------------------------------------------------------
+  describe('Parse health check (memory-degradation disclosure)', () => {
+    async function withParseHealth(report: unknown): Promise<Awaited<ReturnType<typeof checkParseHealth>>> {
+      const { readFile } = await import('node:fs/promises');
+      vi.mocked(readFile).mockImplementation(async (p: any) =>
+        String(p).endsWith('parse-health.json')
+          ? JSON.stringify(report)
+          : Promise.reject(new Error('ENOENT')),
+      );
+      return checkParseHealth('/repo');
+    }
+
+    it('warns and names the reduction when only a memoryDegradation is present', async () => {
+      const result = await withParseHealth({
+        totalDegradedFiles: 0,
+        files: [],
+        byLanguage: [],
+        memoryDegradation: {
+          tier: 'shed-overlay',
+          shed: ['cfg-overlay'],
+          estimatedBytes: 3_100_000_000,
+          availableHeapBytes: 2_000_000_000,
+        },
+      });
+      expect(result.status).toBe('warn');
+      expect(result.detail).toContain('Reduced under memory pressure');
+      expect(result.detail).toContain('CFG/def-use overlay');
+      expect(result.fix).toContain('OPENLORE_HEAP_MB');
+      expect(result.fix).toContain('OPENLORE_FORCE_MEMORY_TIER=full');
+    });
+
+    it('stays ok for a clean report (no degradation, no exclusions)', async () => {
+      const result = await withParseHealth({ totalDegradedFiles: 0, files: [], byLanguage: [] });
+      expect(result.status).toBe('ok');
+      expect(result.detail).toBe('no files parsed with errors');
+    });
+
+    it('warns mentioning both per-file errors and the memory reduction when both apply', async () => {
+      const result = await withParseHealth({
+        totalDegradedFiles: 2,
+        files: [],
+        byLanguage: [{ language: 'typescript', degradedFiles: 2 }],
+        memoryDegradation: {
+          tier: 'shed-overlay-and-deep-analysis',
+          shed: ['cfg-overlay', 'deep-analysis-breadth'],
+          estimatedBytes: 5_000_000_000,
+          availableHeapBytes: 2_000_000_000,
+        },
+      });
+      expect(result.status).toBe('warn');
+      expect(result.detail).toContain('parsed with errors');
+      expect(result.detail).toContain('Reduced under memory pressure');
+      // Both remedies are offered: the grammar-bump path and the larger-heap path.
+      expect(result.fix).toContain('tree-sitter-*');
+      expect(result.fix).toContain('OPENLORE_HEAP_MB');
     });
   });
 

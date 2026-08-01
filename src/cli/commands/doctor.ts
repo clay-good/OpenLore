@@ -40,6 +40,7 @@ import {
 } from '../../constants.js';
 import { resolveTrustedSslVerify, rejectRepoConfiguredTlsOptOut, discloseRepoConfiguredEndpoint } from '../../core/services/repo-config-trust.js';
 import { describeExclusions, totalExcluded, type ParseHealthReport } from '../../core/analyzer/parse-health.js';
+import { describeMemoryDegradation } from '../../core/analyzer/memory-strategy.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -282,7 +283,11 @@ export async function checkParseHealth(rootPath: string): Promise<CheckResult> {
     // with errors" — it is a different cause with a different remedy, and the grammar-bump advice
     // below would send the reader after the wrong subsystem entirely.
     const degradedByParse = Math.max(0, (report.totalDegradedFiles ?? 0) - excludedCount);
-    if (degradedByParse === 0 && !excluded) {
+    // A repo analyzed under memory pressure shed the CFG/def-use overlay (and possibly LLM
+    // deep-analysis breadth) — its coverage is REDUCED even when no file parsed with errors and
+    // nothing was excluded. Disclose it so doctor cannot bless a false-clean degraded index.
+    const memoryReduction = describeMemoryDegradation(report.memoryDegradation);
+    if (degradedByParse === 0 && !excluded && !memoryReduction) {
       return { name: 'Parse health', status: 'ok', detail: 'no files parsed with errors' };
     }
     const langs = (report.byLanguage ?? [])
@@ -294,14 +299,26 @@ export async function checkParseHealth(rootPath: string): Promise<CheckResult> {
       parts.push(`${degradedByParse} file(s) parsed with errors — symbols/edges there are a lower bound: ${langs}`);
     }
     if (excluded) parts.push(`${excluded} — those files were not analyzed at all`);
+    if (memoryReduction) parts.push(memoryReduction);
+    const fixes: string[] = [];
+    if (memoryReduction) {
+      fixes.push(
+        'give analyze a larger heap: --max-old-space-size or OPENLORE_HEAP_MB, or OPENLORE_FORCE_MEMORY_TIER=full if it fits; then re-run analyze',
+      );
+    }
+    if (degradedByParse > 0) {
+      // Only a genuine parse degradation points at a grammar; an exclusion points at cost or size.
+      fixes.push(
+        'Inspect via get_language_support; if this spiked after a grammar bump, revert or re-pin the tree-sitter-* dep',
+      );
+    } else if (excluded) {
+      fixes.push('Raise or disable the per-file bound with OPENLORE_PARSE_BUDGET_MS, or exclude the file from analysis');
+    }
     return {
       name: 'Parse health',
       status: 'warn',
       detail: parts.join('; '),
-      // Only a genuine parse degradation points at a grammar; an exclusion points at cost or size.
-      fix: degradedByParse > 0
-        ? "Inspect via get_language_support; if this spiked after a grammar bump, revert or re-pin the tree-sitter-* dep"
-        : 'Raise or disable the per-file bound with OPENLORE_PARSE_BUDGET_MS, or exclude the file from analysis',
+      fix: fixes.join('; '),
     };
   } catch {
     // No artifact → nothing degraded (clean repos don't write it).
