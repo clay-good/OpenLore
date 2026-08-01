@@ -234,6 +234,7 @@
     "@types/node": "^26.1.1",
     "@vitest/coverage-v8": "^4.0.18",
     "eslint": "^10.8.0",
+    "fast-check": "^4.9.0",
     "globals": "^17.7.0",
     "memfs": "^4.15.0",
     "tsx": "^4.19.2",
