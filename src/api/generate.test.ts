@@ -45,6 +45,11 @@ vi.mock('../core/generator/openspec-writer.js', () => ({
   OpenSpecWriter: vi.fn().mockImplementation(function(this: unknown) {
     Object.assign(this as object, { writeSpecs: vi.fn() });
   }),
+  shouldCleanStaleDomains: (
+    force: boolean | undefined,
+    domains: readonly string[] | undefined,
+    adrOnly: boolean | undefined,
+  ) => force === true && (domains?.length ?? 0) === 0 && adrOnly !== true,
 }));
 
 vi.mock('../core/generator/adr-generator.js', () => ({
@@ -221,6 +226,22 @@ describe('openloreGenerate', () => {
 
       expect(result.pipelineResult).toBeDefined();
       expect(result.duration).toBeGreaterThanOrEqual(0);
+    });
+
+    it('does not authorize stale-domain deletion for filtered force generation', async () => {
+      await openloreGenerate({ rootPath: ROOT, force: true, domains: ['auth'] });
+
+      expect(OpenSpecWriter).toHaveBeenCalledWith(expect.objectContaining({
+        cleanBeforeWrite: false,
+      }));
+    });
+
+    it('authorizes stale-domain deletion for unfiltered full force generation', async () => {
+      await openloreGenerate({ rootPath: ROOT, force: true });
+
+      expect(OpenSpecWriter).toHaveBeenCalledWith(expect.objectContaining({
+        cleanBeforeWrite: true,
+      }));
     });
   });
 

@@ -5,7 +5,8 @@
  * Handles initialization, merging with existing specs, and output tracking.
  */
 
-import { readFile, writeFile, mkdir, copyFile, readdir, rm } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, cp, copyFile, readdir, rm } from 'node:fs/promises';
+import type { Dirent } from 'node:fs';
 import { join, dirname, relative } from 'node:path';
 import logger from '../../utils/logger.js';
 import {
@@ -89,6 +90,23 @@ export interface GenerationReport {
   nextSteps: string[];
 }
 
+/**
+ * Stale-domain cleanup is destructive, so it is authorized only by an unfiltered
+ * full regeneration. A domain filter scopes what is written; it is not a delete list.
+ * (change: harden-openspec-writer-fidelity)
+ */
+export function shouldCleanStaleDomains(
+  force: boolean | undefined,
+  domains: readonly string[] | undefined,
+  adrOnly: boolean | undefined,
+): boolean {
+  return force === true && (domains?.length ?? 0) === 0 && adrOnly !== true;
+}
+
+const GENERATED_SECTION_START = '## Generated Analysis';
+const GENERATED_SECTION_END = '<!-- /openlore-generated -->';
+const RESERVED_SPEC_DIRECTORIES = new Set(['overview', 'architecture']);
+
 // ============================================================================
 // OPENSPEC WRITER
 // ============================================================================
@@ -168,33 +186,46 @@ export class OpenSpecWriter {
         specs.filter(s => s.type === 'domain').map(s => normalizeDomainName(s.domain))
       );
       const specsDir = join(this.openspecRoot, OPENSPEC_SPECS_SUBDIR);
+      let entries: Dirent[];
       try {
-        const entries = await readdir(specsDir, { withFileTypes: true });
-        for (const entry of entries) {
-          if (!entry.isDirectory()) continue;
-          if (incomingDomains.has(entry.name)) continue;
-          const domainDir = join(specsDir, entry.name);
-          // Backup before removing
-          if (this.options.createBackups) {
-            const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-            const backupDir = join(this.openloreRoot, 'backups', timestamp, OPENSPEC_SPECS_SUBDIR, entry.name);
-            await mkdir(backupDir, { recursive: true });
-            const domainEntries = await readdir(domainDir);
-            for (const f of domainEntries) {
-              await copyFile(join(domainDir, f), join(backupDir, f));
-            }
-          }
-          await rm(domainDir, { recursive: true, force: true });
-          report.domainsRemoved.push(entry.name);
-          logger.warning(`Removed stale domain: ${entry.name}`);
+        entries = await readdir(specsDir, { withFileTypes: true });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') entries = [];
+        else throw error;
+      }
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        if (RESERVED_SPEC_DIRECTORIES.has(entry.name)) continue;
+        if (incomingDomains.has(entry.name)) continue;
+        const domainDir = join(specsDir, entry.name);
+        // Back up the complete domain tree before removing it. Any backup failure
+        // aborts cleanup instead of leaving a silently partial backup/removal set.
+        if (this.options.createBackups) {
+          const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+          const backupDir = join(this.openloreRoot, 'backups', timestamp, OPENSPEC_SPECS_SUBDIR, entry.name);
+          await cp(domainDir, backupDir, { recursive: true });
         }
-      } catch {
-        // specsDir doesn't exist yet — nothing to clean
+        await rm(domainDir, { recursive: true, force: true });
+        report.domainsRemoved.push(entry.name);
+        logger.warning(`Removed stale domain: ${entry.name}`);
       }
     }
 
     // Write each spec
     for (const spec of specs) {
+      if (this.options.validateBeforeWrite) {
+        const validation = validateFullSpec(spec.content);
+        for (const error of validation.errors) {
+          report.validationErrors.push(`${spec.path}: ${error}`);
+        }
+        for (const warning of validation.warnings) {
+          report.warnings.push(`${spec.path}: ${warning}`);
+        }
+        if (!validation.valid) {
+          logger.warning(`Validation errors for ${spec.path}: ${validation.errors.join(', ')}`);
+        }
+      }
+
       const result = await this.writeSpec(spec);
 
       if (result.success) {
@@ -207,6 +238,7 @@ export class OpenSpecWriter {
             break;
           case 'merged':
             report.filesMerged.push(result.path);
+            if (result.backupPath) report.filesBackedUp.push(result.backupPath);
             break;
           case 'backed_up':
             if (result.backupPath) {
@@ -285,26 +317,11 @@ export class OpenSpecWriter {
             // Backup if enabled
             if (this.options.createBackups) {
               const backupPath = await this.backupFile(fullPath, relativePath);
-              // Validate before write
-              if (this.options.validateBeforeWrite) {
-                const validation = validateFullSpec(spec.content);
-                if (!validation.valid) {
-                  logger.warning(`Validation warnings for ${relativePath}: ${validation.errors.join(', ')}`);
-                }
-              }
               await this.ensureDir(fullPath);
               await writeFile(fullPath, spec.content, 'utf-8');
               logger.success(`Wrote ${relativePath} (backed up existing)`);
               return { path: relativePath, action: 'backed_up', success: true, backupPath };
             }
-        }
-      }
-
-      // Validate before write
-      if (this.options.validateBeforeWrite) {
-        const validation = validateFullSpec(spec.content);
-        if (!validation.valid) {
-          logger.warning(`Validation warnings for ${relativePath}: ${validation.errors.join(', ')}`);
         }
       }
 
@@ -331,23 +348,34 @@ export class OpenSpecWriter {
 
     try {
       const existingContent = await readFile(fullPath, 'utf-8');
+      const backupPath = this.options.createBackups
+        ? await this.backupFile(fullPath, relativePath)
+        : undefined;
+      const generatedBlock = `${GENERATED_SECTION_START}\n\n${this.extractGeneratedSection(spec.content)}\n\n${GENERATED_SECTION_END}`;
 
       // Check if already has generated section
-      const generatedMarker = '## Generated Analysis';
-      const markerIndex = existingContent.indexOf(generatedMarker);
+      const markerIndex = existingContent.indexOf(GENERATED_SECTION_START);
       if (markerIndex !== -1) {
-        // Replace everything from the first marker onward
         const humanContent = existingContent.slice(0, markerIndex).trimEnd();
-        const mergedContent = `${humanContent}\n\n${generatedMarker}\n\n${this.extractGeneratedSection(spec.content)}`;
+        // Use the last marker: generated text is LLM-derived and may itself contain
+        // the literal boundary token. The writer's own closing marker is appended
+        // after that content, so the last occurrence remains the real boundary.
+        const endIndex = existingContent.lastIndexOf(GENERATED_SECTION_END);
+        const trailingHumanContent = endIndex === -1
+          ? ''
+          : existingContent.slice(endIndex + GENERATED_SECTION_END.length).trim();
+        const mergedContent = [humanContent, generatedBlock, trailingHumanContent]
+          .filter(Boolean)
+          .join('\n\n');
         await writeFile(fullPath, mergedContent, 'utf-8');
       } else {
         // Append generated section
-        const mergedContent = `${existingContent.trimEnd()}\n\n${generatedMarker}\n\n${this.extractGeneratedSection(spec.content)}`;
+        const mergedContent = `${existingContent.trimEnd()}\n\n${generatedBlock}`;
         await writeFile(fullPath, mergedContent, 'utf-8');
       }
 
       logger.success(`Merged ${relativePath}`);
-      return { path: relativePath, action: 'merged', success: true };
+      return { path: relativePath, action: 'merged', success: true, backupPath };
     } catch (error) {
       return {
         path: relativePath,

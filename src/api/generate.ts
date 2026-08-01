@@ -16,7 +16,11 @@ import { createLLMService } from '../core/services/llm-service.js';
 import type { LLMService } from '../core/services/llm-service.js';
 import { SpecGenerationPipeline } from '../core/generator/spec-pipeline.js';
 import { OpenSpecFormatGenerator } from '../core/generator/openspec-format-generator.js';
-import { OpenSpecWriter, type WriteMode } from '../core/generator/openspec-writer.js';
+import {
+  OpenSpecWriter,
+  shouldCleanStaleDomains,
+  type WriteMode,
+} from '../core/generator/openspec-writer.js';
 import { ADRGenerator } from '../core/generator/adr-generator.js';
 import { MappingGenerator } from '../core/generator/mapping-generator.js';
 import type { MappingArtifact } from '../core/generator/mapping-generator.js';
@@ -321,7 +325,7 @@ export async function openloreGenerate(options: GenerateApiOptions = {}): Promis
     createBackups: true,
     updateConfig: true,
     validateBeforeWrite: true,
-    cleanBeforeWrite: options.force === true,
+    cleanBeforeWrite: shouldCleanStaleDomains(options.force, options.domains, adrOnly),
   });
 
   const report = await writer.writeSpecs(generatedSpecs, pipelineResult.survey);

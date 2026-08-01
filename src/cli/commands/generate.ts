@@ -53,6 +53,7 @@ import {
 } from '../../core/generator/openspec-format-generator.js';
 import {
   OpenSpecWriter,
+  shouldCleanStaleDomains,
   type GenerationReport,
   type WriteMode,
 } from '../../core/generator/openspec-writer.js';
@@ -227,7 +228,7 @@ export const generateCommand = new Command('generate')
   )
   .option(
     '--force',
-    'Force regeneration from scratch, ignoring any cached stage results',
+    'Ignore cached stage results; full unfiltered generation also removes stale domains',
     false
   )
   .addHelpText(
@@ -248,7 +249,9 @@ Examples:
   $ openlore generate --adr-only     Only generate ADRs
   $ openlore generate -y             Skip confirmation prompts
   $ openlore generate                Auto-resumes from last completed stage if interrupted
-  $ openlore generate --force        Re-run all LLM stages, clear generation cache, remove stale domains
+  $ openlore generate --force        Re-run all LLM stages; full generation removes stale domains
+  $ openlore generate --force --domains auth
+                                     Re-run auth only; preserve every unselected domain
   $ openlore analyze --force && openlore generate --force
                                      Full reset: fresh static analysis + full regeneration
 
@@ -646,6 +649,7 @@ Each spec.md follows OpenSpec conventions:
         createBackups: true,
         updateConfig: true,
         validateBeforeWrite: true,
+        cleanBeforeWrite: shouldCleanStaleDomains(opts.force, opts.domains, opts.adrOnly),
       });
 
       let report: GenerationReport;

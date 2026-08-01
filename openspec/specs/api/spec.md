@@ -2981,3 +2981,15 @@ so repeated records within a session deduplicate correctly.
 - **GIVEN** an `openloreRecordDecision` call and a concurrent `record_decision` against the same store
 - **WHEN** both complete
 - **THEN** the persisted store contains both decisions — neither write is lost
+
+### Requirement: FilteredForceGenerationPreservesUnselectedDomains
+
+The generation API SHALL treat a domain filter as the complete write scope, not as authorization
+to delete domain specifications outside that scope. Forced stale-domain cleanup SHALL run only for
+an unfiltered, non-ADR generation.
+
+#### Scenario: Force regeneration of one domain is non-destructive
+
+- **GIVEN** existing `auth` and `billing` domain specifications
+- **WHEN** the API generates only `auth` with `force: true`
+- **THEN** the `billing` specification remains unchanged

@@ -12,6 +12,7 @@ import {
   OpenSpecWriter,
   writeOpenSpecs,
   initializeOpenSpec,
+  shouldCleanStaleDomains,
 } from './openspec-writer.js';
 import type { GeneratedSpec } from './openspec-format-generator.js';
 import type { ProjectSurveyResult } from './spec-pipeline.js';
@@ -410,6 +411,108 @@ Old generated content that should be replaced.
       // Should contain new generated content (from the spec)
       expect(content).toContain('Purpose');
     });
+
+    it('preserves trailing human content and creates a backup on re-merge', async () => {
+      await mkdir(join(tempDir, 'openspec/specs/user'), { recursive: true });
+
+      const writer = new OpenSpecWriter({
+        rootPath: tempDir,
+        writeMode: 'merge',
+        updateConfig: false,
+      });
+
+      await writeFile(
+        join(tempDir, 'openspec/specs/user/spec.md'),
+        '# User Specification\n\nHuman preface.\n',
+      );
+      await writer.writeSpecs(createMockSpecs(), createMockSurvey());
+
+      const firstMerge = await readFile(join(tempDir, 'openspec/specs/user/spec.md'), 'utf-8');
+      await writeFile(
+        join(tempDir, 'openspec/specs/user/spec.md'),
+        `${firstMerge}\n\n## Operator Notes\n\nKeep this human-authored tail.\n`,
+      );
+
+      const report = await writer.writeSpecs(createMockSpecs(), createMockSurvey());
+      const secondMerge = await readFile(join(tempDir, 'openspec/specs/user/spec.md'), 'utf-8');
+
+      expect(secondMerge).toContain('## Operator Notes');
+      expect(secondMerge).toContain('Keep this human-authored tail.');
+      expect(report.filesBackedUp.some(path => path.endsWith('openspec/specs/user/spec.md'))).toBe(true);
+      const backupPath = report.filesBackedUp.find(path => path.endsWith('openspec/specs/user/spec.md'))!;
+      expect(await readFile(join(tempDir, backupPath), 'utf-8')).toContain('Keep this human-authored tail.');
+    });
+
+    it('does not confuse an LLM-emitted boundary token with the writer boundary', async () => {
+      await mkdir(join(tempDir, 'openspec/specs/user'), { recursive: true });
+      await writeFile(join(tempDir, 'openspec/specs/user/spec.md'), '# User\n\nHuman preface.\n');
+      const specs = createMockSpecs();
+      specs[1] = {
+        ...specs[1],
+        content: specs[1].content.replace(
+          '## Requirements',
+          '<!-- /openlore-generated -->\n\n## Requirements',
+        ),
+      };
+      const writer = new OpenSpecWriter({ rootPath: tempDir, writeMode: 'merge', updateConfig: false });
+
+      await writer.writeSpecs(specs, createMockSurvey());
+      const firstMerge = await readFile(join(tempDir, 'openspec/specs/user/spec.md'), 'utf-8');
+      await writeFile(
+        join(tempDir, 'openspec/specs/user/spec.md'),
+        `${firstMerge}\n\n## Operator Notes\n\nKeep me.\n`,
+      );
+      await writer.writeSpecs(specs, createMockSurvey());
+
+      const secondMerge = await readFile(join(tempDir, 'openspec/specs/user/spec.md'), 'utf-8');
+      expect(secondMerge.match(/### Requirement: UserValidation/g)).toHaveLength(1);
+      expect(secondMerge).toContain('## Operator Notes');
+      expect(secondMerge).toContain('Keep me.');
+    });
+  });
+
+  describe('Stale domain cleanup', () => {
+    it('recursively backs up a stale domain before removing it', async () => {
+      const staleDir = join(tempDir, 'openspec/specs/stale');
+      await mkdir(join(staleDir, 'notes'), { recursive: true });
+      await writeFile(join(staleDir, 'spec.md'), '# Stale');
+      await writeFile(join(staleDir, 'notes', 'operator.md'), 'preserve me');
+
+      const writer = new OpenSpecWriter({
+        rootPath: tempDir,
+        cleanBeforeWrite: true,
+        updateConfig: false,
+      });
+      const report = await writer.writeSpecs(createMockSpecs(), createMockSurvey());
+
+      expect(report.domainsRemoved).toContain('stale');
+      expect(await fileExists(staleDir)).toBe(false);
+      const backupRuns = await readdir(join(tempDir, '.openlore/backups'));
+      const backedUpNestedFile = join(
+        tempDir,
+        '.openlore/backups',
+        backupRuns[0],
+        'specs/stale/notes/operator.md',
+      );
+      expect(await readFile(backedUpNestedFile, 'utf-8')).toBe('preserve me');
+    });
+
+    it('never reports reserved overview and architecture directories as stale domains', async () => {
+      await mkdir(join(tempDir, 'openspec/specs/overview'), { recursive: true });
+      await mkdir(join(tempDir, 'openspec/specs/architecture'), { recursive: true });
+      await writeFile(join(tempDir, 'openspec/specs/overview/spec.md'), '# Old overview');
+      await writeFile(join(tempDir, 'openspec/specs/architecture/spec.md'), '# Old architecture');
+      const writer = new OpenSpecWriter({
+        rootPath: tempDir,
+        cleanBeforeWrite: true,
+        updateConfig: false,
+      });
+
+      const report = await writer.writeSpecs(createMockSpecs(), createMockSurvey());
+
+      expect(report.domainsRemoved).not.toContain('overview');
+      expect(report.domainsRemoved).not.toContain('architecture');
+    });
   });
 
   describe('Config Update', () => {
@@ -479,6 +582,8 @@ rules:
       const report = await writer.writeSpecs(specs, createMockSurvey());
 
       expect(report.filesWritten).toContain('openspec/specs/bad/spec.md');
+      expect(report.validationErrors.some(error => error.startsWith('openspec/specs/bad/spec.md:'))).toBe(true);
+      expect(report.nextSteps).toContain('Fix validation errors before using specs');
     });
   });
 
@@ -529,6 +634,15 @@ rules:
       expect(report.nextSteps.some(s => s.includes('validate'))).toBe(true);
       expect(report.nextSteps.some(s => s.includes('verify'))).toBe(true);
     });
+  });
+});
+
+describe('stale-domain cleanup policy', () => {
+  it('cleans only during unfiltered full force generation', () => {
+    expect(shouldCleanStaleDomains(true, [], false)).toBe(true);
+    expect(shouldCleanStaleDomains(true, ['auth'], false)).toBe(false);
+    expect(shouldCleanStaleDomains(true, [], true)).toBe(false);
+    expect(shouldCleanStaleDomains(false, [], false)).toBe(false);
   });
 });
 

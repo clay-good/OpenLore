@@ -1558,6 +1558,18 @@ whatever the user set), unchanged.
 - **WHEN** the CLI runs
 - **THEN** it does not re-execute or resize, and behaves exactly as it does today
 
+### Requirement: ForceCleanupRequiresFullGeneration
+
+The `generate --force` command SHALL remove stale domain directories only during a full,
+unfiltered generation. When `--domains` limits generation, `--force` SHALL bypass cached stage
+results without deleting unselected domains, and command help SHALL describe that distinction.
+
+#### Scenario: Filtered force generation keeps other domains
+
+- **GIVEN** existing `auth` and `billing` domain specifications
+- **WHEN** a user runs `openlore generate --force --domains auth`
+- **THEN** generation refreshes `auth` and preserves `billing`
+
 ## Technical Notes
 
 - **Dependencies**: ora, logger, ProgressIndicator, showNextSteps, @inquirer/prompts
