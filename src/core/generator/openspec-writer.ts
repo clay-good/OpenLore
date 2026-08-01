@@ -5,8 +5,9 @@
  * Handles initialization, merging with existing specs, and output tracking.
  */
 
-import { readFile, writeFile, mkdir, copyFile, readdir, rm } from 'node:fs/promises';
-import { join, dirname, relative } from 'node:path';
+import { readFile, writeFile, mkdir, cp, copyFile, readdir, rm } from 'node:fs/promises';
+import type { Dirent } from 'node:fs';
+import { join, dirname, relative, resolve } from 'node:path';
 import logger from '../../utils/logger.js';
 import {
   OPENLORE_DIR,
@@ -17,6 +18,7 @@ import {
   OPENSPEC_DIR,
   OPENSPEC_SPECS_SUBDIR,
   OPENSPEC_DECISIONS_SUBDIR,
+  OPENSPEC_CONFIG_FILENAME,
   ARTIFACT_GENERATION_REPORT,
 } from '../../constants.js';
 import { fileExists } from '../../utils/command-helpers.js';
@@ -89,6 +91,26 @@ export interface GenerationReport {
   nextSteps: string[];
 }
 
+/**
+ * Stale-domain cleanup is destructive, so it is authorized only by an unfiltered
+ * full regeneration. A domain filter scopes what is written; it is not a delete list.
+ * (change: harden-openspec-writer-fidelity)
+ */
+export function shouldCleanStaleDomains(
+  force: boolean | undefined,
+  domains: readonly string[] | undefined,
+  adrOnly: boolean | undefined,
+): boolean {
+  return force === true && (domains?.length ?? 0) === 0 && adrOnly !== true;
+}
+
+const GENERATED_SECTION_START = '<!-- openlore-generated -->';
+const GENERATED_SECTION_HEADING = '## Generated Analysis';
+const GENERATED_SECTION_END = '<!-- /openlore-generated -->';
+const ESCAPED_GENERATED_SECTION_START = '&lt;!-- openlore-generated --&gt;';
+const ESCAPED_GENERATED_SECTION_END = '&lt;!-- /openlore-generated --&gt;';
+const RESERVED_SPEC_DIRECTORIES = new Set(['overview', 'architecture']);
+
 // ============================================================================
 // OPENSPEC WRITER
 // ============================================================================
@@ -98,17 +120,15 @@ export interface GenerationReport {
  */
 export class OpenSpecWriter {
   private rootPath: string;
-  private openspecRoot: string;
-  private openloreRoot: string;
   private options: Required<OpenSpecWriterOptions>;
   private configManager: OpenSpecConfigManager;
 
   constructor(options: OpenSpecWriterOptions) {
-    this.rootPath = options.rootPath;
-    this.openspecRoot = join(options.rootPath, OPENSPEC_DIR);
-    this.openloreRoot = join(options.rootPath, OPENLORE_DIR);
+    this.rootPath = resolve(options.rootPath);
+    safeJoin(this.rootPath, OPENSPEC_DIR);
+    safeJoin(this.rootPath, OPENLORE_DIR);
     this.options = {
-      rootPath: options.rootPath,
+      rootPath: this.rootPath,
       writeMode: options.writeMode ?? 'replace',
       version: options.version ?? '1.0.0',
       createBackups: options.createBackups ?? true,
@@ -116,7 +136,7 @@ export class OpenSpecWriter {
       validateBeforeWrite: options.validateBeforeWrite ?? true,
       cleanBeforeWrite: options.cleanBeforeWrite ?? false,
     };
-    this.configManager = new OpenSpecConfigManager(options.rootPath);
+    this.configManager = new OpenSpecConfigManager(this.rootPath);
   }
 
   /**
@@ -124,15 +144,15 @@ export class OpenSpecWriter {
    */
   async initialize(): Promise<void> {
     // Create openspec directory structure
-    await mkdir(join(this.openspecRoot, OPENSPEC_SPECS_SUBDIR), { recursive: true });
-    await mkdir(join(this.openspecRoot, OPENSPEC_DECISIONS_SUBDIR), { recursive: true });
-    await mkdir(join(this.openspecRoot, 'changes', 'archive'), { recursive: true });
+    await mkdir(safeJoin(this.rootPath, join(OPENSPEC_DIR, OPENSPEC_SPECS_SUBDIR)), { recursive: true });
+    await mkdir(safeJoin(this.rootPath, join(OPENSPEC_DIR, OPENSPEC_DECISIONS_SUBDIR)), { recursive: true });
+    await mkdir(safeJoin(this.rootPath, join(OPENSPEC_DIR, 'changes', 'archive')), { recursive: true });
 
     // Create .openlore directory structure
-    await mkdir(join(this.openloreRoot, OPENLORE_ANALYSIS_SUBDIR), { recursive: true });
-    await mkdir(join(this.openloreRoot, OPENLORE_BACKUPS_SUBDIR), { recursive: true });
-    await mkdir(join(this.openloreRoot, OPENLORE_OUTPUTS_SUBDIR), { recursive: true });
-    await mkdir(join(this.openloreRoot, OPENLORE_LOGS_SUBDIR), { recursive: true });
+    await mkdir(safeJoin(this.rootPath, join(OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR)), { recursive: true });
+    await mkdir(safeJoin(this.rootPath, join(OPENLORE_DIR, OPENLORE_BACKUPS_SUBDIR)), { recursive: true });
+    await mkdir(safeJoin(this.rootPath, join(OPENLORE_DIR, OPENLORE_OUTPUTS_SUBDIR)), { recursive: true });
+    await mkdir(safeJoin(this.rootPath, join(OPENLORE_DIR, OPENLORE_LOGS_SUBDIR)), { recursive: true });
 
     logger.success('Initialized OpenSpec directory structure');
   }
@@ -142,7 +162,8 @@ export class OpenSpecWriter {
    */
   async writeSpecs(
     specs: GeneratedSpec[],
-    survey: ProjectSurveyResult
+    survey: ProjectSurveyResult,
+    metadataSpecs: GeneratedSpec[] = specs,
   ): Promise<GenerationReport> {
     const report: GenerationReport = {
       timestamp: new Date().toISOString(),
@@ -165,36 +186,74 @@ export class OpenSpecWriter {
     // Remove stale domain directories when --force is used
     if (this.options.cleanBeforeWrite) {
       const incomingDomains = new Set(
-        specs.filter(s => s.type === 'domain').map(s => normalizeDomainName(s.domain))
+        specs
+          .filter(s => s.type === 'domain' || s.type === 'api')
+          .map(s => normalizeDomainName(s.domain))
       );
-      const specsDir = join(this.openspecRoot, OPENSPEC_SPECS_SUBDIR);
+      const specsDir = safeJoin(this.rootPath, join(OPENSPEC_DIR, OPENSPEC_SPECS_SUBDIR));
+      let entries: Dirent[];
       try {
-        const entries = await readdir(specsDir, { withFileTypes: true });
-        for (const entry of entries) {
-          if (!entry.isDirectory()) continue;
-          if (incomingDomains.has(entry.name)) continue;
-          const domainDir = join(specsDir, entry.name);
-          // Backup before removing
-          if (this.options.createBackups) {
-            const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-            const backupDir = join(this.openloreRoot, 'backups', timestamp, OPENSPEC_SPECS_SUBDIR, entry.name);
-            await mkdir(backupDir, { recursive: true });
-            const domainEntries = await readdir(domainDir);
-            for (const f of domainEntries) {
-              await copyFile(join(domainDir, f), join(backupDir, f));
-            }
-          }
-          await rm(domainDir, { recursive: true, force: true });
-          report.domainsRemoved.push(entry.name);
-          logger.warning(`Removed stale domain: ${entry.name}`);
+        entries = await readdir(specsDir, { withFileTypes: true });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') entries = [];
+        else throw error;
+      }
+      const staleDomains = entries
+        .filter(entry =>
+          entry.isDirectory() &&
+          !RESERVED_SPEC_DIRECTORIES.has(entry.name) &&
+          !incomingDomains.has(entry.name)
+        )
+        .map(entry => ({
+          name: entry.name,
+          domainDir: safeJoin(
+            this.rootPath,
+            join(OPENSPEC_DIR, OPENSPEC_SPECS_SUBDIR, entry.name),
+          ),
+        }));
+
+      // Complete every recursive backup before the first removal. If any backup
+      // fails, no stale source directory has been deleted.
+      if (this.options.createBackups && staleDomains.length > 0) {
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        for (const stale of staleDomains) {
+          const backupDir = safeJoin(
+            this.rootPath,
+            join(
+              OPENLORE_DIR,
+              OPENLORE_BACKUPS_SUBDIR,
+              timestamp,
+              OPENSPEC_SPECS_SUBDIR,
+              stale.name,
+            ),
+          );
+          await cp(stale.domainDir, backupDir, { recursive: true });
+          report.filesBackedUp.push(relative(this.rootPath, backupDir));
         }
-      } catch {
-        // specsDir doesn't exist yet — nothing to clean
+      }
+
+      for (const stale of staleDomains) {
+        await rm(stale.domainDir, { recursive: true, force: true });
+        report.domainsRemoved.push(stale.name);
+        logger.warning(`Removed stale domain: ${stale.name}`);
       }
     }
 
     // Write each spec
     for (const spec of specs) {
+      if (this.options.validateBeforeWrite) {
+        const validation = validateFullSpec(spec.content);
+        for (const error of validation.errors) {
+          report.validationErrors.push(`${spec.path}: ${error}`);
+        }
+        for (const warning of validation.warnings) {
+          report.warnings.push(`${spec.path}: ${warning}`);
+        }
+        if (!validation.valid) {
+          logger.warning(`Validation errors for ${spec.path}: ${validation.errors.join(', ')}`);
+        }
+      }
+
       const result = await this.writeSpec(spec);
 
       if (result.success) {
@@ -207,6 +266,7 @@ export class OpenSpecWriter {
             break;
           case 'merged':
             report.filesMerged.push(result.path);
+            if (result.backupPath) report.filesBackedUp.push(result.backupPath);
             break;
           case 'backed_up':
             if (result.backupPath) {
@@ -223,7 +283,7 @@ export class OpenSpecWriter {
     // Update config.yaml
     if (this.options.updateConfig) {
       try {
-        await this.updateConfig(specs, survey);
+        await this.updateConfig(metadataSpecs, survey);
         report.configUpdated = true;
       } catch (error) {
         report.warnings.push(`Failed to update config.yaml: ${(error as Error).message}`);
@@ -285,26 +345,11 @@ export class OpenSpecWriter {
             // Backup if enabled
             if (this.options.createBackups) {
               const backupPath = await this.backupFile(fullPath, relativePath);
-              // Validate before write
-              if (this.options.validateBeforeWrite) {
-                const validation = validateFullSpec(spec.content);
-                if (!validation.valid) {
-                  logger.warning(`Validation warnings for ${relativePath}: ${validation.errors.join(', ')}`);
-                }
-              }
               await this.ensureDir(fullPath);
               await writeFile(fullPath, spec.content, 'utf-8');
               logger.success(`Wrote ${relativePath} (backed up existing)`);
               return { path: relativePath, action: 'backed_up', success: true, backupPath };
             }
-        }
-      }
-
-      // Validate before write
-      if (this.options.validateBeforeWrite) {
-        const validation = validateFullSpec(spec.content);
-        if (!validation.valid) {
-          logger.warning(`Validation warnings for ${relativePath}: ${validation.errors.join(', ')}`);
         }
       }
 
@@ -331,23 +376,50 @@ export class OpenSpecWriter {
 
     try {
       const existingContent = await readFile(fullPath, 'utf-8');
+      const backupPath = this.options.createBackups
+        ? await this.backupFile(fullPath, relativePath)
+        : undefined;
+      const generatedBlock = [
+        GENERATED_SECTION_START,
+        GENERATED_SECTION_HEADING,
+        '',
+        this.escapeGeneratedBoundaryTokens(this.extractGeneratedSection(spec.content)),
+        '',
+        GENERATED_SECTION_END,
+      ].join('\n');
 
-      // Check if already has generated section
-      const generatedMarker = '## Generated Analysis';
-      const markerIndex = existingContent.indexOf(generatedMarker);
+      // Replace only a complete writer-owned pair. Unpaired legacy content is
+      // ambiguous, so preserve it wholesale and append the first bounded block.
+      const markerIndex = existingContent.indexOf(GENERATED_SECTION_START);
       if (markerIndex !== -1) {
-        // Replace everything from the first marker onward
-        const humanContent = existingContent.slice(0, markerIndex).trimEnd();
-        const mergedContent = `${humanContent}\n\n${generatedMarker}\n\n${this.extractGeneratedSection(spec.content)}`;
-        await writeFile(fullPath, mergedContent, 'utf-8');
+        const endIndex = existingContent.indexOf(
+          GENERATED_SECTION_END,
+          markerIndex + GENERATED_SECTION_START.length,
+        );
+        if (endIndex !== -1) {
+          const humanContent = existingContent.slice(0, markerIndex).trimEnd();
+          const trailingHumanContent = existingContent
+            .slice(endIndex + GENERATED_SECTION_END.length)
+            .trim();
+          const mergedContent = [humanContent, generatedBlock, trailingHumanContent]
+            .filter(Boolean)
+            .join('\n\n');
+          await writeFile(fullPath, mergedContent, 'utf-8');
+        } else {
+          const preserved = this.escapeGeneratedBoundaryTokens(existingContent).trimEnd();
+          await writeFile(fullPath, `${preserved}\n\n${generatedBlock}`, 'utf-8');
+          logger.warning(`Preserved unbounded legacy generated content while migrating ${relativePath}`);
+        }
       } else {
-        // Append generated section
-        const mergedContent = `${existingContent.trimEnd()}\n\n${generatedMarker}\n\n${this.extractGeneratedSection(spec.content)}`;
+        // A heading-only block is the legacy format. It has no trustworthy end,
+        // so preserve the entire file and append a deterministic paired block.
+        const preserved = this.escapeGeneratedBoundaryTokens(existingContent).trimEnd();
+        const mergedContent = `${preserved}\n\n${generatedBlock}`;
         await writeFile(fullPath, mergedContent, 'utf-8');
       }
 
       logger.success(`Merged ${relativePath}`);
-      return { path: relativePath, action: 'merged', success: true };
+      return { path: relativePath, action: 'merged', success: true, backupPath };
     } catch (error) {
       return {
         path: relativePath,
@@ -380,12 +452,25 @@ export class OpenSpecWriter {
   }
 
   /**
+   * Boundary tokens can appear in LLM output or human documentation. Store those
+   * occurrences as visible Markdown text so only writer-authored tokens delimit a
+   * replaceable block.
+   */
+  private escapeGeneratedBoundaryTokens(content: string): string {
+    return content
+      .replaceAll(GENERATED_SECTION_START, ESCAPED_GENERATED_SECTION_START)
+      .replaceAll(GENERATED_SECTION_END, ESCAPED_GENERATED_SECTION_END);
+  }
+
+  /**
    * Backup an existing file
    */
   private async backupFile(fullPath: string, relativePath: string): Promise<string> {
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const backupDir = join(this.openloreRoot, 'backups', timestamp);
-    const backupPath = join(backupDir, relativePath);
+    const backupPath = safeJoin(
+      this.rootPath,
+      join(OPENLORE_DIR, OPENLORE_BACKUPS_SUBDIR, timestamp, relativePath),
+    );
 
     await mkdir(dirname(backupPath), { recursive: true });
     await copyFile(fullPath, backupPath);
@@ -411,6 +496,8 @@ export class OpenSpecWriter {
 
     const detectedContext = buildDetectedContext(survey);
 
+    // Reject a repo-controlled config symlink before the config manager reads or writes it.
+    safeJoin(this.rootPath, join(OPENSPEC_DIR, OPENSPEC_CONFIG_FILENAME));
     await this.configManager.updateWithOpenLoreMetadata(metadata, detectedContext, {
       preserveUserContext: true,
       appendDetectedInfo: true,
@@ -462,7 +549,10 @@ export class OpenSpecWriter {
    * Save generation report to .openlore/outputs/
    */
   private async saveReport(report: GenerationReport): Promise<void> {
-    const reportPath = join(this.openloreRoot, 'outputs', ARTIFACT_GENERATION_REPORT);
+    const reportPath = safeJoin(
+      this.rootPath,
+      join(OPENLORE_DIR, OPENLORE_OUTPUTS_SUBDIR, ARTIFACT_GENERATION_REPORT),
+    );
     await mkdir(dirname(reportPath), { recursive: true });
     await writeFile(reportPath, JSON.stringify(report, null, 2), 'utf-8');
     logger.discovery(`Saved generation report to ${relative(this.rootPath, reportPath)}`);

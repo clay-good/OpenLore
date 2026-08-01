@@ -1391,6 +1391,33 @@ The system SHALL processes service files to extract services/modules and generat
 - **THEN** The error is logged and processing continues with the next chunk
 - **AND** The stage result reflects the successful extractions despite the error
 
+### Requirement: WriterRegenerationPreservesUserAndBackupContent
+
+The OpenSpec writer SHALL preserve human-authored content outside its bounded generated section.
+Before merging an existing specification, it SHALL create a backup when backups are enabled.
+Before removing a stale domain, it SHALL recursively copy the complete domain tree, and it SHALL
+abort removal if that backup cannot be completed. Generated sections SHALL use explicit paired
+boundaries, and every initialization, cleanup, backup, config, and report path SHALL pass
+symlink-aware project confinement before I/O.
+
+#### Scenario: Re-merging a generated section preserves surrounding content
+
+- **GIVEN** an existing specification with human-authored content after the bounded generated section
+- **WHEN** the writer merges regenerated content with backups enabled
+- **THEN** the human-authored content remains and the pre-merge file is present in the backup tree
+
+#### Scenario: Recursive backup failure prevents stale-domain removal
+
+- **GIVEN** a stale domain directory containing nested evidence files
+- **WHEN** recursive backup cannot complete
+- **THEN** cleanup fails without removing that domain directory
+
+#### Scenario: Repository symlinks cannot redirect writer output
+
+- **GIVEN** a writer-owned directory path that resolves through a symlink outside the project
+- **WHEN** initialization, cleanup, backup, configuration, or reporting begins
+- **THEN** the writer fails closed before changing the external target
+
 ## Technical Notes
 
 - **Implementation**: `src/core/generator/schemas.ts, src/core/generator/openspec-compat.ts, src/core/generator/openspec-format-generator.ts, src/core/generator/mapping-generator.ts, src/core/generator/adr-generator.ts, src/core/generator/openspec-writer.ts, src/core/generator/spec-pipeline.ts`

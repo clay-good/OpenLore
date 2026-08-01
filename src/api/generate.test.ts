@@ -41,11 +41,15 @@ vi.mock('../core/generator/openspec-format-generator.js', () => ({
   }),
 }));
 
-vi.mock('../core/generator/openspec-writer.js', () => ({
-  OpenSpecWriter: vi.fn().mockImplementation(function(this: unknown) {
-    Object.assign(this as object, { writeSpecs: vi.fn() });
-  }),
-}));
+vi.mock('../core/generator/openspec-writer.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../core/generator/openspec-writer.js')>();
+  return {
+    ...actual,
+    OpenSpecWriter: vi.fn().mockImplementation(function(this: unknown) {
+      Object.assign(this as object, { writeSpecs: vi.fn() });
+    }),
+  };
+});
 
 vi.mock('../core/generator/adr-generator.js', () => ({
   ADRGenerator: vi.fn().mockImplementation(function(this: unknown) {
@@ -222,6 +226,43 @@ describe('openloreGenerate', () => {
       expect(result.pipelineResult).toBeDefined();
       expect(result.duration).toBeGreaterThanOrEqual(0);
     });
+
+    it('does not authorize stale-domain deletion for filtered force generation', async () => {
+      await openloreGenerate({ rootPath: ROOT, force: true, domains: ['auth'] });
+
+      expect(OpenSpecWriter).toHaveBeenCalledWith(expect.objectContaining({
+        cleanBeforeWrite: false,
+      }));
+    });
+
+    it('authorizes stale-domain deletion for unfiltered full force generation', async () => {
+      await openloreGenerate({ rootPath: ROOT, force: true });
+
+      expect(OpenSpecWriter).toHaveBeenCalledWith(expect.objectContaining({
+        cleanBeforeWrite: true,
+      }));
+    });
+
+    it('writes only selected domains while retaining the complete metadata view', async () => {
+      const allSpecs = [
+        { path: 'openspec/specs/auth/spec.md', domain: 'auth', type: 'domain' as const, content: '# Auth' },
+        { path: 'openspec/specs/billing/spec.md', domain: 'billing', type: 'domain' as const, content: '# Billing' },
+      ];
+      vi.mocked(OpenSpecFormatGenerator).mockImplementation(function(this: unknown) {
+        Object.assign(this as object, { generateSpecs: vi.fn().mockReturnValue(allSpecs) });
+      });
+
+      await openloreGenerate({ rootPath: ROOT, force: true, domains: ['auth'] });
+
+      const writer = vi.mocked(OpenSpecWriter).mock.results[0].value as unknown as {
+        writeSpecs: ReturnType<typeof vi.fn>;
+      };
+      expect(writer.writeSpecs).toHaveBeenCalledWith(
+        [allSpecs[0]],
+        MOCK_PIPELINE_RESULT.survey,
+        allSpecs,
+      );
+    });
   });
 
   describe('ADR generation', () => {
@@ -245,6 +286,36 @@ describe('openloreGenerate', () => {
     it('skips ADR generation when adr=false', async () => {
       await openloreGenerate({ rootPath: ROOT, adr: false });
       expect(ADRGenerator).not.toHaveBeenCalled();
+    });
+
+    it('keeps the complete domain metadata view during ADR-only generation', async () => {
+      const allSpecs = [
+        { path: 'openspec/specs/auth/spec.md', domain: 'auth', type: 'domain' as const, content: '# Auth' },
+        { path: 'openspec/specs/billing/spec.md', domain: 'billing', type: 'domain' as const, content: '# Billing' },
+      ];
+      const adrSpec = {
+        path: 'openspec/decisions/adr-0001.md',
+        domain: 'adr',
+        type: 'adr' as const,
+        content: '# ADR',
+      };
+      vi.mocked(OpenSpecFormatGenerator).mockImplementation(function(this: unknown) {
+        Object.assign(this as object, { generateSpecs: vi.fn().mockReturnValue(allSpecs) });
+      });
+      vi.mocked(ADRGenerator).mockImplementation(function(this: unknown) {
+        Object.assign(this as object, { generateADRs: vi.fn().mockReturnValue([adrSpec]) });
+      });
+
+      await openloreGenerate({ rootPath: ROOT, adrOnly: true });
+
+      const writer = vi.mocked(OpenSpecWriter).mock.results[0].value as unknown as {
+        writeSpecs: ReturnType<typeof vi.fn>;
+      };
+      expect(writer.writeSpecs).toHaveBeenCalledWith(
+        [adrSpec],
+        MOCK_PIPELINE_RESULT.survey,
+        [...allSpecs, adrSpec],
+      );
     });
   });
 

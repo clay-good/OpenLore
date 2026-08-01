@@ -5,6 +5,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { join } from 'node:path';
 import { mkdir, writeFile, rm } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import type { RepoStructure, LLMContext } from '../../core/analyzer/artifact-generator.js';
 
 // Mock dependencies
@@ -167,6 +169,13 @@ describe('generate command', () => {
       // Find the domains option
       const domainsOption = generateCommand.options.find(opt => opt.long === '--domains');
       expect(domainsOption).toBeDefined();
+    });
+
+    it('uses the shared cleanup policy so filtered force generation cannot delete other domains', () => {
+      const source = readFileSync(fileURLToPath(new URL('./generate.ts', import.meta.url)), 'utf-8');
+      expect(source).toMatch(
+        /cleanBeforeWrite:\s*shouldCleanStaleDomains\(opts\.force,\s*opts\.domains,\s*opts\.adrOnly\)/,
+      );
     });
 
     it('should have dry-run option', async () => {

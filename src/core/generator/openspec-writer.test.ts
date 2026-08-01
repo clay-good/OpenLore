@@ -2,8 +2,8 @@
  * OpenSpec Writer Tests
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdir, rm, writeFile, readFile, readdir, access } from 'node:fs/promises';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { mkdir, rm, writeFile, readFile, readdir, access, symlink } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,6 +12,7 @@ import {
   OpenSpecWriter,
   writeOpenSpecs,
   initializeOpenSpec,
+  shouldCleanStaleDomains,
 } from './openspec-writer.js';
 import type { GeneratedSpec } from './openspec-format-generator.js';
 import type { ProjectSurveyResult } from './spec-pipeline.js';
@@ -378,7 +379,7 @@ The system SHALL do something manually documented.
       expect(report.filesMerged).toContain('openspec/specs/user/spec.md');
     });
 
-    it('should replace existing generated section on re-merge', async () => {
+    it('should preserve and migrate an existing unbounded generated section', async () => {
       // Create spec with existing generated section
       await mkdir(join(tempDir, 'openspec/specs/user'), { recursive: true });
       await writeFile(
@@ -405,10 +406,254 @@ Old generated content that should be replaced.
 
       const content = await readFile(join(tempDir, 'openspec/specs/user/spec.md'), 'utf-8');
       expect(content).toContain('Human content');
-      expect(content).not.toContain('Old generated content');
+      expect(content).toContain('Old generated content');
       expect(content).toContain('## Generated Analysis');
       // Should contain new generated content (from the spec)
       expect(content).toContain('Purpose');
+      expect(content.match(/<!-- openlore-generated -->/g)).toHaveLength(1);
+    });
+
+    it('preserves trailing human content and creates a backup on re-merge', async () => {
+      await mkdir(join(tempDir, 'openspec/specs/user'), { recursive: true });
+
+      const writer = new OpenSpecWriter({
+        rootPath: tempDir,
+        writeMode: 'merge',
+        updateConfig: false,
+      });
+
+      await writeFile(
+        join(tempDir, 'openspec/specs/user/spec.md'),
+        '# User Specification\n\nHuman preface.\n',
+      );
+      await writer.writeSpecs(createMockSpecs(), createMockSurvey());
+
+      const firstMerge = await readFile(join(tempDir, 'openspec/specs/user/spec.md'), 'utf-8');
+      await writeFile(
+        join(tempDir, 'openspec/specs/user/spec.md'),
+        `${firstMerge}\n\n## Operator Notes\n\nKeep this human-authored tail.\n`,
+      );
+
+      const report = await writer.writeSpecs(createMockSpecs(), createMockSurvey());
+      const secondMerge = await readFile(join(tempDir, 'openspec/specs/user/spec.md'), 'utf-8');
+
+      expect(secondMerge).toContain('## Operator Notes');
+      expect(secondMerge).toContain('Keep this human-authored tail.');
+      expect(report.filesBackedUp.some(path => path.endsWith('openspec/specs/user/spec.md'))).toBe(true);
+      const backupPath = report.filesBackedUp.find(path => path.endsWith('openspec/specs/user/spec.md'))!;
+      expect(await readFile(join(tempDir, backupPath), 'utf-8')).toContain('Keep this human-authored tail.');
+    });
+
+    it('does not confuse an LLM-emitted boundary token with the writer boundary', async () => {
+      await mkdir(join(tempDir, 'openspec/specs/user'), { recursive: true });
+      await writeFile(join(tempDir, 'openspec/specs/user/spec.md'), '# User\n\nHuman preface.\n');
+      const specs = createMockSpecs();
+      specs[1] = {
+        ...specs[1],
+        content: specs[1].content.replace(
+          '## Requirements',
+          '<!-- /openlore-generated -->\n\n## Requirements',
+        ),
+      };
+      const writer = new OpenSpecWriter({ rootPath: tempDir, writeMode: 'merge', updateConfig: false });
+
+      await writer.writeSpecs(specs, createMockSurvey());
+      const firstMerge = await readFile(join(tempDir, 'openspec/specs/user/spec.md'), 'utf-8');
+      await writeFile(
+        join(tempDir, 'openspec/specs/user/spec.md'),
+        `${firstMerge}\n\n## Operator Notes\n\nKeep me.\n`,
+      );
+      await writer.writeSpecs(specs, createMockSurvey());
+
+      const secondMerge = await readFile(join(tempDir, 'openspec/specs/user/spec.md'), 'utf-8');
+      expect(secondMerge.match(/### Requirement: UserValidation/g)).toHaveLength(1);
+      expect(secondMerge).toContain('## Operator Notes');
+      expect(secondMerge).toContain('Keep me.');
+    });
+
+    it('migrates a legacy unbounded generated section without deleting ambiguous content', async () => {
+      const specPath = join(tempDir, 'openspec/specs/user/spec.md');
+      await mkdir(join(tempDir, 'openspec/specs/user'), { recursive: true });
+      await writeFile(
+        specPath,
+        [
+          '# User Specification',
+          '',
+          '## Generated Analysis',
+          '',
+          'Legacy generated text.',
+          '',
+          '## Operator Notes',
+          '',
+          'Legacy human tail must survive.',
+          '',
+        ].join('\n'),
+      );
+      const writer = new OpenSpecWriter({
+        rootPath: tempDir,
+        writeMode: 'merge',
+        updateConfig: false,
+      });
+
+      await writer.writeSpecs(createMockSpecs(), createMockSurvey());
+      const migrated = await readFile(specPath, 'utf-8');
+
+      expect(migrated).toContain('Legacy generated text.');
+      expect(migrated).toContain('Legacy human tail must survive.');
+      expect(migrated.match(/<!-- openlore-generated -->/g)).toHaveLength(1);
+      expect(migrated.match(/<!-- \/openlore-generated -->/g)).toHaveLength(1);
+    });
+
+    it('preserves human notes that document the closing boundary token', async () => {
+      const specPath = join(tempDir, 'openspec/specs/user/spec.md');
+      await mkdir(join(tempDir, 'openspec/specs/user'), { recursive: true });
+      const writer = new OpenSpecWriter({
+        rootPath: tempDir,
+        writeMode: 'merge',
+        updateConfig: false,
+      });
+      await writeFile(specPath, '# User Specification\n\nHuman preface.\n');
+      await writer.writeSpecs(createMockSpecs(), createMockSurvey());
+      const firstMerge = await readFile(specPath, 'utf-8');
+      await writeFile(
+        specPath,
+        `${firstMerge}\n\n## Operator Notes\n\nBefore literal must survive.\n\n` +
+          '`<!-- /openlore-generated -->`\n\nAfter literal must survive.\n',
+      );
+
+      await writer.writeSpecs(createMockSpecs(), createMockSurvey());
+      const secondMerge = await readFile(specPath, 'utf-8');
+
+      expect(secondMerge).toContain('Before literal must survive.');
+      expect(secondMerge).toContain('After literal must survive.');
+      expect(secondMerge).toContain('`<!-- /openlore-generated -->`');
+    });
+  });
+
+  describe('Stale domain cleanup', () => {
+    it('recursively backs up a stale domain before removing it', async () => {
+      const staleDir = join(tempDir, 'openspec/specs/stale');
+      await mkdir(join(staleDir, 'notes'), { recursive: true });
+      await writeFile(join(staleDir, 'spec.md'), '# Stale');
+      await writeFile(join(staleDir, 'notes', 'operator.md'), 'preserve me');
+
+      const writer = new OpenSpecWriter({
+        rootPath: tempDir,
+        cleanBeforeWrite: true,
+        updateConfig: false,
+      });
+      const report = await writer.writeSpecs(createMockSpecs(), createMockSurvey());
+
+      expect(report.domainsRemoved).toContain('stale');
+      expect(await fileExists(staleDir)).toBe(false);
+      const backupRuns = await readdir(join(tempDir, '.openlore/backups'));
+      const backedUpNestedFile = join(
+        tempDir,
+        '.openlore/backups',
+        backupRuns[0],
+        'specs/stale/notes/operator.md',
+      );
+      expect(await readFile(backedUpNestedFile, 'utf-8')).toBe('preserve me');
+    });
+
+    it('backs up every stale domain before removing any of them', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-08-01T18:00:00.000Z'));
+      const firstStale = join(tempDir, 'openspec/specs/a-stale');
+      const secondStale = join(tempDir, 'openspec/specs/z-stale');
+      await mkdir(firstStale, { recursive: true });
+      await mkdir(secondStale, { recursive: true });
+      await writeFile(join(firstStale, 'spec.md'), '# A');
+      await writeFile(join(secondStale, 'spec.md'), '# Z');
+      const backupSpecsDir = join(
+        tempDir,
+        '.openlore/backups/2026-08-01T18-00-00-000Z/specs',
+      );
+      await mkdir(backupSpecsDir, { recursive: true });
+      // Force one recursive backup to fail: its destination is a file.
+      await writeFile(join(backupSpecsDir, 'z-stale'), 'not a directory');
+      const writer = new OpenSpecWriter({
+        rootPath: tempDir,
+        cleanBeforeWrite: true,
+        updateConfig: false,
+      });
+
+      try {
+        await expect(writer.writeSpecs(createMockSpecs(), createMockSurvey())).rejects.toThrow();
+        expect(await readFile(join(firstStale, 'spec.md'), 'utf-8')).toBe('# A');
+        expect(await readFile(join(secondStale, 'spec.md'), 'utf-8')).toBe('# Z');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('never reports reserved overview and architecture directories as stale domains', async () => {
+      await mkdir(join(tempDir, 'openspec/specs/overview'), { recursive: true });
+      await mkdir(join(tempDir, 'openspec/specs/architecture'), { recursive: true });
+      await writeFile(join(tempDir, 'openspec/specs/overview/spec.md'), '# Old overview');
+      await writeFile(join(tempDir, 'openspec/specs/architecture/spec.md'), '# Old architecture');
+      const writer = new OpenSpecWriter({
+        rootPath: tempDir,
+        cleanBeforeWrite: true,
+        updateConfig: false,
+      });
+
+      const report = await writer.writeSpecs(createMockSpecs(), createMockSurvey());
+
+      expect(report.domainsRemoved).not.toContain('overview');
+      expect(report.domainsRemoved).not.toContain('architecture');
+      expect(await readFile(join(tempDir, 'openspec/specs/overview/spec.md'), 'utf-8')).toContain('# System Overview');
+      expect(await readFile(join(tempDir, 'openspec/specs/architecture/spec.md'), 'utf-8')).toContain('# Architecture Specification');
+    });
+
+    it('fails closed before cleanup when the specs directory is a symlink escape', async () => {
+      if (process.platform === 'win32') return;
+      const outside = await createTempDir();
+      await mkdir(join(tempDir, 'openspec'), { recursive: true });
+      await mkdir(join(outside, 'victim'), { recursive: true });
+      await writeFile(join(outside, 'victim', 'keep.md'), 'must survive');
+      await symlink(outside, join(tempDir, 'openspec/specs'));
+
+      try {
+        const writer = new OpenSpecWriter({
+          rootPath: tempDir,
+          cleanBeforeWrite: true,
+          updateConfig: false,
+        });
+        await expect(writer.writeSpecs(createMockSpecs(), createMockSurvey())).rejects.toThrow(/escape|outside/i);
+        expect(await readFile(join(outside, 'victim', 'keep.md'), 'utf-8')).toBe('must survive');
+      } finally {
+        await rm(outside, { recursive: true, force: true });
+      }
+    });
+
+    it('fails closed when the backup root is a symlink escape', async () => {
+      if (process.platform === 'win32') return;
+      const outside = await createTempDir();
+      await mkdir(join(tempDir, '.openlore'), { recursive: true });
+      await symlink(outside, join(tempDir, '.openlore/backups'));
+
+      try {
+        expect(() => new OpenSpecWriter({
+          rootPath: tempDir,
+          cleanBeforeWrite: true,
+          updateConfig: false,
+        })).not.toThrow();
+        const writer = new OpenSpecWriter({
+          rootPath: tempDir,
+          cleanBeforeWrite: true,
+          updateConfig: false,
+        });
+        const staleDir = join(tempDir, 'openspec/specs/stale');
+        await mkdir(staleDir, { recursive: true });
+        await writeFile(join(staleDir, 'spec.md'), '# Stale');
+
+        await expect(writer.writeSpecs(createMockSpecs(), createMockSurvey())).rejects.toThrow(/escape|outside/i);
+        expect(await readFile(join(staleDir, 'spec.md'), 'utf-8')).toBe('# Stale');
+        expect(await readdir(outside)).toHaveLength(0);
+      } finally {
+        await rm(outside, { recursive: true, force: true });
+      }
     });
   });
 
@@ -456,6 +701,29 @@ rules:
       expect(configContent).toContain('must-have-purpose');
       expect(configContent).toContain('openlore');
     });
+
+    it('uses the complete metadata set when writing only a scoped spec set', async () => {
+      const allSpecs: GeneratedSpec[] = [
+        createMockSpecs()[1],
+        {
+          path: 'openspec/specs/billing/spec.md',
+          content: '# Billing\n\n## Purpose\n\nBilling.',
+          domain: 'billing',
+          type: 'domain',
+        },
+      ];
+      const writer = new OpenSpecWriter({
+        rootPath: tempDir,
+        updateConfig: true,
+      });
+
+      await writer.writeSpecs([allSpecs[0]], createMockSurvey(), allSpecs);
+
+      const configContent = await readFile(join(tempDir, 'openspec/config.yaml'), 'utf-8');
+      expect(configContent).toContain('- user');
+      expect(configContent).toContain('- billing');
+      expect(await fileExists(join(tempDir, 'openspec/specs/billing/spec.md'))).toBe(false);
+    });
   });
 
   describe('Validation', () => {
@@ -479,6 +747,8 @@ rules:
       const report = await writer.writeSpecs(specs, createMockSurvey());
 
       expect(report.filesWritten).toContain('openspec/specs/bad/spec.md');
+      expect(report.validationErrors.some(error => error.startsWith('openspec/specs/bad/spec.md:'))).toBe(true);
+      expect(report.nextSteps).toContain('Fix validation errors before using specs');
     });
   });
 
@@ -529,6 +799,15 @@ rules:
       expect(report.nextSteps.some(s => s.includes('validate'))).toBe(true);
       expect(report.nextSteps.some(s => s.includes('verify'))).toBe(true);
     });
+  });
+});
+
+describe('stale-domain cleanup policy', () => {
+  it('cleans only during unfiltered full force generation', () => {
+    expect(shouldCleanStaleDomains(true, [], false)).toBe(true);
+    expect(shouldCleanStaleDomains(true, ['auth'], false)).toBe(false);
+    expect(shouldCleanStaleDomains(true, [], true)).toBe(false);
+    expect(shouldCleanStaleDomains(false, [], false)).toBe(false);
   });
 });
 

@@ -15,8 +15,15 @@ import {
 import { createLLMService } from '../core/services/llm-service.js';
 import type { LLMService } from '../core/services/llm-service.js';
 import { SpecGenerationPipeline } from '../core/generator/spec-pipeline.js';
-import { OpenSpecFormatGenerator } from '../core/generator/openspec-format-generator.js';
-import { OpenSpecWriter, type WriteMode } from '../core/generator/openspec-writer.js';
+import {
+  OpenSpecFormatGenerator,
+  type GeneratedSpec,
+} from '../core/generator/openspec-format-generator.js';
+import {
+  OpenSpecWriter,
+  shouldCleanStaleDomains,
+  type WriteMode,
+} from '../core/generator/openspec-writer.js';
 import { ADRGenerator } from '../core/generator/adr-generator.js';
 import { MappingGenerator } from '../core/generator/mapping-generator.js';
 import type { MappingArtifact } from '../core/generator/mapping-generator.js';
@@ -46,6 +53,7 @@ import {
 } from '../constants.js';
 import { resolveTrustedApiBase, resolveTrustedSslVerify, rejectRepoConfiguredTlsOptOut, discloseRepoConfiguredEndpoint } from '../core/services/repo-config-trust.js';
 import { resolveOpenspecDir } from '../utils/openspec-dir.js';
+import { safeJoin } from '../utils/path-confinement.js';
 
 function progress(onProgress: ProgressCallback | undefined, step: string, status: 'start' | 'progress' | 'complete' | 'skip', detail?: string): void {
   onProgress?.({ phase: 'generate', step, status, detail });
@@ -289,7 +297,8 @@ export async function openloreGenerate(options: GenerateApiOptions = {}): Promis
     depGraph,
   });
 
-  let generatedSpecs = adrOnly ? [] : formatGenerator.generateSpecs(pipelineResult, mappingArtifact);
+  const allGeneratedSpecs = formatGenerator.generateSpecs(pipelineResult, mappingArtifact);
+  let generatedSpecs = adrOnly ? [] : [...allGeneratedSpecs];
 
   // Filter by domains
   if (!adrOnly && options.domains && options.domains.length > 0) {
@@ -300,14 +309,16 @@ export async function openloreGenerate(options: GenerateApiOptions = {}): Promis
   }
 
   // Generate ADRs
+  let adrSpecs: GeneratedSpec[] = [];
   if (adr || adrOnly) {
     const adrGenerator = new ADRGenerator({
       version: openloreConfig.version,
       includeMermaid: true,
     });
-    const adrSpecs = adrGenerator.generateADRs(pipelineResult);
+    adrSpecs = adrGenerator.generateADRs(pipelineResult);
     generatedSpecs.push(...adrSpecs);
   }
+  const metadataSpecs = [...allGeneratedSpecs, ...adrSpecs];
   progress(onProgress, 'Formatting specifications', 'complete', `${generatedSpecs.length} files`);
 
   // Write specs
@@ -321,19 +332,19 @@ export async function openloreGenerate(options: GenerateApiOptions = {}): Promis
     createBackups: true,
     updateConfig: true,
     validateBeforeWrite: true,
-    cleanBeforeWrite: options.force === true,
+    cleanBeforeWrite: shouldCleanStaleDomains(options.force, options.domains, adrOnly),
   });
 
-  const report = await writer.writeSpecs(generatedSpecs, pipelineResult.survey);
+  const report = await writer.writeSpecs(generatedSpecs, pipelineResult.survey, metadataSpecs);
   progress(onProgress, 'Writing OpenSpec files', 'complete', `${report.filesWritten.length} written`);
 
   // Generate RAG manifest
   try {
     const manifestGen = new RagManifestGenerator();
-    const manifest = manifestGen.generate(generatedSpecs, depGraph);
+    const manifest = manifestGen.generate(metadataSpecs, depGraph);
     const { writeFile } = await import('node:fs/promises');
     await writeFile(
-      join(fullOpenspecPath, ARTIFACT_RAG_MANIFEST),
+      safeJoin(fullOpenspecPath, ARTIFACT_RAG_MANIFEST),
       JSON.stringify(manifest, null, 2),
       'utf-8',
     );

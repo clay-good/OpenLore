@@ -13,6 +13,7 @@ import { join, relative } from 'node:path';
 import { logger } from '../../utils/logger.js';
 import { resolveTrustedApiBase, resolveTrustedSslVerify, rejectRepoConfiguredTlsOptOut } from '../../core/services/repo-config-trust.js';
 import { resolveOpenspecDir } from '../../utils/openspec-dir.js';
+import { safeJoin } from '../../utils/path-confinement.js';
 import { fileExists, formatDuration, formatAge, parseList, readJsonFile, resolveLLMProvider, estimateCost } from '../../utils/command-helpers.js';
 import {
   DEFAULT_ANTHROPIC_MODEL,
@@ -50,9 +51,11 @@ import {
 } from '../../core/generator/spec-pipeline.js';
 import {
   OpenSpecFormatGenerator,
+  type GeneratedSpec,
 } from '../../core/generator/openspec-format-generator.js';
 import {
   OpenSpecWriter,
+  shouldCleanStaleDomains,
   type GenerationReport,
   type WriteMode,
 } from '../../core/generator/openspec-writer.js';
@@ -227,7 +230,7 @@ export const generateCommand = new Command('generate')
   )
   .option(
     '--force',
-    'Force regeneration from scratch, ignoring any cached stage results',
+    'Ignore cached stage results; full unfiltered generation also removes stale domains',
     false
   )
   .addHelpText(
@@ -248,7 +251,9 @@ Examples:
   $ openlore generate --adr-only     Only generate ADRs
   $ openlore generate -y             Skip confirmation prompts
   $ openlore generate                Auto-resumes from last completed stage if interrupted
-  $ openlore generate --force        Re-run all LLM stages, clear generation cache, remove stale domains
+  $ openlore generate --force        Re-run all LLM stages; full generation removes stale domains
+  $ openlore generate --force --domains auth
+                                     Re-run auth only; preserve every unselected domain
   $ openlore analyze --force && openlore generate --force
                                      Full reset: fresh static analysis + full regeneration
 
@@ -596,7 +601,8 @@ Each spec.md follows OpenSpec conventions:
         depGraph,
       });
 
-      let generatedSpecs = opts.adrOnly ? [] : formatGenerator.generateSpecs(pipelineResult, mappingArtifact);
+      const allGeneratedSpecs = formatGenerator.generateSpecs(pipelineResult, mappingArtifact);
+      let generatedSpecs = opts.adrOnly ? [] : [...allGeneratedSpecs];
 
       // Filter by domains if specified
       if (!opts.adrOnly && opts.domains.length > 0) {
@@ -613,12 +619,13 @@ Each spec.md follows OpenSpec conventions:
       }
 
       // Generate ADRs if requested
+      let adrSpecs: GeneratedSpec[] = [];
       if (opts.adr || opts.adrOnly) {
         const adrGenerator = new ADRGenerator({
           version: openloreConfig.version,
           includeMermaid: true,
         });
-        const adrSpecs = adrGenerator.generateADRs(pipelineResult);
+        adrSpecs = adrGenerator.generateADRs(pipelineResult);
         if (adrSpecs.length > 0) {
           logger.info('ADRs generated', adrSpecs.length);
           generatedSpecs = [...generatedSpecs, ...adrSpecs];
@@ -626,6 +633,7 @@ Each spec.md follows OpenSpec conventions:
           logger.warning('No architectural decisions found for ADR generation');
         }
       }
+      const metadataSpecs = [...allGeneratedSpecs, ...adrSpecs];
 
       logger.info('Total files to write', generatedSpecs.length);
       logger.blank();
@@ -646,11 +654,12 @@ Each spec.md follows OpenSpec conventions:
         createBackups: true,
         updateConfig: true,
         validateBeforeWrite: true,
+        cleanBeforeWrite: shouldCleanStaleDomains(opts.force, opts.domains, opts.adrOnly),
       });
 
       let report: GenerationReport;
       try {
-        report = await writer.writeSpecs(generatedSpecs, pipelineResult.survey);
+        report = await writer.writeSpecs(generatedSpecs, pipelineResult.survey, metadataSpecs);
       } catch (error) {
         logger.error(`Failed to write specs: ${(error as Error).message}`);
         process.exitCode = 1;
@@ -660,10 +669,10 @@ Each spec.md follows OpenSpec conventions:
       // Generate RAG manifest
       try {
         const manifestGen = new RagManifestGenerator();
-        const manifest = manifestGen.generate(generatedSpecs, depGraph);
+        const manifest = manifestGen.generate(metadataSpecs, depGraph);
         const { writeFile } = await import('node:fs/promises');
         await writeFile(
-          join(fullOpenspecPath, ARTIFACT_RAG_MANIFEST),
+          safeJoin(fullOpenspecPath, ARTIFACT_RAG_MANIFEST),
           JSON.stringify(manifest, null, 2),
           'utf-8',
         );

@@ -1,6 +1,6 @@
 # The spec writer deletes human content on merge, discards validation results, and over-deletes domains that a filter never meant to remove
 
-> Status: PROPOSED (2026-07-03, e2e audit pass 4). Four fidelity defects in the shared
+> Status: IMPLEMENTED (2026-08-01, archived after adversarial review). Four fidelity defects in the shared
 > `OpenSpecWriter` (driven by both the CLI and the API generate paths). They share a theme:
 > the writer loses or misreports user content while reporting success. Distinct from
 > `restore-spec-corpus-integrity` (one-time content repair) and `delegate-lifecycle-scope-decision-sync`
