@@ -28,6 +28,7 @@ import { existsSync } from 'node:fs';
 import { readdir, rm, rename } from 'node:fs/promises';
 import { join } from 'node:path';
 import { quietNativeLoggingOnce } from './lance-logging.js';
+import { noteUpdateAndMaybeCompact } from './index-compaction.js';
 import {
   buildBm25Corpus,
   tokenize,
@@ -335,6 +336,10 @@ export class TextLineIndex {
     }
 
     TextLineIndex._patchCache(dbPath, affectedPaths, newRecords);
+    // Reclaim the versions this delete+add left behind. LanceDB is append-only, so without this
+    // the index grows without bound for as long as the watcher runs — measured at 401 MB holding
+    // 36 MB of live rows on a repository whose source is ~9 MB.
+    await noteUpdateAndMaybeCompact(dbPath, table as unknown as Parameters<typeof noteUpdateAndMaybeCompact>[1]);
     return { lines: newRecords.length };
   }
 
