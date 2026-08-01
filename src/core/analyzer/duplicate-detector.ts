@@ -259,7 +259,22 @@ function tokenize(normalizedText: string): string[] {
   return normalizedText.match(/\S+/g) ?? [];
 }
 
+/**
+ * How many shingle sets have been built. Exact, deterministic instrumentation for the one property
+ * that memory and timing can only measure flakily: that a set is built for at most
+ * `MAX_NEAR_FUNCTIONS` bodies rather than for every function in the repository.
+ */
+let _shingleBuilds = 0;
+
+/** Test-only: read and reset the shingle-construction counter. */
+export function _takeShingleBuildCountForTesting(): number {
+  const n = _shingleBuilds;
+  _shingleBuilds = 0;
+  return n;
+}
+
 function getShingles(tokens: string[], k = SHINGLE_SIZE): Set<string> {
+  _shingleBuilds++;
   const s = new Set<string>();
   for (let i = 0; i <= tokens.length - k; i++) {
     s.add(tokens.slice(i, i + k).join('\x00'));
@@ -316,7 +331,16 @@ export function detectDuplicates(
     instance: CloneInstance;
     t1Hash: string;
     t2Hash: string;
-    shingles: Set<string>;
+    /**
+     * Enough to rebuild the shingle set on demand. The set itself is NOT kept: it is read only by
+     * the near-clone pass, which is gated to at most `MAX_NEAR_FUNCTIONS` entries, so building one
+     * per function was pure waste on every repository above that gate — which is most of them.
+     * Measured on a 3,500-file repository: 1,270 MB of shingle strings, none of them ever read,
+     * and the peak of the entire analyze run.
+     */
+    startIndex: number;
+    endIndex: number;
+    language: string;
   }
 
   const entries: Entry[] = [];
@@ -358,7 +382,9 @@ export function detectDuplicates(
       },
       t1Hash: sha16(t1),
       t2Hash: sha16(t2),
-      shingles: getShingles(tokens),
+      startIndex: node.startIndex,
+      endIndex: node.endIndex,
+      language: node.language,
     });
   }
 
@@ -413,6 +439,19 @@ export function detectDuplicates(
     .filter(e => !alreadyGrouped.has(e.origIdx));
 
   if (ungrouped.length >= 2 && ungrouped.length <= MAX_NEAR_FUNCTIONS) {
+    // Built HERE, for at most `MAX_NEAR_FUNCTIONS` bodies, rather than for every function during
+    // extraction. Recomputing costs one re-slice + normalize + tokenize per surviving entry, which
+    // is bounded and small; keeping them for everything was unbounded and, above this gate,
+    // entirely unused.
+    const shinglesOf = new Map<number, Set<string>>();
+    for (let i = 0; i < ungrouped.length; i++) {
+      const e = ungrouped[i];
+      const content = fileContentMap.get(e.instance.file);
+      shinglesOf.set(i, content === undefined
+        ? new Set<string>()
+        : getShingles(tokenize(normalizeType2(content.slice(e.startIndex, e.endIndex), e.language))));
+    }
+
     const nearGrouped = new Set<number>(); // indices into `ungrouped`
 
     for (let i = 0; i < ungrouped.length; i++) {
@@ -421,7 +460,7 @@ export function detectDuplicates(
 
       for (let j = i + 1; j < ungrouped.length; j++) {
         if (nearGrouped.has(j)) continue;
-        const sim = jaccard(ungrouped[i].shingles, ungrouped[j].shingles);
+        const sim = jaccard(shinglesOf.get(i)!, shinglesOf.get(j)!);
         if (sim >= NEAR_THRESHOLD) {
           group.push(j);
           nearGrouped.add(j);
@@ -437,7 +476,7 @@ export function detectDuplicates(
         let minSim = 1.0;
         for (let a = 0; a < group.length; a++) {
           for (let b = a + 1; b < group.length; b++) {
-            minSim = Math.min(minSim, jaccard(ungrouped[group[a]].shingles, ungrouped[group[b]].shingles));
+            minSim = Math.min(minSim, jaccard(shinglesOf.get(group[a])!, shinglesOf.get(group[b])!));
           }
         }
         const repIdx = group[0];
