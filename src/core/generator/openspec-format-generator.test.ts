@@ -214,6 +214,33 @@ describe('OpenSpecFormatGenerator', () => {
       expect(paths.some(p => p.includes('/user/'))).toBe(true);
     });
 
+    // Path-traversal confinement (GHSA-5j8x-q7q6-58j5). The Stage-3 `domain` field is
+    // returned verbatim by the LLM over untrusted repository content; a traversal
+    // value must not survive into the spec's output path.
+    it('normalizes a malicious service domain into a safe in-root path', () => {
+      const generator = new OpenSpecFormatGenerator();
+      const result = createMockPipelineResult();
+      // Only this service drives a domain, so the domain spec below is unambiguous.
+      result.entities = [];
+      result.endpoints = [];
+      result.services = [
+        { ...createMockServices()[0], domain: '../../../../../../tmp/openlore_traversal_proof' },
+      ];
+
+      const specs = generator.generateSpecs(result);
+      const domainSpecs = specs.filter(s => s.type === 'domain');
+
+      expect(domainSpecs.length).toBeGreaterThan(0);
+      for (const s of domainSpecs) {
+        // No traversal segment survives, and the path stays under openspec/specs/.
+        expect(s.path).not.toContain('..');
+        expect(s.path.startsWith('openspec/specs/')).toBe(true);
+        expect(s.path.endsWith('/spec.md')).toBe(true);
+        expect(s.domain).not.toContain('/');
+        expect(s.domain).not.toContain('..');
+      }
+    });
+
     it('should not generate API spec when no endpoints', () => {
       const generator = new OpenSpecFormatGenerator();
       const result = createMockPipelineResult();

@@ -4,7 +4,9 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdir, rm, writeFile, readFile, readdir, access } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import {
   OpenSpecWriter,
@@ -117,6 +119,39 @@ Layered architecture.
 // ============================================================================
 // TESTS
 // ============================================================================
+
+// Structural guard (mcp-security: Spec-Generation Writer Confines LLM-Derived Paths;
+// GHSA-5j8x-q7q6-58j5). The spec-generation writer is the one LLM-in-the-loop write
+// surface, and it sits outside the MCP path-parameter coverage gate. This gate is its
+// equivalent: it fails if `writeSpec` ever stops confining the (LLM-derived) spec path
+// through `safeJoin`, or reverts to the vulnerable bare `join(this.rootPath, spec.path)`
+// — so a future edit cannot silently reopen the traversal.
+describe('Write confinement structural guard (mcp-security)', () => {
+  const writerSrc = readFileSync(
+    fileURLToPath(new URL('./openspec-writer.ts', import.meta.url)),
+    'utf-8',
+  );
+
+  it('imports the shared path-confinement guard', () => {
+    expect(writerSrc).toMatch(/import\s*\{[^}]*\bsafeJoin\b[^}]*\}\s*from\s*['"][^'"]*path-confinement/);
+  });
+
+  it('confines the spec write path through safeJoin', () => {
+    expect(
+      /safeJoin\(\s*this\.rootPath\s*,\s*spec\.path\s*\)/.test(writerSrc),
+      'writeSpec must resolve the spec path via safeJoin(this.rootPath, spec.path)',
+    ).toBe(true);
+  });
+
+  it('never resolves the untrusted spec path with a bare path.join (the pre-fix sink)', () => {
+    // `safeJoin(...)` carries a capital J, so this lowercase-j pattern matches only a
+    // reverted bare `join(this.rootPath, spec.path)`, not the confined call.
+    expect(
+      /\bjoin\(\s*this\.rootPath\s*,\s*spec\.path\s*\)/.test(writerSrc),
+      'writeSpec must not resolve the untrusted spec.path with an unconfined path.join',
+    ).toBe(false);
+  });
+});
 
 describe('OpenSpecWriter', () => {
   let tempDir: string;
@@ -574,6 +609,35 @@ describe('Edge Cases', () => {
 
     expect(report.filesWritten).toContain('openspec/specs/user-profile/spec.md');
     expect(await fileExists(join(tempDir, 'openspec/specs/user-profile/spec.md'))).toBe(true);
+  });
+
+  // Path-traversal confinement (GHSA-5j8x-q7q6-58j5; mcp-security: Write Confinement).
+  // `spec.path`'s domain segment derives from the Stage-3 LLM `domain` field over
+  // untrusted repo content, so a traversal value must never escape the project root.
+  it('refuses to write a spec whose path escapes the project root', async () => {
+    // Escape one level above tempDir (still inside the OS temp dir, so a regression
+    // would land here and be caught — not scattered across the filesystem).
+    const escapeDirName = `openlore-escape-proof-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const escaping: GeneratedSpec[] = [
+      {
+        path: `openspec/specs/../../../${escapeDirName}/spec.md`,
+        content: '# Escaped\n\n## Purpose\n\nShould never be written.',
+        domain: 'evil',
+        type: 'domain',
+      },
+    ];
+
+    const writer = new OpenSpecWriter({ rootPath: tempDir, updateConfig: false });
+    const report = await writer.writeSpecs(escaping, createMockSurvey());
+
+    // The escaping spec is refused, not silently written out of root.
+    expect(report.filesWritten).toHaveLength(0);
+    expect(report.warnings.some(w => /traversal|escape|outside/i.test(w))).toBe(true);
+
+    // And nothing landed outside the project root.
+    const outside = join(tmpdir(), escapeDirName, 'spec.md');
+    expect(await fileExists(outside)).toBe(false);
+    await rm(join(tmpdir(), escapeDirName), { recursive: true, force: true });
   });
 
   it('should handle deeply nested paths', async () => {

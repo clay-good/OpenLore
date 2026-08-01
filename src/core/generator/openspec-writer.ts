@@ -20,6 +20,7 @@ import {
   ARTIFACT_GENERATION_REPORT,
 } from '../../constants.js';
 import { fileExists } from '../../utils/command-helpers.js';
+import { safeJoin } from '../../utils/path-confinement.js';
 import {
   OpenSpecConfigManager,
   buildDetectedContext,
@@ -245,8 +246,26 @@ export class OpenSpecWriter {
    * Write a single spec file
    */
   private async writeSpec(spec: GeneratedSpec): Promise<WriteResult> {
-    const fullPath = join(this.rootPath, spec.path);
     const relativePath = spec.path;
+
+    // Confine every spec write to the project root through the shared, symlink-aware
+    // guard — the same one every other untrusted-path surface routes through
+    // (mcp-security: Symlink-Aware Path Confinement / Write Confinement). `spec.path`'s
+    // domain segment derives from the Stage-3 LLM `domain` field over untrusted repo
+    // content, so a traversal value must never escape the root (GHSA-5j8x-q7q6-58j5).
+    // Fail closed for this one spec and let the rest proceed.
+    let fullPath: string;
+    try {
+      fullPath = safeJoin(this.rootPath, spec.path);
+    } catch (error) {
+      logger.warning(`Refusing to write spec outside project root: ${relativePath}`);
+      return {
+        path: relativePath,
+        action: 'written',
+        success: false,
+        error: (error as Error).message,
+      };
+    }
 
     try {
       // Check if file exists
