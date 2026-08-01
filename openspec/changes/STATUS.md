@@ -17,9 +17,8 @@ validate`**, and the archive machinery works again. This pass:
   39 decision-synced requirements fixed across `cli` (22), `mcp-handlers` (15+Purpose),
   `config` (1), `overview` (1) — missing scenarios backfilled, 11 cross-domain stubs rewritten
   as normative deferrals with pointer scenarios, 3 double-"The system SHALL" glitches fixed,
-  and the missing `## Purpose` added to `mcp-handlers`. Root cause is the decision syncer's
-  template (it emits scenario-less requirements); the recurrence fix is proposed as
-  `fix-decision-sync-template-validity`.
+  and the missing `## Purpose` added to `mcp-handlers`. The decision-sync template recurrence
+  fix shipped and was archived as `2026-08-01-fix-decision-sync-template-validity`.
 - **Archived 28 changes** (as `2026-07-27-*`): the 12 formerly "built, blocked on bookkeeping",
   all 10 formerly "claims built" (each verified against the code first — all 10 were real),
   `fix-analyze-native-abort-and-file-cost-budget` (PR #294), and the 3 `defer-*` scope-decision
@@ -32,7 +31,7 @@ validate`**, and the archive machinery works again. This pass:
   because their requirements were already synced verbatim (`fix-pi-parity-drift`,
   `fix-redaction-module-gaps`).
 
-## Complete — 114 in `archive/`
+## Complete — 117 in `archive/`
 
 Everything in `openspec/changes/archive/` is shipped (or a settled won't-do), with its
 requirements reflected in the main specs. `openspec list` shows only open work.
@@ -42,11 +41,11 @@ requirements reflected in the main specs. `openspec list` shows only open work.
 No open change has partial code on `main`. A change belongs here the moment its implementation
 starts; move it back out (archive it) the moment its marker/spec evidence lands.
 
-## To build — 126 (94 in the table below + 32 landed after this pass)
+## To build — 128
 
 The whole open set is unbuilt backlog. Newest additions: 7 proposals from the 2026-07-27
-first-run e2e (`E2E-FIRSTRUN-2026-07-27.md`) and `fix-decision-sync-template-validity` from this
-repair pass. Other thematic indexes: `E2E-AUDIT-2026-07.md`, `KNOWN-LIMITATIONS-2026-07.md`,
+first-run e2e (`E2E-FIRSTRUN-2026-07-27.md`). Other thematic indexes:
+`E2E-AUDIT-2026-07.md`, `KNOWN-LIMITATIONS-2026-07.md`,
 `COMPETITIVE-SUBSTRATE-2026-07.md`.
 
 After this table was compiled, four research sweeps added 32 more proposals (all validate; not yet
@@ -107,7 +106,6 @@ trust boundary for served content.
 | `fix-commit-gate-delivery` | install hooks where git actually looks, and version the machine contract |
 | `fix-complexity-language-parity` | Go/Ruby/Rust/Swift/Elixir report ~1 regardless of shape |
 | `fix-config-validation-completeness` | Config validation must catch what actually breaks the run, and `doctor` must not bless a config that does |
-| `fix-decision-sync-template-validity` | the syncer must emit schema-valid requirements |
 | `fix-drift-reporting-honesty` | silent truncation, hook failures reported as drift, and invisible memory-staleness kinds |
 | `fix-empty-orient-and-corpus-honesty` | a zero-match briefing explains itself, and the corpus contains only real symbols |
 | `fix-first-analysis-self-contamination` | install's own artifacts must not skew the user's repo |
@@ -160,7 +158,7 @@ trust boundary for served content.
 ## Maintenance rules (what kept this table honest)
 
 - Ship a `change: <name>` marker in the code, or expect this table to call the change unbuilt.
-- Never let a decision sync write a scenario-less requirement (see
-  `fix-decision-sync-template-validity`); `openspec validate --specs` must stay at 15/15.
+- Never let a decision sync write a scenario-less requirement (see archived
+  `2026-08-01-fix-decision-sync-template-validity`); `openspec validate --specs` must stay green.
 - Archive promptly: a built change sitting open makes every count in this file wrong.
 - Re-verify this file by re-running the evidence pass, not by trusting it.

@@ -7,7 +7,7 @@
  */
 
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { fileExists } from '../../utils/command-helpers.js';
 import { safeJoin } from '../../utils/path-confinement.js';
 import { logger } from '../../utils/logger.js';
@@ -129,10 +129,11 @@ async function syncDecision(
   decision: PendingDecision,
   options: SyncOptions,
 ): Promise<string[]> {
+  validateDecisionRenderInputs(decision);
   const modified: string[] = [];
 
   // Resolve each affected domain to a real spec file, preserving order.
-  const resolved: Array<{ specPath: string; specAbsPath: string }> = [];
+  const resolved: Array<{ domain: string; specPath: string; specAbsPath: string }> = [];
   for (const domain of decision.affectedDomains) {
     const mapping = options.specMap.byDomain.get(domain);
     if (!mapping) {
@@ -154,13 +155,14 @@ async function syncDecision(
     }
     if (!(await fileExists(specAbsPath))) continue;
 
-    resolved.push({ specPath: mapping.specPath, specAbsPath });
+    resolved.push({ domain, specPath: mapping.specPath, specAbsPath });
   }
 
   // Scope the write to a single owning domain: the first affected domain that
   // resolves to a spec gets the full requirement + Decisions entry; every other
-  // affected domain gets a one-line pointer to it. Fanning the full block to
-  // every domain (the old behavior) produced verbatim cross-domain duplicates —
+  // affected domain gets a normative deferral to it, or a Decisions pointer when
+  // there is no proposed requirement to defer to. Fanning the full block to every
+  // domain (the old behavior) produced verbatim cross-domain duplicates —
   // e.g. an MCP-preset requirement bolted onto the drift, analyzer, and cli specs.
   // (Requirement: DecisionSyncWritesOneOwningDomain)
   const [owner, ...others] = resolved;
@@ -170,7 +172,13 @@ async function syncDecision(
 
     for (const other of others) {
       if (!options.dryRun) {
-        await appendDecisionPointer(other.specAbsPath, decision, owner.specPath);
+        await appendDecisionPointer(
+          other.specAbsPath,
+          other.specPath,
+          decision,
+          owner.domain,
+          owner.specPath,
+        );
       }
       modified.push(other.specPath);
     }
@@ -206,40 +214,70 @@ async function appendToSpec(specPath: string, decision: PendingDecision): Promis
   await writeFile(specPath, content, 'utf-8');
 }
 
-/**
- * Write a one-line pointer into a non-owning affected domain's spec. The full
- * decision (requirement block + Decisions entry) lives in the owning domain; the
- * other affected domains only reference it, so a decision that touches N domains
- * appears in full exactly once. (Requirement: DecisionSyncWritesOneOwningDomain)
- */
+/** Write a schema-valid deferral or decision pointer into a non-owning domain.
+ * The canonical requirement/decision entry still appears in full only once.
+ * (Requirement: DecisionSyncWritesOneOwningDomain) */
 async function appendDecisionPointer(
   specPath: string,
+  mappedSpecPath: string,
   decision: PendingDecision,
+  ownerDomain: string,
   ownerSpecPath: string,
 ): Promise<void> {
   const content = await readFile(specPath, 'utf-8');
-  const next = appendDecisionPointerLine(content, decision, ownerSpecPath);
+  const next = appendDecisionPointerLine(
+    content,
+    mappedSpecPath,
+    decision,
+    ownerDomain,
+    ownerSpecPath,
+  );
   if (next !== content) await writeFile(specPath, next, 'utf-8');
 }
 
 function appendDecisionPointerLine(
   content: string,
+  mappedSpecPath: string,
   decision: PendingDecision,
+  ownerDomain: string,
   ownerSpecPath: string,
 ): string {
   // Idempotent by a marker distinct from the full-entry markers
   // (`> Decision recorded:` / `**ID:**`), so a re-sync never duplicates the
   // pointer and a domain that already holds the full entry is left untouched.
   const marker = `> Decision pointer: ${decision.id}`;
-  if (content.includes(marker) || content.includes(`**ID:** ${decision.id}`)) {
+  if (hasDecisionPointer(content, decision.id) || hasDecisionEntry(content, decision.id)) {
     return content;
   }
-  const line = `${marker} — "${decision.title}" is recorded in \`${ownerSpecPath}\`; it also affects this domain.`;
-
-  if (content.includes('## Decisions')) {
-    return content.trimEnd() + '\n\n' + line + '\n';
+  if (!decision.proposedRequirement) {
+    const line = `${marker} — "${decision.title}" is recorded in \`${ownerSpecPath}\`; it also affects this domain.`;
+    if (content.includes('## Decisions')) {
+      return content.trimEnd() + '\n\n' + line + '\n';
+    }
+    return content.trimEnd() + '\n\n## Decisions\n\n' + line + '\n';
   }
-  return content.trimEnd() + '\n\n## Decisions\n\n' + line + '\n';
+
+  const slug = toPascalCase(decision.title);
+  const relativeOwnerPath = relative(dirname(mappedSpecPath), ownerSpecPath)
+    .replaceAll('\\', '/')
+    .split('/')
+    .map((segment) => encodeURIComponent(segment))
+    .join('/');
+  const block = `### Requirement: ${slug}
+
+This domain SHALL conform to the canonical statement of decision \`${decision.id}\`, which lives in the
+\`${ownerDomain}\` domain — see [${ownerDomain}/spec.md](${relativeOwnerPath}).
+
+#### Scenario: The canonical statement governs
+
+- **GIVEN** decision \`${decision.id}\` recorded in the \`${ownerDomain}\` domain
+- **WHEN** this domain's behavior touches that decision's surface
+- **THEN** it satisfies the canonical requirement as stated in [${ownerDomain}/spec.md](${relativeOwnerPath})
+
+${marker} — "${decision.title}" is recorded in \`${ownerSpecPath}\`; it also affects this domain.
+`;
+  validateDecisionRequirementBlock(block, decision.id);
+  return insertRequirementBlock(content, block);
 }
 
 function addSourceFiles(content: string, newFiles: string[]): string {
@@ -261,18 +299,128 @@ function appendRequirement(content: string, decision: PendingDecision): string {
   // Idempotent: if this decision's requirement was already synced (by id), don't
   // append a second copy. Re-syncs and consolidation ID churn would otherwise
   // duplicate the block. The id marker is the stable dedupe key.
-  if (content.includes(`> Decision recorded: ${decision.id}`)) return content;
+  if (hasDecisionRequirement(content, decision.id)) return content;
   const slug = toPascalCase(decision.title);
   const req = decision.proposedRequirement ?? '';
-  const reqText = /^the system shall\b/i.test(req.trim()) ? req.trim() : `The system SHALL ${req}`;
-  const block = `
-### Requirement: ${slug}
+  const reqText = normalizeRequirementStatement(req, decision.id);
+  const block = `### Requirement: ${slug}
 
 ${reqText}
 
 > Decision recorded: ${decision.id}
 > Date: ${decision.syncedAt ?? new Date().toISOString().slice(0, 10)}
+
+#### Scenario: The decision requirement is enforced
+
+- **GIVEN** approved decision \`${decision.id}\`
+- **WHEN** the affected behavior is evaluated
+- **THEN** ${reqText}
 `;
+  validateDecisionRequirementBlock(block, decision.id);
+
+  return insertRequirementBlock(content, block);
+}
+
+/** Named failure surfaced as a per-decision sync error.
+ * (change: fix-decision-sync-template-validity) */
+class DecisionRequirementValidationError extends Error {
+  constructor(decisionId: string, detail: string) {
+    super(`DecisionRequirementValidationError [${decisionId}]: ${detail}`);
+    this.name = 'DecisionRequirementValidationError';
+  }
+}
+
+function validateDecisionRenderInputs(decision: PendingDecision): void {
+  const fields: Array<[string, string]> = [
+    ['id', decision.id],
+    ['title', decision.title],
+    ...(decision.proposedRequirement == null
+      ? []
+      : [['proposedRequirement', decision.proposedRequirement] as [string, string]]),
+    ...decision.affectedDomains.map((value, index) => [`affectedDomains[${index}]`, value] as [string, string]),
+    ...decision.affectedFiles.map((value, index) => [`affectedFiles[${index}]`, value] as [string, string]),
+  ];
+  const multiline = fields.find(([, value]) => /[\r\n]/.test(value));
+  if (multiline) {
+    throw new DecisionRequirementValidationError(
+      decision.id,
+      `${multiline[0]} must be a single line`,
+    );
+  }
+  for (const [field, value] of [
+    ['rationale', decision.rationale],
+    ['consequences', decision.consequences],
+  ] as const) {
+    if (/^#{1,6}[ \t]+\S/m.test(value)) {
+      throw new DecisionRequirementValidationError(
+        decision.id,
+        `${field} must not contain Markdown headings`,
+      );
+    }
+  }
+}
+
+function normalizeRequirementStatement(requirement: string, decisionId: string): string {
+  const trimmed = requirement.trim();
+  if (!trimmed) return trimmed;
+  if (/[\r\n]/.test(trimmed)) {
+    throw new DecisionRequirementValidationError(
+      decisionId,
+      'proposed requirement must be a single line',
+    );
+  }
+
+  // Preserve an existing subject + normative modal (for example, "The orient
+  // command SHALL ..."). A leading modal has no subject, so supply only the
+  // subject; plain prose receives the complete default clause.
+  const subjectModal = trimmed.match(/^(.+?\s+)(SHALL|MUST)\b/i);
+  if (subjectModal) {
+    return subjectModal[1] + subjectModal[2].toUpperCase() + trimmed.slice(subjectModal[0].length);
+  }
+  const leadingModal = trimmed.match(/^(SHALL|MUST)\b/i);
+  if (leadingModal) {
+    return `The system ${leadingModal[1].toUpperCase()}${trimmed.slice(leadingModal[0].length)}`;
+  }
+  return `The system SHALL ${trimmed}`;
+}
+
+function validateDecisionRequirementBlock(block: string, decisionId: string): void {
+  if ((block.match(/^### Requirement:/gm) ?? []).length !== 1) {
+    throw new DecisionRequirementValidationError(
+      decisionId,
+      'rendered block must contain exactly one requirement heading',
+    );
+  }
+
+  const heading = block.match(/^### Requirement:[ \t]*(\S.*)$/m)?.[1]?.trim();
+  if (!heading) {
+    throw new DecisionRequirementValidationError(decisionId, 'missing requirement heading');
+  }
+
+  const statement = block
+    .slice(block.indexOf('\n') + 1, block.indexOf('#### Scenario:'))
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('>'))
+    .join(' ');
+  if (!/^.+?\s+(SHALL|MUST)\b/.test(statement)) {
+    throw new DecisionRequirementValidationError(
+      decisionId,
+      'requirement statement must contain a coherent subject followed by SHALL or MUST',
+    );
+  }
+
+  if (!/^#### Scenario:[ \t]*\S.*$/m.test(block)) {
+    throw new DecisionRequirementValidationError(decisionId, 'missing scenario heading');
+  }
+  for (const clause of ['GIVEN', 'WHEN', 'THEN']) {
+    if (!new RegExp(`^- \\*\\*${clause}\\*\\*\\s+\\S`, 'm').test(block)) {
+      throw new DecisionRequirementValidationError(decisionId, `scenario missing ${clause} clause`);
+    }
+  }
+}
+
+function insertRequirementBlock(content: string, block: string): string {
 
   // Insert before ## Technical Notes or ## Architecture Notes or append before ## Decisions
   const sectionMatch = content.match(
@@ -281,17 +429,17 @@ ${reqText}
   if (sectionMatch && sectionMatch.index !== undefined) {
     return (
       content.slice(0, sectionMatch.index).trimEnd() +
-      '\n' + block.trimStart() + '\n' +
+      '\n\n' + block.trim() + '\n\n' +
       content.slice(sectionMatch.index)
     );
   }
 
-  return content.trimEnd() + '\n' + block;
+  return content.trimEnd() + '\n\n' + block.trim() + '\n';
 }
 
 function appendDecisionSection(content: string, decision: PendingDecision): string {
   // Idempotent: skip if this decision's entry (by id) is already present.
-  if (content.includes(`**ID:** ${decision.id}`)) return content;
+  if (hasDecisionEntry(content, decision.id)) return content;
   const entry = buildDecisionEntry(decision);
 
   if (content.includes('## Decisions')) {
@@ -299,6 +447,25 @@ function appendDecisionSection(content: string, decision: PendingDecision): stri
   }
 
   return content.trimEnd() + '\n\n## Decisions\n\n' + entry.trimStart();
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function hasDecisionEntry(content: string, decisionId: string): boolean {
+  return new RegExp(`^\\*\\*ID:\\*\\*[ \\t]+${escapeRegExp(decisionId)}[ \\t]*$`, 'm')
+    .test(content);
+}
+
+function hasDecisionRequirement(content: string, decisionId: string): boolean {
+  return new RegExp(`^> Decision recorded:[ \\t]+${escapeRegExp(decisionId)}[ \\t]*$`, 'm')
+    .test(content);
+}
+
+function hasDecisionPointer(content: string, decisionId: string): boolean {
+  return new RegExp(`^> Decision pointer:[ \\t]+${escapeRegExp(decisionId)}(?:[ \\t]|$)`, 'm')
+    .test(content);
 }
 
 /** Human-visible status label for a spec Decisions entry. Auto-accepted

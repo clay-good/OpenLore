@@ -1,6 +1,6 @@
 # Fix decision-sync template validity: the syncer must emit schema-valid requirements
 
-> Status: PROPOSED (2026-07-27, spec-backlog repair pass). The 2026-07-27 corpus repair fixed 39
+> Status: IMPLEMENTED (2026-08-01). The 2026-07-27 corpus repair fixed 39
 > requirements that failed `openspec validate` — and every one of them was emitted by the decision
 > syncer. The syncer's own template is the defect: it writes requirements the schema rejects, so
 > the corpus rots again on every future `openlore decisions --sync`. This change fixes the
@@ -30,8 +30,7 @@ All three defect shapes trace to `appendRequirement` / the cross-domain stub wri
 
 - **The template emits a valid requirement.** The synced block gains a minimal deterministic
   scenario derived from the decision (no LLM): a `#### Scenario:` whose THEN restates the
-  requirement statement as an observable outcome. Where the decision's consolidation already
-  produced scenario-shaped acceptance criteria, those are used instead.
+  requirement statement as an observable outcome.
 - **Prefixing becomes grammar-aware.** The `The system SHALL` prefix is applied only when the
   proposed requirement does not already contain a SHALL/MUST clause with its own subject.
 - **Stubs use the repaired cross-reference form.** The cross-domain writer emits the normative
