@@ -210,6 +210,83 @@ export async function computeFileImportEdges(
 }
 
 /**
+ * Normalize a cycle to a rotation-invariant key: drop the repeated closing node, rotate so the
+ * lexicographically smallest node is first, join. Two rotations of the same cycle map to one key.
+ */
+function normalizeCycleKey(cycle: string[]): string {
+  const clean = cycle.slice(0, -1); // remove the duplicate closing element
+  if (clean.length === 0) return '';
+  const minIdx = clean.indexOf(clean.reduce((min, curr) => (curr < min ? curr : min)));
+  return [...clean.slice(minIdx), ...clean.slice(0, minIdx)].join('|');
+}
+
+/**
+ * Detect cycles in a directed graph via DFS back-edges — ITERATIVELY, with an explicit frame stack.
+ *
+ * A recursive DFS here is a latent process-abort: on a repository with a long import/dependency
+ * chain the recursion depth equals the chain length, and a chain of a few thousand files overflows
+ * the JS call stack with `RangeError: Maximum call stack size exceeded`, aborting `analyze` for the
+ * whole repository (issue #302 follow-up: no fatal crash for any repo shape; same lesson as the
+ * iterative parse-health walk and the iterative Tarjan SCC in condensation.ts).
+ *
+ * Output is IDENTICAL to the previous recursive implementation: each frame remembers its position
+ * in its neighbor list, so nodes are entered and exited in the exact same order, back-edges are
+ * detected at the same points, and the same cycles are recorded in the same order. Deduplication is
+ * by rotation-invariant key through a Set — the same result the previous pairwise scan produced,
+ * without its O(cycles²) cost on a graph with many cycles.
+ */
+export function detectDependencyCycles(
+  adjacencyList: ReadonlyMap<string, ReadonlySet<string>>,
+  nodeIds: Iterable<string>,
+): string[][] {
+  const cycles: string[][] = [];
+  const seenKeys = new Set<string>();
+  const visited = new Set<string>();
+  const recursionStack = new Set<string>();
+  const path: string[] = [];
+
+  interface Frame { node: string; neighbors: string[]; index: number; }
+
+  // Mark a node on entry (exactly as the recursion did at function entry) and build its frame.
+  const enter = (node: string): Frame => {
+    visited.add(node);
+    recursionStack.add(node);
+    path.push(node);
+    return { node, neighbors: [...(adjacencyList.get(node) ?? [])], index: 0 };
+  };
+
+  for (const rootId of nodeIds) {
+    if (visited.has(rootId)) continue;
+    const stack: Frame[] = [enter(rootId)];
+    while (stack.length > 0) {
+      const frame = stack[stack.length - 1];
+      if (frame.index < frame.neighbors.length) {
+        const neighbor = frame.neighbors[frame.index++];
+        if (!visited.has(neighbor)) {
+          stack.push(enter(neighbor)); // descend — equivalent to the recursive call
+        } else if (recursionStack.has(neighbor)) {
+          // Back-edge: the neighbor is on the current path, so path[cycleStart..] is a cycle.
+          const cycle = path.slice(path.indexOf(neighbor));
+          cycle.push(neighbor); // complete the cycle
+          const key = normalizeCycleKey(cycle);
+          if (!seenKeys.has(key)) {
+            seenKeys.add(key);
+            cycles.push(cycle);
+          }
+        }
+      } else {
+        // Neighbors exhausted — leave the node, exactly as the recursion did on return.
+        path.pop();
+        recursionStack.delete(frame.node);
+        stack.pop();
+      }
+    }
+  }
+
+  return cycles;
+}
+
+/**
  * Builds and analyzes a dependency graph from scored files
  */
 export class DependencyGraphBuilder {
@@ -636,81 +713,11 @@ export class DependencyGraphBuilder {
   }
 
   /**
-   * Detect cycles in the dependency graph using DFS
+   * Detect cycles in the dependency graph. Delegates to the module-level iterative implementation
+   * so a deep import chain cannot overflow the call stack (see {@link detectDependencyCycles}).
    */
   private detectCycles(): string[][] {
-    const cycles: string[][] = [];
-    const visited = new Set<string>();
-    const recursionStack = new Set<string>();
-    const path: string[] = [];
-
-    const dfs = (node: string): void => {
-      visited.add(node);
-      recursionStack.add(node);
-      path.push(node);
-
-      const neighbors = this.adjacencyList.get(node) ?? new Set();
-      for (const neighbor of neighbors) {
-        if (!visited.has(neighbor)) {
-          dfs(neighbor);
-        } else if (recursionStack.has(neighbor)) {
-          // Found a cycle
-          const cycleStart = path.indexOf(neighbor);
-          const cycle = path.slice(cycleStart);
-          cycle.push(neighbor); // Complete the cycle
-
-          // Check if this cycle is not a duplicate (or rotation of existing)
-          if (!this.isDuplicateCycle(cycles, cycle)) {
-            cycles.push(cycle);
-          }
-        }
-      }
-
-      path.pop();
-      recursionStack.delete(node);
-    };
-
-    for (const nodeId of this.nodes.keys()) {
-      if (!visited.has(nodeId)) {
-        dfs(nodeId);
-      }
-    }
-
-    return cycles;
-  }
-
-  /**
-   * Check if a cycle is a duplicate or rotation of an existing cycle
-   */
-  private isDuplicateCycle(existingCycles: string[][], newCycle: string[]): boolean {
-    const normalizedNew = this.normalizeCycle(newCycle);
-
-    for (const existing of existingCycles) {
-      const normalizedExisting = this.normalizeCycle(existing);
-      if (normalizedNew === normalizedExisting) {
-        return true;
-      }
-    }
-
-    return false;
-  }
-
-  /**
-   * Normalize a cycle for comparison (smallest element first, then compare)
-   */
-  private normalizeCycle(cycle: string[]): string {
-    // Remove the duplicate closing element
-    const clean = cycle.slice(0, -1);
-    if (clean.length === 0) return '';
-
-    // Find the smallest element
-    const minIdx = clean.indexOf(
-      clean.reduce((min, curr) => (curr < min ? curr : min))
-    );
-
-    // Rotate so smallest is first
-    const rotated = [...clean.slice(minIdx), ...clean.slice(0, minIdx)];
-    return rotated.join('|');
+    return detectDependencyCycles(this.adjacencyList, this.nodes.keys());
   }
 
   /**
