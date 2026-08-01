@@ -58,6 +58,11 @@ The system SHALL provide deterministic, locally-computed structural context as a
 > Decision recorded: c6d1ad07
 > Date: 2026-06-01
 
+#### Scenario: Capabilities are grounded in static analysis
+
+- **WHEN** any capability serves structural context to an agent
+- **THEN** the answer is computed deterministically and locally from static analysis, with no LLM in the retrieval or guardrail path
+
 ## Technical Notes
 
 - **Architecture Style**: Layered architecture — CLI interface → API layer → service layer → analyzer → repository/store — chosen for clear separation of concerns and a single structural substrate shared by both faces.

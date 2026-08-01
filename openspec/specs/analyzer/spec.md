@@ -4318,6 +4318,285 @@ the build result for the CLI to render.
 - **THEN** the parse-health accounting matches what the serial path would record for the same
   file, and a grammar-unavailable warning is reported once for the run rather than once per worker
 
+### Requirement: ParseHealthIsRecordedAndDisclosed
+
+The analyzer SHALL record a per-file parse-health record during extraction for any file whose parse
+is degraded: the count and line spans of tree-sitter ERROR / MISSING nodes, an outright parse
+failure, or a lossy (encoding-fallback) decode. The record SHALL be tallied in the same per-file
+AST walk that extracts nodes and edges (no second parse). A per-file extraction failure SHALL
+produce a structured parse-health record — never a silently discarded error — while remaining
+fail-soft (one bad file never aborts the build). Records SHALL be rolled up and persisted as their
+own analysis artifact and maintained incrementally by the watcher (created when a change first
+degrades a file, removed when the last degraded file is repaired). A clean file SHALL produce no
+record and a clean repository SHALL write no artifact, so healthy repositories pay zero.
+
+Parse health SHALL be a SOUND LOWER BOUND: a `hasError` signal with no confirmed ERROR/MISSING node
+is dropped rather than fabricated, and grammars whose parser lifecycle makes `hasError` untrustworthy
+(the shared-heap WASM grammars) are fail-soft — not tallied — so a parse-health record is never a
+false positive. Which grammars are excluded is a disclosed property of the loader, not a guess.
+
+The conformance suite SHALL assert that its own native-grammar fixtures parse with zero ERROR/MISSING
+nodes, so a grammar upgrade that degrades extraction fails CI rather than silently shrinking graphs
+in the field.
+
+#### Scenario: A file with a syntax error yields a lower-bound disclosure, not a silent gap
+
+- **GIVEN** a supported-language file containing a syntax error the grammar cannot recover cleanly
+- **WHEN** `analyze` runs
+- **THEN** symbols outside the ERROR region are still extracted
+- **AND** the file's parse-health record reports the ERROR region count and spans
+
+#### Scenario: A lossy decode is disclosed, not omitted
+
+- **GIVEN** a file whose UTF-8 decode was lossy (contained the U+FFFD replacement character)
+- **WHEN** `analyze` runs
+- **THEN** the parse-health record marks the encoding fallback
+- **AND** no conclusion presents that file's absence of symbols as verified emptiness
+
+#### Scenario: Grammar drift fails the conformance canary
+
+- **GIVEN** a tree-sitter grammar upgrade that makes a native-grammar fixture parse with ERROR/MISSING nodes
+- **WHEN** the conformance suite parses its fixtures
+- **THEN** the resulting parse-health record fails the suite
+
+#### Scenario: A clean repository records nothing
+
+- **GIVEN** a repository whose files all parse cleanly
+- **WHEN** `analyze` runs
+- **THEN** no parse-health artifact is written
+
+### Requirement: ExtractionWorkerFaultsAreContainedNotFatal
+
+A fault raised inside a parallel extraction worker — including one that crosses the worker boundary
+as a native exception, an `uncaughtException`, an unhandled rejection, or a non-zero worker exit —
+SHALL be converted into a structured per-file signal and SHALL NOT terminate the analyzer process
+abnormally. The build SHALL continue over the remaining files. When the pool cannot continue at all,
+the analyzer SHALL surface a JavaScript-level error identifying the file and a remedy, and exit with
+a non-zero status through the normal error path — never through `abort()`.
+
+A worker fault SHALL degrade the extraction LANE, not the file: the file SHALL be re-extracted on
+the main thread — the reference implementation — and the fault disclosed on the lane, rather than
+the file being recorded as failed. A fault is evidence about the thread, not about the source it was
+reading, and recording it against the file would silently shrink the graph by exactly one file.
+
+No traversal of a parsed tree SHALL be bounded by the call stack. Tree depth is not bounded by
+anything the analyzer controls, and error recovery — the condition under which the parse-health
+walk runs — is precisely what produces the deepest trees. A stack overflow raised while executing
+inside a native binding's node accessor is not catchable as a JavaScript error and terminates the
+process.
+
+#### Scenario: A deep tree is traversed without exhausting the stack
+
+- **GIVEN** a parsed tree far deeper than the available call stack
+- **WHEN** parse health is tallied over it
+- **THEN** the tally completes and reports the error regions it found
+
+#### Scenario: A native worker fault degrades one file instead of killing the run
+
+- **GIVEN** a repository containing one file whose extraction faults inside a worker, plus 600 files
+  that extract cleanly
+- **WHEN** `openlore analyze` runs with the parallel extraction pool engaged
+- **THEN** the process exits 0, artifacts are written for all 601 files, and the fault is disclosed
+  on the extraction lane — the faulted file having been re-extracted on the main thread
+
+#### Scenario: A fatal pool failure is reported, not aborted
+
+- **GIVEN** an extraction pool that cannot continue after a worker fault
+- **WHEN** `openlore analyze` runs
+- **THEN** it prints an `[error]` line naming the file and the remedy and exits non-zero
+- **AND** the output contains no native runtime abort text and the exit status is not 134
+
+#### Scenario: Worker faults never corrupt the artifact set
+
+- **GIVEN** a run in which one of several workers faults mid-extraction
+- **WHEN** the analyzer writes its artifacts
+- **THEN** the artifacts describe exactly the files that extracted successfully, and the failed file
+  is absent from the graph and present in the parse-health record — never half-written into both
+
+### Requirement: PerFileExtractionCostIsBounded
+
+Extraction of a single file SHALL be bounded by a wall-clock budget expressed as a named constant.
+The bound SHALL be enforced IN-BAND, inside the parse itself, rather than by an external timer or by
+terminating the thread holding the parse: a tree-sitter parse is one synchronous native call, so a
+timer cannot preempt it and terminating mid-parse is what converts a slow file into a process-level
+abort. A binding that cannot accept the deadline SHALL parse unbounded, as before, and SHALL NOT
+fail the file.
+
+A file exceeding the budget SHALL be abandoned, recorded with reason `budget-exceeded` and the
+budget it exceeded, and SHALL NOT block completion of the run. Abandoning a file SHALL cost that
+file's budget ONCE for the whole build: a later pass that would re-read the same content SHALL skip
+it rather than spend the budget again. The default budget SHALL be generous enough that ordinary
+source files — including large generated and vendored files — are never affected, and SHALL be
+operator-overridable, including a value that disables the bound entirely. Abandoning a file SHALL be
+reported, never silent: a bounded result is a lower bound and must read as one.
+
+Abandoning a parse SHALL leave the parser fit to parse the next file. A suspended parse that is
+resumed by the next file's parse would silently corrupt every subsequent file in that language,
+which is a worse failure than the unbounded parse this bound replaces.
+
+#### Scenario: A pathological file is abandoned rather than stalling the run
+
+- **GIVEN** a 300 KB file of a repeated unterminated block-comment opener, alongside ordinary sources
+- **WHEN** `openlore analyze` runs
+- **THEN** the run completes, that file is recorded as `budget-exceeded` with the budget it
+  exceeded, and the remaining files are analyzed normally
+
+#### Scenario: The file after an abandoned one is unaffected
+
+- **GIVEN** an abandoned file followed by an ordinary file in the same language
+- **WHEN** extraction continues
+- **THEN** the ordinary file yields its symbols in full and carries no parse-health record
+
+#### Scenario: The record is the same on every run
+
+- **GIVEN** a repository containing a file that exceeds the budget
+- **WHEN** it is analyzed twice from the same repository state
+- **THEN** the persisted parse-health record is byte-identical across the two runs
+
+#### Scenario: Ordinary large files are unaffected
+
+- **GIVEN** a repository containing a 1.5 MB generated client and a large minified vendor bundle that
+  extract within the budget
+- **WHEN** `openlore analyze` runs
+- **THEN** no file is recorded as `budget-exceeded` and the graph is identical to a run with the
+  budget disabled
+
+#### Scenario: A conclusion over an abandoned file discloses the boundary
+
+- **GIVEN** an analysis in which one file was abandoned for exceeding the budget
+- **WHEN** a conclusion tool returns a result whose reachable set touches that file
+- **THEN** the response discloses that symbols and edges from that file are a lower bound
+
+### Requirement: EveryExcludedFileIsRecordedWithAReason
+
+Every file the analyzer declines to include SHALL be recorded with a machine-readable reason — parse
+failure, budget exceeded, or size cap — in the parse-health record, and every producer of that
+record (the full build and the incremental watcher alike) SHALL use the same vocabulary. The reason
+set SHALL name only causes that can actually occur: a cause with no code path SHALL NOT be listed.
+
+A bare count of skipped files with no reasons SHALL NOT be the only report. Any surface that reports
+on extraction health SHALL read that single record, so two surfaces cannot give contradictory
+answers about the same repository. Where the analyzer excludes files BEFORE extraction — the
+directory/pattern walk — the count SHALL likewise be reported by reason rather than bare.
+
+The record SHALL be deterministic: it is persisted, and re-analyzing an unchanged repository must
+reproduce it byte-for-byte, so a measured duration SHALL NOT be stored in it.
+
+#### Scenario: The skip summary names reasons
+
+- **GIVEN** a repository in which three files are excluded for two different reasons
+- **WHEN** `openlore analyze` completes
+- **THEN** the summary reports the count broken down by reason rather than a bare total
+
+#### Scenario: Health surfaces agree
+
+- **GIVEN** a repository in which at least one file was excluded
+- **WHEN** `openlore doctor` reports extraction health for that repository
+- **THEN** it reports the same excluded files and reasons the analysis recorded, and does not report
+  a clean bill of health
+
+### Requirement: IdentifierAwareKeywordTokenization
+
+The keyword (BM25) retrieval tokenizer SHALL segment compound identifiers — camelCase, PascalCase,
+snake_case, and kebab-case — into their constituent sub-tokens AND retain the original compound
+token, with the identical tokenizer applied at index time and query time through a single shared
+implementation. Tokenization SHALL remain deterministic and introduce no new tuning constants; the
+existing BM25 parameters are reused unchanged. The persisted text index SHALL carry a
+tokenizer-version stamp, and a version mismatch SHALL trigger a rebuild rather than serving
+mixed-token results, mirroring the established model-changed deferral discipline for embedding
+vectors.
+
+#### Scenario: A sub-word query finds a compound identifier
+
+- **GIVEN** a keyword-mode index containing a function named `getUserById`
+- **WHEN** the user searches for `user` (or `getUser`)
+- **THEN** `getUserById` is returned as a match, because its sub-tokens were indexed
+
+#### Scenario: Naming conventions are equivalent
+
+- **GIVEN** functions named `getUserById`, `get_user_by_id`, and `get-user-by-id`
+- **WHEN** the same sub-word query is issued against each
+- **THEN** all three tokenize to the same sub-token set and match equivalently
+
+#### Scenario: The exact compound still wins
+
+- **GIVEN** the compound token is retained in the index
+- **WHEN** the user queries the full identifier `getUserById`
+- **THEN** the exact function ranks at least as well as under the previous tokenizer
+
+#### Scenario: Tokenizer skew rebuilds, never mixes
+
+- **GIVEN** a text index persisted under a previous tokenizer version
+- **WHEN** a query or incremental update runs under the new tokenizer
+- **THEN** the version mismatch is detected and the index is rebuilt (or the update deferred with
+  disclosure), and results are never served from a mixed-token corpus
+
+### Requirement: PersistedKeywordCorpusGuardedByTokenizerStamp
+
+The keyword (BM25) corpus for the function index SHALL be persisted to a sidecar artifact stamped
+with the tokenizer version that produced it. On load, a sidecar whose stamp equals the running
+`TOKENIZER_VERSION` SHALL hydrate the corpus without re-tokenizing any document; a missing, corrupt,
+or version-mismatched sidecar SHALL cause the corpus to be rebuilt from the persisted raw text under
+the current tokenizer and re-persisted. A persisted corpus SHALL NEVER be served when its tokenizer
+version does not match `TOKENIZER_VERSION`. An incremental update that mutates the index SHALL
+invalidate the sidecar so a subsequent load does not hydrate a corpus that predates the update.
+Persistence SHALL be deterministic, introduce no new tuning constants, and reuse the existing
+`TOKENIZER_VERSION`; a separate corpus schema-version stamp MAY version the serialization format.
+Fallback to rebuilding from raw text SHALL NEVER surface as a hard failure.
+
+#### Scenario: Cold start hydrates from the sidecar without re-tokenizing
+
+- **GIVEN** a persisted keyword corpus whose tokenizer stamp equals `TOKENIZER_VERSION`
+- **WHEN** the first keyword query runs in a fresh process (empty in-memory corpus cache)
+- **THEN** the corpus is loaded from the sidecar and no document is re-tokenized, and the query
+  returns the same results as a corpus built directly from the same rows
+
+#### Scenario: A tokenizer-version mismatch rebuilds, never serves mixed
+
+- **GIVEN** a sidecar written under an older tokenizer version
+- **WHEN** a keyword query runs under a newer `TOKENIZER_VERSION`
+- **THEN** the sidecar is ignored, the corpus is rebuilt from raw text under the current tokenizer,
+  results are never served from the stale sidecar, and the sidecar is re-stamped to the current
+  version
+
+#### Scenario: A missing or corrupt sidecar degrades, never fails
+
+- **GIVEN** a legacy index with no sidecar, or a sidecar that does not parse
+- **WHEN** a keyword query runs
+- **THEN** the corpus is rebuilt from the persisted raw text (the pre-change behavior) with no hard
+  failure, and the sidecar is (re)written for the next process
+
+#### Scenario: An incremental update invalidates the persisted corpus
+
+- **GIVEN** a persisted keyword corpus
+- **WHEN** an incremental update patches the index for changed files
+- **THEN** the sidecar is invalidated, so the next cold start rebuilds the corpus from raw text
+  rather than hydrating one that predates the patch
+
+### Requirement: GitPathOutputFidelity
+
+Every subprocess that parses file paths from git stdout (history, provenance, coupling, staged
+files) SHALL disable git's path quoting (`-c core.quotepath=false`, or NUL-terminated output where
+the format supports it) so that paths containing non-ASCII bytes arrive as literal repo-relative
+paths, not quoted octal-escaped strings. The discipline SHALL live in one shared helper adopted by
+all call sites, and an automated guard SHALL fail when a new path-parsing git spawn omits it —
+history-derived joins (provenance, churn, co-change) MUST NOT silently exclude files whose names
+are not ASCII.
+
+#### Scenario: A non-ASCII filename joins history to the graph
+
+- **GIVEN** a repository containing a committed file `src/café.ts`
+- **WHEN** provenance or change-coupling extraction runs
+- **THEN** the file's path is returned exactly as `src/café.ts` and matches the analyzer's
+  repo-relative path set, yielding authors, churn, and co-change data rather than a silent gap
+
+#### Scenario: A new git spawn cannot regress the discipline
+
+- **GIVEN** a contributor adds a new `git log`/`git diff` call that parses paths from stdout
+- **WHEN** the guard test runs in CI
+- **THEN** it fails if the new spawn lacks the quotepath guard (or NUL mode), naming the offending
+  site
+
 ## Sub-components
 
 > `SignatureExtractor` is an orchestrator. Each sub-component below implements one logical block.

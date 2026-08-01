@@ -4,6 +4,12 @@
 > beyond the cross-cutting tool-quality rules in `mcp-quality`. Tool output classification and the
 > conclusion-over-graph contract live in `mcp-quality`; this domain captures handler-specific
 > navigation semantics.
+
+## Purpose
+
+Behavioural requirements for the individual MCP tool handlers (`src/core/services/mcp-handlers/*`)
+— the per-tool navigation, memory, and governance semantics that sit beyond the cross-cutting
+tool-surface rules owned by the `mcp-quality` domain.
 ## Requirements
 ### Requirement: CoarseToFineMapNavigation
 
@@ -91,9 +97,21 @@ The system SHALL verify every registered MCP tool against real codebases via a l
 > Decision recorded: f4bb8a8f
 > Date: 2026-06-10
 
+#### Scenario: Every tool has a live-data driver entry
+
+- **WHEN** the live-data integration harness coverage gate runs
+- **THEN** every registered MCP tool has a driver entry, even when the live harness itself is offline
+
 ### Requirement: ComputeCfgdefuseOverlayInsideLivetreeExtractorsExtendReturnContractToNodesRawedgesCfg
 
-The canonical statement of this decision lives in the `analyzer` domain — see [analyzer/spec.md](../analyzer/spec.md) (decision `c8f2b9bf`).
+This domain SHALL conform to the canonical statement of decision `c8f2b9bf`, which lives in the
+`analyzer` domain — see [analyzer/spec.md](../analyzer/spec.md).
+
+#### Scenario: The canonical statement governs
+
+- **GIVEN** decision `c8f2b9bf` recorded in the `analyzer` domain
+- **WHEN** this domain's behavior touches that decision's surface
+- **THEN** it satisfies the canonical requirement as stated in [analyzer/spec.md](../analyzer/spec.md)
 
 ### Requirement: AnchorPersistedMemoryToCallgraphSymbolsWithDeterministicFreshness
 
@@ -102,6 +120,12 @@ The system SHALL anchor persisted memories to call-graph symbols and compute det
 > Decision recorded: 34b178df
 > Date: 2026-06-16
 
+#### Scenario: Recall verdicts are deterministic
+
+- **GIVEN** a memory anchored to a call-graph symbol
+- **WHEN** it is recalled
+- **THEN** its fresh/drifted/orphaned verdict is computed deterministically with no LLM inference
+
 ### Requirement: CodeanchoredMemoryStoreIsSeparateFromTheDecisionStore
 
 The system SHALL persist agent memories in a dedicated store (.openlore/memory/notes.json) separate from the decision store, and SHALL surface both memory kinds through the recall tool with per-anchor freshness verdicts.
@@ -109,12 +133,23 @@ The system SHALL persist agent memories in a dedicated store (.openlore/memory/n
 > Decision recorded: 517ab4c6
 > Date: 2026-06-16
 
+#### Scenario: Memories and decisions live in separate stores
+
+- **WHEN** an agent memory is persisted
+- **THEN** it is written to `.openlore/memory/notes.json`, not the decision store, and recall surfaces both kinds with per-anchor freshness verdicts
+
 ### Requirement: OrphanedMemoriesAreNeverServedAsAuthoritativeContext
 
-The system SHALL The recall tool SHALL partition returned memories into authoritative and needsReanchoring sets, and SHALL never include orphaned memories in the authoritative set.
+The recall tool SHALL partition returned memories into authoritative and needsReanchoring sets, and SHALL never include orphaned memories in the authoritative set.
 
 > Decision recorded: dbe6a95e
 > Date: 2026-06-16
+
+#### Scenario: An orphaned memory is partitioned out
+
+- **GIVEN** a memory whose anchor no longer resolves
+- **WHEN** recall returns it
+- **THEN** it appears in needsReanchoring, never in the authoritative set
 
 ### Requirement: AuthoritativeRecallInvariant
 
@@ -188,9 +223,21 @@ The system SHALL resolve structural anchors against the call graph when recordin
 > Decision recorded: 10e6a55e
 > Date: 2026-06-16
 
+#### Scenario: Anchors resolve against the graph with a file-level fallback
+
+- **WHEN** a decision is recorded
+- **THEN** its structural anchors are resolved against the call graph, falling back to file-level anchors when no analysis is available
+
 ### Requirement: ValuelevelImpacttraceFallsBackToFunctionGranularityOnIllposedQueriesInsteadOfReportingZero
 
-The canonical statement of this decision lives in the `analyzer` domain — see [analyzer/spec.md](../analyzer/spec.md) (decision `a37d851f`).
+This domain SHALL conform to the canonical statement of decision `a37d851f`, which lives in the
+`analyzer` domain — see [analyzer/spec.md](../analyzer/spec.md).
+
+#### Scenario: The canonical statement governs
+
+- **GIVEN** decision `a37d851f` recorded in the `analyzer` domain
+- **WHEN** this domain's behavior touches that decision's surface
+- **THEN** it satisfies the canonical requirement as stated in [analyzer/spec.md](../analyzer/spec.md)
 
 ### Requirement: DowngradeStableidMoveConfidenceFromExactToStableidWithVerifySemantics
 
@@ -199,6 +246,11 @@ The system SHALL report cross-file stable-id matches with confidence 'stable-id'
 > Decision recorded: a3ede102
 > Date: 2026-06-16
 
+#### Scenario: A cross-file stable-id match says verify
+
+- **WHEN** a cross-file stable-id match is reported
+- **THEN** its confidence is `stable-id` with verify semantics, never asserted as exact
+
 ### Requirement: AnchorStableidParametergroupDetectionToTheSymbolsOwnNameNotTheFirstParenthesis
 
 The system SHALL anchor stableId parameter-group detection to the symbol's own name so that body edits never alter the identifier.
@@ -206,9 +258,22 @@ The system SHALL anchor stableId parameter-group detection to the symbol's own n
 > Decision recorded: 52b10e56
 > Date: 2026-06-16
 
+#### Scenario: Body edits never alter the identifier
+
+- **GIVEN** a symbol whose body contains parenthesized expressions before the parameter list
+- **WHEN** the stableId is computed
+- **THEN** parameter-group detection anchors to the symbol's own name and body edits do not change the id
+
 ### Requirement: PersonalizedPagerankAsQueryconditionedRetrievalRankingNotGlobalSalience
 
-The canonical statement of this decision lives in the `analyzer` domain — see [analyzer/spec.md](../analyzer/spec.md) (decision `0bdd4319`).
+This domain SHALL conform to the canonical statement of decision `0bdd4319`, which lives in the
+`analyzer` domain — see [analyzer/spec.md](../analyzer/spec.md).
+
+#### Scenario: The canonical statement governs
+
+- **GIVEN** decision `0bdd4319` recorded in the `analyzer` domain
+- **WHEN** this domain's behavior touches that decision's surface
+- **THEN** it satisfies the canonical requirement as stated in [analyzer/spec.md](../analyzer/spec.md)
 
 ### Requirement: EpistemicLeaseEmitsNeutralFreshnessFactsNotCoerciveImperatives
 
@@ -217,9 +282,21 @@ The system SHALL surface epistemic-lease freshness as neutral factual signals (e
 > Decision recorded: 8e95746d
 > Date: 2026-06-16
 
+#### Scenario: The lease states facts, not commands
+
+- **WHEN** the epistemic lease preamble fires
+- **THEN** it reports neutral factual signals (elapsed time, cognitive load, index-behind-HEAD) and contains no imperative directed at the agent
+
 ### Requirement: UseADeterministicFieldweightedRankerForRecallNoLearnedModel
 
-The canonical statement of this decision lives in the `analyzer` domain — see [analyzer/spec.md](../analyzer/spec.md) (decision `08005eb9`).
+This domain SHALL conform to the canonical statement of decision `08005eb9`, which lives in the
+`analyzer` domain — see [analyzer/spec.md](../analyzer/spec.md).
+
+#### Scenario: The canonical statement governs
+
+- **GIVEN** decision `08005eb9` recorded in the `analyzer` domain
+- **WHEN** this domain's behavior touches that decision's surface
+- **THEN** it satisfies the canonical requirement as stated in [analyzer/spec.md](../analyzer/spec.md)
 
 ### Requirement: BitemporalMemoryValidity
 
@@ -411,6 +488,11 @@ The system SHALL exclude all directories whose name starts with `.openlore` from
 > Decision recorded: cd5ff82c
 > Date: 2026-06-18
 
+#### Scenario: OpenLore's own caches do not invalidate freshness
+
+- **WHEN** the project fingerprint is computed
+- **THEN** every directory whose name starts with `.openlore` is excluded, so OpenLore-managed cache writes do not change the fingerprint
+
 ### Requirement: ExcludeSupersededDecisionsFromAuthoritativeRecallViaOneSharedSupersessionPredicate
 
 The system SHALL exclude superseded decisions from authoritative recall and orient context using a single shared supersession predicate, surfacing them only as reversal warnings.
@@ -418,9 +500,22 @@ The system SHALL exclude superseded decisions from authoritative recall and orie
 > Decision recorded: 6c32e6c6
 > Date: 2026-06-19
 
+#### Scenario: A superseded decision surfaces only as a reversal warning
+
+- **GIVEN** a decision superseded by a newer one
+- **WHEN** recall or orient assembles context
+- **THEN** the shared supersession predicate excludes it from authoritative results and it appears only as a reversal warning
+
 ### Requirement: SpecstoreBindingResolvesDeclaredTargetsByNameAgainstTheFederationRegistry
 
-The canonical statement of this decision lives in the `config` domain — see [config/spec.md](../config/spec.md) (decision `c6e36101`).
+This domain SHALL conform to the canonical statement of decision `c6e36101`, which lives in the
+`config` domain — see [config/spec.md](../config/spec.md).
+
+#### Scenario: The canonical statement governs
+
+- **GIVEN** decision `c6e36101` recorded in the `config` domain
+- **WHEN** this domain's behavior touches that decision's surface
+- **THEN** it satisfies the canonical requirement as stated in [config/spec.md](../config/spec.md)
 
 ### Requirement: StructuralClaimVerification
 
@@ -1058,6 +1153,372 @@ requirement does not silently claim them.
   (`plan_parallel_work`, `map_in_flight_conflicts`)
 - **WHEN** each footprint's backward reachability runs
 - **THEN** they share one structure for that graph rather than rebuilding adjacency per task
+
+### Requirement: AutoApprovedProvenanceIsAlwaysDisclosed
+
+`recall` and `verify_claim` (`decision-current`) SHALL treat `auto-approved` decisions as
+authoritative but SHALL carry their provenance (`approvedBy: autopilot`, acceptance
+timestamp) in the response, so an agent citing the decision can disclose that it was
+machine-accepted and unreviewed. Spec rendering of an auto-approved decision SHALL carry an
+explicit "auto-accepted (unreviewed)" marker. A decision promoted by a human loses the
+marker; provenance SHALL never be silently upgraded.
+
+#### Scenario: Citing an auto-accepted decision honestly
+
+- **GIVEN** an `auto-approved` decision governing a file the agent is changing
+- **WHEN** the agent calls `verify_claim` with kind `decision-current` for it
+- **THEN** the verdict is `verified` (it is the live authority) and the receipt includes
+  `approvedBy: autopilot`, enabling the agent to disclose the provenance to the human
+
+### Requirement: ConclusionsDiscloseParseHealthBoundaries
+
+A conclusion tool whose result depends on extraction from a file with a degraded parse-health
+record (ERROR/MISSING regions, parse failure, or encoding fallback) SHALL append a boundary
+disclosure identifying the file and the degradation, so a smaller-than-real result reads as a lower
+bound rather than verified absence. `get_language_support`, `orient`, and `doctor` SHALL surface a
+compact parse-health summary (per-language counts / degraded-file lists) for the analyzed scope. A
+repository with no degraded files SHALL incur no boundary output and no payload growth. Parse-health
+regressions SHALL be expressible as the registered governance finding `parse-health` (advisory by
+default; enforcement class owned by the operator's `enforcement.policy`).
+
+#### Scenario: Dead-code over a degraded file carries a boundary
+
+- **GIVEN** `find_dead_code` whose reachability set touches a file that parsed with ERROR regions
+- **WHEN** the tool returns candidates
+- **THEN** the response disclosed that symbols and edges in that file are a lower bound
+
+#### Scenario: Clean repositories pay nothing
+
+- **GIVEN** a repository whose files all parse cleanly
+- **WHEN** any conclusion tool runs
+- **THEN** no parse-health boundary appears and response size is unchanged
+
+#### Scenario: An operator gates on parse-health regressions
+
+- **GIVEN** an `enforcement.policy` classing `parse-health` as `blocking`
+- **WHEN** `openlore enforce` runs after a grammar upgrade that degraded 40 files
+- **THEN** the gate blocks with the finding's evidence (file counts, spans)
+
+### Requirement: SymbolSpanLocatorReportsFreshnessVerdict
+
+The `locate_symbol_span` tool SHALL be read-only (`readOnlyHint: true`) and SHALL NOT write, move,
+or delete any file. It SHALL resolve its target through the same `name::path` addressing used by
+`find_clones` and SHALL refuse to guess: an unknown symbol returns `not-found` with candidates; an
+ambiguous bare name returns `ambiguous` with the `name::path` candidate list. For a resolved
+symbol it SHALL return the byte-exact and line span plus a freshness verdict derived from comparing
+the indexed span's content hash against the file's current bytes: `fresh` when they match (the span
+is safe to edit at exactly these offsets), or `stale` with a re-analyze hint and no usable offset
+when they differ (the index is behind the working tree). The tool SHALL NOT itself apply an edit —
+it hands the host a location the substrate can vouch for; the host applies the write with its own
+tool.
+
+#### Scenario: An ambiguous symbol returns candidates, not a location
+
+- **GIVEN** two indexed functions named `process` in different files and a call targeting bare
+  `process`
+- **WHEN** `locate_symbol_span` runs
+- **THEN** the verdict is `ambiguous` and both `process::<path>` candidates are listed
+- **AND** no span is returned
+
+#### Scenario: A stale span is disclosed, never served as trustworthy
+
+- **GIVEN** a symbol whose file changed after the last analysis (indexed span hash ≠ current
+  content)
+- **WHEN** `locate_symbol_span` targets it
+- **THEN** the verdict is `stale` with a re-analyze hint
+- **AND** no usable offset is presented as current
+
+#### Scenario: A fresh span returns the byte-exact edit location
+
+- **GIVEN** an unambiguous `name::path` symbol whose span hash matches current content
+- **WHEN** `locate_symbol_span` runs
+- **THEN** the verdict is `fresh` and the result carries the byte and line span plus the content
+  hash
+- **AND** no file is modified (the host performs any edit)
+
+### Requirement: LeaseWeightTableIsComplete
+
+The epistemic lease's cognitive-load weight table (`TOOL_WEIGHTS`) SHALL cover every tool
+registered in `TOOL_DEFINITIONS`, and SHALL contain no entry for a tool that is no longer
+registered. Completeness SHALL be enforced by a CI test cross-checking the table against the live
+registry in both directions — the same closed-table discipline applied to `TOOL_OUTPUT_CLASS` and
+`TOOL_CAPABILITY_FAMILY` — so a newly added tool without a declared weight fails CI rather than
+silently falling to the minimum-weight fallback. A new tool's weight SHALL be assigned by analogy
+to its nearest existing entry in the same traversal-depth class (lightweight read, structural
+read, graph traversal, deep architectural trace), never as a newly invented constant; tools
+documented as near-twins (e.g. `find_path` and `trace_execution_path`) SHALL carry the same
+weight. The runtime fallback for an unknown name MAY remain as defense in depth, but SHALL never
+be the mechanism by which a registered tool is scored.
+
+#### Scenario: A new tool without a weight fails CI
+
+- **GIVEN** a change that registers a new tool in `TOOL_DEFINITIONS` without adding a
+  `TOOL_WEIGHTS` entry
+- **WHEN** the completeness test runs
+- **THEN** it fails, naming the unweighted tool
+- **AND** the failure is independent of whether the runtime fallback would have produced a value
+
+#### Scenario: A stale weight entry fails CI
+
+- **GIVEN** a tool removed from (or renamed in) `TOOL_DEFINITIONS` whose old name remains in
+  `TOOL_WEIGHTS`
+- **WHEN** the completeness test runs
+- **THEN** it fails, naming the stale entry
+
+#### Scenario: Near-twin tools accrue equal load
+
+- **GIVEN** two tools documented as answering the same class of question at the same traversal
+  depth (e.g. `find_path` and `trace_execution_path`)
+- **WHEN** each is invoked once in a session
+- **THEN** each contributes the same weight to the session's cognitive load
+
+#### Scenario: Load accounting reflects actual work on the default surface
+
+- **GIVEN** a session invoking only default-surface tools, including graph traversals
+  (`find_path`, `blast_radius`) and lightweight reads (`recall`)
+- **WHEN** the lease accumulates cognitive load
+- **THEN** the traversals contribute their declared structural/architectural weights, not the
+  minimum fallback, so degrade/stale thresholds fire when the declared tier model says they should
+
+### Requirement: StructuralDiffReadsOldContentAtTheMergeBase
+
+The system SHALL read a structural diff's OLD file content from the same git point its
+changed-file list is scoped to: for the working-tree comparison, the merge-base of the resolved
+base ref and HEAD; for an explicit two-ref comparison, the merge-base of the resolved base ref and
+the head ref (with three-dot file-list semantics). When no common ancestor exists, the system
+SHALL fall back to the resolved ref's tip, mirroring the file-list fallback. Every downstream
+consumer of the old snapshot — signature changes, stale callers, and the realized write-footprint
+used for footprint-escape detection — SHALL therefore attribute only branch-side edits to the
+change, never drift the base branch accrued after the branch point. A snapshot whose graph build
+fails SHALL be disclosed as a parse-failure boundary in the response, never silently compared as
+an empty graph.
+
+#### Scenario: An advanced base does not misattribute main-side edits
+
+- **GIVEN** a branch whose base ref has advanced past the branch point
+- **AND** a file changed on both the branch and the base since the branch point
+- **WHEN** `structural_diff` runs the working-tree comparison
+- **THEN** the delta contains only branch-side changes
+- **AND** a function added on the base after the branch point is not reported as removed
+
+#### Scenario: Footprint-escape findings rest on the branch's own writes
+
+- **GIVEN** the same advanced-base repository and an opt-in `declaredFootprint`
+- **WHEN** `structural_diff` computes the realized write-footprint
+- **THEN** base-side edits produce no out-of-scope-write or removed-symbol escape
+- **AND** no footprint-escape governance finding is emitted for them
+
+#### Scenario: The explicit two-ref path uses merge-base semantics
+
+- **GIVEN** `structural_diff` called with a `baseRef` whose tip is ahead of the `headRef` branch point
+- **WHEN** the two-ref comparison runs
+- **THEN** files changed only on the base side are excluded from the delta
+- **AND** old content is read at the merge-base of the two refs
+
+#### Scenario: A snapshot build crash is a disclosed boundary
+
+- **GIVEN** a changed file whose snapshot graph build throws
+- **WHEN** `structural_diff` returns
+- **THEN** the response names the failed snapshot in its soundness caveats
+- **AND** the delta is not presented as an authoritative all-added or all-removed comparison
+
+### Requirement: RegisteredRepoFreshnessIsBaselined
+
+A federation registry entry whose stored fingerprint is empty (a repo registered before its first
+`openlore analyze`) SHALL NOT be reported as plain `indexed`: until a fingerprint baseline exists,
+its state SHALL be an explicit `unbaselined` disclosure stating that staleness cannot yet be
+assessed, with remediation. When a federation status or consult path observes a live index
+fingerprint for such an entry, it SHALL adopt that fingerprint as the stored baseline (persisted
+through the existing atomic registry write), so that subsequent drift is detected as `stale`. The
+staleness verdicts for entries that already carry a baseline SHALL be unchanged. No entry SHALL be
+able to report `indexed` indefinitely while its index drifts.
+
+#### Scenario: A pre-analyze registration is disclosed, then baselined
+
+- **GIVEN** a repo registered into the federation before its first `openlore analyze` (stored
+  fingerprint empty)
+- **WHEN** the repo's index is later built and `federation_status` runs
+- **THEN** the entry is reported `unbaselined` (or the live hash is adopted in the same call and
+  the adoption disclosed) — never plain `indexed` with an empty baseline
+- **AND** after adoption, a subsequent index change is reported `stale`
+
+#### Scenario: Adoption requires a live index
+
+- **GIVEN** an empty-fingerprint entry whose repo has no built index
+- **WHEN** a status path evaluates it
+- **THEN** the state remains `unindexed` and no baseline is written
+
+#### Scenario: spec_store_status inherits the honest state
+
+- **GIVEN** a spec-store target bound to an unbaselined federation entry
+- **WHEN** `spec_store_status` resolves the target
+- **THEN** the target's status discloses the unbaselined condition rather than implying a
+  freshness-checked `indexed` state
+
+### Requirement: FederationStatusDegradesToConclusion
+
+`federation_status` SHALL degrade an unreadable or malformed federation registry
+(`.openlore/federation.json`) to a conclusion-shaped result — naming the file, the parse or shape
+error, and the remediation — rather than propagating a raw exception to the transport. The
+degradation SHALL match the shape its sibling `spec_store_status` already returns for the
+identical failure (`registry-unreadable`).
+
+#### Scenario: A corrupt registry yields a finding, not a throw
+
+- **GIVEN** a `.openlore/federation.json` containing invalid JSON or an unexpected shape
+- **WHEN** `federation_status` is called
+- **THEN** the tool returns a conclusion identifying the registry as unreadable, with the file
+  path and a remediation step (fix or delete the file)
+- **AND** no raw exception reaches the MCP transport
+
+### Requirement: BackgroundConsolidationFailsClosed
+
+A background process spawned by a long-lived MCP handler (e.g. the decision consolidator fired by
+`record_decision`) SHALL never be able to crash the host server: every spawn SHALL register an
+error listener, and a spawn failure (ENOENT, EACCES, or any pre-exec error) SHALL be contained and
+reported. The tool response SHALL reflect the actual spawn outcome — a handler SHALL NOT claim
+background work is running when the spawn failed; a failed spawn SHALL be disclosed together with
+the manual recovery command. Concurrent spawn requests SHALL be coalesced against the existing
+consolidation lock (reused as the in-flight sentinel — no new locking mechanism): while a run is
+in flight no additional consolidator is spawned, and the response discloses that the work was
+coalesced. The primary write (the recorded decision) SHALL commit independently of the background
+spawn's outcome.
+
+#### Scenario: The consolidator binary is missing
+
+- **GIVEN** an environment where binary resolution falls through to a bare `openlore` that is not
+  on PATH
+- **WHEN** `record_decision` fires the background consolidation and the spawn emits ENOENT
+- **THEN** the MCP server process survives (no uncaught exception)
+- **AND** the decision itself is recorded and its id returned
+- **AND** the response states consolidation could not be started and names
+  `openlore decisions --consolidate` as the recovery step, instead of claiming it is running
+
+#### Scenario: A successful spawn is reported as started
+
+- **GIVEN** a resolvable consolidator binary
+- **WHEN** `record_decision` fires the background consolidation and the child emits `spawn`
+- **THEN** the response reports consolidation running in the background, as today
+
+#### Scenario: Rapid records coalesce onto one consolidator
+
+- **GIVEN** a consolidation run already in flight (its lock held)
+- **WHEN** a second `record_decision` arrives before the run completes
+- **THEN** no second consolidator process is spawned
+- **AND** the response disclosed that consolidation was coalesced onto the in-flight run
+
+### Requirement: DecisionStatusPromotionIsCasChecked
+
+Every mutation of a decision's status SHALL be committed through the compare-and-swap store update
+(`updateDecisionStore`) and verified after commit, following the patch-then-verify shape of
+`approve_decision`/`reject_decision`. No handler SHALL promote a decision's status on a
+locally-loaded copy of the store and act on that copy outside the CAS path. A promotion whose
+post-commit verification shows the decision was concurrently removed or changed SHALL return an
+honest error rather than a false success, and SHALL never clobber decisions recorded concurrently.
+
+#### Scenario: sync_decisions promotes an id under CAS
+
+- **GIVEN** a draft decision and a `sync_decisions` call naming its id
+- **WHEN** the handler promotes the decision to `approved` before syncing
+- **THEN** the promotion is committed via `updateDecisionStore` and re-verified on the committed
+  store, not applied to a locally-loaded copy
+
+#### Scenario: A concurrent draft survives a sync
+
+- **GIVEN** a `sync_decisions` call in progress and a `record_decision` committing a new draft
+  concurrently
+- **WHEN** both operations complete
+- **THEN** the new draft is present in the store (the CAS merge re-applied it)
+- **AND** the synced decision's status reflects the sync
+
+#### Scenario: A concurrently-removed decision yields an honest error
+
+- **GIVEN** a decision removed between load and promotion
+- **WHEN** the promotion's post-commit verification runs
+- **THEN** the handler returns an error naming the id, not a success claiming it was synced
+
+### Requirement: DecisionStatusTransitionsAreGuarded
+
+Decision status changes SHALL be governed by an explicit transition table over the existing status
+vocabulary (`draft`, `consolidated`, `verified`, `phantom`, `approved`, `rejected`, `synced`). A
+handler SHALL NOT change a decision's status without first checking that the transition from its
+current status is legal. In particular: a `rejected` decision SHALL NOT be promoted to `approved`
+as a side-effect of any other operation — `sync_decisions` with an explicit `id` SHALL refuse the
+promotion with an error naming the current status and the required human step; reversing a
+rejection SHALL require an explicit `approve_decision` carrying human authorization, and that path
+SHALL disclose that a recorded rejection is being reversed. An already-`synced` decision SHALL NOT
+be re-promoted. Illegal transitions SHALL leave the store and the spec files unchanged. This
+requirement governs which transitions are legal; the compare-and-swap commit discipline for legal
+transitions is governed separately (`DecisionStatusPromotionIsCasChecked`,
+change `harden-decision-consolidation`).
+
+#### Scenario: sync_decisions cannot resurrect a rejected decision
+
+- **GIVEN** a decision a human rejected via `reject_decision`
+- **WHEN** `sync_decisions` is called with that decision's `id`
+- **THEN** the handler returns an error naming the decision's `rejected` status and the explicit
+  `approve_decision` step required to reverse it
+- **AND** the decision's status is unchanged and no spec file is written
+
+#### Scenario: approve_decision discloses a rejection reversal
+
+- **GIVEN** a `rejected` decision with a review note
+- **WHEN** `approve_decision` is called with its `id`
+- **THEN** the handler refuses (or requires the explicit reversal path per the transition table),
+  surfacing the prior rejection and its note so the agent presents the reversal to the human
+  rather than silently overriding a recorded verdict
+
+#### Scenario: The legal lifecycle is unchanged
+
+- **GIVEN** a `verified` decision
+- **WHEN** a human approves it via `approve_decision` and it is then synced via `sync_decisions`
+- **THEN** the decision moves `verified → approved → synced` exactly as before, with no new
+  friction on legal transitions
+
+### Requirement: StalenessTriggersBackgroundRepair
+
+Every read-path staleness signal that yields a verdict — integrity `mismatched`, a stale
+region above threshold, a schema reset, or analysis age beyond the doctor warning threshold
+— SHALL additionally trigger the shared at-most-once background repair service (the
+generalized cold-start bootstrap: non-blocking, never-throw, opt-out via
+`OPENLORE_NO_AUTO_ANALYZE` / `autoInit: false`). A repair that completes and still observes
+its trigger SHALL disclose and stop, never loop. Detection and disclosure are unchanged;
+repair is additive.
+
+#### Scenario: A stale index heals itself behind an honest answer
+
+- **GIVEN** a repo whose index attestation reconciles to `mismatched`
+- **WHEN** any graph-dependent tool is called
+- **THEN** the response is served with the existing staleness verdict plus a
+  "background refresh started" note, exactly one background `analyze` starts, and a later
+  call after it completes serves fresh results with no verdict
+
+#### Scenario: Repair never blocks or lies
+
+- **GIVEN** a background repair in flight
+- **WHEN** further tool calls arrive
+- **THEN** each returns without waiting on the rebuild and none presents the in-repair
+  index as fresh
+
+> Note: the next requirement was originally a MODIFIED block. Its base requirement was
+> authored in `refine-happy-path-and-defaults`, which shipped without spec deltas, so the
+> full statement is recorded here as an addition.
+
+### Requirement: ReadyOrHonestFirstUse
+
+A tool invoked against a directory with no index SHALL self-bootstrap the analysis in the
+background and answer with a machine-readable not-ready shape (never stdout noise on stdio).
+The not-ready/staleness conclusion SHALL additionally distinguish *repairing* from *absent*
+and *stale*: when the background repair service has been triggered for the queried
+directory, the conclusion carries the repair-in-progress marker and its trigger reason, so
+an agent can decide to proceed on the disclosed-stale answer or retry.
+
+#### Scenario: Absent vs stale vs repairing are distinguishable
+
+- **GIVEN** three repos: no index, a stale index with repair running, and a fresh index
+- **WHEN** the same tool is called against each
+- **THEN** the responses respectively carry `reason: index-absent`, the staleness verdict
+  with a repair-in-progress marker and reason, and no freshness caveat at all
 
 ## Decisions
 
