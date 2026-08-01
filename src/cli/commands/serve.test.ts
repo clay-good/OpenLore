@@ -11,9 +11,10 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdtemp, rm, readFile, access, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { request as httpRequest } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 import { startServe, readDescriptor, idleTimeoutMs, type ServeHandle } from './serve.js';
+import { TOOL_PRESETS } from './mcp.js';
 import { EdgeStore } from '../../core/services/edge-store.js';
 import * as analyzeApi from '../../api/analyze.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR } from '../../constants.js';
@@ -139,6 +140,35 @@ describe('idle self-shutdown', () => {
     }
   });
 
+  it('does not let rejected hidden-tool requests postpone idle shutdown', async () => {
+    const exit = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    const dir = await mkdtemp(join(tmpdir(), 'openlore-idle-'));
+    try {
+      const h = await startServe({
+        directory: dir,
+        port: '0',
+        watch: false,
+        preset: 'navigation',
+        idleTimeout: '0.01',
+      });
+      await sleep(350);
+      const rejected = await fetch(`${h!.baseUrl}/tool/record_decision`, {
+        method: 'POST',
+        body: JSON.stringify({ args: { title: 'hidden', rationale: 'hidden' } }),
+      });
+      expect(rejected.status).toBe(403);
+
+      // The original 600ms idle deadline still wins. Resetting it on the 403
+      // would keep the daemon alive until roughly 950ms.
+      await sleep(400);
+      expect(exit).toHaveBeenCalled();
+      expect(await readDescriptor(dir)).toBeNull();
+    } finally {
+      exit.mockRestore();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('never arms the timer when disabled (--idle-timeout 0)', async () => {
     const exit = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
     const dir = await mkdtemp(join(tmpdir(), 'openlore-idle-'));
@@ -162,6 +192,7 @@ describe('openlore serve', () => {
     expect(res.status).toBe(200);
     const body = await jsonOf(res);
     expect(body.ok).toBe(true);
+    expect(body.presetDispatchEnforced).toBe(true);
     expect(typeof body.version).toBe('string');
     // serve shares the one default-preset source with `openlore mcp`
     // (LEAN_DEFAULT_PRESET = substrate; change fix-default-preset-claims). It no
@@ -200,6 +231,15 @@ describe('openlore serve', () => {
 
   it('rejects hidden write tools without creating decision or memory state', async () => {
     const h = await boot({ preset: 'navigation' });
+    const sentinels = new Map([
+      [join(root, '.openlore', 'decisions', 'pending.json'), '{"version":"1","sessionId":"sentinel","updatedAt":"","decisions":[]}\n'],
+      [join(root, '.openlore', 'decisions', 'ledger.jsonl'), '{"id":"aaaaaaaa","title":"sentinel","from":null,"to":"draft","actor":"agent","at":"2026-08-01T00:00:00.000Z"}\n'],
+      [join(root, '.openlore', 'memory', 'notes.json'), '{"version":"1","updatedAt":"","memories":[]}\n'],
+    ]);
+    for (const [path, contents] of sentinels) {
+      await mkdir(join(path, '..'), { recursive: true });
+      await writeFile(path, contents);
+    }
     const calls = [
       ['record_decision', { title: 'must not persist', rationale: 'outside preset' }],
       ['remember', { content: 'must not persist' }],
@@ -215,9 +255,9 @@ describe('openlore serve', () => {
       expect((await jsonOf(res)).error).toMatch(new RegExp(`${name}.*navigation.*openlore install --preset <name>`, 'i'));
     }
 
-    expect(await fileExists(join(root, '.openlore', 'decisions', 'pending.json'))).toBe(false);
-    expect(await fileExists(join(root, '.openlore', 'decisions', 'ledger.jsonl'))).toBe(false);
-    expect(await fileExists(join(root, '.openlore', 'memory', 'notes.json'))).toBe(false);
+    for (const [path, contents] of sentinels) {
+      expect(await readFile(path, 'utf-8')).toBe(contents);
+    }
   });
 
   it('404s a genuinely unknown tool', async () => {
@@ -348,6 +388,76 @@ describe('openlore serve', () => {
     // close() on the reused handle is a no-op — must not tear down h1.
     await h2!.close();
     expect((await fetch(`${h1.baseUrl}/health`)).status).toBe(200);
+  });
+
+  it('treats all and full as the same security surface when reusing a daemon', async () => {
+    const h1 = await boot({ preset: 'full' });
+    const h2 = await startServe({ directory: root, port: '0', watch: false, preset: 'all' });
+    expect(h2).toBeDefined();
+    expect(h2!.port).toBe(h1.port);
+  });
+
+  it('refuses to reuse a daemon with a different preset or token', async () => {
+    const h1 = await boot({ preset: 'full' });
+    const previousExitCode = process.exitCode;
+    try {
+      const incompatible = await startServe({
+        directory: root,
+        port: '0',
+        watch: false,
+        preset: 'navigation',
+        token: 'secret',
+      });
+      expect(incompatible).toBeUndefined();
+      expect(process.exitCode).toBe(1);
+
+      // The original daemon remains unchanged: full-surface and unauthenticated.
+      const health = await jsonOf(await fetch(`${h1.baseUrl}/health`));
+      expect(health.preset).toBe('full');
+      expect((await fetch(`${h1.baseUrl}/tool/get_env_vars`, {
+        method: 'POST',
+        body: JSON.stringify({ args: {} }),
+      })).status).toBe(200);
+    } finally {
+      process.exitCode = previousExitCode;
+    }
+  });
+
+  it('refuses a legacy daemon whose matching preset was only advisory', async () => {
+    root = await mkdtemp(join(tmpdir(), 'openlore-serve-legacy-'));
+    const legacy = createServer((req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(
+        req.url === '/health'
+          ? { ok: true, preset: 'navigation', tools: [...TOOL_PRESETS.navigation] }
+          : { hiddenWriteWouldHaveExecuted: true },
+      ));
+    });
+    await new Promise<void>((resolve) => legacy.listen(0, '127.0.0.1', resolve));
+    const address = legacy.address();
+    if (!address || typeof address === 'string') throw new Error('legacy daemon did not bind');
+    await mkdir(join(root, '.openlore'), { recursive: true });
+    await writeFile(join(root, '.openlore', 'serve.json'), JSON.stringify({
+      port: address.port,
+      pid: process.pid,
+      host: '127.0.0.1',
+      startedAt: '',
+      version: '2.1.6',
+    }));
+    const previousExitCode = process.exitCode;
+    try {
+      const reused = await startServe({
+        directory: root,
+        port: '0',
+        watch: false,
+        preset: 'navigation',
+      });
+      expect(reused).toBeUndefined();
+      expect(process.exitCode).toBe(1);
+    } finally {
+      process.exitCode = previousExitCode;
+      await new Promise<void>((resolve) => legacy.close(() => resolve()));
+    }
   });
 
   it('repopulates the graph after a schema-version reset instead of stalling', async () => {

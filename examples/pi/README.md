@@ -75,13 +75,15 @@ On `session_start` the extension looks for `.openlore/serve.json`; if no healthy
 daemon is announced it spawns `openlore serve` detached and waits for `/health`.
 The daemon:
 
-- serves the `navigation` tool preset over `127.0.0.1`,
+- serves the `full` preset over `127.0.0.1` while Pi curates its model-visible tools,
 - keeps signatures/vector fresh live, and
 - re-analyzes the call graph (debounced) after each edit burst — so what the
   model sees never silently diverges from the code.
 
 The extension never kills a daemon it didn't start; it may be serving other
-clients (another Pi session, an editor).
+clients (another Pi session, an editor). If a healthy daemon is already running
+with a narrower preset, Pi reports the incompatibility and asks you to run
+`openlore serve --stop`; it does not weaken that daemon's operator-selected boundary.
 
 ## Verify
 

@@ -99,6 +99,9 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Verify MCP preset dispatch boundary
+        run: npx vitest run --config vitest.integration.config.ts src/cli/commands/mcp.conformance.integration.test.ts
+
       - name: Verify the published tarball contents
         # Runs here rather than in `lint` because it asserts the built entrypoints are
         # present, which needs `dist/`. `files` is an allowlist, so a stray new

@@ -23,3 +23,13 @@
 - [x] Re-run the e2e probe: under `substrate`, `find_dead_code` / `record_decision` /
       `remember` all rejected with the actionable error and zero side effects; `orient` and the
       other 12 members unaffected; `--preset full` still dispatches everything
+
+## Adversarial follow-up
+
+- [x] Refuse daemon reuse when the requested canonical preset or token differs
+- [x] Require `presetDispatchEnforced: true` before trusting a legacy daemon's preset metadata
+- [x] Keep rejected/unauthorized calls from resetting the daemon idle timer
+- [x] Preserve a healthy narrow daemon after an expected `403` local fallback
+- [x] Detect a narrow pre-existing Pi daemon and return actionable stop/restart remediation
+- [x] Seed initialized decision/memory stores and prove byte-identical rejection behavior
+- [x] Exercise the real MCP-to-full-daemon delegation boundary in hosted CI

@@ -67,7 +67,7 @@ import {
   handleSearchSpecs,
 } from '../../core/services/mcp-handlers/semantic.js';
 import { dispatchTool, UnknownToolError } from '../../core/services/tool-dispatch.js';
-import { ensureServeDaemon, callServeTool, type ServeEndpoint } from '../../core/services/serve-client.js';
+import { ensureServeDaemon, callServeTool, isServePresetRejection, type ServeEndpoint } from '../../core/services/serve-client.js';
 import {
   handleAnalyzeCodebase,
   handleGetArchitectureOverview,
@@ -2664,10 +2664,15 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
           if (ep) {
             try {
               result = await callServeTool(ep, name, args as Record<string, unknown>, directory);
-            } catch {
-              // Daemon unreachable/unknown-tool/transport error → drop it for this
-              // session and run locally (also catches a daemon that died mid-session).
-              daemonByDir.set(directory, null);
+            } catch (err) {
+              // A 403 means a healthy explicitly narrow daemon rejected a tool
+              // this wider MCP session is authorized to call. Fall back for this
+              // call without evicting that daemon; eligible later calls can still
+              // share its watcher. Reachability and other failures retain the
+              // existing local fallback and endpoint eviction behavior.
+              if (!isServePresetRejection(err)) {
+                daemonByDir.set(directory, null);
+              }
               result = await dispatchTool(name, args as Record<string, unknown>, directory);
             }
           } else {

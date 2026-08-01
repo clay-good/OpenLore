@@ -12,9 +12,11 @@
  * `serve` and `openlore mcp` never diverge on what "no --preset" means).
  *
  * Endpoints (all loopback):
- *   GET  /health           → { ok, version, root, preset, tools, uptimeMs }
+ *   GET  /health           → { ok, presetDispatchEnforced, version, root, preset, tools, uptimeMs }
  *   POST /tool/:name       body { directory?, args }  → handler result (JSON)
  *
+ * `presetDispatchEnforced: true` is the semantic compatibility marker clients
+ * require before trusting `preset`/`tools` as the callable boundary.
  * Discovery: writes `.openlore/serve.json` { port, pid, host, token?, startedAt }
  * in the served root so a client can find and reuse a running daemon.
  *
@@ -120,6 +122,13 @@ export interface ServeHandle {
   close(): Promise<void>;
 }
 
+interface DaemonHealth {
+  ok: true;
+  presetDispatchEnforced: true;
+  preset: string;
+  tools: string[];
+}
+
 const SERVE_FILE = 'serve.json';
 const MAX_BODY_BYTES = 1_000_000; // tool args are small; reject anything larger
 
@@ -183,11 +192,42 @@ export async function readDescriptor(root: string): Promise<ServeDescriptor | nu
  * Verifies GET /health returns our `ok: true` shape, so we never signal a PID we
  * can't positively identify as our own daemon.
  */
-async function daemonAlive(desc: ServeDescriptor): Promise<boolean> {
+async function daemonHealth(desc: ServeDescriptor): Promise<DaemonHealth | null> {
   try {
     const res = await fetch(`http://${desc.host}:${desc.port}/health`, {
       signal: AbortSignal.timeout(HEALTH_PROBE_TIMEOUT_MS),
       // A daemon never redirects; following one would take this probe off-machine.
+      redirect: 'error',
+    });
+    if (!res.ok) return null;
+    const body = (await res.json().catch(() => null)) as {
+      ok?: boolean;
+      presetDispatchEnforced?: unknown;
+      preset?: unknown;
+      tools?: unknown;
+    } | null;
+    if (
+      body?.ok !== true
+      || body.presetDispatchEnforced !== true
+      || typeof body.preset !== 'string'
+      || !Array.isArray(body.tools)
+      || !body.tools.every((tool) => typeof tool === 'string')
+    ) return null;
+    return {
+      ok: true,
+      presetDispatchEnforced: true,
+      preset: body.preset,
+      tools: body.tools as string[],
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function daemonAlive(desc: ServeDescriptor): Promise<boolean> {
+  try {
+    const res = await fetch(`http://${desc.host}:${desc.port}/health`, {
+      signal: AbortSignal.timeout(HEALTH_PROBE_TIMEOUT_MS),
       redirect: 'error',
     });
     if (!res.ok) return false;
@@ -292,7 +332,35 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
   // a concurrent spawn (two MCP clients, or pi + MCP) would otherwise leave two
   // watchers racing on the same .openlore/analysis. Reuse the live one instead.
   const existing = await readDescriptor(root);
-  if (existing && (await daemonAlive(existing))) {
+  const existingHealth = existing ? await daemonHealth(existing) : null;
+  if (existing && !existingHealth && (await daemonAlive(existing))) {
+    logger.error(
+      `Refusing to reuse the daemon already serving ${root} because its health response ` +
+      'does not declare a verifiable preset/tool surface. Run `openlore serve --stop` ' +
+      'before restarting it with the requested security settings.',
+    );
+    process.exitCode = 1;
+    return;
+  }
+  if (existing && existingHealth) {
+    const requestedPreset = isFullSurface ? FULL_PRESET : presetName;
+    const existingPreset =
+      existingHealth.preset === FULL_PRESET_ALIAS ? FULL_PRESET : existingHealth.preset;
+    const existingTools = new Set(existingHealth.tools);
+    const surfaceMatches =
+      existingTools.size === activeNames.size
+      && [...activeNames].every((tool) => existingTools.has(tool));
+    if (existingPreset !== requestedPreset || !surfaceMatches || existing.token !== token) {
+      logger.error(
+        `Refusing to reuse the daemon already serving ${root}: requested preset/token ` +
+        `(${requestedPreset}/${token ? 'protected' : 'none'}) does not match the live daemon ` +
+        `(${existingPreset}/${existing.token ? 'protected' : 'none'}), or its advertised tools ` +
+        'do not match that preset. Run ' +
+        '`openlore serve --stop` before starting it with different security settings.',
+      );
+      process.exitCode = 1;
+      return;
+    }
     logger.success(
       `openlore serve already running for ${root} at http://${existing.host}:${existing.port} — reusing.`,
     );
@@ -362,7 +430,6 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
   });
 
   async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    touchActivity(); // any request (incl. /health) keeps an in-use daemon alive
     const url = new URL(req.url ?? '/', `http://${host}`);
 
     // DNS-rebinding / cross-origin defense — runs before ANY dispatch, including
@@ -384,8 +451,10 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
     }
 
     if (req.method === 'GET' && url.pathname === '/health') {
+      touchActivity();
       sendJson(res, 200, {
         ok: true,
+        presetDispatchEnforced: true,
         version: _pkgVersion,
         root,
         preset: presetName,
@@ -413,6 +482,9 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
         sendJson(res, 403, { error: membershipError });
         return;
       }
+      // Only an authenticated, known, in-surface call keeps the daemon alive.
+      // Rejected probes must not mutate process lifecycle state.
+      touchActivity();
       let body: Record<string, unknown>;
       try {
         body = await readJsonBody(req);

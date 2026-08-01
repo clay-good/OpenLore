@@ -14,7 +14,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { serveCommand, startServe, type ServeHandle } from '../../cli/commands/serve.js';
-import { ensureServeDaemon, callServeTool, serveSpawnArgs } from './serve-client.js';
+import { ensureServeDaemon, callServeTool, isServePresetRejection, ServeHttpError, serveSpawnArgs } from './serve-client.js';
 
 let handle: ServeHandle | undefined;
 let root = '';
@@ -76,6 +76,23 @@ describe('serve-client', () => {
     await bootDaemon();
     const ep = await ensureServeDaemon(root, { spawn: false });
     await expect(callServeTool(ep!, 'not_a_real_tool', {}, root)).rejects.toThrow();
+  });
+
+  it('preserves the HTTP status when a narrow daemon rejects a registered tool', async () => {
+    await bootDaemon(); // substrate
+    const ep = await ensureServeDaemon(root, { spawn: false });
+    const error = await callServeTool(ep!, 'record_decision', {
+      title: 'hidden',
+      rationale: 'hidden',
+    }, root).catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(ServeHttpError);
+    expect((error as ServeHttpError).status).toBe(403);
+    expect(isServePresetRejection(error)).toBe(true);
+    expect(isServePresetRejection(new ServeHttpError(500, 'failed'))).toBe(false);
+
+    // The same endpoint is still healthy and serves an in-surface member.
+    const member = await callServeTool(ep!, 'orient', { task: 'x' }, root) as { error?: string };
+    expect(member.error).toMatch(/No analysis/i);
   });
 
   it('throws when the daemon is unreachable (stale endpoint)', async () => {

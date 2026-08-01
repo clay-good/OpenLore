@@ -12,15 +12,16 @@
  * auto-skips with a loud log when either is missing, so it never false-passes.
  */
 
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { ErrorCode, SUPPORTED_PROTOCOL_VERSIONS } from '@modelcontextprotocol/sdk/types.js';
-import { TOOL_DEFINITIONS } from './mcp.js';
+import { TOOL_DEFINITIONS, TOOL_PRESETS } from './mcp.js';
+import { startServe } from './serve.js';
 
 const REPO_ROOT = resolve(import.meta.dirname, '../../../');
 const MCP_BIN = join(REPO_ROOT, 'dist/cli/index.js');
@@ -30,6 +31,25 @@ const _require = createRequire(import.meta.url);
 const PKG_VERSION = (_require('../../../package.json') as { version: string }).version;
 
 const TOOL_NAMES = new Set(TOOL_DEFINITIONS.map((t) => t.name));
+
+function seedPersistentState(directory: string): Map<string, string> {
+  const sentinels = new Map([
+    [join(directory, '.openlore', 'decisions', 'pending.json'), '{"version":"1","sessionId":"sentinel","updatedAt":"","decisions":[]}\n'],
+    [join(directory, '.openlore', 'decisions', 'ledger.jsonl'), '{"id":"aaaaaaaa","title":"sentinel","from":null,"to":"draft","actor":"agent","at":"2026-08-01T00:00:00.000Z"}\n'],
+    [join(directory, '.openlore', 'memory', 'notes.json'), '{"version":"1","updatedAt":"","memories":[]}\n'],
+  ]);
+  for (const [path, contents] of sentinels) {
+    mkdirSync(join(path, '..'), { recursive: true });
+    writeFileSync(path, contents);
+  }
+  return sentinels;
+}
+
+function expectPersistentStateUnchanged(sentinels: ReadonlyMap<string, string>): void {
+  for (const [path, contents] of sentinels) {
+    expect(readFileSync(path, 'utf-8')).toBe(contents);
+  }
+}
 
 let client: Client | null = null;
 let transport: StdioClientTransport | null = null;
@@ -168,8 +188,9 @@ describe('spec — lean default surface + breadth pointer (via SDK Client over s
   }, 60_000);
 
   it('rejects hidden read and write tools before any side effect while preserving member dispatch', async () => {
-    if (!existsSync(MCP_BIN) || !existsSync(CACHE_FILE)) return;
+    expect(existsSync(MCP_BIN), 'run `npm run build` before the MCP boundary suite').toBe(true);
     const dir = mkdtempSync(join(tmpdir(), 'openlore-preset-dispatch-'));
+    const sentinels = seedPersistentState(dir);
     const t = new StdioClientTransport({ command: 'node', args: [MCP_BIN, 'mcp'], cwd: REPO_ROOT });
     const c = new Client({ name: 'preset-boundary-probe', version: '1.0.0' });
     await c.connect(t);
@@ -187,7 +208,7 @@ describe('spec — lean default surface + breadth pointer (via SDK Client over s
       }
 
       // The guard precedes --watch-auto bootstrap and every persistent handler.
-      expect(existsSync(join(dir, '.openlore'))).toBe(false);
+      expectPersistentStateUnchanged(sentinels);
 
       // A deprecated alias resolves before membership enforcement, so the
       // canonical registered name is rejected rather than reported unknown.
@@ -202,6 +223,110 @@ describe('spec — lean default surface + breadth pointer (via SDK Client over s
       expect((member.content as Array<{ text?: string }>)[0]?.text).not.toMatch(/not available in the active/i);
     } finally {
       await c.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it('rejects hidden writes before delegating to a discovered full daemon', async () => {
+    expect(existsSync(MCP_BIN), 'run `npm run build` before the MCP boundary suite').toBe(true);
+    const dir = mkdtempSync(join(tmpdir(), 'openlore-preset-delegation-'));
+    const sentinels = seedPersistentState(dir);
+    const daemon = await startServe({
+      directory: dir,
+      port: '0',
+      watch: false,
+      preset: 'full',
+    });
+    const t = new StdioClientTransport({ command: 'node', args: [MCP_BIN, 'mcp'], cwd: REPO_ROOT });
+    const c = new Client({ name: 'preset-delegation-probe', version: '1.0.0' });
+    await c.connect(t);
+    try {
+      for (const [name, args] of [
+        ['record_decision', { directory: dir, title: 'must not persist', rationale: 'outside preset' }],
+        ['remember', { directory: dir, content: 'must not persist' }],
+      ] as const) {
+        const res = await c.callTool({ name, arguments: args });
+        expect(res.isError).toBe(true);
+        expect((res.content as Array<{ text?: string }>)[0]?.text).toMatch(/not available.*substrate/i);
+      }
+
+      // The backing daemon is full-surface and would execute both writes. Exact
+      // sentinel bytes prove the narrow MCP guard returned before delegation.
+      expectPersistentStateUnchanged(sentinels);
+    } finally {
+      await c.close();
+      await daemon?.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it('rejects an out-of-surface call through the real wire for every curated preset', async () => {
+    expect(existsSync(MCP_BIN), 'run `npm run build` before the MCP boundary suite').toBe(true);
+    const dir = mkdtempSync(join(tmpdir(), 'openlore-preset-matrix-'));
+    try {
+      for (const [preset, active] of Object.entries(TOOL_PRESETS)) {
+        const hidden = TOOL_DEFINITIONS.find((tool) => !active.has(tool.name));
+        expect(hidden, `${preset} must be narrower than full`).toBeDefined();
+        const t = new StdioClientTransport({
+          command: 'node',
+          args: [MCP_BIN, 'mcp', '--preset', preset, '--no-watch-auto'],
+          cwd: REPO_ROOT,
+        });
+        const c = new Client({ name: `preset-matrix-${preset}`, version: '1.0.0' });
+        await c.connect(t);
+        try {
+          const res = await c.callTool({ name: hidden!.name, arguments: { directory: dir } });
+          expect(res.isError, preset).toBe(true);
+          expect((res.content as Array<{ text?: string }>)[0]?.text).toContain(`"${preset}" preset`);
+        } finally {
+          await c.close();
+        }
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it('retains a healthy narrow daemon after a full MCP call falls back on 403', async () => {
+    expect(existsSync(MCP_BIN), 'run `npm run build` before the MCP boundary suite').toBe(true);
+    const dir = mkdtempSync(join(tmpdir(), 'openlore-preset-fallback-'));
+    const exit = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    const daemon = await startServe({
+      directory: dir,
+      port: '0',
+      watch: false,
+      preset: 'navigation',
+      idleTimeout: '0.03', // 1.8s
+    });
+    const t = new StdioClientTransport({
+      command: 'node',
+      args: [MCP_BIN, 'mcp', '--preset', 'full', '--no-watch-auto'],
+      cwd: REPO_ROOT,
+    });
+    const c = new Client({ name: 'preset-fallback-probe', version: '1.0.0' });
+    await c.connect(t);
+    try {
+      // The narrow daemon returns 403; the wider MCP session is authorized and
+      // executes this call locally without evicting the live endpoint.
+      const fallback = await c.callTool({ name: 'get_env_vars', arguments: { directory: dir } });
+      expect(fallback.isError).toBeFalsy();
+
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      const member = await c.callTool({
+        name: 'orient',
+        arguments: { directory: dir, task: 'retain shared daemon' },
+      });
+      expect(member.isError).toBeFalsy();
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+
+      // If the 403 had evicted the endpoint, orient would run locally and the
+      // daemon's original 1.8s idle deadline would have fired by now.
+      expect(exit).not.toHaveBeenCalled();
+      expect((await fetch(`${daemon!.baseUrl}/health`)).status).toBe(200);
+    } finally {
+      await c.close();
+      await daemon?.close();
+      exit.mockRestore();
       rmSync(dir, { recursive: true, force: true });
     }
   }, 60_000);

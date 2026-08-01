@@ -389,7 +389,17 @@ async function runConfigWizard(ctx: ExtensionContext, existing?: OpenLoreConfig 
 
 // ── Daemon discovery + lifecycle ──────────────────────────────────────────────
 
-interface Daemon { baseUrl: string; token?: string }
+interface Daemon {
+  baseUrl: string;
+  token?: string;
+  incompatibility?: string;
+}
+
+interface DaemonHealth {
+  ok: true;
+  presetDispatchEnforced: boolean;
+  tools: string[] | null;
+}
 
 const HEALTH_TIMEOUT_MS = 8000;
 const HEALTH_POLL_MS = 150;
@@ -418,19 +428,66 @@ async function readDescriptor(cwd: string): Promise<ServeDescriptor | null> {
   return readServeDescriptor(join(cwd, OPENLORE_DIR, 'serve.json'));
 }
 
-async function healthy(desc: ServeDescriptor): Promise<boolean> {
+async function probeHealth(desc: ServeDescriptor): Promise<DaemonHealth | null> {
   try {
     // `redirect: 'error'` — a daemon never redirects, and following one would take
     // this probe (and, at the call site below, the token) off the machine.
     const res = await fetch(`http://${desc.host}:${desc.port}/health`, { signal: AbortSignal.timeout(HEALTH_PROBE_TIMEOUT_MS), redirect: 'error' });
-    if (!res.ok) return false;
-    return ((await res.json().catch(() => null)) as { ok?: boolean } | null)?.ok === true;
-  } catch { return false; }
+    if (!res.ok) return null;
+    const body = (await res.json().catch(() => null)) as {
+      ok?: boolean;
+      presetDispatchEnforced?: unknown;
+      tools?: unknown;
+    } | null;
+    if (body?.ok !== true) return null;
+    const tools =
+      Array.isArray(body.tools) && body.tools.every((tool) => typeof tool === 'string')
+        ? body.tools as string[]
+        : null;
+    return {
+      ok: true,
+      presetDispatchEnforced: body.presetDispatchEnforced === true,
+      tools,
+    };
+  } catch { return null; }
 }
 
-async function ensureDaemon(cwd: string): Promise<Daemon | null> {
+export function missingDaemonTools(available: readonly string[], required: readonly string[]): string[] {
+  const advertised = new Set(available);
+  return required.filter((tool) => !advertised.has(tool));
+}
+
+function daemonFromHealth(desc: ServeDescriptor, health: DaemonHealth): Daemon {
+  if (!health.presetDispatchEnforced || !health.tools) {
+    return {
+      baseUrl: `http://${desc.host}:${desc.port}`,
+      token: desc.token,
+      incompatibility:
+        'The running openlore daemon does not report an enforced, verifiable tool surface. Upgrade it or ' +
+        'run `openlore serve --stop`, then retry so Pi can start its required full-preset daemon.',
+    };
+  }
+  const missing = missingDaemonTools(health.tools, NAV_TOOLS.map((tool) => tool.name));
+  return {
+    baseUrl: `http://${desc.host}:${desc.port}`,
+    token: desc.token,
+    ...(missing.length > 0
+      ? {
+          incompatibility:
+            `The running openlore daemon does not expose ${missing.length} Pi tool(s), including ` +
+            `${missing.slice(0, 3).join(', ')}. Run \`openlore serve --stop\`, then retry so Pi ` +
+            'can start its required full-preset daemon.',
+        }
+      : {}),
+  };
+}
+
+export async function ensureDaemon(cwd: string): Promise<Daemon | null> {
   const existing = await readDescriptor(cwd);
-  if (existing && (await healthy(existing))) return { baseUrl: `http://${existing.host}:${existing.port}`, token: existing.token };
+  if (existing) {
+    const health = await probeHealth(existing);
+    if (health) return daemonFromHealth(existing, health);
+  }
   try {
     // The daemon must outlive this process and write .openlore/serve.json.
     // Windows 10 kills a child whose stdout/stderr are NUL (stdio:'ignore') —
@@ -462,12 +519,16 @@ async function ensureDaemon(cwd: string): Promise<Daemon | null> {
   while (Date.now() < deadline) {
     await sleep(HEALTH_POLL_MS);
     const desc = await readDescriptor(cwd);
-    if (desc && (await healthy(desc))) return { baseUrl: `http://${desc.host}:${desc.port}`, token: desc.token };
+    if (desc) {
+      const health = await probeHealth(desc);
+      if (health) return daemonFromHealth(desc, health);
+    }
   }
   return null;
 }
 
-async function callTool(daemon: Daemon, name: string, args: Record<string, unknown>, cwd: string, signal?: AbortSignal): Promise<unknown> {
+export async function callTool(daemon: Daemon, name: string, args: Record<string, unknown>, cwd: string, signal?: AbortSignal): Promise<unknown> {
+  if (daemon.incompatibility) return { error: daemon.incompatibility };
   const headers: Record<string, string> = { 'content-type': 'application/json' };
   if (daemon.token) headers['x-openlore-token'] = daemon.token;
   try {
@@ -480,6 +541,10 @@ async function callTool(daemon: Daemon, name: string, args: Record<string, unkno
     if (!res.ok) return { error: (body as { error?: string }).error ?? `HTTP ${res.status}` };
     return body;
   } catch (err) { return { error: err instanceof Error ? err.message : String(err) }; }
+}
+
+export function isUsableDaemon(daemon: Daemon): boolean {
+  return daemon.incompatibility === undefined;
 }
 
 // ── Context injection helpers ─────────────────────────────────────────────────
@@ -1198,8 +1263,11 @@ export default function openlore(pi: ExtensionAPI): void {
     if ((failedUntil.get(cwd) ?? 0) > Date.now()) return null;
     const d = await ensureDaemon(cwd);
     if (d) {
-      daemons.set(cwd, d);
       failedUntil.delete(cwd);
+      // Incompatible daemons carry remediation to the current call but never
+      // enter the usable/keepalive cache. After the operator stops or upgrades
+      // one, the very next tool call re-probes and can recover immediately.
+      if (isUsableDaemon(d)) daemons.set(cwd, d);
     } else {
       failedUntil.set(cwd, Date.now() + DAEMON_RETRY_COOLDOWN_MS);
     }

@@ -22,6 +22,21 @@ export interface ServeEndpoint {
   token?: string;
 }
 
+/** A reachable daemon rejected a request at its HTTP policy/handler boundary. */
+export class ServeHttpError extends Error {
+  constructor(
+    public readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'ServeHttpError';
+  }
+}
+
+export function isServePresetRejection(error: unknown): error is ServeHttpError {
+  return error instanceof ServeHttpError && error.status === 403;
+}
+
 const SPAWN_HEALTH_TIMEOUT_MS = 8000;
 const HEALTH_POLL_MS = 150;
 // Per-probe timeout for the reuse check. Generous so a cold Node HTTP server on
@@ -147,9 +162,8 @@ export async function callServeTool(
   });
   const body = await res.json().catch(() => null);
   if (!res.ok) {
-    // 404 = unknown tool, etc. Surface as a thrown error → caller falls back.
     const msg = (body as { error?: string } | null)?.error ?? `daemon HTTP ${res.status}`;
-    throw new Error(msg);
+    throw new ServeHttpError(res.status, msg);
   }
   return body;
 }

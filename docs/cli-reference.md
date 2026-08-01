@@ -614,7 +614,7 @@ over plain HTTP so non-MCP clients (e.g. the [Pi](https://pi.dev) extension in
 `examples/pi/`) can hit them with `fetch` — no JSON-RPC, no subprocess-per-call.
 
 ```bash
-openlore serve                          # navigation preset, ephemeral port, watch on
+openlore serve                          # substrate preset, ephemeral port, watch on
 openlore serve --preset all --port 7077 # all 73 tools on a fixed port
 openlore serve --no-watch               # transport only, no freshness lane
 openlore serve --stop                   # stop the daemon serving this directory
@@ -633,6 +633,8 @@ openlore serve --stop                   # stop the daemon serving this directory
 Endpoints (loopback only): `GET /health`, `POST /tool/:name` with body
 `{ "directory": "...", "args": { ... } }`. Discovery: the daemon writes
 `.openlore/serve.json` `{ port, pid, host, token? }` (removed on clean shutdown).
+`/health` includes `presetDispatchEnforced: true`; clients MUST require that
+semantic marker before trusting its `preset` and `tools` fields as the callable boundary.
 
 ```bash
 PORT=$(jq .port .openlore/serve.json)
@@ -644,7 +646,9 @@ curl -XPOST 127.0.0.1:$PORT/tool/orient -d '{"args":{"task":"add rate limiting"}
 
 `openlore setup --tools pi` installs the Pi extension to `.pi/extensions/openlore.ts`
 (add `--global` for `~/.pi/agent/extensions/`). It auto-starts and talks to the
-serve daemon, injecting structural context and exposing the navigation tools.
+serve daemon, injecting structural context and exposing Pi's curated tool surface.
+Pi starts a full-preset backing daemon and curates the model-visible tools itself;
+if an existing narrow daemon owns the repository, stop it before starting Pi.
 See `examples/pi/README.md`.
 
 ---

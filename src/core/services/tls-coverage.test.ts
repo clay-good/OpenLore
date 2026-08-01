@@ -40,12 +40,13 @@ const SRC = join(REPO_ROOT, 'src');
  * opt in, which is a behaviour change in its own right.
  */
 const EXEMPT: { file: string; line: number; why: string }[] = [
-  { file: 'src/core/services/serve-client.ts', line: 67, why: 'loopback http:// health probe' },
-  { file: 'src/core/services/serve-client.ts', line: 139, why: 'loopback http:// daemon call' },
-  { file: 'src/cli/commands/serve.ts', line: 188, why: 'loopback http:// health probe' },
-  { file: 'src/pi/extension.ts', line: 425, why: 'loopback http:// health probe' },
-  { file: 'src/pi/extension.ts', line: 474, why: 'loopback http:// daemon call' },
-  { file: 'src/pi/extension.ts', line: 1219, why: 'loopback http:// health probe' },
+  { file: 'src/core/services/serve-client.ts', line: 82, why: 'loopback http:// health probe' },
+  { file: 'src/core/services/serve-client.ts', line: 154, why: 'loopback http:// daemon call' },
+  { file: 'src/cli/commands/serve.ts', line: 197, why: 'loopback http:// health metadata probe' },
+  { file: 'src/cli/commands/serve.ts', line: 229, why: 'loopback http:// liveness probe' },
+  { file: 'src/pi/extension.ts', line: 435, why: 'loopback http:// health probe' },
+  { file: 'src/pi/extension.ts', line: 535, why: 'loopback http:// daemon call' },
+  { file: 'src/pi/extension.ts', line: 1287, why: 'loopback http:// health probe' },
   {
     file: 'src/pi/extension.ts',
     line: 166,
