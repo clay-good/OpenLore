@@ -11,6 +11,7 @@ import { describe, it, expect } from 'vitest';
 import {
   parseCgroupV2Max,
   parseCgroupV1Limit,
+  cgroupV2MemoryMaxPaths,
   userHasSetHeap,
   planHeapReexec,
   commandFromArgv,
@@ -62,6 +63,29 @@ describe('parseCgroupV1Limit', () => {
   });
   it('treats the near-INT64_MAX no-limit sentinel as no limit', () => {
     expect(parseCgroupV1Limit('9223372036854771712')).toBeUndefined();
+  });
+});
+
+describe('cgroupV2MemoryMaxPaths — hierarchy walk', () => {
+  it('returns just the root for a root-cgroup process (or missing proc file)', () => {
+    expect(cgroupV2MemoryMaxPaths('0::/\n')).toEqual(['/sys/fs/cgroup/memory.max']);
+    expect(cgroupV2MemoryMaxPaths(null)).toEqual(['/sys/fs/cgroup/memory.max']);
+    expect(cgroupV2MemoryMaxPaths('')).toEqual(['/sys/fs/cgroup/memory.max']);
+  });
+  it('walks root → each ancestor → leaf for a nested cgroup', () => {
+    expect(cgroupV2MemoryMaxPaths('0::/system.slice/app.service\n')).toEqual([
+      '/sys/fs/cgroup/memory.max',
+      '/sys/fs/cgroup/system.slice/memory.max',
+      '/sys/fs/cgroup/system.slice/app.service/memory.max',
+    ]);
+  });
+  it('ignores non-v2 controller lines (hybrid /proc/self/cgroup)', () => {
+    const hybrid = '3:memory:/foo\n0::/system.slice/x.service\n';
+    expect(cgroupV2MemoryMaxPaths(hybrid)).toEqual([
+      '/sys/fs/cgroup/memory.max',
+      '/sys/fs/cgroup/system.slice/memory.max',
+      '/sys/fs/cgroup/system.slice/x.service/memory.max',
+    ]);
   });
 });
 

@@ -25,11 +25,12 @@ import { isCfgOverlayShed } from './memory-strategy.js';
 export function buildCfgFor(fnNode: CfgNode, language: string): FunctionCfg | undefined {
   // Graceful-degradation ladder tier 1 (change: make-analyze-scale-to-any-repo): when the
   // pre-flight estimate says the overlay will not fit the heap, it is shed WHOLESALE — no CFG is
-  // built for any function, saving both its build cost and its resident size. Read from an env var
-  // (not a parameter) because this runs inside extraction worker threads that snapshot
-  // `process.env` at spawn time; the generator sets the flag around the whole build so workers and
-  // the serial lane see the same decision. `cfgs` then comes back empty and the reduction is
-  // disclosed — the base call graph is untouched, exactly as when a single overlay fails soft.
+  // built for any function, saving both its build cost and its resident size. `isCfgOverlayShed()`
+  // reads a build-scoped decision (an AsyncLocalStorage store on the main thread; a workerData-
+  // latched flag inside each extraction worker isolate), so the serial lane and the workers a build
+  // spawns see one consistent decision with no shared mutable global. `cfgs` then comes back empty
+  // and the reduction is disclosed — the base call graph is untouched, exactly as when a single
+  // overlay fails soft.
   if (isCfgOverlayShed()) return undefined;
 
   // The overlay is strictly additive: a CFG-builder surprise (an unexpected

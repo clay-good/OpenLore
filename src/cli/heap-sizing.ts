@@ -155,6 +155,26 @@ function readFileSafe(path: string): string | null {
 }
 
 /**
+ * The `memory.max` file paths to consult for the current cgroup v2 process, from the mount root down
+ * to the process's own leaf, derived from `/proc/self/cgroup` (a single `0::<path>` line under v2).
+ * Pure so the path logic is unit-tested without a Linux filesystem. Always includes the root; adds
+ * each ancestor when the process is in a non-root cgroup. `unified` is the cgroup v2 mount root.
+ */
+export function cgroupV2MemoryMaxPaths(procCgroupContent: string | null | undefined, unified = '/sys/fs/cgroup'): string[] {
+  const paths = [`${unified}/memory.max`];
+  const line = procCgroupContent?.split('\n').find(l => l.startsWith('0::'));
+  const rel = line ? line.slice('0::'.length).trim() : '';
+  if (rel && rel !== '/') {
+    let dir = unified;
+    for (const seg of rel.split('/').filter(Boolean)) {
+      dir += `/${seg}`;
+      paths.push(`${dir}/memory.max`);
+    }
+  }
+  return paths;
+}
+
+/**
  * The effective cgroup v2 memory limit in bytes, walking the process's cgroup and its ancestors and
  * taking the SMALLEST finite `memory.max`. The effective cap is the tightest limit anywhere up the
  * hierarchy — with nested systemd slices the leaf often reads `max` while a parent slice carries the
@@ -163,24 +183,10 @@ function readFileSafe(path: string): string | null {
  * no ancestor sets a real limit. Bounded: the chain is a handful of directories.
  */
 function readCgroupV2EffectiveLimitBytes(): number | undefined {
-  // `/proc/self/cgroup` under v2 is a single line `0::<path>`; that path is relative to the cgroup
-  // v2 mount root at `/sys/fs/cgroup`. Absent/non-Linux → no v2 limit.
-  const procCgroup = readFileSafe('/proc/self/cgroup');
-  const rootMax = parseCgroupV2Max(readFileSafe('/sys/fs/cgroup/memory.max'));
-  let best = rootMax;
-  if (procCgroup) {
-    const line = procCgroup.split('\n').find(l => l.startsWith('0::'));
-    const rel = line ? line.slice('0::'.length).trim() : '';
-    if (rel && rel !== '/') {
-      // Walk each ancestor directory from the root down to the leaf, min'ing every real limit.
-      const segments = rel.split('/').filter(Boolean);
-      let dir = '/sys/fs/cgroup';
-      for (const seg of segments) {
-        dir += `/${seg}`;
-        const limit = parseCgroupV2Max(readFileSafe(`${dir}/memory.max`));
-        if (limit !== undefined) best = best === undefined ? limit : Math.min(best, limit);
-      }
-    }
+  let best: number | undefined;
+  for (const path of cgroupV2MemoryMaxPaths(readFileSafe('/proc/self/cgroup'))) {
+    const limit = parseCgroupV2Max(readFileSafe(path));
+    if (limit !== undefined) best = best === undefined ? limit : Math.min(best, limit);
   }
   return best;
 }

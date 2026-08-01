@@ -1488,11 +1488,11 @@ export class AnalysisArtifactGenerator {
         ...(memo ? { pass1Cache: memo.cache } : {}),
         ...(this._cfgSpill ? { cfgSpill: this._cfgSpill } : {}),
       });
-      // Tier 1 of the degradation ladder: when the overlay is shed, the flag is set for the WHOLE
-      // build so the extraction WORKER THREADS (which snapshot `process.env` at spawn) build no
-      // CFGs — `buildCfgFor` short-circuits, no overlay is produced, and the spill stays empty. The
-      // base call graph is unaffected. A no-op wrapper at full fidelity (change:
-      // make-analyze-scale-to-any-repo).
+      // Tier 1 of the degradation ladder: when the overlay is shed, the decision is bound for the
+      // WHOLE build via a build-scoped async-context store, and forwarded to each extraction worker
+      // through `workerData`, so every function's `buildCfgFor` short-circuits — no overlay is
+      // produced and the spill stays empty. The base call graph is unaffected. A no-op wrapper at
+      // full fidelity (change: make-analyze-scale-to-any-repo).
       callGraphResult = await withCfgOverlayShed(
         memoryStrategy.shedCfgOverlay,
         () => builder.build(callGraphFiles),
