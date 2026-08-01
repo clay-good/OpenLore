@@ -22,7 +22,7 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { isGitRepository } from '../drift/git-diff.js';
+import { isGitRepository, getRepoPrefix, reframeRepoPath, validateGitRef } from '../drift/git-diff.js';
 import { gitPathArgs } from '../../utils/git-args.js';
 
 const execFileAsync = promisify(execFile);
@@ -68,6 +68,13 @@ export interface ChangeCouplingOptions {
   minSupport?: number;
   minConfidence?: number;
   topPairs?: number;
+  /**
+   * Mine history at or before this ref instead of from HEAD. A consumer that wants
+   * churn strictly BEFORE a range (e.g. `briefing_since`'s prior-churn tier) passes
+   * its resolved base ref so the briefed commits themselves are excluded. Omitted →
+   * from HEAD, byte-identical to the pre-change behavior.
+   */
+  startRef?: string;
 }
 
 /** Map a churn count to a volatility level (absolute thresholds over the window). */
@@ -103,18 +110,36 @@ export async function analyzeChangeCoupling(
   const minConfidence = opts.minConfidence ?? COUPLING_MIN_CONFIDENCE;
   const topPairs = opts.topPairs ?? COUPLING_TOP_PAIRS;
 
+  // Optional start ref: log from `<startRef>` (that commit and its ancestors) instead
+  // of HEAD, so a caller can measure churn strictly BEFORE a range. Validated as an
+  // argument-injection guard before it reaches git's argv.
+  let startRefArgs: string[] = [];
+  if (opts.startRef) {
+    try {
+      validateGitRef(opts.startRef);
+    } catch {
+      return empty;
+    }
+    startRefArgs = [opts.startRef];
+  }
+
+  // Below the repository root, git emits repo-root-relative paths while the analyzer's
+  // node paths are analyzed-root-relative; re-frame so churn/coupling keys join. Empty
+  // prefix (the root) makes re-framing a no-op → output byte-identical to before.
+  const prefix = (await getRepoPrefix(rootPath)) ?? '';
+
   let stdout: string;
   try {
     ({ stdout } = await execFileAsync(
       'git',
-      gitPathArgs('log', `--max-count=${maxCommits}`, '--no-merges', `--format=${RS}%h`, '--name-only'),
+      gitPathArgs('log', ...startRefArgs, `--max-count=${maxCommits}`, '--no-merges', `--format=${RS}%h`, '--name-only'),
       { cwd: rootPath, maxBuffer: 128 * 1024 * 1024 },
     ));
   } catch {
     return empty;
   }
 
-  // Parse into per-commit file sets.
+  // Parse into per-commit file sets (raw, repo-root-relative paths).
   const commitFileSets: string[][] = [];
   for (const seg of stdout.split(RS)) {
     if (!seg.trim()) continue;
@@ -130,8 +155,15 @@ export async function analyzeChangeCoupling(
   let bulkFiltered = 0;
   let scanned = 0;
 
-  for (const files of commitFileSets) {
-    if (files.length > bulkThreshold) { bulkFiltered++; continue; }
+  for (const rawFiles of commitFileSets) {
+    // Bulk filter uses the RAW repo-wide commit size: a mass sweep manufactures false
+    // coupling for its files whether or not they lie in the analyzed subtree.
+    if (rawFiles.length > bulkThreshold) { bulkFiltered++; continue; }
+    // Re-frame to analyzed-root paths and drop files outside the subtree (no-op at root).
+    const files = rawFiles
+      .map(f => reframeRepoPath(f, prefix))
+      .filter((f): f is string => f !== null);
+    if (files.length === 0) continue; // commit touched nothing in the analyzed subtree
     scanned++;
     const uniq = [...new Set(files)].sort();
     for (const f of uniq) churn.set(f, (churn.get(f) ?? 0) + 1);

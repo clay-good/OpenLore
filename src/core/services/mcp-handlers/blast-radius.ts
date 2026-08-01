@@ -41,6 +41,14 @@ export interface BlastRadiusInput {
   depth?: number;
   /** Cap on the number of changed symbols analyzed for impact. Default 12. */
   maxSymbols?: number;
+  /**
+   * Opt into cross-repo (federation) scope: also evaluate consumer repos that reach a
+   * call site of a changed published symbol. Forwarded verbatim to the composed
+   * `select_tests`. (change: add-multi-repo-federation)
+   */
+  federation?: boolean;
+  /** Restrict the federation scope to these registry repo names (default: all). */
+  federationRepos?: string[];
 }
 
 type RiskLevel = 'low' | 'medium' | 'high' | 'critical';
@@ -112,7 +120,14 @@ export interface BlastRadiusBriefing {
     orphaned: number;
     items: Array<{ kind: string; message: string; domain: string | null }>;
   };
-  federation: { evaluated: false; note: string };
+  /**
+   * Cross-repo (federation) impact. `evaluated: false` carries a truthful note about
+   * why nothing ran — never a claim that the shipped federation capability does not
+   * exist. `evaluated: true` carries the forwarded `select_tests` federation block
+   * (cross-repo tests + repos-consulted/-skipped coverage). (change:
+   * fix-git-derived-signal-honesty; BriefingCapabilityClaimsAreCurrent)
+   */
+  federation: { evaluated: false; note: string } | ({ evaluated: true } & Record<string, unknown>);
   /** Present only when the requested base did not resolve; names both refs (fix-cli-conclusion-honesty). */
   baseRefFallback?: { requested: string; resolved: string };
   /** Index-staleness disclosure: a risk headline computed over a graph that predates the
@@ -224,15 +239,25 @@ export async function computeBlastRadius(
   let testToRun: Array<{ test: string; file: string; confidence: string }> = [];
   let testSoundness: unknown;
   let testsUnavailable: string | null = null;
+  // Cross-repo (federation) block returned by the composed select_tests, present only
+  // when federation was opted in AND a federation scope resolved.
+  let federationResult: Record<string, unknown> | undefined;
   try {
-    const sel = await handleSelectTests({ directory: absDir, diffRef: resolvedBaseRef }) as {
+    const sel = await handleSelectTests({
+      directory: absDir,
+      diffRef: resolvedBaseRef,
+      ...(input.federation ? { federation: true } : {}),
+      ...(input.federationRepos ? { federationRepos: input.federationRepos } : {}),
+    }) as {
       selectedTests?: Array<{ test: string; file: string; confidence: string }>;
       soundness?: unknown;
+      federation?: Record<string, unknown>;
     };
     const tests = sel.selectedTests ?? [];
     testCount = tests.length;
     testToRun = tests.slice(0, 15);
     testSoundness = sel.soundness;
+    federationResult = sel.federation;
   } catch (err) {
     // Tests are best-effort, but "0 tests" and "tests could not be computed" are
     // different claims and a reader acts differently on each: an unrecorded throw
@@ -314,6 +339,19 @@ export async function computeBlastRadius(
   const staleness = await computeStaleness(absDir);
   const confidenceBoundary = assembleBoundary({ staleness, integrity: ctx.integrity });
 
+  // Federation block: forward the composed select_tests result when it ran, otherwise
+  // a truthful note. Never claim the shipped federation capability is unshipped
+  // (BriefingCapabilityClaimsAreCurrent).
+  const federationRequested = input.federation === true || (input.federationRepos?.length ?? 0) > 0;
+  const federation: BlastRadiusBriefing['federation'] = federationResult
+    ? { ...federationResult, evaluated: true } // evaluated wins even if the block ever carries the key
+    : {
+        evaluated: false,
+        note: federationRequested
+          ? 'Federation was requested but no cross-repo selection ran (no federation registry resolved, or no changed published symbol propagated to consumers). Use select_tests with federation:true for the detailed cross-repo diagnosis.'
+          : 'Cross-repo consumers of changed published interfaces are not evaluated by this tool unless federation is opted in. Pass federation:true (optionally federationRepos), or call select_tests with federation:true.',
+      };
+
   const briefing: BlastRadiusBriefing = {
     baseRef,
     resolvedBaseRef,
@@ -340,10 +378,7 @@ export async function computeBlastRadius(
     memory: { drifted: memDrifted, orphaned: memOrphaned, willDrift: memWillDrift.slice(0, 20) },
     specs: { willGoStale: specItems.length, items: specItems.slice(0, 20) },
     decisions: { affected: decisionItems.length, orphaned: decisionsOrphaned, items: decisionItems.slice(0, 20) },
-    federation: {
-      evaluated: false,
-      note: 'Cross-repo consumers of changed published interfaces are not evaluated (multi-repo federation not yet shipped — add-multi-repo-federation).',
-    },
+    federation,
     headline: '',
     posture: 'advisory',
     caveats,

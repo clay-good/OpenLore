@@ -14,11 +14,17 @@ vi.mock('./utils.js', () => ({
   readCachedContext: vi.fn(),
 }));
 
-vi.mock('../../drift/git-diff.js', () => ({
-  getChangedFiles: vi.fn(),
-  // The shared resolve-or-disclose helper; a per-test default is set in beforeEach.
-  resolveBaseRefDisclosed: vi.fn(),
-}));
+vi.mock('../../drift/git-diff.js', async (importActual) => {
+  const actual = await importActual<typeof import('../../drift/git-diff.js')>();
+  return {
+    ...actual, // keep the pure reframeRepoPath real
+    getChangedFiles: vi.fn(),
+    // The shared resolve-or-disclose helper; a per-test default is set in beforeEach.
+    resolveBaseRefDisclosed: vi.fn(),
+    // Analyzed dir is the repo root in these fixtures → empty prefix → re-framing is a no-op.
+    getRepoPrefix: vi.fn(async () => ''),
+  };
+});
 
 // Keep volatilityLevel real; stub only the git-history miner.
 vi.mock('../../provenance/change-coupling.js', async (importActual) => {
@@ -150,6 +156,15 @@ describe('handleBriefingSince', () => {
     expect(r.regions.some(g => g.community === 'core')).toBe(true);
     // baseRef cursor echoed (resolved)
     expect(r.baseRef).toBe('mainsha');
+  });
+
+  it('mines prior churn strictly before the briefed range (passes the resolved base as the start ref)', async () => {
+    mockedDiff.mockResolvedValue(diffFiles(['src/core.ts'], 'v1.0'));
+    mockedCoupling.mockResolvedValue(coupling({ 'src/core.ts': 1 }, 40));
+    await handleBriefingSince({ directory: '/repo', baseRef: 'v1.0' });
+    // The churn miner must be scoped to the resolved base so commits INSIDE base..HEAD
+    // (the briefed change itself) never inflate priorChurn and demote the surprise tier.
+    expect(mockedCoupling).toHaveBeenCalledWith('/repo', { startRef: 'v1.0' });
   });
 
   it('withholds surprising-change on shallow history (single commit) and discloses it', async () => {

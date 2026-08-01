@@ -276,8 +276,11 @@ async function readBuildCommit(absDir: string): Promise<string | null> {
  */
 async function countSourceChangedSince(absDir: string, commit: string): Promise<number | null> {
   try {
-    const { isGitRepository, validateGitRef } = await import('../../drift/git-diff.js');
-    if (!(await isGitRepository(absDir))) return null;
+    const { isGitRepositoryRoot, validateGitRef } = await import('../../drift/git-diff.js');
+    // Root-only: `git diff --name-only <commit>` below the repo root lists the WHOLE
+    // repo's changed files (repo-root-relative), over-counting staleness from sibling
+    // packages. Gate on the root to keep the prior "null below root" behavior.
+    if (!(await isGitRepositoryRoot(absDir))) return null;
     validateGitRef(commit);
     const { stdout } = await execFileAsync('git', gitPathArgs('diff', '--name-only', commit, '--'), { cwd: absDir });
     return stdout

@@ -138,13 +138,60 @@ describe('computeBlastRadius', () => {
     expect(b.decisions.affected).toBe(1);
     expect(b.decisions.orphaned).toBe(1); // uncapped count the block gate reads
 
-    // Federation is honestly out of scope
+    // Federation is honestly out of scope — and never claims the shipped capability is unshipped.
     expect(b.federation.evaluated).toBe(false);
+    if (b.federation.evaluated === false) {
+      expect(b.federation.note).not.toMatch(/not yet shipped|unshipped|does not exist/i);
+      expect(b.federation.note).toMatch(/select_tests/);
+    }
 
     // Conclusion-shaped + advisory
     expect(b.posture).toBe('advisory');
     expect(b.headline).toMatch(/hub/i);
     expect(() => assertConclusionShape('blast_radius', b)).not.toThrow();
+  });
+
+  it('forwards the federation opt-in to the composed select_tests and carries its cross-repo result', async () => {
+    // Drive select_tests to return a federation block (as it does when a scope resolves).
+    vi.mocked(handleSelectTests).mockResolvedValueOnce({
+      selectedTests: [{ test: 'testValidate', file: 'src/x.test.ts', confidence: 'high' }],
+      soundness: { posture: 'over-approximate', caveats: [] },
+      federation: {
+        crossRepoTests: [{ repo: 'consumer', test: 'usesValidate', file: 'c/x.test.ts', viaSymbol: 'validateDirectory', confidence: 'high' }],
+        crossRepoTestCount: 1,
+        reposConsulted: ['consumer'],
+        reposSkipped: [],
+        caveats: [],
+      },
+    } as never);
+
+    const b = await computeBlastRadius({ directory: '/p', federation: true, federationRepos: ['consumer'] }) as BlastRadiusBriefing;
+
+    // The opt-in reached the composed selection verbatim.
+    expect(vi.mocked(handleSelectTests)).toHaveBeenCalledWith(
+      expect.objectContaining({ federation: true, federationRepos: ['consumer'] }),
+    );
+    // The briefing carries the evaluated cross-repo result + coverage disclosures.
+    expect(b.federation.evaluated).toBe(true);
+    if (b.federation.evaluated === true) {
+      expect(b.federation.crossRepoTestCount).toBe(1);
+      expect(b.federation.reposConsulted).toEqual(['consumer']);
+    }
+    expect(() => assertConclusionShape('blast_radius', b)).not.toThrow();
+  });
+
+  it('when federation is opted in but no scope resolves, discloses that — never "not shipped"', async () => {
+    // select_tests ran but returned no federation block (no scope resolved).
+    vi.mocked(handleSelectTests).mockResolvedValueOnce({
+      selectedTests: [{ test: 'testValidate', file: 'src/x.test.ts', confidence: 'high' }],
+      soundness: { posture: 'over-approximate', caveats: [] },
+    } as never);
+    const b = await computeBlastRadius({ directory: '/p', federation: true }) as BlastRadiusBriefing;
+    expect(b.federation.evaluated).toBe(false);
+    if (b.federation.evaluated === false) {
+      expect(b.federation.note).not.toMatch(/not yet shipped|unshipped/i);
+      expect(b.federation.note).toMatch(/requested/i);
+    }
   });
 
   it('reports an empty diff as nothing to brief (advisory, no risk)', async () => {

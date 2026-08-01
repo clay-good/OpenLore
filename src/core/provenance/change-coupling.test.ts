@@ -6,7 +6,7 @@
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { analyzeChangeCoupling, volatilityLevel } from './change-coupling.js';
@@ -90,6 +90,79 @@ describe('analyzeChangeCoupling (crafted history)', () => {
     const norm = (r: Awaited<ReturnType<typeof analyzeChangeCoupling>>) =>
       JSON.stringify([...r.coupling.entries()].sort());
     expect(norm(a)).toBe(norm(b));
+  });
+});
+
+describe('analyzeChangeCoupling — start-ref window (fix-git-derived-signal-honesty)', () => {
+  let repo: string;
+
+  beforeAll(() => {
+    repo = mkdtempSync(join(tmpdir(), 'coupling-window-'));
+    git(repo, ['init', '-q', '-b', 'main']);
+    git(repo, ['config', 'user.name', 'T']); git(repo, ['config', 'user.email', 't@e.com']);
+    git(repo, ['config', 'commit.gpgsign', 'false']);
+    // Two commits BEFORE the cursor, then a burst AFTER it (the "briefed range").
+    commit(repo, ['h.ts'], 'before-1');
+    commit(repo, ['h.ts'], 'before-2');
+    git(repo, ['tag', 'cursor']);
+    commit(repo, ['h.ts'], 'after-1');
+    commit(repo, ['h.ts'], 'after-2');
+    commit(repo, ['h.ts'], 'after-3');
+  });
+  afterAll(() => rmSync(repo, { recursive: true, force: true }));
+
+  it('mines the whole history from HEAD when no start ref is given (unchanged behavior)', async () => {
+    const r = await analyzeChangeCoupling(repo);
+    expect(r.churn.get('h.ts')).toBe(5);
+    expect(r.stats.commitsScanned).toBe(5);
+  });
+
+  it('mines only the start ref and its ancestors — the burst after the cursor is excluded', async () => {
+    const r = await analyzeChangeCoupling(repo, { startRef: 'cursor' });
+    expect(r.churn.get('h.ts')).toBe(2); // before-1, before-2 only
+    expect(r.stats.commitsScanned).toBe(2);
+  });
+
+  it('degrades to empty for an argument-injection-shaped start ref', async () => {
+    const r = await analyzeChangeCoupling(repo, { startRef: '--output=/tmp/pwned' });
+    expect(r.churn.size).toBe(0);
+    expect(r.stats.commitsScanned).toBe(0);
+  });
+});
+
+describe('analyzeChangeCoupling — below-root re-framing (fix-git-derived-signal-honesty)', () => {
+  let repo: string;
+
+  beforeAll(() => {
+    repo = mkdtempSync(join(tmpdir(), 'coupling-subdir-'));
+    git(repo, ['init', '-q', '-b', 'main']);
+    git(repo, ['config', 'user.name', 'T']); git(repo, ['config', 'user.email', 't@e.com']);
+    git(repo, ['config', 'commit.gpgsign', 'false']);
+    mkdirSync(join(repo, 'packages', 'foo'), { recursive: true });
+    // Two files inside the package move in lockstep; a root-level file is outside it.
+    commit(repo, ['packages/foo/a.ts', 'packages/foo/b.ts', 'root.ts'], 'c1');
+    commit(repo, ['packages/foo/a.ts', 'packages/foo/b.ts'], 'c2');
+    commit(repo, ['packages/foo/a.ts', 'packages/foo/b.ts'], 'c3');
+  });
+  afterAll(() => rmSync(repo, { recursive: true, force: true }));
+
+  it('at the repo root, churn keys are repo-root-relative (unchanged)', async () => {
+    const r = await analyzeChangeCoupling(repo);
+    expect(r.churn.get('packages/foo/a.ts')).toBe(3);
+    expect(r.churn.get('root.ts')).toBe(1);
+  });
+
+  it('below the root, churn keys are re-framed to the analyzed subtree and outside files are dropped', async () => {
+    const r = await analyzeChangeCoupling(join(repo, 'packages', 'foo'));
+    // Re-framed to analyzed-root-relative paths...
+    expect(r.churn.get('a.ts')).toBe(3);
+    expect(r.churn.get('b.ts')).toBe(3);
+    // ...never the repo-root-relative form...
+    expect(r.churn.has('packages/foo/a.ts')).toBe(false);
+    // ...and a file outside the subtree never enters the signal.
+    expect(r.churn.has('root.ts')).toBe(false);
+    // Coupling within the subtree still resolves (a ↔ b, 3 co-changes).
+    expect((r.coupling.get('a.ts') ?? []).some(c => c.file === 'b.ts')).toBe(true);
   });
 });
 

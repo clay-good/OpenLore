@@ -27,7 +27,7 @@ vi.mock('../core/services/llm-service.js', () => ({
 }));
 
 vi.mock('../core/drift/git-diff.js', () => ({
-  isGitRepository: vi.fn(),
+  isGitRepositoryRoot: vi.fn(),
   getChangedFiles: vi.fn(),
 }));
 
@@ -43,7 +43,7 @@ vi.mock('../core/drift/drift-detector.js', () => ({
 import { access, readFile } from 'node:fs/promises';
 import { readOpenLoreConfig } from '../core/services/config-manager.js';
 import { createLLMService } from '../core/services/llm-service.js';
-import { isGitRepository, getChangedFiles } from '../core/drift/git-diff.js';
+import { isGitRepositoryRoot, getChangedFiles } from '../core/drift/git-diff.js';
 import { buildSpecMap, buildADRMap } from '../core/drift/spec-mapper.js';
 import { detectDrift } from '../core/drift/drift-detector.js';
 
@@ -51,7 +51,7 @@ const mockAccess = vi.mocked(access);
 const mockReadFile = vi.mocked(readFile);
 const mockReadOpenLoreConfig = vi.mocked(readOpenLoreConfig);
 const mockCreateLLMService = vi.mocked(createLLMService);
-const mockIsGitRepository = vi.mocked(isGitRepository);
+const mockIsGitRepositoryRoot = vi.mocked(isGitRepositoryRoot);
 const mockGetChangedFiles = vi.mocked(getChangedFiles);
 const mockBuildSpecMap = vi.mocked(buildSpecMap);
 const mockBuildADRMap = vi.mocked(buildADRMap);
@@ -90,7 +90,7 @@ function setupMocks() {
   mockReadOpenLoreConfig.mockResolvedValue(MOCK_CONFIG as ReturnType<typeof readOpenLoreConfig> extends Promise<infer T> ? T : never);
   mockAccess.mockResolvedValue(undefined);
   mockReadFile.mockResolvedValue('{}');
-  mockIsGitRepository.mockResolvedValue(true);
+  mockIsGitRepositoryRoot.mockResolvedValue(true);
   mockGetChangedFiles.mockResolvedValue({ files: MOCK_CHANGED_FILES, resolvedBase: 'main', hasUnstagedChanges: false, currentBranch: 'main' } as Awaited<ReturnType<typeof getChangedFiles>>);
   mockBuildSpecMap.mockResolvedValue(MOCK_SPEC_MAP);
   mockBuildADRMap.mockResolvedValue(MOCK_ADR_MAP);
@@ -116,7 +116,7 @@ describe('openloreDrift', () => {
 
   describe('precondition checks', () => {
     it('throws if not a git repository', async () => {
-      mockIsGitRepository.mockResolvedValue(false);
+      mockIsGitRepositoryRoot.mockResolvedValue(false);
       await expect(openloreDrift({ rootPath: ROOT })).rejects.toThrow(/git/i);
     });
 

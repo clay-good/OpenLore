@@ -24,7 +24,7 @@ import { redirectConsoleToStderr } from '../../utils/quiet-stdout.js';
 import { fileExists, resolveLLMProvider } from '../../utils/command-helpers.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
 import { createLLMService } from '../../core/services/llm-service.js';
-import { isGitRepository, getChangedFiles, getFileDiff, getCommitMessages, resolveBaseRef, buildSpecMap, validateGitRef } from '../../core/drift/index.js';
+import { isGitRepositoryRoot, getChangedFiles, getFileDiff, getCommitMessages, resolveBaseRef, buildSpecMap, validateGitRef } from '../../core/drift/index.js';
 import {
   loadDecisionStore,
   updateDecisionStore,
@@ -761,7 +761,9 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
       let combinedDiff = '';
       let commitMessages = '';
       try {
-        if (await isGitRepository(rootPath)) {
+        // Root-only (see api/decisions.ts): getFileDiff below the repo root empties
+        // out on cwd-relative pathspecs, misclassifying real decisions as phantom.
+        if (await isGitRepositoryRoot(rootPath)) {
           const baseRef = await resolveBaseRef(rootPath, 'auto');
           const gitResult = await getChangedFiles({ rootPath, baseRef, includeUnstaged: false });
           const relevant = gitResult.files.slice(0, DECISIONS_EXTRACTION_MAX_FILES);
@@ -954,7 +956,7 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
       let hasStagedSourceChanges = false;
       if (approved.length === 0 && verified.length === 0 && drafts.length === 0
           && !consolidatedRecently && activeCount === 0) {
-        isGitRepo = await isGitRepository(rootPath);
+        isGitRepo = await isGitRepositoryRoot(rootPath);
         if (isGitRepo) {
           try {
             const { stdout } = await execFileAsync(

@@ -15,7 +15,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { logger } from '../../utils/logger.js';
-import { isGitRepository } from '../drift/git-diff.js';
+import { isGitRepository, getRepoPrefix, reframeRepoPath } from '../drift/git-diff.js';
 import { gitPathArgs } from '../../utils/git-args.js';
 
 const execFileAsync = promisify(execFile);
@@ -128,6 +128,10 @@ export async function extractProvenance(
   const topAuthors = opts.topAuthors ?? PROVENANCE_TOP_AUTHORS;
   const maxPrs = opts.maxPrs ?? PROVENANCE_MAX_PRS;
   const wanted = new Set(files);
+  // Below the repository root, git log emits repo-root-relative paths while `files`
+  // (and the analyzer's node paths) are analyzed-root-relative; re-frame each git path
+  // to the analyzed root before matching. Empty prefix (the root) is the identity.
+  const prefix = (await getRepoPrefix(rootPath)) ?? '';
 
   // Pass A — authorship + squash PRs (real authors, no merge commits).
   const authorCommits = await gitLog(rootPath, ['--no-merges'], maxCommits);
@@ -151,8 +155,9 @@ export async function extractProvenance(
   // git log is newest-first; the first commit touching a file is its last-touch.
   for (const c of authorCommits) {
     const pr = parsePrNumber(c.subject);
-    for (const f of c.files) {
-      if (!wanted.has(f)) continue;
+    for (const rawF of c.files) {
+      const f = reframeRepoPath(rawF, prefix);
+      if (f === null || !wanted.has(f)) continue;
       const a = acc(f);
       if (!a.lastAuthor) {
         a.lastAuthor = c.author; a.lastDate = c.date; a.lastCommit = c.sha; a.lastSubject = c.subject;
@@ -169,8 +174,9 @@ export async function extractProvenance(
   for (const c of mergeCommits) {
     const pr = parsePrNumber(c.subject);
     if (pr === undefined) continue;
-    for (const f of c.files) {
-      if (!wanted.has(f)) continue;
+    for (const rawF of c.files) {
+      const f = reframeRepoPath(rawF, prefix);
+      if (f === null || !wanted.has(f)) continue;
       const a = acc(f);
       if (!a.prSeen.has(pr) && a.prNumbers.length < maxPrs) { a.prSeen.add(pr); a.prNumbers.push(pr); }
     }

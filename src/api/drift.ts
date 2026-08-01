@@ -11,7 +11,7 @@ import { fileExists } from '../utils/command-helpers.js';
 import { readOpenLoreConfig } from '../core/services/config-manager.js';
 import {
   getChangedFiles,
-  isGitRepository,
+  isGitRepositoryRoot,
   buildSpecMap,
   buildADRMap,
   detectDrift,
@@ -49,9 +49,13 @@ export async function openloreDrift(options: DriftApiOptions = {}): Promise<Drif
   const maxFiles = options.maxFiles ?? DEFAULT_DRIFT_MAX_FILES;
   const { onProgress } = options;
 
-  // Validate git repo
-  if (!(await isGitRepository(rootPath))) {
-    throw new Error('Not a git repository. Drift detection requires git.');
+  // Validate git repo. Root-only: drift joins git's repo-root-relative changed-file
+  // paths against the analyzed-root-relative spec map, so it is correct only when the
+  // analyzed root IS the repository root. Below-root support is out of scope here;
+  // gating on the root preserves the exact prior refusal instead of silently joining
+  // mismatched path frames (which would miss real drift / invent phantom gaps).
+  if (!(await isGitRepositoryRoot(rootPath))) {
+    throw new Error('Not a git repository (or not at its root). Drift detection requires git and must run at the repository root.');
   }
 
   // Load config

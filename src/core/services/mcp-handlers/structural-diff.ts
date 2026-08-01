@@ -25,7 +25,7 @@ import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { validateDirectory, readCachedContext, safeJoin } from './utils.js';
-import { isGitRepository, resolveBaseRef, validateGitRef, getChangedFiles } from '../../drift/git-diff.js';
+import { isGitRepository, getRepoPrefix, resolveBaseRef, validateGitRef, getChangedFiles } from '../../drift/git-diff.js';
 import { gitPathArgs } from '../../../utils/git-args.js';
 import { CallGraphBuilder, serializeCallGraph } from '../../analyzer/call-graph.js';
 import { detectLanguage } from '../../analyzer/signature-extractor.js';
@@ -111,6 +111,18 @@ export async function handleStructuralDiff(input: StructuralDiffInput): Promise<
   const absDir = await validateDirectory(input.directory);
   if (!(await isGitRepository(absDir))) {
     return { error: 'Not a git repository. Structural diff requires git.' };
+  }
+  // Below the repository root, git emits repo-root-relative paths while this handler
+  // reads working-tree content by joining paths against the analyzed root — the two
+  // frames disagree, so a below-root structural diff would silently match nothing.
+  // Disclose that boundary explicitly rather than return a confident empty delta
+  // (GitRepositoryDetectionIsWorkTreeAware: correct-or-disclosed, never silent-empty).
+  const repoPrefix = (await getRepoPrefix(absDir)) ?? '';
+  if (repoPrefix.length > 0) {
+    return {
+      error: `Structural diff is unavailable below the repository root: the analyzed directory is inside a git repository but not at its root (prefix "${repoPrefix}"). Re-run structural_diff from the repository root to diff this change.`,
+      boundary: { belowRepoRoot: true, prefix: repoPrefix },
+    };
   }
   const baseRaw = input.baseRef ?? 'HEAD';
   try {
