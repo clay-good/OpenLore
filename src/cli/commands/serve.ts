@@ -312,6 +312,7 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
   // cleared after waitForGraphRebuild() succeeds so subsequent requests don't
   // re-open EdgeStore. Uses a Map because the daemon can serve multiple dirs.
   const schemaResetByDir = new Map<string, boolean>();
+  let shuttingDown = false;
 
   // Single forced-rebuild coordinator, keyed by directory. BOTH the schema-reset
   // healer (below) and the watcher's debounced re-analyze (further down) funnel
@@ -327,16 +328,19 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
   // waitForGraphRebuild() poll a not-ready store until it times out.
   const rebuildRunning = new Set<string>();
   const rebuildPending = new Set<string>();
+  const rebuildPromises = new Map<string, Promise<void>>();
   function triggerRebuild(directory: string): void {
+    if (shuttingDown) return;
     if (rebuildRunning.has(directory)) { rebuildPending.add(directory); return; }
     rebuildRunning.add(directory);
     logger.discovery(`[serve] rebuilding graph index (${directory})`);
-    void openloreAnalyze({ rootPath: directory, force: true })
+    const rebuild = openloreAnalyze({ rootPath: directory, force: true })
       .then(() => logger.discovery(`[serve] graph index rebuilt (${directory})`))
       .catch((err) => logger.warning(`[serve] graph rebuild failed: ${err instanceof Error ? err.message : String(err)}`))
       .finally(() => {
+        rebuildPromises.delete(directory);
         rebuildRunning.delete(directory);
-        if (rebuildPending.delete(directory)) {
+        if (!shuttingDown && rebuildPending.delete(directory)) {
           // Re-run for the coalesced trigger. For the served root, go back through
           // the debounce so sustained editing doesn't spin back-to-back analyzes;
           // other dirs (per-request schema heal) re-run immediately.
@@ -344,6 +348,7 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
           else triggerRebuild(directory);
         }
       });
+    rebuildPromises.set(directory, rebuild);
   }
 
   const server = createServer((req, res) => {
@@ -584,7 +589,6 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
   // Store handler refs so teardown() can remove them — without this, every
   // startServe() call (including each test) adds permanent process listeners
   // that accumulate and trigger MaxListenersExceededWarning.
-  let shuttingDown = false;
   const teardown = async (): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
@@ -593,6 +597,8 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
     if (idleTimer) clearTimeout(idleTimer);
     if (reanalyzeTimer) clearTimeout(reanalyzeTimer);
     if (watcher) await watcher.stop().catch(() => {});
+    rebuildPending.clear();
+    await Promise.allSettled([...rebuildPromises.values()]);
     await unlink(serveFilePath(root)).catch(() => {});
     await new Promise<void>((res) => server.close(() => res()));
   };

@@ -132,7 +132,7 @@ async function syncDecision(
   const modified: string[] = [];
 
   // Resolve each affected domain to a real spec file, preserving order.
-  const resolved: Array<{ specPath: string; specAbsPath: string }> = [];
+  const resolved: Array<{ domain: string; specPath: string; specAbsPath: string }> = [];
   for (const domain of decision.affectedDomains) {
     const mapping = options.specMap.byDomain.get(domain);
     if (!mapping) {
@@ -154,12 +154,12 @@ async function syncDecision(
     }
     if (!(await fileExists(specAbsPath))) continue;
 
-    resolved.push({ specPath: mapping.specPath, specAbsPath });
+    resolved.push({ domain, specPath: mapping.specPath, specAbsPath });
   }
 
   // Scope the write to a single owning domain: the first affected domain that
   // resolves to a spec gets the full requirement + Decisions entry; every other
-  // affected domain gets a one-line pointer to it. Fanning the full block to
+  // affected domain gets a normative deferral to it. Fanning the full block to
   // every domain (the old behavior) produced verbatim cross-domain duplicates —
   // e.g. an MCP-preset requirement bolted onto the drift, analyzer, and cli specs.
   // (Requirement: DecisionSyncWritesOneOwningDomain)
@@ -170,7 +170,7 @@ async function syncDecision(
 
     for (const other of others) {
       if (!options.dryRun) {
-        await appendDecisionPointer(other.specAbsPath, decision, owner.specPath);
+        await appendDecisionPointer(other.specAbsPath, decision, owner.domain, owner.specPath);
       }
       modified.push(other.specPath);
     }
@@ -206,25 +206,24 @@ async function appendToSpec(specPath: string, decision: PendingDecision): Promis
   await writeFile(specPath, content, 'utf-8');
 }
 
-/**
- * Write a one-line pointer into a non-owning affected domain's spec. The full
- * decision (requirement block + Decisions entry) lives in the owning domain; the
- * other affected domains only reference it, so a decision that touches N domains
- * appears in full exactly once. (Requirement: DecisionSyncWritesOneOwningDomain)
- */
+/** Write a schema-valid normative deferral into a non-owning affected domain.
+ * The canonical requirement + Decisions entry still appears in full only once.
+ * (Requirement: DecisionSyncWritesOneOwningDomain) */
 async function appendDecisionPointer(
   specPath: string,
   decision: PendingDecision,
+  ownerDomain: string,
   ownerSpecPath: string,
 ): Promise<void> {
   const content = await readFile(specPath, 'utf-8');
-  const next = appendDecisionPointerLine(content, decision, ownerSpecPath);
+  const next = appendDecisionPointerLine(content, decision, ownerDomain, ownerSpecPath);
   if (next !== content) await writeFile(specPath, next, 'utf-8');
 }
 
 function appendDecisionPointerLine(
   content: string,
   decision: PendingDecision,
+  ownerDomain: string,
   ownerSpecPath: string,
 ): string {
   // Idempotent by a marker distinct from the full-entry markers
@@ -234,12 +233,23 @@ function appendDecisionPointerLine(
   if (content.includes(marker) || content.includes(`**ID:** ${decision.id}`)) {
     return content;
   }
-  const line = `${marker} — "${decision.title}" is recorded in \`${ownerSpecPath}\`; it also affects this domain.`;
+  const slug = toPascalCase(decision.title);
+  const relativeOwnerPath = `../${ownerDomain}/spec.md`;
+  const block = `### Requirement: ${slug}
 
-  if (content.includes('## Decisions')) {
-    return content.trimEnd() + '\n\n' + line + '\n';
-  }
-  return content.trimEnd() + '\n\n## Decisions\n\n' + line + '\n';
+This domain SHALL conform to the canonical statement of decision \`${decision.id}\`, which lives in the
+\`${ownerDomain}\` domain — see [${ownerDomain}/spec.md](${relativeOwnerPath}).
+
+#### Scenario: The canonical statement governs
+
+- **GIVEN** decision \`${decision.id}\` recorded in the \`${ownerDomain}\` domain
+- **WHEN** this domain's behavior touches that decision's surface
+- **THEN** it satisfies the canonical requirement as stated in [${ownerDomain}/spec.md](${relativeOwnerPath})
+
+${marker} — "${decision.title}" is recorded in \`${ownerSpecPath}\`; it also affects this domain.
+`;
+  validateDecisionRequirementBlock(block, decision.id);
+  return insertRequirementBlock(content, block);
 }
 
 function addSourceFiles(content: string, newFiles: string[]): string {
@@ -264,15 +274,76 @@ function appendRequirement(content: string, decision: PendingDecision): string {
   if (content.includes(`> Decision recorded: ${decision.id}`)) return content;
   const slug = toPascalCase(decision.title);
   const req = decision.proposedRequirement ?? '';
-  const reqText = /^the system shall\b/i.test(req.trim()) ? req.trim() : `The system SHALL ${req}`;
-  const block = `
-### Requirement: ${slug}
+  const reqText = normalizeRequirementStatement(req);
+  const block = `### Requirement: ${slug}
 
 ${reqText}
 
 > Decision recorded: ${decision.id}
 > Date: ${decision.syncedAt ?? new Date().toISOString().slice(0, 10)}
+
+#### Scenario: The decision requirement is enforced
+
+- **GIVEN** approved decision \`${decision.id}\`
+- **WHEN** the affected behavior is evaluated
+- **THEN** ${reqText}
 `;
+  validateDecisionRequirementBlock(block, decision.id);
+
+  return insertRequirementBlock(content, block);
+}
+
+/** Named failure surfaced as a per-decision sync error.
+ * (change: fix-decision-sync-template-validity) */
+class DecisionRequirementValidationError extends Error {
+  constructor(decisionId: string, detail: string) {
+    super(`DecisionRequirementValidationError [${decisionId}]: ${detail}`);
+    this.name = 'DecisionRequirementValidationError';
+  }
+}
+
+function normalizeRequirementStatement(requirement: string): string {
+  const trimmed = requirement.trim();
+  if (!trimmed) return trimmed;
+
+  // Preserve an existing subject + normative modal (for example, "The orient
+  // command SHALL ..."). A leading modal has no subject, so supply only the
+  // subject; plain prose receives the complete default clause.
+  if (/^.+?\s+(SHALL|MUST)\b/i.test(trimmed)) return trimmed;
+  if (/^(SHALL|MUST)\b/i.test(trimmed)) return `The system ${trimmed}`;
+  return `The system SHALL ${trimmed}`;
+}
+
+function validateDecisionRequirementBlock(block: string, decisionId: string): void {
+  const heading = block.match(/^### Requirement:[ \t]*(\S.*)$/m)?.[1]?.trim();
+  if (!heading) {
+    throw new DecisionRequirementValidationError(decisionId, 'missing requirement heading');
+  }
+
+  const statement = block
+    .slice(block.indexOf('\n') + 1, block.indexOf('#### Scenario:'))
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('>'))
+    .join(' ');
+  if (!/^.+?\s+(SHALL|MUST)\b/.test(statement)) {
+    throw new DecisionRequirementValidationError(
+      decisionId,
+      'requirement statement must contain a coherent subject followed by SHALL or MUST',
+    );
+  }
+
+  if (!/^#### Scenario:[ \t]*\S.*$/m.test(block)) {
+    throw new DecisionRequirementValidationError(decisionId, 'missing scenario heading');
+  }
+  for (const clause of ['GIVEN', 'WHEN', 'THEN']) {
+    if (!new RegExp(`^- \\*\\*${clause}\\*\\*\\s+\\S`, 'm').test(block)) {
+      throw new DecisionRequirementValidationError(decisionId, `scenario missing ${clause} clause`);
+    }
+  }
+}
+
+function insertRequirementBlock(content: string, block: string): string {
 
   // Insert before ## Technical Notes or ## Architecture Notes or append before ## Decisions
   const sectionMatch = content.match(
@@ -281,12 +352,12 @@ ${reqText}
   if (sectionMatch && sectionMatch.index !== undefined) {
     return (
       content.slice(0, sectionMatch.index).trimEnd() +
-      '\n' + block.trimStart() + '\n' +
+      '\n\n' + block.trim() + '\n\n' +
       content.slice(sectionMatch.index)
     );
   }
 
-  return content.trimEnd() + '\n' + block;
+  return content.trimEnd() + '\n\n' + block.trim() + '\n';
 }
 
 function appendDecisionSection(content: string, decision: PendingDecision): string {

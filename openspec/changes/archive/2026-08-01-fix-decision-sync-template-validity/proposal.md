@@ -1,6 +1,6 @@
 # Fix decision-sync template validity: the syncer must emit schema-valid requirements
 
-> Status: PROPOSED (2026-07-27, spec-backlog repair pass). The 2026-07-27 corpus repair fixed 39
+> Status: IMPLEMENTED (2026-08-01). The 2026-07-27 corpus repair fixed 39
 > requirements that failed `openspec validate` — and every one of them was emitted by the decision
 > syncer. The syncer's own template is the defect: it writes requirements the schema rejects, so
 > the corpus rots again on every future `openlore decisions --sync`. This change fixes the

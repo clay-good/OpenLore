@@ -131,6 +131,10 @@ describe('syncApprovedDecisions — filesystem writes', () => {
     const content = await readFile(specPath, 'utf-8');
     expect(content).toContain('### Requirement: UseRedisForCaching');
     expect(content).toContain('The system SHALL use Redis for session caching.');
+    expect(content).toContain('#### Scenario: The decision requirement is enforced');
+    expect(content).toContain('- **GIVEN** approved decision `aaaabbbb`');
+    expect(content).toContain('- **WHEN** the affected behavior is evaluated');
+    expect(content).toContain('- **THEN** The system SHALL use Redis for session caching.');
     expect(content).toContain('## Decisions');
     expect(content).toContain('### Use Redis for caching');
     expect(content).toContain('**ID:** aaaabbbb');
@@ -157,8 +161,74 @@ describe('syncApprovedDecisions — filesystem writes', () => {
     });
 
     const content = await readFile(specPath, 'utf-8');
-    const occurrences = (content.match(/The system SHALL use Redis/g) ?? []).length;
-    expect(occurrences).toBe(1);
+    expect(content).not.toContain('The system SHALL The system SHALL');
+  });
+
+  it('preserves a requirement with its own subject and normative modal', async () => {
+    const specDir = join(tmpDir, 'openspec', 'specs', 'services');
+    await mkdir(specDir, { recursive: true });
+    const specPath = join(specDir, 'spec.md');
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(specPath, MINIMAL_SPEC, 'utf-8');
+
+    await syncApprovedDecisions(makeStore([makeDecision({
+      proposedRequirement: 'The orient command SHALL disclose an empty result.',
+    })]), {
+      rootPath: tmpDir,
+      openspecPath: join(tmpDir, 'openspec'),
+      specMap: makeSpecMap('services', 'openspec/specs/services/spec.md'),
+    });
+
+    const content = await readFile(specPath, 'utf-8');
+    expect(content).toContain('The orient command SHALL disclose an empty result.');
+    expect(content).not.toContain('The system SHALL The orient command SHALL');
+  });
+
+  it('supplies a subject when a requirement starts with a normative modal', async () => {
+    const specDir = join(tmpDir, 'openspec', 'specs', 'services');
+    await mkdir(specDir, { recursive: true });
+    const specPath = join(specDir, 'spec.md');
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(specPath, MINIMAL_SPEC, 'utf-8');
+
+    await syncApprovedDecisions(makeStore([makeDecision({
+      proposedRequirement: 'MUST preserve the decision marker.',
+    })]), {
+      rootPath: tmpDir,
+      openspecPath: join(tmpDir, 'openspec'),
+      specMap: makeSpecMap('services', 'openspec/specs/services/spec.md'),
+    });
+
+    expect(await readFile(specPath, 'utf-8')).toContain(
+      'The system MUST preserve the decision marker.',
+    );
+  });
+
+  it('leaves the spec unchanged and reports a named error for invalid emission', async () => {
+    const specDir = join(tmpDir, 'openspec', 'specs', 'services');
+    await mkdir(specDir, { recursive: true });
+    const specPath = join(specDir, 'spec.md');
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(specPath, MINIMAL_SPEC, 'utf-8');
+
+    const { result, store } = await syncApprovedDecisions(makeStore([makeDecision({
+      title: '!!!',
+    })]), {
+      rootPath: tmpDir,
+      openspecPath: join(tmpDir, 'openspec'),
+      specMap: makeSpecMap('services', 'openspec/specs/services/spec.md'),
+    });
+
+    expect(result.synced).toHaveLength(0);
+    expect(result.errors).toEqual([{
+      id: 'aaaabbbb',
+      error: expect.stringContaining('DecisionRequirementValidationError'),
+    }]);
+    expect(store.decisions).toContainEqual(expect.objectContaining({
+      id: 'aaaabbbb',
+      status: 'approved',
+    }));
+    expect(await readFile(specPath, 'utf-8')).toBe(MINIMAL_SPEC);
   });
 
   it('is idempotent — re-syncing the same decision does not duplicate blocks', async () => {
@@ -190,7 +260,7 @@ describe('syncApprovedDecisions — filesystem writes', () => {
     const { writeFile } = await import('node:fs/promises');
     const paths: Record<string, string> = {};
     for (const domain of ['services', 'drift', 'cli']) {
-      const specDir = join(tmpDir, 'openspec', 'specs', domain);
+      const specDir = join(tmpDir, 'custom-specs', domain);
       await mkdir(specDir, { recursive: true });
       const p = join(specDir, 'spec.md');
       await writeFile(p, MINIMAL_SPEC, 'utf-8');
@@ -198,9 +268,9 @@ describe('syncApprovedDecisions — filesystem writes', () => {
     }
 
     const byDomain = new Map<string, { specPath: string; sourcePaths: string[] }>([
-      ['services', { specPath: 'openspec/specs/services/spec.md', sourcePaths: [] }],
-      ['drift', { specPath: 'openspec/specs/drift/spec.md', sourcePaths: [] }],
-      ['cli', { specPath: 'openspec/specs/cli/spec.md', sourcePaths: [] }],
+      ['services', { specPath: 'custom-specs/services/spec.md', sourcePaths: [] }],
+      ['drift', { specPath: 'custom-specs/drift/spec.md', sourcePaths: [] }],
+      ['cli', { specPath: 'custom-specs/cli/spec.md', sourcePaths: [] }],
     ]);
     const specMap = { byDomain, byFile: new Map() } as unknown as SpecMap;
     const opts = { rootPath: tmpDir, openspecPath: join(tmpDir, 'openspec'), specMap };
@@ -209,9 +279,9 @@ describe('syncApprovedDecisions — filesystem writes', () => {
     const { result } = await syncApprovedDecisions(makeStore([decision]), opts);
 
     // Every affected spec is reported modified (owner write + two pointer writes).
-    expect(result.modifiedSpecs).toContain('openspec/specs/services/spec.md');
-    expect(result.modifiedSpecs).toContain('openspec/specs/drift/spec.md');
-    expect(result.modifiedSpecs).toContain('openspec/specs/cli/spec.md');
+    expect(result.modifiedSpecs).toContain('custom-specs/services/spec.md');
+    expect(result.modifiedSpecs).toContain('custom-specs/drift/spec.md');
+    expect(result.modifiedSpecs).toContain('custom-specs/cli/spec.md');
 
     // Owner (first affected domain) holds the full block.
     const owner = await readFile(paths.services, 'utf-8');
@@ -219,12 +289,23 @@ describe('syncApprovedDecisions — filesystem writes', () => {
     expect(owner).toContain('**ID:** aaaabbbb');
     expect(owner).not.toContain('> Decision pointer:');
 
-    // Non-owning domains hold ONLY a one-line pointer — no duplicated block.
+    // Non-owning domains hold a schema-valid normative deferral, not the
+    // canonical requirement or decision entry.
     for (const domain of ['drift', 'cli']) {
       const other = await readFile(paths[domain], 'utf-8');
+      expect(other).toContain('### Requirement: UseRedisForCaching');
+      expect(other).toContain(
+        'This domain SHALL conform to the canonical statement of decision `aaaabbbb`',
+      );
+      expect(other).toContain('#### Scenario: The canonical statement governs');
+      expect(other).toContain('- **GIVEN** decision `aaaabbbb` recorded in the `services` domain');
+      expect(other).toContain('- **WHEN** this domain\'s behavior touches that decision\'s surface');
+      expect(other).toContain(
+        '- **THEN** it satisfies the canonical requirement as stated in [services/spec.md](../services/spec.md)',
+      );
       expect(other).toContain('> Decision pointer: aaaabbbb');
-      expect(other).toContain('openspec/specs/services/spec.md');
-      expect(other).not.toContain('### Requirement: UseRedisForCaching');
+      expect(other).toContain('custom-specs/services/spec.md');
+      expect(other).not.toContain('The system SHALL use Redis for session caching.');
       expect(other).not.toContain('**ID:** aaaabbbb');
     }
 
