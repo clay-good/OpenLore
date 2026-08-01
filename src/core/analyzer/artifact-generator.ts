@@ -1432,7 +1432,10 @@ export class AnalysisArtifactGenerator {
       const { TextLineIndex } = await import('./text-line-index.js');
       await TextLineIndex.sweepLeakedStaging(this.options.outputDir);
 
-      this._cfgSpill = (await CfgSpill.open(this.options.outputDir)) ?? undefined;
+      // The overlay starts in memory and spills to a file only if it outgrows the threshold
+      // (issue #306), so `open` no longer touches the disk and cannot fail here — an unwritable
+      // directory surfaces at overflow, where it degrades to a disclosed missing overlay.
+      this._cfgSpill = await CfgSpill.open(this.options.outputDir);
       const builder = new CallGraphBuilder({
         ...(memo ? { pass1Cache: memo.cache } : {}),
         ...(this._cfgSpill ? { cfgSpill: this._cfgSpill } : {}),
