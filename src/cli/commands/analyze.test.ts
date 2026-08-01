@@ -32,6 +32,18 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     mkdir:     vi.fn().mockResolvedValue(undefined),
     readFile:  vi.fn().mockResolvedValue('{}'),
     writeFile: vi.fn().mockResolvedValue(undefined),
+    // `mkdir` above is stubbed, so nothing real exists to open. These cover the streaming
+    // artifact writer (`json-stream.ts`), which writes via a temp file handle + rename rather
+    // than `writeFile` — without them analyze aborts at the artifact write and never reaches
+    // what these cases actually assert.
+    open: vi.fn().mockResolvedValue({
+      write: vi.fn().mockResolvedValue({ bytesWritten: 0 }),
+      writeFile: vi.fn().mockResolvedValue(undefined),
+      sync: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+    }),
+    rename: vi.fn().mockResolvedValue(undefined),
+    unlink: vi.fn().mockResolvedValue(undefined),
   };
 });
 
@@ -642,6 +654,10 @@ describe('analyze command', () => {
       const fsMod = await import('node:fs/promises');
       writeFileMock = vi.mocked(fsMod.writeFile);
       writeFileMock.mockClear();
+      // `--max-files input validation` leaves `mkdir` rejecting with "Permission denied", and these
+      // cases run a real analysis. Nothing here reset it, which was harmless only while the
+      // artifact writes went through the mocked `writeFile`; the streaming writer calls `mkdir`.
+      vi.mocked(fsMod.mkdir).mockReset().mockResolvedValue(undefined);
       const cfgMod = await import('../../core/services/config-manager.js');
       vi.mocked(cfgMod.readOpenLoreConfig).mockResolvedValue(null as never);
     });
