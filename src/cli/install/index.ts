@@ -126,9 +126,23 @@ export async function buildIndex(cwd: string, opts: { repair?: boolean } = {}): 
     analyzeCommand.setOptionValue('force', false);
     analyzeCommand.setOptionValue('reanalyze', opts.repair === true);
     const analyzeArgs = opts.repair ? ['--reanalyze', '--embedded'] : ['--embedded'];
+    // `process.exitCode` BEFORE the call, so a value analyze set is distinguishable from one that
+    // was already there (a warning from an earlier step).
+    const exitCodeBefore = process.exitCode;
     await analyzeCommand.parseAsync(analyzeArgs, { from: 'user' });
     console.log = origLog;
-    logger.success('Index built — orient() will return results in your next session.');
+
+    // analyze reports its own failures by SETTING `process.exitCode` and returning, not by
+    // throwing — so `parseAsync` resolves and the `catch` below never runs. Claiming success here
+    // meant a repository whose index had genuinely failed to build was told "Index built", after
+    // which `orient` silently returned nothing. Observed on a read-only `.openlore/` and on a full
+    // disk, where the error line and the success line printed one after the other.
+    if (process.exitCode !== undefined && process.exitCode !== 0 && process.exitCode !== exitCodeBefore) {
+      logger.warning('The index did NOT finish building — see the error above.');
+      logger.info('Next step', 'Fix the cause, then run "openlore analyze" so orient() works');
+    } else {
+      logger.success('Index built — orient() will return results in your next session.');
+    }
   } catch (err) {
     console.log = origLog;
     logger.warning(
