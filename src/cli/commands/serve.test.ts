@@ -15,7 +15,7 @@ import { request as httpRequest } from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 import { startServe, readDescriptor, idleTimeoutMs, type ServeHandle } from './serve.js';
 import { EdgeStore } from '../../core/services/edge-store.js';
-import { openloreAnalyze } from '../../api/analyze.js';
+import * as analyzeApi from '../../api/analyze.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR } from '../../constants.js';
 
 let handle: ServeHandle | undefined;
@@ -30,6 +30,7 @@ afterEach(async () => {
     await rm(root, { recursive: true, force: true });
     root = '';
   }
+  vi.restoreAllMocks();
 });
 
 async function boot(opts: { token?: string; preset?: string } = {}): Promise<ServeHandle> {
@@ -349,7 +350,7 @@ describe('openlore serve', () => {
 
     // Build a real, populated graph, then simulate a post-upgrade schema bump by
     // forcing the on-disk version stale so the next read reports not-ready.
-    await openloreAnalyze({ rootPath: root, force: true });
+    await analyzeApi.openloreAnalyze({ rootPath: root, force: true });
     const analysisDir = join(root, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
     const dbFile = EdgeStore.dbPath(analysisDir);
     {
@@ -368,23 +369,46 @@ describe('openlore serve', () => {
       probe.close();
     }
 
-    // Start serve (watch:false so the ONLY possible healer is serve's own trigger).
-    handle = await startServe({ directory: root, port: '0', watch: false });
-    expect(handle).toBeDefined();
+    // Hold the startup rebuild behind a deterministic gate. This proves close()
+    // joins a rebuild that is definitely active instead of relying on analyze
+    // being slow enough on the current machine.
+    const realAnalyze = analyzeApi.openloreAnalyze;
+    let releaseRebuild!: () => void;
+    const rebuildGate = new Promise<void>((resolve) => { releaseRebuild = resolve; });
+    const analyze = vi.spyOn(analyzeApi, 'openloreAnalyze').mockImplementationOnce(async (options) => {
+      await rebuildGate;
+      return realAnalyze(options);
+    });
 
-    // Serve must re-stamp the store at the current schema — poll until the read is
-    // ready again (proving the rebuild ran, not merely that bytes were never wiped).
-    let ready = false;
-    let nodes = 0;
-    for (let i = 0; i < 100 && !ready; i++) {
-      await new Promise((r) => setTimeout(r, 100));
-      const es = EdgeStore.open(dbFile);
-      ready = es.notReady === null;
-      nodes = ready ? es.countNodes() : 0;
-      es.close();
+    let firstClose: Promise<void> | undefined;
+    try {
+      // Start serve (watch:false so the ONLY possible healer is serve's own trigger).
+      handle = await startServe({ directory: root, port: '0', watch: false });
+      expect(handle).toBeDefined();
+      expect(analyze).toHaveBeenCalledTimes(1);
+
+      // Close immediately while the startup rebuild is active. Every concurrent
+      // close caller joins the same teardown, and teardown does not resolve until
+      // the rebuild is quiescent. This is the exact race that previously let test
+      // cleanup remove .openlore/analysis while analyze was still writing to it.
+      firstClose = handle!.close();
+      const secondClose = handle!.close();
+      expect(secondClose).toBe(firstClose);
+      let closeSettled = false;
+      void firstClose.then(() => { closeSettled = true; });
+      await Promise.resolve();
+      expect(closeSettled).toBe(false);
+    } finally {
+      releaseRebuild();
+      if (firstClose) await firstClose;
+      else if (handle) await handle.close();
+      handle = undefined;
     }
-    expect(ready).toBe(true);           // healed back to the current schema
-    expect(nodes).toBeGreaterThan(0);   // rebuilt, not left empty
+
+    const es = EdgeStore.open(dbFile);
+    expect(es.notReady).toBeNull();      // healed back to the current schema
+    expect(es.countNodes()).toBeGreaterThan(0); // rebuilt, not left empty
+    es.close();
   }, 30_000);
 
   it('rejects a spoofed (DNS-rebinding) Host header before dispatch', async () => {

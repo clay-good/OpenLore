@@ -3,8 +3,7 @@
 ## Implementation
 
 - [x] `appendRequirement` (`syncer.ts:260+`): emit a deterministic `#### Scenario:` derived
-      from the decision (or its consolidation acceptance criteria when present); keep the
-      `> Decision recorded: <id>` dedupe key unchanged
+      from the decision; keep the `> Decision recorded: <id>` dedupe key unchanged
 - [x] Grammar-aware prefixing: apply `The system SHALL` only when the proposed requirement has
       no SHALL/MUST clause with its own subject (fixes the double-modal glitch)
 - [x] Cross-domain stub writer: emit the normative deferral + pointer scenario form (the shape

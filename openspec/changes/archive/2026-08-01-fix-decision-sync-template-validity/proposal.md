@@ -30,8 +30,7 @@ All three defect shapes trace to `appendRequirement` / the cross-domain stub wri
 
 - **The template emits a valid requirement.** The synced block gains a minimal deterministic
   scenario derived from the decision (no LLM): a `#### Scenario:` whose THEN restates the
-  requirement statement as an observable outcome. Where the decision's consolidation already
-  produced scenario-shaped acceptance criteria, those are used instead.
+  requirement statement as an observable outcome.
 - **Prefixing becomes grammar-aware.** The `The system SHALL` prefix is applied only when the
   proposed requirement does not already contain a SHALL/MUST clause with its own subject.
 - **Stubs use the repaired cross-reference form.** The cross-domain writer emits the normative

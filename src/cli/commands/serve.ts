@@ -278,7 +278,7 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
   const idleMs = idleTimeoutMs(options.idleTimeout);
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
   function touchActivity(): void {
-    if (idleMs <= 0) return;
+    if (shuttingDown || idleMs <= 0) return;
     if (idleTimer) clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
       logger.discovery(`[serve] idle ${idleMs / 60_000}min with no requests — shutting down to free memory.`);
@@ -352,6 +352,10 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
   }
 
   const server = createServer((req, res) => {
+    if (shuttingDown) {
+      sendJson(res, 503, { error: 'server is shutting down' });
+      return;
+    }
     void handleRequest(req, res).catch((err) => {
       sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
     });
@@ -448,6 +452,10 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
         }
       }
       if (schemaResetByDir.get(directory)) {
+        if (shuttingDown) {
+          sendJson(res, 503, { error: 'server is shutting down' });
+          return;
+        }
         logger.debug(`[serve] Schema mismatch — waiting for graph rebuild before dispatching…`);
         // Kick the rebuild ourselves (coalesced) — the watcher only schedules, and a
         // read no longer wipes-then-heals; it reports not-ready until analyze runs.
@@ -560,6 +568,7 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
   // Debounced call-graph re-analyze. Routes through triggerRebuild so it shares
   // the single-flight lock with the schema-reset healer (no concurrent --force).
   function scheduleReanalyze(): void {
+    if (shuttingDown) return;
     if (reanalyzeTimer) clearTimeout(reanalyzeTimer);
     reanalyzeTimer = setTimeout(() => triggerRebuild(root), REANALYZE_DEBOUNCE_MS);
   }
@@ -589,18 +598,29 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
   // Store handler refs so teardown() can remove them — without this, every
   // startServe() call (including each test) adds permanent process listeners
   // that accumulate and trigger MaxListenersExceededWarning.
-  const teardown = async (): Promise<void> => {
-    if (shuttingDown) return;
+  let teardownPromise: Promise<void> | undefined;
+  const teardown = (): Promise<void> => {
+    if (teardownPromise) return teardownPromise;
     shuttingDown = true;
-    process.off('SIGINT',  onSigInt);
-    process.off('SIGTERM', onSigTerm);
-    if (idleTimer) clearTimeout(idleTimer);
-    if (reanalyzeTimer) clearTimeout(reanalyzeTimer);
-    if (watcher) await watcher.stop().catch(() => {});
-    rebuildPending.clear();
-    await Promise.allSettled([...rebuildPromises.values()]);
-    await unlink(serveFilePath(root)).catch(() => {});
-    await new Promise<void>((res) => server.close(() => res()));
+    teardownPromise = (async () => {
+      process.off('SIGINT',  onSigInt);
+      process.off('SIGTERM', onSigTerm);
+      if (idleTimer) {
+        clearTimeout(idleTimer);
+        idleTimer = undefined;
+      }
+      if (reanalyzeTimer) {
+        clearTimeout(reanalyzeTimer);
+        reanalyzeTimer = undefined;
+      }
+      const serverClosed = new Promise<void>((resolve) => server.close(() => resolve()));
+      if (watcher) await watcher.stop().catch(() => {});
+      rebuildPending.clear();
+      await Promise.allSettled([...rebuildPromises.values()]);
+      await unlink(serveFilePath(root)).catch(() => {});
+      await serverClosed;
+    })();
+    return teardownPromise;
   };
   const exitAfterTeardown = async (): Promise<void> => {
     await teardown();
