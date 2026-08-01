@@ -5,7 +5,7 @@
  * that will be consumed by the LLM generation phase and optionally by humans.
  */
 
-import { mkdir, readFile } from 'node:fs/promises';
+import { mkdir, readFile, rm } from 'node:fs/promises';
 import { join, basename, isAbsolute } from 'node:path';
 import { createHash } from 'node:crypto';
 import { atomicWriteFile } from '../decisions/atomic-store.js';
@@ -32,6 +32,12 @@ import { writeTraversalIndexArtifact } from './condensation.js';
 import { CfgSpill, sweepLeakedCfgSpills } from './cfg-spill.js';
 import { buildStyleFingerprint, type StyleFingerprint } from './style-fingerprint.js';
 import { buildParseHealthReport, isLossyUtf8, type ParseHealthReport, type FileParseHealth } from './parse-health.js';
+import {
+  resolveMemoryStrategy,
+  withCfgOverlayShed,
+  SHED_DEEP_ANALYSIS_FILE_CAP,
+  type MemoryDegradation,
+} from './memory-strategy.js';
 import type { ScoredFile, ProjectType } from '../../types/index.js';
 import type { RepositoryMap } from './repository-mapper.js';
 import type { DependencyGraphResult } from './dependency-graph.js';
@@ -250,6 +256,13 @@ export interface AnalysisArtifacts {
    * {@link extractionLaneNote}.
    */
   pass1CacheNote?: string;
+  /**
+   * What the graceful-degradation ladder shed under memory pressure, if anything (change:
+   * make-analyze-scale-to-any-repo). Undefined at full fidelity. Also recorded inside
+   * {@link parseHealth} for persistence; surfaced here too so a caller renders the one-line CLI
+   * disclosure without re-reading the artifact — the same pattern as {@link extractionLaneNote}.
+   */
+  memoryDegradation?: MemoryDegradation;
 }
 
 /** Pass-1 memo rows to persist, plus the live path set the memo is pruned against. */
@@ -354,6 +367,13 @@ export class AnalysisArtifactGenerator {
   private _styleFingerprint?: StyleFingerprint;
   /** Parse-health report computed during the last generateLLMContext (call-graph walk). */
   private _parseHealth?: ParseHealthReport;
+  /**
+   * What the graceful-degradation ladder shed on the last build under memory pressure, if anything
+   * (change: make-analyze-scale-to-any-repo). Undefined at full fidelity. Also folded into
+   * `_parseHealth` for persistence; kept here so callers can render the one-line CLI disclosure
+   * without re-reading the artifact.
+   */
+  private _memoryDegradation?: MemoryDegradation;
   /** Pass-1 extraction-lane degradation note from the last generateLLMContext, if any. */
   private _extractionLaneNote?: string;
   /**
@@ -401,6 +421,7 @@ export class AnalysisArtifactGenerator {
       parseHealth: this._parseHealth,
       extractionLaneNote: this._extractionLaneNote,
       pass1CacheNote: this._pass1CacheNote,
+      memoryDegradation: this._memoryDegradation,
     };
   }
 
@@ -507,12 +528,22 @@ export class AnalysisArtifactGenerator {
       // Parse health (change: add-parse-health-boundary-disclosure) — its own artifact, absent on a
       // clean repo. Same fail-soft treatment as the style fingerprint: a disclosure side artifact must
       // never abort analysis, so its write failure is swallowed.
+      //
+      // When the report is absent, DELETE any stale artifact rather than leave it (change:
+      // make-analyze-scale-to-any-repo). Without this, a repo that goes from degraded to clean — a
+      // syntax error fixed, or (the case this change adds) a full-fidelity run after one that shed a
+      // tier under memory pressure — would keep serving the previous run's disclosure, and two
+      // full-fidelity runs would then differ on disk based only on history. Best-effort unlink.
       if (artifacts.parseHealth) {
         saves.push(
           atomicWriteFile(
             join(this.options.outputDir, ARTIFACT_PARSE_HEALTH),
             JSON.stringify(artifacts.parseHealth, null, 2)
           ).catch(() => {})
+        );
+      } else {
+        saves.push(
+          rm(join(this.options.outputDir, ARTIFACT_PARSE_HEALTH), { force: true }).catch(() => {})
         );
       }
 
@@ -1224,6 +1255,23 @@ export class AnalysisArtifactGenerator {
     repoMap: RepositoryMap,
     depGraph: DependencyGraphResult
   ): Promise<LLMContext> {
+    // Pre-flight capacity estimate + degradation ladder (change: make-analyze-scale-to-any-repo).
+    // Deterministic in the repository (file count + total source bytes, both already known from the
+    // mapper); the heap available to THIS process is the only machine-dependent input, and it can
+    // only shed work down a declared ladder — never alter a full-fidelity result. Decided ONCE
+    // here, before the heavy passes, so an over-capacity repository takes the reduced path up front
+    // rather than discovering the ceiling by crashing partway through.
+    const memoryStrategy = resolveMemoryStrategy({
+      analyzedFileCount: repoMap.allFiles.length,
+      totalSourceBytes: repoMap.allFiles.reduce((sum, f) => sum + (f.size ?? 0), 0),
+    });
+    this._memoryDegradation = memoryStrategy.degradation;
+    // Tier 2 sheds deep-analysis breadth: cap the top-files list (a floor with the caller's own
+    // limit, so a caller already asking for fewer keeps its number).
+    const maxDeepAnalysisFiles = memoryStrategy.shedDeepAnalysis
+      ? Math.min(this.options.maxDeepAnalysisFiles, SHED_DEEP_ANALYSIS_FILE_CAP)
+      : this.options.maxDeepAnalysisFiles;
+
     // Phase 1: Survey (repo structure summary)
     const phase1: LLMContextPhase = {
       purpose: 'Initial project categorization',
@@ -1241,7 +1289,7 @@ export class AnalysisArtifactGenerator {
     const phase2Files: LLMContextPhase['files'] = [];
     const topFiles = repoMap.highValueFiles
       .filter(f => !isTestFile(f.path))
-      .slice(0, this.options.maxDeepAnalysisFiles);
+      .slice(0, maxDeepAnalysisFiles);
 
     for (const file of topFiles) {
       try {
@@ -1440,7 +1488,15 @@ export class AnalysisArtifactGenerator {
         ...(memo ? { pass1Cache: memo.cache } : {}),
         ...(this._cfgSpill ? { cfgSpill: this._cfgSpill } : {}),
       });
-      callGraphResult = await builder.build(callGraphFiles);
+      // Tier 1 of the degradation ladder: when the overlay is shed, the decision is bound for the
+      // WHOLE build via a build-scoped async-context store, and forwarded to each extraction worker
+      // through `workerData`, so every function's `buildCfgFor` short-circuits — no overlay is
+      // produced and the spill stays empty. The base call graph is unaffected. A no-op wrapper at
+      // full fidelity (change: make-analyze-scale-to-any-repo).
+      callGraphResult = await withCfgOverlayShed(
+        memoryStrategy.shedCfgOverlay,
+        () => builder.build(callGraphFiles),
+      );
       await this._cfgSpill?.finish();
     } finally {
       memo?.close();
@@ -1488,7 +1544,11 @@ export class AnalysisArtifactGenerator {
         exclusion: 'size-cap',
       });
     }
-    this._parseHealth = buildParseHealthReport([...parseHealthRecords.values()]);
+    this._parseHealth = buildParseHealthReport(
+      [...parseHealthRecords.values()],
+      undefined,
+      this._memoryDegradation,
+    );
 
     // Intra-procedural CFG/def-use overlay (spec: add-intraprocedural-cfg-dataflow-overlay).
     // Transient: persisted to SQLite by writeEdgesToSQLite, then stripped before

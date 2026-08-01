@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_PARSE_HEALTH } from '../../../constants.js';
 import { EXCLUSION_REASON_LABEL, type ParseHealthReport, type FileParseHealth } from '../../analyzer/parse-health.js';
+import { describeMemoryDegradation } from '../../analyzer/memory-strategy.js';
 
 /** Load the persisted parse-health report, or `null` when absent/unreadable (a clean repo). */
 export async function loadParseHealthReport(absDir: string): Promise<ParseHealthReport | null> {
@@ -48,14 +49,14 @@ function describe(h: FileParseHealth): string {
 }
 
 /**
- * Given the files a conclusion's result set touches, return a disclosed boundary string when any of
- * them parsed with errors, else `undefined`. Deterministic (sorted); bounded file list.
+ * The per-file boundary: files in THIS result set that parsed with errors, or `undefined`.
+ * Deterministic (sorted); bounded file list.
  */
-export function parseHealthBoundary(
-  report: ParseHealthReport | null,
+function perFileBoundary(
+  report: ParseHealthReport,
   touchedFiles: Iterable<string>,
 ): string | undefined {
-  if (!report || report.files.length === 0) return undefined;
+  if (report.files.length === 0) return undefined;
   const byPath = new Map(report.files.map(f => [f.filePath, f]));
   const hits: FileParseHealth[] = [];
   const seen = new Set<string>();
@@ -74,4 +75,28 @@ export function parseHealthBoundary(
     `symbols and edges there are a LOWER BOUND, not proof of absence: ${shown.join('; ')}` +
     `${extra > 0 ? `; and ${extra} more` : ''}.`
   );
+}
+
+/**
+ * Given the files a conclusion's result set touches, return a disclosed boundary string, else
+ * `undefined`. Two disclosures ride the same string:
+ *
+ *  1. the per-file boundary — files IN THIS result that parsed with errors;
+ *  2. a whole-analysis memory-pressure reduction (change: make-analyze-scale-to-any-repo). When the
+ *     degradation ladder shed the CFG overlay and/or deep-analysis breadth, that reduction has NO
+ *     per-file record — it affects every result over this index — so it is surfaced REGARDLESS of
+ *     which files the result touched. Without this the shed coverage would read as genuine absence,
+ *     the exact `NoFalseCompleteness` failure the disclosure exists to prevent.
+ */
+export function parseHealthBoundary(
+  report: ParseHealthReport | null,
+  touchedFiles: Iterable<string>,
+): string | undefined {
+  if (!report) return undefined;
+  const sentences: string[] = [];
+  const perFile = perFileBoundary(report, touchedFiles);
+  if (perFile) sentences.push(perFile);
+  const degradation = describeMemoryDegradation(report.memoryDegradation);
+  if (degradation) sentences.push(`${degradation}.`);
+  return sentences.length > 0 ? sentences.join(' ') : undefined;
 }

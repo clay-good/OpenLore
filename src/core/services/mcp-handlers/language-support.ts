@@ -22,6 +22,7 @@ import {
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
 import { compactParseHealthSummary } from '../../analyzer/parse-health.js';
 import { loadParseHealthReport } from './parse-health-boundary.js';
+import { describeMemoryDegradation } from '../../analyzer/memory-strategy.js';
 
 export interface GetLanguageSupportInput {
   directory: string;
@@ -55,7 +56,16 @@ export interface GetLanguageSupportResult {
    * silently under-produced (parse errors, grammar drift, lossy encoding), per language. Absent on
    * a clean repo — a supported capability is not the same as a clean parse, and this says which.
    */
-  parseHealth?: { totalDegradedFiles: number; byLanguage: string[] };
+  parseHealth?: {
+    totalDegradedFiles: number;
+    byLanguage: string[];
+    /**
+     * One-line disclosure of a graceful-degradation-ladder reduction under memory pressure (change:
+     * make-analyze-scale-to-any-repo). Present only when a tier was shed — a shed CFG overlay leaves
+     * `totalDegradedFiles: 0`, so without this a reduced index would read as genuinely full.
+     */
+    memoryPressure?: string;
+  };
   summary: string;
   disclosure: string;
 }
@@ -130,10 +140,18 @@ export async function computeGetLanguageSupport(
 
   // Parse-health overlay (change: add-parse-health-boundary-disclosure): a supported capability is
   // not the same as a clean parse. Absent on a clean repo (no artifact), so healthy repos are
-  // unchanged.
+  // unchanged. `memoryPressure` additionally discloses a graceful-degradation-ladder reduction
+  // (change: make-analyze-scale-to-any-repo) — a shed CFG overlay leaves `totalDegradedFiles: 0`
+  // yet weakens overlay-dependent conclusions, so a "looks clean" block here would otherwise read a
+  // reduced index as genuinely full.
   const phReport = await loadParseHealthReport(absDir);
+  const memoryPressure = describeMemoryDegradation(phReport?.memoryDegradation);
   const parseHealth = phReport
-    ? { totalDegradedFiles: phReport.totalDegradedFiles, byLanguage: compactParseHealthSummary(phReport) }
+    ? {
+        totalDegradedFiles: phReport.totalDegradedFiles,
+        byLanguage: compactParseHealthSummary(phReport),
+        ...(memoryPressure ? { memoryPressure } : {}),
+      }
     : undefined;
 
   return {

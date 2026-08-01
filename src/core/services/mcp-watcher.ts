@@ -1267,9 +1267,21 @@ export class McpWatcher {
       }
       if (!touched) return;
 
-      const report = buildParseHealthReport([...byPath.values()]);
+      // Carry the last full analyze's memory-degradation disclosure forward (change:
+      // make-analyze-scale-to-any-repo). The overlay is shed in the persisted graph until the next
+      // full analyze, and the watcher — which only re-tallies per-file parse health — cannot
+      // re-derive a whole-repo memory-pressure decision. Dropping it here would erase the
+      // "coverage is a LOWER BOUND" signal on the first incremental update, so a shed overlay would
+      // read as genuine structural absence. Preserving `existing.memoryDegradation` is the only
+      // correct behavior; it also keeps `buildParseHealthReport` from returning undefined (and
+      // unlinking the artifact) when the last per-file record is repaired but the degradation stands.
+      const report = buildParseHealthReport(
+        [...byPath.values()],
+        undefined,
+        existing?.memoryDegradation,
+      );
       if (!report) {
-        // The repo is now clean — remove the stale artifact rather than leaving an empty one.
+        // The repo is now clean AND no degradation stands — remove the stale artifact.
         if (before > 0) await unlink(phPath).catch(() => {});
         return;
       }

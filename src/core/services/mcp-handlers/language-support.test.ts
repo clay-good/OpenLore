@@ -4,9 +4,13 @@ vi.mock('./utils.js', () => ({
   validateDirectory: vi.fn(async (d: string) => d),
   readCachedContext: vi.fn(),
 }));
+vi.mock('./parse-health-boundary.js', () => ({
+  loadParseHealthReport: vi.fn(async () => null),
+}));
 
 import { computeGetLanguageSupport, type GetLanguageSupportResult } from './language-support.js';
 import { readCachedContext } from './utils.js';
+import { loadParseHealthReport } from './parse-health-boundary.js';
 import { assertConclusionShape, TOOL_OUTPUT_CLASS } from './tool-contract.js';
 import type { FunctionNode, SerializedCallGraph } from '../../analyzer/call-graph.js';
 
@@ -90,6 +94,24 @@ describe('get_language_support — repo mode (coverage over detected languages)'
     vi.mocked(readCachedContext).mockResolvedValue(null as never);
     const res = await computeGetLanguageSupport({ directory: '/p' });
     expect(res).toHaveProperty('error');
+  });
+
+  it('discloses a memory-pressure degradation even when totalDegradedFiles is 0 (change: make-analyze-scale-to-any-repo)', async () => {
+    vi.mocked(readCachedContext).mockResolvedValue({
+      callGraph: graph([node({ id: 'a', language: 'TypeScript' })]),
+    } as never);
+    // A shed CFG overlay: a cleanly-parsing repo (zero degraded files) that nonetheless reduced
+    // coverage. The "looks clean" block must NOT hide it.
+    vi.mocked(loadParseHealthReport).mockResolvedValue({
+      version: 1, totalDegradedFiles: 0, totalErrorRegions: 0, byLanguage: [], topFiles: [], files: [],
+      memoryDegradation: {
+        tier: 'shed-overlay', shed: ['cfg-overlay'],
+        estimatedBytes: 3_000_000_000, availableHeapBytes: 2_000_000_000,
+      },
+    } as never);
+    const res = await run({ directory: '/p' });
+    expect(res.parseHealth?.memoryPressure).toContain('Reduced under memory pressure');
+    expect(res.parseHealth?.memoryPressure).toContain('CFG/def-use overlay');
   });
 
   it('a docs-only / zero-detected repo returns NO languages (not the whole registry)', async () => {

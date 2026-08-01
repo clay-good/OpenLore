@@ -60,6 +60,7 @@ import { extractMiddleware } from '../../core/analyzer/middleware-extractor.js';
 import { extractEnvVars } from '../../core/analyzer/env-extractor.js';
 import { generateAiConfigs, AI_TOOL_TARGETS, type AiTool, type AiConfigResult } from '../../core/analyzer/ai-config-generator.js';
 import { describeExclusions, EXCLUSION_REASON_LABEL } from '../../core/analyzer/parse-health.js';
+import { describeMemoryDegradation } from '../../core/analyzer/memory-strategy.js';
 
 // ============================================================================
 // TYPES
@@ -298,6 +299,16 @@ export async function runAnalysis(
   // memo, so an operator can always see which lane ran and how much work it removed.
   if (artifacts.pass1CacheNote) {
     logger.info('Extraction', artifacts.pass1CacheNote);
+  }
+
+  // Disclose a graceful-degradation-ladder reduction (change: make-analyze-scale-to-any-repo).
+  // When the pre-flight estimate said full fidelity would not fit the heap, the ladder shed the
+  // most expensive work (overlay first, then deep-analysis breadth) and still produced a usable
+  // index. One line, so reduced coverage is never mistaken for genuine absence. Silent — as it must
+  // be — at full fidelity. Also persisted in parse-health.json for downstream conclusions.
+  const degradationNote = describeMemoryDegradation(artifacts.memoryDegradation);
+  if (degradationNote) {
+    logger.warning(degradationNote);
   }
 
   // Carry anchored memory/decisions across any rename/move detected between the

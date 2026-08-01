@@ -127,6 +127,45 @@ describe('buildParseHealthReport', () => {
     expect(report.files.length).toBe(4);
     expect(compactParseHealthSummary(report).length).toBe(3); // one line per language
   });
+
+  it('emits a report carrying ONLY a memory degradation when there are no per-file records', () => {
+    // A large but cleanly-parsing repo sheds the overlay yet has zero degraded files — the
+    // disclosure must still reach the artifact (change: make-analyze-scale-to-any-repo).
+    const degradation = {
+      tier: 'shed-overlay' as const,
+      shed: ['cfg-overlay' as const],
+      estimatedBytes: 3_000_000_000,
+      availableHeapBytes: 2_000_000_000,
+    };
+    const report = buildParseHealthReport([], 10, degradation)!;
+    expect(report).toBeDefined();
+    expect(report.totalDegradedFiles).toBe(0);
+    expect(report.files).toEqual([]);
+    expect(report.memoryDegradation).toEqual(degradation);
+  });
+
+  it('carries the memory degradation alongside per-file records', () => {
+    const records: FileParseHealth[] = [
+      { filePath: 'a.ts', language: 'TypeScript', errorCount: 1, missingCount: 0, errorLines: [1] },
+    ];
+    const degradation = {
+      tier: 'shed-overlay-and-deep-analysis' as const,
+      shed: ['cfg-overlay' as const, 'deep-analysis-breadth' as const],
+      estimatedBytes: 5_000_000_000,
+      availableHeapBytes: 2_000_000_000,
+    };
+    const report = buildParseHealthReport(records, 10, degradation)!;
+    expect(report.totalDegradedFiles).toBe(1);
+    expect(report.memoryDegradation).toEqual(degradation);
+  });
+
+  it('omits memoryDegradation at full fidelity, keeping the artifact byte-identical', () => {
+    const records: FileParseHealth[] = [
+      { filePath: 'a.ts', language: 'TypeScript', errorCount: 1, missingCount: 0, errorLines: [1] },
+    ];
+    const report = buildParseHealthReport(records)!;
+    expect('memoryDegradation' in report).toBe(false);
+  });
 });
 
 describe('CallGraphBuilder parse-health capture (build integration)', () => {

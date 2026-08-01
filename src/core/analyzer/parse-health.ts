@@ -19,6 +19,8 @@
  * clock — byte-identical across re-analyses of a fixed repository state.
  */
 
+import type { MemoryDegradation } from './memory-strategy.js';
+
 /** Bump when the persisted artifact shape changes incompatibly. */
 export const PARSE_HEALTH_SCHEMA_VERSION = 1;
 
@@ -260,6 +262,15 @@ export interface ParseHealthReport {
    * record every health surface reads, which is what stops `analyze` and `doctor` disagreeing.
    */
   excludedByReason?: Partial<Record<FileExclusionReason, number>>;
+  /**
+   * What the graceful-degradation ladder shed under memory pressure, if anything (change:
+   * make-analyze-scale-to-any-repo). Present ONLY when a tier was shed — a full-fidelity run
+   * carries none, so its artifact stays byte-identical to a run that never had this feature. Rides
+   * the SAME artifact every health surface already reads, so a reduced overlay/deep-analysis is
+   * disclosed exactly like an excluded file: a downstream conclusion reads it as reduced coverage,
+   * never as genuine structural absence.
+   */
+  memoryDegradation?: MemoryDegradation;
 }
 
 /** Total files excluded (any reason). `0` when nothing was excluded. */
@@ -295,9 +306,25 @@ function regionCount(h: FileParseHealth): number {
 export function buildParseHealthReport(
   records: FileParseHealth[],
   topN = 10,
+  memoryDegradation?: MemoryDegradation,
 ): ParseHealthReport | undefined {
   const degraded = records.filter(isDegraded);
-  if (degraded.length === 0) return undefined;
+  // A memory-pressure degradation is a whole-analysis reduction with no per-file records of its
+  // own, so it can be the ONLY signal — a large but cleanly-parsing repository sheds the overlay
+  // yet has zero degraded files. Emit a minimal report carrying just the degradation so the
+  // disclosure still reaches every consumer (change: make-analyze-scale-to-any-repo).
+  if (degraded.length === 0) {
+    if (!memoryDegradation) return undefined;
+    return {
+      version: PARSE_HEALTH_SCHEMA_VERSION,
+      totalDegradedFiles: 0,
+      totalErrorRegions: 0,
+      byLanguage: [],
+      topFiles: [],
+      files: [],
+      memoryDegradation,
+    };
+  }
 
   const byLang = new Map<string, ParseHealthLanguageSummary>();
   const excludedByReason: Partial<Record<FileExclusionReason, number>> = {};
@@ -336,6 +363,8 @@ export function buildParseHealthReport(
     // Omitted when nothing was excluded, so a repo whose only signal is error regions carries no
     // empty tally and its artifact stays byte-identical to before this change.
     ...(Object.keys(excludedByReason).length > 0 ? { excludedByReason } : {}),
+    // Present only under memory pressure; a full-fidelity run omits it and stays byte-identical.
+    ...(memoryDegradation ? { memoryDegradation } : {}),
   };
 }
 
