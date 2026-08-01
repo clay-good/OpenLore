@@ -4,7 +4,9 @@
 
 Defines how generation-time OpenSpec validation findings are surfaced to callers. Validation remains
 advisory, while reports retain the exact path-prefixed errors and warnings needed to correct a spec.
+
 ## Requirements
+
 ### Requirement: ValidationResultsReachTheReport
 
 When the writer runs validation (`validateBeforeWrite`), the resulting errors and warnings
@@ -18,3 +20,8 @@ write); the report SHALL reflect what validation actually found.
 - **WHEN** generation completes with validation enabled
 - **THEN** `report.validationErrors` contains the failure (with its file path), rather than
   being empty
+
+## Technical Notes
+
+- **Implementation**: `src/core/generator/openspec-writer.ts`, `src/core/generator/openspec-compat.ts`
+- **Dependencies**: OpenSpec writer, full-spec validator, generation report

@@ -1563,12 +1563,19 @@ whatever the user set), unchanged.
 The `generate --force` command SHALL remove stale domain directories only during a full,
 unfiltered generation. When `--domains` limits generation, `--force` SHALL bypass cached stage
 results without deleting unselected domains, and command help SHALL describe that distinction.
+Shared configuration and RAG metadata SHALL retain the complete generated domain set.
 
 #### Scenario: Filtered force generation keeps other domains
 
 - **GIVEN** existing `auth` and `billing` domain specifications
 - **WHEN** a user runs `openlore generate --force --domains auth`
 - **THEN** generation refreshes `auth` and preserves `billing`
+
+#### Scenario: ADR-only generation preserves domain metadata
+
+- **GIVEN** existing generated domain metadata
+- **WHEN** a user runs `openlore generate --adr-only`
+- **THEN** ADR files are written without clearing the domain metadata view
 
 ## Technical Notes
 
