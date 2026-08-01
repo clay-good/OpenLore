@@ -12,6 +12,7 @@
 
 import { createHash } from 'node:crypto';
 import type { CallGraphResult } from './call-graph.js';
+import { buildLineIndex, lineFromIndex } from './line-index.js';
 
 // ============================================================================
 // TYPES
@@ -292,24 +293,8 @@ function jaccard(a: Set<string>, b: Set<string>): number {
  * constant that looks like this file's safety valve was guarding the cheap path while this ran
  * unbounded.
  */
-function buildLineIndex(content: string): number[] {
-  const offsets: number[] = [];
-  for (let i = 0; i < content.length; i++) {
-    if (content[i] === '\n') offsets.push(i);
-  }
-  return offsets;
-}
-
-function lineFromIndex(lineIndex: number[], byteOffset: number): number {
-  // Count of newlines strictly before `byteOffset`, plus one.
-  let lo = 0;
-  let hi = lineIndex.length;
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1;
-    if (lineIndex[mid] < byteOffset) lo = mid + 1; else hi = mid;
-  }
-  return lo + 1;
-}
+// Both live in `line-index.ts` — the same quadratic line-counting appeared in the import
+// parser, where it was 50% of an entire analyze run on a large file.
 
 // ============================================================================
 // MAIN FUNCTION
