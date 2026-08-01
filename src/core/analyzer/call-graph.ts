@@ -1906,6 +1906,27 @@ async function loadWasmGrammarSoft(
   }
 }
 
+/**
+ * Did a grammar load attempt for this language already FAIL in this process?
+ *
+ * Every soft loader records `null` in the handle cache when a grammar cannot be loaded — an
+ * optional dependency that was not installed, a native binding that will not build, a WASM file
+ * that is absent. This reports that, so a caller can tell "the grammar is not here" apart from
+ * "the grammar is here and produced nothing", which are the same empty result but very different
+ * facts. `false` also means "not attempted yet"; drive an extraction first.
+ *
+ * Exists because the two are indistinguishable at the assertion site: when `tree-sitter-kotlin`
+ * failed to install in CI, nine tests failed with messages like `expected [] to include 'main'`,
+ * which reads exactly like a broken extractor and cost real time to diagnose as an install
+ * problem. The grammars are `optionalDependencies` BY DESIGN (`loadGrammarSoft`, restricted
+ * environments) — so a suite that cannot distinguish absence from breakage will keep going red
+ * for reasons that are not defects.
+ */
+export function grammarLoadFailed(language: string): boolean {
+  return _grammarHandleCache.get(language) === null
+    || _grammarHandleCache.get(`wasm:${language}`) === null;
+}
+
 /** Reset loader caches — test-only hook for the graceful-degradation test. */
 export function __resetGrammarCacheForTests(): void {
   _grammarHandleCache.clear();
