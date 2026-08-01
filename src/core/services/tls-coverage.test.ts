@@ -40,15 +40,16 @@ const SRC = join(REPO_ROOT, 'src');
  * opt in, which is a behaviour change in its own right.
  */
 const EXEMPT: { file: string; line: number; why: string }[] = [
-  { file: 'src/core/services/serve-client.ts', line: 64, why: 'loopback http:// health probe' },
-  { file: 'src/core/services/serve-client.ts', line: 136, why: 'loopback http:// daemon call' },
-  { file: 'src/cli/commands/serve.ts', line: 188, why: 'loopback http:// health probe' },
-  { file: 'src/pi/extension.ts', line: 421, why: 'loopback http:// health probe' },
-  { file: 'src/pi/extension.ts', line: 470, why: 'loopback http:// daemon call' },
-  { file: 'src/pi/extension.ts', line: 1215, why: 'loopback http:// health probe' },
+  { file: 'src/core/services/serve-client.ts', line: 90, why: 'loopback http:// health probe' },
+  { file: 'src/core/services/serve-client.ts', line: 163, why: 'loopback http:// daemon call' },
+  { file: 'src/cli/commands/serve.ts', line: 210, why: 'loopback http:// health and compatibility probe' },
+  { file: 'src/cli/commands/serve.ts', line: 250, why: 'loopback http:// authenticated shutdown request' },
+  { file: 'src/pi/extension.ts', line: 440, why: 'loopback http:// health probe' },
+  { file: 'src/pi/extension.ts', line: 538, why: 'loopback http:// daemon call' },
+  { file: 'src/pi/extension.ts', line: 1311, why: 'loopback http:// health probe' },
   {
     file: 'src/pi/extension.ts',
-    line: 166,
+    line: 171,
     why: 'pre-existing: the Pi host never opts in, so skipSslVerify is not honoured there at all',
   },
 ];

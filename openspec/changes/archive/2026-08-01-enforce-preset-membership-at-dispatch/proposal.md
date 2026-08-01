@@ -1,6 +1,6 @@
 # Enforce preset membership at dispatch: the advertised surface must be the callable surface
 
-> Status: PROPOSED (2026-07-27, first-run e2e). The preset architecture — benchmark-gated default
+> Status: IMPLEMENTED (2026-08-01). The preset architecture — benchmark-gated default
 > (ADR-0023), "tools remain available strictly by opt-in" (mcp-quality), "substrate holds
 > governance READS, not writes" (`reconcile-substrate-write-face`, PR #234) — governs only
 > `tools/list`. `tools/call` dispatches **any of the ~73 registered tools**, including writes.
@@ -39,9 +39,16 @@
   the tool, the active preset, the preset(s) that contain the tool, and the rewire command
   (`openlore install --preset <name>`). Deprecated aliases keep resolving, then the canonical
   name is membership-checked.
-- **The boundary is guarded in CI.** A test walks `TOOL_PRESETS` × the dispatch path: for each
-  preset, one out-of-surface call must produce the membership error and — for write-family tools —
-  must leave no persisted side effect.
+- **The boundary is guarded in CI.** A test walks `TOOL_PRESETS`: for each preset, one
+  out-of-surface tool must produce the membership error. Wire-protocol and HTTP daemon tests
+  exercise the real dispatch boundary and assert that write tools leave no persisted side effect.
+- **Conflicting daemon launches fail closed.** A second `openlore serve` launch reuses the live
+  daemon only when one authenticated health response proves the exact repository root, canonical
+  preset, token posture, and enforced dispatch capability. Out-of-preset and unauthorized calls
+  do not reset its idle lifetime, and Pi reports an actionable incompatibility instead of silently
+  accepting a narrow backing surface. MCP discovery may reuse a narrower daemon because its own
+  session guard runs first and authorized wider calls fall back locally. `--stop` asks the
+  authenticated listener to shut itself down instead of trusting descriptor PID data.
 - **The mcp-security posture is stated.** Write-capability tools (`change`/`remember` families'
   mutating members) are unreachable through any preset that does not advertise them; this is a
   named requirement, not an emergent property.

@@ -614,7 +614,7 @@ over plain HTTP so non-MCP clients (e.g. the [Pi](https://pi.dev) extension in
 `examples/pi/`) can hit them with `fetch` — no JSON-RPC, no subprocess-per-call.
 
 ```bash
-openlore serve                          # navigation preset, ephemeral port, watch on
+openlore serve                          # substrate preset, ephemeral port, watch on
 openlore serve --preset all --port 7077 # all 73 tools on a fixed port
 openlore serve --no-watch               # transport only, no freshness lane
 openlore serve --stop                   # stop the daemon serving this directory
@@ -625,14 +625,21 @@ openlore serve --stop                   # stop the daemon serving this directory
 | `-d, --directory <path>` | Project root to serve; discovery file written here (default: cwd) |
 | `-p, --port <number>` | Port to bind (default: ephemeral free port) |
 | `--host <host>` | Host to bind (default: `127.0.0.1`) |
-| `--preset <name>` | Advisory surface reported by `/health`: `substrate` (default), `navigation` (the lean navigate-only escape), `minimal`, or `all`/`full` (the full surface — `full` matches the `openlore mcp` selector name). The daemon dispatches any known tool regardless; clients curate their own surface |
+| `--preset <name>` | Callable surface enforced at dispatch and reported by `/health`: `substrate` (default), `navigation` (the lean navigate-only escape), `minimal`, or `all`/`full` (the full surface — `full` matches the `openlore mcp` selector name). Requests for registered tools outside the active preset return `403` before validation or side effects |
 | `--token <token>` | Require this token as the `x-openlore-token` header (default: `$OPENLORE_SERVE_TOKEN`) |
 | `--no-watch` | Disable the freshness watcher + re-analyze lane |
 | `--stop` | Stop a running daemon for `--directory` and exit |
 
-Endpoints (loopback only): `GET /health`, `POST /tool/:name` with body
-`{ "directory": "...", "args": { ... } }`. Discovery: the daemon writes
+Endpoints: `GET /health`, authenticated `POST /shutdown`, and `POST /tool/:name`
+with body `{ "directory": "...", "args": { ... } }`. Discovery: the daemon writes
 `.openlore/serve.json` `{ port, pid, host, token? }` (removed on clean shutdown).
+`/health` reports `presetDispatchEnforced`, `root`, `pid`, `preset`, `tools`,
+`tokenProtected`, and `tokenAuthenticated`. Clients MUST require the semantic marker,
+exact root, and authenticated token proof before trusting the descriptor or callable
+surface. `--stop` uses the authenticated shutdown endpoint; it never signals the
+descriptor PID.
+If a shared-daemon connection fails after a non-idempotent write is sent, OpenLore
+reports an unknown outcome instead of replaying the write locally.
 
 ```bash
 PORT=$(jq .port .openlore/serve.json)
@@ -644,7 +651,9 @@ curl -XPOST 127.0.0.1:$PORT/tool/orient -d '{"args":{"task":"add rate limiting"}
 
 `openlore setup --tools pi` installs the Pi extension to `.pi/extensions/openlore.ts`
 (add `--global` for `~/.pi/agent/extensions/`). It auto-starts and talks to the
-serve daemon, injecting structural context and exposing the navigation tools.
+serve daemon, injecting structural context and exposing Pi's curated tool surface.
+Pi starts a full-preset backing daemon and curates the model-visible tools itself;
+if an existing narrow daemon owns the repository, stop it before starting Pi.
 See `examples/pi/README.md`.
 
 ---
@@ -655,4 +664,3 @@ See `examples/pi/README.md`.
 |--------|-------------|
 | `npm run bench` | EdgeStore micro-benchmark (node lookup, BFS, orient path) — requires `openlore analyze` |
 | `npm run bench:mcp` | MCP handler benchmark — measures cold vs warm path for `readCachedContext`, `handleOrient`, `handleSearchCode`. Requires `openlore analyze`. Pass a project dir: `npm run bench:mcp -- /path/to/project` |
-

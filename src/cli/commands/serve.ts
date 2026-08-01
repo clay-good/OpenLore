@@ -12,9 +12,13 @@
  * `serve` and `openlore mcp` never diverge on what "no --preset" means).
  *
  * Endpoints (all loopback):
- *   GET  /health           → { ok, version, root, preset, tools, uptimeMs }
+ *   GET  /health           → { ok, presetDispatchEnforced, root, pid, preset, tools,
+ *                              tokenProtected, tokenAuthenticated, version, uptimeMs }
+ *   POST /shutdown         → authenticated graceful teardown
  *   POST /tool/:name       body { directory?, args }  → handler result (JSON)
  *
+ * Clients require the semantic marker, exact root, and authenticated token proof
+ * before trusting a descriptor's daemon, preset, or tool list.
  * Discovery: writes `.openlore/serve.json` { port, pid, host, token?, startedAt }
  * in the served root so a client can find and reuse a running daemon.
  *
@@ -33,7 +37,7 @@ import { Command } from 'commander';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createRequire } from 'node:module';
 import { unlink } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { logger } from '../../utils/logger.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, FULL_PRESET, FULL_PRESET_ALIAS, LEAN_DEFAULT_PRESET } from '../../constants.js';
 import { dispatchTool, UnknownToolError } from '../../core/services/tool-dispatch.js';
@@ -42,7 +46,7 @@ import { validateDirectory, waitForGraphRebuild } from '../../core/services/mcp-
 import { EdgeStore } from '../../core/services/edge-store.js';
 import { McpWatcher } from '../../core/services/mcp-watcher.js';
 import { openloreAnalyze } from '../../api/analyze.js';
-import { TOOL_DEFINITIONS, TOOL_PRESETS, selectActiveTools } from './mcp.js';
+import { TOOL_DEFINITIONS, TOOL_PRESETS, presetMembershipError, selectActiveTools } from './mcp.js';
 import { validateToolArgs } from '../../core/services/mcp-handlers/tool-guard.js';
 import {
   isLoopbackHost,
@@ -51,7 +55,13 @@ import {
   OPENLORE_TOKEN_HEADER,
   writeInstanceDescriptor,
 } from './local-http-guard.js';
-import { readServeDescriptor, type ServeDescriptor } from './serve-descriptor.js';
+import {
+  readServeDescriptor,
+  canonicalServeRoot,
+  validateServeHealth,
+  type ServeDescriptor,
+  type ServeHealth,
+} from './serve-descriptor.js';
 
 /**
  * Debounce before a full call-graph re-analyze after edits settle. Longer than
@@ -120,6 +130,11 @@ export interface ServeHandle {
   close(): Promise<void>;
 }
 
+interface DaemonProbe {
+  alive: boolean;
+  health: ServeHealth | null;
+}
+
 const SERVE_FILE = 'serve.json';
 const MAX_BODY_BYTES = 1_000_000; // tool args are small; reject anything larger
 
@@ -166,8 +181,8 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 /**
  * Read + validate <root>/.openlore/serve.json. The discovery file is an untrusted
  * on-disk artifact (mcp-security: Untrusted Artifact Deserialization): a hostile repo
- * could ship a poisoned serve.json, and `daemonAlive` would then fetch an arbitrary
- * host (egress / SSRF) and `stopDaemon` could SIGTERM an arbitrary pid. Validation
+ * could ship a poisoned serve.json, and `probeDaemon` would then fetch an arbitrary
+ * host (egress / SSRF). Validation
  * lives in the shared {@link readServeDescriptor} so every reader fails closed the
  * same way (mcp-security: ServeDescriptorValidatedAtEveryReader).
  *
@@ -180,25 +195,36 @@ export async function readDescriptor(root: string): Promise<ServeDescriptor | nu
 /**
  * Confirm a descriptor points at a LIVE openlore daemon — not a stale serve.json
  * left by a SIGKILL'd process, nor a recycled port now owned by something else.
- * Verifies GET /health returns our `ok: true` shape, so we never signal a PID we
- * can't positively identify as our own daemon.
+ * Verifies GET /health returns the strict authenticated, root-bound shape before
+ * trusting any daemon metadata or asking the listener to shut itself down.
  */
-async function daemonAlive(desc: ServeDescriptor): Promise<boolean> {
+async function probeDaemon(
+  desc: ServeDescriptor,
+  expectedRoot: string,
+): Promise<DaemonProbe> {
   try {
+    // Only transmit the token already present in the mode-0600 descriptor. A
+    // caller-provided replacement token must never be disclosed to a
+    // descriptor-selected listener.
+    const headers = desc.token ? { [OPENLORE_TOKEN_HEADER]: desc.token } : undefined;
     const res = await fetch(`http://${desc.host}:${desc.port}/health`, {
+      headers,
       signal: AbortSignal.timeout(HEALTH_PROBE_TIMEOUT_MS),
       // A daemon never redirects; following one would take this probe off-machine.
       redirect: 'error',
     });
-    if (!res.ok) return false;
-    const body = (await res.json().catch(() => null)) as { ok?: boolean } | null;
-    return body?.ok === true;
+    if (!res.ok) return { alive: false, health: null };
+    const body = await res.json().catch(() => null);
+    return {
+      alive: (body as { ok?: unknown } | null)?.ok === true,
+      health: validateServeHealth(body, expectedRoot, desc),
+    };
   } catch {
-    return false;
+    return { alive: false, health: null };
   }
 }
 
-/** Stop a daemon previously started for `root` by signalling its recorded pid. */
+/** Stop the verified daemon for `root` by asking the listener to tear itself down. */
 async function stopDaemon(root: string): Promise<void> {
   const path = serveFilePath(root);
   const desc = await readDescriptor(root);
@@ -206,25 +232,36 @@ async function stopDaemon(root: string): Promise<void> {
     logger.warning(`No running openlore serve daemon found for ${root}.`);
     return;
   }
-  // Only signal a PID we've confirmed is our live daemon on the recorded port.
-  // A stale serve.json could otherwise point at a recycled PID belonging to an
-  // unrelated process — SIGTERM to that would be a nasty surprise.
-  if (!(await daemonAlive(desc))) {
+  const probe = await probeDaemon(desc, root);
+  if (!probe.alive) {
     await unlink(path).catch(() => {});
     logger.warning(`No live daemon at ${desc.host}:${desc.port}; removed stale ${SERVE_FILE}.`);
     return;
   }
+  if (!probe.health) {
+    logger.warning(
+      'The announced listener is not an authenticated daemon for this repository; refusing ' +
+      'to signal the descriptor PID. Stop or upgrade the legacy daemon manually.',
+    );
+    return;
+  }
   try {
-    process.kill(desc.pid, 'SIGTERM');
-    logger.success(`Sent SIGTERM to openlore serve (pid ${desc.pid}).`);
+    const headers = desc.token ? { [OPENLORE_TOKEN_HEADER]: desc.token } : undefined;
+    const res = await fetch(`http://${desc.host}:${desc.port}/shutdown`, {
+      method: 'POST',
+      headers,
+      signal: AbortSignal.timeout(HEALTH_PROBE_TIMEOUT_MS),
+      redirect: 'error',
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    logger.success(`Requested shutdown of openlore serve (pid ${probe.health.pid}).`);
   } catch {
-    await unlink(path).catch(() => {});
-    logger.warning(`Daemon pid ${desc.pid} not signalable; removed stale ${SERVE_FILE}.`);
+    logger.warning('The verified daemon did not accept the shutdown request.');
   }
 }
 
 export async function startServe(options: ServeCliOptions): Promise<ServeHandle | undefined> {
-  const root = resolve(options.directory ?? process.cwd());
+  const root = canonicalServeRoot(options.directory ?? process.cwd());
 
   if (options.stop) {
     await stopDaemon(root);
@@ -292,14 +329,53 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
   // a concurrent spawn (two MCP clients, or pi + MCP) would otherwise leave two
   // watchers racing on the same .openlore/analysis. Reuse the live one instead.
   const existing = await readDescriptor(root);
-  if (existing && (await daemonAlive(existing))) {
+  if (existing && existing.token !== token) {
+    logger.error(
+      `Refusing to reuse the daemon announced for ${root}: requested token posture ` +
+      `(${token ? 'protected' : 'none'}) does not match the descriptor ` +
+      `(${existing.token ? 'protected' : 'none'}). No request was sent. Stop the existing ` +
+      'daemon before changing its security settings.',
+    );
+    process.exitCode = 1;
+    return;
+  }
+  const existingProbe = existing ? await probeDaemon(existing, root) : null;
+  const existingHealth = existingProbe?.health ?? null;
+  if (existing && existingProbe?.alive && !existingHealth) {
+    logger.error(
+      `Refusing to reuse the daemon already serving ${root} because its health response ` +
+      'does not declare an authenticated, root-bound preset/tool surface. Stop or upgrade ' +
+      'the incompatible process manually before restarting it.',
+    );
+    process.exitCode = 1;
+    return;
+  }
+  if (existing && existingHealth) {
+    const requestedPreset = isFullSurface ? FULL_PRESET : presetName;
+    const existingPreset =
+      existingHealth.preset === FULL_PRESET_ALIAS ? FULL_PRESET : existingHealth.preset;
+    const existingTools = new Set(existingHealth.tools);
+    const surfaceMatches =
+      existingTools.size === activeNames.size
+      && [...activeNames].every((tool) => existingTools.has(tool));
+    if (existingPreset !== requestedPreset || !surfaceMatches || existingHealth.tokenProtected !== Boolean(token)) {
+      logger.error(
+        `Refusing to reuse the daemon already serving ${root}: requested preset/token ` +
+        `(${requestedPreset}/${token ? 'protected' : 'none'}) does not match the live daemon ` +
+        `(${existingPreset}/${existingHealth.tokenProtected ? 'protected' : 'none'}), or its advertised tools ` +
+        'do not match that preset. Run ' +
+        '`openlore serve --stop` before starting it with different security settings.',
+      );
+      process.exitCode = 1;
+      return;
+    }
     logger.success(
       `openlore serve already running for ${root} at http://${existing.host}:${existing.port} — reusing.`,
     );
     return {
       port: existing.port,
       host: existing.host,
-      token: existing.token,
+      token,
       baseUrl: `http://${existing.host}:${existing.port}`,
       close: async () => {}, // never tear down a daemon this process didn't start
     };
@@ -361,8 +437,9 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
     });
   });
 
+  let descriptorRemoved = false;
+
   async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    touchActivity(); // any request (incl. /health) keeps an in-use daemon alive
     const url = new URL(req.url ?? '/', `http://${host}`);
 
     // DNS-rebinding / cross-origin defense — runs before ANY dispatch, including
@@ -373,25 +450,46 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
       return;
     }
 
+    const presented = req.headers[OPENLORE_TOKEN_HEADER];
+    const tokenAuthenticated =
+      !token || (typeof presented === 'string' && constantTimeEqual(presented, token));
+
     // Token gate (skips /health so liveness checks need no secret). Compared in
     // constant time so a timing oracle can't recover the token byte-by-byte.
     if (token && url.pathname !== '/health') {
-      const presented = req.headers[OPENLORE_TOKEN_HEADER];
-      if (typeof presented !== 'string' || !constantTimeEqual(presented, token)) {
+      if (!tokenAuthenticated) {
         sendJson(res, 401, { error: `invalid or missing ${OPENLORE_TOKEN_HEADER}` });
         return;
       }
     }
 
     if (req.method === 'GET' && url.pathname === '/health') {
+      touchActivity();
       sendJson(res, 200, {
         ok: true,
+        presetDispatchEnforced: true,
         version: _pkgVersion,
         root,
+        pid: process.pid,
         preset: presetName,
         tools: [...activeNames],
+        tokenProtected: Boolean(token),
+        tokenAuthenticated,
         uptimeMs: Date.now() - startMs,
       });
+      return;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/shutdown') {
+      // Claim this instance's discovery entry before acknowledging shutdown.
+      // A replacement started after the 202 must not have its descriptor removed
+      // later by this daemon's slower watcher/cache teardown.
+      await unlink(serveFilePath(root)).catch(() => {});
+      descriptorRemoved = true;
+      sendJson(res, 202, { ok: true, shuttingDown: true });
+      // Closing every owned handle lets a CLI daemon exit naturally, while also
+      // making this endpoint safe for in-process callers such as the test suite.
+      setImmediate(() => void teardown());
       return;
     }
 
@@ -399,11 +497,23 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
       // Resolve a deprecated tool-name alias to its canonical name so the daemon
       // transport accepts old names identically to the MCP stdio transport.
       const name = resolveCanonicalToolName(decodeURIComponent(url.pathname.slice('/tool/'.length)));
-      // The preset is ADVISORY (reported by /health for clients that want a
-      // curated list, e.g. the Pi extension). The daemon dispatches any known
-      // tool so it can back multiple clients with different surfaces — notably
-      // the MCP server, which delegates every registered tool here. Unknown tools 404
-      // via UnknownToolError below.
+      const toolDef = TOOL_DEFINITIONS.find(t => t.name === name);
+      if (!toolDef) {
+        sendJson(res, 404, { error: `Unknown tool: ${name}` });
+        return;
+      }
+      // Enforce the daemon's own advertised preset before parsing arguments,
+      // validating a directory, healing an index, or dispatching. An MCP client
+      // with a wider preset will treat this response as a delegation failure and
+      // fall back to its authorized in-process dispatcher.
+      const membershipError = presetMembershipError(name, presetName, activeNames);
+      if (membershipError) {
+        sendJson(res, 403, { error: membershipError });
+        return;
+      }
+      // Only an authenticated, known, in-surface call keeps the daemon alive.
+      // Rejected probes must not mutate process lifecycle state.
+      touchActivity();
       let body: Record<string, unknown>;
       try {
         body = await readJsonBody(req);
@@ -475,13 +585,10 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
       // The MCP stdio transport validates the same way; this keeps the daemon transport —
       // used directly by the Pi extension and other HTTP clients — from leaking internal
       // errors to weak tool-callers.
-      const toolDef = TOOL_DEFINITIONS.find(t => t.name === name);
-      if (toolDef) {
-        const argError = validateToolArgs(args, toolDef.inputSchema);
-        if (argError) {
-          sendJson(res, 400, { error: `Invalid arguments for "${name}": ${argError}` });
-          return;
-        }
+      const argError = validateToolArgs(args, toolDef.inputSchema);
+      if (argError) {
+        sendJson(res, 400, { error: `Invalid arguments for "${name}": ${argError}` });
+        return;
       }
 
       try {
@@ -617,7 +724,7 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
       if (watcher) await watcher.stop().catch(() => {});
       rebuildPending.clear();
       await Promise.allSettled([...rebuildPromises.values()]);
-      await unlink(serveFilePath(root)).catch(() => {});
+      if (!descriptorRemoved) await unlink(serveFilePath(root)).catch(() => {});
       await serverClosed;
     })();
     return teardownPromise;
@@ -653,8 +760,7 @@ export const serveCommand = new Command('serve')
   .option('--host <host>', 'Host to bind', '127.0.0.1')
   .option(
     '--preset <name>',
-    `Advisory tool surface reported by /health (navigation, substrate, minimal, or all/full). The daemon still ` +
-      `dispatches any known tool; clients curate their own surface. Default: ${LEAN_DEFAULT_PRESET}`,
+    `Callable tool surface enforced at dispatch (navigation, substrate, minimal, or all/full). Default: ${LEAN_DEFAULT_PRESET}`,
     LEAN_DEFAULT_PRESET,
   )
   .option('--token <token>', 'Require this token as the x-openlore-token header (default: $OPENLORE_SERVE_TOKEN)')

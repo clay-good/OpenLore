@@ -10,7 +10,8 @@ member of the active preset SHALL NOT execute. The rejection SHALL be a tool exe
 preset, at least one preset that contains the tool, and the rewire command. A deprecated tool
 alias SHALL resolve to its canonical name before the membership check. The advertised surface
 (`tools/list`) and the callable surface SHALL be the same set, guarded by a CI test that
-exercises the dispatch path for every preset with at least one out-of-surface call.
+checks every preset with at least one out-of-surface call and by a wire-protocol test that
+exercises the dispatch boundary.
 
 #### Scenario: A hidden navigation tool is not callable on the default surface
 

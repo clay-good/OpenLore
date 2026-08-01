@@ -57,7 +57,12 @@ import {
 // predicate) so it does not drag the analyzer into the Pi host, and it guarantees
 // Pi trusts the untrusted descriptor exactly as the CLI and MCP server do
 // (mcp-security: ServeDescriptorValidatedAtEveryReader).
-import { readServeDescriptor, type ServeDescriptor } from '../cli/commands/serve-descriptor.js';
+import {
+  readServeDescriptor,
+  validateServeHealth,
+  type ServeDescriptor,
+  type ServeHealth,
+} from '../cli/commands/serve-descriptor.js';
 import type { ContextInjectionConfig } from '../types/index.js';
 import { discloseRepoConfiguredEndpoint } from '../core/services/repo-config-trust.js';
 
@@ -389,7 +394,16 @@ async function runConfigWizard(ctx: ExtensionContext, existing?: OpenLoreConfig 
 
 // ── Daemon discovery + lifecycle ──────────────────────────────────────────────
 
-interface Daemon { baseUrl: string; token?: string }
+interface Daemon {
+  baseUrl: string;
+  token?: string;
+  incompatibility?: string;
+}
+
+interface DaemonProbe {
+  alive: boolean;
+  health: ServeHealth | null;
+}
 
 const HEALTH_TIMEOUT_MS = 8000;
 const HEALTH_POLL_MS = 150;
@@ -404,6 +418,10 @@ const HEALTH_PROBE_TIMEOUT_MS = 2500;
 // orphans get no ping and still reap, so this can't resurrect the RAM pileup.
 const KEEPALIVE_MS = 5 * 60_000;
 const RESULT_MAX = 50_000;
+// Pi curates its own native surface, which intentionally supersets the MCP
+// substrate preset. The daemon enforces its preset at dispatch, so Pi must
+// spawn the full backing surface and keep curating what the model sees here.
+export const PI_DAEMON_PRESET = 'full';
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 // `.openlore/serve.json` is an untrusted, repo-writable artifact; resolve it
@@ -414,19 +432,64 @@ async function readDescriptor(cwd: string): Promise<ServeDescriptor | null> {
   return readServeDescriptor(join(cwd, OPENLORE_DIR, 'serve.json'));
 }
 
-async function healthy(desc: ServeDescriptor): Promise<boolean> {
+async function probeHealth(desc: ServeDescriptor, expectedRoot: string): Promise<DaemonProbe> {
   try {
     // `redirect: 'error'` — a daemon never redirects, and following one would take
     // this probe (and, at the call site below, the token) off the machine.
-    const res = await fetch(`http://${desc.host}:${desc.port}/health`, { signal: AbortSignal.timeout(HEALTH_PROBE_TIMEOUT_MS), redirect: 'error' });
-    if (!res.ok) return false;
-    return ((await res.json().catch(() => null)) as { ok?: boolean } | null)?.ok === true;
-  } catch { return false; }
+    const headers = desc.token ? { 'x-openlore-token': desc.token } : undefined;
+    const res = await fetch(`http://${desc.host}:${desc.port}/health`, {
+      headers,
+      signal: AbortSignal.timeout(HEALTH_PROBE_TIMEOUT_MS),
+      redirect: 'error',
+    });
+    if (!res.ok) return { alive: false, health: null };
+    const body = await res.json().catch(() => null);
+    return {
+      alive: (body as { ok?: unknown } | null)?.ok === true,
+      health: validateServeHealth(body, expectedRoot, desc),
+    };
+  } catch { return { alive: false, health: null }; }
 }
 
-async function ensureDaemon(cwd: string): Promise<Daemon | null> {
+export function missingDaemonTools(available: readonly string[], required: readonly string[]): string[] {
+  const advertised = new Set(available);
+  return required.filter((tool) => !advertised.has(tool));
+}
+
+function incompatibleDaemon(desc: ServeDescriptor): Daemon {
+  return {
+    baseUrl: `http://${desc.host}:${desc.port}`,
+    token: desc.token,
+    incompatibility:
+      'The running openlore daemon does not report an authenticated, enforced tool surface for ' +
+      'this repository. Stop the legacy or incompatible process manually, upgrade OpenLore, ' +
+      'then retry so Pi can start its required full daemon.',
+  };
+}
+
+function daemonFromHealth(desc: ServeDescriptor, health: ServeHealth): Daemon {
+  const missing = missingDaemonTools(health.tools, NAV_TOOLS.map((tool) => tool.name));
+  return {
+    baseUrl: `http://${desc.host}:${desc.port}`,
+    token: desc.token,
+    ...(missing.length > 0
+      ? {
+          incompatibility:
+            `The running openlore daemon does not expose ${missing.length} Pi tool(s), including ` +
+            `${missing.slice(0, 3).join(', ')}. Run \`openlore serve --stop\`, then retry so Pi ` +
+            'can start its required full-preset daemon.',
+        }
+      : {}),
+  };
+}
+
+export async function ensureDaemon(cwd: string): Promise<Daemon | null> {
   const existing = await readDescriptor(cwd);
-  if (existing && (await healthy(existing))) return { baseUrl: `http://${existing.host}:${existing.port}`, token: existing.token };
+  if (existing) {
+    const probe = await probeHealth(existing, cwd);
+    if (probe.health) return daemonFromHealth(existing, probe.health);
+    if (probe.alive) return incompatibleDaemon(existing);
+  }
   try {
     // The daemon must outlive this process and write .openlore/serve.json.
     // Windows 10 kills a child whose stdout/stderr are NUL (stdio:'ignore') —
@@ -443,7 +506,7 @@ async function ensureDaemon(cwd: string): Promise<Daemon | null> {
     await mkdir(join(cwd, OPENLORE_DIR), { recursive: true });
     const logFd = openSync(join(cwd, OPENLORE_DIR, 'serve.log'), 'a');
     try {
-      const child = spawn('openlore', ['serve', '--directory', dirArg], {
+      const child = spawn('openlore', ['serve', '--directory', dirArg, '--preset', PI_DAEMON_PRESET], {
         stdio: ['ignore', logFd, logFd],
         windowsHide: true,
         ...(isWin ? { shell: true } : { detached: true }),
@@ -458,12 +521,17 @@ async function ensureDaemon(cwd: string): Promise<Daemon | null> {
   while (Date.now() < deadline) {
     await sleep(HEALTH_POLL_MS);
     const desc = await readDescriptor(cwd);
-    if (desc && (await healthy(desc))) return { baseUrl: `http://${desc.host}:${desc.port}`, token: desc.token };
+    if (desc) {
+      const probe = await probeHealth(desc, cwd);
+      if (probe.health) return daemonFromHealth(desc, probe.health);
+      if (probe.alive) return incompatibleDaemon(desc);
+    }
   }
   return null;
 }
 
-async function callTool(daemon: Daemon, name: string, args: Record<string, unknown>, cwd: string, signal?: AbortSignal): Promise<unknown> {
+export async function callTool(daemon: Daemon, name: string, args: Record<string, unknown>, cwd: string, signal?: AbortSignal): Promise<unknown> {
+  if (daemon.incompatibility) return { error: daemon.incompatibility };
   const headers: Record<string, string> = { 'content-type': 'application/json' };
   if (daemon.token) headers['x-openlore-token'] = daemon.token;
   try {
@@ -473,9 +541,31 @@ async function callTool(daemon: Daemon, name: string, args: Record<string, unkno
       redirect: 'error',
     });
     const body = await res.json().catch(() => ({ error: `non-JSON (${res.status})` }));
+    if (res.status === 401 || res.status === 403) {
+      throw new PiDaemonConnectionError(
+        (body as { error?: string }).error ?? `HTTP ${res.status}`,
+      );
+    }
     if (!res.ok) return { error: (body as { error?: string }).error ?? `HTTP ${res.status}` };
     return body;
-  } catch (err) { return { error: err instanceof Error ? err.message : String(err) }; }
+  } catch (err) {
+    if (err instanceof PiDaemonConnectionError) throw err;
+    // User cancellation is not evidence that the daemon changed. Preserve the
+    // abort so callers do not evict a healthy endpoint or suggest a retry.
+    if (signal?.aborted || (err instanceof Error && err.name === 'AbortError')) throw err;
+    throw new PiDaemonConnectionError(err instanceof Error ? err.message : String(err));
+  }
+}
+
+export class PiDaemonConnectionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PiDaemonConnectionError';
+  }
+}
+
+export function isUsableDaemon(daemon: Daemon): boolean {
+  return daemon.incompatibility === undefined;
 }
 
 // ── Context injection helpers ─────────────────────────────────────────────────
@@ -1194,8 +1284,14 @@ export default function openlore(pi: ExtensionAPI): void {
     if ((failedUntil.get(cwd) ?? 0) > Date.now()) return null;
     const d = await ensureDaemon(cwd);
     if (d) {
-      daemons.set(cwd, d);
       failedUntil.delete(cwd);
+      // Incompatible daemons carry remediation to the current call but never
+      // enter the usable/keepalive cache. After the operator stops or upgrades
+      // one, the very next tool call re-probes and can recover immediately.
+      if (isUsableDaemon(d)) {
+        daemons.set(cwd, d);
+        startKeepalive();
+      }
     } else {
       failedUntil.set(cwd, Date.now() + DAEMON_RETRY_COOLDOWN_MS);
     }
@@ -1232,7 +1328,15 @@ export default function openlore(pi: ExtensionAPI): void {
       async execute(_id, params, signal, _onUpdate, ctx) {
         const daemon = await getDaemon(ctx.cwd);
         if (!daemon) return toolResult('openlore daemon unavailable — run `openlore analyze` then retry.');
-        const result = await callTool(daemon, tool.name, params as Record<string, unknown>, ctx.cwd, signal ?? undefined);
+        let result: unknown;
+        try {
+          result = await callTool(daemon, tool.name, params as Record<string, unknown>, ctx.cwd, signal ?? undefined);
+        } catch (err) {
+          daemons.delete(ctx.cwd);
+          return toolResult(
+            `openlore daemon connection changed — ${err instanceof Error ? err.message : String(err)}. Retry the tool.`,
+          );
+        }
         // content[].text is sent to the LLM verbatim — keep the FULL structured
         // result so the model loses no detail. The compact human view is produced
         // separately in renderResult (display only). `details` carries the parsed
@@ -1330,7 +1434,13 @@ export default function openlore(pi: ExtensionAPI): void {
     const daemon = await getDaemon(sessionCwd);
     const cfg = resolveInjectionConfig(await readContextInjection(sessionCwd));
     if (daemon && event.prompt && cfg.mode !== 'off') {
-      const oriented = await callTool(daemon, 'orient', { task: event.prompt }, sessionCwd);
+      let oriented: unknown;
+      try {
+        oriented = await callTool(daemon, 'orient', { task: event.prompt }, sessionCwd);
+      } catch {
+        daemons.delete(sessionCwd);
+        oriented = null;
+      }
       const result =
         oriented && typeof oriented === 'object' && !('error' in (oriented as object))
           ? (oriented as LeanOrientResult)

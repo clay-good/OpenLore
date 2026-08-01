@@ -10,11 +10,12 @@
  */
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createServer } from 'node:http';
 import { serveCommand, startServe, type ServeHandle } from '../../cli/commands/serve.js';
-import { ensureServeDaemon, callServeTool, serveSpawnArgs } from './serve-client.js';
+import { ensureServeDaemon, callServeTool, isServePresetRejection, ServeHttpError, serveSpawnArgs } from './serve-client.js';
 
 let handle: ServeHandle | undefined;
 let root = '';
@@ -34,7 +35,7 @@ async function bootDaemon(): Promise<void> {
 describe('serve-client', () => {
   it('spawn args are accepted by the serve command (no rejected flags)', () => {
     const args = serveSpawnArgs('/some/dir');
-    expect(args).toEqual(['serve', '--directory', '/some/dir']);
+    expect(args).toEqual(['serve', '--directory', '/some/dir', '--preset', 'full']);
     // Regression guard: the daemon must accept exactly these. `serve` exposes
     // `--no-watch`, not `--watch`; commander rejects unknown options, which would
     // silently kill the spawned daemon. Parse the flags (minus the leading
@@ -65,6 +66,31 @@ describe('serve-client', () => {
     }
   });
 
+  it('does not discover a legacy daemon without authenticated enforced health', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'openlore-client-legacy-'));
+    const legacy = createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
+    });
+    await new Promise<void>((resolve) => legacy.listen(0, '127.0.0.1', resolve));
+    const address = legacy.address();
+    if (!address || typeof address === 'string') throw new Error('legacy server did not bind');
+    try {
+      await mkdir(join(dir, '.openlore'), { recursive: true });
+      await writeFile(join(dir, '.openlore', 'serve.json'), JSON.stringify({
+        port: address.port,
+        pid: process.pid,
+        host: '127.0.0.1',
+        startedAt: '',
+        version: 'legacy',
+      }));
+      expect(await ensureServeDaemon(dir, { spawn: false })).toBeNull();
+    } finally {
+      await new Promise<void>((resolve) => legacy.close(() => resolve()));
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('calls a tool and returns its body (handler error object on a bare root)', async () => {
     await bootDaemon();
     const ep = await ensureServeDaemon(root, { spawn: false });
@@ -76,6 +102,24 @@ describe('serve-client', () => {
     await bootDaemon();
     const ep = await ensureServeDaemon(root, { spawn: false });
     await expect(callServeTool(ep!, 'not_a_real_tool', {}, root)).rejects.toThrow();
+  });
+
+  it('preserves the HTTP status when a narrow daemon rejects a registered tool', async () => {
+    await bootDaemon(); // substrate
+    const ep = await ensureServeDaemon(root, { spawn: false });
+    const error = await callServeTool(ep!, 'record_decision', {
+      title: 'hidden',
+      rationale: 'hidden',
+    }, root).catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(ServeHttpError);
+    expect((error as ServeHttpError).status).toBe(403);
+    expect(isServePresetRejection(error)).toBe(true);
+    expect(isServePresetRejection(new ServeHttpError(500, 'failed'))).toBe(false);
+    expect(isServePresetRejection(new ServeHttpError(403, 'origin rejected'))).toBe(false);
+
+    // The same endpoint is still healthy and serves an in-surface member.
+    const member = await callServeTool(ep!, 'orient', { task: 'x' }, root) as { error?: string };
+    expect(member.error).toMatch(/No analysis/i);
   });
 
   it('throws when the daemon is unreachable (stale endpoint)', async () => {

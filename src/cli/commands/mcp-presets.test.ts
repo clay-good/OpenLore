@@ -7,7 +7,7 @@
  * surface), and the selector's precedence/error behaviour must hold.
  */
 import { describe, it, expect } from 'vitest';
-import { selectActiveTools, TOOL_PRESETS, TOOL_DEFINITIONS, mcpCommand, BREADTH_POINTER, leanDefaultActive, resolvePresetName, renderToolSurfaceByFamily, renderActiveToolSurface } from './mcp.js';
+import { selectActiveTools, TOOL_PRESETS, TOOL_DEFINITIONS, mcpCommand, BREADTH_POINTER, leanDefaultActive, resolvePresetName, renderToolSurfaceByFamily, renderActiveToolSurface, presetMembershipError } from './mcp.js';
 import { LEAN_DEFAULT_PRESET } from '../../constants.js';
 import { capabilityFamily, type CapabilityFamily } from '../../core/services/mcp-handlers/tool-contract.js';
 
@@ -25,6 +25,26 @@ describe('MCP tool presets', () => {
         expect(real.has(tool), `preset "${name}" references unknown tool "${tool}"`).toBe(true);
       }
     }
+  });
+
+  it('rejects an out-of-surface tool for every curated preset with an actionable error', () => {
+    for (const [preset, active] of Object.entries(TOOL_PRESETS)) {
+      const hidden = TOOL_DEFINITIONS.find((tool) => !active.has(tool.name));
+      expect(hidden, `${preset} must be narrower than full`).toBeDefined();
+      const error = presetMembershipError(hidden!.name, preset, active);
+      expect(error).toContain(hidden!.name);
+      expect(error).toContain(`"${preset}" preset`);
+      expect(error).toContain('full');
+      expect(error).toContain('openlore install --preset <name>');
+    }
+  });
+
+  it('allows every advertised member and every tool on the full surface', () => {
+    for (const [preset, active] of Object.entries(TOOL_PRESETS)) {
+      for (const tool of active) expect(presetMembershipError(tool, preset, active)).toBeUndefined();
+    }
+    const full = new Set(TOOL_DEFINITIONS.map((tool) => tool.name));
+    for (const tool of full) expect(presetMembershipError(tool, 'full', full)).toBeUndefined();
   });
 
   it('navigation preset = exactly the 10 graph-traversal tools, no governance tools', () => {
