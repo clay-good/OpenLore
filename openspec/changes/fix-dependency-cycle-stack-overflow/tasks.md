@@ -32,3 +32,15 @@
 - [x] Existing `dependency-graph.test.ts` circular-dependency cases pass unchanged
 - [x] End-to-end: the 8,000-file-chain repro that threw now completes (exit 0)
 - [x] Full suite, typecheck, lint, build
+
+## Folded in after multi-agent review (output-preserving, same "any repo size" spirit)
+- [x] **Style-fingerprint determinism**: converted the recursive per-file style walk to iterative
+      pre-order (children pushed in reverse). It overflowed on a deeply-nested file and the throw was
+      swallowed by `tallyStyle`'s `catch`, silently dropping the file's style — environment-dependent,
+      so a determinism hole in a byte-identical artifact. Regression test: a 30,000-deep file keeps
+      its style and its shallow idioms are still tallied
+- [x] **Large-graph perf**: Brandes betweenness (head-index queue + touched-node reset:
+      O(V²)→O(V·reachable), ~29× at 8k nodes) and `detectClusters` (O(D·E)→O(E) single edge pass,
+      ~19–49×). Output byte-identical — normalized centrality maxAbsDiff 0, cluster stats unchanged
+- [x] Whole-codebase recursive-walk audit confirmed no OTHER uncaught whole-graph recursion remains
+      (all others iterative, depth-bounded, or exception-isolated)

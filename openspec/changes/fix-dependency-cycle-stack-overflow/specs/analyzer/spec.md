@@ -31,3 +31,22 @@ deduplication of rotations.
 - **GIVEN** any directed graph
 - **WHEN** cycles are detected iteratively and by the reference recursion
 - **THEN** the two results are identical — same cycles, same order, same rotation-deduplication
+
+### Requirement: StyleFingerprintWalkIsStackSafeAndDeterministic
+
+Tallying a file's style fingerprint SHALL walk the parsed tree without recursion depth that scales
+with the tree's nesting, so a deeply-nested but valid file cannot overflow the stack and lose its
+style contribution. The walk SHALL be pre-order with children visited in source order, producing
+counters identical to the recursive walk on every file.
+
+A recursive walk overflowed on a deeply-nested file; the throw was swallowed by the caller, dropping
+the file's whole style contribution silently. Because the stack limit is environment-dependent, the
+same repository could then yield different style fingerprints on different machines — a violation of
+the artifact's determinism.
+
+#### Scenario: A deeply-nested file keeps its style deterministically
+
+- **GIVEN** a valid file whose AST nests far deeper than the JS call stack allows
+- **WHEN** its style fingerprint is tallied
+- **THEN** the tally completes, the file's style is present rather than silently dropped, and its
+  shallow idioms are counted — identically on any environment

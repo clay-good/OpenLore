@@ -50,9 +50,33 @@ many cycles.
   not vacuous.
 - The existing `dependency-graph.test.ts` circular-dependency cases pass unchanged.
 
+## Folded in after multi-agent review
+
+A parallel audit of the whole codebase (every recursive walk classified) and of the adjacent
+dependency-graph algorithms surfaced two more issues in the same "any repo size/shape" spirit, both
+fixed here, both output-preserving:
+
+- **Style-fingerprint walk was a silent determinism hole (not a crash).** The per-file style walk
+  recursed over the parsed tree and overflowed on a deeply-nested file — but the throw was swallowed
+  by `tallyStyle`'s blanket `catch`, so the file's whole style contribution vanished *silently*, and
+  because the stack limit is environment-dependent, it vanished on some machines and not others.
+  That breaks the byte-identical-artifact guarantee. Converted to an iterative pre-order walk
+  (children pushed in reverse → identical visitation and counters); the deep file now keeps its
+  style deterministically. Verified: a 30,000-deep file's style is present and its shallow idioms
+  are still tallied.
+- **Two superlinear factors made large-graph analyze crawl.** The dependency graph runs on up to
+  100,000 nodes with no size guard. Brandes betweenness drained its BFS with `Array.prototype.shift`
+  (O(n) dequeue) and re-initialized four V-sized maps per source (O(V²)); `detectClusters` rescanned
+  every edge for every directory group (O(D·E)). Both are now near-linear (head-index queue +
+  touched-node reset; one O(E) edge pass), output byte-identical (normalized centrality maxAbsDiff 0,
+  cluster stats unchanged) — ~29× and ~19–49× faster on large graphs.
+
 ## Deliberately NOT in scope
 
-The per-file AST walkers (style, CFG, Elixir) are already crash-safe via per-file exception
-isolation — a deeply nested file degrades to a disclosed parse-failure rather than aborting the
-build (verified: a 40,000-deep nested file analyzes to completion). Converting those to iterative
-would be defense-in-depth with real equivalence risk and no crash to fix, so it is left out.
+The remaining per-file AST walkers (CFG, Elixir) and the IaC object walkers are already crash-safe
+via per-file / whole-corpus exception isolation — a deeply nested file degrades rather than aborting
+the build (verified: a 40,000-deep nested file analyzes to completion, keeping its functions, edges,
+and CFG). An AST max-depth *exclusion* was considered and rejected: it would discard data that is
+extracted successfully today, and a robust depth probe costs 85%+ of parse time on every normal
+file. Converting those walkers to iterative is defense-in-depth with real equivalence risk and no
+crash or determinism bug to fix, so it is left out.
