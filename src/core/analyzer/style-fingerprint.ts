@@ -181,7 +181,7 @@ export function classifyNamingCase(name: string): 'camelCase' | 'PascalCase' | '
 }
 
 // ============================================================================
-// Per-file tally — a single recursive walk over the already-parsed tree
+// Per-file tally — a single iterative walk over the already-parsed tree
 // ============================================================================
 
 /**
@@ -211,19 +211,44 @@ function isStringConcat(node: StyleAstNode): boolean {
   return node.namedChildren.some(c => c.type === 'string' || c.type === 'template_string');
 }
 
-function walk(node: StyleAstNode, visit: (n: StyleAstNode) => void): void {
-  visit(node);
-  // Prefer the allocation-free index accessors (real tree-sitter SyntaxNode); the `.namedChildren`
-  // getter builds a new array on every node, which made this whole-tree walk the tally's dominant
-  // cost. Fall back to `.namedChildren` for plain test objects.
-  if (typeof node.namedChildCount === 'number' && typeof node.namedChild === 'function') {
-    const n = node.namedChildCount;
-    for (let i = 0; i < n; i++) {
-      const c = node.namedChild(i);
-      if (c) walk(c, visit);
+/**
+ * Walk the tree once, pre-order, invoking `visit` on every named node.
+ *
+ * ## The walk is iterative, and that is load-bearing
+ *
+ * This walk used to recurse. Tree depth is not bounded by anything the analyzer controls: a
+ * deeply-nested but otherwise valid file (`const x = [[[…]]]`, `f(f(f(…)))`, a minified/generated
+ * bundle) parses into a tree as deep as its source nesting, and the recursion overflowed the JS
+ * stack there — a `RangeError` this whole-file walk runs on EVERY supported file, so it fired on
+ * real input, not only hostile input. The throw was then swallowed by the caller's `catch`
+ * ({@link tallyStyle} in `call-graph.ts`), which SILENTLY dropped the file's entire style
+ * contribution — and, because the stack limit is environment-dependent, dropped it on some
+ * machines and not others, breaking the byte-identical-across-re-analyses guarantee this artifact
+ * must hold. An explicit stack costs a heap array and cannot overflow, so depth stops being a
+ * correctness cliff. This mirrors the same conversion already made for the parse-health walk.
+ *
+ * Order is unchanged: the visit is pre-order and children are pushed in reverse so they pop in
+ * source order — identical visitation order, and therefore byte-identical counters, to the
+ * recursive version on every normal file.
+ */
+function walk(root: StyleAstNode, visit: (n: StyleAstNode) => void): void {
+  const stack: StyleAstNode[] = [root];
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    visit(node);
+    // Prefer the allocation-free index accessors (real tree-sitter SyntaxNode); the `.namedChildren`
+    // getter builds a new array on every node, which made this whole-tree walk the tally's dominant
+    // cost. Fall back to `.namedChildren` for plain test objects. Pushed in reverse so the first
+    // child is visited first — preserving the recursive pre-order.
+    if (typeof node.namedChildCount === 'number' && typeof node.namedChild === 'function') {
+      for (let i = node.namedChildCount - 1; i >= 0; i--) {
+        const c = node.namedChild(i);
+        if (c) stack.push(c);
+      }
+    } else {
+      const kids = node.namedChildren;
+      for (let i = kids.length - 1; i >= 0; i--) stack.push(kids[i]);
     }
-  } else {
-    for (const c of node.namedChildren) walk(c, visit);
   }
 }
 

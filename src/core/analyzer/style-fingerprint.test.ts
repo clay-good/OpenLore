@@ -96,6 +96,34 @@ describe('tally over the existing AST walk (via CallGraphBuilder.build)', () => 
   });
 });
 
+describe('deeply-nested file does not silently drop its style (iterative walk)', () => {
+  it('tallies a file whose AST is far deeper than the JS stack, instead of overflowing', async () => {
+    // A valid, fast-parsing file that nests ~30k deep — well past the recursive-walk stack limit
+    // on any environment. Before the walk was made iterative this threw `RangeError: Maximum call
+    // stack size exceeded`, which `tallyStyle` swallowed, SILENTLY dropping the whole file's style
+    // (and doing so only on machines with a smaller stack — a determinism hole). The shallow lines
+    // carry real idioms that must still be counted.
+    const lines: string[] = [];
+    for (let i = 0; i < 15; i++) lines.push(`const handlerFn${i} = () => (cond ? 1 : 2);`);
+    lines.push('const deeplyNested = ' + '['.repeat(30000) + ']'.repeat(30000) + ';');
+    const content = lines.join('\n') + '\n';
+
+    const builder = new CallGraphBuilder();
+    const result = await builder.build([{ path: 'deep.ts', content, language: 'TypeScript' }]);
+
+    // The regression guard: the file's style is PRESENT, not silently absent.
+    const raw = result.styleByFile?.get('deep.ts');
+    expect(raw).toBeTruthy();
+    // And the shallow idioms were actually tallied through the deep tree.
+    expect(raw!.counters.binding?.const).toBeGreaterThanOrEqual(15);
+    const profile = rollupLanguage([raw!], 'TypeScript');
+    const b = profile.idioms.binding!;
+    expect('dominant' in b && b.dominant).toBe('const');
+    const c = profile.idioms.conditionalForm!;
+    expect('dominant' in c && c.dominant).toBe('ternary');
+  });
+});
+
 describe('evidence floor', () => {
   it('reports null below the fixed floor', () => {
     const raw: FileStyleRaw = {
