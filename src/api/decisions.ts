@@ -16,7 +16,7 @@ import {
 import { fileExists } from '../utils/command-helpers.js';
 import { readOpenLoreConfig } from '../core/services/config-manager.js';
 import { createLLMService } from '../core/services/llm-service.js';
-import { isGitRepository, getChangedFiles, getFileDiff, getCommitMessages, resolveBaseRef, buildSpecMap } from '../core/drift/index.js';
+import { isGitRepositoryRoot, getChangedFiles, getFileDiff, getCommitMessages, resolveBaseRef, buildSpecMap } from '../core/drift/index.js';
 import {
   loadDecisionStore,
   updateDecisionStore,
@@ -169,7 +169,10 @@ export async function openloreConsolidateDecisions(
   // Build combined diff + commit messages for verification
   let combinedDiff = '';
   let commitMessages = '';
-  if (await isGitRepository(rootPath)) {
+  // Root-only: getFileDiff below the repo root receives repo-root-relative paths as
+  // cwd-relative pathspecs and returns empty diffs, which would misclassify real
+  // decisions as phantom. Gate on the root to preserve the prior "skip git" behavior.
+  if (await isGitRepositoryRoot(rootPath)) {
     progress(onProgress, 'Building git diff', 'start');
     try {
       const baseRef = await resolveBaseRef(rootPath, options.baseRef ?? 'auto');

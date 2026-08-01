@@ -90,14 +90,21 @@ export async function handleBriefingSince(input: BriefingSinceInput): Promise<un
   let requestedRefUnresolved: boolean;
   let changedFiles: string[];
   try {
-    const { getChangedFiles, resolveBaseRefDisclosed } = await import('../../drift/git-diff.js');
+    const { getChangedFiles, resolveBaseRefDisclosed, getRepoPrefix, reframeRepoPath } = await import('../../drift/git-diff.js');
     const base = await resolveBaseRefDisclosed(absDir, baseRefInput);
     resolvedBase = base.resolved;
     requestedRefUnresolved = base.fellBack;
     const diff = await getChangedFiles({ rootPath: absDir, baseRef: resolvedBase, includeUnstaged: true });
+    // Below the repository root, git returns repo-root-relative paths while the call
+    // graph is analyzed-root-relative; re-frame so the changed-symbol join is correct
+    // (no-op at the root). Files outside the analyzed subtree are dropped.
+    const prefix = (await getRepoPrefix(absDir)) ?? '';
     // Production code files only — tests/config/generated are not "changes that matter"
     // to rank; they still drive the tests-to-run selection below.
-    changedFiles = diff.files.filter(f => !f.isTest).map(f => f.path);
+    changedFiles = diff.files
+      .filter(f => !f.isTest)
+      .map(f => reframeRepoPath(f.path, prefix))
+      .filter((p): p is string => p !== null);
   } catch (err) {
     return { error: `git diff failed (base ${baseRefInput}): ${err instanceof Error ? err.message : String(err)}` };
   }
@@ -126,11 +133,17 @@ export async function handleBriefingSince(input: BriefingSinceInput): Promise<un
   const labelsById = new Map(landmarks.map(l => [l.id, new Set(l.signals.map(s => s.label))]));
 
   // ── 4. Churn + history depth (reused change-coupling miner) ─────────────────
-  const coupling = await analyzeChangeCoupling(absDir);
+  // Mine churn strictly BEFORE the briefed range: passing the resolved base as the
+  // start ref logs from that commit and its ancestors, so commits INSIDE base..HEAD
+  // (the very change being briefed) never inflate `priorChurn`. Otherwise a dormant
+  // hub hammered within the briefed range reads medium/high volatility and has its own
+  // `surprising-change` tier withheld — the tier demoting itself as significance rises.
+  const coupling = await analyzeChangeCoupling(absDir, { startRef: resolvedBase });
   const churnByPath = new Map<string, number>();
   for (const [file, n] of coupling.churn) churnByPath.set(normPath(file), n);
   // "Rarely changed before" needs a non-degenerate history: a single (or zero)
-  // commit has no "before" to be rare within, so the surprise label is withheld.
+  // commit BEFORE the range has no "before" to be rare within, so the surprise label
+  // is withheld. commitsScanned now counts only the pre-base window (see startRef).
   const historyAvailable = coupling.stats.commitsScanned >= 2;
 
   const facts: ChangedSymbolFacts[] = changedSymbols.map(n => {

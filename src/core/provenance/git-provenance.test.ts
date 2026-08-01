@@ -5,7 +5,7 @@
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { extractProvenance, parsePrNumber, enrichWithGh } from './git-provenance.js';
@@ -112,5 +112,37 @@ describe('extractProvenance — graceful degradation', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('extractProvenance — below-root re-framing (fix-git-derived-signal-honesty)', () => {
+  let repo: string;
+
+  beforeAll(() => {
+    repo = mkdtempSync(join(tmpdir(), 'prov-subdir-'));
+    git(repo, ['init', '-q', '-b', 'main']);
+    git(repo, ['config', 'user.name', 'Test']);
+    git(repo, ['config', 'user.email', 'test@example.com']);
+    git(repo, ['config', 'commit.gpgsign', 'false']);
+    mkdirSync(join(repo, 'packages', 'foo'), { recursive: true });
+    commit(repo, 'packages/foo/x.ts', 'x1\n', 'feat: x (#11)', ALICE);
+    commit(repo, 'root.ts', 'r1\n', 'feat: root (#22)', BOB);
+  });
+  afterAll(() => rmSync(repo, { recursive: true, force: true }));
+
+  it('matches analyzed-root-relative files against re-framed git paths below the repo root', async () => {
+    const sub = join(repo, 'packages', 'foo');
+    // The caller passes analyzed-root-relative paths (as the call graph stores them).
+    const prov = await extractProvenance(sub, ['x.ts'], { useGh: false });
+    expect(prov).toHaveLength(1);
+    expect(prov[0].filePath).toBe('x.ts'); // re-framed, not 'packages/foo/x.ts'
+    expect(prov[0].lastAuthor.name).toBe('Alice');
+    expect(prov[0].prs.map(p => p.number)).toContain(11);
+  });
+
+  it('at the repo root, paths stay repo-root-relative (unchanged behavior)', async () => {
+    const prov = await extractProvenance(repo, ['packages/foo/x.ts'], { useGh: false });
+    expect(prov).toHaveLength(1);
+    expect(prov[0].filePath).toBe('packages/foo/x.ts');
   });
 });

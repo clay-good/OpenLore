@@ -6,8 +6,7 @@
  */
 
 import { execFile } from 'node:child_process';
-import { access } from 'node:fs/promises';
-import { join, extname, basename } from 'node:path';
+import { extname, basename } from 'node:path';
 import { promisify } from 'node:util';
 import type { ChangedFile } from '../../types/index.js';
 import { logger } from '../../utils/logger.js';
@@ -127,15 +126,77 @@ export function isSkippableFile(filePath: string): boolean {
 // ============================================================================
 
 /**
- * Check if the given path is a git repository
+ * Check whether `rootPath` is inside a git work tree.
+ *
+ * Asks git (`rev-parse --is-inside-work-tree`) rather than testing for a `.git`
+ * entry at `rootPath`. The old `access(rootPath/.git)` test recognized only the
+ * repository ROOT: a monorepo package directory (`repo/packages/foo`) failed it and
+ * every git-derived signal (churn, coupling, provenance, structural diff) silently
+ * went empty there, even though every git shell-out with that cwd succeeds.
+ * `--is-inside-work-tree` is true for the root, any subdirectory, a worktree, and a
+ * submodule checkout alike; it is false inside the `.git` directory and outside any
+ * repository. (Worktrees/submodules previously passed only incidentally because
+ * their `.git` is a file.)
  */
 export async function isGitRepository(rootPath: string): Promise<boolean> {
   try {
-    await access(join(rootPath, '.git'));
-    return true;
+    const { stdout } = await execFileAsync('git', ['rev-parse', '--is-inside-work-tree'], { cwd: rootPath });
+    return stdout.trim() === 'true';
   } catch {
     return false;
   }
+}
+
+/**
+ * Check whether `rootPath` is the ROOT of a git work tree (not a subdirectory of one).
+ *
+ * True iff {@link getRepoPrefix} is the empty string — i.e. inside a work tree AND at
+ * its top level. This is behaviorally identical to the pre-work-tree-aware
+ * `access(rootPath/.git)` test across every case (normal root, worktree/submodule
+ * root where `.git` is a file, subdirectory, `.git` dir, bare repo, non-repo), so it
+ * is the drop-in for git-signal callers that JOIN git's repo-root-relative path output
+ * against analyzed-root-relative data and are therefore only correct when the analyzed
+ * root IS the repository root (drift, decisions, staleness, review). Below-root support
+ * for those flows is out of scope for this change; pinning them here preserves their
+ * exact prior "root-only" behavior instead of silently joining mismatched path frames.
+ */
+export async function isGitRepositoryRoot(rootPath: string): Promise<boolean> {
+  return (await getRepoPrefix(rootPath)) === '';
+}
+
+/**
+ * The repo-root → analyzed-root path prefix, for re-framing git's path-list output.
+ *
+ * Git emits `diff`/`log --name-only` paths relative to the REPOSITORY ROOT
+ * regardless of cwd, while the analyzer's node paths are relative to the analyzed
+ * root. At the repo root the two agree; below it they diverge, so every churn /
+ * provenance / diff join must translate between them. Returns:
+ *   - `''` when `rootPath` IS the repository root (re-framing is a no-op),
+ *   - `'packages/foo/'` (trailing slash) when `rootPath` is a subdirectory,
+ *   - `null` when `rootPath` is not inside a work tree.
+ */
+export async function getRepoPrefix(rootPath: string): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync('git', ['rev-parse', '--show-prefix'], { cwd: rootPath });
+    // --show-prefix ends with a newline (and '' at the root); strip line endings only.
+    return stdout.replace(/\r?\n/g, '');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Re-frame one repo-root-relative git path to be relative to the analyzed root,
+ * given a {@link getRepoPrefix} value. Returns `null` for a path OUTSIDE the analyzed
+ * subtree (the caller drops it) or for the analyzed directory itself. With an empty
+ * prefix (the repo root) it is the identity — so callers that re-frame unconditionally
+ * are byte-for-byte unchanged at the root.
+ */
+export function reframeRepoPath(repoRelPath: string, prefix: string): string | null {
+  if (!prefix) return repoRelPath;
+  if (!repoRelPath.startsWith(prefix)) return null;
+  const reframed = repoRelPath.slice(prefix.length);
+  return reframed.length > 0 ? reframed : null;
 }
 
 /**

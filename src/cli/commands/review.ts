@@ -28,7 +28,7 @@ import { readOpenLoreConfig } from '../../core/services/config-manager.js';
 import { writeStdout } from '../output.js';
 import { computeBlastRadius, type BlastRadiusBriefing } from '../../core/services/mcp-handlers/blast-radius.js';
 import { handleStructuralDiff } from '../../core/services/mcp-handlers/structural-diff.js';
-import { isGitRepository } from '../../core/drift/git-diff.js';
+import { isGitRepositoryRoot } from '../../core/drift/git-diff.js';
 import type { BlastRadiusBlockPattern } from '../../types/index.js';
 import { triggeredBlockPatterns } from './blast-radius.js';
 
@@ -441,8 +441,11 @@ export const reviewCommand = new Command('review')
     // A non-git directory cannot produce a review at all — say so cleanly on stderr
     // (exit 0, advisory) so stdout stays empty rather than carrying a marker-less,
     // non-markdown line that a `review > out.md` consumer would capture.
-    if (!(await isGitRepository(process.cwd()).catch(() => false))) {
-      process.stderr.write('[warn] openlore review: not a git repository — nothing to compare. Run inside a git repo.\n');
+    // Root-only: review composes blast_radius/structural_diff, whose working-tree
+    // path joins are correct only at the repository root; below-root it refuses
+    // rather than emit an inconsistent (partly disclosed, partly over-seeded) review.
+    if (!(await isGitRepositoryRoot(process.cwd()).catch(() => false))) {
+      process.stderr.write('[warn] openlore review: not a git repository (or not at its root) — nothing to compare. Run at the repository root.\n');
       process.exit(0);
     }
     const code = await runReviewCli({

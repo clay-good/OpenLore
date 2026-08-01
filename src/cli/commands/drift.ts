@@ -28,7 +28,7 @@ import { readOpenLoreConfig } from '../../core/services/config-manager.js';
 import {
   getChangedFiles,
   resolveBaseRefDisclosed,
-  isGitRepository,
+  isGitRepositoryRoot,
   buildSpecMap,
   buildADRMap,
   detectDrift,
@@ -395,9 +395,11 @@ Pre-commit hook:
         logger.section('Spec Drift Detection');
       }
 
-      // Check git repo
-      if (!(await isGitRepository(rootPath))) {
-        logger.error('Not a git repository. Drift detection requires git.');
+      // Check git repo. Root-only (see api/drift.ts): drift joins repo-root-relative
+      // git paths against the analyzed-root spec map, so it runs only at the repo root;
+      // below-root it refuses rather than silently join mismatched path frames.
+      if (!(await isGitRepositoryRoot(rootPath))) {
+        logger.error('Not a git repository (or not at its root). Drift detection requires git and must run at the repository root.');
         process.exitCode = 1;
         return;
       }

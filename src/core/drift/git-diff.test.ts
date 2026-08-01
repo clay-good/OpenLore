@@ -4,10 +4,10 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { classifyFile, isSkippableFile, validateGitRef,
-  isGitRepository, getCurrentBranch, resolveBaseRef, refExists,
+  isGitRepository, isGitRepositoryRoot, getRepoPrefix, reframeRepoPath, getCurrentBranch, resolveBaseRef, refExists,
   resolveBaseRefDisclosed, getFileDiff, getChangedFiles } from './git-diff.js';
 import { execFile } from 'node:child_process';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -266,6 +266,129 @@ describe('isGitRepository', () => {
   it('returns true for a git repository', async () => {
     await initRepo(tmpDir);
     expect(await isGitRepository(tmpDir)).toBe(true);
+  });
+
+  // fix-git-derived-signal-honesty: work-tree-aware detection. The old access(.git)
+  // test recognized only the repo ROOT, silently emptying every git-derived signal
+  // for a monorepo package directory.
+  it('returns true for a subdirectory of a repository (monorepo package)', async () => {
+    await initRepo(tmpDir);
+    const pkg = join(tmpDir, 'packages', 'foo');
+    await mkdir(pkg, { recursive: true });
+    await writeFile(join(pkg, 'x.ts'), 'export const x = 1;');
+    await commit(tmpDir);
+    expect(await isGitRepository(pkg)).toBe(true);
+  });
+
+  it('returns false inside the .git directory (not a work tree)', async () => {
+    await initRepo(tmpDir);
+    await writeFile(join(tmpDir, 'a.ts'), 'export const a = 1;');
+    await commit(tmpDir);
+    // .git exists after init but is not itself a work tree.
+    expect(await isGitRepository(join(tmpDir, '.git'))).toBe(false);
+  });
+
+  it('returns true for a linked worktree (where .git is a file)', async () => {
+    await initRepo(tmpDir);
+    await writeFile(join(tmpDir, 'a.ts'), 'export const a = 1;');
+    await commit(tmpDir);
+    const wt = await mkdtemp(join(tmpdir(), 'openlore-worktree-'));
+    await rm(wt, { recursive: true, force: true }); // git worktree add wants a non-existent path
+    await execFileAsync('git', ['worktree', 'add', wt], { cwd: tmpDir });
+    try {
+      expect(await isGitRepository(wt)).toBe(true);
+    } finally {
+      await execFileAsync('git', ['worktree', 'remove', '--force', wt], { cwd: tmpDir }).catch(() => {});
+      await rm(wt, { recursive: true, force: true });
+    }
+  });
+});
+
+// ============================================================================
+// getRepoPrefix / reframeRepoPath (below-root path re-framing)
+// ============================================================================
+
+describe('getRepoPrefix', () => {
+  let tmpDir: string;
+  beforeEach(async () => { tmpDir = await mkdtemp(join(tmpdir(), 'openlore-prefix-')); });
+  afterEach(async () => { await rm(tmpDir, { recursive: true, force: true }); });
+
+  it('is empty at the repository root', async () => {
+    await initRepo(tmpDir);
+    expect(await getRepoPrefix(tmpDir)).toBe('');
+  });
+
+  it('is the trailing-slash path from the repo root for a subdirectory', async () => {
+    await initRepo(tmpDir);
+    const pkg = join(tmpDir, 'packages', 'foo');
+    await mkdir(pkg, { recursive: true });
+    await writeFile(join(pkg, 'x.ts'), 'export const x = 1;');
+    await commit(tmpDir);
+    expect(await getRepoPrefix(pkg)).toBe('packages/foo/');
+  });
+
+  it('is null outside any repository', async () => {
+    expect(await getRepoPrefix(tmpDir)).toBeNull();
+  });
+});
+
+describe('isGitRepositoryRoot', () => {
+  let tmpDir: string;
+  beforeEach(async () => { tmpDir = await mkdtemp(join(tmpdir(), 'openlore-reporoot-')); });
+  afterEach(async () => { await rm(tmpDir, { recursive: true, force: true }); });
+
+  // Root-only gate for path-frame-sensitive callers (drift, decisions, staleness):
+  // behaviorally identical to the old access(.git) test — true only AT the repo root.
+  it('is true at the repository root', async () => {
+    await initRepo(tmpDir);
+    expect(await isGitRepositoryRoot(tmpDir)).toBe(true);
+  });
+
+  it('is false in a subdirectory (unlike isGitRepository, which is true there)', async () => {
+    await initRepo(tmpDir);
+    const pkg = join(tmpDir, 'packages', 'foo');
+    await mkdir(pkg, { recursive: true });
+    await writeFile(join(pkg, 'x.ts'), 'export const x = 1;');
+    await commit(tmpDir);
+    expect(await isGitRepository(pkg)).toBe(true);      // work-tree-aware
+    expect(await isGitRepositoryRoot(pkg)).toBe(false); // but not the root
+  });
+
+  it('is false outside any repository', async () => {
+    expect(await isGitRepositoryRoot(tmpDir)).toBe(false);
+  });
+
+  it('is true at a linked worktree root (.git is a file)', async () => {
+    await initRepo(tmpDir);
+    await writeFile(join(tmpDir, 'a.ts'), 'export const a = 1;');
+    await commit(tmpDir);
+    const wt = await mkdtemp(join(tmpdir(), 'openlore-reporoot-wt-'));
+    await rm(wt, { recursive: true, force: true });
+    await execFileAsync('git', ['worktree', 'add', wt], { cwd: tmpDir });
+    try {
+      expect(await isGitRepositoryRoot(wt)).toBe(true);
+    } finally {
+      await execFileAsync('git', ['worktree', 'remove', '--force', wt], { cwd: tmpDir }).catch(() => {});
+      await rm(wt, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('reframeRepoPath', () => {
+  it('is the identity at the repository root (empty prefix)', () => {
+    expect(reframeRepoPath('src/x.ts', '')).toBe('src/x.ts');
+  });
+
+  it('strips the prefix for a path inside the analyzed subtree', () => {
+    expect(reframeRepoPath('packages/foo/src/x.ts', 'packages/foo/')).toBe('src/x.ts');
+  });
+
+  it('returns null for a path outside the analyzed subtree', () => {
+    expect(reframeRepoPath('packages/bar/src/y.ts', 'packages/foo/')).toBeNull();
+  });
+
+  it('returns null for the analyzed directory itself (no file component)', () => {
+    expect(reframeRepoPath('packages/foo', 'packages/foo/')).toBeNull();
   });
 });
 

@@ -133,6 +133,22 @@ describe('handleStructuralDiff', () => {
     expect(r.summary.addedFunctions).toBe(0);
     expect(r.summary.removedFunctions).toBe(0);
   });
+
+  // fix-git-derived-signal-honesty: a below-root directory is inside a real repo, so
+  // structural_diff must NOT refuse it as "Not a git repository"; instead it discloses
+  // the below-root boundary rather than returning a confident empty delta.
+  it('discloses the below-root boundary instead of refusing a real repository', async () => {
+    const pkg = join(repo, 'packages', 'foo');
+    write(pkg, 'lib.ts', 'export function q(): number { return 1; }\n');
+    git(repo, ['add', '.']); git(repo, ['commit', '-q', '-m', 'add pkg', '--no-gpg-sign']);
+    const r = await handleStructuralDiff({ directory: pkg, baseRef: 'HEAD' }) as {
+      error?: string; boundary?: { belowRepoRoot: boolean; prefix: string };
+    };
+    expect(r.error).not.toMatch(/Not a git repository/i);
+    expect(r.error).toMatch(/below the repository root/i);
+    expect(r.boundary).toMatchObject({ belowRepoRoot: true });
+    expect(r.boundary?.prefix).toBe('packages/foo/');
+  });
 });
 
 // ── Rename-stable matching via content-addressed stable id ─────────────────────
