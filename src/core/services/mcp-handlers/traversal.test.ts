@@ -71,7 +71,7 @@ describe('persisted traversal structure', () => {
   it('is written by the analyze path and then served for that generation', async () => {
     const cg = graph(GEN_A);
     const contextJson = JSON.stringify({ callGraph: cg });
-    await writeTraversalIndexArtifact(analysisDir, cg, contextJson);
+    await writeTraversalIndexArtifact(analysisDir, cg, artifactDigest(contextJson));
     expect(existsSync(indexPath())).toBe(true);
 
     recordArtifactDigest(cg, artifactDigest(contextJson));
@@ -84,7 +84,7 @@ describe('persisted traversal structure', () => {
     // rewriting it. This is exactly the "external analyze under a warm daemon" case:
     // the on-disk structure now describes a graph that is no longer being served.
     const cgA = graph(GEN_A);
-    await writeTraversalIndexArtifact(analysisDir, cgA, JSON.stringify({ callGraph: cgA }));
+    await writeTraversalIndexArtifact(analysisDir, cgA, artifactDigest(JSON.stringify({ callGraph: cgA })));
     const staleOnDisk = readFileSync(indexPath(), 'utf-8');
 
     const cgB = graph(GEN_B);

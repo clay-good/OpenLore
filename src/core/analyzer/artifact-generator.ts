@@ -9,6 +9,7 @@ import { mkdir, readFile } from 'node:fs/promises';
 import { join, basename, isAbsolute } from 'node:path';
 import { createHash } from 'node:crypto';
 import { atomicWriteFile } from '../decisions/atomic-store.js';
+import { writeJsonAtomicStreaming } from './json-stream.js';
 import { withAnalysisLock } from '../decisions/lock.js';
 import {
   TOKENS_PER_CHAR_DEFAULT,
@@ -425,7 +426,16 @@ export class AnalysisArtifactGenerator {
       // Strip the CFG/def-use overlay before persisting: it is DB-only and must
       // never enter the resident llm-context.json or the hot cache (spec:
       // add-intraprocedural-cfg-dataflow-overlay).
-      const contextJson = JSON.stringify({ ...artifacts.llmContext, cfgs: undefined }, null, 2);
+      // Streamed, never materialized as one string: `JSON.stringify` caps at V8's 536,870,888-char
+      // string ceiling and throws `RangeError: Invalid string length` past it, which failed the
+      // whole analysis on a large repository after all the work was already done (see
+      // `json-stream.ts`). The digest comes back from the writer so the traversal index can still be
+      // stamped with the exact bytes without anyone holding them.
+      const contextPath = join(this.options.outputDir, ARTIFACT_LLM_CONTEXT);
+      const contextDigest = await writeJsonAtomicStreaming(
+        contextPath,
+        { ...artifacts.llmContext, cfgs: undefined }
+      );
 
       // Save each artifact
       const saves: Promise<void>[] = [
@@ -440,10 +450,6 @@ export class AnalysisArtifactGenerator {
         atomicWriteFile(
           join(this.options.outputDir, 'dependencies.mermaid'),
           artifacts.dependencyDiagram
-        ),
-        atomicWriteFile(
-          join(this.options.outputDir, ARTIFACT_LLM_CONTEXT),
-          contextJson
         ),
       ];
 
@@ -532,7 +538,7 @@ export class AnalysisArtifactGenerator {
         await writeTraversalIndexArtifact(
           this.options.outputDir,
           artifacts.llmContext.callGraph,
-          contextJson,
+          contextDigest,
         ).catch(() => {});
       }
     });
@@ -792,7 +798,10 @@ export class AnalysisArtifactGenerator {
       });
     }
 
-    // Also consider clusters from dependency graph
+    // Also consider clusters from dependency graph. Indexed once for the same reason as the leaf
+    // lookup above: clusters cover nearly every node on a real repository, so `find` per id was
+    // O(files²) here too.
+    const clusterNodeById = new Map(depGraph.nodes.map(n => [n.id, n]));
     for (const cluster of depGraph.clusters) {
       const clusterName = this.normalizeDomainName(cluster.suggestedDomain);
 
@@ -804,7 +813,7 @@ export class AnalysisArtifactGenerator {
 
       // Get file details
       const files = cluster.files
-        .map(id => depGraph.nodes.find(n => n.id === id)?.file)
+        .map(id => clusterNodeById.get(id)?.file)
         .filter((f): f is ScoredFile => f !== undefined);
 
       if (files.length === 0) continue;
@@ -1257,8 +1266,11 @@ export class AnalysisArtifactGenerator {
 
     // Phase 3: Validation (random leaf nodes not in phase 2, excluding test files)
     const phase2Paths = new Set(phase2Files.map(f => f.path));
+    // Indexed, not scanned: `find` inside `map` is O(files²), and leaves are a large fraction of
+    // a real repository's nodes — 49s at 80,000 files, 8s at 39,000, against ~50ms either way.
+    const nodeById = new Map(depGraph.nodes.map(n => [n.id, n]));
     const leafFiles = depGraph.rankings.leafNodes
-      .map(id => depGraph.nodes.find(n => n.id === id)?.file)
+      .map(id => nodeById.get(id)?.file)
       .filter((f): f is ScoredFile => f !== undefined)
       .filter(f => !phase2Paths.has(f.path))
       .filter(f => !isTestFile(f.path));

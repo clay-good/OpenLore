@@ -9,6 +9,8 @@
 import { readFile } from 'node:fs/promises';
 import { dirname, join, resolve, extname } from 'node:path';
 
+import { buildLineIndex, lineFromIndex } from './line-index.js';
+
 // ============================================================================
 // TYPES
 // ============================================================================
@@ -121,10 +123,32 @@ function isBuiltinModule(source: string): boolean {
 }
 
 /**
- * Get line number for a match position in content
+ * Most recently indexed file, so the ~29 call sites below — spread across the per-language parse
+ * functions, several of which run over the SAME content — share one index instead of each
+ * rebuilding it.
+ *
+ * One entry is enough: parsing is per-file and sequential, so the hit rate is effectively total.
+ * It retains the last file's content and its newline offsets; both are bounded by one file (the
+ * scan already refuses anything over `SOURCE_SCAN_MAX_FILE_BYTES`), which is why this is a memo
+ * rather than an unbounded cache keyed by content.
+ */
+let _lastContent: string | undefined;
+let _lastLineIndex: number[] | undefined;
+
+/**
+ * Get line number for a match position in content.
+ *
+ * Was `content.substring(0, position).split('\n').length`, which copies the whole prefix and
+ * allocates an array of every line in it — per match. A file with many matches therefore paid its
+ * own length once per match, and on a 2 MB single-file fixture this one expression was 50% of the
+ * entire analyze run (see `line-index.ts`).
  */
 function getLineNumber(content: string, position: number): number {
-  return content.substring(0, position).split('\n').length;
+  if (_lastContent !== content) {
+    _lastContent = content;
+    _lastLineIndex = buildLineIndex(content);
+  }
+  return lineFromIndex(_lastLineIndex!, position);
 }
 
 /**

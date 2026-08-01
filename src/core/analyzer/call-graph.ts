@@ -386,6 +386,91 @@ async function getSwiftParser(): Promise<{ parser: Parser; lang: object } | null
  * callerId. Deterministic; a no-op when no bare id collides (the common case).
  * (change: add-stable-nested-function-identity.)
  */
+/**
+ * For every node, its immediate enclosing function — the smallest OTHER node strictly containing
+ * it (identical spans excluded: an `export function` wrapper and its inner declaration are the
+ * same logical function matched twice).
+ *
+ * Computed as one sweep with an ancestor stack rather than a scan per node. The scan it replaces
+ * was O(nodes) per colliding node, and the collision it fires on is completely ordinary — a
+ * wrapper and its inner declaration share an id, so in a file of plain `export function`s EVERY
+ * node collides and the scan runs for all of them. On a 2 MB single-file fixture (33,116
+ * functions) it was 24% of the entire analyze run, second only to the line-counting in
+ * `line-index.ts`.
+ *
+ * `sorted` must be ordered by (startIndex asc, endIndex desc) — outermost first — which is the
+ * order `ensureUniqueNodeIds` already needs for its own reasons. Under that order every node
+ * already on the stack starts at or before the current node, so containment reduces to comparing
+ * end offsets, and the stack stays a properly nested ancestor chain. The nearest entry that is not
+ * an identical span is therefore the smallest container.
+ *
+ * AST spans are properly nested — two distinct nodes cannot partially overlap — so "innermost
+ * ancestor" and "smallest container" are the same node. `call-graph-enclosing.test.ts` checks that
+ * against the brute-force definition directly, including on randomized nestings.
+ */
+function computeEnclosing(
+  sorted: FunctionNode[],
+  originalOrder: Map<FunctionNode, number>
+): Map<FunctionNode, FunctionNode | undefined> {
+  const result = new Map<FunctionNode, FunctionNode | undefined>();
+  const stack: FunctionNode[] = [];
+
+  for (const n of sorted) {
+    // Anything ending before n does not contain it, and — spans being nested — cannot contain
+    // anything after n either.
+    while (stack.length > 0 && stack[stack.length - 1].endIndex < n.endIndex) stack.pop();
+
+    let found: FunctionNode | undefined;
+    for (let i = stack.length - 1; i >= 0; i--) {
+      const m = stack[i];
+      if (m === n) continue;
+      if (m.startIndex === n.startIndex && m.endIndex === n.endIndex) continue; // same span, not a container
+      found = m;
+      // Twins over the SAME span are equally valid containers, and the definition breaks that tie
+      // by original array position — so the choice must not depend on how the sort happened to
+      // order them. Walk the rest of the identical run and take the earliest.
+      for (let j = i - 1; j >= 0; j--) {
+        const k = stack[j];
+        if (k.startIndex !== found.startIndex || k.endIndex !== found.endIndex) break;
+        if ((originalOrder.get(k) ?? 0) < (originalOrder.get(found) ?? 0)) found = k;
+      }
+      break;
+    }
+    result.set(n, found);
+    stack.push(n);
+  }
+
+  return result;
+}
+
+/** The definition {@link computeEnclosing} implements. Exported for its differential test only. */
+export function _enclosingByBruteForceForTesting(
+  nodes: FunctionNode[],
+  n: FunctionNode
+): FunctionNode | undefined {
+  let best: FunctionNode | undefined;
+  let bestSize = Infinity;
+  for (const m of nodes) {
+    if (m === n) continue;
+    const contains =
+      m.startIndex <= n.startIndex &&
+      n.endIndex <= m.endIndex &&
+      (m.startIndex !== n.startIndex || m.endIndex !== n.endIndex);
+    if (!contains) continue;
+    const size = m.endIndex - m.startIndex;
+    if (size < bestSize) { bestSize = size; best = m; }
+  }
+  return best;
+}
+
+/** Test-only access to the swept version, so the two can be diffed. */
+export function _computeEnclosingForTesting(
+  nodes: FunctionNode[]
+): Map<FunctionNode, FunctionNode | undefined> {
+  const sorted = [...nodes].sort((a, b) => a.startIndex - b.startIndex || b.endIndex - a.endIndex);
+  return computeEnclosing(sorted, new Map(nodes.map((n, i) => [n, i])));
+}
+
 function ensureUniqueNodeIds(nodes: FunctionNode[]): void {
   const counts = new Map<string, number>();
   for (const n of nodes) counts.set(n.id, (counts.get(n.id) ?? 0) + 1);
@@ -393,32 +478,17 @@ function ensureUniqueNodeIds(nodes: FunctionNode[]): void {
   for (const c of counts.values()) if (c > 1) { anyCollision = true; break; }
   if (!anyCollision) return;
 
-  // Immediate enclosing function node = the smallest OTHER node strictly containing n.
-  const enclosingOf = (n: FunctionNode): FunctionNode | undefined => {
-    let best: FunctionNode | undefined;
-    let bestSize = Infinity;
-    for (const m of nodes) {
-      if (m === n) continue;
-      const contains =
-        m.startIndex <= n.startIndex &&
-        n.endIndex <= m.endIndex &&
-        (m.startIndex !== n.startIndex || m.endIndex !== n.endIndex);
-      if (!contains) continue;
-      const size = m.endIndex - m.startIndex;
-      if (size < bestSize) { bestSize = size; best = m; }
-    }
-    return best;
-  };
-
   // Outermost→innermost AND document order for siblings: a container has a smaller (or
   // equal-start, larger) span, so it sorts first; same-scope twins keep source order.
   const order = [...nodes].sort(
     (a, b) => a.startIndex - b.startIndex || b.endIndex - a.endIndex,
   );
+
+  const enclosing = computeEnclosing(order, new Map(nodes.map((n, i) => [n, i])));
   const taken = new Set(nodes.map(n => n.id));
   for (const n of order) {
     if ((counts.get(n.id) ?? 0) < 2) continue; // bare id is unique — leave it
-    const m = enclosingOf(n);
+    const m = enclosing.get(n);
     // Skip a sibling collision (no container — an intentional collapse) AND a
     // same-id container, which is the SAME logical function matched twice: an
     // `export function` / decorated-definition wrapper byte-contains its inner
@@ -4653,6 +4723,14 @@ export class CallGraphBuilder {
     try {
       const filePaths = files.map(f => f.path);
       const { edges: httpEdges } = await extractAllHttpEdges(filePaths);
+      // Group once, then look up per edge. Rebuilt per edge this was an O(edges × nodes) scan.
+      const httpNodesByFile = new Map<string, FunctionNode[]>();
+      if (httpEdges.length > 0) {
+        for (const n of allNodes.values()) {
+          const list = httpNodesByFile.get(n.filePath);
+          if (list) list.push(n); else httpNodesByFile.set(n.filePath, [n]);
+        }
+      }
       for (const he of httpEdges) {
         // Find callee: the route handler function by name. Prefer the route's own
         // file (FastAPI/NestJS/Express register a route on the handler's file), but
@@ -4675,9 +4753,9 @@ export class CallGraphBuilder {
               for (let i = 0; i < he.call.line - 1 && i < lines.length; i++) {
                 offset += lines[i].length + 1;
               }
-              const candidates = Array.from(allNodes.values())
-                .filter(n => n.filePath === he.callerFile);
-              return findEnclosingFunction(candidates, offset);
+              // Grouped once outside the loop, like every sibling synthesis pass does. Building
+              // and scanning the whole node array PER EDGE cost 1.3s on a 250,000-node repository.
+              return findEnclosingFunction(httpNodesByFile.get(he.callerFile) ?? [], offset);
             })()
           : undefined;
         if (!callerNode) continue;
@@ -4908,10 +4986,12 @@ export class CallGraphBuilder {
         }
       }
 
+      // Deterministic order avoids oscillation. Computed ONCE: the loop mutates `label`, never
+      // `internalNodes`, so re-sorting per iteration produced an identical array 15 times over —
+      // 2.1s of it on a 250,000-node repository.
+      const order = [...internalNodes].sort((a, b) => a.id < b.id ? -1 : 1);
       for (let iter = 0; iter < 15; iter++) {
         let changed = false;
-        // Deterministic order each iteration (sorted) avoids oscillation
-        const order = [...internalNodes].sort((a, b) => a.id < b.id ? -1 : 1);
         for (const n of order) {
           const nbrs = neighbors.get(n.id)!;
           if (nbrs.length === 0) continue;

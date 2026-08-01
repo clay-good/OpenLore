@@ -808,11 +808,16 @@ export function serializeTraversalIndex(cg: SerializedCallGraph, contextDigest: 
 export async function writeTraversalIndexArtifact(
   outputDir: string,
   cg: SerializedCallGraph,
-  contextJson: string,
+  /**
+   * Digest of the `llm-context.json` bytes this structure accompanies. Takes the DIGEST rather than
+   * the JSON because that content is now streamed to disk and never exists as one string — it is
+   * too large to, on the repositories this matters for (see `json-stream.ts`).
+   */
+  contextDigest: string,
 ): Promise<void> {
   const path = join(outputDir, ARTIFACT_TRAVERSAL_INDEX);
   try {
-    await atomicWriteFile(path, serializeTraversalIndex(cg, artifactDigest(contextJson)));
+    await atomicWriteFile(path, serializeTraversalIndex(cg, contextDigest));
   } catch (err) {
     // The write is atomic, so a failure leaves the PREVIOUS generation's structure
     // on disk. Its digest can never match again, so it would sit there indefinitely

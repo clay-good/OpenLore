@@ -34,6 +34,18 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     mkdir:     vi.fn().mockResolvedValue(undefined),
     readFile:  vi.fn().mockResolvedValue('{}'),
     writeFile: vi.fn().mockResolvedValue(undefined),
+    // `mkdir` above is stubbed, so nothing real exists to open. These cover the streaming
+    // artifact writer (`json-stream.ts`), which writes via a temp file handle + rename rather
+    // than `writeFile` — without them analyze aborts at the artifact write and never reaches
+    // what these cases actually assert.
+    open: vi.fn().mockResolvedValue({
+      write: vi.fn().mockResolvedValue({ bytesWritten: 0 }),
+      writeFile: vi.fn().mockResolvedValue(undefined),
+      sync: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+    }),
+    rename: vi.fn().mockResolvedValue(undefined),
+    unlink: vi.fn().mockResolvedValue(undefined),
   };
 });
 

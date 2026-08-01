@@ -12,6 +12,7 @@
 
 import { createHash } from 'node:crypto';
 import type { CallGraphResult } from './call-graph.js';
+import { buildLineIndex, lineFromIndex } from './line-index.js';
 
 // ============================================================================
 // TYPES
@@ -258,7 +259,22 @@ function tokenize(normalizedText: string): string[] {
   return normalizedText.match(/\S+/g) ?? [];
 }
 
+/**
+ * How many shingle sets have been built. Exact, deterministic instrumentation for the one property
+ * that memory and timing can only measure flakily: that a set is built for at most
+ * `MAX_NEAR_FUNCTIONS` bodies rather than for every function in the repository.
+ */
+let _shingleBuilds = 0;
+
+/** Test-only: read and reset the shingle-construction counter. */
+export function _takeShingleBuildCountForTesting(): number {
+  const n = _shingleBuilds;
+  _shingleBuilds = 0;
+  return n;
+}
+
 function getShingles(tokens: string[], k = SHINGLE_SIZE): Set<string> {
+  _shingleBuilds++;
   const s = new Set<string>();
   for (let i = 0; i <= tokens.length - k; i++) {
     s.add(tokens.slice(i, i + k).join('\x00'));
@@ -277,16 +293,23 @@ function jaccard(a: Set<string>, b: Set<string>): number {
 // LINE NUMBER HELPERS
 // ============================================================================
 
-/** Compute 1-based line number of a byte offset in source text */
-function byteOffsetToLine(content: string, byteOffset: number): number {
-  // Count newlines before the offset
-  let line = 1;
-  const end = Math.min(byteOffset, content.length);
-  for (let i = 0; i < end; i++) {
-    if (content[i] === '\n') line++;
-  }
-  return line;
-}
+/**
+ * 1-based line number of a byte offset, via a per-file newline index.
+ *
+ * The obvious version counts newlines from index 0 on every call, which is O(offset) — and this is
+ * called twice per function, BEFORE the size filters, so the repository-wide cost is
+ * Σ(functions × file length). That is quadratic in exactly the wrong variable: a long file with
+ * many functions pays its own length once per function. Measured on microsoft/TypeScript, whose
+ * `checker.ts` alone is ~3 MB: 85.5s of pure line-counting, against 0.23s for this version — the
+ * same work, 371× less of it. A 17× growth in node count had produced a 170× growth in time.
+ *
+ * The index is built once per file and binary-searched. `MAX_NEAR_FUNCTIONS` bounds the O(n²)
+ * near-clone pass further down, and on a large repository that pass is skipped entirely — so the
+ * constant that looks like this file's safety valve was guarding the cheap path while this ran
+ * unbounded.
+ */
+// Both live in `line-index.ts` — the same quadratic line-counting appeared in the import
+// parser, where it was 50% of an entire analyze run on a large file.
 
 // ============================================================================
 // MAIN FUNCTION
@@ -308,18 +331,36 @@ export function detectDuplicates(
     instance: CloneInstance;
     t1Hash: string;
     t2Hash: string;
-    shingles: Set<string>;
+    /**
+     * Enough to rebuild the shingle set on demand. The set itself is NOT kept: it is read only by
+     * the near-clone pass, which is gated to at most `MAX_NEAR_FUNCTIONS` entries, so building one
+     * per function was pure waste on every repository above that gate — which is most of them.
+     * Measured on a 3,500-file repository: 1,270 MB of shingle strings, none of them ever read,
+     * and the peak of the entire analyze run.
+     */
+    startIndex: number;
+    endIndex: number;
+    language: string;
   }
 
   const entries: Entry[] = [];
+  // One newline index per FILE, not per function: the nodes of a file are visited together, and
+  // rebuilding it per node would restore the quadratic cost this replaced.
+  const lineIndexCache = new Map<string, number[]>();
 
   for (const node of callGraph.nodes.values()) {
     const content = fileContentMap.get(node.filePath);
     if (!content) continue;
 
+    let lineIndex = lineIndexCache.get(node.filePath);
+    if (lineIndex === undefined) {
+      lineIndex = buildLineIndex(content);
+      lineIndexCache.set(node.filePath, lineIndex);
+    }
+
     // Compute line numbers from byte offsets
-    const startLine = byteOffsetToLine(content, node.startIndex);
-    const endLine = byteOffsetToLine(content, node.endIndex);
+    const startLine = lineFromIndex(lineIndex, node.startIndex);
+    const endLine = lineFromIndex(lineIndex, node.endIndex);
     const lineCount = endLine - startLine + 1;
 
     if (lineCount < MIN_LINES) continue;
@@ -341,7 +382,9 @@ export function detectDuplicates(
       },
       t1Hash: sha16(t1),
       t2Hash: sha16(t2),
-      shingles: getShingles(tokens),
+      startIndex: node.startIndex,
+      endIndex: node.endIndex,
+      language: node.language,
     });
   }
 
@@ -396,6 +439,19 @@ export function detectDuplicates(
     .filter(e => !alreadyGrouped.has(e.origIdx));
 
   if (ungrouped.length >= 2 && ungrouped.length <= MAX_NEAR_FUNCTIONS) {
+    // Built HERE, for at most `MAX_NEAR_FUNCTIONS` bodies, rather than for every function during
+    // extraction. Recomputing costs one re-slice + normalize + tokenize per surviving entry, which
+    // is bounded and small; keeping them for everything was unbounded and, above this gate,
+    // entirely unused.
+    const shinglesOf = new Map<number, Set<string>>();
+    for (let i = 0; i < ungrouped.length; i++) {
+      const e = ungrouped[i];
+      const content = fileContentMap.get(e.instance.file);
+      shinglesOf.set(i, content === undefined
+        ? new Set<string>()
+        : getShingles(tokenize(normalizeType2(content.slice(e.startIndex, e.endIndex), e.language))));
+    }
+
     const nearGrouped = new Set<number>(); // indices into `ungrouped`
 
     for (let i = 0; i < ungrouped.length; i++) {
@@ -404,7 +460,7 @@ export function detectDuplicates(
 
       for (let j = i + 1; j < ungrouped.length; j++) {
         if (nearGrouped.has(j)) continue;
-        const sim = jaccard(ungrouped[i].shingles, ungrouped[j].shingles);
+        const sim = jaccard(shinglesOf.get(i)!, shinglesOf.get(j)!);
         if (sim >= NEAR_THRESHOLD) {
           group.push(j);
           nearGrouped.add(j);
@@ -420,7 +476,7 @@ export function detectDuplicates(
         let minSim = 1.0;
         for (let a = 0; a < group.length; a++) {
           for (let b = a + 1; b < group.length; b++) {
-            minSim = Math.min(minSim, jaccard(ungrouped[group[a]].shingles, ungrouped[group[b]].shingles));
+            minSim = Math.min(minSim, jaccard(shinglesOf.get(group[a])!, shinglesOf.get(group[b])!));
           }
         }
         const repIdx = group[0];
@@ -587,10 +643,19 @@ export function findClones(
   const fileContentMap = new Map(files.map(f => [f.path, f.content]));
   const matches: CloneMatch[] = [];
   let comparedAgainst = 0;
+  // Same per-file newline index as `detectDuplicates`. This path is an MCP tool (`find_clones`),
+  // so the cost was paid on EVERY request rather than once per analyze.
+  const lineIndexCache = new Map<string, number[]>();
 
   for (const node of nodes) {
     const content = fileContentMap.get(node.filePath);
     if (!content) continue;
+
+    let lineIndex = lineIndexCache.get(node.filePath);
+    if (lineIndex === undefined) {
+      lineIndex = buildLineIndex(content);
+      lineIndexCache.set(node.filePath, lineIndex);
+    }
 
     // Skip the query's own instance (symbol mode) before any work or counting. Identity is the
     // file + byte range (collision-proof), never the name.
@@ -603,8 +668,8 @@ export function findClones(
       continue;
     }
 
-    const startLine = byteOffsetToLine(content, node.startIndex);
-    const endLine = byteOffsetToLine(content, node.endIndex);
+    const startLine = lineFromIndex(lineIndex, node.startIndex);
+    const endLine = lineFromIndex(lineIndex, node.endIndex);
     if (endLine - startLine + 1 < MIN_LINES) continue;
 
     const body = content.slice(node.startIndex, node.endIndex);

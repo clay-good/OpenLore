@@ -52,6 +52,7 @@ import {
   writeArchitectureMd,
 } from '../../core/analyzer/architecture-writer.js';
 import { generateCodebaseDigest } from '../../core/analyzer/codebase-digest.js';
+import { writeJsonAtomicStreaming } from '../../core/analyzer/json-stream.js';
 import { extractUIComponents } from '../../core/analyzer/ui-component-extractor.js';
 import { extractSchemas } from '../../core/analyzer/schema-extractor.js';
 import { buildRouteInventory } from '../../core/analyzer/http-route-parser.js';
@@ -322,11 +323,11 @@ export async function runAnalysis(
     logger.debug(`continuity carry-forward skipped: ${(err as Error).message}`);
   }
 
-  // Also save the raw dependency graph
-  await writeFile(
-    join(outputPath, ARTIFACT_DEPENDENCY_GRAPH),
-    JSON.stringify(depGraph, null, 2)
-  );
+  // Also save the raw dependency graph. Streamed for the same reason as `llm-context.json`: a
+  // whole-repository `JSON.stringify` hits V8's 536,870,888-char string ceiling and throws
+  // `RangeError: Invalid string length`, which failed the entire analysis at the very last step
+  // (see `json-stream.ts`). This one is also now atomic, which it was not before.
+  await writeJsonAtomicStreaming(join(outputPath, ARTIFACT_DEPENDENCY_GRAPH), depGraph);
 
   // Write the metadata fingerprint (path + mtime + size per source file — not file
   // bytes) so future runs can skip re-analysis when source files are unchanged

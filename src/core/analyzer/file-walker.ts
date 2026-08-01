@@ -5,9 +5,10 @@
  * Collects metadata about each file for significance scoring and analysis.
  */
 
-import { opendir, readFile, stat } from 'node:fs/promises';
+import { opendir, readFile, realpath, stat } from 'node:fs/promises';
 import { join, relative, basename, extname, dirname } from 'node:path';
 import ignoreModule from 'ignore';
+import { isConfinedPath } from '../../utils/path-confinement.js';
 import { DEFAULT_MAX_FILES, OPENLORE_DIR, OPENSPEC_DIR } from '../../constants.js';
 // `ignore` ships as CJS with `module.exports = ignore` plus a self-referencing
 // `.default`, and which of the two an interop path hands back varies. The runtime
@@ -410,6 +411,12 @@ export class FileWalker {
   /**
    * Record a skipped file with reason
    */
+  /** Real paths of directories already walked — stops a symlink cycle from walking forever. */
+  private readonly visitedRealDirs = new Set<string>();
+
+  /** The root, resolved, so confinement compares like with like when the root itself is a link. */
+  private realRootPath = '';
+
   private recordSkip(reason: string): void {
     this.skippedCount++;
     this.skippedReasons[reason] = (this.skippedReasons[reason] ?? 0) + 1;
@@ -504,11 +511,35 @@ export class FileWalker {
       const entries: { name: string; isDirectory: boolean; isFile: boolean }[] = [];
 
       for await (const entry of dir) {
-        entries.push({
-          name: entry.name,
-          isDirectory: entry.isDirectory(),
-          isFile: entry.isFile(),
-        });
+        // A `Dirent` does NOT follow symlinks, so a symlink reports false for BOTH `isDirectory`
+        // and `isFile` — it fell out of both lists below and was dropped with no `recordSkip` at
+        // all. A repository laid out as `src -> packages/app/src` (pnpm and lerna workspaces, or
+        // any shared checkout) was therefore analyzed as though `src` did not exist, and reported
+        // success: "Files analyzed: 5", a green `doctor`, and `orient` confidently answering about
+        // functions it had never opened. That is the failure this project's honesty contract
+        // exists to prevent — a path we could not look at, served as a path with nothing in it.
+        //
+        // Resolve the link and classify it by its TARGET. Escapes and loops are handled below;
+        // neither was previously possible only because nothing was followed.
+        let isDirectory = entry.isDirectory();
+        let isFile = entry.isFile();
+        if (!isDirectory && !isFile && entry.isSymbolicLink()) {
+          try {
+            const target = await stat(join(dirPath, entry.name));
+            isDirectory = target.isDirectory();
+            isFile = target.isFile();
+          } catch {
+            // Broken link, or a target we may not stat. Disclosed, not silently dropped.
+            this.recordSkip('symlink:unresolvable');
+            continue;
+          }
+          if (!isDirectory && !isFile) {
+            // A link to a FIFO, socket, or device. Nothing to analyze, but say so.
+            this.recordSkip('symlink:not-a-regular-file');
+            continue;
+          }
+        }
+        entries.push({ name: entry.name, isDirectory, isFile });
       }
 
       // Process directories first, then files
@@ -533,6 +564,33 @@ export class FileWalker {
           this.recordSkip('gitignore');
           continue;
         }
+
+        // Following symlinks makes two hazards reachable that could not occur while they were
+        // being dropped, so both are handled HERE rather than left to chance.
+        //
+        //  - A link may point outside the repository (`node_modules/x -> /usr/lib/...`). Indexing
+        //    that would put files the user never checked in into their graph.
+        //  - A link may point at an ancestor (`d/up -> ../..`), which walks forever.
+        //
+        // The real path answers both: confinement is checked against it, and a directory already
+        // visited under its real path is not walked twice. A hard-link cycle is impossible for
+        // directories, so real-path identity is sufficient.
+        let realSubPath: string;
+        try {
+          realSubPath = await realpath(subPath);
+        } catch {
+          this.recordSkip('symlink:unresolvable');
+          continue;
+        }
+        if (!isConfinedPath(this.realRootPath, realSubPath)) {
+          this.recordSkip('symlink:outside-root');
+          continue;
+        }
+        if (this.visitedRealDirs.has(realSubPath)) {
+          this.recordSkip('symlink:already-visited');
+          continue;
+        }
+        this.visitedRealDirs.add(realSubPath);
 
         await this.walkDirectory(subPath, depth + 1);
       }
@@ -605,6 +663,13 @@ export class FileWalker {
    * Walk the codebase and collect file metadata
    */
   async walk(): Promise<FileWalkerResult> {
+    // Resolve the root once. Confinement must compare real path against real path, or a repository
+    // whose own root is reached through a symlink would judge every one of its directories to be
+    // outside itself.
+    this.realRootPath = await realpath(this.rootPath).catch(() => this.rootPath);
+    this.visitedRealDirs.clear();
+    this.visitedRealDirs.add(this.realRootPath);
+
     // Load ignore patterns
     this.ig = await loadIgnorePatterns(this.rootPath);
 
