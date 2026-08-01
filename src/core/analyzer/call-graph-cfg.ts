@@ -12,6 +12,7 @@
  */
 
 import { buildFunctionCfg, type FunctionCfg, type CfgNode } from './cfg.js';
+import { isCfgOverlayShed } from './memory-strategy.js';
 
 /**
  * Build the per-function CFG + reaching-definitions overlay for one function
@@ -22,6 +23,15 @@ import { buildFunctionCfg, type FunctionCfg, type CfgNode } from './cfg.js';
  * returns undefined for unsupported languages or any analysis surprise.
  */
 export function buildCfgFor(fnNode: CfgNode, language: string): FunctionCfg | undefined {
+  // Graceful-degradation ladder tier 1 (change: make-analyze-scale-to-any-repo): when the
+  // pre-flight estimate says the overlay will not fit the heap, it is shed WHOLESALE — no CFG is
+  // built for any function, saving both its build cost and its resident size. Read from an env var
+  // (not a parameter) because this runs inside extraction worker threads that snapshot
+  // `process.env` at spawn time; the generator sets the flag around the whole build so workers and
+  // the serial lane see the same decision. `cfgs` then comes back empty and the reduction is
+  // disclosed — the base call graph is untouched, exactly as when a single overlay fails soft.
+  if (isCfgOverlayShed()) return undefined;
+
   // The overlay is strictly additive: a CFG-builder surprise (an unexpected
   // grammar shape, a partially-loaded optional grammar after the tree-sitter
   // deps became optional) must never propagate and drop the function's node/edge

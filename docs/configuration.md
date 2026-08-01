@@ -46,6 +46,10 @@
 | `OPENLORE_SKIP_POSTINSTALL` | -- | Suppress the post-install next-step hint |
 | `OPENLORE_NO_WORKERS` | `analyze` | Run per-file extraction on a single thread instead of the worker pool. Both lanes produce byte-identical analysis output, so this only costs wall-clock — set it to isolate a worker-related problem, or in an environment where extra threads are unwelcome |
 | `OPENLORE_NO_FACT_CACHE` | `analyze` | Re-extract every file instead of reusing the per-file extraction cache, exactly as `--force` does (and, like `--force`, the cache is refilled afterwards). Both lanes produce byte-identical analysis output, so this only costs wall-clock — reach for it when a CLI flag is not available, e.g. from an embedded caller |
+| `OPENLORE_NO_AUTO_HEAP` | CLI | Disable [adaptive heap sizing](#analyzing-at-any-repository-size) — the CLI runs at Node's default heap (or whatever you set) with no re-exec, exactly as before this feature existed |
+| `OPENLORE_HEAP_MB` | CLI | Force the analyzer's V8 old-space heap to this many MB (skips auto-detection). Equivalent to setting `--max-old-space-size` yourself, but as an env knob |
+| `OPENLORE_HEAP_FRACTION` | CLI | Fraction of available memory used for the heap when sizing automatically (default `0.75`) |
+| `OPENLORE_FORCE_MEMORY_TIER` | `analyze` | Force the [graceful-degradation tier](#analyzing-at-any-repository-size): `full`, `shed-overlay`, or `shed-overlay-and-deep-analysis`. Overrides the pre-flight estimate — for a memory-constrained CI job that wants reduced fidelity deterministically, or to reproduce the degraded path |
 
 > **The extraction cache costs disk.** `analyze` memoizes each file's extracted facts inside
 > `call-graph.db`, keyed by content hash, so a later run re-parses only what changed. It is
@@ -57,6 +61,20 @@
 > build cache.
 
 > The `EMBED_*` variables configure the **remote** embedding provider only. For on-device embeddings with no endpoint or key, run `openlore embed --local` (or set `embedding.provider: "local"` in `.openlore/config.json`). Keyword (BM25) search is the first-class default and needs none of these. See [docs/semantic-search.md](semantic-search.md#retrieval-modes) for the full embedding/retrieval-mode reference.
+
+### Analyzing at any repository size
+
+**The promise: `openlore analyze` works to your machine's capacity, degrades gracefully and transparently beyond it, and never crashes — with no flags and no attention.** Two mechanisms deliver that, both on by default:
+
+1. **Adaptive heap sizing.** A very large repository's call graph can outgrow Node's default V8 heap, and the old recourse was knowing to pass `--max-old-space-size` by hand. The CLI now sizes its own heap: at startup it re-executes itself **once** with a heap set to a generous fraction (`0.75`) of the memory *available to the process* — the container/cgroup limit when there is one (so a CI or container job sizes to its own limit, not the host's, and is not OOM-killed), otherwise host RAM. It is quiet and safe: at most once (a marker prevents any loop), skipped when you already set the heap (`--max-old-space-size` / `NODE_OPTIONS`) or opted out (`OPENLORE_NO_AUTO_HEAP`), transparent to piped output and the stdio MCP server (stdio is inherited untouched; the one-line heap disclosure goes to **stderr**, never stdout). Turn it off with `OPENLORE_NO_AUTO_HEAP=1`; pin an exact size with `OPENLORE_HEAP_MB`; change the fraction with `OPENLORE_HEAP_FRACTION`.
+
+2. **Graceful degradation, disclosed.** Before the heavy passes, the analyzer estimates the memory the graph will need from the repository's own size (file count + bytes). If even the largest sane heap will not hold full-fidelity analysis, it sheds the most expensive, least-essential work first — the **CFG/def-use overlay**, then **LLM deep-analysis breadth** — and still produces a usable index (call graph + search intact), rather than aborting with a raw out-of-memory fatal. Whatever it reduced is disclosed in `parse-health.json` (a `memoryDegradation` record) and in one CLI line, so a downstream conclusion reads reduced coverage as *reduced*, never as genuine structural absence.
+
+**Determinism is preserved.** Heap size and buffer-versus-spill choices never change the produced artifact: two full-fidelity runs of the same repository are byte-identical regardless of how much RAM each machine had. Only the degradation ladder reduces content, and only as a function of *declared* constraints (available memory, repository size) — disclosed and reproducible, never a silent machine-dependent difference between two "full" runs.
+
+**Embeddable API path.** The in-process API (`import { analyze } from 'openlore'`) cannot re-execute the host process, so it does **not** resize the heap — the host owns that (set `--max-old-space-size` on the host, or `OPENLORE_HEAP_MB`). The degradation ladder still applies within whatever heap the host provides, so an over-capacity repository degrades gracefully there too instead of crashing.
+
+**Not yet in scope:** an out-of-core (streaming) graph — a graph *larger than RAM*, persisted and never held whole. Adaptive heap plus graceful degradation cover the practical need; a genuine RAM-ceiling case at normal function density would earn its own proposal.
 
 ### Spec-store binding
 

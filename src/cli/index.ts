@@ -15,6 +15,12 @@
 // `openspec lore generate` under Node 20) gets one legible stderr line and a
 // stable exit code, never a stack trace. Keep this the first import.
 import './node-version-bootstrap.js';
+// Size the V8 heap to the machine BEFORE commander and the command modules load, so a large
+// repository analyzes with no `--max-old-space-size` flag (change: make-analyze-scale-to-any-repo).
+// Placed right after the Node-version guard: both are early import side effects, and a re-exec here
+// does essentially no wasted work before handing off to the larger-heap child. Fail-open and
+// at-most-once — see heap-sizing.ts.
+import './heap-bootstrap.js';
 import { allowInsecureTls } from '../core/services/tls-scope.js';
 
 import { Command } from 'commander';
