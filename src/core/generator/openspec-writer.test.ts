@@ -576,6 +576,35 @@ describe('Edge Cases', () => {
     expect(await fileExists(join(tempDir, 'openspec/specs/user-profile/spec.md'))).toBe(true);
   });
 
+  // Path-traversal confinement (GHSA-5j8x-q7q6-58j5; mcp-security: Write Confinement).
+  // `spec.path`'s domain segment derives from the Stage-3 LLM `domain` field over
+  // untrusted repo content, so a traversal value must never escape the project root.
+  it('refuses to write a spec whose path escapes the project root', async () => {
+    // Escape one level above tempDir (still inside the OS temp dir, so a regression
+    // would land here and be caught — not scattered across the filesystem).
+    const escapeDirName = `openlore-escape-proof-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const escaping: GeneratedSpec[] = [
+      {
+        path: `openspec/specs/../../../${escapeDirName}/spec.md`,
+        content: '# Escaped\n\n## Purpose\n\nShould never be written.',
+        domain: 'evil',
+        type: 'domain',
+      },
+    ];
+
+    const writer = new OpenSpecWriter({ rootPath: tempDir, updateConfig: false });
+    const report = await writer.writeSpecs(escaping, createMockSurvey());
+
+    // The escaping spec is refused, not silently written out of root.
+    expect(report.filesWritten).toHaveLength(0);
+    expect(report.warnings.some(w => /traversal|escape|outside/i.test(w))).toBe(true);
+
+    // And nothing landed outside the project root.
+    const outside = join(tmpdir(), escapeDirName, 'spec.md');
+    expect(await fileExists(outside)).toBe(false);
+    await rm(join(tmpdir(), escapeDirName), { recursive: true, force: true });
+  });
+
   it('should handle deeply nested paths', async () => {
     const specs: GeneratedSpec[] = [
       {

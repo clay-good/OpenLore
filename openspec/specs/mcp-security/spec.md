@@ -356,6 +356,33 @@ outside the project root.
 - **THEN** it is confined to (or rejected against) the project's `.openlore/`/`openspec/`
   trees, and nothing outside the root is created or modified
 
+### Requirement: Spec-Generation Writer Confines LLM-Derived Paths
+
+The spec-generation writer (`openlore generate`, `OpenSpecFormatGenerator` +
+`OpenSpecWriter`) is the one write path that intentionally puts an LLM in the loop, and
+the LLM is fed **raw content from the analyzed repository**. The domain segment of every
+generated spec path derives from the Stage-3 `domain` field the model returns over that
+untrusted content. That value SHALL be normalized to a safe, single-segment directory name
+before it becomes a path, and every spec write SHALL be confined to the validated project
+root through the shared `safeJoin` guard — the same guard the MCP, `serve`, and `view`
+surfaces already route through. A spec path that resolves outside the root SHALL be refused
+(that spec skipped with a warning), never written. This closes the exact "repo content
+redirects a write outside the project root" gap on the generation surface that this spec
+already hardens elsewhere.
+
+#### Scenario: A traversal domain cannot escape the root
+- **GIVEN** a Stage-3 service whose `domain` is a path-traversal string (e.g.
+  `../../../../tmp/x`)
+- **WHEN** the generator builds the spec path and the writer writes it
+- **THEN** the domain is normalized to a plain in-root directory name and the spec lands
+  under `openspec/specs/`, never outside the project root
+
+#### Scenario: An escaping spec path is refused, not written
+- **GIVEN** a generated spec whose `path` resolves outside the project root
+- **WHEN** the writer attempts to write it
+- **THEN** `safeJoin` rejects it, the spec is skipped with a warning, and nothing is
+  created outside the root
+
 ### Requirement: Capability Declaration and Accepted-Risk Register
 
 The server SHALL ship a machine-readable declaration of its security-relevant capabilities

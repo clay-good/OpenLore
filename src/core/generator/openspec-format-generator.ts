@@ -16,6 +16,7 @@ import type {
 } from './spec-pipeline.js';
 import type { DependencyGraphResult } from '../analyzer/dependency-graph.js';
 import type { MappingArtifact } from './mapping-generator.js';
+import { normalizeDomainName } from './openspec-compat.js';
 
 // ============================================================================
 // TYPES
@@ -559,10 +560,17 @@ export class OpenSpecFormatGenerator {
       lines.push(...depSection);
     }
 
+    // `domain.name` derives from the Stage-3 LLM `domain` field, which is fed raw
+    // repository content — an untrusted value. Route it through the same
+    // `normalizeDomainName` the writer already applies elsewhere (stale-dir cleanup,
+    // config metadata) so a traversal value like `../../../tmp/x` becomes a plain
+    // in-root directory segment and cannot redirect the write outside the project
+    // (GHSA-5j8x-q7q6-58j5). `.toLowerCase()` alone did not strip `/` or `..`.
+    const domainDir = normalizeDomainName(domain.name);
     return {
-      path: `openspec/specs/${domain.name.toLowerCase()}/spec.md`,
+      path: `openspec/specs/${domainDir}/spec.md`,
       content: lines.join('\n'),
-      domain: domain.name.toLowerCase(),
+      domain: domainDir,
       type: 'domain',
     };
   }
