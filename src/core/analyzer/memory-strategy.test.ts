@@ -18,18 +18,17 @@ import {
   resolveMemoryStrategy,
   isCfgOverlayShed,
   withCfgOverlayShed,
+  setWorkerCfgOverlayShed,
   formatBytes,
   MEMORY_TIERS,
   FULL_FIDELITY_HEAP_FRACTION,
   DEEP_ANALYSIS_SHED_HEAP_FRACTION,
   GRAPH_BYTES_BASE,
   FORCE_TIER_ENV,
-  SHED_CFG_OVERLAY_ENV,
 } from './memory-strategy.js';
 
 const ENV_KEYS = [
   FORCE_TIER_ENV,
-  SHED_CFG_OVERLAY_ENV,
   'OPENLORE_MEMORY_ESTIMATE_BYTES',
 ];
 const saved: Record<string, string | undefined> = {};
@@ -160,28 +159,58 @@ describe('resolveMemoryStrategy — forced-tier override', () => {
   });
 });
 
-describe('withCfgOverlayShed / isCfgOverlayShed — worker-visible flag', () => {
+describe('withCfgOverlayShed / isCfgOverlayShed — build-scoped shed flag', () => {
+  afterEach(() => setWorkerCfgOverlayShed(false));
+
   it('is off by default', () => {
     expect(isCfgOverlayShed()).toBe(false);
   });
 
-  it('sets the flag only within the wrapped build, then restores it', async () => {
+  it('sets the flag only within the wrapped build, then clears it', async () => {
     expect(isCfgOverlayShed()).toBe(false);
     let seenInside = false;
     await withCfgOverlayShed(true, async () => { seenInside = isCfgOverlayShed(); });
     expect(seenInside).toBe(true);
     expect(isCfgOverlayShed()).toBe(false);
-    expect(process.env[SHED_CFG_OVERLAY_ENV]).toBeUndefined();
   });
 
-  it('does not touch the flag when shed is false', async () => {
+  it('does not set the flag when shed is false', async () => {
     let seenInside = true;
     await withCfgOverlayShed(false, async () => { seenInside = isCfgOverlayShed(); });
     expect(seenInside).toBe(false);
   });
 
-  it('restores the flag even when the build throws', async () => {
+  it('clears the flag even when the build throws', async () => {
     await expect(withCfgOverlayShed(true, async () => { throw new Error('boom'); })).rejects.toThrow('boom');
+    expect(isCfgOverlayShed()).toBe(false);
+  });
+
+  it('is concurrency-safe: a full-fidelity build is NOT contaminated by a concurrent shedding build', async () => {
+    // The exact defect the async-context store replaced process.env to fix: two overlapping builds
+    // must see independent shed decisions, and the full-fidelity one must never observe the flag.
+    let fullSawShed = false;
+    let shedSawShed = false;
+    const full = withCfgOverlayShed(false, async () => {
+      await new Promise(r => setTimeout(r, 5));
+      fullSawShed = isCfgOverlayShed(); // must be false throughout
+    });
+    const shed = withCfgOverlayShed(true, async () => {
+      await new Promise(r => setTimeout(r, 2));
+      shedSawShed = isCfgOverlayShed(); // must be true throughout
+    });
+    await Promise.all([full, shed]);
+    expect(shedSawShed).toBe(true);
+    expect(fullSawShed).toBe(false);
+    expect(isCfgOverlayShed()).toBe(false); // nothing leaked past either build
+  });
+
+  it('reads the latched worker flag inside a worker isolate (no async store present)', () => {
+    // In a worker there is no withCfgOverlayShed store; the decision arrives via workerData and is
+    // latched by setWorkerCfgOverlayShed.
+    expect(isCfgOverlayShed()).toBe(false);
+    setWorkerCfgOverlayShed(true);
+    expect(isCfgOverlayShed()).toBe(true);
+    setWorkerCfgOverlayShed(false);
     expect(isCfgOverlayShed()).toBe(false);
   });
 });

@@ -28,27 +28,55 @@ import { spawnSync } from 'node:child_process';
 const MB = 1024 * 1024;
 
 /**
- * The commands whose heap is worth sizing — the ones that BUILD the call graph in-process
- * (`analyze` and the commands that run it) or HOLD it in memory to serve queries (`mcp`, `serve`).
- * Everything else (the `orient`/`search` query hot paths an agent drives constantly, `--version`,
- * `doctor`, …) reads bounded data and runs fine at the default heap, so it is NOT re-executed — an
- * extra process spawn on those would be pure latency, exactly the attention this feature removes.
+ * The commands whose heap is worth sizing — the FINITE, graph-building runs: `analyze` and the
+ * commands that run it in-process. Everything else (the `orient`/`search` query hot paths an agent
+ * drives constantly, `--version`, `doctor`, …) reads bounded data and runs fine at the default heap,
+ * so it is NOT re-executed — an extra process spawn on those would be pure latency, exactly the
+ * attention this feature removes.
+ *
+ * The long-lived daemons `mcp` and `serve` are deliberately EXCLUDED. Re-execution here is a
+ * blocking `spawnSync` supervisor, which cannot forward a signal to the child while it blocks; a
+ * directed `SIGTERM` to the supervisor (how a programmatic MCP host stops a stdio server) would
+ * orphan the real server holding the whole graph. A finite batch command's supervisor blocks only
+ * for the run and its child dies with the foreground process group, so the hazard is theirs alone.
+ * A daemon on a huge repo can still be given a heap the ordinary way (`--max-old-space-size` /
+ * `OPENLORE_HEAP_MB`), which this feature honors.
  *
  * An allowlist, not a denylist, on purpose: a command mistakenly omitted merely runs at the default
  * heap (today's behavior — no regression), whereas a hot path mistakenly INCLUDED would pay a second
  * process spawn on every call. The safe failure is "no improvement," never "slower."
  */
 export const HEAP_SIZED_COMMANDS: ReadonlySet<string> = new Set([
-  'analyze', 'install', 'prove', 'import', 'run', 'mcp', 'serve',
+  'analyze', 'install', 'prove', 'import', 'run',
 ]);
 
 /**
- * The subcommand from a raw argv (`[node, script, ...rest]`): the first token that is not a flag.
- * `undefined` for a bare `openlore` or a global-flag-only invocation (`openlore --version`).
+ * Top-level options that take a VALUE (see `src/cli/index.ts`). In the space-separated form
+ * (`--config prod.json`) the value is a non-dash token that must NOT be mistaken for the
+ * subcommand — otherwise `openlore --config prod.json analyze` would read `prod.json` as the
+ * command and silently skip heap sizing for a config-guarded analyze. The `=`-joined form
+ * (`--config=prod.json`) already starts with `-`, so only the space form needs this.
+ */
+const GLOBAL_VALUE_FLAGS: ReadonlySet<string> = new Set([
+  '--config', '--api-base', '--timeout',
+]);
+
+/**
+ * The subcommand from a raw argv (`[node, script, ...rest]`): the first token that is neither a
+ * flag nor the value of a global value-taking option. `undefined` for a bare `openlore` or a
+ * global-flag-only invocation (`openlore --version`).
  */
 export function commandFromArgv(argv: readonly string[]): string | undefined {
-  for (const token of argv.slice(2)) {
-    if (!token.startsWith('-')) return token;
+  const rest = argv.slice(2);
+  for (let i = 0; i < rest.length; i++) {
+    const token = rest[i];
+    if (token.startsWith('-')) {
+      // A space-separated global value-flag consumes the next token as its value — skip it so the
+      // value can never be read as the command.
+      if (GLOBAL_VALUE_FLAGS.has(token)) i++;
+      continue;
+    }
+    return token;
   }
   return undefined;
 }
@@ -127,11 +155,43 @@ function readFileSafe(path: string): string | null {
 }
 
 /**
+ * The effective cgroup v2 memory limit in bytes, walking the process's cgroup and its ancestors and
+ * taking the SMALLEST finite `memory.max`. The effective cap is the tightest limit anywhere up the
+ * hierarchy — with nested systemd slices the leaf often reads `max` while a parent slice carries the
+ * real cap — and reading only the leaf would miss it and size to host RAM, blowing the parent cap
+ * (which the kernel answers with SIGKILL, past the reach of the fail-open ladder). `undefined` when
+ * no ancestor sets a real limit. Bounded: the chain is a handful of directories.
+ */
+function readCgroupV2EffectiveLimitBytes(): number | undefined {
+  // `/proc/self/cgroup` under v2 is a single line `0::<path>`; that path is relative to the cgroup
+  // v2 mount root at `/sys/fs/cgroup`. Absent/non-Linux → no v2 limit.
+  const procCgroup = readFileSafe('/proc/self/cgroup');
+  const rootMax = parseCgroupV2Max(readFileSafe('/sys/fs/cgroup/memory.max'));
+  let best = rootMax;
+  if (procCgroup) {
+    const line = procCgroup.split('\n').find(l => l.startsWith('0::'));
+    const rel = line ? line.slice('0::'.length).trim() : '';
+    if (rel && rel !== '/') {
+      // Walk each ancestor directory from the root down to the leaf, min'ing every real limit.
+      const segments = rel.split('/').filter(Boolean);
+      let dir = '/sys/fs/cgroup';
+      for (const seg of segments) {
+        dir += `/${seg}`;
+        const limit = parseCgroupV2Max(readFileSafe(`${dir}/memory.max`));
+        if (limit !== undefined) best = best === undefined ? limit : Math.min(best, limit);
+      }
+    }
+  }
+  return best;
+}
+
+/**
  * The cgroup/container memory limit in bytes, or `undefined` when there is none (non-Linux, no
- * cgroup, or an "unlimited" limit). Reads cgroup v2 first, then v1.
+ * cgroup, or an "unlimited" limit). Reads cgroup v2 (walking the hierarchy for the tightest cap)
+ * first, then v1.
  */
 export function readCgroupMemoryLimitBytes(): number | undefined {
-  const v2 = parseCgroupV2Max(readFileSafe('/sys/fs/cgroup/memory.max'));
+  const v2 = readCgroupV2EffectiveLimitBytes();
   if (v2 !== undefined) return v2;
   return parseCgroupV1Limit(readFileSafe('/sys/fs/cgroup/memory/memory.limit_in_bytes'));
 }
@@ -308,8 +368,11 @@ export function maybeReexecForHeap(): void {
     }
     // Propagate a signal death faithfully; otherwise exit with the child's status.
     if (result.signal) {
+      // Re-raise so the parent dies the same way the child did, then exit as a guaranteed
+      // terminator: signal delivery is not synchronous, and control must NEVER return to index.ts
+      // (which would load commander and run the command a second time at the default heap).
       process.kill(process.pid, result.signal);
-      return;
+      process.exit(1);
     }
     process.exit(result.status ?? 0);
   } catch (err) {

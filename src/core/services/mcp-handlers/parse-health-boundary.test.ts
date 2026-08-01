@@ -65,6 +65,40 @@ describe('parseHealthBoundary', () => {
   });
 });
 
+describe('parseHealthBoundary surfaces a memory-pressure degradation (change: make-analyze-scale-to-any-repo)', () => {
+  const degraded: ParseHealthReport = {
+    version: 1, totalDegradedFiles: 0, totalErrorRegions: 0, byLanguage: [], topFiles: [], files: [],
+    memoryDegradation: {
+      tier: 'shed-overlay', shed: ['cfg-overlay'],
+      estimatedBytes: 3_000_000_000, availableHeapBytes: 2_000_000_000,
+    },
+  };
+
+  it('discloses the reduction even for a result that touched NO degraded per-file records', () => {
+    // The whole point: a shed overlay has zero per-file records, so the OLD boundary (per-file only)
+    // returned undefined and the reduction read as genuine absence. It must surface regardless.
+    const note = parseHealthBoundary(degraded, ['src/anything.ts'])!;
+    expect(note).toContain('Reduced under memory pressure');
+    expect(note).toContain('CFG/def-use overlay');
+    expect(note).toContain('LOWER BOUND');
+  });
+
+  it('surfaces it even with an EMPTY touched-file set', () => {
+    expect(parseHealthBoundary(degraded, [])).toContain('Reduced under memory pressure');
+  });
+
+  it('combines the per-file boundary AND the degradation when both apply', () => {
+    const both: ParseHealthReport = { ...degraded, files: REPORT.files, totalDegradedFiles: 2 };
+    const note = parseHealthBoundary(both, ['src/a.ts'])!;
+    expect(note).toContain('src/a.ts');            // per-file boundary
+    expect(note).toContain('Reduced under memory pressure'); // degradation boundary
+  });
+
+  it('is still undefined at full fidelity (no degradation, no touched degraded files)', () => {
+    expect(parseHealthBoundary(REPORT, ['src/clean.ts'])).toBeUndefined();
+  });
+});
+
 describe('boundary text names WHY a file was excluded (change: fix-analyze-native-abort-and-file-cost-budget)', () => {
   const report = (files: ParseHealthReport['files']): ParseHealthReport => ({
     version: 1, totalDegradedFiles: files.length, totalErrorRegions: 0, byLanguage: [], topFiles: files, files,

@@ -27,6 +27,7 @@
  */
 
 import { getHeapStatistics } from 'node:v8';
+import { AsyncLocalStorage } from 'node:async_hooks';
 
 // ============================================================================
 // TIERS
@@ -233,9 +234,6 @@ export interface MemoryStrategy {
 /** Environment override that forces a tier regardless of the estimate/heap (operator + tests). */
 export const FORCE_TIER_ENV = 'OPENLORE_FORCE_MEMORY_TIER';
 
-/** Internal flag, set around the call-graph build, that {@link isCfgOverlayShed} reads. */
-export const SHED_CFG_OVERLAY_ENV = 'OPENLORE_SHED_CFG_OVERLAY';
-
 /**
  * Resolve the memory strategy for a repository. Reads the forced-tier override first (an operator
  * knob and the deterministic hook the ladder is tested through); otherwise estimates from the
@@ -255,32 +253,46 @@ export function resolveMemoryStrategy(inputs: RepoSizeInputs): MemoryStrategy {
 }
 
 /**
- * True when the CFG/def-use overlay has been shed for THIS process. Read from an env var, not a
- * module variable, because the per-function overlay is built inside extraction WORKER THREADS,
- * which inherit `process.env` at creation — a module-level flag set on the main thread would never
- * reach them. The generator sets {@link SHED_CFG_OVERLAY_ENV} before it spawns the build and clears
- * it after (see `withCfgOverlayShed`), so the workers a build spawns see the same decision the main
- * thread's serial lane does.
+ * Main-thread channel for the overlay-shed decision: an async-context store, NOT a process global.
+ * The MCP server runs builds CONCURRENTLY (a background self-heal rebuild alongside a tool-call
+ * build), and a process-global flag shared between two overlapping builds corrupts and leaks —
+ * one build's cleanup clears the flag the other still needs, or leaves it set so a later
+ * full-fidelity build silently sheds with no disclosure. An `AsyncLocalStorage` gives each build
+ * its own value along its own async call chain, so concurrent builds never interfere and a
+ * full-fidelity build (no store) can never be contaminated by a concurrent shedding one.
  */
-export function isCfgOverlayShed(): boolean {
-  return process.env[SHED_CFG_OVERLAY_ENV] === '1';
+const cfgOverlayShedStore = new AsyncLocalStorage<boolean>();
+
+/**
+ * Worker-isolate channel. An extraction worker is a separate V8 isolate that cannot see the main
+ * thread's async store, so it receives the decision in `workerData` and latches it here at startup.
+ * A module flag is safe HERE precisely because a worker isolate serves exactly one build and one
+ * thread — none of the concurrency that makes a process-global unsafe on the main thread.
+ */
+let workerCfgOverlayShed = false;
+
+/** Worker-side: latch the shed decision passed in `workerData`. Called once at worker startup. */
+export function setWorkerCfgOverlayShed(shed: boolean): void {
+  workerCfgOverlayShed = shed;
 }
 
 /**
- * Run `fn` with the CFG-overlay-shed flag set when `shed` is true, restoring the prior value after.
- * The flag must be set for the WHOLE build (the workers snapshot `process.env` at spawn time), so
- * the generator wraps its entire call-graph build in this.
+ * True when the CFG/def-use overlay has been shed for the current build. On the main thread this is
+ * the async-context store (per build, concurrency-safe); inside an extraction worker it is the
+ * latched worker flag. `buildCfgFor` reads it and short-circuits.
  */
-export async function withCfgOverlayShed<T>(shed: boolean, fn: () => Promise<T>): Promise<T> {
-  if (!shed) return fn();
-  const previous = process.env[SHED_CFG_OVERLAY_ENV];
-  process.env[SHED_CFG_OVERLAY_ENV] = '1';
-  try {
-    return await fn();
-  } finally {
-    if (previous === undefined) delete process.env[SHED_CFG_OVERLAY_ENV];
-    else process.env[SHED_CFG_OVERLAY_ENV] = previous;
-  }
+export function isCfgOverlayShed(): boolean {
+  return cfgOverlayShedStore.getStore() === true || workerCfgOverlayShed;
+}
+
+/**
+ * Run the call-graph build `fn` with the overlay shed when `shed` is true. Binds an async-context
+ * store for the whole build so both the main-thread serial lane and — via `isCfgOverlayShed()` read
+ * at worker spawn and forwarded through `workerData` — the extraction workers see one consistent,
+ * build-scoped decision, with no shared mutable global to race across concurrent builds.
+ */
+export function withCfgOverlayShed<T>(shed: boolean, fn: () => Promise<T>): Promise<T> {
+  return shed ? cfgOverlayShedStore.run(true, fn) : fn();
 }
 
 // ============================================================================

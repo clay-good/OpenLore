@@ -30,6 +30,7 @@
 
 import { parentPort, workerData } from 'node:worker_threads';
 import { dispatchFileExtract } from './call-graph.js';
+import { setWorkerCfgOverlayShed } from './memory-strategy.js';
 import { logger } from '../../utils/logger.js';
 import { WORKER_FAULT_MESSAGE_PREFIX } from './extraction-pool.js';
 import type { ExtractionRequest, ExtractionResponse, ExtractionWorkerData } from './extraction-pool.js';
@@ -146,6 +147,11 @@ async function main(): Promise<void> {
   const data = workerData as ExtractionWorkerData | null;
   if (!parentPort || data?.openloreExtractionWorker !== true) return;
   relayLogging();
+
+  // Latch this build's overlay-shed decision (change: make-analyze-scale-to-any-repo). A worker
+  // isolate serves exactly one build, so a module flag is safe here; the main thread forwarded the
+  // decision through `workerData` because the worker cannot see its async-context store.
+  setWorkerCfgOverlayShed(data.skipCfgOverlay === true);
 
   const failure = await probeFailureReason(data.probeLanguage);
   if (failure) {

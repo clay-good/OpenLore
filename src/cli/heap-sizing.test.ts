@@ -88,14 +88,28 @@ describe('commandFromArgv + HEAP_SIZED_COMMANDS — the command gate', () => {
     expect(commandFromArgv(['node', '/cli.js'])).toBeUndefined();
     expect(commandFromArgv(['node', '/cli.js', '--version'])).toBeUndefined();
   });
-  it('sizes the graph-building/holding commands but NOT the query hot paths', () => {
+  it('skips the VALUE of a space-separated global value-option (does not read it as the command)', () => {
+    // The bug this guards: `openlore --config prod.json analyze` must detect `analyze`, not the path.
+    expect(commandFromArgv(['node', '/cli.js', '--config', 'prod.json', 'analyze'])).toBe('analyze');
+    expect(commandFromArgv(['node', '/cli.js', '--timeout', '120000', 'run'])).toBe('run');
+    expect(commandFromArgv(['node', '/cli.js', '--api-base', 'http://x', 'prove'])).toBe('prove');
+    // A config path literally named like a command must not misfire either.
+    expect(commandFromArgv(['node', '/cli.js', '--config', 'run', 'orient'])).toBe('orient');
+    // The `=`-joined form already starts with `-`, so it needs no special handling.
+    expect(commandFromArgv(['node', '/cli.js', '--config=prod.json', 'analyze'])).toBe('analyze');
+  });
+  it('sizes the finite graph-building commands but NOT the query hot paths or daemons', () => {
     expect(HEAP_SIZED_COMMANDS.has('analyze')).toBe(true);
     expect(HEAP_SIZED_COMMANDS.has('install')).toBe(true);
-    expect(HEAP_SIZED_COMMANDS.has('mcp')).toBe(true);
+    expect(HEAP_SIZED_COMMANDS.has('run')).toBe(true);
     // The agent hot path must never pay an extra process spawn.
     expect(HEAP_SIZED_COMMANDS.has('orient')).toBe(false);
     expect(HEAP_SIZED_COMMANDS.has('search')).toBe(false);
     expect(HEAP_SIZED_COMMANDS.has('doctor')).toBe(false);
+    // The long-lived daemons are excluded: a blocking spawnSync supervisor can't forward a directed
+    // signal, which would orphan the server. They size via --max-old-space-size / OPENLORE_HEAP_MB.
+    expect(HEAP_SIZED_COMMANDS.has('mcp')).toBe(false);
+    expect(HEAP_SIZED_COMMANDS.has('serve')).toBe(false);
   });
 });
 

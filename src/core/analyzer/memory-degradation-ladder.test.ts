@@ -9,9 +9,9 @@
  * shed, because shedding only removes the additive overlay, never the graph.
  */
 
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { CallGraphBuilder, serializeCallGraph } from './call-graph.js';
-import { withCfgOverlayShed, SHED_CFG_OVERLAY_ENV } from './memory-strategy.js';
+import { withCfgOverlayShed, isCfgOverlayShed } from './memory-strategy.js';
 
 const TS_SRC = `
 export function classify(n: number): string {
@@ -26,10 +26,6 @@ export function caller(n: number): string {
 
 const FILES = [{ path: 'a.ts', content: TS_SRC, language: 'TypeScript' }];
 
-afterEach(() => {
-  delete process.env[SHED_CFG_OVERLAY_ENV];
-});
-
 describe('degradation ladder — overlay shed', () => {
   it('builds a per-function overlay at full fidelity', async () => {
     const result = await new CallGraphBuilder().build(FILES);
@@ -40,7 +36,7 @@ describe('degradation ladder — overlay shed', () => {
     const result = await withCfgOverlayShed(true, () => new CallGraphBuilder().build(FILES));
     // Either an empty map or none at all — the point is zero CFGs were built.
     expect(result.cfgs ? result.cfgs.size : 0).toBe(0);
-    expect(process.env[SHED_CFG_OVERLAY_ENV]).toBeUndefined(); // restored after
+    expect(isCfgOverlayShed()).toBe(false); // build-scoped store cleared after
   });
 
   it('keeps the base call graph intact when the overlay is shed (still a usable index)', async () => {

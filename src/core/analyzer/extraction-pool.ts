@@ -47,6 +47,7 @@ import { dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Worker } from 'node:worker_threads';
+import { isCfgOverlayShed } from './memory-strategy.js';
 import {
   EXTRACTION_POOL_MAX,
   EXTRACTION_POOL_MIN_FILES,
@@ -190,6 +191,13 @@ export interface ExtractionWorkerData {
    * means no startup probe: the per-language unproven-silence guard still covers it.
    */
   probeLanguage?: string;
+  /**
+   * Whether this build has shed the CFG/def-use overlay under memory pressure (change:
+   * make-analyze-scale-to-any-repo). Read from the main thread's build-scoped decision at spawn and
+   * latched in the worker, since the worker isolate cannot see the main thread's async-context
+   * store. When true the worker builds no CFGs — the overlay is shed everywhere consistently.
+   */
+  skipCfgOverlay?: boolean;
 }
 
 /** Parent → worker. */
@@ -430,7 +438,14 @@ async function runSerial<T>(
 function createNodeWorker(entry: ResolvedWorkerEntry, probeLanguage?: string): ExtractionWorkerHandle {
   const worker = new Worker(entry.specifier, {
     ...(entry.execArgv ? { execArgv: entry.execArgv } : {}),
-    workerData: { openloreExtractionWorker: true, probeLanguage } satisfies ExtractionWorkerData,
+    // `isCfgOverlayShed()` is read HERE, on the main thread, inside the build's async-context store
+    // (the spawn happens within `withCfgOverlayShed(...)`), and forwarded so the worker builds no
+    // overlay when this build shed it (change: make-analyze-scale-to-any-repo).
+    workerData: {
+      openloreExtractionWorker: true,
+      probeLanguage,
+      skipCfgOverlay: isCfgOverlayShed(),
+    } satisfies ExtractionWorkerData,
     stdout: true,
   });
   worker.stdout.resume();
