@@ -34,6 +34,7 @@
     "bench:completion": "tsx scripts/bench-preset-completion.ts",
     "test": "vitest",
     "test:run": "vitest run",
+    "fuzz": "vitest run src/fuzz",
     "test:coverage": "vitest run --coverage",
     "test:openspec-compat": "vitest run --grep 'openspec' || echo 'No OpenSpec compat tests yet'",
     "test:e2e": "vitest run --config vitest.integration.config.ts --reporter=verbose",
