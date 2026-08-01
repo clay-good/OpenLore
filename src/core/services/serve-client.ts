@@ -13,7 +13,7 @@
 
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
-import { OPENLORE_DIR } from '../../constants.js';
+import { FULL_PRESET, OPENLORE_DIR } from '../../constants.js';
 import { readServeDescriptor, type ServeDescriptor } from '../../cli/commands/serve-descriptor.js';
 
 /** A resolved, reachable daemon. */
@@ -42,7 +42,10 @@ function descriptorPath(directory: string): string {
  * the daemon never starts. Keep this in lockstep with serve.ts's options.
  */
 export function serveSpawnArgs(directory: string): string[] {
-  return ['serve', '--directory', directory];
+  // This daemon is shared across clients whose advertised presets may differ.
+  // Keep the backing surface complete; each MCP session enforces its own preset
+  // before delegation, while direct HTTP callers remain bounded by this `full`.
+  return ['serve', '--directory', directory, '--preset', FULL_PRESET];
 }
 
 /**

@@ -40,12 +40,12 @@ const SRC = join(REPO_ROOT, 'src');
  * opt in, which is a behaviour change in its own right.
  */
 const EXEMPT: { file: string; line: number; why: string }[] = [
-  { file: 'src/core/services/serve-client.ts', line: 64, why: 'loopback http:// health probe' },
-  { file: 'src/core/services/serve-client.ts', line: 136, why: 'loopback http:// daemon call' },
+  { file: 'src/core/services/serve-client.ts', line: 67, why: 'loopback http:// health probe' },
+  { file: 'src/core/services/serve-client.ts', line: 139, why: 'loopback http:// daemon call' },
   { file: 'src/cli/commands/serve.ts', line: 188, why: 'loopback http:// health probe' },
-  { file: 'src/pi/extension.ts', line: 421, why: 'loopback http:// health probe' },
-  { file: 'src/pi/extension.ts', line: 470, why: 'loopback http:// daemon call' },
-  { file: 'src/pi/extension.ts', line: 1215, why: 'loopback http:// health probe' },
+  { file: 'src/pi/extension.ts', line: 425, why: 'loopback http:// health probe' },
+  { file: 'src/pi/extension.ts', line: 474, why: 'loopback http:// daemon call' },
+  { file: 'src/pi/extension.ts', line: 1219, why: 'loopback http:// health probe' },
   {
     file: 'src/pi/extension.ts',
     line: 166,

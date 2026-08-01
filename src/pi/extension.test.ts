@@ -3,9 +3,13 @@ import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { modelsUrl, stripMarker, isUsableConfig, readConfig, formatToolResult, formatCallArgs, NAV_TOOLS, PI_EXCLUDED_CONCLUSION_TOOLS } from './extension.js';
+import { modelsUrl, stripMarker, isUsableConfig, readConfig, formatToolResult, formatCallArgs, NAV_TOOLS, PI_DAEMON_PRESET, PI_EXCLUDED_CONCLUSION_TOOLS } from './extension.js';
 import { TOOL_DEFINITIONS } from '../cli/commands/mcp.js';
 import { TOOL_OUTPUT_CLASS } from '../core/services/mcp-handlers/tool-contract.js';
+
+it('spawns a full-surface daemon because Pi curates a wider native tool set itself', () => {
+  expect(PI_DAEMON_PRESET).toBe('full');
+});
 
 describe('modelsUrl', () => {
   it('appends /v1/models to a bare host', () => {

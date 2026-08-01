@@ -34,7 +34,7 @@ async function bootDaemon(): Promise<void> {
 describe('serve-client', () => {
   it('spawn args are accepted by the serve command (no rejected flags)', () => {
     const args = serveSpawnArgs('/some/dir');
-    expect(args).toEqual(['serve', '--directory', '/some/dir']);
+    expect(args).toEqual(['serve', '--directory', '/some/dir', '--preset', 'full']);
     // Regression guard: the daemon must accept exactly these. `serve` exposes
     // `--no-watch`, not `--watch`; commander rejects unknown options, which would
     // silently kill the spawned daemon. Parse the flags (minus the leading

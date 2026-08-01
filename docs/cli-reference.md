@@ -625,7 +625,7 @@ openlore serve --stop                   # stop the daemon serving this directory
 | `-d, --directory <path>` | Project root to serve; discovery file written here (default: cwd) |
 | `-p, --port <number>` | Port to bind (default: ephemeral free port) |
 | `--host <host>` | Host to bind (default: `127.0.0.1`) |
-| `--preset <name>` | Advisory surface reported by `/health`: `substrate` (default), `navigation` (the lean navigate-only escape), `minimal`, or `all`/`full` (the full surface — `full` matches the `openlore mcp` selector name). The daemon dispatches any known tool regardless; clients curate their own surface |
+| `--preset <name>` | Callable surface enforced at dispatch and reported by `/health`: `substrate` (default), `navigation` (the lean navigate-only escape), `minimal`, or `all`/`full` (the full surface — `full` matches the `openlore mcp` selector name). Requests for registered tools outside the active preset return `403` before validation or side effects |
 | `--token <token>` | Require this token as the `x-openlore-token` header (default: `$OPENLORE_SERVE_TOKEN`) |
 | `--no-watch` | Disable the freshness watcher + re-analyze lane |
 | `--stop` | Stop a running daemon for `--directory` and exit |
@@ -655,4 +655,3 @@ See `examples/pi/README.md`.
 |--------|-------------|
 | `npm run bench` | EdgeStore micro-benchmark (node lookup, BFS, orient path) — requires `openlore analyze` |
 | `npm run bench:mcp` | MCP handler benchmark — measures cold vs warm path for `readCachedContext`, `handleOrient`, `handleSearchCode`. Requires `openlore analyze`. Pass a project dir: `npm run bench:mcp -- /path/to/project` |
-

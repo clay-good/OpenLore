@@ -1,5 +1,5 @@
 /**
- * Tests for the `openlore serve` HTTP daemon: endpoints, advisory preset,
+ * Tests for the `openlore serve` HTTP daemon: endpoints, enforced preset,
  * token gate, dup-daemon reuse, and serve.json discovery-file lifecycle.
  *
  * Served root is a throwaway temp dir (no analysis), so /tool/orient returns a
@@ -187,15 +187,37 @@ describe('openlore serve', () => {
     expect(await fileExists(descPath)).toBe(false);
   });
 
-  it('preset is advisory — a non-preset tool is still dispatched (not 404)', async () => {
-    const h = await boot(); // default navigation preset
-    // get_env_vars is a real tool, NOT in the navigation preset. The daemon must
-    // still serve it (preset only advises /health) so it can back the MCP server.
+  it('rejects a registered tool outside the active preset before dispatch', async () => {
+    const h = await boot();
     const res = await fetch(`${h.baseUrl}/tool/get_env_vars`, {
       method: 'POST',
       body: JSON.stringify({ args: {} }),
     });
-    expect(res.status).toBe(200); // dispatched, not gated
+    expect(res.status).toBe(403);
+    const body = await jsonOf(res);
+    expect(body.error).toMatch(/get_env_vars.*substrate.*full.*openlore install --preset <name>/i);
+  });
+
+  it('rejects hidden write tools without creating decision or memory state', async () => {
+    const h = await boot({ preset: 'navigation' });
+    const calls = [
+      ['record_decision', { title: 'must not persist', rationale: 'outside preset' }],
+      ['remember', { content: 'must not persist' }],
+      ['approve_decision', { id: 'deadbeef' }],
+    ] as const;
+
+    for (const [name, args] of calls) {
+      const res = await fetch(`${h.baseUrl}/tool/${name}`, {
+        method: 'POST',
+        body: JSON.stringify({ args }),
+      });
+      expect(res.status).toBe(403);
+      expect((await jsonOf(res)).error).toMatch(new RegExp(`${name}.*navigation.*openlore install --preset <name>`, 'i'));
+    }
+
+    expect(await fileExists(join(root, '.openlore', 'decisions', 'pending.json'))).toBe(false);
+    expect(await fileExists(join(root, '.openlore', 'decisions', 'ledger.jsonl'))).toBe(false);
+    expect(await fileExists(join(root, '.openlore', 'memory', 'notes.json'))).toBe(false);
   });
 
   it('404s a genuinely unknown tool', async () => {
@@ -238,6 +260,12 @@ describe('openlore serve', () => {
     expect(body.preset).toBe('full');
     expect(body.tools).toContain('get_env_vars');
     expect(body.tools).toContain('record_decision'); // full surface incl. governance
+
+    const call = await fetch(`${h.baseUrl}/tool/get_env_vars`, {
+      method: 'POST',
+      body: JSON.stringify({ args: {} }),
+    });
+    expect(call.status).toBe(200);
   });
 
   it('enforces the token gate on /tool but not /health', async () => {

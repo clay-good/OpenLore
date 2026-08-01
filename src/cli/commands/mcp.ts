@@ -2252,6 +2252,26 @@ export const TOOL_PRESETS: Record<string, Set<string>> = {
 };
 
 /**
+ * Return an actionable error when a registered tool is outside the active preset.
+ * Membership is derived from the same sets that drive tools/list; `full` is the
+ * registry itself, so it is appended rather than maintained as another set.
+ */
+export function presetMembershipError(
+  toolName: string,
+  activePreset: string,
+  activeToolNames: ReadonlySet<string>,
+): string | undefined {
+  if (activeToolNames.has(toolName)) return undefined;
+  const containingPresets = Object.entries(TOOL_PRESETS)
+    .filter(([, tools]) => tools.has(toolName))
+    .map(([name]) => name);
+  containingPresets.push(FULL_PRESET);
+  return `Tool "${toolName}" is not available in the active "${activePreset}" preset. ` +
+    `Available in: ${containingPresets.join(', ')}. Re-wire with ` +
+    '`openlore install --preset <name>`.';
+}
+
+/**
  * Resolve a tool-selector option set to its canonical preset name (change:
  * default-to-lean-tool-surface). Precedence: `--all-tools`/`--preset full`/`all`
  * → `full`; `--preset <name>` → that name; legacy `--minimal` → `minimal`; no
@@ -2398,6 +2418,8 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
     process.stderr.write(`${(e as Error).message}\n`);
     process.exit(2);
   }
+  const activePreset = resolvePresetName(selectorOpts);
+  const activeToolNames = new Set(activeTools.map((tool) => tool.name));
   // Advertise breadth once via server instructions only when the active surface
   // IS the lean default (LEAN_DEFAULT_PRESET) — whether reached by no selector or
   // an explicit `--preset <that name>` (how install wires it). Adds no tool schemas.
@@ -2481,6 +2503,26 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
     // schema lookup, arg validation, tracking, and dispatch all see one name.
     const name = resolveCanonicalToolName(_rawName);
 
+    // change: enforce-preset-membership-at-dispatch
+    // Presets are a callable governance boundary, not only a tools/list filter.
+    // Reject before watcher bootstrap, validation, tracking, daemon delegation,
+    // or handler dispatch so hidden write tools cannot leave any trace. Resolve
+    // aliases first, while retaining the existing distinct unknown-tool result.
+    const toolDef = TOOL_DEFINITIONS.find(t => t.name === name);
+    if (!toolDef) {
+      return {
+        content: [{ type: 'text', text: `Unknown tool: ${name}` }],
+        isError: true,
+      };
+    }
+    const membershipError = presetMembershipError(name, activePreset, activeToolNames);
+    if (membershipError) {
+      return {
+        content: [{ type: 'text', text: membershipError }],
+        isError: true,
+      };
+    }
+
     if (options.watchAuto && !autoWatcher) {
       const dir = (args as Record<string, unknown>).directory;
       if (typeof dir === 'string') {
@@ -2532,8 +2574,7 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
     // dispatch. Invalid args become a JSON-RPC -32602 error (spec-12), not an
     // isError tool result — a malformed request is a protocol error, not a tool failure.
     {
-      const toolDef = TOOL_DEFINITIONS.find(t => t.name === name);
-      const argError = toolDef ? validateToolArgs(args, toolDef.inputSchema) : null;
+      const argError = validateToolArgs(args, toolDef.inputSchema);
       if (argError) {
         emit(directory, 'mcp', { event: 'tool_error', tool: name, ms: Date.now() - _t0, agent: agentName, code: 'INVALID_ARGS', error: argError });
         throw new McpError(ErrorCode.InvalidParams, `Invalid arguments for "${name}": ${argError}`);

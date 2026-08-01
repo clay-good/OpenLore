@@ -13,7 +13,8 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -43,7 +44,11 @@ beforeAll(async () => {
   // change: default-to-lean-tool-surface — no-preset is now the LEAN navigation
   // surface, so this full-surface conformance run opts into `--preset full`
   // explicitly (the lean default + breadth pointer are asserted separately below).
-  transport = new StdioClientTransport({ command: 'node', args: [MCP_BIN, 'mcp', '--preset', 'full'], cwd: REPO_ROOT });
+  // Protocol conformance does not exercise watcher behavior. Keep it disabled so
+  // large repositories cannot exhaust the process file-descriptor limit before
+  // the CallTool assertions run; the preset-boundary probe below deliberately
+  // leaves watch-auto enabled to prove rejected calls do not bootstrap it.
+  transport = new StdioClientTransport({ command: 'node', args: [MCP_BIN, 'mcp', '--preset', 'full', '--no-watch-auto'], cwd: REPO_ROOT });
   client = new Client({ name: 'spec-12-conformance', version: '1.0.0' });
   // connect() performs the initialize handshake and (per the SDK) rejects if the
   // server answers with a protocolVersion the client does not support — so a
@@ -159,6 +164,45 @@ describe('spec — lean default surface + breadth pointer (via SDK Client over s
       expect(instructions).toMatch(/--preset full/);
     } finally {
       await c.close();
+    }
+  }, 60_000);
+
+  it('rejects hidden read and write tools before any side effect while preserving member dispatch', async () => {
+    if (!existsSync(MCP_BIN) || !existsSync(CACHE_FILE)) return;
+    const dir = mkdtempSync(join(tmpdir(), 'openlore-preset-dispatch-'));
+    const t = new StdioClientTransport({ command: 'node', args: [MCP_BIN, 'mcp'], cwd: REPO_ROOT });
+    const c = new Client({ name: 'preset-boundary-probe', version: '1.0.0' });
+    await c.connect(t);
+    try {
+      const calls = [
+        ['find_dead_code', { directory: dir }],
+        ['record_decision', { directory: dir, title: 'must not persist', rationale: 'outside preset' }],
+        ['remember', { directory: dir, content: 'must not persist' }],
+      ] as const;
+      for (const [name, args] of calls) {
+        const res = await c.callTool({ name, arguments: args });
+        expect(res.isError).toBe(true);
+        const text = (res.content as Array<{ text?: string }>)[0]?.text ?? '';
+        expect(text).toMatch(new RegExp(`${name}.*substrate.*full.*openlore install --preset <name>`, 'i'));
+      }
+
+      // The guard precedes --watch-auto bootstrap and every persistent handler.
+      expect(existsSync(join(dir, '.openlore'))).toBe(false);
+
+      // A deprecated alias resolves before membership enforcement, so the
+      // canonical registered name is rejected rather than reported unknown.
+      const alias = await c.callTool({ name: 'get_ui_components', arguments: { directory: dir } });
+      expect(alias.isError).toBe(true);
+      expect((alias.content as Array<{ text?: string }>)[0]?.text).toMatch(/get_ui_component_inventory.*substrate.*full/i);
+
+      // A member still reaches its handler. An unanalyzed temp repo returns a
+      // structured domain error, not the preset boundary error.
+      const member = await c.callTool({ name: 'orient', arguments: { directory: dir, task: 'anything' } });
+      expect(member.isError).toBeFalsy();
+      expect((member.content as Array<{ text?: string }>)[0]?.text).not.toMatch(/not available in the active/i);
+    } finally {
+      await c.close();
+      rmSync(dir, { recursive: true, force: true });
     }
   }, 60_000);
 });

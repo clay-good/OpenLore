@@ -404,6 +404,10 @@ const HEALTH_PROBE_TIMEOUT_MS = 2500;
 // orphans get no ping and still reap, so this can't resurrect the RAM pileup.
 const KEEPALIVE_MS = 5 * 60_000;
 const RESULT_MAX = 50_000;
+// Pi curates its own native surface, which intentionally supersets the MCP
+// substrate preset. The daemon enforces its preset at dispatch, so Pi must
+// spawn the full backing surface and keep curating what the model sees here.
+export const PI_DAEMON_PRESET = 'full';
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 // `.openlore/serve.json` is an untrusted, repo-writable artifact; resolve it
@@ -443,7 +447,7 @@ async function ensureDaemon(cwd: string): Promise<Daemon | null> {
     await mkdir(join(cwd, OPENLORE_DIR), { recursive: true });
     const logFd = openSync(join(cwd, OPENLORE_DIR, 'serve.log'), 'a');
     try {
-      const child = spawn('openlore', ['serve', '--directory', dirArg], {
+      const child = spawn('openlore', ['serve', '--directory', dirArg, '--preset', PI_DAEMON_PRESET], {
         stdio: ['ignore', logFd, logFd],
         windowsHide: true,
         ...(isWin ? { shell: true } : { detached: true }),

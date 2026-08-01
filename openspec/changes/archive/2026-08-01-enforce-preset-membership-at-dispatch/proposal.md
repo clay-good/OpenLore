@@ -1,6 +1,6 @@
 # Enforce preset membership at dispatch: the advertised surface must be the callable surface
 
-> Status: PROPOSED (2026-07-27, first-run e2e). The preset architecture — benchmark-gated default
+> Status: IMPLEMENTED (2026-08-01). The preset architecture — benchmark-gated default
 > (ADR-0023), "tools remain available strictly by opt-in" (mcp-quality), "substrate holds
 > governance READS, not writes" (`reconcile-substrate-write-face`, PR #234) — governs only
 > `tools/list`. `tools/call` dispatches **any of the ~73 registered tools**, including writes.
@@ -39,9 +39,9 @@
   the tool, the active preset, the preset(s) that contain the tool, and the rewire command
   (`openlore install --preset <name>`). Deprecated aliases keep resolving, then the canonical
   name is membership-checked.
-- **The boundary is guarded in CI.** A test walks `TOOL_PRESETS` × the dispatch path: for each
-  preset, one out-of-surface call must produce the membership error and — for write-family tools —
-  must leave no persisted side effect.
+- **The boundary is guarded in CI.** A test walks `TOOL_PRESETS`: for each preset, one
+  out-of-surface tool must produce the membership error. Wire-protocol and HTTP daemon tests
+  exercise the real dispatch boundary and assert that write tools leave no persisted side effect.
 - **The mcp-security posture is stated.** Write-capability tools (`change`/`remember` families'
   mutating members) are unreachable through any preset that does not advertise them; this is a
   named requirement, not an emergent property.

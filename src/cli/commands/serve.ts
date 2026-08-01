@@ -42,7 +42,7 @@ import { validateDirectory, waitForGraphRebuild } from '../../core/services/mcp-
 import { EdgeStore } from '../../core/services/edge-store.js';
 import { McpWatcher } from '../../core/services/mcp-watcher.js';
 import { openloreAnalyze } from '../../api/analyze.js';
-import { TOOL_DEFINITIONS, TOOL_PRESETS, selectActiveTools } from './mcp.js';
+import { TOOL_DEFINITIONS, TOOL_PRESETS, presetMembershipError, selectActiveTools } from './mcp.js';
 import { validateToolArgs } from '../../core/services/mcp-handlers/tool-guard.js';
 import {
   isLoopbackHost,
@@ -399,11 +399,20 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
       // Resolve a deprecated tool-name alias to its canonical name so the daemon
       // transport accepts old names identically to the MCP stdio transport.
       const name = resolveCanonicalToolName(decodeURIComponent(url.pathname.slice('/tool/'.length)));
-      // The preset is ADVISORY (reported by /health for clients that want a
-      // curated list, e.g. the Pi extension). The daemon dispatches any known
-      // tool so it can back multiple clients with different surfaces — notably
-      // the MCP server, which delegates every registered tool here. Unknown tools 404
-      // via UnknownToolError below.
+      const toolDef = TOOL_DEFINITIONS.find(t => t.name === name);
+      if (!toolDef) {
+        sendJson(res, 404, { error: `Unknown tool: ${name}` });
+        return;
+      }
+      // Enforce the daemon's own advertised preset before parsing arguments,
+      // validating a directory, healing an index, or dispatching. An MCP client
+      // with a wider preset will treat this response as a delegation failure and
+      // fall back to its authorized in-process dispatcher.
+      const membershipError = presetMembershipError(name, presetName, activeNames);
+      if (membershipError) {
+        sendJson(res, 403, { error: membershipError });
+        return;
+      }
       let body: Record<string, unknown>;
       try {
         body = await readJsonBody(req);
@@ -475,13 +484,10 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
       // The MCP stdio transport validates the same way; this keeps the daemon transport —
       // used directly by the Pi extension and other HTTP clients — from leaking internal
       // errors to weak tool-callers.
-      const toolDef = TOOL_DEFINITIONS.find(t => t.name === name);
-      if (toolDef) {
-        const argError = validateToolArgs(args, toolDef.inputSchema);
-        if (argError) {
-          sendJson(res, 400, { error: `Invalid arguments for "${name}": ${argError}` });
-          return;
-        }
+      const argError = validateToolArgs(args, toolDef.inputSchema);
+      if (argError) {
+        sendJson(res, 400, { error: `Invalid arguments for "${name}": ${argError}` });
+        return;
       }
 
       try {
@@ -653,8 +659,7 @@ export const serveCommand = new Command('serve')
   .option('--host <host>', 'Host to bind', '127.0.0.1')
   .option(
     '--preset <name>',
-    `Advisory tool surface reported by /health (navigation, substrate, minimal, or all/full). The daemon still ` +
-      `dispatches any known tool; clients curate their own surface. Default: ${LEAN_DEFAULT_PRESET}`,
+    `Callable tool surface enforced at dispatch (navigation, substrate, minimal, or all/full). Default: ${LEAN_DEFAULT_PRESET}`,
     LEAN_DEFAULT_PRESET,
   )
   .option('--token <token>', 'Require this token as the x-openlore-token header (default: $OPENLORE_SERVE_TOKEN)')
