@@ -10,8 +10,15 @@ it. An operator's preset choice is a governance boundary: rejecting the call SHA
 any persistent or process-lifecycle side effect, and the guard test SHALL assert both the
 rejection and the absence of persisted state (no decision draft, no ledger entry, no memory note)
 after an out-of-surface write attempt. A conflicting `openlore serve` launch SHALL refuse to reuse
-a live daemon when its preset or token differs from the requested security settings, and it MUST
-require `presetDispatchEnforced: true` before trusting that daemon's preset metadata. MCP client
+a live daemon when its preset or token differs from the requested security settings. Every
+descriptor consumer MUST require one authenticated health response that reports
+`presetDispatchEnforced: true`, the expected repository root, the daemon PID, preset, tools, and
+token posture before trusting daemon metadata. Shutdown SHALL use the authenticated daemon
+endpoint rather than signaling descriptor PID data, and the daemon SHALL remove its own discovery
+entry before acknowledging shutdown so later instances retain ownership of their descriptors.
+An ambiguous daemon transport failure SHALL NOT automatically replay a non-idempotent tool
+locally; OpenLore SHALL report that the outcome is unknown so the operator can inspect state.
+MCP client
 discovery MAY reuse a narrower daemon because the session enforces its own surface before
 delegation and falls back locally for an authorized call rejected by the daemon.
 
@@ -49,3 +56,23 @@ delegation and falls back locally for an authorized call rejected by the daemon.
   advertise enforced preset dispatch
 - **WHEN** a new OpenLore process considers reusing it
 - **THEN** reuse is refused because the legacy daemon may still dispatch hidden tools
+
+#### Scenario: A descriptor cannot redirect trust across repositories
+
+- **GIVEN** a valid descriptor copied from another repository or modified with a different token
+- **WHEN** a client probes that descriptor
+- **THEN** the client rejects the listener because authenticated health does not prove the
+  expected repository root and token
+
+#### Scenario: Shutdown does not trust descriptor PID data
+
+- **GIVEN** an untrusted descriptor containing a valid loopback listener and arbitrary PID
+- **WHEN** an operator runs `openlore serve --stop`
+- **THEN** OpenLore only requests authenticated shutdown from a root-bound compatible daemon and
+  never signals the descriptor PID
+
+#### Scenario: An ambiguous write is not replayed
+
+- **GIVEN** a non-idempotent write reaches the shared daemon
+- **WHEN** the connection closes before the client receives a response
+- **THEN** OpenLore reports an unknown outcome and does not dispatch the write again locally

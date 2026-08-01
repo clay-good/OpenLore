@@ -43,11 +43,12 @@
   out-of-surface tool must produce the membership error. Wire-protocol and HTTP daemon tests
   exercise the real dispatch boundary and assert that write tools leave no persisted side effect.
 - **Conflicting daemon launches fail closed.** A second `openlore serve` launch reuses the live
-  daemon only when its canonical preset and token match the requested security settings and it
-  advertises enforced dispatch as a semantic health capability. Rejected calls do not reset its
-  idle lifetime, and Pi reports an actionable incompatibility instead of silently accepting a
-  narrow backing surface. MCP discovery may reuse a narrower daemon because its own session guard
-  runs first and authorized wider calls fall back locally.
+  daemon only when one authenticated health response proves the exact repository root, canonical
+  preset, token posture, and enforced dispatch capability. Out-of-preset and unauthorized calls
+  do not reset its idle lifetime, and Pi reports an actionable incompatibility instead of silently
+  accepting a narrow backing surface. MCP discovery may reuse a narrower daemon because its own
+  session guard runs first and authorized wider calls fall back locally. `--stop` asks the
+  authenticated listener to shut itself down instead of trusting descriptor PID data.
 - **The mcp-security posture is stated.** Write-capability tools (`change`/`remember` families'
   mutating members) are unreachable through any preset that does not advertise them; this is a
   named requirement, not an emergent property.

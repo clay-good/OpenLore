@@ -1,10 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:http';
 
-import { modelsUrl, stripMarker, isUsableConfig, readConfig, formatToolResult, formatCallArgs, NAV_TOOLS, PI_DAEMON_PRESET, PI_EXCLUDED_CONCLUSION_TOOLS, ensureDaemon, callTool, isUsableDaemon, missingDaemonTools } from './extension.js';
+import { modelsUrl, stripMarker, isUsableConfig, readConfig, formatToolResult, formatCallArgs, NAV_TOOLS, PI_DAEMON_PRESET, PI_EXCLUDED_CONCLUSION_TOOLS, ensureDaemon, callTool, isUsableDaemon, missingDaemonTools, PiDaemonConnectionError } from './extension.js';
 import { TOOL_DEFINITIONS } from '../cli/commands/mcp.js';
 import { startServe } from '../cli/commands/serve.js';
 import { TOOL_OUTPUT_CLASS } from '../core/services/mcp-handlers/tool-contract.js';
@@ -73,11 +73,79 @@ it('reports a legacy daemon without tools immediately as incompatible', async ()
     const discovered = await ensureDaemon(dir);
     expect(Date.now() - startedAt).toBeLessThan(1000);
     const result = await callTool(discovered!, 'orient', { task: 'x' }, dir) as { error?: string };
-    expect(result.error).toMatch(/does not report an enforced, verifiable tool surface/);
-    expect(result.error).toContain('openlore serve --stop');
+    expect(result.error).toMatch(/does not report an authenticated, enforced tool surface/);
+    expect(result.error).toMatch(/stop the legacy or incompatible process manually/i);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+it('rejects a tampered protected-daemon descriptor in Pi discovery', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openlore-pi-tampered-token-'));
+  const daemon = await startServe({
+    directory: dir,
+    port: '0',
+    watch: false,
+    preset: 'full',
+    token: 'real-token',
+  });
+  try {
+    const path = join(dir, '.openlore', 'serve.json');
+    const descriptor = JSON.parse(await readFile(path, 'utf-8')) as Record<string, unknown>;
+    await writeFile(path, JSON.stringify({ ...descriptor, token: 'forged-token' }));
+    const discovered = await ensureDaemon(dir);
+    expect(discovered).not.toBeNull();
+    expect(isUsableDaemon(discovered!)).toBe(false);
+  } finally {
+    await daemon?.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+it('classifies rejected daemon credentials as a recoverable connection change', async () => {
+  const server = createServer((_req, res) => {
+    res.writeHead(401, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ error: 'invalid or missing x-openlore-token' }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('auth test server did not bind');
+  try {
+    await expect(callTool(
+      { baseUrl: `http://127.0.0.1:${address.port}`, token: 'stale' },
+      'orient',
+      { task: 'x' },
+      '/tmp/project',
+    )).rejects.toBeInstanceOf(PiDaemonConnectionError);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+it('preserves caller cancellation instead of classifying it as a daemon change', async () => {
+  const server = createServer((_req, _res) => {
+    // Deliberately wait for the caller to abort.
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('abort test server did not bind');
+  const controller = new AbortController();
+  const pending = callTool(
+    { baseUrl: `http://127.0.0.1:${address.port}` },
+    'orient',
+    { task: 'x' },
+    '/tmp/project',
+    controller.signal,
+  );
+  controller.abort();
+  try {
+    const error = await pending.catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(PiDaemonConnectionError);
+    expect((error as Error).name).toBe('AbortError');
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });
 

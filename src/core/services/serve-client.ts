@@ -14,7 +14,12 @@
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import { FULL_PRESET, OPENLORE_DIR } from '../../constants.js';
-import { readServeDescriptor, type ServeDescriptor } from '../../cli/commands/serve-descriptor.js';
+import {
+  readServeDescriptor,
+  validateServeHealth,
+  type ServeDescriptor,
+} from '../../cli/commands/serve-descriptor.js';
+import { OPENLORE_TOKEN_HEADER } from '../../cli/commands/local-http-guard.js';
 
 /** A resolved, reachable daemon. */
 export interface ServeEndpoint {
@@ -34,7 +39,9 @@ export class ServeHttpError extends Error {
 }
 
 export function isServePresetRejection(error: unknown): error is ServeHttpError {
-  return error instanceof ServeHttpError && error.status === 403;
+  return error instanceof ServeHttpError
+    && error.status === 403
+    && /not available in the active .* preset/i.test(error.message);
 }
 
 const SPAWN_HEALTH_TIMEOUT_MS = 8000;
@@ -77,9 +84,11 @@ async function readDescriptor(directory: string): Promise<ServeDescriptor | null
 
 /** True when a descriptor points at a LIVE daemon (ok:true /health), not a stale
  * file or a recycled port owned by an unrelated server. */
-async function healthy(desc: ServeDescriptor): Promise<boolean> {
+async function healthy(desc: ServeDescriptor, expectedRoot: string): Promise<boolean> {
   try {
+    const headers = desc.token ? { [OPENLORE_TOKEN_HEADER]: desc.token } : undefined;
     const res = await fetch(`http://${desc.host}:${desc.port}/health`, {
+      headers,
       signal: AbortSignal.timeout(HEALTH_PROBE_TIMEOUT_MS),
       // The descriptor is confined to loopback, but a local listener answering a
       // redirect would otherwise pull this probe (and the call below, with its
@@ -87,8 +96,8 @@ async function healthy(desc: ServeDescriptor): Promise<boolean> {
       redirect: 'error',
     });
     if (!res.ok) return false;
-    const body = (await res.json().catch(() => null)) as { ok?: boolean } | null;
-    return body?.ok === true;
+    const body = await res.json().catch(() => null);
+    return validateServeHealth(body, expectedRoot, desc) !== null;
   } catch {
     return false;
   }
@@ -109,7 +118,7 @@ export async function ensureServeDaemon(
   opts: { spawn?: boolean } = {},
 ): Promise<ServeEndpoint | null> {
   const existing = await readDescriptor(directory);
-  if (existing && (await healthy(existing))) return endpointOf(existing);
+  if (existing && (await healthy(existing, directory))) return endpointOf(existing);
 
   if (opts.spawn === false) return null;
 
@@ -132,7 +141,7 @@ export async function ensureServeDaemon(
   while (Date.now() < deadline) {
     await sleep(HEALTH_POLL_MS);
     const desc = await readDescriptor(directory);
-    if (desc && (await healthy(desc))) return endpointOf(desc);
+    if (desc && (await healthy(desc, directory))) return endpointOf(desc);
   }
   return null;
 }

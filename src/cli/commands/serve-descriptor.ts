@@ -17,7 +17,7 @@
  * applied. A descriptor that fails any check is treated exactly as ABSENT — the
  * reader returns null and the caller takes its existing no-daemon path (spawn a
  * fresh daemon or fall back to in-process dispatch). No field of an invalid
- * descriptor ever becomes a fetch target, a request header, or a signal target.
+ * descriptor ever becomes a fetch target or request header.
  *
  * Dependency-light by contract (mcp-security ServeDescriptorValidatedAtEveryReader
  * + the MCP↔Pi parity doctrine): it imports only node builtins and the loopback
@@ -26,6 +26,8 @@
  */
 
 import { readFile } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { isLoopbackHost } from './local-http-guard.js';
 
 /**
@@ -41,6 +43,64 @@ export interface ServeDescriptor {
   token?: string;
   startedAt: string;
   version: string;
+}
+
+export interface ServeHealth {
+  ok: true;
+  presetDispatchEnforced: true;
+  root: string;
+  pid: number;
+  preset: string;
+  tools: string[];
+  tokenProtected: boolean;
+  tokenAuthenticated: boolean;
+}
+
+/** Resolve aliases to the stable filesystem identity used in health proofs. */
+export function canonicalServeRoot(root: string): string {
+  let canonical: string;
+  try {
+    canonical = realpathSync.native(resolve(root));
+  } catch {
+    canonical = resolve(root);
+  }
+  return process.platform === 'win32' ? canonical.toLowerCase() : canonical;
+}
+
+/** Validate the semantic compatibility and identity fields returned by `/health`. */
+export function validateServeHealth(
+  parsed: unknown,
+  expectedRoot: string,
+  descriptor?: Pick<ServeDescriptor, 'pid' | 'token'>,
+): ServeHealth | null {
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  const h = parsed as Record<string, unknown>;
+  if (
+    h.ok !== true
+    || h.presetDispatchEnforced !== true
+    || typeof h.root !== 'string'
+    || canonicalServeRoot(h.root) !== canonicalServeRoot(expectedRoot)
+    || typeof h.pid !== 'number'
+    || !Number.isInteger(h.pid)
+    || h.pid <= 0
+    || typeof h.preset !== 'string'
+    || !Array.isArray(h.tools)
+    || !h.tools.every((tool) => typeof tool === 'string')
+    || typeof h.tokenProtected !== 'boolean'
+    || h.tokenAuthenticated !== true
+    || (descriptor !== undefined && h.pid !== descriptor.pid)
+    || (descriptor !== undefined && h.tokenProtected !== Boolean(descriptor.token))
+  ) return null;
+  return {
+    ok: true,
+    presetDispatchEnforced: true,
+    root: canonicalServeRoot(h.root),
+    pid: h.pid,
+    preset: h.preset,
+    tools: h.tools as string[],
+    tokenProtected: h.tokenProtected,
+    tokenAuthenticated: true,
+  };
 }
 
 /**
@@ -73,7 +133,7 @@ export function validateServeDescriptor(parsed: unknown): ServeDescriptor | null
  * Read + validate a serve.json at `descriptorPath`. Any failure — missing file,
  * malformed JSON, or a descriptor that fails {@link validateServeDescriptor} —
  * resolves to null, so a poisoned descriptor is indistinguishable from an absent
- * one and no field of it ever reaches a fetch, a header, or a signal target.
+ * one and no field of it ever reaches a fetch target or request header.
  */
 export async function readServeDescriptor(descriptorPath: string): Promise<ServeDescriptor | null> {
   let parsed: unknown;

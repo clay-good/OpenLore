@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { mkdtemp, rm, readFile, access, mkdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, access, mkdir, writeFile, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer, request as httpRequest } from 'node:http';
@@ -193,6 +193,10 @@ describe('openlore serve', () => {
     const body = await jsonOf(res);
     expect(body.ok).toBe(true);
     expect(body.presetDispatchEnforced).toBe(true);
+    expect(body.root).toBe(await realpath(root));
+    expect(body.pid).toBe(process.pid);
+    expect(body.tokenProtected).toBe(false);
+    expect(body.tokenAuthenticated).toBe(true);
     expect(typeof body.version).toBe('string');
     // serve shares the one default-preset source with `openlore mcp`
     // (LEAN_DEFAULT_PRESET = substrate; change fix-default-preset-claims). It no
@@ -311,8 +315,15 @@ describe('openlore serve', () => {
   it('enforces the token gate on /tool but not /health', async () => {
     const h = await boot({ token: 'sekret' });
 
-    // /health needs no token (liveness).
-    expect((await fetch(`${h.baseUrl}/health`)).status).toBe(200);
+    // /health stays public for liveness but reports whether the candidate token
+    // actually authenticated, so descriptor consumers can fail closed.
+    const publicHealth = await jsonOf(await fetch(`${h.baseUrl}/health`));
+    expect(publicHealth.tokenProtected).toBe(true);
+    expect(publicHealth.tokenAuthenticated).toBe(false);
+    const authenticatedHealth = await jsonOf(await fetch(`${h.baseUrl}/health`, {
+      headers: { 'x-openlore-token': 'sekret' },
+    }));
+    expect(authenticatedHealth.tokenAuthenticated).toBe(true);
 
     // /tool without token → 401.
     const noTok = await fetch(`${h.baseUrl}/tool/orient`, {
@@ -335,7 +346,7 @@ describe('openlore serve', () => {
     const descPath = join(root, '.openlore', 'serve.json');
     await mkdir(join(root, '.openlore'), { recursive: true });
     // Point at a dead port + a PID that is almost certainly not an openlore daemon
-    // (pid 1). daemonAlive() must fail the /health probe → file removed, no kill.
+    // (pid 1). The health probe must fail → file removed, no shutdown request.
     await writeFile(
       descPath,
       JSON.stringify({ port: 1, pid: 1, host: '127.0.0.1', version: 'x', startedAt: '' }),
@@ -346,14 +357,39 @@ describe('openlore serve', () => {
     expect(await fileExists(descPath)).toBe(false); // stale descriptor cleaned up
   });
 
+  it('--stop asks the root-bound daemon to shut itself down without signalling descriptor PID data', async () => {
+    const h = await boot();
+    const kill = vi.spyOn(process, 'kill');
+    await startServe({ directory: root, stop: true });
+    for (let i = 0; i < 100 && await readDescriptor(root); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    expect(await readDescriptor(root)).toBeNull();
+    expect(kill).not.toHaveBeenCalled();
+    handle = undefined;
+    await expect(fetch(`${h.baseUrl}/health`)).rejects.toThrow();
+  });
+
+  it('does not remove a replacement descriptor during slower shutdown teardown', async () => {
+    const old = await boot();
+    await startServe({ directory: root, stop: true });
+    const replacement = await startServe({ directory: root, port: '0', watch: false });
+    expect(replacement).toBeDefined();
+    handle = replacement;
+    await old.close();
+    const descriptor = await readDescriptor(root);
+    expect(descriptor?.port).toBe(replacement!.port);
+    expect((await fetch(`${replacement!.baseUrl}/health`)).status).toBe(200);
+  });
+
   it('rejects a poisoned serve.json (untrusted artifact) — fails closed', async () => {
     root = await mkdtemp(join(tmpdir(), 'openlore-serve-'));
     const descPath = join(root, '.openlore', 'serve.json');
     await mkdir(join(root, '.openlore'), { recursive: true });
     const write = (o: unknown) => writeFile(descPath, JSON.stringify(o), 'utf-8');
 
-    // A non-loopback host must be rejected — otherwise daemonAlive would fetch it
-    // (arbitrary-host egress) and stopDaemon could SIGTERM its pid.
+    // A non-loopback host must be rejected, or the probe would fetch it
+    // (arbitrary-host egress).
     await write({ port: 8080, pid: 99999, host: 'evil.example.com', version: 'x', startedAt: '' });
     expect(await readDescriptor(root)).toBeNull();
 
@@ -420,6 +456,84 @@ describe('openlore serve', () => {
       })).status).toBe(200);
     } finally {
       process.exitCode = previousExitCode;
+    }
+  });
+
+  it('does not trust a tampered descriptor token over live authentication state', async () => {
+    await boot({ preset: 'full' });
+    const descPath = join(root, '.openlore', 'serve.json');
+    const desc = JSON.parse(await readFile(descPath, 'utf-8')) as Record<string, unknown>;
+    await writeFile(descPath, JSON.stringify({ ...desc, token: 'forged-secret' }));
+    const previousExitCode = process.exitCode;
+    try {
+      const reused = await startServe({
+        directory: root,
+        port: '0',
+        watch: false,
+        preset: 'full',
+        token: 'forged-secret',
+      });
+      expect(reused).toBeUndefined();
+      expect(process.exitCode).toBe(1);
+    } finally {
+      process.exitCode = previousExitCode;
+    }
+  });
+
+  it('refuses a mismatched launch token before contacting a descriptor-selected listener', async () => {
+    root = await mkdtemp(join(tmpdir(), 'openlore-serve-token-preflight-'));
+    await mkdir(join(root, '.openlore'), { recursive: true });
+    let requests = 0;
+    const listener = createServer((_req, res) => {
+      requests += 1;
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
+    });
+    await new Promise<void>((resolveListen) => listener.listen(0, '127.0.0.1', resolveListen));
+    const address = listener.address();
+    if (!address || typeof address === 'string') throw new Error('token preflight listener did not bind');
+    await writeFile(join(root, '.openlore', 'serve.json'), JSON.stringify({
+      port: address.port,
+      pid: process.pid,
+      host: '127.0.0.1',
+      token: 'descriptor-token',
+      startedAt: '',
+      version: 'test',
+    }));
+    const previousExitCode = process.exitCode;
+    try {
+      expect(await startServe({
+        directory: root,
+        port: '0',
+        watch: false,
+        token: 'new-operator-secret',
+      })).toBeUndefined();
+      expect(process.exitCode).toBe(1);
+      expect(requests).toBe(0);
+    } finally {
+      process.exitCode = previousExitCode;
+      await new Promise<void>((resolveClose) => listener.close(() => resolveClose()));
+    }
+  });
+
+  it('does not reuse a compatible-looking daemon from another repository root', async () => {
+    await boot();
+    const desc = await readFile(join(root, '.openlore', 'serve.json'), 'utf-8');
+    const otherRoot = await mkdtemp(join(tmpdir(), 'openlore-serve-other-'));
+    await mkdir(join(otherRoot, '.openlore'), { recursive: true });
+    await writeFile(join(otherRoot, '.openlore', 'serve.json'), desc);
+    const previousExitCode = process.exitCode;
+    try {
+      const reused = await startServe({
+        directory: otherRoot,
+        port: '0',
+        watch: false,
+      });
+      expect(reused).toBeUndefined();
+      expect(process.exitCode).toBe(1);
+    } finally {
+      process.exitCode = previousExitCode;
+      await rm(otherRoot, { recursive: true, force: true });
     }
   });
 

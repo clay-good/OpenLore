@@ -17,6 +17,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
+import { createServer } from 'node:http';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { ErrorCode, SUPPORTED_PROTOCOL_VERSIONS } from '@modelcontextprotocol/sdk/types.js';
@@ -209,6 +210,7 @@ describe('spec — lean default surface + breadth pointer (via SDK Client over s
 
       // The guard precedes --watch-auto bootstrap and every persistent handler.
       expectPersistentStateUnchanged(sentinels);
+      expect(existsSync(join(dir, '.openlore', 'analysis'))).toBe(false);
 
       // A deprecated alias resolves before membership enforcement, so the
       // canonical registered name is rejected rather than reported unknown.
@@ -256,6 +258,72 @@ describe('spec — lean default surface + breadth pointer (via SDK Client over s
     } finally {
       await c.close();
       await daemon?.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it('does not replay a non-idempotent write after an ambiguous daemon disconnect', async () => {
+    expect(existsSync(MCP_BIN), 'run `npm run build` before the MCP boundary suite').toBe(true);
+    const dir = mkdtempSync(join(tmpdir(), 'openlore-daemon-unknown-outcome-'));
+    const sentinels = seedPersistentState(dir);
+    let dispatched = 0;
+    const daemon = createServer((req, res) => {
+      if (req.method === 'GET' && req.url === '/health') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          ok: true,
+          presetDispatchEnforced: true,
+          root: dir,
+          pid: process.pid,
+          preset: 'full',
+          tools: TOOL_DEFINITIONS.map((tool) => tool.name),
+          tokenProtected: false,
+          tokenAuthenticated: true,
+        }));
+        return;
+      }
+      if (req.method === 'POST' && req.url === '/tool/record_decision') {
+        req.resume();
+        req.on('end', () => {
+          dispatched += 1;
+          req.socket.destroy();
+        });
+        return;
+      }
+      res.writeHead(404).end();
+    });
+    await new Promise<void>((resolveListen) => daemon.listen(0, '127.0.0.1', resolveListen));
+    const address = daemon.address();
+    if (!address || typeof address === 'string') throw new Error('fake daemon did not bind');
+    writeFileSync(join(dir, '.openlore', 'serve.json'), JSON.stringify({
+      port: address.port,
+      pid: process.pid,
+      host: '127.0.0.1',
+      startedAt: new Date().toISOString(),
+      version: 'test',
+    }));
+
+    const t = new StdioClientTransport({
+      command: 'node',
+      args: [MCP_BIN, 'mcp', '--preset', 'full', '--no-watch-auto'],
+      cwd: REPO_ROOT,
+    });
+    const c = new Client({ name: 'ambiguous-write-probe', version: '1.0.0' });
+    await c.connect(t);
+    try {
+      const result = await c.callTool({
+        name: 'record_decision',
+        arguments: { directory: dir, title: 'must not replay', rationale: 'ambiguous outcome' },
+      });
+      expect(result.isError).toBe(true);
+      expect((result.content as Array<{ text?: string }>)[0]?.text).toMatch(
+        /outcome is unknown.*did not replay.*inspect repository state/i,
+      );
+      expect(dispatched).toBe(1);
+      expectPersistentStateUnchanged(sentinels);
+    } finally {
+      await c.close();
+      await new Promise<void>((resolveClose) => daemon.close(() => resolveClose()));
       rmSync(dir, { recursive: true, force: true });
     }
   }, 60_000);

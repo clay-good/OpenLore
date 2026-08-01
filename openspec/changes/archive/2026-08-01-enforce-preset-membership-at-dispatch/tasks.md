@@ -27,8 +27,12 @@
 ## Adversarial follow-up
 
 - [x] Refuse daemon reuse when the requested canonical preset or token differs
-- [x] Require `presetDispatchEnforced: true` before trusting a legacy daemon's preset metadata
-- [x] Keep rejected/unauthorized calls from resetting the daemon idle timer
+- [x] Require one authenticated, root-bound health response with
+      `presetDispatchEnforced: true` before trusting daemon metadata
+- [x] Keep out-of-preset and unauthorized calls from resetting the daemon idle timer
+- [x] Stop a verified daemon through its authenticated shutdown endpoint, never descriptor PID data
+- [x] Do not replay non-idempotent writes after an ambiguous daemon disconnect
+- [x] Claim the daemon descriptor before acknowledging shutdown so replacements retain discovery
 - [x] Preserve a healthy narrow daemon after an expected `403` local fallback
 - [x] Detect a narrow pre-existing Pi daemon and return actionable stop/restart remediation
 - [x] Seed initialized decision/memory stores and prove byte-identical rejection behavior

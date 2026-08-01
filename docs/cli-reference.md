@@ -630,11 +630,16 @@ openlore serve --stop                   # stop the daemon serving this directory
 | `--no-watch` | Disable the freshness watcher + re-analyze lane |
 | `--stop` | Stop a running daemon for `--directory` and exit |
 
-Endpoints (loopback only): `GET /health`, `POST /tool/:name` with body
-`{ "directory": "...", "args": { ... } }`. Discovery: the daemon writes
+Endpoints: `GET /health`, authenticated `POST /shutdown`, and `POST /tool/:name`
+with body `{ "directory": "...", "args": { ... } }`. Discovery: the daemon writes
 `.openlore/serve.json` `{ port, pid, host, token? }` (removed on clean shutdown).
-`/health` includes `presetDispatchEnforced: true`; clients MUST require that
-semantic marker before trusting its `preset` and `tools` fields as the callable boundary.
+`/health` reports `presetDispatchEnforced`, `root`, `pid`, `preset`, `tools`,
+`tokenProtected`, and `tokenAuthenticated`. Clients MUST require the semantic marker,
+exact root, and authenticated token proof before trusting the descriptor or callable
+surface. `--stop` uses the authenticated shutdown endpoint; it never signals the
+descriptor PID.
+If a shared-daemon connection fails after a non-idempotent write is sent, OpenLore
+reports an unknown outcome instead of replaying the write locally.
 
 ```bash
 PORT=$(jq .port .openlore/serve.json)

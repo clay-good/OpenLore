@@ -13,16 +13,66 @@
 
 import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
-import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, mkdir, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   validateServeDescriptor,
+  validateServeHealth,
   readServeDescriptor,
 } from './serve-descriptor.js';
 
 const HEALTHY = { port: 8080, pid: 4242, host: '127.0.0.1', token: 't', startedAt: 's', version: 'v' };
+const HEALTH = {
+  ok: true,
+  presetDispatchEnforced: true,
+  root: '/tmp/project',
+  pid: 4242,
+  preset: 'full',
+  tools: ['orient'],
+  tokenProtected: true,
+  tokenAuthenticated: true,
+};
+
+describe('validateServeHealth', () => {
+  it('requires an authenticated enforced surface bound to the expected root', () => {
+    expect(validateServeHealth(HEALTH, '/tmp/project')).toEqual(HEALTH);
+    for (const bad of [
+      { ...HEALTH, presetDispatchEnforced: false },
+      { ...HEALTH, root: '/tmp/other' },
+      { ...HEALTH, pid: 0 },
+      { ...HEALTH, tools: [1] },
+      { ...HEALTH, tokenProtected: 'yes' },
+      { ...HEALTH, tokenAuthenticated: false },
+    ]) {
+      expect(validateServeHealth(bad, '/tmp/project')).toBeNull();
+    }
+  });
+
+  it('binds daemon identity and token posture to the discovery descriptor', () => {
+    expect(validateServeHealth(HEALTH, '/tmp/project', HEALTHY)).toEqual(HEALTH);
+    expect(validateServeHealth({ ...HEALTH, pid: 4243 }, '/tmp/project', HEALTHY)).toBeNull();
+    expect(validateServeHealth(
+      { ...HEALTH, tokenProtected: false },
+      '/tmp/project',
+      HEALTHY,
+    )).toBeNull();
+  });
+
+  it.skipIf(process.platform === 'win32')('accepts a filesystem alias of the same repository root', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'openlore-health-root-'));
+    const real = join(parent, 'real');
+    const alias = join(parent, 'alias');
+    await mkdir(real);
+    await symlink(real, alias, 'dir');
+    try {
+      expect(validateServeHealth({ ...HEALTH, root: real }, alias)).not.toBeNull();
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+});
 
 describe('validateServeDescriptor', () => {
   it('accepts a well-formed loopback descriptor and round-trips its fields', () => {

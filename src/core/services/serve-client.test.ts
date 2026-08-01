@@ -10,9 +10,10 @@
  */
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createServer } from 'node:http';
 import { serveCommand, startServe, type ServeHandle } from '../../cli/commands/serve.js';
 import { ensureServeDaemon, callServeTool, isServePresetRejection, ServeHttpError, serveSpawnArgs } from './serve-client.js';
 
@@ -65,6 +66,31 @@ describe('serve-client', () => {
     }
   });
 
+  it('does not discover a legacy daemon without authenticated enforced health', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'openlore-client-legacy-'));
+    const legacy = createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
+    });
+    await new Promise<void>((resolve) => legacy.listen(0, '127.0.0.1', resolve));
+    const address = legacy.address();
+    if (!address || typeof address === 'string') throw new Error('legacy server did not bind');
+    try {
+      await mkdir(join(dir, '.openlore'), { recursive: true });
+      await writeFile(join(dir, '.openlore', 'serve.json'), JSON.stringify({
+        port: address.port,
+        pid: process.pid,
+        host: '127.0.0.1',
+        startedAt: '',
+        version: 'legacy',
+      }));
+      expect(await ensureServeDaemon(dir, { spawn: false })).toBeNull();
+    } finally {
+      await new Promise<void>((resolve) => legacy.close(() => resolve()));
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('calls a tool and returns its body (handler error object on a bare root)', async () => {
     await bootDaemon();
     const ep = await ensureServeDaemon(root, { spawn: false });
@@ -89,6 +115,7 @@ describe('serve-client', () => {
     expect((error as ServeHttpError).status).toBe(403);
     expect(isServePresetRejection(error)).toBe(true);
     expect(isServePresetRejection(new ServeHttpError(500, 'failed'))).toBe(false);
+    expect(isServePresetRejection(new ServeHttpError(403, 'origin rejected'))).toBe(false);
 
     // The same endpoint is still healthy and serves an in-surface member.
     const member = await callServeTool(ep!, 'orient', { task: 'x' }, root) as { error?: string };

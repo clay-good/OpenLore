@@ -2673,6 +2673,19 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
               if (!isServePresetRejection(err)) {
                 daemonByDir.set(directory, null);
               }
+              const annotations = toolAnnotations(name);
+              const replaySafe =
+                isServePresetRejection(err)
+                || annotations.readOnlyHint === true
+                || annotations.idempotentHint === true;
+              if (!replaySafe) {
+                throw new Error(
+                  `The shared daemon connection failed after dispatching ${name}; its outcome is ` +
+                  'unknown, so OpenLore did not replay this non-idempotent operation locally. ' +
+                  'Inspect repository state before retrying.',
+                  { cause: err },
+                );
+              }
               result = await dispatchTool(name, args as Record<string, unknown>, directory);
             }
           } else {
