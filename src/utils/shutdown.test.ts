@@ -7,6 +7,7 @@ import {
   setShutdownState,
   clearShutdownState,
   withShutdownState,
+  createShutdownCoordinator,
 } from './shutdown.js';
 
 // Mock fs
@@ -237,5 +238,84 @@ describe('global shutdown functions', () => {
         })
       ).rejects.toThrow('Test error');
     });
+  });
+});
+
+// ============================================================================
+// createShutdownCoordinator (change: fix-process-exit-lifecycle)
+// ============================================================================
+
+describe('createShutdownCoordinator', () => {
+  it('runs every registered teardown once, then exits with the given code', async () => {
+    const order: string[] = [];
+    const exit = vi.fn<(code: number) => void>();
+    const c = createShutdownCoordinator({ exit });
+
+    c.register(() => { order.push('a'); });
+    c.register(async () => { order.push('b'); });
+
+    await c.shutdown(0);
+
+    expect(order).toEqual(['a', 'b']);
+    expect(exit).toHaveBeenCalledTimes(1);
+    expect(exit).toHaveBeenCalledWith(0);
+  });
+
+  it('is idempotent: a second shutdown runs no teardown and exits once', async () => {
+    const teardown = vi.fn();
+    const exit = vi.fn<(code: number) => void>();
+    const c = createShutdownCoordinator({ exit });
+    c.register(teardown);
+
+    await c.shutdown(0);
+    await c.shutdown(0);
+
+    expect(teardown).toHaveBeenCalledTimes(1);
+    expect(exit).toHaveBeenCalledTimes(1);
+  });
+
+  it('flips isShuttingDown to true', async () => {
+    const c = createShutdownCoordinator({ exit: vi.fn() });
+    expect(c.isShuttingDown).toBe(false);
+    await c.shutdown(0);
+    expect(c.isShuttingDown).toBe(true);
+  });
+
+  it('defaults the exit code to 0', async () => {
+    const exit = vi.fn<(code: number) => void>();
+    const c = createShutdownCoordinator({ exit });
+    await c.shutdown();
+    expect(exit).toHaveBeenCalledWith(0);
+  });
+
+  it('a teardown that throws does not prevent later teardowns or the exit', async () => {
+    const later = vi.fn();
+    const exit = vi.fn<(code: number) => void>();
+    const c = createShutdownCoordinator({ exit });
+    c.register(() => { throw new Error('boom'); });
+    c.register(later);
+
+    await c.shutdown(0);
+
+    expect(later).toHaveBeenCalledTimes(1);
+    expect(exit).toHaveBeenCalledTimes(1);
+    expect(exit).toHaveBeenCalledWith(0);
+  });
+
+  it('a hung teardown cannot turn shutdown into a hang — the process exits within the grace window', async () => {
+    const exit = vi.fn<(code: number) => void>();
+    // A teardown that never resolves — the exact failure mode this coordinator
+    // exists to bound. With a short grace window, shutdown must still exit.
+    const c = createShutdownCoordinator({ exit, graceMs: 20 });
+    c.register(() => new Promise<void>(() => { /* never resolves */ }));
+
+    const start = Date.now();
+    await c.shutdown(0);
+    const elapsed = Date.now() - start;
+
+    expect(exit).toHaveBeenCalledTimes(1);
+    expect(exit).toHaveBeenCalledWith(0);
+    // Bounded by the grace window, not by the hung teardown (which is unbounded).
+    expect(elapsed).toBeLessThan(1000);
   });
 });

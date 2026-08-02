@@ -68,6 +68,7 @@ import {
 } from '../../core/services/mcp-handlers/semantic.js';
 import { dispatchTool, UnknownToolError } from '../../core/services/tool-dispatch.js';
 import { ensureServeDaemon, callServeTool, isServePresetRejection, type ServeEndpoint } from '../../core/services/serve-client.js';
+import { createShutdownCoordinator } from '../../utils/shutdown.js';
 import {
   handleAnalyzeCodebase,
   handleGetArchitectureOverview,
@@ -2445,6 +2446,15 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
   // --watch-auto: start the watcher on the first tool call that carries a directory
   let autoWatcher: import('../../core/services/mcp-watcher.js').McpWatcher | undefined;
 
+  // change: fix-process-exit-lifecycle
+  // The stdio server's lifetime is its stdin. Every long-lived resource acquired
+  // during dispatch (the file watcher and its graph store) registers its teardown
+  // here, and stdin EOF / SIGINT / SIGTERM all converge on this one idempotent
+  // path (wired once after connect). Without this, chokidar's handles keep the
+  // event loop alive after the client closes the pipe, leaking a zombie process
+  // per agent session.
+  const lifecycle = createShutdownCoordinator();
+
   // Serve-daemon delegation: when a shared `openlore serve` daemon is available
   // for a directory, forward tool calls to it (one warm process + one watcher
   // for the repo, shared across agents) instead of dispatching in-process.
@@ -2559,9 +2569,10 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
             selfRebuild: true,
           });
           await autoWatcher.start();
-          const cleanup = () => autoWatcher!.stop().then(() => process.exit(0));
-          process.on('SIGINT',  cleanup);
-          process.on('SIGTERM', cleanup);
+          // Teardown routes through the one lifecycle path wired after connect
+          // (stdin EOF / SIGINT / SIGTERM), so this watcher cannot outlive its
+          // transport and no signal implements a partial teardown of its own.
+          lifecycle.register(() => autoWatcher!.stop());
         }
       }
     }
@@ -2811,6 +2822,21 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
+  // change: fix-process-exit-lifecycle
+  // Bind process lifetime to transport lifetime. The client closing stdin (EOF)
+  // is the natural end of a stdio session; SIGINT/SIGTERM are the signalled ends.
+  // All three converge on one idempotent shutdown that runs every registered
+  // teardown and exits — so an agent session leaves no zombie holding a watcher.
+  // The SDK's StdioServerTransport only listens for stdin 'data'/'error' (never
+  // 'end'), so its onclose does NOT fire on EOF — we wire stdin 'end'/'close'
+  // ourselves. `server.onclose` still covers a transport closed by other means.
+  const shutdown = (): void => { void lifecycle.shutdown(0); };
+  server.onclose = shutdown;
+  process.stdin.once('end', shutdown);
+  process.stdin.once('close', shutdown);
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+
   if (options.watch) {
     const { resolve } = await import('node:path');
     const watchDir = resolve(options.watch);
@@ -2828,9 +2854,8 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
         embed: !options.watchNoEmbed,
       });
       await watcher.start();
-      const cleanup = () => watcher.stop().then(() => process.exit(0));
-      process.on('SIGINT',  cleanup);
-      process.on('SIGTERM', cleanup);
+      // Route this watcher's teardown through the same one lifecycle path.
+      lifecycle.register(() => watcher.stop());
     }
   }
 }
