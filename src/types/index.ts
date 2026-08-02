@@ -288,6 +288,13 @@ export interface FileWalkerResult {
     byDirectory: Record<string, number>;
     skippedCount: number;
     skippedReasons: Record<string, number>;
+    /**
+     * Present only when the walk stopped at the `maxFiles` cap. The corpus is then a truncated
+     * prefix of the repository — `limit` is the cap that was hit and `atPath` is where the walk
+     * stopped — so a partial corpus is never presented as complete. Absent means the walk
+     * completed within the cap.
+     */
+    truncated?: { limit: number; atPath: string };
   };
   rootPath: string;
   timestamp: string;

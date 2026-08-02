@@ -3,6 +3,12 @@
  *
  * Traverses the codebase intelligently, filtering noise and respecting ignore patterns.
  * Collects metadata about each file for significance scoring and analysis.
+ *
+ * The walker is where the substrate's honesty starts: every directory entry it does not analyze
+ * is accounted for under a named skip reason or a truncation receipt, `includePatterns` override
+ * every exclusion layer (down to directory pruning), and nested `.gitignore` files are honored
+ * with git's subtree scoping — so a corpus is never silently smaller than it claims to be
+ * (change: harden-walker-corpus-boundary).
  */
 
 import { opendir, readFile, realpath, stat } from 'node:fs/promises';
@@ -19,6 +25,40 @@ const ignore =
   (ignoreModule as typeof ignoreModule & { default?: typeof ignoreModule }).default ?? ignoreModule;
 type Ignore = ReturnType<typeof ignore>;
 import type { FileMetadata, FileWalkerResult } from '../../types/index.js';
+
+/**
+ * The `ignore` package matches POSIX-separated paths only. `path.relative()` yields
+ * backslash separators on Windows, so every relative path handed to `ig.ignores()` must be
+ * normalized first — otherwise gitignore/exclude/include matching silently no-ops there
+ * (nothing excluded, or everything walked). This is the concrete site the
+ * `fix-windows-invocation-surface` change names.
+ */
+export function toPosixPath(p: string): string {
+  return p.replace(/\\/g, '/');
+}
+
+/**
+ * The glob-free leading directory of an include pattern — the deepest ancestor a walk must
+ * descend into to ever reach a file the pattern can match. `vendor/mylib/**` → `vendor/mylib`,
+ * `src/**\/*.ts` → `src`, a bare `foo.ts` → `foo.ts`. Returned POSIX-normalized.
+ */
+export function includePatternPrefix(pattern: string): string {
+  const normalized = toPosixPath(pattern).replace(/^\.\//, '').replace(/^\//, '');
+  const literal: string[] = [];
+  for (const seg of normalized.split('/')) {
+    if (seg.length === 0) continue;
+    if (/[*?[\]{}!]/.test(seg)) break;
+    literal.push(seg);
+  }
+  return literal.join('/');
+}
+
+/** A `.gitignore` found in a subdirectory, scoped (git semantics) to its own subtree. */
+interface NestedIgnore {
+  /** POSIX repo-relative path of the directory that owns the `.gitignore`. */
+  baseDir: string;
+  ig: Ignore;
+}
 
 /**
  * Options for the FileWalker
@@ -227,6 +267,18 @@ const TEST_FILE_PATTERNS = [
 const MAX_READ_SIZE = 10_000_000;
 
 /**
+ * How many directory entries the walk may examine PAST the `maxFiles` cap while confirming a
+ * truncation before it gives up and conservatively declares the corpus partial. Precise detection
+ * (a truncation is real iff a genuinely admissible file is denied) means walking until the next
+ * admissible file; in a realistic oversized repo source files are dense, so that file appears
+ * almost immediately. This bound caps the pathological case — the cap filling right before a large
+ * trailing subtree of only-skipped files — so the walk never re-scans the whole repository just to
+ * label it. Generous enough that a real sibling overflow is always found precisely; small enough
+ * that the fallback scan stays well under a tenth of a second.
+ */
+const POST_CAP_PROBE_LIMIT = 10_000;
+
+/**
  * Check if a file has a shebang line
  */
 async function hasShebang(filePath: string): Promise<boolean> {
@@ -317,7 +369,10 @@ async function isEntryPoint(
     return true;
   }
 
-  // Files in src/, lib/, bin/ at depth 1 might be entry points
+  // Files in src/, lib/, bin/ at depth 1 might be entry points. Note: `bin` is in
+  // SKIP_DIRECTORIES, so a file under `bin/` only reaches this classifier when the user's
+  // `includePatterns` override descends into it (see matchesIncludeLineage) — the branch is
+  // reachable exactly on that path, not dead.
   if (depth === 1) {
     const dir = dirname(relativePath);
     if (['src', 'lib', 'bin'].includes(dir)) {
@@ -383,6 +438,33 @@ export class FileWalker {
   private ig: Ignore | null = null;
   /** Separate ignore instance used to check if a file matches includePatterns. */
   private igInclude: Ignore | null = null;
+  /**
+   * Glob-free directory prefixes of the include patterns. A directory on the lineage of any
+   * of these must be descended even when a built-in skip / gitignore / excludePatterns rule
+   * would otherwise prune it, so the documented "includePatterns override all exclusions"
+   * contract holds at directory granularity, not only at file granularity.
+   */
+  private includePrefixes: string[] = [];
+  /**
+   * True when an include pattern begins with a glob segment (`**\/*.ts`, `*.ts`) and therefore
+   * has no glob-free directory prefix to anchor on. Such a pattern can match a file at ANY depth,
+   * so every directory is on its lineage — no directory may be pruned, or the override is a
+   * silent no-op inside pruned trees.
+   */
+  private includeMatchesAnyDir = false;
+  /**
+   * Where the walk stopped when it hit `maxFiles`, if it did. Non-null means the corpus is a
+   * truncated prefix of the repository, and the walk summary must say so rather than present
+   * a partial corpus as complete.
+   */
+  private truncatedAtPath: string | null = null;
+  /**
+   * Set once truncation is confirmed (an admissible file was denied because the cap was full).
+   * Unwinds the recursion promptly instead of scanning the rest of the tree.
+   */
+  private stopWalk = false;
+  /** Entries examined past the `maxFiles` cap while probing for an overflow file (see the bound). */
+  private postCapEntriesExamined = 0;
   private files: FileMetadata[] = [];
   private skippedCount = 0;
   private skippedReasons: Record<string, number> = {};
@@ -423,6 +505,97 @@ export class FileWalker {
   }
 
   /**
+   * Record where the walk hit the `maxFiles` cap. Only the first stop location wins.
+   *
+   * Called from exactly one site — the point where a file that passed every skip check cannot be
+   * added because the corpus is full — so a non-null value means at least one genuinely
+   * analyzable file was dropped. A complete corpus (even one that exactly fills the cap) is never
+   * marked, because no admissible file is ever denied in that case.
+   */
+  private markTruncated(atPath: string): void {
+    if (this.truncatedAtPath === null) {
+      this.truncatedAtPath = atPath.length > 0 ? toPosixPath(atPath) : '.';
+    }
+  }
+
+  /**
+   * Count one entry examined past a full corpus and, if the probe budget is spent, conservatively
+   * declare truncation and arm the unwind. Returns true when the caller should stop. A no-op (and
+   * false) while the corpus is not yet full — the probe only runs past the cap. Reaching the budget
+   * without an admissible file means a large trailing all-skipped subtree: continuing would re-scan
+   * the repository the cap exists to bound, and a corpus with that much beyond it is honestly partial.
+   */
+  private probePastCap(atPath: string): boolean {
+    if (this.files.length < this.options.maxFiles) return false;
+    this.postCapEntriesExamined++;
+    if (this.postCapEntriesExamined > POST_CAP_PROBE_LIMIT) {
+      this.markTruncated(atPath);
+      this.stopWalk = true;
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Is `relativeDir` on the lineage of an include pattern — i.e. it either contains (is an
+   * ancestor of) or lies under a directory an include pattern targets? Such a directory must
+   * be descended regardless of any exclusion layer, or the include is a silent no-op because
+   * its directory was pruned before any file inside it was ever tested.
+   */
+  private matchesIncludeLineage(relativeDir: string): boolean {
+    // A glob-leading include pattern (`**/*.ts`, `*.ts`) can match at any depth, so no directory
+    // may be pruned — every one is on its lineage.
+    if (this.includeMatchesAnyDir) return true;
+    if (this.includePrefixes.length === 0) return false;
+    const dir = toPosixPath(relativeDir);
+    if (dir === '' || dir === '.') return true;
+    for (const prefix of this.includePrefixes) {
+      if (dir === prefix || dir.startsWith(prefix + '/') || prefix.startsWith(dir + '/')) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Does any active nested `.gitignore` exclude this POSIX path? Each scope only governs its
+   * own subtree (git semantics), so a pattern in `packages/app/.gitignore` never leaks to
+   * `packages/lib/`. The directory holding a `.gitignore` is never excluded by its own file.
+   */
+  private isIgnoredByNested(posixRelPath: string, nested: NestedIgnore[]): boolean {
+    for (const scope of nested) {
+      const base = scope.baseDir;
+      let sub: string;
+      if (base === '' || base === '.') {
+        sub = posixRelPath;
+      } else if (posixRelPath === base || posixRelPath === base + '/') {
+        continue;
+      } else if (posixRelPath.startsWith(base + '/')) {
+        sub = posixRelPath.slice(base.length + 1);
+      } else {
+        continue;
+      }
+      if (sub.length > 0 && scope.ig.ignores(sub)) return true;
+    }
+    return false;
+  }
+
+  /** Read a directory's own `.gitignore` (if any) into a subtree-scoped matcher. */
+  private async loadDirectoryGitignore(
+    dirPath: string,
+    relativeDirPath: string,
+  ): Promise<NestedIgnore | null> {
+    try {
+      const content = await readFile(join(dirPath, '.gitignore'), 'utf-8');
+      const ig = ignore();
+      ig.add(content);
+      return { baseDir: toPosixPath(relativeDirPath), ig };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Check if we should skip a directory
    */
   private shouldSkipDirectory(dirName: string, depth: number, relativeDir?: string): boolean {
@@ -459,20 +632,22 @@ export class FileWalker {
    * Check if we should skip a file
    */
   private shouldSkipFile(relativePath: string, _fileName: string): boolean {
+    const posixPath = toPosixPath(relativePath);
+
     // includePatterns override all exclusions — check first
-    if (this.igInclude && this.igInclude.ignores(relativePath)) {
+    if (this.igInclude && this.igInclude.ignores(posixPath)) {
       return false;
     }
 
     // Check against ignore patterns (gitignore + excludePatterns)
-    if (this.ig && this.ig.ignores(relativePath)) {
+    if (this.ig && this.ig.ignores(posixPath)) {
       return true;
     }
 
     // Check exclude patterns against relative path (direct prefix match)
     for (const pattern of this.options.excludePatterns) {
-      const normalized = pattern.replace(/\/\*\*$/, '').replace(/\/$/, '');
-      if (relativePath === normalized || relativePath.startsWith(normalized + '/')) {
+      const normalized = toPosixPath(pattern).replace(/\/\*\*$/, '').replace(/\/$/, '');
+      if (posixPath === normalized || posixPath.startsWith(normalized + '/')) {
         return true;
       }
     }
@@ -483,20 +658,28 @@ export class FileWalker {
   /**
    * Walk a directory recursively
    */
-  private async walkDirectory(dirPath: string, depth: number): Promise<void> {
-    // Check for cancellation
-    if (this.options.signal.aborted) {
-      return;
-    }
-
-    // Check if we've reached max files
-    if (this.files.length >= this.options.maxFiles) {
+  private async walkDirectory(
+    dirPath: string,
+    depth: number,
+    nestedIgnores: NestedIgnore[] = [],
+  ): Promise<void> {
+    // Check for cancellation, or an already-confirmed truncation unwinding the recursion.
+    if (this.options.signal.aborted || this.stopWalk) {
       return;
     }
 
     this.directoriesScanned++;
 
     const relativeDirPath = relative(this.rootPath, dirPath);
+
+    // Honor a `.gitignore` in this directory (git scopes it to this subtree). The repository
+    // root's `.gitignore` is already folded into `this.ig`; nested ones are added here so their
+    // patterns apply only below where they live, matching git — not to the whole repo.
+    let activeNested = nestedIgnores;
+    if (depth > 0) {
+      const local = await this.loadDirectoryGitignore(dirPath, relativeDirPath);
+      if (local) activeNested = [...nestedIgnores, local];
+    }
 
     // Report progress
     this.options.onProgress({
@@ -548,21 +731,38 @@ export class FileWalker {
 
       // Process subdirectories
       for (const entry of directories) {
-        if (this.options.signal.aborted) break;
-        if (this.files.length >= this.options.maxFiles) break;
+        if (this.options.signal.aborted || this.stopWalk) break;
+        // Past a full corpus, bound how far we descend probing for an overflow file.
+        if (this.probePastCap(relativeDirPath)) break;
 
         const subPath = join(dirPath, entry.name);
         const relativeSubPath = relative(this.rootPath, subPath);
+        const posixSubPath = toPosixPath(relativeSubPath);
 
-        if (this.shouldSkipDirectory(entry.name, depth, relativeSubPath)) {
-          this.recordSkip(`directory:${entry.name}`);
-          continue;
-        }
+        // includePatterns override EVERY exclusion layer, including directory pruning: a
+        // directory on the lineage of an include pattern is descended even when a built-in
+        // skip dir, gitignore, or excludePatterns rule would prune it — otherwise the include
+        // is a silent no-op because its directory vanished before any file was tested. The
+        // file-level check (shouldSkipFile) still admits only the files that actually match.
+        const forceInclude = this.matchesIncludeLineage(relativeSubPath);
 
-        // Check against ignore patterns
-        if (this.ig && this.ig.ignores(relativeSubPath + '/')) {
-          this.recordSkip('gitignore');
-          continue;
+        if (!forceInclude) {
+          if (this.shouldSkipDirectory(entry.name, depth, relativeSubPath)) {
+            this.recordSkip(`directory:${entry.name}`);
+            continue;
+          }
+
+          // Check against ignore patterns (root gitignore + built-ins + excludes)
+          if (this.ig && this.ig.ignores(posixSubPath + '/')) {
+            this.recordSkip('gitignore');
+            continue;
+          }
+
+          // Check against nested `.gitignore` scopes active for this subtree
+          if (this.isIgnoredByNested(posixSubPath + '/', activeNested)) {
+            this.recordSkip('gitignore');
+            continue;
+          }
         }
 
         // Following symlinks makes two hazards reachable that could not occur while they were
@@ -592,20 +792,43 @@ export class FileWalker {
         }
         this.visitedRealDirs.add(realSubPath);
 
-        await this.walkDirectory(subPath, depth + 1);
+        await this.walkDirectory(subPath, depth + 1, activeNested);
+        if (this.stopWalk) break;
       }
 
-      // Process files sequentially to respect maxFiles limit accurately
+      // Process files sequentially. The `maxFiles` cap is enforced AFTER the skip checks so the
+      // truncation receipt fires only when a genuinely ADMISSIBLE file is denied — never on a
+      // trailing empty/skipped entry, which would brand a complete corpus as partial.
       for (const entry of files) {
-        if (this.options.signal.aborted) break;
-        if (this.files.length >= this.options.maxFiles) break;
+        if (this.options.signal.aborted || this.stopWalk) break;
+        // Past a full corpus, bound how many skipped files we scan probing for an overflow file.
+        if (this.probePastCap(relativeDirPath)) break;
 
         const filePath = join(dirPath, entry.name);
         const relativePath = relative(this.rootPath, filePath);
+        const posixPath = toPosixPath(relativePath);
+
+        // A nested `.gitignore` excludes its own subtree's files — unless an include pattern
+        // overrides it, keeping includePatterns supreme over every exclusion layer.
+        const includedByPattern = this.igInclude?.ignores(posixPath) ?? false;
+        if (!includedByPattern && this.isIgnoredByNested(posixPath, activeNested)) {
+          this.recordSkip('gitignore');
+          continue;
+        }
 
         if (this.shouldSkipFile(relativePath, entry.name)) {
           this.recordSkip('pattern');
           continue;
+        }
+
+        // This file WOULD be analyzed — but the corpus is already full. That is a real
+        // truncation: record where it happened and unwind. (The walk keeps scanning past the cap
+        // only until this first admissible-but-denied file, so a genuinely oversized repo stops
+        // promptly while an exact-fit repo is never mislabeled.)
+        if (this.files.length >= this.options.maxFiles) {
+          this.markTruncated(relativeDirPath);
+          this.stopWalk = true;
+          break;
         }
 
         await this.processFile(filePath, relativePath, entry.name, depth);
@@ -669,6 +892,16 @@ export class FileWalker {
     this.realRootPath = await realpath(this.rootPath).catch(() => this.rootPath);
     this.visitedRealDirs.clear();
     this.visitedRealDirs.add(this.realRootPath);
+    // Reset every accumulator so a re-used instance re-walks cleanly rather than double-counting.
+    this.files = [];
+    this.skippedCount = 0;
+    this.skippedReasons = {};
+    this.directoriesScanned = 0;
+    this.extensionCounts = {};
+    this.directoryCounts = Object.create(null) as Record<string, number>;
+    this.stopWalk = false;
+    this.truncatedAtPath = null;
+    this.postCapEntriesExamined = 0;
 
     // Load ignore patterns
     this.ig = await loadIgnorePatterns(this.rootPath);
@@ -687,6 +920,19 @@ export class FileWalker {
         this.ig.add('!' + pattern);
         this.igInclude.add(pattern);
       }
+      // Glob-free directory lineage of each include pattern, so directory pruning can honor
+      // the "includePatterns override all exclusions" contract before pruning a directory.
+      this.includePrefixes = this.options.includePatterns
+        .map(includePatternPrefix)
+        .filter((p) => p.length > 0);
+      // An UNANCHORED pattern with no glob-free prefix (it starts with a glob, e.g. `**/*.ts` or
+      // `*.ts`) can match a file at any depth, so it must force every directory open. An anchored
+      // pattern (`/*.ts`) is root-relative: its lineage is captured by its prefix (empty here means
+      // "root only", and root is always descended), so it must NOT force the whole tree open.
+      this.includeMatchesAnyDir = this.options.includePatterns.some((p) => {
+        const t = p.trim();
+        return t.length > 0 && !t.startsWith('/') && includePatternPrefix(t) === '';
+      });
     }
 
     // Start walking from root
@@ -701,6 +947,12 @@ export class FileWalker {
         byDirectory: this.directoryCounts,
         skippedCount: this.skippedCount,
         skippedReasons: this.skippedReasons,
+        // A partial corpus must announce itself: hitting `maxFiles` leaves the graph a truncated
+        // prefix of the repository, which every downstream tool would otherwise present as the
+        // whole repo. Absent means the walk completed within the cap.
+        ...(this.truncatedAtPath !== null
+          ? { truncated: { limit: this.options.maxFiles, atPath: this.truncatedAtPath } }
+          : {}),
       },
       rootPath: this.rootPath,
       timestamp: new Date().toISOString(),

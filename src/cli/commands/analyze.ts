@@ -187,6 +187,15 @@ export async function runAnalysis(
       ? `${repoMap.summary.skippedFiles} (${skipReasons.join(', ')})`
       : repoMap.summary.skippedFiles,
   );
+  // A truncated walk analyzed only a prefix of the repository — say so, or every count above and
+  // every downstream tool presents a partial corpus as the whole repo (change:
+  // harden-walker-corpus-boundary).
+  if (repoMap.summary.truncated) {
+    logger.warning(
+      `Partial corpus: walk stopped at the ${repoMap.summary.truncated.limit}-file cap ` +
+        `(at ${repoMap.summary.truncated.atPath}). Raise maxFiles or narrow the include set to analyze the rest.`,
+    );
+  }
   logger.blank();
 
   // Phase 2: Dependency Graph

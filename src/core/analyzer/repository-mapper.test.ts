@@ -449,4 +449,37 @@ describe('RepositoryMapper', () => {
       expect(map.clusters.byLayer.infrastructure.length).toBeGreaterThan(0);
     });
   });
+
+  // A truncated walk analyzed only a prefix of the repository. The map must carry that receipt so
+  // `analyze` can disclose the partial corpus instead of reporting a smaller count as if it were
+  // the whole repo (change: harden-walker-corpus-boundary).
+  describe('partial-corpus disclosure', () => {
+    it('propagates the truncation receipt when maxFiles is hit and renders it in the summary', async () => {
+      for (let i = 0; i < 6; i++) {
+        await writeFile(join(testDir, `mod${i}.ts`), `export const v${i} = ${i};`);
+      }
+
+      const outputDir = join(testDir, '.out');
+      const mapper = new RepositoryMapper(testDir, { maxFiles: 2, outputDir });
+      const map = await mapper.map();
+
+      expect(map.summary.truncated).toBeDefined();
+      expect(map.summary.truncated?.limit).toBe(2);
+
+      await mapper.writeOutput(map);
+      const summary = await import('node:fs/promises').then((fs) =>
+        fs.readFile(join(outputDir, 'SUMMARY.md'), 'utf-8'),
+      );
+      expect(summary).toContain('Partial corpus');
+    });
+
+    it('leaves no truncation receipt when the walk completes within the cap', async () => {
+      await writeFile(join(testDir, 'a.ts'), 'export const a = 1;');
+      await writeFile(join(testDir, 'b.ts'), 'export const b = 2;');
+
+      const map = await new RepositoryMapper(testDir, { maxFiles: 100 }).map();
+
+      expect(map.summary.truncated).toBeUndefined();
+    });
+  });
 });
