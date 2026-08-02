@@ -26,7 +26,7 @@
 <p align="center"><em>A real, unedited recording — the published <code>openlore</code> on a fresh clone of <a href="https://github.com/BurntSushi/ripgrep">ripgrep</a>. <strong>install</strong> wires your agent and indexes the repo live — 235 files, 2,978 functions, 4,329 call edges in <strong>14 seconds</strong>, no API key → <strong>orient</strong> returns the code a task touches → <strong>review</strong> catches a signature change that left <strong>39 callers</strong> stale → <strong>prove</strong> projects the payoff. Re-record it yourself: <a href="docs/openlore-demo.tape"><code>docs/openlore-demo.tape</code></a>.</em></p>
 
 <p align="center">
-  <strong><a href="#install-in-one-command">Install</a> · <a href="#what-you-get">What you get</a> · <a href="#does-it-pay-for-itself">Benchmarks</a> · <a href="#governance">Governance</a> · <a href="#how-it-works">How it works</a> · <a href="#openlore-vs-alternatives">vs. Alternatives</a> · <a href="#documentation">Docs</a></strong>
+  <strong><a href="#install-in-one-command">Install</a> · <a href="#what-you-get">What you get</a> · <a href="#value-scorecard--does-it-pay-for-itself">Benchmarks</a> · <a href="#governance">Governance</a> · <a href="#how-it-works">How it works</a> · <a href="#openlore-vs-alternatives">vs. Alternatives</a> · <a href="#documentation">Docs</a></strong>
 </p>
 
 ---
@@ -86,7 +86,7 @@ Full guardrail table with commands: [Governance](#governance).
 | **What it misses** | the five callers living in files it never opened | every caller the graph can see |
 | **Before it commits** | "looks right to me" | `blast_radius` → tests to run; `certify_public_surface` → the consumers this change breaks, by name |
 
-The measured effect on deep, multi-hop tasks: **25 → 16 round-trips** on excalidraw, **−26%** aggregate. Not magic — the difference between *rediscovering* structure per task and *querying* it. Full numbers, including where it **doesn't** pay off: [Does it pay for itself?](#does-it-pay-for-itself)
+The measured effect on deep, multi-hop tasks: **25 → 16 round-trips** on excalidraw, **−26%** aggregate. Not magic — the difference between *rediscovering* structure per task and *querying* it. Full numbers, including where it **doesn't** pay off: [Does it pay for itself?](#value-scorecard--does-it-pay-for-itself)
 
 <details>
 <summary><strong>See a real <code>orient()</code> result</strong> — one query replaces most exploratory file reads</summary>
@@ -120,14 +120,16 @@ The agent knows exactly where to look, what it touches, and what's risky to touc
 
 ---
 
-## Does it pay for itself?
+## Value Scorecard — does it pay for itself?
 
 OpenLore only earns its place if an agent **with** it reaches a correct answer for less total cost than the same agent **without** it. We measure that and publish it — wins **and** losses. Numbers from the Spec 14 agent benchmark (`claude -p`, sonnet, N=4 medians, pinned SHAs), measured **2026-06-01**.
 
 | Scenario | Cost Δ | Round-trips Δ | Correctness | Verdict |
 |---|---|---|---|---|
 | **Large/unfamiliar repo · deep "how does X flow through Y"** *(its target)* | **−7% to −21%** | **−26%** | 100% = 100% | ✅ helps — and the win grows with repo size |
-| Small/familiar repo · shallow "who calls X" | **task-dependent** *(Round 1: +43%)* | +38% | 100% = 100% | ❌ often pure overhead — measure first |
+| Small/familiar repo · shallow "who calls X" | **task-dependent** *(Round 1: +43%)* | +38% | 100% = 100% | ❌ often adds overhead — measure first |
+
+> **Re-confirmed live 2026-06-03 (N=2):** the deep-task win **reproduces** (okhttp **−13%**). The small/familiar case is task-dependent, not a flat loss — same repo class, opposite outcomes (chalk **−32%** win vs. express **+59%** loss). Don't guess from our repos — run **`openlore prove`** on yours.
 
 The win scales with codebase size (round-trips WITHOUT → WITH):
 
@@ -135,6 +137,7 @@ The win scales with codebase size (round-trips WITHOUT → WITH):
 |---|---|---|
 | excalidraw (~640 files) | **−21%** | 25 → 16 |
 | tokio (~790 files) | **−21%** | 17 → 13 |
+| okhttp | **−13%** | 13 → 11 |
 | django (~3k files) | **−7%** | 21 → 15 |
 | gin (110 files, smallest) | +4% *(≈even)* | 10 → 9 |
 
@@ -152,7 +155,7 @@ The fastest way to evaluate a tool is to find out quickly that it isn't for you.
 |---|---|
 | ✅ **Strong fit** | A codebase too big to hold in your head — and the model's. Private or niche code the model never memorized. Long sessions where stale assumptions compound. Polyglot repos, or code plus the IaC that deploys it. Anywhere "the agent changed something it shouldn't have" is a real cost. |
 | 🤔 **Try it, but measure** | Mid-size repos and mixed workloads. The win scales with size and depth — run **`openlore prove --estimate`** (seconds, no key) before you commit. |
-| ❌ **Probably not yet** | A small repo the model already knows, answering shallow questions like "who calls `parseArgs`" — your agent's built-in search is cheaper, and we [publish the measurement that says so](#does-it-pay-for-itself). Also: if you want something to *perform* the refactor, OpenLore is the wrong layer — it locates and certifies, it never edits your code. |
+| ❌ **Probably not yet** | A small repo the model already knows, answering shallow questions like "who calls `parseArgs`" — your agent's built-in search is cheaper, and we [publish the measurement that says so](#value-scorecard--does-it-pay-for-itself). Also: if you want something to *perform* the refactor, OpenLore is the wrong layer — it locates and certifies, it never edits your code. |
 
 **If you read one line of this README:** an agent's expensive failure mode isn't ignorance — it's *confidence*. A model that doesn't know a function exists will go look. A model that "knows" a stale fact will confidently build on it, and you pay for that at review time. OpenLore is built so the agent can be told **"that fact is stale"** and **"this change opens a path you said was sensitive"** — deterministically, with no second model guessing about the first.
 
@@ -256,7 +259,7 @@ OpenLore answers it too — then keeps going into the **second question almost n
 - **Symbol-level *edits*** (rename across files, move a symbol) — an **LSP toolkit's** home turf. OpenLore is deliberately read-only; the two compose well.
 - **Search across hundreds of repos, org-wide, with an audit trail** — a **code search platform**. OpenLore is local-first and repo-scoped (federation is opt-in and read-only).
 - **Just fast graph retrieval, nothing else** — a **graph MCP server** is a smaller surface. OpenLore's extra weight is governance; skip it if you don't want a commit gate.
-- **A small, familiar repo and shallow questions** — your agent's built-in search is often cheaper. We measured it and [published it](#does-it-pay-for-itself).
+- **A small, familiar repo and shallow questions** — your agent's built-in search is often cheaper. We measured it and [published it](#value-scorecard--does-it-pay-for-itself).
 
 *Comparisons reflect each project's publicly documented capabilities as of July 2026 and describe categories, not verdicts on quality; a correction PR is always welcome. OpenLore [exports SCIP](docs/scip-export.md), so it sits alongside these tools rather than against them.*
 
@@ -351,7 +354,7 @@ Everything else (read a file, grep, list files) uses your native tools. Full ref
 - **`verify_claim`** *(no key, opt-in)* — `confirmed / refuted / unverifiable` with a citation receipt, never an LLM guess.
 - **`openlore enforce`** *(no key, advisory)* — the unified gate over all governance findings; one `enforcement.policy` maps each finding → `blocking / advisory / off`. → [docs/configuration.md](docs/configuration.md#enforcement-policy)
 - **Decisions on the graph** *(API key for consolidation)* — `record_decision` before writing code; a pre-commit hook gates until reviewed. Decisions become `decision::` nodes joined to the files they govern, so `analyze_impact` returns them as neighbors.
-- **Epistemic Lease** *(no key)* — models drift as a navigation phenomenon; every MCP response carries a brief freshness note once context ages. `orient()` resets it.
+- **Epistemic Lease** *(no key)* — models drift as a navigation phenomenon; every MCP response carries a brief, factual freshness note once context ages. `orient()` resets it.
 - **`structural_diff`** *(no key)* — the structural complement to `git diff`: functions/edges added/removed, signature changes, and callers now stale. → [docs/structural-diff.md](docs/structural-diff.md)
 - **`get_change_coupling`** *(no key)* — co-change coupling and churn from git. Advisory, correlation not causation. → [docs/change-coupling.md](docs/change-coupling.md)
 - **`report_coverage_gaps`** *(no key, opt-in)* — which load-bearing code has no test reaching it, ranked by significance. Never claims a symbol is "tested." → [docs/coverage-gaps.md](docs/coverage-gaps.md)
