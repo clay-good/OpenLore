@@ -104,6 +104,19 @@ describe('MCP stdio server exits on stdin EOF (no zombie)', () => {
     expect(ms).toBeLessThan(EXIT_BUDGET_MS);
     expect(code).toBe(0);
   }, 20_000);
+
+  it('exits promptly on SIGTERM after a watcher-starting session (signals converge on the same teardown)', async () => {
+    if (!HAVE_BUILD) { console.warn('  ⚠ no dist build — run "npm run build"'); return; }
+    // The architecture requirement is that EOF, SIGINT, and SIGTERM all route
+    // through one teardown. EOF is covered above; this covers the signal leg.
+    const proc = spawnCli(['mcp', '--no-watch-auto', '--watch', watchDir, '--watch-no-embed', '--preset', 'full'], { cwd: watchDir });
+    initialize(proc);
+    await sleep(1500); // let the watcher reach 'ready'
+    proc.kill('SIGTERM');
+    const { code, ms } = await exitWithin(proc, EXIT_BUDGET_MS);
+    expect(ms).toBeLessThan(EXIT_BUDGET_MS);
+    expect(code).toBe(0); // shutdown(0) is the single path for every leg
+  }, 20_000);
 });
 
 describe('generate exits promptly after a fatal connection error', () => {

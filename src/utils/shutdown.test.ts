@@ -318,4 +318,20 @@ describe('createShutdownCoordinator', () => {
     // Bounded by the grace window, not by the hung teardown (which is unbounded).
     expect(elapsed).toBeLessThan(1000);
   });
+
+  it('a teardown registered AFTER shutdown has begun still runs (not silently dropped)', async () => {
+    // Reachable in the MCP wiring: a watcher started by a tool call still in
+    // flight when stdin EOF triggers shutdown registers its teardown late. The
+    // contract ("every registered teardown runs once") must hold even then —
+    // process.exit masks it in production, but not when exit is injected.
+    const exit = vi.fn<(code: number) => void>();
+    const late = vi.fn();
+    const c = createShutdownCoordinator({ exit });
+
+    await c.shutdown(0);
+    c.register(late);
+    await Promise.resolve(); // flush the microtask the late teardown runs on
+
+    expect(late).toHaveBeenCalledTimes(1);
+  });
 });

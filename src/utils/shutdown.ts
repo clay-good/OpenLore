@@ -277,6 +277,16 @@ export function createShutdownCoordinator(
       return shuttingDown;
     },
     register(teardown: CleanupCallback): void {
+      if (shuttingDown) {
+        // Shutdown already snapshotted its teardowns. A late registrant — e.g. a
+        // watcher started by a tool call that was in flight when stdin EOF began
+        // the shutdown — would otherwise be silently dropped. Run it now so the
+        // "every registered teardown runs once" contract holds even when `exit`
+        // is injected (tests) or non-terminating. Errors swallowed, matching the
+        // allSettled path in shutdown().
+        void Promise.resolve().then(teardown).catch(() => { /* best-effort */ });
+        return;
+      }
       teardowns.push(teardown);
     },
     async shutdown(code = 0): Promise<void> {
