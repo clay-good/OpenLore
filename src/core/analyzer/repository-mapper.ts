@@ -100,6 +100,10 @@ export interface RepositoryMapSummary {
    * which the renderer treats as "say nothing extra" rather than fabricating an empty tally.
    */
   skippedReasons?: Record<string, number>;
+  /** How many symlinks were followed into the corpus (disclosure; see FileWalkerResult). */
+  symlinkFollowed?: number;
+  /** Include patterns the caller set that matched no file — a visible config no-op. */
+  includePatternsUnmatched?: string[];
   /**
    * Present only when the file walk stopped at the `maxFiles` cap — the analyzed corpus is a
    * truncated prefix of the repository, not the whole thing. Carried through so `analyze` can
@@ -848,6 +852,8 @@ export class RepositoryMapper {
         analyzedFiles: walkResult.summary.totalFiles,
         skippedFiles: walkResult.summary.skippedCount,
         skippedReasons: walkResult.summary.skippedReasons,
+        symlinkFollowed: walkResult.summary.symlinkFollowed,
+        includePatternsUnmatched: walkResult.summary.includePatternsUnmatched,
         truncated: walkResult.summary.truncated,
         languages,
         frameworks,
@@ -899,6 +905,9 @@ export class RepositoryMapper {
     lines.push(`- **Total Files**: ${map.summary.totalFiles}`);
     lines.push(`- **Analyzed Files**: ${map.summary.analyzedFiles}`);
     lines.push(`- **Skipped Files**: ${map.summary.skippedFiles}`);
+    if (map.summary.symlinkFollowed) {
+      lines.push(`- **Symlinks Followed**: ${map.summary.symlinkFollowed}`);
+    }
     if (map.summary.truncated) {
       lines.push(
         `- **⚠️ Partial corpus**: walk stopped at the ${map.summary.truncated.limit}-file ` +

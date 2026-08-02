@@ -53,6 +53,16 @@ export function includePatternPrefix(pattern: string): string {
   return literal.join('/');
 }
 
+/**
+ * Classify a filesystem error hit while listing/reading an entry into a named skip reason. A
+ * permission-denied directory drops a whole subtree, which is a very different disclosure from a
+ * transient read error — lumping both under a bare `error` read like an ordinary hiccup.
+ */
+function directorySkipReason(e: unknown): string {
+  const code = (e as { code?: string } | null)?.code;
+  return code === 'EACCES' || code === 'EPERM' ? 'error:permission' : 'error:read';
+}
+
 /** A `.gitignore` found in a subdirectory, scoped (git semantics) to its own subtree. */
 interface NestedIgnore {
   /** POSIX repo-relative path of the directory that owns the `.gitignore`. */
@@ -490,15 +500,16 @@ export class FileWalker {
     };
   }
 
-  /**
-   * Record a skipped file with reason
-   */
   /** Real paths of directories already walked — stops a symlink cycle from walking forever. */
   private readonly visitedRealDirs = new Set<string>();
 
   /** The root, resolved, so confinement compares like with like when the root itself is a link. */
   private realRootPath = '';
 
+  /** How many followed symlinks (dir or file) entered the corpus — disclosed in the summary. */
+  private symlinkFollowedCount = 0;
+
+  /** Record a skipped directory entry under a named reason. */
   private recordSkip(reason: string): void {
     this.skippedCount++;
     this.skippedReasons[reason] = (this.skippedReasons[reason] ?? 0) + 1;
@@ -561,6 +572,14 @@ export class FileWalker {
    * Does any active nested `.gitignore` exclude this POSIX path? Each scope only governs its
    * own subtree (git semantics), so a pattern in `packages/app/.gitignore` never leaks to
    * `packages/lib/`. The directory holding a `.gitignore` is never excluded by its own file.
+   *
+   * BOUNDARY (deliberate): the root and nested `.gitignore` files are evaluated as INDEPENDENT
+   * subtree filters (ignored if the root `this.ig` OR any scope says so), not as one git-style
+   * depth-ordered chain. So a deeper `!important.log` that re-includes what a shallower `*.log`
+   * excluded is NOT honored — the walker errs toward over-exclusion (a smaller, never a wrongly
+   * larger, corpus). Same-file negation works (delegated to the `ignore` package). Full
+   * cross-file negation precedence is a separate, larger change (it must not resurrect the
+   * builtin skip dirs); see the follow-up task.
    */
   private isIgnoredByNested(posixRelPath: string, nested: NestedIgnore[]): boolean {
     for (const scope of nested) {
@@ -629,11 +648,10 @@ export class FileWalker {
   }
 
   /**
-   * Check if we should skip a file
+   * Check if we should skip a file. `posixPath` is the caller's already-normalized relative path
+   * (avoids re-running `toPosixPath` per file on the walk's hot path).
    */
-  private shouldSkipFile(relativePath: string, _fileName: string): boolean {
-    const posixPath = toPosixPath(relativePath);
-
+  private shouldSkipFile(posixPath: string): boolean {
     // includePatterns override all exclusions — check first
     if (this.igInclude && this.igInclude.ignores(posixPath)) {
       return false;
@@ -672,15 +690,6 @@ export class FileWalker {
 
     const relativeDirPath = relative(this.rootPath, dirPath);
 
-    // Honor a `.gitignore` in this directory (git scopes it to this subtree). The repository
-    // root's `.gitignore` is already folded into `this.ig`; nested ones are added here so their
-    // patterns apply only below where they live, matching git — not to the whole repo.
-    let activeNested = nestedIgnores;
-    if (depth > 0) {
-      const local = await this.loadDirectoryGitignore(dirPath, relativeDirPath);
-      if (local) activeNested = [...nestedIgnores, local];
-    }
-
     // Report progress
     this.options.onProgress({
       filesFound: this.files.length,
@@ -688,10 +697,16 @@ export class FileWalker {
       currentPath: relativeDirPath || '.',
     });
 
+    // The repository root's `.gitignore` is folded into `this.ig`; a nested one is added below,
+    // scoped to this subtree so its patterns apply only where they live (git semantics).
+    let activeNested = nestedIgnores;
+
     try {
       const dir = await opendir(dirPath);
 
-      const entries: { name: string; isDirectory: boolean; isFile: boolean }[] = [];
+      const entries: { name: string; isDirectory: boolean; isFile: boolean; isSymlink: boolean }[] =
+        [];
+      let hasGitignore = false;
 
       for await (const entry of dir) {
         // A `Dirent` does NOT follow symlinks, so a symlink reports false for BOTH `isDirectory`
@@ -704,9 +719,10 @@ export class FileWalker {
         //
         // Resolve the link and classify it by its TARGET. Escapes and loops are handled below;
         // neither was previously possible only because nothing was followed.
+        const isSymlink = entry.isSymbolicLink();
         let isDirectory = entry.isDirectory();
         let isFile = entry.isFile();
-        if (!isDirectory && !isFile && entry.isSymbolicLink()) {
+        if (!isDirectory && !isFile && isSymlink) {
           try {
             const target = await stat(join(dirPath, entry.name));
             isDirectory = target.isDirectory();
@@ -722,7 +738,17 @@ export class FileWalker {
             continue;
           }
         }
-        entries.push({ name: entry.name, isDirectory, isFile });
+        if (isFile && entry.name === '.gitignore') hasGitignore = true;
+        entries.push({ name: entry.name, isDirectory, isFile, isSymlink });
+      }
+
+      // Load this directory's own `.gitignore` ONLY when the listing we just built actually
+      // contains one. Probing `readFile('.gitignore')` in every directory was one doomed ENOENT
+      // syscall per directory across the whole tree; the `opendir` above already told us whether
+      // the file exists, so reuse that instead of asking the filesystem twice.
+      if (depth > 0 && hasGitignore) {
+        const local = await this.loadDirectoryGitignore(dirPath, relativeDirPath);
+        if (local) activeNested = [...nestedIgnores, local];
       }
 
       // Process directories first, then files
@@ -792,6 +818,11 @@ export class FileWalker {
         }
         this.visitedRealDirs.add(realSubPath);
 
+        // A directory reached THROUGH a symlink is now being analyzed rather than dropped. The
+        // corpus is correct, but the walk summary must be able to explain why files under a link
+        // appear — disclose the followed link, distinct from the skipped-link reasons above.
+        if (entry.isSymlink) this.symlinkFollowedCount++;
+
         await this.walkDirectory(subPath, depth + 1, activeNested);
         if (this.stopWalk) break;
       }
@@ -816,7 +847,7 @@ export class FileWalker {
           continue;
         }
 
-        if (this.shouldSkipFile(relativePath, entry.name)) {
+        if (this.shouldSkipFile(posixPath)) {
           this.recordSkip('pattern');
           continue;
         }
@@ -831,23 +862,29 @@ export class FileWalker {
           break;
         }
 
-        await this.processFile(filePath, relativePath, entry.name, depth);
+        // Count a followed symlinked file only once it ACTUALLY entered the corpus — processFile
+        // swallows a stat/read failure, so incrementing before it would disclose a "followed" link
+        // that was never analyzed.
+        const added = await this.processFile(filePath, relativePath, entry.name, depth);
+        if (added && entry.isSymlink) this.symlinkFollowedCount++;
       }
-    } catch {
-      // Permission denied or other read error, skip this directory
-      this.recordSkip('error');
+    } catch (e) {
+      // Could not list the directory (permission denied, or a transient read error). Disclose
+      // WHICH, so a permission-pruned subtree is not read as an ordinary hiccup.
+      this.recordSkip(directorySkipReason(e));
     }
   }
 
   /**
-   * Process a single file and collect metadata
+   * Process a single file and collect metadata. Returns true when the file was added to the
+   * corpus, false when a stat/read failure dropped it (recorded under a skip reason).
    */
   private async processFile(
     absolutePath: string,
     relativePath: string,
     fileName: string,
     depth: number
-  ): Promise<void> {
+  ): Promise<boolean> {
     try {
       const fileStat = await stat(absolutePath);
       const extension = extname(fileName);
@@ -877,8 +914,10 @@ export class FileWalker {
 
       const dir = directory === '' || directory === '.' ? '(root)' : directory;
       this.directoryCounts[dir] = (this.directoryCounts[dir] ?? 0) + 1;
-    } catch {
-      this.recordSkip('error');
+      return true;
+    } catch (e) {
+      this.recordSkip(directorySkipReason(e));
+      return false;
     }
   }
 
@@ -902,6 +941,9 @@ export class FileWalker {
     this.stopWalk = false;
     this.truncatedAtPath = null;
     this.postCapEntriesExamined = 0;
+    this.symlinkFollowedCount = 0;
+    this.includePrefixes = [];
+    this.includeMatchesAnyDir = false;
 
     // Load ignore patterns
     this.ig = await loadIgnorePatterns(this.rootPath);
@@ -938,6 +980,21 @@ export class FileWalker {
     // Start walking from root
     await this.walkDirectory(this.rootPath, 0);
 
+    // An include pattern that matched NOTHING is a silent config no-op — the user asked to force
+    // something in and it wasn't there (a typo, a wrong path). Surface it so the config failure is
+    // visible rather than silently doing nothing. Checked against the admitted corpus; each
+    // pattern gets its own matcher once, tested over the (usually scoped) file set.
+    let includePatternsUnmatched: string[] | undefined;
+    if (this.options.includePatterns.length > 0 && !this.truncatedAtPath) {
+      const admitted = this.files.map((f) => toPosixPath(f.path));
+      const unmatched = this.options.includePatterns.filter((pat) => {
+        if (pat.trim().length === 0) return false;
+        const matcher = ignore().add(pat);
+        return !admitted.some((p) => matcher.ignores(p));
+      });
+      if (unmatched.length > 0) includePatternsUnmatched = unmatched;
+    }
+
     return {
       files: this.files,
       summary: {
@@ -947,6 +1004,12 @@ export class FileWalker {
         byDirectory: this.directoryCounts,
         skippedCount: this.skippedCount,
         skippedReasons: this.skippedReasons,
+        // Followed symlinks entered the corpus (a symlinked `src/`, a vendored file). The spec
+        // requires the followed count be disclosed so a corpus reachable only through a link is
+        // explainable from the summary alone, not just the SKIPPED links. Absent means none.
+        ...(this.symlinkFollowedCount > 0 ? { symlinkFollowed: this.symlinkFollowedCount } : {}),
+        // Include patterns the user set that matched no admitted file — a visible config no-op.
+        ...(includePatternsUnmatched ? { includePatternsUnmatched } : {}),
         // A partial corpus must announce itself: hitting `maxFiles` leaves the graph a truncated
         // prefix of the repository, which every downstream tool would otherwise present as the
         // whole repo. Absent means the walk completed within the cap.

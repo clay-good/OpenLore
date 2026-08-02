@@ -1029,6 +1029,12 @@ export class AnalysisArtifactGenerator {
       lines.push(`- **Frameworks**: ${repoMap.summary.frameworks.map(f => f.name).join(', ')}`);
     }
     lines.push(`- **Files Analyzed**: ${repoMap.summary.analyzedFiles} of ${repoMap.summary.totalFiles} (${repoMap.summary.skippedFiles} skipped)`);
+    if (repoMap.summary.truncated) {
+      // Match the CLI/repo-map disclosure: this digest describes only a truncated prefix.
+      lines.push(
+        `- **⚠️ Partial corpus**: analysis stopped at the ${repoMap.summary.truncated.limit}-file cap; the map below covers only that prefix.`,
+      );
+    }
     lines.push(`- **Analysis Date**: ${repoMap.metadata.analyzedAt}`);
     lines.push('');
 
