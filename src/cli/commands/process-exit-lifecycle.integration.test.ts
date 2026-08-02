@@ -33,12 +33,41 @@ const CLI = join(REPO_ROOT, 'dist/cli/index.js');
 const HAVE_BUILD = existsSync(CLI);
 
 /** Spawn the built CLI with the heap re-exec disabled and stderr inherited. */
+// Per-process captured stderr, accumulated from spawn time so no early line is
+// lost and stderr never backpressures (a piped-but-undrained stderr can block
+// the child once its buffer fills).
+const stderrByProc = new WeakMap<ChildProcess, () => string>();
+
 function spawnCli(args: string[], opts: { cwd: string; env?: Record<string, string> }): ChildProcess {
-  return spawn('node', [CLI, ...args], {
+  const proc = spawn('node', [CLI, ...args], {
     cwd: opts.cwd,
-    stdio: ['pipe', 'pipe', 'ignore'],
+    // stderr piped (not ignored) so the watcher-session tests can wait for the
+    // real "watching" readiness line rather than a blind sleep that would let a
+    // slow runner silently degrade the test into a no-watcher one.
+    stdio: ['pipe', 'pipe', 'pipe'],
     env: { ...process.env, OPENLORE_NO_AUTO_HEAP: '1', ...opts.env },
   });
+  let captured = '';
+  proc.stderr?.on('data', (c: Buffer) => { captured += c.toString(); }); // drains + captures
+  stderrByProc.set(proc, () => captured);
+  return proc;
+}
+
+/**
+ * Resolve `true` once the child has logged that its file watcher is ready,
+ * `false` if it hasn't within `timeoutMs`. Polls the captured stderr, so a fast
+ * machine proceeds immediately and a slow one still waits — letting the caller
+ * ASSERT the watcher actually started, closing the "false confidence" gap of a
+ * fixed sleep.
+ */
+async function waitForWatcher(proc: ChildProcess, timeoutMs: number): Promise<boolean> {
+  const read = stderrByProc.get(proc) ?? (() => '');
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (read().includes('[mcp-watcher] watching')) return true;
+    await sleep(50);
+  }
+  return read().includes('[mcp-watcher] watching');
 }
 
 /** Resolve when the child exits; reject if it outlives `budgetMs` (the bug). */
@@ -87,7 +116,7 @@ describe('MCP stdio server exits on stdin EOF (no zombie)', () => {
     // alive before the fix) without depending on an analysis cache.
     const proc = spawnCli(['mcp', '--no-watch-auto', '--watch', watchDir, '--watch-no-embed', '--preset', 'full'], { cwd: watchDir });
     initialize(proc);
-    await sleep(1500); // let the watcher reach 'ready'
+    expect(await waitForWatcher(proc, EXIT_BUDGET_MS)).toBe(true); // precondition: watcher is live
     proc.stdin!.end(); // EOF
     const { code, ms } = await exitWithin(proc, EXIT_BUDGET_MS);
     expect(ms).toBeLessThan(EXIT_BUDGET_MS);
@@ -111,7 +140,7 @@ describe('MCP stdio server exits on stdin EOF (no zombie)', () => {
     // through one teardown. EOF is covered above; this covers the signal leg.
     const proc = spawnCli(['mcp', '--no-watch-auto', '--watch', watchDir, '--watch-no-embed', '--preset', 'full'], { cwd: watchDir });
     initialize(proc);
-    await sleep(1500); // let the watcher reach 'ready'
+    expect(await waitForWatcher(proc, EXIT_BUDGET_MS)).toBe(true); // precondition: watcher is live
     proc.kill('SIGTERM');
     const { code, ms } = await exitWithin(proc, EXIT_BUDGET_MS);
     expect(ms).toBeLessThan(EXIT_BUDGET_MS);
