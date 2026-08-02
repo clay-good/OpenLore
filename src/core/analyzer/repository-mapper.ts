@@ -100,6 +100,17 @@ export interface RepositoryMapSummary {
    * which the renderer treats as "say nothing extra" rather than fabricating an empty tally.
    */
   skippedReasons?: Record<string, number>;
+  /** How many symlinks were followed into the corpus (disclosure; see FileWalkerResult). */
+  symlinkFollowed?: number;
+  /** Include patterns the caller set that matched no file — a visible config no-op. */
+  includePatternsUnmatched?: string[];
+  /**
+   * Present only when the file walk stopped at the `maxFiles` cap — the analyzed corpus is a
+   * truncated prefix of the repository, not the whole thing. Carried through so `analyze` can
+   * disclose the partial corpus instead of reporting a smaller count as if it were complete.
+   * Absent means the walk completed (or a persisted map that never recorded it).
+   */
+  truncated?: { limit: number; atPath: string };
   languages: LanguageBreakdown[];
   frameworks: DetectedFramework[];
   directories: DirectoryStats[];
@@ -841,6 +852,9 @@ export class RepositoryMapper {
         analyzedFiles: walkResult.summary.totalFiles,
         skippedFiles: walkResult.summary.skippedCount,
         skippedReasons: walkResult.summary.skippedReasons,
+        symlinkFollowed: walkResult.summary.symlinkFollowed,
+        includePatternsUnmatched: walkResult.summary.includePatternsUnmatched,
+        truncated: walkResult.summary.truncated,
         languages,
         frameworks,
         directories,
@@ -891,6 +905,16 @@ export class RepositoryMapper {
     lines.push(`- **Total Files**: ${map.summary.totalFiles}`);
     lines.push(`- **Analyzed Files**: ${map.summary.analyzedFiles}`);
     lines.push(`- **Skipped Files**: ${map.summary.skippedFiles}`);
+    if (map.summary.symlinkFollowed) {
+      lines.push(`- **Symlinks Followed**: ${map.summary.symlinkFollowed}`);
+    }
+    if (map.summary.truncated) {
+      lines.push(
+        `- **⚠️ Partial corpus**: walk stopped at the ${map.summary.truncated.limit}-file ` +
+          `cap (at \`${map.summary.truncated.atPath}\`); results below cover only the first ` +
+          `${map.summary.truncated.limit} files.`,
+      );
+    }
     lines.push('');
 
     // Languages

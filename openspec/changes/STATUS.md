@@ -41,12 +41,15 @@ requirements reflected in the main specs. `openspec list` shows only open work.
 No open change has partial code on `main`. A change belongs here the moment its implementation
 starts; move it back out (archive it) the moment its marker/spec evidence lands.
 
-## To build — 128
+## To build — 127
 
 The whole open set is unbuilt backlog. Newest additions: 7 proposals from the 2026-07-27
 first-run e2e (`E2E-FIRSTRUN-2026-07-27.md`). Other thematic indexes:
 `E2E-AUDIT-2026-07.md`, `KNOWN-LIMITATIONS-2026-07.md`,
 `COMPETITIVE-SUBSTRATE-2026-07.md`.
+
+Shipped since compile: `harden-walker-corpus-boundary` (2026-08-02, archived) — the walker
+truncation receipt, includePatterns-override-directory-pruning, and nested-`.gitignore` semantics.
 
 After this table was compiled, four research sweeps added 32 more proposals (all validate; not yet
 folded into the table): 10 in `FIELD-RESEARCH-2026-07.md`, 10 in `ECOSYSTEM-RESEARCH-2026-07-27.md`,
@@ -135,7 +138,6 @@ trust boundary for served content.
 | `harden-spec-verification-honesty` | no silent decision loss, no shrinking denominator, no fabricated requirement claims |
 | `harden-vector-index-coherence` | a rebuilt index must never be served through stale process caches |
 | `harden-view-server-file-confinement` | The view server's file access is lexical-only — a symlink in a cloned repo escapes the project root; and it serves arbitrarily stale analysis as current |
-| `harden-walker-corpus-boundary` | no silently smaller graph |
 | `optimize-analyze-pipeline-passes` | One analyze makes 3-4 full passes over the corpus, re-parsing (and re-reading from disk) trees Pass 1 already built |
 | `optimize-incremental-and-coldstart-scale` | A branch switch grinds through the per-file incremental pipeline with no bulk fallback, reloading the full node table once per changed file |
 | `optimize-serving-hot-path-caches` | The default tools rebuild derived graph structures and re-parse multi-MB artifacts on every call, and re-scan the whole corpus per keyword search |

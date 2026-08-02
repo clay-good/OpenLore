@@ -288,6 +288,25 @@ export interface FileWalkerResult {
     byDirectory: Record<string, number>;
     skippedCount: number;
     skippedReasons: Record<string, number>;
+    /**
+     * How many symlinks were FOLLOWED into the corpus (a symlinked source dir, a vendored file),
+     * as opposed to the skipped-link reasons in `skippedReasons`. Present only when > 0, so a
+     * corpus reachable only through a link is explainable from the summary alone.
+     */
+    symlinkFollowed?: number;
+    /**
+     * `includePatterns` the caller set that matched no admitted file — a silent config no-op made
+     * visible. Present only when non-empty and the walk was not truncated (a truncated walk can't
+     * prove a pattern matched nothing, since matches could lie beyond the cap).
+     */
+    includePatternsUnmatched?: string[];
+    /**
+     * Present only when the walk stopped at the `maxFiles` cap. The corpus is then a truncated
+     * prefix of the repository — `limit` is the cap that was hit and `atPath` is where the walk
+     * stopped — so a partial corpus is never presented as complete. Absent means the walk
+     * completed within the cap.
+     */
+    truncated?: { limit: number; atPath: string };
   };
   rootPath: string;
   timestamp: string;

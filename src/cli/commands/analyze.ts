@@ -187,6 +187,27 @@ export async function runAnalysis(
       ? `${repoMap.summary.skippedFiles} (${skipReasons.join(', ')})`
       : repoMap.summary.skippedFiles,
   );
+  // A followed symlink means files under a link entered the corpus — disclose it so a corpus
+  // reachable only through a link (a symlinked src/) is explainable, not surprising.
+  if (repoMap.summary.symlinkFollowed) {
+    logger.info('Symlinks followed', repoMap.summary.symlinkFollowed);
+  }
+  // An include pattern that matched nothing did nothing — tell the user so a typo'd --include
+  // isn't a silent no-op.
+  if (repoMap.summary.includePatternsUnmatched?.length) {
+    logger.warning(
+      `Include pattern(s) matched no files: ${repoMap.summary.includePatternsUnmatched.join(', ')}`,
+    );
+  }
+  // A truncated walk analyzed only a prefix of the repository — say so, or every count above and
+  // every downstream tool presents a partial corpus as the whole repo (change:
+  // harden-walker-corpus-boundary).
+  if (repoMap.summary.truncated) {
+    logger.warning(
+      `Partial corpus: walk stopped at the ${repoMap.summary.truncated.limit}-file cap ` +
+        `(at ${repoMap.summary.truncated.atPath}). Raise maxFiles or narrow the include set to analyze the rest.`,
+    );
+  }
   logger.blank();
 
   // Phase 2: Dependency Graph
