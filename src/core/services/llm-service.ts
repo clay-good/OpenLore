@@ -1755,14 +1755,28 @@ export class LLMService {
   private async executeWithTimeout(request: CompletionRequest): Promise<CompletionResponse> {
     const timeoutMs = this.retryConfig.timeout;
 
-    const result = await Promise.race([
-      this.provider.generateCompletion(request),
-      new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new Error(`LLM request timed out after ${timeoutMs}ms`)), timeoutMs);
-      }),
-    ]);
-
-    return result;
+    // change: fix-process-exit-lifecycle
+    // The timeout timer MUST be cleared once the race settles. Without this, a
+    // request that fails fast (e.g. an unreachable provider rejecting in <1s)
+    // leaves the setTimeout pending for the full request timeout — keeping the
+    // event loop alive so the whole command hangs until the timer fires at the
+    // 120s mark, long after it reported the failure. `unref` is defence in depth:
+    // even a missed clear degrades to an early exit rather than a hang.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        this.provider.generateCompletion(request),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`LLM request timed out after ${timeoutMs}ms`)),
+            timeoutMs,
+          );
+          timer.unref?.();
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   /**

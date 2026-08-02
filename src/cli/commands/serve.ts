@@ -678,6 +678,10 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
     if (shuttingDown) return;
     if (reanalyzeTimer) clearTimeout(reanalyzeTimer);
     reanalyzeTimer = setTimeout(() => triggerRebuild(root), REANALYZE_DEBOUNCE_MS);
+    // Don't keep the daemon alive for this debounce alone — the HTTP socket owns
+    // the daemon's lifetime; a pending re-analyze must never delay a shutdown
+    // (change: fix-process-exit-lifecycle; parity with idleTimer above).
+    reanalyzeTimer.unref?.();
   }
 
   if (options.watch !== false) {

@@ -440,11 +440,23 @@ export class McpWatcher {
     this.armFlush();
   }
 
+  /**
+   * Create a self-expiring timer that never by itself keeps the process alive
+   * (change: fix-process-exit-lifecycle). Every watcher timer is short-lived and
+   * cleared on stop(); unref'ing them means a missed teardown degrades to an
+   * early exit rather than a process that outlives its transport.
+   */
+  private armTimer(fn: () => void, ms: number): ReturnType<typeof setTimeout> {
+    const t = setTimeout(fn, ms);
+    t.unref?.();
+    return t;
+  }
+
   private armFlush(): void {
     if (this.debounceTimer) clearTimeout(this.debounceTimer);
-    this.debounceTimer = setTimeout(() => this.flush(), this.debounceMs);
+    this.debounceTimer = this.armTimer(() => this.flush(), this.debounceMs);
     if (!this.maxBatchTimer) {
-      this.maxBatchTimer = setTimeout(() => this.flush(), this.maxBatchMs);
+      this.maxBatchTimer = this.armTimer(() => this.flush(), this.maxBatchMs);
     }
   }
 
@@ -452,7 +464,7 @@ export class McpWatcher {
   private onVcsEvent(): void {
     this.vcsBulkFlag = true;
     if (this.debounceTimer) clearTimeout(this.debounceTimer);
-    this.debounceTimer = setTimeout(() => this.flush(), WATCH_VCS_SETTLE_MS);
+    this.debounceTimer = this.armTimer(() => this.flush(), WATCH_VCS_SETTLE_MS);
     if (this.debug) {
       process.stderr.write('[mcp-watcher] VCS operation detected — coalescing into one refresh\n');
     }
@@ -483,7 +495,7 @@ export class McpWatcher {
       .finally(() => {
         this.running = false;
         if (this.pending.size > 0 || this.pendingDeletions.size > 0) {
-          this.debounceTimer = setTimeout(() => this.flush(), this.debounceMs);
+          this.debounceTimer = this.armTimer(() => this.flush(), this.debounceMs);
         }
       });
   }
@@ -944,13 +956,13 @@ export class McpWatcher {
     if (this.embedTimer) clearTimeout(this.embedTimer);
     // Slightly behind the signature debounce so structural freshness always lands
     // first and multiple flushes batch into one embed pass.
-    this.embedTimer = setTimeout(() => void this.runEmbedLane(), this.debounceMs);
+    this.embedTimer = this.armTimer(() => void this.runEmbedLane(), this.debounceMs);
   }
 
   private async runEmbedLane(): Promise<void> {
     if (this.embedRunning) {
       // Re-arm: drain again once the in-flight pass finishes.
-      this.embedTimer = setTimeout(() => void this.runEmbedLane(), this.debounceMs);
+      this.embedTimer = this.armTimer(() => void this.runEmbedLane(), this.debounceMs);
       return;
     }
     if (this.embedFiles.size === 0 || !this.lastEmbedContext) return;
@@ -967,7 +979,7 @@ export class McpWatcher {
     } finally {
       this.embedRunning = false;
       if (this.embedFiles.size > 0) {
-        this.embedTimer = setTimeout(() => void this.runEmbedLane(), this.debounceMs);
+        this.embedTimer = this.armTimer(() => void this.runEmbedLane(), this.debounceMs);
       }
     }
   }

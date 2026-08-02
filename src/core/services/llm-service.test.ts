@@ -305,6 +305,53 @@ describe('LLMService', () => {
         userPrompt: 'Short prompt',
       })).rejects.toThrow('exceeds context limit');
     });
+
+    // change: fix-process-exit-lifecycle
+    // A request that fails fast must not leave the request-timeout timer pending.
+    // Before the fix, the setTimeout inside executeWithTimeout was never cleared,
+    // so a sub-second failure kept the event loop alive until the timer fired at
+    // the (default 120s) timeout mark — the "generate hangs for two minutes after
+    // it already reported the error" bug. Fake timers make the leak observable:
+    // after a failed request, zero timers must remain scheduled.
+    it('leaves no pending request-timeout timer after a fast failure', async () => {
+      vi.useFakeTimers();
+      try {
+        const mock = createMockLLMService({ maxRetries: 0, timeout: 120_000 });
+        mock.provider.shouldFail = true;
+        mock.provider.failCount = 1; // fails the single (no-retry) attempt
+
+        await expect(
+          mock.service.complete({ systemPrompt: 'A', userPrompt: 'B' }),
+        ).rejects.toThrow('Mock failure');
+
+        // The race lost the request to a fast rejection; the timeout timer must
+        // have been cleared. A leaked timer here is exactly what hung `generate`.
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    // The exit delay must not track the configured timeout: whether the request
+    // timeout is 120s or 240s, a fast failure clears the timer immediately, so no
+    // timer survives in either case (the two-run invariant from the reproducer,
+    // asserted structurally rather than by wall-clock).
+    it('clears the timer regardless of the configured timeout value', async () => {
+      for (const timeout of [120_000, 240_000]) {
+        vi.useFakeTimers();
+        try {
+          const mock = createMockLLMService({ maxRetries: 0, timeout });
+          mock.provider.shouldFail = true;
+          mock.provider.failCount = 1;
+          await expect(
+            mock.service.complete({ systemPrompt: 'A', userPrompt: 'B' }),
+          ).rejects.toThrow('Mock failure');
+          expect(vi.getTimerCount()).toBe(0);
+        } finally {
+          vi.useRealTimers();
+        }
+      }
+    });
   });
 
   describe('JSON Completion', () => {
