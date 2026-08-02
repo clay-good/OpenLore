@@ -5,6 +5,67 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ## [Unreleased]
 
+## [2.1.8] - 2026-08-02
+
+**The release where `analyze` stopped caring how big your repo is.**
+
+Last time `analyze` stopped dying on one hostile *file*. This time it stops dying on
+the whole *repository*, however large. Plus we closed a security advisory, and the MCP
+server finally leaves when you do. Everything is additive and backward-compatible.
+
+### Security: a spec write that could escape the project root (GHSA-5j8x-q7q6-58j5)
+
+`openlore generate` built each spec's output path from an LLM-derived `domain` field.
+Against a repository you don't trust, a crafted value could steer that write *outside*
+your project root. Now the domain is normalized to a single safe path segment and every
+spec write goes through the same symlink-aware root guard the rest of the codebase uses —
+an out-of-root path is refused, not written. Regression tests on both the source and the
+sink, plus a structural guard so a future edit can't quietly reopen the door.
+
+### `analyze` scales to any repo size
+
+- **No more out-of-memory on large repositories.** Repo-wide enrichment scans are bounded,
+  five superlinear scans are gone, and the background index no longer grows forever.
+- **The CFG overlay stays in memory and only spills to disk when it's actually big** — the
+  common case never touches the filesystem.
+- **Adaptive heap + graceful degradation.** `analyze` sizes its own heap to the machine
+  (cgroup-aware) and, when a repo is too big for a full pass, steps down a level instead of
+  falling over. Any repo finishes with *some* answer, never a crash.
+- **Deep import chains no longer overflow the stack** — cycle detection is iterative now.
+
+### The MCP server leaves when you do
+
+The zombie-process known issue from 2.1.7 is fixed: the stdio server's lifetime is now
+bound to its transport, so when your agent closes stdin, the process (and its file watcher)
+exits. No more stray `openlore mcp` holding caches after the session ends.
+
+### Honesty, still the house style
+
+- **The walker no longer hands back a silently smaller graph.** If it can't cover the whole
+  corpus it says so — with a truncation receipt — instead of quietly analyzing less.
+- **Git-derived signals tell the truth** about their own window: churn is measured over a
+  real pre-change window, federation claims reflect the current tree, and change detection is
+  work-tree-aware.
+- **`generate` preserves your existing specs** instead of clobbering them on regeneration.
+
+### Under the hood
+
+- Property-based fuzzing now runs against the untrusted-input surface.
+- Dependency bumps: commander 15, chalk 6, ora 9, transformers 4.
+
+### Known issues
+
+- **A config missing its `analysis` section still crashes `analyze`** with an internal
+  `TypeError` (and `doctor` still calls that config healthy). Not a regression — carried over
+  from 2.1.7. If you hand-edit `.openlore/config.json`, keep the `analysis` block, or re-run
+  `openlore init`.
+
+---
+
+**Upgrade:** `npm i -g openlore@2.1.8` — or `openlore update`.
+
+**Full Changelog**: https://github.com/clay-good/OpenLore/compare/v2.1.7...v2.1.8
+
 ## [2.1.7] - 2026-07-26
 
 **The release where `analyze` stopped dying and started explaining itself.**
