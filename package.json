@@ -209,12 +209,14 @@
       "protobufjs": "^7.6.5"
     },
     "ws": "^8.21.0",
-    "undici": "^8.5.0",
+    "undici": "^8.9.0",
     "js-yaml": "^4.3.0",
-    "hono": "^4.12.32",
+    "hono": "^4.12.34",
     "@hono/node-server": "^2.0.5",
     "sharp": "^0.35.0",
     "adm-zip": "^0.6.0",
+    "fast-uri": "^3.1.5",
+    "brace-expansion": "^5.0.9",
     "onnxruntime-web": {
       "protobufjs": "^7.6.5"
     },
@@ -223,7 +225,7 @@
         "protobufjs": "^7.6.5"
       },
       "ws": "^8.21.0",
-      "undici": "^8.5.0"
+      "undici": "^8.9.0"
     }
   },
   "devDependencies": {

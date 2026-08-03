@@ -479,14 +479,14 @@ export class FileWalker {
   private skippedCount = 0;
   private skippedReasons: Record<string, number> = {};
   private directoriesScanned = 0;
-  private extensionCounts: Record<string, number> = {};
   /**
-   * Keyed by directory path, which comes from the scanned repository — so a directory
-   * literally named `__proto__` would otherwise read and write `Object.prototype`
-   * instead of this table. `Object.create(null)` has no prototype to reach, and still
-   * serializes as a plain object for `byDirectory`.
+   * Counters keyed by file extension and by directory path. Both keys come from the
+   * scanned repository, so a file whose extension or directory is literally `__proto__`
+   * (or `constructor`) must never reach `Object.prototype`. A `Map` has no such sink;
+   * it is materialized to a plain object for the public summary at the walk boundary.
    */
-  private directoryCounts: Record<string, number> = Object.create(null) as Record<string, number>;
+  private extensionCounts = new Map<string, number>();
+  private directoryCounts = new Map<string, number>();
 
   constructor(rootPath: string, options: FileWalkerOptions = {}) {
     this.rootPath = rootPath;
@@ -910,10 +910,10 @@ export class FileWalker {
 
       // Update counts
       const ext = extension || '(no extension)';
-      this.extensionCounts[ext] = (this.extensionCounts[ext] ?? 0) + 1;
+      this.extensionCounts.set(ext, (this.extensionCounts.get(ext) ?? 0) + 1);
 
       const dir = directory === '' || directory === '.' ? '(root)' : directory;
-      this.directoryCounts[dir] = (this.directoryCounts[dir] ?? 0) + 1;
+      this.directoryCounts.set(dir, (this.directoryCounts.get(dir) ?? 0) + 1);
       return true;
     } catch (e) {
       this.recordSkip(directorySkipReason(e));
@@ -936,8 +936,8 @@ export class FileWalker {
     this.skippedCount = 0;
     this.skippedReasons = {};
     this.directoriesScanned = 0;
-    this.extensionCounts = {};
-    this.directoryCounts = Object.create(null) as Record<string, number>;
+    this.extensionCounts = new Map();
+    this.directoryCounts = new Map();
     this.stopWalk = false;
     this.truncatedAtPath = null;
     this.postCapEntriesExamined = 0;
@@ -1000,8 +1000,8 @@ export class FileWalker {
       summary: {
         totalFiles: this.files.length,
         totalDirectories: this.directoriesScanned,
-        byExtension: this.extensionCounts,
-        byDirectory: this.directoryCounts,
+        byExtension: Object.fromEntries(this.extensionCounts),
+        byDirectory: Object.fromEntries(this.directoryCounts),
         skippedCount: this.skippedCount,
         skippedReasons: this.skippedReasons,
         // Followed symlinks entered the corpus (a symlinked `src/`, a vendored file). The spec

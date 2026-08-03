@@ -32,6 +32,33 @@ const ALLOWLIST = {
     clearsWhen:
       'pi-coding-agent bumps brace-expansion in its shrinkwrap, or drops the shrinkwrap.',
   },
+  'GHSA-rgw5-rvv9-x895': {
+    package: 'brace-expansion',
+    reason:
+      'Affects <5.0.9, patched in 5.0.9 (a follow-up to CVE-2026-14257). Our own tree is ' +
+      'already on 5.0.9 via a top-level `overrides` pin; this survives ONLY under the same ' +
+      'shrinkwrapped @earendil-works/pi-coding-agent -> minimatch -> brace-expansion@5.0.7 ' +
+      'subtree as GHSA-mh99-v99m-4gvg — `overrides` cannot rewrite a dependency\'s ' +
+      'npm-shrinkwrap.json (same verification as that entry). Dev-only (pi-coding-agent is a ' +
+      'devDependency, absent from the published `files` list) and reached only by ' +
+      'developer-authored glob input.',
+    clearsWhen:
+      'pi-coding-agent bumps brace-expansion in its shrinkwrap, or drops the shrinkwrap.',
+  },
+  'GHSA-4cwx-7wf7-3272': {
+    package: 'undici',
+    reason:
+      'Affects <8.9.0, patched in 8.9.0. undici appears in the tree ONLY as a nested ' +
+      'dependency of @earendil-works/pi-coding-agent (8.5.0), locked by that package\'s ' +
+      'npm-shrinkwrap.json — a top-level and a nested `overrides` undici pin both left it at ' +
+      '8.5.0, so `overrides` cannot rewrite it (same mechanism as the brace-expansion ' +
+      'entries). Dev-only (pi-coding-agent is a devDependency, absent from the published ' +
+      '`files` list); undici is not reachable from any shipped code path. The four remaining ' +
+      'undici advisories on the same 8.5.0 copy are moderate and below this gate\'s ' +
+      'high/critical threshold.',
+    clearsWhen:
+      'pi-coding-agent bumps undici to >=8.9.0 in its shrinkwrap, or drops the shrinkwrap.',
+  },
 };
 
 const GATED = new Set(['high', 'critical']);
