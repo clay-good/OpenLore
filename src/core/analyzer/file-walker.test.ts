@@ -415,6 +415,22 @@ describe('FileWalker', () => {
       expect(result.summary.byDirectory['(root)']).toBe(1);
     });
 
+    it('counts a directory named __proto__ as an ordinary key without polluting Object.prototype', async () => {
+      // The directory/extension counters are keyed by repository-derived names. A directory
+      // literally named `__proto__` (or `constructor`) must be counted as a plain key and must
+      // never reach `Object.prototype` — the counters are Maps materialized to plain objects.
+      await mkdir(join(testDir, '__proto__'));
+      await writeFile(join(testDir, '__proto__', 'a.ts'), '');
+      await writeFile(join(testDir, '__proto__', 'b.ts'), '');
+
+      const result = await walkDirectory(testDir);
+
+      expect(result.summary.byDirectory['__proto__']).toBe(2);
+      // No global prototype pollution occurred.
+      expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+      expect(Object.prototype).not.toHaveProperty('a.ts');
+    });
+
     it('should track skipped files', async () => {
       await mkdir(join(testDir, 'node_modules'));
       await writeFile(join(testDir, 'node_modules', 'pkg.js'), '');
