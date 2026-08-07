@@ -214,7 +214,7 @@ export async function handleAnalyzeErrorPropagation(
     if (tree === undefined) {
       try {
         const content = await readFile(join(absDir, n.filePath), 'utf-8');
-        const parser = await getExceptionParser(n.language);
+        const parser = await getExceptionParser(n.language, n.filePath);
         // Bounded (change: fix-analyze-native-abort-and-file-cost-budget): this parse runs inside
         // the long-lived daemon, so one pathological file must not be able to wedge it. On the
         // budget the file becomes a disclosed boundary below, never a silent "no exceptions".

@@ -154,6 +154,7 @@ function tallyStyle(language: string, tree: Parser.Tree, nodes: FunctionNode[], 
 // ============================================================================
 
 let _tsParser: Parser | undefined;
+let _tsxParser: Parser | undefined;
 let _pyParser: Parser | undefined;
 let _goParser: Parser | undefined;
 let _rustParser: Parser | undefined;
@@ -185,6 +186,7 @@ async function loadNativeParser(): Promise<typeof Parser | null> {
   return _NativeParser;
 }
 let _TsLanguage: object | undefined;
+let _TsxLanguage: object | undefined;
 let _PyLanguage: object | undefined;
 let _GoLanguage: object | undefined;
 let _RustLanguage: object | undefined;
@@ -198,9 +200,31 @@ let _KtLanguage: object | undefined;
 let _ScalaLanguage: object | undefined;
 let _ExLanguage: object | undefined;
 
-async function getTSParser(): Promise<{ parser: Parser; lang: object } | null> {
+
+/** True when the file is JSX/TSX, which needs tree-sitter-typescript's `tsx`
+ *  grammar. The plain `typescript` grammar treats every JSX element as a syntax
+ *  error, so a React file parses to thousands of ERROR nodes and its symbols and
+ *  edges silently become a small fraction of what is there. */
+function isJsxPath(filePath?: string): boolean {
+  if (!filePath) return false;
+  const p = filePath.toLowerCase();
+  return p.endsWith('.tsx') || p.endsWith('.jsx');
+}
+
+async function getTSParser(
+  filePath?: string
+): Promise<{ parser: Parser; lang: object } | null> {
   const NP = await loadNativeParser();
   if (!NP) return null;
+  if (isJsxPath(filePath)) {
+    if (!_tsxParser) {
+      const tsModule = await import('tree-sitter-typescript');
+      _TsxLanguage = (tsModule.default as { tsx: object }).tsx;
+      _tsxParser = new NP();
+      _tsxParser.setLanguage(_TsxLanguage as unknown as Parser.Language);
+    }
+    return { parser: _tsxParser!, lang: _TsxLanguage! };
+  }
   if (!_tsParser) {
     const tsModule = await import('tree-sitter-typescript');
     _TsLanguage = (tsModule.default as { typescript: object }).typescript;
@@ -697,7 +721,7 @@ async function extractTSGraph(
   filePath: string,
   content: string
 ): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[]; cfg: Map<string, FunctionCfg>; style?: FileStyleRaw; parseHealth?: FileParseHealth }> {
-  const r = await getTSParser();
+  const r = await getTSParser(filePath);
   if (!r) return { nodes: [], rawEdges: [], cfg: new Map() };
   const { parser, lang } = r;
   const tree = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, content);

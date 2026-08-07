@@ -172,6 +172,7 @@ function specFor(language: string): LangSpec | null {
 // ── Lazy tree-sitter parsers (scoped to the supported languages) ─────────────
 
 let _tsParser: Parser | undefined;
+let _tsxParser: Parser | undefined;
 let _pyParser: Parser | undefined;
 let _NativeParser: typeof Parser | null | undefined;
 
@@ -186,14 +187,39 @@ async function loadNativeParser(): Promise<typeof Parser | null> {
   return _NativeParser;
 }
 
-/** A tree-sitter parser for a supported language, or null if unavailable. */
-export async function getExceptionParser(language: string): Promise<Parser | null> {
+
+/** True when the file is JSX/TSX, which needs tree-sitter-typescript's `tsx`
+ *  grammar. The plain `typescript` grammar treats every JSX element as a syntax
+ *  error, so a React file parses to thousands of ERROR nodes and its symbols and
+ *  edges silently become a small fraction of what is there. */
+function isJsxPath(filePath?: string): boolean {
+  if (!filePath) return false;
+  const p = filePath.toLowerCase();
+  return p.endsWith('.tsx') || p.endsWith('.jsx');
+}
+
+/** A tree-sitter parser for a supported language, or null if unavailable.
+ *  `filePath` is optional and only used to select the JSX grammar. */
+export async function getExceptionParser(
+  language: string,
+  filePath?: string
+): Promise<Parser | null> {
   try {
     const NP = await loadNativeParser();
     if (!NP) return null;
     switch (language) {
       case 'TypeScript':
       case 'JavaScript': {
+        if (isJsxPath(filePath)) {
+          if (!_tsxParser) {
+            const m = await import('tree-sitter-typescript');
+            _tsxParser = new NP();
+            _tsxParser.setLanguage(
+              ((m.default ?? m) as { tsx: object }).tsx as Parser.Language,
+            );
+          }
+          return _tsxParser!;
+        }
         if (!_tsParser) {
           const m = await import('tree-sitter-typescript');
           _tsParser = new NP();
@@ -532,11 +558,12 @@ export function extractExceptionFacts(
 export async function extractExceptionFactsFromSource(
   source: string,
   language: string,
+  filePath?: string,
 ): Promise<FunctionExceptionFacts> {
   if (!ERROR_PROPAGATION_LANGUAGES.has(language)) {
     return { language, supported: false, throwSites: [], tryGuards: [], callSites: [], dynamicThrowCount: 0 };
   }
-  const parser = await getExceptionParser(language);
+  const parser = await getExceptionParser(language, filePath);
   if (!parser) {
     return { language, supported: false, throwSites: [], tryGuards: [], callSites: [], dynamicThrowCount: 0 };
   }

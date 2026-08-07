@@ -16,6 +16,7 @@ import { parseWithBudget, type BudgetableParser } from './parse-budget.js';
 // ── Lazy parser singletons (one per language, created on first use) ─────────
 
 let _tsParser: Parser | undefined;
+let _tsxParser: Parser | undefined;
 let _pyParser: Parser | undefined;
 let _goParser: Parser | undefined;
 let _rustParser: Parser | undefined;
@@ -36,13 +37,34 @@ async function loadNativeParser(): Promise<typeof Parser | null> {
   return _NativeParser;
 }
 
-async function getParserForLanguage(lang: string): Promise<Parser | null> {
+
+/** True when the file is JSX/TSX, which needs tree-sitter-typescript's `tsx`
+ *  grammar. The plain `typescript` grammar treats every JSX element as a syntax
+ *  error, so a React file parses to thousands of ERROR nodes and its symbols and
+ *  edges silently become a small fraction of what is there. */
+function isJsxPath(filePath?: string): boolean {
+  if (!filePath) return false;
+  const p = filePath.toLowerCase();
+  return p.endsWith('.tsx') || p.endsWith('.jsx');
+}
+
+async function getParserForLanguage(lang: string, filePath?: string): Promise<Parser | null> {
   try {
     const NP = await loadNativeParser();
     if (!NP) return null;
     switch (lang.toLowerCase()) {
       case 'typescript':
       case 'javascript': {
+        if (isJsxPath(filePath)) {
+          if (!_tsxParser) {
+            const m = await import('tree-sitter-typescript');
+            _tsxParser = new NP();
+            _tsxParser.setLanguage(
+              ((m.default ?? m) as { tsx: object }).tsx as Parser.Language
+            );
+          }
+          return _tsxParser!;
+        }
         if (!_tsParser) {
           const m = await import('tree-sitter-typescript');
           _tsParser = new NP();
@@ -177,7 +199,7 @@ export async function astChunkContent(
   if (content.length <= maxChars) return [content];
 
   const language = detectLanguage(filePath);
-  const parser = await getParserForLanguage(language);
+  const parser = await getParserForLanguage(language, filePath);
   if (!parser) return blankLineChunk(content, maxChars, overlapLines);
 
   let tree: Parser.Tree;
