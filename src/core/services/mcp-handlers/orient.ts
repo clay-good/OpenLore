@@ -49,6 +49,7 @@ import { getSourceRoots, moduleFromPath } from './epistemic-lease.js';
 import { readHotspotArtifact, hotspotsForModules } from './behavioral-hotspots.js';
 import {
   decisionContentProvenance,
+  indexedSpecContentProvenance,
   readAnalysisContentProvenance,
   reviewedFileContentProvenance,
   type AnalysisContentProvenance,
@@ -364,14 +365,18 @@ export async function handleOrient(
   if (!lean && hasSpecIndex) {  // embedSvc may be null — SpecVectorIndex.search falls back to BM25
     try {
       const specResults = await SpecVectorIndex.search(outputDir, task, embedSvc, { limit: 3 });
-      matchingSpecs = specResults.map(r => ({
+      matchingSpecs = await Promise.all(specResults.map(async r => ({
         domain: r.record.domain,
         section: r.record.section,
         title: r.record.title,
         score: parseFloat(r.score.toFixed(3)),
         text: r.record.text.slice(0, 300) + (r.record.text.length > 300 ? '…' : ''),
-        provenance: specProvenance,
-      }));
+        provenance: await indexedSpecContentProvenance(
+          absDir,
+          `openspec/specs/${r.record.domain}/spec.md`,
+          [r.record.title, r.record.text],
+        ),
+      })));
     } catch {
       // non-fatal — spec index may be corrupt or unavailable
     }

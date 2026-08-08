@@ -293,7 +293,7 @@ export async function computeBlastRadius(
     for (const issue of drift.issues ?? []) {
       if (MEMORY_KINDS.has(issue.kind)) memWillDrift.push({ kind: issue.kind, message: issue.message, filePath: issue.filePath, provenance: 'local-unreviewed' });
       else if (SPEC_KINDS.has(issue.kind)) specItems.push({ kind: issue.kind, message: issue.message, domain: issue.domain, specPath: issue.specPath, provenance: specProvenance });
-      else if (DECISION_KINDS.has(issue.kind)) decisionItems.push({ kind: issue.kind, message: issue.message, domain: issue.domain, provenance: 'source-derived' });
+      else if (DECISION_KINDS.has(issue.kind)) decisionItems.push({ kind: issue.kind, message: issue.message, domain: issue.domain, provenance: specProvenance });
     }
   }
   const memOrphaned = memWillDrift.filter(m => m.kind === 'memory-orphaned').length;

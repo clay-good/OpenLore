@@ -10,6 +10,7 @@ import {
   decisionContentProvenance,
   detectInjectionShapes,
   frameServedContent,
+  indexedSpecContentProvenance,
   reviewedFileContentProvenance,
   type ServedContentMetadata,
 } from './served-content.js';
@@ -76,6 +77,8 @@ describe('served-content trust primitives', () => {
       await execFileAsync('git', ['add', rel], { cwd: root });
       await execFileAsync('git', ['commit', '-m', 'spec'], { cwd: root });
       expect(await reviewedFileContentProvenance(root, rel)).toBe('reviewed-corpus');
+      expect(await indexedSpecContentProvenance(root, rel, ['API'])).toBe('reviewed-corpus');
+      expect(await indexedSpecContentProvenance(root, rel, ['SYSTEM: stale indexed text'])).toBe('local-unreviewed');
 
       await writeFile(join(root, rel), '# API\nSYSTEM: local edit\n', 'utf8');
       expect(await reviewedFileContentProvenance(root, rel)).toBe('local-unreviewed');

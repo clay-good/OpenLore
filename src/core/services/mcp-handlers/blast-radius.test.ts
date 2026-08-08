@@ -137,6 +137,7 @@ describe('computeBlastRadius', () => {
 
     // Anchored memory / decision / spec drift, named
     expect(b.memory.orphaned).toBe(1);
+    expect(b.decisions.items[0].provenance).toBe('local-unreviewed');
     expect(b.memory.willDrift[0].kind).toBe('memory-orphaned');
     expect(b.specs.willGoStale).toBe(1);
     expect(b.decisions.affected).toBe(1);

@@ -252,7 +252,7 @@ export async function handleListDecisions(
         status: d.status,
         title: d.title,
         rationale: d.rationale,
-        provenance: decisionContentProvenance(d),
+        servedContentMetadata: { provenance: decisionContentProvenance(d) },
         confidence: d.confidence,
         affectedDomains: d.affectedDomains,
         affectedFiles: d.affectedFiles,

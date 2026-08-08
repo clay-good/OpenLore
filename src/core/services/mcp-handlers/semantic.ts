@@ -24,6 +24,7 @@ import { expandHandle, applyTokenBudget, collapseExactDuplicates, omissionNote }
 import { readOpenLoreConfig } from '../config-manager.js';
 import {
   readAnalysisContentProvenance,
+  indexedSpecContentProvenance,
   reviewedFileContentProvenance,
   type AnalysisContentProvenance,
 } from '../served-content.js';
@@ -557,7 +558,21 @@ export async function handleSearchSpecs(
     SpecVectorIndex.search(outputDir, query, embedSvc, { limit, domain, section }),
     loadMappingIndex(absDir),
   ]);
-  const provenance = await reviewedFileContentProvenance(absDir, 'openspec/specs');
+  const servedResults = await Promise.all(results.map(async (r) => ({
+    score: r.score,
+    id: r.record.id,
+    domain: r.record.domain,
+    section: r.record.section,
+    title: r.record.title,
+    text: r.record.text,
+    provenance: await indexedSpecContentProvenance(
+      absDir,
+      `openspec/specs/${r.record.domain}/spec.md`,
+      [r.record.title, r.record.text],
+    ),
+    linkedFiles: r.record.linkedFiles,
+    linkedFunctions: mappingIdx ? functionsForDomain(mappingIdx, r.record.domain) : undefined,
+  })));
 
   return {
     query,
@@ -568,18 +583,8 @@ export async function handleSearchSpecs(
           note: 'Keyword (BM25) spec search — the zero-config default. For semantic ranking, run "openlore embed --local" (on-device, no API key) or set EMBED_* for a remote endpoint.',
         }
       : {}),
-    count: results.length,
-    results: results.map((r) => ({
-      score: r.score,
-      id: r.record.id,
-      domain: r.record.domain,
-      section: r.record.section,
-      title: r.record.title,
-      text: r.record.text,
-      provenance,
-      linkedFiles: r.record.linkedFiles,
-      linkedFunctions: mappingIdx ? functionsForDomain(mappingIdx, r.record.domain) : undefined,
-    })),
+    count: servedResults.length,
+    results: servedResults,
   };
 }
 

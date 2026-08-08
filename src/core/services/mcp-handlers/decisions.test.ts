@@ -364,8 +364,12 @@ describe('handleListDecisions', () => {
       decisions: [makeDecision({ status: 'synced', approvedBy: 'autopilot' })],
     });
     await writeStore(tmpDir, store);
-    const result = await handleListDecisions(tmpDir) as { decisions: Array<{ provenance: string }> };
-    expect(result.decisions[0].provenance).toBe('local-unreviewed');
+    const result = await handleListDecisions(tmpDir) as {
+      decisions: Array<{ confidence: string; servedContentMetadata: Record<string, unknown> }>;
+    };
+    expect(result.decisions[0].servedContentMetadata).toEqual({ provenance: 'local-unreviewed' });
+    expect(result.decisions[0].servedContentMetadata).not.toHaveProperty('confidence');
+    expect(result.decisions[0].confidence).toBeDefined();
   });
 });
 

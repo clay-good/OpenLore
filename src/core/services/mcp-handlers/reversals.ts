@@ -19,6 +19,8 @@ export interface Reversal {
   provenance: ServedContentProvenance;
   /** Provenance of the superseder rationale in `reason`, when present. */
   reasonProvenance?: ServedContentProvenance;
+  /** All origins composed into the rendered `warning` field. */
+  warningProvenance: ServedContentProvenance[];
   /** Id of the reverted memory/decision. Absent on a `note` placeholder. */
   id?: string;
   /** The reverted approach: the old memory content or decision title. Absent on a `note`. */
@@ -127,6 +129,7 @@ export function collectReversals(
       source: 'memory',
       provenance: 'local-unreviewed',
       ...(by?.content ? { reasonProvenance: 'local-unreviewed' as const } : {}),
+      warningProvenance: ['local-unreviewed'],
       id: m.id,
       what: m.content,
       reason: by?.content,
@@ -147,6 +150,7 @@ export function collectReversals(
       source: 'decision',
       provenance: decisionContentProvenance(a),
       reasonProvenance: decisionContentProvenance(b),
+      warningProvenance: [...new Set([decisionContentProvenance(a), decisionContentProvenance(b)])],
       id: a.id,
       what: a.title,
       reason: b.rationale,
@@ -166,6 +170,7 @@ export function collectReversals(
     out.push({
       source: 'note',
       provenance: 'local-unreviewed',
+      warningProvenance: ['local-unreviewed'],
       warning: `${rev.length - maxReversals} more reverted item(s) in scope not shown — raise the limit or query recall for the full history.`,
     });
   }

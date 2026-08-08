@@ -1,5 +1,5 @@
 import { readFile, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { ARTIFACT_ANALYSIS_ORIGIN, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR } from '../../constants.js';
 import type { PendingDecision } from '../../types/index.js';
@@ -74,6 +74,30 @@ export async function reviewedFileContentProvenance(
     const baseRef = await resolveBaseRef(rootPath, 'auto');
     await execFileAsync('git', ['diff', '--quiet', baseRef, '--', relativePath], { cwd: rootPath });
     return 'reviewed-corpus';
+  } catch {
+    return 'local-unreviewed';
+  }
+}
+
+/**
+ * Classify bytes returned from the persisted spec index. A clean current file
+ * cannot upgrade stale indexed text: every served excerpt must still occur in
+ * that file before it may inherit the file's reviewed provenance.
+ */
+export async function indexedSpecContentProvenance(
+  rootPath: string,
+  relativePath: string,
+  servedValues: readonly string[],
+): Promise<Extract<ServedContentProvenance, 'reviewed-corpus' | 'local-unreviewed'>> {
+  try {
+    const root = resolve(rootPath);
+    const candidate = resolve(root, relativePath);
+    if (candidate !== root && !candidate.startsWith(`${root}${sep}`)) return 'local-unreviewed';
+    const current = await readFile(candidate, 'utf8');
+    if (servedValues.some(value => value.length > 0 && !current.includes(value))) {
+      return 'local-unreviewed';
+    }
+    return reviewedFileContentProvenance(rootPath, relativePath);
   } catch {
     return 'local-unreviewed';
   }
