@@ -17,13 +17,13 @@
  * amplification is per-symbol rather than per-byte, so a function-dense repository gets there well
  * below TypeScript's size on disk.
  *
- * This writer emits the same bytes without ever holding them all at once, and returns the digest of
- * what it wrote so callers that must stamp an artifact with it (the traversal index) do not need
- * the string either.
+ * This writer emits the same bytes without ever holding them all at once, and returns the SHA-256
+ * of what it wrote so a caller can fingerprint the artifact without re-reading it.
  *
- * The output is byte-identical to `JSON.stringify(value, null, 2)`. That is load-bearing: the
- * traversal index is invalidated by a digest OF THESE BYTES, so a single differing space would
- * silently orphan it on every read. The guarantee comes from delegating: any subtree the writer
+ * The output is byte-identical to `JSON.stringify(value, null, 2)`. That is load-bearing for
+ * artifact reproducibility: two analyze runs over the same inputs must produce byte-identical
+ * output (see the determinism e2e), so a single differing space would break that guarantee. It
+ * comes from delegating: any subtree the writer
  * chooses not to split is serialized by `JSON.stringify` itself and re-indented, so every leaf rule
  * — `toJSON`, omitted `undefined` object values, `null` for `undefined` array holes, `NaN` as
  * `null`, key escaping — is inherited rather than reimplemented. Which subtrees get split is purely
