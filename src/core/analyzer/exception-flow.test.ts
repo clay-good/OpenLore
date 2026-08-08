@@ -20,6 +20,19 @@ describe('extractExceptionFacts — TypeScript', () => {
     expect(tsParser?.parse('const value = <Widget>input;').rootNode.hasError).toBe(false);
   });
 
+  it('extracts exception facts from a TSX function through the source API', async () => {
+    const facts = await extractExceptionFactsFromSource(
+      'function View() { risky(); if (bad) throw new RenderError(); return <button>Go</button>; }',
+      'TypeScript',
+      'src/View.tsx',
+    );
+
+    expect(facts.throwSites).toEqual([
+      expect.objectContaining({ type: 'RenderError', locallyHandled: false }),
+    ]);
+    expect(facts.callSites.map(site => site.calleeName)).toContain('risky');
+  });
+
   it('reports a direct, un-caught throw with its constructed type', async () => {
     const facts = await extractExceptionFactsFromSource(
       `function f() {\n  throw new RangeError("bad");\n}`,

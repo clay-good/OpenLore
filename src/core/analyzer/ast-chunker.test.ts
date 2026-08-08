@@ -115,6 +115,22 @@ describe('astChunkContent', () => {
     }
   });
 
+  it('keeps TSX declarations intact instead of chunking parser-error fragments', async () => {
+    const content = [
+      "import React from 'react';",
+      'export const A = () => <section>{items.map(x => <span>{x}</span>)}</section>;',
+      'export const B = () => <main/>;',
+    ].join('\n');
+
+    const chunks = await astChunkContent(content, 'src/View.tsx', 80);
+
+    expect(chunks).toEqual([
+      "import React from 'react';",
+      "import React from 'react';\n\nexport const A = () => <section>{items.map(x => <span>{x}</span>)}</section>;",
+      "import React from 'react';\n\nexport const B = () => <main/>;",
+    ]);
+  });
+
   // Regression for change: fix-language-detection-single-source. The `.mts`/`.cts`/`.jsx`
   // extension variants were absent from the (now-deleted) code-shaper detection map that fed
   // this chunker, so they resolved to 'unknown' → generic blank-line fallback. With the single

@@ -550,6 +550,23 @@ describe('CallGraphBuilder — JavaScript', () => {
     expect(edgePairs(result)).toEqual(['init→setup']);
     expect(fanIn(result, 'setup')).toBe(1);
   });
+
+  it('parses JSX files with JSX syntax and resolves their calls', async () => {
+    const builder = new CallGraphBuilder();
+    const result = await builder.build([{
+      path: 'src/View.jsx',
+      language: 'JavaScript',
+      content: `
+        function save() {}
+        export function View() {
+          return <button onClick={() => save()}>Save</button>;
+        }
+      `,
+    }]);
+
+    expect(nodeNames(result)).toEqual(['View', 'save']);
+    expect(edgePairs(result)).toContain('View→save');
+  });
 });
 
 // ---------------------------------------------------------------------------

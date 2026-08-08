@@ -52,6 +52,30 @@ describe('event-channel synthesis', () => {
     expect(edgeBetween(b, 'trigger', 'onMount')?.synthesizedBy).toBe('event-channel');
   });
 
+  it('selects the grammar per file in a mixed TypeScript and TSX batch', async () => {
+    const b = await new CallGraphBuilder().build([
+      {
+        path: 'src/register.ts',
+        language: 'TypeScript',
+        content: `
+          function onSave() { return 1; }
+          function register(emitter: any) {
+            const count = <number>1;
+            emitter.on('save', onSave);
+            return count;
+          }
+        `,
+      },
+      {
+        path: 'src/trigger.tsx',
+        language: 'TypeScript',
+        content: `function trigger(emitter: any) { emitter.emit('save'); return <main />; }`,
+      },
+    ]);
+
+    expect(edgeBetween(b, 'trigger', 'onSave')?.synthesizedBy).toBe('event-channel');
+  });
+
   it('Mismatched channel keys produce no edge', async () => {
     const b = await build(`
       function handler() { return 1; }
