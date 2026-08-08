@@ -151,7 +151,7 @@ export async function findFleetMemory(
         symbol: anchor.symbolName,
         filePath: anchor.filePath,
         title: d.title,
-        provenance: decisionContentProvenance(d.status),
+        provenance: decisionContentProvenance(d),
         status: d.status,
         freshness: f.freshness,
         recordedAt: d.recordedAt,

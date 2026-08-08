@@ -22,6 +22,11 @@ import { fileExists } from '../../../utils/command-helpers.js';
 import { validateDirectory, safeJoin, loadMappingIndex, specsForFile, functionsForDomain, queryTooLongError, notReadyResult } from './utils.js';
 import { expandHandle, applyTokenBudget, collapseExactDuplicates, omissionNote } from './progressive.js';
 import { readOpenLoreConfig } from '../config-manager.js';
+import {
+  readAnalysisContentProvenance,
+  reviewedFileContentProvenance,
+  type AnalysisContentProvenance,
+} from '../served-content.js';
 
 // ============================================================================
 // INSERTION POINT HELPERS
@@ -144,6 +149,7 @@ async function searchTextLines(
   query: string,
   limit: number,
   searchMode: 'text' | 'text_fallback',
+  provenance: AnalysisContentProvenance,
 ): Promise<unknown | null> {
   const { TextLineIndex } = await import('../../analyzer/text-line-index.js');
   if (!TextLineIndex.exists(outputDir)) {
@@ -166,6 +172,7 @@ async function searchTextLines(
       text: h.text,
       score: h.score,
       kind: 'text' as const,
+      provenance,
     })),
   };
 }
@@ -182,6 +189,7 @@ export async function handleSearchCode(
   const tooLong = queryTooLongError(query); if (tooLong) return tooLong;
   const absDir = await validateDirectory(directory);
   const outputDir = join(absDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
+  const analysisProvenance = await readAnalysisContentProvenance(absDir);
 
   const { VectorIndex } = await import('../../analyzer/vector-index.js');
   const { resolveEmbedder, servedRetrievalMode } = await import('../../analyzer/embedder.js');
@@ -189,7 +197,7 @@ export async function handleSearchCode(
   // Forced literal-text mode: query the separate line index directly, bypassing
   // symbol search. Use when hunting a literal string (UI copy, error text).
   if (mode === 'text') {
-    return searchTextLines(outputDir, query, limit, 'text');
+    return searchTextLines(outputDir, query, limit, 'text', analysisProvenance);
   }
 
   if (!VectorIndex.exists(outputDir)) {
@@ -221,7 +229,7 @@ export async function handleSearchCode(
   // so a throw degrades silently to the normal empty response below.
   if (results.length === 0) {
     try {
-      const textFallback = await searchTextLines(outputDir, query, limit, 'text_fallback');
+      const textFallback = await searchTextLines(outputDir, query, limit, 'text_fallback', analysisProvenance);
       if (textFallback) return textFallback;
     } catch {
       /* text index unavailable/corrupt — fall through to the empty symbol response */
@@ -266,6 +274,7 @@ export async function handleSearchCode(
     fanOut: r.record.fanOut,
     isHub: r.record.isHub,
     isEntryPoint: r.record.isEntryPoint,
+    provenance: analysisProvenance,
     linkedSpecs: mappingIdx ? specsForFile(mappingIdx, r.record.filePath) : undefined,
     callers: llmCtx?.edgeStore
       ? llmCtx.edgeStore.getCallers(r.record.id)
@@ -471,6 +480,7 @@ export async function handleGetSpec(directory: string, domain: string): Promise<
     domain,
     specFile: `openspec/specs/${domain}/spec.md`,
     content,
+    provenance: await reviewedFileContentProvenance(absDir, `openspec/specs/${domain}/spec.md`),
     linkedFunctions,
   };
 }
@@ -503,7 +513,11 @@ export async function handleListSpecDomains(directory: string): Promise<unknown>
     entries.map((e) => fileExists(pjoin(specsDir, e, 'spec.md')))
   );
   const domains = entries.filter((_, i) => domainChecks[i]);
-  return { domains, count: domains.length };
+  return {
+    domains,
+    count: domains.length,
+    provenance: await reviewedFileContentProvenance(absDir, 'openspec/specs'),
+  };
 }
 
 /**
@@ -543,6 +557,7 @@ export async function handleSearchSpecs(
     SpecVectorIndex.search(outputDir, query, embedSvc, { limit, domain, section }),
     loadMappingIndex(absDir),
   ]);
+  const provenance = await reviewedFileContentProvenance(absDir, 'openspec/specs');
 
   return {
     query,
@@ -561,6 +576,7 @@ export async function handleSearchSpecs(
       section: r.record.section,
       title: r.record.title,
       text: r.record.text,
+      provenance,
       linkedFiles: r.record.linkedFiles,
       linkedFunctions: mappingIdx ? functionsForDomain(mappingIdx, r.record.domain) : undefined,
     })),
@@ -612,4 +628,3 @@ export async function handleUnifiedSearch(
     results,
   };
 }
-

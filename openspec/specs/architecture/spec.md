@@ -389,6 +389,9 @@ accepted it, not because the serving surface is read-only or deterministic. Read
 protects the store from mutation; determinism returns the same bytes. Neither property SHALL be
 presented as protecting a consuming agent from malicious content.
 
+The published security posture SHALL state what the read-only guarantee covers and what it does
+not, including that content which has not passed human review is outside that guarantee.
+
 The serving path SHALL NOT add a sanitizer, trustworthiness score, or model-computed belief verdict.
 Introducing one SHALL require a superseding architectural decision.
 
@@ -398,6 +401,12 @@ Introducing one SHALL require a superseding architectural decision.
 - **WHEN** they inspect the read-only serving guarantee
 - **THEN** it states that the guarantee protects the store
 - **AND** it identifies human review as the authority boundary for served content
+
+#### Scenario: A sanitizer requires a superseding decision
+
+- **GIVEN** a proposal to filter, rewrite, or score served content in the serving path
+- **WHEN** it is reviewed
+- **THEN** it is refused unless it supersedes this requirement through a recorded decision
 
 #### Scenario: Determinism is not overclaimed
 

@@ -358,6 +358,15 @@ describe('handleListDecisions', () => {
     expect(d.proposedRequirement).toBe('REQ-001');
     expect(d.syncedToSpecs).toEqual(['services']);
   });
+
+  it('keeps autopilot-synced decision prose locally unreviewed', async () => {
+    const store = makeStore({
+      decisions: [makeDecision({ status: 'synced', approvedBy: 'autopilot' })],
+    });
+    await writeStore(tmpDir, store);
+    const result = await handleListDecisions(tmpDir) as { decisions: Array<{ provenance: string }> };
+    expect(result.decisions[0].provenance).toBe('local-unreviewed');
+  });
 });
 
 // ── handleApproveDecision ─────────────────────────────────────────────────────

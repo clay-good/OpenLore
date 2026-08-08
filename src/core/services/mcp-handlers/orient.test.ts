@@ -156,8 +156,30 @@ describe('handleOrient', () => {
     expect((result.relevantFunctions as Array<{ provenance: string }>)[0].provenance).toBe('source-derived');
     expect(result.servedContentProvenance).toMatchObject({
       relevantFiles: 'source-derived',
-      specDomains: 'reviewed-corpus',
+      specDomains: 'local-unreviewed',
     });
+  });
+
+  it('serves functions from a promoted bundle with imported provenance after restart', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'openlore-imported-orient-'));
+    try {
+      await mkdir(join(root, '.openlore', 'analysis'), { recursive: true });
+      await writeFile(
+        join(root, '.openlore', 'analysis', 'analysis-origin.json'),
+        JSON.stringify({ provenance: 'imported' }),
+      );
+      vi.mocked(VectorIndex.exists).mockReturnValue(true);
+      vi.mocked(VectorIndex.search).mockResolvedValue([makeSearchResult()]);
+
+      const result = await handleOrient(root, 'do foo') as {
+        relevantFunctions: Array<{ provenance: string }>;
+        servedContentProvenance: { relevantFunctions: string };
+      };
+      expect(result.relevantFunctions[0].provenance).toBe('imported');
+      expect(result.servedContentProvenance.relevantFunctions).toBe('imported');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   // regionStyle PRODUCER (change: add-codebase-style-fingerprint). The renderer is covered in

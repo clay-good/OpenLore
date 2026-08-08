@@ -17,6 +17,8 @@ export interface Reversal {
   /** Where the reverted record came from. `note` marks an omission placeholder. */
   source: 'memory' | 'decision' | 'note';
   provenance: ServedContentProvenance;
+  /** Provenance of the superseder rationale in `reason`, when present. */
+  reasonProvenance?: ServedContentProvenance;
   /** Id of the reverted memory/decision. Absent on a `note` placeholder. */
   id?: string;
   /** The reverted approach: the old memory content or decision title. Absent on a `note`. */
@@ -124,6 +126,7 @@ export function collectReversals(
     rev.push({
       source: 'memory',
       provenance: 'local-unreviewed',
+      ...(by?.content ? { reasonProvenance: 'local-unreviewed' as const } : {}),
       id: m.id,
       what: m.content,
       reason: by?.content,
@@ -142,7 +145,8 @@ export function collectReversals(
     if (!scope.decisionInScope(a)) continue;
     rev.push({
       source: 'decision',
-      provenance: decisionContentProvenance(a.status),
+      provenance: decisionContentProvenance(a),
+      reasonProvenance: decisionContentProvenance(b),
       id: a.id,
       what: a.title,
       reason: b.rationale,

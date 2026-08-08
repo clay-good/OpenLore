@@ -43,6 +43,7 @@ import {
 import type { SerializedCallGraph, FunctionNode, AmbiguousCallSite } from '../../analyzer/call-graph.js';
 import { callDistance } from '../../analyzer/call-graph.js';
 import type { DecisionNode } from '../../decisions/project.js';
+import { decisionContentProvenance } from '../served-content.js';
 import { isIacLanguage } from '../../analyzer/iac/types.js';
 import { getFileGodFunctions, extractSubgraph } from '../../analyzer/subgraph-extractor.js';
 import { readOpenLoreConfig } from '../config-manager.js';
@@ -338,6 +339,7 @@ export function decisionToNeighbor(d: DecisionNode) {
     status: d.status,
     rationale: d.rationale,
     consequences: d.consequences,
+    provenance: decisionContentProvenance(d),
     affectedDomains: d.affectedDomains,
     governs: d.affectedFiles,
     ...(d.supersedes ? { supersedes: d.supersedes } : {}),

@@ -132,15 +132,17 @@ function renderHuman(b: BlastRadiusBriefing): string {
     lines.push('   Hubs: ' + b.impact.hubsTouched.map(h => `${h.symbol} (${h.fanIn} callers)`).join(', '));
   }
   if (b.impact.layersCrossed.length > 0) lines.push('   Layers crossed: ' + b.impact.layersCrossed.join(', '));
-  if (b.impact.governingDecisions.length > 0) lines.push('   Governing decisions: ' + b.impact.governingDecisions.join('; '));
+  if (b.impact.governingDecisions.length > 0) {
+    lines.push('   Governing decisions: ' + b.impact.governingDecisionProvenance.map(d => `[${d.provenance}] ${d.title}`).join('; '));
+  }
   if (b.tests.count > 0) {
     const top = b.tests.toRun.slice(0, 8).map(t => t.test).join(', ');
     lines.push(`   Tests to run (${b.tests.count}): ${top}${b.tests.count > 8 ? ', …' : ''}`);
   }
-  for (const m of b.memory.willDrift) lines.push(`   ⚠ memory ${m.kind === 'memory-orphaned' ? 'ORPHANED' : 'drifted'}: ${m.message}`);
+  for (const m of b.memory.willDrift) lines.push(`   ⚠ memory [${m.provenance}] ${m.kind === 'memory-orphaned' ? 'ORPHANED' : 'drifted'}: ${m.message}`);
   const memTotal = b.memory.drifted + b.memory.orphaned;
   if (memTotal > b.memory.willDrift.length) lines.push(`   … and ${memTotal - b.memory.willDrift.length} more anchored memor${memTotal - b.memory.willDrift.length === 1 ? 'y' : 'ies'}`);
-  for (const d of b.decisions.items) lines.push(`   ⚠ decision ${d.kind}: ${d.message}`);
+  for (const d of b.decisions.items) lines.push(`   ⚠ decision [${d.provenance}] ${d.kind}: ${d.message}`);
   if (b.decisions.affected > b.decisions.items.length) lines.push(`   … and ${b.decisions.affected - b.decisions.items.length} more decision issue(s)`);
   const SPEC_SHOWN = 5;
   for (const s of b.specs.items.slice(0, SPEC_SHOWN)) lines.push(`   ⚠ spec ${s.kind}: ${s.message}`);

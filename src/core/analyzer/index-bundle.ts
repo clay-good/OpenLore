@@ -36,10 +36,12 @@ import { tmpdir } from 'node:os';
 import { join, basename, isAbsolute } from 'node:path';
 import {
   ARTIFACT_CALL_GRAPH_DB,
+  ARTIFACT_ANALYSIS_ORIGIN,
   ARTIFACT_FINGERPRINT,
   ARTIFACT_INDEX_ATTESTATION,
   ARTIFACT_TRAVERSAL_INDEX,
 } from '../../constants.js';
+import { writeAnalysisContentProvenance } from '../services/served-content.js';
 import {
   computeAttestation,
   digestProductionGraph,
@@ -75,6 +77,7 @@ const EXCLUDED_FILES = new Set([
   `${ARTIFACT_CALL_GRAPH_DB}-wal`,
   `${ARTIFACT_CALL_GRAPH_DB}-shm`,
   'vector-index-meta.json',
+  ARTIFACT_ANALYSIS_ORIGIN,
   // The precomputed reachability structure (change: optimize-reachability-precompute) is
   // excluded on exactly the vector index's reasoning: it is a pure, millisecond-scale
   // function of the bundled graph and runs ~10% of the context's size, so shipping it
@@ -513,6 +516,7 @@ export async function promoteStagedIndex(bundle: Bundle, stagingDir: string, ana
     if (!isSafeBundleFileName(name)) throw new BundleError('unreadable', `Unsafe bundled file name: ${JSON.stringify(name)}.`);
     await copyFile(join(stagingDir, name), join(analysisDir, name));
   }
+  await writeAnalysisContentProvenance(analysisDir, 'imported');
 }
 
 /** Best-effort directory removal (staging cleanup). */

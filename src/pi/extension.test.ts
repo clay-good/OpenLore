@@ -16,7 +16,7 @@ it('spawns a full-surface daemon because Pi curates a wider native tool set itse
 it('frames every Pi before-agent corpus block with the shared provenance boundary', async () => {
   const source = await readFile(new URL('./extension.ts', import.meta.url), 'utf8');
   expect(source).toContain("frameServedContent(\n      '# Codebase architecture");
-  expect(source).toContain("frameServedContent(specIndex, 'reviewed-corpus'");
+  expect(source).toContain('frameServedContent(specIndex, specProvenance');
   expect(source).toContain('renderInjectionBlock(result, cfg)');
 });
 

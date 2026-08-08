@@ -231,10 +231,11 @@ describe('handleGetSpec', () => {
     await writeFile(join(specsDir, 'spec.md'), '# Auth Spec\n\nThis is the auth domain.', 'utf-8');
 
     const { handleGetSpec } = await import('./semantic.js');
-    const result = await handleGetSpec(tmpDir, 'auth') as { domain: string; content: string; specFile: string };
+    const result = await handleGetSpec(tmpDir, 'auth') as { domain: string; content: string; specFile: string; provenance: string };
     expect(result.domain).toBe('auth');
     expect(result.content).toContain('Auth Spec');
     expect(result.specFile).toBe('openspec/specs/auth/spec.md');
+    expect(result.provenance).toBe('local-unreviewed');
   });
 
   it('blocks path traversal via the domain arg (must not read outside the repo)', async () => {

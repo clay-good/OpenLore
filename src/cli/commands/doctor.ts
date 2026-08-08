@@ -211,13 +211,12 @@ export async function checkServedContentTrust(
     try {
       const { stdout } = await execFileAsync(
         'git',
-        ['status', '--porcelain=v1', '--untracked-files=all'],
+        ['status', '--porcelain=v1', '-z', '--untracked-files=all'],
         { cwd: rootPath },
       );
-      for (const line of stdout.split('\n')) {
-        if (line.length < 4) continue;
-        const raw = line.slice(3).trim();
-        const path = raw.includes(' -> ') ? raw.slice(raw.indexOf(' -> ') + 4) : raw;
+      for (const record of stdout.split('\0')) {
+        if (record.length < 4) continue;
+        const path = record.slice(3);
         if (path.startsWith('openspec/') && path.endsWith('.md')) {
           candidates.add(path);
         }
@@ -231,14 +230,16 @@ export async function checkServedContentTrust(
   for (const candidate of [...candidates].sort()) {
     let content: string;
     try { content = await readFile(join(rootPath, candidate), 'utf8'); } catch { continue; }
-    for (const match of detectInjectionShapes(content)) {
-      findings.push({
-        code: 'injection-shaped-content',
-        severity: 'warning',
-        source: 'doctor',
-        subject: candidate,
-        message: `${match.shape}: ${JSON.stringify(match.excerpt)}. ${INJECTION_SHAPE_LIMITS}`,
-      });
+    for (const text of servedContentStrings(candidate, content)) {
+      for (const match of detectInjectionShapes(text)) {
+        findings.push({
+          code: 'injection-shaped-content',
+          severity: 'warning',
+          source: 'doctor',
+          subject: candidate,
+          message: `${match.shape}: ${JSON.stringify(match.excerpt)}. ${INJECTION_SHAPE_LIMITS}`,
+        });
+      }
     }
   }
 
@@ -256,6 +257,23 @@ export async function checkServedContentTrust(
     findings,
     fix: 'Review the named content and its provenance; do not rewrite it automatically.',
   };
+}
+
+/** JSON stores serve their string values, not their serialized line layout. */
+function servedContentStrings(candidate: string, content: string): string[] {
+  if (!candidate.endsWith('.json')) return [content];
+  try {
+    const values: string[] = [];
+    const visit = (value: unknown): void => {
+      if (typeof value === 'string') values.push(value);
+      else if (Array.isArray(value)) value.forEach(visit);
+      else if (value && typeof value === 'object') Object.values(value).forEach(visit);
+    };
+    visit(JSON.parse(content));
+    return values;
+  } catch {
+    return [content];
+  }
 }
 
 async function checkAnalysis(rootPath: string): Promise<CheckResult> {

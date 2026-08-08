@@ -1,6 +1,6 @@
 # Tasks — bound-served-content-trust
 
-> Status: BUILT (2026-08-08). Proof: 361 test files passed (6,883 tests passed, 2 skipped),
+> Status: BUILT (2026-08-08). Proof: 361 test files passed (6,889 tests passed, 2 skipped),
 > plus lint, typecheck, build, strict OpenSpec validation, and scoped drift verification for the
 > `mcp-security` and `architecture` domains.
 

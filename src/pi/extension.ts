@@ -65,7 +65,11 @@ import {
 } from '../cli/commands/serve-descriptor.js';
 import type { ContextInjectionConfig } from '../types/index.js';
 import { discloseRepoConfiguredEndpoint } from '../core/services/repo-config-trust.js';
-import { frameServedContent } from '../core/services/served-content.js';
+import {
+  frameServedContent,
+  readAnalysisContentProvenance,
+  reviewedFileContentProvenance,
+} from '../core/services/served-content.js';
 
 // ── Config types & helpers ────────────────────────────────────────────────────
 
@@ -1421,14 +1425,18 @@ export default function openlore(pi: ExtensionAPI): void {
     primed.add(sessionCwd);
 
     const blocks: string[] = [];
+    const [analysisProvenance, specProvenance] = await Promise.all([
+      readAnalysisContentProvenance(sessionCwd),
+      reviewedFileContentProvenance(sessionCwd, 'openspec'),
+    ]);
     const digest = await readDigest(sessionCwd);
     if (digest) blocks.push(frameServedContent(
       '# Codebase architecture (openlore)\n\n' + truncate(digest, 8000),
-      'source-derived',
+      analysisProvenance,
       'codebase architecture digest',
     ));
     const specIndex = await readSpecIndex(sessionCwd);
-    if (specIndex) blocks.push(frameServedContent(specIndex, 'reviewed-corpus', 'specification index'));
+    if (specIndex) blocks.push(frameServedContent(specIndex, specProvenance, 'specification index'));
 
     // Task-scoped orientation: gate + token-budgeted render, the same pipeline
     // `openlore orient --inject` uses for the Claude Code hook (change

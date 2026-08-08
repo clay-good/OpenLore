@@ -26,6 +26,7 @@ import { AnchorContext } from '../../decisions/anchor-adapter.js';
 import { readOpenLoreConfig } from '../config-manager.js';
 import { join } from 'node:path';
 import type { PendingDecision, DecisionScope } from '../../../types/index.js';
+import { decisionContentProvenance } from '../served-content.js';
 
 type ConsolidateSpawnOutcome =
   | { outcome: 'started' }
@@ -251,6 +252,7 @@ export async function handleListDecisions(
         status: d.status,
         title: d.title,
         rationale: d.rationale,
+        provenance: decisionContentProvenance(d),
         confidence: d.confidence,
         affectedDomains: d.affectedDomains,
         affectedFiles: d.affectedFiles,

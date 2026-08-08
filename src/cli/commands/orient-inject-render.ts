@@ -14,7 +14,7 @@
  */
 
 import { estimateTokens } from '../../core/services/llm-service.js';
-import { frameServedContent } from '../../core/services/served-content.js';
+import { frameServedContent, type ServedContentProvenance } from '../../core/services/served-content.js';
 import type { ContextInjectionConfig } from '../../types/index.js';
 
 /** Injection settings with every documented default applied. */
@@ -80,6 +80,7 @@ interface OrientFn {
   fanIn?: number;
   fanOut?: number;
   isHub?: boolean;
+  provenance?: ServedContentProvenance;
 }
 
 interface CallNeighbour {
@@ -107,11 +108,17 @@ export interface LeanOrientResult {
   error?: string;
   relevantFiles?: string[];
   relevantFunctions?: OrientFn[];
-  specDomains?: string[];
+  specDomains?: Array<string | { domain?: string; provenance?: ServedContentProvenance }>;
   callPaths?: OrientCallPath[];
   suggestedTools?: string[];
   regionStyle?: RegionStyle;
   parseHealth?: string;
+  servedContentProvenance?: {
+    relevantFiles?: ServedContentProvenance;
+    relevantFunctions?: ServedContentProvenance;
+    specDomains?: ServedContentProvenance;
+    callPaths?: ServedContentProvenance;
+  };
 }
 
 /**
@@ -169,6 +176,13 @@ function take<T>(arr: T[] | undefined, n: number): T[] {
  */
 export function renderInjectionBlock(result: LeanOrientResult, cfg: ResolvedInjectionConfig): string {
   const task = (result.task ?? '').replace(/\s+/g, ' ').trim().slice(0, 200);
+  const sourceProvenance = result.servedContentProvenance?.relevantFunctions
+    ?? result.relevantFunctions?.find(f => f.provenance)?.provenance
+    ?? 'source-derived';
+  const specProvenance = result.servedContentProvenance?.specDomains
+    ?? result.specDomains?.find((s): s is { domain?: string; provenance?: ServedContentProvenance } => typeof s === 'object')?.provenance
+    ?? 'local-unreviewed';
+  const baseProvenances: ServedContentProvenance[] = ['local-unreviewed', sourceProvenance];
   const mandatory = [`Task: ${task}`];
 
   const optional: string[] = [];
@@ -177,12 +191,12 @@ export function renderInjectionBlock(result: LeanOrientResult, cfg: ResolvedInje
 
   const fns = take(result.relevantFunctions, 8).filter(f => f.name && f.filePath);
   if (fns.length > 0) {
-    optional.push('Relevant functions:');
+    optional.push(`Relevant functions [${sourceProvenance}]:`);
     for (const f of fns) optional.push(`  • ${f.name} — ${f.filePath}`);
   }
 
   const files = clean(result.relevantFiles, 8);
-  if (files.length > 0) optional.push(`Relevant files: ${files.join(', ')}`);
+  if (files.length > 0) optional.push(`Relevant files [${sourceProvenance}]: ${files.join(', ')}`);
 
   // Parse-health boundary — a disclosed lower-bound warning for the surfaced files, so the Pi
   // surface never lets a degraded parse read as genuine absence (change:
@@ -217,12 +231,17 @@ export function renderInjectionBlock(result: LeanOrientResult, cfg: ResolvedInje
     if (parts.length > 0) pathLines.push(`  ${p.function}: ${parts.join('  ')}`);
   }
   if (pathLines.length > 0) {
-    optional.push('Call neighbours:');
+    optional.push(`Call neighbours [${sourceProvenance}]:`);
     optional.push(...pathLines);
   }
 
-  const specs = clean(result.specDomains, 8);
-  if (specs.length > 0) optional.push(`Spec domains: ${specs.join(', ')}`);
+  const specs = (result.specDomains ?? [])
+    .map(s => typeof s === 'string' ? s : s?.domain)
+    .filter((s): s is string => typeof s === 'string' && s.length > 0)
+    .slice(0, 8);
+  if (specs.length > 0) {
+    optional.push(`Spec domains [${specProvenance}]: ${specs.join(', ')}`);
+  }
 
   const tools = clean(result.suggestedTools, 6);
   if (tools.length > 0) optional.push(`Suggested tools: ${tools.join(', ')}`);
@@ -232,9 +251,16 @@ export function renderInjectionBlock(result: LeanOrientResult, cfg: ResolvedInje
   // Greedily include optional lines while the whole block stays within budget.
   const lines = [...mandatory];
   for (const line of optional) {
-    const candidate = frameServedContent([...lines, line].join('\n'), 'source-derived', 'task-scoped orientation');
+    const candidateLines = [...lines, line];
+    const candidateProvenances = candidateLines.some(l => l.startsWith('Spec domains ['))
+      ? [...baseProvenances, specProvenance]
+      : baseProvenances;
+    const candidate = frameServedContent(candidateLines.join('\n'), candidateProvenances, 'task-scoped orientation');
     if (estimateTokens(candidate) > cfg.tokenBudget) break;
     lines.push(line);
   }
-  return frameServedContent(lines.join('\n'), 'source-derived', 'task-scoped orientation');
+  const finalProvenances = lines.some(l => l.startsWith('Spec domains ['))
+    ? [...baseProvenances, specProvenance]
+    : baseProvenances;
+  return frameServedContent(lines.join('\n'), finalProvenances, 'task-scoped orientation');
 }

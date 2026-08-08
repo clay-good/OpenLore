@@ -357,6 +357,7 @@ describe('index-bundle: promoteStagedIndex clears orphaned search indexes', () =
     expect(existsSync(join(live, 'text-line-index'))).toBe(false);  // orphan dir cleared
     expect(existsSync(join(live, 'vector-index-meta.json'))).toBe(false); // stale meta cleared
     expect(existsSync(join(live, ARTIFACT_CALL_GRAPH_DB))).toBe(true);    // bundle files promoted
+    expect(JSON.parse(await readFile(join(live, 'analysis-origin.json'), 'utf8'))).toEqual({ provenance: 'imported' });
   });
 });
 

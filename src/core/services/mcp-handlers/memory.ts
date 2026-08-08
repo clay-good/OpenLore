@@ -352,7 +352,7 @@ export async function handleRecall(
             kind: 'decision',
             id: d.id,
             text: d.title,
-            provenance: decisionContentProvenance(d.status),
+            provenance: decisionContentProvenance(d),
             freshness: f.freshness,
             anchored: f.anchored,
             verify: f.freshness === 'drifted' ? true : undefined,

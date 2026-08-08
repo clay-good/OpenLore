@@ -39,6 +39,8 @@ export interface DecisionNode {
   affectedDomains: string[];
   affectedFiles: string[];
   confidence: 'high' | 'medium' | 'low';
+  approvedBy?: 'human' | 'autopilot';
+  humanReviewedAt?: string;
   /** 8-char id of a prior decision this one reverses, if any. */
   supersedes?: string;
 }
@@ -92,6 +94,8 @@ export function projectDecisions(store: DecisionStore): ProjectedDecisions {
       affectedDomains: [...d.affectedDomains].sort(),
       affectedFiles: [...d.affectedFiles].sort(),
       confidence: d.confidence,
+      ...(d.approvedBy ? { approvedBy: d.approvedBy } : {}),
+      ...(d.humanReviewedAt ? { humanReviewedAt: d.humanReviewedAt } : {}),
       ...(d.supersedes ? { supersedes: d.supersedes } : {}),
     });
 

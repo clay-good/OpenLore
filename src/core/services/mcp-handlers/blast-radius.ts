@@ -26,6 +26,7 @@ import { assembleBoundary, computeStaleness } from './confidence-boundary.js';
 import type { ConfidenceBoundary } from './confidence-boundary.js';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
 import type { DriftIssue, DriftResult } from '../../../types/index.js';
+import { reviewedFileContentProvenance, type ServedContentProvenance } from '../served-content.js';
 
 /** How many of the highest-fan-in changed symbols to run impact analysis on.
  * A briefing, not an audit: the riskiest symbols dominate the blast radius, and
@@ -72,7 +73,7 @@ interface ImpactResult {
   blastRadius: { total: number; upstream: number; downstream: number; infrastructure?: number };
   riskLevel: RiskLevel;
   crossDomain?: { ecosystems: string[] };
-  governingDecisions?: Array<{ id?: string; title: string; affectedDomains?: string[] }>;
+  governingDecisions?: Array<{ id?: string; title: string; affectedDomains?: string[]; provenance?: ServedContentProvenance }>;
 }
 
 export interface BlastRadiusBriefing {
@@ -89,6 +90,8 @@ export interface BlastRadiusBriefing {
     hubsTouched: Array<{ symbol: string; fanIn: number }>;
     layersCrossed: string[];
     governingDecisions: string[];
+    /** Additive provenance companion for the legacy title array above. */
+    governingDecisionProvenance: Array<{ title: string; provenance: ServedContentProvenance }>;
     topSymbols: SymbolRisk[];
     analyzedSymbolCount: number;
     truncated?: { omitted: number; reason: string };
@@ -107,18 +110,18 @@ export interface BlastRadiusBriefing {
   memory: {
     drifted: number;
     orphaned: number;
-    willDrift: Array<{ kind: string; message: string; filePath: string }>;
+    willDrift: Array<{ kind: string; message: string; filePath: string; provenance: ServedContentProvenance }>;
   };
   specs: {
     willGoStale: number;
-    items: Array<{ kind: string; message: string; domain: string | null; specPath: string | null }>;
+    items: Array<{ kind: string; message: string; domain: string | null; specPath: string | null; provenance: ServedContentProvenance }>;
   };
   decisions: {
     affected: number;
     /** Uncapped count of `adr-orphaned` issues. The hook's block gate reads this,
      * never `items` — `items` is display-capped and could omit a triggering issue. */
     orphaned: number;
-    items: Array<{ kind: string; message: string; domain: string | null }>;
+    items: Array<{ kind: string; message: string; domain: string | null; provenance: ServedContentProvenance }>;
   };
   /**
    * Cross-repo (federation) impact. `evaluated: false` carries a truthful note about
@@ -197,7 +200,7 @@ export async function computeBlastRadius(
   const topSymbols: SymbolRisk[] = [];
   const hubsTouched: Array<{ symbol: string; fanIn: number }> = [];
   const layers = new Set<string>();
-  const governing = new Set<string>();
+  const governing = new Map<string, ServedContentProvenance>();
   let highestRank = 0;
   let maxAffectedCallers = 0;
   // Symbols whose impact analysis threw. `analyzedSymbolCount` is documented below as
@@ -223,7 +226,7 @@ export async function computeBlastRadius(
     if (isHub) hubsTouched.push({ symbol: r.symbol, fanIn: r.metrics?.fanIn ?? 0 });
     for (const e of r.crossDomain?.ecosystems ?? []) layers.add(e);
     for (const d of r.governingDecisions ?? []) {
-      governing.add(d.title);
+      governing.set(d.title, d.provenance ?? 'local-unreviewed');
       for (const dom of d.affectedDomains ?? []) layers.add(dom);
     }
     highestRank = Math.max(highestRank, RISK_RANK[risk] ?? 0);
@@ -270,9 +273,10 @@ export async function computeBlastRadius(
   // check_spec_drift already computes anchored-memory freshness (memory-drifted /
   // memory-orphaned) and ADR drift in addition to spec staleness. We extract the
   // named issues by kind rather than re-implementing freshness — pure reuse.
-  const memWillDrift: Array<{ kind: string; message: string; filePath: string }> = [];
-  const specItems: Array<{ kind: string; message: string; domain: string | null; specPath: string | null }> = [];
-  const decisionItems: Array<{ kind: string; message: string; domain: string | null }> = [];
+  const memWillDrift: Array<{ kind: string; message: string; filePath: string; provenance: ServedContentProvenance }> = [];
+  const specItems: Array<{ kind: string; message: string; domain: string | null; specPath: string | null; provenance: ServedContentProvenance }> = [];
+  const decisionItems: Array<{ kind: string; message: string; domain: string | null; provenance: ServedContentProvenance }> = [];
+  const specProvenance = await reviewedFileContentProvenance(absDir, 'openspec');
   let driftUnavailable: string | null = null;
   let driftRaw: unknown;
   try {
@@ -287,9 +291,9 @@ export async function computeBlastRadius(
   } else {
     const drift = driftRaw as DriftResult;
     for (const issue of drift.issues ?? []) {
-      if (MEMORY_KINDS.has(issue.kind)) memWillDrift.push({ kind: issue.kind, message: issue.message, filePath: issue.filePath });
-      else if (SPEC_KINDS.has(issue.kind)) specItems.push({ kind: issue.kind, message: issue.message, domain: issue.domain, specPath: issue.specPath });
-      else if (DECISION_KINDS.has(issue.kind)) decisionItems.push({ kind: issue.kind, message: issue.message, domain: issue.domain });
+      if (MEMORY_KINDS.has(issue.kind)) memWillDrift.push({ kind: issue.kind, message: issue.message, filePath: issue.filePath, provenance: 'local-unreviewed' });
+      else if (SPEC_KINDS.has(issue.kind)) specItems.push({ kind: issue.kind, message: issue.message, domain: issue.domain, specPath: issue.specPath, provenance: specProvenance });
+      else if (DECISION_KINDS.has(issue.kind)) decisionItems.push({ kind: issue.kind, message: issue.message, domain: issue.domain, provenance: 'source-derived' });
     }
   }
   const memOrphaned = memWillDrift.filter(m => m.kind === 'memory-orphaned').length;
@@ -367,7 +371,10 @@ export async function computeBlastRadius(
       maxAffectedCallers,
       hubsTouched: hubsTouched.sort((a, b) => b.fanIn - a.fanIn),
       layersCrossed: [...layers].sort(),
-      governingDecisions: [...governing].sort(),
+      governingDecisions: [...governing.keys()].sort(),
+      governingDecisionProvenance: [...governing.entries()]
+        .map(([title, provenance]) => ({ title, provenance }))
+        .sort((a, b) => a.title.localeCompare(b.title)),
       topSymbols: topSymbols.slice(0, 15),
       analyzedSymbolCount: analyzed.length - impactFailures,
       ...(seeds.length > analyzed.length

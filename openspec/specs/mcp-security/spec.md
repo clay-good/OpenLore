@@ -491,6 +491,9 @@ carry one factual provenance class: `reviewed-corpus`, `local-unreviewed`, `fore
 `imported`, or `source-derived`. The system SHALL NOT emit a trustworthiness score, safety rating,
 or computed judgment of whether that content should be believed.
 
+Content that has not passed human review SHALL NOT be presented as carrying the reviewed corpus's
+authority.
+
 The serving path SHALL preserve recorded bytes exactly. It SHALL NOT sanitize, strip, escape,
 neutralize, or otherwise rewrite instruction-shaped content. A composed agent-context block SHALL
 state that its content is data rather than instructions and SHALL use a delimiter absent from the
@@ -501,6 +504,7 @@ enclosed bytes.
 - **GIVEN** a locally recorded memory containing imperative language
 - **WHEN** recall serves it to an agent
 - **THEN** it carries `local-unreviewed` provenance
+- **AND** it is not presented as carrying the reviewed corpus's authority
 - **AND** its text is byte-identical to the recorded text
 - **AND** it carries no trustworthiness, safety, or confidence verdict
 

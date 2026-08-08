@@ -47,7 +47,13 @@ import type { MemoryFreshness } from '../../../types/index.js';
 import { type Reversal, collectReversals, fileScope, supersededDecisionIds } from './reversals.js';
 import { getSourceRoots, moduleFromPath } from './epistemic-lease.js';
 import { readHotspotArtifact, hotspotsForModules } from './behavioral-hotspots.js';
-import { decisionContentProvenance, type ServedContentProvenance } from '../served-content.js';
+import {
+  decisionContentProvenance,
+  readAnalysisContentProvenance,
+  reviewedFileContentProvenance,
+  type AnalysisContentProvenance,
+  type ServedContentProvenance,
+} from '../served-content.js';
 
 // ============================================================================
 // MANIFEST CACHE
@@ -121,7 +127,7 @@ interface OrientFunction {
   isHub: boolean;
   isEntryPoint: boolean;
   linkedSpecs: Array<{ requirement: string; domain: string; specFile: string }>;
-  provenance: ServedContentProvenance;
+  provenance: AnalysisContentProvenance;
   /** Other files holding an exact copy, when collapsed under a token budget (P3). */
   duplicateOf?: string[];
 }
@@ -131,7 +137,7 @@ interface CallNeighbour {
   filePath: string;
   /** Present only for infrastructure neighbors (IaC resources) — spec-17 cross-domain. */
   domain?: 'infra';
-  provenance: 'source-derived';
+  provenance: AnalysisContentProvenance;
 }
 
 interface OrientCallPath {
@@ -139,7 +145,7 @@ interface OrientCallPath {
   filePath: string;
   callers: CallNeighbour[];
   callees: CallNeighbour[];
-  provenance: 'source-derived';
+  provenance: AnalysisContentProvenance;
 }
 
 interface OrientInsertionPoint {
@@ -150,7 +156,7 @@ interface OrientInsertionPoint {
   strategy: string;
   reason: string;
   score: number;
-  provenance: 'source-derived';
+  provenance: AnalysisContentProvenance;
 }
 
 interface OrientSpecMatch {
@@ -159,7 +165,7 @@ interface OrientSpecMatch {
   title: string;
   score: number;
   text: string;
-  provenance: 'reviewed-corpus';
+  provenance: Extract<ServedContentProvenance, 'reviewed-corpus' | 'local-unreviewed'>;
 }
 
 interface InlineSpec {
@@ -170,7 +176,7 @@ interface InlineSpec {
   calledBy: string[];
   /** Condensed spec content: Purpose + Dependencies section + Requirement names with file:line */
   content: string;
-  provenance: 'reviewed-corpus';
+  provenance: Extract<ServedContentProvenance, 'reviewed-corpus' | 'local-unreviewed'>;
 }
 
 // ============================================================================
@@ -202,6 +208,11 @@ export async function handleOrient(
       hint: 'Plain "openlore analyze" builds a keyword (BM25) index that orient can use; add EMBED_* (or --embed) for semantic search.',
     };
   }
+
+  const [analysisProvenance, specProvenance] = await Promise.all([
+    readAnalysisContentProvenance(absDir),
+    reviewedFileContentProvenance(absDir, 'openspec'),
+  ]);
 
   // Resolve the active embedder (env → local provider → remote config); null is
   // the first-class keyword default, never an error. `searchMode` stays an
@@ -241,7 +252,7 @@ export async function handleOrient(
     isHub: r.record.isHub,
     isEntryPoint: r.record.isEntryPoint,
     linkedSpecs: mappingIdx ? specsForFile(mappingIdx, r.record.filePath) : [],
-    provenance: 'source-derived',
+    provenance: analysisProvenance,
   }));
 
   // Progressive disclosure (Spec 25 P2–P4): when a tokenBudget is set, collapse
@@ -293,19 +304,19 @@ export async function handleOrient(
     .sort((a, b) => b[1].matchCount - a[1].matchCount)
     .slice(0, 5)
     .map(([domain, { specFile, matchCount }]) => ({
-      domain, specFile, matchCount, provenance: 'reviewed-corpus' as const,
+      domain, specFile, matchCount, provenance: specProvenance,
     }));
 
   // ── Call paths for each top function ──────────────────────────────────────
   const callPaths: OrientCallPath[] = topResults.map(r => {
     if (!llmCtx?.edgeStore) {
-      return { function: r.record.name, filePath: r.record.filePath, callers: [], callees: [], provenance: 'source-derived' };
+      return { function: r.record.name, filePath: r.record.filePath, callers: [], callees: [], provenance: analysisProvenance };
     }
     const es = llmCtx.edgeStore;
     // Tag IaC resources so an agent can tell infrastructure neighbors from code (spec-17).
     const toNeighbour = (n: ReturnType<typeof es.getNode>): CallNeighbour | null =>
       n && !n.isExternal
-        ? { name: n.name, filePath: n.filePath, provenance: 'source-derived' as const, ...(isIacLanguage(n.language) ? { domain: 'infra' as const } : {}) }
+        ? { name: n.name, filePath: n.filePath, provenance: analysisProvenance, ...(isIacLanguage(n.language) ? { domain: 'infra' as const } : {}) }
         : null;
     const callers = es.getCallers(r.record.id)
       .map(e => toNeighbour(es.getNode(e.callerId)))
@@ -315,7 +326,7 @@ export async function handleOrient(
       .map(e => toNeighbour(es.getNode(e.calleeId)))
       .filter((x): x is CallNeighbour => x !== null)
       .slice(0, 5);
-    return { function: r.record.name, filePath: r.record.filePath, callers, callees, provenance: 'source-derived' };
+    return { function: r.record.name, filePath: r.record.filePath, callers, callees, provenance: analysisProvenance };
   });
 
   // ── Insertion points (lightweight: reuse rawResults with structural scoring) ──
@@ -337,7 +348,7 @@ export async function handleOrient(
   insertionCandidates.sort((a, b) => b.score - a.score);
   const insertionPoints: OrientInsertionPoint[] = insertionCandidates
     .slice(0, 3)
-    .map((c, i) => ({ rank: i + 1, ...c, score: parseFloat(c.score.toFixed(3)), provenance: 'source-derived' }));
+    .map((c, i) => ({ rank: i + 1, ...c, score: parseFloat(c.score.toFixed(3)), provenance: analysisProvenance }));
 
   // ── Enrichment (Spec 27, deepened) ─────────────────────────────────────────
   // Everything from here down is dropped by lean mode (it returns the navigation
@@ -359,7 +370,7 @@ export async function handleOrient(
         title: r.record.title,
         score: parseFloat(r.score.toFixed(3)),
         text: r.record.text.slice(0, 300) + (r.record.text.length > 300 ? '…' : ''),
-        provenance: 'reviewed-corpus',
+        provenance: specProvenance,
       }));
     } catch {
       // non-fatal — spec index may be corrupt or unavailable
@@ -405,7 +416,7 @@ export async function handleOrient(
               dependsOn: entry.dependsOn,
               calledBy: entry.calledBy,
               content,
-              provenance: 'reviewed-corpus',
+              provenance: specProvenance,
             } satisfies InlineSpec;
           }),
         );
@@ -491,7 +502,7 @@ export async function handleOrient(
           title: d.title,
           status: d.status,
           affectedDomains: d.affectedDomains,
-          provenance: decisionContentProvenance(d.status),
+          provenance: decisionContentProvenance(d),
         };
         const anchors = decisionAnchors(d);
         if (view) {
@@ -565,7 +576,7 @@ export async function handleOrient(
           title: d.title,
           status: d.status,
           governs: d.affectedFiles,
-          provenance: decisionContentProvenance(d.status),
+          provenance: decisionContentProvenance(d),
         }));
       }
     }
@@ -895,10 +906,10 @@ export async function handleOrient(
     callPaths,
     suggestedTools,
     servedContentProvenance: {
-      relevantFiles: 'source-derived' as const,
-      relevantFunctions: 'source-derived' as const,
-      specDomains: 'reviewed-corpus' as const,
-      callPaths: 'source-derived' as const,
+      relevantFiles: analysisProvenance,
+      relevantFunctions: analysisProvenance,
+      specDomains: specProvenance,
+      callPaths: analysisProvenance,
     },
   };
 
