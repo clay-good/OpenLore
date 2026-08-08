@@ -8,10 +8,13 @@
  */
 
 import { createHash } from 'node:crypto';
+import {
+  OPENLORE_BLOCK_BEGIN,
+  OPENLORE_BLOCK_END,
+} from '../../utils/openlore-managed-file.js';
 
-export const BLOCK_BEGIN =
-  '<!-- BEGIN OPENLORE (managed — edits inside this block will be overwritten) -->';
-export const BLOCK_END = '<!-- END OPENLORE -->';
+export const BLOCK_BEGIN = OPENLORE_BLOCK_BEGIN;
+export const BLOCK_END = OPENLORE_BLOCK_END;
 
 const FINGERPRINT_PREFIX = '<!-- openlore-fingerprint: ';
 const FINGERPRINT_SUFFIX = ' -->';

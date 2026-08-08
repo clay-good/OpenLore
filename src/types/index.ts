@@ -266,6 +266,8 @@ export interface FileMetadata {
   isConfig: boolean;
   isTest: boolean;
   isGenerated: boolean;
+  /** True when the file contains only OpenLore installer-managed content. */
+  tooling?: boolean;
 }
 
 export interface ScoredFile extends FileMetadata {

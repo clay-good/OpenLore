@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtemp, rm, writeFile, mkdir, stat } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, mkdir, stat, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runInstall } from './index.js';
@@ -27,6 +27,9 @@ describe('openlore install — auto index build', () => {
       join(dir, 'src', 'index.ts'),
       'export function greet(name: string): string {\n  return `hi ${name}`;\n}\n'
     );
+    await writeFile(join(dir, 'src', 'payments.ts'), 'export function charge(): boolean { return true; }\n');
+    await mkdir(join(dir, 'scripts'), { recursive: true });
+    await writeFile(join(dir, 'scripts', 'report.py'), 'def report():\n    return 1\n');
   });
 
   afterEach(async () => {
@@ -41,6 +44,15 @@ describe('openlore install — auto index build', () => {
     // …AND the index was built (init created config; analyze wrote the index).
     expect(await exists(join(dir, '.openlore/config.json'))).toBe(true);
     expect(await exists(join(dir, '.openlore/analysis/vector-index'))).toBe(true);
+
+    const repoStructure = JSON.parse(await readFile(join(dir, '.openlore/analysis/repo-structure.json'), 'utf8'));
+    const summary = await readFile(join(dir, '.openlore/analysis/SUMMARY.md'), 'utf8');
+    expect(summary).toContain('| Python | 1 |');
+    expect(summary).not.toContain('`.mcp.json`');
+    expect(summary).not.toContain('`CLAUDE.md`');
+    expect(repoStructure.domains.flatMap((domain: { files: string[] }) => domain.files)).not.toContain('.mcp.json');
+    expect(repoStructure.domains.every((domain: { name: string }) => /^[a-z0-9]/i.test(domain.name))).toBe(true);
+    expect(repoStructure.undomained).toContain('scripts/report.py');
   }, 30_000);
 
   it('--no-analyze (analyze:false) configures surfaces but does NOT build the index', async () => {

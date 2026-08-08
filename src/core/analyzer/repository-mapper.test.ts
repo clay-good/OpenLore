@@ -7,6 +7,8 @@ import { mkdir, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { RepositoryMapper, mapRepository } from './repository-mapper.js';
+import { renderBlock } from '../../cli/install/block.js';
+import { mergeEntries } from '../../cli/install/json-managed.js';
 
 describe('RepositoryMapper', () => {
   let testDir: string;
@@ -21,6 +23,39 @@ describe('RepositoryMapper', () => {
   });
 
   describe('basic mapping', () => {
+    it('keeps installer-owned artifacts out of repository characterization', async () => {
+      await mkdir(join(testDir, 'src'));
+      await mkdir(join(testDir, 'scripts'));
+      await writeFile(join(testDir, 'src', 'index.ts'), 'export function main() {}');
+      await writeFile(join(testDir, 'src', 'payments.ts'), 'export function charge() {}');
+      await writeFile(join(testDir, 'scripts', 'report.py'), 'def report():\n    return 1\n');
+      await writeFile(join(testDir, 'AGENTS.md'), renderBlock('OpenLore instructions'));
+      await writeFile(join(testDir, '.clinerules'), renderBlock('OpenLore instructions'));
+      await writeFile(join(testDir, '.mcp.json'), JSON.stringify(mergeEntries({}, [{
+        path: 'mcpServers.openlore', value: { command: 'openlore' },
+      }]).next));
+
+      const map = await new RepositoryMapper(testDir).map();
+
+      expect(map.summary.languages.map(language => language.language)).toContain('Python');
+      expect(map.highValueFiles.map(file => file.path)).not.toContain('AGENTS.md');
+      expect(map.highValueFiles.map(file => file.path)).not.toContain('.mcp.json');
+      expect(map.allFiles.find(file => file.path === 'AGENTS.md')?.tooling).toBe(true);
+      expect(map.allFiles.find(file => file.path === '.mcp.json')?.tooling).toBe(true);
+      expect(map.allFiles.find(file => file.path === '.clinerules')?.tooling).toBe(true);
+      expect(Object.values(map.clusters.byDomain).flat().map(file => file.path)).not.toContain('AGENTS.md');
+    });
+
+    it('characterizes a user AGENTS.md that also contains an OpenLore block', async () => {
+      await writeFile(join(testDir, 'AGENTS.md'), `# User instructions\n\n${renderBlock('OpenLore instructions')}`);
+      await writeFile(join(testDir, 'index.ts'), 'export function main() {}');
+
+      const map = await new RepositoryMapper(testDir).map();
+
+      expect(map.allFiles.find(file => file.path === 'AGENTS.md')?.tooling).not.toBe(true);
+      expect(map.summary.languages.map(language => language.language)).toContain('Markdown');
+    });
+
     it('should map a simple project structure', async () => {
       // Create a simple Node.js project
       await writeFile(
