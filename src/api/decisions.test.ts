@@ -9,6 +9,8 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
+const mocks = vi.hoisted(() => ({ saveLogs: vi.fn(async () => {}) }));
+
 // ── Module mocks (hoisted) ────────────────────────────────────────────────────
 
 vi.mock('../utils/command-helpers.js', async (importOriginal) => {
@@ -20,9 +22,21 @@ vi.mock('../core/services/config-manager.js', () => ({
   readOpenLoreConfig: vi.fn(async () => ({ version: '1.0.0', openspecPath: './openspec' })),
 }));
 
+vi.mock('../core/services/llm-service.js', () => ({
+  createLLMService: vi.fn(() => ({ saveLogs: mocks.saveLogs })),
+}));
+
+vi.mock('../core/decisions/consolidator.js', () => ({
+  consolidateDrafts: vi.fn(),
+}));
+
 vi.mock('../core/drift/index.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../core/drift/index.js')>();
-  return { ...actual, buildSpecMap: vi.fn(async () => ({})) };
+  return {
+    ...actual,
+    buildSpecMap: vi.fn(async () => ({})),
+    isGitRepositoryRoot: vi.fn(async () => false),
+  };
 });
 
 vi.mock('../core/decisions/syncer.js', () => ({
@@ -35,14 +49,19 @@ vi.mock('../core/decisions/syncer.js', () => ({
 // Keep the real store module (real illegalPromotionToApproved) but stub the disk read.
 vi.mock('../core/decisions/store.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../core/decisions/store.js')>();
-  return { ...actual, loadDecisionStore: vi.fn() };
+  return {
+    ...actual,
+    loadDecisionStore: vi.fn(),
+    updateDecisionStore: vi.fn(),
+  };
 });
 
 // ── Imports ───────────────────────────────────────────────────────────────────
 
-import { openloreSyncDecisions } from './decisions.js';
-import { loadDecisionStore } from '../core/decisions/store.js';
+import { openloreConsolidateDecisions, openloreSyncDecisions } from './decisions.js';
+import { loadDecisionStore, updateDecisionStore } from '../core/decisions/store.js';
 import { syncApprovedDecisions } from '../core/decisions/syncer.js';
+import { consolidateDrafts } from '../core/decisions/consolidator.js';
 import type { DecisionStore, PendingDecision } from '../types/index.js';
 
 function makeDecision(overrides: Partial<PendingDecision> = {}): PendingDecision {
@@ -106,5 +125,26 @@ describe('openloreSyncDecisions — status-transition guard', () => {
       }),
       expect.anything(),
     );
+  });
+});
+
+describe('openloreConsolidateDecisions — verification evidence', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('marks non-git decisions as having no verification evidence and saves LLM logs', async () => {
+    const draft = makeDecision();
+    const store = makeStore([draft]);
+    vi.mocked(loadDecisionStore).mockResolvedValue(store);
+    vi.mocked(updateDecisionStore).mockResolvedValue(store);
+    vi.mocked(consolidateDrafts).mockResolvedValue({ decisions: [draft], supersededIds: [] });
+
+    const result = await openloreConsolidateDecisions({ rootPath: '/test/project', provider: 'anthropic' });
+
+    expect(result.verified).toEqual([
+      expect.objectContaining({ id: draft.id, status: 'verified', verificationEvidence: 'none' }),
+    ]);
+    expect(mocks.saveLogs).toHaveBeenCalledOnce();
   });
 });

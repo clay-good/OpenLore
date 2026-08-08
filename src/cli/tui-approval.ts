@@ -56,6 +56,7 @@ function renderDecision(d: PendingDecision, idx: number, total: number): string 
     `  ${C.dim}ID        :${C.reset} ${d.id}`,
     `  ${C.dim}Domains   :${C.reset} ${d.affectedDomains.join(', ') || C.dim + 'unknown' + C.reset}`,
     `  ${C.dim}Confidence:${C.reset} ${conf}`,
+    `  ${C.dim}Evidence  :${C.reset} ${d.verificationEvidence ?? 'legacy/unknown'}`,
     '',
     `  ${C.dim}Rationale :${C.reset} ${wrap(d.rationale, width - 14, indent)}`,
   ];

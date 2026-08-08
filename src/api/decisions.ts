@@ -27,7 +27,7 @@ import {
 } from '../core/decisions/store.js';
 import { consolidateDrafts } from '../core/decisions/consolidator.js';
 import type { ProviderName } from '../utils/command-helpers.js';
-import { verifyDecisions } from '../core/decisions/verifier.js';
+import { markVerificationEvidenceAbsent, verifyDecisions } from '../core/decisions/verifier.js';
 import { syncApprovedDecisions } from '../core/decisions/syncer.js';
 import type { PendingDecision, DecisionStore } from '../types/index.js';
 import type { SyncResult } from '../core/decisions/syncer.js';
@@ -160,6 +160,7 @@ export async function openloreConsolidateDecisions(
 
   progress(onProgress, 'Consolidating drafts', 'start');
   const { decisions: consolidated, supersededIds } = await consolidateDrafts(store, llm, specMap);
+  await llm.saveLogs().catch(() => {});
   progress(onProgress, 'Consolidating drafts', 'complete', `${consolidated.length} decisions`);
 
   if (consolidated.length === 0) {
@@ -192,7 +193,7 @@ export async function openloreConsolidateDecisions(
   progress(onProgress, 'Verifying decisions', 'start');
   const { verified, phantom, missing } = combinedDiff
     ? await verifyDecisions(consolidated, combinedDiff, llm, commitMessages)
-    : { verified: consolidated.map((d) => ({ ...d, status: 'verified' as const, confidence: 'medium' as const })), phantom: [], missing: [] };
+    : { verified: markVerificationEvidenceAbsent(consolidated), phantom: [], missing: [] };
   progress(onProgress, 'Verifying decisions', 'complete', `${verified.length} verified`);
 
   // CAS persist onto the freshest store so a concurrently-recorded draft is kept.

@@ -74,6 +74,7 @@ describe('verifyDecisions — happy path', () => {
     expect(result.verified).toHaveLength(1);
     expect(result.verified[0].status).toBe('verified');
     expect(result.verified[0].confidence).toBe('high');
+    expect(result.verified[0].verificationEvidence).toBe('git-diff');
     expect(result.verified[0].evidenceFile).toBe('src/cache.ts');
   });
 

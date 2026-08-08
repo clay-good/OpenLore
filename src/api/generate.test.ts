@@ -169,6 +169,7 @@ describe('openloreGenerate', () => {
     delete process.env.OPENAI_API_KEY;
     delete process.env.GEMINI_API_KEY;
     delete process.env.OPENAI_COMPAT_API_KEY;
+    delete process.env.NODE_TLS_REJECT_UNAUTHORIZED;
   });
 
   describe('config validation', () => {
@@ -199,6 +200,16 @@ describe('openloreGenerate', () => {
       delete process.env.OPENAI_COMPAT_API_KEY;
       // A user with the Claude Code CLI but no API key must learn the path that works for them.
       await expect(openloreGenerate({ rootPath: ROOT })).rejects.toThrow(/claude-code/);
+    });
+
+    it('an embedding TLS opt-out never disables TLS for the host process', async () => {
+      mockReadOpenLoreConfig.mockResolvedValue({
+        ...MOCK_CONFIG,
+        embedding: { skipSslVerify: true },
+      } as ReturnType<typeof readOpenLoreConfig> extends Promise<infer T> ? T : never);
+
+      await openloreGenerate({ rootPath: ROOT });
+      expect(process.env.NODE_TLS_REJECT_UNAUTHORIZED).toBeUndefined();
     });
   });
 

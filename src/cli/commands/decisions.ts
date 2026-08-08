@@ -40,7 +40,7 @@ import { consolidateDrafts } from '../../core/decisions/consolidator.js';
 import { classifyGateState } from '../../core/decisions/gate-state.js';
 import { acquireDecisionsLock } from '../../core/decisions/lock.js';
 import { extractFromDiff } from '../../core/decisions/extractor.js';
-import { verifyDecisions } from '../../core/decisions/verifier.js';
+import { markVerificationEvidenceAbsent, verifyDecisions } from '../../core/decisions/verifier.js';
 import { syncApprovedDecisions } from '../../core/decisions/syncer.js';
 import {
   OPENLORE_DIR,
@@ -506,6 +506,7 @@ export function displayDecision(d: PendingDecision, verbose = false): void {
   console.log(`${icon} [${safe(d.id)}] ${scopeBadge} ${safe(d.title)}`);
   if (verbose) {
     console.log(`   Status     : ${d.status}  Confidence: ${confidence}  Scope: ${scopeLabel}`);
+    console.log(`   Verification evidence: ${d.verificationEvidence ?? 'legacy/unknown'}`);
     console.log(`   Rationale  : ${d.rationale}`);
     if (d.affectedDomains.length) console.log(`   Domains    : ${d.affectedDomains.join(', ')}`);
     if (d.proposedRequirement) console.log(`   Requirement: ${d.proposedRequirement}`);
@@ -780,7 +781,7 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
       // Step 3 — Verify
       const { verified, phantom, missing } = combinedDiff
         ? await verifyDecisions(consolidated, combinedDiff, llm, commitMessages)
-        : { verified: consolidated.map((d) => ({ ...d, status: 'verified' as const, confidence: 'medium' as const })), phantom: [], missing: [] };
+        : { verified: markVerificationEvidenceAbsent(consolidated), phantom: [], missing: [] };
 
       // Step 4 — Persist
       // Reject all original drafts — they've been replaced by consolidated decisions.
@@ -883,6 +884,7 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
             affectedDomains: d.affectedDomains,
             affectedFiles: d.affectedFiles,
             confidence: d.confidence,
+            verificationEvidence: d.verificationEvidence,
           })),
           phantom: phantom.map((d) => ({ id: d.id, title: d.title })),
           missing: missing.map((m) => ({ file: m.file, description: m.description })),
@@ -901,7 +903,7 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
       logger.section('Architectural Decisions — Review Required');
 
       if (verified.length > 0) {
-        console.log('\nVerified decisions (found in code):');
+        console.log('\nDecisions awaiting review:');
         for (const d of verified) displayDecision(d, options.verbose);
       }
 
@@ -1072,6 +1074,7 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
           affectedDomains: d.affectedDomains,
           affectedFiles: d.affectedFiles,
           confidence: d.confidence,
+          verificationEvidence: d.verificationEvidence,
         })),
         phantom: [],
         missing,

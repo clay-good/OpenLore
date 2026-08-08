@@ -31,7 +31,7 @@ validate`**, and the archive machinery works again. This pass:
   because their requirements were already synced verbatim (`fix-pi-parity-drift`,
   `fix-redaction-module-gaps`).
 
-## Complete — 117 in `archive/`
+## Complete — 118 in `archive/`
 
 Everything in `openspec/changes/archive/` is shipped (or a settled won't-do), with its
 requirements reflected in the main specs. `openspec list` shows only open work.
@@ -41,7 +41,7 @@ requirements reflected in the main specs. `openspec list` shows only open work.
 No open change has partial code on `main`. A change belongs here the moment its implementation
 starts; move it back out (archive it) the moment its marker/spec evidence lands.
 
-## To build — 127
+## To build — 126
 
 The whole open set is unbuilt backlog. Newest additions: 7 proposals from the 2026-07-27
 first-run e2e (`E2E-FIRSTRUN-2026-07-27.md`). Other thematic indexes:
@@ -49,7 +49,9 @@ first-run e2e (`E2E-FIRSTRUN-2026-07-27.md`). Other thematic indexes:
 `COMPETITIVE-SUBSTRATE-2026-07.md`.
 
 Shipped since compile: `harden-walker-corpus-boundary` (2026-08-02, archived) — the walker
-truncation receipt, includePatterns-override-directory-pruning, and nested-`.gitignore` semantics.
+truncation receipt, includePatterns-override-directory-pruning, and nested-`.gitignore` semantics;
+`harden-api-decision-and-generate-safety` (2026-08-08, archived) — decision-sync transition
+enforcement, scoped TLS configuration, verification-evidence disclosure, and consolidation logs.
 
 After this table was compiled, four research sweeps added 32 more proposals (all validate; not yet
 folded into the table): 10 in `FIELD-RESEARCH-2026-07.md`, 10 in `ECOSYSTEM-RESEARCH-2026-07-27.md`,
@@ -123,7 +125,6 @@ trust boundary for served content.
 | `fix-windows-invocation-surface` | spawns that ENOENT, configs that can't launch, and no support statement |
 | `ground-generated-specs-in-the-graph` | resolve requirement→symbol citations against the graph |
 | `harden-analyze-rebuild-atomicity` | The full edge-store rebuild is not atomic — concurrent readers see empty/partial/doubled graphs, and a >5s lock silently drops watcher work |
-| `harden-api-decision-and-generate-safety` | The API's decision-sync force-approves rejected decisions, its generate disables TLS process-globally, and it stamps "verified" with no evidence |
 | `harden-bundle-import-trust` | integrity is not authenticity, and "verified current" must be earned |
 | `harden-chat-agent-surface` | per-provider model resolution and honest terminal states |
 | `harden-daemon-lifecycle` | protect the token, win the start race, drain before exit, bound the caches |

@@ -170,7 +170,7 @@ export async function verifyDecisions(
     .flatMap((v) => {
       const d = byId.get(v.id);
       if (!d) return [];
-      return [{ ...d, status: 'verified' as const, confidence: v.confidence, evidenceFile: v.evidenceFile, verifiedAt: now }];
+      return [{ ...d, status: 'verified' as const, confidence: v.confidence, verificationEvidence: 'git-diff' as const, evidenceFile: v.evidenceFile, verifiedAt: now }];
     });
 
   // HF-1: rescue any LLM-marked phantom whose affected files are all present in the
@@ -181,11 +181,24 @@ export async function verifyDecisions(
     if (!d) continue;
     const evidenceFile = substantiveEvidence(d, diffByFile);
     if (evidenceFile) {
-      verified.push({ ...d, status: 'verified', confidence: 'low', evidenceFile, verifiedAt: now });
+      verified.push({ ...d, status: 'verified', confidence: 'low', verificationEvidence: 'git-diff', evidenceFile, verifiedAt: now });
     } else {
       phantom.push({ ...d, status: 'phantom', confidence: 'low', verifiedAt: now });
     }
   }
 
   return { verified, phantom, missing: result.missing };
+}
+
+/**
+ * Mark decisions that could not be checked against a git diff without claiming evidence.
+ * change: harden-api-decision-and-generate-safety
+ */
+export function markVerificationEvidenceAbsent(decisions: PendingDecision[]): PendingDecision[] {
+  return decisions.map((decision) => ({
+    ...decision,
+    status: 'verified',
+    confidence: 'medium',
+    verificationEvidence: 'none',
+  }));
 }
