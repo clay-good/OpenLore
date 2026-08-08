@@ -284,6 +284,33 @@ describe('AnalysisArtifactGenerator', () => {
   });
 
   describe('RepoStructure Generation', () => {
+    it('discloses a call-graph source file that belongs to no domain', async () => {
+      const scriptDir = join(tempDir, 'scripts');
+      const scriptPath = join(scriptDir, 'report.py');
+      await mkdir(scriptDir, { recursive: true });
+      await writeFile(scriptPath, 'def report():\n    return 1\n');
+      const script = createScoredFile({
+        name: 'report.py', path: 'scripts/report.py', absolutePath: scriptPath,
+        directory: 'scripts', extension: '.py',
+      });
+      const repoMap = createMockRepoMap({
+        allFiles: [script], highValueFiles: [script], entryPoints: [], schemaFiles: [],
+        configFiles: [],
+        clusters: {
+          byDirectory: { scripts: [script] }, byDomain: {},
+          byLayer: { presentation: [], business: [], data: [], infrastructure: [] },
+        },
+      });
+
+      const artifacts = await generateArtifacts(repoMap, createMockDepGraph({ nodes: [], edges: [], clusters: [] }), {
+        rootDir: tempDir, outputDir,
+      });
+
+      expect(artifacts.repoStructure.undomained).toEqual(['scripts/report.py']);
+      expect(artifacts.summaryMarkdown).toContain('Undomained source files');
+      expect(artifacts.summaryMarkdown).toContain('scripts/report.py');
+    });
+
     it('should generate valid repo-structure.json', async () => {
       const repoMap = createMockRepoMap();
       const depGraph = createMockDepGraph();

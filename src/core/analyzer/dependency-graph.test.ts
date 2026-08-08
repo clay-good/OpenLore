@@ -72,6 +72,25 @@ describe('DependencyGraphBuilder', () => {
   });
 
   describe('Basic Graph Construction', () => {
+    it('excludes tooling files and gives root config clusters a stable honest name', async () => {
+      const dotfile = await createFile(tempDir, '.mcp.json', '{}');
+      const packageJson = await createFile(tempDir, 'package.json', '{}');
+      const gitignore = await createFile(tempDir, '.gitignore', 'node_modules');
+      const tooling = createScoredFile({ absolutePath: dotfile, name: '.mcp.json', extension: '.json' });
+      tooling.tooling = true;
+
+      const result = await buildDependencyGraph([
+        tooling,
+        createScoredFile({ absolutePath: packageJson, name: 'package.json', extension: '.json', isConfig: true }),
+        createScoredFile({ absolutePath: gitignore, name: '.gitignore', extension: '', isConfig: true }),
+      ], { rootDir: tempDir });
+
+      expect(result.nodes.map(node => node.file.name)).not.toContain('.mcp.json');
+      expect(result.clusters).toHaveLength(1);
+      expect(result.clusters[0].suggestedDomain).toBe('(root config)');
+      expect(result.clusters[0].suggestedDomain).toMatch(/^\([^)]*\)$|^[a-z0-9]/i);
+    });
+
     it('should create nodes for all files', async () => {
       const fileA = await createFile(tempDir, 'a.ts', 'export const a = 1;');
       const fileB = await createFile(tempDir, 'b.ts', 'export const b = 2;');

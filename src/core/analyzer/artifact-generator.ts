@@ -154,6 +154,8 @@ export interface RepoStructure {
     layers: ArchitectureLayer[];
   };
   domains: DetectedDomain[];
+  /** Call-graph source files not represented by any detected domain. */
+  undomained?: string[];
   entryPoints: EntryPointInfo[];
   dataFlow: DataFlowInfo;
   keyFiles: KeyFiles;
@@ -416,10 +418,17 @@ export class AnalysisArtifactGenerator {
     enrichment?: EnrichmentData
   ): Promise<AnalysisArtifacts> {
     // Generate each artifact
+    const llmContext = await this.generateLLMContext(repoMap, depGraph);
     const repoStructure = this.generateRepoStructure(repoMap, depGraph, enrichment);
+    const domainFiles = new Set(repoStructure.domains.flatMap(domain => domain.files));
+    repoStructure.undomained = [...new Set(
+      (llmContext.callGraph?.nodes ?? [])
+        .filter(node => !node.id.startsWith('external::'))
+        .map(node => node.filePath)
+        .filter(path => !domainFiles.has(path)),
+    )].sort();
     const summaryMarkdown = this.generateSummaryMarkdown(repoMap, depGraph, repoStructure);
     const dependencyDiagram = this.generateDependencyDiagram(depGraph);
-    const llmContext = await this.generateLLMContext(repoMap, depGraph);
 
     return {
       repoStructure,
@@ -649,6 +658,7 @@ export class AnalysisArtifactGenerator {
         layers,
       },
       domains,
+      undomained: [],
       entryPoints,
       dataFlow,
       keyFiles,
@@ -1082,6 +1092,10 @@ export class AnalysisArtifactGenerator {
         const entities = domain.entities.slice(0, 3).join(', ') || '-';
         lines.push(`| ${domain.name} | ${domain.files.length} | ${entities} | \`${domain.suggestedSpecPath}\` |`);
       }
+      lines.push('');
+    }
+    if (repoStructure.undomained?.length) {
+      lines.push(`**Undomained source files**: ${repoStructure.undomained.join(', ')}`);
       lines.push('');
     }
 

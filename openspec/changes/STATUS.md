@@ -51,7 +51,9 @@ first-run e2e (`E2E-FIRSTRUN-2026-07-27.md`). Other thematic indexes:
 Shipped since compile: `harden-walker-corpus-boundary` (2026-08-02, archived) — the walker
 truncation receipt, includePatterns-override-directory-pruning, and nested-`.gitignore` semantics;
 `harden-api-decision-and-generate-safety` (2026-08-08, archived) — decision-sync transition
-enforcement, scoped TLS configuration, verification-evidence disclosure, and consolidation logs.
+enforcement, scoped TLS configuration, verification-evidence disclosure, and consolidation logs;
+`fix-first-analysis-self-contamination` (2026-08-08, archived) — installer-owned artifacts no
+longer skew domains, languages, or high-value files, and undomained source files are disclosed.
 
 After this table was compiled, four research sweeps added 32 more proposals (all validate; not yet
 folded into the table): 10 in `FIELD-RESEARCH-2026-07.md`, 10 in `ECOSYSTEM-RESEARCH-2026-07-27.md`,
@@ -113,7 +115,6 @@ trust boundary for served content.
 | `fix-config-validation-completeness` | Config validation must catch what actually breaks the run, and `doctor` must not bless a config that does |
 | `fix-drift-reporting-honesty` | silent truncation, hook failures reported as drift, and invisible memory-staleness kinds |
 | `fix-empty-orient-and-corpus-honesty` | a zero-match briefing explains itself, and the corpus contains only real symbols |
-| `fix-first-analysis-self-contamination` | install's own artifacts must not skew the user's repo |
 | `fix-git-derived-signal-honesty` | prior churn measured before the change, no stale capability claims, work-tree-aware repo detection |
 | `fix-inject-relevance-gate-keyword-mode` | it can never fire in the zero-config default mode on small repos |
 | `fix-interference-map-honesty` | no silently dropped branches, no fake WAR from shared reads |

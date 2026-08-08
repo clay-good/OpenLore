@@ -313,6 +313,7 @@ export class DependencyGraphBuilder {
    * Build the dependency graph from scored files
    */
   async build(files: ScoredFile[]): Promise<DependencyGraphResult> {
+    files = files.filter(file => !file.tooling);
     // Clear any previous state
     this.nodes.clear();
     this.edges = [];
@@ -704,7 +705,7 @@ export class DependencyGraphBuilder {
       const coupling = totalEdges > 0 ? externalEdges / totalEdges : 0;
 
       // Generate suggested domain name
-      const suggestedDomain = this.suggestDomainName(dir, files);
+      const suggestedDomain = this.suggestDomainName(dir, files, internalEdges > 0);
 
       clusters.push({
         id: `cluster-${clusterId}`,
@@ -726,7 +727,7 @@ export class DependencyGraphBuilder {
   /**
    * Suggest a domain name based on directory and file contents
    */
-  private suggestDomainName(dir: string, files: string[]): string {
+  private suggestDomainName(dir: string, files: string[], isStructural: boolean): string {
     // Walk the directory path leaf-first, skipping build-layout / reverse-DNS
     // package noise, via the shared helper so cluster domains stay in lockstep
     // with repository-mapper's inferred domains (issue #138).
@@ -736,13 +737,17 @@ export class DependencyGraphBuilder {
       return derived;
     }
 
-    // Fallback: derive from the first file's name (any language extension)
-    if (files.length > 0) {
-      const firstFile = this.nodes.get(files[0])?.file.name ?? 'unknown';
-      return firstFile.replace(/\.[a-z0-9]+$/i, '').toLowerCase().replace(/[^a-z0-9]/g, '-');
-    }
+    // A non-structural root group is configuration, not a business domain. Do not let scan order
+    // (especially a leading dotfile) mint the name.
+    if (dir === '(root)' && !isStructural) return '(root config)';
 
-    return 'misc';
+    const candidates = files
+      .map(id => this.nodes.get(id)?.file.name ?? '')
+      .filter(name => !name.startsWith('.'))
+      .map(name => name.replace(/\.[a-z0-9]+$/i, '').toLowerCase().replace(/[^a-z0-9]+/g, '-'))
+      .filter(name => /^[a-z0-9]/.test(name))
+      .sort();
+    return candidates[0] ?? 'misc';
   }
 
   /**

@@ -22,6 +22,7 @@ import type { ProjectType, ScoredFile, FileMetadata } from '../../types/index.js
 import { FileWalker, type FileWalkerOptions } from './file-walker.js';
 import { SignificanceScorer, type ScoringConfig } from './significance-scorer.js';
 import { deriveDomainFromPath, DOMAIN_NOISE_DIRS } from './domain-naming.js';
+import { isEntirelyOpenLoreManaged } from '../../utils/openlore-managed-file.js';
 
 // ============================================================================
 // TYPES
@@ -808,6 +809,21 @@ export class RepositoryMapper {
     const walker = new FileWalker(this.rootPath, walkerOptions);
     const walkResult = await walker.walk();
 
+    // change: fix-first-analysis-self-contamination
+    // Installer-owned files remain visible in the raw inventory, but never characterize the
+    // user's repository. Only marker-bearing text formats are opened here; source files do not
+    // pay for another read pass.
+    for (const file of walkResult.files) {
+      if (!['.json', '.md', '.mdc'].includes(file.extension.toLowerCase())) continue;
+      try {
+        const content = await readFile(file.absolutePath, 'utf8');
+        if (isEntirelyOpenLoreManaged(file.path, content)) file.tooling = true;
+      } catch {
+        // The normal scoring/extraction paths retain their existing unreadable-file behavior.
+      }
+    }
+    const userFiles = walkResult.files.filter(file => !file.tooling);
+
     this.options.onProgress?.('scoring', 40);
 
     // Score all files
@@ -817,24 +833,25 @@ export class RepositoryMapper {
     this.options.onProgress?.('analyzing', 70);
 
     // Detect project type and frameworks
-    const projectType = this.detectProjectType(walkResult.files);
-    const languages = this.calculateLanguages(walkResult.files);
-    const frameworks = this.detectFrameworks(walkResult.files);
+    const projectType = this.detectProjectType(userFiles);
+    const languages = this.calculateLanguages(userFiles);
+    const frameworks = this.detectFrameworks(userFiles);
+    const userScoredFiles = scoredFiles.filter(file => !file.tooling);
 
     // Extract special file categories
-    const highValueFiles = scoredFiles.slice(0, HIGH_VALUE_FILES_LIMIT);
-    const entryPoints = scoredFiles.filter(f => f.isEntryPoint);
-    const schemaFiles = scoredFiles.filter(f =>
+    const highValueFiles = userScoredFiles.slice(0, HIGH_VALUE_FILES_LIMIT);
+    const entryPoints = userScoredFiles.filter(f => f.isEntryPoint);
+    const schemaFiles = userScoredFiles.filter(f =>
       f.tags.includes('schema') ||
       f.name.toLowerCase().includes('model') ||
       f.name.toLowerCase().includes('entity') ||
       f.name.toLowerCase().includes('schema')
     );
-    const configFiles = scoredFiles.filter(f => f.isConfig);
+    const configFiles = userScoredFiles.filter(f => f.isConfig);
 
     // Calculate directory stats and clusters
-    const directories = this.calculateDirectoryStats(scoredFiles);
-    const clusters = this.clusterFiles(scoredFiles);
+    const directories = this.calculateDirectoryStats(userScoredFiles);
+    const clusters = this.clusterFiles(userScoredFiles);
 
     this.options.onProgress?.('complete', 100);
 

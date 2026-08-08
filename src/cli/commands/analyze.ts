@@ -644,6 +644,9 @@ After analysis, run 'openlore generate' to create OpenSpec files.
       console.log(`    ├─ Files analyzed: ${repoMap.summary.analyzedFiles}`);
       console.log(`    ├─ High-value files: ${repoMap.highValueFiles.length}`);
       console.log(`    ├─ Languages: ${repoMap.summary.languages.slice(0, 3).map(l => l.language).join(', ')}`);
+      if (artifacts.repoStructure.undomained?.length) {
+        console.log(`    ├─ Undomained source files: ${artifacts.repoStructure.undomained.join(', ')}`);
+      }
       console.log(`    └─ Architecture: ${artifacts.repoStructure.architecture.pattern}`);
       console.log('');
 
