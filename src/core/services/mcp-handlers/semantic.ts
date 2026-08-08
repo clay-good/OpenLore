@@ -568,7 +568,7 @@ export async function handleSearchSpecs(
     provenance: await indexedSpecContentProvenance(
       absDir,
       `openspec/specs/${r.record.domain}/spec.md`,
-      [r.record.title, r.record.text],
+      [r.record.title, r.record.text, ...r.record.linkedFiles],
     ),
     linkedFiles: r.record.linkedFiles,
     linkedFunctions: mappingIdx ? functionsForDomain(mappingIdx, r.record.domain) : undefined,
@@ -626,10 +626,21 @@ export async function handleUnifiedSearch(
     domain,
     section,
   });
+  const analysisProvenance = await readAnalysisContentProvenance(absDir);
+  const servedResults = await Promise.all(results.map(async result => ({
+    ...result,
+    provenance: result.source.domain
+      ? await indexedSpecContentProvenance(
+          absDir,
+          `openspec/specs/${result.source.domain}/spec.md`,
+          [result.source.section, result.source.title].filter((value): value is string => Boolean(value)),
+        )
+      : analysisProvenance,
+  })));
 
   return {
     query,
-    count: results.length,
-    results,
+    count: servedResults.length,
+    results: servedResults,
   };
 }

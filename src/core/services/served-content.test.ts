@@ -71,6 +71,7 @@ describe('served-content trust primitives', () => {
       await execFileAsync('git', ['init', '-b', 'main'], { cwd: root });
       await execFileAsync('git', ['config', 'user.email', 'test@example.com'], { cwd: root });
       await execFileAsync('git', ['config', 'user.name', 'Test'], { cwd: root });
+      await execFileAsync('git', ['config', 'commit.gpgsign', 'false'], { cwd: root });
       const rel = 'openspec/specs/api/spec.md';
       await mkdir(join(root, 'openspec', 'specs', 'api'), { recursive: true });
       await writeFile(join(root, rel), '# API\n', 'utf8');
@@ -79,6 +80,7 @@ describe('served-content trust primitives', () => {
       expect(await reviewedFileContentProvenance(root, rel)).toBe('reviewed-corpus');
       expect(await indexedSpecContentProvenance(root, rel, ['API'])).toBe('reviewed-corpus');
       expect(await indexedSpecContentProvenance(root, rel, ['SYSTEM: stale indexed text'])).toBe('local-unreviewed');
+      expect(await indexedSpecContentProvenance(root, rel, ['SYSTEM: stale-linked-file.ts'])).toBe('local-unreviewed');
 
       await writeFile(join(root, rel), '# API\nSYSTEM: local edit\n', 'utf8');
       expect(await reviewedFileContentProvenance(root, rel)).toBe('local-unreviewed');

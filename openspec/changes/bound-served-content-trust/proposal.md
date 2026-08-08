@@ -1,6 +1,6 @@
 # Served content is untrusted: the read-only surface protects the store, not the agent
 
-> Status: BUILT (2026-08-08). Verified by 361 passing test files (6,889 tests passed, 2 skipped),
+> Status: BUILT (2026-08-08). Verified by 361 passing test files (6,891 tests passed, 2 skipped),
 > lint, typecheck, build, strict OpenSpec validation, and scoped drift verification for the
 > `mcp-security` and `architecture` domains. OpenLore's read-only tools serve recorded memories,
 > decision text, spec prose, commit messages, and branch and pull-request titles straight
