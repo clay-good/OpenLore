@@ -1,12 +1,50 @@
 import { extname } from 'node:path';
+import { createHash } from 'node:crypto';
 
 export const OPENLORE_BLOCK_BEGIN =
   '<!-- BEGIN OPENLORE (managed — edits inside this block will be overwritten) -->';
 export const OPENLORE_BLOCK_END = '<!-- END OPENLORE -->';
 
+const unsafePathPart = (part: string): boolean =>
+  !part || part === '__proto__' || part === 'prototype' || part === 'constructor';
+
+function canonicalize(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalize).join(',')}]`;
+  const object = value as Record<string, unknown>;
+  return `{${Object.keys(object).sort().map(key => `${JSON.stringify(key)}:${canonicalize(object[key])}`).join(',')}}`;
+}
+
+function shortHash(content: string): string {
+  return createHash('sha256').update(content, 'utf8').digest('hex').slice(0, 16);
+}
+
+function managedJsonSubset(doc: Record<string, unknown>, paths: string[]): Record<string, unknown> | null {
+  const subset: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  for (const dottedPath of paths) {
+    const parts = dottedPath.split('.');
+    if (parts.length === 0 || parts.some(unsafePathPart)) return null;
+
+    let source: unknown = doc;
+    for (const part of parts) {
+      if (!source || typeof source !== 'object' || Array.isArray(source) || !Object.hasOwn(source, part)) return null;
+      source = (source as Record<string, unknown>)[part];
+    }
+
+    let target = subset;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const part = parts[i];
+      if (!target[part]) target[part] = Object.create(null) as Record<string, unknown>;
+      target = target[part] as Record<string, unknown>;
+    }
+    target[parts[parts.length - 1]] = source;
+  }
+  return subset;
+}
+
 function removeManagedJsonPath(doc: Record<string, unknown>, dottedPath: string): boolean {
   const parts = dottedPath.split('.');
-  if (parts.length === 0 || parts.some(part => !part || part === '__proto__' || part === 'prototype' || part === 'constructor')) {
+  if (parts.length === 0 || parts.some(unsafePathPart)) {
     return false;
   }
 
@@ -45,11 +83,19 @@ export function isEntirelyOpenLoreManaged(path: string, content: string): boolea
       const meta = doc._openlore;
       if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return false;
       const marker = meta as Record<string, unknown>;
-      if (marker.managed !== true || !Array.isArray(marker.paths) || marker.paths.length === 0) return false;
+      if (
+        marker.managed !== true || typeof marker.fingerprint !== 'string' ||
+        !Array.isArray(marker.paths) || marker.paths.length === 0 ||
+        !marker.paths.every(managedPath => typeof managedPath === 'string')
+      ) return false;
+
+      const paths = marker.paths as string[];
+      const subset = managedJsonSubset(doc, paths);
+      if (!subset || shortHash(canonicalize(subset)) !== marker.fingerprint) return false;
 
       delete doc._openlore;
-      for (const managedPath of marker.paths) {
-        if (typeof managedPath !== 'string' || !removeManagedJsonPath(doc, managedPath)) return false;
+      for (const managedPath of paths) {
+        if (!removeManagedJsonPath(doc, managedPath)) return false;
       }
       return Object.keys(doc).length === 0;
     } catch {
@@ -58,9 +104,33 @@ export function isEntirelyOpenLoreManaged(path: string, content: string): boolea
   }
 
   const begin = content.indexOf(OPENLORE_BLOCK_BEGIN);
-  if (begin === -1) return false;
-  const endMarker = content.indexOf(OPENLORE_BLOCK_END, begin + OPENLORE_BLOCK_BEGIN.length);
-  if (endMarker === -1) return false;
-  const outside = content.slice(0, begin) + content.slice(endMarker + OPENLORE_BLOCK_END.length);
-  return outside.trim().length === 0;
+  if (begin !== -1) {
+    const endMarker = content.indexOf(OPENLORE_BLOCK_END, begin + OPENLORE_BLOCK_BEGIN.length);
+    if (endMarker === -1) return false;
+    const inner = content.slice(begin + OPENLORE_BLOCK_BEGIN.length, endMarker);
+    const fingerprint = inner.match(/<!-- openlore-fingerprint: ([0-9a-f]+) -->/i)?.[1];
+    if (!fingerprint) return false;
+    const managedContent = inner
+      .replace(/<!-- openlore-fingerprint: [0-9a-f]+ -->\n?/i, '')
+      .replace(/^\n+/, '')
+      .trimEnd();
+    if (shortHash(managedContent) !== fingerprint) return false;
+    const outside = content.slice(0, begin) + content.slice(endMarker + OPENLORE_BLOCK_END.length);
+    return outside.trim().length === 0;
+  }
+
+  // Cursor's generated .mdc uses fingerprinted YAML frontmatter instead of block delimiters.
+  if (extname(path).toLowerCase() !== '.mdc') return false;
+  const mdc = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n([\s\S]*)$/);
+  const frontmatter = mdc?.[1].split(/\r?\n/).filter(line => line.trim().length > 0) ?? [];
+  if (
+    frontmatter.length !== 3 ||
+    !frontmatter.includes('description: OpenLore orient() workflow') ||
+    !frontmatter.includes('alwaysApply: true')
+  ) return false;
+  const mdcFingerprint = frontmatter
+    .map(line => line.match(/^openlore-fingerprint:\s*([0-9a-f]+)\s*$/i)?.[1])
+    .find(Boolean);
+  const mdcBody = mdc?.[2].replace(/^\r?\n/, '').trimEnd();
+  return !!mdcFingerprint && mdcBody !== undefined && shortHash(mdcBody) === mdcFingerprint;
 }

@@ -91,6 +91,16 @@ describe('DependencyGraphBuilder', () => {
       expect(result.clusters[0].suggestedDomain).toMatch(/^\([^)]*\)$|^[a-z0-9]/i);
     });
 
+    it('does not label unrelated root source files as configuration', async () => {
+      const main = await createFile(tempDir, 'main.py', 'def main(): pass');
+      const report = await createFile(tempDir, 'report.py', 'def report(): pass');
+      const result = await buildDependencyGraph([
+        createScoredFile({ absolutePath: main, name: 'main.py', extension: '.py' }),
+        createScoredFile({ absolutePath: report, name: 'report.py', extension: '.py' }),
+      ], { rootDir: tempDir });
+      expect(result.clusters[0].suggestedDomain).toBe('main');
+    });
+
     it('should create nodes for all files', async () => {
       const fileA = await createFile(tempDir, 'a.ts', 'export const a = 1;');
       const fileB = await createFile(tempDir, 'b.ts', 'export const b = 2;');

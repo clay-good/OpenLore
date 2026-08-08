@@ -39,6 +39,7 @@ function createScoredFile(overrides: Partial<ScoredFile> & { name: string; path:
     isConfig: overrides.isConfig ?? false,
     isTest: overrides.isTest ?? false,
     isGenerated: overrides.isGenerated ?? false,
+    tooling: overrides.tooling,
     score: overrides.score ?? 50,
     scoreBreakdown: overrides.scoreBreakdown ?? { name: 10, path: 10, structure: 10, connectivity: 20 },
     tags: overrides.tags ?? [],
@@ -311,6 +312,28 @@ describe('AnalysisArtifactGenerator', () => {
       expect(artifacts.summaryMarkdown).toContain('scripts/report.py');
     });
 
+    it('does not mistake a real external-prefixed path for a synthetic node', async () => {
+      const relativePath = 'external::report\n## forged.py';
+      const absolutePath = join(tempDir, relativePath);
+      await writeFile(absolutePath, 'def report():\n    return 1\n');
+      const file = createScoredFile({
+        name: relativePath, path: relativePath, absolutePath, extension: '.py',
+      });
+      const repoMap = createMockRepoMap({
+        allFiles: [file], highValueFiles: [], entryPoints: [], schemaFiles: [], configFiles: [],
+        clusters: {
+          byDirectory: { '(root)': [file] }, byDomain: {},
+          byLayer: { presentation: [], business: [], data: [], infrastructure: [] },
+        },
+      });
+      const artifacts = await generateArtifacts(repoMap, createMockDepGraph({ nodes: [], edges: [], clusters: [] }), {
+        rootDir: tempDir, outputDir,
+      });
+      expect(artifacts.repoStructure.undomained).toContain(relativePath);
+      expect(artifacts.summaryMarkdown).not.toContain('\n## forged.py');
+      expect(artifacts.summaryMarkdown).toContain('\\u000a\\#\\# forged.py');
+    });
+
     it('should generate valid repo-structure.json', async () => {
       const repoMap = createMockRepoMap();
       const depGraph = createMockDepGraph();
@@ -493,6 +516,17 @@ describe('AnalysisArtifactGenerator', () => {
       expect(Array.isArray(artifacts.repoStructure.keyFiles.config)).toBe(true);
       expect(Array.isArray(artifacts.repoStructure.keyFiles.auth)).toBe(true);
       expect(Array.isArray(artifacts.repoStructure.keyFiles.database)).toBe(true);
+    });
+
+    it('excludes OpenLore tooling from key files', async () => {
+      const tooling = createScoredFile({
+        name: '.mcp.json', path: '.mcp.json', extension: '.json', isConfig: true, tooling: true,
+      });
+      const repoMap = createMockRepoMap({ allFiles: [tooling] });
+      const artifacts = await generateArtifacts(repoMap, createMockDepGraph(), {
+        rootDir: tempDir, outputDir,
+      });
+      expect(artifacts.repoStructure.keyFiles.config).not.toContain('.mcp.json');
     });
 
     it('should include statistics', async () => {

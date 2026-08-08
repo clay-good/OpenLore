@@ -48,6 +48,14 @@ import type { RouteInventory } from './http-route-parser.js';
 import type { MiddlewareEntry } from './middleware-extractor.js';
 import type { EnvVar } from './env-extractor.js';
 
+function escapeMarkdownInline(value: string): string {
+  return value
+    // eslint-disable-next-line no-control-regex -- escape repository-controlled line/control bytes
+    .replace(/[\x00-\x1f\x7f-\x9f]/g, character =>
+      `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`)
+    .replace(/([\\`*_[\]<>#])/g, '\\$1');
+}
+
 // Canonical cross-language test-file predicate. Re-exported here for the many
 // existing importers (e.g. spec-pipeline); the call-graph builder imports the
 // same shared definition so the two can no longer drift.
@@ -417,18 +425,23 @@ export class AnalysisArtifactGenerator {
     depGraph: DependencyGraphResult,
     enrichment?: EnrichmentData
   ): Promise<AnalysisArtifacts> {
-    // Generate each artifact
-    const llmContext = await this.generateLLMContext(repoMap, depGraph);
+    // Preserve the pre-call-graph dependency artifacts before generateLLMContext injects
+    // synthesized cross-file call edges into depGraph for traversal consumers.
     const repoStructure = this.generateRepoStructure(repoMap, depGraph, enrichment);
+    const dependencyDiagram = this.generateDependencyDiagram(depGraph);
+    let summaryMarkdown = this.generateSummaryMarkdown(repoMap, depGraph, repoStructure);
+    const llmContext = await this.generateLLMContext(repoMap, depGraph);
     const domainFiles = new Set(repoStructure.domains.flatMap(domain => domain.files));
     repoStructure.undomained = [...new Set(
       (llmContext.callGraph?.nodes ?? [])
-        .filter(node => !node.id.startsWith('external::'))
+        .filter(node => !node.isExternal)
         .map(node => node.filePath)
         .filter(path => !domainFiles.has(path)),
     )].sort();
-    const summaryMarkdown = this.generateSummaryMarkdown(repoMap, depGraph, repoStructure);
-    const dependencyDiagram = this.generateDependencyDiagram(depGraph);
+    if (repoStructure.undomained.length > 0) {
+      const disclosure = `\n**Undomained source files**: ${repoStructure.undomained.map(escapeMarkdownInline).join(', ')}\n`;
+      summaryMarkdown = summaryMarkdown.replace('\n## Dependency Insights', `${disclosure}\n## Dependency Insights`);
+    }
 
     return {
       repoStructure,
@@ -1002,6 +1015,7 @@ export class AnalysisArtifactGenerator {
     };
 
     for (const file of repoMap.allFiles) {
+      if (file.tooling) continue;
       const dir = file.directory.toLowerCase();
       const name = file.name.toLowerCase();
 
@@ -1094,11 +1108,6 @@ export class AnalysisArtifactGenerator {
       }
       lines.push('');
     }
-    if (repoStructure.undomained?.length) {
-      lines.push(`**Undomained source files**: ${repoStructure.undomained.join(', ')}`);
-      lines.push('');
-    }
-
     // Dependency insights
     lines.push('## Dependency Insights');
 

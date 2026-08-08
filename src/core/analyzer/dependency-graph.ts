@@ -739,7 +739,13 @@ export class DependencyGraphBuilder {
 
     // A non-structural root group is configuration, not a business domain. Do not let scan order
     // (especially a leading dotfile) mint the name.
-    if (dir === '(root)' && !isStructural) return '(root config)';
+    if (
+      dir === '(root)' && !isStructural &&
+      files.every(id => {
+        const file = this.nodes.get(id)?.file;
+        return file?.isConfig === true || file?.name.startsWith('.') === true;
+      })
+    ) return '(root config)';
 
     const candidates = files
       .map(id => this.nodes.get(id)?.file.name ?? '')

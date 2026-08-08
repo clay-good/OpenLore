@@ -17,12 +17,14 @@ import {
   OPENLORE_DIR,
   OPENLORE_ANALYSIS_SUBDIR,
   ARTIFACT_REPOSITORY_MAP,
+  SOURCE_SCAN_MAX_FILE_BYTES,
 } from '../../constants.js';
 import type { ProjectType, ScoredFile, FileMetadata } from '../../types/index.js';
 import { FileWalker, type FileWalkerOptions } from './file-walker.js';
 import { SignificanceScorer, type ScoringConfig } from './significance-scorer.js';
 import { deriveDomainFromPath, DOMAIN_NOISE_DIRS } from './domain-naming.js';
 import { isEntirelyOpenLoreManaged } from '../../utils/openlore-managed-file.js';
+import { readSourceCapped } from './bounded-file-scan.js';
 
 // ============================================================================
 // TYPES
@@ -814,10 +816,13 @@ export class RepositoryMapper {
     // user's repository. Only marker-bearing text formats are opened here; source files do not
     // pay for another read pass.
     for (const file of walkResult.files) {
-      if (!['.json', '.md', '.mdc'].includes(file.extension.toLowerCase())) continue;
+      if (
+        file.size > SOURCE_SCAN_MAX_FILE_BYTES ||
+        !['', '.json', '.md', '.mdc'].includes(file.extension.toLowerCase())
+      ) continue;
       try {
-        const content = await readFile(file.absolutePath, 'utf8');
-        if (isEntirelyOpenLoreManaged(file.path, content)) file.tooling = true;
+        const content = await readSourceCapped(file.absolutePath, SOURCE_SCAN_MAX_FILE_BYTES);
+        if (content !== null && isEntirelyOpenLoreManaged(file.path, content)) file.tooling = true;
       } catch {
         // The normal scoring/extraction paths retain their existing unreadable-file behavior.
       }
