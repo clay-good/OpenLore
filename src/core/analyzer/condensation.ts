@@ -51,14 +51,41 @@ import { ARTIFACT_TRAVERSAL_INDEX } from '../../constants.js';
 import type { SerializedCallGraph } from './call-graph.js';
 
 /**
- * The invalidation key binding a persisted structure to the graph it was built
- * from: the SHA-256 of the exact `llm-context.json` content. Writer and reader
- * both derive it from the same bytes, so a structure can never be served over a
- * graph from another generation — and no separate freshness bookkeeping (mtimes,
- * generation counters) can drift out of step with it.
+ * The invalidation key binding a persisted structure to the graph it describes:
+ * a SHA-256 over EXACTLY the call-graph facts the structure depends on — the node
+ * id set in `cg.nodes` order, then each usable edge's `(callerId, calleeId,
+ * synthesized)` in `cg.edges` order. Nothing else. Signatures, phases, and every
+ * other `llm-context.json` field are irrelevant to the structure, so an edit that
+ * touches only those cannot move this digest and cannot invalidate the structure;
+ * conversely any change to a node id, an edge endpoint, an edge's synthesized-ness,
+ * or the edge order does move it.
+ *
+ * `analyze` writes this value INTO `llm-context.json` (change:
+ * shrink-traversal-index-invalidation-scope) and stamps the persisted structure
+ * with the same value, so the reader gets the key for free from the JSON it has
+ * already parsed — no hashing of the multi-MB artifact on the read path. The edge
+ * universe fully determines the interned node universe the structure builds, so
+ * hashing `cg.nodes` ids plus each edge triple covers the structure's whole
+ * dependency set.
  */
-export function artifactDigest(contextJson: string): string {
-  return createHash('sha256').update(contextJson).digest('hex');
+export function graphDigest(cg: SerializedCallGraph): string {
+  const nodes = Array.isArray(cg.nodes) ? cg.nodes : [];
+  const edges = Array.isArray(cg.edges) ? cg.edges : [];
+  const h = createHash('sha256');
+  // NUL-delimited (\u0000 cannot occur in a symbol id) with distinct section
+  // markers, so no id can forge a boundary and no two distinct graphs collide.
+  h.update(`n${nodes.length}`);
+  for (const n of nodes) { h.update('\u0000'); h.update(n.id); }
+  h.update('\u0001e');
+  for (const e of edges) {
+    if (!e.calleeId) continue;
+    h.update('\u0000');
+    h.update(e.callerId);
+    h.update('\u0000');
+    h.update(e.calleeId);
+    h.update(e.confidence === 'synthesized' ? '\u0001s' : '\u0001d');
+  }
+  return h.digest('hex');
 }
 
 /** Traversal direction: `forward` = caller→callee, `backward` = callee→caller. */
@@ -696,19 +723,19 @@ function makeIndex(p: IndexParts): TraversalIndex {
 
 /**
  * The persisted form. `nodeIds` carries the string universe; every other array is
- * a base64-encoded typed-array buffer. `contextDigest` binds the structure to the
- * exact bytes of the `llm-context.json` it was built from — a structure whose
+ * a base64-encoded typed-array buffer. `graphDigest` binds the structure to the
+ * call-graph facts it describes (see {@link graphDigest}) — a structure whose
  * digest does not match the graph being served is discarded, never traversed, so
  * it can never survive a graph it was not built from.
  */
 export interface SerializedTraversalIndex {
   version: number;
-  /** SHA-256 of the llm-context.json content this structure was built from. */
-  contextDigest: string;
+  /** {@link graphDigest} of the call graph this structure was built from. */
+  graphDigest: string;
   /**
    * SHA-256 over this structure's OWN payload (`nodeIds` + every array).
    *
-   * `contextDigest` binds the structure to the right graph; it says nothing about
+   * `graphDigest` binds the structure to the right graph; it says nothing about
    * whether the structure's own bytes survived the trip. Length checks alone do
    * not close that: a single flipped base64 character keeps every array the right
    * length and silently changes reachability answers — an out-of-range `targets`
@@ -760,8 +787,8 @@ function decodeU8(s: string): Uint8Array {
   return new Uint8Array(Buffer.from(s, 'base64'));
 }
 
-/** Serialize an index built by {@link buildTraversalIndex}, bound to `contextDigest`. */
-export function serializeTraversalIndex(cg: SerializedCallGraph, contextDigest: string): string {
+/** Serialize an index built by {@link buildTraversalIndex}, bound to `graphDigest`. */
+export function serializeTraversalIndex(cg: SerializedCallGraph, digest: string): string {
   const parts = buildIndexParts(cg);
   const cond = (prefix: string, c: Condensation): Record<string, string> => ({
     [`${prefix}Component`]: encode(c.component),
@@ -782,7 +809,7 @@ export function serializeTraversalIndex(cg: SerializedCallGraph, contextDigest: 
   };
   const payload: SerializedTraversalIndex = {
     version: TRAVERSAL_INDEX_VERSION,
-    contextDigest,
+    graphDigest: digest,
     payloadDigest: payloadDigestOf(parts.nodeIds, arrays),
     littleEndian: IS_LITTLE_ENDIAN,
     nodeCount: parts.nodeIds.length,
@@ -798,7 +825,7 @@ export function serializeTraversalIndex(cg: SerializedCallGraph, contextDigest: 
 
 /**
  * Build and persist the structure for `cg` next to the analysis artifacts, stamped
- * with the digest of the `llm-context.json` content it accompanies. The single
+ * with the {@link graphDigest} of the graph it describes. The single
  * writer both surfaces use — a full `analyze` (artifact-generator) and an
  * incremental watcher flush — so the two can never disagree about the layout or
  * the invalidation key.
@@ -809,15 +836,15 @@ export async function writeTraversalIndexArtifact(
   outputDir: string,
   cg: SerializedCallGraph,
   /**
-   * Digest of the `llm-context.json` bytes this structure accompanies. Takes the DIGEST rather than
-   * the JSON because that content is now streamed to disk and never exists as one string — it is
-   * too large to, on the repositories this matters for (see `json-stream.ts`).
+   * {@link graphDigest} of `cg` — the value `analyze` also writes into
+   * `llm-context.json`, so the reader recovers this key from the parsed context
+   * for free rather than hashing the multi-MB artifact on the read path.
    */
-  contextDigest: string,
+  digest: string,
 ): Promise<void> {
   const path = join(outputDir, ARTIFACT_TRAVERSAL_INDEX);
   try {
-    await atomicWriteFile(path, serializeTraversalIndex(cg, contextDigest));
+    await atomicWriteFile(path, serializeTraversalIndex(cg, digest));
   } catch (err) {
     // The write is atomic, so a failure leaves the PREVIOUS generation's structure
     // on disk. Its digest can never match again, so it would sit there indefinitely
@@ -831,14 +858,14 @@ export async function writeTraversalIndexArtifact(
 
 /**
  * Rehydrate a persisted index, or return null when it cannot be trusted: wrong
- * schema version, foreign endianness, a `contextDigest` that does not match the
+ * schema version, foreign endianness, a `graphDigest` that does not match the
  * graph being served, a payload that does not match its own digest, or any
  * structural inconsistency. Null means "rebuild in memory" — a wrong structure is
  * never preferred to a slower correct one.
  *
  * Validation is deliberately layered, because each layer catches a class the one
  * before it cannot:
- *  - `contextDigest`  — the structure belongs to ANOTHER graph generation.
+ *  - `graphDigest`    — the structure belongs to ANOTHER graph generation.
  *  - `payloadDigest`  — the structure's own bytes were altered (bitrot, a partial
  *                       write, a hand edit that kept every length intact).
  *  - shape + range    — a hand-edited artifact whose digest was recomputed. Every
@@ -853,7 +880,7 @@ export function deserializeTraversalIndex(raw: string, expectedDigest: string): 
     const p = parsed as Partial<SerializedTraversalIndex>;
     if (p.version !== TRAVERSAL_INDEX_VERSION) return null;
     if (p.littleEndian !== IS_LITTLE_ENDIAN) return null;
-    if (typeof p.contextDigest !== 'string' || p.contextDigest !== expectedDigest) return null;
+    if (typeof p.graphDigest !== 'string' || p.graphDigest !== expectedDigest) return null;
     if (!Array.isArray(p.nodeIds)) return null;
     const counts = p.componentCounts;
     if (counts === null || typeof counts !== 'object') return null;

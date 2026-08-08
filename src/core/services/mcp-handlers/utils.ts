@@ -8,8 +8,7 @@ import { extname, join, relative, resolve } from 'node:path';
 import type { LLMContext } from '../../analyzer/artifact-generator.js';
 import { EdgeStore } from '../edge-store.js';
 import { readAttestation, reconcile, type IndexIntegrity } from '../../analyzer/index-attestation.js';
-import { artifactDigest } from '../../analyzer/condensation.js';
-import { recordArtifactDigest, traversalIndexMayBeCurrent } from './traversal.js';
+import { recordGraphDigest } from './traversal.js';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
 import { ANALYSIS_AGE_WARNING_HOURS, ANALYSIS_STALE_THRESHOLD_MS, ARTIFACT_FINGERPRINT, ARTIFACT_LLM_CONTEXT, MAX_QUERY_LENGTH, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR, STALE_REGION_REPAIR_THRESHOLD } from '../../../constants.js';
 import { repairInBackground, type RepairReason } from '../cold-start-bootstrap.js';
@@ -329,23 +328,21 @@ export async function readCachedContext(directory: string, timeout?: number): Pr
           const cg = ctx.callGraph as { nodes?: unknown; edges?: unknown };
           if (!Array.isArray(cg.nodes)) cg.nodes = [];
           if (!Array.isArray(cg.edges)) cg.edges = [];
-          // Bind this generation's graph to the exact artifact bytes it came from,
-          // so the persisted traversal structure can be accepted only when it was
-          // built from THESE bytes (change: optimize-reachability-precompute).
-          // Recorded on the parsed object, never on the context we might re-serialize.
+          // Bind this generation's graph to the persisted traversal structure by the
+          // graph digest `analyze` wrote INTO the context, so the structure is accepted
+          // only when it describes THIS graph (change:
+          // shrink-traversal-index-invalidation-scope). Recorded on the parsed object,
+          // never on the context we might re-serialize.
           //
-          // Gated behind a two-stat staleness check, because this hash is charged to
-          // EVERY cache miss and every tool — `orient`, `search_code`, `get_spec` —
-          // not only the traversal ones. Measured on this repo (11.7 MB context,
-          // 1.1 MB structure): digest 29 ms + read/deserialize 10 ms = ~40 ms, against
-          // a 39 ms in-memory rebuild — a wash at this size, a clear win at monorepo
-          // size (81 ms + 20 ms against a 300 ms rebuild at 50k nodes). It is worth
-          // paying only when there is a structure that could still be current. A repo
-          // that has never run this version of `analyze`, one materialized by
-          // `openlore import`, and one whose watcher has flushed since the last full
-          // analyze all pay nothing at all.
-          if (await traversalIndexMayBeCurrent(analysisDir)) {
-            recordArtifactDigest(ctx.callGraph as SerializedCallGraph, artifactDigest(raw));
+          // No hashing on this path. The previous key was the SHA-256 of the whole
+          // artifact, charged to EVERY cache miss and every tool — `orient`,
+          // `search_code`, `get_spec` — not only the traversal ones (measured at 29 ms
+          // over this repo's 11.7 MB context). The key now rides in the JSON already
+          // parsed, so establishing currency is a field read: O(1), no crypto. A legacy
+          // context that predates this field records no key, so no persisted structure
+          // is consulted and the traversal is built in memory — today's behavior.
+          if (typeof ctx.graphDigest === 'string') {
+            recordGraphDigest(ctx.callGraph as SerializedCallGraph, ctx.graphDigest);
           }
         } else {
           ctx.callGraph = undefined;

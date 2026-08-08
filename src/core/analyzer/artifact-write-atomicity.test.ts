@@ -75,53 +75,45 @@ describe('harden-artifact-write-atomicity: every artifact writer adopts the shar
 });
 
 /**
- * optimize-reachability-precompute — the write-ORDER guard.
+ * shrink-traversal-index-invalidation-scope — the structure is keyed to the graph.
  *
- * The read path decides whether the persisted traversal structure is worth
- * validating by comparing mtimes: a structure older than `llm-context.json` is
- * provably from a previous generation (`traversalIndexMayBeCurrent`). That
- * inference is only sound because `analyze` writes the structure strictly AFTER
- * the context — sequentially, not as another entry in the concurrent `saves`
- * array. Racing them put the structure FIRST in 80 of 100 measured runs.
+ * The read path used to decide currency by mtime ordering, which forced `analyze`
+ * to write the structure strictly AFTER the context. That pre-check is gone: the
+ * reader now compares the `graphDigest` carried in the context to the structure's
+ * stamp, so write order no longer matters and the structure is written CONCURRENTLY
+ * with the rest of the artifact set. These guards pin the two facts that keep the
+ * new key sound at analyze time — the structure is stamped with the graph digest
+ * (not the artifact bytes), and its write stays inside the analysis-lock fence.
  *
- * Nothing else catches a regression here: moving the write back into `saves`
- * breaks no test and changes no answer, it just makes the pre-check ~always
- * false, silently disabling the persisted structure. A source scan is the right
- * shape for that — the ordering is structural, and a runtime test would have to
- * run a full analyze to observe it.
- *
- * Guards analyzer-spec requirement ReachabilityStructureIsComputedAtAnalyzeTime.
+ * Guards analyzer-spec requirements ReachabilityStructureIsComputedAtAnalyzeTime and
+ * TraversalStructureIsKeyedToTheGraphItDescribes.
  */
-describe('optimize-reachability-precompute: the traversal structure is written after the context', () => {
-  it('writes the structure sequentially after the concurrent artifact set, not inside it', () => {
+describe('shrink-traversal-index-invalidation-scope: the traversal structure is stamped with the graph digest', () => {
+  it('stamps the context and the structure with the same graphDigest, not the artifact bytes', () => {
     const src = read(ARTIFACT_GENERATOR);
-
-    const barrier = src.indexOf('await Promise.all(saves)');
-    const structureWrite = src.indexOf('writeTraversalIndexArtifact(');
-    const contextWrite = src.indexOf('ARTIFACT_LLM_CONTEXT');
-    expect(barrier).toBeGreaterThan(-1);
-    expect(structureWrite).toBeGreaterThan(-1);
-    expect(contextWrite).toBeGreaterThan(-1);
-
-    // The context is written in the concurrent set; the structure is written after
-    // that set has fully settled, so its mtime can never precede the context's.
-    expect(contextWrite).toBeLessThan(barrier);
-    expect(structureWrite).toBeGreaterThan(barrier);
-
-    // And it must be awaited — a floating promise would reintroduce the race the
-    // sequencing exists to remove.
-    expect(src.slice(barrier)).toMatch(/await\s+writeTraversalIndexArtifact\(/);
+    // The graph digest is computed and written into the context…
+    expect(src).toMatch(/graphDigest\(cg\)/);
+    expect(src).toMatch(/artifacts\.llmContext\.graphDigest\s*=/);
+    // …and the persisted structure is stamped with that same value.
+    expect(src).toMatch(/writeTraversalIndexArtifact\([^)]*graphDigest/s);
+    // The old artifact-bytes key is gone from the write path.
+    expect(src).not.toMatch(/const\s+contextDigest\s*=/);
   });
 
-  it('never pushes the structure write into the concurrent saves array', () => {
+  it('writes the structure concurrently in the saves set (no ordering constraint)', () => {
     const src = read(ARTIFACT_GENERATOR);
-    expect(src).not.toMatch(/saves\.push\([^)]*writeTraversalIndexArtifact/s);
+    // The structure write is now one of the concurrent saves, before the barrier.
+    expect(src).toMatch(/saves\.push\([\s\S]*?writeTraversalIndexArtifact/);
+    const push = src.indexOf('writeTraversalIndexArtifact(');
+    const barrier = src.indexOf('await Promise.all(saves)');
+    expect(push).toBeGreaterThan(-1);
+    expect(barrier).toBeGreaterThan(push);
   });
 
   it('keeps the structure write inside the analysis-lock fence', () => {
     const src = read(ARTIFACT_GENERATOR);
     const fence = src.indexOf('withAnalysisLock(this.options.outputDir');
-    const structureWrite = src.indexOf('writeTraversalIndexArtifact(', src.indexOf('await Promise.all(saves)'));
+    const structureWrite = src.indexOf('writeTraversalIndexArtifact(');
     expect(fence).toBeGreaterThan(-1);
     expect(structureWrite).toBeGreaterThan(fence);
   });

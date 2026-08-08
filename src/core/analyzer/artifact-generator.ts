@@ -28,7 +28,7 @@ import {
   ARTIFACT_PARSE_HEALTH,
   MAX_HTML_INLINE_SCRIPT_CHARS,
 } from '../../constants.js';
-import { writeTraversalIndexArtifact } from './condensation.js';
+import { graphDigest, writeTraversalIndexArtifact } from './condensation.js';
 import { CfgSpill, sweepLeakedCfgSpills } from './cfg-spill.js';
 import { buildStyleFingerprint, type StyleFingerprint } from './style-fingerprint.js';
 import { buildParseHealthReport, isLossyUtf8, type ParseHealthReport, type FileParseHealth } from './parse-health.js';
@@ -204,6 +204,15 @@ export interface LLMContext {
   signatures?: import('./signature-extractor.js').FileSignatureMap[];
   /** Static call graph: function→function relationships across all TS/Python files */
   callGraph?: import('./call-graph.js').SerializedCallGraph;
+  /**
+   * Digest over exactly the call-graph facts the precomputed traversal structure
+   * depends on (change: shrink-traversal-index-invalidation-scope). Written here so
+   * a reader recovers the persisted structure's invalidation key from the parsed
+   * context — no hashing of the artifact on the read path — and so an incremental
+   * flush that leaves the graph untouched carries it through unchanged, keeping the
+   * structure valid. Absent when there is no `callGraph`.
+   */
+  graphDigest?: string;
   /**
    * Per-function CFG + reaching-definitions overlay (spec:
    * add-intraprocedural-cfg-dataflow-overlay). Transient: written to the SQLite
@@ -447,13 +456,20 @@ export class AnalysisArtifactGenerator {
       // Strip the CFG/def-use overlay before persisting: it is DB-only and must
       // never enter the resident llm-context.json or the hot cache (spec:
       // add-intraprocedural-cfg-dataflow-overlay).
+      // Stamp the context with the graph digest BEFORE streaming it, so the value the
+      // traversal structure is keyed to travels inside the artifact the reader already
+      // parses (change: shrink-traversal-index-invalidation-scope). Computed over the
+      // graph, not the artifact bytes, so a later signature-only flush that rewrites the
+      // context carries it through unchanged and the structure stays valid.
+      const cg = artifacts.llmContext.callGraph;
+      if (cg) artifacts.llmContext.graphDigest = graphDigest(cg);
+
       // Streamed, never materialized as one string: `JSON.stringify` caps at V8's 536,870,888-char
       // string ceiling and throws `RangeError: Invalid string length` past it, which failed the
       // whole analysis on a large repository after all the work was already done (see
-      // `json-stream.ts`). The digest comes back from the writer so the traversal index can still be
-      // stamped with the exact bytes without anyone holding them.
+      // `json-stream.ts`).
       const contextPath = join(this.options.outputDir, ARTIFACT_LLM_CONTEXT);
-      const contextDigest = await writeJsonAtomicStreaming(
+      await writeJsonAtomicStreaming(
         contextPath,
         { ...artifacts.llmContext, cfgs: undefined }
       );
@@ -547,31 +563,25 @@ export class AnalysisArtifactGenerator {
         );
       }
 
-      await Promise.all(saves);
-
       // Precomputed reachability structure (change: optimize-reachability-precompute):
       // SCC condensation + CSR adjacency, so the reachability tools traverse a lookup
-      // instead of rebuilding adjacency per call. Stamped with the digest of the exact
-      // llm-context.json bytes written above, so a reader refuses any structure that
-      // does not belong to the graph it is serving.
+      // instead of rebuilding adjacency per call. Stamped with the same graph digest
+      // written into the context above, so a reader refuses any structure that does not
+      // belong to the graph it is serving.
       //
-      // Written AFTER the set above, not concurrently with it, so its mtime is never
-      // older than llm-context.json's. That ordering is what lets a reader rule out a
-      // stale structure with one stat instead of digesting a multi-MB artifact — see
-      // `traversalIndexMayBeCurrent`. This is not a theoretical ordering concern:
-      // racing the two writes inside one `Promise.all` landed the structure BEFORE
-      // the context in 80 of 100 measured runs, which would have made the mtime
-      // comparison worse than useless.
-      //
-      // Fail-soft like the other side artifacts: a write failure means the next read
-      // builds in memory, never that analysis aborts.
-      if (artifacts.llmContext.callGraph) {
-        await writeTraversalIndexArtifact(
-          this.options.outputDir,
-          artifacts.llmContext.callGraph,
-          contextDigest,
-        ).catch(() => {});
+      // Written CONCURRENTLY with the set above (change:
+      // shrink-traversal-index-invalidation-scope): the reader now decides currency by
+      // comparing the digest carried in the context to the structure's stamp, so write
+      // order no longer matters — the mtime pre-check that once required "structure
+      // strictly after context" is gone. Fail-soft like the other side artifacts: a
+      // write failure means the next read builds in memory, never that analysis aborts.
+      if (cg) {
+        saves.push(
+          writeTraversalIndexArtifact(this.options.outputDir, cg, artifacts.llmContext.graphDigest!).catch(() => {})
+        );
       }
+
+      await Promise.all(saves);
     });
 
     // Write SQLite edge store alongside JSON artifacts (additive, non-fatal)
