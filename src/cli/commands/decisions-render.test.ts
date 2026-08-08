@@ -46,6 +46,14 @@ describe('decisions rendering', () => {
     expect(capture(() => displayDecision(decision('approved')))).toContain('●');
   });
 
+  it('discloses when a decision has no verification evidence', () => {
+    const out = capture(() => displayDecision({
+      ...decision('verified'),
+      verificationEvidence: 'none',
+    }, true));
+    expect(out).toContain('Verification evidence: none');
+  });
+
   it('legend explains that verified means awaiting review', () => {
     const legend = capture(() => printDecisionLegend());
     expect(legend.toLowerCase()).toContain('awaiting review');

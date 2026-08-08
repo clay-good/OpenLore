@@ -6,7 +6,6 @@
  */
 
 import { join } from 'node:path';
-import { allowInsecureTls } from '../core/services/tls-scope.js';
 import { readJsonFile } from '../utils/command-helpers.js';
 import {
   readOpenLoreConfig,
@@ -197,10 +196,6 @@ export async function openloreGenerate(options: GenerateApiOptions = {}): Promis
   );
   rejectRepoConfiguredTlsOptOut('generation.skipSslVerify', openloreConfig.generation.skipSslVerify);
   rejectRepoConfiguredTlsOptOut('embedding.skipSslVerify', openloreConfig.embedding?.skipSslVerify);
-  if (!sslVerify) {
-    allowInsecureTls('sslVerify=false');
-  }
-
   // Create LLM service
   progress(onProgress, 'Creating LLM service', 'start');
   let llm: LLMService;

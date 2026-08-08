@@ -9,6 +9,8 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
+const mocks = vi.hoisted(() => ({ saveLogs: vi.fn(async () => {}) }));
+
 // ── Module mocks (hoisted) ────────────────────────────────────────────────────
 
 vi.mock('../utils/command-helpers.js', async (importOriginal) => {
@@ -20,9 +22,30 @@ vi.mock('../core/services/config-manager.js', () => ({
   readOpenLoreConfig: vi.fn(async () => ({ version: '1.0.0', openspecPath: './openspec' })),
 }));
 
+vi.mock('../core/services/llm-service.js', () => ({
+  createLLMService: vi.fn(() => ({ saveLogs: mocks.saveLogs })),
+}));
+
+vi.mock('../core/decisions/consolidator.js', () => ({
+  consolidateDrafts: vi.fn(),
+}));
+
 vi.mock('../core/drift/index.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../core/drift/index.js')>();
-  return { ...actual, buildSpecMap: vi.fn(async () => ({})) };
+  return {
+    ...actual,
+    buildSpecMap: vi.fn(async () => ({})),
+    isGitRepositoryRoot: vi.fn(async () => false),
+    resolveBaseRef: vi.fn(async () => 'main'),
+    getChangedFiles: vi.fn(async () => ({ files: [{ path: 'src/example.ts' }] })),
+    getFileDiff: vi.fn(async () => 'diff --git a/src/example.ts b/src/example.ts\n+changed'),
+    getCommitMessages: vi.fn(async () => 'feat: change'),
+  };
+});
+
+vi.mock('../core/decisions/verifier.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../core/decisions/verifier.js')>();
+  return { ...actual, verifyDecisions: vi.fn() };
 });
 
 vi.mock('../core/decisions/syncer.js', () => ({
@@ -35,14 +58,21 @@ vi.mock('../core/decisions/syncer.js', () => ({
 // Keep the real store module (real illegalPromotionToApproved) but stub the disk read.
 vi.mock('../core/decisions/store.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../core/decisions/store.js')>();
-  return { ...actual, loadDecisionStore: vi.fn() };
+  return {
+    ...actual,
+    loadDecisionStore: vi.fn(),
+    updateDecisionStore: vi.fn(),
+  };
 });
 
 // ── Imports ───────────────────────────────────────────────────────────────────
 
-import { openloreSyncDecisions } from './decisions.js';
-import { loadDecisionStore } from '../core/decisions/store.js';
+import { openloreConsolidateDecisions, openloreSyncDecisions } from './decisions.js';
+import { loadDecisionStore, updateDecisionStore } from '../core/decisions/store.js';
 import { syncApprovedDecisions } from '../core/decisions/syncer.js';
+import { consolidateDrafts } from '../core/decisions/consolidator.js';
+import { verifyDecisions } from '../core/decisions/verifier.js';
+import { isGitRepositoryRoot } from '../core/drift/index.js';
 import type { DecisionStore, PendingDecision } from '../types/index.js';
 
 function makeDecision(overrides: Partial<PendingDecision> = {}): PendingDecision {
@@ -70,6 +100,9 @@ function makeStore(decisions: PendingDecision[]): DecisionStore {
 describe('openloreSyncDecisions — status-transition guard', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(updateDecisionStore).mockImplementation(async (_root, mutate) =>
+      mutate(await vi.mocked(loadDecisionStore).mock.results.at(-1)!.value),
+    );
   });
 
   it('refuses to promote a rejected decision by id; sync never runs', async () => {
@@ -106,5 +139,55 @@ describe('openloreSyncDecisions — status-transition guard', () => {
       }),
       expect.anything(),
     );
+  });
+
+  it('observes a rejection committed after the initial read and before promotion', async () => {
+    const verified = makeDecision({ status: 'verified' });
+    const rejected = makeDecision({ status: 'rejected', reviewNote: 'Rejected concurrently' });
+    vi.mocked(loadDecisionStore).mockResolvedValue(makeStore([verified]));
+    vi.mocked(updateDecisionStore).mockImplementation(async (_root, mutate) => mutate(makeStore([rejected])));
+
+    await expect(openloreSyncDecisions({ rootPath: '/test/project', ids: [verified.id] }))
+      .rejects.toThrow(/rejected by a human/);
+    expect(syncApprovedDecisions).not.toHaveBeenCalled();
+  });
+});
+
+describe('openloreConsolidateDecisions — verification evidence', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('marks non-git decisions as having no verification evidence and saves LLM logs', async () => {
+    const draft = makeDecision();
+    const store = makeStore([draft]);
+    vi.mocked(loadDecisionStore).mockResolvedValue(store);
+    vi.mocked(updateDecisionStore).mockResolvedValue(store);
+    vi.mocked(consolidateDrafts).mockResolvedValue({ decisions: [draft], supersededIds: [] });
+
+    const result = await openloreConsolidateDecisions({ rootPath: '/test/project', provider: 'anthropic' });
+
+    expect(result.verified).toEqual([
+      expect.objectContaining({ id: draft.id, status: 'verified', verificationEvidence: 'none' }),
+    ]);
+    expect(mocks.saveLogs).toHaveBeenCalledOnce();
+  });
+
+  it('saves logs after git-diff verification has made its LLM request', async () => {
+    const draft = makeDecision({ affectedFiles: ['src/example.ts'] });
+    const store = makeStore([draft]);
+    vi.mocked(loadDecisionStore).mockResolvedValue(store);
+    vi.mocked(updateDecisionStore).mockResolvedValue(store);
+    vi.mocked(consolidateDrafts).mockResolvedValue({ decisions: [draft], supersededIds: [] });
+    vi.mocked(isGitRepositoryRoot).mockResolvedValue(true);
+    vi.mocked(verifyDecisions).mockImplementation(async () => {
+      expect(mocks.saveLogs).not.toHaveBeenCalled();
+      return { verified: [draft], phantom: [], missing: [] };
+    });
+
+    await openloreConsolidateDecisions({ rootPath: '/test/project', provider: 'anthropic' });
+
+    expect(verifyDecisions).toHaveBeenCalledOnce();
+    expect(mocks.saveLogs).toHaveBeenCalledOnce();
   });
 });

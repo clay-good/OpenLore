@@ -170,6 +170,18 @@ describe('decision autopilot', () => {
     expect(spec).not.toContain('aaaabbbb');
   });
 
+  it('does not auto-accept or sync a decision without git-diff evidence', async () => {
+    await writeConfig({ autopilot: true });
+    await saveDecisionStore(dir, makeStore([makeDecision({ verificationEvidence: 'none' })]));
+
+    await runGate();
+
+    const store = await loadDecisionStore(dir);
+    expect(store.decisions[0].status).toBe('verified');
+    expect(store.decisions[0].syncedToSpecs).toEqual([]);
+    expect(stderrChunks.join('\n')).toContain('unevidenced decision(s) require review');
+  });
+
   it('exits 0 even when sync infrastructure is missing (fail-soft)', async () => {
     await writeConfig({ autopilot: true });
     await rm(join(dir, 'openspec'), { recursive: true, force: true });
@@ -271,5 +283,19 @@ describe('decision autopilot', () => {
     expect(entries.length).toBeGreaterThan(0);
     expect(entries[0]).toHaveProperty('actor');
     expect(entries[0]).toHaveProperty('to');
+  });
+
+  it('review --json discloses verification evidence in the pending queue', async () => {
+    await writeConfig({ autopilot: true });
+    await saveDecisionStore(dir, makeStore([makeDecision({
+      status: 'auto-approved',
+      approvedBy: 'autopilot',
+      verificationEvidence: 'git-diff',
+    })]));
+
+    await decisionsCommand.parseAsync(['review', '--json'], { from: 'user' });
+
+    const payload = JSON.parse(stdoutText());
+    expect(payload.awaitingReview[0].verificationEvidence).toBe('git-diff');
   });
 });

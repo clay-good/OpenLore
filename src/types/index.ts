@@ -659,6 +659,8 @@ export interface PendingDecision {
 
   // Verification output
   confidence: 'high' | 'medium' | 'low';
+  /** Evidence basis for the verification verdict; absent on legacy decisions. */
+  verificationEvidence?: 'git-diff' | 'none';
   evidenceFile?: string;
 
   // Review

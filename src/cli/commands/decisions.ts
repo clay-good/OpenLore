@@ -40,7 +40,7 @@ import { consolidateDrafts } from '../../core/decisions/consolidator.js';
 import { classifyGateState } from '../../core/decisions/gate-state.js';
 import { acquireDecisionsLock } from '../../core/decisions/lock.js';
 import { extractFromDiff } from '../../core/decisions/extractor.js';
-import { verifyDecisions } from '../../core/decisions/verifier.js';
+import { markVerificationEvidenceAbsent, verifyDecisions } from '../../core/decisions/verifier.js';
 import { syncApprovedDecisions } from '../../core/decisions/syncer.js';
 import {
   OPENLORE_DIR,
@@ -397,7 +397,9 @@ async function runAutopilotGate(
 ): Promise<void> {
   try {
     let store = await loadDecisionStore(rootPath);
-    const verifiedIds = getDecisionsByStatus(store, 'verified').map((d) => d.id);
+    const verified = getDecisionsByStatus(store, 'verified');
+    const verifiedIds = verified.filter((d) => d.verificationEvidence !== 'none').map((d) => d.id);
+    const unevidencedCount = verified.length - verifiedIds.length;
 
     if (verifiedIds.length > 0) {
       const now = new Date().toISOString();
@@ -447,6 +449,7 @@ async function runAutopilotGate(
     if (syncedCount > 0) parts.push(`${syncedCount} synced to specs`);
     if (draftCount > 0) parts.push(`${draftCount} draft(s) pending background consolidation`);
     if (syncErrors.length > 0) parts.push(`${syncErrors.length} sync error(s) — will retry next gate`);
+    if (unevidencedCount > 0) parts.push(`${unevidencedCount} unevidenced decision(s) require review`);
     if (parts.length > 0 || unreviewedCount > 0) {
       console.error(
         `openlore autopilot: ${parts.length ? parts.join(' · ') : 'nothing new'}`
@@ -462,6 +465,7 @@ async function runAutopilotGate(
         synced: syncedCount,
         draftsPending: draftCount,
         awaitingReview: unreviewedCount,
+        unevidencedAwaitingReview: unevidencedCount,
         syncErrors,
       }, null, 2) + '\n');
     }
@@ -506,6 +510,7 @@ export function displayDecision(d: PendingDecision, verbose = false): void {
   console.log(`${icon} [${safe(d.id)}] ${scopeBadge} ${safe(d.title)}`);
   if (verbose) {
     console.log(`   Status     : ${d.status}  Confidence: ${confidence}  Scope: ${scopeLabel}`);
+    console.log(`   Verification evidence: ${d.verificationEvidence ?? 'legacy/unknown'}`);
     console.log(`   Rationale  : ${d.rationale}`);
     if (d.affectedDomains.length) console.log(`   Domains    : ${d.affectedDomains.join(', ')}`);
     if (d.proposedRequirement) console.log(`   Requirement: ${d.proposedRequirement}`);
@@ -780,7 +785,7 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
       // Step 3 — Verify
       const { verified, phantom, missing } = combinedDiff
         ? await verifyDecisions(consolidated, combinedDiff, llm, commitMessages)
-        : { verified: consolidated.map((d) => ({ ...d, status: 'verified' as const, confidence: 'medium' as const })), phantom: [], missing: [] };
+        : { verified: markVerificationEvidenceAbsent(consolidated), phantom: [], missing: [] };
 
       // Step 4 — Persist
       // Reject all original drafts — they've been replaced by consolidated decisions.
@@ -883,6 +888,7 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
             affectedDomains: d.affectedDomains,
             affectedFiles: d.affectedFiles,
             confidence: d.confidence,
+            verificationEvidence: d.verificationEvidence,
           })),
           phantom: phantom.map((d) => ({ id: d.id, title: d.title })),
           missing: missing.map((m) => ({ file: m.file, description: m.description })),
@@ -901,7 +907,7 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
       logger.section('Architectural Decisions — Review Required');
 
       if (verified.length > 0) {
-        console.log('\nVerified decisions (found in code):');
+        console.log('\nDecisions awaiting review:');
         for (const d of verified) displayDecision(d, options.verbose);
       }
 
@@ -1072,6 +1078,7 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
           affectedDomains: d.affectedDomains,
           affectedFiles: d.affectedFiles,
           confidence: d.confidence,
+          verificationEvidence: d.verificationEvidence,
         })),
         phantom: [],
         missing,
@@ -1324,6 +1331,7 @@ decisionsCommand
           awaitingReview: remaining.map((d) => ({
             id: d.id, title: d.title, rationale: d.rationale,
             reviewedAt: d.reviewedAt, syncedToSpecs: d.syncedToSpecs,
+            verificationEvidence: d.verificationEvidence,
           })),
         }, null, 2) + '\n');
         return;

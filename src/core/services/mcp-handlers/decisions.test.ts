@@ -348,15 +348,16 @@ describe('handleListDecisions', () => {
     expect(result.decisions[0].status).toBe('approved');
   });
 
-  it('returns mapped fields including proposedRequirement and syncedToSpecs', async () => {
+  it('returns mapped fields including proposedRequirement, syncedToSpecs, and verificationEvidence', async () => {
     const store = makeStore({
-      decisions: [makeDecision({ proposedRequirement: 'REQ-001', syncedToSpecs: ['services'] })],
+      decisions: [makeDecision({ proposedRequirement: 'REQ-001', syncedToSpecs: ['services'], verificationEvidence: 'none' })],
     });
     await writeStore(tmpDir, store);
     const result = await handleListDecisions(tmpDir) as { decisions: Array<Record<string, unknown>> };
     const d = result.decisions[0];
     expect(d.proposedRequirement).toBe('REQ-001');
     expect(d.syncedToSpecs).toEqual(['services']);
+    expect(d.verificationEvidence).toBe('none');
   });
 
   it('keeps autopilot-synced decision prose locally unreviewed', async () => {
