@@ -358,5 +358,5 @@ gate/TUI — they SHALL NOT be labeled "verified" identically to diff-verified d
 
 ## Technical Notes
 
-- **Implementation**: `src/core/verifier/verification-engine.ts`
+- **Implementation**: `src/core/verifier/verification-engine.ts`, `src/core/decisions/verifier.ts`, `src/api/decisions.ts`, `src/cli/commands/decisions.ts`, `src/cli/tui-approval.ts`, `src/core/services/mcp-handlers/decisions.ts`
 - **Dependencies**: LLMService, DependencyGraphResult, DependencyNode, ImportExportParser

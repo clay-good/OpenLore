@@ -46,6 +46,7 @@ const VALID_RESPONSE = JSON.stringify({
   phantom: [],
   missing: [],
 });
+const VALID_DIFF = 'diff --git a/src/cache.ts b/src/cache.ts\n--- a/src/cache.ts\n+++ b/src/cache.ts\n@@ -1 +1,2 @@\n-old\n+new';
 
 // ============================================================================
 // Empty / no-op cases
@@ -70,7 +71,7 @@ describe('verifyDecisions — happy path', () => {
   it('marks decisions as verified when LLM confirms', async () => {
     const llm = makeLLM(VALID_RESPONSE);
     const d = makeDecision();
-    const result = await verifyDecisions([d], 'diff content', llm);
+    const result = await verifyDecisions([d], VALID_DIFF, llm);
     expect(result.verified).toHaveLength(1);
     expect(result.verified[0].status).toBe('verified');
     expect(result.verified[0].confidence).toBe('high');
@@ -112,6 +113,20 @@ describe('verifyDecisions — happy path', () => {
     const result = await verifyDecisions([d], 'diff', llm);
     expect(result.verified).toHaveLength(0);
   });
+
+  it('rejects a fabricated evidence file that is absent from the targeted diff', async () => {
+    const response = JSON.stringify({
+      verified: [{ id: 'aaaa0001', evidenceFile: 'not-in-diff.ts', confidence: 'high' }],
+      phantom: [],
+      missing: [],
+    });
+    const unrelatedDiff = 'diff --git a/src/other.ts b/src/other.ts\n--- a/src/other.ts\n+++ b/src/other.ts\n@@ -1 +1,2 @@\n-old\n+new';
+    const result = await verifyDecisions([makeDecision()], unrelatedDiff, makeLLM(response));
+    expect(result.verified).toHaveLength(0);
+    expect(result.phantom).toEqual([
+      expect.objectContaining({ id: 'aaaa0001', status: 'phantom' }),
+    ]);
+  });
 });
 
 // ============================================================================
@@ -121,21 +136,21 @@ describe('verifyDecisions — happy path', () => {
 describe('verifyDecisions — JSON parsing robustness', () => {
   it('parses plain JSON object', async () => {
     const llm = makeLLM(VALID_RESPONSE);
-    const result = await verifyDecisions([makeDecision()], 'diff', llm);
+    const result = await verifyDecisions([makeDecision()], VALID_DIFF, llm);
     expect(result.verified).toHaveLength(1);
   });
 
   it('parses JSON wrapped in ```json ... ``` fences', async () => {
     const fenced = '```json\n' + VALID_RESPONSE + '\n```';
     const llm = makeLLM(fenced);
-    const result = await verifyDecisions([makeDecision()], 'diff', llm);
+    const result = await verifyDecisions([makeDecision()], VALID_DIFF, llm);
     expect(result.verified).toHaveLength(1);
   });
 
   it('parses JSON wrapped in plain ``` fences', async () => {
     const fenced = '```\n' + VALID_RESPONSE + '\n```';
     const llm = makeLLM(fenced);
-    const result = await verifyDecisions([makeDecision()], 'diff', llm);
+    const result = await verifyDecisions([makeDecision()], VALID_DIFF, llm);
     expect(result.verified).toHaveLength(1);
   });
 

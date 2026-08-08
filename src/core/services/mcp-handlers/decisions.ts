@@ -259,6 +259,7 @@ export async function handleListDecisions(
         proposedRequirement: d.proposedRequirement,
         recordedAt: d.recordedAt,
         syncedToSpecs: d.syncedToSpecs,
+        verificationEvidence: d.verificationEvidence,
         // Provenance is always disclosed: an autopilot-accepted decision is
         // authoritative but never presented as human-reviewed. (add-decision-autopilot)
         ...(d.approvedBy ? { approvedBy: d.approvedBy } : {}),

@@ -60,6 +60,11 @@ let savedValue: string | undefined;
  */
 export function allowInsecureTls(reason: string, opts: { announce?: boolean } = {}): void {
   insecureAllowed = true;
+  announceInsecureTls(reason, opts);
+}
+
+/** Announce an instance-scoped TLS opt-out without granting a process-wide capability. */
+export function announceInsecureTls(reason: string, opts: { announce?: boolean } = {}): void {
   // `announce: false` means the caller owns the message, so it counts as announced.
   // Without marking it, a later opt-in from deeper in the same run (generate.ts after
   // the CLI's `--insecure` hook) would print a second notice.
@@ -82,13 +87,14 @@ export function isInsecureTlsAllowed(): boolean {
 }
 
 /**
- * Run `fn` with certificate verification relaxed, if and only if the user opted in.
+ * Run `fn` with certificate verification relaxed when the caller's own capability
+ * enables it. Callers without an instance capability may inherit the CLI-wide opt-in.
  *
  * Wrap the `await fetch(...)` itself — not the surrounding bookkeeping and not the
  * body read. That is the narrowest span that still covers the handshake.
  */
-export async function withRelaxedTls<T>(fn: () => Promise<T>): Promise<T> {
-  if (!insecureAllowed) return fn();
+export async function withRelaxedTls<T>(fn: () => Promise<T>, enabled = insecureAllowed): Promise<T> {
+  if (!enabled) return fn();
 
   if (openScopes === 0) {
     savedValue = process.env[ENV_KEY];

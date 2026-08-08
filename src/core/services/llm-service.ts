@@ -9,7 +9,7 @@ import { writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import logger from '../../utils/logger.js';
 import { redactSecrets } from './secret-redaction.js';
-import { allowInsecureTls, withRelaxedTls } from './tls-scope.js';
+import { announceInsecureTls, withRelaxedTls } from './tls-scope.js';
 import {
   CLAUDE_MAX_CONTEXT_TOKENS,
   CLAUDE_MAX_OUTPUT_TOKENS,
@@ -342,7 +342,7 @@ interface RetryConfig {
  * lifetime of the process (see tls-scope.ts).
  */
 function disableSslVerification(): void {
-  allowInsecureTls('--insecure or llm.sslVerify=false');
+  announceInsecureTls('--insecure or llm.sslVerify=false');
 }
 
 /**
@@ -582,11 +582,13 @@ export class AnthropicProvider implements LLMProvider {
   private apiKey: string;
   private model: string;
   private baseUrl: string;
+  private relaxTls: boolean;
 
   constructor(apiKey: string, model = DEFAULT_ANTHROPIC_MODEL, baseUrl?: string, sslVerify = true) {
     this.apiKey = apiKey;
     this.model = model;
     this.baseUrl = baseUrl ? normalizeApiBase(baseUrl) : 'https://api.anthropic.com/v1';
+    this.relaxTls = !sslVerify;
     if (!sslVerify) disableSslVerification();
   }
 
@@ -612,7 +614,7 @@ export class AnthropicProvider implements LLMProvider {
         ],
         stop_sequences: request.stopSequences,
       }),
-    }));
+    }), this.relaxTls);
 
     if (!response.ok) {
       const error = await response.text();
@@ -771,11 +773,13 @@ export class OpenAIProvider implements LLMProvider {
   private apiKey: string;
   private model: string;
   private baseUrl: string;
+  private relaxTls: boolean;
 
   constructor(apiKey: string, model = DEFAULT_OPENAI_MODEL, baseUrl?: string, sslVerify = true) {
     this.apiKey = apiKey;
     this.model = model;
     this.baseUrl = baseUrl ? normalizeApiBase(baseUrl) : 'https://api.openai.com/v1';
+    this.relaxTls = !sslVerify;
     if (!sslVerify) disableSslVerification();
   }
 
@@ -819,7 +823,7 @@ export class OpenAIProvider implements LLMProvider {
         'Authorization': `Bearer ${this.apiKey}`,
       },
       body: JSON.stringify(body),
-    }));
+    }), this.relaxTls);
 
     if (!response.ok) {
       const error = await response.text();
@@ -887,12 +891,15 @@ export class OpenAICompatibleProvider implements LLMProvider {
   private model: string;
   private baseUrl: string;
   private disableResponseFormat: boolean;
+  private relaxTls: boolean;
 
-  constructor(apiKey: string, baseUrl: string, model = DEFAULT_OPENAI_COMPAT_MODEL, disableResponseFormat = false) {
+  constructor(apiKey: string, baseUrl: string, model = DEFAULT_OPENAI_COMPAT_MODEL, disableResponseFormat = false, sslVerify = true) {
     this.apiKey = apiKey;
     this.baseUrl = normalizeApiBase(baseUrl);
     this.model = model;
     this.disableResponseFormat = disableResponseFormat;
+    this.relaxTls = !sslVerify;
+    if (!sslVerify) disableSslVerification();
   }
 
   countTokens(text: string): number {
@@ -910,7 +917,7 @@ export class OpenAICompatibleProvider implements LLMProvider {
           'Authorization': `Bearer ${this.apiKey}`,
           'Content-Type': 'application/json',
         },
-      }));
+      }), this.relaxTls);
 
       if (!response.ok) {
         return [];
@@ -1001,7 +1008,7 @@ export class OpenAICompatibleProvider implements LLMProvider {
         'Authorization': `Bearer ${this.apiKey}`,
       },
       body: JSON.stringify(body),
-    }));
+    }), this.relaxTls);
 
     if (!response.ok) {
       const error = await response.text();
@@ -1086,11 +1093,14 @@ export class CopilotProvider implements LLMProvider {
   private apiKey: string;
   private model: string;
   private baseUrl: string;
+  private relaxTls: boolean;
 
-  constructor(baseUrl: string, model = DEFAULT_COPILOT_MODEL, apiKey = 'copilot') {
+  constructor(baseUrl: string, model = DEFAULT_COPILOT_MODEL, apiKey = 'copilot', sslVerify = true) {
     this.apiKey = apiKey;
     this.baseUrl = normalizeApiBase(baseUrl);
     this.model = model;
+    this.relaxTls = !sslVerify;
+    if (!sslVerify) disableSslVerification();
   }
 
   countTokens(text: string): number {
@@ -1128,7 +1138,7 @@ export class CopilotProvider implements LLMProvider {
         'Authorization': `Bearer ${this.apiKey}`,
       },
       body: JSON.stringify(body),
-    }));
+    }), this.relaxTls);
 
     if (!response.ok) {
       const error = await response.text();
@@ -1364,10 +1374,13 @@ export class GeminiProvider implements LLMProvider {
   private apiKey: string;
   private model: string;
   private baseUrl = 'https://generativelanguage.googleapis.com/v1beta/models';
+  private relaxTls: boolean;
 
-  constructor(apiKey: string, model = DEFAULT_GEMINI_MODEL) {
+  constructor(apiKey: string, model = DEFAULT_GEMINI_MODEL, sslVerify = true) {
     this.apiKey = apiKey;
     this.model = model;
+    this.relaxTls = !sslVerify;
+    if (!sslVerify) disableSslVerification();
   }
 
   countTokens(text: string): number {
@@ -1396,7 +1409,7 @@ export class GeminiProvider implements LLMProvider {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-    }));
+    }), this.relaxTls);
 
     if (!response.ok) {
       const error = await response.text();
@@ -1924,17 +1937,17 @@ export function createLLMService(options: LLMServiceOptions = {}): LLMService {
     if (!baseUrl) {
       throw new Error('openaiCompatBaseUrl must be set in config or OPENAI_COMPAT_BASE_URL env var (e.g. https://api.mistral.ai/v1)');
     }
-    provider = new OpenAICompatibleProvider(apiKey, baseUrl, options.model ?? DEFAULT_OPENAI_COMPAT_MODEL, options.disableResponseFormat ?? false);
+    provider = new OpenAICompatibleProvider(apiKey, baseUrl, options.model ?? DEFAULT_OPENAI_COMPAT_MODEL, options.disableResponseFormat ?? false, sslVerify);
   } else if (providerName === 'copilot') {
     const baseUrl = options.openaiCompatBaseUrl ?? options.apiBase ?? process.env.COPILOT_API_BASE_URL ?? 'http://localhost:4141/v1';
     const apiKey = process.env.COPILOT_API_KEY ?? 'copilot';
-    provider = new CopilotProvider(baseUrl, options.model ?? DEFAULT_COPILOT_MODEL, apiKey);
+    provider = new CopilotProvider(baseUrl, options.model ?? DEFAULT_COPILOT_MODEL, apiKey, sslVerify);
   } else if (providerName === 'gemini') {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
       throw new Error('GEMINI_API_KEY environment variable is not set');
     }
-    provider = new GeminiProvider(apiKey, options.model ?? DEFAULT_GEMINI_MODEL);
+    provider = new GeminiProvider(apiKey, options.model ?? DEFAULT_GEMINI_MODEL, sslVerify);
   } else if (providerName === 'claude-code') {
     provider = new ClaudeCodeProvider(options.model);
   } else if (providerName === 'mistral-vibe') {

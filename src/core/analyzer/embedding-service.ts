@@ -13,7 +13,7 @@
  */
 
 import type { OpenLoreConfig } from '../../types/index.js';
-import { allowInsecureTls, withRelaxedTls } from '../services/tls-scope.js';
+import { announceInsecureTls, withRelaxedTls } from '../services/tls-scope.js';
 import { refuseRepoConfiguredEndpoint, rejectRepoConfiguredTlsOptOut } from '../services/repo-config-trust.js';
 
 // ============================================================================
@@ -60,6 +60,7 @@ export class EmbeddingService implements Embedder {
   private model: string;
   private apiKey: string;
   private batchSize: number;
+  private relaxTls: boolean;
 
   /**
    * Maximum characters per text before truncation.
@@ -73,8 +74,9 @@ export class EmbeddingService implements Embedder {
     this.model = config.model;
     this.apiKey = config.apiKey ?? '';
     this.batchSize = config.batchSize ?? 64;
+    this.relaxTls = config.skipSslVerify === true;
     if (config.skipSslVerify) {
-      allowInsecureTls('embedding.skipSslVerify');
+      announceInsecureTls('embedding.skipSslVerify');
     }
   }
 
@@ -174,7 +176,7 @@ export class EmbeddingService implements Embedder {
       method: 'POST',
       headers,
       body: JSON.stringify({ input: truncated, model: this.model }),
-    }));
+    }), this.relaxTls);
 
     if (!response.ok) {
       const body = await response.text().catch(() => '');

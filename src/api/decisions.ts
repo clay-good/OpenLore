@@ -160,10 +160,10 @@ export async function openloreConsolidateDecisions(
 
   progress(onProgress, 'Consolidating drafts', 'start');
   const { decisions: consolidated, supersededIds } = await consolidateDrafts(store, llm, specMap);
-  await llm.saveLogs().catch(() => {});
   progress(onProgress, 'Consolidating drafts', 'complete', `${consolidated.length} decisions`);
 
   if (consolidated.length === 0) {
+    await llm.saveLogs().catch(() => {});
     return { verified: [], phantom: [], missing: [], store };
   }
 
@@ -194,6 +194,7 @@ export async function openloreConsolidateDecisions(
   const { verified, phantom, missing } = combinedDiff
     ? await verifyDecisions(consolidated, combinedDiff, llm, commitMessages)
     : { verified: markVerificationEvidenceAbsent(consolidated), phantom: [], missing: [] };
+  await llm.saveLogs().catch(() => {});
   progress(onProgress, 'Verifying decisions', 'complete', `${verified.length} verified`);
 
   // CAS persist onto the freshest store so a concurrently-recorded draft is kept.
@@ -232,24 +233,29 @@ export async function openloreSyncDecisions(
 
   // Optionally filter to specific IDs
   if (options.ids?.length) {
-    // Transition guard: refuse to promote a rejected (or already-synced)
-    // decision to approved — one requested id with an illegal transition fails
-    // the whole sync, leaving the store and spec files unchanged, rather than
-    // resurrecting a recorded human verdict.
-    for (const reqId of options.ids) {
-      const d = store.decisions.find((x) => x.id === reqId);
-      if (!d) continue;
-      const illegal = illegalPromotionToApproved(reqId, d.status, d.reviewNote);
-      if (illegal) throw new Error(illegal);
-    }
-    store = {
-      ...store,
-      decisions: store.decisions.map((d) =>
-        options.ids!.includes(d.id) && d.status !== 'approved'
-          ? { ...d, status: 'approved' as const }
-          : d,
-      ),
+    const promote = (current: DecisionStore): DecisionStore => {
+      for (const reqId of options.ids!) {
+        const d = current.decisions.find((x) => x.id === reqId);
+        if (!d) continue;
+        const illegal = illegalPromotionToApproved(reqId, d.status, d.reviewNote);
+        if (illegal) throw new Error(illegal);
+      }
+      return {
+        ...current,
+        decisions: current.decisions.map((d) =>
+          options.ids!.includes(d.id) && d.status !== 'approved'
+            ? { ...d, status: 'approved' as const }
+            : d,
+        ),
+      };
     };
+    // Commit the promotion against the freshest CAS snapshot before any spec write.
+    // A rejection that lands after the initial read is therefore observed by the
+    // transition guard instead of being overwritten by the stale approved copy.
+    store = options.dryRun ? promote(store) : await updateDecisionStore(rootPath, promote);
+  } else {
+    // Do not hand the syncer a snapshot older than spec-map construction.
+    store = await loadDecisionStore(rootPath);
   }
 
   progress(onProgress, 'Syncing decisions', 'start');

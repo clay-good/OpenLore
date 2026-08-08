@@ -26,6 +26,7 @@ import {
   sanitizeCliPrompt,
   type CompletionRequest,
 } from './llm-service.js';
+import { resetTlsScopeForTests } from './tls-scope.js';
 
 // Mock child_process for CLI provider tests (hoisted before module load)
 vi.mock('child_process', () => ({ execFileSync: vi.fn() }));
@@ -958,13 +959,28 @@ describe('AnthropicProvider', () => {
 // ============================================================================
 
 describe('OpenAIProvider', () => {
-  afterEach(() => { vi.unstubAllGlobals(); });
+  afterEach(() => { vi.unstubAllGlobals(); resetTlsScopeForTests(); });
 
   const SUCCESS_BODY = {
     choices: [{ message: { content: 'OpenAI response' }, finish_reason: 'stop' }],
     usage: { prompt_tokens: 20, completion_tokens: 10, total_tokens: 30 },
     model: 'gpt-4o',
   };
+
+  it('keeps a later secure provider verified after an insecure provider call', async () => {
+    const tlsValues: Array<string | undefined> = [];
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      tlsValues.push(process.env.NODE_TLS_REJECT_UNAUTHORIZED);
+      return mockResponse(SUCCESS_BODY);
+    }));
+
+    const insecure = new OpenAIProvider('key', undefined, undefined, false);
+    const secure = new OpenAIProvider('key');
+    await insecure.generateCompletion({ systemPrompt: '', userPrompt: 'first' });
+    await secure.generateCompletion({ systemPrompt: '', userPrompt: 'second' });
+
+    expect(tlsValues).toEqual(['0', undefined]);
+  });
 
   it('returns content and token usage on success', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResponse(SUCCESS_BODY)));

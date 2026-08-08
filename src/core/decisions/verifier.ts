@@ -166,19 +166,34 @@ export async function verifyDecisions(
   const byId = new Map(decisions.map((d) => [d.id, d]));
   const now = new Date().toISOString();
 
-  const verified: PendingDecision[] = result.verified
-    .flatMap((v) => {
-      const d = byId.get(v.id);
-      if (!d) return [];
-      return [{ ...d, status: 'verified' as const, confidence: v.confidence, verificationEvidence: 'git-diff' as const, evidenceFile: v.evidenceFile, verifiedAt: now }];
-    });
+  const verified: PendingDecision[] = [];
+  const phantom: PendingDecision[] = [];
+  const classified = new Set<string>();
+  for (const v of result.verified) {
+    const d = byId.get(v.id);
+    if (!d || classified.has(v.id)) continue;
+    classified.add(v.id);
+    const evidenceFile = v.evidenceFile.replace(/^[ab]\//, '');
+    const targeted = d.affectedFiles.some((file) => file.replace(/^[ab]\//, '') === evidenceFile);
+    const evidenceHunk = diffByFile.get(evidenceFile);
+    if (targeted && evidenceHunk && countChangedLines(evidenceHunk) >= SUBSTANTIVE_MIN_CHANGED_LINES) {
+      verified.push({ ...d, status: 'verified', confidence: v.confidence, verificationEvidence: 'git-diff', evidenceFile, verifiedAt: now });
+      continue;
+    }
+    const deterministicEvidence = substantiveEvidence(d, diffByFile);
+    if (deterministicEvidence) {
+      verified.push({ ...d, status: 'verified', confidence: 'low', verificationEvidence: 'git-diff', evidenceFile: deterministicEvidence, verifiedAt: now });
+    } else {
+      phantom.push({ ...d, status: 'phantom', confidence: 'low', verifiedAt: now });
+    }
+  }
 
   // HF-1: rescue any LLM-marked phantom whose affected files are all present in the
   // diff with substantive hunks — trust the diff over the LLM's "no evidence" call.
-  const phantom: PendingDecision[] = [];
   for (const p of result.phantom) {
     const d = byId.get(p.id);
-    if (!d) continue;
+    if (!d || classified.has(p.id)) continue;
+    classified.add(p.id);
     const evidenceFile = substantiveEvidence(d, diffByFile);
     if (evidenceFile) {
       verified.push({ ...d, status: 'verified', confidence: 'low', verificationEvidence: 'git-diff', evidenceFile, verifiedAt: now });
