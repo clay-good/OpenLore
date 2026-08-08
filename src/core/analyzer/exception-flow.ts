@@ -26,6 +26,7 @@
  */
 
 import type Parser from 'tree-sitter';
+import { usesTsxGrammar } from './language-detection.js';
 import { parseWithBudget, type BudgetableParser } from './parse-budget.js';
 
 /** The languages whose exception flow is statically extractable here. This is the
@@ -172,6 +173,7 @@ function specFor(language: string): LangSpec | null {
 // ── Lazy tree-sitter parsers (scoped to the supported languages) ─────────────
 
 let _tsParser: Parser | undefined;
+let _tsxParser: Parser | undefined;
 let _pyParser: Parser | undefined;
 let _NativeParser: typeof Parser | null | undefined;
 
@@ -186,14 +188,28 @@ async function loadNativeParser(): Promise<typeof Parser | null> {
   return _NativeParser;
 }
 
-/** A tree-sitter parser for a supported language, or null if unavailable. */
-export async function getExceptionParser(language: string): Promise<Parser | null> {
+/** A tree-sitter parser for a supported language, or null if unavailable.
+ *  `filePath` is optional and only used to select the JSX grammar. */
+export async function getExceptionParser(
+  language: string,
+  filePath?: string
+): Promise<Parser | null> {
   try {
     const NP = await loadNativeParser();
     if (!NP) return null;
     switch (language) {
       case 'TypeScript':
       case 'JavaScript': {
+        if (usesTsxGrammar(filePath)) {
+          if (!_tsxParser) {
+            const m = await import('tree-sitter-typescript');
+            _tsxParser = new NP();
+            _tsxParser.setLanguage(
+              ((m.default ?? m) as { tsx: object }).tsx as Parser.Language,
+            );
+          }
+          return _tsxParser!;
+        }
         if (!_tsParser) {
           const m = await import('tree-sitter-typescript');
           _tsParser = new NP();
@@ -532,11 +548,12 @@ export function extractExceptionFacts(
 export async function extractExceptionFactsFromSource(
   source: string,
   language: string,
+  filePath?: string,
 ): Promise<FunctionExceptionFacts> {
   if (!ERROR_PROPAGATION_LANGUAGES.has(language)) {
     return { language, supported: false, throwSites: [], tryGuards: [], callSites: [], dynamicThrowCount: 0 };
   }
-  const parser = await getExceptionParser(language);
+  const parser = await getExceptionParser(language, filePath);
   if (!parser) {
     return { language, supported: false, throwSites: [], tryGuards: [], callSites: [], dynamicThrowCount: 0 };
   }

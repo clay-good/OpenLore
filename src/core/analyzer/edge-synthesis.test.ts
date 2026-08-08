@@ -38,6 +38,44 @@ describe('event-channel synthesis', () => {
     expect(edge!.kind).toBe('calls');
   });
 
+  it('TSX event handlers remain reachable through synthesized edges', async () => {
+    const b = await new CallGraphBuilder().build([{
+      path: 'src/app.tsx',
+      language: 'TypeScript',
+      content: `
+        function onMount() { return <span />; }
+        function register(emitter: any) { emitter.on('mount', onMount); return <div />; }
+        function trigger(emitter: any) { emitter.emit('mount'); return <main />; }
+      `,
+    }]);
+
+    expect(edgeBetween(b, 'trigger', 'onMount')?.synthesizedBy).toBe('event-channel');
+  });
+
+  it('selects the grammar per file in a mixed TypeScript and TSX batch', async () => {
+    const b = await new CallGraphBuilder().build([
+      {
+        path: 'src/register.ts',
+        language: 'TypeScript',
+        content: `
+          function onSave() { return 1; }
+          function register(emitter: any) {
+            const count = <number>1;
+            emitter.on('save', onSave);
+            return count;
+          }
+        `,
+      },
+      {
+        path: 'src/trigger.tsx',
+        language: 'TypeScript',
+        content: `function trigger(emitter: any) { emitter.emit('save'); return <main />; }`,
+      },
+    ]);
+
+    expect(edgeBetween(b, 'trigger', 'onSave')?.synthesizedBy).toBe('event-channel');
+  });
+
   it('Mismatched channel keys produce no edge', async () => {
     const b = await build(`
       function handler() { return 1; }
@@ -693,6 +731,19 @@ describe('callback-registration synthesis', () => {
     ].join('\n') }]);
     expect(edgeBetween(b, 'start', 'tick')?.synthesizedBy).toBe('callback-registration');
     expect(edgeBetween(b, 'start', 'poll')?.synthesizedBy).toBe('callback-registration');
+  });
+
+  it('TSX: setTimeout with a named function wires the callback', async () => {
+    const b = await new CallGraphBuilder().build([{
+      path: 'app.tsx',
+      language: 'TypeScript',
+      content: [
+        'function tick() { return <span />; }',
+        'function start() { setTimeout(tick, 1000); return <main />; }',
+      ].join('\n'),
+    }]);
+
+    expect(edgeBetween(b, 'start', 'tick')?.synthesizedBy).toBe('callback-registration');
   });
 
   it('JS/TS: an inline arrow to setTimeout is NOT a callback-registration edge (direct resolution covers it)', async () => {

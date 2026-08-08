@@ -155,6 +155,30 @@ describe('extraction pool — real worker threads', () => {
     expect(JSON.stringify(serializeCallGraph(result))).toBe(serial);
   }, 120_000);
 
+  it('matches the serial lane for TSX and JSX files', async () => {
+    if (!resolveWorkerEntry()) return;
+    const files: ExtractionFile[] = [
+      {
+        path: 'src/View.tsx',
+        language: 'TypeScript',
+        content: 'function save() {}\nexport function View() { return <button onClick={() => save()}>Save</button>; }',
+      },
+      {
+        path: 'src/Panel.jsx',
+        language: 'JavaScript',
+        content: 'function close() {}\nexport function Panel() { return <button onClick={() => close()}>Close</button>; }',
+      },
+    ];
+
+    process.env.OPENLORE_NO_WORKERS = '1';
+    const serial = await buildJson(files);
+    delete process.env.OPENLORE_NO_WORKERS;
+
+    expect(await buildJson(files, POOL_SIZE)).toBe(serial);
+    const names = JSON.parse(serial).nodes.map((node: { name: string }) => node.name);
+    expect(names).toEqual(expect.arrayContaining(['View', 'save', 'Panel', 'close']));
+  }, 120_000);
+
   it('loads the per-thread WASM grammars (Lua, Dart) without cross-contaminating them', async () => {
     if (!resolveWorkerEntry()) return;
     const lua = fixtureFile('lua/app.lua', 'Lua');

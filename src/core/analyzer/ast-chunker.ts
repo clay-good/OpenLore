@@ -10,12 +10,13 @@
  */
 
 import type Parser from 'tree-sitter';
-import { detectLanguage } from './language-detection.js';
+import { detectLanguage, usesTsxGrammar } from './language-detection.js';
 import { parseWithBudget, type BudgetableParser } from './parse-budget.js';
 
 // ── Lazy parser singletons (one per language, created on first use) ─────────
 
 let _tsParser: Parser | undefined;
+let _tsxParser: Parser | undefined;
 let _pyParser: Parser | undefined;
 let _goParser: Parser | undefined;
 let _rustParser: Parser | undefined;
@@ -36,13 +37,23 @@ async function loadNativeParser(): Promise<typeof Parser | null> {
   return _NativeParser;
 }
 
-async function getParserForLanguage(lang: string): Promise<Parser | null> {
+async function getParserForLanguage(lang: string, filePath?: string): Promise<Parser | null> {
   try {
     const NP = await loadNativeParser();
     if (!NP) return null;
     switch (lang.toLowerCase()) {
       case 'typescript':
       case 'javascript': {
+        if (usesTsxGrammar(filePath)) {
+          if (!_tsxParser) {
+            const m = await import('tree-sitter-typescript');
+            _tsxParser = new NP();
+            _tsxParser.setLanguage(
+              ((m.default ?? m) as { tsx: object }).tsx as Parser.Language
+            );
+          }
+          return _tsxParser!;
+        }
         if (!_tsParser) {
           const m = await import('tree-sitter-typescript');
           _tsParser = new NP();
@@ -177,7 +188,7 @@ export async function astChunkContent(
   if (content.length <= maxChars) return [content];
 
   const language = detectLanguage(filePath);
-  const parser = await getParserForLanguage(language);
+  const parser = await getParserForLanguage(language, filePath);
   if (!parser) return blankLineChunk(content, maxChars, overlapLines);
 
   let tree: Parser.Tree;

@@ -44,6 +44,7 @@ import {
 // Per-file parse budget (change: fix-analyze-native-abort-and-file-cost-budget). Bounds the one
 // synchronous native call nothing else can interrupt.
 import { parseWithBudget, parseBudgetOverrunMs, parseBudgetMs, type BudgetableParser } from './parse-budget.js';
+import { usesTsxGrammar } from './language-detection.js';
 // Pass-1 extraction lane (change: optimize-parallel-extraction-pool). The pool holds no
 // extraction logic of its own — it dispatches `dispatchFileExtract` to worker threads and
 // merges by input index, with the serial loop as both reference and fallback.
@@ -154,6 +155,7 @@ function tallyStyle(language: string, tree: Parser.Tree, nodes: FunctionNode[], 
 // ============================================================================
 
 let _tsParser: Parser | undefined;
+let _tsxParser: Parser | undefined;
 let _pyParser: Parser | undefined;
 let _goParser: Parser | undefined;
 let _rustParser: Parser | undefined;
@@ -185,6 +187,7 @@ async function loadNativeParser(): Promise<typeof Parser | null> {
   return _NativeParser;
 }
 let _TsLanguage: object | undefined;
+let _TsxLanguage: object | undefined;
 let _PyLanguage: object | undefined;
 let _GoLanguage: object | undefined;
 let _RustLanguage: object | undefined;
@@ -198,9 +201,20 @@ let _KtLanguage: object | undefined;
 let _ScalaLanguage: object | undefined;
 let _ExLanguage: object | undefined;
 
-async function getTSParser(): Promise<{ parser: Parser; lang: object } | null> {
+async function getTSParser(
+  filePath?: string
+): Promise<{ parser: Parser; lang: object } | null> {
   const NP = await loadNativeParser();
   if (!NP) return null;
+  if (usesTsxGrammar(filePath)) {
+    if (!_tsxParser) {
+      const tsModule = await import('tree-sitter-typescript');
+      _TsxLanguage = (tsModule.default as { tsx: object }).tsx;
+      _tsxParser = new NP();
+      _tsxParser.setLanguage(_TsxLanguage as unknown as Parser.Language);
+    }
+    return { parser: _tsxParser!, lang: _TsxLanguage! };
+  }
   if (!_tsParser) {
     const tsModule = await import('tree-sitter-typescript');
     _TsLanguage = (tsModule.default as { typescript: object }).typescript;
@@ -697,7 +711,7 @@ async function extractTSGraph(
   filePath: string,
   content: string
 ): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[]; cfg: Map<string, FunctionCfg>; style?: FileStyleRaw; parseHealth?: FileParseHealth }> {
-  const r = await getTSParser();
+  const r = await getTSParser(filePath);
   if (!r) return { nodes: [], rawEdges: [], cfg: new Map() };
   const { parser, lang } = r;
   const tree = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, content);
@@ -2484,7 +2498,7 @@ async function extractClassRelationships(
   for (const file of files) {
     try {
       if (file.language === 'TypeScript' || file.language === 'JavaScript') {
-        const r = await getTSParser();
+        const r = await getTSParser(file.path);
         if (!r) continue;
         const { parser, lang } = r;
         const tree = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, file.content);
@@ -3655,16 +3669,14 @@ async function synthesizeEventChannelEdges(
     (f.language === 'TypeScript' || f.language === 'JavaScript') && EVENT_PREFILTER.test(f.content),
   );
   if (tsFiles.length > 0) {
-    const r = await getTSParser();
-    if (r) {
-      const { parser } = r;
-      const sites: EventSites = { registrations: [], dispatches: [] };
-      for (const file of tsFiles) {
-        try { collectTsEventSites(parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
-        catch { /* skip unparseable file */ }
-      }
-      edges.push(...pairAndEmitEventEdges(sites, allNodes, 'event-channel'));
+    const sites: EventSites = { registrations: [], dispatches: [] };
+    for (const file of tsFiles) {
+      const r = await getTSParser(file.path);
+      if (!r) continue;
+      try { collectTsEventSites(parseWithBudget(r.parser as unknown as BudgetableParser<Parser.Tree>, file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, sites); }
+      catch { /* skip unparseable file */ }
     }
+    edges.push(...pairAndEmitEventEdges(sites, allNodes, 'event-channel'));
   }
 
   const pyFiles = files.filter(f => f.language === 'Python' && EVENT_PREFILTER.test(f.content));
@@ -3965,13 +3977,11 @@ async function synthesizeCallbackRegistrationEdges(
 
   const tsFiles = files.filter(f => (f.language === 'TypeScript' || f.language === 'JavaScript') && TS_CALLBACK_PREFILTER.test(f.content));
   if (tsFiles.length > 0) {
-    const r = await getTSParser();
-    if (r) {
-      const { parser } = r;
-      for (const file of tsFiles) {
-        try { collectTsCallbackEdges(parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, out, seen); }
-        catch { /* skip */ }
-      }
+    for (const file of tsFiles) {
+      const r = await getTSParser(file.path);
+      if (!r) continue;
+      try { collectTsCallbackEdges(parseWithBudget(r.parser as unknown as BudgetableParser<Parser.Tree>, file.content), nodesByFile.get(file.path) ?? [], file.path, resolveHandler, out, seen); }
+      catch { /* skip */ }
     }
   }
 

@@ -132,6 +132,22 @@ describe('CallGraphBuilder — TypeScript', () => {
     expect(edgePairs(result)).toContain('run→shared');
   });
 
+  it('resolves inherited methods in TSX files', async () => {
+    const builder = new CallGraphBuilder();
+    const result = await builder.build([{
+      path: 'src/view.tsx',
+      language: 'TypeScript',
+      content: `
+        class Base { inherited() { return <span />; } }
+        class Child extends Base {
+          run() { this.inherited(); return <main />; }
+        }
+      `,
+    }]);
+
+    expect(edgePairs(result)).toContain('run→inherited');
+  });
+
   it('resolves super.method() to the PARENT class method, not the overriding child', async () => {
     const builder = new CallGraphBuilder();
     const result = await builder.build([{
@@ -533,6 +549,23 @@ describe('CallGraphBuilder — JavaScript', () => {
     expect(nodeNames(result)).toEqual(['init', 'setup']);
     expect(edgePairs(result)).toEqual(['init→setup']);
     expect(fanIn(result, 'setup')).toBe(1);
+  });
+
+  it('parses JSX files with JSX syntax and resolves their calls', async () => {
+    const builder = new CallGraphBuilder();
+    const result = await builder.build([{
+      path: 'src/View.jsx',
+      language: 'JavaScript',
+      content: `
+        function save() {}
+        export function View() {
+          return <button onClick={() => save()}>Save</button>;
+        }
+      `,
+    }]);
+
+    expect(nodeNames(result)).toEqual(['View', 'save']);
+    expect(edgePairs(result)).toContain('View→save');
   });
 });
 
