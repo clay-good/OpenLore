@@ -28,6 +28,7 @@ import {
   ERROR_PROPAGATION_LANGUAGES as ERRP,
   extractExceptionFactsFromSource,
 } from './exception-flow.js';
+import { usesTsxGrammar } from './language-detection.js';
 import {
   CROSS_SERVICE_HTTP_LANGUAGES as XSVC,
   extractHttpCalls,
@@ -479,6 +480,13 @@ describe('single-source language detection', () => {
 
   it.each(FORMERLY_MISSED)('formerly-missed %s resolves to %s (not unknown)', (path, lang) => {
     expect(detectLanguage(path)).toBe(lang);
+  });
+
+  it('selects the TSX grammar only for .tsx/.jsx paths', () => {
+    expect(usesTsxGrammar('src/View.tsx')).toBe(true);
+    expect(usesTsxGrammar('src/View.JSX')).toBe(true);
+    expect(usesTsxGrammar('src/cast.ts')).toBe(false);
+    expect(usesTsxGrammar()).toBe(false);
   });
 
   it('an unknown extension degrades honestly to "unknown", never a guess', () => {

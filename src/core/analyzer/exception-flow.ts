@@ -26,6 +26,7 @@
  */
 
 import type Parser from 'tree-sitter';
+import { usesTsxGrammar } from './language-detection.js';
 import { parseWithBudget, type BudgetableParser } from './parse-budget.js';
 
 /** The languages whose exception flow is statically extractable here. This is the
@@ -187,17 +188,6 @@ async function loadNativeParser(): Promise<typeof Parser | null> {
   return _NativeParser;
 }
 
-
-/** True when the file is JSX/TSX, which needs tree-sitter-typescript's `tsx`
- *  grammar. The plain `typescript` grammar treats every JSX element as a syntax
- *  error, so a React file parses to thousands of ERROR nodes and its symbols and
- *  edges silently become a small fraction of what is there. */
-function isJsxPath(filePath?: string): boolean {
-  if (!filePath) return false;
-  const p = filePath.toLowerCase();
-  return p.endsWith('.tsx') || p.endsWith('.jsx');
-}
-
 /** A tree-sitter parser for a supported language, or null if unavailable.
  *  `filePath` is optional and only used to select the JSX grammar. */
 export async function getExceptionParser(
@@ -210,7 +200,7 @@ export async function getExceptionParser(
     switch (language) {
       case 'TypeScript':
       case 'JavaScript': {
-        if (isJsxPath(filePath)) {
+        if (usesTsxGrammar(filePath)) {
           if (!_tsxParser) {
             const m = await import('tree-sitter-typescript');
             _tsxParser = new NP();

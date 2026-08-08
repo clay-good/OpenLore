@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   extractExceptionFactsFromSource,
+  getExceptionParser,
   innermostGuard,
   enclosingGuards,
   guardCatches,
@@ -11,6 +12,14 @@ import {
 } from './exception-flow.js';
 
 describe('extractExceptionFacts — TypeScript', () => {
+  it('parses TSX without regressing TypeScript angle-bracket assertions', async () => {
+    const tsxParser = await getExceptionParser('TypeScript', 'src/View.tsx');
+    const tsParser = await getExceptionParser('TypeScript', 'src/cast.ts');
+
+    expect(tsxParser?.parse('const View = () => <section />;').rootNode.hasError).toBe(false);
+    expect(tsParser?.parse('const value = <Widget>input;').rootNode.hasError).toBe(false);
+  });
+
   it('reports a direct, un-caught throw with its constructed type', async () => {
     const facts = await extractExceptionFactsFromSource(
       `function f() {\n  throw new RangeError("bad");\n}`,

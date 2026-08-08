@@ -10,7 +10,7 @@
  */
 
 import type Parser from 'tree-sitter';
-import { detectLanguage } from './language-detection.js';
+import { detectLanguage, usesTsxGrammar } from './language-detection.js';
 import { parseWithBudget, type BudgetableParser } from './parse-budget.js';
 
 // ── Lazy parser singletons (one per language, created on first use) ─────────
@@ -37,17 +37,6 @@ async function loadNativeParser(): Promise<typeof Parser | null> {
   return _NativeParser;
 }
 
-
-/** True when the file is JSX/TSX, which needs tree-sitter-typescript's `tsx`
- *  grammar. The plain `typescript` grammar treats every JSX element as a syntax
- *  error, so a React file parses to thousands of ERROR nodes and its symbols and
- *  edges silently become a small fraction of what is there. */
-function isJsxPath(filePath?: string): boolean {
-  if (!filePath) return false;
-  const p = filePath.toLowerCase();
-  return p.endsWith('.tsx') || p.endsWith('.jsx');
-}
-
 async function getParserForLanguage(lang: string, filePath?: string): Promise<Parser | null> {
   try {
     const NP = await loadNativeParser();
@@ -55,7 +44,7 @@ async function getParserForLanguage(lang: string, filePath?: string): Promise<Pa
     switch (lang.toLowerCase()) {
       case 'typescript':
       case 'javascript': {
-        if (isJsxPath(filePath)) {
+        if (usesTsxGrammar(filePath)) {
           if (!_tsxParser) {
             const m = await import('tree-sitter-typescript');
             _tsxParser = new NP();

@@ -132,6 +132,22 @@ describe('CallGraphBuilder — TypeScript', () => {
     expect(edgePairs(result)).toContain('run→shared');
   });
 
+  it('resolves inherited methods in TSX files', async () => {
+    const builder = new CallGraphBuilder();
+    const result = await builder.build([{
+      path: 'src/view.tsx',
+      language: 'TypeScript',
+      content: `
+        class Base { inherited() { return <span />; } }
+        class Child extends Base {
+          run() { this.inherited(); return <main />; }
+        }
+      `,
+    }]);
+
+    expect(edgePairs(result)).toContain('run→inherited');
+  });
+
   it('resolves super.method() to the PARENT class method, not the overriding child', async () => {
     const builder = new CallGraphBuilder();
     const result = await builder.build([{

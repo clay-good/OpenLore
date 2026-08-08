@@ -65,3 +65,13 @@ export function detectLanguage(filePath: string): string {
   const ext = lower.split('.').pop() ?? '';
   return EXTENSION_TO_LANGUAGE[ext] ?? 'unknown';
 }
+
+/**
+ * Whether a JavaScript/TypeScript-family file needs tree-sitter-typescript's TSX grammar.
+ * Keep this path decision beside the canonical extension map so parser consumers cannot drift.
+ */
+export function usesTsxGrammar(filePath?: string): boolean {
+  if (!filePath) return false;
+  const lower = filePath.toLowerCase();
+  return lower.endsWith('.tsx') || lower.endsWith('.jsx');
+}
