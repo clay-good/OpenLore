@@ -41,6 +41,8 @@ import {
 import { resolveTrustedSslVerify, rejectRepoConfiguredTlsOptOut, discloseRepoConfiguredEndpoint } from '../../core/services/repo-config-trust.js';
 import { describeExclusions, totalExcluded, type ParseHealthReport } from '../../core/analyzer/parse-health.js';
 import { describeMemoryDegradation } from '../../core/analyzer/memory-strategy.js';
+import type { GovernanceFinding } from '../../core/services/mcp-handlers/enforcement-policy.js';
+import { detectInjectionShapes, INJECTION_SHAPE_LIMITS } from '../../core/services/served-content.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -67,6 +69,7 @@ export interface CheckResult {
   detail: string;
   fix?: string;
   remediation?: Remediation;
+  findings?: GovernanceFinding[];
 }
 
 // ============================================================================
@@ -188,6 +191,70 @@ async function checkConfigSchema(rootPath: string): Promise<CheckResult> {
     status: 'warn',
     detail: `${findings.length} config finding(s): ${summary}${more}`,
     fix: `Edit ${OPENLORE_CONFIG_REL_PATH} to correct the key(s), or re-run 'openlore init'`,
+  };
+}
+
+/**
+ * Diagnose instruction-shaped text at the human-review boundary. By default we
+ * inspect locally recorded memory plus changed spec/decision files; already
+ * reviewed corpus content is not re-litigated on every doctor run.
+ */
+export async function checkServedContentTrust(
+  rootPath: string,
+  explicitFiles?: string[],
+): Promise<CheckResult> {
+  const candidates = new Set<string>(explicitFiles ?? [
+    join(OPENLORE_DIR, 'memory', 'notes.json'),
+    join(OPENLORE_DIR, 'decisions', 'pending.json'),
+  ]);
+  if (!explicitFiles) {
+    try {
+      const { stdout } = await execFileAsync(
+        'git',
+        ['status', '--porcelain=v1', '--untracked-files=all'],
+        { cwd: rootPath },
+      );
+      for (const line of stdout.split('\n')) {
+        if (line.length < 4) continue;
+        const raw = line.slice(3).trim();
+        const path = raw.includes(' -> ') ? raw.slice(raw.indexOf(' -> ') + 4) : raw;
+        if (path.startsWith('openspec/') && path.endsWith('.md')) {
+          candidates.add(path);
+        }
+      }
+    } catch {
+      // Non-git roots still get the local-memory check.
+    }
+  }
+
+  const findings: GovernanceFinding[] = [];
+  for (const candidate of [...candidates].sort()) {
+    let content: string;
+    try { content = await readFile(join(rootPath, candidate), 'utf8'); } catch { continue; }
+    for (const match of detectInjectionShapes(content)) {
+      findings.push({
+        code: 'injection-shaped-content',
+        severity: 'warning',
+        source: 'doctor',
+        subject: candidate,
+        message: `${match.shape}: ${JSON.stringify(match.excerpt)}. ${INJECTION_SHAPE_LIMITS}`,
+      });
+    }
+  }
+
+  if (findings.length === 0) {
+    return {
+      name: 'Served content trust',
+      status: 'ok',
+      detail: `no lexical injection shapes found. ${INJECTION_SHAPE_LIMITS}`,
+    };
+  }
+  return {
+    name: 'Served content trust',
+    status: 'warn',
+    detail: `${findings.length} advisory finding(s). ${INJECTION_SHAPE_LIMITS}`,
+    findings,
+    fix: 'Review the named content and its provenance; do not rewrite it automatically.',
   };
 }
 
@@ -619,6 +686,9 @@ function printResult(r: CheckResult, useColor: boolean): void {
 
   const icon = paint[r.status](glyph[r.status]);
   console.log(`  ${icon}  ${safe(r.name).padEnd(22)} ${c.dim(safe(r.detail))}`);
+  for (const finding of r.findings ?? []) {
+    console.log(`       ${' '.repeat(22)} ${c.yellow(`→ ${safe(finding.subject)}: ${safe(finding.message)}`)}`);
+  }
   if (r.fix) {
     console.log(`       ${' '.repeat(22)} ${c.yellow(`→ ${r.fix}`)}`);
   }
@@ -647,6 +717,7 @@ Checks performed:
   • Analysis artifacts freshness
   • Graph store lifecycle (schema mismatch / quarantined index)
   • OpenSpec directory presence
+  • Injection-shaped unreviewed content (lexical advisory; never a guarantee)
   • MCP wiring (Claude Code reads .mcp.json, not .claude/settings.json)
   • LLM connection (live request with 10s timeout)
   • Embedding connection (if configured)
@@ -675,6 +746,7 @@ Checks performed:
         checkGraphStore(rootPath),
         checkParseHealth(rootPath),
         checkOpenSpecDir(rootPath),
+        checkServedContentTrust(rootPath),
         checkDiskSpace(rootPath),
       ]),
       checkMcpWiring(rootPath),

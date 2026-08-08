@@ -26,6 +26,7 @@ import { repoStatus } from './registry.js';
 import type { FederationScope } from './resolver.js';
 import type { ConsultedRepo, FederationCoverage } from './types.js';
 import type { MemoryFreshness, StructuralAnchor } from '../../types/index.js';
+import { decisionContentProvenance, type ServedContentProvenance } from '../services/served-content.js';
 
 /** Default cap on fleet records returned (per kind), to keep the recall conclusion bounded. */
 export const DEFAULT_MAX_FLEET_MEMORIES = 50;
@@ -39,6 +40,7 @@ export interface FleetMemory {
   /** Producer-side file the anchor points at. */
   filePath: string;
   content: string;
+  provenance: ServedContentProvenance;
   /** Freshness against the PRODUCER's graph; `orphaned` is withheld, never returned. */
   freshness: Exclude<MemoryFreshness, 'orphaned'>;
   type?: string;
@@ -51,6 +53,7 @@ export interface FleetDecision {
   symbol: string;
   filePath: string;
   title: string;
+  provenance: ServedContentProvenance;
   status: string;
   /** Freshness against the PRODUCER's graph; `orphaned` is withheld, never returned. */
   freshness: Exclude<MemoryFreshness, 'orphaned'>;
@@ -124,6 +127,7 @@ export async function findFleetMemory(
         symbol: anchor.symbolName,
         filePath: anchor.filePath,
         content: m.content,
+        provenance: 'foreign-actor',
         freshness: f.freshness,
         ...(m.type ? { type: m.type } : {}),
         recordedAt: m.recordedAt,
@@ -147,6 +151,7 @@ export async function findFleetMemory(
         symbol: anchor.symbolName,
         filePath: anchor.filePath,
         title: d.title,
+        provenance: decisionContentProvenance(d.status),
         status: d.status,
         freshness: f.freshness,
         recordedAt: d.recordedAt,

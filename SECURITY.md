@@ -29,6 +29,22 @@ Include:
 
 OpenLore runs **locally** and is deterministic by design — analysis is pure static analysis with no LLM and no network in the hot path, and no telemetry is sent anywhere by default. Areas especially worth scrutiny: the MCP server surface (`openlore mcp`), the pre-commit decisions gate, and any path that reads untrusted repository contents during `analyze`.
 
+### Served content and the human-review boundary
+
+OpenLore's read-only surfaces protect its stores from mutation. They do not protect a consuming
+agent from the text those stores contain. Memories, specifications, decisions, source-derived
+strings, imported metadata, and branch or pull-request titles are untrusted input when served.
+Deterministic output means the same bytes are returned; it does not mean those bytes are benign.
+
+Human review is the authority boundary. Served fields carry factual origin labels
+(`reviewed-corpus`, `local-unreviewed`, `foreign-actor`, `imported`, or `source-derived`), and
+composed agent-context blocks frame the original bytes as data rather than instructions. OpenLore
+does not sanitize, rewrite, or score the trustworthiness of recorded content.
+
+`openlore doctor` provides an advisory lexical check for common instruction-shaped text. It is
+incomplete, can miss unfamiliar phrasing, and can flag benign prose. It helps a human reviewer; it
+is not a safety guarantee and does not block by default.
+
 ## Automated checks
 
 Every pull request and release runs these:

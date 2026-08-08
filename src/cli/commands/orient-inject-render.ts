@@ -14,6 +14,7 @@
  */
 
 import { estimateTokens } from '../../core/services/llm-service.js';
+import { frameServedContent } from '../../core/services/served-content.js';
 import type { ContextInjectionConfig } from '../../types/index.js';
 
 /** Injection settings with every documented default applied. */
@@ -41,11 +42,6 @@ export const INJECTION_DEFAULTS: ResolvedInjectionConfig = {
 export const POINTER_LINE =
   '[OpenLore] Structural context is available — call `orient` with your task for a deterministic ' +
   'briefing (relevant functions, callers, insertion points). Informational; ignore if not useful.';
-
-/** One-line framing prefix on the full block — facts, never an instruction. */
-const BLOCK_HEADER =
-  '[OpenLore] Task-scoped orientation (deterministic, from the local call graph). ' +
-  'Informational — act on it or ignore it.';
 
 const BLOCK_FOOTER = '(From OpenLore. Call `orient` for the full briefing, or ignore this.)';
 
@@ -173,7 +169,7 @@ function take<T>(arr: T[] | undefined, n: number): T[] {
  */
 export function renderInjectionBlock(result: LeanOrientResult, cfg: ResolvedInjectionConfig): string {
   const task = (result.task ?? '').replace(/\s+/g, ' ').trim().slice(0, 200);
-  const mandatory = [BLOCK_HEADER, `Task: ${task}`];
+  const mandatory = [`Task: ${task}`];
 
   const optional: string[] = [];
   const clean = (xs: Array<string | undefined> | undefined, n: number): string[] =>
@@ -236,8 +232,9 @@ export function renderInjectionBlock(result: LeanOrientResult, cfg: ResolvedInje
   // Greedily include optional lines while the whole block stays within budget.
   const lines = [...mandatory];
   for (const line of optional) {
-    if (estimateTokens([...lines, line].join('\n')) > cfg.tokenBudget) break;
+    const candidate = frameServedContent([...lines, line].join('\n'), 'source-derived', 'task-scoped orientation');
+    if (estimateTokens(candidate) > cfg.tokenBudget) break;
     lines.push(line);
   }
-  return lines.join('\n');
+  return frameServedContent(lines.join('\n'), 'source-derived', 'task-scoped orientation');
 }

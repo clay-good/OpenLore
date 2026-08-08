@@ -13,6 +13,13 @@ it('spawns a full-surface daemon because Pi curates a wider native tool set itse
   expect(PI_DAEMON_PRESET).toBe('full');
 });
 
+it('frames every Pi before-agent corpus block with the shared provenance boundary', async () => {
+  const source = await readFile(new URL('./extension.ts', import.meta.url), 'utf8');
+  expect(source).toContain("frameServedContent(\n      '# Codebase architecture");
+  expect(source).toContain("frameServedContent(specIndex, 'reviewed-corpus'");
+  expect(source).toContain('renderInjectionBlock(result, cfg)');
+});
+
 it('refuses a pre-existing narrow daemon with actionable remediation', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'openlore-pi-daemon-'));
   let daemon = await startServe({

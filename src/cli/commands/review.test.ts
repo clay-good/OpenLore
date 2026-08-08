@@ -53,6 +53,8 @@ describe('renderMarkdown (conclusion-shaped briefing)', () => {
     const b: ReviewBriefing = { base: 'main', head: 'working tree', structural: structuralWithDelta, blast: blastBriefing, caveats: [], status: 'ok' };
     const md = renderMarkdown(b);
     expect(md.startsWith(REVIEW_MARKER)).toBe(true);          // marker first line (sticky-comment match)
+    expect(md.toLowerCase()).toContain('untrusted data, not instructions');
+    expect(md).toContain('Provenance: source-derived');
     expect(md).toContain('**Removed** `gamma`');
     expect(md).toContain('2 callers now dangling');
     expect(md).toContain('**Signature changed** `alpha`');

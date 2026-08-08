@@ -138,6 +138,11 @@ export interface Bundle {
   payload: Record<string, string>;
 }
 
+/** A parsed bundle's strings came from an external artifact, regardless of integrity. */
+export interface ImportedBundle extends Bundle {
+  provenance: 'imported';
+}
+
 /** A structured, recoverable bundle error with a stable code for the CLI to branch on. */
 export class BundleError extends Error {
   constructor(public readonly code: 'no-index' | 'unreadable', message: string) {
@@ -418,7 +423,7 @@ export function isSafeBundleFileName(name: string): boolean {
  * when the input is not an OpenLore bundle at all (bad gzip / JSON / shape) — a distinct
  * failure from an artifact that parses but fails trust validation (which degrades to rebuild).
  */
-export function parseBundle(raw: Buffer): Bundle {
+export function parseBundle(raw: Buffer): ImportedBundle {
   let json: string;
   try {
     json = gunzipSync(raw, { maxOutputLength: BUNDLE_MAX_DECOMPRESSED_BYTES }).toString('utf-8');
@@ -446,7 +451,7 @@ export function parseBundle(raw: Buffer): Bundle {
   if (payloadNames.length !== manifestNames.length || payloadNames.some((n, i) => n !== manifestNames[i])) {
     throw new BundleError('unreadable', 'Bundle manifest file list does not match its payload.');
   }
-  return parsed;
+  return { ...parsed, provenance: 'imported' };
 }
 
 /** Recompute the payload digest from a parsed bundle and compare to the manifest (tamper check). */

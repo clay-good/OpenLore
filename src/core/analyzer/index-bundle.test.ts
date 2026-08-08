@@ -256,6 +256,7 @@ describe('index-bundle: export', () => {
     await buildAnalysisDir(src, 'abc1234');
     const { buffer } = await buildBundle(src, VERSION);
     const bundle = parseBundle(buffer);
+    expect(bundle.provenance).toBe('imported');
 
     // Forge the shape an older exporter produced: the quarantine copy alongside the store.
     bundle.payload[`${ARTIFACT_CALL_GRAPH_DB}.corrupt-0`] = bundle.payload[ARTIFACT_CALL_GRAPH_DB];

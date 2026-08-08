@@ -153,6 +153,11 @@ describe('handleOrient', () => {
     expect(Array.isArray(result.insertionPoints)).toBe(true);
     expect(Array.isArray(result.nextSteps)).toBe(true);
     expect((result.relevantFunctions as unknown[]).length).toBeGreaterThan(0);
+    expect((result.relevantFunctions as Array<{ provenance: string }>)[0].provenance).toBe('source-derived');
+    expect(result.servedContentProvenance).toMatchObject({
+      relevantFiles: 'source-derived',
+      specDomains: 'reviewed-corpus',
+    });
   });
 
   // regionStyle PRODUCER (change: add-codebase-style-fingerprint). The renderer is covered in

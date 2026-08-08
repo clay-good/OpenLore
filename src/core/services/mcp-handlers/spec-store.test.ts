@@ -122,6 +122,8 @@ describe('handleSpecStoreStatus', () => {
     writeBinding(undefined);
     const report = await handleSpecStoreStatus(home);
     expect(report.bound).toBe(false);
+    expect(report.provenance).toBe('local-unreviewed');
+    expect(report.findings[0].provenance).toBe('local-unreviewed');
     expect(report.sound).toBe(true);
     expect(report.findings).toHaveLength(1);
     expect(report.findings[0].code).toBe('no-binding');

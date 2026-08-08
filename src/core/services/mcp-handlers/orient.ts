@@ -47,6 +47,7 @@ import type { MemoryFreshness } from '../../../types/index.js';
 import { type Reversal, collectReversals, fileScope, supersededDecisionIds } from './reversals.js';
 import { getSourceRoots, moduleFromPath } from './epistemic-lease.js';
 import { readHotspotArtifact, hotspotsForModules } from './behavioral-hotspots.js';
+import { decisionContentProvenance, type ServedContentProvenance } from '../served-content.js';
 
 // ============================================================================
 // MANIFEST CACHE
@@ -120,6 +121,7 @@ interface OrientFunction {
   isHub: boolean;
   isEntryPoint: boolean;
   linkedSpecs: Array<{ requirement: string; domain: string; specFile: string }>;
+  provenance: ServedContentProvenance;
   /** Other files holding an exact copy, when collapsed under a token budget (P3). */
   duplicateOf?: string[];
 }
@@ -129,6 +131,7 @@ interface CallNeighbour {
   filePath: string;
   /** Present only for infrastructure neighbors (IaC resources) — spec-17 cross-domain. */
   domain?: 'infra';
+  provenance: 'source-derived';
 }
 
 interface OrientCallPath {
@@ -136,6 +139,7 @@ interface OrientCallPath {
   filePath: string;
   callers: CallNeighbour[];
   callees: CallNeighbour[];
+  provenance: 'source-derived';
 }
 
 interface OrientInsertionPoint {
@@ -146,6 +150,7 @@ interface OrientInsertionPoint {
   strategy: string;
   reason: string;
   score: number;
+  provenance: 'source-derived';
 }
 
 interface OrientSpecMatch {
@@ -154,6 +159,7 @@ interface OrientSpecMatch {
   title: string;
   score: number;
   text: string;
+  provenance: 'reviewed-corpus';
 }
 
 interface InlineSpec {
@@ -164,6 +170,7 @@ interface InlineSpec {
   calledBy: string[];
   /** Condensed spec content: Purpose + Dependencies section + Requirement names with file:line */
   content: string;
+  provenance: 'reviewed-corpus';
 }
 
 // ============================================================================
@@ -234,6 +241,7 @@ export async function handleOrient(
     isHub: r.record.isHub,
     isEntryPoint: r.record.isEntryPoint,
     linkedSpecs: mappingIdx ? specsForFile(mappingIdx, r.record.filePath) : [],
+    provenance: 'source-derived',
   }));
 
   // Progressive disclosure (Spec 25 P2–P4): when a tokenBudget is set, collapse
@@ -284,18 +292,20 @@ export async function handleOrient(
   const specDomains = [...domainScores.entries()]
     .sort((a, b) => b[1].matchCount - a[1].matchCount)
     .slice(0, 5)
-    .map(([domain, { specFile, matchCount }]) => ({ domain, specFile, matchCount }));
+    .map(([domain, { specFile, matchCount }]) => ({
+      domain, specFile, matchCount, provenance: 'reviewed-corpus' as const,
+    }));
 
   // ── Call paths for each top function ──────────────────────────────────────
   const callPaths: OrientCallPath[] = topResults.map(r => {
     if (!llmCtx?.edgeStore) {
-      return { function: r.record.name, filePath: r.record.filePath, callers: [], callees: [] };
+      return { function: r.record.name, filePath: r.record.filePath, callers: [], callees: [], provenance: 'source-derived' };
     }
     const es = llmCtx.edgeStore;
     // Tag IaC resources so an agent can tell infrastructure neighbors from code (spec-17).
     const toNeighbour = (n: ReturnType<typeof es.getNode>): CallNeighbour | null =>
       n && !n.isExternal
-        ? { name: n.name, filePath: n.filePath, ...(isIacLanguage(n.language) ? { domain: 'infra' as const } : {}) }
+        ? { name: n.name, filePath: n.filePath, provenance: 'source-derived' as const, ...(isIacLanguage(n.language) ? { domain: 'infra' as const } : {}) }
         : null;
     const callers = es.getCallers(r.record.id)
       .map(e => toNeighbour(es.getNode(e.callerId)))
@@ -305,7 +315,7 @@ export async function handleOrient(
       .map(e => toNeighbour(es.getNode(e.calleeId)))
       .filter((x): x is CallNeighbour => x !== null)
       .slice(0, 5);
-    return { function: r.record.name, filePath: r.record.filePath, callers, callees };
+    return { function: r.record.name, filePath: r.record.filePath, callers, callees, provenance: 'source-derived' };
   });
 
   // ── Insertion points (lightweight: reuse rawResults with structural scoring) ──
@@ -327,7 +337,7 @@ export async function handleOrient(
   insertionCandidates.sort((a, b) => b.score - a.score);
   const insertionPoints: OrientInsertionPoint[] = insertionCandidates
     .slice(0, 3)
-    .map((c, i) => ({ rank: i + 1, ...c, score: parseFloat(c.score.toFixed(3)) }));
+    .map((c, i) => ({ rank: i + 1, ...c, score: parseFloat(c.score.toFixed(3)), provenance: 'source-derived' }));
 
   // ── Enrichment (Spec 27, deepened) ─────────────────────────────────────────
   // Everything from here down is dropped by lean mode (it returns the navigation
@@ -349,6 +359,7 @@ export async function handleOrient(
         title: r.record.title,
         score: parseFloat(r.score.toFixed(3)),
         text: r.record.text.slice(0, 300) + (r.record.text.length > 300 ? '…' : ''),
+        provenance: 'reviewed-corpus',
       }));
     } catch {
       // non-fatal — spec index may be corrupt or unavailable
@@ -394,6 +405,7 @@ export async function handleOrient(
               dependsOn: entry.dependsOn,
               calledBy: entry.calledBy,
               content,
+              provenance: 'reviewed-corpus',
             } satisfies InlineSpec;
           }),
         );
@@ -413,6 +425,7 @@ export async function handleOrient(
     title: string;
     status: string;
     affectedDomains: string[];
+    provenance: ServedContentProvenance;
     /** Deterministic freshness of the decision against the current graph (spec: code-anchored memory). */
     freshness?: MemoryFreshness;
     /** Set when freshness is `drifted`: do not treat as authoritative without checking. */
@@ -478,6 +491,7 @@ export async function handleOrient(
           title: d.title,
           status: d.status,
           affectedDomains: d.affectedDomains,
+          provenance: decisionContentProvenance(d.status),
         };
         const anchors = decisionAnchors(d);
         if (view) {
@@ -537,7 +551,7 @@ export async function handleOrient(
   // runtime set-membership scan. Additive alongside pendingDecisions — this field
   // also reports *which* files each decision governs (file-level provenance).
   let governingDecisions:
-    | Array<{ id: string; title: string; status: string; governs: string[] }>
+    | Array<{ id: string; title: string; status: string; governs: string[]; provenance: ServedContentProvenance }>
     | undefined;
   if (!lean) try {
     const es = llmCtx?.edgeStore;
@@ -551,6 +565,7 @@ export async function handleOrient(
           title: d.title,
           status: d.status,
           governs: d.affectedFiles,
+          provenance: decisionContentProvenance(d.status),
         }));
       }
     }
@@ -562,7 +577,7 @@ export async function handleOrient(
   // "Last changed by X in PR #N" for the files this task touches — derived from
   // local git history (and local gh if present). Additive, local-only, no upload.
   let provenance:
-    | Array<{ file: string; lastAuthor: string; lastDate?: string; lastPr?: number; lastPrTitle?: string }>
+    | Array<{ file: string; lastAuthor: string; lastDate?: string; lastPr?: number; lastPrTitle?: string; provenance: 'reviewed-corpus' }>
     | undefined;
   if (!lean) try {
     const es = llmCtx?.edgeStore;
@@ -577,6 +592,7 @@ export async function handleOrient(
             ...(r.lastDate ? { lastDate: r.lastDate } : {}),
             ...(topPr ? { lastPr: topPr.number } : {}),
             ...(topPr?.title ? { lastPrTitle: topPr.title } : {}),
+            provenance: 'reviewed-corpus',
           };
         });
       }
@@ -878,6 +894,12 @@ export async function handleOrient(
     specDomains,
     callPaths,
     suggestedTools,
+    servedContentProvenance: {
+      relevantFiles: 'source-derived' as const,
+      relevantFunctions: 'source-derived' as const,
+      specDomains: 'reviewed-corpus' as const,
+      callPaths: 'source-derived' as const,
+    },
   };
 
   // Lean mode (Spec 27): return the navigation core only. The enrichment blocks
