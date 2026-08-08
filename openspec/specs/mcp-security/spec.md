@@ -484,6 +484,59 @@ delegation and falls back locally for an authorized call rejected by the daemon.
 - **WHEN** the connection closes before the client receives a response
 - **THEN** OpenLore reports an unknown outcome and does not dispatch the write again locally
 
+### Requirement: ServedContentIsUntrustedAndCarriesItsProvenance
+
+Content served into a consuming agent's context SHALL be treated as untrusted input and SHALL
+carry one factual provenance class: `reviewed-corpus`, `local-unreviewed`, `foreign-actor`,
+`imported`, or `source-derived`. The system SHALL NOT emit a trustworthiness score, safety rating,
+or computed judgment of whether that content should be believed.
+
+Content that has not passed human review SHALL NOT be presented as carrying the reviewed corpus's
+authority.
+
+The serving path SHALL preserve recorded bytes exactly. It SHALL NOT sanitize, strip, escape,
+neutralize, or otherwise rewrite instruction-shaped content. A composed agent-context block SHALL
+state that its content is data rather than instructions and SHALL use a delimiter absent from the
+enclosed bytes.
+
+#### Scenario: An unreviewed memory retains its status and bytes
+
+- **GIVEN** a locally recorded memory containing imperative language
+- **WHEN** recall serves it to an agent
+- **THEN** it carries `local-unreviewed` provenance
+- **AND** it is not presented as carrying the reviewed corpus's authority
+- **AND** its text is byte-identical to the recorded text
+- **AND** it carries no trustworthiness, safety, or confidence verdict
+
+#### Scenario: Another actor's title is marked as foreign
+
+- **GIVEN** an interference conclusion containing another actor's branch or pull-request title
+- **WHEN** the conclusion is served
+- **THEN** the title carries `foreign-actor` provenance
+
+#### Scenario: A composed briefing cannot have its delimiter forged
+
+- **GIVEN** composed content containing a delimiter-shaped string
+- **WHEN** the briefing is framed
+- **THEN** the chosen boundary delimiter does not occur in the enclosed content
+- **AND** the block states that the enclosed text is data rather than instructions
+
+### Requirement: InjectionShapedContentIsFlaggedForReviewNeverRewritten
+
+The diagnostic surface SHALL deterministically and offline flag imperative overrides, system,
+agent, or tool impersonation, and language steering an agent away from a recorded decision. The
+finding SHALL be advisory, SHALL NOT modify content, and SHALL NOT gate under the default policy.
+Every report SHALL state that the lexical check is incomplete, may flag benign text, and aids human
+review rather than guaranteeing safety.
+
+#### Scenario: A lexical finding remains advisory
+
+- **GIVEN** an unreviewed corpus artifact matching one of the lexical shapes
+- **WHEN** `openlore doctor` inspects it
+- **THEN** the finding names the artifact and matched shape
+- **AND** the artifact remains byte-identical
+- **AND** the default exit posture remains non-blocking
+
 ## Technical Notes
 
 - **Baseline reused from `mcp-quality`:** *Error Sanitization* (`sanitizeMcpError`),

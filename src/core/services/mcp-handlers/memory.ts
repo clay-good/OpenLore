@@ -32,6 +32,7 @@ import { assembleBoundary, computeStaleness } from './confidence-boundary.js';
 import { resolveFederationScope } from '../../federation/resolver.js';
 import { findFleetMemory } from '../../federation/fleet-memory.js';
 import { collectReversals, supersededDecisionIds } from './reversals.js';
+import { decisionContentProvenance, type ServedContentProvenance } from '../served-content.js';
 import { buildRetirementGraph, staleRefsInText, type StaleRef } from './stale-decision-reference.js';
 import {
   MEMORY_TYPES,
@@ -173,6 +174,7 @@ interface RecalledMemory {
   kind: 'note' | 'decision';
   id: string;
   text: string;
+  provenance: ServedContentProvenance;
   freshness: 'fresh' | 'drifted' | 'orphaned';
   anchored: boolean;
   /** Caller-supplied classification (notes only); decisions omit it. */
@@ -315,6 +317,7 @@ export async function handleRecall(
           kind: 'note',
           id: m.id,
           text: m.content,
+          provenance: 'local-unreviewed',
           freshness: f.freshness,
           anchored: f.anchored,
           type: m.type ?? 'note',
@@ -349,6 +352,7 @@ export async function handleRecall(
             kind: 'decision',
             id: d.id,
             text: d.title,
+            provenance: decisionContentProvenance(d),
             freshness: f.freshness,
             anchored: f.anchored,
             verify: f.freshness === 'drifted' ? true : undefined,

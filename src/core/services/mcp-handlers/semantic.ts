@@ -22,6 +22,12 @@ import { fileExists } from '../../../utils/command-helpers.js';
 import { validateDirectory, safeJoin, loadMappingIndex, specsForFile, functionsForDomain, queryTooLongError, notReadyResult } from './utils.js';
 import { expandHandle, applyTokenBudget, collapseExactDuplicates, omissionNote } from './progressive.js';
 import { readOpenLoreConfig } from '../config-manager.js';
+import {
+  readAnalysisContentProvenance,
+  indexedSpecContentProvenance,
+  reviewedFileContentProvenance,
+  type AnalysisContentProvenance,
+} from '../served-content.js';
 
 // ============================================================================
 // INSERTION POINT HELPERS
@@ -144,6 +150,7 @@ async function searchTextLines(
   query: string,
   limit: number,
   searchMode: 'text' | 'text_fallback',
+  provenance: AnalysisContentProvenance,
 ): Promise<unknown | null> {
   const { TextLineIndex } = await import('../../analyzer/text-line-index.js');
   if (!TextLineIndex.exists(outputDir)) {
@@ -166,6 +173,7 @@ async function searchTextLines(
       text: h.text,
       score: h.score,
       kind: 'text' as const,
+      provenance,
     })),
   };
 }
@@ -182,6 +190,7 @@ export async function handleSearchCode(
   const tooLong = queryTooLongError(query); if (tooLong) return tooLong;
   const absDir = await validateDirectory(directory);
   const outputDir = join(absDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
+  const analysisProvenance = await readAnalysisContentProvenance(absDir);
 
   const { VectorIndex } = await import('../../analyzer/vector-index.js');
   const { resolveEmbedder, servedRetrievalMode } = await import('../../analyzer/embedder.js');
@@ -189,7 +198,7 @@ export async function handleSearchCode(
   // Forced literal-text mode: query the separate line index directly, bypassing
   // symbol search. Use when hunting a literal string (UI copy, error text).
   if (mode === 'text') {
-    return searchTextLines(outputDir, query, limit, 'text');
+    return searchTextLines(outputDir, query, limit, 'text', analysisProvenance);
   }
 
   if (!VectorIndex.exists(outputDir)) {
@@ -221,7 +230,7 @@ export async function handleSearchCode(
   // so a throw degrades silently to the normal empty response below.
   if (results.length === 0) {
     try {
-      const textFallback = await searchTextLines(outputDir, query, limit, 'text_fallback');
+      const textFallback = await searchTextLines(outputDir, query, limit, 'text_fallback', analysisProvenance);
       if (textFallback) return textFallback;
     } catch {
       /* text index unavailable/corrupt — fall through to the empty symbol response */
@@ -266,6 +275,7 @@ export async function handleSearchCode(
     fanOut: r.record.fanOut,
     isHub: r.record.isHub,
     isEntryPoint: r.record.isEntryPoint,
+    provenance: analysisProvenance,
     linkedSpecs: mappingIdx ? specsForFile(mappingIdx, r.record.filePath) : undefined,
     callers: llmCtx?.edgeStore
       ? llmCtx.edgeStore.getCallers(r.record.id)
@@ -471,6 +481,7 @@ export async function handleGetSpec(directory: string, domain: string): Promise<
     domain,
     specFile: `openspec/specs/${domain}/spec.md`,
     content,
+    provenance: await reviewedFileContentProvenance(absDir, `openspec/specs/${domain}/spec.md`),
     linkedFunctions,
   };
 }
@@ -503,7 +514,11 @@ export async function handleListSpecDomains(directory: string): Promise<unknown>
     entries.map((e) => fileExists(pjoin(specsDir, e, 'spec.md')))
   );
   const domains = entries.filter((_, i) => domainChecks[i]);
-  return { domains, count: domains.length };
+  return {
+    domains,
+    count: domains.length,
+    provenance: await reviewedFileContentProvenance(absDir, 'openspec/specs'),
+  };
 }
 
 /**
@@ -543,6 +558,21 @@ export async function handleSearchSpecs(
     SpecVectorIndex.search(outputDir, query, embedSvc, { limit, domain, section }),
     loadMappingIndex(absDir),
   ]);
+  const servedResults = await Promise.all(results.map(async (r) => ({
+    score: r.score,
+    id: r.record.id,
+    domain: r.record.domain,
+    section: r.record.section,
+    title: r.record.title,
+    text: r.record.text,
+    provenance: await indexedSpecContentProvenance(
+      absDir,
+      `openspec/specs/${r.record.domain}/spec.md`,
+      [r.record.title, r.record.text, ...r.record.linkedFiles],
+    ),
+    linkedFiles: r.record.linkedFiles,
+    linkedFunctions: mappingIdx ? functionsForDomain(mappingIdx, r.record.domain) : undefined,
+  })));
 
   return {
     query,
@@ -553,17 +583,8 @@ export async function handleSearchSpecs(
           note: 'Keyword (BM25) spec search — the zero-config default. For semantic ranking, run "openlore embed --local" (on-device, no API key) or set EMBED_* for a remote endpoint.',
         }
       : {}),
-    count: results.length,
-    results: results.map((r) => ({
-      score: r.score,
-      id: r.record.id,
-      domain: r.record.domain,
-      section: r.record.section,
-      title: r.record.title,
-      text: r.record.text,
-      linkedFiles: r.record.linkedFiles,
-      linkedFunctions: mappingIdx ? functionsForDomain(mappingIdx, r.record.domain) : undefined,
-    })),
+    count: servedResults.length,
+    results: servedResults,
   };
 }
 
@@ -605,11 +626,21 @@ export async function handleUnifiedSearch(
     domain,
     section,
   });
+  const analysisProvenance = await readAnalysisContentProvenance(absDir);
+  const servedResults = await Promise.all(results.map(async result => ({
+    ...result,
+    provenance: result.source.domain
+      ? await indexedSpecContentProvenance(
+          absDir,
+          `openspec/specs/${result.source.domain}/spec.md`,
+          [result.source.section, result.source.title].filter((value): value is string => Boolean(value)),
+        )
+      : analysisProvenance,
+  })));
 
   return {
     query,
-    count: results.length,
-    results,
+    count: servedResults.length,
+    results: servedResults,
   };
 }
-

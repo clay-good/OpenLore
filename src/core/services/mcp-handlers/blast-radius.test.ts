@@ -101,7 +101,7 @@ describe('computeBlastRadius', () => {
       blastRadius: { total: 60, upstream: 58, downstream: 2 },
       riskLevel: 'critical',
       crossDomain: { ecosystems: ['http'] },
-      governingDecisions: [{ id: 'd1', title: 'Validate directories at the boundary', affectedDomains: ['mcp-handlers'] }],
+      governingDecisions: [{ id: 'd1', title: 'Validate directories at the boundary', affectedDomains: ['mcp-handlers'], provenance: 'reviewed-corpus' }],
     } as never);
     vi.mocked(handleCheckSpecDrift).mockResolvedValue(driftResult([
       { id: 'm1', kind: 'memory-orphaned', severity: 'warning', message: 'memory anchored to gone symbol', filePath: 'src/utils.ts', domain: null, specPath: null, suggestion: '' },
@@ -126,6 +126,10 @@ describe('computeBlastRadius', () => {
     expect(b.impact.hubsTouched).toEqual([{ symbol: 'validateDirectory', fanIn: 58 }]);
     expect(b.impact.layersCrossed).toEqual(expect.arrayContaining(['http', 'mcp-handlers']));
     expect(b.impact.governingDecisions).toContain('Validate directories at the boundary');
+    expect(b.impact.governingDecisionProvenance).toContainEqual({
+      title: 'Validate directories at the boundary',
+      provenance: 'reviewed-corpus',
+    });
 
     // Tests to run (reached the change through select_tests)
     expect(b.tests.count).toBeGreaterThan(0);
@@ -133,6 +137,7 @@ describe('computeBlastRadius', () => {
 
     // Anchored memory / decision / spec drift, named
     expect(b.memory.orphaned).toBe(1);
+    expect(b.decisions.items[0].provenance).toBe('local-unreviewed');
     expect(b.memory.willDrift[0].kind).toBe('memory-orphaned');
     expect(b.specs.willGoStale).toBe(1);
     expect(b.decisions.affected).toBe(1);

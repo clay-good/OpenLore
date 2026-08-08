@@ -51,6 +51,7 @@ import type { GovernanceFinding } from './enforcement-policy.js';
 import { CallGraphBuilder, serializeCallGraph } from '../../analyzer/call-graph.js';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
 import { detectLanguage } from '../../analyzer/signature-extractor.js';
+import type { ServedContentProvenance } from '../served-content.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -122,6 +123,9 @@ export interface ChangeNode {
   ref: string;
   repo: string;
   kind: ActorKind;
+  /** Exact branch/PR title (when available), served unchanged. */
+  title?: string;
+  provenance: ServedContentProvenance;
   assessed: boolean;
   /** When assessed: the count of changed code files that produced the footprint. */
   changedFiles?: number;
@@ -134,8 +138,8 @@ export interface ChangeNode {
 
 /** One pairwise conflict between two in-flight changes (supporting evidence). */
 export interface InterferenceConflict {
-  a: { actor: string; ref: string; repo: string };
-  b: { actor: string; ref: string; repo: string };
+  a: { actor: string; ref: string; repo: string; provenance: ServedContentProvenance };
+  b: { actor: string; ref: string; repo: string; provenance: ServedContentProvenance };
   hazard: HazardVerdict['kind'];
   direction?: HazardVerdict['direction'];
   crossRepo: boolean;
@@ -437,6 +441,7 @@ export interface RawChange {
   ref: string;
   repo: string;
   kind: ActorKind;
+  title?: string;
   /** Parsed diff hunks (empty when fetchError is set). */
   files: FileHunks[];
   /** Base-snapshot symbols by changed-file path (the provider does the re-parse I/O). */
@@ -579,7 +584,7 @@ async function defaultEnumerateBranches(
     let actor = branch;
     try { actor = (await git(repoPath, ['log', '-1', '--format=%an', branch])).trim() || branch; } catch { /* keep branch as actor */ }
     const { byFile, unreadable } = await buildBaseSymbols(repoPath, mergeBase, files);
-    out.push({ actor, ref: branch, repo: repoName, kind: 'branch', files, baseSymbolsByFile: byFile, ...(unreadable.length ? { unreadableFiles: unreadable } : {}) });
+    out.push({ actor, ref: branch, title: branch, repo: repoName, kind: 'branch', files, baseSymbolsByFile: byFile, ...(unreadable.length ? { unreadableFiles: unreadable } : {}) });
   }
   return out;
 }
@@ -609,7 +614,7 @@ async function defaultEnumeratePullRequests(
       const { stdout } = await execFileAsync('gh', ['pr', 'diff', String(pr.number), '--patch'], { cwd: repoPath, maxBuffer: 64 * 1024 * 1024 });
       patch = stdout;
     } catch {
-      out.push({ actor, ref, repo: repoName, kind: 'pull-request', files: [], baseSymbolsByFile: new Map(), fetchError: `gh pr diff ${pr.number} failed` });
+      out.push({ actor, ref, title: pr.title, repo: repoName, kind: 'pull-request', files: [], baseSymbolsByFile: new Map(), fetchError: `gh pr diff ${pr.number} failed` });
       continue;
     }
     const files = parseUnifiedDiff(patch);
@@ -617,7 +622,7 @@ async function defaultEnumeratePullRequests(
     // Old content is read from the LOCAL base ref (an approximation when the PR's base
     // has advanced past local) — disclosed in the caveats.
     const { byFile, unreadable } = await buildBaseSymbols(repoPath, baseRef, files);
-    out.push({ actor, ref, repo: repoName, kind: 'pull-request', files, baseSymbolsByFile: byFile, ...(unreadable.length ? { unreadableFiles: unreadable } : {}) });
+    out.push({ actor, ref, title: pr.title, repo: repoName, kind: 'pull-request', files, baseSymbolsByFile: byFile, ...(unreadable.length ? { unreadableFiles: unreadable } : {}) });
   }
   return out;
 }
@@ -773,7 +778,7 @@ export async function computeInterferenceMap(
 
   // Unusable federated targets surface as a single not-assessed marker each.
   for (const u of unusable) {
-    notAssessed.push({ actor: '—', ref: '(all changes)', repo: u.name, kind: 'branch', assessed: false, reason: u.reason, detail: u.detail });
+    notAssessed.push({ actor: '—', ref: '(all changes)', repo: u.name, kind: 'branch', provenance: 'foreign-actor', assessed: false, reason: u.reason, detail: u.detail });
   }
 
   for (const rc of raw) {
@@ -783,16 +788,16 @@ export async function computeInterferenceMap(
     }
     const repo = cgByRepo.get(rc.repo);
     if (rc.fetchError) {
-      notAssessed.push({ actor: rc.actor, ref: rc.ref, repo: rc.repo, kind: rc.kind, assessed: false, reason: 'diff-unfetchable', detail: rc.fetchError });
+      notAssessed.push({ actor: rc.actor, ref: rc.ref, title: rc.title, repo: rc.repo, kind: rc.kind, provenance: 'foreign-actor', assessed: false, reason: 'diff-unfetchable', detail: rc.fetchError });
       continue;
     }
     if (!repo) {
-      notAssessed.push({ actor: rc.actor, ref: rc.ref, repo: rc.repo, kind: rc.kind, assessed: false, reason: 'index-missing', detail: `no usable index for ${rc.repo}` });
+      notAssessed.push({ actor: rc.actor, ref: rc.ref, title: rc.title, repo: rc.repo, kind: rc.kind, provenance: 'foreign-actor', assessed: false, reason: 'index-missing', detail: `no usable index for ${rc.repo}` });
       continue;
     }
     const writeMembers = writeSetFromHunks(rc.files, rc.baseSymbolsByFile);
     if (writeMembers.length === 0) {
-      notAssessed.push({ actor: rc.actor, ref: rc.ref, repo: rc.repo, kind: rc.kind, assessed: false, reason: 'no-resolvable-symbols', detail: 'the diff touched no symbol resolvable in the index' });
+      notAssessed.push({ actor: rc.actor, ref: rc.ref, title: rc.title, repo: rc.repo, kind: rc.kind, provenance: 'foreign-actor', assessed: false, reason: 'no-resolvable-symbols', detail: 'the diff touched no symbol resolvable in the index' });
       continue;
     }
     if (rc.unreadableFiles && rc.unreadableFiles.length > 0) partialReads.push({ ref: rc.ref, files: rc.unreadableFiles.length });
@@ -800,7 +805,7 @@ export async function computeInterferenceMap(
     const stableByNodeId = new Map<string, string>();
     for (const w of writeMembers) if (w.stableId) stableByNodeId.set(w.id, w.stableId);
     assessed.push({
-      node: { actor: rc.actor, ref: rc.ref, repo: rc.repo, kind: rc.kind, assessed: true, changedFiles: rc.files.length, writeSetCount: writeMembers.length },
+      node: { actor: rc.actor, ref: rc.ref, title: rc.title, repo: rc.repo, kind: rc.kind, provenance: 'foreign-actor', assessed: true, changedFiles: rc.files.length, writeSetCount: writeMembers.length },
       footprint,
       stableByNodeId,
     });
@@ -815,19 +820,19 @@ export async function computeInterferenceMap(
     if (!t || typeof t.id !== 'string' || t.id.length === 0) { malformedTasks++; continue; }
     const hasSeed = (t.seedSymbols && t.seedSymbols.length > 0) || (t.seedFiles && t.seedFiles.length > 0);
     if (!hasSeed) {
-      notAssessed.push({ actor: 'agent', ref: t.id, repo: home.name, kind: 'agent-task', assessed: false, reason: 'no-resolvable-symbols', detail: 'task descriptor has no seedSymbols or seedFiles' });
+      notAssessed.push({ actor: 'agent', ref: t.id, repo: home.name, kind: 'agent-task', provenance: 'local-unreviewed', assessed: false, reason: 'no-resolvable-symbols', detail: 'task descriptor has no seedSymbols or seedFiles' });
       continue;
     }
     const footprint = computeFootprint(home.cg, t, fpOptsFor(home));
     if (footprint.writeSet.length === 0) {
-      notAssessed.push({ actor: 'agent', ref: t.id, repo: home.name, kind: 'agent-task', assessed: false, reason: 'no-resolvable-symbols', detail: `task seeds resolved to no symbol: ${footprint.unresolvedSeeds.join(', ')}` });
+      notAssessed.push({ actor: 'agent', ref: t.id, repo: home.name, kind: 'agent-task', provenance: 'local-unreviewed', assessed: false, reason: 'no-resolvable-symbols', detail: `task seeds resolved to no symbol: ${footprint.unresolvedSeeds.join(', ')}` });
       continue;
     }
     const stableByNodeId = new Map<string, string>();
     const byId = new Map(home.cg.nodes.map(n => [n.id, n] as const));
     for (const w of footprint.writeSet) { const n = byId.get(w.id); if (n?.stableId) stableByNodeId.set(w.id, n.stableId); }
     assessed.push({
-      node: { actor: 'agent', ref: t.id, repo: home.name, kind: 'agent-task', assessed: true, changedFiles: 0, writeSetCount: footprint.writeSet.length },
+      node: { actor: 'agent', ref: t.id, repo: home.name, kind: 'agent-task', provenance: 'local-unreviewed', assessed: true, changedFiles: 0, writeSetCount: footprint.writeSet.length },
       footprint,
       stableByNodeId,
     });
@@ -860,8 +865,8 @@ export async function computeInterferenceMap(
       if (v.kind === 'none') continue;
       const labels = v.witnesses.map(id => nameByWitnessId.get(id) ?? shortName(id));
       conflicts.push({
-        a: { actor: A.node.actor, ref: A.node.ref, repo: A.node.repo },
-        b: { actor: B.node.actor, ref: B.node.ref, repo: B.node.repo },
+        a: { actor: A.node.actor, ref: A.node.ref, repo: A.node.repo, provenance: A.node.provenance },
+        b: { actor: B.node.actor, ref: B.node.ref, repo: B.node.repo, provenance: B.node.provenance },
         hazard: v.kind,
         direction: v.direction,
         crossRepo,

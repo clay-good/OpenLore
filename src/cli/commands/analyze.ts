@@ -61,6 +61,7 @@ import { extractEnvVars } from '../../core/analyzer/env-extractor.js';
 import { generateAiConfigs, AI_TOOL_TARGETS, type AiTool, type AiConfigResult } from '../../core/analyzer/ai-config-generator.js';
 import { describeExclusions, EXCLUSION_REASON_LABEL } from '../../core/analyzer/parse-health.js';
 import { describeMemoryDegradation } from '../../core/analyzer/memory-strategy.js';
+import { writeAnalysisContentProvenance } from '../../core/services/served-content.js';
 
 // ============================================================================
 // TYPES
@@ -372,6 +373,7 @@ export async function runAnalysis(
     join(outputPath, ARTIFACT_FINGERPRINT),
     JSON.stringify({ hash: fingerprintHash, commit: buildCommit, computedAt: new Date().toISOString(), fileCount: repoMap.allFiles.length })
   );
+  await writeAnalysisContentProvenance(outputPath, 'source-derived');
 
   const duration = Date.now() - startTime;
 

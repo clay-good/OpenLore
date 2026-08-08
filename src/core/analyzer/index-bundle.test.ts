@@ -256,6 +256,7 @@ describe('index-bundle: export', () => {
     await buildAnalysisDir(src, 'abc1234');
     const { buffer } = await buildBundle(src, VERSION);
     const bundle = parseBundle(buffer);
+    expect(bundle.provenance).toBe('imported');
 
     // Forge the shape an older exporter produced: the quarantine copy alongside the store.
     bundle.payload[`${ARTIFACT_CALL_GRAPH_DB}.corrupt-0`] = bundle.payload[ARTIFACT_CALL_GRAPH_DB];
@@ -356,6 +357,7 @@ describe('index-bundle: promoteStagedIndex clears orphaned search indexes', () =
     expect(existsSync(join(live, 'text-line-index'))).toBe(false);  // orphan dir cleared
     expect(existsSync(join(live, 'vector-index-meta.json'))).toBe(false); // stale meta cleared
     expect(existsSync(join(live, ARTIFACT_CALL_GRAPH_DB))).toBe(true);    // bundle files promoted
+    expect(JSON.parse(await readFile(join(live, 'analysis-origin.json'), 'utf8'))).toEqual({ provenance: 'imported' });
   });
 });
 

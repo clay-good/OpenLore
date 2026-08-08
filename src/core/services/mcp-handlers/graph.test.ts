@@ -1122,7 +1122,7 @@ describe('governing decisions — analyze_impact & get_subgraph', () => {
   it('analyze_impact returns the governing decision as a typed neighbor (not a code node)', async () => {
     vi.mocked(readCachedContext).mockResolvedValueOnce({ edgeStore: store } as never);
     const result = await handleAnalyzeImpact(dir, 'entry', 2) as {
-      governingDecisions?: Array<{ nodeType: string; id: string; governs: string[] }>;
+      governingDecisions?: Array<{ nodeType: string; id: string; governs: string[]; provenance: string }>;
       upstreamChain: unknown[];
     };
     expect(result.governingDecisions).toBeDefined();
@@ -1131,6 +1131,7 @@ describe('governing decisions — analyze_impact & get_subgraph', () => {
       nodeType: 'decision',
       id: 'c6d1ad07',
       governs: ['src/a.ts'],
+      provenance: 'local-unreviewed',
     });
   });
 

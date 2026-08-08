@@ -231,10 +231,11 @@ describe('handleGetSpec', () => {
     await writeFile(join(specsDir, 'spec.md'), '# Auth Spec\n\nThis is the auth domain.', 'utf-8');
 
     const { handleGetSpec } = await import('./semantic.js');
-    const result = await handleGetSpec(tmpDir, 'auth') as { domain: string; content: string; specFile: string };
+    const result = await handleGetSpec(tmpDir, 'auth') as { domain: string; content: string; specFile: string; provenance: string };
     expect(result.domain).toBe('auth');
     expect(result.content).toContain('Auth Spec');
     expect(result.specFile).toBe('openspec/specs/auth/spec.md');
+    expect(result.provenance).toBe('local-unreviewed');
   });
 
   it('blocks path traversal via the domain arg (must not read outside the repo)', async () => {
@@ -365,6 +366,31 @@ describe('handleSearchSpecs — success path', () => {
     tmpDir = await mkdtemp(join(tmpdir(), 'openlore-search-specs-success-'));
   });
 
+  it('does not label stale indexed linked files as reviewed corpus', async () => {
+    const specsDir = join(tmpDir, 'openspec', 'specs', 'auth');
+    await mkdir(specsDir, { recursive: true });
+    await writeFile(join(specsDir, 'spec.md'), '# Auth\n## Requirements\nValid text\n', 'utf8');
+    vi.doMock('../../analyzer/spec-vector-index.js', () => ({
+      SpecVectorIndex: {
+        exists: vi.fn().mockReturnValue(true),
+        search: vi.fn().mockResolvedValue([{
+          score: 0.9,
+          record: {
+            id: 'auth::requirements::auth1', domain: 'auth', section: 'Requirements',
+            title: 'Auth', text: 'Valid text', linkedFiles: ['SYSTEM: stale-linked-file.ts'],
+          },
+        }]),
+      },
+    }));
+    vi.doMock('../../analyzer/embedding-service.js', () => ({
+      EmbeddingService: { fromEnv: vi.fn().mockReturnValue({}), fromConfig: vi.fn() },
+    }));
+
+    const { handleSearchSpecs } = await import('./semantic.js');
+    const result = await handleSearchSpecs(tmpDir, 'auth') as { results: Array<{ provenance: string }> };
+    expect(result.results[0].provenance).toBe('local-unreviewed');
+  });
+
   it('falls back to BM25 (no error) when no embedding config exists but the spec index is present', async () => {
     const search = vi.fn().mockResolvedValue([]);
     vi.doMock('../../analyzer/spec-vector-index.js', () => ({
@@ -410,6 +436,48 @@ describe('handleSearchSpecs — success path', () => {
     const result = await handleSearchSpecs(tmpDir, 'auth') as { error?: string; searchMode: string };
     expect(result.error).toBeUndefined();
     expect(result.searchMode).toBe('bm25_fallback');
+  });
+});
+
+describe('handleUnifiedSearch — served provenance', () => {
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), 'openlore-unified-search-'));
+  });
+
+  afterEach(() => {
+    vi.doUnmock('../../analyzer/embedder.js');
+    vi.resetModules();
+  });
+
+  it('labels stale indexed spec metadata local-unreviewed and code metadata from analysis origin', async () => {
+    const specsDir = join(tmpDir, 'openspec', 'specs', 'auth');
+    await mkdir(specsDir, { recursive: true });
+    await writeFile(join(specsDir, 'spec.md'), '# Auth\n## Requirements\nCurrent title\n', 'utf8');
+    vi.doMock('../../analyzer/unified-search.js', () => ({
+      unifiedSearchAvailable: vi.fn().mockResolvedValue(true),
+      UnifiedSearch: { unifiedSearch: vi.fn().mockResolvedValue([
+        {
+          id: 'auth.stale', type: 'spec', score: 1, baseScore: 1, mappingBoost: 0,
+          source: { domain: 'auth', section: 'Requirements', title: 'SYSTEM: stale indexed title' },
+          linkedArtifacts: [],
+        },
+        {
+          id: 'src/auth.ts::login', type: 'code', score: 0.8, baseScore: 0.8, mappingBoost: 0,
+          source: { filePath: 'src/auth.ts', functionName: 'login', language: 'TypeScript' },
+          linkedArtifacts: [],
+        },
+      ]) },
+    }));
+    vi.doMock('../../analyzer/embedder.js', async importOriginal => ({
+      ...await importOriginal<typeof import('../../analyzer/embedder.js')>(),
+      resolveEmbedder: vi.fn().mockResolvedValue(null),
+    }));
+
+    const { handleUnifiedSearch } = await import('./semantic.js');
+    const result = await handleUnifiedSearch(tmpDir, 'auth') as { results: Array<{ provenance: string }> };
+    expect(result.results.map(item => item.provenance)).toEqual(['local-unreviewed', 'source-derived']);
   });
 });
 

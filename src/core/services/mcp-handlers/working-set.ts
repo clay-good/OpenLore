@@ -31,6 +31,7 @@ import { validateDirectory, safeJoin } from './utils.js';
 import { handleSpecStoreStatus, type SpecStoreStatusReport } from './spec-store.js';
 import { handleOrient } from './orient.js';
 import { applyTokenBudget, omissionNote } from './progressive.js';
+import type { ServedContentProvenance } from '../served-content.js';
 
 /** Default token budget for the whole merged briefing when none is supplied. */
 const DEFAULT_WORKING_SET_BUDGET = 8_000;
@@ -62,6 +63,7 @@ export interface WorkingSetFinding {
 export interface WorkingSetItem {
   /** The target repository this symbol lives in (per-target attribution). */
   target: string;
+  provenance: ServedContentProvenance;
   name: string;
   filePath: string;
   score: number;
@@ -78,6 +80,7 @@ export interface WorkingSetItem {
 export interface AnchoredIntent {
   id: string;
   title: string;
+  provenance: ServedContentProvenance;
   /** The decision's status (e.g. 'verified', 'approved'). An 'approved' entry may be
    *  surfaced for sync-awareness rather than strict scope — see briefTargetFromOrient. */
   status: string;
@@ -131,12 +134,13 @@ interface OrientFnView {
   score: number;
   expand: string;
   signature?: string;
+  provenance?: ServedContentProvenance;
 }
 export interface OrientView {
   error?: string;
   relevantFunctions?: OrientFnView[];
   callPaths?: Array<{ function: string; filePath: string; callers?: Array<{ name: string }> }>;
-  specDomains?: Array<{ domain: string }>;
+  specDomains?: Array<{ domain: string; provenance?: ServedContentProvenance }>;
   insertionPoints?: Array<{ name: string; filePath: string; strategy: string }>;
   // Orient's task-relevant authoritative anchored decisions, each carrying a freshness
   // verdict. Orient EXCLUDES orphaned anchors from this set (they go to
@@ -144,7 +148,7 @@ export interface OrientView {
   // with `freshness: 'drifted'` / `verify: true`. The single source of anchored intent:
   // it withholds orphaned by construction and flags drifted. (Also includes any
   // `approved`-status decisions orient surfaces for sync-awareness — see briefTargetFromOrient.)
-  pendingDecisions?: Array<{ id: string; title: string; status?: string; freshness?: string; verify?: boolean }>;
+  pendingDecisions?: Array<{ id: string; title: string; status?: string; freshness?: string; verify?: boolean; provenance?: ServedContentProvenance }>;
 }
 
 /**
@@ -179,6 +183,7 @@ export function briefTargetFromOrient(
 
   const items: WorkingSetItem[] = (orient.relevantFunctions ?? []).map(fn => ({
     target: targetName,
+    provenance: fn.provenance ?? 'source-derived',
     name: fn.name,
     filePath: fn.filePath,
     score: fn.score,
@@ -191,6 +196,7 @@ export function briefTargetFromOrient(
   const anchoredIntent: AnchoredIntent[] = (orient.pendingDecisions ?? []).map(d => ({
     id: d.id,
     title: d.title,
+    provenance: d.provenance ?? 'local-unreviewed',
     status: d.status ?? 'unknown',
     verdict: d.freshness === 'drifted' || d.verify ? 'drifted' as const : 'current' as const,
   }));

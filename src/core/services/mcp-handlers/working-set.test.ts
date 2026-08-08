@@ -139,9 +139,9 @@ describe('briefTargetFromOrient', () => {
     // flagged only via `verify`. Orphaned anchors NEVER appear here (orient routes
     // them to staleDecisions, which the handler deliberately does not consume).
     pendingDecisions: [
-      { id: 'd1', title: 'Use JWTs', status: 'approved', freshness: 'fresh' },
-      { id: 'd2', title: 'Old cache policy', status: 'approved', freshness: 'drifted' },
-      { id: 'd3', title: 'Verify me', status: 'draft', verify: true },
+      { id: 'd1', title: 'Use JWTs', status: 'approved', freshness: 'fresh', provenance: 'reviewed-corpus' },
+      { id: 'd2', title: 'Old cache policy', status: 'approved', freshness: 'drifted', provenance: 'reviewed-corpus' },
+      { id: 'd3', title: 'Verify me', status: 'draft', verify: true, provenance: 'local-unreviewed' },
     ],
   };
 
@@ -161,6 +161,9 @@ describe('briefTargetFromOrient', () => {
     const drifted = brief.anchoredIntent.filter(a => a.verdict === 'drifted');
     expect(current.map(a => a.id)).toEqual(['d1']);
     expect(drifted.map(a => a.id)).toEqual(['d2', 'd3']); // freshness:'drifted' AND verify:true
+    expect(brief.anchoredIntent.map(a => a.provenance)).toEqual([
+      'reviewed-corpus', 'reviewed-corpus', 'local-unreviewed',
+    ]);
   });
 
   // Spec: "orphaned intent SHALL be withheld." Orphaned anchors live in orient's
@@ -180,9 +183,9 @@ describe('briefTargetFromOrient', () => {
 // ── Pure: rank + budget ──────────────────────────────────────────────────────
 describe('rankAndBudget', () => {
   const items: WorkingSetItem[] = [
-    { target: 'web', name: 'low', filePath: 'a', score: 1, expand: 'x', callers: [], specDomains: [] },
-    { target: 'api', name: 'high', filePath: 'b', score: 9, expand: 'y', callers: [], specDomains: [] },
-    { target: 'api', name: 'mid', filePath: 'c', score: 5, expand: 'z', callers: [], specDomains: [] },
+    { target: 'web', provenance: 'source-derived', name: 'low', filePath: 'a', score: 1, expand: 'x', callers: [], specDomains: [] },
+    { target: 'api', provenance: 'source-derived', name: 'high', filePath: 'b', score: 9, expand: 'y', callers: [], specDomains: [] },
+    { target: 'api', provenance: 'source-derived', name: 'mid', filePath: 'c', score: 5, expand: 'z', callers: [], specDomains: [] },
   ];
 
   it('ranks by score descending and keeps all when budget is ample', () => {
@@ -200,9 +203,9 @@ describe('rankAndBudget', () => {
 
   it('is deterministic for equal scores (stable on target then name)', () => {
     const tie: WorkingSetItem[] = [
-      { target: 'b', name: 'q', filePath: 'p', score: 3, expand: 'e', callers: [], specDomains: [] },
-      { target: 'a', name: 'z', filePath: 'p', score: 3, expand: 'e', callers: [], specDomains: [] },
-      { target: 'a', name: 'a', filePath: 'p', score: 3, expand: 'e', callers: [], specDomains: [] },
+      { target: 'b', provenance: 'source-derived', name: 'q', filePath: 'p', score: 3, expand: 'e', callers: [], specDomains: [] },
+      { target: 'a', provenance: 'source-derived', name: 'z', filePath: 'p', score: 3, expand: 'e', callers: [], specDomains: [] },
+      { target: 'a', provenance: 'source-derived', name: 'a', filePath: 'p', score: 3, expand: 'e', callers: [], specDomains: [] },
     ];
     expect(rankAndBudget(tie, 100_000).kept.map(i => `${i.target}/${i.name}`))
       .toEqual(['a/a', 'a/z', 'b/q']);
@@ -213,8 +216,8 @@ describe('rankAndBudget', () => {
   // regardless of input order / engine sort stability.
   it('breaks score+target+name ties on filePath', () => {
     const fwd: WorkingSetItem[] = [
-      { target: 'api', name: 'init', filePath: 'b.ts', score: 5, expand: 'e', callers: [], specDomains: [] },
-      { target: 'api', name: 'init', filePath: 'a.ts', score: 5, expand: 'e', callers: [], specDomains: [] },
+      { target: 'api', provenance: 'source-derived', name: 'init', filePath: 'b.ts', score: 5, expand: 'e', callers: [], specDomains: [] },
+      { target: 'api', provenance: 'source-derived', name: 'init', filePath: 'a.ts', score: 5, expand: 'e', callers: [], specDomains: [] },
     ];
     const rev = [...fwd].reverse();
     expect(rankAndBudget(fwd, 100_000).kept.map(i => i.filePath)).toEqual(['a.ts', 'b.ts']);

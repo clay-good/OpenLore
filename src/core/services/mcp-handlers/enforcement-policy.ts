@@ -158,6 +158,12 @@ export const FINDING_CODE_REGISTRY: Record<string, FindingCodeSpec> = {
     source: 'conclusion-contract',
     description: 'A conclusion-classified tool returned a graph-shaped response at runtime (a top-level nodes[]+edges[] join, or a raw id-reference edge dump over MAX_PROVENANCE_EDGES) instead of the computed conclusion — pushing the traversal back onto the agent. Advisory by default: the result is still returned with this disclosure attached. Gate on it via enforcement.policy to fail CI when a handler regresses.',
   },
+  // ── served-content trust boundary (bound-served-content-trust) ──
+  'injection-shaped-content': {
+    defaultClass: 'advisory',
+    source: 'doctor',
+    description: 'Unreviewed served content lexically resembles an imperative override, message impersonation, or direction away from a recorded decision. The check is incomplete and review-only.',
+  },
 };
 
 /** Whether a code is registered (so a declared policy entry is recognized). */

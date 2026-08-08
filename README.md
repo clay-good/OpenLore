@@ -256,7 +256,7 @@ OpenLore answers it too — then keeps going into the **second question almost n
 
 **Where the others are the better pick** — we'd rather you use the right tool than ours:
 
-- **Symbol-level *edits*** (rename across files, move a symbol) — an **LSP toolkit's** home turf. OpenLore is deliberately read-only; the two compose well.
+- **Symbol-level *edits*** (rename across files, move a symbol) — an **LSP toolkit's** home turf. OpenLore is deliberately read-only; that protects its stores from mutation, while provenance labels and data framing disclose that served repository text is still untrusted. The two compose well.
 - **Search across hundreds of repos, org-wide, with an audit trail** — a **code search platform**. OpenLore is local-first and repo-scoped (federation is opt-in and read-only).
 - **Just fast graph retrieval, nothing else** — a **graph MCP server** is a smaller surface. OpenLore's extra weight is governance; skip it if you don't want a commit gate.
 - **A small, familiar repo and shallow questions** — your agent's built-in search is often cheaper. We measured it and [published it](#value-scorecard--does-it-pay-for-itself).

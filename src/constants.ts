@@ -84,6 +84,9 @@ export const ARTIFACT_REFACTOR_PRIORITIES = 'refactor-priorities.json';
 /** Filename for the content-hash fingerprint used for cache invalidation */
 export const ARTIFACT_FINGERPRINT = 'fingerprint.json';
 
+/** Factual origin of the live analysis corpus (`source-derived` or `imported`). */
+export const ARTIFACT_ANALYSIS_ORIGIN = 'analysis-origin.json';
+
 /** Filename for the SQLite call-graph edge store */
 export const ARTIFACT_CALL_GRAPH_DB = 'call-graph.db';
 

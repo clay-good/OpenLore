@@ -22,6 +22,7 @@ import { listRepos, evaluateRepoState } from '../../federation/registry.js';
 import { recheckPersistedCertificates } from './impact-certificate.js';
 import type { SpecStoreConfig } from '../../../types/index.js';
 import type { FederationRepoEntry, RepoIndexState } from '../../federation/types.js';
+import type { ServedContentProvenance } from '../served-content.js';
 
 /** Stable finding codes — part of the agent-facing `--json` contract. */
 export type SpecStoreFindingCode =
@@ -48,6 +49,7 @@ export interface SpecStoreFinding {
   message: string;
   /** A pasteable remediation. */
   remediation: string;
+  provenance?: ServedContentProvenance;
 }
 
 interface ResolvedRepoStatus {
@@ -55,11 +57,13 @@ interface ResolvedRepoStatus {
   resolved: boolean;
   state?: RepoIndexState;
   path?: string;
+  provenance?: ServedContentProvenance;
 }
 
 export interface SpecStoreStatusReport {
+  provenance: 'local-unreviewed';
   bound: boolean;
-  store?: { name: string; path: string };
+  store?: { name: string; path: string; provenance: 'local-unreviewed' };
   targets: ResolvedRepoStatus[];
   references: ResolvedRepoStatus[];
   findings: SpecStoreFinding[];
@@ -270,6 +274,7 @@ export async function handleSpecStoreStatus(directory: string): Promise<SpecStor
 
   if (!binding) {
     return {
+      provenance: 'local-unreviewed',
       bound: false,
       targets: [],
       references: [],
@@ -277,6 +282,7 @@ export async function handleSpecStoreStatus(directory: string): Promise<SpecStor
         code: 'no-binding', severity: 'info', subject: basename(absDir),
         message: 'No spec-store binding is configured; single-repository behavior is unchanged.',
         remediation: 'Add a "specStore" block to .openlore/config.json to bind an external spec store.',
+        provenance: 'local-unreviewed',
       }],
       sound: true,
       summary: 'No spec-store binding configured.',
@@ -363,11 +369,12 @@ export async function handleSpecStoreStatus(directory: string): Promise<SpecStor
     : `Binding "${storeName}" has ${errors} blocking issue(s) and ${warns} warning(s); see findings.`;
 
   return {
+    provenance: 'local-unreviewed',
     bound: true,
-    store: { name: storeName, path: storePath },
-    targets,
-    references,
-    findings,
+    store: { name: storeName, path: storePath, provenance: 'local-unreviewed' },
+    targets: targets.map(t => ({ ...t, provenance: 'local-unreviewed' })),
+    references: references.map(r => ({ ...r, provenance: 'local-unreviewed' })),
+    findings: findings.map(f => ({ ...f, provenance: 'local-unreviewed' })),
     sound,
     summary,
   };

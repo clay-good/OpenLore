@@ -1,7 +1,9 @@
 # Served content is untrusted: the read-only surface protects the store, not the agent
 
-> Status: PROPOSED (2026-07-31, external-pattern study). OpenLore's read-only tools serve recorded
-> memories, decision text, spec prose, commit messages, and branch and pull-request titles straight
+> Status: BUILT (2026-08-08). Verified by 361 passing test files (6,891 tests passed, 2 skipped),
+> lint, typecheck, build, strict OpenSpec validation, and scoped drift verification for the
+> `mcp-security` and `architecture` domains. OpenLore's read-only tools serve recorded memories,
+> decision text, spec prose, commit messages, and branch and pull-request titles straight
 > into a coding agent's context as authoritative grounding — which is the entire point, and which
 > makes that content an instruction channel nobody has named. The sibling
 > `harden-llm-prompt-injection-boundary` closes this for the *LLM* paths. The *serving* path,
@@ -88,9 +90,9 @@ solves it.
   `spec-store.ts`), an injection-shape check in `src/cli/commands/doctor.ts`, unforgeable
   delimiters in `src/cli/commands/orient-inject-render.ts` and the Pi injection block, and a
   `SECURITY.md` section.
-- **Specs:** `mcp-security` — 1 ADDED requirement (untrusted served content, provenance tiers,
-  no-rewrite rule); `architecture` — 1 ADDED requirement (the trust boundary is human review, and
-  what the read-only guarantee does not cover).
+- **Specs:** `mcp-security` — 2 ADDED requirements (untrusted served content, provenance tiers,
+  no-rewrite rule, and advisory injection-shape review); `architecture` — 1 ADDED requirement (the
+  trust boundary is human review, and what the read-only guarantee does not cover).
 - **Tool surface:** unchanged. No new tool; provenance is an additive field, the flag is a `doctor`
   finding.
 - **Risk:** low mechanically. The real risk is a reader mistaking the `doctor` flag for a

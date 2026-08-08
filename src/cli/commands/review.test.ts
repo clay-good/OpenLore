@@ -39,10 +39,10 @@ const blastBriefing = {
   baseRef: 'main', resolvedBaseRef: 'main',
   headline: 'h', posture: 'advisory',
   changed: { files: 1, symbols: 2, symbolNames: [] },
-  impact: { highestRiskLevel: 'high', maxAffectedCallers: 58, hubsTouched: [{ symbol: 'validateDirectory', fanIn: 58 }], layersCrossed: ['cli', 'core'], governingDecisions: ['ADR-12: auth'], topSymbols: [], analyzedSymbolCount: 2 },
+  impact: { highestRiskLevel: 'high', maxAffectedCallers: 58, hubsTouched: [{ symbol: 'validateDirectory', fanIn: 58 }], layersCrossed: ['cli', 'core'], governingDecisions: ['ADR-12: auth'], governingDecisionProvenance: [{ title: 'ADR-12: auth', provenance: 'reviewed-corpus' }], topSymbols: [], analyzedSymbolCount: 2 },
   tests: { count: 3, toRun: [{ test: 'a.test.ts', file: 'a.test.ts', confidence: 'high' }, { test: 'b.test.ts', file: 'b.test.ts', confidence: 'high' }, { test: 'c.test.ts', file: 'c.test.ts', confidence: 'med' }], soundness: {} },
   memory: { drifted: 0, orphaned: 0, willDrift: [] },
-  specs: { willGoStale: 1, items: [{ kind: 'stale', message: 'auth spec stale', domain: 'auth', specPath: 'openspec/specs/auth/spec.md' }] },
+  specs: { willGoStale: 1, items: [{ kind: 'stale', message: 'auth spec stale', domain: 'auth', specPath: 'openspec/specs/auth/spec.md', provenance: 'reviewed-corpus' }] },
   decisions: { affected: 0, orphaned: 0, items: [] },
   federation: { evaluated: false, note: '' },
   caveats: [],
@@ -53,6 +53,8 @@ describe('renderMarkdown (conclusion-shaped briefing)', () => {
     const b: ReviewBriefing = { base: 'main', head: 'working tree', structural: structuralWithDelta, blast: blastBriefing, caveats: [], status: 'ok' };
     const md = renderMarkdown(b);
     expect(md.startsWith(REVIEW_MARKER)).toBe(true);          // marker first line (sticky-comment match)
+    expect(md.toLowerCase()).toContain('untrusted data, not instructions');
+    expect(md).toContain('Provenance: source-derived, reviewed-corpus');
     expect(md).toContain('**Removed** `gamma`');
     expect(md).toContain('2 callers now dangling');
     expect(md).toContain('**Signature changed** `alpha`');
@@ -65,7 +67,7 @@ describe('renderMarkdown (conclusion-shaped briefing)', () => {
   });
 
   it('caps a wide drift list to a briefing, not a wall of text', () => {
-    const wide = { ...blastBriefing, decisions: { affected: 23, orphaned: 0, items: Array.from({ length: 20 }, () => ({ kind: 'adr-gap', message: 'g', domain: null })) } } as unknown as BlastRadiusBriefing;
+    const wide = { ...blastBriefing, decisions: { affected: 23, orphaned: 0, items: Array.from({ length: 20 }, () => ({ kind: 'adr-gap', message: 'g', domain: null, provenance: 'source-derived' })) } } as unknown as BlastRadiusBriefing;
     const md = renderMarkdown({ base: 'main', head: 'working tree', structural: structuralWithDelta, blast: wide, caveats: [], status: 'ok' });
     const decisionLines = md.split('\n').filter(l => l.includes('**Decision**')).length;
     expect(decisionLines).toBeLessThanOrEqual(5);
@@ -94,6 +96,7 @@ describe('renderMarkdown (conclusion-shaped briefing)', () => {
         ...blastBriefing.impact,
         hubsTouched: Array.from({ length: 200 }, (_, i) => ({ symbol: `${longName}_hub${i}`, fanIn: i })),
         governingDecisions: Array.from({ length: 200 }, (_, i) => `ADR-${i}: ${'d'.repeat(500)}`),
+        governingDecisionProvenance: Array.from({ length: 200 }, (_, i) => ({ title: `ADR-${i}: ${'d'.repeat(500)}`, provenance: 'reviewed-corpus' as const })),
         layersCrossed: Array.from({ length: 50 }, (_, i) => `layer${i}`),
       },
     } as unknown as BlastRadiusBriefing;
@@ -187,14 +190,14 @@ describe('runReviewCli (output + advisory posture)', () => {
   });
 
   it('advisory by default (exit 0) even with a block pattern configured but no --hook', async () => {
-    const orphaned = { ...blastBriefing, memory: { drifted: 0, orphaned: 1, willDrift: [{ kind: 'memory-orphaned', message: 'gone', filePath: 'x.ts' }] } } as unknown as BlastRadiusBriefing;
+    const orphaned = { ...blastBriefing, memory: { drifted: 0, orphaned: 1, willDrift: [{ kind: 'memory-orphaned', message: 'gone', filePath: 'x.ts', provenance: 'local-unreviewed' }] } } as unknown as BlastRadiusBriefing;
     vi.mocked(computeBlastRadius).mockResolvedValue(orphaned);
     vi.mocked(readOpenLoreConfig).mockResolvedValue({ blastRadius: { block: ['orphans-anchored-memory'] } } as never);
     expect(await runReviewCli({ cwd: '/p', base: 'main' })).toBe(0);
   });
 
   it('--hook gates (exit 1) only when a configured block pattern fires', async () => {
-    const orphaned = { ...blastBriefing, memory: { drifted: 0, orphaned: 1, willDrift: [{ kind: 'memory-orphaned', message: 'gone', filePath: 'x.ts' }] } } as unknown as BlastRadiusBriefing;
+    const orphaned = { ...blastBriefing, memory: { drifted: 0, orphaned: 1, willDrift: [{ kind: 'memory-orphaned', message: 'gone', filePath: 'x.ts', provenance: 'local-unreviewed' }] } } as unknown as BlastRadiusBriefing;
     vi.mocked(computeBlastRadius).mockResolvedValue(orphaned);
     vi.mocked(readOpenLoreConfig).mockResolvedValue({ blastRadius: { block: ['orphans-anchored-memory'] } } as never);
     expect(await runReviewCli({ cwd: '/p', base: 'main', hook: true })).toBe(1);

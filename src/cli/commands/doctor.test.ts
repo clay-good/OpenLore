@@ -133,9 +133,9 @@ describe('doctor command', () => {
       expect(Array.isArray(checks)).toBe(true);
     });
 
-    it('should include exactly 10 checks', async () => {
+    it('should include exactly 11 checks', async () => {
       const checks = await runDoctorJson();
-      expect(checks).toHaveLength(10);
+      expect(checks).toHaveLength(11);
     });
 
     it('should include a Config schema check', async () => {
