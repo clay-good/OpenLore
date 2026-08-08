@@ -15,17 +15,18 @@
 
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { createHash } from 'node:crypto';
 import {
   buildTraversalIndex,
   serializeTraversalIndex,
   deserializeTraversalIndex,
+  graphDigest,
 } from '../dist/core/analyzer/condensation.js';
 
 const repo = process.argv[2] ?? process.cwd();
 const analysisDir = join(repo, '.openlore', 'analysis');
 const contextRaw = readFileSync(join(analysisDir, 'llm-context.json'), 'utf-8');
-const cg = JSON.parse(contextRaw).callGraph;
+const contextParsed = JSON.parse(contextRaw);
+const cg = contextParsed.callGraph;
 if (!cg) { console.error('No callGraph in llm-context.json — run `openlore analyze` first.'); process.exit(1); }
 
 // ── The frozen pre-change implementations. ──────────────────────────────────
@@ -152,12 +153,18 @@ for (const filter of [undefined, { directResolvedOnly: true }]) {
 
 // 6. The persisted artifact: digest binding and rehydrated equivalence.
 console.log('── persisted artifact ─────────────────────────────');
-const digest = createHash('sha256').update(contextRaw).digest('hex');
+// The structure is now keyed to the GRAPH, not the artifact bytes (change:
+// shrink-traversal-index-invalidation-scope): `analyze` writes graphDigest(cg) into
+// llm-context.json and stamps the structure with the same value, so a signature-only
+// flush that rewrites the context leaves the structure valid.
+const digest = graphDigest(cg);
 let onDisk = null;
 try { onDisk = JSON.parse(readFileSync(join(analysisDir, 'traversal-index.json'), 'utf-8')); } catch { /* absent */ }
 check('analyze wrote traversal-index.json', onDisk !== null);
-check('its contextDigest binds it to THIS llm-context.json', onDisk?.contextDigest === digest,
-  onDisk ? `artifact=${onDisk.contextDigest?.slice(0, 12)} actual=${digest.slice(0, 12)}` : '');
+check('its graphDigest binds it to THIS graph', onDisk?.graphDigest === digest,
+  onDisk ? `artifact=${onDisk.graphDigest?.slice(0, 12)} actual=${digest.slice(0, 12)}` : '');
+check('llm-context.json carries the same graphDigest for the reader', contextParsed.graphDigest === digest,
+  `context=${String(contextParsed.graphDigest).slice(0, 12)} actual=${digest.slice(0, 12)}`);
 
 const rehydrated = deserializeTraversalIndex(serializeTraversalIndex(cg, digest), digest);
 check('round-trip rehydrates', rehydrated !== null);

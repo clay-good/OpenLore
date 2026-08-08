@@ -22,7 +22,7 @@
  *
  * TRUST BOUNDARY, stated plainly. Two different properties, deliberately not
  * conflated:
- *  - CORRUPTION is caught. `contextDigest` proves the structure belongs to the
+ *  - CORRUPTION is caught. `graphDigest` proves the structure belongs to the
  *    graph being served, `payloadDigest` proves its own bytes are intact, and the
  *    bounds checks prove no index escapes the array it addresses. Bitrot, a partial
  *    write, and a careless hand edit are all refused, not answered.
@@ -36,13 +36,12 @@
  *    graph directly.
  */
 
-import { open, stat, type FileHandle } from 'node:fs/promises';
+import { open, type FileHandle } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   OPENLORE_DIR,
   OPENLORE_ANALYSIS_SUBDIR,
   ARTIFACT_TRAVERSAL_INDEX,
-  ARTIFACT_LLM_CONTEXT,
 } from '../../../constants.js';
 import {
   buildTraversalIndex,
@@ -66,48 +65,20 @@ function indexPath(absDir: string): string {
   return join(absDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_TRAVERSAL_INDEX);
 }
 
-/**
- * Cheap (two-stat) pre-check: could the persisted structure possibly belong to the
- * current `llm-context.json`? Only then is it worth digesting a multi-MB artifact
- * to find out for certain — see the call site in `readCachedContext`.
- *
- * The test is mtime ordering. `analyze` writes the structure strictly AFTER the
- * context (see `artifact-generator.ts`), so a structure older than the context can
- * only be left over from a previous generation. That is exactly the steady state in
- * watch mode: the watcher rewrites `llm-context.json` on every flush and
- * deliberately does not rebuild the structure, so without this check every cold read
- * would pay a full digest plus a full artifact read only to reject the result —
- * measured at ~40 ms per read on this repo, forever, until the next full `analyze`.
- *
- * A false NEGATIVE (clock skew, a filesystem with coarse timestamps) costs an
- * in-memory rebuild — the correct answer, slightly slower. A false POSITIVE costs
- * nothing but the digest, because `contextDigest` still has to agree before the
- * structure is used. Neither can produce a wrong answer.
- */
-export async function traversalIndexMayBeCurrent(analysisDir: string): Promise<boolean> {
-  try {
-    const [ix, ctx] = await Promise.all([
-      stat(join(analysisDir, ARTIFACT_TRAVERSAL_INDEX)),
-      stat(join(analysisDir, ARTIFACT_LLM_CONTEXT)),
-    ]);
-    return ix.isFile() && ix.mtimeMs >= ctx.mtimeMs;
-  } catch {
-    return false; // no structure (or no context) — nothing to unlock
-  }
-}
-
 /** Loaded/built structures, one per graph generation. */
 const indexByGraph = new WeakMap<SerializedCallGraph, TraversalIndex>();
 
-/** Digest of the artifact bytes each served graph was parsed from. */
+/** Graph digest each served graph was stamped with (from the parsed context). */
 const digestByGraph = new WeakMap<SerializedCallGraph, string>();
 
 /**
- * Record the `llm-context.json` content digest for a just-parsed graph. Called by
- * `readCachedContext` on the cold path; without it the persisted structure cannot
- * be validated and is simply not used.
+ * Record the `graphDigest` a just-parsed context carried, for the graph it belongs
+ * to. Called by `readCachedContext` on the cold path; without it the persisted
+ * structure cannot be validated and is simply not used. The value is read straight
+ * from the parsed context — the read path never hashes the artifact (change:
+ * shrink-traversal-index-invalidation-scope).
  */
-export function recordArtifactDigest(cg: SerializedCallGraph, digest: string): void {
+export function recordGraphDigest(cg: SerializedCallGraph, digest: string): void {
   digestByGraph.set(cg, digest);
 }
 

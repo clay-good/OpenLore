@@ -68,8 +68,10 @@ rather than only on a cold monorepo, and it deletes two mechanisms rather than a
   `mcp-handlers/traversal.ts` (drop `traversalIndexMayBeCurrent`; key off the parsed field),
   `mcp-handlers/utils.ts` (drop the read-path SHA-256), `mcp-watcher.ts` (guard + a comment
   stating the invariant), one new guard test.
-- Specs: `analyzer` — 1 ADDED (TraversalStructureIsKeyedToTheGraphItDescribes); `mcp-handlers` —
-  1 MODIFIED (TraversalToolsShareOnePrecomputedRepresentation, whose invalidation clause changes).
+- Specs: `analyzer` — 1 ADDED (TraversalStructureIsKeyedToTheGraphItDescribes) + 1 MODIFIED
+  (ReachabilityStructureIsComputedAtAnalyzeTime, whose artifact-bytes-digest / write-strictly-after
+  / mtime-pre-check clauses this change deletes); `mcp-handlers` — 1 MODIFIED
+  (TraversalToolsShareOnePrecomputedRepresentation, whose invalidation clause changes).
 - Risk: medium-low. The hazard is a future watcher lane mutating the graph without recomputing
   the digest, which would serve a structure for the wrong graph — the one failure mode #290's
   byte-level key made structurally impossible. That trade is the entire substance of this change,

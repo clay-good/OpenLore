@@ -933,13 +933,17 @@ export class McpWatcher {
     // already on disk. Measured, rebuilding + reserializing it here cost +40-53% on
     // a flush of this repo, and ~1.3-7.6 s of synchronous, event-loop-blocking CPU
     // at 200k-600k nodes — while holding the analysis lock, to produce a file this
-    // process then discards (the flush primes the read cache, and a primed context
-    // carries no artifact digest, so the next tool call never consults it).
+    // process then discards.
     //
-    // The cost of skipping it is bounded and honest: the flush changes the context
-    // BYTES, so the persisted structure's digest stops matching and a later COLD
-    // read rebuilds it in memory until the next full `analyze` rewrites both. A
-    // slower correct answer, never a stale one.
+    // INVARIANT, now load-bearing (change: shrink-traversal-index-invalidation-scope):
+    // the persisted structure is keyed to `context.graphDigest` — a digest of the
+    // GRAPH, not the artifact bytes — and this write round-trips the parsed context, so
+    // `graphDigest` is carried through unchanged. A signature-only flush therefore
+    // leaves the structure valid: a later COLD read loads it rather than rebuilding.
+    // That is only sound because this lane never changes the graph. Any future watcher
+    // path that assigns `context.callGraph` MUST recompute `graphDigest` in the same
+    // write, or a stale structure would be served for the new graph; a source-scan
+    // guard (`traversal-graph-digest-guard.test.ts`) fails CI if one does not.
     // Hand the patched object back to the read cache, aligned to the new on-disk
     // mtime, so the next tool call is a cache hit (no cold re-parse). This is the
     // fix for root-cause item 2 (mtime bump forcing a full re-read). Only valid

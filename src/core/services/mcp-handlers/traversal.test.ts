@@ -1,11 +1,13 @@
 /**
  * The load-once-per-generation contract for the precomputed traversal structure
- * (change: optimize-reachability-precompute).
+ * (change: optimize-reachability-precompute), re-keyed to the graph digest
+ * (change: shrink-traversal-index-invalidation-scope).
  *
  * Two properties are load-bearing and both are pinned here:
  *  1. A structure is served ONLY alongside the graph it was built from — an
  *     external `openlore analyze` that rewrites the artifacts while a daemon holds
- *     a loaded structure must not be answered from the old one.
+ *     a loaded structure must not be answered from the old one. Currency is decided
+ *     by the graph digest the context carries, not by the artifact's bytes.
  *  2. Anything the persisted artifact cannot prove (absent, stale digest, wrong
  *     version, truncated) degrades to an in-memory rebuild with the SAME answers,
  *     never to a wrong or empty one.
@@ -21,15 +23,14 @@ import {
   ARTIFACT_TRAVERSAL_INDEX,
 } from '../../../constants.js';
 import {
-  artifactDigest,
+  graphDigest,
   writeTraversalIndexArtifact,
   serializeTraversalIndex,
 } from '../../analyzer/condensation.js';
 import {
   loadTraversalIndex,
   traversalIndexFor,
-  recordArtifactDigest,
-  traversalIndexMayBeCurrent,
+  recordGraphDigest,
 } from './traversal.js';
 import type { CallEdge, FunctionNode, SerializedCallGraph } from '../../analyzer/call-graph.js';
 
@@ -67,14 +68,27 @@ afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
 const indexPath = () => join(analysisDir, ARTIFACT_TRAVERSAL_INDEX);
 
+describe('the graph digest is stable across two equal graphs and moves with the graph', () => {
+  it('two structurally identical graphs digest identically; a rewire changes the digest', () => {
+    expect(graphDigest(graph(GEN_A))).toBe(graphDigest(graph(GEN_A)));
+    expect(graphDigest(graph(GEN_A))).not.toBe(graphDigest(graph(GEN_B)));
+  });
+
+  it('a synthesized edge digests differently from a resolved one', () => {
+    const base = graph([['x.ts::a', 'x.ts::b']]);
+    const synth = graph([['x.ts::a', 'x.ts::b']]);
+    (synth.edges as CallEdge[])[0].confidence = 'synthesized';
+    expect(graphDigest(base)).not.toBe(graphDigest(synth));
+  });
+});
+
 describe('persisted traversal structure', () => {
   it('is written by the analyze path and then served for that generation', async () => {
     const cg = graph(GEN_A);
-    const contextJson = JSON.stringify({ callGraph: cg });
-    await writeTraversalIndexArtifact(analysisDir, cg, artifactDigest(contextJson));
+    await writeTraversalIndexArtifact(analysisDir, cg, graphDigest(cg));
     expect(existsSync(indexPath())).toBe(true);
 
-    recordArtifactDigest(cg, artifactDigest(contextJson));
+    recordGraphDigest(cg, graphDigest(cg));
     const ix = await loadTraversalIndex(dir, cg);
     expect([...ix.reachAll(['x.ts::a'], 'forward')].sort()).toEqual(['x.ts::a', 'x.ts::b', 'x.ts::c']);
   });
@@ -84,12 +98,11 @@ describe('persisted traversal structure', () => {
     // rewriting it. This is exactly the "external analyze under a warm daemon" case:
     // the on-disk structure now describes a graph that is no longer being served.
     const cgA = graph(GEN_A);
-    await writeTraversalIndexArtifact(analysisDir, cgA, artifactDigest(JSON.stringify({ callGraph: cgA })));
+    await writeTraversalIndexArtifact(analysisDir, cgA, graphDigest(cgA));
     const staleOnDisk = readFileSync(indexPath(), 'utf-8');
 
     const cgB = graph(GEN_B);
-    const contextB = JSON.stringify({ callGraph: cgB });
-    recordArtifactDigest(cgB, artifactDigest(contextB));
+    recordGraphDigest(cgB, graphDigest(cgB));
 
     const ix = await loadTraversalIndex(dir, cgB);
     // Generation A's structure would answer `a` reaches `c`. Generation B's must not.
@@ -98,18 +111,28 @@ describe('persisted traversal structure', () => {
     expect(readFileSync(indexPath(), 'utf-8')).toBe(staleOnDisk);
   });
 
-  it('a flush that rewrites the artifact makes the new structure servable', async () => {
-    const cgB = graph(GEN_B);
-    const contextB = JSON.stringify({ callGraph: cgB });
-    await writeTraversalIndexArtifact(analysisDir, cgB, contextB);
-    recordArtifactDigest(cgB, artifactDigest(contextB));
-    const ix = await loadTraversalIndex(dir, cgB);
-    expect([...ix.reachAll(['x.ts::d'], 'forward')].sort()).toEqual(['x.ts::c', 'x.ts::d']);
+  it('a signature-only flush leaves the structure servable — the graph digest is unchanged', async () => {
+    // The whole point of the change: a flush rewrites llm-context.json bytes but the
+    // graph is untouched, so the digest the context carries still matches the stamp,
+    // and a later cold read LOADS the structure rather than rebuilding it. Model that
+    // by serving the SAME graph the structure was stamped with — the digest agrees,
+    // so the persisted structure (not an in-memory rebuild) is returned.
+    const cg = graph(GEN_A);
+    await writeTraversalIndexArtifact(analysisDir, cg, graphDigest(cg));
+    const onDisk = readFileSync(indexPath(), 'utf-8');
+
+    // A fresh graph object with the same structure — a memo miss, forcing the loader
+    // to consult the disk. It must return the persisted structure's answers.
+    const served = graph(GEN_A);
+    recordGraphDigest(served, graphDigest(served));
+    const ix = await loadTraversalIndex(dir, served);
+    expect([...ix.reachAll(['x.ts::a'], 'forward')].sort()).toEqual(['x.ts::a', 'x.ts::b', 'x.ts::c']);
+    // The structure on disk was accepted as-is, never rewritten by the read path.
+    expect(readFileSync(indexPath(), 'utf-8')).toBe(onDisk);
   });
 
   it('falls back to an in-memory build — with identical answers — when the artifact is unusable', async () => {
     const cg = graph(GEN_A);
-    const contextJson = JSON.stringify({ callGraph: cg });
     const expected = [...traversalIndexFor(graph(GEN_A)).reachAll(['x.ts::a'], 'forward')].sort();
 
     const unusable: Array<string | undefined> = [
@@ -117,14 +140,14 @@ describe('persisted traversal structure', () => {
       'not json',                                                 // unparseable
       '{}',                                                       // wrong shape
       serializeTraversalIndex(graph(GEN_A), 'a-different-digest'), // stale generation
-      serializeTraversalIndex(graph(GEN_A), artifactDigest(contextJson)).replace(/"fwdTargets":"[^"]*"/, '"fwdTargets":"AAAA"'), // truncated CSR
+      serializeTraversalIndex(graph(GEN_A), graphDigest(cg)).replace(/"fwdTargets":"[^"]*"/, '"fwdTargets":"AAAA"'), // truncated CSR
     ];
     for (const broken of unusable) {
       rmSync(indexPath(), { force: true });
       if (broken !== undefined) writeFileSync(indexPath(), broken);
       // A fresh graph object each time so the WeakMap memo cannot mask the reload.
       const fresh = graph(GEN_A);
-      recordArtifactDigest(fresh, artifactDigest(contextJson));
+      recordGraphDigest(fresh, graphDigest(fresh));
       const ix = await loadTraversalIndex(dir, fresh);
       expect([...ix.reachAll(['x.ts::a'], 'forward')].sort()).toEqual(expected);
     }
@@ -137,53 +160,6 @@ describe('persisted traversal structure', () => {
     writeFileSync(indexPath(), serializeTraversalIndex(graph(GEN_B), 'some-digest'));
     const ix = await loadTraversalIndex(dir, cg);
     expect([...ix.reachAll(['x.ts::a'], 'forward')].sort()).toEqual(['x.ts::a', 'x.ts::b', 'x.ts::c']);
-  });
-});
-
-describe('staleness pre-check (cost, not correctness)', () => {
-  // Validating the structure means digesting a multi-MB context (~29 ms here) and
-  // reading the structure (~10 ms). That is worth paying only when the structure
-  // could still be current. The watcher rewrites `llm-context.json` on every flush
-  // and deliberately does NOT rebuild the structure, so without this check every
-  // cold read after a flush would pay the full cost only to reject the result —
-  // permanently, until the next full `analyze`.
-  const contextPath = () => join(analysisDir, 'llm-context.json');
-
-  it('says yes when the structure was written after the context (the analyze order)', async () => {
-    writeFileSync(contextPath(), '{}');
-    await new Promise(r => setTimeout(r, 12));
-    await writeTraversalIndexArtifact(analysisDir, graph(GEN_A), '{}');
-    expect(await traversalIndexMayBeCurrent(analysisDir)).toBe(true);
-  });
-
-  it('says no when the context was rewritten after it — the post-flush steady state', async () => {
-    await writeTraversalIndexArtifact(analysisDir, graph(GEN_A), '{}');
-    await new Promise(r => setTimeout(r, 12));
-    writeFileSync(contextPath(), '{"changed":true}'); // what a watcher flush does
-    expect(await traversalIndexMayBeCurrent(analysisDir)).toBe(false);
-  });
-
-  it('says no when either file is missing', async () => {
-    expect(await traversalIndexMayBeCurrent(analysisDir)).toBe(false); // neither
-    writeFileSync(contextPath(), '{}');
-    expect(await traversalIndexMayBeCurrent(analysisDir)).toBe(false); // no structure
-    rmSync(contextPath());
-    await writeTraversalIndexArtifact(analysisDir, graph(GEN_A), '{}');
-    expect(await traversalIndexMayBeCurrent(analysisDir)).toBe(false); // no context
-  });
-
-  it('is only a cost gate — a structure that passes it is still digest-checked', async () => {
-    // Same mtime ordering as a real analyze, but the structure belongs to a
-    // different generation. The pre-check waves it through; the digest must not.
-    writeFileSync(contextPath(), '{}');
-    await new Promise(r => setTimeout(r, 12));
-    await writeTraversalIndexArtifact(analysisDir, graph(GEN_A), '{"other":"generation"}');
-    expect(await traversalIndexMayBeCurrent(analysisDir)).toBe(true);
-
-    const cg = graph(GEN_B);
-    recordArtifactDigest(cg, artifactDigest('{}'));
-    const ix = await loadTraversalIndex(dir, cg);
-    expect([...ix.reachAll(['x.ts::a'], 'forward')].sort()).toEqual(['x.ts::a', 'x.ts::b']);
   });
 });
 
