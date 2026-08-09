@@ -290,12 +290,15 @@ async function countSourceChangedSince(absDir: string, commit: string): Promise<
     // packages. Gate on the root to keep the prior "null below root" behavior.
     if (!(await isGitRepositoryRoot(absDir))) return null;
     validateGitRef(commit);
-    const { stdout } = await execFileAsync('git', gitPathArgs('diff', '--name-only', commit, '--'), { cwd: absDir });
-    return stdout
+    const [{ stdout: changed }, { stdout: untracked }] = await Promise.all([
+      execFileAsync('git', gitPathArgs('diff', '--name-only', commit, '--'), { cwd: absDir }),
+      execFileAsync('git', ['ls-files', '--others', '--exclude-standard', '--'], { cwd: absDir }),
+    ]);
+    return new Set(`${changed}\n${untracked}`
       .split('\n')
       .map((s) => s.trim())
-      .filter((f) => f.length > 0 && GRAPH_SOURCE_EXTS.has(extname(f)))
-      .length;
+      .filter((f) => f.length > 0 && GRAPH_SOURCE_EXTS.has(extname(f))))
+      .size;
   } catch {
     return null;
   }
@@ -330,11 +333,11 @@ export async function assessStalenessForAnalysis(
   analysisDir: string,
   now: number = Date.now(),
 ): Promise<StalenessAssessment> {
-  const memoKey = `${absDir}\0${analysisDir}`;
+  const commit = await readBuildCommit(absDir, analysisDir);
+  const memoKey = `${absDir}\0${analysisDir}\0${commit ?? ''}`;
   const memo = stalenessMemo.get(memoKey);
   if (memo && now - memo.at < STALENESS_TTL_MS) return memo.value;
 
-  const commit = await readBuildCommit(absDir, analysisDir);
   const changed = commit ? await countSourceChangedSince(absDir, commit) : null;
   const value = {
     indexCommit: commit,

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { collectSpecMarkdown } from './view-files.js';
+import { collectSpecMarkdown, readConfinedFile } from './view-files.js';
 
 const roots: string[] = [];
 async function tempRoot(): Promise<string> {
@@ -40,9 +40,37 @@ describe('collectSpecMarkdown', () => {
     await writeFile(join(specs, 'a.md'), '12345');
     await writeFile(join(specs, 'b.md'), '67890');
 
-    const result = await collectSpecMarkdown(specs, 8);
+    const result = await collectSpecMarkdown(specs, { maxBytes: 8 });
     expect(result.content).toBe('12345');
     expect(result.bytes).toBeLessThanOrEqual(8);
     expect(result.truncated).toBe(true);
+  });
+
+  it('rejects a spec root reached through an escaping ancestor symlink', async () => {
+    const base = await tempRoot();
+    const repo = join(base, 'repo');
+    const outside = join(base, 'outside');
+    await mkdir(repo);
+    await mkdir(join(outside, 'specs'), { recursive: true });
+    await writeFile(join(outside, 'specs', 'secret.md'), '# Secret');
+    await symlink(outside, join(repo, 'openspec'));
+
+    const result = await collectSpecMarkdown(join(repo, 'openspec', 'specs'), {
+      confinementRoot: repo,
+    });
+    expect(result.content).toBe('');
+  });
+
+  it('bounds direct confined reads and refuses a symlink target', async () => {
+    const base = await tempRoot();
+    const repo = join(base, 'repo');
+    const outside = join(base, 'outside.md');
+    await mkdir(repo);
+    await writeFile(outside, '# Secret');
+    await symlink(outside, join(repo, 'escape.md'));
+
+    await expect(readConfinedFile(repo, join(repo, 'escape.md'), 100)).rejects.toThrow();
+    await writeFile(join(repo, 'large.md'), '12345');
+    await expect(readConfinedFile(repo, join(repo, 'large.md'), 4)).rejects.toThrow(/byte limit/);
   });
 });

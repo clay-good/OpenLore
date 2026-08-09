@@ -18,6 +18,7 @@ import { Hint, SL, Row, Chip, KindBadge } from './components/MicroComponents.jsx
 import { ChatPanel } from './components/ChatPanel.jsx';
 import { FreshnessBanner } from './components/FreshnessBanner.jsx';
 import { THEMES, THEME_KEYS, DEFAULT_THEME } from './utils/themes.js';
+import { freshnessFromResponse, mergeFreshness } from './utils/freshness.js';
 
 export default function App({ graphUrl, mappingUrl = '/api/mapping', specUrl = '/api/spec' }) {
   const [rawGraph, setRawGraph] = useState(null);
@@ -113,6 +114,11 @@ export default function App({ graphUrl, mappingUrl = '/api/mapping', specUrl = '
     setSpecReqs(parseSpecRequirements(mdStr));
   }, []);
 
+  const observeFreshness = useCallback((response) => {
+    const observed = freshnessFromResponse(response);
+    if (observed) setFreshness((current) => mergeFreshness(current, observed));
+  }, []);
+
   const mappingRef = useRef();
   const specRef = useRef();
 
@@ -123,27 +129,24 @@ export default function App({ graphUrl, mappingUrl = '/api/mapping', specUrl = '
       try {
         const res = await fetch(graphUrl);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        observeFreshness(res);
         const text = await res.text();
         loadGraph(text);
 
         try {
-          const freshnessRes = await fetch('/api/freshness');
-          if (freshnessRes.ok) setFreshness(await freshnessRes.json());
-        } catch { /* ignore */ }
-
-        try {
           const ctxRes = await fetch('/api/llm-context');
-          if (ctxRes.ok) setLlmCtx(await ctxRes.json());
+          if (ctxRes.ok) { observeFreshness(ctxRes); setLlmCtx(await ctxRes.json()); }
         } catch { /* ignore */ }
 
         try {
           const cgRes = await fetch('/api/class-graph');
-          if (cgRes.ok) setClassData(await cgRes.json());
+          if (cgRes.ok) { observeFreshness(cgRes); setClassData(await cgRes.json()); }
         } catch { /* ignore */ }
 
         try {
           const refRes = await fetch('/api/refactor-priorities');
           if (refRes.ok) {
+            observeFreshness(refRes);
             const report = await refRes.json();
             setRefReport(report);
           }
@@ -151,7 +154,7 @@ export default function App({ graphUrl, mappingUrl = '/api/mapping', specUrl = '
 
         try {
           const mRes = await fetch('/api/mapping');
-          if (mRes.ok) loadMapping(await mRes.text());
+          if (mRes.ok) { observeFreshness(mRes); loadMapping(await mRes.text()); }
         } catch { /* ignore */ }
         try {
           const srRes = await fetch('/api/spec-requirements');
@@ -169,7 +172,7 @@ export default function App({ graphUrl, mappingUrl = '/api/mapping', specUrl = '
         console.error('Failed to load graph from', graphUrl, e);
       }
     })();
-  }, [graphUrl, mappingUrl, specUrl, loadGraph]);
+  }, [graphUrl, mappingUrl, specUrl, loadGraph, observeFreshness]);
 
   const handleFile = (e) => {
     const f = e.target.files[0];

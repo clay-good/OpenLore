@@ -90,8 +90,9 @@ Run `openlore generate` to produce `mapping.json` and the spec files. Once prese
 
 ### Freshness and file safety
 
-Every analysis-artifact response includes its generated time, analyzed commit, current
-commit, and freshness status. If tracked source files changed after analysis, the viewer
+Every analysis-artifact response includes its generated time and freshness status. When
+recorded and assessable, it also includes the analyzed and current commit. If tracked or
+untracked source files changed after analysis, the viewer
 shows a dismissible **STALE ANALYSIS** banner; run `openlore analyze` before relying on the
 graph. When freshness cannot be assessed, the API reports `unassessable` instead of
 claiming the graph is current.

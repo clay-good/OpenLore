@@ -40,7 +40,7 @@ import { resolveEmbedder } from '../../core/analyzer/embedder.js';
 import { getSkeletonContent } from '../../core/analyzer/code-shaper.js';
 import { detectLanguage } from '../../core/analyzer/language-detection.js';
 import { runChatAgent, resolveProviderConfig } from '../../core/services/chat-agent.js';
-import { collectSpecMarkdown } from './view-files.js';
+import { collectSpecMarkdown, readConfinedFile } from './view-files.js';
 import { readViewerFreshness, setViewerFreshnessHeaders } from './viewer-freshness.js';
 
 /** Strip internal filesystem paths and API keys from error messages before sending to clients. */
@@ -104,7 +104,13 @@ export const viewCommand = new Command('view')
       const llmContextPath = join(analysisDir, ARTIFACT_LLM_CONTEXT);
       const refactorPath = join(analysisDir, ARTIFACT_REFACTOR_PRIORITIES);
       const mappingPath = join(analysisDir, ARTIFACT_MAPPING);
-      const specDir = resolve(rootPath, options.spec);
+      const specDir = safePath(rootPath, options.spec);
+
+      if (!specDir) {
+        logger.error('Spec directory resolves outside the project root');
+        process.exitCode = 1;
+        return;
+      }
 
       const attachFreshness = async (
         res: { setHeader(name: string, value: string): void },
@@ -339,7 +345,7 @@ export const viewCommand = new Command('view')
                     return;
                   }
 
-                  const collected = await collectSpecMarkdown(specDir);
+                  const collected = await collectSpecMarkdown(specDir, { confinementRoot: rootPath });
 
                   res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
                   res.setHeader('X-OpenLore-Spec-Truncated', String(collected.truncated));
@@ -387,7 +393,8 @@ export const viewCommand = new Command('view')
                     if (!specFileAbs || !(await fileExists(specFileAbs))) continue;
 
                     try {
-                      const content = await readFile(specFileAbs, 'utf-8');
+                      const content = (await readConfinedFile(rootPath, specFileAbs, MAX_CHAT_BODY_BYTES))
+                        .toString('utf8');
 
                       // Split into Requirement sections and find the one that matches reqName exactly
                       // We will compare titles case-insensitively but otherwise match the title text directly.
@@ -460,7 +467,8 @@ export const viewCommand = new Command('view')
                     res.end(JSON.stringify({ error: 'Access denied: path outside project' }));
                     return;
                   }
-                  const source = await readFile(absFile, 'utf-8');
+                  const source = (await readConfinedFile(rootPath, absFile, MAX_CHAT_BODY_BYTES))
+                    .toString('utf8');
                   const language = detectLanguage(file);
                   const skeleton = getSkeletonContent(source, language);
                   res.setHeader('Content-Type', 'application/json; charset=utf-8');
