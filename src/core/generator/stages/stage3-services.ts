@@ -10,6 +10,7 @@ import { PROMPTS } from '../prompts.js';
 import type { ExtractedEntity, ExtractedService, StageResult, PipelineContext, ProjectSurveyResult } from '../../../types/pipeline.js';
 import { astChunkContent } from '../../analyzer/ast-chunker.js';
 import { STAGE3_SERVICE_SCHEMA } from '../schemas.js';
+import { protectPrompt } from '../../../utils/prompt-boundary.js';
 
 export async function runStage3(
   pipeline: PipelineContext,
@@ -20,7 +21,7 @@ export async function runStage3(
 ): Promise<StageResult<ExtractedService[]>> {
   const startTime = Date.now();
   const entityNames = entities.map(e => e.name);
-  const systemPrompt = PROMPTS.stage3_services(survey.projectCategory, entityNames, survey.suggestedDomains ?? []);
+  const systemPrompt = PROMPTS.stage3_services;
   const allServices: ExtractedService[] = [];
   const seenNames = new Set<string>();
 
@@ -42,11 +43,10 @@ export async function runStage3(
       const signaturesNote = signaturesSection
         ? `\n\nFunctions available in this file:\n${signaturesSection}\n\nFor each operation you extract, set functionName to exactly match one of the above.`
         : '';
-      const userPrompt = `Analyze this file and extract services/modules:\n\n=== ${file.path}${chunkNote} ===\n${fileChunks[i]}${signaturesNote}`;
+      const userPrompt = `Project category: ${survey.projectCategory}\nKnown entities: ${entityNames.join(', ')}\nAvailable domains: ${(survey.suggestedDomains ?? []).join(', ')}\n\nFile: ${file.path}${chunkNote}\n${fileChunks[i]}${signaturesNote}`;
       try {
         const result = await pipeline.llm.completeJSON<ExtractedService[]>({
-          systemPrompt,
-          userPrompt,
+          ...protectPrompt(systemPrompt, userPrompt),
           temperature: 0.3,
           maxTokens: STAGE3_MAX_TOKENS,
         }, STAGE3_SERVICE_SCHEMA);

@@ -38,7 +38,7 @@ Example output:
 
 Respond ONLY with valid JSON.`,
 
-  stage2_entities: (projectCategory: string, frameworks: string[]) => `You are analyzing the core data models of a ${projectCategory} built with ${frameworks.join(', ')}.
+  stage2_entities: `You are analyzing the core data models described by the provided project data.
 
 For each entity you identify, extract in OpenSpec format:
 - name: The entity name (e.g., "User", "Order")
@@ -67,10 +67,7 @@ Example output:
 
 Respond with a JSON array of entities. Respond ONLY with valid JSON.`,
 
-  stage3_services: (projectCategory: string, entities: string[], suggestedDomains: string[]) => `You are analyzing the logic and processing layer of a ${projectCategory}.
-
-Known entities: ${entities.join(', ')}
-Available domains: ${suggestedDomains.join(', ')}
+  stage3_services: `You are analyzing the logic and processing layer described by the provided project data.
 
 For each service/module, identify:
 - name: Service name
@@ -131,11 +128,7 @@ Example output:
 
 Respond with a JSON array of endpoints. Respond ONLY with valid JSON.`,
 
-  stage5_architecture: (survey: { domainSummary: string; architecturePattern: string; suggestedDomains: string[] }) => `Based on the analysis data, synthesize a complete architecture overview for OpenSpec.
-
-Project context: ${survey.domainSummary}
-Architecture pattern: ${survey.architecturePattern}
-Domains: ${survey.suggestedDomains.join(', ')}
+  stage5_architecture: `Based on the provided analysis data, synthesize a complete architecture overview for OpenSpec.
 
 Include:
 - systemPurpose: 2-3 sentences on what this system does and why
@@ -166,7 +159,7 @@ Example output:
 
 Respond with a JSON object. Respond ONLY with valid JSON.`,
 
-  stage6_adr: (architecture: { layerMap: { name: string; purpose: string }[]; systemPurpose: string; architectureStyle: string; dataFlow: string; securityModel: string; integrations: string[]; keyDecisions: string[] }) => `You are a senior software architect creating Architecture Decision Records (ADRs).
+  stage6_adr: `You are a senior software architect creating Architecture Decision Records (ADRs).
 
 For each key decision listed below, produce a complete ADR with:
 - id: Sequential like "ADR-001", "ADR-002", etc.
@@ -176,19 +169,8 @@ For each key decision listed below, produce a complete ADR with:
 - decision: 1-2 sentences clearly stating what was decided
 - consequences: Array of 2-4 consequences (include both positive and negative)
 - alternatives: Array of 1-3 alternatives that could have been chosen instead
-- relatedLayers: Array of architecture layer names affected (from: ${architecture.layerMap.map(l => l.name).join(', ')})
+- relatedLayers: Array of architecture layer names affected
 - relatedDomains: Array of domain names affected
-
-Architecture context:
-- System purpose: ${architecture.systemPurpose}
-- Architecture style: ${architecture.architectureStyle}
-- Layers: ${architecture.layerMap.map(l => `${l.name} (${l.purpose})`).join(', ')}
-- Data flow: ${architecture.dataFlow}
-- Security model: ${architecture.securityModel}
-- External integrations: ${architecture.integrations.join(', ') || 'None'}
-
-Key decisions to expand into full ADRs:
-${architecture.keyDecisions.map((d, i) => `${i + 1}. ${d}`).join('\n')}
 
 Base all conclusions on the code evidence provided. Where uncertain, say so explicitly.
 Respond with a JSON array of ADR objects. Respond ONLY with valid JSON.`,

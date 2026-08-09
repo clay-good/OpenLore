@@ -133,7 +133,7 @@ async function writeConfig(cwd: string, config: OpenLoreConfig): Promise<void> {
 
 const PROVIDERS = [
   'anthropic', 'openai', 'openai-compat', 'gemini',
-  'copilot', 'claude-code', 'gemini-cli', 'mistral-vibe', 'cursor-agent',
+  'copilot', 'claude-code', 'codex-cli', 'gemini-cli', 'antigravity-cli', 'mistral-vibe', 'cursor-agent',
 ];
 
 const PROVIDER_MODEL_DEFAULTS: Record<string, string> = {
@@ -143,12 +143,14 @@ const PROVIDER_MODEL_DEFAULTS: Record<string, string> = {
   gemini: 'gemini-2.0-flash',
   copilot: 'gpt-4o',
   'claude-code': 'claude-sonnet-4-6',
+  'codex-cli': '',
   'gemini-cli': 'gemini-2.0-flash',
+  'antigravity-cli': '',
   'mistral-vibe': 'codestral-latest',
   'cursor-agent': '',
 };
 
-const SYSTEM_AUTH_PROVIDERS = new Set(['copilot', 'claude-code', 'gemini-cli', 'mistral-vibe', 'cursor-agent']);
+const SYSTEM_AUTH_PROVIDERS = new Set(['copilot', 'claude-code', 'codex-cli', 'gemini-cli', 'antigravity-cli', 'mistral-vibe', 'cursor-agent']);
 
 const PROVIDER_ENV_VARS: Record<string, string> = {
   anthropic: 'ANTHROPIC_API_KEY',

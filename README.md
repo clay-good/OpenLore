@@ -413,7 +413,7 @@ We'd rather you know these up front. Last validated against the code on 2026-07-
   export OPENAI_API_KEY=sk-...           # OpenAI
   export GEMINI_API_KEY=...              # Google Gemini
   ```
-  …or use a CLI-based provider (`claude-code`, `gemini-cli`, `mistral-vibe`, `cursor-agent`) — no key, just the CLI on your PATH.
+  …or use a CLI-based provider (`codex-cli`, `claude-code`, `gemini-cli`, `antigravity-cli`, `mistral-vibe`, `cursor-agent`) — no key, just the CLI on your PATH.
 
 ---
 

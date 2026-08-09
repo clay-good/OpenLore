@@ -22,6 +22,7 @@ import type { LLMService } from '../services/llm-service.js';
 import type { PendingDecision, SpecMap, DecisionScope } from '../../types/index.js';
 import { makeDecisionId } from './store.js';
 import { parseJSON } from '../../utils/misc.js';
+import { createPromptBoundary } from '../../utils/prompt-boundary.js';
 
 const SYSTEM_PROMPT = `You are an architectural decision extractor for a software project.
 
@@ -60,7 +61,20 @@ interface ExtractedRaw {
   consequences: string;
   affectedFiles: string[];
   proposedRequirement: string | null;
-  scope?: string;
+  scope?: DecisionScope;
+}
+
+const EXTRACTOR_SCOPES = new Set<DecisionScope>(['local', 'component']);
+
+function isExtractedRaw(value: unknown): value is ExtractedRaw {
+  if (!value || typeof value !== 'object') return false;
+  const item = value as Record<string, unknown>;
+  return typeof item.title === 'string'
+    && typeof item.rationale === 'string'
+    && typeof item.consequences === 'string'
+    && Array.isArray(item.affectedFiles) && item.affectedFiles.every((file) => typeof file === 'string')
+    && (item.proposedRequirement === null || typeof item.proposedRequirement === 'string')
+    && (item.scope === undefined || EXTRACTOR_SCOPES.has(item.scope as DecisionScope));
 }
 
 export interface ExtractFromDiffOptions {
@@ -154,15 +168,20 @@ export async function extractFromDiff(options: ExtractFromDiffOptions): Promise<
       '',
       ...domainFiles.map((f, i) => `=== ${f.path} ===\n${diffs[i]}`),
     ].filter(Boolean).join('\n\n');
+    const boundary = createPromptBoundary();
 
     const response = await llm.complete({
-      systemPrompt: SYSTEM_PROMPT,
-      userPrompt: userContent,
+      systemPrompt: `${SYSTEM_PROMPT}\n\n${boundary.instruction}`,
+      userPrompt: boundary.wrap(userContent),
       maxTokens: DECISIONS_CONSOLIDATION_MAX_TOKENS,
       temperature: 0.1,
     });
 
-    const extracted = parseJSON<ExtractedRaw[]>(response.content, []);
+    const parsed = parseJSON<unknown>(response.content, null);
+    if (!Array.isArray(parsed) || !parsed.every(isExtractedRaw)) {
+      throw new Error('decision extraction returned invalid structured output');
+    }
+    const extracted = parsed;
 
     for (const e of extracted) {
       const id = makeDecisionId(sessionId, domain, e.title);
@@ -173,13 +192,14 @@ export async function extractFromDiff(options: ExtractFromDiffOptions): Promise<
         rationale: e.rationale,
         consequences: e.consequences,
         proposedRequirement: e.proposedRequirement,
-        scope: (e.scope as DecisionScope) ?? 'component',
+        scope: e.scope ?? 'component',
         affectedDomains: [domain],
         affectedFiles: e.affectedFiles.length ? e.affectedFiles : domainFiles.map((f) => f.path),
         sessionId,
         recordedAt: now,
         consolidatedAt: now,
         confidence: 'medium',
+        contentOrigin: 'llm-extracted',
         syncedToSpecs: [],
       });
     }

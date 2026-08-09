@@ -242,7 +242,7 @@ describe('verify_claim — decision-current', () => {
     return {
       status: 'approved', title: `decision ${over.id}`, rationale: 'r', consequences: 'c',
       proposedRequirement: null, affectedDomains: [], affectedFiles: [], syncedToSpecs: [],
-      sessionId: 's', recordedAt: '2026-06-01T00:00:00Z', confidence: 'high', ...over,
+      sessionId: 's', recordedAt: '2026-06-01T00:00:00Z', contentOrigin: 'agent-recorded', confidence: 'high', ...over,
     };
   }
   async function writeStore(decisions: PendingDecision[]): Promise<void> {

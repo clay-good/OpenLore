@@ -13,6 +13,7 @@ function makeDecision(overrides: Partial<PendingDecision> & { id: string }): Pen
     affectedFiles: [],
     sessionId: 'sess',
     recordedAt: '2026-05-30T00:00:00.000Z',
+    contentOrigin: 'agent-recorded',
     confidence: 'high',
     syncedToSpecs: [],
     ...overrides,

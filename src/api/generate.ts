@@ -142,13 +142,13 @@ export async function openloreGenerate(options: GenerateApiOptions = {}): Promis
   const geminiKey = process.env.GEMINI_API_KEY;
 
   const configuredProvider = options.provider ?? openloreConfig.generation.provider;
-  const noKeyProviders = ['claude-code', 'mistral-vibe', 'copilot', 'gemini-cli', 'cursor-agent'];
+  const noKeyProviders = ['claude-code', 'codex-cli', 'mistral-vibe', 'copilot', 'gemini-cli', 'antigravity-cli', 'cursor-agent'];
 
   if (!noKeyProviders.includes(configuredProvider ?? '') && !anthropicKey && !openaiKey && !openaiCompatKey && !geminiKey) {
     throw new Error(
       'No LLM API key found. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, or OPENAI_COMPAT_API_KEY — ' +
         'or, with the Claude Code CLI installed, set generation.provider to "claude-code" in .openlore/config.json (no API key needed). ' +
-        'Other no-key providers: copilot, gemini-cli, mistral-vibe, cursor-agent.'
+        'Other no-key providers: codex-cli, copilot, gemini-cli, antigravity-cli, mistral-vibe, cursor-agent.'
     );
   }
 
@@ -166,8 +166,10 @@ export async function openloreGenerate(options: GenerateApiOptions = {}): Promis
     copilot: DEFAULT_COPILOT_MODEL,
     openai: DEFAULT_OPENAI_MODEL,
     'claude-code': 'claude-code',
+    'codex-cli': 'codex-cli',
     'mistral-vibe': 'mistral-vibe',
     'gemini-cli': 'gemini-cli',
+    'antigravity-cli': 'antigravity-cli',
     'cursor-agent': 'cursor-agent',
   };
   const effectiveModel = options.model || openloreConfig.generation.model || defaultModels[effectiveProvider];

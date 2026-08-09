@@ -191,6 +191,7 @@ export async function handleRecordDecision(
       supersedes,
       sessionId: store.sessionId,
       recordedAt: new Date().toISOString(),
+      contentOrigin: 'agent-recorded',
       confidence: 'medium',
       syncedToSpecs: [],
     };
@@ -260,6 +261,7 @@ export async function handleListDecisions(
         recordedAt: d.recordedAt,
         syncedToSpecs: d.syncedToSpecs,
         verificationEvidence: d.verificationEvidence,
+        contentOrigin: d.contentOrigin,
         // Provenance is always disclosed: an autopilot-accepted decision is
         // authoritative but never presented as human-reviewed. (add-decision-autopilot)
         ...(d.approvedBy ? { approvedBy: d.approvedBy } : {}),

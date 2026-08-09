@@ -3024,3 +3024,14 @@ on the embedding endpoint's `skipSslVerify`.
 - **GIVEN** a config with `embedding.skipSslVerify: true` and default LLM TLS
 - **WHEN** an embedder calls `openloreGenerate`
 - **THEN** the host process's global TLS verification is unchanged
+
+### Requirement: ApiRecordedDecisionsDeclareAgentOrigin
+
+`openloreRecordDecision` SHALL mark every directly recorded draft as
+`agent-recorded` so downstream approval surfaces never infer an absent provenance value.
+
+#### Scenario: API decision provenance is explicit
+
+- **GIVEN** an embedder records an architectural decision through the API
+- **WHEN** the pending decision is persisted or listed
+- **THEN** its content origin is `agent-recorded`

@@ -1570,6 +1570,17 @@ not evaluate it and name the tool that does — never that the capability is "no
 - **THEN** the composed test selection runs with the federation scope
 - **AND** the briefing carries its cross-repo result and coverage disclosures
 
+### Requirement: RecordedDecisionsDeclareContentOrigin
+
+The `record_decision` handler SHALL mark agent-authored drafts as `agent-recorded`, and
+decision-list responses SHALL expose the explicit origin for every pending decision.
+
+#### Scenario: Agent-recorded text is distinguishable from LLM text
+
+- **GIVEN** an agent records an architectural decision through MCP
+- **WHEN** a reviewer lists the pending decisions
+- **THEN** the decision reports `agent-recorded` rather than an absent or inferred origin
+
 ## Decisions
 
 ### Build the MCP live-data test harness as an integration-only, behavior-neutral verification layer

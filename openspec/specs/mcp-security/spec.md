@@ -36,9 +36,7 @@ data-flow patterns a generic taint scanner flags in this codebase (read a file, 
 call git or an LLM endpoint) are the tool's legitimate job; this spec makes that intent
 **explicit and auditable** (see *Capability Declaration and Accepted-Risk Register*)
 rather than obscuring it.
-
 ## Requirements
-
 ### Requirement: Symlink-Aware Path Confinement
 
 Every tool argument that names a filesystem path SHALL be confined to the validated
@@ -536,6 +534,40 @@ review rather than guaranteeing safety.
 - **THEN** the finding names the artifact and matched shape
 - **AND** the artifact remains byte-identical
 - **AND** the default exit posture remains non-blocking
+
+### Requirement: LlmDerivedTextIsUntrustedUntilHumanApproval
+
+Free-text fields produced by an LLM (proposed requirement text, decision title/rationale,
+drift suggestion reason) and LLM-supplied supersession targets SHALL be treated as
+untrusted until a human approves them. Every pending decision SHALL carry an explicit
+`agent-recorded` or `llm-extracted` origin, and every approval interface SHALL display
+that origin while stripping terminal control characters from untrusted fields. A
+supersession SHALL be applied only when a recorded draft explicitly declares a target
+already known to the decision store. LLM-authored text written toward a durable trusted
+surface (spec requirements, the commit-gate approval prompt) SHALL be marked as
+LLM-extracted so a reviewer approves content, not a rubber stamp.
+
+#### Scenario: An injected supersession does not retire a real decision
+
+- **GIVEN** an LLM consolidation output whose `supersededIds` names a genuine existing
+  decision the diff wanted retired
+- **WHEN** consolidation applies supersessions
+- **THEN** the supersession is applied only when a recorded draft explicitly declared the
+  known target and the injected target does not silently retire the real decision
+
+#### Scenario: A spec requirement carries its LLM provenance to the approver
+
+- **GIVEN** a proposed requirement extracted by the LLM from a diff
+- **WHEN** the commit gate presents it for approval
+- **THEN** it is marked as LLM-extracted from a diff, so the human approves the content
+  deliberately
+
+#### Scenario: Approval content cannot forge the terminal
+
+- **GIVEN** LLM-authored decision text containing ANSI controls or embedded newlines
+- **WHEN** a CLI or TUI approval surface renders the decision
+- **THEN** the origin remains visible and untrusted fields cannot clear, redraw, or forge
+  approval lines
 
 ## Technical Notes
 

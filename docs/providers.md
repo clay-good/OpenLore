@@ -4,7 +4,7 @@
 > (including where these provider values go), see [configuration.md](configuration.md). An LLM is
 > optional — `analyze`/`orient`/the graph tools need no API key.
 
-openlore supports nine providers. The default is Anthropic Claude.
+openlore supports eleven provider IDs. The default is Anthropic Claude.
 
 | Provider | `provider` value | API key env var | Default model |
 |----------|-----------------|-----------------|---------------|
@@ -14,7 +14,9 @@ openlore supports nine providers. The default is Anthropic Claude.
 | GitHub Copilot *(via copilot-api proxy)* | `copilot` | *(none)* | `gpt-4o` |
 | Google Gemini | `gemini` | `GEMINI_API_KEY` | `gemini-2.0-flash` |
 | Gemini CLI | `gemini-cli` | *(none)* | *(CLI default)* |
+| Antigravity CLI | `antigravity-cli` | *(none)* | *(CLI default)* |
 | Claude Code | `claude-code` | *(none)* | *(CLI default)* |
+| Codex CLI | `codex-cli` | *(none)* | *(CLI default)* |
 | Mistral Vibe | `mistral-vibe` | *(none)* | *(CLI default)* |
 | Cursor Agent CLI | `cursor-agent` | *(none)* | *(CLI default)* |
 
@@ -130,12 +132,14 @@ No API key is required — the copilot-api proxy handles authentication via your
 
 ### CLI-based providers (no API key)
 
-Four providers route LLM calls through local CLI tools instead of HTTP APIs. No API key or configuration is needed — just have the CLI installed and on your PATH.
+Six provider IDs route LLM calls through local CLI tools instead of HTTP APIs. No API key or configuration is needed — just have the CLI installed and on your PATH. The hardened agent integrations cover four families: Codex, Claude Code, Google Gemini (Gemini CLI or Antigravity CLI), and Cursor.
 
 | Provider | CLI binary | Install |
 |----------|-----------|----------------|
+| `codex-cli` | `codex` | [Codex CLI](https://learn.chatgpt.com/docs/developer-commands?surface=cli) (ChatGPT subscription / CLI auth) |
 | `claude-code` | `claude` | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (requires Claude Max/Pro subscription) |
 | `gemini-cli` | `gemini` | [Gemini CLI](https://github.com/google-gemini/gemini-cli) (free tier with Google account) |
+| `antigravity-cli` | `agy` | [Antigravity CLI](https://antigravity.google/docs/cli-overview) (Google account / subscription) |
 | `mistral-vibe` | `vibe` | [Mistral Vibe](https://github.com/mistralai/mistral-vibe) (standalone binary) |
 | `cursor-agent` | `cursor-agent` | [Cursor CLI](https://cursor.com/docs/cli/overview) (Cursor subscription / CLI auth) |
 
@@ -147,6 +151,19 @@ Four providers route LLM calls through local CLI tools instead of HTTP APIs. No 
   }
 }
 ```
+
+OpenLore treats these as analysis-only subprocesses. It invokes Codex ephemerally with
+user configuration and rules ignored in its read-only sandbox, Claude Code with an empty
+tool set and no MCP servers, Gemini CLI with default approval and no pre-approved tools or
+extensions, Antigravity CLI in sandbox mode, and Cursor Agent in read-only Ask mode. Each
+subprocess runs from an isolated temporary directory so repository instructions, hooks,
+plugins, and project settings are not loaded while normal CLI authentication remains
+available. A provider invocation fails instead of falling back to unrestricted tool access.
+Repository content is passed inside a randomized data boundary and is never trusted as an
+instruction. Some harnesses retain read-only or search tools in their restricted modes;
+OpenLore prevents repository mutation and project-local configuration loading, but does not
+claim that every provider is tool-free. Use the provider's account and network controls when
+repository content must not be sent through provider-managed search services.
 
 ### Custom base URL for Anthropic or OpenAI
 
@@ -186,4 +203,3 @@ The providers above are for **LLM** spec generation. Semantic search uses a sepa
 | Remote (OpenAI-compatible) | `EMBED_BASE_URL`/`EMBED_MODEL` or an `embedding` block, then `openlore analyze` | optional (`EMBED_API_KEY`) | Any `/embeddings` endpoint: Ollama, OpenAI, Mistral, vLLM, LM Studio… |
 
 Revert to keyword with `openlore embed --off`. See [docs/semantic-search.md](semantic-search.md#retrieval-modes) for the full reference.
-

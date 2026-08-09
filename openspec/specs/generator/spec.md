@@ -1418,6 +1418,20 @@ symlink-aware project confinement before I/O.
 - **WHEN** initialization, cleanup, backup, configuration, or reporting begins
 - **THEN** the writer fails closed before changing the external target
 
+### Requirement: GeneratorRepositoryContextUsesTheSharedPromptBoundary
+
+Every generator stage and test-generation analysis that sends repository-derived source,
+specification, scenario, or test-title content to an LLM SHALL use the shared randomized
+untrusted-data boundary defined by the `llm` specification.
+
+#### Scenario: A hostile source excerpt remains data
+
+- **GIVEN** repository source or spec text that contains an instruction to change the
+  requested output
+- **WHEN** a generator, verification, coverage, or test-enrichment path builds its prompt
+- **THEN** the complete repository-derived payload is inside the randomized boundary and
+  the instruction-level prompt contains no copied hostile text
+
 ## Technical Notes
 
 - **Implementation**: `src/core/generator/schemas.ts, src/core/generator/openspec-compat.ts, src/core/generator/openspec-format-generator.ts, src/core/generator/mapping-generator.ts, src/core/generator/adr-generator.ts, src/core/generator/openspec-writer.ts, src/core/generator/spec-pipeline.ts`

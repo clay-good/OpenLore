@@ -1668,6 +1668,20 @@ unchanged.
 - **THEN** stderr states the verdict (suppressed) and which criteria failed, and stdout contains
   only the pointer line
 
+### Requirement: DecisionApprovalDisplaysSafeContentOrigin
+
+Every decision approval or verbose listing SHALL display whether its content is
+`agent-recorded` or `llm-extracted`, and SHALL remove terminal control characters and
+embedded line breaks from untrusted decision fields before rendering them.
+
+#### Scenario: LLM text cannot forge an approval screen
+
+- **GIVEN** an LLM-extracted rationale containing ANSI clear-screen controls and a forged
+  approval line
+- **WHEN** the CLI or interactive TUI renders the pending decision
+- **THEN** the origin warning remains visible and the injected controls and line break do
+  not alter the approval display
+
 ## Technical Notes
 
 - **Dependencies**: ora, logger, ProgressIndicator, showNextSteps, @inquirer/prompts

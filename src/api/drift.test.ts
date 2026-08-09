@@ -172,6 +172,12 @@ describe('openloreDrift', () => {
       await openloreDrift({ rootPath: ROOT, llmEnhanced: true });
       expect(mockCreateLLMService).toHaveBeenCalled();
     });
+
+    it.each(['codex-cli', 'antigravity-cli'] as const)('uses no-key provider %s', async (provider) => {
+      delete process.env.ANTHROPIC_API_KEY;
+      await openloreDrift({ rootPath: ROOT, llmEnhanced: true, provider });
+      expect(mockCreateLLMService).toHaveBeenCalledWith(expect.objectContaining({ provider, model: provider }));
+    });
   });
 
   describe('maxFiles limit', () => {

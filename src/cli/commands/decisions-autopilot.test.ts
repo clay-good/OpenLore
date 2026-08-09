@@ -68,6 +68,7 @@ function makeDecision(overrides: Partial<PendingDecision> = {}): PendingDecision
     affectedFiles: ['src/cache.ts'],
     sessionId: 'session123',
     recordedAt: '2026-07-18T00:00:00.000Z',
+    contentOrigin: 'agent-recorded',
     confidence: 'high',
     syncedToSpecs: [],
     ...overrides,

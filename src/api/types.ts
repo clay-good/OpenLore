@@ -115,7 +115,7 @@ export interface AnalyzeResult {
 
 export interface GenerateApiOptions extends BaseOptions {
   /** LLM provider to use */
-  provider?: 'anthropic' | 'openai' | 'openai-compat' | 'copilot' | 'gemini' | 'gemini-cli' | 'claude-code' | 'mistral-vibe' | 'cursor-agent';
+  provider?: 'anthropic' | 'openai' | 'openai-compat' | 'copilot' | 'gemini' | 'gemini-cli' | 'antigravity-cli' | 'claude-code' | 'codex-cli' | 'mistral-vibe' | 'cursor-agent';
   /** LLM model name */
   model?: string;
   /** Custom LLM API base URL */
@@ -156,7 +156,7 @@ export interface GenerateResult {
 
 export interface VerifyApiOptions extends BaseOptions {
   /** LLM provider to use */
-  provider?: 'anthropic' | 'openai' | 'openai-compat' | 'copilot' | 'gemini' | 'gemini-cli' | 'claude-code' | 'mistral-vibe' | 'cursor-agent';
+  provider?: 'anthropic' | 'openai' | 'openai-compat' | 'copilot' | 'gemini' | 'gemini-cli' | 'antigravity-cli' | 'claude-code' | 'codex-cli' | 'mistral-vibe' | 'cursor-agent';
   /** LLM model name */
   model?: string;
   /** Custom LLM API base URL */
@@ -194,7 +194,7 @@ export interface DriftApiOptions extends BaseOptions {
   /** Use LLM for deeper semantic comparison */
   llmEnhanced?: boolean;
   /** LLM provider (required if llmEnhanced is true) */
-  provider?: 'anthropic' | 'openai' | 'openai-compat' | 'copilot' | 'gemini' | 'gemini-cli' | 'claude-code' | 'mistral-vibe' | 'cursor-agent';
+  provider?: 'anthropic' | 'openai' | 'openai-compat' | 'copilot' | 'gemini' | 'gemini-cli' | 'antigravity-cli' | 'claude-code' | 'codex-cli' | 'mistral-vibe' | 'cursor-agent';
   /** LLM model name (used when llmEnhanced is true) */
   model?: string;
   /** Custom LLM API base URL */
@@ -229,7 +229,7 @@ export interface RunApiOptions extends BaseOptions {
    */
   reExtract?: boolean;
   /** LLM provider to use */
-  provider?: 'anthropic' | 'openai' | 'openai-compat' | 'copilot' | 'gemini' | 'gemini-cli' | 'claude-code' | 'mistral-vibe' | 'cursor-agent';
+  provider?: 'anthropic' | 'openai' | 'openai-compat' | 'copilot' | 'gemini' | 'gemini-cli' | 'antigravity-cli' | 'claude-code' | 'codex-cli' | 'mistral-vibe' | 'cursor-agent';
   /** LLM model name */
   model?: string;
   /** Custom LLM API base URL */

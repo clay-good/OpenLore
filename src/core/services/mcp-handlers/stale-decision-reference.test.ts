@@ -20,6 +20,7 @@ function decision(p: Partial<PendingDecision> & { id: string }): PendingDecision
     supersedes: p.supersedes,
     sessionId: p.sessionId ?? 's1',
     recordedAt: p.recordedAt ?? '2026-06-23T00:00:00Z',
+    contentOrigin: p.contentOrigin ?? 'agent-recorded',
     confidence: p.confidence ?? 'high',
     syncedToSpecs: p.syncedToSpecs ?? [],
   };
