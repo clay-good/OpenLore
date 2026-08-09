@@ -51,7 +51,8 @@
       the stamp digests extractor bytes, so these differ at the same version), Node ABI, and
       platform triple, else CI silently gets a 0% hit rate or, worse, a divergence
 - [ ] Redact secrets on EXPORT (docstrings/signatures/identifiers leave the machine for the first
-      time; `secret-redaction.ts` is currently wired only to telemetry/LLM/error paths)
+      time; tool dispatch, telemetry, LLM, and error paths are covered, while cache export
+      remains a separate serialized boundary)
 - [ ] Gate: an unsigned imported cache is bypassed by any analyze feeding a blocking enforcement
       decision; import path does not ship before bundle signature verification ships
 - [ ] `openlore cache export|import` CLI (+ `--json`), with accepted/rejected counts and reasons

@@ -287,6 +287,30 @@ describe('openlore serve', () => {
     expect(body.error).toMatch(/No analysis/i);
   });
 
+  it('uses one canonical repository for handler data and boundary policy', async () => {
+    const h = await boot({ preset: 'all' });
+    const otherRoot = await mkdtemp(join(tmpdir(), 'openlore-serve-other-'));
+    try {
+      await writeFile(join(root, 'auth.ts'), 'export function auth() { return "served-root"; }\n');
+      await writeFile(join(otherRoot, 'auth.ts'), `export function auth() { return "sk-${'v'.repeat(24)}"; }\n`);
+
+      const res = await fetch(`${h.baseUrl}/tool/get_function_body`, {
+        method: 'POST',
+        body: JSON.stringify({
+          directory: root,
+          args: { directory: otherRoot, filePath: 'auth.ts', functionName: 'auth' },
+        }),
+      });
+      const body = await jsonOf(res);
+
+      expect(res.status).toBe(200);
+      expect(body.body).toContain('served-root');
+      expect(JSON.stringify(body)).not.toContain(`sk-${'v'.repeat(24)}`);
+    } finally {
+      await rm(otherRoot, { recursive: true, force: true });
+    }
+  });
+
   it('preset "all" exposes non-navigation tools', async () => {
     const h = await boot({ preset: 'all' });
     const res = await fetch(`${h.baseUrl}/health`);

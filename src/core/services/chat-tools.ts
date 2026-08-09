@@ -22,13 +22,13 @@ import {
 } from './mcp-handlers/graph.js';
 
 import {
-  handleSearchCode,
   handleSuggestInsertionPoints,
   handleSearchSpecs,
   handleListSpecDomains,
   handleGetSpec,
   handleUnifiedSearch,
 } from './mcp-handlers/semantic.js';
+import { dispatchTool } from './tool-dispatch.js';
 
 import {
   handleGetArchitectureOverview,
@@ -370,11 +370,12 @@ export const CHAT_TOOLS: ChatTool[] = [
       required: ['directory', 'query'],
     },
     async execute(directory, args) {
-      const result = await handleSearchCode(
-        (args.directory as string) ?? directory,
-        args.query as string,
-        (args.limit as number) ?? 10
-      );
+      const targetDirectory = (args.directory as string) ?? directory;
+      const result = await dispatchTool('search_code', {
+        directory: targetDirectory,
+        query: args.query as string,
+        limit: (args.limit as number) ?? 10,
+      }, targetDirectory);
       const paths: string[] = [];
       if (result && typeof result === 'object') {
         const r = result as Record<string, unknown>;

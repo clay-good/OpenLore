@@ -533,8 +533,9 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
       const directory = (typeof body.directory === 'string' && body.directory)
         || (typeof args.directory === 'string' && args.directory)
         || root;
-      // Ensure handlers receive directory in args (they read it from there).
-      if (typeof args.directory !== 'string') args.directory = directory;
+      // Canonicalize the directory once: handlers and boundary policy must read the
+      // same repository, even when a caller supplies conflicting body/args values.
+      args.directory = directory;
 
       try {
         await validateDirectory(directory);

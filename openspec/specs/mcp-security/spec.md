@@ -596,6 +596,9 @@ learned model), default-on, and opt-out via configuration for trusted-solo use. 
 *Secret Confinement Across All Output Paths* from the tool's own credentials to the analyzed
 repository's content.
 
+> Decision recorded: 2d0457b5
+> Date: 2026-08-09
+
 #### Scenario: A hardcoded credential does not reach the model verbatim
 
 - **GIVEN** an analyzed repository whose source contains a hardcoded API key
@@ -663,3 +666,19 @@ treated as a substitute for redaction.
 - **Non-goals:** user authentication for the stdio transport (the host process is trusted
   by construction); sandboxing the analyzed code (OpenLore parses statically and never
   executes repository code); defending against a compromised host process.
+
+## Decisions
+
+### Enforce repository secret redaction at shared tool dispatch
+
+**Status:** Approved
+**Date:** 2026-08-09
+**ID:** 2d0457b5
+
+Both stdio MCP and HTTP/Pi paths converge on `dispatchTool`, so applying the existing
+dependency-free redactor there protects source-carrying tool outputs without duplicating
+transport logic.
+
+**Consequences:** The four source-carrying tools are redacted by default with typed,
+counted disclosure. Trusted operators may opt out through configuration; existing error
+and telemetry redaction APIs remain compatible.

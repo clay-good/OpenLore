@@ -4,7 +4,7 @@
 
 accepted
 
-**Domains**: analyzer, drift, llm, config
+**Domains**: mcp-security, llm, config
 
 ## Context
 

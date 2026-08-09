@@ -21,6 +21,9 @@
 const SECRET_KEY_NAME =
   /(^|[._-])(api[._-]?key|apikey|token|secret|password|passwd|authorization|credential|client[._-]?secret|access[._-]?key|private[._-]?key|session[._-]?key)([._-]|$)/i;
 
+/** Canonical AWS SDK credential property names, including camelCase object syntax. */
+const CLOUD_CREDENTIAL_KEY_NAME = /^(?:aws)?(?:secretAccessKey|sessionToken)$/i;
+
 export type SecretKind =
   | 'api-key'
   | 'authorization'
@@ -48,23 +51,36 @@ interface SecretPattern {
 
 /** Fixed, deterministic credential patterns, ordered broadest-first to avoid double counting. */
 const SECRET_VALUE_PATTERNS: readonly SecretPattern[] = [
-  // Consume the ENTIRE header value — scheme plus credential — to end of line/value, so
-  // Basic/Digest/any spaced-credential scheme redacts as fully as Bearer. `\S+` would keep
-  // only the scheme and leave the credential behind. The Bearer-specific pattern above still
-  // covers bare `Bearer <token>` occurrences outside a header context.
-  { pattern: /Authorization:[^\n\r]*/gi, kind: 'authorization', replacement: 'Authorization: $MARKER' },
+  // Stop at a surrounding object/header delimiter so embedded provider diagnostics are
+  // scrubbed without erasing sibling source properties. A credential value must contain
+  // a scheme plus payload, so `{ Authorization: token, ... }` remains ordinary code.
+  {
+    pattern: /(["']?Authorization["']?\s*:\s*)(["']?)(?:[A-Za-z][A-Za-z0-9_-]*\s+[^}\]\n\r]*?|[A-Za-z0-9_+/=-]{10,})\2(?=\s*,\s*["']?[A-Za-z][A-Za-z0-9_-]*["']?\s*:|[}\]\n\r]|$)/gi,
+    kind: 'authorization',
+    replacement: '$1$2$MARKER$2',
+  },
   { pattern: /Bearer\s+\S{10,}/gi, kind: 'authorization', replacement: 'Bearer $MARKER' },
   { pattern: /-----BEGIN ([A-Z0-9 ]*PRIVATE KEY)-----[\s\S]*?-----END \1-----/g, kind: 'private-key' },
   { pattern: /\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqps?):\/\/[^\s:/]+:[^\s@/]+@[^\s'"`]+/gi, kind: 'connection-string' },
   { pattern: /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g, kind: 'jwt' },
   { pattern: /\bAKIA[0-9A-Z]{16}\b/g, kind: 'cloud-credential' },
+  {
+    pattern: /((?:AWS_SECRET_ACCESS_KEY|aws_secret_access_key|awsSecretAccessKey|secretAccessKey)\s*[=:]\s*)["']?[A-Za-z0-9/+=]{40}["']?/gi,
+    kind: 'cloud-credential',
+    replacement: '$1$MARKER',
+  },
+  {
+    pattern: /((?:AWS_SESSION_TOKEN|aws_session_token|awsSessionToken|sessionToken)\s*[=:]\s*)["']?[A-Za-z0-9/+=]{16,}["']?/gi,
+    kind: 'cloud-credential',
+    replacement: '$1$MARKER',
+  },
   // Provider header forms that carry the raw key. Anthropic sends `x-api-key`, Google
   // sends `x-goog-api-key`; a proxy that echoes the inbound request in its error body
   // puts the header (name and value) verbatim into text we then log.
   { pattern: /x-api-key:[^\n\r]*/gi, kind: 'api-key', replacement: 'x-api-key: $MARKER' },
   { pattern: /x-goog-api-key:[^\n\r]*/gi, kind: 'api-key', replacement: 'x-goog-api-key: $MARKER' },
   {
-    pattern: /((?:api[_-]?key|password|passwd|secret|token)["']?\s*[=:]\s*)["']?(?!\[REDACTED(?::[a-z-]+)?\])[^\s'";,]{8,}["']?/gi,
+    pattern: /((?:api[_-]?key|password|passwd|secret|token)["']?\s*[=:]\s*)(?!\[REDACTED(?::[a-z-]+)?\])(?:"[^"\r\n]{8,}"|'[^'\r\n]{8,}'|(?!(?:undefined|null|true|false)\b)(?:(?=[A-Za-z0-9_+/=-]{8,}(?:\s|[;,]|$))(?=[A-Za-z0-9_+/=-]*[0-9_+/=-])[A-Za-z0-9_+/=-]{8,}|[A-Za-z]{8,}(?=\s|$)))/gi,
     kind: 'secret-field',
     replacement: '$1$MARKER',
   },
@@ -137,7 +153,7 @@ export function redactSecrets<T>(value: T, _seen?: WeakMap<object, unknown>): T 
   const out: Record<string, unknown> = {};
   seen.set(value as object, out);
   for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-    if (typeof v === 'string' && SECRET_KEY_NAME.test(k)) {
+    if (typeof v === 'string' && (SECRET_KEY_NAME.test(k) || CLOUD_CREDENTIAL_KEY_NAME.test(k))) {
       out[k] = '[REDACTED]';
     } else {
       out[k] = redactSecrets(v, seen);
@@ -176,7 +192,11 @@ export function redactSecretsWithReport<T>(value: T, typed = true): RedactionRes
     const copy: Record<string, unknown> = {};
     seen.set(current, copy);
     for (const [key, child] of Object.entries(current as Record<string, unknown>)) {
-      if (typeof child === 'string' && SECRET_KEY_NAME.test(key)) {
+      if (typeof child === 'string' && CLOUD_CREDENTIAL_KEY_NAME.test(key)) {
+        copy[key] = marker('cloud-credential', typed);
+        count++;
+        kinds.add('cloud-credential');
+      } else if (typeof child === 'string' && SECRET_KEY_NAME.test(key)) {
         copy[key] = marker('secret-field', typed);
         count++;
         kinds.add('secret-field');

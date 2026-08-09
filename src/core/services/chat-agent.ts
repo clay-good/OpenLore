@@ -271,7 +271,11 @@ async function executeTool(
     const { result, filePaths } = await tool.execute(directory, args);
     let content = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
     if (content.length > MAX_TOOL_RESULT_CHARS) {
-      content = content.slice(0, MAX_TOOL_RESULT_CHARS) + '\n... [truncated]';
+      const receipt = result && typeof result === 'object' && !Array.isArray(result)
+        ? (result as Record<string, unknown>).redactions
+        : undefined;
+      const suffix = `\n... [truncated]${receipt === undefined ? '' : `\nRedactions: ${JSON.stringify(receipt)}`}`;
+      content = content.slice(0, Math.max(0, MAX_TOOL_RESULT_CHARS - suffix.length)) + suffix;
     }
     callbacks?.onToolEnd?.(name);
     return { content, filePaths };

@@ -99,6 +99,19 @@ describe('capStructuredResult', () => {
     expect(parsed.truncated).toBe(true);
     expect(typeof parsed.partial).toBe('string');
   });
+
+  it('preserves a redaction receipt when capping a nested source result', () => {
+    const redactions = { count: 3, kinds: ['api-key', 'cloud-credential'] };
+    const result = {
+      results: Array.from({ length: 50_000 }, (_, i) => ({ id: i, source: `[REDACTED:api-key] ${i}` })),
+      redactions,
+    };
+    const r = capStructuredResult(result, 64 * 1024);
+    const parsed = JSON.parse(r.text) as { redactions: typeof redactions };
+
+    expect(r.truncated).toBe(true);
+    expect(parsed.redactions).toEqual(redactions);
+  });
 });
 
 describe('classifyToolError', () => {

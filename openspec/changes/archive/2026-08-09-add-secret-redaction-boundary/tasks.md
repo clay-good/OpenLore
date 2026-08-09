@@ -1,7 +1,7 @@
 # Tasks — add-secret-redaction-boundary
 
 ## Implementation
-- [x] New shared module `src/utils/secret-redaction.ts`: deterministic pattern set (provider
+- [x] Shared module `src/core/services/secret-redaction.ts`: deterministic pattern set (provider
       API-key shapes, private-key blocks, bearer/JWT, connection strings, cloud credential
       formats), returning redacted text + span count + kinds; dependency-light (importable
       by MCP handlers, llm-service, and the Pi surface without pulling the analyzer)

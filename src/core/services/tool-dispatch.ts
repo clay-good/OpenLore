@@ -145,14 +145,14 @@ export async function dispatchTool(
   return redactSourceToolResult(canonical, checked, directory);
 }
 
-const SOURCE_CARRYING_TOOLS = new Set([
+export const SOURCE_CARRYING_TOOLS = new Set([
   'get_function_body',
   'find_clones',
   'analyze_env_impact',
   'search_code',
 ]);
 
-async function redactSourceToolResult(name: string, result: unknown, directory: string): Promise<unknown> {
+export async function redactSourceToolResult(name: string, result: unknown, directory: string): Promise<unknown> {
   if (!SOURCE_CARRYING_TOOLS.has(name)) return result;
   const config = await readOpenLoreConfig(directory);
   if (config?.secretRedaction?.toolOutput === false) return result;

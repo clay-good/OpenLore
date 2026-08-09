@@ -696,19 +696,6 @@ stand in for either outcome.
 - **WHEN** repository detection runs
 - **THEN** the directory is recognized as a git repository
 
-### Requirement: EnforceRepositorySecretRedactionAtSharedToolDispatch
-
-This domain SHALL conform to the canonical statement of decision `2d0457b5`, which lives in the
-`analyzer` domain — see [analyzer/spec.md](../analyzer/spec.md).
-
-#### Scenario: The canonical statement governs
-
-- **GIVEN** decision `2d0457b5` recorded in the `analyzer` domain
-- **WHEN** this domain's behavior touches that decision's surface
-- **THEN** it satisfies the canonical requirement as stated in [analyzer/spec.md](../analyzer/spec.md)
-
-> Decision pointer: 2d0457b5 — "Enforce repository secret redaction at shared tool dispatch" is recorded in `openspec/specs/analyzer/spec.md`; it also affects this domain.
-
 ## Sub-components
 
 > `DriftDetector` is an orchestrator. Each sub-component below implements one logical block.

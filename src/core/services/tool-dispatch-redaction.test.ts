@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { dispatchTool } from './tool-dispatch.js';
+import { dispatchTool, redactSourceToolResult, SOURCE_CARRYING_TOOLS } from './tool-dispatch.js';
 
 const roots: string[] = [];
 
@@ -17,6 +17,23 @@ afterEach(async () => {
 });
 
 describe('source-carrying tool output redaction', () => {
+  it('routes every source-carrying tool through the disclosure boundary', async () => {
+    const root = await fixtureRoot();
+    const secret = `sk-${'r'.repeat(24)}`;
+
+    expect([...SOURCE_CARRYING_TOOLS]).toEqual([
+      'get_function_body',
+      'find_clones',
+      'analyze_env_impact',
+      'search_code',
+    ]);
+    for (const tool of SOURCE_CARRYING_TOOLS) {
+      const result = await redactSourceToolResult(tool, { source: secret }, root) as Record<string, unknown>;
+      expect(JSON.stringify(result), tool).not.toContain(secret);
+      expect(result.redactions, tool).toEqual({ count: 1, kinds: ['api-key'] });
+    }
+  });
+
   it('redacts a function body once and discloses the kind', async () => {
     const root = await fixtureRoot();
     const secret = `sk-${'a'.repeat(24)}`;
