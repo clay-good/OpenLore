@@ -31,7 +31,7 @@ validate`**, and the archive machinery works again. This pass:
   because their requirements were already synced verbatim (`fix-pi-parity-drift`,
   `fix-redaction-module-gaps`).
 
-## Complete — 127 in `archive/`
+## Complete — 128 in `archive/`
 
 Everything in `openspec/changes/archive/` is shipped (or a settled won't-do), with its
 requirements reflected in the main specs. `openspec list` shows only open work.
@@ -41,7 +41,7 @@ requirements reflected in the main specs. `openspec list` shows only open work.
 No open change has partial code on `main`. A change belongs here the moment its implementation
 starts; move it back out (archive it) the moment its marker/spec evidence lands.
 
-## To build — 118
+## To build — 117
 
 The whole open set is unbuilt backlog. Newest additions: 7 proposals from the 2026-07-27
 first-run e2e (`E2E-FIRSTRUN-2026-07-27.md`). Other thematic indexes:
@@ -58,7 +58,8 @@ longer skew domains, languages, or high-value files, and undomained source files
 rank evidence make task-scoped injection reachable in the zero-config keyword mode;
 `fix-empty-orient-and-corpus-honesty` (2026-08-09, archived) — empty orientations explain their
 misses with bounded near-token receipts, and synthetic external nodes no longer enter the
-searchable function corpus.
+searchable function corpus; `widen-import-resolution` (2026-08-09, archived) — Go, Java, Kotlin,
+C#, and PHP now resolve statically unique package/import bindings at `import` confidence.
 
 After this table was compiled, four research sweeps added 32 more proposals (all validate; not yet
 folded into the table): 10 in `FIELD-RESEARCH-2026-07.md`, 10 in `ECOSYSTEM-RESEARCH-2026-07-27.md`,
@@ -159,7 +160,6 @@ trust boundary for served content.
 | `shrink-traversal-index-invalidation-scope` | The traversal structure is invalidated by edits it does not depend on |
 | `unify-onboarding-entrypoint` | install once, auto-init on every repo you touch |
 | `widen-architecture-rule-vocabulary` | required, circular, reachable/orphan, captures, instability |
-| `widen-import-resolution` | Widen import-precise cross-file resolution beyond TS/JS/Python |
 | `widen-keyword-recall-with-repo-vocabulary` | close the natural-language gap without an embedder |
 | `widen-overlay-language-coverage` | Go error flow, Kotlin/Dart types, four CFG languages, Python/Go HTTP clients |
 

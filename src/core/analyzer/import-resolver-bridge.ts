@@ -6,7 +6,7 @@
  * share the same function name.
  *
  * TypeScript / JavaScript / Python are handled via import-parser.ts (existing).
- * Go, Rust, Ruby, Java get lightweight regex parsers here.
+ * Go, Java, Kotlin, C#, and PHP use lightweight declaration/import indexes here.
  */
 
 import { dirname, resolve, posix } from 'node:path';
@@ -31,28 +31,184 @@ export type ImportMap = Map<string, Map<string, string>>;
  * repo-relative target (e.g. `widgets/sphere.ts` importing `../shapes/base` → `shapes/base`)
  * that prefix-matches the class node's `shapes/base.ts`.
  *
- * Scope: relative TS/JS/Python imports — the languages with a content-level import parser.
- * Non-relative (package) imports and other languages are skipped; resolution then falls
- * through to the same-directory / global-unique layers exactly as before (additive — this
- * can only recover a correct base, never introduce a new wrong one).
+ * Scope: relative TS/JS/Python imports plus the statically bindable package/namespace forms
+ * registered below. Unresolved imports fall through to the existing ladder unchanged.
  */
 /**
- * Languages whose relative imports {@link buildBaseImportMap} actually resolves into the
+ * Languages whose import or package facts {@link buildBaseImportMap} actually resolves into the
  * `confidence: 'import'` edge path (the live import-resolution pipeline). Authoritative
  * source for the `imports` capability flag in the declarative language-support registry
  * (change: add-declarative-language-support-registry). MUST match the dispatch in
- * {@link buildBaseImportMap} below. (Go/Rust/Ruby/Java parsers exist elsewhere but are not
- * wired into this live path, so the registry does not claim `imports` for them — honesty
- * over latent capability.)
+ * {@link buildBaseImportMap} below. Ruby remains outside this set because its load forms do
+ * not statically bind names.
  */
 export const IMPORT_RESOLUTION_LANGUAGES: ReadonlySet<string> = new Set<string>([
-  'TypeScript', 'JavaScript', 'Python',
+  'TypeScript', 'JavaScript', 'Python', 'Go', 'Java', 'Kotlin', 'C#', 'PHP',
 ]);
+
+/** Reserved map entry for a caller's own package directory (used by bare Go calls). */
+export const PACKAGE_SCOPE_IMPORT = '\0package';
+
+type TargetIndex = Map<string, Set<string>>;
+
+function addTarget(index: TargetIndex, name: string, path: string): void {
+  const targets = index.get(name) ?? new Set<string>();
+  targets.add(path);
+  index.set(name, targets);
+}
+
+function uniqueTarget(index: TargetIndex, name: string): string | undefined {
+  const targets = index.get(name);
+  return targets?.size === 1 ? targets.values().next().value : undefined;
+}
+
+function declaredNamespace(content: string, language: string): string | undefined {
+  if (language === 'PHP') {
+    return content.match(/^\s*namespace\s+([\\\w]+)\s*;/m)?.[1].replaceAll('\\', '.');
+  }
+  if (language === 'C#') return content.match(/^\s*namespace\s+([\w.]+)\s*[;{]/m)?.[1];
+  return content.match(/^\s*package\s+([\w.]+)\s*;?/m)?.[1];
+}
+
+function declaredTypes(content: string): string[] {
+  return [...content.matchAll(/\b(?:class|interface|enum|record|object|trait)\s+([A-Za-z_]\w*)/g)]
+    .map(m => m[1]);
+}
+
+function resolveImportedFqn(index: TargetIndex, fqn: string, memberImport = false): string | undefined {
+  const exact = uniqueTarget(index, fqn);
+  if (exact || !memberImport || !fqn.includes('.')) return exact;
+  return uniqueTarget(index, fqn.slice(0, fqn.lastIndexOf('.')));
+}
+
+function goImportSpecs(content: string): Array<{ alias: string; source: string }> {
+  const specs: Array<{ alias: string; source: string }> = [];
+  const add = (alias: string | undefined, source: string): void => {
+    const local = alias ?? source.split('/').pop()!;
+    if (local !== '_' && local !== '.') specs.push({ alias: local, source });
+  };
+  for (const m of content.matchAll(/^\s*import\s+(?:(\w+)\s+)?"([^"]+)"/gm)) add(m[1], m[2]);
+  for (const block of content.matchAll(/\bimport\s*\(([\s\S]*?)\)/g)) {
+    for (const m of block[1].matchAll(/^\s*(?:(\w+)\s+)?"([^"]+)"/gm)) add(m[1], m[2]);
+  }
+  return specs;
+}
+
+/** Build import/package bindings (change: widen-import-resolution). */
+function buildStaticLanguageImportMaps(
+  files: Array<{ path: string; content: string; language: string }>,
+): ImportMap {
+  const map: ImportMap = new Map();
+  const allFilePaths = files.map(file => file.path);
+
+  const goPackages = new Map<string, Set<string>>();
+  for (const f of files.filter(f => f.language === 'Go')) {
+    const pkg = f.content.match(/^\s*package\s+([A-Za-z_]\w*)\b/m)?.[1];
+    if (!pkg) continue;
+    const dirs = goPackages.get(pkg) ?? new Set<string>();
+    dirs.add(posix.dirname(f.path));
+    goPackages.set(pkg, dirs);
+  }
+  for (const f of files.filter(f => f.language === 'Go')) {
+    const fileMap = new Map<string, string>();
+    const ownPackage = f.content.match(/^\s*package\s+([A-Za-z_]\w*)\b/m)?.[1];
+    const ownDir = posix.dirname(f.path);
+    if (ownPackage && goPackages.get(ownPackage)?.has(ownDir)) {
+      fileMap.set(PACKAGE_SCOPE_IMPORT, ownDir);
+    }
+    for (const [alias, target] of parseGoImports(f.path, f.content, allFilePaths)) {
+      fileMap.set(alias, target);
+    }
+    for (const spec of goImportSpecs(f.content)) {
+      const candidates = [...goPackages.values()].flatMap(dirs => [...dirs]).filter(dir =>
+        spec.source === dir || spec.source.endsWith(`/${dir}`) || dir.endsWith(`/${spec.source}`),
+      );
+      if (candidates.length === 1) fileMap.set(spec.alias, candidates[0]);
+    }
+    if (fileMap.size > 0) map.set(f.path, fileMap);
+  }
+
+  const fqnIndex: TargetIndex = new Map();
+  const namespaceTypes = new Map<string, Map<string, Set<string>>>();
+  for (const f of files) {
+    if (!['Java', 'Kotlin', 'C#', 'PHP'].includes(f.language)) continue;
+    const namespace = declaredNamespace(f.content, f.language);
+    if (!namespace) continue;
+    const symbols = declaredTypes(f.content);
+    if (f.language === 'Kotlin') {
+      for (const m of f.content.matchAll(/^\s*fun\s+([A-Za-z_]\w*)\s*\(/gm)) symbols.push(m[1]);
+    }
+    const byName = namespaceTypes.get(namespace) ?? new Map<string, Set<string>>();
+    for (const symbol of symbols) {
+      addTarget(fqnIndex, `${namespace}.${symbol}`, f.path);
+      const targets = byName.get(symbol) ?? new Set<string>();
+      targets.add(f.path);
+      byName.set(symbol, targets);
+    }
+    namespaceTypes.set(namespace, byName);
+  }
+
+  for (const f of files) {
+    if (!['Java', 'Kotlin', 'C#', 'PHP'].includes(f.language)) continue;
+    const fileMap = new Map<string, string>();
+    const conflicting = new Set<string>();
+    const bind = (name: string, target: string): void => {
+      if (conflicting.has(name)) return;
+      const existing = fileMap.get(name);
+      if (existing && existing !== target) {
+        fileMap.delete(name);
+        conflicting.add(name);
+      } else {
+        fileMap.set(name, target);
+      }
+    };
+    const ownNamespace = declaredNamespace(f.content, f.language);
+    if (ownNamespace) {
+      for (const [name, targets] of namespaceTypes.get(ownNamespace) ?? []) {
+        if (targets.size === 1) bind(name, targets.values().next().value!);
+      }
+    }
+
+    if (f.language === 'Java' || f.language === 'Kotlin') {
+      for (const m of f.content.matchAll(/^\s*import\s+(?:(static)\s+)?([\w.]+)(?:\s+as\s+(\w+))?\s*;?/gm)) {
+        const fqn = m[2];
+        const local = m[3] ?? fqn.split('.').pop()!;
+        const target = resolveImportedFqn(fqnIndex, fqn, m[1] === 'static');
+        if (target) bind(local, target);
+      }
+    } else if (f.language === 'C#') {
+      for (const m of f.content.matchAll(/^\s*using\s+(?:(\w+)\s*=\s*)?([\w.]+)\s*;/gm)) {
+        const alias = m[1];
+        const imported = m[2];
+        const direct = resolveImportedFqn(fqnIndex, imported);
+        if (alias && direct) bind(alias, direct);
+        if (!alias) {
+          for (const [name, targets] of namespaceTypes.get(imported) ?? []) {
+            if (targets.size === 1) bind(name, targets.values().next().value!);
+          }
+          if (direct) bind(imported.split('.').pop()!, direct);
+        }
+      }
+    } else {
+      for (const m of f.content.matchAll(/^\s*use\s+(?:function\s+)?([\\\w]+)(?:\s+as\s+(\w+))?\s*;/gm)) {
+        const fqn = m[1].replaceAll('\\', '.');
+        const local = m[2] ?? fqn.split('.').pop()!;
+        const target = resolveImportedFqn(fqnIndex, fqn);
+        if (target) bind(local, target);
+      }
+    }
+    if (fileMap.size > 0) map.set(f.path, fileMap);
+  }
+
+  // Ruby intentionally remains name-only: require/autoload/open classes load files but do not
+  // statically bind names, so treating them as a name map would guess at runtime behavior.
+  return map;
+}
 
 export function buildBaseImportMap(
   files: Array<{ path: string; content: string; language: string }>,
 ): ImportMap {
-  const map: ImportMap = new Map();
+  const map: ImportMap = buildStaticLanguageImportMaps(files);
   for (const f of files) {
     let imports;
     if (f.language === 'TypeScript' || f.language === 'JavaScript') {
@@ -219,7 +375,7 @@ export function buildResolvedImportMap(
     return false;
   }
 
-  const map: ImportMap = new Map();
+  const map: ImportMap = buildStaticLanguageImportMaps(files);
   const reExported = new Set<string>();
   for (const f of files) {
     let imports;
@@ -355,27 +511,13 @@ export function parseGoImports(
   allFilePaths: string[],
 ): Map<string, string> {
   const result = new Map<string, string>();
-  const dir = dirname(filePath);
-
-  // Single import: import "path/to/pkg"  or  import alias "path/to/pkg"
-  for (const m of content.matchAll(/import\s+(?:(\w+)\s+)?"([^"]+)"/g)) {
-    const importPath = m[2];
-    if (!importPath.startsWith('.')) continue;
-    const resolved = resolve(dir, importPath);
-    const match = allFilePaths.find(f => f.startsWith(resolved));
-    if (match) result.set(m[1] ?? importPath.split('/').pop()!, resolved);
+  const dir = posix.dirname(filePath);
+  for (const spec of goImportSpecs(content)) {
+    if (!spec.source.startsWith('.')) continue;
+    const target = posix.normalize(posix.join(dir, spec.source));
+    const matches = allFilePaths.filter(path => posix.dirname(path) === target);
+    if (matches.length > 0) result.set(spec.alias, target);
   }
-
-  // Grouped import block: import ( ... )
-  for (const group of content.matchAll(/import\s+\(\s*([\s\S]*?)\s*\)/g)) {
-    for (const line of group[1].split('\n')) {
-      const m = line.trim().match(/^(?:(\w+)\s+)?"([^"]+)"/);
-      if (!m || !m[2].startsWith('.')) continue;
-      const resolved = resolve(dir, m[2]);
-      result.set(m[1] ?? m[2].split('/').pop()!, resolved);
-    }
-  }
-
   return result;
 }
 

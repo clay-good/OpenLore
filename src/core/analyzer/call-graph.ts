@@ -12,11 +12,11 @@
  *  - Layer violations — cross-layer calls in the wrong direction
  */
 
-import { dirname, join as joinPath } from 'node:path';
+import { dirname, join as joinPath, posix } from 'node:path';
 import type Parser from 'tree-sitter';
 import { FunctionRegistryTrie } from './function-registry-trie.js';
 import type { ImportMap } from './import-resolver-bridge.js';
-import { buildResolvedImportMap } from './import-resolver-bridge.js';
+import { buildResolvedImportMap, PACKAGE_SCOPE_IMPORT } from './import-resolver-bridge.js';
 import { inferTypesFromSource, resolveViaTypeInference } from './type-inference-engine.js';
 import {
   extractAllHttpEdges,
@@ -2044,6 +2044,8 @@ interface QueryLangSpec {
   extraClassName?: (fnNode: TsNodeLike) => string | undefined;
   /** Optional filter: only emit a call edge when this returns true. */
   callFilter?: (calleeName: string, definedNames: Set<string>) => boolean;
+  /** Optional receiver recovery for grammars whose call query historically captured only a name. */
+  callObject?: (callNode: TsNodeLike) => string | undefined;
 }
 
 
@@ -2116,7 +2118,7 @@ async function extractByQueries(
       if (spec.callFilter && !spec.callFilter(calleeName, definedNames)) continue;
       const caller = findEnclosingFunction(nodes, nodeCapture.node.startIndex);
       if (!caller) continue;
-      const calleeObject = objectCapture?.node.text;
+      const calleeObject = objectCapture?.node.text ?? spec.callObject?.(nodeCapture.node);
       const key = `${caller.id}\0${calleeName}\0${calleeObject ?? ''}\0${nodeCapture.node.startIndex}`;
       if (seen.has(key)) continue;
       seen.add(key);
@@ -2141,12 +2143,11 @@ const CSHARP_SPEC: QueryLangSpec = {
     (constructor_declaration name: (identifier) @fn.name) @fn.node
     (local_function_statement name: (identifier) @fn.name) @fn.node
   `,
-  // Name-based resolution (matches the codebase's best-effort approach): capture
-  // the callee name only — the object isn't used for resolution in these langs.
   callQuery: `
     (invocation_expression function: (member_access_expression name: (identifier) @call.name)) @call.node
     (invocation_expression function: (identifier) @call.name) @call.node
   `,
+  callObject: (call) => call.childForFieldName('function')?.childForFieldName('expression')?.text,
 };
 
 // ── Kotlin ──────────────────────────────────────────────────────────────────
@@ -2175,6 +2176,10 @@ const KOTLIN_SPEC: QueryLangSpec = {
     (call_expression (simple_identifier) @call.name) @call.node
     (call_expression (navigation_expression (navigation_suffix (simple_identifier) @call.name))) @call.node
   `,
+  callObject: (call) => {
+    const navigation = call.namedChildren.find(c => c.type === 'navigation_expression');
+    return navigation?.namedChildren.find(c => c.type !== 'navigation_suffix')?.text;
+  },
 };
 
 // ── PHP ─────────────────────────────────────────────────────────────────────
@@ -2191,6 +2196,8 @@ const PHP_SPEC: QueryLangSpec = {
     (member_call_expression name: (name) @call.name) @call.node
     (scoped_call_expression name: (name) @call.name) @call.node
   `,
+  callObject: (call) =>
+    call.childForFieldName('object')?.text ?? call.childForFieldName('scope')?.text,
 };
 
 // ── C ───────────────────────────────────────────────────────────────────────
@@ -2277,6 +2284,10 @@ const QUERY_LANG_SPECS: Record<string, QueryLangSpec> = {
 export const CALLGRAPH_LANGUAGES: ReadonlySet<string> = new Set<string>([
   'Python', 'TypeScript', 'JavaScript', 'Go', 'Rust', 'Ruby', 'Java', 'C++', 'Swift', 'Elixir', 'Dart',
   ...Object.keys(QUERY_LANG_SPECS),
+]);
+
+const UNIQUE_IMPORT_BINDING_LANGUAGES: ReadonlySet<string> = new Set([
+  'Go', 'Java', 'Kotlin', 'C#', 'PHP',
 ]);
 
 // ── Dart (via portable WASM + web-tree-sitter) ───────────────────────────────
@@ -4486,6 +4497,12 @@ export class CallGraphBuilder {
         : { kind: 'ambiguous', candidates: cands };
     };
 
+    const matchesImportedTarget = (filePath: string, target: string): boolean =>
+      filePath === target
+      || filePath.startsWith(`${target}.`)
+      || filePath.startsWith(`${target}/`)
+      || posix.dirname(filePath) === target;
+
     /** Resolve an intra-object method call by walking the enclosing class chain,
      *  disambiguating each hop with {@link pickByAffinity}. Returns the resolved node,
      *  or — when the first class with candidates was ambiguous with no affinity and no
@@ -4588,7 +4605,8 @@ export class CallGraphBuilder {
       ) {
         const ch = raw.calleeObject.charCodeAt(0);
         const isCapitalized = ch >= 65 && ch <= 90; // A-Z
-        if (isCapitalized) {
+        const hasImportBinding = callImportMap.get(callerNode.filePath)?.has(raw.calleeObject);
+        if (isCapitalized && !hasImportBinding) {
           const picked = pickByAffinity(
             trie.findByQualifiedName(raw.calleeObject, raw.calleeName),
             callerNode.filePath,
@@ -4627,7 +4645,7 @@ export class CallGraphBuilder {
         }
       }
 
-      // Strategy 3 — import resolution, re-export aware (TS/JS/Python).
+      // Strategy 3 — import/package resolution, re-export aware for TS/JS.
       // The map resolves an imported name to its true-definition module even when it
       // arrives through a barrel; an anchored prefix match (`x.` / `x/`, never bare
       // `startsWith`) avoids binding `shapes/base` to `shapes/base2.ts`. An edge whose
@@ -4635,16 +4653,22 @@ export class CallGraphBuilder {
       // proven concrete target, but the barrel hop is disclosed); a direct import is
       // labelled `import`.
       if (!calleeNode) {
+        const qualifier = raw.calleeObject?.split(/[.\\:]/).filter(Boolean).pop();
         const viaName = callImportMap.get(callerNode.filePath)?.get(raw.calleeName);
         const importedFile = viaName
-          ?? (raw.calleeObject ? callImportMap.get(callerNode.filePath)?.get(raw.calleeObject) : undefined);
+          ?? (raw.calleeObject
+            ? callImportMap.get(callerNode.filePath)?.get(raw.calleeObject)
+              ?? (qualifier ? callImportMap.get(callerNode.filePath)?.get(qualifier) : undefined)
+            : callImportMap.get(callerNode.filePath)?.get(PACKAGE_SCOPE_IMPORT));
         if (importedFile) {
-          const candidates = trie.findBySimpleName(raw.calleeName).filter(n =>
-            n.filePath === importedFile
-            || n.filePath.startsWith(`${importedFile}.`)
-            || n.filePath.startsWith(`${importedFile}/`),
+          const importedCandidates = qualifier && callerNode.language !== 'Go'
+            ? trie.findByQualifiedName(qualifier, raw.calleeName)
+            : trie.findBySimpleName(raw.calleeName);
+          const candidates = importedCandidates.filter(n =>
+            matchesImportedTarget(n.filePath, importedFile),
           );
-          if (candidates.length > 0) {
+          const requiresUniqueTarget = UNIQUE_IMPORT_BINDING_LANGUAGES.has(callerNode.language);
+          if (candidates.length > 0 && (!requiresUniqueTarget || candidates.length === 1)) {
             calleeNode = candidates[0];
             confidence = (viaName && reExportedNames.has(`${callerNode.filePath}\0${raw.calleeName}`))
               ? 're_export'
