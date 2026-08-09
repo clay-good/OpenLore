@@ -1,12 +1,13 @@
 /**
  * Pure presentation + gating for task-scoped context injection
- * (change: add-task-scoped-context-injection).
+ * (changes: add-task-scoped-context-injection,
+ * fix-inject-relevance-gate-keyword-mode).
  *
  * Extracted from `orient-inject.ts` so it can be reused by hosts that must NOT
  * load the analyzer in-process — notably the Pi extension, which orients through
  * a warm daemon over RPC (decision abee8e3e). Everything here is pure and
- * deterministic; its only runtime dependency is `estimateTokens`. Keep it that
- * way — importing the analyzer (`handleOrient`) or config I/O here would drag the
+ * deterministic; its runtime dependencies are dependency-light pure helpers.
+ * Keep it that way — importing the analyzer (`handleOrient`) or config I/O here would drag the
  * analyzer back into the Pi host process the daemon split exists to keep lean.
  *
  * The block is framed as facts-not-coercion (Epistemic Lease, decision 8e95746d)
@@ -15,6 +16,7 @@
 
 import { estimateTokens } from '../../core/services/llm-service.js';
 import { frameServedContent, type ServedContentProvenance } from '../../core/services/served-content.js';
+import { tokenize } from '../../core/analyzer/bm25-tokenizer.js';
 import type { ContextInjectionConfig } from '../../types/index.js';
 
 /** Injection settings with every documented default applied. */
@@ -121,6 +123,12 @@ export interface LeanOrientResult {
   };
 }
 
+export interface RelevanceGateEvaluation {
+  passes: boolean;
+  passedCriteria: string[];
+  failedCriteria: string[];
+}
+
 /**
  * Deterministic orientation-relevance gate. Returns true when the task has a
  * substantial, structurally-connected match in the graph — the case where a
@@ -130,30 +138,62 @@ export interface LeanOrientResult {
  *
  * Signals are read off the lean orient result itself (no new analysis pass):
  *   1. matched-function count >= relevanceMinMatches, AND
- *   2. structural centrality — a match with fan-in >= relevanceMinFanIn, or a
- *      hub — OR, only on the bounded semantic/hybrid score scale, a top match
- *      score >= relevanceMinScore.
+ *   2. an exact identifier mention; structural centrality; a bounded hybrid
+ *      score; or scale-free keyword rank evidence.
  *
  * BM25-fallback scores live on an unbounded, corpus-relative scale, so the score
- * path is disabled there and the gate relies on count + structural centrality —
- * which keeps a strong structural match from being gated out when embeddings are
- * unavailable, without letting an arbitrary BM25 magnitude wave everything through.
+ * path is disabled there. Exact identifier and rank evidence make keyword mode
+ * decidable without letting an arbitrary BM25 magnitude wave everything through.
  */
-export function passesRelevanceGate(result: LeanOrientResult, cfg: ResolvedInjectionConfig): boolean {
-  if (result.error) return false;
+export function evaluateRelevanceGate(
+  result: LeanOrientResult,
+  cfg: ResolvedInjectionConfig,
+): RelevanceGateEvaluation {
+  if (result.error) {
+    return { passes: false, passedCriteria: [], failedCriteria: ['orient-error'] };
+  }
   const fns = result.relevantFunctions ?? [];
-  if (fns.length < cfg.relevanceMinMatches) return false;
+  const enoughMatches = fns.length >= cfg.relevanceMinMatches;
+
+  const promptTokens = new Set(tokenize(result.task ?? ''));
+  const exactIdentifierMention = fns.some(f => {
+    const fullIdentifier = f.name?.trim().match(/[A-Za-z0-9]+$/)?.[0]?.toLowerCase();
+    return !!fullIdentifier && promptTokens.has(fullIdentifier);
+  });
 
   const maxFanIn = fns.reduce((m, f) => Math.max(m, f.fanIn ?? 0), 0);
   const anyHub = fns.some(f => f.isHub === true);
-  if (anyHub || maxFanIn >= cfg.relevanceMinFanIn) return true;
+  const structuralCentrality = anyHub || maxFanIn >= cfg.relevanceMinFanIn;
 
   // Score is only comparable to a fixed threshold on the bounded hybrid scale.
-  if (result.searchMode === 'hybrid') {
-    const maxScore = fns.reduce((m, f) => Math.max(m, f.score ?? 0), 0);
-    return maxScore >= cfg.relevanceMinScore;
-  }
-  return false;
+  const maxScore = fns.reduce((m, f) => Math.max(m, f.score ?? 0), 0);
+  const hybridScore = result.searchMode === 'hybrid' && maxScore >= cfg.relevanceMinScore;
+
+  // Raw BM25 scores are unbounded and corpus-relative, so keyword mode uses
+  // scale-free rank evidence: an identifier token from the top-ranked match.
+  const topIdentifierTokens = tokenize(fns[0]?.name ?? '');
+  const keywordMode = result.searchMode === 'bm25_fallback' || result.searchMode === 'keyword';
+  const keywordRankEvidence = keywordMode
+    && topIdentifierTokens.some(token => promptTokens.has(token));
+
+  const criteria: Record<string, boolean> = {
+    'minimum-matches': enoughMatches,
+    'exact-identifier': exactIdentifierMention,
+    'structural-centrality': structuralCentrality,
+  };
+  if (result.searchMode === 'hybrid') criteria['hybrid-score'] = hybridScore;
+  if (keywordMode) criteria['keyword-rank-evidence'] = keywordRankEvidence;
+  const passedCriteria = Object.entries(criteria).filter(([, passed]) => passed).map(([name]) => name);
+  const failedCriteria = Object.entries(criteria).filter(([, passed]) => !passed).map(([name]) => name);
+  return {
+    passes: enoughMatches && (exactIdentifierMention || structuralCentrality || hybridScore || keywordRankEvidence),
+    passedCriteria,
+    failedCriteria,
+  };
+}
+
+export function passesRelevanceGate(result: LeanOrientResult, cfg: ResolvedInjectionConfig): boolean {
+  return evaluateRelevanceGate(result, cfg).passes;
 }
 
 /** Take the first `n` graph-clean entries; tolerate undefined. */

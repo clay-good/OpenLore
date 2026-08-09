@@ -80,6 +80,42 @@ describe('passesRelevanceGate', () => {
     expect(passesRelevanceGate({ searchMode: 'bm25_fallback', relevantFunctions: weakStructural }, cfg())).toBe(false);
   });
 
+  it('passes an exact identifier mention in keyword mode on a small repo', () => {
+    const r = {
+      task: 'fix the bug where chargeCard rejects zero amounts',
+      searchMode: 'bm25_fallback',
+      relevantFunctions: [
+        { name: 'chargeCard', filePath: 'src/payments.ts', score: 18, fanIn: 0 },
+        { name: 'validateAmount', filePath: 'src/payments.ts', score: 8, fanIn: 0 },
+      ],
+    };
+    expect(passesRelevanceGate(r, cfg())).toBe(true);
+  });
+
+  it('uses scale-free top-rank identifier overlap in keyword mode', () => {
+    const r = {
+      task: 'fix the card failure',
+      searchMode: 'bm25_fallback',
+      relevantFunctions: [
+        { name: 'chargeCard', filePath: 'src/payments.ts', score: 18, fanIn: 0 },
+        { name: 'validateAmount', filePath: 'src/payments.ts', score: 8, fanIn: 0 },
+      ],
+    };
+    expect(passesRelevanceGate(r, cfg())).toBe(true);
+  });
+
+  it('keeps a weak keyword match on the pointer path', () => {
+    const r = {
+      task: 'update the documentation',
+      searchMode: 'bm25_fallback',
+      relevantFunctions: [
+        { name: 'chargeCard', filePath: 'src/payments.ts', score: 18, fanIn: 0 },
+        { name: 'validateAmount', filePath: 'src/payments.ts', score: 8, fanIn: 0 },
+      ],
+    };
+    expect(passesRelevanceGate(r, cfg())).toBe(false);
+  });
+
   it('gates down a sparse, low-score hybrid match', () => {
     const r = {
       searchMode: 'hybrid',

@@ -24,7 +24,7 @@ import {
   INJECTION_DEFAULTS,
   POINTER_LINE,
   resolveInjectionConfig,
-  passesRelevanceGate,
+  evaluateRelevanceGate,
   renderInjectionBlock,
   type LeanOrientResult,
 } from './orient-inject-render.js';
@@ -37,10 +37,11 @@ export {
   INJECTION_DEFAULTS,
   POINTER_LINE,
   resolveInjectionConfig,
+  evaluateRelevanceGate,
   passesRelevanceGate,
   renderInjectionBlock,
 } from './orient-inject-render.js';
-export type { ResolvedInjectionConfig, LeanOrientResult } from './orient-inject-render.js';
+export type { ResolvedInjectionConfig, LeanOrientResult, RelevanceGateEvaluation } from './orient-inject-render.js';
 
 /**
  * Extract the user's prompt from a hook stdin payload. Claude Code's
@@ -74,7 +75,11 @@ export function extractPrompt(stdin: string): string {
  * Never throws: every failure path resolves to the pointer line so a hook that
  * invokes it cannot break the user's turn.
  */
-export async function buildInjection(directory: string, prompt: string): Promise<string> {
+export async function buildInjection(
+  directory: string,
+  prompt: string,
+  onGateEvaluation?: (evaluation: ReturnType<typeof evaluateRelevanceGate>) => void,
+): Promise<string> {
   let cfg: ReturnType<typeof resolveInjectionConfig>;
   try {
     const loaded = await readOpenLoreConfig(directory);
@@ -90,7 +95,9 @@ export async function buildInjection(directory: string, prompt: string): Promise
 
   try {
     const result = (await handleOrient(directory, task, 8, undefined, true)) as LeanOrientResult;
-    if (!passesRelevanceGate(result, cfg)) return POINTER_LINE;
+    const evaluation = evaluateRelevanceGate(result, cfg);
+    onGateEvaluation?.(evaluation);
+    if (!evaluation.passes) return POINTER_LINE;
     return renderInjectionBlock(result, cfg);
   } catch {
     return POINTER_LINE;

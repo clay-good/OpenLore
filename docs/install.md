@@ -133,7 +133,7 @@ Task-scoped injection is on by default. To disable it (while leaving the MCP ser
     "mode": "off",            // "task-scoped" (default) | "off"
     "tokenBudget": 600,        // hard cap on the injected block, in estimated tokens
     "relevanceMinMatches": 2,  // gate: minimum matched-function count
-    "relevanceMinFanIn": 2,    // gate: a match this central (or a hub) clears the gate
+    "relevanceMinFanIn": 2,    // gate: centrality; exact/ranked identifier evidence also clears it
     "relevanceMinScore": 0.3   // gate: minimum top score (semantic/hybrid scale only)
   }
 }
