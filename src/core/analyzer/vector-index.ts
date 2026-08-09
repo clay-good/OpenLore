@@ -25,6 +25,9 @@ import type { Embedder } from './embedding-service.js';
 import { getSkeletonContent, isSkeletonWorthIncluding } from './code-shaper.js';
 import { quietNativeLoggingOnce } from './lance-logging.js';
 import { noteUpdateAndMaybeCompact } from './index-compaction.js';
+import { TOKENIZER_VERSION, tokenize } from './bm25-tokenizer.js';
+
+export { TOKENIZER_VERSION, tokenize } from './bm25-tokenizer.js';
 
 // ============================================================================
 // TYPES
@@ -146,60 +149,6 @@ export interface Bm25Corpus {
   df: Map<string, number>;
   avgLength: number;
   N: number;
-}
-
-/**
- * Version of the `tokenize` contract. Bump whenever the token set produced for a
- * given text changes, so a persisted index built under an older tokenizer is
- * rebuilt rather than incrementally patched against a query tokenized under the
- * new one (see `VectorIndexMeta.tokenizerVersion` and the `tokenizer-changed`
- * deferral in `updateFiles`, mirroring the embedding-model deferral discipline).
- *   v1 — lowercase + split on non-alphanumeric only.
- *   v2 — identifier-aware: also split camelCase/PascalCase and retain the compound.
- */
-export const TOKENIZER_VERSION = 2;
-
-/**
- * Split one alphanumeric chunk on camelCase / PascalCase boundaries, preserving
- * digit-adjacent runs. Case is significant here, so callers lowercase the result.
- *   `getUserById`      → [get, User, By, Id]
- *   `parseHTMLResponse`→ [parse, HTML, Response]
- * Returns the single chunk unchanged when there is no internal boundary.
- */
-function splitCompound(chunk: string): string[] {
-  return chunk
-    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')      // lower/digit → Upper: getUser → get User
-    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')   // acronym run → Word: HTMLResponse → HTML Response
-    .split(' ')
-    .filter(Boolean);
-}
-
-/**
- * Identifier-aware BM25 tokenizer. Splits compound identifiers (camelCase,
- * PascalCase, snake_case, kebab-case) into their sub-tokens AND retains the
- * original compound token, so a sub-word query (`user`) matches `getUserById`
- * while the exact compound query still ranks the exact match. Applied identically
- * at index and query time — there is one `tokenize`, shared by every BM25 corpus.
- * The >1-char filter and lowercasing are unchanged; no new tuning constants.
- */
-export function tokenize(text: string): string[] {
-  const out: string[] = [];
-  // snake_case / kebab-case / punctuation split first (non-alphanumeric boundaries).
-  for (const chunk of text.split(/[^A-Za-z0-9]+/)) {
-    if (!chunk) continue;
-    const compound = chunk.toLowerCase();
-    // Retain the whole compound token (exact-identifier queries still match/rank).
-    if (compound.length > 1) out.push(compound);
-    // Add camelCase/PascalCase sub-tokens; only when the chunk actually splits.
-    const subs = splitCompound(chunk);
-    if (subs.length > 1) {
-      for (const s of subs) {
-        const lowered = s.toLowerCase();
-        if (lowered.length > 1) out.push(lowered);
-      }
-    }
-  }
-  return out;
 }
 
 export function buildBm25Corpus(records: Array<{ id: string; text: string }>): Bm25Corpus {

@@ -80,6 +80,78 @@ describe('passesRelevanceGate', () => {
     expect(passesRelevanceGate({ searchMode: 'bm25_fallback', relevantFunctions: weakStructural }, cfg())).toBe(false);
   });
 
+  it('passes an exact identifier mention in keyword mode on a small repo', () => {
+    const r = {
+      task: 'fix the bug where chargeCard rejects zero amounts',
+      searchMode: 'bm25_fallback',
+      relevantFunctions: [
+        { name: 'chargeCard', filePath: 'src/payments.ts', score: 18, fanIn: 0 },
+        { name: 'validateAmount', filePath: 'src/payments.ts', score: 8, fanIn: 0 },
+      ],
+    };
+    expect(passesRelevanceGate(r, cfg())).toBe(true);
+  });
+
+  it('lets an exact identifier mention bypass the minimum match count', () => {
+    const r = {
+      task: 'fix the bug where chargeCard rejects zero amounts',
+      searchMode: 'bm25_fallback',
+      relevantFunctions: [
+        { name: 'chargeCard', filePath: 'src/payments.ts', score: 18, fanIn: 0 },
+      ],
+    };
+    expect(passesRelevanceGate(r, cfg())).toBe(true);
+  });
+
+  it('does not treat a partial snake-case token as an exact hybrid match', () => {
+    const r = {
+      task: 'fix card',
+      searchMode: 'hybrid',
+      relevantFunctions: [
+        { name: 'charge_card', filePath: 'src/payments.ts', score: 0.1, fanIn: 0 },
+        { name: 'other', filePath: 'src/payments.ts', score: 0.1, fanIn: 0 },
+      ],
+    };
+    expect(passesRelevanceGate(r, cfg())).toBe(false);
+    expect(passesRelevanceGate({ ...r, task: 'fix charge_card' }, cfg())).toBe(true);
+  });
+
+  it('supports an exact one-character identifier and rejects malformed fields', () => {
+    expect(passesRelevanceGate({
+      task: 'fix f',
+      searchMode: 'hybrid',
+      relevantFunctions: [{ name: 'f', fanIn: 0 }],
+    }, cfg())).toBe(true);
+    expect(() => passesRelevanceGate({
+      task: {} as unknown as string,
+      relevantFunctions: [{ name: {} as unknown as string }, { name: 'safe' }],
+    }, cfg())).not.toThrow();
+  });
+
+  it('uses scale-free top-rank identifier overlap in keyword mode', () => {
+    const r = {
+      task: 'fix the card failure',
+      searchMode: 'bm25_fallback',
+      relevantFunctions: [
+        { name: 'chargeCard', filePath: 'src/payments.ts', score: 18, fanIn: 0 },
+        { name: 'validateAmount', filePath: 'src/payments.ts', score: 8, fanIn: 0 },
+      ],
+    };
+    expect(passesRelevanceGate(r, cfg())).toBe(true);
+  });
+
+  it('keeps a weak keyword match on the pointer path', () => {
+    const r = {
+      task: 'update the documentation',
+      searchMode: 'bm25_fallback',
+      relevantFunctions: [
+        { name: 'chargeCard', filePath: 'src/payments.ts', score: 18, fanIn: 0 },
+        { name: 'validateAmount', filePath: 'src/payments.ts', score: 8, fanIn: 0 },
+      ],
+    };
+    expect(passesRelevanceGate(r, cfg())).toBe(false);
+  });
+
   it('gates down a sparse, low-score hybrid match', () => {
     const r = {
       searchMode: 'hybrid',

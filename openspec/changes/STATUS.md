@@ -53,7 +53,9 @@ truncation receipt, includePatterns-override-directory-pruning, and nested-`.git
 `harden-api-decision-and-generate-safety` (2026-08-08, archived) — decision-sync transition
 enforcement, scoped TLS configuration, verification-evidence disclosure, and consolidation logs;
 `fix-first-analysis-self-contamination` (2026-08-08, archived) — installer-owned artifacts no
-longer skew domains, languages, or high-value files, and undomained source files are disclosed.
+longer skew domains, languages, or high-value files, and undomained source files are disclosed;
+`fix-inject-relevance-gate-keyword-mode` (2026-08-08, archived) — exact identifier and scale-free
+rank evidence make task-scoped injection reachable in the zero-config keyword mode.
 
 After this table was compiled, four research sweeps added 32 more proposals (all validate; not yet
 folded into the table): 10 in `FIELD-RESEARCH-2026-07.md`, 10 in `ECOSYSTEM-RESEARCH-2026-07-27.md`,
@@ -116,7 +118,6 @@ trust boundary for served content.
 | `fix-drift-reporting-honesty` | silent truncation, hook failures reported as drift, and invisible memory-staleness kinds |
 | `fix-empty-orient-and-corpus-honesty` | a zero-match briefing explains itself, and the corpus contains only real symbols |
 | `fix-git-derived-signal-honesty` | prior churn measured before the change, no stale capability claims, work-tree-aware repo detection |
-| `fix-inject-relevance-gate-keyword-mode` | it can never fire in the zero-config default mode on small repos |
 | `fix-interference-map-honesty` | no silently dropped branches, no fake WAR from shared reads |
 | `fix-mcp-argument-contract` | a sensible directory default, actionable missing-arg errors, no silently ignored arguments |
 | `fix-overlay-language-fidelity` | Ruby CFG, destructured params, env-var semantics, Go arity |

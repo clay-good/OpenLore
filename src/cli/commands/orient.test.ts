@@ -38,6 +38,7 @@ describe('orient command', () => {
     consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue('/fake/proj');
     process.exitCode = undefined;
+    delete process.env.OPENLORE_INJECT_DEBUG;
     // orientCommand is a module-level singleton; commander retains option
     // values between parseAsync() calls, so reset them so one test's flags
     // (e.g. --limit 0) don't bleed into the next.
@@ -50,6 +51,7 @@ describe('orient command', () => {
     consoleSpy.mockRestore();
     cwdSpy.mockRestore();
     process.exitCode = undefined;
+    delete process.env.OPENLORE_INJECT_DEBUG;
   });
 
   function output(): string {
@@ -129,6 +131,34 @@ describe('orient command', () => {
       await orientCommand.parseAsync(['--inject', '--task', 'whatever'], { from: 'user' });
       expect(output()).toContain('Structural context is available');
       expect(process.exitCode).toBeUndefined();
+    });
+
+    it('reports a suppressed gate to stderr only when injection debug is enabled', async () => {
+      mockHandleOrient.mockResolvedValue({
+        task: 'update the documentation',
+        searchMode: 'bm25_fallback',
+        relevantFunctions: [
+          { name: 'chargeCard', filePath: 'src/payments.ts', score: 18, fanIn: 0 },
+          { name: 'validateAmount', filePath: 'src/payments.ts', score: 8, fanIn: 0 },
+        ],
+      });
+      process.env.OPENLORE_INJECT_DEBUG = '1';
+      const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+      await orientCommand.parseAsync(['--inject', '--task', 'update the documentation'], { from: 'user' });
+
+      expect(output()).toBe('[OpenLore] Structural context is available — call `orient` with your task for a deterministic briefing (relevant functions, callers, insertion points). Informational; ignore if not useful.');
+      const stderrText = stderrSpy.mock.calls.map(c => String(c[0])).join('');
+      expect(stderrText).toContain('[openlore:inject] verdict=suppressed');
+      expect(stderrText).toContain('failed=');
+      expect(stderrText).not.toContain('hybrid-score');
+      expect(output()).not.toContain('verdict=suppressed');
+
+      stderrSpy.mockClear();
+      delete process.env.OPENLORE_INJECT_DEBUG;
+      await orientCommand.parseAsync(['--inject', '--task', 'update the documentation'], { from: 'user' });
+      expect(stderrSpy.mock.calls.map(c => String(c[0])).join('')).not.toContain('[openlore:inject]');
+      stderrSpy.mockRestore();
     });
   });
 

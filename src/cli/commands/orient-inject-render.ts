@@ -1,12 +1,13 @@
 /**
  * Pure presentation + gating for task-scoped context injection
- * (change: add-task-scoped-context-injection).
+ * (changes: add-task-scoped-context-injection,
+ * fix-inject-relevance-gate-keyword-mode).
  *
  * Extracted from `orient-inject.ts` so it can be reused by hosts that must NOT
  * load the analyzer in-process — notably the Pi extension, which orients through
  * a warm daemon over RPC (decision abee8e3e). Everything here is pure and
- * deterministic; its only runtime dependency is `estimateTokens`. Keep it that
- * way — importing the analyzer (`handleOrient`) or config I/O here would drag the
+ * deterministic; its runtime dependencies are dependency-light pure helpers.
+ * Keep it that way — importing the analyzer (`handleOrient`) or config I/O here would drag the
  * analyzer back into the Pi host process the daemon split exists to keep lean.
  *
  * The block is framed as facts-not-coercion (Epistemic Lease, decision 8e95746d)
@@ -15,6 +16,7 @@
 
 import { estimateTokens } from '../../core/services/llm-service.js';
 import { frameServedContent, type ServedContentProvenance } from '../../core/services/served-content.js';
+import { tokenize } from '../../core/analyzer/bm25-tokenizer.js';
 import type { ContextInjectionConfig } from '../../types/index.js';
 
 /** Injection settings with every documented default applied. */
@@ -121,6 +123,17 @@ export interface LeanOrientResult {
   };
 }
 
+export interface RelevanceGateEvaluation {
+  passes: boolean;
+  passedCriteria: string[];
+  failedCriteria: string[];
+}
+
+function containsExactIdentifier(prompt: string, name: string): boolean {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(^|[^A-Za-z0-9_$])${escaped}($|[^A-Za-z0-9_$])`, 'i').test(prompt);
+}
+
 /**
  * Deterministic orientation-relevance gate. Returns true when the task has a
  * substantial, structurally-connected match in the graph — the case where a
@@ -128,32 +141,67 @@ export interface LeanOrientResult {
  * keeping injection out of the small/familiar/shallow arena the scorecard shows
  * OpenLore should not tax.
  *
- * Signals are read off the lean orient result itself (no new analysis pass):
- *   1. matched-function count >= relevanceMinMatches, AND
- *   2. structural centrality — a match with fan-in >= relevanceMinFanIn, or a
- *      hub — OR, only on the bounded semantic/hybrid score scale, a top match
- *      score >= relevanceMinScore.
+ * Signals are read off the lean orient result itself (no new analysis pass).
+ * An exact identifier mention passes directly. Otherwise the matched-function
+ * count must reach relevanceMinMatches and one of structural centrality, a
+ * bounded hybrid score, or scale-free keyword rank evidence must pass.
  *
  * BM25-fallback scores live on an unbounded, corpus-relative scale, so the score
- * path is disabled there and the gate relies on count + structural centrality —
- * which keeps a strong structural match from being gated out when embeddings are
- * unavailable, without letting an arbitrary BM25 magnitude wave everything through.
+ * path is disabled there. Exact identifier and rank evidence make keyword mode
+ * decidable without letting an arbitrary BM25 magnitude wave everything through.
  */
-export function passesRelevanceGate(result: LeanOrientResult, cfg: ResolvedInjectionConfig): boolean {
-  if (result.error) return false;
-  const fns = result.relevantFunctions ?? [];
-  if (fns.length < cfg.relevanceMinMatches) return false;
+export function evaluateRelevanceGate(
+  result: LeanOrientResult,
+  cfg: ResolvedInjectionConfig,
+): RelevanceGateEvaluation {
+  if (result.error) {
+    return { passes: false, passedCriteria: [], failedCriteria: ['orient-error'] };
+  }
+  const fns = Array.isArray(result.relevantFunctions)
+    ? result.relevantFunctions.filter((f): f is OrientFn => !!f && typeof f === 'object')
+    : [];
+  const enoughMatches = fns.length >= cfg.relevanceMinMatches;
+
+  const task = typeof result.task === 'string' ? result.task : '';
+  const promptTokens = new Set(tokenize(task));
+  const exactIdentifierMention = fns.some(f => {
+    const name = typeof f.name === 'string' ? f.name.trim() : '';
+    return !!name && containsExactIdentifier(task, name);
+  });
 
   const maxFanIn = fns.reduce((m, f) => Math.max(m, f.fanIn ?? 0), 0);
   const anyHub = fns.some(f => f.isHub === true);
-  if (anyHub || maxFanIn >= cfg.relevanceMinFanIn) return true;
+  const structuralCentrality = anyHub || maxFanIn >= cfg.relevanceMinFanIn;
 
   // Score is only comparable to a fixed threshold on the bounded hybrid scale.
-  if (result.searchMode === 'hybrid') {
-    const maxScore = fns.reduce((m, f) => Math.max(m, f.score ?? 0), 0);
-    return maxScore >= cfg.relevanceMinScore;
-  }
-  return false;
+  const maxScore = fns.reduce((m, f) => Math.max(m, f.score ?? 0), 0);
+  const hybridScore = result.searchMode === 'hybrid' && maxScore >= cfg.relevanceMinScore;
+
+  // Raw BM25 scores are unbounded and corpus-relative, so keyword mode uses
+  // scale-free rank evidence: an identifier token from the top-ranked match.
+  const topIdentifierTokens = tokenize(typeof fns[0]?.name === 'string' ? fns[0].name : '');
+  const keywordMode = result.searchMode === 'bm25_fallback' || result.searchMode === 'keyword';
+  const keywordRankEvidence = keywordMode
+    && topIdentifierTokens.some(token => promptTokens.has(token));
+
+  const criteria: Record<string, boolean> = {
+    'minimum-matches': enoughMatches,
+    'exact-identifier': exactIdentifierMention,
+    'structural-centrality': structuralCentrality,
+  };
+  if (result.searchMode === 'hybrid') criteria['hybrid-score'] = hybridScore;
+  if (keywordMode) criteria['keyword-rank-evidence'] = keywordRankEvidence;
+  const passedCriteria = Object.entries(criteria).filter(([, passed]) => passed).map(([name]) => name);
+  const failedCriteria = Object.entries(criteria).filter(([, passed]) => !passed).map(([name]) => name);
+  return {
+    passes: exactIdentifierMention || (enoughMatches && (structuralCentrality || hybridScore || keywordRankEvidence)),
+    passedCriteria,
+    failedCriteria,
+  };
+}
+
+export function passesRelevanceGate(result: LeanOrientResult, cfg: ResolvedInjectionConfig): boolean {
+  return evaluateRelevanceGate(result, cfg).passes;
 }
 
 /** Take the first `n` graph-clean entries; tolerate undefined. */
@@ -175,7 +223,7 @@ function take<T>(arr: T[] | undefined, n: number): T[] {
  * leading comma into the agent's context.
  */
 export function renderInjectionBlock(result: LeanOrientResult, cfg: ResolvedInjectionConfig): string {
-  const task = (result.task ?? '').replace(/\s+/g, ' ').trim().slice(0, 200);
+  const task = (typeof result.task === 'string' ? result.task : '').replace(/\s+/g, ' ').trim().slice(0, 200);
   const sourceProvenance = result.servedContentProvenance?.relevantFunctions
     ?? result.relevantFunctions?.find(f => f.provenance)?.provenance
     ?? 'source-derived';
@@ -189,7 +237,8 @@ export function renderInjectionBlock(result: LeanOrientResult, cfg: ResolvedInje
   const clean = (xs: Array<string | undefined> | undefined, n: number): string[] =>
     (xs ?? []).filter((x): x is string => typeof x === 'string' && x.length > 0).slice(0, n);
 
-  const fns = take(result.relevantFunctions, 8).filter(f => f.name && f.filePath);
+  const fns = take(result.relevantFunctions, 8)
+    .filter(f => typeof f?.name === 'string' && typeof f.filePath === 'string');
   if (fns.length > 0) {
     optional.push(`Relevant functions [${sourceProvenance}]:`);
     for (const f of fns) optional.push(`  • ${f.name} — ${f.filePath}`);

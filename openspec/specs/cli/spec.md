@@ -1630,6 +1630,44 @@ timeout.
 - **WHEN** the command is run with a larger configured request timeout
 - **THEN** the time from the error message to process exit is unchanged
 
+### Requirement: InjectionRelevanceGateIsDecidableInEveryShippedRetrievalMode
+
+The task-scoped injection relevance gate SHALL have at least one satisfiable pass criterion in
+every retrieval mode the product ships as a default or fallback (hybrid, keyword/BM25). A gate
+criterion SHALL NOT compare an unbounded score to a fixed constant. In keyword mode the gate
+SHALL accept scale-free evidence — at minimum, an exact identifier mention (the prompt contains a
+matched function's exact name) — independent of hub status and fan-in, so small and young
+repositories are not structurally excluded from injection.
+
+#### Scenario: An exact identifier mention passes the gate in keyword mode
+
+- **GIVEN** a freshly installed repository in zero-config keyword mode whose functions all have
+  fan-in below the gate's fan-in criterion
+- **WHEN** the `UserPromptSubmit` hook runs with a prompt that names an indexed function verbatim
+  (e.g. "fix the bug where chargeCard rejects zero amounts")
+- **THEN** `orient --inject` emits the full injection block, not the pointer line
+
+#### Scenario: A genuinely weak match still degrades to the pointer line
+
+- **GIVEN** the same repository
+- **WHEN** the hook runs with a prompt whose tokens match no indexed identifier and whose
+  matches carry no hub or fan-in evidence
+- **THEN** the pointer line is emitted, and the behavior is unchanged from today
+
+### Requirement: InjectionSuppressionIsObservable
+
+When the relevance gate suppresses a full injection block, the gate verdict and the failing
+criterion SHALL be observable under an opt-in debug switch, written to stderr only; stdout SHALL
+carry nothing but the injected block or pointer line. Without the debug switch, output is
+unchanged.
+
+#### Scenario: Debugging why a block was suppressed
+
+- **GIVEN** a prompt whose match fails the gate
+- **WHEN** `orient --inject` runs with the debug switch enabled
+- **THEN** stderr states the verdict (suppressed) and which criteria failed, and stdout contains
+  only the pointer line
+
 ## Technical Notes
 
 - **Dependencies**: ora, logger, ProgressIndicator, showNextSteps, @inquirer/prompts
@@ -1903,3 +1941,13 @@ Round-3 adversarial QA found two saveScorecard defects: an existsSync-then-write
 Benchmark-cleared. The DefaultSurfaceRevealsAllFaces gate ran all three quantities and none regressed: (1) token economy — substrate ~4.5k tokens, +1.2k over navigation, within the ~10k tool-search threshold; (2) face coverage — substrate exposes navigate+change+remember+verify, navigation only navigate; (3) selection accuracy — substrate 90% vs navigation 80% on shared tool selection (no regression) and 100% vs 0% on governance, plus end-to-end task COMPLETION on the pinned real-repo corpus across TWO models (sonnet + haiku) on BOTH tiers: 100% correctness everywhere, substrate cheaper on 3 of 4 model×tier cells. The lean navigation default under-sold the substrate: agents installed the documented way never discovered recall/verify_claim/blast_radius.
 
 **Consequences:** The out-of-box default install now exposes the substrate preset (navigation core + recall + verify_claim + blast_radius, 13 tools) instead of navigation (10). No tool removed; navigation stays a named preset and is a one-flag reversible escape (--preset navigation). Reverses ADR-0022 (a6c916ed). Lean-default payload budget rises ~13.2KB to ~17.7KB. The BREADTH_POINTER now describes the substrate default and points to full/federation/navigation. Docs/guards updated to the 13-tool default.
+
+### Share identifier tokenization through a dependency-light module
+
+**Status:** Approved
+**Date:** 2026-08-09
+**ID:** b9a5481b
+
+The injection relevance gate must use the same identifier-aware tokenization as BM25 while the Pi host must not import the analyzer-backed vector index. Extracting the pure tokenizer into a dependency-light module preserves one tokenization contract without loading analyzer dependencies.
+
+**Consequences:** The vector index re-exports the tokenizer for compatibility, while injection and Pi consume the lightweight implementation directly.

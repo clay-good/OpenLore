@@ -62,7 +62,14 @@ async function runInject(directory: string, taskOpt: string | undefined): Promis
     // success line via console.log, which would otherwise pollute the injected
     // context. Redirect diagnostics to stderr (same discipline as --json mode)
     // so stdout carries only the orientation block.
-    const block = await withQuietStdout(() => buildInjection(directory, prompt));
+    const debug = process.env.OPENLORE_INJECT_DEBUG === '1';
+    const block = await withQuietStdout(() => buildInjection(directory, prompt, debug ? evaluation => {
+      const verdict = evaluation.passes ? 'passed' : 'suppressed';
+      process.stderr.write(
+        `[openlore:inject] verdict=${verdict} passed=${evaluation.passedCriteria.join(',') || 'none'} ` +
+        `failed=${evaluation.failedCriteria.join(',') || 'none'}\n`,
+      );
+    } : undefined));
     if (block) console.log(block);
   } catch {
     // buildInjection is fail-open, but guard the print path too: never throw.

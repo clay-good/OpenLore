@@ -43,7 +43,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 
 // Task-scoped injection gate + render. This module is intentionally
-// dependency-light (its only runtime import is estimateTokens) so importing it
+// dependency-light (pure tokenization, framing, and token estimation) so importing it
 // here does NOT drag the analyzer into the Pi host — orientation still comes
 // from the warm daemon over RPC (decision abee8e3e).
 import {
@@ -1462,7 +1462,11 @@ export default function openlore(pi: ExtensionAPI): void {
       // error / no graph) pushes nothing, so the no-analysis baseline nudge in
       // the `suffix` fallback below can still surface.
       if (result) {
-        blocks.push(passesRelevanceGate(result, cfg) ? renderInjectionBlock(result, cfg) : POINTER_LINE);
+        try {
+          blocks.push(passesRelevanceGate(result, cfg) ? renderInjectionBlock(result, cfg) : POINTER_LINE);
+        } catch {
+          blocks.push(POINTER_LINE);
+        }
       }
     }
 
