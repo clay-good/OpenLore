@@ -33,6 +33,9 @@ import {
   readSourceCapped,
   type OversizedFileObserver,
 } from './bounded-file-scan.js';
+import { blankCommentsPreservingLayout } from './comment-blanking.js';
+import { scanJavaMethodDeclarations } from './java-method-scanner.js';
+import { lineFromIndex } from './line-index.js';
 
 // ============================================================================
 // TYPES
@@ -526,30 +529,75 @@ function combineSpringPaths(prefix: string, path: string): string {
   return combined || '/';
 }
 
-/**
- * Scan forward from an annotation line to find the handler method name.
- * Java method signatures: `public ReturnType methodName(args) ...`
- */
-function extractNextJavaMethodName(lines: string[], annotationLine: number): string {
-  const start = annotationLine - 1;
-  const maxLook = Math.min(lines.length, start + 20);
-  const skipNames = new Set(['if', 'for', 'while', 'switch', 'return', 'class', 'interface', 'enum', 'record', 'new']);
-  for (let i = start; i < maxLook; i++) {
-    const l = lines[i] ?? '';
-    // Skip further annotation lines
-    if (l.trim().startsWith('@')) continue;
-    // Match `[modifiers] [@Annotation...] ReturnType methodName(` — return type
-    // can include generics, arrays, and dotted names. Annotations may sit in the
-    // return-type position (e.g. Spring's `public @ResponseBody Vets list()`),
-    // so allow and skip them — otherwise the handler name resolves to "unknown".
-    const match = l.match(
-      // Type capture excludes SPACE — see JPA_FIELD_RE in schema-extractor.ts for why
-      // the ' ' inside the class overlapping the following `\s+` is quadratic.
-      /\b(?:public|private|protected)\s+(?:static\s+|final\s+|abstract\s+|synchronized\s+|default\s+|native\s+)*(?:@[\w.]+(?:\([^)]{0,400}\))?\s+)*(?:<[^>]+>\s+)?[\w<>[\],?.]+(?:\s+[\w<>[\],?.]+)*?\s+(\w+)\s*\(/
-    );
-    if (match && !skipNames.has(match[1])) return match[1];
+interface JavaAnnotationMatch {
+  index: number;
+  end: number;
+  args: string;
+  hasArguments: boolean;
+}
+
+/** Scan one Java annotation name without retrying malformed argument suffixes. */
+function* scanJavaAnnotations(content: string, name: string): Generator<JavaAnnotationMatch> {
+  const needle = `@${name}`;
+  let cursor = 0;
+  while (cursor < content.length) {
+    const current = content[cursor];
+    if (current === '"' || current === "'") {
+      const quote = current;
+      cursor++;
+      while (cursor < content.length) {
+        if (content[cursor] === '\\') cursor += 2;
+        else if (content[cursor++] === quote) break;
+      }
+      continue;
+    }
+    if (!content.startsWith(needle, cursor)) {
+      cursor++;
+      continue;
+    }
+    const index = cursor;
+    let i = index + needle.length;
+    if (/[\w$]/.test(content[i] ?? '')) {
+      cursor = i;
+      continue;
+    }
+    while (i < content.length && /\s/.test(content[i])) i++;
+    if (content[i] !== '(') {
+      yield { index, end: i, args: '', hasArguments: false };
+      cursor = Math.max(i, index + 1);
+      continue;
+    }
+
+    const argsStart = ++i;
+    let depth = 1;
+    let quote = '';
+    while (i < content.length && depth > 0) {
+      const char = content[i];
+      if (quote) {
+        if (char === '\\') i += 2;
+        else {
+          i++;
+          if (char === quote) quote = '';
+        }
+        continue;
+      }
+      if (char === '"' || char === "'") {
+        quote = char;
+        i++;
+      } else if (char === '(') {
+        depth++;
+        i++;
+      } else if (char === ')') {
+        depth--;
+        i++;
+      } else {
+        i++;
+      }
+    }
+    if (depth > 0) return;
+    yield { index, end: i, args: content.slice(argsStart, i - 1), hasArguments: true };
+    cursor = i;
   }
-  return 'unknown';
 }
 
 /**
@@ -572,9 +620,25 @@ export async function extractJavaRouteDefinitions(
   const lines = content.split('\n');
 
   // Strip comments but preserve offsets so line numbers stay accurate.
-  const clean = content
-    .replace(/\/\*[\s\S]*?\*\//g, m => ' '.repeat(m.length))
-    .replace(/\/\/.*$/gm, m => ' '.repeat(m.length));
+  const clean = blankCommentsPreservingLayout(content);
+  const methodDeclarations = scanJavaMethodDeclarations(
+    clean,
+    new Set(['public', 'private', 'protected']),
+  );
+  const handlerNameAfter = (offset: number): string => {
+    let lo = 0;
+    let hi = methodDeclarations.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (methodDeclarations[mid].parameterStart < offset) lo = mid + 1;
+      else hi = mid;
+    }
+    const declaration = methodDeclarations[lo];
+    if (!declaration) return 'unknown';
+    const annotationLine = getLine(lines, offset);
+    const declarationLine = getLine(lines, declaration.start);
+    return declarationLine < annotationLine + 20 ? declaration.name : 'unknown';
+  };
 
   // ── Detect framework and compute class-level path prefix ───────────────────
   // Spring: class-level @RequestMapping(...)  |  JAX-RS: class-level @Path(...)
@@ -585,14 +649,15 @@ export async function extractJavaRouteDefinitions(
   const classMatch = clean.match(/\bclass\s+\w+/);
   if (classMatch && classMatch.index !== undefined) {
     const preamble = clean.slice(0, classMatch.index);
-    const springClassMapping = preamble.match(/@RequestMapping\s*\(([^)]*)\)(?![^@]*@RequestMapping)/);
+    const springClassMapping = Array.from(scanJavaAnnotations(preamble, 'RequestMapping')).at(-1);
     if (springClassMapping) {
-      const p = extractSpringPath(springClassMapping[1]);
+      const p = extractSpringPath(springClassMapping.args);
       if (p) springPrefix = '/' + p.replace(/^\//, '');
     }
-    const jaxrsClassPath = preamble.match(/@Path\s*\(\s*"([^"]+)"\s*\)(?![^@]*@Path)/);
+    const jaxrsClassPath = Array.from(scanJavaAnnotations(preamble, 'Path')).at(-1);
     if (jaxrsClassPath) {
-      jaxrsPrefix = '/' + jaxrsClassPath[1].replace(/^\//, '');
+      const p = extractSpringPath(jaxrsClassPath.args);
+      if (p) jaxrsPrefix = '/' + p.replace(/^\//, '');
     }
   }
 
@@ -602,21 +667,26 @@ export async function extractJavaRouteDefinitions(
   // use identically-named @GET/@POST/@Path from retrofit2.http (client request
   // templates, not server endpoints) and would otherwise yield phantom routes.
   const hasJaxrsImport = /\bimport\s+(?:static\s+)?(?:javax|jakarta)\.ws\.rs\b/.test(clean);
+  const jaxrsAnnotations = new Map(
+    JAXRS_METHOD_ANNOTATIONS.map(([annotation]) => [
+      annotation,
+      Array.from(scanJavaAnnotations(clean, annotation)).filter(m => !m.hasArguments),
+    ]),
+  );
+  const hasJaxrsPath = scanJavaAnnotations(clean, 'Path').next().done === false;
   const isJaxrs = hasJaxrsImport
-    && /@Path\b/.test(clean)
-    && /@(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\b/.test(clean);
+    && hasJaxrsPath
+    && Array.from(jaxrsAnnotations.values()).some(matches => matches.length > 0);
 
   // ── Spring: shorthand mappings (@GetMapping, @PostMapping, …) ──────────────
   if (isSpring) {
     for (const [annotation, method] of SPRING_METHOD_ANNOTATIONS) {
-      const re = new RegExp(`@${annotation}\\s*(?:\\(([^)]*)\\))?`, 'g');
-      let m: RegExpExecArray | null;
-      while ((m = re.exec(clean)) !== null) {
-        const argsBlob = m[1] ?? '';
+      for (const m of scanJavaAnnotations(clean, annotation)) {
+        const argsBlob = m.args;
         const path = extractSpringPath(argsBlob) ?? '';
         const fullPath = combineSpringPaths(springPrefix, path);
         const lineNum = getLine(lines, m.index);
-        const handlerName = extractNextJavaMethodName(lines, lineNum);
+        const handlerName = handlerNameAfter(m.end);
         routes.push({
           file: filePath,
           method,
@@ -634,17 +704,16 @@ export async function extractJavaRouteDefinitions(
     // The class-level @RequestMapping is skipped because the class declaration
     // immediately follows it — we detect that by checking whether the nearest
     // forward token after the annotation is `class`.
-    const reqMappingRegex = /@RequestMapping\s*\(([^)]*)\)/g;
-    let m: RegExpExecArray | null;
-    while ((m = reqMappingRegex.exec(clean)) !== null) {
-      const argsBlob = m[1];
+    for (const m of scanJavaAnnotations(clean, 'RequestMapping')) {
+      const argsBlob = m.args;
+      if (!argsBlob) continue;
       const methods = extractSpringMethods(argsBlob);
       if (methods.length === 0) continue; // no method= → class-level or unhandled
 
       // Ensure this annotation is on a method, not on the class. Peek forward
       // past any subsequent annotations and check that we don't hit `class`
       // before a method-like signature.
-      const afterIdx = m.index + m[0].length;
+      const afterIdx = m.end;
       const ahead = clean.slice(afterIdx, afterIdx + 400);
       const nextClass = ahead.search(/\bclass\s+\w+/);
       const nextMethod = ahead.search(
@@ -655,7 +724,7 @@ export async function extractJavaRouteDefinitions(
       const path = extractSpringPath(argsBlob) ?? '';
       const fullPath = combineSpringPaths(springPrefix, path);
       const lineNum = getLine(lines, m.index);
-      const handlerName = extractNextJavaMethodName(lines, lineNum);
+      const handlerName = handlerNameAfter(m.end);
       for (const method of methods) {
         routes.push({
           file: filePath,
@@ -680,20 +749,21 @@ export async function extractJavaRouteDefinitions(
     for (const [annotation, method] of JAXRS_METHOD_ANNOTATIONS) {
       // Bare annotation with no argument list; path comes from class @Path
       // prefix combined with any @Path on the same method.
-      const re = new RegExp(`@${annotation}\\b\\s*(?!\\()`, 'g');
-      let m: RegExpExecArray | null;
-      while ((m = re.exec(clean)) !== null) {
+      for (const m of jaxrsAnnotations.get(annotation) ?? []) {
         // Only look for a method-level @Path *within this method's annotation
         // block* — i.e. between the @GET and the next method signature.
-        const afterIdx = m.index + m[0].length;
+        const afterIdx = m.end;
         const ahead = clean.slice(afterIdx, afterIdx + 400);
         const sigMatch = methodSigRegex.exec(ahead);
         const window = sigMatch ? ahead.slice(0, sigMatch.index) : ahead;
-        const methodPathMatch = window.match(/@Path\s*\(\s*"([^"]+)"\s*\)/);
-        const methodPath = methodPathMatch ? '/' + methodPathMatch[1].replace(/^\//, '') : '';
+        const methodPathAnnotation = Array.from(scanJavaAnnotations(window, 'Path')).at(-1);
+        const extractedMethodPath = methodPathAnnotation
+          ? extractSpringPath(methodPathAnnotation.args)
+          : null;
+        const methodPath = extractedMethodPath ? '/' + extractedMethodPath.replace(/^\//, '') : '';
         const fullPath = combineSpringPaths(jaxrsPrefix, methodPath);
         const lineNum = getLine(lines, m.index);
-        const handlerName = extractNextJavaMethodName(lines, lineNum);
+        const handlerName = handlerNameAfter(m.end);
         routes.push({
           file: filePath,
           method,
@@ -926,14 +996,22 @@ function maskPythonNonCode(content: string): string {
   return stringsMasked.replace(/#[^\n]*/g, blankKeepNewlines);
 }
 
-/** Convert a character offset in `content` to a 1-based line number */
+const LINE_INDEX_CACHE = new WeakMap<string[], number[]>();
+
+/** Convert a character offset in `content` to a 1-based line number. */
 function getLine(lines: string[], charOffset: number): number {
-  let accumulated = 0;
-  for (let i = 0; i < lines.length; i++) {
-    accumulated += lines[i].length + 1; // +1 for newline
-    if (accumulated > charOffset) return i + 1;
+  let lineIndex = LINE_INDEX_CACHE.get(lines);
+  if (!lineIndex) {
+    lineIndex = [];
+    let offset = 0;
+    for (let i = 0; i < lines.length - 1; i++) {
+      offset += lines[i].length;
+      lineIndex.push(offset);
+      offset++;
+    }
+    LINE_INDEX_CACHE.set(lines, lineIndex);
   }
-  return lines.length;
+  return lineFromIndex(lineIndex, charOffset);
 }
 
 /**

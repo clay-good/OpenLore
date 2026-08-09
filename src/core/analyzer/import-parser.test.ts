@@ -1071,6 +1071,27 @@ export function test() {}
       expect(result).toBe(utilsPath);
     });
 
+    it('should resolve oversized files without reading their contents', async () => {
+      const largePath = await createFile(tempDir, 'large.ts', 'x'.repeat(4 * 1024 * 1024 + 1));
+
+      const result = await resolveImport('./large', join(tempDir, 'app.ts'), {
+        baseDir: tempDir,
+      });
+
+      expect(result).toBe(largePath);
+    });
+
+    it('should not resolve directories as source files', async () => {
+      await mkdir(join(tempDir, 'module.ts'));
+
+      const result = await resolveImport('./module.ts', join(tempDir, 'app.ts'), {
+        baseDir: tempDir,
+        extensions: [],
+      });
+
+      expect(result).toBeNull();
+    });
+
     it('should resolve index file in directory', async () => {
       await mkdir(join(tempDir, 'components'), { recursive: true });
       const indexPath = await createFile(tempDir, 'components/index.ts', 'export * from "./button";');
