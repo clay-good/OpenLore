@@ -60,6 +60,11 @@ export interface SearchResult {
   score: number;
 }
 
+export interface KeywordMissDiagnostics {
+  missedTokens: string[];
+  nearTokens: Array<{ queryToken: string; indexedTokens: string[] }>;
+}
+
 // ============================================================================
 // CONSTANTS
 // ============================================================================
@@ -139,6 +144,15 @@ function rowToRecord(row: Record<string, unknown>): Omit<FunctionRecord, 'vector
   };
 }
 
+/** change: fix-empty-orient-and-corpus-honesty */
+function isRepoFunction(node: Pick<FunctionNode, 'id' | 'filePath' | 'isExternal'>): boolean {
+  return !node.isExternal && node.filePath !== 'external' && !node.id.startsWith('external::');
+}
+
+function isRepoFunctionRow(row: Record<string, unknown>): boolean {
+  return row.filePath !== 'external' && !(row.id as string | undefined)?.startsWith('external::');
+}
+
 // ============================================================================
 // BM25 SPARSE RETRIEVAL (#7)
 // ============================================================================
@@ -198,6 +212,7 @@ function rrfScore(rankDense: number, rankSparse: number, k = 60): number {
 // Module-level BM25 corpus cache: avoids a full table scan on every search call.
 // Keyed by dbPath; invalidated by build() when the index is rebuilt.
 const _bm25Cache = new Map<string, { corpus: Bm25Corpus; rowCount: number; rows: Record<string, unknown>[] }>();
+const _identifierVocabularyCache = new Map<string, string[]>();
 
 // Module-level LanceDB table cache: avoids connect() + openTable() on every search call.
 // Invalidated by build() when the index is rebuilt.
@@ -207,6 +222,7 @@ const _tableCache = new Map<string, { table: any }>();
 /** Test-only: clear in-memory BM25 + LanceDB caches to force cold path. */
 export function _resetVectorIndexCachesForTesting(): void {
   _bm25Cache.clear();
+  _identifierVocabularyCache.clear();
   _tableCache.clear();
   _metaCache.clear();
 }
@@ -218,6 +234,7 @@ export function _resetVectorIndexCachesForTesting(): void {
  * the next search builds the corpus fresh from the table.
  */
 function patchBm25Cache(dbPath: string, changedFilePaths: Set<string>, newRows: Record<string, unknown>[]): void {
+  _identifierVocabularyCache.delete(dbPath);
   // The on-disk corpus sidecar no longer matches the mutated table; drop it so the
   // next cold start rebuilds from raw text rather than hydrating a stale corpus.
   // Re-serialising per patch is intentionally out of scope (owned by the serving
@@ -588,7 +605,15 @@ export class VectorIndex {
     fileContents?: Map<string, string>,
     /** When true, reuse cached vectors for unchanged functions */
     incremental = false
-  ): Promise<{ embedded: number; reused: number; total: number; hasEmbeddings: boolean }> {
+  ): Promise<{
+    embedded: number;
+    reused: number;
+    total: number;
+    hasEmbeddings: boolean;
+    productionFunctions: number;
+    testFunctions: number;
+    signatureOnlySymbols: number;
+  }> {
     quietNativeLoggingOnce();
     const { connect } = await import('@lancedb/lancedb');
 
@@ -596,11 +621,12 @@ export class VectorIndex {
       throw new Error('No functions to index');
     }
 
+    const repoNodes = nodes.filter(isRepoFunction);
     const sigIndex = buildSignatureIndex(signatures);
 
     // Build candidate records (without vectors)
-    const nodeIds = new Set(nodes.map(n => n.id));
-    const candidates: Omit<FunctionRecord, 'vector'>[] = nodes.map(node => {
+    const nodeIds = new Set(repoNodes.map(n => n.id));
+    const candidates: Omit<FunctionRecord, 'vector'>[] = repoNodes.map(node => {
       const cgDoc = node.docstring ?? '';
       const cgSig = node.signature ?? '';
       // Always check regex index as fallback — CG may miss docstrings when
@@ -635,9 +661,10 @@ export class VectorIndex {
     // codebase that is entries × nodes — on the order of 10^10 comparisons — and it dominated the
     // wall clock of the whole index build.
     const nodeFileNames = new Set<string>();
-    for (const n of nodes) nodeFileNames.add(`${n.filePath}\u0000${n.name}`);
+    for (const n of repoNodes) nodeFileNames.add(`${n.filePath}\u0000${n.name}`);
 
     for (const fsm of signatures) {
+      if (fsm.path === 'external') continue;
       for (const entry of fsm.entries) {
         const syntheticId = `${fsm.path}::${entry.name}`;
         if (nodeIds.has(syntheticId)) continue; // already covered by call graph
@@ -662,7 +689,14 @@ export class VectorIndex {
       }
     }
 
+    if (candidates.length === 0) {
+      throw new Error('No repository functions to index');
+    }
+
     const dbPath = join(outputDir, DB_FOLDER);
+    const productionFunctions = repoNodes.filter((node) => !node.isTest).length;
+    const testFunctions = repoNodes.length - productionFunctions;
+    const signatureOnlySymbols = candidates.length - repoNodes.length;
 
     // ── BM25-only build (no embedding service) ───────────────────────────────
     // Write the corpus without a `vector` column so the table can never be
@@ -690,8 +724,17 @@ export class VectorIndex {
       );
       _tableCache.delete(dbPath);
       _bm25Cache.delete(dbPath);
+      _identifierVocabularyCache.delete(dbPath);
       _metaCache.delete(dbPath);
-      return { embedded: 0, reused: 0, total: candidates.length, hasEmbeddings: false };
+      return {
+        embedded: 0,
+        reused: 0,
+        total: candidates.length,
+        hasEmbeddings: false,
+        productionFunctions,
+        testFunctions,
+        signatureOnlySymbols,
+      };
     }
 
     // ── Incremental cache lookup ─────────────────────────────────────────────
@@ -794,6 +837,7 @@ export class VectorIndex {
     // Invalidate search caches — index was just rebuilt
     _tableCache.delete(dbPath);
     _bm25Cache.delete(dbPath);
+    _identifierVocabularyCache.delete(dbPath);
     _metaCache.delete(dbPath);
 
     return {
@@ -801,6 +845,9 @@ export class VectorIndex {
       reused: cachedIdx.length,
       total: fullRecords.length,
       hasEmbeddings: true,
+      productionFunctions,
+      testFunctions,
+      signatureOnlySymbols,
     };
   }
 
@@ -857,9 +904,10 @@ export class VectorIndex {
     }
 
     // ── Build candidate records for the changed files' functions ──────────────
+    const repoNodes = nodes.filter(isRepoFunction);
     const sigIndex = buildSignatureIndex(signatures);
-    const nodeIds = new Set(nodes.map((n) => n.id));
-    const candidates: Omit<FunctionRecord, 'vector'>[] = nodes.map((node) => {
+    const nodeIds = new Set(repoNodes.map((n) => n.id));
+    const candidates: Omit<FunctionRecord, 'vector'>[] = repoNodes.map((node) => {
       const cgDoc = node.docstring ?? '';
       const cgSig = node.signature ?? '';
       const { signature: regexSig, docstring: regexDoc } = findSignatureEntry(node, sigIndex);
@@ -889,7 +937,7 @@ export class VectorIndex {
     // paid per incremental update, i.e. on every save the watcher sees: ~5s of added latency on a
     // 250,000-node repository. The full-build path was fixed and this one was missed.
     const nodeFileNames = new Set<string>();
-    for (const n of nodes) nodeFileNames.add(`${n.filePath}\u0000${n.name}`);
+    for (const n of repoNodes) nodeFileNames.add(`${n.filePath}\u0000${n.name}`);
 
     for (const fsm of signatures) {
       if (!changedFilePaths.has(fsm.path)) continue;
@@ -1064,6 +1112,7 @@ export class VectorIndex {
     const denseRows = await table.query().nearestTo(queryVector).limit(denseFetch).toArray() as Record<string, unknown>[];
 
     const passesFilters = (row: Record<string, unknown>): boolean => {
+      if (!isRepoFunctionRow(row)) return false;
       if (language && (row.language as string) !== language) return false;
       if (minFanIn !== undefined && minFanIn > 0 && (row.fanIn as number) < minFanIn) return false;
       return true;
@@ -1082,7 +1131,7 @@ export class VectorIndex {
     let allRows: Record<string, unknown>[];
 
     if (!cachedEntry) {
-      allRows = await table.query().toArray() as Record<string, unknown>[];
+      allRows = (await table.query().toArray() as Record<string, unknown>[]).filter(isRepoFunctionRow);
       const corpus = loadOrBuildBm25Corpus(dbPath, allRows);
       cachedEntry = { corpus, rowCount: allRows.length, rows: allRows };
       _bm25Cache.set(dbPath, cachedEntry);
@@ -1158,7 +1207,7 @@ export class VectorIndex {
     let allRows: Record<string, unknown>[];
 
     if (!cachedEntry) {
-      allRows = await table.query().toArray() as Record<string, unknown>[];
+      allRows = (await table.query().toArray() as Record<string, unknown>[]).filter(isRepoFunctionRow);
       const corpus = loadOrBuildBm25Corpus(dbPath, allRows);
       cachedEntry = { corpus, rowCount: allRows.length, rows: allRows };
       _bm25Cache.set(dbPath, cachedEntry);
@@ -1184,12 +1233,65 @@ export class VectorIndex {
       })
       .filter((x): x is { row: Record<string, unknown>; score: number } => x !== null)
       .filter(({ row }) => {
+        if (!isRepoFunctionRow(row)) return false;
         if (language && (row.language as string) !== language) return false;
         if (minFanIn !== undefined && minFanIn > 0 && (row.fanIn as number) < minFanIn) return false;
         return true;
       })
       .slice(0, limit)
       .map(({ row, score }) => ({ record: rowToRecord(row), score }));
+  }
+
+  /**
+   * Explain an empty keyword result using the corpus already loaded by search().
+   * The lookup is bounded and deterministic: at most 12 distinct query tokens,
+   * 3 near identifier tokens per miss, and no model or secondary index.
+   */
+  static async keywordMissDiagnostics(
+    outputDir: string,
+    query: string,
+  ): Promise<KeywordMissDiagnostics> {
+    const dbPath = join(outputDir, DB_FOLDER);
+    let cachedEntry = _bm25Cache.get(dbPath);
+
+    if (!cachedEntry) {
+      quietNativeLoggingOnce();
+      const { connect } = await import('@lancedb/lancedb');
+      const db = await connect(dbPath);
+      const table = await db.openTable(TABLE_NAME);
+      const rows = (await table.query().toArray() as Record<string, unknown>[]).filter(isRepoFunctionRow);
+      const corpus = loadOrBuildBm25Corpus(dbPath, rows);
+      cachedEntry = { corpus, rowCount: rows.length, rows };
+      _bm25Cache.set(dbPath, cachedEntry);
+    }
+
+    const queryTokens = [...new Set(tokenize(query))].slice(0, 12);
+    const missedTokens = queryTokens.filter((token) => !cachedEntry.corpus.df.has(token));
+    if (missedTokens.length === 0) return { missedTokens, nearTokens: [] };
+
+    let identifierTokens = _identifierVocabularyCache.get(dbPath);
+    if (!identifierTokens) {
+      identifierTokens = [...new Set(
+        cachedEntry.rows.flatMap((row) => tokenize(String(row.name ?? ''))),
+      )].sort();
+      _identifierVocabularyCache.set(dbPath, identifierTokens);
+    }
+
+    const nearTokens = missedTokens.flatMap((queryToken) => {
+      const indexedTokens: string[] = [];
+      const compare = (a: string, b: string): number =>
+        Math.abs(a.length - queryToken.length) - Math.abs(b.length - queryToken.length)
+        || a.localeCompare(b);
+      for (const token of identifierTokens) {
+        if (!token.includes(queryToken) && !queryToken.includes(token)) continue;
+        indexedTokens.push(token);
+        indexedTokens.sort(compare);
+        if (indexedTokens.length > 3) indexedTokens.pop();
+      }
+      return indexedTokens.length > 0 ? [{ queryToken, indexedTokens }] : [];
+    });
+
+    return { missedTokens, nearTokens };
   }
 
   /**

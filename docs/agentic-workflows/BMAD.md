@@ -288,7 +288,11 @@ during story implementation without leaving their context window.
 
 ### `orient` returns 0 results
 
-The analysis cache is missing or stale. Run:
+Check the response shape first. An `emptyResult` field means the index is healthy but the task
+tokens matched no repository symbol. Follow its bounded near-token receipt, then try the suggested
+identifier-style `search_code` or `get_map` call.
+
+If the response instead has `notReady: true`, the analysis cache is missing. Run:
 
 ```bash
 openlore analyze

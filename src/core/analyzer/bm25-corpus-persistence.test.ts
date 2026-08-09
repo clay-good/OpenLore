@@ -138,6 +138,23 @@ describe('BM25 corpus persistence', () => {
     expect(JSON.stringify(p).includes(MARKER)).toBe(false);
   });
 
+  it('a tokenizer-stamp rebuild keeps synthetic external nodes out of the corpus', async () => {
+    const external = {
+      ...node('external::id.startsWith', 'id.startsWith', 'external'),
+      isExternal: true,
+    };
+    await VectorIndex.build(tmpDir, [...NODES, external], SIGS, new Set(), new Set(), null);
+    const stale = JSON.parse(await readFile(sidecar, 'utf-8'));
+    stale.tokenizerVersion = TOKENIZER_VERSION - 1;
+    await writeFile(sidecar, JSON.stringify(stale), 'utf-8');
+    _resetVectorIndexCachesForTesting();
+
+    expect(await VectorIndex.search(tmpDir, 'startsWith', null, { limit: 10 })).toEqual([]);
+    const rebuilt = JSON.parse(await readFile(sidecar, 'utf-8'));
+    expect(rebuilt.docs).toHaveLength(NODES.length);
+    expect(rebuilt.docs.some((doc: { id: string }) => doc.id.startsWith('external::'))).toBe(false);
+  });
+
   it('a missing sidecar degrades to a raw-text rebuild (and re-persists)', async () => {
     await VectorIndex.build(tmpDir, NODES, SIGS, new Set(), new Set(), null);
     await rm(sidecar);

@@ -1,6 +1,7 @@
 # Fix empty-orient and corpus honesty: a zero-match briefing explains itself, and the corpus contains only real symbols
 
-> Status: PROPOSED (2026-07-27, first-run e2e). A first-time user's very first `orient` can be an
+> Status: **BUILT** (2026-08-09). Verified by 368 passing test files (7,011 tests passed,
+> 2 skipped), lint, typecheck, build, and strict OpenSpec validation. A first-time user's very first `orient` can be an
 > empty briefing — and today that briefing neither explains why it is empty nor suggests anything
 > useful. Meanwhile the searchable function corpus quietly contains **synthetic `external::`
 > nodes**, so counts are inflated and a search can hit a "function" that does not exist in the
@@ -36,8 +37,8 @@ membership and not the empty-result contract.
 
 - **A zero-match orientation discloses why, deterministically.** The payload gains an
   `emptyResult` disclosure: the identifier-shaped query tokens that had no posting in the corpus,
-  and — computable today with no new machinery — for each missed token, whether any indexed
-  identifier *contains* it as a substring/prefix (a "near token" receipt: `greeting` → nearest
+  and — computable today with no new machinery — for each missed token, whether it and any indexed
+  identifier share a substring/prefix in either direction (a "near token" receipt: `greeting` → nearest
   indexed token `greet`). No ranking, no model; a bounded lookup against the existing corpus
   vocabulary.
 - **Next steps are conditioned on result shape.** An empty briefing suggests the actions that

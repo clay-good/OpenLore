@@ -40,6 +40,7 @@ vi.mock('../../analyzer/vector-index.js', () => ({
   VectorIndex: {
     exists: vi.fn(() => false),
     search: vi.fn(async () => []),
+    keywordMissDiagnostics: vi.fn(async () => ({ missedTokens: [], nearTokens: [] })),
   },
 }));
 
@@ -112,6 +113,7 @@ describe('handleOrient', () => {
   beforeEach(() => {
     vi.mocked(VectorIndex.exists).mockReturnValue(false);
     vi.mocked(VectorIndex.search).mockResolvedValue([]);
+    vi.mocked(VectorIndex.keywordMissDiagnostics).mockResolvedValue({ missedTokens: [], nearTokens: [] });
     vi.mocked(SpecVectorIndex.exists).mockReturnValue(false);
     vi.mocked(SpecVectorIndex.search).mockResolvedValue([]);
     vi.mocked(loadMappingIndex).mockResolvedValue(null);
@@ -388,17 +390,49 @@ describe('handleOrient', () => {
     expect(fns[0].score).toBe(0.2);
   });
 
-  it('returns empty collections when search returns no results', async () => {
+  it('explains an empty result and conditions next steps on the miss', async () => {
     vi.mocked(VectorIndex.exists).mockReturnValue(true);
     vi.mocked(VectorIndex.search).mockResolvedValue([]);
+    vi.mocked(VectorIndex.keywordMissDiagnostics).mockResolvedValue({
+      missedTokens: ['change', 'greeting'],
+      nearTokens: [{ queryToken: 'greeting', indexedTokens: ['greet'] }],
+    });
 
-    const result = await handleOrient('/tmp/proj', 'unknown task') as Record<string, unknown>;
+    const result = await handleOrient('/tmp/proj', 'change the greeting') as Record<string, unknown>;
 
     expect(result.relevantFunctions).toEqual([]);
     expect(result.relevantFiles).toEqual([]);
     expect(result.callPaths).toEqual([]);
     expect(result.insertionPoints).toEqual([]);
-    expect(Array.isArray(result.nextSteps)).toBe(true);
+    expect(result.emptyResult).toEqual({
+      reason: 'No indexed repository function matched the task tokens.',
+      missedTokens: ['change', 'greeting'],
+      nearTokens: [{ queryToken: 'greeting', indexedTokens: ['greet'] }],
+    });
+    expect(result.nextSteps).toEqual(expect.arrayContaining([
+      expect.stringContaining('search_code'),
+      expect.stringContaining('get_map'),
+      expect.stringContaining('greet'),
+    ]));
+    expect((result.nextSteps as string[]).join(' ')).not.toMatch(/record_decision|check_spec_drift/);
+    expect(result.suggestedTools).toEqual(expect.arrayContaining(['search_code', 'get_map']));
+    expect(result.suggestedTools).not.toEqual(expect.arrayContaining(['record_decision', 'check_spec_drift']));
+  });
+
+  it('does not fabricate a near token for a foreign query', async () => {
+    vi.mocked(VectorIndex.exists).mockReturnValue(true);
+    vi.mocked(VectorIndex.search).mockResolvedValue([]);
+    vi.mocked(VectorIndex.keywordMissDiagnostics).mockResolvedValue({
+      missedTokens: ['kubernetes', 'ingress', 'rules'],
+      nearTokens: [],
+    });
+
+    const result = await handleOrient('/tmp/proj', 'kubernetes ingress rules') as {
+      emptyResult: { missedTokens: string[]; nearTokens: unknown[] };
+    };
+
+    expect(result.emptyResult.missedTokens).toEqual(['kubernetes', 'ingress', 'rules']);
+    expect(result.emptyResult.nearTokens).toEqual([]);
   });
 
   it('uses embed service from config when env service is unavailable', async () => {

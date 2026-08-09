@@ -163,6 +163,75 @@ describe('VectorIndex', () => {
       ).rejects.toThrow('No functions to index');
     });
 
+    it('excludes synthetic external call targets and reports the indexed population', async () => {
+      const external = makeNode({
+        id: 'external::id.startsWith',
+        name: 'id.startsWith',
+        filePath: 'external',
+        isExternal: true,
+      });
+      const testNode = makeNode({
+        id: 'src/auth.test.ts::authenticates',
+        name: 'authenticates',
+        filePath: 'src/auth.test.ts',
+        isTest: true,
+      });
+
+      const result = await VectorIndex.build(
+        tmpDir,
+        [...SAMPLE_NODES, external, testNode],
+        SAMPLE_SIGNATURES,
+        new Set(),
+        new Set(),
+        null,
+      );
+
+      expect(result).toMatchObject({
+        total: SAMPLE_NODES.length + 1,
+        productionFunctions: SAMPLE_NODES.length,
+        testFunctions: 1,
+        signatureOnlySymbols: 0,
+      });
+      _resetVectorIndexCachesForTesting();
+      expect(await VectorIndex.search(tmpDir, 'startsWith', null, { limit: 10 })).toEqual([]);
+    });
+
+    it('indexes repository signature symbols when every call-graph node is external', async () => {
+      const external = makeNode({
+        id: 'external::console.log',
+        name: 'console.log',
+        filePath: 'external',
+        isExternal: true,
+      });
+      const signatures: FileSignatureMap[] = [{
+        path: 'src/config.ts',
+        language: 'TypeScript',
+        entries: [{
+          kind: 'const',
+          name: 'DEFAULT_GREETING',
+          signature: 'const DEFAULT_GREETING = "hello"',
+        }],
+      }];
+
+      const result = await VectorIndex.build(
+        tmpDir,
+        [external],
+        signatures,
+        new Set(),
+        new Set(),
+        null,
+      );
+
+      expect(result).toMatchObject({
+        total: 1,
+        productionFunctions: 0,
+        testFunctions: 0,
+        signatureOnlySymbols: 1,
+      });
+      const matches = await VectorIndex.search(tmpDir, 'DEFAULT_GREETING', null, { limit: 5 });
+      expect(matches.map((match) => match.record.name)).toEqual(['DEFAULT_GREETING']);
+    });
+
     it('marks hub functions correctly', async () => {
       const hubIds = new Set(['src/auth.ts::authenticate']);
       const embedSvc = makeMockEmbedSvc();
@@ -312,6 +381,48 @@ describe('VectorIndex', () => {
       expect(auth!.record.isHub).toBe(true);
       expect((auth!.record as Record<string, unknown>)['vector']).toBeUndefined();
       for (const r of results) expect(typeof r.score).toBe('number');
+    });
+
+    it('explains morphological and foreign misses from indexed identifiers only', async () => {
+      const greet = makeNode({
+        id: 'src/main.ts::greet',
+        name: 'greet',
+        filePath: 'src/main.ts',
+      });
+      await VectorIndex.build(tmpDir, [greet], [], new Set(), new Set(), null);
+
+      const morphological = await VectorIndex.keywordMissDiagnostics(tmpDir, 'change the greeting');
+      expect(morphological.missedTokens).toContain('greeting');
+      expect(morphological.nearTokens).toContainEqual({
+        queryToken: 'greeting',
+        indexedTokens: ['greet'],
+      });
+
+      const foreign = await VectorIndex.keywordMissDiagnostics(tmpDir, 'kubernetes ingress rules');
+      expect(foreign.missedTokens).toEqual(['kubernetes', 'ingress', 'rules']);
+      expect(foreign.nearTokens).toEqual([]);
+    });
+
+    it('invalidates the cached identifier vocabulary after an incremental update', async () => {
+      const greet = makeNode({ id: 'src/main.ts::greet', name: 'greet', filePath: 'src/main.ts' });
+      await VectorIndex.build(tmpDir, [greet], [], new Set(), new Set(), null);
+      expect((await VectorIndex.keywordMissDiagnostics(tmpDir, 'greeting')).nearTokens)
+        .toContainEqual({ queryToken: 'greeting', indexedTokens: ['greet'] });
+
+      const welcome = makeNode({ id: 'src/main.ts::welcome', name: 'welcome', filePath: 'src/main.ts' });
+      await VectorIndex.updateFiles(
+        tmpDir,
+        [welcome],
+        new Set(['src/main.ts']),
+        [],
+        new Set(),
+        new Set(),
+        null,
+      );
+
+      const updated = await VectorIndex.keywordMissDiagnostics(tmpDir, 'welcomes');
+      expect(updated.nearTokens).toContainEqual({ queryToken: 'welcomes', indexedTokens: ['welcome'] });
+      expect(updated.nearTokens.flatMap((receipt) => receipt.indexedTokens)).not.toContain('greet');
     });
 
     it('does NOT embed the query against a hasEmbeddings:false index, even when an embedder is supplied', async () => {
