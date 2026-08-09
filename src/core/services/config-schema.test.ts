@@ -37,6 +37,7 @@ const FULLY_POPULATED: Required<OpenLoreConfig> = {
   impactCertificate: {},
   contextInjection: {},
   enforcement: {},
+  secretRedaction: {},
 };
 
 describe('config-schema — type-completeness bind', () => {

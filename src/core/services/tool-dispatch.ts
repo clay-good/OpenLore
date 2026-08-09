@@ -19,6 +19,8 @@ import { DEFAULT_DRIFT_MAX_FILES } from '../../constants.js';
 import type { DecisionScope } from '../../types/index.js';
 import { resolveCanonicalToolName, enforceConclusionContract } from './mcp-handlers/tool-contract.js';
 import { logger } from '../../utils/logger.js';
+import { readOpenLoreConfig } from './config-manager.js';
+import { redactSecretsWithReport } from './secret-redaction.js';
 
 import { handleOrient } from './mcp-handlers/orient.js';
 import { handleSelectTests } from './mcp-handlers/test-impact.js';
@@ -139,7 +141,28 @@ export async function dispatchTool(
 ): Promise<unknown> {
   const canonical = resolveCanonicalToolName(name);
   const result = await dispatchToolImpl(canonical, args, directory);
-  return enforceConclusionContract(canonical, result, (msg) => logger.warning(msg));
+  const checked = enforceConclusionContract(canonical, result, (msg) => logger.warning(msg));
+  return redactSourceToolResult(canonical, checked, directory);
+}
+
+const SOURCE_CARRYING_TOOLS = new Set([
+  'get_function_body',
+  'find_clones',
+  'analyze_env_impact',
+  'search_code',
+]);
+
+async function redactSourceToolResult(name: string, result: unknown, directory: string): Promise<unknown> {
+  if (!SOURCE_CARRYING_TOOLS.has(name)) return result;
+  const config = await readOpenLoreConfig(directory);
+  if (config?.secretRedaction?.toolOutput === false) return result;
+
+  const redacted = redactSecretsWithReport(result);
+  if (redacted.redactions.count === 0) return result;
+  if (redacted.value !== null && typeof redacted.value === 'object' && !Array.isArray(redacted.value)) {
+    return { ...(redacted.value as Record<string, unknown>), redactions: redacted.redactions };
+  }
+  return { result: redacted.value, redactions: redacted.redactions };
 }
 
 async function dispatchToolImpl(

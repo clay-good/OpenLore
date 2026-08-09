@@ -587,10 +587,13 @@ describe('LLMService', () => {
     it('should redact secrets in logs', async () => {
       const logDir = join(tempDir, 'logs');
 
-      const { service } = createMockLLMService({
+      const { service, provider } = createMockLLMService({
         logDir,
         enableLogging: true,
       });
+
+      const responseSecret = `sk-${'r'.repeat(24)}`;
+      provider.setDefaultResponse(`echo ${responseSecret}`);
 
       await service.complete({
         systemPrompt: 'api_key="sk-12345678901234567890"',
@@ -601,9 +604,13 @@ describe('LLMService', () => {
 
       const files = await readdir(logDir);
       const logContent = await readFile(join(logDir, files[0]), 'utf-8');
+      const parsed = JSON.parse(logContent);
 
       expect(logContent).toContain('[REDACTED]');
       expect(logContent).not.toContain('sk-12345678901234567890');
+      expect(logContent).not.toContain(responseSecret);
+      expect(parsed.requests[0].redactions.count).toBeGreaterThanOrEqual(3);
+      expect(parsed.requests[0].redactions.kinds).toEqual(expect.arrayContaining(['api-key', 'secret-field']));
     });
   });
 

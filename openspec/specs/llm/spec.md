@@ -410,6 +410,19 @@ The system SHALL invoke all analysis agent CLIs from a unique temporary working 
 - **WHEN** the affected behavior is evaluated
 - **THEN** The system SHALL invoke all analysis agent CLIs from a unique temporary working directory that is isolated from the user's project tree and removed after each invocation.
 
+### Requirement: EnforceRepositorySecretRedactionAtSharedToolDispatch
+
+This domain SHALL conform to the canonical statement of decision `2d0457b5`, which lives in the
+`analyzer` domain — see [analyzer/spec.md](../analyzer/spec.md).
+
+#### Scenario: The canonical statement governs
+
+- **GIVEN** decision `2d0457b5` recorded in the `analyzer` domain
+- **WHEN** this domain's behavior touches that decision's surface
+- **THEN** it satisfies the canonical requirement as stated in [analyzer/spec.md](../analyzer/spec.md)
+
+> Decision pointer: 2d0457b5 — "Enforce repository secret redaction at shared tool dispatch" is recorded in `openspec/specs/analyzer/spec.md`; it also affects this domain.
+
 ## Technical Notes
 
 - **Implementation**: `src/core/services/llm-service.ts, src/utils/prompt-boundary.ts, src/core/decisions/extractor.ts, src/core/decisions/consolidator.ts, src/core/decisions/verifier.ts, src/core/drift/drift-detector.ts, src/core/verifier/verification-engine.ts, src/core/generator/spec-pipeline.ts, src/core/generator/stages, src/core/test-generator/coverage-analyzer.ts, src/core/test-generator/test-generator.ts`

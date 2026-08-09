@@ -10,7 +10,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import logger from '../../utils/logger.js';
-import { redactSecrets } from './secret-redaction.js';
+import { redactSecretsWithReport } from './secret-redaction.js';
 import { protectPrompt } from '../../utils/prompt-boundary.js';
 import { announceInsecureTls, withRelaxedTls } from './tls-scope.js';
 import {
@@ -431,24 +431,6 @@ interface RetryConfig {
  */
 function disableSslVerification(): void {
   announceInsecureTls('--insecure or llm.sslVerify=false');
-}
-
-/**
- * Blank long opaque alphanumeric runs in the PROMPTS only.
- *
- * The shared redactor matches credential SHAPES (`sk-…`, `AIza…`, header forms). A
- * prompt additionally carries the repository's own source text, where a hardcoded key
- * for some provider OpenLore knows nothing about has no recognizable shape — so this
- * keeps the blanket heuristic the removed private redactor applied. It stays scoped to
- * the two prompt fields because it is lossy (it also blanks legitimate hashes), and a
- * mangled response/error would make the log useless for its actual purpose.
- */
-function blankLongOpaqueTokens(request: CompletionRequest): CompletionRequest {
-  const blank = (s: string): string =>
-    s
-      .replace(/(?:api[_-]?key|password|secret|token|auth)['":\s]*[=:]\s*['"]?[\w-]{20,}['"]?/gi, '[REDACTED]')
-      .replace(/['"]?[a-zA-Z0-9]{32,}['"]?/g, '[REDACTED]');
-  return { ...request, systemPrompt: blank(request.systemPrompt), userPrompt: blank(request.userPrompt) };
 }
 
 /**
@@ -1704,7 +1686,13 @@ export class LLMService {
   private options: Required<LLMServiceOptions>;
   private tokenUsage: TokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0, requests: 0 };
   private costTracking: CostTracking = { estimatedCost: 0, currency: 'USD', byProvider: {} };
-  private requestLog: Array<{ timestamp: string; request: CompletionRequest; response?: CompletionResponse; error?: string }> = [];
+  private requestLog: Array<{
+    timestamp: string;
+    request: CompletionRequest;
+    response?: CompletionResponse;
+    error?: string;
+    redactions: { count: number; kinds: string[] };
+  }> = [];
 
   constructor(provider: LLMProvider, options: LLMServiceOptions = {}) {
     this.provider = provider;
@@ -1994,14 +1982,14 @@ export class LLMService {
     // disk. This is the channel mcp-security's "Secret Confinement Across All Output
     // Paths" names ("or written artifact"), so it uses the shared redactor rather
     // than a private, request-only copy that had drifted from it.
-    const logEntry = redactSecrets({
+    const { value, redactions } = redactSecretsWithReport({
       timestamp: new Date().toISOString(),
-      request: blankLongOpaqueTokens(request),
+      request,
       response,
       error,
-    });
+    }, false);
 
-    this.requestLog.push(logEntry);
+    this.requestLog.push({ ...value, redactions });
   }
 
   /**
