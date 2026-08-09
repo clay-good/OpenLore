@@ -246,14 +246,34 @@ describe('every capability-set member is exercised against the real extractor (n
   });
 
   it('imports: every member resolves a relative import; a non-member yields nothing', () => {
+    const fixtures: Record<string, Array<{ path: string; content: string; language: string }>> = {
+      TypeScript: [{ path: 'a.ts', content: "import { x } from './b';", language: 'TypeScript' }],
+      JavaScript: [{ path: 'a.js', content: "import { x } from './b';", language: 'JavaScript' }],
+      Python: [{ path: 'pkg/a.py', content: 'from .b import x', language: 'Python' }],
+      Go: [{ path: 'pkg/a.go', content: 'package pkg', language: 'Go' }],
+      Java: [
+        { path: 'a/A.java', content: 'package a;\nimport b.B;\nclass A {}', language: 'Java' },
+        { path: 'b/B.java', content: 'package b;\nclass B {}', language: 'Java' },
+      ],
+      Kotlin: [
+        { path: 'a/A.kt', content: 'package a\nimport b.B\nclass A', language: 'Kotlin' },
+        { path: 'b/B.kt', content: 'package b\nclass B', language: 'Kotlin' },
+      ],
+      'C#': [
+        { path: 'a/A.cs', content: 'using B;\nnamespace A;\nclass A {}', language: 'C#' },
+        { path: 'b/B.cs', content: 'namespace B;\nclass B {}', language: 'C#' },
+      ],
+      PHP: [
+        { path: 'a/A.php', content: '<?php\nnamespace A;\nuse B\\B;\nclass A {}', language: 'PHP' },
+        { path: 'b/B.php', content: '<?php\nnamespace B;\nclass B {}', language: 'PHP' },
+      ],
+    };
     for (const lang of IMP) {
-      const ext = lang === 'Python' ? 'py' : lang === 'JavaScript' ? 'js' : 'ts';
-      const content = lang === 'Python' ? 'from .b import x' : "import { x } from './b';";
-      expect(buildBaseImportMap([{ path: `a.${ext}`, content, language: lang }]).size, `${lang} import`).toBe(1);
+      expect(fixtures[lang], `missing imports fixture for set member ${lang}`).toBeDefined();
+      expect(buildBaseImportMap(fixtures[lang]).size, `${lang} import`).toBeGreaterThan(0);
     }
-    // Go/Rust/Ruby/Java parsers exist but are unwired in the live path → honestly unclaimed.
-    for (const non of ['Go', 'Rust', 'Ruby', 'Java']) expect(IMP.has(non)).toBe(false);
-    expect(buildBaseImportMap([{ path: 'a.go', content: 'import "fmt"', language: 'Go' }]).size).toBe(0);
+    for (const non of ['Rust', 'Ruby']) expect(IMP.has(non)).toBe(false);
+    expect(buildBaseImportMap([{ path: 'a.rb', content: "require_relative 'b'", language: 'Ruby' }]).size).toBe(0);
   });
 
   it('callGraph: every member extracts ≥1 node on a fixture', async () => {

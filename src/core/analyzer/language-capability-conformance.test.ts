@@ -13,9 +13,8 @@
  * the error-propagation overlay. Plain `.test.ts` so CI runs it.
  *
  * Findings locked in by this sweep (2026-06-26): the call graph is sound across all 18 call-graph
- * languages for basic calls, intra-class method dispatch, and cross-file resolution; the one
- * cross-language *precision* difference (TS resolves cross-file via `import`; Python/Go via
- * `name_only`) is asserted explicitly rather than hidden.
+ * languages for basic calls, intra-class method dispatch, and cross-file resolution; every
+ * cross-language precision difference is asserted explicitly rather than hidden.
  */
 import { describe, it, expect } from 'vitest';
 import { mkdtempSync, writeFileSync } from 'node:fs';
@@ -30,9 +29,14 @@ import { STYLE_FINGERPRINT_LANGUAGES } from './style-fingerprint.js';
 import { CROSS_SERVICE_HTTP_LANGUAGES, HTTP_CLIENT_LANGUAGES } from './http-capability.js';
 import { extractRoutesFromFile, extractHttpCalls } from './http-route-parser.js';
 import { CODE_LANGUAGES } from './language-support.js';
+import { IMPORT_RESOLUTION_LANGUAGES } from './import-resolver-bridge.js';
+import { buildBaseImportMap } from './import-resolver-bridge.js';
 
-async function build(files: Array<{ path: string; language: string; content: string }>) {
-  return new CallGraphBuilder().build(files);
+async function build(
+  files: Array<{ path: string; language: string; content: string }>,
+  importMap?: Map<string, Map<string, string>>,
+) {
+  return new CallGraphBuilder().build(files, undefined, importMap);
 }
 function hasEdge(
   r: Awaited<ReturnType<CallGraphBuilder['build']>>,
@@ -156,18 +160,17 @@ describe('language conformance — cross-file resolution', () => {
     expect(e!.confidence, 'TS cross-file is import-precise').toBe('import');
   });
 
-  // Documented precision difference: Python/Go resolve cross-file by name (name_only), not by
-  // import. The edge is still found (navigation works); the provenance is lower-confidence.
+  // Relative Python imports and Go package siblings resolve through the import/package map.
   for (const c of [
-    { language: 'Python', a: { path: 'a.py', content: `from b import helper\n\ndef main():\n    helper()\n` }, b: { path: 'b.py', content: `def helper():\n    return 1\n` }, caller: 'main', callee: 'helper' },
-    { language: 'Go', a: { path: 'a.go', content: `package m\nfunc Main(){ Helper() }\n` }, b: { path: 'b.go', content: `package m\nfunc Helper() int { return 1 }\n` }, caller: 'Main', callee: 'Helper' },
+    { language: 'Python', a: { path: 'pkg/a.py', content: `from .b import helper\n\ndef main():\n    helper()\n` }, b: { path: 'pkg/b.py', content: `def helper():\n    return 1\n` }, caller: 'main', callee: 'helper' },
+    { language: 'Go', a: { path: 'pkg/a.go', content: `package m\nfunc Main(){ Helper() }\n` }, b: { path: 'pkg/b.go', content: `package m\nfunc Helper() int { return 1 }\n` }, caller: 'Main', callee: 'Helper' },
   ]) {
-    it(`${c.language} resolves a cross-file call (name_only provenance)`, async () => {
+    it(`${c.language} resolves a cross-file call at import confidence`, async () => {
       const r = await build([
         { path: c.a.path, language: c.language, content: c.a.content },
         { path: c.b.path, language: c.language, content: c.b.content },
       ]);
-      expect(hasEdge(r, c.caller, c.callee), `${c.language} cross-file edge`).toBeTruthy();
+      expect(hasEdge(r, c.caller, c.callee)?.confidence, `${c.language} cross-file edge`).toBe('import');
     });
   }
 });
@@ -354,9 +357,7 @@ describe('grammar-drift canary — every claimed callGraph language parses its f
 // ── (9) Cross-file resolution for EVERY claimed callGraph language + precision ─────────────────────
 // The resolver's discipline is only proven where it is exercised. Section (3) sampled 3 languages;
 // this sweep drives a caller→callee split across two files for every claimed callGraph language and
-// asserts the edge resolves AND its provenance is the confidence expected for that language — so a
-// cross-language precision difference (import-precise TS/JS, capitalized-receiver Java, name-only for
-// the rest) is asserted, never hidden (change: harden-call-resolution-ambiguity).
+// asserts the edge resolves AND its provenance is the confidence expected for that language.
 //
 // Documented exclusions (proven cross-file elsewhere or a disclosed extractor limitation, NOT a
 // resolver guess):
@@ -372,14 +373,14 @@ interface CrossFile { language: string; a: { path: string; content: string }; b:
 const CROSS_FILE: CrossFile[] = [
   { language: 'TypeScript', confidence: 'import',    caller: 'main', callee: 'helper', a: { path: 'a.ts', content: `import { helper } from './b';\nexport function main(){ helper(); }` }, b: { path: 'b.ts', content: `export function helper(){ return 1; }` } },
   { language: 'JavaScript', confidence: 'import',    caller: 'main', callee: 'helper', a: { path: 'a.js', content: `import { helper } from './b';\nexport function main(){ helper(); }` }, b: { path: 'b.js', content: `export function helper(){ return 1; }` } },
-  { language: 'Python',     confidence: 'name_only', caller: 'main', callee: 'helper', a: { path: 'a.py', content: `from b import helper\n\ndef main():\n    helper()\n` }, b: { path: 'b.py', content: `def helper():\n    return 1\n` } },
-  { language: 'Go',         confidence: 'name_only', caller: 'Main', callee: 'Helper', a: { path: 'a.go', content: `package m\nfunc Main(){ Helper() }\n` }, b: { path: 'b.go', content: `package m\nfunc Helper() int { return 1 }\n` } },
+  { language: 'Python',     confidence: 'import',    caller: 'main', callee: 'helper', a: { path: 'pkg/a.py', content: `from .b import helper\n\ndef main():\n    helper()\n` }, b: { path: 'pkg/b.py', content: `def helper():\n    return 1\n` } },
+  { language: 'Go',         confidence: 'import',    caller: 'Main', callee: 'Helper', a: { path: 'pkg/a.go', content: `package m\nfunc Main(){ Helper() }\n` }, b: { path: 'pkg/b.go', content: `package m\nfunc Helper() int { return 1 }\n` } },
   { language: 'Rust',       confidence: 'name_only', caller: 'main', callee: 'helper', a: { path: 'a.rs', content: `fn main(){ helper(); }\n` }, b: { path: 'b.rs', content: `fn helper() -> i32 { 1 }\n` } },
   { language: 'Ruby',       confidence: 'name_only', caller: 'main', callee: 'helper', a: { path: 'a.rb', content: `def main\n  helper\nend\n` }, b: { path: 'b.rb', content: `def helper\n  1\nend\n` } },
-  { language: 'Java',       confidence: 'type_name', caller: 'main', callee: 'helper', a: { path: 'A.java', content: `class A {\n  void main() { B.helper(); }\n}` }, b: { path: 'B.java', content: `class B {\n  static void helper() {}\n}` } },
-  { language: 'Kotlin',     confidence: 'name_only', caller: 'main', callee: 'helper', a: { path: 'a.kt', content: `fun main() { helper() }\n` }, b: { path: 'b.kt', content: `fun helper(): Int { return 1 }\n` } },
-  { language: 'PHP',        confidence: 'name_only', caller: 'main', callee: 'helper', a: { path: 'a.php', content: `<?php\nfunction main() { helper(); }\n` }, b: { path: 'b.php', content: `<?php\nfunction helper() { return 1; }\n` } },
-  { language: 'C#',         confidence: 'name_only', caller: 'Main', callee: 'Helper', a: { path: 'A.cs', content: `class A {\n  void Main() { B.Helper(); }\n}` }, b: { path: 'B.cs', content: `class B {\n  public static void Helper() {}\n}` } },
+  { language: 'Java',       confidence: 'import',    caller: 'main', callee: 'helper', a: { path: 'app/A.java', content: `package app;\nimport util.B;\nclass A {\n  void main() { B.helper(); }\n}` }, b: { path: 'util/B.java', content: `package util;\nclass B {\n  static void helper() {}\n}` } },
+  { language: 'Kotlin',     confidence: 'import',    caller: 'main', callee: 'helper', a: { path: 'app/A.kt', content: `package app\nimport util.B\nfun main() { B.helper() }\n` }, b: { path: 'util/B.kt', content: `package util\nobject B { fun helper(): Int { return 1 } }\n` } },
+  { language: 'PHP',        confidence: 'import',    caller: 'main', callee: 'helper', a: { path: 'app/A.php', content: `<?php\nnamespace App;\nuse Util\\B;\nfunction main() { B::helper(); }\n` }, b: { path: 'util/B.php', content: `<?php\nnamespace Util;\nclass B { public static function helper() { return 1; } }\n` } },
+  { language: 'C#',         confidence: 'import',    caller: 'Main', callee: 'Helper', a: { path: 'app/A.cs', content: `using Util;\nnamespace App;\nclass A {\n  void Main() { B.Helper(); }\n}` }, b: { path: 'util/B.cs', content: `namespace Util;\nclass B {\n  public static void Helper() {}\n}` } },
   { language: 'C++',        confidence: 'name_only', caller: 'mainFn', callee: 'helper', a: { path: 'a.cpp', content: `void mainFn() { helper(); }\n` }, b: { path: 'b.cpp', content: `void helper() {}\n` } },
   { language: 'C',          confidence: 'name_only', caller: 'mainFn', callee: 'helper', a: { path: 'a.c', content: `void mainFn() { helper(); }\n` }, b: { path: 'b.c', content: `void helper() {}\n` } },
   { language: 'Swift',      confidence: 'name_only', caller: 'mainFn', callee: 'helper', a: { path: 'a.swift', content: `func mainFn() { helper() }\n` }, b: { path: 'b.swift', content: `func helper() -> Int { return 1 }\n` } },
@@ -393,6 +394,34 @@ describe('language conformance — cross-file resolution for EVERY claimed callG
     const covered = new Set(CROSS_FILE.map((f) => f.language));
     const uncovered = claimed.filter((l) => !covered.has(l));
     expect(uncovered, `callGraph languages with no cross-file fixture: ${uncovered.join(', ')}`).toEqual([]);
+  });
+
+  it('has an import-provenance cross-file fixture for every claimed import language', () => {
+    const byLanguage = new Map(CROSS_FILE.map(f => [f.language, f]));
+    const uncovered = [...IMPORT_RESOLUTION_LANGUAGES]
+      .filter(language => byLanguage.get(language)?.confidence !== 'import');
+    expect(uncovered, `import languages without import fixture: ${uncovered.join(', ')}`).toEqual([]);
+  });
+
+  it('moves all 5 staged-language corpus edges to import confidence without losing a target', async () => {
+    const staged = CROSS_FILE.filter(f => ['Go', 'Java', 'Kotlin', 'C#', 'PHP'].includes(f.language));
+    let moved = 0;
+    for (const f of staged) {
+      const files = [
+        { path: f.a.path, language: f.language, content: f.a.content },
+        { path: f.b.path, language: f.language, content: f.b.content },
+      ];
+      const before = await build(files, new Map());
+      const after = await build(files);
+      const oldEdge = hasEdge(before, f.caller, f.callee);
+      const newEdge = hasEdge(after, f.caller, f.callee);
+      expect(oldEdge, `${f.language} baseline target`).toBeTruthy();
+      expect(newEdge?.calleeId, `${f.language} target preserved`).toBe(oldEdge!.calleeId);
+      expect(oldEdge!.confidence, `${f.language} baseline provenance`).not.toBe('import');
+      expect(newEdge!.confidence, `${f.language} widened provenance`).toBe('import');
+      moved++;
+    }
+    expect(moved).toBe(5);
   });
 
   for (const f of CROSS_FILE) {
@@ -428,6 +457,263 @@ describe('language conformance — cross-file resolution for EVERY claimed callG
 describe('language conformance — resolver refuses to guess on ambiguity', () => {
   const boundEdgesFrom = (r: Awaited<ReturnType<typeof build>>, caller: string) =>
     r.edges.filter((e) => r.nodes.get(e.callerId)?.name === caller && !r.nodes.get(e.calleeId)?.isExternal);
+
+  const importedCollisions = [
+    {
+      language: 'Go', caller: 'Main', callee: 'Helper', wanted: 'wanted/helper.go',
+      files: [
+        { path: 'app/main.go', content: 'package app\nimport pick "example.com/project/wanted"\nfunc Main(){ pick.Helper() }' },
+        { path: 'wanted/helper.go', content: 'package chosen\nfunc Helper() {}' },
+        { path: 'other/helper.go', content: 'package other\nfunc Helper() {}' },
+      ],
+    },
+    {
+      language: 'Java', caller: 'main', callee: 'helper', wanted: 'wanted/Parser.java',
+      files: [
+        { path: 'app/Main.java', content: 'package app;\nimport wanted.Parser;\nclass Main { void main(){ Parser.helper(); } }' },
+        { path: 'wanted/Parser.java', content: 'package wanted;\nclass Parser { static void helper() {} }' },
+        { path: 'other/Parser.java', content: 'package other;\nclass Parser { static void helper() {} }' },
+      ],
+    },
+    {
+      language: 'Kotlin', caller: 'main', callee: 'helper', wanted: 'wanted/Parser.kt',
+      files: [
+        { path: 'app/Main.kt', content: 'package app\nimport wanted.Parser\nfun main(){ Parser.helper() }' },
+        { path: 'wanted/Parser.kt', content: 'package wanted\nobject Parser { fun helper() {} }' },
+        { path: 'other/Parser.kt', content: 'package other\nobject Parser { fun helper() {} }' },
+      ],
+    },
+    {
+      language: 'C#', caller: 'Main', callee: 'Helper', wanted: 'wanted/Parser.cs',
+      files: [
+        { path: 'app/Main.cs', content: 'using Wanted;\nnamespace App;\nclass MainType { void Main(){ Parser.Helper(); } }' },
+        { path: 'wanted/Parser.cs', content: 'namespace Wanted;\nclass Parser {\n  public static void Helper() {}\n}' },
+        { path: 'other/Parser.cs', content: 'namespace Other;\nclass Parser {\n  public static void Helper() {}\n}' },
+      ],
+    },
+    {
+      language: 'PHP', caller: 'main', callee: 'helper', wanted: 'wanted/Parser.php',
+      files: [
+        { path: 'app/Main.php', content: '<?php\nnamespace App;\nuse Wanted\\Parser;\nfunction main(){ Parser::helper(); }' },
+        { path: 'wanted/Parser.php', content: '<?php\nnamespace Wanted;\nclass Parser { public static function helper() {} }' },
+        { path: 'other/Parser.php', content: '<?php\nnamespace Other;\nclass Parser { public static function helper() {} }' },
+      ],
+    },
+  ];
+
+  for (const fixture of importedCollisions) {
+    it(`${fixture.language}: an import selects the declared target among same-named definitions`, async () => {
+      const r = await build(fixture.files.map(file => ({ ...file, language: fixture.language })));
+      const edge = boundEdgesFrom(r, fixture.caller).find(e => e.calleeName === fixture.callee);
+      expect(edge?.confidence).toBe('import');
+      expect(r.nodes.get(edge!.calleeId)?.filePath).toBe(fixture.wanted);
+    });
+  }
+
+  it('a wired-language call absent from the package map falls through to name_only unchanged', async () => {
+    const r = await build([
+      { path: 'caller/main.go', language: 'Go', content: 'package caller\nfunc Main(){ Helper() }' },
+      { path: 'other/helper.go', language: 'Go', content: 'package other\nfunc Helper() {}' },
+    ]);
+    const edge = boundEdgesFrom(r, 'Main').find(e => e.calleeName === 'Helper');
+    expect(edge?.confidence).toBe('name_only');
+    expect(r.nodes.get(edge!.calleeId)?.filePath).toBe('other/helper.go');
+  });
+
+  it('Go package scope leaves same-file calls at same_file confidence', async () => {
+    const r = await build([{
+      path: 'pkg/main.go',
+      language: 'Go',
+      content: 'package pkg\nfunc Main(){ Helper() }\nfunc Helper() {}',
+    }]);
+    expect(hasEdge(r, 'Main', 'Helper')?.confidence).toBe('same_file');
+  });
+
+  const aliasedImports = [
+    {
+      language: 'Kotlin', caller: 'main', callee: 'helper', wanted: 'wanted/Parser.kt',
+      files: [
+        { path: 'app/Main.kt', content: 'package app\nimport wanted.Parser as P\nfun main(){ P.helper() }' },
+        { path: 'wanted/Parser.kt', content: 'package wanted\nobject Parser { fun helper() {} }' },
+      ],
+    },
+    {
+      language: 'C#', caller: 'Main', callee: 'Helper', wanted: 'wanted/Parser.cs',
+      files: [
+        { path: 'app/Main.cs', content: 'using P = Wanted.Parser;\nnamespace App;\nclass MainType { void Main(){ P.Helper(); } }' },
+        { path: 'wanted/Parser.cs', content: 'namespace Wanted;\nclass Parser { public static void Helper() {} }' },
+      ],
+    },
+    {
+      language: 'PHP', caller: 'main', callee: 'helper', wanted: 'wanted/Parser.php',
+      files: [
+        { path: 'app/Main.php', content: '<?php\nnamespace App;\nuse Wanted\\Parser as P;\nfunction main(){ P::helper(); }' },
+        { path: 'wanted/Parser.php', content: '<?php\nnamespace Wanted;\nclass Parser { public static function helper() {} }' },
+      ],
+    },
+  ];
+
+  for (const fixture of aliasedImports) {
+    it(`${fixture.language}: an aliased import resolves to the declaration's real type`, async () => {
+      const r = await build(fixture.files.map(file => ({ ...file, language: fixture.language })));
+      const edge = boundEdgesFrom(r, fixture.caller).find(e => e.calleeName === fixture.callee);
+      expect(edge?.confidence).toBe('import');
+      expect(r.nodes.get(edge!.calleeId)?.filePath).toBe(fixture.wanted);
+    });
+  }
+
+  it('an alias cannot bind a method from the wrong type in the imported file', async () => {
+    const r = await build([
+      { path: 'app/Main.cs', language: 'C#', content: 'using P = Wanted.Parser;\nnamespace App;\nclass MainType { void Main(){ P.Helper(); } }' },
+      { path: 'wanted/Types.cs', language: 'C#', content: 'namespace Wanted;\nclass Parser {}\nclass Other { public static void Helper() {} }' },
+    ]);
+    expect(boundEdgesFrom(r, 'Main').some(
+      e => e.calleeName === 'Helper' && e.confidence === 'import',
+    )).toBe(false);
+  });
+
+  it('a failed imported-method lookup falls through to the pre-change name_only tier', async () => {
+    const r = await build([
+      { path: 'app/Main.kt', language: 'Kotlin', content: 'package app\nimport wanted.Parser as P\nfun main(){ P.helper() }' },
+      { path: 'wanted/Parser.kt', language: 'Kotlin', content: 'package wanted\nobject Parser {}' },
+      { path: 'legacy/Functions.kt', language: 'Kotlin', content: 'package legacy\nfun helper() {}' },
+    ]);
+    expect(boundEdgesFrom(r, 'main').find(e => e.calleeName === 'helper')?.confidence).toBe('name_only');
+  });
+
+  it('an unaliased Go import uses the target package clause, not the path basename', async () => {
+    const r = await build([
+      { path: 'app/main.go', language: 'Go', content: 'package app\nimport "example.com/acme/lib/v2"\nfunc Main(){ lib.Helper() }' },
+      { path: 'lib/v2/helper.go', language: 'Go', content: 'package lib\nfunc Helper() {}' },
+    ]);
+    const edge = boundEdgesFrom(r, 'Main').find(e => e.calleeName === 'Helper');
+    expect(edge?.confidence).toBe('import');
+    expect(r.nodes.get(edge!.calleeId)?.filePath).toBe('lib/v2/helper.go');
+  });
+
+  it('Go external-test packages do not disable production sibling resolution', async () => {
+    const r = await build([
+      { path: 'pkg/a.go', language: 'Go', content: 'package pkg\nfunc Main(){ Helper() }' },
+      { path: 'pkg/b.go', language: 'Go', content: 'package pkg\nfunc Helper() {}' },
+      { path: 'pkg/external_test.go', language: 'Go', content: 'package pkg_test\nfunc TestExternal() {}' },
+    ]);
+    const edge = boundEdgesFrom(r, 'Main').find(e => e.calleeName === 'Helper');
+    expect(edge?.confidence).toBe('import');
+    expect(r.nodes.get(edge!.calleeId)?.filePath).toBe('pkg/b.go');
+  });
+
+  it('Go external-test packages do not change an unaliased import qualifier', async () => {
+    const r = await build([
+      { path: 'app/main.go', language: 'Go', content: 'package app\nimport "example.com/project/pkg"\nfunc Main(){ pkg.Helper() }' },
+      { path: 'pkg/helper.go', language: 'Go', content: 'package pkg\nfunc Helper() {}' },
+      { path: 'pkg/external_test.go', language: 'Go', content: 'package pkg_test\nfunc TestExternal() {}' },
+    ]);
+    const edge = boundEdgesFrom(r, 'Main').find(e => e.calleeName === 'Helper');
+    expect(edge?.confidence).toBe('import');
+    expect(r.nodes.get(edge!.calleeId)?.filePath).toBe('pkg/helper.go');
+  });
+
+  for (const fixture of [
+    { language: 'Java', ext: 'java', caller: 'main', callee: 'helper', source: 'package app; class Main { void main(){ wanted.Parser.helper(); } }', target: 'package wanted; class Parser { static void helper() {} }' },
+    { language: 'Kotlin', ext: 'kt', caller: 'main', callee: 'helper', source: 'package app\nfun main(){ wanted.Parser.helper() }', target: 'package wanted\nobject Parser { fun helper() {} }' },
+    { language: 'C#', ext: 'cs', caller: 'Main', callee: 'Helper', source: 'namespace App; class MainType { void Main(){ Wanted.Parser.Helper(); } }', target: 'namespace Wanted; class Parser { public static void Helper() {} }' },
+  ]) {
+    it(`${fixture.language}: a fully qualified call resolves through the FQN map`, async () => {
+      const r = await build([
+        { path: `app/Main.${fixture.ext}`, language: fixture.language, content: fixture.source },
+        { path: `wanted/Parser.${fixture.ext}`, language: fixture.language, content: fixture.target },
+      ]);
+      const edge = boundEdgesFrom(r, fixture.caller).find(e => e.calleeName === fixture.callee);
+      expect(edge?.confidence).toBe('import');
+    });
+  }
+
+  it('language ecosystems do not contaminate each other\'s FQN uniqueness', async () => {
+    const r = await build([
+      { path: 'app/Main.cs', language: 'C#', content: 'using Shared;\nnamespace App;\nclass MainType { void Main(){ Parser.Helper(); } }' },
+      { path: 'shared/Parser.cs', language: 'C#', content: 'namespace Shared;\nclass Parser { public static void Helper() {} }' },
+      { path: 'shared/Parser.php', language: 'PHP', content: '<?php\nnamespace Shared;\nclass Parser { public static function Helper() {} }' },
+    ]);
+    const edge = boundEdgesFrom(r, 'Main').find(e => e.calleeName === 'Helper');
+    expect(edge?.confidence).toBe('import');
+    expect(r.nodes.get(edge!.calleeId)?.filePath).toBe('shared/Parser.cs');
+    expect(boundEdgesFrom(r, 'Main').some(
+      e => r.nodes.get(e.calleeId)?.filePath === 'shared/Parser.php',
+    )).toBe(false);
+  });
+
+  it('PHP function imports bind namespace-level functions only', async () => {
+    const r = await build([
+      { path: 'app/Main.php', language: 'PHP', content: '<?php\nnamespace App;\nuse function Util\\helper;\nfunction main(){ helper(); }' },
+      { path: 'util/Functions.php', language: 'PHP', content: '<?php\nnamespace Util;\nfunction helper() {}\nclass Decoy { function helper() {} }' },
+    ]);
+    const edge = boundEdgesFrom(r, 'main').find(e => e.calleeName === 'helper');
+    expect(edge?.confidence).toBe('import');
+    expect(r.nodes.get(edge!.calleeId)?.className).toBeUndefined();
+  });
+
+  it('PHP bracketed namespaces support use-based resolution', async () => {
+    const r = await build([
+      { path: 'app/Main.php', language: 'PHP', content: '<?php\nnamespace App {\nuse Wanted\\Parser;\nfunction main(){ Parser::helper(); }\n}' },
+      { path: 'wanted/Parser.php', language: 'PHP', content: '<?php\nnamespace Wanted {\nclass Parser { public static function helper() {} }\n}' },
+    ]);
+    expect(boundEdgesFrom(r, 'main').find(e => e.calleeName === 'helper')?.confidence).toBe('import');
+  });
+
+  it('commented-out declarations and imports cannot create import-confidence edges', async () => {
+    const r = await build([
+      { path: 'app/Main.java', language: 'Java', content: 'package app;\n/*\nimport wanted.Parser;\n*/\nclass Main { void main(){ Parser.helper(); } }' },
+      { path: 'wanted/Parser.java', language: 'Java', content: 'package wanted;\nclass Parser { static void helper() {} }' },
+    ]);
+    expect(boundEdgesFrom(r, 'main').find(e => e.calleeName === 'helper')?.confidence).not.toBe('import');
+  });
+
+  it('Kotlin nested block comments cannot create import-confidence edges', async () => {
+    const r = await build([
+      { path: 'app/Main.kt', language: 'Kotlin', content: 'package app\n/* outer\n/* inner */\nimport wanted.Parser\n*/\nfun main(){ Parser.helper() }' },
+      { path: 'wanted/Parser.kt', language: 'Kotlin', content: 'package wanted\nobject Parser { fun helper() {} }' },
+    ]);
+    expect(boundEdgesFrom(r, 'main').find(e => e.calleeName === 'helper')?.confidence).not.toBe('import');
+  });
+
+  it('Java non-nested block comments end at the first closing delimiter', async () => {
+    const r = await build([
+      { path: 'app/Main.java', language: 'Java', content: 'package app;\n/* prose containing /* */\nimport wanted.Parser;\nclass Main { void main(){ Parser.helper(); } }' },
+      { path: 'wanted/Parser.java', language: 'Java', content: 'package wanted;\nclass Parser { static void helper() {} }' },
+    ]);
+    expect(boundEdgesFrom(r, 'main').find(e => e.calleeName === 'helper')?.confidence).toBe('import');
+  });
+
+  it('recovered Kotlin receivers retain the pre-change name_only fallback when no import binds', async () => {
+    const r = await build([
+      { path: 'a.kt', language: 'Kotlin', content: 'fun main(){ service.helper() }' },
+      { path: 'b.kt', language: 'Kotlin', content: 'fun helper() {}' },
+    ]);
+    expect(boundEdgesFrom(r, 'main').find(e => e.calleeName === 'helper')?.confidence).toBe('name_only');
+  });
+
+  it('C# object return types are not misindexed as declarations', async () => {
+    const r = await build([
+      { path: 'app/Main.cs', language: 'C#', content: 'using Helpers;\nnamespace App;\nclass MainType { object model; void Main(){ model.GetValue(); } }' },
+      { path: 'helpers/ReflectionHelpers.cs', language: 'C#', content: 'namespace Helpers;\nstatic class ReflectionHelpers { public static object GetValue(this object value) => value; }' },
+    ]);
+    expect(boundEdgesFrom(r, 'Main').find(e => e.calleeName === 'GetValue')?.confidence).toBe('name_only');
+  });
+
+  it('the Go import scanner stays bounded on many unclosed import blocks', () => {
+    const content = `package p\n${'import (\n'.repeat(20_000)}`;
+    const started = performance.now();
+    buildBaseImportMap([{ path: 'p/main.go', language: 'Go', content }]);
+    expect(performance.now() - started).toBeLessThan(500);
+  });
+
+  it('Go raw-string contents cannot fabricate an import binding', async () => {
+    const r = await build([
+      { path: 'app/main.go', language: 'Go', content: 'package app\nvar text = `\nimport "example.com/wanted"\n`\nfunc Main(){ wanted.Helper() }' },
+      { path: 'wanted/helper.go', language: 'Go', content: 'package wanted\nfunc Helper() {}' },
+    ]);
+    expect(boundEdgesFrom(r, 'Main').find(e => e.calleeName === 'Helper')?.confidence).not.toBe('import');
+  });
 
   it('name_only: a bare cross-file call matching two definitions is not bound arbitrarily', async () => {
     const r = await build([
