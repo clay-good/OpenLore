@@ -49,6 +49,10 @@ export const IMPORT_RESOLUTION_LANGUAGES: ReadonlySet<string> = new Set<string>(
 /** Reserved map entry for a caller's own package directory (used by bare Go calls). */
 export const PACKAGE_SCOPE_IMPORT = '\0package';
 
+/** Reserved metadata entry mapping a source-level qualifier to its declared type name. */
+export const IMPORT_QUALIFIER_PREFIX = '\0qualifier:';
+export const IMPORT_TOP_LEVEL_QUALIFIER = '\0top-level';
+
 type TargetIndex = Map<string, Set<string>>;
 
 function addTarget(index: TargetIndex, name: string, path: string): void {
@@ -62,17 +66,77 @@ function uniqueTarget(index: TargetIndex, name: string): string | undefined {
   return targets?.size === 1 ? targets.values().next().value : undefined;
 }
 
-function declaredNamespace(content: string, language: string): string | undefined {
-  if (language === 'PHP') {
-    return content.match(/^\s*namespace\s+([\\\w]+)\s*;/m)?.[1].replaceAll('\\', '.');
+function sanitizeForRegex(content: string, preserveStrings: boolean): string {
+  let out = '';
+  let state: 'code' | 'line' | 'block' | 'string' = 'code';
+  let quote = '';
+  for (let i = 0; i < content.length; i++) {
+    const ch = content[i];
+    const next = content[i + 1];
+    if (state === 'line') {
+      if (ch === '\n') { state = 'code'; out += '\n'; } else out += ' ';
+    } else if (state === 'block') {
+      if (ch === '*' && next === '/') { out += '  '; i++; state = 'code'; }
+      else out += ch === '\n' ? '\n' : ' ';
+    } else if (state === 'string') {
+      if (ch === '\\' && quote !== '`' && next) {
+        out += preserveStrings ? ch + next : '  ';
+        i++;
+      } else if (ch === quote) {
+        out += preserveStrings ? ch : ' ';
+        state = 'code';
+      } else {
+        out += preserveStrings || ch === '\n' ? ch : ' ';
+      }
+    } else if (ch === '/' && next === '/') {
+      out += '  '; i++; state = 'line';
+    } else if (ch === '/' && next === '*') {
+      out += '  '; i++; state = 'block';
+    } else if (ch === '"' || ch === "'" || ch === '`') {
+      quote = ch; state = 'string'; out += preserveStrings ? ch : ' ';
+    } else {
+      out += ch;
+    }
   }
-  if (language === 'C#') return content.match(/^\s*namespace\s+([\w.]+)\s*[;{]/m)?.[1];
-  return content.match(/^\s*package\s+([\w.]+)\s*;?/m)?.[1];
+  return out;
 }
 
-function declaredTypes(content: string): string[] {
-  return [...content.matchAll(/\b(?:class|interface|enum|record|object|trait)\s+([A-Za-z_]\w*)/g)]
+function declaredNamespace(content: string, language: string): string | undefined {
+  const code = sanitizeForRegex(content, false);
+  if (language === 'PHP') {
+    return code.match(/^\s*namespace\s+([\\\w]+)\s*[;{]/m)?.[1].replaceAll('\\', '.');
+  }
+  if (language === 'C#') return code.match(/^\s*namespace\s+([\w.]+)\s*[;{]/m)?.[1];
+  return code.match(/^\s*package\s+([\w.]+)\s*;?/m)?.[1];
+}
+
+function declaredTypes(content: string, language: string): string[] {
+  const keywords = language === 'Kotlin'
+    ? 'class|interface|enum|object'
+    : language === 'PHP'
+      ? 'class|interface|enum|trait'
+      : language === 'C#'
+        ? 'class|interface|enum|record|struct'
+        : 'class|interface|enum|record';
+  return [...sanitizeForRegex(content, false).matchAll(
+    new RegExp(`\\b(?:${keywords})\\s+([A-Za-z_]\\w*)`, 'g'),
+  )]
     .map(m => m[1]);
+}
+
+function declaredTopLevelFunctions(content: string): string[] {
+  const code = sanitizeForRegex(content, false);
+  const functions: string[] = [];
+  const scopes: boolean[] = [];
+  let pendingType = false;
+  for (const match of code.matchAll(/\b(class|interface|trait|enum)\s+[A-Za-z_]\w*|\bfunction\s+([A-Za-z_]\w*)|[{}]/g)) {
+    const token = match[0];
+    if (/^(?:class|interface|trait|enum)\b/.test(token)) pendingType = true;
+    else if (token === '{') { scopes.push(pendingType); pendingType = false; }
+    else if (token === '}') scopes.pop();
+    else if (match[2] && !scopes.includes(true)) functions.push(match[2]);
+  }
+  return functions;
 }
 
 function resolveImportedFqn(index: TargetIndex, fqn: string, memberImport = false): string | undefined {
@@ -81,15 +145,33 @@ function resolveImportedFqn(index: TargetIndex, fqn: string, memberImport = fals
   return uniqueTarget(index, fqn.slice(0, fqn.lastIndexOf('.')));
 }
 
-function goImportSpecs(content: string): Array<{ alias: string; source: string }> {
-  const specs: Array<{ alias: string; source: string }> = [];
-  const add = (alias: string | undefined, source: string): void => {
-    const local = alias ?? source.split('/').pop()!;
-    if (local !== '_' && local !== '.') specs.push({ alias: local, source });
+interface GoImportSpec { alias?: string; source: string }
+
+function goImportSpecs(content: string): GoImportSpec[] {
+  const specs: GoImportSpec[] = [];
+  const code = sanitizeForRegex(content, true);
+  let inBlock = false;
+  const add = (text: string): void => {
+    const m = text.match(/^\s*(?:([A-Za-z_]\w*|[._])\s+)?"([^"]+)"/);
+    if (!m || m[1] === '_' || m[1] === '.') return;
+    specs.push({ alias: m[1], source: m[2] });
   };
-  for (const m of content.matchAll(/^\s*import\s+(?:(\w+)\s+)?"([^"]+)"/gm)) add(m[1], m[2]);
-  for (const block of content.matchAll(/\bimport\s*\(([\s\S]*?)\)/g)) {
-    for (const m of block[1].matchAll(/^\s*(?:(\w+)\s+)?"([^"]+)"/gm)) add(m[1], m[2]);
+  for (const line of code.split('\n')) {
+    if (!inBlock) {
+      const single = line.match(/^\s*import\s+(?!\()(.+)$/);
+      if (single) add(single[1]);
+      const open = line.match(/^\s*import\s*\((.*)$/);
+      if (open) {
+        inBlock = true;
+        const close = open[1].indexOf(')');
+        add(close >= 0 ? open[1].slice(0, close) : open[1]);
+        if (close >= 0) inBlock = false;
+      }
+    } else {
+      const close = line.indexOf(')');
+      add(close >= 0 ? line.slice(0, close) : line);
+      if (close >= 0) inBlock = false;
+    }
   }
   return specs;
 }
@@ -101,42 +183,61 @@ function buildStaticLanguageImportMaps(
   const map: ImportMap = new Map();
   const allFilePaths = files.map(file => file.path);
 
-  const goPackages = new Map<string, Set<string>>();
+  const goPackageSetsByDir = new Map<string, Set<string>>();
+  const goFileDirs = new Set<string>();
   for (const f of files.filter(f => f.language === 'Go')) {
-    const pkg = f.content.match(/^\s*package\s+([A-Za-z_]\w*)\b/m)?.[1];
+    const dir = posix.dirname(f.path);
+    goFileDirs.add(dir);
+    const pkg = sanitizeForRegex(f.content, false).match(/^\s*package\s+([A-Za-z_]\w*)\b/m)?.[1];
     if (!pkg) continue;
-    const dirs = goPackages.get(pkg) ?? new Set<string>();
-    dirs.add(posix.dirname(f.path));
-    goPackages.set(pkg, dirs);
+    const packages = goPackageSetsByDir.get(dir) ?? new Set<string>();
+    packages.add(pkg);
+    goPackageSetsByDir.set(dir, packages);
+  }
+  const goPackageByDir = new Map(
+    [...goPackageSetsByDir].flatMap(([dir, packages]) =>
+      packages.size === 1 ? [[dir, packages.values().next().value!] as const] : []),
+  );
+  const goDirsBySuffix = new Map<string, Set<string>>();
+  for (const dir of goFileDirs) {
+    const parts = dir.split('/');
+    for (let i = 0; i < parts.length; i++) {
+      const suffix = parts.slice(i).join('/');
+      const dirs = goDirsBySuffix.get(suffix) ?? new Set<string>();
+      dirs.add(dir);
+      goDirsBySuffix.set(suffix, dirs);
+    }
   }
   for (const f of files.filter(f => f.language === 'Go')) {
     const fileMap = new Map<string, string>();
-    const ownPackage = f.content.match(/^\s*package\s+([A-Za-z_]\w*)\b/m)?.[1];
     const ownDir = posix.dirname(f.path);
-    if (ownPackage && goPackages.get(ownPackage)?.has(ownDir)) {
-      fileMap.set(PACKAGE_SCOPE_IMPORT, ownDir);
-    }
-    for (const [alias, target] of parseGoImports(f.path, f.content, allFilePaths)) {
+    if (goPackageByDir.has(ownDir)) fileMap.set(PACKAGE_SCOPE_IMPORT, ownDir);
+    for (const [alias, target] of parseGoImports(f.path, f.content, allFilePaths, {
+      fileDirs: goFileDirs,
+      dirsBySuffix: goDirsBySuffix,
+      packageByDir: goPackageByDir,
+    })) {
       fileMap.set(alias, target);
-    }
-    for (const spec of goImportSpecs(f.content)) {
-      const candidates = [...goPackages.values()].flatMap(dirs => [...dirs]).filter(dir =>
-        spec.source === dir || spec.source.endsWith(`/${dir}`) || dir.endsWith(`/${spec.source}`),
-      );
-      if (candidates.length === 1) fileMap.set(spec.alias, candidates[0]);
     }
     if (fileMap.size > 0) map.set(f.path, fileMap);
   }
 
-  const fqnIndex: TargetIndex = new Map();
-  const namespaceTypes = new Map<string, Map<string, Set<string>>>();
+  const ecosystemFor = (language: string): string =>
+    language === 'Java' || language === 'Kotlin' ? 'JVM' : language;
+  const fqnIndexes = new Map<string, TargetIndex>();
+  const namespaceTypesByEcosystem = new Map<string, Map<string, Map<string, Set<string>>>>();
   for (const f of files) {
     if (!['Java', 'Kotlin', 'C#', 'PHP'].includes(f.language)) continue;
     const namespace = declaredNamespace(f.content, f.language);
     if (!namespace) continue;
-    const symbols = declaredTypes(f.content);
+    const ecosystem = ecosystemFor(f.language);
+    const fqnIndex = fqnIndexes.get(ecosystem) ?? new Map<string, Set<string>>();
+    const namespaceTypes = namespaceTypesByEcosystem.get(ecosystem) ?? new Map();
+    const symbols = declaredTypes(f.content, f.language);
     if (f.language === 'Kotlin') {
-      for (const m of f.content.matchAll(/^\s*fun\s+([A-Za-z_]\w*)\s*\(/gm)) symbols.push(m[1]);
+      for (const m of sanitizeForRegex(f.content, false).matchAll(/^\s*fun\s+([A-Za-z_]\w*)\s*\(/gm)) symbols.push(m[1]);
+    } else if (f.language === 'PHP') {
+      symbols.push(...declaredTopLevelFunctions(f.content));
     }
     const byName = namespaceTypes.get(namespace) ?? new Map<string, Set<string>>();
     for (const symbol of symbols) {
@@ -146,55 +247,76 @@ function buildStaticLanguageImportMaps(
       byName.set(symbol, targets);
     }
     namespaceTypes.set(namespace, byName);
+    fqnIndexes.set(ecosystem, fqnIndex);
+    namespaceTypesByEcosystem.set(ecosystem, namespaceTypes);
   }
 
   for (const f of files) {
     if (!['Java', 'Kotlin', 'C#', 'PHP'].includes(f.language)) continue;
+    const ecosystem = ecosystemFor(f.language);
+    const fqnIndex = fqnIndexes.get(ecosystem) ?? new Map();
+    const namespaceTypes = namespaceTypesByEcosystem.get(ecosystem) ?? new Map();
+    const code = sanitizeForRegex(f.content, false);
     const fileMap = new Map<string, string>();
     const conflicting = new Set<string>();
-    const bind = (name: string, target: string): void => {
+    const bind = (name: string, target: string, declaredQualifier?: string): void => {
       if (conflicting.has(name)) return;
       const existing = fileMap.get(name);
       if (existing && existing !== target) {
         fileMap.delete(name);
+        fileMap.delete(`${IMPORT_QUALIFIER_PREFIX}${name}`);
         conflicting.add(name);
       } else {
         fileMap.set(name, target);
+        if (declaredQualifier) fileMap.set(`${IMPORT_QUALIFIER_PREFIX}${name}`, declaredQualifier);
       }
     };
     const ownNamespace = declaredNamespace(f.content, f.language);
     if (ownNamespace) {
       for (const [name, targets] of namespaceTypes.get(ownNamespace) ?? []) {
-        if (targets.size === 1) bind(name, targets.values().next().value!);
+        if (targets.size === 1) bind(name, targets.values().next().value!, name);
       }
     }
 
     if (f.language === 'Java' || f.language === 'Kotlin') {
-      for (const m of f.content.matchAll(/^\s*import\s+(?:(static)\s+)?([\w.]+)(?:\s+as\s+(\w+))?\s*;?/gm)) {
+      for (const m of code.matchAll(/^\s*import\s+(?:(static)\s+)?([\w.]+)(?:\s+as\s+(\w+))?\s*;?/gm)) {
         const fqn = m[2];
         const local = m[3] ?? fqn.split('.').pop()!;
         const target = resolveImportedFqn(fqnIndex, fqn, m[1] === 'static');
-        if (target) bind(local, target);
+        const qualifier = m[1] ? undefined : fqn.split('.').pop()!;
+        if (target) bind(local, target, qualifier);
       }
     } else if (f.language === 'C#') {
-      for (const m of f.content.matchAll(/^\s*using\s+(?:(\w+)\s*=\s*)?([\w.]+)\s*;/gm)) {
+      for (const m of code.matchAll(/^\s*using\s+(?:(\w+)\s*=\s*)?([\w.]+)\s*;/gm)) {
         const alias = m[1];
         const imported = m[2];
         const direct = resolveImportedFqn(fqnIndex, imported);
-        if (alias && direct) bind(alias, direct);
+        if (alias && direct) bind(alias, direct, imported.split('.').pop()!);
         if (!alias) {
           for (const [name, targets] of namespaceTypes.get(imported) ?? []) {
-            if (targets.size === 1) bind(name, targets.values().next().value!);
+            if (targets.size === 1) bind(name, targets.values().next().value!, name);
           }
-          if (direct) bind(imported.split('.').pop()!, direct);
+          if (direct) bind(imported.split('.').pop()!, direct, imported.split('.').pop()!);
         }
       }
     } else {
-      for (const m of f.content.matchAll(/^\s*use\s+(?:function\s+)?([\\\w]+)(?:\s+as\s+(\w+))?\s*;/gm)) {
-        const fqn = m[1].replaceAll('\\', '.');
-        const local = m[2] ?? fqn.split('.').pop()!;
+      for (const m of code.matchAll(/^\s*use\s+(?:(function)\s+)?([\\\w]+)(?:\s+as\s+(\w+))?\s*;/gm)) {
+        const fqn = m[2].replaceAll('\\', '.');
+        const local = m[3] ?? fqn.split('.').pop()!;
         const target = resolveImportedFqn(fqnIndex, fqn);
-        if (target) bind(local, target);
+        if (target) bind(
+          local,
+          target,
+          m[1] ? IMPORT_TOP_LEVEL_QUALIFIER : fqn.split('.').pop()!,
+        );
+      }
+    }
+    if (f.language !== 'PHP') {
+      for (const m of code.matchAll(/\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+\b/g)) {
+        const exactTarget = resolveImportedFqn(fqnIndex, m[0]);
+        const qualifier = exactTarget ? m[0] : m[0].slice(0, m[0].lastIndexOf('.'));
+        const target = exactTarget ?? resolveImportedFqn(fqnIndex, qualifier);
+        if (target) bind(qualifier, target, qualifier.split('.').pop()!);
       }
     }
     if (fileMap.size > 0) map.set(f.path, fileMap);
@@ -505,18 +627,49 @@ export function findCalleeFileViaImport(
 // Language-specific import parsers (Go, Rust, Ruby, Java)
 // ---------------------------------------------------------------------------
 
+interface GoImportIndex {
+  fileDirs: ReadonlySet<string>;
+  dirsBySuffix: ReadonlyMap<string, ReadonlySet<string>>;
+  packageByDir: ReadonlyMap<string, string>;
+}
+
 export function parseGoImports(
   filePath: string,
   content: string,
   allFilePaths: string[],
+  index?: GoImportIndex,
 ): Map<string, string> {
   const result = new Map<string, string>();
   const dir = posix.dirname(filePath);
+  const fileDirs = index?.fileDirs ?? new Set(allFilePaths.map(path => posix.dirname(path)));
+  const dirsBySuffix = index?.dirsBySuffix ?? (() => {
+    const suffixes = new Map<string, Set<string>>();
+    for (const candidate of fileDirs) {
+      const parts = candidate.split('/');
+      for (let i = 0; i < parts.length; i++) {
+        const suffix = parts.slice(i).join('/');
+        const dirs = suffixes.get(suffix) ?? new Set<string>();
+        dirs.add(candidate);
+        suffixes.set(suffix, dirs);
+      }
+    }
+    return suffixes;
+  })();
   for (const spec of goImportSpecs(content)) {
-    if (!spec.source.startsWith('.')) continue;
-    const target = posix.normalize(posix.join(dir, spec.source));
-    const matches = allFilePaths.filter(path => posix.dirname(path) === target);
-    if (matches.length > 0) result.set(spec.alias, target);
+    let candidates: ReadonlySet<string> | undefined;
+    if (spec.source.startsWith('.')) {
+      const target = posix.normalize(posix.join(dir, spec.source));
+      if (fileDirs.has(target)) candidates = new Set([target]);
+    } else {
+      const parts = spec.source.split('/');
+      for (let i = 0; i < parts.length && !candidates; i++) {
+        candidates = dirsBySuffix.get(parts.slice(i).join('/'));
+      }
+    }
+    if (candidates?.size !== 1) continue;
+    const target = candidates.values().next().value!;
+    const alias = spec.alias ?? index?.packageByDir.get(target);
+    if (alias) result.set(alias, target);
   }
   return result;
 }

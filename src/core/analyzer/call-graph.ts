@@ -16,7 +16,12 @@ import { dirname, join as joinPath, posix } from 'node:path';
 import type Parser from 'tree-sitter';
 import { FunctionRegistryTrie } from './function-registry-trie.js';
 import type { ImportMap } from './import-resolver-bridge.js';
-import { buildResolvedImportMap, PACKAGE_SCOPE_IMPORT } from './import-resolver-bridge.js';
+import {
+  buildResolvedImportMap,
+  IMPORT_QUALIFIER_PREFIX,
+  IMPORT_TOP_LEVEL_QUALIFIER,
+  PACKAGE_SCOPE_IMPORT,
+} from './import-resolver-bridge.js';
 import { inferTypesFromSource, resolveViaTypeInference } from './type-inference-engine.js';
 import {
   extractAllHttpEdges,
@@ -1338,7 +1343,7 @@ const JAVA_FN_QUERY = `
 
 const JAVA_CALL_QUERY = `
   (method_invocation
-    object: (identifier) @call.object
+    object: [(identifier) (field_access)] @call.object
     name: (identifier) @call.name) @call.node
 
   (method_invocation
@@ -2289,6 +2294,7 @@ export const CALLGRAPH_LANGUAGES: ReadonlySet<string> = new Set<string>([
 const UNIQUE_IMPORT_BINDING_LANGUAGES: ReadonlySet<string> = new Set([
   'Go', 'Java', 'Kotlin', 'C#', 'PHP',
 ]);
+const RECOVERED_RECEIVER_LANGUAGES: ReadonlySet<string> = new Set(['Kotlin', 'C#', 'PHP']);
 
 // ── Dart (via portable WASM + web-tree-sitter) ───────────────────────────────
 //
@@ -4652,20 +4658,40 @@ export class CallGraphBuilder {
       // name was followed through a re-export chain is labelled `re_export` (still a
       // proven concrete target, but the barrel hop is disclosed); a direct import is
       // labelled `import`.
+      let importBindingFound = false;
       if (!calleeNode) {
         const qualifier = raw.calleeObject?.split(/[.\\:]/).filter(Boolean).pop();
         const viaName = callImportMap.get(callerNode.filePath)?.get(raw.calleeName);
+        const packageScopeTarget = !raw.calleeObject
+          ? callImportMap.get(callerNode.filePath)?.get(PACKAGE_SCOPE_IMPORT)
+          : undefined;
         const importedFile = viaName
           ?? (raw.calleeObject
             ? callImportMap.get(callerNode.filePath)?.get(raw.calleeObject)
               ?? (qualifier ? callImportMap.get(callerNode.filePath)?.get(qualifier) : undefined)
-            : callImportMap.get(callerNode.filePath)?.get(PACKAGE_SCOPE_IMPORT));
+            : packageScopeTarget);
         if (importedFile) {
-          const importedCandidates = qualifier && callerNode.language !== 'Go'
-            ? trie.findByQualifiedName(qualifier, raw.calleeName)
-            : trie.findBySimpleName(raw.calleeName);
+          importBindingFound = true;
+          // The imported file is the authoritative qualifier. A source-level alias (for example
+          // `using P = Wanted.Parser`) need not match the declaration's real class name.
+          const boundName = raw.calleeObject ?? (viaName ? raw.calleeName : undefined);
+          const declaredQualifier = boundName
+            ? callImportMap.get(callerNode.filePath)?.get(
+              `${IMPORT_QUALIFIER_PREFIX}${boundName}`,
+            ) ?? (qualifier
+              ? callImportMap.get(callerNode.filePath)?.get(`${IMPORT_QUALIFIER_PREFIX}${qualifier}`)
+              : undefined)
+            : undefined;
+          const importedCandidates = declaredQualifier === IMPORT_TOP_LEVEL_QUALIFIER
+            ? trie.findBySimpleName(raw.calleeName).filter(n => !n.className)
+            : declaredQualifier
+              ? trie.findByQualifiedName(declaredQualifier, raw.calleeName)
+              : trie.findBySimpleName(raw.calleeName);
           const candidates = importedCandidates.filter(n =>
-            matchesImportedTarget(n.filePath, importedFile),
+            matchesImportedTarget(n.filePath, importedFile) &&
+            // Go's package-scope binding is only for siblings. Same-file calls must continue to
+            // the established `same_file` tier below.
+            (!packageScopeTarget || n.filePath !== callerNode.filePath),
           );
           const requiresUniqueTarget = UNIQUE_IMPORT_BINDING_LANGUAGES.has(callerNode.language);
           if (candidates.length > 0 && (!requiresUniqueTarget || candidates.length === 1)) {
@@ -4680,7 +4706,11 @@ export class CallGraphBuilder {
       // Strategy 4 — same-file preference (only for calls without a typed receiver)
       // When a receiver is explicitly present but unresolvable (e.g. redis_client.get()),
       // skip name_only fallback to avoid false-positive edges.
-      if (!calleeNode && !raw.calleeObject) {
+      if (
+        !calleeNode &&
+        (!raw.calleeObject ||
+          (RECOVERED_RECEIVER_LANGUAGES.has(callerNode.language) && !importBindingFound))
+      ) {
         const candidates = trie.findBySimpleName(raw.calleeName);
         if (candidates.length === 0) {
           // A synthesized super(...) edge whose parent class is not in the
