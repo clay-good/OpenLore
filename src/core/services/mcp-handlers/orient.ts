@@ -750,7 +750,7 @@ export async function handleOrient(
 
   // ── Suggested tools (portable discovery for non-Claude Code clients) ─────
   // Derived from what orient already knows — no extra I/O.
-  const _suggested: string[] = ['record_decision'];
+  const _suggested: string[] = emptyResult ? ['search_code', 'get_map'] : ['record_decision'];
   if (architectureViolations !== undefined) _suggested.push('check_architecture');
   if (relevantFunctions.some(f => f.isHub)) _suggested.push('analyze_impact');
   if (insertionPoints.length > 0) _suggested.push('get_subgraph');
@@ -769,7 +769,7 @@ export async function handleOrient(
   if (/\b(test|coverage|spec.?driven)\b/.test(_taskLow)) _suggested.push('get_test_coverage');
   if (/\b(duplicate|clone|similar|refactor)\b/.test(_taskLow)) _suggested.push('get_duplicate_report');
   if (/\b(cluster|community|coupled|group)\b/.test(_taskLow)) _suggested.push('get_cluster');
-  _suggested.push('check_spec_drift');
+  if (!emptyResult) _suggested.push('check_spec_drift');
   const _seen = new Set<string>();
   const suggestedTools = _suggested.filter(t => (_seen.has(t) ? false : (_seen.add(t), true)));
 

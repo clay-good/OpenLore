@@ -1585,9 +1585,10 @@ decision-list responses SHALL expose the explicit origin for every pending decis
 
 An `orient` result with no relevant functions SHALL carry a deterministic empty-result
 disclosure: the identifier-shaped query tokens that matched nothing in the corpus, and, for each,
-any indexed identifier token that contains the missed token as a prefix or substring (a
-"near token" receipt, bounded lookup over the existing corpus vocabulary — no model, no new
-index). The disclosure SHALL state facts about the miss, never guess an answer.
+any indexed identifier token that shares a prefix or substring relation with the missed token
+(either token may contain the other), as a "near token" receipt. The lookup SHALL be bounded over
+the existing corpus vocabulary and use no model or new index. The disclosure SHALL state facts
+about the miss, never guess an answer.
 
 #### Scenario: A morphological miss names its near token
 

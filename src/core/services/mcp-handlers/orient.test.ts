@@ -415,6 +415,8 @@ describe('handleOrient', () => {
       expect.stringContaining('greet'),
     ]));
     expect((result.nextSteps as string[]).join(' ')).not.toMatch(/record_decision|check_spec_drift/);
+    expect(result.suggestedTools).toEqual(expect.arrayContaining(['search_code', 'get_map']));
+    expect(result.suggestedTools).not.toEqual(expect.arrayContaining(['record_decision', 'check_spec_drift']));
   });
 
   it('does not fabricate a near token for a foreign query', async () => {

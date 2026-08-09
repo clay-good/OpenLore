@@ -152,7 +152,15 @@ describe('analyze --no-embed builds a keyword (BM25) index', () => {
   let cwdSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(async () => {
-    buildMock.mockReset().mockResolvedValue({ hasEmbeddings: false, total: 1, reused: 0, embedded: 0 });
+    buildMock.mockReset().mockResolvedValue({
+      hasEmbeddings: false,
+      total: CALL_GRAPH.stats.totalNodes,
+      productionFunctions: CALL_GRAPH.stats.totalNodes,
+      testFunctions: 0,
+      signatureOnlySymbols: 0,
+      reused: 0,
+      embedded: 0,
+    });
     fromEnvMock.mockReset().mockImplementation(() => { throw new Error('no embedder'); });
     fromConfigMock.mockReset().mockReturnValue(null);
     const cfgMod = await import('../../core/services/config-manager.js');
@@ -192,5 +200,12 @@ describe('analyze --no-embed builds a keyword (BM25) index', () => {
     expect(buildMock).toHaveBeenCalledTimes(1);
     // Default path DOES attempt to resolve an embedder (then falls back).
     expect(fromEnvMock).toHaveBeenCalled();
+  });
+
+  it('prints the same function count as the call graph when no extra populations are indexed', async () => {
+    await analyzeCommand.parseAsync(['--no-embed'], { from: 'user' });
+    expect(consoleSpy).toHaveBeenCalledWith(
+      expect.stringContaining(`Function index built [keyword] (${CALL_GRAPH.stats.totalNodes} functions)`),
+    );
   });
 });

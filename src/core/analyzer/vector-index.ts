@@ -212,6 +212,7 @@ function rrfScore(rankDense: number, rankSparse: number, k = 60): number {
 // Module-level BM25 corpus cache: avoids a full table scan on every search call.
 // Keyed by dbPath; invalidated by build() when the index is rebuilt.
 const _bm25Cache = new Map<string, { corpus: Bm25Corpus; rowCount: number; rows: Record<string, unknown>[] }>();
+const _identifierVocabularyCache = new Map<string, string[]>();
 
 // Module-level LanceDB table cache: avoids connect() + openTable() on every search call.
 // Invalidated by build() when the index is rebuilt.
@@ -221,6 +222,7 @@ const _tableCache = new Map<string, { table: any }>();
 /** Test-only: clear in-memory BM25 + LanceDB caches to force cold path. */
 export function _resetVectorIndexCachesForTesting(): void {
   _bm25Cache.clear();
+  _identifierVocabularyCache.clear();
   _tableCache.clear();
   _metaCache.clear();
 }
@@ -232,6 +234,7 @@ export function _resetVectorIndexCachesForTesting(): void {
  * the next search builds the corpus fresh from the table.
  */
 function patchBm25Cache(dbPath: string, changedFilePaths: Set<string>, newRows: Record<string, unknown>[]): void {
+  _identifierVocabularyCache.delete(dbPath);
   // The on-disk corpus sidecar no longer matches the mutated table; drop it so the
   // next cold start rebuilds from raw text rather than hydrating a stale corpus.
   // Re-serialising per patch is intentionally out of scope (owned by the serving
@@ -619,10 +622,6 @@ export class VectorIndex {
     }
 
     const repoNodes = nodes.filter(isRepoFunction);
-    if (repoNodes.length === 0) {
-      throw new Error('No repository functions to index');
-    }
-
     const sigIndex = buildSignatureIndex(signatures);
 
     // Build candidate records (without vectors)
@@ -665,6 +664,7 @@ export class VectorIndex {
     for (const n of repoNodes) nodeFileNames.add(`${n.filePath}\u0000${n.name}`);
 
     for (const fsm of signatures) {
+      if (fsm.path === 'external') continue;
       for (const entry of fsm.entries) {
         const syntheticId = `${fsm.path}::${entry.name}`;
         if (nodeIds.has(syntheticId)) continue; // already covered by call graph
@@ -687,6 +687,10 @@ export class VectorIndex {
           text: `[${fsm.language}] ${fsm.path} ${entry.name}\n${sig}${doc ? '\n' + doc : ''}`,
         });
       }
+    }
+
+    if (candidates.length === 0) {
+      throw new Error('No repository functions to index');
     }
 
     const dbPath = join(outputDir, DB_FOLDER);
@@ -720,6 +724,7 @@ export class VectorIndex {
       );
       _tableCache.delete(dbPath);
       _bm25Cache.delete(dbPath);
+      _identifierVocabularyCache.delete(dbPath);
       _metaCache.delete(dbPath);
       return {
         embedded: 0,
@@ -832,6 +837,7 @@ export class VectorIndex {
     // Invalidate search caches — index was just rebuilt
     _tableCache.delete(dbPath);
     _bm25Cache.delete(dbPath);
+    _identifierVocabularyCache.delete(dbPath);
     _metaCache.delete(dbPath);
 
     return {
@@ -1261,15 +1267,27 @@ export class VectorIndex {
 
     const queryTokens = [...new Set(tokenize(query))].slice(0, 12);
     const missedTokens = queryTokens.filter((token) => !cachedEntry.corpus.df.has(token));
-    const identifierTokens = [...new Set(
-      cachedEntry.rows.flatMap((row) => tokenize(String(row.name ?? ''))),
-    )].sort();
+    if (missedTokens.length === 0) return { missedTokens, nearTokens: [] };
+
+    let identifierTokens = _identifierVocabularyCache.get(dbPath);
+    if (!identifierTokens) {
+      identifierTokens = [...new Set(
+        cachedEntry.rows.flatMap((row) => tokenize(String(row.name ?? ''))),
+      )].sort();
+      _identifierVocabularyCache.set(dbPath, identifierTokens);
+    }
 
     const nearTokens = missedTokens.flatMap((queryToken) => {
-      const indexedTokens = identifierTokens
-        .filter((token) => token.includes(queryToken) || queryToken.includes(token))
-        .sort((a, b) => Math.abs(a.length - queryToken.length) - Math.abs(b.length - queryToken.length) || a.localeCompare(b))
-        .slice(0, 3);
+      const indexedTokens: string[] = [];
+      const compare = (a: string, b: string): number =>
+        Math.abs(a.length - queryToken.length) - Math.abs(b.length - queryToken.length)
+        || a.localeCompare(b);
+      for (const token of identifierTokens) {
+        if (!token.includes(queryToken) && !queryToken.includes(token)) continue;
+        indexedTokens.push(token);
+        indexedTokens.sort(compare);
+        if (indexedTokens.length > 3) indexedTokens.pop();
+      }
       return indexedTokens.length > 0 ? [{ queryToken, indexedTokens }] : [];
     });
 
