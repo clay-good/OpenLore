@@ -30,14 +30,11 @@ export async function readConfinedFile(
   maxBytes: number,
 ): Promise<Buffer> {
   safeJoin(confinementRoot, relative(confinementRoot, filePath));
-  const before = await lstat(filePath);
-  if (!before.isFile() || before.isSymbolicLink()) throw new Error('Refusing non-regular file');
-  if (before.size > maxBytes) throw new Error('File exceeds viewer byte limit');
-
   const handle = await open(filePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
   try {
     const opened = await handle.stat();
-    if (!sameFile(before, opened)) throw new Error('File changed during confinement check');
+    if (!opened.isFile()) throw new Error('Refusing non-regular file');
+    if (opened.size > maxBytes) throw new Error('File exceeds viewer byte limit');
 
     const buffer = Buffer.allocUnsafe(maxBytes + 1);
     let bytesRead = 0;
