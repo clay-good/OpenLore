@@ -223,6 +223,19 @@ read.
 - **WHEN** the config is read
 - **THEN** the skew is disclosed and unknown content is ignored gracefully; the read succeeds
 
+### Requirement: EnforceRepositorySecretRedactionAtSharedToolDispatch
+
+This domain SHALL conform to the canonical statement of decision `2d0457b5`, which lives in the
+`mcp-security` domain — see [mcp-security/spec.md](../mcp-security/spec.md).
+
+#### Scenario: The canonical statement governs
+
+- **GIVEN** decision `2d0457b5` recorded in the `mcp-security` domain
+- **WHEN** this domain's behavior touches that decision's surface
+- **THEN** it satisfies the canonical requirement as stated in [mcp-security/spec.md](../mcp-security/spec.md)
+
+> Decision pointer: 2d0457b5 — "Enforce repository secret redaction at shared tool dispatch" is recorded in `openspec/specs/mcp-security/spec.md`; it also affects this domain.
+
 ## Technical Notes
 
 ## Decisions

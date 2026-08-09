@@ -54,6 +54,7 @@ export const CONFIG_FIELD_KINDS: Record<keyof OpenLoreConfig, ConfigFieldKind> =
   impactCertificate: 'object',
   contextInjection: 'object',
   enforcement: 'object',
+  secretRedaction: 'object',
 };
 
 /** The known top-level config keys, derived from the type-bound field map. */

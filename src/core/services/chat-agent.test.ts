@@ -305,6 +305,38 @@ describe('runChatAgent', () => {
       expect(onToolEnd).toHaveBeenCalledWith('test_tool');
     });
 
+    it('keeps the redaction receipt visible when tool history is truncated', async () => {
+      mockToolExecute.mockResolvedValue({
+        result: {
+          results: [{ source: '[REDACTED:api-key]' + 'x'.repeat(20_000) }],
+          redactions: { count: 1, kinds: ['api-key'] },
+        },
+        filePaths: [],
+      });
+      fetchSpy.mockResolvedValueOnce(mockResponse({
+        choices: [{
+          message: {
+            role: 'assistant',
+            content: null,
+            tool_calls: [{ id: 'tc1', type: 'function', function: { name: 'test_tool', arguments: '{}' } }],
+          },
+          finish_reason: 'tool_calls',
+        }],
+      }));
+      fetchSpy.mockResolvedValueOnce(mockResponse({
+        choices: [{ message: { role: 'assistant', content: 'Safe.', tool_calls: [] }, finish_reason: 'stop' }],
+      }));
+
+      await runChatAgent({ directory: '/project', messages: [{ role: 'user', content: 'search' }] });
+      const secondRequest = JSON.parse(fetchSpy.mock.calls[1][1].body) as {
+        messages: Array<{ role: string; content: string }>;
+      };
+      const toolMessage = secondRequest.messages.find(message => message.role === 'tool');
+
+      expect(toolMessage?.content).toContain('... [truncated]');
+      expect(toolMessage?.content).toContain('Redactions: {"count":1,"kinds":["api-key"]}');
+    });
+
     it('should throw on non-ok response', async () => {
       fetchSpy.mockResolvedValue(mockResponse({ error: 'bad request' }, false, 400));
 

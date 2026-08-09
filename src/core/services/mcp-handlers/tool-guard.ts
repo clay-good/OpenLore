@@ -124,9 +124,18 @@ export function capStructuredResult(result: unknown, maxBytes: number): { text: 
   const note =
     'output exceeded the response byte budget; narrow the query (add a filePattern, lower a ' +
     'limit/maxDepth/maxResults, or query a specific symbol/file).';
+  const redactions = result && typeof result === 'object' && !Array.isArray(result)
+    ? (result as Record<string, unknown>).redactions
+    : undefined;
+  const envelope = (partial: string): Record<string, unknown> => ({
+    truncated: true,
+    note,
+    ...(redactions === undefined ? {} : { redactions }),
+    partial,
+  });
   const best = largestFitting(full.length, (n) =>
-    Buffer.byteLength(JSON.stringify({ truncated: true, note, partial: full.slice(0, n) }, null, 2), 'utf8') <= maxBytes);
-  return { text: JSON.stringify({ truncated: true, note, partial: full.slice(0, best) }, null, 2), truncated: true };
+    Buffer.byteLength(JSON.stringify(envelope(full.slice(0, n)), null, 2), 'utf8') <= maxBytes);
+  return { text: JSON.stringify(envelope(full.slice(0, best)), null, 2), truncated: true };
 }
 
 /** Map an error to the stable taxonomy code (actionable vs real failure). */

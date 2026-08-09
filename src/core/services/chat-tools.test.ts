@@ -6,7 +6,15 @@
  * the toChatToolDefinitions() conversion helper.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+
+const { dispatchToolMock } = vi.hoisted(() => ({
+  dispatchToolMock: vi.fn(),
+}));
+
+vi.mock('./tool-dispatch.js', () => ({
+  dispatchTool: dispatchToolMock,
+}));
 import { CHAT_TOOLS, toChatToolDefinitions } from './chat-tools.js';
 
 // ============================================================================
@@ -54,6 +62,22 @@ describe('CHAT_TOOLS registry', () => {
     expect(names.has('search_specs')).toBe(true); // list_spec_domains is subsumed: omit query to list domains
     expect(names.has('get_refactor_report')).toBe(true);
     expect(names.has('suggest_insertion_points')).toBe(true);
+  });
+
+  it('routes diagram-chat code search through shared dispatch', async () => {
+    const secret = `sk-${'c'.repeat(24)}`;
+    dispatchToolMock.mockResolvedValue({
+      results: [{ filePath: 'src/auth.ts', source: '[REDACTED:api-key]' }],
+      redactions: { count: 1, kinds: ['api-key'] },
+    });
+    const search = CHAT_TOOLS.find(tool => tool.name === 'search_code');
+    const output = await search!.execute('/repo', { directory: '/repo', query: secret, limit: 3 });
+
+    expect(dispatchToolMock).toHaveBeenCalledWith('search_code', {
+      directory: '/repo', query: secret, limit: 3,
+    }, '/repo');
+    expect(JSON.stringify(output.result)).not.toContain(secret);
+    expect(output.result).toHaveProperty('redactions');
   });
 });
 

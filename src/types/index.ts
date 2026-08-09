@@ -96,6 +96,13 @@ export interface OpenLoreConfig {
    * sugar, which now lowers onto this policy.
    */
   enforcement?: EnforcementConfig;
+  /**
+   * Repository-content secret redaction. Tool output is redacted by default; setting
+   * `toolOutput` to false is an explicit trusted-solo opt-out.
+   */
+  secretRedaction?: {
+    toolOutput?: boolean;
+  };
 }
 
 /**

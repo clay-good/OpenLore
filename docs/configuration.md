@@ -62,6 +62,25 @@
 
 > The `EMBED_*` variables configure the **remote** embedding provider only. For on-device embeddings with no endpoint or key, run `openlore embed --local` (or set `embedding.provider: "local"` in `.openlore/config.json`). Keyword (BM25) search is the first-class default and needs none of these. See [docs/semantic-search.md](semantic-search.md#retrieval-modes) for the full embedding/retrieval-mode reference.
 
+### Repository secret redaction
+
+OpenLore redacts credential-shaped repository content before source-carrying tool results reach an
+agent. Redacted results include a count and the matched credential kinds. Persisted LLM request logs
+use the same pattern set for both prompts and responses and record the redaction count per request.
+
+The tool-output boundary is enabled by default. A trusted solo operator who requires byte-exact tool
+output can opt out explicitly:
+
+```json
+{
+  "secretRedaction": {
+    "toolOutput": false
+  }
+}
+```
+
+This opt-out does not disable redaction in LLM logs, errors, or telemetry.
+
 ### Analyzing at any repository size
 
 **The promise: `openlore analyze` works to your machine's capacity, degrades gracefully and transparently beyond it, and never crashes — with no flags and no attention.** Two mechanisms deliver that, both on by default:

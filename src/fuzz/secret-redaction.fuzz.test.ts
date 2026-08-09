@@ -68,7 +68,9 @@ describe('fuzz: redactSecretString', () => {
   it('a guaranteed-matching secret body never survives verbatim in the output', () => {
     fc.assert(
       fc.property(fc.string(), secretWithBody, fc.string(), (prefix, { secret, body }, suffix) => {
-        const out = redactSecretString(prefix + secret + suffix);
+        // Whitespace keeps the generated occurrence credential-bounded. Arbitrary
+        // adjacency can turn an assignment value into source syntax such as a call.
+        const out = redactSecretString(`${prefix} ${secret} ${suffix}`);
         // The credential material was replaced by a [REDACTED] form; only the
         // arbitrary surrounding text may remain, never the body itself.
         return !out.includes(body);

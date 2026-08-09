@@ -31,7 +31,7 @@ validate`**, and the archive machinery works again. This pass:
   because their requirements were already synced verbatim (`fix-pi-parity-drift`,
   `fix-redaction-module-gaps`).
 
-## Complete — 128 in `archive/`
+## Complete — 129 in `archive/`
 
 Everything in `openspec/changes/archive/` is shipped (or a settled won't-do), with its
 requirements reflected in the main specs. `openspec list` shows only open work.
@@ -59,7 +59,9 @@ rank evidence make task-scoped injection reachable in the zero-config keyword mo
 `fix-empty-orient-and-corpus-honesty` (2026-08-09, archived) — empty orientations explain their
 misses with bounded near-token receipts, and synthetic external nodes no longer enter the
 searchable function corpus; `widen-import-resolution` (2026-08-09, archived) — Go, Java, Kotlin,
-C#, and PHP now resolve statically unique package/import bindings at `import` confidence.
+C#, and PHP now resolve statically unique package/import bindings at `import` confidence;
+`add-secret-redaction-boundary` (2026-08-09, archived) — source-carrying tool results and both
+sides of persisted LLM logs share deterministic, disclosed credential redaction.
 
 After this table was compiled, four research sweeps added 32 more proposals (all validate; not yet
 folded into the table): 10 in `FIELD-RESEARCH-2026-07.md`, 10 in `ECOSYSTEM-RESEARCH-2026-07-27.md`,
@@ -99,7 +101,6 @@ trust boundary for served content.
 | `add-ownership-tagged-conclusions` | per-conclusion staleness instead of a blanket lease |
 | `add-perf-regression-counter-budgets` | A deterministic counter-based performance budget in CI — catch the "fourth parse pass" before it lands |
 | `add-scip-index-interchange` | overlay compiler-verified resolution onto the tree-sitter ladder |
-| `add-secret-redaction-boundary` | repo secrets never reach the model or the log undisclosed |
 | `add-sfc-script-extraction` | disclose, then index, the code inside .vue/.svelte/.astro |
 | `add-span-precise-conclusions` | Conclusions drop the line numbers the substrate already stores |
 | `add-structural-search-tool` | deterministic AST pattern search as a conclusion tool |
