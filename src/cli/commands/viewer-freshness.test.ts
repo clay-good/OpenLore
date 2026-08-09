@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, utimes, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { buildViewerFreshness, readViewerFreshness, setViewerFreshnessHeaders } from './viewer-freshness.js';
@@ -15,11 +15,64 @@ afterEach(async () => {
 
 describe('viewer freshness', () => {
   it('distinguishes stale, current, and unassessable metadata', () => {
-    const common = { generatedAt: '2026-08-09T00:00:00.000Z', analyzedCommit: 'a', currentCommit: 'b' };
+    const common = {
+      generatedAt: '2026-08-09T00:00:00.000Z', analyzedCommit: 'a', currentCommit: 'b',
+      artifactPredatesAnalyzedCommit: false,
+    };
     expect(buildViewerFreshness({ ...common, filesChangedSince: 1 }).status).toBe('stale');
     expect(buildViewerFreshness({ ...common, filesChangedSince: 0 }).status).toBe('current');
     expect(buildViewerFreshness({ ...common, currentCommit: null, filesChangedSince: null }).status)
       .toBe('unassessable');
+  });
+
+  it('does not reuse a current result after the working tree changes', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'openlore-view-live-edit-'));
+    roots.push(root);
+    await execFileAsync('git', ['init', '--quiet'], { cwd: root });
+    await execFileAsync('git', ['config', 'user.email', 'test@example.com'], { cwd: root });
+    await execFileAsync('git', ['config', 'user.name', 'Test'], { cwd: root });
+    await execFileAsync('git', ['config', 'commit.gpgsign', 'false'], { cwd: root });
+    await mkdir(join(root, 'src'));
+    await writeFile(join(root, 'src', 'app.ts'), 'export const value = 1;\n');
+    await execFileAsync('git', ['add', 'src/app.ts'], { cwd: root });
+    await execFileAsync('git', ['commit', '--quiet', '-m', 'initial'], { cwd: root });
+    const commit = (await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: root })).stdout.trim();
+
+    const analysisDir = join(root, '.openlore', 'custom-analysis');
+    const artifactPath = join(analysisDir, 'dependency-graph.json');
+    await mkdir(analysisDir, { recursive: true });
+    await writeFile(artifactPath, '{}');
+    await writeFile(join(analysisDir, 'fingerprint.json'), JSON.stringify({ commit }));
+    await expect(readViewerFreshness(root, analysisDir, artifactPath)).resolves
+      .toMatchObject({ status: 'current', filesChangedSince: 0 });
+
+    await writeFile(join(root, 'src', 'app.ts'), 'export const value = 2;\n');
+    await expect(readViewerFreshness(root, analysisDir, artifactPath)).resolves
+      .toMatchObject({ status: 'stale', filesChangedSince: 1 });
+  });
+
+  it('marks an independently generated artifact older than the analyzed commit as stale', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'openlore-view-old-artifact-'));
+    roots.push(root);
+    await execFileAsync('git', ['init', '--quiet'], { cwd: root });
+    await execFileAsync('git', ['config', 'user.email', 'test@example.com'], { cwd: root });
+    await execFileAsync('git', ['config', 'user.name', 'Test'], { cwd: root });
+    await execFileAsync('git', ['config', 'commit.gpgsign', 'false'], { cwd: root });
+    await writeFile(join(root, 'app.ts'), 'export const value = 1;\n');
+    await execFileAsync('git', ['add', 'app.ts'], { cwd: root });
+    await execFileAsync('git', ['commit', '--quiet', '-m', 'initial'], { cwd: root });
+    const commit = (await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: root })).stdout.trim();
+
+    const analysisDir = join(root, '.openlore', 'custom-analysis');
+    const artifactPath = join(analysisDir, 'mapping.json');
+    await mkdir(analysisDir, { recursive: true });
+    await writeFile(artifactPath, '{}');
+    await utimes(artifactPath, new Date('2000-01-01T00:00:00Z'), new Date('2000-01-01T00:00:00Z'));
+    await writeFile(join(analysisDir, 'fingerprint.json'), JSON.stringify({ commit }));
+
+    await expect(readViewerFreshness(root, analysisDir, artifactPath)).resolves.toMatchObject({
+      status: 'stale', filesChangedSince: 0,
+    });
   });
 
   it('reports a tracked source edit since the analyzed commit as stale', async () => {

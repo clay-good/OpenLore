@@ -78,7 +78,6 @@ The viewer auto-loads all available data on startup:
 | Endpoint | Source | Required? |
 |----------|--------|-----------|
 | `/api/dependency-graph` | `.openlore/analysis/dependency-graph.json` | Yes |
-| `/api/freshness` | Artifact time and analyzed-commit freshness | Yes |
 | `/api/llm-context` | `.openlore/analysis/llm-context.json` | No |
 | `/api/refactor-priorities` | `.openlore/analysis/refactor-priorities.json` | No |
 | `/api/mapping` | `.openlore/analysis/mapping.json` | No |

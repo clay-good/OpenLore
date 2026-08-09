@@ -332,11 +332,12 @@ export async function assessStalenessForAnalysis(
   absDir: string,
   analysisDir: string,
   now: number = Date.now(),
+  useMemo: boolean = true,
 ): Promise<StalenessAssessment> {
   const commit = await readBuildCommit(absDir, analysisDir);
   const memoKey = `${absDir}\0${analysisDir}\0${commit ?? ''}`;
   const memo = stalenessMemo.get(memoKey);
-  if (memo && now - memo.at < STALENESS_TTL_MS) return memo.value;
+  if (useMemo && memo && now - memo.at < STALENESS_TTL_MS) return memo.value;
 
   const changed = commit ? await countSourceChangedSince(absDir, commit) : null;
   const value = {
@@ -344,7 +345,7 @@ export async function assessStalenessForAnalysis(
     changedSourceFiles: changed,
     marker: buildStalenessMarker(commit, changed),
   };
-  stalenessMemo.set(memoKey, { at: now, value });
+  if (useMemo) stalenessMemo.set(memoKey, { at: now, value });
   return value;
 }
 
