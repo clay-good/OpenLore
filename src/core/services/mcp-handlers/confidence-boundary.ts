@@ -236,7 +236,12 @@ export function crossingsFromBasis(basis: EdgeBasis): KnownUnknowableCrossing[] 
 // re-shell `git diff` each time. Source changes are what move the result, so a few
 // seconds of latency on the staleness check itself is immaterial.
 const STALENESS_TTL_MS = 5000;
-const stalenessMemo = new Map<string, { at: number; value: StalenessMarker | undefined }>();
+export interface StalenessAssessment {
+  indexCommit: string | null;
+  changedSourceFiles: number | null;
+  marker: StalenessMarker | undefined;
+}
+const stalenessMemo = new Map<string, { at: number; value: StalenessAssessment }>();
 
 /**
  * Pure staleness decision: emit a marker only when we can both name the build
@@ -259,9 +264,12 @@ export function buildStalenessMarker(indexCommit: string | null, changedSourceFi
 }
 
 /** Read the build commit the index was analyzed at, if it was captured. */
-async function readBuildCommit(absDir: string): Promise<string | null> {
+async function readBuildCommit(absDir: string, analysisDir?: string): Promise<string | null> {
   try {
-    const raw = await readFile(join(absDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_FINGERPRINT), 'utf-8');
+    const raw = await readFile(join(
+      analysisDir ?? join(absDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR),
+      ARTIFACT_FINGERPRINT,
+    ), 'utf-8');
     const fp = JSON.parse(raw) as { commit?: string | null };
     return fp.commit ?? null;
   } catch {
@@ -282,12 +290,15 @@ async function countSourceChangedSince(absDir: string, commit: string): Promise<
     // packages. Gate on the root to keep the prior "null below root" behavior.
     if (!(await isGitRepositoryRoot(absDir))) return null;
     validateGitRef(commit);
-    const { stdout } = await execFileAsync('git', gitPathArgs('diff', '--name-only', commit, '--'), { cwd: absDir });
-    return stdout
+    const [{ stdout: changed }, { stdout: untracked }] = await Promise.all([
+      execFileAsync('git', gitPathArgs('diff', '--name-only', commit, '--'), { cwd: absDir }),
+      execFileAsync('git', ['ls-files', '--others', '--exclude-standard', '--'], { cwd: absDir }),
+    ]);
+    return new Set(`${changed}\n${untracked}`
       .split('\n')
       .map((s) => s.trim())
-      .filter((f) => f.length > 0 && GRAPH_SOURCE_EXTS.has(extname(f)))
-      .length;
+      .filter((f) => f.length > 0 && GRAPH_SOURCE_EXTS.has(extname(f))))
+      .size;
   } catch {
     return null;
   }
@@ -300,13 +311,41 @@ async function countSourceChangedSince(absDir: string, commit: string): Promise<
  * when staleness cannot be assessed (no build commit, or not a git repo).
  */
 export async function computeStaleness(absDir: string, now: number = Date.now()): Promise<StalenessMarker | undefined> {
-  const memo = stalenessMemo.get(absDir);
-  if (memo && now - memo.at < STALENESS_TTL_MS) return memo.value;
+  return computeStalenessForAnalysis(
+    absDir,
+    join(absDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR),
+    now,
+  );
+}
 
-  const commit = await readBuildCommit(absDir);
+/** Viewer/custom-analysis variant of {@link computeStaleness}. */
+export async function computeStalenessForAnalysis(
+  absDir: string,
+  analysisDir: string,
+  now: number = Date.now(),
+): Promise<StalenessMarker | undefined> {
+  return (await assessStalenessForAnalysis(absDir, analysisDir, now)).marker;
+}
+
+/** Return the viewer-facing assessment without collapsing unknown and current. */
+export async function assessStalenessForAnalysis(
+  absDir: string,
+  analysisDir: string,
+  now: number = Date.now(),
+  useMemo: boolean = true,
+): Promise<StalenessAssessment> {
+  const commit = await readBuildCommit(absDir, analysisDir);
+  const memoKey = `${absDir}\0${analysisDir}\0${commit ?? ''}`;
+  const memo = stalenessMemo.get(memoKey);
+  if (useMemo && memo && now - memo.at < STALENESS_TTL_MS) return memo.value;
+
   const changed = commit ? await countSourceChangedSince(absDir, commit) : null;
-  const value = buildStalenessMarker(commit, changed);
-  stalenessMemo.set(absDir, { at: now, value });
+  const value = {
+    indexCommit: commit,
+    changedSourceFiles: changed,
+    marker: buildStalenessMarker(commit, changed),
+  };
+  if (useMemo) stalenessMemo.set(memoKey, { at: now, value });
   return value;
 }
 

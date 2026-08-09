@@ -3,7 +3,11 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { viewCommand, sanitizeErrorMessage, safePath } from './view.js';
+import { safeJoin } from '../../utils/path-confinement.js';
 
 // ============================================================================
 // MOCKS
@@ -33,7 +37,8 @@ vi.mock('@vitejs/plugin-react', () => ({
   default: vi.fn().mockReturnValue({ name: 'vite:react' }),
 }));
 
-vi.mock('node:child_process', () => ({
+vi.mock('node:child_process', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('node:child_process')>()),
   spawn: vi.fn().mockReturnValue({ unref: vi.fn() }),
 }));
 
@@ -58,6 +63,22 @@ vi.mock('../../core/analyzer/code-shaper.js', () => ({
 vi.mock('../../core/services/chat-agent.js', () => ({
   runChatAgent: vi.fn().mockResolvedValue({ reply: '', filePaths: [] }),
   resolveProviderConfig: vi.fn().mockResolvedValue({ kind: 'anthropic', model: 'claude', baseUrl: '', apiKey: '' }),
+}));
+
+vi.mock('./view-files.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./view-files.js')>()),
+  collectSpecMarkdown: vi.fn().mockResolvedValue({ content: '# Spec', bytes: 6, truncated: false }),
+  readConfinedFile: vi.fn().mockResolvedValue(Buffer.from('export const value = 1;')),
+}));
+
+vi.mock('./viewer-freshness.js', () => ({
+  readViewerFreshness: vi.fn().mockResolvedValue({
+    generatedAt: '2026-08-09T00:00:00.000Z', analyzedCommit: 'abc', currentCommit: 'def',
+    status: 'stale', filesChangedSince: 1,
+  }),
+  setViewerFreshnessHeaders: vi.fn((setHeader: (name: string, value: string) => void) => {
+    setHeader('X-OpenLore-Analysis-Freshness', 'stale');
+  }),
 }));
 
 // Mock fs so the descriptor write in the wiring test never touches the real repo.
@@ -299,6 +320,28 @@ describe('safePath', () => {
     const result = safePath('/project', 'src/../src/file.ts');
     expect(result).toBe('/project/src/file.ts');
   });
+
+  it('rejects an in-root symlink whose target is outside the project root', () => {
+    const base = mkdtempSync(join(tmpdir(), 'openlore-view-path-'));
+    const root = join(base, 'repo');
+    const outside = join(base, 'outside.txt');
+    mkdirSync(root);
+    writeFileSync(outside, 'secret');
+    symlinkSync(outside, join(root, 'escape.ts'));
+    try {
+      expect(safePath(root, 'escape.ts')).toBeNull();
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('matches the shared MCP confinement guard on the same paths', () => {
+    for (const candidate of ['.', 'src/file.ts', '../outside.ts', '/etc/passwd']) {
+      let shared: string | null = null;
+      try { shared = safeJoin('/project', candidate); } catch { /* rejected */ }
+      expect(safePath('/project', candidate)).toBe(shared);
+    }
+  });
 });
 
 // ============================================================================
@@ -394,5 +437,52 @@ describe('view server API guard wiring', () => {
     expect(wrote![2]).toMatchObject({ mode: 0o600 });
     const { chmod } = await import('node:fs/promises');
     expect(vi.mocked(chmod).mock.calls.some(([p, m]) => String(p).endsWith('view.json') && m === 0o600)).toBe(true);
+  });
+
+  it('routes spec traversal through the bounded symlink-skipping collector', async () => {
+    const cfg = await captureViteConfig();
+    const plugin = (cfg.plugins.flat() as Array<{ name?: string; configureServer?: (s: unknown) => void }>)
+      .find((p) => p && p.name === 'openlore-graph-api')!;
+    const routes = new Map<string, (...args: any[]) => unknown>();
+    plugin.configureServer!({ middlewares: { use: (path: unknown, handler: unknown) => {
+      if (typeof path === 'string' && typeof handler === 'function') routes.set(path, handler as (...args: any[]) => unknown);
+    } } });
+    const headers = new Map<string, string>();
+    const response = {
+      statusCode: 0, setHeader: (name: string, value: string) => headers.set(name, value),
+      end: vi.fn(),
+    };
+    await routes.get('/api/spec')!({}, response);
+
+    const { collectSpecMarkdown } = await import('./view-files.js');
+    expect(collectSpecMarkdown).toHaveBeenCalledWith(expect.any(String), {
+      confinementRoot: process.cwd(),
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.end).toHaveBeenCalledWith('# Spec');
+    expect(headers.get('X-OpenLore-Spec-Truncated')).toBe('false');
+  });
+
+  it('serves stale metadata through /api/freshness and blocks traversal at /api/skeleton', async () => {
+    const cfg = await captureViteConfig();
+    const plugin = (cfg.plugins.flat() as Array<{ name?: string; configureServer?: (s: unknown) => void }>)
+      .find((p) => p && p.name === 'openlore-graph-api')!;
+    const routes = new Map<string, (...args: any[]) => unknown>();
+    plugin.configureServer!({ middlewares: { use: (path: unknown, handler: unknown) => {
+      if (typeof path === 'string' && typeof handler === 'function') routes.set(path, handler as (...args: any[]) => unknown);
+    } } });
+
+    const freshnessResponse = { statusCode: 0, setHeader: vi.fn(), end: vi.fn() };
+    await routes.get('/api/freshness')!({}, freshnessResponse);
+    expect(freshnessResponse.statusCode).toBe(200);
+    expect(JSON.parse(freshnessResponse.end.mock.calls[0][0])).toMatchObject({
+      status: 'stale', filesChangedSince: 1,
+    });
+
+    const skeletonResponse = { statusCode: 0, setHeader: vi.fn(), end: vi.fn() };
+    await routes.get('/api/skeleton')!({ url: '/?file=../../etc/passwd' }, skeletonResponse);
+    expect(skeletonResponse.statusCode).toBe(403);
+    const { readConfinedFile } = await import('./view-files.js');
+    expect(readConfinedFile).not.toHaveBeenCalled();
   });
 });
