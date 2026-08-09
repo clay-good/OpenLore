@@ -48,6 +48,8 @@ export const IMPORT_RESOLUTION_LANGUAGES: ReadonlySet<string> = new Set<string>(
 
 /** Reserved map entry for a caller's own package directory (used by bare Go calls). */
 export const PACKAGE_SCOPE_IMPORT = '\0package';
+export const PACKAGE_SCOPE_NAME = '\0package-name';
+export const GO_IMPORT_PACKAGE_PREFIX = '\0go-package:';
 
 /** Reserved metadata entry mapping a source-level qualifier to its declared type name. */
 export const IMPORT_QUALIFIER_PREFIX = '\0qualifier:';
@@ -66,34 +68,49 @@ function uniqueTarget(index: TargetIndex, name: string): string | undefined {
   return targets?.size === 1 ? targets.values().next().value : undefined;
 }
 
-function sanitizeForRegex(content: string, preserveStrings: boolean): string {
+function sanitizeForRegex(
+  content: string,
+  preserveStrings: boolean,
+  nestedBlockComments = false,
+): string {
   let out = '';
   let state: 'code' | 'line' | 'block' | 'string' = 'code';
   let quote = '';
+  let preserveCurrentString = false;
+  let blockDepth = 0;
   for (let i = 0; i < content.length; i++) {
     const ch = content[i];
     const next = content[i + 1];
     if (state === 'line') {
       if (ch === '\n') { state = 'code'; out += '\n'; } else out += ' ';
     } else if (state === 'block') {
-      if (ch === '*' && next === '/') { out += '  '; i++; state = 'code'; }
+      if (nestedBlockComments && ch === '/' && next === '*') {
+        out += '  '; i++; blockDepth++;
+      }
+      else if (ch === '*' && next === '/') {
+        out += '  '; i++; blockDepth--;
+        if (blockDepth === 0) state = 'code';
+      }
       else out += ch === '\n' ? '\n' : ' ';
     } else if (state === 'string') {
       if (ch === '\\' && quote !== '`' && next) {
-        out += preserveStrings ? ch + next : '  ';
+        out += preserveCurrentString ? ch + next : '  ';
         i++;
       } else if (ch === quote) {
-        out += preserveStrings ? ch : ' ';
+        out += preserveCurrentString ? ch : ' ';
         state = 'code';
       } else {
-        out += preserveStrings || ch === '\n' ? ch : ' ';
+        out += preserveCurrentString || ch === '\n' ? ch : ' ';
       }
     } else if (ch === '/' && next === '/') {
       out += '  '; i++; state = 'line';
     } else if (ch === '/' && next === '*') {
-      out += '  '; i++; state = 'block';
+      out += '  '; i++; state = 'block'; blockDepth = 1;
     } else if (ch === '"' || ch === "'" || ch === '`') {
-      quote = ch; state = 'string'; out += preserveStrings ? ch : ' ';
+      quote = ch;
+      preserveCurrentString = preserveStrings && ch === '"';
+      state = 'string';
+      out += preserveCurrentString ? ch : ' ';
     } else {
       out += ch;
     }
@@ -102,7 +119,7 @@ function sanitizeForRegex(content: string, preserveStrings: boolean): string {
 }
 
 function declaredNamespace(content: string, language: string): string | undefined {
-  const code = sanitizeForRegex(content, false);
+  const code = sanitizeForRegex(content, false, language === 'Kotlin');
   if (language === 'PHP') {
     return code.match(/^\s*namespace\s+([\\\w]+)\s*[;{]/m)?.[1].replaceAll('\\', '.');
   }
@@ -118,7 +135,7 @@ function declaredTypes(content: string, language: string): string[] {
       : language === 'C#'
         ? 'class|interface|enum|record|struct'
         : 'class|interface|enum|record';
-  return [...sanitizeForRegex(content, false).matchAll(
+  return [...sanitizeForRegex(content, false, language === 'Kotlin').matchAll(
     new RegExp(`\\b(?:${keywords})\\s+([A-Za-z_]\\w*)`, 'g'),
   )]
     .map(m => m[1]);
@@ -195,8 +212,17 @@ function buildStaticLanguageImportMaps(
     goPackageSetsByDir.set(dir, packages);
   }
   const goPackageByDir = new Map(
-    [...goPackageSetsByDir].flatMap(([dir, packages]) =>
-      packages.size === 1 ? [[dir, packages.values().next().value!] as const] : []),
+    [...goPackageSetsByDir].flatMap(([dir, packages]) => {
+      const production = [...packages].filter(pkg => !pkg.endsWith('_test'));
+      const selected = packages.size === 1
+        ? packages.values().next().value!
+        : production.length === 1 && [...packages].every(
+          pkg => pkg === production[0] || pkg === `${production[0]}_test`,
+        )
+          ? production[0]
+          : undefined;
+      return selected ? [[dir, selected] as const] : [];
+    }),
   );
   const goDirsBySuffix = new Map<string, Set<string>>();
   for (const dir of goFileDirs) {
@@ -211,13 +237,21 @@ function buildStaticLanguageImportMaps(
   for (const f of files.filter(f => f.language === 'Go')) {
     const fileMap = new Map<string, string>();
     const ownDir = posix.dirname(f.path);
-    if (goPackageByDir.has(ownDir)) fileMap.set(PACKAGE_SCOPE_IMPORT, ownDir);
+    const ownPackage = sanitizeForRegex(f.content, false).match(
+      /^\s*package\s+([A-Za-z_]\w*)\b/m,
+    )?.[1];
+    if (ownPackage) {
+      fileMap.set(PACKAGE_SCOPE_IMPORT, ownDir);
+      fileMap.set(PACKAGE_SCOPE_NAME, ownPackage);
+    }
     for (const [alias, target] of parseGoImports(f.path, f.content, allFilePaths, {
       fileDirs: goFileDirs,
       dirsBySuffix: goDirsBySuffix,
       packageByDir: goPackageByDir,
     })) {
       fileMap.set(alias, target);
+      const importedPackage = goPackageByDir.get(target);
+      if (importedPackage) fileMap.set(`${GO_IMPORT_PACKAGE_PREFIX}${alias}`, importedPackage);
     }
     if (fileMap.size > 0) map.set(f.path, fileMap);
   }
@@ -235,7 +269,7 @@ function buildStaticLanguageImportMaps(
     const namespaceTypes = namespaceTypesByEcosystem.get(ecosystem) ?? new Map();
     const symbols = declaredTypes(f.content, f.language);
     if (f.language === 'Kotlin') {
-      for (const m of sanitizeForRegex(f.content, false).matchAll(/^\s*fun\s+([A-Za-z_]\w*)\s*\(/gm)) symbols.push(m[1]);
+      for (const m of sanitizeForRegex(f.content, false, true).matchAll(/^\s*fun\s+([A-Za-z_]\w*)\s*\(/gm)) symbols.push(m[1]);
     } else if (f.language === 'PHP') {
       symbols.push(...declaredTopLevelFunctions(f.content));
     }
@@ -256,7 +290,7 @@ function buildStaticLanguageImportMaps(
     const ecosystem = ecosystemFor(f.language);
     const fqnIndex = fqnIndexes.get(ecosystem) ?? new Map();
     const namespaceTypes = namespaceTypesByEcosystem.get(ecosystem) ?? new Map();
-    const code = sanitizeForRegex(f.content, false);
+    const code = sanitizeForRegex(f.content, false, f.language === 'Kotlin');
     const fileMap = new Map<string, string>();
     const conflicting = new Set<string>();
     const bind = (name: string, target: string, declaredQualifier?: string): void => {

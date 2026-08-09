@@ -572,6 +572,15 @@ describe('language conformance — resolver refuses to guess on ambiguity', () =
     )).toBe(false);
   });
 
+  it('a failed imported-method lookup falls through to the pre-change name_only tier', async () => {
+    const r = await build([
+      { path: 'app/Main.kt', language: 'Kotlin', content: 'package app\nimport wanted.Parser as P\nfun main(){ P.helper() }' },
+      { path: 'wanted/Parser.kt', language: 'Kotlin', content: 'package wanted\nobject Parser {}' },
+      { path: 'legacy/Functions.kt', language: 'Kotlin', content: 'package legacy\nfun helper() {}' },
+    ]);
+    expect(boundEdgesFrom(r, 'main').find(e => e.calleeName === 'helper')?.confidence).toBe('name_only');
+  });
+
   it('an unaliased Go import uses the target package clause, not the path basename', async () => {
     const r = await build([
       { path: 'app/main.go', language: 'Go', content: 'package app\nimport "example.com/acme/lib/v2"\nfunc Main(){ lib.Helper() }' },
@@ -580,6 +589,28 @@ describe('language conformance — resolver refuses to guess on ambiguity', () =
     const edge = boundEdgesFrom(r, 'Main').find(e => e.calleeName === 'Helper');
     expect(edge?.confidence).toBe('import');
     expect(r.nodes.get(edge!.calleeId)?.filePath).toBe('lib/v2/helper.go');
+  });
+
+  it('Go external-test packages do not disable production sibling resolution', async () => {
+    const r = await build([
+      { path: 'pkg/a.go', language: 'Go', content: 'package pkg\nfunc Main(){ Helper() }' },
+      { path: 'pkg/b.go', language: 'Go', content: 'package pkg\nfunc Helper() {}' },
+      { path: 'pkg/external_test.go', language: 'Go', content: 'package pkg_test\nfunc TestExternal() {}' },
+    ]);
+    const edge = boundEdgesFrom(r, 'Main').find(e => e.calleeName === 'Helper');
+    expect(edge?.confidence).toBe('import');
+    expect(r.nodes.get(edge!.calleeId)?.filePath).toBe('pkg/b.go');
+  });
+
+  it('Go external-test packages do not change an unaliased import qualifier', async () => {
+    const r = await build([
+      { path: 'app/main.go', language: 'Go', content: 'package app\nimport "example.com/project/pkg"\nfunc Main(){ pkg.Helper() }' },
+      { path: 'pkg/helper.go', language: 'Go', content: 'package pkg\nfunc Helper() {}' },
+      { path: 'pkg/external_test.go', language: 'Go', content: 'package pkg_test\nfunc TestExternal() {}' },
+    ]);
+    const edge = boundEdgesFrom(r, 'Main').find(e => e.calleeName === 'Helper');
+    expect(edge?.confidence).toBe('import');
+    expect(r.nodes.get(edge!.calleeId)?.filePath).toBe('pkg/helper.go');
   });
 
   for (const fixture of [
@@ -606,6 +637,9 @@ describe('language conformance — resolver refuses to guess on ambiguity', () =
     const edge = boundEdgesFrom(r, 'Main').find(e => e.calleeName === 'Helper');
     expect(edge?.confidence).toBe('import');
     expect(r.nodes.get(edge!.calleeId)?.filePath).toBe('shared/Parser.cs');
+    expect(boundEdgesFrom(r, 'Main').some(
+      e => r.nodes.get(e.calleeId)?.filePath === 'shared/Parser.php',
+    )).toBe(false);
   });
 
   it('PHP function imports bind namespace-level functions only', async () => {
@@ -634,6 +668,22 @@ describe('language conformance — resolver refuses to guess on ambiguity', () =
     expect(boundEdgesFrom(r, 'main').find(e => e.calleeName === 'helper')?.confidence).not.toBe('import');
   });
 
+  it('Kotlin nested block comments cannot create import-confidence edges', async () => {
+    const r = await build([
+      { path: 'app/Main.kt', language: 'Kotlin', content: 'package app\n/* outer\n/* inner */\nimport wanted.Parser\n*/\nfun main(){ Parser.helper() }' },
+      { path: 'wanted/Parser.kt', language: 'Kotlin', content: 'package wanted\nobject Parser { fun helper() {} }' },
+    ]);
+    expect(boundEdgesFrom(r, 'main').find(e => e.calleeName === 'helper')?.confidence).not.toBe('import');
+  });
+
+  it('Java non-nested block comments end at the first closing delimiter', async () => {
+    const r = await build([
+      { path: 'app/Main.java', language: 'Java', content: 'package app;\n/* prose containing /* */\nimport wanted.Parser;\nclass Main { void main(){ Parser.helper(); } }' },
+      { path: 'wanted/Parser.java', language: 'Java', content: 'package wanted;\nclass Parser { static void helper() {} }' },
+    ]);
+    expect(boundEdgesFrom(r, 'main').find(e => e.calleeName === 'helper')?.confidence).toBe('import');
+  });
+
   it('recovered Kotlin receivers retain the pre-change name_only fallback when no import binds', async () => {
     const r = await build([
       { path: 'a.kt', language: 'Kotlin', content: 'fun main(){ service.helper() }' },
@@ -655,6 +705,14 @@ describe('language conformance — resolver refuses to guess on ambiguity', () =
     const started = performance.now();
     buildBaseImportMap([{ path: 'p/main.go', language: 'Go', content }]);
     expect(performance.now() - started).toBeLessThan(500);
+  });
+
+  it('Go raw-string contents cannot fabricate an import binding', async () => {
+    const r = await build([
+      { path: 'app/main.go', language: 'Go', content: 'package app\nvar text = `\nimport "example.com/wanted"\n`\nfunc Main(){ wanted.Helper() }' },
+      { path: 'wanted/helper.go', language: 'Go', content: 'package wanted\nfunc Helper() {}' },
+    ]);
+    expect(boundEdgesFrom(r, 'Main').find(e => e.calleeName === 'Helper')?.confidence).not.toBe('import');
   });
 
   it('name_only: a bare cross-file call matching two definitions is not bound arbitrarily', async () => {

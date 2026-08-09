@@ -18,9 +18,11 @@ import { FunctionRegistryTrie } from './function-registry-trie.js';
 import type { ImportMap } from './import-resolver-bridge.js';
 import {
   buildResolvedImportMap,
+  GO_IMPORT_PACKAGE_PREFIX,
   IMPORT_QUALIFIER_PREFIX,
   IMPORT_TOP_LEVEL_QUALIFIER,
   PACKAGE_SCOPE_IMPORT,
+  PACKAGE_SCOPE_NAME,
 } from './import-resolver-bridge.js';
 import { inferTypesFromSource, resolveViaTypeInference } from './type-inference-engine.js';
 import {
@@ -4658,12 +4660,14 @@ export class CallGraphBuilder {
       // name was followed through a re-export chain is labelled `re_export` (still a
       // proven concrete target, but the barrel hop is disclosed); a direct import is
       // labelled `import`.
-      let importBindingFound = false;
       if (!calleeNode) {
         const qualifier = raw.calleeObject?.split(/[.\\:]/).filter(Boolean).pop();
         const viaName = callImportMap.get(callerNode.filePath)?.get(raw.calleeName);
         const packageScopeTarget = !raw.calleeObject
           ? callImportMap.get(callerNode.filePath)?.get(PACKAGE_SCOPE_IMPORT)
+          : undefined;
+        const packageScopeName = packageScopeTarget
+          ? callImportMap.get(callerNode.filePath)?.get(PACKAGE_SCOPE_NAME)
           : undefined;
         const importedFile = viaName
           ?? (raw.calleeObject
@@ -4671,7 +4675,6 @@ export class CallGraphBuilder {
               ?? (qualifier ? callImportMap.get(callerNode.filePath)?.get(qualifier) : undefined)
             : packageScopeTarget);
         if (importedFile) {
-          importBindingFound = true;
           // The imported file is the authoritative qualifier. A source-level alias (for example
           // `using P = Wanted.Parser`) need not match the declaration's real class name.
           const boundName = raw.calleeObject ?? (viaName ? raw.calleeName : undefined);
@@ -4687,8 +4690,17 @@ export class CallGraphBuilder {
             : declaredQualifier
               ? trie.findByQualifiedName(declaredQualifier, raw.calleeName)
               : trie.findBySimpleName(raw.calleeName);
+          const goQualifier = raw.calleeObject ?? qualifier;
+          const goPackage = callerNode.language === 'Go'
+            ? packageScopeName ?? (goQualifier
+              ? callImportMap.get(callerNode.filePath)?.get(
+                `${GO_IMPORT_PACKAGE_PREFIX}${goQualifier}`,
+              )
+              : undefined)
+            : undefined;
           const candidates = importedCandidates.filter(n =>
             matchesImportedTarget(n.filePath, importedFile) &&
+            (!goPackage || callImportMap.get(n.filePath)?.get(PACKAGE_SCOPE_NAME) === goPackage) &&
             // Go's package-scope binding is only for siblings. Same-file calls must continue to
             // the established `same_file` tier below.
             (!packageScopeTarget || n.filePath !== callerNode.filePath),
@@ -4709,7 +4721,7 @@ export class CallGraphBuilder {
       if (
         !calleeNode &&
         (!raw.calleeObject ||
-          (RECOVERED_RECEIVER_LANGUAGES.has(callerNode.language) && !importBindingFound))
+          RECOVERED_RECEIVER_LANGUAGES.has(callerNode.language))
       ) {
         const candidates = trie.findBySimpleName(raw.calleeName);
         if (candidates.length === 0) {

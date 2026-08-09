@@ -345,7 +345,12 @@ function synthesizeVirtualDispatchEdges(
 
     // Drop targets already directly resolved from this call site, and self-edges.
     const direct = directCalleeIdsByCaller.get(call.callerId);
+    const sharesDispatchEcosystem = (target: FunctionNode): boolean =>
+      target.language === caller.language ||
+      (['Java', 'Kotlin'].includes(target.language) &&
+        ['Java', 'Kotlin'].includes(caller.language));
     const fresh = targets.filter(t =>
+      sharesDispatchEcosystem(t) &&
       t.id !== call.callerId && !(direct && direct.has(t.id)),
     );
     const unique = new Map(fresh.map(t => [t.id, t]));
