@@ -6,10 +6,13 @@
  * Supports JavaScript/TypeScript, Python, and Java.
  */
 
-import { readFile } from 'node:fs/promises';
+import { stat } from 'node:fs/promises';
 import { dirname, join, resolve, extname } from 'node:path';
 
 import { buildLineIndex, lineFromIndex } from './line-index.js';
+import { blankCommentsPreservingLayout } from './comment-blanking.js';
+import { readSourceCapped } from './bounded-file-scan.js';
+import { scanJavaMethodDeclarations } from './java-method-scanner.js';
 
 // ============================================================================
 // TYPES
@@ -754,8 +757,8 @@ function isJavaBuiltin(source: string): boolean {
  */
 export function parseJavaPackage(content: string): string | undefined {
   // Strip block comments so we don't match inside them.
-  const clean = content.replace(/\/\*[\s\S]*?\*\//g, '');
-  const match = clean.match(/^\s*package\s+([\w.]+)\s*;/m);
+  const clean = blankCommentsPreservingLayout(content);
+  const match = clean.match(/^[ \t]*package\b\s+([\w.]+)\s*;/m);
   return match ? match[1] : undefined;
 }
 
@@ -773,9 +776,7 @@ function parseJavaImports(content: string): ImportInfo[] {
 
   // Blank comments with same-length whitespace (newlines kept) so recorded
   // import lines match the original file (the `parseHtmlAssetImports` discipline).
-  const clean = content
-    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
-    .replace(/\/\/.*$/gm, (m) => ' '.repeat(m.length));
+  const clean = blankCommentsPreservingLayout(content);
 
   // `^[ \t]*` (not `^\s*`) so a preceding blank line's newline is not consumed
   // into the match — that would report the import one line early.
@@ -841,9 +842,7 @@ export function parseJavaExports(content: string): ExportInfo[] {
 
   // Blank comments with same-length whitespace (newlines kept) so recorded
   // export lines match the original file (the `parseHtmlAssetImports` discipline).
-  const clean = content
-    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
-    .replace(/\/\/.*$/gm, (m) => ' '.repeat(m.length));
+  const clean = blankCommentsPreservingLayout(content);
 
   let match: RegExpExecArray | null;
 
@@ -867,30 +866,17 @@ export function parseJavaExports(content: string): ExportInfo[] {
     });
   }
 
-  // Public methods: `public [static] [final] ReturnType name(`
-  // We keep this conservative: only methods with an explicit `public` modifier.
-  // The return-type capture is non-greedy and excludes keywords that start
-  // type declarations (class/interface/enum/record) to avoid false matches.
-  const methodRegex =
-    // Type capture excludes SPACE — a ' ' inside the class overlapping the following
-    // `\s+` made `public final final …` quadratic to scan. The inner token repetition
-    // (space-separated fragments of a generic return type, e.g. `Map<String, Object>`)
-    // is bounded to a small constant so a `public a public a …(` flood with no closing
-    // `(` cannot rescan to EOF from each of O(n) `public` starts (ReDoS). No real Java
-    // return type has >12 whitespace-separated fragments. See extractor-redos.test.ts.
-    /\bpublic\s+(?:static\s+|final\s+|abstract\s+|synchronized\s+|default\s+|native\s+)*(?!class\b|interface\b|enum\b|record\b|@interface\b)(?:<[^>]+>\s+)?[\w<>[\],?.]+(?:\s+[\w<>[\],?.]+){0,12}?\s+(\w+)\s*\(/g;
-  while ((match = methodRegex.exec(clean)) !== null) {
-    const name = match[1];
-    // Filter obvious non-methods (the regex can match some constructors or
-    // edge cases; keep common false-positives out).
-    if (['class', 'interface', 'enum', 'record', 'new', 'return', 'if', 'for', 'while'].includes(name)) continue;
+  // Public methods are scanned with one monotonic cursor. This avoids retrying an
+  // unterminated declaration suffix from every `public` token and accepts valid
+  // return types without an arbitrary whitespace-token cap.
+  for (const method of scanJavaMethodDeclarations(clean)) {
     exports.push({
-      name,
+      name: method.name,
       isDefault: false,
       isType: false,
       isReExport: false,
       kind: 'function',
-      line: getLineNumber(content, match.index),
+      line: getLineNumber(content, method.start),
     });
   }
 
@@ -992,8 +978,7 @@ export async function resolveImport(
     if (seen.has(candidate)) continue;
     seen.add(candidate);
     try {
-      await readFile(candidate);
-      return candidate;
+      if ((await stat(candidate)).isFile()) return candidate;
     } catch {
       // Not found, try next
     }
@@ -1065,8 +1050,7 @@ async function resolveJavaImport(
     seen.add(root);
     const candidate = join(root, relPath);
     try {
-      await readFile(candidate);
-      return candidate;
+      if ((await stat(candidate)).isFile()) return candidate;
     } catch {
       // try next root
     }
@@ -1207,7 +1191,16 @@ export class ImportExportParser {
     };
 
     try {
-      const content = await readFile(filePath, 'utf-8');
+      let oversized = false;
+      const content = await readSourceCapped(filePath, undefined, () => { oversized = true; });
+      if (content === null) {
+        if (oversized) {
+          analysis.parseErrors.push('File exceeds the analyzer source-size limit');
+          this.cache.set(filePath, analysis);
+          return analysis;
+        }
+        throw new Error('source is unreadable or is not a regular file');
+      }
       const fileType = this.getFileType(filePath);
 
       if (fileType === 'js' || fileType === 'ts') {

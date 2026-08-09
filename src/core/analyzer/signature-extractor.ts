@@ -13,6 +13,7 @@
 // module's existing importers keep working. The definition and its extension map live
 // once, in the dependency-free `language-detection.ts` leaf.
 import { detectLanguage } from './language-detection.js';
+import { blankCommentsPreservingLayout } from './comment-blanking.js';
 export { detectLanguage };
 
 // ============================================================================
@@ -759,49 +760,180 @@ function extractBicepSignatures(content: string): ExtractedSignature[] {
 interface SigPattern { re: RegExp; kind: ExtractedSignature['kind']; }
 
 const EXTRA_LANG_PATTERNS: Record<string, SigPattern[]> = {
-  // Each modifier carries its own trailing `\s+` — a bare `\s` alternative inside the
-  // modifier group would overlap the leading `^\s*`, letting a whitespace-only line be
-  // partitioned O(n²) ways (ReDoS). See extractor-redos.test.ts.
+  // Declaration whitespace is horizontal only. Letting `\s` consume newlines under /m
+  // makes the engine retry from every line start and rescan the remaining file. Each
+  // modifier also owns its trailing whitespace, so adjacent groups cannot repartition
+  // one whitespace run quadratically. See extractor-redos.test.ts.
   'C#': [
-    { re: /^\s*(?:(?:public|private|protected|internal|static|sealed|abstract|partial)\s+)*\b(?:class|interface|struct|record|enum)\s+(\w+)/gm, kind: 'class' },
-    { re: /^\s*(?:(?:public|private|protected|internal|static|async|virtual|override)\s+)*[\w<>[\],?]+\s+(\w+)\s*\(/gm, kind: 'method' },
+    { re: /^[ \t]*(?:(?:public|private|protected|internal|static|sealed|abstract|partial)[ \t]+)*\b(?:class|interface|struct|record|enum)[ \t]+(\w+)/gm, kind: 'class' },
+    { re: /^[ \t]*(?:(?:public|private|protected|internal|static|async|virtual|override)[ \t]+)*[\w<>[\],?]+[ \t]+(\w+)[ \t]*\(/gm, kind: 'method' },
   ],
   Kotlin: [
-    { re: /^\s*(?:(?:public|private|internal|open|abstract|sealed|data)\s+)*\b(?:class|object|interface)\s+(\w+)/gm, kind: 'class' },
-    { re: /^\s*(?:(?:public|private|internal|open|override|suspend)\s+)*\bfun\s+(?:[\w.<>]+\.)?(\w+)\s*\(/gm, kind: 'function' },
+    { re: /^[ \t]*(?:(?:public|private|internal|open|abstract|sealed|data)[ \t]+)*\b(?:class|object|interface)[ \t]+(\w+)/gm, kind: 'class' },
+    { re: /^[ \t]*(?:(?:public|private|internal|open|override|suspend)[ \t]+)*\bfun[ \t]+(?:[\w.<>]+\.)?(\w+)[ \t]*\(/gm, kind: 'function' },
   ],
   PHP: [
-    { re: /^\s*(?:(?:abstract|final)\s+)*\b(?:class|trait|interface|enum)\s+(\w+)/gm, kind: 'class' },
-    { re: /^\s*(?:(?:public|private|protected|static|abstract|final)\s+)*\bfunction\s+(\w+)\s*\(/gm, kind: 'function' },
+    { re: /^[ \t]*(?:(?:abstract|final)[ \t]+)*\b(?:class|trait|interface|enum)[ \t]+(\w+)/gm, kind: 'class' },
+    { re: /^[ \t]*(?:(?:public|private|protected|static|abstract|final)[ \t]+)*\bfunction[ \t]+(\w+)[ \t]*\(/gm, kind: 'function' },
   ],
-  C: [
-    { re: /^[A-Za-z_][\w\s*]*\b(\w+)\s*\([^;{]*\)\s*\{/gm, kind: 'function' },
-  ],
+  C: [],
   Scala: [
-    { re: /^\s*(?:case\s+)?\b(?:object|class|trait)\s+(\w+)/gm, kind: 'class' },
-    { re: /^\s*(?:(?:override|implicit|private|protected)\s+)*\bdef\s+(\w+)/gm, kind: 'function' },
+    { re: /^[ \t]*(?:case[ \t]+)?\b(?:object|class|trait)[ \t]+(\w+)/gm, kind: 'class' },
+    { re: /^[ \t]*(?:(?:override|implicit|private|protected)[ \t]+)*\bdef[ \t]+(\w+)/gm, kind: 'function' },
   ],
   Dart: [
-    { re: /^\s*(?:abstract\s+)?\b(?:class|mixin|extension|enum)\s+(\w+)/gm, kind: 'class' },
-    { re: /^\s*(?:[\w<>,?]+\s+)?(\w+)\s*\([^;{]*\)\s*(?:async\s*)?\{/gm, kind: 'function' },
+    { re: /^[ \t]*(?:abstract[ \t]+)?\b(?:class|mixin|extension|enum)[ \t]+(\w+)/gm, kind: 'class' },
   ],
   Lua: [
-    { re: /^\s*(?:local\s+)?function\s+([\w.:]+)/gm, kind: 'function' },
+    { re: /^[ \t]*(?:local[ \t]+)?function[ \t]+([\w.:]+)/gm, kind: 'function' },
   ],
   Elixir: [
-    { re: /^\s*defmodule\s+([\w.]+)/gm, kind: 'class' },
-    { re: /^\s*def(?:p|macro|macrop)?\s+(\w+)/gm, kind: 'function' },
+    { re: /^[ \t]*defmodule[ \t]+([\w.]+)/gm, kind: 'class' },
+    { re: /^[ \t]*def(?:p|macro|macrop)?[ \t]+(\w+)/gm, kind: 'function' },
   ],
   Bash: [
-    { re: /^\s*(?:function\s+(\w+)|(\w+)\s*\(\s*\))/gm, kind: 'function' },
+    { re: /^[ \t]*(?:function[ \t]+(\w+)|(\w+)[ \t]*\([ \t]*\))/gm, kind: 'function' },
   ],
 };
+
+const NON_DECLARATION_NAMES = new Set(['if', 'for', 'while', 'switch', 'catch', 'return', 'new']);
+
+/**
+ * Scan C/Dart brace-bodied functions with one monotonic cursor. Parameter lists may
+ * be arbitrarily long and multiline; an unterminated opener consumes the remaining
+ * suffix once instead of being retried from every line start.
+ */
+function scanBraceFunctions(language: string, content: string): ExtractedSignature[] {
+  if (language !== 'C' && language !== 'Dart') return [];
+  const text = blankCommentsPreservingLayout(content);
+  const entries: ExtractedSignature[] = [];
+  const lineStarts = [0];
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '\n') lineStarts.push(i + 1);
+  }
+  const lineAt = (offset: number): number => {
+    let lo = 0;
+    let hi = lineStarts.length;
+    while (lo + 1 < hi) {
+      const mid = (lo + hi) >> 1;
+      if (lineStarts[mid] <= offset) lo = mid;
+      else hi = mid;
+    }
+    return lo;
+  };
+  let cursor = 0;
+  let segmentStart = 0;
+
+  const skipQuoted = (start: number): number => {
+    const quote = text[start];
+    let i = start + 1;
+    while (i < text.length) {
+      if (text[i] === '\\') i += 2;
+      else if (text[i++] === quote) break;
+    }
+    return i;
+  };
+
+  while (cursor < text.length && entries.length < MAX_SIGS_PER_FILE) {
+    if (text[cursor] === '"' || text[cursor] === "'") {
+      cursor = skipQuoted(cursor);
+      continue;
+    }
+    if (text[cursor] !== '(') {
+      if (text[cursor] === ';' || text[cursor] === '{' || text[cursor] === '}') {
+        segmentStart = cursor + 1;
+      }
+      cursor++;
+      continue;
+    }
+
+    const open = cursor;
+    let nameEnd = open;
+    while (nameEnd > segmentStart && /\s/.test(text[nameEnd - 1])) nameEnd--;
+    let nameStart = nameEnd;
+    while (nameStart > 0 && /[\w$]/.test(text[nameStart - 1])) nameStart--;
+    const name = text.slice(nameStart, nameEnd);
+    if (!name || NON_DECLARATION_NAMES.has(name)) {
+      segmentStart = open + 1;
+      cursor++;
+      continue;
+    }
+
+    const nameLine = lineAt(nameStart);
+    let declarationStart = Math.max(lineStarts[nameLine], segmentStart);
+    let prefix = text.slice(declarationStart, nameStart).trim();
+    if (!prefix && nameLine > 0 && segmentStart <= lineStarts[nameLine - 1]) {
+      const previousEnd = lineStarts[nameLine] - 1;
+      const previousStart = lineStarts[nameLine - 1];
+      const previousLine = text.slice(previousStart, previousEnd).trim();
+      if (previousLine) {
+        declarationStart = previousStart;
+        prefix = previousLine;
+      }
+    }
+    const validPrefix = language === 'C'
+      ? prefix.length > 0 && /^[\w \t*]+$/.test(prefix)
+      : prefix.length === 0 || /^[\w<>,?.[\] \t]+$/.test(prefix);
+    if (!validPrefix) {
+      segmentStart = open + 1;
+      cursor++;
+      continue;
+    }
+
+    let i = open + 1;
+    let depth = 1;
+    while (i < text.length && depth > 0) {
+      const char = text[i];
+      if (char === '"' || char === "'") i = skipQuoted(i);
+      else {
+        if (char === '(') depth++;
+        else if (char === ')') depth--;
+        i++;
+      }
+    }
+    if (depth > 0) break;
+
+    while (i < text.length && /\s/.test(text[i])) i++;
+    if (language === 'Dart') {
+      const asyncKeyword = text.startsWith('async', i) ? 'async'
+        : text.startsWith('sync', i) ? 'sync'
+        : '';
+      const afterKeyword = i + asyncKeyword.length;
+      if (asyncKeyword && !/[\w$]/.test(text[afterKeyword] ?? '')) {
+        i = afterKeyword;
+        if (text[i] === '*') i++;
+        while (i < text.length && /\s/.test(text[i])) i++;
+      }
+    }
+    if (text[i] !== '{') {
+      segmentStart = i;
+      cursor = i;
+      continue;
+    }
+
+    entries.push({
+      kind: 'function',
+      name,
+      signature: text.slice(declarationStart, i + 1).trim().replace(/\s+/g, ' ').slice(0, 120),
+    });
+
+    // Resume inside the body so Dart local functions (and GCC nested C functions)
+    // remain discoverable, matching the former line-anchored extractor.
+    segmentStart = i + 1;
+    cursor = i + 1;
+  }
+  return entries;
+}
 
 function extractExtraLangSignatures(language: string, content: string): ExtractedSignature[] {
   const patterns = EXTRA_LANG_PATTERNS[language];
   if (!patterns) return [];
   const entries: ExtractedSignature[] = [];
   const seen = new Set<string>();
+  for (const entry of scanBraceFunctions(language, content)) {
+    entries.push(entry);
+    seen.add(`${entry.kind}:${entry.name}`);
+  }
   for (const { re, kind } of patterns) {
     for (const m of content.matchAll(re)) {
       if (entries.length >= MAX_SIGS_PER_FILE) break;

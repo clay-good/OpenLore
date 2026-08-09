@@ -20,7 +20,13 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parseJSImports, parseJSExports, parseJavaExports } from './import-parser.js';
+import {
+  ImportExportParser,
+  parseJavaExports,
+  parseJavaPackage,
+  parseJSExports,
+  parseJSImports,
+} from './import-parser.js';
 import { extractMiddleware } from './middleware-extractor.js';
 import { extractHtmlScripts } from './html-script-extractor.js';
 import { extractUIComponents } from './ui-component-extractor.js';
@@ -236,21 +242,78 @@ describe('extractors are not quadratic on an unterminated-opener file', () => {
 describe('language extractors are not quadratic on a whitespace/token flood', () => {
   // One long run of spaces, no declaration keyword — the EXTRA_LANG_PATTERNS trigger.
   const wsFlood = (bytes: number): string => ' '.repeat(bytes);
+  // Newlines create a `^` match at every position under /m; `^\s*` used to rescan
+  // the entire remaining file from every one of those positions.
+  const newlineFlood = (bytes: number): string => '\n'.repeat(bytes);
   // `public a public a …` with no closing `(` — the Java lazy-repetition trigger.
   const publicFlood = (bytes: number): string => 'public a '.repeat(Math.floor(bytes / 9));
+  // Unterminated generic-method prefixes exercised a separate unbounded branch.
+  const genericFlood = (bytes: number): string => 'public < '.repeat(Math.floor(bytes / 9));
+  // The former regex comment blanker retried to EOF from every unmatched opener.
+  const commentFlood = (bytes: number): string => '/*x'.repeat(Math.floor(bytes / 3));
+  const mappingFlood = (name: string, bytes: number): string =>
+    `@${name}(`.repeat(Math.floor(bytes / (name.length + 2)));
 
-  for (const [lang, ext] of [['C#', 'cs'], ['Kotlin', 'kt'], ['PHP', 'php'], ['Scala', 'scala']] as const) {
+  for (const [lang, ext] of [
+    ['C#', 'cs'], ['Kotlin', 'kt'], ['PHP', 'php'], ['Scala', 'scala'],
+    ['Dart', 'dart'], ['Lua', 'lua'], ['Elixir', 'ex'], ['Bash', 'sh'],
+  ] as const) {
     it(`extractSignatures(${lang}) survives a whitespace flood`, async () => {
       expectLinearAndFast(
         await measure(b => { extractSignatures(`hostile.${ext}`, wsFlood(b)); }),
         `${lang} signatures`,
       );
+      expectLinearAndFast(
+        await measure(b => { extractSignatures(`hostile.${ext}`, newlineFlood(b)); }),
+        `${lang} signatures (newlines)`,
+      );
     }, TIMEOUT_MS);
   }
 
+  it('extractSignatures(C) survives declaration-like lines with no function', async () => {
+    expectLinearAndFast(
+      await measure(b => { extractSignatures('hostile.c', 'a '.repeat(Math.floor(b / 2))); }),
+      'C signatures',
+    );
+  }, TIMEOUT_MS);
+
+  it('C and Dart scanners survive repeated unterminated parameter lists', async () => {
+    expectLinearAndFast(
+      await measure(b => { extractSignatures('hostile.c', 'int f(\n'.repeat(Math.floor(b / 7))); }),
+      'C unterminated parameters',
+    );
+    expectLinearAndFast(
+      await measure(b => { extractSignatures('hostile.dart', 'f(\n'.repeat(Math.floor(b / 3))); }),
+      'Dart unterminated parameters',
+    );
+  }, TIMEOUT_MS);
+
+  it('C and Dart scanners survive many balanced call-like tokens on one line', async () => {
+    expectLinearAndFast(
+      await measure(b => { extractSignatures('hostile.c', 'a() '.repeat(Math.floor(b / 4))); }),
+      'C balanced call-like tokens',
+    );
+    expectLinearAndFast(
+      await measure(b => { extractSignatures('hostile.dart', 'a() '.repeat(Math.floor(b / 4))); }),
+      'Dart balanced call-like tokens',
+    );
+  }, TIMEOUT_MS);
+
   it('parseJavaExports survives repeated `public a ` with no `(`', async () => {
     expectLinearAndFast(await measure(b => { parseJavaExports(publicFlood(b)); }), 'parseJavaExports');
+    expectLinearAndFast(await measure(b => { parseJavaExports(genericFlood(b)); }), 'parseJavaExports generic');
+    expectLinearAndFast(await measure(b => { parseJavaExports(commentFlood(b)); }), 'parseJavaExports comments');
   }, TIMEOUT_MS);
+
+  it('parseJavaPackage survives newline and unterminated-comment floods', async () => {
+    expectLinearAndFast(await measure(b => { parseJavaPackage(newlineFlood(b)); }), 'parseJavaPackage newlines');
+    expectLinearAndFast(await measure(b => { parseJavaPackage(commentFlood(b)); }), 'parseJavaPackage comments');
+  }, TIMEOUT_MS);
+
+  it('parseJavaPackage accepts multiline and CRLF package declarations', () => {
+    expect(parseJavaPackage('package\ncom.example\n;')).toBe('com.example');
+    expect(parseJavaPackage('package\r\ncom.example\r\n;')).toBe('com.example');
+  });
 
   it('extractJavaRouteDefinitions survives a giant handler-signature line', async () => {
     // The route regex runs per-line only in a Spring file after a mapping annotation,
@@ -261,7 +324,76 @@ describe('language extractors are not quadratic on a whitespace/token flood', ()
       }),
       'extractJavaRouteDefinitions',
     );
+    expectLinearAndFast(
+      await measure(async b => {
+        await extractJavaRouteDefinitions('Hostile.java', `@GetMapping("/x")\n${genericFlood(b)}`);
+      }),
+      'extractJavaRouteDefinitions generic',
+    );
+    expectLinearAndFast(
+      await measure(async b => {
+        await extractJavaRouteDefinitions('Hostile.java', `@GetMapping("/x")\n${commentFlood(b)}`);
+      }),
+      'extractJavaRouteDefinitions comments',
+    );
   }, TIMEOUT_MS);
+
+  it('extractJavaRouteDefinitions survives unterminated Spring mapping annotations', async () => {
+    expectLinearAndFast(
+      await measure(async b => {
+        await extractJavaRouteDefinitions('Hostile.java', mappingFlood('GetMapping', b));
+      }),
+      'extractJavaRouteDefinitions GetMapping annotation',
+    );
+    expectLinearAndFast(
+      await measure(async b => {
+        await extractJavaRouteDefinitions('Hostile.java', mappingFlood('RequestMapping', b));
+      }),
+      'extractJavaRouteDefinitions RequestMapping annotation',
+    );
+  }, TIMEOUT_MS);
+
+  it('extractJavaRouteDefinitions scales across many valid mappings and line lookups', async () => {
+    const routes = (bytes: number): string => {
+      const declaration = '@GetMapping("/x")\npublic String handler() { return ""; }\n';
+      return declaration.repeat(Math.floor(bytes / declaration.length));
+    };
+    expectLinearAndFast(
+      await measure(async b => { await extractJavaRouteDefinitions('Many.java', routes(b)); }),
+      'extractJavaRouteDefinitions many routes',
+    );
+  }, TIMEOUT_MS);
+
+  it('extractJavaRouteDefinitions caches handler scans for dense same-line annotations', async () => {
+    expectLinearAndFast(
+      await measure(async b => {
+        await extractJavaRouteDefinitions('Dense.java', '@GetMapping '.repeat(Math.floor(b / 12)));
+      }),
+      'extractJavaRouteDefinitions dense annotations',
+    );
+  }, TIMEOUT_MS);
+
+  it('resolves distinct handlers for multiple mappings on the same line', async () => {
+    const routes = await extractJavaRouteDefinitions(
+      'Dense.java',
+      '@RestController class C { @GetMapping("/a") public String alpha() {} @GetMapping("/b") public String beta() {} }',
+    );
+    expect(routes.map(r => [r.path, r.handlerName])).toEqual([
+      ['/a', 'alpha'],
+      ['/b', 'beta'],
+    ]);
+  });
+
+  it('resolves mapping annotations interleaved with method modifiers', async () => {
+    const routes = await extractJavaRouteDefinitions(
+      'Inline.java',
+      'class C { public @GetMapping("/a") String alpha() {} public static @GetMapping("/b") String beta() {} public String later() {} }',
+    );
+    expect(routes.map(r => [r.path, r.handlerName])).toEqual([
+      ['/a', 'alpha'],
+      ['/b', 'beta'],
+    ]);
+  });
 
   // ── Controls: the fixes must still extract real declarations (a regex that matched
   //    nothing at all would pass every timing assertion above). ──
@@ -282,6 +414,14 @@ describe('language extractors are not quadratic on a whitespace/token flood', ()
     expect(names('a.scala', 'class Svc {\n    private def run() = {\n')).toEqual(
       expect.arrayContaining(['Svc', 'run']),
     );
+    expect(names('a.c', 'int\ncompute(\n  int x,\n  int y\n) {\n')).toContain('compute');
+    expect(names('a.c', 'int compute\n(\n  int x\n) {\n')).toContain('compute');
+    expect(names('a.dart', 'Future<String> fetch(\n  String url,\n  int retries,\n) {\n')).toContain('fetch');
+    expect(names('a.dart', 'Future<String> fetch\n(\n  String url\n) {\n')).toContain('fetch');
+    const cParams = Array.from({ length: 700 }, (_, i) => `int p${i}`).join(',\n');
+    expect(names('generated.c', `int generated(\n${cParams}\n) {\n`)).toContain('generated');
+    const dartParams = Array.from({ length: 300 }, (_, i) => `String p${i}`).join(',\n');
+    expect(names('generated.dart', `Future<String> generated(\n${dartParams}\n) {\n`)).toContain('generated');
   });
 
   it('still extracts a real Java public method (generic return type with a space)', () => {
@@ -291,11 +431,100 @@ describe('language extractors are not quadratic on a whitespace/token flood', ()
     expect(names).toContain('config');
   });
 
+  it('preserves valid wide and spaced Java return types without matching constructors', () => {
+    const arrays = Array.from({ length: 20 }, () => ' []').join('');
+    const nested = 'Map < String , Map < String , Map < String , Map < String , Integer > > > >';
+    const source = [
+      `public String${arrays} wide() { return null; }`,
+      `public ${nested} nested() { return null; }`,
+      'public <T extends Map<String, List<Integer>>> T generic() { return null; }',
+      'public @Deprecated String annotated() { return ""; }',
+      'public java.lang.String @ Size (max=5) [] constrained() { return null; }',
+      'public java.lang.String @/* keep */Size(max=5) [] commentedAnnotation() { return null; }',
+      'public Widget() {}',
+      'public <T> Widget(T value) {}',
+      'public record Pair(int left, int right) {}',
+    ].join('\n');
+    const methodNames = parseJavaExports(source).filter(e => e.kind === 'function').map(e => e.name);
+    expect(methodNames).toEqual(
+      expect.arrayContaining(['wide', 'nested', 'generic', 'annotated', 'constrained', 'commentedAnnotation']),
+    );
+    expect(methodNames).not.toEqual(
+      expect.arrayContaining(['Widget', 'Pair']),
+    );
+  });
+
   it('still resolves a Spring handler name', async () => {
     const routes = await extractJavaRouteDefinitions(
       'Ctrl.java',
       '@RestController\nclass C {\n  @GetMapping("/x")\n  public String hello() { return "hi"; }\n}\n',
     );
     expect(routes.map(r => r.handlerName)).toContain('hello');
+  });
+
+  it('resolves a Spring handler with a wide spaced return type', async () => {
+    const arrays = Array.from({ length: 20 }, () => ' []').join('');
+    const routes = await extractJavaRouteDefinitions(
+      'Ctrl.java',
+      `@RestController\nclass C {\n  @GetMapping("/x")\n  public String${arrays} wide() { return null; }\n}\n`,
+    );
+    expect(routes.map(r => r.handlerName)).toContain('wide');
+  });
+
+  it('resolves a Spring handler after an argument-bearing type-use annotation', async () => {
+    const routes = await extractJavaRouteDefinitions(
+      'Ctrl.java',
+      '@GetMapping("/x")\npublic java.lang.String @ Size (max=5) [] constrained() { return null; }\n',
+    );
+    expect(routes.map(r => r.handlerName)).toContain('constrained');
+  });
+
+  it('combines a named method-level JAX-RS path with the class prefix', async () => {
+    const routes = await extractJavaRouteDefinitions(
+      'Resource.java',
+      [
+        'import jakarta.ws.rs.*;',
+        '@Path(value = "/users")',
+        'class Resource {',
+        '  @GET',
+        '  @Path(value = "/nested")',
+        '  public String nested() { return ""; }',
+        '}',
+      ].join('\n'),
+    );
+    expect(routes.map(r => r.path)).toContain('/users/nested');
+    expect(routes.map(r => r.handlerName)).toContain('nested');
+  });
+
+  it('does not treat JAX-RS annotations inside Java strings as routes', async () => {
+    const routes = await extractJavaRouteDefinitions(
+      'Resource.java',
+      [
+        'import jakarta.ws.rs.*;',
+        '@Path("/users")',
+        'class Resource {',
+        '  String documentation = "call @GET to read";',
+        '  public String ordinary() { return ""; }',
+        '}',
+      ].join('\n'),
+    );
+    expect(routes).toEqual([]);
+  });
+
+  it('does not treat Spring annotations inside Java strings as routes', async () => {
+    const routes = await extractJavaRouteDefinitions(
+      'Strings.java',
+      'class C { String example = "@GetMapping(\\"/phantom\\")"; }\n',
+    );
+    expect(routes).toEqual([]);
+  });
+
+  it('ImportParser rejects a Java file above the analyzer source-size cap', async () => {
+    const oversized = join(dir, 'Oversized.java');
+    await writeFile(oversized, ' '.repeat(4 * 1024 * 1024 + 1));
+    const analysis = await new ImportExportParser().parseFile(oversized);
+    expect(analysis.imports).toEqual([]);
+    expect(analysis.exports).toEqual([]);
+    expect(analysis.parseErrors).toContain('File exceeds the analyzer source-size limit');
   });
 });
