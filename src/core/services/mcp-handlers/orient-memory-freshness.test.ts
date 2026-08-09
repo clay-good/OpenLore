@@ -15,7 +15,11 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 // Make orient believe an index exists; search results are irrelevant here because
 // `approved` decisions surface regardless of task relevance.
 vi.mock('../../analyzer/vector-index.js', () => ({
-  VectorIndex: { exists: vi.fn(() => true), search: vi.fn(async () => []) },
+  VectorIndex: {
+    exists: vi.fn(() => true),
+    search: vi.fn(async () => []),
+    keywordMissDiagnostics: vi.fn(async () => ({ missedTokens: [], nearTokens: [] })),
+  },
 }));
 vi.mock('../../analyzer/embedding-service.js', () => ({
   EmbeddingService: { fromEnv: vi.fn(() => { throw new Error('no env'); }), fromConfig: vi.fn(() => null) },

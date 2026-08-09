@@ -1,6 +1,7 @@
 # Fix empty-orient and corpus honesty: a zero-match briefing explains itself, and the corpus contains only real symbols
 
-> Status: PROPOSED (2026-07-27, first-run e2e). A first-time user's very first `orient` can be an
+> Status: **BUILT** (2026-08-09). Verified by 368 passing test files (7,008 tests passed,
+> 2 skipped), lint, typecheck, build, and strict OpenSpec validation. A first-time user's very first `orient` can be an
 > empty briefing — and today that briefing neither explains why it is empty nor suggests anything
 > useful. Meanwhile the searchable function corpus quietly contains **synthetic `external::`
 > nodes**, so counts are inflated and a search can hit a "function" that does not exist in the

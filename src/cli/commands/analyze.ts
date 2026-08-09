@@ -105,6 +105,17 @@ function collect(value: string, previous: string[]): string[] {
   return previous.concat([value]);
 }
 
+export function formatIndexedFunctionPopulation(result: {
+  total: number;
+  productionFunctions: number;
+  testFunctions: number;
+  signatureOnlySymbols: number;
+}): string {
+  return result.testFunctions + result.signatureOnlySymbols === 0
+    ? `${result.productionFunctions} functions`
+    : `${result.productionFunctions} call-graph functions + ${result.testFunctions} test functions + ${result.signatureOnlySymbols} signature-only symbols; ${result.total} indexed repo symbols`;
+}
+
 /**
  * Check if analysis exists and return its age
  */
@@ -1049,11 +1060,13 @@ async function runEmbedStep(
       if (result.hasEmbeddings) {
         const mode = embedSvc && embedSvc.modelName.startsWith('local:') ? 'local-semantic' : 'remote-semantic';
         const cacheNote = result.reused > 0 ? ` (${result.embedded} embedded, ${result.reused} cached)` : '';
-        console.log(`    ✓ Function index built [${mode}] (${result.total} functions${cacheNote}, ${fileContents.size} files with skeleton bodies)`);
+        const population = formatIndexedFunctionPopulation(result);
+        console.log(`    ✓ Function index built [${mode}] (${population}${cacheNote}, ${fileContents.size} files with skeleton bodies)`);
       } else {
         // Keyword (BM25) is a first-class default, not a degraded fallback. State
         // the mode plainly and offer the semantic upgrade — never warn.
-        console.log(`    ✓ Function index built [keyword] (${result.total} functions). Semantic ranking is optional: run "openlore embed --local" (on-device, no API key).`);
+        const population = formatIndexedFunctionPopulation(result);
+        console.log(`    ✓ Function index built [keyword] (${population}). Semantic ranking is optional: run "openlore embed --local" (on-device, no API key).`);
       }
       console.log(`    → ${outputPath.replace(rootPath + '/', '')}vector-index/`);
     }

@@ -8,7 +8,7 @@ import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { analyzeCommand, runAnalysis } from './analyze.js';
+import { analyzeCommand, formatIndexedFunctionPopulation, runAnalysis } from './analyze.js';
 import { ARTIFACT_FINGERPRINT } from '../../constants.js';
 
 // ============================================================================
@@ -128,6 +128,25 @@ vi.mock('../../core/services/mcp-handlers/utils.js', async (orig) => {
 import { isCacheFresh } from '../../core/services/mcp-handlers/utils.js';
 
 describe('analyze command', () => {
+  describe('indexed function population disclosure', () => {
+    it('uses the call-graph count when there are no additional indexed symbols', () => {
+      expect(formatIndexedFunctionPopulation({
+        total: 5,
+        productionFunctions: 5,
+        testFunctions: 0,
+        signatureOnlySymbols: 0,
+      })).toBe('5 functions');
+    });
+
+    it('names every additional indexed population when counts differ', () => {
+      expect(formatIndexedFunctionPopulation({
+        total: 8,
+        productionFunctions: 5,
+        testFunctions: 2,
+        signatureOnlySymbols: 1,
+      })).toBe('5 call-graph functions + 2 test functions + 1 signature-only symbols; 8 indexed repo symbols');
+    });
+  });
   describe('command configuration', () => {
     it('should have correct name and description', () => {
       expect(analyzeCommand.name()).toBe('analyze');

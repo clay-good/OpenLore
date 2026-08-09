@@ -31,7 +31,7 @@ validate`**, and the archive machinery works again. This pass:
   because their requirements were already synced verbatim (`fix-pi-parity-drift`,
   `fix-redaction-module-gaps`).
 
-## Complete — 118 in `archive/`
+## Complete — 127 in `archive/`
 
 Everything in `openspec/changes/archive/` is shipped (or a settled won't-do), with its
 requirements reflected in the main specs. `openspec list` shows only open work.
@@ -41,7 +41,7 @@ requirements reflected in the main specs. `openspec list` shows only open work.
 No open change has partial code on `main`. A change belongs here the moment its implementation
 starts; move it back out (archive it) the moment its marker/spec evidence lands.
 
-## To build — 126
+## To build — 118
 
 The whole open set is unbuilt backlog. Newest additions: 7 proposals from the 2026-07-27
 first-run e2e (`E2E-FIRSTRUN-2026-07-27.md`). Other thematic indexes:
@@ -55,7 +55,10 @@ enforcement, scoped TLS configuration, verification-evidence disclosure, and con
 `fix-first-analysis-self-contamination` (2026-08-08, archived) — installer-owned artifacts no
 longer skew domains, languages, or high-value files, and undomained source files are disclosed;
 `fix-inject-relevance-gate-keyword-mode` (2026-08-08, archived) — exact identifier and scale-free
-rank evidence make task-scoped injection reachable in the zero-config keyword mode.
+rank evidence make task-scoped injection reachable in the zero-config keyword mode;
+`fix-empty-orient-and-corpus-honesty` (2026-08-09, archived) — empty orientations explain their
+misses with bounded near-token receipts, and synthetic external nodes no longer enter the
+searchable function corpus.
 
 After this table was compiled, four research sweeps added 32 more proposals (all validate; not yet
 folded into the table): 10 in `FIELD-RESEARCH-2026-07.md`, 10 in `ECOSYSTEM-RESEARCH-2026-07-27.md`,

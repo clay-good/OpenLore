@@ -22,7 +22,11 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 // orient gates on "an index exists"; mock only the vector-index surface (orthogonal
 // to freshness). Harmless to the recall path, which does not touch it.
 vi.mock('../../analyzer/vector-index.js', () => ({
-  VectorIndex: { exists: vi.fn(() => true), search: vi.fn(async () => []) },
+  VectorIndex: {
+    exists: vi.fn(() => true),
+    search: vi.fn(async () => []),
+    keywordMissDiagnostics: vi.fn(async () => ({ missedTokens: [], nearTokens: [] })),
+  },
 }));
 vi.mock('../../analyzer/embedding-service.js', () => ({
   EmbeddingService: { fromEnv: vi.fn(() => { throw new Error('no env'); }), fromConfig: vi.fn(() => null) },

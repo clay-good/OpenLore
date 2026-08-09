@@ -163,6 +163,39 @@ describe('VectorIndex', () => {
       ).rejects.toThrow('No functions to index');
     });
 
+    it('excludes synthetic external call targets and reports the indexed population', async () => {
+      const external = makeNode({
+        id: 'external::id.startsWith',
+        name: 'id.startsWith',
+        filePath: 'external',
+        isExternal: true,
+      });
+      const testNode = makeNode({
+        id: 'src/auth.test.ts::authenticates',
+        name: 'authenticates',
+        filePath: 'src/auth.test.ts',
+        isTest: true,
+      });
+
+      const result = await VectorIndex.build(
+        tmpDir,
+        [...SAMPLE_NODES, external, testNode],
+        SAMPLE_SIGNATURES,
+        new Set(),
+        new Set(),
+        null,
+      );
+
+      expect(result).toMatchObject({
+        total: SAMPLE_NODES.length + 1,
+        productionFunctions: SAMPLE_NODES.length,
+        testFunctions: 1,
+        signatureOnlySymbols: 0,
+      });
+      _resetVectorIndexCachesForTesting();
+      expect(await VectorIndex.search(tmpDir, 'startsWith', null, { limit: 10 })).toEqual([]);
+    });
+
     it('marks hub functions correctly', async () => {
       const hubIds = new Set(['src/auth.ts::authenticate']);
       const embedSvc = makeMockEmbedSvc();
@@ -312,6 +345,26 @@ describe('VectorIndex', () => {
       expect(auth!.record.isHub).toBe(true);
       expect((auth!.record as Record<string, unknown>)['vector']).toBeUndefined();
       for (const r of results) expect(typeof r.score).toBe('number');
+    });
+
+    it('explains morphological and foreign misses from indexed identifiers only', async () => {
+      const greet = makeNode({
+        id: 'src/main.ts::greet',
+        name: 'greet',
+        filePath: 'src/main.ts',
+      });
+      await VectorIndex.build(tmpDir, [greet], [], new Set(), new Set(), null);
+
+      const morphological = await VectorIndex.keywordMissDiagnostics(tmpDir, 'change the greeting');
+      expect(morphological.missedTokens).toContain('greeting');
+      expect(morphological.nearTokens).toContainEqual({
+        queryToken: 'greeting',
+        indexedTokens: ['greet'],
+      });
+
+      const foreign = await VectorIndex.keywordMissDiagnostics(tmpDir, 'kubernetes ingress rules');
+      expect(foreign.missedTokens).toEqual(['kubernetes', 'ingress', 'rules']);
+      expect(foreign.nearTokens).toEqual([]);
     });
 
     it('does NOT embed the query against a hasEmbeddings:false index, even when an embedder is supplied', async () => {

@@ -265,6 +265,13 @@ export async function handleOrient(
     : { kept: relevantFunctionsAll, omitted: 0 };
   const relevantFunctions = budgeted.kept;
 
+  const emptyResult = relevantFunctions.length === 0
+    ? {
+        reason: 'No indexed repository function matched the task tokens.',
+        ...await VectorIndex.keywordMissDiagnostics(outputDir, task),
+      }
+    : undefined;
+
   // ── Relevant files (deduplicated) ─────────────────────────────────────────
   const relevantFiles = [...new Set(relevantFunctions.map(f => f.filePath))];
 
@@ -768,21 +775,37 @@ export async function handleOrient(
 
   // ── Next steps ────────────────────────────────────────────────────────────
   const nextSteps: string[] = [];
-  nextSteps.push(
-    'Before making an architectural choice, call record_decision(title, rationale, consequences, affectedFiles) to document it',
-  );
-  if (insertionPoints.length > 0) {
+  if (emptyResult) {
+    const near = emptyResult.nearTokens[0];
+    const searchTerms = near?.indexedTokens.join(' OR ')
+      || emptyResult.missedTokens.join(' ')
+      || task;
+    nextSteps.push(`Call search_code with identifier-style terms such as "${searchTerms}"`);
+    nextSteps.push('Call get_map to inspect the repository structure and choose a concrete symbol');
+    if (near) {
+      nextSteps.push(
+        `Near-token receipt: "${near.queryToken}" did not match; indexed identifiers include ${near.indexedTokens.map(token => `"${token}"`).join(', ')}`,
+      );
+    }
+  } else {
+    nextSteps.push(
+      'Before making an architectural choice, call record_decision(title, rationale, consequences, affectedFiles) to document it',
+    );
+  }
+  if (!emptyResult && insertionPoints.length > 0) {
     nextSteps.push(
       `Call get_subgraph("${insertionPoints[0].name}") to trace the call neighbourhood`,
     );
   }
-  if (specDomains.length > 0) {
+  if (!emptyResult && specDomains.length > 0) {
     const hint = inlineSpecs
       ? `Domain purposes included in inlineSpecs — call get_spec("${specDomains[0].domain}") for requirements and implementation details`
       : `Call get_spec("${specDomains[0].domain}") to read the full spec before writing code`;
     nextSteps.push(hint);
   }
-  nextSteps.push('After implementing, run check_spec_drift to verify the code matches the spec');
+  if (!emptyResult) {
+    nextSteps.push('After implementing, run check_spec_drift to verify the code matches the spec');
+  }
 
   // Signal when the graph index is unavailable (e.g. wiped by a version upgrade and
   // not yet re-analyzed): call paths, provenance, decisions, and change-coupling all
@@ -904,6 +927,7 @@ export async function handleOrient(
       : {}),
     relevantFiles,
     relevantFunctions,
+    ...(emptyResult ? { emptyResult } : {}),
     ...(budgeted.omitted > 0
       ? { relevantFunctionsOmitted: omissionNote(budgeted.omitted, 'raise tokenBudget, increase limit, or call search_code') }
       : {}),
