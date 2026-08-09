@@ -127,10 +127,17 @@ export function capStructuredResult(result: unknown, maxBytes: number): { text: 
   const redactions = result && typeof result === 'object' && !Array.isArray(result)
     ? (result as Record<string, unknown>).redactions
     : undefined;
+  const indexStaleness = result && typeof result === 'object' && !Array.isArray(result)
+    ? (result as Record<string, unknown>).indexStaleness
+    : undefined;
   const envelope = (partial: string): Record<string, unknown> => ({
     truncated: true,
     note,
     ...(redactions === undefined ? {} : { redactions }),
+    // Freshness is a mandatory factual boundary, not optional detail. Preserve
+    // it even when the structured payload falls back to a truncation envelope
+    // (change: disclose-stale-serving-on-cold-reads).
+    ...(indexStaleness === undefined ? {} : { indexStaleness }),
     partial,
   });
   const best = largestFitting(full.length, (n) =>

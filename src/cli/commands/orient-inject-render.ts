@@ -115,6 +115,11 @@ export interface LeanOrientResult {
   suggestedTools?: string[];
   regionStyle?: RegionStyle;
   parseHealth?: string;
+  indexStaleness?: {
+    staleFiles?: string[];
+    note?: string;
+    repairScheduled?: true;
+  };
   servedContentProvenance?: {
     relevantFiles?: ServedContentProvenance;
     relevantFunctions?: ServedContentProvenance;
@@ -232,6 +237,14 @@ export function renderInjectionBlock(result: LeanOrientResult, cfg: ResolvedInje
     ?? 'local-unreviewed';
   const baseProvenances: ServedContentProvenance[] = ['local-unreviewed', sourceProvenance];
   const mandatory = [`Task: ${task}`];
+  if (typeof result.indexStaleness?.note === 'string') {
+    // Mandatory-line priority (change: disclose-stale-serving-on-cold-reads):
+    // this factual boundary must survive before any function/caller/spec detail.
+    // Collapse whitespace defensively so an artifact-controlled filename cannot
+    // forge a second injected line.
+    const freshnessLine = result.indexStaleness.note.replace(/\s+/g, ' ').trim();
+    if (freshnessLine) mandatory.push(`⚠ ${freshnessLine}`);
+  }
 
   const optional: string[] = [];
   const clean = (xs: Array<string | undefined> | undefined, n: number): string[] =>

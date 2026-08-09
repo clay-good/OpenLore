@@ -112,6 +112,22 @@ describe('capStructuredResult', () => {
     expect(r.truncated).toBe(true);
     expect(parsed.redactions).toEqual(redactions);
   });
+
+  it('preserves index staleness when a structured result falls back to an envelope', () => {
+    const indexStaleness = {
+      staleFiles: ['src/payments.ts'],
+      note: 'The index is behind the working tree for: src/payments.ts.',
+    };
+    const result = {
+      items: Array.from({ length: 50_000 }, (_, i) => ({ id: i, name: `n${i}` })),
+      indexStaleness,
+    };
+    const r = capStructuredResult(result, 64 * 1024);
+    const parsed = JSON.parse(r.text) as { indexStaleness: typeof indexStaleness };
+
+    expect(r.truncated).toBe(true);
+    expect(parsed.indexStaleness).toEqual(indexStaleness);
+  });
 });
 
 describe('classifyToolError', () => {

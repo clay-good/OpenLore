@@ -232,6 +232,26 @@ describe('renderInjectionBlock', () => {
     expect(block).not.toContain('Suggested tools');
   });
 
+  it('keeps cited-file staleness ahead of optional detail inside the budgeted block', () => {
+    const stale = {
+      ...richResult,
+      indexStaleness: {
+        staleFiles: ['src/api/run.ts'],
+        note: 'The index is behind the working tree for: "src/api/run.ts" — results may omit recent edits; re-run analyze or let the watcher converge.',
+      },
+    };
+    const block = renderInjectionBlock(stale, cfg({ tokenBudget: 100 }));
+
+    expect(estimateTokens(block)).toBeLessThanOrEqual(100);
+    expect(block).toContain('src/api/run.ts');
+    expect(block).toContain('results may omit recent edits');
+    const detailIndex = block.indexOf('Relevant functions');
+    if (detailIndex >= 0) {
+      expect(block.indexOf('results may omit recent edits')).toBeLessThan(detailIndex);
+    }
+    expect(block).not.toContain('Suggested tools');
+  });
+
   it('includes more detail as the budget grows', () => {
     const small = renderInjectionBlock(richResult, cfg({ tokenBudget: 60 }));
     const large = renderInjectionBlock(richResult, cfg({ tokenBudget: 600 }));

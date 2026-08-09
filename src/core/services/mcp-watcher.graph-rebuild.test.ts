@@ -75,4 +75,16 @@ describe('McpWatcher graph-rebuild trigger', () => {
     expect(() => w._triggerGraphStaleForTesting('stale-region')).not.toThrow();
     spawn.mockRestore();
   });
+
+  it('accepts a cited-file repair only when a rebuild lane is wired', () => {
+    vi.useFakeTimers();
+    const fired: GraphStaleReason[] = [];
+    const hosted = new McpWatcher({ rootPath: freshDir(), onGraphStale: reason => fired.push(reason) });
+    const plain = new McpWatcher({ rootPath: freshDir() });
+
+    expect(hosted.requestColdReadRepair(['src/payments.ts', 'src/payments.ts'])).toBe(true);
+    expect(plain.requestColdReadRepair(['src/payments.ts'])).toBe(false);
+    vi.advanceTimersByTime(2000);
+    expect(fired).toEqual(['stale-region']);
+  });
 });

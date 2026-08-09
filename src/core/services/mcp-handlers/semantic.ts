@@ -19,7 +19,7 @@ import {
   OPENSPEC_SPECS_SUBDIR,
 } from '../../../constants.js';
 import { fileExists } from '../../../utils/command-helpers.js';
-import { validateDirectory, safeJoin, loadMappingIndex, specsForFile, functionsForDomain, queryTooLongError, notReadyResult } from './utils.js';
+import { validateDirectory, safeJoin, loadMappingIndex, specsForFile, functionsForDomain, queryTooLongError, notReadyResult, readCachedContext } from './utils.js';
 import { expandHandle, applyTokenBudget, collapseExactDuplicates, omissionNote } from './progressive.js';
 import { readOpenLoreConfig } from '../config-manager.js';
 import {
@@ -28,6 +28,7 @@ import {
   reviewedFileContentProvenance,
   type AnalysisContentProvenance,
 } from '../served-content.js';
+import { withIndexStaleness } from './index-staleness.js';
 
 // ============================================================================
 // INSERTION POINT HELPERS
@@ -198,7 +199,11 @@ export async function handleSearchCode(
   // Forced literal-text mode: query the separate line index directly, bypassing
   // symbol search. Use when hunting a literal string (UI copy, error text).
   if (mode === 'text') {
-    return searchTextLines(outputDir, query, limit, 'text', analysisProvenance);
+    const [result, freshnessCtx] = await Promise.all([
+      searchTextLines(outputDir, query, limit, 'text', analysisProvenance),
+      readCachedContext(absDir),
+    ]);
+    return result ? withIndexStaleness(absDir, result, freshnessCtx) : result;
   }
 
   if (!VectorIndex.exists(outputDir)) {
@@ -216,7 +221,6 @@ export async function handleSearchCode(
   const searchMode = retrievalMode === 'keyword' ? 'bm25_fallback' : 'hybrid';
 
   limit = Math.max(1, Math.min(limit, 100));
-  const { readCachedContext } = await import('./utils.js');
   const [results, mappingIdx, llmCtx] = await Promise.all([
     VectorIndex.search(outputDir, query, embedSvc, { limit, language, minFanIn }),
     loadMappingIndex(absDir),
@@ -231,7 +235,7 @@ export async function handleSearchCode(
   if (results.length === 0) {
     try {
       const textFallback = await searchTextLines(outputDir, query, limit, 'text_fallback', analysisProvenance);
-      if (textFallback) return textFallback;
+      if (textFallback) return withIndexStaleness(absDir, textFallback, llmCtx);
     } catch {
       /* text index unavailable/corrupt — fall through to the empty symbol response */
     }
@@ -296,7 +300,7 @@ export async function handleSearchCode(
     ? applyTokenBudget(collapseExactDuplicates(allResults), tokenBudget)
     : { kept: allResults, omitted: 0 };
 
-  return {
+  const result = {
     query,
     searchMode,
     retrievalMode,
@@ -312,6 +316,7 @@ export async function handleSearchCode(
       : {}),
     ...(specPeers.length > 0 ? { specLinkedFunctions: specPeers } : {}),
   };
+  return withIndexStaleness(absDir, result, llmCtx);
 }
 
 /**

@@ -18,7 +18,25 @@ import { repairInBackground, type RepairReason } from '../cold-start-bootstrap.j
  * exists) and the index integrity verdict (present when an attestation was written and
  * could be reconciled against the store — change: add-index-integrity-attestation).
  */
-export type CachedContext = LLMContext & { edgeStore?: EdgeStore; integrity?: IndexIntegrity };
+export type CachedContext = LLMContext & {
+  edgeStore?: EdgeStore;
+  integrity?: IndexIntegrity;
+  /**
+   * Mtime of the exact llm-context generation represented by this object.
+   * Non-enumerable at runtime so watcher persistence never writes cache metadata
+   * back into the analysis artifact.
+   */
+  artifactMtimeMs?: number;
+};
+
+function bindArtifactMtime(ctx: CachedContext, mtime: number): void {
+  Object.defineProperty(ctx, 'artifactMtimeMs', {
+    value: mtime,
+    writable: true,
+    configurable: true,
+    enumerable: false,
+  });
+}
 
 /**
  * Reconcile the on-disk edge store against its build-time attestation, returning the
@@ -280,6 +298,7 @@ export async function primeContextCache(directory: string, ctx: CachedContext): 
   if (existing?.ctx.edgeStore && !ctx.edgeStore) {
     ctx.edgeStore = existing.ctx.edgeStore;
   }
+  bindArtifactMtime(ctx, mtime);
   _contextCache.set(directory, { ctx, mtime });
 }
 
@@ -316,6 +335,11 @@ export async function readCachedContext(directory: string, timeout?: number): Pr
         return null;
       }
       const ctx = parsed as CachedContext;
+      // Bind freshness fallbacks to THIS parsed generation. A later analyze may
+      // replace the artifact while a handler is still composing its response;
+      // re-statting at response time could otherwise bless stale cached data with
+      // the newer generation's timestamp.
+      bindArtifactMtime(ctx, mtime);
       // Normalize a present callGraph so `nodes`/`edges` are always arrays. A truncated
       // or hand-edited artifact (`{"callGraph": {}}`) — or a minimal one carrying only
       // entryPoints/hubFunctions — would otherwise throw when a handler does

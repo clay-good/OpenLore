@@ -31,7 +31,7 @@ validate`**, and the archive machinery works again. This pass:
   because their requirements were already synced verbatim (`fix-pi-parity-drift`,
   `fix-redaction-module-gaps`).
 
-## Complete — 129 in `archive/`
+## Complete — 130 in `archive/`
 
 Everything in `openspec/changes/archive/` is shipped (or a settled won't-do), with its
 requirements reflected in the main specs. `openspec list` shows only open work.
@@ -41,7 +41,7 @@ requirements reflected in the main specs. `openspec list` shows only open work.
 No open change has partial code on `main`. A change belongs here the moment its implementation
 starts; move it back out (archive it) the moment its marker/spec evidence lands.
 
-## To build — 117
+## To build — 116
 
 The whole open set is unbuilt backlog. Newest additions: 7 proposals from the 2026-07-27
 first-run e2e (`E2E-FIRSTRUN-2026-07-27.md`). Other thematic indexes:
@@ -61,7 +61,9 @@ misses with bounded near-token receipts, and synthetic external nodes no longer 
 searchable function corpus; `widen-import-resolution` (2026-08-09, archived) — Go, Java, Kotlin,
 C#, and PHP now resolve statically unique package/import bindings at `import` confidence;
 `add-secret-redaction-boundary` (2026-08-09, archived) — source-carrying tool results and both
-sides of persisted LLM logs share deterministic, disclosed credential redaction.
+sides of persisted LLM logs share deterministic, disclosed credential redaction;
+`disclose-stale-serving-on-cold-reads` (2026-08-09, archived) — cold navigation reads disclose
+changed cited files and active watcher/serve hosts schedule repository-scoped repair.
 
 After this table was compiled, four research sweeps added 32 more proposals (all validate; not yet
 folded into the table): 10 in `FIELD-RESEARCH-2026-07.md`, 10 in `ECOSYSTEM-RESEARCH-2026-07-27.md`,
@@ -115,7 +117,6 @@ trust boundary for served content.
 | `align-api-layer-with-cli-core` | The programmatic API is a fork of the CLI pipeline, not a facade over it — realign and make its contract embedder-safe |
 | `align-first-run-ctas-with-repo-shape` | never advertise a command that will fail on this repo |
 | `disclose-dynamic-boundary-regions` | the call graph names where it stops seeing, instead of returning a quiet lower bound |
-| `disclose-stale-serving-on-cold-reads` | never a confident answer from an index the working tree has outrun |
 | `enforce-preset-membership-at-dispatch` | the advertised surface must be the callable surface |
 | `fix-commit-gate-delivery` | install hooks where git actually looks, and version the machine contract |
 | `fix-complexity-language-parity` | Go/Ruby/Rust/Swift/Elixir report ~1 regardless of shape |

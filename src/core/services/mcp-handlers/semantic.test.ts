@@ -304,6 +304,7 @@ describe('handleSearchCode', () => {
     expect(result.searchMode).toBe('bm25_fallback');
     expect(result.count).toBe(1);
     expect(Array.isArray(result.results)).toBe(true);
+    expect((result.indexStaleness as { staleFiles: string[] }).staleFiles).toEqual(['src/a.ts']);
   });
 });
 

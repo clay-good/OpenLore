@@ -820,14 +820,41 @@ export class McpWatcher {
   }
 
   /**
+   * Hand a read-time freshness mismatch to this host's existing stale-region
+   * repair lane (change: disclose-stale-serving-on-cold-reads). The caller has
+   * already confined and normalized these repository-relative paths. Marking
+   * them preserves the factual stale region while the coalesced full rebuild is
+   * pending; the method returns true only when this watcher actually owns a
+   * rebuild lane, so response wording never promises an unscheduled repair.
+   */
+  requestColdReadRepair(staleFiles: readonly string[]): boolean {
+    const files = [...new Set(staleFiles.filter(file => file.length > 0))].sort();
+    if (files.length === 0 || (!this.onGraphStale && !this.selfRebuild)) return false;
+    try {
+      if (EdgeStore.exists(this.outputPath)) {
+        const store = EdgeStore.open(EdgeStore.dbPath(this.outputPath));
+        try {
+          if (!store.notReady) store.markFilesStale(files);
+        } finally {
+          store.close();
+        }
+      }
+    } catch {
+      // The full rebuild remains the repair authority even when the stale-region
+      // receipt cannot be persisted (legacy/corrupt store). Never block the read.
+    }
+    return this.scheduleGraphRebuild('stale-region');
+  }
+
+  /**
    * Schedule a debounced, coalesced full-graph rebuild after a trigger an
    * incremental patch cannot repair (change: make-index-self-healing). Rapid
    * successive triggers (a `git pull` touching many refs) collapse into one
    * rebuild. No-op unless a host wired `onGraphStale` or `selfRebuild` is set, so
    * the plain signatures-only watcher is byte-for-byte unchanged.
    */
-  private scheduleGraphRebuild(reason: GraphStaleReason): void {
-    if (!this.onGraphStale && !this.selfRebuild) return;
+  private scheduleGraphRebuild(reason: GraphStaleReason): boolean {
+    if (!this.onGraphStale && !this.selfRebuild) return false;
     // Keep the first reason of a coalesced burst — HEAD-change is the more
     // salient cause when both fire together, and it arrives first on a switch.
     if (this.graphStalePendingReason === undefined) this.graphStalePendingReason = reason;
@@ -843,6 +870,7 @@ export class McpWatcher {
       }
     }, GRAPH_STALE_DEBOUNCE_MS);
     this.graphStaleTimer.unref?.();
+    return true;
   }
 
   /**

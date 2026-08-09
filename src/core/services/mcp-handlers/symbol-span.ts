@@ -43,6 +43,7 @@ import {
 import { validateDirectory, readCachedContext } from './utils.js';
 import { hashSpan } from '../../decisions/anchor.js';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
+import { resolveFileFreshness } from './freshness.js';
 
 export interface LocateSymbolSpanInput {
   directory: string;
@@ -63,28 +64,6 @@ interface SerNode {
 }
 
 const HTML_RE = /\.html?$/i;
-
-/**
- * Pure freshness resolver — the whole trust decision, extracted so every branch
- * is unit-tested without touching disk. Content-hash is AUTHORITATIVE when the
- * index recorded a per-file baseline (the watcher records one on every edit); the
- * full-analyze path records none, so the fallback is the artifact-vs-source mtime:
- * a file that has not been written since the index artifact was produced still
- * carries the offsets the index recorded. Both paths fail safe toward `stale` —
- * any later write, or an unreadable baseline, biases away from a false `fresh`.
- */
-export function resolveFreshness(params: {
-  baselineFileHash: string | null;
-  currentFileHash: string;
-  sourceMtimeMs: number;
-  artifactMtimeMs: number;
-}): 'fresh' | 'stale' {
-  const { baselineFileHash, currentFileHash, sourceMtimeMs, artifactMtimeMs } = params;
-  if (baselineFileHash !== null) {
-    return baselineFileHash === currentFileHash ? 'fresh' : 'stale';
-  }
-  return sourceMtimeMs <= artifactMtimeMs ? 'fresh' : 'stale';
-}
 
 const SPAN_NOTE =
   'startByte/endByte are tree-sitter offsets — UTF-16 code-unit indices into the file read as a ' +
@@ -195,7 +174,7 @@ export async function handleLocateSymbolSpan(input: LocateSymbolSpanInput): Prom
     // than artifact → `stale`).
   }
 
-  const verdict = resolveFreshness({ baselineFileHash, currentFileHash, sourceMtimeMs, artifactMtimeMs });
+  const verdict = resolveFileFreshness({ baselineFileHash, currentFileHash, sourceMtimeMs, artifactMtimeMs });
 
   if (verdict === 'stale') {
     return {

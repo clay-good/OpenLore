@@ -214,6 +214,23 @@ describe('orient command', () => {
       expect(parsed.searchMode).toBe('hybrid');
     });
 
+    it('--json carries cited-file staleness in the single JSON document', async () => {
+      mockHandleOrient.mockResolvedValue({
+        task: 'refundCard behavior',
+        searchMode: 'bm25_fallback',
+        relevantFunctions: [],
+        indexStaleness: {
+          staleFiles: ['src/payments.ts'],
+          note: 'The index is behind the working tree for: "src/payments.ts".',
+        },
+      });
+      await orientCommand.parseAsync(['--json', '--task', 'refundCard behavior'], { from: 'user' });
+
+      const parsed = JSON.parse(output());
+      expect(parsed.indexStaleness.staleFiles).toEqual(['src/payments.ts']);
+      expect(consoleSpy).toHaveBeenCalledTimes(1);
+    });
+
     it('rejects a non-positive --limit', async () => {
       await orientCommand.parseAsync(['--task', 'x', '--limit', '0'], { from: 'user' });
       expect(process.exitCode).toBe(1);

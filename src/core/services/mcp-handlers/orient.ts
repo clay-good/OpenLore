@@ -55,6 +55,7 @@ import {
   type AnalysisContentProvenance,
   type ServedContentProvenance,
 } from '../served-content.js';
+import { withIndexStaleness } from './index-staleness.js';
 
 // ============================================================================
 // MANIFEST CACHE
@@ -947,10 +948,10 @@ export async function handleOrient(
   // exact `expand` handle or one dedicated tool call away — so we trim bytes per
   // turn without forcing a follow-up round-trip. The rich default is unchanged.
   if (lean) {
-    return { ...core, lean: true };
+    return withIndexStaleness(absDir, { ...core, lean: true }, llmCtx);
   }
 
-  return {
+  const result = {
     ...core,
     ...(specLinkedFunctions.length > 0 ? { specLinkedFunctions } : {}),
     ...(inlineSpecs !== undefined ? { inlineSpecs } : {}),
@@ -969,6 +970,7 @@ export async function handleOrient(
     ...(regionStyle !== undefined ? { regionStyle } : {}),
     nextSteps,
   };
+  return withIndexStaleness(absDir, result, llmCtx);
 }
 
 // ============================================================================

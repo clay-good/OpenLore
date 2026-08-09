@@ -731,6 +731,9 @@ describe('handleGetSubgraph — edgeStore fast path', () => {
     expect(nodes.map(n => n.name)).toContain('entry');
     expect(nodes.map(n => n.name)).toContain('middle');
     expect(nodes.map(n => n.name)).toContain('leaf');
+    expect((result.indexStaleness as { staleFiles: string[] }).staleFiles).toEqual([
+      'src/a.ts', 'src/b.ts', 'src/c.ts',
+    ]);
   });
 
   it('subgraph edges connect visited nodes correctly', async () => {

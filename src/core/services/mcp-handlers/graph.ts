@@ -56,6 +56,7 @@ import {
   repairDisclosure,
   type BoundaryEdge,
 } from './confidence-boundary.js';
+import { computeIndexStaleness, withIndexStaleness } from './index-staleness.js';
 
 // ============================================================================
 // SHARED GRAPH HELPERS
@@ -496,7 +497,7 @@ export async function handleGetSubgraph(
 
   // Governing decisions (spec-16): typed graph neighbors of the subgraph's files,
   // surfaced via the `affects`-edge join — not a post-hoc filter.
-  const subgraphFiles = [...new Set(visibleNodes.map(n => n.filePath))];
+  const subgraphFiles = [...new Set(visibleNodes.filter(n => !n.isExternal).map(n => n.filePath))];
   const governingDecisions = ctx.edgeStore.getDecisionsForFiles(subgraphFiles).map(decisionToNeighbor);
 
   if (format === 'mermaid') {
@@ -521,7 +522,11 @@ export async function handleGetSubgraph(
     const decisionNote = governingDecisions.length > 0
       ? ` · ${governingDecisions.length} governing decision${governingDecisions.length > 1 ? 's' : ''}`
       : '';
-    return `\`\`\`mermaid\n${diagram}\n\`\`\`\n\n` +
+    const indexStaleness = await computeIndexStaleness(absDir, null, ctx, subgraphFiles);
+    const freshnessPrefix = indexStaleness
+      ? `> [OpenLore index] ${indexStaleness.note}\n\n`
+      : '';
+    return freshnessPrefix + `\`\`\`mermaid\n${diagram}\n\`\`\`\n\n` +
       `_${subNodes.length} nodes · ${deduped.length} edges${decisionNote} · seeds: ${seeds.map(s => s.name).join(', ')}_`;
   }
 
@@ -534,7 +539,7 @@ export async function handleGetSubgraph(
   })));
   const confidenceBoundary = assembleBoundary({ basis: subBasis, staleness: await computeStaleness(absDir), integrity: ctx?.integrity, repair: repairDisclosure(absDir) });
 
-  return {
+  const result = {
     query: { functionName, direction, maxDepth },
     seeds: seeds.map(n => ({ name: n.name, file: n.filePath })),
     stats: { nodes: subNodes.length, edges: subEdges.length, governingDecisions: governingDecisions.length },
@@ -543,6 +548,7 @@ export async function handleGetSubgraph(
     ...(governingDecisions.length > 0 ? { governingDecisions } : {}),
     confidenceBoundary,
   };
+  return withIndexStaleness(absDir, result, ctx, subgraphFiles);
 }
 
 /**

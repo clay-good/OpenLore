@@ -114,7 +114,9 @@ describe('computeBlastRadius', () => {
   });
 
   it('briefs a hub change: callers, layers, tests, and anchored drift, as one conclusion', async () => {
-    const b = await computeBlastRadius({ directory: '/p' }) as BlastRadiusBriefing;
+    const b = await computeBlastRadius({ directory: '/p' }) as BlastRadiusBriefing & {
+      indexStaleness?: { staleFiles: string[] };
+    };
 
     // Changed set
     expect(b.changed.files).toBe(1);
@@ -142,6 +144,7 @@ describe('computeBlastRadius', () => {
     expect(b.specs.willGoStale).toBe(1);
     expect(b.decisions.affected).toBe(1);
     expect(b.decisions.orphaned).toBe(1); // uncapped count the block gate reads
+    expect(b.indexStaleness?.staleFiles).toEqual(expect.arrayContaining(['src/x.test.ts', 'src/utils.ts']));
 
     // Federation is honestly out of scope — and never claims the shipped capability is unshipped.
     expect(b.federation.evaluated).toBe(false);
