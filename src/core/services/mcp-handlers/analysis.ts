@@ -38,6 +38,8 @@ import { formatSignatureMaps } from '../../analyzer/signature-extractor.js';
 import { getSkeletonContent, isSkeletonWorthIncluding } from '../../analyzer/code-shaper.js';
 import { detectLanguage } from '../../analyzer/language-detection.js';
 import { buildArchitectureOverview } from '../../analyzer/architecture-writer.js';
+import { buildDomainEvidence } from '../../generator/domain-evidence.js';
+import type { RepoStructure } from '../../analyzer/artifact-generator.js';
 import {
   isGitRepository,
   getChangedFiles,
@@ -161,11 +163,19 @@ export async function handleGetArchitectureOverview(directory: string): Promise<
   }
 
   const overview = buildArchitectureOverview(depGraph, ctx, absDir);
+  let domainEvidence: unknown[] = [];
+  if (ctx) {
+    try {
+      const repo = JSON.parse(await readFile(join(absDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_REPO_STRUCTURE), 'utf-8')) as RepoStructure;
+      domainEvidence = buildDomainEvidence(repo, ctx);
+    } catch { /* the architectural summary remains usable when this artifact is absent */ }
+  }
   return {
     summary: overview.summary,
     clusters: overview.clusters,
     globalEntryPoints: overview.globalEntryPoints,
     criticalHubs: overview.criticalHubs,
+    domainEvidence,
   };
 }
 

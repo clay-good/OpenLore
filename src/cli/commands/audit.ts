@@ -26,7 +26,11 @@ function printReport(report: AuditReport, rootPath: string): void {
   console.log('   Spec Coverage Audit');
   console.log('   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('');
-  console.log(`   Coverage:       ${summary.coveragePct}% (${summary.coveredFunctions}/${summary.totalFunctions} functions)`);
+  if (report.mappingCoverage.state === 'available') {
+    console.log(`   Coverage:       ${summary.coveragePct}% (${summary.coveredFunctions}/${summary.totalFunctions} functions)`);
+  } else {
+    console.log(`   Coverage:       unavailable (${report.mappingCoverage.state}: ${report.mappingCoverage.reason})`);
+  }
   console.log(`   Uncovered:      ${summary.uncoveredCount} functions`);
   console.log(`   Hub gaps:       ${summary.hubGapCount} hub functions without spec`);
   console.log(`   Orphan reqs:    ${summary.orphanRequirementCount} requirements with no implementation found`);

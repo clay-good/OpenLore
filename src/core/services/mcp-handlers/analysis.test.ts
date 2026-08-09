@@ -22,6 +22,7 @@ import {
   OPENLORE_ANALYSIS_SUBDIR,
   ARTIFACT_DEPENDENCY_GRAPH,
   ARTIFACT_MAPPING,
+  ARTIFACT_REPO_STRUCTURE,
   ARTIFACT_ROUTE_INVENTORY,
   ARTIFACT_MIDDLEWARE_INVENTORY,
   ARTIFACT_SCHEMA_INVENTORY,
@@ -125,6 +126,25 @@ describe('handleGetArchitectureOverview', () => {
     const { handleGetArchitectureOverview } = await import('./analysis.js');
     const result = await handleGetArchitectureOverview(tmpDir) as { summary: { totalFiles: number } };
     expect(result.summary.totalFiles).toBe(42);
+  });
+
+  it('exposes the shared deterministic domain evidence for MCP hosts', async () => {
+    await writeAnalysisFile(tmpDir, ARTIFACT_DEPENDENCY_GRAPH, makeMinimalDepGraph());
+    await writeAnalysisFile(tmpDir, ARTIFACT_REPO_STRUCTURE, {
+      domains: [{ name: 'billing', files: ['src/billing/model.ts', 'src/billing/routes.ts'] }],
+      undomained: [],
+      schemas: [{ file: 'src/billing/model.ts', name: 'Invoice' }],
+      routeInventory: { routes: [{ file: 'src/billing/routes.ts', method: 'GET', path: '/invoices' }] },
+    });
+    readCachedContext.mockResolvedValue({
+      ...makeMinimalLLMContext(),
+      signatures: [{ path: 'src/billing/model.ts', functions: [] }, { path: 'src/billing/routes.ts', functions: [] }],
+    });
+    const { handleGetArchitectureOverview } = await import('./analysis.js');
+    const result = await handleGetArchitectureOverview(tmpDir) as { domainEvidence: Array<{ name: string; schemaFiles: string[]; apiFiles: string[] }> };
+    expect(result.domainEvidence).toEqual([expect.objectContaining({
+      name: 'billing', schemaFiles: ['src/billing/model.ts'], apiFiles: ['src/billing/routes.ts'],
+    })]);
   });
 });
 

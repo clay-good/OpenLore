@@ -653,6 +653,17 @@ dryRun     boolean   Preview changes without writing files (default: false)
 3. If hubGaps includes a function you'll touch: flag it in your risk check
 ```
 
+**Scenario E.1 -- Agent-authored specification generation and repair**
+
+OpenLore exposes one deterministic, domain-scoped evidence representation through
+`get_architecture_overview`. Any MCP-capable host agent can use it to author a new
+specification without an OpenLore LLM call. For repair, compose the same evidence
+with `audit_spec_coverage`, `get_spec`, `get_mapping`, `check_spec_drift`, and (as
+needed) `structural_diff` or `get_subgraph`. Generate and Repair deliberately use
+different subsets: the shared layer is a representation, not a mandatory fixed
+bundle. `mappingCoverage` explicitly reports `available`, `missing`, `invalid`, or
+`stale`; unavailable mapping provenance never masquerades as uncovered code.
+
 **Scenario F -- Decisions workflow**
 ```
 1. record_decision({ directory, title, rationale, consequences, affectedFiles })

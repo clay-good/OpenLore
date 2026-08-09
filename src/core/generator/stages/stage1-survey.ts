@@ -4,9 +4,7 @@
  * Analyzes repository structure to categorize the project and identify key files.
  */
 
-import logger from '../../../utils/logger.js';
 import { STAGE1_MAX_TOKENS } from '../../../constants.js';
-import { formatSignatureMaps, STAGE1_MAX_CHARS } from '../../analyzer/signature-extractor.js';
 import type { LLMService } from '../../services/llm-service.js';
 import type { PipelineOptions, ProjectSurveyResult, StageResult } from '../../../types/pipeline.js';
 import type { LLMContext, RepoStructure } from '../../analyzer/artifact-generator.js';
@@ -88,18 +86,24 @@ export async function runStage1(
   repoStructure: RepoStructure,
   llmContext: LLMContext
 ): Promise<StageResult<ProjectSurveyResult>> {
-  if (llmContext.signatures && llmContext.signatures.length > 0) {
-    const chunks = formatSignatureMaps(llmContext.signatures, STAGE1_MAX_CHARS);
-    if (chunks.length === 1) {
-      return runStage1WithSection(llm, options, saveResult, repoStructure, chunks[0], true, llmContext);
-    }
-    logger.analysis(`Stage 1: ${chunks.length} signature chunks across ${llmContext.signatures.length} files`);
-    const results = await Promise.all(chunks.map((c: string) => runStage1WithSection(llm, options, saveResult, repoStructure, c, true, llmContext)));
-    return mergeStage1Results(results);
-  }
-  // Legacy fallback — only the 20 files in phase2_deep are visible
-  const section = llmContext.phase2_deep.files.map(f => `- ${f.path}`).join('\n');
-  return runStage1WithSection(llm, options, saveResult, repoStructure, section, false, llmContext);
+  const schemaFiles = [...new Set(repoStructure.schemas.map(schema => schema.file))].sort();
+  const apiFiles = [...new Set((repoStructure.routeInventory?.routes ?? []).map(route => route.file))].sort();
+  const knownFiles = [...new Set(repoStructure.domains.flatMap(domain => domain.files))];
+  const serviceFiles = knownFiles.filter(file => !schemaFiles.includes(file) && !apiFiles.includes(file)).sort();
+  const section = repoStructure.domains
+    .map(domain => `- ${domain.name}: ${domain.files.sort().join(', ') || '(no files)'}`)
+    .join('\n');
+  const result = await runStage1WithSection(llm, options, saveResult, repoStructure, section, false, llmContext);
+  if (!result.data) return result;
+
+  // The LLM may characterize the project, but inventories own the downstream
+  // routing facts.  This prevents a survey hallucination from dropping a
+  // schema, route, or whole domain from stages 2–4.
+  result.data.schemaFiles = schemaFiles;
+  result.data.apiFiles = apiFiles;
+  result.data.serviceFiles = serviceFiles;
+  result.data.suggestedDomains = repoStructure.domains.map(domain => domain.name);
+  return result;
 }
 
 /**

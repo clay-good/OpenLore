@@ -9,6 +9,7 @@
 
 import { writeFile, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import {
   SIMILARITY_CONTAINMENT_SCORE,
   SIMILARITY_TOKEN_OVERLAP_WEIGHT,
@@ -44,7 +45,10 @@ export interface RequirementMapping {
 }
 
 export interface MappingArtifact {
+  version?: 2;
   generatedAt: string;
+  /** Fingerprint of the exported-symbol inventory the mappings were built from. */
+  sourceAnalysisFingerprint?: string;
   mappings: RequirementMapping[];
   orphanFunctions: FunctionRef[];
   stats: {
@@ -53,6 +57,15 @@ export interface MappingArtifact {
     totalExportedFunctions: number;
     orphanCount: number;
   };
+}
+
+/** Stable provenance key shared by mapping generation and coverage readers. */
+export function mappingSourceFingerprint(depGraph: DependencyGraphResult): string {
+  const exports = depGraph.nodes.flatMap(node => node.exports
+    .filter(exp => !exp.isType)
+    .map(exp => `${node.file.path}\u0000${exp.name}\u0000${exp.kind}\u0000${exp.line}`))
+    .sort();
+  return createHash('sha256').update(exports.join('\n')).digest('hex');
 }
 
 // ============================================================================
@@ -299,7 +312,9 @@ export class MappingGenerator {
     }
 
     const artifact: MappingArtifact = {
+      version: 2,
       generatedAt: new Date().toISOString(),
+      sourceAnalysisFingerprint: mappingSourceFingerprint(depGraph),
       mappings,
       orphanFunctions,
       stats: {

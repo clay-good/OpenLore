@@ -434,6 +434,17 @@ describe('readConfig', () => {
 });
 
 describe('NAV_TOOLS surface', () => {
+  it('has native generation and repair compositions over existing daemon observations', async () => {
+    const source = await readFile(new URL('./extension.ts', import.meta.url), 'utf8');
+    expect(source).toContain("name: 'openlore_prepare_spec_generation'");
+    expect(source).toContain("name: 'openlore_prepare_spec_repair'");
+    expect(source).toContain("callTool(daemon, 'get_architecture_overview'");
+    expect(source).toContain("callTool(daemon, 'audit_spec_coverage'");
+    expect(source).toContain("callTool(daemon, 'get_mapping'");
+    expect(source).toContain('OpenLore makes no internal');
+    expect(source).toContain('LLM call here. Pi\'s host agent');
+  });
+
   it('has unique tool names', () => {
     const names = NAV_TOOLS.map(t => t.name);
     expect(new Set(names).size).toBe(names.length);

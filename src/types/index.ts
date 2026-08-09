@@ -612,6 +612,11 @@ export interface AuditStaleDomain {
 
 export interface AuditReport {
   generatedAt: string;
+  mappingCoverage: {
+    state: 'available' | 'missing' | 'invalid' | 'stale';
+    reason?: string;
+    artifactPath: string;
+  };
   summary: {
     totalFunctions: number;
     coveredFunctions: number;

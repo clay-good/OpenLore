@@ -7,6 +7,7 @@ import { mkdir, rm, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { MappingGenerator } from './mapping-generator.js';
+import { mappingSourceFingerprint } from './mapping-generator.js';
 import type { SemanticSearchFn } from './mapping-generator.js';
 import type { SearchResult } from '../analyzer/vector-index.js';
 import type { PipelineResult } from './spec-pipeline.js';
@@ -134,6 +135,7 @@ describe('MappingGenerator — similarity matching', () => {
     expect(mapping.functions).toHaveLength(1);
     expect(mapping.functions[0].name).toBe('getUserById');
     expect(mapping.functions[0].confidence).toBe('heuristic'); // heuristic path (no functionName on op)
+    expect(artifact).toMatchObject({ version: 2, sourceAnalysisFingerprint: mappingSourceFingerprint(graph) });
   });
 
   it('matches via containment (score 0.8) — operation name contained in function name', async () => {

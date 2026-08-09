@@ -1370,6 +1370,66 @@ export default function openlore(pi: ExtensionAPI): void {
     });
   }
 
+  // Pi-native task entry points compose existing daemon primitives.  They do
+  // not add MCP operations or invoke a generator LLM: OpenLore makes no internal
+  // LLM call here. Pi's host agent receives
+  // deterministic evidence and remains responsible for authoring/reconciling
+  // the OpenSpec text.
+  pi.registerTool({
+    name: 'openlore_prepare_spec_generation',
+    label: 'openlore prepare spec generation',
+    description: 'Prepare deterministic, domain-scoped code evidence for writing a new OpenSpec specification.',
+    promptSnippet: 'Get deterministic evidence before writing a new specification.',
+    promptGuidelines: ['When asked to create specs from existing code, call openlore_prepare_spec_generation first; write the specification yourself from its evidence.'],
+    parameters: Type.Object({ domain: Type.Optional(Type.String({ description: 'Optional domain name to select from the architecture evidence.' })) }),
+    async execute(_id, params, signal, _onUpdate, ctx) {
+      const daemon = await getDaemon(ctx.cwd);
+      if (!daemon) return toolResult('openlore daemon unavailable — run `openlore analyze` then retry.');
+      try {
+        const overview = await callTool(daemon, 'get_architecture_overview', {}, ctx.cwd, signal ?? undefined) as { domainEvidence?: unknown[] };
+        const domain = (params as { domain?: string }).domain;
+        const evidence = domain
+          ? (overview.domainEvidence ?? []).filter((item) => (item as { name?: string }).name === domain)
+          : overview.domainEvidence ?? [];
+        if (domain && evidence.length === 0) return toolResult(`No analyzed domain named "${domain}". Use openlore_get_architecture_overview to list domains.`);
+        return toolResult(JSON.stringify({ domainEvidence: evidence, source: 'get_architecture_overview' }, null, 2), { domainEvidence: evidence });
+      } catch (err) {
+        daemons.delete(ctx.cwd);
+        return toolResult(`openlore daemon connection changed — ${err instanceof Error ? err.message : String(err)}. Retry the tool.`);
+      }
+    },
+  });
+
+  pi.registerTool({
+    name: 'openlore_prepare_spec_repair',
+    label: 'openlore prepare spec repair',
+    description: 'Prepare evidence for repairing one existing OpenSpec domain: code coverage observations, its spec, mapping provenance, and drift.',
+    promptSnippet: 'Get deterministic repair evidence before editing an existing specification.',
+    promptGuidelines: ['When asked to repair an existing spec, call openlore_prepare_spec_repair first; interpret observations and edit the specification yourself.'],
+    parameters: Type.Object({ domain: Type.String({ description: 'REQUIRED. Existing OpenSpec domain to repair.' }) }),
+    async execute(_id, params, signal, _onUpdate, ctx) {
+      const daemon = await getDaemon(ctx.cwd);
+      if (!daemon) return toolResult('openlore daemon unavailable — run `openlore analyze` then retry.');
+      const domain = (params as { domain: string }).domain;
+      try {
+        const [overview, audit, spec, mapping, drift] = await Promise.all([
+          callTool(daemon, 'get_architecture_overview', {}, ctx.cwd, signal ?? undefined),
+          callTool(daemon, 'audit_spec_coverage', {}, ctx.cwd, signal ?? undefined),
+          callTool(daemon, 'get_spec', { domain }, ctx.cwd, signal ?? undefined),
+          callTool(daemon, 'get_mapping', { domain }, ctx.cwd, signal ?? undefined),
+          callTool(daemon, 'check_spec_drift', { domains: [domain] }, ctx.cwd, signal ?? undefined),
+        ]);
+        const domainEvidence = ((overview as { domainEvidence?: unknown[] }).domainEvidence ?? [])
+          .filter((item) => (item as { name?: string }).name === domain);
+        const result = { domainEvidence, audit, spec, mapping, drift };
+        return toolResult(truncate(JSON.stringify(result, null, 2), RESULT_MAX), result);
+      } catch (err) {
+        daemons.delete(ctx.cwd);
+        return toolResult(`openlore daemon connection changed — ${err instanceof Error ? err.message : String(err)}. Retry the tool.`);
+      }
+    },
+  });
+
   // ── Config tool ──
   pi.registerTool({
     name: 'openlore_configure',

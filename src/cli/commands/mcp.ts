@@ -242,7 +242,7 @@ export const TOOL_DEFINITIONS = [
     name: 'get_architecture_overview',
     description:
       'USE THIS WHEN: onboarding to an unknown codebase, or before planning a large feature. ' +
-      'Returns domain clusters, cross-cluster dependencies, global entry points, and critical hubs. ' +
+      'Returns domain clusters, cross-cluster dependencies, global entry points, critical hubs, and deterministic per-domain evidence. ' +
       'Run analyze_codebase first.',
     inputSchema: {
       type: 'object',

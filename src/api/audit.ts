@@ -14,6 +14,7 @@ import {
   OPENLORE_ANALYSIS_SUBDIR,
   ARTIFACT_LLM_CONTEXT,
   ARTIFACT_MAPPING,
+  ARTIFACT_DEPENDENCY_GRAPH,
   ARTIFACT_AUDIT_REPORT,
   OPENSPEC_DIR,
 } from '../constants.js';
@@ -25,7 +26,8 @@ import type {
 } from '../types/index.js';
 import type { AuditApiOptions } from './types.js';
 import type { LLMContext } from '../core/analyzer/artifact-generator.js';
-import type { MappingArtifact } from '../core/generator/mapping-generator.js';
+import { mappingSourceFingerprint, type MappingArtifact } from '../core/generator/mapping-generator.js';
+import type { DependencyGraphResult } from '../core/analyzer/dependency-graph.js';
 import type { SerializedCallGraph, FunctionNode } from '../core/analyzer/call-graph.js';
 
 const DEFAULT_MAX_UNCOVERED = 50;
@@ -81,13 +83,37 @@ export async function openloreAudit(options: AuditApiOptions = {}): Promise<Audi
   const snapshot = await snapshotGen.generate().catch(() => null);
 
   // Load raw artifacts for deep analysis
-  const [llmContextRaw, mappingRaw] = await Promise.all([
+  const [llmContextRaw, mappingRaw, depGraphRaw] = await Promise.all([
     readFile(join(analysisDir, ARTIFACT_LLM_CONTEXT), 'utf-8').catch(() => null),
     readFile(join(analysisDir, ARTIFACT_MAPPING), 'utf-8').catch(() => null),
+    readFile(join(analysisDir, ARTIFACT_DEPENDENCY_GRAPH), 'utf-8').catch(() => null),
   ]);
 
   const llmContext = llmContextRaw ? JSON.parse(llmContextRaw) as LLMContext : null;
-  const mapping = mappingRaw ? JSON.parse(mappingRaw) as MappingArtifact : null;
+  const mappingPath = join(analysisDir, ARTIFACT_MAPPING);
+  let mapping: MappingArtifact | null = null;
+  let mappingCoverage: AuditReport['mappingCoverage'] = {
+    state: 'missing', reason: 'mapping.json has not been generated', artifactPath: mappingPath,
+  };
+  if (!mappingRaw) {
+    mappingCoverage = { state: 'missing', reason: 'mapping.json has not been generated', artifactPath: mappingPath };
+  } else {
+    try {
+      mapping = JSON.parse(mappingRaw) as MappingArtifact;
+      const depGraph = depGraphRaw ? JSON.parse(depGraphRaw) as DependencyGraphResult : null;
+      if (!mapping.version || !mapping.sourceAnalysisFingerprint || !depGraph) {
+        mappingCoverage = { state: 'stale', reason: 'mapping.json has no compatible source-analysis provenance', artifactPath: mappingPath };
+        mapping = null;
+      } else if (mapping.sourceAnalysisFingerprint !== mappingSourceFingerprint(depGraph)) {
+        mappingCoverage = { state: 'stale', reason: 'mapping.json does not match the current dependency graph', artifactPath: mappingPath };
+        mapping = null;
+      } else {
+        mappingCoverage = { state: 'available', artifactPath: mappingPath };
+      }
+    } catch {
+      mappingCoverage = { state: 'invalid', reason: 'mapping.json is not valid JSON', artifactPath: mappingPath };
+    }
+  }
 
   const callGraph = llmContext?.callGraph as SerializedCallGraph | undefined;
   const allNodes = callGraph?.nodes ?? [];
@@ -97,15 +123,18 @@ export async function openloreAudit(options: AuditApiOptions = {}): Promise<Audi
   const covered = mapping ? buildCoveredSet(mapping) : new Set<string>();
 
   // 1. Uncovered functions
-  const uncoveredNodes = allNodes.filter(n => !isNodeCovered(n, covered));
+  // A missing or stale mapping cannot establish either coverage or a gap.  Do
+  // not turn absence of this optional provenance artifact into a fabricated
+  // list of uncovered functions.
+  const uncoveredNodes = mapping ? allNodes.filter(n => !isNodeCovered(n, covered)) : [];
   const uncoveredFunctions: AuditUncoveredFunction[] = uncoveredNodes
     .slice(0, maxUncovered)
     .map(n => toAuditFunction(n, hubNodes.has(n.id) || n.fanIn >= hubThreshold));
 
   // 2. Hub gaps (hubs with no spec coverage)
-  const hubGaps: AuditUncoveredFunction[] = allNodes
+  const hubGaps: AuditUncoveredFunction[] = mapping ? allNodes
     .filter(n => (hubNodes.has(n.id) || n.fanIn >= hubThreshold) && !isNodeCovered(n, covered))
-    .map(n => toAuditFunction(n, true));
+    .map(n => toAuditFunction(n, true)) : [];
 
   // 3. Orphan requirements (requirements in mapping with no matched function)
   const orphanRequirements: AuditOrphanRequirement[] = mapping
@@ -127,9 +156,10 @@ export async function openloreAudit(options: AuditApiOptions = {}): Promise<Audi
         }))
     : [];
 
-  const coveredCount = allNodes.length - uncoveredNodes.length;
+  const coveredCount = mapping ? allNodes.length - uncoveredNodes.length : 0;
   const report: AuditReport = {
     generatedAt: new Date().toISOString(),
+    mappingCoverage,
     summary: {
       totalFunctions: allNodes.length,
       coveredFunctions: coveredCount,

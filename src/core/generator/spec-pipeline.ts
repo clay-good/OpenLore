@@ -25,6 +25,7 @@ import { runStage3 } from './stages/stage3-services.js';
 import { runStage4 } from './stages/stage4-api.js';
 import { runStage5 } from './stages/stage5-architecture.js';
 import { runStage6 } from './stages/stage6-adr.js';
+import { buildDomainEvidence } from './domain-evidence.js';
 import { PROMPTS } from './prompts.js';
 import { SUBSPEC_SCHEMA } from './schemas.js';
 import type {
@@ -110,6 +111,8 @@ export class SpecGenerationPipeline implements PipelineContext {
   ): Promise<PipelineResult> {
     this.currentLLMContext = llmContext;
     this.currentRepoStructure = repoStructure;
+    const domainEvidence = buildDomainEvidence(repoStructure, llmContext);
+    const domainForFile = (path: string): string => domainEvidence.find(bundle => bundle.files.includes(path))?.name ?? 'undomained';
     const startTime = Date.now();
     let totalTokens = 0;
     const completedStages: string[] = [];
@@ -206,14 +209,14 @@ export class SpecGenerationPipeline implements PipelineContext {
 
       // Stage 2: Entity Extraction
       let entities: ExtractedEntity[] = [];
-      const schemaFiles = await this.resolveFiles(llmContext, survey.schemaFiles ?? [], await this.getSchemaFiles(llmContext));
+      const schemaFiles = await this.resolveFiles(llmContext, domainEvidence.flatMap(bundle => bundle.schemaFiles), await this.getSchemaFiles(llmContext));
       if (schemaFiles.length > 0) {
         entities = await executeStage(
           'entities',
           'Entity Extraction',
           async () => runStage2(this, survey, schemaFiles, (i, total, file) => {
             this.progress?.updateGeneration({ stage: stageNum, totalStages, stageName: `Entity Extraction ${i}/${total}: ${file}` });
-          }),
+          }, domainForFile),
           () => []
         );
       } else {
@@ -223,14 +226,14 @@ export class SpecGenerationPipeline implements PipelineContext {
 
       // Stage 3: Service Analysis
       let services: ExtractedService[] = [];
-      const serviceFiles = await this.resolveFiles(llmContext, survey.serviceFiles ?? [], await this.getServiceFiles(llmContext));
+      const serviceFiles = await this.resolveFiles(llmContext, domainEvidence.flatMap(bundle => bundle.serviceFiles), await this.getServiceFiles(llmContext));
       if (serviceFiles.length > 0) {
         services = await executeStage(
           'services',
           'Service Analysis',
           async () => runStage3(this, survey, entities, serviceFiles, (i, total, file) => {
             this.progress?.updateGeneration({ stage: stageNum, totalStages, stageName: `Service Analysis ${i}/${total}: ${file}` });
-          }),
+          }, domainForFile),
           () => []
         );
       } else {
@@ -240,14 +243,14 @@ export class SpecGenerationPipeline implements PipelineContext {
 
        // Stage 4: API Extraction
        let endpoints: ExtractedEndpoint[] = [];
-       const apiFiles = await this.resolveFiles(llmContext, survey.apiFiles ?? [], await this.getApiFiles(llmContext));
+       const apiFiles = await this.resolveFiles(llmContext, domainEvidence.flatMap(bundle => bundle.apiFiles), await this.getApiFiles(llmContext));
        if (apiFiles.length > 0) {
          endpoints = await executeStage(
            'api',
            'API Extraction',
-           async () => runStage4(this, apiFiles, (i, total, file) => {
-             this.progress?.updateGeneration({ stage: stageNum, totalStages, stageName: `API Extraction ${i}/${total}: ${file}` });
-           }),
+          async () => runStage4(this, apiFiles, (i, total, file) => {
+            this.progress?.updateGeneration({ stage: stageNum, totalStages, stageName: `API Extraction ${i}/${total}: ${file}` });
+          }, domainForFile),
            () => []
          );
        } else {

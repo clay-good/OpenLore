@@ -654,6 +654,9 @@ curl -XPOST 127.0.0.1:$PORT/tool/orient -d '{"args":{"task":"add rate limiting"}
 serve daemon, injecting structural context and exposing Pi's curated tool surface.
 Pi starts a full-preset backing daemon and curates the model-visible tools itself;
 if an existing narrow daemon owns the repository, stop it before starting Pi.
+Its `openlore_prepare_spec_generation` and `openlore_prepare_spec_repair` tools
+compose the same deterministic daemon evidence used by MCP hosts; Pi writes or
+reconciles the specification itself and OpenLore makes no internal LLM call.
 See `examples/pi/README.md`.
 
 ---
