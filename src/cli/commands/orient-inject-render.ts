@@ -129,6 +129,11 @@ export interface RelevanceGateEvaluation {
   failedCriteria: string[];
 }
 
+function containsExactIdentifier(prompt: string, name: string): boolean {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(^|[^A-Za-z0-9_$])${escaped}($|[^A-Za-z0-9_$])`, 'i').test(prompt);
+}
+
 /**
  * Deterministic orientation-relevance gate. Returns true when the task has a
  * substantial, structurally-connected match in the graph — the case where a
@@ -136,10 +141,10 @@ export interface RelevanceGateEvaluation {
  * keeping injection out of the small/familiar/shallow arena the scorecard shows
  * OpenLore should not tax.
  *
- * Signals are read off the lean orient result itself (no new analysis pass):
- *   1. matched-function count >= relevanceMinMatches, AND
- *   2. an exact identifier mention; structural centrality; a bounded hybrid
- *      score; or scale-free keyword rank evidence.
+ * Signals are read off the lean orient result itself (no new analysis pass).
+ * An exact identifier mention passes directly. Otherwise the matched-function
+ * count must reach relevanceMinMatches and one of structural centrality, a
+ * bounded hybrid score, or scale-free keyword rank evidence must pass.
  *
  * BM25-fallback scores live on an unbounded, corpus-relative scale, so the score
  * path is disabled there. Exact identifier and rank evidence make keyword mode
@@ -152,13 +157,16 @@ export function evaluateRelevanceGate(
   if (result.error) {
     return { passes: false, passedCriteria: [], failedCriteria: ['orient-error'] };
   }
-  const fns = result.relevantFunctions ?? [];
+  const fns = Array.isArray(result.relevantFunctions)
+    ? result.relevantFunctions.filter((f): f is OrientFn => !!f && typeof f === 'object')
+    : [];
   const enoughMatches = fns.length >= cfg.relevanceMinMatches;
 
-  const promptTokens = new Set(tokenize(result.task ?? ''));
+  const task = typeof result.task === 'string' ? result.task : '';
+  const promptTokens = new Set(tokenize(task));
   const exactIdentifierMention = fns.some(f => {
-    const fullIdentifier = f.name?.trim().match(/[A-Za-z0-9]+$/)?.[0]?.toLowerCase();
-    return !!fullIdentifier && promptTokens.has(fullIdentifier);
+    const name = typeof f.name === 'string' ? f.name.trim() : '';
+    return !!name && containsExactIdentifier(task, name);
   });
 
   const maxFanIn = fns.reduce((m, f) => Math.max(m, f.fanIn ?? 0), 0);
@@ -171,7 +179,7 @@ export function evaluateRelevanceGate(
 
   // Raw BM25 scores are unbounded and corpus-relative, so keyword mode uses
   // scale-free rank evidence: an identifier token from the top-ranked match.
-  const topIdentifierTokens = tokenize(fns[0]?.name ?? '');
+  const topIdentifierTokens = tokenize(typeof fns[0]?.name === 'string' ? fns[0].name : '');
   const keywordMode = result.searchMode === 'bm25_fallback' || result.searchMode === 'keyword';
   const keywordRankEvidence = keywordMode
     && topIdentifierTokens.some(token => promptTokens.has(token));
@@ -186,7 +194,7 @@ export function evaluateRelevanceGate(
   const passedCriteria = Object.entries(criteria).filter(([, passed]) => passed).map(([name]) => name);
   const failedCriteria = Object.entries(criteria).filter(([, passed]) => !passed).map(([name]) => name);
   return {
-    passes: enoughMatches && (exactIdentifierMention || structuralCentrality || hybridScore || keywordRankEvidence),
+    passes: exactIdentifierMention || (enoughMatches && (structuralCentrality || hybridScore || keywordRankEvidence)),
     passedCriteria,
     failedCriteria,
   };
@@ -215,7 +223,7 @@ function take<T>(arr: T[] | undefined, n: number): T[] {
  * leading comma into the agent's context.
  */
 export function renderInjectionBlock(result: LeanOrientResult, cfg: ResolvedInjectionConfig): string {
-  const task = (result.task ?? '').replace(/\s+/g, ' ').trim().slice(0, 200);
+  const task = (typeof result.task === 'string' ? result.task : '').replace(/\s+/g, ' ').trim().slice(0, 200);
   const sourceProvenance = result.servedContentProvenance?.relevantFunctions
     ?? result.relevantFunctions?.find(f => f.provenance)?.provenance
     ?? 'source-derived';
@@ -229,7 +237,8 @@ export function renderInjectionBlock(result: LeanOrientResult, cfg: ResolvedInje
   const clean = (xs: Array<string | undefined> | undefined, n: number): string[] =>
     (xs ?? []).filter((x): x is string => typeof x === 'string' && x.length > 0).slice(0, n);
 
-  const fns = take(result.relevantFunctions, 8).filter(f => f.name && f.filePath);
+  const fns = take(result.relevantFunctions, 8)
+    .filter(f => typeof f?.name === 'string' && typeof f.filePath === 'string');
   if (fns.length > 0) {
     optional.push(`Relevant functions [${sourceProvenance}]:`);
     for (const f of fns) optional.push(`  • ${f.name} — ${f.filePath}`);

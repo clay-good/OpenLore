@@ -104,14 +104,13 @@ The injected block:
   never dominate the context it economizes;
 - is **clearly attributed to OpenLore** and opens with a one-line "informational; act on it or
   ignore it" framing — facts, not instructions;
-- is **gated**: a deterministic graph-relevance signal (matched-function count, fan-in / hub
-  centrality, and — only with embeddings — match score) decides whether the task warrants a full
-  block; below the threshold it degrades to a single pointer line, so injection stays out of the
-  small/familiar arena it would otherwise tax. (Without embeddings — the default keyword/BM25 index —
-  the gate is *structural only*: it can occasionally emit a block for an off-topic prompt that
-  spuriously matches a central function. Run `openlore embed --local` — a one-command, on-device,
-  no-API-key upgrade — or set `EMBED_*` for a remote endpoint to add the semantic-score path, which
-  discriminates relevance far better.)
+- is **gated**: exact identifier mentions, matched-function count, fan-in / hub centrality, and
+  retrieval-mode evidence decide whether the task warrants a full block; below the threshold it
+  degrades to a single pointer line, so injection stays out of the small/familiar arena it would
+  otherwise tax. Without embeddings, the default keyword/BM25 path uses scale-free top-match
+  identifier overlap and never compares the corpus-relative BM25 score to a fixed threshold. Run
+  `openlore embed --local` — a one-command, on-device, no-API-key upgrade — or set `EMBED_*` for a
+  remote endpoint to add the bounded semantic-score path.
 - **never breaks your turn**: any failure (no graph, parse error, empty/weak match) degrades to the
   pointer line and exits 0.
 
@@ -132,7 +131,7 @@ Task-scoped injection is on by default. To disable it (while leaving the MCP ser
   "contextInjection": {
     "mode": "off",            // "task-scoped" (default) | "off"
     "tokenBudget": 600,        // hard cap on the injected block, in estimated tokens
-    "relevanceMinMatches": 2,  // gate: minimum matched-function count
+    "relevanceMinMatches": 2,  // gate: minimum match count unless an identifier is exact
     "relevanceMinFanIn": 2,    // gate: centrality; exact/ranked identifier evidence also clears it
     "relevanceMinScore": 0.3   // gate: minimum top score (semantic/hybrid scale only)
   }

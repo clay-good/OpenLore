@@ -1462,7 +1462,11 @@ export default function openlore(pi: ExtensionAPI): void {
       // error / no graph) pushes nothing, so the no-analysis baseline nudge in
       // the `suffix` fallback below can still surface.
       if (result) {
-        blocks.push(passesRelevanceGate(result, cfg) ? renderInjectionBlock(result, cfg) : POINTER_LINE);
+        try {
+          blocks.push(passesRelevanceGate(result, cfg) ? renderInjectionBlock(result, cfg) : POINTER_LINE);
+        } catch {
+          blocks.push(POINTER_LINE);
+        }
       }
     }
 
