@@ -759,24 +759,27 @@ function extractBicepSignatures(content: string): ExtractedSignature[] {
 interface SigPattern { re: RegExp; kind: ExtractedSignature['kind']; }
 
 const EXTRA_LANG_PATTERNS: Record<string, SigPattern[]> = {
+  // Each modifier carries its own trailing `\s+` — a bare `\s` alternative inside the
+  // modifier group would overlap the leading `^\s*`, letting a whitespace-only line be
+  // partitioned O(n²) ways (ReDoS). See extractor-redos.test.ts.
   'C#': [
-    { re: /^\s*(?:public|private|protected|internal|static|sealed|abstract|partial|\s)*\b(?:class|interface|struct|record|enum)\s+(\w+)/gm, kind: 'class' },
-    { re: /^\s*(?:public|private|protected|internal|static|async|virtual|override|\s)+[\w<>[\],?]+\s+(\w+)\s*\(/gm, kind: 'method' },
+    { re: /^\s*(?:(?:public|private|protected|internal|static|sealed|abstract|partial)\s+)*\b(?:class|interface|struct|record|enum)\s+(\w+)/gm, kind: 'class' },
+    { re: /^\s*(?:(?:public|private|protected|internal|static|async|virtual|override)\s+)*[\w<>[\],?]+\s+(\w+)\s*\(/gm, kind: 'method' },
   ],
   Kotlin: [
-    { re: /^\s*(?:public|private|internal|open|abstract|sealed|data|\s)*\b(?:class|object|interface)\s+(\w+)/gm, kind: 'class' },
-    { re: /^\s*(?:public|private|internal|open|override|suspend|\s)*\bfun\s+(?:[\w.<>]+\.)?(\w+)\s*\(/gm, kind: 'function' },
+    { re: /^\s*(?:(?:public|private|internal|open|abstract|sealed|data)\s+)*\b(?:class|object|interface)\s+(\w+)/gm, kind: 'class' },
+    { re: /^\s*(?:(?:public|private|internal|open|override|suspend)\s+)*\bfun\s+(?:[\w.<>]+\.)?(\w+)\s*\(/gm, kind: 'function' },
   ],
   PHP: [
-    { re: /^\s*(?:abstract|final|\s)*\b(?:class|trait|interface|enum)\s+(\w+)/gm, kind: 'class' },
-    { re: /^\s*(?:public|private|protected|static|abstract|final|\s)*\bfunction\s+(\w+)\s*\(/gm, kind: 'function' },
+    { re: /^\s*(?:(?:abstract|final)\s+)*\b(?:class|trait|interface|enum)\s+(\w+)/gm, kind: 'class' },
+    { re: /^\s*(?:(?:public|private|protected|static|abstract|final)\s+)*\bfunction\s+(\w+)\s*\(/gm, kind: 'function' },
   ],
   C: [
     { re: /^[A-Za-z_][\w\s*]*\b(\w+)\s*\([^;{]*\)\s*\{/gm, kind: 'function' },
   ],
   Scala: [
     { re: /^\s*(?:case\s+)?\b(?:object|class|trait)\s+(\w+)/gm, kind: 'class' },
-    { re: /^\s*(?:override|implicit|private|protected|\s)*\bdef\s+(\w+)/gm, kind: 'function' },
+    { re: /^\s*(?:(?:override|implicit|private|protected)\s+)*\bdef\s+(\w+)/gm, kind: 'function' },
   ],
   Dart: [
     { re: /^\s*(?:abstract\s+)?\b(?:class|mixin|extension|enum)\s+(\w+)/gm, kind: 'class' },

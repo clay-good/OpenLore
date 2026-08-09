@@ -544,8 +544,11 @@ function extractNextJavaMethodName(lines: string[], annotationLine: number): str
     // so allow and skip them — otherwise the handler name resolves to "unknown".
     const match = l.match(
       // Type capture excludes SPACE — see JPA_FIELD_RE in schema-extractor.ts for why
-      // the ' ' inside the class overlapping the following `\s+` is quadratic.
-      /\b(?:public|private|protected)\s+(?:static\s+|final\s+|abstract\s+|synchronized\s+|default\s+|native\s+)*(?:@[\w.]+(?:\([^)]{0,400}\))?\s+)*(?:<[^>]+>\s+)?[\w<>[\],?.]+(?:\s+[\w<>[\],?.]+)*?\s+(\w+)\s*\(/
+      // the ' ' inside the class overlapping the following `\s+` is quadratic. The inner
+      // token repetition (space-separated fragments of a generic return type) is bounded
+      // to a small constant so a `public a public a …(` line with no closing `(` cannot
+      // rescan to end-of-line from each of O(n) starts (ReDoS). See extractor-redos.test.ts.
+      /\b(?:public|private|protected)\s+(?:static\s+|final\s+|abstract\s+|synchronized\s+|default\s+|native\s+)*(?:@[\w.]+(?:\([^)]{0,400}\))?\s+)*(?:<[^>]+>\s+)?[\w<>[\],?.]+(?:\s+[\w<>[\],?.]+){0,12}?\s+(\w+)\s*\(/
     );
     if (match && !skipNames.has(match[1])) return match[1];
   }

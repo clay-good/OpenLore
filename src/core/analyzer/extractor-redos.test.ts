@@ -20,10 +20,12 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parseJSImports, parseJSExports } from './import-parser.js';
+import { parseJSImports, parseJSExports, parseJavaExports } from './import-parser.js';
 import { extractMiddleware } from './middleware-extractor.js';
 import { extractHtmlScripts } from './html-script-extractor.js';
 import { extractUIComponents } from './ui-component-extractor.js';
+import { extractSignatures } from './signature-extractor.js';
+import { extractJavaRouteDefinitions } from './http-route-parser.js';
 
 /** An opening token repeated with no closer — the whole attack. */
 function payload(token: string, bytes: number): string {
@@ -211,5 +213,89 @@ describe('extractors are not quadratic on an unterminated-opener file', () => {
     expect(imports).toHaveLength(1);
     expect(imports[0].importedNames).toEqual(['readFile', 'writeFile']);
     expect(imports[0].source).toBe('node:fs/promises');
+  });
+});
+
+/**
+ * Language-signature and Java-route extractors on a whitespace / unterminated-token
+ * flood.
+ *
+ * Two distinct quadratic shapes, both firing on attacker-controlled repo source that
+ * `openlore analyze` (and the live watcher) parse:
+ *  - EXTRA_LANG_PATTERNS (C#/Kotlin/PHP/Scala) placed a bare `\s` alternative inside a
+ *    modifier group adjacent to the leading `^\s*`, so a whitespace-only line could be
+ *    partitioned O(n²) ways before the declaration keyword failed to arrive.
+ *  - The Java method/handler regexes rescanned to end-of-input from each of O(n)
+ *    `public` starts via an UNBOUNDED lazy token repetition when the closing `(` never
+ *    came. The per-file 4 MB cap does not neutralize a quadratic (a 4 MB file costs
+ *    hours), so a single planted file was a permanent-hang DoS.
+ *
+ * Same PROPERTY assertion as above: linear growth where measurable, and an absolute
+ * ceiling that catches both an unbounded quantifier and an over-generous bound.
+ */
+describe('language extractors are not quadratic on a whitespace/token flood', () => {
+  // One long run of spaces, no declaration keyword — the EXTRA_LANG_PATTERNS trigger.
+  const wsFlood = (bytes: number): string => ' '.repeat(bytes);
+  // `public a public a …` with no closing `(` — the Java lazy-repetition trigger.
+  const publicFlood = (bytes: number): string => 'public a '.repeat(Math.floor(bytes / 9));
+
+  for (const [lang, ext] of [['C#', 'cs'], ['Kotlin', 'kt'], ['PHP', 'php'], ['Scala', 'scala']] as const) {
+    it(`extractSignatures(${lang}) survives a whitespace flood`, async () => {
+      expectLinearAndFast(
+        await measure(b => { extractSignatures(`hostile.${ext}`, wsFlood(b)); }),
+        `${lang} signatures`,
+      );
+    }, TIMEOUT_MS);
+  }
+
+  it('parseJavaExports survives repeated `public a ` with no `(`', async () => {
+    expectLinearAndFast(await measure(b => { parseJavaExports(publicFlood(b)); }), 'parseJavaExports');
+  }, TIMEOUT_MS);
+
+  it('extractJavaRouteDefinitions survives a giant handler-signature line', async () => {
+    // The route regex runs per-line only in a Spring file after a mapping annotation,
+    // so the hostile line must sit right after one.
+    expectLinearAndFast(
+      await measure(async b => {
+        await extractJavaRouteDefinitions('Hostile.java', `@GetMapping("/x")\n${publicFlood(b)}`);
+      }),
+      'extractJavaRouteDefinitions',
+    );
+  }, TIMEOUT_MS);
+
+  // ── Controls: the fixes must still extract real declarations (a regex that matched
+  //    nothing at all would pass every timing assertion above). ──
+
+  it('still extracts real C#/Kotlin/PHP/Scala declarations', () => {
+    const names = (path: string, src: string): string[] =>
+      extractSignatures(path, src).entries.map(e => e.name);
+    // Includes an indented, modifier-less member and a fully-qualified modifier chain.
+    expect(names('a.cs', 'public static class Widget {\n    public async Task<int> Load() {\n')).toEqual(
+      expect.arrayContaining(['Widget', 'Load']),
+    );
+    expect(names('a.kt', 'internal open class Repo {\n    suspend fun fetch() {\n')).toEqual(
+      expect.arrayContaining(['Repo', 'fetch']),
+    );
+    expect(names('a.php', 'abstract class Base {\n    public function handle() {\n')).toEqual(
+      expect.arrayContaining(['Base', 'handle']),
+    );
+    expect(names('a.scala', 'class Svc {\n    private def run() = {\n')).toEqual(
+      expect.arrayContaining(['Svc', 'run']),
+    );
+  });
+
+  it('still extracts a real Java public method (generic return type with a space)', () => {
+    // `Map<String, Object>` — the space inside the generic is exactly the case the
+    // bounded token repetition must still span.
+    const names = parseJavaExports('public Map<String, Object> config(int n) { return null; }\n').map(e => e.name);
+    expect(names).toContain('config');
+  });
+
+  it('still resolves a Spring handler name', async () => {
+    const routes = await extractJavaRouteDefinitions(
+      'Ctrl.java',
+      '@RestController\nclass C {\n  @GetMapping("/x")\n  public String hello() { return "hi"; }\n}\n',
+    );
+    expect(routes.map(r => r.handlerName)).toContain('hello');
   });
 });

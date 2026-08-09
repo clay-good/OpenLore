@@ -836,7 +836,7 @@ function parseJavaImports(content: string): ImportInfo[] {
  * and public fields on those types since downstream mapping uses
  * function-level exports to connect requirements to code.
  */
-function parseJavaExports(content: string): ExportInfo[] {
+export function parseJavaExports(content: string): ExportInfo[] {
   const exports: ExportInfo[] = [];
 
   // Blank comments with same-length whitespace (newlines kept) so recorded
@@ -873,8 +873,12 @@ function parseJavaExports(content: string): ExportInfo[] {
   // type declarations (class/interface/enum/record) to avoid false matches.
   const methodRegex =
     // Type capture excludes SPACE — a ' ' inside the class overlapping the following
-    // `\s+` made `public final final …` quadratic to scan.
-    /\bpublic\s+(?:static\s+|final\s+|abstract\s+|synchronized\s+|default\s+|native\s+)*(?!class\b|interface\b|enum\b|record\b|@interface\b)(?:<[^>]+>\s+)?[\w<>[\],?.]+(?:\s+[\w<>[\],?.]+)*?\s+(\w+)\s*\(/g;
+    // `\s+` made `public final final …` quadratic to scan. The inner token repetition
+    // (space-separated fragments of a generic return type, e.g. `Map<String, Object>`)
+    // is bounded to a small constant so a `public a public a …(` flood with no closing
+    // `(` cannot rescan to EOF from each of O(n) `public` starts (ReDoS). No real Java
+    // return type has >12 whitespace-separated fragments. See extractor-redos.test.ts.
+    /\bpublic\s+(?:static\s+|final\s+|abstract\s+|synchronized\s+|default\s+|native\s+)*(?!class\b|interface\b|enum\b|record\b|@interface\b)(?:<[^>]+>\s+)?[\w<>[\],?.]+(?:\s+[\w<>[\],?.]+){0,12}?\s+(\w+)\s*\(/g;
   while ((match = methodRegex.exec(clean)) !== null) {
     const name = match[1];
     // Filter obvious non-methods (the regex can match some constructors or
