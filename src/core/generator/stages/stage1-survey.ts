@@ -11,6 +11,7 @@ import type { LLMService } from '../../services/llm-service.js';
 import type { PipelineOptions, ProjectSurveyResult, StageResult } from '../../../types/pipeline.js';
 import type { LLMContext, RepoStructure } from '../../analyzer/artifact-generator.js';
 import { PROMPTS } from '../prompts.js';
+import { protectPrompt } from '../../../utils/prompt-boundary.js';
 
 /**
  * Build a concise structured hints section from pre-extracted analysis data.
@@ -145,8 +146,7 @@ ${fileListingSection}`;
 
   try {
     const result = await llm.completeJSON<ProjectSurveyResult>({
-      systemPrompt: PROMPTS.stage1_survey,
-      userPrompt,
+      ...protectPrompt(PROMPTS.stage1_survey, userPrompt),
       temperature: 0.3,
       maxTokens: STAGE1_MAX_TOKENS,
     });

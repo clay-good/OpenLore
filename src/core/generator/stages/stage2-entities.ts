@@ -10,6 +10,7 @@ import { PROMPTS } from '../prompts.js';
 import type { ExtractedEntity, StageResult, PipelineContext, ProjectSurveyResult } from '../../../types/pipeline.js';
 import { astChunkContent } from '../../analyzer/ast-chunker.js';
 import { STAGE2_ENTITY_SCHEMA } from '../schemas.js';
+import { protectPrompt } from '../../../utils/prompt-boundary.js';
 
 export async function runStage2(
   pipeline: PipelineContext,
@@ -18,7 +19,7 @@ export async function runStage2(
   onFile?: (i: number, total: number, file: string) => void
 ): Promise<StageResult<ExtractedEntity[]>> {
   const startTime = Date.now();
-  const systemPrompt = PROMPTS.stage2_entities(survey.projectCategory, survey.frameworks);
+  const systemPrompt = PROMPTS.stage2_entities;
   const allEntities: ExtractedEntity[] = [];
   const seenNames = new Set<string>();
 
@@ -42,11 +43,10 @@ export async function runStage2(
       const schemaNote = schemaHint
         ? `\n\nKnown schema tables detected in this file (use these field names and types directly):\n${schemaHint}`
         : '';
-      const userPrompt = `Analyze this schema/model file and extract entities:\n\n=== ${file.path}${chunkNote} ===\n${fileChunks[i]}${schemaNote}`;
+      const userPrompt = `Project category: ${survey.projectCategory}\nFrameworks: ${survey.frameworks.join(', ')}\n\nFile: ${file.path}${chunkNote}\n${fileChunks[i]}${schemaNote}`;
       try {
         const result = await pipeline.llm.completeJSON<ExtractedEntity[]>({
-          systemPrompt,
-          userPrompt,
+          ...protectPrompt(systemPrompt, userPrompt),
           temperature: 0.3,
           maxTokens: STAGE2_MAX_TOKENS,
         }, STAGE2_ENTITY_SCHEMA);

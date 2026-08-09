@@ -249,9 +249,9 @@ describe('SpecGenerationPipeline', () => {
 
       // Set up mock responses
       provider.setResponse('categorize', MOCK_RESPONSES.survey);
-      provider.setResponse('schema/model', MOCK_RESPONSES.entities);
-      provider.setResponse('services/modules', MOCK_RESPONSES.services);
-      provider.setResponse('API/route', MOCK_RESPONSES.api);
+      provider.setResponse('core data models', MOCK_RESPONSES.entities);
+      provider.setResponse('logic and processing layer', MOCK_RESPONSES.services);
+      provider.setResponse('public API surface', MOCK_RESPONSES.api);
       provider.setResponse('Synthesize', MOCK_RESPONSES.architecture);
       provider.setDefaultResponse(MOCK_RESPONSES.survey);
 
@@ -351,7 +351,7 @@ describe('SpecGenerationPipeline', () => {
     it('should extract entities from schema files', async () => {
       const { service, provider } = createMockLLMService();
       provider.setResponse('categorize', MOCK_RESPONSES.survey);
-      provider.setResponse('schema/model', MOCK_RESPONSES.entities);
+      provider.setResponse('core data models', MOCK_RESPONSES.entities);
       provider.setDefaultResponse(MOCK_RESPONSES.architecture);
 
       const pipeline = new SpecGenerationPipeline(service, {
@@ -372,7 +372,7 @@ describe('SpecGenerationPipeline', () => {
     it('should include entity scenarios', async () => {
       const { service, provider } = createMockLLMService();
       provider.setResponse('categorize', MOCK_RESPONSES.survey);
-      provider.setResponse('schema/model', MOCK_RESPONSES.entities);
+      provider.setResponse('core data models', MOCK_RESPONSES.entities);
       provider.setDefaultResponse(MOCK_RESPONSES.architecture);
 
       const pipeline = new SpecGenerationPipeline(service, {
@@ -396,8 +396,8 @@ describe('SpecGenerationPipeline', () => {
     it('should extract services', async () => {
       const { service, provider } = createMockLLMService();
       provider.setResponse('categorize', MOCK_RESPONSES.survey);
-      provider.setResponse('schema/model', MOCK_RESPONSES.entities);
-      provider.setResponse('services/modules', MOCK_RESPONSES.services);
+      provider.setResponse('core data models', MOCK_RESPONSES.entities);
+      provider.setResponse('logic and processing layer', MOCK_RESPONSES.services);
       provider.setDefaultResponse(MOCK_RESPONSES.architecture);
 
       const pipeline = new SpecGenerationPipeline(service, {
@@ -418,8 +418,8 @@ describe('SpecGenerationPipeline', () => {
     it('should include service dependencies', async () => {
       const { service, provider } = createMockLLMService();
       provider.setResponse('categorize', MOCK_RESPONSES.survey);
-      provider.setResponse('schema/model', MOCK_RESPONSES.entities);
-      provider.setResponse('services/modules', MOCK_RESPONSES.services);
+      provider.setResponse('core data models', MOCK_RESPONSES.entities);
+      provider.setResponse('logic and processing layer', MOCK_RESPONSES.services);
       provider.setDefaultResponse(MOCK_RESPONSES.architecture);
 
       const pipeline = new SpecGenerationPipeline(service, {
@@ -440,9 +440,9 @@ describe('SpecGenerationPipeline', () => {
     it('should extract API endpoints', async () => {
       const { service, provider } = createMockLLMService();
       provider.setResponse('categorize', MOCK_RESPONSES.survey);
-      provider.setResponse('schema/model', MOCK_RESPONSES.entities);
-      provider.setResponse('service/business', MOCK_RESPONSES.services);
-      provider.setResponse('API/route', MOCK_RESPONSES.api);
+      provider.setResponse('core data models', MOCK_RESPONSES.entities);
+      provider.setResponse('logic and processing layer', MOCK_RESPONSES.services);
+      provider.setResponse('public API surface', MOCK_RESPONSES.api);
       provider.setDefaultResponse(MOCK_RESPONSES.architecture);
 
       const pipeline = new SpecGenerationPipeline(service, {
@@ -463,7 +463,7 @@ describe('SpecGenerationPipeline', () => {
     it('should include endpoint scenarios', async () => {
       const { service, provider } = createMockLLMService();
       provider.setResponse('categorize', MOCK_RESPONSES.survey);
-      provider.setResponse('API/route', MOCK_RESPONSES.api);
+      provider.setResponse('public API surface', MOCK_RESPONSES.api);
       provider.setDefaultResponse(MOCK_RESPONSES.survey);
 
       const pipeline = new SpecGenerationPipeline(service, {

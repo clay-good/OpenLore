@@ -57,6 +57,9 @@ function renderDecision(d: PendingDecision, idx: number, total: number): string 
     `  ${C.dim}Domains   :${C.reset} ${d.affectedDomains.join(', ') || C.dim + 'unknown' + C.reset}`,
     `  ${C.dim}Confidence:${C.reset} ${conf}`,
     `  ${C.dim}Evidence  :${C.reset} ${d.verificationEvidence ?? 'legacy/unknown'}`,
+    ...(d.contentOrigin === 'llm-extracted'
+      ? [`  ${C.yellow}⚠ LLM-extracted from repository content; review every field before approval.${C.reset}`]
+      : []),
     '',
     `  ${C.dim}Rationale :${C.reset} ${wrap(d.rationale, width - 14, indent)}`,
   ];

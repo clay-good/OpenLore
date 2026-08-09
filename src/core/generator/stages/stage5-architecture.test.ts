@@ -477,9 +477,10 @@ describe('Stage 5: Architecture Synthesis', () => {
     await runStage5(pipeline, MOCK_SURVEY, MOCK_ENTITIES, MOCK_SERVICES, MOCK_ENDPOINTS);
 
     const request = mockProvider.callHistory[0];
-    const systemPrompt = request.systemPrompt;
-    expect(systemPrompt).toContain(MOCK_SURVEY.domainSummary);
-    expect(systemPrompt).toContain(MOCK_SURVEY.architecturePattern);
-    expect(systemPrompt).toContain(MOCK_SURVEY.suggestedDomains.join(', '));
+    const userPrompt = request.userPrompt;
+    expect(userPrompt).toContain(MOCK_SURVEY.domainSummary);
+    expect(userPrompt).toContain(MOCK_SURVEY.architecturePattern);
+    expect(userPrompt).toContain(MOCK_SURVEY.suggestedDomains.join(', '));
+    expect(request.systemPrompt).not.toContain(MOCK_SURVEY.domainSummary);
   });
 });

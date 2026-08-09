@@ -71,12 +71,17 @@ export class ClaudeCodeProvider implements LLMProvider {
   async generateCompletion(request: CompletionRequest): Promise<CompletionResponse> {
     const { execFileSync } = await import('child_process');
 
-    // Claude Code CLI takes a single prompt; combine system + user prompts
-    const fullPrompt = request.systemPrompt
-      ? `${request.systemPrompt}\n\n---\n\n${request.userPrompt}`
-      : request.userPrompt;
-
-    const args = ['-p', sanitizeCliPrompt(fullPrompt), '--output-format', 'json'];
+    const fullPrompt = request.systemPrompt + request.userPrompt;
+    const args = [
+      '-p', sanitizeCliPrompt(request.userPrompt),
+      '--system-prompt', sanitizeCliPrompt(request.systemPrompt),
+      '--output-format', 'json',
+      '--tools', '',
+      '--strict-mcp-config',
+      '--mcp-config', '{"mcpServers":{}}',
+      '--disable-slash-commands',
+      '--no-chrome',
+    ];
     if (this.model) args.push('--model', this.model);
 
     // Remove Claude Code session env vars so the CLI can run inside an existing session
@@ -1203,8 +1208,16 @@ export class GeminiCLIProvider implements LLMProvider {
       ? `${request.systemPrompt}\n\n---\n\n${request.userPrompt}`
       : request.userPrompt;
 
-    // gemini CLI: -p for prompt, --output-format json, -m for model
-    const args = ['-p', sanitizeCliPrompt(fullPrompt), '--output-format', 'json'];
+    // Gemini has no tool-disable flag. Its default approval mode is the
+    // restricted fail-closed mode for headless calls; no tool is pre-approved,
+    // and extensions are disabled so project configuration cannot add tools.
+    const args = [
+      '-p', sanitizeCliPrompt(fullPrompt),
+      '--output-format', 'json',
+      '--approval-mode', 'default',
+      '--allowed-tools', '',
+      '--extensions', 'none',
+    ];
     if (this.model) args.push('-m', this.model);
 
     const geminiCLIBin = process.env.GEMINI_CLI ?? 'gemini';
@@ -1295,7 +1308,9 @@ export class CursorAgentProvider implements LLMProvider {
       ? `${request.systemPrompt}\n\n---\n\n${request.userPrompt}`
       : request.userPrompt;
 
-    const args = ['-p', sanitizeCliPrompt(fullPrompt), '--output-format', 'json'];
+    // Ask mode is Cursor's read-only restricted-permission mode. Print mode
+    // otherwise has full write and shell access.
+    const args = ['-p', sanitizeCliPrompt(fullPrompt), '--output-format', 'json', '--mode=ask'];
     if (this.model) args.push('--model', this.model);
 
     const bin = process.env.CURSOR_AGENT_CLI ?? 'cursor-agent';

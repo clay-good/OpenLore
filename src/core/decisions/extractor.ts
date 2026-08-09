@@ -22,6 +22,7 @@ import type { LLMService } from '../services/llm-service.js';
 import type { PendingDecision, SpecMap, DecisionScope } from '../../types/index.js';
 import { makeDecisionId } from './store.js';
 import { parseJSON } from '../../utils/misc.js';
+import { createPromptBoundary } from '../../utils/prompt-boundary.js';
 
 const SYSTEM_PROMPT = `You are an architectural decision extractor for a software project.
 
@@ -154,10 +155,11 @@ export async function extractFromDiff(options: ExtractFromDiffOptions): Promise<
       '',
       ...domainFiles.map((f, i) => `=== ${f.path} ===\n${diffs[i]}`),
     ].filter(Boolean).join('\n\n');
+    const boundary = createPromptBoundary();
 
     const response = await llm.complete({
-      systemPrompt: SYSTEM_PROMPT,
-      userPrompt: userContent,
+      systemPrompt: `${SYSTEM_PROMPT}\n\n${boundary.instruction}`,
+      userPrompt: boundary.wrap(userContent),
       maxTokens: DECISIONS_CONSOLIDATION_MAX_TOKENS,
       temperature: 0.1,
     });
@@ -180,6 +182,7 @@ export async function extractFromDiff(options: ExtractFromDiffOptions): Promise<
         recordedAt: now,
         consolidatedAt: now,
         confidence: 'medium',
+        contentOrigin: 'llm-extracted',
         syncedToSpecs: [],
       });
     }

@@ -1345,6 +1345,11 @@ describe('ClaudeCodeProvider', () => {
     expect(result.usage.inputTokens).toBe(20);
     expect(result.finishReason).toBe('stop');
     expect(result.model).toBe('claude-code');
+    const args = vi.mocked(execFileSync).mock.calls.at(-1)![1] as string[];
+    expect(args).toEqual(expect.arrayContaining([
+      '--system-prompt', 'sys', '--tools', '', '--strict-mcp-config', '--disable-slash-commands', '--no-chrome',
+    ]));
+    expect(args.join(' ')).not.toContain('sys\n\n---');
   });
 
   it('throws when is_error=true', async () => {
@@ -1405,6 +1410,10 @@ describe('GeminiCLIProvider', () => {
     expect(result.usage.inputTokens).toBe(12);
     expect(result.usage.outputTokens).toBe(6);
     expect(result.model).toBe('gemini-2.0-flash');
+    const args = vi.mocked(execFileSync).mock.calls.at(-1)![1] as string[];
+    expect(args).toEqual(expect.arrayContaining([
+      '--approval-mode', 'default', '--allowed-tools', '', '--extensions', 'none',
+    ]));
   });
 
   it('aggregates tokens across multiple models', async () => {
@@ -1453,6 +1462,8 @@ describe('CursorAgentProvider', () => {
     expect(result.usage.inputTokens).toBe(3);
     expect(result.usage.outputTokens).toBe(2);
     expect(result.model).toBe('cursor-agent');
+    const args = vi.mocked(execFileSync).mock.calls.at(-1)![1] as string[];
+    expect(args).toContain('--mode=ask');
   });
 
   it('returns content from { response } JSON output', async () => {

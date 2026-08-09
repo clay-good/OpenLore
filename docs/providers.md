@@ -148,6 +148,12 @@ Four providers route LLM calls through local CLI tools instead of HTTP APIs. No 
 }
 ```
 
+OpenLore treats these as analysis-only subprocesses. It invokes Claude Code with an empty
+tool set and no MCP servers, Gemini CLI with default approval, no pre-approved tools, and no
+extensions, and Cursor Agent in read-only Ask mode. A provider invocation fails instead of
+falling back to unrestricted tool access. Repository content is passed inside a randomized
+data boundary and is never trusted as an instruction.
+
 ### Custom base URL for Anthropic or OpenAI
 
 To redirect the built-in Anthropic or OpenAI provider to a proxy or self-hosted endpoint:
@@ -186,4 +192,3 @@ The providers above are for **LLM** spec generation. Semantic search uses a sepa
 | Remote (OpenAI-compatible) | `EMBED_BASE_URL`/`EMBED_MODEL` or an `embedding` block, then `openlore analyze` | optional (`EMBED_API_KEY`) | Any `/embeddings` endpoint: Ollama, OpenAI, Mistral, vLLM, LM Studio… |
 
 Revert to keyword with `openlore embed --off`. See [docs/semantic-search.md](semantic-search.md#retrieval-modes) for the full reference.
-

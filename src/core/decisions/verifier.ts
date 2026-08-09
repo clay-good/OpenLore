@@ -11,6 +11,7 @@ import { DECISIONS_VERIFICATION_MAX_TOKENS } from '../../constants.js';
 import type { LLMService } from '../services/llm-service.js';
 import type { PendingDecision } from '../../types/index.js';
 import { parseJSON } from '../../utils/misc.js';
+import { createPromptBoundary } from '../../utils/prompt-boundary.js';
 
 const SYSTEM_PROMPT = `You are an architectural decision verifier for a software project.
 
@@ -152,10 +153,11 @@ export async function verifyDecisions(
 
   const commitSection = commitMessages ? `\nCommit messages:\n${commitMessages}\n` : '';
   const userContent = `Decisions:\n${JSON.stringify(decisionSummary, null, 2)}${commitSection}`;
+  const boundary = createPromptBoundary();
 
   const response = await llm.complete({
-    systemPrompt: SYSTEM_PROMPT,
-    userPrompt: userContent,
+    systemPrompt: `${SYSTEM_PROMPT}\n\n${boundary.instruction}`,
+    userPrompt: boundary.wrap(userContent),
     maxTokens: DECISIONS_VERIFICATION_MAX_TOKENS,
     temperature: 0.1,
   });

@@ -655,6 +655,8 @@ export interface PendingDecision {
   recordedAt: string;
   consolidatedAt?: string;
   verifiedAt?: string;
+  /** Origin of free text that a reviewer must treat as untrusted until approval. */
+  contentOrigin?: 'agent-recorded' | 'llm-extracted';
 
   // Scope — gates ADR creation: only cross-domain and system produce ADRs
   scope?: DecisionScope;

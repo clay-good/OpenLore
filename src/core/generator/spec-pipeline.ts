@@ -13,6 +13,7 @@ import type { ProgressIndicator } from '../../utils/progress.js';
 import type { LLMService } from '../services/llm-service.js';
 import type { RepoStructure, LLMContext } from '../analyzer/artifact-generator.js';
 import { buildGraphPromptSection, getFileGodFunctions, extractSubgraph } from '../analyzer/subgraph-extractor.js';
+import { protectPrompt } from '../../utils/prompt-boundary.js';
 import { getSkeletonContent, isSkeletonWorthIncluding } from '../analyzer/code-shaper.js';
 import { detectLanguage } from '../analyzer/language-detection.js';
 import type { DependencyGraphResult } from '../analyzer/dependency-graph.js';
@@ -505,8 +506,10 @@ export class SpecGenerationPipeline implements PipelineContext {
 
     try {
       const result = await this.llm.completeJSON<ServiceSubSpec[]>({
-        systemPrompt: PROMPTS.stage3_subspec_system,
-        userPrompt: PROMPTS.stage3_subspec(parentName, parentPurpose, calleeInfos),
+        ...protectPrompt(
+          PROMPTS.stage3_subspec_system,
+          PROMPTS.stage3_subspec(parentName, parentPurpose, calleeInfos),
+        ),
         temperature: 0.3,
         maxTokens: 4000,
       }, SUBSPEC_SCHEMA);

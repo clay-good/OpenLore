@@ -8,6 +8,7 @@ import { STAGE6_MAX_TOKENS } from '../../../constants.js';
 import { PROMPTS } from '../prompts.js';
 import type { ArchitectureSynthesis, EnrichedADR, PipelineContext, StageResult } from '../../../types/pipeline.js';
 import { STAGE6_ADR_SCHEMA } from '../schemas.js';
+import { protectPrompt } from '../../../utils/prompt-boundary.js';
 
 export async function runStage6(
   pipeline: PipelineContext,
@@ -15,14 +16,21 @@ export async function runStage6(
 ): Promise<StageResult<EnrichedADR[]>> {
   const startTime = Date.now();
 
-  const userPrompt = `Expand these ${architecture.keyDecisions.length} architectural decisions into full ADRs:
+  const userPrompt = `Architecture context:
+- System purpose: ${architecture.systemPurpose}
+- Architecture style: ${architecture.architectureStyle}
+- Layers: ${architecture.layerMap.map(l => `${l.name} (${l.purpose})`).join(', ')}
+- Data flow: ${architecture.dataFlow}
+- Security model: ${architecture.securityModel}
+- External integrations: ${architecture.integrations.join(', ') || 'None'}
+
+Expand these ${architecture.keyDecisions.length} architectural decisions into full ADRs:
 
 ${architecture.keyDecisions.map((d, i) => `${i + 1}. ${d}`).join('\n')}`;
 
   try {
     const result = await pipeline.llm.completeJSON<EnrichedADR[]>({
-      systemPrompt: PROMPTS.stage6_adr(architecture),
-      userPrompt,
+      ...protectPrompt(PROMPTS.stage6_adr, userPrompt),
       temperature: 0.3,
       maxTokens: STAGE6_MAX_TOKENS,
     }, STAGE6_ADR_SCHEMA);

@@ -10,6 +10,7 @@ import { PROMPTS } from '../prompts.js';
 import type { ExtractedEndpoint, StageResult, PipelineContext } from '../../../types/pipeline.js';
 import { astChunkContent } from '../../analyzer/ast-chunker.js';
 import { STAGE4_ENDPOINT_SCHEMA } from '../schemas.js';
+import { protectPrompt } from '../../../utils/prompt-boundary.js';
 
 export async function runStage4(
   pipeline: PipelineContext,
@@ -38,11 +39,10 @@ export async function runStage4(
       const routeNote = routeHint
         ? `\n\nKnown routes detected in this file (use these method/path values directly):\n${routeHint}`
         : '';
-      const userPrompt = `Analyze this API/route file and extract endpoints:\n\n=== ${file.path}${chunkNote} ===\n${fileChunks[i]}${routeNote}`;
+      const userPrompt = `File: ${file.path}${chunkNote}\n${fileChunks[i]}${routeNote}`;
       try {
         const result = await pipeline.llm.completeJSON<ExtractedEndpoint[]>({
-          systemPrompt: PROMPTS.stage4_api,
-          userPrompt,
+          ...protectPrompt(PROMPTS.stage4_api, userPrompt),
           temperature: 0.3,
           maxTokens: STAGE4_MAX_TOKENS,
         }, STAGE4_ENDPOINT_SCHEMA);

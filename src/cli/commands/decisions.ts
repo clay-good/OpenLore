@@ -508,6 +508,9 @@ export function displayDecision(d: PendingDecision, verbose = false): void {
                                     c.gray(`[${scopeLabel}]`);
 
   console.log(`${icon} [${safe(d.id)}] ${scopeBadge} ${safe(d.title)}`);
+  if (d.contentOrigin === 'llm-extracted') {
+    console.log(c.yellow('   ⚠ LLM-extracted from repository content; review all text before approval.'));
+  }
   if (verbose) {
     console.log(`   Status     : ${d.status}  Confidence: ${confidence}  Scope: ${scopeLabel}`);
     console.log(`   Verification evidence: ${d.verificationEvidence ?? 'legacy/unknown'}`);
@@ -889,6 +892,7 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
             affectedFiles: d.affectedFiles,
             confidence: d.confidence,
             verificationEvidence: d.verificationEvidence,
+            contentOrigin: d.contentOrigin,
           })),
           phantom: phantom.map((d) => ({ id: d.id, title: d.title })),
           missing: missing.map((m) => ({ file: m.file, description: m.description })),
@@ -1079,6 +1083,7 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
           affectedFiles: d.affectedFiles,
           confidence: d.confidence,
           verificationEvidence: d.verificationEvidence,
+          contentOrigin: d.contentOrigin,
         })),
         phantom: [],
         missing,
@@ -1332,6 +1337,7 @@ decisionsCommand
             id: d.id, title: d.title, rationale: d.rationale,
             reviewedAt: d.reviewedAt, syncedToSpecs: d.syncedToSpecs,
             verificationEvidence: d.verificationEvidence,
+            contentOrigin: d.contentOrigin,
           })),
         }, null, 2) + '\n');
         return;

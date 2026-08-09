@@ -18,6 +18,7 @@ import type {
 import type { DependencyGraphResult } from '../../analyzer/dependency-graph.js';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
 import type { RefactorReport } from '../../analyzer/refactor-analyzer.js';
+import { protectPrompt } from '../../../utils/prompt-boundary.js';
 
 export async function runStage5(
   pipeline: PipelineContext,
@@ -32,6 +33,10 @@ export async function runStage5(
   const startTime = Date.now();
 
   const userPrompt = `Synthesize the architecture from this analysis:
+
+Project context: ${survey.domainSummary}
+Architecture pattern: ${survey.architecturePattern}
+Domains: ${survey.suggestedDomains.join(', ')}
 
 Entities (${entities.length}):
 ${entities.map(e => `- ${e.name}: ${e.description}`).join('\n')}
@@ -70,8 +75,7 @@ ${refactorReport.cycles.slice(0, STAGE5_CYCLES_LIMIT).map(c => `- [${c.size} fun
 
   try {
     const result = await pipeline.llm.completeJSON<ArchitectureSynthesis>({
-      systemPrompt: PROMPTS.stage5_architecture(survey),
-      userPrompt,
+      ...protectPrompt(PROMPTS.stage5_architecture, userPrompt),
       temperature: 0.3,
       maxTokens: STAGE5_MAX_TOKENS,
     });

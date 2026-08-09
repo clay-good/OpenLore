@@ -14,6 +14,7 @@ import type { PendingDecision, DecisionStore, SpecMap, DecisionScope } from '../
 import { makeDecisionId } from './store.js';
 import { parseJSON } from '../../utils/misc.js';
 import { matchFileToDomains } from '../drift/spec-mapper.js';
+import { createPromptBoundary } from '../../utils/prompt-boundary.js';
 
 const SYSTEM_PROMPT = `You are an architectural decision consolidator for a software project.
 
@@ -117,6 +118,11 @@ export async function consolidateDrafts(
   // (LLM-reworded) title, so the gate advertises an id that no longer maps to the
   // recorded draft, and approve/sync operate on a different logical record.
   const reusableIds = new Set([...existingIds, ...drafts.map((d) => d.id)]);
+  const declaredSupersessionIds = new Set(
+    drafts
+      .map((d) => d.supersedes)
+      .filter((id): id is string => typeof id === 'string' && reusableIds.has(id)),
+  );
 
   const userContent = JSON.stringify(
     {
@@ -141,9 +147,10 @@ export async function consolidateDrafts(
     2,
   );
 
+  const boundary = createPromptBoundary();
   const response = await llm.complete({
-    systemPrompt: SYSTEM_PROMPT,
-    userPrompt: userContent,
+    systemPrompt: `${SYSTEM_PROMPT}\n\n${boundary.instruction}`,
+    userPrompt: boundary.wrap(userContent),
     maxTokens: DECISIONS_CONSOLIDATION_MAX_TOKENS,
     temperature: 0.1,
   });
@@ -156,7 +163,12 @@ export async function consolidateDrafts(
   }
 
   const now = new Date().toISOString();
-  const allSupersededIds = consolidated.flatMap((c) => c.supersededIds ?? []);
+  // Supersession is a durable state transition. The LLM may preserve a target
+  // explicitly declared by a recorded draft, but may never invent one merely
+  // because it knows a real decision id.
+  const allSupersededIds = consolidated
+    .flatMap((c) => c.supersededIds ?? [])
+    .filter((id) => declaredSupersessionIds.has(id));
 
   const decisions = consolidated.map((c): PendingDecision => {
     // Remap LLM-produced domain names to spec-map ground truth using affectedFiles.
@@ -180,6 +192,7 @@ export async function consolidateDrafts(
       affectedFiles: c.affectedFiles,
       scope: (c.scope as DecisionScope) ?? 'component',
       confidence: 'medium',
+      contentOrigin: 'llm-extracted',
       sessionId: store.sessionId,
       recordedAt: now,
       consolidatedAt: now,

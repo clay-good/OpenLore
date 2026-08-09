@@ -54,6 +54,15 @@ describe('decisions rendering', () => {
     expect(out).toContain('Verification evidence: none');
   });
 
+  it('warns when approval text was extracted by an LLM from repository content', () => {
+    const out = capture(() => displayDecision({
+      ...decision('verified'),
+      contentOrigin: 'llm-extracted',
+    }));
+    expect(out).toContain('LLM-extracted from repository content');
+    expect(out).toContain('review all text before approval');
+  });
+
   it('legend explains that verified means awaiting review', () => {
     const legend = capture(() => printDecisionLegend());
     expect(legend.toLowerCase()).toContain('awaiting review');

@@ -25,6 +25,7 @@ import { loadMemoryStore } from '../decisions/memory-store.js';
 import { AnchorContext } from '../decisions/anchor-adapter.js';
 import { memoryFreshness, decisionAnchors, isStaleRegionOnly } from '../decisions/anchor.js';
 import type { StructuralAnchor, AnchorVerdict } from '../../types/index.js';
+import { createPromptBoundary } from '../../utils/prompt-boundary.js';
 
 // ============================================================================
 // TYPES
@@ -544,10 +545,13 @@ export async function enhanceGapsWithLLM(
       }
 
       // Ask the LLM
-      const userPrompt = `## Code Diff\n\`\`\`diff\n${diff}\n\`\`\`\n\n## Specification (${issue.domain})\n${specContent}`;
+      const boundary = createPromptBoundary();
+      const userPrompt = boundary.wrap(
+        `## Code Diff\n${diff}\n\n## Specification (${issue.domain})\n${specContent}`,
+      );
 
       const response = await llm.complete({
-        systemPrompt: LLM_SYSTEM_PROMPT,
+        systemPrompt: `${LLM_SYSTEM_PROMPT}\n\n${boundary.instruction}`,
         userPrompt,
         temperature: 0.1,
         maxTokens: DRIFT_CLASSIFICATION_MAX_TOKENS,
@@ -563,19 +567,19 @@ export async function enhanceGapsWithLLM(
           enhancedGaps.push({
             ...issue,
             severity: 'info',
-            suggestion: `[LLM] Not spec-relevant: ${classification.reason}`,
+            suggestion: `[LLM-extracted] Not spec-relevant: ${classification.reason}`,
           });
         } else if (classification.relevant) {
           // Keep severity, enrich suggestion with LLM reasoning
           enhancedGaps.push({
             ...issue,
-            suggestion: `${issue.suggestion} [LLM: ${classification.reason}]`,
+            suggestion: `${issue.suggestion} [LLM-extracted: ${classification.reason}]`,
           });
         } else {
           // Low/medium confidence non-relevant — keep as-is but annotate
           enhancedGaps.push({
             ...issue,
-            suggestion: `${issue.suggestion} [LLM (${classification.confidence} confidence): possibly not spec-relevant — ${classification.reason}]`,
+            suggestion: `${issue.suggestion} [LLM-extracted (${classification.confidence} confidence): possibly not spec-relevant — ${classification.reason}]`,
           });
         }
       } else {
