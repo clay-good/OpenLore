@@ -11,7 +11,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { formatDuration, formatAge, parseList } from './command-helpers.js';
+import { formatDuration, formatAge, parseList, resolveLLMProvider } from './command-helpers.js';
 
 // ============================================================================
 // formatDuration
@@ -94,6 +94,12 @@ describe('parseList', () => {
 
   it('trims leading/trailing whitespace from each item', () => {
     expect(parseList('  foo  ,  bar  ')).toEqual(['foo', 'bar']);
+  });
+});
+
+describe('resolveLLMProvider', () => {
+  it.each(['codex-cli', 'antigravity-cli'] as const)('accepts no-key provider %s', (provider) => {
+    expect(resolveLLMProvider({ generation: { provider } })).toEqual({ provider });
   });
 });
 

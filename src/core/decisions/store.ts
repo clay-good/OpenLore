@@ -56,6 +56,10 @@ export async function loadDecisionStore(rootPath: string): Promise<DecisionStore
   }
   const store = parsed as DecisionStore;
   if (typeof store.sequence !== 'number') store.sequence = 0; // legacy default
+  store.decisions = store.decisions.map((decision) => ({
+    ...decision,
+    contentOrigin: decision.contentOrigin ?? 'legacy-unknown',
+  }));
   return store;
 }
 

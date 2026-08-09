@@ -89,8 +89,26 @@ interface ConsolidatedRaw {
   affectedDomains: string[];
   affectedFiles: string[];
   proposedRequirement: string | null;
-  supersededIds: string[];
-  scope?: string;
+  supersededIds?: string[];
+  scope?: DecisionScope;
+}
+
+const DECISION_SCOPES = new Set<DecisionScope>(['local', 'component', 'cross-domain', 'system']);
+
+function isConsolidatedRaw(value: unknown): value is ConsolidatedRaw {
+  if (!value || typeof value !== 'object') return false;
+  const item = value as Record<string, unknown>;
+  const strings = (candidate: unknown): candidate is string[] =>
+    Array.isArray(candidate) && candidate.every((entry) => typeof entry === 'string');
+  return (item.id === undefined || typeof item.id === 'string')
+    && typeof item.title === 'string'
+    && typeof item.rationale === 'string'
+    && typeof item.consequences === 'string'
+    && strings(item.affectedDomains)
+    && strings(item.affectedFiles)
+    && (item.proposedRequirement === null || typeof item.proposedRequirement === 'string')
+    && (item.supersededIds === undefined || strings(item.supersededIds))
+    && (item.scope === undefined || DECISION_SCOPES.has(item.scope as DecisionScope));
 }
 
 export interface ConsolidateResult {
@@ -106,10 +124,8 @@ export async function consolidateDrafts(
   const drafts = store.decisions.filter((d) => d.status === 'draft');
   if (drafts.length === 0) return { decisions: [], supersededIds: [] };
 
-  // Non-draft decisions passed to LLM so it can reuse their IDs when the same concept recurs.
-  // Includes 'synced' intentionally — if a synced concept resurfaces in a new session, the LLM
-  // should reuse the stable ID for traceability rather than minting a duplicate. Synced decisions
-  // are purged from the store after sync, so this set is empty in the common case.
+  // Non-draft decisions are context only. Their durable IDs may not be reused by
+  // LLM output because replaceDecisions() overwrites matching records.
   const existing = store.decisions.filter((d) => d.status !== 'draft' && d.status !== 'rejected' && d.status !== 'phantom');
   const existingIds = new Set(existing.map((d) => d.id));
   // A consolidated decision that echoes back its source DRAFT's id should keep that
@@ -117,11 +133,12 @@ export async function consolidateDrafts(
   // drafts. Without this, a single-draft consolidation re-mints a fresh id from the
   // (LLM-reworded) title, so the gate advertises an id that no longer maps to the
   // recorded draft, and approve/sync operate on a different logical record.
-  const reusableIds = new Set([...existingIds, ...drafts.map((d) => d.id)]);
+  const draftIds = new Set(drafts.map((d) => d.id));
+  const knownIds = new Set([...existingIds, ...draftIds]);
   const declaredSupersessionIds = new Set(
     drafts
       .map((d) => d.supersedes)
-      .filter((id): id is string => typeof id === 'string' && reusableIds.has(id)),
+      .filter((id): id is string => typeof id === 'string' && knownIds.has(id)),
   );
 
   const userContent = JSON.stringify(
@@ -156,7 +173,11 @@ export async function consolidateDrafts(
   });
   const raw = response.content;
 
-  const consolidated = parseJSON<ConsolidatedRaw[]>(raw, []);
+  const parsed = parseJSON<unknown>(raw, null);
+  if (!Array.isArray(parsed) || !parsed.every(isConsolidatedRaw)) {
+    throw new Error('decision consolidation returned invalid structured output');
+  }
+  const consolidated = parsed;
 
   if (consolidated.length === 0 && drafts.length > 0) {
     logger.warning(`consolidation returned 0 decisions from ${drafts.length} drafts — LLM response: ${raw.slice(0, 300)}`);
@@ -175,10 +196,10 @@ export async function consolidateDrafts(
     // Falls back to LLM names if specMap is absent or files yield no match.
     const resolvedDomains = resolveDomainsFromFiles(c.affectedFiles, c.affectedDomains, specMap);
     const domain = resolvedDomains[0] ?? 'unknown';
-    // Prefer LLM-supplied ID when it matches a known existing decision — this is the
-    // traceability anchor that prevents duplicate IDs across consolidation runs.
+    // Reuse only the source draft's ID. A known durable ID from the context is
+    // never a replacement target unless an explicit draft supersession retires it.
     const id =
-      c.id && reusableIds.has(c.id)
+      c.id && draftIds.has(c.id)
         ? c.id
         : makeDecisionId(store.sessionId, domain, c.title);
     return {
@@ -190,7 +211,7 @@ export async function consolidateDrafts(
       proposedRequirement: c.proposedRequirement,
       affectedDomains: resolvedDomains,
       affectedFiles: c.affectedFiles,
-      scope: (c.scope as DecisionScope) ?? 'component',
+      scope: c.scope ?? 'component',
       confidence: 'medium',
       contentOrigin: 'llm-extracted',
       sessionId: store.sessionId,

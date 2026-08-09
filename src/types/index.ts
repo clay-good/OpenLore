@@ -232,7 +232,7 @@ export interface AnalysisConfig {
 }
 
 export interface GenerationConfig {
-  provider?: 'anthropic' | 'openai' | 'openai-compat' | 'copilot' | 'gemini' | 'claude-code' | 'mistral-vibe' | 'gemini-cli' | 'cursor-agent';
+  provider?: 'anthropic' | 'openai' | 'openai-compat' | 'copilot' | 'gemini' | 'claude-code' | 'codex-cli' | 'mistral-vibe' | 'gemini-cli' | 'antigravity-cli' | 'cursor-agent';
   model?: string;
   openaiCompatBaseUrl?: string;
   skipSslVerify?: boolean;
@@ -656,7 +656,7 @@ export interface PendingDecision {
   consolidatedAt?: string;
   verifiedAt?: string;
   /** Origin of free text that a reviewer must treat as untrusted until approval. */
-  contentOrigin?: 'agent-recorded' | 'llm-extracted';
+  contentOrigin: 'agent-recorded' | 'llm-extracted' | 'legacy-unknown';
 
   // Scope — gates ADR creation: only cross-domain and system produce ADRs
   scope?: DecisionScope;

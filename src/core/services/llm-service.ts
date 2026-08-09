@@ -6,9 +6,12 @@
  */
 
 import { writeFile, mkdir } from 'node:fs/promises';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import logger from '../../utils/logger.js';
 import { redactSecrets } from './secret-redaction.js';
+import { protectPrompt } from '../../utils/prompt-boundary.js';
 import { announceInsecureTls, withRelaxedTls } from './tls-scope.js';
 import {
   CLAUDE_MAX_CONTEXT_TOKENS,
@@ -42,6 +45,15 @@ import {
  */
 export function sanitizeCliPrompt(prompt: string): string {
   return prompt.includes('\0') ? prompt.replace(/\0/g, '') : prompt;
+}
+
+function withIsolatedCliCwd<T>(run: (cwd: string) => T): T {
+  const cwd = mkdtempSync(join(tmpdir(), 'openlore-llm-'));
+  try {
+    return run(cwd);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
 }
 
 // ============================================================================
@@ -81,6 +93,8 @@ export class ClaudeCodeProvider implements LLMProvider {
       '--mcp-config', '{"mcpServers":{}}',
       '--disable-slash-commands',
       '--no-chrome',
+      '--setting-sources', '',
+      '--no-session-persistence',
     ];
     if (this.model) args.push('--model', this.model);
 
@@ -93,12 +107,13 @@ export class ClaudeCodeProvider implements LLMProvider {
 
     let raw: string;
     try {
-      raw = execFileSync('claude', args, {
+      raw = withIsolatedCliCwd((cwd) => execFileSync('claude', args, {
         encoding: 'utf8',
         maxBuffer: LLM_CLI_MAX_BUFFER_BYTES,
         timeout: LLM_CLI_TIMEOUT_MS,
         env,
-      });
+        cwd,
+      }));
     } catch (err: unknown) {
       const e = err as NodeJS.ErrnoException & { stderr?: string; stdout?: string; status?: number };
       const detail = e.stderr || e.stdout || e.message || String(err);
@@ -123,6 +138,73 @@ export class ClaudeCodeProvider implements LLMProvider {
       content: parsed.result ?? '',
       usage: { inputTokens, outputTokens, totalTokens: inputTokens + outputTokens },
       model: this.model ?? 'claude-code',
+      finishReason: 'stop',
+    };
+  }
+
+  countTokens(text: string): number {
+    return estimateTokens(text);
+  }
+}
+
+// ============================================================================
+// CODEX CLI PROVIDER (uses local `codex` CLI, no cloud API key)
+// ============================================================================
+
+export class CodexCLIProvider implements LLMProvider {
+  name = 'codex-cli';
+  maxContextTokens = 1_000_000;
+  maxOutputTokens = 8_192;
+  private model: string | undefined;
+
+  constructor(model?: string) {
+    this.model = model && model !== 'codex-cli' ? model : undefined;
+  }
+
+  async generateCompletion(request: CompletionRequest): Promise<CompletionResponse> {
+    const { execFileSync } = await import('child_process');
+    const fullPrompt = request.systemPrompt
+      ? `${request.systemPrompt}\n\n---\n\n${request.userPrompt}`
+      : request.userPrompt;
+    const bin = process.env.CODEX_CLI ?? 'codex';
+
+    let content: string;
+    try {
+      content = withIsolatedCliCwd((cwd) => {
+        const outputPath = join(cwd, 'response.txt');
+        const args = [
+          'exec',
+          '--sandbox', 'read-only',
+          '--ignore-user-config',
+          '--ignore-rules',
+          '--ephemeral',
+          '--skip-git-repo-check',
+          '--color', 'never',
+          '--output-last-message', outputPath,
+          '--cd', cwd,
+        ];
+        if (this.model) args.push('--model', this.model);
+        args.push(sanitizeCliPrompt(fullPrompt));
+        execFileSync(bin, args, {
+          encoding: 'utf8',
+          maxBuffer: LLM_CLI_MAX_BUFFER_BYTES,
+          timeout: LLM_CLI_TIMEOUT_MS,
+          cwd,
+        });
+        return readFileSync(outputPath, 'utf8').trim();
+      });
+    } catch (err: unknown) {
+      const e = err as NodeJS.ErrnoException & { stderr?: string; stdout?: string };
+      const detail = e.stderr ?? e.stdout ?? e.message ?? String(err);
+      throw Object.assign(new Error(`codex CLI failed: ${detail}`), { retryable: false });
+    }
+
+    const inputTokens = estimateTokens(fullPrompt);
+    const outputTokens = estimateTokens(content);
+    return {
+      content,
+      usage: { inputTokens, outputTokens, totalTokens: inputTokens + outputTokens },
+      model: this.model ?? 'codex-cli',
       finishReason: 'stop',
     };
   }
@@ -164,7 +246,7 @@ export class MistralVibeProvider implements LLMProvider {
       : request.userPrompt;
 
     // vibe CLI: -p for prompt, --output json for JSON, --agent for model/agent name
-    const args = ['-p', sanitizeCliPrompt(fullPrompt), '--output', 'json'];
+    const args = ['-p', sanitizeCliPrompt(fullPrompt), '--output', 'json', '--enabled-tools', ''];
     if (this.model) args.push('--agent', this.model);
 
     // Use MISTRAL_VIBE_CLI if set (standalone install not on PATH), else 'vibe'
@@ -172,11 +254,12 @@ export class MistralVibeProvider implements LLMProvider {
 
     let raw: string;
     try {
-      raw = execFileSync(mistralVibeBin, args, {
+      raw = withIsolatedCliCwd((cwd) => execFileSync(mistralVibeBin, args, {
         encoding: 'utf8',
         maxBuffer: LLM_CLI_MAX_BUFFER_BYTES,
         timeout: LLM_CLI_TIMEOUT_MS,
-      });
+        cwd,
+      }));
     } catch (err: unknown) {
       const e = err as NodeJS.ErrnoException & { stderr?: string; stdout?: string; status?: number };
       const detail = e.stderr ?? e.stdout ?? e.message ?? String(err);
@@ -274,7 +357,7 @@ export interface LLMProvider {
   maxOutputTokens: number;
 }
 
-export type ProviderName = 'anthropic' | 'openai' | 'openai-compat' | 'copilot' | 'gemini' | 'gemini-cli' | 'claude-code' | 'mistral-vibe' | 'cursor-agent';
+export type ProviderName = 'anthropic' | 'openai' | 'openai-compat' | 'copilot' | 'gemini' | 'gemini-cli' | 'antigravity-cli' | 'claude-code' | 'codex-cli' | 'mistral-vibe' | 'cursor-agent';
 
 /**
  * Token usage tracking
@@ -499,6 +582,14 @@ const PRICING: Record<string, Record<string, { input: number; output: number }>>
   },
   'gemini-cli': {
     // No per-token cost: covered by Google account free tier
+    default: { input: 0, output: 0 },
+  },
+  'antigravity-cli': {
+    // No per-token cost in openlore: Google account / Antigravity subscription
+    default: { input: 0, output: 0 },
+  },
+  'codex-cli': {
+    // No per-token cost in openlore: ChatGPT subscription / CLI auth
     default: { input: 0, output: 0 },
   },
   'cursor-agent': {
@@ -1211,23 +1302,27 @@ export class GeminiCLIProvider implements LLMProvider {
     // Gemini has no tool-disable flag. Its default approval mode is the
     // restricted fail-closed mode for headless calls; no tool is pre-approved,
     // and extensions are disabled so project configuration cannot add tools.
-    const args = [
-      '-p', sanitizeCliPrompt(fullPrompt),
-      '--output-format', 'json',
-      '--approval-mode', 'default',
-      '--allowed-tools', '',
-      '--extensions', 'none',
-    ];
-    if (this.model) args.push('-m', this.model);
-
     const geminiCLIBin = process.env.GEMINI_CLI ?? 'gemini';
 
     let raw: string;
     try {
-      raw = execFileSync(geminiCLIBin, args, {
-        encoding: 'utf8',
-        maxBuffer: 50 * 1024 * 1024,
-        timeout: 300_000,
+      raw = withIsolatedCliCwd((cwd) => {
+        const policyPath = join(cwd, 'deny-all-tools.toml');
+        writeFileSync(policyPath, '[[rule]]\ntoolName = "*"\ndecision = "deny"\npriority = 999\n');
+        const args = [
+          '-p', sanitizeCliPrompt(fullPrompt),
+          '--output-format', 'json',
+          '--approval-mode', 'default',
+          '--admin-policy', policyPath,
+          '--extensions', 'none',
+        ];
+        if (this.model) args.push('-m', this.model);
+        return execFileSync(geminiCLIBin, args, {
+          encoding: 'utf8',
+          maxBuffer: 50 * 1024 * 1024,
+          timeout: 300_000,
+          cwd,
+        });
       });
     } catch (err: unknown) {
       const e = err as NodeJS.ErrnoException & { stderr?: string; stdout?: string };
@@ -1280,6 +1375,58 @@ export class GeminiCLIProvider implements LLMProvider {
 }
 
 // ============================================================================
+// ANTIGRAVITY CLI PROVIDER (Google Gemini agent family)
+// ============================================================================
+
+export class AntigravityCLIProvider implements LLMProvider {
+  name = 'antigravity-cli';
+  maxContextTokens = 1_000_000;
+  maxOutputTokens = 8_192;
+  private model: string | undefined;
+
+  constructor(model?: string) {
+    this.model = model && model !== 'antigravity-cli' ? model : undefined;
+  }
+
+  async generateCompletion(request: CompletionRequest): Promise<CompletionResponse> {
+    const { execFileSync } = await import('child_process');
+    const fullPrompt = request.systemPrompt
+      ? `${request.systemPrompt}\n\n---\n\n${request.userPrompt}`
+      : request.userPrompt;
+    const args = ['--sandbox', '-p', sanitizeCliPrompt(fullPrompt)];
+    if (this.model) args.push('--model', this.model);
+    const bin = process.env.ANTIGRAVITY_CLI ?? 'agy';
+
+    let content: string;
+    try {
+      content = withIsolatedCliCwd((cwd) => execFileSync(bin, args, {
+        encoding: 'utf8',
+        maxBuffer: LLM_CLI_MAX_BUFFER_BYTES,
+        timeout: LLM_CLI_TIMEOUT_MS,
+        cwd,
+      }).trim());
+    } catch (err: unknown) {
+      const e = err as NodeJS.ErrnoException & { stderr?: string; stdout?: string };
+      const detail = e.stderr ?? e.stdout ?? e.message ?? String(err);
+      throw Object.assign(new Error(`antigravity CLI failed: ${detail}`), { retryable: false });
+    }
+
+    const inputTokens = estimateTokens(fullPrompt);
+    const outputTokens = estimateTokens(content);
+    return {
+      content,
+      usage: { inputTokens, outputTokens, totalTokens: inputTokens + outputTokens },
+      model: this.model ?? 'antigravity-cli',
+      finishReason: 'stop',
+    };
+  }
+
+  countTokens(text: string): number {
+    return estimateTokens(text);
+  }
+}
+
+// ============================================================================
 // CURSOR AGENT CLI PROVIDER (uses local `cursor-agent` CLI, no cloud API key)
 // ============================================================================
 
@@ -1288,7 +1435,7 @@ export class GeminiCLIProvider implements LLMProvider {
  *
  * Routes LLM calls through the Cursor Agent CLI in print mode (`-p`, JSON output).
  * Authentication is handled by Cursor (see Cursor CLI headless documentation) —
- * e.g. `cursor auth login` or `CURSOR_API_KEY` — not ANTHROPIC_API_KEY / OPENAI_API_KEY.
+ * e.g. `cursor-agent login` or `CURSOR_API_KEY` — not ANTHROPIC_API_KEY / OPENAI_API_KEY.
  * If the binary is not on PATH, set `CURSOR_AGENT_CLI` to its full path.
  */
 export class CursorAgentProvider implements LLMProvider {
@@ -1317,11 +1464,12 @@ export class CursorAgentProvider implements LLMProvider {
 
     let raw: string;
     try {
-      raw = execFileSync(bin, args, {
+      raw = withIsolatedCliCwd((cwd) => execFileSync(bin, args, {
         encoding: 'utf8',
         maxBuffer: LLM_CLI_MAX_BUFFER_BYTES,
         timeout: LLM_CLI_TIMEOUT_MS,
-      });
+        cwd,
+      }));
     } catch (err: unknown) {
       const e = err as NodeJS.ErrnoException & { stderr?: string; stdout?: string; status?: number };
       const detail = e.stderr ?? e.stdout ?? e.message ?? String(err);
@@ -1734,9 +1882,12 @@ export class LLMService {
       // Retry with correction prompt for parse errors
       logger.warning('JSON parse failed, attempting correction');
 
+      const correctionPrompt = protectPrompt(
+        'Fix the invalid JSON in the untrusted data block and return only valid JSON. Do not include any explanation.',
+        `Invalid JSON:\n${content}\n\nError: ${(parseError as Error).message}`,
+      );
       const correctionRequest: CompletionRequest = {
-        systemPrompt: 'Fix the following invalid JSON and return only valid JSON. Do not include any explanation.',
-        userPrompt: `Invalid JSON:\n${content}\n\nError: ${(parseError as Error).message}\n\nReturn the corrected JSON:`,
+        ...correctionPrompt,
         temperature: 0.1,
         responseFormat: 'json',
       };
@@ -1965,14 +2116,18 @@ export function createLLMService(options: LLMServiceOptions = {}): LLMService {
     provider = new GeminiProvider(apiKey, options.model ?? DEFAULT_GEMINI_MODEL, sslVerify);
   } else if (providerName === 'claude-code') {
     provider = new ClaudeCodeProvider(options.model);
+  } else if (providerName === 'codex-cli') {
+    provider = new CodexCLIProvider(options.model);
   } else if (providerName === 'mistral-vibe') {
     provider = new MistralVibeProvider(options.model);
   } else if (providerName === 'gemini-cli') {
     provider = new GeminiCLIProvider(options.model);
+  } else if (providerName === 'antigravity-cli') {
+    provider = new AntigravityCLIProvider(options.model);
   } else if (providerName === 'cursor-agent') {
     provider = new CursorAgentProvider(options.model);
   } else {
-    throw new Error(`Unknown provider: ${providerName}. Supported: anthropic, openai, openai-compat, copilot, gemini, gemini-cli, claude-code, mistral-vibe, cursor-agent`);
+    throw new Error(`Unknown provider: ${providerName}. Supported: anthropic, openai, openai-compat, copilot, gemini, gemini-cli, antigravity-cli, claude-code, codex-cli, mistral-vibe, cursor-agent`);
   }
 
   if (!sslVerify) {

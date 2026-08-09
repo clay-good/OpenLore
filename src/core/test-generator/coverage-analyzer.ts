@@ -27,6 +27,7 @@ import type {
 } from '../../types/test-generator.js';
 import type { LLMService } from '../services/llm-service.js';
 import type { DriftResult } from '../../types/index.js';
+import { protectPrompt } from '../../utils/prompt-boundary.js';
 
 // ============================================================================
 // FILE WALKING
@@ -177,12 +178,13 @@ async function discoverWithLlm(
     'Only include matches with similarity >= 0.75. ' +
     'Do not include any prose or explanation.';
 
-  const userPrompt =
+  const untrustedContent =
     `Scenarios:\n${scenarioDescriptions.join('\n')}\n\n` +
     `Test titles:\n${titleList}`;
+  const prompts = protectPrompt(systemPrompt, untrustedContent);
 
   try {
-    const response = await llm.complete({ systemPrompt, userPrompt, maxTokens: 2048 });
+    const response = await llm.complete({ ...prompts, maxTokens: 2048 });
     // Extract JSON array from response
     const jsonMatch = response.content.match(/\[[\s\S]*\]/);
     if (!jsonMatch) return discovered;

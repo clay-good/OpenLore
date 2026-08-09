@@ -49,6 +49,7 @@ function makeDecision(overrides: Partial<PendingDecision> = {}): PendingDecision
     affectedFiles: ['src/cache.ts'],
     sessionId: 'session123',
     recordedAt: '2026-01-01T00:00:00.000Z',
+    contentOrigin: 'agent-recorded',
     confidence: 'medium',
     syncedToSpecs: [],
     ...overrides,
@@ -380,6 +381,17 @@ describe('loadDecisionStore', () => {
     expect(loaded.sessionId).toBe('abc123def456');
     expect(loaded.decisions).toHaveLength(1);
     expect(loaded.decisions[0].id).toBe('aaaabbbb');
+  });
+
+  it('labels pre-provenance decisions as legacy/unknown', async () => {
+    const dir = decisionsDir(tmpDir);
+    await mkdir(dir, { recursive: true });
+    const { writeFile } = await import('node:fs/promises');
+    const legacy = { ...makeDecision() } as Partial<PendingDecision>;
+    delete legacy.contentOrigin;
+    await writeFile(join(dir, 'pending.json'), JSON.stringify({ ...emptyStore(), decisions: [legacy] }), 'utf-8');
+    const loaded = await loadDecisionStore(tmpDir);
+    expect(loaded.decisions[0].contentOrigin).toBe('legacy-unknown');
   });
 
   it('quarantines (never silently empties) a corrupt store on JSON parse error', async () => {

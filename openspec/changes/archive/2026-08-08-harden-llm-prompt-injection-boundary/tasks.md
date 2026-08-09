@@ -10,7 +10,7 @@
 - [x] Quarantine LLM free text: supersededIds applied only for already-known ids
       (consolidator.ts:159); proposedRequirement/reason/title/rationale marked LLM-authored
       at the approval surface
-- [x] Provider spawn flags: claude -p (:77-94), gemini -p (:1187-1198), cursor-agent -p
+- [x] Provider spawn flags: codex exec, claude -p, gemini -p, agy -p, cursor-agent -p
       (:1278-1289) run with tools disabled / restricted permission; unsupported flag →
       refuse the provider (disclosed), never run tool-enabled
 
@@ -19,8 +19,8 @@
       real drift gap; a diff instructing "return []" does NOT suppress a genuine decision
 - [x] Self-certify fixture: a hostile diff cannot flip verifier output to verified/phantom
 - [x] Supersession fixture: an injected supersededId for a real decision is not applied
-- [x] Provider fixture: the analysis spawn carries the tool-disable flag; a provider
-      lacking it is refused with a disclosed message, not run tool-enabled
+- [x] Provider fixture: the analysis spawn carries the strongest documented tool-disable
+      or restricted-permission flag, and residual read/search capability is disclosed
 - [x] Golden regression: decision/drift golden outputs unchanged on benign inputs
 - [x] Full suite green
 

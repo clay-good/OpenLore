@@ -39,6 +39,7 @@ function makeDecision(overrides: Partial<PendingDecision> = {}, index = 0): Pend
     affectedFiles: [],
     sessionId: 'sess001aabbcc',
     recordedAt: '2026-01-01T00:00:00.000Z',
+    contentOrigin: 'agent-recorded',
     confidence: 'medium' as const,
     syncedToSpecs: [],
     ...overrides,
@@ -201,11 +202,10 @@ describe('consolidateDrafts — JSON parsing robustness', () => {
     expect(decisions).toHaveLength(1);
   });
 
-  it('returns empty decisions on completely malformed response', async () => {
+  it('fails closed on completely malformed response', async () => {
     const llm = makeLLM('Sorry, I cannot help with that.');
     const store = makeStore([{}]);
-    const { decisions } = await consolidateDrafts(store, llm);
-    expect(decisions).toHaveLength(0);
+    await expect(consolidateDrafts(store, llm)).rejects.toThrow(/invalid structured output/);
   });
 
   it('returns empty decisions on empty JSON array response', async () => {
@@ -215,11 +215,10 @@ describe('consolidateDrafts — JSON parsing robustness', () => {
     expect(decisions).toHaveLength(0);
   });
 
-  it('returns empty decisions on invalid JSON inside fences', async () => {
+  it('fails closed on invalid JSON inside fences', async () => {
     const llm = makeLLM('```json\nnot valid json\n```');
     const store = makeStore([{}]);
-    const { decisions } = await consolidateDrafts(store, llm);
-    expect(decisions).toHaveLength(0);
+    await expect(consolidateDrafts(store, llm)).rejects.toThrow(/invalid structured output/);
   });
 });
 
@@ -248,12 +247,10 @@ describe('consolidateDrafts — consolidation warning', () => {
     );
   });
 
-  it('warns when LLM returns malformed JSON for non-empty drafts', async () => {
-    const { logger } = await import('../../utils/logger.js');
+  it('fails closed when LLM returns malformed JSON for non-empty drafts', async () => {
     const llm = makeLLM('not json at all');
     const store = makeStore([{ title: 'Draft' }]);
-    await consolidateDrafts(store, llm);
-    expect(vi.mocked(logger.warning)).toHaveBeenCalled();
+    await expect(consolidateDrafts(store, llm)).rejects.toThrow(/invalid structured output/);
   });
 });
 
@@ -266,7 +263,7 @@ describe('consolidateDrafts — ID reuse', () => {
     { id: 'abc12345', status: 'approved', title: 'Use Redis for caching' },
   );
 
-  it('reuses existing decision ID when LLM returns it in response', async () => {
+  it('does not let LLM output reuse and overwrite an existing durable decision ID', async () => {
     const responseWithId = JSON.stringify([{
       id: 'abc12345',
       title: 'Use Redis for caching',
@@ -280,7 +277,8 @@ describe('consolidateDrafts — ID reuse', () => {
     const llm = makeLLM(responseWithId);
     const store = makeStore([{ title: 'Draft about caching' }], [existingDecision]);
     const { decisions } = await consolidateDrafts(store, llm);
-    expect(decisions[0].id).toBe('abc12345');
+    expect(decisions[0].id).not.toBe('abc12345');
+    expect(decisions[0].id).toMatch(/^[0-9a-f]{8}$/);
   });
 
   it('ignores LLM-supplied ID when it does not match any existing decision', async () => {
@@ -368,5 +366,15 @@ describe('consolidateDrafts — ID reuse', () => {
     }]);
     const { decisions } = await consolidateDrafts(makeStore([{ title: 'Retry draft' }]), makeLLM(response));
     expect(decisions[0].scope).toBe('component');
+  });
+
+  it('fails closed on invalid fields or scope', async () => {
+    const response = JSON.stringify([{
+      title: 'bad', rationale: 'bad', consequences: 'bad', affectedDomains: [],
+      affectedFiles: 'not-an-array', proposedRequirement: null, supersededIds: [],
+      scope: '\u001b[2J',
+    }]);
+    await expect(consolidateDrafts(makeStore([{ title: 'Draft' }]), makeLLM(response)))
+      .rejects.toThrow(/invalid structured output/);
   });
 });

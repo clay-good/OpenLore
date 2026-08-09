@@ -183,5 +183,11 @@ describe('openloreVerify', () => {
       await openloreVerify({ rootPath: ROOT });
       expect(mockCreateLLMService).toHaveBeenCalledWith(expect.objectContaining({ provider: 'openai' }));
     });
+
+    it.each(['codex-cli', 'antigravity-cli'] as const)('uses no-key provider %s', async (provider) => {
+      delete process.env.ANTHROPIC_API_KEY;
+      await openloreVerify({ rootPath: ROOT, provider });
+      expect(mockCreateLLMService).toHaveBeenCalledWith(expect.objectContaining({ provider, model: provider }));
+    });
   });
 });

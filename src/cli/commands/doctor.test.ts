@@ -262,6 +262,30 @@ describe('doctor command', () => {
       }
     });
 
+    it.each([
+      ['codex-cli', 'CODEX_CLI', '/opt/openlore/codex'],
+      ['antigravity-cli', 'ANTIGRAVITY_CLI', '/opt/openlore/agy'],
+      ['cursor-agent', 'CURSOR_AGENT_CLI', '/opt/openlore/cursor-agent'],
+    ])('checks the configured binary for %s', async (provider, envName, binary) => {
+      const saved = process.env[envName];
+      const configManager = await import('../../core/services/config-manager.js');
+      vi.mocked(configManager.readOpenLoreConfig).mockResolvedValue({
+        projectType: 'nodejs', createdAt: '2024-01-01T00:00:00Z', openspecPath: './openspec',
+        maxFiles: 500, generation: { provider },
+      } as never);
+      process.env[envName] = binary;
+      try {
+        await runDoctorJson();
+        expect(vi.mocked(execFileMock).mock.calls.some((call) => call[0] === binary)).toBe(true);
+      } finally {
+        if (saved === undefined) delete process.env[envName];
+        else process.env[envName] = saved;
+        vi.mocked(configManager.readOpenLoreConfig).mockResolvedValue({
+          projectType: 'nodejs', createdAt: '2024-01-01T00:00:00Z', openspecPath: './openspec', maxFiles: 500,
+        } as never);
+      }
+    });
+
     it('warns (not fails) when createLLMService throws (missing API key) — LLM is optional', async () => {
       const saved = clearLLMKeys();
       const llmService = await import('../../core/services/llm-service.js');

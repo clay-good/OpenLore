@@ -12,6 +12,7 @@ import { VERIFICATION_PREDICTION_MAX_TOKENS } from '../../constants.js';
 import type { LLMService } from '../services/llm-service.js';
 import type { DependencyGraphResult, DependencyNode } from '../analyzer/dependency-graph.js';
 import { ImportExportParser } from '../analyzer/import-parser.js';
+import { protectPrompt } from '../../utils/prompt-boundary.js';
 
 // ============================================================================
 // TYPES
@@ -530,15 +531,10 @@ export class SpecVerificationEngine {
 - "requirementCoverageScore": float 0.0–1.0 — of the requirements in the spec that are relevant to THIS file specifically, what fraction does the file actually implement? Ignore requirements that clearly belong to other files in the domain.`
       : '';
 
-    const userPrompt = `Here are the specifications:
-
-${specsContent}${fileExcerpt}
-
-Predict the contents of: ${candidate.path}
-
-IMPORTANT: The specs may contain entries attributed to specific files using \`> \`path\`\` markers.
-Focus ONLY on entries attributed to \`${candidate.path}\`. Ignore entries attributed to other files.
-If no entries are attributed to this file, use only the general domain purpose.${judgeInstruction}
+    const analysisInstruction = `Predict the target file from the supplied specifications and file excerpt.
+The specs may contain entries attributed to specific files using \`> \`path\`\` markers.
+Focus only on entries attributed to the target path. Ignore entries attributed to other files.
+If no entries are attributed to the target path, use only the general domain purpose.${judgeInstruction}
 
 Respond in JSON:
 {
@@ -552,11 +548,14 @@ Respond in JSON:
   "requirementCoverageScore": 0.0-1.0,
   "reasoning": "..."
 }`;
+    const prompts = protectPrompt(
+      `${PREDICTION_SYSTEM_PROMPT}\n\n${analysisInstruction}`,
+      `Specifications:\n${specsContent}${fileExcerpt}\n\nTarget path: ${candidate.path}`,
+    );
 
     try {
       const prediction = await this.llm.completeJSON<FilePrediction>({
-        systemPrompt: PREDICTION_SYSTEM_PROMPT,
-        userPrompt,
+        ...prompts,
         temperature: 0.3,
         maxTokens: VERIFICATION_PREDICTION_MAX_TOKENS,
       });

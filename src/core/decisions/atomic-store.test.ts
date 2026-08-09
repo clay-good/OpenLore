@@ -304,7 +304,7 @@ describe('decision store — concurrent CAS writers across mutation kinds', () =
     return {
       id, status, title: `decision ${id}`, rationale: '', consequences: '',
       proposedRequirement: null, affectedDomains: [], affectedFiles: [],
-      sessionId: 's', recordedAt: '2026-01-01T00:00:00Z', confidence: 'medium', syncedToSpecs: [],
+      sessionId: 's', recordedAt: '2026-01-01T00:00:00Z', contentOrigin: 'agent-recorded', confidence: 'medium', syncedToSpecs: [],
     };
   }
 

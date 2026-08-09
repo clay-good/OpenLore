@@ -191,6 +191,7 @@ export async function handleRecordDecision(
       supersedes,
       sessionId: store.sessionId,
       recordedAt: new Date().toISOString(),
+      contentOrigin: 'agent-recorded',
       confidence: 'medium',
       syncedToSpecs: [],
     };

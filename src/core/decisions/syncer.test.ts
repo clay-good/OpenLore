@@ -54,6 +54,7 @@ function makeDecision(overrides: Partial<PendingDecision> = {}): PendingDecision
     confidence: 'high',
     sessionId: 'sess-001',
     recordedAt: '2026-04-18T10:00:00Z',
+    contentOrigin: 'agent-recorded',
     syncedToSpecs: [],
     ...overrides,
   };

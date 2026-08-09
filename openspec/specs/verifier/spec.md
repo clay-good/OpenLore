@@ -356,19 +356,6 @@ gate/TUI — they SHALL NOT be labeled "verified" identically to diff-verified d
 - **THEN** each is marked as having no verification evidence, distinguishable from a
   diff-verified decision at the approval surface
 
-### Requirement: DiscloseLlmauthoredDecisionContentWithExplicitProvenance
-
-This domain SHALL conform to the canonical statement of decision `07df3189`, which lives in the
-`analyzer` domain — see [analyzer/spec.md](../analyzer/spec.md).
-
-#### Scenario: The canonical statement governs
-
-- **GIVEN** decision `07df3189` recorded in the `analyzer` domain
-- **WHEN** this domain's behavior touches that decision's surface
-- **THEN** it satisfies the canonical requirement as stated in [analyzer/spec.md](../analyzer/spec.md)
-
-> Decision pointer: 07df3189 — "Disclose LLM-authored decision content with explicit provenance" is recorded in `openspec/specs/analyzer/spec.md`; it also affects this domain.
-
 ## Technical Notes
 
 - **Implementation**: `src/core/verifier/verification-engine.ts`, `src/core/decisions/verifier.ts`, `src/api/decisions.ts`, `src/cli/commands/decisions.ts`, `src/cli/tui-approval.ts`, `src/core/services/mcp-handlers/decisions.ts`

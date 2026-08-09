@@ -7,6 +7,7 @@
 
 import * as readline from 'node:readline';
 import type { PendingDecision } from '../types/index.js';
+import { sanitizeForTerminal as safe } from '../utils/misc.js';
 
 const C = {
   reset:   '\x1b[0m',
@@ -38,7 +39,7 @@ function wrap(text: string, width: number, indent: string): string {
   return lines.join('\n');
 }
 
-function renderDecision(d: PendingDecision, idx: number, total: number): string {
+export function renderDecision(d: PendingDecision, idx: number, total: number): string {
   const width = Math.min(process.stdout.columns ?? 80, 100) - 4;
   const indent = '             ';
   const conf = d.confidence === 'high'
@@ -51,31 +52,32 @@ function renderDecision(d: PendingDecision, idx: number, total: number): string 
     `${C.bold}${C.cyan}Architectural Decision ${idx + 1} of ${total}${C.reset}`,
     '─'.repeat(width),
     '',
-    `  ${C.bold}${d.title}${C.reset}`,
+    `  ${C.bold}${safe(d.title)}${C.reset}`,
     '',
-    `  ${C.dim}ID        :${C.reset} ${d.id}`,
-    `  ${C.dim}Domains   :${C.reset} ${d.affectedDomains.join(', ') || C.dim + 'unknown' + C.reset}`,
+    `  ${C.dim}ID        :${C.reset} ${safe(d.id)}`,
+    `  ${C.dim}Domains   :${C.reset} ${safe(d.affectedDomains.join(', ')) || C.dim + 'unknown' + C.reset}`,
     `  ${C.dim}Confidence:${C.reset} ${conf}`,
     `  ${C.dim}Evidence  :${C.reset} ${d.verificationEvidence ?? 'legacy/unknown'}`,
+    `  ${C.dim}Origin    :${C.reset} ${d.contentOrigin === 'llm-extracted' ? 'LLM-extracted' : d.contentOrigin === 'agent-recorded' ? 'agent-recorded' : 'legacy/unknown'}`,
     ...(d.contentOrigin === 'llm-extracted'
       ? [`  ${C.yellow}⚠ LLM-extracted from repository content; review every field before approval.${C.reset}`]
       : []),
     '',
-    `  ${C.dim}Rationale :${C.reset} ${wrap(d.rationale, width - 14, indent)}`,
+    `  ${C.dim}Rationale :${C.reset} ${wrap(safe(d.rationale), width - 14, indent)}`,
   ];
 
   if (d.consequences) {
-    lines.push(`  ${C.dim}Impact    :${C.reset} ${wrap(d.consequences, width - 14, indent)}`);
+    lines.push(`  ${C.dim}Impact    :${C.reset} ${wrap(safe(d.consequences), width - 14, indent)}`);
   }
 
   if (d.proposedRequirement) {
     lines.push('');
-    lines.push(`  ${C.dim}SHALL     :${C.reset} ${C.yellow}${wrap(d.proposedRequirement, width - 14, indent)}${C.reset}`);
+    lines.push(`  ${C.dim}SHALL     :${C.reset} ${C.yellow}${wrap(safe(d.proposedRequirement), width - 14, indent)}${C.reset}`);
   }
 
   if (d.affectedFiles.length) {
     lines.push('');
-    lines.push(`  ${C.dim}Files     :${C.reset} ${d.affectedFiles.slice(0, 3).join(', ')}${d.affectedFiles.length > 3 ? ` +${d.affectedFiles.length - 3}` : ''}`);
+    lines.push(`  ${C.dim}Files     :${C.reset} ${safe(d.affectedFiles.slice(0, 3).join(', '))}${d.affectedFiles.length > 3 ? ` +${d.affectedFiles.length - 3}` : ''}`);
   }
 
   lines.push('');

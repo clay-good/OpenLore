@@ -63,6 +63,29 @@ describe('decisions rendering', () => {
     expect(out).toContain('review all text before approval');
   });
 
+  it('labels agent-recorded content and strips terminal controls from verbose fields', () => {
+    const out = capture(() => displayDecision({
+      ...decision('verified'),
+      contentOrigin: 'agent-recorded',
+      rationale: 'safe\x1b[2J\nFORGED APPROVAL',
+      proposedRequirement: 'SHALL\x1b]8;;https://evil.example\x07click',
+      evidenceFile: 'src/x.ts\nAPPROVED',
+    }, true));
+    expect(out).toContain('Content origin: agent-recorded');
+    expect(out).not.toContain('\x1b');
+    expect(out).not.toContain('\nFORGED APPROVAL');
+  });
+
+  it('labels legacy provenance as unknown and strips controls from scope', () => {
+    const out = capture(() => displayDecision({
+      ...decision('verified'),
+      contentOrigin: 'legacy-unknown',
+      scope: 'component\x1b]8;;https://evil.example\x07' as PendingDecision['scope'],
+    }, true));
+    expect(out).toContain('Content origin: legacy/unknown');
+    expect(out).not.toContain('\x1b');
+  });
+
   it('legend explains that verified means awaiting review', () => {
     const legend = capture(() => printDecisionLegend());
     expect(legend.toLowerCase()).toContain('awaiting review');

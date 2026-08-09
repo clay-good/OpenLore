@@ -3,7 +3,8 @@
 > Status: PROPOSED (2026-07-03, e2e audit pass 4). The decision-consolidation, drift, and
 > spec-generation paths concatenate raw git diffs, commit messages, and source into LLM
 > prompts with no data/instruction boundary — and the advertised no-API-key providers hand
-> that prompt to a tool-capable agent CLI (`claude -p`, `gemini -p`, `cursor-agent -p`)
+> that prompt to a tool-capable agent CLI (`codex exec`, `claude -p`, `gemini -p`,
+> `agy -p`, `cursor-agent -p`)
 > running under the user's own permission allowlist. A hostile cloned repo can suppress
 > drift, forge or bury architectural decisions that become standing spec requirements, or
 > drive file/Bash actions in the spawned agent. This is content-level manipulation, distinct
@@ -52,10 +53,11 @@
    only applied when the target id is already known; free-text fields are marked
    LLM-authored at the approval prompt ("this decision was extracted from a diff by an
    LLM") so a human approves content, not a rubber stamp.
-3. **Run the agent-CLI providers with tools disabled.** Spawn `claude`/`gemini`/`cursor-agent`
+3. **Run the top four agent families with restricted tools.** Spawn
+   `codex`/`claude`/`gemini` or `agy`/`cursor-agent`
    with their tool-disable / restricted-permission flags for these non-interactive,
    analysis-only calls (they only need text in, JSON out). Disclose in the provider docs
-   that the analysis path runs tool-free.
+   when a harness's restricted mode retains read-only or search capabilities.
 
 ## Why this is in scope
 

@@ -66,7 +66,7 @@ describe('writeEdgesToSQLite — decision projection (spec-16)', () => {
         proposedRequirement: null,
         affectedDomains: ['overview'],
         affectedFiles: ['src/a.ts'],   // repo-relative, as record_decision stores
-        sessionId: 's', recordedAt: 'x', confidence: 'high', syncedToSpecs: [],
+        sessionId: 's', recordedAt: 'x', contentOrigin: 'agent-recorded', confidence: 'high', syncedToSpecs: [],
       }],
     });
 

@@ -78,19 +78,27 @@ export async function openloreDrift(options: DriftApiOptions = {}): Promise<Drif
     const openaiKey = process.env.OPENAI_API_KEY;
     const openaiCompatKey = process.env.OPENAI_COMPAT_API_KEY;
     const geminiKey = process.env.GEMINI_API_KEY;
-    if (!anthropicKey && !openaiKey && !openaiCompatKey && !geminiKey) {
+    const noKeyProviders = ['claude-code', 'codex-cli', 'mistral-vibe', 'copilot', 'gemini-cli', 'antigravity-cli', 'cursor-agent'];
+    const configuredProvider = options.provider ?? openloreConfig.generation?.provider;
+    if (!noKeyProviders.includes(configuredProvider ?? '') && !anthropicKey && !openaiKey && !openaiCompatKey && !geminiKey) {
       throw new Error('No LLM API key found. LLM-enhanced drift requires ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, or OPENAI_COMPAT_API_KEY.');
     }
     const envDetectedProvider = anthropicKey ? 'anthropic'
       : geminiKey ? 'gemini'
       : openaiCompatKey ? 'openai-compat'
       : 'openai';
-    const provider = options.provider ?? envDetectedProvider;
+    const provider = configuredProvider ?? envDetectedProvider;
     const defaultModels: Record<string, string> = {
       anthropic: DEFAULT_ANTHROPIC_MODEL,
       gemini: DEFAULT_GEMINI_MODEL,
       'openai-compat': DEFAULT_OPENAI_COMPAT_MODEL,
       openai: DEFAULT_OPENAI_MODEL,
+      'claude-code': 'claude-code',
+      'codex-cli': 'codex-cli',
+      'mistral-vibe': 'mistral-vibe',
+      'gemini-cli': 'gemini-cli',
+      'antigravity-cli': 'antigravity-cli',
+      'cursor-agent': 'cursor-agent',
     };
     llm = createLLMService({
       provider,

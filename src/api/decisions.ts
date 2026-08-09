@@ -100,6 +100,7 @@ export async function openloreRecordDecision(options: RecordDecisionOptions): Pr
     supersedes: options.supersedes,
     sessionId: store.sessionId,
     recordedAt: new Date().toISOString(),
+    contentOrigin: 'agent-recorded',
     confidence: 'medium',
     syncedToSpecs: [],
   };

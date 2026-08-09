@@ -38,6 +38,25 @@ interface VerificationRaw {
   missing: Array<{ file: string; description: string }>;
 }
 
+function isVerificationRaw(value: unknown): value is VerificationRaw {
+  if (!value || typeof value !== 'object') return false;
+  const item = value as Record<string, unknown>;
+  const verified = Array.isArray(item.verified) && item.verified.every((entry) => {
+    if (!entry || typeof entry !== 'object') return false;
+    const candidate = entry as Record<string, unknown>;
+    return typeof candidate.id === 'string'
+      && typeof candidate.evidenceFile === 'string'
+      && ['high', 'medium', 'low'].includes(candidate.confidence as string);
+  });
+  const phantom = Array.isArray(item.phantom) && item.phantom.every((entry) =>
+    !!entry && typeof entry === 'object' && typeof (entry as Record<string, unknown>).id === 'string');
+  const missing = Array.isArray(item.missing) && item.missing.every((entry) =>
+    !!entry && typeof entry === 'object'
+      && typeof (entry as Record<string, unknown>).file === 'string'
+      && typeof (entry as Record<string, unknown>).description === 'string');
+  return verified && phantom && missing;
+}
+
 export interface VerificationResult {
   verified: PendingDecision[];
   phantom: PendingDecision[];
@@ -163,7 +182,11 @@ export async function verifyDecisions(
   });
   const raw = response.content;
 
-  const result = parseJSON<VerificationRaw>(raw, { verified: [], phantom: [], missing: [] });
+  const parsed = parseJSON<unknown>(raw, null);
+  if (!isVerificationRaw(parsed)) {
+    throw new Error('decision verification returned invalid structured output');
+  }
+  const result = parsed;
 
   const byId = new Map(decisions.map((d) => [d.id, d]));
   const now = new Date().toISOString();

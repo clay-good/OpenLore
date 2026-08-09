@@ -484,11 +484,13 @@ async function checkMcpWiring(rootPath: string): Promise<CheckResult | null> {
   return null;
 }
 
-const CLI_PROVIDERS: Record<string, string> = {
-  'claude-code': 'claude',
-  'gemini-cli': 'gemini',
-  'cursor-agent': 'cursor',
-  'mistral-vibe': 'vibe',
+const CLI_PROVIDERS: Record<string, () => string> = {
+  'claude-code': () => 'claude',
+  'codex-cli': () => process.env.CODEX_CLI ?? 'codex',
+  'gemini-cli': () => process.env.GEMINI_CLI ?? 'gemini',
+  'antigravity-cli': () => process.env.ANTIGRAVITY_CLI ?? 'agy',
+  'cursor-agent': () => process.env.CURSOR_AGENT_CLI ?? 'cursor-agent',
+  'mistral-vibe': () => process.env.MISTRAL_VIBE_CLI ?? 'vibe',
 };
 
 const DOCTOR_TIMEOUT_MS = 10_000;
@@ -517,15 +519,17 @@ async function checkLLMConnection(rootPath: string): Promise<CheckResult> {
     copilot: DEFAULT_COPILOT_MODEL,
     openai: DEFAULT_OPENAI_MODEL,
     'claude-code': 'claude-code',
+    'codex-cli': 'codex-cli',
     'mistral-vibe': 'mistral-vibe',
     'gemini-cli': 'gemini-cli',
+    'antigravity-cli': 'antigravity-cli',
     'cursor-agent': 'cursor-agent',
   };
   const model = gen?.model ?? defaultModels[provider] ?? provider;
 
   // CLI-based providers: just check binary availability
   if (provider in CLI_PROVIDERS) {
-    const bin = CLI_PROVIDERS[provider];
+    const bin = CLI_PROVIDERS[provider]();
     try {
       await execFileAsync(bin, ['--version']);
       return { name: 'LLM connection', status: 'ok', detail: `${provider} · ${bin} CLI detected` };

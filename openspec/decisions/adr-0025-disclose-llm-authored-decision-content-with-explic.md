@@ -4,7 +4,7 @@
 
 accepted
 
-**Domains**: analyzer, drift, verifier
+**Domains**: mcp-security, cli, mcp-handlers
 
 ## Context
 

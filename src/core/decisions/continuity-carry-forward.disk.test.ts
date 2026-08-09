@@ -268,7 +268,7 @@ describe('carryForwardContinuity (disk)', () => {
         { nodeId: oldNode.id, stableId: oldNode.stableId, symbolName: 'authorize', filePath: file, contentHash: hashSpan(oldSrc) },
         { filePath: file, contentHash: hashSpan(oldSrc) },
       ],
-      sessionId: 's1', recordedAt: new Date(0).toISOString(), confidence: 'high', syncedToSpecs: [],
+      sessionId: 's1', recordedAt: new Date(0).toISOString(), contentOrigin: 'agent-recorded', confidence: 'high', syncedToSpecs: [],
     };
     const ds = await loadDecisionStore(root);
     await saveDecisionStore(root, { ...ds, decisions: [decision] });

@@ -21,6 +21,7 @@ import { renderTests } from './renderers/index.js';
 import { toKebabCase } from './scenario-parser.js';
 import { toSnakeCase, toPascalCase } from './renderers/shared.js';
 import { FRAMEWORK_EXTENSIONS } from '../../types/test-generator.js';
+import { protectPrompt } from '../../utils/prompt-boundary.js';
 
 // ============================================================================
 // TYPES
@@ -99,7 +100,7 @@ async function enrichWithLlm(
     `Framework: ${frameworkHint[framework]}. ` +
     `Return ONLY valid assertion lines, one per line, no prose, no backticks.`;
 
-  const userPrompt =
+  const untrustedContent =
     `Scenario: ${scenario.domain} / ${scenario.requirement} / ${scenario.scenarioName}\n\n` +
     `GIVEN:\n${scenario.given.map((g) => `  - ${g}`).join('\n')}\n\n` +
     `WHEN:\n${scenario.when.map((w) => `  - ${w}`).join('\n')}\n\n` +
@@ -108,11 +109,11 @@ async function enrichWithLlm(
     (snippets
       ? `\n\nRelated implementation:\n\`\`\`\n${snippets}\n\`\`\``
       : '');
+  const prompts = protectPrompt(systemPrompt, untrustedContent);
 
   try {
     const response = await llm.complete({
-      systemPrompt,
-      userPrompt,
+      ...prompts,
       maxTokens: 512,
     });
 

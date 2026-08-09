@@ -47,7 +47,7 @@ function decision(p: Partial<PendingDecision> & { id: string }): PendingDecision
     id: p.id, status: p.status ?? 'approved', title: p.title ?? `d ${p.id}`,
     rationale: p.rationale ?? '', consequences: '', proposedRequirement: null,
     affectedDomains: [], affectedFiles: [], supersedes: p.supersedes,
-    sessionId: 's1', recordedAt: '2026-06-23T00:00:00Z', confidence: 'high', syncedToSpecs: [],
+    sessionId: 's1', recordedAt: '2026-06-23T00:00:00Z', contentOrigin: 'agent-recorded', confidence: 'high', syncedToSpecs: [],
   };
 }
 
