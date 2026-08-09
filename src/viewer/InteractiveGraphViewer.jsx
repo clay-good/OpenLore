@@ -16,6 +16,7 @@ import { FilterBar } from './components/FilterBar.jsx';
 import { ArchitectureView } from './components/ArchitectureView.jsx';
 import { Hint, SL, Row, Chip, KindBadge } from './components/MicroComponents.jsx';
 import { ChatPanel } from './components/ChatPanel.jsx';
+import { FreshnessBanner } from './components/FreshnessBanner.jsx';
 import { THEMES, THEME_KEYS, DEFAULT_THEME } from './utils/themes.js';
 
 export default function App({ graphUrl, mappingUrl = '/api/mapping', specUrl = '/api/spec' }) {
@@ -23,6 +24,7 @@ export default function App({ graphUrl, mappingUrl = '/api/mapping', specUrl = '
   const [llmCtx, setLlmCtx] = useState(null);
   const [refReport, setRefReport] = useState(null);
   const [classData, setClassData] = useState(null);
+  const [freshness, setFreshness] = useState(null);
   const [selectedClass, setSelectedClass] = useState(null); // full class object
   const selectedClassId = selectedClass?.id ?? null;
   const [focusedPaths, setFocusedPaths] = useState([]);
@@ -123,6 +125,11 @@ export default function App({ graphUrl, mappingUrl = '/api/mapping', specUrl = '
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const text = await res.text();
         loadGraph(text);
+
+        try {
+          const freshnessRes = await fetch('/api/freshness');
+          if (freshnessRes.ok) setFreshness(await freshnessRes.json());
+        } catch { /* ignore */ }
 
         try {
           const ctxRes = await fetch('/api/llm-context');
@@ -807,6 +814,8 @@ export default function App({ graphUrl, mappingUrl = '/api/mapping', specUrl = '
           }}
         />
       </div>
+
+      <FreshnessBanner freshness={freshness} />
 
       {/* Filter bar */}
       {viewMode !== 'architecture' && viewMode !== 'classes' && (

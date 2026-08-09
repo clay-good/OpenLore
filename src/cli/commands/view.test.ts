@@ -3,6 +3,9 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { viewCommand, sanitizeErrorMessage, safePath } from './view.js';
 
 // ============================================================================
@@ -33,7 +36,8 @@ vi.mock('@vitejs/plugin-react', () => ({
   default: vi.fn().mockReturnValue({ name: 'vite:react' }),
 }));
 
-vi.mock('node:child_process', () => ({
+vi.mock('node:child_process', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('node:child_process')>()),
   spawn: vi.fn().mockReturnValue({ unref: vi.fn() }),
 }));
 
@@ -298,6 +302,20 @@ describe('safePath', () => {
     // src/../src/file.ts resolves to /project/src/file.ts
     const result = safePath('/project', 'src/../src/file.ts');
     expect(result).toBe('/project/src/file.ts');
+  });
+
+  it('rejects an in-root symlink whose target is outside the project root', () => {
+    const base = mkdtempSync(join(tmpdir(), 'openlore-view-path-'));
+    const root = join(base, 'repo');
+    const outside = join(base, 'outside.txt');
+    mkdirSync(root);
+    writeFileSync(outside, 'secret');
+    symlinkSync(outside, join(root, 'escape.ts'));
+    try {
+      expect(safePath(root, 'escape.ts')).toBeNull();
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
   });
 });
 

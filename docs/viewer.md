@@ -78,6 +78,7 @@ The viewer auto-loads all available data on startup:
 | Endpoint | Source | Required? |
 |----------|--------|-----------|
 | `/api/dependency-graph` | `.openlore/analysis/dependency-graph.json` | Yes |
+| `/api/freshness` | Artifact time and analyzed-commit freshness | Yes |
 | `/api/llm-context` | `.openlore/analysis/llm-context.json` | No |
 | `/api/refactor-priorities` | `.openlore/analysis/refactor-priorities.json` | No |
 | `/api/mapping` | `.openlore/analysis/mapping.json` | No |
@@ -86,6 +87,18 @@ The viewer auto-loads all available data on startup:
 | `/api/search?q=` | `.openlore/analysis/vector-index/` | No (`--embed`) |
 
 Run `openlore generate` to produce `mapping.json` and the spec files. Once present, the **Spec** tab shows the full requirement body for each selected file.
+
+### Freshness and file safety
+
+Every analysis-artifact response includes its generated time, analyzed commit, current
+commit, and freshness status. If tracked source files changed after analysis, the viewer
+shows a dismissible **STALE ANALYSIS** banner; run `openlore analyze` before relying on the
+graph. When freshness cannot be assessed, the API reports `unassessable` instead of
+claiming the graph is current.
+
+Viewer file reads use the same symlink-aware project-root confinement as MCP tools.
+Spec traversal skips symlinks and stops at 2 MB of Markdown; `/api/spec` reports whether
+that ceiling truncated its response.
 
 ### View Options
 
@@ -97,4 +110,3 @@ openlore view [options]
   --host <host>        Bind host (default: 127.0.0.1)
   --no-open            Skip automatic browser open
 ```
-

@@ -40,6 +40,8 @@ import { resolveEmbedder } from '../../core/analyzer/embedder.js';
 import { getSkeletonContent } from '../../core/analyzer/code-shaper.js';
 import { detectLanguage } from '../../core/analyzer/language-detection.js';
 import { runChatAgent, resolveProviderConfig } from '../../core/services/chat-agent.js';
+import { collectSpecMarkdown } from './view-files.js';
+import { readViewerFreshness, setViewerFreshnessHeaders } from './viewer-freshness.js';
 
 /** Strip internal filesystem paths and API keys from error messages before sending to clients. */
 export function sanitizeErrorMessage(msg: string): string {
@@ -103,6 +105,15 @@ export const viewCommand = new Command('view')
       const refactorPath = join(analysisDir, ARTIFACT_REFACTOR_PRIORITIES);
       const mappingPath = join(analysisDir, ARTIFACT_MAPPING);
       const specDir = resolve(rootPath, options.spec);
+
+      const attachFreshness = async (
+        res: { setHeader(name: string, value: string): void },
+        artifactPath: string,
+      ) => {
+        const freshness = await readViewerFreshness(rootPath, analysisDir, artifactPath);
+        setViewerFreshnessHeaders((name, value) => res.setHeader(name, value), freshness);
+        return freshness;
+      };
 
       if (!(await fileExists(graphPath))) {
         logger.error(`Missing graph file: ${graphPath}`);
@@ -203,6 +214,23 @@ export const viewCommand = new Command('view')
                 }),
               );
 
+              devServer.middlewares.use('/api/freshness', async (_req, res) => {
+                try {
+                  if (!(await fileExists(graphPath))) {
+                    res.statusCode = 404;
+                    res.end(JSON.stringify({ error: 'dependency-graph.json not found — run "openlore analyze"' }));
+                    return;
+                  }
+                  const freshness = await attachFreshness(res, graphPath);
+                  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+                  res.statusCode = 200;
+                  res.end(JSON.stringify(freshness));
+                } catch (err) {
+                  res.statusCode = 500;
+                  res.end(JSON.stringify({ error: sanitizeErrorMessage((err as Error).message) }));
+                }
+              });
+
               devServer.middlewares.use('/api/dependency-graph', async (_req, res) => {
                 try {
                   // Friendly 404 (matching the sibling artifact endpoints) when the graph
@@ -213,6 +241,7 @@ export const viewCommand = new Command('view')
                     return;
                   }
                   const json = await readFile(graphPath, 'utf-8');
+                  await attachFreshness(res, graphPath);
                   res.setHeader('Content-Type', 'application/json; charset=utf-8');
                   res.statusCode = 200;
                   res.end(json);
@@ -230,6 +259,7 @@ export const viewCommand = new Command('view')
                     return;
                   }
                   const json = await readFile(llmContextPath, 'utf-8');
+                  await attachFreshness(res, llmContextPath);
                   res.setHeader('Content-Type', 'application/json; charset=utf-8');
                   res.statusCode = 200;
                   res.end(json);
@@ -250,6 +280,7 @@ export const viewCommand = new Command('view')
                     callGraph?: { classes?: unknown[]; inheritanceEdges?: unknown[]; edges?: unknown[]; nodes?: unknown[] };
                   };
                   const cg = raw.callGraph ?? {};
+                  await attachFreshness(res, llmContextPath);
                   res.setHeader('Content-Type', 'application/json; charset=utf-8');
                   res.statusCode = 200;
                   res.end(JSON.stringify({
@@ -272,6 +303,7 @@ export const viewCommand = new Command('view')
                     return;
                   }
                   const json = await readFile(refactorPath, 'utf-8');
+                  await attachFreshness(res, refactorPath);
                   res.setHeader('Content-Type', 'application/json; charset=utf-8');
                   res.statusCode = 200;
                   res.end(json);
@@ -289,6 +321,7 @@ export const viewCommand = new Command('view')
                     return;
                   }
                   const json = await readFile(mappingPath, 'utf-8');
+                  await attachFreshness(res, mappingPath);
                   res.setHeader('Content-Type', 'application/json; charset=utf-8');
                   res.statusCode = 200;
                   res.end(json);
@@ -306,44 +339,13 @@ export const viewCommand = new Command('view')
                     return;
                   }
 
-                  // Recursively read all spec files and concatenate them
-                  const { readdirSync, statSync } = await import('node:fs');
-
-                  const collectSpecFiles = (dir: string): string[] => {
-                    const files: string[] = [];
-                    try {
-                      const entries = readdirSync(dir);
-                      for (const entry of entries) {
-                        if (entry.startsWith('.')) continue;
-                        const fullPath = join(dir, entry);
-                        const stat = statSync(fullPath);
-                        if (stat.isDirectory()) {
-                          files.push(...collectSpecFiles(fullPath));
-                        } else if (entry.endsWith('.md')) {
-                          files.push(fullPath);
-                        }
-                      }
-                    } catch {
-                      // ignore errors in subdirectories
-                    }
-                    return files;
-                  };
-
-                  const specFiles = collectSpecFiles(specDir).sort();
-                  let combinedSpec = '';
-
-                  for (const filePath of specFiles) {
-                    try {
-                      const content = await readFile(filePath, 'utf-8');
-                      combinedSpec += content + '\n\n';
-                    } catch {
-                      // skip files that can't be read
-                    }
-                  }
+                  const collected = await collectSpecMarkdown(specDir);
 
                   res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+                  res.setHeader('X-OpenLore-Spec-Truncated', String(collected.truncated));
+                  res.setHeader('X-OpenLore-Spec-Bytes', String(collected.bytes));
                   res.statusCode = 200;
-                  res.end(combinedSpec);
+                  res.end(collected.content);
                 } catch (err) {
                   res.statusCode = 500;
                   res.end(JSON.stringify({ error: sanitizeErrorMessage((err as Error).message) }));
