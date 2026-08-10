@@ -115,6 +115,14 @@ const WORKFLOW_ENTRIES: GuidanceEntry[] = [
   { requires: ['check_spec_drift'], render: () => '- **Before opening a PR** — `check_spec_drift`' },
   { requires: ['recall'], render: () => '- **Touching code others have reasoned about** — `recall` for anchored notes and decisions' },
   { requires: ['verify_claim'], render: () => '- **About to assert a structural fact to a human** — `verify_claim`, then cite the receipt' },
+  {
+    requires: ['prepare_spec_generation'],
+    render: () => '- **Creating a domain spec** — `prepare_spec_generation <domain>`, exhaust continuation cursors, then author and validate with the host editor',
+  },
+  {
+    requires: ['prepare_spec_repair'],
+    render: () => '- **Repairing an existing spec** — `prepare_spec_repair <domain>`, honor unavailable evidence, then reconcile and validate with the host editor',
+  },
 ];
 
 const ON_DEMAND_TOOLS = [
@@ -267,4 +275,3 @@ export async function generateAiConfigs(options: AiConfigOptions): Promise<AiCon
     })
   );
 }
-

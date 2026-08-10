@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:http';
 
-import { modelsUrl, stripMarker, isUsableConfig, readConfig, formatToolResult, formatCallArgs, NAV_TOOLS, PI_DAEMON_PRESET, PI_EXCLUDED_CONCLUSION_TOOLS, ensureDaemon, callTool, isUsableDaemon, missingDaemonTools, PiDaemonConnectionError } from './extension.js';
+import { modelsUrl, stripMarker, isUsableConfig, readConfig, formatToolResult, formatCallArgs, NAV_TOOLS, PI_DAEMON_PRESET, PI_EXCLUDED_CONCLUSION_TOOLS, PI_SPEC_WORKFLOW_OBSERVATIONS, PI_SPEC_WORKFLOW_EXCLUSIONS, ensureDaemon, callTool, isUsableDaemon, missingDaemonTools, PiDaemonConnectionError } from './extension.js';
 import { TOOL_DEFINITIONS } from '../cli/commands/mcp.js';
 import { startServe } from '../cli/commands/serve.js';
 import { TOOL_OUTPUT_CLASS } from '../core/services/mcp-handlers/tool-contract.js';
@@ -267,6 +267,21 @@ describe('formatToolResult', () => {
     expect(out).toContain('  hubCount: 5');
   });
 
+  it('presents degraded mapping coverage with its reason and remediation', () => {
+    const out = formatToolResult({
+      mappingCoverage: {
+        state: 'missing',
+        reason: 'mapping-not-generated',
+        message: 'Coverage claims are unavailable.',
+        remediation: 'Run `openlore generate` to create mapping.json.',
+      },
+    });
+    expect(out).toContain('**mappingCoverage**');
+    expect(out).toContain('state: missing');
+    expect(out).toContain('reason: mapping-not-generated');
+    expect(out).toContain('remediation: Run `openlore generate` to create mapping.json.');
+  });
+
   it('skips input-echo / prose / meta keys and empty arrays', () => {
     const out = formatToolResult({
       task: 'add auth',
@@ -438,11 +453,38 @@ describe('NAV_TOOLS surface', () => {
     const source = await readFile(new URL('./extension.ts', import.meta.url), 'utf8');
     expect(source).toContain("name: 'openlore_prepare_spec_generation'");
     expect(source).toContain("name: 'openlore_prepare_spec_repair'");
-    expect(source).toContain("callTool(daemon, 'get_architecture_overview'");
-    expect(source).toContain("callTool(daemon, 'audit_spec_coverage'");
-    expect(source).toContain("callTool(daemon, 'get_mapping'");
+    expect(source).toContain("callTool(daemon, 'prepare_spec_generation'");
+    expect(source).toContain("callTool(daemon, 'prepare_spec_repair'");
+    expect(source).not.toContain("callTool(daemon, 'audit_spec_coverage'");
+    expect(source).not.toContain("callTool(daemon, 'get_mapping'");
     expect(source).toContain('OpenLore makes no internal');
     expect(source).toContain('LLM call here. Pi\'s host agent');
+  });
+
+  it('surfaces every Generate/Repair protocol observation or documents an exclusion', () => {
+    const required = {
+      generation: ['domainEvidence'],
+      repair: [
+        'domainEvidence',
+        'existingSpec',
+        'coveredFunction',
+        'uncoveredFunction',
+        'staleMapping',
+        'orphanRequirement',
+        'structuralChange',
+        'mappingCoverage',
+      ],
+    } as const;
+    for (const [workflow, observations] of Object.entries(required)) {
+      const surfaced = PI_SPEC_WORKFLOW_OBSERVATIONS[workflow as keyof typeof PI_SPEC_WORKFLOW_OBSERVATIONS];
+      for (const observation of observations) {
+        const exclusion = PI_SPEC_WORKFLOW_EXCLUSIONS[`${workflow}.${observation}`];
+        expect(
+          observation in surfaced || Boolean(exclusion?.trim()),
+          `${workflow}.${observation} must be surfaced or have a documented exclusion`,
+        ).toBe(true);
+      }
+    }
   });
 
   it('has unique tool names', () => {

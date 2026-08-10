@@ -10,14 +10,64 @@ describe('buildDomainEvidence', () => {
       routeInventory: { total: 1, byMethod: {}, byFramework: {}, routes: [{ method: 'GET', path: '/invoices', file: 'src/routes.ts', framework: 'express', handler: 'list', contractSource: 'none' }] },
       undomained: [],
     } as unknown as RepoStructure;
-    const context = { signatures: [
-      { path: 'src/invoice.ts', language: 'TypeScript', entries: [] },
-      { path: 'src/helper.ts', language: 'TypeScript', entries: [] },
-    ] } as unknown as LLMContext;
+    const context = {
+      phase2_deep: { files: [{ path: 'src/no-signature.ts', content: '', tokens: 0 }] },
+      signatures: [
+        { path: 'src/invoice.ts', language: 'TypeScript', entries: [] },
+        { path: 'src/helper.ts', language: 'TypeScript', entries: [] },
+      ],
+    } as unknown as LLMContext;
 
     expect(buildDomainEvidence(repo, context)).toMatchObject([
       { name: 'billing', schemaFiles: ['src/invoice.ts'], apiFiles: ['src/routes.ts'], serviceFiles: [] },
-      { name: 'undomained', files: ['src/helper.ts'], serviceFiles: ['src/helper.ts'] },
+      { name: 'undomained', files: ['src/helper.ts', 'src/no-signature.ts'], serviceFiles: ['src/helper.ts', 'src/no-signature.ts'] },
+    ]);
+  });
+
+  it('retains attached tests but never reintroduces excluded evidence as undomained', () => {
+    const repo = {
+      domains: [{
+        name: 'generator',
+        files: ['src/generator/run.ts', 'src/generator/run.test.ts'],
+        definingFiles: ['src/generator/run.ts'],
+        supportingFiles: ['src/generator/run.test.ts'],
+        entities: [], keyFile: null, suggestedSpecPath: '',
+      }],
+      undomained: ['src/fixtures/sample.ts', 'test/unattached.test.ts'],
+      undomainedEvidence: [
+        { path: 'src/fixtures/sample.ts', role: 'excluded', reason: 'fixture-tree' },
+        { path: 'test/unattached.test.ts', role: 'supporting', reason: 'test-file' },
+      ],
+      domainDecisions: [{ candidate: 'stages', path: 'src/generator/stages', sources: ['dependency-cluster'], disposition: 'merged', reason: 'technical-child', owner: 'generator', files: [] }],
+      domainDecisionSummary: { total: 1, emitted: 1, omitted: 0, limit: 500, filesPerDecisionLimit: 50 },
+    } as unknown as RepoStructure;
+    const context = {
+      phase2_deep: { files: [
+        { path: 'src/fixtures/sample.ts', content: '', tokens: 0 },
+        { path: 'test/unattached.test.ts', content: '', tokens: 0 },
+      ] },
+      signatures: [
+        { path: 'src/generator/run.ts', language: 'TypeScript', entries: [] },
+        { path: 'src/generator/run.test.ts', language: 'TypeScript', entries: [] },
+        { path: 'src/fixtures/sample.ts', language: 'TypeScript', entries: [] },
+      ],
+    } as unknown as LLMContext;
+
+    expect(buildDomainEvidence(repo, context)).toMatchObject([
+      {
+        name: 'generator',
+        definingFiles: ['src/generator/run.ts'],
+        supportingFiles: ['src/generator/run.test.ts'],
+        serviceFiles: ['src/generator/run.ts'],
+        signatures: [expect.objectContaining({ path: 'src/generator/run.ts' })],
+        supportingSignatures: [expect.objectContaining({ path: 'src/generator/run.test.ts' })],
+        candidateDecisions: [expect.objectContaining({ candidate: 'stages', owner: 'generator' })],
+        candidateDecisionSummary: expect.objectContaining({ omitted: 0, limit: 500 }),
+      },
+      {
+        name: 'undomained', files: ['test/unattached.test.ts'],
+        definingFiles: [], supportingFiles: ['test/unattached.test.ts'], serviceFiles: [],
+      },
     ]);
   });
 });

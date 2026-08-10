@@ -74,13 +74,15 @@ export async function openloreAudit(options: AuditApiOptions = {}): Promise<Audi
   const maxUncovered = options.maxUncovered ?? DEFAULT_MAX_UNCOVERED;
   const hubThreshold = options.hubThreshold ?? DEFAULT_HUB_THRESHOLD;
   const shouldSave = options.save ?? true;
+  const fileScope = options.files ? new Set(options.files) : null;
+  const domainScope = options.domains ? new Set(options.domains) : null;
   const analysisDir = join(rootPath, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
 
   // Load (or refresh) snapshot
   const openloreConfig = await readOpenLoreConfig(rootPath);
   const openspecRelPath = openloreConfig?.openspecPath ?? OPENSPEC_DIR;
   const snapshotGen = new SpecSnapshotGenerator(rootPath, openspecRelPath);
-  const snapshot = await snapshotGen.generate().catch(() => null);
+  const snapshot = await snapshotGen.generate({ persist: shouldSave }).catch(() => null);
 
   // Load raw artifacts for deep analysis
   const [llmContextRaw, mappingRaw, depGraphRaw] = await Promise.all([
@@ -92,31 +94,62 @@ export async function openloreAudit(options: AuditApiOptions = {}): Promise<Audi
   const llmContext = llmContextRaw ? JSON.parse(llmContextRaw) as LLMContext : null;
   const mappingPath = join(analysisDir, ARTIFACT_MAPPING);
   let mapping: MappingArtifact | null = null;
-  let mappingCoverage: AuditReport['mappingCoverage'] = {
-    state: 'missing', reason: 'mapping.json has not been generated', artifactPath: mappingPath,
-  };
+  let mappingCoverage: AuditReport['mappingCoverage'];
   if (!mappingRaw) {
-    mappingCoverage = { state: 'missing', reason: 'mapping.json has not been generated', artifactPath: mappingPath };
+    mappingCoverage = {
+      state: 'missing',
+      reason: 'mapping-not-generated',
+      message: 'mapping.json has not been generated',
+      remediation: 'Run `openlore generate` to create a mapping from the current analysis.',
+      artifactPath: mappingPath,
+    };
   } else {
     try {
       mapping = JSON.parse(mappingRaw) as MappingArtifact;
       const depGraph = depGraphRaw ? JSON.parse(depGraphRaw) as DependencyGraphResult : null;
-      if (!mapping.version || !mapping.sourceAnalysisFingerprint || !depGraph) {
-        mappingCoverage = { state: 'stale', reason: 'mapping.json has no compatible source-analysis provenance', artifactPath: mappingPath };
+      if (mapping.scope?.domains.length && (!domainScope || [...domainScope].some(domain => !mapping!.scope!.domains.includes(domain)))) {
+        mappingCoverage = {
+          state: 'stale',
+          reason: 'scoped-artifact',
+          message: `mapping.json covers only these domains: ${mapping.scope.domains.join(', ')}`,
+          remediation: 'Run `openlore generate` without `--domains` to refresh global coverage.',
+          artifactPath: mappingPath,
+        };
+        mapping = null;
+      } else if (!mapping.version || !mapping.sourceAnalysisFingerprint || !depGraph) {
+        mappingCoverage = {
+          state: 'stale',
+          reason: 'incompatible-provenance',
+          message: 'mapping.json has no compatible source-analysis provenance',
+          remediation: 'Run `openlore analyze` and then `openlore generate` to refresh mapping provenance.',
+          artifactPath: mappingPath,
+        };
         mapping = null;
       } else if (mapping.sourceAnalysisFingerprint !== mappingSourceFingerprint(depGraph)) {
-        mappingCoverage = { state: 'stale', reason: 'mapping.json does not match the current dependency graph', artifactPath: mappingPath };
+        mappingCoverage = {
+          state: 'stale',
+          reason: 'fingerprint-mismatch',
+          message: 'mapping.json does not match the current dependency graph',
+          remediation: 'Run `openlore generate` against the current analysis to refresh mapping.json.',
+          artifactPath: mappingPath,
+        };
         mapping = null;
       } else {
         mappingCoverage = { state: 'available', artifactPath: mappingPath };
       }
     } catch {
-      mappingCoverage = { state: 'invalid', reason: 'mapping.json is not valid JSON', artifactPath: mappingPath };
+      mappingCoverage = {
+        state: 'invalid',
+        reason: 'invalid-json',
+        message: 'mapping.json is not valid JSON',
+        remediation: 'Run `openlore generate` to replace the invalid mapping artifact.',
+        artifactPath: mappingPath,
+      };
     }
   }
 
   const callGraph = llmContext?.callGraph as SerializedCallGraph | undefined;
-  const allNodes = callGraph?.nodes ?? [];
+  const allNodes = (callGraph?.nodes ?? []).filter(node => !fileScope || fileScope.has(node.filePath));
   const hubNodes = new Set((callGraph?.hubFunctions ?? []).map(n => n.id));
 
   // Build coverage set
@@ -139,14 +172,14 @@ export async function openloreAudit(options: AuditApiOptions = {}): Promise<Audi
   // 3. Orphan requirements (requirements in mapping with no matched function)
   const orphanRequirements: AuditOrphanRequirement[] = mapping
     ? mapping.mappings
-        .filter(m => m.functions.length === 0 || m.functions.every(f => f.name === '*'))
+        .filter(m => (!domainScope || domainScope.has(m.domain)) && (m.functions.length === 0 || m.functions.every(f => f.name === '*')))
         .map(m => ({ requirement: m.requirement, domain: m.domain, specFile: m.specFile }))
     : [];
 
   // 4. Stale domains (source files modified after spec)
   const staleDomains: AuditStaleDomain[] = snapshot
     ? snapshot.domains
-        .filter(d => d.sourcesModifiedAt > d.specModifiedAt)
+        .filter(d => (!domainScope || domainScope.has(d.name)) && d.sourcesModifiedAt > d.specModifiedAt)
         .map(d => ({
           name: d.name,
           specFile: d.specFile,

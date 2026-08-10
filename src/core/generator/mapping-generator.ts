@@ -7,8 +7,8 @@
  * Enables refactoring workflows: dead code detection, naming normalization.
  */
 
-import { writeFile, readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { writeFile, readFile, mkdir } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import {
   SIMILARITY_CONTAINMENT_SCORE,
@@ -49,6 +49,8 @@ export interface MappingArtifact {
   generatedAt: string;
   /** Fingerprint of the exported-symbol inventory the mappings were built from. */
   sourceAnalysisFingerprint?: string;
+  /** Present when this artifact describes selected domains rather than global coverage. */
+  scope?: { domains: string[] };
   mappings: RequirementMapping[];
   orphanFunctions: FunctionRef[];
   stats: {
@@ -126,15 +128,18 @@ export class MappingGenerator {
   private rootPath: string;
   private openspecPath: string;
   private semanticSearch?: SemanticSearchFn;
+  private artifactRootPath: string;
 
   constructor(
     rootPath: string,
     openspecPath = OPENSPEC_DIR,
-    semanticSearch?: SemanticSearchFn
+    semanticSearch?: SemanticSearchFn,
+    artifactRootPath = rootPath,
   ) {
     this.rootPath = rootPath;
     this.openspecPath = openspecPath;
     this.semanticSearch = semanticSearch;
+    this.artifactRootPath = artifactRootPath;
   }
 
   /** Semantic lookup: returns FunctionRefs matched by vector similarity */
@@ -165,7 +170,8 @@ export class MappingGenerator {
 
   async generate(
     pipeline: PipelineResult,
-    depGraph: DependencyGraphResult
+    depGraph: DependencyGraphResult,
+    scopeDomains?: string[],
   ): Promise<MappingArtifact> {
     // Build export index: name → list of FunctionRef (multiple files can export same name)
     const exportIndex = new Map<string, FunctionRef[]>();
@@ -315,6 +321,9 @@ export class MappingGenerator {
       version: 2,
       generatedAt: new Date().toISOString(),
       sourceAnalysisFingerprint: mappingSourceFingerprint(depGraph),
+      ...(scopeDomains && scopeDomains.length > 0
+        ? { scope: { domains: [...new Set(scopeDomains.map(domain => domain.toLowerCase()))].sort() } }
+        : {}),
       mappings,
       orphanFunctions,
       stats: {
@@ -330,7 +339,8 @@ export class MappingGenerator {
   }
 
   private async write(artifact: MappingArtifact): Promise<void> {
-    const outPath = join(this.rootPath, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_MAPPING);
+    const outPath = join(this.artifactRootPath, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_MAPPING);
+    await mkdir(dirname(outPath), { recursive: true });
     await writeFile(outPath, JSON.stringify(artifact, null, 2), 'utf-8');
   }
 

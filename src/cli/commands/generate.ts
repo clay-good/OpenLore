@@ -9,7 +9,7 @@ import { Command } from 'commander';
 import { allowInsecureTls } from '../../core/services/tls-scope.js';
 import { confirm } from '@inquirer/prompts';
 import { stat, rm } from 'node:fs/promises';
-import { join, relative } from 'node:path';
+import { join, relative, resolve } from 'node:path';
 import { logger } from '../../utils/logger.js';
 import { resolveTrustedApiBase, resolveTrustedSslVerify, rejectRepoConfiguredTlsOptOut } from '../../core/services/repo-config-trust.js';
 import { resolveOpenspecDir } from '../../utils/openspec-dir.js';
@@ -87,6 +87,11 @@ interface AnalysisData {
   depGraph?: DependencyGraphResult;
   age: number;
   timestamp: string;
+}
+
+/** Resolve an operator-supplied output path without rebasing an absolute path. */
+export function resolveGenerateOutputPath(rootPath: string, outputDir: string): string {
+  return resolve(rootPath, outputDir);
 }
 
 // ============================================================================
@@ -323,7 +328,7 @@ Each spec.md follows OpenSpec conventions:
       // `openspecPath` comes from the repo's own config.json and may not — it ends up
       // as a write target (the RAG manifest, synced specs) further down.
       const fullOpenspecPath = opts.outputDir
-        ? join(rootPath, opts.outputDir)
+        ? resolveGenerateOutputPath(rootPath, opts.outputDir)
         : resolveOpenspecDir(rootPath, openloreConfig.openspecPath);
 
       // Load existing OpenSpec config if present
@@ -536,6 +541,7 @@ Each spec.md follows OpenSpec conventions:
       const pipeline = new SpecGenerationPipeline(llm, {
         outputDir: join(rootPath, OPENLORE_DIR, OPENLORE_GENERATION_SUBDIR),
         rootPath,
+        domains: opts.domains,
         saveIntermediate: true,
         generateADRs: opts.adr || opts.adrOnly,
         force: opts.force,
@@ -585,10 +591,15 @@ Each spec.md follows OpenSpec conventions:
       let mappingArtifact: MappingArtifact | undefined;
       if (depGraph) {
         try {
-          const mapper = new MappingGenerator(rootPath, relative(rootPath, fullOpenspecPath) || OPENSPEC_DIR, semanticSearch);
-          mappingArtifact = await mapper.generate(pipelineResult, depGraph);
+          const mapper = new MappingGenerator(
+            rootPath,
+            opts.outputDir ? '.' : relative(rootPath, fullOpenspecPath) || OPENSPEC_DIR,
+            semanticSearch,
+            opts.outputDir ? fullOpenspecPath : rootPath,
+          );
+          mappingArtifact = await mapper.generate(pipelineResult, depGraph, opts.domains);
           logger.success(
-            `Requirement mapping: ${mappingArtifact.stats.mappedRequirements}/${mappingArtifact.stats.totalRequirements} requirements mapped, ${mappingArtifact.stats.orphanCount} orphan functions → ${OPENLORE_ANALYSIS_REL_PATH}/${ARTIFACT_MAPPING}`
+            `Requirement mapping: ${mappingArtifact.stats.mappedRequirements}/${mappingArtifact.stats.totalRequirements} requirements mapped, ${mappingArtifact.stats.orphanCount} orphan functions → ${relative(rootPath, join(opts.outputDir ? fullOpenspecPath : rootPath, OPENLORE_ANALYSIS_REL_PATH, ARTIFACT_MAPPING))}`
           );
         } catch (error) {
           logger.warning(`Could not generate mapping artifact: ${(error as Error).message}`);
@@ -651,10 +662,11 @@ Each spec.md follows OpenSpec conventions:
       // Write specs
       const writer = new OpenSpecWriter({
         rootPath,
+        openspecRoot: fullOpenspecPath,
         writeMode,
         version: openloreConfig.version,
         createBackups: true,
-        updateConfig: true,
+        updateConfig: Boolean(opts.outputDir) || opts.domains.length === 0,
         validateBeforeWrite: true,
         cleanBeforeWrite: shouldCleanStaleDomains(opts.force, opts.domains, opts.adrOnly),
       });
@@ -670,18 +682,22 @@ Each spec.md follows OpenSpec conventions:
 
       // Generate RAG manifest
       try {
-        const manifestGen = new RagManifestGenerator();
-        const manifest = manifestGen.generate(metadataSpecs, depGraph);
-        const { writeFile } = await import('node:fs/promises');
-        await writeFile(
-          safeJoin(fullOpenspecPath, ARTIFACT_RAG_MANIFEST),
-          JSON.stringify(manifest, null, 2),
-          'utf-8',
-        );
-        // Report where it ACTUALLY went. `openloreConfig.openspecPath` is the
-        // requested value, which may have been clamped back into the root — printing
-        // it made the tool claim a destination it had deliberately refused to use.
-        logger.success(`RAG manifest: ${manifest.domains.length} domains → ${relative(rootPath, join(fullOpenspecPath, ARTIFACT_RAG_MANIFEST)) || ARTIFACT_RAG_MANIFEST}`);
+        if (opts.domains.length > 0 && !opts.outputDir) {
+          logger.warning('Scoped generation leaves the global RAG manifest unchanged. Run without --domains to refresh it.');
+        } else {
+          const manifestGen = new RagManifestGenerator();
+          const manifest = manifestGen.generate(metadataSpecs, depGraph);
+          const { writeFile } = await import('node:fs/promises');
+          await writeFile(
+            safeJoin(fullOpenspecPath, ARTIFACT_RAG_MANIFEST),
+            JSON.stringify(manifest, null, 2),
+            'utf-8',
+          );
+          // Report where it ACTUALLY went. `openloreConfig.openspecPath` is the
+          // requested value, which may have been clamped back into the root — printing
+          // it made the tool claim a destination it had deliberately refused to use.
+          logger.success(`RAG manifest: ${manifest.domains.length} domains → ${relative(rootPath, join(fullOpenspecPath, ARTIFACT_RAG_MANIFEST)) || ARTIFACT_RAG_MANIFEST}`);
+        }
       } catch (error) {
         logger.warning(`Could not generate RAG manifest: ${(error as Error).message}`);
       }

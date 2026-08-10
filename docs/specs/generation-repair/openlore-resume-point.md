@@ -5,12 +5,12 @@ which of the three companion documents to read for detail.
 
 ## Companion documents
 
-1. `openlore-unified-hlspec-v2.md` (content is v4) — the architecture itself.
+1. [`openlore-unified-hlspec-v2.md`](openlore-unified-hlspec-v2.md) (content is v4) — the architecture itself.
    This is the one to read in full when resuming.
-2. `openlore-capability-audit.md` — the evidence: what the current MCP surface
+2. [`openlore-capability-audit.md`](openlore-capability-audit.md) — the evidence: what the current MCP surface
    already does (§A-D), and the per-stage read of the six-stage generation
    pipeline (§E). Reference when touching any specific tool or stage.
-3. `openlore-generation-repair-hlspec.md` (v1) — superseded, kept for history
+3. [`openlore-generation-repair-hlspec.md`](openlore-generation-repair-hlspec.md) (v1) — superseded, kept for history
    only. Not needed to resume work; v4 is self-contained.
 
 ## What's decided (architecture — treat as settled, don't re-litigate)
@@ -19,23 +19,23 @@ which of the three companion documents to read for detail.
   scope. Repair = a spec exists but doesn't fully match the code — Repair
   handles partial coverage too (add + correct in one pass over one file,
   never split between Generate and Repair on the same file).
-- **Four reconciliation states are Claude Code's job, not OpenLore's**:
+- **Four reconciliation states are the host agent's job, not OpenLore's**:
   OpenLore reports observations (`covered`, `uncovered_function`,
-  `stale_mapping`, `orphan_requirement`, `structural_change`). Claude Code
+  `stale_mapping`, `orphan_requirement`, `structural_change`). The host agent
   maps those to `consistent` / `stale` / `missing` (judgment call) /
   `orphaned`. OpenLore never infers business intent from structure.
 - **Division of responsibility**: OpenLore = deterministic observations.
-  Claude Code = semantic interpretation + reconciliation + editing. OpenSpec
+  Host agent = semantic interpretation + reconciliation + editing. OpenSpec
   = spec format + change/evolution workflow.
 - **Same evidence layer, task-specific composition** — not one fixed bundle
   shared identically by Generate and Repair.
 - **No new MCP primitive** (`detect_drift()`, `repair_context()`, etc.) unless
   the composed-primitives workflow (`orient` → `audit_spec_coverage` →
   `get_spec`/`get_mapping`/`check_spec_drift` → `structural_diff`/
-  `get_subgraph` → Claude reconciles → edit) demonstrates a concrete
+  `get_subgraph` → host agent reconciles → edit) demonstrates a concrete
   information/performance gap in practice.
 - **ACP is out of scope entirely** — not for cost reasons alone; the target
-  architecture doesn't need it. Claude Code is a host agent consuming
+  architecture doesn't need it. An MCP-compatible host agent consumes
   OpenLore's MCP surface, not a provider OpenLore calls into. The standalone
   facade already supports Claude via direct Anthropic API
   (`provider: "anthropic"`), fully separate from ACP, if a standalone-with-
@@ -99,7 +99,7 @@ Concrete checklist, in order:
    provider on a real domain, compare to the pre-rework output and to the
    Mistral→Claude-rewrite baseline already observed.
 7. Only after that: reuse the same evidence shape for the agent-hosted
-   (Claude Code / MCP) path — no new tool unless step 6-7 reveals a genuine
+   (MCP-compatible host / Pi) path — no new tool unless step 6-7 reveals a genuine
    gap.
 
 ## Explicitly not re-open when resuming

@@ -18,6 +18,17 @@ import type { AuditReport } from '../../types/index.js';
 // FORMATTING
 // ============================================================================
 
+export function formatMappingCoverageStatus(report: AuditReport): string[] {
+  if (report.mappingCoverage.state === 'available') {
+    return [`Coverage:       ${report.summary.coveragePct}% (${report.summary.coveredFunctions}/${report.summary.totalFunctions} functions)`];
+  }
+  return [
+    `Coverage:       unavailable (${report.mappingCoverage.state}: ${report.mappingCoverage.reason ?? 'unknown'})`,
+    ...(report.mappingCoverage.message ? [`Reason:         ${report.mappingCoverage.message}`] : []),
+    ...(report.mappingCoverage.remediation ? [`Refresh:        ${report.mappingCoverage.remediation}`] : []),
+  ];
+}
+
 function printReport(report: AuditReport, rootPath: string): void {
   const { summary } = report;
 
@@ -26,11 +37,7 @@ function printReport(report: AuditReport, rootPath: string): void {
   console.log('   Spec Coverage Audit');
   console.log('   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('');
-  if (report.mappingCoverage.state === 'available') {
-    console.log(`   Coverage:       ${summary.coveragePct}% (${summary.coveredFunctions}/${summary.totalFunctions} functions)`);
-  } else {
-    console.log(`   Coverage:       unavailable (${report.mappingCoverage.state}: ${report.mappingCoverage.reason})`);
-  }
+  for (const line of formatMappingCoverageStatus(report)) console.log(`   ${line}`);
   console.log(`   Uncovered:      ${summary.uncoveredCount} functions`);
   console.log(`   Hub gaps:       ${summary.hubGapCount} hub functions without spec`);
   console.log(`   Orphan reqs:    ${summary.orphanRequirementCount} requirements with no implementation found`);

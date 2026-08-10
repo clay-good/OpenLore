@@ -266,6 +266,10 @@ export interface AuditApiOptions extends BaseOptions {
   hubThreshold?: number;
   /** Save audit report to .openlore/analysis/audit-report.json. Default: true */
   save?: boolean;
+  /** Optional normalized file scope applied before result limits. */
+  files?: string[];
+  /** Optional spec-domain scope applied before result limits. */
+  domains?: string[];
 }
 
 export type { AuditReport } from '../types/index.js';

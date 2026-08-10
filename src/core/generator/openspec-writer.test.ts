@@ -125,7 +125,7 @@ Layered architecture.
 // GHSA-5j8x-q7q6-58j5). The spec-generation writer is the one LLM-in-the-loop write
 // surface, and it sits outside the MCP path-parameter coverage gate. This gate is its
 // equivalent: it fails if `writeSpec` ever stops confining the (LLM-derived) spec path
-// through `safeJoin`, or reverts to the vulnerable bare `join(this.rootPath, spec.path)`
+// through `safeJoin`, or reverts to a vulnerable bare path join
 // — so a future edit cannot silently reopen the traversal.
 describe('Write confinement structural guard (mcp-security)', () => {
   const writerSrc = readFileSync(
@@ -139,8 +139,8 @@ describe('Write confinement structural guard (mcp-security)', () => {
 
   it('confines the spec write path through safeJoin', () => {
     expect(
-      /safeJoin\(\s*this\.rootPath\s*,\s*spec\.path\s*\)/.test(writerSrc),
-      'writeSpec must resolve the spec path via safeJoin(this.rootPath, spec.path)',
+      /safeJoin\(\s*this\.openspecRoot\s*,\s*spec\.path\.slice\(prefix\.length\)\s*\)/.test(writerSrc),
+      'writeSpec must strip the openspec/ prefix and resolve within this.openspecRoot via safeJoin',
     ).toBe(true);
   });
 
@@ -181,6 +181,43 @@ describe('OpenSpecWriter', () => {
   });
 
   describe('writeSpecs', () => {
+    it('writes specs and config to an explicit OpenSpec root outside the project root', async () => {
+      const openspecRoot = await createTempDir();
+      try {
+        const writer = new OpenSpecWriter({ rootPath: tempDir, openspecRoot, updateConfig: true });
+        await writer.writeSpecs(createMockSpecs(), createMockSurvey());
+        expect(await fileExists(join(openspecRoot, 'specs/user/spec.md'))).toBe(true);
+        expect(await fileExists(join(openspecRoot, 'config.yaml'))).toBe(true);
+        expect(await fileExists(join(tempDir, 'openspec/specs/user/spec.md'))).toBe(false);
+      } finally {
+        await rm(openspecRoot, { recursive: true, force: true });
+      }
+    });
+
+    it('merges an existing spec under an external OpenSpec root and keeps backups project-local', async () => {
+      const openspecRoot = await createTempDir();
+      try {
+        await mkdir(join(openspecRoot, 'specs/user'), { recursive: true });
+        await writeFile(join(openspecRoot, 'specs/user/spec.md'), '# User\n\nHuman preface.\n');
+        const writer = new OpenSpecWriter({
+          rootPath: tempDir,
+          openspecRoot,
+          writeMode: 'merge',
+          updateConfig: false,
+        });
+
+        const report = await writer.writeSpecs(createMockSpecs(), createMockSurvey());
+
+        expect(report.filesMerged).toContain('openspec/specs/user/spec.md');
+        expect(await readFile(join(openspecRoot, 'specs/user/spec.md'), 'utf-8')).toContain('Human preface.');
+        const backup = report.filesBackedUp.find(path => path.endsWith('openspec/specs/user/spec.md'));
+        expect(backup).toBeDefined();
+        expect(await fileExists(join(tempDir, backup!))).toBe(true);
+      } finally {
+        await rm(openspecRoot, { recursive: true, force: true });
+      }
+    });
+
     it('should write all specs to correct paths', async () => {
       const writer = new OpenSpecWriter({
         rootPath: tempDir,

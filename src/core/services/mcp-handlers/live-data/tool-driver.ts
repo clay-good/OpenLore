@@ -219,6 +219,8 @@ export const TOOL_REGISTRY: Record<string, ToolPlan> = {
 
   // ── domain tool ──────────────────────────────────────────────────────────
   get_spec: { kind: 'read', buildArgs: (f) => (f.specDomain ? { directory: f.directory, domain: f.specDomain } : null) },
+  prepare_spec_generation: { kind: 'read', buildArgs: (f) => (f.specDomain ? { directory: f.directory, domain: f.specDomain } : null) },
+  prepare_spec_repair: { kind: 'read', buildArgs: (f) => (f.specDomain ? { directory: f.directory, domain: f.specDomain } : null) },
 
   // ── mutating decision tools (write into the cached repo's gitignored .openlore) ──
   record_decision: {

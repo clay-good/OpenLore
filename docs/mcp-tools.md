@@ -34,13 +34,13 @@ or for local development:
 
 ### Recommended lean surface (cost, Spec 25 P1 · Spec 28)
 
-MCP clients send every tool's JSON Schema on every request, so tools the agent never calls are pure per-request overhead. The full surface is **73 tools / ~87 KB / ~22k tokens** of `tools/list`. The Spec 14 benchmark showed this prefix is what made openlore *lose* on small repos — and that a lean, navigation-focused surface flips it to a win (see the [Value Scorecard](../README.md#value-scorecard--does-it-pay-for-itself)).
+MCP clients send every tool's JSON Schema on every request, so tools the agent never calls are pure per-request overhead. The full surface is **75 tools / ~89 KB / ~22k tokens** of `tools/list`. The Spec 14 benchmark showed this prefix is what made openlore *lose* on small repos — and that a lean, navigation-focused surface flips it to a win (see the [Value Scorecard](../README.md#value-scorecard--does-it-pay-for-itself)).
 
-**The default surface is the `substrate` preset (the navigation core plus governance reads)**, not an extra step: `openlore install` (and a bare `openlore mcp`) wires the **`substrate`** preset — 13 tools: the navigation graph-traversal core plus the three highest-value governance reads (`recall`, `verify_claim`, `blast_radius`) — so an out-of-box agent gets the read face on top of navigation (the write face, `remember` + `record_decision`, stays opt-in). It cleared the DefaultSurfaceRevealsAllFaces benchmark (no task-completion or selection regression vs. the lean core across two models and both repo tiers; decision c79ec7ca / ADR-0023 supersedes ADR-0022). The lean navigate-only **`navigation`** preset (10 tools) stays a one-flag escape (`--preset navigation`); the full surface is one explicit opt-in away (`--preset full` / `--all-tools`), and every governance/memory/verify/federation/coordination capability stays reachable via its named preset. When the default surface is active, the server advertises breadth once via its `instructions` channel (no extra tool schemas) so an agent never concludes a capability is absent. To restore the prior all-tools default: `openlore install --preset full`.
+**The default surface is the `substrate` preset (the navigation core plus governance and spec-workflow reads)**, not an extra step: `openlore install` (and a bare `openlore mcp`) wires the **`substrate`** preset — 15 tools: the navigation graph-traversal core, the three highest-value governance reads (`recall`, `verify_claim`, `blast_radius`), and `prepare_spec_generation` / `prepare_spec_repair`. An out-of-box capable MCP agent can therefore obtain a bounded evidence bundle and author specs with its native editor; OpenLore performs no internal LLM call in these composites. The lean navigate-only **`navigation`** preset (10 tools) stays a one-flag escape (`--preset navigation`); the full surface is one explicit opt-in away (`--preset full` / `--all-tools`). When the default surface is active, the server advertises breadth once via its `instructions` channel (no extra tool schemas) so an agent never concludes a capability is absent. To restore the prior all-tools default: `openlore install --preset full`.
 
 **Spec 28 measured how far the *server* can shrink that prefix, honestly:** MCP has no server-driven lazy-schema mechanism (`tools/list` always returns full schemas), and the lossless server-side byte-lever is only ~2% — the payload is dominated by irreducible per-tool schema structure plus the selection text an agent needs to pick a tool. So the real lever is the *client* (deferred schemas, below) and *tool count* (`--preset`), not byte-shaving. The surface has been trimmed losslessly anyway (shared param descriptions, no boilerplate) and is now **bounded by a regression guard** so it can't silently bloat. Two ways to get the lean surface, in order of preference:
 
-1. **Deferred schemas (best — keeps every tool available).** If your client supports it (Claude Code: `alwaysLoad: false`), advertise tool *names* cheaply and load a tool's schema only when it's used. See the [two-server setup](agent-setup.md) — you keep all 73 tools without paying their schema cost up front.
+1. **Deferred schemas (best — keeps every tool available).** If your client supports it (Claude Code: `alwaysLoad: false`), advertise tool *names* cheaply and load a tool's schema only when it's used. See the [two-server setup](agent-setup.md) — you keep all 75 tools without paying their schema cost up front.
 2. **`--preset navigation` (server-side, navigation-only — the lean escape below the default).** A bare `openlore mcp` / `openlore install` wires the wider `substrate` default (see below); `--preset navigation` is the one-flag way down to the navigate-only core: a graph-traversal surface of 10 tools (orient, search_code, get_subgraph, trace_execution_path, analyze_impact, suggest_insertion_points, get_function_skeleton, get_landmarks, get_map, find_path). It is exactly the configuration the benchmark measured (−7%→−21% cost, −26% round-trips on deep traces). Note it omits the governance tools (`record_decision`, `check_architecture`, inventories, and the `substrate` default's governance reads), so if you use the decision gate or architecture checks during a session, prefer option 1 (deferred schemas) or wire a governance-bearing preset (`--minimal`, or the full surface with `--preset full`).
 
 The tool list and schemas are emitted in a fixed, deterministic order with no per-request variation, so the provider KV-cache holds the surface and its cost drops sharply after the first call (guarded by a regression test).
@@ -655,14 +655,20 @@ dryRun     boolean   Preview changes without writing files (default: false)
 
 **Scenario E.1 -- Agent-authored specification generation and repair**
 
-OpenLore exposes one deterministic, domain-scoped evidence representation through
-`get_architecture_overview`. Any MCP-capable host agent can use it to author a new
-specification without an OpenLore LLM call. For repair, compose the same evidence
-with `audit_spec_coverage`, `get_spec`, `get_mapping`, `check_spec_drift`, and (as
-needed) `structural_diff` or `get_subgraph`. Generate and Repair deliberately use
-different subsets: the shared layer is a representation, not a mandatory fixed
-bundle. `mappingCoverage` explicitly reports `available`, `missing`, `invalid`, or
-`stale`; unavailable mapping provenance never masquerades as uncovered code.
+Use `prepare_spec_generation({ directory, domain })` for a new domain spec and
+`prepare_spec_repair({ directory, domain, baseRef? })` for an existing spec. Both
+are read-only, deterministic MCP compositions: OpenLore prepares evidence while
+the host agent interprets it, authors prose, and edits files. They are present in
+the default and full surfaces; the explicit navigation-only preset omits them.
+
+Each response includes analysis provenance and a `receipt`. A `partial` receipt
+names omitted evidence and either supplies an opaque continuation cursor or a
+prefilled atomic-tool follow-up. Exhaust cursors in order; use `get_spec`,
+`get_mapping`, `audit_spec_coverage`, `structural_diff`, and other atomic tools
+only when the receipt requests deeper evidence. Repair scopes structural changes
+over current domain files plus historical paths from the spec and mapping, so a
+deleted/moved file and a fully orphaned spec remain observable. Unavailable
+mapping provenance never masquerades as zero uncovered code.
 
 **Scenario F -- Decisions workflow**
 ```

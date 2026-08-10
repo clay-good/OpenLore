@@ -63,6 +63,8 @@ import {
   handleGetCriticalHubs,
   handleCheckSpecDrift,
   handleSuggestInsertionPoints,
+  selectActiveTools,
+  TOOL_DEFINITIONS,
 } from './mcp.js';
 import { VectorIndex } from '../../core/analyzer/vector-index.js';
 import { EmbeddingService } from '../../core/analyzer/embedding-service.js';
@@ -78,6 +80,17 @@ import {
   detectDrift,
 } from '../../core/drift/index.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
+
+describe('spec workflow composite presets', () => {
+  it('exposes both composites by default and in full, but not in navigation-only', () => {
+    const names = (preset?: string) => selectActiveTools(TOOL_DEFINITIONS, preset ? { preset } : {}).map(tool => tool.name);
+    for (const name of ['prepare_spec_generation', 'prepare_spec_repair']) {
+      expect(names()).toContain(name);
+      expect(names('full')).toContain(name);
+      expect(names('navigation')).not.toContain(name);
+    }
+  });
+});
 
 // ============================================================================
 // Fixture helpers

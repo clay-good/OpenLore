@@ -50,6 +50,20 @@ describe('generateCodebaseDigest', () => {
     expect(content).toContain('openlore MCP workflow');
   });
 
+  it('renders reconciled ownership domains without re-inferring them', async () => {
+    const tmpDir = await mkdtemp(join(tmpdir(), 'digest-test-'));
+    const repoStructure = {
+      domains: [{ name: 'generator', files: ['a.ts', 'a.test.ts'], definingFiles: ['a.ts'], supportingFiles: ['a.test.ts'] }],
+      statistics: { rawDomainCandidateCount: 4 },
+    } as unknown as import('./artifact-generator.js').RepoStructure;
+
+    await generateCodebaseDigest(makeContext(), null, { rootPath: tmpDir, outputDir: tmpDir, repoStructure });
+    const content = await readFile(join(tmpDir, 'CODEBASE.md'), 'utf-8');
+    expect(content).toContain('## Inferred ownership domains');
+    expect(content).toContain('4 raw candidates reconciled into 1 generation-ready domains');
+    expect(content).toContain('`generator` — 1 defining, 1 supporting files');
+  });
+
   it('includes Overview section when call graph is present', async () => {
     const tmpDir = await mkdtemp(join(tmpdir(), 'digest-test-'));
     const cg = makeCallGraph({

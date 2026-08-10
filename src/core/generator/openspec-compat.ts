@@ -6,7 +6,7 @@
  */
 
 import { readFile, writeFile, mkdir, access, readdir } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml, parseDocument } from 'yaml';
 import logger from '../../utils/logger.js';
 import { OPENSPEC_DIR, OPENSPEC_CONFIG_FILENAME } from '../../constants.js';
@@ -396,8 +396,8 @@ export class OpenSpecConfigManager {
   private configPath: string;
   private openspecRoot: string;
 
-  constructor(projectRoot: string) {
-    this.openspecRoot = join(projectRoot, OPENSPEC_DIR);
+  constructor(projectRoot: string, openspecRoot?: string) {
+    this.openspecRoot = openspecRoot ? resolve(openspecRoot) : join(projectRoot, OPENSPEC_DIR);
     this.configPath = join(this.openspecRoot, OPENSPEC_CONFIG_FILENAME);
   }
 

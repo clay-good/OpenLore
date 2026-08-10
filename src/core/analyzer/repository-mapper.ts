@@ -22,7 +22,7 @@ import {
 import type { ProjectType, ScoredFile, FileMetadata } from '../../types/index.js';
 import { FileWalker, type FileWalkerOptions } from './file-walker.js';
 import { SignificanceScorer, type ScoringConfig } from './significance-scorer.js';
-import { deriveDomainFromPath, DOMAIN_NOISE_DIRS } from './domain-naming.js';
+import { classifyDomainFile, deriveDomainOwnershipFromPath, DOMAIN_NOISE_DIRS } from './domain-naming.js';
 import { isEntirelyOpenLoreManaged } from '../../utils/openlore-managed-file.js';
 import { readSourceCapped } from './bounded-file-scan.js';
 
@@ -498,17 +498,15 @@ function inferDomains(files: ScoredFile[]): Record<string, ScoredFile[]> {
   const domainPrefixes = new Map<string, string[]>();
 
   for (const file of files) {
-    // Skip test and config files for domain inference
-    if (file.isTest || file.isConfig) continue;
+    // Only defining files may mint repository-map candidates. Supporting
+    // tests are attached later, after final-domain reconciliation.
+    if (classifyDomainFile(file).role !== 'defining') continue;
 
-    // Derive a domain from the file's directory by walking leaf-first and
-    // skipping build-layout / reverse-DNS package noise (shared with the
-    // dependency-graph cluster naming). Walking leaf-first is what keeps Java
-    // (src/main/java/com/example/inventory/Foo.java) at the business package
-    // ("inventory") instead of collapsing every source file into the org root
-    // ("com"/"springframework"). See issue #138.
+    // Derive the stable ownership root for this source tree. JVM package
+    // layouts remain leaf-oriented; module layouts keep technical children
+    // under their first meaningful owner.
     const dirParts = file.path.replace(/\\/g, '/').split('/').slice(0, -1);
-    const domain = deriveDomainFromPath(dirParts);
+    const domain = deriveDomainOwnershipFromPath(dirParts, file.extension);
     if (domain) {
       if (!domains[domain]) {
         domains[domain] = [];

@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { deriveDomainFromPath, DOMAIN_NOISE_DIRS } from './domain-naming.js';
+import {
+  deriveDomainFromPath,
+  deriveDomainOwnershipFromPath,
+  isTechnicalDomainRole,
+  DOMAIN_NOISE_DIRS,
+} from './domain-naming.js';
 
 describe('deriveDomainFromPath', () => {
   it('returns the leaf business package for a Maven/Gradle Java layout', () => {
@@ -51,5 +56,44 @@ describe('deriveDomainFromPath', () => {
     for (const d of ['com', 'org', 'io', 'net', 'main', 'java', 'src']) {
       expect(DOMAIN_NOISE_DIRS.has(d)).toBe(true);
     }
+  });
+});
+
+describe('deriveDomainOwnershipFromPath', () => {
+  it('uses the stable module root for TypeScript implementation children', () => {
+    expect(deriveDomainOwnershipFromPath('src/core/generator/stages'.split('/'), '.ts')).toBe('generator');
+    expect(deriveDomainOwnershipFromPath('src/cli/commands'.split('/'), '.ts')).toBe('cli');
+  });
+
+  it('uses the workspace package as the owner', () => {
+    expect(deriveDomainOwnershipFromPath('packages/payments/src/services'.split('/'), '.ts')).toBe('payments');
+  });
+
+  it('preserves leaf package ownership for JVM layouts', () => {
+    expect(deriveDomainOwnershipFromPath(
+      'src/main/java/org/example/petclinic/owner'.split('/'), '.java',
+    )).toBe('owner');
+    expect(deriveDomainOwnershipFromPath(
+      'src/main/kotlin/org/example/petclinic/vet'.split('/'), '.kt',
+    )).toBe('vet');
+  });
+
+  it('selects layout per tree in a mixed repository', () => {
+    expect(deriveDomainOwnershipFromPath('packages/web/src/components'.split('/'), '.tsx')).toBe('web');
+    expect(deriveDomainOwnershipFromPath('backend/src/main/java/org/acme/orders'.split('/'), '.java')).toBe('orders');
+    expect(deriveDomainOwnershipFromPath('backend/src/main/kotlin/org/acme/billing'.split('/'), 'kt')).toBe('billing');
+  });
+
+  it('treats technical names as reconciliation signals, not path noise', () => {
+    expect(isTechnicalDomainRole('stages')).toBe(true);
+    expect(isTechnicalDomainRole('commands')).toBe(true);
+    expect([
+      'api', 'routes', 'endpoint', 'endpoints',
+      'model', 'entities', 'entity', 'schema', 'schemas',
+      'dto', 'dtos', 'component', 'hooks',
+      'resource', 'repos', 'repository', 'dao',
+    ].every(isTechnicalDomainRole)).toBe(true);
+    expect(isTechnicalDomainRole('payments')).toBe(false);
+    expect(DOMAIN_NOISE_DIRS.has('stages')).toBe(false);
   });
 });

@@ -51,6 +51,8 @@ export interface StructuralDiffInput {
   headRef?: string;
   /** Cap reported items per category (default 200). */
   maxResults?: number;
+  /** Optional repository-relative file scope applied before graph construction and truncation. */
+  files?: string[];
   /**
    * Optional declared write-footprint for the change (proposal-1 `Footprint`
    * shape, or any subset carrying `writeSet`/`readSet`). When supplied,
@@ -182,7 +184,9 @@ export async function handleStructuralDiff(input: StructuralDiffInput): Promise<
 
   // Code files only; logical path = the new path (so a file move doesn't explode
   // into all-removed + all-added at the function level).
+  const fileScope = input.files ? new Set(input.files) : null;
   const codeChanged = changed.filter(c => {
+    if (fileScope && !fileScope.has(c.path) && !(c.oldPath && fileScope.has(c.oldPath))) return false;
     const lang = detectLanguage(c.path);
     return lang && lang !== 'Unknown' && lang !== 'unknown';
   });

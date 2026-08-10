@@ -77,6 +77,36 @@ describe('handleStructuralDiff', () => {
     expect(r.summary.signatureChanges).toBe(1);
   });
 
+  it('applies a file scope before category limits and summary computation', async () => {
+    write(repo, 'src/unrelated.ts', 'export function before(): void {}\n');
+    git(repo, ['add', 'src/unrelated.ts']);
+    git(repo, ['commit', '-q', '-m', 'unrelated baseline', '--no-gpg-sign']);
+    write(repo, 'src/unrelated.ts', 'export function after(): void {}\n');
+
+    const r = await handleStructuralDiff({
+      directory: repo,
+      baseRef: 'HEAD',
+      files: ['src/mod.ts'],
+      maxResults: 1,
+    }) as { changedFiles: Array<{ path: string }>; summary: Record<string, number>; added: Array<{ name: string }> };
+
+    expect(r.changedFiles.map(file => file.path)).toEqual(['src/mod.ts']);
+    expect(r.summary.addedFunctions).toBe(2);
+    expect(r.added).toHaveLength(1);
+    expect(r.added.map(item => item.name)).not.toContain('after');
+  });
+
+  it('treats an explicit empty file scope as empty rather than repo-wide', async () => {
+    const r = await handleStructuralDiff({
+      directory: repo,
+      baseRef: 'HEAD',
+      files: [],
+    }) as { message: string; summary: Record<string, number> };
+
+    expect(r.message).toMatch(/No changed code files/);
+    expect(Object.values(r.summary).every(value => value === 0)).toBe(true);
+  });
+
   it('lists stale callers of a signature-changed function from the canonical graph', async () => {
     const r = await handleStructuralDiff({ directory: repo, baseRef: 'HEAD' }) as {
       signatureChanged: Array<{ name: string; staleCallers: Array<{ name: string; file: string }> }>;

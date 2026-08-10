@@ -247,6 +247,7 @@ export async function openloreGenerate(options: GenerateApiOptions = {}): Promis
   const adrOnly = options.adrOnly ?? false;
   const pipeline = new SpecGenerationPipeline(llm, {
     outputDir: join(rootPath, OPENLORE_DIR, OPENLORE_GENERATION_SUBDIR),
+    domains: options.domains,
     saveIntermediate: true,
     generateADRs: adr || adrOnly,
     force: options.force,
@@ -278,7 +279,7 @@ export async function openloreGenerate(options: GenerateApiOptions = {}): Promis
         }
       }
       const mapper = new MappingGenerator(rootPath, openspecRelPath, semanticSearch);
-      mappingArtifact = await mapper.generate(pipelineResult, depGraph);
+      mappingArtifact = await mapper.generate(pipelineResult, depGraph, options.domains);
       progress(onProgress, 'Generating mapping artifact', 'complete');
     } catch {
       // Non-fatal
@@ -327,7 +328,7 @@ export async function openloreGenerate(options: GenerateApiOptions = {}): Promis
     writeMode,
     version: openloreConfig.version,
     createBackups: true,
-    updateConfig: true,
+    updateConfig: (options.domains?.length ?? 0) === 0,
     validateBeforeWrite: true,
     cleanBeforeWrite: shouldCleanStaleDomains(options.force, options.domains, adrOnly),
   });
@@ -337,15 +338,19 @@ export async function openloreGenerate(options: GenerateApiOptions = {}): Promis
 
   // Generate RAG manifest
   try {
-    const manifestGen = new RagManifestGenerator();
-    const manifest = manifestGen.generate(metadataSpecs, depGraph);
-    const { writeFile } = await import('node:fs/promises');
-    await writeFile(
-      safeJoin(fullOpenspecPath, ARTIFACT_RAG_MANIFEST),
-      JSON.stringify(manifest, null, 2),
-      'utf-8',
-    );
-    progress(onProgress, 'Generating RAG manifest', 'complete', `${manifest.domains.length} domains`);
+    if ((options.domains?.length ?? 0) > 0) {
+      progress(onProgress, 'Generating RAG manifest', 'skip', 'Scoped generation leaves the global manifest unchanged');
+    } else {
+      const manifestGen = new RagManifestGenerator();
+      const manifest = manifestGen.generate(metadataSpecs, depGraph);
+      const { writeFile } = await import('node:fs/promises');
+      await writeFile(
+        safeJoin(fullOpenspecPath, ARTIFACT_RAG_MANIFEST),
+        JSON.stringify(manifest, null, 2),
+        'utf-8',
+      );
+      progress(onProgress, 'Generating RAG manifest', 'complete', `${manifest.domains.length} domains`);
+    }
   } catch {
     // Non-fatal
   }

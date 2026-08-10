@@ -174,6 +174,8 @@ export interface StageResult<T> {
 export interface PipelineOptions {
   outputDir: string;
   rootPath?: string;
+  /** Optional domain scope. Stages 2–6 process only these domain evidence bundles. */
+  domains?: string[];
   skipStages?: string[];
   resumeFrom?: string;
   /** Force regeneration from scratch, ignoring any cached stage results on disk */

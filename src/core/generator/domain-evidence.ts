@@ -3,10 +3,15 @@ import type { LLMContext, RepoStructure } from '../analyzer/artifact-generator.j
 export interface DomainEvidenceBundle {
   name: string;
   files: string[];
+  definingFiles: string[];
+  supportingFiles: string[];
+  candidateDecisions: NonNullable<RepoStructure['domainDecisions']>;
+  candidateDecisionSummary?: RepoStructure['domainDecisionSummary'];
   schemaFiles: string[];
   serviceFiles: string[];
   apiFiles: string[];
   signatures: NonNullable<LLMContext['signatures']>;
+  supportingSignatures: NonNullable<LLMContext['signatures']>;
   schemas: RepoStructure['schemas'];
   routes: NonNullable<RepoStructure['routeInventory']>['routes'];
 }
@@ -60,31 +65,66 @@ export function buildDomainEvidence(
 ): DomainEvidenceBundle[] {
   const schemaFiles = new Set((repo.schemas ?? []).map(s => s.file));
   const apiFiles = new Set((repo.routeInventory?.routes ?? []).map(r => r.file));
-  const bundles = repo.domains.map(domain => makeBundle(domain.name, domain.files, schemaFiles, apiFiles, repo, context));
+  const bundles = repo.domains.map(domain => makeBundle(
+    domain.name,
+    domain.files,
+    domain.definingFiles ?? domain.files,
+    domain.supportingFiles ?? [],
+    schemaFiles,
+    apiFiles,
+    repo,
+    context,
+  ));
   const assigned = new Set(bundles.flatMap(bundle => bundle.files));
-  const undomained = [...new Set([...(repo.undomained ?? []), ...(context.signatures ?? []).map(s => s.path).filter(path => !assigned.has(path))])].sort();
-  if (undomained.length > 0) bundles.push(makeBundle('undomained', undomained, schemaFiles, apiFiles, repo, context));
+  const excluded = new Set((repo.undomainedEvidence ?? [])
+    .filter(item => item.role === 'excluded')
+    .map(item => item.path));
+  const evidenceFiles = [
+    ...(repo.undomained ?? []),
+    ...(context.signatures ?? []).map(signature => signature.path),
+    ...(context.phase2_deep?.files ?? []).map(file => file.path),
+    ...schemaFiles,
+    ...apiFiles,
+  ];
+  const evidenceRole = new Map((repo.undomainedEvidence ?? []).map(item => [item.path, item.role]));
+  const undomained = [...new Set(evidenceFiles.filter(path => !assigned.has(path) && !excluded.has(path)))].sort();
+  if (undomained.length > 0) bundles.push(makeBundle(
+    'undomained',
+    undomained,
+    undomained.filter(path => evidenceRole.get(path) !== 'supporting'),
+    undomained.filter(path => evidenceRole.get(path) === 'supporting'),
+    schemaFiles, apiFiles, repo, context,
+  ));
   return bundles;
 }
 
 function makeBundle(
   name: string,
   paths: string[],
+  definingPaths: string[],
+  supportingPaths: string[],
   schemaFiles: Set<string>,
   apiFiles: Set<string>,
   repo: RepoStructure,
   context: LLMContext,
 ): DomainEvidenceBundle {
   const files = [...new Set(paths)].sort();
-  const inBundle = new Set(files);
+  const defining = new Set(definingPaths);
+  const supporting = new Set(supportingPaths);
   return {
     name,
     files,
-    schemaFiles: files.filter(path => schemaFiles.has(path)),
-    apiFiles: files.filter(path => apiFiles.has(path)),
-    serviceFiles: files.filter(path => !schemaFiles.has(path) && !apiFiles.has(path)),
-    signatures: (context.signatures ?? []).filter(signature => inBundle.has(signature.path)),
-    schemas: (repo.schemas ?? []).filter(schema => inBundle.has(schema.file)),
-    routes: (repo.routeInventory?.routes ?? []).filter(route => inBundle.has(route.file)),
+    definingFiles: [...new Set(definingPaths)].sort(),
+    supportingFiles: [...new Set(supportingPaths)].sort(),
+    candidateDecisions: (repo.domainDecisions ?? []).filter(decision =>
+      decision.owner === name || decision.candidate === name),
+    candidateDecisionSummary: repo.domainDecisionSummary,
+    schemaFiles: files.filter(path => defining.has(path) && schemaFiles.has(path)),
+    apiFiles: files.filter(path => defining.has(path) && apiFiles.has(path)),
+    serviceFiles: files.filter(path => defining.has(path) && !schemaFiles.has(path) && !apiFiles.has(path)),
+    signatures: (context.signatures ?? []).filter(signature => defining.has(signature.path)),
+    supportingSignatures: (context.signatures ?? []).filter(signature => supporting.has(signature.path)),
+    schemas: (repo.schemas ?? []).filter(schema => defining.has(schema.file)),
+    routes: (repo.routeInventory?.routes ?? []).filter(route => defining.has(route.file)),
   };
 }

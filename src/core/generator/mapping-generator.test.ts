@@ -138,6 +138,18 @@ describe('MappingGenerator — similarity matching', () => {
     expect(artifact).toMatchObject({ version: 2, sourceAnalysisFingerprint: mappingSourceFingerprint(graph) });
   });
 
+  it('persists scoped provenance under an explicit artifact root', async () => {
+    const artifactRoot = join(tmpDir, 'override');
+    const scoped = new MappingGenerator(tmpDir, '.', undefined, artifactRoot);
+    const pipeline = makePipeline([{
+      name: 'AuthService', purpose: 'auth', operations: [], dependencies: [], sideEffects: [], domain: 'auth',
+    }]);
+    const artifact = await scoped.generate(pipeline, makeDepGraph(), ['auth']);
+    expect(artifact.scope).toEqual({ domains: ['auth'] });
+    const saved = JSON.parse(await readFile(join(artifactRoot, '.openlore/analysis/mapping.json'), 'utf8'));
+    expect(saved).toMatchObject({ version: 2, scope: { domains: ['auth'] } });
+  });
+
   it('matches via containment (score 0.8) — operation name contained in function name', async () => {
     // "login" contained in "loginUser" → score 0.8 >= 0.7
     const pipeline = makePipeline([{

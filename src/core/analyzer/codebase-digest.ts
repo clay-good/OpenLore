@@ -18,7 +18,7 @@
 import { writeFile, readdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import type { LLMContext } from './artifact-generator.js';
+import type { LLMContext, RepoStructure } from './artifact-generator.js';
 import type { DependencyGraphResult } from './dependency-graph.js';
 import { languageCoverageMatrix, renderCoverageMatrixMarkdown } from './language-support.js';
 
@@ -39,6 +39,8 @@ interface DigestOptions {
   maxGodFunctions?: number;
   /** Max most-coupled files to list */
   maxCoupledFiles?: number;
+  /** Reconciled analyzer-owned domains; never inferred again by this consumer. */
+  repoStructure?: RepoStructure;
 }
 
 // ============================================================================
@@ -85,6 +87,7 @@ export async function generateCodebaseDigest(
       maxHubs = 10,
       maxGodFunctions = 5,
       maxCoupledFiles = 8,
+      repoStructure,
     } = opts;
 
     const cg = llmContext.callGraph;
@@ -230,6 +233,20 @@ export async function generateCodebaseDigest(
       }
       if (cg.layerViolations.length > 5) {
         lines.push(`- … (${cg.layerViolations.length - 5} more violations)`);
+      }
+      lines.push('');
+    }
+
+    // ── Reconciled analysis domains ──────────────────────────────────────────
+    if (repoStructure?.domains.length) {
+      const raw = repoStructure.statistics.rawDomainCandidateCount ?? repoStructure.domains.length;
+      lines.push('## Inferred ownership domains');
+      lines.push(`${raw} raw candidates reconciled into ${repoStructure.domains.length} generation-ready domains.`);
+      lines.push('');
+      for (const domain of repoStructure.domains) {
+        const defining = domain.definingFiles?.length ?? domain.files.length;
+        const supporting = domain.supportingFiles?.length ?? 0;
+        lines.push(`- \`${domain.name}\` — ${defining} defining, ${supporting} supporting files`);
       }
       lines.push('');
     }

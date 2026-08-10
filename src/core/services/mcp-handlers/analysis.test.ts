@@ -21,6 +21,7 @@ import {
   OPENLORE_DIR,
   OPENLORE_ANALYSIS_SUBDIR,
   ARTIFACT_DEPENDENCY_GRAPH,
+  ARTIFACT_LLM_CONTEXT,
   ARTIFACT_MAPPING,
   ARTIFACT_REPO_STRUCTURE,
   ARTIFACT_ROUTE_INVENTORY,
@@ -131,7 +132,16 @@ describe('handleGetArchitectureOverview', () => {
   it('exposes the shared deterministic domain evidence for MCP hosts', async () => {
     await writeAnalysisFile(tmpDir, ARTIFACT_DEPENDENCY_GRAPH, makeMinimalDepGraph());
     await writeAnalysisFile(tmpDir, ARTIFACT_REPO_STRUCTURE, {
-      domains: [{ name: 'billing', files: ['src/billing/model.ts', 'src/billing/routes.ts'] }],
+      domains: [{
+        name: 'billing',
+        files: ['src/billing/model.ts', 'src/billing/routes.ts', 'src/billing/model.test.ts'],
+        definingFiles: ['src/billing/model.ts', 'src/billing/routes.ts'],
+        supportingFiles: ['src/billing/model.test.ts'],
+      }],
+      domainDecisions: [{
+        candidate: 'routes', path: 'src/billing/routes', sources: ['dependency-cluster'],
+        disposition: 'merged', reason: 'contained-footprint', owner: 'billing', files: ['src/billing/routes.ts'],
+      }],
       undomained: [],
       schemas: [{ file: 'src/billing/model.ts', name: 'Invoice' }],
       routeInventory: { routes: [{ file: 'src/billing/routes.ts', method: 'GET', path: '/invoices' }] },
@@ -141,9 +151,14 @@ describe('handleGetArchitectureOverview', () => {
       signatures: [{ path: 'src/billing/model.ts', functions: [] }, { path: 'src/billing/routes.ts', functions: [] }],
     });
     const { handleGetArchitectureOverview } = await import('./analysis.js');
-    const result = await handleGetArchitectureOverview(tmpDir) as { domainEvidence: Array<{ name: string; schemaFiles: string[]; apiFiles: string[] }> };
+    const result = await handleGetArchitectureOverview(tmpDir) as { domainEvidence: Array<{ name: string; schemaFiles: string[]; apiFiles: string[]; definingFiles: string[]; supportingFiles: string[]; candidateDecisions: unknown[] }> };
     expect(result.domainEvidence).toEqual([expect.objectContaining({
-      name: 'billing', schemaFiles: ['src/billing/model.ts'], apiFiles: ['src/billing/routes.ts'],
+      name: 'billing',
+      schemaFiles: ['src/billing/model.ts'],
+      apiFiles: ['src/billing/routes.ts'],
+      definingFiles: ['src/billing/model.ts', 'src/billing/routes.ts'],
+      supportingFiles: ['src/billing/model.test.ts'],
+      candidateDecisions: [expect.objectContaining({ candidate: 'routes', owner: 'billing' })],
     })]);
   });
 });
@@ -394,11 +409,12 @@ describe('handleGetMapping', () => {
   });
 
   it('returns full mapping when no filters', async () => {
-    await writeAnalysisFile(tmpDir, ARTIFACT_MAPPING, sampleMapping);
+    await writeAnalysisFile(tmpDir, ARTIFACT_MAPPING, { ...sampleMapping, scope: { domains: ['auth'] } });
     const { handleGetMapping } = await import('./analysis.js');
-    const result = await handleGetMapping(tmpDir) as typeof sampleMapping;
+    const result = await handleGetMapping(tmpDir) as typeof sampleMapping & { scope: { domains: string[] } };
     expect(result.mappings).toHaveLength(2);
     expect(result.orphanFunctions).toHaveLength(2);
+    expect(result.scope).toEqual({ domains: ['auth'] });
   });
 
   it('filters mappings by domain', async () => {
@@ -1251,6 +1267,7 @@ describe('handleDetectChanges', () => {
     git('init', '-q');
     git('config', 'user.email', 'test@test.dev');
     git('config', 'user.name', 'Test');
+    git('config', 'commit.gpgsign', 'false');
 
     const srcDir = join(tmpDir, 'src');
     await mkdir(srcDir, { recursive: true });
@@ -1292,6 +1309,7 @@ describe('handleDetectChanges', () => {
     git('init', '-q');
     git('config', 'user.email', 'test@test.dev');
     git('config', 'user.name', 'Test');
+    git('config', 'commit.gpgsign', 'false');
     const srcDir = join(tmpDir, 'src');
     await mkdir(srcDir, { recursive: true });
     const file = join(srcDir, 'b.ts');
@@ -1329,6 +1347,7 @@ describe('handleDetectChanges', () => {
     git('init', '-q');
     git('config', 'user.email', 'test@test.dev');
     git('config', 'user.name', 'Test');
+    git('config', 'commit.gpgsign', 'false');
     const srcDir = join(tmpDir, 'src');
     await mkdir(srcDir, { recursive: true });
     const file = join(srcDir, 'c.ts');
@@ -1370,6 +1389,7 @@ describe('handleDetectChanges', () => {
     git('init', '-q');
     git('config', 'user.email', 'test@test.dev');
     git('config', 'user.name', 'Test');
+    git('config', 'commit.gpgsign', 'false');
     const srcDir = join(tmpDir, 'src');
     await mkdir(srcDir, { recursive: true });
     const file = join(srcDir, 'd.ts');
@@ -1425,5 +1445,17 @@ describe('handleAuditSpecCoverage', () => {
     const result = await handleAuditSpecCoverage(tmpDir) as { error: string };
     // No analysis cache → openloreAudit throws
     expect(result.error).toMatch(/Audit failed/);
+  });
+
+  it('returns degraded mapping coverage with machine-readable remediation', async () => {
+    await writeAnalysisFile(tmpDir, ARTIFACT_LLM_CONTEXT, {
+      callGraph: { nodes: [], edges: [], entryPoints: [], hubFunctions: [], layerViolations: [], inheritanceEdges: [], classes: [], stats: { totalNodes: 0, totalEdges: 0, avgFanIn: 0, avgFanOut: 0 } },
+    });
+    const { handleAuditSpecCoverage } = await import('./analysis.js');
+    const result = await handleAuditSpecCoverage(tmpDir) as { mappingCoverage: { state: string; reason: string; remediation: string } };
+    expect(result.mappingCoverage).toMatchObject({
+      state: 'missing', reason: 'mapping-not-generated',
+      remediation: expect.stringContaining('openlore generate'),
+    });
   });
 });

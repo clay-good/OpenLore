@@ -1,8 +1,8 @@
 # OpenLore — Unified Generation & Repair, High-Level Spec (Working Draft v4)
 
 Status: architecture agreed — moving to stage 1-4 implementation/audit next
-Supersedes: openlore-generation-repair-hlspec.md (v1) and the standalone-generation
-assumption in openlore-capability-audit.md's closing note
+Supersedes: [openlore-generation-repair-hlspec.md](openlore-generation-repair-hlspec.md) (v1) and the standalone-generation
+assumption in [openlore-capability-audit.md](openlore-capability-audit.md)'s closing note
 Scope: a single architecture for producing and correcting OpenSpec specs from a
 codebase, and the boundary with OpenSpec
 
@@ -140,9 +140,9 @@ What the evidence layer can establish, and which tools establish it:
 These are facts about code-vs-spec correspondence, not decisions about what
 the spec should say.
 
-### 5.2 Reconciliation (Claude Code)
+### 5.2 Reconciliation (host agent)
 
-Claude Code maps observations to a reconciliation action:
+The MCP-compatible host agent maps observations to a reconciliation action:
 
 - `covered`, no `stale_mapping`/`structural_change` → **consistent**, leave
   unchanged.
@@ -159,7 +159,7 @@ Example this handles directly:
 Code:            Spec:                    Observation:            Reconciliation:
   create-payment    create-payment          covered                 consistent
   cancel-payment    cancel-payment          stale_mapping           stale, update
-  refund()          (nothing)               uncovered_function      Claude judges: is a
+  refund()          (nothing)               uncovered_function      Host agent judges: is a
                                                                      requirement missing
                                                                      here? if so, add it
 ```
@@ -171,9 +171,9 @@ for the domain.
 ### 5.3 Division of responsibility
 
 ```
-OpenLore:     deterministic observations + evidence
-Claude Code:  semantic interpretation + reconciliation decision
-OpenSpec:     specification format + evolution/change workflow
+OpenLore:    deterministic observations + evidence
+Host agent:  semantic interpretation + reconciliation decision
+OpenSpec:    specification format + evolution/change workflow
 ```
 
 ## 6. Same evidence layer, task-specific composition
@@ -205,7 +205,7 @@ existing surface already covers everything §5.1 needs: `orient`, `get_spec`,
 `get_mapping`, `search_specs`, `check_spec_drift`, `audit_spec_coverage`,
 `structural_diff`, `get_subgraph`.
 
-The next implementation step is to test whether Claude Code can compose these
+The next implementation step is to test whether an MCP-compatible host can compose these
 into the repair workflow directly:
 
 ```
@@ -220,7 +220,7 @@ check_spec_drift(domain)
 structural_diff(...)
 get_subgraph(...)
     ↓
-Claude determines reconciliation (§5.2)
+Host agent determines reconciliation (§5.2)
     ↓
 edit OpenSpec file
 ```
@@ -241,13 +241,12 @@ implementation:
   `pipeline.services[].operations[].name` — i.e. from a prior `openlore
   generate` LLM run (`MappingGenerator.generate(pipeline, depGraph)`). It is
   not reconstructible from code/specs/graph alone.
-- `audit_spec_coverage` reads the same `mapping.json` and **fails silently**
-  when it's absent: `mapping = null` → `covered = new Set()` →
-  `uncoveredFunctions` reports every function in the call graph as uncovered
-  (false positives, no error), and `orphanRequirements` returns empty (the
-  signal disappears with no warning). Only `staleDomains` is independent —
-  it comes from `SpecSnapshotGenerator` comparing spec vs. source mtimes, no
-  `mapping.json` involved.
+- `audit_spec_coverage` reads the same `mapping.json` and now exposes
+  `mappingCoverage` as `available`, `missing`, `invalid`, or `stale`, with a
+  stable reason code and regeneration guidance. When unavailable, it withholds
+  mapping-derived uncovered/hub/orphan conclusions. Only `staleDomains` remains
+  independently available because it comes from `SpecSnapshotGenerator`
+  comparing spec vs. source mtimes.
 - `check_spec_drift` is independent — `buildSpecMap()` parses the
   `"> Source files: ..."` header directly out of each `spec.md`. Its only
   dependency is that convention being present in the spec text itself, not a
@@ -258,15 +257,9 @@ implementation:
 be current — a real precondition, not an emergent property of code + specs.
 `stale_mapping` and `structural_change` do not have this dependency.
 
-**Not yet decided — needs a call before Repair ships**: either (a) make the
-dependency explicit — `audit_spec_coverage` should error or clearly flag
-degraded results when `mapping.json` is missing/stale, rather than silently
-returning misleading output — or (b) build a fallback that derives "covered"
-from spec content directly (parsing function references out of `spec.md`,
-similar in spirit to `get_mapping`'s existing semantic/heuristic fallback)
-so the observation doesn't hard-depend on a persisted generation artifact.
-Whichever is chosen, it should not be treated as already solved by the
-existing MCP surface.
+**Implemented choice**: the dependency is explicit. Coverage fails closed and
+reports unavailable evidence; OpenLore does not heuristically rebuild
+requirement-to-function correspondence from spec prose.
 
 ## 8. Sequencing (decided)
 
@@ -275,13 +268,13 @@ they were never reworked to lean on it as heavily as they could. Fixing them
 is decoupled from the generate/repair unification question and from the ACP
 question: it benefits the standalone facade directly, with the currently
 configured provider, independent of any decision about hosting the drafting
-step in Claude Code.
+step in a particular host agent.
 
 Order of work:
 
 1. Rework stages 1-4 around per-domain deterministic aggregation, following
    stage5's already-correct shape (per-stage audit in
-   openlore-capability-audit.md §E: stage5 and stage6 are single full-context
+   [openlore-capability-audit.md](openlore-capability-audit.md) §E: stage5 and stage6 are single full-context
    calls over an aggregated deterministic bundle; stages 1-4 are per-file
    loops that only partially trust the same deterministic data). Concretely:
    - Group by `repoStructure.domains` rather than by individual schema/
@@ -294,10 +287,10 @@ Order of work:
      aggregated-bundle level.
 2. Stabilize that evidence representation in the standalone pipeline. Ships
    in the **standalone facade**, with the existing configured LLM provider —
-   no dependency on Claude Code or MCP.
+   no dependency on a particular host agent or on MCP.
 3. Reuse that evidence representation for the agent-hosted path (§4/§6) —
    same primitives, composed per §6 for Generate vs. Repair.
-4. Test Claude Code generation/repair (§7's composed-primitives workflow)
+4. Test agent-hosted generation/repair (§7's composed-primitives workflow)
    against the improved standalone pipeline's output.
 5. Only then decide whether individual LLM stages (1, 3, 4 — the per-file
    extraction loops) are still necessary as separate stages, or collapse into
@@ -305,7 +298,7 @@ Order of work:
 
 This is preferable to mixing pipeline-quality work with the hosting-
 architecture question. In this model, ACP is no longer a fundamental
-architectural concern: Claude Code is simply the host agent consuming
+architectural concern: an MCP-compatible client is simply the host agent consuming
 OpenLore's MCP capabilities.
 
 ## 9. Open questions

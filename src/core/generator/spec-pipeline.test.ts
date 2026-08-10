@@ -53,7 +53,16 @@ function createMockRepoStructure(): RepoStructure {
     },
     uiComponents: [],
     schemas: [],
-    routeInventory: { total: 0, byMethod: {}, byFramework: {}, routes: [] },
+    routeInventory: {
+      total: 3,
+      byMethod: { GET: 2, POST: 1 },
+      byFramework: { express: 3 },
+      routes: [
+        { method: 'GET', path: '/users/:id', handler: 'getUser', file: 'routes/user.ts', framework: 'express', contractSource: 'none' },
+        { method: 'POST', path: '/users', handler: 'createUser', file: 'routes/user.ts', framework: 'express', contractSource: 'none' },
+        { method: 'GET', path: '/api/health', handler: 'healthCheck', file: 'routes/api.ts', framework: 'express', contractSource: 'none' },
+      ],
+    },
     middleware: [],
         envVars: [],
     statistics: {
@@ -304,6 +313,101 @@ describe('SpecGenerationPipeline', () => {
       );
 
       expect(result.metadata.totalTokens).toBeGreaterThan(0);
+    });
+
+    it('limits domain stages and their resume cache to the requested domains', async () => {
+      const { service, provider } = createMockLLMService();
+      provider.setResponse('categorize', MOCK_RESPONSES.survey);
+      provider.setResponse('core data models', MOCK_RESPONSES.entities);
+      provider.setResponse('logic and processing layer', MOCK_RESPONSES.services);
+      provider.setResponse('public API surface', MOCK_RESPONSES.api);
+      provider.setResponse('Synthesize', MOCK_RESPONSES.architecture);
+      provider.setDefaultResponse(MOCK_RESPONSES.survey);
+
+      const repo = createMockRepoStructure();
+      repo.domains = [
+        { ...repo.domains[0], files: ['services/user-service.ts'] },
+        { ...repo.domains[1], files: ['auth.ts'] },
+      ];
+      const context = createMockLLMContext();
+      context.phase2_deep.files.push({ path: 'auth.ts', content: 'export function AUTH_ONLY() {}', tokens: 10 });
+
+      const pipeline = new SpecGenerationPipeline(service, {
+        outputDir: tempDir,
+        saveIntermediate: true,
+        domains: ['user'],
+      });
+      await pipeline.run(repo, context, createMockDepGraph());
+
+      const domainStageCalls = provider.callHistory.filter(call =>
+        /core data models|logic and processing layer|public API surface/.test(call.systemPrompt),
+      );
+      expect(domainStageCalls.some(call => call.userPrompt.includes('AUTH_ONLY'))).toBe(false);
+      expect(domainStageCalls.some(call => call.userPrompt.includes('models/user.ts'))).toBe(false);
+      expect(domainStageCalls.some(call => call.userPrompt.includes('routes/user.ts'))).toBe(false);
+      const cacheFiles = await readdir(tempDir);
+      expect(cacheFiles.some(file => /^stage3-services\.domains-[a-f0-9]{12}\.json$/.test(file))).toBe(true);
+      expect(cacheFiles).not.toContain('stage2-entities.json');
+    });
+
+    it('rejects every unknown requested domain even when another domain matches', async () => {
+      const { service, provider } = createMockLLMService();
+      provider.setDefaultResponse(MOCK_RESPONSES.survey);
+      const pipeline = new SpecGenerationPipeline(service, {
+        outputDir: tempDir,
+        domains: ['user', 'typo'],
+      });
+      await expect(pipeline.run(createMockRepoStructure(), createMockLLMContext()))
+        .rejects.toThrow('Requested domains were not found: typo');
+      expect(provider.callHistory).toHaveLength(0);
+    });
+
+    it('routes cross-file domain evidence through stages 2-4 end to end', async () => {
+      const { service, provider } = createMockLLMService();
+      provider.setResponse('categorize', MOCK_RESPONSES.survey);
+      provider.setResponse('core data models', JSON.stringify([
+        { name: 'Invoice', description: 'invoice', properties: [], relationships: [], validations: [], scenarios: [], location: 'invented.ts' },
+        { name: 'Payment', description: 'payment', properties: [], relationships: [], validations: [], scenarios: [], location: 'invented.ts' },
+      ]));
+      provider.setResponse('logic and processing layer', JSON.stringify([{ name: 'BillingService', purpose: 'billing', operations: [{ name: 'collect', description: '', scenarios: [], functionName: 'collectPayment' }], dependencies: [], sideEffects: [], domain: 'wrong' }]));
+      provider.setResponse('public API surface', JSON.stringify([{ method: 'POST', path: '/payments', purpose: 'collect', scenarios: [] }]));
+      provider.setResponse('Synthesize', MOCK_RESPONSES.architecture);
+
+      const repo = createMockRepoStructure();
+      repo.domains = [{
+        name: 'billing', suggestedSpecPath: 'openspec/specs/billing/spec.md',
+        files: ['models/invoice.ts', 'models/payment.ts', 'services/billing.ts', 'routes/billing.ts'],
+        entities: ['Invoice', 'Payment'], keyFile: 'services/billing.ts',
+      }];
+      repo.schemas = [
+        { name: 'Invoice', file: 'models/invoice.ts', orm: 'prisma', line: 1, fields: [{ name: 'id', type: 'string', nullable: false }] },
+        { name: 'Payment', file: 'models/payment.ts', orm: 'prisma', line: 1, fields: [{ name: 'amount', type: 'decimal', nullable: false }] },
+      ];
+      repo.routeInventory = {
+        total: 1, byMethod: { POST: 1 }, byFramework: { express: 1 },
+        routes: [{ method: 'POST', path: '/payments', handler: 'collectPayment', file: 'routes/billing.ts', framework: 'express', contractSource: 'none' }],
+      };
+      const context = createMockLLMContext();
+      context.phase2_deep.files = [
+        { path: 'models/invoice.ts', content: 'model Invoice { id String }', tokens: 8 },
+        { path: 'models/payment.ts', content: 'model Payment { amount Decimal }', tokens: 8 },
+        { path: 'services/billing.ts', content: 'export function collectPayment() {}', tokens: 8 },
+        { path: 'routes/billing.ts', content: 'router.post("/payments", collectPayment)', tokens: 8 },
+      ];
+      context.signatures = [{
+        path: 'services/billing.ts', language: 'TypeScript',
+        entries: [{ kind: 'function', name: 'collectPayment', signature: 'function collectPayment(): void' }],
+      }];
+
+      const pipeline = new SpecGenerationPipeline(service, { outputDir: tempDir });
+      const result = await pipeline.run(repo, context, createMockDepGraph());
+
+      expect(result.entities.map(entity => [entity.name, entity.location])).toEqual([
+        ['Invoice', 'models/invoice.ts'], ['Payment', 'models/payment.ts'],
+      ]);
+      expect(result.services[0]).toMatchObject({ domain: 'billing', locationFile: 'services/billing.ts' });
+      expect(result.services[0].operations[0].functionName).toBe('collectPayment');
+      expect(result.endpoints.map(endpoint => `${endpoint.method} ${endpoint.path}`)).toEqual(['POST /payments']);
     });
   });
 

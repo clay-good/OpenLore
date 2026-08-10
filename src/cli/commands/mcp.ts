@@ -256,6 +256,34 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: 'prepare_spec_generation',
+    description: 'Prepare bounded deterministic evidence for a host agent to author a new OpenSpec domain specification. Read-only; no LLM and no file writes.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        directory: { type: 'string', description: DIR_DESC },
+        domain: { type: 'string', description: 'Reconciled analyzed domain to document.' },
+        cursor: { type: 'string', description: 'Opaque continuation cursor from a partial response.' },
+        maxItems: { type: 'number', minimum: 10, maximum: 200, description: 'Deterministic page size, 10-200 (default 80).' },
+      },
+      required: ['directory', 'domain'],
+    },
+  },
+  {
+    name: 'prepare_spec_repair',
+    description: 'Prepare bounded deterministic spec, mapping, coverage, drift, and structural evidence for a host agent to repair one existing OpenSpec specification. Read-only; no LLM and no file writes.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        directory: { type: 'string', description: DIR_DESC },
+        domain: { type: 'string', description: 'Existing OpenSpec domain to reconcile.' },
+        baseRef: { type: 'string', description: 'Git base ref for drift and structural changes.' },
+        maxItems: { type: 'number', minimum: 10, maximum: 200, description: 'Maximum observations per bounded category, 10-200.' },
+      },
+      required: ['directory', 'domain'],
+    },
+  },
+  {
     name: 'get_refactor_report',
     description:
       'Return a prioritized list of functions that need refactoring, based on ' +
@@ -663,6 +691,11 @@ export const TOOL_DEFINITIONS = [
         baseRef: { type: 'string', description: 'Old state to diff against (default "HEAD")' },
         headRef: { type: 'string', description: 'New state (a git ref). Omit to use the working tree.' },
         maxResults: { type: 'number', description: 'Cap reported items per category (default 200)' },
+        files: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional repository-relative files to analyze. Applied before category limits.',
+        },
         declaredFootprint: {
           type: 'object',
           description:
@@ -2100,6 +2133,7 @@ const _RW  = { readOnlyHint: false, destructiveHint: false, idempotentHint: fals
 
 const TOOL_ANNOTATIONS: Record<string, typeof _RO | typeof _RWI | typeof _RW> = {
   orient: _RO, analyze_codebase: _RWI, get_architecture_overview: _RO,
+  prepare_spec_generation: _RO, prepare_spec_repair: _RO,
   get_refactor_report: _RO, get_call_graph: _RO, get_duplicate_report: _RO,
   get_signatures: _RO, get_subgraph: _RO, trace_execution_path: _RO,
   get_mapping: _RO, check_spec_drift: _RO, analyze_impact: _RO, select_tests: _RO, blast_radius: _RO, find_dead_code: _RO, structural_diff: _RO, get_change_coupling: _RO, check_architecture: _RO,
@@ -2255,6 +2289,7 @@ export const TOOL_PRESETS: Record<string, Set<string>> = {
     'analyze_impact', 'suggest_insertion_points', 'get_function_skeleton',
     'get_landmarks', 'get_map', 'find_path',
     'recall', 'verify_claim', 'blast_radius',
+    'prepare_spec_generation', 'prepare_spec_repair',
   ]),
 };
 
@@ -2517,7 +2552,7 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
     };
   });
 
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const { name: _rawName, arguments: args = {} } = request.params;
     // Resolve a deprecated tool-name alias to its canonical name up front, so the
     // schema lookup, arg validation, tracking, and dispatch all see one name.
@@ -2690,7 +2725,7 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
         try {
           if (ep) {
             try {
-              result = await callServeTool(ep, name, args as Record<string, unknown>, directory);
+              result = await callServeTool(ep, name, args as Record<string, unknown>, directory, extra.signal);
             } catch (err) {
               // A 403 means a healthy explicitly narrow daemon rejected a tool
               // this wider MCP session is authorized to call. Fall back for this
@@ -2713,10 +2748,10 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
                   { cause: err },
                 );
               }
-              result = await dispatchTool(name, args as Record<string, unknown>, directory);
+              result = await dispatchTool(name, args as Record<string, unknown>, directory, extra.signal);
             }
           } else {
-            result = await dispatchTool(name, args as Record<string, unknown>, directory);
+            result = await dispatchTool(name, args as Record<string, unknown>, directory, extra.signal);
           }
         } catch (err) {
           if (err instanceof UnknownToolError) {

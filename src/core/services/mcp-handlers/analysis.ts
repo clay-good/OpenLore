@@ -313,7 +313,7 @@ export async function handleGetMapping(
     const filtered = domain
       ? mapping.orphanFunctions.filter((f: { file: string }) => f.file.includes(domain))
       : mapping.orphanFunctions;
-    return { generatedAt: mapping.generatedAt, stats: mapping.stats, orphanFunctions: filtered };
+    return { generatedAt: mapping.generatedAt, scope: mapping.scope, stats: mapping.stats, orphanFunctions: filtered };
   }
 
   const filteredMappings = domain
@@ -322,6 +322,7 @@ export async function handleGetMapping(
 
   return {
     generatedAt: mapping.generatedAt,
+    scope: mapping.scope,
     stats: mapping.stats,
     mappings: filteredMappings,
     orphanFunctions: domain ? [] : mapping.orphanFunctions,
@@ -801,6 +802,8 @@ export async function handleAuditSpecCoverage(
   directory: string,
   maxUncovered = 50,
   hubThreshold = 5,
+  save = true,
+  scope?: { files?: string[]; domains?: string[] },
 ): Promise<unknown> {
   const absDir = await validateDirectory(directory);
   try {
@@ -808,7 +811,9 @@ export async function handleAuditSpecCoverage(
       rootPath: absDir,
       maxUncovered,
       hubThreshold,
-      save: true,
+      save,
+      files: scope?.files,
+      domains: scope?.domains,
     });
     return report;
   } catch (err) {

@@ -21,6 +21,7 @@ import { resolveCanonicalToolName, enforceConclusionContract } from './mcp-handl
 import { logger } from '../../utils/logger.js';
 import { readOpenLoreConfig } from './config-manager.js';
 import { redactSecretsWithReport } from './secret-redaction.js';
+import { prepareSpecGeneration, prepareSpecRepair } from './spec-workflow.js';
 
 import { handleOrient } from './mcp-handlers/orient.js';
 import { handleSelectTests } from './mcp-handlers/test-impact.js';
@@ -138,9 +139,10 @@ export async function dispatchTool(
   name: string,
   args: Record<string, unknown>,
   directory: string,
+  signal?: AbortSignal,
 ): Promise<unknown> {
   const canonical = resolveCanonicalToolName(name);
-  const result = await dispatchToolImpl(canonical, args, directory);
+  const result = await dispatchToolImpl(canonical, args, directory, signal);
   const checked = enforceConclusionContract(canonical, result, (msg) => logger.warning(msg));
   return redactSourceToolResult(canonical, checked, directory);
 }
@@ -150,6 +152,8 @@ export const SOURCE_CARRYING_TOOLS = new Set([
   'find_clones',
   'analyze_env_impact',
   'search_code',
+  'prepare_spec_generation',
+  'prepare_spec_repair',
 ]);
 
 export async function redactSourceToolResult(name: string, result: unknown, directory: string): Promise<unknown> {
@@ -169,6 +173,7 @@ async function dispatchToolImpl(
   name: string,
   args: Record<string, unknown>,
   directory: string,
+  signal?: AbortSignal,
 ): Promise<unknown> {
   // Resolve a deprecated tool-name alias (e.g. get_ui_components) to its canonical
   // name so both transports dispatch identically and old callers keep working.
@@ -182,6 +187,12 @@ async function dispatchToolImpl(
   } else if (name === 'get_architecture_overview') {
     const { directory } = args as { directory: string };
     return handleGetArchitectureOverview(directory);
+  } else if (name === 'prepare_spec_generation') {
+    const { domain, cursor, maxItems } = args as { domain: string; cursor?: string; maxItems?: number };
+    return prepareSpecGeneration({ directory, domain, cursor, maxItems, signal });
+  } else if (name === 'prepare_spec_repair') {
+    const { domain, baseRef, maxItems } = args as { domain: string; baseRef?: string; maxItems?: number };
+    return prepareSpecRepair({ directory, domain, baseRef, maxItems, signal });
   } else if (name === 'get_refactor_report') {
     const { directory } = args as { directory: string };
     return handleGetRefactorReport(directory);
@@ -219,11 +230,12 @@ async function dispatchToolImpl(
       args as { directory: string; ifDeleted?: string; maxResults?: number; filePattern?: string; directResolvedOnly?: boolean; federation?: boolean; federationRepos?: string[] };
     return handleFindDeadCode({ directory, ifDeleted, maxResults, filePattern, directResolvedOnly, federation, federationRepos });
   } else if (name === 'structural_diff') {
-    const { directory, baseRef, headRef, maxResults, declaredFootprint, peerFootprints } =
+    const { directory, baseRef, headRef, maxResults, files, declaredFootprint, peerFootprints } =
       args as { directory: string; baseRef?: string; headRef?: string; maxResults?: number;
+        files?: string[];
         declaredFootprint?: import('./mcp-handlers/footprint-escape.js').DeclaredFootprintInput;
         peerFootprints?: import('./mcp-handlers/footprint-escape.js').DeclaredFootprintInput[] };
-    return handleStructuralDiff({ directory, baseRef, headRef, maxResults, declaredFootprint, peerFootprints });
+    return handleStructuralDiff({ directory, baseRef, headRef, maxResults, files, declaredFootprint, peerFootprints });
   } else if (name === 'get_change_coupling') {
     const { directory, file, limit } = args as { directory: string; file?: string; limit?: number };
     return handleGetChangeCoupling({ directory, file, limit });

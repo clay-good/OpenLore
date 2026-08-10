@@ -667,7 +667,12 @@ After analysis, run 'openlore generate' to create OpenSpec files.
       console.log(`    ├─ High-value files: ${repoMap.highValueFiles.length}`);
       console.log(`    ├─ Languages: ${repoMap.summary.languages.slice(0, 3).map(l => l.language).join(', ')}`);
       if (artifacts.repoStructure.undomained?.length) {
-        console.log(`    ├─ Undomained source files: ${artifacts.repoStructure.undomained.map(path => safe(path)).join(', ')}`);
+        const roleCounts = new Map<string, number>();
+        for (const item of artifacts.repoStructure.undomainedEvidence ?? []) {
+          roleCounts.set(item.role, (roleCounts.get(item.role) ?? 0) + 1);
+        }
+        const detail = [...roleCounts.entries()].map(([role, count]) => `${count} ${role}`).join(', ');
+        console.log(`    ├─ Undomained analyzed evidence: ${artifacts.repoStructure.undomained.length} (${safe(detail)})`);
       }
       console.log(`    └─ Architecture: ${artifacts.repoStructure.architecture.pattern}`);
       console.log('');
@@ -818,7 +823,9 @@ After analysis, run 'openlore generate' to create OpenSpec files.
 
       // Detected domains
       if (artifacts.repoStructure.domains.length > 0) {
-        console.log('  Detected Domains:');
+        const rawCandidates = artifacts.repoStructure.statistics.rawDomainCandidateCount
+          ?? artifacts.repoStructure.domains.length;
+        console.log(`  Detected Domains (${rawCandidates} raw candidates → ${artifacts.repoStructure.domains.length} final):`);
         for (let i = 0; i < Math.min(artifacts.repoStructure.domains.length, 6); i++) {
           const domain = artifacts.repoStructure.domains[i];
           const isLast = i === Math.min(artifacts.repoStructure.domains.length, 6) - 1;
@@ -846,7 +853,7 @@ After analysis, run 'openlore generate' to create OpenSpec files.
       const digestWritten = await generateCodebaseDigest(
         artifacts.llmContext,
         depGraph,
-        { rootPath, outputDir: outputPath },
+        { rootPath, outputDir: outputPath, repoStructure: artifacts.repoStructure },
       );
 
       // Generate AI tool config files — prompt user to select which assistants

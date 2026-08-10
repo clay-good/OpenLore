@@ -134,19 +134,19 @@ openlore connect remove [agent]      # disconnect that agent
 `connect` takes the agent as a positional argument (`openlore connect cursor`), not
 `--agent`, and disconnects via the `remove` subcommand rather than `--uninstall`.
 
-A bare `openlore install` wires the `substrate` surface (13 tools — navigation core + governance reads) and, for
+A bare `openlore install` wires the `substrate` surface (15 tools — navigation core + governance reads + spec-workflow composites) and, for
 Claude Code, both a `SessionStart` primer hook and a `UserPromptSubmit` task-scoped
 injection hook. Use `--preset navigation` for the lean navigate-only core (10 tools), or
-`--preset full` for all 73 tools.
+`--preset full` for all 75 tools.
 
 ### MCP Server Options
 
 ```bash
 openlore mcp [options]             # start the stdio MCP server
 
-  --preset <name>        # Expose a named preset (default: substrate, 13 tools — nav core + governance reads)
+  --preset <name>        # Expose a named preset (default: substrate, 15 tools — nav + governance + spec workflows)
   --minimal              # Expose only the core 6 governance tools
-  --all-tools            # Expose the full surface — all 73 tools (alias --preset full)
+  --all-tools            # Expose the full surface — all 75 tools (alias --preset full)
   --list-tools           # Print the active surface grouped by capability family and exit
   --watch-auto           # Auto-detect + incrementally re-index the project dir
   --no-watch-auto        # Disable auto-watch (use for one-shot tool calls)
@@ -615,7 +615,7 @@ over plain HTTP so non-MCP clients (e.g. the [Pi](https://pi.dev) extension in
 
 ```bash
 openlore serve                          # substrate preset, ephemeral port, watch on
-openlore serve --preset all --port 7077 # all 73 tools on a fixed port
+openlore serve --preset all --port 7077 # all 75 tools on a fixed port
 openlore serve --no-watch               # transport only, no freshness lane
 openlore serve --stop                   # stop the daemon serving this directory
 ```

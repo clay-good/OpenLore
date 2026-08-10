@@ -593,15 +593,26 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
         return;
       }
 
+      const dispatchAbort = new AbortController();
+      const abortDispatch = (): void => dispatchAbort.abort();
+      const abortOnResponseClose = (): void => {
+        if (!res.writableEnded) abortDispatch();
+      };
+      req.once('aborted', abortDispatch);
+      res.once('close', abortOnResponseClose);
       try {
-        const result = await dispatchTool(name, args, directory);
-        sendJson(res, 200, result ?? null);
+        const result = await dispatchTool(name, args, directory, dispatchAbort.signal);
+        if (!dispatchAbort.signal.aborted) sendJson(res, 200, result ?? null);
       } catch (err) {
+        if (dispatchAbort.signal.aborted) return;
         if (err instanceof UnknownToolError) {
           sendJson(res, 404, { error: err.message });
           return;
         }
         sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
+      } finally {
+        req.removeListener('aborted', abortDispatch);
+        res.removeListener('close', abortOnResponseClose);
       }
       return;
     }

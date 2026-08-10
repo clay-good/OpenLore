@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { mkdir, writeFile, rm } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -155,6 +155,12 @@ describe('generate command', () => {
   });
 
   describe('command options', () => {
+    it('preserves absolute output directories and resolves relative ones from the project root', async () => {
+      const { resolveGenerateOutputPath } = await import('./generate.js');
+      expect(resolveGenerateOutputPath('/project', '/private/tmp/specs')).toBe('/private/tmp/specs');
+      expect(resolveGenerateOutputPath('/project', 'artifacts/specs')).toBe(resolve('/project/artifacts/specs'));
+    });
+
     it('should have correct default values', async () => {
       const { generateCommand } = await import('./generate.js');
 
@@ -176,6 +182,14 @@ describe('generate command', () => {
       expect(source).toMatch(
         /cleanBeforeWrite:\s*shouldCleanStaleDomains\(opts\.force,\s*opts\.domains,\s*opts\.adrOnly\)/,
       );
+    });
+
+    it('keeps scoped global metadata honest and wires the concrete output root', () => {
+      const source = readFileSync(fileURLToPath(new URL('./generate.ts', import.meta.url)), 'utf-8');
+      expect(source).toContain('openspecRoot: fullOpenspecPath');
+      expect(source).toContain('updateConfig: Boolean(opts.outputDir) || opts.domains.length === 0');
+      expect(source).toContain('Scoped generation leaves the global RAG manifest unchanged');
+      expect(source).toContain('mappingArtifact = await mapper.generate(pipelineResult, depGraph, opts.domains)');
     });
 
     it('should have dry-run option', async () => {

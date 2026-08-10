@@ -614,7 +614,9 @@ export interface AuditReport {
   generatedAt: string;
   mappingCoverage: {
     state: 'available' | 'missing' | 'invalid' | 'stale';
-    reason?: string;
+    reason?: 'mapping-not-generated' | 'invalid-json' | 'incompatible-provenance' | 'fingerprint-mismatch' | 'scoped-artifact';
+    message?: string;
+    remediation?: string;
     artifactPath: string;
   };
   summary: {
