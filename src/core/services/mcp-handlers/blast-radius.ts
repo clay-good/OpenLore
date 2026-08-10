@@ -27,6 +27,7 @@ import type { ConfidenceBoundary } from './confidence-boundary.js';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
 import type { DriftIssue, DriftResult } from '../../../types/index.js';
 import { reviewedFileContentProvenance, type ServedContentProvenance } from '../served-content.js';
+import { withIndexStaleness } from './index-staleness.js';
 
 /** How many of the highest-fan-in changed symbols to run impact analysis on.
  * A briefing, not an audit: the riskiest symbols dominate the blast radius, and
@@ -391,7 +392,7 @@ export async function computeBlastRadius(
     caveats,
   };
   briefing.headline = renderHeadline(briefing);
-  return briefing;
+  return withIndexStaleness(absDir, briefing, ctx);
 }
 
 /** One-line conclusion summarizing the briefing. */

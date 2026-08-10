@@ -112,6 +112,45 @@ describe('capStructuredResult', () => {
     expect(r.truncated).toBe(true);
     expect(parsed.redactions).toEqual(redactions);
   });
+
+  it('preserves index staleness when a structured result falls back to an envelope', () => {
+    const indexStaleness = {
+      staleFiles: ['src/payments.ts'],
+      note: 'The index is behind the working tree for: src/payments.ts.',
+    };
+    const result = {
+      items: Array.from({ length: 50_000 }, (_, i) => ({ id: i, name: `n${i}` })),
+      indexStaleness,
+    };
+    const r = capStructuredResult(result, 64 * 1024);
+    const parsed = JSON.parse(r.text) as { indexStaleness: typeof indexStaleness };
+
+    expect(r.truncated).toBe(true);
+    expect(parsed.indexStaleness).toEqual(indexStaleness);
+  });
+
+  it('bounds preserved staleness metadata when its file list alone exceeds the response cap', () => {
+    const staleFiles = Array.from({ length: 200 }, (_, i) => `src/${i}-${'nested/'.repeat(200)}file.ts`);
+    const result = {
+      items: Array.from({ length: 50_000 }, (_, i) => ({ id: i })),
+      indexStaleness: {
+        staleFiles,
+        note: `The index is behind the working tree for: ${staleFiles.join(', ')}`,
+        repairScheduled: true,
+      },
+    };
+    const maxBytes = 4 * 1024;
+    const capped = capStructuredResult(result, maxBytes);
+    const parsed = JSON.parse(capped.text) as {
+      indexStaleness: { staleFiles: string[]; staleFileCount: number; staleFilesOmitted: number; repairScheduled: true };
+    };
+
+    expect(Buffer.byteLength(capped.text, 'utf8')).toBeLessThanOrEqual(maxBytes);
+    expect(parsed.indexStaleness.staleFileCount).toBe(200);
+    expect(parsed.indexStaleness.staleFiles).toHaveLength(1);
+    expect(parsed.indexStaleness.staleFilesOmitted).toBe(199);
+    expect(parsed.indexStaleness.repairScheduled).toBe(true);
+  });
 });
 
 describe('classifyToolError', () => {

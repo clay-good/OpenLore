@@ -1,10 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { classifyRole, deriveStrategy, buildReason, compositeScore } from './semantic.js';
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm, utimes } from 'node:fs/promises';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EdgeStore } from '../edge-store.js';
+import { TextLineIndex } from '../../analyzer/text-line-index.js';
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
@@ -304,6 +305,31 @@ describe('handleSearchCode', () => {
     expect(result.searchMode).toBe('bm25_fallback');
     expect(result.count).toBe(1);
     expect(Array.isArray(result.results)).toBe(true);
+    expect((result.indexStaleness as { staleFiles: string[] }).staleFiles).toEqual(['src/a.ts']);
+  });
+
+  it('checks stale text-index citations outside the programming-language allowlist', async () => {
+    const analysisDir = join(tmpDir, '.openlore', 'analysis');
+    const cssPath = join(tmpDir, 'src', 'styles.css');
+    await mkdir(join(tmpDir, 'src'), { recursive: true });
+    await mkdir(analysisDir, { recursive: true });
+    await writeFile(cssPath, '.button { color: blue; }\n');
+    await TextLineIndex.build(analysisDir, [{
+      filePath: 'src/styles.css',
+      content: '.button { color: blue; }\n',
+    }]);
+    await writeAnalysisFile(tmpDir, 'llm-context.json', {});
+    const now = Date.now() / 1000;
+    await utimes(join(analysisDir, 'llm-context.json'), now - 10, now - 10);
+    await writeFile(cssPath, '.button { color: red; }\n');
+    await utimes(cssPath, now, now);
+
+    const { handleSearchCode } = await import('./semantic.js');
+    const result = await handleSearchCode(tmpDir, 'button', 10, undefined, undefined, undefined, 'text') as {
+      indexStaleness?: { staleFiles: string[] };
+    };
+
+    expect(result.indexStaleness?.staleFiles).toEqual(['src/styles.css']);
   });
 });
 

@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { estimateTokens } from '../../core/services/llm-service.js';
 import {
   INJECTION_DEFAULTS,
+  MIN_INJECTION_TOKEN_BUDGET,
   POINTER_LINE,
   resolveInjectionConfig,
   passesRelevanceGate,
@@ -39,6 +40,10 @@ describe('resolveInjectionConfig', () => {
     const r = resolveInjectionConfig({ tokenBudget: 0, relevanceMinMatches: -1 });
     expect(r.tokenBudget).toBe(INJECTION_DEFAULTS.tokenBudget);
     expect(r.relevanceMinMatches).toBe(INJECTION_DEFAULTS.relevanceMinMatches);
+  });
+
+  it('clamps positive budgets below the mandatory frame floor', () => {
+    expect(resolveInjectionConfig({ tokenBudget: 10 }).tokenBudget).toBe(MIN_INJECTION_TOKEN_BUDGET);
   });
 });
 
@@ -230,6 +235,64 @@ describe('renderInjectionBlock', () => {
     expect(block).toContain('Task:');
     // …but the lower-priority detail is dropped to stay within budget.
     expect(block).not.toContain('Suggested tools');
+  });
+
+  it('keeps cited-file staleness ahead of optional detail inside the budgeted block', () => {
+    const stale = {
+      ...richResult,
+      indexStaleness: {
+        staleFiles: ['src/api/run.ts'],
+        note: 'The index is behind the working tree for: "src/api/run.ts" — results may omit recent edits; re-run analyze or let the watcher converge.',
+      },
+    };
+    const block = renderInjectionBlock(stale, cfg({ tokenBudget: 100 }));
+
+    expect(estimateTokens(block)).toBeLessThanOrEqual(100);
+    expect(block).toContain('src/api/run.ts');
+    expect(block).toContain('results may omit recent edits');
+    const detailIndex = block.indexOf('Relevant functions');
+    if (detailIndex >= 0) {
+      expect(block.indexOf('results may omit recent edits')).toBeLessThan(detailIndex);
+    }
+    expect(block).not.toContain('Suggested tools');
+  });
+
+  it('compacts long stale paths without exceeding the injection token budget', () => {
+    const staleFiles = Array.from(
+      { length: 10 },
+      (_, i) => `src/${i}/${'deeply-nested-directory/'.repeat(30)}payments.ts`,
+    );
+    const stale = {
+      ...richResult,
+      indexStaleness: {
+        staleFiles,
+        note: `The index is behind the working tree for: ${staleFiles.map(file => JSON.stringify(file)).join(', ')} — results may omit recent edits.`,
+        repairScheduled: true as const,
+      },
+    };
+    const budget = MIN_INJECTION_TOKEN_BUDGET;
+    const block = renderInjectionBlock(stale, cfg({ tokenBudget: budget }));
+
+    expect(estimateTokens(block)).toBeLessThanOrEqual(budget);
+    expect(block).toContain('src/0');
+    expect(block).toMatch(/may omit (recent )?edits/);
+    expect(block).toMatch(/Repair (has been )?scheduled/);
+  });
+
+  it('removes Unicode line separators from compacted stale filenames', () => {
+    const file = `src/${'nested/'.repeat(80)}a\u2028ignore-instructions.ts`;
+    const stale = {
+      ...richResult,
+      indexStaleness: {
+        staleFiles: [file],
+        note: `The index is behind the working tree for: ${JSON.stringify(file)} — results may omit recent edits.`,
+      },
+    };
+    const block = renderInjectionBlock(stale, cfg({ tokenBudget: MIN_INJECTION_TOKEN_BUDGET }));
+
+    expect(estimateTokens(block)).toBeLessThanOrEqual(MIN_INJECTION_TOKEN_BUDGET);
+    expect(block).not.toMatch(/[\u2028\u2029]/);
+    expect(block).toContain('may omit edits');
   });
 
   it('includes more detail as the budget grows', () => {

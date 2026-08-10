@@ -127,11 +127,47 @@ export function capStructuredResult(result: unknown, maxBytes: number): { text: 
   const redactions = result && typeof result === 'object' && !Array.isArray(result)
     ? (result as Record<string, unknown>).redactions
     : undefined;
-  const envelope = (partial: string): Record<string, unknown> => ({
+  const indexStaleness = result && typeof result === 'object' && !Array.isArray(result)
+    ? (result as Record<string, unknown>).indexStaleness
+    : undefined;
+  let preservedIndexStaleness = indexStaleness;
+  const envelopeWith = (partial: string, staleness: unknown): Record<string, unknown> => ({
     truncated: true,
     note,
     ...(redactions === undefined ? {} : { redactions }),
+    ...(staleness === undefined ? {} : { indexStaleness: staleness }),
     partial,
+  });
+
+  // An untrusted artifact can cite many very long paths. Keeping that machine
+  // list verbatim would make the "capped" envelope itself exceed maxBytes even
+  // with an empty partial. Compact only when necessary, retaining the factual
+  // boundary, count, one bounded example, and repair status.
+  if (
+    indexStaleness !== undefined
+    && Buffer.byteLength(JSON.stringify(envelopeWith('', indexStaleness), null, 2), 'utf8') > maxBytes
+  ) {
+    const stale = indexStaleness && typeof indexStaleness === 'object' && !Array.isArray(indexStaleness)
+      ? indexStaleness as Record<string, unknown>
+      : {};
+    const files = Array.isArray(stale.staleFiles)
+      ? stale.staleFiles.filter((file): file is string => typeof file === 'string')
+      : [];
+    const first = files[0]?.slice(0, 256);
+    preservedIndexStaleness = {
+      staleFiles: first ? [first] : [],
+      staleFileCount: files.length,
+      ...(files.length > (first ? 1 : 0) ? { staleFilesOmitted: files.length - (first ? 1 : 0) } : {}),
+      note: 'The index is behind the working tree; results may omit recent edits. Stale-file details were bounded to fit the response.',
+      ...(stale.repairScheduled === true ? { repairScheduled: true } : {}),
+      ...(stale.uncheckedCitations === true ? { uncheckedCitations: true } : {}),
+    };
+  }
+  const envelope = (partial: string): Record<string, unknown> => ({
+    // Freshness is a mandatory factual boundary, not optional detail. Preserve
+    // a bounded form even when the structured payload falls back to a
+    // truncation envelope (change: disclose-stale-serving-on-cold-reads).
+    ...envelopeWith(partial, preservedIndexStaleness),
   });
   const best = largestFitting(full.length, (n) =>
     Buffer.byteLength(JSON.stringify(envelope(full.slice(0, n)), null, 2), 'utf8') <= maxBytes);

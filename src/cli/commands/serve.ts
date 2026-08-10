@@ -45,6 +45,7 @@ import { resolveCanonicalToolName } from '../../core/services/mcp-handlers/tool-
 import { validateDirectory, waitForGraphRebuild } from '../../core/services/mcp-handlers/utils.js';
 import { EdgeStore } from '../../core/services/edge-store.js';
 import { McpWatcher } from '../../core/services/mcp-watcher.js';
+import { registerRepairHost } from '../../core/services/cold-start-bootstrap.js';
 import { openloreAnalyze } from '../../api/analyze.js';
 import { TOOL_DEFINITIONS, TOOL_PRESETS, presetMembershipError, selectActiveTools } from './mcp.js';
 import { validateToolArgs } from '../../core/services/mcp-handlers/tool-guard.js';
@@ -704,6 +705,16 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
     }
   }
 
+  // A serve daemon owns a repeatable, coalesced rebuild coordinator even when
+  // its filesystem watcher is disabled. Register repair authority for this
+  // canonical served root only; request paths for any other repository cannot
+  // borrow it (change: disclose-stale-serving-on-cold-reads).
+  const unregisterRepairHost = registerRepairHost(root, staleFiles => {
+    if (watcher) return watcher.requestColdReadRepair(staleFiles);
+    triggerRebuild(root);
+    return true;
+  });
+
   // Clean shutdown: drop the descriptor so clients don't reuse a dead port.
   // Signal handlers exit the process; the returned close() is for in-process
   // callers (tests) that must not kill the host.
@@ -725,6 +736,7 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
         clearTimeout(reanalyzeTimer);
         reanalyzeTimer = undefined;
       }
+      unregisterRepairHost();
       const serverClosed = new Promise<void>((resolve) => server.close(() => resolve()));
       if (watcher) await watcher.stop().catch(() => {});
       rebuildPending.clear();

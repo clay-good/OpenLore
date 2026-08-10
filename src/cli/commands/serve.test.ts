@@ -18,6 +18,10 @@ import { TOOL_PRESETS } from './mcp.js';
 import { EdgeStore } from '../../core/services/edge-store.js';
 import * as analyzeApi from '../../api/analyze.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR } from '../../constants.js';
+import {
+  _resetRepairServiceForTesting,
+  requestRepairFromHost,
+} from '../../core/services/cold-start-bootstrap.js';
 
 let handle: ServeHandle | undefined;
 let root = '';
@@ -32,6 +36,21 @@ afterEach(async () => {
     root = '';
   }
   vi.restoreAllMocks();
+  _resetRepairServiceForTesting();
+});
+
+describe('host-scoped cold-read repair', () => {
+  it('accepts repair only while the exact serve root is hosted', async () => {
+    const analyze = vi.spyOn(analyzeApi, 'openloreAnalyze').mockResolvedValue({} as never);
+    const h = await boot();
+
+    expect(requestRepairFromHost(root, ['src/payments.ts'])).toBe(true);
+    await vi.waitFor(() => expect(analyze).toHaveBeenCalled());
+
+    await h.close();
+    handle = undefined;
+    expect(requestRepairFromHost(root, ['src/payments.ts'])).toBe(false);
+  });
 });
 
 async function boot(opts: { token?: string; preset?: string } = {}): Promise<ServeHandle> {

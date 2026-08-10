@@ -8,6 +8,8 @@ import {
   repairInBackground,
   repairStatusFor,
   registerRepairBuilder,
+  registerRepairHost,
+  requestRepairFromHost,
   _resetRepairServiceForTesting,
 } from './cold-start-bootstrap.js';
 import { OPENLORE_ANALYSIS_REL_PATH, OPENLORE_CONFIG_REL_PATH } from '../../constants.js';
@@ -180,5 +182,83 @@ describe('repairInBackground (make-index-self-healing)', () => {
     const dir = freshDir(true);
     writeFileSync(join(dir, OPENLORE_CONFIG_REL_PATH), JSON.stringify({ autoInit: false }));
     expect(repairInBackground(dir, 'stale-region', { analyze: async () => {}, log: () => {} })).toBeNull();
+  });
+});
+
+describe('host-scoped cited-file repair handoff', () => {
+  afterEach(() => {
+    _resetRepairServiceForTesting();
+  });
+
+  it('hands stale cited files only to the host registered for that exact root', () => {
+    const hosted = freshDir(true);
+    const other = freshDir(true);
+    const received: Array<readonly string[]> = [];
+    registerRepairHost(hosted, (files) => {
+      received.push(files);
+      return true;
+    });
+
+    expect(requestRepairFromHost(other, ['src/other.ts'])).toBe(false);
+    expect(requestRepairFromHost(hosted, ['src/payments.ts', 'src/refunds.ts'])).toBe(true);
+    expect(received).toEqual([['src/payments.ts', 'src/refunds.ts']]);
+  });
+
+  it('canonicalizes aliases while keeping sibling roots isolated', () => {
+    const hosted = freshDir(true);
+    const sibling = freshDir(true);
+    let calls = 0;
+    registerRepairHost(join(hosted, '.'), () => {
+      calls++;
+      return true;
+    });
+
+    expect(requestRepairFromHost(hosted, ['src/a.ts'])).toBe(true);
+    expect(requestRepairFromHost(sibling, ['src/a.ts'])).toBe(false);
+    expect(calls).toBe(1);
+  });
+
+  it('reports acceptance exactly as the host returns and fails soft on exceptions', () => {
+    const declined = freshDir(true);
+    registerRepairHost(declined, () => false);
+    expect(requestRepairFromHost(declined, ['src/a.ts'])).toBe(false);
+
+    const broken = freshDir(true);
+    registerRepairHost(broken, () => { throw new Error('host stopped'); });
+    expect(requestRepairFromHost(broken, ['src/b.ts'])).toBe(false);
+    expect(requestRepairFromHost(broken, [])).toBe(false);
+  });
+
+  it('uses an identity-safe disposer when a host is replaced for the same root', () => {
+    const dir = freshDir(true);
+    const disposeOld = registerRepairHost(dir, () => false);
+    const disposeCurrent = registerRepairHost(dir, () => true);
+
+    disposeOld();
+    expect(requestRepairFromHost(dir, ['src/a.ts'])).toBe(true);
+
+    disposeCurrent();
+    expect(requestRepairFromHost(dir, ['src/a.ts'])).toBe(false);
+  });
+
+  it('restores the prior same-root host when the newest registration is disposed', () => {
+    const dir = freshDir(true);
+    const calls: string[] = [];
+    const disposeOld = registerRepairHost(dir, () => {
+      calls.push('old');
+      return false;
+    });
+    const disposeCurrent = registerRepairHost(dir, () => {
+      calls.push('current');
+      return true;
+    });
+
+    expect(requestRepairFromHost(dir, ['src/a.ts'])).toBe(true);
+    disposeCurrent();
+    expect(requestRepairFromHost(dir, ['src/a.ts'])).toBe(false);
+    expect(calls).toEqual(['current', 'old']);
+
+    disposeOld();
+    expect(requestRepairFromHost(dir, ['src/a.ts'])).toBe(false);
   });
 });

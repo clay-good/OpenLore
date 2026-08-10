@@ -13,7 +13,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, utimesSync, statSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { handleLocateSymbolSpan, resolveFreshness } from './symbol-span.js';
+import { handleLocateSymbolSpan } from './symbol-span.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_LLM_CONTEXT } from '../../../constants.js';
 
 const FOO = `export function foo(a) {
@@ -88,21 +88,6 @@ beforeEach(() => {
 
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
-});
-
-describe('resolveFreshness (pure)', () => {
-  it('trusts the recorded content hash when present: equal → fresh', () => {
-    expect(resolveFreshness({ baselineFileHash: 'abc', currentFileHash: 'abc', sourceMtimeMs: 9e9, artifactMtimeMs: 0 })).toBe('fresh');
-  });
-  it('trusts the recorded content hash when present: differ → stale (even if mtime looks fresh)', () => {
-    expect(resolveFreshness({ baselineFileHash: 'abc', currentFileHash: 'xyz', sourceMtimeMs: 0, artifactMtimeMs: 9e9 })).toBe('stale');
-  });
-  it('falls back to mtime when no baseline hash: not written since analysis → fresh', () => {
-    expect(resolveFreshness({ baselineFileHash: null, currentFileHash: 'abc', sourceMtimeMs: 100, artifactMtimeMs: 200 })).toBe('fresh');
-  });
-  it('falls back to mtime when no baseline hash: written after analysis → stale', () => {
-    expect(resolveFreshness({ baselineFileHash: null, currentFileHash: 'abc', sourceMtimeMs: 300, artifactMtimeMs: 200 })).toBe('stale');
-  });
 });
 
 describe('handleLocateSymbolSpan', () => {

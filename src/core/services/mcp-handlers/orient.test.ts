@@ -77,11 +77,12 @@ import { SpecVectorIndex } from '../../analyzer/spec-vector-index.js';
 import { loadMappingIndex, specsForFile, functionsForDomain, readCachedContext } from './utils.js';
 import { readOpenLoreConfig } from '../config-manager.js';
 import { loadDecisionStore } from '../../decisions/store.js';
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildStyleFingerprint } from '../../analyzer/style-fingerprint.js';
 import { ARTIFACT_STYLE_FINGERPRINT } from '../../../constants.js';
+import { registerRepairHost } from '../cold-start-bootstrap.js';
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -160,6 +161,90 @@ describe('handleOrient', () => {
       relevantFiles: 'source-derived',
       specDomains: 'local-unreviewed',
     });
+  });
+
+  it('adds cited-file staleness only when the working tree outruns the served artifact', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'openlore-orient-freshness-'));
+    const analysisDir = join(root, '.openlore', 'analysis');
+    const source = join(root, 'src', 'payments.ts');
+    try {
+      await mkdir(analysisDir, { recursive: true });
+      await mkdir(join(root, 'src'), { recursive: true });
+      await writeFile(join(analysisDir, 'llm-context.json'), '{}');
+      await writeFile(source, 'export function chargeCard() {}\n');
+      const now = Date.now() / 1000;
+      await utimes(join(analysisDir, 'llm-context.json'), now - 10, now - 10);
+      await utimes(source, now, now);
+
+      vi.mocked(VectorIndex.exists).mockReturnValue(true);
+      vi.mocked(VectorIndex.search).mockResolvedValue([
+        makeSearchResult({ name: 'chargeCard', filePath: 'src/payments.ts' }),
+      ]);
+
+      const stale = await handleOrient(root, 'chargeCard') as {
+        indexStaleness?: { staleFiles: string[]; repairScheduled?: true };
+      };
+      expect(stale.indexStaleness?.staleFiles).toEqual(['src/payments.ts']);
+      expect(stale.indexStaleness?.repairScheduled).toBeUndefined();
+
+      await utimes(source, now - 20, now - 20);
+      const fresh = await handleOrient(root, 'chargeCard') as { indexStaleness?: unknown };
+      expect(fresh.indexStaleness).toBeUndefined();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('schedules hosted repair and serves the rebuilt symbol without a stale note after convergence', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'openlore-orient-convergence-'));
+    const artifact = join(root, '.openlore', 'analysis', 'llm-context.json');
+    const source = join(root, 'src', 'payments.ts');
+    const accepted: string[][] = [];
+    let repairDone = Promise.resolve();
+    let unregister = (): void => {};
+    try {
+      await mkdir(join(root, '.openlore', 'analysis'), { recursive: true });
+      await mkdir(join(root, 'src'), { recursive: true });
+      await writeFile(artifact, '{}');
+      await writeFile(source, 'export function chargeCard() {}\nexport function refundCard() {}\n');
+      const now = Date.now() / 1000;
+      await utimes(artifact, now - 10, now - 10);
+      await utimes(source, now, now);
+
+      vi.mocked(VectorIndex.exists).mockReturnValue(true);
+      vi.mocked(VectorIndex.search).mockResolvedValue([
+        makeSearchResult({ name: 'chargeCard', filePath: 'src/payments.ts' }),
+      ]);
+      unregister = registerRepairHost(root, staleFiles => {
+        accepted.push([...staleFiles]);
+        repairDone = (async () => {
+          vi.mocked(VectorIndex.search).mockResolvedValue([
+            makeSearchResult({ name: 'refundCard', filePath: 'src/payments.ts' }),
+          ]);
+          await utimes(artifact, now + 10, now + 10);
+        })();
+        return true;
+      });
+
+      const stale = await handleOrient(root, 'refundCard') as {
+        relevantFunctions: Array<{ name: string }>;
+        indexStaleness?: { repairScheduled?: true };
+      };
+      expect(stale.relevantFunctions.map(fn => fn.name)).toEqual(['chargeCard']);
+      expect(stale.indexStaleness?.repairScheduled).toBe(true);
+      expect(accepted).toEqual([['src/payments.ts']]);
+
+      await repairDone;
+      const converged = await handleOrient(root, 'refundCard') as {
+        relevantFunctions: Array<{ name: string }>;
+        indexStaleness?: unknown;
+      };
+      expect(converged.relevantFunctions.map(fn => fn.name)).toEqual(['refundCard']);
+      expect(converged.indexStaleness).toBeUndefined();
+    } finally {
+      unregister();
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it('serves functions from a promoted bundle with imported provenance after restart', async () => {

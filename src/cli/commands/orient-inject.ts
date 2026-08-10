@@ -35,6 +35,7 @@ import {
 // tests continue to resolve everything from this module.
 export {
   INJECTION_DEFAULTS,
+  MIN_INJECTION_TOKEN_BUDGET,
   POINTER_LINE,
   resolveInjectionConfig,
   evaluateRelevanceGate,

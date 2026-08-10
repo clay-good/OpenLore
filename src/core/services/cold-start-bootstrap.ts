@@ -26,8 +26,8 @@
  * Deterministic, no LLM, no new dependency.
  */
 
-import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import {
   OPENLORE_ANALYSIS_REL_PATH,
 } from '../../constants.js';
@@ -69,6 +69,74 @@ const inFlight = new Map<string, { reason: RepairReason; startedAt: number }>();
  * the automatic rebuild is skipped.
  */
 let registeredBuilder: ((directory: string) => Promise<void>) | null = null;
+
+/**
+ * A long-lived host's non-blocking handoff for files found stale by a cited-file
+ * read check. Returning true means the host accepted the repair request (it may
+ * coalesce it with work already queued); false means disclosure must remain
+ * repair-agnostic. The callback must not await the repair itself.
+ */
+export type RepairHost = (staleFiles: readonly string[]) => boolean;
+
+interface RepairHostRegistration {
+  callback: RepairHost;
+  token: symbol;
+}
+
+/** Repair hosts keyed by canonical repository root; newest active registration wins. */
+const repairHosts = new Map<string, RepairHostRegistration[]>();
+
+/** Resolve path aliases to the same stable repository identity. */
+function canonicalRoot(directory: string): string {
+  let root: string;
+  try {
+    root = realpathSync.native(resolve(directory));
+  } catch {
+    root = resolve(directory);
+  }
+  return process.platform === 'win32' ? root.toLowerCase() : root;
+}
+
+/**
+ * Register the repair path owned by one watcher/serve host. Registrations are
+ * exact-root scoped: hosting repo A never authorizes repair work in repo B.
+ *
+ * The disposer is identity-safe. If a replacement host registers for the same
+ * root before the old host tears down, the old disposer cannot remove the new
+ * registration.
+ */
+export function registerRepairHost(directory: string, callback: RepairHost): () => void {
+  const root = canonicalRoot(directory);
+  const registration = { callback, token: Symbol(root) };
+  const registrations = repairHosts.get(root) ?? [];
+  registrations.push(registration);
+  repairHosts.set(root, registrations);
+  return () => {
+    const active = repairHosts.get(root);
+    if (!active) return;
+    const index = active.findIndex(candidate => candidate.token === registration.token);
+    if (index < 0) return;
+    active.splice(index, 1);
+    if (active.length === 0) repairHosts.delete(root);
+  };
+}
+
+/**
+ * Offer cited stale files to the host for this exact repository. Returns true
+ * only when a registered host accepted the request. Missing or throwing hosts
+ * fail soft so a read can still serve its factual staleness disclosure.
+ */
+export function requestRepairFromHost(directory: string, staleFiles: readonly string[]): boolean {
+  if (!directory || staleFiles.length === 0) return false;
+  const registrations = repairHosts.get(canonicalRoot(directory));
+  const host = registrations?.[registrations.length - 1];
+  if (!host) return false;
+  try {
+    return host.callback([...staleFiles]) === true;
+  } catch {
+    return false;
+  }
+}
 
 /** Register the process-wide repair builder (the MCP server injects install's forced buildIndex). */
 export function registerRepairBuilder(fn: (directory: string) => Promise<void>): void {
@@ -202,5 +270,6 @@ export function bootstrapAnalysisInBackground(
 export function _resetRepairServiceForTesting(): void {
   attempted.clear();
   inFlight.clear();
+  repairHosts.clear();
   registeredBuilder = null;
 }

@@ -1,13 +1,19 @@
 # Disclose stale serving on cold reads: never a confident answer from an index the working tree has outrun
 
-> Status: PROPOSED (2026-07-27, first-run e2e). The README promises an agent is "*told when a
+> Status: **BUILT** (2026-08-09). The README promises an agent is "*told when a
 > fact has gone stale* instead of served a confident guess." On the two read paths a first-time
 > user actually exercises — the hook-driven one-shot `orient --json`/`--inject`, and the first
-> calls of a freshly-started MCP session — the promise does not hold: an index that is behind the
-> working tree is served **with no staleness signal anywhere in the payload**. Verified live:
+> calls of a freshly-started MCP session — the promise did not hold before this change: an index
+> behind the working tree was served **with no staleness signal anywhere in the payload**. The
+> pre-fix behavior was verified live:
 > after appending `refundCard` to `src/payments.ts`, both `openlore orient --json --task
 > "refundCard behavior"` and a cold-started MCP `orient` returned the pre-edit graph (no
 > `refundCard`, `chargeCard` ranked instead) with zero disclosure fields.
+
+Implemented with a confined, bounded cited-file freshness helper shared by the span locator and
+the four conclusion surfaces. One-shot reads disclose only; exact-root watcher/serve hosts accept
+repeatable repair handoffs through their existing coalesced rebuild lanes. Full test suite, lint,
+typecheck, and OpenSpec validation are green.
 
 ## The gap
 

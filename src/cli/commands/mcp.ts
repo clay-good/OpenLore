@@ -43,7 +43,12 @@ import {
 import { sanitizeMcpError, validateDirectory } from '../../core/services/mcp-handlers/utils.js';
 import { createTracker, updateTracker, updatePanic, resetPanicOnOrient, getFreshnessSignal, trackerToPanicState } from '../../core/services/mcp-handlers/epistemic-lease.js';
 import type { EpistemicTracker } from '../../core/services/mcp-handlers/epistemic-lease.js';
-import { registerRepairBuilder, repairStatusFor, REPAIR_REASON_DETAIL } from '../../core/services/cold-start-bootstrap.js';
+import {
+  registerRepairBuilder,
+  registerRepairHost,
+  repairStatusFor,
+  REPAIR_REASON_DETAIL,
+} from '../../core/services/cold-start-bootstrap.js';
 import type { PanicResponseMode } from '../../types/index.js';
 import { readPanicState, mutatePanicStateLocked, getPanicSignalText } from '../../core/services/mcp-handlers/panic-response.js';
 import { emit } from '../../core/services/telemetry.js';
@@ -2569,10 +2574,16 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
             selfRebuild: true,
           });
           await autoWatcher.start();
+          const unregisterRepairHost = registerRepairHost(resolve(dir), staleFiles =>
+            autoWatcher?.requestColdReadRepair(staleFiles) ?? false,
+          );
           // Teardown routes through the one lifecycle path wired after connect
           // (stdin EOF / SIGINT / SIGTERM), so this watcher cannot outlive its
           // transport and no signal implements a partial teardown of its own.
-          lifecycle.register(() => autoWatcher!.stop());
+          lifecycle.register(async () => {
+            unregisterRepairHost();
+            await autoWatcher!.stop();
+          });
         }
       }
     }
@@ -2852,10 +2863,17 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
         rootPath: watchDir,
         debounceMs: isNaN(debounceMs) ? 400 : debounceMs,
         embed: !options.watchNoEmbed,
+        selfRebuild: true,
       });
       await watcher.start();
+      const unregisterRepairHost = registerRepairHost(watchDir, staleFiles =>
+        watcher.requestColdReadRepair(staleFiles),
+      );
       // Route this watcher's teardown through the same one lifecycle path.
-      lifecycle.register(() => watcher.stop());
+      lifecycle.register(async () => {
+        unregisterRepairHost();
+        await watcher.stop();
+      });
     }
   }
 }
