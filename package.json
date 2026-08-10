@@ -1,6 +1,6 @@
 {
   "name": "openlore",
-  "version": "2.1.8",
+  "version": "2.1.9",
   "description": "Persistent architectural memory and structural cognition for AI coding agents.",
   "type": "module",
   "main": "dist/api/index.js",
