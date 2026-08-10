@@ -38,12 +38,17 @@ describe('openlore-orient skill bundle', () => {
     expect(src).toContain('orient-via-mcp.mjs');
   });
 
-  it('SKILL.md has the required frontmatter keys', async () => {
+  it('SKILL.md has portable Agent Skills frontmatter', async () => {
     const src = await readFile(SKILL_MD, 'utf8');
-    expect(src).toMatch(/^---\n[\s\S]*?\n---/);
+    const frontmatter = src.match(/^---\n([\s\S]*?)\n---/)?.[1];
+    expect(frontmatter).toBeDefined();
     expect(src).toMatch(/^name:\s*openlore-orient$/m);
-    expect(src).toMatch(/^version:\s*[0-9]+\.[0-9]+$/m);
-    expect(src.toLowerCase()).toContain('persistent architectural memory');
+    expect(src).toMatch(/^description:\s*.+Use when.+$/m);
+    expect(frontmatter?.split('\n').map((line) => line.split(':', 1)[0])).toEqual([
+      'name',
+      'description',
+    ]);
+    expect(src.toLowerCase()).toContain('deterministic, graph-native model');
   });
 
   it('orient.sh and orient.ps1 are executable', async () => {
