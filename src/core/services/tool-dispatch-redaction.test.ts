@@ -26,6 +26,8 @@ describe('source-carrying tool output redaction', () => {
       'find_clones',
       'analyze_env_impact',
       'search_code',
+      'prepare_spec_generation',
+      'prepare_spec_repair',
     ]);
     for (const tool of SOURCE_CARRYING_TOOLS) {
       const result = await redactSourceToolResult(tool, { source: secret }, root) as Record<string, unknown>;

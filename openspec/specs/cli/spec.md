@@ -1780,7 +1780,7 @@ openlore emits SCIP for interop with external indexers but never imports it; the
 
 **Consequences:** SCIP consumers get a snapshot; openlore never depends on SCIP being read back.
 
-### MCP exposes a curated navigation tool preset, not all 73 tools
+### MCP exposes a curated navigation tool preset, not all 75 tools
 
 **Status:** Approved
 **Date:** 2026-06-01
@@ -1958,13 +1958,13 @@ A spec-store binding adds an optional OpenLoreConfig.specStore block { name, pat
 
 **Consequences:** Using a spec-store binding requires the target repos to also be registered via `openlore federation add`; a declared name with no registry entry surfaces as a target-unresolved finding with a pasteable remediation rather than an error. Tool count rises 60→61, requiring updates to the count-guarded docs and the --preset help string. Future working-set and impact-certificate tools will extend this binding.
 
-### Lean default MCP surface = navigation preset; full 73-tool surface is opt-in via --preset full / --all-tools
+### Lean default MCP surface = navigation preset; the then-current full seventy-three-tool surface is opt-in via --preset full / --all-tools
 
 **Status:** Approved
 **Date:** 2026-06-22
 **ID:** a6c916ed
 
-OpenLore exposed all 73 MCP tools by default (selectActiveTools with no selector returned allTools; install wired `openlore mcp` with no preset), contradicting both the Spec 14 agent-benchmark result (the net win comes specifically from `--preset navigation`, a ~10-tool graph-traversal surface) and the mcp-quality MinimizeToolSurface rule (schemas for uncalled tools are pure per-request overhead and degrade tool-selection accuracy). Invert the default: no selector now resolves to the lean default = the existing `navigation` preset verbatim (orient, search_code, get_subgraph, trace_execution_path, analyze_impact, suggest_insertion_points, get_function_skeleton, get_landmarks, get_map, find_path). The full TOOL_DEFINITIONS surface stays reachable via `--preset full` (alias `all`) or `--all-tools`. Governance/memory/verify/federation remain opt-in named presets, unchanged. Shared default/full preset names live in src/constants.ts so install adapters need not import the heavy MCP module.
+OpenLore exposed all seventy-three MCP tools by default (selectActiveTools with no selector returned allTools; install wired `openlore mcp` with no preset), contradicting both the Spec 14 agent-benchmark result (the net win comes specifically from `--preset navigation`, a ~10-tool graph-traversal surface) and the mcp-quality MinimizeToolSurface rule (schemas for uncalled tools are pure per-request overhead and degrade tool-selection accuracy). Invert the default: no selector now resolves to the lean default = the existing `navigation` preset verbatim (orient, search_code, get_subgraph, trace_execution_path, analyze_impact, suggest_insertion_points, get_function_skeleton, get_landmarks, get_map, find_path). The full TOOL_DEFINITIONS surface stays reachable via `--preset full` (alias `all`) or `--all-tools`. Governance/memory/verify/federation remain opt-in named presets, unchanged. Shared default/full preset names live in src/constants.ts so install adapters need not import the heavy MCP module.
 
 **Consequences:** No tool is removed; --preset full restores prior behavior exactly. The default-installed surface no longer includes governance tools (record_decision, check_spec_drift, detect_changes) — agents relying on the decisions pre-commit-gate workflow should install with --preset full or governance preset; documented with a migration note. The tool-count doc guard asserts the documented default count against the lean preset and the full count against TOOL_DEFINITIONS.length. New tools added to the registry default to opt-in (absent from the lean default) unless an evidence-backed decision adds them.
 
@@ -2036,7 +2036,7 @@ Round-3 adversarial QA found two saveScorecard defects: an existsSync-then-write
 
 Benchmark-cleared. The DefaultSurfaceRevealsAllFaces gate ran all three quantities and none regressed: (1) token economy — substrate ~4.5k tokens, +1.2k over navigation, within the ~10k tool-search threshold; (2) face coverage — substrate exposes navigate+change+remember+verify, navigation only navigate; (3) selection accuracy — substrate 90% vs navigation 80% on shared tool selection (no regression) and 100% vs 0% on governance, plus end-to-end task COMPLETION on the pinned real-repo corpus across TWO models (sonnet + haiku) on BOTH tiers: 100% correctness everywhere, substrate cheaper on 3 of 4 model×tier cells. The lean navigation default under-sold the substrate: agents installed the documented way never discovered recall/verify_claim/blast_radius.
 
-**Consequences:** The out-of-box default install now exposes the substrate preset (navigation core + recall + verify_claim + blast_radius, 13 tools) instead of navigation (10). No tool removed; navigation stays a named preset and is a one-flag reversible escape (--preset navigation). Reverses ADR-0022 (a6c916ed). Lean-default payload budget rises ~13.2KB to ~17.7KB. The BREADTH_POINTER now describes the substrate default and points to full/federation/navigation. Docs/guards updated to the 13-tool default.
+**Consequences:** The out-of-box default install then exposed the substrate preset (navigation core + recall + verify_claim + blast_radius, thirteen tools) instead of navigation (10). No tool was removed; navigation remained a named preset and a one-flag reversible escape (--preset navigation). This reversed ADR-0022 (a6c916ed). The lean-default payload budget rose ~13.2KB to ~17.7KB. The BREADTH_POINTER described the substrate default and pointed to full/federation/navigation. Docs/guards were updated to the then-current thirteen-tool default.
 
 ### Share identifier tokenization through a dependency-light module
 

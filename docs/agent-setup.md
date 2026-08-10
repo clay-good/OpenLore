@@ -113,7 +113,7 @@ Wire the generated digest into your agent's context:
 
 **Claude Code — MCP config (token-efficient two-server setup)**
 
-MCP clients load all tool schemas at session start. With 75 tools, this costs roughly 16k tokens of `tools/list` before any work begins (Spec 28 measured the preceding 73-tool surface; the lossless server-side trim is only ~2%, so the real lever is deferral). Claude Code supports `alwaysLoad: false` (deferred, default) — tools load only when the agent searches for them via Tool Search.
+MCP clients load all tool schemas at session start. With 75 tools, this costs roughly 16k tokens of `tools/list` before any work begins (Spec 28 measured the preceding seventy-three-tool surface; the lossless server-side trim is only ~2%, so the real lever is deferral). Claude Code supports `alwaysLoad: false` (deferred, default) — tools load only when the agent searches for them via Tool Search.
 
 The recommended setup uses two server entries: one always-visible core server and one deferred full server:
 

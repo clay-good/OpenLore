@@ -107,9 +107,9 @@ openlore install [options]   # detect agents, wire surfaces, build the index
   --agent <name>         # Limit to one surface: claude-code, cursor, cline,
                          #   continue, agents-md
   --preset <name>        # MCP tool preset to wire: substrate (default; navigation core +
-                         #   governance reads: nav + recall + verify_claim + blast_radius), navigation (lean escape),
+                         #   spec workflows + recall + verify_claim + blast_radius), navigation (lean escape),
                          #   minimal, memory, verify, federation, coordination, or full
-  --all-tools            # Wire the full 73-tool surface (alias of --preset full)
+  --all-tools            # Wire the full 75-tool surface (alias of --preset full)
   --dry-run              # Print planned changes without writing any files
   --force                # Overwrite OpenLore-managed blocks even if hand-edited
   --uninstall            # Remove OpenLore-managed blocks and entries
@@ -125,7 +125,7 @@ openlore connect remove [agent]      # disconnect that agent
   <agent>                # Positional: claude-code | cursor | cline | continue |
                          #   agents-md (omit for an interactive picker)
   --preset <name>        # MCP tool preset to wire (same names as install)
-  --all-tools            # Wire the full 73-tool surface (alias of --preset full)
+  --all-tools            # Wire the full 75-tool surface (alias of --preset full)
   --dry-run              # Print planned changes without writing any files
   --force                # Overwrite OpenLore-managed blocks even if hand-edited
   --no-analyze           # Configure surfaces only; do not build the index

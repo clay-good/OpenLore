@@ -43,8 +43,8 @@
 For all other cases (reading a file, grepping, listing files) use native tools directly.
 
 > **The default MCP surface is the `substrate` preset (change `refine-happy-path-and-defaults`):** a bare
-> `openlore mcp` / `openlore install` wires the 13-tool `substrate` preset — the navigation core plus governance reads
-> (the `navigation` core + `recall` + `verify_claim` + `blast_radius`) — not all 73 tools. It cleared the
+> `openlore mcp` / `openlore install` wires the 15-tool `substrate` preset — the navigation core, spec-workflow composites, and governance reads
+> (`prepare_spec_generation` + `prepare_spec_repair` + `recall` + `verify_claim` + `blast_radius`) — not all 75 tools. It cleared the
 > DefaultSurfaceRevealsAllFaces benchmark (no task-completion or selection regression across two models /
 > both tiers; decision c79ec7ca / ADR-0023, superseding ADR-0022). Narrower/wider is opt-in: the lean
 > navigate-only `navigation` preset (10 tools, the one-flag escape), `--minimal` (governance core),
