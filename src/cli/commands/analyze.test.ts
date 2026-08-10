@@ -8,7 +8,7 @@ import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { analyzeCommand, formatIndexedFunctionPopulation, runAnalysis } from './analyze.js';
+import { analyzeCommand, formatIndexedFunctionPopulation, formatSpecIndexFailure, runAnalysis } from './analyze.js';
 import { ARTIFACT_FINGERPRINT } from '../../constants.js';
 
 // ============================================================================
@@ -215,6 +215,21 @@ describe('analyze command', () => {
   });
 
   describe('helper function tests', () => {
+    it('presents a freshly created empty spec directory as optional normal state', () => {
+      const line = formatSpecIndexFailure(
+        'Spec directory /repo/openspec/specs exists but contains no spec.md files',
+        true,
+      );
+      expect(line).toContain('ℹ No specs yet');
+      expect(line).toContain('optional');
+      expect(line).toContain('requires an LLM provider');
+      expect(line).not.toContain('⚠');
+    });
+
+    it('preserves the warning for an empty spec directory not created by this run', () => {
+      expect(formatSpecIndexFailure('exists but contains no spec.md files', false)).toContain('⚠ Spec index skipped');
+    });
+
     describe('collect function', () => {
       it('should collect multiple values', () => {
         const collect = (value: string, previous: string[]): string[] => {

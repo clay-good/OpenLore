@@ -85,6 +85,8 @@ interface ExtendedAnalyzeOptions extends AnalyzeOptions {
    * next-step) — install does the agent wiring itself, so those would be
    * redundant and contradictory on the install path. */
   embedded?: boolean;
+  /** Internal: the current install created the empty OpenSpec directory. */
+  freshSpecDirectory?: boolean;
 }
 
 interface AnalysisResult {
@@ -451,6 +453,7 @@ export const analyzeCommand = new Command('analyze')
   // Internal flag set by `openlore install` (hidden from help): install does the
   // agent wiring itself, so analyze must not also print its agent-onboarding tips.
   .addOption(new Option('--embedded').hideHelp())
+  .addOption(new Option('--fresh-spec-directory').hideHelp())
   .addHelpText(
     'after',
     `
@@ -542,7 +545,7 @@ After analysis, run 'openlore generate' to create OpenSpec files.
       if (opts.reindexSpecs) {
         const outputPath = join(rootPath, opts.output);
         await mkdir(outputPath, { recursive: true });
-        await runSpecIndexing(rootPath, outputPath, openloreConfig);
+        await runSpecIndexing(rootPath, outputPath, openloreConfig, false, options.freshSpecDirectory === true);
         return;
       }
 
@@ -940,7 +943,15 @@ After analysis, run 'openlore generate' to create OpenSpec files.
       // ========================================================================
       // Always build an index so orient() works. With embeddings when available,
       // otherwise (or with --no-embed) a keyword-only BM25 index.
-      await runEmbedStep(rootPath, outputPath, openloreConfig, opts.force ?? false, result.artifacts.llmContext, keywordOnly);
+      await runEmbedStep(
+        rootPath,
+        outputPath,
+        openloreConfig,
+        opts.force ?? false,
+        result.artifacts.llmContext,
+        keywordOnly,
+        options.freshSpecDirectory === true,
+      );
 
       // Duration
       const totalDuration = Date.now() - startTime;
@@ -976,6 +987,7 @@ async function runEmbedStep(
   force: boolean,
   llmContext: import('../../core/analyzer/artifact-generator.js').LLMContext | null,
   keywordOnly = false,
+  freshSpecDirectory = false,
 ): Promise<void> {
   console.log(keywordOnly ? '  Building keyword (BM25) search index...' : '  Building semantic vector index...');
   try {
@@ -1077,7 +1089,7 @@ async function runEmbedStep(
     await runTextLineIndexing(rootPath, outputPath);
 
     // Also index specs if they exist
-    await runSpecIndexing(rootPath, outputPath, openloreConfig, keywordOnly);
+    await runSpecIndexing(rootPath, outputPath, openloreConfig, keywordOnly, freshSpecDirectory);
   } catch (embedErr) {
     console.log(`    ✗ Vector index failed: ${(embedErr as Error).message}`);
   }
@@ -1152,7 +1164,8 @@ async function runSpecIndexing(
   rootPath: string,
   outputPath: string,
   openloreConfig: OpenLoreConfig | null,
-  keywordOnly = false
+  keywordOnly = false,
+  freshSpecDirectory = false
 ): Promise<void> {
   const { join: pathJoin } = await import('node:path');
   const { SpecVectorIndex } = await import('../../core/analyzer/spec-vector-index.js');
@@ -1186,6 +1199,16 @@ async function runSpecIndexing(
     console.log(`    ✓ Spec index built [${mode}] (${recordCount} sections)`);
     console.log(`    → ${outputPath.replace(rootPath + '/', '')}vector-index/`);
   } catch (err) {
-    console.log(`    ⚠ Spec index skipped: ${(err as Error).message}`);
+    const message = (err as Error).message;
+    console.log(formatSpecIndexFailure(message, freshSpecDirectory));
   }
+}
+
+export function formatSpecIndexFailure(message: string, freshSpecDirectory: boolean): string {
+  if (freshSpecDirectory && message.includes('exists but contains no spec.md files')) {
+    // change: align-first-run-ctas-with-repo-shape — install created this
+    // empty directory, so it is expected first-run state rather than a warning.
+    return '    ℹ No specs yet — optional: run "openlore generate" (requires an LLM provider; see "openlore features")';
+  }
+  return `    ⚠ Spec index skipped: ${message}`;
 }

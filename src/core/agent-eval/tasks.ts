@@ -25,6 +25,30 @@ export interface ProveTask {
   probes: string;
 }
 
+/** Minimum direct fan-in needed to derive a stable orientation task. */
+export const PROVE_MIN_CALLERS = 2;
+
+/** A single qualifying function is enough to derive the locate/caller tasks. */
+export const PROVE_MIN_ELIGIBLE_FUNCTIONS = 1;
+
+export interface ProveEligibility {
+  eligibleFunctions: number;
+  requiredEligibleFunctions: number;
+  minCallers: number;
+  eligible: boolean;
+}
+
+/** Measure the exact structural precondition shared by install and prove. */
+export function measureProveEligibility(facts: GraphFact[]): ProveEligibility {
+  const eligibleFunctions = facts.filter(f => f.callerNames.length >= PROVE_MIN_CALLERS).length;
+  return {
+    eligibleFunctions,
+    requiredEligibleFunctions: PROVE_MIN_ELIGIBLE_FUNCTIONS,
+    minCallers: PROVE_MIN_CALLERS,
+    eligible: eligibleFunctions >= PROVE_MIN_ELIGIBLE_FUNCTIONS,
+  };
+}
+
 /** True iff the agent's answer contains at least one oracle substring. */
 export function scoreAnswer(task: ProveTask, answer: string): boolean {
   const a = answer.toLowerCase();
@@ -66,9 +90,9 @@ export function deriveTasks(facts: GraphFact[], max = 3): ProveTask[] {
 
   // Hub = a well-connected function with a distinctive name (so the oracle is
   // unambiguous), falling back to the most-called function if none qualifies.
-  const hub = byCallers.find(f => f.callerNames.length >= 2 && isDistinctive(f.name)) ?? byCallers[0];
+  const hub = byCallers.find(f => f.callerNames.length >= PROVE_MIN_CALLERS && isDistinctive(f.name)) ?? byCallers[0];
 
-  if (hub && hub.callerNames.length >= 2) {
+  if (hub && hub.callerNames.length >= PROVE_MIN_CALLERS) {
     // Task 1 — locate: "which file defines `hub`?" Oracle = the file path/stem,
     // which a correct answer will quote verbatim. Very robust.
     tasks.push({

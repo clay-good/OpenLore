@@ -25,7 +25,7 @@
 | `openlore test --min-coverage <n>` | Fail when effective spec coverage is below N% (CI gate) | No |
 | `openlore digest` | Plain-English summary of all specs for human review | No |
 | `openlore prove` | Measure OpenLore's token value on your repo (WITH vs WITHOUT agent pass) | Yes |
-| `openlore prove --estimate` | Deterministic, graph-derived projection of the orientation tax — no agent, no key | No |
+| `openlore prove --estimate` | Deterministic graph projection when ≥1 function has ≥2 callers; sparse refusals report the measured count — no agent, no key | No |
 | `openlore prove --json\|--markdown\|--save` | CI-consumable scorecard / paste-ready block + badge / dated record under `.openlore/prove/` | Matches arm |
 | `openlore decisions` | Manage architectural decisions: list, approve, reject, sync to specs and ADRs | No |
 | `openlore decisions --gate` | Pre-commit gate check: exit non-zero if decisions await review (used by the hook) | No |

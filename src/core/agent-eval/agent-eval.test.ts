@@ -4,7 +4,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { parseAgentJson, summarize, median, type Metrics } from './measure.js';
-import { deriveTasks, scoreAnswer, type GraphFact } from './tasks.js';
+import { deriveTasks, measureProveEligibility, scoreAnswer, type GraphFact } from './tasks.js';
 import {
   computeScorecard, verdict, renderScorecard,
   serializeScorecard, renderScorecardMarkdown, scorecardBadgeUrl, money,
@@ -122,6 +122,25 @@ describe('deriveTasks', () => {
 
   it('returns [] for a graph too sparse to oracle', () => {
     expect(deriveTasks([{ name: 'x', filePath: 'x.ts', callerNames: [], calleeNames: [], isEntryPoint: false }])).toEqual([]);
+  });
+});
+
+describe('measureProveEligibility', () => {
+  it('reports the measured and required values for sparse and dense graphs', () => {
+    const sparse: GraphFact[] = [
+      { name: 'leaf', filePath: 'leaf.ts', callerNames: ['one'], calleeNames: [], isEntryPoint: false },
+    ];
+    expect(measureProveEligibility(sparse)).toEqual({
+      eligibleFunctions: 0,
+      requiredEligibleFunctions: 1,
+      minCallers: 2,
+      eligible: false,
+    });
+
+    const dense: GraphFact[] = [
+      { name: 'sharedTarget', filePath: 'target.ts', callerNames: ['one', 'two'], calleeNames: [], isEntryPoint: false },
+    ];
+    expect(measureProveEligibility(dense).eligible).toBe(true);
   });
 });
 

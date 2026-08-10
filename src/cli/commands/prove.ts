@@ -24,7 +24,13 @@ import { fileURLToPath } from 'node:url';
 import { logger } from '../../utils/logger.js';
 import { readCachedContext } from '../../core/services/mcp-handlers/utils.js';
 import { OPENLORE_PROVE_REL_PATH } from '../../constants.js';
-import { deriveTasks, scoreAnswer, type GraphFact, type ProveTask } from '../../core/agent-eval/tasks.js';
+import {
+  deriveTasks,
+  measureProveEligibility,
+  scoreAnswer,
+  type GraphFact,
+  type ProveTask,
+} from '../../core/agent-eval/tasks.js';
 import {
   claudeRunner, writeProveMcpConfigs, summarize, parseAgentJson,
   type AgentRunner, type Condition, type Metrics, type Cell,
@@ -47,6 +53,12 @@ interface ProveOptions {
   save?: boolean;
 }
 
+export function formatProveIneligibleMessage(eligibility: ReturnType<typeof measureProveEligibility>): string {
+  return `Could not derive orientation tasks: ${eligibility.eligibleFunctions} functions have ` +
+    `≥${eligibility.minCallers} callers; at least ${eligibility.requiredEligibleFunctions} is required. ` +
+    'Nothing is wrong with the installation — skip this projection for this repo, or run it on a larger repo.';
+}
+
 /** Locate this CLI's own entry so the spawned MCP server is the same build. */
 function localCliEntry(): string {
   // dist/cli/commands/prove.js → dist/cli/index.js
@@ -54,7 +66,7 @@ function localCliEntry(): string {
 }
 
 /** Build GraphFacts from the analysis EdgeStore (the call graph). */
-async function loadGraphFacts(absDir: string): Promise<GraphFact[] | null> {
+export async function loadGraphFacts(absDir: string): Promise<GraphFact[] | null> {
   const ctx = await readCachedContext(absDir);
   const store = ctx?.edgeStore;
   if (!store) return null;
@@ -209,10 +221,14 @@ export async function runProve(opts: {
   if (!facts) {
     return { ok: false, message: 'No analysis graph found. Run "openlore analyze" first, then "openlore prove".' };
   }
-  const tasks = deriveTasks(facts);
-  if (tasks.length === 0) {
-    return { ok: false, message: 'Could not derive orientation tasks — the call graph is too sparse (need functions with ≥2 callers). Try a larger repo.' };
+  const eligibility = measureProveEligibility(facts);
+  if (!eligibility.eligible) {
+    return {
+      ok: false,
+      message: formatProveIneligibleMessage(eligibility),
+    };
   }
+  const tasks = deriveTasks(facts);
 
   const mode: ProveMode = opts.estimate ? 'estimate' : opts.dryRun ? 'dry-run' : 'measured';
 
