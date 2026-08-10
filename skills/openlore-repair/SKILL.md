@@ -1,6 +1,6 @@
 ---
 name: openlore-repair
-description: Reconcile one existing OpenSpec specification from deterministic OpenLore MCP observations.
+description: Reconcile one existing OpenSpec specification from deterministic OpenLore MCP observations. Use when a spec may be incomplete, stale, partially covered, or orphaned from current code.
 ---
 
 1. Call `prepare_spec_repair` for the existing spec domain.

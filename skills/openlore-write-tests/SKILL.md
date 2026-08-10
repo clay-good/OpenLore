@@ -1,17 +1,6 @@
 ---
 name: openlore-write-tests
-description: Write real tests for a function or spec scenario — language-agnostic (TypeScript, Python, C++…). Reads the implementation and spec contract first, runs tests, fixes failures. No stubs, no placeholders.
-license: MIT
-compatibility: openlore MCP server
-user-invocable: true
-allowed-tools:
-  - ask_followup_question
-  - use_mcp_tool
-  - read_file
-  - write_file
-  - str_replace_based_edit
-  - replace_in_file
-  - run_command
+description: Write and run real tests for a function or spec scenario after reading implementation and contract evidence. Use when asked to add, improve, or repair tests without stubs or placeholders.
 ---
 
 # openlore: Write Tests
@@ -42,16 +31,9 @@ Ask the user:
 
 **Step 1b — Find untested scenarios (if no target given)**
 
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>get_test_coverage</tool_name>
-  <arguments>{"directory": "$PROJECT_ROOT"}</arguments>
-</use_mcp_tool>
-```
+Call the openlore MCP tool `get_test_coverage` with `{"directory": "$PROJECT_ROOT"}`.
 
-Present the top 5 uncovered scenarios to the user, ranked by spec importance. Ask which to
-implement first.
+Present the top 5 uncovered scenarios to the user, ranked by spec importance. Ask which to implement first.
 
 **Step 1c — Detect test framework**
 
@@ -71,16 +53,13 @@ Store as `$TEST_RUNNER`. If ambiguous, ask the user.
 
 ## Step 2 — Orient
 
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>orient</tool_name>
-  <arguments>{
-    "directory": "$PROJECT_ROOT",
-    "task": "write tests for $TARGET",
-    "limit": 5
-  }</arguments>
-</use_mcp_tool>
+Call the openlore MCP tool `orient` with:
+```json
+{
+  "directory": "$PROJECT_ROOT",
+  "task": "write tests for $TARGET",
+  "limit": 5
+}
 ```
 
 Extract:
@@ -96,16 +75,13 @@ Extract:
 
 **3a — Read the function body**
 
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>get_function_body</tool_name>
-  <arguments>{
-    "directory": "$PROJECT_ROOT",
-    "symbol": "$TARGET_FUNCTION",
-    "filePath": "$TARGET_FILE"
-  }</arguments>
-</use_mcp_tool>
+Call the openlore MCP tool `get_function_body` with:
+```json
+{
+  "directory": "$PROJECT_ROOT",
+  "symbol": "$TARGET_FUNCTION",
+  "filePath": "$TARGET_FILE"
+}
 ```
 
 Identify:
@@ -115,16 +91,13 @@ Identify:
 
 **3b — Find the spec contract (if specs exist)**
 
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>search_specs</tool_name>
-  <arguments>{
-    "directory": "$PROJECT_ROOT",
-    "query": "$TARGET — expected behaviour",
-    "limit": 5
-  }</arguments>
-</use_mcp_tool>
+Call the openlore MCP tool `search_specs` with:
+```json
+{
+  "directory": "$PROJECT_ROOT",
+  "query": "$TARGET — expected behaviour",
+  "limit": 5
+}
 ```
 
 For each matching spec scenario, note:
@@ -163,7 +136,7 @@ Write (or append to) `$EXISTING_TEST_FILE` (or create `<name>.test.ts` / `test_<
    - TypeScript/JS: `// openlore: {"domain":"$DOMAIN","requirement":"$REQ","scenario":"$SCENARIO","specFile":"openspec/specs/$DOMAIN/spec.md"}`
    - Python: `# openlore: {"domain":"$DOMAIN","requirement":"$REQ","scenario":"$SCENARIO"}`
    - C++/Go: `// openlore: {"domain":"$DOMAIN","requirement":"$REQ","scenario":"$SCENARIO"}`
-   
+
    If no spec scenario exists (contract inferred), omit the tag.
 
 4. **Mock only system boundaries** — mock filesystem, network, LLM API, DB connections, and
@@ -236,13 +209,7 @@ Do not weaken assertions to make tests pass. A test that masks a bug is worse th
 
 ## Step 6 — Coverage check
 
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>get_test_coverage</tool_name>
-  <arguments>{"directory": "$PROJECT_ROOT"}</arguments>
-</use_mcp_tool>
-```
+Call the openlore MCP tool `get_test_coverage` with `{"directory": "$PROJECT_ROOT"}`.
 
 Report:
 - Which spec scenarios are now covered (new)

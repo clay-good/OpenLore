@@ -1,8 +1,6 @@
 ---
 name: openlore-brainstorm
-description: Transform a feature idea into an annotated story. Detects greenfield vs brownfield automatically — uses Domain Sketch for greenfield (no existing code), Constrained Option Tree for brownfield (existing codebase with openlore analysis).
-license: MIT
-compatibility: openlore MCP server
+description: Transform a feature idea into an annotated story using a Domain Sketch or Constrained Option Tree. Use when asked to brainstorm, explore, or shape a feature before implementation.
 ---
 
 # openlore: Brainstorm

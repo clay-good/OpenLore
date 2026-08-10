@@ -1,6 +1,6 @@
 ---
 name: openlore-generate
-description: Author a new OpenSpec domain specification from deterministic OpenLore MCP evidence.
+description: Author a new OpenSpec domain specification from deterministic OpenLore MCP evidence. Use when asked to reverse-engineer, generate, or document a specification for existing code.
 ---
 
 1. Call `prepare_spec_generation` for the reconciled domain; never infer domains from paths.

@@ -1,8 +1,6 @@
 ---
 name: openlore-implement-story
-description: Implement a story on a brownfield codebase using openlore structural context. Runs orient + risk check before coding, validates against specs, enforces a test gate before drift check.
-license: MIT
-compatibility: openlore MCP server
+description: Implement a brownfield story with OpenLore orientation, risk checks, spec validation, tests, and drift detection. Use when asked to implement or continue a story in an existing codebase.
 ---
 
 # openlore: Implement Story
@@ -192,6 +190,13 @@ If `.claude/antipatterns.md` exists, read it and include any applicable patterns
 
 This is not a gate — do not wait for user input. It is a mandatory self-check
 that must appear in the output before the first line of code is written.
+
+### Step 4c — Record significant design choices
+
+Before editing, call `record_decision` when the chosen approach establishes a module
+boundary, interface contract, dependency, non-obvious insertion point, or other meaningful
+architectural trade-off. Include the directory, rationale, consequences, and affected files.
+Skip self-evident local edits.
 
 ---
 

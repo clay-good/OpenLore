@@ -277,10 +277,10 @@ Files installed:
 
 | Tool | Destination | Content |
 |------|-------------|---------|
-| `vibe` | `.vibe/skills/openlore-{name}/SKILL.md` | 8 skills |
+| `vibe` | `.vibe/skills/openlore-{name}/SKILL.md` | 10 skills |
 | `cline` | `.clinerules/workflows/openlore-{name}.md` | 7 workflows |
-| `claude` | `.claude/skills/openlore-{name}/SKILL.md` + decisions pre-commit hook | 8 skills + commit gate |
-| `opencode` | `.opencode/skills/openlore-{name}/SKILL.md` + `.opencode/plugins/agent-guard.ts` | 8 skills + guard plugin |
+| `claude` | `.claude/skills/openlore-{name}/SKILL.md` + decisions pre-commit hook | 10 skills + commit gate |
+| `opencode` | `.opencode/skills/openlore-{name}/SKILL.md` + `.opencode/plugins/agent-guard.ts` | 10 skills + guard plugin |
 | `gsd` | `.claude/commands/gsd/openlore-{name}.md` | 2 commands |
 | `bmad` | `_bmad/openlore/{agents,tasks}/` | 2 agents, 4 tasks |
 | `omoa` | `.opencode/plugins/` + `.opencode/prompts/` | 4 SDD plugins + Sisyphus prompt (oh-my-openagent) |

@@ -1,8 +1,6 @@
 ---
 name: openlore-review-changes
-description: Risk-aware code review using detect_changes + get_minimal_context + get_cluster. Surfaces the riskiest changed functions, interprets callType/coverage/cluster density, and produces a go/no-go recommendation. No code written.
-license: MIT
-compatibility: openlore MCP server
+description: Review code changes using OpenLore risk, call, coverage, and cluster evidence without editing code. Use when asked for a change review, pre-PR safety check, or merge recommendation.
 ---
 
 # openlore: Review Changes

@@ -65,10 +65,10 @@ openlore setup                   # install workflow skills
 ```
 openlore setup [--tools vibe,cline,claude,opencode,omoa,gsd,bmad]
 
-Mistral Vibe  ->  .vibe/skills/openlore-{name}/SKILL.md       (8 skills)
+Mistral Vibe  ->  .vibe/skills/openlore-{name}/SKILL.md       (10 skills)
 Cline / Roo   ->  .clinerules/workflows/openlore-{name}.md    (7 workflows)
-Claude Code   ->  .claude/skills/openlore-{name}/SKILL.md     (8 skills + decisions pre-commit hook)
-OpenCode      ->  .opencode/skills/openlore-{name}/SKILL.md   (8 skills)
+Claude Code   ->  .claude/skills/openlore-{name}/SKILL.md     (10 skills + decisions pre-commit hook)
+OpenCode      ->  .opencode/skills/openlore-{name}/SKILL.md   (10 skills)
               ->  .opencode/plugins/agent-guard.ts             (guard plugin)
 oh-my-openagent -> .opencode/plugins/{anti-laziness,openlore-enforcer,
               ->                      openlore-decision-extractor,openlore-context-injector}.ts
@@ -204,7 +204,7 @@ Then invoke `/openlore` inside Vibe to get architecture context on demand.
 openlore setup --tools opencode
 ```
 
-This installs 8 workflow skills into `.opencode/skills/` and an `agent-guard.ts` plugin into `.opencode/plugins/`. OpenCode loads plugins from `.opencode/plugins/` automatically — no further configuration needed.
+This installs 10 workflow skills into `.opencode/skills/` and an `agent-guard.ts` plugin into `.opencode/plugins/`. OpenCode loads plugins from `.opencode/plugins/` automatically — no further configuration needed.
 
 The plugin does four things at runtime, with no LLM calls of its own:
 

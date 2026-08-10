@@ -1,8 +1,6 @@
 ---
 name: openlore-debug
-description: Debug a problem by anchoring root-cause analysis in openlore structural knowledge. Uses orient + search_specs + analyze_impact to form an explicit hypothesis before reading code. Enforces RED/GREEN test verification.
-license: MIT
-compatibility: openlore MCP server
+description: Debug with OpenLore structural context, an explicit root-cause hypothesis, and RED/GREEN verification. Use when a bug, failure, or regression needs diagnosis and repair.
 ---
 
 # openlore: Debug

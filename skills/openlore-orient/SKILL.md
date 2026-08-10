@@ -1,7 +1,6 @@
 ---
 name: openlore-orient
-version: 2.1
-description: Persistent architectural memory for this codebase. Call `orient(task)` before reading source files to get the relevant functions, callers, spec sections, and insertion points for any task — one structural lookup instead of file-by-file rediscovery.
+description: Retrieve relevant functions, callers, spec sections, and insertion points from OpenLore before reading source files. Use when starting work that needs structural orientation in an existing codebase.
 ---
 
 # OpenLore — orient before you read

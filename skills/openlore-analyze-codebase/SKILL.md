@@ -1,8 +1,6 @@
 ---
 name: openlore-analyze-codebase
-description: Run a full static analysis of a project using openlore and summarise the results — architecture, call graph, top refactoring issues, and duplicate code. No LLM required.
-license: MIT
-compatibility: openlore MCP server
+description: Run a full static OpenLore analysis and summarize architecture, call graph, refactoring issues, and duplicate code. Use when asked to analyze, map, or assess a codebase without LLM inference.
 ---
 
 # openlore: Analyze Codebase

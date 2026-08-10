@@ -330,7 +330,7 @@ The default MCP surface is the **`substrate`** preset — 15 tools: the navigati
 
 Everything else (read a file, grep, list files) uses your native tools. Full reference — all 75 tools: [docs/mcp-tools.md](docs/mcp-tools.md).
 
-**As a Claude Code Skill:** OpenLore ships a canonical [Skill](https://docs.claude.com/en/docs/claude-code/skills) at [`skills/openlore-orient/`](skills/openlore-orient/) — `npm run skill:install-local` and Claude Code calls `orient()` at the start of every task, no `CLAUDE.md` editing. The 8 multi-agent workflow skills (brainstorm, plan-refactor, write-tests, debug…) install via `openlore setup`.
+**As a Claude Code Skill:** OpenLore ships a canonical [Skill](https://docs.claude.com/en/docs/claude-code/skills) at [`skills/openlore-orient/`](skills/openlore-orient/) — `npm run skill:install-local` and Claude Code calls `orient()` at the start of every task, no `CLAUDE.md` editing. The 10 multi-agent workflow skills — including composite-backed Generate and Repair — install via `openlore setup`.
 
 ---
 

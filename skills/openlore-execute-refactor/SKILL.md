@@ -1,8 +1,6 @@
 ---
 name: openlore-execute-refactor
-description: Apply the refactoring plan produced by openlore-plan-refactor. Reads .openlore/refactor-plan.md and re-reads it before each change to stay on track. Requires a confirmed plan to exist before running.
-license: MIT
-compatibility: openlore MCP server
+description: Apply a confirmed .openlore/refactor-plan.md with a test gate after each change. Use when asked to execute or continue an OpenLore refactoring plan.
 ---
 
 # openlore: Execute Refactor
@@ -115,6 +113,10 @@ Fill in the `Restore point` section of `.openlore/refactor-plan.md` with the cur
 ---
 
 ## Step 4 — Apply changes (mini-development loop)
+
+Before the first change, call `record_decision` with the directory, target function,
+selected strategy, rationale, consequences, and affected files. Record any additional
+architectural choice discovered during the refactor as it arises.
 
 For **each change** in the plan, execute the full mini-development cycle below.
 Do not move to the next change until the current one is marked ✅.
