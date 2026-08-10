@@ -5,6 +5,21 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ## [Unreleased]
 
+## [2.1.9] - 2026-08-09
+
+**The release where OpenLore stopped trusting the vibes.**
+
+- Import resolution got smarter, including the deeply suspicious `.tsx` and `.jsx` twins.
+- Stale analysis now says it is stale instead of confidently wearing last week's nametag.
+- Repository secrets, hostile prompts, and wandering viewer file reads all meet firmer boundaries.
+- First-run guidance and empty results now tell you what actually happened.
+
+Everything is backward-compatible: no commands, options, exports, or config keys were removed.
+
+**Upgrade:** `npm i -g openlore@2.1.9` — or `openlore update`.
+
+**Full Changelog**: https://github.com/clay-good/OpenLore/compare/v2.1.8...v2.1.9
+
 ## [2.1.8] - 2026-08-02
 
 **The release where `analyze` stopped caring how big your repo is.**
