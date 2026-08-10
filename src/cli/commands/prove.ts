@@ -23,8 +23,17 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { logger } from '../../utils/logger.js';
 import { readCachedContext } from '../../core/services/mcp-handlers/utils.js';
-import { OPENLORE_PROVE_REL_PATH } from '../../constants.js';
-import { deriveTasks, scoreAnswer, type GraphFact, type ProveTask } from '../../core/agent-eval/tasks.js';
+import { EdgeStore } from '../../core/services/edge-store.js';
+import { OPENLORE_ANALYSIS_REL_PATH, OPENLORE_PROVE_REL_PATH } from '../../constants.js';
+import {
+  deriveTasks,
+  measureProveEligibility,
+  proveEligibilityFromCount,
+  PROVE_MIN_CALLERS,
+  scoreAnswer,
+  type GraphFact,
+  type ProveTask,
+} from '../../core/agent-eval/tasks.js';
 import {
   claudeRunner, writeProveMcpConfigs, summarize, parseAgentJson,
   type AgentRunner, type Condition, type Metrics, type Cell,
@@ -47,6 +56,16 @@ interface ProveOptions {
   save?: boolean;
 }
 
+export function formatProveIneligibleMessage(eligibility: ReturnType<typeof measureProveEligibility>): string {
+  return `Could not derive orientation tasks: ${eligibility.eligibleFunctions} functions have ` +
+    `≥${eligibility.minCallers} callers; at least ${eligibility.requiredEligibleFunctions} is required. ` +
+    'Nothing is wrong with the installation — skip this prove run for this repo, or run it on a larger repo.';
+}
+
+const PROVE_GRAPH_UNAVAILABLE =
+  'Could not read the analysis graph. Retry after any running "openlore analyze" completes; ' +
+  'if the problem persists, run "openlore analyze" to rebuild it.';
+
 /** Locate this CLI's own entry so the spawned MCP server is the same build. */
 function localCliEntry(): string {
   // dist/cli/commands/prove.js → dist/cli/index.js
@@ -54,7 +73,7 @@ function localCliEntry(): string {
 }
 
 /** Build GraphFacts from the analysis EdgeStore (the call graph). */
-async function loadGraphFacts(absDir: string): Promise<GraphFact[] | null> {
+export async function loadGraphFacts(absDir: string): Promise<GraphFact[] | null> {
   const ctx = await readCachedContext(absDir);
   const store = ctx?.edgeStore;
   if (!store) return null;
@@ -67,6 +86,19 @@ async function loadGraphFacts(absDir: string): Promise<GraphFact[] | null> {
     // Entry point = no internal callers (matches the analyzer's definition).
     return { name: n.name, filePath: n.filePath, isEntryPoint: callerNames.length === 0, callerNames, calleeNames };
   });
+}
+
+/** Read prove's structural precondition with one bounded aggregate query. */
+export async function loadProveEligibility(absDir: string): Promise<ReturnType<typeof measureProveEligibility> | null> {
+  const analysisDir = join(absDir, OPENLORE_ANALYSIS_REL_PATH);
+  if (!EdgeStore.exists(analysisDir)) return null;
+  const store = EdgeStore.open(EdgeStore.dbPath(analysisDir));
+  try {
+    if (store.notReady) return null;
+    return proveEligibilityFromCount(store.countNodesWithMinFanIn(PROVE_MIN_CALLERS));
+  } finally {
+    store.close();
+  }
 }
 
 function claudeAvailable(): boolean {
@@ -205,14 +237,26 @@ export async function runProve(opts: {
   runner?: AgentRunner;
 }): Promise<ProveResult> {
   const absDir = resolve(opts.directory);
+  let eligibility: Awaited<ReturnType<typeof loadProveEligibility>>;
+  try {
+    eligibility = await loadProveEligibility(absDir);
+  } catch {
+    return { ok: false, message: PROVE_GRAPH_UNAVAILABLE };
+  }
+  if (!eligibility) {
+    return { ok: false, message: 'No analysis graph found. Run "openlore analyze" first, then "openlore prove".' };
+  }
+  if (!eligibility.eligible) {
+    return {
+      ok: false,
+      message: formatProveIneligibleMessage(eligibility),
+    };
+  }
   const facts = await loadGraphFacts(absDir);
   if (!facts) {
     return { ok: false, message: 'No analysis graph found. Run "openlore analyze" first, then "openlore prove".' };
   }
   const tasks = deriveTasks(facts);
-  if (tasks.length === 0) {
-    return { ok: false, message: 'Could not derive orientation tasks — the call graph is too sparse (need functions with ≥2 callers). Try a larger repo.' };
-  }
 
   const mode: ProveMode = opts.estimate ? 'estimate' : opts.dryRun ? 'dry-run' : 'measured';
 
@@ -358,6 +402,24 @@ Examples:
 
     // The agent arm needs `claude`; the estimate + dry-run arms do not.
     if (!dryRun && !estimate && !claudeAvailable()) {
+      let eligibility: Awaited<ReturnType<typeof loadProveEligibility>>;
+      try {
+        eligibility = await loadProveEligibility(resolve(directory));
+      } catch {
+        logger.error(PROVE_GRAPH_UNAVAILABLE);
+        process.exitCode = 1;
+        return;
+      }
+      if (!eligibility) {
+        logger.error('No analysis graph found. Run "openlore analyze" first, then "openlore prove".');
+        process.exitCode = 1;
+        return;
+      }
+      if (!eligibility.eligible) {
+        logger.error(formatProveIneligibleMessage(eligibility));
+        process.exitCode = 1;
+        return;
+      }
       logger.error('`claude` CLI not found on PATH — the prove agent arm needs it (plus an API key).');
       logger.info('Try', 'Run `openlore prove --estimate` for a no-API-key projection, or `--dry-run` to preview the shape.');
       process.exitCode = 1;

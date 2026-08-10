@@ -141,7 +141,7 @@ The win scales with codebase size (round-trips WITHOUT → WITH):
 | django (~3k files) | **−7%** | 21 → 15 |
 | gin (110 files, smallest) | +4% *(≈even)* | 10 → 9 |
 
-> **Prove it on your repo — no API key.** `openlore prove --estimate` projects the orientation tax from your own call graph in seconds (zero API key, zero network). Plain `openlore prove` runs the full measured WITH/WITHOUT pass (needs `claude` + a key). Add `--json`, `--markdown` (a paste-ready scorecard + README badge), or `--save`.
+> **Prove it on your repo — no API key.** `openlore prove --estimate` projects the orientation tax from your own call graph in seconds (zero API key, zero network) when at least one function has 2 direct callers; sparse repos get the measured count and can skip the projection. Plain `openlore prove` runs the full measured WITH/WITHOUT pass (needs `claude` + a key). Add `--json`, `--markdown` (a paste-ready scorecard + README badge), or `--save`.
 
 > **Honesty contract.** We never publish a savings number the benchmark didn't produce, we always show the losses next to the wins, and every token claim traces to a command you can run here. Full methodology: [docs/AGENT-BENCHMARKS.md](docs/AGENT-BENCHMARKS.md).
 

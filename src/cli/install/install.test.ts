@@ -1,8 +1,9 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtemp, rm, writeFile, readFile, mkdir, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runInstall } from './index.js';
+import { formatProveGuidance, runInstall } from './index.js';
+import { logger } from '../../utils/logger.js';
 
 async function exists(p: string): Promise<boolean> {
   try {
@@ -214,6 +215,42 @@ describe('openlore install (end-to-end)', () => {
     // settings.json and .mcp.json were created by us, so both should be removed
     expect(await exists(join(dir, '.claude/settings.json'))).toBe(false);
     expect(await exists(join(dir, '.mcp.json'))).toBe(false);
+  });
+
+  it('--uninstall names the retained .openlore data and its removal command', async () => {
+    await runInstall({ cwd: dir, agent: 'agents-md', analyze: false });
+    const info = vi.spyOn(logger, 'info');
+    try {
+      await runInstall({ cwd: dir, agent: 'agents-md', uninstall: true });
+      const kept = info.mock.calls.find(([title]) => title === 'Kept data')?.[1];
+      expect(String(kept)).toContain('.openlore/');
+      expect(String(kept)).toContain('index, decisions, and memories');
+      expect(String(kept)).toContain('From the repository root');
+      expect(String(kept)).toContain('rm -rf -- ./.openlore/');
+    } finally {
+      info.mockRestore();
+    }
+  });
+
+  it('gates the install prove epilogue for sparse and dense graph measurements', () => {
+    const sparse = formatProveGuidance({
+      eligibleFunctions: 0,
+      requiredEligibleFunctions: 1,
+      minCallers: 2,
+      eligible: false,
+    });
+    expect(sparse.title).toBe('Measured projection unavailable');
+    expect(sparse.detail).not.toContain('openlore prove --estimate');
+    expect(sparse.detail).toContain('0 functions have ≥2 callers');
+
+    const dense = formatProveGuidance({
+      eligibleFunctions: 1,
+      requiredEligibleFunctions: 1,
+      minCallers: 2,
+      eligible: true,
+    });
+    expect(dense.title).toBe('Does it pay off?');
+    expect(dense.detail).toContain('openlore prove --estimate');
   });
 
   it('--uninstall removes AGENTS.md when it was OpenLore-only', async () => {

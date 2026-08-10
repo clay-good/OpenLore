@@ -8,7 +8,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { saveScorecard, parseNumericFlag, summarizeArms, type ProveResult } from './prove.js';
+import { formatProveIneligibleMessage, saveScorecard, parseNumericFlag, summarizeArms, type ProveResult } from './prove.js';
 import { OPENLORE_PROVE_REL_PATH } from '../../constants.js';
 import type { Metrics } from '../../core/agent-eval/measure.js';
 import type { Scorecard, ScorecardMeta } from '../../core/agent-eval/scorecard.js';
@@ -150,5 +150,20 @@ describe('parseNumericFlag', () => {
     expect((r as { error: string }).error).toContain('--runs must be a number');
     const b = parseNumericFlag('xyz', 'max-budget-usd', false, 0, 0.5);
     expect((b as { error: string }).error).toContain('--max-budget-usd must be a number');
+  });
+});
+
+describe('sparse graph refusal', () => {
+  it('names the measured count, threshold, and applicable alternatives', () => {
+    const message = formatProveIneligibleMessage({
+      eligibleFunctions: 0,
+      requiredEligibleFunctions: 1,
+      minCallers: 2,
+      eligible: false,
+    });
+    expect(message).toContain('0 functions have ≥2 callers');
+    expect(message).toContain('at least 1 is required');
+    expect(message).toContain('Nothing is wrong with the installation');
+    expect(message).toContain('skip this prove run');
   });
 });

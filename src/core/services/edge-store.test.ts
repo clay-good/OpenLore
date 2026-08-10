@@ -398,6 +398,14 @@ describe('EdgeStore', () => {
       expect(store.countNodes()).toBe(2); // nodeExternal excluded
     });
 
+    it('counts internal nodes meeting a fan-in threshold in one aggregate read', () => {
+      const popular = { ...nodeB, fanIn: 2 };
+      const externalPopular = { ...nodeExternal, fanIn: 99 };
+      store.insertNodes([nodeA, popular, externalPopular]);
+      expect(store.countNodesWithMinFanIn(2)).toBe(1);
+      expect(store.countNodesWithMinFanIn(3)).toBe(0);
+    });
+
     it('searchNodes finds by name substring', () => {
       store.insertNodes([nodeA, nodeB]);
       const results = store.searchNodes('fo');

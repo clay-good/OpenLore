@@ -19,6 +19,7 @@ import { claudeCodeAdapter } from './adapters/claude-code.js';
 import { cursorAdapter } from './adapters/cursor.js';
 import { clineAdapter } from './adapters/cline.js';
 import { continueAdapter } from './adapters/continue.js';
+import type { ProveEligibility } from '../../core/agent-eval/tasks.js';
 
 const ADAPTERS: Record<AgentName, Adapter> = {
   'agents-md': agentsMdAdapter,
@@ -87,7 +88,7 @@ export interface InstallOptions {
  * Failures are non-fatal: the surfaces are already wired, so we warn and tell
  * the user to run analyze themselves rather than failing the whole install.
  */
-export async function buildIndex(cwd: string, opts: { repair?: boolean } = {}): Promise<void> {
+export async function buildIndex(cwd: string, opts: { repair?: boolean } = {}): Promise<boolean> {
   const prevCwd = process.cwd();
   // analyze prints its own multi-line CLI output ("Next step: run generate",
   // etc.) via console.log — noise inside install. Capture it to stderr so
@@ -99,7 +100,15 @@ export async function buildIndex(cwd: string, opts: { repair?: boolean } = {}): 
   try {
     const { openloreInit } = await import('../../api/init.js');
     // Silent + idempotent: creates config if absent, no-ops (created:false) if present.
-    await openloreInit({ rootPath: cwd });
+    let freshSpecDirectory = false;
+    await openloreInit({
+      rootPath: cwd,
+      onProgress: event => {
+        if (event.step === 'Creating openspec directory' && event.status === 'complete') {
+          freshSpecDirectory = true;
+        }
+      },
+    });
 
     process.chdir(cwd);
     const { analyzeCommand } = await import('../commands/analyze.js');
@@ -126,6 +135,7 @@ export async function buildIndex(cwd: string, opts: { repair?: boolean } = {}): 
     analyzeCommand.setOptionValue('force', false);
     analyzeCommand.setOptionValue('reanalyze', opts.repair === true);
     const analyzeArgs = opts.repair ? ['--reanalyze', '--embedded'] : ['--embedded'];
+    if (freshSpecDirectory) analyzeArgs.push('--fresh-spec-directory');
     // `process.exitCode` BEFORE the call, so a value analyze set is distinguishable from one that
     // was already there (a warning from an earlier step).
     const exitCodeBefore = process.exitCode;
@@ -140,8 +150,10 @@ export async function buildIndex(cwd: string, opts: { repair?: boolean } = {}): 
     if (process.exitCode !== undefined && process.exitCode !== 0 && process.exitCode !== exitCodeBefore) {
       logger.warning('The index did NOT finish building — see the error above.');
       logger.info('Next step', 'Fix the cause, then run "openlore analyze" so orient() works');
+      return false;
     } else {
       logger.success('Index built — orient() will return results in your next session.');
+      return true;
     }
   } catch (err) {
     console.log = origLog;
@@ -149,6 +161,7 @@ export async function buildIndex(cwd: string, opts: { repair?: boolean } = {}): 
       `Could not build the index automatically: ${(err as Error).message}`
     );
     logger.info('Next step', 'Run "openlore analyze" so orient() works in your next session');
+    return false;
   } finally {
     console.log = origLog;
     process.chdir(prevCwd);
@@ -268,7 +281,8 @@ export async function runInstall(opts: InstallOptions): Promise<number> {
   // Opt out with --no-analyze; never runs for dry-run or uninstall.
   const shouldAnalyze = opts.analyze !== false && !opts.dryRun && !opts.uninstall;
   if (shouldAnalyze) {
-    await buildIndex(cwd);
+    const indexBuilt = await buildIndex(cwd);
+    if (indexBuilt) await printProveGuidance(cwd);
   } else if (!opts.dryRun && !opts.uninstall) {
     // --no-analyze skipped init too, so a bare "openlore analyze" would fail
     // ("Run openlore init first"). Advise a sequence that actually works.
@@ -312,12 +326,42 @@ function printSummary(
     logger.discovery('Dry run — no files were written.');
   } else if (!uninstall) {
     logger.success('OpenLore install complete.');
-    // Point the user at the value-proof command. --estimate needs no API key, so
-    // it works as an immediate first look right after install.
-    logger.info('Does it pay off?', 'Run "openlore prove --estimate" for a no-API-key projection on this repo (or "openlore prove" for a measured pass).');
   } else {
     logger.success('OpenLore uninstall complete.');
+    logger.info(
+      'Kept data',
+      'The ".openlore/" directory remains (index, decisions, and memories). From the repository root, remove it with `rm -rf -- ./.openlore/` if you no longer need that data.'
+    );
   }
+}
+
+/** Render install's value-proof epilogue only after checking the built graph. */
+export async function printProveGuidance(cwd: string): Promise<void> {
+  const { loadProveEligibility } = await import('../commands/prove.js');
+  let eligibility: Awaited<ReturnType<typeof loadProveEligibility>>;
+  try {
+    eligibility = await loadProveEligibility(cwd);
+  } catch {
+    return;
+  }
+  if (!eligibility) return;
+  const guidance = formatProveGuidance(eligibility);
+  logger.info(guidance.title, guidance.detail);
+}
+
+export function formatProveGuidance(eligibility: ProveEligibility): { title: string; detail: string } {
+  if (eligibility.eligible) {
+    return {
+      title: 'Does it pay off?',
+      detail: 'Run "openlore prove --estimate" for a no-API-key projection on this repo (or "openlore prove" for a measured pass).',
+    };
+  }
+  return {
+    title: 'Measured projection unavailable',
+    detail: `${eligibility.eligibleFunctions} functions have ≥${eligibility.minCallers} callers; ` +
+      `${eligibility.requiredEligibleFunctions} is required. Nothing is wrong with the installation — ` +
+      'skip this projection for this repo, or run it on a larger repo.',
+  };
 }
 
 export const installCommand = new Command('install')

@@ -146,7 +146,7 @@ A reviewer must be able to verify all of these without reading your PR descripti
 2. `openlore install --agent claude-code` in a repo containing `CLAUDE.md` adds exactly one OpenLore-managed block, with the canonical comment delimiters, and creates `.claude/settings.json` with the `SessionStart` hook and `mcpServers` entry.
 3. Running `openlore install` a second time is a no-op (fingerprint matches; nothing written; exit 0).
 4. Hand-editing inside an OpenLore block, then re-running `openlore install`, prints a warning and refuses to overwrite (exit non-zero unless `--force`).
-5. `openlore install --uninstall` removes everything `openlore install` created in the previous step. Files that pre-existed and only had OpenLore blocks added to them are restored to their pre-install state byte-for-byte. (Test this with a git-clean fixture.)
+5. `openlore install --uninstall` removes the agent wiring created in the previous step and names the retained `.openlore/` data directory plus its removal command. Files that pre-existed and only had OpenLore blocks added to them are restored to their pre-install state byte-for-byte. (Test this with a git-clean fixture.)
 6. All unit tests added in `test/cli/install/` pass. Test fixtures live under `test/cli/install/fixtures/` as small example trees.
 7. `npm run lint`, `npm run typecheck`, `npm run test:run`, `npm run build` all pass.
 8. No new runtime dependencies added (devDependencies only, ideally none).

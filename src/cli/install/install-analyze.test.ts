@@ -109,4 +109,25 @@ describe('openlore install — auto index build', () => {
     expect(out).not.toContain('Agent setup (one-time)');
     expect(out).not.toContain("Run 'openlore generate'");
   }, 30_000);
+
+  it('keeps fresh empty-spec messaging informational on the cached-analysis path', async () => {
+    await runInstall({ cwd: dir, agent: 'claude-code' });
+    await rm(join(dir, '.openlore/config.json'));
+    await rm(join(dir, 'openspec'), { recursive: true, force: true });
+
+    const chunks: string[] = [];
+    const push = (...a: unknown[]): boolean => { chunks.push(a.map(String).join(' ')); return true; };
+    const se = vi.spyOn(process.stderr, 'write').mockImplementation(push as unknown as typeof process.stderr.write);
+    const cl = vi.spyOn(console, 'log').mockImplementation(push);
+    try {
+      await runInstall({ cwd: dir, agent: 'claude-code' });
+    } finally {
+      se.mockRestore(); cl.mockRestore();
+    }
+    const out = chunks.join('\n');
+    expect(out).toContain('Analysis is up to date');
+    expect(out).toContain('ℹ No specs yet');
+    expect(out).toContain('requires an LLM provider');
+    expect(out).not.toContain('⚠ Spec index skipped');
+  }, 30_000);
 });

@@ -63,7 +63,10 @@ C#, and PHP now resolve statically unique package/import bindings at `import` co
 `add-secret-redaction-boundary` (2026-08-09, archived) — source-carrying tool results and both
 sides of persisted LLM logs share deterministic, disclosed credential redaction;
 `disclose-stale-serving-on-cold-reads` (2026-08-09, archived) — cold navigation reads disclose
-changed cited files and active watcher/serve hosts schedule repository-scoped repair.
+changed cited files and active watcher/serve hosts schedule repository-scoped repair;
+`align-first-run-ctas-with-repo-shape` (2026-08-09, archived) — install gates the prove CTA on
+the built graph, sparse refusals carry receipts, fresh empty spec stores are informational, and
+uninstall names retained data.
 
 After this table was compiled, four research sweeps added 32 more proposals (all validate; not yet
 folded into the table): 10 in `FIELD-RESEARCH-2026-07.md`, 10 in `ECOSYSTEM-RESEARCH-2026-07-27.md`,
@@ -115,7 +118,6 @@ trust boundary for served content.
 | `adopt-mcp-tasks-and-cache-hints` | cache hints carry the lease, tasks carry long builds |
 | `adopt-spec-link-status-vocabulary` | name "Unwanted", "Predated", and shallow-vs-deep coverage, from OpenFastTrace |
 | `align-api-layer-with-cli-core` | The programmatic API is a fork of the CLI pipeline, not a facade over it — realign and make its contract embedder-safe |
-| `align-first-run-ctas-with-repo-shape` | never advertise a command that will fail on this repo |
 | `disclose-dynamic-boundary-regions` | the call graph names where it stops seeing, instead of returning a quiet lower bound |
 | `enforce-preset-membership-at-dispatch` | the advertised surface must be the callable surface |
 | `fix-commit-gate-delivery` | install hooks where git actually looks, and version the machine contract |

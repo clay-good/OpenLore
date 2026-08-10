@@ -606,6 +606,14 @@ export class EdgeStore {
     return row.n;
   }
 
+  /** Internal node count at or above a direct-caller threshold. */
+  countNodesWithMinFanIn(minFanIn: number): number {
+    const row = this.db
+      .prepare('SELECT COUNT(*) as n FROM nodes WHERE is_external = 0 AND fan_in >= ?')
+      .get(minFanIn) as { n: number };
+    return row.n;
+  }
+
   /** Distinct source files contributing production nodes. Reconciliation input for the attestation. */
   countFiles(): number {
     const row = this.db.prepare('SELECT COUNT(DISTINCT file_path) as n FROM nodes WHERE is_external = 0').get() as { n: number };
