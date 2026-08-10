@@ -5,6 +5,7 @@ import {
   realpathSync,
   rmSync,
   symlinkSync,
+  truncateSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
@@ -13,10 +14,13 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   buildStaleServingDisclosure,
+  boundCitedFiles,
   checkCitedFileFreshness,
   collectCitedSourceFiles,
+  fileChangedDuringRead,
   resolveFileFreshness,
 } from './freshness.js';
+import { SOURCE_SCAN_MAX_FILE_BYTES } from '../../../constants.js';
 
 let root: string;
 let outside: string;
@@ -61,6 +65,45 @@ describe('resolveFileFreshness', () => {
   });
 });
 
+describe('fileChangedDuringRead', () => {
+  it('rejects an append that occurs after the initial same-handle stat', () => {
+    const opened = { dev: 1, ino: 2, size: 6, mtimeMs: 100, ctimeMs: 100 };
+    const namedAfterRead = {
+      dev: 1,
+      ino: 2,
+      size: 6,
+      mtimeMs: 100,
+      ctimeMs: 100,
+      isSymbolicLink: () => false,
+    };
+
+    expect(fileChangedDuringRead({
+      opened,
+      afterRead: { size: 7, mtimeMs: 101, ctimeMs: 101 },
+      namedAfterRead,
+      bytesRead: 7,
+    })).toBe(true);
+    expect(fileChangedDuringRead({
+      opened,
+      afterRead: { size: 6, mtimeMs: 100, ctimeMs: 100 },
+      namedAfterRead,
+      bytesRead: 6,
+    })).toBe(false);
+    expect(fileChangedDuringRead({
+      opened,
+      afterRead: { size: 6, mtimeMs: 101, ctimeMs: 101 },
+      namedAfterRead: { ...namedAfterRead, mtimeMs: 101, ctimeMs: 101 },
+      bytesRead: 6,
+    })).toBe(true);
+    expect(fileChangedDuringRead({
+      opened,
+      afterRead: { size: 6, mtimeMs: 100, ctimeMs: 100 },
+      namedAfterRead: { ...namedAfterRead, size: 7, mtimeMs: 101, ctimeMs: 101 },
+      bytesRead: 6,
+    })).toBe(true);
+  });
+});
+
 describe('checkCitedFileFreshness', () => {
   it('checks only deduplicated cited files and uses their recorded hashes', async () => {
     writeFileSync(join(root, 'src', 'fresh.ts'), 'fresh');
@@ -78,7 +121,10 @@ describe('checkCitedFileFreshness', () => {
       { edgeStore: { getFileHash }, artifactMtimeMs: 0 },
     );
 
-    expect(result).toEqual({ staleFiles: ['src/stale.ts'] });
+    expect(result).toEqual({
+      staleFiles: ['src/stale.ts'],
+      repairableStaleFiles: ['src/stale.ts'],
+    });
     expect(getFileHash.mock.calls.map(([p]) => p)).toEqual(['src/fresh.ts', 'src/stale.ts']);
     expect(getFileHash).not.toHaveBeenCalledWith('src/uncited.ts');
   });
@@ -127,6 +173,18 @@ describe('checkCitedFileFreshness', () => {
     expect(result.staleFiles).toEqual(files);
   });
 
+  it('marks an oversized hash-backed citation stale without reading it into memory', async () => {
+    const file = join(root, 'src', 'generated.ts');
+    writeFileSync(file, 'before');
+    truncateSync(file, SOURCE_SCAN_MAX_FILE_BYTES + 1);
+    const result = await checkCitedFileFreshness(root, ['src/generated.ts'], {
+      edgeStore: { getFileHash: () => sha256('before') },
+      artifactMtimeMs: Number.MAX_SAFE_INTEGER,
+    });
+    expect(result.staleFiles).toEqual(['src/generated.ts']);
+    expect(result.repairableStaleFiles).toEqual(['src/generated.ts']);
+  });
+
   it('never reads absolute, traversal, or symlink-escape citations', async () => {
     writeFileSync(join(outside, 'secret.ts'), 'outside');
     symlinkSync(outside, join(root, 'src', 'escape'));
@@ -139,6 +197,7 @@ describe('checkCitedFileFreshness', () => {
     );
 
     expect(result.staleFiles).toEqual(['[unsafe cited path]', 'src/escape/secret.ts']);
+    expect(result.repairableStaleFiles).toEqual([]);
     expect(getFileHash).not.toHaveBeenCalled();
   });
 
@@ -169,6 +228,7 @@ describe('collectCitedSourceFiles', () => {
     expect(collectCitedSourceFiles(payload)).toEqual({
       files: ['src/a.ts', 'src/b.py', 'deploy/app.yaml', 'web/page.html'],
       truncated: false,
+      unsafeCitation: true,
     });
   });
 
@@ -184,6 +244,25 @@ describe('collectCitedSourceFiles', () => {
   it('returns an empty bounded result when max is zero', () => {
     expect(collectCitedSourceFiles({ file: 'src/a.ts' }, 0)).toEqual({
       files: [],
+      truncated: true,
+    });
+  });
+
+  it('bounds wide traversal fan-out before enqueueing every child', () => {
+    const payload = Array.from({ length: 10_000 }, (_, i) => ({ file: `src/f${i}.ts` }));
+    const result = collectCitedSourceFiles(payload, 2);
+    expect(result).toEqual({ files: ['src/f0.ts', 'src/f1.ts'], truncated: true });
+  });
+});
+
+describe('boundCitedFiles', () => {
+  it('caps caller-supplied citations by count and total path bytes', () => {
+    expect(boundCitedFiles(['src/a.ts', 'src/b.ts', 'src/c.ts'], 2, 1_000)).toEqual({
+      files: ['src/a.ts', 'src/b.ts'],
+      truncated: true,
+    });
+    expect(boundCitedFiles(['src/aaaa.ts', 'src/bbbb.ts'], 10, 11)).toEqual({
+      files: ['src/aaaa.ts'],
       truncated: true,
     });
   });

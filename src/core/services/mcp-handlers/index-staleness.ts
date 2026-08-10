@@ -4,6 +4,7 @@ import { requestRepairFromHost } from '../cold-start-bootstrap.js';
 import type { CachedContext } from './utils.js';
 import {
   buildStaleServingDisclosure,
+  boundCitedFiles,
   checkCitedFileFreshness,
   collectCitedSourceFiles,
   type StaleServingDisclosure,
@@ -26,13 +27,14 @@ export async function computeIndexStaleness(
   citedFiles?: readonly string[],
 ): Promise<IndexStaleness | undefined> {
   const collected = citedFiles
-    ? { files: [...new Set(citedFiles)], truncated: false }
+    ? boundCitedFiles(citedFiles)
     : collectCitedSourceFiles(result);
   const checked = await checkCitedFileFreshness(root, collected.files, {
     edgeStore: context?.edgeStore,
     artifactMtimeMs: context?.artifactMtimeMs,
+    unsafeCitation: collected.unsafeCitation,
   });
-  const repairScheduled = requestRepairFromHost(root, checked.staleFiles);
+  const repairScheduled = requestRepairFromHost(root, checked.repairableStaleFiles);
   const disclosure = buildStaleServingDisclosure(checked.staleFiles, repairScheduled);
   if (disclosure) {
     return {

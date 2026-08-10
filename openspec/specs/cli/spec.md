@@ -1701,7 +1701,8 @@ every other OpenLore surface carries.
 The one-shot CLI read paths that install wires as agent hooks — `orient --json --task` and
 `orient --inject` — SHALL perform the same cited-file freshness check as the MCP handlers and
 carry the same staleness disclosure: in `--json` output as a payload field, in `--inject` output
-as a single factual line inside the injection block (within the token budget). The check SHALL
+as a single factual line inside the injection block (within the token budget). Configured
+injection budgets below the 68-token mandatory-frame floor SHALL be clamped to that floor. The check SHALL
 never block, never spawn analysis from the hook, and never write to stdout outside the
 JSON/injection block.
 

@@ -1634,14 +1634,17 @@ NOT silently differ.
 
 ### Requirement: ConclusionsDiscloseWhenTheIndexIsBehindTheWorkingTree
 
-Before serving, a conclusion handler that cites source files SHALL compare those cited files —
+Before serving, the cold-navigation conclusion handlers `orient`, `search_code`, `get_subgraph`,
+and `blast_radius` SHALL compare the bounded set of source files cited by their final payload —
 and only those files — against the analysis artifact's recorded baseline (modification time
 first, content hash to confirm, reusing the span-locator's dual-baseline mechanic through a
-shared helper). When any cited file has changed since the baseline, the payload SHALL carry a
+shared helper). When any checked file has changed since the baseline, the payload SHALL carry a
 factual staleness note naming the changed files and stating that results may omit recent edits.
+If a payload contains more citations than the bounded check can inspect, it SHALL instead carry
+an explicit unchecked-citations boundary and SHALL NOT imply the omitted citations are current.
 The conclusion SHALL still be served (fail-open); the check SHALL NOT scan beyond the cited
-files; a repository where all cited files match the baseline SHALL produce no note and no
-per-call cost beyond the bounded stat/hash of cited files.
+files; a repository where every cited file was checked and matches the baseline SHALL produce
+no note and no per-call cost beyond the bounded stat/hash of cited files.
 
 #### Scenario: A cold-started server serves a stale graph with disclosure
 
@@ -1654,7 +1657,7 @@ per-call cost beyond the bounded stat/hash of cited files.
 #### Scenario: A fresh index stays silent
 
 - **GIVEN** a repository whose working tree matches the analysis baseline
-- **WHEN** any conclusion tool runs
+- **WHEN** any of the four cold-navigation conclusion tools runs
 - **THEN** no staleness note appears in the payload
 
 ### Requirement: DetectedColdStalenessFeedsTheRepairPathWhereOneIsWired

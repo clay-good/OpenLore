@@ -16,8 +16,9 @@
 - [x] Note the baseline gotcha: full analyze does not populate `file_hashes` in every path
       (span-locator finding) — the helper must keep the mtime fallback honest
 - [x] Tests: cold-start stale fixture (edit after analyze, no watcher) → note present, results
-      served; fresh fixture → no note; watcher-hosted → repair scheduled + converges;
-      per-call cost bounded to cited files (no repo scan)
+      served; fresh fixture → no note; a deterministic hosted repair callback drives the
+      stale-to-fresh transition, with watcher/serve scheduling covered separately; per-call
+      cost bounded to cited files (no repo scan)
 
 ## Verification
 

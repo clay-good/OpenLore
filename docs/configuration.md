@@ -210,7 +210,7 @@ An optional `contextInjection` block controls the per-task orientation that `ope
 | Field | Default | Meaning |
 |-------|:---:|---------|
 | `mode` | `task-scoped` | `task-scoped` enables injection; `off` makes `orient --inject` a no-op (exit 0). Disabling does **not** affect the MCP server or the `SessionStart` primer. |
-| `tokenBudget` | `600` | Hard cap on the injected block, in estimated tokens. The mandatory header + task line is the floor; lower-priority detail (functions → files → call neighbours → specs → tools) is dropped to stay within budget. |
+| `tokenBudget` | `600` | Hard cap on the injected block, in estimated tokens, with a 68-token minimum for the mandatory framed task and stale-index disclosure. Lower positive values are clamped to `68`; lower-priority detail (functions → files → call neighbours → specs → tools) is dropped to stay within budget. |
 | `relevanceMinMatches` | `2` | Relevance gate: minimum matched-function count unless the prompt names a matched identifier exactly (below it → a one-line pointer). |
 | `relevanceMinFanIn` | `2` | Relevance gate: a match with at least this fan-in (or a hub) clears the gate structurally. Exact identifier mentions and scale-free top-match identifier overlap can also clear the gate. |
 | `relevanceMinScore` | `0.3` | Relevance gate: minimum top match score — used **only** on the bounded semantic/hybrid score scale (BM25-fallback scores are corpus-relative and the score path is disabled there). |

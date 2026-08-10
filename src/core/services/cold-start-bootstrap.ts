@@ -83,8 +83,8 @@ interface RepairHostRegistration {
   token: symbol;
 }
 
-/** Repair hosts keyed by canonical repository root; never process-wide by accident. */
-const repairHosts = new Map<string, RepairHostRegistration>();
+/** Repair hosts keyed by canonical repository root; newest active registration wins. */
+const repairHosts = new Map<string, RepairHostRegistration[]>();
 
 /** Resolve path aliases to the same stable repository identity. */
 function canonicalRoot(directory: string): string {
@@ -108,9 +108,16 @@ function canonicalRoot(directory: string): string {
 export function registerRepairHost(directory: string, callback: RepairHost): () => void {
   const root = canonicalRoot(directory);
   const registration = { callback, token: Symbol(root) };
-  repairHosts.set(root, registration);
+  const registrations = repairHosts.get(root) ?? [];
+  registrations.push(registration);
+  repairHosts.set(root, registrations);
   return () => {
-    if (repairHosts.get(root)?.token === registration.token) repairHosts.delete(root);
+    const active = repairHosts.get(root);
+    if (!active) return;
+    const index = active.findIndex(candidate => candidate.token === registration.token);
+    if (index < 0) return;
+    active.splice(index, 1);
+    if (active.length === 0) repairHosts.delete(root);
   };
 }
 
@@ -121,7 +128,8 @@ export function registerRepairHost(directory: string, callback: RepairHost): () 
  */
 export function requestRepairFromHost(directory: string, staleFiles: readonly string[]): boolean {
   if (!directory || staleFiles.length === 0) return false;
-  const host = repairHosts.get(canonicalRoot(directory));
+  const registrations = repairHosts.get(canonicalRoot(directory));
+  const host = registrations?.[registrations.length - 1];
   if (!host) return false;
   try {
     return host.callback([...staleFiles]) === true;

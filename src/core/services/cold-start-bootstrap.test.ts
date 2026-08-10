@@ -240,4 +240,25 @@ describe('host-scoped cited-file repair handoff', () => {
     disposeCurrent();
     expect(requestRepairFromHost(dir, ['src/a.ts'])).toBe(false);
   });
+
+  it('restores the prior same-root host when the newest registration is disposed', () => {
+    const dir = freshDir(true);
+    const calls: string[] = [];
+    const disposeOld = registerRepairHost(dir, () => {
+      calls.push('old');
+      return false;
+    });
+    const disposeCurrent = registerRepairHost(dir, () => {
+      calls.push('current');
+      return true;
+    });
+
+    expect(requestRepairFromHost(dir, ['src/a.ts'])).toBe(true);
+    disposeCurrent();
+    expect(requestRepairFromHost(dir, ['src/a.ts'])).toBe(false);
+    expect(calls).toEqual(['current', 'old']);
+
+    disposeOld();
+    expect(requestRepairFromHost(dir, ['src/a.ts'])).toBe(false);
+  });
 });

@@ -58,4 +58,31 @@ describe('computeIndexStaleness', () => {
       { artifactMtimeMs: 200_000 },
     )).toBeUndefined();
   });
+
+  it('discloses an unsafe payload citation without reading or repairing it', async () => {
+    const repair = vi.fn(() => true);
+    registerRepairHost(root, repair);
+    const result = await computeIndexStaleness(root, { filePath: '../../secret.ts' }, {
+      artifactMtimeMs: Number.MAX_SAFE_INTEGER,
+    });
+    expect(result?.staleFiles).toEqual(['[unsafe cited path]']);
+    expect(result?.repairScheduled).toBeUndefined();
+    expect(repair).not.toHaveBeenCalled();
+  });
+
+  it('bounds explicit graph citations and repairs only the checked batch', async () => {
+    const repair = vi.fn((_files: readonly string[]) => true);
+    registerRepairHost(root, repair);
+    const files = Array.from({ length: 205 }, (_, i) => `src/missing-${i}.ts`);
+    const result = await computeIndexStaleness(
+      root,
+      null,
+      { artifactMtimeMs: Number.MAX_SAFE_INTEGER },
+      files,
+    );
+    expect(result?.staleFiles).toHaveLength(200);
+    expect(result?.uncheckedCitations).toBe(true);
+    expect(repair).toHaveBeenCalledOnce();
+    expect(repair.mock.calls[0][0]).toHaveLength(200);
+  });
 });

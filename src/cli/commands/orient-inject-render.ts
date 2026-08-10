@@ -37,6 +37,9 @@ export const INJECTION_DEFAULTS: ResolvedInjectionConfig = {
   relevanceMinScore: 0.3,
 };
 
+/** Smallest budget that can carry the framed task and a factual stale-index line. */
+export const MIN_INJECTION_TOKEN_BUDGET = 68;
+
 /**
  * The single pointer line emitted whenever a full block is not warranted
  * (weak match, no graph, error, or empty prompt). Informational, not coercive.
@@ -53,7 +56,7 @@ export function resolveInjectionConfig(ci: ContextInjectionConfig | undefined): 
     mode: ci?.mode ?? INJECTION_DEFAULTS.mode,
     tokenBudget:
       typeof ci?.tokenBudget === 'number' && ci.tokenBudget > 0
-        ? ci.tokenBudget
+        ? Math.max(MIN_INJECTION_TOKEN_BUDGET, ci.tokenBudget)
         : INJECTION_DEFAULTS.tokenBudget,
     relevanceMinMatches:
       typeof ci?.relevanceMinMatches === 'number' && ci.relevanceMinMatches >= 0
@@ -243,7 +246,60 @@ export function renderInjectionBlock(result: LeanOrientResult, cfg: ResolvedInje
     // Collapse whitespace defensively so an artifact-controlled filename cannot
     // forge a second injected line.
     const freshnessLine = result.indexStaleness.note.replace(/\s+/g, ' ').trim();
-    if (freshnessLine) mandatory.push(`⚠ ${freshnessLine}`);
+    const staleFiles = (result.indexStaleness.staleFiles ?? [])
+      .filter((file): file is string => typeof file === 'string' && file.length > 0);
+    const repair = result.indexStaleness.repairScheduled === true ? ' Repair has been scheduled.' : '';
+    const omitted = staleFiles.length > 1 ? `, and ${staleFiles.length - 1} more` : '';
+    const compactFile = (file: string, limit: number): string => {
+      const singleLine = file.replace(/[\s\u2028\u2029]+/g, ' ').trim();
+      return singleLine.length > limit ? `${singleLine.slice(0, Math.max(1, limit - 1))}…` : singleLine;
+    };
+    const summaries = [200, 100, 50].map((limit) => {
+      const first = staleFiles[0];
+      const shown = first
+        ? JSON.stringify(compactFile(first, limit))
+        : 'cited source files';
+      return `⚠ The index is behind the working tree for: ${shown}${omitted}; results may omit recent edits.${repair}`;
+    });
+    const terse = [24, 12, 6].map((limit) => {
+      const first = staleFiles[0];
+      const shown = first
+        ? JSON.stringify(compactFile(first, limit))
+        : 'cited files';
+      const more = staleFiles.length > 1 ? ` (+${staleFiles.length - 1})` : '';
+      return `⚠ Stale index: ${shown}${more}; may omit edits.${repair}`;
+    });
+    const namedFloor = staleFiles[0]
+      ? `⚠ ${JSON.stringify(compactFile(staleFiles[0], 8))} stale; may omit edits.${
+        result.indexStaleness.repairScheduled === true ? ' Repair scheduled.' : ''
+      }`
+      : `⚠ Stale index; may omit edits.${repair}`;
+    const candidates = [
+      ...(freshnessLine ? [`⚠ ${freshnessLine}`] : []),
+      ...summaries,
+      ...terse,
+      namedFloor,
+      `⚠ Stale index; may omit edits.${repair}`,
+    ];
+    const taskLines = [
+      mandatory[0],
+      `Task: ${task.length > 40 ? `${task.slice(0, 39)}…` : task}`,
+      'Task: …',
+    ];
+    let fitted: { taskLine: string; warning: string } | undefined;
+    for (const warning of candidates) {
+      const taskLine = taskLines.find((line) => estimateTokens(frameServedContent(
+        [line, warning].join('\n'),
+        baseProvenances,
+        'task-scoped orientation',
+      )) <= cfg.tokenBudget);
+      if (taskLine) {
+        fitted = { taskLine, warning };
+        break;
+      }
+    }
+    mandatory[0] = fitted?.taskLine ?? 'Task: …';
+    mandatory.push(fitted?.warning ?? namedFloor);
   }
 
   const optional: string[] = [];

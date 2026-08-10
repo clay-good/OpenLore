@@ -7,12 +7,14 @@
  */
 
 import { createHash } from 'node:crypto';
-import { readFile, stat } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { lstat, open, stat } from 'node:fs/promises';
 import { isAbsolute, join, posix, win32 } from 'node:path';
 import {
   ARTIFACT_LLM_CONTEXT,
   OPENLORE_ANALYSIS_SUBDIR,
   OPENLORE_DIR,
+  SOURCE_SCAN_MAX_FILE_BYTES,
 } from '../../../constants.js';
 import { safeJoin } from '../../../utils/path-confinement.js';
 import { detectLanguage } from '../../analyzer/language-detection.js';
@@ -27,24 +29,65 @@ export interface CitedFileFreshnessContext {
   artifactMtimeMs?: number;
   /** Direct callers may override the default llm-context artifact path. */
   artifactPath?: string;
+  /** The bounded payload traversal encountered a citation it could not confine. */
+  unsafeCitation?: boolean;
 }
 
 export interface CitedFileFreshnessResult {
   /** Normalized repository-relative files that cannot be vouched fresh. */
   staleFiles: string[];
+  /** Confined stale paths safe to hand to a repository repair host. */
+  repairableStaleFiles: string[];
 }
 
-export interface StaleServingDisclosure extends CitedFileFreshnessResult {
+export interface StaleServingDisclosure {
+  staleFiles: string[];
   note: string;
   repairScheduled?: true;
 }
 
 /** A conclusion normally cites <10 files; this caps burst I/O without serial latency. */
 const FRESHNESS_IO_CONCURRENCY = 8;
+const MAX_CITED_FILES = 200;
+const MAX_CITED_PATH_BYTES = 64 * 1024;
+
+function sameFile(
+  a: { dev: number; ino: number },
+  b: { dev: number; ino: number },
+): boolean {
+  return a.dev === b.dev && a.ino === b.ino;
+}
+
+/** Deterministic seam for the same-handle post-read race check. */
+export function fileChangedDuringRead(params: {
+  opened: { dev: number; ino: number; size: number; mtimeMs: number; ctimeMs: number };
+  afterRead: { size: number; mtimeMs: number; ctimeMs: number };
+  namedAfterRead: {
+    dev: number;
+    ino: number;
+    size: number;
+    mtimeMs: number;
+    ctimeMs: number;
+    isSymbolicLink(): boolean;
+  };
+  bytesRead: number;
+}): boolean {
+  const { opened, afterRead, namedAfterRead, bytesRead } = params;
+  return bytesRead > opened.size
+    || afterRead.size !== opened.size
+    || afterRead.mtimeMs !== opened.mtimeMs
+    || afterRead.ctimeMs !== opened.ctimeMs
+    || namedAfterRead.isSymbolicLink()
+    || !sameFile(opened, namedAfterRead)
+    || namedAfterRead.size !== afterRead.size
+    || namedAfterRead.mtimeMs !== afterRead.mtimeMs
+    || namedAfterRead.ctimeMs !== afterRead.ctimeMs;
+}
 
 export interface CitedSourceFiles {
   files: string[];
   truncated: boolean;
+  unsafeCitation?: true;
 }
 
 /**
@@ -93,7 +136,7 @@ function isSourceCitation(filePath: string): boolean {
  * not candidates the user never sees. Traversal is iterative and capped too, so
  * a malformed cyclic or enormous value cannot turn freshness into a repo scan.
  */
-export function collectCitedSourceFiles(value: unknown, max = 200): CitedSourceFiles {
+export function collectCitedSourceFiles(value: unknown, max = MAX_CITED_FILES): CitedSourceFiles {
   const limit = Number.isFinite(max) ? Math.max(0, Math.floor(max)) : 200;
   const files: string[] = [];
   const seenFiles = new Set<string>();
@@ -101,9 +144,11 @@ export function collectCitedSourceFiles(value: unknown, max = 200): CitedSourceF
   const stack: unknown[] = [value];
   const maxVisited = Math.max(100, limit * 20);
   let visited = 0;
+  let propertiesVisited = 0;
   let truncated = false;
+  let unsafeCitation = false;
 
-  while (stack.length > 0) {
+  traversal: while (stack.length > 0) {
     if (visited++ >= maxVisited) {
       truncated = true;
       break;
@@ -114,15 +159,24 @@ export function collectCitedSourceFiles(value: unknown, max = 200): CitedSourceF
     seenObjects.add(current);
 
     if (Array.isArray(current)) {
-      for (let i = current.length - 1; i >= 0; i--) stack.push(current[i]);
+      const available = maxVisited - visited - stack.length;
+      const accepted = Math.max(0, Math.min(current.length, available));
+      if (accepted < current.length) truncated = true;
+      for (let i = accepted - 1; i >= 0; i--) stack.push(current[i]);
       continue;
     }
 
-    const entries = Object.entries(current as Record<string, unknown>);
-    for (let i = entries.length - 1; i >= 0; i--) {
-      const [key, child] = entries[i];
+    const children: unknown[] = [];
+    for (const key in current as Record<string, unknown>) {
+      if (!Object.hasOwn(current as object, key)) continue;
+      if (propertiesVisited++ >= maxVisited * 2) {
+        truncated = true;
+        break traversal;
+      }
+      const child = (current as Record<string, unknown>)[key];
       if ((key === 'file' || key === 'filePath') && typeof child === 'string') {
         const normalized = normalizeCitation(child);
+        if (normalized === null) unsafeCitation = true;
         if (
           normalized !== null
           && normalized !== 'external'
@@ -133,18 +187,56 @@ export function collectCitedSourceFiles(value: unknown, max = 200): CitedSourceF
         ) {
           if (files.length >= limit) {
             truncated = true;
-            continue;
+            break traversal;
           }
           seenFiles.add(normalized);
           files.push(normalized);
         }
       } else {
-        stack.push(child);
+        if (visited + stack.length + children.length < maxVisited) children.push(child);
+        else truncated = true;
       }
     }
+    for (let i = children.length - 1; i >= 0; i--) stack.push(children[i]);
   }
 
-  return { files, truncated };
+  return { files, truncated, ...(unsafeCitation ? { unsafeCitation: true as const } : {}) };
+}
+
+/** Apply the same count and serialized-path budget to caller-supplied citations. */
+export function boundCitedFiles(
+  citedFiles: Iterable<string>,
+  max = MAX_CITED_FILES,
+  maxPathBytes = MAX_CITED_PATH_BYTES,
+): CitedSourceFiles {
+  const files: string[] = [];
+  const seen = new Set<string>();
+  let pathBytes = 0;
+  let truncated = false;
+  let unsafeCitation = false;
+  let examined = 0;
+  for (const file of citedFiles) {
+    if (examined++ >= max * 20) {
+      truncated = true;
+      break;
+    }
+    if (typeof file !== 'string' || seen.has(file)) continue;
+    const normalized = normalizeCitation(file);
+    if (normalized === null) {
+      unsafeCitation = true;
+      continue;
+    }
+    const bytes = Buffer.byteLength(normalized, 'utf8');
+    if (files.length >= max || pathBytes + bytes > maxPathBytes) {
+      truncated = true;
+      break;
+    }
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+    files.push(normalized);
+    pathBytes += bytes;
+  }
+  return { files, truncated, ...(unsafeCitation ? { unsafeCitation: true as const } : {}) };
 }
 
 /**
@@ -159,7 +251,7 @@ export async function checkCitedFileFreshness(
 ): Promise<CitedFileFreshnessResult> {
   const files: string[] = [];
   const seen = new Set<string>();
-  let unsafeCitation = false;
+  let unsafeCitation = context.unsafeCitation ?? false;
 
   for (const cited of citedFiles) {
     if (typeof cited !== 'string' || cited.length === 0) continue;
@@ -175,6 +267,7 @@ export async function checkCitedFileFreshness(
   }
 
   const staleFiles: string[] = unsafeCitation ? ['[unsafe cited path]'] : [];
+  const repairableStaleFiles: string[] = [];
   let artifactMtimeMs = context.artifactMtimeMs;
   const artifactPath = context.artifactPath
     ?? join(root, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_LLM_CONTEXT);
@@ -182,12 +275,15 @@ export async function checkCitedFileFreshness(
   type Check = { filePath: string; absPath: string; baselineFileHash: string | null };
   const checks: Check[] = [];
   for (const filePath of files) {
+    let confined = false;
     try {
       const absPath = safeJoin(root, filePath);
+      confined = true;
       const baselineFileHash = context.edgeStore?.getFileHash(filePath) ?? null;
       checks.push({ filePath, absPath, baselineFileHash });
     } catch {
       staleFiles.push(filePath);
+      if (confined) repairableStaleFiles.push(filePath);
     }
   }
 
@@ -207,16 +303,50 @@ export async function checkCitedFileFreshness(
     while (next < checks.length) {
       const index = next++;
       const { absPath, baselineFileHash } = checks[index];
+      let handle: Awaited<ReturnType<typeof open>> | undefined;
       try {
-        const sourceStats = await stat(absPath);
+        // One handle binds the size check, mtime, and content hash to the same
+        // file generation. The source-size cap prevents a changed generated file
+        // from turning each cold read into an unbounded allocation.
+        handle = await open(absPath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+        const sourceStats = await handle.stat();
         if (!sourceStats.isFile()) {
           staleByCheck[index] = true;
           continue;
         }
 
         if (baselineFileHash !== null) {
-          const content = await readFile(absPath);
-          const currentFileHash = createHash('sha256').update(content).digest('hex');
+          if (sourceStats.size > SOURCE_SCAN_MAX_FILE_BYTES) {
+            staleByCheck[index] = true;
+            continue;
+          }
+          const content = Buffer.allocUnsafe(sourceStats.size + 1);
+          let bytesRead = 0;
+          while (bytesRead < content.byteLength) {
+            const read = await handle.read(
+              content,
+              bytesRead,
+              content.byteLength - bytesRead,
+              bytesRead,
+            );
+            if (read.bytesRead === 0) break;
+            bytesRead += read.bytesRead;
+          }
+          const afterRead = await handle.stat();
+          safeJoin(root, checks[index].filePath);
+          const namedAfterRead = await lstat(absPath);
+          if (fileChangedDuringRead({
+            opened: sourceStats,
+            afterRead,
+            namedAfterRead,
+            bytesRead,
+          })) {
+            staleByCheck[index] = true;
+            continue;
+          }
+          const currentFileHash = createHash('sha256')
+            .update(content.subarray(0, bytesRead))
+            .digest('hex');
           if (resolveFileFreshness({
             baselineFileHash,
             currentFileHash,
@@ -228,6 +358,18 @@ export async function checkCitedFileFreshness(
           continue;
         }
 
+        const afterStat = await handle.stat();
+        safeJoin(root, checks[index].filePath);
+        const namedAfterStat = await lstat(absPath);
+        if (fileChangedDuringRead({
+          opened: sourceStats,
+          afterRead: afterStat,
+          namedAfterRead: namedAfterStat,
+          bytesRead: sourceStats.size,
+        })) {
+          staleByCheck[index] = true;
+          continue;
+        }
         if (resolveFileFreshness({
           baselineFileHash: null,
           currentFileHash: '',
@@ -238,6 +380,8 @@ export async function checkCitedFileFreshness(
         }
       } catch {
         staleByCheck[index] = true;
+      } finally {
+        await handle?.close().catch(() => {});
       }
     }
   };
@@ -246,10 +390,13 @@ export async function checkCitedFileFreshness(
   );
 
   for (let i = 0; i < checks.length; i++) {
-    if (staleByCheck[i]) staleFiles.push(checks[i].filePath);
+    if (staleByCheck[i]) {
+      staleFiles.push(checks[i].filePath);
+      repairableStaleFiles.push(checks[i].filePath);
+    }
   }
 
-  return { staleFiles };
+  return { staleFiles, repairableStaleFiles };
 }
 
 /** Build the additive payload block shared by MCP and one-shot CLI surfaces. */

@@ -130,7 +130,7 @@ Task-scoped injection is on by default. To disable it (while leaving the MCP ser
 {
   "contextInjection": {
     "mode": "off",            // "task-scoped" (default) | "off"
-    "tokenBudget": 600,        // hard cap on the injected block, in estimated tokens
+    "tokenBudget": 600,        // hard cap in estimated tokens; positive values below 68 clamp to 68
     "relevanceMinMatches": 2,  // gate: minimum match count unless an identifier is exact
     "relevanceMinFanIn": 2,    // gate: centrality; exact/ranked identifier evidence also clears it
     "relevanceMinScore": 0.3   // gate: minimum top score (semantic/hybrid scale only)

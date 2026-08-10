@@ -146,13 +146,21 @@ export function compositeScore(semanticRelevance: number, role: InsertionRole): 
  * yields no matches, so the caller can fall through to its normal empty
  * response. In forced `text` mode it always returns an object.
  */
+interface TextSearchPayload {
+  query: string;
+  searchMode: 'text' | 'text_fallback';
+  count: number;
+  results: Array<{ filePath: string; line: number; text: string; score: number; kind: 'text'; provenance: AnalysisContentProvenance }>;
+  note?: string;
+}
+
 async function searchTextLines(
   outputDir: string,
   query: string,
   limit: number,
   searchMode: 'text' | 'text_fallback',
   provenance: AnalysisContentProvenance,
-): Promise<unknown | null> {
+): Promise<TextSearchPayload | null> {
   const { TextLineIndex } = await import('../../analyzer/text-line-index.js');
   if (!TextLineIndex.exists(outputDir)) {
     return searchMode === 'text'
@@ -203,7 +211,9 @@ export async function handleSearchCode(
       searchTextLines(outputDir, query, limit, 'text', analysisProvenance),
       readCachedContext(absDir),
     ]);
-    return result ? withIndexStaleness(absDir, result, freshnessCtx) : result;
+    return result
+      ? withIndexStaleness(absDir, result, freshnessCtx, result.results.map(hit => hit.filePath))
+      : result;
   }
 
   if (!VectorIndex.exists(outputDir)) {
@@ -235,7 +245,14 @@ export async function handleSearchCode(
   if (results.length === 0) {
     try {
       const textFallback = await searchTextLines(outputDir, query, limit, 'text_fallback', analysisProvenance);
-      if (textFallback) return withIndexStaleness(absDir, textFallback, llmCtx);
+      if (textFallback) {
+        return withIndexStaleness(
+          absDir,
+          textFallback,
+          llmCtx,
+          textFallback.results.map(hit => hit.filePath),
+        );
+      }
     } catch {
       /* text index unavailable/corrupt — fall through to the empty symbol response */
     }
