@@ -586,7 +586,15 @@ After analysis, run 'openlore generate' to create OpenSpec files.
 
             // Always (re)build the search index — incremental, so it only
             // re-embeds changed functions. keywordOnly forces a BM25 index.
-            await runEmbedStep(rootPath, outputPath, openloreConfig, opts.force ?? false, null, keywordOnly);
+            await runEmbedStep(
+              rootPath,
+              outputPath,
+              openloreConfig,
+              opts.force ?? false,
+              null,
+              keywordOnly,
+              options.freshSpecDirectory === true,
+            );
 
             // If --ai-configs is requested, generate them even from cached analysis
             if (opts.aiConfigs) {

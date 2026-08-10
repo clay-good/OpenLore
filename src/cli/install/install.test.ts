@@ -225,7 +225,8 @@ describe('openlore install (end-to-end)', () => {
       const kept = info.mock.calls.find(([title]) => title === 'Kept data')?.[1];
       expect(String(kept)).toContain('.openlore/');
       expect(String(kept)).toContain('index, decisions, and memories');
-      expect(String(kept)).toContain('rm -rf .openlore/');
+      expect(String(kept)).toContain('From the repository root');
+      expect(String(kept)).toContain('rm -rf -- ./.openlore/');
     } finally {
       info.mockRestore();
     }

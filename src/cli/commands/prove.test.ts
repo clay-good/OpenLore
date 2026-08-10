@@ -164,6 +164,6 @@ describe('sparse graph refusal', () => {
     expect(message).toContain('0 functions have ≥2 callers');
     expect(message).toContain('at least 1 is required');
     expect(message).toContain('Nothing is wrong with the installation');
-    expect(message).toContain('skip this projection');
+    expect(message).toContain('skip this prove run');
   });
 });

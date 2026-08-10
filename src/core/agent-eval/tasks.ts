@@ -38,15 +38,19 @@ export interface ProveEligibility {
   eligible: boolean;
 }
 
-/** Measure the exact structural precondition shared by install and prove. */
-export function measureProveEligibility(facts: GraphFact[]): ProveEligibility {
-  const eligibleFunctions = facts.filter(f => f.callerNames.length >= PROVE_MIN_CALLERS).length;
+export function proveEligibilityFromCount(eligibleFunctions: number): ProveEligibility {
   return {
     eligibleFunctions,
     requiredEligibleFunctions: PROVE_MIN_ELIGIBLE_FUNCTIONS,
     minCallers: PROVE_MIN_CALLERS,
     eligible: eligibleFunctions >= PROVE_MIN_ELIGIBLE_FUNCTIONS,
   };
+}
+
+/** Measure the exact structural precondition shared by install and prove. */
+export function measureProveEligibility(facts: GraphFact[]): ProveEligibility {
+  const eligibleFunctions = facts.filter(f => f.callerNames.length >= PROVE_MIN_CALLERS).length;
+  return proveEligibilityFromCount(eligibleFunctions);
 }
 
 /** True iff the agent's answer contains at least one oracle substring. */

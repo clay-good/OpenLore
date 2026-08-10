@@ -330,25 +330,21 @@ function printSummary(
     logger.success('OpenLore uninstall complete.');
     logger.info(
       'Kept data',
-      'The ".openlore/" directory remains (index, decisions, and memories). Remove it with `rm -rf .openlore/` if you no longer need that data.'
+      'The ".openlore/" directory remains (index, decisions, and memories). From the repository root, remove it with `rm -rf -- ./.openlore/` if you no longer need that data.'
     );
   }
 }
 
 /** Render install's value-proof epilogue only after checking the built graph. */
 export async function printProveGuidance(cwd: string): Promise<void> {
-  const [{ loadGraphFacts }, { measureProveEligibility }] = await Promise.all([
-    import('../commands/prove.js'),
-    import('../../core/agent-eval/tasks.js'),
-  ]);
-  let facts: Awaited<ReturnType<typeof loadGraphFacts>>;
+  const { loadProveEligibility } = await import('../commands/prove.js');
+  let eligibility: Awaited<ReturnType<typeof loadProveEligibility>>;
   try {
-    facts = await loadGraphFacts(cwd);
+    eligibility = await loadProveEligibility(cwd);
   } catch {
     return;
   }
-  if (!facts) return;
-  const eligibility = measureProveEligibility(facts);
+  if (!eligibility) return;
   const guidance = formatProveGuidance(eligibility);
   logger.info(guidance.title, guidance.detail);
 }
