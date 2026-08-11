@@ -34,7 +34,7 @@
  * acquires ownership BEFORE the artifact lock and never the reverse — one fixed
  * order, so the two can never deadlock.
  */
-import { link, open, readFile, rename, stat, unlink, mkdir } from 'node:fs/promises';
+import { link, open, rename, stat, unlink, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { decisionsDir } from '../decisions/store.js';
 
