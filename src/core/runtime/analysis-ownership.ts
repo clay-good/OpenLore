@@ -22,9 +22,10 @@
  * enter an artifact digest.
  */
 
-import { unlinkSync } from 'node:fs';
+import { unlinkSync, writeFileSync } from 'node:fs';
 import { readFile, rename, writeFile, mkdir, unlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { Worker } from 'node:worker_threads';
 
 import {
   OWNERSHIP_HEARTBEAT_STALE_MS,
@@ -150,6 +151,53 @@ async function writeProgress(progressPath: string, progress: AnalysisProgress): 
   await rename(tmp, progressPath);
 }
 
+/** File the watchdog program is written to, beside the lock it maintains. */
+export const WATCHDOG_FILE = '.analysis-watchdog.cjs';
+
+/**
+ * The watchdog thread's whole program.
+ *
+ * Written to a `.cjs` file at acquire time rather than run with `eval: true`.
+ * The extension is load-bearing: an eval'd worker inherits the host's module
+ * type, so under `--input-type=module` (how the test harness and some embedders
+ * start Node) the same source is parsed as ESM and dies on `require is not
+ * defined` — silently, since a watchdog failure must never fail the analysis.
+ * A `.cjs` file is CommonJS no matter how the host was started, and needs no
+ * build step or `dist/`-vs-`tsx` path resolution.
+ *
+ * It exists because timers are event-loop callbacks: a stage that is synchronous
+ * and CPU-bound (artifact generation on a large repository) starves the main
+ * thread's `setInterval` exactly as it starves a signal handler. Observed live —
+ * a 405s analysis whose heartbeat never beat once. A separate thread has its own
+ * event loop, so it keeps writing while the main thread is blocked.
+ *
+ * It writes only the heartbeat timestamp over a payload the main thread gave it.
+ * The stage in that payload can go stale while the main thread is blocked (it
+ * cannot post an update it never reaches), which is correct: the beat asserts
+ * "this process is alive", never "the stage advanced".
+ */
+const WATCHDOG_SOURCE = `
+const { parentPort, workerData } = require('node:worker_threads');
+const { writeFileSync, renameSync } = require('node:fs');
+let { lockPath, progressPath, payload, progress, intervalMs, pid } = workerData;
+function beat() {
+  const now = new Date().toISOString();
+  try {
+    writeFileSync(lockPath, JSON.stringify({ ...payload, heartbeatAt: now }));
+  } catch { return; }
+  try {
+    const tmp = progressPath + '.' + pid + '.wd.tmp';
+    writeFileSync(tmp, JSON.stringify({ ...progress, updatedAt: now }, null, 2));
+    renameSync(tmp, progressPath);
+  } catch { /* the sidecar is advisory; a lost write is not fatal */ }
+}
+const timer = setInterval(beat, intervalMs);
+parentPort.on('message', (msg) => {
+  if (msg && msg.type === 'state') { payload = msg.payload; progress = msg.progress; return; }
+  if (msg && msg.type === 'stop') { clearInterval(timer); process.exit(0); }
+});
+`;
+
 /**
  * Try to become the sole owner of a full analysis for `repository`.
  *
@@ -161,11 +209,12 @@ async function writeProgress(progressPath: string, progress: AnalysisProgress): 
 export async function acquireAnalysisOwnership(
   repository: string,
   analysisDir: string,
-  options: { wait?: boolean; stage?: string } = {},
+  options: { wait?: boolean; stage?: string; heartbeatIntervalMs?: number } = {},
 ): Promise<AnalysisOwnership> {
   const runtimeDir = runtimeDirOf(analysisDir);
   const progressPath = progressPathOf(analysisDir);
   const startedAt = new Date().toISOString();
+  const heartbeatIntervalMs = options.heartbeatIntervalMs ?? PROGRESS_INTERVAL_MS;
   let stage = options.stage ?? 'starting';
 
   const payloadOf = (): string => JSON.stringify({
@@ -203,6 +252,80 @@ export async function acquireAnalysisOwnership(
   await writeProgress(progressPath, { stage, percent: null, updatedAt: new Date().toISOString() });
 
   let released = false;
+  let lastProgress: Omit<AnalysisProgress, 'stage' | 'updatedAt'> = { percent: null };
+
+  /**
+   * Refresh the heartbeat and re-stamp the sidecar with the CURRENT stage.
+   *
+   * Stage transitions alone are not enough. A single stage can run for minutes
+   * (artifact generation on a large repository), and during it nothing called
+   * `update`, so the heartbeat froze: `status` and a contending `analyze` reported
+   * an owner whose last beat was minutes old, and the only thing standing between
+   * that owner and reclamation was the liveness PID check. Observed live on a real
+   * repository — 80s+ of a frozen heartbeat inside one `artifacts` stage.
+   */
+  const beat = async (): Promise<void> => {
+    if (released) return;
+    await handle.refresh(payloadOf());
+    await writeProgress(progressPath, {
+      stage,
+      percent: lastProgress.percent ?? null,
+      ...(lastProgress.detail ? { detail: lastProgress.detail } : {}),
+      updatedAt: new Date().toISOString(),
+    }).catch(() => {});
+  };
+
+  // Unref'd so a live heartbeat can never keep the process alive on its own: it
+  // observes the analysis, it does not extend it. This in-thread ticker covers
+  // every stage that leaves the event loop reachable; the watchdog below covers
+  // the ones that do not.
+  const ticker = setInterval(() => { void beat(); }, heartbeatIntervalMs);
+  ticker.unref?.();
+
+  const ownerPayload = (): AnalysisOwnerPayload => ({
+    repository, pid: process.pid, startedAt, heartbeatAt: new Date().toISOString(), stage, progressPath,
+  });
+
+  /**
+   * Start the out-of-loop watchdog. Failure is non-fatal: the in-thread ticker
+   * still runs, so a host that forbids worker threads degrades to the previous
+   * behavior rather than losing ownership.
+   */
+  let watchdog: Worker | null = null;
+  const watchdogPath = join(runtimeDir, WATCHDOG_FILE);
+  try {
+    writeFileSync(watchdogPath, WATCHDOG_SOURCE, 'utf8');
+    watchdog = new Worker(watchdogPath, {
+      // Inherit NO CLI flags. A worker copies the host's `execArgv` by default,
+      // and a host started with `--input-type=module` (the test harness, some
+      // embedders) hands the thread a flag that is illegal for a file-based
+      // worker — it dies at startup with "--input-type can only be used with
+      // string input". The watchdog is plain CommonJS needing no loader, no
+      // transform, and no flags, so the empty list is both correct and the only
+      // value that cannot be poisoned by how the host was launched.
+      execArgv: [],
+      workerData: {
+        lockPath, progressPath, pid: process.pid, intervalMs: heartbeatIntervalMs,
+        payload: ownerPayload(),
+        progress: { stage, percent: null },
+      },
+    });
+    watchdog.unref();
+    // A watchdog that dies must not take the analysis with it — but a silent
+    // failure is how this whole class of bug hid in the first place, so the
+    // reason is available behind an env flag rather than discarded.
+    watchdog.on('error', err => {
+      watchdog = null;
+      if (process.env.OPENLORE_DEBUG_WATCHDOG) {
+        process.stderr.write(`[analysis-ownership] watchdog failed: ${(err as Error).message}\n`);
+      }
+    });
+  } catch (err) {
+    watchdog = null;
+    if (process.env.OPENLORE_DEBUG_WATCHDOG) {
+      process.stderr.write(`[analysis-ownership] watchdog could not start: ${(err as Error).message}\n`);
+    }
+  }
 
   /**
    * Synchronous release.
@@ -212,9 +335,25 @@ export async function acquireAnalysisOwnership(
    * would leave the repository locked until the heartbeat went stale. Only
    * synchronous filesystem calls are reliable at that point.
    */
+  /**
+   * Stop the watchdog BEFORE removing the lock, in both release paths. A beat
+   * that lands after the unlink would recreate the lock file this process just
+   * gave up — silently re-locking the repository against everyone else.
+   */
+  const stopWatchdog = (): void => {
+    if (!watchdog) return;
+    const worker = watchdog;
+    watchdog = null;
+    try { worker.postMessage({ type: 'stop' }); } catch { /* already gone */ }
+    void worker.terminate().catch(() => {});
+    try { unlinkSync(watchdogPath); } catch { /* already gone */ }
+  };
+
   const releaseSync = (): void => {
     if (released) return;
     released = true;
+    clearInterval(ticker);
+    stopWatchdog();
     try { unlinkSync(lockPath); } catch { /* already gone */ }
     try { unlinkSync(progressPath); } catch { /* already gone */ }
   };
@@ -222,6 +361,8 @@ export async function acquireAnalysisOwnership(
   const release = async (): Promise<void> => {
     if (released) return;
     released = true;
+    clearInterval(ticker);
+    stopWatchdog();
     await handle.release();
     await unlink(progressPath).catch(() => {});
   };
@@ -247,6 +388,13 @@ export async function acquireAnalysisOwnership(
     waitedMs: handle.waitedMs,
     update: async (nextStage, progress) => {
       stage = nextStage;
+      // Remembered so the periodic beat re-stamps the real stage detail rather
+      // than blanking it back to "no progress known".
+      lastProgress = { percent: progress?.percent ?? null, ...(progress?.detail ? { detail: progress.detail } : {}) };
+      // Hand the watchdog the new stage so its beats stop describing the old one.
+      // Best-effort by construction: if the main thread is blocked it never gets
+      // here, and the watchdog keeps asserting liveness under the previous stage.
+      try { watchdog?.postMessage({ type: 'state', payload: ownerPayload(), progress: { stage: nextStage, ...lastProgress } }); } catch { /* watchdog gone */ }
       await handle.refresh(payloadOf());
       await writeProgress(progressPath, {
         stage: nextStage,

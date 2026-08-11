@@ -6,6 +6,7 @@ import { join } from 'node:path';
 
 import { OWNERSHIP_LOCK_FILE } from './advisory-lock.js';
 import {
+  PROGRESS_INTERVAL_MS,
   acquireAnalysisOwnership,
   isOwnershipStale,
   isProcessAlive,
@@ -216,6 +217,46 @@ describe('analysis ownership — progress sidecar', () => {
     expect(progressPathOf(analysisDir).startsWith(analysisDir)).toBe(false);
   });
 
+  it('refreshes the heartbeat inside a stage that never calls update', async () => {
+    // The regression this pins: stages publish at their BOUNDARIES, so a single
+    // long stage (artifact generation on a big repo) left the heartbeat frozen for
+    // minutes. Observed live — 80s+ of an unchanged `heartbeatAt` while the owner
+    // was healthily working, which makes `status` and a contending `analyze` report
+    // an owner that looks abandoned. The test below drives NO update at all.
+    vi.useFakeTimers();
+    const { root, analysisDir } = await fixture();
+    const held = await own(root, analysisDir);
+    if (held.state !== 'owned') throw new Error('expected ownership');
+    await held.update('artifacts', { percent: 75, detail: 'Generating analysis artifacts' });
+
+    const lockPath = join(runtimeDirOf(analysisDir), OWNERSHIP_LOCK_FILE);
+    const before = JSON.parse(await readFile(lockPath, 'utf8')).heartbeatAt as string;
+
+    await vi.advanceTimersByTimeAsync(PROGRESS_INTERVAL_MS + 500);
+
+    const after = JSON.parse(await readFile(lockPath, 'utf8')) as { heartbeatAt: string; stage: string };
+    expect(Date.parse(after.heartbeatAt)).toBeGreaterThan(Date.parse(before));
+    // The beat re-stamps the CURRENT stage and its detail — it must not blank the
+    // sidecar back to "nothing known" just because no boundary was crossed.
+    expect(after.stage).toBe('artifacts');
+    expect(await readAnalysisProgress(analysisDir)).toMatchObject({
+      stage: 'artifacts', percent: 75, detail: 'Generating analysis artifacts',
+    });
+  });
+
+  it('stops beating once ownership is released', async () => {
+    vi.useFakeTimers();
+    const { root, analysisDir } = await fixture();
+    const held = await own(root, analysisDir);
+    if (held.state !== 'owned') throw new Error('expected ownership');
+    await held.release();
+
+    // A beat after release would recreate the lock file it just removed, silently
+    // re-locking the repository against every other process.
+    await vi.advanceTimersByTimeAsync(PROGRESS_INTERVAL_MS * 3);
+    await expect(stat(join(runtimeDirOf(analysisDir), OWNERSHIP_LOCK_FILE))).rejects.toThrow();
+  });
+
   it('an 18-minute silent stage still refreshes on the caller cadence', async () => {
     const { root, analysisDir } = await fixture();
     const held = await own(root, analysisDir);
@@ -265,6 +306,36 @@ describe('analysis ownership — across processes', () => {
     });
 
     expect(JSON.parse(out)).toEqual({ state: 'in-progress', pid: process.pid });
+  }, 60_000);
+
+  it('keeps beating while the owner blocks the event loop in a synchronous stage', async () => {
+    // THE regression this whole watchdog exists for. Timers are event-loop
+    // callbacks, so an in-thread `setInterval` cannot fire during a synchronous
+    // CPU-bound stage — observed live as a 405s analysis whose heartbeat never
+    // beat once. The child below acquires ownership and then busy-loops, never
+    // yielding: only a beat from OUTSIDE that loop can move the timestamp.
+    const { root, analysisDir } = await fixture();
+    const child = runChild(`
+      const m = await import('__MODULE__');
+      await m.acquireAnalysisOwnership(${JSON.stringify(root)}, ${JSON.stringify(analysisDir)}, { heartbeatIntervalMs: 150 });
+      process.stdout.write('owned');
+      const until = Date.now() + 3000;
+      while (Date.now() < until) { /* block the loop hard — no await, no I/O */ }
+      process.exit(0);
+    `);
+    await new Promise<void>((resolve, reject) => {
+      child.stdout?.on('data', chunk => { if (String(chunk).includes('owned')) resolve(); });
+      child.on('error', reject);
+      child.on('close', () => reject(new Error('child exited before taking ownership')));
+    });
+
+    const lockPath = join(runtimeDirOf(analysisDir), OWNERSHIP_LOCK_FILE);
+    const first = JSON.parse(await readFile(lockPath, 'utf8')).heartbeatAt as string;
+    await new Promise(resolve => setTimeout(resolve, 1_200));
+    const during = JSON.parse(await readFile(lockPath, 'utf8')).heartbeatAt as string;
+
+    expect(Date.parse(during)).toBeGreaterThan(Date.parse(first));
+    child.kill('SIGKILL');
   }, 60_000);
 
   it('a killed owner releases ownership on SIGTERM rather than holding it', async () => {
