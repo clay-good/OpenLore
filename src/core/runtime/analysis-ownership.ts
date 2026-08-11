@@ -22,7 +22,7 @@
  * enter an artifact digest.
  */
 
-import { unlinkSync, writeFileSync } from 'node:fs';
+import { statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { open, readFile, rename, writeFile, mkdir, unlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { Worker } from 'node:worker_threads';
@@ -190,8 +190,8 @@ export const WATCHDOG_FILE = '.analysis-watchdog.cjs';
  */
 const WATCHDOG_SOURCE = `
 const { parentPort, workerData } = require('node:worker_threads');
-const { writeFileSync, renameSync } = require('node:fs');
-let { lockPath, progressPath, payload, progress, intervalMs, pid, stop } = workerData;
+const { statSync, writeFileSync, renameSync } = require('node:fs');
+let { lockPath, progressPath, payload, progress, intervalMs, pid, stop, inode } = workerData;
 const stopFlag = new Int32Array(stop);
 function beat() {
   // Checked synchronously on every beat. Releasing sets this BEFORE unlinking the
@@ -202,6 +202,10 @@ function beat() {
   if (Atomics.load(stopFlag, 0) !== 0) return;
   const now = new Date().toISOString();
   try {
+    // Never write a lock this owner no longer holds. If ownership was reclaimed,
+    // the path names a DIFFERENT file now, and beating onto it would overwrite the
+    // new owner's heartbeat with a superseded one — reviving a dead owner on paper.
+    if (statSync(lockPath).ino !== inode) return;
     writeFileSync(lockPath, JSON.stringify({ ...payload, heartbeatAt: now }));
   } catch { return; }
   try {
@@ -329,6 +333,7 @@ export async function acquireAnalysisOwnership(
       execArgv: [],
       workerData: {
         lockPath, progressPath, pid: process.pid, intervalMs: heartbeatIntervalMs, stop: stopFlag,
+        inode: handle.inode,
         payload: ownerPayload(),
         progress: { stage, percent: null },
       },
@@ -383,7 +388,11 @@ export async function acquireAnalysisOwnership(
     // Cannot await a thread from a signal/exit handler; the shared stop flag is
     // what makes this path safe, since the watchdog observes it before every write.
     void stopWatchdog();
-    try { unlinkSync(lockPath); } catch { /* already gone */ }
+    // Same identity rule as the async release: a superseded owner must not delete
+    // the lock its successor now holds.
+    try {
+      if (statSync(lockPath).ino === handle.inode) unlinkSync(lockPath);
+    } catch { /* already gone */ }
     try { unlinkSync(progressPath); } catch { /* already gone */ }
   };
 

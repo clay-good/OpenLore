@@ -85,6 +85,32 @@ describe('stale steal — exactly one winner', () => {
   }, 20_000);
 });
 
+describe('a superseded holder cannot damage its successor', () => {
+  it('refresh does not truncate the lock a new owner took', async () => {
+    // The old holder keeps running after its lock is stolen. Re-opening the PATH
+    // with 'w' would truncate whatever lives there now — the new owner's lock.
+    const dir = join(root, 'superseded');
+    await mkdir(dir, { recursive: true });
+    const first = await acquireLockAt(dir, '.x.lock', { payload: () => 'FIRST' });
+    if (isLockHeld(first)) throw new Error('setup acquire must own the lock');
+
+    // Simulate reclamation: the file is replaced by a new owner's lock.
+    const lockPath = join(dir, '.x.lock');
+    await rm(lockPath, { force: true });
+    const second = await acquireLockAt(dir, '.x.lock', { payload: () => 'SECOND' });
+    if (isLockHeld(second)) throw new Error('second acquire must own the lock');
+
+    await first.refresh('FIRST-AGAIN');
+    expect(await readFile(lockPath, 'utf8')).toBe('SECOND');
+
+    await first.release();
+    // The superseded release must not delete the successor's lock either.
+    expect(await readFile(lockPath, 'utf8')).toBe('SECOND');
+    await second.release();
+    await expect(stat(lockPath)).rejects.toThrow();
+  }, 15_000);
+});
+
 describe('wait policy — maxWaitMs and waitedMs', () => {
   it('reports zero wait for an uncontended acquire and a real wait after contention', async () => {
     const first = await acquireLockAt(root, '.wait.lock');

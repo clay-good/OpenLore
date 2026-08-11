@@ -115,6 +115,12 @@ export interface LockHandle {
    * someone else just finished the work it is about to start.
    */
   waitedMs: number;
+  /**
+   * Inode of the file this handle acquired. Any other writer of the same path —
+   * a signal handler, a watchdog thread — must compare against it before writing
+   * or deleting, so a superseded holder cannot damage its successor's lock.
+   */
+  inode: number;
 }
 
 /** Returned instead of a handle when `onContended: 'report'` finds a live holder. */
@@ -129,15 +135,6 @@ export interface LockHeld {
 
 const defaultPayload = (): string => `${process.pid} ${new Date().toISOString()}`;
 const defaultIsStale = (mtimeMs: number): boolean => Date.now() - mtimeMs > STALE_MS;
-
-async function writePayload(lockPath: string, payload: string): Promise<void> {
-  const fh = await open(lockPath, 'w');
-  try {
-    await fh.writeFile(payload);
-  } finally {
-    await fh.close();
-  }
-}
 
 /**
  * Acquire an exclusive-create advisory lock at `dir/lockFile`.
@@ -170,18 +167,36 @@ export async function acquireLockAt(
     try {
       const fh = await open(lockPath, 'wx'); // exclusive create — fails if held
       await fh.writeFile(payloadOf());
-      await fh.close();
+      // The identity of the file we acquired. Everything this handle does later is
+      // bound to it, because a holder whose lock was STOLEN keeps running: its next
+      // refresh must not truncate, and its release must not delete, the lock a new
+      // owner has since put at the same path. The path is not the lock; this inode
+      // is. (The descriptor stays open for the handle's lifetime for the same
+      // reason — see `refresh`.)
+      const inode = (await fh.stat()).ino;
       let released = false;
       return {
         bestEffort: false,
         waitedMs: contended ? Date.now() - start : 0,
+        inode,
         refresh: async (payload: string) => {
-          if (!released) await writePayload(lockPath, payload).catch(() => {});
+          if (released) return;
+          // Written THROUGH the descriptor obtained at acquire time. Re-opening the
+          // path with 'w' would truncate whatever lives there now — after a steal,
+          // that is the new owner's lock. A descriptor cannot be redirected, so a
+          // superseded holder can only ever scribble on the file it already lost.
+          await fh.truncate(0).catch(() => {});
+          await fh.write(payload, 0).catch(() => {});
         },
         release: async () => {
           if (released) return;
           released = true;
-          await unlink(lockPath).catch(() => {});
+          await fh.close().catch(() => {});
+          // Remove the path only while it still names OUR file. A superseded holder
+          // that unlinked blindly would hand the repository to nobody: the new
+          // owner would keep working while its lock had already been deleted.
+          const current = await stat(lockPath).then(info => info.ino).catch(() => null);
+          if (current === inode) await unlink(lockPath).catch(() => {});
         },
       };
     } catch (err) {
@@ -253,7 +268,7 @@ export async function acquireLockAt(
         if (!bestEffortAfterMaxWait) {
           return { held: true, payload: contents, ageMs: Date.now() - mtimeMs, lockPath };
         }
-        return { bestEffort: true, waitedMs: Date.now() - start, refresh: async () => {}, release: async () => {} };
+        return { bestEffort: true, waitedMs: Date.now() - start, inode: -1, refresh: async () => {}, release: async () => {} };
       }
       await sleep(POLL_MS);
     }
