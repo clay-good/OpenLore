@@ -42,6 +42,7 @@ never treated as anchors, so narrative can never invent coverage.
 | `linked` | Every exact anchor resolved to exactly one symbol in the graph |
 | `ambiguous` | An anchor matched several symbols — candidates are disclosed, **none is selected** |
 | `stale` | An anchor names a symbol that no longer exists — same-name symbols elsewhere are disclosed as candidates, not auto-selected |
+| `type-only` *(anchor state)* | The anchored name **exists but is a type**. Types are outside what coverage measures, so no coverage is claimed — but nothing is missing either, and the type's location is disclosed. A requirement anchored only to types is `unmapped`, never `stale` |
 | `unmapped` | The requirement carries no exact symbol anchor at all |
 
 A file-only anchor contributes to the domain footprint and to nothing else:

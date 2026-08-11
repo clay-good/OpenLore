@@ -220,6 +220,50 @@ describe('buildSpecLinkIndex', () => {
     expect(index.links[0].footprintFiles).toEqual(['config.yaml']);
   });
 
+  it('reports an anchor on an exported type as type-only, never as stale', () => {
+    // `stale` asserts the cited symbol no longer exists. Saying that about a type
+    // sitting right there is false: it is merely outside what coverage measures.
+    const index = build(
+      specInput(spec('Mounts A Widget', ['MountOptions::embed/src/mount.tsx'])),
+      graph(node('embed/src/mount.tsx', [
+        { name: 'mount', line: 40 },
+        { name: 'MountOptions', line: 20, kind: 'interface', isType: true },
+      ])),
+    );
+    const anchor = index.links[0].anchors[0];
+    expect(anchor.state).toBe('type-only');
+    // The type's location is disclosed, so a human can see what was cited.
+    expect(anchor.candidates).toEqual([
+      { name: 'MountOptions', file: 'embed/src/mount.tsx', line: 20, kind: 'interface' },
+    ]);
+    // No coverage is claimed, and no missing symbol is alleged.
+    expect(index.links[0].state).toBe('unmapped');
+    expect(index.links[0].functions).toEqual([]);
+    expect(index.stats).toMatchObject({ stale: 0, unmapped: 1, coveredFunctions: 0 });
+  });
+
+  it('never lists an exported type as an uncovered orphan', () => {
+    const index = build(
+      specInput(spec('Mounts A Widget', ['mount::embed/src/mount.tsx'])),
+      graph(node('embed/src/mount.tsx', [
+        { name: 'mount', line: 40 },
+        { name: 'MountHandle', line: 29, kind: 'interface', isType: true },
+      ])),
+    );
+    expect(index.links[0].state).toBe('linked');
+    expect(index.orphanFunctions).toEqual([]);
+    expect(index.stats.totalExportedFunctions).toBe(1);
+  });
+
+  it('still reports a genuinely absent symbol as stale', () => {
+    const index = build(
+      specInput(spec('Mounts A Widget', ['vanished::embed/src/mount.tsx'])),
+      graph(node('embed/src/mount.tsx', [{ name: 'mount', line: 40 }])),
+    );
+    expect(index.links[0].anchors[0].state).toBe('stale');
+    expect(index.links[0].state).toBe('stale');
+  });
+
   it('reports a duplicate symbol as ambiguous with bounded candidates, selecting none', () => {
     const index = build(
       specInput(spec('Sessions Expire', ['createSession'])),
@@ -278,12 +322,17 @@ describe('buildSpecLinkIndex', () => {
     expect(index.links[0].anchors[0].candidates).toEqual([]);
   });
 
-  it('ignores type-only exports as coverage targets', () => {
+  it('ignores type-only exports as coverage targets, without calling them missing', () => {
+    // This case previously asserted `stale`, which was the wrong verdict: the type
+    // is present in the graph, so claiming the spec cites something that no longer
+    // exists was a false statement. It establishes no coverage — that part was
+    // right — so the requirement is `unmapped`.
     const index = build(
       specInput(spec('Types', ['Session::src/auth/session.ts'])),
       graph(node('src/auth/session.ts', [{ name: 'Session', isType: true, kind: 'interface' }])),
     );
-    expect(index.links[0].state).toBe('stale');
+    expect(index.links[0].state).toBe('unmapped');
+    expect(index.links[0].anchors[0].state).toBe('type-only');
     expect(index.stats.totalExportedFunctions).toBe(0);
   });
 

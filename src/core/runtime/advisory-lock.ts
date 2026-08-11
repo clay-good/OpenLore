@@ -33,7 +33,29 @@
  * also taken by the incremental watcher, which never takes ownership. An owner
  * acquires ownership BEFORE the artifact lock and never the reverse — one fixed
  * order, so the two can never deadlock.
+ *
+ * WHAT THIS LOCK GUARANTEES, AND WHERE IT STOPS
+ *
+ * It is ADVISORY. It serializes cooperating writers that all take it; it does not
+ * constrain a process that ignores it, and it is not a security boundary.
+ *
+ * Two operations are genuinely atomic: taking the lock (`open` with `wx`, which
+ * fails when the file exists) and stealing a stale one (`rename`, which exactly
+ * one contender can win). Release is not. It compares the path's inode with the
+ * one acquired and then unlinks, and POSIX offers no portable compare-and-delete:
+ * between the comparison and the unlink, the path can be replaced. That window is
+ * narrow and it is NOT closed. Adding another check before the unlink would only
+ * move it — the honest statement is that it exists.
+ *
+ * Reclamation is therefore deliberately conservative: a lock is stolen only when
+ * its holder is confirmed dead (dead PID AND a stale heartbeat), with ONE stated
+ * exception — {@link OWNERSHIP_ABANDONED_MS}. Past that much silence the heartbeat
+ * outranks a PID that still looks alive, to escape a permanently unreclaimable
+ * lock after PID reuse. In that case the holder is not confirmed dead; its death
+ * is INFERRED from 120 consecutive missed beats. That is a trade, not a proof, and
+ * is recorded here as one.
  */
+import { randomUUID } from 'node:crypto';
 import { link, open, rename, stat, unlink, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { decisionsDir } from '../decisions/store.js';
@@ -215,6 +237,12 @@ export async function acquireLockAt(
           // nobody: the new owner would keep working with its lock already deleted.
           // Unknown identity (stat failed, no inode) falls back to removing our own
           // lock — refusing to clean up on doubt would leak a lock instead.
+          //
+          // ADVISORY, and knowingly so: this is a compare THEN delete, not an
+          // atomic compare-and-delete, which POSIX does not portably offer. A
+          // replacement landing between the two lines is still deleted. The window
+          // is small and deliberately left open — another guard here would shrink
+          // it while implying it was closed.
           const current = await stat(lockPath).then(info => info.ino).catch(() => null);
           const foreign = typeof current === 'number' && inode >= 0 && current !== inode;
           if (!foreign) await unlink(lockPath).catch(() => {});
@@ -251,7 +279,14 @@ export async function acquireLockAt(
         // lock the first has already put there, and both then believe they own the
         // repository — the one outcome this loop exists to prevent. A rename is
         // atomic, so exactly one contender moves this file out of the way.
-        const stolen = `${lockPath}.${process.pid}.${Date.now()}.stale`;
+        // The destination MUST be unique per attempt. `rename` overwrites silently,
+        // so a name built only from pid+timestamp collides between two contenders
+        // in the same process within the same millisecond — the shape of five
+        // concurrent acquires. The second steal would then clobber the first's
+        // stolen copy, and the first's identity check would compare against a file
+        // that was never its own, restoring a lock belonging to neither. A random
+        // suffix removes the collision instead of narrowing its window.
+        const stolen = `${lockPath}.${process.pid}.${randomUUID()}.stale`;
         try {
           await rename(lockPath, stolen);
         } catch {

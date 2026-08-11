@@ -12,6 +12,7 @@
  *
  *   - exact anchor resolving to exactly one graph identity → `linked`
  *   - anchor resolving to several exact identities         → `ambiguous`
+ *   - anchor naming an exported TYPE (not behaviour)       → `type-only`
  *   - anchor whose identity is absent from the graph       → `stale`
  *   - requirement with no exact symbol anchor at all       → `unmapped`
  *
@@ -48,8 +49,10 @@ import { parseRequirementBlocks } from '../drift/spec-mapper.js';
  *   4 — legacy `> Implementation: \`name\` in \`file\`` hints are read too
  *   5 — a dotted `Class.method` token resolves as a member identity when the
  *       graph holds it, instead of always being read as a file path
+ *   6 — an anchor naming an exported type resolves to `type-only` instead of
+ *       `stale`: the type exists, it is merely outside what coverage measures
  */
-export const SPEC_LINK_INDEX_VERSION = 5;
+export const SPEC_LINK_INDEX_VERSION = 6;
 
 /** Default bound on disclosed candidates for one ambiguous or stale anchor. */
 export const SPEC_LINK_MAX_CANDIDATES = 5;
@@ -57,7 +60,18 @@ export const SPEC_LINK_MAX_CANDIDATES = 5;
 export type SpecLinkState = 'linked' | 'ambiguous' | 'unmapped' | 'stale';
 
 /** Why one anchor did not resolve to a single identity. */
-export type SpecAnchorState = 'linked' | 'ambiguous' | 'stale' | 'footprint';
+export type SpecAnchorState =
+  | 'linked'
+  | 'ambiguous'
+  | 'stale'
+  /** A file-only anchor: domain footprint, never function coverage. */
+  | 'footprint'
+  /**
+   * The anchored name EXISTS but is a type declaration, so it is outside what
+   * coverage measures. Distinct from `stale`, which asserts the cited symbol is
+   * gone — saying that about a type that is right there is simply false.
+   */
+  | 'type-only';
 
 export interface SpecSymbolRef {
   name: string;
@@ -267,22 +281,34 @@ export function specCorpusDigest(specs: SpecLinkIndexSpecInput[]): string {
 const compareRefs = (a: SpecSymbolRef, b: SpecSymbolRef): number =>
   a.file.localeCompare(b.file) || a.name.localeCompare(b.name) || a.line - b.line;
 
-/** Index the graph's exported, non-type symbols by exact name. */
-function buildExportIndex(graph: DependencyGraphResult): Map<string, SpecSymbolRef[]> {
-  const byName = new Map<string, SpecSymbolRef[]>();
+/**
+ * Index the graph's exported symbols by exact name, keeping VALUES and TYPES
+ * apart.
+ *
+ * Coverage is about behaviour, so only values can establish it. But a type still
+ * has to be findable: an anchor naming one must be answerable with "that exists
+ * and is a type", not with `stale`, which claims the cited symbol is gone.
+ */
+function buildExportIndex(graph: DependencyGraphResult): {
+  values: Map<string, SpecSymbolRef[]>;
+  types: Map<string, SpecSymbolRef[]>;
+} {
+  const values = new Map<string, SpecSymbolRef[]>();
+  const types = new Map<string, SpecSymbolRef[]>();
   for (const node of graph.nodes) {
     const file = normalizeAnchorPath(node.file.path);
     if (!file) continue;
     for (const exported of node.exports) {
-      if (exported.isType) continue;
       const ref: SpecSymbolRef = { name: exported.name, file, line: exported.line, kind: exported.kind };
-      const existing = byName.get(exported.name);
+      const target = exported.isType ? types : values;
+      const existing = target.get(exported.name);
       if (existing) existing.push(ref);
-      else byName.set(exported.name, [ref]);
+      else target.set(exported.name, [ref]);
     }
   }
-  for (const refs of byName.values()) refs.sort(compareRefs);
-  return byName;
+  for (const refs of values.values()) refs.sort(compareRefs);
+  for (const refs of types.values()) refs.sort(compareRefs);
+  return { values, types };
 }
 
 /**
@@ -297,7 +323,7 @@ function buildExportIndex(graph: DependencyGraphResult): Map<string, SpecSymbolR
 export function buildSymbolResolver(
   graph: DependencyGraphResult,
 ): (name: string, file?: string | null) => SpecSymbolRef | null {
-  const exportIndex = buildExportIndex(graph);
+  const exportIndex = buildExportIndex(graph).values;
   return (name, file) => {
     const byName = exportIndex.get(name) ?? [];
     const normalized = file ? normalizeAnchorPath(file) : null;
@@ -329,7 +355,7 @@ export function requirementAnchorKey(domain: string, requirement: string): strin
 function resolveAnchor(
   raw: string,
   parsed: ParsedSpecAnchor,
-  exportIndex: Map<string, SpecSymbolRef[]>,
+  exportIndex: { values: Map<string, SpecSymbolRef[]>; types: Map<string, SpecSymbolRef[]> },
   maxCandidates: number,
 ): SpecLinkAnchor {
   if (!parsed.symbol) {
@@ -337,13 +363,13 @@ function resolveAnchor(
     // graph holds that exact name. Unresolved, it stays file-footprint evidence
     // rather than being asserted as a stale symbol the spec may never have cited.
     const member = parsed.memberCandidate;
-    if (member && (exportIndex.get(member)?.length ?? 0) > 0) {
+    if (member && (exportIndex.values.get(member)?.length ?? 0) > 0) {
       return resolveAnchor(raw, { file: null, symbol: member }, exportIndex, maxCandidates);
     }
     return { raw, file: parsed.file, symbol: null, state: 'footprint', candidates: [], candidateTotal: 0 };
   }
 
-  const byName = exportIndex.get(parsed.symbol) ?? [];
+  const byName = exportIndex.values.get(parsed.symbol) ?? [];
   const matches = parsed.file ? byName.filter(ref => ref.file === parsed.file) : byName;
 
   if (matches.length === 1) {
@@ -355,6 +381,20 @@ function resolveAnchor(
       candidates: matches.slice(0, maxCandidates), candidateTotal: matches.length,
     };
   }
+  // Before calling it gone: is the name a TYPE? Types are excluded from coverage
+  // because coverage is about behaviour, but they are not missing. Reporting
+  // `stale` — "the spec cites something that no longer exists" — for a type that is
+  // right there would be a false statement, so it gets its own state and discloses
+  // where the type lives.
+  const typeRefs = exportIndex.types.get(parsed.symbol) ?? [];
+  const typeMatches = parsed.file ? typeRefs.filter(ref => ref.file === parsed.file) : typeRefs;
+  if (typeMatches.length > 0) {
+    return {
+      raw, file: parsed.file, symbol: parsed.symbol, state: 'type-only',
+      candidates: typeMatches.slice(0, maxCandidates), candidateTotal: typeMatches.length,
+    };
+  }
+
   // The cited identity is absent. Same-name symbols elsewhere are disclosed as
   // candidates so a human can see where it moved — they are NOT auto-selected.
   return {
@@ -373,6 +413,10 @@ function requirementState(anchors: SpecLinkAnchor[]): SpecLinkState {
   if (symbolAnchors.length === 0) return 'unmapped';
   if (symbolAnchors.some(anchor => anchor.state === 'stale')) return 'stale';
   if (symbolAnchors.some(anchor => anchor.state === 'ambiguous')) return 'ambiguous';
+  // A requirement anchored ONLY to types establishes no function coverage, but it
+  // cites nothing missing either: `unmapped` says exactly that, where `stale`
+  // would accuse the spec of naming something gone.
+  if (symbolAnchors.every(anchor => anchor.state === 'type-only')) return 'unmapped';
   return 'linked';
 }
 
@@ -420,7 +464,9 @@ export function buildSpecLinkIndex(input: SpecLinkIndexInput): SpecLinkIndex {
 
   links.sort((a, b) => a.specFile.localeCompare(b.specFile) || a.requirement.localeCompare(b.requirement));
 
-  const allExports = [...exportIndex.values()].flat();
+  // Orphans are VALUES only: a type was never a coverage candidate, so listing it
+  // as uncovered would invent a gap that cannot be closed.
+  const allExports = [...exportIndex.values.values()].flat();
   const orphanFunctions = allExports
     .filter(ref => !coveredKeys.has(`${ref.name}\0${ref.file}`))
     .sort(compareRefs);
