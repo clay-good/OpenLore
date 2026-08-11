@@ -191,9 +191,18 @@ export async function acquireLockAt(
       let mtimeMs: number;
       let contents: string;
       try {
-        const s = await stat(lockPath);
-        mtimeMs = s.mtimeMs;
-        contents = await readFile(lockPath, 'utf8').catch(() => '');
+        // ONE open handle for both the timestamp and the bytes. Resolving the path
+        // twice can straddle a rewrite and pair one holder's mtime with another's
+        // payload — and that pair is exactly what the staleness policy judges, and
+        // what the post-rename mtime comparison below re-checks. Reading them from
+        // the same inode makes both decisions describe the same file.
+        const handle = await open(lockPath, 'r');
+        try {
+          mtimeMs = (await handle.stat()).mtimeMs;
+          contents = await handle.readFile('utf8');
+        } finally {
+          await handle.close();
+        }
       } catch {
         continue; // lock vanished between open and stat — retry acquire
       }
