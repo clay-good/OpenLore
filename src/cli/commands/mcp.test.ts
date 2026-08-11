@@ -69,7 +69,6 @@ import {
 import { VectorIndex } from '../../core/analyzer/vector-index.js';
 import { EmbeddingService } from '../../core/analyzer/embedding-service.js';
 import type { SerializedCallGraph, FunctionNode } from '../../core/analyzer/call-graph.js';
-import type { MappingArtifact } from '../../core/generator/mapping-generator.js';
 import type { FileSignatureMap } from '../../core/analyzer/signature-extractor.js';
 import type { DriftResult } from '../../types/index.js';
 import {
@@ -167,36 +166,32 @@ async function writeCacheFixture(
   }
 }
 
-async function writeMappingFixture(dir: string, mapping: MappingArtifact) {
+/**
+ * Seed the INPUTS the deterministic link index derives from: the current graph
+ * plus specs carrying exact `name::path` anchors. `mapping.json` is a cache, so
+ * no fixture writes it.
+ */
+async function writeLinkIndexFixture(dir: string) {
   const analysisDir = join(dir, '.openlore', 'analysis');
   await mkdir(analysisDir, { recursive: true });
-  await writeFile(join(analysisDir, 'mapping.json'), JSON.stringify(mapping), 'utf-8');
-}
+  await writeFile(join(analysisDir, 'dependency-graph.json'), JSON.stringify({
+    nodes: [
+      { file: { path: 'src/auth/auth.ts' }, exports: [{ name: 'authenticate', kind: 'function', line: 10, isType: false }] },
+      { file: { path: 'src/orders/service.ts' }, exports: [{ name: 'placeOrder', kind: 'function', line: 50, isType: false }] },
+      { file: { path: 'src/utils/legacy.ts' }, exports: [{ name: 'oldHelper', kind: 'function', line: 5, isType: false }] },
+    ],
+    edges: [], clusters: [], structuralClusters: [], rankings: {}, cycles: [], statistics: {},
+  }), 'utf-8');
 
-function makeMapping(): MappingArtifact {
-  return {
-    generatedAt: '2026-01-01T00:00:00Z',
-    mappings: [
-      {
-        requirement: 'Authenticate User',
-        service: 'AuthService',
-        domain: 'auth',
-        specFile: 'openspec/specs/auth/spec.md',
-        functions: [{ name: 'authenticate', file: 'src/auth/auth.ts', line: 10, kind: 'function', confidence: 'llm' }],
-      },
-      {
-        requirement: 'Place Order',
-        service: 'OrderService',
-        domain: 'orders',
-        specFile: 'openspec/specs/orders/spec.md',
-        functions: [{ name: 'placeOrder', file: 'src/orders/service.ts', line: 50, kind: 'function', confidence: 'heuristic' }],
-      },
-    ],
-    orphanFunctions: [
-      { name: 'oldHelper', file: 'src/utils/legacy.ts', line: 5, kind: 'function', confidence: 'heuristic' },
-    ],
-    stats: { totalRequirements: 2, mappedRequirements: 2, totalExportedFunctions: 10, orphanCount: 1 },
-  };
+  const spec = (name: string, anchor: string) =>
+    `### Requirement: ${name}\n\nThe system SHALL work.\n- **Implementation**: \`${anchor}\`\n\n`;
+  for (const [domain, content] of Object.entries({
+    auth: `# Auth\n\n${spec('Authenticate User', 'authenticate::src/auth/auth.ts')}`,
+    orders: `# Orders\n\n${spec('Place Order', 'placeOrder::src/orders/service.ts')}`,
+  })) {
+    await mkdir(join(dir, 'openspec', 'specs', domain), { recursive: true });
+    await writeFile(join(dir, 'openspec', 'specs', domain, 'spec.md'), content, 'utf-8');
+  }
 }
 
 function makeSignatures(): FileSignatureMap[] {
@@ -479,36 +474,39 @@ describe('handleGetMapping', () => {
   beforeEach(async () => {
     testDir = join(tmpdir(), `openlore-map-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     await mkdir(testDir, { recursive: true });
+    vi.mocked(readOpenLoreConfig).mockResolvedValue({ openspecPath: 'openspec' } as never);
   });
   afterEach(async () => { await rm(testDir, { recursive: true, force: true }); });
 
-  it('returns error when no mapping.json exists', async () => {
-    const r = await handleGetMapping(testDir) as { error: string };
-    expect(r.error).toMatch(/openlore generate first/);
+  it('reports the missing input rather than a missing cache', async () => {
+    const r = await handleGetMapping(testDir) as { error: string; reason: string };
+    expect(r.reason).toBe('analysis-unavailable');
+    expect(r.error).toMatch(/openlore analyze/);
   });
 
-  it('returns full mapping when no filters applied', async () => {
-    await writeMappingFixture(testDir, makeMapping());
-    const r = await handleGetMapping(testDir) as { mappings: unknown[]; orphanFunctions: unknown[] };
+  it('derives the full link index with no mapping.json present', async () => {
+    await writeLinkIndexFixture(testDir);
+    const r = await handleGetMapping(testDir) as { source: string; mappings: unknown[]; orphanFunctions: unknown[] };
+    expect(r.source).toBe('derived');
     expect(r.mappings).toHaveLength(2);
     expect(r.orphanFunctions).toHaveLength(1);
   });
 
-  it('filters mappings by domain', async () => {
-    await writeMappingFixture(testDir, makeMapping());
+  it('filters links by domain', async () => {
+    await writeLinkIndexFixture(testDir);
     const r = await handleGetMapping(testDir, 'auth') as { mappings: Array<{ domain: string }> };
     expect(r.mappings).toHaveLength(1);
     expect(r.mappings[0].domain).toBe('auth');
   });
 
   it('domain filter returns empty orphanFunctions', async () => {
-    await writeMappingFixture(testDir, makeMapping());
+    await writeLinkIndexFixture(testDir);
     const r = await handleGetMapping(testDir, 'auth') as { orphanFunctions: unknown[] };
     expect(r.orphanFunctions).toHaveLength(0);
   });
 
   it('orphansOnly returns only orphan functions', async () => {
-    await writeMappingFixture(testDir, makeMapping());
+    await writeLinkIndexFixture(testDir);
     const r = await handleGetMapping(testDir, undefined, true) as { orphanFunctions: Array<{ name: string }> };
     expect(r).toHaveProperty('orphanFunctions');
     expect(r.orphanFunctions[0].name).toBe('oldHelper');
@@ -516,14 +514,14 @@ describe('handleGetMapping', () => {
   });
 
   it('orphansOnly with domain filters orphans by file path containing domain', async () => {
-    await writeMappingFixture(testDir, makeMapping());
+    await writeLinkIndexFixture(testDir);
     const r = await handleGetMapping(testDir, 'legacy', true) as { orphanFunctions: Array<{ name: string }> };
     expect(r.orphanFunctions).toHaveLength(1);
     expect(r.orphanFunctions[0].name).toBe('oldHelper');
   });
 
   it('orphansOnly with non-matching domain returns empty list', async () => {
-    await writeMappingFixture(testDir, makeMapping());
+    await writeLinkIndexFixture(testDir);
     const r = await handleGetMapping(testDir, 'payments', true) as { orphanFunctions: unknown[] };
     expect(r.orphanFunctions).toHaveLength(0);
   });

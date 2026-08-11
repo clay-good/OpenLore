@@ -24,8 +24,12 @@ import {
   type WriteMode,
 } from '../core/generator/openspec-writer.js';
 import { ADRGenerator } from '../core/generator/adr-generator.js';
-import { MappingGenerator } from '../core/generator/mapping-generator.js';
-import type { MappingArtifact } from '../core/generator/mapping-generator.js';
+import {
+  requirementAnchorProposals,
+  resolveSpecLinkIndex,
+  verifyRequirementAnchors,
+} from '../core/generator/spec-link-service.js';
+import type { SpecSymbolRef } from '../core/generator/spec-link-index.js';
 import { RagManifestGenerator } from '../core/generator/rag-manifest-generator.js';
 import type { RepoStructure, LLMContext } from '../core/analyzer/artifact-generator.js';
 import type { DependencyGraphResult } from '../core/analyzer/dependency-graph.js';
@@ -39,7 +43,6 @@ import {
   DEFAULT_COPILOT_MODEL,
   DEFAULT_GEMINI_MODEL,
   OPENLORE_DIR,
-  OPENLORE_ANALYSIS_SUBDIR,
   OPENLORE_LOGS_SUBDIR,
   OPENLORE_ANALYSIS_REL_PATH,
   OPENLORE_GENERATION_SUBDIR,
@@ -263,27 +266,14 @@ export async function openloreGenerate(options: GenerateApiOptions = {}): Promis
   }
   progress(onProgress, 'Running LLM generation pipeline', 'complete');
 
-  // Generate mapping artifact early so formatGenerator can annotate file:line per requirement
-  let mappingArtifact: MappingArtifact | undefined;
+  // Verify each requirement's proposed implementation symbol against the graph
+  // BEFORE the spec is written, so the spec carries exact anchors the link index
+  // can read back. An unverifiable proposal yields no anchor, never a guess.
+  let verifiedAnchors: Map<string, SpecSymbolRef> | undefined;
   if ((options.mapping ?? true) && depGraph) {
-    try {
-      let semanticSearch: import('../core/generator/mapping-generator.js').SemanticSearchFn | undefined;
-      const analysisDir = join(rootPath, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
-      const { VectorIndex } = await import('../core/analyzer/vector-index.js');
-      if (VectorIndex.exists(analysisDir)) {
-        const { resolveEmbedder } = await import('../core/analyzer/embedder.js');
-        const embedSvc = await resolveEmbedder(openloreConfig) ?? undefined;
-        if (embedSvc) {
-          const svc = embedSvc;
-          semanticSearch = (query, limit) => VectorIndex.search(analysisDir, query, svc, { limit });
-        }
-      }
-      const mapper = new MappingGenerator(rootPath, openspecRelPath, semanticSearch);
-      mappingArtifact = await mapper.generate(pipelineResult, depGraph, options.domains);
-      progress(onProgress, 'Generating mapping artifact', 'complete');
-    } catch {
-      // Non-fatal
-    }
+    const anchors = verifyRequirementAnchors(requirementAnchorProposals(pipelineResult), depGraph);
+    verifiedAnchors = anchors;
+    progress(onProgress, 'Verifying requirement anchors', 'complete', `${anchors.size} exact`);
   }
 
   // Format specs
@@ -295,7 +285,7 @@ export async function openloreGenerate(options: GenerateApiOptions = {}): Promis
     depGraph,
   });
 
-  const allGeneratedSpecs = formatGenerator.generateSpecs(pipelineResult, mappingArtifact);
+  const allGeneratedSpecs = formatGenerator.generateSpecs(pipelineResult, verifiedAnchors);
   let generatedSpecs = adrOnly ? [] : [...allGeneratedSpecs];
 
   // Filter by domains
@@ -353,6 +343,28 @@ export async function openloreGenerate(options: GenerateApiOptions = {}): Promis
     }
   } catch {
     // Non-fatal
+  }
+
+  // Derive the mapping cache from the specs that were actually WRITTEN, not from
+  // the pipeline result. Standalone generation and the agent-hosted skills then
+  // finalize through the same deterministic contract, and a failure here costs
+  // only the cache — audit and Repair re-derive the index in memory.
+  if (options.mapping ?? true) {
+    try {
+      const resolution = await resolveSpecLinkIndex({
+        rootPath,
+        openspecPath: openspecRelPath,
+        persist: true,
+      });
+      if (resolution.state === 'available') {
+        progress(onProgress, 'Deriving spec link index', 'complete',
+          `${resolution.index.stats.linked}/${resolution.index.stats.totalRequirements} linked`);
+      } else {
+        progress(onProgress, 'Deriving spec link index', 'skip', resolution.reason);
+      }
+    } catch {
+      // Non-fatal: the cache is rebuildable on demand.
+    }
   }
 
   // Update spec snapshot with richer post-generate coverage (non-fatal)

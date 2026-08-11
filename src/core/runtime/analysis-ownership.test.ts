@@ -1,0 +1,328 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { spawn } from 'node:child_process';
+import { mkdtemp, readFile, rm, stat, writeFile, mkdir } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import { OWNERSHIP_LOCK_FILE } from './advisory-lock.js';
+import {
+  acquireAnalysisOwnership,
+  isOwnershipStale,
+  isProcessAlive,
+  progressPathOf,
+  readAnalysisOwner,
+  readAnalysisProgress,
+  runtimeDirOf,
+  type AnalysisOwnership,
+} from './analysis-ownership.js';
+
+const roots: string[] = [];
+const opened: Array<AnalysisOwnership & { state: 'owned' }> = [];
+
+afterEach(async () => {
+  for (const held of opened.splice(0)) await held.release().catch(() => {});
+  await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })));
+  vi.useRealTimers();
+});
+
+async function fixture(): Promise<{ root: string; analysisDir: string }> {
+  const root = await mkdtemp(join(tmpdir(), 'openlore-ownership-'));
+  roots.push(root);
+  const analysisDir = join(root, '.openlore', 'analysis');
+  await mkdir(analysisDir, { recursive: true });
+  return { root, analysisDir };
+}
+
+async function own(root: string, analysisDir: string, options?: { wait?: boolean }) {
+  const result = await acquireAnalysisOwnership(root, analysisDir, options);
+  if (result.state === 'owned') opened.push(result);
+  return result;
+}
+
+/** Write a lock file by hand to simulate another process's ownership. */
+async function plantOwner(
+  analysisDir: string,
+  payload: Record<string, unknown>,
+  ageMs = 0,
+): Promise<string> {
+  const dir = runtimeDirOf(analysisDir);
+  await mkdir(dir, { recursive: true });
+  const lockPath = join(dir, OWNERSHIP_LOCK_FILE);
+  await writeFile(lockPath, JSON.stringify(payload), 'utf8');
+  if (ageMs > 0) {
+    const when = new Date(Date.now() - ageMs);
+    const { utimes } = await import('node:fs/promises');
+    await utimes(lockPath, when, when);
+  }
+  return lockPath;
+}
+
+const livePayload = (repository: string, analysisDir: string, overrides: Record<string, unknown> = {}) => ({
+  repository, pid: process.pid, startedAt: new Date().toISOString(),
+  heartbeatAt: new Date().toISOString(), stage: 'artifacts',
+  progressPath: progressPathOf(analysisDir), ...overrides,
+});
+
+// ============================================================================
+// SINGLE FLIGHT
+// ============================================================================
+
+describe('analysis ownership — single flight', () => {
+  it('grants ownership to the first caller and reports the owner to the rest', async () => {
+    const { root, analysisDir } = await fixture();
+    const first = await own(root, analysisDir);
+    expect(first.state).toBe('owned');
+
+    // Five concurrent invocations: exactly one owns, four report — none analyzes.
+    const contenders = await Promise.all(
+      Array.from({ length: 5 }, () => acquireAnalysisOwnership(root, analysisDir)),
+    );
+    expect(contenders.every(result => result.state === 'in-progress')).toBe(true);
+    for (const contender of contenders) {
+      if (contender.state !== 'in-progress') throw new Error('unreachable');
+      expect(contender.owner?.pid).toBe(process.pid);
+      expect(contender.elapsedMs).toBeGreaterThanOrEqual(0);
+    }
+  });
+
+  it('releases ownership so the next caller can take it', async () => {
+    const { root, analysisDir } = await fixture();
+    const first = await own(root, analysisDir);
+    if (first.state !== 'owned') throw new Error('expected ownership');
+    await first.release();
+
+    const second = await own(root, analysisDir);
+    expect(second.state).toBe('owned');
+  });
+
+  it('an attach reports how long it waited, so the caller can skip redundant work', async () => {
+    const { root, analysisDir } = await fixture();
+    const first = await own(root, analysisDir);
+    if (first.state !== 'owned') throw new Error('expected ownership');
+    expect(first.waitedMs).toBe(0);
+
+    const attaching = acquireAnalysisOwnership(root, analysisDir, { wait: true });
+    await new Promise(resolve => setTimeout(resolve, 400));
+    await first.release();
+
+    const attached = await attaching;
+    if (attached.state !== 'owned') throw new Error('an attach must acquire once the owner releases');
+    // Non-zero means a previous owner just finished: `analyze --wait` re-checks
+    // freshness on this signal instead of running a second full analysis.
+    expect(attached.waitedMs).toBeGreaterThan(0);
+    await attached.release();
+  }, 15_000);
+
+  it('never proceeds unlocked: a live owner is reported, not bypassed', async () => {
+    const { root, analysisDir } = await fixture();
+    await plantOwner(analysisDir, livePayload(root, analysisDir));
+    const contender = await acquireAnalysisOwnership(root, analysisDir);
+    expect(contender.state).toBe('in-progress');
+  });
+});
+
+// ============================================================================
+// RECLAMATION
+// ============================================================================
+
+describe('analysis ownership — reclamation', () => {
+  it('reclaims a lock whose owner is dead AND whose heartbeat is stale', async () => {
+    const { root, analysisDir } = await fixture();
+    // PID 2^22 is above every platform's default pid_max, so it cannot be alive.
+    await plantOwner(analysisDir, livePayload(root, analysisDir, { pid: 4_194_303 }), 120_000);
+
+    const result = await own(root, analysisDir);
+    expect(result.state).toBe('owned');
+  });
+
+  it('does NOT reclaim a live owner merely because time has passed', () => {
+    const stale = isOwnershipStale(
+      Date.now() - 10 * 60_000,
+      JSON.stringify(livePayload('/repo', '/repo/.openlore/analysis')),
+      '/repo',
+    );
+    // The PID is this very process, so the owner is alive: a long analysis is not
+    // an abandoned one.
+    expect(stale).toBe(false);
+  });
+
+  it('does NOT reclaim a dead owner whose heartbeat is still fresh', () => {
+    const stale = isOwnershipStale(
+      Date.now(),
+      JSON.stringify({ repository: '/repo', pid: 4_194_303, startedAt: new Date().toISOString() }),
+      '/repo',
+    );
+    expect(stale).toBe(false);
+  });
+
+  it('defends against PID reuse by requiring a repository match', () => {
+    // A stale heartbeat whose payload names a DIFFERENT repository is not ours to
+    // reclaim, even though the pid may now belong to an unrelated live process.
+    const stale = isOwnershipStale(
+      Date.now() - 10 * 60_000,
+      JSON.stringify({ repository: '/other-repo', pid: 4_194_303, startedAt: new Date().toISOString() }),
+      '/repo',
+    );
+    expect(stale).toBe(false);
+  });
+
+  it('reclaims a stale lock whose payload is unparseable', () => {
+    expect(isOwnershipStale(Date.now() - 10 * 60_000, 'not json at all', '/repo')).toBe(true);
+  });
+
+  it('treats an obviously invalid pid as not alive', () => {
+    expect(isProcessAlive(0)).toBe(false);
+    expect(isProcessAlive(-1)).toBe(false);
+    expect(isProcessAlive(process.pid)).toBe(true);
+  });
+});
+
+// ============================================================================
+// PROGRESS AND HEARTBEAT
+// ============================================================================
+
+describe('analysis ownership — progress sidecar', () => {
+  it('publishes a progress sidecar on acquire and removes it on release', async () => {
+    const { root, analysisDir } = await fixture();
+    const held = await own(root, analysisDir);
+    if (held.state !== 'owned') throw new Error('expected ownership');
+
+    expect(await readAnalysisProgress(analysisDir)).toMatchObject({ stage: 'starting', percent: null });
+    await held.release();
+    expect(await readAnalysisProgress(analysisDir)).toBeNull();
+  });
+
+  it('advances the stage and refreshes the lock heartbeat together', async () => {
+    const { root, analysisDir } = await fixture();
+    const held = await own(root, analysisDir);
+    if (held.state !== 'owned') throw new Error('expected ownership');
+
+    const lockPath = join(runtimeDirOf(analysisDir), OWNERSHIP_LOCK_FILE);
+    const before = (await stat(lockPath)).mtimeMs;
+    await new Promise(resolve => setTimeout(resolve, 10));
+    await held.update('artifacts', { percent: 75, detail: 'Generating analysis artifacts' });
+
+    expect(await readAnalysisProgress(analysisDir)).toMatchObject({
+      stage: 'artifacts', percent: 75, detail: 'Generating analysis artifacts',
+    });
+    expect((await stat(lockPath)).mtimeMs).toBeGreaterThanOrEqual(before);
+    expect(JSON.parse(await readFile(lockPath, 'utf8')).stage).toBe('artifacts');
+  });
+
+  it('keeps runtime state OUT of the analysis artifact directory', async () => {
+    const { root, analysisDir } = await fixture();
+    await own(root, analysisDir);
+    expect(runtimeDirOf(analysisDir).startsWith(analysisDir)).toBe(false);
+    expect(progressPathOf(analysisDir).startsWith(analysisDir)).toBe(false);
+  });
+
+  it('an 18-minute silent stage still refreshes on the caller cadence', async () => {
+    const { root, analysisDir } = await fixture();
+    const held = await own(root, analysisDir);
+    if (held.state !== 'owned') throw new Error('expected ownership');
+
+    // Simulate the owner's periodic refresh across a long unchanged phase: every
+    // refresh must move the heartbeat, so the lock never looks abandoned.
+    const lockPath = join(runtimeDirOf(analysisDir), OWNERSHIP_LOCK_FILE);
+    for (let minute = 0; minute < 18; minute++) {
+      await held.update('artifacts', { percent: 75, detail: `${minute}m elapsed` });
+    }
+    const contents = JSON.parse(await readFile(lockPath, 'utf8'));
+    expect(Date.now() - Date.parse(contents.heartbeatAt)).toBeLessThan(5_000);
+    expect(await readAnalysisProgress(analysisDir)).toMatchObject({ detail: '17m elapsed' });
+  });
+});
+
+// ============================================================================
+// CROSS-PROCESS BEHAVIOR
+// ============================================================================
+
+/** Run a snippet in a real child process against this module. */
+function runChild(source: string): ReturnType<typeof spawn> {
+  const modulePath = new URL('./analysis-ownership.ts', import.meta.url).pathname;
+  return spawn(
+    process.execPath,
+    ['--import', 'tsx', '--input-type=module', '-e', source.replace('__MODULE__', modulePath)],
+    { stdio: ['ignore', 'pipe', 'pipe'] },
+  );
+}
+
+describe('analysis ownership — across processes', () => {
+  it('a second PROCESS sees the first process as the owner', async () => {
+    const { root, analysisDir } = await fixture();
+    await own(root, analysisDir);
+
+    const child = runChild(`
+      const m = await import('__MODULE__');
+      const result = await m.acquireAnalysisOwnership(${JSON.stringify(root)}, ${JSON.stringify(analysisDir)});
+      process.stdout.write(JSON.stringify({ state: result.state, pid: result.owner?.pid ?? null }));
+    `);
+    const out = await new Promise<string>((resolve, reject) => {
+      let buffer = '';
+      child.stdout?.on('data', chunk => { buffer += String(chunk); });
+      child.on('error', reject);
+      child.on('close', () => resolve(buffer));
+    });
+
+    expect(JSON.parse(out)).toEqual({ state: 'in-progress', pid: process.pid });
+  }, 60_000);
+
+  it('a killed owner releases ownership on SIGTERM rather than holding it', async () => {
+    const { root, analysisDir } = await fixture();
+    const child = runChild(`
+      const m = await import('__MODULE__');
+      const held = await m.acquireAnalysisOwnership(${JSON.stringify(root)}, ${JSON.stringify(analysisDir)});
+      process.stdout.write('owned');
+      // A real timer, not a never-settling promise: an ESM top-level await that
+      // never settles lets Node exit immediately, which would make this test
+      // measure process teardown rather than signal handling.
+      setInterval(() => {}, 1000);
+    `);
+    await new Promise<void>((resolve, reject) => {
+      child.stdout?.on('data', chunk => { if (String(chunk).includes('owned')) resolve(); });
+      child.on('error', reject);
+      child.on('close', () => resolve());
+    });
+    expect(await readAnalysisOwner(root, analysisDir)).not.toBeNull();
+
+    child.kill('SIGTERM');
+    await new Promise<void>(resolve => child.on('close', () => resolve()));
+
+    // Signal cleanup means the next caller takes ownership immediately, without
+    // waiting for the heartbeat-stale window.
+    const next = await own(root, analysisDir);
+    expect(next.state).toBe('owned');
+  }, 60_000);
+});
+
+// ============================================================================
+// STATUS READS
+// ============================================================================
+
+describe('readAnalysisOwner', () => {
+  it('returns null when no analysis owns the repository', async () => {
+    const { root, analysisDir } = await fixture();
+    expect(await readAnalysisOwner(root, analysisDir)).toBeNull();
+  });
+
+  it('reports a live owner with its stage and elapsed time', async () => {
+    const { root, analysisDir } = await fixture();
+    await own(root, analysisDir);
+    const active = await readAnalysisOwner(root, analysisDir);
+    expect(active?.owner).toMatchObject({ pid: process.pid, stage: 'starting' });
+    expect(active?.elapsedMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it('reports a crashed holder as no analysis in progress', async () => {
+    const { root, analysisDir } = await fixture();
+    await plantOwner(analysisDir, livePayload(root, analysisDir, { pid: 4_194_303 }), 120_000);
+    expect(await readAnalysisOwner(root, analysisDir)).toBeNull();
+  });
+
+  it('never acquires or steals the lock while reading', async () => {
+    const { root, analysisDir } = await fixture();
+    const lockPath = await plantOwner(analysisDir, livePayload(root, analysisDir));
+    await readAnalysisOwner(root, analysisDir);
+    await expect(stat(lockPath)).resolves.toBeDefined();
+  });
+});

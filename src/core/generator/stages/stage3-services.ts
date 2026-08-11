@@ -12,6 +12,31 @@ import { STAGE3_SERVICE_SCHEMA } from '../schemas.js';
 import { protectPrompt } from '../../../utils/prompt-boundary.js';
 import { partitionEvidenceFiles } from '../domain-evidence.js';
 
+/**
+ * Reconcile an LLM-returned function name with the names the signatures actually
+ * expose, across the qualified/bare boundary.
+ *
+ * `Class.method` and `method` name the same function; which form appears depends
+ * on the language and on how the model echoed it back. Dropping the mismatched
+ * form loses the anchor for the whole operation, so both directions are resolved
+ * — but only when the answer is UNIQUE. A bare name matching several qualified
+ * candidates stays unresolved rather than being attributed to an arbitrary class.
+ *
+ * Exported for tests: this is the join that decides whether a requirement gets an
+ * implementation anchor at all.
+ */
+export function resolveAvailableFunction(name: string, available: ReadonlySet<string>): string | undefined {
+  if (available.has(name)) return name;
+
+  // `Class.method` returned, only `method` extracted from the signature line.
+  const bare = name.slice(name.lastIndexOf('.') + 1);
+  if (bare !== name && available.has(bare)) return bare;
+
+  // `method` returned, the signature carries the qualified `Class.method`.
+  const qualified = [...available].filter(candidate => candidate.endsWith(`.${name}`));
+  return qualified.length === 1 ? qualified[0] : undefined;
+}
+
 export async function runStage3(
   pipeline: PipelineContext,
   survey: ProjectSurveyResult,
@@ -43,8 +68,13 @@ export async function runStage3(
     const servicesFromFile: ExtractedService[] = [];
     {
       const signaturesSection = files.map(candidate => pipeline.signaturesFor(candidate.path)).filter(Boolean).join('\n');
+      // `\w` excludes `.`, so a bare-identifier pattern registers only `method` for
+      // a `Class.method(...)` signature. The qualified form is exactly what an OO
+      // codebase's graph uses (and what the LLM tends to echo back), so both forms
+      // are captured and reconciled below rather than silently dropped.
       const availableFunctions = new Set(
-        signaturesSection.split('\n').flatMap(line => [...line.matchAll(/\b([A-Za-z_$][\w$]*)\s*\(/g)].map(match => match[1])),
+        signaturesSection.split('\n').flatMap(line =>
+          [...line.matchAll(/\b([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*\(/g)].map(match => match[1])),
       );
       const signaturesNote = signaturesSection
         ? `\n\nFunctions available in this file:\n${signaturesSection}\n\nFor each operation you extract, set functionName to exactly match one of the above.`
@@ -61,8 +91,8 @@ export async function runStage3(
         for (const service of services) {
           service.domain = domain;
           for (const operation of service.operations ?? []) {
-            if (operation.functionName && !availableFunctions.has(operation.functionName)) {
-              operation.functionName = undefined;
+            if (operation.functionName) {
+              operation.functionName = resolveAvailableFunction(operation.functionName, availableFunctions);
             }
           }
           servicesFromFile.push(service);

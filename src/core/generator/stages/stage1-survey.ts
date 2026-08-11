@@ -4,7 +4,7 @@
  * Analyzes repository structure to categorize the project and identify key files.
  */
 
-import { STAGE1_MAX_TOKENS } from '../../../constants.js';
+import { STAGE1_MAX_TOKENS, STAGE_CHUNK_MAX_CHARS } from '../../../constants.js';
 import type { LLMService } from '../../services/llm-service.js';
 import type { PipelineOptions, ProjectSurveyResult, StageResult } from '../../../types/pipeline.js';
 import type { LLMContext, RepoStructure } from '../../analyzer/artifact-generator.js';
@@ -79,6 +79,41 @@ function buildStructuredHints(
   return parts.length > 0 ? `\nPre-extracted structural intelligence:\n${parts.join('\n\n')}\n` : '';
 }
 
+/**
+ * The domain/file listing for the survey prompt, bounded by the same chunk budget
+ * every other stage respects.
+ *
+ * The listing informs only the model's CHARACTERIZATION of the project:
+ * `schemaFiles`, `apiFiles`, `serviceFiles`, and `suggestedDomains` are
+ * overwritten from the static inventories right after the call, so a bounded
+ * listing cannot cost a routing fact — while an unbounded one is hundreds of KB
+ * in a single request on a large repository. Each domain gets an equal share so
+ * one huge domain cannot crowd the others out, and truncation is DISCLOSED in the
+ * text: the model must not be told a partial list is exhaustive.
+ *
+ * Exported for tests.
+ */
+export function buildDomainListing(
+  domains: Array<{ name: string; files: string[] }>,
+  maxChars: number,
+): string {
+  if (domains.length === 0) return '';
+  const share = Math.max(80, Math.floor(maxChars / domains.length));
+  return domains.map(domain => {
+    const files = [...domain.files].sort();
+    if (files.length === 0) return `- ${domain.name}: (no files)`;
+    const shown: string[] = [];
+    let used = 0;
+    for (const file of files) {
+      if (used + file.length + 2 > share && shown.length > 0) break;
+      shown.push(file);
+      used += file.length + 2;
+    }
+    const omitted = files.length - shown.length;
+    return `- ${domain.name}: ${shown.join(', ')}${omitted > 0 ? ` … (+${omitted} more file(s) not listed)` : ''}`;
+  }).join('\n');
+}
+
 export async function runStage1(
   llm: LLMService,
   options: PipelineOptions,
@@ -90,9 +125,7 @@ export async function runStage1(
   const apiFiles = [...new Set((repoStructure.routeInventory?.routes ?? []).map(route => route.file))].sort();
   const knownFiles = [...new Set(repoStructure.domains.flatMap(domain => domain.files))];
   const serviceFiles = knownFiles.filter(file => !schemaFiles.includes(file) && !apiFiles.includes(file)).sort();
-  const section = repoStructure.domains
-    .map(domain => `- ${domain.name}: ${domain.files.sort().join(', ') || '(no files)'}`)
-    .join('\n');
+  const section = buildDomainListing(repoStructure.domains, options.chunkMaxChars ?? STAGE_CHUNK_MAX_CHARS);
   const result = await runStage1WithSection(llm, options, saveResult, repoStructure, section, false, llmContext);
   if (!result.data) return result;
 

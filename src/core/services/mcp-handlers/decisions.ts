@@ -20,7 +20,7 @@ import {
   illegalPromotionToApproved,
 } from '../../decisions/store.js';
 import { syncApprovedDecisions } from '../../decisions/syncer.js';
-import { isDecisionsLockHeld } from '../../decisions/lock.js';
+import { isDecisionsLockHeld } from '../../runtime/advisory-lock.js';
 import { buildSpecMap, matchFileToDomains } from '../../../core/drift/spec-mapper.js';
 import { AnchorContext } from '../../decisions/anchor-adapter.js';
 import { readOpenLoreConfig } from '../config-manager.js';

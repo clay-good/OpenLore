@@ -27,6 +27,33 @@ describe('runStage3', () => {
     expect(result.data?.[0].operations[0].functionName).toBeUndefined();
   });
 
+  it('keeps a qualified method anchor instead of dropping it over the dotted form', async () => {
+    // `Class.method` and `method` name the same function; which form appears depends
+    // on the language and on how the model echoed it back. Dropping the mismatched
+    // form loses the anchor, so the requirement is written with no implementation.
+    const { service, provider } = createMockLLMService();
+    provider.setDefaultResponse(JSON.stringify([{
+      name: 'BillingService', purpose: 'billing', dependencies: [], sideEffects: [], domain: 'wrong',
+      operations: [
+        { name: 'charge', description: '', scenarios: [], functionName: 'Invoice.charge' },
+        { name: 'settle', description: '', scenarios: [], functionName: 'settle' },
+        { name: 'ghost', description: '', scenarios: [], functionName: 'neverDefined' },
+      ],
+    }]));
+    const pipeline: PipelineContext = {
+      llm: service, options: { saveIntermediate: false, chunkMaxChars: 8_000 }, saveResult: async () => undefined,
+      chunkContent: () => [], graphPromptFor: () => null, schemasFor: () => null, routesFor: () => null,
+      signaturesFor: () => '- charge()\n- Payment.settle()', generateSubSpecs: async () => [],
+    };
+    const result = await runStage3(pipeline, survey, [], [
+      { path: 'src/invoice.ts', content: 'export class Invoice { charge() {} }' },
+    ], undefined, () => 'billing');
+
+    const names = result.data?.[0].operations.map(operation => operation.functionName);
+    // Qualified → bare, bare → qualified, and an unknown name still resolves to nothing.
+    expect(names).toEqual(['charge', 'Payment.settle', undefined]);
+  });
+
   it('reconciles duplicate service output across stable domain partitions', async () => {
     const { service, provider } = createMockLLMService();
     provider.setResponse('src/invoice.ts', JSON.stringify([{ name: 'BillingService', purpose: 'billing', operations: [{ name: 'create', description: '', scenarios: [], functionName: 'createInvoice' }], dependencies: [], sideEffects: [], domain: 'wrong' }]));

@@ -28,4 +28,46 @@ describe('runStage4', () => {
     expect(provider.callHistory[0].userPrompt).toContain('=== src/payment.ts ===');
     expect(result.data).toEqual([{ method: 'GET', path: '/invoices', purpose: 'list', scenarios: [] }]);
   });
+
+  it('admits a real route whose method case or path-parameter syntax differs from the inventory', async () => {
+    // The join keeps FABRICATED endpoints out. Rejecting `get` for `GET`, or
+    // `/users/{id}` for `/users/:id`, drops every real endpoint for the domain and
+    // leaves a silently empty API spec.
+    const { service, provider } = createMockLLMService();
+    provider.setDefaultResponse(JSON.stringify([
+      { method: 'get', path: '/users/{id}', purpose: 'fetch one', scenarios: [] },
+      { method: 'POST', path: '/users/', purpose: 'create', scenarios: [] },
+    ]));
+    const pipeline: PipelineContext = {
+      llm: service, options: { saveIntermediate: false, chunkMaxChars: 8_000 }, saveResult: async () => undefined,
+      chunkContent: () => [], graphPromptFor: () => null, signaturesFor: () => null, schemasFor: () => null,
+      routesFor: () => '- GET /users/:id → getUser\n- post /users → createUser',
+      generateSubSpecs: async () => [],
+    };
+    const result = await runStage4(pipeline, [{ path: 'src/user.ts', content: 'router.get("/users/:id")' }], undefined, () => 'users');
+    expect(result.data?.map(endpoint => `${endpoint.method} ${endpoint.path}`))
+      .toEqual(['get /users/{id}', 'POST /users/']);
+  });
+
+  it('discloses dropped endpoints instead of returning a silently empty API spec', async () => {
+    const { service, provider } = createMockLLMService();
+    provider.setDefaultResponse(JSON.stringify([{ method: 'DELETE', path: '/invented', purpose: 'x', scenarios: [] }]));
+    const warnings: string[] = [];
+    const { default: logger } = await import('../../../utils/logger.js');
+    const original = logger.warning;
+    logger.warning = (message: string) => { warnings.push(message); };
+    try {
+      const pipeline: PipelineContext = {
+        llm: service, options: { saveIntermediate: false, chunkMaxChars: 8_000 }, saveResult: async () => undefined,
+        chunkContent: () => [], graphPromptFor: () => null, signaturesFor: () => null, schemasFor: () => null,
+        routesFor: () => '- GET /real → real',
+        generateSubSpecs: async () => [],
+      };
+      const result = await runStage4(pipeline, [{ path: 'src/a.ts', content: '' }], undefined, () => 'billing');
+      expect(result.data).toEqual([]);
+    } finally {
+      logger.warning = original;
+    }
+    expect(warnings.join('\n')).toContain('DELETE /invented');
+  });
 });

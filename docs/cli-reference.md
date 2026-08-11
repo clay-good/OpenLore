@@ -9,13 +9,17 @@
 | `openlore init` | Initialize configuration | No |
 | `openlore install` | One-command setup: wire agent surfaces (lean `navigation` MCP + hooks) and build the index | No |
 | `openlore connect [agent]` | Wire a specific coding agent to the MCP server + hooks | No |
-| `openlore analyze` | Run static analysis | No |
+| `openlore analyze` | Run static analysis (repository-scoped single flight — a second analyze reports the live owner instead of duplicating work) | No |
+| `openlore analyze --wait` | Follow an analysis another process already owns and return its result | No |
 | `openlore embed --local` | Enable on-device semantic embeddings (no API key; downloads ~23 MB model) and rebuild the index | No |
 | `openlore embed --off` | Revert to the first-class keyword (BM25) default and rebuild | No |
 | `openlore orient` | Relevant functions, callers, specs, and insertion points for a task (the flagship) | No |
 | `openlore orient --inject` | Emit a bounded, ignorable task-scoped orientation block for a pre-turn hook | No |
 | `openlore generate` | Generate specs from analysis | Yes |
 | `openlore generate --adr` | Also generate Architecture Decision Records | Yes |
+| `openlore generate --plan` | List the stages and domains that would run, then stop — no provider call, no cost, no writes | No |
+| `openlore generate --dry-run` | Run the REAL pipeline into an isolated temporary workspace and show the candidate spec diff; the project tree is left byte-identical | Yes |
+| `openlore mapping refresh` | Rebuild the deterministic spec→code link index from the anchors written in existing specs | No |
 | `openlore verify` | Verify spec accuracy | Yes |
 | `openlore drift` | Detect spec drift (static) | No |
 | `openlore drift --use-llm` | Detect spec drift (LLM-enhanced) | Yes |

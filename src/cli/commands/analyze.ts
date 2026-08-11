@@ -62,6 +62,14 @@ import { generateAiConfigs, AI_TOOL_TARGETS, type AiTool, type AiConfigResult } 
 import { describeExclusions, EXCLUSION_REASON_LABEL } from '../../core/analyzer/parse-health.js';
 import { describeMemoryDegradation } from '../../core/analyzer/memory-strategy.js';
 import { writeAnalysisContentProvenance } from '../../core/services/served-content.js';
+import { REQUIRED_ANALYSIS_ARTIFACTS, publishGeneration } from '../../core/runtime/analysis-generation.js';
+import {
+  PROGRESS_INTERVAL_MS,
+  VISIBLE_HEARTBEAT_MS,
+  acquireAnalysisOwnership,
+  readAnalysisProgress,
+  type AnalysisOwnership,
+} from '../../core/runtime/analysis-ownership.js';
 
 // ============================================================================
 // TYPES
@@ -87,6 +95,8 @@ interface ExtendedAnalyzeOptions extends AnalyzeOptions {
   embedded?: boolean;
   /** Internal: the current install created the empty OpenSpec directory. */
   freshSpecDirectory?: boolean;
+  /** Follow an analysis another process already owns instead of exiting. */
+  wait?: boolean;
 }
 
 interface AnalysisResult {
@@ -144,6 +154,57 @@ async function captureBuildCommit(rootPath: string): Promise<string | null> {
 }
 
 /**
+ * Report the live owner of an in-progress analysis, with its current stage.
+ *
+ * Exits without doing any work: the point of single flight is that the second
+ * invocation performs no analysis. `--wait` is the opt-in path for attaching.
+ */
+async function reportActiveAnalysis(
+  ownership: AnalysisOwnership & { state: 'in-progress' },
+  outputPath: string,
+): Promise<void> {
+  const owner = ownership.owner;
+  logger.warning('ANALYSIS_IN_PROGRESS — another process already owns a full analysis of this repository.');
+  if (owner) {
+    logger.info('Owner PID', String(owner.pid));
+    logger.info('Stage', owner.stage);
+    logger.info('Started', owner.startedAt);
+  }
+  if (ownership.elapsedMs !== null) logger.info('Elapsed', formatDuration(ownership.elapsedMs));
+  logger.info('Heartbeat age', formatDuration(ownership.heartbeatAgeMs));
+
+  const progress = await readAnalysisProgress(outputPath);
+  if (progress) {
+    logger.info('Progress', progress.percent === null ? progress.stage : `${progress.stage} (${progress.percent}%)`);
+  }
+  logger.blank();
+  logger.info('Attach', 'Re-run with `openlore analyze --wait` to follow it instead of exiting.');
+}
+
+/**
+ * Print the summary of an analysis THIS process did not run — the result an
+ * attaching `--wait` invocation was waiting for. Best-effort: an unreadable
+ * artifact is reported as such rather than silently implying no analysis exists.
+ */
+async function reportCompletedAnalysis(outputPath: string): Promise<void> {
+  try {
+    const raw = await readFile(join(outputPath, ARTIFACT_REPO_STRUCTURE), 'utf-8');
+    const repoStructure = JSON.parse(raw) as {
+      statistics: { analyzedFiles: number };
+      domains: Array<{ name: string }>;
+      architecture: { pattern: string };
+    };
+    logger.blank();
+    logger.success('Analysis Summary');
+    logger.info('Files analyzed', String(repoStructure.statistics.analyzedFiles));
+    logger.info('Domains detected', repoStructure.domains.map(d => d.name).join(', ') || 'None');
+    logger.info('Architecture', repoStructure.architecture.pattern);
+  } catch (err) {
+    logger.warning(`Analysis completed but its summary could not be read: ${(err as Error).message}`);
+  }
+}
+
+/**
  * Run the complete analysis pipeline
  */
 export async function runAnalysis(
@@ -162,9 +223,21 @@ export async function runAnalysis(
      * {@link ArtifactGeneratorOptions.reExtract}. `analyze --force` sets both.
      */
     reExtract?: boolean;
+    /**
+     * Repository-scoped ownership handle for this run. Callers that already
+     * acquired ownership pass it so the analysis publishes stage/progress through
+     * it; `runAnalysis` never acquires ownership itself, so it cannot deadlock
+     * with the caller that did.
+     */
+    ownership?: AnalysisOwnership & { state: 'owned' };
   }
 ): Promise<AnalysisResult> {
   const startTime = Date.now();
+  // Ownership is optional so every existing caller keeps working unchanged; when
+  // present, each phase publishes a stage so a waiting frontend sees progress.
+  const stage = async (name: string, percent: number | null, detail?: string): Promise<void> => {
+    await options.ownership?.update(name, { percent, ...(detail ? { detail } : {}) }).catch(() => {});
+  };
 
   // Merge config patterns with caller-supplied patterns so all entry points
   // (CLI, MCP, …) automatically respect the project configuration.
@@ -175,6 +248,7 @@ export async function runAnalysis(
   const mergedInclude = [...new Set([...configInclude, ...options.include])];
 
   // Phase 1: Repository Mapping
+  await stage('mapping', 0, 'Scanning directory structure');
   logger.analysis('Scanning directory structure...');
 
   const mapper = new RepositoryMapper(rootPath, {
@@ -225,6 +299,7 @@ export async function runAnalysis(
   logger.blank();
 
   // Phase 2: Dependency Graph
+  await stage('dependency-graph', 25, 'Building dependency graph');
   logger.analysis('Building dependency graph...');
 
   const graphBuilder = new DependencyGraphBuilder({
@@ -242,6 +317,7 @@ export async function runAnalysis(
   logger.blank();
 
   // Phase 3: Run the enrichment extractors
+  await stage('extractors', 50, 'Extracting UI components, schemas, routes, and env vars');
   logger.analysis('Extracting UI components, schemas, routes, and env vars...');
 
   const allFilePaths = repoMap.allFiles.map(f => f.path);
@@ -283,7 +359,9 @@ export async function runAnalysis(
     );
   }
 
-  // Phase 4: Generate Artifacts
+  // Phase 4: Generate Artifacts.  This is the longest silent phase, so it also
+  // gets a periodic heartbeat below rather than one update at its start.
+  await stage('artifacts', 75, 'Generating analysis artifacts');
   logger.analysis('Generating analysis artifacts...');
 
   const artifactGenerator = new AnalysisArtifactGenerator({
@@ -299,13 +377,35 @@ export async function runAnalysis(
   // and its anchored memory/decisions carried forward (add-symbol-identity-continuity).
   const oldNodeSnapshot = snapshotOldNodes(outputPath);
 
-  const artifacts = await artifactGenerator.generateAndSave(repoMap, depGraph, {
-    uiComponents,
-    schemas,
-    routeInventory,
-    middleware,
-    envVars,
-  });
+  // Artifact generation is one long call with no natural sub-steps, so without a
+  // timer it can run for many minutes in complete silence — the symptom this
+  // change was written to remove. The sidecar refreshes at PROGRESS_INTERVAL_MS
+  // and the visible CLI line at VISIBLE_HEARTBEAT_MS, both derived from the same
+  // start so their cadence cannot drift apart.
+  const artifactStart = Date.now();
+  let lastVisibleHeartbeat = artifactStart;
+  const heartbeat = setInterval(() => {
+    const elapsed = Date.now() - artifactStart;
+    void stage('artifacts', 75, `Generating analysis artifacts (${Math.round(elapsed / 1000)}s elapsed)`);
+    if (Date.now() - lastVisibleHeartbeat >= VISIBLE_HEARTBEAT_MS) {
+      lastVisibleHeartbeat = Date.now();
+      logger.analysis(`Still generating analysis artifacts — ${Math.round(elapsed / 1000)}s elapsed`);
+    }
+  }, PROGRESS_INTERVAL_MS);
+  heartbeat.unref?.();
+
+  let artifacts;
+  try {
+    artifacts = await artifactGenerator.generateAndSave(repoMap, depGraph, {
+      uiComponents,
+      schemas,
+      routeInventory,
+      middleware,
+      envVars,
+    });
+  } finally {
+    clearInterval(heartbeat);
+  }
 
   // Disclose a degraded Pass-1 extraction lane (change: optimize-parallel-extraction-pool).
   // The builder deliberately does not log this itself — the same code path runs inside the
@@ -388,6 +488,16 @@ export async function runAnalysis(
   );
   await writeAnalysisContentProvenance(outputPath, 'source-derived');
 
+  // COMMIT POINT: every required artifact is durable, so this generation becomes
+  // current. Published last on purpose — an analysis interrupted before this line
+  // leaves the previous committed generation readable rather than a half-published
+  // mixture (change `harden-spec-workflow-lifecycle`, decision 64e6eb87).
+  const manifest = await publishGeneration(outputPath, [...REQUIRED_ANALYSIS_ARTIFACTS]);
+  if (!manifest) {
+    logger.warning('Analysis completed but a required artifact was missing, so no new generation was published.');
+  }
+
+  await stage('complete', 100);
   const duration = Date.now() - startTime;
 
   return { repoMap, depGraph, artifacts, duration };
@@ -448,6 +558,11 @@ export const analyzeCommand = new Command('analyze')
   .option(
     '--ai-configs',
     'Generate AI tool config files (.cursorrules, .clinerules/openlore.md, CLAUDE.md) if they do not already exist',
+    false
+  )
+  .option(
+    '--wait',
+    'If another process already owns a full analysis of this repository, follow its progress and return its result instead of exiting',
     false
   )
   // Internal flag set by `openlore install` (hidden from help): install does the
@@ -645,12 +760,47 @@ After analysis, run 'openlore generate' to create OpenSpec files.
       // Ensure output directory exists
       await mkdir(outputPath, { recursive: true });
 
-      const result = await runAnalysis(rootPath, outputPath, {
-        maxFiles: opts.maxFiles,
-        include: opts.include,
-        exclude: opts.exclude,
-        reExtract: opts.force ?? false,
+      // Repository-scoped single flight. A second analysis — from any frontend —
+      // must not duplicate the work already under way; it either reports the live
+      // owner and exits, or (with --wait) follows it to completion.
+      const ownership = await acquireAnalysisOwnership(rootPath, outputPath, {
+        wait: options.wait === true,
+        stage: 'starting',
       });
+      if (ownership.state === 'in-progress') {
+        await reportActiveAnalysis(ownership, outputPath);
+        process.exitCode = 1;
+        return;
+      }
+
+      // Attached: a previous owner held the repository and has now released it, so
+      // the analysis this invocation was waiting for already exists. Running the
+      // pipeline again would be exactly the duplicate full analysis `--wait` exists
+      // to avoid. An explicit re-analysis request still runs, and a dead owner that
+      // never finished leaves the tree unchanged-but-not-fresh, which also runs.
+      if (ownership.waitedMs > 0 && !skipSuppressed && (await isCacheFresh(rootPath))) {
+        try {
+          logger.success('Attached to the analysis owned by another process — it completed');
+          logger.info('Waited', formatDuration(ownership.waitedMs));
+          await reportCompletedAnalysis(outputPath);
+        } finally {
+          await ownership.release();
+        }
+        return;
+      }
+
+      let result;
+      try {
+        result = await runAnalysis(rootPath, outputPath, {
+          maxFiles: opts.maxFiles,
+          include: opts.include,
+          exclude: opts.exclude,
+          reExtract: opts.force ?? false,
+          ownership,
+        });
+      } finally {
+        await ownership.release();
+      }
 
       // ========================================================================
       // PHASE 4: DISPLAY RESULTS

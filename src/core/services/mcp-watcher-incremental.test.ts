@@ -14,7 +14,13 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { McpWatcher } from './mcp-watcher.js';
+import {
+  REQUIRED_ANALYSIS_ARTIFACTS,
+  publishGeneration,
+  readCurrentGeneration,
+} from '../runtime/analysis-generation.js';
 import {
   readCachedContext,
   primeContextCache,
@@ -95,6 +101,31 @@ describe('McpWatcher — Spec 13.1 freshness', () => {
     const paths = onDisk.signatures.map((s) => s.path);
     expect(paths).toContain('src/existing.ts');
     expect(paths).toContain('src/newmod.ts');
+  });
+
+  it('republishes the generation manifest after an incremental rewrite', async () => {
+    // The watcher rewrites the SAME artifacts a full analyze publishes. Leaving the
+    // manifest untouched would keep the old generation id on new content, so a
+    // multi-artifact reader would validate an identity that never moved and label a
+    // mixed read `ok`.
+    await writeContext([]);
+    for (const name of ['repo-structure.json', 'dependency-graph.json', 'fingerprint.json']) {
+      await writeFile(join(analysisDir, name), JSON.stringify({ seeded: true }), 'utf-8');
+    }
+    const before = await publishGeneration(analysisDir, [...REQUIRED_ANALYSIS_ARTIFACTS]);
+    expect(before).not.toBeNull();
+
+    const fooAbs = join(root, 'foo.ts');
+    await writeFile(fooAbs, 'export function alpha() { return 1; }\n', 'utf-8');
+    await new McpWatcher({ rootPath: root, embed: false }).handleChange(fooAbs);
+
+    const after = await readCurrentGeneration(analysisDir, [...REQUIRED_ANALYSIS_ARTIFACTS]);
+    expect(after?.compatibility).toBe('manifest');
+    expect(after?.generationId).not.toBe(before!.generationId);
+    // The republished manifest describes the content that is actually on disk now.
+    const contextRecord = after?.artifacts.find(a => a.path === 'llm-context.json');
+    const digest = createHash('sha256').update(await readFile(contextPath)).digest('hex');
+    expect(contextRecord?.sha256).toBe(digest);
   });
 
   it('G1: primeContextCache makes the next read a HIT — it returns the in-memory object, not what is on disk', async () => {

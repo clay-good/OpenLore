@@ -188,11 +188,11 @@ async function dispatchToolImpl(
     const { directory } = args as { directory: string };
     return handleGetArchitectureOverview(directory);
   } else if (name === 'prepare_spec_generation') {
-    const { domain, cursor, maxItems } = args as { domain: string; cursor?: string; maxItems?: number };
-    return prepareSpecGeneration({ directory, domain, cursor, maxItems, signal });
+    const { domain, cursor, maxItems, maxResponseBytes } = args as { domain: string; cursor?: string; maxItems?: number; maxResponseBytes?: number };
+    return prepareSpecGeneration({ directory, domain, cursor, maxItems, maxResponseBytes, signal });
   } else if (name === 'prepare_spec_repair') {
-    const { domain, baseRef, maxItems } = args as { domain: string; baseRef?: string; maxItems?: number };
-    return prepareSpecRepair({ directory, domain, baseRef, maxItems, signal });
+    const { domain, baseRef, cursor, maxItems, maxResponseBytes } = args as { domain: string; baseRef?: string; cursor?: string; maxItems?: number; maxResponseBytes?: number };
+    return prepareSpecRepair({ directory, domain, baseRef, cursor, maxItems, maxResponseBytes, signal });
   } else if (name === 'get_refactor_report') {
     const { directory } = args as { directory: string };
     return handleGetRefactorReport(directory);

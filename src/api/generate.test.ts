@@ -57,9 +57,15 @@ vi.mock('../core/generator/adr-generator.js', () => ({
   }),
 }));
 
-vi.mock('../core/generator/mapping-generator.js', () => ({
-  MappingGenerator: vi.fn().mockImplementation(function(this: unknown) {
-    Object.assign(this as object, { generate: vi.fn().mockResolvedValue({}) });
+// Anchor verification and link-index derivation are exercised by their own unit
+// fixtures; here they are stubbed so the generate flow can be tested without a
+// real analysis directory on disk.
+vi.mock('../core/generator/spec-link-service.js', () => ({
+  requirementAnchorProposals: vi.fn().mockReturnValue([]),
+  verifyRequirementAnchors: vi.fn().mockReturnValue(new Map()),
+  resolveSpecLinkIndex: vi.fn().mockResolvedValue({
+    state: 'unavailable', reason: 'analysis-unavailable',
+    message: 'stubbed', remediation: 'stubbed', artifactPath: '/tmp/mapping.json',
   }),
 }));
 

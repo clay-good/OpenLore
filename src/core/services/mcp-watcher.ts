@@ -26,7 +26,12 @@
 
 import { readFile, readdir, unlink } from 'node:fs/promises';
 import { atomicWriteFile } from '../decisions/atomic-store.js';
-import { withAnalysisLock } from '../decisions/lock.js';
+import { withAnalysisLock } from '../runtime/advisory-lock.js';
+import {
+  REQUIRED_ANALYSIS_ARTIFACTS,
+  discardGeneration,
+  publishGeneration,
+} from '../runtime/analysis-generation.js';
 import { createHash } from 'node:crypto';
 import { join, relative, posix } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -745,6 +750,7 @@ export class McpWatcher {
       //      must be able to create it, and a repaired file must be able to remove its entry (and the
       //      artifact once empty).
       await this.updateParseHealth(changedFiles);
+      await this.republishGeneration();
       return loaded;
     });
     if (!context) return;
@@ -1439,10 +1445,33 @@ export class McpWatcher {
 
       // 7. Parse health — drop the deleted files' degradation records and re-roll-up.
       await this.updateParseHealth([], rels);
+      await this.republishGeneration();
     });
 
     if (this.debug) {
       process.stderr.write(`[mcp-watcher] reconciled ${rels.length} deletion(s)\n`);
+    }
+  }
+
+  /**
+   * Republish the generation manifest at the commit point of an incremental write.
+   *
+   * The watcher rewrites the SAME required artifacts a full analyze publishes, so
+   * leaving the manifest alone would keep the old generation id on new content: a
+   * multi-artifact reader would then validate before/after against an identity that
+   * never moved and label a mixed read `ok`, and every cache keyed on the
+   * generation id would keep serving superseded structure. Always called inside the
+   * artifact lock, after the whole write set is durable.
+   */
+  private async republishGeneration(): Promise<void> {
+    try {
+      const manifest = await publishGeneration(this.outputPath, [...REQUIRED_ANALYSIS_ARTIFACTS]);
+      // An incomplete artifact set cannot be published. Drop the manifest rather
+      // than leave one vouching for content it no longer describes — readers then
+      // fall back to the disclosed legacy identity, which does track the rewrite.
+      if (!manifest) await discardGeneration(this.outputPath);
+    } catch (err) {
+      process.stderr.write(`[mcp-watcher] generation republish error: ${(err as Error).message}\n`);
     }
   }
 

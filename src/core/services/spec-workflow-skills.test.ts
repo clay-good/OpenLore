@@ -20,6 +20,39 @@ describe('spec workflow host skills', () => {
     }
   });
 
+  it('teaches both authoring paths the same finalization and anchor contract', () => {
+    const generate = readFileSync(resolve('skills/openlore-generate/SKILL.md'), 'utf8');
+    const repair = readFileSync(resolve('skills/openlore-repair/SKILL.md'), 'utf8');
+
+    for (const skill of [generate, repair]) {
+      // Exact per-requirement anchors — the input the deterministic link index reads.
+      expect(skill).toContain('**Implementation**');
+      expect(skill).toContain('symbolName::path/to/file.ts');
+      expect(skill).toMatch(/file-only reference[\s\S]*never establishes function coverage/);
+      // Finalization through the CLI, with the skipped-cache case disclosed rather
+      // than implied to be a correctness problem.
+      expect(skill).toContain('openlore mapping refresh');
+      expect(skill).toMatch(/re-derive the index in memory/);
+      // Continuation stays inside the composite protocol.
+      expect(skill).toContain('receipt.continuationCursor');
+    }
+  });
+
+  it('makes Generate stop for host judgment on material existing-spec overlap', () => {
+    const generate = readFileSync(resolve('skills/openlore-generate/SKILL.md'), 'utf8');
+    expect(generate).toContain('overlap');
+    expect(generate).toMatch(/[Ss]top for the human/);
+    expect(generate).toContain('Do not silently author a competing spec');
+    // The skill must not encode a decision OpenLore deliberately does not make.
+    expect(generate).toMatch(/never decides/);
+  });
+
+  it('forbids Repair from re-running the observation that came back unavailable', () => {
+    const repair = readFileSync(resolve('skills/openlore-repair/SKILL.md'), 'utf8');
+    expect(repair).toMatch(/never read `null` as zero gaps/);
+    expect(repair).toMatch(/never re-run the same audit/);
+  });
+
   it('installs the same canonical skill catalogue for every skill-based host', () => {
     const projectRoot = '/project';
     const manifest = buildManifest(projectRoot);

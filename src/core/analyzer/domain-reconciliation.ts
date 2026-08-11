@@ -187,13 +187,23 @@ export function reconcileRepositoryDomains(
   // Single-root candidates go first so cross-root filename observations can
   // attach to known owners without manufacturing fallback domains.
   const directoryCandidates = candidates.filter(item => item.source === 'directory');
-  for (const candidate of directoryCandidates.filter(item =>
-    groupFilesByOwner(item.files, item.name).size <= 1)) {
+  // `groupFilesByOwner` is pure over (files, name) and was being recomputed two to
+  // three times per candidate — once inside a `.filter()` predicate, again in the
+  // body. Memoize per candidate: same grouping, computed once.
+  const ownerGroupCache = new Map<Candidate, Map<string, ScoredFile[]>>();
+  const ownerGroupsOf = (candidate: Candidate): Map<string, ScoredFile[]> => {
+    const cached = ownerGroupCache.get(candidate);
+    if (cached) return cached;
+    const groups = groupFilesByOwner(candidate.files, candidate.name);
+    ownerGroupCache.set(candidate, groups);
+    return groups;
+  };
+  for (const candidate of directoryCandidates.filter(item => ownerGroupsOf(item).size <= 1)) {
     if (candidate.files.length === 0) {
       decisions.push(decision(candidate, 'excluded', 'non-defining-only'));
       continue;
     }
-    const owner = groupFilesByOwner(candidate.files, candidate.name).keys().next().value as string;
+    const owner = ownerGroupsOf(candidate).keys().next().value as string;
     mergeDefiningFiles(domainMap, owner, candidate.files);
     decisions.push(decision(candidate, 'promoted', 'ownership-root', owner));
   }
@@ -204,7 +214,7 @@ export function reconcileRepositoryDomains(
       decisions.push(decision(candidate, 'excluded', 'non-defining-only'));
       continue;
     }
-    const ownerGroups = groupFilesByOwner(candidate.files, candidate.name);
+    const ownerGroups = ownerGroupsOf(candidate);
     const owner = ownerGroups.size === 1
       ? ownerGroups.keys().next().value as string
       : undefined;
@@ -219,9 +229,8 @@ export function reconcileRepositoryDomains(
     decisions.push(decision(candidate, 'promoted', 'independent-boundary', candidate.name));
   }
 
-  for (const candidate of directoryCandidates.filter(item =>
-    groupFilesByOwner(item.files, item.name).size > 1)) {
-    const ownerGroups = groupFilesByOwner(candidate.files, candidate.name);
+  for (const candidate of directoryCandidates.filter(item => ownerGroupsOf(item).size > 1)) {
+    const ownerGroups = ownerGroupsOf(candidate);
     const filenameBoundary = candidate.signals.includes('filename') &&
       [...ownerGroups.keys()].every(owner => isTechnicalDomainRole(owner));
     if (filenameBoundary) {
@@ -310,10 +319,13 @@ export function reconcileRepositoryDomains(
   }
 
   const unattachedEvidence: DomainEvidenceRole[] = [];
+  // Defining ownership is settled above and is not mutated by the supporting pass,
+  // so the directory index is built once for the whole loop.
+  const directoryOwnerIndex = buildDirectoryOwnerIndex(domainMap);
   for (const file of allFiles.filter(item => classifyDomainFile(item).role === 'supporting')) {
     const pathOwner = ownerForFile(file);
     const importOwner = strongestOwner(importOwnersByPath.get(file.path));
-    const closestOwner = closestDirectoryOwner(file, domainMap);
+    const closestOwner = closestDirectoryOwner(file, directoryOwnerIndex);
     const owner = importOwner ?? closestOwner ?? ((pathOwner && domainMap.has(pathOwner)) ? pathOwner : undefined);
     if (owner && domainMap.has(owner)) {
       domainMap.get(owner)!.supportingFiles.push(file);
@@ -434,22 +446,49 @@ function enforceUniqueDefiningOwnership(domains: Map<string, ReconciledDomain>):
   }
 }
 
-function closestDirectoryOwner(
-  file: ScoredFile,
-  domains: Map<string, ReconciledDomain>,
-): string | undefined {
-  const target = normalizePath(file.directory || posix.dirname(file.path)).split('/');
-  const ranked = [...domains.entries()].map(([name, domain]) => {
-    let score = 0;
+/** Directory prefix (depth ≥ 2) → the domains owning a defining file under it. */
+type DirectoryOwnerIndex = Map<string, Set<string>>;
+
+/**
+ * Index every domain's defining directories by prefix, ONCE per reconciliation.
+ *
+ * The per-file scan this replaces re-split every defining file's directory for
+ * every supporting file — on a repo with thousands of each, tens of millions of
+ * `split('/')` calls inside the hot artifact-generation phase. The prefix index
+ * answers the same question (deepest shared directory prefix, tie ⇒ no owner) by
+ * lookup instead of by scan.
+ */
+function buildDirectoryOwnerIndex(domains: Map<string, ReconciledDomain>): DirectoryOwnerIndex {
+  const index: DirectoryOwnerIndex = new Map();
+  for (const [name, domain] of domains) {
     for (const defining of domain.definingFiles) {
       const parts = normalizePath(defining.directory || posix.dirname(defining.path)).split('/');
-      let common = 0;
-      while (common < target.length && common < parts.length && target[common] === parts[common]) common++;
-      score = Math.max(score, common);
+      for (let depth = 2; depth <= parts.length; depth++) {
+        const key = parts.slice(0, depth).join('/');
+        const owners = index.get(key) ?? new Set<string>();
+        owners.add(name);
+        index.set(key, owners);
+      }
     }
-    return { name, score };
-  }).filter(item => item.score >= 2).sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
-  return ranked.length > 1 && ranked[0].score === ranked[1].score ? undefined : ranked[0]?.name;
+  }
+  return index;
+}
+
+/**
+ * The domain whose defining directories share the DEEPEST prefix with this file.
+ *
+ * Walking prefixes deepest-first makes the first non-empty bucket the maximum
+ * score by construction, so a bucket holding more than one domain is exactly the
+ * score tie the previous ranking treated as "no owner".
+ */
+function closestDirectoryOwner(file: ScoredFile, index: DirectoryOwnerIndex): string | undefined {
+  const target = normalizePath(file.directory || posix.dirname(file.path)).split('/');
+  for (let depth = target.length; depth >= 2; depth--) {
+    const owners = index.get(target.slice(0, depth).join('/'));
+    if (!owners || owners.size === 0) continue;
+    return owners.size > 1 ? undefined : owners.values().next().value;
+  }
+  return undefined;
 }
 
 function addImportOwner(

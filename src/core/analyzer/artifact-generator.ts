@@ -10,7 +10,7 @@ import { join, basename, isAbsolute } from 'node:path';
 import { createHash } from 'node:crypto';
 import { atomicWriteFile } from '../decisions/atomic-store.js';
 import { writeJsonAtomicStreaming } from './json-stream.js';
-import { withAnalysisLock } from '../decisions/lock.js';
+import { withAnalysisLock } from '../runtime/advisory-lock.js';
 import {
   TOKENS_PER_CHAR_DEFAULT,
   PHASE2_FILE_CONTENT_MAX_CHARS,

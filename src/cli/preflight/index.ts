@@ -18,6 +18,7 @@ import {
   OPENLORE_ANALYSIS_SUBDIR,
   ARTIFACT_CALL_GRAPH_DB,
 } from '../../constants.js';
+import { readAnalysisOwner } from '../../core/runtime/analysis-ownership.js';
 import { computeDiff, readGraphFingerprint } from './diff.js';
 import { scoreChangedFiles } from './score.js';
 import {
@@ -103,12 +104,26 @@ export async function runPreflight(opts: PreflightOptions): Promise<{
   // 4. Score.
   const score = scoreChangedFiles(cwd, diff.changed);
 
-  // 5. Build summary.
-  const summary = buildSummary({ diff, score, graphBuiltAt, graphCommit, threshold });
+  // 5. Build summary. A live analysis owner outranks staleness, so preflight
+  // never tells a user to rebuild an index that is already being rebuilt.
+  const active = await readAnalysisOwner(cwd, join(cwd, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR));
+  const summary = buildSummary({
+    diff, score, graphBuiltAt, graphCommit, threshold,
+    ...(active ? {
+      activeAnalysis: {
+        pid: active.owner?.pid ?? null,
+        stage: active.owner?.stage ?? null,
+        startedAt: active.owner?.startedAt ?? null,
+        elapsedMs: active.elapsedMs,
+        heartbeatAgeMs: active.heartbeatAgeMs,
+      },
+    } : {}),
+  });
   const stale = summary.stalenessScore > threshold;
 
-  // 6. --fix path runs `openlore analyze` then re-checks.
-  if (stale && opts.fix) {
+  // 6. --fix path runs `openlore analyze` then re-checks. Never while another
+  // process owns the analysis: that is the duplicate run single flight prevents.
+  if (stale && opts.fix && !active) {
     if (!opts.json) logger.discovery('Stale graph detected — running `openlore analyze --fix`');
     const code = await (opts.analyzeFn ?? runAnalyzeFix)(cwd);
     if (code !== 0) {

@@ -6,7 +6,23 @@ import { sanitizeForTerminal } from '../../utils/misc.js';
 import type { DiffResult } from './diff.js';
 import type { ScoreResult } from './score.js';
 
-export type PreflightStatus = 'FRESH' | 'STALE' | 'ERROR';
+/**
+ * `ANALYSIS_IN_PROGRESS` is distinct from `STALE` on purpose: a repository whose
+ * index is mid-rebuild is not one whose index the user must go rebuild. Telling
+ * them to "run `openlore analyze`" while an analyze is running is exactly the
+ * duplicate work single flight exists to prevent (change
+ * `harden-spec-workflow-lifecycle`).
+ */
+export type PreflightStatus = 'FRESH' | 'STALE' | 'MISSING' | 'ANALYSIS_IN_PROGRESS' | 'ERROR';
+
+/** Live owner metadata, present only under `ANALYSIS_IN_PROGRESS`. */
+export interface PreflightActiveAnalysis {
+  pid: number | null;
+  stage: string | null;
+  startedAt: string | null;
+  elapsedMs: number | null;
+  heartbeatAgeMs: number;
+}
 
 export interface PerFileEntry {
   filePath: string;
@@ -34,6 +50,8 @@ export interface PreflightSummary {
   mechanism: 'git' | 'mtime';
   warnings: string[];
   message: string;
+  /** Present only when an analysis owns this repository right now. */
+  activeAnalysis?: PreflightActiveAnalysis;
 }
 
 export interface BuildSummaryInput {
@@ -42,16 +60,30 @@ export interface BuildSummaryInput {
   graphBuiltAt: string | null;
   graphCommit: string | null;
   threshold: number;
+  /** Live analysis owner, when one holds the repository. */
+  activeAnalysis?: PreflightActiveAnalysis;
+  /** True when no analysis artifacts exist at all. */
+  missing?: boolean;
 }
 
 export function buildSummary(input: BuildSummaryInput): PreflightSummary {
   const { diff, score, graphBuiltAt, graphCommit, threshold } = input;
   const totalChanged = diff.changed.length;
   const stale = score.totalScore > threshold;
-  const status: PreflightStatus = stale ? 'STALE' : 'FRESH';
+
+  // An analysis in flight outranks staleness: the index is already being rebuilt,
+  // so telling the user to rebuild it would start a duplicate run.
+  const status: PreflightStatus = input.activeAnalysis
+    ? 'ANALYSIS_IN_PROGRESS'
+    : input.missing ? 'MISSING' : stale ? 'STALE' : 'FRESH';
 
   let message: string;
-  if (totalChanged === 0) {
+  if (input.activeAnalysis) {
+    const stage = input.activeAnalysis.stage ?? 'running';
+    message = `ANALYSIS_IN_PROGRESS — pid ${input.activeAnalysis.pid ?? '?'} is at stage "${stage}"; wait for it or attach with \`openlore analyze --wait\``;
+  } else if (input.missing) {
+    message = 'MISSING — no analysis found; run `openlore analyze`';
+  } else if (totalChanged === 0) {
     message = 'nothing to check — no changed files since graph build';
   } else if (stale) {
     message = `STALE — run \`openlore analyze\` or re-run with --fix`;
@@ -89,6 +121,7 @@ export function buildSummary(input: BuildSummaryInput): PreflightSummary {
     mechanism: diff.mechanism,
     warnings: diff.warnings,
     message,
+    ...(input.activeAnalysis ? { activeAnalysis: input.activeAnalysis } : {}),
   };
 }
 
@@ -123,7 +156,9 @@ export function renderHuman(s: PreflightSummary): string {
   // Status line: STALE message wins; otherwise distinguish "FRESH" from the
   // genuinely-empty "nothing to check" case so users can tell why CI passed.
   let statusLine: string;
-  if (s.status === 'STALE') {
+  if (s.status === 'ANALYSIS_IN_PROGRESS' || s.status === 'MISSING') {
+    statusLine = s.message;
+  } else if (s.status === 'STALE') {
     statusLine = 'STALE — ' + s.message.replace('STALE — ', '');
   } else if (s.changedFiles.length === 0) {
     statusLine = `FRESH — ${s.message}`;
@@ -223,6 +258,15 @@ export function renderJson(s: PreflightSummary): string {
     threshold: s.threshold,
     mechanism: s.mechanism,
     warnings: s.warnings,
+    ...(s.activeAnalysis ? {
+      active_analysis: {
+        pid: s.activeAnalysis.pid,
+        stage: s.activeAnalysis.stage,
+        started_at: s.activeAnalysis.startedAt,
+        elapsed_ms: s.activeAnalysis.elapsedMs,
+        heartbeat_age_ms: s.activeAnalysis.heartbeatAgeMs,
+      },
+    } : {}),
   };
   return JSON.stringify(payload, null, 2);
 }

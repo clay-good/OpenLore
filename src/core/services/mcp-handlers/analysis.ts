@@ -21,7 +21,6 @@ import {
   OPENLORE_ANALYSIS_REL_PATH,
   OPENSPEC_DIR,
   ARTIFACT_DEPENDENCY_GRAPH,
-  ARTIFACT_MAPPING,
   ARTIFACT_REPO_STRUCTURE,
   ARTIFACT_ROUTE_INVENTORY,
   ARTIFACT_MIDDLEWARE_INVENTORY,
@@ -33,6 +32,7 @@ import {
   REPO_CONTENT_PROVENANCE,
 } from '../../../constants.js';
 import { runAnalysis } from '../../../cli/commands/analyze.js';
+import { acquireAnalysisOwnership } from '../../runtime/analysis-ownership.js';
 import { analyzeForRefactoring } from '../../analyzer/refactor-analyzer.js';
 import { formatSignatureMaps } from '../../analyzer/signature-extractor.js';
 import { getSkeletonContent, isSkeletonWorthIncluding } from '../../analyzer/code-shaper.js';
@@ -54,7 +54,7 @@ import { buildWeightedAdjacency, weightedBfs } from './graph.js';
 import { personalizedPageRank } from '../../analyzer/personalized-pagerank.js';
 import { applyTokenBudget, normalizeResponseFormat, truncationReceipt, summarizeListInventory, type ResponseFormat } from './progressive.js';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
-import type { MappingArtifact } from '../../generator/mapping-generator.js';
+import { mappingViewOf, resolveSpecLinkIndex } from '../../generator/spec-link-service.js';
 import { openloreAudit } from '../../../api/audit.js';
 import type { DriftResult } from '../../../types/index.js';
 
@@ -94,11 +94,34 @@ export async function handleAnalyzeCodebase(
     }
   }
 
-  const result = await runAnalysis(absDir, outputPath, {
-    maxFiles: DEFAULT_MAX_FILES,
-    include: [],
-    exclude: [],
-  });
+  // Repository-scoped single flight, shared with the CLI, the daemon, and Pi: an
+  // MCP-triggered analyze must not duplicate one a user already started (change
+  // `harden-spec-workflow-lifecycle`). A tool call cannot block on someone else's
+  // run, so it reports the owner instead of waiting.
+  const ownership = await acquireAnalysisOwnership(absDir, outputPath);
+  if (ownership.state === 'in-progress') {
+    return {
+      status: 'ANALYSIS_IN_PROGRESS',
+      message: 'Another process already owns a full analysis of this repository. No duplicate analysis was started.',
+      owner: ownership.owner,
+      elapsedMs: ownership.elapsedMs,
+      heartbeatAgeMs: ownership.heartbeatAgeMs,
+      remediation: 'Wait for the owner to publish, or run `openlore analyze --wait` to follow it.',
+      analysisPath: OPENLORE_ANALYSIS_REL_PATH,
+    };
+  }
+
+  let result;
+  try {
+    result = await runAnalysis(absDir, outputPath, {
+      maxFiles: DEFAULT_MAX_FILES,
+      include: [],
+      exclude: [],
+      ownership,
+    });
+  } finally {
+    await ownership.release();
+  }
 
   const { artifacts, repoMap, depGraph } = result;
   const rs = artifacts.repoStructure;
@@ -287,7 +310,12 @@ export async function handleGetSignatures(directory: string, filePattern?: strin
 }
 
 /**
- * Return the requirement→function mapping from mapping.json.
+ * Return the requirement→code links of the deterministic spec link index.
+ *
+ * Read-only: the index is served from the persisted cache when it is current and
+ * derived in memory otherwise, and this path never writes the cache back. An
+ * unusable INPUT (no analysis, no specs) is the only error — an absent or legacy
+ * `mapping.json` is not, because the links can always be re-derived.
  */
 export async function handleGetMapping(
   directory: string,
@@ -295,38 +323,13 @@ export async function handleGetMapping(
   orphansOnly?: boolean
 ): Promise<unknown> {
   const absDir = await validateDirectory(directory);
-  let raw: string;
-  try {
-    raw = await readFile(join(absDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_MAPPING), 'utf-8');
-  } catch {
-    return { error: 'No mapping found. Run openlore generate first.' };
-  }
-
-  let mapping: MappingArtifact;
-  try {
-    mapping = JSON.parse(raw) as MappingArtifact;
-  } catch {
-    return { error: 'Mapping file is corrupted. Re-run openlore generate.' };
-  }
-
-  if (orphansOnly) {
-    const filtered = domain
-      ? mapping.orphanFunctions.filter((f: { file: string }) => f.file.includes(domain))
-      : mapping.orphanFunctions;
-    return { generatedAt: mapping.generatedAt, scope: mapping.scope, stats: mapping.stats, orphanFunctions: filtered };
-  }
-
-  const filteredMappings = domain
-    ? mapping.mappings.filter((m: { domain: string }) => m.domain === domain)
-    : mapping.mappings;
-
-  return {
-    generatedAt: mapping.generatedAt,
-    scope: mapping.scope,
-    stats: mapping.stats,
-    mappings: filteredMappings,
-    orphanFunctions: domain ? [] : mapping.orphanFunctions,
-  };
+  const config = await readOpenLoreConfig(absDir).catch(() => null);
+  const resolution = await resolveSpecLinkIndex({
+    rootPath: absDir,
+    openspecPath: config?.openspecPath ?? OPENSPEC_DIR,
+    persist: false,
+  });
+  return mappingViewOf(resolution, domain, orphansOnly);
 }
 
 /**

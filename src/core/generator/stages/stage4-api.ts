@@ -12,6 +12,27 @@ import { STAGE4_ENDPOINT_SCHEMA } from '../schemas.js';
 import { protectPrompt } from '../../../utils/prompt-boundary.js';
 import { partitionEvidenceFiles } from '../domain-evidence.js';
 
+/**
+ * Canonical key for joining an extracted endpoint to the static route inventory.
+ *
+ * The join exists to keep fabricated endpoints out of the API spec, so it must
+ * not also reject REAL ones over spelling: a model answering `get` instead of
+ * `GET`, or `/users/{id}` where the inventory recorded `/users/:id`, names the
+ * same route. Method case, path-parameter syntax, and a trailing slash are
+ * normalized away; nothing else is.
+ *
+ * Exported for tests — this key decides whether a domain's API spec is populated
+ * or silently empty.
+ */
+export function routeKey(method: string, path: string): string {
+  const normalized = String(path ?? '').trim()
+    .replace(/\{[^}]*\}/g, ':param')             // {id}
+    .replace(/<[^>]*>/g, ':param')               // <id>
+    .replace(/:[A-Za-z_$][\w$]*/g, ':param')     // :id
+    .replace(/\/+$/, '');
+  return `${String(method ?? '').trim().toUpperCase()} ${normalized || '/'}`;
+}
+
 export async function runStage4(
   pipeline: PipelineContext,
   apiFiles: Array<{ path: string; content: string }>,
@@ -38,8 +59,8 @@ export async function runStage4(
     const routeHint = files.map(file => pipeline.routesFor(file.path)).filter(Boolean).join('\n');
     const knownRoutes = new Set(
       routeHint.split('\n').flatMap(line => {
-        const match = /^-\s+([A-Z]+)\s+(\S+)/.exec(line);
-        return match ? [`${match[1]}:${match[2]}`] : [];
+        const match = /^-\s+([A-Za-z]+)\s+(\S+)/.exec(line);
+        return match ? [routeKey(match[1], match[2])] : [];
       }),
     );
 
@@ -56,12 +77,26 @@ export async function runStage4(
         }, STAGE4_ENDPOINT_SCHEMA);
         // Normalize: LLM may return a single object instead of an array
         const endpoints = Array.isArray(result) ? result : [result];
+        const unverified: string[] = [];
         for (const endpoint of endpoints) {
-          const key = `${endpoint.method}:${endpoint.path}`;
-          if (knownRoutes.has(key) && !seenPaths.has(key)) {
-            seenPaths.add(key);
-            allEndpoints.push(endpoint);
+          const key = routeKey(endpoint.method, endpoint.path);
+          if (!knownRoutes.has(key)) {
+            unverified.push(key);
+            continue;
           }
+          if (seenPaths.has(key)) continue;
+          seenPaths.add(key);
+          allEndpoints.push(endpoint);
+        }
+        // An endpoint with no static route to stand on is dropped — the spec must
+        // not carry an unverifiable route — but the drop is DISCLOSED. A silently
+        // empty API spec is indistinguishable from a domain that has no routes.
+        if (unverified.length > 0) {
+          logger.warning(
+            `Stage 4: ${unverified.length} extracted endpoint(s) for ${domain} matched no detected route and were dropped `
+            + `(${unverified.slice(0, 3).join(', ')}${unverified.length > 3 ? ', …' : ''})`
+            + (knownRoutes.size === 0 ? ' — no routes were detected in these files at all.' : '.'),
+          );
         }
       } catch (error) {
         logger.warning(`Stage 4: failed to analyze domain ${domain}: ${(error as Error).message}`);

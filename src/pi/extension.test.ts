@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:http';
 
-import { modelsUrl, stripMarker, isUsableConfig, readConfig, formatToolResult, formatCallArgs, NAV_TOOLS, PI_DAEMON_PRESET, PI_EXCLUDED_CONCLUSION_TOOLS, PI_SPEC_WORKFLOW_OBSERVATIONS, PI_SPEC_WORKFLOW_EXCLUSIONS, ensureDaemon, callTool, isUsableDaemon, missingDaemonTools, PiDaemonConnectionError } from './extension.js';
+import { modelsUrl, stripMarker, isUsableConfig, readConfig, formatToolResult, formatCallArgs, compositeToolResult, NAV_TOOLS, PI_DAEMON_PRESET, PI_EXCLUDED_CONCLUSION_TOOLS, PI_SPEC_WORKFLOW_OBSERVATIONS, PI_SPEC_WORKFLOW_EXCLUSIONS, ensureDaemon, callTool, isUsableDaemon, missingDaemonTools, PiDaemonConnectionError } from './extension.js';
 import { TOOL_DEFINITIONS } from '../cli/commands/mcp.js';
 import { startServe } from '../cli/commands/serve.js';
 import { TOOL_OUTPUT_CLASS } from '../core/services/mcp-handlers/tool-contract.js';
@@ -448,17 +448,49 @@ describe('readConfig', () => {
   });
 });
 
+/** The single text block a composite result carries. */
+function compositeText(result: ReturnType<typeof compositeToolResult>): string {
+  const block = result.content[0];
+  if (block.type !== 'text') throw new Error('a composite envelope must be forwarded as text');
+  return block.text;
+}
+
 describe('NAV_TOOLS surface', () => {
   it('has native generation and repair compositions over existing daemon observations', async () => {
     const source = await readFile(new URL('./extension.ts', import.meta.url), 'utf8');
     expect(source).toContain("name: 'openlore_prepare_spec_generation'");
     expect(source).toContain("name: 'openlore_prepare_spec_repair'");
-    expect(source).toContain("callTool(daemon, 'prepare_spec_generation'");
-    expect(source).toContain("callTool(daemon, 'prepare_spec_repair'");
+    expect(source).toContain("'prepare_spec_generation',");
+    expect(source).toContain("'prepare_spec_repair',");
+    // Pi requests the daemon's byte budget and forwards the page without generic
+    // clipping, so a within-budget completeness receipt stays trustworthy.
+    expect(source).toContain('maxResponseBytes: PI_COMPOSITE_RESPONSE_BYTES');
+    expect(source).toContain('return compositeToolResult(result);');
     expect(source).not.toContain("callTool(daemon, 'audit_spec_coverage'");
     expect(source).not.toContain("callTool(daemon, 'get_mapping'");
     expect(source).toContain('OpenLore makes no internal');
     expect(source).toContain('LLM call here. Pi\'s host agent');
+  });
+
+  it('forwards a page the daemon packed to its compact budget instead of rejecting it', () => {
+    // The daemon budgets the COMPACT serialization (48 KiB). Measuring the indented
+    // form against the host bound rejected every full page as a transport fault.
+    const filler = 'x'.repeat(40_000);
+    const page = { workflow: 'repair', receipt: { state: 'partial' }, evidence: [filler, filler.slice(0, 4_000)] };
+    expect(Buffer.byteLength(JSON.stringify(page), 'utf8')).toBeLessThanOrEqual(48 * 1024);
+    expect(Buffer.byteLength(JSON.stringify(page, null, 2), 'utf8')).toBeGreaterThan(0);
+
+    const forwarded = compositeToolResult(page);
+    expect(forwarded.details).toBe(page);
+    expect(compositeText(forwarded)).not.toContain('response-too-large');
+    expect(JSON.parse(compositeText(forwarded))).toEqual(page);
+  });
+
+  it('reports a genuinely oversized envelope as a typed transport fault, never clipped', () => {
+    const oversized = { workflow: 'repair', evidence: 'y'.repeat(60_000) };
+    const result = compositeToolResult(oversized);
+    expect(JSON.parse(compositeText(result)).error.code).toBe('response-too-large');
+    expect(result.details).toBe(oversized);
   });
 
   it('surfaces every Generate/Repair protocol observation or documents an exclusion', () => {

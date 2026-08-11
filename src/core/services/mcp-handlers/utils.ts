@@ -7,6 +7,7 @@ import { readFile, readdir, stat } from 'node:fs/promises';
 import { extname, join, relative, resolve } from 'node:path';
 import type { LLMContext } from '../../analyzer/artifact-generator.js';
 import { EdgeStore } from '../edge-store.js';
+import { REQUIRED_ANALYSIS_ARTIFACTS, readCurrentGeneration } from '../../runtime/analysis-generation.js';
 import { readAttestation, reconcile, type IndexIntegrity } from '../../analyzer/index-attestation.js';
 import { recordGraphDigest } from './traversal.js';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
@@ -249,9 +250,15 @@ export function notReadyResult(error: string, reason: NotReadyReason): NotReadyR
 interface ContextCacheEntry {
   ctx: CachedContext;
   mtime: number;
+  /** Committed analysis generation this entry was read under, when one exists. */
+  generation: string | null;
 }
 
-/** One entry per project directory. Invalidated by llm-context.json mtime change. */
+/**
+ * One entry per project directory. Invalidated when EITHER the artifact mtime or
+ * the committed analysis generation changes, so an external analyze cannot leave
+ * a daemon serving the previous generation's paths.
+ */
 const _contextCache = new Map<string, ContextCacheEntry>();
 
 /** Grace period before closing an evicted EdgeStore so concurrent in-flight
@@ -299,7 +306,8 @@ export async function primeContextCache(directory: string, ctx: CachedContext): 
     ctx.edgeStore = existing.ctx.edgeStore;
   }
   bindArtifactMtime(ctx, mtime);
-  _contextCache.set(directory, { ctx, mtime });
+  const generation = (await readCurrentGeneration(analysisDir, [...REQUIRED_ANALYSIS_ARTIFACTS]))?.generationId ?? null;
+  _contextCache.set(directory, { ctx, mtime, generation });
 }
 
 export async function readCachedContext(directory: string, timeout?: number): Promise<CachedContext | null> {
@@ -310,8 +318,14 @@ export async function readCachedContext(directory: string, timeout?: number): Pr
     try {
       const st = await stat(filePath);
       const mtime = st.mtimeMs;
+      // Key on the committed generation as well as the artifact mtime. An mtime
+      // alone cannot distinguish "same file" from "republished with identical
+      // timestamp granularity", which is how a daemon could keep serving paths
+      // that only existed in the previous generation (change
+      // `harden-spec-workflow-lifecycle`, decision 64e6eb87).
+      const generation = (await readCurrentGeneration(analysisDir, [...REQUIRED_ANALYSIS_ARTIFACTS]))?.generationId ?? null;
       const cached = _contextCache.get(directory);
-      if (cached && cached.mtime === mtime) {
+      if (cached && cached.mtime === mtime && cached.generation === generation) {
         emit(directory, 'cache', { event: 'cache_read', hit: true });
         return cached.ctx;
       }
@@ -434,7 +448,7 @@ export async function readCachedContext(directory: string, timeout?: number): Pr
       // between edgeStore reads). A grace delay lets in-flight requests drain
       // before release, bounding live handles to ~grace/reanalyze-interval.
       const prev = _contextCache.get(directory);
-      _contextCache.set(directory, { ctx, mtime });
+      _contextCache.set(directory, { ctx, mtime, generation });
       if (prev?.ctx.edgeStore && prev.ctx.edgeStore !== ctx.edgeStore) {
         const stale = prev.ctx.edgeStore;
         const t = setTimeout(() => { try { stale.close(); } catch { /* already closed */ } }, STALE_STORE_CLOSE_DELAY_MS);

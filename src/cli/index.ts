@@ -40,6 +40,7 @@ import { doctorCommand } from './commands/doctor.js';
 import { setupCommand } from './commands/setup.js';
 import { refreshStoriesCommand } from './commands/refresh-stories.js';
 import { auditCommand } from './commands/audit.js';
+import { mappingCommand } from './commands/mapping.js';
 import { testCommand } from './commands/test.js';
 import { digestCommand } from './commands/digest.js';
 import { decisionsCommand } from './commands/decisions.js';
@@ -199,6 +200,9 @@ Spec authoring (optional, needs an LLM API key):
   openlore test         Report spec test coverage
   openlore digest       Plain-English summary of specs for human review
 
+  openlore mapping refresh   Rebuild the spec→code link index from spec anchors (no API key)
+  openlore audit             Report spec coverage gaps from that index (no API key)
+
 Run 'openlore <command> --help' for the full options of any command.
 
 Learn more: https://github.com/clay-good/OpenLore
@@ -222,6 +226,7 @@ program.addCommand(featuresCommand);
 program.addCommand(setupCommand);
 program.addCommand(refreshStoriesCommand);
 program.addCommand(auditCommand);
+program.addCommand(mappingCommand);
 program.addCommand(testCommand);
 program.addCommand(digestCommand);
 program.addCommand(decisionsCommand);

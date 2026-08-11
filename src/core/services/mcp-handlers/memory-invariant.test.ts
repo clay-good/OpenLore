@@ -56,6 +56,21 @@ import { handleRemember, handleRecall } from './memory.js';
 import { handleOrient } from './orient.js';
 import type { FunctionNode } from '../../analyzer/call-graph.js';
 
+/**
+ * Budget for the two property tests below.
+ *
+ * Each drives 120 trials that write a source tree, rebuild the edge store, record
+ * a memory per function, and recall them — real filesystem and SQLite work, not a
+ * mocked loop. The recall property measures ~105s here, well past the previous
+ * 60s budget, so it failed as a TIMEOUT — on `origin/main` too — with no invariant
+ * ever violated. This value is ~1.7x the measured runtime, leaving headroom for a
+ * loaded CI runner. The trial count and the invariants themselves are unchanged,
+ * so nothing about what these tests PROVE has been weakened; if the runtime grows
+ * enough to threaten this budget again, cut the trial count rather than raising it
+ * further, so the suite keeps a bounded wall-clock cost.
+ */
+const PROPERTY_TIMEOUT_MS = 180_000;
+
 // ── deterministic PRNG (replayable; no new dependency) ────────────────────────
 function rng(seed: number): () => number {
   let a = seed >>> 0;
@@ -190,7 +205,7 @@ describe('AuthoritativeRecallInvariant — recall, property-based over generated
       await rm(join(memoryDir(dir), MEMORY_NOTES_FILE), { force: true });
       await mkdir(join(dir, 'src'), { recursive: true });
     }
-  }, 60_000);
+  }, PROPERTY_TIMEOUT_MS);
 });
 
 // orient surfaces decisions (not notes); the property mirrors recall over the
@@ -269,5 +284,5 @@ describe('AuthoritativeRecallInvariant — orient decision section, property-bas
       await rm(join(dir, 'src'), { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
       await mkdir(join(dir, 'src'), { recursive: true });
     }
-  }, 60_000);
+  }, PROPERTY_TIMEOUT_MS);
 });

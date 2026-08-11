@@ -43,7 +43,7 @@ describe('harden-artifact-write-atomicity: every artifact writer adopts the shar
 
   it('the analyze artifact generator fences its save-set with withAnalysisLock', () => {
     const src = read(ARTIFACT_GENERATOR);
-    expect(src).toMatch(/import\s*\{\s*withAnalysisLock\s*\}\s*from\s*['"]\.\.\/decisions\/lock\.js['"]/);
+    expect(src).toMatch(/import\s*\{\s*withAnalysisLock\s*\}\s*from\s*['"]\.\.\/runtime\/advisory-lock\.js['"]/);
     expect(src).toMatch(/withAnalysisLock\(\s*this\.options\.outputDir/);
   });
 
@@ -58,7 +58,7 @@ describe('harden-artifact-write-atomicity: every artifact writer adopts the shar
 
   it('the watcher fences each artifact-mutation lane with withAnalysisLock', () => {
     const src = read(WATCHER);
-    expect(src).toMatch(/import\s*\{\s*withAnalysisLock\s*\}\s*from\s*['"]\.\.\/decisions\/lock\.js['"]/);
+    expect(src).toMatch(/import\s*\{\s*withAnalysisLock\s*\}\s*from\s*['"]\.\.\/runtime\/advisory-lock\.js['"]/);
     // Both the change lane (handleBatch) and the deletion lane fence on this.outputPath.
     const fences = src.match(/withAnalysisLock\(\s*this\.outputPath/g) ?? [];
     expect(fences.length).toBeGreaterThanOrEqual(2);

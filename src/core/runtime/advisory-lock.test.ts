@@ -6,8 +6,8 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm, mkdir, writeFile, readFile, utimes, stat, access } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { acquireDecisionsLock, isDecisionsLockHeld, acquireAnalysisLock, withAnalysisLock } from './lock.js';
-import { decisionsDir } from './store.js';
+import { acquireDecisionsLock, acquireLockAt, isDecisionsLockHeld, isLockHeld, acquireAnalysisLock, withAnalysisLock } from './advisory-lock.js';
+import { decisionsDir } from '../decisions/store.js';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 let root: string;
@@ -57,6 +57,38 @@ describe('acquireDecisionsLock', () => {
     const release = await acquireDecisionsLock(root);
     await stat(lockPath); // lock exists again (ours)
     await release();
+  }, 10_000);
+});
+
+describe('wait policy — maxWaitMs and waitedMs', () => {
+  it('reports zero wait for an uncontended acquire and a real wait after contention', async () => {
+    const first = await acquireLockAt(root, '.wait.lock');
+    if (isLockHeld(first)) throw new Error('first acquire must own the lock');
+    expect(first.waitedMs).toBe(0);
+
+    const second = acquireLockAt(root, '.wait.lock');
+    await sleep(400);
+    await first.release();
+    const handle = await second;
+    if (isLockHeld(handle)) throw new Error('second acquire must own the lock after release');
+    // Non-zero is what tells a caller someone else just finished the work.
+    expect(handle.waitedMs).toBeGreaterThan(0);
+    await handle.release();
+  }, 10_000);
+
+  it('honors a caller-supplied wait bound instead of the default cap', async () => {
+    const held = await acquireLockAt(root, '.bounded.lock');
+    if (isLockHeld(held)) throw new Error('setup acquire must own the lock');
+    const t0 = Date.now();
+    const contender = await acquireLockAt(root, '.bounded.lock', {
+      maxWaitMs: 300,
+      bestEffortAfterMaxWait: false,
+    });
+    // Gave up on the caller's bound, not the module default (180s), and reported
+    // the live holder rather than proceeding unlocked.
+    expect(isLockHeld(contender)).toBe(true);
+    expect(Date.now() - t0).toBeLessThan(3_000);
+    await held.release();
   }, 10_000);
 });
 

@@ -23,11 +23,14 @@ export function formatMappingCoverageStatus(report: AuditReport): string[] {
     return [`Coverage:       ${report.summary.coveragePct}% (${report.summary.coveredFunctions}/${report.summary.totalFunctions} functions)`];
   }
   return [
-    `Coverage:       unavailable (${report.mappingCoverage.state}: ${report.mappingCoverage.reason ?? 'unknown'})`,
+    `Coverage:       unavailable (${report.mappingCoverage.reason ?? 'unknown'})`,
     ...(report.mappingCoverage.message ? [`Reason:         ${report.mappingCoverage.message}`] : []),
     ...(report.mappingCoverage.remediation ? [`Refresh:        ${report.mappingCoverage.remediation}`] : []),
   ];
 }
+
+/** Render a nullable metric: `null` is unknown evidence, never a zero count. */
+const metric = (value: number | null): string => (value === null ? 'unknown' : String(value));
 
 function printReport(report: AuditReport, rootPath: string): void {
   const { summary } = report;
@@ -38,9 +41,9 @@ function printReport(report: AuditReport, rootPath: string): void {
   console.log('   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('');
   for (const line of formatMappingCoverageStatus(report)) console.log(`   ${line}`);
-  console.log(`   Uncovered:      ${summary.uncoveredCount} functions`);
-  console.log(`   Hub gaps:       ${summary.hubGapCount} hub functions without spec`);
-  console.log(`   Orphan reqs:    ${summary.orphanRequirementCount} requirements with no implementation found`);
+  console.log(`   Uncovered:      ${metric(summary.uncoveredCount)} functions`);
+  console.log(`   Hub gaps:       ${metric(summary.hubGapCount)} hub functions without spec`);
+  console.log(`   Orphan reqs:    ${metric(summary.orphanRequirementCount)} requirements with no implementation found`);
   console.log(`   Stale domains:  ${summary.staleDomainCount} domains with source changes since last spec`);
   console.log('');
 
@@ -74,7 +77,7 @@ function printReport(report: AuditReport, rootPath: string): void {
       const hub = fn.isHub ? ' [hub]' : '';
       console.log(`   · ${safe(fn.name)}${hub}  ${safe(fn.file)}`);
     }
-    if (summary.uncoveredCount > 20) {
+    if (summary.uncoveredCount !== null && summary.uncoveredCount > 20) {
       console.log(`   … and ${summary.uncoveredCount - 20} more`);
     }
     console.log('');

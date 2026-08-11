@@ -189,7 +189,19 @@ describe('generate command', () => {
       expect(source).toContain('openspecRoot: fullOpenspecPath');
       expect(source).toContain('updateConfig: Boolean(opts.outputDir) || opts.domains.length === 0');
       expect(source).toContain('Scoped generation leaves the global RAG manifest unchanged');
-      expect(source).toContain('mappingArtifact = await mapper.generate(pipelineResult, depGraph, opts.domains)');
+    });
+
+    it('derives the link index from the specs it wrote, not from the pipeline result', () => {
+      const source = readFileSync(fileURLToPath(new URL('./generate.ts', import.meta.url)), 'utf-8');
+      // Anchors are verified against the graph BEFORE the write…
+      expect(source).toContain('verifyRequirementAnchors(requirementAnchorProposals(pipelineResult), depGraph)');
+      // …and the persisted index is derived AFTER it, from the files on disk.
+      const write = source.indexOf('await writer.writeSpecs(');
+      const derive = source.indexOf('resolveSpecLinkIndex({');
+      expect(write).toBeGreaterThan(-1);
+      expect(derive).toBeGreaterThan(write);
+      // No probabilistic matcher survives as a coverage input.
+      expect(source).not.toContain('MappingGenerator');
     });
 
     it('should have dry-run option', async () => {
@@ -392,5 +404,98 @@ describe('generate command', () => {
       const { logger } = await import('../../utils/logger.js');
       expect(logger.error).toBeDefined();
     });
+  });
+});
+
+// ============================================================================
+// PLAN VS REAL DRY RUN (change: harden-spec-workflow-lifecycle)
+// ============================================================================
+
+const { generateCommand } = await import('./generate.js');
+const { renderSpecPreviewDiff } = await import('./generate.js');
+
+describe('generate preview modes', () => {
+  const roots: string[] = [];
+
+  afterEach(async () => {
+    const { rm } = await import('node:fs/promises');
+    await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })));
+  });
+
+  async function specTree(specs: Record<string, string>): Promise<string> {
+    const { mkdtemp, mkdir, writeFile } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const root = await mkdtemp(join(tmpdir(), 'openlore-preview-'));
+    roots.push(root);
+    for (const [domain, content] of Object.entries(specs)) {
+      await mkdir(join(root, 'specs', domain), { recursive: true });
+      await writeFile(join(root, 'specs', domain, 'spec.md'), content, 'utf-8');
+    }
+    return root;
+  }
+
+  it('exposes --plan and --dry-run as distinct options', () => {
+    expect(generateCommand.options.find(opt => opt.long === '--plan')).toBeDefined();
+    expect(generateCommand.options.find(opt => opt.long === '--dry-run')).toBeDefined();
+  });
+
+  it('documents that a real dry run still costs provider calls', () => {
+    const dryRun = generateCommand.options.find(opt => opt.long === '--dry-run');
+    expect(dryRun?.description).toMatch(/cost still occur/i);
+    const plan = generateCommand.options.find(opt => opt.long === '--plan');
+    expect(plan?.description).toMatch(/no provider call/i);
+  });
+
+  it('runs plan mode before any provider is constructed', () => {
+    const source = readFileSync(fileURLToPath(new URL('./generate.ts', import.meta.url)), 'utf-8');
+    const planReturn = source.indexOf('Plan complete. No provider call was made');
+    const providerCreated = source.indexOf('llm = createLLMService(');
+    expect(planReturn).toBeGreaterThan(-1);
+    expect(providerCreated).toBeGreaterThan(planReturn);
+  });
+
+  it('redirects every dry-run write into a throwaway workspace and removes it', () => {
+    const source = readFileSync(fileURLToPath(new URL('./generate.ts', import.meta.url)), 'utf-8');
+    expect(source).toContain("mkdtemp(join(tmpdir(), 'openlore-dry-run-'))");
+    expect(source).toContain('if (previewRoot) opts.outputDir = previewRoot;');
+    // Cleanup runs in a finally, so a provider failure cannot leak the workspace.
+    expect(source).toMatch(/finally \{[\s\S]*openlore-dry-run-[\s\S]*rm\(opts\.outputDir/);
+  });
+
+  it('reports a new spec as an addition', async () => {
+    const project = await specTree({});
+    const preview = await specTree({ billing: '# Billing\nline\n' });
+    const lines = await renderSpecPreviewDiff(project, preview);
+    expect(lines.join('\n')).toContain('+ billing');
+    expect(lines.join('\n')).toContain('1 specification(s) would change');
+  });
+
+  it('reports a rewritten spec with its line delta', async () => {
+    const project = await specTree({ billing: '# Billing\n' });
+    const preview = await specTree({ billing: '# Billing\nmore\nlines\n' });
+    const lines = await renderSpecPreviewDiff(project, preview);
+    expect(lines.join('\n')).toMatch(/~ billing.*\+2 lines/);
+  });
+
+  it('reports a byte-identical spec as unchanged rather than as a rewrite', async () => {
+    const identical = '# Billing\nsame\n';
+    const project = await specTree({ billing: identical });
+    const preview = await specTree({ billing: identical });
+    const lines = await renderSpecPreviewDiff(project, preview);
+    expect(lines.join('\n')).toContain('= billing  (byte-identical)');
+    expect(lines.join('\n')).toContain('No specification would change');
+  });
+
+  it('leaves a spec outside the generation scope marked untouched', async () => {
+    const project = await specTree({ billing: '# Billing\n', auth: '# Auth\n' });
+    const preview = await specTree({ billing: '# Billing\nnew\n' });
+    const lines = await renderSpecPreviewDiff(project, preview);
+    expect(lines.join('\n')).toContain("= auth  (untouched");
+  });
+
+  it('says so plainly when the preview produced nothing', async () => {
+    const project = await specTree({});
+    const preview = await specTree({});
+    expect(await renderSpecPreviewDiff(project, preview)).toEqual(['  (no specifications were generated)']);
   });
 });
