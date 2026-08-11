@@ -93,3 +93,7 @@ Stock GitHub labels only — `needs-info`→`question`, `ready-for-human`→`hel
 ### Domain docs
 
 Single-context; no `CONTEXT.md` yet, and ADRs live in `openspec/decisions/`, not `docs/adr/`. See `docs/agents/domain.md`.
+
+# Chat reply standard
+
+Use this standard for your chat replies: **ASD-STE100 Simplified Technical English** (**STE**). Also consider ELI18 and TLDR. Apart from that: silence is gold
