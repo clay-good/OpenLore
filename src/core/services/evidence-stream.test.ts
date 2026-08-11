@@ -224,6 +224,26 @@ describe('trimPageToBudget', () => {
     expect(page.next).toMatchObject({ sectionIndex: 1, offset: 0 });
   });
 
+  it('refuses a partial page that would deliver nothing', () => {
+    // Trimming can empty a page whose envelope overhead alone nearly fills the
+    // budget. The empty page then FITS, and its cursor resumes exactly where the
+    // request started — the caller would page forever without progress. It has to
+    // come back as unrepresentable instead.
+    const sections = stream({ a: [{ pad: 'a'.repeat(400) }, { pad: 'b'.repeat(400) }] });
+    const page = packEvidenceStream(sections, { sectionIndex: 0, offset: 0 }, 100_000, 0);
+    const emptyEnvelope = measure({ ...page, included: [], records: {}, starts: {} } as typeof page);
+
+    // A budget that an empty page fits but no single record does.
+    expect(trimPageToBudget(page, sections, emptyEnvelope + 20, measure)).toBe(false);
+  });
+
+  it('still accepts an exhausted stream that is legitimately empty', () => {
+    const sections = stream({ a: [record(10)] });
+    const page = packEvidenceStream(sections, { sectionIndex: 0, offset: 1 }, 10_000, 100);
+    expect(page.next).toBeUndefined();
+    expect(trimPageToBudget(page, sections, 10_000, measure)).toBe(true);
+  });
+
   it('reports failure when even an empty page cannot fit', () => {
     const sections = stream({ a: [{ pad: 'a'.repeat(500) }] });
     const page = packEvidenceStream(sections, { sectionIndex: 0, offset: 0 }, 100_000, 0);

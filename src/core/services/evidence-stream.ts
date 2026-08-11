@@ -272,5 +272,14 @@ export function trimPageToBudget(
     }
     finalizeOmissions(page, sections);
   }
+
+  // A PARTIAL page must deliver at least one record. Trimming can empty a page
+  // whose envelope overhead alone approaches the budget, and an empty page whose
+  // cursor resumes at the position it started from makes the caller loop forever
+  // without progress. Reporting it as unrepresentable turns a silent livelock into
+  // the typed `response-too-large` the caller already handles. A page with nothing
+  // left to defer is the exhausted stream, which is legitimately empty.
+  const delivered = page.included.reduce((total, section) => total + (page.records[section]?.length ?? 0), 0);
+  if (delivered === 0 && page.next) return false;
   return true;
 }
