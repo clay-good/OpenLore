@@ -80,7 +80,10 @@ export function buildSummary(input: BuildSummaryInput): PreflightSummary {
   let message: string;
   if (input.activeAnalysis) {
     const stage = input.activeAnalysis.stage ?? 'running';
-    message = `ANALYSIS_IN_PROGRESS — pid ${input.activeAnalysis.pid ?? '?'} is at stage "${stage}"; wait for it or attach with \`openlore analyze --wait\``;
+    // The stage is the owner's LAST PUBLISHED one, not necessarily its current
+    // work: a synchronous stage cannot post an update while it runs. Saying "last
+    // published" keeps a long stage from reading as a stuck one.
+    message = `ANALYSIS_IN_PROGRESS — pid ${input.activeAnalysis.pid ?? '?'} owns this repository (last published stage "${stage}"); wait for it or attach with \`openlore analyze --wait\``;
   } else if (input.missing) {
     message = 'MISSING — no analysis found; run `openlore analyze`';
   } else if (totalChanged === 0) {

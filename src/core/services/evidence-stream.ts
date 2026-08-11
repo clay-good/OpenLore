@@ -18,7 +18,7 @@
  * section+offset cursor continues INSIDE the section instead.
  */
 
-import { createHash } from 'node:crypto';
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 
 /** Bumped whenever the cursor payload or packing contract changes. */
 export const EVIDENCE_STREAM_PROTOCOL = 1;
@@ -102,8 +102,23 @@ export interface EvidencePage {
 // CURSORS
 // ============================================================================
 
+/**
+ * Per-process key for the cursor MAC.
+ *
+ * A plain digest over the payload authenticates nothing: every input is
+ * client-visible, so anyone can recompute it and hand back a position the server
+ * never issued. Keying it means only this server can mint a cursor.
+ *
+ * The key lives for the process lifetime and is never persisted, so a cursor does
+ * not survive a server restart — the holder gets the same typed "restart
+ * preparation" answer as for a stale generation, which is honest and already a
+ * supported outcome. It is deliberately not a config value: a shared secret to
+ * manage would be a worse trade than re-issuing a short-lived cursor.
+ */
+const CURSOR_KEY = randomBytes(32);
+
 function cursorFingerprint(payload: Omit<EvidenceCursorPayload, 'f'>): string {
-  return createHash('sha256')
+  return createHmac('sha256', CURSOR_KEY)
     .update([payload.v, payload.w, payload.d, payload.g, payload.s, payload.o, payload.b].join('\0'))
     .digest('hex')
     .slice(0, 32);
@@ -138,7 +153,11 @@ export function decodeEvidenceCursor(value?: string): EvidenceCursorPayload | un
   if (!Number.isInteger(parsed.o) || parsed.o < 0) return undefined;
   if (!Number.isInteger(parsed.b) || parsed.b < MIN_RESPONSE_BYTES || parsed.b > MAX_RESPONSE_BYTES) return undefined;
   const { f, ...rest } = parsed;
-  return f === cursorFingerprint(rest) ? parsed : undefined;
+  if (typeof f !== 'string') return undefined;
+  const expected = Buffer.from(cursorFingerprint(rest), 'utf8');
+  const actual = Buffer.from(f, 'utf8');
+  if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) return undefined;
+  return parsed;
 }
 
 // ============================================================================

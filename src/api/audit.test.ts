@@ -84,6 +84,21 @@ describe('openloreAudit — coverage availability', () => {
     expect(report.hubGaps).toEqual([]);
   });
 
+  it('does not let one anchor cover a same-named function in another file', async () => {
+    // Coverage keys used to include the bare symbol name, so `work::src/a.ts`
+    // marked an unrelated `work` in `src/b.ts` covered too — the audit reported
+    // evidence it did not have.
+    const report = await openloreAudit({
+      rootPath: await fixture({
+        nodes: [{ name: 'work', filePath: 'src/a.ts' }, { name: 'work', filePath: 'src/b.ts' }],
+        specs: { core: specWith('Works', 'work::src/a.ts') },
+      }),
+      save: false,
+    });
+    expect(report.summary).toMatchObject({ totalFunctions: 2, coveredFunctions: 1, uncoveredCount: 1 });
+    expect(report.uncoveredFunctions.map(fn => `${fn.name}::${fn.file}`)).toEqual(['work::src/b.ts']);
+  });
+
   it('reports unavailable when no specifications exist to derive links from', async () => {
     const report = await openloreAudit({ rootPath: await fixture(), save: false });
     expect(report.mappingCoverage).toMatchObject({ state: 'unavailable', reason: 'specs-unavailable' });

@@ -60,6 +60,6 @@
 ## 8. Validation And Dogfood
 
 - [x] 8.1 Run focused mapping, audit, composite, MCP preset, Pi, daemon/cache, analyzer-lock, generate, API, and skill suites plus typecheck and lint.
-- [ ] 8.2 Run full tests and build, inspect `git diff HEAD`, and complete the required code-review agent pass; fix all CRITICAL/HIGH findings and report remaining MEDIUM/LOW findings.
+- [x] 8.2 Run full tests and build, inspect `git diff HEAD`, and complete the required code-review agent pass; fix all CRITICAL/HIGH findings and report remaining MEDIUM/LOW findings. (7360 tests green; review returned 13 findings — 5 HIGH and 7 MEDIUM fixed, 2 LOW documented in the PR.)
 - [ ] 8.3 Dogfood Analyze → mapping refresh → Repair and agent-hosted Generate on the external project that produced the feedback, exercising stale provenance, oversized `components`, existing-spec overlap, daemon reload, concurrent analyze, heartbeat, and real preview.
 - [x] 8.4 Update user-facing MCP/CLI/skill documentation and the PR description with deterministic mapping, nullable coverage, transport-safe continuation, lifecycle observability, preview cost, limitations, and migration guidance.

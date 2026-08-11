@@ -175,6 +175,29 @@ export type GenerationSnapshot<T> =
   | { state: 'analysis-changed'; message: string };
 
 /**
+ * Do the artifacts on disk still hash to what the manifest recorded?
+ *
+ * The identity check alone is not sufficient. A full analyze writes each artifact
+ * IN PLACE and publishes its manifest last, so between the first overwrite and
+ * that publication the current manifest is still the OLD one: a reader sees the
+ * same generation id before and after, while the bytes underneath it have already
+ * changed. Comparing the recorded digests closes exactly that window — the one
+ * where a mixture is silently labelled `ok`.
+ *
+ * A legacy generation records no digests (its identity is synthesized from mtime
+ * and size, which already moves on any rewrite), so there is nothing to verify and
+ * it passes.
+ */
+async function artifactsStillMatch(analysisDir: string, manifest: GenerationManifest): Promise<boolean> {
+  for (const recorded of manifest.artifacts) {
+    if (!recorded.sha256) continue; // legacy: no digest was ever taken
+    const current = await digestOf(join(analysisDir, recorded.path));
+    if (!current || current.sha256 !== recorded.sha256) return false;
+  }
+  return true;
+}
+
+/**
  * Run a multi-artifact read against ONE generation.
  *
  * Validates the current generation identity before and after `read`. A change
@@ -194,7 +217,7 @@ export async function readGenerationSnapshot<T>(
     const value = await read(before.generationId);
 
     const after = await readCurrentGeneration(analysisDir, legacyArtifacts);
-    if (after && after.generationId === before.generationId) {
+    if (after && after.generationId === before.generationId && await artifactsStillMatch(analysisDir, after)) {
       return { state: 'ok', value, generationId: before.generationId, compatibility: before.compatibility };
     }
   }

@@ -122,6 +122,34 @@ describe('readGenerationSnapshot', () => {
     expect(snapshot.state).toBe('analysis-changed');
   });
 
+  it('rejects an in-place overwrite that has not published its manifest yet', async () => {
+    // The gap the identity check alone cannot see: a full analyze overwrites the
+    // artifacts and publishes LAST, so during that window the manifest is still the
+    // old one. Both identity reads agree while the bytes underneath have already
+    // changed — a mixture that used to be labelled `ok`.
+    const dir = await analysisDir();
+    await publishGeneration(dir, required);
+
+    const snapshot = await readGenerationSnapshot(dir, required, async () => {
+      await writeFile(join(dir, required[0]), JSON.stringify({ rewritten: true }), 'utf8');
+      return 'read-across-an-overwrite';
+    });
+    expect(snapshot.state).toBe('analysis-changed');
+  });
+
+  it('accepts a read whose artifacts are byte-identical throughout', async () => {
+    const dir = await analysisDir();
+    await publishGeneration(dir, required);
+    // Rewriting the SAME bytes is not a change: the digest still matches, so this
+    // must not degrade into a spurious analysis-changed.
+    const original = await readFile(join(dir, required[0]), 'utf8');
+    const snapshot = await readGenerationSnapshot(dir, required, async () => {
+      await writeFile(join(dir, required[0]), original, 'utf8');
+      return 'stable';
+    });
+    expect(snapshot).toMatchObject({ state: 'ok', value: 'stable' });
+  });
+
   it('retries once and succeeds when only the first attempt was interrupted', async () => {
     const dir = await analysisDir();
     await publishGeneration(dir, required);

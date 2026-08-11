@@ -67,6 +67,7 @@ import {
   PROGRESS_INTERVAL_MS,
   VISIBLE_HEARTBEAT_MS,
   acquireAnalysisOwnership,
+  isProcessAlive,
   readAnalysisProgress,
   type AnalysisOwnership,
 } from '../../core/runtime/analysis-ownership.js';
@@ -171,7 +172,19 @@ async function reportActiveAnalysis(
     logger.info('Started', owner.startedAt);
   }
   if (ownership.elapsedMs !== null) logger.info('Elapsed', formatDuration(ownership.elapsedMs));
-  logger.info('Heartbeat age', formatDuration(ownership.heartbeatAgeMs));
+  // A heartbeat age is not a health verdict. Liveness is the PID; the heartbeat
+  // says when the owner last wrote. Printing the age alone made a healthy owner in
+  // a long synchronous stage read as abandoned, so the two facts are stated
+  // separately and the reader is told which one settles it.
+  const alive = owner ? isProcessAlive(owner.pid) : null;
+  logger.info(
+    'Heartbeat',
+    `last beat ${formatDuration(ownership.heartbeatAgeMs)} ago`
+    + (alive === null ? '' : alive ? ' — owner process is alive' : ' — owner process is GONE'),
+  );
+  if (alive === false) {
+    logger.info('Reclaim', 'The owner is dead; the next analyze reclaims this lock automatically.');
+  }
 
   const progress = await readAnalysisProgress(outputPath);
   if (progress) {

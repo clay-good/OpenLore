@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, stat, writeFile, mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { OWNERSHIP_LOCK_FILE } from './advisory-lock.js';
+import { OWNERSHIP_ABANDONED_MS, OWNERSHIP_HEARTBEAT_STALE_MS, OWNERSHIP_LOCK_FILE } from './advisory-lock.js';
 import {
   PROGRESS_INTERVAL_MS,
   acquireAnalysisOwnership,
@@ -154,6 +154,23 @@ describe('analysis ownership — reclamation', () => {
       '/repo',
     );
     expect(stale).toBe(false);
+  });
+
+  it('reclaims after prolonged silence even when the PID still looks alive', () => {
+    // The hole this closes: an owner dies, the OS recycles its PID onto an
+    // unrelated live process, and `isProcessAlive` then answers "alive" forever —
+    // locking the repository permanently. Safe only because the watchdog keeps
+    // beating through a blocked main thread, so this much silence really does mean
+    // the writer is gone.
+    const live = JSON.stringify(livePayload('/repo', '/repo/.openlore/analysis'));
+    expect(isOwnershipStale(Date.now() - OWNERSHIP_ABANDONED_MS - 1_000, live, '/repo')).toBe(true);
+    // Just past the ordinary threshold is NOT enough while the PID is alive.
+    expect(isOwnershipStale(Date.now() - OWNERSHIP_HEARTBEAT_STALE_MS - 1_000, live, '/repo')).toBe(false);
+  });
+
+  it('never reclaims another repository, however long it has been silent', () => {
+    const other = JSON.stringify(livePayload('/somewhere/else', '/somewhere/else/.openlore/analysis'));
+    expect(isOwnershipStale(Date.now() - OWNERSHIP_ABANDONED_MS * 10, other, '/repo')).toBe(false);
   });
 
   it('defends against PID reuse by requiring a repository match', () => {
@@ -335,6 +352,32 @@ describe('analysis ownership — across processes', () => {
     const during = JSON.parse(await readFile(lockPath, 'utf8')).heartbeatAt as string;
 
     expect(Date.parse(during)).toBeGreaterThan(Date.parse(first));
+    child.kill('SIGKILL');
+  }, 60_000);
+
+  it('a released lock is not resurrected by a beat that was already in flight', async () => {
+    // Release used to fire-and-forget the worker stop and then unlink. A beat that
+    // was already scheduled could land afterwards and RECREATE the lock file,
+    // leaving the repository falsely owned by a process that had finished.
+    const { root, analysisDir } = await fixture();
+    const child = runChild(`
+      const m = await import('__MODULE__');
+      const held = await m.acquireAnalysisOwnership(${JSON.stringify(root)}, ${JSON.stringify(analysisDir)}, { heartbeatIntervalMs: 30 });
+      await new Promise(r => setTimeout(r, 300));   // let several beats run
+      await held.release();
+      process.stdout.write('released');
+      await new Promise(r => setTimeout(r, 600));   // any late beat would land here
+      process.exit(0);
+    `);
+    await new Promise<void>((resolve, reject) => {
+      child.stdout?.on('data', chunk => { if (String(chunk).includes('released')) resolve(); });
+      child.on('error', reject);
+      child.on('close', () => reject(new Error('child exited before releasing')));
+    });
+
+    const lockPath = join(runtimeDirOf(analysisDir), OWNERSHIP_LOCK_FILE);
+    await new Promise(resolve => setTimeout(resolve, 500));
+    await expect(stat(lockPath)).rejects.toThrow();
     child.kill('SIGKILL');
   }, 60_000);
 

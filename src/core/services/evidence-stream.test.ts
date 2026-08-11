@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
 
 import {
   DEFAULT_RESPONSE_BYTES,
@@ -77,6 +78,20 @@ describe('evidence cursors', () => {
     expect(decodeEvidenceCursor('')).toBeUndefined();
     expect(decodeEvidenceCursor('not-base64url!!')).toBeUndefined();
     expect(decodeEvidenceCursor(Buffer.from('[]').toString('base64url'))).toBeUndefined();
+  });
+
+  it('cannot be minted by anyone who knows the algorithm', () => {
+    // The fingerprint used to be a plain digest over fields the caller controls, so
+    // a caller could recompute it for ANY position — including one past the end of
+    // the stream, which came back as an empty page stamped `complete`. Keyed now:
+    // recomputing the documented digest no longer authenticates.
+    const forgedPosition = { ...payload, s: 99 };
+    const selfSigned = createHash('sha256')
+      .update([forgedPosition.v, forgedPosition.w, forgedPosition.d, forgedPosition.g,
+        forgedPosition.s, forgedPosition.o, forgedPosition.b].join('\0'))
+      .digest('hex').slice(0, 32);
+    const forged = Buffer.from(JSON.stringify({ ...forgedPosition, f: selfSigned })).toString('base64url');
+    expect(decodeEvidenceCursor(forged)).toBeUndefined();
   });
 
   it('rejects an out-of-range budget even with a valid shape', () => {

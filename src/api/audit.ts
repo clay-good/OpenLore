@@ -31,6 +31,7 @@ import {
   orphanRequirementsOf,
   resolveSpecLinkIndex,
 } from '../core/generator/spec-link-service.js';
+import { normalizeAnchorPath } from '../core/generator/spec-link-index.js';
 import type { DependencyGraphResult } from '../core/analyzer/dependency-graph.js';
 import type { SerializedCallGraph, FunctionNode } from '../core/analyzer/call-graph.js';
 
@@ -41,8 +42,15 @@ const DEFAULT_HUB_THRESHOLD = 5;
 // HELPERS
 // ============================================================================
 
+/**
+ * Coverage is matched on the FILE-QUALIFIED identity only.
+ *
+ * Falling back to a bare-name match let one anchor cover every same-named symbol
+ * in the repository — `foo::src/a.ts` silently covering `foo` in `src/b.ts` — so
+ * the audit reported coverage it had no evidence for.
+ */
 function isNodeCovered(node: FunctionNode, covered: Set<string>): boolean {
-  return covered.has(`${node.filePath}::${node.name}`) || covered.has(node.name);
+  return covered.has(`${normalizeAnchorPath(node.filePath) ?? node.filePath}::${node.name}`);
 }
 
 function toAuditFunction(node: FunctionNode, isHub: boolean): AuditUncoveredFunction {

@@ -51,6 +51,18 @@ const MAX_WAIT_MS = 180_000;  // give up waiting after this and proceed best-eff
  * reclamation — the owner PID must also be dead.
  */
 const OWNERSHIP_HEARTBEAT_STALE_MS = 90_000;
+/**
+ * Silence after which an owner is abandoned NO MATTER WHAT ITS PID SAYS.
+ *
+ * Reclamation normally needs a dead PID as well, which leaves one permanent hole:
+ * an owner that dies and whose PID is then recycled by an unrelated live process
+ * looks alive forever, so its lock could never be reclaimed. This bound closes it
+ * — but only because the heartbeat is written by a watchdog thread that keeps
+ * beating while the main thread is blocked, so silence this long really does mean
+ * the writer is gone. It is 120 consecutive missed beats; a real analysis that
+ * still has a live watchdog cannot reach it.
+ */
+const OWNERSHIP_ABANDONED_MS = 30 * 60_000;
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -272,6 +284,7 @@ export {
   ANALYSIS_LOCK_FILE,
   DECISIONS_LOCK_FILE,
   OWNERSHIP_LOCK_FILE,
+  OWNERSHIP_ABANDONED_MS,
   OWNERSHIP_HEARTBEAT_STALE_MS,
   POLL_MS,
   STALE_MS,

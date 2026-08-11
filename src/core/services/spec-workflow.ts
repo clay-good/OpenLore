@@ -292,7 +292,11 @@ function resolveStart(
   if (cursor.g !== fingerprint) {
     return unavailable(workflow, input.domain, 'analysis-changed', `Analysis changed after the cursor was issued; restart ${workflow} preparation.`);
   }
-  if (cursor.s > sectionCount) {
+  // `>=`, not `>`: a cursor AT the end of the stream is never emitted — the final
+  // page carries no continuation. Accepting one returned an empty page stamped
+  // `complete`, which is the one answer this protocol must never give for evidence
+  // it did not deliver.
+  if (cursor.s >= sectionCount) {
     return unavailable(workflow, input.domain, 'analysis-changed', `Continuation cursor is outside the current evidence stream; restart ${workflow} preparation.`);
   }
   return { start: { sectionIndex: cursor.s, offset: cursor.o }, budget: cursor.b };

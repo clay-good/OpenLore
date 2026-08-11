@@ -28,6 +28,7 @@ import { dirname, join } from 'node:path';
 import { Worker } from 'node:worker_threads';
 
 import {
+  OWNERSHIP_ABANDONED_MS,
   OWNERSHIP_HEARTBEAT_STALE_MS,
   OWNERSHIP_LOCK_FILE,
   acquireLockAt,
@@ -129,10 +130,15 @@ function parsePayload(contents: string): AnalysisOwnerPayload | null {
  * one — and a dead PID alone is not either, because PID reuse can make a live
  * unrelated process look like the owner. Requiring both, plus a repository match,
  * is what keeps reclamation from stealing a healthy run.
+ *
+ * One exception, at {@link OWNERSHIP_ABANDONED_MS}: past that much silence the
+ * heartbeat outranks the PID. Otherwise a dead owner whose PID was recycled onto
+ * a live process would lock the repository permanently, with no way out but
+ * deleting the file by hand.
  */
 export function isOwnershipStale(mtimeMs: number, contents: string, repository: string): boolean {
-  const heartbeatStale = Date.now() - mtimeMs > OWNERSHIP_HEARTBEAT_STALE_MS;
-  if (!heartbeatStale) return false;
+  const silentMs = Date.now() - mtimeMs;
+  if (silentMs <= OWNERSHIP_HEARTBEAT_STALE_MS) return false;
 
   const payload = parsePayload(contents);
   // An unparseable payload with a stale heartbeat is a crashed or truncated
@@ -140,7 +146,13 @@ export function isOwnershipStale(mtimeMs: number, contents: string, repository: 
   if (!payload) return true;
   // A lock naming a different repository is not ours to interpret; leave it.
   if (payload.repository !== repository) return false;
-  return !isProcessAlive(payload.pid);
+  if (!isProcessAlive(payload.pid)) return true;
+
+  // The PID says alive, but nothing has written here for half an hour. Either the
+  // watchdog AND the main thread are both wedged, or — the case this exists for —
+  // the owner died and the OS recycled its PID onto an unrelated live process,
+  // which would otherwise hold this repository locked forever.
+  return silentMs > OWNERSHIP_ABANDONED_MS;
 }
 
 /** Atomically publish the progress sidecar (write-temp-then-rename). */
@@ -179,8 +191,15 @@ export const WATCHDOG_FILE = '.analysis-watchdog.cjs';
 const WATCHDOG_SOURCE = `
 const { parentPort, workerData } = require('node:worker_threads');
 const { writeFileSync, renameSync } = require('node:fs');
-let { lockPath, progressPath, payload, progress, intervalMs, pid } = workerData;
+let { lockPath, progressPath, payload, progress, intervalMs, pid, stop } = workerData;
+const stopFlag = new Int32Array(stop);
 function beat() {
+  // Checked synchronously on every beat. Releasing sets this BEFORE unlinking the
+  // lock, so a beat already scheduled cannot land afterwards and recreate the file
+  // this process just gave up — which would leave the repository falsely locked
+  // until the abandonment window expired. A posted 'stop' message cannot close
+  // that race: it is delivered on an event loop turn that may never come.
+  if (Atomics.load(stopFlag, 0) !== 0) return;
   const now = new Date().toISOString();
   try {
     writeFileSync(lockPath, JSON.stringify({ ...payload, heartbeatAt: now }));
@@ -293,6 +312,10 @@ export async function acquireAnalysisOwnership(
    */
   let watchdog: Worker | null = null;
   const watchdogPath = join(runtimeDir, WATCHDOG_FILE);
+  // Shared with the watchdog thread so a stop is visible to it IMMEDIATELY, with
+  // no event-loop turn and no message round-trip in between.
+  const stopFlag = new SharedArrayBuffer(4);
+  const stopView = new Int32Array(stopFlag);
   try {
     writeFileSync(watchdogPath, WATCHDOG_SOURCE, 'utf8');
     watchdog = new Worker(watchdogPath, {
@@ -305,7 +328,7 @@ export async function acquireAnalysisOwnership(
       // value that cannot be poisoned by how the host was launched.
       execArgv: [],
       workerData: {
-        lockPath, progressPath, pid: process.pid, intervalMs: heartbeatIntervalMs,
+        lockPath, progressPath, pid: process.pid, intervalMs: heartbeatIntervalMs, stop: stopFlag,
         payload: ownerPayload(),
         progress: { stage, percent: null },
       },
@@ -340,20 +363,26 @@ export async function acquireAnalysisOwnership(
    * that lands after the unlink would recreate the lock file this process just
    * gave up — silently re-locking the repository against everyone else.
    */
-  const stopWatchdog = (): void => {
-    if (!watchdog) return;
+  const stopWatchdog = (): Promise<void> => {
+    // Set FIRST and synchronously: from this point the watchdog cannot write,
+    // whichever release path is running and whether or not the thread has died yet.
+    Atomics.store(stopView, 0, 1);
+    if (!watchdog) return Promise.resolve();
     const worker = watchdog;
     watchdog = null;
     try { worker.postMessage({ type: 'stop' }); } catch { /* already gone */ }
-    void worker.terminate().catch(() => {});
+    const terminated = worker.terminate().then(() => undefined).catch(() => undefined);
     try { unlinkSync(watchdogPath); } catch { /* already gone */ }
+    return terminated;
   };
 
   const releaseSync = (): void => {
     if (released) return;
     released = true;
     clearInterval(ticker);
-    stopWatchdog();
+    // Cannot await a thread from a signal/exit handler; the shared stop flag is
+    // what makes this path safe, since the watchdog observes it before every write.
+    void stopWatchdog();
     try { unlinkSync(lockPath); } catch { /* already gone */ }
     try { unlinkSync(progressPath); } catch { /* already gone */ }
   };
@@ -362,7 +391,10 @@ export async function acquireAnalysisOwnership(
     if (released) return;
     released = true;
     clearInterval(ticker);
-    stopWatchdog();
+    // Wait for the thread to actually be gone before removing the lock. The stop
+    // flag already forbids a late write; awaiting termination also rules out a beat
+    // that had passed the flag check and was mid-write.
+    await stopWatchdog();
     await handle.release();
     await unlink(progressPath).catch(() => {});
   };

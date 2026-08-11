@@ -348,13 +348,20 @@ export function mappingViewOf(
   };
 }
 
-/** Keys (`file::name` and bare `name`) of every symbol a requirement links to. */
+/**
+ * File-qualified keys (`file::name`) of every symbol a requirement links to.
+ *
+ * ONLY qualified. A bare `name` key was previously added alongside, which made
+ * coverage leak across files: an anchor on `foo::src/a.ts` marked an unrelated
+ * `foo` in `src/b.ts` covered too, inflating the audit. Every linked symbol is a
+ * uniquely resolved reference, so its file is always known — including for a
+ * bare-name anchor, which only links when exactly one symbol carries that name.
+ */
 export function coveredSymbolKeys(index: SpecLinkIndex): Set<string> {
   const covered = new Set<string>();
   for (const link of index.links) {
     for (const fn of link.functions) {
       covered.add(`${fn.file}::${fn.name}`);
-      covered.add(fn.name);
     }
   }
   return covered;
