@@ -34,7 +34,7 @@
  * acquires ownership BEFORE the artifact lock and never the reverse — one fixed
  * order, so the two can never deadlock.
  */
-import { open, readFile, stat, unlink, mkdir } from 'node:fs/promises';
+import { link, open, readFile, rename, stat, unlink, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { decisionsDir } from '../decisions/store.js';
 
@@ -198,7 +198,34 @@ export async function acquireLockAt(
         continue; // lock vanished between open and stat — retry acquire
       }
       if (isStale(mtimeMs, contents)) {
-        await unlink(lockPath).catch(() => {});
+        // Steal by RENAME, not by unlink-on-path. Two contenders can both judge the
+        // same lock stale; with a path delete, the second one removes the FRESH
+        // lock the first has already put there, and both then believe they own the
+        // repository — the one outcome this loop exists to prevent. A rename is
+        // atomic, so exactly one contender moves this file out of the way.
+        const stolen = `${lockPath}.${process.pid}.${Date.now()}.stale`;
+        try {
+          await rename(lockPath, stolen);
+        } catch {
+          continue; // another contender won the steal — re-read and retry
+        }
+        // Confirm we moved the file we judged, not one the holder refreshed in
+        // between. On a mismatch the holder was alive after all, so put it back —
+        // unless a new lock already exists, which we must not clobber.
+        try {
+          const moved = await stat(stolen);
+          if (moved.mtimeMs !== mtimeMs) {
+            // The holder refreshed between our read and the steal, so it was alive:
+            // put the file back. `link` is used rather than `rename` because rename
+            // OVERWRITES — restoring that way clobbers a lock another contender may
+            // already have taken, handing out two owners. `link` fails when the path
+            // is occupied, which is the answer we want: someone else owns it now.
+            await link(stolen, lockPath).catch(() => {});
+            await unlink(stolen).catch(() => {});
+            continue;
+          }
+        } catch { /* already gone — nothing to restore */ }
+        await unlink(stolen).catch(() => {});
         continue; // retry acquire immediately
       }
       if (onContended === 'report') {

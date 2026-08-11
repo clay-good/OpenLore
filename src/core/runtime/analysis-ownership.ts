@@ -23,7 +23,7 @@
  */
 
 import { unlinkSync, writeFileSync } from 'node:fs';
-import { readFile, rename, writeFile, mkdir, unlink } from 'node:fs/promises';
+import { open, readFile, rename, writeFile, mkdir, unlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { Worker } from 'node:worker_threads';
 
@@ -468,10 +468,16 @@ export async function readAnalysisOwner(
   let contents: string;
   let mtimeMs: number;
   try {
-    const { stat } = await import('node:fs/promises');
-    const info = await stat(lockPath);
-    mtimeMs = info.mtimeMs;
-    contents = await readFile(lockPath, 'utf8');
+    // ONE open handle for both the timestamp and the bytes. Resolving the path
+    // twice can straddle a rewrite and pair one owner's heartbeat with another's
+    // payload, which is exactly the kind of mixture this module refuses elsewhere.
+    const handle = await open(lockPath, 'r');
+    try {
+      mtimeMs = (await handle.stat()).mtimeMs;
+      contents = await handle.readFile('utf8');
+    } finally {
+      await handle.close();
+    }
   } catch {
     return null;
   }

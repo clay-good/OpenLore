@@ -3,7 +3,7 @@
  * `decisions --consolidate` processes from clobbering pending.json.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, mkdir, writeFile, readFile, utimes, stat, access } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, readdir, writeFile, readFile, utimes, stat, access } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { acquireDecisionsLock, acquireLockAt, isDecisionsLockHeld, isLockHeld, acquireAnalysisLock, withAnalysisLock } from './advisory-lock.js';
@@ -58,6 +58,31 @@ describe('acquireDecisionsLock', () => {
     await stat(lockPath); // lock exists again (ours)
     await release();
   }, 10_000);
+});
+
+describe('stale steal — exactly one winner', () => {
+  it('gives ownership to ONE contender when several judge the same lock stale', async () => {
+    // Stealing by unlink-on-path lets a second contender delete the FRESH lock the
+    // first has already written, so both proceed as owner. The steal is a rename,
+    // which only one contender can win.
+    const dir = join(root, 'steal');
+    await mkdir(dir, { recursive: true });
+    const lockPath = join(dir, '.race.lock');
+    await writeFile(lockPath, '99999 crashed');
+    const old = (Date.now() - 200_000) / 1000; // older than STALE_MS
+    await utimes(lockPath, old, old);
+
+    const results = await Promise.all(
+      Array.from({ length: 5 }, () => acquireLockAt(dir, '.race.lock', { onContended: 'report' })),
+    );
+    const handles = results.filter(result => !isLockHeld(result));
+    expect(handles).toHaveLength(1);
+
+    // No steal debris is left behind.
+    const leftovers = (await readdir(dir)).filter(name => name.endsWith('.stale'));
+    expect(leftovers).toEqual([]);
+    for (const handle of handles) await (handle as { release: () => Promise<void> }).release();
+  }, 20_000);
 });
 
 describe('wait policy — maxWaitMs and waitedMs', () => {
