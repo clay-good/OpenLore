@@ -190,6 +190,7 @@ export async function acquireLockAt(
       // Held by someone else — steal if the policy says it is stale, else wait.
       let mtimeMs: number;
       let contents: string;
+      let inode: number;
       try {
         // ONE open handle for both the timestamp and the bytes. Resolving the path
         // twice can straddle a rewrite and pair one holder's mtime with another's
@@ -198,7 +199,9 @@ export async function acquireLockAt(
         // the same inode makes both decisions describe the same file.
         const handle = await open(lockPath, 'r');
         try {
-          mtimeMs = (await handle.stat()).mtimeMs;
+          const info = await handle.stat();
+          mtimeMs = info.mtimeMs;
+          inode = info.ino;
           contents = await handle.readFile('utf8');
         } finally {
           await handle.close();
@@ -218,12 +221,18 @@ export async function acquireLockAt(
         } catch {
           continue; // another contender won the steal — re-read and retry
         }
-        // Confirm we moved the file we judged, not one the holder refreshed in
-        // between. On a mismatch the holder was alive after all, so put it back —
-        // unless a new lock already exists, which we must not clobber.
+        // Confirm we moved the FILE WE JUDGED, not one the holder replaced in
+        // between. This is the compensating control for the unavoidable gap
+        // between judging a lock and acting on its path: a lock steal is
+        // check-then-act by nature, so the check is re-proved after the act.
+        // Identity is the inode, not the timestamp — a replacement written inside
+        // the same millisecond carries a different inode but can carry the same
+        // mtime. On a mismatch the holder was alive after all, so put it back:
+        // `link` refuses when the path is occupied, which is the right answer,
+        // since a contender that already took it must not be clobbered.
         try {
           const moved = await stat(stolen);
-          if (moved.mtimeMs !== mtimeMs) {
+          if (moved.ino !== inode || moved.mtimeMs !== mtimeMs) {
             // The holder refreshed between our read and the steal, so it was alive:
             // put the file back. `link` is used rather than `rename` because rename
             // OVERWRITES — restoring that way clobbers a lock another contender may
