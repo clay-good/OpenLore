@@ -66,11 +66,21 @@ export function manifestPathOf(analysisDir: string): string {
   return join(analysisDir, GENERATION_MANIFEST_FILE);
 }
 
-async function digestOf(path: string): Promise<GenerationArtifactRecord | null> {
+/**
+ * Digest one artifact, recorded under the NAME it was asked for.
+ *
+ * The name is never derived back out of the joined path. Doing that with a POSIX
+ * separator stored the whole absolute path on Windows, where `join` produces
+ * backslashes — and since the recorded name is what the digest re-check joins
+ * against, every snapshot read on Windows would resolve to a nonexistent file and
+ * report `analysis-changed` forever. Passing the name through keeps the record
+ * platform-independent by construction.
+ */
+async function digestOf(analysisDir: string, name: string): Promise<GenerationArtifactRecord | null> {
   try {
-    const contents = await readFile(path);
+    const contents = await readFile(join(analysisDir, name));
     return {
-      path: path.slice(path.lastIndexOf('/') + 1),
+      path: name,
       sha256: createHash('sha256').update(contents).digest('hex'),
       bytes: contents.byteLength,
     };
@@ -95,7 +105,7 @@ export async function publishGeneration(
 ): Promise<GenerationManifest | null> {
   const records: GenerationArtifactRecord[] = [];
   for (const name of requiredArtifacts) {
-    const record = await digestOf(join(analysisDir, name));
+    const record = await digestOf(analysisDir, name);
     if (!record) return null;
     records.push(record);
   }
@@ -191,7 +201,7 @@ export type GenerationSnapshot<T> =
 async function artifactsStillMatch(analysisDir: string, manifest: GenerationManifest): Promise<boolean> {
   for (const recorded of manifest.artifacts) {
     if (!recorded.sha256) continue; // legacy: no digest was ever taken
-    const current = await digestOf(join(analysisDir, recorded.path));
+    const current = await digestOf(analysisDir, recorded.path);
     if (!current || current.sha256 !== recorded.sha256) return false;
   }
   return true;

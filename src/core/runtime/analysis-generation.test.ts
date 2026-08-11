@@ -61,6 +61,22 @@ describe('publishGeneration', () => {
   });
 });
 
+describe('artifact records are platform-independent', () => {
+  it('records the bare artifact name, never a joined path', async () => {
+    // The recorded name is what the digest re-check joins against. Deriving it from
+    // the joined path with a POSIX separator kept the whole absolute path on
+    // Windows, where `join` emits backslashes — the re-check then resolved a
+    // nonexistent file and every snapshot read reported `analysis-changed`.
+    const dir = await analysisDir();
+    const manifest = await publishGeneration(dir, required);
+    expect(manifest!.artifacts.map(a => a.path)).toEqual([...required].sort());
+    for (const record of manifest!.artifacts) {
+      expect(record.path).not.toContain('/');
+      expect(record.path).not.toContain('\\');
+    }
+  });
+});
+
 describe('readCurrentGeneration', () => {
   it('reads a published manifest', async () => {
     const dir = await analysisDir();
