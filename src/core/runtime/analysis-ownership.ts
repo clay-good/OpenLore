@@ -391,7 +391,10 @@ export async function acquireAnalysisOwnership(
     // Same identity rule as the async release: a superseded owner must not delete
     // the lock its successor now holds.
     try {
-      if (statSync(lockPath).ino === handle.inode) unlinkSync(lockPath);
+      // Same rule as the async release: abstain only when the path positively
+      // names another file; unknown identity still cleans up our own lock.
+      const current = statSync(lockPath).ino;
+      if (!(typeof current === 'number' && handle.inode >= 0 && current !== handle.inode)) unlinkSync(lockPath);
     } catch { /* already gone */ }
     try { unlinkSync(progressPath); } catch { /* already gone */ }
   };

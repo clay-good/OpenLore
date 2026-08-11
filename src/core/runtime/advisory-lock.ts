@@ -133,6 +133,22 @@ export interface LockHeld {
   lockPath: string;
 }
 
+/**
+ * Run a file-handle operation, tolerating a handle that does not implement it.
+ *
+ * A `.catch()` alone is not enough: calling a method the handle lacks throws
+ * SYNCHRONOUSLY, so the rejection handler never runs and the exception escapes
+ * the acquire loop entirely. Identity and heartbeat writes are refinements — a
+ * handle that cannot do them must degrade, never abort the lock.
+ */
+async function tryHandle<T>(operation: () => Promise<T>): Promise<T | undefined> {
+  try {
+    return await operation();
+  } catch {
+    return undefined;
+  }
+}
+
 const defaultPayload = (): string => `${process.pid} ${new Date().toISOString()}`;
 const defaultIsStale = (mtimeMs: number): boolean => Date.now() - mtimeMs > STALE_MS;
 
@@ -173,7 +189,9 @@ export async function acquireLockAt(
       // owner has since put at the same path. The path is not the lock; this inode
       // is. (The descriptor stays open for the handle's lifetime for the same
       // reason — see `refresh`.)
-      const inode = (await fh.stat()).ino;
+      // `-1` when identity is unavailable (a mocked or exotic filesystem). Every
+      // comparison below treats that as "unknown", never as "foreign".
+      const inode = (await tryHandle(async () => (await fh.stat()).ino)) ?? -1;
       let released = false;
       return {
         bestEffort: false,
@@ -185,18 +203,21 @@ export async function acquireLockAt(
           // path with 'w' would truncate whatever lives there now — after a steal,
           // that is the new owner's lock. A descriptor cannot be redirected, so a
           // superseded holder can only ever scribble on the file it already lost.
-          await fh.truncate(0).catch(() => {});
-          await fh.write(payload, 0).catch(() => {});
+          await tryHandle(() => fh.truncate(0));
+          await tryHandle(() => fh.write(payload, 0));
         },
         release: async () => {
           if (released) return;
           released = true;
-          await fh.close().catch(() => {});
-          // Remove the path only while it still names OUR file. A superseded holder
-          // that unlinked blindly would hand the repository to nobody: the new
-          // owner would keep working while its lock had already been deleted.
+          await tryHandle(() => fh.close());
+          // Keep the path only when it positively names a DIFFERENT file. A
+          // superseded holder that unlinked blindly would hand the repository to
+          // nobody: the new owner would keep working with its lock already deleted.
+          // Unknown identity (stat failed, no inode) falls back to removing our own
+          // lock — refusing to clean up on doubt would leak a lock instead.
           const current = await stat(lockPath).then(info => info.ino).catch(() => null);
-          if (current === inode) await unlink(lockPath).catch(() => {});
+          const foreign = typeof current === 'number' && inode >= 0 && current !== inode;
+          if (!foreign) await unlink(lockPath).catch(() => {});
         },
       };
     } catch (err) {
