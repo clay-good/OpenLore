@@ -10,6 +10,7 @@
  */
 
 import { appendFileSync, mkdirSync, renameSync, statSync, unlinkSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { OPENLORE_DIR } from '../../constants.js';
 import { redactSecrets } from './secret-redaction.js';
@@ -20,6 +21,94 @@ const ROTATE_THRESHOLD_BYTES = 50 * 1024 * 1024;  // 50 MB
  *  Exported so readers that must span rotation (e.g. the panic accuracy gate) stay in lockstep. */
 export const MAX_ROTATED_FILES = 5;
 const _createdDirs = new Set<string>();
+
+// ── Emitting identity (change: scope-telemetry-by-agent-and-session) ─────────
+// A repository is a shared surface: two agents (a coding agent and one it spawns)
+// write the SAME telemetry files. Without identity stamped at WRITE time, a
+// reader cannot separate them afterwards — one agent's calls land in the other's
+// statistics, and an interval metric pairs one actor's stale warning with
+// another's later orientation, hours apart. So identity is resolved once per
+// process and merged into every event here, rather than added at each call site.
+
+export interface TelemetryIdentity {
+  /** Emitting agent (MCP `clientInfo.name`, or `cli:<command>` for CLI runs). */
+  agent: string;
+  /** Emitting agent's version, `unknown` when the source did not state one. */
+  agent_version: string;
+  /** Stable for this process, distinct across processes. */
+  session_id: string;
+}
+
+/** Identity source registered by the host, resolved lazily and at most once. */
+type IdentitySource = () => { agent?: string; agentVersion?: string };
+
+let _identity: TelemetryIdentity | null = null;
+let _identitySource: IdentitySource | null = null;
+let _sessionId: string | null = null;
+
+/** Mint the per-process session id. Never throws — falls back to pid+time. */
+function sessionId(): string {
+  if (_sessionId) return _sessionId;
+  try {
+    _sessionId = `${process.pid.toString(36)}-${randomUUID().slice(0, 8)}`;
+  } catch {
+    _sessionId = `${process.pid.toString(36)}-${Date.now().toString(36)}`;
+  }
+  return _sessionId;
+}
+
+/**
+ * Register the emitting agent directly (MCP servers know it at initialize time).
+ * Re-registering replaces the name but KEEPS the session id: one process is one
+ * session, even if the client identifies itself late.
+ */
+export function setTelemetryIdentity(agent: string, agentVersion?: string): void {
+  _identity = {
+    agent: agent || 'unknown',
+    agent_version: agentVersion || 'unknown',
+    session_id: sessionId(),
+  };
+  _identitySource = null;
+}
+
+/**
+ * Register a lazy identity source for hosts that only know the agent later (the
+ * CLI derives it from the invoked command). Resolved at most once, on first emit.
+ */
+export function setTelemetryIdentitySource(source: IdentitySource): void {
+  if (_identity) return;  // an explicit identity always wins
+  _identitySource = source;
+}
+
+/**
+ * The identity stamped on every event. Never throws: a source that throws, or one
+ * that yields nothing, degrades to `unknown` — an unattributed event is honest,
+ * a missing event is not.
+ */
+export function getTelemetryIdentity(): TelemetryIdentity {
+  if (_identity) return _identity;
+  let agent = 'unknown';
+  let agentVersion = 'unknown';
+  if (_identitySource) {
+    try {
+      const resolved = _identitySource();
+      agent = resolved?.agent || 'unknown';
+      agentVersion = resolved?.agentVersion || 'unknown';
+    } catch {
+      // Identity resolution must never cost an event.
+    }
+    _identitySource = null;
+  }
+  _identity = { agent, agent_version: agentVersion, session_id: sessionId() };
+  return _identity;
+}
+
+/** Test seam: forget the resolved identity so a case can register its own. */
+export function resetTelemetryIdentityForTests(): void {
+  _identity = null;
+  _identitySource = null;
+  _sessionId = null;
+}
 
 function rotateTelemetryFile(filePath: string): void {
   // Shift existing rotated files: .5.jsonl deleted, .4 → .5, …, .1 → .2
@@ -55,8 +144,11 @@ export function emit(
       if (size >= ROTATE_THRESHOLD_BYTES) rotateTelemetryFile(filePath);
     } catch { /* file doesn't exist yet */ }
     // Defense in depth: a telemetry payload must never carry a credential to disk
-    // (mcp-security: Secret Confinement Across All Output Paths).
-    const safe = redactSecrets(payload);
+    // (mcp-security: Secret Confinement Across All Output Paths). The identity is
+    // redacted with the payload — the agent name comes from an external client.
+    // Payload fields win over identity, so a call site that already states its
+    // own `agent` (the orient events) keeps that attribution.
+    const safe = redactSecrets({ ...getTelemetryIdentity(), ...payload });
     const line = JSON.stringify({ ts: new Date().toISOString(), ...safe }) + '\n';
     appendFileSync(filePath, line, 'utf-8');
   } catch {

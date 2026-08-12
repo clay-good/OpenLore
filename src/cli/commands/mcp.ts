@@ -51,7 +51,7 @@ import {
 } from '../../core/services/cold-start-bootstrap.js';
 import type { PanicResponseMode } from '../../types/index.js';
 import { readPanicState, mutatePanicStateLocked, getPanicSignalText } from '../../core/services/mcp-handlers/panic-response.js';
-import { emit } from '../../core/services/telemetry.js';
+import { emit, setTelemetryIdentity } from '../../core/services/telemetry.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
 import { MCP_TOOL_MAX_BYTES, LEAN_DEFAULT_PRESET, FULL_PRESET, FULL_PRESET_ALIAS } from '../../constants.js';
 import { capabilityFamily, groupToolsByFamily, resolveCanonicalToolName } from '../../core/services/mcp-handlers/tool-contract.js';
@@ -2492,6 +2492,10 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
   server.setRequestHandler(InitializeRequestSchema, async (request) => {
     agentName = request.params.clientInfo?.name ?? 'unknown';
     agentVersion = request.params.clientInfo?.version ?? 'unknown';
+    // Stamp every event this process emits with the client that opened it, so a
+    // repository shared by two agents stays separable at read time
+    // (change: scope-telemetry-by-agent-and-session).
+    setTelemetryIdentity(agentName, agentVersion);
     // Protocol negotiation (spec-12): echo the client's requested version when we
     // support it (per the SDK's pinned set), else offer our latest supported one.
     const requested = request.params.protocolVersion;

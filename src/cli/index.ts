@@ -44,6 +44,7 @@ import { testCommand } from './commands/test.js';
 import { digestCommand } from './commands/digest.js';
 import { decisionsCommand } from './commands/decisions.js';
 import { telemetryCommand } from './commands/telemetry.js';
+import { setTelemetryIdentitySource } from '../core/services/telemetry.js';
 import { installCommand } from './install/index.js';
 import { connectCommand } from './commands/connect.js';
 import { federationCommand } from './commands/federation.js';
@@ -260,6 +261,16 @@ program.addCommand(updateCommand);
 // (CommandSurfaceGroupedByJob). Presentation only — every command stays invocable.
 // Must run after the last addCommand(): it tags each registered subcommand with its group.
 applyJobGroupedHelp(program);
+
+// Attribute telemetry emitted by a CLI run to the command that produced it, so a
+// CLI-originated event never lands in an MCP client's statistics
+// (change: scope-telemetry-by-agent-and-session). Lazy: resolved on first emit,
+// and only when telemetry is enabled — a run that emits nothing pays nothing.
+setTelemetryIdentitySource(() => {
+  const command = process.argv[2];
+  const isCommand = typeof command === 'string' && command.length > 0 && !command.startsWith('-');
+  return { agent: `cli:${isCommand ? command : 'unknown'}`, agentVersion: version };
+});
 
 // A bare `openlore` (no command) is the most natural way a new user explores the tool.
 // Show help on stdout and exit 0 instead of Commander's default (help on stderr, exit 1).
