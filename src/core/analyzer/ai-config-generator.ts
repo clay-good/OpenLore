@@ -15,6 +15,7 @@
 import { writeFile, mkdir } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileExists } from '../../utils/command-helpers.js';
+import { resolveWiredPreset, presetToolNames, enablingCommandFor } from '../services/wired-preset.js';
 
 // ============================================================================
 // TYPES
@@ -35,6 +36,13 @@ export interface AiConfigOptions {
    * Defaults to all tools if omitted.
    */
   tools?: AiTool[];
+  /**
+   * The wired MCP preset the guidance is written for. Omitted = read from the
+   * repository's MCP registration (or the documented default when unwired), so
+   * the guidance can never prescribe a tool the agent cannot call
+   * (change: align-generated-guidance-with-installed-preset).
+   */
+  preset?: string;
 }
 
 // ============================================================================
@@ -65,23 +73,56 @@ export const AI_TOOL_TARGETS: ToolTarget[] = [
 // TEMPLATE
 // ============================================================================
 
-const MCP_TOOLS_TABLE = `
-## openlore MCP workflow
+/**
+ * The orientation rule, stated as a CONDITION rather than an absolute
+ * (change: align-generated-guidance-with-installed-preset).
+ *
+ * "ALWAYS call orient before reading source files" was routinely ignored on the
+ * work it does not fit — repeated edits inside one already-read file — and an
+ * instruction that is routinely ignored teaches the agent to discount the whole
+ * instruction set, including the turns where orienting would have paid. The
+ * condition names the case where the lookup actually replaces work.
+ */
+const ORIENT_GUIDANCE = `
+## When to orient
 
-**Follow this sequence for every task:**
+Call \`orient "<task description>"\` **before touching a module you have not yet read
+in this session**, and when a task spans several modules. It returns the relevant
+functions, callers, spec sections, and insertion points in one lookup instead of
+file-by-file rediscovery.
 
-1. **\`orient "<task description>"\`** — always start here. Returns relevant functions, files, spec domains, call paths, and insertion points in one call.
-2. **If the task involves data models, APIs, or config** — call the relevant inventory tool:
-   \`get_schema_inventory\` · \`get_route_inventory\` · \`get_env_vars\` · \`get_ui_component_inventory\` · \`get_middleware_inventory\`
-3. **If debugging a call flow** ("how does X reach Y?") — \`trace_execution_path\`
-4. **Before modifying a function** — \`get_subgraph\` to understand blast radius
-5. **Before opening a PR** — \`check_spec_drift\`
+Skip it for work you are already inside: repeated edits to a file you have read this
+session do not need re-orientation. Reach for it again when the task moves to
+unfamiliar code.
+`.trim();
 
-**On-demand** (when orient's results aren't enough):
-\`search_code\` · \`suggest_insertion_points\` · \`get_spec <domain>\` · \`search_specs\` · \`analyze_impact\` · \`get_function_body\` · \`get_function_skeleton\`
+/** One workflow entry in the generated guidance, with the tools it needs to be callable. */
+interface GuidanceEntry {
+  /** Tools this entry instructs the agent to call. */
+  requires: string[];
+  /** Rendered when every required tool is available. */
+  render: () => string;
+}
 
-## Architectural decisions
+const WORKFLOW_ENTRIES: GuidanceEntry[] = [
+  {
+    requires: ['get_schema_inventory', 'get_route_inventory', 'get_env_vars', 'get_ui_component_inventory', 'get_middleware_inventory'],
+    render: () => '- **Data models, APIs, or config** — `get_schema_inventory` · `get_route_inventory` · `get_env_vars` · `get_ui_component_inventory` · `get_middleware_inventory`',
+  },
+  { requires: ['trace_execution_path'], render: () => '- **Debugging a call flow** ("how does X reach Y?") — `trace_execution_path`' },
+  { requires: ['get_subgraph'], render: () => '- **Before modifying a function** — `get_subgraph` for blast radius' },
+  { requires: ['blast_radius'], render: () => '- **Weighing a diff before committing** — `blast_radius`' },
+  { requires: ['check_spec_drift'], render: () => '- **Before opening a PR** — `check_spec_drift`' },
+  { requires: ['recall'], render: () => '- **Touching code others have reasoned about** — `recall` for anchored notes and decisions' },
+  { requires: ['verify_claim'], render: () => '- **About to assert a structural fact to a human** — `verify_claim`, then cite the receipt' },
+];
 
+const ON_DEMAND_TOOLS = [
+  'search_code', 'suggest_insertion_points', 'get_spec', 'search_specs',
+  'analyze_impact', 'get_function_body', 'get_function_skeleton', 'find_path', 'get_map',
+];
+
+const DECISIONS_BODY = `
 When making a significant design choice, call \`record_decision\` **before** writing the code.
 
 Significant choices: data structure, library/dependency, API contract, auth strategy, module boundary, database schema, caching approach, error handling pattern.
@@ -101,7 +142,63 @@ Decisions are consolidated in the background immediately after \`record_decision
 **Performance note**: if you skip \`record_decision\`, the gate detects unrecorded source changes at commit time and triggers a slow LLM extraction on the *next* commit (~10-30s). Calling \`record_decision\` proactively keeps every commit instant. Do not record trivial choices (variable names, formatting).
 `.trim();
 
-function buildContent(analysisDir: string, projectName: string, forClaude: boolean): string {
+/**
+ * Build the MCP workflow section for the surface actually wired here.
+ *
+ * `available === null` means the full surface (every tool callable). Otherwise an
+ * entry whose tools are absent is dropped, and the decisions workflow — the one
+ * whose absence silently blocked a task — is kept but rewritten as a prerequisite
+ * with the exact command that enables it, never as a callable instruction.
+ */
+function buildMcpSection(
+  preset: string,
+  available: ReadonlySet<string> | null,
+  enablingCommand: string,
+): string {
+  const has = (tool: string) => available === null || available.has(tool);
+  const lines: string[] = ['## openlore MCP workflow', ''];
+
+  lines.push(`_Written for the wired \`${preset}\` surface. Re-run \`openlore install --preset <name>\` after changing it so this section is regenerated._`, '');
+
+  if (has('orient')) {
+    lines.push(ORIENT_GUIDANCE, '');
+  }
+
+  const entries = WORKFLOW_ENTRIES.filter(e => e.requires.some(has))
+    .map(e => e.render());
+  if (entries.length) {
+    lines.push('**Then, by situation:**', '', ...entries, '');
+  }
+
+  const onDemand = ON_DEMAND_TOOLS.filter(has);
+  if (onDemand.length) {
+    lines.push(`**On-demand** (when orient's results aren't enough): ${onDemand.map(t => `\`${t}\``).join(' · ')}`, '');
+  }
+
+  lines.push('## Architectural decisions', '');
+  if (has('record_decision')) {
+    lines.push(DECISIONS_BODY);
+  } else {
+    // Honest form: state the prerequisite instead of prescribing a tool the
+    // agent cannot call. This is the exact failure this change exists to fix.
+    lines.push(
+      `\`record_decision\` is **not** part of the wired \`${preset}\` surface, so the decision-recording workflow is unavailable in this repository.`,
+      '',
+      `To enable it: \`${enablingCommand}\`  — then this section regenerates with the full workflow.`,
+      '',
+      'Until then, do not plan around `record_decision`: it will not be callable.',
+    );
+  }
+
+  return lines.join('\n').trimEnd();
+}
+
+function buildContent(
+  analysisDir: string,
+  projectName: string,
+  forClaude: boolean,
+  mcpSection: string,
+): string {
   const digestRef = forClaude
     ? `@${analysisDir}/CODEBASE.md`
     : `<!-- Import or paste ${analysisDir}/CODEBASE.md here for full project context -->`;
@@ -111,7 +208,7 @@ function buildContent(analysisDir: string, projectName: string, forClaude: boole
     '',
     digestRef,
     '',
-    MCP_TOOLS_TABLE,
+    mcpSection,
   ].join('\n');
 }
 
@@ -151,10 +248,20 @@ export async function generateAiConfigs(options: AiConfigOptions): Promise<AiCon
     ? AI_TOOL_TARGETS.filter(t => tools.includes(t.tool))
     : AI_TOOL_TARGETS;
 
+  // Resolve the wired surface ONCE for this generation pass: every file written
+  // here describes the same repository, so they must not disagree about which
+  // tools are callable (change: align-generated-guidance-with-installed-preset).
+  const wired = options.preset
+    ? { preset: options.preset, source: 'caller' }
+    : await resolveWiredPreset(rootDir);
+  const available = await presetToolNames(wired.preset);
+  const enablingCommand = await enablingCommandFor('record_decision', wired.preset);
+  const mcpSection = buildMcpSection(wired.preset, available, enablingCommand);
+
   return Promise.all(
     targets.map(async ({ rel, forClaude }) => {
       const absPath = join(rootDir, rel);
-      const content = buildContent(analysisDir, projectName, forClaude);
+      const content = buildContent(analysisDir, projectName, forClaude, mcpSection);
       const created = await writeIfAbsent(absPath, content);
       return { rel, created };
     })
