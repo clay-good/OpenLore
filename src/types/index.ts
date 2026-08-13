@@ -620,6 +620,41 @@ export type DecisionScope =
   | 'cross-domain' // touches multiple spec domains or service contracts
   | 'system';      // global constraint (auth, data model, infra, API protocol)
 
+/**
+ * Terminal verdict a draft receives from consolidation
+ * (change: explain-decision-rejection). A draft may no longer simply stop
+ * existing: every input draft carries one of these, and `pending` is the honest
+ * state of a draft consolidation has not reached yet — never a silent rejection.
+ */
+export type DecisionDisposition = 'pending' | 'promoted' | 'merged-into' | 'rejected';
+
+/**
+ * Stable reason codes for a disposition. Source-declared (see
+ * `DECISION_DISPOSITION_REASONS` in `src/core/decisions/disposition.ts`) so a
+ * caller can branch on the code and a human can read the description.
+ */
+export type DecisionDispositionReason =
+  | 'promoted-as-recorded'
+  | 'promoted-with-rewrite'
+  | 'merged-into-consolidated'
+  | 'superseded-by-later-draft'
+  | 'not-in-consolidated-set'
+  | 'no-supporting-diff'
+  | 'awaiting-consolidation'
+  | 'legacy-unknown';
+
+/**
+ * The author's own words, kept verbatim when consolidation re-derives a
+ * decision's content from the diff (change: explain-decision-rejection).
+ * Recorded text is never rewritten in place — the served content and what the
+ * author actually wrote are both readable.
+ */
+export interface AuthorStatement {
+  title: string;
+  rationale: string;
+  recordedAt: string;
+}
+
 export type DecisionStatus =
   | 'draft'         // recorded by agent during dev session
   | 'consolidated'  // LLM has merged/resolved drafts
@@ -656,6 +691,23 @@ export interface PendingDecision {
 
   /** ID of a prior decision this one supersedes (agent signals a reversal) */
   supersedes?: string;
+
+  /**
+   * Terminal verdict from consolidation and its stable reason
+   * (change: explain-decision-rejection). Additive: a record written before this
+   * existed reads as `legacy-unknown`, never as a rejection.
+   */
+  disposition?: DecisionDisposition;
+  dispositionReason?: DecisionDispositionReason;
+  /** Set exactly when `disposition` is `merged-into`: the surviving decision's id. */
+  mergedIntoId?: string;
+  /** When the disposition was assigned (ISO). */
+  dispositionAt?: string;
+  /**
+   * The agent-recorded title/rationale, retained verbatim when consolidation
+   * re-derived the served content. Present only when the two differ.
+   */
+  authorStatement?: AuthorStatement;
 
   // Provenance
   sessionId: string;

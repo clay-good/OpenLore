@@ -12,6 +12,12 @@ import { logger } from '../../utils/logger.js';
 import type { LLMService } from '../services/llm-service.js';
 import type { PendingDecision, DecisionStore, SpecMap, DecisionScope } from '../../types/index.js';
 import { makeDecisionId } from './store.js';
+import {
+  authorStatementOf,
+  computeDraftDispositions,
+  contentWasRewritten,
+  type DraftDisposition,
+} from './disposition.js';
 import { parseJSON } from '../../utils/misc.js';
 import { matchFileToDomains } from '../drift/spec-mapper.js';
 import { createPromptBoundary } from '../../utils/prompt-boundary.js';
@@ -114,6 +120,12 @@ function isConsolidatedRaw(value: unknown): value is ConsolidatedRaw {
 export interface ConsolidateResult {
   decisions: PendingDecision[];
   supersededIds: string[];
+  /**
+   * One terminal verdict per INPUT draft (change: explain-decision-rejection).
+   * `dispositions.length === drafts.length` always — a draft can no longer leave
+   * consolidation without a reason the author can read.
+   */
+  dispositions: DraftDisposition[];
 }
 
 export async function consolidateDrafts(
@@ -122,7 +134,7 @@ export async function consolidateDrafts(
   specMap?: SpecMap,
 ): Promise<ConsolidateResult> {
   const drafts = store.decisions.filter((d) => d.status === 'draft');
-  if (drafts.length === 0) return { decisions: [], supersededIds: [] };
+  if (drafts.length === 0) return { decisions: [], supersededIds: [], dispositions: [] };
 
   // Non-draft decisions are context only. Their durable IDs may not be reused by
   // LLM output because replaceDecisions() overwrites matching records.
@@ -191,6 +203,8 @@ export async function consolidateDrafts(
     .flatMap((c) => c.supersededIds ?? [])
     .filter((id) => declaredSupersessionIds.has(id));
 
+  const draftById = new Map(drafts.map((d) => [d.id, d]));
+
   const decisions = consolidated.map((c): PendingDecision => {
     // Remap LLM-produced domain names to spec-map ground truth using affectedFiles.
     // Falls back to LLM names if specMap is absent or files yield no match.
@@ -202,6 +216,14 @@ export async function consolidateDrafts(
       c.id && draftIds.has(c.id)
         ? c.id
         : makeDecisionId(store.sessionId, domain, c.title);
+    // Preserve the author's words when the consolidator re-derived the wording.
+    // The served content stays `llm-extracted` — what changes is that the text
+    // the agent actually wrote is no longer discarded without trace.
+    const source = draftById.get(id);
+    const authorStatement = source && contentWasRewritten(source, {
+      ...source, title: c.title, rationale: c.rationale,
+    }) ? authorStatementOf(source) : undefined;
+
     return {
       id,
       status: 'consolidated',
@@ -218,10 +240,18 @@ export async function consolidateDrafts(
       recordedAt: now,
       consolidatedAt: now,
       syncedToSpecs: [],
+      ...(authorStatement ? { authorStatement } : {}),
     };
   });
 
-  return { decisions, supersededIds: allSupersededIds };
+  // One verdict per input draft — including the drafts the LLM did not return.
+  const dispositions = computeDraftDispositions({
+    drafts,
+    consolidated: decisions,
+    supersededIds: allSupersededIds,
+  });
+
+  return { decisions, supersededIds: allSupersededIds, dispositions };
 }
 
 /**

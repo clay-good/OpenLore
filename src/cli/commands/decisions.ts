@@ -37,6 +37,14 @@ import {
 import { readLedger } from '../../core/decisions/ledger.js';
 import { rewriteSyncedDecisionStatus } from '../../core/decisions/syncer.js';
 import { consolidateDrafts } from '../../core/decisions/consolidator.js';
+import {
+  DECISION_DISPOSITION_REASONS,
+  applyDispositions,
+  describeDisposition,
+  readDisposition,
+  withVerificationOutcome,
+  type DraftDisposition,
+} from '../../core/decisions/disposition.js';
 import { classifyGateState } from '../../core/decisions/gate-state.js';
 import { acquireDecisionsLock } from '../../core/decisions/lock.js';
 import { extractFromDiff } from '../../core/decisions/extractor.js';
@@ -753,11 +761,13 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
       const specMapResult = await buildSpecMap({ rootPath, openspecPath }).catch(() => undefined);
       let consolidated: PendingDecision[];
       let supersededIds: string[] = [];
+      let dispositions: DraftDisposition[] = [];
       if (hasDrafts) {
         if (!options.json) logger.discovery(`Consolidating ${drafts.length} draft decision(s) via ${resolved.provider}...`);
         const result = await consolidateDrafts(store, llm, specMapResult);
         consolidated = result.decisions;
         supersededIds = result.supersededIds;
+        dispositions = result.dispositions;
       } else {
         if (!options.json) logger.discovery(`No drafts found — extracting decisions from diff via ${resolved.provider}...`);
         const specMap = specMapResult ?? await buildSpecMap({ rootPath, openspecPath });
@@ -765,7 +775,22 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
         consolidated = await extractFromDiff({ rootPath, stagedOnly: true, specMap, sessionId: store.sessionId, llm });
       }
       if (consolidated.length === 0) {
-        if (!options.json) console.log('No architectural decisions found in drafts.');
+        // Nothing survived — but every draft still gets its verdict, so the author
+        // can read WHY rather than watch the draft disappear
+        // (change: explain-decision-rejection).
+        if (dispositions.length > 0) {
+          await updateDecisionStore(rootPath, (s) => applyDispositions(s, dispositions), 'agent');
+        }
+        if (!options.json) {
+          console.log('No architectural decisions found in drafts.');
+          for (const d of dispositions) {
+            const entry = DECISION_DISPOSITION_REASONS[d.reason];
+            console.log(`  ${d.id}: ${d.disposition} [${d.reason}] — ${entry.description}${entry.nextAction ? ` → ${entry.nextAction}` : ''}`);
+          }
+          if (dispositions.length > 0) console.log('  Read a verdict any time with: openlore decisions status <id>');
+        } else {
+          process.stdout.write(JSON.stringify({ verified: [], phantom: [], missing: [], dispositions }, null, 2) + '\n');
+        }
         if (options.gate) process.exitCode = 0;
         return;
       }
@@ -819,12 +844,15 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
       // record_decision/approve committed concurrently (different lock) is preserved
       // rather than clobbered by this stale snapshot. replaceDecisions (not upsert)
       // because consolidated decisions share IDs with their original drafts.
+      const finalDispositions = withVerificationOutcome(dispositions, new Set(phantom.map((d) => d.id)));
       const updatedStore = await updateDecisionStore(rootPath, (s) => {
         let next = s;
         for (const id of [...originalDraftIds, ...supersededIds]) {
           next = patchDecision(next, id, { status: 'rejected' });
         }
         next = replaceDecisions(next, withProvenance);
+        // Every input draft's verdict, written alongside the status transition.
+        next = applyDispositions(next, finalDispositions);
         return { ...next, lastConsolidatedAt: new Date().toISOString() };
       });
 
@@ -1252,6 +1280,70 @@ decisionsCommand
       console.log(`\nTotal: ${entries.length} transition(s)`);
     } catch (err) {
       logger.error(`decisions log failed: ${(err as Error).message}`);
+      process.exitCode = 1;
+    } finally {
+      restoreStdout?.();
+    }
+  });
+
+decisionsCommand
+  .command('status')
+  .argument('<id>', '8-char decision/draft id')
+  .description('Report a draft\'s terminal disposition and reason (pending, promoted, merged-into, rejected)')
+  .option('--json', 'Output as JSON', false)
+  .action(async (id: string, opts: { json: boolean }, cmd: Command) => {
+    const parentOpts = (cmd.parent?.opts() ?? {}) as { json?: boolean };
+    const json = Boolean(opts.json || parentOpts.json);
+    const restoreStdout = json ? redirectConsoleToStderr() : null;
+    try {
+      const rootPath = process.cwd();
+      const store = await loadDecisionStore(rootPath);
+      const decision = store.decisions.find((d) => d.id === id);
+      if (!decision) {
+        // An id the store has never held is "not found" — never a rejection.
+        if (json) {
+          process.stdout.write(JSON.stringify({ id, found: false, note: 'No decision or draft with this id — not found, NOT rejected.' }, null, 2) + '\n');
+        } else {
+          logger.warning(`No decision or draft with id ${safe(id)} — not found, NOT rejected.`);
+        }
+        process.exitCode = 1;
+        return;
+      }
+
+      const { disposition, reason, mergedIntoId } = readDisposition(decision);
+      const entry = DECISION_DISPOSITION_REASONS[reason];
+      if (json) {
+        process.stdout.write(JSON.stringify({
+          id: decision.id,
+          found: true,
+          status: decision.status,
+          disposition,
+          reason,
+          reasonDescription: entry.description,
+          ...(entry.nextAction ? { nextAction: entry.nextAction } : {}),
+          ...(mergedIntoId ? { mergedIntoId } : {}),
+          ...(decision.dispositionAt ? { dispositionAt: decision.dispositionAt } : {}),
+          title: decision.title,
+          contentOrigin: decision.contentOrigin,
+          ...(decision.verificationEvidence ? { verificationEvidence: decision.verificationEvidence } : {}),
+          ...(decision.authorStatement ? { authorStatement: decision.authorStatement } : {}),
+        }, null, 2) + '\n');
+        return;
+      }
+
+      logger.section(`Decision ${safe(decision.id)}`);
+      console.log(`  title:       ${safe(decision.title)}`);
+      console.log(`  status:      ${safe(decision.status)}`);
+      console.log(`  disposition: ${describeDisposition(decision)}`);
+      // Provenance the author needs to interpret the served text.
+      console.log(`  content:     ${safe(decision.contentOrigin)}${decision.verificationEvidence ? ` (evidence: ${safe(decision.verificationEvidence)})` : ''}`);
+      if (decision.authorStatement) {
+        console.log('  authorStatement (your recorded wording, kept verbatim):');
+        console.log(`    title:     ${safe(decision.authorStatement.title)}`);
+        console.log(`    rationale: ${safe(decision.authorStatement.rationale)}`);
+      }
+    } catch (err) {
+      logger.error(`decisions status failed: ${(err as Error).message}`);
       process.exitCode = 1;
     } finally {
       restoreStdout?.();

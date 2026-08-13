@@ -164,7 +164,7 @@ describe('openloreConsolidateDecisions — verification evidence', () => {
     const store = makeStore([draft]);
     vi.mocked(loadDecisionStore).mockResolvedValue(store);
     vi.mocked(updateDecisionStore).mockResolvedValue(store);
-    vi.mocked(consolidateDrafts).mockResolvedValue({ decisions: [draft], supersededIds: [] });
+    vi.mocked(consolidateDrafts).mockResolvedValue({ decisions: [draft], supersededIds: [], dispositions: [{ id: draft.id, disposition: "promoted", reason: "promoted-as-recorded" }] });
 
     const result = await openloreConsolidateDecisions({ rootPath: '/test/project', provider: 'anthropic' });
 
@@ -179,7 +179,7 @@ describe('openloreConsolidateDecisions — verification evidence', () => {
     const store = makeStore([draft]);
     vi.mocked(loadDecisionStore).mockResolvedValue(store);
     vi.mocked(updateDecisionStore).mockResolvedValue(store);
-    vi.mocked(consolidateDrafts).mockResolvedValue({ decisions: [draft], supersededIds: [] });
+    vi.mocked(consolidateDrafts).mockResolvedValue({ decisions: [draft], supersededIds: [], dispositions: [{ id: draft.id, disposition: "promoted", reason: "promoted-as-recorded" }] });
     vi.mocked(isGitRepositoryRoot).mockResolvedValue(true);
     vi.mocked(verifyDecisions).mockImplementation(async () => {
       expect(mocks.saveLogs).not.toHaveBeenCalled();

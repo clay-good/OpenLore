@@ -26,6 +26,7 @@ import {
   illegalPromotionToApproved,
 } from '../core/decisions/store.js';
 import { consolidateDrafts } from '../core/decisions/consolidator.js';
+import { applyDispositions, withVerificationOutcome } from '../core/decisions/disposition.js';
 import type { ProviderName } from '../utils/command-helpers.js';
 import { markVerificationEvidenceAbsent, verifyDecisions } from '../core/decisions/verifier.js';
 import { syncApprovedDecisions } from '../core/decisions/syncer.js';
@@ -160,12 +161,18 @@ export async function openloreConsolidateDecisions(
   const specMap = await buildSpecMap({ rootPath, openspecPath }).catch(() => undefined);
 
   progress(onProgress, 'Consolidating drafts', 'start');
-  const { decisions: consolidated, supersededIds } = await consolidateDrafts(store, llm, specMap);
+  const { decisions: consolidated, supersededIds, dispositions } = await consolidateDrafts(store, llm, specMap);
   progress(onProgress, 'Consolidating drafts', 'complete', `${consolidated.length} decisions`);
 
   if (consolidated.length === 0) {
     await llm.saveLogs().catch(() => {});
-    return { verified: [], phantom: [], missing: [], store };
+    // Consolidation kept nothing — but the drafts still get their verdicts. A
+    // draft that produced no decision must say so, not vanish
+    // (change: explain-decision-rejection).
+    const withVerdicts = dispositions.length
+      ? await updateDecisionStore(rootPath, (s) => applyDispositions(s, dispositions))
+      : store;
+    return { verified: [], phantom: [], missing: [], store: withVerdicts };
   }
 
   // Build combined diff + commit messages for verification
@@ -202,8 +209,9 @@ export async function openloreConsolidateDecisions(
   // replaceDecisions (via applyConsolidationResult), NOT upsert: consolidated decisions
   // reuse their drafts' deterministic ids, so an upsert would silently drop the verified
   // status. Matches the CLI consolidation path.
+  const finalDispositions = withVerificationOutcome(dispositions, new Set(phantom.map((d) => d.id)));
   const updatedStore = await updateDecisionStore(rootPath, (s) =>
-    applyConsolidationResult(s, { verified, phantom, supersededIds }),
+    applyDispositions(applyConsolidationResult(s, { verified, phantom, supersededIds }), finalDispositions),
   );
 
   return { verified, phantom, missing, store: updatedStore };

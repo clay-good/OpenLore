@@ -1929,10 +1929,14 @@ export const TOOL_DEFINITIONS = [
   {
     name: 'record_decision',
     description:
-      'Record an architectural decision made during the current development session. ' +
+      'Record a DRAFT architectural decision for the current session — a proposal, not a final record. ' +
       'Call this whenever you make a significant design choice: choosing a data structure, ' +
       'picking a library, defining an API contract, selecting an auth strategy, etc. ' +
-      'Decisions are stored as drafts and consolidated before the next commit. ' +
+      'The draft is then decided by diff-grounded consolidation, which promotes it (possibly ' +
+      'rewording it from the diff, keeping your text as authorStatement), merges it into another ' +
+      'decision, or rejects it — always with a stated reason. The response returns the draft id ' +
+      'and the command that reads its verdict (`openlore decisions status <id>`); re-recording an ' +
+      'already-decided draft returns that verdict instead of creating a second one. ' +
       'Use the supersedes field when a later decision replaces an earlier one.',
     inputSchema: {
       type: 'object',
