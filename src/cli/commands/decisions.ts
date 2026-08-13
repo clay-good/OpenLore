@@ -785,7 +785,9 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
           console.log('No architectural decisions found in drafts.');
           for (const d of dispositions) {
             const entry = DECISION_DISPOSITION_REASONS[d.reason];
-            console.log(`  ${d.id}: ${d.disposition} [${d.reason}] — ${entry.description}${entry.nextAction ? ` → ${entry.nextAction}` : ''}`);
+            // The id comes from the analyzed repository's decision store, so it is
+            // untrusted terminal input like any other repo-derived value.
+            console.log(`  ${safe(d.id)}: ${d.disposition} [${d.reason}] — ${entry.description}${entry.nextAction ? ` → ${entry.nextAction}` : ''}`);
           }
           if (dispositions.length > 0) console.log('  Read a verdict any time with: openlore decisions status <id>');
         } else {
