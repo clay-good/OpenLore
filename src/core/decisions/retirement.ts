@@ -27,7 +27,7 @@ import { existsSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { logger } from '../../utils/logger.js';
 import { loadDecisionStore, saveDecisionStore } from './store.js';
-import { loadMemoryStore, updateMemoryStore } from './memory-store.js';
+import { updateMemoryStore } from './memory-store.js';
 import type {
   AnchoredMemory,
   PendingDecision,

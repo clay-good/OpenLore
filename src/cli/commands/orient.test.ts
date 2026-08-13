@@ -21,6 +21,7 @@ vi.mock('node:fs', async (importOriginal) => {
 });
 
 import { orientCommand, readStdin } from './orient.js';
+import { pointerLineFor } from './orient-inject-render.js';
 import { handleOrient } from '../../core/services/mcp-handlers/orient.js';
 import { existsSync } from 'node:fs';
 import { PassThrough } from 'node:stream';
@@ -129,7 +130,11 @@ describe('orient command', () => {
     it('emits the pointer line (never throws) when handleOrient returns an error result', async () => {
       mockHandleOrient.mockResolvedValue({ error: 'No analysis found.' });
       await orientCommand.parseAsync(['--inject', '--task', 'whatever'], { from: 'user' });
-      expect(output()).toContain('Structural context is available');
+      // The pointer line now states WHY the briefing was withheld
+      // (change: scope-advisory-noise-to-touched-code) — here, orientation failed.
+      expect(output()).toContain('[OpenLore] No briefing:');
+      expect(output()).toContain('orientation failed for this turn');
+      expect(output()).toContain('orient');
       expect(process.exitCode).toBeUndefined();
     });
 
@@ -147,9 +152,13 @@ describe('orient command', () => {
 
       await orientCommand.parseAsync(['--inject', '--task', 'update the documentation'], { from: 'user' });
 
-      expect(output()).toBe('[OpenLore] Structural context is available — call `orient` with your task for a deterministic briefing (relevant functions, callers, insertion points). Informational; ignore if not useful.');
+      // A weak match is withheld with its own stated reason, distinct from the
+      // "no lookup was performed" variants (change: scope-advisory-noise-to-touched-code).
+      expect(output()).toBe(pointerLineFor('weak-relevance'));
+      expect(output()).toContain('nothing in the graph matched this turn');
       const stderrText = stderrSpy.mock.calls.map(c => String(c[0])).join('');
       expect(stderrText).toContain('[openlore:inject] verdict=suppressed');
+      expect(stderrText).toContain('reason=weak-relevance');
       expect(stderrText).toContain('failed=');
       expect(stderrText).not.toContain('hybrid-score');
       expect(output()).not.toContain('verdict=suppressed');
