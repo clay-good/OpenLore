@@ -224,7 +224,7 @@ describe('reproducer: a pathological file is abandoned rather than stalling the 
     // abandoned file through the SAME singleton parser, and without a reset it produced nothing.
     expect([...result.nodes.values()].some(n => n.name === 'a')).toBe(true);
     expect(result.parseHealthByFile?.has('src/ok.ts')).toBe(false);
-  }, 60_000);
+  }, 180_000);
 
   it('records the same thing twice — a budget-exceeded file must not make the artifact non-deterministic', async () => {
     // `parse-health.json` is persisted and must be byte-identical across re-analyses of a fixed
@@ -237,13 +237,19 @@ describe('reproducer: a pathological file is abandoned rather than stalling the 
     expect(JSON.stringify([...once.parseHealthByFile!]))
       .toBe(JSON.stringify([...twice.parseHealthByFile!]));
     expect(once.parseHealthByFile!.get('src/hostile.ts')?.budgetMs).toBe(600);
-    // 120s, not the 60s its siblings use: this is the only case here that builds the graph TWICE
+    // 240s, not the 180s its siblings use: this is the only case here that builds the graph TWICE
     // over the 300 KB pathological payload, and abandoning that parse is expensive on both runs.
     // It takes ~17s on a developer machine but ~61s on a 2-core CI runner, so at 60s it had no
     // headroom at all and failed on load it did not cause. Measured on this branch and on `main`
     // uncontended it is unchanged (17.0/17.4s vs 17.6/18.0s), so the budget — not the code — is
     // what was wrong.
-  }, 120_000);
+    //
+    // Bumped again (60→180 / 120→240 across this file) after the same failure recurred under a
+    // FULL parallel suite: measured at ~187s for the file on a box at load 5, against per-test
+    // bounds of 60/120s. These tests abandon a deliberately pathological parse, so their cost is
+    // real work that contention multiplies — headroom is the only correct lever. No assertion is
+    // weakened by this; a genuine hang still fails, three minutes later.
+  }, 240_000);
 
   it('CONTROL: an ordinary large file is NOT recorded, and the graph matches a run with the budget disabled', async () => {
     // ~1.4 MB of well-formed generated-client-shaped source — far larger than anything in this
@@ -262,7 +268,7 @@ describe('reproducer: a pathological file is abandoned rather than stalling the 
 
     expect(withBudget.parseHealthByFile?.get('src/generated-client.ts')).toBeUndefined();
     expect(JSON.stringify(serializeCallGraph(withBudget))).toBe(JSON.stringify(withoutBudget));
-  }, 120_000);
+  }, 240_000);
 });
 
 // ---------------------------------------------------------------------------
@@ -363,5 +369,5 @@ describe('an abandoned file must not cost OTHER files their edges', () => {
     expect(edge!.calleeId).toBe('src/impl.ts::realThing');
     // And the healthy files carry no parse-health record — they were never degraded.
     expect(result.parseHealthByFile?.has('src/consumer.ts')).toBe(false);
-  }, 60_000);
+  }, 180_000);
 });

@@ -80,7 +80,6 @@ const fnSrc = (k: number, body: string) => `export function ${fnName(k)}() {\n  
 // that actually failed.
 let root: string;
 const analysisDirOf = (dir: string) => join(dir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
-const ANALYSIS = () => analysisDirOf(root);
 
 function nodeFor(k: number, src: string): FunctionNode {
   return {
