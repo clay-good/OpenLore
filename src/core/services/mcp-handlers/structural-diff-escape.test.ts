@@ -18,8 +18,19 @@ vi.mock('./utils.js', async (orig) => {
 
 import { handleStructuralDiff } from './structural-diff.js';
 
+// Identity and signing come from the environment rather than three extra
+// `git config` invocations per fixture. Process spawn dominates the cost of
+// these git-backed fixtures, so every avoided call is real wall time.
+const GIT_FIXTURE_ENV = {
+  ...process.env,
+  GIT_CONFIG_GLOBAL: '/dev/null',
+  GIT_CONFIG_SYSTEM: '/dev/null',
+  GIT_AUTHOR_NAME: 'T', GIT_AUTHOR_EMAIL: 't@e.com',
+  GIT_COMMITTER_NAME: 'T', GIT_COMMITTER_EMAIL: 't@e.com',
+};
+
 function git(cwd: string, args: string[]): void {
-  execFileSync('git', args, { cwd, stdio: 'ignore', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' } });
+  execFileSync('git', args, { cwd, stdio: 'ignore', env: GIT_FIXTURE_ENV });
 }
 function write(cwd: string, rel: string, content: string): void {
   const p = join(cwd, rel); mkdirSync(dirname(p), { recursive: true }); writeFileSync(p, content);
@@ -78,8 +89,6 @@ describe('structural_diff footprint escape detection', () => {
   beforeEach(() => {
     repo = mkdtempSync(join(tmpdir(), 'escape-'));
     git(repo, ['init', '-q', '-b', 'main']);
-    git(repo, ['config', 'user.name', 'T']); git(repo, ['config', 'user.email', 't@e.com']);
-    git(repo, ['config', 'commit.gpgsign', 'false']);
     write(repo, 'src/core.ts', BASE);
     git(repo, ['add', '.']); git(repo, ['commit', '-q', '-m', 'base', '--no-gpg-sign']);
   });
@@ -208,8 +217,6 @@ describe('structural_diff escape detection — adversarial regressions', () => {
   const init = () => {
     repo = mkdtempSync(join(tmpdir(), 'escape-adv-'));
     git(repo, ['init', '-q', '-b', 'main']);
-    git(repo, ['config', 'user.name', 'T']); git(repo, ['config', 'user.email', 't@e.com']);
-    git(repo, ['config', 'commit.gpgsign', 'false']);
   };
   const commit = (msg: string) => { git(repo, ['add', '.']); git(repo, ['commit', '-q', '-m', msg, '--no-gpg-sign']); };
   beforeEach(init);
