@@ -73,7 +73,7 @@ const MOCK_DRIFT_RESULT = {
   totalChangedFiles: 2,
   specRelevantFiles: 1,
   issues: [],
-  summary: { gaps: 0, stale: 0, uncovered: 1, orphanedSpecs: 0, adrGaps: 0, adrOrphaned: 0, memoryDrifted: 0, memoryOrphaned: 0, total: 1 },
+  summary: { gaps: 0, stale: 0, uncovered: 1, orphanedSpecs: 0, adrGaps: 0, adrOrphaned: 0, memoryDrifted: 0, memoryOrphaned: 0, memoryOutOfScope: 0, total: 1 },
   hasDrift: true,
   mode: 'static' as const,
   duration: 500,

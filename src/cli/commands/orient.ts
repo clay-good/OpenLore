@@ -66,7 +66,8 @@ async function runInject(directory: string, taskOpt: string | undefined): Promis
     const block = await withQuietStdout(() => buildInjection(directory, prompt, debug ? evaluation => {
       const verdict = evaluation.passes ? 'passed' : 'suppressed';
       process.stderr.write(
-        `[openlore:inject] verdict=${verdict} passed=${evaluation.passedCriteria.join(',') || 'none'} ` +
+        `[openlore:inject] verdict=${verdict} reason=${evaluation.reason ?? 'none'} ` +
+        `passed=${evaluation.passedCriteria.join(',') || 'none'} ` +
         `failed=${evaluation.failedCriteria.join(',') || 'none'}\n`,
       );
     } : undefined));

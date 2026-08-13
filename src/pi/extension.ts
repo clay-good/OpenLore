@@ -48,9 +48,10 @@ import { homedir } from 'node:os';
 // from the warm daemon over RPC (decision abee8e3e).
 import {
   resolveInjectionConfig,
-  passesRelevanceGate,
+  evaluateRelevanceGate,
   renderInjectionBlock,
-  POINTER_LINE,
+  classifyTurnIntent,
+  pointerLineFor,
   type LeanOrientResult,
 } from '../cli/commands/orient-inject-render.js';
 // The shared serve.json validator. Dependency-light (node builtins + the loopback
@@ -1448,7 +1449,16 @@ export default function openlore(pi: ExtensionAPI): void {
     // to the single ignorable pointer line instead of dumping raw orient JSON.
     const daemon = await getDaemon(sessionCwd);
     const cfg = resolveInjectionConfig(await readContextInjection(sessionCwd));
-    if (daemon && event.prompt && cfg.mode !== 'off') {
+    // Turn-intent gate, ahead of the daemon round-trip: a repository-management
+    // turn (push, open/merge a PR, cut a release) gets the reason-bearing
+    // pointer line and no orientation at all — same classifier, same wording as
+    // the CLI hook (change scope-advisory-noise-to-touched-code).
+    const managementTurn = cfg.intentGate
+      && !!event.prompt
+      && classifyTurnIntent(event.prompt) === 'repository-management';
+    if (managementTurn && cfg.mode !== 'off') {
+      blocks.push(pointerLineFor('management-intent'));
+    } else if (daemon && event.prompt && cfg.mode !== 'off') {
       let oriented: unknown;
       try {
         oriented = await callTool(daemon, 'orient', { task: event.prompt }, sessionCwd);
@@ -1460,14 +1470,17 @@ export default function openlore(pi: ExtensionAPI): void {
         oriented && typeof oriented === 'object' && !('error' in (oriented as object))
           ? (oriented as LeanOrientResult)
           : null;
-      // Weak match → the single ignorable pointer line. A null result (daemon
-      // error / no graph) pushes nothing, so the no-analysis baseline nudge in
-      // the `suffix` fallback below can still surface.
+      // Weak match → the single ignorable pointer line, naming its cause. A null
+      // result (daemon error / no graph) pushes nothing, so the no-analysis
+      // baseline nudge in the `suffix` fallback below can still surface.
       if (result) {
         try {
-          blocks.push(passesRelevanceGate(result, cfg) ? renderInjectionBlock(result, cfg) : POINTER_LINE);
+          const evaluation = evaluateRelevanceGate(result, cfg);
+          blocks.push(evaluation.passes
+            ? renderInjectionBlock(result, cfg)
+            : pointerLineFor(evaluation.reason ?? 'weak-relevance'));
         } catch {
-          blocks.push(POINTER_LINE);
+          blocks.push(pointerLineFor('error'));
         }
       }
     }

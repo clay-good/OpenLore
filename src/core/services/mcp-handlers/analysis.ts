@@ -365,7 +365,7 @@ export async function handleCheckSpecDrift(
       totalChangedFiles: 0,
       specRelevantFiles: 0,
       issues: [],
-      summary: { gaps: 0, stale: 0, uncovered: 0, orphanedSpecs: 0, adrGaps: 0, adrOrphaned: 0, memoryDrifted: 0, memoryOrphaned: 0, total: 0 },
+      summary: { gaps: 0, stale: 0, uncovered: 0, orphanedSpecs: 0, adrGaps: 0, adrOrphaned: 0, memoryDrifted: 0, memoryOrphaned: 0, memoryOutOfScope: 0, total: 0 },
       hasDrift: false,
       duration: Date.now() - startTime,
       mode: 'static',

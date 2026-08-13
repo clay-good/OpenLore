@@ -42,7 +42,9 @@ import {
   type PendingDecision,
   type AnchorVerdict,
   type GroundingCertificate,
+  type RetirementReason,
 } from '../../../types/index.js';
+import { isRetired } from '../../decisions/retirement.js';
 
 /** Normalize a caller-supplied type to the closed set; unknown/absent ⇒ `note`. No inference. */
 function normalizeMemoryType(type?: string): MemoryType {
@@ -184,6 +186,14 @@ interface RecalledMemory {
   /** Set on a memory returned by `asOf`/`changedSince` that has since been invalidated. */
   invalidated?: boolean;
   /**
+   * Set on a record given a terminal disposition — its anchored file is gone from
+   * both the working tree and `HEAD` (change: scope-advisory-noise-to-touched-code).
+   * A retired record is history: it is served only under a temporal query, never
+   * as authoritative current memory, and its text is exactly as recorded.
+   */
+  retired?: boolean;
+  retiredReason?: RetirementReason;
+  /**
    * Set on non-fresh memories: do not treat as authoritative without checking.
    * When `staleRegion` is also set the cause is a not-yet-recomputed topology, NOT
    * a code change (the anchored code is byte-identical).
@@ -308,6 +318,7 @@ export async function handleRecall(
           content: m.content,
         });
         const invalidated = !!m.invalidatedAt;
+        const retired = isRetired(m);
         // Only an authoritative (non-orphaned, non-invalidated) memory carries the signal;
         // an orphaned/invalidated one is never served as authoritative in the first place.
         const staleRefs = !invalidated && f.freshness !== 'orphaned'
@@ -323,6 +334,7 @@ export async function handleRecall(
           type: m.type ?? 'note',
           ...(m.validFromCommit ? { validFromCommit: m.validFromCommit } : {}),
           ...(invalidated ? { invalidated: true } : {}),
+          ...(retired ? { retired: true, retiredReason: m.retiredReason } : {}),
           verify: f.freshness === 'drifted' || staleRefs.length > 0 ? true : undefined,
           ...(isStaleRegionOnly(f.verdicts) ? { staleRegion: true } : {}),
           anchors: f.verdicts.map(summarizeVerdict),
@@ -345,6 +357,7 @@ export async function handleRecall(
         const supersededIds = supersededDecisionIds(decisionStore.decisions);
         for (const d of activeDecisions(decisionStore.decisions)) {
           if (supersededIds.has(d.id)) continue;
+          if (isRetired(d)) continue;   // terminal disposition — history, not current memory
           const anchors = decisionAnchors(d);
           const f = memoryFreshness(anchors, view);
           const r = scoreMemory(terms, decisionFields(d, anchors));
@@ -518,7 +531,11 @@ async function selectNotesInScope(
 ): Promise<Set<string>> {
   const { asOfSha, sinceSha } = opts;
   if (!asOfSha && !sinceSha) {
-    return new Set(memories.filter((m) => !m.invalidatedAt).map((m) => m.id));
+    // Retired records are history in exactly the sense invalidated ones are: the
+    // code they were anchored to is gone, so they are out of the authoritative
+    // set for a plain recall, and reachable only through a temporal query
+    // (change: scope-advisory-noise-to-touched-code).
+    return new Set(memories.filter((m) => !m.invalidatedAt && !isRetired(m)).map((m) => m.id));
   }
   const inScope = new Set<string>();
   for (const m of memories) {
