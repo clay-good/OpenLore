@@ -6,6 +6,17 @@ export default defineConfig({
     environment: 'node',
     include: ['src/**/*.test.ts', 'test/**/*.test.ts', 'examples/**/*.test.ts'],
     exclude: ['**/*.integration.test.ts', 'node_modules/**'],
+    // A meaningful part of this suite builds REAL fixtures — git repositories,
+    // SQLite edge stores, tree-sitter parses — because that is exactly what the
+    // code under test reads. Process spawn alone costs ~150ms per `git` call on
+    // some machines (macOS with the Xcode CLT shim), so a fixture that creates a
+    // repo with three commits and two branches spends seconds before the first
+    // assertion. Vitest's 5s default was tuned for pure unit tests and made those
+    // suites pass only on fast hardware; under a full parallel run they timed out
+    // and read as logic failures. 30s is chosen to be comfortably above the real
+    // work while still catching a genuine hang.
+    testTimeout: 30_000,
+    hookTimeout: 30_000,
     env: {
       // Keep the suite on the serial Pass-1 extraction lane by default
       // (change: optimize-parallel-extraction-pool): spawning real worker threads under

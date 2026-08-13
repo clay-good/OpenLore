@@ -42,8 +42,19 @@ vi.mock('../../analyzer/call-graph.js', async (orig) => {
 
 import { handleStructuralDiff } from './structural-diff.js';
 
+// Identity and signing come from the environment rather than three extra
+// `git config` invocations per fixture. Process spawn dominates the cost of
+// these git-backed fixtures, so every avoided call is real wall time.
+const GIT_FIXTURE_ENV = {
+  ...process.env,
+  GIT_CONFIG_GLOBAL: '/dev/null',
+  GIT_CONFIG_SYSTEM: '/dev/null',
+  GIT_AUTHOR_NAME: 'T', GIT_AUTHOR_EMAIL: 't@e.com',
+  GIT_COMMITTER_NAME: 'T', GIT_COMMITTER_EMAIL: 't@e.com',
+};
+
 function git(cwd: string, args: string[]): void {
-  execFileSync('git', args, { cwd, stdio: 'ignore', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' } });
+  execFileSync('git', args, { cwd, stdio: 'ignore', env: GIT_FIXTURE_ENV });
 }
 function write(cwd: string, rel: string, content: string): void {
   const p = join(cwd, rel); mkdirSync(dirname(p), { recursive: true }); writeFileSync(p, content);
@@ -77,8 +88,6 @@ interface DiffResult {
 function buildAdvancedBaseRepo(checkout: 'feature' | 'main'): string {
   const repo = mkdtempSync(join(tmpdir(), 'struct-mb-'));
   git(repo, ['init', '-q', '-b', 'main']);
-  git(repo, ['config', 'user.name', 'T']); git(repo, ['config', 'user.email', 't@e.com']);
-  git(repo, ['config', 'commit.gpgsign', 'false']);
   // C0 — the branch point.
   write(repo, 'src/mod.ts', C0);
   git(repo, ['add', '.']); git(repo, ['commit', '-q', '-m', 'c0', '--no-gpg-sign']);
@@ -145,8 +154,6 @@ describe('structural_diff — merge-base old-content discipline', () => {
     // from the same SHA the pre-fix code used, so behavior is unchanged.
     repo = mkdtempSync(join(tmpdir(), 'struct-mb-nodrift-'));
     git(repo, ['init', '-q', '-b', 'main']);
-    git(repo, ['config', 'user.name', 'T']); git(repo, ['config', 'user.email', 't@e.com']);
-    git(repo, ['config', 'commit.gpgsign', 'false']);
     write(repo, 'src/mod.ts', C0);
     git(repo, ['add', '.']); git(repo, ['commit', '-q', '-m', 'c0', '--no-gpg-sign']);
     write(repo, 'src/mod.ts', FEATURE); // working-tree change only, no divergence
@@ -169,8 +176,6 @@ describe('structural_diff — snapshot build failure is a disclosed boundary', (
   it('names the failed snapshot instead of a silent empty comparison', async () => {
     repo = mkdtempSync(join(tmpdir(), 'struct-mb-crash-'));
     git(repo, ['init', '-q', '-b', 'main']);
-    git(repo, ['config', 'user.name', 'T']); git(repo, ['config', 'user.email', 't@e.com']);
-    git(repo, ['config', 'commit.gpgsign', 'false']);
     // Old version carries the parse-crash marker → its snapshot build throws.
     write(repo, 'src/mod.ts', `// __PARSE_CRASH__\nexport function keep(): void {}\n`);
     git(repo, ['add', '.']); git(repo, ['commit', '-q', '-m', 'c0', '--no-gpg-sign']);

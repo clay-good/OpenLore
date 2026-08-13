@@ -154,6 +154,13 @@ describe('viewer freshness', () => {
       .toMatchObject({ status: 'stale' });
 
     const second = (await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: root })).stdout.trim();
+    // Re-analysis rewrites the ARTIFACT as well as the fingerprint. Advancing only
+    // the fingerprint leaves an artifact older than the commit it claims to have
+    // analyzed — which `artifactPredatesAnalyzedCommit` correctly calls stale. Git
+    // commit times have one-second granularity, so the old fixture read `current`
+    // only when the whole test finished inside a single second, and failed under a
+    // loaded parallel run. Rewrite the artifact, as a real re-analysis does.
+    await writeFile(artifactPath, '{}');
     await writeFile(join(analysisDir, 'fingerprint.json'), JSON.stringify({ commit: second }));
     await expect(readViewerFreshness(root, analysisDir, artifactPath)).resolves
       .toMatchObject({ analyzedCommit: second, status: 'current', filesChangedSince: 0 });

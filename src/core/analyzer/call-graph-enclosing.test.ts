@@ -155,9 +155,23 @@ describe('computeEnclosing — identical to the brute-force definition', () => {
       return Number(process.hrtime.bigint() - t) / 1e6;
     };
 
+    // BEST of several runs, not a single sample. A sub-millisecond baseline measured
+    // once on a loaded machine is noise, not signal: one GC pause or scheduler
+    // preemption during the large run inflated the ratio past the bound and this
+    // test failed under a full parallel suite while passing in isolation. Noise only
+    // ever ADDS time, so the minimum is the honest estimate of the intrinsic cost —
+    // and it leaves the quadratic detector intact (a quadratic implementation is
+    // ~64× at its best run too).
+    const best = (n: number, runs = 5): number => {
+      const nodes = build(n);
+      let fastest = Infinity;
+      for (let i = 0; i < runs; i++) fastest = Math.min(fastest, time(nodes));
+      return Math.max(fastest, 0.01);
+    };
+
     time(build(1000)); // warm
-    const small = Math.max(time(build(2000)), 0.01);
-    const large = Math.max(time(build(16000)), 0.01);
+    const small = best(2000);
+    const large = best(16000);
 
     // 8× the nodes. Linear-with-a-sort is ~8-10×; quadratic is ~64×. The bound is loose enough to
     // survive CI noise and still fails by a wide margin if the scan returns.

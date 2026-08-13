@@ -34,6 +34,17 @@ vi.mock('../../analyzer/embedding-service.js', () => ({
 vi.mock('../../analyzer/spec-vector-index.js', () => ({
   SpecVectorIndex: { exists: vi.fn(() => false), search: vi.fn(async () => []) },
 }));
+// The bitemporal valid-time marker is orthogonal to the freshness invariant under
+// test, but `handleRemember` reads it by spawning `git rev-parse HEAD` — 600 of
+// them across these 120-trial properties, which on a machine with slow process
+// spawn is ~90s of pure subprocess overhead and the sole reason this file timed
+// out. The fixtures are throwaway temp dirs with no git repo, so HEAD is
+// `undefined` here anyway; return it directly and keep the property intact.
+vi.mock('../../decisions/git-time.js', () => ({
+  getHeadCommit: vi.fn(async () => undefined),
+  resolveCommitSha: vi.fn(async () => undefined),
+  isAncestor: vi.fn(async () => false),
+}));
 
 import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -61,8 +72,15 @@ const fnName = (k: number) => `fn${k}`;
 const fnFile = (k: number) => `src/m${k}.ts`;
 const fnSrc = (k: number, body: string) => `export function ${fnName(k)}() {\n  ${body}\n}\n`;
 
+// The fixture root is module-scoped for the helpers below, but each test also
+// binds it to a LOCAL const and uses that. A timed-out test's loop keeps running
+// (a JS promise cannot be cancelled); reading the shared `root` it would delete
+// the NEXT test's fixture mid-run, turning one timeout into a cascade of
+// unrelated ENOENT failures. The local binding contains the damage to the test
+// that actually failed.
 let root: string;
-const ANALYSIS = () => join(root, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
+const analysisDirOf = (dir: string) => join(dir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
+const ANALYSIS = () => analysisDirOf(root);
 
 function nodeFor(k: number, src: string): FunctionNode {
   return {
@@ -78,9 +96,10 @@ function nodeFor(k: number, src: string): FunctionNode {
   };
 }
 
-async function buildStore(nodes: FunctionNode[]): Promise<void> {
-  await mkdir(ANALYSIS(), { recursive: true });
-  const store = EdgeStore.open(EdgeStore.dbPath(ANALYSIS()));
+async function buildStore(nodes: FunctionNode[], dir: string = root): Promise<void> {
+  const analysis = analysisDirOf(dir);
+  await mkdir(analysis, { recursive: true });
+  const store = EdgeStore.open(EdgeStore.dbPath(analysis));
   store.clearAll();
   store.insertNodes(nodes);
   store.close();
@@ -90,7 +109,7 @@ async function buildStore(nodes: FunctionNode[]): Promise<void> {
     hubFunctions: [], entryPoints: [], layerViolations: [],
     stats: { totalNodes: nodes.length, totalEdges: 0, avgFanIn: 0, avgFanOut: 0 },
   };
-  await writeFile(join(ANALYSIS(), ARTIFACT_LLM_CONTEXT), JSON.stringify({ callGraph }), 'utf-8');
+  await writeFile(join(analysis, ARTIFACT_LLM_CONTEXT), JSON.stringify({ callGraph }), 'utf-8');
 }
 
 beforeEach(async () => {
@@ -123,19 +142,20 @@ function assertRecallInvariant(r: {
 
 describe('AuthoritativeRecallInvariant — recall, property-based over generated mutations', () => {
   it('the authoritative set never contains an orphaned or unlabeled-drifted memory (120 generated cases)', async () => {
+    const dir = root;   // see the note on `root`: never touch the next test's fixture
     for (let trial = 0; trial < 120; trial++) {
       const rand = rng(0x1000 + trial);
 
       // Fresh baseline: every function present and unmodified.
       const baseSrc = Array.from({ length: FN_COUNT }, (_, k) => fnSrc(k, `return ${k};`));
-      for (let k = 0; k < FN_COUNT; k++) await writeFile(join(root, fnFile(k)), baseSrc[k], 'utf-8');
-      await buildStore(baseSrc.map((s, k) => nodeFor(k, s)));
+      for (let k = 0; k < FN_COUNT; k++) await writeFile(join(dir, fnFile(k)), baseSrc[k], 'utf-8');
+      await buildStore(baseSrc.map((s, k) => nodeFor(k, s)), dir);
 
       // Anchor one memory per function (plus an occasional unanchored note).
       for (let k = 0; k < FN_COUNT; k++) {
-        await handleRemember(root, `memory about ${fnName(k)} number ${trial}`, [{ symbol: fnName(k), file: fnFile(k) }]);
+        await handleRemember(dir, `memory about ${fnName(k)} number ${trial}`, [{ symbol: fnName(k), file: fnFile(k) }]);
       }
-      if (rand() < 0.5) await handleRemember(root, `free-floating note ${trial}`);
+      if (rand() < 0.5) await handleRemember(dir, `free-floating note ${trial}`);
 
       // Apply an arbitrary mutation plan: keep / edit-body (→drift) / delete (→orphan).
       const survivors: FunctionNode[] = [];
@@ -147,19 +167,19 @@ describe('AuthoritativeRecallInvariant — recall, property-based over generated
         } else if (roll < 0.67) {
           // edit body in place → span hash differs → drifted (node stays in store)
           const edited = fnSrc(k, `return ${k * 100 + trial};`);
-          await writeFile(join(root, fnFile(k)), edited, 'utf-8');
+          await writeFile(join(dir, fnFile(k)), edited, 'utf-8');
           survivors.push(nodeFor(k, baseSrc[k])); // stale offsets/hash on purpose
         } else if (roll < 0.84) {
           // delete the node from the graph → orphaned
           // (file may or may not remain; symbol-level anchor still orphans)
         } else {
           // delete the whole file too → orphaned
-          await rm(join(root, fnFile(k)), { force: true });
+          await rm(join(dir, fnFile(k)), { force: true });
         }
       }
-      await buildStore(survivors);
+      await buildStore(survivors, dir);
 
-      const r = (await handleRecall(root, undefined, 50)) as {
+      const r = (await handleRecall(dir, undefined, 50)) as {
         authoritative: RecalledItem[]; needsReanchoring: RecalledItem[];
       };
       assertRecallInvariant(r, `recall trial ${trial}`);
@@ -167,9 +187,9 @@ describe('AuthoritativeRecallInvariant — recall, property-based over generated
       // Reset for the next trial: clear the source tree and the notes store. The
       // edge store is reset by buildStore's clearAll, so we avoid rm-ing the
       // .openlore dir (which races with the SQLite file handle on some platforms).
-      await rm(join(root, 'src'), { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
-      await rm(join(memoryDir(root), MEMORY_NOTES_FILE), { force: true });
-      await mkdir(join(root, 'src'), { recursive: true });
+      await rm(join(dir, 'src'), { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+      await rm(join(memoryDir(dir), MEMORY_NOTES_FILE), { force: true });
+      await mkdir(join(dir, 'src'), { recursive: true });
     }
   }, 60_000);
 });
@@ -177,8 +197,8 @@ describe('AuthoritativeRecallInvariant — recall, property-based over generated
 // orient surfaces decisions (not notes); the property mirrors recall over the
 // decision store. Decisions are anchored to files via affectedFiles, so a deleted
 // file orphans, a changed-symbol anchor drifts, an untouched file stays fresh.
-async function writeDecisions(decisions: Array<Record<string, unknown>>): Promise<void> {
-  const dir = join(root, OPENLORE_DIR, 'decisions');
+async function writeDecisions(decisions: Array<Record<string, unknown>>, rootDir: string = root): Promise<void> {
+  const dir = join(rootDir, OPENLORE_DIR, 'decisions');
   await mkdir(dir, { recursive: true });
   const full = decisions.map((d) => ({
     status: 'approved', title: 'untitled', rationale: '', consequences: '', proposedRequirement: null,
@@ -190,12 +210,13 @@ async function writeDecisions(decisions: Array<Record<string, unknown>>): Promis
 
 describe('AuthoritativeRecallInvariant — orient decision section, property-based', () => {
   it('pendingDecisions never lists an orphaned decision; staleDecisions holds only orphaned (120 cases)', async () => {
+    const dir = root;   // see the note on `root`
     for (let trial = 0; trial < 120; trial++) {
       const rand = rng(0x2000 + trial);
 
       const baseSrc = Array.from({ length: FN_COUNT }, (_, k) => fnSrc(k, `return ${k};`));
-      for (let k = 0; k < FN_COUNT; k++) await writeFile(join(root, fnFile(k)), baseSrc[k], 'utf-8');
-      await buildStore(baseSrc.map((s, k) => nodeFor(k, s)));
+      for (let k = 0; k < FN_COUNT; k++) await writeFile(join(dir, fnFile(k)), baseSrc[k], 'utf-8');
+      await buildStore(baseSrc.map((s, k) => nodeFor(k, s)), dir);
 
       // One approved decision per function, symbol-anchored to it.
       const decisions = Array.from({ length: FN_COUNT }, (_, k) => ({
@@ -221,13 +242,13 @@ describe('AuthoritativeRecallInvariant — orient decision section, property-bas
           survivors.push(nodeFor(k, edited));
         } else {
           // delete the node (and sometimes the file) → orphan
-          if (roll > 0.84) await rm(join(root, fnFile(k)), { force: true });
+          if (roll > 0.84) await rm(join(dir, fnFile(k)), { force: true });
         }
       }
-      await buildStore(survivors);
-      await writeDecisions(decisions);
+      await buildStore(survivors, dir);
+      await writeDecisions(decisions, dir);
 
-      const r = (await handleOrient(root, `work on ${fnName(0)} ${fnName(1)} ${fnName(2)} ${fnName(3)} ${fnName(4)}`)) as {
+      const r = (await handleOrient(dir, `work on ${fnName(0)} ${fnName(1)} ${fnName(2)} ${fnName(3)} ${fnName(4)}`)) as {
         error?: string;
         pendingDecisions?: Array<{ id: string; freshness?: string; verify?: boolean }>;
         staleDecisions?: Array<{ id: string; freshness?: string }>;
@@ -246,8 +267,8 @@ describe('AuthoritativeRecallInvariant — orient decision section, property-bas
 
       // Reset the source tree only; buildStore.clearAll resets the edge store and
       // writeDecisions overwrites pending.json next trial.
-      await rm(join(root, 'src'), { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
-      await mkdir(join(root, 'src'), { recursive: true });
+      await rm(join(dir, 'src'), { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+      await mkdir(join(dir, 'src'), { recursive: true });
     }
   }, 60_000);
 });

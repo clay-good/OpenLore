@@ -101,7 +101,14 @@ async function measure(
  * asserted only where it can mean something — the cases slow enough (the middleware
  * and Vue extractors, ~0.5-1.5s) that a doubling is visible above the noise.
  */
-const RATIO_FLOOR_MS = 50;
+const RATIO_FLOOR_MS = 250;
+// Raised from 50ms to match the rationale above rather than undercut it. At 50ms the
+// ratio was still being asserted on tens-of-milliseconds cases — the Java route
+// extractor measured 3.18 against a 3.0 bound on CI while measuring ~50ms, which is
+// the scheduler talking, not the parser. The cases the ratio is actually for (the
+// middleware and Vue extractors) run in seconds and clear this floor by an order of
+// magnitude; everything below it stays guarded by MAX_ABSOLUTE_MS, which separates
+// fixed from unfixed by three orders of magnitude (5ms vs 10,866ms).
 
 /**
  * Assert the absolute cost always, and the growth ratio when it is measurable.
