@@ -76,7 +76,23 @@ interface CoverageGap {
    * untested symbol (e.g. an entry point invoked by a framework): untested-not-dead.
    */
   alsoFlaggedDead?: true;
+  /**
+   * WHY the symbol landed in the dead set (change: demote-dead-flagged-coverage-gaps).
+   * Present exactly when `alsoFlaggedDead` is — the boolean's meaning is unchanged.
+   *
+   *   `no-callers`                    — fan-in zero: nothing in the graph calls it.
+   *   `dead-via-unreachable-callers`  — fan-in above zero, yet still unreachable
+   *                                     from any liveness root. Its callers are
+   *                                     themselves unreachable, which is the
+   *                                     signature of an INBOUND edge this analysis
+   *                                     could not resolve (WebSocket/queue/DI
+   *                                     dispatch), not evidence the code is unused.
+   */
+  deadReason?: DeadFlagReason;
 }
+
+/** Why a gap is also in the dead set. Closed set, derived — no new traversal. */
+export type DeadFlagReason = 'no-callers' | 'dead-via-unreachable-callers';
 
 /**
  * Report the structurally-untested surface: internal code in no test's reachable
@@ -201,15 +217,28 @@ export async function handleReportCoverageGaps(input: ReportCoverageGapsInput): 
       fanIn: n.fanIn ?? 0,
       signals,
     };
-    if (deadIds.has(n.id)) gap.alsoFlaggedDead = true;
+    if (deadIds.has(n.id)) {
+      gap.alsoFlaggedDead = true;
+      // Derived from the dead set + the node's own fan-in — no extra traversal.
+      gap.deadReason = gap.fanIn > 0 ? 'dead-via-unreachable-callers' : 'no-callers';
+    }
     return gap;
   });
 
-  // Rank: load-bearing untested code first. Tier by hub/chokepoint label (the
-  // significance signals named in the proposal), then raw fan-in (evidence), then
-  // a stable file+name tiebreak for determinism. No composite score, no constant.
+  // Rank: certainty before significance. A dead-flagged gap is one whose
+  // reachability this analysis could NOT establish, so ranking it above a gap that
+  // is certainly live-and-untested spends the reader's budget on the undecidable
+  // (change: demote-dead-flagged-coverage-gaps). Tiers, in order:
+  //   live load-bearing > live > dead-flagged load-bearing > dead-flagged.
+  // Within a tier the previous comparator is preserved byte-for-byte: fan-in
+  // (evidence), then a stable file+name tiebreak. Still label-based and
+  // deterministic — no composite score, no new tuning constant.
   const isLoadBearing = (g: CoverageGap) => g.signals.some(s => s.label === 'hub' || s.label === 'chokepoint');
+  const isLive = (g: CoverageGap) => !g.alsoFlaggedDead;
   gaps.sort((a, b) => {
+    const al = isLive(a) ? 1 : 0;
+    const bl = isLive(b) ? 1 : 0;
+    if (al !== bl) return bl - al;
     const at = isLoadBearing(a) ? 1 : 0;
     const bt = isLoadBearing(b) ? 1 : 0;
     if (at !== bt) return bt - at;
@@ -219,6 +248,24 @@ export async function handleReportCoverageGaps(input: ReportCoverageGapsInput): 
 
   const returned = gaps.slice(0, maxResults);
   const omitted = gaps.length - returned.length;
+
+  // Page composition: how much of what the caller is holding is decidable
+  // untested code versus undecidable reachability. Reported for the returned page
+  // AND the omitted remainder, so a 264-gap set discloses its shape without the
+  // caller re-deriving it.
+  const liveOf = (list: CoverageGap[]) => list.filter(isLive).length;
+  const composition = {
+    returned: { live: liveOf(returned), deadFlagged: returned.length - liveOf(returned) },
+    ...(omitted > 0
+      ? {
+          omittedRemainder: {
+            live: liveOf(gaps) - liveOf(returned),
+            deadFlagged: omitted - (liveOf(gaps) - liveOf(returned)),
+          },
+        }
+      : {}),
+    total: { live: liveOf(gaps), deadFlagged: gaps.length - liveOf(gaps) },
+  };
 
   // ── Honest coverage posture (mirrors select_tests' testDetection) ───────────
   const graphHasTests = cg.nodes.some(n => n.isTest) || cg.edges.some(e => e.kind === 'tested_by');
@@ -248,6 +295,11 @@ export async function handleReportCoverageGaps(input: ReportCoverageGapsInput): 
     // to substring, so a short name can scope to more than the one function intended.
     caveats.push('Symbol scope resolves by name (exact preferred, substring fallback); a short or partial symbol name may widen the scope to several functions.');
   }
+  // Emitted only when the returned page actually carries the reason — a caveat about
+  // a signal that is not present is noise of the kind this change exists to remove.
+  if (returned.some(g => g.deadReason === 'dead-via-unreachable-callers')) {
+    caveats.push('Some returned gaps are flagged dead despite having callers (deadReason "dead-via-unreachable-callers"): their callers are themselves unreachable from any liveness root. That is the signature of an INBOUND edge static analysis could not resolve (WebSocket/queue/DI dispatch) — undecidable reachability, NOT evidence the code is unused. Such gaps are ranked below every live gap.');
+  }
 
   // Confidence boundary: the liveness partition rests on the edges traversed within
   // the test-reachable set (the complement of the reported gaps — same posture as
@@ -275,6 +327,7 @@ export async function handleReportCoverageGaps(input: ReportCoverageGapsInput): 
     reachableFromTest: testedCount,
     gapCount: gaps.length,
     coverageGaps: returned,
+    composition,
     ...(omitted > 0 ? { omitted } : {}),
     ...(unmatchedNote ? { note: unmatchedNote } : {}),
     soundness: { posture: 'gaps-only' as const, claim: 'no-reaching-test' as const, caveats },
