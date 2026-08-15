@@ -349,6 +349,51 @@ describe('config-manager', () => {
         s.restore();
       }
     });
+
+    it('rejects an empty config with an attributable file and remedy', async () => {
+      await writeRawConfig({});
+
+      await expect(readOpenLoreConfig(testDir)).rejects.toThrow(/\.openlore\/config\.json/);
+      await expect(readOpenLoreConfig(testDir)).rejects.toThrow(/analysis/);
+      await expect(readOpenLoreConfig(testDir)).rejects.toThrow(/openlore init/);
+    });
+
+    it('rejects a malformed nested field before a caller can dereference it', async () => {
+      await writeRawConfig({
+        ...getDefaultConfig('nodejs', 'openspec'),
+        analysis: { maxFiles: 'lots', includePatterns: [], excludePatterns: [] },
+      });
+
+      await expect(readOpenLoreConfig(testDir)).rejects.toThrow(/analysis\.maxFiles/);
+    });
+
+    it('reports but preserves malformed optional sections for their domain validators', async () => {
+      const s = spyStderr();
+      try {
+        await writeRawConfig({
+          ...getDefaultConfig('nodejs', 'openspec'),
+          specStore: { name: 42, path: false, targets: ['api'] },
+        });
+
+        const config = await readOpenLoreConfig(testDir);
+        expect(config).not.toBeNull();
+        expect(s.lines().some(line => line.includes('specStore.name'))).toBe(true);
+        expect(s.lines().some(line => line.includes('specStore.path'))).toBe(true);
+      } finally {
+        s.restore();
+      }
+    });
+
+    it('keeps invalid-config diagnostics off stdout', async () => {
+      const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+      try {
+        await writeRawConfig({});
+        await expect(readOpenLoreConfig(testDir)).rejects.toThrow();
+        expect(stdout).not.toHaveBeenCalled();
+      } finally {
+        stdout.mockRestore();
+      }
+    });
   });
 
   describe('readOpenSpecConfig — malformed YAML', () => {

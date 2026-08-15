@@ -34,6 +34,7 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 vi.mock('node:child_process', () => ({ execFile: vi.fn() }));
 
 vi.mock('../../core/services/config-manager.js', () => ({
+  InvalidOpenLoreConfigError: class InvalidOpenLoreConfigError extends Error {},
   readOpenLoreConfig: vi.fn().mockResolvedValue({
     projectType: 'nodejs',
     createdAt: '2024-01-01T00:00:00Z',
@@ -397,6 +398,36 @@ describe('doctor command', () => {
       const checks = await runDoctorJson();
       const schemaCheck = checks.find(c => c.name === 'Config schema')!;
       expect(schemaCheck.status).toBe('ok');
+      expect(schemaCheck.detail).toContain('required fields present');
+    });
+
+    it('reports missing required sections instead of blessing an empty config', async () => {
+      const { readFile } = await import('node:fs/promises');
+      vi.mocked(readFile).mockResolvedValue('{}' as never);
+
+      const checks = await runDoctorJson();
+      const schemaCheck = checks.find(c => c.name === 'Config schema')!;
+
+      expect(schemaCheck.status).toBe('warn');
+      expect(schemaCheck.detail).toContain('analysis');
+      expect(schemaCheck.detail).toContain('openlore init');
+      expect(schemaCheck.detail).not.toContain('all keys known and well-typed');
+    });
+
+    it('reports nested type mismatches', async () => {
+      const { readFile } = await import('node:fs/promises');
+      vi.mocked(readFile).mockResolvedValue(
+        JSON.stringify({
+          version: '1.0.0', projectType: 'nodejs', openspecPath: 'openspec',
+          analysis: { maxFiles: 'lots', includePatterns: [], excludePatterns: [] },
+          generation: { domains: 'auto' }, createdAt: '2026-01-01T00:00:00Z', lastRun: null,
+        }) as never
+      );
+
+      const checks = await runDoctorJson();
+      const schemaCheck = checks.find(c => c.name === 'Config schema')!;
+      expect(schemaCheck.status).toBe('warn');
+      expect(schemaCheck.detail).toContain('analysis.maxFiles');
     });
 
     it('warns and names an unknown (typo\'d) key with a suggestion', async () => {

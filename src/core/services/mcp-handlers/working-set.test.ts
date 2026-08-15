@@ -47,7 +47,7 @@ afterEach(() => {
 function writeBinding(binding: SpecStoreConfig | undefined): void {
   mkdirSync(join(home, OPENLORE_DIR), { recursive: true });
   const config: Record<string, unknown> = {
-    version: '1.0.0', projectType: 'library', openspecPath: 'openspec',
+    version: '1.0.0', projectType: 'unknown', openspecPath: 'openspec',
     analysis: { maxFiles: 1000, includePatterns: [], excludePatterns: [] },
     generation: { model: 'x', domains: 'auto' },
     createdAt: new Date().toISOString(), lastRun: null,

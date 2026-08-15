@@ -44,7 +44,7 @@ function writeBinding(binding: unknown): void {
   writeFileSync(
     join(home, OPENLORE_DIR, OPENLORE_CONFIG_FILENAME),
     JSON.stringify({
-      version: '1.0.0', projectType: 'library', openspecPath: 'openspec',
+      version: '1.0.0', projectType: 'unknown', openspecPath: 'openspec',
       analysis: { maxFiles: 1000, includePatterns: [], excludePatterns: [] },
       generation: { model: 'x', domains: 'auto' },
       createdAt: new Date().toISOString(), lastRun: null,
@@ -89,7 +89,7 @@ describe('working-set context CLI', () => {
     mkdirSync(join(home, OPENLORE_DIR), { recursive: true });
     writeFileSync(
       join(home, OPENLORE_DIR, OPENLORE_CONFIG_FILENAME),
-      JSON.stringify({ version: '1.0.0', projectType: 'library', openspecPath: 'openspec', analysis: { maxFiles: 1, includePatterns: [], excludePatterns: [] }, generation: { model: 'x', domains: 'auto' }, createdAt: new Date().toISOString(), lastRun: null }),
+      JSON.stringify({ version: '1.0.0', projectType: 'unknown', openspecPath: 'openspec', analysis: { maxFiles: 1, includePatterns: [], excludePatterns: [] }, generation: { model: 'x', domains: 'auto' }, createdAt: new Date().toISOString(), lastRun: null }),
     );
 
     const out = captureStdout();
