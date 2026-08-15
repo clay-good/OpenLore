@@ -38,12 +38,11 @@
  * It is ADVISORY. It serializes cooperating writers that all take it; it does not
  * constrain a process that ignores it, and it is not a security boundary.
  *
- * Taking the lock (`open` with `wx`), stealing a stale one (`rename`), and release
- * (`unlink`) are each a single atomic namespace operation. Release is safe because
- * reclamation never steals from a PID that is still alive: while a live holder can
- * call release, no cooperating successor can replace its path. This invariant is
- * stronger than a check-then-delete inode comparison, whose check could race with
- * the delete it was meant to guard.
+ * Taking the lock (`open` with `wx`) and stealing a stale one (`rename`) are atomic
+ * namespace operations. Acquire, steal, and release all pass through a short-lived
+ * namespace gate. Release compares the path inode with the acquired inode while
+ * holding that gate, then unlinks only its own file. A stale or misconfigured
+ * holder therefore cannot delete a successor.
  *
  * Reclamation is therefore deliberately conservative: a lock is stolen only when
  * its holder is confirmed dead and old enough to exclude an acquire still writing
@@ -288,9 +287,18 @@ export async function acquireLockAt(
             if (released) return;
             released = true;
             await tryHandle(() => fh.close());
-            // One namespace operation, with no check-then-delete race. A cooperating
-            // successor cannot exist because live holders are never stolen.
-            await unlink(lockPath).catch(() => {});
+            // The namespace gate makes this identity-check-plus-unlink one
+            // serialized operation relative to every acquire and steal. If a
+            // custom policy ever reclaimed this holder, its successor has a
+            // different inode and remains untouched.
+            const releaseNamespace = await acquireNamespaceGate(lockPath);
+            try {
+              if (inode < 0) return; // unknown identity fails closed
+              const current = await stat(lockPath).catch(() => null);
+              if (current?.ino === inode) await unlink(lockPath).catch(() => {});
+            } finally {
+              await releaseNamespace();
+            }
           },
         };
       } catch (err) {
@@ -371,11 +379,13 @@ export async function acquireLockAt(
           }
           return { bestEffort: true, waitedMs: Date.now() - start, inode: -1, refresh: async () => {}, release: async () => {} };
         }
-        await sleep(POLL_MS);
+        // Never sleep while owning the namespace gate: doing so makes N waiters
+        // hold it for N × POLL_MS and can starve the live holder's release.
       }
     } finally {
       await releaseGate();
     }
+    await sleep(POLL_MS);
   }
 }
 

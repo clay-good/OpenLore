@@ -109,6 +109,28 @@ describe('a live holder is never superseded', () => {
   }, 15_000);
 });
 
+describe('superseded-holder safety', () => {
+  it('cannot delete or refresh a successor even under an unsafe custom stale policy', async () => {
+    const dir = join(root, 'superseded-holder');
+    const lockPath = join(dir, '.x.lock');
+    const first = await acquireLockAt(dir, '.x.lock', { payload: () => 'first' });
+    if (isLockHeld(first)) throw new Error('first acquire must own the lock');
+
+    const successor = await acquireLockAt(dir, '.x.lock', {
+      payload: () => 'successor',
+      isStale: () => true,
+    });
+    if (isLockHeld(successor)) throw new Error('unsafe policy should supersede first');
+
+    await first.refresh('first-after-steal');
+    await first.release();
+    expect(await readFile(lockPath, 'utf8')).toBe('successor');
+
+    await successor.release();
+    await expect(access(lockPath)).rejects.toThrow();
+  });
+});
+
 describe('wait policy — maxWaitMs and waitedMs', () => {
   it('reports zero wait for an uncontended acquire and a real wait after contention', async () => {
     const first = await acquireLockAt(root, '.wait.lock');
