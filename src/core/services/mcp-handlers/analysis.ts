@@ -821,7 +821,13 @@ export async function handleAuditSpecCoverage(
       domains: scope?.domains,
       ...(analysisArtifacts ? { analysisArtifacts } : {}),
     });
-    return report;
+    return {
+      ...report,
+      mappingCoverage: {
+        ...report.mappingCoverage,
+        artifactPath: relative(absDir, report.mappingCoverage.artifactPath),
+      },
+    };
   } catch (err) {
     return { error: `Audit failed: ${err instanceof Error ? err.message : String(err)}` };
   }

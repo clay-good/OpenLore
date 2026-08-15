@@ -15,7 +15,7 @@
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { McpWatcher } from './mcp-watcher.js';
@@ -110,6 +110,36 @@ describe('watcher parse-health lane — the exclusion vocabulary matches the ful
       { rel: 'src/hostile.ts', content: 'export function a(): void { b(); }\nfunction b(): void {}\n' },
     ]);
     expect(readReport(outputPath), 'the last degraded file was repaired — artifact removed').toBeNull();
+  }, 60_000);
+
+  it('preserves a whole-language grammar boundary while rebuilding file-level health', async () => {
+    const { watcher, outputPath } = watcherIn();
+    const existing: ParseHealthReport = {
+      version: 1,
+      totalDegradedFiles: 1,
+      totalErrorRegions: 0,
+      byLanguage: [{
+        language: 'TypeScript', degradedFiles: 1, errorRegions: 0, parseFailures: 1,
+        encodingFallbacks: 0,
+      }],
+      topFiles: [],
+      files: [{
+        filePath: 'src/repaired.ts', language: 'TypeScript', errorCount: 0, missingCount: 0,
+        errorLines: [], parseFailed: true, exclusion: 'parse-failure',
+      }],
+      grammarUnavailable: [{
+        language: 'Python', fileCount: 5, reason: 'load-failure', detail: 'missing grammar',
+      }],
+    };
+    writeFileSync(join(outputPath, ARTIFACT_PARSE_HEALTH), JSON.stringify(existing));
+
+    await spliceParseHealth(watcher, [{
+      rel: 'src/repaired.ts', content: 'export function repaired(): number { return 1; }',
+    }]);
+
+    const report = readReport(outputPath);
+    expect(report?.files).toEqual([]);
+    expect(report?.grammarUnavailable).toEqual(existing.grammarUnavailable);
   }, 60_000);
 
 

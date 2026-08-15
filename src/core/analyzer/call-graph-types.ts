@@ -11,7 +11,7 @@
 
 import type { FunctionCfg } from './cfg.js';
 import type { FileStyleRaw } from './style-fingerprint.js';
-import type { FileParseHealth } from './parse-health.js';
+import type { FileParseHealth, GrammarUnavailableBoundary } from './parse-health.js';
 import type { ExtractionLaneDisclosure } from './extraction-pool.js';
 import type { Pass1CacheDisclosure } from './pass1-fact-cache.js';
 
@@ -331,6 +331,8 @@ export type FileExtractResult = {
   cfg?: Map<string, FunctionCfg>;
   style?: FileStyleRaw;
   parseHealth?: FileParseHealth;
+  /** Plain-data receipt that survives the worker-thread structured-clone boundary. */
+  grammarUnavailable?: Omit<GrammarUnavailableBoundary, 'fileCount'>;
 };
 
 export interface CallGraphResult {
@@ -376,6 +378,8 @@ export interface CallGraphResult {
    * {@link SerializedCallGraph}.
    */
   parseHealthByFile?: Map<string, FileParseHealth>;
+  /** Language-level grammar failures aggregated across Pass-1 files. */
+  grammarUnavailable?: GrammarUnavailableBoundary[];
   /**
    * Call sites the resolution ladder refused to bind because the candidate set was
    * ambiguous (change: harden-call-resolution-ambiguity). NOT edges — these are the

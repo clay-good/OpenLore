@@ -100,6 +100,21 @@ describe('isLossyUtf8', () => {
 });
 
 describe('buildParseHealthReport', () => {
+  it('persists a grammar boundary even when there are no per-file parse errors', () => {
+    const report = buildParseHealthReport([], 10, undefined, [{
+      language: 'TypeScript',
+      fileCount: 3,
+      reason: 'load-failure',
+      detail: 'missing optional dependency',
+    }]);
+    expect(report?.totalDegradedFiles).toBe(0);
+    expect(report?.grammarUnavailable).toEqual([{
+      language: 'TypeScript',
+      fileCount: 3,
+      reason: 'load-failure',
+      detail: 'missing optional dependency',
+    }]);
+  });
   it('returns undefined when nothing is degraded', () => {
     expect(buildParseHealthReport([])).toBeUndefined();
     const clean: FileParseHealth = { filePath: 'a.ts', language: 'TypeScript', errorCount: 0, missingCount: 0, errorLines: [] };

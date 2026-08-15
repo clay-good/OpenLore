@@ -156,11 +156,20 @@ describe('VectorIndex', () => {
       expect(texts).toHaveLength(SAMPLE_NODES.length);
     });
 
-    it('throws when nodes array is empty', async () => {
-      const embedSvc = makeMockEmbedSvc();
+    it('builds a searchable signature-only index when grammar extraction produced no nodes', async () => {
+      const result = await VectorIndex.build(
+        tmpDir, [], SAMPLE_SIGNATURES, new Set(), new Set(), null,
+      );
+      expect(result).toMatchObject({ total: 2, signatureOnlySymbols: 2, productionFunctions: 0 });
+      const matches = await VectorIndex.search(tmpDir, 'authenticate JWT token', null, { limit: 5 });
+      expect(matches.map(match => match.record.name)).toContain('authenticate');
+      expect(matches.find(match => match.record.name === 'authenticate')?.record.filePath).toBe('src/auth.ts');
+    });
+
+    it('still refuses an index with neither graph nodes nor signatures', async () => {
       await expect(
-        VectorIndex.build(tmpDir, [], SAMPLE_SIGNATURES, new Set(), new Set(), embedSvc)
-      ).rejects.toThrow('No functions to index');
+        VectorIndex.build(tmpDir, [], [], new Set(), new Set(), null),
+      ).rejects.toThrow('No repository functions to index');
     });
 
     it('excludes synthetic external call targets and reports the indexed population', async () => {

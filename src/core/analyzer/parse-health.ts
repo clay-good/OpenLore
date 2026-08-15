@@ -242,6 +242,23 @@ export interface ParseHealthLanguageSummary {
   encodingFallbacks: number;
 }
 
+/** Why an otherwise-supported language contributed no graph facts. */
+export type GrammarUnavailableReason = 'load-failure' | 'query-incompatible';
+
+/**
+ * Language-level extraction boundary (change: harden-grammar-load-disclosure).
+ *
+ * This is deliberately not modeled as N generic per-file parse failures. The source never reached
+ * the parser, so blaming each file would hide the shared runtime cause and prescribe the wrong
+ * remedy. `fileCount` is the exact number of analyzed files affected by this boundary.
+ */
+export interface GrammarUnavailableBoundary {
+  language: string;
+  fileCount: number;
+  reason: GrammarUnavailableReason;
+  detail: string;
+}
+
 /** The persisted, rolled-up parse-health report (its own `parse-health.json` artifact). */
 export interface ParseHealthReport {
   version: number;
@@ -255,6 +272,8 @@ export interface ParseHealthReport {
   topFiles: FileParseHealth[];
   /** Every per-file record (the source of truth the watcher splices and consumers scan). */
   files: FileParseHealth[];
+  /** Supported languages whose runtime grammar could not produce graph facts. */
+  grammarUnavailable?: GrammarUnavailableBoundary[];
   /**
    * How many files were EXCLUDED, per reason (change:
    * fix-analyze-native-abort-and-file-cost-budget). Omitted entirely when nothing was excluded,
@@ -307,14 +326,18 @@ export function buildParseHealthReport(
   records: FileParseHealth[],
   topN = 10,
   memoryDegradation?: MemoryDegradation,
+  grammarUnavailable: GrammarUnavailableBoundary[] = [],
 ): ParseHealthReport | undefined {
   const degraded = records.filter(isDegraded);
+  const grammarBoundaries = [...grammarUnavailable].sort(
+    (a, b) => a.language < b.language ? -1 : a.language > b.language ? 1 : 0,
+  );
   // A memory-pressure degradation is a whole-analysis reduction with no per-file records of its
   // own, so it can be the ONLY signal — a large but cleanly-parsing repository sheds the overlay
   // yet has zero degraded files. Emit a minimal report carrying just the degradation so the
   // disclosure still reaches every consumer (change: make-analyze-scale-to-any-repo).
   if (degraded.length === 0) {
-    if (!memoryDegradation) return undefined;
+    if (!memoryDegradation && grammarBoundaries.length === 0) return undefined;
     return {
       version: PARSE_HEALTH_SCHEMA_VERSION,
       totalDegradedFiles: 0,
@@ -322,7 +345,8 @@ export function buildParseHealthReport(
       byLanguage: [],
       topFiles: [],
       files: [],
-      memoryDegradation,
+      ...(memoryDegradation ? { memoryDegradation } : {}),
+      ...(grammarBoundaries.length > 0 ? { grammarUnavailable: grammarBoundaries } : {}),
     };
   }
 
@@ -360,6 +384,7 @@ export function buildParseHealthReport(
     byLanguage,
     topFiles: sorted.slice(0, topN),
     files: sorted,
+    ...(grammarBoundaries.length > 0 ? { grammarUnavailable: grammarBoundaries } : {}),
     // Omitted when nothing was excluded, so a repo whose only signal is error regions carries no
     // empty tally and its artifact stays byte-identical to before this change.
     ...(Object.keys(excludedByReason).length > 0 ? { excludedByReason } : {}),

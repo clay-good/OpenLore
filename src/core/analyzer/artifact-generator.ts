@@ -1610,6 +1610,7 @@ export class AnalysisArtifactGenerator {
       [...parseHealthRecords.values()],
       undefined,
       this._memoryDegradation,
+      callGraphResult.grammarUnavailable,
     );
 
     // Intra-procedural CFG/def-use overlay (spec: add-intraprocedural-cfg-dataflow-overlay).

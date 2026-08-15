@@ -82,7 +82,8 @@ function perFileBoundary(
  * `undefined`. Two disclosures ride the same string:
  *
  *  1. the per-file boundary — files IN THIS result that parsed with errors;
- *  2. a whole-analysis memory-pressure reduction (change: make-analyze-scale-to-any-repo). When the
+ *  2. language grammars that were unavailable for the whole analysis;
+ *  3. a whole-analysis memory-pressure reduction (change: make-analyze-scale-to-any-repo). When the
  *     degradation ladder shed the CFG overlay and/or deep-analysis breadth, that reduction has NO
  *     per-file record — it affects every result over this index — so it is surfaced REGARDLESS of
  *     which files the result touched. Without this the shed coverage would read as genuine absence,
@@ -96,6 +97,15 @@ export function parseHealthBoundary(
   const sentences: string[] = [];
   const perFile = perFileBoundary(report, touchedFiles);
   if (perFile) sentences.push(perFile);
+  if (report.grammarUnavailable?.length) {
+    const boundaries = [...report.grammarUnavailable]
+      .sort((a, b) => a.language < b.language ? -1 : a.language > b.language ? 1 : 0)
+      .map(boundary =>
+        `${boundary.language}: ${boundary.fileCount} file${boundary.fileCount === 1 ? '' : 's'} indexed for search but not graphed`);
+    sentences.push(
+      `Grammar unavailable — call-graph conclusions are a LOWER BOUND, not proof of absence (${boundaries.join('; ')}).`,
+    );
+  }
   const degradation = describeMemoryDegradation(report.memoryDegradation);
   if (degradation) sentences.push(`${degradation}.`);
   return sentences.length > 0 ? sentences.join(' ') : undefined;
