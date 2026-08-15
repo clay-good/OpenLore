@@ -8,12 +8,14 @@
  * orientation (which once reported a two-hour "recovery latency").
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   computeAgentBreakdown,
   computeRecovery,
   computeObstinacy,
   filterByAgent,
+  renderSummary,
+  renderTelemetryLine,
   type McpEvent,
   type LeaseEvent,
   type CacheEvent,
@@ -87,6 +89,19 @@ describe('per-agent aggregation', () => {
     expect(breakdown.per_agent.find(a => a.agent === 'claude-code')!.calls).toBe(1);
     expect(breakdown.per_agent.find(a => a.agent === 'unknown')!.calls).toBe(1);
   });
+
+  it('treats malformed persisted identities as unknown instead of crashing', () => {
+    const malformed = {
+      ...call('orient', 0),
+      agent: { unexpected: 'object' },
+      session_id: 42,
+    } as unknown as McpEvent;
+
+    const breakdown = computeAgentBreakdown([malformed], []);
+    expect(breakdown.per_agent).toHaveLength(1);
+    expect(breakdown.per_agent[0]!.agent).toBe('unknown');
+    expect(breakdown.per_agent[0]!.sessions).toBe(1);
+  });
 });
 
 describe('--agent filter', () => {
@@ -138,6 +153,15 @@ describe('session-bounded interval metrics', () => {
     expect(computeRecovery(mcp, lease).recovery_excluded_pairs).toBe(1);
   });
 
+  it('does not let delimiter characters collapse distinct identities', () => {
+    const lease = [stale(0, 'a\0b', 'c')];
+    const mcp = [call('orient', 60_000, 'a', 'b\0c')];
+
+    const result = computeRecovery(mcp, lease);
+    expect(result.avg_recovery_ms).toBeNull();
+    expect(result.recovery_excluded_pairs).toBe(1);
+  });
+
   it('never pairs a legacy event with an identified one', () => {
     const lease = [stale(0)];                                  // no identity
     const mcp = [call('orient', 60_000, 'claude-code', 's1')]; // identified
@@ -186,5 +210,42 @@ describe('session-bounded interval metrics', () => {
     ];
 
     expect(computeObstinacy(mcp, lease).episodes[0]!.calls_before_orient).toBe(2);
+  });
+});
+
+describe('terminal rendering boundary', () => {
+  it('sanitizes and bounds agent and tool labels in summaries', () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const hostileAgent = `agent\n\u001b]52;c;forged\u0007${'x'.repeat(200)}`;
+    const hostileTool = `tool\r\n\u001b[2J${'y'.repeat(200)}`;
+
+    renderSummary([call(hostileTool, 0, hostileAgent, 's1')], [], [], [], []);
+
+    const lines = log.mock.calls.map(args => String(args[0]));
+    // eslint-disable-next-line no-control-regex -- proving no terminal controls survive rendering
+    expect(lines.every(line => !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u.test(line))).toBe(true);
+    expect(lines.some(line => line.includes('…'))).toBe(true);
+    expect(lines.some(line => line.includes('\u001b[2J'))).toBe(false);
+    log.mockRestore();
+  });
+
+  it('sanitizes live event fields before writing them to the terminal', () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const payload = JSON.stringify({
+      ts: '2026-08-12T10:00:00.000Z',
+      event: 'tool_call',
+      tool: 'orient\nFORGED\u001b[2J',
+      ms: 12,
+      agent: 'bad\u001b]0;title\u0007agent',
+    });
+
+    renderTelemetryLine('/repo/.openlore/telemetry/mcp.jsonl', payload, '/repo/.openlore/telemetry/epistemic-lease.jsonl');
+
+    const rendered = String(log.mock.calls[0]?.[0]);
+    // eslint-disable-next-line no-control-regex -- proving no terminal controls survive rendering
+    expect(rendered).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/u);
+    expect(rendered).toContain('orientFORGED');
+    expect(rendered).toContain('[bad]0;titleagent]');
+    log.mockRestore();
   });
 });

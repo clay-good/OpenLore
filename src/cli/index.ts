@@ -267,9 +267,10 @@ applyJobGroupedHelp(program);
 // (change: scope-telemetry-by-agent-and-session). Lazy: resolved on first emit,
 // and only when telemetry is enabled — a run that emits nothing pays nothing.
 setTelemetryIdentitySource(() => {
-  const command = process.argv[2];
-  const isCommand = typeof command === 'string' && command.length > 0 && !command.startsWith('-');
-  return { agent: `cli:${isCommand ? command : 'unknown'}`, agentVersion: version };
+  // Commander has parsed global options by the time the lazy source resolves,
+  // so this remains correct for invocations such as `openlore --verbose analyze`.
+  const command = program.args[0];
+  return { agent: `cli:${command || 'unknown'}`, agentVersion: version };
 });
 
 // A bare `openlore` (no command) is the most natural way a new user explores the tool.

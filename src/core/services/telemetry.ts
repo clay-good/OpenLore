@@ -50,7 +50,9 @@ let _sessionId: string | null = null;
 function sessionId(): string {
   if (_sessionId) return _sessionId;
   try {
-    _sessionId = `${process.pid.toString(36)}-${randomUUID().slice(0, 8)}`;
+    // Keep the full UUID. A short 32-bit prefix is unnecessarily collision-prone
+    // for telemetry accumulated across many processes and repositories.
+    _sessionId = `${process.pid.toString(36)}-${randomUUID()}`;
   } catch {
     _sessionId = `${process.pid.toString(36)}-${Date.now().toString(36)}`;
   }
