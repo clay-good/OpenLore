@@ -39,12 +39,11 @@ The happy path needs no flags and never touches your repo on `npm install`:
 | `--force` | Overwrite OpenLore-managed blocks even when hand-edited. |
 | `--uninstall` | Remove every OpenLore-managed block / entry. Files OpenLore created (and never had non-OpenLore content) are deleted. |
 
-> **Default tool surface (since `default-to-lean-tool-surface`).** A plain `openlore install` wires the
-> MCP server to the lean **`navigation`** preset — 10 graph-traversal tools, the Spec 14 benchmark
-> winner — not all 72. This is per-session token savings with no capability loss: every tool stays one
-> opt-in away. Note the lean default does **not** include the governance tools the decisions pre-commit
-> gate uses (`record_decision`, `check_spec_drift`, `detect_changes`); on a repo that gates commits,
-> install with **`--preset full`** (all 72) or **`--preset minimal`** (the governance core) to wire them.
+> **Default tool surface.** A plain `openlore install` wires the read-only **`substrate`** preset:
+> 15 tools comprising the navigation core, the highest-value governance reads, and the 2 spec
+> preparation composites. Use `--preset navigation` for the lean 10-tool escape or `--preset full`
+> for all 75 tools. The decision-write and commit-gate tools remain opt-in through a preset that
+> includes them.
 
 ## What it actually writes
 

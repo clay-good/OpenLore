@@ -649,7 +649,10 @@ dryRun     boolean   Preview changes without writing files (default: false)
 1. audit_spec_coverage({ directory })
    # Before writing code: surfaces stale domains, uncovered hub functions,
    # orphan requirements. 0 LLM calls, ~200ms.
-2. If staleDomains includes your target: openlore generate --domains $DOMAIN
+2. If staleDomains includes your target: run the `openlore-repair` host skill, which exhausts
+   `prepare_spec_repair` evidence and edits the existing spec with the host agent. Use
+   `openlore generate --domains $DOMAIN` only when explicitly choosing the optional paid
+   standalone-provider path.
 3. If hubGaps includes a function you'll touch: flag it in your risk check
 ```
 

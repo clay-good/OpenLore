@@ -49,8 +49,9 @@ openlore install   # detect your agent, wire it up, and build the index (no API 
 openlore doctor    # confirm it worked and see what (if anything) to fix
 ```
 
-`openlore install` wires the lean `navigation` MCP surface plus the `SessionStart` and
-`UserPromptSubmit` hooks, then builds the index. The granular commands below remain available
+`openlore install` wires the 15-tool read-only `substrate` MCP surface plus the `SessionStart` and
+`UserPromptSubmit` hooks, then builds the index. Use `--preset navigation` for the lean 10-tool
+escape. The granular commands below remain available
 when you want project-specific context files or the workflow skills:
 
 ```bash

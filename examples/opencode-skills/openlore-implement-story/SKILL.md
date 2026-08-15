@@ -146,7 +146,9 @@ Call the openlore MCP tool `audit_spec_coverage` with `{"directory": "$PROJECT_R
 
 From the result, check:
 - `staleDomains` — if the target domain appears here, its spec is outdated.
-  Recommend running `openlore generate --domains $DOMAIN` before implementing.
+  Run the `openlore-repair` host skill before implementing. It uses deterministic
+  `prepare_spec_repair` evidence and the current host agent; do not silently switch
+  to the optional paid standalone `openlore generate` pipeline.
 - `hubGaps` — uncovered hub functions. If the feature touches one of these,
   add it to the adversarial check in Step 4b (high blast radius + no spec = risk).
 
@@ -242,7 +244,7 @@ Call the openlore MCP tool `check_spec_drift` with `{"directory": "$PROJECT_ROOT
 | Drift type | Resolution |
 |---|---|
 | `uncovered` on new files | Note it — propose `openlore generate` post-sprint |
-| `gap` on existing domain | Run `openlore generate --domains $DOMAIN` |
+| `gap` on existing domain | Run the `openlore-repair` host skill |
 | `stale` | Fix the reference |
 | No drift | Done |
 

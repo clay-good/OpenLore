@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { buildManifest } from '../../cli/commands/setup.js';
+import { adaptSkillForHost, buildManifest } from '../../cli/commands/setup.js';
 
 describe('spec workflow host skills', () => {
   const legacySkillNames = [
@@ -81,6 +81,13 @@ describe('spec workflow host skills', () => {
       expect(generate?.src).toBe(resolve('skills/openlore-generate/SKILL.md'));
       expect(repair?.src).toBe(resolve('skills/openlore-repair/SKILL.md'));
     }
+  });
+
+  it('adds Vibe slash-command metadata without polluting portable canonical skills', () => {
+    const canonical = readFileSync(resolve('skills/openlore-generate/SKILL.md'), 'utf8');
+    expect(canonical).not.toContain('user-invocable:');
+    expect(adaptSkillForHost(canonical, 'vibe')).toContain('user-invocable: true');
+    expect(adaptSkillForHost(canonical, 'claude')).toBe(canonical);
   });
 
   it('keeps former host-specific package paths as exact compatibility copies', () => {

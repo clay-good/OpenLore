@@ -7,7 +7,7 @@
 | Command | Description | API Key |
 |---------|-------------|---------|
 | `openlore init` | Initialize configuration | No |
-| `openlore install` | One-command setup: wire agent surfaces (lean `navigation` MCP + hooks) and build the index | No |
+| `openlore install` | One-command setup: wire agent surfaces (`substrate` MCP + hooks) and build the index | No |
 | `openlore connect [agent]` | Wire a specific coding agent to the MCP server + hooks | No |
 | `openlore analyze` | Run static analysis (repository-scoped single flight — a second analyze reports the live owner instead of duplicating work) | No |
 | `openlore analyze --wait` | Follow an analysis another process already owns and return its result | No |
@@ -183,7 +183,9 @@ openlore drift [options]
 ```bash
 openlore generate [options]
   --model <name>         # LLM model to use
-  --dry-run              # Preview without writing
+  --dry-run              # Free plan: no provider call, cost, or writes
+  --plan                 # Alias for the free plan
+  --preview              # Paid isolated generation preview and candidate diff
   --domains <list>       # Only generate specific domains
   --merge                # Merge with existing specs
   --no-overwrite         # Skip existing files

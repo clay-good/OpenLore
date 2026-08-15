@@ -107,14 +107,22 @@ async function detectOmoa(projectRoot: string): Promise<boolean> {
 async function copyFile(
   src: string,
   dest: string,
-  force: boolean
+  force: boolean,
+  transform?: (content: string) => string,
 ): Promise<'created' | 'updated' | 'skipped'> {
   const exists = await fileExists(dest);
   if (exists && !force) return 'skipped';
-  const content = await readFile(src, 'utf-8');
+  const raw = await readFile(src, 'utf-8');
+  const content = transform ? transform(raw) : raw;
   await mkdir(dirname(dest), { recursive: true });
   await writeFile(dest, content, 'utf-8');
   return exists ? 'updated' : 'created';
+}
+
+/** Add only metadata required by a specific host, keeping canonical skills portable. */
+export function adaptSkillForHost(content: string, host: ToolName): string {
+  if (host !== 'vibe' || /^user-invocable:/m.test(content)) return content;
+  return content.replace(/^(name:\s*[^\n]+)$/m, '$1\nuser-invocable: true');
 }
 
 // ============================================================================
@@ -275,7 +283,12 @@ async function runSetup(
         const oldTs = entry.dest.slice(0, -3) + '.ts';
         if (await fileExists(oldTs)) await unlink(oldTs);
       }
-      const status = await copyFile(entry.src, entry.dest, force);
+      const status = await copyFile(
+        entry.src,
+        entry.dest,
+        force,
+        /[/\\]SKILL\.md$/.test(entry.dest) ? content => adaptSkillForHost(content, tool) : undefined,
+      );
       const rel = entry.dest.startsWith(projectRoot)
         ? entry.dest.slice(projectRoot.length).replace(/^\//, '')
         : entry.dest;
