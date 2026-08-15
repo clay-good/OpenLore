@@ -74,6 +74,16 @@ const ALL_ACTION_FILES = [...workflowFiles.map(f => join(WORKFLOW_DIR, f)), ...C
 
 const rel = (abs: string) => abs.slice(REPO_ROOT.length + 1);
 
+function sourceFiles(dir: string): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) return sourceFiles(full);
+    return entry.name.endsWith('.ts') && !entry.name.includes('.test.') && !entry.name.includes('.spec.')
+      ? [full]
+      : [];
+  });
+}
+
 /**
  * The only expressions allowed to be interpolated directly into a `run:` script.
  * `needs.<job>.result` is a closed enum produced by Actions itself
@@ -318,5 +328,34 @@ describe('workflow security: supply-chain automation is wired', () => {
     expect(Object.keys(triggers), 'CodeQL needs both a PR trigger and a schedule').toEqual(
       expect.arrayContaining(['pull_request', 'schedule'])
     );
+  });
+});
+
+describe('workflow security: CodeQL suppressions stay narrow and auditable', () => {
+  it('allows only the six reviewed file-to-HTTP egress sinks', () => {
+    const suppressions: Record<string, number> = {};
+    const unexplained: string[] = [];
+
+    for (const file of sourceFiles(join(REPO_ROOT, 'src'))) {
+      const lines = read(file).split('\n');
+      lines.forEach((line, index) => {
+        if (!line.includes('codeql[')) return;
+        const location = `${rel(file)}:${index + 1}`;
+        if (line.trim() !== '// codeql[js/file-access-to-http]' ||
+            lines[index - 1]?.trim().startsWith('// INTENTIONAL EGRESS:') !== true) {
+          unexplained.push(location);
+        }
+        suppressions[rel(file)] = (suppressions[rel(file)] ?? 0) + 1;
+      });
+    }
+
+    expect(
+      unexplained,
+      'Every CodeQL suppression must name one query and have an immediately preceding rationale.'
+    ).toEqual([]);
+    expect(suppressions, 'Changing the reviewed suppression set requires explicit security review.').toEqual({
+      'src/core/analyzer/embedding-service.ts': 2,
+      'src/core/services/llm-service.ts': 4,
+    });
   });
 });
