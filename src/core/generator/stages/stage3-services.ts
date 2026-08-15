@@ -95,6 +95,12 @@ export async function runStage3(
               operation.functionName = resolveAvailableFunction(operation.functionName, availableFunctions);
             }
           }
+          // Operations are claims about executable behavior. When static signatures
+          // exist, an unresolved or absent function identity is fabricated evidence,
+          // not a requirement candidate. Quarantine it by omitting it from output.
+          if (availableFunctions.size > 0) {
+            service.operations = (service.operations ?? []).filter(operation => Boolean(operation.functionName));
+          }
           servicesFromFile.push(service);
         }
       } catch (error) {

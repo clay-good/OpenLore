@@ -187,7 +187,7 @@ describe('generate command', () => {
     it('keeps scoped global metadata honest and wires the concrete output root', () => {
       const source = readFileSync(fileURLToPath(new URL('./generate.ts', import.meta.url)), 'utf-8');
       expect(source).toContain('openspecRoot: fullOpenspecPath');
-      expect(source).toContain('updateConfig: Boolean(opts.outputDir) || opts.domains.length === 0');
+      expect(source).toContain('updateConfig: hasOperatorOutputDir || opts.domains.length === 0');
       expect(source).toContain('Scoped generation leaves the global RAG manifest unchanged');
     });
 
@@ -440,6 +440,32 @@ describe('generate preview modes', () => {
     expect(generateCommand.options.find(opt => opt.long === '--preview')).toBeDefined();
   });
 
+  it('preserves force in the normalized execution options', async () => {
+    const { normalizeGenerateOptions } = await import('./generate.js');
+    expect(normalizeGenerateOptions({ force: true }).force).toBe(true);
+    expect(normalizeGenerateOptions({}).force).toBe(false);
+  });
+
+  it('seeds a preview from regular project files without copying symlinks', async () => {
+    const { copyRegularTree } = await import('./generate.js');
+    const { mkdir, readFile, symlink, writeFile } = await import('node:fs/promises');
+    const source = await specTree({ billing: '# Billing\nhuman content\n' });
+    const destination = await specTree({});
+    const victim = join(source, '..', `preview-victim-${Date.now()}.json`);
+    roots.push(victim);
+    await writeFile(victim, 'ORIGINAL');
+    await mkdir(join(source, '.openlore', 'generation'), { recursive: true });
+    await symlink(victim, join(source, '.openlore', 'generation', 'pipeline-result.json'));
+
+    await copyRegularTree(source, destination);
+
+    expect(await readFile(join(destination, 'specs', 'billing', 'spec.md'), 'utf-8'))
+      .toContain('human content');
+    await expect(readFile(join(destination, '.openlore', 'generation', 'pipeline-result.json')))
+      .rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await readFile(victim, 'utf-8')).toBe('ORIGINAL');
+  });
+
   it('documents cost only on the explicit preview', () => {
     const dryRun = generateCommand.options.find(opt => opt.long === '--dry-run');
     expect(dryRun?.description).toMatch(/no provider call, no cost/i);
@@ -462,8 +488,8 @@ describe('generate preview modes', () => {
   it('redirects every paid-preview write into a captured throwaway workspace and removes it', () => {
     const source = readFileSync(fileURLToPath(new URL('./generate.ts', import.meta.url)), 'utf-8');
     expect(source).toContain("mkdtemp(join(tmpdir(), 'openlore-preview-'))");
-    expect(source).toContain('if (previewRoot) opts.outputDir = previewRoot;');
-    expect(source).toContain('logDir: join(previewRoot ?? rootPath, OPENLORE_DIR, OPENLORE_LOGS_SUBDIR)');
+    expect(source).toContain('opts.outputDir = previewRoot;');
+    expect(source).toContain('? join(previewRoot, OPENLORE_DIR, OPENLORE_LOGS_SUBDIR)');
     // Cleanup runs in a finally, so a provider failure cannot leak the workspace.
     expect(source).toMatch(/finally \{[\s\S]*if \(previewRoot\)[\s\S]*rm\(previewRoot/);
   });

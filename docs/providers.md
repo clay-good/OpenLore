@@ -50,7 +50,7 @@ export OPENAI_COMPAT_API_KEY=ollama                       # any non-empty value 
                                                           # use your real API key for cloud providers (Mistral, Groq...)
 ```
 
-**Config file** (per-project):
+**Config file** (per-project, loopback endpoints only):
 ```json
 {
   "generation": {
@@ -66,13 +66,20 @@ export OPENAI_COMPAT_API_KEY=ollama                       # any non-empty value 
 ```bash
 openlore generate --insecure
 ```
-Or in `config.json`:
+Select a remote endpoint outside the repository, then opt out of TLS verification explicitly:
+```bash
+export OPENAI_COMPAT_BASE_URL=https://internal-llm.corp.net/v1
+openlore generate --insecure
+```
+
+Repository configuration cannot select a remote credential destination or disable TLS. This prevents
+a cloned repository from redirecting your API key and source without operator consent.
+
+For remote gateways, keep only non-sensitive generation behavior in `config.json`:
 ```json
 {
   "generation": {
     "provider": "openai-compat",
-    "openaiCompatBaseUrl": "https://internal-llm.corp.net/v1",
-    "skipSslVerify": true,
     "domains": "auto"
   }
 }
@@ -88,12 +95,13 @@ to omit that field — the model still produces JSON via the system prompt:
 {
   "generation": {
     "provider": "openai-compat",
-    "openaiCompatBaseUrl": "https://your-gateway.corp.net/v1",
     "disableResponseFormat": true,
     "domains": "auto"
   }
 }
 ```
+
+Set `OPENAI_COMPAT_BASE_URL=https://your-gateway.corp.net/v1` in the operator environment.
 
 Works with: Ollama, LM Studio, Mistral AI, Groq, Together AI, LiteLLM, vLLM,
 text-generation-inference, LocalAI, Azure OpenAI, and any `/v1/chat/completions` server.

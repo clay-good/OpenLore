@@ -46,7 +46,7 @@ describe('runStage4', () => {
     };
     const result = await runStage4(pipeline, [{ path: 'src/user.ts', content: 'router.get("/users/:id")' }], undefined, () => 'users');
     expect(result.data?.map(endpoint => `${endpoint.method} ${endpoint.path}`))
-      .toEqual(['get /users/{id}', 'POST /users/']);
+      .toEqual(['GET /users/:id', 'POST /users']);
   });
 
   it('discloses dropped endpoints instead of returning a silently empty API spec', async () => {

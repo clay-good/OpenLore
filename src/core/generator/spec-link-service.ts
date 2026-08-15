@@ -15,8 +15,8 @@
  * never merely because the cache was unusable.
  */
 
-import { readFile, readdir, writeFile, mkdir } from 'node:fs/promises';
-import { dirname, join, relative } from 'node:path';
+import { readFile, readdir } from 'node:fs/promises';
+import { join, relative } from 'node:path';
 
 import {
   ARTIFACT_DEPENDENCY_GRAPH,
@@ -26,7 +26,8 @@ import {
   OPENSPEC_DIR,
 } from '../../constants.js';
 import type { MappingCoverageReason } from '../../types/index.js';
-import { isConfinedPath } from '../../utils/path-confinement.js';
+import { isConfinedPath, safeJoin } from '../../utils/path-confinement.js';
+import { atomicWriteFile } from '../decisions/atomic-store.js';
 import type { DependencyGraphResult } from '../analyzer/dependency-graph.js';
 import { mappingSourceFingerprint } from './mapping-generator.js';
 import type { PipelineResult } from './spec-pipeline.js';
@@ -83,11 +84,12 @@ export interface ResolveLinkIndexOptions {
 // ============================================================================
 
 export function analysisDirOf(rootPath: string): string {
-  return join(rootPath, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
+  return safeJoin(rootPath, join(OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR));
 }
 
 export function mappingArtifactPath(rootPath: string): string {
-  return join(analysisDirOf(rootPath), ARTIFACT_MAPPING);
+  const analysisDir = analysisDirOf(rootPath);
+  return safeJoin(analysisDir, ARTIFACT_MAPPING);
 }
 
 /**
@@ -232,8 +234,7 @@ export async function resolveSpecLinkIndex(options: ResolveLinkIndexOptions): Pr
 /** Persist the index as `mapping.json`. */
 export async function writeSpecLinkIndex(rootPath: string, index: SpecLinkIndex): Promise<string> {
   const outPath = mappingArtifactPath(rootPath);
-  await mkdir(dirname(outPath), { recursive: true });
-  await writeFile(outPath, JSON.stringify(index, null, 2), 'utf-8');
+  await atomicWriteFile(outPath, JSON.stringify(index, null, 2));
   return outPath;
 }
 

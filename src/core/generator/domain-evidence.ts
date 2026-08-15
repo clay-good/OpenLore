@@ -1,4 +1,5 @@
 import type { LLMContext, RepoStructure } from '../analyzer/artifact-generator.js';
+import { normalizeDomainName } from './openspec-compat.js';
 
 export interface DomainEvidenceBundle {
   name: string;
@@ -19,6 +20,25 @@ export interface DomainEvidenceBundle {
 export interface EvidenceFile {
   path: string;
   content: string;
+}
+
+/** Resolve user-facing domain names to one canonical, collision-free identity. */
+export function resolveDomainSelection(available: readonly string[], requested: readonly string[]): string[] {
+  const byKey = new Map<string, string>();
+  for (const name of available) {
+    const key = normalizeDomainName(name);
+    if (!key) throw new Error(`Domain name cannot be normalized: ${JSON.stringify(name)}`);
+    const prior = byKey.get(key);
+    if (prior && prior !== name) {
+      throw new Error(`Domain names collide after normalization: ${JSON.stringify(prior)} and ${JSON.stringify(name)} (${key})`);
+    }
+    byKey.set(key, name);
+  }
+  if (requested.length === 0) return [...byKey.keys()];
+  const keys = requested.map(normalizeDomainName);
+  const missing = requested.filter((_, index) => !keys[index] || !byKey.has(keys[index]));
+  if (missing.length > 0) throw new Error(`Requested domains were not found: ${missing.join(', ')}`);
+  return [...new Set(keys)];
 }
 
 /**
@@ -88,10 +108,11 @@ export function buildDomainEvidence(
   ];
   const evidenceRole = new Map((repo.undomainedEvidence ?? []).map(item => [item.path, item.role]));
   const undomained = [...new Set(evidenceFiles.filter(path => !assigned.has(path) && !excluded.has(path)))].sort();
-  if (undomained.length > 0) bundles.push(makeBundle(
+  const undomainedDefining = undomained.filter(path => evidenceRole.get(path) !== 'supporting');
+  if (undomainedDefining.length > 0) bundles.push(makeBundle(
     'undomained',
     undomained,
-    undomained.filter(path => evidenceRole.get(path) !== 'supporting'),
+    undomainedDefining,
     undomained.filter(path => evidenceRole.get(path) === 'supporting'),
     schemaFiles, apiFiles, repo, context,
   ));

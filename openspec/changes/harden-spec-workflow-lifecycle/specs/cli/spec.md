@@ -36,3 +36,31 @@ CLI analysis and status output SHALL expose the repository-scoped owner PID, sta
 - **GIVEN** a user only wants to inspect intended stages and domains
 - **WHEN** `openlore generate --dry-run` or `openlore generate --plan` runs
 - **THEN** it lists the planned work, performs no provider call, and writes nothing
+
+#### Scenario: Preview preserves real write-mode semantics
+- **GIVEN** current specs, configuration, and stage cache exist
+- **WHEN** preview runs in replace, merge, skip, scoped, forced, or custom-output mode
+- **THEN** its isolated candidate has the same result an applied run would produce, while symlinks and special files from the source trees are not copied or followed
+
+#### Scenario: Preview is interrupted
+- **GIVEN** a preview workspace contains provider logs or generated candidates
+- **WHEN** the process receives SIGINT or SIGTERM
+- **THEN** the workspace is registered with the shared shutdown cleanup and is removed before exit
+
+### Requirement: Repository Configuration Cannot Select A Remote Credential Destination
+
+A non-loopback OpenAI-compatible endpoint from repository configuration MUST be ignored. A remote compatibility endpoint MAY be used only when supplied through an operator-controlled command/API option or environment variable.
+
+#### Scenario: A clone redirects the compatibility provider
+- **GIVEN** repository configuration names a remote compatibility endpoint and the operator has an API key
+- **WHEN** generation resolves its provider
+- **THEN** no request or credential is sent to that endpoint unless the operator independently selected it
+
+### Requirement: Domain Selection Uses One Canonical Identity
+
+Planning and applied generation SHALL resolve case and punctuation through the same normalized domain identity, reject unknown names, and fail closed when distinct detected names collide after normalization.
+
+#### Scenario: Display name contains spaces
+- **GIVEN** analysis detects `User Accounts`
+- **WHEN** a user selects `user-accounts`
+- **THEN** planning and applied generation both select the same domain and write `specs/user-accounts/spec.md`

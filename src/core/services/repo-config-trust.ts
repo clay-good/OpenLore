@@ -23,10 +23,9 @@
  * recording proxy) is the legitimate reason to commit the field at all, and a
  * loopback address cannot exfiltrate to an attacker's host.
  *
- * NOT covered here, deliberately: `generation.openaiCompatBaseUrl`. It has no default
- * — an openai-compat provider is unusable without it — so a committed value is the
- * documented way to configure a team's gateway, and refusing it would break working
- * repos. It gets a disclosure instead (see `command-helpers.ts`).
+ * `generation.openaiCompatBaseUrl` follows the same rule. A remote compatibility
+ * gateway must be selected by the operator through an option or environment variable;
+ * a committed repository value is accepted only for loopback development servers.
  */
 
 import { logger } from '../../utils/logger.js';
@@ -59,6 +58,22 @@ export function resolveTrustedApiBase(
     `Ignoring llm.apiBase "${configValue}" from .openlore/config.json: a repository's ` +
       'config may not redirect provider requests that carry your API key. ' +
       'Pass --api-base to use it deliberately.',
+  );
+  return undefined;
+}
+
+/** Resolve an OpenAI-compatible endpoint without letting a clone choose a credential sink. */
+export function resolveTrustedCompatBase(
+  operatorValue: string | undefined,
+  configValue: string | undefined,
+): string | undefined {
+  if (operatorValue) return operatorValue;
+  if (!configValue) return undefined;
+  if (isLoopbackUrl(configValue)) return configValue;
+  logger.warning(
+    `Ignoring generation.openaiCompatBaseUrl "${configValue}" from .openlore/config.json: ` +
+      'a repository may not choose where your API key and source are sent. ' +
+      'Set OPENAI_COMPAT_BASE_URL or pass an API option to trust it deliberately.',
   );
   return undefined;
 }
@@ -106,11 +121,9 @@ export function rejectRepoConfiguredTlsOptOut(field: string, value: boolean | un
  * Disclose a repo-configured endpoint that will receive credentials and repository
  * text, when it is not loopback.
  *
- * Used for the endpoints that CANNOT be dropped without breaking a working
- * configuration — `generation.openaiCompatBaseUrl` and `embedding.baseUrl` have no
- * provider default, so a committed value is the only way to name the gateway. The
- * honest move for those is to make the destination visible rather than silent; a
- * refusal belongs only where a default exists to fall back to.
+ * Used for repository-selected data endpoints whose callers intentionally support
+ * disclosure rather than refusal (currently embedding). Generation endpoints that
+ * carry operator credentials use {@link resolveTrustedCompatBase} instead.
  */
 const disclosed = new Set<string>();
 

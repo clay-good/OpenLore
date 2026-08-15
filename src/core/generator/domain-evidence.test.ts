@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildDomainEvidence, partitionEvidenceFiles } from './domain-evidence.js';
+import { buildDomainEvidence, partitionEvidenceFiles, resolveDomainSelection } from './domain-evidence.js';
 import type { LLMContext, RepoStructure } from '../analyzer/artifact-generator.js';
 
 describe('buildDomainEvidence', () => {
@@ -64,11 +64,22 @@ describe('buildDomainEvidence', () => {
         candidateDecisions: [expect.objectContaining({ candidate: 'stages', owner: 'generator' })],
         candidateDecisionSummary: expect.objectContaining({ omitted: 0, limit: 500 }),
       },
-      {
-        name: 'undomained', files: ['test/unattached.test.ts'],
-        definingFiles: [], supportingFiles: ['test/unattached.test.ts'], serviceFiles: [],
-      },
     ]);
+  });
+
+  it('does not promote supporting-only evidence into a selectable undomained domain', () => {
+    const repo = {
+      domains: [], undomained: ['test/helper.test.ts'],
+      undomainedEvidence: [{ path: 'test/helper.test.ts', role: 'supporting', reason: 'test-file' }],
+    } as unknown as RepoStructure;
+    const context = { phase2_deep: { files: [] }, signatures: [] } as unknown as LLMContext;
+    expect(buildDomainEvidence(repo, context)).toEqual([]);
+  });
+
+  it('resolves punctuation and case canonically and rejects ambiguous identities', () => {
+    expect(resolveDomainSelection(['User Accounts', 'Billing'], ['user-accounts'])).toEqual(['user-accounts']);
+    expect(() => resolveDomainSelection(['Foo Bar', 'foo-bar'], [])).toThrow(/collide after normalization/);
+    expect(() => resolveDomainSelection(['Billing'], ['missing'])).toThrow(/not found/);
   });
 });
 

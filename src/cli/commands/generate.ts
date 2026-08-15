@@ -8,9 +8,10 @@
 import { Command } from 'commander';
 import { allowInsecureTls } from '../../core/services/tls-scope.js';
 import { confirm } from '@inquirer/prompts';
-import { cp, mkdtemp, readdir, readFile, stat, rm } from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
+import { lstat, mkdir, mkdtemp, open, readdir, readFile, stat, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, relative, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { logger } from '../../utils/logger.js';
 import { resolveTrustedApiBase, resolveTrustedSslVerify, rejectRepoConfiguredTlsOptOut } from '../../core/services/repo-config-trust.js';
 import { resolveOpenspecDir } from '../../utils/openspec-dir.js';
@@ -72,6 +73,9 @@ import {
 import type { SpecSymbolRef } from '../../core/generator/spec-link-index.js';
 import { RagManifestGenerator } from '../../core/generator/rag-manifest-generator.js';
 import { createProgress } from '../../utils/progress.js';
+import { getShutdownManager, type ShutdownManager } from '../../utils/shutdown.js';
+import { normalizeDomainName } from '../../core/generator/openspec-compat.js';
+import { buildDomainEvidence, resolveDomainSelection } from '../../core/generator/domain-evidence.js';
 
 // ============================================================================
 // TYPES
@@ -99,9 +103,76 @@ interface AnalysisData {
   timestamp: string;
 }
 
+export function normalizeGenerateOptions(options: Partial<ExtendedGenerateOptions>): ExtendedGenerateOptions {
+  return {
+    analysis: options.analysis ?? `${OPENLORE_ANALYSIS_REL_PATH}/`,
+    model: options.model ?? '',
+    dryRun: options.dryRun ?? false,
+    plan: options.plan ?? false,
+    preview: options.preview ?? false,
+    domains: options.domains ?? [],
+    adr: options.adr ?? false,
+    adrOnly: options.adrOnly ?? false,
+    merge: options.merge ?? false,
+    // Commander stores `--no-overwrite` under the `overwrite` key (default true).
+    noOverwrite: options.overwrite === false,
+    yes: options.yes ?? false,
+    outputDir: options.outputDir,
+    quiet: false,
+    verbose: false,
+    noColor: false,
+    config: OPENLORE_CONFIG_REL_PATH,
+    force: options.force ?? false,
+  };
+}
+
 /** Resolve an operator-supplied output path without rebasing an absolute path. */
 export function resolveGenerateOutputPath(rootPath: string, outputDir: string): string {
   return resolve(rootPath, outputDir);
+}
+
+/**
+ * Copy only ordinary files and directories from an untrusted repository tree.
+ * Symlinks and special files are ignored; regular files are opened with NOFOLLOW
+ * so a rename race cannot turn the validation into an external read.
+ */
+export async function copyRegularTree(sourceRoot: string, destinationRoot: string): Promise<void> {
+  async function visit(relativePath: string): Promise<void> {
+    const source = safeJoin(sourceRoot, relativePath || '.');
+    let entries;
+    try {
+      entries = await readdir(source, { withFileTypes: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw error;
+    }
+    await mkdir(safeJoin(destinationRoot, relativePath || '.'), { recursive: true });
+    for (const entry of entries) {
+      const child = join(relativePath, entry.name);
+      // Inspect the directory entry itself before canonicalizing its target. A
+      // symlink outside the root is something to skip, not an error that aborts
+      // an otherwise-safe preview copy.
+      const sourcePath = join(source, entry.name);
+      const metadata = await lstat(sourcePath);
+      if (metadata.isSymbolicLink()) continue;
+      if (metadata.isDirectory()) {
+        await visit(child);
+        continue;
+      }
+      if (!metadata.isFile()) continue;
+      const handle = await open(sourcePath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+      try {
+        const verified = await handle.stat();
+        if (!verified.isFile()) continue;
+        const destination = safeJoin(destinationRoot, child);
+        await mkdir(dirname(destination), { recursive: true });
+        await writeFile(destination, await handle.readFile());
+      } finally {
+        await handle.close();
+      }
+    }
+  }
+  await visit('');
 }
 
 /** Every `specs/<domain>/spec.md` under an openspec root, keyed by domain. */
@@ -371,30 +442,18 @@ Each spec.md follows OpenSpec conventions:
   .action(async function (this: Command, options: Partial<ExtendedGenerateOptions>) {
     const startTime = Date.now();
     const rootPath = process.cwd();
+    const hasOperatorOutputDir = Boolean(options.outputDir);
     let previewRoot: string | null = null;
+    let comparisonOpenspecRoot: string;
+    let shutdownManager: ShutdownManager | null = null;
+    const removePreview = async (): Promise<void> => {
+      if (previewRoot) await rm(previewRoot, { recursive: true, force: true });
+    };
 
     // Inherit global options (--api-base, --insecure, etc.)
     const globalOpts = this.optsWithGlobals?.() ?? {};
 
-    const opts: ExtendedGenerateOptions = {
-      analysis: options.analysis ?? `${OPENLORE_ANALYSIS_REL_PATH}/`,
-      model: options.model ?? '',
-      dryRun: options.dryRun ?? false,
-      plan: options.plan ?? false,
-      preview: options.preview ?? false,
-      domains: options.domains ?? [],
-      adr: options.adr ?? false,
-      adrOnly: options.adrOnly ?? false,
-      merge: options.merge ?? false,
-      // commander stores `--no-overwrite` under the `overwrite` key (default true).
-      noOverwrite: options.overwrite === false,
-      yes: options.yes ?? false,
-      outputDir: options.outputDir,
-      quiet: false,
-      verbose: false,
-      noColor: false,
-      config: OPENLORE_CONFIG_REL_PATH,
-    };
+    const opts = normalizeGenerateOptions(options);
 
     try {
       // ========================================================================
@@ -420,8 +479,18 @@ Each spec.md follows OpenSpec conventions:
       // workspace: specs, mapping, config, manifests, backups. Redirecting through
       // the existing `--output-dir` plumbing means there is one isolation
       // mechanism, not a second parallel set of preview-only write paths.
+      comparisonOpenspecRoot = options.outputDir
+        ? resolveGenerateOutputPath(rootPath, options.outputDir)
+        : resolveOpenspecDir(rootPath, openloreConfig.openspecPath);
       previewRoot = opts.preview ? await mkdtemp(join(tmpdir(), 'openlore-preview-')) : null;
-      if (previewRoot) opts.outputDir = previewRoot;
+      if (previewRoot) {
+        shutdownManager = getShutdownManager(rootPath);
+        shutdownManager.onCleanup(removePreview);
+        // Merge/skip/config behavior must be evaluated against the current corpus,
+        // not against an empty directory that makes every candidate look new.
+        await copyRegularTree(comparisonOpenspecRoot, previewRoot);
+        opts.outputDir = previewRoot;
+      }
 
       // Determine openspec path
       const openspecPath = opts.outputDir ?? openloreConfig.openspecPath ?? OPENSPEC_DIR;
@@ -484,16 +553,27 @@ Each spec.md follows OpenSpec conventions:
         logger.listItem('Stage 5: Architecture Synthesis');
         logger.blank();
 
-        const domainFilter = opts.domains.length > 0 ? opts.domains : repoStructure.domains.map(d => d.name);
+        const availableDomains = buildDomainEvidence(repoStructure, llmContext).map(domain => domain.name);
+        const selectedKeys = resolveDomainSelection(
+          availableDomains,
+          opts.domains,
+        );
+        const domainFilter = availableDomains
+          .filter(name => selectedKeys.includes(normalizeDomainName(name)));
         logger.discovery('Domains to generate:');
         for (const domain of domainFilter) logger.listItem(domain);
         logger.blank();
 
-        logger.discovery('Would write specs to:');
-        logger.listItem(`${openspecPath}/specs/overview/spec.md`);
-        logger.listItem(`${openspecPath}/specs/architecture/spec.md`);
-        for (const domain of domainFilter) logger.listItem(`${openspecPath}/specs/${domain}/spec.md`);
-        logger.listItem(`${openspecPath}/specs/api/spec.md (if applicable)`);
+        logger.discovery('Would write:');
+        if (!opts.adrOnly) {
+          logger.listItem(`${openspecPath}/specs/overview/spec.md`);
+          logger.listItem(`${openspecPath}/specs/architecture/spec.md`);
+          for (const domain of domainFilter) {
+            logger.listItem(`${openspecPath}/specs/${normalizeDomainName(domain)}/spec.md`);
+          }
+          logger.listItem(`${openspecPath}/specs/api/spec.md (if applicable)`);
+        }
+        if (opts.adr || opts.adrOnly) logger.listItem(`${openspecPath}/decisions/ (if decisions are found)`);
         logger.blank();
 
         logger.success(`${opts.dryRun ? 'Dry run' : 'Plan'} complete. No provider call was made and no files were modified.`);
@@ -602,7 +682,9 @@ Each spec.md follows OpenSpec conventions:
           sslVerify: resolveTrustedSslVerify(globalOpts.insecure, openloreConfig?.llm?.sslVerify),
           timeout: globalOpts.timeout ?? openloreConfig.generation?.timeout,
           enableLogging: true,
-          logDir: join(previewRoot ?? rootPath, OPENLORE_DIR, OPENLORE_LOGS_SUBDIR),
+          logDir: previewRoot
+            ? join(previewRoot, OPENLORE_DIR, OPENLORE_LOGS_SUBDIR)
+            : safeJoin(rootPath, join(OPENLORE_DIR, OPENLORE_LOGS_SUBDIR)),
         });
       } catch (error) {
         logger.error(`Failed to create LLM service: ${(error as Error).message}`);
@@ -642,11 +724,11 @@ Each spec.md follows OpenSpec conventions:
       // not write (or overwrite) the project's stage output. The existing cache is
       // COPIED in first, so the preview still reuses whatever has already been paid
       // for instead of re-running every stage.
-      const stageCacheDir = join(rootPath, OPENLORE_DIR, OPENLORE_GENERATION_SUBDIR);
+      const stageCacheDir = safeJoin(rootPath, join(OPENLORE_DIR, OPENLORE_GENERATION_SUBDIR));
       let pipelineOutputDir = stageCacheDir;
       if (previewRoot) {
         pipelineOutputDir = join(previewRoot, OPENLORE_DIR, OPENLORE_GENERATION_SUBDIR);
-        await cp(stageCacheDir, pipelineOutputDir, { recursive: true }).catch(() => {});
+        await copyRegularTree(stageCacheDir, pipelineOutputDir);
       }
 
       const pipeline = new SpecGenerationPipeline(llm, {
@@ -671,7 +753,9 @@ Each spec.md follows OpenSpec conventions:
         // Save logs on failure
         try {
           await llm.saveLogs();
-          logger.discovery(`LLM logs saved to ${OPENLORE_DIR}/${OPENLORE_LOGS_SUBDIR}/`);
+          logger.discovery(opts.preview
+            ? 'LLM logs were isolated with the preview workspace and will be discarded.'
+            : `LLM logs saved to ${OPENLORE_DIR}/${OPENLORE_LOGS_SUBDIR}/`);
         } catch {
           // Ignore log save errors
         }
@@ -721,14 +805,14 @@ Each spec.md follows OpenSpec conventions:
 
       // Filter by domains if specified
       if (!opts.adrOnly && opts.domains.length > 0) {
-        const domainSet = new Set(opts.domains.map(d => d.toLowerCase()));
+        const domainSet = new Set(opts.domains.map(normalizeDomainName));
         generatedSpecs = generatedSpecs.filter(spec => {
           // Always include overview and architecture
           if (spec.type === 'overview' || spec.type === 'architecture') {
             return true;
           }
           // Check if domain matches
-          return domainSet.has(spec.domain.toLowerCase());
+          return domainSet.has(normalizeDomainName(spec.domain));
         });
         logger.info('Filtered to domains', opts.domains.join(', '));
       }
@@ -771,7 +855,7 @@ Each spec.md follows OpenSpec conventions:
         writeMode,
         version: openloreConfig.version,
         createBackups: true,
-        updateConfig: Boolean(opts.outputDir) || opts.domains.length === 0,
+        updateConfig: hasOperatorOutputDir || opts.domains.length === 0,
         validateBeforeWrite: true,
         cleanBeforeWrite: shouldCleanStaleDomains(opts.force, opts.domains, opts.adrOnly),
       });
@@ -793,6 +877,7 @@ Each spec.md follows OpenSpec conventions:
           rootPath: opts.outputDir ? fullOpenspecPath : rootPath,
           openspecPath: opts.outputDir ? '.' : relative(rootPath, fullOpenspecPath) || OPENSPEC_DIR,
           persist: true,
+          graph: depGraph,
         });
         if (resolution.state === 'available') {
           const { stats } = resolution.index;
@@ -810,7 +895,7 @@ Each spec.md follows OpenSpec conventions:
 
       // Generate RAG manifest
       try {
-        if (opts.domains.length > 0 && !opts.outputDir) {
+        if (opts.domains.length > 0 && !hasOperatorOutputDir) {
           logger.warning('Scoped generation leaves the global RAG manifest unchanged. Run without --domains to refresh it.');
         } else {
           const manifestGen = new RagManifestGenerator();
@@ -836,8 +921,7 @@ Each spec.md follows OpenSpec conventions:
       if (previewRoot) {
         logger.blank();
         logger.section('Paid Preview');
-        const projectSpecs = resolveOpenspecDir(rootPath, openloreConfig.openspecPath);
-        for (const line of await renderSpecPreviewDiff(projectSpecs, previewRoot)) console.log(line);
+        for (const line of await renderSpecPreviewDiff(comparisonOpenspecRoot!, previewRoot)) console.log(line);
         logger.blank();
         logger.success('Preview complete. The project tree was not modified.');
         return;
@@ -918,7 +1002,8 @@ Each spec.md follows OpenSpec conventions:
       // A preview workspace is disposable by definition: remove it whether the
       // pipeline succeeded, failed, or threw mid-provider-call.
       if (previewRoot) {
-        await rm(previewRoot, { recursive: true, force: true }).catch(() => {});
+        await removePreview().catch(() => {});
+        shutdownManager?.removeCleanup(removePreview);
       }
     }
   });

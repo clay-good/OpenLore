@@ -57,10 +57,10 @@ export async function runStage4(
     onFile?.(idx + 1, work.length, label);
     const evidence = files.map(file => `=== ${file.path} ===\n${pipeline.graphPromptFor(file.path, file.content) ?? file.content}`).join('\n\n');
     const routeHint = files.map(file => pipeline.routesFor(file.path)).filter(Boolean).join('\n');
-    const knownRoutes = new Set(
+    const knownRoutes = new Map(
       routeHint.split('\n').flatMap(line => {
         const match = /^-\s+([A-Za-z]+)\s+(\S+)/.exec(line);
-        return match ? [routeKey(match[1], match[2])] : [];
+        return match ? [[routeKey(match[1], match[2]), { method: match[1].toUpperCase(), path: match[2] }] as const] : [];
       }),
     );
 
@@ -80,13 +80,14 @@ export async function runStage4(
         const unverified: string[] = [];
         for (const endpoint of endpoints) {
           const key = routeKey(endpoint.method, endpoint.path);
-          if (!knownRoutes.has(key)) {
+          const canonical = knownRoutes.get(key);
+          if (!canonical) {
             unverified.push(key);
             continue;
           }
           if (seenPaths.has(key)) continue;
           seenPaths.add(key);
-          allEndpoints.push(endpoint);
+          allEndpoints.push({ ...endpoint, method: canonical.method, path: canonical.path });
         }
         // An endpoint with no static route to stand on is dropped — the spec must
         // not carry an unverifiable route — but the drop is DISCLOSED. A silently

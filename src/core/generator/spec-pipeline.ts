@@ -27,6 +27,9 @@ import { runStage4 } from './stages/stage4-api.js';
 import { runStage5 } from './stages/stage5-architecture.js';
 import { runStage6 } from './stages/stage6-adr.js';
 import { buildDomainEvidence } from './domain-evidence.js';
+import { resolveDomainSelection } from './domain-evidence.js';
+import { normalizeDomainName } from './openspec-compat.js';
+import { safeJoin } from '../../utils/path-confinement.js';
 import { PROMPTS } from './prompts.js';
 import { SUBSPEC_SCHEMA } from './schemas.js';
 import type {
@@ -91,7 +94,7 @@ export class SpecGenerationPipeline implements PipelineContext {
     this.semanticSearch = options.semanticSearch;
     this.options = {
       outputDir: options.outputDir,
-      domains: [...(options.domains ?? [])].map(domain => domain.toLowerCase()).sort(),
+      domains: [...(options.domains ?? [])].map(normalizeDomainName).sort(),
       skipStages: options.skipStages ?? [],
       resumeFrom: options.resumeFrom ?? '',
       force: options.force ?? false,
@@ -118,15 +121,13 @@ export class SpecGenerationPipeline implements PipelineContext {
     this.currentLLMContext = llmContext;
     this.currentRepoStructure = repoStructure;
     const allDomainEvidence = buildDomainEvidence(repoStructure, llmContext);
-    const selectedDomains = new Set(this.options.domains);
+    const selectedDomains = new Set(resolveDomainSelection(
+      allDomainEvidence.map(bundle => bundle.name),
+      this.options.domains,
+    ));
     const domainEvidence = selectedDomains.size > 0
-      ? allDomainEvidence.filter(bundle => selectedDomains.has(bundle.name.toLowerCase()))
+      ? allDomainEvidence.filter(bundle => selectedDomains.has(normalizeDomainName(bundle.name)))
       : allDomainEvidence;
-    if (selectedDomains.size > 0) {
-      const matched = new Set(domainEvidence.map(bundle => bundle.name.toLowerCase()));
-      const missing = this.options.domains.filter(domain => !matched.has(domain));
-      if (missing.length > 0) throw new Error(`Requested domains were not found: ${missing.join(', ')}`);
-    }
     const domainForFile = (path: string): string => domainEvidence.find(bundle => bundle.files.includes(path))?.name ?? 'undomained';
     const scopedFilePaths = new Set(domainEvidence.flatMap(bundle => bundle.files));
     const withinDomainScope = (files: Array<{ path: string; content: string }>) =>
@@ -784,9 +785,7 @@ export class SpecGenerationPipeline implements PipelineContext {
       // 2. Read from disk when rootPath is configured (covers files outside phase2_deep)
       if (this.options.rootPath) {
         try {
-          const absPath = resolve(this.options.rootPath, p);
-          // Prevent path traversal outside the project root
-          if (!absPath.startsWith(resolve(this.options.rootPath))) continue;
+          const absPath = safeJoin(resolve(this.options.rootPath), p);
           const content = await readFile(absPath, 'utf-8');
           resolved.push({ path: p, content });
         } catch {

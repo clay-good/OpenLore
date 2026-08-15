@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdir, rm, readdir } from 'node:fs/promises';
+import { mkdir, rm, readdir, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -1033,5 +1033,31 @@ describe('SpecGenerationPipeline', () => {
       expect(result.metadata.completedStages).toContain('survey');
       expect(result.metadata.skippedStages).toContain('api');
     });
+  });
+});
+
+describe('generation evidence path confinement', () => {
+  it('rejects sibling-prefix traversal and symlinks outside the project', async () => {
+    const parent = await createTempDir();
+    const root = join(parent, 'project');
+    const sibling = join(parent, 'project-secret');
+    await mkdir(root);
+    await mkdir(sibling);
+    await writeFile(join(sibling, 'secret.ts'), 'TOP_SECRET');
+    await symlink(join(sibling, 'secret.ts'), join(root, 'linked.ts'));
+    const { service } = createMockLLMService();
+    const pipeline = new SpecGenerationPipeline(service, {
+      outputDir: join(root, '.openlore', 'generation'), rootPath: root, saveIntermediate: false,
+    });
+    const resolveFiles = (pipeline as unknown as {
+      resolveFiles(context: LLMContext, paths: string[], fallback: Array<{ path: string; content: string }>): Promise<Array<{ path: string; content: string }>>;
+    }).resolveFiles.bind(pipeline);
+    const context = { phase2_deep: { files: [] } } as unknown as LLMContext;
+    try {
+      expect(await resolveFiles(context, ['../project-secret/secret.ts'], [])).toEqual([]);
+      expect(await resolveFiles(context, ['linked.ts'], [])).toEqual([]);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
   });
 });

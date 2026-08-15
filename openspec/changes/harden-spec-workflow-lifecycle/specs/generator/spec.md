@@ -39,3 +39,31 @@ The standalone generator and agent-hosted Generate/Repair workflows SHALL leave 
 - **GIVEN** standalone generation writes specifications
 - **WHEN** it finalizes its output
 - **THEN** its mapping artifact is derived from the written specs and current graph under the same link-state and provenance rules as agent-hosted generation
+
+### Requirement: Generated Claims Remain Bound To Static Evidence
+
+The standalone generator MUST NOT emit an operation whose proposed function cannot be resolved uniquely against the supplied signature evidence, and it MUST use the static route inventory's method and path as the canonical identity of every emitted endpoint. Supporting-only evidence MUST NOT become a selectable domain.
+
+#### Scenario: A fabricated operation is quarantined
+- **GIVEN** a generation response proposes an operation with no matching static function signature
+- **WHEN** service results are reconciled
+- **THEN** the unresolved operation is omitted rather than written as repository behavior
+
+#### Scenario: A route spelling is canonicalized
+- **GIVEN** a generated endpoint matches a static route after parameter and case normalization
+- **WHEN** API results are reconciled
+- **THEN** the emitted endpoint uses the exact method and path recorded by the static inventory
+
+### Requirement: Generation Inputs And Caches Are Confined
+
+Provider-selected source paths MUST resolve canonically inside the project, and persisted mapping output MUST use a confined atomic write that neither follows a mapping symlink nor leaves a torn artifact.
+
+#### Scenario: A provider selects an escaping source path
+- **GIVEN** a provider proposes a sibling-prefix traversal or an in-project symlink to an external file
+- **WHEN** later stages resolve the proposed source
+- **THEN** the file is excluded and none of its contents are sent in a later provider request
+
+#### Scenario: Mapping path is a symlink
+- **GIVEN** the mapping target or its analysis directory resolves outside the project
+- **WHEN** mapping persistence runs
+- **THEN** persistence fails closed without modifying the symlink target

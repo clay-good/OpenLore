@@ -5,7 +5,7 @@
  * No side effects (no process.exit, no console.log).
  */
 
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { readJsonFile } from '../utils/command-helpers.js';
 import {
   readOpenLoreConfig,
@@ -46,16 +46,16 @@ import {
   OPENLORE_LOGS_SUBDIR,
   OPENLORE_ANALYSIS_REL_PATH,
   OPENLORE_GENERATION_SUBDIR,
-  OPENSPEC_DIR,
   ARTIFACT_REPO_STRUCTURE,
   ARTIFACT_LLM_CONTEXT,
   ARTIFACT_DEPENDENCY_GRAPH,
   ARTIFACT_REFACTOR_PRIORITIES,
   ARTIFACT_RAG_MANIFEST,
 } from '../constants.js';
-import { resolveTrustedApiBase, resolveTrustedSslVerify, rejectRepoConfiguredTlsOptOut, discloseRepoConfiguredEndpoint } from '../core/services/repo-config-trust.js';
+import { resolveTrustedApiBase, resolveTrustedCompatBase, resolveTrustedSslVerify, rejectRepoConfiguredTlsOptOut } from '../core/services/repo-config-trust.js';
 import { resolveOpenspecDir } from '../utils/openspec-dir.js';
 import { safeJoin } from '../utils/path-confinement.js';
+import { normalizeDomainName } from '../core/generator/openspec-compat.js';
 
 function progress(onProgress: ProgressCallback | undefined, step: string, status: 'start' | 'progress' | 'complete' | 'skip', detail?: string): void {
   onProgress?.({ phase: 'generate', step, status, detail });
@@ -121,11 +121,11 @@ export async function openloreGenerate(options: GenerateApiOptions = {}): Promis
     throw new Error('No openlore configuration found. Run openloreInit() first.');
   }
 
-  const openspecRelPath = openloreConfig.openspecPath ?? OPENSPEC_DIR;
   // Confined: this becomes a WRITE target (the RAG manifest, the generated specs), and
   // `openspecPath` comes from the analyzed repo's own config. The CLI twin does the
   // same; leaving the API twin unguarded would just move the escape one layer down.
   const fullOpenspecPath = resolveOpenspecDir(rootPath, openloreConfig.openspecPath);
+  const openspecRelPath = relative(rootPath, fullOpenspecPath) || '.';
   await readOpenSpecConfig(fullOpenspecPath); // Ensure it's readable
   progress(onProgress, 'Loading configuration', 'complete');
 
@@ -202,20 +202,10 @@ export async function openloreGenerate(options: GenerateApiOptions = {}): Promis
   const effectiveModel = options.model || openloreConfig.generation.model || defaultModels[effectiveProvider];
 
   const rootConfig = openloreConfig as unknown as Record<string, string>;
-  const effectiveBaseUrl = options.openaiCompatBaseUrl
-    ?? process.env.OPENAI_COMPAT_BASE_URL
-    ?? openloreConfig.generation.openaiCompatBaseUrl
-    ?? rootConfig['openaiCompatBaseUrl'];
-  // Disclose when the endpoint came from the analyzed repo's config rather than the
-  // host process or the environment. Both spellings are covered — the undeclared
-  // top-level `openaiCompatBaseUrl` key is read here and nowhere else, so it had no
-  // disclosure at all.
-  if (!options.openaiCompatBaseUrl && !process.env.OPENAI_COMPAT_BASE_URL) {
-    discloseRepoConfiguredEndpoint(
-      'generation.openaiCompatBaseUrl',
-      openloreConfig.generation.openaiCompatBaseUrl ?? rootConfig['openaiCompatBaseUrl'],
-    );
-  }
+  const effectiveBaseUrl = resolveTrustedCompatBase(
+    options.openaiCompatBaseUrl ?? process.env.OPENAI_COMPAT_BASE_URL,
+    openloreConfig.generation.openaiCompatBaseUrl ?? rootConfig['openaiCompatBaseUrl'],
+  );
 
   // `options.*` is supplied by the HOST PROCESS embedding OpenLore, so it is trusted
   // like a CLI flag; the config file is the analyzed repo's and is not.
@@ -238,7 +228,7 @@ export async function openloreGenerate(options: GenerateApiOptions = {}): Promis
       timeout: options.timeout ?? openloreConfig.generation?.timeout,
       disableResponseFormat: openloreConfig.generation?.disableResponseFormat,
       enableLogging: true,
-      logDir: join(rootPath, OPENLORE_DIR, OPENLORE_LOGS_SUBDIR),
+      logDir: safeJoin(rootPath, join(OPENLORE_DIR, OPENLORE_LOGS_SUBDIR)),
     });
   } catch (error) {
     throw new Error(`Failed to create LLM service: ${(error as Error).message}`, { cause: error });
@@ -250,7 +240,7 @@ export async function openloreGenerate(options: GenerateApiOptions = {}): Promis
   const adr = options.adr ?? false;
   const adrOnly = options.adrOnly ?? false;
   const pipeline = new SpecGenerationPipeline(llm, {
-    outputDir: join(rootPath, OPENLORE_DIR, OPENLORE_GENERATION_SUBDIR),
+    outputDir: safeJoin(rootPath, join(OPENLORE_DIR, OPENLORE_GENERATION_SUBDIR)),
     domains: options.domains,
     saveIntermediate: true,
     generateADRs: adr || adrOnly,
@@ -291,9 +281,9 @@ export async function openloreGenerate(options: GenerateApiOptions = {}): Promis
 
   // Filter by domains
   if (!adrOnly && options.domains && options.domains.length > 0) {
-    const domainSet = new Set(options.domains.map(d => d.toLowerCase()));
+    const domainSet = new Set(options.domains.map(normalizeDomainName));
     generatedSpecs = generatedSpecs.filter(spec =>
-      spec.type === 'overview' || spec.type === 'architecture' || domainSet.has(spec.domain.toLowerCase())
+      spec.type === 'overview' || spec.type === 'architecture' || domainSet.has(normalizeDomainName(spec.domain))
     );
   }
 
@@ -316,6 +306,7 @@ export async function openloreGenerate(options: GenerateApiOptions = {}): Promis
 
   const writer = new OpenSpecWriter({
     rootPath,
+    openspecRoot: fullOpenspecPath,
     writeMode,
     version: openloreConfig.version,
     createBackups: true,
@@ -356,6 +347,7 @@ export async function openloreGenerate(options: GenerateApiOptions = {}): Promis
         rootPath,
         openspecPath: openspecRelPath,
         persist: true,
+        graph: depGraph,
       });
       if (resolution.state === 'available') {
         progress(onProgress, 'Deriving spec link index', 'complete',

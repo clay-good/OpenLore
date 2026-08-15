@@ -24,7 +24,7 @@ describe('runStage3', () => {
     expect(provider.callHistory[0].userPrompt).toContain('createInvoice');
     expect(provider.callHistory[0].userPrompt).toContain('collectPayment');
     expect(result.data?.[0]).toMatchObject({ name: 'BillingService', domain: 'billing', locationFile: 'src/invoice.ts' });
-    expect(result.data?.[0].operations[0].functionName).toBeUndefined();
+    expect(result.data?.[0].operations).toEqual([]);
   });
 
   it('keeps a qualified method anchor instead of dropping it over the dotted form', async () => {
@@ -50,8 +50,8 @@ describe('runStage3', () => {
     ], undefined, () => 'billing');
 
     const names = result.data?.[0].operations.map(operation => operation.functionName);
-    // Qualified → bare, bare → qualified, and an unknown name still resolves to nothing.
-    expect(names).toEqual(['charge', 'Payment.settle', undefined]);
+    // Qualified → bare and bare → qualified; the fabricated operation is quarantined.
+    expect(names).toEqual(['charge', 'Payment.settle']);
   });
 
   it('reconciles duplicate service output across stable domain partitions', async () => {
