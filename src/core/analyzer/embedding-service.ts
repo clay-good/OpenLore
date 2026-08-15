@@ -172,13 +172,11 @@ export class EmbeddingService implements Embedder {
       headers['Authorization'] = `Bearer ${this.apiKey}`;
     }
 
+    // INTENTIONAL EGRESS: this feature sends repository text to the operator-selected endpoint.
+    // codeql[js/file-access-to-http]
     const response = await withRelaxedTls(() => fetch(url, {
       method: 'POST',
-      // INTENTIONAL EGRESS: the operator-selected endpoint needs its configured credential.
-      // codeql[js/file-access-to-http]
       headers,
-      // INTENTIONAL EGRESS: embedding repository text is this configured feature's purpose.
-      // codeql[js/file-access-to-http]
       body: JSON.stringify({ input: truncated, model: this.model }),
     }), this.relaxTls);
 
