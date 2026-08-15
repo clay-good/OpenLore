@@ -900,6 +900,8 @@ export class OpenAIProvider implements LLMProvider {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${this.apiKey}`,
       },
+      // INTENTIONAL EGRESS: this provider sends the request to the operator-selected LLM.
+      // codeql[js/file-access-to-http]
       body: JSON.stringify(body),
     }), this.relaxTls);
 
@@ -1085,6 +1087,8 @@ export class OpenAICompatibleProvider implements LLMProvider {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${this.apiKey}`,
       },
+      // INTENTIONAL EGRESS: this provider sends the request to the operator-selected LLM.
+      // codeql[js/file-access-to-http]
       body: JSON.stringify(body),
     }), this.relaxTls);
 
@@ -1215,6 +1219,8 @@ export class CopilotProvider implements LLMProvider {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${this.apiKey}`,
       },
+      // INTENTIONAL EGRESS: this provider sends the request to the operator-selected LLM.
+      // codeql[js/file-access-to-http]
       body: JSON.stringify(body),
     }), this.relaxTls);
 
@@ -1553,6 +1559,8 @@ export class GeminiProvider implements LLMProvider {
     const response = await withRelaxedTls(() => fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      // INTENTIONAL EGRESS: this provider sends the request to the operator-selected LLM.
+      // codeql[js/file-access-to-http]
       body: JSON.stringify(body),
     }), this.relaxTls);
 

@@ -15,10 +15,11 @@ queries:
 # shipped program, so a dataflow SOURCE inside it describes a scenario that cannot
 # occur in the artifact users run.
 #
-# Findings are NOT suppressed by rule. When a query fires on real shipped code and
-# the behaviour is intended, that alert is dismissed individually in the Security
-# tab with a stated reason — so the rule keeps guarding new code instead of going
-# quiet everywhere.
+# Findings are NOT suppressed by rule. A stable, reviewed sink whose behavior is
+# essential may carry a query-specific inline suppression with its reason next to
+# it. All other accepted findings are dismissed individually in the Security tab
+# with a stated reason. Both approaches keep the rule guarding new code instead of
+# going quiet everywhere.
 # ---------------------------------------------------------------------------
 paths-ignore:
   # ---- test code -----------------------------------------------------------

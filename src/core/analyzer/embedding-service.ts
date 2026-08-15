@@ -174,7 +174,11 @@ export class EmbeddingService implements Embedder {
 
     const response = await withRelaxedTls(() => fetch(url, {
       method: 'POST',
+      // INTENTIONAL EGRESS: the operator-selected endpoint needs its configured credential.
+      // codeql[js/file-access-to-http]
       headers,
+      // INTENTIONAL EGRESS: embedding repository text is this configured feature's purpose.
+      // codeql[js/file-access-to-http]
       body: JSON.stringify({ input: truncated, model: this.model }),
     }), this.relaxTls);
 
