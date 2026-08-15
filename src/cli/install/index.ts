@@ -250,11 +250,21 @@ export async function runInstall(opts: InstallOptions): Promise<number> {
   const allChanges: PlannedChange[] = [];
   const allWarnings: string[] = [];
 
+  // The guidance block names the surface it was written for, so a reader can tell
+  // which tools it assumes — and so the block's fingerprint changes when the
+  // preset does, making a re-install with a different preset rewrite it rather
+  // than leave stale instructions in place
+  // (change: align-generated-guidance-with-installed-preset).
+  const guidancePreset = effectivePreset ?? LEAN_DEFAULT_PRESET;
+  const instructionTemplate = `${template.trimEnd()}\n\nWired MCP surface: \`${guidancePreset}\`. ` +
+    'This guidance is written for that surface; re-run `openlore install --preset <name>` to change it ' +
+    'and regenerate these instructions.\n';
+
   for (const surface of surfaces) {
     const adapter = ADAPTERS[surface.agent];
     const ctx: ApplyContext = {
       root: surface.root,
-      instructionTemplate: template,
+      instructionTemplate,
       dryRun: !!opts.dryRun,
       force: !!opts.force,
       preset: effectivePreset,
@@ -269,6 +279,13 @@ export async function runInstall(opts: InstallOptions): Promise<number> {
   }
 
   printSummary(allChanges, allWarnings, !!opts.dryRun, !!opts.uninstall);
+
+  if (!opts.uninstall) {
+    logger.info(
+      'Wired surface',
+      `\`${guidancePreset}\` — the generated guidance prescribes only tools this preset exposes`
+    );
+  }
 
   if (conflict) {
     logger.error(
