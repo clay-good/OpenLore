@@ -340,6 +340,21 @@ describe('EdgeStore', () => {
       const direct = store.getCallees('src/c.ts::baz').find(e => e.calleeId === 'src/a.ts::foo');
       expect(direct?.synthesizedBy).toBeUndefined();
     });
+
+    it('stores an identical structural edge only once across retries', () => {
+      const duplicate: CallEdge = {
+        callerId: 'src/retry.ts::run',
+        calleeId: 'src/a.ts::foo',
+        calleeName: 'foo',
+        confidence: 'import',
+        kind: 'calls',
+        line: 17,
+      };
+      store.insertEdges([duplicate, duplicate]);
+      store.insertEdges([duplicate]);
+
+      expect(store.getCallees(duplicate.callerId)).toEqual([duplicate]);
+    });
   });
 
   describe('nodes', () => {

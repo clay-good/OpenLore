@@ -96,6 +96,21 @@ let backgroundRebuildTriggered = false;
  */
 const GRAPH_STALE_DEBOUNCE_MS = 1500;
 
+/** Additional attempts after SQLite's own busy_timeout expires. */
+const SQLITE_BUSY_RETRY_DELAYS_MS = [50, 150, 450] as const;
+
+function isSqliteBusyError(err: unknown): boolean {
+  const message = (err as Error | undefined)?.message?.toLowerCase() ?? '';
+  return /sqlite_(?:busy|locked)|database(?: table)? is (?:locked|busy)/.test(message);
+}
+
+async function waitForSqliteRetry(ms: number): Promise<void> {
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
+}
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export interface McpWatcherOptions {
@@ -441,18 +456,26 @@ export class McpWatcher {
       try { child.kill('SIGTERM'); } catch { done(); }
     })));
 
-    // Drain anything queued immediately before shutdown. Deletions first, then
-    // changes (same order as flush). stop() does not return while either can
-    // still publish analysis artifacts or release their advisory lock.
-    if (this.pendingDeletions.size > 0) {
-      const dels = Array.from(this.pendingDeletions);
-      this.pendingDeletions.clear();
-      try { await this.handleDeletions(dels); } catch { /* ignore */ }
+    // Drain anything queued immediately before shutdown through the same busy
+    // retry path as a live flush. If contention outlives that bounded retry,
+    // disclose the still-deferred work: shutdown cannot retry forever, but it
+    // must never make an unpersisted batch disappear silently.
+    const shutdownDeletions = Array.from(this.pendingDeletions);
+    const shutdownBatch = Array.from(this.pending);
+    this.pendingDeletions.clear();
+    this.pending.clear();
+    if (shutdownDeletions.length > 0 || shutdownBatch.length > 0) {
+      try {
+        await this.flushBatchWithBusyRetry(shutdownBatch, shutdownDeletions);
+      } catch (err) {
+        process.stderr.write(`[mcp-watcher] shutdown flush error: ${(err as Error).message}\n`);
+      }
     }
-    if (this.pending.size > 0) {
-      const batch = Array.from(this.pending);
-      this.pending.clear();
-      try { await this.handleBatch(batch, { syncFlush: true }); } catch { /* ignore */ }
+    if (this.pending.size > 0 || this.pendingDeletions.size > 0) {
+      process.stderr.write(
+        `[mcp-watcher] stopped with ${this.pending.size} change(s) and ` +
+        `${this.pendingDeletions.size} deletion(s) still deferred — run analyze to reconcile\n`,
+      );
     }
     process.stderr.write('[mcp-watcher] stopped\n');
   }
@@ -527,11 +550,7 @@ export class McpWatcher {
     this.pending.clear();
     this.pendingDeletions.clear();
     this.running = true;
-    // Deletions first (remove stale state), then re-index the changed/added files.
-    const operation = (async () => {
-      if (deletions.length > 0) await this.handleDeletions(deletions);
-      if (batch.length > 0) await this.handleBatch(batch);
-    })()
+    const operation = this.flushBatchWithBusyRetry(batch, deletions)
       .catch((err) => { process.stderr.write(`[mcp-watcher] error: ${(err as Error).message}\n`); });
     this.flushPromise = operation;
     void operation.finally(() => {
@@ -541,6 +560,41 @@ export class McpWatcher {
         this.debounceTimer = this.armTimer(() => this.flush(), this.debounceMs);
       }
     });
+  }
+
+  /**
+   * Retry a contended SQLite batch, then put it back in the in-memory queue.
+   * The queue is drained only after a successful pass, so a long external write
+   * lock delays freshness but never silently loses the file events.
+   */
+  private async flushBatchWithBusyRetry(batch: string[], deletions: string[]): Promise<void> {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        // Deletions first (remove stale state), then re-index changed/added files.
+        if (deletions.length > 0) await this.handleDeletions(deletions);
+        if (batch.length > 0) await this.handleBatch(batch);
+        return;
+      } catch (err) {
+        if (!isSqliteBusyError(err)) throw err;
+        const delay = SQLITE_BUSY_RETRY_DELAYS_MS[attempt];
+        if (delay !== undefined) {
+          await waitForSqliteRetry(delay);
+          continue;
+        }
+        for (const path of deletions) {
+          this.pendingDeletions.add(path);
+          this.pending.delete(path);
+        }
+        for (const path of batch) {
+          if (!this.pendingDeletions.has(path)) this.pending.add(path);
+        }
+        process.stderr.write(
+          `[mcp-watcher] SQLite remained busy after ${attempt + 1} attempts; ` +
+          `deferred ${batch.length} change(s) and ${deletions.length} deletion(s) for retry\n`,
+        );
+        return;
+      }
+    }
   }
 
   // ── Core re-index ──────────────────────────────────────────────────────────
@@ -1450,6 +1504,7 @@ export class McpWatcher {
           await refreshAttestationCounts(this.outputPath, store).catch(() => {});
         }
       } catch (err) {
+        if (isSqliteBusyError(err)) throw err;
         process.stderr.write(`[mcp-watcher] delete (graph) error: ${(err as Error).message}\n`);
       } finally {
         store.close();
