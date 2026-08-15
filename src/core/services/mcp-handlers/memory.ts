@@ -42,6 +42,7 @@ import {
   type PendingDecision,
   type AnchorVerdict,
   type GroundingCertificate,
+  type AuthorStatement,
 } from '../../../types/index.js';
 
 /** Normalize a caller-supplied type to the closed set; unknown/absent ⇒ `note`. No inference. */
@@ -214,6 +215,15 @@ interface RecalledMemory {
    * so it is NOT presented as cleanly fresh. (add-finding-enforcement-policy)
    */
   staleDecisionRef?: StaleRef[];
+  /**
+   * Provenance of a decision's served text (decisions only): `llm-extracted`
+   * content was re-derived by consolidation from the diff, with the author's
+   * recorded wording preserved in `authorStatement`
+   * (change: explain-decision-rejection).
+   */
+  contentOrigin?: PendingDecision['contentOrigin'];
+  verificationEvidence?: PendingDecision['verificationEvidence'];
+  authorStatement?: AuthorStatement;
   score: number;
 }
 
@@ -361,6 +371,12 @@ export async function handleRecall(
             recordedAt: d.recordedAt,
             match: hasQuery ? { fields: r.matched, anchorBoost: r.anchorBoost } : undefined,
             ...certify(f.freshness, anchors),
+            // Disclose how the served text came to be: `llm-extracted` content is
+            // the consolidator's wording, and the author's own is kept alongside it
+            // (change: explain-decision-rejection).
+            contentOrigin: d.contentOrigin,
+            ...(d.verificationEvidence ? { verificationEvidence: d.verificationEvidence } : {}),
+            ...(d.authorStatement ? { authorStatement: d.authorStatement } : {}),
             score: r.score,
           });
           contradictionItems.push({ id: d.id, anchors, freshness: f.freshness });

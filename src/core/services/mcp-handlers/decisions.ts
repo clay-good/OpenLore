@@ -27,6 +27,11 @@ import { readOpenLoreConfig } from '../config-manager.js';
 import { join } from 'node:path';
 import type { PendingDecision, DecisionScope } from '../../../types/index.js';
 import { decisionContentProvenance } from '../served-content.js';
+import {
+  DECISION_DISPOSITION_REASONS,
+  describeDisposition,
+  readDisposition,
+} from '../../decisions/disposition.js';
 
 type ConsolidateSpawnOutcome =
   | { outcome: 'started' }
@@ -133,6 +138,32 @@ export async function handleRecordDecision(
 
     const id = makeDecisionId(store.sessionId, primaryDomain, title.trim());
 
+    // Re-recording something already decided must return that verdict, not open a
+    // second draft the author will watch disappear the same way
+    // (change: explain-decision-rejection). Match on the deterministic id (content
+    // + session + domain) — the same identity the store already dedupes on.
+    const existing = store.decisions.find((d) => d.id === id);
+    if (existing) {
+      const verdict = readDisposition(existing);
+      if (verdict.disposition !== 'pending') {
+        const entry = DECISION_DISPOSITION_REASONS[verdict.reason];
+        return {
+          id: existing.id,
+          alreadyDecided: true,
+          status: existing.status,
+          disposition: verdict.disposition,
+          reason: verdict.reason,
+          reasonDescription: entry.description,
+          ...(entry.nextAction ? { nextAction: entry.nextAction } : {}),
+          ...(verdict.mergedIntoId ? { mergedIntoId: verdict.mergedIntoId } : {}),
+          readVerdictWith: `openlore decisions status ${existing.id}`,
+          message:
+            `This decision was already recorded and decided: ${describeDisposition(existing)} ` +
+            'No new draft was created.',
+        };
+      }
+    }
+
     // Resolve scope: explicit caller value wins; otherwise auto-promote via deterministic signals.
     // Two independent triggers, either is sufficient:
     //   1. Structural: files span 2+ distinct top-level source dirs (file-topology, no LLM)
@@ -211,16 +242,24 @@ export async function handleRecordDecision(
     // already committed (CAS upsert above), independent of the spawn's outcome —
     // report that outcome honestly rather than an unconditional "running".
     const spawnOutcome = await spawnConsolidateBackground(rootPath);
+    // The response says DRAFT, not "recorded", and names where the verdict is read.
+    // The tool proposes a decision; diff-grounded consolidation decides it
+    // (change: explain-decision-rejection).
+    const readVerdictWith = `openlore decisions status ${recordedId}`;
     const message =
       spawnOutcome.outcome === 'failed'
-        ? `Decision recorded: "${title}". Consolidation could NOT be started (${spawnOutcome.detail}) — run \`openlore decisions --consolidate\` to consolidate it now.`
+        ? `Draft decision recorded: "${title}". Consolidation could NOT be started (${spawnOutcome.detail}) — run \`openlore decisions --consolidate\` to decide it now, then read the verdict with \`${readVerdictWith}\`.`
         : spawnOutcome.outcome === 'coalesced'
-          ? `Decision recorded: "${title}". Consolidation already running — this draft will be picked up by the in-flight run.`
-          : `Decision recorded: "${title}". Consolidation running in background.`;
+          ? `Draft decision recorded: "${title}". Consolidation already running — this draft will be picked up by the in-flight run. Read its verdict with \`${readVerdictWith}\`.`
+          : `Draft decision recorded: "${title}". Diff-grounded consolidation is running in background and will promote, merge, or reject it with a stated reason. Read the verdict with \`${readVerdictWith}\`.`;
 
     return {
       id: recordedId,
+      status: 'draft' as const,
+      disposition: 'pending' as const,
+      reason: 'awaiting-consolidation' as const,
       consolidation: spawnOutcome.outcome,
+      readVerdictWith,
       message,
     };
   } catch (err) {
@@ -262,6 +301,19 @@ export async function handleListDecisions(
         syncedToSpecs: d.syncedToSpecs,
         verificationEvidence: d.verificationEvidence,
         contentOrigin: d.contentOrigin,
+        // The verdict travels with the record: a caller reading the list can tell a
+        // promoted decision from one still awaiting consolidation, and the author's
+        // own wording survives a consolidator rewrite
+        // (change: explain-decision-rejection).
+        ...(() => {
+          const v = readDisposition(d);
+          return {
+            disposition: v.disposition,
+            dispositionReason: v.reason,
+            ...(v.mergedIntoId ? { mergedIntoId: v.mergedIntoId } : {}),
+          };
+        })(),
+        ...(d.authorStatement ? { authorStatement: d.authorStatement } : {}),
         // Provenance is always disclosed: an autopilot-accepted decision is
         // authoritative but never presented as human-reviewed. (add-decision-autopilot)
         ...(d.approvedBy ? { approvedBy: d.approvedBy } : {}),

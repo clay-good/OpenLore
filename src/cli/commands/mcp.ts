@@ -1929,11 +1929,12 @@ export const TOOL_DEFINITIONS = [
   {
     name: 'record_decision',
     description:
-      'Record an architectural decision made during the current development session. ' +
-      'Call this whenever you make a significant design choice: choosing a data structure, ' +
-      'picking a library, defining an API contract, selecting an auth strategy, etc. ' +
-      'Decisions are stored as drafts and consolidated before the next commit. ' +
-      'Use the supersedes field when a later decision replaces an earlier one.',
+      'Record a DRAFT architectural decision — a proposal, not a final record. ' +
+      'Call this on a significant design choice: data structure, library, API contract, auth strategy. ' +
+      'Diff-grounded consolidation then promotes it (possibly rewording it, keeping your text as ' +
+      'authorStatement), merges it, or rejects it — always with a stated reason. The response returns ' +
+      'the draft id and the command that reads the verdict; re-recording a decided draft returns that ' +
+      'verdict instead of a second draft. Use supersedes when a later decision replaces an earlier one.',
     inputSchema: {
       type: 'object',
       properties: {

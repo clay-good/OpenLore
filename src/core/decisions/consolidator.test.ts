@@ -378,3 +378,95 @@ describe('consolidateDrafts — ID reuse', () => {
       .rejects.toThrow(/invalid structured output/);
   });
 });
+
+// ============================================================================
+// Dispositions + author statement (change: explain-decision-rejection)
+// ============================================================================
+
+describe('consolidateDrafts — every draft reaches a reasoned verdict', () => {
+  it('emits one disposition per input draft, including drafts the LLM did not return', async () => {
+    // Two drafts in, one decision out (echoing draft0000's id): the second draft
+    // must still come back with a stated verdict, not vanish.
+    const response = JSON.stringify([{
+      id: 'draft0000',
+      title: 'Decision 0',
+      rationale: 'Some rationale',
+      consequences: 'c',
+      affectedDomains: ['api'],
+      affectedFiles: [],
+      proposedRequirement: null,
+    }]);
+    const result = await consolidateDrafts(
+      makeStore([{ title: 'Decision 0' }, { title: 'Decision 1' }]),
+      makeLLM(response),
+    );
+
+    expect(result.dispositions).toHaveLength(2);
+    expect(result.dispositions[0]).toEqual({
+      id: 'draft0000', disposition: 'promoted', reason: 'promoted-as-recorded',
+    });
+    // The absorbed draft names the survivor rather than disappearing.
+    expect(result.dispositions[1]).toEqual({
+      id: 'draft0001', disposition: 'merged-into', reason: 'merged-into-consolidated', mergedIntoId: 'draft0000',
+    });
+  });
+
+  it('gives every draft a verdict when the LLM keeps nothing at all', async () => {
+    const result = await consolidateDrafts(
+      makeStore([{ title: 'Decision 0' }, { title: 'Decision 1' }]),
+      makeLLM('[]'),
+    );
+    expect(result.decisions).toHaveLength(0);
+    expect(result.dispositions).toHaveLength(2);
+    for (const d of result.dispositions) {
+      expect(d.disposition).toBe('rejected');
+      expect(d.reason).toBe('not-in-consolidated-set');
+    }
+  });
+
+  it('preserves the author statement when consolidation re-derives the wording', async () => {
+    const response = JSON.stringify([{
+      id: 'draft0000',
+      title: 'Persist the call graph in SQLite rather than JSON',
+      rationale: 'Re-derived from the diff: the EdgeStore write path changed',
+      consequences: 'c',
+      affectedDomains: ['api'],
+      affectedFiles: [],
+      proposedRequirement: null,
+    }]);
+    const { decisions, dispositions } = await consolidateDrafts(
+      makeStore([{ title: 'Use SQLite', rationale: 'JSON artifact too big to reload' }]),
+      makeLLM(response),
+    );
+
+    const kept = decisions[0];
+    // The served content is the consolidator's, disclosed as such…
+    expect(kept.contentOrigin).toBe('llm-extracted');
+    expect(kept.title).toBe('Persist the call graph in SQLite rather than JSON');
+    // …and the author's own words survive untouched alongside it.
+    expect(kept.authorStatement).toEqual({
+      title: 'Use SQLite',
+      rationale: 'JSON artifact too big to reload',
+      recordedAt: '2026-01-01T00:00:00.000Z',
+    });
+    expect(dispositions[0].reason).toBe('promoted-with-rewrite');
+  });
+
+  it('does not attach an author statement when the wording was kept', async () => {
+    const response = JSON.stringify([{
+      id: 'draft0000',
+      title: 'Decision 0',
+      rationale: 'Some rationale',
+      consequences: 'c',
+      affectedDomains: ['api'],
+      affectedFiles: [],
+      proposedRequirement: null,
+    }]);
+    const { decisions, dispositions } = await consolidateDrafts(
+      makeStore([{ title: 'Decision 0' }]),
+      makeLLM(response),
+    );
+    expect(decisions[0].authorStatement).toBeUndefined();
+    expect(dispositions[0].reason).toBe('promoted-as-recorded');
+  });
+});

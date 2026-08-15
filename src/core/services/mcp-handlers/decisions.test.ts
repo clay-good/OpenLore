@@ -154,6 +154,49 @@ describe('handleRecordDecision', () => {
     expect(result.message).toContain('Use SQLite');
   });
 
+  it('returns the draft status and the exact command that reads the verdict', async () => {
+    // The tool proposes a decision; it does not finalize one. The response must say
+    // so and point at where the outcome will be readable
+    // (change: explain-decision-rejection).
+    const r = await handleRecordDecision(tmpDir, 'Use SQLite', 'JSON too big') as {
+      id: string; status: string; disposition: string; reason: string;
+      readVerdictWith: string; message: string;
+    };
+    expect(r.status).toBe('draft');
+    expect(r.disposition).toBe('pending');
+    expect(r.reason).toBe('awaiting-consolidation');
+    expect(r.readVerdictWith).toBe(`openlore decisions status ${r.id}`);
+    expect(r.message).toMatch(/draft/i);
+    expect(r.message).toContain(r.readVerdictWith);
+  });
+
+  it('returns the existing verdict when a decided draft is recorded again', async () => {
+    const first = await handleRecordDecision(tmpDir, 'Use SQLite', 'JSON too big') as { id: string };
+
+    // Simulate consolidation having rejected it with a stated reason.
+    const store = await readStore(tmpDir);
+    store.decisions = store.decisions.map(d => d.id === first.id
+      ? { ...d, status: 'rejected', disposition: 'rejected', dispositionReason: 'not-in-consolidated-set' }
+      : d);
+    await writeStore(tmpDir, store);
+
+    const again = await handleRecordDecision(tmpDir, 'Use SQLite', 'JSON too big') as {
+      id: string; alreadyDecided: boolean; disposition: string; reason: string;
+      nextAction?: string; message: string;
+    };
+    expect(again.alreadyDecided).toBe(true);
+    expect(again.id).toBe(first.id);
+    expect(again.disposition).toBe('rejected');
+    expect(again.reason).toBe('not-in-consolidated-set');
+    expect(again.nextAction).toMatch(/narrower subject|not architectural/i);
+    expect(again.message).toMatch(/No new draft was created/);
+
+    // …and no second draft was written.
+    const after = await readStore(tmpDir);
+    expect(after.decisions).toHaveLength(1);
+    expect(after.decisions[0].status).toBe('rejected');
+  });
+
   it('persists the decision with draft status to disk', async () => {
     await handleRecordDecision(tmpDir, 'Use SQLite', 'JSON too big');
     const store = await readStore(tmpDir);
