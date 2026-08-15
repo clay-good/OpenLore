@@ -12,8 +12,18 @@ import { createReadStream, existsSync, statSync, watch } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { basename, join } from 'node:path';
 import { OPENLORE_DIR } from '../../constants.js';
+import { sanitizeForTerminal } from '../../utils/misc.js';
 
 const TELEMETRY_SUBDIR = 'telemetry';
+const MAX_DISPLAY_VALUE_LENGTH = 96;
+
+/** Render an untrusted telemetry value as one bounded terminal-safe field. */
+function safe(value: unknown, maxLength = MAX_DISPLAY_VALUE_LENGTH): string {
+  const sanitized = sanitizeForTerminal(String(value ?? ''));
+  return sanitized.length <= maxLength
+    ? sanitized
+    : `${sanitized.slice(0, Math.max(0, maxLength - 1))}…`;
+}
 
 // ============================================================================
 // JSONL reader — O(1) streaming
@@ -31,26 +41,80 @@ async function readJsonl<T>(filePath: string): Promise<T[]> {
   return rows;
 }
 
-interface McpEvent {
-  ts: string; event: 'tool_call' | 'tool_error'; tool: string;
-  ms: number; agent?: string; agent_version?: string; error?: string;
+/**
+ * Emitting identity, stamped at write time (change: scope-telemetry-by-agent-and-session).
+ * Optional on every event: a stream written before identity stamping carries none.
+ */
+interface Attributed { agent?: string; agent_version?: string; session_id?: string }
+
+/**
+ * The bucket identity-less events fall into. It is ONE implicit session under
+ * `unknown`, not one session per event: historical data keeps yielding the
+ * metrics it always did, while never pairing with an identified event. Its
+ * internal boundaries are genuinely unknown, so the report says so rather than
+ * implying these events came from one actor.
+ */
+const LEGACY_SESSION = 'legacy-unattributed';
+const UNKNOWN_AGENT = 'unknown';
+
+function agentOf(e: Attributed): string {
+  return typeof e.agent === 'string' && e.agent ? e.agent : UNKNOWN_AGENT;
 }
-interface OrientEvent {
+function hasSessionIdentity(e: Attributed): boolean {
+  return typeof e.session_id === 'string' && e.session_id.length > 0;
+}
+function sessionOf(e: Attributed): string {
+  return hasSessionIdentity(e) ? e.session_id! : LEGACY_SESSION;
+}
+/** Interval metrics pair only within one key: same agent AND same session. */
+function sessionKeyOf(e: Attributed): string {
+  // A delimiter is ambiguous when either client-controlled component contains it.
+  // JSON's escaping keeps distinct tuples distinct without placing a literal NUL in
+  // this source file (which also made Git and security tooling treat it as binary).
+  return JSON.stringify([agentOf(e), sessionOf(e)]);
+}
+
+/**
+ * Restrict a stream to one agent. `unknown` selects the identity-less events —
+ * they are never folded into a named agent, so asking for a name can never
+ * return another actor's calls.
+ */
+function filterByAgent<T extends Attributed>(rows: T[], agent: string | undefined): T[] {
+  if (!agent) return rows;
+  return rows.filter(e => agentOf(e) === agent);
+}
+
+function groupBy<T>(rows: T[], key: (row: T) => string): Map<string, T[]> {
+  const out = new Map<string, T[]>();
+  for (const row of rows) {
+    const k = key(row);
+    const arr = out.get(k) ?? [];
+    arr.push(row);
+    out.set(k, arr);
+  }
+  return out;
+}
+
+interface McpEvent extends Attributed {
+  ts: string; event: 'tool_call' | 'tool_error'; tool: string;
+  ms: number; error?: string;
+}
+interface OrientEvent extends Attributed {
   ts: string; event: 'orient_call';
-  agent?: string; functions: number; files: number;
+  functions: number; files: number;
   spec_domains: number; insertion_points: number;
 }
-interface CacheEvent {
+interface CacheEvent extends Attributed {
   ts: string; event: 'cache_read'; hit: boolean;
 }
-interface LeaseEvent {
+interface LeaseEvent extends Attributed {
   ts: string;
   event: 'degraded' | 'stale' | 'depth_escalate' | 'orient_reset';
   trigger?: string; depth?: number; from_depth?: number; to_depth?: number;
   from_state?: string; tool?: string; cognitive_load?: number;
   density?: number; oscillation?: number; age_min?: number; prior_load?: number; prior_depth?: number;
 }
-interface PanicEvent {
+interface PanicEvent extends Attributed {
   ts: string;
   event: 'panic_level_change' | 'panic_orient_reset' | 'hook_intervention' | 'panic_signal_injected'
        | 'panic_intervention_outcome' | 'panic_score_delta';
@@ -92,6 +156,44 @@ function computeCacheStats(cache: CacheEvent[]) {
   return { hits, misses: total - hits, total, hit_rate: total ? Math.round(hits / total * 100) : 0 };
 }
 
+/**
+ * Per-agent tool and cache aggregates, plus an explicit cross-agent total.
+ *
+ * The total is reported as its own row rather than as "the" figure, because on a
+ * shared repository the sum belongs to nobody: it is what made another agent's
+ * `analyze_codebase` calls show up in a session that never called it.
+ */
+function computeAgentBreakdown(mcp: McpEvent[], cache: CacheEvent[]) {
+  const agents = new Set<string>([...mcp.map(agentOf), ...cache.map(agentOf)]);
+  const perAgent = [...agents].map(agent => {
+    const agentMcp = mcp.filter(e => agentOf(e) === agent);
+    const agentCache = cache.filter(e => agentOf(e) === agent);
+    const tools = computeToolStats(agentMcp);
+    const seen: Attributed[] = [...agentMcp, ...agentCache];
+    return {
+      agent,
+      sessions: new Set(seen.map(sessionOf)).size,
+      calls: tools.total_calls,
+      errors: tools.total_errors,
+      cache: computeCacheStats(agentCache),
+      top_tools: tools.stats.slice(0, 5),
+    };
+  }).sort((a, b) => b.calls - a.calls);
+
+  const totals = computeToolStats(mcp);
+  return {
+    per_agent: perAgent,
+    // Named `across_agents` (not `total`) so a reader cannot mistake it for one
+    // agent's figures — that conflation is the bug this change exists to fix.
+    across_agents: {
+      agents: perAgent.length,
+      calls: totals.total_calls,
+      errors: totals.total_errors,
+      cache: computeCacheStats(cache),
+    },
+  };
+}
+
 function computeOrientQuality(orient: OrientEvent[]) {
   if (!orient.length) return null;
   const avg = (arr: number[]) => arr.length ? Math.round(arr.reduce((a, b) => a + b, 0) / arr.length) : 0;
@@ -120,36 +222,43 @@ function computeOrientQuality(orient: OrientEvent[]) {
  */
 function computeObstinacy(mcp: McpEvent[], lease: LeaseEvent[]) {
   // Merge and sort by ts
-  type Tagged = { ts: string; kind: 'stale' | 'orient' | 'tool'; depth?: number; tool?: string };
+  type Tagged = { ts: string; kind: 'stale' | 'orient' | 'tool'; depth?: number; tool?: string; key: string };
   const events: Tagged[] = [];
 
   for (const e of lease) {
-    if (e.event === 'stale') events.push({ ts: e.ts, kind: 'stale', depth: e.depth });
-    if (e.event === 'orient_reset') events.push({ ts: e.ts, kind: 'orient' });
+    if (e.event === 'stale') events.push({ ts: e.ts, kind: 'stale', depth: e.depth, key: sessionKeyOf(e) });
+    if (e.event === 'orient_reset') events.push({ ts: e.ts, kind: 'orient', key: sessionKeyOf(e) });
   }
   for (const e of mcp) {
-    if (e.event === 'tool_call') events.push({ ts: e.ts, kind: e.tool === 'orient' ? 'orient' : 'tool', tool: e.tool });
+    if (e.event === 'tool_call') {
+      events.push({ ts: e.ts, kind: e.tool === 'orient' ? 'orient' : 'tool', tool: e.tool, key: sessionKeyOf(e) });
+    }
   }
   // ISO 8601 strings from toISOString() are lexicographically sortable
   events.sort((a, b) => a.ts.localeCompare(b.ts));
 
+  // A stale episode is bounded by ONE session: another agent's orientation does
+  // not end this agent's obstinacy, and its tool calls are not this agent's
+  // stubbornness (change: scope-telemetry-by-agent-and-session).
   const segments: { depth: number; calls_before_orient: number }[] = [];
-  let inStale = false;
-  let staleDepth = 0;
-  let callCount = 0;
+  for (const [, sessionEvents] of groupBy(events, e => e.key)) {
+    let inStale = false;
+    let staleDepth = 0;
+    let callCount = 0;
 
-  for (const ev of events) {
-    if (ev.kind === 'stale') {
-      if (!inStale) { inStale = true; staleDepth = ev.depth ?? 1; callCount = 0; }
-      else if ((ev.depth ?? 1) > staleDepth) { staleDepth = ev.depth ?? 1; }
-    } else if (ev.kind === 'orient') {
-      if (inStale) { segments.push({ depth: staleDepth, calls_before_orient: callCount }); }
-      inStale = false; callCount = 0;
-    } else if (ev.kind === 'tool' && inStale) {
-      callCount++;
+    for (const ev of sessionEvents) {
+      if (ev.kind === 'stale') {
+        if (!inStale) { inStale = true; staleDepth = ev.depth ?? 1; callCount = 0; }
+        else if ((ev.depth ?? 1) > staleDepth) { staleDepth = ev.depth ?? 1; }
+      } else if (ev.kind === 'orient') {
+        if (inStale) { segments.push({ depth: staleDepth, calls_before_orient: callCount }); }
+        inStale = false; callCount = 0;
+      } else if (ev.kind === 'tool' && inStale) {
+        callCount++;
+      }
     }
+    if (inStale) segments.push({ depth: staleDepth, calls_before_orient: callCount });
   }
-  if (inStale) segments.push({ depth: staleDepth, calls_before_orient: callCount });
 
   const avg = (arr: number[]) => arr.length ? (arr.reduce((a, b) => a + b, 0) / arr.length).toFixed(1) : '—';
   const d2 = segments.filter(s => s.depth >= 2).map(s => s.calls_before_orient);
@@ -167,44 +276,99 @@ function computeObstinacy(mcp: McpEvent[], lease: LeaseEvent[]) {
  * Recovery efficiency: time from stale to orient call (ms),
  * and recovery half-life: time from orient_reset to first degraded/stale after it.
  */
+/**
+ * Pair each `from` event with the next `to` event IN THE SAME SESSION.
+ *
+ * A pair that would only exist across sessions or across agents is EXCLUDED and
+ * counted, never averaged: that cross-session pairing is what once reported a
+ * two-hour "stale→orient latency" by matching one agent's stale warning with
+ * another agent's orientation later in the day. Returns the durations, the
+ * number of sessions that actually produced a pair, and the excluded count.
+ */
+function pairWithinSession(from: Attributed[], to: Attributed[]): {
+  durations: number[]; sessions: number; excluded: number;
+} {
+  const at = (e: Attributed) => new Date((e as { ts: string }).ts).getTime();
+  const tsOf = (e: Attributed) => (e as { ts: string }).ts;
+  const toByKey = groupBy(to, sessionKeyOf);
+  const durations: number[] = [];
+  const contributing = new Set<string>();
+  let excluded = 0;
+
+  // Sorted once for the "was there any later candidate at all?" test below.
+  const allTo = [...to].sort((a, b) => tsOf(a).localeCompare(tsOf(b)));
+
+  for (const start of from) {
+    const key = sessionKeyOf(start);
+    const sameSession = (toByKey.get(key) ?? []).filter(e => tsOf(e) > tsOf(start));
+    if (sameSession.length) {
+      const next = sameSession.reduce((a, b) => (tsOf(a) <= tsOf(b) ? a : b));
+      durations.push(at(next) - at(start));
+      contributing.add(key);
+    } else if (allTo.some(e => tsOf(e) > tsOf(start))) {
+      // A later candidate exists, but it belongs to another session or agent.
+      // That is precisely the pair this metric must not measure.
+      excluded++;
+    }
+  }
+  return { durations, sessions: contributing.size, excluded };
+}
+
+/**
+ * Recovery efficiency: time from stale to orient call (ms), and recovery
+ * half-life: time from orient_reset to the first degraded/stale after it.
+ * Both are session-bounded (change: scope-telemetry-by-agent-and-session).
+ */
 function computeRecovery(mcp: McpEvent[], lease: LeaseEvent[]) {
-  const staleTs = lease.filter(e => e.event === 'stale').map(e => e.ts).sort();
-  const orientTs = mcp.filter(e => e.event === 'tool_call' && e.tool === 'orient').map(e => e.ts).sort();
-
-  const latencies: number[] = [];
-  for (const st of staleTs) {
-    const next = orientTs.find(o => o > st);
-    if (next) latencies.push(new Date(next).getTime() - new Date(st).getTime());
-  }
-  const avg = latencies.length ? Math.round(latencies.reduce((a, b) => a + b, 0) / latencies.length) : null;
-
-  // Recovery half-life: orient_reset → next degraded/stale (how long context stays fresh post-orient).
-  const resetTs = lease.filter(e => e.event === 'orient_reset').map(e => e.ts).sort();
-  const degradationTs = lease.filter(e => e.event === 'degraded' || e.event === 'stale').map(e => e.ts).sort();
-  const stableDurations: number[] = [];
-  for (const rt of resetTs) {
-    const next = degradationTs.find(d => d > rt);
-    if (next) stableDurations.push(new Date(next).getTime() - new Date(rt).getTime());
-  }
-  const avgStableMs = stableDurations.length
-    ? Math.round(stableDurations.reduce((a, b) => a + b, 0) / stableDurations.length)
+  const stale = lease.filter(e => e.event === 'stale');
+  const orientCalls = mcp.filter(e => e.event === 'tool_call' && e.tool === 'orient');
+  const recovery = pairWithinSession(stale, orientCalls);
+  const avg = recovery.durations.length
+    ? Math.round(recovery.durations.reduce((a, b) => a + b, 0) / recovery.durations.length)
     : null;
 
-  const staleRecurrences = lease.filter(e => e.event === 'stale').length;
-  const orients = orientTs.length;
+  const resets = lease.filter(e => e.event === 'orient_reset');
+  const degradations = lease.filter(e => e.event === 'degraded' || e.event === 'stale');
+  const stability = pairWithinSession(resets, degradations);
+  const avgStableMs = stability.durations.length
+    ? Math.round(stability.durations.reduce((a, b) => a + b, 0) / stability.durations.length)
+    : null;
+
+  const staleRecurrences = stale.length;
+  const orients = orientCalls.length;
+  // Legacy events carry no session identity; the report must not present their
+  // single implicit bucket as an observed session boundary. Deduplicated by
+  // identity: a `stale` event is both a stale and a degradation, and counting it
+  // twice would overstate how much of the data is unattributed.
+  const considered = new Set<Attributed>([...stale, ...orientCalls, ...resets, ...degradations]);
+  const legacyEvents = [...considered].filter(e => !hasSessionIdentity(e)).length;
+
   return {
     stale_events: staleRecurrences,
     orient_calls: orients,
-    orient_resets: resetTs.length,
+    orient_resets: resets.length,
     avg_recovery_ms: avg,
     avg_stable_after_orient_ms: avgStableMs,
     recurrence_rate: orients ? `${(staleRecurrences / orients).toFixed(2)} stale/orient` : '—',
+    recovery_sessions: recovery.sessions,
+    recovery_excluded_pairs: recovery.excluded,
+    stability_sessions: stability.sessions,
+    stability_excluded_pairs: stability.excluded,
+    unattributed_events: legacyEvents,
   };
 }
 
 // Exported for testing
-export type { PanicEvent, LeaseEvent, McpEvent };
-export { computePanicStats, computeRecovery, computeObstinacy };
+export type { PanicEvent, LeaseEvent, McpEvent, CacheEvent };
+export {
+  computePanicStats,
+  computeRecovery,
+  computeObstinacy,
+  computeAgentBreakdown,
+  filterByAgent,
+  renderSummary,
+  renderTelemetryLine,
+};
 
 // Observe-mode validation (the accuracy gate) lives in the shared panic-validation module so the
 // `openlore panic-validate` command and the `openlore telemetry` summary compute it identically.
@@ -318,6 +482,7 @@ function renderSummary(
 ) {
   const tools = computeToolStats(mcp);
   const cacheStats = computeCacheStats(cache);
+  const breakdown = computeAgentBreakdown(mcp, cache);
   const quality = computeOrientQuality(orient);
   const obstinacy = computeObstinacy(mcp, lease);
   const recovery = computeRecovery(mcp, lease);
@@ -325,11 +490,41 @@ function renderSummary(
   const panicStats = computePanicStats(panicEvents);
   const panicValidation = validatePanicSignal(panicEvents);
 
+  section('ATTRIBUTION');
+  const allEvents: Attributed[] = [...mcp, ...orient, ...cache, ...lease, ...panicEvents];
+  const sessions = new Set(allEvents.map(sessionKeyOf));
+  const unattributed = allEvents.filter(e => !hasSessionIdentity(e)).length;
+  console.log(`  agents observed  : ${breakdown.across_agents.agents}  (${breakdown.per_agent.map(a => safe(a.agent)).join(', ') || '—'})`);
+  console.log(`  sessions observed: ${sessions.size}`);
+  if (unattributed) {
+    console.log(`  unattributed     : ${unattributed} event(s) written before identity stamping —`);
+    console.log(`                     counted as one implicit session under "${UNKNOWN_AGENT}"; their real boundaries are unknown`);
+  }
+  if (breakdown.across_agents.agents > 1) {
+    console.log(`  note             : this repository was shared — per-agent figures below are the interpretable ones`);
+  }
+
+  section('PER-AGENT ACTIVITY');
+  console.log(`  ${'agent'.padEnd(28)} ${'sess'.padStart(5)} ${'calls'.padStart(6)} ${'errors'.padStart(7)} ${'cache'.padStart(7)}`);
+  for (const a of breakdown.per_agent) {
+    console.log(`  ${safe(a.agent, 28).padEnd(28)} ${String(a.sessions).padStart(5)} ${String(a.calls).padStart(6)} ${String(a.errors).padStart(7)} ${`${a.cache.hit_rate}%`.padStart(7)}`);
+    if (a.top_tools.length) {
+      console.log(`    ${a.top_tools.map(t => `${safe(t.tool, 40)}×${t.count}`).join('  ')}`);
+    }
+  }
+  // Only meaningful with several actors: with one agent the sum IS that agent's
+  // figures, and printing it twice suggests a second actor that does not exist.
+  if (breakdown.per_agent.length > 1) {
+    console.log(`  ${'—'.repeat(28)}`);
+    console.log(`  ${'across agents'.padEnd(28)} ${''.padStart(5)} ${String(breakdown.across_agents.calls).padStart(6)} ${String(breakdown.across_agents.errors).padStart(7)} ${`${breakdown.across_agents.cache.hit_rate}%`.padStart(7)}`);
+    console.log(`    (a sum, not an actor — no single agent did this)`);
+  }
+
   section('TOOL LATENCY');
   if (tools.stats.length) {
     console.log(`  ${'tool'.padEnd(32)} ${'calls'.padStart(6)} ${'avg ms'.padStart(8)} ${'max ms'.padStart(8)}`);
     for (const s of tools.stats.slice(0, 15)) {
-      console.log(`  ${s.tool.padEnd(32)} ${String(s.count).padStart(6)} ${String(s.avg_ms).padStart(8)} ${String(s.max_ms).padStart(8)}`);
+      console.log(`  ${safe(s.tool, 32).padEnd(32)} ${String(s.count).padStart(6)} ${String(s.avg_ms).padStart(8)} ${String(s.max_ms).padStart(8)}`);
     }
     console.log(`\n  total: ${tools.total_calls} calls, ${tools.total_errors} errors`);
   } else {
@@ -344,7 +539,7 @@ function renderSummary(
     console.log(`  total calls : ${quality.total_calls}\n`);
     console.log(`  ${'agent'.padEnd(28)} ${'calls'.padStart(6)} ${'avg fn'.padStart(8)} ${'avg files'.padStart(10)} ${'avg ins pts'.padStart(12)}`);
     for (const r of quality.per_agent) {
-      console.log(`  ${r.agent.padEnd(28)} ${String(r.calls).padStart(6)} ${String(r.avg_functions).padStart(8)} ${String(r.avg_files).padStart(10)} ${String(r.avg_insertion_points).padStart(12)}`);
+      console.log(`  ${safe(r.agent, 28).padEnd(28)} ${String(r.calls).padStart(6)} ${String(r.avg_functions).padStart(8)} ${String(r.avg_files).padStart(10)} ${String(r.avg_insertion_points).padStart(12)}`);
     }
   } else {
     console.log('  no orient.jsonl data');
@@ -362,7 +557,7 @@ function renderSummary(
   console.log(`  degraded events  : ${degraded}`);
   console.log(`  stale events     : ${stale}  (depth≥2: ${d2}, depth≥3: ${d3})`);
   if (triggers.size) {
-    console.log(`  triggers         : ${[...triggers.entries()].map(([k, v]) => `${k}×${v}`).join('  ')}`);
+    console.log(`  triggers         : ${[...triggers.entries()].map(([k, v]) => `${safe(k, 40)}×${v}`).join('  ')}`);
   }
 
   section('OBSTINACY INDEX');
@@ -371,9 +566,15 @@ function renderSummary(
   console.log(`  depth≥2 avg            : ${obstinacy.depth2_avg}`);
   console.log(`  depth≥3 avg            : ${obstinacy.depth3_avg}`);
 
-  section('RECOVERY EFFICIENCY');
-  console.log(`  avg stale→orient latency : ${recovery.avg_recovery_ms != null ? `${recovery.avg_recovery_ms}ms` : '—'}`);
-  console.log(`  recovery half-life       : ${recovery.avg_stable_after_orient_ms != null ? `${recovery.avg_stable_after_orient_ms}ms` : '—'}  (orient_reset → next degradation)`);
+  section('RECOVERY EFFICIENCY  (session-bounded)');
+  const noPair = (excluded: number) =>
+    excluded > 0
+      ? `no qualifying pair — ${excluded} candidate(s) excluded as cross-session/cross-agent`
+      : 'no qualifying pair';
+  console.log(`  avg stale→orient latency : ${recovery.avg_recovery_ms != null ? `${recovery.avg_recovery_ms}ms` : noPair(recovery.recovery_excluded_pairs)}`);
+  console.log(`    from                   : ${recovery.recovery_sessions} session(s), ${recovery.recovery_excluded_pairs} pair(s) excluded`);
+  console.log(`  recovery half-life       : ${recovery.avg_stable_after_orient_ms != null ? `${recovery.avg_stable_after_orient_ms}ms` : noPair(recovery.stability_excluded_pairs)}  (orient_reset → next degradation)`);
+  console.log(`    from                   : ${recovery.stability_sessions} session(s), ${recovery.stability_excluded_pairs} pair(s) excluded`);
   console.log(`  orient resets            : ${recovery.orient_resets}`);
   console.log(`  recurrence rate          : ${recovery.recurrence_rate}`);
 
@@ -391,7 +592,7 @@ function renderSummary(
   console.log(`  orient spam events       : ${panicStats.orient_spam_events}  (rapid: ${panicStats.orient_rapid_events})`);
   console.log(`  gryph-enriched           : ${panicStats.gryph_enriched_intercepts}`);
   if (panicStats.trigger_counts.length) {
-    console.log(`  triggers                 : ${panicStats.trigger_counts.map(([k, v]) => `${k}×${v}`).join('  ')}`);
+    console.log(`  triggers                 : ${panicStats.trigger_counts.map(([k, v]) => `${safe(k, 40)}×${v}`).join('  ')}`);
   }
 
   section('OBSERVE-MODE VALIDATION (accuracy gate)');
@@ -401,7 +602,7 @@ function renderSummary(
   console.log(`  episodes observed        : ${pv.episodes.completed} completed / ${pv.episodes.total} total  (need ≥${pv.min_episodes})`);
   console.log(`  false-positive proxy     : ${pct(pv.false_positive.proxy_rate)}  (${pv.false_positive.resolved_via_decay}/${pv.episodes.completed} resolved without re-orient)`);
   console.log(`  intervention follow-thru : ${pct(pv.intervention.follow_through_rate)}  (${pv.intervention.responses}/${pv.intervention.hook_intercepts} intercepts → orient)`);
-  console.log(`  → full report: openlore panic-validate${pv.recommendations[0] ? `  —  ${pv.recommendations[0]}` : ''}`);
+  console.log(`  → full report: openlore panic-validate${pv.recommendations[0] ? `  —  ${safe(pv.recommendations[0])}` : ''}`);
 
   hr();
 }
@@ -420,7 +621,7 @@ export interface TelemetryTailState {
 function renderTelemetryLine(filePath: string, trimmed: string, leaseFile: string): void {
   try {
     const ev = JSON.parse(trimmed) as Record<string, unknown>;
-    const ts = String(ev['ts'] ?? '').slice(11, 23);
+    const ts = safe(String(ev['ts'] ?? '').slice(11, 23), 12);
     if (filePath === leaseFile) {
       const evt = ev['event'];
       if (evt === 'stale' || evt === 'degraded') {
@@ -429,20 +630,20 @@ function renderTelemetryLine(filePath: string, trimmed: string, leaseFile: strin
         const isSpike = density >= 0.60;
         const isOscillating = oscillation >= 0.50;
         const structuredType = isSpike ? 'TRAJECTORY_SPIKE' : 'STATE_TRANSITION';
-        const depthStr = evt === 'stale' ? ` depth=${ev['depth']}` : '';
-        let line = `${ts}  [${structuredType}] ${String(evt).toUpperCase()}${depthStr} trigger=${ev['trigger']} load=${ev['cognitive_load']} density=${density.toFixed(3)}`;
+        const depthStr = evt === 'stale' ? ` depth=${safe(ev['depth'], 16)}` : '';
+        let line = `${ts}  [${structuredType}] ${String(evt).toUpperCase()}${depthStr} trigger=${safe(ev['trigger'])} load=${safe(ev['cognitive_load'], 16)} density=${density.toFixed(3)}`;
         if (isOscillating) line += `  [OSCILLATION_DETECTED osc=${oscillation.toFixed(2)}]`;
         console.log(line);
       } else if (evt === 'orient_reset') {
-        console.log(`${ts}  [ORIENT_RECOVERY] from=${ev['from_state']} prior_load=${ev['prior_load']} prior_depth=${ev['prior_depth']}`);
+        console.log(`${ts}  [ORIENT_RECOVERY] from=${safe(ev['from_state'])} prior_load=${safe(ev['prior_load'], 16)} prior_depth=${safe(ev['prior_depth'], 16)}`);
       } else if (evt === 'depth_escalate') {
         const burstStr = ev['trigger'] === 'burst' ? ' (burst)' : '';
-        console.log(`${ts}  [STATE_TRANSITION] DEPTH ${ev['from_depth']} → ${ev['to_depth']}${burstStr} density=${Number(ev['density'] ?? 0).toFixed(3)}`);
+        console.log(`${ts}  [STATE_TRANSITION] DEPTH ${safe(ev['from_depth'], 16)} → ${safe(ev['to_depth'], 16)}${burstStr} density=${Number(ev['density'] ?? 0).toFixed(3)}`);
       }
     } else {
-      const tool = ev['tool'];
-      const agent = ev['agent'] ? ` [${ev['agent']}]` : '';
-      if (ev['event'] === 'tool_call') console.log(`${ts}  ${String(tool).padEnd(30)} ${ev['ms']}ms${agent}`);
+      const tool = safe(ev['tool'], 30);
+      const agent = ev['agent'] ? ` [${safe(ev['agent'])}]` : '';
+      if (ev['event'] === 'tool_call') console.log(`${ts}  ${tool.padEnd(30)} ${safe(ev['ms'], 16)}ms${agent}`);
       else if (ev['event'] === 'tool_error') console.log(`${ts}  ERROR ${tool}${agent}`);
     }
   } catch { /* skip */ }
@@ -478,7 +679,7 @@ export function tailTelemetryFile(filePath: string, state: TelemetryTailState): 
       inFlight.delete(filePath);
       process.stderr.write(
         `telemetry --live: tail of ${basename(filePath)} failed ` +
-        `(${(err as Error)?.message ?? String(err)}); retrying on next event\n`
+        `(${safe((err as Error)?.message ?? String(err))}); retrying on next event\n`
       );
       resolve();
     });
@@ -508,7 +709,7 @@ function renderLive(dir: string) {
     leaseFile,
   };
 
-  console.log(`Watching ${join(dir, OPENLORE_DIR, TELEMETRY_SUBDIR)} — Ctrl+C to stop\n`);
+  console.log(`Watching ${safe(join(dir, OPENLORE_DIR, TELEMETRY_SUBDIR))} — Ctrl+C to stop\n`);
 
   const files = [leaseFile, mcpFile];
   // Initial tail
@@ -532,13 +733,15 @@ export const telemetryCommand = new Command('telemetry')
   .description('Analyze EpistemicLease cognitive telemetry')
   .argument('[directory]', 'Project directory', process.cwd())
   .option('--live', 'Stream cognitive events in real time')
+  .option('--agent <name>', 'Restrict the report to one emitting agent ("unknown" = events written before identity stamping)')
   .addHelpText('after', `
 Examples:
   $ openlore telemetry                    Summary stats for current directory
   $ openlore telemetry /path/to/repo      Summary for specific project
   $ openlore telemetry --live             Stream events live
+  $ openlore telemetry --agent claude-code  Only this agent's events (a shared repo mixes several)
 `)
-  .action(async function (directory: string, options: { live?: boolean }) {
+  .action(async function (directory: string, options: { live?: boolean; agent?: string }) {
     const dir = directory ?? process.cwd();
     const telDir = join(dir, OPENLORE_DIR, TELEMETRY_SUBDIR);
 
@@ -547,7 +750,7 @@ Examples:
       return; // keep process alive — watcher keeps running
     }
 
-    const [mcp, orient, cache, lease, panicEvents] = await Promise.all([
+    const [allMcp, allOrient, allCache, allLease, allPanic] = await Promise.all([
       readJsonl<McpEvent>(join(telDir, 'mcp.jsonl')),
       readJsonl<OrientEvent>(join(telDir, 'orient.jsonl')),
       readJsonl<CacheEvent>(join(telDir, 'cache.jsonl')),
@@ -555,10 +758,25 @@ Examples:
       readJsonl<PanicEvent>(join(telDir, 'panic.jsonl')),
     ]);
 
-    if (!mcp.length && !orient.length && !cache.length && !lease.length && !panicEvents.length) {
-      console.log(`No telemetry found at ${telDir}`);
+    if (!allMcp.length && !allOrient.length && !allCache.length && !allLease.length && !allPanic.length) {
+      console.log(`No telemetry found at ${safe(telDir)}`);
       console.log('Enable with: export OPENLORE_TELEMETRY=1');
       return;
+    }
+
+    const mcp = filterByAgent(allMcp, options.agent);
+    const orient = filterByAgent(allOrient, options.agent);
+    const cache = filterByAgent(allCache, options.agent);
+    const lease = filterByAgent(allLease, options.agent);
+    const panicEvents = filterByAgent(allPanic, options.agent);
+
+    if (options.agent) {
+      const observed = new Set([...allMcp, ...allOrient, ...allCache, ...allLease, ...allPanic].map(agentOf));
+      console.log(`Filtered to agent "${safe(options.agent)}" — observed in this repository: ${[...observed].map(a => safe(a)).join(', ')}\n`);
+      if (!observed.has(options.agent)) {
+        console.log(`No events from "${safe(options.agent)}".`);
+        return;
+      }
     }
 
     renderSummary(mcp, orient, cache, lease, panicEvents);
