@@ -89,8 +89,38 @@ function runTransaction(db: DatabaseSync, fn: () => void): void {
   }
 }
 
+async function runTransactionAsync<T>(db: DatabaseSync, fn: () => Promise<T>): Promise<T> {
+  const depth = txDepth.get(db) ?? 0;
+  const sp = `sp${depth}`;
+  if (depth === 0) {
+    db.exec('BEGIN');
+  } else {
+    db.exec(`SAVEPOINT ${sp}`);
+  }
+  txDepth.set(db, depth + 1);
+  try {
+    const result = await fn();
+    if (depth === 0) {
+      db.exec('COMMIT');
+    } else {
+      db.exec(`RELEASE ${sp}`);
+    }
+    return result;
+  } catch (err) {
+    if (depth === 0) {
+      db.exec('ROLLBACK');
+    } else {
+      db.exec(`ROLLBACK TO ${sp}`);
+      db.exec(`RELEASE ${sp}`);
+    }
+    throw err;
+  } finally {
+    txDepth.set(db, depth);
+  }
+}
+
 /** Bump when schema changes. Old DBs are dropped and rebuilt on next analyze --force. */
-export const SCHEMA_VERSION = 8;
+export const SCHEMA_VERSION = 9;
 
 export class EdgeStore {
   /**
@@ -173,6 +203,16 @@ export class EdgeStore {
       CREATE INDEX IF NOT EXISTS idx_callee_id   ON edges(callee_id);
       CREATE INDEX IF NOT EXISTS idx_caller_file ON edges(caller_file);
       CREATE INDEX IF NOT EXISTS idx_callee_file ON edges(callee_file);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_edges_identity ON edges(
+        caller_id,
+        callee_id,
+        callee_name,
+        COALESCE(line, -1),
+        COALESCE(confidence, ''),
+        COALESCE(kind, ''),
+        COALESCE(call_type, ''),
+        COALESCE(synthesized_by, '')
+      );
       -- callee_name is filtered by the incremental closure's consumer lookups
       -- (getExternalConsumerFiles / getNameOnlyConsumers / getExternalConsumers)
       -- on the hot watch path. Without this index each is a full scan of edges,
@@ -487,7 +527,7 @@ export class EdgeStore {
   /** Bulk-insert edges in a single transaction. */
   insertEdges(edges: CallEdge[]): void {
     const stmt: StatementSync = this.db.prepare(`
-      INSERT INTO edges (caller_id, caller_file, callee_id, callee_file, callee_name, line, confidence, kind, call_type, synthesized_by)
+      INSERT OR IGNORE INTO edges (caller_id, caller_file, callee_id, callee_file, callee_name, line, confidence, kind, call_type, synthesized_by)
       VALUES (@callerId, @callerFile, @calleeId, @calleeFile, @calleeName, @line, @confidence, @kind, @callType, @synthesizedBy)
     `);
     runTransaction(this.db, () => {
@@ -1154,6 +1194,11 @@ export class EdgeStore {
   /** Run fn inside a single SQLite transaction. */
   transaction(fn: () => void): void {
     runTransaction(this.db, fn);
+  }
+
+  /** Run an async fn inside one SQLite transaction, preserving nested savepoints. */
+  async transactionAsync<T>(fn: () => Promise<T>): Promise<T> {
+    return runTransactionAsync(this.db, fn);
   }
 
   close(): void {

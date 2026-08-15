@@ -13,6 +13,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, writeFile, readFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { spawn } from 'node:child_process';
 import type { LLMContext } from '../analyzer/artifact-generator.js';
 import type { SerializedCallGraph } from '../analyzer/call-graph.js';
 import { EdgeStore } from './edge-store.js';
@@ -650,6 +651,73 @@ describe('McpWatcher coalescing queue', () => {
     await vi.advanceTimersByTimeAsync(200);
     expect(calls).toBe(2); // pending 'b.ts' flushed after the first finished
   });
+
+  it('retries SQLITE_BUSY, then defers the batch without dropping it', async () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const { McpWatcher } = await import('./mcp-watcher.js');
+    const watcher = new McpWatcher({ rootPath: '/tmp/proj', debounceMs: 100, embed: false });
+
+    let calls = 0;
+    const handleBatch = vi.spyOn(watcher as any, 'handleBatch').mockImplementation(async () => {
+      calls++;
+      if (calls <= 4) throw new Error('SQLITE_BUSY: database is locked');
+    });
+    const enqueue = (watcher as unknown as { enqueue(p: string): void }).enqueue.bind(watcher);
+
+    enqueue('/tmp/proj/src/contended.ts');
+    await vi.runAllTimersAsync();
+
+    expect(handleBatch).toHaveBeenCalledTimes(5);
+    expect(handleBatch.mock.calls[4][0]).toEqual(['/tmp/proj/src/contended.ts']);
+    expect(stderr).toHaveBeenCalledWith(expect.stringContaining('deferred 1 change(s)'));
+    stderr.mockRestore();
+  });
+});
+
+describe('McpWatcher SQLite contention', () => {
+  it('retries after a real write lock outlives busy_timeout', async () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const ctx = makeContext({ callGraph: makeCallGraph() });
+    const { rootPath, outputPath } = await setupProject(ctx);
+    const srcFile = join(rootPath, 'contended.ts');
+    await writeFile(srcFile, 'export function contended() { return 1; }', 'utf-8');
+    EdgeStore.openForAnalyze(EdgeStore.dbPath(outputPath)).close();
+
+    const childScript = `
+      import { DatabaseSync } from 'node:sqlite';
+      const db = new DatabaseSync(process.argv[1]);
+      db.exec('BEGIN IMMEDIATE');
+      process.stdout.write('locked\\n');
+      setTimeout(() => { db.exec('ROLLBACK'); db.close(); }, 5500);
+    `;
+    const child = spawn(process.execPath, ['--input-type=module', '-e', childScript, EdgeStore.dbPath(outputPath)], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    await new Promise<void>((resolve, reject) => {
+      child.once('error', reject);
+      child.stdout.once('data', () => resolve());
+      child.stderr.once('data', (chunk) => reject(new Error(String(chunk))));
+    });
+
+    try {
+      const { McpWatcher } = await import('./mcp-watcher.js');
+      const watcher = new McpWatcher({ rootPath, outputPath, embed: false });
+      await (watcher as unknown as {
+        flushBatchWithBusyRetry(batch: string[], deletions: string[]): Promise<void>;
+      }).flushBatchWithBusyRetry([srcFile], []);
+
+      const store = EdgeStore.open(EdgeStore.dbPath(outputPath));
+      try {
+        expect(store.getFileHash('contended.ts')).not.toBeNull();
+      } finally {
+        store.close();
+      }
+      expect(stderr).not.toHaveBeenCalledWith(expect.stringContaining('deferred 1 change(s)'));
+    } finally {
+      if (child.exitCode === null) child.kill('SIGTERM');
+      stderr.mockRestore();
+    }
+  }, 15_000);
 });
 
 // ── start / stop ──────────────────────────────────────────────────────────────
@@ -661,6 +729,27 @@ describe('McpWatcher start/stop', () => {
     const watcher = new McpWatcher({ rootPath: '/tmp/proj' });
     await expect(watcher.start()).resolves.not.toThrow();
     await expect(watcher.stop()).resolves.not.toThrow();
+  });
+
+  it('discloses a batch that remains contended during shutdown', async () => {
+    vi.useFakeTimers();
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const { McpWatcher } = await import('./mcp-watcher.js');
+      const watcher = new McpWatcher({ rootPath: '/tmp/proj', embed: false });
+      vi.spyOn(watcher as any, 'handleBatch').mockRejectedValue(new Error('SQLITE_LOCKED: database table is locked'));
+      (watcher as unknown as { enqueue(path: string): void }).enqueue('/tmp/proj/src/a.ts');
+
+      const stopped = watcher.stop();
+      await vi.runAllTimersAsync();
+      await stopped;
+
+      expect(stderr).toHaveBeenCalledWith(expect.stringContaining('stopped with 1 change(s)'));
+      expect(stderr).toHaveBeenCalledWith(expect.stringContaining('run analyze to reconcile'));
+    } finally {
+      stderr.mockRestore();
+      vi.useRealTimers();
+    }
   });
 });
 

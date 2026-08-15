@@ -1788,8 +1788,6 @@ export async function writeEdgesToSQLite(
   // it repopulates the store immediately below (change: harden-index-store-lifecycle).
   const store = EdgeStore.openForAnalyze(dbPath);
   try {
-    store.clearAll();
-
     // Normalize absolute paths to relative — vector index uses relative IDs; DB must match.
     const prefix = rootPath ? (rootPath.endsWith('/') ? rootPath : rootPath + '/') : '';
     const norm = (s: string): string => (prefix && s.startsWith(prefix)) ? s.slice(prefix.length) : s;
@@ -1819,10 +1817,17 @@ export async function writeEdgesToSQLite(
     const prodEdges = edges.filter(e =>
       e.kind !== 'tested_by' && !testNodeIds.has(e.callerId) && !testNodeIds.has(e.calleeId));
 
-    store.insertNodes(prodNodes, hubIds, entryIds);
-    store.insertEdges(prodEdges);
-    store.insertInheritanceEdges(inheritanceEdges);
-    store.insertClasses(classes);
+    // The production graph is one generation. Keep clear + every derived table in
+    // one SQLite transaction so WAL readers continue to see the previous complete
+    // graph until this replacement commits. A throw (including a failed CFG spill
+    // drain) rolls the whole replacement back instead of leaving a half-built store
+    // (change: harden-analyze-rebuild-atomicity).
+    await store.transactionAsync(async () => {
+      store.clearAll();
+      store.insertNodes(prodNodes, hubIds, entryIds);
+      store.insertEdges(prodEdges);
+      store.insertInheritanceEdges(inheritanceEdges);
+      store.insertClasses(classes);
 
     // CFG/def-use overlay (spec: add-intraprocedural-cfg-dataflow-overlay).
     // Production functions only — keyed by the same normalized ids as nodes.
@@ -1911,6 +1916,7 @@ export async function writeEdgesToSQLite(
         // A memo that cannot be written is simply a memo the next run will not find.
       }
     }
+    });
 
     // Index integrity attestation (change: add-index-integrity-attestation). Records
     // what this build committed to the production graph so a later load can reconcile
