@@ -30,7 +30,7 @@ import type {
   DecisionStore,
   PendingDecision,
 } from '../../types/index.js';
-import { patchDecision } from './store.js';
+import { patchDecision, replaceDecisions } from './store.js';
 
 /**
  * Source-declared reason registry. A code that is not here cannot be emitted;
@@ -179,9 +179,36 @@ export function withVerificationOutcome(
 ): DraftDisposition[] {
   if (phantomIds.size === 0) return [...dispositions];
   return dispositions.map(d =>
-    phantomIds.has(d.id)
+    phantomIds.has(d.id) || (d.mergedIntoId !== undefined && phantomIds.has(d.mergedIntoId))
       ? { id: d.id, disposition: 'rejected' as const, reason: 'no-supporting-diff' as const }
       : d);
+}
+
+/**
+ * Atomically apply every state transition produced by one consolidation run.
+ * `originalDraftIds` is captured before the LLM call, so drafts recorded while
+ * consolidation is in flight remain untouched in the fresh CAS snapshot.
+ *
+ * Rejected originals stay in the store as an audit trail; verified/phantom
+ * survivors replace source drafts with the same deterministic id. Dispositions
+ * are applied last so both survivors and absorbed originals carry their verdict.
+ */
+export function applyConsolidationOutcome(
+  store: DecisionStore,
+  result: {
+    originalDraftIds: ReadonlySet<string>;
+    verified: readonly PendingDecision[];
+    phantom: readonly PendingDecision[];
+    supersededIds: readonly string[];
+    dispositions: readonly DraftDisposition[];
+  },
+): DecisionStore {
+  let next = store;
+  for (const id of new Set([...result.originalDraftIds, ...result.supersededIds])) {
+    next = patchDecision(next, id, { status: 'rejected' });
+  }
+  next = replaceDecisions(next, [...result.verified, ...result.phantom]);
+  return applyDispositions(next, result.dispositions);
 }
 
 /**

@@ -191,4 +191,87 @@ describe('openloreConsolidateDecisions — verification evidence', () => {
     expect(verifyDecisions).toHaveBeenCalledOnce();
     expect(mocks.saveLogs).toHaveBeenCalledOnce();
   });
+
+  it('settles absorbed drafts and preserves a draft recorded during consolidation', async () => {
+    const kept = makeDecision({ id: 'keep0001' });
+    const absorbed = makeDecision({ id: 'drop0002', title: 'Related draft' });
+    const concurrent = makeDecision({ id: 'later003', title: 'Recorded concurrently' });
+    const initial = makeStore([kept, absorbed]);
+    const fresh = makeStore([kept, absorbed, concurrent]);
+    vi.mocked(loadDecisionStore).mockResolvedValue(initial);
+    vi.mocked(updateDecisionStore).mockImplementation(async (_root, mutate) => mutate(fresh));
+    vi.mocked(isGitRepositoryRoot).mockResolvedValue(false);
+    vi.mocked(consolidateDrafts).mockResolvedValue({
+      decisions: [{ ...kept, status: 'consolidated' }],
+      supersededIds: [],
+      dispositions: [
+        { id: kept.id, disposition: 'promoted', reason: 'promoted-as-recorded' },
+        { id: absorbed.id, disposition: 'merged-into', reason: 'merged-into-consolidated', mergedIntoId: kept.id },
+      ],
+    });
+
+    const result = await openloreConsolidateDecisions({ rootPath: '/test/project', provider: 'anthropic' });
+
+    expect(result.store.decisions.find(d => d.id === kept.id)).toMatchObject({
+      status: 'verified', disposition: 'promoted', dispositionReason: 'promoted-as-recorded',
+    });
+    expect(result.store.decisions.find(d => d.id === absorbed.id)).toMatchObject({
+      status: 'rejected', disposition: 'merged-into',
+      dispositionReason: 'merged-into-consolidated', mergedIntoId: kept.id,
+    });
+    expect(result.store.decisions.find(d => d.id === concurrent.id)).toEqual(concurrent);
+  });
+
+  it('rejects every original draft when consolidation keeps nothing', async () => {
+    const first = makeDecision({ id: 'draft001' });
+    const second = makeDecision({ id: 'draft002', title: 'Non-architectural refactor' });
+    const initial = makeStore([first, second]);
+    vi.mocked(loadDecisionStore).mockResolvedValue(initial);
+    vi.mocked(updateDecisionStore).mockImplementation(async (_root, mutate) => mutate(initial));
+    vi.mocked(isGitRepositoryRoot).mockResolvedValue(false);
+    vi.mocked(consolidateDrafts).mockResolvedValue({
+      decisions: [],
+      supersededIds: [],
+      dispositions: [
+        { id: first.id, disposition: 'rejected', reason: 'not-in-consolidated-set' },
+        { id: second.id, disposition: 'rejected', reason: 'not-in-consolidated-set' },
+      ],
+    });
+
+    const result = await openloreConsolidateDecisions({ rootPath: '/test/project', provider: 'anthropic' });
+
+    expect(result.store.decisions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: first.id, status: 'rejected', disposition: 'rejected' }),
+      expect.objectContaining({ id: second.id, status: 'rejected', disposition: 'rejected' }),
+    ]));
+  });
+
+  it('rejects an absorbed draft instead of pointing it at a phantom survivor', async () => {
+    const survivor = makeDecision({ id: 'phantom1', affectedFiles: ['src/example.ts'] });
+    const absorbed = makeDecision({ id: 'merged02', affectedFiles: ['src/example.ts'] });
+    const initial = makeStore([survivor, absorbed]);
+    const phantom = { ...survivor, status: 'phantom' as const };
+    vi.mocked(loadDecisionStore).mockResolvedValue(initial);
+    vi.mocked(updateDecisionStore).mockImplementation(async (_root, mutate) => mutate(initial));
+    vi.mocked(consolidateDrafts).mockResolvedValue({
+      decisions: [{ ...survivor, status: 'consolidated' }],
+      supersededIds: [],
+      dispositions: [
+        { id: survivor.id, disposition: 'promoted', reason: 'promoted-as-recorded' },
+        { id: absorbed.id, disposition: 'merged-into', reason: 'merged-into-consolidated', mergedIntoId: survivor.id },
+      ],
+    });
+    vi.mocked(isGitRepositoryRoot).mockResolvedValue(true);
+    vi.mocked(verifyDecisions).mockResolvedValue({ verified: [], phantom: [phantom], missing: [] });
+
+    const result = await openloreConsolidateDecisions({ rootPath: '/test/project', provider: 'anthropic' });
+
+    expect(result.store.decisions.find(d => d.id === survivor.id)).toMatchObject({
+      status: 'phantom', disposition: 'rejected', dispositionReason: 'no-supporting-diff',
+    });
+    expect(result.store.decisions.find(d => d.id === absorbed.id)).toMatchObject({
+      status: 'rejected', disposition: 'rejected', dispositionReason: 'no-supporting-diff',
+    });
+    expect(result.store.decisions.find(d => d.id === absorbed.id)?.mergedIntoId).toBeUndefined();
+  });
 });

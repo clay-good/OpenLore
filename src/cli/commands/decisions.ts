@@ -28,7 +28,6 @@ import { isGitRepositoryRoot, getChangedFiles, getFileDiff, getCommitMessages, r
 import {
   loadDecisionStore,
   updateDecisionStore,
-  replaceDecisions,
   patchDecision,
   getDecisionsByStatus,
   INACTIVE_STATUSES,
@@ -39,7 +38,7 @@ import { rewriteSyncedDecisionStatus } from '../../core/decisions/syncer.js';
 import { consolidateDrafts } from '../../core/decisions/consolidator.js';
 import {
   DECISION_DISPOSITION_REASONS,
-  applyDispositions,
+  applyConsolidationOutcome,
   describeDisposition,
   readDisposition,
   withVerificationOutcome,
@@ -779,7 +778,13 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
         // can read WHY rather than watch the draft disappear
         // (change: explain-decision-rejection).
         if (dispositions.length > 0) {
-          await updateDecisionStore(rootPath, (s) => applyDispositions(s, dispositions), 'agent');
+          await updateDecisionStore(rootPath, (s) => applyConsolidationOutcome(s, {
+            originalDraftIds: new Set(drafts.map((draft) => draft.id)),
+            verified: [],
+            phantom: [],
+            supersededIds,
+            dispositions,
+          }), 'agent');
         }
         if (!options.json) {
           console.log('No architectural decisions found in drafts.');
@@ -848,13 +853,14 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
       // because consolidated decisions share IDs with their original drafts.
       const finalDispositions = withVerificationOutcome(dispositions, new Set(phantom.map((d) => d.id)));
       const updatedStore = await updateDecisionStore(rootPath, (s) => {
-        let next = s;
-        for (const id of [...originalDraftIds, ...supersededIds]) {
-          next = patchDecision(next, id, { status: 'rejected' });
-        }
-        next = replaceDecisions(next, withProvenance);
         // Every input draft's verdict, written alongside the status transition.
-        next = applyDispositions(next, finalDispositions);
+        const next = applyConsolidationOutcome(s, {
+          originalDraftIds,
+          verified: withProvenance.filter((decision) => decision.status === 'verified'),
+          phantom: withProvenance.filter((decision) => decision.status === 'phantom'),
+          supersededIds,
+          dispositions: finalDispositions,
+        });
         return { ...next, lastConsolidatedAt: new Date().toISOString() };
       });
 

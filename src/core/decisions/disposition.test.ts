@@ -9,6 +9,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   DECISION_DISPOSITION_REASONS,
+  applyConsolidationOutcome,
   applyDispositions,
   authorStatementOf,
   computeDraftDispositions,
@@ -16,6 +17,7 @@ import {
   describeDisposition,
   readDisposition,
   withVerificationOutcome,
+  type DraftDisposition,
 } from './disposition.js';
 import type { DecisionStore, PendingDecision } from '../../types/index.js';
 
@@ -163,6 +165,81 @@ describe('withVerificationOutcome', () => {
       consolidated: [decision({ id: 'a', status: 'consolidated' })],
     });
     expect(withVerificationOutcome(verdicts, new Set())).toEqual(verdicts);
+  });
+
+  it('rejects an absorbed draft when its supposed survivor is phantom', () => {
+    const verdicts: DraftDisposition[] = [
+      { id: 'a', disposition: 'promoted', reason: 'promoted-as-recorded' },
+      { id: 'b', disposition: 'merged-into', reason: 'merged-into-consolidated', mergedIntoId: 'a' },
+    ];
+
+    expect(withVerificationOutcome(verdicts, new Set(['a']))).toEqual([
+      { id: 'a', disposition: 'rejected', reason: 'no-supporting-diff' },
+      { id: 'b', disposition: 'rejected', reason: 'no-supporting-diff' },
+    ]);
+  });
+});
+
+describe('applyConsolidationOutcome', () => {
+  it('settles every original while leaving a concurrently recorded draft pending', () => {
+    const originalA = decision({ id: 'a' });
+    const originalB = decision({ id: 'b' });
+    const concurrent = decision({ id: 'later' });
+    const verified = decision({ id: 'a', status: 'verified' });
+
+    const next = applyConsolidationOutcome(store([originalA, originalB, concurrent]), {
+      originalDraftIds: new Set(['a', 'b']),
+      verified: [verified],
+      phantom: [],
+      supersededIds: [],
+      dispositions: [
+        { id: 'a', disposition: 'promoted', reason: 'promoted-as-recorded' },
+        { id: 'b', disposition: 'merged-into', reason: 'merged-into-consolidated', mergedIntoId: 'a' },
+      ],
+    });
+
+    expect(next.decisions.find(d => d.id === 'a')).toMatchObject({
+      status: 'verified', disposition: 'promoted', dispositionReason: 'promoted-as-recorded',
+    });
+    expect(next.decisions.find(d => d.id === 'b')).toMatchObject({
+      status: 'rejected', disposition: 'merged-into',
+      dispositionReason: 'merged-into-consolidated', mergedIntoId: 'a',
+    });
+    expect(next.decisions.find(d => d.id === 'later')).toEqual(concurrent);
+  });
+
+  it('turns every discarded draft into a rejected record when consolidation keeps nothing', () => {
+    const dispositions: DraftDisposition[] = [
+      { id: 'a', disposition: 'rejected', reason: 'not-in-consolidated-set' },
+      { id: 'b', disposition: 'rejected', reason: 'superseded-by-later-draft' },
+    ];
+    const next = applyConsolidationOutcome(store([decision({ id: 'a' }), decision({ id: 'b' })]), {
+      originalDraftIds: new Set(['a', 'b']),
+      verified: [],
+      phantom: [],
+      supersededIds: ['b'],
+      dispositions,
+    });
+
+    expect(next.decisions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'a', status: 'rejected', disposition: 'rejected' }),
+      expect.objectContaining({ id: 'b', status: 'rejected', disposition: 'rejected' }),
+    ]));
+  });
+
+  it('keeps phantom status while recording the no-supporting-diff verdict', () => {
+    const phantom = decision({ id: 'a', status: 'phantom' });
+    const next = applyConsolidationOutcome(store([decision({ id: 'a' })]), {
+      originalDraftIds: new Set(['a']),
+      verified: [],
+      phantom: [phantom],
+      supersededIds: [],
+      dispositions: [{ id: 'a', disposition: 'rejected', reason: 'no-supporting-diff' }],
+    });
+
+    expect(next.decisions[0]).toMatchObject({
+      status: 'phantom', disposition: 'rejected', dispositionReason: 'no-supporting-diff',
+    });
   });
 });
 

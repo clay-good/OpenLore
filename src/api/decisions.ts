@@ -21,12 +21,11 @@ import {
   loadDecisionStore,
   updateDecisionStore,
   upsertDecisions,
-  applyConsolidationResult,
   makeDecisionId,
   illegalPromotionToApproved,
 } from '../core/decisions/store.js';
 import { consolidateDrafts } from '../core/decisions/consolidator.js';
-import { applyDispositions, withVerificationOutcome } from '../core/decisions/disposition.js';
+import { applyConsolidationOutcome, withVerificationOutcome } from '../core/decisions/disposition.js';
 import type { ProviderName } from '../utils/command-helpers.js';
 import { markVerificationEvidenceAbsent, verifyDecisions } from '../core/decisions/verifier.js';
 import { syncApprovedDecisions } from '../core/decisions/syncer.js';
@@ -156,6 +155,9 @@ export async function openloreConsolidateDecisions(
   });
 
   const store = await loadDecisionStore(rootPath);
+  const originalDraftIds = new Set(
+    store.decisions.filter((decision) => decision.status === 'draft').map((decision) => decision.id),
+  );
 
   const openspecPath = resolveOpenspecDir(rootPath, openloreConfig.openspecPath);
   const specMap = await buildSpecMap({ rootPath, openspecPath }).catch(() => undefined);
@@ -170,7 +172,13 @@ export async function openloreConsolidateDecisions(
     // draft that produced no decision must say so, not vanish
     // (change: explain-decision-rejection).
     const withVerdicts = dispositions.length
-      ? await updateDecisionStore(rootPath, (s) => applyDispositions(s, dispositions))
+      ? await updateDecisionStore(rootPath, (s) => applyConsolidationOutcome(s, {
+          originalDraftIds,
+          verified: [],
+          phantom: [],
+          supersededIds,
+          dispositions,
+        }))
       : store;
     return { verified: [], phantom: [], missing: [], store: withVerdicts };
   }
@@ -206,12 +214,18 @@ export async function openloreConsolidateDecisions(
   progress(onProgress, 'Verifying decisions', 'complete', `${verified.length} verified`);
 
   // CAS persist onto the freshest store so a concurrently-recorded draft is kept.
-  // replaceDecisions (via applyConsolidationResult), NOT upsert: consolidated decisions
+  // replaceDecisions (via applyConsolidationOutcome), NOT upsert: consolidated decisions
   // reuse their drafts' deterministic ids, so an upsert would silently drop the verified
   // status. Matches the CLI consolidation path.
   const finalDispositions = withVerificationOutcome(dispositions, new Set(phantom.map((d) => d.id)));
   const updatedStore = await updateDecisionStore(rootPath, (s) =>
-    applyDispositions(applyConsolidationResult(s, { verified, phantom, supersededIds }), finalDispositions),
+    applyConsolidationOutcome(s, {
+      originalDraftIds,
+      verified,
+      phantom,
+      supersededIds,
+      dispositions: finalDispositions,
+    }),
   );
 
   return { verified, phantom, missing, store: updatedStore };
