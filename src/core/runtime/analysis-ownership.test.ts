@@ -41,6 +41,25 @@ async function own(root: string, analysisDir: string, options?: { wait?: boolean
   return result;
 }
 
+/**
+ * Read a live ownership lock while its heartbeat may be between truncate and write.
+ * The production reader treats that interval as ambiguous and fails closed; assertions
+ * retry only transient JSON syntax errors and still surface persistent corruption or I/O
+ * failures. Each read yields to the worker thread, so no fake-timer delay is required.
+ */
+async function readLiveLock<T>(lockPath: string): Promise<T> {
+  let syntaxError: SyntaxError | undefined;
+  for (let attempt = 0; attempt < 20; attempt++) {
+    try {
+      return JSON.parse(await readFile(lockPath, 'utf8')) as T;
+    } catch (error) {
+      if (!(error instanceof SyntaxError)) throw error;
+      syntaxError = error;
+    }
+  }
+  throw syntaxError ?? new Error(`Could not parse live ownership lock: ${lockPath}`);
+}
+
 /** Write a lock file by hand to simulate another process's ownership. */
 async function plantOwner(
   analysisDir: string,
@@ -295,7 +314,7 @@ describe('analysis ownership — progress sidecar', () => {
       stage: 'artifacts', percent: 75, detail: 'Generating analysis artifacts',
     });
     expect((await stat(lockPath)).mtimeMs).toBeGreaterThanOrEqual(before);
-    expect(JSON.parse(await readFile(lockPath, 'utf8')).stage).toBe('artifacts');
+    expect((await readLiveLock<{ stage: string }>(lockPath)).stage).toBe('artifacts');
   });
 
   it('keeps runtime state OUT of the analysis artifact directory', async () => {
@@ -318,11 +337,11 @@ describe('analysis ownership — progress sidecar', () => {
     await held.update('artifacts', { percent: 75, detail: 'Generating analysis artifacts' });
 
     const lockPath = join(runtimeDirOf(analysisDir), OWNERSHIP_LOCK_FILE);
-    const before = JSON.parse(await readFile(lockPath, 'utf8')).heartbeatAt as string;
+    const before = (await readLiveLock<{ heartbeatAt: string }>(lockPath)).heartbeatAt;
 
     await vi.advanceTimersByTimeAsync(PROGRESS_INTERVAL_MS + 500);
 
-    const after = JSON.parse(await readFile(lockPath, 'utf8')) as { heartbeatAt: string; stage: string };
+    const after = await readLiveLock<{ heartbeatAt: string; stage: string }>(lockPath);
     expect(Date.parse(after.heartbeatAt)).toBeGreaterThan(Date.parse(before));
     // The beat re-stamps the CURRENT stage and its detail — it must not blank the
     // sidecar back to "nothing known" just because no boundary was crossed.
@@ -356,7 +375,7 @@ describe('analysis ownership — progress sidecar', () => {
     for (let minute = 0; minute < 18; minute++) {
       await held.update('artifacts', { percent: 75, detail: `${minute}m elapsed` });
     }
-    const contents = JSON.parse(await readFile(lockPath, 'utf8'));
+    const contents = await readLiveLock<{ heartbeatAt: string }>(lockPath);
     expect(Date.now() - Date.parse(contents.heartbeatAt)).toBeLessThan(5_000);
     expect(await readAnalysisProgress(analysisDir)).toMatchObject({ detail: '17m elapsed' });
   });
@@ -418,9 +437,9 @@ describe('analysis ownership — across processes', () => {
     });
 
     const lockPath = join(runtimeDirOf(analysisDir), OWNERSHIP_LOCK_FILE);
-    const first = JSON.parse(await readFile(lockPath, 'utf8')).heartbeatAt as string;
+    const first = (await readLiveLock<{ heartbeatAt: string }>(lockPath)).heartbeatAt;
     await new Promise(resolve => setTimeout(resolve, 1_200));
-    const during = JSON.parse(await readFile(lockPath, 'utf8')).heartbeatAt as string;
+    const during = (await readLiveLock<{ heartbeatAt: string }>(lockPath)).heartbeatAt;
 
     expect(Date.parse(during)).toBeGreaterThan(Date.parse(first));
     child.kill('SIGKILL');
