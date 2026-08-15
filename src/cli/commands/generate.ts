@@ -9,7 +9,7 @@ import { Command } from 'commander';
 import { allowInsecureTls } from '../../core/services/tls-scope.js';
 import { confirm } from '@inquirer/prompts';
 import { constants as fsConstants } from 'node:fs';
-import { lstat, mkdir, mkdtemp, open, readdir, readFile, stat, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, open, readdir, readFile, stat, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import { logger } from '../../utils/logger.js';
@@ -166,18 +166,24 @@ export async function copyRegularTree(sourceRoot: string, destinationRoot: strin
       // Inspect the directory entry itself before canonicalizing its target. A
       // symlink outside the root is something to skip, not an error that aborts
       // an otherwise-safe preview copy.
-      const sourcePath = join(source, entry.name);
-      const metadata = await lstat(sourcePath);
-      if (metadata.isSymbolicLink()) continue;
-      if (metadata.isDirectory()) {
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) {
         await visit(child);
         continue;
       }
-      if (!metadata.isFile()) continue;
+      if (!entry.isFile()) continue;
+      const sourcePath = safeJoin(sourceRoot, child);
       const handle = await open(sourcePath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
       try {
         const verified = await handle.stat();
         if (!verified.isFile()) continue;
+        // Re-confine and identify the path AFTER opening it. The handle is stable,
+        // so a rename between directory enumeration and open cannot redirect the
+        // subsequent read: an escaping parent is rejected, and a replaced path no
+        // longer has the device/inode pair held by this handle.
+        const currentPath = safeJoin(sourceRoot, child);
+        const current = await stat(currentPath);
+        if (current.dev !== verified.dev || current.ino !== verified.ino) continue;
         const destination = safeJoin(destinationRoot, child);
         await mkdir(dirname(destination), { recursive: true });
         await writeFile(destination, await handle.readFile());
