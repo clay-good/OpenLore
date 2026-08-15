@@ -342,6 +342,12 @@ export async function prepareSpecGeneration(input: PrepareSpecInput): Promise<Sp
   if (snapshot.state === 'changed') return unavailable('generation', input.domain, 'analysis-changed', snapshot.message);
   if (snapshot.state !== 'ok') return unavailable('generation', input.domain, 'analysis-unavailable', 'No compatible analysis found. Run analyze_codebase first.');
   const loaded = snapshot.loaded;
+  if (loaded.generationCoherence !== 'full') {
+    return unavailable(
+      'generation', input.domain, 'analysis-changed',
+      'The current analysis was incrementally patched and may not contain a current repository inventory. Run analyze_codebase for a full analysis before preparing specifications.',
+    );
+  }
 
   const bundles = buildDomainEvidence(loaded.repo, loaded.context);
   const bundle = bundles.find(item => item.name.toLowerCase() === input.domain.toLowerCase());
@@ -480,6 +486,12 @@ export async function prepareSpecRepair(input: PrepareSpecInput): Promise<SpecWo
   if (snapshot.state === 'changed') return unavailable('repair', input.domain, 'analysis-changed', snapshot.message);
   if (snapshot.state !== 'ok') return unavailable('repair', input.domain, 'analysis-unavailable', 'No compatible analysis found. Run analyze_codebase first.');
   const loaded = snapshot.loaded;
+  if (loaded.generationCoherence !== 'full') {
+    return unavailable(
+      'repair', input.domain, 'analysis-changed',
+      'The current analysis was incrementally patched and may not contain a current repository inventory. Run analyze_codebase for a full analysis before preparing specifications.',
+    );
+  }
   const bundles = buildDomainEvidence(loaded.repo, loaded.context);
   const bundle = bundles.find(item => item.name.toLowerCase() === input.domain.toLowerCase());
   const specCorpus = await loadSpecCorpus(loaded.root, loaded.openspecPath);

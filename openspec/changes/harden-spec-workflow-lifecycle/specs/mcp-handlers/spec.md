@@ -67,6 +67,13 @@ Every follow-up advertised by a composite SHALL either name an MCP tool callable
 
 Every composite and cached MCP read SHALL bind all consumed analysis artifacts to one analysis-generation identity. A server SHALL automatically reload when a newer committed generation becomes current. If a generation changes while a response is composed, the request SHALL retry against one generation or return a typed `analysis-changed` result; it MUST NOT combine old cached paths with a fresh preflight state.
 
+Generate and Repair SHALL require a generation marked `full`. A watcher-patched `incremental` generation MAY serve navigation tools, but MUST NOT seed specification authoring because its repository inventory can lag its patched context and dependency graph. The composites SHALL return `analysis-changed` with guidance to run a full analysis.
+
+#### Scenario: Incremental evidence cannot author specifications
+- **GIVEN** the watcher has published an incrementally patched analysis generation
+- **WHEN** an agent requests Generate or Repair evidence
+- **THEN** the composite returns `analysis-changed`, includes no repository evidence, and directs the agent to run a full analysis
+
 #### Scenario: External analyze invalidates daemon cache
 - **GIVEN** a daemon has cached one analysis generation and another process commits a newer generation
 - **WHEN** `orient` or a spec composite is called

@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { historicalSpecPaths, prepareSpecGeneration, prepareSpecRepair } from './spec-workflow.js';
 import { DEFAULT_RESPONSE_BYTES, EVIDENCE_STREAM_PROTOCOL } from './evidence-stream.js';
 import { mappingSourceFingerprint } from '../generator/mapping-generator.js';
+import { publishGeneration, REQUIRED_ANALYSIS_ARTIFACTS } from '../runtime/analysis-generation.js';
 
 const roots: string[] = [];
 
@@ -40,6 +41,24 @@ afterEach(() => {
 });
 
 describe('spec workflow composites', () => {
+  it('rejects incrementally patched analysis for specification authoring', async () => {
+    const root = fixture();
+    const analysis = join(root, '.openlore', 'analysis');
+    writeFileSync(join(analysis, 'fingerprint.json'), '{}');
+    await publishGeneration(analysis, [...REQUIRED_ANALYSIS_ARTIFACTS], { coherence: 'incremental' });
+
+    for (const result of await Promise.all([
+      prepareSpecGeneration({ directory: root, domain: 'billing' }),
+      prepareSpecRepair({ directory: root, domain: 'billing' }),
+    ])) {
+      expect(result).toMatchObject({
+        receipt: { state: 'unavailable' },
+        error: { code: 'analysis-changed', message: expect.stringContaining('full analysis') },
+      });
+      expect(result.evidence).toBeUndefined();
+    }
+  });
+
   it('honors a propagated cancellation signal before reading analysis', async () => {
     const controller = new AbortController();
     controller.abort();
