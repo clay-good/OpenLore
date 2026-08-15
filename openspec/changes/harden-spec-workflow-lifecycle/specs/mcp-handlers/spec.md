@@ -76,4 +76,3 @@ Generation preparation SHALL compare the requested analyzed domain footprint wit
 - **GIVEN** a candidate domain with a complete footprint comparison and no shared files or symbols
 - **WHEN** generation preparation runs
 - **THEN** it reports an available empty overlap set rather than omitting the observation
-

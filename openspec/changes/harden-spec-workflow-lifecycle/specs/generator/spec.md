@@ -39,4 +39,3 @@ The standalone generator and agent-hosted Generate/Repair workflows SHALL leave 
 - **GIVEN** standalone generation writes specifications
 - **WHEN** it finalizes its output
 - **THEN** its mapping artifact is derived from the written specs and current graph under the same link-state and provenance rules as agent-hosted generation
-

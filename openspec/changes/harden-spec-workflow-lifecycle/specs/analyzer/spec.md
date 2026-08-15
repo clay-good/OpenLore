@@ -48,4 +48,3 @@ Every long-running analysis stage, including artifact generation, SHALL update o
 - **GIVEN** an analysis lock with a live owner and current heartbeat
 - **WHEN** preflight/status is requested
 - **THEN** it reports `ANALYSIS_IN_PROGRESS` and owner metadata rather than `STALE` or `FRESH`
-
