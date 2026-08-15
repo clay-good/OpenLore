@@ -49,6 +49,7 @@ import {
   ARTIFACT_REPO_STRUCTURE,
   ARTIFACT_LLM_CONTEXT,
   ARTIFACT_DEPENDENCY_GRAPH,
+  ARTIFACT_FINGERPRINT,
   ARTIFACT_REFACTOR_PRIORITIES,
   ARTIFACT_RAG_MANIFEST,
 } from '../constants.js';
@@ -56,6 +57,11 @@ import { resolveTrustedApiBase, resolveTrustedCompatBase, resolveTrustedSslVerif
 import { resolveOpenspecDir } from '../utils/openspec-dir.js';
 import { safeJoin } from '../utils/path-confinement.js';
 import { normalizeDomainName } from '../core/generator/openspec-compat.js';
+import {
+  readGenerationSnapshot,
+  REQUIRED_ANALYSIS_ARTIFACTS,
+  type GenerationManifest,
+} from '../core/runtime/analysis-generation.js';
 
 function progress(onProgress: ProgressCallback | undefined, step: string, status: 'start' | 'progress' | 'complete' | 'skip', detail?: string): void {
   onProgress?.({ phase: 'generate', step, status, detail });
@@ -67,35 +73,57 @@ interface AnalysisData {
   llmContext: LLMContext;
   depGraph?: DependencyGraphResult;
   refactorReport?: RefactorReport;
+  generationCompatibility: GenerationManifest['compatibility'];
 }
 
-async function loadAnalysisData(analysisPath: string): Promise<AnalysisData | null> {
-  const repoStructure = await readJsonFile<RepoStructure>(
-    join(analysisPath, ARTIFACT_REPO_STRUCTURE),
-    ARTIFACT_REPO_STRUCTURE,
+export class GenerateAnalysisError extends Error {
+  constructor(public readonly code: 'analysis-unavailable' | 'analysis-changed', message: string) {
+    super(message);
+    this.name = 'GenerateAnalysisError';
+  }
+}
+
+type JsonArtifactReader = <T>(path: string, label: string) => Promise<T | null>;
+
+export async function loadAnalysisData(
+  analysisPath: string,
+  readArtifact: JsonArtifactReader = readJsonFile,
+): Promise<AnalysisData> {
+  const snapshot = await readGenerationSnapshot(
+    analysisPath,
+    [...REQUIRED_ANALYSIS_ARTIFACTS],
+    async () => Promise.all([
+      readArtifact<RepoStructure>(join(analysisPath, ARTIFACT_REPO_STRUCTURE), ARTIFACT_REPO_STRUCTURE),
+      readArtifact<LLMContext>(join(analysisPath, ARTIFACT_LLM_CONTEXT), ARTIFACT_LLM_CONTEXT),
+      readArtifact<DependencyGraphResult>(join(analysisPath, ARTIFACT_DEPENDENCY_GRAPH), ARTIFACT_DEPENDENCY_GRAPH),
+      readArtifact<Record<string, unknown>>(join(analysisPath, ARTIFACT_FINGERPRINT), ARTIFACT_FINGERPRINT),
+      readArtifact<RefactorReport>(join(analysisPath, ARTIFACT_REFACTOR_PRIORITIES), ARTIFACT_REFACTOR_PRIORITIES),
+    ]),
   );
-  if (!repoStructure) return null;
 
-  const llmContext = await readJsonFile<LLMContext>(
-    join(analysisPath, ARTIFACT_LLM_CONTEXT),
-    ARTIFACT_LLM_CONTEXT,
-  ) ?? {
-    phase1_survey: { purpose: 'Initial survey', files: [], estimatedTokens: 0 },
-    phase2_deep: { purpose: 'Deep analysis', files: [], totalTokens: 0 },
-    phase3_validation: { purpose: 'Validation', files: [], totalTokens: 0 },
+  if (snapshot.state === 'analysis-changed') {
+    throw new GenerateAnalysisError('analysis-changed', snapshot.message);
+  }
+  if (snapshot.state === 'analysis-unavailable') {
+    throw new GenerateAnalysisError('analysis-unavailable', 'No compatible analysis generation found. Run openloreAnalyze() first.');
+  }
+
+  const [repoStructure, llmContext, depGraph, fingerprint, refactorReport] = snapshot.value;
+  if (!repoStructure || (snapshot.compatibility === 'manifest' && (!llmContext || !depGraph || !fingerprint))) {
+    throw new GenerateAnalysisError('analysis-unavailable', 'The current analysis generation is incomplete or invalid. Run openloreAnalyze() again.');
+  }
+
+  return {
+    repoStructure,
+    llmContext: llmContext ?? {
+      phase1_survey: { purpose: 'Initial survey', files: [], estimatedTokens: 0 },
+      phase2_deep: { purpose: 'Deep analysis', files: [], totalTokens: 0 },
+      phase3_validation: { purpose: 'Validation', files: [], totalTokens: 0 },
+    },
+    depGraph: depGraph ?? undefined,
+    refactorReport: refactorReport ?? undefined,
+    generationCompatibility: snapshot.compatibility,
   };
-
-  const depGraph = await readJsonFile<DependencyGraphResult>(
-    join(analysisPath, ARTIFACT_DEPENDENCY_GRAPH),
-    ARTIFACT_DEPENDENCY_GRAPH,
-  ) ?? undefined;
-
-  const refactorReport = await readJsonFile<RefactorReport>(
-    join(analysisPath, ARTIFACT_REFACTOR_PRIORITIES),
-    ARTIFACT_REFACTOR_PRIORITIES,
-  ) ?? undefined;
-
-  return { repoStructure, llmContext, depGraph, refactorReport };
 }
 
 /**
@@ -132,11 +160,13 @@ export async function openloreGenerate(options: GenerateApiOptions = {}): Promis
   // Load analysis
   progress(onProgress, 'Loading analysis', 'start');
   const analysisData = await loadAnalysisData(analysisPath);
-  if (!analysisData) {
-    throw new Error('No analysis found. Run openloreAnalyze() first.');
-  }
-  const { repoStructure, llmContext, depGraph, refactorReport } = analysisData;
-  progress(onProgress, 'Loading analysis', 'complete', `${repoStructure.statistics.analyzedFiles} files`);
+  const { repoStructure, llmContext, depGraph, refactorReport, generationCompatibility } = analysisData;
+  progress(
+    onProgress,
+    'Loading analysis',
+    'complete',
+    `${repoStructure.statistics.analyzedFiles} files (${generationCompatibility} generation)`,
+  );
 
   // Keep the public API's historical dry-run contract: analysis is validated,
   // but no provider is resolved or constructed and nothing is written.

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { renderRefresh } from './mapping.js';
-import { resolveSpecLinkIndex } from '../../core/generator/spec-link-service.js';
+import { mappingViewOf, resolveSpecLinkIndex } from '../../core/generator/spec-link-service.js';
 import { SPEC_LINK_INDEX_VERSION } from '../../core/generator/spec-link-index.js';
 
 const roots: string[] = [];
@@ -36,6 +36,30 @@ const requirement = (name: string, anchor?: string): string =>
   `### Requirement: ${name}\n\nThe system SHALL work.\n${anchor ? `- **Implementation**: \`${anchor}\`\n` : ''}\n`;
 
 describe('mapping refresh — persistence and idempotence', () => {
+  it('serves the deterministic v2 shape without legacy probabilistic fields', async () => {
+    const root = await fixture(
+      { auth: `# Auth\n\n${requirement('Sessions Expire', 'createSession::src/auth.ts')}` },
+      { 'src/auth.ts': ['createSession'] },
+    );
+    const resolution = await resolveSpecLinkIndex({ rootPath: root, persist: false });
+    const view = mappingViewOf(resolution) as {
+      schemaVersion?: number;
+      mappings?: Array<Record<string, unknown>>;
+    };
+
+    expect(view.schemaVersion).toBe(2);
+    expect(view.mappings?.[0]).toMatchObject({
+      requirement: 'Sessions Expire',
+      state: 'linked',
+      functions: [{ name: 'createSession', file: 'src/auth.ts' }],
+    });
+    expect(view.mappings?.[0]).not.toHaveProperty('service');
+    expect(view.mappings?.[0]).not.toHaveProperty('confidence');
+    expect(view.mappings?.[0]?.functions).toEqual([
+      expect.not.objectContaining({ confidence: expect.anything() }),
+    ]);
+  });
+
   it('writes a versioned provenance-bound index without an LLM', async () => {
     const root = await fixture(
       { auth: `# Auth\n\n${requirement('Sessions Expire', 'createSession::src/auth.ts')}` },

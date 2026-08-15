@@ -313,11 +313,12 @@ export function mappingViewOf(
   orphansOnly?: boolean,
 ): Record<string, unknown> {
   if (resolution.state === 'unavailable') {
-    return { error: `${resolution.message} ${resolution.remediation}`, reason: resolution.reason };
+    return { schemaVersion: 2, error: `${resolution.message} ${resolution.remediation}`, reason: resolution.reason };
   }
 
   const { index } = resolution;
   const provenance = {
+    schemaVersion: 2,
     generatedAt: index.generatedAt,
     source: resolution.source,
     provenance: index.provenance,

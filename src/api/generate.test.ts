@@ -29,6 +29,13 @@ vi.mock('../core/services/llm-service.js', () => ({
   createLLMService: vi.fn(),
 }));
 
+vi.mock('../core/runtime/analysis-generation.js', () => ({
+  REQUIRED_ANALYSIS_ARTIFACTS: ['repo-structure.json', 'llm-context.json', 'dependency-graph.json', 'fingerprint.json'],
+  readGenerationSnapshot: vi.fn(async (_dir: string, _required: string[], read: () => Promise<unknown>) => ({
+    state: 'ok', value: await read(), generationId: 'legacy-test', compatibility: 'legacy', coherence: 'full',
+  })),
+}));
+
 vi.mock('../core/generator/spec-pipeline.js', () => ({
   SpecGenerationPipeline: vi.fn().mockImplementation(function(this: unknown) {
     Object.assign(this as object, { run: vi.fn() });

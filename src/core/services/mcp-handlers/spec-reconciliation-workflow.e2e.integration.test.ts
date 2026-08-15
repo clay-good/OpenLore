@@ -114,7 +114,10 @@ describe('agent-neutral MCP spec reconciliation workflow', () => {
 
     const architecture = await call('get_architecture_overview') as { domainEvidence: Array<{ name: string }> };
     const spec = await call('get_spec', { domain: 'billing' }) as { content: string };
-    const mapping = await call('get_mapping', { domain: 'billing' }) as { mappings: Array<{ functions: Array<{ name: string }> }> };
+    const mapping = await call('get_mapping', { domain: 'billing' }) as {
+      schemaVersion: number;
+      mappings: Array<{ service?: unknown; confidence?: unknown; functions: Array<{ name: string; confidence?: unknown }> }>;
+    };
     const coverage = await call('audit_spec_coverage') as {
       mappingCoverage: { state: string };
       uncoveredFunctions: Array<{ name: string }>;
@@ -123,7 +126,11 @@ describe('agent-neutral MCP spec reconciliation workflow', () => {
 
     expect(architecture.domainEvidence.map(domain => domain.name)).toContain('billing');
     expect(spec.content).toContain('Collect payment');
+    expect(mapping.schemaVersion).toBe(2);
     expect(mapping.mappings[0].functions[0].name).toBe('collectPayment'); // covered / consistent evidence
+    expect(mapping.mappings[0]).not.toHaveProperty('service');
+    expect(mapping.mappings[0]).not.toHaveProperty('confidence');
+    expect(mapping.mappings[0].functions[0]).not.toHaveProperty('confidence');
     expect(coverage.mappingCoverage.state).toBe('available');
     expect(coverage.uncoveredFunctions.map(fn => fn.name)).toEqual(['refundPayment']);
     expect(coverage.orphanRequirements.map(item => item.requirement)).toContain('Legacy charge');

@@ -35,6 +35,7 @@ import {
   ARTIFACT_REPO_STRUCTURE,
   ARTIFACT_LLM_CONTEXT,
   ARTIFACT_DEPENDENCY_GRAPH,
+  ARTIFACT_FINGERPRINT,
   ARTIFACT_GENERATION_REPORT,
   ARTIFACT_MAPPING,
   ARTIFACT_RAG_MANIFEST,
@@ -76,6 +77,11 @@ import { createProgress } from '../../utils/progress.js';
 import { getShutdownManager, type ShutdownManager } from '../../utils/shutdown.js';
 import { normalizeDomainName } from '../../core/generator/openspec-compat.js';
 import { buildDomainEvidence, resolveDomainSelection } from '../../core/generator/domain-evidence.js';
+import {
+  readGenerationSnapshot,
+  REQUIRED_ANALYSIS_ARTIFACTS,
+  type GenerationManifest,
+} from '../../core/runtime/analysis-generation.js';
 
 // ============================================================================
 // TYPES
@@ -101,7 +107,15 @@ interface AnalysisData {
   depGraph?: DependencyGraphResult;
   age: number;
   timestamp: string;
+  generationCompatibility: GenerationManifest['compatibility'];
 }
+
+export type GenerateAnalysisLoadResult =
+  | { state: 'ok'; data: AnalysisData }
+  | { state: 'analysis-unavailable' }
+  | { state: 'analysis-changed'; message: string };
+
+type JsonArtifactReader = <T>(path: string, label: string) => Promise<T | null>;
 
 export function normalizeGenerateOptions(options: Partial<ExtendedGenerateOptions>): ExtendedGenerateOptions {
   return {
@@ -248,37 +262,66 @@ export async function renderSpecPreviewDiff(projectRoot: string, previewRoot: st
 /**
  * Load analysis data from disk
  */
-async function loadAnalysis(analysisPath: string): Promise<AnalysisData | null> {
+export async function loadAnalysis(
+  analysisPath: string,
+  readArtifact: JsonArtifactReader = readJsonFile,
+): Promise<GenerateAnalysisLoadResult> {
   try {
-    const repoStructure = await readJsonFile<RepoStructure>(
-      join(analysisPath, ARTIFACT_REPO_STRUCTURE),
-      ARTIFACT_REPO_STRUCTURE,
+    const snapshot = await readGenerationSnapshot(
+      analysisPath,
+      [...REQUIRED_ANALYSIS_ARTIFACTS],
+      async () => {
+        const repoStructure = await readArtifact<RepoStructure>(
+          join(analysisPath, ARTIFACT_REPO_STRUCTURE), ARTIFACT_REPO_STRUCTURE,
+        );
+        const llmContext = await readArtifact<LLMContext>(
+          join(analysisPath, ARTIFACT_LLM_CONTEXT), ARTIFACT_LLM_CONTEXT,
+        );
+        const depGraph = await readArtifact<DependencyGraphResult>(
+          join(analysisPath, ARTIFACT_DEPENDENCY_GRAPH), ARTIFACT_DEPENDENCY_GRAPH,
+        );
+        // The fingerprint is not consumed by generation, but reading it inside
+        // the snapshot makes the complete required artifact set part of this
+        // attempt instead of merely trusting that its path exists.
+        const fingerprint = await readArtifact<Record<string, unknown>>(
+          join(analysisPath, ARTIFACT_FINGERPRINT), ARTIFACT_FINGERPRINT,
+        );
+        const stats = await stat(join(analysisPath, ARTIFACT_REPO_STRUCTURE));
+        return {
+          repoStructure,
+          llmContext,
+          depGraph,
+          fingerprint,
+          age: Date.now() - stats.mtime.getTime(),
+          timestamp: stats.mtime.toISOString(),
+        };
+      },
     );
-    if (!repoStructure) return null;
 
-    const llmContext = await readJsonFile<LLMContext>(
-      join(analysisPath, ARTIFACT_LLM_CONTEXT),
-      ARTIFACT_LLM_CONTEXT,
-    ) ?? {
-      phase1_survey: { purpose: 'Initial survey', files: [], estimatedTokens: 0 },
-      phase2_deep: { purpose: 'Deep analysis', files: [], totalTokens: 0 },
-      phase3_validation: { purpose: 'Validation', files: [], totalTokens: 0 },
+    if (snapshot.state !== 'ok') return snapshot;
+    const value = snapshot.value;
+    if (!value.repoStructure) return { state: 'analysis-unavailable' };
+    if (snapshot.compatibility === 'manifest' && (!value.llmContext || !value.depGraph || !value.fingerprint)) {
+      return { state: 'analysis-unavailable' };
+    }
+    return {
+      state: 'ok',
+      data: {
+        repoStructure: value.repoStructure,
+        llmContext: value.llmContext ?? {
+          phase1_survey: { purpose: 'Initial survey', files: [], estimatedTokens: 0 },
+          phase2_deep: { purpose: 'Deep analysis', files: [], totalTokens: 0 },
+          phase3_validation: { purpose: 'Validation', files: [], totalTokens: 0 },
+        },
+        depGraph: value.depGraph ?? undefined,
+        age: value.age,
+        timestamp: value.timestamp,
+        generationCompatibility: snapshot.compatibility,
+      },
     };
-
-    const depGraph = await readJsonFile<DependencyGraphResult>(
-      join(analysisPath, ARTIFACT_DEPENDENCY_GRAPH),
-      ARTIFACT_DEPENDENCY_GRAPH,
-    ) ?? undefined;
-
-    // Get analysis age
-    const stats = await stat(join(analysisPath, ARTIFACT_REPO_STRUCTURE));
-    const age = Date.now() - stats.mtime.getTime();
-    const timestamp = stats.mtime.toISOString();
-
-    return { repoStructure, llmContext, depGraph, age, timestamp };
   } catch (error) {
     logger.warning(`Failed to load analysis: ${(error as Error).message}`);
-    return null;
+    return { state: 'analysis-unavailable' };
   }
 }
 
@@ -530,15 +573,23 @@ Each spec.md follows OpenSpec conventions:
 
       const analysisData = await loadAnalysis(analysisPath);
 
-      if (!analysisData) {
+      if (analysisData.state === 'analysis-changed') {
+        logger.error(analysisData.message);
+        process.exitCode = 1;
+        return;
+      }
+      if (analysisData.state === 'analysis-unavailable') {
         logger.error('No analysis found. Run "openlore analyze" first.');
         process.exitCode = 1;
         return;
       }
 
-      const { repoStructure, llmContext, depGraph, age } = analysisData;
+      const { repoStructure, llmContext, depGraph, age, generationCompatibility } = analysisData.data;
 
       logger.discovery(`Using analysis from ${formatAge(age)}`);
+      if (generationCompatibility === 'legacy') {
+        logger.warning('Using a legacy analysis without a generation manifest; run "openlore analyze" to upgrade its coherence guarantee.');
+      }
       logger.info('Files analyzed', repoStructure.statistics.analyzedFiles);
       logger.info('Domains detected', repoStructure.domains.map(d => d.name).join(', ') || 'None');
       logger.blank();
