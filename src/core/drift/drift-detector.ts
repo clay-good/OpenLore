@@ -46,6 +46,16 @@ export interface DriftDetectorOptions {
   maxLlmCalls?: number;
   /** Optional ADR map for ADR drift detection. */
   adrMap?: ADRMap;
+  /**
+   * How far memory-staleness findings are enumerated
+   * (change: scope-advisory-noise-to-touched-code):
+   *   - `changed-files` (default): enumerate only anchors whose file is in the
+   *     reviewed changeset; the rest are counted as `memoryOutOfScope`.
+   *   - `repository`: enumerate every drifted anchor (today's behavior).
+   * A run with an empty changeset is repository-wide either way — there is no
+   * scope to narrow to, so nothing is hidden.
+   */
+  memoryScope?: 'changed-files' | 'repository';
 }
 
 // ============================================================================
@@ -659,6 +669,7 @@ export async function detectMemoryStaleness(rootPath: string): Promise<DriftIssu
       loadDecisionStore(rootPath),
       loadMemoryStore(rootPath),
     ]);
+
     const issues: DriftIssue[] = [];
 
     for (const d of decisionStore.decisions) {
@@ -693,6 +704,32 @@ export async function detectMemoryStaleness(rootPath: string): Promise<DriftIssu
   } finally {
     ctx.close();
   }
+}
+
+/**
+ * Partition memory-staleness findings into those anchored inside the reviewed
+ * scope and a count of those outside it
+ * (change: scope-advisory-noise-to-touched-code).
+ *
+ * Partitioning happens AFTER the freshness verdict, never before: the same
+ * anchor gets the same verdict whether it is enumerated or counted. Scope
+ * changes what is shown, never what is true.
+ *
+ * Fails open — a finding whose file cannot be attributed (empty `filePath`) is
+ * enumerated rather than silently folded into a count.
+ */
+export function scopeMemoryFindings(
+  issues: DriftIssue[],
+  scopeFiles: Set<string>,
+): { inScope: DriftIssue[]; outOfScope: number } {
+  if (scopeFiles.size === 0) return { inScope: issues, outOfScope: 0 };
+  const inScope: DriftIssue[] = [];
+  let outOfScope = 0;
+  for (const issue of issues) {
+    if (!issue.filePath || scopeFiles.has(issue.filePath)) inScope.push(issue);
+    else outOfScope++;
+  }
+  return { inScope, outOfScope };
 }
 
 /** Build a DriftIssue for a stale (orphaned/drifted) memory. */
@@ -753,8 +790,19 @@ export async function detectDrift(options: DriftDetectorOptions): Promise<DriftR
   // Code-anchored memory staleness (full-state scan, independent of the diff).
   const memoryStaleness = await detectMemoryStaleness(rootPath);
 
+  // …then scoped to the code under review. The scan stays repository-wide (a
+  // memory is stale because the code moved, whatever this commit touched), but a
+  // review of five files should not read seventeen findings about the other
+  // ninety-five: out-of-scope anchors are counted, not enumerated
+  // (change: scope-advisory-noise-to-touched-code).
+  const scopeFiles = (options.memoryScope ?? 'changed-files') === 'repository'
+    ? new Set<string>()
+    : new Set(changedFiles.flatMap(f => (f.oldPath ? [f.path, f.oldPath] : [f.path])));
+  const { inScope: scopedMemoryStaleness, outOfScope: memoryOutOfScope } =
+    scopeMemoryFindings(memoryStaleness, scopeFiles);
+
   // Combine all issues
-  let allIssues = [...gaps, ...stale, ...uncovered, ...orphaned, ...adrGaps, ...adrOrphanedIssues, ...memoryStaleness];
+  let allIssues = [...gaps, ...stale, ...uncovered, ...orphaned, ...adrGaps, ...adrOrphanedIssues, ...scopedMemoryStaleness];
 
   // Apply domain filter if provided — exclude null-domain issues too,
   // since the user only wants results for the specified domains
@@ -817,6 +865,7 @@ export async function detectDrift(options: DriftDetectorOptions): Promise<DriftR
       adrOrphaned: dedupedIssues.filter(i => i.kind === 'adr-orphaned').length,
       memoryDrifted: dedupedIssues.filter(i => i.kind === 'memory-drifted').length,
       memoryOrphaned: dedupedIssues.filter(i => i.kind === 'memory-orphaned').length,
+      memoryOutOfScope,
       total: dedupedIssues.length,
     },
     hasDrift,

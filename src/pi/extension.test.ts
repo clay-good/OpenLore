@@ -20,6 +20,15 @@ it('frames every Pi before-agent corpus block with the shared provenance boundar
   expect(source).toContain('renderInjectionBlock(result, cfg)');
 });
 
+it('applies the Pi intent gate before daemon work and discloses every withheld path', async () => {
+  const source = await readFile(new URL('./extension.ts', import.meta.url), 'utf8');
+  const hook = source.slice(source.indexOf("pi.on('before_agent_start'"));
+  expect(hook.indexOf('classifyTurnIntent(prompt)')).toBeLessThan(hook.indexOf('await getDaemon(sessionCwd)'));
+  expect(hook).toContain("pointerLineFor('empty-prompt')");
+  expect(hook).toContain("pointerLineFor('management-intent')");
+  expect(hook).toContain("pointerLineFor('error')");
+});
+
 it('refuses a pre-existing narrow daemon with actionable remediation', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'openlore-pi-daemon-'));
   let daemon = await startServe({

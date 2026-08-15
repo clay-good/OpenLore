@@ -111,6 +111,17 @@ function displaySummary(result: DriftResult): void {
   if (result.summary.orphanedSpecs > 0) parts.push(`Orphaned: ${result.summary.orphanedSpecs}`);
   if (result.summary.adrGaps > 0) parts.push(`ADR gaps: ${result.summary.adrGaps}`);
   if (result.summary.adrOrphaned > 0) parts.push(`ADR orphaned: ${result.summary.adrOrphaned}`);
+  if (result.summary.memoryDrifted > 0) parts.push(`Memory drifted: ${result.summary.memoryDrifted}`);
+  if (result.summary.memoryOrphaned > 0) parts.push(`Memory orphaned: ${result.summary.memoryOrphaned}`);
+  // Counted, never listed: these anchors drifted outside the code under review.
+  // Naming the switch keeps the omission auditable rather than silent
+  // (change: scope-advisory-noise-to-touched-code).
+  if (result.summary.memoryOutOfScope > 0) {
+    parts.push(
+      `Memory drifted outside this change: ${result.summary.memoryOutOfScope} ` +
+      `(not listed; --memory-scope repository to enumerate)`
+    );
+  }
 
   if (parts.length === 0) {
     console.log('     No issues found');
@@ -303,6 +314,11 @@ export const driftCommand = new Command('drift')
     'After detecting drift, list the test files that cover affected domains',
     false
   )
+  .option(
+    '--memory-scope <scope>',
+    'Enumerate stale memories for the changed files only, or repository-wide (changed-files | repository)',
+    'changed-files'
+  )
   .addHelpText(
     'after',
     `
@@ -344,6 +360,7 @@ Pre-commit hook:
       installHook: options.installHook ?? false,
       uninstallHook: options.uninstallHook ?? false,
       suggestTests: options.suggestTests ?? false,
+      memoryScope: options.memoryScope === 'repository' ? 'repository' : 'changed-files',
       failOn: (options.failOn as DriftSeverity) ?? 'warning',
       maxFiles: (() => {
         // Commander routes --max-files to parent when both parent and subcommand define it.
@@ -497,7 +514,7 @@ Pre-commit hook:
             totalChangedFiles: 0,
             specRelevantFiles: 0,
             issues: [],
-            summary: { gaps: 0, stale: 0, uncovered: 0, orphanedSpecs: 0, adrGaps: 0, adrOrphaned: 0, memoryDrifted: 0, memoryOrphaned: 0, total: 0 },
+            summary: { gaps: 0, stale: 0, uncovered: 0, orphanedSpecs: 0, adrGaps: 0, adrOrphaned: 0, memoryDrifted: 0, memoryOrphaned: 0, memoryOutOfScope: 0, total: 0 },
             hasDrift: false,
             duration: Date.now() - startTime,
             mode: 'static',
@@ -573,6 +590,7 @@ Pre-commit hook:
         llm,
         baseRef: gitResult.resolvedBase,
         adrMap: adrMap ?? undefined,
+        memoryScope: opts.memoryScope,
       });
 
       // Fill in the base ref and actual total count (before --max-files truncation)

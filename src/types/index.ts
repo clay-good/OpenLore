@@ -144,6 +144,14 @@ export interface ContextInjectionConfig {
   relevanceMinFanIn?: number;
   /** Relevance gate: minimum top match score (semantic/hybrid scale only) to clear the gate. Default 0.3. */
   relevanceMinScore?: number;
+  /**
+   * Turn-intent gate: withhold the briefing on repository-management turns
+   * (push, open/merge a PR, cut a release, write the changelog) before any
+   * structural lookup runs. Deterministic and fail-open — a turn is management
+   * only on positive evidence with no code-work signal. Default true; set false
+   * to orient on every turn as before.
+   */
+  intentGate?: boolean;
 }
 
 /** Named high-risk patterns the blast-radius hook may block on (opt-in). */
@@ -465,6 +473,8 @@ export interface DriftOptions extends GlobalOptions {
   failOn: DriftSeverity;
   maxFiles: number;
   suggestTests: boolean;
+  /** Enumerate stale memories for the reviewed changeset only (default) or repository-wide. */
+  memoryScope: 'changed-files' | 'repository';
 }
 
 export interface DriftIssue {
@@ -494,6 +504,13 @@ export interface DriftResult {
     adrOrphaned: number;
     memoryDrifted: number;
     memoryOrphaned: number;
+    /**
+     * Drifted/orphaned anchors OUTSIDE the reviewed scope: counted, not
+     * enumerated (change: scope-advisory-noise-to-touched-code). Their verdicts
+     * are computed identically to the enumerated ones — only the presentation
+     * differs. 0 on an unscoped, repository-wide run.
+     */
+    memoryOutOfScope: number;
     total: number;
   };
   hasDrift: boolean;

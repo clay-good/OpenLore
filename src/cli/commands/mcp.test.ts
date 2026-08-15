@@ -1021,7 +1021,7 @@ function makeDriftResult(overrides: Partial<DriftResult> = {}): DriftResult {
     totalChangedFiles: 1,
     specRelevantFiles: 1,
     issues: [],
-    summary: { gaps: 0, stale: 0, uncovered: 0, orphanedSpecs: 0, adrGaps: 0, adrOrphaned: 0, memoryDrifted: 0, memoryOrphaned: 0, total: 0 },
+    summary: { gaps: 0, stale: 0, uncovered: 0, orphanedSpecs: 0, adrGaps: 0, adrOrphaned: 0, memoryDrifted: 0, memoryOrphaned: 0, memoryOutOfScope: 0, total: 0 },
     hasDrift: false,
     duration: 42,
     mode: 'static',
@@ -1125,7 +1125,7 @@ describe('handleCheckSpecDrift', () => {
         changedLines: { added: 20, removed: 5 },
         suggestion: 'Update the auth spec to reflect these changes',
       }],
-      summary: { gaps: 1, stale: 0, uncovered: 0, orphanedSpecs: 0, adrGaps: 0, adrOrphaned: 0, memoryDrifted: 0, memoryOrphaned: 0, total: 1 },
+      summary: { gaps: 1, stale: 0, uncovered: 0, orphanedSpecs: 0, adrGaps: 0, adrOrphaned: 0, memoryDrifted: 0, memoryOrphaned: 0, memoryOutOfScope: 0, total: 1 },
       totalChangedFiles: 1,
     }));
     const result = await handleCheckSpecDrift(driftDir) as DriftResult;

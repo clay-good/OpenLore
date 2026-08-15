@@ -26,6 +26,8 @@ export interface ResolvedInjectionConfig {
   relevanceMinMatches: number;
   relevanceMinFanIn: number;
   relevanceMinScore: number;
+  /** Withhold the briefing on repository-management turns. Default on. */
+  intentGate: boolean;
 }
 
 /** Documented defaults — used when `.openlore/config.json` omits `contextInjection`. */
@@ -35,18 +37,115 @@ export const INJECTION_DEFAULTS: ResolvedInjectionConfig = {
   relevanceMinMatches: 2,
   relevanceMinFanIn: 2,
   relevanceMinScore: 0.3,
+  intentGate: true,
 };
 
 /** Smallest budget that can carry the framed task and a factual stale-index line. */
 export const MIN_INJECTION_TOKEN_BUDGET = 68;
 
 /**
- * The single pointer line emitted whenever a full block is not warranted
- * (weak match, no graph, error, or empty prompt). Informational, not coercive.
+ * The generic pointer line: structural context exists, this turn did not get a
+ * block. Informational, not coercive. Retained as the neutral form (and for
+ * callers that do not track a cause); the emitted lines come from
+ * {@link pointerLineFor}, which states WHICH cause withheld the briefing.
  */
 export const POINTER_LINE =
   '[OpenLore] Structural context is available — call `orient` with your task for a deterministic ' +
   'briefing (relevant functions, callers, insertion points). Informational; ignore if not useful.';
+
+/**
+ * Why a briefing was withheld. Stable and machine-readable: telemetry counts it,
+ * and the agent-visible pointer line states it.
+ */
+export type WithholdReason =
+  | 'management-intent'
+  | 'weak-relevance'
+  | 'no-graph'
+  | 'empty-prompt'
+  | 'error';
+
+/**
+ * The agent-visible pointer line for each withhold cause.
+ *
+ * Absence must never be ambiguous. An agent that cannot tell "nothing relevant
+ * was found" from "no lookup was performed" learns to read silence as noise, and
+ * the one turn where the briefing mattered is lost with the rest. Each variant
+ * therefore states the cause AND names the manual call, so a misclassified turn
+ * costs the pre-computed briefing — never the knowledge that one was skipped.
+ */
+export function pointerLineFor(reason: WithholdReason): string {
+  const call = 'Call `orient "<your task>"` if you want the briefing now.';
+  switch (reason) {
+    case 'management-intent':
+      return '[OpenLore] No briefing: this turn reads as repository management, not code work, ' +
+        `so no structural lookup was performed. ${call}`;
+    case 'weak-relevance':
+      return '[OpenLore] No briefing: a lookup ran, but nothing in the graph matched this turn ' +
+        `strongly enough to be worth the context. ${call}`;
+    case 'no-graph':
+      return '[OpenLore] No briefing: no analysis index is available for this repository. ' +
+        'Run `openlore analyze` to build one, then orient will work.';
+    case 'empty-prompt':
+      return '[OpenLore] No briefing: no task text was supplied to orient on. ' + call;
+    case 'error':
+      return '[OpenLore] No briefing: orientation failed for this turn (the index may be mid-rebuild). ' +
+        `${call}`;
+  }
+}
+
+/**
+ * Repository/process management objects. A turn ABOUT one of these — pushing,
+ * opening or merging a PR, releasing, writing a changelog — needs no structural
+ * briefing, however many of its words happen to match indexed symbols.
+ */
+const MANAGEMENT_PATTERNS: RegExp[] = [
+  /\bpull request\b|\bPRs?\b/i,
+  /\bpush(ed|ing)?\b/i,
+  /\bmerge[ds]?\b|\bmerging\b/i,
+  /\brebas(e|ed|ing)\b/i,
+  /\bcherry[- ]pick\b/i,
+  /\bchangelog\b|\brelease notes?\b/i,
+  /\brelease\b|\bcut a\b|\btag(ged|ging)?\b/i,
+  /\bcommit(s|ted|ting)?\b/i,
+  /\bbranch(es)?\b/i,
+  /\bgit status\b|\bstash\b/i,
+];
+
+/**
+ * Code-work objects. Any of these present means the turn touches code, so the
+ * intent gate steps aside even when management words are also present ("fix the
+ * failing test, then push").
+ */
+const CODE_WORK_PATTERNS: RegExp[] = [
+  /\.[a-z]{1,4}\b(?<!\.md)/i,                 // a file extension (prose .md excluded)
+  /\bsrc\/|\blib\/|\bpath\b/i,
+  /\bfunction\b|\bmethod\b|\bclass\b|\bmodule\b|\bcomponent\b/i,
+  /\btests?\b|\bspec\b|\bcoverage\b/i,
+  /\bbug\b|\berror\b|\bexception\b|\bcrash(es|ed)?\b|\bfail(s|ed|ing)?\b/i,
+  /\bimplement\b|\brefactor\b|\brename\b|\bdebug\b|\boptimi[sz]e\b/i,
+  /\btype\b|\binterface\b|\bschema\b|\bapi\b|\bendpoint\b/i,
+];
+
+/** What kind of work a turn is doing. */
+export type TurnIntent = 'code-work' | 'repository-management';
+
+/**
+ * Deterministic turn-intent classification: pure, local, no LLM, no new score.
+ *
+ * FAILS OPEN by construction — a turn is repository management only when it
+ * matches a management pattern AND no code-work pattern. Everything else,
+ * including everything unrecognized, is treated as code work and keeps today's
+ * behavior. The gate can therefore only withhold on positive evidence, never on
+ * an absence of recognition.
+ */
+export function classifyTurnIntent(prompt: string): TurnIntent {
+  const text = (prompt ?? '').trim();
+  if (!text) return 'code-work';
+  const management = MANAGEMENT_PATTERNS.some(p => p.test(text));
+  if (!management) return 'code-work';
+  const codeWork = CODE_WORK_PATTERNS.some(p => p.test(text));
+  return codeWork ? 'code-work' : 'repository-management';
+}
 
 const BLOCK_FOOTER = '(From OpenLore. Call `orient` for the full briefing, or ignore this.)';
 
@@ -70,6 +169,7 @@ export function resolveInjectionConfig(ci: ContextInjectionConfig | undefined): 
       typeof ci?.relevanceMinScore === 'number' && ci.relevanceMinScore >= 0
         ? ci.relevanceMinScore
         : INJECTION_DEFAULTS.relevanceMinScore,
+    intentGate: typeof ci?.intentGate === 'boolean' ? ci.intentGate : INJECTION_DEFAULTS.intentGate,
   };
 }
 
@@ -111,6 +211,9 @@ export interface LeanOrientResult {
   task?: string;
   searchMode?: string;
   error?: string;
+  /** Set by `notReadyResult` when the index is absent/unbuilt (reason `index-absent`). */
+  notReady?: boolean;
+  reason?: string;
   relevantFiles?: string[];
   relevantFunctions?: OrientFn[];
   specDomains?: Array<string | { domain?: string; provenance?: ServedContentProvenance }>;
@@ -135,6 +238,8 @@ export interface RelevanceGateEvaluation {
   passes: boolean;
   passedCriteria: string[];
   failedCriteria: string[];
+  /** Present when `passes` is false: why the briefing was withheld. */
+  reason?: WithholdReason;
 }
 
 function containsExactIdentifier(prompt: string, name: string): boolean {
@@ -163,7 +268,15 @@ export function evaluateRelevanceGate(
   cfg: ResolvedInjectionConfig,
 ): RelevanceGateEvaluation {
   if (result.error) {
-    return { passes: false, passedCriteria: [], failedCriteria: ['orient-error'] };
+    // An absent index is a distinct, actionable cause: the remedy is `openlore
+    // analyze`, not a retry. Report it as such rather than as a generic failure.
+    const noGraph = result.notReady === true || result.reason === 'index-absent';
+    return {
+      passes: false,
+      passedCriteria: [],
+      failedCriteria: [noGraph ? 'no-graph' : 'orient-error'],
+      reason: noGraph ? 'no-graph' : 'error',
+    };
   }
   const fns = Array.isArray(result.relevantFunctions)
     ? result.relevantFunctions.filter((f): f is OrientFn => !!f && typeof f === 'object')
@@ -201,10 +314,12 @@ export function evaluateRelevanceGate(
   if (keywordMode) criteria['keyword-rank-evidence'] = keywordRankEvidence;
   const passedCriteria = Object.entries(criteria).filter(([, passed]) => passed).map(([name]) => name);
   const failedCriteria = Object.entries(criteria).filter(([, passed]) => !passed).map(([name]) => name);
+  const passes = exactIdentifierMention || (enoughMatches && (structuralCentrality || hybridScore || keywordRankEvidence));
   return {
-    passes: exactIdentifierMention || (enoughMatches && (structuralCentrality || hybridScore || keywordRankEvidence)),
+    passes,
     passedCriteria,
     failedCriteria,
+    ...(passes ? {} : { reason: 'weak-relevance' as const }),
   };
 }
 

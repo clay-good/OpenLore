@@ -87,7 +87,7 @@ function driftResult(issues: DriftResult['issues']): DriftResult {
   return {
     timestamp: 't', baseRef: 'HEAD', totalChangedFiles: 1, specRelevantFiles: 1,
     issues,
-    summary: { gaps: 0, stale: 0, uncovered: 0, orphanedSpecs: 0, adrGaps: 0, adrOrphaned: 0, memoryDrifted: 0, memoryOrphaned: 0, total: issues.length },
+    summary: { gaps: 0, stale: 0, uncovered: 0, orphanedSpecs: 0, adrGaps: 0, adrOrphaned: 0, memoryDrifted: 0, memoryOrphaned: 0, memoryOutOfScope: 0, total: issues.length },
     hasDrift: issues.length > 0, duration: 1, mode: 'static',
   };
 }

@@ -17,7 +17,10 @@ import {
   renderInjectionBlock,
   extractPrompt,
   buildInjection,
+  classifyTurnIntent,
+  pointerLineFor,
   type ResolvedInjectionConfig,
+  type WithholdReason,
 } from './orient-inject.js';
 
 const cfg = (over: Partial<ResolvedInjectionConfig> = {}): ResolvedInjectionConfig => ({
@@ -377,12 +380,12 @@ describe('buildInjection (fail-open integration)', () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  it('emits the pointer line for an empty prompt', async () => {
-    expect(await buildInjection(dir, '')).toBe(POINTER_LINE);
+  it('emits the empty-prompt pointer line for an empty prompt', async () => {
+    expect(await buildInjection(dir, '')).toBe(pointerLineFor('empty-prompt'));
   });
 
-  it('emits the pointer line when there is no analysis graph (never throws)', async () => {
-    expect(await buildInjection(dir, 'some real task')).toBe(POINTER_LINE);
+  it('emits the no-graph pointer line when there is no analysis graph (never throws)', async () => {
+    expect(await buildInjection(dir, 'some real task')).toBe(pointerLineFor('no-graph'));
   });
 
   it('emits nothing when injection is disabled in config', async () => {
@@ -393,5 +396,132 @@ describe('buildInjection (fail-open integration)', () => {
       'utf8'
     );
     expect(await buildInjection(dir, 'some real task')).toBe('');
+  });
+});
+
+// ============================================================================
+// Turn-intent gate (change: scope-advisory-noise-to-touched-code)
+// ============================================================================
+
+describe('classifyTurnIntent', () => {
+  const management = [
+    'push and open the PR',
+    'the PR was merged',
+    'cut a release',
+    'write the changelog',
+    'rebase onto main',
+    'commit',
+    'commit and push',
+    'create the PRs',
+    'what branches do I have?',
+  ];
+  it.each(management)('classifies %j as repository management', prompt => {
+    expect(classifyTurnIntent(prompt)).toBe('repository-management');
+  });
+
+  const codeWork = [
+    'fix the failing test in src/auth.ts',
+    'why does the parser drop the last token?',
+    'refactor handleOrient into two functions',
+    'add a schema for the config block',
+    'the endpoint returns 500 on empty input',
+    'explain how injection works',                  // no management word at all
+  ];
+  it.each(codeWork)('classifies %j as code work', prompt => {
+    expect(classifyTurnIntent(prompt)).toBe('code-work');
+  });
+
+  it('treats a mixed turn as code work — code-work evidence overrides management words', () => {
+    expect(classifyTurnIntent('fix the failing test, then push')).toBe('code-work');
+    expect(classifyTurnIntent('rename resolveWiredPreset in src/cli/install/index.ts and commit'))
+      .toBe('code-work');
+  });
+
+  it('fails open: an unrecognized turn keeps today\'s path', () => {
+    expect(classifyTurnIntent('hmm')).toBe('code-work');
+    expect(classifyTurnIntent('')).toBe('code-work');
+    expect(classifyTurnIntent('do the thing we discussed')).toBe('code-work');
+  });
+});
+
+describe('pointerLineFor (absence is never ambiguous)', () => {
+  const reasons: WithholdReason[] = [
+    'management-intent', 'weak-relevance', 'no-graph', 'empty-prompt', 'error',
+  ];
+
+  it('emits a non-empty, OpenLore-attributed line for every cause', () => {
+    for (const reason of reasons) {
+      const line = pointerLineFor(reason);
+      expect(line.length).toBeGreaterThan(0);
+      expect(line.startsWith('[OpenLore]')).toBe(true);
+    }
+  });
+
+  it('emits a distinct line per cause, so no two absences read alike', () => {
+    const lines = reasons.map(pointerLineFor);
+    expect(new Set(lines).size).toBe(reasons.length);
+    expect(lines).not.toContain(POINTER_LINE);
+  });
+
+  it('names the manual orientation call on every recoverable cause', () => {
+    for (const reason of reasons.filter(r => r !== 'no-graph')) {
+      expect(pointerLineFor(reason)).toContain('orient');
+    }
+    // no-graph is the one cause `orient` cannot fix — it names the real remedy.
+    expect(pointerLineFor('no-graph')).toContain('openlore analyze');
+  });
+});
+
+describe('buildInjection intent gate', () => {
+  let dir: string;
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'openlore-intent-'));
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const writeConfig = async (ci: Record<string, unknown>) => {
+    await mkdir(join(dir, '.openlore'), { recursive: true });
+    await writeFile(
+      join(dir, '.openlore', 'config.json'),
+      JSON.stringify({ contextInjection: ci }),
+      'utf8'
+    );
+  };
+
+  it('withholds on a management turn, before any structural lookup', async () => {
+    // No analysis exists here, so an ungated turn would report `no-graph`.
+    // Getting `management-intent` proves the gate ran ahead of the lookup.
+    expect(await buildInjection(dir, 'push and open the PR'))
+      .toBe(pointerLineFor('management-intent'));
+  });
+
+  it('reports the withhold reason to the gate-evaluation callback', async () => {
+    const seen: Array<string | undefined> = [];
+    await buildInjection(dir, 'cut a release', e => seen.push(e.reason));
+    expect(seen).toEqual(['management-intent']);
+  });
+
+  it('leaves a code-work turn on the existing path', async () => {
+    expect(await buildInjection(dir, 'fix the failing test in src/auth.ts'))
+      .toBe(pointerLineFor('no-graph'));
+  });
+
+  it('can be switched off, restoring the pre-gate behavior', async () => {
+    await writeConfig({ intentGate: false });
+    expect(await buildInjection(dir, 'push and open the PR'))
+      .toBe(pointerLineFor('no-graph'));
+  });
+
+  it('is never silent while injection is enabled — only mode "off" emits nothing', async () => {
+    const prompts = ['', 'push and open the PR', 'fix the failing test in src/auth.ts'];
+    for (const prompt of prompts) {
+      expect((await buildInjection(dir, prompt)).length).toBeGreaterThan(0);
+    }
+    await writeConfig({ mode: 'off' });
+    for (const prompt of prompts) {
+      expect(await buildInjection(dir, prompt)).toBe('');
+    }
   });
 });
