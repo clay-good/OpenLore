@@ -89,19 +89,42 @@ const CALL_GRAPH = {
 
 vi.mock('../../core/analyzer/artifact-generator.js', () => ({
   AnalysisArtifactGenerator: vi.fn().mockImplementation(function (this: unknown) {
+    const artifacts = {
+      repoStructure: {
+        architecture: { pattern: 'unknown' }, domains: [], uiComponents: [],
+        schemas: [], routeInventory: { total: 0, byMethod: {}, byFramework: {}, routes: [] },
+        middleware: [], envVars: [],
+      },
+      llmContext: { callGraph: CALL_GRAPH, signatures: [] },
+    };
     Object.assign(this as object, {
-      generateAndSave: vi.fn().mockResolvedValue({
-        repoStructure: {
-          architecture: { pattern: 'unknown' }, domains: [], uiComponents: [],
-          schemas: [], routeInventory: { total: 0, byMethod: {}, byFramework: {}, routes: [] },
-          middleware: [], envVars: [],
-        },
-        llmContext: { callGraph: CALL_GRAPH, signatures: [] },
-      }),
+      generate: vi.fn().mockResolvedValue(artifacts),
+      generateAndSave: vi.fn().mockResolvedValue(artifacts),
     });
   }),
   repoStructureToRepoMap: vi.fn().mockReturnValue({}),
 }));
+
+// These tests exercise the embedding choice after analysis, not cross-process
+// ownership or artifact serialization. Keep the hardened publication seams
+// transparent while preserving their call shape.
+vi.mock('../../core/runtime/analysis-ownership.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../core/runtime/analysis-ownership.js')>();
+  return {
+    ...actual,
+    acquireAnalysisOwnership: vi.fn().mockResolvedValue({
+      state: 'owned',
+      waitedMs: 0,
+      update: vi.fn().mockResolvedValue(undefined),
+      release: vi.fn().mockResolvedValue(undefined),
+    }),
+  };
+});
+
+vi.mock('../../core/runtime/advisory-lock.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../core/runtime/advisory-lock.js')>();
+  return { ...actual, withAnalysisLock: vi.fn(async (_dir, fn) => fn()) };
+});
 
 vi.mock('../../core/analyzer/architecture-writer.js', () => ({
   buildArchitectureOverview: vi.fn().mockReturnValue({}),
