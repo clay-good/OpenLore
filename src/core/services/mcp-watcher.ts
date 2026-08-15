@@ -254,6 +254,8 @@ export class McpWatcher {
   private debounceTimer?: ReturnType<typeof setTimeout>;
   private maxBatchTimer?: ReturnType<typeof setTimeout>;
   private running = false;                           // single-flight for the signature flush
+  private flushPromise?: Promise<void>;              // lets stop() join the active flush
+  private stopping = false;                          // reject events once shutdown begins
   private vcsBulkFlag = false;                       // set by the .git ref watcher
 
   // ── Embedding lane (Step 4 — decoupled, lower priority) ─────────────────────
@@ -263,6 +265,7 @@ export class McpWatcher {
   private embedNodes = new Map<string, FunctionNode>(); // id → node awaiting embed
   private embedTimer?: ReturnType<typeof setTimeout>;
   private embedRunning = false;
+  private embedPromise?: Promise<void>;              // lets stop() join vector persistence
   private lastEmbedContext?: CachedContext;
 
   constructor(options: McpWatcherOptions) {
@@ -286,6 +289,7 @@ export class McpWatcher {
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
   async start(): Promise<void> {
+    this.stopping = false;
     // Auto-degrade live embedding on very large trees (Step 4). Counting is
     // bounded — it stops as soon as the ceiling is exceeded.
     if (this.embed) {
@@ -400,27 +404,33 @@ export class McpWatcher {
   }
 
   async stop(): Promise<void> {
+    this.stopping = true;
     if (this.debounceTimer) clearTimeout(this.debounceTimer);
     if (this.maxBatchTimer) clearTimeout(this.maxBatchTimer);
     if (this.embedTimer) clearTimeout(this.embedTimer);
     if (this.graphStaleTimer) clearTimeout(this.graphStaleTimer);
     this.debounceTimer = this.maxBatchTimer = this.embedTimer = this.graphStaleTimer = undefined;
-    // Best-effort: drain anything still queued so a save/delete right before
-    // shutdown is not lost. Deletions first, then changes (same order as flush).
-    if (!this.running) {
-      if (this.pendingDeletions.size > 0) {
-        const dels = Array.from(this.pendingDeletions);
-        this.pendingDeletions.clear();
-        try { await this.handleDeletions(dels); } catch { /* ignore */ }
-      }
-      if (this.pending.size > 0) {
-        const batch = Array.from(this.pending);
-        this.pending.clear();
-        try { await this.handleBatch(batch, { syncFlush: true }); } catch { /* ignore */ }
-      }
-    }
+    // Close event sources before joining the active flush. Once close resolves,
+    // the stopping guard below makes the pending sets a finite shutdown queue.
     await this.fsWatcher?.close();
     await this.gitWatcher?.close();
+    this.fsWatcher = this.gitWatcher = undefined;
+    await this.flushPromise;
+    await this.embedPromise;
+
+    // Drain anything queued immediately before shutdown. Deletions first, then
+    // changes (same order as flush). stop() does not return while either can
+    // still publish analysis artifacts or release their advisory lock.
+    if (this.pendingDeletions.size > 0) {
+      const dels = Array.from(this.pendingDeletions);
+      this.pendingDeletions.clear();
+      try { await this.handleDeletions(dels); } catch { /* ignore */ }
+    }
+    if (this.pending.size > 0) {
+      const batch = Array.from(this.pending);
+      this.pending.clear();
+      try { await this.handleBatch(batch, { syncFlush: true }); } catch { /* ignore */ }
+    }
     process.stderr.write('[mcp-watcher] stopped\n');
   }
 
@@ -431,6 +441,7 @@ export class McpWatcher {
    * plus a one-shot hard ceiling so a continuous stream still flushes.
    */
   private enqueue(absPath: string): void {
+    if (this.stopping) return;
     this.pending.add(absPath);
     // A re-create supersedes a pending delete for the same path.
     this.pendingDeletions.delete(absPath);
@@ -439,6 +450,7 @@ export class McpWatcher {
 
   /** Queue a file deletion for the next flush (reuses the same debounce). */
   private enqueueDeletion(absPath: string): void {
+    if (this.stopping) return;
     this.pendingDeletions.add(absPath);
     // A delete supersedes a pending change for the same path.
     this.pending.delete(absPath);
@@ -467,6 +479,7 @@ export class McpWatcher {
 
   /** A .git ref changed — settle, then flush whatever changed as one bulk batch. */
   private onVcsEvent(): void {
+    if (this.stopping) return;
     this.vcsBulkFlag = true;
     if (this.debounceTimer) clearTimeout(this.debounceTimer);
     this.debounceTimer = this.armTimer(() => this.flush(), WATCH_VCS_SETTLE_MS);
@@ -492,17 +505,19 @@ export class McpWatcher {
     this.pendingDeletions.clear();
     this.running = true;
     // Deletions first (remove stale state), then re-index the changed/added files.
-    (async () => {
+    const operation = (async () => {
       if (deletions.length > 0) await this.handleDeletions(deletions);
       if (batch.length > 0) await this.handleBatch(batch);
     })()
-      .catch((err) => process.stderr.write(`[mcp-watcher] error: ${(err as Error).message}\n`))
-      .finally(() => {
-        this.running = false;
-        if (this.pending.size > 0 || this.pendingDeletions.size > 0) {
-          this.debounceTimer = this.armTimer(() => this.flush(), this.debounceMs);
-        }
-      });
+      .catch((err) => { process.stderr.write(`[mcp-watcher] error: ${(err as Error).message}\n`); });
+    this.flushPromise = operation;
+    void operation.finally(() => {
+      if (this.flushPromise === operation) this.flushPromise = undefined;
+      this.running = false;
+      if (!this.stopping && (this.pending.size > 0 || this.pendingDeletions.size > 0)) {
+        this.debounceTimer = this.armTimer(() => this.flush(), this.debounceMs);
+      }
+    });
   }
 
   // ── Core re-index ──────────────────────────────────────────────────────────
@@ -788,6 +803,7 @@ export class McpWatcher {
    * analyze" note rather than retrying — no thundering herd, no loop (B10).
    */
   private scheduleBackgroundRebuild(): void {
+    if (this.stopping) return;
     if (backgroundRebuildTriggered) return;
     backgroundRebuildTriggered = true;
     const cli = process.argv[1];
@@ -860,6 +876,7 @@ export class McpWatcher {
    * the plain signatures-only watcher is byte-for-byte unchanged.
    */
   private scheduleGraphRebuild(reason: GraphStaleReason): boolean {
+    if (this.stopping) return false;
     if (!this.onGraphStale && !this.selfRebuild) return false;
     // Keep the first reason of a coalesced burst — HEAD-change is the more
     // salient cause when both fire together, and it arrives first on a switch.
@@ -988,6 +1005,7 @@ export class McpWatcher {
   // ── Embedding lane (Step 4) ──────────────────────────────────────────────────
 
   private scheduleEmbed(context: CachedContext, changedFiles: ChangedFile[], nodes: FunctionNode[]): void {
+    if (this.stopping) return;
     for (const f of changedFiles) this.embedFiles.set(f.rel, f.content);
     for (const node of nodes) this.embedNodes.set(node.id, node);
     this.lastEmbedContext = context;
@@ -1010,13 +1028,20 @@ export class McpWatcher {
     this.embedFiles.clear();
     this.embedNodes.clear();
     this.embedRunning = true;
+    const operation = (async () => {
+      try {
+        await this.updateVectors(context, changedFiles, nodes);
+      } catch (err) {
+        process.stderr.write(`[mcp-watcher] embed error: ${(err as Error).message}\n`);
+      }
+    })();
+    this.embedPromise = operation;
     try {
-      await this.updateVectors(context, changedFiles, nodes);
-    } catch (err) {
-      process.stderr.write(`[mcp-watcher] embed error: ${(err as Error).message}\n`);
+      await operation;
     } finally {
+      if (this.embedPromise === operation) this.embedPromise = undefined;
       this.embedRunning = false;
-      if (this.embedFiles.size > 0) {
+      if (!this.stopping && this.embedFiles.size > 0) {
         this.embedTimer = this.armTimer(() => void this.runEmbedLane(), this.debounceMs);
       }
     }

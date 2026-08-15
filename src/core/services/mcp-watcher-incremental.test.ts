@@ -166,6 +166,7 @@ describe('McpWatcher — Spec 13.1 freshness', () => {
     for (const f of files) (watcher as unknown as { enqueue(p: string): void }).enqueue(join(root, f));
 
     await until(() => summaries.length > 0);
+    await watcher.stop();
 
     expect(summaries.length).toBe(1);
     expect(summaries[0]).toContain('updated 4 files');
@@ -194,6 +195,7 @@ describe('McpWatcher — Spec 13.1 freshness', () => {
     const watcher = new McpWatcher({ rootPath: root, embed: false, debounceMs: 20, maxBatchMs: 1000 });
     (watcher as unknown as { enqueue(p: string): void }).enqueue(fooAbs);
     await until(() => primeSpy.mock.calls.length > 0);
+    await watcher.stop();
 
     // The flush handed the patched context to the read cache exactly once.
     expect(primeSpy).toHaveBeenCalledTimes(1);
@@ -221,6 +223,7 @@ describe('McpWatcher — Spec 13.1 freshness', () => {
     const watcher = new McpWatcher({ rootPath: root, embed: false, debounceMs: 30, bulkThreshold: 3 });
     for (const f of files) (watcher as unknown as { enqueue(p: string): void }).enqueue(join(root, f));
     await until(() => summaries.length > 0);
+    await watcher.stop();
 
     expect(summaries.length).toBe(1);
     expect(summaries[0]).toContain('coalesced 3 changes');
@@ -243,5 +246,44 @@ describe('McpWatcher — Spec 13.1 freshness', () => {
     expect(foo!.entries.some((e) => e.name === 'delta')).toBe(true);
 
     await watcher.stop();
+  });
+
+  it('stop waits for an in-flight flush and rejects later file events', async () => {
+    await writeContext([]);
+    const fooAbs = join(root, 'shutdown.ts');
+    await writeFile(fooAbs, 'export function beforeStop() {}\n', 'utf-8');
+
+    const watcher = new McpWatcher({ rootPath: root, embed: false, debounceMs: 1 });
+    const internals = watcher as unknown as {
+      enqueue(path: string): void;
+      handleBatch(paths: string[], opts?: { syncFlush?: boolean }): Promise<void>;
+      pending: Set<string>;
+    };
+    const originalHandleBatch = internals.handleBatch.bind(watcher);
+    let enterFlush!: () => void;
+    let releaseFlush!: () => void;
+    const flushEntered = new Promise<void>((resolve) => { enterFlush = resolve; });
+    const flushGate = new Promise<void>((resolve) => { releaseFlush = resolve; });
+    vi.spyOn(internals, 'handleBatch').mockImplementation(async (...args) => {
+      enterFlush();
+      await flushGate;
+      await originalHandleBatch(...args);
+    });
+
+    internals.enqueue(fooAbs);
+    await flushEntered;
+
+    let stopped = false;
+    const stopPromise = watcher.stop().then(() => { stopped = true; });
+    await Promise.resolve();
+    expect(stopped).toBe(false);
+
+    releaseFlush();
+    await stopPromise;
+    expect(stopped).toBe(true);
+    expect(await readFile(contextPath, 'utf-8')).toContain('beforeStop');
+
+    internals.enqueue(join(root, 'after-stop.ts'));
+    expect(internals.pending.size).toBe(0);
   });
 });
