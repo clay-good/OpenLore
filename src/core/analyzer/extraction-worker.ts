@@ -22,10 +22,9 @@
  *    cannot do that reports itself `unhealthy` and is dropped. This is a FAST-FAIL, not the
  *    guarantee: it covers one language, and the pool's per-language unproven-silence guard
  *    is what actually makes an empty result trustworthy.
- *  - **Log relay.** A grammar that is genuinely unavailable warns once per thread. Left
- *    alone that prints N times, interleaves with the parent's spinner, and — because a
- *    worker inherits no console patching — could write to a stdout that is carrying
- *    JSON-RPC. So the logger is redirected to the parent, which dedupes and prints once.
+ *  - **Log relay.** Worker diagnostics must not interleave with the parent's spinner or
+ *    write to stdout while it is carrying JSON-RPC. The logger is therefore redirected
+ *    to the parent, which dedupes repeated messages across the pool.
  */
 
 import { parentPort, workerData } from 'node:worker_threads';
@@ -62,9 +61,8 @@ function post(message: ExtractionResponse): void {
 }
 
 /**
- * Route this thread's logger through the parent. `logger.warning` is the channel the
- * grammar loaders use to disclose an unavailable language, and it must survive — deduped
- * — rather than be swallowed or printed once per worker.
+ * Route this thread's logger through the parent so diagnostics survive without corrupting
+ * the protocol stream or printing once per worker.
  */
 function relayLogging(): void {
   const relay = (level: 'warning' | 'debug') => (message: string): void => post({ type: 'log', level, message });

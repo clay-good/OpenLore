@@ -20,6 +20,7 @@ import {
   type Capability,
 } from '../../analyzer/language-support.js';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
+import { grammarStatus as liveGrammarStatus, type GrammarStatus } from '../../analyzer/call-graph.js';
 import { compactParseHealthSummary } from '../../analyzer/parse-health.js';
 import { loadParseHealthReport } from './parse-health-boundary.js';
 import { describeMemoryDegradation } from '../../analyzer/memory-strategy.js';
@@ -42,6 +43,8 @@ export interface LanguageSupportView {
   /** The capabilities this language does NOT back (the rest). */
   unsupported: Capability[];
   supportedCount: number;
+  /** Runtime availability of the grammar behind `callGraph`. */
+  grammarStatus: GrammarStatus;
 }
 
 export interface GetLanguageSupportResult {
@@ -59,6 +62,8 @@ export interface GetLanguageSupportResult {
   parseHealth?: {
     totalDegradedFiles: number;
     byLanguage: string[];
+    /** Language-level boundaries where no source file reached graph extraction. */
+    grammarUnavailable?: string[];
     /**
      * One-line disclosure of a graceful-degradation-ladder reduction under memory pressure (change:
      * make-analyze-scale-to-any-repo). Present only when a tier was shed — a shed CFG overlay leaves
@@ -77,7 +82,11 @@ const DISCLOSURE =
   'it is unsupported the quiet means "calls are not extracted for this language." `styleFingerprint` is ' +
   'not built for any language yet. The matrix is the true backing of the generic extractors, not a roadmap.';
 
-function viewFor(language: string, detectedInRepo?: boolean): LanguageSupportView {
+function viewFor(
+  language: string,
+  detectedInRepo?: boolean,
+  persistedGrammarStatus?: GrammarStatus,
+): LanguageSupportView {
   const rec = languageSupport(language);
   return {
     language,
@@ -86,6 +95,7 @@ function viewFor(language: string, detectedInRepo?: boolean): LanguageSupportVie
     supported: rec.capabilities,
     unsupported: CAPABILITIES.filter(c => !rec.capabilities.includes(c)),
     supportedCount: rec.capabilities.length,
+    grammarStatus: persistedGrammarStatus ?? liveGrammarStatus(language),
   };
 }
 
@@ -125,11 +135,20 @@ export async function computeGetLanguageSupport(
   if (!ctx.callGraph) return { error: 'Call graph not available. Re-run analyze_codebase.' };
   const cg = ctx.callGraph as SerializedCallGraph;
 
-  const detected = detectedLanguages(cg);
+  const phReport = await loadParseHealthReport(absDir);
+  const unavailableLanguages = new Set(
+    phReport?.grammarUnavailable?.map(boundary => boundary.language) ?? [],
+  );
+  const detected = [...new Set([...detectedLanguages(cg), ...unavailableLanguages])]
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   // `detected` may be empty (a docs-only repo) — pass it straight through; an empty list
   // yields NO rows (not the whole registry), so `languages` never contradicts
   // `detectedLanguages`.
-  const languages = languageCoverageMatrix(detected).rows.map(r => viewFor(r.language, true));
+  const languages = languageCoverageMatrix(detected).rows.map(r => viewFor(
+    r.language,
+    true,
+    unavailableLanguages.has(r.language) ? 'unavailable' : undefined,
+  ));
 
   const fully = languages.filter(l => l.supportedCount === CAPABILITIES.length).length;
   const partial = languages.filter(l => l.known && l.supportedCount > 0 && l.supportedCount < CAPABILITIES.length).length;
@@ -144,12 +163,17 @@ export async function computeGetLanguageSupport(
   // (change: make-analyze-scale-to-any-repo) — a shed CFG overlay leaves `totalDegradedFiles: 0`
   // yet weakens overlay-dependent conclusions, so a "looks clean" block here would otherwise read a
   // reduced index as genuinely full.
-  const phReport = await loadParseHealthReport(absDir);
   const memoryPressure = describeMemoryDegradation(phReport?.memoryDegradation);
   const parseHealth = phReport
     ? {
         totalDegradedFiles: phReport.totalDegradedFiles,
         byLanguage: compactParseHealthSummary(phReport),
+        ...(phReport.grammarUnavailable?.length
+          ? {
+              grammarUnavailable: phReport.grammarUnavailable.map(boundary =>
+                `${boundary.language} grammar unavailable — ${boundary.fileCount} file${boundary.fileCount === 1 ? '' : 's'} indexed for search but not graphed (${boundary.reason})`),
+            }
+          : {}),
         ...(memoryPressure ? { memoryPressure } : {}),
       }
     : undefined;

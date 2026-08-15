@@ -1197,12 +1197,14 @@ async function runEmbedStep(
 
     const cg = llmContext!.callGraph;
     const sigs = llmContext!.signatures ?? [];
+    const graphNodes = cg?.nodes ?? [];
+    const hasSignatureSymbols = sigs.some(file => file.path !== 'external' && file.entries.length > 0);
 
-    if (!cg || cg.nodes.length === 0) {
-      console.log('    ⚠ No call graph data — function index skipped');
+    if (graphNodes.length === 0 && !hasSignatureSymbols) {
+      console.log('    ⚠ No call graph or signature data — function index skipped');
     } else {
-      const hubIds = new Set(cg.hubFunctions.map(f => f.id));
-      const entryIds = new Set(cg.entryPoints.map(f => f.id));
+      const hubIds = new Set(cg?.hubFunctions.map(f => f.id) ?? []);
+      const entryIds = new Set(cg?.entryPoints.map(f => f.id) ?? []);
 
       // Read in bounded chunks, and let each chunk's array die once its entries are in the Map.
       //
@@ -1211,7 +1213,7 @@ async function runEmbedStep(
       // copies of every graph-bearing file's text (~470 MB on a large repository), on top of the
       // call-graph artifacts that are still in scope here. Bounding concurrency does not bound
       // retention; only consuming in chunks does.
-      const paths = [...new Set(cg.nodes.map(n => n.filePath))];
+      const paths = [...new Set(graphNodes.map(n => n.filePath))];
       const fileContents = new Map<string, string>();
       const READ_CHUNK = 256;
       for (let i = 0; i < paths.length; i += READ_CHUNK) {
@@ -1235,14 +1237,14 @@ async function runEmbedStep(
       let result;
       try {
         result = await VectorIndex.build(
-          outputPath, cg.nodes, sigs, hubIds, entryIds, embedSvc, fileContents,
+          outputPath, graphNodes, sigs, hubIds, entryIds, embedSvc, fileContents,
           /* incremental */ !force
         );
       } catch (buildErr) {
         if (embedSvc) {
           console.log(`    ⚠ Embedding failed (${(buildErr as Error).message}) — building keyword (BM25) index instead.`);
           result = await VectorIndex.build(
-            outputPath, cg.nodes, sigs, hubIds, entryIds, null, fileContents,
+            outputPath, graphNodes, sigs, hubIds, entryIds, null, fileContents,
             /* incremental */ false
           );
         } else {

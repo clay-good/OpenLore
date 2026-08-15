@@ -1485,13 +1485,15 @@ describe('handleAuditSpecCoverage', () => {
     });
     const { handleAuditSpecCoverage } = await import('./analysis.js');
     const result = await handleAuditSpecCoverage(tmpDir) as {
-      mappingCoverage: { state: string; reason: string; remediation: string };
+      mappingCoverage: { state: string; reason: string; remediation: string; artifactPath: string };
       summary: Record<string, unknown>;
     };
     expect(result.mappingCoverage).toMatchObject({
       state: 'unavailable', reason: 'analysis-unavailable',
       remediation: expect.stringContaining('openlore analyze'),
     });
+    expect(result.mappingCoverage.artifactPath).toBe('.openlore/analysis/mapping.json');
+    expect(result.mappingCoverage.artifactPath).not.toContain(tmpDir);
     expect(result.summary.coveragePct).toBeNull();
   });
 });

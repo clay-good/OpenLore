@@ -1386,6 +1386,7 @@ export class McpWatcher {
         [...byPath.values()],
         undefined,
         existing?.memoryDegradation,
+        existing?.grammarUnavailable,
       );
       if (!report) {
         // The repo is now clean AND no degradation stands — remove the stale artifact.

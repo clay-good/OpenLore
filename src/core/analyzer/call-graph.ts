@@ -46,6 +46,8 @@ import {
   tallyParseHealth,
   type FileParseHealth,
   type FileExclusionReason,
+  type GrammarUnavailableBoundary,
+  type GrammarUnavailableReason,
   type ParseHealthNode,
 } from './parse-health.js';
 // Per-file parse budget (change: fix-analyze-native-abort-and-file-cost-budget). Bounds the one
@@ -179,6 +181,95 @@ let _exParser: Parser | undefined;
 // null = tried and unavailable; undefined = not yet tried
 let _NativeParser: (typeof Parser) | null | undefined;
 let _NativeQuery: (typeof Parser.Query) | null | undefined;
+let _nativeParserError: unknown;
+
+export type GrammarStatus = 'loaded' | 'unavailable' | 'untried';
+type GrammarFailureReceipt = Omit<GrammarUnavailableBoundary, 'fileCount'>;
+
+const _grammarRuntime = new Map<string, { status: Exclude<GrammarStatus, 'untried'>; failure?: GrammarFailureReceipt }>();
+const _warnedUnavailable = new Set<string>();
+
+/** Runtime status for the grammar backing one statically-supported language. */
+export function grammarStatus(language: string): GrammarStatus {
+  return _grammarRuntime.get(language)?.status ?? 'untried';
+}
+
+function grammarFailure(language: string): GrammarFailureReceipt | undefined {
+  return _grammarRuntime.get(language)?.failure;
+}
+
+function markGrammarLoaded(language: string): void {
+  // A query incompatibility is terminal for this process even though the module itself loaded.
+  if (_grammarRuntime.get(language)?.status !== 'unavailable') {
+    _grammarRuntime.set(language, { status: 'loaded' });
+  }
+}
+
+function markGrammarUnavailable(
+  language: string,
+  reason: GrammarUnavailableReason,
+  error: unknown,
+): GrammarFailureReceipt {
+  const message = error instanceof Error ? error.message : String(error);
+  const detail = reason === 'query-incompatible'
+    ? `tree-sitter query is incompatible with the installed ${language} grammar: ${message}`
+    : `${message}; rebuild the matching tree-sitter grammar or check the local build toolchain`;
+  const failure: GrammarFailureReceipt = { language, reason, detail };
+  _grammarRuntime.set(language, { status: 'unavailable', failure });
+  return failure;
+}
+
+function warnGrammarUnavailable(failure: GrammarFailureReceipt): void {
+  const { language, detail } = failure;
+  if (!_warnedUnavailable.has(language)) {
+    _warnedUnavailable.add(language);
+    logger.warning(
+      `language ${language} grammar unavailable — files will be indexed for search but not graphed (${detail})`,
+    );
+  }
+}
+
+async function loadCoreGrammarSoft<T>(
+  language: string,
+  load: () => Promise<T>,
+): Promise<T | null> {
+  if (grammarStatus(language) === 'unavailable') return null;
+  try {
+    const result = await load();
+    markGrammarLoaded(language);
+    return result;
+  } catch (error) {
+    markGrammarUnavailable(language, 'load-failure', error);
+    return null;
+  }
+}
+
+function emptyForUnavailable(
+  language: string,
+  cfg = true,
+): FileExtractResult {
+  const failure = grammarFailure(language);
+  return {
+    nodes: [],
+    rawEdges: [],
+    ...(cfg ? { cfg: new Map<string, FunctionCfg>() } : {}),
+    ...(failure ? { grammarUnavailable: failure } : {}),
+  };
+}
+
+function nativeQuerySoft(
+  language: string,
+  lang: object,
+  source: string,
+): Parser.Query | null {
+  if (!_NativeQuery || grammarStatus(language) === 'unavailable') return null;
+  try {
+    return new _NativeQuery(lang as unknown as Parser.Language, source);
+  } catch (error) {
+    markGrammarUnavailable(language, 'query-incompatible', error);
+    return null;
+  }
+}
 
 async function loadNativeParser(): Promise<typeof Parser | null> {
   if (_NativeParser === undefined) {
@@ -186,12 +277,25 @@ async function loadNativeParser(): Promise<typeof Parser | null> {
       const m = ((await import('tree-sitter')).default) as typeof Parser;
       _NativeParser = m;
       _NativeQuery = m.Query;
-    } catch {
+    } catch (error) {
       _NativeParser = null;
       _NativeQuery = null;
+      _nativeParserError = error;
     }
   }
   return _NativeParser;
+}
+
+async function loadNativeParserFor(language: string): Promise<typeof Parser | null> {
+  const parser = await loadNativeParser();
+  if (!parser) {
+    markGrammarUnavailable(
+      language,
+      'load-failure',
+      _nativeParserError ?? new Error('tree-sitter native bindings not available'),
+    );
+  }
+  return parser;
 }
 let _TsLanguage: object | undefined;
 let _TsxLanguage: object | undefined;
@@ -211,88 +315,144 @@ let _ExLanguage: object | undefined;
 async function getTSParser(
   filePath?: string
 ): Promise<{ parser: Parser; lang: object } | null> {
-  const NP = await loadNativeParser();
+  const NP = await loadNativeParserFor(filePath && /\.(?:[cm]?js|jsx)$/i.test(filePath) ? 'JavaScript' : 'TypeScript');
   if (!NP) return null;
+  const language = filePath && /\.(?:[cm]?js|jsx)$/i.test(filePath) ? 'JavaScript' : 'TypeScript';
+  if (grammarStatus(language) === 'unavailable') return null;
   if (usesTsxGrammar(filePath)) {
     if (!_tsxParser) {
-      const tsModule = await import('tree-sitter-typescript');
-      _TsxLanguage = (tsModule.default as { tsx: object }).tsx;
-      _tsxParser = new NP();
-      _tsxParser.setLanguage(_TsxLanguage as unknown as Parser.Language);
+      const loaded = await loadCoreGrammarSoft(language, async () => {
+        const tsModule = await import('tree-sitter-typescript');
+        const lang = (tsModule.default as { tsx: object }).tsx;
+        const parser = new NP();
+        parser.setLanguage(lang as unknown as Parser.Language);
+        return { parser, lang };
+      });
+      if (!loaded) return null;
+      _TsxLanguage = loaded.lang;
+      _tsxParser = loaded.parser;
     }
+    markGrammarLoaded(language);
     return { parser: _tsxParser!, lang: _TsxLanguage! };
   }
   if (!_tsParser) {
-    const tsModule = await import('tree-sitter-typescript');
-    _TsLanguage = (tsModule.default as { typescript: object }).typescript;
-    _tsParser = new NP();
-    _tsParser.setLanguage(_TsLanguage as unknown as Parser.Language);
+    const loaded = await loadCoreGrammarSoft(language, async () => {
+      const tsModule = await import('tree-sitter-typescript');
+      const lang = (tsModule.default as { typescript: object }).typescript;
+      const parser = new NP();
+      parser.setLanguage(lang as unknown as Parser.Language);
+      return { parser, lang };
+    });
+    if (!loaded) return null;
+    _TsLanguage = loaded.lang;
+    _tsParser = loaded.parser;
   }
+  markGrammarLoaded(language);
   return { parser: _tsParser!, lang: _TsLanguage! };
 }
 
 async function getPyParser(): Promise<{ parser: Parser; lang: object } | null> {
-  const NP = await loadNativeParser();
+  const NP = await loadNativeParserFor('Python');
   if (!NP) return null;
+  if (grammarStatus('Python') === 'unavailable') return null;
   if (!_pyParser) {
-    const pyModule = await import('tree-sitter-python');
-    _PyLanguage = pyModule.default;
-    _pyParser = new NP();
-    _pyParser.setLanguage(_PyLanguage as unknown as Parser.Language);
+    const loaded = await loadCoreGrammarSoft('Python', async () => {
+      const pyModule = await import('tree-sitter-python');
+      const lang = pyModule.default;
+      const parser = new NP();
+      parser.setLanguage(lang as unknown as Parser.Language);
+      return { parser, lang };
+    });
+    if (!loaded) return null;
+    _PyLanguage = loaded.lang;
+    _pyParser = loaded.parser;
   }
+  markGrammarLoaded('Python');
   return { parser: _pyParser!, lang: _PyLanguage! };
 }
 
 async function getGoParser(): Promise<{ parser: Parser; lang: object } | null> {
-  const NP = await loadNativeParser();
+  const NP = await loadNativeParserFor('Go');
   if (!NP) return null;
+  if (grammarStatus('Go') === 'unavailable') return null;
   if (!_goParser) {
-    const goModule = await import('tree-sitter-go');
-    _GoLanguage = goModule.default;
-    _goParser = new NP();
-    _goParser.setLanguage(_GoLanguage as unknown as Parser.Language);
+    const loaded = await loadCoreGrammarSoft('Go', async () => {
+      const goModule = await import('tree-sitter-go');
+      const lang = goModule.default;
+      const parser = new NP();
+      parser.setLanguage(lang as unknown as Parser.Language);
+      return { parser, lang };
+    });
+    if (!loaded) return null;
+    _GoLanguage = loaded.lang;
+    _goParser = loaded.parser;
   }
+  markGrammarLoaded('Go');
   return { parser: _goParser!, lang: _GoLanguage! };
 }
 
 async function getRustParser(): Promise<{ parser: Parser; lang: object } | null> {
-  const NP = await loadNativeParser();
+  const NP = await loadNativeParserFor('Rust');
   if (!NP) return null;
+  if (grammarStatus('Rust') === 'unavailable') return null;
   if (!_rustParser) {
-    const rustModule = await import('tree-sitter-rust');
-    _RustLanguage = rustModule.default;
-    _rustParser = new NP();
-    _rustParser.setLanguage(_RustLanguage as unknown as Parser.Language);
+    const loaded = await loadCoreGrammarSoft('Rust', async () => {
+      const rustModule = await import('tree-sitter-rust');
+      const lang = rustModule.default;
+      const parser = new NP();
+      parser.setLanguage(lang as unknown as Parser.Language);
+      return { parser, lang };
+    });
+    if (!loaded) return null;
+    _RustLanguage = loaded.lang;
+    _rustParser = loaded.parser;
   }
+  markGrammarLoaded('Rust');
   return { parser: _rustParser!, lang: _RustLanguage! };
 }
 
 async function getRubyParser(): Promise<{ parser: Parser; lang: object } | null> {
-  const NP = await loadNativeParser();
+  const NP = await loadNativeParserFor('Ruby');
   if (!NP) return null;
+  if (grammarStatus('Ruby') === 'unavailable') return null;
   if (!_rubyParser) {
-    const rubyModule = await import('tree-sitter-ruby');
-    _RubyLanguage = rubyModule.default;
-    _rubyParser = new NP();
-    _rubyParser.setLanguage(_RubyLanguage as unknown as Parser.Language);
+    const loaded = await loadCoreGrammarSoft('Ruby', async () => {
+      const rubyModule = await import('tree-sitter-ruby');
+      const lang = rubyModule.default;
+      const parser = new NP();
+      parser.setLanguage(lang as unknown as Parser.Language);
+      return { parser, lang };
+    });
+    if (!loaded) return null;
+    _RubyLanguage = loaded.lang;
+    _rubyParser = loaded.parser;
   }
+  markGrammarLoaded('Ruby');
   return { parser: _rubyParser!, lang: _RubyLanguage! };
 }
 
 async function getJavaParser(): Promise<{ parser: Parser; lang: object } | null> {
-  const NP = await loadNativeParser();
+  const NP = await loadNativeParserFor('Java');
   if (!NP) return null;
+  if (grammarStatus('Java') === 'unavailable') return null;
   if (!_javaParser) {
-    const javaModule = await import('tree-sitter-java');
-    _JavaLanguage = javaModule.default;
-    _javaParser = new NP();
-    _javaParser.setLanguage(_JavaLanguage as unknown as Parser.Language);
+    const loaded = await loadCoreGrammarSoft('Java', async () => {
+      const javaModule = await import('tree-sitter-java');
+      const lang = javaModule.default;
+      const parser = new NP();
+      parser.setLanguage(lang as unknown as Parser.Language);
+      return { parser, lang };
+    });
+    if (!loaded) return null;
+    _JavaLanguage = loaded.lang;
+    _javaParser = loaded.parser;
   }
+  markGrammarLoaded('Java');
   return { parser: _javaParser!, lang: _JavaLanguage! };
 }
 
 async function getPhpParser(): Promise<{ parser: Parser; lang: object } | null> {
-  const NP = await loadNativeParser();
+  const NP = await loadNativeParserFor('PHP');
   if (!NP) return null;
   if (!_phpParser) {
     const phpModule = await import('tree-sitter-php');
@@ -304,7 +464,7 @@ async function getPhpParser(): Promise<{ parser: Parser; lang: object } | null> 
 }
 
 async function getCSharpParser(): Promise<{ parser: Parser; lang: object } | null> {
-  const NP = await loadNativeParser();
+  const NP = await loadNativeParserFor('C#');
   if (!NP) return null;
   if (!_csParser) {
     const csModule = await import('tree-sitter-c-sharp');
@@ -316,7 +476,7 @@ async function getCSharpParser(): Promise<{ parser: Parser; lang: object } | nul
 }
 
 async function getKotlinParser(): Promise<{ parser: Parser; lang: object } | null> {
-  const NP = await loadNativeParser();
+  const NP = await loadNativeParserFor('Kotlin');
   if (!NP) return null;
   if (!_ktParser) {
     const ktModule = await import('tree-sitter-kotlin');
@@ -328,7 +488,7 @@ async function getKotlinParser(): Promise<{ parser: Parser; lang: object } | nul
 }
 
 async function getScalaParser(): Promise<{ parser: Parser; lang: object } | null> {
-  const NP = await loadNativeParser();
+  const NP = await loadNativeParserFor('Scala');
   if (!NP) return null;
   if (!_scalaParser) {
     const scalaModule = await import('tree-sitter-scala');
@@ -340,7 +500,7 @@ async function getScalaParser(): Promise<{ parser: Parser; lang: object } | null
 }
 
 async function getElixirParser(): Promise<{ parser: Parser; lang: object } | null> {
-  const NP = await loadNativeParser();
+  const NP = await loadNativeParserFor('Elixir');
   if (!NP) return null;
   if (!_exParser) {
     const exModule = await import('tree-sitter-elixir');
@@ -352,26 +512,42 @@ async function getElixirParser(): Promise<{ parser: Parser; lang: object } | nul
 }
 
 async function getCppParser(): Promise<{ parser: Parser; lang: object } | null> {
-  const NP = await loadNativeParser();
+  const NP = await loadNativeParserFor('C++');
   if (!NP) return null;
+  if (grammarStatus('C++') === 'unavailable') return null;
   if (!_cppParser) {
-    const cppModule = await import('tree-sitter-cpp');
-    _CppLanguage = cppModule.default;
-    _cppParser = new NP();
-    _cppParser.setLanguage(_CppLanguage as unknown as Parser.Language);
+    const loaded = await loadCoreGrammarSoft('C++', async () => {
+      const cppModule = await import('tree-sitter-cpp');
+      const lang = cppModule.default;
+      const parser = new NP();
+      parser.setLanguage(lang as unknown as Parser.Language);
+      return { parser, lang };
+    });
+    if (!loaded) return null;
+    _CppLanguage = loaded.lang;
+    _cppParser = loaded.parser;
   }
+  markGrammarLoaded('C++');
   return { parser: _cppParser!, lang: _CppLanguage! };
 }
 
 async function getSwiftParser(): Promise<{ parser: Parser; lang: object } | null> {
-  const NP = await loadNativeParser();
+  const NP = await loadNativeParserFor('Swift');
   if (!NP) return null;
+  if (grammarStatus('Swift') === 'unavailable') return null;
   if (!_swiftParser) {
-    const swiftModule = await import('tree-sitter-swift');
-    _SwiftLanguage = swiftModule.default;
-    _swiftParser = new NP();
-    _swiftParser.setLanguage(_SwiftLanguage as unknown as Parser.Language);
+    const loaded = await loadCoreGrammarSoft('Swift', async () => {
+      const swiftModule = await import('tree-sitter-swift');
+      const lang = swiftModule.default;
+      const parser = new NP();
+      parser.setLanguage(lang as unknown as Parser.Language);
+      return { parser, lang };
+    });
+    if (!loaded) return null;
+    _SwiftLanguage = loaded.lang;
+    _swiftParser = loaded.parser;
   }
+  markGrammarLoaded('Swift');
   return { parser: _swiftParser!, lang: _SwiftLanguage! };
 }
 
@@ -717,14 +893,16 @@ const TS_CALL_QUERY = `
 async function extractTSGraph(
   filePath: string,
   content: string
-): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[]; cfg: Map<string, FunctionCfg>; style?: FileStyleRaw; parseHealth?: FileParseHealth }> {
+): Promise<FileExtractResult> {
+  const language = /\.(?:[cm]?js|jsx)$/i.test(filePath) ? 'JavaScript' : 'TypeScript';
   const r = await getTSParser(filePath);
-  if (!r) return { nodes: [], rawEdges: [], cfg: new Map() };
+  if (!r) return emptyForUnavailable(language);
   const { parser, lang } = r;
   const tree = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, content);
 
-  const fnQuery = new _NativeQuery!(lang as unknown as Parser.Language, TS_FN_QUERY);
-  const callQuery = new _NativeQuery!(lang as unknown as Parser.Language, TS_CALL_QUERY);
+  const fnQuery = nativeQuerySoft(language, lang, TS_FN_QUERY);
+  const callQuery = nativeQuerySoft(language, lang, TS_CALL_QUERY);
+  if (!fnQuery || !callQuery) return emptyForUnavailable(language);
 
   // --- Extract function nodes ---
   const nodes: FunctionNode[] = [];
@@ -902,13 +1080,14 @@ const PY_METHOD_CALL_QUERY = `
 async function extractPyGraph(
   filePath: string,
   content: string
-): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[]; cfg: Map<string, FunctionCfg>; style?: FileStyleRaw; parseHealth?: FileParseHealth }> {
+): Promise<FileExtractResult> {
   const r = await getPyParser();
-  if (!r) return { nodes: [], rawEdges: [], cfg: new Map() };
+  if (!r) return emptyForUnavailable('Python');
   const { parser, lang } = r;
   const tree = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, content);
 
-  const fnQuery = new _NativeQuery!(lang as unknown as Parser.Language, PY_FN_QUERY);
+  const fnQuery = nativeQuerySoft('Python', lang, PY_FN_QUERY);
+  if (!fnQuery) return emptyForUnavailable('Python');
 
   // --- Extract function nodes ---
   const nodes: FunctionNode[] = [];
@@ -973,8 +1152,9 @@ async function extractPyGraph(
   ensureUniqueNodeIds(nodes);
   const rawEdges: RawEdge[] = [];
 
-  const directCallQuery = new _NativeQuery!(lang as unknown as Parser.Language, PY_DIRECT_CALL_QUERY);
-  const methodCallQuery = new _NativeQuery!(lang as unknown as Parser.Language, PY_METHOD_CALL_QUERY);
+  const directCallQuery = nativeQuerySoft('Python', lang, PY_DIRECT_CALL_QUERY);
+  const methodCallQuery = nativeQuerySoft('Python', lang, PY_METHOD_CALL_QUERY);
+  if (!directCallQuery || !methodCallQuery) return emptyForUnavailable('Python');
 
   // Direct calls: foo(), bar(x) — resolve across all files
   for (const match of directCallQuery.matches(tree.rootNode)) {
@@ -1056,14 +1236,15 @@ const GO_CALL_QUERY = `
 async function extractGoGraph(
   filePath: string,
   content: string
-): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[]; cfg: Map<string, FunctionCfg>; style?: FileStyleRaw; parseHealth?: FileParseHealth }> {
+): Promise<FileExtractResult> {
   const r = await getGoParser();
-  if (!r) return { nodes: [], rawEdges: [], cfg: new Map() };
+  if (!r) return emptyForUnavailable('Go');
   const { parser, lang } = r;
   const tree = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, content);
 
-  const fnQuery = new _NativeQuery!(lang as unknown as Parser.Language, GO_FN_QUERY);
-  const callQuery = new _NativeQuery!(lang as unknown as Parser.Language, GO_CALL_QUERY);
+  const fnQuery = nativeQuerySoft('Go', lang, GO_FN_QUERY);
+  const callQuery = nativeQuerySoft('Go', lang, GO_CALL_QUERY);
+  if (!fnQuery || !callQuery) return emptyForUnavailable('Go');
 
   const nodes: FunctionNode[] = [];
   const cfgByStart = new Map<number, FunctionCfg>();
@@ -1148,15 +1329,16 @@ const RUST_CALL_QUERY = `
 async function extractRustGraph(
   filePath: string,
   content: string
-): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[]; cfg: Map<string, FunctionCfg>; parseHealth?: FileParseHealth }> {
+): Promise<FileExtractResult> {
   const r = await getRustParser();
-  if (!r) return { nodes: [], rawEdges: [], cfg: new Map() };
+  if (!r) return emptyForUnavailable('Rust');
   const { parser, lang } = r;
   const tree = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, content);
   const parseHealth = tallyParseHealth('', tree.rootNode as unknown as ParseHealthNode, filePath);
 
-  const fnQuery = new _NativeQuery!(lang as unknown as Parser.Language, RUST_FN_QUERY);
-  const callQuery = new _NativeQuery!(lang as unknown as Parser.Language, RUST_CALL_QUERY);
+  const fnQuery = nativeQuerySoft('Rust', lang, RUST_FN_QUERY);
+  const callQuery = nativeQuerySoft('Rust', lang, RUST_CALL_QUERY);
+  if (!fnQuery || !callQuery) return emptyForUnavailable('Rust');
 
   const nodes: FunctionNode[] = [];
   const cfgByStart = new Map<number, FunctionCfg>();
@@ -1259,16 +1441,17 @@ const RUBY_BAREWORD_QUERY = `
 async function extractRubyGraph(
   filePath: string,
   content: string
-): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[]; cfg: Map<string, FunctionCfg>; parseHealth?: FileParseHealth }> {
+): Promise<FileExtractResult> {
   const r = await getRubyParser();
-  if (!r) return { nodes: [], rawEdges: [], cfg: new Map() };
+  if (!r) return emptyForUnavailable('Ruby');
   const { parser, lang } = r;
   const tree = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, content);
   const parseHealth = tallyParseHealth('', tree.rootNode as unknown as ParseHealthNode, filePath);
 
-  const fnQuery = new _NativeQuery!(lang as unknown as Parser.Language, RUBY_FN_QUERY);
-  const callQuery = new _NativeQuery!(lang as unknown as Parser.Language, RUBY_CALL_QUERY);
-  const barewordQuery = new _NativeQuery!(lang as unknown as Parser.Language, RUBY_BAREWORD_QUERY);
+  const fnQuery = nativeQuerySoft('Ruby', lang, RUBY_FN_QUERY);
+  const callQuery = nativeQuerySoft('Ruby', lang, RUBY_CALL_QUERY);
+  const barewordQuery = nativeQuerySoft('Ruby', lang, RUBY_BAREWORD_QUERY);
+  if (!fnQuery || !callQuery || !barewordQuery) return emptyForUnavailable('Ruby');
 
   const nodes: FunctionNode[] = [];
   const cfgByStart = new Map<number, FunctionCfg>();
@@ -1434,10 +1617,12 @@ function synthesizeJavaSuperCalls(
 ): RawEdge[] {
   // class simple-name → parent simple-name, from `extends` clauses.
   const parentOf = new Map<string, string>();
-  const clsQuery = new _NativeQuery!(
-    lang as Parser.Language,
+  const clsQuery = nativeQuerySoft(
+    'Java',
+    lang as object,
     `(class_declaration name: (identifier) @cls (superclass (type_identifier) @parent))`
   );
+  if (!clsQuery) return [];
   for (const m of clsQuery.matches(root)) {
     const cls = m.captures.find(c => c.name === 'cls')?.node.text;
     const parent = m.captures.find(c => c.name === 'parent')?.node.text;
@@ -1446,10 +1631,12 @@ function synthesizeJavaSuperCalls(
   if (parentOf.size === 0) return [];
 
   const out: RawEdge[] = [];
-  const ctorQuery = new _NativeQuery!(
-    lang as Parser.Language,
+  const ctorQuery = nativeQuerySoft(
+    'Java',
+    lang as object,
     `(explicit_constructor_invocation (super)) @node`
   );
+  if (!ctorQuery) return [];
   for (const m of ctorQuery.matches(root)) {
     const node = m.captures.find(c => c.name === 'node')?.node;
     if (!node) continue;
@@ -1465,15 +1652,16 @@ function synthesizeJavaSuperCalls(
 async function extractJavaGraph(
   filePath: string,
   content: string
-): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[]; cfg: Map<string, FunctionCfg>; parseHealth?: FileParseHealth }> {
+): Promise<FileExtractResult> {
   const r = await getJavaParser();
-  if (!r) return { nodes: [], rawEdges: [], cfg: new Map() };
+  if (!r) return emptyForUnavailable('Java');
   const { parser, lang } = r;
   const tree = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, content);
   const parseHealth = tallyParseHealth('', tree.rootNode as unknown as ParseHealthNode, filePath);
 
-  const fnQuery = new _NativeQuery!(lang as unknown as Parser.Language, JAVA_FN_QUERY);
-  const callQuery = new _NativeQuery!(lang as unknown as Parser.Language, JAVA_CALL_QUERY);
+  const fnQuery = nativeQuerySoft('Java', lang, JAVA_FN_QUERY);
+  const callQuery = nativeQuerySoft('Java', lang, JAVA_CALL_QUERY);
+  if (!fnQuery || !callQuery) return emptyForUnavailable('Java');
 
   const nodes: FunctionNode[] = [];
   const cfgByStart = new Map<number, FunctionCfg>();
@@ -1532,6 +1720,7 @@ async function extractJavaGraph(
 
   // super(...) constructor-chain edges (this(...) intentionally omitted).
   rawEdges.push(...synthesizeJavaSuperCalls(tree.rootNode, nodes, lang));
+  if (grammarStatus('Java') === 'unavailable') return emptyForUnavailable('Java');
 
   const cfg = materializeCfgByNodeId(nodes, cfgByStart);
   return { nodes, rawEdges, cfg, parseHealth };
@@ -1553,9 +1742,12 @@ function safeQuery(
 ): Parser.QueryMatch[] {
   if (!_NativeQuery) return [];
   try {
-    const q = new _NativeQuery(lang as unknown as Parser.Language, queryStr);
-    return q.matches(root);
+    const query = new _NativeQuery(lang as unknown as Parser.Language, queryStr);
+    return query.matches(root);
   } catch {
+    // These are optional shape probes: one grammar version may reject a specialized arm while
+    // another required arm still extracts the file correctly. Only required extractor queries
+    // cross the language-level incompatibility boundary.
     return [];
   }
 }
@@ -1596,9 +1788,9 @@ const CPP_CALL_MEMBER_QUERY = `
 async function extractCppGraph(
   filePath: string,
   content: string
-): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[]; cfg: Map<string, FunctionCfg>; parseHealth?: FileParseHealth }> {
+): Promise<FileExtractResult> {
   const r = await getCppParser();
-  if (!r) return { nodes: [], rawEdges: [], cfg: new Map() };
+  if (!r) return emptyForUnavailable('C++');
   const { parser, lang } = r;
   const tree = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, content);
   const parseHealth = tallyParseHealth('', tree.rootNode as unknown as ParseHealthNode, filePath);
@@ -1731,16 +1923,17 @@ const SWIFT_CALL_NAV_QUERY = `
 async function extractSwiftGraph(
   filePath: string,
   content: string
-): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[]; parseHealth?: FileParseHealth }> {
+): Promise<FileExtractResult> {
   const r = await getSwiftParser();
-  if (!r) return { nodes: [], rawEdges: [] };
+  if (!r) return emptyForUnavailable('Swift', false);
   const { parser, lang } = r;
   const tree = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, content);
   const parseHealth = tallyParseHealth('', tree.rootNode as unknown as ParseHealthNode, filePath);
 
-  const fnQuery = new _NativeQuery!(lang as unknown as Parser.Language, SWIFT_FN_QUERY);
-  const directCallQuery = new _NativeQuery!(lang as unknown as Parser.Language, SWIFT_CALL_DIRECT_QUERY);
-  const navCallQuery = new _NativeQuery!(lang as unknown as Parser.Language, SWIFT_CALL_NAV_QUERY);
+  const fnQuery = nativeQuerySoft('Swift', lang, SWIFT_FN_QUERY);
+  const directCallQuery = nativeQuerySoft('Swift', lang, SWIFT_CALL_DIRECT_QUERY);
+  const navCallQuery = nativeQuerySoft('Swift', lang, SWIFT_CALL_NAV_QUERY);
+  if (!fnQuery || !directCallQuery || !navCallQuery) return emptyForUnavailable('Swift', false);
 
   const nodes: FunctionNode[] = [];
   for (const match of fnQuery.matches(tree.rootNode)) {
@@ -1830,8 +2023,6 @@ async function extractSwiftGraph(
 // missing/ABI-incompatible grammar logs one warning and skips graphing for that
 // language without aborting analyze or any other language.
 
-const _warnedUnavailable = new Set<string>();
-
 /**
  * Minimal structural node/match interface shared by native tree-sitter and the
  * web-tree-sitter (WASM) backend, so one extractor works against either.
@@ -1869,12 +2060,7 @@ interface GrammarHandle {
 const _grammarHandleCache = new Map<string, GrammarHandle | null>();
 
 function warnUnavailable(language: string, err: unknown): null {
-  if (!_warnedUnavailable.has(language)) {
-    _warnedUnavailable.add(language);
-    logger.warning(
-      `language ${language} grammar unavailable — files will be indexed for search but not graphed (${(err as Error).message})`,
-    );
-  }
+  markGrammarUnavailable(language, 'load-failure', err);
   return null;
 }
 
@@ -1893,6 +2079,7 @@ async function loadGrammarSoft(
     if (!lang) throw new Error('grammar export resolved to undefined');
     const parser = new NP();
     parser.setLanguage(lang as unknown as Parser.Language);
+    markGrammarLoaded(language);
     const handle: GrammarHandle = {
       withTree: (content, fn) => {
         const tree = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, content);
@@ -1902,7 +2089,10 @@ async function loadGrammarSoft(
           try {
             const q = new _NativeQuery(lang as unknown as Parser.Language, src);
             return q.matches(tree.rootNode) as unknown as TsMatch[];
-          } catch { return []; }
+          } catch (error) {
+            markGrammarUnavailable(language, 'query-incompatible', error);
+            return [];
+          }
         };
         return fn(root, runQuery);
       },
@@ -1975,7 +2165,10 @@ async function loadWasmGrammarSoft(
             const q = WasmQuery ? new WasmQuery(lang, src) : lang.query(src);
             queries.push(q);
             return q.matches(tree.rootNode);
-          } catch { return []; }
+          } catch (error) {
+            markGrammarUnavailable(language, 'query-incompatible', error);
+            return [];
+          }
         };
         try {
           return fn(tree.rootNode, runQuery);
@@ -1989,6 +2182,7 @@ async function loadWasmGrammarSoft(
       // hasError is not trustworthy here — parse-health is fail-soft for WASM grammars.
       parseHealthReliable: false,
     };
+    markGrammarLoaded(language);
     _grammarHandleCache.set(cacheKey, handle);
     return handle;
   } catch (err) {
@@ -2014,14 +2208,40 @@ async function loadWasmGrammarSoft(
  * for reasons that are not defects.
  */
 export function grammarLoadFailed(language: string): boolean {
-  return _grammarHandleCache.get(language) === null
-    || _grammarHandleCache.get(`wasm:${language}`) === null;
+  return grammarStatus(language) === 'unavailable';
 }
 
 /** Reset loader caches — test-only hook for the graceful-degradation test. */
 export function __resetGrammarCacheForTests(): void {
   _grammarHandleCache.clear();
+  _grammarRuntime.clear();
   _warnedUnavailable.clear();
+  _NativeParser = undefined;
+  _NativeQuery = undefined;
+  _nativeParserError = undefined;
+  _tsParser = undefined;
+  _tsxParser = undefined;
+  _pyParser = undefined;
+  _goParser = undefined;
+  _rustParser = undefined;
+  _rubyParser = undefined;
+  _javaParser = undefined;
+  _cppParser = undefined;
+  _swiftParser = undefined;
+  _TsLanguage = undefined;
+  _TsxLanguage = undefined;
+  _PyLanguage = undefined;
+  _GoLanguage = undefined;
+  _RustLanguage = undefined;
+  _RubyLanguage = undefined;
+  _JavaLanguage = undefined;
+  _CppLanguage = undefined;
+  _SwiftLanguage = undefined;
+}
+
+/** Replace the native query constructor after parser warm-up — test-only grammar-drift hook. */
+export function __setNativeQueryForTests(query: typeof Parser.Query): void {
+  _NativeQuery = query;
 }
 
 const NAME_CHILD_TYPES = new Set(['identifier', 'name', 'type_identifier', 'simple_identifier', 'word']);
@@ -2065,11 +2285,11 @@ async function extractByQueries(
   spec: QueryLangSpec,
   filePath: string,
   content: string,
-): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[]; cfg: Map<string, FunctionCfg>; parseHealth?: FileParseHealth }> {
+): Promise<FileExtractResult> {
   const handle = await spec.loader();
-  if (!handle) return { nodes: [], rawEdges: [], cfg: new Map() };
+  if (!handle) return emptyForUnavailable(spec.language);
 
-  return handle.withTree(content, (_root, runQuery) => {
+  const result = handle.withTree(content, (_root, runQuery) => {
     const nodes: FunctionNode[] = [];
     const cfgByStart = new Map<number, FunctionCfg>();
     for (const match of runQuery(spec.fnQuery)) {
@@ -2138,6 +2358,9 @@ async function extractByQueries(
       : tallyParseHealth('', _root as unknown as ParseHealthNode, filePath);
     return { nodes, rawEdges, cfg, parseHealth };
   });
+  return grammarStatus(spec.language) === 'unavailable'
+    ? emptyForUnavailable(spec.language)
+    : result;
 }
 
 // ── C# ──────────────────────────────────────────────────────────────────────
@@ -4198,6 +4421,7 @@ export class CallGraphBuilder {
     const cfgSpill = this.cfgSpill;
     const styleByFile = new Map<string, FileStyleRaw>();
     const parseHealthByFile = new Map<string, FileParseHealth>();
+    const grammarUnavailableByLanguage = new Map<string, GrammarUnavailableBoundary>();
 
     // Pass 1: Extract nodes and raw edges from each file.
     //
@@ -4254,6 +4478,15 @@ export class CallGraphBuilder {
       try {
         if (outcome.status === 'error') throw outcome.error;
         const result = outcome.value;
+        if (result?.grammarUnavailable) {
+          const failure = result.grammarUnavailable;
+          warnGrammarUnavailable(failure);
+          const existing = grammarUnavailableByLanguage.get(failure.language);
+          grammarUnavailableByLanguage.set(failure.language, {
+            ...failure,
+            fileCount: (existing?.fileCount ?? 0) + 1,
+          });
+        }
         // Record what a FRESH extraction produced, before the relabeling below mutates it,
         // so the stored facts are exactly the extractor's own answer.
         //
@@ -5190,6 +5423,9 @@ export class CallGraphBuilder {
       },
       styleByFile: styleByFile.size > 0 ? styleByFile : undefined,
       parseHealthByFile: parseHealthByFile.size > 0 ? parseHealthByFile : undefined,
+      grammarUnavailable: grammarUnavailableByLanguage.size > 0
+        ? [...grammarUnavailableByLanguage.values()].sort((a, b) => a.language < b.language ? -1 : a.language > b.language ? 1 : 0)
+        : undefined,
       ambiguousSites: ambiguousSites.length > 0 ? ambiguousSites : undefined,
       extractionLane,
       pass1Cache,

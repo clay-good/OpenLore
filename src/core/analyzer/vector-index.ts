@@ -617,10 +617,6 @@ export class VectorIndex {
     quietNativeLoggingOnce();
     const { connect } = await import('@lancedb/lancedb');
 
-    if (nodes.length === 0) {
-      throw new Error('No functions to index');
-    }
-
     const repoNodes = nodes.filter(isRepoFunction);
     const sigIndex = buildSignatureIndex(signatures);
 

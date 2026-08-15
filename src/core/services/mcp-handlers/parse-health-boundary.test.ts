@@ -63,6 +63,18 @@ describe('parseHealthBoundary', () => {
     const note = parseHealthBoundary(REPORT, ['src/a.ts', 'src/a.ts'])!;
     expect(note).toContain('1 file');
   });
+  it('surfaces a grammar failure for every conclusion, including an empty result', () => {
+    const report: ParseHealthReport = {
+      version: 1, totalDegradedFiles: 0, totalErrorRegions: 0, byLanguage: [], topFiles: [], files: [],
+      grammarUnavailable: [{
+        language: 'TypeScript', fileCount: 7, reason: 'load-failure', detail: 'missing grammar',
+      }],
+    };
+    const note = parseHealthBoundary(report, [])!;
+    expect(note).toContain('Grammar unavailable');
+    expect(note).toContain('TypeScript: 7 files indexed for search but not graphed');
+    expect(note).toContain('LOWER BOUND');
+  });
 });
 
 describe('parseHealthBoundary surfaces a memory-pressure degradation (change: make-analyze-scale-to-any-repo)', () => {

@@ -68,6 +68,26 @@ describe('get_language_support — named-language mode (pure registry, no analys
 });
 
 describe('get_language_support — repo mode (coverage over detected languages)', () => {
+  it('reports a supported language whose runtime grammar produced zero graph nodes', async () => {
+    vi.mocked(readCachedContext).mockResolvedValue({ callGraph: graph([]) } as never);
+    vi.mocked(loadParseHealthReport).mockResolvedValue({
+      version: 1, totalDegradedFiles: 0, totalErrorRegions: 0, byLanguage: [], topFiles: [], files: [],
+      grammarUnavailable: [{
+        language: 'TypeScript', fileCount: 4, reason: 'load-failure', detail: 'missing grammar',
+      }],
+    });
+
+    const res = await run({ directory: '/p' });
+
+    expect(res.detectedLanguages).toEqual(['TypeScript']);
+    expect(res.languages[0]).toMatchObject({
+      language: 'TypeScript',
+      detectedInRepo: true,
+      grammarStatus: 'unavailable',
+    });
+    expect(res.languages[0].supported).toContain('callGraph');
+    expect(res.parseHealth?.grammarUnavailable?.[0]).toContain('4 files indexed for search but not graphed');
+  });
   it('reports the matrix over the languages detected in the index', async () => {
     vi.mocked(readCachedContext).mockResolvedValue({
       callGraph: graph([

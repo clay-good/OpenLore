@@ -16,7 +16,7 @@ exports[`spec-09 MCP live-data harness > snapshots stable architecture-overview 
 {
   "criticalHubs": 8,
   "cycles": 0,
-  "globalEntryPoints": 13,
+  "globalEntryPoints": 15,
   "layerViolations": 0,
   "totalClusters": 1,
   "totalEdges": 0,
@@ -31,19 +31,19 @@ exports[`spec-09 MCP live-data harness > snapshots stable architecture-overview 
   "globalEntryPoints": 20,
   "layerViolations": 0,
   "totalClusters": 12,
-  "totalEdges": 443,
+  "totalEdges": 401,
   "totalFiles": 110,
 }
 `;
 
 exports[`spec-09 MCP live-data harness > snapshots stable architecture-overview counts per ready repo > overview-counts py-click@874ca2bc1c30d93a4ac6e36a15ed685eafe89097 1`] = `
 {
-  "criticalHubs": 8,
-  "cycles": 2,
+  "criticalHubs": 10,
+  "cycles": 23,
   "globalEntryPoints": 20,
   "layerViolations": 0,
   "totalClusters": 21,
-  "totalEdges": 156,
+  "totalEdges": 182,
   "totalFiles": 140,
 }
 `;
@@ -74,12 +74,12 @@ exports[`spec-09 MCP live-data harness > snapshots stable architecture-overview 
 
 exports[`spec-09 MCP live-data harness > snapshots stable architecture-overview counts per ready repo > overview-counts ts-commander@970ecae402b253de691e6a9066fea22f38fe7431 1`] = `
 {
-  "criticalHubs": 0,
+  "criticalHubs": 3,
   "cycles": 0,
   "globalEntryPoints": 20,
   "layerViolations": 0,
   "totalClusters": 11,
   "totalEdges": 118,
-  "totalFiles": 203,
+  "totalFiles": 206,
 }
 `;
