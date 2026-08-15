@@ -16,6 +16,7 @@ const NAV = [
   'analyze_impact', 'suggest_insertion_points', 'get_function_skeleton',
   'get_landmarks', 'get_map', 'find_path',
 ];
+const SPEC_WORKFLOWS = ['prepare_spec_generation', 'prepare_spec_repair'];
 
 describe('MCP tool presets', () => {
   it('every preset references only real, defined tools (no stale names)', () => {
@@ -80,15 +81,17 @@ describe('MCP tool presets', () => {
     }
   });
 
-  // change: unify-navigation-and-governance-substrate — the `substrate` preset spans BOTH
-  // faces: the navigation graph-traversal core plus the three highest-value governance
-  // READS (recall, verify_claim, blast_radius). It holds reads only — no remember /
+  // change: add-mcp-spec-workflow-composites — the `substrate` preset spans BOTH
+  // faces: the navigation graph-traversal core, the two read-only spec-workflow
+  // composites, and the three highest-value governance READS. It holds reads only — no remember /
   // record_decision write, no commit gate. `substrate` is now the no-selector DEFAULT
   // surface (decision c79ec7ca superseding ADR-0022, after the DefaultSurfaceRevealsAllFaces
   // benchmark cleared it across two models and both repo tiers with no regression).
-  it('substrate preset = navigation core + recall + verify_claim + blast_radius (reads only)', () => {
+  it('substrate preset = navigation core + spec workflows + governance reads (reads only)', () => {
     const tools = selectActiveTools(TOOL_DEFINITIONS, { preset: 'substrate' }).map(t => t.name);
-    expect(new Set(tools)).toEqual(new Set([...NAV, 'recall', 'verify_claim', 'blast_radius']));
+    expect(new Set(tools)).toEqual(
+      new Set([...NAV, ...SPEC_WORKFLOWS, 'recall', 'verify_claim', 'blast_radius'])
+    );
     // governance WRITES / gate must never be in the both-faces reads preset
     for (const write of ['remember', 'record_decision', 'approve_decision', 'sync_decisions']) {
       expect(tools).not.toContain(write);
@@ -142,8 +145,8 @@ describe('MCP tool presets', () => {
   it('renderToolSurfaceByFamily groups the substrate surface by family, covering every tool', () => {
     const tools = selectActiveTools(TOOL_DEFINITIONS, { preset: 'substrate' });
     const text = renderToolSurfaceByFamily(tools, 'substrate');
-    // Header states the surface, tool count, and family count (navigation core + governance reads → 4 families).
-    expect(text).toMatch(/substrate \(13 tools, 4 families\)/);
+    // Header states the surface, tool count, and family count (navigation + spec workflows + governance reads → 4 families).
+    expect(text).toMatch(/substrate \(15 tools, 4 families\)/);
     // Family group headers appear, in canonical order; every tool is listed exactly once.
     expect(text).toContain('Navigate —');
     expect(text).toContain('Change —');
@@ -257,7 +260,9 @@ describe('MCP tool presets', () => {
   // registry. The full surface is opt-in via --preset full / --all-tools.
   it('no selector exposes the DEFAULT surface (substrate), not the full set', () => {
     const tools = selectActiveTools(TOOL_DEFINITIONS, {}).map(t => t.name);
-    expect(new Set(tools)).toEqual(new Set([...NAV, 'recall', 'verify_claim', 'blast_radius']));
+    expect(new Set(tools)).toEqual(
+      new Set([...NAV, ...SPEC_WORKFLOWS, 'recall', 'verify_claim', 'blast_radius'])
+    );
     expect(tools.length).toBeLessThan(TOOL_DEFINITIONS.length); // strictly smaller than full
     expect(LEAN_DEFAULT_PRESET).toBe('substrate'); // the default IS the substrate preset
   });
@@ -471,8 +476,8 @@ describe('tool annotations (spec-11)', () => {
 });
 
 // ============================================================================
-// Spec 28 — tools/list payload budget. The full tool surface is a ~46 KB / ~11.6k-
-// token prefix that an eager (non-deferring) MCP client loads every turn. Spec 25
+// Spec 28 — tools/list payload budget. The full tool surface is a ~91.7 KB
+// schema prefix that an eager (non-deferring) MCP client loads every turn. Spec 25
 // §7 asked whether that prefix could be erased; Spec 28 measured the answer:
 // deferral is client-side (the dominant client already lazy-loads MCP schemas),
 // and the server-side lossless byte-lever is ~1%. These guards lock that in — they
@@ -480,17 +485,18 @@ describe('tool annotations (spec-11)', () => {
 // bump, not silent drift. Bytes mirror what the ListTools handler actually emits.
 // ============================================================================
 describe('tools/list payload budget (spec-28)', () => {
+  const toolPayloadBytes = (tools: typeof TOOL_DEFINITIONS): number => Buffer.byteLength(
+    JSON.stringify({ tools: tools.map(t => ({ ...t, annotations: toolAnnotations(t.name) })) }),
+    'utf8',
+  );
+
   const payloadBytes = (opts: { minimal?: boolean; preset?: string }): number => {
-    const tools = selectActiveTools(TOOL_DEFINITIONS, opts).map(t => ({
-      ...t,
-      annotations: toolAnnotations(t.name),
-    }));
-    return Buffer.byteLength(JSON.stringify({ tools }), 'utf8');
+    return toolPayloadBytes(selectActiveTools(TOOL_DEFINITIONS, opts));
   };
 
-  // Ceilings sit just above the measured size (full ≈ 46.5 KB, nav ≈ 10.9 KB) with
-  // ~1 tool of headroom. A new tool (~900 B) or un-trimmed boilerplate breaches
-  // them — forcing a deliberate decision rather than letting the cached prefix creep.
+  // Ceilings sit just above the measured size (full ≈ 91.7 KB, nav ≈ 13.9 KB).
+  // A new tool or untrimmed boilerplate breaches them, forcing a deliberate
+  // budget decision rather than letting the cached prefix creep.
   // The nav ceiling was bumped 8_500 → 9_800 → 10_700 → 11_800 as the structural-
   // navigation primitives get_landmarks, get_map, then find_path were added to the
   // preset — each a conscious budget decision, not silent drift.
@@ -605,18 +611,21 @@ describe('tools/list payload budget (spec-28)', () => {
   // opt-in `full` surface; it stays OUT of the lean substrate/navigation default, so
   // the lean prefix is unchanged. The residual is the genuine cost of its schema — a
   // conscious budget decision, not silent drift.
+  // Bumped 90_000 → 92_000 when the two bounded, read-only spec-workflow composites
+  // joined the registry (change: add-mcp-spec-workflow-composites). Their schemas expose
+  // pagination, provenance, and honest-degradation controls; this is the measured cost of
+  // that public contract rather than silent description drift.
   it('full surface stays within its prefix budget', () => {
-    expect(payloadBytes({ preset: 'full' })).toBeLessThan(90_000);
+    expect(payloadBytes({ preset: 'full' })).toBeLessThan(92_000);
   });
 
   it('the DEFAULT surface (no selector) is the substrate payload, well under the full one', () => {
-    // No selector now pays the substrate budget (~18 KB), not the ~85 KB full prefix.
-    // Substrate adds three governance-read tools (recall, verify_claim, blast_radius)
-    // to the navigation core; the benchmark (decision c79ec7ca) showed the wider default
-    // pays for itself with no task-completion or selection regression. Ceiling sits just
-    // above the measured substrate size with ~1 tool of headroom — a conscious decision.
+    // No selector pays the substrate budget (~20 KB), not the ~91 KB full prefix.
+    // Substrate adds three governance reads plus the two spec-workflow composites to the
+    // navigation core. The 19_000 → 21_000 bump is the measured cost of making Generate
+    // and Repair available to a default capable MCP host, with no internal LLM calls.
     expect(payloadBytes({})).toBe(payloadBytes({ preset: 'substrate' }));
-    expect(payloadBytes({})).toBeLessThan(19_000);
+    expect(payloadBytes({})).toBeLessThan(21_000);
     expect(payloadBytes({})).toBeLessThan(payloadBytes({ preset: 'full' }));
   });
 
@@ -629,13 +638,19 @@ describe('tools/list payload budget (spec-28)', () => {
   });
 
   // change: unify-navigation-and-governance-substrate — the `substrate` default
-  // preset is the navigation core + the three governance reads. It stays well under
+  // preset is the navigation core + two spec composites + three governance reads. It stays well under
   // the full surface (governance reads only, no inventories/specs/coordination), so
   // an out-of-box agent on the default surface still pays only a small prefix.
-  it('substrate preset (navigation core + governance reads) stays well under the full surface', () => {
-    expect(payloadBytes({ preset: 'substrate' })).toBeLessThan(20_000);
+  it('substrate preset (navigation + spec workflows + governance reads) stays well under the full surface', () => {
+    expect(payloadBytes({ preset: 'substrate' })).toBeLessThan(21_000);
     expect(payloadBytes({ preset: 'substrate' })).toBeLessThan(payloadBytes({ preset: 'full' }));
     expect(payloadBytes({ preset: 'substrate' })).toBeGreaterThan(payloadBytes({ preset: 'navigation' }));
+  });
+
+  it('the two spec composites add less than 1,700 bytes to the default surface', () => {
+    const substrate = selectActiveTools(TOOL_DEFINITIONS, { preset: 'substrate' });
+    const withoutSpecComposites = substrate.filter(t => !SPEC_WORKFLOWS.includes(t.name));
+    expect(toolPayloadBytes(substrate) - toolPayloadBytes(withoutSpecComposites)).toBeLessThan(1_700);
   });
 
   // Lossless-dedup invariant: the `directory` input is shared by every tool, so its

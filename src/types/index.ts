@@ -610,17 +610,62 @@ export interface AuditStaleDomain {
   staleSince: string;
 }
 
+/**
+ * Coverage availability is BINARY; the detail lives in a stable reason code.
+ *
+ * The previous `missing | invalid | stale` states leaked into arithmetic paths
+ * where an unusable mapping was reported as numeric zero, which generic agents
+ * and dashboards read as an observed count (change `harden-spec-workflow-lifecycle`,
+ * decision 5d3ac32a). Consumers MUST branch on `state` before using any
+ * mapping-dependent number.
+ */
+export type MappingCoverageState = 'available' | 'unavailable';
+
+export type MappingCoverageReason =
+  | 'mapping-not-generated'
+  | 'invalid-json'
+  | 'incompatible-provenance'
+  | 'fingerprint-mismatch'
+  | 'scoped-artifact'
+  | 'analysis-unavailable'
+  | 'specs-unavailable';
+
+export interface MappingCoverageStatus {
+  state: MappingCoverageState;
+  reason?: MappingCoverageReason;
+  message?: string;
+  remediation?: string;
+  artifactPath: string;
+  /** Where available coverage came from: the persisted cache, or an in-memory rebuild. */
+  source?: 'cache' | 'derived';
+  /**
+   * Why the persisted cache was not used, when coverage is nonetheless available.
+   * Observability only — an unusable cache never degrades availability, because the
+   * links are re-derived from the specs and the current graph.
+   */
+  cacheReason?: MappingCoverageReason;
+}
+
+/**
+ * Every mapping-dependent metric is nullable: `null` means "not established",
+ * numeric zero means an observed count of zero.
+ */
+export interface AuditCoverageSummary {
+  /** Mapping-independent: the analyzed function total is always observable. */
+  totalFunctions: number;
+  coveredFunctions: number | null;
+  coveragePct: number | null;
+  uncoveredCount: number | null;
+  hubGapCount: number | null;
+  orphanRequirementCount: number | null;
+  /** Mapping-independent: staleness is computed from spec/source timestamps. */
+  staleDomainCount: number;
+}
+
 export interface AuditReport {
   generatedAt: string;
-  summary: {
-    totalFunctions: number;
-    coveredFunctions: number;
-    coveragePct: number;
-    uncoveredCount: number;
-    hubGapCount: number;
-    orphanRequirementCount: number;
-    staleDomainCount: number;
-  };
+  mappingCoverage: MappingCoverageStatus;
+  summary: AuditCoverageSummary;
   uncoveredFunctions: AuditUncoveredFunction[];
   hubGaps: AuditUncoveredFunction[];
   orphanRequirements: AuditOrphanRequirement[];

@@ -26,7 +26,12 @@
 
 import { readFile, readdir, unlink } from 'node:fs/promises';
 import { atomicWriteFile } from '../decisions/atomic-store.js';
-import { withAnalysisLock } from '../decisions/lock.js';
+import { acquireAnalysisLock } from '../runtime/advisory-lock.js';
+import {
+  REQUIRED_ANALYSIS_ARTIFACTS,
+  discardGeneration,
+  publishGeneration,
+} from '../runtime/analysis-generation.js';
 import { createHash } from 'node:crypto';
 import { join, relative, posix } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -242,6 +247,7 @@ export class McpWatcher {
   private graphStalePendingReason?: GraphStaleReason;
   private graphRebuildRunning = false;   // singleflight for the self-spawned rebuild
   private graphRebuildPending = false;   // a trigger arrived mid-rebuild → run once more
+  private rebuildChildren = new Set<ReturnType<typeof spawn>>();
 
   // ── Coalescing queue (Step 1) ──────────────────────────────────────────────
   private pending = new Set<string>();              // absolute paths awaiting a flush
@@ -249,6 +255,8 @@ export class McpWatcher {
   private debounceTimer?: ReturnType<typeof setTimeout>;
   private maxBatchTimer?: ReturnType<typeof setTimeout>;
   private running = false;                           // single-flight for the signature flush
+  private flushPromise?: Promise<void>;              // lets stop() join the active flush
+  private stopping = false;                          // reject events once shutdown begins
   private vcsBulkFlag = false;                       // set by the .git ref watcher
 
   // ── Embedding lane (Step 4 — decoupled, lower priority) ─────────────────────
@@ -258,6 +266,7 @@ export class McpWatcher {
   private embedNodes = new Map<string, FunctionNode>(); // id → node awaiting embed
   private embedTimer?: ReturnType<typeof setTimeout>;
   private embedRunning = false;
+  private embedPromise?: Promise<void>;              // lets stop() join vector persistence
   private lastEmbedContext?: CachedContext;
 
   constructor(options: McpWatcherOptions) {
@@ -281,6 +290,7 @@ export class McpWatcher {
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
   async start(): Promise<void> {
+    this.stopping = false;
     // Auto-degrade live embedding on very large trees (Step 4). Counting is
     // bounded — it stops as soon as the ceiling is exceeded.
     if (this.embed) {
@@ -395,27 +405,55 @@ export class McpWatcher {
   }
 
   async stop(): Promise<void> {
+    this.stopping = true;
     if (this.debounceTimer) clearTimeout(this.debounceTimer);
     if (this.maxBatchTimer) clearTimeout(this.maxBatchTimer);
     if (this.embedTimer) clearTimeout(this.embedTimer);
     if (this.graphStaleTimer) clearTimeout(this.graphStaleTimer);
     this.debounceTimer = this.maxBatchTimer = this.embedTimer = this.graphStaleTimer = undefined;
-    // Best-effort: drain anything still queued so a save/delete right before
-    // shutdown is not lost. Deletions first, then changes (same order as flush).
-    if (!this.running) {
-      if (this.pendingDeletions.size > 0) {
-        const dels = Array.from(this.pendingDeletions);
-        this.pendingDeletions.clear();
-        try { await this.handleDeletions(dels); } catch { /* ignore */ }
-      }
-      if (this.pending.size > 0) {
-        const batch = Array.from(this.pending);
-        this.pending.clear();
-        try { await this.handleBatch(batch, { syncFlush: true }); } catch { /* ignore */ }
-      }
-    }
+    // Close event sources before joining the active flush. Once close resolves,
+    // the stopping guard below makes the pending sets a finite shutdown queue.
     await this.fsWatcher?.close();
     await this.gitWatcher?.close();
+    this.fsWatcher = this.gitWatcher = undefined;
+    await this.flushPromise;
+    await this.embedPromise;
+    // A completed structural flush may have queued the lower-priority embed lane
+    // immediately before stop cleared its timer. Drain it explicitly so shutdown
+    // cannot leave semantic search behind the committed structural generation.
+    if (this.embedFiles.size > 0) await this.runEmbedLane();
+    this.graphRebuildPending = false;
+    const rebuilds = [...this.rebuildChildren];
+    await Promise.all(rebuilds.map(child => new Promise<void>(resolve => {
+      let settled = false;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = setTimeout(() => {
+        try { child.kill('SIGKILL'); } catch { /* gone */ }
+        done();
+      }, 2_000);
+      child.once('close', done);
+      child.once('error', done);
+      try { child.kill('SIGTERM'); } catch { done(); }
+    })));
+
+    // Drain anything queued immediately before shutdown. Deletions first, then
+    // changes (same order as flush). stop() does not return while either can
+    // still publish analysis artifacts or release their advisory lock.
+    if (this.pendingDeletions.size > 0) {
+      const dels = Array.from(this.pendingDeletions);
+      this.pendingDeletions.clear();
+      try { await this.handleDeletions(dels); } catch { /* ignore */ }
+    }
+    if (this.pending.size > 0) {
+      const batch = Array.from(this.pending);
+      this.pending.clear();
+      try { await this.handleBatch(batch, { syncFlush: true }); } catch { /* ignore */ }
+    }
     process.stderr.write('[mcp-watcher] stopped\n');
   }
 
@@ -426,6 +464,7 @@ export class McpWatcher {
    * plus a one-shot hard ceiling so a continuous stream still flushes.
    */
   private enqueue(absPath: string): void {
+    if (this.stopping) return;
     this.pending.add(absPath);
     // A re-create supersedes a pending delete for the same path.
     this.pendingDeletions.delete(absPath);
@@ -434,6 +473,7 @@ export class McpWatcher {
 
   /** Queue a file deletion for the next flush (reuses the same debounce). */
   private enqueueDeletion(absPath: string): void {
+    if (this.stopping) return;
     this.pendingDeletions.add(absPath);
     // A delete supersedes a pending change for the same path.
     this.pending.delete(absPath);
@@ -462,6 +502,7 @@ export class McpWatcher {
 
   /** A .git ref changed — settle, then flush whatever changed as one bulk batch. */
   private onVcsEvent(): void {
+    if (this.stopping) return;
     this.vcsBulkFlag = true;
     if (this.debounceTimer) clearTimeout(this.debounceTimer);
     this.debounceTimer = this.armTimer(() => this.flush(), WATCH_VCS_SETTLE_MS);
@@ -487,17 +528,19 @@ export class McpWatcher {
     this.pendingDeletions.clear();
     this.running = true;
     // Deletions first (remove stale state), then re-index the changed/added files.
-    (async () => {
+    const operation = (async () => {
       if (deletions.length > 0) await this.handleDeletions(deletions);
       if (batch.length > 0) await this.handleBatch(batch);
     })()
-      .catch((err) => process.stderr.write(`[mcp-watcher] error: ${(err as Error).message}\n`))
-      .finally(() => {
-        this.running = false;
-        if (this.pending.size > 0 || this.pendingDeletions.size > 0) {
-          this.debounceTimer = this.armTimer(() => this.flush(), this.debounceMs);
-        }
-      });
+      .catch((err) => { process.stderr.write(`[mcp-watcher] error: ${(err as Error).message}\n`); });
+    this.flushPromise = operation;
+    void operation.finally(() => {
+      if (this.flushPromise === operation) this.flushPromise = undefined;
+      this.running = false;
+      if (!this.stopping && (this.pending.size > 0 || this.pendingDeletions.size > 0)) {
+        this.debounceTimer = this.armTimer(() => this.flush(), this.debounceMs);
+      }
+    });
   }
 
   // ── Core re-index ──────────────────────────────────────────────────────────
@@ -541,10 +584,16 @@ export class McpWatcher {
     }
     if (files.length === 0) return;
 
-    // 2. Incremental edge update (CGC _handle_modification algorithm), one open
-    //    store for the whole batch. Content-hash skip drops no-op autosaves.
+    // The graph database and required JSON artifacts are one logical generation.
+    // Hold the same fence across both mutations; splitting them into two sections
+    // lets a full analyze overwrite the DB between the watcher's DB and JSON writes.
+    const releaseAnalysis = await acquireAnalysisLock(this.outputPath);
+    let context: CachedContext;
     const changedFiles: ChangedFile[] = [];
     const changedNodes: FunctionNode[] = [];
+    try {
+    // 2. Incremental edge update (CGC _handle_modification algorithm), one open
+    //    store for the whole batch. Content-hash skip drops no-op autosaves.
     if (EdgeStore.exists(this.outputPath)) {
       const store = EdgeStore.open(EdgeStore.dbPath(this.outputPath));
       try {
@@ -705,11 +754,10 @@ export class McpWatcher {
     // directory — including the watcher's own self-heal `analyze --reanalyze` spawn
     // (change: harden-artifact-write-atomicity). loadContext is INSIDE the lock so
     // our persist can never clobber a fresh full write that landed after we read.
-    const context = await withAnalysisLock(this.outputPath, async (): Promise<CachedContext | null> => {
       const loaded = await this.loadContext();
       if (!loaded) {
         process.stderr.write(`[mcp-watcher] no context at ${this.contextPath} — run analyze first\n`);
-        return null;
+        return;
       }
       if (!loaded.signatures) loaded.signatures = [];
       for (const f of changedFiles) {
@@ -745,10 +793,11 @@ export class McpWatcher {
       //      must be able to create it, and a repaired file must be able to remove its entry (and the
       //      artifact once empty).
       await this.updateParseHealth(changedFiles);
-      return loaded;
-    });
-    if (!context) return;
-
+      await this.republishGeneration();
+      context = loaded;
+    } finally {
+      await releaseAnalysis();
+    }
     // 4. Vector update — decoupled from signature freshness (Step 4).
     const isBulk = consumedVcsBulk || changedFiles.length >= this.bulkThreshold;
     if (this.embed && !this.embedDegraded && context.callGraph) {
@@ -782,6 +831,7 @@ export class McpWatcher {
    * analyze" note rather than retrying — no thundering herd, no loop (B10).
    */
   private scheduleBackgroundRebuild(): void {
+    if (this.stopping) return;
     if (backgroundRebuildTriggered) return;
     backgroundRebuildTriggered = true;
     const cli = process.argv[1];
@@ -804,6 +854,8 @@ export class McpWatcher {
         [cli, 'analyze', '--reanalyze', '--no-embed', '--output', this.outputPath],
         { cwd: this.rootPath, stdio: 'ignore', detached: true }
       );
+      this.rebuildChildren.add(child);
+      child.once('close', () => this.rebuildChildren.delete(child));
       child.on('error', (err) => {
         process.stderr.write(`[mcp-watcher] background rebuild failed to start (${err.message}) — run "openlore analyze".\n`);
       });
@@ -854,6 +906,7 @@ export class McpWatcher {
    * the plain signatures-only watcher is byte-for-byte unchanged.
    */
   private scheduleGraphRebuild(reason: GraphStaleReason): boolean {
+    if (this.stopping) return false;
     if (!this.onGraphStale && !this.selfRebuild) return false;
     // Keep the first reason of a coalesced burst — HEAD-change is the more
     // salient cause when both fire together, and it arrives first on a switch.
@@ -899,13 +952,15 @@ export class McpWatcher {
         [cli, 'analyze', '--reanalyze', '--no-embed', '--output', this.outputPath],
         { cwd: this.rootPath, stdio: 'ignore', detached: true }
       );
+      this.rebuildChildren.add(child);
+      child.once('close', () => this.rebuildChildren.delete(child));
       child.on('error', (err) => {
         this.graphRebuildRunning = false;
         process.stderr.write(`[mcp-watcher] background graph rebuild failed to start (${err.message}) — run "openlore analyze".\n`);
       });
       child.on('exit', () => {
         this.graphRebuildRunning = false;
-        if (this.graphRebuildPending) { this.graphRebuildPending = false; this.spawnGraphRebuild(reason); }
+        if (!this.stopping && this.graphRebuildPending) { this.graphRebuildPending = false; this.spawnGraphRebuild(reason); }
       });
       child.unref();
       process.stderr.write(`[mcp-watcher] background "openlore analyze --reanalyze" started (${reason}); the graph will refresh shortly.\n`);
@@ -982,6 +1037,7 @@ export class McpWatcher {
   // ── Embedding lane (Step 4) ──────────────────────────────────────────────────
 
   private scheduleEmbed(context: CachedContext, changedFiles: ChangedFile[], nodes: FunctionNode[]): void {
+    if (this.stopping) return;
     for (const f of changedFiles) this.embedFiles.set(f.rel, f.content);
     for (const node of nodes) this.embedNodes.set(node.id, node);
     this.lastEmbedContext = context;
@@ -1004,13 +1060,20 @@ export class McpWatcher {
     this.embedFiles.clear();
     this.embedNodes.clear();
     this.embedRunning = true;
+    const operation = (async () => {
+      try {
+        await this.updateVectors(context, changedFiles, nodes);
+      } catch (err) {
+        process.stderr.write(`[mcp-watcher] embed error: ${(err as Error).message}\n`);
+      }
+    })();
+    this.embedPromise = operation;
     try {
-      await this.updateVectors(context, changedFiles, nodes);
-    } catch (err) {
-      process.stderr.write(`[mcp-watcher] embed error: ${(err as Error).message}\n`);
+      await operation;
     } finally {
+      if (this.embedPromise === operation) this.embedPromise = undefined;
       this.embedRunning = false;
-      if (this.embedFiles.size > 0) {
+      if (!this.stopping && this.embedFiles.size > 0) {
         this.embedTimer = this.armTimer(() => void this.runEmbedLane(), this.debounceMs);
       }
     }
@@ -1350,6 +1413,8 @@ export class McpWatcher {
     // here anyway: chokidar prunes them, so no unlink fires.)
     const rels = absPaths.map((abs) => relative(this.rootPath, abs));
     if (rels.length === 0) return;
+    const releaseAnalysis = await acquireAnalysisLock(this.outputPath);
+    try {
 
     // 1. Call-graph store — deleteEdgesForFile removes edges where the file is
     //    caller OR callee, so incoming edges don't dangle.
@@ -1396,7 +1461,6 @@ export class McpWatcher {
     // (change: harden-artifact-write-atomicity). The vector delete (step 4) is kept
     // inside the section rather than reordered — deletions are infrequent, and holding
     // the lock briefly is cheaper than risking a reorder.
-    await withAnalysisLock(this.outputPath, async () => {
       // 2. Signatures in llm-context.json.
       const context = await this.loadContext();
       if (context?.signatures) {
@@ -1439,10 +1503,39 @@ export class McpWatcher {
 
       // 7. Parse health — drop the deleted files' degradation records and re-roll-up.
       await this.updateParseHealth([], rels);
-    });
+      await this.republishGeneration();
+    } finally {
+      await releaseAnalysis();
+    }
 
     if (this.debug) {
       process.stderr.write(`[mcp-watcher] reconciled ${rels.length} deletion(s)\n`);
+    }
+  }
+
+  /**
+   * Republish the generation manifest at the commit point of an incremental write.
+   *
+   * The watcher rewrites the SAME required artifacts a full analyze publishes, so
+   * leaving the manifest alone would keep the old generation id on new content: a
+   * multi-artifact reader would then validate before/after against an identity that
+   * never moved and label a mixed read `ok`, and every cache keyed on the
+   * generation id would keep serving superseded structure. Always called inside the
+   * artifact lock, after the whole write set is durable.
+   */
+  private async republishGeneration(): Promise<void> {
+    try {
+      const manifest = await publishGeneration(
+        this.outputPath,
+        [...REQUIRED_ANALYSIS_ARTIFACTS],
+        { coherence: 'incremental' },
+      );
+      // An incomplete artifact set cannot be published. Drop the manifest rather
+      // than leave one vouching for content it no longer describes — readers then
+      // fall back to the disclosed legacy identity, which does track the rewrite.
+      if (!manifest) await discardGeneration(this.outputPath);
+    } catch (err) {
+      process.stderr.write(`[mcp-watcher] generation republish error: ${(err as Error).message}\n`);
     }
   }
 

@@ -40,6 +40,7 @@ import { doctorCommand } from './commands/doctor.js';
 import { setupCommand } from './commands/setup.js';
 import { refreshStoriesCommand } from './commands/refresh-stories.js';
 import { auditCommand } from './commands/audit.js';
+import { mappingCommand } from './commands/mapping.js';
 import { testCommand } from './commands/test.js';
 import { digestCommand } from './commands/digest.js';
 import { decisionsCommand } from './commands/decisions.js';
@@ -192,12 +193,15 @@ Core commands (no API key):
   openlore doctor       Check your setup and tell you exactly what to fix
   openlore features     List opt-in features, what's active, and how to turn on the rest
 
-Spec authoring (optional, needs an LLM API key):
-  openlore generate     Generate OpenSpec spec files from the analysis
-  openlore verify       Verify generated specs against the source
-  openlore drift        Detect when code outpaces specs
-  openlore test         Report spec test coverage
-  openlore digest       Plain-English summary of specs for human review
+Specs & governance:
+  openlore generate     Standalone provider-backed spec generation (provider access required)
+  prepare_spec_generation    Evidence for your connected host agent to author specs (no extra key)
+  openlore verify       LLM-enhanced verification (provider access required)
+  openlore drift        Detect when code outpaces specs (no API key by default)
+  openlore test         Report spec test coverage (no API key)
+  openlore digest       Plain-English summary of specs for human review (no API key)
+  openlore mapping refresh   Rebuild the spec→code link index from spec anchors (no API key)
+  openlore audit             Report spec coverage gaps from that index (no API key)
 
 Run 'openlore <command> --help' for the full options of any command.
 
@@ -222,6 +226,7 @@ program.addCommand(featuresCommand);
 program.addCommand(setupCommand);
 program.addCommand(refreshStoriesCommand);
 program.addCommand(auditCommand);
+program.addCommand(mappingCommand);
 program.addCommand(testCommand);
 program.addCommand(digestCommand);
 program.addCommand(decisionsCommand);

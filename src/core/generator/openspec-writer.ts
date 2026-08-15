@@ -48,6 +48,14 @@ export type WriteMode = 'replace' | 'merge' | 'skip';
 export interface OpenSpecWriterOptions {
   /** Root path of the project */
   rootPath: string;
+  /** Concrete OpenSpec root. Defaults to `<rootPath>/openspec`. */
+  openspecRoot?: string;
+  /**
+   * Concrete `.openlore` root for backups, outputs, and logs. Defaults to
+   * `<rootPath>/.openlore`. A preview (`generate --dry-run`) redirects it into its
+   * throwaway workspace so the project tree really is left byte-identical.
+   */
+  openloreRoot?: string;
   /** How to handle existing specs */
   writeMode?: WriteMode;
   /** Version string for generated specs */
@@ -120,15 +128,23 @@ const RESERVED_SPEC_DIRECTORIES = new Set(['overview', 'architecture']);
  */
 export class OpenSpecWriter {
   private rootPath: string;
+  private openspecRoot: string;
+  private openloreRoot: string;
   private options: Required<OpenSpecWriterOptions>;
   private configManager: OpenSpecConfigManager;
 
   constructor(options: OpenSpecWriterOptions) {
     this.rootPath = resolve(options.rootPath);
-    safeJoin(this.rootPath, OPENSPEC_DIR);
-    safeJoin(this.rootPath, OPENLORE_DIR);
+    this.openspecRoot = options.openspecRoot
+      ? resolve(options.openspecRoot)
+      : safeJoin(this.rootPath, OPENSPEC_DIR);
+    this.openloreRoot = options.openloreRoot
+      ? resolve(options.openloreRoot)
+      : safeJoin(this.rootPath, OPENLORE_DIR);
     this.options = {
       rootPath: this.rootPath,
+      openspecRoot: this.openspecRoot,
+      openloreRoot: this.openloreRoot,
       writeMode: options.writeMode ?? 'replace',
       version: options.version ?? '1.0.0',
       createBackups: options.createBackups ?? true,
@@ -136,7 +152,7 @@ export class OpenSpecWriter {
       validateBeforeWrite: options.validateBeforeWrite ?? true,
       cleanBeforeWrite: options.cleanBeforeWrite ?? false,
     };
-    this.configManager = new OpenSpecConfigManager(this.rootPath);
+    this.configManager = new OpenSpecConfigManager(this.rootPath, this.openspecRoot);
   }
 
   /**
@@ -144,15 +160,16 @@ export class OpenSpecWriter {
    */
   async initialize(): Promise<void> {
     // Create openspec directory structure
-    await mkdir(safeJoin(this.rootPath, join(OPENSPEC_DIR, OPENSPEC_SPECS_SUBDIR)), { recursive: true });
-    await mkdir(safeJoin(this.rootPath, join(OPENSPEC_DIR, OPENSPEC_DECISIONS_SUBDIR)), { recursive: true });
-    await mkdir(safeJoin(this.rootPath, join(OPENSPEC_DIR, 'changes', 'archive')), { recursive: true });
+    await mkdir(safeJoin(this.openspecRoot, OPENSPEC_SPECS_SUBDIR), { recursive: true });
+    await mkdir(safeJoin(this.openspecRoot, OPENSPEC_DECISIONS_SUBDIR), { recursive: true });
+    await mkdir(safeJoin(this.openspecRoot, join('changes', 'archive')), { recursive: true });
 
-    // Create .openlore directory structure
-    await mkdir(safeJoin(this.rootPath, join(OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR)), { recursive: true });
-    await mkdir(safeJoin(this.rootPath, join(OPENLORE_DIR, OPENLORE_BACKUPS_SUBDIR)), { recursive: true });
-    await mkdir(safeJoin(this.rootPath, join(OPENLORE_DIR, OPENLORE_OUTPUTS_SUBDIR)), { recursive: true });
-    await mkdir(safeJoin(this.rootPath, join(OPENLORE_DIR, OPENLORE_LOGS_SUBDIR)), { recursive: true });
+    // Create the .openlore directory structure under the configured root, which a
+    // preview redirects away from the project.
+    await mkdir(safeJoin(this.openloreRoot, OPENLORE_ANALYSIS_SUBDIR), { recursive: true });
+    await mkdir(safeJoin(this.openloreRoot, OPENLORE_BACKUPS_SUBDIR), { recursive: true });
+    await mkdir(safeJoin(this.openloreRoot, OPENLORE_OUTPUTS_SUBDIR), { recursive: true });
+    await mkdir(safeJoin(this.openloreRoot, OPENLORE_LOGS_SUBDIR), { recursive: true });
 
     logger.success('Initialized OpenSpec directory structure');
   }
@@ -190,7 +207,7 @@ export class OpenSpecWriter {
           .filter(s => s.type === 'domain' || s.type === 'api')
           .map(s => normalizeDomainName(s.domain))
       );
-      const specsDir = safeJoin(this.rootPath, join(OPENSPEC_DIR, OPENSPEC_SPECS_SUBDIR));
+      const specsDir = safeJoin(this.openspecRoot, OPENSPEC_SPECS_SUBDIR);
       let entries: Dirent[];
       try {
         entries = await readdir(specsDir, { withFileTypes: true });
@@ -207,8 +224,8 @@ export class OpenSpecWriter {
         .map(entry => ({
           name: entry.name,
           domainDir: safeJoin(
-            this.rootPath,
-            join(OPENSPEC_DIR, OPENSPEC_SPECS_SUBDIR, entry.name),
+            this.openspecRoot,
+            join(OPENSPEC_SPECS_SUBDIR, entry.name),
           ),
         }));
 
@@ -218,14 +235,8 @@ export class OpenSpecWriter {
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
         for (const stale of staleDomains) {
           const backupDir = safeJoin(
-            this.rootPath,
-            join(
-              OPENLORE_DIR,
-              OPENLORE_BACKUPS_SUBDIR,
-              timestamp,
-              OPENSPEC_SPECS_SUBDIR,
-              stale.name,
-            ),
+            this.openloreRoot,
+            join(OPENLORE_BACKUPS_SUBDIR, timestamp, OPENSPEC_SPECS_SUBDIR, stale.name),
           );
           await cp(stale.domainDir, backupDir, { recursive: true });
           report.filesBackedUp.push(relative(this.rootPath, backupDir));
@@ -316,7 +327,9 @@ export class OpenSpecWriter {
     // Fail closed for this one spec and let the rest proceed.
     let fullPath: string;
     try {
-      fullPath = safeJoin(this.rootPath, spec.path);
+      const prefix = `${OPENSPEC_DIR}/`;
+      if (!spec.path.startsWith(prefix)) throw new Error(`Spec path must start with ${prefix}`);
+      fullPath = safeJoin(this.openspecRoot, spec.path.slice(prefix.length));
     } catch (error) {
       logger.warning(`Refusing to write spec outside project root: ${relativePath}`);
       return {
@@ -338,7 +351,7 @@ export class OpenSpecWriter {
             return { path: relativePath, action: 'skipped', success: true };
 
           case 'merge':
-            return await this.mergeSpec(spec, fullPath);
+            return await this.mergeSpec(spec, fullPath, relativePath);
 
           case 'replace':
           default:
@@ -371,9 +384,7 @@ export class OpenSpecWriter {
   /**
    * Merge spec with existing content
    */
-  private async mergeSpec(spec: GeneratedSpec, fullPath: string): Promise<WriteResult> {
-    const relativePath = relative(this.rootPath, fullPath);
-
+  private async mergeSpec(spec: GeneratedSpec, fullPath: string, relativePath: string): Promise<WriteResult> {
     try {
       const existingContent = await readFile(fullPath, 'utf-8');
       const backupPath = this.options.createBackups
@@ -468,8 +479,8 @@ export class OpenSpecWriter {
   private async backupFile(fullPath: string, relativePath: string): Promise<string> {
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const backupPath = safeJoin(
-      this.rootPath,
-      join(OPENLORE_DIR, OPENLORE_BACKUPS_SUBDIR, timestamp, relativePath),
+      this.openloreRoot,
+      join(OPENLORE_BACKUPS_SUBDIR, timestamp, relativePath),
     );
 
     await mkdir(dirname(backupPath), { recursive: true });
@@ -497,7 +508,7 @@ export class OpenSpecWriter {
     const detectedContext = buildDetectedContext(survey);
 
     // Reject a repo-controlled config symlink before the config manager reads or writes it.
-    safeJoin(this.rootPath, join(OPENSPEC_DIR, OPENSPEC_CONFIG_FILENAME));
+    safeJoin(this.openspecRoot, OPENSPEC_CONFIG_FILENAME);
     await this.configManager.updateWithOpenLoreMetadata(metadata, detectedContext, {
       preserveUserContext: true,
       appendDetectedInfo: true,
@@ -550,8 +561,8 @@ export class OpenSpecWriter {
    */
   private async saveReport(report: GenerationReport): Promise<void> {
     const reportPath = safeJoin(
-      this.rootPath,
-      join(OPENLORE_DIR, OPENLORE_OUTPUTS_SUBDIR, ARTIFACT_GENERATION_REPORT),
+      this.openloreRoot,
+      join(OPENLORE_OUTPUTS_SUBDIR, ARTIFACT_GENERATION_REPORT),
     );
     await mkdir(dirname(reportPath), { recursive: true });
     await writeFile(reportPath, JSON.stringify(report, null, 2), 'utf-8');

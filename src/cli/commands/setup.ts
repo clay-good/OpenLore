@@ -5,14 +5,14 @@
  * Unlike `analyze --ai-configs` (which generates project-specific context files),
  * `setup` copies static workflow assets that are the same for every project:
  *
- *   - Mistral Vibe skills  -> .vibe/skills/openlore-{name}/SKILL.md      (8 skills)
+ *   - Mistral Vibe skills  -> .vibe/skills/openlore-{name}/SKILL.md      (10 skills)
  *   - Cline workflows      -> .clinerules/workflows/openlore-{name}.md
- *   - Claude Code skills   -> .claude/skills/openlore-{name}/SKILL.md    (8 skills)
- *   - OpenCode skills      -> .opencode/skills/openlore-{name}/SKILL.md  (8 skills)
+ *   - Claude Code skills   -> .claude/skills/openlore-{name}/SKILL.md    (10 skills)
+ *   - OpenCode skills      -> .opencode/skills/openlore-{name}/SKILL.md  (10 skills)
  *   - GSD commands         -> .claude/commands/gsd/openlore-{name}.md
  *
  * Files are never overwritten — existing files are skipped silently.
- * Assets are read from the `examples/` directory shipped with the openlore package.
+ * Canonical skills are read from `skills/`; other integration assets remain under `examples/`.
  */
 
 import { Command } from 'commander';
@@ -35,7 +35,7 @@ import type { PanicResponseMode } from '../../types/index.js';
 type ToolName = 'vibe' | 'cline' | 'gsd' | 'bmad' | 'claude' | 'opencode' | 'omoa' | 'pi';
 
 interface SkillEntry {
-  /** Absolute source path inside the package's examples/ directory */
+  /** Absolute source path inside the package */
   src: string;
   /** Relative destination path from the project root */
   dest: string;
@@ -107,21 +107,29 @@ async function detectOmoa(projectRoot: string): Promise<boolean> {
 async function copyFile(
   src: string,
   dest: string,
-  force: boolean
+  force: boolean,
+  transform?: (content: string) => string,
 ): Promise<'created' | 'updated' | 'skipped'> {
   const exists = await fileExists(dest);
   if (exists && !force) return 'skipped';
-  const content = await readFile(src, 'utf-8');
+  const raw = await readFile(src, 'utf-8');
+  const content = transform ? transform(raw) : raw;
   await mkdir(dirname(dest), { recursive: true });
   await writeFile(dest, content, 'utf-8');
   return exists ? 'updated' : 'created';
+}
+
+/** Add only metadata required by a specific host, keeping canonical skills portable. */
+export function adaptSkillForHost(content: string, host: ToolName): string {
+  if (host !== 'vibe' || /^user-invocable:/m.test(content)) return content;
+  return content.replace(/^(name:\s*[^\n]+)$/m, '$1\nuser-invocable: true');
 }
 
 // ============================================================================
 // SKILL MANIFESTS
 // ============================================================================
 
-function buildManifest(projectRoot: string, piGlobal = false): Record<ToolName, SkillEntry[]> {
+export function buildManifest(projectRoot: string, piGlobal = false): Record<ToolName, SkillEntry[]> {
   const ex = join(PACKAGE_ROOT, 'examples');
 
   const VIBE_SKILLS = [
@@ -130,12 +138,15 @@ function buildManifest(projectRoot: string, piGlobal = false): Record<ToolName, 
     'openlore-debug',
     'openlore-execute-refactor',
     'openlore-generate',
+    'openlore-repair',
     'openlore-implement-story',
     'openlore-plan-refactor',
+    'openlore-review-changes',
     'openlore-write-tests',
   ];
 
-  const OPENCODE_SKILLS = VIBE_SKILLS; // same skill names, different source + dest
+  const OPENCODE_SKILLS = VIBE_SKILLS;
+  const skillSource = (name: string): string => join(PACKAGE_ROOT, 'skills', name, 'SKILL.md');
 
   const CLINE_WORKFLOWS = [
     'openlore-analyze-codebase.md',
@@ -154,7 +165,7 @@ function buildManifest(projectRoot: string, piGlobal = false): Record<ToolName, 
 
   return {
     vibe: VIBE_SKILLS.map((name) => ({
-      src: join(ex, 'mistral-vibe', 'skills', name, 'SKILL.md'),
+      src: skillSource(name),
       dest: join(projectRoot, '.vibe', 'skills', name, 'SKILL.md'),
     })),
     cline: CLINE_WORKFLOWS.map((file) => ({
@@ -176,12 +187,12 @@ function buildManifest(projectRoot: string, piGlobal = false): Record<ToolName, 
       })),
     ],
     claude: OPENCODE_SKILLS.map((name) => ({
-      src: join(ex, 'opencode-skills', name, 'SKILL.md'),
+      src: skillSource(name),
       dest: join(projectRoot, '.claude', 'skills', name, 'SKILL.md'),
     })),
     opencode: [
       ...OPENCODE_SKILLS.map((name) => ({
-        src: join(ex, 'opencode-skills', name, 'SKILL.md'),
+        src: skillSource(name),
         dest: join(projectRoot, '.opencode', 'skills', name, 'SKILL.md'),
       })),
       {
@@ -272,7 +283,12 @@ async function runSetup(
         const oldTs = entry.dest.slice(0, -3) + '.ts';
         if (await fileExists(oldTs)) await unlink(oldTs);
       }
-      const status = await copyFile(entry.src, entry.dest, force);
+      const status = await copyFile(
+        entry.src,
+        entry.dest,
+        force,
+        /[/\\]SKILL\.md$/.test(entry.dest) ? content => adaptSkillForHost(content, tool) : undefined,
+      );
       const rel = entry.dest.startsWith(projectRoot)
         ? entry.dest.slice(projectRoot.length).replace(/^\//, '')
         : entry.dest;
@@ -567,7 +583,7 @@ export const setupCommand = new Command('setup')
         message: 'Which agent tools do you want to install skills for?',
         choices: [
           {
-            name: 'Claude Code   (.claude/skills/ — 8 skills + pre-commit hook)',
+            name: 'Claude Code   (.claude/skills/ — 10 skills + pre-commit hook)',
             value: 'claude' as ToolName,
           },
           {
@@ -575,11 +591,11 @@ export const setupCommand = new Command('setup')
             value: 'cline' as ToolName,
           },
           {
-            name: 'Mistral Vibe  (.vibe/skills/openlore-{name}/SKILL.md — 8 skills)',
+            name: 'Mistral Vibe  (.vibe/skills/openlore-{name}/SKILL.md — 10 skills)',
             value: 'vibe' as ToolName,
           },
           {
-            name: 'OpenCode      (.opencode/skills/openlore-{name}/SKILL.md — 8 skills + agent-guard plugin)',
+            name: 'OpenCode      (.opencode/skills/openlore-{name}/SKILL.md — 10 skills + agent-guard plugin)',
             value: 'opencode' as ToolName,
           },
           {

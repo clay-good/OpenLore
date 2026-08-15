@@ -16,7 +16,7 @@ import type {
   ExtractedEndpoint,
   ArchitectureSynthesis,
 } from './spec-pipeline.js';
-import type { MappingArtifact } from './mapping-generator.js';
+import { requirementAnchorKey, type SpecSymbolRef } from './spec-link-index.js';
 import type { DependencyGraphResult } from '../analyzer/dependency-graph.js';
 
 // ============================================================================
@@ -993,84 +993,62 @@ describe('OpenSpecFormatGenerator — ## Dependencies section', () => {
 });
 
 // ============================================================================
-// > Implementation: file:line annotations (Piste 2)
+// Requirement-scoped implementation anchors
 // ============================================================================
 
-function makeMappingArtifact(domain: string, requirement: string, file: string, line: number): MappingArtifact {
-  return {
-    generatedAt: new Date().toISOString(),
-    mappings: [
-      {
-        requirement,
-        service: 'SomeService',
-        domain,
-        specFile: `openspec/specs/${domain}/spec.md`,
-        functions: [
-          { name: 'doSomething', file, line, kind: 'function', confidence: 'llm' },
-        ],
-      },
-    ],
-    orphanFunctions: [],
-    stats: { totalRequirements: 1, mappedRequirements: 1, totalExportedFunctions: 5, orphanCount: 0 },
-  };
+function anchorMap(
+  domain: string,
+  requirement: string,
+  name: string,
+  file: string,
+  line = 1,
+): Map<string, SpecSymbolRef> {
+  return new Map([
+    [requirementAnchorKey(domain, requirement), { name, file, line, kind: 'function' }],
+  ]);
 }
 
-describe('OpenSpecFormatGenerator — > Implementation annotations', () => {
-  it('emits > Implementation after matching Requirement header', () => {
-    const result = createMockPipelineResult();
-    const mapping = makeMappingArtifact('user', 'Getuser', 'src/services/user.ts', 42);
+describe('OpenSpecFormatGenerator — requirement implementation anchors', () => {
+  it('emits the canonical name::path anchor after a matching Requirement header', () => {
     const gen = new OpenSpecFormatGenerator();
-    const specs = gen.generateSpecs(result, mapping);
+    const specs = gen.generateSpecs(
+      createMockPipelineResult(),
+      anchorMap('user', 'Getuser', 'doSomething', 'src/services/user.ts', 42),
+    );
     const userSpec = specs.find(s => s.domain === 'user')!;
 
-    expect(userSpec.content).toContain('> Implementation: `doSomething` in `src/services/user.ts` · confidence: llm');
+    expect(userSpec.content).toContain('- **Implementation**: `doSomething::src/services/user.ts`');
   });
 
-  it('does not emit > Implementation when no matching mapping', () => {
-    const result = createMockPipelineResult();
-    const mapping = makeMappingArtifact('auth', 'Login', 'src/auth.ts', 10);
+  it('emits no anchor when no verified anchor exists for the requirement', () => {
     const gen = new OpenSpecFormatGenerator();
-    const specs = gen.generateSpecs(result, mapping);
+    const specs = gen.generateSpecs(
+      createMockPipelineResult(),
+      anchorMap('auth', 'Login', 'login', 'src/auth.ts', 10),
+    );
     const userSpec = specs.find(s => s.domain === 'user')!;
 
-    expect(userSpec.content).not.toContain('> Implementation:');
+    // The domain-level Technical Notes still lists implementation FILES; what must
+    // be absent is a requirement-scoped `name::path` symbol anchor.
+    expect(userSpec.content).not.toContain('doSomething::');
   });
 
-  it('does not emit > Implementation when no mappingArtifact passed', () => {
-    const result = createMockPipelineResult();
+  it('emits no anchor when no anchor map is passed at all', () => {
     const gen = new OpenSpecFormatGenerator();
-    const specs = gen.generateSpecs(result);
+    const specs = gen.generateSpecs(createMockPipelineResult());
     for (const spec of specs.filter(s => s.type === 'domain')) {
-      expect(spec.content).not.toContain('> Implementation:');
+      expect(spec.content).not.toMatch(/- \*\*Implementation\*\*: `[^`]+::/);
     }
   });
 
-  it('prefers llm confidence over semantic over heuristic', () => {
-    const result = createMockPipelineResult();
-    const mapping: MappingArtifact = {
-      generatedAt: new Date().toISOString(),
-      mappings: [
-        {
-          requirement: 'Getuser',
-          service: 'UserService',
-          domain: 'user',
-          specFile: 'openspec/specs/user/spec.md',
-          functions: [
-            { name: 'getUserHeuristic', file: 'src/h.ts', line: 1, kind: 'function', confidence: 'heuristic' },
-            { name: 'getUserLlm', file: 'src/llm.ts', line: 2, kind: 'function', confidence: 'llm' },
-            { name: 'getUserSemantic', file: 'src/sem.ts', line: 3, kind: 'function', confidence: 'semantic' },
-          ],
-        },
-      ],
-      orphanFunctions: [],
-      stats: { totalRequirements: 1, mappedRequirements: 1, totalExportedFunctions: 3, orphanCount: 0 },
-    };
+  it('never emits a confidence tier — a written anchor is exact or absent', () => {
     const gen = new OpenSpecFormatGenerator();
-    const specs = gen.generateSpecs(result, mapping);
+    const specs = gen.generateSpecs(
+      createMockPipelineResult(),
+      anchorMap('user', 'Getuser', 'doSomething', 'src/services/user.ts'),
+    );
     const userSpec = specs.find(s => s.domain === 'user')!;
 
-    expect(userSpec.content).toContain('`getUserLlm` in `src/llm.ts`');
-    expect(userSpec.content).not.toContain('src/h.ts');
-    expect(userSpec.content).not.toContain('src/sem.ts');
+    expect(userSpec.content).not.toContain('confidence:');
   });
 });

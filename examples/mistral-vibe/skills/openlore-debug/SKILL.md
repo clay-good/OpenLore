@@ -1,17 +1,6 @@
 ---
 name: openlore-debug
-description: Debug a problem by anchoring root-cause analysis in openlore structural knowledge. Uses orient + search_specs + analyze_impact to form an explicit hypothesis before reading code. Enforces RED/GREEN test verification.
-license: MIT
-compatibility: openlore MCP server
-user-invocable: true
-allowed-tools:
-  - ask_followup_question
-  - use_mcp_tool
-  - read_file
-  - write_file
-  - str_replace_based_edit
-  - replace_in_file
-  - run_command
+description: Debug with OpenLore structural context, an explicit root-cause hypothesis, and RED/GREEN verification. Use when a bug, failure, or regression needs diagnosis and repair.
 ---
 
 # openlore: Debug
@@ -55,16 +44,13 @@ Capture:
 
 ## Step 2 — Orient
 
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>orient</tool_name>
-  <arguments>{
-    "directory": "$PROJECT_ROOT",
-    "task": "$BUG_DESCRIPTION",
-    "limit": 7
-  }</arguments>
-</use_mcp_tool>
+Call the openlore MCP tool `orient` with:
+```json
+{
+  "directory": "$PROJECT_ROOT",
+  "task": "$BUG_DESCRIPTION",
+  "limit": 7
+}
 ```
 
 Extract:
@@ -78,16 +64,13 @@ Extract:
 
 If `openspec/specs/` exists:
 
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>search_specs</tool_name>
-  <arguments>{
-    "directory": "$PROJECT_ROOT",
-    "query": "$BUG_DESCRIPTION",
-    "limit": 5
-  }</arguments>
-</use_mcp_tool>
+Call the openlore MCP tool `search_specs` with:
+```json
+{
+  "directory": "$PROJECT_ROOT",
+  "query": "$BUG_DESCRIPTION",
+  "limit": 5
+}
 ```
 
 Look for:
@@ -102,41 +85,31 @@ If no specs exist, skip this step and note the absence.
 ## Step 4 — Isolate and hypothesize
 
 For the top 2 candidate functions from Step 2, get minimal context first (callers, callees, body, test coverage in one call):
-
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>get_minimal_context</tool_name>
-  <arguments>{"directory": "$PROJECT_ROOT", "functionName": "$CANDIDATE_FUNCTION"}</arguments>
-</use_mcp_tool>
+```json
+// get_minimal_context
+{
+  "directory": "$PROJECT_ROOT",
+  "functionName": "$CANDIDATE_FUNCTION"
+}
 ```
 
 Then check structural properties:
-
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>analyze_impact</tool_name>
-  <arguments>{
-    "directory": "$PROJECT_ROOT",
-    "symbol": "$CANDIDATE_FUNCTION",
-    "depth": 2
-  }</arguments>
-</use_mcp_tool>
+```json
+// analyze_impact
+{
+  "directory": "$PROJECT_ROOT",
+  "symbol": "$CANDIDATE_FUNCTION",
+  "depth": 2
+}
 ```
 
-If the repro involves a request flow (HTTP request, event, message queue), confirm the call chain before forming the hypothesis:
-
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>trace_execution_path</tool_name>
-  <arguments>{
-    "directory": "$PROJECT_ROOT",
-    "from": "$ENTRY_POINT",
-    "to": "$CANDIDATE_FUNCTION"
-  }</arguments>
-</use_mcp_tool>
+If the repro involves a request flow (HTTP request, event, message queue), confirm the call chain before forming the hypothesis by calling the openlore MCP tool `trace_execution_path` with:
+```json
+{
+  "directory": "$PROJECT_ROOT",
+  "from": "$ENTRY_POINT",
+  "to": "$CANDIDATE_FUNCTION"
+}
 ```
 
 This replaces speculative file browsing — the path is structural fact, not inference. Skip if `$ENTRY_POINT` is unknown or the repro is not request-driven.
@@ -158,17 +131,12 @@ The hypothesis must:
 
 ## Step 5 — Verify the hypothesis
 
-Read the source of the hypothesised function(s):
-
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>get_function_skeleton</tool_name>
-  <arguments>{
-    "directory": "$PROJECT_ROOT",
-    "filePath": "$TARGET_FILE"
-  }</arguments>
-</use_mcp_tool>
+Read the skeleton of the hypothesised function(s) by calling the openlore MCP tool `get_function_skeleton` with:
+```json
+{
+  "directory": "$PROJECT_ROOT",
+  "filePath": "$TARGET_FILE"
+}
 ```
 
 Then read the full function body if needed.
@@ -223,13 +191,7 @@ before closing the bug.
 
 Only if the fix changes a documented behaviour:
 
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>check_spec_drift</tool_name>
-  <arguments>{"directory": "$PROJECT_ROOT"}</arguments>
-</use_mcp_tool>
-```
+Call the openlore MCP tool `check_spec_drift` with `{"directory": "$PROJECT_ROOT"}`.
 
 | Drift type | Resolution |
 |---|---|
@@ -257,15 +219,12 @@ or an undocumented state constraint — that is the invariant.
 
 **9b — Locate the spec**
 
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>get_spec</tool_name>
-  <arguments>{
-    "directory": "$PROJECT_ROOT",
-    "domain": "$DOMAIN_AFFECTED"
-  }</arguments>
-</use_mcp_tool>
+Call the openlore MCP tool `get_spec` with:
+```json
+{
+  "directory": "$PROJECT_ROOT",
+  "domain": "$DOMAIN_AFFECTED"
+}
 ```
 
 **9c — Add the invariant**
@@ -297,7 +256,7 @@ Ask: is this bug an instance of a general failure pattern, or specific to this d
 | Bug is specific to a data invariant in `$DOMAIN` | No — domain spec only |
 
 If cross-cutting, append to `.claude/antipatterns.md` (if absent, create it with the
-header from the [antipatterns template](../../antipatterns-template.md)):
+header from the antipatterns template):
 
 ```markdown
 ## AP-{NNN} — {pattern name}

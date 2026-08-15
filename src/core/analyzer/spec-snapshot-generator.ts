@@ -140,7 +140,7 @@ export class SpecSnapshotGenerator {
     private readonly openspecRelPath: string = OPENSPEC_DIR,
   ) {}
 
-  async generate(): Promise<SpecSnapshot> {
+  async generate(options: { persist?: boolean } = {}): Promise<SpecSnapshot> {
     const analysisDir = join(this.rootPath, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
     const openspecPath = join(this.rootPath, this.openspecRelPath);
 
@@ -223,11 +223,12 @@ export class SpecSnapshotGenerator {
       hubs,
     };
 
-    // Persist
-    await writeFile(
-      join(analysisDir, ARTIFACT_SPEC_SNAPSHOT),
-      JSON.stringify(snapshot, null, 2),
-    );
+    if (options.persist ?? true) {
+      await writeFile(
+        join(analysisDir, ARTIFACT_SPEC_SNAPSHOT),
+        JSON.stringify(snapshot, null, 2),
+      );
+    }
 
     return snapshot;
   }

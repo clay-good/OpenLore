@@ -281,7 +281,7 @@ function stableCompare(a: string, b: string): number {
 
 /** A stable sort key so identical findings produce identical, reproducible gate output. */
 function findingKey(f: GovernanceFinding): string {
-  return `${f.code} ${f.subject} ${f.message}`;
+  return `${f.code}\0${f.subject}\0${f.message}`;
 }
 
 export interface GateResult {

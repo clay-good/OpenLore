@@ -51,6 +51,10 @@ export interface StructuralDiffInput {
   headRef?: string;
   /** Cap reported items per category (default 200). */
   maxResults?: number;
+  /** Internal composite mode: return the full logical stream for downstream paging. */
+  unboundedResults?: boolean;
+  /** Optional repository-relative file scope applied before graph construction and truncation. */
+  files?: string[];
   /**
    * Optional declared write-footprint for the change (proposal-1 `Footprint`
    * shape, or any subset carrying `writeSet`/`readSet`). When supplied,
@@ -182,7 +186,9 @@ export async function handleStructuralDiff(input: StructuralDiffInput): Promise<
 
   // Code files only; logical path = the new path (so a file move doesn't explode
   // into all-removed + all-added at the function level).
+  const fileScope = input.files ? new Set(input.files) : null;
   const codeChanged = changed.filter(c => {
+    if (fileScope && !fileScope.has(c.path) && !(c.oldPath && fileScope.has(c.oldPath))) return false;
     const lang = detectLanguage(c.path);
     return lang && lang !== 'Unknown' && lang !== 'unknown';
   });
@@ -355,7 +361,9 @@ export async function handleStructuralDiff(input: StructuralDiffInput): Promise<
     return [...out.values()].sort((a, b) => a.file.localeCompare(b.file) || a.name.localeCompare(b.name));
   };
 
-  const limit = Math.max(1, Math.min(input.maxResults ?? 200, 1000));
+  const limit = input.unboundedResults
+    ? Number.POSITIVE_INFINITY
+    : Math.max(1, Math.min(input.maxResults ?? 200, 1000));
   const sigChangedOut = signatureChanged
     .map(s => ({ ...nodeRef(s.node), before: s.before, after: s.after, staleCallers: collectStaleCallers(s.node.id) }))
     .sort((a, b) => b.staleCallers.length - a.staleCallers.length || a.file.localeCompare(b.file));

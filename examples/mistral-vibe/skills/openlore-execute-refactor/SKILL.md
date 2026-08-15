@@ -1,18 +1,6 @@
 ---
 name: openlore-execute-refactor
-description: Apply the refactoring plan produced by openlore-plan-refactor. Reads .openlore/refactor-plan.md and re-reads it before each change to stay on track. Requires a confirmed plan to exist before running.
-license: MIT
-compatibility: openlore MCP server
-user-invocable: true
-allowed-tools:
-  - use_mcp_tool
-  - read_file
-  - write_file
-  - str_replace_based_edit
-  - replace_in_file
-  - apply_diff
-  - run_command
-  - openlore-plan-refactor
+description: Apply a confirmed .openlore/refactor-plan.md with a test gate after each change. Use when asked to execute or continue an OpenLore refactoring plan.
 ---
 
 # openlore: Execute Refactor
@@ -105,7 +93,7 @@ If coverage is below 40%:
 Only continue past this point with **explicit user confirmation**.
 
 **Large file warning**: if the target function spans more than 300 lines:
-> "This function is X lines long. Devstral Small 2 may lose code when editing files of this size in a single pass. The plan must decompose each change to ≤ 50 lines. Verify the plan respects this before continuing."
+> "This function is X lines long. Small models may lose code when editing files of this size in a single pass. The plan must decompose each change to ≤ 50 lines. Verify the plan respects this before continuing."
 
 ---
 
@@ -126,23 +114,9 @@ Fill in the `Restore point` section of `.openlore/refactor-plan.md` with the cur
 
 ## Step 4 — Apply changes (mini-development loop)
 
-Before applying the first change, record the refactoring decision:
-
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>record_decision</tool_name>
-  <arguments>{
-    "directory": "$DIRECTORY",
-    "title": "Refactor $TARGET_FUNCTION via $STRATEGY",
-    "rationale": "$PRIMARY_REASON from the plan's Why section",
-    "consequences": "Callers unchanged; complexity distributed across extracted helpers",
-    "affectedFiles": ["$TARGET_FILE"]
-  }</arguments>
-</use_mcp_tool>
-```
-
-Also call `record_decision` for any unexpected architectural choice that emerges mid-refactor (new module boundary discovered, shared interface change required, dependency introduced).
+Before the first change, call `record_decision` with the directory, target function,
+selected strategy, rationale, consequences, and affected files. Record any additional
+architectural choice discovered during the refactor as it arises.
 
 For **each change** in the plan, execute the full mini-development cycle below.
 Do not move to the next change until the current one is marked ✅.
@@ -156,9 +130,9 @@ Re-read `.openlore/refactor-plan.md` to confirm:
 
 ### Editing tool rule
 
-Always prefer a targeted edit tool (`replace_in_file`, `str_replace_based_edit`, `apply_diff`) over a full-file rewrite (`write_to_file`). Only use `write_to_file` if the file is under 100 lines. If a change seems to require `write_to_file` on a larger file, stop and split it into smaller targeted edits.
+Always prefer a targeted edit tool over a full-file rewrite. Only use a full rewrite if the file is under 100 lines. If a change seems to require a full rewrite on a larger file, stop and split it into smaller targeted edits.
 
-**Devstral Small 2 constraint**: each edit must touch a contiguous block of at most **50 lines**. If the planned change exceeds this, split it into sub-changes before proceeding — do not attempt an oversized edit.
+**Small model constraint**: each edit must touch a contiguous block of at most **50 lines**. If the planned change exceeds this, split it into sub-changes before proceeding — do not attempt an oversized edit.
 
 ### Mini-development cycle (execute for each change)
 
@@ -210,19 +184,9 @@ Append `✅` to the change heading in `.openlore/refactor-plan.md`, then proceed
 
 ## Step 5 — Verify improvement
 
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>analyze_codebase</tool_name>
-  <arguments>{"directory": "$DIRECTORY", "force": true}</arguments>
-</use_mcp_tool>
+Call the openlore MCP tool `analyze_codebase` with `{"directory": "$DIRECTORY", "force": true}`.
 
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>get_refactor_report</tool_name>
-  <arguments>{"directory": "$DIRECTORY"}</arguments>
-</use_mcp_tool>
-```
+Then call the openlore MCP tool `get_refactor_report` with `{"directory": "$DIRECTORY"}`.
 
 Check each acceptance criterion from the plan:
 - Priority score dropped below the target
@@ -241,13 +205,7 @@ Run the full test suite one final time to confirm the refactored state is clean.
 
 ### 6a — Dead code: orphan functions
 
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>get_mapping</tool_name>
-  <arguments>{"directory": "$DIRECTORY", "orphansOnly": true}</arguments>
-</use_mcp_tool>
-```
+Call the openlore MCP tool `get_mapping` with `{"directory": "$DIRECTORY", "orphansOnly": true}`.
 
 Present the orphan list (kind `function` or `class` only). For each one, check:
 - Is it exported and potentially consumed by external code?
@@ -258,13 +216,7 @@ Present the orphan list (kind `function` or `class` only). For each one, check:
 
 ### 6b — Naming alignment: spec vocabulary vs actual names
 
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>get_mapping</tool_name>
-  <arguments>{"directory": "$DIRECTORY"}</arguments>
-</use_mcp_tool>
-```
+Call the openlore MCP tool `get_mapping` with `{"directory": "$DIRECTORY"}`.
 
 Build a table of mismatches and present it before touching any code:
 
@@ -280,7 +232,7 @@ Only renames with `confidence: "llm"` should be proposed automatically. Flag `co
 ## Absolute constraints
 
 - Always re-read `.openlore/refactor-plan.md` before each change
-- Never use `write_to_file` on a file > 100 lines
+- Never rewrite a file > 100 lines in a single operation
 - Never accumulate broken state — restore immediately on any test failure
 - Always verify the diff before running tests
 - Never proceed to Step 6 without explicit user request

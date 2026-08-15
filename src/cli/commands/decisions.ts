@@ -45,7 +45,7 @@ import {
   type DraftDisposition,
 } from '../../core/decisions/disposition.js';
 import { classifyGateState } from '../../core/decisions/gate-state.js';
-import { acquireDecisionsLock } from '../../core/decisions/lock.js';
+import { acquireDecisionsLock } from '../../core/runtime/advisory-lock.js';
 import { extractFromDiff } from '../../core/decisions/extractor.js';
 import { markVerificationEvidenceAbsent, verifyDecisions } from '../../core/decisions/verifier.js';
 import { syncApprovedDecisions } from '../../core/decisions/syncer.js';

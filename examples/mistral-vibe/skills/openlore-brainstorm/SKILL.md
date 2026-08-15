@@ -1,16 +1,6 @@
 ---
 name: openlore-brainstorm
-description: Transform a feature idea into an annotated story. Detects greenfield vs brownfield automatically — uses Domain Sketch for greenfield (no existing code), Constrained Option Tree for brownfield (existing codebase with openlore analysis).
-license: MIT
-compatibility: openlore MCP server
-user-invocable: true
-allowed-tools:
-  - ask_followup_question
-  - use_mcp_tool
-  - read_file
-  - write_file
-  - str_replace_based_edit
-  - run_command
+description: Transform a feature idea into an annotated story using a Domain Sketch or Constrained Option Tree. Use when asked to brainstorm, explore, or shape a feature before implementation.
 ---
 
 # openlore: Brainstorm
@@ -31,18 +21,13 @@ writing any code, with phrasings like:
 Capture `$PROJECT_ROOT`, `$FEATURE_DESCRIPTION`, and
 `$FEATURE_SLUG` (kebab-case, ≤ 5 words, e.g. `payment-retry-flow`).
 
-Then probe the structural index:
-
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>orient</tool_name>
-  <arguments>{
-    "directory": "$PROJECT_ROOT",
-    "task": "$FEATURE_DESCRIPTION",
-    "limit": 7
-  }</arguments>
-</use_mcp_tool>
+Then probe the structural index by calling the openlore MCP tool `orient` with:
+```json
+{
+  "directory": "$PROJECT_ROOT",
+  "task": "$FEATURE_DESCRIPTION",
+  "limit": 7
+}
 ```
 
 Set `$MODE` based on the result:
@@ -69,31 +54,22 @@ These will be used as a failure mode source in Step 5. If absent, `$ANTIPATTERNS
 
 ### Step 2 — Architecture overview
 
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>get_architecture_overview</tool_name>
-  <arguments>{"directory": "$PROJECT_ROOT"}</arguments>
-</use_mcp_tool>
-```
+Call the openlore MCP tool `get_architecture_overview` with `{"directory": "$PROJECT_ROOT"}`.
 
 Note hub functions and cross-domain dependencies in `$DOMAINS_AFFECTED`.
 
 ### Step 3 — Generate change proposal
 
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>generate_change_proposal</tool_name>
-  <arguments>{
-    "directory": "$PROJECT_ROOT",
-    "description": "$FEATURE_DESCRIPTION",
-    "slug": "$FEATURE_SLUG"
-  }</arguments>
-</use_mcp_tool>
+Call the openlore MCP tool `generate_change_proposal` with:
+```json
+{
+  "directory": "$PROJECT_ROOT",
+  "description": "$FEATURE_DESCRIPTION",
+  "slug": "$FEATURE_SLUG"
+}
 ```
 
-Chains `orient` + `search_specs` + `analyze_impact` and writes
+This chains `orient` + `search_specs` + `analyze_impact` and writes
 `openspec/changes/$FEATURE_SLUG/proposal.md`.
 
 Extract:
@@ -343,16 +319,13 @@ $DECISIONS_TABLE
 
 **Brownfield only.** Skip if `$MODE = greenfield`.
 
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>annotate_story</tool_name>
-  <arguments>{
-    "directory": "$PROJECT_ROOT",
-    "storyFilePath": "$STORY_FILE_PATH",
-    "description": "$STORY_TITLE"
-  }</arguments>
-</use_mcp_tool>
+Call the openlore MCP tool `annotate_story` with:
+```json
+{
+  "directory": "$PROJECT_ROOT",
+  "storyFilePath": "$STORY_FILE_PATH",
+  "description": "$STORY_TITLE"
+}
 ```
 
 Patches `## Risk Context` directly. Story is now ready for `openlore-implement-story`.

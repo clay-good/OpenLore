@@ -34,17 +34,16 @@ The happy path needs no flags and never touches your repo on `npm install`:
 | Flag | Effect |
 |------|--------|
 | `--agent <name>` | Install only for one surface. Names: `claude-code`, `cursor`, `cline`, `continue`, `agents-md`. |
-| `--preset <name>` | Wire the MCP server to a tool preset: `substrate` (the default — the navigation core plus governance reads: `recall` + `verify_claim` + `blast_radius`; the write face `remember`/`record_decision` stays opt-in), `navigation` (the lean navigate-only escape), `minimal`, `memory`, `verify`, `federation`, `coordination`, or `full`. Omit it for the `substrate` default; pass `--preset navigation` for the lean core, or `--preset full` to wire all 73 tools. |
+| `--preset <name>` | Wire the MCP server to a tool preset: `substrate` (the default — the navigation core, governance reads `recall` + `verify_claim` + `blast_radius`, and `prepare_spec_generation` + `prepare_spec_repair`; the write face `remember`/`record_decision` stays opt-in), `navigation` (the lean navigate-only escape), `minimal`, `memory`, `verify`, `federation`, `coordination`, or `full`. Omit it for the `substrate` default; pass `--preset navigation` for the lean core, or `--preset full` to wire all 75 tools. |
 | `--dry-run` | Print the planned changes; write nothing. |
 | `--force` | Overwrite OpenLore-managed blocks even when hand-edited. |
 | `--uninstall` | Remove every OpenLore-managed block / entry. Files OpenLore created (and never had non-OpenLore content) are deleted. |
 
-> **Default tool surface (since `default-to-lean-tool-surface`).** A plain `openlore install` wires the
-> MCP server to the lean **`navigation`** preset — 10 graph-traversal tools, the Spec 14 benchmark
-> winner — not all 72. This is per-session token savings with no capability loss: every tool stays one
-> opt-in away. Note the lean default does **not** include the governance tools the decisions pre-commit
-> gate uses (`record_decision`, `check_spec_drift`, `detect_changes`); on a repo that gates commits,
-> install with **`--preset full`** (all 72) or **`--preset minimal`** (the governance core) to wire them.
+> **Default tool surface.** A plain `openlore install` wires the read-only **`substrate`** preset:
+> 15 tools comprising the navigation core, the highest-value governance reads, and the 2 spec
+> preparation composites. Use `--preset navigation` for the lean 10-tool escape or `--preset full`
+> for all 75 tools. The decision-write and commit-gate tools remain opt-in through a preset that
+> includes them.
 
 ## What it actually writes
 

@@ -79,6 +79,14 @@ export function parseSpecReferences(content: string): {
   const lines = content.split('\n');
   let inImplBlock = false;
   for (const line of lines) {
+    // The pre-anchor blockquote hint still names a real implementation file, so
+    // it contributes to the domain footprint regardless of its confidence.
+    const legacyMatch = line.match(LEGACY_IMPLEMENTATION_LINE);
+    if (legacyMatch) {
+      files.push(legacyMatch[2].trim());
+      inImplBlock = false;
+      continue;
+    }
     if (/\*\*Implementation\*\*:/.test(line)) {
       inImplBlock = true;
       // Extract backtick refs from this line
@@ -117,6 +125,129 @@ export function parseSpecReferences(content: string): {
   }
 
   return { files, requirements, entities };
+}
+
+/**
+ * One `### Requirement:` block with the implementation anchors written inside it.
+ *
+ * Anchors are read ONLY from backtick-quoted tokens on an `**Implementation**:`
+ * line (and its indented continuation lines) inside the block. Requirement prose,
+ * scenario text, and inline code spans elsewhere in the block are never treated as
+ * anchors — the link index must not invent coverage from narrative.
+ */
+export interface SpecRequirementBlock {
+  /** Requirement name exactly as written after `### Requirement:`. */
+  name: string;
+  /** 1-based line of the requirement heading. */
+  line: number;
+  /** Raw anchor tokens, in document order, deduplicated. */
+  anchors: string[];
+}
+
+/** Split one backtick group into anchor tokens (`a.ts, b.ts` is a comma-joined list). */
+function splitAnchorGroup(group: string): string[] {
+  return group.split(',').map(token => token.trim()).filter(Boolean);
+}
+
+/** Backtick-quoted tokens on a line, minus the `**Implementation**` label itself. */
+function backtickAnchors(line: string): string[] {
+  const groups = line.match(/`([^`]+)`/g);
+  if (!groups) return [];
+  return groups
+    .map(group => group.replace(/`/g, '').trim())
+    .filter(group => group.length > 0 && group !== '**Implementation**')
+    .flatMap(splitAnchorGroup);
+}
+
+/**
+ * The implementation hint emitted by generators before the anchor contract:
+ *
+ *   `> Implementation: \`useAgent\` in \`ui/src/useAgent.ts\` · confidence: reviewed`
+ *
+ * Every previously generated spec carries this form, so ignoring it would leave
+ * the whole existing corpus unreadable to the link index and to overlap.
+ *
+ * Confidence decides how far it is trusted. `reviewed` and `llm` were an explicit
+ * claim (a human's, or a proposal the generator was told), so they become a
+ * `name::path` SYMBOL anchor — still verified against the graph before it counts
+ * as coverage. `semantic` and `heuristic` were similarity guesses, so only the
+ * FILE survives, as footprint evidence: honoring them as symbol anchors would
+ * reintroduce exactly the probabilistic coverage this contract removes.
+ */
+const LEGACY_IMPLEMENTATION_LINE =
+  /^>\s*Implementation:\s*(.+?)\s+in\s+`([^`]+)`(?:\s*·\s*confidence:\s*(\w+))?/i;
+
+const TRUSTED_LEGACY_CONFIDENCE = new Set(['reviewed', 'llm']);
+
+function legacyImplementationAnchors(line: string): string[] | null {
+  const match = line.match(LEGACY_IMPLEMENTATION_LINE);
+  if (!match) return null;
+  const [, symbols, file, confidence] = match;
+  if (!TRUSTED_LEGACY_CONFIDENCE.has((confidence ?? 'reviewed').toLowerCase())) return [file.trim()];
+  // A hint may name several symbols (`send` / `prompt`); each becomes its own anchor.
+  return symbols
+    .split('/')
+    .map(name => name.replace(/`/g, '').trim())
+    .filter(name => /^[A-Za-z_$][\w$.]*$/.test(name))
+    .map(name => `${name}::${file.trim()}`);
+}
+
+/**
+ * Parse every requirement block and its requirement-scoped implementation anchors.
+ *
+ * A block runs from its `### Requirement:` heading to the next `#`-level heading of
+ * the same or higher rank (`### ` / `## ` / `# `); `#### Scenario:` blocks stay inside
+ * their requirement.
+ */
+export function parseRequirementBlocks(content: string): SpecRequirementBlock[] {
+  const lines = content.split('\n');
+  const blocks: SpecRequirementBlock[] = [];
+  let current: SpecRequirementBlock | null = null;
+  let inImplBlock = false;
+
+  for (const [index, line] of lines.entries()) {
+    const requirementMatch = line.match(/^###\s+Requirement:\s*(.+)/);
+    if (requirementMatch) {
+      current = { name: requirementMatch[1].trim(), line: index + 1, anchors: [] };
+      blocks.push(current);
+      inImplBlock = false;
+      continue;
+    }
+    // Any heading of rank <= 3 that is not a requirement closes the current block.
+    if (/^#{1,3}\s/.test(line)) {
+      current = null;
+      inImplBlock = false;
+      continue;
+    }
+    if (!current) continue;
+
+    // Legacy generators emitted a blockquote hint instead of an anchor line.
+    const legacy = legacyImplementationAnchors(line);
+    if (legacy) {
+      current.anchors.push(...legacy);
+      inImplBlock = false;
+      continue;
+    }
+
+    if (/\*\*Implementation\*\*:/.test(line)) {
+      inImplBlock = true;
+      current.anchors.push(...backtickAnchors(line));
+      continue;
+    }
+    if (inImplBlock) {
+      // Continuation: an indented or list-item line that starts with a backtick token.
+      if (/^\s*[-*]?\s*`[^`]+`/.test(line) || /^\s+`[^`]+`/.test(line)) {
+        current.anchors.push(...backtickAnchors(line));
+      } else {
+        inImplBlock = false;
+      }
+    }
+  }
+
+  for (const block of blocks) {
+    block.anchors = [...new Set(block.anchors)];
+  }
+  return blocks;
 }
 
 /**

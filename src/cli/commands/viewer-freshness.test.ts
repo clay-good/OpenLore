@@ -162,6 +162,11 @@ describe('viewer freshness', () => {
     // loaded parallel run. Rewrite the artifact, as a real re-analysis does.
     await writeFile(artifactPath, '{}');
     await writeFile(join(analysisDir, 'fingerprint.json'), JSON.stringify({ commit: second }));
+    // Re-stamp the artifact AFTER the commit. Git commit times have one-second
+    // granularity, so an artifact written in the same second as the commit lands
+    // on either side of `artifactPredatesAnalyzedCommit` depending on where the
+    // second boundary falls — which made this assertion flaky rather than wrong.
+    await writeFile(artifactPath, '{}');
     await expect(readViewerFreshness(root, analysisDir, artifactPath)).resolves
       .toMatchObject({ analyzedCommit: second, status: 'current', filesChangedSince: 0 });
   });

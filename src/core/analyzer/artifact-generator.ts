@@ -10,7 +10,7 @@ import { join, basename, isAbsolute } from 'node:path';
 import { createHash } from 'node:crypto';
 import { atomicWriteFile } from '../decisions/atomic-store.js';
 import { writeJsonAtomicStreaming } from './json-stream.js';
-import { withAnalysisLock } from '../decisions/lock.js';
+import { withAnalysisLock } from '../runtime/advisory-lock.js';
 import {
   TOKENS_PER_CHAR_DEFAULT,
   PHASE2_FILE_CONTENT_MAX_CHARS,
@@ -47,6 +47,14 @@ import type { SchemaTable } from './schema-extractor.js';
 import type { RouteInventory } from './http-route-parser.js';
 import type { MiddlewareEntry } from './middleware-extractor.js';
 import type { EnvVar } from './env-extractor.js';
+import { classifyDomainFile } from './domain-naming.js';
+import {
+  reconcileRepositoryDomains,
+  type DomainCandidateDecision,
+  type DomainDecisionSummary,
+  type DomainEvidenceRole,
+  type DomainReconciliationResult,
+} from './domain-reconciliation.js';
 
 function escapeMarkdownInline(value: string): string {
   return value
@@ -118,6 +126,10 @@ export interface DetectedDomain {
   files: string[];
   entities: string[];
   keyFile: string | null;
+  /** Production files that established this domain. */
+  definingFiles?: string[];
+  /** Behavioral evidence attached only after domain reconciliation. */
+  supportingFiles?: string[];
 }
 
 /**
@@ -162,8 +174,14 @@ export interface RepoStructure {
     layers: ArchitectureLayer[];
   };
   domains: DetectedDomain[];
-  /** Call-graph source files not represented by any detected domain. */
+  /** Bounded, deterministic audit trail for raw domain-candidate dispositions. */
+  domainDecisions?: DomainCandidateDecision[];
+  /** Explicit receipt when the bounded candidate-decision audit trail is truncated. */
+  domainDecisionSummary?: DomainDecisionSummary;
+  /** Analyzed source files not represented by any detected domain. */
   undomained?: string[];
+  /** Role-aware disclosure for analyzed files outside final domains. */
+  undomainedEvidence?: DomainEvidenceRole[];
   entryPoints: EntryPointInfo[];
   dataFlow: DataFlowInfo;
   keyFiles: KeyFiles;
@@ -186,6 +204,10 @@ export interface RepoStructure {
     edgeCount: number;
     cycleCount: number;
     clusterCount: number;
+    /** Raw directory + graph candidates observed before reconciliation. */
+    rawDomainCandidateCount?: number;
+    /** Generation-ready domains after reconciliation. */
+    finalDomainCount?: number;
   };
 }
 
@@ -223,6 +245,8 @@ export interface LLMContext {
    * structure valid. Absent when there is no `callGraph`.
    */
   graphDigest?: string;
+  /** Reconciled ownership domains shared by standalone and agent-hosted consumers. */
+  domains?: DetectedDomain[];
   /**
    * Per-function CFG + reaching-definitions overlay (spec:
    * add-intraprocedural-cfg-dataflow-overlay). Transient: written to the SQLite
@@ -431,15 +455,31 @@ export class AnalysisArtifactGenerator {
     const dependencyDiagram = this.generateDependencyDiagram(depGraph);
     let summaryMarkdown = this.generateSummaryMarkdown(repoMap, depGraph, repoStructure);
     const llmContext = await this.generateLLMContext(repoMap, depGraph);
+    llmContext.domains = repoStructure.domains;
     const domainFiles = new Set(repoStructure.domains.flatMap(domain => domain.files));
-    repoStructure.undomained = [...new Set(
-      (llmContext.callGraph?.nodes ?? [])
-        .filter(node => !node.isExternal)
-        .map(node => node.filePath)
-        .filter(path => !domainFiles.has(path)),
+    const undomained = [...new Set(
+      repoMap.allFiles.map(file => file.path).filter(path => !domainFiles.has(path)),
     )].sort();
+    const scoredByPath = new Map(repoMap.allFiles.map(file => [file.path, file]));
+    const evidenceByPath = new Map((repoStructure.undomainedEvidence ?? []).map(item => [item.path, item]));
+    for (const path of undomained) {
+      const scored = scoredByPath.get(path);
+      if (scored) evidenceByPath.set(path, { path, ...classifyDomainFile(scored) });
+    }
+    repoStructure.undomained = undomained;
+    repoStructure.undomainedEvidence = [...evidenceByPath.values()].sort((a, b) => a.path.localeCompare(b.path));
     if (repoStructure.undomained.length > 0) {
-      const disclosure = `\n**Undomained source files**: ${repoStructure.undomained.map(escapeMarkdownInline).join(', ')}\n`;
+      const byRole = (role: DomainEvidenceRole['role']) => repoStructure.undomainedEvidence!
+        .filter(item => item.role === role).map(item => item.path);
+      const renderPaths = (paths: string[]) => {
+        const visible = paths.slice(0, 20).map(escapeMarkdownInline).join(', ');
+        return paths.length > 20 ? `${visible}, … (${paths.length - 20} more)` : visible;
+      };
+      const roleLines = (['defining', 'supporting', 'excluded'] as const)
+        .map(role => ({ role, paths: byRole(role) }))
+        .filter(item => item.paths.length > 0)
+        .map(item => `- **${item.role}** (${item.paths.length}): ${renderPaths(item.paths)}`);
+      const disclosure = `\n**Undomained analyzed evidence by role**:\n${roleLines.join('\n')}\n`;
       summaryMarkdown = summaryMarkdown.replace('\n## Dependency Insights', `${disclosure}\n## Dependency Insights`);
     }
 
@@ -462,9 +502,10 @@ export class AnalysisArtifactGenerator {
   async generateAndSave(
     repoMap: RepositoryMap,
     depGraph: DependencyGraphResult,
-    enrichment?: EnrichmentData
+    enrichment?: EnrichmentData,
+    persistence: { precomputed?: AnalysisArtifacts; acquireLock?: boolean } = {},
   ): Promise<AnalysisArtifacts> {
-    const artifacts = await this.generate(repoMap, depGraph, enrichment);
+    const artifacts = persistence.precomputed ?? await this.generate(repoMap, depGraph, enrichment);
 
     // Ensure output directory exists
     await mkdir(this.options.outputDir, { recursive: true });
@@ -474,7 +515,7 @@ export class AnalysisArtifactGenerator {
     // `analyze --force` — cannot interleave its set with ours (change:
     // harden-artifact-write-atomicity). Each individual write is already atomic (temp +
     // rename via atomicWriteFile); the lock adds set-level serialization on top.
-    await withAnalysisLock(this.options.outputDir, async () => {
+    const persist = async (): Promise<void> => {
       // Strip the CFG/def-use overlay before persisting: it is DB-only and must
       // never enter the resident llm-context.json or the hot cache (spec:
       // add-intraprocedural-cfg-dataflow-overlay).
@@ -604,28 +645,39 @@ export class AnalysisArtifactGenerator {
       }
 
       await Promise.all(saves);
-    });
+    };
 
-    // Write SQLite edge store alongside JSON artifacts (additive, non-fatal)
-    try {
-      if (artifacts.llmContext.callGraph) {
-        const dbPath = join(this.options.outputDir, ARTIFACT_CALL_GRAPH_DB);
-        await writeEdgesToSQLite(
-          artifacts.llmContext.callGraph, dbPath, this.options.rootDir, artifacts.llmContext.cfgs,
-          this._pass1Memo, this._cfgSpill,
-        );
+    const persistAll = async (): Promise<void> => {
+      await persist();
+      // Write SQLite edge store inside the same set-level lock as the JSON
+      // artifacts. It is additive and non-fatal, but a watcher must not observe a
+      // database from one generation beside JSON from another.
+      try {
+        if (artifacts.llmContext.callGraph) {
+          const dbPath = join(this.options.outputDir, ARTIFACT_CALL_GRAPH_DB);
+          await writeEdgesToSQLite(
+            artifacts.llmContext.callGraph, dbPath, this.options.rootDir, artifacts.llmContext.cfgs,
+            this._pass1Memo, this._cfgSpill,
+          );
+        }
+      } catch {
+        // Non-fatal — JSON artifacts are the source of truth
+      } finally {
+        // Release the serialized memo rows unconditionally: on a cold or forced build they are
+        // the whole corpus (tens of MB), and nothing after this point — continuity
+        // carry-forward, the dependency-graph write, the fingerprint — has any use for them.
+        this._pass1Memo = undefined;
+        // The spill has either been drained into the table or abandoned; either way the file is
+        // temporary and must not outlive the build.
+        await this._cfgSpill?.dispose();
+        this._cfgSpill = undefined;
       }
-    } catch {
-      // Non-fatal — JSON artifacts are the source of truth
-    } finally {
-      // Release the serialized memo rows unconditionally: on a cold or forced build they are
-      // the whole corpus (tens of MB), and nothing after this point — continuity
-      // carry-forward, the dependency-graph write, the fingerprint — has any use for them.
-      this._pass1Memo = undefined;
-      // The spill has either been drained into the table or abandoned; either way the file is
-      // temporary and must not outlive the build.
-      await this._cfgSpill?.dispose();
-      this._cfgSpill = undefined;
+    };
+
+    if (persistence.acquireLock === false) {
+      await persistAll();
+    } else {
+      await withAnalysisLock(this.options.outputDir, persistAll);
     }
 
     return artifacts;
@@ -646,7 +698,8 @@ export class AnalysisArtifactGenerator {
     const layers = this.generateArchitectureLayers(repoMap);
 
     // Generate domains from clusters
-    const domains = this.generateDomains(repoMap, depGraph);
+    const domainResult = this.generateDomains(repoMap, depGraph, enrichment);
+    const domains = domainResult.domains;
 
     // Generate entry points
     const entryPoints = this.generateEntryPoints(repoMap);
@@ -671,7 +724,10 @@ export class AnalysisArtifactGenerator {
         layers,
       },
       domains,
+      domainDecisions: domainResult.decisions,
+      domainDecisionSummary: domainResult.decisionSummary,
       undomained: [],
+      undomainedEvidence: domainResult.unattachedEvidence,
       entryPoints,
       dataFlow,
       keyFiles,
@@ -689,6 +745,8 @@ export class AnalysisArtifactGenerator {
         edgeCount: depGraph.statistics.edgeCount,
         cycleCount: depGraph.statistics.cycleCount,
         clusterCount: depGraph.statistics.clusterCount,
+        rawDomainCandidateCount: domainResult.rawCandidateCount,
+        finalDomainCount: domains.length,
       },
     };
   }
@@ -832,69 +890,32 @@ export class AnalysisArtifactGenerator {
    */
   private generateDomains(
     repoMap: RepositoryMap,
-    depGraph: DependencyGraphResult
-  ): DetectedDomain[] {
-    const domains: DetectedDomain[] = [];
-
-    // Use directory-based clusters from repo map
-    for (const [dirName, files] of Object.entries(repoMap.clusters.byDomain)) {
-      if (files.length === 0) continue;
-
-      // Skip infrastructure directories
-      const skipDirs = ['utils', 'helpers', 'common', 'shared', 'config', 'middleware'];
-      if (skipDirs.includes(dirName.toLowerCase())) continue;
-
-      // Extract potential entities from file names
-      const entities = this.extractEntities(files);
-
-      // Find the key file (highest score in domain)
-      const keyFile = files.sort((a, b) => b.score - a.score)[0];
-
-      // Generate suggested spec path
-      const domainName = this.normalizeDomainName(dirName);
-
-      domains.push({
-        name: domainName,
-        suggestedSpecPath: `openspec/specs/${domainName}/spec.md`,
-        files: files.map(f => f.path),
-        entities,
-        keyFile: keyFile?.path ?? null,
-      });
-    }
-
-    // Also consider clusters from dependency graph. Indexed once for the same reason as the leaf
-    // lookup above: clusters cover nearly every node on a real repository, so `find` per id was
-    // O(files²) here too.
-    const clusterNodeById = new Map(depGraph.nodes.map(n => [n.id, n]));
-    for (const cluster of depGraph.clusters) {
-      const clusterName = this.normalizeDomainName(cluster.suggestedDomain);
-
-      // Skip if already covered
-      if (domains.some(d => d.name === clusterName)) continue;
-
-      // Skip small clusters
-      if (cluster.files.length < 2) continue;
-
-      // Get file details
-      const files = cluster.files
-        .map(id => clusterNodeById.get(id)?.file)
-        .filter((f): f is ScoredFile => f !== undefined);
-
-      if (files.length === 0) continue;
-
-      const entities = this.extractEntities(files);
-      const keyFile = files.sort((a, b) => b.score - a.score)[0];
-
-      domains.push({
-        name: clusterName,
-        suggestedSpecPath: `openspec/specs/${clusterName}/spec.md`,
-        files: files.map(f => f.path),
-        entities,
-        keyFile: keyFile?.path ?? null,
-      });
-    }
-
-    return domains;
+    depGraph: DependencyGraphResult,
+    enrichment?: EnrichmentData,
+  ): Omit<DomainReconciliationResult, 'domains'> & { domains: DetectedDomain[] } {
+    const result = reconcileRepositoryDomains(repoMap, depGraph, {
+      entryFiles: repoMap.entryPoints.map(file => file.path),
+      routeFiles: enrichment?.routeInventory?.routes.map(route => route.file) ?? [],
+      schemaFiles: enrichment?.schemas?.map(schema => schema.file) ?? [],
+    });
+    return {
+      ...result,
+      domains: result.domains.map(domain => {
+        const defining = [...domain.definingFiles].sort((a, b) => a.path.localeCompare(b.path));
+        const supporting = [...domain.supportingFiles].sort((a, b) => a.path.localeCompare(b.path));
+        const domainName = this.normalizeDomainName(domain.name);
+        const keyFile = [...defining].sort((a, b) => b.score - a.score || a.path.localeCompare(b.path))[0];
+        return {
+          name: domainName,
+          suggestedSpecPath: `openspec/specs/${domainName}/spec.md`,
+          files: [...defining, ...supporting].map(file => file.path),
+          definingFiles: defining.map(file => file.path),
+          supportingFiles: supporting.map(file => file.path),
+          entities: this.extractEntities(defining),
+          keyFile: keyFile?.path ?? null,
+        };
+      }),
+    };
   }
 
   /**
@@ -1098,6 +1119,8 @@ export class AnalysisArtifactGenerator {
     // Domains
     if (repoStructure.domains.length > 0) {
       lines.push('## Detected Domains');
+      const rawCount = repoStructure.statistics.rawDomainCandidateCount ?? repoStructure.domains.length;
+      lines.push(`Reconciled **${rawCount} raw candidates** into **${repoStructure.domains.length} generation-ready domains**.`);
       lines.push('These domains will become OpenSpec specifications:');
       lines.push('');
       lines.push('| Domain | Files | Key Entities | Spec Path |');

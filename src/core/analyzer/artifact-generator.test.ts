@@ -285,7 +285,7 @@ describe('AnalysisArtifactGenerator', () => {
   });
 
   describe('RepoStructure Generation', () => {
-    it('discloses a call-graph source file that belongs to no domain', async () => {
+    it('discloses an analyzed source with no callable node that belongs to no domain', async () => {
       const scriptDir = join(tempDir, 'scripts');
       const scriptPath = join(scriptDir, 'report.py');
       await mkdir(scriptDir, { recursive: true });
@@ -308,7 +308,10 @@ describe('AnalysisArtifactGenerator', () => {
       });
 
       expect(artifacts.repoStructure.undomained).toEqual(['scripts/report.py']);
-      expect(artifacts.summaryMarkdown).toContain('Undomained source files');
+      expect(artifacts.repoStructure.undomainedEvidence).toEqual([{
+        path: 'scripts/report.py', role: 'defining', reason: 'production-source',
+      }]);
+      expect(artifacts.summaryMarkdown).toContain('Undomained analyzed evidence by role');
       expect(artifacts.summaryMarkdown).toContain('scripts/report.py');
     });
 
@@ -622,7 +625,10 @@ describe('AnalysisArtifactGenerator', () => {
       });
 
       expect(artifacts.summaryMarkdown).toContain('## Detected Domains');
+      expect(artifacts.summaryMarkdown).toContain('raw candidates');
       expect(artifacts.summaryMarkdown).toContain('| Domain | Files |');
+      expect(artifacts.llmContext.domains).toEqual(artifacts.repoStructure.domains);
+      expect(artifacts.repoStructure.statistics.finalDomainCount).toBe(artifacts.repoStructure.domains.length);
     });
 
     it('should include dependency insights', async () => {
@@ -765,6 +771,21 @@ describe('AnalysisArtifactGenerator', () => {
   });
 
   describe('File Saving', () => {
+    it('never deletes or renames existing OpenSpec specifications during analysis', async () => {
+      const existingSpec = join(tempDir, 'openspec', 'specs', 'legacy-stage', 'spec.md');
+      await mkdir(join(tempDir, 'openspec', 'specs', 'legacy-stage'), { recursive: true });
+      await writeFile(existingSpec, '# Legacy Stage Specification\n');
+      const before = await readFile(existingSpec, 'utf8');
+
+      await generateAndSaveArtifacts(createMockRepoMap(), createMockDepGraph(), {
+        rootDir: tempDir,
+        outputDir,
+      });
+
+      await expect(readFile(existingSpec, 'utf8')).resolves.toBe(before);
+      await expect(access(join(tempDir, 'openspec', 'specs', 'legacy-stage', 'spec.md'))).resolves.not.toThrow();
+    });
+
     it('should save all artifacts to disk', async () => {
       const srcDir = join(tempDir, 'src');
       await mkdir(srcDir, { recursive: true });

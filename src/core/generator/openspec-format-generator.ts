@@ -15,7 +15,11 @@ import type {
   Scenario,
 } from './spec-pipeline.js';
 import type { DependencyGraphResult } from '../analyzer/dependency-graph.js';
-import type { MappingArtifact } from './mapping-generator.js';
+import {
+  formatSpecAnchor,
+  requirementAnchorKey,
+  type VerifiedRequirementAnchors,
+} from './spec-link-index.js';
 import { normalizeDomainName } from './openspec-compat.js';
 
 // ============================================================================
@@ -95,7 +99,7 @@ export class OpenSpecFormatGenerator {
    * Generate all spec files from pipeline result.
    * Pass mappingArtifact to annotate each Requirement with `> Implementation: file:line`.
    */
-  generateSpecs(result: PipelineResult, mappingArtifact?: MappingArtifact): GeneratedSpec[] {
+  generateSpecs(result: PipelineResult, anchors?: VerifiedRequirementAnchors): GeneratedSpec[] {
     const specs: GeneratedSpec[] = [];
     const domains = this.groupByDomain(result);
 
@@ -104,7 +108,7 @@ export class OpenSpecFormatGenerator {
 
     // 2. Domain specs
     for (const domain of domains) {
-      specs.push(this.generateDomainSpec(domain, result.survey, mappingArtifact));
+      specs.push(this.generateDomainSpec(domain, result.survey, anchors));
     }
 
     // 3. Architecture spec
@@ -351,7 +355,7 @@ export class OpenSpecFormatGenerator {
   /**
    * Generate a domain spec
    */
-  private generateDomainSpec(domain: DomainGroup, _survey: ProjectSurveyResult, mappingArtifact?: MappingArtifact): GeneratedSpec {
+  private generateDomainSpec(domain: DomainGroup, _survey: ProjectSurveyResult, anchors?: VerifiedRequirementAnchors): GeneratedSpec {
     const lines: string[] = [];
     const now = new Date();
     const date = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
@@ -453,7 +457,7 @@ export class OpenSpecFormatGenerator {
         const reqName = this.formatRequirementName(operation.name);
         lines.push(`### Requirement: ${reqName}`);
         lines.push('');
-        this.emitImplementationHint(lines, reqName, domain.name, mappingArtifact);
+        this.emitImplementationHint(lines, reqName, domain.name, anchors);
         const opDesc = (operation.description ?? '').replace(/^\s*(shall|must|should|may)\s+/i, '');
         lines.push(`The system SHALL ${opDesc.toLowerCase()}`);
         lines.push('');
@@ -506,7 +510,7 @@ export class OpenSpecFormatGenerator {
           );
           lines.push(`### Requirement: ${reqName}`);
           lines.push('');
-          this.emitImplementationHint(lines, reqName, domain.name, mappingArtifact);
+          this.emitImplementationHint(lines, reqName, domain.name, anchors);
           const epPurpose = (endpoint.purpose ?? 'handle this endpoint').replace(/^\s*(shall|must|should|may)\s+/i, '');
           lines.push(`The system SHALL ${epPurpose.toLowerCase()}`);
           lines.push('');
@@ -520,7 +524,7 @@ export class OpenSpecFormatGenerator {
         const reqName = this.formatRequirementName(`${domain.name}Overview`);
         lines.push(`### Requirement: ${reqName}`);
         lines.push('');
-        this.emitImplementationHint(lines, reqName, domain.name, mappingArtifact);
+        this.emitImplementationHint(lines, reqName, domain.name, anchors);
         lines.push(`The ${domain.name} domain SHALL provide its documented functionality.`);
         lines.push('');
         lines.push(`#### Scenario: ${reqName}Works`);
@@ -829,27 +833,24 @@ export class OpenSpecFormatGenerator {
   }
 
   /**
-   * Emit `> Implementation: \`file:line\`` after a Requirement header when a
-   * high-confidence mapping entry exists.  Mutates `lines` in-place.
+   * Emit the requirement-scoped implementation anchor the deterministic link
+   * index reads back: `- **Implementation**: \`name::path\`.
+   *
+   * Only anchors already VERIFIED against the graph are written — a proposal that
+   * resolved to zero or several symbols is absent from the map, and the
+   * requirement is written with no anchor rather than with a guess. Nothing here
+   * carries a confidence tier, because a written anchor is either exact or absent
+   * (change `harden-spec-workflow-lifecycle`).
    */
   private emitImplementationHint(
     lines: string[],
     reqName: string,
     domainName: string,
-    mappingArtifact?: MappingArtifact,
+    anchors?: VerifiedRequirementAnchors,
   ): void {
-    if (!mappingArtifact) return;
-    const normReq = reqName.toLowerCase().replace(/[^a-z0-9]/g, '');
-    const match = mappingArtifact.mappings.find(m => {
-      const normM = m.requirement.toLowerCase().replace(/[^a-z0-9]/g, '');
-      return normM === normReq && m.domain.toLowerCase() === domainName.toLowerCase();
-    });
-    if (!match || match.functions.length === 0) return;
-    const best = [...match.functions].sort((a, b) => {
-      const order = { llm: 0, semantic: 1, heuristic: 2 };
-      return (order[a.confidence] ?? 3) - (order[b.confidence] ?? 3);
-    })[0];
-    lines.push(`> Implementation: \`${best.name}\` in \`${best.file}\` · confidence: ${best.confidence}`);
+    const anchor = anchors?.get(requirementAnchorKey(domainName, reqName));
+    if (!anchor) return;
+    lines.push(`- **Implementation**: \`${formatSpecAnchor(anchor)}\``);
     lines.push('');
   }
 

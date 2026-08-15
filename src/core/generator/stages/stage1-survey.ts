@@ -4,9 +4,7 @@
  * Analyzes repository structure to categorize the project and identify key files.
  */
 
-import logger from '../../../utils/logger.js';
-import { STAGE1_MAX_TOKENS } from '../../../constants.js';
-import { formatSignatureMaps, STAGE1_MAX_CHARS } from '../../analyzer/signature-extractor.js';
+import { STAGE1_MAX_TOKENS, STAGE_CHUNK_MAX_CHARS } from '../../../constants.js';
 import type { LLMService } from '../../services/llm-service.js';
 import type { PipelineOptions, ProjectSurveyResult, StageResult } from '../../../types/pipeline.js';
 import type { LLMContext, RepoStructure } from '../../analyzer/artifact-generator.js';
@@ -81,6 +79,41 @@ function buildStructuredHints(
   return parts.length > 0 ? `\nPre-extracted structural intelligence:\n${parts.join('\n\n')}\n` : '';
 }
 
+/**
+ * The domain/file listing for the survey prompt, bounded by the same chunk budget
+ * every other stage respects.
+ *
+ * The listing informs only the model's CHARACTERIZATION of the project:
+ * `schemaFiles`, `apiFiles`, `serviceFiles`, and `suggestedDomains` are
+ * overwritten from the static inventories right after the call, so a bounded
+ * listing cannot cost a routing fact — while an unbounded one is hundreds of KB
+ * in a single request on a large repository. Each domain gets an equal share so
+ * one huge domain cannot crowd the others out, and truncation is DISCLOSED in the
+ * text: the model must not be told a partial list is exhaustive.
+ *
+ * Exported for tests.
+ */
+export function buildDomainListing(
+  domains: Array<{ name: string; files: string[] }>,
+  maxChars: number,
+): string {
+  if (domains.length === 0) return '';
+  const share = Math.max(80, Math.floor(maxChars / domains.length));
+  return domains.map(domain => {
+    const files = [...domain.files].sort();
+    if (files.length === 0) return `- ${domain.name}: (no files)`;
+    const shown: string[] = [];
+    let used = 0;
+    for (const file of files) {
+      if (used + file.length + 2 > share && shown.length > 0) break;
+      shown.push(file);
+      used += file.length + 2;
+    }
+    const omitted = files.length - shown.length;
+    return `- ${domain.name}: ${shown.join(', ')}${omitted > 0 ? ` … (+${omitted} more file(s) not listed)` : ''}`;
+  }).join('\n');
+}
+
 export async function runStage1(
   llm: LLMService,
   options: PipelineOptions,
@@ -88,18 +121,22 @@ export async function runStage1(
   repoStructure: RepoStructure,
   llmContext: LLMContext
 ): Promise<StageResult<ProjectSurveyResult>> {
-  if (llmContext.signatures && llmContext.signatures.length > 0) {
-    const chunks = formatSignatureMaps(llmContext.signatures, STAGE1_MAX_CHARS);
-    if (chunks.length === 1) {
-      return runStage1WithSection(llm, options, saveResult, repoStructure, chunks[0], true, llmContext);
-    }
-    logger.analysis(`Stage 1: ${chunks.length} signature chunks across ${llmContext.signatures.length} files`);
-    const results = await Promise.all(chunks.map((c: string) => runStage1WithSection(llm, options, saveResult, repoStructure, c, true, llmContext)));
-    return mergeStage1Results(results);
-  }
-  // Legacy fallback — only the 20 files in phase2_deep are visible
-  const section = llmContext.phase2_deep.files.map(f => `- ${f.path}`).join('\n');
-  return runStage1WithSection(llm, options, saveResult, repoStructure, section, false, llmContext);
+  const schemaFiles = [...new Set(repoStructure.schemas.map(schema => schema.file))].sort();
+  const apiFiles = [...new Set((repoStructure.routeInventory?.routes ?? []).map(route => route.file))].sort();
+  const knownFiles = [...new Set(repoStructure.domains.flatMap(domain => domain.files))];
+  const serviceFiles = knownFiles.filter(file => !schemaFiles.includes(file) && !apiFiles.includes(file)).sort();
+  const section = buildDomainListing(repoStructure.domains, options.chunkMaxChars ?? STAGE_CHUNK_MAX_CHARS);
+  const result = await runStage1WithSection(llm, options, saveResult, repoStructure, section, false, llmContext);
+  if (!result.data) return result;
+
+  // The LLM may characterize the project, but inventories own the downstream
+  // routing facts.  This prevents a survey hallucination from dropping a
+  // schema, route, or whole domain from stages 2–4.
+  result.data.schemaFiles = schemaFiles;
+  result.data.apiFiles = apiFiles;
+  result.data.serviceFiles = serviceFiles;
+  result.data.suggestedDomains = repoStructure.domains.map(domain => domain.name);
+  return result;
 }
 
 /**

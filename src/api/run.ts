@@ -7,8 +7,8 @@
  */
 
 import { join } from 'node:path';
-import { readFile, mkdir, writeFile } from 'node:fs/promises';
-import { DEFAULT_MAX_FILES, DEFAULT_ANTHROPIC_MODEL, DEFAULT_OPENAI_MODEL, DEFAULT_GEMINI_MODEL, DEFAULT_OPENAI_COMPAT_MODEL, DEFAULT_COPILOT_MODEL, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_LOGS_SUBDIR, OPENLORE_CONFIG_REL_PATH, OPENLORE_GENERATION_SUBDIR, OPENLORE_RUNS_SUBDIR, DEFAULT_OPENSPEC_PATH, ARTIFACT_REPO_STRUCTURE, ARTIFACT_DEPENDENCY_GRAPH, ARTIFACT_LLM_CONTEXT } from '../constants.js';
+import { readFile, mkdir, writeFile, realpath } from 'node:fs/promises';
+import { DEFAULT_MAX_FILES, DEFAULT_ANTHROPIC_MODEL, DEFAULT_OPENAI_MODEL, DEFAULT_GEMINI_MODEL, DEFAULT_OPENAI_COMPAT_MODEL, DEFAULT_COPILOT_MODEL, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_LOGS_SUBDIR, OPENLORE_CONFIG_REL_PATH, OPENLORE_GENERATION_SUBDIR, OPENLORE_RUNS_SUBDIR, DEFAULT_OPENSPEC_PATH, ARTIFACT_REPO_STRUCTURE, ARTIFACT_DEPENDENCY_GRAPH, ARTIFACT_LLM_CONTEXT, ARTIFACT_FINGERPRINT } from '../constants.js';
 import { fileExists, readJsonFile } from '../utils/command-helpers.js';
 import { isCacheFresh } from '../core/services/mcp-handlers/utils.js';
 import {
@@ -36,6 +36,12 @@ import { OpenSpecWriter } from '../core/generator/openspec-writer.js';
 import { ADRGenerator } from '../core/generator/adr-generator.js';
 import type { RunApiOptions, RunResult, InitResult, AnalyzeResult, ProgressCallback } from './types.js';
 import { resolveTrustedApiBase, resolveTrustedSslVerify } from '../core/services/repo-config-trust.js';
+import { atomicWriteFile } from '../core/decisions/atomic-store.js';
+import { withAnalysisLock } from '../core/runtime/advisory-lock.js';
+import { publishGeneration, readGenerationSnapshot, REQUIRED_ANALYSIS_ARTIFACTS } from '../core/runtime/analysis-generation.js';
+import { computeProjectFingerprint } from '../core/services/mcp-handlers/utils.js';
+import { acquireAnalysisOwnership } from '../core/runtime/analysis-ownership.js';
+import { AnalysisInProgressError } from './analyze.js';
 
 function progress(onProgress: ProgressCallback | undefined, step: string, status: 'start' | 'progress' | 'complete' | 'skip', detail?: string): void {
   onProgress?.({ phase: 'run', step, status, detail });
@@ -72,7 +78,7 @@ async function loadCachedArtifacts(
  */
 export async function openloreRun(options: RunApiOptions = {}): Promise<RunResult> {
   const startTime = Date.now();
-  const rootPath = options.rootPath ?? process.cwd();
+  const rootPath = await realpath(options.rootPath ?? process.cwd());
   const force = options.force ?? false;
   const reanalyze = options.reanalyze ?? false;
   const maxFiles = options.maxFiles ?? DEFAULT_MAX_FILES;
@@ -137,7 +143,7 @@ export async function openloreRun(options: RunApiOptions = {}): Promise<RunResul
   progress(onProgress, 'Analysis', 'start');
 
   const analysisPath = join(rootPath, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
-  let analyzeResult: AnalyzeResult;
+  let analyzeResult!: AnalyzeResult;
 
   // Check for existing fresh analysis (content-hash or TTL)
   const repoStructurePath = join(analysisPath, ARTIFACT_REPO_STRUCTURE);
@@ -148,36 +154,56 @@ export async function openloreRun(options: RunApiOptions = {}): Promise<RunResul
   }
 
   if (useExisting) {
-    const repoStructure = await readJsonFile<RepoStructure>(repoStructurePath, ARTIFACT_REPO_STRUCTURE);
-    if (!repoStructure) {
-      throw new Error(`Failed to load ${ARTIFACT_REPO_STRUCTURE} — run openlore analyze to regenerate`);
-    }
-    const depGraph = await readJsonFile<DependencyGraphResult>(
-      join(analysisPath, ARTIFACT_DEPENDENCY_GRAPH),
-      ARTIFACT_DEPENDENCY_GRAPH,
-    ) ?? undefined;
-
-    analyzeResult = {
-      repoMap: repoStructureToRepoMap(repoStructure),
-      depGraph: depGraph ?? {
-        nodes: [], edges: [], clusters: [], structuralClusters: [], cycles: [],
-        rankings: { byImportance: [], byConnectivity: [], clusterCenters: [], leafNodes: [], bridgeNodes: [], orphanNodes: [] },
-        statistics: { nodeCount: 0, edgeCount: 0, importEdgeCount: 0, httpEdgeCount: 0, avgDegree: 0, density: 0, clusterCount: 0, structuralClusterCount: 0, cycleCount: 0 },
+    const snapshot = await readGenerationSnapshot(
+      analysisPath,
+      [...REQUIRED_ANALYSIS_ARTIFACTS],
+      async (): Promise<AnalyzeResult | null> => {
+        const repoStructure = await readJsonFile<RepoStructure>(repoStructurePath, ARTIFACT_REPO_STRUCTURE);
+        if (!repoStructure) return null;
+        const depGraph = await readJsonFile<DependencyGraphResult>(
+          join(analysisPath, ARTIFACT_DEPENDENCY_GRAPH),
+          ARTIFACT_DEPENDENCY_GRAPH,
+        ) ?? undefined;
+        return {
+          repoMap: repoStructureToRepoMap(repoStructure),
+          depGraph: depGraph ?? {
+            nodes: [], edges: [], clusters: [], structuralClusters: [], cycles: [],
+            rankings: { byImportance: [], byConnectivity: [], clusterCenters: [], leafNodes: [], bridgeNodes: [], orphanNodes: [] },
+            statistics: { nodeCount: 0, edgeCount: 0, importEdgeCount: 0, httpEdgeCount: 0, avgDegree: 0, density: 0, clusterCount: 0, structuralClusterCount: 0, cycleCount: 0 },
+          },
+          artifacts: await loadCachedArtifacts(analysisPath, repoStructure),
+          duration: 0,
+        };
       },
-      artifacts: await loadCachedArtifacts(analysisPath, repoStructure),
-      duration: 0,
-    };
-    progress(onProgress, 'Analysis', 'skip', 'Recent analysis exists');
-  } else {
+    );
+    if (snapshot.state === 'ok' && snapshot.value) {
+      analyzeResult = snapshot.value;
+      progress(onProgress, 'Analysis', 'skip', 'Recent analysis exists');
+    } else {
+      // A TTL-fresh but uncommitted/mixed artifact set is not a cache hit.
+      useExisting = false;
+    }
+  }
+
+  if (!useExisting) {
     await mkdir(analysisPath, { recursive: true });
 
-    const mapper = new RepositoryMapper(rootPath, { maxFiles });
-    const repoMap = await mapper.map();
+    const ownership = await acquireAnalysisOwnership(rootPath, analysisPath, { stage: 'starting' });
+    if (ownership.state === 'in-progress') {
+      throw new AnalysisInProgressError(ownership.owner, ownership.elapsedMs, ownership.heartbeatAgeMs);
+    }
 
-    const graphBuilder = new DependencyGraphBuilder({ rootDir: rootPath });
-    const depGraph = await graphBuilder.build(repoMap.allFiles);
+    try {
+      await ownership.update('scanning', { percent: 0 }).catch(() => {});
+      const mapper = new RepositoryMapper(rootPath, { maxFiles });
+      const repoMap = await mapper.map();
 
-    const artifactGenerator = new AnalysisArtifactGenerator({
+      await ownership.update('dependency-graph', { percent: 35 }).catch(() => {});
+      const graphBuilder = new DependencyGraphBuilder({ rootDir: rootPath });
+      const depGraph = await graphBuilder.build(repoMap.allFiles);
+
+      await ownership.update('artifacts', { percent: 70 }).catch(() => {});
+      const artifactGenerator = new AnalysisArtifactGenerator({
       rootDir: rootPath,
       outputDir: analysisPath,
       maxDeepAnalysisFiles: Math.min(20, Math.ceil(repoMap.highValueFiles.length * 0.3)),
@@ -188,20 +214,32 @@ export async function openloreRun(options: RunApiOptions = {}): Promise<RunResul
       // that genuinely wants a full re-parse asks for it.
       reExtract: options.reExtract ?? false,
     });
-    const artifacts = await artifactGenerator.generateAndSave(repoMap, depGraph);
+      const fingerprintHash = await computeProjectFingerprint(rootPath);
+      let artifacts: AnalysisArtifacts;
+      await withAnalysisLock(analysisPath, async () => {
+      artifacts = await artifactGenerator.generateAndSave(repoMap, depGraph, undefined, { acquireLock: false });
+      await atomicWriteFile(join(analysisPath, ARTIFACT_DEPENDENCY_GRAPH), JSON.stringify(depGraph, null, 2));
+      await atomicWriteFile(join(analysisPath, ARTIFACT_FINGERPRINT), JSON.stringify({
+        hash: fingerprintHash,
+        commit: null,
+        computedAt: new Date().toISOString(),
+        fileCount: repoMap.allFiles.length,
+      }));
+      if (!await publishGeneration(analysisPath, [...REQUIRED_ANALYSIS_ARTIFACTS])) {
+        throw new Error('Analysis produced an incomplete required artifact set; generation was not published.');
+      }
+      });
 
-    await writeFile(
-      join(analysisPath, ARTIFACT_DEPENDENCY_GRAPH),
-      JSON.stringify(depGraph, null, 2)
-    );
-
-    analyzeResult = {
-      repoMap,
-      depGraph,
-      artifacts,
-      duration: Date.now() - startTime,
-    };
-    progress(onProgress, 'Analysis', 'complete', `${repoMap.summary.analyzedFiles} files`);
+      analyzeResult = {
+        repoMap,
+        depGraph,
+        artifacts: artifacts!,
+        duration: Date.now() - startTime,
+      };
+      progress(onProgress, 'Analysis', 'complete', `${repoMap.summary.analyzedFiles} files`);
+    } finally {
+      await ownership.release();
+    }
   }
 
   // ========================================================================

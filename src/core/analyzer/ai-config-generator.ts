@@ -115,6 +115,14 @@ const WORKFLOW_ENTRIES: GuidanceEntry[] = [
   { requires: ['check_spec_drift'], render: () => '- **Before opening a PR** — `check_spec_drift`' },
   { requires: ['recall'], render: () => '- **Touching code others have reasoned about** — `recall` for anchored notes and decisions' },
   { requires: ['verify_claim'], render: () => '- **About to assert a structural fact to a human** — `verify_claim`, then cite the receipt' },
+  {
+    requires: ['prepare_spec_generation'],
+    render: () => '- **Creating a domain spec** — `prepare_spec_generation <domain>`, exhaust continuation cursors, then author and validate with the host editor',
+  },
+  {
+    requires: ['prepare_spec_repair'],
+    render: () => '- **Repairing an existing spec** — `prepare_spec_repair <domain>`, honor unavailable evidence, then reconcile and validate with the host editor',
+  },
 ];
 
 const ON_DEMAND_TOOLS = [
@@ -164,10 +172,13 @@ function buildMcpSection(
     lines.push(ORIENT_GUIDANCE, '');
   }
 
-  const entries = WORKFLOW_ENTRIES.filter(e => e.requires.some(has))
+  const entries = WORKFLOW_ENTRIES.filter(e => e.requires.every(has))
     .map(e => e.render());
   if (entries.length) {
     lines.push('**Then, by situation:**', '', ...entries, '');
+  }
+  if (has('prepare_spec_generation') || has('prepare_spec_repair')) {
+    lines.push('Use the specification composites directly; do not routinely reconstruct them by replaying atomic tools.', '');
   }
 
   const onDemand = ON_DEMAND_TOOLS.filter(has);
@@ -267,4 +278,3 @@ export async function generateAiConfigs(options: AiConfigOptions): Promise<AiCon
     })
   );
 }
-

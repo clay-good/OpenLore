@@ -21,7 +21,6 @@ import {
   OPENLORE_ANALYSIS_REL_PATH,
   OPENSPEC_DIR,
   ARTIFACT_DEPENDENCY_GRAPH,
-  ARTIFACT_MAPPING,
   ARTIFACT_REPO_STRUCTURE,
   ARTIFACT_ROUTE_INVENTORY,
   ARTIFACT_MIDDLEWARE_INVENTORY,
@@ -33,11 +32,15 @@ import {
   REPO_CONTENT_PROVENANCE,
 } from '../../../constants.js';
 import { runAnalysis } from '../../../cli/commands/analyze.js';
+import { acquireAnalysisOwnership } from '../../runtime/analysis-ownership.js';
 import { analyzeForRefactoring } from '../../analyzer/refactor-analyzer.js';
 import { formatSignatureMaps } from '../../analyzer/signature-extractor.js';
 import { getSkeletonContent, isSkeletonWorthIncluding } from '../../analyzer/code-shaper.js';
 import { detectLanguage } from '../../analyzer/language-detection.js';
 import { buildArchitectureOverview } from '../../analyzer/architecture-writer.js';
+import { buildDomainEvidence } from '../../generator/domain-evidence.js';
+import type { LLMContext, RepoStructure } from '../../analyzer/artifact-generator.js';
+import type { DependencyGraphResult } from '../../analyzer/dependency-graph.js';
 import {
   isGitRepository,
   getChangedFiles,
@@ -52,7 +55,7 @@ import { buildWeightedAdjacency, weightedBfs } from './graph.js';
 import { personalizedPageRank } from '../../analyzer/personalized-pagerank.js';
 import { applyTokenBudget, normalizeResponseFormat, truncationReceipt, summarizeListInventory, type ResponseFormat } from './progressive.js';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
-import type { MappingArtifact } from '../../generator/mapping-generator.js';
+import { mappingViewOf, resolveSpecLinkIndex } from '../../generator/spec-link-service.js';
 import { openloreAudit } from '../../../api/audit.js';
 import type { DriftResult } from '../../../types/index.js';
 
@@ -92,11 +95,34 @@ export async function handleAnalyzeCodebase(
     }
   }
 
-  const result = await runAnalysis(absDir, outputPath, {
-    maxFiles: DEFAULT_MAX_FILES,
-    include: [],
-    exclude: [],
-  });
+  // Repository-scoped single flight, shared with the CLI, the daemon, and Pi: an
+  // MCP-triggered analyze must not duplicate one a user already started (change
+  // `harden-spec-workflow-lifecycle`). A tool call cannot block on someone else's
+  // run, so it reports the owner instead of waiting.
+  const ownership = await acquireAnalysisOwnership(absDir, outputPath);
+  if (ownership.state === 'in-progress') {
+    return {
+      status: 'ANALYSIS_IN_PROGRESS',
+      message: 'Another process already owns a full analysis of this repository. No duplicate analysis was started.',
+      owner: ownership.owner,
+      elapsedMs: ownership.elapsedMs,
+      heartbeatAgeMs: ownership.heartbeatAgeMs,
+      remediation: 'Wait for the owner to publish, or run `openlore analyze --wait` to follow it.',
+      analysisPath: OPENLORE_ANALYSIS_REL_PATH,
+    };
+  }
+
+  let result;
+  try {
+    result = await runAnalysis(absDir, outputPath, {
+      maxFiles: DEFAULT_MAX_FILES,
+      include: [],
+      exclude: [],
+      ownership,
+    });
+  } finally {
+    await ownership.release();
+  }
 
   const { artifacts, repoMap, depGraph } = result;
   const rs = artifacts.repoStructure;
@@ -161,11 +187,19 @@ export async function handleGetArchitectureOverview(directory: string): Promise<
   }
 
   const overview = buildArchitectureOverview(depGraph, ctx, absDir);
+  let domainEvidence: unknown[] = [];
+  if (ctx) {
+    try {
+      const repo = JSON.parse(await readFile(join(absDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_REPO_STRUCTURE), 'utf-8')) as RepoStructure;
+      domainEvidence = buildDomainEvidence(repo, ctx);
+    } catch { /* the architectural summary remains usable when this artifact is absent */ }
+  }
   return {
     summary: overview.summary,
     clusters: overview.clusters,
     globalEntryPoints: overview.globalEntryPoints,
     criticalHubs: overview.criticalHubs,
+    domainEvidence,
   };
 }
 
@@ -277,7 +311,12 @@ export async function handleGetSignatures(directory: string, filePattern?: strin
 }
 
 /**
- * Return the requirement→function mapping from mapping.json.
+ * Return the requirement→code links of the deterministic spec link index.
+ *
+ * Read-only: the index is served from the persisted cache when it is current and
+ * derived in memory otherwise, and this path never writes the cache back. An
+ * unusable INPUT (no analysis, no specs) is the only error — an absent or legacy
+ * `mapping.json` is not, because the links can always be re-derived.
  */
 export async function handleGetMapping(
   directory: string,
@@ -285,37 +324,13 @@ export async function handleGetMapping(
   orphansOnly?: boolean
 ): Promise<unknown> {
   const absDir = await validateDirectory(directory);
-  let raw: string;
-  try {
-    raw = await readFile(join(absDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_MAPPING), 'utf-8');
-  } catch {
-    return { error: 'No mapping found. Run openlore generate first.' };
-  }
-
-  let mapping: MappingArtifact;
-  try {
-    mapping = JSON.parse(raw) as MappingArtifact;
-  } catch {
-    return { error: 'Mapping file is corrupted. Re-run openlore generate.' };
-  }
-
-  if (orphansOnly) {
-    const filtered = domain
-      ? mapping.orphanFunctions.filter((f: { file: string }) => f.file.includes(domain))
-      : mapping.orphanFunctions;
-    return { generatedAt: mapping.generatedAt, stats: mapping.stats, orphanFunctions: filtered };
-  }
-
-  const filteredMappings = domain
-    ? mapping.mappings.filter((m: { domain: string }) => m.domain === domain)
-    : mapping.mappings;
-
-  return {
-    generatedAt: mapping.generatedAt,
-    stats: mapping.stats,
-    mappings: filteredMappings,
-    orphanFunctions: domain ? [] : mapping.orphanFunctions,
-  };
+  const config = await readOpenLoreConfig(absDir).catch(() => null);
+  const resolution = await resolveSpecLinkIndex({
+    rootPath: absDir,
+    openspecPath: config?.openspecPath ?? OPENSPEC_DIR,
+    persist: false,
+  });
+  return mappingViewOf(resolution, domain, orphansOnly);
 }
 
 /**
@@ -791,6 +806,9 @@ export async function handleAuditSpecCoverage(
   directory: string,
   maxUncovered = 50,
   hubThreshold = 5,
+  save = true,
+  scope?: { files?: string[]; domains?: string[] },
+  analysisArtifacts?: { llmContext: LLMContext; dependencyGraph: DependencyGraphResult },
 ): Promise<unknown> {
   const absDir = await validateDirectory(directory);
   try {
@@ -798,7 +816,10 @@ export async function handleAuditSpecCoverage(
       rootPath: absDir,
       maxUncovered,
       hubThreshold,
-      save: true,
+      save,
+      files: scope?.files,
+      domains: scope?.domains,
+      ...(analysisArtifacts ? { analysisArtifacts } : {}),
     });
     return report;
   } catch (err) {
@@ -955,7 +976,7 @@ export async function handleGetMinimalContext(
   // callType of each direct call edge, keyed (callerId → calleeId) so the last hop
   // on a scoped path can report how that neighbour is reached.
   const callTypeByEdge = new Map<string, string>();
-  for (const e of callsEdges) callTypeByEdge.set(`${e.callerId} ${e.calleeId}`, e.callType ?? 'direct');
+  for (const e of callsEdges) callTypeByEdge.set(`${e.callerId}\0${e.calleeId}`, e.callType ?? 'direct');
 
   const { forward, backward } = buildWeightedAdjacency(cg);
   const pagerank = rankBy === 'pagerank';
@@ -997,7 +1018,7 @@ export async function handleGetMinimalContext(
     .map(([id, r]) => {
       const n = nodeMap.get(id);
       if (!n || n.isExternal) return null;
-      const callType = callTypeByEdge.get(`${id} ${r.predecessor}`) ?? 'direct';
+      const callType = callTypeByEdge.get(`${id}\0${r.predecessor}`) ?? 'direct';
       return { id, name: n.name, file: relative(absDir, n.filePath), sig: sig(n), callType, isExternal: false, distance: r.distance, hops: r.hops, _rank: n.fanIn, _rel: callerScores.get(id) ?? 0 };
     })
     .filter((n): n is NonNullable<typeof n> => !!n);
@@ -1011,7 +1032,7 @@ export async function handleGetMinimalContext(
     .map(([id, r]) => {
       const n = nodeMap.get(id);
       if (!n || n.isExternal) return null;
-      const callType = callTypeByEdge.get(`${r.predecessor} ${id}`) ?? 'direct';
+      const callType = callTypeByEdge.get(`${r.predecessor}\0${id}`) ?? 'direct';
       return { id, name: n.name, file: relative(absDir, n.filePath), sig: sig(n), callType, isExternal: false, kind: undefined as string | undefined, distance: r.distance, hops: r.hops, _rank: n.fanOut, _rel: calleeScores.get(id) ?? 0 };
     })
     .filter((n): n is NonNullable<typeof n> => !!n);
@@ -1025,7 +1046,7 @@ export async function handleGetMinimalContext(
     .map(n => ({
       id: n.id,
       name: `[external] ${n.name}`, file: 'external', sig: sig(n),
-      callType: callTypeByEdge.get(`${target.id} ${n.id}`) ?? 'direct',
+      callType: callTypeByEdge.get(`${target.id}\0${n.id}`) ?? 'direct',
       isExternal: true, kind: n.externalKind as string | undefined, distance: 1, hops: 1, _rank: 0, _rel: 0,
     }));
 

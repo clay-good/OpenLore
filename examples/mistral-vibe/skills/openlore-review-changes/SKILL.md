@@ -1,23 +1,19 @@
 ---
 name: openlore-review-changes
-description: Risk-aware code review using detect_changes + get_minimal_context + get_cluster. Surfaces the riskiest changed functions, interprets callType/coverage/cluster density, and produces a go/no-go recommendation. No code written.
-license: MIT
-compatibility: openlore MCP server
-user-invocable: true
-allowed-tools:
-  - use_mcp_tool
-  - ask_followup_question
+description: Review code changes using OpenLore risk, call, coverage, and cluster evidence without editing code. Use when asked for a change review, pre-PR safety check, or merge recommendation.
 ---
 
 # openlore: Review Changes
 
 ## When to use this skill
 
-Trigger whenever the user asks to **review, audit, or check the safety of recent changes**:
+Trigger this skill whenever the user asks to **review, audit, or check the safety of recent changes**, with phrasings like:
 - "review my changes"
 - "what did I break?"
 - "is this branch safe to merge?"
-- "pre-PR check" / "what's risky in this diff?"
+- "pre-PR check"
+- "what's risky in this diff?"
+- "check the blast radius of my changes"
 - explicit command `/openlore-review-changes`
 
 **No code is written.** Output is a risk-ranked review with a go/no-go recommendation.
@@ -28,101 +24,109 @@ Trigger whenever the user asks to **review, audit, or check the safety of recent
 
 Ask: which project? Diff against which base? (default: `main`)
 
+Store as `$DIRECTORY` and `$BASE_REF`.
+
 ---
 
 ## Step 2 — Detect changed functions and risk scores
 
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>detect_changes</tool_name>
-  <arguments>{"directory": "$DIRECTORY", "base": "$BASE_REF"}</arguments>
-</use_mcp_tool>
+Call the openlore MCP tool `detect_changes` with:
+```json
+{"directory": "$DIRECTORY", "base": "$BASE_REF"}
 ```
 
-Risk score is **multiplicative**: `likelihood × impact`.
-- `likelihood` = changeScore × (1 + coveragePenalty) — `"called"` tests count full; `"imported"`-only count 0.3×
-- `impact` = log(fanIn) + distance-weighted transitive callers (weighted by callType) + external boundary calls
+The risk score is **multiplicative**: `likelihood × impact`.
+- `likelihood` = how much was changed × how poorly covered it is (`"called"` tests count full; `"imported"`-only count 0.3×)
+- `impact` = structural blast radius (log fanIn + distance-weighted transitive callers weighted by callType + external boundary calls)
 
-Functions with fanIn=0 calling nothing external score 0 — correct; focus on non-zero scores.
+A function with fanIn=0 calling nothing external scores 0 regardless of change size — correct; focus on non-zero scores.
 
 Present a risk-ranked table:
 
 | Rank | Function | File | riskScore | blastRadius | fanIn | testedBy |
 |---|---|---|---|---|---|---|
 
-Flag: `≥ 5` → 🔴 HIGH | `2–5` → 🟡 MEDIUM | `< 2` → 🟢 LOW
+Flag:
+- `riskScore ≥ 5` → 🔴 HIGH — must inspect
+- `riskScore 2–5` → 🟡 MEDIUM — inspect if time allows
+- `riskScore < 2` → 🟢 LOW
 
 ---
 
 ## Step 3 — Deep-inspect each HIGH function
 
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>get_minimal_context</tool_name>
-  <arguments>{"directory": "$DIRECTORY", "functionName": "$FUNCTION_NAME"}</arguments>
-</use_mcp_tool>
+For each function with `riskScore ≥ 5`, call `get_minimal_context`:
+```json
+{"directory": "$DIRECTORY", "functionName": "$FUNCTION_NAME"}
 ```
 
 **What to read:**
-- `function.riskLevel` — `"high"` means up to 24 callers/callees shown; all are in blast radius.
-- `callers[*].callType` — all `"awaited"` = async interface frozen; signature change breaks all callers silently. Mixed = looser.
-- `callees[*].isExternal: true` — external boundary; failures propagate past mocks.
-- `testedBy[*].confidence` — `"called"` = strong. `"imported"` only = `vi.mock()` can neutralize; treat as untested.
 
-State for each HIGH function:
+- `function.riskLevel` — `"high"` means the tool expanded caller/callee lists to 24. All shown entries are in the blast radius.
+- `callers[*].callType` — all `"awaited"` = async interface frozen; any signature change breaks every caller without a compile error in JS. Mixed = looser coupling.
+- `callees[*].isExternal: true` — function touches an external boundary (HTTP/DB). Failures here propagate outward and may not be caught in unit tests.
+- `testedBy[*].confidence` — `"called"` = direct test (strong safety net). `"imported"` = test file only imports the module; `vi.mock()` can neutralize it entirely. Only `"imported"` = effectively untested.
+
+For each HIGH function, state:
 ```
-$FUNCTION_NAME: interface frozen? | external boundary? | effective coverage | verdict
+$FUNCTION_NAME ($FILE):
+  Interface frozen? [yes — all callers await | no — mixed]
+  External boundary? [yes: $CALLEES | no]
+  Effective coverage: [strong (called) | weak (imported only) | none]
+  Verdict: [safe | needs direct tests first | coordinate with callers before merge]
 ```
 
 ---
 
 ## Step 4 — Check cluster density for non-safe HIGH functions
 
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>get_cluster</tool_name>
-  <arguments>{"directory": "$DIRECTORY", "functionName": "$FUNCTION_NAME"}</arguments>
-</use_mcp_tool>
+For any HIGH function whose verdict is not "safe":
+```json
+{"directory": "$DIRECTORY", "functionName": "$FUNCTION_NAME"}
+// get_cluster
 ```
 
-`stats.clusterDensity`:
-- `< 0.05` → sparse; change isolated; safe to land independently
-- `0.05–0.15` → moderate; review `internalCallGraph` for transitively dependent functions
-- `> 0.15` → dense; coordinate whole cluster; consider feature flag or staged rollout
+Read `stats.clusterDensity`:
+
+| Density | Meaning | Action |
+|---|---|---|
+| < 0.05 | Sparse — shared utilities | Change isolated; safe to land independently |
+| 0.05–0.15 | Moderate coupling | Review `internalCallGraph` for transitively dependent functions |
+| > 0.15 | Dense — tightly interwoven | Coordinate whole cluster; consider feature flag or staged rollout |
 
 ---
 
 ## Step 5 — Coverage gap check
 
-For each HIGH/MEDIUM function with `testedBy` empty or all `"imported"`:
-> "⚠️ `$FUNCTION_NAME` has no direct test coverage. Recommend a characterisation test before merging."
+For each HIGH or MEDIUM function with `testedBy` empty or all `"imported"`:
 
-Suggest a concrete test scenario from the function body.
+> "⚠️ `$FUNCTION_NAME` has no direct test coverage. Changes here are not caught by the test suite unless a test directly calls this function. Recommend adding a characterisation test before merging."
+
+Suggest a concrete test scenario based on the function body from `get_minimal_context`.
 
 ---
 
-## Step 6 — Output
+## Step 6 — Output the review
 
 ### Summary
-Total changed: N | HIGH: N | MEDIUM: N | Coverage gaps: N
+- Total changed: N | HIGH: N | MEDIUM: N | Coverage gaps: N
 
-### Risk table (from Step 2)
+### Risk table
+(from Step 2)
 
 ### Function verdicts (HIGH only)
+(from Steps 3–4)
 
 ### Go / No-Go
 - ✅ **Safe to merge** — no HIGH-risk uncovered functions
-- ⚠️ **Merge with caution** — HIGH functions exist but covered by direct tests
-- 🛑 **Do not merge** — HIGH uncovered functions with frozen interfaces or external boundaries
+- ⚠️ **Merge with caution** — HIGH-risk functions exist but covered by direct tests
+- 🛑 **Do not merge** — HIGH-risk uncovered functions with frozen interfaces or external boundaries
 
 ---
 
 ## Absolute constraints
 
-- Never skip Step 3 for HIGH functions — riskScore alone is not enough
-- `callType` determines whether interface change is breaking — always interpret it
-- `"imported"` confidence is not strong coverage — always flag it
-- Do not recommend merging: riskScore ≥ 5 + zero direct tests + external callee
+- Never skip Step 3 for HIGH-risk functions — riskScore alone is not enough
+- Always interpret `callType` — determines whether interface change is breaking
+- Always interpret `testedBy.confidence` — `"imported"` is not strong coverage
+- Do not recommend merging any function with `riskScore ≥ 5`, zero direct tests, and an external callee

@@ -49,8 +49,9 @@ openlore install   # detect your agent, wire it up, and build the index (no API 
 openlore doctor    # confirm it worked and see what (if anything) to fix
 ```
 
-`openlore install` wires the lean `navigation` MCP surface plus the `SessionStart` and
-`UserPromptSubmit` hooks, then builds the index. The granular commands below remain available
+`openlore install` wires the 15-tool read-only `substrate` MCP surface plus the `SessionStart` and
+`UserPromptSubmit` hooks, then builds the index. Use `--preset navigation` for the lean 10-tool
+escape. The granular commands below remain available
 when you want project-specific context files or the workflow skills:
 
 ```bash
@@ -65,10 +66,10 @@ openlore setup                   # install workflow skills
 ```
 openlore setup [--tools vibe,cline,claude,opencode,omoa,gsd,bmad]
 
-Mistral Vibe  ->  .vibe/skills/openlore-{name}/SKILL.md       (8 skills)
+Mistral Vibe  ->  .vibe/skills/openlore-{name}/SKILL.md       (10 skills)
 Cline / Roo   ->  .clinerules/workflows/openlore-{name}.md    (7 workflows)
-Claude Code   ->  .claude/skills/openlore-{name}/SKILL.md     (8 skills + decisions pre-commit hook)
-OpenCode      ->  .opencode/skills/openlore-{name}/SKILL.md   (8 skills)
+Claude Code   ->  .claude/skills/openlore-{name}/SKILL.md     (10 skills + decisions pre-commit hook)
+OpenCode      ->  .opencode/skills/openlore-{name}/SKILL.md   (10 skills)
               ->  .opencode/plugins/agent-guard.ts             (guard plugin)
 oh-my-openagent -> .opencode/plugins/{anti-laziness,openlore-enforcer,
               ->                      openlore-decision-extractor,openlore-context-injector}.ts
@@ -113,7 +114,7 @@ Wire the generated digest into your agent's context:
 
 **Claude Code — MCP config (token-efficient two-server setup)**
 
-MCP clients load all tool schemas at session start. With 73 tools, this costs ~16k tokens of `tools/list` before any work begins (Spec 28 measured it; the lossless server-side trim is only ~2%, so the real lever is deferral). Claude Code supports `alwaysLoad: false` (deferred, default) — tools load only when the agent searches for them via Tool Search.
+MCP clients load all tool schemas at session start. With 75 tools, this costs roughly 16k tokens of `tools/list` before any work begins (Spec 28 measured the preceding seventy-three-tool surface; the lossless server-side trim is only ~2%, so the real lever is deferral). Claude Code supports `alwaysLoad: false` (deferred, default) — tools load only when the agent searches for them via Tool Search.
 
 The recommended setup uses two server entries: one always-visible core server and one deferred full server:
 
@@ -137,9 +138,9 @@ The recommended setup uses two server entries: one always-visible core server an
 ```
 
 - **`openlore-core`** exposes 6 tools always visible in context (~600 tokens): `orient`, `search_code`, `record_decision`, `detect_changes`, `check_spec_drift`, `get_health_map`. These are the tools most likely to be called at session start.
-- **`openlore`** exposes all 73 tools deferred — loaded on demand when the agent uses Tool Search (e.g. "find tool for BFS graph traversal"). The `--preset full` is required here: a bare `openlore mcp` exposes only the 13-tool `substrate` default surface, so without it the deferred server would advertise only those 13 tools, not the full 72 you want searchable. (Deferral makes the full surface's up-front schema cost ~0, so wiring `full` on the *deferred* server is the right trade — the eager default targets the *non-deferred* case.)
+- **`openlore`** exposes all 75 tools deferred — loaded on demand when the agent uses Tool Search (e.g. "find tool for BFS graph traversal"). The `--preset full` is required here: a bare `openlore mcp` exposes only the 15-tool `substrate` default surface, so without it the deferred server would advertise only those 15 tools. (Deferral makes the full surface's up-front schema cost ~0, so wiring `full` on the *deferred* server is the right trade — the eager default targets the *non-deferred* case.)
 
-If you only need one server entry and want every tool searchable, use `alwaysLoad: false` (the default) with `openlore mcp --preset full` — all 73 tools are deferred and searchable via Tool Search. A bare `openlore mcp` instead gives the 13-tool `substrate` default surface (the navigation core plus governance reads; use `--preset navigation` for the lean 10-tool core).
+If you only need one server entry and want every tool searchable, use `alwaysLoad: false` (the default) with `openlore mcp --preset full` — all 75 tools are deferred and searchable via Tool Search. A bare `openlore mcp` instead gives the 15-tool `substrate` default surface (navigation, governance reads, and spec preparation; use `--preset navigation` for the lean 10-tool core).
 
 The full surface stays navigable despite its size because every tool declares one of six **capability families** — `navigate` · `change` · `remember` · `verify` · `coordinate` · `federate` — carried in its MCP `annotations.family`, so a client (or Tool Search) can group rather than face a flat list. Inspect any surface grouped by family with `openlore mcp --preset full --list-tools`.
 
@@ -204,7 +205,7 @@ Then invoke `/openlore` inside Vibe to get architecture context on demand.
 openlore setup --tools opencode
 ```
 
-This installs 8 workflow skills into `.opencode/skills/` and an `agent-guard.ts` plugin into `.opencode/plugins/`. OpenCode loads plugins from `.opencode/plugins/` automatically — no further configuration needed.
+This installs 10 workflow skills into `.opencode/skills/` and an `agent-guard.ts` plugin into `.opencode/plugins/`. OpenCode loads plugins from `.opencode/plugins/` automatically — no further configuration needed.
 
 The plugin does four things at runtime, with no LLM calls of its own:
 
@@ -248,4 +249,3 @@ openlore integrates with structured agentic workflows so AI agents follow a cons
 | **Cline** | Workflow markdown files for Cline / Roo Code / Kilocode. Copy to `.clinerules/workflows/`. | `examples/cline-workflows/` |
 
 Each integration ships with a README explaining setup and the step-by-step workflow.
-

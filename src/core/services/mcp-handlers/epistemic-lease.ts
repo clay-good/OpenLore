@@ -169,6 +169,8 @@ const TOOL_WEIGHTS: Record<string, number> = {
 
   // Structural-heavy: graph and architecture reads
   get_architecture_overview: 3,
+  prepare_spec_generation: 3,
+  prepare_spec_repair: 3,
   get_call_graph: 3,
   get_file_dependencies: 3,
   get_critical_hubs: 3,

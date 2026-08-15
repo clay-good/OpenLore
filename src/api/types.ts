@@ -136,7 +136,7 @@ export interface GenerateApiOptions extends BaseOptions {
   adrOnly?: boolean;
   /** Generate requirement-to-function mapping */
   mapping?: boolean;
-  /** Preview what would be generated without writing */
+  /** List what would be generated without constructing/calling a provider or writing */
   dryRun?: boolean;
   /** Path to analysis directory. Default: '.openlore/analysis/' */
   analysisPath?: string;
@@ -266,6 +266,10 @@ export interface AuditApiOptions extends BaseOptions {
   hubThreshold?: number;
   /** Save audit report to .openlore/analysis/audit-report.json. Default: true */
   save?: boolean;
+  /** Optional normalized file scope applied before result limits. */
+  files?: string[];
+  /** Optional spec-domain scope applied before result limits. */
+  domains?: string[];
 }
 
 export type { AuditReport } from '../types/index.js';

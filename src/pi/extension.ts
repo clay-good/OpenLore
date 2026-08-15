@@ -426,10 +426,46 @@ const HEALTH_PROBE_TIMEOUT_MS = 2500;
 // orphans get no ping and still reap, so this can't resurrect the RAM pileup.
 const KEEPALIVE_MS = 5 * 60_000;
 const RESULT_MAX = 50_000;
+/**
+ * Serialized budget Pi requests from the spec-workflow composites.
+ *
+ * The daemon packs a page to fit this, so a valid composite envelope is ALWAYS
+ * within Pi's model-visible bound and must bypass the generic `RESULT_MAX`
+ * clipping below — clipping a within-budget page would invalidate the very
+ * completeness receipt the protocol exists to guarantee (change
+ * `harden-spec-workflow-lifecycle`). Kept strictly under RESULT_MAX so the
+ * adapter's own JSON framing still fits.
+ */
+const PI_COMPOSITE_RESPONSE_BYTES = 48 * 1024;
 // Pi curates its own native surface, which intentionally supersets the MCP
 // substrate preset. The daemon enforces its preset at dispatch, so Pi must
 // spawn the full backing surface and keep curating what the model sees here.
 export const PI_DAEMON_PRESET = 'full';
+
+/**
+ * Auditable mapping from the Generate/Repair protocol observations to the
+ * existing daemon primitives used by Pi's task entry points. Keep this list
+ * closed in tests: adding a protocol observation must either wire it here or
+ * add a documented exclusion below.
+ */
+export const PI_SPEC_WORKFLOW_OBSERVATIONS = {
+  generation: {
+    domainEvidence: 'prepare_spec_generation',
+  },
+  repair: {
+    domainEvidence: 'prepare_spec_repair',
+    existingSpec: 'prepare_spec_repair',
+    coveredFunction: 'prepare_spec_repair',
+    uncoveredFunction: 'prepare_spec_repair',
+    staleMapping: 'prepare_spec_repair',
+    orphanRequirement: 'prepare_spec_repair',
+    structuralChange: 'prepare_spec_repair',
+    mappingCoverage: 'prepare_spec_repair',
+  },
+} as const;
+
+export const PI_SPEC_WORKFLOW_EXCLUSIONS: Readonly<Record<string, string>> = {};
+
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 // `.openlore/serve.json` is an untrusted, repo-writable artifact; resolve it
@@ -1047,6 +1083,8 @@ export const NAV_TOOLS: NavToolSpec[] = [
 // conclusion tool fails CI until its author makes this decision explicitly, the
 // same fails-until-you-classify discipline tool-contract.test.ts enforces.
 export const PI_EXCLUDED_CONCLUSION_TOOLS: Record<string, string> = {
+  prepare_spec_generation: 'surfaced by the dedicated openlore_prepare_spec_generation entry point',
+  prepare_spec_repair: 'surfaced by the dedicated openlore_prepare_spec_repair entry point',
   // Opt-in preset surfaces — federation/coordination tools ship behind
   // `--preset federation` / `--preset coordination`, not the native substrate
   // surface Pi mirrors; surface them if a Pi host adopts those workflows.
@@ -1094,6 +1132,41 @@ export const PI_EXCLUDED_CONCLUSION_TOOLS: Record<string, string> = {
 
 function toolResult(text: string, details: unknown = null): AgentToolResult<unknown> {
   return { content: [{ type: 'text', text }], details };
+}
+
+/**
+ * Forward a spec-workflow composite envelope WITHOUT generic clipping.
+ *
+ * The daemon already packed the page to `PI_COMPOSITE_RESPONSE_BYTES`, so a
+ * valid envelope fits by construction and its completeness receipt is
+ * meaningful. Clipping it here would silently invalidate that receipt — the
+ * exact failure this change removes. A page that is somehow still oversized is a
+ * transport fault, so it returns a typed error instead of clipped JSON the model
+ * would try to parse as evidence.
+ */
+export function compositeToolResult(result: unknown): AgentToolResult<unknown> {
+  // The daemon budgeted the COMPACT serialization, so that is what the bound must
+  // be measured against: indentation inflates the same evidence by well over the
+  // headroom between the two limits, and measuring it would reject every full page
+  // as a transport fault. Indented text is forwarded only when it also fits.
+  const compact = JSON.stringify(result);
+  const compactBytes = Buffer.byteLength(compact, 'utf8');
+  if (compactBytes <= RESULT_MAX) {
+    const indented = JSON.stringify(result, null, 2);
+    return toolResult(Buffer.byteLength(indented, 'utf8') <= RESULT_MAX ? indented : compact, result);
+  }
+  return toolResult(
+    JSON.stringify({
+      error: {
+        code: 'response-too-large',
+        message:
+          `The composite response is ${compactBytes} bytes, above this host's ${RESULT_MAX}-byte bound, ` +
+          'despite a smaller requested budget. This is a transport fault, not partial evidence — retry with a smaller ' +
+          'maxItems, or use the atomic tools. No evidence was clipped.',
+      },
+    }, null, 2),
+    result,
+  );
 }
 
 // ── Tool-result rendering ──────────────────────────────────────────────────
@@ -1369,6 +1442,69 @@ export default function openlore(pi: ExtensionAPI): void {
       },
     });
   }
+
+  // Pi-native task entry points wrap the public MCP composites. They do not
+  // rederive evidence or invoke a generator LLM: OpenLore makes no internal
+  // LLM call here. Pi's host agent receives
+  // deterministic evidence and remains responsible for authoring/reconciling
+  // the OpenSpec text.
+  pi.registerTool({
+    name: 'openlore_prepare_spec_generation',
+    label: 'openlore prepare spec generation',
+    description: 'Prepare deterministic, domain-scoped code evidence for writing a new OpenSpec specification.',
+    promptSnippet: 'Get deterministic evidence before writing a new specification.',
+    promptGuidelines: ['When asked to create specs from existing code, call openlore_prepare_spec_generation first; write the specification yourself from its evidence.'],
+    parameters: Type.Object({
+      domain: Type.String({ description: 'REQUIRED. Reconciled domain name to prepare.' }),
+      cursor: Type.Optional(Type.String({ description: 'Opaque continuation cursor returned by the preceding page.' })),
+      maxItems: Type.Optional(Type.Number({ minimum: 10, maximum: 200, description: 'Maximum evidence items per deterministic page.' })),
+    }),
+    async execute(_id, params, signal, _onUpdate, ctx) {
+      const daemon = await getDaemon(ctx.cwd);
+      if (!daemon) return toolResult('openlore daemon unavailable — run `openlore analyze` then retry.');
+      try {
+        const { domain, cursor, maxItems } = params as { domain: string; cursor?: string; maxItems?: number };
+        const result = await callTool(
+          daemon, 'prepare_spec_generation',
+          { domain, cursor, maxItems, maxResponseBytes: PI_COMPOSITE_RESPONSE_BYTES }, ctx.cwd, signal ?? undefined,
+        );
+        return compositeToolResult(result);
+      } catch (err) {
+        daemons.delete(ctx.cwd);
+        return toolResult(`openlore daemon connection changed — ${err instanceof Error ? err.message : String(err)}. Retry the tool.`);
+      }
+    },
+  });
+
+  pi.registerTool({
+    name: 'openlore_prepare_spec_repair',
+    label: 'openlore prepare spec repair',
+    description: 'Prepare evidence for repairing one existing OpenSpec domain: code coverage observations, its spec, mapping provenance, and drift.',
+    promptSnippet: 'Get deterministic repair evidence before editing an existing specification.',
+    promptGuidelines: ['When asked to repair an existing spec, call openlore_prepare_spec_repair first; interpret observations and edit the specification yourself.'],
+    parameters: Type.Object({
+      domain: Type.String({ description: 'REQUIRED. Existing OpenSpec domain to repair.' }),
+      baseRef: Type.Optional(Type.String({ description: 'Git ref used to identify structural changes (default: HEAD).' })),
+      cursor: Type.Optional(Type.String({ description: 'Opaque continuation cursor returned by the preceding page.' })),
+      maxItems: Type.Optional(Type.Number({ minimum: 10, maximum: 200, description: 'Maximum observations per bounded category.' })),
+    }),
+    async execute(_id, params, signal, _onUpdate, ctx) {
+      const daemon = await getDaemon(ctx.cwd);
+      if (!daemon) return toolResult('openlore daemon unavailable — run `openlore analyze` then retry.');
+      const { domain, baseRef, cursor, maxItems } = params as { domain: string; baseRef?: string; cursor?: string; maxItems?: number };
+      try {
+        const result = await callTool(
+          daemon, 'prepare_spec_repair',
+          { domain, baseRef: baseRef ?? 'HEAD', cursor, maxItems, maxResponseBytes: PI_COMPOSITE_RESPONSE_BYTES },
+          ctx.cwd, signal ?? undefined,
+        );
+        return compositeToolResult(result);
+      } catch (err) {
+        daemons.delete(ctx.cwd);
+        return toolResult(`openlore daemon connection changed — ${err instanceof Error ? err.message : String(err)}. Retry the tool.`);
+      }
+    },
+  });
 
   // ── Config tool ──
   pi.registerTool({

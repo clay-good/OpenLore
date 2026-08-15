@@ -1,13 +1,6 @@
 ---
 name: openlore-analyze-codebase
-description: Run a full static analysis of a project using openlore and summarise the results — architecture, call graph, top refactoring issues, and duplicate code. No LLM required.
-license: MIT
-compatibility: openlore MCP server
-user-invocable: true
-allowed-tools:
-  - ask_followup_question
-  - use_mcp_tool
-  - openlore-plan-refactor
+description: Run a full static OpenLore analysis and summarize architecture, call graph, refactoring issues, and duplicate code. Use when asked to analyze, map, or assess a codebase without LLM inference.
 ---
 
 # openlore: Analyze Codebase
@@ -38,13 +31,7 @@ Options: current workspace root | enter a different path
 
 ## Step 2 — Run static analysis
 
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>analyze_codebase</tool_name>
-  <arguments>{"directory": "$DIRECTORY"}</arguments>
-</use_mcp_tool>
-```
+Call the openlore MCP tool `analyze_codebase` with `{"directory": "$DIRECTORY"}`.
 
 ---
 
@@ -68,13 +55,7 @@ If none of these files exist, skip this section and suggest running `openlore an
 
 ## Step 4 — Show the call graph
 
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>get_call_graph</tool_name>
-  <arguments>{"directory": "$DIRECTORY"}</arguments>
-</use_mcp_tool>
-```
+Call the openlore MCP tool `get_call_graph` with `{"directory": "$DIRECTORY"}`.
 
 Highlight:
 - **Hub functions** (fanIn ≥ 8) — over-solicited functions, high coupling risk
@@ -84,13 +65,7 @@ Highlight:
 
 ## Step 5 — Show duplicate code report
 
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>get_duplicate_report</tool_name>
-  <arguments>{"directory": "$DIRECTORY"}</arguments>
-</use_mcp_tool>
-```
+Call the openlore MCP tool `get_duplicate_report` with `{"directory": "$DIRECTORY"}`.
 
 Present a concise summary:
 - Overall duplication ratio (e.g. "12% of functions are duplicated")

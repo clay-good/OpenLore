@@ -3,11 +3,11 @@
  * `decisions --consolidate` processes from clobbering pending.json.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, mkdir, writeFile, readFile, utimes, stat, access } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, readdir, writeFile, readFile, utimes, stat, access } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { acquireDecisionsLock, isDecisionsLockHeld, acquireAnalysisLock, withAnalysisLock } from './lock.js';
-import { decisionsDir } from './store.js';
+import { acquireDecisionsLock, acquireLockAt, isDecisionsLockHeld, isLockHeld, acquireAnalysisLock, withAnalysisLock, NamespaceGateHeldError } from './advisory-lock.js';
+import { decisionsDir } from '../decisions/store.js';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 let root: string;
@@ -60,6 +60,129 @@ describe('acquireDecisionsLock', () => {
   }, 10_000);
 });
 
+describe('stale steal — exactly one winner', () => {
+  it('gives ownership to ONE contender when several judge the same lock stale', async () => {
+    // Stealing by unlink-on-path lets a second contender delete the FRESH lock the
+    // first has already written, so both proceed as owner. The steal is a rename,
+    // which only one contender can win.
+    const dir = join(root, 'steal');
+    await mkdir(dir, { recursive: true });
+    const lockPath = join(dir, '.race.lock');
+    for (let round = 0; round < 25; round++) {
+      await writeFile(lockPath, '99999 crashed');
+      const old = (Date.now() - 200_000) / 1000; // older than STALE_MS
+      await utimes(lockPath, old, old);
+
+      const results = await Promise.all(
+        Array.from({ length: 5 }, () => acquireLockAt(dir, '.race.lock', { onContended: 'report' })),
+      );
+      const handles = results.filter(result => !isLockHeld(result));
+      expect(handles, `round ${round}`).toHaveLength(1);
+      await (handles[0] as { release: () => Promise<void> }).release();
+
+      // Neither stale-steal nor the namespace gate leaves debris that can alter
+      // the next ownership decision.
+      const leftovers = (await readdir(dir)).filter(name => name.endsWith('.stale') || name.endsWith('.gate'));
+      expect(leftovers).toEqual([]);
+    }
+  }, 20_000);
+});
+
+describe('a live holder is never superseded', () => {
+  it('refuses to steal a stale-looking lock while its PID is alive', async () => {
+    const dir = join(root, 'live-holder');
+    const first = await acquireLockAt(dir, '.x.lock');
+    if (isLockHeld(first)) throw new Error('setup acquire must own the lock');
+
+    const lockPath = join(dir, '.x.lock');
+    const old = (Date.now() - 200_000) / 1000;
+    await utimes(lockPath, old, old);
+
+    const contender = await acquireLockAt(dir, '.x.lock', { onContended: 'report' });
+    expect(isLockHeld(contender)).toBe(true);
+
+    await first.release();
+    const successor = await acquireLockAt(dir, '.x.lock');
+    if (isLockHeld(successor)) throw new Error('successor must acquire after release');
+    await successor.release();
+    await expect(stat(lockPath)).rejects.toThrow();
+  }, 15_000);
+});
+
+describe('superseded-holder safety', () => {
+  it('serializes concurrent refreshes into one complete payload', async () => {
+    const dir = join(root, 'refresh-race');
+    const held = await acquireLockAt(dir, '.x.lock');
+    if (isLockHeld(held)) throw new Error('setup acquire must own the lock');
+    const payloads = Array.from({ length: 100 }, (_, i) => JSON.stringify({ i, detail: 'x'.repeat(i * 17) }));
+    await Promise.all(payloads.map(payload => held.refresh(payload)));
+    expect(payloads).toContain(await readFile(join(dir, '.x.lock'), 'utf8'));
+    await held.release();
+  });
+
+  it('fails closed instead of deleting a stranded namespace gate', async () => {
+    const dir = join(root, 'stranded-gate');
+    await mkdir(dir, { recursive: true });
+    const gate = join(dir, '.x.lock.gate');
+    await writeFile(gate, '4194303');
+    await expect(acquireLockAt(dir, '.x.lock', { namespaceGateMaxWaitMs: 20 }))
+      .rejects.toBeInstanceOf(NamespaceGateHeldError);
+    expect(await readFile(gate, 'utf8')).toBe('4194303');
+  });
+
+  it('cannot delete or refresh a successor even under an unsafe custom stale policy', async () => {
+    const dir = join(root, 'superseded-holder');
+    const lockPath = join(dir, '.x.lock');
+    const first = await acquireLockAt(dir, '.x.lock', { payload: () => 'first' });
+    if (isLockHeld(first)) throw new Error('first acquire must own the lock');
+
+    const successor = await acquireLockAt(dir, '.x.lock', {
+      payload: () => 'successor',
+      isStale: () => true,
+    });
+    if (isLockHeld(successor)) throw new Error('unsafe policy should supersede first');
+
+    await first.refresh('first-after-steal');
+    await first.release();
+    expect(await readFile(lockPath, 'utf8')).toBe('successor');
+
+    await successor.release();
+    await expect(access(lockPath)).rejects.toThrow();
+  });
+});
+
+describe('wait policy — maxWaitMs and waitedMs', () => {
+  it('reports zero wait for an uncontended acquire and a real wait after contention', async () => {
+    const first = await acquireLockAt(root, '.wait.lock');
+    if (isLockHeld(first)) throw new Error('first acquire must own the lock');
+    expect(first.waitedMs).toBe(0);
+
+    const second = acquireLockAt(root, '.wait.lock');
+    await sleep(400);
+    await first.release();
+    const handle = await second;
+    if (isLockHeld(handle)) throw new Error('second acquire must own the lock after release');
+    // Non-zero is what tells a caller someone else just finished the work.
+    expect(handle.waitedMs).toBeGreaterThan(0);
+    await handle.release();
+  }, 10_000);
+
+  it('honors a caller-supplied wait bound instead of the default cap', async () => {
+    const held = await acquireLockAt(root, '.bounded.lock');
+    if (isLockHeld(held)) throw new Error('setup acquire must own the lock');
+    const t0 = Date.now();
+    const contender = await acquireLockAt(root, '.bounded.lock', {
+      maxWaitMs: 300,
+      bestEffortAfterMaxWait: false,
+    });
+    // Gave up on the caller's bound, not the module default (180s), and reported
+    // the live holder rather than proceeding unlocked.
+    expect(isLockHeld(contender)).toBe(true);
+    expect(Date.now() - t0).toBeLessThan(3_000);
+    await held.release();
+  }, 10_000);
+});
+
 describe('isDecisionsLockHeld', () => {
   it('false when no lock file exists', async () => {
     expect(await isDecisionsLockHeld(root)).toBe(false);
@@ -81,6 +204,16 @@ describe('isDecisionsLockHeld', () => {
     await utimes(lockPath, old, old);
 
     expect(await isDecisionsLockHeld(root)).toBe(false);
+  });
+
+  it('true for an old lock while its owning PID is still alive', async () => {
+    const release = await acquireDecisionsLock(root);
+    const lockPath = join(decisionsDir(root), '.consolidate.lock');
+    const old = (Date.now() - 200_000) / 1000;
+    await utimes(lockPath, old, old);
+
+    expect(await isDecisionsLockHeld(root)).toBe(true);
+    await release();
   });
 
   it('never acquires or steals — a pure read leaves the lock untouched', async () => {

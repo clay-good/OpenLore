@@ -18,6 +18,7 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     readFile:  vi.fn(),
     writeFile: vi.fn().mockResolvedValue(undefined),
     mkdir:     vi.fn().mockResolvedValue(undefined),
+    realpath:  vi.fn(async (path: string) => path),
   };
 });
 
@@ -44,6 +45,24 @@ vi.mock('../core/services/gitignore-manager.js', () => ({
 
 vi.mock('../core/services/llm-service.js', () => ({
   createLLMService: vi.fn(),
+}));
+
+vi.mock('../core/runtime/advisory-lock.js', () => ({
+  withAnalysisLock: vi.fn(async (_dir: string, fn: () => Promise<unknown>) => fn()),
+}));
+
+vi.mock('../core/decisions/atomic-store.js', () => ({ atomicWriteFile: vi.fn() }));
+
+vi.mock('../core/runtime/analysis-generation.js', () => ({
+  REQUIRED_ANALYSIS_ARTIFACTS: ['repo-structure.json', 'llm-context.json', 'dependency-graph.json', 'fingerprint.json'],
+  publishGeneration: vi.fn(async () => ({ generationId: 'test-generation' })),
+  readGenerationSnapshot: vi.fn(async (_dir: string, _required: string[], read: () => Promise<unknown>) => ({
+    state: 'ok', value: await read(), generationId: 'test-generation', compatibility: 'manifest', coherence: 'full',
+  })),
+}));
+
+vi.mock('../core/runtime/analysis-ownership.js', () => ({
+  acquireAnalysisOwnership: vi.fn(),
 }));
 
 vi.mock('../core/analyzer/repository-mapper.js', () => ({
@@ -105,6 +124,7 @@ vi.mock('../core/generator/adr-generator.js', () => ({
 
 vi.mock('../core/services/mcp-handlers/utils.js', () => ({
   isCacheFresh: vi.fn(),
+  computeProjectFingerprint: vi.fn(async () => 'test-fingerprint'),
 }));
 
 import { access, stat, readFile } from 'node:fs/promises';
@@ -119,6 +139,7 @@ import { AnalysisArtifactGenerator } from '../core/analyzer/artifact-generator.j
 import { SpecGenerationPipeline } from '../core/generator/spec-pipeline.js';
 import { OpenSpecFormatGenerator } from '../core/generator/openspec-format-generator.js';
 import { OpenSpecWriter } from '../core/generator/openspec-writer.js';
+import { acquireAnalysisOwnership } from '../core/runtime/analysis-ownership.js';
 
 const mockAccess = vi.mocked(access);
 const mockStat = vi.mocked(stat);
@@ -137,6 +158,9 @@ const mockAddToGitignore = vi.mocked(addToGitignore);
 const mockEnsureGitignored = vi.mocked(ensureGitignored);
 const mockCreateLLMService = vi.mocked(createLLMService);
 const mockIsCacheFresh = vi.mocked(isCacheFresh);
+const mockAcquireAnalysisOwnership = vi.mocked(acquireAnalysisOwnership);
+const mockOwnershipUpdate = vi.fn().mockResolvedValue(undefined);
+const mockOwnershipRelease = vi.fn().mockResolvedValue(undefined);
 
 // ============================================================================
 // FIXTURES
@@ -178,6 +202,10 @@ const MOCK_LLM_SERVICE = {
 };
 
 function setupMocks({ configExists = false, analysisRecent = false } = {}) {
+  mockAcquireAnalysisOwnership.mockResolvedValue({
+    state: 'owned', payload: {} as never, waitedMs: 0,
+    update: mockOwnershipUpdate, release: mockOwnershipRelease,
+  });
   // Init mocks
   mockDetectProjectType.mockResolvedValue({ projectType: 'nodejs' } as Awaited<ReturnType<typeof detectProjectType>>);
   mockGetProjectTypeName.mockReturnValue('nodejs');
@@ -301,6 +329,21 @@ describe('openloreRun', () => {
       expect(RepositoryMapper).toHaveBeenCalled();
       expect(DependencyGraphBuilder).toHaveBeenCalled();
       expect(AnalysisArtifactGenerator).toHaveBeenCalled();
+      expect(mockAcquireAnalysisOwnership).toHaveBeenCalledWith(ROOT, expect.any(String), { stage: 'starting' });
+      expect(mockOwnershipRelease).toHaveBeenCalledOnce();
+    });
+
+    it('does no analysis when another frontend owns the repository', async () => {
+      setupMocks({ configExists: true, analysisRecent: false });
+      mockAcquireAnalysisOwnership.mockResolvedValueOnce({
+        state: 'in-progress', owner: { pid: 4321, stage: 'artifacts' } as never,
+        elapsedMs: 1000, heartbeatAgeMs: 25, progressPath: null,
+      });
+
+      await expect(openloreRun({ rootPath: ROOT })).rejects.toMatchObject({
+        name: 'AnalysisInProgressError', code: 'ANALYSIS_IN_PROGRESS',
+      });
+      expect(RepositoryMapper).not.toHaveBeenCalled();
     });
 
     it('reanalyze=true bypasses fresh cache', async () => {

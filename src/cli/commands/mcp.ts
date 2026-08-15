@@ -242,7 +242,7 @@ export const TOOL_DEFINITIONS = [
     name: 'get_architecture_overview',
     description:
       'USE THIS WHEN: onboarding to an unknown codebase, or before planning a large feature. ' +
-      'Returns domain clusters, cross-cluster dependencies, global entry points, and critical hubs. ' +
+      'Returns domain clusters, cross-cluster dependencies, global entry points, critical hubs, and deterministic per-domain evidence. ' +
       'Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
@@ -253,6 +253,37 @@ export const TOOL_DEFINITIONS = [
         },
       },
       required: ['directory'],
+    },
+  },
+  {
+    name: 'prepare_spec_generation',
+    description: 'Return paged evidence for a host to author an OpenSpec domain. Read-only; no LLM or writes.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        directory: { type: 'string', description: DIR_DESC },
+        domain: { type: 'string', description: 'Analyzed domain to document.' },
+        cursor: { type: 'string', description: 'Continuation cursor.' },
+        maxItems: { type: 'number', minimum: 10, maximum: 200, description: 'Page size (default 80).' },
+        maxResponseBytes: { type: 'number', minimum: 8192, maximum: 225280, description: 'Byte budget (default 49,152).' },
+      },
+      required: ['directory', 'domain'],
+    },
+  },
+  {
+    name: 'prepare_spec_repair',
+    description: 'Return paged evidence for a host to repair an OpenSpec domain. Read-only; no LLM or writes.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        directory: { type: 'string', description: DIR_DESC },
+        domain: { type: 'string', description: 'Existing domain to repair.' },
+        baseRef: { type: 'string', description: 'Drift comparison ref.' },
+        cursor: { type: 'string', description: 'Continuation cursor.' },
+        maxItems: { type: 'number', minimum: 10, maximum: 200, description: 'Maximum evidence records per page (default 80).' },
+        maxResponseBytes: { type: 'number', minimum: 8192, maximum: 225280, description: 'Byte budget (default 49,152).' },
+      },
+      required: ['directory', 'domain'],
     },
   },
   {
@@ -663,6 +694,11 @@ export const TOOL_DEFINITIONS = [
         baseRef: { type: 'string', description: 'Old state to diff against (default "HEAD")' },
         headRef: { type: 'string', description: 'New state (a git ref). Omit to use the working tree.' },
         maxResults: { type: 'number', description: 'Cap reported items per category (default 200)' },
+        files: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional repository-relative files to analyze. Applied before category limits.',
+        },
         declaredFootprint: {
           type: 'object',
           description:
@@ -2100,6 +2136,7 @@ const _RW  = { readOnlyHint: false, destructiveHint: false, idempotentHint: fals
 
 const TOOL_ANNOTATIONS: Record<string, typeof _RO | typeof _RWI | typeof _RW> = {
   orient: _RO, analyze_codebase: _RWI, get_architecture_overview: _RO,
+  prepare_spec_generation: _RO, prepare_spec_repair: _RO,
   get_refactor_report: _RO, get_call_graph: _RO, get_duplicate_report: _RO,
   get_signatures: _RO, get_subgraph: _RO, trace_execution_path: _RO,
   get_mapping: _RO, check_spec_drift: _RO, analyze_impact: _RO, select_tests: _RO, blast_radius: _RO, find_dead_code: _RO, structural_diff: _RO, get_change_coupling: _RO, check_architecture: _RO,
@@ -2255,6 +2292,7 @@ export const TOOL_PRESETS: Record<string, Set<string>> = {
     'analyze_impact', 'suggest_insertion_points', 'get_function_skeleton',
     'get_landmarks', 'get_map', 'find_path',
     'recall', 'verify_claim', 'blast_radius',
+    'prepare_spec_generation', 'prepare_spec_repair',
   ]),
 };
 
@@ -2346,7 +2384,8 @@ interface McpServerOptions {
  */
 export const BREADTH_POINTER =
   'OpenLore is running its default tool surface (the substrate core: the navigation ' +
-  'core plus governance reads — recall + verify_claim + blast_radius). More tools ' +
+  'core, spec preparation — prepare_spec_generation + prepare_spec_repair — and ' +
+  'governance reads — recall + verify_claim + blast_radius). More tools ' +
   'are available behind named presets — the full surface (`--preset full`), multi-repo ' +
   'federation (`--preset federation`), parallel-work coordination (`--preset coordination`), ' +
   'or the lean navigate-only core (`--preset navigation`). Re-wire with ' +
@@ -2517,7 +2556,7 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
     };
   });
 
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const { name: _rawName, arguments: args = {} } = request.params;
     // Resolve a deprecated tool-name alias to its canonical name up front, so the
     // schema lookup, arg validation, tracking, and dispatch all see one name.
@@ -2690,7 +2729,7 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
         try {
           if (ep) {
             try {
-              result = await callServeTool(ep, name, args as Record<string, unknown>, directory);
+              result = await callServeTool(ep, name, args as Record<string, unknown>, directory, extra.signal);
             } catch (err) {
               // A 403 means a healthy explicitly narrow daemon rejected a tool
               // this wider MCP session is authorized to call. Fall back for this
@@ -2713,10 +2752,10 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
                   { cause: err },
                 );
               }
-              result = await dispatchTool(name, args as Record<string, unknown>, directory);
+              result = await dispatchTool(name, args as Record<string, unknown>, directory, extra.signal);
             }
           } else {
-            result = await dispatchTool(name, args as Record<string, unknown>, directory);
+            result = await dispatchTool(name, args as Record<string, unknown>, directory, extra.signal);
           }
         } catch (err) {
           if (err instanceof UnknownToolError) {
@@ -2896,7 +2935,7 @@ export const mcpCommand = new Command('mcp')
   .option('--watch-debounce <ms>', 'Debounce delay in ms before re-indexing after a file change (default: 400)', '400')
   .option('--watch-no-embed', 'Watch signatures only — skip live vector re-embedding (embeddings refresh at commit). Large repos auto-degrade to this.')
   .option('--minimal', 'Expose only core 6 tools (orient, search_code, record_decision, detect_changes, check_spec_drift, get_health_map). Pair with alwaysLoad: true in Claude Code for always-visible core tools.')
-  .option('--preset <name>', `Expose a named tool preset. Default (no preset) is the "${LEAN_DEFAULT_PRESET}" surface — the navigation core plus governance reads: the graph-traversal core (orient, search_code, get_subgraph, trace_execution_path, analyze_impact, suggest_insertion_points, get_function_skeleton, get_landmarks, get_map, find_path) plus the governance reads recall + verify_claim + blast_radius (decision c79ec7ca / ADR-0023) — NOT the full registry. "navigation" = the lean navigate-only escape (the graph-traversal core alone, no governance reads); "minimal" = orient+search+governance; "memory" = orient+remember+recall; "verify" = orient+search+verify_claim; "federation" = orient + federation_status + spec_store_status + working_set_context + change_impact_certificate + map_in_flight_conflicts + the four cross-repo conclusion tools; "coordination" = orient + plan_parallel_work + map_in_flight_conflicts + analyze_impact + find_path; "full" = all ${TOOL_DEFINITIONS.length} tools (the prior default). Takes precedence over --minimal.`)
+  .option('--preset <name>', `Expose a named tool preset. Default (no preset) is the "${LEAN_DEFAULT_PRESET}" surface — the graph-traversal core (orient, search_code, get_subgraph, trace_execution_path, analyze_impact, suggest_insertion_points, get_function_skeleton, get_landmarks, get_map, find_path), spec preparation (prepare_spec_generation + prepare_spec_repair), and governance reads (recall + verify_claim + blast_radius) — NOT the full registry. "navigation" = the lean navigate-only escape (the graph-traversal core alone, no governance or spec-workflow reads); "minimal" = orient+search+governance; "memory" = orient+remember+recall; "verify" = orient+search+verify_claim; "federation" = orient + federation_status + spec_store_status + working_set_context + change_impact_certificate + map_in_flight_conflicts + the four cross-repo conclusion tools; "coordination" = orient + plan_parallel_work + map_in_flight_conflicts + analyze_impact + find_path; "full" = all ${TOOL_DEFINITIONS.length} tools (the prior default). Takes precedence over --minimal.`)
   .option('--all-tools', `Expose the full surface — all ${TOOL_DEFINITIONS.length} tools (alias for --preset full). Opt-in breadth; the "${LEAN_DEFAULT_PRESET}" default is recommended.`)
   .option('--list-tools', 'Print the active tool surface grouped by capability family (navigate/change/remember/verify/coordinate/federate) and exit — does not start the server. Respects --preset / --all-tools.')
   .action((options: McpServerOptions) => startMcpServer(options));

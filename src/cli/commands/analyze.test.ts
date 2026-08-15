@@ -43,6 +43,7 @@ vi.mock('node:fs/promises', async (importOriginal) => {
       close: vi.fn().mockResolvedValue(undefined),
     }),
     rename: vi.fn().mockResolvedValue(undefined),
+    link: vi.fn().mockResolvedValue(undefined),
     unlink: vi.fn().mockResolvedValue(undefined),
   };
 });
@@ -71,19 +72,21 @@ vi.mock('../../core/analyzer/dependency-graph.js', () => ({
 
 vi.mock('../../core/analyzer/artifact-generator.js', () => ({
   AnalysisArtifactGenerator: vi.fn().mockImplementation(function(this: unknown) {
+    const artifacts = {
+      repoStructure: {
+        architecture: { pattern: 'unknown' },
+        domains: [],
+        uiComponents: [],
+        schemas: [],
+        routeInventory: { total: 0, byMethod: {}, byFramework: {}, routes: [] },
+        middleware: [],
+        envVars: [],
+      },
+      llmContext: { callGraph: null },
+    };
     Object.assign(this as object, {
-      generateAndSave: vi.fn().mockResolvedValue({
-        repoStructure: {
-          architecture: { pattern: 'unknown' },
-          domains: [],
-          uiComponents: [],
-          schemas: [],
-          routeInventory: { total: 0, byMethod: {}, byFramework: {}, routes: [] },
-          middleware: [],
-          envVars: [],
-        },
-        llmContext: { callGraph: null },
-      }),
+      generate: vi.fn().mockResolvedValue(artifacts),
+      generateAndSave: vi.fn().mockResolvedValue(artifacts),
     });
   }),
   repoStructureToRepoMap: vi.fn().mockReturnValue({}),
@@ -117,6 +120,11 @@ vi.mock('../../core/analyzer/ai-config-generator.js', () => ({
 vi.mock('../../core/services/config-manager.js', () => ({
   readOpenLoreConfig: vi.fn(),
 }));
+
+vi.mock('../../core/decisions/atomic-store.js', async (orig) => {
+  const actual = await orig<typeof import('../../core/decisions/atomic-store.js')>();
+  return { ...actual, atomicWriteFile: vi.fn().mockResolvedValue(undefined) };
+});
 
 // Partial-mock utils: keep everything real except isCacheFresh, so the action-handler
 // tests can drive the source-unchanged (skip) vs source-changed (re-analyze) decision
@@ -682,12 +690,13 @@ describe('analyze command', () => {
   // separately; this guards that the field is always written and degrades to null off
   // a git repo, never silently dropped. (spec: add-confidence-boundary-disclosure)
   describe('runAnalysis — build commit in fingerprint.json', () => {
-    let writeFileMock: ReturnType<typeof vi.fn>;
+    let atomicWriteMock: ReturnType<typeof vi.fn>;
 
     beforeEach(async () => {
       const fsMod = await import('node:fs/promises');
-      writeFileMock = vi.mocked(fsMod.writeFile);
-      writeFileMock.mockClear();
+      const atomicStore = await import('../../core/decisions/atomic-store.js');
+      atomicWriteMock = vi.mocked(atomicStore.atomicWriteFile);
+      atomicWriteMock.mockClear();
       // `--max-files input validation` leaves `mkdir` rejecting with "Permission denied", and these
       // cases run a real analysis. Nothing here reset it, which was harmless only while the
       // artifact writes went through the mocked `writeFile`; the streaming writer calls `mkdir`.
@@ -697,14 +706,18 @@ describe('analyze command', () => {
     });
 
     function fingerprint(): { hash: string; commit: string | null } {
-      const call = writeFileMock.mock.calls.find(c => String(c[0]).endsWith(ARTIFACT_FINGERPRINT));
+      const call = atomicWriteMock.mock.calls.find(c => String(c[0]).endsWith(ARTIFACT_FINGERPRINT));
       expect(call, 'fingerprint.json was written').toBeDefined();
       return JSON.parse(String((call as unknown[])[1]));
     }
 
     it('records the short HEAD commit when analyzing a git repo', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'ol-analyze-git-'));
-      const git = (...a: string[]) => execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', ...a], { cwd: dir });
+      const git = (...a: string[]) => execFileSync(
+        'git',
+        ['-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', ...a],
+        { cwd: dir },
+      );
       try {
         git('init', '-q');
         writeFileSync(join(dir, 'a.ts'), 'export const x = 1;\n');

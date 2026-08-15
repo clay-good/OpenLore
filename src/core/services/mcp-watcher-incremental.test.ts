@@ -14,7 +14,13 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { McpWatcher } from './mcp-watcher.js';
+import {
+  REQUIRED_ANALYSIS_ARTIFACTS,
+  publishGeneration,
+  readCurrentGeneration,
+} from '../runtime/analysis-generation.js';
 import {
   readCachedContext,
   primeContextCache,
@@ -97,6 +103,31 @@ describe('McpWatcher — Spec 13.1 freshness', () => {
     expect(paths).toContain('src/newmod.ts');
   });
 
+  it('republishes the generation manifest after an incremental rewrite', async () => {
+    // The watcher rewrites the SAME artifacts a full analyze publishes. Leaving the
+    // manifest untouched would keep the old generation id on new content, so a
+    // multi-artifact reader would validate an identity that never moved and label a
+    // mixed read `ok`.
+    await writeContext([]);
+    for (const name of ['repo-structure.json', 'dependency-graph.json', 'fingerprint.json']) {
+      await writeFile(join(analysisDir, name), JSON.stringify({ seeded: true }), 'utf-8');
+    }
+    const before = await publishGeneration(analysisDir, [...REQUIRED_ANALYSIS_ARTIFACTS]);
+    expect(before).not.toBeNull();
+
+    const fooAbs = join(root, 'foo.ts');
+    await writeFile(fooAbs, 'export function alpha() { return 1; }\n', 'utf-8');
+    await new McpWatcher({ rootPath: root, embed: false }).handleChange(fooAbs);
+
+    const after = await readCurrentGeneration(analysisDir, [...REQUIRED_ANALYSIS_ARTIFACTS]);
+    expect(after?.compatibility).toBe('manifest');
+    expect(after?.generationId).not.toBe(before!.generationId);
+    // The republished manifest describes the content that is actually on disk now.
+    const contextRecord = after?.artifacts.find(a => a.path === 'llm-context.json');
+    const digest = createHash('sha256').update(await readFile(contextPath)).digest('hex');
+    expect(contextRecord?.sha256).toBe(digest);
+  });
+
   it('G1: primeContextCache makes the next read a HIT — it returns the in-memory object, not what is on disk', async () => {
     await writeContext([{ path: 'orig.ts', entries: [] }]);
     const cold = await readCachedContext(root);
@@ -135,6 +166,7 @@ describe('McpWatcher — Spec 13.1 freshness', () => {
     for (const f of files) (watcher as unknown as { enqueue(p: string): void }).enqueue(join(root, f));
 
     await until(() => summaries.length > 0);
+    await watcher.stop();
 
     expect(summaries.length).toBe(1);
     expect(summaries[0]).toContain('updated 4 files');
@@ -163,6 +195,7 @@ describe('McpWatcher — Spec 13.1 freshness', () => {
     const watcher = new McpWatcher({ rootPath: root, embed: false, debounceMs: 20, maxBatchMs: 1000 });
     (watcher as unknown as { enqueue(p: string): void }).enqueue(fooAbs);
     await until(() => primeSpy.mock.calls.length > 0);
+    await watcher.stop();
 
     // The flush handed the patched context to the read cache exactly once.
     expect(primeSpy).toHaveBeenCalledTimes(1);
@@ -190,6 +223,7 @@ describe('McpWatcher — Spec 13.1 freshness', () => {
     const watcher = new McpWatcher({ rootPath: root, embed: false, debounceMs: 30, bulkThreshold: 3 });
     for (const f of files) (watcher as unknown as { enqueue(p: string): void }).enqueue(join(root, f));
     await until(() => summaries.length > 0);
+    await watcher.stop();
 
     expect(summaries.length).toBe(1);
     expect(summaries[0]).toContain('coalesced 3 changes');
@@ -212,5 +246,44 @@ describe('McpWatcher — Spec 13.1 freshness', () => {
     expect(foo!.entries.some((e) => e.name === 'delta')).toBe(true);
 
     await watcher.stop();
+  });
+
+  it('stop waits for an in-flight flush and rejects later file events', async () => {
+    await writeContext([]);
+    const fooAbs = join(root, 'shutdown.ts');
+    await writeFile(fooAbs, 'export function beforeStop() {}\n', 'utf-8');
+
+    const watcher = new McpWatcher({ rootPath: root, embed: false, debounceMs: 1 });
+    const internals = watcher as unknown as {
+      enqueue(path: string): void;
+      handleBatch(paths: string[], opts?: { syncFlush?: boolean }): Promise<void>;
+      pending: Set<string>;
+    };
+    const originalHandleBatch = internals.handleBatch.bind(watcher);
+    let enterFlush!: () => void;
+    let releaseFlush!: () => void;
+    const flushEntered = new Promise<void>((resolve) => { enterFlush = resolve; });
+    const flushGate = new Promise<void>((resolve) => { releaseFlush = resolve; });
+    vi.spyOn(internals, 'handleBatch').mockImplementation(async (...args) => {
+      enterFlush();
+      await flushGate;
+      await originalHandleBatch(...args);
+    });
+
+    internals.enqueue(fooAbs);
+    await flushEntered;
+
+    let stopped = false;
+    const stopPromise = watcher.stop().then(() => { stopped = true; });
+    await Promise.resolve();
+    expect(stopped).toBe(false);
+
+    releaseFlush();
+    await stopPromise;
+    expect(stopped).toBe(true);
+    expect(await readFile(contextPath, 'utf-8')).toContain('beforeStop');
+
+    internals.enqueue(join(root, 'after-stop.ts'));
+    expect(internals.pending.size).toBe(0);
   });
 });

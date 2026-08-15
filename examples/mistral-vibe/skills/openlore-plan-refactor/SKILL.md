@@ -1,15 +1,6 @@
 ---
 name: openlore-plan-refactor
-description: Identify the highest-priority refactoring target using static analysis, assess its blast radius, and produce a detailed written plan saved to .openlore/refactor-plan.md. Makes no code changes.
-license: MIT
-compatibility: openlore MCP server
-user-invocable: true
-allowed-tools:
-  - ask_followup_question
-  - use_mcp_tool
-  - read_file
-  - write_file
-  - openlore-analyze-codebase
+description: Identify a high-priority refactoring target, assess its blast radius, and write .openlore/refactor-plan.md without changing code. Use when asked to plan or prioritize a refactor.
 ---
 
 # openlore: Plan Refactor
@@ -37,7 +28,7 @@ Each change = one atomic edit → one diff verification → one full test run �
 This is not a final gate at the end. Testing is a mandatory sub-step after **every single change**.
 The plan must make this cycle explicit and impossible to skip.
 
-**For Devstral Small 2**: each change must touch at most **50 contiguous lines** in the source file.
+**For small models (< 13B parameters)**: each change must touch at most **50 contiguous lines** in the source file.
 If a logical extraction exceeds this limit, split it into smaller sub-changes, each with its own test gate.
 
 ---
@@ -59,27 +50,15 @@ Ask the user which project to analyze, or confirm the current workspace root.
 
 ## Step 2 — Run static analysis
 
-Analyze the project via the `openlore` MCP server. If a recent analysis already exists, skip unless the user explicitly requests a fresh run.
+Call the openlore MCP tool `analyze_codebase` with `{"directory": "$DIRECTORY"}`.
 
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>analyze_codebase</tool_name>
-  <arguments>{"directory": "$DIRECTORY"}</arguments>
-</use_mcp_tool>
-```
+If a recent analysis already exists, skip unless the user explicitly requests a fresh run.
 
 ---
 
 ## Step 3 — Get the refactoring report
 
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>get_refactor_report</tool_name>
-  <arguments>{"directory": "$DIRECTORY"}</arguments>
-</use_mcp_tool>
-```
+Call the openlore MCP tool `get_refactor_report` with `{"directory": "$DIRECTORY"}`.
 
 Present the top 5 candidates:
 
@@ -90,13 +69,7 @@ Present the top 5 candidates:
 
 ## Step 3b — Check for duplicate code
 
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>get_duplicate_report</tool_name>
-  <arguments>{"directory": "$DIRECTORY"}</arguments>
-</use_mcp_tool>
-```
+Call the openlore MCP tool `get_duplicate_report` with `{"directory": "$DIRECTORY"}`.
 
 If a top candidate appears in a clone group, prepend a **deduplication note** to the plan:
 > "⚠️ `<function>` has N near-clones. Consolidate them first to reduce the blast radius of this refactor."
@@ -136,57 +109,37 @@ If **all candidates are below 40%**:
 
 ## Step 4 — Get minimal context + analyze impact
 
-Get the condensed view (callers, callees, body, test coverage) in one call:
+Get the condensed view of the target function (callers, callees, body, test coverage in one call):
 
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>get_minimal_context</tool_name>
-  <arguments>{"directory": "$DIRECTORY", "functionName": "$FUNCTION_NAME"}</arguments>
-</use_mcp_tool>
-```
+Call the openlore MCP tool `get_minimal_context` with `{"directory": "$DIRECTORY", "functionName": "$FUNCTION_NAME"}`.
 
 **What to read before deciding whether to proceed:**
-- `function.riskLevel` — `"high"` = up to 24 callers/callees shown; read all, they are all in scope.
-- `callers[*].callType` — all `"awaited"` = async interface frozen; extracting or splitting requires updating every call site.
-- `testedBy[*].confidence` — `"imported"` only = `vi.mock()` can neutralize; write a characterisation test before refactoring.
+- `function.riskLevel` — `"high"` (fanIn ≥ 30 or fanOut ≥ 15) means up to 24 callers/callees shown. Read all — they are all in scope for this refactor.
+- `callers[*].callType` — all `"awaited"` = async interface frozen; extracting or splitting requires updating every call site. `"direct"` / `"method"` = more portable.
+- `testedBy[*].confidence` — `"called"` = direct test, safe to refactor under. `"imported"` only = `vi.mock()` can neutralize it; write a characterisation test **before** refactoring.
 
-Then get full impact analysis:
+Then get the full impact analysis:
 
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>analyze_impact</tool_name>
-  <arguments>{"directory": "$DIRECTORY", "symbol": "$FUNCTION_NAME"}</arguments>
-</use_mcp_tool>
-```
+Call the openlore MCP tool `analyze_impact` with `{"directory": "$DIRECTORY", "symbol": "$FUNCTION_NAME"}`.
 
 Note: risk score (0–100), recommended strategy (`extract` / `split` / `facade` / `delegate`), top 5 upstream callers and downstream callees.
 
-**If `riskLevel` is `"high"` or impact risk score ≥ 60**, check cluster scope:
+**If `riskLevel` is `"high"` or impact risk score ≥ 60**, check the cluster to set refactor scope:
 
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>get_cluster</tool_name>
-  <arguments>{"directory": "$DIRECTORY", "functionName": "$FUNCTION_NAME"}</arguments>
-</use_mcp_tool>
-```
+Call the openlore MCP tool `get_cluster` with `{"directory": "$DIRECTORY", "functionName": "$FUNCTION_NAME"}`.
 
-- `clusterDensity < 0.05` → extract target independently
-- `clusterDensity 0.05–0.15` → include `internalCallGraph` callers in risk section
-- `clusterDensity > 0.15` → refactor whole cluster together or not at all
+Read `stats.clusterDensity`:
+- `< 0.05` — sparse; extract the target independently, others not in scope
+- `0.05–0.15` — moderate; include functions in `internalCallGraph` that call the target in the plan's risk section
+- `> 0.15` — dense; refactor the whole cluster together or not at all; add all members to affected-files list
 
 ---
 
 ## Step 5 — Visualise the call neighbourhood
 
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>get_subgraph</tool_name>
-  <arguments>{"directory": "$DIRECTORY", "functionName": "$FUNCTION_NAME", "direction": "both", "format": "mermaid"}</arguments>
-</use_mcp_tool>
+Call the openlore MCP tool `get_subgraph` with:
+```json
+{"directory": "$DIRECTORY", "functionName": "$FUNCTION_NAME", "direction": "both", "format": "mermaid"}
 ```
 
 Show the Mermaid diagram to the user.
@@ -195,12 +148,9 @@ Show the Mermaid diagram to the user.
 
 ## Step 6 — Find safe entry points (bottom-up)
 
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>get_low_risk_refactor_candidates</tool_name>
-  <arguments>{"directory": "$DIRECTORY", "filePattern": "$TARGET_FILE", "limit": 5}</arguments>
-</use_mcp_tool>
+Call the openlore MCP tool `get_low_risk_refactor_candidates` with:
+```json
+{"directory": "$DIRECTORY", "filePattern": "$TARGET_FILE", "limit": 5}
 ```
 
 Cross-reference with the subgraph from Step 5: a good first extraction candidate already appears as a callee of the target function.
@@ -212,12 +162,9 @@ Cross-reference with the subgraph from Step 5: a good first extraction candidate
 Before designing the change sequence, identify where extracted functions should land.
 This avoids creating helpers in the wrong file or layer.
 
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>suggest_insertion_points</tool_name>
-  <arguments>{"directory": "$DIRECTORY", "query": "extract helper from $FUNCTION_NAME", "limit": 5}</arguments>
-</use_mcp_tool>
+Call the openlore MCP tool `suggest_insertion_points` with:
+```json
+{"directory": "$DIRECTORY", "query": "extract helper from $FUNCTION_NAME", "limit": 5}
 ```
 
 For each candidate, note its role and strategy. Prefer candidates that already call into — or are called by — the target function (visible in the Step 5 subgraph).
@@ -228,7 +175,7 @@ For each candidate, note its role and strategy. Prefer candidates that already c
 
 Design an ordered sequence of atomic changes based on the strategy from Step 4.
 
-### Size constraint (mandatory for Devstral Small 2)
+### Size constraint (mandatory for small models)
 
 **Each change must touch at most 50 contiguous lines** in the source file.
 If a logical extraction requires moving more than 50 lines in one pass, split it into sub-changes:
@@ -334,23 +281,10 @@ Never advance to the next change without a green test gate.
 Hash: <to be filled by the execute workflow>
 ```
 
-Once the file is written, record the refactoring decision so it appears in the decisions workflow at commit time:
+Once the file is written, call `record_decision` with the target, strategy, rationale,
+consequences, and affected files so the planned architectural choice enters the decisions
+workflow. Then report:
 
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>record_decision</tool_name>
-  <arguments>{
-    "directory": "$DIRECTORY",
-    "title": "Refactor $TARGET_FUNCTION into smaller units ($STRATEGY)",
-    "rationale": "$PRIMARY_REASON from the Why section above",
-    "consequences": "Callers unchanged; complexity distributed across $N extracted helpers",
-    "affectedFiles": ["$TARGET_FILE"]
-  }</arguments>
-</use_mcp_tool>
-```
-
-Then:
 > "Plan written to `.openlore/refactor-plan.md`. Review it, then run `/openlore-execute-refactor` to apply the changes."
 
 ---

@@ -71,8 +71,7 @@
       "./dist/pi/extension.js"
     ],
     "skills": [
-      "./examples/opencode-skills",
-      "./skills/openlore-orient"
+      "./skills"
     ]
   },
   "openspec": {
@@ -148,7 +147,8 @@
     "src/viewer",
     "!src/viewer/**/*.test.*",
     "examples",
-    "skills/openlore-orient",
+    "skills",
+    "!skills/.DS_Store",
     "stubs",
     "schemas",
     "README.md",

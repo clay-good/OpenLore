@@ -7,15 +7,20 @@
 | Command | Description | API Key |
 |---------|-------------|---------|
 | `openlore init` | Initialize configuration | No |
-| `openlore install` | One-command setup: wire agent surfaces (lean `navigation` MCP + hooks) and build the index | No |
+| `openlore install` | One-command setup: wire agent surfaces (`substrate` MCP + hooks) and build the index | No |
 | `openlore connect [agent]` | Wire a specific coding agent to the MCP server + hooks | No |
-| `openlore analyze` | Run static analysis | No |
+| `openlore analyze` | Run static analysis (repository-scoped single flight — a second analyze reports the live owner instead of duplicating work) | No |
+| `openlore analyze --wait` | Follow an analysis another process already owns and return its result | No |
 | `openlore embed --local` | Enable on-device semantic embeddings (no API key; downloads ~23 MB model) and rebuild the index | No |
 | `openlore embed --off` | Revert to the first-class keyword (BM25) default and rebuild | No |
 | `openlore orient` | Relevant functions, callers, specs, and insertion points for a task (the flagship) | No |
 | `openlore orient --inject` | Emit a bounded, ignorable task-scoped orientation block for a pre-turn hook | No |
 | `openlore generate` | Generate specs from analysis | Yes |
 | `openlore generate --adr` | Also generate Architecture Decision Records | Yes |
+| `openlore generate --dry-run` | List the stages and domains that would run, then stop — no provider call, no cost, no writes | No |
+| `openlore generate --plan` | Explicit alias for the same free plan-only output | No |
+| `openlore generate --preview` | Run the real pipeline in an isolated temporary workspace and show the candidate spec diff; provider cost occurs and the project tree is left byte-identical | Yes |
+| `openlore mapping refresh` | Rebuild the deterministic spec→code link index from the anchors written in existing specs | No |
 | `openlore verify` | Verify spec accuracy | Yes |
 | `openlore drift` | Detect spec drift (static) | No |
 | `openlore drift --use-llm` | Detect spec drift (LLM-enhanced) | Yes |
@@ -107,9 +112,9 @@ openlore install [options]   # detect agents, wire surfaces, build the index
   --agent <name>         # Limit to one surface: claude-code, cursor, cline,
                          #   continue, agents-md
   --preset <name>        # MCP tool preset to wire: substrate (default; navigation core +
-                         #   governance reads: nav + recall + verify_claim + blast_radius), navigation (lean escape),
+                         #   spec workflows + recall + verify_claim + blast_radius), navigation (lean escape),
                          #   minimal, memory, verify, federation, coordination, or full
-  --all-tools            # Wire the full 73-tool surface (alias of --preset full)
+  --all-tools            # Wire the full 75-tool surface (alias of --preset full)
   --dry-run              # Print planned changes without writing any files
   --force                # Overwrite OpenLore-managed blocks even if hand-edited
   --uninstall            # Remove OpenLore-managed blocks and entries
@@ -125,7 +130,7 @@ openlore connect remove [agent]      # disconnect that agent
   <agent>                # Positional: claude-code | cursor | cline | continue |
                          #   agents-md (omit for an interactive picker)
   --preset <name>        # MCP tool preset to wire (same names as install)
-  --all-tools            # Wire the full 73-tool surface (alias of --preset full)
+  --all-tools            # Wire the full 75-tool surface (alias of --preset full)
   --dry-run              # Print planned changes without writing any files
   --force                # Overwrite OpenLore-managed blocks even if hand-edited
   --no-analyze           # Configure surfaces only; do not build the index
@@ -134,19 +139,19 @@ openlore connect remove [agent]      # disconnect that agent
 `connect` takes the agent as a positional argument (`openlore connect cursor`), not
 `--agent`, and disconnects via the `remove` subcommand rather than `--uninstall`.
 
-A bare `openlore install` wires the `substrate` surface (13 tools — navigation core + governance reads) and, for
+A bare `openlore install` wires the `substrate` surface (15 tools — navigation core + governance reads + spec-workflow composites) and, for
 Claude Code, both a `SessionStart` primer hook and a `UserPromptSubmit` task-scoped
 injection hook. Use `--preset navigation` for the lean navigate-only core (10 tools), or
-`--preset full` for all 73 tools.
+`--preset full` for all 75 tools.
 
 ### MCP Server Options
 
 ```bash
 openlore mcp [options]             # start the stdio MCP server
 
-  --preset <name>        # Expose a named preset (default: substrate, 13 tools — nav core + governance reads)
+  --preset <name>        # Expose a named preset (default: substrate, 15 tools — nav + governance + spec workflows)
   --minimal              # Expose only the core 6 governance tools
-  --all-tools            # Expose the full surface — all 73 tools (alias --preset full)
+  --all-tools            # Expose the full surface — all 75 tools (alias --preset full)
   --list-tools           # Print the active surface grouped by capability family and exit
   --watch-auto           # Auto-detect + incrementally re-index the project dir
   --no-watch-auto        # Disable auto-watch (use for one-shot tool calls)
@@ -178,7 +183,9 @@ openlore drift [options]
 ```bash
 openlore generate [options]
   --model <name>         # LLM model to use
-  --dry-run              # Preview without writing
+  --dry-run              # Free plan: no provider call, cost, or writes
+  --plan                 # Alias for the free plan
+  --preview              # Paid isolated generation preview and candidate diff
   --domains <list>       # Only generate specific domains
   --merge                # Merge with existing specs
   --no-overwrite         # Skip existing files
@@ -277,10 +284,10 @@ Files installed:
 
 | Tool | Destination | Content |
 |------|-------------|---------|
-| `vibe` | `.vibe/skills/openlore-{name}/SKILL.md` | 8 skills |
+| `vibe` | `.vibe/skills/openlore-{name}/SKILL.md` | 10 skills |
 | `cline` | `.clinerules/workflows/openlore-{name}.md` | 7 workflows |
-| `claude` | `.claude/skills/openlore-{name}/SKILL.md` + decisions pre-commit hook | 8 skills + commit gate |
-| `opencode` | `.opencode/skills/openlore-{name}/SKILL.md` + `.opencode/plugins/agent-guard.ts` | 8 skills + guard plugin |
+| `claude` | `.claude/skills/openlore-{name}/SKILL.md` + decisions pre-commit hook | 10 skills + commit gate |
+| `opencode` | `.opencode/skills/openlore-{name}/SKILL.md` + `.opencode/plugins/agent-guard.ts` | 10 skills + guard plugin |
 | `gsd` | `.claude/commands/gsd/openlore-{name}.md` | 2 commands |
 | `bmad` | `_bmad/openlore/{agents,tasks}/` | 2 agents, 4 tasks |
 | `omoa` | `.opencode/plugins/` + `.opencode/prompts/` | 4 SDD plugins + Sisyphus prompt (oh-my-openagent) |
@@ -615,7 +622,7 @@ over plain HTTP so non-MCP clients (e.g. the [Pi](https://pi.dev) extension in
 
 ```bash
 openlore serve                          # substrate preset, ephemeral port, watch on
-openlore serve --preset all --port 7077 # all 73 tools on a fixed port
+openlore serve --preset all --port 7077 # all 75 tools on a fixed port
 openlore serve --no-watch               # transport only, no freshness lane
 openlore serve --stop                   # stop the daemon serving this directory
 ```
@@ -654,6 +661,9 @@ curl -XPOST 127.0.0.1:$PORT/tool/orient -d '{"args":{"task":"add rate limiting"}
 serve daemon, injecting structural context and exposing Pi's curated tool surface.
 Pi starts a full-preset backing daemon and curates the model-visible tools itself;
 if an existing narrow daemon owns the repository, stop it before starting Pi.
+Its `openlore_prepare_spec_generation` and `openlore_prepare_spec_repair` tools
+compose the same deterministic daemon evidence used by MCP hosts; Pi writes or
+reconciles the specification itself and OpenLore makes no internal LLM call.
 See `examples/pi/README.md`.
 
 ---

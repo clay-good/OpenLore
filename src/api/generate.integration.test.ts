@@ -164,8 +164,16 @@ function makeLlmContext() {
 function makeDepGraph() {
   return {
     nodes: [
-      { id: 'src/generator/gen.ts', label: 'gen.ts', type: 'file', size: 1, layer: 'generator' },
-      { id: 'src/analyzer/dep.ts', label: 'dep.ts', type: 'file', size: 1, layer: 'analyzer' },
+      {
+        id: 'src/generator/gen.ts', label: 'gen.ts', type: 'file', size: 1, layer: 'generator',
+        file: { path: 'src/generator/gen.ts' }, exports: [],
+        metrics: { inDegree: 0, outDegree: 1, betweenness: 0, pageRank: 0 },
+      },
+      {
+        id: 'src/analyzer/dep.ts', label: 'dep.ts', type: 'file', size: 1, layer: 'analyzer',
+        file: { path: 'src/analyzer/dep.ts' }, exports: [],
+        metrics: { inDegree: 1, outDegree: 0, betweenness: 0, pageRank: 0 },
+      },
     ],
     edges: [
       {
@@ -362,5 +370,18 @@ describe('openloreGenerate() integration — RAG pipeline wiring', () => {
 
     expect(result.report.filesWritten.length).toBeGreaterThan(0);
     expect(result.duration).toBeGreaterThan(0);
+  });
+
+  it('uses one configured custom OpenSpec destination for every generated artifact', async () => {
+    await createFile(tmpDir, '.openlore/config.json',
+      JSON.stringify(makeOpenLoreConfig('docs/open-spec'), null, 2));
+    await createFile(tmpDir, 'docs/open-spec/config.yaml', 'schema: openspec/v1\n');
+    const { openloreGenerate } = await import('./generate.js');
+    await openloreGenerate({ rootPath: tmpDir });
+
+    expect(await readFile(join(tmpDir, 'docs/open-spec/specs/overview/spec.md'), 'utf-8')).toContain('# ');
+    expect(await readFile(join(tmpDir, 'docs/open-spec/rag-manifest.json'), 'utf-8')).toContain('generatedAt');
+    await expect(readFile(join(tmpDir, 'openspec/specs/overview/spec.md'), 'utf-8'))
+      .rejects.toMatchObject({ code: 'ENOENT' });
   });
 });

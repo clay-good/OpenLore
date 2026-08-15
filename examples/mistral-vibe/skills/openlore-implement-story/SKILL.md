@@ -1,18 +1,6 @@
 ---
 name: openlore-implement-story
-description: Implement a story on a brownfield codebase using openlore structural context. Runs orient + risk check before coding, validates against specs, enforces a test gate before drift check.
-license: MIT
-compatibility: openlore MCP server
-user-invocable: true
-allowed-tools:
-  - ask_followup_question
-  - use_mcp_tool
-  - read_file
-  - write_file
-  - str_replace_based_edit
-  - replace_in_file
-  - run_command
-  - openlore-execute-refactor
+description: Implement a brownfield story with OpenLore orientation, risk checks, spec validation, tests, and drift detection. Use when asked to implement or continue a story in an existing codebase.
 ---
 
 # openlore: Implement Story
@@ -48,60 +36,50 @@ Read the story file. Extract:
 
 ## Step 2 — Orient and assess risk
 
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>orient</tool_name>
-  <arguments>{
-    "directory": "$PROJECT_ROOT",
-    "task": "$STORY_TITLE",
-    "limit": 7
-  }</arguments>
-</use_mcp_tool>
+Call the openlore MCP tool `orient` with:
+```json
+{
+  "directory": "$PROJECT_ROOT",
+  "task": "$STORY_TITLE",
+  "limit": 7
+}
 ```
 
-For the top 2 functions returned, get minimal context first (callers, callees, body, test coverage):
-
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>get_minimal_context</tool_name>
-  <arguments>{"directory": "$PROJECT_ROOT", "functionName": "$FUNCTION_NAME"}</arguments>
-</use_mcp_tool>
+For the top 2 functions returned, get minimal context first (callers, callees, body, test coverage in one call):
+```json
+// get_minimal_context
+{
+  "directory": "$PROJECT_ROOT",
+  "functionName": "$FUNCTION_NAME"
+}
 ```
 
-**What to read before proceeding:**
-- `function.riskLevel` — `"high"` = fanIn ≥ 30 or fanOut ≥ 15; tool expanded lists to 24 entries — all are blast-radius members.
-- `callers[*].callType` — all `"awaited"` = async interface frozen; signature change breaks every caller silently in JS. Mixed = looser coupling.
-- `callees[*].isExternal: true` — external boundary; new paths may pass mocked tests but fail in production.
-- `testedBy[*].confidence` — `"called"` = direct test (strong). `"imported"` only = `vi.mock()` can neutralize; treat as untested.
+**What to read from the result before proceeding:**
+- `function.riskLevel` — `"high"` means fanIn ≥ 30 or fanOut ≥ 15; the tool expanded caller/callee lists to 24. All shown entries are in scope.
+- `callers[*].callType` — all `"awaited"` = async interface frozen; changing signature or return type breaks every caller. Mixed = looser coupling.
+- `callees[*].isExternal: true` — function touches HTTP/DB boundary; new code paths may fail silently in tests (mocked) but loudly in production.
+- `testedBy[*].confidence` — `"called"` = direct test (strong). `"imported"` = test imports module only; `vi.mock()` can nullify it. Only `"imported"` entries = treat as effectively untested.
 
-If `riskLevel` is `"high"` or any callee is external, also check the cluster:
-
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>get_cluster</tool_name>
-  <arguments>{"directory": "$PROJECT_ROOT", "functionName": "$FUNCTION_NAME"}</arguments>
-</use_mcp_tool>
+If `riskLevel` is `"high"` or any callee is external, check the cluster:
+```json
+// get_cluster
+{
+  "directory": "$PROJECT_ROOT",
+  "functionName": "$FUNCTION_NAME"
+}
 ```
-
-- `clusterDensity < 0.05` → isolated, proceed
+- `clusterDensity < 0.05` → sparse, change is isolated, proceed
 - `clusterDensity 0.05–0.15` → check `internalCallGraph` for transitively dependent functions
-- `clusterDensity > 0.15` → dense cluster; coordinate scope with user first
+- `clusterDensity > 0.15` → dense cluster; coordinate the whole cluster or discuss scope with user
 
 Then check risk:
-
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>analyze_impact</tool_name>
-  <arguments>{
-    "directory": "$PROJECT_ROOT",
-    "symbol": "$FUNCTION_NAME",
-    "depth": 2
-  }</arguments>
-</use_mcp_tool>
+```json
+// analyze_impact
+{
+  "directory": "$PROJECT_ROOT",
+  "symbol": "$FUNCTION_NAME",
+  "depth": 2
+}
 ```
 
 **If any function has `riskScore ≥ 70`: stop.**
@@ -121,18 +99,11 @@ Based on the story title and orient results, call the relevant inventory tool(s)
 | Config / env vars / secrets | `get_env_vars` | Identify which vars are required vs have defaults |
 | UI components | `get_ui_components` | See existing component props and framework |
 
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>get_schema_inventory</tool_name>
-  <arguments>{"directory": "$PROJECT_ROOT"}</arguments>
-</use_mcp_tool>
-```
+Call whichever openlore MCP inventory tool applies, e.g. `get_schema_inventory` with `{"directory": "$PROJECT_ROOT"}`.
 
 Use the results to ground the implementation in existing schemas/routes — the plan cannot contradict what already exists.
 
 ---
-
 
 ## Step 3 — Check the spec
 
@@ -155,16 +126,13 @@ Skip the `search_specs` call and go to Step 4.
 
 **If specs exist:**
 
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>search_specs</tool_name>
-  <arguments>{
-    "directory": "$PROJECT_ROOT",
-    "query": "$STORY_TITLE",
-    "limit": 5
-  }</arguments>
-</use_mcp_tool>
+Call the openlore MCP tool `search_specs` with:
+```json
+{
+  "directory": "$PROJECT_ROOT",
+  "query": "$STORY_TITLE",
+  "limit": 5
+}
 ```
 
 If relevant requirements are found, read the domain spec before writing any code.
@@ -174,19 +142,13 @@ Note any constraints that apply.
 
 ## Step 3.5 — Audit spec coverage of the target domain
 
-Run a parity audit to check if the domain you're about to touch has spec gaps.
-
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>audit_spec_coverage</tool_name>
-  <arguments>{"directory": "$PROJECT_ROOT"}</arguments>
-</use_mcp_tool>
-```
+Call the openlore MCP tool `audit_spec_coverage` with `{"directory": "$PROJECT_ROOT"}`.
 
 From the result, check:
 - `staleDomains` — if the target domain appears here, its spec is outdated.
-  Recommend running `openlore generate --domains $DOMAIN` before implementing.
+  Run the `openlore-repair` host skill before implementing. It uses deterministic
+  `prepare_spec_repair` evidence and the current host agent; do not silently switch
+  to the optional paid standalone `openlore generate` pipeline.
 - `hubGaps` — uncovered hub functions. If the feature touches one of these,
   add it to the adversarial check in Step 4b (high blast radius + no spec = risk).
 
@@ -198,29 +160,21 @@ If both are clean, continue to Step 4 without action.
 
 Use `insertion_points` from `risk_context` if present. Otherwise:
 
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>suggest_insertion_points</tool_name>
-  <arguments>{
-    "directory": "$PROJECT_ROOT",
-    "description": "$STORY_TITLE",
-    "limit": 5
-  }</arguments>
-</use_mcp_tool>
+Call the openlore MCP tool `suggest_insertion_points` with:
+```json
+{
+  "directory": "$PROJECT_ROOT",
+  "description": "$STORY_TITLE",
+  "limit": 5
+}
 ```
 
-Read the skeleton of the target file:
-
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>get_function_skeleton</tool_name>
-  <arguments>{
-    "directory": "$PROJECT_ROOT",
-    "filePath": "$TARGET_FILE"
-  }</arguments>
-</use_mcp_tool>
+Read the skeleton of the target file by calling the openlore MCP tool `get_function_skeleton` with:
+```json
+{
+  "directory": "$PROJECT_ROOT",
+  "filePath": "$TARGET_FILE"
+}
 ```
 
 **Confirm the approach with the user before writing code.**
@@ -239,27 +193,12 @@ If `.claude/antipatterns.md` exists, read it and include any applicable patterns
 This is not a gate — do not wait for user input. It is a mandatory self-check
 that must appear in the output before the first line of code is written.
 
----
+### Step 4c — Record significant design choices
 
-### Step 4c — Record the design decision
-
-Before writing any code, record the implementation approach if it represents a significant architectural choice:
-
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>record_decision</tool_name>
-  <arguments>{
-    "directory": "$DIRECTORY",
-    "title": "$APPROACH_TITLE",
-    "rationale": "$WHY_THIS_APPROACH",
-    "consequences": "$TRADE_OFFS",
-    "affectedFiles": ["$TARGET_FILE"]
-  }</arguments>
-</use_mcp_tool>
-```
-
-Call this for: a non-obvious insertion point, a pattern chosen over alternatives, a new dependency introduced, or an interface contract established. Skip for trivial changes where the approach is self-evident.
+Before editing, call `record_decision` when the chosen approach establishes a module
+boundary, interface contract, dependency, non-obvious insertion point, or other meaningful
+architectural trade-off. Include the directory, rationale, consequences, and affected files.
+Skip self-evident local edits.
 
 ---
 
@@ -273,8 +212,7 @@ Apply changes in this order:
 Do not touch functions outside the scope identified in Step 2 / `risk_context` without
 re-running the gate.
 
-**Small model constraint**: if the model is under 13B parameters (Mistral Small, Phi, Gemma…),
-each edit must touch a contiguous block of at most 50 lines. Split larger changes.
+**Small model constraint**: if the model is under 13B parameters, each edit must touch a contiguous block of at most 50 lines. Split larger changes.
 
 ---
 
@@ -301,18 +239,12 @@ Write a test that directly exercises the behaviour described in the acceptance c
 
 Only run once tests are green.
 
-```xml
-<use_mcp_tool>
-  <server_name>openlore</server_name>
-  <tool_name>check_spec_drift</tool_name>
-  <arguments>{"directory": "$PROJECT_ROOT"}</arguments>
-</use_mcp_tool>
-```
+Call the openlore MCP tool `check_spec_drift` with `{"directory": "$PROJECT_ROOT"}`.
 
 | Drift type | Resolution |
 |---|---|
 | `uncovered` on new files | Note it — propose `openlore generate` post-sprint |
-| `gap` on existing domain | Run `openlore generate --domains $DOMAIN` |
+| `gap` on existing domain | Run the `openlore-repair` host skill |
 | `stale` | Fix the reference |
 | No drift | Done |
 

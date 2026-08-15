@@ -26,6 +26,7 @@ import {
 } from './utils.js';
 import { EdgeStore } from '../edge-store.js';
 import { logger } from '../../../utils/logger.js';
+import { publishGeneration, REQUIRED_ANALYSIS_ARTIFACTS } from '../../runtime/analysis-generation.js';
 import {
   OPENLORE_DIR,
   OPENLORE_ANALYSIS_SUBDIR,
@@ -253,6 +254,20 @@ describe('readCachedContext', () => {
     await writeFile(join(dir, ARTIFACT_LLM_CONTEXT), JSON.stringify(ctx), 'utf-8');
     const result = await readCachedContext(tmpDir);
     expect(result).toMatchObject({ phase1_survey: { purpose: 'survey' } });
+  });
+
+  it('never serves artifact bytes written before their generation is committed', async () => {
+    const dir = join(tmpDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
+    await mkdir(dir, { recursive: true });
+    for (const name of REQUIRED_ANALYSIS_ARTIFACTS) {
+      await writeFile(join(dir, name), name === ARTIFACT_LLM_CONTEXT
+        ? JSON.stringify({ marker: 'committed' })
+        : '{}');
+    }
+    await publishGeneration(dir, [...REQUIRED_ANALYSIS_ARTIFACTS]);
+    expect(await readCachedContext(tmpDir)).toMatchObject({ marker: 'committed' });
+    await writeFile(join(dir, ARTIFACT_LLM_CONTEXT), JSON.stringify({ marker: 'uncommitted' }));
+    expect(await readCachedContext(tmpDir)).toBeNull();
   });
 
   it('attaches EdgeStore when call-graph.db is present', async () => {
