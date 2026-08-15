@@ -57,6 +57,36 @@ describe('config-schema — type-completeness bind', () => {
   it('a fully-populated, correctly-typed config yields zero findings', () => {
     expect(validateOpenLoreConfig(FULLY_POPULATED)).toEqual([]);
   });
+
+  it('requires every non-optional top-level config field', () => {
+    const findings = validateOpenLoreConfig({});
+
+    expect(findings.filter(f => f.kind === 'missing-required').map(f => f.key)).toEqual([
+      'version',
+      'projectType',
+      'openspecPath',
+      'analysis',
+      'generation',
+      'createdAt',
+      'lastRun',
+    ]);
+    expect(findings.every(f => f.message.includes("re-run 'openlore init'"))).toBe(true);
+    expect(findings.every(f => f.fatal === true)).toBe(true);
+  });
+
+  it('does not require optional sections', () => {
+    const minimal = {
+      version: CONFIG_SCHEMA_VERSION,
+      projectType: 'nodejs',
+      openspecPath: 'openspec',
+      analysis: { maxFiles: 1, includePatterns: [], excludePatterns: [] },
+      generation: { domains: 'auto' },
+      createdAt: '2026-07-18T00:00:00.000Z',
+      lastRun: null,
+    };
+
+    expect(validateOpenLoreConfig(minimal)).toEqual([]);
+  });
 });
 
 describe('config-schema — unknown keys', () => {
@@ -127,6 +157,72 @@ describe('config-schema — type mismatches', () => {
     expect(f?.kind).toBe('type-mismatch');
     expect(f?.message).toContain('a string or null');
   });
+
+  it('flags a wrong nested scalar type with its full key path', () => {
+    const findings = validateOpenLoreConfig({
+      ...FULLY_POPULATED,
+      analysis: { ...FULLY_POPULATED.analysis, maxFiles: 'lots' },
+    });
+    const f = findings.find(x => x.key === 'analysis.maxFiles');
+
+    expect(f?.kind).toBe('type-mismatch');
+    expect(f?.message).toContain('should be a number');
+    expect(f?.message).toContain('got string');
+    expect(f?.fatal).toBe(true);
+  });
+
+  it('validates declared fields in optional nested sections', () => {
+    const findings = validateOpenLoreConfig({
+      ...FULLY_POPULATED,
+      embedding: { provider: 'remote', batchSize: 'many' },
+      contextInjection: { tokenBudget: false },
+      secretRedaction: { toolOutput: 'yes' },
+    });
+
+    expect(findings.filter(f => f.kind === 'type-mismatch').map(f => f.key)).toEqual([
+      'embedding.batchSize',
+      'contextInjection.tokenBudget',
+      'secretRedaction.toolOutput',
+    ]);
+    expect(findings.every(f => f.fatal === false)).toBe(true);
+  });
+
+  it('requires declared nested fields when their section is present', () => {
+    const findings = validateOpenLoreConfig({
+      ...FULLY_POPULATED,
+      analysis: {},
+      generation: {},
+      specStore: {},
+    });
+
+    expect(findings.filter(f => f.kind === 'missing-required').map(f => f.key)).toEqual([
+      'analysis.maxFiles',
+      'analysis.includePatterns',
+      'analysis.excludePatterns',
+      'generation.domains',
+      'specStore.name',
+      'specStore.path',
+      'specStore.targets',
+    ]);
+  });
+
+  it('rejects invalid enum members and invalid array elements', () => {
+    const findings = validateOpenLoreConfig({
+      ...FULLY_POPULATED,
+      projectType: 'brainfuck',
+      generation: { domains: ['api', 42] },
+      impactCertificate: {
+        surfaces: [{ name: 'data', members: [{ file: 42 }], severity: 'urgent' }],
+      },
+    });
+
+    expect(findings.map(f => f.key)).toEqual([
+      'projectType',
+      'generation.domains[1]',
+      'impactCertificate.surfaces[0].members[0].file',
+      'impactCertificate.surfaces[0].severity',
+    ]);
+  });
 });
 
 describe('config-schema — version skew', () => {
@@ -173,11 +269,12 @@ describe('config-schema — version skew', () => {
 });
 
 describe('config-schema — robustness', () => {
-  it('a non-object input yields no findings (JSON parse already reported syntax errors)', () => {
-    expect(validateOpenLoreConfig(null)).toEqual([]);
-    expect(validateOpenLoreConfig('string')).toEqual([]);
-    expect(validateOpenLoreConfig([1, 2, 3])).toEqual([]);
-    expect(validateOpenLoreConfig(42)).toEqual([]);
+  it('a non-object parsed value is an attributable root type mismatch', () => {
+    for (const value of [null, 'string', [1, 2, 3], 42]) {
+      expect(validateOpenLoreConfig(value)).toEqual([
+        expect.objectContaining({ kind: 'type-mismatch', key: '<root>' }),
+      ]);
+    }
   });
 
   it('never throws on arbitrary shapes', () => {

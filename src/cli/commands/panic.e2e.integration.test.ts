@@ -32,7 +32,16 @@ function run(args: string[]): { stdout: string; code: number } {
 }
 
 function setMode(dir: string, mode: string): void {
-  writeFileSync(join(dir, '.openlore', 'config.json'), JSON.stringify({ panicResponse: { mode } }));
+  writeFileSync(join(dir, '.openlore', 'config.json'), JSON.stringify({
+    version: '1.0.0',
+    projectType: 'unknown',
+    openspecPath: './openspec',
+    analysis: { maxFiles: 500, includePatterns: [], excludePatterns: [] },
+    generation: { domains: 'auto' },
+    panicResponse: { mode },
+    createdAt: new Date().toISOString(),
+    lastRun: null,
+  }));
 }
 function writeState(dir: string, state: Record<string, unknown>): void {
   writeFileSync(join(dir, '.openlore', 'panic-state.json'), JSON.stringify(state));
@@ -264,7 +273,8 @@ describe.skipIf(!haveCli)('panic CLI — e2e against the built binary', () => {
     writeFileSync(
       join(dir, '.openlore', 'config.json'),
       JSON.stringify({ version: '1.0.0', projectType: 'unknown', openspecPath: './openspec',
-        analysis: {}, generation: {}, panicResponse: { mode: 'off' }, createdAt: '', lastRun: null }),
+        analysis: { maxFiles: 500, includePatterns: [], excludePatterns: [] },
+        generation: { domains: 'auto' }, panicResponse: { mode: 'off' }, createdAt: '', lastRun: null }),
     );
     const setMode2 = run(['setup', '--panic', 'observe', '--dir', dir]);
     expect(setMode2.code).toBe(0);

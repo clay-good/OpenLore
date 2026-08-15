@@ -260,7 +260,12 @@ describe('structural_diff escape detection — adversarial regressions', () => {
     commit('base');
     write(repo, 'src/core2.ts', `export function dispatch(n: string): number {\n  if (n === 'a') return 5;\n  return 0;\n}\n`);
     // Opt the newly-opened-conflict code into blocking for THIS repo.
-    write(repo, '.openlore/config.json', JSON.stringify({ enforcement: { policy: { 'footprint-escape-new-conflict': 'blocking' } } }));
+    write(repo, '.openlore/config.json', JSON.stringify({
+      version: '1.0.0', projectType: 'nodejs', openspecPath: 'openspec',
+      analysis: { maxFiles: 100, includePatterns: [], excludePatterns: [] },
+      generation: { domains: 'auto' }, createdAt: '2026-01-01T00:00:00Z', lastRun: null,
+      enforcement: { policy: { 'footprint-escape-new-conflict': 'blocking' } },
+    }));
     const r = await handleStructuralDiff({
       directory: repo, baseRef: 'HEAD',
       declaredFootprint: { taskId: 't1', writeSet: [{ id: 'src/other.ts::x', filePath: 'src/other.ts' }] },
@@ -300,7 +305,12 @@ describe('structural_diff escape detection — adversarial regressions', () => {
     write(repo, 'src/m.ts', `export function p(): number { return 1; }\nexport function q(): number { return 2; }\n`);
     commit('base');
     write(repo, 'src/m.ts', `export function p(): number { return 11; }\nexport function q(): number { return 22; }\n`);
-    write(repo, '.openlore/config.json', JSON.stringify({ enforcement: { policy: { 'footprint-escape': 'blocking' } } }));
+    write(repo, '.openlore/config.json', JSON.stringify({
+      version: '1.0.0', projectType: 'nodejs', openspecPath: 'openspec',
+      analysis: { maxFiles: 100, includePatterns: [], excludePatterns: [] },
+      generation: { domains: 'auto' }, createdAt: '2026-01-01T00:00:00Z', lastRun: null,
+      enforcement: { policy: { 'footprint-escape': 'blocking' } },
+    }));
     const r = await handleStructuralDiff({
       directory: repo, baseRef: 'HEAD', maxResults: 1,
       declaredFootprint: { taskId: 't1', writeSet: [{ id: 'src/other.ts::z', filePath: 'src/other.ts' }] },

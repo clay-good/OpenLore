@@ -443,9 +443,13 @@ describe('handleSearchSpecs — success path', () => {
   });
 
   it('uses BM25 fallback when cfg exists but fromConfig returns null', async () => {
-    // Create minimal .openlore/config.json so readOpenLoreConfig returns a config
+    // Create a valid .openlore/config.json so readOpenLoreConfig returns a config.
     await mkdir(join(tmpDir, '.openlore'), { recursive: true });
-    await writeFile(join(tmpDir, '.openlore', 'config.json'), JSON.stringify({ version: '1' }), 'utf-8');
+    await writeFile(join(tmpDir, '.openlore', 'config.json'), JSON.stringify({
+      version: '1.0.0', projectType: 'nodejs', openspecPath: 'openspec',
+      analysis: { maxFiles: 100, includePatterns: [], excludePatterns: [] },
+      generation: { domains: 'auto' }, createdAt: '2026-01-01T00:00:00Z', lastRun: null,
+    }), 'utf-8');
 
     const search = vi.fn().mockResolvedValue([]);
     vi.doMock('../../analyzer/spec-vector-index.js', () => ({

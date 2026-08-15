@@ -51,14 +51,21 @@ vi.mock('../../core/analyzer/dependency-graph.js', () => ({
 
 vi.mock('../../core/analyzer/artifact-generator.js', () => ({
   AnalysisArtifactGenerator: vi.fn().mockImplementation(function(this: unknown) {
+    const artifacts = {
+      repoStructure: { architecture: { pattern: 'unknown' }, domains: [] },
+      llmContext: { callGraph: null },
+    };
     Object.assign(this as object, {
-      generateAndSave: vi.fn().mockResolvedValue({
-        repoStructure: { architecture: { pattern: 'unknown' }, domains: [] },
-        llmContext: { callGraph: null },
-      }),
+      generate: vi.fn().mockResolvedValue(artifacts),
+      generateAndSave: vi.fn().mockResolvedValue(artifacts),
     });
   }),
 }));
+
+vi.mock('../../core/runtime/analysis-generation.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../core/runtime/analysis-generation.js')>();
+  return { ...actual, publishGeneration: vi.fn(async () => ({ generationId: 'test-generation' })) };
+});
 
 // ============================================================================
 // HELPERS

@@ -65,7 +65,12 @@ async function writeStaleScenario(root: string): Promise<void> {
 }
 
 async function writePolicy(root: string, policy: Record<string, EnforcementClass>): Promise<void> {
-  await writeFile(join(root, OPENLORE_DIR, OPENLORE_CONFIG_FILENAME), JSON.stringify({ enforcement: { policy } }, null, 2), 'utf-8');
+  await writeFile(join(root, OPENLORE_DIR, OPENLORE_CONFIG_FILENAME), JSON.stringify({
+    version: '1.0.0', projectType: 'nodejs', openspecPath: 'openspec',
+    analysis: { maxFiles: 100, includePatterns: [], excludePatterns: [] },
+    generation: { domains: 'auto' }, createdAt: '2026-01-01T00:00:00Z', lastRun: null,
+    enforcement: { policy },
+  }, null, 2), 'utf-8');
 }
 
 type GateJson = {
@@ -236,7 +241,12 @@ describe('enforce gate decision', () => {
     await writeStaleScenario(root);
     // hostile shapes that must not crash or block the gate
     await writeFile(join(root, OPENLORE_DIR, OPENLORE_CONFIG_FILENAME),
-      JSON.stringify({ enforcement: { policy: ['blocking'] } }), 'utf-8');
+      JSON.stringify({
+        version: '1.0.0', projectType: 'nodejs', openspecPath: 'openspec',
+        analysis: { maxFiles: 100, includePatterns: [], excludePatterns: [] },
+        generation: { domains: 'auto' }, createdAt: '2026-01-01T00:00:00Z', lastRun: null,
+        enforcement: { policy: ['blocking'] },
+      }), 'utf-8');
     const { code, json } = await gateJson(root);
     expect(code).toBe(0);
     expect(json.gated).toBe(false);

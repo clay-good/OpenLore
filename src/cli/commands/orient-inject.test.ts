@@ -392,7 +392,12 @@ describe('buildInjection (fail-open integration)', () => {
     await mkdir(join(dir, '.openlore'), { recursive: true });
     await writeFile(
       join(dir, '.openlore', 'config.json'),
-      JSON.stringify({ contextInjection: { mode: 'off' } }),
+      JSON.stringify({
+        version: '1.0.0', projectType: 'nodejs', openspecPath: 'openspec',
+        analysis: { maxFiles: 100, includePatterns: [], excludePatterns: [] },
+        generation: { domains: 'auto' }, createdAt: '2026-01-01T00:00:00Z', lastRun: null,
+        contextInjection: { mode: 'off' },
+      }),
       'utf8'
     );
     expect(await buildInjection(dir, 'some real task')).toBe('');
@@ -485,7 +490,12 @@ describe('buildInjection intent gate', () => {
     await mkdir(join(dir, '.openlore'), { recursive: true });
     await writeFile(
       join(dir, '.openlore', 'config.json'),
-      JSON.stringify({ contextInjection: ci }),
+      JSON.stringify({
+        version: '1.0.0', projectType: 'nodejs', openspecPath: 'openspec',
+        analysis: { maxFiles: 100, includePatterns: [], excludePatterns: [] },
+        generation: { domains: 'auto' }, createdAt: '2026-01-01T00:00:00Z', lastRun: null,
+        contextInjection: ci,
+      }),
       'utf8'
     );
   };

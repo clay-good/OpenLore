@@ -1,15 +1,16 @@
 /**
  * Deterministic schema validation for `.openlore/config.json`
- * (change: add-config-schema-validation).
+ * (changes: add-config-schema-validation, fix-config-validation-completeness).
  *
  * `readOpenLoreConfig` parses the file with a bare `JSON.parse(...) as OpenLoreConfig`
  * — a type *assertion* checked by nothing at runtime. A typo'd key (`pancResponse`,
  * `embeding`) is silently dropped and the default wins, so the user believes a feature
  * is configured when it is not. This module closes that gap the way the rest of the
  * substrate already does (the decision store validates on load, the index attests
- * integrity): a shallow, allocation-light, dependency-free validator that DISCLOSES
- * unknown keys, type mismatches, and version skew — never a hard failure, and never a
- * behavior change for a currently-valid config.
+ * integrity): an allocation-light, dependency-free validator that recursively checks
+ * every declared field. Unknown keys and version skew remain advisory; missing required
+ * fields and known fields with unusable types are rejected at the read boundary before a
+ * caller can dereference them.
  *
  * Two honesty invariants:
  *  - Forward-compatible: an unknown key (including one written by a *newer* OpenLore) is
@@ -20,17 +21,220 @@
  *    completeness test names any residual drift.
  */
 
-import type { OpenLoreConfig } from '../../types/index.js';
+import type {
+  AnalysisConfig,
+  BlastRadiusConfig,
+  CoveringSurfaceConfig,
+  CoveringSurfaceMember,
+  ContextInjectionConfig,
+  EmbeddingConfig,
+  EnforcementConfig,
+  GenerationConfig,
+  ImpactCertificateConfig,
+  LLMConfig,
+  OpenLoreConfig,
+  SpecStoreConfig,
+} from '../../types/index.js';
 
 /** The current config-schema version stamped into `.openlore/config.json`. */
 export const CONFIG_SCHEMA_VERSION = '1.0.0';
 
 /**
- * Top-level value shapes the validator checks. Deliberately shallow — validation runs
- * on every read of a ~45-caller hub, so it stays allocation-light and does not recurse
- * into nested objects (a mistyped nested field is out of scope, disclosed as such).
+ * Top-level value shapes retained as the public compatibility map for callers and tests.
+ * The recursive schema below refines object fields without changing this exported shape.
  */
 export type ConfigFieldKind = 'string' | 'string-or-null' | 'object';
+
+type RequiredKeys<T> = {
+  [K in keyof T]-?: Record<string, never> extends Pick<T, K> ? never : K
+}[keyof T];
+
+type RequiredFieldMap<T> = Record<RequiredKeys<T>, true>
+  & Partial<Record<Exclude<keyof T, RequiredKeys<T>>, never>>;
+
+type ConfigRule =
+  | { kind: 'string' | 'number' | 'boolean' | 'string-or-null' }
+  | { kind: 'enum'; values: readonly string[] }
+  | { kind: 'array'; element: ConfigRule }
+  | { kind: 'string-or-string-array' }
+  | { kind: 'record-enum'; values: readonly string[] }
+  | { kind: 'object'; fields: Record<string, ConfigRule>; required: readonly string[]; strict?: boolean };
+
+function fieldsFor<T>(fields: Record<keyof T, ConfigRule>): Record<string, ConfigRule> {
+  return fields as Record<string, ConfigRule>;
+}
+
+function requiredFor<T>(required: RequiredFieldMap<T>): readonly string[] {
+  return Object.keys(required);
+}
+
+const stringRule: ConfigRule = { kind: 'string' };
+const numberRule: ConfigRule = { kind: 'number' };
+const booleanRule: ConfigRule = { kind: 'boolean' };
+const stringArrayRule: ConfigRule = { kind: 'array', element: stringRule };
+
+const analysisRule: ConfigRule = {
+  kind: 'object',
+  strict: true,
+  fields: fieldsFor<AnalysisConfig>({
+    maxFiles: numberRule,
+    includePatterns: stringArrayRule,
+    excludePatterns: stringArrayRule,
+  }),
+  required: requiredFor<AnalysisConfig>({ maxFiles: true, includePatterns: true, excludePatterns: true }),
+};
+
+const generationRule: ConfigRule = {
+  kind: 'object',
+  strict: true,
+  fields: fieldsFor<GenerationConfig>({
+    provider: { kind: 'enum', values: ['anthropic', 'openai', 'openai-compat', 'copilot', 'gemini', 'claude-code', 'codex-cli', 'mistral-vibe', 'gemini-cli', 'antigravity-cli', 'cursor-agent'] },
+    model: stringRule,
+    openaiCompatBaseUrl: stringRule,
+    skipSslVerify: booleanRule,
+    disableResponseFormat: booleanRule,
+    timeout: numberRule,
+    chunkMaxChars: numberRule,
+    domains: { kind: 'string-or-string-array' },
+  }),
+  required: requiredFor<GenerationConfig>({ domains: true }),
+};
+
+const llmRule: ConfigRule = {
+  kind: 'object',
+  fields: fieldsFor<LLMConfig>({ apiBase: stringRule, sslVerify: booleanRule }),
+  required: requiredFor<LLMConfig>({}),
+};
+
+const embeddingRule: ConfigRule = {
+  kind: 'object',
+  fields: fieldsFor<EmbeddingConfig>({
+    provider: { kind: 'enum', values: ['remote', 'local'] },
+    baseUrl: stringRule,
+    model: stringRule,
+    apiKey: stringRule,
+    batchSize: numberRule,
+    skipSslVerify: booleanRule,
+  }),
+  required: requiredFor<EmbeddingConfig>({}),
+};
+
+const panicRule: ConfigRule = {
+  kind: 'object',
+  fields: fieldsFor<NonNullable<OpenLoreConfig['panicResponse']>>({
+    mode: { kind: 'enum', values: ['off', 'observe', 'advisory', 'experimental_blocking'] },
+  }),
+  required: requiredFor<NonNullable<OpenLoreConfig['panicResponse']>>({ mode: true }),
+};
+
+const blastRadiusRule: ConfigRule = {
+  kind: 'object',
+  fields: fieldsFor<BlastRadiusConfig>({
+    block: { kind: 'array', element: { kind: 'enum', values: ['orphans-anchored-memory', 'orphans-anchored-decision'] } },
+  }),
+  required: requiredFor<BlastRadiusConfig>({}),
+};
+
+const specStoreRule: ConfigRule = {
+  kind: 'object',
+  fields: fieldsFor<SpecStoreConfig>({
+    name: stringRule,
+    path: stringRule,
+    targets: stringArrayRule,
+    references: stringArrayRule,
+  }),
+  required: requiredFor<SpecStoreConfig>({ name: true, path: true, targets: true }),
+};
+
+const governanceRule: ConfigRule = {
+  kind: 'object',
+  fields: fieldsFor<NonNullable<OpenLoreConfig['governance']>>({ autopilot: booleanRule }),
+  required: requiredFor<NonNullable<OpenLoreConfig['governance']>>({}),
+};
+
+const coveringMemberRule: ConfigRule = {
+  kind: 'object',
+  fields: fieldsFor<CoveringSurfaceMember>({ symbol: stringRule, file: stringRule }),
+  required: requiredFor<CoveringSurfaceMember>({}),
+};
+
+const coveringSurfaceRule: ConfigRule = {
+  kind: 'object',
+  fields: fieldsFor<CoveringSurfaceConfig>({
+    name: stringRule,
+    members: { kind: 'array', element: coveringMemberRule },
+    severity: { kind: 'enum', values: ['info', 'warn', 'critical'] },
+  }),
+  required: requiredFor<CoveringSurfaceConfig>({ name: true, members: true }),
+};
+
+const impactCertificateRule: ConfigRule = {
+  kind: 'object',
+  fields: fieldsFor<ImpactCertificateConfig>({
+    surfaces: { kind: 'array', element: coveringSurfaceRule },
+    block: { kind: 'array', element: { kind: 'enum', values: ['info', 'warn', 'critical'] } },
+  }),
+  required: requiredFor<ImpactCertificateConfig>({}),
+};
+
+const contextInjectionRule: ConfigRule = {
+  kind: 'object',
+  fields: fieldsFor<ContextInjectionConfig>({
+    mode: { kind: 'enum', values: ['off', 'task-scoped'] },
+    tokenBudget: numberRule,
+    relevanceMinMatches: numberRule,
+    relevanceMinFanIn: numberRule,
+    relevanceMinScore: numberRule,
+    intentGate: booleanRule,
+  }),
+  required: requiredFor<ContextInjectionConfig>({}),
+};
+
+const enforcementRule: ConfigRule = {
+  kind: 'object',
+  fields: fieldsFor<EnforcementConfig>({
+    policy: { kind: 'record-enum', values: ['blocking', 'advisory', 'off'] },
+  }),
+  required: requiredFor<EnforcementConfig>({}),
+};
+
+const secretRedactionRule: ConfigRule = {
+  kind: 'object',
+  fields: fieldsFor<NonNullable<OpenLoreConfig['secretRedaction']>>({ toolOutput: booleanRule }),
+  required: requiredFor<NonNullable<OpenLoreConfig['secretRedaction']>>({}),
+};
+
+const CONFIG_RULE: ConfigRule = {
+  kind: 'object',
+  fields: fieldsFor<OpenLoreConfig>({
+    version: stringRule,
+    projectType: { kind: 'enum', values: ['nodejs', 'python', 'rust', 'go', 'java', 'ruby', 'php', 'unknown'] },
+    openspecPath: stringRule,
+    analysis: analysisRule,
+    generation: generationRule,
+    llm: llmRule,
+    embedding: embeddingRule,
+    panicResponse: panicRule,
+    createdAt: stringRule,
+    lastRun: { kind: 'string-or-null' },
+    blastRadius: blastRadiusRule,
+    specStore: specStoreRule,
+    governance: governanceRule,
+    impactCertificate: impactCertificateRule,
+    contextInjection: contextInjectionRule,
+    enforcement: enforcementRule,
+    secretRedaction: secretRedactionRule,
+  }),
+  required: requiredFor<OpenLoreConfig>({
+    version: true,
+    projectType: true,
+    openspecPath: true,
+    analysis: true,
+    generation: true,
+    createdAt: true,
+    lastRun: true,
+  }),
+};
 
 /**
  * The known keys of `OpenLoreConfig` and the shape each holds. Typed as
@@ -80,13 +284,20 @@ export const CONFIG_MIGRATIONS: readonly ConfigMigration[] = [];
 
 /** A single deterministic finding from validating a config object. */
 export interface ConfigValidationFinding {
-  kind: 'unknown-key' | 'type-mismatch' | 'version-older' | 'version-newer';
+  kind: 'unknown-key' | 'missing-required' | 'type-mismatch' | 'version-older' | 'version-newer';
   /** The offending key, when the finding is about one. */
   key?: string;
   /** Human-readable message. */
   message: string;
   /** For unknown-key: the closest known key within the edit-distance bound, if any. */
   suggestion?: string;
+  /** Whether returning the parsed object would expose an unsafe required runtime shape. */
+  fatal?: boolean;
+}
+
+/** Findings that make the parsed object unsafe to expose as `OpenLoreConfig`. */
+export function isFatalConfigFinding(finding: ConfigValidationFinding): boolean {
+  return finding.fatal === true;
 }
 
 /**
@@ -119,10 +330,10 @@ function editDistance(a: string, b: string): number {
  * The closest known key to `unknown` within {@link MAX_SUGGESTION_DISTANCE}, or undefined.
  * Ties broken alphabetically so the suggestion is deterministic.
  */
-function suggestKnownKey(unknown: string): string | undefined {
+function suggestKey(unknown: string, knownKeys: readonly string[]): string | undefined {
   let best: string | undefined;
   let bestDist = MAX_SUGGESTION_DISTANCE + 1;
-  for (const known of KNOWN_CONFIG_KEYS) {
+  for (const known of knownKeys) {
     const d = editDistance(unknown, known);
     if (d < bestDist || (d === bestDist && best !== undefined && known < best)) {
       bestDist = d;
@@ -138,14 +349,116 @@ function actualKind(value: unknown): string {
   return typeof value;
 }
 
-function kindMatches(kind: ConfigFieldKind, value: unknown): boolean {
-  switch (kind) {
-    case 'string':
-      return typeof value === 'string';
-    case 'string-or-null':
-      return value === null || typeof value === 'string';
-    case 'object':
-      return typeof value === 'object' && value !== null && !Array.isArray(value);
+function expectedDescription(rule: ConfigRule): string {
+  switch (rule.kind) {
+    case 'string': return 'a string';
+    case 'number': return 'a number';
+    case 'boolean': return 'a boolean';
+    case 'string-or-null': return 'a string or null';
+    case 'enum': return `one of ${rule.values.join(', ')}`;
+    case 'array': return 'an array';
+    case 'string-or-string-array': return 'a string or an array of strings';
+    case 'record-enum': return `an object whose values are one of ${rule.values.join(', ')}`;
+    case 'object': return 'an object';
+  }
+}
+
+function typeFinding(path: string, rule: ConfigRule, value: unknown, fatal: boolean): ConfigValidationFinding {
+  return {
+    kind: 'type-mismatch',
+    key: path,
+    fatal,
+    message: `config key '${path}' should be ${expectedDescription(rule)}, got ${actualKind(value)} — correct it or re-run 'openlore init'`,
+  };
+}
+
+function validateRule(
+  value: unknown,
+  rule: ConfigRule,
+  path: string,
+  findings: { unknown: ConfigValidationFinding[]; missing: ConfigValidationFinding[]; mismatches: ConfigValidationFinding[] },
+  fatal = false,
+): void {
+  if (rule.kind === 'string' || rule.kind === 'number' || rule.kind === 'boolean') {
+    if (typeof value !== rule.kind) findings.mismatches.push(typeFinding(path, rule, value, fatal));
+    return;
+  }
+  if (rule.kind === 'string-or-null') {
+    if (value !== null && typeof value !== 'string') findings.mismatches.push(typeFinding(path, rule, value, fatal));
+    return;
+  }
+  if (rule.kind === 'enum') {
+    if (typeof value !== 'string' || !rule.values.includes(value)) findings.mismatches.push(typeFinding(path, rule, value, fatal));
+    return;
+  }
+  if (rule.kind === 'string-or-string-array') {
+    if (typeof value === 'string') return;
+    if (!Array.isArray(value)) {
+      findings.mismatches.push(typeFinding(path, rule, value, fatal));
+      return;
+    }
+    value.forEach((item, index) => {
+      if (typeof item !== 'string') findings.mismatches.push(typeFinding(`${path}[${index}]`, stringRule, item, fatal));
+    });
+    return;
+  }
+  if (rule.kind === 'array') {
+    if (!Array.isArray(value)) {
+      findings.mismatches.push(typeFinding(path, rule, value, fatal));
+      return;
+    }
+    value.forEach((item, index) => validateRule(item, rule.element, `${path}[${index}]`, findings, fatal));
+    return;
+  }
+  if (rule.kind === 'record-enum') {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+      findings.mismatches.push(typeFinding(path, rule, value, fatal));
+      return;
+    }
+    for (const [key, item] of Object.entries(value)) {
+      if (typeof item !== 'string' || !rule.values.includes(item)) {
+        findings.mismatches.push(typeFinding(`${path}.${key}`, { kind: 'enum', values: rule.values }, item, fatal));
+      }
+    }
+    return;
+  }
+
+  if (rule.kind !== 'object') return;
+
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    findings.mismatches.push(typeFinding(path || '<root>', rule, value, fatal));
+    return;
+  }
+  const obj = value as Record<string, unknown>;
+  for (const key of Object.keys(obj)) {
+    const childRule = rule.fields[key];
+    const childPath = path ? `${path}.${key}` : key;
+    if (!childRule) {
+      const suggestion = suggestKey(key, Object.keys(rule.fields));
+      findings.unknown.push({
+        kind: 'unknown-key',
+        key: childPath,
+        fatal: false,
+        suggestion,
+        message: suggestion
+          ? `unknown config key '${childPath}' — did you mean '${path ? `${path}.` : ''}${suggestion}'? (ignored)`
+          : `unknown config key '${childPath}' — possibly from a newer OpenLore (ignored)`,
+      });
+      continue;
+    }
+    const childFatal = rule.strict === true || (path === '' && rule.required.includes(key));
+    validateRule(obj[key], childRule, childPath, findings, childFatal);
+  }
+  for (const key of rule.required) {
+    if (!Object.prototype.hasOwnProperty.call(obj, key)) {
+      const childPath = path ? `${path}.${key}` : key;
+      findings.missing.push({
+        kind: 'missing-required',
+        key: childPath,
+        fatal: rule.strict === true || path === '',
+        message: `required config key '${childPath}' is missing — restore it or re-run 'openlore init'`,
+      });
+    }
   }
 }
 
@@ -211,44 +524,22 @@ export function checkConfigVersion(
 
 /**
  * Validate a parsed config object against the type-derived schema. Pure and
- * deterministic: returns findings ordered as unknown-keys (in file order), then
- * type-mismatches, then version skew. Never throws, never mutates, never a hard failure.
- * A non-object input yields no findings (the JSON parse already reported a syntax error).
+ * deterministic: returns findings ordered as unknown keys, missing required fields,
+ * type mismatches, then version skew. Never throws or mutates; the config read boundary
+ * decides which findings are fatal.
  */
 export function validateOpenLoreConfig(
   parsed: unknown,
   opts: { current?: string; migrations?: readonly ConfigMigration[] } = {}
 ): ConfigValidationFinding[] {
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return [];
-  const obj = parsed as Record<string, unknown>;
-  const findings: ConfigValidationFinding[] = [];
-
-  const unknownKeys: ConfigValidationFinding[] = [];
-  const mismatches: ConfigValidationFinding[] = [];
-  for (const key of Object.keys(obj)) {
-    const kind = CONFIG_FIELD_KINDS[key as keyof OpenLoreConfig];
-    if (kind === undefined) {
-      const suggestion = suggestKnownKey(key);
-      unknownKeys.push({
-        kind: 'unknown-key',
-        key,
-        suggestion,
-        message: suggestion
-          ? `unknown config key '${key}' — did you mean '${suggestion}'? (ignored)`
-          : `unknown config key '${key}' — possibly from a newer OpenLore (ignored)`,
-      });
-      continue;
-    }
-    if (!kindMatches(kind, obj[key])) {
-      mismatches.push({
-        kind: 'type-mismatch',
-        key,
-        message: `config key '${key}' should be ${kind === 'object' ? 'an object' : kind === 'string-or-null' ? 'a string or null' : 'a string'}, got ${actualKind(obj[key])}`,
-      });
-    }
-  }
-
-  findings.push(...unknownKeys, ...mismatches);
-  findings.push(...checkConfigVersion(obj.version, opts));
-  return findings;
+  const findings = {
+    unknown: [] as ConfigValidationFinding[],
+    missing: [] as ConfigValidationFinding[],
+    mismatches: [] as ConfigValidationFinding[],
+  };
+  validateRule(parsed, CONFIG_RULE, '', findings, true);
+  const versionFindings = typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+    ? checkConfigVersion((parsed as Record<string, unknown>).version, opts)
+    : [];
+  return [...findings.unknown, ...findings.missing, ...findings.mismatches, ...versionFindings];
 }

@@ -371,7 +371,7 @@ describe('certificate decay (freshness lease)', () => {
       addRepo(home, target, { name: 'app' });
       mkdirSync(join(scratch, 'store'), { recursive: true });
       writeFileSync(join(home, OPENLORE_DIR, OPENLORE_CONFIG_FILENAME), JSON.stringify({
-        version: '1.0.0', projectType: 'library', openspecPath: 'openspec',
+        version: '1.0.0', projectType: 'unknown', openspecPath: 'openspec',
         analysis: { maxFiles: 1000, includePatterns: [], excludePatterns: [] },
         generation: { model: 'x', domains: 'auto' }, createdAt: new Date().toISOString(), lastRun: null,
         specStore: { name: 'plans', path: join(scratch, 'store'), targets: ['app'] },

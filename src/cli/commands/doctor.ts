@@ -14,7 +14,11 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { logger } from '../../utils/logger.js';
 import { palette } from '../../utils/colors.js';
-import { readOpenLoreConfig, resolveOpenLoreConfigPath } from '../../core/services/config-manager.js';
+import {
+  InvalidOpenLoreConfigError,
+  readOpenLoreConfig,
+  resolveOpenLoreConfigPath,
+} from '../../core/services/config-manager.js';
 import { validateOpenLoreConfig } from '../../core/services/config-schema.js';
 import { EdgeStore } from '../../core/services/edge-store.js';
 import { createLLMService, ProviderName } from '../../core/services/llm-service.js';
@@ -154,7 +158,15 @@ async function checkConfig(rootPath: string): Promise<CheckResult> {
       status: 'ok',
       detail: `${shown} (project: ${config.projectType})`,
     };
-  } catch {
+  } catch (error) {
+    if (error instanceof InvalidOpenLoreConfigError) {
+      return {
+        name: 'openlore config',
+        status: 'fail',
+        detail: error.message,
+        fix: `Correct the named keys in ${shown}, or re-run 'openlore init'`,
+      };
+    }
     return {
       name: 'openlore config',
       status: 'warn',
@@ -168,8 +180,8 @@ async function checkConfig(rootPath: string): Promise<CheckResult> {
  * Config-schema check (change: add-config-schema-validation): surface unknown keys
  * (typo'd sections silently dropped today), type mismatches, and version skew in
  * `.openlore/config.json`. Reads the raw file and validates directly so the findings
- * appear as one structured check; advisory only (never fails), and clean/absent configs
- * report ok. Complements `checkConfig`, which only reports parse success.
+ * appear as one structured check. Clean/absent configs report ok; unusable configs also
+ * make `checkConfig` fail through the same validator-backed read boundary.
  */
 async function checkConfigSchema(rootPath: string): Promise<CheckResult> {
   const configPath = resolveOpenLoreConfigPath(rootPath);
@@ -182,10 +194,19 @@ async function checkConfigSchema(rootPath: string): Promise<CheckResult> {
   }
   const findings = validateOpenLoreConfig(parsed);
   if (findings.length === 0) {
-    return { name: 'Config schema', status: 'ok', detail: 'all keys known and well-typed' };
+    return { name: 'Config schema', status: 'ok', detail: 'all required fields present and all declared fields well-typed' };
   }
-  const summary = findings.slice(0, 3).map(f => f.message).join('; ');
-  const more = findings.length > 3 ? ` (+${findings.length - 3} more)` : '';
+  const missing = findings.filter(f => f.kind === 'missing-required');
+  const other = findings.filter(f => f.kind !== 'missing-required');
+  const parts = [
+    ...(missing.length > 0
+      ? [`missing required keys: ${missing.map(f => f.key).join(', ')} — re-run 'openlore init'`]
+      : []),
+    ...other.slice(0, 3).map(f => f.message),
+  ];
+  const undisclosed = Math.max(0, other.length - 3);
+  const summary = parts.join('; ');
+  const more = undisclosed > 0 ? ` (+${undisclosed} more)` : '';
   return {
     name: 'Config schema',
     status: 'warn',

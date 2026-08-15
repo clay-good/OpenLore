@@ -19,7 +19,12 @@ import {
   OPENSPEC_CONFIG_FILENAME,
 } from '../../constants.js';
 import { fileExists } from '../../utils/command-helpers.js';
-import { validateOpenLoreConfig, CONFIG_SCHEMA_VERSION } from './config-schema.js';
+import {
+  validateOpenLoreConfig,
+  isFatalConfigFinding,
+  CONFIG_SCHEMA_VERSION,
+  type ConfigValidationFinding,
+} from './config-schema.js';
 
 /**
  * OpenSpec config.yaml structure
@@ -119,16 +124,27 @@ export function getDefaultConfig(projectType: ProjectType, openspecPath: string)
  */
 const emittedConfigWarnings = new Set<string>();
 
+/** An existing config file parsed as JSON but is unsafe to expose as `OpenLoreConfig`. */
+export class InvalidOpenLoreConfigError extends Error {
+  constructor(
+    public readonly configPath: string,
+    public readonly findings: readonly ConfigValidationFinding[],
+  ) {
+    const keys = findings.map(finding => finding.key ?? finding.kind).join(', ');
+    super(`Invalid ${configPath}: correct ${keys} or re-run 'openlore init' to recreate the configuration.`);
+    this.name = 'InvalidOpenLoreConfigError';
+  }
+}
+
 /** Test hook: clear the per-process config-validation warning dedup memory. */
 export function resetConfigValidationWarnings(): void {
   emittedConfigWarnings.clear();
 }
 
 /**
- * Validate a parsed config against the type-derived schema and emit any findings once
- * per process. Warnings are advisory: a typo'd key, a type mismatch, or a version skew
- * is disclosed and then ignored — never a hard failure, and never emitted for a config
- * that uses only known keys with correctly-typed values (change: add-config-schema-validation).
+ * Emit schema findings once per process. Unknown keys and version skew are advisory;
+ * required-field and declared-type failures are emitted here and rejected by the read
+ * boundary before the parsed object is returned.
  *
  * Emitted to STDERR (honoring the logger's quiet/noColor state), not stdout: this is a
  * ~45-caller hub read by machine-output paths — `--json` commands, `orient`, and the MCP
@@ -136,8 +152,10 @@ export function resetConfigValidationWarnings(): void {
  * the diagnostic in their terminal; `openlore doctor` additionally surfaces it as a
  * structured `Config schema` finding.
  */
-function emitConfigValidationWarnings(configPath: string, parsed: unknown): void {
-  const findings = validateOpenLoreConfig(parsed);
+function emitConfigValidationWarnings(
+  configPath: string,
+  findings: readonly ConfigValidationFinding[],
+): void {
   if (findings.length === 0) return;
   const { quiet } = logger.getOptions();
   if (quiet) return; // errors-only mode — match logger.warning's suppression
@@ -173,7 +191,12 @@ export async function readOpenLoreConfig(rootPath: string): Promise<OpenLoreConf
     logger.warning(`Delete ${configPath} and run 'openlore init' to recreate it.`);
     return null;
   }
-  emitConfigValidationWarnings(configPath, parsed);
+  const findings = validateOpenLoreConfig(parsed);
+  emitConfigValidationWarnings(configPath, findings);
+  const fatalFindings = findings.filter(isFatalConfigFinding);
+  if (fatalFindings.length > 0) {
+    throw new InvalidOpenLoreConfigError(configPath, fatalFindings);
+  }
   return parsed;
 }
 
