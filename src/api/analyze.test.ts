@@ -39,6 +39,9 @@ vi.mock('../core/decisions/atomic-store.js', () => ({ atomicWriteFile: vi.fn() }
 vi.mock('../core/runtime/analysis-generation.js', () => ({
   REQUIRED_ANALYSIS_ARTIFACTS: ['repo-structure.json', 'llm-context.json', 'dependency-graph.json', 'fingerprint.json'],
   publishGeneration: vi.fn(async () => ({ generationId: 'test-generation' })),
+  readGenerationSnapshot: vi.fn(async (_dir: string, _required: string[], read: () => Promise<unknown>) => ({
+    state: 'ok', value: await read(), generationId: 'test-generation', compatibility: 'manifest', coherence: 'full',
+  })),
 }));
 
 vi.mock('../core/services/mcp-handlers/utils.js', () => ({
@@ -84,12 +87,14 @@ import { RepositoryMapper } from '../core/analyzer/repository-mapper.js';
 import { DependencyGraphBuilder } from '../core/analyzer/dependency-graph.js';
 import { AnalysisArtifactGenerator } from '../core/analyzer/artifact-generator.js';
 import { acquireAnalysisOwnership } from '../core/runtime/analysis-ownership.js';
+import { readGenerationSnapshot } from '../core/runtime/analysis-generation.js';
 
 const mockAccess = vi.mocked(access);
 const mockStat = vi.mocked(stat);
 const mockReadFile = vi.mocked(readFile);
 const mockReadOpenLoreConfig = vi.mocked(readOpenLoreConfig);
 const mockAcquireAnalysisOwnership = vi.mocked(acquireAnalysisOwnership);
+const mockReadGenerationSnapshot = vi.mocked(readGenerationSnapshot);
 const mockOwnershipUpdate = vi.fn().mockResolvedValue(undefined);
 const mockOwnershipRelease = vi.fn().mockResolvedValue(undefined);
 
@@ -209,6 +214,15 @@ describe('openloreAnalyze', () => {
     it('force=true bypasses cache and runs full analysis', async () => {
       await openloreAnalyze({ rootPath: ROOT, force: true });
       expect(RepositoryMapper).toHaveBeenCalled();
+    });
+
+    it('rebuilds instead of serving a TTL-fresh mixed generation', async () => {
+      mockReadGenerationSnapshot.mockResolvedValueOnce({
+        state: 'analysis-changed', message: 'changed',
+      });
+      await openloreAnalyze({ rootPath: ROOT });
+      expect(RepositoryMapper).toHaveBeenCalled();
+      expect(mockAcquireAnalysisOwnership).toHaveBeenCalled();
     });
   });
 

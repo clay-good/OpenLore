@@ -20,7 +20,7 @@ import type { AnalyzeApiOptions, AnalyzeResult, ProgressCallback } from './types
 import { SpecSnapshotGenerator } from '../core/analyzer/spec-snapshot-generator.js';
 import { atomicWriteFile } from '../core/decisions/atomic-store.js';
 import { withAnalysisLock } from '../core/runtime/advisory-lock.js';
-import { publishGeneration, REQUIRED_ANALYSIS_ARTIFACTS } from '../core/runtime/analysis-generation.js';
+import { publishGeneration, readGenerationSnapshot, REQUIRED_ANALYSIS_ARTIFACTS } from '../core/runtime/analysis-generation.js';
 import { computeProjectFingerprint } from '../core/services/mcp-handlers/utils.js';
 import {
   acquireAnalysisOwnership,
@@ -112,29 +112,22 @@ export async function openloreAnalyze(options: AnalyzeApiOptions = {}): Promise<
       const stats = await stat(repoStructurePath);
       const age = Date.now() - stats.mtime.getTime();
       if (age < ANALYSIS_STALE_THRESHOLD_MS) {
-        progress(
-          onProgress,
-          'Recent analysis exists',
-          'skip',
-          `${Math.floor(age / 60000)} minutes old`
-        );
-        // Load and return existing analysis
-        const repoStructure = await readJsonFile<RepoStructure>(
-          repoStructurePath,
-          ARTIFACT_REPO_STRUCTURE,
-        );
-        if (!repoStructure) {
-          throw new Error(`Failed to load ${ARTIFACT_REPO_STRUCTURE} — run openlore analyze --force to regenerate`);
-        }
-
-        const depGraph = await readJsonFile<DependencyGraphResult>(
-          join(outputPath, ARTIFACT_DEPENDENCY_GRAPH),
-          ARTIFACT_DEPENDENCY_GRAPH,
-        ) ?? undefined;
-
-        return {
-          repoMap: repoStructureToRepoMap(repoStructure),
-          depGraph: depGraph ?? {
+        const snapshot = await readGenerationSnapshot(
+          outputPath,
+          [...REQUIRED_ANALYSIS_ARTIFACTS],
+          async (): Promise<AnalyzeResult | null> => {
+            const repoStructure = await readJsonFile<RepoStructure>(
+              repoStructurePath,
+              ARTIFACT_REPO_STRUCTURE,
+            );
+            if (!repoStructure) return null;
+            const depGraph = await readJsonFile<DependencyGraphResult>(
+              join(outputPath, ARTIFACT_DEPENDENCY_GRAPH),
+              ARTIFACT_DEPENDENCY_GRAPH,
+            ) ?? undefined;
+            return {
+              repoMap: repoStructureToRepoMap(repoStructure),
+              depGraph: depGraph ?? {
             nodes: [],
             edges: [],
             clusters: [],
@@ -159,10 +152,23 @@ export async function openloreAnalyze(options: AnalyzeApiOptions = {}): Promise<
               density: 0,
               structuralClusterCount: 0,
             },
+              },
+              artifacts: await loadCachedArtifacts(outputPath, repoStructure),
+              duration: Date.now() - startTime,
+            };
           },
-          artifacts: await loadCachedArtifacts(outputPath, repoStructure),
-          duration: Date.now() - startTime,
-        };
+        );
+        if (snapshot.state === 'ok' && snapshot.value) {
+          progress(
+            onProgress,
+            'Recent analysis exists',
+            'skip',
+            `${Math.floor(age / 60000)} minutes old`
+          );
+          return snapshot.value;
+        }
+        // TTL-fresh but mixed/uncommitted artifacts are a cache miss. Continue
+        // through ownership and rebuild rather than returning unverifiable facts.
       }
     }
   }
