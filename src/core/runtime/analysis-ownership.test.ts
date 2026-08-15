@@ -1,12 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { spawn } from 'node:child_process';
-import { mkdtemp, readFile, rm, stat, writeFile, mkdir } from 'node:fs/promises';
+import { lstat, mkdtemp, readFile, rm, stat, symlink, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { OWNERSHIP_HEARTBEAT_STALE_MS, OWNERSHIP_LOCK_FILE } from './advisory-lock.js';
 import {
   PROGRESS_INTERVAL_MS,
+  WATCHDOG_FILE,
   acquireAnalysisOwnership,
   isOwnershipStale,
   isProcessAlive,
@@ -196,6 +197,69 @@ describe('analysis ownership — reclamation', () => {
 // ============================================================================
 
 describe('analysis ownership — progress sidecar', () => {
+  it('never writes or executes the legacy repository-resident watchdog path', async () => {
+    const { root, analysisDir } = await fixture();
+    const outside = await mkdtemp(join(tmpdir(), 'openlore-watchdog-victim-'));
+    roots.push(outside);
+    const victim = join(outside, 'victim.txt');
+    const runtimeDir = runtimeDirOf(analysisDir);
+    const watchdogPath = join(runtimeDir, WATCHDOG_FILE);
+    await mkdir(runtimeDir, { recursive: true });
+    await writeFile(victim, 'SAFE', 'utf8');
+    await symlink(victim, watchdogPath);
+
+    const held = await own(root, analysisDir);
+    expect(held.state).toBe('owned');
+    expect(await readFile(victim, 'utf8')).toBe('SAFE');
+    expect((await lstat(watchdogPath)).isSymbolicLink()).toBe(true);
+  });
+
+  it('does not execute a malicious replacement planted at the legacy watchdog path', async () => {
+    const { root, analysisDir } = await fixture();
+    const victim = join(root, 'replacement-victim.txt');
+    const runtimeDir = runtimeDirOf(analysisDir);
+    const watchdogPath = join(runtimeDir, WATCHDOG_FILE);
+    await mkdir(runtimeDir, { recursive: true });
+    await writeFile(victim, 'SAFE', 'utf8');
+    await writeFile(
+      watchdogPath,
+      `require('node:fs').writeFileSync(${JSON.stringify(victim)}, 'EXECUTED')`,
+      'utf8',
+    );
+
+    const held = await own(root, analysisDir);
+    expect(held.state).toBe('owned');
+    await new Promise(resolve => setTimeout(resolve, 100));
+    expect(await readFile(victim, 'utf8')).toBe('SAFE');
+  });
+
+  it('replaces a hostile progress symlink without following it during acquire or watchdog beats', async () => {
+    const { root, analysisDir } = await fixture();
+    const outside = await mkdtemp(join(tmpdir(), 'openlore-progress-victim-'));
+    roots.push(outside);
+    const victim = join(outside, 'victim.txt');
+    const tempVictim = join(outside, 'temp-victim.txt');
+    const progressPath = progressPathOf(analysisDir);
+    const legacyWatchdogTemp = `${progressPath}.${process.pid}.wd.tmp`;
+    await mkdir(runtimeDirOf(analysisDir), { recursive: true });
+    await writeFile(victim, 'SAFE', 'utf8');
+    await writeFile(tempVictim, 'SAFE-TEMP', 'utf8');
+    await symlink(victim, progressPath);
+    await symlink(tempVictim, legacyWatchdogTemp);
+
+    const held = await acquireAnalysisOwnership(root, analysisDir, { heartbeatIntervalMs: 30 });
+    if (held.state !== 'owned') throw new Error('expected ownership');
+    opened.push(held);
+    await new Promise(resolve => setTimeout(resolve, 120));
+
+    expect(await readFile(victim, 'utf8')).toBe('SAFE');
+    expect(await readFile(tempVictim, 'utf8')).toBe('SAFE-TEMP');
+    expect((await lstat(progressPath)).isFile()).toBe(true);
+    expect((await lstat(legacyWatchdogTemp)).isSymbolicLink()).toBe(true);
+    if (process.platform !== 'win32') expect((await stat(progressPath)).mode & 0o777).toBe(0o600);
+    expect(await readAnalysisProgress(analysisDir)).toMatchObject({ stage: 'starting' });
+  });
+
   it('publishes concurrent stage updates without temp-file collisions or torn lock JSON', async () => {
     const { root, analysisDir } = await fixture();
     const held = await own(root, analysisDir);

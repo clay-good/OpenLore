@@ -22,8 +22,8 @@
  * enter an artifact digest.
  */
 
-import { statSync, unlinkSync, writeFileSync } from 'node:fs';
-import { open, readFile, rename, writeFile, mkdir, unlink } from 'node:fs/promises';
+import { statSync, unlinkSync } from 'node:fs';
+import { open, readFile, rename, mkdir, unlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { Worker } from 'node:worker_threads';
 import { randomUUID } from 'node:crypto';
@@ -152,23 +152,36 @@ export function isOwnershipStale(mtimeMs: number, contents: string, repository: 
 async function writeProgress(progressPath: string, progress: AnalysisProgress): Promise<void> {
   await mkdir(dirname(progressPath), { recursive: true });
   const tmp = `${progressPath}.${process.pid}.${randomUUID()}.tmp`;
-  await writeFile(tmp, JSON.stringify(progress, null, 2), 'utf8');
-  await rename(tmp, progressPath);
+  let renamed = false;
+  try {
+    // Exclusive creation refuses a planted symlink instead of following it. The
+    // random name makes pre-planting impractical; mode 0600 keeps transient runtime
+    // details private even under a permissive umask.
+    const handle = await open(tmp, 'wx', 0o600);
+    try {
+      await handle.writeFile(JSON.stringify(progress, null, 2), 'utf8');
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await rename(tmp, progressPath);
+    renamed = true;
+  } finally {
+    if (!renamed) await unlink(tmp).catch(() => {});
+  }
 }
 
-/** File the watchdog program is written to, beside the lock it maintains. */
+/** Legacy filename retained for compatibility checks. It is never written or executed. */
 export const WATCHDOG_FILE = '.analysis-watchdog.cjs';
 
 /**
  * The watchdog thread's whole program.
  *
- * Written to a `.cjs` file at acquire time rather than run with `eval: true`.
- * The extension is load-bearing: an eval'd worker inherits the host's module
- * type, so under `--input-type=module` (how the test harness and some embedders
- * start Node) the same source is parsed as ESM and dies on `require is not
- * defined` — silently, since a watchdog failure must never fail the analysis.
- * A `.cjs` file is CommonJS no matter how the host was started, and needs no
- * build step or `dist/`-vs-`tsx` path resolution.
+ * The source runs directly in an eval worker with an empty `execArgv`. Nothing is
+ * written into the analyzed repository and no repository-writable path is ever
+ * executed. Clearing `execArgv` is load-bearing: an embedding host may itself have
+ * started with `--input-type=module`, which is invalid for a file worker and must
+ * not leak into this isolated CommonJS eval worker.
  *
  * It exists because timers are event-loop callbacks: a stage that is synchronous
  * and CPU-bound (artifact generation on a large repository) starves the main
@@ -183,7 +196,8 @@ export const WATCHDOG_FILE = '.analysis-watchdog.cjs';
  */
 const WATCHDOG_SOURCE = `
 const { parentPort, workerData } = require('node:worker_threads');
-const { statSync, writeFileSync, renameSync } = require('node:fs');
+const { closeSync, fsyncSync, openSync, statSync, writeFileSync, renameSync, unlinkSync } = require('node:fs');
+const { randomUUID } = require('node:crypto');
 let { lockPath, progressPath, payload, progress, intervalMs, pid, stop, inode, writeMutex } = workerData;
 const stopFlag = new Int32Array(stop);
 const writeFlag = new Int32Array(writeMutex);
@@ -204,11 +218,25 @@ function beat() {
     writeFileSync(lockPath, JSON.stringify({ ...payload, heartbeatAt: now }));
   } catch { return; }
   finally { Atomics.store(writeFlag, 0, 0); Atomics.notify(writeFlag, 0); }
+  const tmp = progressPath + '.' + pid + '.' + randomUUID() + '.wd.tmp';
+  let fd;
+  let renamed = false;
   try {
-    const tmp = progressPath + '.' + pid + '.wd.tmp';
-    writeFileSync(tmp, JSON.stringify({ ...progress, updatedAt: now }, null, 2));
+    // Exclusive creation refuses a planted symlink. Rename publishes the
+    // completed regular file atomically and replaces (rather than follows) a
+    // hostile destination symlink.
+    fd = openSync(tmp, 'wx', 0o600);
+    writeFileSync(fd, JSON.stringify({ ...progress, updatedAt: now }, null, 2));
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = undefined;
     renameSync(tmp, progressPath);
+    renamed = true;
   } catch { /* the sidecar is advisory; a lost write is not fatal */ }
+  finally {
+    if (fd !== undefined) { try { closeSync(fd); } catch {} }
+    if (!renamed) { try { unlinkSync(tmp); } catch {} }
+  }
 }
 const timer = setInterval(beat, intervalMs);
 parentPort.on('message', (msg) => {
@@ -320,21 +348,16 @@ export async function acquireAnalysisOwnership(
    * behavior rather than losing ownership.
    */
   let watchdog: Worker | null = null;
-  const watchdogPath = join(runtimeDir, WATCHDOG_FILE);
   // Shared with the watchdog thread so a stop is visible to it IMMEDIATELY, with
   // no event-loop turn and no message round-trip in between.
   const stopFlag = new SharedArrayBuffer(4);
   const stopView = new Int32Array(stopFlag);
   try {
-    writeFileSync(watchdogPath, WATCHDOG_SOURCE, 'utf8');
-    watchdog = new Worker(watchdogPath, {
-      // Inherit NO CLI flags. A worker copies the host's `execArgv` by default,
-      // and a host started with `--input-type=module` (the test harness, some
-      // embedders) hands the thread a flag that is illegal for a file-based
-      // worker — it dies at startup with "--input-type can only be used with
-      // string input". The watchdog is plain CommonJS needing no loader, no
-      // transform, and no flags, so the empty list is both correct and the only
-      // value that cannot be poisoned by how the host was launched.
+    watchdog = new Worker(WATCHDOG_SOURCE, {
+      eval: true,
+      // Inherit NO CLI flags. The watchdog is self-contained CommonJS and needs
+      // no loader or transform; an empty list also proves a parent's module-mode
+      // flags cannot change how the worker source is interpreted.
       execArgv: [],
       workerData: {
         lockPath, progressPath, pid: process.pid, intervalMs: heartbeatIntervalMs, stop: stopFlag, writeMutex,
@@ -381,9 +404,7 @@ export async function acquireAnalysisOwnership(
     const worker = watchdog;
     watchdog = null;
     try { worker.postMessage({ type: 'stop' }); } catch { /* already gone */ }
-    const terminated = worker.terminate().then(() => undefined).catch(() => undefined);
-    try { unlinkSync(watchdogPath); } catch { /* already gone */ }
-    return terminated;
+    return worker.terminate().then(() => undefined).catch(() => undefined);
   };
 
   const releaseSync = (): void => {
