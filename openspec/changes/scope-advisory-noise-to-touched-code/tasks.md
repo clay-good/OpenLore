@@ -15,12 +15,12 @@
 - [x] 2.3 Prove scoping changes no verdict: the same anchor yields the same freshness whether enumerated or counted.
 - [x] 2.4 Update CLI/MCP rendering of the drift summary to show the out-of-scope count without listing it.
 
-## 3. Terminal state for a deleted anchor
+## 3. Read-only handling of deleted anchors
 
-- [x] 3.1 Add a retired disposition with reason `anchor-file-deleted` to the anchored-fact store (append-only, recorded text untouched).
-- [x] 3.2 Retire an orphaned anchor only when its file is absent from both the working tree and `HEAD`; leave an uncommitted deletion orphaned.
-- [x] 3.3 Suppress retired records from subsequent drift findings while keeping them served by `recall` under `asOf` with the retired disposition.
-- [x] 3.4 Tests: retire-once behavior across two runs, uncommitted-deletion exemption, `asOf` retrieval of a retired record, and no rewrite of recorded text.
+- [x] 3.1 Keep memory-staleness detection observational: it reports verdicts but never changes record lifecycle state.
+- [x] 3.2 Preserve repeated orphan findings until an explicit lifecycle operation changes the record.
+- [x] 3.3 Tests: decision and memory stores remain byte-for-byte unchanged across repeated drift runs.
+- [x] 3.4 Tests: branch-local deletion and rename findings do not persist after returning to the base branch and refreshing analysis.
 
 ## 4. Verification
 

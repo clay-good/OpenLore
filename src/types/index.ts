@@ -637,13 +637,6 @@ export type DecisionScope =
   | 'cross-domain' // touches multiple spec domains or service contracts
   | 'system';      // global constraint (auth, data model, infra, API protocol)
 
-/**
- * Why an anchored record was given a terminal disposition. Closed set — today
- * one member (change: scope-advisory-noise-to-touched-code). Retirement is a
- * disposition, not a deletion: the recorded text is untouched.
- */
-export type RetirementReason = 'anchor-file-deleted';
-
 export type DecisionStatus =
   | 'draft'         // recorded by agent during dev session
   | 'consolidated'  // LLM has merged/resolved drafts
@@ -680,15 +673,6 @@ export interface PendingDecision {
 
   /** ID of a prior decision this one supersedes (agent signals a reversal) */
   supersedes?: string;
-
-  /**
-   * Terminal disposition: the anchored code is gone from history, so the record
-   * can never be re-anchored and is not re-reported by drift
-   * (change: scope-advisory-noise-to-touched-code). Additive and append-only —
-   * the recorded text is never rewritten, and `recall --asOf` still serves it.
-   */
-  retiredAt?: string;
-  retiredReason?: RetirementReason;
 
   // Provenance
   sessionId: string;
@@ -911,14 +895,6 @@ export interface AnchoredMemory {
   invalidatedByCommit?: string;
   /** Id of the prior memory this one supersedes (provenance for the lifecycle op). */
   supersedes?: string;
-  /**
-   * Terminal disposition: the anchored file is gone from working tree AND `HEAD`,
-   * so the orphaned finding is unactionable and is not re-reported
-   * (change: scope-advisory-noise-to-touched-code). The content is never
-   * rewritten; `recall --asOf` still serves the record, marked retired.
-   */
-  retiredAt?: string;
-  retiredReason?: RetirementReason;
 }
 
 /** Persistent store written to .openlore/memory/notes.json */

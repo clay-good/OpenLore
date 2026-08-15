@@ -22,7 +22,6 @@ import type { LLMService } from '../services/llm-service.js';
 import logger from '../../utils/logger.js';
 import { loadDecisionStore, INACTIVE_STATUSES } from '../decisions/store.js';
 import { loadMemoryStore } from '../decisions/memory-store.js';
-import { isRetired, retiredIdsIn, retireRecordsWithDeletedAnchors } from '../decisions/retirement.js';
 import { AnchorContext } from '../decisions/anchor-adapter.js';
 import { memoryFreshness, decisionAnchors, isStaleRegionOnly } from '../decisions/anchor.js';
 import type { StructuralAnchor, AnchorVerdict } from '../../types/index.js';
@@ -671,23 +670,10 @@ export async function detectMemoryStaleness(rootPath: string): Promise<DriftIssu
       loadMemoryStore(rootPath),
     ]);
 
-    // An anchor whose file is gone from history can never be re-anchored, so its
-    // orphaned finding is unactionable and would repeat forever. Give it one
-    // terminal disposition and stop reporting it; records retired by a previous
-    // run are already excluded here (change: scope-advisory-noise-to-touched-code).
-    const alreadyRetired = retiredIdsIn(decisionStore);
-    for (const m of memStore.memories) if (isRetired(m)) alreadyRetired.add(m.id);
-    const { retiredIds } = await retireRecordsWithDeletedAnchors(rootPath, {
-      decisions: decisionStore.decisions.filter(d => !INACTIVE_STATUSES.has(d.status)),
-      memories: memStore.memories,
-    });
-    const retired = new Set([...alreadyRetired, ...retiredIds]);
-
     const issues: DriftIssue[] = [];
 
     for (const d of decisionStore.decisions) {
       if (INACTIVE_STATUSES.has(d.status)) continue;
-      if (retired.has(d.id)) continue;
       const anchors = decisionAnchors(d);
       if (anchors.length === 0) continue;
       const f = memoryFreshness(anchors, view);
@@ -707,7 +693,6 @@ export async function detectMemoryStaleness(rootPath: string): Promise<DriftIssu
       // re-record or reject something already superseded.
       // (add-bitemporal-typed-memory-operations)
       if (m.invalidatedAt) continue;
-      if (retired.has(m.id)) continue;
       if (m.anchors.length === 0) continue;
       const f = memoryFreshness(m.anchors, view);
       if (f.freshness === 'fresh') continue;

@@ -1,12 +1,12 @@
 /**
- * Scoped memory findings + terminal disposition for deleted anchors
+ * Scoped memory findings and read-only treatment of deleted anchors
  * (change: scope-advisory-noise-to-touched-code).
  *
  * Two properties under test:
  *   1. A scoped drift run enumerates only anchors inside the reviewed changeset
  *      and COUNTS the rest — without changing any verdict.
- *   2. An anchor to a file gone from working tree AND `HEAD` is retired once,
- *      never re-reported, never rewritten, and still served by `recall --asOf`.
+ *   2. Drift inspection never mutates memory or decision stores, including on
+ *      branches that delete or rename anchored files.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm, mkdir, writeFile, readFile, unlink } from 'node:fs/promises';
@@ -16,8 +16,6 @@ import { join } from 'node:path';
 import { EdgeStore } from '../services/edge-store.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR } from '../../constants.js';
 import { detectMemoryStaleness, detectDrift, scopeMemoryFindings } from './drift-detector.js';
-import { isFileGoneFromHistory } from '../decisions/retirement.js';
-import { handleRecall } from '../services/mcp-handlers/memory.js';
 import type { FunctionNode } from '../analyzer/call-graph.js';
 import type { ChangedFile, DriftIssue, SpecMap } from '../../types/index.js';
 
@@ -53,9 +51,14 @@ async function writeNotes(memories: Array<Record<string, unknown>>): Promise<voi
   );
 }
 
-async function readNotes(): Promise<Array<Record<string, unknown>>> {
-  const raw = await readFile(join(root, OPENLORE_DIR, 'memory', 'notes.json'), 'utf-8');
-  return (JSON.parse(raw) as { memories: Array<Record<string, unknown>> }).memories;
+async function writeDecisions(decisions: Array<Record<string, unknown>>): Promise<void> {
+  const dir = join(root, OPENLORE_DIR, 'decisions');
+  await mkdir(dir, { recursive: true });
+  await writeFile(
+    join(dir, 'pending.json'),
+    JSON.stringify({ version: '1', sessionId: 's', updatedAt: '', decisions }),
+    'utf-8',
+  );
 }
 
 function emptySpecMap(): SpecMap {
@@ -66,10 +69,10 @@ function changed(path: string): ChangedFile {
   return { path, status: 'modified', additions: 1, deletions: 0, isTest: false, isGenerated: false, extension: '.ts' } as ChangedFile;
 }
 
-function note(id: string, filePath: string): Record<string, unknown> {
+function note(id: string, filePath: string, contentHash: string | null = 'stale-hash'): Record<string, unknown> {
   return {
     id, kind: 'note', content: `note about ${filePath}`, recordedAt: '2026-01-01T00:00:00Z',
-    anchors: [{ filePath, contentHash: 'stale-hash' }],
+    anchors: [{ filePath, ...(contentHash === null ? {} : { contentHash }) }],
   };
 }
 
@@ -154,97 +157,70 @@ describe('detectDrift memory scope', () => {
 });
 
 // ============================================================================
-// 2. Retirement
+// 2. Read-only branch semantics
 // ============================================================================
 
-describe('retirement of anchors to deleted files', () => {
-  /** Commit src/gone.ts, then delete it in a second commit. */
-  async function repoWithDeletedFile(): Promise<void> {
-    git('init', '-q');
+describe('read-only handling of anchors to branch-local deletions and renames', () => {
+  async function initializeRepository(filePath: string): Promise<void> {
+    git('init', '-q', '-b', 'main');
     git('config', 'user.email', 'test@example.com');
     git('config', 'user.name', 'Test');
-    await writeFile(join(root, 'src', 'gone.ts'), 'export const gone = 1;\n', 'utf-8');
+    await writeFile(join(root, filePath), 'export const anchored = 1;\n', 'utf-8');
     git('add', '-A');
-    git('-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'add gone');
-    await unlink(join(root, 'src', 'gone.ts'));
-    git('add', '-A');
-    git('-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'delete gone');
+    git('-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'add anchored file');
   }
 
-  it('recognizes a file absent from working tree and HEAD', async () => {
-    await repoWithDeletedFile();
-    expect(await isFileGoneFromHistory(root, 'src/gone.ts')).toBe(true);
-    expect(await isFileGoneFromHistory(root, 'src/a.ts')).toBe(false);
-  });
-
-  it('retires once and never re-reports, keeping the recorded text intact', async () => {
-    await repoWithDeletedFile();
-    await writeNotes([note('n1', 'src/gone.ts')]);
-
-    const first = await detectMemoryStaleness(root);
-    expect(first.some(i => i.id === 'memory-orphaned:note:n1')).toBe(false);
-
-    const stored = (await readNotes()).find(m => m.id === 'n1')!;
-    expect(stored.retiredReason).toBe('anchor-file-deleted');
-    expect(typeof stored.retiredAt).toBe('string');
-    expect(stored.content).toBe('note about src/gone.ts');   // text untouched
-
-    const second = await detectMemoryStaleness(root);
-    expect(second.some(i => i.id === 'memory-orphaned:note:n1')).toBe(false);
-    // The disposition is written once, not re-stamped on every run.
-    expect((await readNotes()).find(m => m.id === 'n1')!.retiredAt).toBe(stored.retiredAt);
-  });
-
-  it('does NOT retire an uncommitted deletion — it may be the change under review', async () => {
-    git('init', '-q');
-    git('config', 'user.email', 'test@example.com');
-    git('config', 'user.name', 'Test');
-    await writeFile(join(root, 'src', 'pending.ts'), 'export const p = 1;\n', 'utf-8');
+  it('reports a branch-local committed deletion on every run without mutating either store', async () => {
+    await initializeRepository('src/gone.ts');
+    git('switch', '-q', '-c', 'review-delete');
+    await unlink(join(root, 'src', 'gone.ts'));
     git('add', '-A');
-    git('-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'add pending');
-    await unlink(join(root, 'src', 'pending.ts'));   // deleted in the working tree only
+    git('-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'delete anchored file');
+    await buildStore([]);
+    await writeNotes([note('n1', 'src/gone.ts', null)]);
+    await writeDecisions([{
+      id: 'd1', status: 'approved', title: 'decision about gone.ts', rationale: '', consequences: '',
+      proposedRequirement: null, affectedDomains: [], affectedFiles: ['src/gone.ts'],
+      anchors: [{ filePath: 'src/gone.ts' }], sessionId: 's', recordedAt: '2026-01-01T00:00:00Z',
+      confidence: 'medium', syncedToSpecs: [],
+    }]);
 
-    expect(await isFileGoneFromHistory(root, 'src/pending.ts')).toBe(false);
+    const notesPath = join(root, OPENLORE_DIR, 'memory', 'notes.json');
+    const decisionsPath = join(root, OPENLORE_DIR, 'decisions', 'pending.json');
+    const before = await Promise.all([readFile(notesPath, 'utf-8'), readFile(decisionsPath, 'utf-8')]);
+    for (let run = 0; run < 2; run++) {
+      const issues = await detectMemoryStaleness(root);
+      expect(issues.map(i => i.id)).toEqual([
+        'memory-orphaned:decision:d1',
+        'memory-orphaned:note:n1',
+      ]);
+      expect(await Promise.all([readFile(notesPath, 'utf-8'), readFile(decisionsPath, 'utf-8')])).toEqual(before);
+    }
 
-    await writeNotes([note('n1', 'src/pending.ts')]);
-    const issues = await detectMemoryStaleness(root);
-    expect(issues.some(i => i.id === 'memory-orphaned:note:n1')).toBe(true);
-    expect((await readNotes()).find(m => m.id === 'n1')!.retiredAt).toBeUndefined();
+    // The same durable records become fresh again when the branch context and
+    // analysis return to the revision where their subject exists.
+    git('switch', '-q', 'main');
+    await buildStore([node('src/gone.ts', 'anchored', 27)]);
+    expect(await detectMemoryStaleness(root)).toEqual([]);
+    expect(await Promise.all([readFile(notesPath, 'utf-8'), readFile(decisionsPath, 'utf-8')])).toEqual(before);
   });
 
-  it('retires nothing outside a git repository (no history to be absent from)', async () => {
-    await writeNotes([note('n1', 'src/never-existed.ts')]);
-    const issues = await detectMemoryStaleness(root);
-    expect(issues.some(i => i.id === 'memory-orphaned:note:n1')).toBe(true);
-    expect((await readNotes()).find(m => m.id === 'n1')!.retiredAt).toBeUndefined();
-  });
+  it('does not permanently retire an old path while inspecting a branch-local rename', async () => {
+    await initializeRepository('src/old.ts');
+    git('switch', '-q', '-c', 'review-rename');
+    git('mv', 'src/old.ts', 'src/new.ts');
+    git('-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'rename anchored file');
+    await buildStore([node('src/new.ts', 'anchored', 27)]);
+    await writeNotes([note('n1', 'src/old.ts', null)]);
+    const notesPath = join(root, OPENLORE_DIR, 'memory', 'notes.json');
+    const before = await readFile(notesPath, 'utf-8');
 
-  it('keeps a retired record queryable under asOf, and out of current memory', async () => {
-    await repoWithDeletedFile();
-    await writeNotes([note('n1', 'src/gone.ts')]);
-    await detectMemoryStaleness(root);   // retires n1
+    expect((await detectMemoryStaleness(root)).map(i => i.id)).toEqual(['memory-orphaned:note:n1']);
+    expect(await readFile(notesPath, 'utf-8')).toBe(before);
 
-    const current = await handleRecall(root) as {
-      authoritative?: Array<{ id: string }>;
-      needsReanchoring?: Array<{ id: string }>;
-    };
-    const currentIds = [
-      ...(current.authoritative ?? []),
-      ...(current.needsReanchoring ?? []),
-    ].map(i => i.id);
-    expect(currentIds).not.toContain('n1');
-
-    const historical = await handleRecall(root, undefined, 10, undefined, 'HEAD') as {
-      authoritative?: Array<{ id: string; text: string; retired?: boolean; retiredReason?: string }>;
-      needsReanchoring?: Array<{ id: string; text: string; retired?: boolean; retiredReason?: string }>;
-    };
-    const served = [
-      ...(historical.authoritative ?? []),
-      ...(historical.needsReanchoring ?? []),
-    ].find(i => i.id === 'n1');
-    expect(served).toBeDefined();
-    expect(served!.retired).toBe(true);
-    expect(served!.retiredReason).toBe('anchor-file-deleted');
-    expect(served!.text).toBe('note about src/gone.ts');
+    git('switch', '-q', 'main');
+    await buildStore([node('src/old.ts', 'anchored', 27)]);
+    expect(await detectMemoryStaleness(root)).toEqual([]);
+    expect(await readFile(notesPath, 'utf-8')).toBe(before);
   });
 });

@@ -1447,39 +1447,37 @@ export default function openlore(pi: ExtensionAPI): void {
     // host only gates and renders. `mode: "off"` opts out (digest/spec index,
     // Pi's own baseline grounding, are unaffected); a weak/absent match degrades
     // to the single ignorable pointer line instead of dumping raw orient JSON.
-    const daemon = await getDaemon(sessionCwd);
     const cfg = resolveInjectionConfig(await readContextInjection(sessionCwd));
     // Turn-intent gate, ahead of the daemon round-trip: a repository-management
     // turn (push, open/merge a PR, cut a release) gets the reason-bearing
     // pointer line and no orientation at all — same classifier, same wording as
     // the CLI hook (change scope-advisory-noise-to-touched-code).
-    const managementTurn = cfg.intentGate
-      && !!event.prompt
-      && classifyTurnIntent(event.prompt) === 'repository-management';
-    if (managementTurn && cfg.mode !== 'off') {
-      blocks.push(pointerLineFor('management-intent'));
-    } else if (daemon && event.prompt && cfg.mode !== 'off') {
-      let oriented: unknown;
-      try {
-        oriented = await callTool(daemon, 'orient', { task: event.prompt }, sessionCwd);
-      } catch {
-        daemons.delete(sessionCwd);
-        oriented = null;
-      }
-      const result =
-        oriented && typeof oriented === 'object' && !('error' in (oriented as object))
-          ? (oriented as LeanOrientResult)
-          : null;
-      // Weak match → the single ignorable pointer line, naming its cause. A null
-      // result (daemon error / no graph) pushes nothing, so the no-analysis
-      // baseline nudge in the `suffix` fallback below can still surface.
-      if (result) {
+    const prompt = event.prompt?.trim() ?? '';
+    if (cfg.mode !== 'off') {
+      if (!prompt) {
+        blocks.push(pointerLineFor('empty-prompt'));
+      } else if (cfg.intentGate && classifyTurnIntent(prompt) === 'repository-management') {
+        blocks.push(pointerLineFor('management-intent'));
+      } else {
+        // Resolve/contact the daemon only after the intent gate has admitted the
+        // turn. Every failure remains visible as a reason-bearing pointer; a
+        // digest already in `blocks` must not accidentally hide orientation loss.
         try {
-          const evaluation = evaluateRelevanceGate(result, cfg);
-          blocks.push(evaluation.passes
-            ? renderInjectionBlock(result, cfg)
-            : pointerLineFor(evaluation.reason ?? 'weak-relevance'));
+          const daemon = await getDaemon(sessionCwd);
+          if (!daemon) {
+            blocks.push(pointerLineFor('error'));
+          } else {
+            const oriented = await callTool(daemon, 'orient', { task: prompt }, sessionCwd);
+            const result = oriented && typeof oriented === 'object'
+              ? (oriented as LeanOrientResult)
+              : { error: 'invalid orient response' };
+            const evaluation = evaluateRelevanceGate(result, cfg);
+            blocks.push(evaluation.passes
+              ? renderInjectionBlock(result, cfg)
+              : pointerLineFor(evaluation.reason ?? 'weak-relevance'));
+          }
         } catch {
+          daemons.delete(sessionCwd);
           blocks.push(pointerLineFor('error'));
         }
       }

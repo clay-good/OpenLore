@@ -18,26 +18,20 @@ Scoping SHALL NOT change any verdict: an anchor's freshness is computed the same
 - **WHEN** drift runs with no scope
 - **THEN** every drifted anchor is enumerated as it is today
 
-### Requirement: OrphanedAnchorToADeletedFileIsRetiredOnce
+### Requirement: DriftInspectionDoesNotMutateAnchoredRecords
 
-An anchored record whose file is absent from both the working tree and `HEAD` SHALL be retired: the store records a terminal disposition with the stable reason `anchor-file-deleted`, and subsequent drift runs SHALL NOT re-report it. Retirement SHALL NOT delete or rewrite the recorded text, and `recall` with `asOf` SHALL still serve the retired record with its retired disposition.
+Drift detection SHALL NOT modify decision or memory stores. An orphaned anchor SHALL remain a finding on repeated runs unless an explicit lifecycle operation changes the record. A committed deletion or rename on the branch under review SHALL NOT permanently change how that record is treated on another branch.
 
-A file that is merely absent from the working tree but present in `HEAD` SHALL NOT be retired, since it may be an uncommitted deletion under review.
+This read-only guarantee SHALL apply equally to uncommitted changes, committed branch-local changes, and repositories without resolvable history.
 
-#### Scenario: Deleted anchor stops being re-reported
+#### Scenario: Branch-local deletion remains an observation
 
-- **GIVEN** a decision anchored to a file deleted several commits ago
+- **GIVEN** a decision anchored to a file deleted on the branch under review
 - **WHEN** drift runs twice
-- **THEN** the first run retires the record with reason `anchor-file-deleted` and the second run reports no finding for it
+- **THEN** both runs report the same orphaned finding and the decision store remains byte-for-byte unchanged
 
-#### Scenario: Uncommitted deletion is not retired
+#### Scenario: Returning to the base branch restores the current verdict
 
-- **GIVEN** an anchored file deleted in the working tree but still present in `HEAD`
-- **WHEN** drift runs
-- **THEN** the record keeps its orphaned finding and is not retired
-
-#### Scenario: A retired record stays queryable
-
-- **GIVEN** a record retired for a deleted anchor
-- **WHEN** `recall` is called with an `asOf` predating the deletion
-- **THEN** the record is served with its original text and a retired disposition, never as authoritative current memory
+- **GIVEN** an anchored file renamed or deleted only on a review branch
+- **WHEN** the caller returns to the base branch and refreshes analysis
+- **THEN** the original record is evaluated against that branch without any persisted disposition from the review branch
