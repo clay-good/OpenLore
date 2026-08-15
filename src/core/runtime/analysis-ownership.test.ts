@@ -196,6 +196,17 @@ describe('analysis ownership — reclamation', () => {
 // ============================================================================
 
 describe('analysis ownership — progress sidecar', () => {
+  it('publishes concurrent stage updates without temp-file collisions or torn lock JSON', async () => {
+    const { root, analysisDir } = await fixture();
+    const held = await own(root, analysisDir);
+    if (held.state !== 'owned') throw new Error('expected ownership');
+    const updates = Array.from({ length: 100 }, (_, i) =>
+      held.update(`stage-${i}`, { percent: i, detail: 'x'.repeat(i + 1) }));
+    await expect(Promise.all(updates)).resolves.toHaveLength(100);
+    expect(JSON.parse(await readFile(
+      join(runtimeDirOf(analysisDir), OWNERSHIP_LOCK_FILE), 'utf8',
+    ))).toMatchObject({ repository: root, pid: process.pid });
+  });
   it('publishes a progress sidecar on acquire and removes it on release', async () => {
     const { root, analysisDir } = await fixture();
     const held = await own(root, analysisDir);

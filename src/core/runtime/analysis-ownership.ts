@@ -26,6 +26,7 @@ import { statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { open, readFile, rename, writeFile, mkdir, unlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { Worker } from 'node:worker_threads';
+import { randomUUID } from 'node:crypto';
 
 import {
   OWNERSHIP_HEARTBEAT_STALE_MS,
@@ -150,7 +151,7 @@ export function isOwnershipStale(mtimeMs: number, contents: string, repository: 
 /** Atomically publish the progress sidecar (write-temp-then-rename). */
 async function writeProgress(progressPath: string, progress: AnalysisProgress): Promise<void> {
   await mkdir(dirname(progressPath), { recursive: true });
-  const tmp = `${progressPath}.${process.pid}.tmp`;
+  const tmp = `${progressPath}.${process.pid}.${randomUUID()}.tmp`;
   await writeFile(tmp, JSON.stringify(progress, null, 2), 'utf8');
   await rename(tmp, progressPath);
 }
@@ -183,8 +184,9 @@ export const WATCHDOG_FILE = '.analysis-watchdog.cjs';
 const WATCHDOG_SOURCE = `
 const { parentPort, workerData } = require('node:worker_threads');
 const { statSync, writeFileSync, renameSync } = require('node:fs');
-let { lockPath, progressPath, payload, progress, intervalMs, pid, stop, inode } = workerData;
+let { lockPath, progressPath, payload, progress, intervalMs, pid, stop, inode, writeMutex } = workerData;
 const stopFlag = new Int32Array(stop);
+const writeFlag = new Int32Array(writeMutex);
 function beat() {
   // Checked synchronously on every beat. Releasing sets this BEFORE unlinking the
   // lock, so a beat already scheduled cannot land afterwards and recreate the file
@@ -193,6 +195,7 @@ function beat() {
   // that race: it is delivered on an event loop turn that may never come.
   if (Atomics.load(stopFlag, 0) !== 0) return;
   const now = new Date().toISOString();
+  while (Atomics.compareExchange(writeFlag, 0, 0, 1) !== 0) Atomics.wait(writeFlag, 0, 1, 100);
   try {
     // Never write a lock this owner no longer holds. If ownership was reclaimed,
     // the path names a DIFFERENT file now, and beating onto it would overwrite the
@@ -200,6 +203,7 @@ function beat() {
     if (statSync(lockPath).ino !== inode) return;
     writeFileSync(lockPath, JSON.stringify({ ...payload, heartbeatAt: now }));
   } catch { return; }
+  finally { Atomics.store(writeFlag, 0, 0); Atomics.notify(writeFlag, 0); }
   try {
     const tmp = progressPath + '.' + pid + '.wd.tmp';
     writeFileSync(tmp, JSON.stringify({ ...progress, updatedAt: now }, null, 2));
@@ -268,6 +272,15 @@ export async function acquireAnalysisOwnership(
 
   let released = false;
   let lastProgress: Omit<AnalysisProgress, 'stage' | 'updatedAt'> = { percent: null };
+  const writeMutex = new SharedArrayBuffer(4);
+  const writeView = new Int32Array(writeMutex);
+  const refreshOwnershipPayload = async (payload: string): Promise<void> => {
+    while (Atomics.compareExchange(writeView, 0, 0, 1) !== 0) {
+      await new Promise(resolve => setTimeout(resolve, 1));
+    }
+    try { await handle.refresh(payload); }
+    finally { Atomics.store(writeView, 0, 0); Atomics.notify(writeView, 0); }
+  };
 
   /**
    * Refresh the heartbeat and re-stamp the sidecar with the CURRENT stage.
@@ -281,7 +294,7 @@ export async function acquireAnalysisOwnership(
    */
   const beat = async (): Promise<void> => {
     if (released) return;
-    await handle.refresh(payloadOf());
+    await refreshOwnershipPayload(payloadOf());
     await writeProgress(progressPath, {
       stage,
       percent: lastProgress.percent ?? null,
@@ -324,7 +337,7 @@ export async function acquireAnalysisOwnership(
       // value that cannot be poisoned by how the host was launched.
       execArgv: [],
       workerData: {
-        lockPath, progressPath, pid: process.pid, intervalMs: heartbeatIntervalMs, stop: stopFlag,
+        lockPath, progressPath, pid: process.pid, intervalMs: heartbeatIntervalMs, stop: stopFlag, writeMutex,
         inode: handle.inode,
         payload: ownerPayload(),
         progress: { stage, percent: null },
@@ -431,7 +444,7 @@ export async function acquireAnalysisOwnership(
       // Best-effort by construction: if the main thread is blocked it never gets
       // here, and the watchdog keeps asserting liveness under the previous stage.
       try { watchdog?.postMessage({ type: 'state', payload: ownerPayload(), progress: { stage: nextStage, ...lastProgress } }); } catch { /* watchdog gone */ }
-      await handle.refresh(payloadOf());
+      await refreshOwnershipPayload(payloadOf());
       await writeProgress(progressPath, {
         stage: nextStage,
         percent: progress?.percent ?? null,

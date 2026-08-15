@@ -62,6 +62,8 @@ export interface GenerationManifest {
    * identity of an analysis produced before manifests existed.
    */
   compatibility: 'manifest' | 'legacy';
+  /** Full rebuild, or an honest watcher patch over a potentially stale repo survey. */
+  coherence: 'full' | 'incremental';
 }
 
 export function manifestPathOf(analysisDir: string): string {
@@ -91,6 +93,21 @@ async function digestOf(analysisDir: string, name: string): Promise<GenerationAr
   }
 }
 
+/** Verify one artifact against a manifest record without trusting mtime granularity. */
+export async function artifactMatchesGeneration(
+  analysisDir: string,
+  manifest: GenerationManifest,
+  name: string,
+): Promise<boolean> {
+  if (manifest.compatibility === 'legacy') return true;
+  const expected = manifest.artifacts.find(record => record.path === name);
+  if (!expected) return false;
+  const current = await digestOf(analysisDir, name);
+  return current !== null
+    && current.sha256 === expected.sha256
+    && current.bytes === expected.bytes;
+}
+
 /**
  * Publish a new current generation.
  *
@@ -104,6 +121,7 @@ async function digestOf(analysisDir: string, name: string): Promise<GenerationAr
 export async function publishGeneration(
   analysisDir: string,
   requiredArtifacts: string[],
+  options: { coherence?: GenerationManifest['coherence'] } = {},
 ): Promise<GenerationManifest | null> {
   const records: GenerationArtifactRecord[] = [];
   for (const name of requiredArtifacts) {
@@ -118,6 +136,7 @@ export async function publishGeneration(
     publishedAt: new Date().toISOString(),
     artifacts: records.sort((a, b) => a.path.localeCompare(b.path)),
     compatibility: 'manifest',
+    coherence: options.coherence ?? 'full',
   };
 
   await atomicWriteFile(manifestPathOf(analysisDir), JSON.stringify(manifest, null, 2));
@@ -157,6 +176,7 @@ export async function readCurrentGeneration(
       && parsed.generationId.length > 0
       && typeof parsed.publishedAt === 'string'
       && parsed.compatibility === 'manifest'
+      && (parsed.coherence === 'full' || parsed.coherence === 'incremental' || parsed.coherence === undefined)
       && Array.isArray(parsed.artifacts)
       && uniquePaths.size === parsed.artifacts.length
       && legacyArtifacts.every(name => uniquePaths.has(name))
@@ -208,11 +228,12 @@ export async function synthesizeLegacyGeneration(
     publishedAt: new Date(0).toISOString(),
     artifacts: records,
     compatibility: 'legacy',
+    coherence: 'full',
   };
 }
 
 export type GenerationSnapshot<T> =
-  | { state: 'ok'; value: T; generationId: string; compatibility: GenerationManifest['compatibility'] }
+  | { state: 'ok'; value: T; generationId: string; compatibility: GenerationManifest['compatibility']; coherence: GenerationManifest['coherence'] }
   | { state: 'analysis-unavailable' }
   | { state: 'analysis-changed'; message: string };
 
@@ -260,7 +281,7 @@ export async function readGenerationSnapshot<T>(
 
     const after = await readCurrentGeneration(analysisDir, legacyArtifacts);
     if (after && after.generationId === before.generationId && await artifactsStillMatch(analysisDir, after)) {
-      return { state: 'ok', value, generationId: before.generationId, compatibility: before.compatibility };
+      return { state: 'ok', value, generationId: before.generationId, compatibility: before.compatibility, coherence: before.coherence ?? 'full' };
     }
   }
   return {

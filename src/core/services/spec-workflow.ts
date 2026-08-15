@@ -90,6 +90,8 @@ export interface SpecWorkflowEnvelope {
     analysisGeneration?: string;
     /** `legacy` when the analysis predates generation manifests. */
     generationCompatibility?: 'manifest' | 'legacy';
+    /** `incremental` means watcher-patched evidence over the last full survey. */
+    generationCoherence?: 'full' | 'incremental';
   };
   receipt: SpecWorkflowReceipt;
   evidence?: Record<string, unknown>;
@@ -121,6 +123,7 @@ interface LoadedAnalysis {
   generationId: string;
   /** `legacy` when the analysis predates generation manifests. */
   generationCompatibility: 'manifest' | 'legacy';
+  generationCoherence: 'full' | 'incremental';
 }
 
 /**
@@ -151,11 +154,12 @@ async function loadAnalysisSnapshot(directory: string): Promise<
       openspecPath,
       generationId: snapshot.generationId,
       generationCompatibility: snapshot.compatibility,
+      generationCoherence: snapshot.coherence,
     },
   };
 }
 
-async function loadAnalysisArtifacts(root: string, analysis: string): Promise<Omit<LoadedAnalysis, 'openspecPath' | 'generationId' | 'generationCompatibility'> | null> {
+async function loadAnalysisArtifacts(root: string, analysis: string): Promise<Omit<LoadedAnalysis, 'openspecPath' | 'generationId' | 'generationCompatibility' | 'generationCoherence'> | null> {
   try {
     const repoPath = join(analysis, ARTIFACT_REPO_STRUCTURE);
     const graphPath = join(analysis, ARTIFACT_DEPENDENCY_GRAPH);
@@ -239,6 +243,7 @@ function respondWithPage(args: {
         responseBytes: budget,
         analysisGeneration: loaded.generationId,
         generationCompatibility: loaded.generationCompatibility,
+        generationCoherence: loaded.generationCoherence,
       },
       receipt: {
         state: page.next || extraOmissions.length > 0 ? 'partial' : 'complete',

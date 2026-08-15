@@ -61,6 +61,7 @@ const OWNERSHIP_LOCK_FILE = '.analysis-owner.lock';
 const STALE_MS = 120_000;     // steal a lock older than this (crashed/killed holder)
 const POLL_MS = 150;
 const MAX_WAIT_MS = 180_000;
+const NAMESPACE_GATE_MAX_WAIT_MS = 5_000;
 /**
  * Ownership heartbeat window. An owner refreshes its payload at least this often
  * (the progress sidecar runs at 15s, so a live owner refreshes well inside it);
@@ -100,6 +101,15 @@ export interface LockPolicy {
    * dead holder (otherwise a crashed holder would block forever).
    */
   maxWaitMs?: number;
+  /** Bound for the internal namespace gate. A stranded gate fails closed. */
+  namespaceGateMaxWaitMs?: number;
+}
+
+export class NamespaceGateHeldError extends Error {
+  constructor(public readonly gatePath: string) {
+    super(`Lock namespace gate is still present at ${gatePath}; remove it only after verifying its owner is gone.`);
+    this.name = 'NamespaceGateHeldError';
+  }
 }
 
 export interface LockHandle {
@@ -185,10 +195,15 @@ const defaultIsStale = (mtimeMs: number, contents: string): boolean => {
  * contender can read inode A, another contender can replace A with a fresh lock,
  * and the first contender's later rename moves that fresh lock. Every acquire and
  * steal attempt passes through the gate, closing that judged-inode/replaced-path
- * race. A crashed gate is reclaimed only when its recorded PID is dead.
+ * race. A stranded gate fails closed with a bounded recovery error: portable
+ * filesystems do not provide compare-and-delete, so automatic deletion is unsafe.
  */
-async function acquireNamespaceGate(lockPath: string): Promise<() => Promise<void>> {
+async function acquireNamespaceGate(
+  lockPath: string,
+  maxWaitMs = NAMESPACE_GATE_MAX_WAIT_MS,
+): Promise<() => Promise<void>> {
   const gatePath = `${lockPath}.gate`;
+  const startedAt = Date.now();
   for (;;) {
     // Prepare the payload under a unique name before atomically claiming the
     // fixed gate path. A crash can therefore leave either no gate or a complete
@@ -204,20 +219,21 @@ async function acquireNamespaceGate(lockPath: string): Promise<() => Promise<voi
       }
       await link(candidate, gatePath); // fails rather than replacing a live gate
       await unlink(candidate).catch(() => {});
-      return async () => { await unlink(gatePath).catch(() => {}); };
+      const inode = (await stat(gatePath)).ino;
+      return async () => {
+        const current = await stat(gatePath).catch(() => null);
+        if (current?.ino === inode) await unlink(gatePath).catch(() => {});
+      };
     } catch (err) {
       await unlink(candidate).catch(() => {});
       if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-      try {
-        const pid = Number.parseInt(await readFile(gatePath, 'utf8'), 10);
-        if (Number.isSafeInteger(pid) && pid > 0 && !isProcessAlive(pid)) {
-          await unlink(gatePath).catch(() => {});
-          continue;
-        }
-      } catch {
-        // The gate disappeared or is ambiguous. Retry without deleting an owner
-        // we cannot prove dead.
-      }
+      // There is no portable compare-and-delete filesystem primitive. Deleting a
+      // gate merely because its recorded PID is dead has an ABA race: another
+      // contender can replace it between our read and unlink, after which we delete
+      // the successor's live gate. Never reclaim automatically; a stranded gate is
+      // an explicit, bounded, fail-closed operator-recovery condition.
+      await readFile(gatePath, 'utf8').catch(() => '');
+      if (Date.now() - startedAt >= maxWaitMs) throw new NamespaceGateHeldError(gatePath);
       await sleep(10);
     }
   }
@@ -241,6 +257,7 @@ export async function acquireLockAt(
   const onContended = policy.onContended ?? 'wait';
   const bestEffortAfterMaxWait = policy.bestEffortAfterMaxWait ?? false;
   const maxWaitMs = policy.maxWaitMs ?? MAX_WAIT_MS;
+  const namespaceGateMaxWaitMs = policy.namespaceGateMaxWaitMs ?? NAMESPACE_GATE_MAX_WAIT_MS;
 
   await mkdir(dir, { recursive: true });
   const lockPath = join(dir, lockFile);
@@ -251,7 +268,7 @@ export async function acquireLockAt(
   let contended = false;
 
   for (;;) {
-    const releaseGate = await acquireNamespaceGate(lockPath);
+    const releaseGate = await acquireNamespaceGate(lockPath, namespaceGateMaxWaitMs);
     try {
       try {
         const fh = await open(lockPath, 'wx'); // exclusive create — fails if held
@@ -272,16 +289,23 @@ export async function acquireLockAt(
         // same reason — see `refresh`.) `-1` means identity is unavailable.
         const inode = (await tryHandle(async () => (await fh.stat()).ino)) ?? -1;
         let released = false;
+        let refreshTail = Promise.resolve();
         return {
           bestEffort: false,
           waitedMs: contended ? Date.now() - start : 0,
           inode,
           refresh: async (payload: string) => {
             if (released) return;
-            // Written THROUGH the descriptor obtained at acquire time. Re-opening
-            // the path with 'w' could truncate a successor's lock after a steal.
-            await tryHandle(() => fh.truncate(0));
-            await tryHandle(() => fh.write(payload, 0));
+            // Serialize truncate+write pairs. Heartbeats and explicit stage updates
+            // can overlap in one process; without this chain their writes splice
+            // into malformed JSON and make a later crashed lock unreclaimable.
+            const operation = refreshTail.then(async () => {
+              if (released) return;
+              await tryHandle(() => fh.truncate(0));
+              await tryHandle(() => fh.write(payload, 0));
+            });
+            refreshTail = operation.catch(() => {});
+            await operation;
           },
           release: async () => {
             if (released) return;
@@ -291,7 +315,8 @@ export async function acquireLockAt(
             // serialized operation relative to every acquire and steal. If a
             // custom policy ever reclaimed this holder, its successor has a
             // different inode and remains untouched.
-            const releaseNamespace = await acquireNamespaceGate(lockPath);
+            await refreshTail;
+            const releaseNamespace = await acquireNamespaceGate(lockPath, namespaceGateMaxWaitMs);
             try {
               if (inode < 0) return; // unknown identity fails closed
               const current = await stat(lockPath).catch(() => null);

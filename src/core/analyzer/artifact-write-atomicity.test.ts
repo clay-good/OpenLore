@@ -57,12 +57,18 @@ describe('harden-artifact-write-atomicity: every artifact writer adopts the shar
     expect(src).not.toMatch(/\.tmp/);
   });
 
-  it('the watcher fences each artifact-mutation lane with withAnalysisLock', () => {
+  it('the watcher fences SQLite and JSON as one change generation, plus the deletion lane', () => {
     const src = read(WATCHER);
-    expect(src).toMatch(/import\s*\{\s*withAnalysisLock\s*\}\s*from\s*['"]\.\.\/runtime\/advisory-lock\.js['"]/);
-    // Both the change lane (handleBatch) and the deletion lane fence on this.outputPath.
-    const fences = src.match(/withAnalysisLock\(\s*this\.outputPath/g) ?? [];
-    expect(fences.length).toBeGreaterThanOrEqual(2);
+    expect(src).toMatch(/import\s*\{\s*acquireAnalysisLock\s*\}\s*from\s*['"]\.\.\/runtime\/advisory-lock\.js['"]/);
+    const acquire = src.indexOf('acquireAnalysisLock(this.outputPath)');
+    const sqlite = src.indexOf('EdgeStore.open(EdgeStore.dbPath(this.outputPath))', acquire);
+    const publication = src.indexOf('await this.republishGeneration()', sqlite);
+    const release = src.indexOf('await releaseAnalysis()', publication);
+    expect(acquire).toBeGreaterThan(-1);
+    expect(sqlite).toBeGreaterThan(acquire);
+    expect(publication).toBeGreaterThan(sqlite);
+    expect(release).toBeGreaterThan(publication);
+    expect(src.match(/acquireAnalysisLock\(this\.outputPath\)/g)).toHaveLength(2);
   });
 
   it('persistContext itself stays lock-free (it runs inside a lane that already holds the lock)', () => {

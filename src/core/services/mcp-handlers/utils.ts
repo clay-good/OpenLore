@@ -7,7 +7,11 @@ import { readFile, readdir, stat } from 'node:fs/promises';
 import { extname, join, relative, resolve } from 'node:path';
 import type { LLMContext } from '../../analyzer/artifact-generator.js';
 import { EdgeStore } from '../edge-store.js';
-import { REQUIRED_ANALYSIS_ARTIFACTS, readCurrentGeneration } from '../../runtime/analysis-generation.js';
+import {
+  REQUIRED_ANALYSIS_ARTIFACTS,
+  artifactMatchesGeneration,
+  readCurrentGeneration,
+} from '../../runtime/analysis-generation.js';
 import { readAttestation, reconcile, type IndexIntegrity } from '../../analyzer/index-attestation.js';
 import { recordGraphDigest } from './traversal.js';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
@@ -323,7 +327,20 @@ export async function readCachedContext(directory: string, timeout?: number): Pr
       // timestamp granularity", which is how a daemon could keep serving paths
       // that only existed in the previous generation (change
       // `harden-spec-workflow-lifecycle`, decision 64e6eb87).
-      const generation = (await readCurrentGeneration(analysisDir, [...REQUIRED_ANALYSIS_ARTIFACTS]))?.generationId ?? null;
+      const generationManifest = await readCurrentGeneration(analysisDir, [...REQUIRED_ANALYSIS_ARTIFACTS]);
+      if (!generationManifest) {
+        emit(directory, 'cache', { event: 'cache_read', hit: false, reason: 'analysis_generation_unavailable' });
+        return null;
+      }
+      const generation = generationManifest?.generationId ?? null;
+      // A writer updates artifacts in place and publishes the manifest last. During
+      // that interval the old generation id is still visible, so id+mtime alone can
+      // bless uncommitted bytes. Bind this read to the manifest's content digest.
+      if (generationManifest
+        && !await artifactMatchesGeneration(analysisDir, generationManifest, ARTIFACT_LLM_CONTEXT)) {
+        emit(directory, 'cache', { event: 'cache_read', hit: false, reason: 'analysis_generation_changed' });
+        return null;
+      }
       const cached = _contextCache.get(directory);
       if (cached && cached.mtime === mtime && cached.generation === generation) {
         emit(directory, 'cache', { event: 'cache_read', hit: true });
@@ -339,6 +356,19 @@ export async function readCachedContext(directory: string, timeout?: number): Pr
       }
       // Cache miss — read 3.7MB JSON and open EdgeStore connection
       const raw = await readFile(filePath, 'utf-8');
+      const afterGeneration = await readCurrentGeneration(analysisDir, [...REQUIRED_ANALYSIS_ARTIFACTS]);
+      const expectedContext = afterGeneration?.artifacts.find(record => record.path === ARTIFACT_LLM_CONTEXT);
+      const rawMatches = afterGeneration?.compatibility === 'legacy'
+        || (expectedContext !== undefined
+          && Buffer.byteLength(raw) === expectedContext.bytes
+          && createHash('sha256').update(raw).digest('hex') === expectedContext.sha256);
+      if (afterGeneration?.generationId !== generation
+        || !rawMatches
+        || (afterGeneration
+          && !await artifactMatchesGeneration(analysisDir, afterGeneration, ARTIFACT_LLM_CONTEXT))) {
+        emit(directory, 'cache', { event: 'cache_read', hit: false, reason: 'analysis_generation_changed' });
+        return null;
+      }
       const parsed: unknown = JSON.parse(raw);
       // Validate top-level shape before use: a valid context is a non-null,
       // non-array object. Fail closed on null/scalar/array so a malformed or

@@ -6,7 +6,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm, mkdir, readdir, writeFile, readFile, utimes, stat, access } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { acquireDecisionsLock, acquireLockAt, isDecisionsLockHeld, isLockHeld, acquireAnalysisLock, withAnalysisLock } from './advisory-lock.js';
+import { acquireDecisionsLock, acquireLockAt, isDecisionsLockHeld, isLockHeld, acquireAnalysisLock, withAnalysisLock, NamespaceGateHeldError } from './advisory-lock.js';
 import { decisionsDir } from '../decisions/store.js';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -110,6 +110,26 @@ describe('a live holder is never superseded', () => {
 });
 
 describe('superseded-holder safety', () => {
+  it('serializes concurrent refreshes into one complete payload', async () => {
+    const dir = join(root, 'refresh-race');
+    const held = await acquireLockAt(dir, '.x.lock');
+    if (isLockHeld(held)) throw new Error('setup acquire must own the lock');
+    const payloads = Array.from({ length: 100 }, (_, i) => JSON.stringify({ i, detail: 'x'.repeat(i * 17) }));
+    await Promise.all(payloads.map(payload => held.refresh(payload)));
+    expect(payloads).toContain(await readFile(join(dir, '.x.lock'), 'utf8'));
+    await held.release();
+  });
+
+  it('fails closed instead of deleting a stranded namespace gate', async () => {
+    const dir = join(root, 'stranded-gate');
+    await mkdir(dir, { recursive: true });
+    const gate = join(dir, '.x.lock.gate');
+    await writeFile(gate, '4194303');
+    await expect(acquireLockAt(dir, '.x.lock', { namespaceGateMaxWaitMs: 20 }))
+      .rejects.toBeInstanceOf(NamespaceGateHeldError);
+    expect(await readFile(gate, 'utf8')).toBe('4194303');
+  });
+
   it('cannot delete or refresh a successor even under an unsafe custom stale policy', async () => {
     const dir = join(root, 'superseded-holder');
     const lockPath = join(dir, '.x.lock');

@@ -59,6 +59,13 @@ describe('publishGeneration', () => {
     const second = await publishGeneration(dir, required);
     expect(second!.generationId).not.toBe(first!.generationId);
   });
+
+  it('discloses watcher-patched generations as incremental', async () => {
+    const dir = await analysisDir();
+    const manifest = await publishGeneration(dir, required, { coherence: 'incremental' });
+    expect(manifest?.coherence).toBe('incremental');
+    expect((await readCurrentGeneration(dir, required))?.coherence).toBe('incremental');
+  });
 });
 
 describe('artifact records are platform-independent', () => {
