@@ -33,6 +33,7 @@ const INLINE_RENAME = /\brename\s*\(/g;
 
 const ARTIFACT_GENERATOR = 'core/analyzer/artifact-generator.ts';
 const WATCHER = 'core/services/mcp-watcher.ts';
+const ANALYZE_COMMAND = 'cli/commands/analyze.ts';
 
 describe('harden-artifact-write-atomicity: every artifact writer adopts the shared discipline', () => {
   it('the analyze artifact generator writes only through atomicWriteFile — no bare writeFile', () => {
@@ -71,6 +72,23 @@ describe('harden-artifact-write-atomicity: every artifact writer adopts the shar
     const body = persist.slice(0, persist.indexOf('\n  }'));
     expect(body).toMatch(/atomicWriteFile\(this\.contextPath/);
     expect(body).not.toMatch(/withAnalysisLock|acquireAnalysisLock/);
+  });
+
+  it('holds one analysis lock from the first full-artifact write through generation publication', () => {
+    const src = read(ANALYZE_COMMAND);
+    const fence = src.indexOf('withAnalysisLock(outputPath');
+    const artifactWrite = src.indexOf('artifactGenerator.generateAndSave', fence);
+    const dependencyWrite = src.indexOf('ARTIFACT_DEPENDENCY_GRAPH', artifactWrite);
+    const fingerprintWrite = src.indexOf('ARTIFACT_FINGERPRINT', dependencyWrite);
+    const publication = src.indexOf('publishGeneration(', fingerprintWrite);
+    const fenceEnd = src.indexOf('\n  });', publication);
+
+    expect(fence).toBeGreaterThan(-1);
+    expect(artifactWrite).toBeGreaterThan(fence);
+    expect(dependencyWrite).toBeGreaterThan(artifactWrite);
+    expect(fingerprintWrite).toBeGreaterThan(dependencyWrite);
+    expect(publication).toBeGreaterThan(fingerprintWrite);
+    expect(fenceEnd).toBeGreaterThan(publication);
   });
 });
 
@@ -112,9 +130,10 @@ describe('shrink-traversal-index-invalidation-scope: the traversal structure is 
 
   it('keeps the structure write inside the analysis-lock fence', () => {
     const src = read(ARTIFACT_GENERATOR);
-    const fence = src.indexOf('withAnalysisLock(this.options.outputDir');
+    const fence = src.indexOf('withAnalysisLock(this.options.outputDir, persistAll)');
     const structureWrite = src.indexOf('writeTraversalIndexArtifact(');
     expect(fence).toBeGreaterThan(-1);
-    expect(structureWrite).toBeGreaterThan(fence);
+    expect(structureWrite).toBeGreaterThan(-1);
+    expect(src.slice(structureWrite, fence)).toContain('const persistAll');
   });
 });

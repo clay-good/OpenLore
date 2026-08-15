@@ -23,10 +23,11 @@
  *      `*.corrupt-<n>` and signal it, instead of silently substituting empty.
  */
 
-import { open, rename, stat, unlink, mkdir, access, readFile, link } from 'node:fs/promises';
+import { open, rename, unlink, mkdir, access, link } from 'node:fs/promises';
 import { linkSync, unlinkSync, renameSync, existsSync } from 'node:fs';
 import { dirname, basename, join } from 'node:path';
 import { logger } from '../../utils/logger.js';
+import { acquireLockAt, isLockHeld } from '../runtime/advisory-lock.js';
 
 /** Any persisted store that carries the monotonic CAS counter. */
 export interface SequencedStore {
@@ -76,7 +77,7 @@ export async function atomicWriteFile(path: string, data: string): Promise<void>
   } catch { /* directory fsync unsupported — skip */ }
 }
 
-// ── advisory lock for the tiny compare-and-write commit section ───────────────
+// ── shared advisory lock for the tiny compare-and-write commit section ───────
 
 // STALE < MAX_WAIT by design: a crashed holder's lock always becomes stealable
 // (10s) well before a waiter gives up (30s), so a wait timeout means genuine
@@ -85,9 +86,7 @@ export async function atomicWriteFile(path: string, data: string): Promise<void>
 // whose promise is "no write is lost," a rare surfaced error the caller can retry
 // beats a rare silent lost update.
 const LOCK_STALE_MS = 10_000; // steal a lock older than this (crashed holder)
-const LOCK_POLL_MS = 25;
 const LOCK_MAX_WAIT_MS = 30_000;
-const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 // Globally-unique-among-live-holders lock token: pid is unique across concurrent
 // processes, the counter across concurrent in-process acquires.
@@ -95,54 +94,40 @@ let lockSeq = 0;
 
 /**
  * Run `fn` while holding a per-file advisory lock (exclusive-create lockfile,
- * polled, with stale-steal for a crashed holder). The lock guards only the brief
+ * polled, with stale-steal for a confirmed-dead holder). The lock guards only the brief
  * compare-and-write commit, so contention is minimal. On a wait timeout it throws
  * rather than proceed unlocked. The lock carries an ownership token and is released
- * only if it is still ours — so if our hold was stolen as stale (e.g. a long GC
- * pause) and recreated by another writer, we never delete a lock someone else holds.
+ * with one atomic unlink. A live holder is never stolen merely because its mtime
+ * is old, so no cooperating successor can replace the path before that unlink.
  */
 async function withCommitLock<T>(lockPath: string, fn: () => Promise<T>): Promise<T> {
-  await mkdir(dirname(lockPath), { recursive: true });
   const token = `${process.pid}-${lockSeq++}`;
-  const start = Date.now();
-  for (;;) {
-    try {
-      const fh = await open(lockPath, 'wx'); // exclusive create — fails if held
-      await fh.writeFile(token);
-      await fh.close();
-      break;
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+  const result = await acquireLockAt(dirname(lockPath), basename(lockPath), {
+    payload: () => token,
+    isStale: (mtimeMs, contents) => {
+      if (Date.now() - mtimeMs <= LOCK_STALE_MS) return false;
+      const ownerPid = Number.parseInt(contents.split('-', 1)[0] ?? '', 10);
+      if (!Number.isSafeInteger(ownerPid) || ownerPid <= 0) return false;
       try {
-        const s = await stat(lockPath);
-        if (Date.now() - s.mtimeMs > LOCK_STALE_MS) {
-          await unlink(lockPath).catch(() => {});
-          continue;
-        }
-      } catch {
-        continue; // lock vanished between open and stat — retry
+        process.kill(ownerPid, 0);
+        return false;
+      } catch (err) {
+        return (err as NodeJS.ErrnoException).code !== 'EPERM';
       }
-      if (Date.now() - start > LOCK_MAX_WAIT_MS) {
-        throw new Error(
-          `store lock: timed out after ${LOCK_MAX_WAIT_MS}ms waiting for ${lockPath} ` +
-            `(sustained write contention) — retry the operation`,
-          // `err` is the EEXIST from the last failed acquisition, i.e. the reason we
-          // kept waiting. Carrying it forward surfaces the errno and path behind a
-          // timeout that otherwise reads as unexplained.
-          { cause: err },
-        );
-      }
-      await sleep(LOCK_POLL_MS);
-    }
+    },
+    bestEffortAfterMaxWait: false,
+    maxWaitMs: LOCK_MAX_WAIT_MS,
+  });
+  if (isLockHeld(result)) {
+    throw new Error(
+      `store lock: timed out after ${LOCK_MAX_WAIT_MS}ms waiting for ${lockPath} ` +
+        `(sustained write contention) — retry the operation`,
+    );
   }
   try {
     return await fn();
   } finally {
-    // Release only if the on-disk lock is still ours. A token mismatch means our
-    // hold was stolen as stale and another writer now owns it — leave theirs alone.
-    try {
-      if ((await readFile(lockPath, 'utf-8')) === token) await unlink(lockPath).catch(() => {});
-    } catch { /* lock already gone — nothing to release */ }
+    await result.release();
   }
 }
 

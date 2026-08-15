@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, stat, writeFile, mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { OWNERSHIP_ABANDONED_MS, OWNERSHIP_HEARTBEAT_STALE_MS, OWNERSHIP_LOCK_FILE } from './advisory-lock.js';
+import { OWNERSHIP_HEARTBEAT_STALE_MS, OWNERSHIP_LOCK_FILE } from './advisory-lock.js';
 import {
   PROGRESS_INTERVAL_MS,
   acquireAnalysisOwnership,
@@ -156,21 +156,17 @@ describe('analysis ownership — reclamation', () => {
     expect(stale).toBe(false);
   });
 
-  it('reclaims after prolonged silence even when the PID still looks alive', () => {
-    // The hole this closes: an owner dies, the OS recycles its PID onto an
-    // unrelated live process, and `isProcessAlive` then answers "alive" forever —
-    // locking the repository permanently. Safe only because the watchdog keeps
-    // beating through a blocked main thread, so this much silence really does mean
-    // the writer is gone.
+  it('fails closed after prolonged silence when the PID still looks alive', () => {
+    // Silence cannot distinguish a recycled PID from a live but wedged owner.
+    // Requiring manual cleanup is safer than authorizing a concurrent writer.
     const live = JSON.stringify(livePayload('/repo', '/repo/.openlore/analysis'));
-    expect(isOwnershipStale(Date.now() - OWNERSHIP_ABANDONED_MS - 1_000, live, '/repo')).toBe(true);
-    // Just past the ordinary threshold is NOT enough while the PID is alive.
+    expect(isOwnershipStale(Date.now() - OWNERSHIP_HEARTBEAT_STALE_MS * 100, live, '/repo')).toBe(false);
     expect(isOwnershipStale(Date.now() - OWNERSHIP_HEARTBEAT_STALE_MS - 1_000, live, '/repo')).toBe(false);
   });
 
   it('never reclaims another repository, however long it has been silent', () => {
     const other = JSON.stringify(livePayload('/somewhere/else', '/somewhere/else/.openlore/analysis'));
-    expect(isOwnershipStale(Date.now() - OWNERSHIP_ABANDONED_MS * 10, other, '/repo')).toBe(false);
+    expect(isOwnershipStale(Date.now() - OWNERSHIP_HEARTBEAT_STALE_MS * 100, other, '/repo')).toBe(false);
   });
 
   it('defends against PID reuse by requiring a repository match', () => {
@@ -184,8 +180,8 @@ describe('analysis ownership — reclamation', () => {
     expect(stale).toBe(false);
   });
 
-  it('reclaims a stale lock whose payload is unparseable', () => {
-    expect(isOwnershipStale(Date.now() - 10 * 60_000, 'not json at all', '/repo')).toBe(true);
+  it('fails closed for a stale lock whose ownership payload is unparseable', () => {
+    expect(isOwnershipStale(Date.now() - 10 * 60_000, 'not json at all', '/repo')).toBe(false);
   });
 
   it('treats an obviously invalid pid as not alive', () => {

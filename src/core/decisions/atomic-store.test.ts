@@ -149,6 +149,30 @@ describe('casUpdate', () => {
     // The lock we acquired (and owned) is released on completion.
     await expect(readFile(lockPath, 'utf-8')).rejects.toThrow();
   });
+
+  it('does not steal a stale-looking lock while its owner PID is alive', async () => {
+    const lockPath = `${path()}.lock`;
+    await writeFile(lockPath, `${process.pid}-external`, 'utf-8');
+    const old = new Date(Date.now() - 60_000);
+    await utimes(lockPath, old, old);
+
+    let mutated = false;
+    const pending = casUpdate<Store>({
+      storePath: path(),
+      load,
+      serialize,
+      mutate: (s) => {
+        mutated = true;
+        return { ...s, items: [...s.items, 'mine'] };
+      },
+    });
+
+    await new Promise(resolve => setTimeout(resolve, 100));
+    expect(mutated).toBe(false);
+    await rm(lockPath);
+
+    await expect(pending).resolves.toMatchObject({ items: ['mine'], sequence: 1 });
+  });
 });
 
 // ════════════════════════════════════════════════════════════════════════════

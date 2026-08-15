@@ -6,8 +6,8 @@
  */
 
 import { join } from 'node:path';
-import { readFile, stat, mkdir, writeFile } from 'node:fs/promises';
-import { ANALYSIS_STALE_THRESHOLD_MS, DEFAULT_MAX_FILES, OPENLORE_ANALYSIS_REL_PATH, ARTIFACT_REPO_STRUCTURE, ARTIFACT_DEPENDENCY_GRAPH, ARTIFACT_LLM_CONTEXT, OPENSPEC_DIR } from '../constants.js';
+import { readFile, stat, mkdir } from 'node:fs/promises';
+import { ANALYSIS_STALE_THRESHOLD_MS, DEFAULT_MAX_FILES, OPENLORE_ANALYSIS_REL_PATH, ARTIFACT_REPO_STRUCTURE, ARTIFACT_DEPENDENCY_GRAPH, ARTIFACT_LLM_CONTEXT, ARTIFACT_FINGERPRINT, OPENSPEC_DIR } from '../constants.js';
 import { fileExists, readJsonFile } from '../utils/command-helpers.js';
 import { readOpenLoreConfig } from '../core/services/config-manager.js';
 import { RepositoryMapper } from '../core/analyzer/repository-mapper.js';
@@ -18,6 +18,10 @@ import {
 import { AnalysisArtifactGenerator, repoStructureToRepoMap, type RepoStructure, type LLMContext } from '../core/analyzer/artifact-generator.js';
 import type { AnalyzeApiOptions, AnalyzeResult, ProgressCallback } from './types.js';
 import { SpecSnapshotGenerator } from '../core/analyzer/spec-snapshot-generator.js';
+import { atomicWriteFile } from '../core/decisions/atomic-store.js';
+import { withAnalysisLock } from '../core/runtime/advisory-lock.js';
+import { publishGeneration, REQUIRED_ANALYSIS_ARTIFACTS } from '../core/runtime/analysis-generation.js';
+import { computeProjectFingerprint } from '../core/services/mcp-handlers/utils.js';
 
 function progress(
   onProgress: ProgressCallback | undefined,
@@ -179,10 +183,21 @@ export async function openloreAnalyze(options: AnalyzeApiOptions = {}): Promise<
     // cheap. Re-extraction is its own opt-in.
     reExtract: options.reExtract ?? false,
   });
-  const artifacts = await artifactGenerator.generateAndSave(repoMap, depGraph);
-
-  // Save dependency graph
-  await writeFile(join(outputPath, ARTIFACT_DEPENDENCY_GRAPH), JSON.stringify(depGraph, null, 2));
+  const fingerprintHash = await computeProjectFingerprint(rootPath);
+  let artifacts: AnalyzeResult['artifacts'];
+  await withAnalysisLock(outputPath, async () => {
+    artifacts = await artifactGenerator.generateAndSave(repoMap, depGraph, undefined, { acquireLock: false });
+    await atomicWriteFile(join(outputPath, ARTIFACT_DEPENDENCY_GRAPH), JSON.stringify(depGraph, null, 2));
+    await atomicWriteFile(join(outputPath, ARTIFACT_FINGERPRINT), JSON.stringify({
+      hash: fingerprintHash,
+      commit: null,
+      computedAt: new Date().toISOString(),
+      fileCount: repoMap.allFiles.length,
+    }));
+    if (!await publishGeneration(outputPath, [...REQUIRED_ANALYSIS_ARTIFACTS])) {
+      throw new Error('Analysis produced an incomplete required artifact set; generation was not published.');
+    }
+  });
   progress(onProgress, 'Generating analysis artifacts', 'complete');
 
   // Generate spec snapshot (non-fatal — snapshot is a derived artifact)
@@ -191,5 +206,5 @@ export async function openloreAnalyze(options: AnalyzeApiOptions = {}): Promise<
   await snapshotGenerator.generate().catch(() => {});
 
   const duration = Date.now() - startTime;
-  return { repoMap, depGraph, artifacts, duration };
+  return { repoMap, depGraph, artifacts: artifacts!, duration };
 }

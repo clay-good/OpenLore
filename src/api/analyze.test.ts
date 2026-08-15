@@ -25,6 +25,21 @@ vi.mock('../core/services/config-manager.js', () => ({
   readOpenLoreConfig: vi.fn(),
 }));
 
+vi.mock('../core/runtime/advisory-lock.js', () => ({
+  withAnalysisLock: vi.fn(async (_dir: string, fn: () => Promise<unknown>) => fn()),
+}));
+
+vi.mock('../core/decisions/atomic-store.js', () => ({ atomicWriteFile: vi.fn() }));
+
+vi.mock('../core/runtime/analysis-generation.js', () => ({
+  REQUIRED_ANALYSIS_ARTIFACTS: ['repo-structure.json', 'llm-context.json', 'dependency-graph.json', 'fingerprint.json'],
+  publishGeneration: vi.fn(async () => ({ generationId: 'test-generation' })),
+}));
+
+vi.mock('../core/services/mcp-handlers/utils.js', () => ({
+  computeProjectFingerprint: vi.fn(async () => 'test-fingerprint'),
+}));
+
 vi.mock('../core/analyzer/repository-mapper.js', () => ({
   RepositoryMapper: vi.fn().mockImplementation(function (this: unknown) {
     Object.assign(this as object, { map: vi.fn() });

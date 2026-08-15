@@ -34,15 +34,15 @@
 
 ## 5. Atomic Analysis Generations And Cache Reload
 
-- [x] 5.1 Add an analysis-generation manifest schema with generation id, required-artifact digests, compatibility state, atomic publication, and bounded cleanup of abandoned staging output.
-- [x] 5.2 Stage full-analysis artifacts and publish the manifest only after every required artifact is durable; preserve the prior committed generation after forced interruption/failure.
+- [x] 5.1 Add an analysis-generation manifest schema with generation id, required-artifact digests, compatibility state, and durable atomic manifest publication.
+- [x] 5.2 Serialize the complete required artifact write set and manifest commit point; fail closed as `analysis-changed` after an interrupted in-place replacement rather than claiming the overwritten prior generation remains readable.
 - [x] 5.3 Add a consistent multi-artifact snapshot reader that validates the current generation before and after reads, retries once on change, and otherwise returns typed `analysis-changed`.
 - [x] 5.4 Key context, traversal, edge-store, preflight, and composite caches by canonical repository plus committed generation id, retaining disclosed legacy fallback until the next analyze.
 - [x] 5.5 Add daemon regression tests where an external analyze replaces old `web/src` paths, concurrent publication occurs during `orient`, and mixed-generation artifacts are rejected.
 
 ## 6. Repository-Scoped Analysis Ownership And Progress
 
-- [x] 6.0 Parameterize the existing single advisory-lock loop (`acquireLockAt`) with `payload`, `isStale`, `onContended`, and `bestEffortAfterMaxWait`, each defaulting to today's hardcoded behavior; move the module out of `src/core/decisions/` to a neutral location now that it serves three domains, and update the literal import-path assertions in `artifact-write-atomicity.test.ts`. `lock.test.ts` must pass unchanged apart from the import path — no second lock loop, no second stale-steal path, no second release path.
+- [x] 6.0 Parameterize the shared advisory-lock loop (`acquireLockAt`) with `payload`, `isStale`, `onContended`, and `bestEffortAfterMaxWait`; fail closed by default, serialize namespace changes, and never reclaim a live PID or proceed unlocked for correctness-sensitive writers.
 - [x] 6.1 Implement the full-analysis ownership lock as a third thin binding of that loop: canonical repository identity, PID/start/heartbeat/stage/progress-path JSON payload, `onContended: report` (and `wait` only under `--wait`), `bestEffortAfterMaxWait: false`, signal-safe release, and dead-PID-plus-stale-heartbeat reclamation. Declare the ownership heartbeat/stale threshold in the same constants block as `STALE_MS`/`POLL_MS`/`MAX_WAIT_MS`. An owner acquires ownership before `.artifacts.lock`, never the reverse.
 - [x] 6.2 Wire CLI analyze, MCP analyze/bootstrap, daemon, and Pi entry points through the shared lock so only one full analysis can run per repository across frontends.
 - [x] 6.3 Add atomic progress-sidecar updates at most 15 seconds apart during every stage and visible CLI/attached heartbeats at most 30 seconds apart during unchanged long artifact generation.

@@ -7,7 +7,7 @@
 
 import { Command, Option } from 'commander';
 import { sanitizeForTerminal as safe } from '../../utils/misc.js';
-import { writeFile, mkdir, readFile } from 'node:fs/promises';
+import { mkdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { logger } from '../../utils/logger.js';
 import { fileExists, formatDuration, formatAge, getAnalysisAge } from '../../utils/command-helpers.js';
@@ -63,6 +63,8 @@ import { describeExclusions, EXCLUSION_REASON_LABEL } from '../../core/analyzer/
 import { describeMemoryDegradation } from '../../core/analyzer/memory-strategy.js';
 import { writeAnalysisContentProvenance } from '../../core/services/served-content.js';
 import { REQUIRED_ANALYSIS_ARTIFACTS, publishGeneration } from '../../core/runtime/analysis-generation.js';
+import { withAnalysisLock } from '../../core/runtime/advisory-lock.js';
+import { atomicWriteFile } from '../../core/decisions/atomic-store.js';
 import {
   PROGRESS_INTERVAL_MS,
   VISIBLE_HEARTBEAT_MS,
@@ -409,7 +411,7 @@ export async function runAnalysis(
 
   let artifacts;
   try {
-    artifacts = await artifactGenerator.generateAndSave(repoMap, depGraph, {
+    artifacts = await artifactGenerator.generate(repoMap, depGraph, {
       uiComponents,
       schemas,
       routeInventory,
@@ -419,6 +421,35 @@ export async function runAnalysis(
   } finally {
     clearInterval(heartbeat);
   }
+
+  // Compute repository metadata before taking the publication lock. Only the
+  // bounded persistence transaction is serialized against the incremental
+  // watcher; expensive extraction never blocks it.
+  const fingerprintHash = await computeProjectFingerprint(rootPath);
+  const buildCommit = await captureBuildCommit(rootPath);
+  await withAnalysisLock(outputPath, async () => {
+    await artifactGenerator.generateAndSave(repoMap, depGraph, {
+      uiComponents,
+      schemas,
+      routeInventory,
+      middleware,
+      envVars,
+    }, { precomputed: artifacts, acquireLock: false });
+
+    await writeJsonAtomicStreaming(join(outputPath, ARTIFACT_DEPENDENCY_GRAPH), depGraph);
+    await atomicWriteFile(
+      join(outputPath, ARTIFACT_FINGERPRINT),
+      JSON.stringify({ hash: fingerprintHash, commit: buildCommit, computedAt: new Date().toISOString(), fileCount: repoMap.allFiles.length }),
+    );
+    await writeAnalysisContentProvenance(outputPath, 'source-derived');
+
+    // Commit point: the watcher cannot modify any required artifact between the
+    // final write and manifest publication because it takes this same lock.
+    const manifest = await publishGeneration(outputPath, [...REQUIRED_ANALYSIS_ARTIFACTS]);
+    if (!manifest) {
+      throw new Error('Analysis produced an incomplete required artifact set; generation was not published.');
+    }
+  });
 
   // Disclose a degraded Pass-1 extraction lane (change: optimize-parallel-extraction-pool).
   // The builder deliberately does not log this itself — the same code path runs inside the
@@ -480,34 +511,6 @@ export async function runAnalysis(
     }
   } catch (err) {
     logger.debug(`continuity carry-forward skipped: ${(err as Error).message}`);
-  }
-
-  // Also save the raw dependency graph. Streamed for the same reason as `llm-context.json`: a
-  // whole-repository `JSON.stringify` hits V8's 536,870,888-char string ceiling and throws
-  // `RangeError: Invalid string length`, which failed the entire analysis at the very last step
-  // (see `json-stream.ts`). This one is also now atomic, which it was not before.
-  await writeJsonAtomicStreaming(join(outputPath, ARTIFACT_DEPENDENCY_GRAPH), depGraph);
-
-  // Write the metadata fingerprint (path + mtime + size per source file — not file
-  // bytes) so future runs can skip re-analysis when source files are unchanged
-  // (replaces the 1-hour TTL on a warm cache). The build commit (when this is a git
-  // repo) lets the confidence-boundary staleness marker name "computed against the
-  // index at commit X" — best-effort, null otherwise.
-  const fingerprintHash = await computeProjectFingerprint(rootPath);
-  const buildCommit = await captureBuildCommit(rootPath);
-  await writeFile(
-    join(outputPath, ARTIFACT_FINGERPRINT),
-    JSON.stringify({ hash: fingerprintHash, commit: buildCommit, computedAt: new Date().toISOString(), fileCount: repoMap.allFiles.length })
-  );
-  await writeAnalysisContentProvenance(outputPath, 'source-derived');
-
-  // COMMIT POINT: every required artifact is durable, so this generation becomes
-  // current. Published last on purpose — an analysis interrupted before this line
-  // leaves the previous committed generation readable rather than a half-published
-  // mixture (change `harden-spec-workflow-lifecycle`, decision 64e6eb87).
-  const manifest = await publishGeneration(outputPath, [...REQUIRED_ANALYSIS_ARTIFACTS]);
-  if (!manifest) {
-    logger.warning('Analysis completed but a required artifact was missing, so no new generation was published.');
   }
 
   await stage('complete', 100);

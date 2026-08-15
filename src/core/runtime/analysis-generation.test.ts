@@ -106,12 +106,42 @@ describe('readCurrentGeneration', () => {
     expect(await readCurrentGeneration(root, required)).toBeNull();
   });
 
-  it('falls back to legacy rather than trusting a corrupt manifest', async () => {
+  it('fails closed rather than trusting or downgrading a corrupt manifest', async () => {
     const dir = await analysisDir();
     await publishGeneration(dir, required);
     await writeFile(join(dir, GENERATION_MANIFEST_FILE), '{not json', 'utf8');
     const current = await readCurrentGeneration(dir, required);
-    expect(current?.compatibility).toBe('legacy');
+    expect(current).toBeNull();
+  });
+
+  it('rejects manifest artifact paths that escape the analysis directory', async () => {
+    const dir = await analysisDir();
+    const published = await publishGeneration(dir, required);
+    await writeFile(join(dir, GENERATION_MANIFEST_FILE), JSON.stringify({
+      ...published,
+      artifacts: [{ path: '../outside.json', sha256: 'a'.repeat(64), bytes: 1 }],
+    }), 'utf8');
+
+    expect(await readCurrentGeneration(dir, required)).toBeNull();
+  });
+
+  it('does not downgrade a malformed manifest to legacy when artifacts exist', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'openlore-generation-invalid-'));
+    roots.push(dir);
+    await writeFile(join(dir, 'a.json'), '{"old":true}');
+    await writeFile(join(dir, GENERATION_MANIFEST_FILE), '{not-json');
+
+    expect(await readCurrentGeneration(dir, ['a.json'])).toBeNull();
+  });
+
+  it('rejects a manifest that omits a required artifact', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'openlore-generation-partial-'));
+    roots.push(dir);
+    await writeFile(join(dir, 'a.json'), 'a');
+    await writeFile(join(dir, 'b.json'), 'b');
+    await publishGeneration(dir, ['a.json']);
+
+    expect(await readCurrentGeneration(dir, ['a.json', 'b.json'])).toBeNull();
   });
 });
 
@@ -186,7 +216,7 @@ describe('readGenerationSnapshot', () => {
     expect(snapshot.state).toBe('analysis-unavailable');
   });
 
-  it('keeps serving the previous generation after an interrupted publication', async () => {
+  it('retains the prior manifest but refuses its overwritten artifacts after interruption', async () => {
     const dir = await analysisDir();
     const committed = await publishGeneration(dir, required);
 
@@ -196,6 +226,7 @@ describe('readGenerationSnapshot', () => {
     const current = await readCurrentGeneration(dir, required);
     expect(current?.generationId).toBe(committed!.generationId);
     expect(current?.compatibility).toBe('manifest');
+    expect((await readGenerationSnapshot(dir, required, async () => 'stale')).state).toBe('analysis-changed');
   });
 
   it('degrades to legacy when the manifest is discarded', async () => {

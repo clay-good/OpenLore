@@ -6,16 +6,16 @@
  * Pi), so process-local promise deduplication cannot fix them — the guarantee has
  * to be cross-process (change `harden-spec-workflow-lifecycle`, decision 4da0a04f).
  *
- * This is the THIRD thin binding of the repository's single advisory-lock loop,
+ * This is one thin binding of the repository's single advisory-lock loop,
  * not a second locking mechanism. It supplies policy values and nothing else: a
  * structured JSON payload, a dead-PID-plus-stale-heartbeat staleness predicate,
  * `report` contention, `bestEffortAfterMaxWait: false`, and — under `--wait` — an
  * unbounded wait, since an attach ends when the owner finishes or dies.
  *
- * That last one is the reason ownership cannot simply reuse `acquireAnalysisLock`:
- * that binding proceeds WITHOUT the lock after the max wait, which is right for a
- * bounded artifact write and is exactly the duplicate full analysis this module
- * exists to prevent.
+ * Ownership cannot simply reuse `acquireAnalysisLock`: it uses a different path,
+ * reports its structured holder to attach-capable callers, and spans the whole
+ * analysis run rather than only the publication write set. Both bindings fail
+ * closed and wait indefinitely when their correctness guarantee requires it.
  *
  * Runtime lock and progress state deliberately live OUTSIDE the analysis
  * artifacts: heartbeat timestamps are not deterministic evidence and must never
@@ -28,7 +28,6 @@ import { dirname, join } from 'node:path';
 import { Worker } from 'node:worker_threads';
 
 import {
-  OWNERSHIP_ABANDONED_MS,
   OWNERSHIP_HEARTBEAT_STALE_MS,
   OWNERSHIP_LOCK_FILE,
   acquireLockAt,
@@ -131,28 +130,21 @@ function parsePayload(contents: string): AnalysisOwnerPayload | null {
  * unrelated process look like the owner. Requiring both, plus a repository match,
  * is what keeps reclamation from stealing a healthy run.
  *
- * One exception, at {@link OWNERSHIP_ABANDONED_MS}: past that much silence the
- * heartbeat outranks the PID. Otherwise a dead owner whose PID was recycled onto
- * a live process would lock the repository permanently, with no way out but
- * deleting the file by hand.
+ * PID reuse deliberately fails closed. A stale heartbeat does not prove that the
+ * process currently carrying the PID is unrelated, so elapsed time alone never
+ * authorizes a second full analysis. An ambiguous lock requires operator cleanup.
  */
 export function isOwnershipStale(mtimeMs: number, contents: string, repository: string): boolean {
   const silentMs = Date.now() - mtimeMs;
   if (silentMs <= OWNERSHIP_HEARTBEAT_STALE_MS) return false;
 
   const payload = parsePayload(contents);
-  // An unparseable payload with a stale heartbeat is a crashed or truncated
-  // writer: there is no owner to protect.
-  if (!payload) return true;
+  // A refresh can be observed between truncate and write, and hand-edited lock
+  // files exist. Ambiguous ownership fails closed rather than minting two owners.
+  if (!payload) return false;
   // A lock naming a different repository is not ours to interpret; leave it.
   if (payload.repository !== repository) return false;
-  if (!isProcessAlive(payload.pid)) return true;
-
-  // The PID says alive, but nothing has written here for half an hour. Either the
-  // watchdog AND the main thread are both wedged, or — the case this exists for —
-  // the owner died and the OS recycled its PID onto an unrelated live process,
-  // which would otherwise hold this repository locked forever.
-  return silentMs > OWNERSHIP_ABANDONED_MS;
+  return !isProcessAlive(payload.pid);
 }
 
 /** Atomically publish the progress sidecar (write-temp-then-rename). */

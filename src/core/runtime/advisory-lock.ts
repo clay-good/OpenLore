@@ -1,8 +1,8 @@
 /**
  * The repository's ONE cross-process advisory-lock loop.
  *
- * Three callers share it — the decision store, the analysis-artifact writers, and
- * full-analysis ownership. All three are thin bindings of `acquireLockAt`; there
+ * Four callers share it — JSON-store commit sections, decision consolidation,
+ * analysis-artifact writers, and full-analysis ownership. All are thin bindings of `acquireLockAt`; there
  * is no second locking mechanism and no second stale-steal or release path.
  *
  * Decisions: `record_decision` spawns a detached `decisions --consolidate` per
@@ -25,8 +25,7 @@
  * payload, a dead-PID-plus-stale-heartbeat staleness predicate, contention that
  * REPORTS instead of waiting, and no best-effort escape (proceeding unlocked
  * would void the single-flight guarantee). Those four differences are parameters
- * of this loop, not a second implementation; every one defaults to the behavior
- * the first two callers already had, so they are unchanged.
+ * of this loop, not a second implementation.
  *
  * Ownership and the artifact lock are complementary: ownership spans a whole
  * analysis run, while `.artifacts.lock` fences only the artifact write-set and is
@@ -39,33 +38,30 @@
  * It is ADVISORY. It serializes cooperating writers that all take it; it does not
  * constrain a process that ignores it, and it is not a security boundary.
  *
- * Two operations are genuinely atomic: taking the lock (`open` with `wx`, which
- * fails when the file exists) and stealing a stale one (`rename`, which exactly
- * one contender can win). Release is not. It compares the path's inode with the
- * one acquired and then unlinks, and POSIX offers no portable compare-and-delete:
- * between the comparison and the unlink, the path can be replaced. That window is
- * narrow and it is NOT closed. Adding another check before the unlink would only
- * move it — the honest statement is that it exists.
+ * Taking the lock (`open` with `wx`), stealing a stale one (`rename`), and release
+ * (`unlink`) are each a single atomic namespace operation. Release is safe because
+ * reclamation never steals from a PID that is still alive: while a live holder can
+ * call release, no cooperating successor can replace its path. This invariant is
+ * stronger than a check-then-delete inode comparison, whose check could race with
+ * the delete it was meant to guard.
  *
  * Reclamation is therefore deliberately conservative: a lock is stolen only when
- * its holder is confirmed dead (dead PID AND a stale heartbeat), with ONE stated
- * exception — {@link OWNERSHIP_ABANDONED_MS}. Past that much silence the heartbeat
- * outranks a PID that still looks alive, to escape a permanently unreclaimable
- * lock after PID reuse. In that case the holder is not confirmed dead; its death
- * is INFERRED from 120 consecutive missed beats. That is a trade, not a proof, and
- * is recorded here as one.
+ * its holder is confirmed dead and old enough to exclude an acquire still writing
+ * its payload. Ambiguous, malformed, and PID-reused locks fail closed. They may
+ * require operator cleanup, but they never authorize two correctness-sensitive
+ * writers at once.
  */
 import { randomUUID } from 'node:crypto';
-import { link, open, rename, stat, unlink, mkdir } from 'node:fs/promises';
+import { link, open, readFile, rename, stat, unlink, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { decisionsDir } from '../decisions/store.js';
+import { OPENLORE_DECISIONS_SUBDIR, OPENLORE_DIR } from '../../constants.js';
 
 const DECISIONS_LOCK_FILE = '.consolidate.lock';
 const ANALYSIS_LOCK_FILE = '.artifacts.lock';
 const OWNERSHIP_LOCK_FILE = '.analysis-owner.lock';
 const STALE_MS = 120_000;     // steal a lock older than this (crashed/killed holder)
 const POLL_MS = 150;
-const MAX_WAIT_MS = 180_000;  // give up waiting after this and proceed best-effort
+const MAX_WAIT_MS = 180_000;
 /**
  * Ownership heartbeat window. An owner refreshes its payload at least this often
  * (the progress sidecar runs at 15s, so a live owner refreshes well inside it);
@@ -73,19 +69,6 @@ const MAX_WAIT_MS = 180_000;  // give up waiting after this and proceed best-eff
  * reclamation — the owner PID must also be dead.
  */
 const OWNERSHIP_HEARTBEAT_STALE_MS = 90_000;
-/**
- * Silence after which an owner is abandoned NO MATTER WHAT ITS PID SAYS.
- *
- * Reclamation normally needs a dead PID as well, which leaves one permanent hole:
- * an owner that dies and whose PID is then recycled by an unrelated live process
- * looks alive forever, so its lock could never be reclaimed. This bound closes it
- * — but only because the heartbeat is written by a watchdog thread that keeps
- * beating while the main thread is blocked, so silence this long really does mean
- * the writer is gone. It is 120 consecutive missed beats; a real analysis that
- * still has a live watchdog cannot reach it.
- */
-const OWNERSHIP_ABANDONED_MS = 30 * 60_000;
-
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 /** What a contender does when the lock is held by a live holder. */
@@ -100,15 +83,14 @@ export interface LockPolicy {
   payload?: () => string;
   /**
    * Is a held lock reclaimable? Receives the file's mtime and its raw contents.
-   * Default: mtime older than {@link STALE_MS}.
+   * Default: mtime older than {@link STALE_MS} and payload PID confirmed dead.
    */
   isStale?: (mtimeMs: number, contents: string) => boolean;
   /** Behavior when the lock is held by a live holder. Default `wait`. */
   onContended?: LockContention;
   /**
    * Proceed WITHOUT the lock after {@link MAX_WAIT_MS} rather than block forever.
-   * Default `true`, which is right for a bounded background write and wrong for
-   * any caller whose guarantee is exclusivity.
+   * Default `false`: callers promising serialization must never continue unlocked.
    */
   bestEffortAfterMaxWait?: boolean;
   /**
@@ -172,7 +154,75 @@ async function tryHandle<T>(operation: () => Promise<T>): Promise<T | undefined>
 }
 
 const defaultPayload = (): string => `${process.pid} ${new Date().toISOString()}`;
-const defaultIsStale = (mtimeMs: number): boolean => Date.now() - mtimeMs > STALE_MS;
+
+function decisionsDir(rootPath: string): string {
+  return join(rootPath, OPENLORE_DIR, OPENLORE_DECISIONS_SUBDIR);
+}
+
+function pidFromDefaultPayload(contents: string): number | null {
+  const match = /^\s*(\d+)\b/.exec(contents);
+  if (!match) return null;
+  const pid = Number(match[1]);
+  return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+const defaultIsStale = (mtimeMs: number, contents: string): boolean => {
+  if (Date.now() - mtimeMs <= STALE_MS) return false;
+  const pid = pidFromDefaultPayload(contents);
+  return pid !== null && !isProcessAlive(pid);
+};
+
+/**
+ * Serialize namespace changes for one lock path. Without this tiny gate, a stale
+ * contender can read inode A, another contender can replace A with a fresh lock,
+ * and the first contender's later rename moves that fresh lock. Every acquire and
+ * steal attempt passes through the gate, closing that judged-inode/replaced-path
+ * race. A crashed gate is reclaimed only when its recorded PID is dead.
+ */
+async function acquireNamespaceGate(lockPath: string): Promise<() => Promise<void>> {
+  const gatePath = `${lockPath}.gate`;
+  for (;;) {
+    // Prepare the payload under a unique name before atomically claiming the
+    // fixed gate path. A crash can therefore leave either no gate or a complete
+    // PID-bearing gate, never an empty gate that nobody can safely reclaim.
+    const candidate = `${gatePath}.${process.pid}.${randomUUID()}.candidate`;
+    try {
+      const handle = await open(candidate, 'wx');
+      try {
+        await handle.writeFile(String(process.pid));
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      await link(candidate, gatePath); // fails rather than replacing a live gate
+      await unlink(candidate).catch(() => {});
+      return async () => { await unlink(gatePath).catch(() => {}); };
+    } catch (err) {
+      await unlink(candidate).catch(() => {});
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      try {
+        const pid = Number.parseInt(await readFile(gatePath, 'utf8'), 10);
+        if (Number.isSafeInteger(pid) && pid > 0 && !isProcessAlive(pid)) {
+          await unlink(gatePath).catch(() => {});
+          continue;
+        }
+      } catch {
+        // The gate disappeared or is ambiguous. Retry without deleting an owner
+        // we cannot prove dead.
+      }
+      await sleep(10);
+    }
+  }
+}
 
 /**
  * Acquire an exclusive-create advisory lock at `dir/lockFile`.
@@ -190,7 +240,7 @@ export async function acquireLockAt(
   const payloadOf = policy.payload ?? defaultPayload;
   const isStale = policy.isStale ?? defaultIsStale;
   const onContended = policy.onContended ?? 'wait';
-  const bestEffortAfterMaxWait = policy.bestEffortAfterMaxWait ?? true;
+  const bestEffortAfterMaxWait = policy.bestEffortAfterMaxWait ?? false;
   const maxWaitMs = policy.maxWaitMs ?? MAX_WAIT_MS;
 
   await mkdir(dir, { recursive: true });
@@ -202,60 +252,55 @@ export async function acquireLockAt(
   let contended = false;
 
   for (;;) {
+    const releaseGate = await acquireNamespaceGate(lockPath);
     try {
-      const fh = await open(lockPath, 'wx'); // exclusive create — fails if held
-      await fh.writeFile(payloadOf());
-      // The identity of the file we acquired. Everything this handle does later is
-      // bound to it, because a holder whose lock was STOLEN keeps running: its next
-      // refresh must not truncate, and its release must not delete, the lock a new
-      // owner has since put at the same path. The path is not the lock; this inode
-      // is. (The descriptor stays open for the handle's lifetime for the same
-      // reason — see `refresh`.)
-      // `-1` when identity is unavailable (a mocked or exotic filesystem). Every
-      // comparison below treats that as "unknown", never as "foreign".
-      const inode = (await tryHandle(async () => (await fh.stat()).ino)) ?? -1;
-      let released = false;
-      return {
-        bestEffort: false,
-        waitedMs: contended ? Date.now() - start : 0,
-        inode,
-        refresh: async (payload: string) => {
-          if (released) return;
-          // Written THROUGH the descriptor obtained at acquire time. Re-opening the
-          // path with 'w' would truncate whatever lives there now — after a steal,
-          // that is the new owner's lock. A descriptor cannot be redirected, so a
-          // superseded holder can only ever scribble on the file it already lost.
-          await tryHandle(() => fh.truncate(0));
-          await tryHandle(() => fh.write(payload, 0));
-        },
-        release: async () => {
-          if (released) return;
-          released = true;
-          await tryHandle(() => fh.close());
-          // Keep the path only when it positively names a DIFFERENT file. A
-          // superseded holder that unlinked blindly would hand the repository to
-          // nobody: the new owner would keep working with its lock already deleted.
-          // Unknown identity (stat failed, no inode) falls back to removing our own
-          // lock — refusing to clean up on doubt would leak a lock instead.
-          //
-          // ADVISORY, and knowingly so: this is a compare THEN delete, not an
-          // atomic compare-and-delete, which POSIX does not portably offer. A
-          // replacement landing between the two lines is still deleted. The window
-          // is small and deliberately left open — another guard here would shrink
-          // it while implying it was closed.
-          const current = await stat(lockPath).then(info => info.ino).catch(() => null);
-          const foreign = typeof current === 'number' && inode >= 0 && current !== inode;
-          if (!foreign) await unlink(lockPath).catch(() => {});
-        },
-      };
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-      contended = true;
-      // Held by someone else — steal if the policy says it is stale, else wait.
-      let mtimeMs: number;
-      let contents: string;
-      let inode: number;
       try {
+        const fh = await open(lockPath, 'wx'); // exclusive create — fails if held
+        try {
+          await fh.writeFile(payloadOf());
+        } catch (err) {
+          await tryHandle(() => fh.close());
+          // The gate excludes every successor, so this cleanup cannot delete a
+          // different owner's lock.
+          await unlink(lockPath).catch(() => {});
+          throw err;
+        }
+        // The identity of the file we acquired. Everything this handle does later
+        // is bound to it, because a holder whose lock was STOLEN keeps running: its
+        // next refresh must not truncate, and its release must not delete, the lock
+        // a new owner has since put at the same path. The path is not the lock; this
+        // inode is. (The descriptor stays open for the handle's lifetime for the
+        // same reason — see `refresh`.) `-1` means identity is unavailable.
+        const inode = (await tryHandle(async () => (await fh.stat()).ino)) ?? -1;
+        let released = false;
+        return {
+          bestEffort: false,
+          waitedMs: contended ? Date.now() - start : 0,
+          inode,
+          refresh: async (payload: string) => {
+            if (released) return;
+            // Written THROUGH the descriptor obtained at acquire time. Re-opening
+            // the path with 'w' could truncate a successor's lock after a steal.
+            await tryHandle(() => fh.truncate(0));
+            await tryHandle(() => fh.write(payload, 0));
+          },
+          release: async () => {
+            if (released) return;
+            released = true;
+            await tryHandle(() => fh.close());
+            // One namespace operation, with no check-then-delete race. A cooperating
+            // successor cannot exist because live holders are never stolen.
+            await unlink(lockPath).catch(() => {});
+          },
+        };
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+        contended = true;
+        // Held by someone else — steal if the policy says it is stale, else wait.
+        let mtimeMs: number;
+        let contents: string;
+        let inode: number;
+        try {
         // ONE open handle for both the timestamp and the bytes. Resolving the path
         // twice can straddle a rewrite and pair one holder's mtime with another's
         // payload — and that pair is exactly what the staleness policy judges, and
@@ -270,10 +315,10 @@ export async function acquireLockAt(
         } finally {
           await handle.close();
         }
-      } catch {
-        continue; // lock vanished between open and stat — retry acquire
-      }
-      if (isStale(mtimeMs, contents)) {
+        } catch {
+          continue; // lock vanished between open and stat — retry acquire
+        }
+        if (isStale(mtimeMs, contents)) {
         // Steal by RENAME, not by unlink-on-path. Two contenders can both judge the
         // same lock stale; with a path delete, the second one removes the FRESH
         // lock the first has already put there, and both then believe they own the
@@ -286,12 +331,12 @@ export async function acquireLockAt(
         // stolen copy, and the first's identity check would compare against a file
         // that was never its own, restoring a lock belonging to neither. A random
         // suffix removes the collision instead of narrowing its window.
-        const stolen = `${lockPath}.${process.pid}.${randomUUID()}.stale`;
-        try {
-          await rename(lockPath, stolen);
-        } catch {
-          continue; // another contender won the steal — re-read and retry
-        }
+          const stolen = `${lockPath}.${process.pid}.${randomUUID()}.stale`;
+          try {
+            await rename(lockPath, stolen);
+          } catch {
+            continue; // holder released between judgment and rename
+          }
         // Confirm we moved the FILE WE JUDGED, not one the holder replaced in
         // between. This is the compensating control for the unavoidable gap
         // between judging a lock and acting on its path: a lock steal is
@@ -301,32 +346,35 @@ export async function acquireLockAt(
         // mtime. On a mismatch the holder was alive after all, so put it back:
         // `link` refuses when the path is occupied, which is the right answer,
         // since a contender that already took it must not be clobbered.
-        try {
-          const moved = await stat(stolen);
-          if (moved.ino !== inode || moved.mtimeMs !== mtimeMs) {
+          try {
+            const moved = await stat(stolen);
+            if (moved.ino !== inode || moved.mtimeMs !== mtimeMs) {
             // The holder refreshed between our read and the steal, so it was alive:
             // put the file back. `link` is used rather than `rename` because rename
             // OVERWRITES — restoring that way clobbers a lock another contender may
             // already have taken, handing out two owners. `link` fails when the path
             // is occupied, which is the answer we want: someone else owns it now.
-            await link(stolen, lockPath).catch(() => {});
-            await unlink(stolen).catch(() => {});
-            continue;
-          }
-        } catch { /* already gone — nothing to restore */ }
-        await unlink(stolen).catch(() => {});
-        continue; // retry acquire immediately
-      }
-      if (onContended === 'report') {
-        return { held: true, payload: contents, ageMs: Date.now() - mtimeMs, lockPath };
-      }
-      if (Date.now() - start > maxWaitMs) {
-        if (!bestEffortAfterMaxWait) {
+              await link(stolen, lockPath).catch(() => {});
+              await unlink(stolen).catch(() => {});
+              continue;
+            }
+          } catch { /* already gone — nothing to restore */ }
+          await unlink(stolen).catch(() => {});
+          continue; // retry acquire immediately
+        }
+        if (onContended === 'report') {
           return { held: true, payload: contents, ageMs: Date.now() - mtimeMs, lockPath };
         }
-        return { bestEffort: true, waitedMs: Date.now() - start, inode: -1, refresh: async () => {}, release: async () => {} };
+        if (Date.now() - start > maxWaitMs) {
+          if (!bestEffortAfterMaxWait) {
+            return { held: true, payload: contents, ageMs: Date.now() - mtimeMs, lockPath };
+          }
+          return { bestEffort: true, waitedMs: Date.now() - start, inode: -1, refresh: async () => {}, release: async () => {} };
+        }
+        await sleep(POLL_MS);
       }
-      await sleep(POLL_MS);
+    } finally {
+      await releaseGate();
     }
   }
 }
@@ -341,8 +389,12 @@ export function isLockHeld(result: LockHandle | LockHeld): result is LockHeld {
  * Returns an idempotent release function.
  */
 export async function acquireDecisionsLock(rootPath: string): Promise<() => Promise<void>> {
-  const result = await acquireLockAt(decisionsDir(rootPath), DECISIONS_LOCK_FILE);
-  return isLockHeld(result) ? async () => {} : result.release;
+  const result = await acquireLockAt(decisionsDir(rootPath), DECISIONS_LOCK_FILE, {
+    bestEffortAfterMaxWait: false,
+    maxWaitMs: Number.POSITIVE_INFINITY,
+  });
+  if (isLockHeld(result)) throw new Error('decision lock acquisition ended without ownership');
+  return result.release;
 }
 
 /**
@@ -354,8 +406,12 @@ export async function acquireDecisionsLock(rootPath: string): Promise<() => Prom
  * different directories do not.
  */
 export async function acquireAnalysisLock(analysisDir: string): Promise<() => Promise<void>> {
-  const result = await acquireLockAt(analysisDir, ANALYSIS_LOCK_FILE);
-  return isLockHeld(result) ? async () => {} : result.release;
+  const result = await acquireLockAt(analysisDir, ANALYSIS_LOCK_FILE, {
+    bestEffortAfterMaxWait: false,
+    maxWaitMs: Number.POSITIVE_INFINITY,
+  });
+  if (isLockHeld(result)) throw new Error('analysis lock acquisition ended without ownership');
+  return result.release;
 }
 
 /** Run `fn` while holding the analysis-artifact lock for `analysisDir`; always releases. */
@@ -379,8 +435,13 @@ export async function withAnalysisLock<T>(analysisDir: string, fn: () => Promise
 export async function isDecisionsLockHeld(rootPath: string): Promise<boolean> {
   const lockPath = join(decisionsDir(rootPath), DECISIONS_LOCK_FILE);
   try {
-    const s = await stat(lockPath);
-    return Date.now() - s.mtimeMs <= STALE_MS;
+    const handle = await open(lockPath, 'r');
+    try {
+      const [s, contents] = await Promise.all([handle.stat(), handle.readFile('utf8')]);
+      return !defaultIsStale(s.mtimeMs, contents);
+    } finally {
+      await handle.close();
+    }
   } catch {
     return false; // no lock file → not held
   }
@@ -400,7 +461,6 @@ export {
   ANALYSIS_LOCK_FILE,
   DECISIONS_LOCK_FILE,
   OWNERSHIP_LOCK_FILE,
-  OWNERSHIP_ABANDONED_MS,
   OWNERSHIP_HEARTBEAT_STALE_MS,
   POLL_MS,
   STALE_MS,

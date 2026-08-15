@@ -68,45 +68,43 @@ describe('stale steal — exactly one winner', () => {
     const dir = join(root, 'steal');
     await mkdir(dir, { recursive: true });
     const lockPath = join(dir, '.race.lock');
-    await writeFile(lockPath, '99999 crashed');
-    const old = (Date.now() - 200_000) / 1000; // older than STALE_MS
-    await utimes(lockPath, old, old);
+    for (let round = 0; round < 25; round++) {
+      await writeFile(lockPath, '99999 crashed');
+      const old = (Date.now() - 200_000) / 1000; // older than STALE_MS
+      await utimes(lockPath, old, old);
 
-    const results = await Promise.all(
-      Array.from({ length: 5 }, () => acquireLockAt(dir, '.race.lock', { onContended: 'report' })),
-    );
-    const handles = results.filter(result => !isLockHeld(result));
-    expect(handles).toHaveLength(1);
+      const results = await Promise.all(
+        Array.from({ length: 5 }, () => acquireLockAt(dir, '.race.lock', { onContended: 'report' })),
+      );
+      const handles = results.filter(result => !isLockHeld(result));
+      expect(handles, `round ${round}`).toHaveLength(1);
+      await (handles[0] as { release: () => Promise<void> }).release();
 
-    // No steal debris is left behind.
-    const leftovers = (await readdir(dir)).filter(name => name.endsWith('.stale'));
-    expect(leftovers).toEqual([]);
-    for (const handle of handles) await (handle as { release: () => Promise<void> }).release();
+      // Neither stale-steal nor the namespace gate leaves debris that can alter
+      // the next ownership decision.
+      const leftovers = (await readdir(dir)).filter(name => name.endsWith('.stale') || name.endsWith('.gate'));
+      expect(leftovers).toEqual([]);
+    }
   }, 20_000);
 });
 
-describe('a superseded holder cannot damage its successor', () => {
-  it('refresh does not truncate the lock a new owner took', async () => {
-    // The old holder keeps running after its lock is stolen. Re-opening the PATH
-    // with 'w' would truncate whatever lives there now — the new owner's lock.
-    const dir = join(root, 'superseded');
-    await mkdir(dir, { recursive: true });
-    const first = await acquireLockAt(dir, '.x.lock', { payload: () => 'FIRST' });
+describe('a live holder is never superseded', () => {
+  it('refuses to steal a stale-looking lock while its PID is alive', async () => {
+    const dir = join(root, 'live-holder');
+    const first = await acquireLockAt(dir, '.x.lock');
     if (isLockHeld(first)) throw new Error('setup acquire must own the lock');
 
-    // Simulate reclamation: the file is replaced by a new owner's lock.
     const lockPath = join(dir, '.x.lock');
-    await rm(lockPath, { force: true });
-    const second = await acquireLockAt(dir, '.x.lock', { payload: () => 'SECOND' });
-    if (isLockHeld(second)) throw new Error('second acquire must own the lock');
+    const old = (Date.now() - 200_000) / 1000;
+    await utimes(lockPath, old, old);
 
-    await first.refresh('FIRST-AGAIN');
-    expect(await readFile(lockPath, 'utf8')).toBe('SECOND');
+    const contender = await acquireLockAt(dir, '.x.lock', { onContended: 'report' });
+    expect(isLockHeld(contender)).toBe(true);
 
     await first.release();
-    // The superseded release must not delete the successor's lock either.
-    expect(await readFile(lockPath, 'utf8')).toBe('SECOND');
-    await second.release();
+    const successor = await acquireLockAt(dir, '.x.lock');
+    if (isLockHeld(successor)) throw new Error('successor must acquire after release');
+    await successor.release();
     await expect(stat(lockPath)).rejects.toThrow();
   }, 15_000);
 });
@@ -164,6 +162,16 @@ describe('isDecisionsLockHeld', () => {
     await utimes(lockPath, old, old);
 
     expect(await isDecisionsLockHeld(root)).toBe(false);
+  });
+
+  it('true for an old lock while its owning PID is still alive', async () => {
+    const release = await acquireDecisionsLock(root);
+    const lockPath = join(decisionsDir(root), '.consolidate.lock');
+    const old = (Date.now() - 200_000) / 1000;
+    await utimes(lockPath, old, old);
+
+    expect(await isDecisionsLockHeld(root)).toBe(true);
+    await release();
   });
 
   it('never acquires or steals — a pure read leaves the lock untouched', async () => {

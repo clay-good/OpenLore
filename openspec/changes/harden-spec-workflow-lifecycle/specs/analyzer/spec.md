@@ -23,17 +23,17 @@ A lock MAY be reclaimed only when its owner is no longer alive and its heartbeat
 
 ### Requirement: Atomic Analysis Generation Publication
 
-A completed full analysis SHALL publish one generation identity and a manifest binding every required artifact to that identity and content digest. Readers SHALL validate the manifest before and after multi-artifact reads. The generation SHALL become current only after all required artifacts are durable; interrupted generation MUST leave the prior committed generation readable.
+A completed full analysis SHALL publish one generation identity and a manifest binding every required artifact to that identity and content digest. Writers SHALL hold the analysis lock across the complete required artifact write set and manifest commit point. Readers SHALL validate the manifest before and after multi-artifact reads. An interrupted in-place generation MUST fail closed as `analysis-changed`; it MUST NOT serve either a mixed snapshot or overwritten artifacts under the prior identity.
 
 #### Scenario: Reader never accepts mixed generations
 - **GIVEN** one analysis generation is current while a new generation is being written
 - **WHEN** an MCP request reads multiple artifacts
-- **THEN** it observes either the complete previous generation or the complete new generation, never a mixture
+- **THEN** it observes a complete verified generation or a typed `analysis-changed` response, never a mixture
 
-#### Scenario: Interrupted analysis preserves previous generation
+#### Scenario: Interrupted analysis fails closed
 - **GIVEN** a valid current analysis and a replacement analysis that terminates before publication
 - **WHEN** a reader requests evidence
-- **THEN** the previous generation remains current and the interrupted staging output is not served
+- **THEN** digest validation rejects the overwritten artifact set as `analysis-changed` until a complete generation is published
 
 ### Requirement: Long Analysis Phases Emit Heartbeats
 

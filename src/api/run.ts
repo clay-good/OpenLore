@@ -8,7 +8,7 @@
 
 import { join } from 'node:path';
 import { readFile, mkdir, writeFile } from 'node:fs/promises';
-import { DEFAULT_MAX_FILES, DEFAULT_ANTHROPIC_MODEL, DEFAULT_OPENAI_MODEL, DEFAULT_GEMINI_MODEL, DEFAULT_OPENAI_COMPAT_MODEL, DEFAULT_COPILOT_MODEL, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_LOGS_SUBDIR, OPENLORE_CONFIG_REL_PATH, OPENLORE_GENERATION_SUBDIR, OPENLORE_RUNS_SUBDIR, DEFAULT_OPENSPEC_PATH, ARTIFACT_REPO_STRUCTURE, ARTIFACT_DEPENDENCY_GRAPH, ARTIFACT_LLM_CONTEXT } from '../constants.js';
+import { DEFAULT_MAX_FILES, DEFAULT_ANTHROPIC_MODEL, DEFAULT_OPENAI_MODEL, DEFAULT_GEMINI_MODEL, DEFAULT_OPENAI_COMPAT_MODEL, DEFAULT_COPILOT_MODEL, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_LOGS_SUBDIR, OPENLORE_CONFIG_REL_PATH, OPENLORE_GENERATION_SUBDIR, OPENLORE_RUNS_SUBDIR, DEFAULT_OPENSPEC_PATH, ARTIFACT_REPO_STRUCTURE, ARTIFACT_DEPENDENCY_GRAPH, ARTIFACT_LLM_CONTEXT, ARTIFACT_FINGERPRINT } from '../constants.js';
 import { fileExists, readJsonFile } from '../utils/command-helpers.js';
 import { isCacheFresh } from '../core/services/mcp-handlers/utils.js';
 import {
@@ -36,6 +36,10 @@ import { OpenSpecWriter } from '../core/generator/openspec-writer.js';
 import { ADRGenerator } from '../core/generator/adr-generator.js';
 import type { RunApiOptions, RunResult, InitResult, AnalyzeResult, ProgressCallback } from './types.js';
 import { resolveTrustedApiBase, resolveTrustedSslVerify } from '../core/services/repo-config-trust.js';
+import { atomicWriteFile } from '../core/decisions/atomic-store.js';
+import { withAnalysisLock } from '../core/runtime/advisory-lock.js';
+import { publishGeneration, REQUIRED_ANALYSIS_ARTIFACTS } from '../core/runtime/analysis-generation.js';
+import { computeProjectFingerprint } from '../core/services/mcp-handlers/utils.js';
 
 function progress(onProgress: ProgressCallback | undefined, step: string, status: 'start' | 'progress' | 'complete' | 'skip', detail?: string): void {
   onProgress?.({ phase: 'run', step, status, detail });
@@ -188,17 +192,26 @@ export async function openloreRun(options: RunApiOptions = {}): Promise<RunResul
       // that genuinely wants a full re-parse asks for it.
       reExtract: options.reExtract ?? false,
     });
-    const artifacts = await artifactGenerator.generateAndSave(repoMap, depGraph);
-
-    await writeFile(
-      join(analysisPath, ARTIFACT_DEPENDENCY_GRAPH),
-      JSON.stringify(depGraph, null, 2)
-    );
+    const fingerprintHash = await computeProjectFingerprint(rootPath);
+    let artifacts: AnalysisArtifacts;
+    await withAnalysisLock(analysisPath, async () => {
+      artifacts = await artifactGenerator.generateAndSave(repoMap, depGraph, undefined, { acquireLock: false });
+      await atomicWriteFile(join(analysisPath, ARTIFACT_DEPENDENCY_GRAPH), JSON.stringify(depGraph, null, 2));
+      await atomicWriteFile(join(analysisPath, ARTIFACT_FINGERPRINT), JSON.stringify({
+        hash: fingerprintHash,
+        commit: null,
+        computedAt: new Date().toISOString(),
+        fileCount: repoMap.allFiles.length,
+      }));
+      if (!await publishGeneration(analysisPath, [...REQUIRED_ANALYSIS_ARTIFACTS])) {
+        throw new Error('Analysis produced an incomplete required artifact set; generation was not published.');
+      }
+    });
 
     analyzeResult = {
       repoMap,
       depGraph,
-      artifacts,
+      artifacts: artifacts!,
       duration: Date.now() - startTime,
     };
     progress(onProgress, 'Analysis', 'complete', `${repoMap.summary.analyzedFiles} files`);

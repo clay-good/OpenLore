@@ -177,6 +177,9 @@ function buildMcpSection(
   if (entries.length) {
     lines.push('**Then, by situation:**', '', ...entries, '');
   }
+  if (has('prepare_spec_generation') || has('prepare_spec_repair')) {
+    lines.push('Use the specification composites directly; do not routinely reconstruct them by replaying atomic tools.', '');
+  }
 
   const onDemand = ON_DEMAND_TOOLS.filter(has);
   if (onDemand.length) {

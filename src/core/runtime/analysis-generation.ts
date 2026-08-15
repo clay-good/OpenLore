@@ -10,8 +10,9 @@
  * decision 64e6eb87).
  *
  * The manifest is what makes a generation CURRENT: it is written last, after
- * every required artifact is durable, so an interrupted analysis leaves the prior
- * committed generation readable rather than a half-published one.
+ * every required artifact is durable. Writers serialize the complete required
+ * write set and this commit point under the analysis lock. Readers that do not
+ * participate in that lock still verify content digests and refuse a mixture.
  *
  * Renaming the whole analysis directory was rejected — databases, runtime
  * sidecars, and platform-specific rename behavior make whole-directory
@@ -20,8 +21,9 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
-import { readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { readFile, stat, unlink } from 'node:fs/promises';
+import { basename, join } from 'node:path';
+import { atomicWriteFile } from '../decisions/atomic-store.js';
 
 /** Name of the manifest inside the analysis output directory. */
 export const GENERATION_MANIFEST_FILE = 'generation.json';
@@ -93,8 +95,8 @@ async function digestOf(analysisDir: string, name: string): Promise<GenerationAr
  * Publish a new current generation.
  *
  * Call ONLY after every required artifact is durable: this is the commit point.
- * The manifest is written to a temp file and renamed, so a reader sees either the
- * previous manifest or the new one, never a partially written one.
+ * The manifest uses the durable atomic-write primitive, so a reader sees either
+ * the previous manifest or the new one, never a partially written one.
  *
  * Returns `null` when a required artifact is missing — an analysis that did not
  * produce its full artifact set must not become current.
@@ -118,10 +120,7 @@ export async function publishGeneration(
     compatibility: 'manifest',
   };
 
-  const target = manifestPathOf(analysisDir);
-  const tmp = `${target}.${process.pid}.tmp`;
-  await writeFile(tmp, JSON.stringify(manifest, null, 2), 'utf8');
-  await rename(tmp, target);
+  await atomicWriteFile(manifestPathOf(analysisDir), JSON.stringify(manifest, null, 2));
   return manifest;
 }
 
@@ -136,13 +135,46 @@ export async function readCurrentGeneration(
   analysisDir: string,
   legacyArtifacts: string[] = [],
 ): Promise<GenerationManifest | null> {
+  let raw: string;
   try {
-    const parsed = JSON.parse(await readFile(manifestPathOf(analysisDir), 'utf8')) as GenerationManifest;
-    if (parsed?.version === GENERATION_MANIFEST_VERSION && typeof parsed.generationId === 'string') return parsed;
-  } catch {
-    // fall through to the legacy path
+    raw = await readFile(manifestPathOf(analysisDir), 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      return synthesizeLegacyGeneration(analysisDir, legacyArtifacts);
+    }
+    return null;
   }
-  return synthesizeLegacyGeneration(analysisDir, legacyArtifacts);
+
+  try {
+    const parsed = JSON.parse(raw) as GenerationManifest;
+    const paths = Array.isArray(parsed?.artifacts)
+      ? parsed.artifacts.map(record => record?.path)
+      : [];
+    const uniquePaths = new Set(paths);
+    if (
+      parsed?.version === GENERATION_MANIFEST_VERSION
+      && typeof parsed.generationId === 'string'
+      && parsed.generationId.length > 0
+      && typeof parsed.publishedAt === 'string'
+      && parsed.compatibility === 'manifest'
+      && Array.isArray(parsed.artifacts)
+      && uniquePaths.size === parsed.artifacts.length
+      && legacyArtifacts.every(name => uniquePaths.has(name))
+      && parsed.artifacts.every(record =>
+        record
+        && typeof record.path === 'string'
+        && record.path === basename(record.path)
+        && record.path !== '.'
+        && typeof record.sha256 === 'string'
+        && /^[a-f0-9]{64}$/.test(record.sha256)
+        && Number.isSafeInteger(record.bytes)
+        && record.bytes >= 0)
+    ) return parsed;
+  } catch {
+    // A present but malformed manifest is an invalid committed generation, not a
+    // legacy analysis. Falling back here would silently downgrade integrity.
+  }
+  return null;
 }
 
 /**

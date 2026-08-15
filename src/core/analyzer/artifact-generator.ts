@@ -502,9 +502,10 @@ export class AnalysisArtifactGenerator {
   async generateAndSave(
     repoMap: RepositoryMap,
     depGraph: DependencyGraphResult,
-    enrichment?: EnrichmentData
+    enrichment?: EnrichmentData,
+    persistence: { precomputed?: AnalysisArtifacts; acquireLock?: boolean } = {},
   ): Promise<AnalysisArtifacts> {
-    const artifacts = await this.generate(repoMap, depGraph, enrichment);
+    const artifacts = persistence.precomputed ?? await this.generate(repoMap, depGraph, enrichment);
 
     // Ensure output directory exists
     await mkdir(this.options.outputDir, { recursive: true });
@@ -514,7 +515,7 @@ export class AnalysisArtifactGenerator {
     // `analyze --force` — cannot interleave its set with ours (change:
     // harden-artifact-write-atomicity). Each individual write is already atomic (temp +
     // rename via atomicWriteFile); the lock adds set-level serialization on top.
-    await withAnalysisLock(this.options.outputDir, async () => {
+    const persist = async (): Promise<void> => {
       // Strip the CFG/def-use overlay before persisting: it is DB-only and must
       // never enter the resident llm-context.json or the hot cache (spec:
       // add-intraprocedural-cfg-dataflow-overlay).
@@ -644,28 +645,39 @@ export class AnalysisArtifactGenerator {
       }
 
       await Promise.all(saves);
-    });
+    };
 
-    // Write SQLite edge store alongside JSON artifacts (additive, non-fatal)
-    try {
-      if (artifacts.llmContext.callGraph) {
-        const dbPath = join(this.options.outputDir, ARTIFACT_CALL_GRAPH_DB);
-        await writeEdgesToSQLite(
-          artifacts.llmContext.callGraph, dbPath, this.options.rootDir, artifacts.llmContext.cfgs,
-          this._pass1Memo, this._cfgSpill,
-        );
+    const persistAll = async (): Promise<void> => {
+      await persist();
+      // Write SQLite edge store inside the same set-level lock as the JSON
+      // artifacts. It is additive and non-fatal, but a watcher must not observe a
+      // database from one generation beside JSON from another.
+      try {
+        if (artifacts.llmContext.callGraph) {
+          const dbPath = join(this.options.outputDir, ARTIFACT_CALL_GRAPH_DB);
+          await writeEdgesToSQLite(
+            artifacts.llmContext.callGraph, dbPath, this.options.rootDir, artifacts.llmContext.cfgs,
+            this._pass1Memo, this._cfgSpill,
+          );
+        }
+      } catch {
+        // Non-fatal — JSON artifacts are the source of truth
+      } finally {
+        // Release the serialized memo rows unconditionally: on a cold or forced build they are
+        // the whole corpus (tens of MB), and nothing after this point — continuity
+        // carry-forward, the dependency-graph write, the fingerprint — has any use for them.
+        this._pass1Memo = undefined;
+        // The spill has either been drained into the table or abandoned; either way the file is
+        // temporary and must not outlive the build.
+        await this._cfgSpill?.dispose();
+        this._cfgSpill = undefined;
       }
-    } catch {
-      // Non-fatal — JSON artifacts are the source of truth
-    } finally {
-      // Release the serialized memo rows unconditionally: on a cold or forced build they are
-      // the whole corpus (tens of MB), and nothing after this point — continuity
-      // carry-forward, the dependency-graph write, the fingerprint — has any use for them.
-      this._pass1Memo = undefined;
-      // The spill has either been drained into the table or abandoned; either way the file is
-      // temporary and must not outlive the build.
-      await this._cfgSpill?.dispose();
-      this._cfgSpill = undefined;
+    };
+
+    if (persistence.acquireLock === false) {
+      await persistAll();
+    } else {
+      await withAnalysisLock(this.options.outputDir, persistAll);
     }
 
     return artifacts;

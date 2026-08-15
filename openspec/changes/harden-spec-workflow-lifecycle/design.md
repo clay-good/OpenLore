@@ -61,7 +61,7 @@ Alternative considered: add every atomic follow-up to the default preset. Reject
 
 ### 5. Publish analysis through a generation manifest
 
-Each full analysis chooses a random generation id and writes candidate artifacts to staging using existing atomic file writers. Publication writes a manifest containing required artifact paths and digests, then atomically makes that manifest current. Multi-artifact readers read the current manifest, load and verify artifacts, and re-read the current identity before returning. A changed identity triggers one retry, then a typed `analysis-changed` response.
+Each full analysis chooses a random generation id and writes artifacts in place using existing atomic file writers while holding the publication lock. Publication writes a manifest containing required artifact paths and digests, then atomically makes that manifest current. Multi-artifact readers read the current manifest, load and verify artifacts, and re-read the current identity before returning. A changed identity triggers one retry, then a typed `analysis-changed` response. If a writer stops after overwriting an artifact but before manifest publication, the old manifest's digest no longer matches and readers fail closed with `analysis-changed`; the design does not claim that the previous generation remains available. Preserving old-generation availability would require generation-scoped storage plus an atomic pointer swap, which is outside this change.
 
 Caches key by canonical repository path plus generation id, not only artifact mtime. Legacy analysis without a manifest remains readable through a disclosed compatibility generation and is upgraded on the next analyze.
 
@@ -73,23 +73,23 @@ Acquire a lock with exclusive creation under the repository runtime state before
 
 `analyze --wait` follows the sidecar until the owner publishes or fails. The same lock service is used by CLI, MCP, daemon bootstrap, and Pi.
 
-**This is not a second locking mechanism.** `src/core/decisions/lock.ts` already owns the repository's single advisory-lock loop (`acquireLockAt`), whose header states the rule explicitly: both existing callers — `acquireDecisionsLock` and `acquireAnalysisLock` (`.artifacts.lock`, from `harden-artifact-write-atomicity`) — are thin bindings of one loop, "no second locking mechanism, no new tuning values". Analysis ownership becomes the **third thin binding of that same loop**, not a parallel implementation. The loop is parameterized rather than copied; every field below already exists as a hardcoded behavior of `acquireLockAt`:
+**This is not a second locking mechanism.** `src/core/runtime/advisory-lock.ts` owns the repository's single advisory-lock loop (`acquireLockAt`). JSON-store commit sections, decision consolidation, analysis publication, and full-analysis ownership are thin bindings of that loop, not parallel implementations. Every namespace mutation in acquire and stale reclamation is itself serialized by a short-lived gate. A live gate cannot be replaced: all successors must first acquire that same path, and the gate is reclaimable only after its recorded PID is confirmed dead. Its owner's single `unlink` therefore cannot delete a successor.
 
-| Policy knob | Default (existing two callers, unchanged) | Ownership binding |
+| Policy knob | Shared default | Ownership binding |
 |---|---|---|
 | `payload` | `` `${pid} ${iso}` `` plain text | structured JSON: canonical repo identity, PID, start, heartbeat, stage, progress-file path |
-| `isStale` | `mtime > STALE_MS` | dead PID **and** heartbeat older than the threshold (PID-reuse defense) |
+| `isStale` | `mtime > STALE_MS` **and** payload PID confirmed dead | dead PID **and** heartbeat older than the threshold (PID-reuse defense) |
 | `onContended` | `wait` (poll `POLL_MS`) | `report` — return the owner descriptor so the caller emits `ANALYSIS_IN_PROGRESS`; `wait` only under `analyze --wait` |
-| `bestEffortAfterMaxWait` | `true` — proceed unlocked after `MAX_WAIT_MS` rather than hang a background write | **`false`** — proceeding unlocked would silently void the single-flight guarantee this decision exists to provide |
+| `bestEffortAfterMaxWait` | `false` — correctness-sensitive writers never proceed unlocked | `false` — proceeding unlocked would silently void the single-flight guarantee this decision exists to provide |
 | heartbeat refresh | none (mtime frozen at create) | owner rewrites the payload on the sidecar cadence |
 
-Consequences of that choice: no new lock loop, no new stale-steal path, no new release path — the idempotent-unlink release and the exclusive-create acquire are the existing ones. The one genuinely new tuning value is the ownership heartbeat/stale threshold, and it is declared in the same constants block as `STALE_MS`/`POLL_MS`/`MAX_WAIT_MS` so tuning values stay in one place. Because `lock.ts` now serves three unrelated domains, it moves out of `src/core/decisions/` to a neutral module (both faces import it; `artifact-write-atomicity.test.ts` asserts the import path literally and is updated in the same task).
+Consequences of that choice: no duplicated lock loop, stale-steal path, or release path. Exact exclusive creation, gate-serialized reclamation, and single-unlink release are shared. The ownership heartbeat threshold lives beside `STALE_MS`/`POLL_MS`/`MAX_WAIT_MS` so tuning values stay in one place.
 
 The ownership lock and `.artifacts.lock` are **complementary, not redundant**, and neither can absorb the other: ownership is held for a whole analysis run and is what a competing *analysis* contends on; `.artifacts.lock` fences only the artifact write-set and is also taken by the incremental watcher, which never takes ownership. Collapsing them would either serialize every watcher persist against a full analysis run or leave artifact writes unfenced. An owner therefore takes ownership **before** `.artifacts.lock` and never the reverse — one fixed order, so the two can never deadlock. Lower-level database/write locks remain below both as defense in depth.
 
 Alternative considered: process-local promise deduplication. Rejected because the observed duplicate analyses run in distinct processes and frontends.
 
-Alternative considered: use `acquireAnalysisLock` as-is for ownership. Rejected — its `bestEffortAfterMaxWait` escape hatch means a contender proceeds anyway after `MAX_WAIT_MS`, which is correct for a bounded artifact write but is exactly the duplicate full analysis this decision must prevent; and its mtime-only staleness cannot express dead-PID-plus-stale-heartbeat.
+Alternative considered: let bounded artifact writers proceed unlocked after `MAX_WAIT_MS`. Rejected — bounded duration does not make interleaved persistence correct. Decision stores, artifact writers, and full-analysis ownership all fail closed; only a confirmed-dead PID may be reclaimed.
 
 ### 7. Compute spec overlap as evidence, not domain reconciliation
 
@@ -115,8 +115,8 @@ Alternative considered: change `--dry-run` into the paid preview. Rejected becau
 - **[Mapping schema breaks old consumers]** → Version the artifact, keep a compatibility reader for provenance/error reporting, and regenerate rather than migrate probabilistic links.
 - **[48 KiB increases round trips for large domains]** → Stream deterministic sections without repeating page-global evidence and let callers request a smaller, never larger-than-server, budget.
 - **[Manifest validation adds reads/hashing]** → Hash at publication, store digests, and validate generation identity cheaply on hot paths; perform full digest verification on cache misses or integrity suspicion.
-- **[Stale lock recovery can target PID reuse]** → Require both stale heartbeat and repository/owner metadata validation; never reclaim solely by elapsed time.
-- **[Parameterizing the shared lock loop regresses its two existing callers]** → Every new knob defaults to the current hardcoded behavior, so `acquireDecisionsLock`/`acquireAnalysisLock` change call sites not at all; the existing `lock.test.ts` cases are the regression gate and must pass unmodified except for the import path.
+- **[PID reuse can make a dead owner's PID look alive]** → Fail closed and require operator cleanup; elapsed time never proves that a live PID is unrelated strongly enough to authorize a concurrent writer.
+- **[Interrupted in-place publication overwrites bytes named by the old manifest]** → State the fail-closed contract honestly: readers return `analysis-changed` until a complete locked publication succeeds. Preserving old-generation availability would require generation-scoped storage and an atomic pointer swap, which this change does not implement.
 - **[Preview incurs provider cost]** → Give the paid operation a distinct `--preview` name and display the estimate and explicit cost warning; `--dry-run` and `--plan` remain free.
 - **[Overlap evidence can be large]** → Feed it through the same receipted evidence stream and rank exact-symbol intersections before file-only intersections.
 
@@ -131,4 +131,4 @@ Alternative considered: change `--dry-run` into the paid preview. Rejected becau
 7. Update canonical skills, preserve free `--dry-run`/`--plan`, and add paid `--preview`.
 8. Dogfood Analyze → Generate → Repair on the reported external project, including stale mapping, oversized `components`, daemon reload, concurrent analyze, and long artifact generation.
 
-Rollback can disable manifest publication, lock attachment, and deterministic cache persistence independently. Existing specs are never deleted; new mapping caches and incomplete staging generations are disposable.
+Rollback can disable manifest publication, lock attachment, and deterministic cache persistence independently. Existing specs are never deleted; new mapping caches are disposable.
