@@ -21,6 +21,13 @@ interface CoverageGapItem {
   fanIn: number;
   signals: Array<{ label: string; evidence: Record<string, number | string> }>;
   alsoFlaggedDead?: true;
+  deadReason?: 'no-callers' | 'dead-via-unreachable-callers';
+}
+
+/** Live vs dead-flagged split of a gap list (change: demote-dead-flagged-coverage-gaps). */
+interface GapComposition {
+  live: number;
+  deadFlagged: number;
 }
 
 interface CoverageGapsResult {
@@ -31,6 +38,11 @@ interface CoverageGapsResult {
   reachableFromTest: number;
   gapCount: number;
   coverageGaps: CoverageGapItem[];
+  composition?: {
+    returned: GapComposition;
+    omittedRemainder?: GapComposition;
+    total: GapComposition;
+  };
   omitted?: number;
   note?: string;
   soundness: { posture: string; claim: string; caveats: string[] };
@@ -74,14 +86,29 @@ function renderHuman(r: CoverageGapsResult): string {
   if (r.coverageGaps.length === 0) {
     lines.push(r.note ? '   (nothing in scope to report)' : '   No gaps in scope.');
   } else {
-    lines.push('   Top untested (most load-bearing first):');
+    lines.push('   Top untested (live and load-bearing first; dead-flagged last):');
     for (const g of r.coverageGaps) {
       const labels = g.signals.map(s => s.label).join(',');
-      const tags = [labels && `[${labels}]`, g.alsoFlaggedDead && '(also dead)'].filter(Boolean).join(' ');
+      // Name WHY it is dead-flagged: "has callers, still unreachable" is a resolution
+      // limit of the analysis, not a claim the code is unused.
+      const deadTag = g.deadReason === 'dead-via-unreachable-callers'
+        ? '(dead-flagged: callers unreachable — undecidable)'
+        : g.alsoFlaggedDead ? '(dead-flagged: no callers)' : '';
+      const tags = [labels && `[${labels}]`, deadTag].filter(Boolean).join(' ');
       lines.push(`   • ${g.name}  ${g.file}  fanIn=${g.fanIn}${tags ? '  ' + tags : ''}`);
     }
-    if (r.omitted && r.omitted > 0) lines.push(`   … and ${r.omitted} more (raise --max to see them)`);
+    if (r.composition) {
+      const { live, deadFlagged } = r.composition.returned;
+      lines.push(`   composition: ${live} live · ${deadFlagged} dead-flagged (of ${r.composition.total.live} live / ${r.composition.total.deadFlagged} dead-flagged overall)`);
+    }
+    if (r.omitted && r.omitted > 0) {
+      const rest = r.composition?.omittedRemainder;
+      const detail = rest ? ` (${rest.live} live · ${rest.deadFlagged} dead-flagged)` : '';
+      lines.push(`   … and ${r.omitted} more${detail} (raise --max to see them)`);
+    }
   }
+  const undecidable = r.soundness.caveats.find(c => /dead-via-unreachable-callers/.test(c));
+  if (undecidable) lines.push(`   ⚠ ${undecidable}`);
   lines.push('   ' + r.soundness.caveats[0]);
   lines.push('');
   return lines.join('\n');

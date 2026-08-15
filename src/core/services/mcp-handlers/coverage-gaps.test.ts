@@ -47,7 +47,16 @@ interface GapResult {
   analyzedSymbols: number;
   reachableFromTest: number;
   gapCount: number;
-  coverageGaps: Array<{ name: string; file: string; fanIn: number; signals: Array<{ label: string }>; alsoFlaggedDead?: true }>;
+  coverageGaps: Array<{
+    name: string; file: string; fanIn: number; signals: Array<{ label: string }>;
+    alsoFlaggedDead?: true;
+    deadReason?: 'no-callers' | 'dead-via-unreachable-callers';
+  }>;
+  composition?: {
+    returned: { live: number; deadFlagged: number };
+    omittedRemainder?: { live: number; deadFlagged: number };
+    total: { live: number; deadFlagged: number };
+  };
   omitted?: number;
   note?: string;
   confidenceBoundary?: Record<string, unknown>;
@@ -84,13 +93,18 @@ describe('handleReportCoverageGaps', () => {
     vi.mocked(getChangedFiles).mockResolvedValue({ files: [] } as never);
   });
 
-  it('ranks the untested hub on top, sinks the leaves, and omits the tested hub', async () => {
+  it('ranks live gaps above dead-flagged ones, sinks the leaves, and omits the tested hub', async () => {
     const r = await handleReportCoverageGaps({ directory: '/p' }) as GapResult;
     const names = r.coverageGaps.map(g => g.name);
 
     expect(names).not.toContain('testedHub'); // reached by a test → not a gap
-    expect(names[0]).toBe('untestedHub');     // load-bearing (hub/chokepoint) floats up
-    // the two untested leaves sink below the hub
+    // `untestedHub` is load-bearing BUT reached only from candidate-dead leaves, so
+    // its own reachability is undecidable. The live gap leads instead
+    // (change: demote-dead-flagged-coverage-gaps) — certainty before significance.
+    expect(names[0]).toBe('main');
+    // Within the dead-flagged tier the old comparator still holds: the hub outranks
+    // the leaves.
+    expect(names.indexOf('untestedHub')).toBeLessThan(names.indexOf('leaf1'));
     expect(names.indexOf('leaf1')).toBeGreaterThan(names.indexOf('untestedHub'));
     expect(names.indexOf('leaf2')).toBeGreaterThan(names.indexOf('untestedHub'));
     // the untested hub carries its earned significance labels (evidence, not a score)
@@ -236,6 +250,90 @@ describe('handleReportCoverageGaps', () => {
     vi.mocked(readCachedContext).mockResolvedValue({ callGraph: FIXTURE() } as never);
     const b = await handleReportCoverageGaps({ directory: '/p' });
     expect(JSON.stringify(a)).toBe(JSON.stringify(b));
+  });
+
+  // ==========================================================================
+  // Reachability-aware ranking, typed dead reason, page composition
+  // (change: demote-dead-flagged-coverage-gaps)
+  // ==========================================================================
+
+  it('ranks a dead-flagged hub below a live unlabelled gap', async () => {
+    const r = await handleReportCoverageGaps({ directory: '/p' }) as GapResult;
+    const names = r.coverageGaps.map(g => g.name);
+    const hub = r.coverageGaps.find(g => g.name === 'untestedHub')!;
+    const live = r.coverageGaps.find(g => g.name === 'main')!;
+
+    // `untestedHub` carries hub+chokepoint and fanIn 5; `main` carries neither and
+    // has fanIn 0. Under the old comparator the hub led. It no longer does.
+    expect(hub.signals.map(s => s.label)).toEqual(expect.arrayContaining(['hub', 'chokepoint']));
+    expect(hub.alsoFlaggedDead).toBe(true);
+    expect(live.alsoFlaggedDead).toBeUndefined();
+    expect(names.indexOf('main')).toBeLessThan(names.indexOf('untestedHub'));
+
+    // Every live gap precedes every dead-flagged one — a partition, not a nudge.
+    const lastLive = Math.max(...r.coverageGaps.map((g, i) => (g.alsoFlaggedDead ? -1 : i)));
+    const firstDead = r.coverageGaps.findIndex(g => g.alsoFlaggedDead);
+    expect(lastLive).toBeLessThan(firstDead);
+  });
+
+  it('types the dead flag: fan-in zero is no-callers, fan-in above zero is undecidable reachability', async () => {
+    const r = await handleReportCoverageGaps({ directory: '/p' }) as GapResult;
+    const leaf = r.coverageGaps.find(g => g.name === 'leaf1')!;
+    const hub = r.coverageGaps.find(g => g.name === 'untestedHub')!;
+    const live = r.coverageGaps.find(g => g.name === 'main')!;
+
+    expect(leaf.fanIn).toBe(0);
+    expect(leaf.deadReason).toBe('no-callers');
+    // 5 resolved callers, still unreachable from a liveness root — the signature of
+    // an inbound edge static analysis cannot see (the pi-outpost WebSocket case).
+    expect(hub.fanIn).toBeGreaterThan(0);
+    expect(hub.deadReason).toBe('dead-via-unreachable-callers');
+    // The boolean keeps its exact prior meaning; the reason is additive.
+    expect(hub.alsoFlaggedDead).toBe(true);
+    expect(live.deadReason).toBeUndefined();
+  });
+
+  it('emits the undecidable-reachability caveat only when that reason is on the page', async () => {
+    const withReason = await handleReportCoverageGaps({ directory: '/p' }) as GapResult;
+    expect(withReason.soundness.caveats.join(' ')).toMatch(/dead-via-unreachable-callers/);
+
+    // A graph whose only gap has no callers at all: no such reason, so no caveat.
+    vi.mocked(readCachedContext).mockResolvedValueOnce({
+      callGraph: graph(
+        [node({ id: 'src/z.ts::lonely', fanIn: 0 }), node({ id: 'src/z.test.ts::t', isTest: true })],
+        [],
+      ),
+    } as never);
+    const without = await handleReportCoverageGaps({ directory: '/p' }) as GapResult;
+    expect(without.coverageGaps.map(g => g.deadReason)).not.toContain('dead-via-unreachable-callers');
+    expect(without.soundness.caveats.join(' ')).not.toMatch(/dead-via-unreachable-callers/);
+  });
+
+  it('reports page composition that sums to the whole gap set', async () => {
+    const r = await handleReportCoverageGaps({ directory: '/p' }) as GapResult;
+    const c = r.composition!;
+    expect(c.returned.live + c.returned.deadFlagged).toBe(r.coverageGaps.length);
+    expect(c.total.live + c.total.deadFlagged).toBe(r.gapCount);
+    expect(c.total.live).toBe(1);              // only `main` is live-and-untested
+    expect(c.omittedRemainder).toBeUndefined(); // nothing truncated here
+  });
+
+  it('truncation never returns a dead-flagged gap ahead of a live one, and discloses the remainder split', async () => {
+    const r = await handleReportCoverageGaps({ directory: '/p', maxResults: 1 }) as GapResult;
+    expect(r.coverageGaps).toHaveLength(1);
+    expect(r.coverageGaps[0].alsoFlaggedDead).toBeUndefined(); // the live gap survives truncation
+    expect(r.composition!.returned).toEqual({ live: 1, deadFlagged: 0 });
+    expect(r.composition!.omittedRemainder).toEqual({ live: 0, deadFlagged: 3 });
+    expect(
+      r.composition!.omittedRemainder!.live + r.composition!.omittedRemainder!.deadFlagged,
+    ).toBe(r.omitted);
+  });
+
+  it('keeps ranking stable across repeated runs', async () => {
+    const first = await handleReportCoverageGaps({ directory: '/p' }) as GapResult;
+    vi.mocked(readCachedContext).mockResolvedValue({ callGraph: FIXTURE() } as never);
+    const second = await handleReportCoverageGaps({ directory: '/p' }) as GapResult;
+    expect(second.coverageGaps.map(g => g.name)).toEqual(first.coverageGaps.map(g => g.name));
   });
 
   it('errors cleanly when no analysis is cached', async () => {
