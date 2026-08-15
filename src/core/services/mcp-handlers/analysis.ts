@@ -973,7 +973,7 @@ export async function handleGetMinimalContext(
   // callType of each direct call edge, keyed (callerId → calleeId) so the last hop
   // on a scoped path can report how that neighbour is reached.
   const callTypeByEdge = new Map<string, string>();
-  for (const e of callsEdges) callTypeByEdge.set(`${e.callerId} ${e.calleeId}`, e.callType ?? 'direct');
+  for (const e of callsEdges) callTypeByEdge.set(`${e.callerId}\0${e.calleeId}`, e.callType ?? 'direct');
 
   const { forward, backward } = buildWeightedAdjacency(cg);
   const pagerank = rankBy === 'pagerank';
@@ -1015,7 +1015,7 @@ export async function handleGetMinimalContext(
     .map(([id, r]) => {
       const n = nodeMap.get(id);
       if (!n || n.isExternal) return null;
-      const callType = callTypeByEdge.get(`${id} ${r.predecessor}`) ?? 'direct';
+      const callType = callTypeByEdge.get(`${id}\0${r.predecessor}`) ?? 'direct';
       return { id, name: n.name, file: relative(absDir, n.filePath), sig: sig(n), callType, isExternal: false, distance: r.distance, hops: r.hops, _rank: n.fanIn, _rel: callerScores.get(id) ?? 0 };
     })
     .filter((n): n is NonNullable<typeof n> => !!n);
@@ -1029,7 +1029,7 @@ export async function handleGetMinimalContext(
     .map(([id, r]) => {
       const n = nodeMap.get(id);
       if (!n || n.isExternal) return null;
-      const callType = callTypeByEdge.get(`${r.predecessor} ${id}`) ?? 'direct';
+      const callType = callTypeByEdge.get(`${r.predecessor}\0${id}`) ?? 'direct';
       return { id, name: n.name, file: relative(absDir, n.filePath), sig: sig(n), callType, isExternal: false, kind: undefined as string | undefined, distance: r.distance, hops: r.hops, _rank: n.fanOut, _rel: calleeScores.get(id) ?? 0 };
     })
     .filter((n): n is NonNullable<typeof n> => !!n);
@@ -1043,7 +1043,7 @@ export async function handleGetMinimalContext(
     .map(n => ({
       id: n.id,
       name: `[external] ${n.name}`, file: 'external', sig: sig(n),
-      callType: callTypeByEdge.get(`${target.id} ${n.id}`) ?? 'direct',
+      callType: callTypeByEdge.get(`${target.id}\0${n.id}`) ?? 'direct',
       isExternal: true, kind: n.externalKind as string | undefined, distance: 1, hops: 1, _rank: 0, _rel: 0,
     }));
 

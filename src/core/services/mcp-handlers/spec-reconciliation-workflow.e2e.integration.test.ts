@@ -35,7 +35,13 @@ async function createWorkflowFixture(): Promise<{ root: string; mappingPath: str
   git(root, ['config', 'user.email', 'test@openlore.local']);
   git(root, ['config', 'commit.gpgsign', 'false']);
   await write(root, 'src/billing.ts', 'export function collectPayment(amount: number): void {}\nexport function refundPayment(): void {}\n');
-  await write(root, 'openspec/specs/billing/spec.md', '# Billing\n\n> Source files: src/billing.ts\n\n## Requirements\n\n### Requirement: Collect payment\n');
+  await write(
+    root,
+    'openspec/specs/billing/spec.md',
+    '# Billing\n\n> Source files: src/billing.ts\n\n## Requirements\n\n' +
+      '### Requirement: Collect payment\n\n- **Implementation**: `collectPayment::src/billing.ts`\n\n' +
+      '### Requirement: Legacy charge\n',
+  );
 
   const depGraph = {
     nodes: [{
@@ -101,7 +107,7 @@ async function createWorkflowFixture(): Promise<{ root: string; mappingPath: str
 }
 
 describe('agent-neutral MCP spec reconciliation workflow', () => {
-  it('distinguishes covered, structural-change, uncovered, and unavailable observations', async () => {
+  it('distinguishes covered, structural-change, cache fallback, and unavailable observations', async () => {
     const { root, mappingPath } = await createWorkflowFixture();
     const call = (name: string, args: Record<string, unknown> = {}) =>
       dispatchTool(name, { directory: root, ...args }, root);
@@ -129,11 +135,19 @@ describe('agent-neutral MCP spec reconciliation workflow', () => {
     await writeFile(mappingPath, JSON.stringify({
       version: 2, sourceAnalysisFingerprint: 'outdated', mappings: [], orphanFunctions: [], stats: {},
     }));
-    const stale = await call('audit_spec_coverage') as { mappingCoverage: { state: string; reason: string } };
-    expect(stale.mappingCoverage).toMatchObject({ state: 'stale', reason: 'fingerprint-mismatch' });
+    const stale = await call('audit_spec_coverage') as { mappingCoverage: { state: string; source: string; cacheReason: string } };
+    expect(stale.mappingCoverage).toMatchObject({
+      state: 'available', source: 'derived', cacheReason: 'incompatible-provenance',
+    });
 
     await rm(mappingPath);
+    const missingCache = await call('audit_spec_coverage') as { mappingCoverage: { state: string; source: string; cacheReason: string } };
+    expect(missingCache.mappingCoverage).toMatchObject({
+      state: 'available', source: 'derived', cacheReason: 'mapping-not-generated',
+    });
+
+    await rm(join(root, 'openspec/specs/billing/spec.md'));
     const unavailable = await call('audit_spec_coverage') as { mappingCoverage: { state: string; reason: string } };
-    expect(unavailable.mappingCoverage).toMatchObject({ state: 'missing', reason: 'mapping-not-generated' });
+    expect(unavailable.mappingCoverage).toMatchObject({ state: 'unavailable', reason: 'specs-unavailable' });
   });
 });

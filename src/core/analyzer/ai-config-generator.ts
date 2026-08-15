@@ -172,7 +172,7 @@ function buildMcpSection(
     lines.push(ORIENT_GUIDANCE, '');
   }
 
-  const entries = WORKFLOW_ENTRIES.filter(e => e.requires.some(has))
+  const entries = WORKFLOW_ENTRIES.filter(e => e.requires.every(has))
     .map(e => e.render());
   if (entries.length) {
     lines.push('**Then, by situation:**', '', ...entries, '');

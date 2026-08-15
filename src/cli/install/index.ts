@@ -387,7 +387,7 @@ export const installCommand = new Command('install')
     'to call orient(), then build the index so orient works on your first session.'
   )
   .option('--agent <name>', 'Install only for a specific surface (claude-code, cursor, cline, continue, agents-md)')
-  .option('--preset <name>', `Wire the registered MCP server to a tool preset (navigation, substrate, minimal, memory, verify, federation, coordination, or full). Default (no preset) wires the "${LEAN_DEFAULT_PRESET}" surface — the navigation core plus the governance reads recall + verify_claim + blast_radius (decision c79ec7ca / ADR-0023); "navigation" is the lean navigate-only escape; pass "full" to wire the full surface (the prior default).`)
+  .option('--preset <name>', `Wire the registered MCP server to a tool preset (navigation, substrate, minimal, memory, verify, federation, coordination, or full). Default (no preset) wires the "${LEAN_DEFAULT_PRESET}" surface — the navigation core, prepare_spec_generation + prepare_spec_repair, and the governance reads recall + verify_claim + blast_radius; "navigation" is the lean navigate-only escape; pass "full" to wire the full surface (the prior default).`)
   .option('--all-tools', 'Wire the full surface (alias of --preset full). Matches `openlore mcp --all-tools`.')
   .option('--dry-run', 'Print the planned changes without writing any files', false)
   .option('--force', 'Overwrite OpenLore-managed blocks even if hand-edited', false)

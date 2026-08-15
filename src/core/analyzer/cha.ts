@@ -257,7 +257,7 @@ function synthesizeOverrideEdges(h: Hierarchy, nodes: Map<string, FunctionNode>)
       for (const overrider of h.methodsInSubtree(descendants, baseMethod.name)) {
         if (overrider.id === baseMethod.id) continue;
         if (!arityCompatible(baseArity, arityFromSignature(overrider.signature))) continue;
-        const key = `${baseMethod.id} ${overrider.id}`;
+        const key = `${baseMethod.id}\0${overrider.id}`;
         if (seen.has(key)) continue;
         seen.add(key);
         edges.push({
@@ -365,7 +365,7 @@ function synthesizeVirtualDispatchEdges(
     }
 
     for (const target of unique.values()) {
-      const key = `${call.callerId} ${target.id}`;
+      const key = `${call.callerId}\0${target.id}`;
       if (emitted.has(key)) continue;
       emitted.add(key);
       edges.push({

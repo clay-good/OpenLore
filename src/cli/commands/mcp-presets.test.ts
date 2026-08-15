@@ -476,8 +476,8 @@ describe('tool annotations (spec-11)', () => {
 });
 
 // ============================================================================
-// Spec 28 — tools/list payload budget. The full tool surface is a ~46 KB / ~11.6k-
-// token prefix that an eager (non-deferring) MCP client loads every turn. Spec 25
+// Spec 28 — tools/list payload budget. The full tool surface is a ~91.7 KB
+// schema prefix that an eager (non-deferring) MCP client loads every turn. Spec 25
 // §7 asked whether that prefix could be erased; Spec 28 measured the answer:
 // deferral is client-side (the dominant client already lazy-loads MCP schemas),
 // and the server-side lossless byte-lever is ~1%. These guards lock that in — they
@@ -485,17 +485,18 @@ describe('tool annotations (spec-11)', () => {
 // bump, not silent drift. Bytes mirror what the ListTools handler actually emits.
 // ============================================================================
 describe('tools/list payload budget (spec-28)', () => {
+  const toolPayloadBytes = (tools: typeof TOOL_DEFINITIONS): number => Buffer.byteLength(
+    JSON.stringify({ tools: tools.map(t => ({ ...t, annotations: toolAnnotations(t.name) })) }),
+    'utf8',
+  );
+
   const payloadBytes = (opts: { minimal?: boolean; preset?: string }): number => {
-    const tools = selectActiveTools(TOOL_DEFINITIONS, opts).map(t => ({
-      ...t,
-      annotations: toolAnnotations(t.name),
-    }));
-    return Buffer.byteLength(JSON.stringify({ tools }), 'utf8');
+    return toolPayloadBytes(selectActiveTools(TOOL_DEFINITIONS, opts));
   };
 
-  // Ceilings sit just above the measured size (full ≈ 46.5 KB, nav ≈ 10.9 KB) with
-  // ~1 tool of headroom. A new tool (~900 B) or un-trimmed boilerplate breaches
-  // them — forcing a deliberate decision rather than letting the cached prefix creep.
+  // Ceilings sit just above the measured size (full ≈ 91.7 KB, nav ≈ 13.9 KB).
+  // A new tool or untrimmed boilerplate breaches them, forcing a deliberate
+  // budget decision rather than letting the cached prefix creep.
   // The nav ceiling was bumped 8_500 → 9_800 → 10_700 → 11_800 as the structural-
   // navigation primitives get_landmarks, get_map, then find_path were added to the
   // preset — each a conscious budget decision, not silent drift.
@@ -644,6 +645,12 @@ describe('tools/list payload budget (spec-28)', () => {
     expect(payloadBytes({ preset: 'substrate' })).toBeLessThan(21_000);
     expect(payloadBytes({ preset: 'substrate' })).toBeLessThan(payloadBytes({ preset: 'full' }));
     expect(payloadBytes({ preset: 'substrate' })).toBeGreaterThan(payloadBytes({ preset: 'navigation' }));
+  });
+
+  it('the two spec composites add less than 1,700 bytes to the default surface', () => {
+    const substrate = selectActiveTools(TOOL_DEFINITIONS, { preset: 'substrate' });
+    const withoutSpecComposites = substrate.filter(t => !SPEC_WORKFLOWS.includes(t.name));
+    expect(toolPayloadBytes(substrate) - toolPayloadBytes(withoutSpecComposites)).toBeLessThan(1_700);
   });
 
   // Lossless-dedup invariant: the `directory` input is shared by every tool, so its

@@ -50,6 +50,13 @@ const REQUIRED = [
   'dist/cli/index.js', // the `openlore` bin
   'dist/api/index.js', // the library entrypoint
   'scripts/postinstall.mjs', // referenced by the postinstall lifecycle script
+  // `skills/` is canonical. Keep one representative old path from each former
+  // host-specific catalog so a release cannot silently break direct consumers
+  // before they migrate to the canonical location.
+  'skills/openlore-generate/SKILL.md',
+  'skills/openlore-repair/SKILL.md',
+  'examples/opencode-skills/openlore-generate/SKILL.md',
+  'examples/mistral-vibe/skills/openlore-generate/SKILL.md',
 ];
 
 /**

@@ -711,11 +711,11 @@ export async function handleOrient(
       // Seeds = the matched functions, mapped to node ids.
       const idsByNameFile = new Map<string, string[]>();
       for (const n of cg.nodes) {
-        const key = `${n.filePath} ${n.name}`;
+        const key = `${n.filePath}\0${n.name}`;
         const arr = idsByNameFile.get(key);
         if (arr) arr.push(n.id); else idsByNameFile.set(key, [n.id]);
       }
-      const seedIds = relevantFunctions.flatMap(f => idsByNameFile.get(`${f.filePath} ${f.name}`) ?? []);
+      const seedIds = relevantFunctions.flatMap(f => idsByNameFile.get(`${f.filePath}\0${f.name}`) ?? []);
       const seedSet = new Set(seedIds);
 
       if (seedIds.length > 0 && landmarkById.size > 0) {

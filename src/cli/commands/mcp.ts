@@ -257,31 +257,31 @@ export const TOOL_DEFINITIONS = [
   },
   {
     name: 'prepare_spec_generation',
-    description: 'Prepare bounded deterministic evidence for a host agent to author a new OpenSpec domain specification. Read-only; no LLM and no file writes.',
+    description: 'Return paged evidence for a host to author an OpenSpec domain. Read-only; no LLM or writes.',
     inputSchema: {
       type: 'object',
       properties: {
         directory: { type: 'string', description: DIR_DESC },
-        domain: { type: 'string', description: 'Reconciled analyzed domain to document.' },
-        cursor: { type: 'string', description: 'Opaque continuation cursor from a partial response.' },
-        maxItems: { type: 'number', minimum: 10, maximum: 200, description: 'Deterministic page size, 10-200 (default 80).' },
-        maxResponseBytes: { type: 'number', minimum: 8192, maximum: 225280, description: 'Serialized response budget in bytes (default 49152). Clamped to the server range; a caller may request less, never more.' },
+        domain: { type: 'string', description: 'Analyzed domain to document.' },
+        cursor: { type: 'string', description: 'Continuation cursor.' },
+        maxItems: { type: 'number', minimum: 10, maximum: 200, description: 'Page size (default 80).' },
+        maxResponseBytes: { type: 'number', minimum: 8192, maximum: 225280, description: 'Byte budget (default 49,152).' },
       },
       required: ['directory', 'domain'],
     },
   },
   {
     name: 'prepare_spec_repair',
-    description: 'Prepare bounded deterministic spec, mapping, coverage, drift, and structural evidence for a host agent to repair one existing OpenSpec specification. Read-only; no LLM and no file writes.',
+    description: 'Return paged evidence for a host to repair an OpenSpec domain. Read-only; no LLM or writes.',
     inputSchema: {
       type: 'object',
       properties: {
         directory: { type: 'string', description: DIR_DESC },
-        domain: { type: 'string', description: 'Existing OpenSpec domain to reconcile.' },
-        baseRef: { type: 'string', description: 'Git base ref for drift and structural changes.' },
-        cursor: { type: 'string', description: 'Opaque continuation cursor from a partial response.' },
-        maxItems: { type: 'number', minimum: 10, maximum: 200, description: 'Maximum observations per bounded category, 10-200.' },
-        maxResponseBytes: { type: 'number', minimum: 8192, maximum: 225280, description: 'Serialized response budget in bytes (default 49152). Clamped to the server range; a caller may request less, never more.' },
+        domain: { type: 'string', description: 'Existing domain to repair.' },
+        baseRef: { type: 'string', description: 'Drift comparison ref.' },
+        cursor: { type: 'string', description: 'Continuation cursor.' },
+        maxItems: { type: 'number', minimum: 10, maximum: 200, description: 'Per-category item limit.' },
+        maxResponseBytes: { type: 'number', minimum: 8192, maximum: 225280, description: 'Byte budget (default 49,152).' },
       },
       required: ['directory', 'domain'],
     },
@@ -2384,7 +2384,8 @@ interface McpServerOptions {
  */
 export const BREADTH_POINTER =
   'OpenLore is running its default tool surface (the substrate core: the navigation ' +
-  'core plus governance reads — recall + verify_claim + blast_radius). More tools ' +
+  'core, spec preparation — prepare_spec_generation + prepare_spec_repair — and ' +
+  'governance reads — recall + verify_claim + blast_radius). More tools ' +
   'are available behind named presets — the full surface (`--preset full`), multi-repo ' +
   'federation (`--preset federation`), parallel-work coordination (`--preset coordination`), ' +
   'or the lean navigate-only core (`--preset navigation`). Re-wire with ' +
@@ -2934,7 +2935,7 @@ export const mcpCommand = new Command('mcp')
   .option('--watch-debounce <ms>', 'Debounce delay in ms before re-indexing after a file change (default: 400)', '400')
   .option('--watch-no-embed', 'Watch signatures only — skip live vector re-embedding (embeddings refresh at commit). Large repos auto-degrade to this.')
   .option('--minimal', 'Expose only core 6 tools (orient, search_code, record_decision, detect_changes, check_spec_drift, get_health_map). Pair with alwaysLoad: true in Claude Code for always-visible core tools.')
-  .option('--preset <name>', `Expose a named tool preset. Default (no preset) is the "${LEAN_DEFAULT_PRESET}" surface — the navigation core plus governance reads: the graph-traversal core (orient, search_code, get_subgraph, trace_execution_path, analyze_impact, suggest_insertion_points, get_function_skeleton, get_landmarks, get_map, find_path) plus the governance reads recall + verify_claim + blast_radius (decision c79ec7ca / ADR-0023) — NOT the full registry. "navigation" = the lean navigate-only escape (the graph-traversal core alone, no governance reads); "minimal" = orient+search+governance; "memory" = orient+remember+recall; "verify" = orient+search+verify_claim; "federation" = orient + federation_status + spec_store_status + working_set_context + change_impact_certificate + map_in_flight_conflicts + the four cross-repo conclusion tools; "coordination" = orient + plan_parallel_work + map_in_flight_conflicts + analyze_impact + find_path; "full" = all ${TOOL_DEFINITIONS.length} tools (the prior default). Takes precedence over --minimal.`)
+  .option('--preset <name>', `Expose a named tool preset. Default (no preset) is the "${LEAN_DEFAULT_PRESET}" surface — the graph-traversal core (orient, search_code, get_subgraph, trace_execution_path, analyze_impact, suggest_insertion_points, get_function_skeleton, get_landmarks, get_map, find_path), spec preparation (prepare_spec_generation + prepare_spec_repair), and governance reads (recall + verify_claim + blast_radius) — NOT the full registry. "navigation" = the lean navigate-only escape (the graph-traversal core alone, no governance or spec-workflow reads); "minimal" = orient+search+governance; "memory" = orient+remember+recall; "verify" = orient+search+verify_claim; "federation" = orient + federation_status + spec_store_status + working_set_context + change_impact_certificate + map_in_flight_conflicts + the four cross-repo conclusion tools; "coordination" = orient + plan_parallel_work + map_in_flight_conflicts + analyze_impact + find_path; "full" = all ${TOOL_DEFINITIONS.length} tools (the prior default). Takes precedence over --minimal.`)
   .option('--all-tools', `Expose the full surface — all ${TOOL_DEFINITIONS.length} tools (alias for --preset full). Opt-in breadth; the "${LEAN_DEFAULT_PRESET}" default is recommended.`)
   .option('--list-tools', 'Print the active tool surface grouped by capability family (navigate/change/remember/verify/coordinate/federate) and exit — does not start the server. Respects --preset / --all-tools.')
   .action((options: McpServerOptions) => startMcpServer(options));

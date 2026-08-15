@@ -29,10 +29,11 @@ function prescribedTools(markdown: string): string[] {
     'record_decision', 'check_spec_drift', 'get_spec', 'search_specs', 'get_function_body',
     'get_schema_inventory', 'get_route_inventory', 'get_env_vars', 'get_ui_component_inventory',
     'get_middleware_inventory', 'trace_execution_path', 'get_subgraph', 'remember',
+    'prepare_spec_generation', 'prepare_spec_repair',
   ]) known.add(t);
 
   const found = new Set<string>();
-  for (const match of markdown.matchAll(/`([a-z_]+)`/g)) {
+  for (const match of markdown.matchAll(/`([a-z_]+)(?:\s[^`]*)?`/g)) {
     const name = match[1]!;
     if (known.has(name)) found.add(name);
   }
@@ -84,6 +85,16 @@ describe('generated guidance ↔ wired preset coherence', () => {
 
     const wired = TOOL_PRESETS['navigation']!;
     expect(prescribedTools(withoutUnavailabilityNotes(guidance)).filter(t => !wired.has(t))).toEqual([]);
+    expect(guidance).not.toContain('`prepare_spec_generation <domain>`');
+    expect(guidance).not.toContain('`prepare_spec_repair <domain>`');
+  });
+
+  it('prescribes both spec workflows on the default substrate surface', async () => {
+    writeMcpConfig(dir, ['--yes', 'openlore', 'mcp', '--preset', LEAN_DEFAULT_PRESET]);
+    const guidance = await generate(dir);
+
+    expect(guidance).toContain('`prepare_spec_generation <domain>`');
+    expect(guidance).toContain('`prepare_spec_repair <domain>`');
   });
 
   it('prescribes the decision workflow on the full surface', async () => {

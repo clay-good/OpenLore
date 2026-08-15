@@ -4,6 +4,18 @@ import { resolve } from 'node:path';
 import { buildManifest } from '../../cli/commands/setup.js';
 
 describe('spec workflow host skills', () => {
+  const legacySkillNames = [
+    'openlore-analyze-codebase',
+    'openlore-brainstorm',
+    'openlore-debug',
+    'openlore-execute-refactor',
+    'openlore-generate',
+    'openlore-implement-story',
+    'openlore-plan-refactor',
+    'openlore-review-changes',
+    'openlore-write-tests',
+  ];
+
   it('keeps deterministic composition on the MCP server', () => {
     const generate = readFileSync(resolve('skills/openlore-generate/SKILL.md'), 'utf8');
     const repair = readFileSync(resolve('skills/openlore-repair/SKILL.md'), 'utf8');
@@ -68,6 +80,14 @@ describe('spec workflow host skills', () => {
       expect(skillEntries.every(({ src }) => src.includes('/skills/openlore-'))).toBe(true);
       expect(generate?.src).toBe(resolve('skills/openlore-generate/SKILL.md'));
       expect(repair?.src).toBe(resolve('skills/openlore-repair/SKILL.md'));
+    }
+  });
+
+  it('keeps former host-specific package paths as exact compatibility copies', () => {
+    for (const name of legacySkillNames) {
+      const canonical = readFileSync(resolve('skills', name, 'SKILL.md'), 'utf8');
+      expect(readFileSync(resolve('examples/opencode-skills', name, 'SKILL.md'), 'utf8')).toBe(canonical);
+      expect(readFileSync(resolve('examples/mistral-vibe/skills', name, 'SKILL.md'), 'utf8')).toBe(canonical);
     }
   });
 });
