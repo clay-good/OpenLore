@@ -12,7 +12,7 @@ Real-world use of the new agent-hosted Generate and Repair workflows exposed a c
 - Serialize full analyses per repository with an inspectable lock containing PID, start time, heartbeat, and status. Report `ANALYSIS_IN_PROGRESS` distinctly and emit periodic progress during long artifact generation.
 - Add deterministic overlap observations between a candidate generated domain and existing spec footprints without making a business-domain decision for the host agent.
 - Make the agent-hosted Generate and Repair skills finalize successful spec edits through validation and deterministic mapping refresh, aligning their outcome with standalone generation.
-- Make `generate --dry-run` a real no-write preview that produces a temporary candidate output and spec diff; retain a cheap plan-only mode under an explicit `--plan` option.
+- Preserve the established free, no-provider `generate --dry-run` contract (with `--plan` as an explicit alias), and add paid `--preview` for a real isolated candidate output and spec diff.
 
 ## Capabilities
 

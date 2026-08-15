@@ -114,3 +114,10 @@ Legacy specs with only file-level `> Source files:` headers will report as
 `unmapped` rather than covered. That is the honest answer — add per-requirement
 anchors to establish real coverage. The bundled `openlore-generate` and
 `openlore-repair` skills write them automatically for anything they author.
+
+Legacy per-requirement hints such as
+`> Implementation: \`expireSession\` in \`src/auth/session.ts\` · confidence: reviewed`
+are consumed automatically when their confidence is `reviewed` or `llm`. Lower-confidence
+semantic or heuristic hints remain file-footprint evidence only. Run
+`openlore mapping refresh` to see the bounded list of requirements that still need an
+exact `symbol::path` anchor; refresh never guesses a replacement for a stale anchor.

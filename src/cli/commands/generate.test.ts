@@ -408,7 +408,7 @@ describe('generate command', () => {
 });
 
 // ============================================================================
-// PLAN VS REAL DRY RUN (change: harden-spec-workflow-lifecycle)
+// FREE PLAN/DRY RUN VS PAID PREVIEW (change: harden-spec-workflow-lifecycle)
 // ============================================================================
 
 const { generateCommand } = await import('./generate.js');
@@ -434,32 +434,38 @@ describe('generate preview modes', () => {
     return root;
   }
 
-  it('exposes --plan and --dry-run as distinct options', () => {
+  it('exposes free --dry-run/--plan and explicit paid --preview', () => {
     expect(generateCommand.options.find(opt => opt.long === '--plan')).toBeDefined();
     expect(generateCommand.options.find(opt => opt.long === '--dry-run')).toBeDefined();
+    expect(generateCommand.options.find(opt => opt.long === '--preview')).toBeDefined();
   });
 
-  it('documents that a real dry run still costs provider calls', () => {
+  it('documents cost only on the explicit preview', () => {
     const dryRun = generateCommand.options.find(opt => opt.long === '--dry-run');
-    expect(dryRun?.description).toMatch(/cost still occur/i);
+    expect(dryRun?.description).toMatch(/no provider call, no cost/i);
     const plan = generateCommand.options.find(opt => opt.long === '--plan');
     expect(plan?.description).toMatch(/no provider call/i);
+    const preview = generateCommand.options.find(opt => opt.long === '--preview');
+    expect(preview?.description).toMatch(/cost occur/i);
   });
 
-  it('runs plan mode before any provider is constructed', () => {
+  it('runs dry-run and plan mode before provider resolution or construction', () => {
     const source = readFileSync(fileURLToPath(new URL('./generate.ts', import.meta.url)), 'utf-8');
-    const planReturn = source.indexOf('Plan complete. No provider call was made');
+    const planReturn = source.indexOf("logger.success(`${opts.dryRun ? 'Dry run' : 'Plan'} complete");
+    const providerResolved = source.indexOf('const resolved = resolveLLMProvider(');
     const providerCreated = source.indexOf('llm = createLLMService(');
     expect(planReturn).toBeGreaterThan(-1);
+    expect(providerResolved).toBeGreaterThan(planReturn);
     expect(providerCreated).toBeGreaterThan(planReturn);
   });
 
-  it('redirects every dry-run write into a throwaway workspace and removes it', () => {
+  it('redirects every paid-preview write into a captured throwaway workspace and removes it', () => {
     const source = readFileSync(fileURLToPath(new URL('./generate.ts', import.meta.url)), 'utf-8');
-    expect(source).toContain("mkdtemp(join(tmpdir(), 'openlore-dry-run-'))");
+    expect(source).toContain("mkdtemp(join(tmpdir(), 'openlore-preview-'))");
     expect(source).toContain('if (previewRoot) opts.outputDir = previewRoot;');
+    expect(source).toContain('logDir: join(previewRoot ?? rootPath, OPENLORE_DIR, OPENLORE_LOGS_SUBDIR)');
     // Cleanup runs in a finally, so a provider failure cannot leak the workspace.
-    expect(source).toMatch(/finally \{[\s\S]*openlore-dry-run-[\s\S]*rm\(opts\.outputDir/);
+    expect(source).toMatch(/finally \{[\s\S]*if \(previewRoot\)[\s\S]*rm\(previewRoot/);
   });
 
   it('reports a new spec as an addition', async () => {

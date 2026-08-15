@@ -24,7 +24,12 @@ import { sanitizeForTerminal as safe } from '../../utils/misc.js';
 /** Ambiguous requirements listed in human output before the remainder is summarized. */
 const MAX_LISTED_AMBIGUITIES = 10;
 
-export function renderRefresh(index: SpecLinkIndex, artifactPath: string, source: 'cache' | 'derived'): string {
+export function renderRefresh(
+  index: SpecLinkIndex,
+  artifactPath: string,
+  source: 'cache' | 'derived',
+  cacheReason?: string,
+): string {
   const { stats } = index;
   const lines = [
     `Spec link index (${source === 'cache' ? 'already current' : 'rebuilt'})`,
@@ -35,6 +40,10 @@ export function renderRefresh(index: SpecLinkIndex, artifactPath: string, source
     `  stale:         ${stats.stale}`,
     `  covered:       ${stats.coveredFunctions}/${stats.totalExportedFunctions} exported symbols`,
   ];
+
+  if (cacheReason === 'incompatible-provenance') {
+    lines.push('', '  Legacy mapping cache was incompatible and was rebuilt from current specs and analysis.');
+  }
 
   const ambiguous = index.links.filter(link => link.state === 'ambiguous');
   if (ambiguous.length > 0) {
@@ -52,6 +61,33 @@ export function renderRefresh(index: SpecLinkIndex, artifactPath: string, source
       lines.push('    Disambiguate by writing `symbol::path/to/file.ts` in the requirement anchor,');
       lines.push('    or read the full set from the JSON output: `openlore mapping refresh --json`.');
     }
+  }
+
+  const unmapped = index.links.filter(link => link.state === 'unmapped');
+  if (unmapped.length > 0) {
+    lines.push('', '  Requirements without an exact implementation anchor:');
+    for (const link of unmapped.slice(0, MAX_LISTED_AMBIGUITIES)) {
+      lines.push(`    [${safe(link.domain)}] ${safe(link.requirement)}`);
+    }
+    if (unmapped.length > MAX_LISTED_AMBIGUITIES) {
+      lines.push(`    … and ${unmapped.length - MAX_LISTED_AMBIGUITIES} more unmapped requirements`);
+    }
+    lines.push('    Legacy `> Source files:` headers provide domain footprint only. Add a per-requirement');
+    lines.push('    - **Implementation**: `symbol::path/to/file.ts` anchor, then refresh again.');
+  }
+
+  const stale = index.links.filter(link => link.state === 'stale');
+  if (stale.length > 0) {
+    lines.push('', '  Stale implementation anchors:');
+    for (const link of stale.slice(0, MAX_LISTED_AMBIGUITIES)) {
+      const raw = link.anchors.filter(anchor => anchor.state === 'stale').map(anchor => `\`${safe(anchor.raw)}\``).join(', ');
+      lines.push(`    [${safe(link.domain)}] ${safe(link.requirement)} → ${raw}`);
+    }
+    if (stale.length > MAX_LISTED_AMBIGUITIES) {
+      lines.push(`    … and ${stale.length - MAX_LISTED_AMBIGUITIES} more stale requirements`);
+    }
+    lines.push('    Replace each stale anchor with the current exact `symbol::path`, or remove it if the');
+    lines.push('    requirement no longer has an implementation. No candidate is selected automatically.');
   }
 
   lines.push('', `  Written to: ${artifactPath}`);
@@ -87,7 +123,7 @@ const refreshCommand = new Command('refresh')
     if (opts.json) {
       await writeStdout(JSON.stringify(resolution.index, null, 2) + '\n');
     } else {
-      console.log(renderRefresh(resolution.index, resolution.artifactPath, resolution.source));
+      console.log(renderRefresh(resolution.index, resolution.artifactPath, resolution.source, resolution.cacheReason));
     }
 
     // An honest index still exits 0; ambiguity is only fatal when asked for.

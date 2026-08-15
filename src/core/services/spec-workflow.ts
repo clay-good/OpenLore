@@ -225,7 +225,7 @@ function respondWithPage(args: {
   const build = (page: EvidencePage): SpecWorkflowEnvelope => {
     const cursor = page.next
       ? encodeEvidenceCursor({
-          v: EVIDENCE_STREAM_PROTOCOL, w: workflow, d: requestedDomain, g: loaded.fingerprint,
+          v: EVIDENCE_STREAM_PROTOCOL, w: workflow, d: resolvedDomain ?? requestedDomain, g: loaded.fingerprint,
           s: page.next.sectionIndex, o: page.next.offset, b: budget,
         })
       : undefined;
@@ -279,6 +279,7 @@ function respondWithPage(args: {
 function resolveStart(
   workflow: SpecWorkflow,
   input: PrepareSpecInput,
+  resolvedDomain: string,
   fingerprint: string,
   sectionCount: number,
 ): { start: EvidenceStreamPosition; budget: number } | SpecWorkflowEnvelope {
@@ -286,7 +287,7 @@ function resolveStart(
     return { start: { sectionIndex: 0, offset: 0 }, budget: clampResponseBytes(input.maxResponseBytes) };
   }
   const cursor = decodeEvidenceCursor(input.cursor);
-  if (!cursor || cursor.w !== workflow || cursor.d !== input.domain) {
+  if (!cursor || cursor.w !== workflow || cursor.d !== resolvedDomain) {
     return unavailable(workflow, input.domain, 'analysis-changed', `Invalid continuation cursor; restart ${workflow} preparation.`);
   }
   if (cursor.g !== fingerprint) {
@@ -311,13 +312,13 @@ export async function prepareSpecGeneration(input: PrepareSpecInput): Promise<Sp
   const loaded = snapshot.loaded;
 
   const bundles = buildDomainEvidence(loaded.repo, loaded.context);
-  const bundle = bundles.find(item => item.name === input.domain);
+  const bundle = bundles.find(item => item.name.toLowerCase() === input.domain.toLowerCase());
   if (!bundle) return unavailable('generation', input.domain, 'unknown-domain', `No analyzed domain named "${input.domain}".`, bundles.map(item => item.name));
 
   // Resolve the cursor BEFORE building the stream: overlap costs a full read of
   // the spec corpus plus a link-index build, and a continuation page that has
   // already streamed past the `overlap` section must not pay for it again.
-  const resolved = resolveStart('generation', input, loaded.fingerprint, GENERATION_STREAM_SECTIONS.length);
+  const resolved = resolveStart('generation', input, bundle.name, loaded.fingerprint, GENERATION_STREAM_SECTIONS.length);
   if ('receipt' in resolved) return resolved;
 
   const overlapIndex = GENERATION_STREAM_SECTIONS.indexOf('overlap');
@@ -348,7 +349,7 @@ export async function prepareSpecGeneration(input: PrepareSpecInput): Promise<Sp
     },
     start: resolved.start,
     budget: resolved.budget,
-    followUpsFor: page => continuationFollowUps('generation', input, page),
+    followUpsFor: page => continuationFollowUps('generation', { ...input, domain: bundle.name }, page),
   });
 }
 
@@ -434,19 +435,22 @@ export async function prepareSpecRepair(input: PrepareSpecInput): Promise<SpecWo
   if (snapshot.state === 'changed') return unavailable('repair', input.domain, 'analysis-changed', snapshot.message);
   if (snapshot.state !== 'ok') return unavailable('repair', input.domain, 'analysis-unavailable', 'No compatible analysis found. Run analyze_codebase first.');
   const loaded = snapshot.loaded;
-  const spec = objectResult(await handleGetSpec(loaded.root, input.domain));
+  const bundles = buildDomainEvidence(loaded.repo, loaded.context);
+  const bundle = bundles.find(item => item.name.toLowerCase() === input.domain.toLowerCase());
+  const specCorpus = await loadSpecCorpus(loaded.root, loaded.openspecPath);
+  const canonicalSpecDomain = specCorpus.find(item => item.domain.toLowerCase() === input.domain.toLowerCase())?.domain;
+  const resolvedDomain = bundle?.name ?? canonicalSpecDomain ?? input.domain;
+  const spec = objectResult(await handleGetSpec(loaded.root, canonicalSpecDomain ?? resolvedDomain));
   if (typeof spec.error === 'string') return unavailable('repair', input.domain, 'spec-not-found', spec.error);
 
-  const bundles = buildDomainEvidence(loaded.repo, loaded.context);
-  const bundle = bundles.find(item => item.name === input.domain);
   // Resolve links against the graph this composite already parsed rather than
   // re-reading `dependency-graph.json` for the same request.
   const [mappingRaw, drift] = await Promise.all([
     resolveSpecLinkIndex({
-      rootPath: loaded.root, openspecPath: loaded.openspecPath, domains: [input.domain], persist: false, graph: loaded.graph,
+      rootPath: loaded.root, openspecPath: loaded.openspecPath, domains: [resolvedDomain], persist: false, graph: loaded.graph,
     })
-      .then(resolution => mappingViewOf(resolution, input.domain)),
-    handleCheckSpecDrift(loaded.root, input.baseRef ?? 'auto', [], [input.domain]),
+      .then(resolution => mappingViewOf(resolution, resolvedDomain)),
+    handleCheckSpecDrift(loaded.root, input.baseRef ?? 'auto', [], [resolvedDomain]),
   ]);
   input.signal?.throwIfAborted();
   const mapping = objectResult(mappingRaw);
@@ -466,7 +470,7 @@ export async function prepareSpecRepair(input: PrepareSpecInput): Promise<SpecWo
     maxItems,
     5,
     false,
-    { files: scopedPaths, domains: [input.domain] },
+    { files: scopedPaths, domains: [resolvedDomain] },
   );
   input.signal?.throwIfAborted();
   const scopedSet = new Set(scopedPaths);
@@ -478,12 +482,12 @@ export async function prepareSpecRepair(input: PrepareSpecInput): Promise<SpecWo
   const auditObj = objectResult(audit);
   const mappingCoverage = auditObj.mappingCoverage;
   const allOrphanRequirements = (Array.isArray(auditObj.orphanRequirements)
-    ? auditObj.orphanRequirements as Array<Record<string, unknown>> : []).filter(item => item.domain === input.domain);
+    ? auditObj.orphanRequirements as Array<Record<string, unknown>> : []).filter(item => item.domain === resolvedDomain);
   const scopedAudit = {
     ...auditObj,
     uncoveredFunctions: (Array.isArray(auditObj.uncoveredFunctions) ? auditObj.uncoveredFunctions as Array<Record<string, unknown>> : []).filter(item => inScope(item.file)),
     orphanRequirements: allOrphanRequirements.slice(0, maxItems),
-    staleDomains: (Array.isArray(auditObj.staleDomains) ? auditObj.staleDomains as Array<Record<string, unknown>> : []).filter(item => item.name === input.domain),
+    staleDomains: (Array.isArray(auditObj.staleDomains) ? auditObj.staleDomains as Array<Record<string, unknown>> : []).filter(item => item.name === resolvedDomain),
     summary: {},
   };
   const scopedNodes = (loaded.context.callGraph?.nodes ?? []).filter(node => inScope(node.filePath));
@@ -552,7 +556,7 @@ export async function prepareSpecRepair(input: PrepareSpecInput): Promise<SpecWo
     candidateDecisions: bundle?.candidateDecisions ?? [],
   });
 
-  const resolved = resolveStart('repair', input, loaded.fingerprint, sections.length);
+  const resolved = resolveStart('repair', input, resolvedDomain, loaded.fingerprint, sections.length);
   if ('receipt' in resolved) return resolved;
 
   const mappingProvenance = {
@@ -569,7 +573,7 @@ export async function prepareSpecRepair(input: PrepareSpecInput): Promise<SpecWo
   return respondWithPage({
     workflow: 'repair',
     requestedDomain: input.domain,
-    ...(bundle ? { resolvedDomain: bundle.name } : {}),
+    resolvedDomain,
     loaded,
     sections,
     pageGlobal: {
@@ -591,7 +595,7 @@ export async function prepareSpecRepair(input: PrepareSpecInput): Promise<SpecWo
     start: resolved.start,
     budget: resolved.budget,
     followUpsFor: page => [
-      ...continuationFollowUps('repair', input, page),
+      ...continuationFollowUps('repair', { ...input, domain: resolvedDomain }, page),
       ...(mappingUnavailable ? [mappingRemediation(loaded.root, objectResult(mappingCoverage))] : []),
     ],
     extraOmissions: coverageOmissions,

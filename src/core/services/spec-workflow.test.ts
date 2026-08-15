@@ -96,6 +96,12 @@ describe('spec workflow composites', () => {
     expect(result.evidence).toBeUndefined();
   });
 
+  it('resolves generation domains case-insensitively and returns the canonical name', async () => {
+    const result = await prepareSpecGeneration({ directory: fixture(2), domain: 'BILLING' });
+    expect(result.error).toBeUndefined();
+    expect(result.domain).toEqual({ requested: 'BILLING', resolved: 'billing' });
+  });
+
   it('reports an indivisible oversized record instead of dropping the section', async () => {
     const root = fixture(1);
     const contextPath = join(root, '.openlore', 'analysis', 'llm-context.json');
@@ -167,6 +173,27 @@ describe('spec workflow composites', () => {
     const first = await prepareSpecGeneration({ directory: root, domain: 'billing', maxResponseBytes: 8 * 1024 });
     const result = await prepareSpecGeneration({ directory: root, domain: 'typo', cursor: first.receipt.continuationCursor });
     expect(result.error?.code).toBe('unknown-domain');
+  });
+
+  it('binds continuation cursors to the canonical domain across casing changes', async () => {
+    const root = fixture(12, 2_000);
+    const repoPath = join(root, '.openlore', 'analysis', 'repo-structure.json');
+    const repo = JSON.parse(String(await import('node:fs/promises').then(fs => fs.readFile(repoPath))));
+    repo.domains.push({ name: 'orders', files: [], definingFiles: [], supportingFiles: [] });
+    repo.domainDecisions = Array.from({ length: 30 }, (_, index) => ({
+      candidate: `billing-${index}-${'x'.repeat(500)}`,
+      path: 'src/billing', sources: ['directory'], disposition: 'promoted',
+      reason: 'ownership-root', owner: 'billing', files: [],
+    }));
+    writeFileSync(repoPath, JSON.stringify(repo));
+
+    const first = await prepareSpecGeneration({ directory: root, domain: 'BILLING', maxResponseBytes: 8 * 1024 });
+    const continued = await prepareSpecGeneration({ directory: root, domain: 'billing', cursor: first.receipt.continuationCursor });
+    expect(continued.error).toBeUndefined();
+    expect(continued.domain).toEqual({ requested: 'billing', resolved: 'billing' });
+
+    const switched = await prepareSpecGeneration({ directory: root, domain: 'orders', cursor: first.receipt.continuationCursor });
+    expect(switched.error?.code).toBe('analysis-changed');
   });
 
   it('extracts historical source paths without guessing prose', () => {
@@ -254,6 +281,42 @@ describe('spec workflow composites', () => {
     const invalid = await prepareSpecRepair({ directory: root, domain: 'legacy', baseRef: 'HEAD' });
     expect(invalid.evidence?.mappingCoverage).toMatchObject({ state: 'available', source: 'derived' });
     expect(invalid.evidence?.existingSpecMeta).toMatchObject({ domain: 'legacy' });
+  });
+
+  it('resolves repair spec domains case-insensitively and returns the canonical name', async () => {
+    const root = fixture(1);
+    mkdirSync(join(root, 'openspec', 'specs', 'billing'), { recursive: true });
+    writeFileSync(join(root, 'openspec', 'specs', 'billing', 'spec.md'), '# Billing\n');
+
+    const result = await prepareSpecRepair({ directory: root, domain: 'BILLING' });
+    expect(result.error).toBeUndefined();
+    expect(result.domain).toEqual({ requested: 'BILLING', resolved: 'billing' });
+  });
+
+  it('binds repair cursors to the canonical domain without making casing significant', async () => {
+    const root = fixture(12, 2_000);
+    const repoPath = join(root, '.openlore', 'analysis', 'repo-structure.json');
+    const repo = JSON.parse(String(await import('node:fs/promises').then(fs => fs.readFile(repoPath))));
+    repo.domains.push({ name: 'orders', files: [], definingFiles: [], supportingFiles: [] });
+    repo.domainDecisions = Array.from({ length: 30 }, (_, index) => ({
+      candidate: `billing-${index}-${'x'.repeat(500)}`,
+      path: 'src/billing', sources: ['directory'], disposition: 'promoted',
+      reason: 'ownership-root', owner: 'billing', files: [],
+    }));
+    writeFileSync(repoPath, JSON.stringify(repo));
+    for (const domain of ['billing', 'orders']) {
+      mkdirSync(join(root, 'openspec', 'specs', domain), { recursive: true });
+      writeFileSync(join(root, 'openspec', 'specs', domain, 'spec.md'), `# ${domain}\n`);
+    }
+
+    const first = await prepareSpecRepair({ directory: root, domain: 'BILLING', maxResponseBytes: 8 * 1024 });
+    expect(first.receipt.continuationCursor).toBeDefined();
+    const continued = await prepareSpecRepair({ directory: root, domain: 'billing', cursor: first.receipt.continuationCursor });
+    expect(continued.error).toBeUndefined();
+    expect(continued.domain).toEqual({ requested: 'billing', resolved: 'billing' });
+
+    const switched = await prepareSpecRepair({ directory: root, domain: 'orders', cursor: first.receipt.continuationCursor });
+    expect(switched.error?.code).toBe('analysis-changed');
   });
 
   it('withholds coverage metrics for a spec outside the link corpus', async () => {

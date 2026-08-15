@@ -113,4 +113,33 @@ describe('renderRefresh', () => {
     expect(output).toContain('src/auth.ts:1');
     expect(output).toContain('src/legacy.ts:1');
   });
+
+  it('gives legacy specs an actionable per-requirement anchor migration', async () => {
+    const root = await fixture(
+      { auth: '# Auth\n\n> Source files: `src/auth.ts`\n\n' + requirement('Legacy Requirement') },
+      { 'src/auth.ts': ['createSession'] },
+    );
+    const resolution = await resolveSpecLinkIndex({ rootPath: root, persist: false });
+    if (resolution.state !== 'available') throw new Error('fixture should resolve');
+
+    const output = renderRefresh(resolution.index, resolution.artifactPath, resolution.source, 'incompatible-provenance');
+    expect(output).toContain('Legacy mapping cache was incompatible');
+    expect(output).toContain('[auth] Legacy Requirement');
+    expect(output).toContain('Legacy `> Source files:` headers provide domain footprint only');
+    expect(output).toContain('symbol::path/to/file.ts');
+  });
+
+  it('lists stale anchors without silently choosing a replacement', async () => {
+    const root = await fixture(
+      { auth: `# Auth\n\n${requirement('Removed Handler', 'oldHandler::src/auth.ts')}` },
+      { 'src/auth.ts': ['newHandler'] },
+    );
+    const resolution = await resolveSpecLinkIndex({ rootPath: root, persist: false });
+    if (resolution.state !== 'available') throw new Error('fixture should resolve');
+
+    const output = renderRefresh(resolution.index, resolution.artifactPath, resolution.source);
+    expect(output).toContain('Stale implementation anchors:');
+    expect(output).toContain('oldHandler::src/auth.ts');
+    expect(output).toContain('No candidate is selected automatically');
+  });
 });

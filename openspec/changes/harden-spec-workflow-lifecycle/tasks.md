@@ -53,9 +53,9 @@
 
 - [x] 7.1 Update canonical `openlore-generate` and `openlore-repair` skills to add exact per-requirement implementation anchors, validate edits, refresh mapping when CLI access exists, and disclose skipped cache persistence without weakening later correctness.
 - [x] 7.2 Update setup/package conformance tests so every installed host receives the same finalization and continuation protocol; resynchronize the global test installation only after canonical sources pass.
-- [x] 7.3 Move the current cheap generate dry-run listing to `--plan`, including CLI/API option validation and backward-facing help text.
-- [x] 7.4 Implement real `generate --dry-run` in isolated temporary output with provider/cost disclosure, normalized spec/config diff rendering, and zero writes to project specs, mapping, manifests, backups, or analysis artifacts.
-- [x] 7.5 Add snapshot/integration tests for plan mode without provider calls, dry-run candidate diffs, external output directories, provider failure cleanup, and byte-identical project state before/after preview.
+- [x] 7.3 Preserve the free generate `--dry-run` contract and expose the same plan-only behavior under `--plan`, including CLI/API regression coverage before provider resolution.
+- [x] 7.4 Implement explicit paid `generate --preview` in isolated temporary output with provider/cost disclosure, normalized candidate-spec summary, and zero writes to project specs, mapping, configuration, manifests, backups, or analysis artifacts.
+- [x] 7.5 Add snapshot/integration tests for dry-run/plan without provider calls, paid-preview candidate diffs, external output directories, provider failure cleanup, and byte-identical project state before/after preview.
 
 ## 8. Validation And Dogfood
 
@@ -64,5 +64,5 @@
 - [x] 8.3 Dogfood Analyze → mapping refresh → Repair and agent-hosted Generate on the external project that produced the feedback, exercising stale provenance, oversized `components`, existing-spec overlap, daemon reload, concurrent analyze, heartbeat, and real preview.
   - **Exercised on pi-outpost:** legacy/incompatible mapping provenance (reported `available` + `derived`, never a misleading 0%); cache-free Repair on four domains (`theme`, `preview-file-attachments`, `agent`, `file`) taking the link index from 17 linked / 10 stale to **27 linked / 0 stale**; `openlore mapping refresh`; concurrent analyze (second invocation reported the live owner and did no work); stale reclamation after a `kill -9` (dead PID + stale heartbeat); signal cleanup; generation-manifest publication and digest binding; daemon reload against an externally published generation.
   - **Found by dogfooding, not by tests:** the ownership heartbeat never beat during a long synchronous stage (405s frozen), because timers are event-loop callbacks — fixed with an out-of-loop `worker_thread` watchdog. The pre-existing "18-minute silent stage" test had passed throughout: it drove `update()` itself, simulating the very cadence that fails in production.
-  - **NOT exercised — real `generate --dry-run`.** It runs the actual provider pipeline and costs real money on someone else's account. `--plan` (free) was verified instead. This is an owner's call, deliberately left undone rather than silently skipped.
+  - **NOT exercised — paid `generate --preview`.** It runs the actual provider pipeline and costs real money on someone else's account. Free `--dry-run`/`--plan` behavior was verified instead. This is an owner's call, deliberately left undone rather than silently skipped.
 - [x] 8.4 Update user-facing MCP/CLI/skill documentation and the PR description with deterministic mapping, nullable coverage, transport-safe continuation, lifecycle observability, preview cost, limitations, and migration guidance.

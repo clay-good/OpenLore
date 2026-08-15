@@ -103,7 +103,7 @@ async function loadAnalysisData(analysisPath: string): Promise<AnalysisData | nu
  *
  * @throws Error if no openlore configuration found
  * @throws Error if no analysis found
- * @throws Error if no LLM API key found
+ * @throws Error if no LLM API key found (except in dry-run mode)
  * @throws Error if LLM API connectivity fails
  * @throws Error if pipeline fails
  */
@@ -137,6 +137,30 @@ export async function openloreGenerate(options: GenerateApiOptions = {}): Promis
   }
   const { repoStructure, llmContext, depGraph, refactorReport } = analysisData;
   progress(onProgress, 'Loading analysis', 'complete', `${repoStructure.statistics.analyzedFiles} files`);
+
+  // Keep the public API's historical dry-run contract: analysis is validated,
+  // but no provider is resolved or constructed and nothing is written.
+  if (options.dryRun) {
+    progress(onProgress, 'Dry run complete', 'complete');
+    return {
+      report: {
+        timestamp: new Date().toISOString(),
+        openspecVersion: openloreConfig.version ?? '1.0.0',
+        openloreVersion: '1.0.0',
+        filesWritten: [],
+        filesSkipped: [],
+        filesBackedUp: [],
+        filesMerged: [],
+        domainsRemoved: [],
+        configUpdated: false,
+        validationErrors: [],
+        warnings: [],
+        nextSteps: ['Run without --dry-run to generate specs'],
+      },
+      pipelineResult: {} as GenerateResult['pipelineResult'],
+      duration: Date.now() - startTime,
+    };
+  }
 
   // Resolve provider
   const anthropicKey = process.env.ANTHROPIC_API_KEY;
@@ -220,29 +244,6 @@ export async function openloreGenerate(options: GenerateApiOptions = {}): Promis
     throw new Error(`Failed to create LLM service: ${(error as Error).message}`, { cause: error });
   }
   progress(onProgress, 'Creating LLM service', 'complete', `${effectiveProvider}/${effectiveModel}`);
-
-  // Dry run — return empty result
-  if (options.dryRun) {
-    progress(onProgress, 'Dry run complete', 'complete');
-    return {
-      report: {
-        timestamp: new Date().toISOString(),
-        openspecVersion: openloreConfig.version ?? '1.0.0',
-        openloreVersion: '1.0.0',
-        filesWritten: [],
-        filesSkipped: [],
-        filesBackedUp: [],
-        filesMerged: [],
-        domainsRemoved: [],
-        configUpdated: false,
-        validationErrors: [],
-        warnings: [],
-        nextSteps: ['Run without --dry-run to generate specs'],
-      },
-      pipelineResult: {} as GenerateResult['pipelineResult'],
-      duration: Date.now() - startTime,
-    };
-  }
 
   // Run pipeline
   progress(onProgress, 'Running LLM generation pipeline', 'start');

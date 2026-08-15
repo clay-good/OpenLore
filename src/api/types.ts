@@ -136,7 +136,7 @@ export interface GenerateApiOptions extends BaseOptions {
   adrOnly?: boolean;
   /** Generate requirement-to-function mapping */
   mapping?: boolean;
-  /** Preview what would be generated without writing */
+  /** List what would be generated without constructing/calling a provider or writing */
   dryRun?: boolean;
   /** Path to analysis directory. Default: '.openlore/analysis/' */
   analysisPath?: string;

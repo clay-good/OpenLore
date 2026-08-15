@@ -196,7 +196,7 @@ Large monorepos take minutes rather than seconds — stated plainly in [Known Li
 <summary>Optional pipeline, install from source, and Nix</summary>
 
 ```bash
-openlore generate   # generate living specs (requires API key)
+openlore generate   # standalone provider-backed generation (API key or supported local/host CLI)
 openlore drift      # detect spec/code drift (no API key)
 openlore decisions  # manage architectural decisions
 ```
@@ -272,7 +272,7 @@ Three layers, each usable independently:
 | Layer | What it does | API key? |
 |-------|-------------|----------|
 | **1. Static Analysis** | Call graph, clusters, McCabe CC, IaC, external deps → `CODEBASE.md` digest | No |
-| **2. Spec & Governance** | Living specs, ADRs, drift detection, change certificates, decision & finding gates | For spec *generation* only |
+| **2. Spec & Governance** | Living specs, ADRs, drift detection, change certificates, decision & finding gates | No for governance and host-agent authoring; standalone `generate` needs provider access |
 | **3. Agent Runtime** | 75 MCP tools — `orient()`, spec preparation, graph traversal, semantic search, verdicts & gates | No |
 
 Use layer 1 alone for structural context; add layer 2 for semantic intent and governance; layer 3 keeps it all accessible through MCP once `openlore mcp` is running.
@@ -407,7 +407,7 @@ We'd rather you know these up front. Last validated against the code on 2026-07-
 
 - **Node.js 22.13+** (the first line where the built-in `node:sqlite` is available without runtime flags).
 - **No API key** for `analyze`, `drift`, `mcp`, `init`, and every governance/navigation tool.
-- **API key** only for `generate`, `verify`, and `drift --use-llm`:
+- **Provider access** only for standalone `generate`, `verify`, and `drift --use-llm`. Agent-hosted Generate/Repair uses the connected host model and needs no additional OpenLore key:
   ```bash
   export ANTHROPIC_API_KEY=sk-ant-...    # default provider
   export OPENAI_API_KEY=sk-...           # OpenAI

@@ -17,8 +17,9 @@
 | `openlore orient --inject` | Emit a bounded, ignorable task-scoped orientation block for a pre-turn hook | No |
 | `openlore generate` | Generate specs from analysis | Yes |
 | `openlore generate --adr` | Also generate Architecture Decision Records | Yes |
-| `openlore generate --plan` | List the stages and domains that would run, then stop — no provider call, no cost, no writes | No |
-| `openlore generate --dry-run` | Run the REAL pipeline into an isolated temporary workspace and show the candidate spec diff; the project tree is left byte-identical | Yes |
+| `openlore generate --dry-run` | List the stages and domains that would run, then stop — no provider call, no cost, no writes | No |
+| `openlore generate --plan` | Explicit alias for the same free plan-only output | No |
+| `openlore generate --preview` | Run the real pipeline in an isolated temporary workspace and show the candidate spec diff; provider cost occurs and the project tree is left byte-identical | Yes |
 | `openlore mapping refresh` | Rebuild the deterministic spec→code link index from the anchors written in existing specs | No |
 | `openlore verify` | Verify spec accuracy | Yes |
 | `openlore drift` | Detect spec drift (static) | No |

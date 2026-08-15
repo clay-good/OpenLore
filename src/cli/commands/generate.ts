@@ -85,13 +85,10 @@ interface ExtendedGenerateOptions extends GenerateOptions {
   yes?: boolean;
   outputDir?: string;
   force?: boolean;
-  /**
-   * Cheap plan-only mode: list the stages and domains that would run, then stop.
-   * This is the behavior `--dry-run` used to have; it was renamed because users
-   * conventionally expect a dry run to exercise the real operation without
-   * committing it (change `harden-spec-workflow-lifecycle`).
-   */
+  /** Cheap plan-only alias: list the stages and domains, then stop. */
   plan?: boolean;
+  /** Paid preview: run the real pipeline with every write redirected. */
+  preview?: boolean;
 }
 
 interface AnalysisData {
@@ -169,7 +166,7 @@ export async function renderSpecPreviewDiff(projectRoot: string, previewRoot: st
   lines.push('');
   lines.push(changed === 0
     ? '  No specification would change.'
-    : `  ${changed} specification(s) would change. Re-run without --dry-run to apply.`);
+    : `  ${changed} specification(s) would change. Re-run without --preview to apply.`);
   return lines;
 }
 
@@ -276,12 +273,17 @@ export const generateCommand = new Command('generate')
   )
   .option(
     '--dry-run',
-    'Run the real generation into an isolated temporary workspace and show the candidate spec diff. Provider calls and cost still occur; the project tree is left byte-identical.',
+    'List the stages and domains that would run, then stop. No provider call, no cost, no writes.',
     false
   )
   .option(
     '--plan',
     'List the stages and domains that would run, then stop. No provider call, no cost, no writes.',
+    false
+  )
+  .option(
+    '--preview',
+    'Run the real generation in an isolated temporary workspace and show the candidate spec diff. Provider calls and cost occur; the project tree is left byte-identical.',
     false
   )
   .option(
@@ -327,8 +329,9 @@ export const generateCommand = new Command('generate')
     `
 Examples:
   $ openlore generate                Generate all specs from analysis
-  $ openlore generate --plan         List planned stages/domains (free, no provider call)
-  $ openlore generate --dry-run      Real preview: generates into a temp workspace and diffs
+  $ openlore generate --dry-run      List planned stages/domains (free, no provider call)
+  $ openlore generate --plan         Same free plan-only behavior, with an explicit name
+  $ openlore generate --preview      Paid preview: generate in a temp workspace and diff
   $ openlore generate --domains auth,api,database
                                      Only generate specific domains
   $ openlore generate --model claude-opus-4-20250514
@@ -368,6 +371,7 @@ Each spec.md follows OpenSpec conventions:
   .action(async function (this: Command, options: Partial<ExtendedGenerateOptions>) {
     const startTime = Date.now();
     const rootPath = process.cwd();
+    let previewRoot: string | null = null;
 
     // Inherit global options (--api-base, --insecure, etc.)
     const globalOpts = this.optsWithGlobals?.() ?? {};
@@ -377,6 +381,7 @@ Each spec.md follows OpenSpec conventions:
       model: options.model ?? '',
       dryRun: options.dryRun ?? false,
       plan: options.plan ?? false,
+      preview: options.preview ?? false,
       domains: options.domains ?? [],
       adr: options.adr ?? false,
       adrOnly: options.adrOnly ?? false,
@@ -405,11 +410,17 @@ Each spec.md follows OpenSpec conventions:
         return;
       }
 
-      // A real dry run redirects EVERY project-target path into a throwaway
+      if ([opts.dryRun, opts.plan, opts.preview].filter(Boolean).length > 1) {
+        logger.error('Choose only one of --dry-run, --plan, or --preview.');
+        process.exitCode = 1;
+        return;
+      }
+
+      // A paid preview redirects EVERY project-target path into a throwaway
       // workspace: specs, mapping, config, manifests, backups. Redirecting through
       // the existing `--output-dir` plumbing means there is one isolation
       // mechanism, not a second parallel set of preview-only write paths.
-      const previewRoot = opts.dryRun ? await mkdtemp(join(tmpdir(), 'openlore-dry-run-')) : null;
+      previewRoot = opts.preview ? await mkdtemp(join(tmpdir(), 'openlore-preview-')) : null;
       if (previewRoot) opts.outputDir = previewRoot;
 
       // Determine openspec path
@@ -442,7 +453,7 @@ Each spec.md follows OpenSpec conventions:
       const analysisPath = join(rootPath, opts.analysis);
 
       // --force: clear intermediate stage files so no stale LLM output survives
-      if (options.force === true) {
+      if (options.force === true && !opts.dryRun && !opts.plan && !opts.preview) {
         const generationDir = join(rootPath, OPENLORE_DIR, OPENLORE_GENERATION_SUBDIR);
         await rm(generationDir, { recursive: true, force: true });
         logger.discovery('--force: cleared generation cache');
@@ -462,6 +473,32 @@ Each spec.md follows OpenSpec conventions:
       logger.info('Files analyzed', repoStructure.statistics.analyzedFiles);
       logger.info('Domains detected', repoStructure.domains.map(d => d.name).join(', ') || 'None');
       logger.blank();
+
+      if (opts.plan || opts.dryRun) {
+        logger.section('Generation Plan');
+        logger.discovery('Would run LLM generation pipeline with:');
+        logger.listItem('Stage 1: Project Survey');
+        logger.listItem('Stage 2: Entity Extraction');
+        logger.listItem('Stage 3: Service Analysis');
+        logger.listItem('Stage 4: API Extraction');
+        logger.listItem('Stage 5: Architecture Synthesis');
+        logger.blank();
+
+        const domainFilter = opts.domains.length > 0 ? opts.domains : repoStructure.domains.map(d => d.name);
+        logger.discovery('Domains to generate:');
+        for (const domain of domainFilter) logger.listItem(domain);
+        logger.blank();
+
+        logger.discovery('Would write specs to:');
+        logger.listItem(`${openspecPath}/specs/overview/spec.md`);
+        logger.listItem(`${openspecPath}/specs/architecture/spec.md`);
+        for (const domain of domainFilter) logger.listItem(`${openspecPath}/specs/${domain}/spec.md`);
+        logger.listItem(`${openspecPath}/specs/api/spec.md (if applicable)`);
+        logger.blank();
+
+        logger.success(`${opts.dryRun ? 'Dry run' : 'Plan'} complete. No provider call was made and no files were modified.`);
+        return;
+      }
 
       // ========================================================================
       // PHASE 3: PRE-FLIGHT CHECKS
@@ -530,18 +567,15 @@ Each spec.md follows OpenSpec conventions:
         logger.blank();
       }
 
-      // A real dry run still calls the provider, so the cost is real and must be
-      // disclosed before it is incurred — the whole point of separating it from
-      // the free `--plan` mode.
-      if (opts.dryRun) {
-        logger.discovery('DRY RUN — the real pipeline runs into an isolated temporary workspace.');
-        logger.warning(`Provider calls and cost still occur (estimated ~$${estimate.cost.toFixed(2)}). Use --plan for a free preview.`);
+      if (opts.preview) {
+        logger.discovery('PAID PREVIEW — the real pipeline runs in an isolated temporary workspace.');
+        logger.warning(`Provider calls and cost occur (estimated ~$${estimate.cost.toFixed(2)}). Use --dry-run for a free plan.`);
         logger.blank();
       }
 
       // Confirmation prompt. Plan mode never reaches a provider, so there is no
       // cost to confirm — prompting there would make the free preview interactive.
-      if (!opts.plan && estimate.cost > COST_CONFIRMATION_THRESHOLD) {
+      if (!opts.plan && !opts.dryRun && estimate.cost > COST_CONFIRMATION_THRESHOLD) {
         const confirmed = await promptConfirmation(
           `Estimated cost: ~$${estimate.cost.toFixed(2)}. Continue? [Y/n]`,
           opts.yes ?? false
@@ -557,38 +591,6 @@ Each spec.md follows OpenSpec conventions:
       // ========================================================================
       logger.section('Generating Specifications');
 
-      if (opts.plan) {
-        // Plan mode: describe the intended work and stop. No provider call.
-        logger.discovery('Would run LLM generation pipeline with:');
-        logger.listItem('Stage 1: Project Survey');
-        logger.listItem('Stage 2: Entity Extraction');
-        logger.listItem('Stage 3: Service Analysis');
-        logger.listItem('Stage 4: API Extraction');
-        logger.listItem('Stage 5: Architecture Synthesis');
-        logger.blank();
-
-        // Show domains that would be generated
-        const domainFilter = opts.domains.length > 0 ? opts.domains : repoStructure.domains.map(d => d.name);
-        logger.discovery('Domains to generate:');
-        for (const domain of domainFilter) {
-          logger.listItem(domain);
-        }
-        logger.blank();
-
-        // Show output paths
-        logger.discovery('Would write specs to:');
-        logger.listItem(`${openspecPath}/specs/overview/spec.md`);
-        logger.listItem(`${openspecPath}/specs/architecture/spec.md`);
-        for (const domain of domainFilter) {
-          logger.listItem(`${openspecPath}/specs/${domain}/spec.md`);
-        }
-        logger.listItem(`${openspecPath}/specs/api/spec.md (if applicable)`);
-        logger.blank();
-
-        logger.success('Plan complete. No provider call was made and no files were modified.');
-        return;
-      }
-
       // Create LLM service (CLI flags > env vars > config file)
       let llm: LLMService;
       try {
@@ -600,7 +602,7 @@ Each spec.md follows OpenSpec conventions:
           sslVerify: resolveTrustedSslVerify(globalOpts.insecure, openloreConfig?.llm?.sslVerify),
           timeout: globalOpts.timeout ?? openloreConfig.generation?.timeout,
           enableLogging: true,
-          logDir: join(rootPath, OPENLORE_DIR, OPENLORE_LOGS_SUBDIR),
+          logDir: join(previewRoot ?? rootPath, OPENLORE_DIR, OPENLORE_LOGS_SUBDIR),
         });
       } catch (error) {
         logger.error(`Failed to create LLM service: ${(error as Error).message}`);
@@ -635,7 +637,7 @@ Each spec.md follows OpenSpec conventions:
       const progress = createProgress();
       progress.start('Generating specifications...');
 
-      // A dry run leaves the project byte-identical, so the intermediate stage
+      // A paid preview leaves the project byte-identical, so the intermediate stage
       // cache is redirected into the throwaway workspace as well — a preview must
       // not write (or overwrite) the project's stage output. The existing cache is
       // COPIED in first, so the preview still reuses whatever has already been paid
@@ -833,11 +835,11 @@ Each spec.md follows OpenSpec conventions:
       // ========================================================================
       if (previewRoot) {
         logger.blank();
-        logger.section('Dry Run Preview');
+        logger.section('Paid Preview');
         const projectSpecs = resolveOpenspecDir(rootPath, openloreConfig.openspecPath);
         for (const line of await renderSpecPreviewDiff(projectSpecs, previewRoot)) console.log(line);
         logger.blank();
-        logger.success('Dry run complete. The project tree was not modified.');
+        logger.success('Preview complete. The project tree was not modified.');
         return;
       }
 
@@ -915,8 +917,8 @@ Each spec.md follows OpenSpec conventions:
     } finally {
       // A preview workspace is disposable by definition: remove it whether the
       // pipeline succeeded, failed, or threw mid-provider-call.
-      if (opts.dryRun && opts.outputDir?.includes('openlore-dry-run-')) {
-        await rm(opts.outputDir, { recursive: true, force: true }).catch(() => {});
+      if (previewRoot) {
+        await rm(previewRoot, { recursive: true, force: true }).catch(() => {});
       }
     }
   });

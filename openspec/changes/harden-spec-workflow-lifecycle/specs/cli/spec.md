@@ -23,17 +23,16 @@ CLI analysis and status output SHALL expose the repository-scoped owner PID, sta
 - **WHEN** a user runs the CLI analyze command
 - **THEN** the CLI reports the shared owner and either exits or follows it when wait mode is selected
 
-### Requirement: Generation Preview Produces A Real Diff
+### Requirement: Generation Planning Remains Free And Preview Is Explicitly Paid
 
-`openlore generate --dry-run` SHALL run the selected generation workflow into isolated temporary output, perform no writes to project specs, mapping, configuration, manifest, backups, or analysis artifacts, and display the candidate spec/config changes as a diff or structured preview. The CLI SHALL disclose that provider calls and cost still occur. A separate `--plan` option SHALL provide the previous cheap no-provider step listing.
+`openlore generate --dry-run` and its explicit `--plan` alias SHALL list the selected generation workflow without resolving, constructing, or calling a provider and without writing. `openlore generate --preview` SHALL run the selected workflow into isolated temporary output, perform no writes to project specs, mapping, configuration, manifest, backups, or analysis artifacts, display a normalized summary of candidate specification changes, and disclose that provider calls and cost occur.
 
-#### Scenario: Dry run previews generated specifications
+#### Scenario: Paid preview generates candidate specifications
 - **GIVEN** a configured generation provider and current analysis
-- **WHEN** `openlore generate --dry-run` runs
+- **WHEN** `openlore generate --preview` runs
 - **THEN** candidate specifications are generated in isolation, the proposed diff is returned, and the project tree remains unchanged
 
-#### Scenario: Plan mode performs no provider call
+#### Scenario: Dry run performs no provider call
 - **GIVEN** a user only wants to inspect intended stages and domains
-- **WHEN** `openlore generate --plan` runs
+- **WHEN** `openlore generate --dry-run` or `openlore generate --plan` runs
 - **THEN** it lists the planned work, performs no provider call, and writes nothing
-

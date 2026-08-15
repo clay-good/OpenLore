@@ -220,10 +220,15 @@ describe('openloreGenerate', () => {
   });
 
   describe('dry run', () => {
-    it('returns empty report without running pipeline', async () => {
+    it('returns an empty report without an API key, provider construction, or pipeline', async () => {
+      delete process.env.ANTHROPIC_API_KEY;
+      delete process.env.OPENAI_API_KEY;
+      delete process.env.GEMINI_API_KEY;
+      delete process.env.OPENAI_COMPAT_API_KEY;
       const result = await openloreGenerate({ rootPath: ROOT, dryRun: true });
 
       expect(result.report.filesWritten).toHaveLength(0);
+      expect(mockCreateLLMService).not.toHaveBeenCalled();
       expect(SpecGenerationPipeline).not.toHaveBeenCalled();
     });
   });

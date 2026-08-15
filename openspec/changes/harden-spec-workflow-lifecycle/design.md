@@ -105,9 +105,9 @@ The skill names remain `openlore-generate` and `openlore-repair`: they describe 
 
 ### 9. Split real preview from cheap planning
 
-Move the existing early-return behavior to `--plan`. `--dry-run` executes the normal provider pipeline with every project-target path redirected to a temporary workspace, then calculates a normalized diff against current specs/config. Mapping, manifests, backups, and analysis outputs are also redirected or disabled. Temporary output is removed after rendering.
+Keep the established early-return behavior on `--dry-run`, and expose `--plan` as a more explicit alias. Neither mode resolves or constructs a provider. A separate `--preview` executes the normal provider pipeline with every project-target path redirected to a temporary workspace, then calculates a normalized summary of candidate spec changes. Mapping, configuration, manifests, backups, and analysis outputs are also redirected or disabled. Temporary output is removed after rendering. Preview does not claim to render changes to those supporting artifacts.
 
-Alternative considered: keep the current dry-run name and add `--preview`. Rejected because users conventionally expect dry-run to exercise the real operation without committing it, and the present output does not do that.
+Alternative considered: change `--dry-run` into the paid preview. Rejected because existing callers rely on it as the free planning contract; silently turning an established free command into a billable operation is unsafe.
 
 ## Risks / Trade-offs
 
@@ -117,7 +117,7 @@ Alternative considered: keep the current dry-run name and add `--preview`. Rejec
 - **[Manifest validation adds reads/hashing]** → Hash at publication, store digests, and validate generation identity cheaply on hot paths; perform full digest verification on cache misses or integrity suspicion.
 - **[Stale lock recovery can target PID reuse]** → Require both stale heartbeat and repository/owner metadata validation; never reclaim solely by elapsed time.
 - **[Parameterizing the shared lock loop regresses its two existing callers]** → Every new knob defaults to the current hardcoded behavior, so `acquireDecisionsLock`/`acquireAnalysisLock` change call sites not at all; the existing `lock.test.ts` cases are the regression gate and must pass unmodified except for the import path.
-- **[Dry-run incurs provider cost]** → Display the estimate and explicit cost warning before execution; `--plan` remains free.
+- **[Preview incurs provider cost]** → Give the paid operation a distinct `--preview` name and display the estimate and explicit cost warning; `--dry-run` and `--plan` remain free.
 - **[Overlap evidence can be large]** → Feed it through the same receipted evidence stream and rank exact-symbol intersections before file-only intersections.
 
 ## Migration Plan
@@ -128,7 +128,7 @@ Alternative considered: keep the current dry-run name and add `--preview`. Rejec
 4. Add overlap observations and executable remediation actions.
 5. Introduce generation manifests and generation-keyed caches with legacy fallback.
 6. Add the shared full-analysis lock/progress service and wire CLI/MCP/Pi entry points.
-7. Update canonical skills and add true dry-run plus `--plan`.
+7. Update canonical skills, preserve free `--dry-run`/`--plan`, and add paid `--preview`.
 8. Dogfood Analyze → Generate → Repair on the reported external project, including stale mapping, oversized `components`, daemon reload, concurrent analyze, and long artifact generation.
 
 Rollback can disable manifest publication, lock attachment, and deterministic cache persistence independently. Existing specs are never deleted; new mapping caches and incomplete staging generations are disposable.

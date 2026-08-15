@@ -568,6 +568,23 @@ Old generated content that should be replaced.
   });
 
   describe('Stale domain cleanup', () => {
+    it('preserves an existing spec byte-for-byte when reconciliation no longer emits that domain', async () => {
+      const demotedDir = join(tempDir, 'openspec/specs/legacy-domain');
+      const original = '# Legacy Domain\n\nHuman-maintained requirements must survive reclassification.\n';
+      await mkdir(demotedDir, { recursive: true });
+      await writeFile(join(demotedDir, 'spec.md'), original);
+
+      const writer = new OpenSpecWriter({
+        rootPath: tempDir,
+        cleanBeforeWrite: false,
+        updateConfig: false,
+      });
+      const report = await writer.writeSpecs(createMockSpecs(), createMockSurvey());
+
+      expect(report.domainsRemoved).not.toContain('legacy-domain');
+      expect(await readFile(join(demotedDir, 'spec.md'), 'utf-8')).toBe(original);
+    });
+
     it('recursively backs up a stale domain before removing it', async () => {
       const staleDir = join(tempDir, 'openspec/specs/stale');
       await mkdir(join(staleDir, 'notes'), { recursive: true });
