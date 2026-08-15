@@ -46,6 +46,7 @@ export const REPAIR_STREAM_SECTIONS = [
   'uncoveredFunction',
   'staleMapping',
   'orphanRequirement',
+  'structuralScope',
   'structuralChange',
   'drift',
   'domainEvidence',
@@ -80,7 +81,11 @@ function fileRoles(bundle: DomainEvidenceBundle, path: string): string[] {
 }
 
 function relativePath(root: string, value: string): string {
-  return value.startsWith(`${root}/`) ? value.slice(root.length + 1) : value;
+  const normalizedRoot = root.replaceAll('\\', '/').replace(/\/$/, '');
+  const normalizedValue = value.replaceAll('\\', '/');
+  return normalizedValue.startsWith(`${normalizedRoot}/`)
+    ? normalizedValue.slice(normalizedRoot.length + 1)
+    : normalizedValue;
 }
 
 export interface GenerationStreamInput {
@@ -101,12 +106,12 @@ export interface GenerationStreamInput {
  */
 export function buildGenerationStream(input: GenerationStreamInput): EvidenceSection[] {
   const { root, bundle, repo, graph } = input;
-  const domainFiles = new Set(bundle.files);
+  const domainFiles = new Set(bundle.files.map(path => relativePath(root, path)));
 
   return [
     {
       section: 'domainEvidence',
-      records: bundle.files.map(path => ({ path, roles: fileRoles(bundle, path) })),
+      records: bundle.files.map(path => ({ path: relativePath(root, path), roles: fileRoles(bundle, path) })),
     },
     {
       section: 'signatures',
@@ -143,6 +148,7 @@ export interface RepairStreamInput {
   uncoveredFunction: unknown[];
   staleMapping: unknown[];
   orphanRequirement: unknown[];
+  structuralScope: unknown[];
   structuralChange: unknown[];
   drift: unknown[];
   domainMembership: unknown[];
@@ -157,6 +163,7 @@ export function buildRepairStream(input: RepairStreamInput): EvidenceSection[] {
     { section: 'uncoveredFunction', records: input.uncoveredFunction },
     { section: 'staleMapping', records: input.staleMapping },
     { section: 'orphanRequirement', records: input.orphanRequirement },
+    { section: 'structuralScope', records: input.structuralScope },
     { section: 'structuralChange', records: input.structuralChange },
     { section: 'drift', records: input.drift },
     { section: 'domainEvidence', records: input.domainMembership },
@@ -194,6 +201,9 @@ export function structuralChangeSummary(result: unknown): Record<string, unknown
   if (!result || typeof result !== 'object') return { state: 'unavailable' };
   const value = result as Record<string, unknown>;
   if (typeof value.error === 'string') return { state: 'unavailable', reason: value.error };
+  if (value.state === 'unavailable') {
+    return { state: 'unavailable', ...(typeof value.reason === 'string' ? { reason: value.reason } : {}) };
+  }
   return {
     state: 'available',
     base: value.base,

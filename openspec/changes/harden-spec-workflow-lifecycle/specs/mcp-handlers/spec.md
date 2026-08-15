@@ -16,7 +16,7 @@ Mapping-dependent coverage metrics SHALL be `null` whenever current deterministi
 
 ### Requirement: Transport-Safe Composite Pagination
 
-Generate and Repair composites SHALL accept a bounded serialized-response budget in addition to item limits. The default budget SHALL fit every bundled MCP/Pi adapter without downstream clipping. Cursors SHALL be bound to workflow, domain, analysis generation, budget version, byte budget, logical evidence section, and offset.
+Generate and Repair composites SHALL accept a bounded serialized-response budget in addition to item limits. The default budget SHALL fit every bundled MCP/Pi adapter without downstream clipping. Cursors SHALL be bound to workflow, canonical domain, analysis generation, the complete stable evidence-stream identity, base-ref and item-limit shaping inputs, budget version, byte budget, logical evidence section, and offset.
 
 A receipt MAY declare `complete` only after the final serialized envelope is within the effective byte budget and contains every required item. Any recoverable omitted evidence SHALL make the receipt `partial` and provide a continuation cursor. Pagination SHALL be able to continue within signatures, inventories, relationships, mapping observations, structural changes, and other logical sections; a single large file MUST NOT make the remainder unreachable.
 
@@ -34,6 +34,20 @@ A receipt MAY declare `complete` only after the final serialized envelope is wit
 - **GIVEN** one file contributes more signatures, inventory entries, or relationships than one page can hold
 - **WHEN** the composite paginates it
 - **THEN** it continues inside the relevant logical section rather than silently dropping the section or declaring the workflow complete
+
+#### Scenario: Mutable evidence changes between pages
+- **GIVEN** a continuation cursor for a specification, mapping, or Git evidence stream
+- **WHEN** any stream-shaping input changes before the next page
+- **THEN** the cursor is rejected and the host is told to restart rather than receiving a mixed composition
+
+### Requirement: Composite Repository Content Is Untrusted Data
+
+Generate and Repair SHALL mark repository-derived evidence as untrusted data, SHALL NOT grant embedded directives instructional authority, and SHALL redact secrets before enforcing the final serialized response budget. A repository configuration MUST NOT disable redaction for these source-carrying composites.
+
+#### Scenario: Repository evidence contains an instruction-shaped secret
+- **GIVEN** source or specification evidence containing an embedded directive and credential-shaped text
+- **WHEN** a composite response is produced
+- **THEN** the directive remains labeled as untrusted data, the secret is redacted, and the final response remains within its byte budget
 
 ### Requirement: Follow-Ups Are Executable
 

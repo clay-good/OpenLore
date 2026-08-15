@@ -42,7 +42,7 @@ describe('stream section order', () => {
   it('repair stream matches its declared section order', () => {
     const built = buildRepairStream({
       specContent: '', coveredFunction: [], uncoveredFunction: [], staleMapping: [],
-      orphanRequirement: [], structuralChange: [], drift: [], domainMembership: [],
+      orphanRequirement: [], structuralScope: [], structuralChange: [], drift: [], domainMembership: [],
       candidateDecisions: [],
     });
     expect(built.map(section => section.section)).toEqual([...REPAIR_STREAM_SECTIONS]);

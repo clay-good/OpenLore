@@ -64,12 +64,18 @@ export interface EvidenceCursorPayload {
   d: string;
   /** Analysis generation identity the page was built from. */
   g: string;
+  /** Fingerprint of every stable input that shapes the logical evidence stream. */
+  x: string;
   /** Index into the ordered section list. */
   s: number;
   /** Offset inside that section. */
   o: number;
   /** Effective byte budget bound into the cursor. */
   b: number;
+  /** Effective per-page item limit. */
+  m: number;
+  /** Canonical repair base ref; empty for generation. */
+  r: string;
   /** Fingerprint over the fields above, so a forged cursor is rejected. */
   f: string;
 }
@@ -119,7 +125,7 @@ const CURSOR_KEY = randomBytes(32);
 
 function cursorFingerprint(payload: Omit<EvidenceCursorPayload, 'f'>): string {
   return createHmac('sha256', CURSOR_KEY)
-    .update([payload.v, payload.w, payload.d, payload.g, payload.s, payload.o, payload.b].join('\0'))
+    .update([payload.v, payload.w, payload.d, payload.g, payload.x, payload.s, payload.o, payload.b, payload.m, payload.r].join('\0'))
     .digest('hex')
     .slice(0, 32);
 }
@@ -140,6 +146,9 @@ export function encodeEvidenceCursor(payload: Omit<EvidenceCursorPayload, 'f'>):
  */
 export function decodeEvidenceCursor(value?: string): EvidenceCursorPayload | undefined {
   if (!value) return undefined;
+  // A valid cursor is a few hundred bytes. Reject an attacker-controlled giant
+  // base64 value before decoding/parsing it into a correspondingly giant buffer.
+  if (value.length > 4_096) return undefined;
   let parsed: EvidenceCursorPayload;
   try {
     parsed = JSON.parse(Buffer.from(value, 'base64url').toString('utf8')) as EvidenceCursorPayload;
@@ -148,10 +157,12 @@ export function decodeEvidenceCursor(value?: string): EvidenceCursorPayload | un
   }
   if (!parsed || typeof parsed !== 'object') return undefined;
   if (parsed.v !== EVIDENCE_STREAM_PROTOCOL) return undefined;
-  if (typeof parsed.w !== 'string' || typeof parsed.d !== 'string' || typeof parsed.g !== 'string') return undefined;
+  if (typeof parsed.w !== 'string' || typeof parsed.d !== 'string' || typeof parsed.g !== 'string' || typeof parsed.x !== 'string') return undefined;
   if (!Number.isInteger(parsed.s) || parsed.s < 0) return undefined;
   if (!Number.isInteger(parsed.o) || parsed.o < 0) return undefined;
   if (!Number.isInteger(parsed.b) || parsed.b < MIN_RESPONSE_BYTES || parsed.b > MAX_RESPONSE_BYTES) return undefined;
+  if (!Number.isInteger(parsed.m) || parsed.m < 10 || parsed.m > 200) return undefined;
+  if (typeof parsed.r !== 'string' || parsed.r.length > 1_000) return undefined;
   const { f, ...rest } = parsed;
   if (typeof f !== 'string') return undefined;
   const expected = Buffer.from(cursorFingerprint(rest), 'utf8');
@@ -180,9 +191,11 @@ export function packEvidenceStream(
   start: EvidenceStreamPosition,
   budget: number,
   envelopeBytes: number,
+  maxItems = Number.POSITIVE_INFINITY,
 ): EvidencePage {
   const page: EvidencePage = { included: [], omitted: [], records: {}, starts: {} };
   let used = envelopeBytes;
+  let itemCount = 0;
 
   for (let sectionIndex = start.sectionIndex; sectionIndex < sections.length; sectionIndex++) {
     const { section, records } = sections[sectionIndex];
@@ -194,6 +207,7 @@ export function packEvidenceStream(
     let sectionUsed = 0;
 
     for (let index = from; index < records.length; index++) {
+      if (itemCount + taken >= maxItems) break;
       const cost = byteLength(records[index]) + 1; // + separator
       if (used + sectionOverhead + sectionUsed + cost > budget) {
         if (taken === 0 && page.included.length === 0) {
@@ -212,6 +226,7 @@ export function packEvidenceStream(
       page.starts[section] = from;
       page.included.push(section);
       used += sectionOverhead + sectionUsed;
+      itemCount += taken;
     }
 
     if (from + taken < records.length) {

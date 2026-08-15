@@ -150,6 +150,13 @@ describe('readCurrentGeneration', () => {
 
     expect(await readCurrentGeneration(dir, ['a.json', 'b.json'])).toBeNull();
   });
+
+  it('rejects a manifest that adds undeclared artifact membership', async () => {
+    const dir = await analysisDir();
+    await writeFile(join(dir, 'surprise.json'), '{}');
+    await publishGeneration(dir, [...required, 'surprise.json']);
+    expect(await readCurrentGeneration(dir, required)).toBeNull();
+  });
 });
 
 describe('readGenerationSnapshot', () => {

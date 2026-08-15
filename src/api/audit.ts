@@ -34,6 +34,7 @@ import {
 import { normalizeAnchorPath } from '../core/generator/spec-link-index.js';
 import type { DependencyGraphResult } from '../core/analyzer/dependency-graph.js';
 import type { SerializedCallGraph, FunctionNode } from '../core/analyzer/call-graph.js';
+import { readGenerationSnapshot, REQUIRED_ANALYSIS_ARTIFACTS } from '../core/runtime/analysis-generation.js';
 
 const DEFAULT_MAX_UNCOVERED = 50;
 const DEFAULT_HUB_THRESHOLD = 5;
@@ -83,14 +84,22 @@ export async function openloreAudit(options: AuditApiOptions = {}): Promise<Audi
   const snapshotGen = new SpecSnapshotGenerator(rootPath, openspecRelPath);
   const snapshot = await snapshotGen.generate({ persist: shouldSave }).catch(() => null);
 
-  const [llmContextRaw, depGraphRaw] = await Promise.all([
-    readFile(join(analysisDir, ARTIFACT_LLM_CONTEXT), 'utf-8').catch(() => null),
-    readFile(join(analysisDir, ARTIFACT_DEPENDENCY_GRAPH), 'utf-8').catch(() => null),
-  ]);
+  const supplied = (options as AuditApiOptions & { analysisArtifacts?: { llmContext: LLMContext; dependencyGraph: DependencyGraphResult } }).analysisArtifacts;
+  const coherent = supplied ? null : await readGenerationSnapshot(
+    analysisDir,
+    [...REQUIRED_ANALYSIS_ARTIFACTS],
+    async () => Promise.all([
+      readFile(join(analysisDir, ARTIFACT_LLM_CONTEXT), 'utf-8').catch(() => null),
+      readFile(join(analysisDir, ARTIFACT_DEPENDENCY_GRAPH), 'utf-8').catch(() => null),
+    ]),
+  );
+  const [llmContextRaw, depGraphRaw] = coherent?.state === 'ok' ? coherent.value : [null, null];
 
-  const llmContext = llmContextRaw ? JSON.parse(llmContextRaw) as LLMContext : null;
+  const llmContext = supplied?.llmContext ?? (llmContextRaw ? JSON.parse(llmContextRaw) as LLMContext : null);
   let depGraph: DependencyGraphResult | null;
-  try {
+  if (supplied) {
+    depGraph = supplied.dependencyGraph;
+  } else try {
     depGraph = depGraphRaw ? JSON.parse(depGraphRaw) as DependencyGraphResult : null;
   } catch {
     depGraph = null;

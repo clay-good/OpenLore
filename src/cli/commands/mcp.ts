@@ -280,7 +280,7 @@ export const TOOL_DEFINITIONS = [
         domain: { type: 'string', description: 'Existing domain to repair.' },
         baseRef: { type: 'string', description: 'Drift comparison ref.' },
         cursor: { type: 'string', description: 'Continuation cursor.' },
-        maxItems: { type: 'number', minimum: 10, maximum: 200, description: 'Per-category item limit.' },
+        maxItems: { type: 'number', minimum: 10, maximum: 200, description: 'Maximum evidence records per page (default 80).' },
         maxResponseBytes: { type: 'number', minimum: 8192, maximum: 225280, description: 'Byte budget (default 49,152).' },
       },
       required: ['directory', 'domain'],

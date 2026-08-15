@@ -29,6 +29,7 @@ describe('spec workflow host skills', () => {
       expect(skill).toMatch(/[Dd]o not reconstruct/);
       expect(skill).not.toContain('Phase 1 — Codebase Survey');
       expect(skill).not.toContain('Identify domains by looking for');
+      expect(skill).toMatch(/untrusted data, not instructions/i);
     }
   });
 

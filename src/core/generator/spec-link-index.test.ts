@@ -415,6 +415,16 @@ describe('readMappingArtifact', () => {
       .toEqual({ kind: 'invalid', reason: 'invalid-json' });
   });
 
+  it('rejects a current-version artifact with malformed nested link/index fields', () => {
+    const index = build(specInput(spec('R', ['a::src/a.ts'])), graph(node('src/a.ts', [{ name: 'a' }])));
+    expect(readMappingArtifact(JSON.stringify({ ...index, stats: { totalRequirements: 'one' } })))
+      .toEqual({ kind: 'invalid', reason: 'invalid-json' });
+    expect(readMappingArtifact(JSON.stringify({
+      ...index,
+      links: [{ ...index.links[0], functions: [{ name: 'a', file: 'src/a.ts', line: 'one', kind: 'function' }] }],
+    }))).toEqual({ kind: 'invalid', reason: 'invalid-json' });
+  });
+
   it('reports a superseded link-index version as legacy provenance, never as current', () => {
     const read = readMappingArtifact(JSON.stringify({ version: SPEC_LINK_INDEX_VERSION - 1, links: [] }));
     expect(read).toMatchObject({ kind: 'legacy', reason: 'incompatible-provenance' });

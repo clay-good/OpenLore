@@ -180,6 +180,7 @@ export async function readCurrentGeneration(
       && Array.isArray(parsed.artifacts)
       && uniquePaths.size === parsed.artifacts.length
       && legacyArtifacts.every(name => uniquePaths.has(name))
+      && (legacyArtifacts.length === 0 || uniquePaths.size === new Set(legacyArtifacts).size)
       && parsed.artifacts.every(record =>
         record
         && typeof record.path === 'string'

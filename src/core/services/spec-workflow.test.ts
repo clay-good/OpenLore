@@ -74,6 +74,65 @@ describe('spec workflow composites', () => {
     expect(seen.filter(entry => entry.startsWith('domainEvidence:'))).toHaveLength(12);
   });
 
+  it('binds continuations to the full mutable repair composition', async () => {
+    const root = fixture(1);
+    const specPath = join(root, 'openspec', 'specs', 'billing', 'spec.md');
+    mkdirSync(join(root, 'openspec', 'specs', 'billing'), { recursive: true });
+    writeFileSync(specPath, `# Billing\n\n${'original evidence\n'.repeat(2_000)}`);
+    const first = await prepareSpecRepair({ directory: root, domain: 'billing', maxItems: 10, maxResponseBytes: 8 * 1024 });
+    expect(first.receipt.continuationCursor).toBeDefined();
+
+    writeFileSync(specPath, `# Billing\n\n${'changed evidence\n'.repeat(2_000)}`);
+    const changed = await prepareSpecRepair({
+      directory: root, domain: 'billing', maxItems: 10,
+      cursor: first.receipt.continuationCursor,
+    });
+    expect(changed.error?.code).toBe('analysis-changed');
+  });
+
+  it('binds repair shaping arguments and emits an executable continuation', async () => {
+    const root = fixture(1);
+    mkdirSync(join(root, 'openspec', 'specs', 'billing'), { recursive: true });
+    writeFileSync(join(root, 'openspec', 'specs', 'billing', 'spec.md'), `# Billing\n\n${'evidence\n'.repeat(2_000)}`);
+    const first = await prepareSpecRepair({ directory: root, domain: 'billing', baseRef: 'HEAD', maxItems: 10, maxResponseBytes: 8 * 1024 });
+    const follow = first.receipt.followUps.find(item => item.tool === 'prepare_spec_repair')!;
+    expect(follow.arguments).toMatchObject({
+      cursor: first.receipt.continuationCursor,
+      baseRef: 'HEAD',
+      maxItems: 10,
+      maxResponseBytes: 8 * 1024,
+    });
+    const reshaped = await prepareSpecRepair({
+      directory: root, domain: 'billing', baseRef: 'auto', maxItems: 10,
+      cursor: first.receipt.continuationCursor,
+    });
+    expect(reshaped.error?.code).toBe('analysis-changed');
+  });
+
+  it('enforces maxItems as a cross-section page limit', async () => {
+    const page = await prepareSpecGeneration({ directory: fixture(25), domain: 'billing', maxItems: 10 });
+    const delivered = page.receipt.included.reduce(
+      (count, section) => count + ((page.evidence?.[section] as unknown[] | undefined)?.length ?? 0), 0,
+    );
+    expect(delivered).toBeLessThanOrEqual(10);
+    expect(page.receipt.state).toBe('partial');
+  });
+
+  it('unconditionally redacts repository evidence before enforcing the wire budget', async () => {
+    const root = fixture(20, 300);
+    mkdirSync(join(root, '.openlore'), { recursive: true });
+    writeFileSync(join(root, '.openlore', 'config.json'), JSON.stringify({ secretRedaction: { toolOutput: false } }));
+    const contextPath = join(root, '.openlore', 'analysis', 'llm-context.json');
+    const context = JSON.parse(String(await import('node:fs/promises').then(fs => fs.readFile(contextPath))));
+    context.signatures[0].signatures[0] += ' password=abcdefgh';
+    writeFileSync(contextPath, JSON.stringify(context));
+    const result = await prepareSpecGeneration({ directory: root, domain: 'billing', maxResponseBytes: 8 * 1024 });
+    expect(JSON.stringify(result)).not.toContain('password=abcdefgh');
+    expect(result.redactions?.count).toBeGreaterThan(0);
+    expect(result.evidence?.contentSafety).toMatch(/untrusted repository source content/i);
+    expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(8 * 1024);
+  });
+
   it('declares complete only when the whole stream fits one within-budget envelope', async () => {
     const only = await prepareSpecGeneration({ directory: fixture(2), domain: 'billing' });
     expect(only.receipt.state).toBe('complete');
@@ -293,6 +352,30 @@ describe('spec workflow composites', () => {
     expect(result.domain).toEqual({ requested: 'BILLING', resolved: 'billing' });
   });
 
+  it('uses spec casing as the canonical repair and mapping identity', async () => {
+    const root = fixture(1);
+    const repoPath = join(root, '.openlore', 'analysis', 'repo-structure.json');
+    const repo = JSON.parse(String(await import('node:fs/promises').then(fs => fs.readFile(repoPath))));
+    repo.domains[0].name = 'Billing';
+    writeFileSync(repoPath, JSON.stringify(repo));
+    mkdirSync(join(root, 'openspec', 'specs', 'billing'), { recursive: true });
+    writeFileSync(join(root, 'openspec', 'specs', 'billing', 'spec.md'),
+      '# Billing\n\n### Requirement: Runs F0\n\n- **Implementation**: `f0::src/billing/f00.ts`\n');
+    const result = await prepareSpecRepair({ directory: root, domain: 'BILLING' });
+    expect(result.domain.resolved).toBe('billing');
+    expect(JSON.stringify(result.evidence?.coveredFunction ?? [])).toContain('f0');
+  });
+
+  it('reports an empty historical footprint as unavailable', async () => {
+    const root = fixture(1);
+    mkdirSync(join(root, 'openspec', 'specs', 'legacy'), { recursive: true });
+    writeFileSync(join(root, 'openspec', 'specs', 'legacy', 'spec.md'), '# Legacy\n');
+    const result = await prepareSpecRepair({ directory: root, domain: 'legacy' });
+    expect(result.evidence?.structuralChangeSummary).toEqual({
+      state: 'unavailable', reason: 'empty-historical-footprint',
+    });
+  });
+
   it('binds repair cursors to the canonical domain without making casing significant', async () => {
     const root = fixture(12, 2_000);
     const repoPath = join(root, '.openlore', 'analysis', 'repo-structure.json');
@@ -340,6 +423,8 @@ describe('spec workflow composites', () => {
     expect(result.receipt.omitted).toContainEqual(expect.objectContaining({
       section: 'uncoveredFunction', reason: 'mapping-specs-unavailable',
     }));
+    expect(result.receipt.omitted.find(item => item.section === 'uncoveredFunction'))
+      .not.toHaveProperty('omittedCount');
     expect(result.receipt.included).not.toContain('uncoveredFunction');
     expect(result.receipt.state).toBe('partial');
   });

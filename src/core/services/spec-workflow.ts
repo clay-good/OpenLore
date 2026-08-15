@@ -9,6 +9,7 @@ import {
   OPENLORE_ANALYSIS_SUBDIR,
   OPENLORE_DIR,
   OPENSPEC_DIR,
+  REPO_CONTENT_PROVENANCE,
 } from '../../constants.js';
 import type { LLMContext, RepoStructure } from '../analyzer/artifact-generator.js';
 import type { DependencyGraphResult } from '../analyzer/dependency-graph.js';
@@ -44,6 +45,7 @@ import { handleAuditSpecCoverage, handleCheckSpecDrift } from './mcp-handlers/an
 import { handleGetSpec } from './mcp-handlers/semantic.js';
 import { handleStructuralDiff } from './mcp-handlers/structural-diff.js';
 import { validateDirectory } from './mcp-handlers/utils.js';
+import { redactSecretsWithReport } from './secret-redaction.js';
 
 /**
  * The observation names each workflow can report.
@@ -96,6 +98,7 @@ export interface SpecWorkflowEnvelope {
   receipt: SpecWorkflowReceipt;
   evidence?: Record<string, unknown>;
   error?: { code: SpecWorkflowErrorCode; message: string; availableDomains?: string[] };
+  redactions?: { count: number; kinds: string[] };
 }
 
 export interface PrepareSpecInput {
@@ -113,6 +116,10 @@ export interface PrepareSpecInput {
 }
 
 const clampMaxItems = (value?: number): number => Math.max(10, Math.min(Math.floor(value ?? 80), 200));
+
+function compositionFingerprint(value: unknown): string {
+  return createHash('sha256').update(JSON.stringify(value)).digest('hex');
+}
 
 interface LoadedAnalysis {
   root: string; repo: RepoStructure; graph: DependencyGraphResult; fingerprint: string;
@@ -189,12 +196,19 @@ async function loadAnalysisArtifacts(root: string, analysis: string): Promise<Om
   } catch { return null; }
 }
 
+function secureEnvelope(envelope: SpecWorkflowEnvelope): SpecWorkflowEnvelope {
+  const redacted = redactSecretsWithReport(envelope);
+  return redacted.redactions.count > 0
+    ? { ...(redacted.value as SpecWorkflowEnvelope), redactions: redacted.redactions }
+    : redacted.value;
+}
+
 function unavailable(workflow: SpecWorkflow, domain: string, code: SpecWorkflowErrorCode, message: string, availableDomains?: string[]): SpecWorkflowEnvelope {
-  return {
+  return secureEnvelope({
     workflow, domain: { requested: domain },
     receipt: { state: 'unavailable', included: [], omitted: [{ section: 'domainEvidence', reason: code }], followUps: [] },
     error: { code, message, ...(availableDomains ? { availableDomains } : {}) },
-  };
+  });
 }
 
 /**
@@ -215,7 +229,10 @@ function respondWithPage(args: {
   pageGlobal: Record<string, unknown>;
   start: EvidenceStreamPosition;
   budget: number;
-  followUpsFor: (page: EvidencePage) => SpecWorkflowFollowUp[];
+  maxItems: number;
+  baseRef: string;
+  streamIdentity: string;
+  followUpsFor: (page: EvidencePage, cursor?: string) => SpecWorkflowFollowUp[];
   /**
    * Omissions that are NOT volume-driven — evidence withheld because it could not
    * be established. These make the receipt partial but are not recoverable by a
@@ -229,11 +246,12 @@ function respondWithPage(args: {
   const build = (page: EvidencePage): SpecWorkflowEnvelope => {
     const cursor = page.next
       ? encodeEvidenceCursor({
-          v: EVIDENCE_STREAM_PROTOCOL, w: workflow, d: resolvedDomain ?? requestedDomain, g: loaded.fingerprint,
-          s: page.next.sectionIndex, o: page.next.offset, b: budget,
+          v: EVIDENCE_STREAM_PROTOCOL, w: workflow, d: resolvedDomain ?? requestedDomain, g: loaded.generationId,
+          x: args.streamIdentity, s: page.next.sectionIndex, o: page.next.offset, b: budget,
+          m: args.maxItems, r: args.baseRef,
         })
       : undefined;
-    return {
+    const envelope: SpecWorkflowEnvelope = {
       workflow,
       domain: { requested: requestedDomain, ...(resolvedDomain ? { resolved: resolvedDomain } : {}) },
       provenance: {
@@ -250,10 +268,13 @@ function respondWithPage(args: {
         included: page.included.filter(section => !extraOmissions.some(entry => entry.section === section)),
         omitted: [...page.omitted, ...extraOmissions],
         ...(cursor ? { continuationCursor: cursor } : {}),
-        followUps: args.followUpsFor(page),
+        followUps: args.followUpsFor(page, cursor),
       },
       evidence: { ...pageGlobal, ...page.records },
     };
+    // Budget the exact value that leaves dispatch. Dispatch sees an already-redacted
+    // result and therefore does not append a second disclosure after measurement.
+    return secureEnvelope(envelope);
   };
 
   // Reserve room for the parts of the envelope that are not stream records.
@@ -262,7 +283,7 @@ function respondWithPage(args: {
     next: { sectionIndex: sections.length, offset: 0 },
   })), 'utf8');
 
-  const page = packEvidenceStream(sections, start, budget, envelopeBytes);
+  const page = packEvidenceStream(sections, start, budget, envelopeBytes, args.maxItems);
   if (page.unrepresentable) {
     return unavailable(
       workflow, requestedDomain, 'response-too-large',
@@ -285,27 +306,33 @@ function resolveStart(
   workflow: SpecWorkflow,
   input: PrepareSpecInput,
   resolvedDomain: string,
-  fingerprint: string,
-  sectionCount: number,
-): { start: EvidenceStreamPosition; budget: number } | SpecWorkflowEnvelope {
+  generationId: string,
+  baseRef: string,
+  sectionCount?: number,
+  streamIdentity?: string,
+): { start: EvidenceStreamPosition; budget: number; maxItems: number; cursorIdentity?: string } | SpecWorkflowEnvelope {
+  const maxItems = clampMaxItems(input.maxItems);
   if (!input.cursor) {
-    return { start: { sectionIndex: 0, offset: 0 }, budget: clampResponseBytes(input.maxResponseBytes) };
+    return { start: { sectionIndex: 0, offset: 0 }, budget: clampResponseBytes(input.maxResponseBytes), maxItems };
   }
   const cursor = decodeEvidenceCursor(input.cursor);
   if (!cursor || cursor.w !== workflow || cursor.d !== resolvedDomain) {
     return unavailable(workflow, input.domain, 'analysis-changed', `Invalid continuation cursor; restart ${workflow} preparation.`);
   }
-  if (cursor.g !== fingerprint) {
+  if (cursor.g !== generationId || cursor.m !== maxItems || cursor.r !== baseRef) {
     return unavailable(workflow, input.domain, 'analysis-changed', `Analysis changed after the cursor was issued; restart ${workflow} preparation.`);
+  }
+  if (streamIdentity !== undefined && cursor.x !== streamIdentity) {
+    return unavailable(workflow, input.domain, 'analysis-changed', `Specification, mapping, or Git evidence changed after the cursor was issued; restart ${workflow} preparation.`);
   }
   // `>=`, not `>`: a cursor AT the end of the stream is never emitted — the final
   // page carries no continuation. Accepting one returned an empty page stamped
   // `complete`, which is the one answer this protocol must never give for evidence
   // it did not deliver.
-  if (cursor.s >= sectionCount) {
+  if (sectionCount !== undefined && cursor.s >= sectionCount) {
     return unavailable(workflow, input.domain, 'analysis-changed', `Continuation cursor is outside the current evidence stream; restart ${workflow} preparation.`);
   }
-  return { start: { sectionIndex: cursor.s, offset: cursor.o }, budget: cursor.b };
+  return { start: { sectionIndex: cursor.s, offset: cursor.o }, budget: cursor.b, maxItems, cursorIdentity: cursor.x };
 }
 
 export async function prepareSpecGeneration(input: PrepareSpecInput): Promise<SpecWorkflowEnvelope> {
@@ -320,20 +347,31 @@ export async function prepareSpecGeneration(input: PrepareSpecInput): Promise<Sp
   const bundle = bundles.find(item => item.name.toLowerCase() === input.domain.toLowerCase());
   if (!bundle) return unavailable('generation', input.domain, 'unknown-domain', `No analyzed domain named "${input.domain}".`, bundles.map(item => item.name));
 
-  // Resolve the cursor BEFORE building the stream: overlap costs a full read of
-  // the spec corpus plus a link-index build, and a continuation page that has
-  // already streamed past the `overlap` section must not pay for it again.
-  const resolved = resolveStart('generation', input, bundle.name, loaded.fingerprint, GENERATION_STREAM_SECTIONS.length);
-  if ('receipt' in resolved) return resolved;
+  // Authenticate workflow/domain/generation/shaping arguments before the spec
+  // corpus or link index is read. The full stream digest is checked after build.
+  const preliminary = resolveStart('generation', input, bundle.name, loaded.generationId, '');
+  if ('receipt' in preliminary) return preliminary;
 
-  const overlapIndex = GENERATION_STREAM_SECTIONS.indexOf('overlap');
-  const overlap = resolved.start.sectionIndex <= overlapIndex
-    ? await computeSpecOverlap(loaded, bundle)
-    : { observations: [], provenance: { state: 'available' as const, comparedSpecs: 0, candidateFiles: bundle.files.length, candidateSymbols: 0, complete: true, basis: [], deliveredOnEarlierPage: true } };
+  const overlap = await computeSpecOverlap(loaded, bundle);
   input.signal?.throwIfAborted();
   const sections = buildGenerationStream({
     root: loaded.root, bundle, repo: loaded.repo, graph: loaded.graph, overlap: overlap.observations,
   });
+  const pageGlobal = {
+    contentSafety: REPO_CONTENT_PROVENANCE,
+    domainSummary: {
+      name: bundle.name,
+      fileCount: bundle.files.length,
+      definingFileCount: bundle.definingFiles.length,
+      supportingFileCount: bundle.supportingFiles.length,
+      ...(bundle.candidateDecisionSummary ? { candidateDecisionSummary: bundle.candidateDecisionSummary } : {}),
+    },
+    specOverlap: overlap.provenance,
+    streamSections: [...GENERATION_STREAM_SECTIONS],
+  };
+  const streamIdentity = compositionFingerprint({ sections, pageGlobal });
+  const resolved = resolveStart('generation', input, bundle.name, loaded.generationId, '', sections.length, streamIdentity);
+  if ('receipt' in resolved) return resolved;
 
   return respondWithPage({
     workflow: 'generation',
@@ -341,20 +379,13 @@ export async function prepareSpecGeneration(input: PrepareSpecInput): Promise<Sp
     resolvedDomain: bundle.name,
     loaded,
     sections,
-    pageGlobal: {
-      domainSummary: {
-        name: bundle.name,
-        fileCount: bundle.files.length,
-        definingFileCount: bundle.definingFiles.length,
-        supportingFileCount: bundle.supportingFiles.length,
-        ...(bundle.candidateDecisionSummary ? { candidateDecisionSummary: bundle.candidateDecisionSummary } : {}),
-      },
-      specOverlap: overlap.provenance,
-      streamSections: [...GENERATION_STREAM_SECTIONS],
-    },
+    pageGlobal,
     start: resolved.start,
     budget: resolved.budget,
-    followUpsFor: page => continuationFollowUps('generation', { ...input, domain: bundle.name }, page),
+    maxItems: resolved.maxItems,
+    baseRef: '',
+    streamIdentity,
+    followUpsFor: (page, cursor) => continuationFollowUps('generation', { ...input, domain: bundle.name }, page, cursor, resolved),
   });
 }
 
@@ -403,11 +434,20 @@ function continuationFollowUps(
   workflow: SpecWorkflow,
   input: PrepareSpecInput,
   page: EvidencePage,
+  cursor: string | undefined,
+  shaping: { budget: number; maxItems: number },
 ): SpecWorkflowFollowUp[] {
-  if (!page.next) return [];
+  if (!page.next || !cursor) return [];
   return [{
     tool: workflow === 'generation' ? 'prepare_spec_generation' : 'prepare_spec_repair',
-    arguments: { directory: input.directory, domain: input.domain, cursor: '<continuationCursor>' },
+    arguments: {
+      directory: input.directory,
+      domain: input.domain,
+      cursor,
+      maxItems: shaping.maxItems,
+      maxResponseBytes: shaping.budget,
+      ...(workflow === 'repair' ? { baseRef: input.baseRef ?? 'auto' } : {}),
+    },
     reason: `Retrieve the deferred ${page.omitted.map(entry => entry.section).join(', ')} evidence from the same composite.`,
   }];
 }
@@ -444,9 +484,14 @@ export async function prepareSpecRepair(input: PrepareSpecInput): Promise<SpecWo
   const bundle = bundles.find(item => item.name.toLowerCase() === input.domain.toLowerCase());
   const specCorpus = await loadSpecCorpus(loaded.root, loaded.openspecPath);
   const canonicalSpecDomain = specCorpus.find(item => item.domain.toLowerCase() === input.domain.toLowerCase())?.domain;
-  const resolvedDomain = bundle?.name ?? canonicalSpecDomain ?? input.domain;
+  // The spec corpus owns Repair's identity. Analysis casing may differ, while the
+  // link index deliberately stores the on-disk canonical domain name.
+  const resolvedDomain = canonicalSpecDomain ?? bundle?.name ?? input.domain;
   const spec = objectResult(await handleGetSpec(loaded.root, canonicalSpecDomain ?? resolvedDomain));
   if (typeof spec.error === 'string') return unavailable('repair', input.domain, 'spec-not-found', spec.error);
+  const baseRef = input.baseRef ?? 'auto';
+  const preliminary = resolveStart('repair', input, resolvedDomain, loaded.generationId, baseRef);
+  if ('receipt' in preliminary) return preliminary;
 
   // Resolve links against the graph this composite already parsed rather than
   // re-reading `dependency-graph.json` for the same request.
@@ -455,7 +500,7 @@ export async function prepareSpecRepair(input: PrepareSpecInput): Promise<SpecWo
       rootPath: loaded.root, openspecPath: loaded.openspecPath, domains: [resolvedDomain], persist: false, graph: loaded.graph,
     })
       .then(resolution => mappingViewOf(resolution, resolvedDomain)),
-    handleCheckSpecDrift(loaded.root, input.baseRef ?? 'auto', [], [resolvedDomain]),
+    handleCheckSpecDrift(loaded.root, baseRef, [], [resolvedDomain], 'warning', Number.MAX_SAFE_INTEGER),
   ]);
   input.signal?.throwIfAborted();
   const mapping = objectResult(mappingRaw);
@@ -469,19 +514,23 @@ export async function prepareSpecRepair(input: PrepareSpecInput): Promise<SpecWo
     }
   }
   const scopedPaths = [...paths].sort();
-  const maxItems = clampMaxItems(input.maxItems);
   const audit = await handleAuditSpecCoverage(
     loaded.root,
-    maxItems,
+    Number.MAX_SAFE_INTEGER,
     5,
     false,
     { files: scopedPaths, domains: [resolvedDomain] },
+    { llmContext: loaded.context, dependencyGraph: loaded.graph },
   );
   input.signal?.throwIfAborted();
   const scopedSet = new Set(scopedPaths);
-  const inScope = (path: unknown): boolean => typeof path === 'string' && scopedSet.has(path.startsWith(loaded.root) ? relative(loaded.root, path) : path);
+  const inScope = (path: unknown): boolean => {
+    if (typeof path !== 'string') return false;
+    const normalized = normalizeScopedPath(loaded.root, path.startsWith(loaded.root) ? relative(loaded.root, path) : path);
+    return normalized !== null && scopedSet.has(normalized);
+  };
   const structuralChange = scopedPaths.length > 0
-    ? await handleStructuralDiff({ directory: loaded.root, baseRef: input.baseRef ?? 'HEAD', files: scopedPaths, maxResults: Math.min(clampMaxItems(input.maxItems), 50) })
+    ? await handleStructuralDiff({ directory: loaded.root, baseRef, files: scopedPaths, unboundedResults: true })
     : { state: 'unavailable', reason: 'empty-historical-footprint', message: 'No current or historical source path could be recovered.' };
   input.signal?.throwIfAborted();
   const auditObj = objectResult(audit);
@@ -491,16 +540,15 @@ export async function prepareSpecRepair(input: PrepareSpecInput): Promise<SpecWo
   const scopedAudit = {
     ...auditObj,
     uncoveredFunctions: (Array.isArray(auditObj.uncoveredFunctions) ? auditObj.uncoveredFunctions as Array<Record<string, unknown>> : []).filter(item => inScope(item.file)),
-    orphanRequirements: allOrphanRequirements.slice(0, maxItems),
+    orphanRequirements: allOrphanRequirements,
     staleDomains: (Array.isArray(auditObj.staleDomains) ? auditObj.staleDomains as Array<Record<string, unknown>> : []).filter(item => item.name === resolvedDomain),
     summary: {},
   };
   const scopedNodes = (loaded.context.callGraph?.nodes ?? []).filter(node => inScope(node.filePath));
   const coverageAvailable = objectResult(mappingCoverage).state === 'available';
   // The audit already ran under exactly this file scope, so its own summary is the
-  // scoped one — and, unlike the returned `uncoveredFunctions` list, it is NOT
-  // truncated to `maxItems`. Recomputing the counts from the truncated list would
-  // report a bounded page as if it were the whole gap.
+  // scoped one. Recomputing counts from a transport page would report a bounded
+  // page as if it were the whole gap.
   const auditSummary = objectResult(auditObj.summary);
   const scopedCount = (key: string): number | null =>
     (coverageAvailable && typeof auditSummary[key] === 'number' ? auditSummary[key] as number : null);
@@ -526,7 +574,6 @@ export async function prepareSpecRepair(input: PrepareSpecInput): Promise<SpecWo
     ? mappingDependentSections.map(section => ({
         section,
         reason: `mapping-${String(objectResult(mappingCoverage).reason ?? 'unavailable')}`,
-        omittedCount: 0,
       }))
     : [];
 
@@ -549,31 +596,48 @@ export async function prepareSpecRepair(input: PrepareSpecInput): Promise<SpecWo
     }));
 
   const driftIssues = Array.isArray(objectResult(drift).issues) ? objectResult(drift).issues as unknown[] : [];
+  const mappingProvenance = {
+    state: typeof mapping.error === 'string' ? 'unavailable' : 'available',
+    ...(typeof mapping.error === 'string' ? { reason: mapping.reason ?? mapping.error } : {}),
+    generatedAt: mapping.generatedAt,
+    source: mapping.source,
+    provenance: mapping.provenance,
+    stats: mapping.stats,
+  };
   const sections = buildRepairStream({
     specContent,
     coveredFunction: mappingUnavailable ? [] : allCoveredFunctions,
     uncoveredFunction: mappingUnavailable ? [] : scopedAudit.uncoveredFunctions,
     staleMapping: mappingUnavailable ? [] : staleMapping,
     orphanRequirement: mappingUnavailable ? [] : allOrphanRequirements,
+    structuralScope: scopedPaths,
     structuralChange: structuralChangeRecords(structuralChange),
     drift: driftIssues,
     domainMembership: (bundle?.files ?? []).map(path => ({ path })),
     candidateDecisions: bundle?.candidateDecisions ?? [],
   });
 
-  const resolved = resolveStart('repair', input, resolvedDomain, loaded.fingerprint, sections.length);
-  if ('receipt' in resolved) return resolved;
-
-  const mappingProvenance = {
-    state: typeof mapping.error === 'string' ? 'unavailable' : 'available',
-    ...(typeof mapping.error === 'string' ? { reason: mapping.reason ?? mapping.error } : {}),
-    generatedAt: mapping.generatedAt,
-    // `cache` or `derived` — Repair works either way, so the host can see that a
-    // missing cache did not degrade the evidence it is reading.
-    source: mapping.source,
-    provenance: mapping.provenance,
-    stats: mapping.stats,
+  const pageGlobal = {
+    contentSafety: REPO_CONTENT_PROVENANCE,
+    existingSpecMeta: { domain: spec.domain, path: spec.path, length: specContent.length },
+    domainEvidenceCoverage: bundle
+      ? { state: 'available', fileCount: bundle.files.length }
+      : { state: 'unavailable', reason: 'domain-not-analyzed', possibleOrphan: true },
+    mapping: mappingProvenance,
+    mappingCoverage,
+    coverageSummary: scopedAudit.summary,
+    staleDomains: scopedAudit.staleDomains,
+    driftSummary: { state: typeof objectResult(drift).error === 'string' ? 'unavailable' : 'available', summary: objectResult(drift).summary },
+    structuralChangeSummary: structuralChangeSummary(structuralChange),
+    structuralScopeTotal: scopedPaths.length,
+    streamSections: [...REPAIR_STREAM_SECTIONS],
   };
+  const streamIdentity = compositionFingerprint({
+    sections,
+    pageGlobal: { ...pageGlobal, mapping: { ...mappingProvenance, generatedAt: undefined } },
+  });
+  const resolved = resolveStart('repair', input, resolvedDomain, loaded.generationId, baseRef, sections.length, streamIdentity);
+  if ('receipt' in resolved) return resolved;
 
   return respondWithPage({
     workflow: 'repair',
@@ -581,26 +645,14 @@ export async function prepareSpecRepair(input: PrepareSpecInput): Promise<SpecWo
     resolvedDomain,
     loaded,
     sections,
-    pageGlobal: {
-      existingSpecMeta: { domain: spec.domain, path: spec.path, length: specContent.length },
-      domainEvidenceCoverage: bundle
-        ? { state: 'available', fileCount: bundle.files.length }
-        : { state: 'unavailable', reason: 'domain-not-analyzed', possibleOrphan: true },
-      mapping: mappingProvenance,
-      mappingCoverage,
-      coverageSummary: scopedAudit.summary,
-      staleDomains: scopedAudit.staleDomains,
-      driftSummary: { state: typeof objectResult(drift).error === 'string' ? 'unavailable' : 'available', summary: objectResult(drift).summary },
-      structuralChangeSummary: structuralChangeSummary(structuralChange),
-      structuralScope: scopedPaths.slice(0, maxItems),
-      structuralScopeTotal: scopedPaths.length,
-      structuralScopeTruncated: scopedPaths.length > maxItems,
-      streamSections: [...REPAIR_STREAM_SECTIONS],
-    },
+    pageGlobal,
     start: resolved.start,
     budget: resolved.budget,
-    followUpsFor: page => [
-      ...continuationFollowUps('repair', { ...input, domain: resolvedDomain }, page),
+    maxItems: resolved.maxItems,
+    baseRef,
+    streamIdentity,
+    followUpsFor: (page, cursor) => [
+      ...continuationFollowUps('repair', { ...input, domain: resolvedDomain, baseRef }, page, cursor, resolved),
       ...(mappingUnavailable ? [mappingRemediation(loaded.root, objectResult(mappingCoverage))] : []),
     ],
     extraOmissions: coverageOmissions,

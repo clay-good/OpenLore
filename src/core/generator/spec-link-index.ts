@@ -538,7 +538,9 @@ export function readMappingArtifact(raw: string): MappingArtifactRead {
     const hasProvenance = !!provenance && typeof provenance === 'object'
       && typeof (provenance as Record<string, unknown>).analysisGeneration === 'string'
       && typeof (provenance as Record<string, unknown>).specDigest === 'string';
-    if (hasProvenance) return { kind: 'link-index', index: record as unknown as SpecLinkIndex };
+    if (hasProvenance && isValidLinkIndexShape(record)) {
+      return { kind: 'link-index', index: record as unknown as SpecLinkIndex };
+    }
     return { kind: 'invalid', reason: 'invalid-json' };
   }
 
@@ -550,6 +552,47 @@ export function readMappingArtifact(raw: string): MappingArtifactRead {
       ? { sourceAnalysisFingerprint: record.sourceAnalysisFingerprint } : {}),
     reason: 'incompatible-provenance',
   };
+}
+
+const isString = (value: unknown): value is string => typeof value === 'string';
+const isCount = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0;
+const isObjectRecord = (value: unknown): value is Record<string, unknown> =>
+  !!value && typeof value === 'object' && !Array.isArray(value);
+
+function isSymbolRef(value: unknown): boolean {
+  if (!isObjectRecord(value)) return false;
+  return isString(value.name) && isString(value.file) && isCount(value.line) && isString(value.kind);
+}
+
+function isAnchor(value: unknown): boolean {
+  if (!isObjectRecord(value)) return false;
+  return isString(value.raw)
+    && (value.file === null || isString(value.file))
+    && (value.symbol === null || isString(value.symbol))
+    && ['linked', 'ambiguous', 'stale', 'footprint', 'type-only'].includes(String(value.state))
+    && Array.isArray(value.candidates)
+    && value.candidates.every(isSymbolRef)
+    && isCount(value.candidateTotal);
+}
+
+function isRequirementLink(value: unknown): boolean {
+  if (!isObjectRecord(value)) return false;
+  return isString(value.requirement)
+    && isString(value.domain)
+    && isString(value.specFile)
+    && ['linked', 'ambiguous', 'unmapped', 'stale'].includes(String(value.state))
+    && Array.isArray(value.anchors) && value.anchors.every(isAnchor)
+    && Array.isArray(value.functions) && value.functions.every(isSymbolRef)
+    && Array.isArray(value.footprintFiles) && value.footprintFiles.every(isString);
+}
+
+function isValidLinkIndexShape(value: Record<string, unknown>): boolean {
+  if (!isString(value.generatedAt) || !Array.isArray(value.links) || !value.links.every(isRequirementLink)) return false;
+  if (!Array.isArray(value.orphanFunctions) || !value.orphanFunctions.every(isSymbolRef)) return false;
+  if (!isObjectRecord(value.stats)) return false;
+  const stats = value.stats;
+  const statKeys = ['totalRequirements', 'linked', 'ambiguous', 'unmapped', 'stale', 'totalExportedFunctions', 'coveredFunctions', 'orphanCount', 'footprintFileCount'];
+  return statKeys.every(key => isCount(stats[key]));
 }
 
 /**

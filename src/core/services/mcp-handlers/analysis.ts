@@ -39,7 +39,8 @@ import { getSkeletonContent, isSkeletonWorthIncluding } from '../../analyzer/cod
 import { detectLanguage } from '../../analyzer/language-detection.js';
 import { buildArchitectureOverview } from '../../analyzer/architecture-writer.js';
 import { buildDomainEvidence } from '../../generator/domain-evidence.js';
-import type { RepoStructure } from '../../analyzer/artifact-generator.js';
+import type { LLMContext, RepoStructure } from '../../analyzer/artifact-generator.js';
+import type { DependencyGraphResult } from '../../analyzer/dependency-graph.js';
 import {
   isGitRepository,
   getChangedFiles,
@@ -807,6 +808,7 @@ export async function handleAuditSpecCoverage(
   hubThreshold = 5,
   save = true,
   scope?: { files?: string[]; domains?: string[] },
+  analysisArtifacts?: { llmContext: LLMContext; dependencyGraph: DependencyGraphResult },
 ): Promise<unknown> {
   const absDir = await validateDirectory(directory);
   try {
@@ -817,6 +819,7 @@ export async function handleAuditSpecCoverage(
       save,
       files: scope?.files,
       domains: scope?.domains,
+      ...(analysisArtifacts ? { analysisArtifacts } : {}),
     });
     return report;
   } catch (err) {

@@ -49,7 +49,7 @@ describe('clampResponseBytes', () => {
 describe('evidence cursors', () => {
   const payload = {
     v: EVIDENCE_STREAM_PROTOCOL, w: 'generation', d: 'billing', g: 'gen-1',
-    s: 2, o: 40, b: DEFAULT_RESPONSE_BYTES,
+    x: 'stream-1', s: 2, o: 40, b: DEFAULT_RESPONSE_BYTES, m: 80, r: '',
   };
 
   it('round-trips a well-formed cursor', () => {
@@ -88,7 +88,8 @@ describe('evidence cursors', () => {
     const forgedPosition = { ...payload, s: 99 };
     const selfSigned = createHash('sha256')
       .update([forgedPosition.v, forgedPosition.w, forgedPosition.d, forgedPosition.g,
-        forgedPosition.s, forgedPosition.o, forgedPosition.b].join('\0'))
+        forgedPosition.x, forgedPosition.s, forgedPosition.o, forgedPosition.b,
+        forgedPosition.m, forgedPosition.r].join('\0'))
       .digest('hex').slice(0, 32);
     const forged = Buffer.from(JSON.stringify({ ...forgedPosition, f: selfSigned })).toString('base64url');
     expect(decodeEvidenceCursor(forged)).toBeUndefined();
@@ -97,6 +98,10 @@ describe('evidence cursors', () => {
   it('rejects an out-of-range budget even with a valid shape', () => {
     const tooSmall = encodeEvidenceCursor({ ...payload, b: MIN_RESPONSE_BYTES - 1 });
     expect(decodeEvidenceCursor(tooSmall)).toBeUndefined();
+  });
+
+  it('rejects an oversized encoded cursor before decoding', () => {
+    expect(decodeEvidenceCursor('a'.repeat(4_097))).toBeUndefined();
   });
 });
 
