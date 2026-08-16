@@ -349,7 +349,11 @@ describe('runReviewCli (output + advisory posture)', () => {
     const code = await runReviewCli({ cwd: '/p', base: 'main', format: 'json' });
     expect(code).toBe(0);
     const payload = JSON.parse(outSpy.mock.calls.map((c: unknown[]) => String(c[0])).join(''));
-    expect(payload).toMatchObject({ status: 'ok', structural: { summary: { removedFunctions: 1 } } });
+    expect(payload).toMatchObject({
+      schemaVersion: 1,
+      status: 'ok',
+      structural: { summary: { removedFunctions: 1 } },
+    });
   });
 
   it('markdown output carries the sticky marker on stdout', async () => {

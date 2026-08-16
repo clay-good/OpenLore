@@ -10,7 +10,7 @@
 
 import { Command } from 'commander';
 import { sanitizeForTerminal as safe } from '../../utils/misc.js';
-import { readFile, writeFile, mkdir, chmod } from 'node:fs/promises';
+import { readFile, rm, writeFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 const execFileAsync = promisify(execFile);
@@ -62,6 +62,14 @@ import type { DecisionStore, PendingDecision } from '../../types/index.js';
 import { runTuiApproval } from '../tui-approval.js';
 import { emit } from '../../core/services/telemetry.js';
 import { resolveOpenspecDir } from '../../utils/openspec-dir.js';
+import {
+  displayHookPath,
+  hookManagerWarning,
+  isResolvedGitRepository,
+  resolveGitHookTarget,
+  resolveGitPath,
+  updateHookFile,
+} from '../git-hooks.js';
 
 // ============================================================================
 // AGENT INSTRUCTION FILES
@@ -213,66 +221,8 @@ async function ensureGitignored(rootPath: string, entry: string): Promise<void> 
   logger.discovery(`  → added ${entry} to .gitignore`);
 }
 
-export async function installPreCommitHook(rootPath: string): Promise<void> {
-  const hooksDir = join(rootPath, '.git', 'hooks');
-  const hookPath = join(hooksDir, 'pre-commit');
-
-  if (!(await fileExists(join(rootPath, '.git')))) {
-    logger.error('Not a git repository. Cannot install hook.');
-    process.exitCode = 1;
-    return;
-  }
-
-  await mkdir(hooksDir, { recursive: true });
-
-  let existingContent: string;
-  if (await fileExists(hookPath)) {
-    existingContent = await readFile(hookPath, 'utf-8');
-    if (existingContent.includes(HOOK_MARKER)) {
-      // Still clean up legacy spec-gen block if present
-      const cleaned = existingContent.replace(/\n*# spec-gen-decisions-hook[\s\S]*?# end-spec-gen-decisions-hook\n*/g, '');
-      if (cleaned !== existingContent) {
-        await writeFile(hookPath, cleaned, 'utf-8');
-        logger.discovery('Removed legacy spec-gen-decisions-hook block.');
-      } else {
-        logger.success('Pre-commit hook already installed.');
-      }
-      return;
-    }
-    logger.discovery('Existing pre-commit hook found. Appending decisions gate.');
-    // Strip legacy spec-gen block and trailing `exit 0` so our block is not unreachable.
-    const stripped = existingContent
-      .replace(/\n*# spec-gen-decisions-hook[\s\S]*?# end-spec-gen-decisions-hook\n*/g, '')
-      .trimEnd()
-      .replace(/\n*\nexit 0\s*$/, '');
-    await writeFile(hookPath, stripped + '\n\n' + HOOK_CONTENT, 'utf-8');
-  } else {
-    await writeFile(hookPath, '#!/bin/sh\n\n' + HOOK_CONTENT, 'utf-8');
-  }
-
-  await chmod(hookPath, 0o755);
-  logger.success('Pre-commit hook installed at .git/hooks/pre-commit');
-  logger.discovery('Commits will be gated until decisions are approved. Use --no-verify to skip.');
-
-  // Install post-commit hook to detect --no-verify bypass
-  const postCommitPath = join(hooksDir, 'post-commit');
-  let existingPostContent: string;
-  if (await fileExists(postCommitPath)) {
-    existingPostContent = await readFile(postCommitPath, 'utf-8');
-    if (!existingPostContent.includes(POST_COMMIT_HOOK_MARKER)) {
-      const strippedPost = existingPostContent.trimEnd().replace(/\n*\nexit 0\s*$/, '');
-      await writeFile(postCommitPath, strippedPost + '\n\n' + POST_COMMIT_HOOK_CONTENT, 'utf-8');
-    }
-  } else {
-    await writeFile(postCommitPath, '#!/bin/sh\n\n' + POST_COMMIT_HOOK_CONTENT, 'utf-8');
-  }
-  await chmod(postCommitPath, 0o755);
-  logger.success('Post-commit hook installed at .git/hooks/post-commit (bypass detector)');
-
-  // Ensure pending decisions store is not accidentally committed
+async function ensureDecisionSupportFiles(rootPath: string): Promise<void> {
   await ensureGitignored(rootPath, '.openlore/decisions/');
-
-  // Inject record_decision instructions into existing agent context files
   const agentFiles = [
     { path: join(rootPath, 'CLAUDE.md'), label: 'CLAUDE.md' },
     { path: join(rootPath, 'AGENTS.md'), label: 'AGENTS.md' },
@@ -282,58 +232,143 @@ export async function installPreCommitHook(rootPath: string): Promise<void> {
     { path: join(rootPath, '.windsurf', 'rules.md'), label: '.windsurf/rules.md' },
     { path: join(rootPath, '.vibe', 'skills', 'openlore.md'), label: '.vibe/skills/openlore.md' },
   ];
-
   for (const { path: filePath, label } of agentFiles) {
     const result = await injectAgentInstructions(filePath);
     if (result === 'injected') logger.discovery(`  → record_decision instructions added to ${label}`);
   }
 }
 
+export async function runPostCommitDecisionCheck(rootPath: string): Promise<void> {
+  const sentinel = await resolveGitPath(rootPath, 'OPENLORE_GATE_RAN')
+    ?? join(rootPath, '.git', 'OPENLORE_GATE_RAN');
+  if (await fileExists(sentinel)) {
+    await rm(sentinel, { force: true });
+    return;
+  }
+  logger.warning('openlore: pre-commit gate was bypassed (--no-verify). Architectural decisions were not reviewed for this commit. Run: openlore decisions --consolidate --gate');
+}
+
+export async function installPreCommitHook(rootPath: string): Promise<void> {
+  const target = await resolveGitHookTarget(rootPath, 'pre-commit');
+  const hookPath = target.hookPath;
+
+  if (!(await isResolvedGitRepository(rootPath, target))) {
+    logger.error('Not a git repository. Cannot install hook.');
+    process.exitCode = 1;
+    return;
+  }
+  await ensureDecisionSupportFiles(rootPath);
+  if (!target.canInstall) {
+    logger.warning(hookManagerWarning(target, 'openlore decisions --gate'));
+    const postTarget = await resolveGitHookTarget(rootPath, 'post-commit');
+    logger.warning(hookManagerWarning(postTarget, 'openlore decisions --post-commit-check'));
+    return;
+  }
+
+  let preAlreadyInstalled = false;
+  let removedLegacyBlock = false;
+  let appendedPre = false;
+  const preResult = await updateHookFile(hookPath, (existing) => {
+    if (existing?.includes(HOOK_MARKER)) {
+      preAlreadyInstalled = true;
+      const cleaned = existing.replace(/\n*# spec-gen-decisions-hook[\s\S]*?# end-spec-gen-decisions-hook\n*/g, '');
+      removedLegacyBlock = cleaned !== existing;
+      return removedLegacyBlock ? cleaned : null;
+    }
+    appendedPre = existing !== null;
+    const stripped = existing
+      ?.replace(/\n*# spec-gen-decisions-hook[\s\S]*?# end-spec-gen-decisions-hook\n*/g, '')
+      .trimEnd()
+      .replace(/\n*\nexit 0\s*$/, '');
+    return stripped
+      ? stripped + '\n\n' + HOOK_CONTENT
+      : '#!/bin/sh\n\n' + HOOK_CONTENT;
+  });
+  if (preResult.status === 'unavailable') {
+    logger.warning(`Cannot install the decisions hook at ${displayHookPath(hookPath)}: ${preResult.reason}`);
+    return;
+  }
+  if (removedLegacyBlock) logger.discovery('Removed legacy spec-gen-decisions-hook block.');
+  if (preAlreadyInstalled) logger.success('Pre-commit hook already installed.');
+  else {
+    if (appendedPre) logger.discovery('Existing pre-commit hook found. Appending decisions gate.');
+    logger.success(`Pre-commit hook installed at ${displayHookPath(hookPath)}`);
+    logger.discovery('Commits will be gated until decisions are approved. Use --no-verify to skip.');
+  }
+
+  // Install post-commit hook to detect --no-verify bypass
+  const postTarget = await resolveGitHookTarget(rootPath, 'post-commit');
+  const postCommitPath = postTarget.hookPath;
+  if (!postTarget.canInstall) {
+    logger.warning(hookManagerWarning(postTarget, 'openlore decisions --post-commit-check'));
+    return;
+  }
+  const postResult = await updateHookFile(postCommitPath, (existing) => {
+    if (existing?.includes(POST_COMMIT_HOOK_MARKER)) return null;
+    const stripped = existing?.trimEnd().replace(/\n*\nexit 0\s*$/, '');
+    return stripped
+      ? stripped + '\n\n' + POST_COMMIT_HOOK_CONTENT
+      : '#!/bin/sh\n\n' + POST_COMMIT_HOOK_CONTENT;
+  });
+  if (postResult.status === 'unavailable') {
+    logger.warning(`Cannot install the decisions post-commit hook at ${displayHookPath(postCommitPath)}: ${postResult.reason}`);
+    return;
+  }
+  logger.success(`Post-commit hook installed at ${displayHookPath(postCommitPath)} (bypass detector)`);
+}
+
 export async function uninstallPreCommitHook(rootPath: string): Promise<void> {
-  const hookPath = join(rootPath, '.git', 'hooks', 'pre-commit');
-
-  if (!(await fileExists(hookPath))) {
+  const { hookPath } = await resolveGitHookTarget(rootPath, 'pre-commit');
+  let preFound = false;
+  let preBlockFound = false;
+  let preDeleted = false;
+  const preResult = await updateHookFile(hookPath, (existing) => {
+    if (existing === null) return null;
+    preFound = true;
+    if (!existing.includes(HOOK_MARKER)) return null;
+    preBlockFound = true;
+    const cleaned = existing
+      .replace(/\n*# openlore-decisions-hook[\s\S]*?# end-openlore-decisions-hook\n*/g, '')
+      .replace(/\n*# spec-gen-decisions-hook[\s\S]*?# end-spec-gen-decisions-hook\n*/g, '')
+      .trim();
+    if (!cleaned || cleaned === '#!/bin/sh') {
+      preDeleted = true;
+      return undefined;
+    }
+    return cleaned + '\n';
+  });
+  if (preResult.status === 'unavailable') {
+    logger.warning(`Cannot uninstall the decisions hook at ${displayHookPath(hookPath)}: ${preResult.reason}`);
+  } else if (!preFound) {
     logger.warning('No pre-commit hook found.');
-    return;
-  }
-
-  const content = await readFile(hookPath, 'utf-8');
-  if (!content.includes(HOOK_MARKER)) {
+  } else if (!preBlockFound) {
     logger.warning('Pre-commit hook does not contain openlore decisions gate.');
-    return;
-  }
-
-  const newContent = content
-    .replace(/\n*# openlore-decisions-hook[\s\S]*?# end-openlore-decisions-hook\n*/g, '')
-    .replace(/\n*# spec-gen-decisions-hook[\s\S]*?# end-spec-gen-decisions-hook\n*/g, '')
-    .trim();
-
-  if (!newContent || newContent === '#!/bin/sh') {
-    const { unlink } = await import('node:fs/promises');
-    await unlink(hookPath);
+  } else if (preDeleted) {
     logger.success('Pre-commit hook removed (file deleted — was only openlore).');
   } else {
-    await writeFile(hookPath, newContent + '\n', 'utf-8');
     logger.success('OpenLore decisions gate removed from pre-commit hook.');
   }
 
   // Remove post-commit bypass detector
-  const postCommitPath = join(rootPath, '.git', 'hooks', 'post-commit');
-  if (await fileExists(postCommitPath)) {
-    const postContent = await readFile(postCommitPath, 'utf-8');
-    if (postContent.includes(POST_COMMIT_HOOK_MARKER)) {
-      const newPostContent = postContent
-        .replace(/\n*# openlore-decisions-post-hook[\s\S]*?# end-openlore-decisions-post-hook\n*/g, '')
-        .trim();
-      if (!newPostContent || newPostContent === '#!/bin/sh') {
-        const { unlink } = await import('node:fs/promises');
-        await unlink(postCommitPath);
-        logger.success('Post-commit hook removed.');
-      } else {
-        await writeFile(postCommitPath, newPostContent + '\n', 'utf-8');
-        logger.success('OpenLore bypass detector removed from post-commit hook.');
-      }
+  const { hookPath: postCommitPath } = await resolveGitHookTarget(rootPath, 'post-commit');
+  let postRemoved = false;
+  let postDeleted = false;
+  const postResult = await updateHookFile(postCommitPath, (existing) => {
+    if (!existing?.includes(POST_COMMIT_HOOK_MARKER)) return null;
+    postRemoved = true;
+    const cleaned = existing
+      .replace(/\n*# openlore-decisions-post-hook[\s\S]*?# end-openlore-decisions-post-hook\n*/g, '')
+      .trim();
+    if (!cleaned || cleaned === '#!/bin/sh') {
+      postDeleted = true;
+      return undefined;
     }
+    return cleaned + '\n';
+  });
+  if (postResult.status === 'unavailable') {
+    logger.warning(`Cannot uninstall the decisions post-commit hook at ${displayHookPath(postCommitPath)}: ${postResult.reason}`);
+  } else if (postRemoved) {
+    logger.success(postDeleted ? 'Post-commit hook removed.' : 'OpenLore bypass detector removed from post-commit hook.');
   }
 
   // Remove record_decision instructions from agent context files
@@ -614,6 +649,7 @@ export const decisionsCommand = new Command('decisions')
   .description('Record, consolidate, and sync architectural decisions to OpenSpec')
   .option('--consolidate', 'Consolidate drafts + verify against diff', false)
   .option('--gate', 'Exit non-zero if decisions await review (for use in hooks)', false)
+  .option('--post-commit-check', 'Report when the decisions pre-commit gate was bypassed', false)
   .option('--approve <id>', 'Approve a decision by ID')
   .option('--reject <id>', 'Reject a decision by ID')
   .option('--note <text>', 'Note to attach to approve/reject action')
@@ -652,6 +688,7 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
   .action(async function (this: Command, options: {
     consolidate: boolean;
     gate: boolean;
+    postCommitCheck: boolean;
     approve?: string;
     reject?: string;
     note?: string;
@@ -678,6 +715,10 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
     if (options.uninstallHook) {
       await uninstallPreCommitHook(rootPath);
       await uninstallClaudeHook(rootPath); // cleans up any previously installed PostToolUse hook
+      return;
+    }
+    if (options.postCommitCheck) {
+      await runPostCommitDecisionCheck(rootPath);
       return;
     }
     // ── Load store (always needed) ───────────────────────────────────────────

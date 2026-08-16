@@ -4,8 +4,8 @@
 
 ### Requirement: HookInstallersTargetTheEffectiveHooksDir
 
-Every openlore git-hook installer (the enforcement gate, the decisions gate, and its post-commit
-companion) SHALL install into the hooks directory git actually consults — resolved via
+Every openlore git-hook installer (enforcement, decisions and its post-commit companion, drift,
+blast-radius, impact-certificate, and refresh-stories) SHALL install into the hooks directory git actually consults — resolved via
 `git rev-parse --git-path hooks`, honoring `core.hooksPath`, worktrees, and `$GIT_DIR` — never a
 hard-coded `.git/hooks`. When the effective directory is owned by a hook manager, the installer
 SHALL either wire the openlore block through that manager's script (same marker discipline) or
@@ -17,7 +17,7 @@ directory, with a shadowed `.git/hooks` install reported as "installed but unrea
 #### Scenario: A custom hooksPath repo gets a working gate
 
 - **GIVEN** a repository with `core.hooksPath` pointing outside `.git/hooks`
-- **WHEN** the user runs the enforcement or decisions hook installer
+- **WHEN** the user runs any OpenLore hook installer
 - **THEN** the hook block lands in the configured hooks directory and a subsequent `git commit`
   actually runs the gate
 

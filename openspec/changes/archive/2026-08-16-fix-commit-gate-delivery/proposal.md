@@ -1,6 +1,6 @@
 # Fix commit-gate delivery: install hooks where git actually looks, and version the machine contract
 
-> Status: PROPOSED (2026-07-03, e2e audit pass 3). Both pre-commit hook installers hard-code
+> Status: BUILT (2026-08-16). OpenLore's hook installers previously hard-coded
 > `<root>/.git/hooks/pre-commit` and never consult `core.hooksPath` — under husky/lefthook/custom
 > hooksPath, git never reads `.git/hooks`, so the gate the user believes protects them is inert
 > while both installers print success. And the `openlore enforce --json` envelope CI consumes has
@@ -34,7 +34,7 @@
 
 ## What changes
 
-1. **Resolve the effective hooks dir.** Both installers resolve it via
+1. **Resolve the effective hooks dir.** All hook installers resolve it via
    `git rev-parse --git-path hooks` (execFile array-args, honoring `core.hooksPath`, worktrees,
    and `$GIT_DIR`) and install there instead of the hard-coded path. The existing marker-based
    stacking (`enforce.ts:88-91`, `decisions.ts:229-234`) is unchanged — it just operates on the
@@ -68,9 +68,8 @@ decisions store already practices.
 
 ## Impact
 
-- Files: `src/cli/commands/enforce.ts` (effective-hooks-dir resolution, manager detection,
-  `schemaVersion`), `src/cli/commands/decisions.ts` (same resolution for the decisions gate and
-  its post-commit hook), `src/cli/commands/doctor.ts` (reachability check),
+- Files: `src/cli/git-hooks.ts` (shared resolution and atomic mutation), all hook-installing CLI
+  commands, `src/cli/commands/doctor.ts` (reachability check),
   `src/cli/commands/review.ts` (`schemaVersion` in the JSON envelope); tests for each.
 - Specs: `cli` — 2 ADDED (HookInstallersTargetTheEffectiveHooksDir,
   MachineJsonEnvelopesCarrySchemaVersion).

@@ -23,12 +23,9 @@
  * commit. Deterministic, no LLM (north star `c6d1ad07`).
  */
 
-import { join } from 'node:path';
-import { readFile, writeFile, mkdir, chmod } from 'node:fs/promises';
 import { Command } from 'commander';
 import { logger, configureLogger } from '../../utils/logger.js';
 import { writeStdout } from '../output.js';
-import { fileExists } from '../../utils/command-helpers.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
 import {
   effectivePolicy,
@@ -41,6 +38,13 @@ import { detectStaleDecisionReferences } from '../../core/services/mcp-handlers/
 import { computeBlastRadius, type BlastRadiusBriefing } from '../../core/services/mcp-handlers/blast-radius.js';
 import { computeImpactCertificate, type ImpactCertificate } from '../../core/services/mcp-handlers/impact-certificate.js';
 import type { OpenLoreConfig } from '../../types/index.js';
+import {
+  displayHookPath,
+  hookManagerWarning,
+  isResolvedGitRepository,
+  resolveGitHookTarget,
+  updateHookFile,
+} from '../git-hooks.js';
 
 const HOOK_MARKER = '# openlore-enforcement-hook';
 
@@ -69,51 +73,67 @@ fi
 `;
 
 export async function installEnforcementHook(rootPath: string): Promise<void> {
-  const hooksDir = join(rootPath, '.git', 'hooks');
-  const hookPath = join(hooksDir, 'pre-commit');
+  const target = await resolveGitHookTarget(rootPath, 'pre-commit');
+  const hookPath = target.hookPath;
 
-  if (!(await fileExists(join(rootPath, '.git')))) {
+  if (!(await isResolvedGitRepository(rootPath, target))) {
     logger.error('Not a git repository. Cannot install hook.');
     process.exitCode = 1;
     return;
   }
-  await mkdir(hooksDir, { recursive: true });
-
-  if (await fileExists(hookPath)) {
-    const existing = await readFile(hookPath, 'utf-8');
-    if (existing.includes(HOOK_MARKER)) {
-      logger.success('Unified enforcement pre-commit hook already installed.');
-      return;
-    }
-    // Coexist with any other openlore hook (decisions gate, blast-radius, impact-cert):
-    // append our block after stripping a trailing `exit 0` so it is not unreachable.
-    const stripped = existing.trimEnd().replace(/\n*\nexit 0\s*$/, '');
-    await writeFile(hookPath, stripped + '\n\n' + HOOK_CONTENT, 'utf-8');
-  } else {
-    await writeFile(hookPath, '#!/bin/sh\n\n' + HOOK_CONTENT, 'utf-8');
+  if (!target.canInstall) {
+    logger.warning(hookManagerWarning(target, 'openlore enforce --hook'));
+    return;
   }
-  await chmod(hookPath, 0o755);
-  logger.success('Unified enforcement pre-commit hook installed at .git/hooks/pre-commit');
+  let alreadyInstalled = false;
+  const result = await updateHookFile(hookPath, (existing) => {
+    if (existing?.includes(HOOK_MARKER)) {
+      alreadyInstalled = true;
+      return null;
+    }
+    const stripped = existing?.trimEnd().replace(/\n*\nexit 0\s*$/, '');
+    return stripped
+      ? stripped + '\n\n' + HOOK_CONTENT
+      : '#!/bin/sh\n\n' + HOOK_CONTENT;
+  });
+  if (result.status === 'unavailable') {
+    logger.warning(`Cannot install the enforcement hook at ${displayHookPath(hookPath)}: ${result.reason}`);
+    return;
+  }
+  if (alreadyInstalled) {
+    logger.success('Unified enforcement pre-commit hook already installed.');
+    return;
+  }
+  logger.success(`Unified enforcement pre-commit hook installed at ${displayHookPath(hookPath)}`);
   logger.discovery('It is advisory (never blocks) until enforcement.policy in .openlore/config.json maps a finding code to "blocking".');
 }
 
 export async function uninstallEnforcementHook(rootPath: string): Promise<void> {
-  const hookPath = join(rootPath, '.git', 'hooks', 'pre-commit');
-  if (!(await fileExists(hookPath))) {
+  const { hookPath } = await resolveGitHookTarget(rootPath, 'pre-commit');
+  let hookFound = false;
+  let blockFound = false;
+  const result = await updateHookFile(hookPath, (existing) => {
+    if (existing === null) return null;
+    hookFound = true;
+    const cleaned = existing.replace(
+      new RegExp(`\\n*${HOOK_MARKER}[\\s\\S]*?# end-openlore-enforcement-hook\\n*`, 'g'),
+      '\n',
+    );
+    if (cleaned === existing) return null;
+    blockFound = true;
+    return cleaned.trimEnd() + '\n';
+  });
+  if (result.status === 'unavailable') {
+    logger.warning(`Cannot uninstall the enforcement hook at ${displayHookPath(hookPath)}: ${result.reason}`);
+    return;
+  }
+  if (!hookFound) {
     logger.discovery('No pre-commit hook found; nothing to uninstall.');
-    return;
-  }
-  const existing = await readFile(hookPath, 'utf-8');
-  const cleaned = existing.replace(
-    new RegExp(`\\n*${HOOK_MARKER}[\\s\\S]*?# end-openlore-enforcement-hook\\n*`, 'g'),
-    '\n',
-  );
-  if (cleaned === existing) {
+  } else if (!blockFound) {
     logger.discovery('Enforcement hook block not present; nothing to uninstall.');
-    return;
+  } else {
+    logger.success('Removed the unified enforcement pre-commit hook block.');
   }
-  await writeFile(hookPath, cleaned.trimEnd() + '\n', 'utf-8');
-  logger.success('Removed the unified enforcement pre-commit hook block.');
 }
 
 /** Whether the repo opted into a diff-heavy source (so the gate should run it). */
@@ -273,6 +293,7 @@ export async function runEnforceCli(opts: EnforceCliOptions): Promise<number> {
 
   if (opts.json) {
     await writeStdout(JSON.stringify({
+      schemaVersion: 1,
       gated: result.gated,
       blocking: result.blocking,
       advisory: result.advisory,

@@ -31,7 +31,7 @@ validate`**, and the archive machinery works again. This pass:
   because their requirements were already synced verbatim (`fix-pi-parity-drift`,
   `fix-redaction-module-gaps`).
 
-## Complete — 143 in `archive/`
+## Complete — 144 in `archive/`
 
 Everything in `openspec/changes/archive/` is shipped (or a settled won't-do), with its
 requirements reflected in the main specs. `openspec list` shows only open work.
@@ -41,7 +41,7 @@ requirements reflected in the main specs. `openspec list` shows only open work.
 No open change has partial code on `main`. A change belongs here the moment its implementation
 starts; move it back out (archive it) the moment its marker/spec evidence lands.
 
-## To build — 111
+## To build — 110
 
 The whole open set is unbuilt backlog. Newest additions: 7 proposals from the 2026-07-27
 first-run e2e (`E2E-FIRSTRUN-2026-07-27.md`). Other thematic indexes:
@@ -77,7 +77,10 @@ analysis freshness and failures are disclosed, and the bundled Action documents 
 write-token trust boundary without suppressing configured policy gates;
 `harden-llm-output-contract` (2026-08-16, archived) — malformed structured entries no longer
 discard valid siblings, truncation and provider errors fail explicitly, and every LLM-derived
-verification metric and mixed composite carries its evidence and model provenance.
+verification metric and mixed composite carries its evidence and model provenance;
+`fix-commit-gate-delivery` (2026-08-16, archived) — every Git-hook installer targets Git's
+effective hook path, manager-owned hooks fail honestly, doctor checks reachability, concurrent
+edits are atomic, and machine JSON envelopes carry an explicit schema version.
 
 After this table was compiled, four research sweeps added 32 more proposals (all validate; not yet
 folded into the table): 10 in `FIELD-RESEARCH-2026-07.md`, 10 in `ECOSYSTEM-RESEARCH-2026-07-27.md`,
@@ -131,7 +134,6 @@ trust boundary for served content.
 | `align-api-layer-with-cli-core` | The programmatic API is a fork of the CLI pipeline, not a facade over it — realign and make its contract embedder-safe |
 | `disclose-dynamic-boundary-regions` | the call graph names where it stops seeing, instead of returning a quiet lower bound |
 | `enforce-preset-membership-at-dispatch` | the advertised surface must be the callable surface |
-| `fix-commit-gate-delivery` | install hooks where git actually looks, and version the machine contract |
 | `fix-complexity-language-parity` | Go/Ruby/Rust/Swift/Elixir report ~1 regardless of shape |
 | `fix-config-validation-completeness` | Config validation must catch what actually breaks the run, and `doctor` must not bless a config that does |
 | `fix-drift-reporting-honesty` | silent truncation, hook failures reported as drift, and invisible memory-staleness kinds |

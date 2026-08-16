@@ -9,6 +9,7 @@ import { Command } from 'commander';
 import { sanitizeForTerminal as safe } from '../../utils/misc.js';
 import { withRelaxedTls } from '../../core/services/tls-scope.js';
 import { access, stat, readFile } from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
 import { join, relative } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -47,6 +48,11 @@ import { describeExclusions, totalExcluded, type ParseHealthReport } from '../..
 import { describeMemoryDegradation } from '../../core/analyzer/memory-strategy.js';
 import type { GovernanceFinding } from '../../core/services/mcp-handlers/enforcement-policy.js';
 import { detectInjectionShapes, INJECTION_SHAPE_LIMITS } from '../../core/services/served-content.js';
+import {
+  hookManagerWarning,
+  isResolvedGitRepository,
+  resolveGitHookTarget,
+} from '../git-hooks.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -133,6 +139,67 @@ async function checkGit(rootPath: string): Promise<CheckResult> {
       fix: 'Install git from https://git-scm.com/',
     };
   }
+}
+
+const OPENLORE_PRE_COMMIT_MARKER = /# openlore-(?:enforcement|decisions|drift|blast-radius|impact-certificate)-hook/;
+
+/** Verify that an installed OpenLore gate is on Git's active, executable hook path. */
+export async function checkHookReachability(rootPath: string): Promise<CheckResult> {
+  const target = await resolveGitHookTarget(rootPath, 'pre-commit');
+  if (!(await isResolvedGitRepository(rootPath, target))) {
+    return { name: 'Git hook reachability', status: 'ok', detail: 'not a Git repository; no hook to check' };
+  }
+
+  let activeContent = '';
+  try { activeContent = await readFile(target.hookPath, 'utf-8'); } catch { /* absent */ }
+  if (OPENLORE_PRE_COMMIT_MARKER.test(activeContent)) {
+    try {
+      await access(target.executionPath, fsConstants.X_OK);
+      return {
+        name: 'Git hook reachability',
+        status: 'ok',
+        detail: target.executionPath === target.hookPath
+          ? `OpenLore gate is installed and executable at ${target.hookPath}`
+          : `OpenLore gate is installed at ${target.hookPath} and reachable through ${target.executionPath}`,
+      };
+    } catch {
+      return {
+        name: 'Git hook reachability',
+        status: 'warn',
+        detail: `OpenLore gate is installed at ${target.hookPath} but Git cannot execute ${target.executionPath}`,
+        fix: target.manager
+          ? hookManagerWarning(target, 'openlore enforce --hook')
+          : `Run chmod +x ${JSON.stringify(target.executionPath)}`,
+      };
+    }
+  }
+
+  const legacyPath = join(rootPath, '.git', 'hooks', 'pre-commit');
+  if (legacyPath !== target.hookPath) {
+    try {
+      const shadowed = await readFile(legacyPath, 'utf-8');
+      if (OPENLORE_PRE_COMMIT_MARKER.test(shadowed)) {
+        return {
+          name: 'Git hook reachability',
+          status: 'warn',
+          detail: `OpenLore gate is installed but unreachable at ${legacyPath}; Git uses ${target.effectiveHooksDir}`,
+          fix: target.canInstall
+            ? 'Re-run the OpenLore hook installer so it writes to the effective hooks directory'
+            : hookManagerWarning(target, 'openlore enforce --hook'),
+        };
+      }
+    } catch { /* no shadowed legacy hook */ }
+  }
+
+  if (!target.canInstall) {
+    return {
+      name: 'Git hook reachability',
+      status: 'warn',
+      detail: `No reachable OpenLore gate is wired through ${target.manager}`,
+      fix: hookManagerWarning(target, 'openlore enforce --hook'),
+    };
+  }
+  return { name: 'Git hook reachability', status: 'ok', detail: 'No OpenLore Git gate installed (optional)' };
 }
 
 async function checkConfig(rootPath: string): Promise<CheckResult> {
@@ -733,7 +800,7 @@ function printResult(r: CheckResult, useColor: boolean): void {
     console.log(`       ${' '.repeat(22)} ${c.yellow(`→ ${safe(finding.subject)}: ${safe(finding.message)}`)}`);
   }
   if (r.fix) {
-    console.log(`       ${' '.repeat(22)} ${c.yellow(`→ ${r.fix}`)}`);
+    console.log(`       ${' '.repeat(22)} ${c.yellow(`→ ${safe(r.fix)}`)}`);
   }
 }
 
@@ -783,6 +850,7 @@ Checks performed:
       Promise.all([
         checkNodeVersion(),
         checkGit(rootPath),
+        checkHookReachability(rootPath),
         checkConfig(rootPath),
         checkConfigSchema(rootPath),
         checkAnalysis(rootPath),

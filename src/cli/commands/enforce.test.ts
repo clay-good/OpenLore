@@ -13,7 +13,9 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { mkdtemp, rm, mkdir, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import {
   installEnforcementHook,
   uninstallEnforcementHook,
@@ -31,6 +33,7 @@ import {
 import type { DecisionStore, PendingDecision, EnforcementClass } from '../../types/index.js';
 
 const created: string[] = [];
+const execFileAsync = promisify(execFile);
 afterEach(async () => { for (const r of created.splice(0)) await rm(r, { recursive: true, force: true }); process.exitCode = 0; });
 
 async function mkRepo(): Promise<string> {
@@ -74,6 +77,7 @@ async function writePolicy(root: string, policy: Record<string, EnforcementClass
 }
 
 type GateJson = {
+  schemaVersion: number;
   gated: boolean;
   blocking: Array<{ code: string }>;
   advisory: Array<{ code: string }>;
@@ -129,6 +133,36 @@ describe('enforce git hook install/uninstall', () => {
     h = await readHook(root);
     expect(h).toContain('# openlore-decisions-hook');
     expect(h).not.toContain('# openlore-enforcement-hook');
+  });
+
+  it('installs into core.hooksPath and Git executes the resulting hook', async () => {
+    const root = await mkRepo();
+    await execFileAsync('git', ['init'], { cwd: root });
+    await execFileAsync('git', ['config', 'user.email', 'test@openlore.dev'], { cwd: root });
+    await execFileAsync('git', ['config', 'user.name', 'OpenLore Test'], { cwd: root });
+    await execFileAsync('git', ['config', 'commit.gpgsign', 'false'], { cwd: root });
+    await execFileAsync('git', ['config', 'core.hooksPath', '.githooks'], { cwd: root });
+    await mkdir(join(root, '.githooks'), { recursive: true });
+    await mkdir(join(root, 'test-bin'), { recursive: true });
+    await writeFile(
+      join(root, '.githooks', 'pre-commit'),
+      '#!/bin/sh\n',
+      { encoding: 'utf-8', mode: 0o755 },
+    );
+    await writeFile(
+      join(root, 'test-bin', 'openlore'),
+      '#!/bin/sh\nif [ "$2" = "--help" ]; then echo --hook; elif [ "$2" = "--hook" ]; then printf ran > openlore-hook-ran; fi\n',
+      { encoding: 'utf-8', mode: 0o755 },
+    );
+
+    await installEnforcementHook(root);
+    const hook = await readFile(join(root, '.githooks', 'pre-commit'), 'utf-8');
+    expect(hook).toContain('# openlore-enforcement-hook');
+    await execFileAsync('git', ['commit', '--allow-empty', '-m', 'exercise custom hook'], {
+      cwd: root,
+      env: { ...process.env, PATH: `${join(root, 'test-bin')}${delimiter}${process.env.PATH ?? ''}` },
+    });
+    expect(await readFile(join(root, 'openlore-hook-ran'), 'utf-8')).toBe('ran');
   });
 });
 
@@ -201,6 +235,7 @@ describe('enforce gate decision', () => {
     await writeStaleScenario(root);
     const { code, json } = await gateJson(root);
     expect(code).toBe(0);
+    expect(json.schemaVersion).toBe(1);
     expect(json.gated).toBe(false);
     expect(json.advisory.map((f) => f.code)).toContain('stale-decision-reference');
   });
