@@ -1,6 +1,6 @@
 # Harden the viewer chat agent: per-provider model resolution and honest terminal states
 
-> Status: PROPOSED (2026-07-08, e2e audit fifth pass). The viewer chat agent
+> Status: BUILT (2026-08-16). The viewer chat agent
 > (`src/core/services/chat-agent.ts`) was never audited by any prior pass. Its provider
 > resolution leaks a config/env model across providers — a default-config repo with only a
 > Gemini key sends `claude-sonnet-4-6` to the Gemini API and 404s on every message — and an
