@@ -395,9 +395,9 @@ describe('workflow security: supply-chain automation is wired', () => {
   });
 });
 
-describe('workflow security: CodeQL suppressions stay narrow and auditable', () => {
+describe('workflow security: reviewed CodeQL egress stays narrow and auditable', () => {
   it('allows only the thirteen reviewed file-to-HTTP egress sinks', () => {
-    const suppressions: Record<string, number> = {};
+    const markers: Record<string, number> = {};
     const unexplained: string[] = [];
 
     for (const file of sourceFiles(join(REPO_ROOT, 'src'))) {
@@ -409,15 +409,15 @@ describe('workflow security: CodeQL suppressions stay narrow and auditable', () 
             lines[index - 1]?.trim().startsWith('// INTENTIONAL EGRESS:') !== true) {
           unexplained.push(location);
         }
-        suppressions[rel(file)] = (suppressions[rel(file)] ?? 0) + 1;
+        markers[rel(file)] = (markers[rel(file)] ?? 0) + 1;
       });
     }
 
     expect(
       unexplained,
-      'Every CodeQL suppression must name one query and have an immediately preceding rationale.'
+      'Every reviewed CodeQL egress marker must name one query and have an immediately preceding rationale.'
     ).toEqual([]);
-    expect(suppressions, 'Changing the reviewed suppression set requires explicit security review.').toEqual({
+    expect(markers, 'Changing the reviewed egress set requires explicit security review.').toEqual({
       'src/cli/commands/serve.ts': 2,
       'src/core/analyzer/embedding-service.ts': 1,
       'src/core/services/chat-agent.ts': 4,
