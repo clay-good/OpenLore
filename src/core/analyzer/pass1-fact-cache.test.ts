@@ -383,11 +383,21 @@ describe('the memo refuses to serve what it cannot prove', () => {
 });
 
 describe('serialization round-trips the extractor’s own answer', () => {
-  it('preserves nodes, raw edges, the CFG map, style and parse health', async () => {
+  it('preserves nodes, edges, CFG, style, parse health, and late-pass facts', async () => {
     const file = corpus(1)[0];
     const facts = await dispatchFileExtract(file);
     expect(facts).toBeDefined();
     expect(facts!.cfg?.size ?? 0).toBeGreaterThan(0);
+    facts!.classRelationships = [{ className: 'Child', parentClasses: ['Base'], interfaces: [] }];
+    facts!.dynamicDispatch = {
+      events: [{
+        group: 'TypeScript',
+        rule: 'event-channel',
+        registrations: [{ key: 'str:ready', handlerIds: ['handler-ref'] }],
+        dispatches: [{ key: 'str:ready', callerId: 'caller', line: 7 }],
+      }],
+      callbacks: [{ group: 'TypeScript', callerId: 'caller', handlerId: 'handler-ref', line: 8 }],
+    };
 
     const round = deserializeFacts(serializeFacts(facts));
     expect(round).toBeDefined();
@@ -398,6 +408,8 @@ describe('serialization round-trips the extractor’s own answer', () => {
     expect([...back.cfg!.entries()]).toEqual([...facts!.cfg!.entries()]);
     expect(back.style).toEqual(facts!.style);
     expect(back.parseHealth).toEqual(facts!.parseHealth);
+    expect(back.classRelationships).toEqual(facts!.classRelationships);
+    expect(back.dynamicDispatch).toEqual(facts!.dynamicDispatch);
   });
 
   it('stores "no extractor for this language" as a reusable answer, not a miss', () => {
@@ -409,6 +421,44 @@ describe('serialization round-trips the extractor’s own answer', () => {
     expect(deserializeFacts('{')).toBeUndefined();
     expect(deserializeFacts('{"v":1}')).toBeUndefined();
     expect(deserializeFacts('[]')).toBeUndefined();
+  });
+});
+
+describe('late-pass facts survive the persistent cache boundary', () => {
+  it('keeps inheritance, cross-file events, and callbacks byte-identical on a fully warm run', async () => {
+    const files: ExtractionInput[] = [
+      {
+        path: 'src/register.ts', language: 'TypeScript',
+        content: `
+class Base { run(): void {} }
+class Child extends Base { run(): void {} }
+export function handler(): void {}
+export function register(emitter: any): void {
+  emitter.on('ready', handler);
+  setTimeout(handler, 1);
+}
+`,
+      },
+      {
+        path: 'src/dispatch.ts', language: 'TypeScript',
+        content: `export function dispatch(emitter: any): void { emitter.emit('ready'); }`,
+      },
+    ];
+    const storage = new MemoryStorage();
+    const cold = await buildWith(files, storage, 'late-facts-v1');
+    storage.absorb(cold.cache);
+    const warm = await buildWith(files, storage, 'late-facts-v1');
+
+    expect(warm.reused).toBe(files.length);
+    expect(warm.extracted).toBe(0);
+    expect(warm.graph).toBe(cold.graph);
+    const graph = JSON.parse(warm.graph) as {
+      inheritanceEdges: Array<{ kind: string }>;
+      edges: Array<{ synthesizedBy?: string }>;
+    };
+    expect(graph.inheritanceEdges.some(edge => edge.kind === 'extends')).toBe(true);
+    expect(graph.edges.some(edge => edge.synthesizedBy === 'event-channel')).toBe(true);
+    expect(graph.edges.some(edge => edge.synthesizedBy === 'callback-registration')).toBe(true);
   });
 });
 

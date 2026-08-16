@@ -56,6 +56,32 @@ export interface RawEdge {
   callType?: CallType;
 }
 
+/** Plain-data class relationship extracted while the Pass-1 syntax tree is alive. */
+export interface ClassRelationshipFact {
+  className: string;
+  parentClasses: string[];
+  interfaces: string[];
+}
+
+export interface DynamicEventFacts {
+  group: string;
+  rule: 'event-channel' | 'type-event' | 'actor-message';
+  registrations: Array<{ key: string; handlerIds: string[] }>;
+  dispatches: Array<{ key: string; callerId: string; line: number }>;
+}
+
+export interface DynamicCallbackFact {
+  group: 'TypeScript' | 'Go' | 'C++';
+  callerId: string;
+  handlerId: string;
+  line: number;
+}
+
+export interface DynamicDispatchFacts {
+  events: DynamicEventFacts[];
+  callbacks: DynamicCallbackFact[];
+}
+
 export interface FunctionNode {
   /** Unique ID: "filepath::ClassName.methodName" or "filepath::functionName" */
   id: string;
@@ -331,6 +357,10 @@ export type FileExtractResult = {
   cfg?: Map<string, FunctionCfg>;
   style?: FileStyleRaw;
   parseHealth?: FileParseHealth;
+  /** Survives worker structured-clone and persistent fact-cache JSON boundaries. */
+  classRelationships?: ClassRelationshipFact[];
+  /** Unresolved handler references are resolved only after all repository nodes exist. */
+  dynamicDispatch?: DynamicDispatchFacts;
   /** Plain-data receipt that survives the worker-thread structured-clone boundary. */
   grammarUnavailable?: Omit<GrammarUnavailableBoundary, 'fileCount'>;
 };

@@ -19,6 +19,8 @@ import { describe, it, expect } from 'vitest';
 import {
   _computeEnclosingForTesting,
   _enclosingByBruteForceForTesting,
+  _findEnclosingFunctionForTesting,
+  _findEnclosingFunctionStepsForTesting,
 } from './call-graph.js';
 import type { FunctionNode } from './call-graph.js';
 
@@ -177,5 +179,76 @@ describe('computeEnclosing — identical to the brute-force definition', () => {
     // survive CI noise and still fails by a wide margin if the scan returns.
     expect(large / small, `${small.toFixed(1)}ms -> ${large.toFixed(1)}ms for 8x the nodes`)
       .toBeLessThan(30);
+  });
+});
+
+describe('findEnclosingFunction interval index', () => {
+  const brute = (nodes: FunctionNode[], pos: number): FunctionNode | undefined => {
+    let best: FunctionNode | undefined;
+    let bestSize = Infinity;
+    for (const n of nodes) {
+      if (n.startIndex <= pos && pos < n.endIndex) {
+        const size = n.endIndex - n.startIndex;
+        if (size < bestSize) { best = n; bestSize = size; }
+      }
+    }
+    return best;
+  };
+
+  it('agrees at boundaries, sibling gaps, nesting, and identical spans', () => {
+    const nodes = [
+      node('outer', 0, 100),
+      node('left', 5, 25),
+      node('leftTwin', 5, 25),
+      node('deep', 10, 20),
+      node('right', 40, 60),
+    ];
+    for (const pos of [-1, 0, 4, 5, 10, 19, 20, 24, 25, 39, 40, 59, 60, 99, 100]) {
+      expect(_findEnclosingFunctionForTesting(nodes, pos), `position ${pos}`).toBe(brute(nodes, pos));
+    }
+  });
+
+  it('agrees on randomized properly nested spans in arbitrary input order', () => {
+    let seed = 0x51a7e;
+    const rnd = (): number => (seed = (seed * 1664525 + 1013904223) >>> 0) / 0xffffffff;
+    for (let trial = 0; trial < 80; trial++) {
+      const nodes: FunctionNode[] = [];
+      let id = 0;
+      const build = (lo: number, hi: number, depth: number): void => {
+        nodes.push(node(`q${id++}`, lo, hi));
+        if (depth >= 5 || hi - lo < 8) return;
+        let cursor = lo + 1;
+        const count = Math.floor(rnd() * 4);
+        for (let i = 0; i < count && cursor < hi - 3; i++) {
+          const room = hi - cursor - 1;
+          const width = Math.max(2, Math.floor(rnd() * room));
+          const end = Math.min(cursor + width, hi - 1);
+          build(cursor, end, depth + 1);
+          cursor = end + 1;
+        }
+      };
+      build(0, 300, 0);
+      for (let i = nodes.length - 1; i > 0; i--) {
+        const j = Math.floor(rnd() * (i + 1));
+        [nodes[i], nodes[j]] = [nodes[j], nodes[i]];
+      }
+      for (let pos = -1; pos <= 301; pos++) {
+        expect(_findEnclosingFunctionForTesting(nodes, pos), `trial ${trial}, pos ${pos}`)
+          .toBe(brute(nodes, pos));
+      }
+    }
+  });
+
+  it('keeps early-position lookup work logarithmic after the index is built', () => {
+    const build = (count: number): FunctionNode[] =>
+      Array.from({ length: count }, (_, i) => node(`s${i}`, i * 4, i * 4 + 3));
+    const small = build(2_000);
+    const large = build(16_000);
+    _findEnclosingFunctionForTesting(small, 0);
+    _findEnclosingFunctionForTesting(large, 0);
+    const smallSteps = _findEnclosingFunctionStepsForTesting(small, 0);
+    const largeSteps = _findEnclosingFunctionStepsForTesting(large, 0);
+    // Growing the corpus 8x adds only O(log2(8)) levels to the binary and segment-tree searches.
+    expect(largeSteps).toBeLessThanOrEqual(smallSteps + 12);
   });
 });

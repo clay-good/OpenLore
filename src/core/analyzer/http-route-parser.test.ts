@@ -973,6 +973,28 @@ async def list_items():
     expect(result.edges[0].method).toBe('GET');
   });
 
+  it('uses resident content without opening builder-owned paths', async () => {
+    const frontendFile = join(tempDir, 'does-not-exist', 'api.ts');
+    const backendFile = join(tempDir, 'also-missing', 'items.py');
+    const result = await extractAllHttpEdges([
+      {
+        path: frontendFile,
+        content: `export async function fetchItems() { return fetch('/api/items'); }`,
+      },
+      {
+        path: backendFile,
+        content: `@app.get("/api/items")\nasync def list_items():\n    return []\n`,
+      },
+    ]);
+
+    // Non-empty results prove the implementation consumed the supplied text. Any disk read would
+    // hit nonexistent paths and turn this into the vacuous empty answer the optimization forbids.
+    expect(result.calls).toHaveLength(1);
+    expect(result.routes).toHaveLength(1);
+    expect(result.edges).toHaveLength(1);
+    expect(result.edges[0]).toMatchObject({ callerFile: frontendFile, handlerFile: backendFile });
+  });
+
   it('should create a cross-language edge for axios.post → FastAPI route', async () => {
     const frontendFile = await createFile(tempDir, 'search.ts', `
       import axios from 'axios';
