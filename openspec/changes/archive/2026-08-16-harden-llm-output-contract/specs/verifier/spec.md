@@ -6,11 +6,13 @@
 
 Any verification metric derived from an LLM's self-reported judgment (such as
 `specAccuracyScore`) SHALL be labeled with its provenance in verifier output — `llm-judged`
-plus the judging model's id — and SHALL be kept separately attributed from the deterministic
-sub-checks (import/export analysis, requirement coverage). The verifier SHALL NOT blend an
-LLM-judged number and deterministic measurements into one undifferentiated score. When no LLM
-judgment is available, the deterministic fallback (keyword overlap) SHALL be labeled as such,
-so a reader can always tell measurement from opinion.
+plus the judging model's id. A deterministic comparison that consumes an LLM prediction,
+such as export matching, SHALL identify both the deterministic comparison and the prediction's
+model. Fully deterministic checks SHALL remain separately attributed. The verifier SHALL NOT
+blend these inputs into an undifferentiated score: any mixed composite SHALL publish its
+evidence basis and weights. When no LLM judgment is available, a deterministic fallback
+(keyword overlap) SHALL be labeled as such, so a reader can always tell measurement from
+opinion.
 
 #### Scenario: An LLM-judged score is labeled
 
@@ -32,3 +34,11 @@ so a reader can always tell measurement from opinion.
 - **WHEN** summary metrics are computed
 - **THEN** each summary line attributes its inputs; no single figure silently mixes
   LLM-judged and deterministic components
+
+#### Scenario: A deterministic comparison names its LLM operand
+
+- **GIVEN** export matching deterministically compares source exports with an LLM-predicted
+  export list
+- **WHEN** the verification result or report is rendered
+- **THEN** the metric is labeled as a deterministic comparison over an LLM prediction and
+  carries the prediction model's id

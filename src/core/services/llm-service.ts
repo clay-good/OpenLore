@@ -351,6 +351,12 @@ export interface CompletionResponse {
   finishReason: 'stop' | 'length' | 'error';
 }
 
+/** Parsed structured output together with the completion that produced it. */
+export interface StructuredCompletion<T> {
+  data: T;
+  response: CompletionResponse;
+}
+
 /**
  * LLM provider interface
  */
@@ -1883,6 +1889,15 @@ export class LLMService {
    * Generate a completion expecting JSON response
    */
   async completeJSON<T>(request: CompletionRequest, schema?: object): Promise<T> {
+    return (await this.completeJSONWithMetadata<T>(request, schema)).data;
+  }
+
+  /**
+   * Generate a JSON completion while retaining provider metadata such as the
+   * actual model id. Consumers that publish LLM-derived judgments use this to
+   * attribute the result instead of presenting model opinion as measurement.
+   */
+  async completeJSONWithMetadata<T>(request: CompletionRequest, schema?: object): Promise<StructuredCompletion<T>> {
     const jsonRequest = { ...request, responseFormat: 'json' as const, jsonSchema: schema };
 
     // Add JSON instruction to prompt if not already present
@@ -1897,7 +1912,14 @@ export class LLMService {
       jsonRequest.systemPrompt += `\n\nYour response MUST conform to this JSON Schema:\n${JSON.stringify(schema)}`;
     }
 
-    const response = await this.complete(jsonRequest);
+    let response = await this.complete(jsonRequest);
+    if (response.finishReason === 'length') {
+      const cap = request.maxTokens ?? this.provider.maxOutputTokens;
+      throw new Error(`LLM JSON completion was truncated at the ${cap}-token output cap; structured output may be incomplete`);
+    }
+    if (response.finishReason === 'error') {
+      throw new Error('LLM JSON completion ended with a provider error; structured output was not accepted');
+    }
     let content = response.content;
 
     // Extract JSON from markdown code blocks if present
@@ -1926,8 +1948,21 @@ export class LLMService {
         jsonSchema: schema,
       };
 
-      const correctionResponse = await this.complete(correctionRequest);
-      let correctedContent = correctionResponse.content;
+      response = await this.complete(correctionRequest);
+      if (response.finishReason === 'length') {
+        const cap = correctionRequest.maxTokens ?? this.provider.maxOutputTokens;
+        throw new Error(
+          `LLM JSON correction was truncated at the ${cap}-token output cap; structured output may be incomplete`,
+          { cause: parseError },
+        );
+      }
+      if (response.finishReason === 'error') {
+        throw new Error(
+          'LLM JSON correction ended with a provider error; structured output was not accepted',
+          { cause: parseError },
+        );
+      }
+      let correctedContent = response.content;
 
       // Extract from code blocks again
       const correctedMatch = correctedContent.match(/```(?:json)?\s*([\s\S]*?)```/);
@@ -1959,7 +1994,7 @@ export class LLMService {
       this.validateSchema(parsed, schema);
     }
 
-    return parsed;
+    return { data: parsed, response };
   }
 
   /**

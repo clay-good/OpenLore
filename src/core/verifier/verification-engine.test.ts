@@ -473,10 +473,22 @@ export function createUserService(): UserService {
       expect(result.llmConfidence).toBe(0.8);
       // LLM-as-judge: specAccuracyScore (0.85) → purposeMatch.similarity
       expect(result.purposeMatch.similarity).toBe(0.85);
+      expect(result.purposeMatch.provenance).toEqual({ source: 'llm-judged', model: 'mock-model' });
       // LLM-as-judge: requirementCoverageScore (0.75) → requirementCoverage.coverage
       expect(result.requirementCoverage.coverage).toBe(0.75);
       expect(result.requirementCoverage.evidence).toBe('llm-score');
+      expect(result.requirementCoverage.provenance).toEqual({ source: 'llm-judged', model: 'mock-model' });
       expect(result.requirementCoverage.actuallyImplements).toEqual([]);
+      expect(result.importMatch.provenance).toEqual({ source: 'deterministic' });
+      expect(result.exportMatch.provenance).toEqual({
+        source: 'llm-prediction-compared-deterministically',
+        model: 'mock-model',
+      });
+      expect(result.llmConfidenceProvenance).toEqual({ source: 'llm-reported', model: 'mock-model' });
+      expect(result.scoreComposition).toEqual({
+        kind: 'weighted-mixed-evidence-composite',
+        weights: { purpose: 0.5, requirementCoverage: 0.35, imports: 0.05, exports: 0.1 },
+      });
     });
 
     it.each([
@@ -485,18 +497,26 @@ export function createUserService(): UserService {
       ['specAccuracyScore', -0.01],
       ['requirementCoverageScore', Number.NaN],
     ])('rejects an invalid %s instead of grading with it', async (field, value) => {
-      vi.spyOn(llmService, 'completeJSON').mockResolvedValue({
-        predictedPurpose: '',
-        predictedImports: [],
-        predictedExports: [],
-        predictedLogic: [],
-        relatedRequirements: [],
-        confidence: 0.5,
-        specAccuracyScore: 0.5,
-        requirementCoverageScore: 0.5,
-        reasoning: '',
-        [field]: value,
-      } as any);
+      vi.spyOn(llmService, 'completeJSONWithMetadata').mockResolvedValue({
+        data: {
+          predictedPurpose: '',
+          predictedImports: [],
+          predictedExports: [],
+          predictedLogic: [],
+          relatedRequirements: [],
+          confidence: 0.5,
+          specAccuracyScore: 0.5,
+          requirementCoverageScore: 0.5,
+          reasoning: '',
+          [field]: value,
+        } as any,
+        response: {
+          content: '{}',
+          model: 'test-model',
+          finishReason: 'stop',
+          usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+        },
+      });
       const engine = new SpecVerificationEngine(llmService, {
         rootPath: testDir,
         openspecPath: openspecDir,
@@ -514,6 +534,61 @@ export function createUserService(): UserService {
         imports: 2,
         exports: 3,
       })).rejects.toThrow(/finite number between 0 and 1|is required/);
+    });
+
+    it.each([
+      ['predictedExports', 'not-an-array'],
+      ['predictedExports', ['valid', 42]],
+      ['predictedPurpose', 42],
+      ['reasoning', { text: 'not-a-string' }],
+    ])('rejects a shape-invalid %s before using it', async (field, value) => {
+      vi.spyOn(llmService, 'completeJSONWithMetadata').mockResolvedValue({
+        data: {
+          predictedPurpose: '', predictedImports: [], predictedExports: [], predictedLogic: [],
+          relatedRequirements: [], confidence: 0.5, reasoning: '', [field]: value,
+        } as any,
+        response: {
+          content: '{}', model: 'test-model', finishReason: 'stop',
+          usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+        },
+      });
+      const engine = new SpecVerificationEngine(llmService, {
+        rootPath: testDir, openspecPath: openspecDir, outputDir,
+      });
+      await (engine as any).loadSpecs();
+
+      await expect((engine as any).verifyFile({
+        path: 'src/user-service.ts', absolutePath: join(srcDir, 'user-service.ts'), domain: 'user',
+        usedInGeneration: false, complexity: 100, lines: 30, imports: 2, exports: 3,
+      })).rejects.toThrow(/must be (an array of strings|a string)/);
+    });
+
+    it.each([
+      [42],
+      ['judge|forged'],
+      ['judge\nforged'],
+      ['judge\u202emodel'],
+      ['x'.repeat(201)],
+    ])('rejects an unsafe completion model id before publishing provenance', async (model) => {
+      vi.spyOn(llmService, 'completeJSONWithMetadata').mockResolvedValue({
+        data: {
+          predictedPurpose: '', predictedImports: [], predictedExports: [], predictedLogic: [],
+          relatedRequirements: [], confidence: 0.5, reasoning: '',
+        },
+        response: {
+          content: '{}', model: model as string, finishReason: 'stop',
+          usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+        },
+      });
+      const engine = new SpecVerificationEngine(llmService, {
+        rootPath: testDir, openspecPath: openspecDir, outputDir,
+      });
+      await (engine as any).loadSpecs();
+
+      await expect((engine as any).verifyFile({
+        path: 'src/user-service.ts', absolutePath: join(srcDir, 'user-service.ts'), domain: 'user',
+        usedInGeneration: false, complexity: 100, lines: 30, imports: 2, exports: 3,
+      })).rejects.toThrow(/completion model id/);
     });
 
     it('keeps hostile spec and source instructions inside one randomized data boundary', async () => {
@@ -590,6 +665,7 @@ export function createUserService(): UserService {
       expect(result.purposeMatch.similarity).toBeLessThanOrEqual(1);
       // But it must NOT be 0.85 (the LLM-as-judge value from the other test)
       expect(result.purposeMatch.similarity).not.toBe(0.85);
+      expect(result.purposeMatch.provenance).toEqual({ source: 'keyword-fallback' });
     });
   });
 
@@ -603,12 +679,33 @@ export function createUserService(): UserService {
 
       const result = (engine as any).comparePurpose(
         'Handles user authentication',
-        '// Handles authentication for users\nfunction login() {}'
+        '// Handles authentication for users\nfunction login() {}',
+        undefined,
+        undefined,
+        'The system SHALL handle user authentication',
       );
 
       expect(result.predicted).toBe('Handles user authentication');
       expect(result.actual).toContain('authentication');
       expect(result.similarity).toBeGreaterThan(0);
+      expect(result.provenance).toEqual({ source: 'keyword-fallback' });
+    });
+
+    it('uses spec text rather than LLM-predicted text for the keyword fallback', () => {
+      const engine = new SpecVerificationEngine(llmService, {
+        rootPath: testDir,
+        openspecPath: openspecDir,
+        outputDir,
+      });
+      const source = '// Handles authentication for users\nfunction login() {}';
+      const spec = 'The system SHALL handle user authentication';
+
+      const first = (engine as any).comparePurpose('unrelated model wording', source, undefined, undefined, spec);
+      const second = (engine as any).comparePurpose('different model wording', source, undefined, undefined, spec);
+
+      expect(first.similarity).toBe(second.similarity);
+      expect(first.similarity).toBeGreaterThan(0);
+      expect(first.provenance).toEqual({ source: 'keyword-fallback' });
     });
 
     it('should use specAccuracyScore directly when provided (LLM-as-judge)', () => {
@@ -621,11 +718,13 @@ export function createUserService(): UserService {
       const result = (engine as any).comparePurpose(
         'Handles user authentication',
         '// Something completely different',
-        0.92
+        0.92,
+        'judge-model',
       );
 
       // specAccuracyScore takes precedence over Jaccard
       expect(result.similarity).toBe(0.92);
+      expect(result.provenance).toEqual({ source: 'llm-judged', model: 'judge-model' });
     });
   });
 
@@ -1175,7 +1274,7 @@ export class PaymentService {}`;
         path: 'openspec/specs/user/spec.md',
         content: '### Requirement: First\n\nThe system SHALL authenticate users.\n\n### Requirement: Second\n\nThe system SHALL update profiles.',
       }];
-      const coverage = (engine as any).analyzeRequirementCoverage('user', 'unrelated content', 0.25);
+      const coverage = (engine as any).analyzeRequirementCoverage('user', 'unrelated content', 0.25, 'judge-model');
       const feedback = (engine as any).generateFeedback(
         { path: 'src/user.ts' },
         { relatedRequirements: ['First', 'Second'], confidence: 1, reasoning: '' },
@@ -1190,8 +1289,9 @@ export class PaymentService {}`;
         actuallyImplements: [],
         coverage: 0.25,
         evidence: 'llm-score',
+        provenance: { source: 'llm-judged', model: 'judge-model' },
       });
-      expect(feedback).toContain('Requirement coverage: 25% (LLM-scored; no per-requirement claims)');
+      expect(feedback).toContain('Requirement coverage: 25% (LLM-judged by judge-model; no per-requirement claims)');
       expect(feedback.join('\n')).not.toMatch(/Requirements .*don't appear to be implemented/);
     });
 
@@ -1253,9 +1353,10 @@ export class PaymentService {}`;
             domain: 'user',
             overallScore: 0.65,
             llmConfidence: 0.7,
+            llmConfidenceProvenance: { source: 'llm-reported', model: 'judge-model' },
             purposeMatch: { predicted: 'test', actual: 'test', similarity: 0.8 },
-            importMatch: { predicted: [], actual: [], precision: 0.6, recall: 0.6, f1Score: 0.6 },
-            exportMatch: { predicted: [], actual: [], precision: 0.5, recall: 0.5, f1Score: 0.5 },
+            importMatch: { predicted: [], actual: [], precision: 0.6, recall: 0.6, f1Score: 0.6, provenance: { source: 'deterministic' } },
+            exportMatch: { predicted: [], actual: [], precision: 0.5, recall: 0.5, f1Score: 0.5, provenance: { source: 'llm-prediction-compared-deterministically', model: 'judge-model' } },
             requirementCoverage: { relatedRequirements: [], actuallyImplements: [], coverage: 0.7, evidence: 'keyword-match' },
             feedback: ['Some feedback'],
           },
@@ -1269,6 +1370,11 @@ export class PaymentService {}`;
       expect(markdown).toContain('## Domain Breakdown');
       expect(markdown).toContain('needs-review');
       expect(markdown).toContain('65');
+      expect(markdown).toContain('Purpose Match | 80% (provenance unavailable)');
+      expect(markdown).toContain('Import Match (F1) | 60% (deterministic)');
+      expect(markdown).toContain('Export Match (F1) | 50% (deterministic comparison over judge-model prediction)');
+      expect(markdown).toContain('LLM Confidence**: 70% (llm-reported: judge-model)');
+      expect(markdown).toContain('provenance unavailable');
     });
 
     it('neutralizes multiline Markdown syntax in failure paths and reasons', () => {

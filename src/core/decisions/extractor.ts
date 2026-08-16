@@ -23,6 +23,7 @@ import type { PendingDecision, SpecMap, DecisionScope } from '../../types/index.
 import { makeDecisionId } from './store.js';
 import { parseJSON } from '../../utils/misc.js';
 import { createPromptBoundary } from '../../utils/prompt-boundary.js';
+import { logger } from '../../utils/logger.js';
 
 const SYSTEM_PROMPT = `You are an architectural decision extractor for a software project.
 
@@ -177,11 +178,31 @@ export async function extractFromDiff(options: ExtractFromDiffOptions): Promise<
       temperature: 0.1,
     });
 
+    if (response.finishReason === 'length') {
+      throw new Error(
+        `decision extraction response truncated at ${DECISIONS_CONSOLIDATION_MAX_TOKENS.toLocaleString('en-US')} tokens — ` +
+        'decisions may be lost; raise the cap or reduce scope',
+      );
+    }
+    if (response.finishReason === 'error') {
+      throw new Error('decision extraction response ended with a provider error; no decisions were accepted');
+    }
+
     const parsed = parseJSON<unknown>(response.content, null);
-    if (!Array.isArray(parsed) || !parsed.every(isExtractedRaw)) {
+    if (!Array.isArray(parsed)) {
+      if (response.usage?.outputTokens >= DECISIONS_CONSOLIDATION_MAX_TOKENS) {
+        throw new Error(
+          `decision extraction response truncated at ${DECISIONS_CONSOLIDATION_MAX_TOKENS.toLocaleString('en-US')} tokens — ` +
+          'decisions may be lost; raise the cap or reduce scope',
+        );
+      }
       throw new Error('decision extraction returned invalid structured output');
     }
-    const extracted = parsed;
+    const extracted = parsed.filter(isExtractedRaw);
+    const malformedCount = parsed.length - extracted.length;
+    if (malformedCount > 0) {
+      logger.warning(`decision extraction skipped ${malformedCount} malformed decision ${malformedCount === 1 ? 'entry' : 'entries'}`);
+    }
 
     for (const e of extracted) {
       const id = makeDecisionId(sessionId, domain, e.title);

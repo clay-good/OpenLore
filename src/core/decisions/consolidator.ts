@@ -185,13 +185,33 @@ export async function consolidateDrafts(
   });
   const raw = response.content;
 
+  if (response.finishReason === 'length') {
+    throw new Error(
+      `decision consolidation response truncated at ${DECISIONS_CONSOLIDATION_MAX_TOKENS.toLocaleString('en-US')} tokens — ` +
+      'decisions may be lost; raise the cap or reduce scope',
+    );
+  }
+  if (response.finishReason === 'error') {
+    throw new Error('decision consolidation response ended with a provider error; no decisions were accepted');
+  }
+
   const parsed = parseJSON<unknown>(raw, null);
-  if (!Array.isArray(parsed) || !parsed.every(isConsolidatedRaw)) {
+  if (!Array.isArray(parsed)) {
+    if (response.usage?.outputTokens >= DECISIONS_CONSOLIDATION_MAX_TOKENS) {
+      throw new Error(
+        `decision consolidation response truncated at ${DECISIONS_CONSOLIDATION_MAX_TOKENS.toLocaleString('en-US')} tokens — ` +
+        'decisions may be lost; raise the cap or reduce scope',
+      );
+    }
     throw new Error('decision consolidation returned invalid structured output');
   }
-  const consolidated = parsed;
+  const consolidated = parsed.filter(isConsolidatedRaw);
+  const malformedCount = parsed.length - consolidated.length;
+  if (malformedCount > 0) {
+    logger.warning(`decision consolidation skipped ${malformedCount} malformed decision ${malformedCount === 1 ? 'entry' : 'entries'}`);
+  }
 
-  if (consolidated.length === 0 && drafts.length > 0) {
+  if (parsed.length === 0 && drafts.length > 0) {
     logger.warning(`consolidation returned 0 decisions from ${drafts.length} drafts — LLM response: ${raw.slice(0, 300)}`);
   }
 
@@ -245,11 +265,22 @@ export async function consolidateDrafts(
   });
 
   // One verdict per input draft — including the drafts the LLM did not return.
-  const dispositions = computeDraftDispositions({
+  let dispositions = computeDraftDispositions({
     drafts,
     consolidated: decisions,
     supersededIds: allSupersededIds,
   });
+  if (malformedCount > 0) {
+    const directSurvivorIds = new Set(decisions.map((decision) => decision.id));
+    dispositions = dispositions.map((disposition) =>
+      directSurvivorIds.has(disposition.id) || disposition.reason === 'superseded-by-later-draft'
+      ? disposition
+      : {
+          id: disposition.id,
+          disposition: 'pending' as const,
+          reason: 'awaiting-consolidation' as const,
+        });
+  }
 
   return { decisions, supersededIds: allSupersededIds, dispositions };
 }

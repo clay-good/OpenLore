@@ -458,6 +458,70 @@ describe('LLMService', () => {
       expect(result.value).toBe(42);
     });
 
+    it('retains the actual completion model for structured-output attribution', async () => {
+      provider.setDefaultResponse('{"score": 0.8}');
+
+      const result = await service.completeJSONWithMetadata<{ score: number }>({
+        systemPrompt: 'Return JSON.',
+        userPrompt: 'Judge this input.',
+      });
+
+      expect(result.data).toEqual({ score: 0.8 });
+      expect(result.response.model).toBe('mock-model');
+    });
+
+    it('refuses to repair a token-truncated JSON response', async () => {
+      provider.generateCompletion = vi.fn().mockResolvedValue({
+        content: '{"score":',
+        model: 'truncated-model',
+        finishReason: 'length',
+        usage: { inputTokens: 1, outputTokens: 25, totalTokens: 26 },
+      });
+
+      await expect(service.completeJSONWithMetadata({
+        systemPrompt: 'Return JSON.',
+        userPrompt: 'Judge this input.',
+        maxTokens: 25,
+      })).rejects.toThrow(/JSON completion was truncated at the 25-token output cap/);
+      expect(provider.generateCompletion).toHaveBeenCalledTimes(1);
+    });
+
+    it('rejects valid-looking JSON from a provider-error completion', async () => {
+      provider.generateCompletion = vi.fn().mockResolvedValue({
+        content: '{"score": 1}',
+        model: 'error-model',
+        finishReason: 'error',
+        usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+      });
+
+      await expect(service.completeJSONWithMetadata({
+        systemPrompt: 'Return JSON.',
+        userPrompt: 'Judge this input.',
+      })).rejects.toThrow(/ended with a provider error/);
+    });
+
+    it('refuses a token-truncated JSON correction', async () => {
+      provider.generateCompletion = vi.fn()
+        .mockResolvedValueOnce({
+          content: '{"score": nope}',
+          model: 'initial-model',
+          finishReason: 'stop',
+          usage: { inputTokens: 1, outputTokens: 3, totalTokens: 4 },
+        })
+        .mockResolvedValueOnce({
+          content: '{"score":',
+          model: 'correction-model',
+          finishReason: 'length',
+          usage: { inputTokens: 4, outputTokens: 25, totalTokens: 29 },
+        });
+
+      await expect(service.completeJSONWithMetadata({
+        systemPrompt: 'Return JSON.',
+        userPrompt: 'Judge this input.',
+        maxTokens: 25,
+      })).rejects.toThrow(/JSON correction was truncated at the 25-token output cap/);
+    });
+
     it('should extract JSON from markdown code blocks', async () => {
       provider.setDefaultResponse('```json\n{"extracted": true}\n```');
 

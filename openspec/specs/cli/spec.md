@@ -1964,6 +1964,20 @@ leaving a logically half-rebuilt store.
 - **WHEN** the idle timer would fire
 - **THEN** the reaper is suppressed until the rebuild completes, then idle accounting resumes
 
+### Requirement: VerificationCliLabelsEvidenceAndCompositeScores
+
+The `verify` command SHALL label direct LLM judgments with the judging model,
+deterministic fallbacks as deterministic, and deterministic comparisons over LLM
+predictions with the prediction model. File, domain, and report aggregates SHALL be
+named as weighted mixed-evidence composites and SHALL expose their basis.
+
+#### Scenario: Terminal verification output does not hide provenance
+
+- **GIVEN** a verification report containing LLM-derived and deterministic inputs
+- **WHEN** the CLI renders file results and the summary
+- **THEN** each metric identifies its evidence source and each aggregate identifies its
+  mixed-evidence composition
+
 ## Technical Notes
 
 - **Dependencies**: ora, logger, ProgressIndicator, showNextSteps, @inquirer/prompts

@@ -59,9 +59,18 @@ function makeSpecMap(entries: Array<[string, string[]]> = []): SpecMap {
   return { byDomain, byFile } as unknown as SpecMap;
 }
 
-function makeLLM(response: unknown) {
+function makeLLM(
+  response: unknown,
+  finishReason: 'stop' | 'length' | 'error' = 'stop',
+  outputTokens: number = 1,
+) {
   return {
-    complete: vi.fn().mockResolvedValue({ content: JSON.stringify(response) }),
+    complete: vi.fn().mockResolvedValue({
+      content: JSON.stringify(response),
+      finishReason,
+      usage: { inputTokens: 1, outputTokens, totalTokens: outputTokens + 1 },
+      model: 'test-model',
+    }),
   };
 }
 
@@ -319,15 +328,73 @@ describe('extractFromDiff', () => {
     expect(r1[0].id).toBe(r2[0].id);
   });
 
-  it('fails closed on shape-invalid LLM output', async () => {
+  it('keeps valid decisions and discloses malformed sibling entries', async () => {
+    const { logger } = await import('../../utils/logger.js');
+    vi.mocked(logger.warning).mockClear();
     getChangedFiles.mockResolvedValue({ files: [{ path: 'src/services/cache.ts', status: 'modified' }] });
     getFileDiff.mockResolvedValue('diff');
     matchFileToDomains.mockReturnValue(['services']);
+    const result = await extractFromDiff({
+      rootPath: '/project',
+      specMap: makeSpecMap([['services', ['src/services/cache.ts']]]),
+      sessionId: 'sess-001',
+      llm: makeLLM([
+        { title: 'missing required fields', affectedFiles: 'not-an-array' },
+        { title: 'Keep me', rationale: 'R', consequences: 'C', affectedFiles: [], proposedRequirement: null },
+      ]) as never,
+    });
+
+    expect(result.map((decision) => decision.title)).toEqual(['Keep me']);
+    expect(vi.mocked(logger.warning)).toHaveBeenCalledWith(
+      'decision extraction skipped 1 malformed decision entry',
+    );
+  });
+
+  it('reports token-cap truncation instead of returning an empty result', async () => {
+    getChangedFiles.mockResolvedValue({ files: [{ path: 'src/services/cache.ts', status: 'modified' }] });
+    getFileDiff.mockResolvedValue('diff');
+    matchFileToDomains.mockReturnValue(['services']);
+
     await expect(extractFromDiff({
       rootPath: '/project',
       specMap: makeSpecMap([['services', ['src/services/cache.ts']]]),
       sessionId: 'sess-001',
-      llm: makeLLM([{ title: 'missing required fields', affectedFiles: 'not-an-array' }]) as never,
-    })).rejects.toThrow(/invalid structured output/);
+      llm: makeLLM([], 'length') as never,
+    })).rejects.toThrow(/truncated at 2,000 tokens.*decisions may be lost.*raise the cap or reduce scope/);
+  });
+
+  it('rejects valid-looking JSON when the provider reports an error completion', async () => {
+    getChangedFiles.mockResolvedValue({ files: [{ path: 'src/services/cache.ts', status: 'modified' }] });
+    getFileDiff.mockResolvedValue('diff');
+    matchFileToDomains.mockReturnValue(['services']);
+
+    await expect(extractFromDiff({
+      rootPath: '/project',
+      specMap: makeSpecMap([['services', ['src/services/cache.ts']]]),
+      sessionId: 'sess-001',
+      llm: makeLLM([
+        { title: 'Must not survive', rationale: 'R', consequences: 'C', affectedFiles: [], proposedRequirement: null },
+      ], 'error') as never,
+    })).rejects.toThrow(/provider error; no decisions were accepted/);
+  });
+
+  it('treats an unparseable response at the token cap as truncation', async () => {
+    getChangedFiles.mockResolvedValue({ files: [{ path: 'src/services/cache.ts', status: 'modified' }] });
+    getFileDiff.mockResolvedValue('diff');
+    matchFileToDomains.mockReturnValue(['services']);
+    const llm = makeLLM([], 'stop', 2_000);
+    llm.complete.mockResolvedValue({
+      content: '[{"title":"cut off"',
+      finishReason: 'stop',
+      usage: { inputTokens: 1, outputTokens: 2_000, totalTokens: 2_001 },
+      model: 'test-model',
+    });
+
+    await expect(extractFromDiff({
+      rootPath: '/project',
+      specMap: makeSpecMap([['services', ['src/services/cache.ts']]]),
+      sessionId: 'sess-001',
+      llm: llm as never,
+    })).rejects.toThrow(/truncated at 2,000 tokens.*raise the cap or reduce scope/);
   });
 });

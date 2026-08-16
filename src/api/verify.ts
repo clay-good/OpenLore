@@ -147,7 +147,12 @@ export async function openloreVerify(options: VerifyApiOptions = {}): Promise<Ve
 
   progress(onProgress, 'Verifying specs against codebase', 'start');
   const report = await engine.verify(depGraph, openloreConfig.version, selectedCandidates);
-  progress(onProgress, 'Verifying specs against codebase', 'complete', `${(report.overallConfidence * 100).toFixed(0)}% confidence`);
+  progress(
+    onProgress,
+    'Verifying specs against codebase',
+    'complete',
+    `${(report.overallConfidence * 100).toFixed(0)}% weighted mixed-evidence composite confidence`,
+  );
 
   // Save LLM logs
   await llm.saveLogs().catch(() => {});

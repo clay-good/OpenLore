@@ -4,6 +4,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { consolidateDrafts } from './consolidator.js';
+import { applyConsolidationOutcome } from './disposition.js';
 import type { DecisionStore, PendingDecision } from '../../types/index.js';
 import type { LLMService } from '../services/llm-service.js';
 
@@ -15,9 +16,18 @@ vi.mock('../../utils/logger.js', () => ({
 // HELPERS
 // ============================================================================
 
-function makeLLM(response: string): LLMService {
+function makeLLM(
+  response: string,
+  finishReason: 'stop' | 'length' | 'error' = 'stop',
+  outputTokens: number = 1,
+): LLMService {
   return {
-    complete: vi.fn().mockResolvedValue({ content: response, model: 'test-model' }),
+    complete: vi.fn().mockResolvedValue({
+      content: response,
+      model: 'test-model',
+      finishReason,
+      usage: { inputTokens: 1, outputTokens, totalTokens: outputTokens + 1 },
+    }),
     completeJSON: vi.fn(),
     saveLogs: vi.fn().mockResolvedValue(undefined),
   } as unknown as LLMService;
@@ -220,6 +230,111 @@ describe('consolidateDrafts — JSON parsing robustness', () => {
     const store = makeStore([{}]);
     await expect(consolidateDrafts(store, llm)).rejects.toThrow(/invalid structured output/);
   });
+
+  it('keeps valid decisions and discloses malformed sibling entries', async () => {
+    const { logger } = await import('../../utils/logger.js');
+    vi.mocked(logger.warning).mockClear();
+    const valid = JSON.parse(VALID_RESPONSE)[0];
+    const llm = makeLLM(JSON.stringify([
+      { title: 'missing fields', affectedFiles: 'not-an-array' },
+      valid,
+    ]));
+
+    const { decisions } = await consolidateDrafts(makeStore([{}]), llm);
+
+    expect(decisions.map((decision) => decision.title)).toEqual(['Use Redis for caching']);
+    expect(vi.mocked(logger.warning)).toHaveBeenCalledWith(
+      'decision consolidation skipped 1 malformed decision entry',
+    );
+  });
+
+  it('keeps unmatched source drafts pending when malformed output prevents safe lineage', async () => {
+    const valid = {
+      ...JSON.parse(VALID_RESPONSE)[0],
+      id: 'draft0000',
+      title: 'Decision 0',
+      rationale: 'Some rationale',
+    };
+    const malformed = { id: 'draft0001', title: 'Decision 1', affectedFiles: 'not-an-array' };
+
+    const result = await consolidateDrafts(
+      makeStore([{ title: 'Decision 0' }, { title: 'Decision 1' }]),
+      makeLLM(JSON.stringify([valid, malformed])),
+    );
+
+    expect(result.decisions.map((decision) => decision.id)).toEqual(['draft0000']);
+    expect(result.dispositions).toEqual([
+      { id: 'draft0000', disposition: 'promoted', reason: 'promoted-as-recorded' },
+      { id: 'draft0001', disposition: 'pending', reason: 'awaiting-consolidation' },
+    ]);
+  });
+
+  it('preserves valid explicit supersession despite an unrelated malformed sibling', async () => {
+    const store = makeStore([
+      { id: 'draft0000', title: 'New decision', supersedes: 'draft0001' },
+      { id: 'draft0001', title: 'Old decision' },
+    ]);
+    const valid = {
+      ...JSON.parse(VALID_RESPONSE)[0],
+      id: 'draft0000',
+      title: 'New decision',
+      rationale: 'Some rationale',
+      supersededIds: ['draft0001'],
+    };
+    const result = await consolidateDrafts(
+      store,
+      makeLLM(JSON.stringify([valid, { id: 'unrelated', affectedFiles: 'bad' }])),
+    );
+
+    expect(result.dispositions).toEqual([
+      { id: 'draft0000', disposition: 'promoted', reason: 'promoted-as-recorded' },
+      { id: 'draft0001', disposition: 'rejected', reason: 'superseded-by-later-draft' },
+    ]);
+
+    const persisted = applyConsolidationOutcome(store, {
+      originalDraftIds: new Set(['draft0000', 'draft0001']),
+      originalDrafts: store.decisions,
+      capturedDecisions: store.decisions,
+      verified: result.decisions.map((decision) => ({ ...decision, status: 'verified' as const })),
+      phantom: [],
+      supersededIds: result.supersededIds,
+      dispositions: result.dispositions,
+    });
+    expect(persisted.decisions.find((decision) => decision.id === 'draft0001')).toMatchObject({
+      status: 'rejected',
+      disposition: 'rejected',
+      dispositionReason: 'superseded-by-later-draft',
+    });
+  });
+
+  it('reports token-cap truncation and does not call it an empty consolidation', async () => {
+    const { logger } = await import('../../utils/logger.js');
+    vi.mocked(logger.warning).mockClear();
+
+    await expect(consolidateDrafts(makeStore([{}]), makeLLM('[{"title":"cut off"', 'length')))
+      .rejects.toThrow(/truncated at 2,000 tokens.*decisions may be lost.*raise the cap or reduce scope/);
+    expect(vi.mocked(logger.warning)).not.toHaveBeenCalledWith(
+      expect.stringContaining('returned 0 decisions'),
+    );
+  });
+
+  it('rejects valid-looking JSON when the provider reports an error completion', async () => {
+    await expect(consolidateDrafts(makeStore([{}]), makeLLM(VALID_RESPONSE, 'error')))
+      .rejects.toThrow(/provider error; no decisions were accepted/);
+  });
+
+  it('treats an unparseable response at the token cap as truncation', async () => {
+    const { logger } = await import('../../utils/logger.js');
+    vi.mocked(logger.warning).mockClear();
+
+    await expect(consolidateDrafts(
+      makeStore([{}]),
+      makeLLM('[{"title":"cut off"', 'stop', 2_000),
+    )).rejects.toThrow(/truncated at 2,000 tokens.*raise the cap or reduce scope/);
+    expect(vi.mocked(logger.warning)).not.toHaveBeenCalledWith(
+      expect.stringContaining('returned 0 decisions'),
+    );
+  });
 });
 
 // ============================================================================
@@ -368,14 +483,19 @@ describe('consolidateDrafts — ID reuse', () => {
     expect(decisions[0].scope).toBe('component');
   });
 
-  it('fails closed on invalid fields or scope', async () => {
+  it('skips and discloses entries with invalid fields or scope', async () => {
+    const { logger } = await import('../../utils/logger.js');
+    vi.mocked(logger.warning).mockClear();
     const response = JSON.stringify([{
       title: 'bad', rationale: 'bad', consequences: 'bad', affectedDomains: [],
       affectedFiles: 'not-an-array', proposedRequirement: null, supersededIds: [],
       scope: '\u001b[2J',
     }]);
-    await expect(consolidateDrafts(makeStore([{ title: 'Draft' }]), makeLLM(response)))
-      .rejects.toThrow(/invalid structured output/);
+    const { decisions } = await consolidateDrafts(makeStore([{ title: 'Draft' }]), makeLLM(response));
+    expect(decisions).toEqual([]);
+    expect(vi.mocked(logger.warning)).toHaveBeenCalledWith(
+      'decision consolidation skipped 1 malformed decision entry',
+    );
   });
 });
 
