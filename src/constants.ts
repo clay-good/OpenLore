@@ -155,6 +155,21 @@ export const MISTRAL_VIBE_MAX_CONTEXT_TOKENS = 128_000;
 /** Default maximum output tokens for Claude models */
 export const CLAUDE_MAX_OUTPUT_TOKENS = 16_000;
 
+/** Default maximum output tokens for Anthropic API models */
+export const ANTHROPIC_MAX_OUTPUT_TOKENS = 16_000;
+
+/** Default maximum output tokens for OpenAI API models */
+export const OPENAI_MAX_OUTPUT_TOKENS = 16_000;
+
+/** Default maximum output tokens for OpenAI-compatible API models */
+export const OPENAI_COMPAT_MAX_OUTPUT_TOKENS = 16_000;
+
+/** Default maximum output tokens for the Copilot API proxy */
+export const COPILOT_MAX_OUTPUT_TOKENS = 16_000;
+
+/** Default maximum output tokens for Gemini API models */
+export const GEMINI_MAX_OUTPUT_TOKENS = 8_192;
+
 /** Default maximum output tokens for Mistral Vibe */
 export const MISTRAL_VIBE_MAX_OUTPUT_TOKENS = 4_096;
 

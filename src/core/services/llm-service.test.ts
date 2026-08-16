@@ -14,6 +14,7 @@ import {
   AnthropicProvider,
   OpenAIProvider,
   OpenAICompatibleProvider,
+  CopilotProvider,
   GeminiProvider,
   ClaudeCodeProvider,
   CodexCLIProvider,
@@ -24,12 +25,22 @@ import {
   createMockLLMService,
   createLLMService,
   estimateTokens,
+  knownModelsForEndpoint,
   lookupPricing,
+  pricedModelIds,
   parseRetryAfterMs,
   sanitizeCliPrompt,
   type CompletionRequest,
 } from './llm-service.js';
 import { resetTlsScopeForTests } from './tls-scope.js';
+import logger from '../../utils/logger.js';
+import {
+  ANTHROPIC_MAX_OUTPUT_TOKENS,
+  OPENAI_MAX_OUTPUT_TOKENS,
+  OPENAI_COMPAT_MAX_OUTPUT_TOKENS,
+  COPILOT_MAX_OUTPUT_TOKENS,
+  GEMINI_MAX_OUTPUT_TOKENS,
+} from '../../constants.js';
 
 // Mock child_process for CLI provider tests (hoisted before module load)
 vi.mock('child_process', () => ({ execFileSync: vi.fn() }));
@@ -336,6 +347,19 @@ describe('LLMService', () => {
       }
     });
 
+    it('leaves no pending request-timeout timer after a successful request', async () => {
+      vi.useFakeTimers();
+      try {
+        const mock = createMockLLMService({ maxRetries: 0, timeout: 120_000 });
+
+        await mock.service.complete({ systemPrompt: 'A', userPrompt: 'B' });
+
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     // The exit delay must not track the configured timeout: whether the request
     // timeout is 120s or 240s, a fast failure clears the timer immediately, so no
     // timer survives in either case (the two-run invariant from the reproducer,
@@ -355,6 +379,60 @@ describe('LLMService', () => {
           vi.useRealTimers();
         }
       }
+    });
+
+    it('aborts the underlying fetch and stream when the request times out', async () => {
+      vi.useFakeTimers();
+      const cancel = vi.fn();
+      let fetchSignal: AbortSignal | undefined;
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'));
+        },
+        cancel,
+      });
+      vi.stubGlobal('fetch', vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+        fetchSignal = init?.signal ?? undefined;
+        return new Response(stream, { status: 200 });
+      }));
+
+      try {
+        const provider = new OpenAICompatibleProvider('key', 'https://api.mistral.ai/v1');
+        const timed = new LLMService(provider, { maxRetries: 0, timeout: 50 });
+        const completion = timed.complete({ systemPrompt: 'A', userPrompt: 'B' });
+        const rejection = expect(completion).rejects.toThrow('LLM request timed out after 50ms');
+
+        await vi.advanceTimersByTimeAsync(50);
+        await rejection;
+
+        expect(fetchSignal?.aborted).toBe(true);
+        expect(cancel).toHaveBeenCalledOnce();
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.unstubAllGlobals();
+        vi.useRealTimers();
+      }
+    });
+
+    it('warns exactly once when a provider response reaches the output cap', async () => {
+      const warning = vi.spyOn(logger, 'warning').mockImplementation(() => undefined);
+      provider.generateCompletion = async () => ({
+        content: 'partial',
+        usage: { inputTokens: 1, outputTokens: 25, totalTokens: 26 },
+        model: 'mock',
+        finishReason: 'length',
+      });
+
+      await service.complete({
+        systemPrompt: 'Return JSON.',
+        userPrompt: 'Generate data.',
+        responseFormat: 'json',
+        maxTokens: 25,
+      });
+
+      expect(warning).toHaveBeenCalledTimes(1);
+      expect(warning).toHaveBeenCalledWith('LLM JSON completion was truncated at the 25-token output cap');
+      warning.mockRestore();
     });
   });
 
@@ -430,6 +508,44 @@ describe('LLMService', () => {
 
       expect(result.valid).toBe('json');
       expect(callCount).toBe(2);
+    });
+
+    it('preserves the output cap and schema on a correction request', async () => {
+      const requests: CompletionRequest[] = [];
+      provider.generateCompletion = async (request) => {
+        requests.push(request);
+        return {
+          content: requests.length === 1 ? '{invalid}' : '{"name":"fixed"}',
+          usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+          model: 'mock',
+          finishReason: 'stop',
+        };
+      };
+      const schema = { type: 'object', required: ['name'] };
+
+      await service.completeJSON(
+        { systemPrompt: 'Return JSON.', userPrompt: 'Give me data.', maxTokens: 12_345 },
+        schema,
+      );
+
+      expect(requests[1].maxTokens).toBe(12_345);
+      expect(requests[1].jsonSchema).toBe(schema);
+      expect(requests[1].responseFormat).toBe('json');
+    });
+
+    it('validates corrected JSON against the original schema', async () => {
+      let calls = 0;
+      provider.generateCompletion = async () => ({
+        content: ++calls === 1 ? '{invalid}' : '{"wrong":"shape"}',
+        usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+        model: 'mock',
+        finishReason: 'stop',
+      });
+
+      await expect(service.completeJSON(
+        { systemPrompt: 'Return JSON.', userPrompt: 'Give me data.' },
+        { type: 'object', required: ['name'] },
+      )).rejects.toThrow('Missing required field: name');
     });
 
     it('uses a fresh trust boundary for invalid JSON correction', async () => {
@@ -620,7 +736,7 @@ describe('LLMService', () => {
 
       expect(provider.name).toBe('anthropic');
       expect(provider.maxContextTokens).toBe(200000);
-      expect(provider.maxOutputTokens).toBe(4096);
+      expect(provider.maxOutputTokens).toBe(ANTHROPIC_MAX_OUTPUT_TOKENS);
     });
 
     it('should create OpenAIProvider with correct properties', () => {
@@ -628,7 +744,66 @@ describe('LLMService', () => {
 
       expect(provider.name).toBe('openai');
       expect(provider.maxContextTokens).toBe(128000);
-      expect(provider.maxOutputTokens).toBe(4096);
+      expect(provider.maxOutputTokens).toBe(OPENAI_MAX_OUTPUT_TOKENS);
+    });
+
+    it('sources every HTTP provider output ceiling from constants', () => {
+      expect(new OpenAICompatibleProvider('key', 'https://api.mistral.ai/v1').maxOutputTokens)
+        .toBe(OPENAI_COMPAT_MAX_OUTPUT_TOKENS);
+      expect(new CopilotProvider('https://localhost:4141/v1').maxOutputTokens)
+        .toBe(COPILOT_MAX_OUTPUT_TOKENS);
+      expect(new GeminiProvider('key').maxOutputTokens).toBe(GEMINI_MAX_OUTPUT_TOKENS);
+    });
+
+    it('uses the constants-backed ceiling in every HTTP provider request body', async () => {
+      const fetchMock = vi.fn();
+      const signal = new AbortController().signal;
+      vi.stubGlobal('fetch', fetchMock);
+      try {
+        fetchMock.mockResolvedValueOnce(mockResponse({
+          content: [], usage: { input_tokens: 0, output_tokens: 0 }, model: 'claude', stop_reason: 'end_turn',
+        }));
+        await new AnthropicProvider('key').generateCompletion({ systemPrompt: '', userPrompt: '' }, signal);
+        expect(JSON.parse((fetchMock.mock.calls.at(-1)?.[1] as RequestInit).body as string).max_tokens)
+          .toBe(ANTHROPIC_MAX_OUTPUT_TOKENS);
+        expect((fetchMock.mock.calls.at(-1)?.[1] as RequestInit).signal).toBe(signal);
+
+        const openAIResponse = {
+          choices: [{ message: { content: '' }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+          model: 'gpt-4o',
+        };
+        fetchMock.mockResolvedValueOnce(mockResponse(openAIResponse));
+        await new OpenAIProvider('key').generateCompletion({ systemPrompt: '', userPrompt: '' }, signal);
+        expect(JSON.parse((fetchMock.mock.calls.at(-1)?.[1] as RequestInit).body as string).max_tokens)
+          .toBe(OPENAI_MAX_OUTPUT_TOKENS);
+        expect((fetchMock.mock.calls.at(-1)?.[1] as RequestInit).signal).toBe(signal);
+
+        fetchMock.mockResolvedValueOnce(mockStreamResponse([]));
+        await new OpenAICompatibleProvider('key', 'https://api.mistral.ai/v1')
+          .generateCompletion({ systemPrompt: '', userPrompt: '' }, signal);
+        expect(JSON.parse((fetchMock.mock.calls.at(-1)?.[1] as RequestInit).body as string).max_tokens)
+          .toBe(OPENAI_COMPAT_MAX_OUTPUT_TOKENS);
+        expect((fetchMock.mock.calls.at(-1)?.[1] as RequestInit).signal).toBe(signal);
+
+        fetchMock.mockResolvedValueOnce(mockResponse(openAIResponse));
+        await new CopilotProvider('https://localhost:4141/v1')
+          .generateCompletion({ systemPrompt: '', userPrompt: '' }, signal);
+        expect(JSON.parse((fetchMock.mock.calls.at(-1)?.[1] as RequestInit).body as string).max_tokens)
+          .toBe(COPILOT_MAX_OUTPUT_TOKENS);
+        expect((fetchMock.mock.calls.at(-1)?.[1] as RequestInit).signal).toBe(signal);
+
+        fetchMock.mockResolvedValueOnce(mockResponse({
+          candidates: [{ content: { parts: [], role: 'model' }, finishReason: 'STOP' }],
+          usageMetadata: { promptTokenCount: 0, candidatesTokenCount: 0, totalTokenCount: 0 },
+        }));
+        await new GeminiProvider('key').generateCompletion({ systemPrompt: '', userPrompt: '' }, signal);
+        expect(JSON.parse((fetchMock.mock.calls.at(-1)?.[1] as RequestInit).body as string)
+          .generationConfig.maxOutputTokens).toBe(GEMINI_MAX_OUTPUT_TOKENS);
+        expect((fetchMock.mock.calls.at(-1)?.[1] as RequestInit).signal).toBe(signal);
+      } finally {
+        vi.unstubAllGlobals();
+      }
     });
   });
 
@@ -1248,6 +1423,51 @@ describe('OpenAICompatibleProvider', () => {
 
   it('throws on invalid baseUrl', () => {
     expect(() => new OpenAICompatibleProvider('key', 'not-a-url')).toThrow('Invalid API base URL');
+  });
+
+  it('returns only pricing-backed fallback model ids for known endpoints', () => {
+    const endpoints = [
+      'https://codestral.mistral.ai/v1',
+      'https://api.mistral.ai/v1',
+      'https://api.groq.com/openai/v1',
+    ];
+    const priced = new Set(pricedModelIds('openai-compat'));
+    for (const endpoint of endpoints) {
+      expect(knownModelsForEndpoint(endpoint).every((id) => priced.has(id))).toBe(true);
+    }
+
+    expect(knownModelsForEndpoint(endpoints[1])).toEqual([
+      'mistral-large-latest',
+      'mistral-small-latest',
+      'codestral-latest',
+    ]);
+    expect(knownModelsForEndpoint(endpoints[2])).toEqual([
+      'llama-3.3-70b-versatile',
+      'llama-3.1-8b-instant',
+    ]);
+    expect(knownModelsForEndpoint(endpoints[0])).toEqual(['codestral-latest']);
+    expect(knownModelsForEndpoint('https://api.openai.com/v1')).toEqual([]);
+    expect(knownModelsForEndpoint('https://unknown.example/v1')).toEqual([]);
+    expect(knownModelsForEndpoint('https://api.mistral.ai.attacker.example/v1')).toEqual([]);
+    expect(knownModelsForEndpoint('https://proxy.example/api.mistral.ai/v1')).toEqual([]);
+  });
+
+  it('cancels an SSE response that sends DONE without closing the transport', async () => {
+    const cancel = vi.fn();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+      },
+      cancel,
+    });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(stream, { status: 200 })));
+    try {
+      const provider = new OpenAICompatibleProvider('key', 'https://api.mistral.ai/v1');
+      await provider.generateCompletion({ systemPrompt: '', userPrompt: '' });
+      expect(cancel).toHaveBeenCalledOnce();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 

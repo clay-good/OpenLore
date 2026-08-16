@@ -25,7 +25,7 @@ successful call leaves no dangling timer in a long-lived process.
 
 ### Requirement: OutputTokenCeilingSingleSourced
 
-Each provider's default output-token ceiling SHALL come from one authoritative
+Each HTTP API provider's default output-token ceiling SHALL come from one authoritative
 constants-sourced path (the discipline `CLAUDE_MAX_OUTPUT_TOKENS` already establishes for the
 CLI provider), not per-provider hardcoded literals. A derived request issued by the service
 itself — such as the JSON correction request inside `completeJSON` — SHALL inherit the
@@ -37,7 +37,7 @@ so truncation is disclosed once rather than inferred from downstream parse failu
 #### Scenario: The default ceiling comes from the constant, not a literal
 
 - **GIVEN** a caller that passes no `maxTokens`
-- **WHEN** any provider builds its request body
+- **WHEN** any HTTP API provider builds its request body
 - **THEN** the output cap resolves through the per-provider constants path, and changing the
   constant changes every provider default without touching provider code
 
@@ -57,15 +57,15 @@ so truncation is disclosed once rather than inferred from downstream parse failu
 
 ### Requirement: KnownModelCatalogConsistency
 
-The fallback model catalog offered when a provider's `/models` endpoint is unavailable SHALL
-list only model ids consistent with the service's own pricing table for that endpoint, or
-return an empty list (the existing honest unknown-endpoint behavior) — never an invented or
-retired id presented as selectable. A consistency test SHALL pin the catalog to the pricing
-table so the two cannot drift independently.
+The dormant fallback model catalog helper SHALL list only model ids with exact entries in
+the OpenAI-compatible provider's pricing table, or return an empty list for an unknown or
+differently priced endpoint — never an invented or retired id. A consistency test SHALL pin
+the helper to the pricing table so the two cannot drift independently. This requirement does
+not claim that a runtime model picker currently calls the helper.
 
-#### Scenario: No invented ids are offered
+#### Scenario: No invented ids are returned
 
-- **GIVEN** an endpoint whose `/models` listing is unavailable
-- **WHEN** the fallback catalog is consulted
-- **THEN** every returned id resolves in the pricing table for that provider, and an endpoint
+- **GIVEN** a known or unknown provider endpoint
+- **WHEN** the fallback catalog helper is consulted
+- **THEN** every returned id has an exact pricing-table entry, and an endpoint
   with no consistent ids returns an empty list rather than a guess
