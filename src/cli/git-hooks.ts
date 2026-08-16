@@ -9,7 +9,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { isAbsolute, basename, dirname, join, resolve, sep } from 'node:path';
-import { access, lstat, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { access, lstat, mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileExists } from '../utils/command-helpers.js';
@@ -253,16 +253,26 @@ export async function updateHookFile(
   const tempPath = join(parent, `.${basename(hookPath)}.${process.pid}.${randomUUID()}.tmp`);
   try {
     let existing: string | null = null;
+    let hookHandle: Awaited<ReturnType<typeof open>> | undefined;
     try {
-      const info = await lstat(hookPath);
+      hookHandle = await open(
+        hookPath,
+        fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
+      );
+      const info = await hookHandle.stat();
       if (!info.isFile()) {
         return { status: 'unavailable', reason: 'the hook target is not a regular file' };
       }
-      existing = await readFile(hookPath, 'utf-8');
+      existing = await hookHandle.readFile({ encoding: 'utf-8' });
     } catch (error) {
+      if (errorCode(error) === 'ELOOP') {
+        return { status: 'unavailable', reason: 'the hook target is not a regular file' };
+      }
       if (errorCode(error) !== 'ENOENT') {
         return { status: 'unavailable', reason: `cannot inspect the hook target (${error instanceof Error ? error.message : String(error)})` };
       }
+    } finally {
+      await hookHandle?.close().catch(() => {});
     }
 
     const next = update(existing);
