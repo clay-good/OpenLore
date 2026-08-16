@@ -1,25 +1,24 @@
 # Tasks — optimize-analyze-pipeline-passes
 
 ## Implementation
-- [ ] Thread Pass-1 parsed trees (or resident files[].content) into extractClassRelationships
-      (call-graph.ts:2308-2592), the HTTP pass (http-route-parser.ts:829-861), and event
-      synthesis (call-graph.ts:3496-3620); no second parse where the tree exists
-- [ ] HTTP pass: reuse in-memory content instead of disk re-reads; bound read concurrency
-      (avoid the unbounded Promise.all EMFILE risk)
-- [ ] Memoize inferred types by callerNode.id in Pass 2 Strategy 2 (call-graph.ts:4162-4171),
+- [x] Extract plain-data class and dynamic-dispatch facts during Pass 1; round-trip them through
+      worker structured-clone and the persistent fact cache; do not retain parser trees
+- [x] HTTP pass: consume resident in-memory content instead of re-reading builder inputs
+- [x] Memoize inferred types by callerNode.id in Pass 2 Strategy 2,
       mirroring cha.ts typesByCaller
-- [ ] Cache compiled tree-sitter Query objects per (language, source) in a module Map
-- [ ] Replace findEnclosingFunction linear scan (:445-461) with sorted-span binary search;
-      Set-based id membership in the O(F^2) extractors (:1390,:1920-1932,:2163)
+- [x] Cache native tree-sitter Query objects per worker/runtime, grammar identity, and source;
+      keep WASM queries parse-scoped and disposable
+- [x] Replace findEnclosingFunction linear scan with a cached sorted-span index; use Set-based id
+      membership in extractors that currently scan the whole node list
 
 ## Verification
-- [ ] Graph-equality test: nodes, edges, classes, events, and routes on the fixture corpus are
-      byte-identical before and after
-- [ ] Counter test: analyze parses each file once (parse count == file count for the graphed
-      set); Query compilations bounded to distinct (language, source) pairs; type inference
-      runs once per caller
-- [ ] Concurrency test: the HTTP pass does not exceed the file-descriptor bound on a large repo
+- [x] Golden graph test covers nodes, every edge (including synthesized provenance), classes, and
+      inheritance; serial, worker, and warm-cache lanes remain identical
+- [x] Boundary counter test: each newly extracted grammar-backed file parses at most once; native
+      queries compile once per cache key; type inference runs once per eligible caller
+- [x] Resident HTTP test produces non-empty calls/routes/edges from nonexistent paths with zero
+      file opens
 - [ ] Full suite green
 
 ## Spec
-- [ ] `analyzer` delta: ADD AnalyzeParsesEachFileOnce
+- [x] `analyzer` delta: ADD AnalyzeReusesPassOneFacts

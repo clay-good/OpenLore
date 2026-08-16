@@ -52,7 +52,7 @@ import {
 } from './parse-health.js';
 // Per-file parse budget (change: fix-analyze-native-abort-and-file-cost-budget). Bounds the one
 // synchronous native call nothing else can interrupt.
-import { parseWithBudget, parseBudgetOverrunMs, parseBudgetMs, type BudgetableParser } from './parse-budget.js';
+import { parseWithBudget as rawParseWithBudget, parseBudgetOverrunMs, type BudgetableParser } from './parse-budget.js';
 import { usesTsxGrammar } from './language-detection.js';
 // Pass-1 extraction lane (change: optimize-parallel-extraction-pool). The pool holds no
 // extraction logic of its own — it dispatches `dispatchFileExtract` to worker threads and
@@ -83,6 +83,8 @@ import type {
   AmbiguousCallSite,
   AmbiguousStrategy,
   FileExtractResult,
+  ClassRelationshipFact,
+  DynamicDispatchFacts,
 } from './call-graph-types.js';
 import { classifyLayerEdge, AMBIGUOUS_CANDIDATE_CAP } from './call-graph-types.js';
 
@@ -133,6 +135,46 @@ export { computeCyclomaticComplexity } from './call-graph-complexity.js';
 
 const HUB_THRESHOLD = 5;
 
+const analyzerWorkCounters = { enabled: false, parses: 0, nativeQueryCompiles: 0, typeInferences: 0 };
+let nextTestGrammarId = 1;
+let testGrammarIds = new WeakMap<object, number>();
+const testNativeQueryCompilesByKey = new Map<string, number>();
+
+function parseWithBudget<T>(parser: BudgetableParser<T>, content: string): T {
+  if (analyzerWorkCounters.enabled) analyzerWorkCounters.parses++;
+  return rawParseWithBudget(parser, content);
+}
+
+/** Test-only boundary counters: actual parser/query/inference calls, not orchestration intent. */
+export function __getAnalyzerWorkCountersForTests(): Readonly<{
+  parses: number;
+  nativeQueryCompiles: number;
+  nativeQueryCompileCounts: number[];
+  typeInferences: number;
+}> {
+  const { parses, nativeQueryCompiles, typeInferences } = analyzerWorkCounters;
+  return {
+    parses,
+    nativeQueryCompiles,
+    nativeQueryCompileCounts: [...testNativeQueryCompilesByKey.values()],
+    typeInferences,
+  };
+}
+
+export function __resetAnalyzerWorkCountersForTests(clearQueries = false): void {
+  analyzerWorkCounters.enabled = true;
+  analyzerWorkCounters.parses = 0;
+  analyzerWorkCounters.nativeQueryCompiles = 0;
+  analyzerWorkCounters.typeInferences = 0;
+  testNativeQueryCompilesByKey.clear();
+  if (clearQueries) {
+    _nativeQueries = new WeakMap();
+    _nativeQueryErrors = new WeakMap();
+    testGrammarIds = new WeakMap();
+    nextTestGrammarId = 1;
+  }
+}
+
 // Callee-ignore tables (PYTHON_IGNORED…CFAMILY_IGNORED, IGNORED_BY_LANGUAGE,
 // ALL_IGNORED_CALLEES) and the isIgnoredCallee / isSelfReceiver predicates were
 // extracted to ./call-graph-builtins.ts (change: modularize-call-graph-builder);
@@ -177,6 +219,49 @@ let _csParser: Parser | undefined;
 let _ktParser: Parser | undefined;
 let _scalaParser: Parser | undefined;
 let _exParser: Parser | undefined;
+
+// Native queries are immutable after compilation. Weak grammar keys prevent a test/runtime
+// grammar reload from being retained. Required and optional callers share compiled handles;
+// only their failure handling differs.
+let _nativeQueries = new WeakMap<object, Map<string, Parser.Query | null>>();
+let _nativeQueryErrors = new WeakMap<object, Map<string, unknown>>();
+
+function cachedNativeQuery(
+  lang: object,
+  source: string,
+): Parser.Query | null {
+  let bySource = _nativeQueries.get(lang);
+  if (!bySource) {
+    bySource = new Map();
+    _nativeQueries.set(lang, bySource);
+  }
+  if (bySource.has(source)) return bySource.get(source) ?? null;
+  if (!_NativeQuery) return null;
+  try {
+    if (analyzerWorkCounters.enabled) {
+      analyzerWorkCounters.nativeQueryCompiles++;
+      let grammarId = testGrammarIds.get(lang);
+      if (!grammarId) {
+        grammarId = nextTestGrammarId++;
+        testGrammarIds.set(lang, grammarId);
+      }
+      const key = `${grammarId}\0${source}`;
+      testNativeQueryCompilesByKey.set(key, (testNativeQueryCompilesByKey.get(key) ?? 0) + 1);
+    }
+    const query = new _NativeQuery(lang as unknown as Parser.Language, source);
+    bySource.set(source, query);
+    return query;
+  } catch (error) {
+    bySource.set(source, null);
+    let errors = _nativeQueryErrors.get(lang);
+    if (!errors) {
+      errors = new Map();
+      _nativeQueryErrors.set(lang, errors);
+    }
+    errors.set(source, error);
+    return null;
+  }
+}
 
 // null = tried and unavailable; undefined = not yet tried
 let _NativeParser: (typeof Parser) | null | undefined;
@@ -263,12 +348,13 @@ function nativeQuerySoft(
   source: string,
 ): Parser.Query | null {
   if (!_NativeQuery || grammarStatus(language) === 'unavailable') return null;
-  try {
-    return new _NativeQuery(lang as unknown as Parser.Language, source);
-  } catch (error) {
+  const query = cachedNativeQuery(lang, source);
+  if (!query) {
+    const error = _nativeQueryErrors.get(lang)?.get(source)
+      ?? new Error('query is incompatible with the loaded grammar');
     markGrammarUnavailable(language, 'query-incompatible', error);
-    return null;
   }
+  return query;
 }
 
 async function loadNativeParser(): Promise<typeof Parser | null> {
@@ -733,20 +819,80 @@ function materializeCfgByNodeId(
 
 function findEnclosingFunction(
   nodes: FunctionNode[],
-  callPos: number
+  callPos: number,
+  probe?: { steps: number },
 ): FunctionNode | undefined {
-  let best: FunctionNode | undefined;
-  let bestSize = Infinity;
-  for (const n of nodes) {
-    if (n.startIndex <= callPos && callPos < n.endIndex) {
-      const size = n.endIndex - n.startIndex;
-      if (size < bestSize) {
-        bestSize = size;
-        best = n;
-      }
-    }
+  const index = enclosingIndexes.get(nodes) ?? buildEnclosingIndex(nodes);
+  let lo = 0;
+  let hiExclusive = index.entries.length;
+  while (lo < hiExclusive) {
+    if (probe) probe.steps++;
+    const mid = (lo + hiExclusive) >> 1;
+    if (index.entries[mid].node.startIndex <= callPos) lo = mid + 1;
+    else hiExclusive = mid;
   }
-  return best;
+  const hi = lo - 1;
+  if (hi < 0) return undefined;
+  const found = findRightmostContaining(index, 1, 0, index.size - 1, hi, callPos, probe);
+  return found < 0 ? undefined : index.entries[found].node;
+}
+
+interface EnclosingIndex {
+  entries: Array<{ node: FunctionNode; original: number }>;
+  maxEnd: number[];
+  size: number;
+}
+
+const enclosingIndexes = new WeakMap<FunctionNode[], EnclosingIndex>();
+
+function buildEnclosingIndex(nodes: FunctionNode[]): EnclosingIndex {
+  // Function intervals from one syntax tree are nested or disjoint. For equal starts, placing the
+  // widest first makes the rightmost containing interval the narrowest; identical spans retain the
+  // original first-match behavior by sorting the lower original index last.
+  const entries = nodes.map((node, original) => ({ node, original })).sort((a, b) =>
+    a.node.startIndex - b.node.startIndex ||
+    b.node.endIndex - a.node.endIndex ||
+    b.original - a.original,
+  );
+  let size = 1;
+  while (size < entries.length) size <<= 1;
+  const maxEnd = new Array(size * 2).fill(-Infinity) as number[];
+  for (let i = 0; i < entries.length; i++) maxEnd[size + i] = entries[i].node.endIndex;
+  for (let i = size - 1; i > 0; i--) maxEnd[i] = Math.max(maxEnd[i * 2], maxEnd[i * 2 + 1]);
+  const index = { entries, maxEnd, size };
+  enclosingIndexes.set(nodes, index);
+  return index;
+}
+
+function findRightmostContaining(
+  index: EnclosingIndex,
+  treeNode: number,
+  left: number,
+  right: number,
+  hi: number,
+  callPos: number,
+  probe?: { steps: number },
+): number {
+  if (probe) probe.steps++;
+  if (left > hi || index.maxEnd[treeNode] <= callPos) return -1;
+  if (left === right) return left < index.entries.length ? left : -1;
+  const mid = (left + right) >> 1;
+  const fromRight = findRightmostContaining(index, treeNode * 2 + 1, mid + 1, right, hi, callPos, probe);
+  return fromRight >= 0
+    ? fromRight
+    : findRightmostContaining(index, treeNode * 2, left, mid, hi, callPos, probe);
+}
+
+/** Test-only differential hook for the call-attribution interval index. */
+export function _findEnclosingFunctionForTesting(nodes: FunctionNode[], callPos: number): FunctionNode | undefined {
+  return findEnclosingFunction(nodes, callPos);
+}
+
+/** Deterministic work receipt for the interval-index complexity regression test. */
+export function _findEnclosingFunctionStepsForTesting(nodes: FunctionNode[], callPos: number): number {
+  const probe = { steps: 0 };
+  findEnclosingFunction(nodes, callPos, probe);
+  return probe.steps;
 }
 
 /**
@@ -1038,7 +1184,10 @@ async function extractTSGraph(
   const style = tallyStyle('TypeScript', tree, nodes, filePath);
   const parseHealth = tallyParseHealth('TypeScript', tree.rootNode as unknown as ParseHealthNode, filePath);
   const cfg = materializeCfgByNodeId(nodes, cfgByStart);
-  return { nodes, rawEdges, cfg, style, parseHealth };
+  const classRelationships = collectClassRelationshipFacts('TypeScript', source =>
+    safeQuery(lang, source, tree.rootNode) as unknown as TsMatch[]);
+  const dynamicDispatch = collectPass1DynamicDispatch('TypeScript', content, tree.rootNode as unknown as TsNodeLike, nodes, filePath);
+  return { nodes, rawEdges, cfg, style, parseHealth, classRelationships, dynamicDispatch };
 }
 
 // ============================================================================
@@ -1208,7 +1357,10 @@ async function extractPyGraph(
   const style = tallyStyle('Python', tree, nodes, filePath);
   const parseHealth = tallyParseHealth('Python', tree.rootNode as unknown as ParseHealthNode, filePath);
   const cfg = materializeCfgByNodeId(nodes, cfgByStart);
-  return { nodes, rawEdges, cfg, style, parseHealth };
+  const classRelationships = collectClassRelationshipFacts('Python', source =>
+    safeQuery(lang, source, tree.rootNode) as unknown as TsMatch[]);
+  const dynamicDispatch = collectPass1DynamicDispatch('Python', content, tree.rootNode as unknown as TsNodeLike, nodes, filePath);
+  return { nodes, rawEdges, cfg, style, parseHealth, classRelationships, dynamicDispatch };
 }
 
 // ============================================================================
@@ -1304,7 +1456,10 @@ async function extractGoGraph(
   const style = tallyStyle('Go', tree, nodes, filePath);
   const parseHealth = tallyParseHealth('Go', tree.rootNode as unknown as ParseHealthNode, filePath);
   const cfg = materializeCfgByNodeId(nodes, cfgByStart);
-  return { nodes, rawEdges, cfg, style, parseHealth };
+  const classRelationships = collectClassRelationshipFacts('Go', source =>
+    safeQuery(lang, source, tree.rootNode) as unknown as TsMatch[]);
+  const dynamicDispatch = collectPass1DynamicDispatch('Go', content, tree.rootNode as unknown as TsNodeLike, nodes, filePath);
+  return { nodes, rawEdges, cfg, style, parseHealth, classRelationships, dynamicDispatch };
 }
 
 // ============================================================================
@@ -1511,7 +1666,10 @@ async function extractRubyGraph(
   }
 
   const cfg = materializeCfgByNodeId(nodes, cfgByStart);
-  return { nodes, rawEdges, cfg, parseHealth };
+  const classRelationships = collectClassRelationshipFacts('Ruby', source =>
+    safeQuery(lang, source, tree.rootNode) as unknown as TsMatch[]);
+  const dynamicDispatch = collectPass1DynamicDispatch('Ruby', content, tree.rootNode as unknown as TsNodeLike, nodes, filePath);
+  return { nodes, rawEdges, cfg, parseHealth, classRelationships, dynamicDispatch };
 }
 
 // ============================================================================
@@ -1664,6 +1822,7 @@ async function extractJavaGraph(
   if (!fnQuery || !callQuery) return emptyForUnavailable('Java');
 
   const nodes: FunctionNode[] = [];
+  const nodeIds = new Set<string>();
   const cfgByStart = new Map<number, FunctionCfg>();
   for (const match of fnQuery.matches(tree.rootNode)) {
     const nameCapture = match.captures.find(c => c.name === 'fn.name');
@@ -1694,7 +1853,8 @@ async function extractJavaGraph(
 
     const isAsync = false; // Java uses Future/CompletableFuture, not async keyword
     const id = className ? `${filePath}::${className}.${name}` : `${filePath}::${name}`;
-    if (nodes.some(n => n.id === id)) continue; // collapse overloads (same name) to one node
+    if (nodeIds.has(id)) continue; // collapse overloads (same name) to one node
+    nodeIds.add(id);
     nodes.push({
       id, name, filePath, className,
       isAsync,
@@ -1723,7 +1883,10 @@ async function extractJavaGraph(
   if (grammarStatus('Java') === 'unavailable') return emptyForUnavailable('Java');
 
   const cfg = materializeCfgByNodeId(nodes, cfgByStart);
-  return { nodes, rawEdges, cfg, parseHealth };
+  const classRelationships = collectClassRelationshipFacts('Java', source =>
+    safeQuery(lang, source, tree.rootNode) as unknown as TsMatch[]);
+  const dynamicDispatch = collectPass1DynamicDispatch('Java', content, tree.rootNode as unknown as TsNodeLike, nodes, filePath);
+  return { nodes, rawEdges, cfg, parseHealth, classRelationships, dynamicDispatch };
 }
 
 // ============================================================================
@@ -1742,8 +1905,8 @@ function safeQuery(
 ): Parser.QueryMatch[] {
   if (!_NativeQuery) return [];
   try {
-    const query = new _NativeQuery(lang as unknown as Parser.Language, queryStr);
-    return query.matches(root);
+    const query = cachedNativeQuery(lang, queryStr);
+    return query?.matches(root) ?? [];
   } catch {
     // These are optional shape probes: one grammar version may reject a specialized arm while
     // another required arm still extracts the file correctly. Only required extractor queries
@@ -1891,7 +2054,10 @@ async function extractCppGraph(
   }
 
   const cfg = materializeCfgByNodeId(nodes, cfgByStart);
-  return { nodes, rawEdges, cfg, parseHealth };
+  const classRelationships = collectClassRelationshipFacts('C++', source =>
+    safeQuery(lang, source, tree.rootNode) as unknown as TsMatch[]);
+  const dynamicDispatch = collectPass1DynamicDispatch('C++', content, tree.rootNode as unknown as TsNodeLike, nodes, filePath);
+  return { nodes, rawEdges, cfg, parseHealth, classRelationships, dynamicDispatch };
 }
 
 // ============================================================================
@@ -2010,7 +2176,10 @@ async function extractSwiftGraph(
     rawEdges.push({ callerId: caller.id, calleeName, line: nodeCapture.node.startPosition.row + 1, calleeObject: objText });
   }
 
-  return { nodes, rawEdges, parseHealth };
+  const classRelationships = collectClassRelationshipFacts('Swift', source =>
+    safeQuery(lang, source, tree.rootNode) as unknown as TsMatch[]);
+  const dynamicDispatch = collectPass1DynamicDispatch('Swift', content, tree.rootNode as unknown as TsNodeLike, nodes, filePath);
+  return { nodes, rawEdges, parseHealth, classRelationships, dynamicDispatch };
 }
 
 // ============================================================================
@@ -2040,13 +2209,108 @@ interface TsNodeLike {
   childForFieldName(name: string): TsNodeLike | null;
 }
 interface TsMatch { captures: Array<{ name: string; node: TsNodeLike }> }
+
+/**
+ * Extract inheritance/embedding facts while Pass 1 still owns the syntax tree. The returned
+ * values contain no parser objects, so they can cross worker structured-clone and fact-cache JSON
+ * boundaries. Optional grammar-version probes remain fail-soft through the supplied query runner.
+ */
+function collectClassRelationshipFacts(
+  language: string,
+  runQuery: (source: string) => TsMatch[],
+): ClassRelationshipFact[] {
+  try {
+  const byClass = new Map<string, ClassRelationshipFact>();
+  const merge = (className: string, parents: string[] = [], interfaces: string[] = []): void => {
+    const fact = byClass.get(className) ?? { className, parentClasses: [], interfaces: [] };
+    for (const parent of parents) if (!fact.parentClasses.includes(parent)) fact.parentClasses.push(parent);
+    for (const iface of interfaces) if (!fact.interfaces.includes(iface)) fact.interfaces.push(iface);
+    byClass.set(className, fact);
+  };
+  const captures = (query: string, clsName = 'cls', valueName = 'parent'): Array<[string, string]> => {
+    const pairs: Array<[string, string]> = [];
+    for (const match of runQuery(query)) {
+      const cls = match.captures.find(c => c.name === clsName)?.node.text;
+      const value = match.captures.find(c => c.name === valueName)?.node.text;
+      if (cls && value) pairs.push([cls, value]);
+    }
+    return pairs;
+  };
+
+  if (language === 'TypeScript' || language === 'JavaScript') {
+    for (const [cls, parent] of captures(`(class_declaration name: (type_identifier) @cls (class_heritage (extends_clause value: (identifier) @parent)))`)) merge(cls, [parent]);
+    for (const [cls, iface] of captures(`(class_declaration name: (type_identifier) @cls (class_heritage (implements_clause (type_identifier) @iface)))`, 'cls', 'iface')) merge(cls, [], [iface]);
+  } else if (language === 'Python') {
+    for (const [cls, parent] of captures(`(class_definition name: (identifier) @cls superclasses: (argument_list (identifier) @parent))`)) {
+      if (parent !== 'object') merge(cls, [parent]);
+    }
+  } else if (language === 'Java') {
+    for (const [cls, parent] of captures(`(class_declaration name: (identifier) @cls (superclass (type_identifier) @parent))`)) merge(cls, [parent]);
+    for (const [cls, iface] of captures(`(class_declaration name: (identifier) @cls (super_interfaces (type_list (type_identifier) @iface)))`, 'cls', 'iface')) merge(cls, [], [iface]);
+  } else if (language === 'C++') {
+    for (const [cls, parent] of captures(`(class_specifier name: (type_identifier) @cls (base_class_clause (type_identifier) @parent))`)) merge(cls, [parent]);
+  } else if (language === 'C#') {
+    for (const decl of ['class_declaration', 'interface_declaration', 'record_declaration', 'struct_declaration']) {
+      for (const [cls, base] of captures(`(${decl} name: (identifier) @cls (base_list [(identifier) @base (generic_name (identifier) @base)]))`, 'cls', 'base')) {
+        if (/^I[A-Z]/.test(base)) merge(cls, [], [base]); else merge(cls, [base]);
+      }
+    }
+  } else if (language === 'Kotlin') {
+    for (const decl of ['class_declaration', 'object_declaration', 'interface_declaration']) {
+      for (const wrap of ['(user_type) @put', '(constructor_invocation (user_type) @put)']) {
+        for (const [cls, raw] of captures(`(${decl} (type_identifier) @cls (delegation_specifier ${wrap}))`, 'cls', 'put')) {
+          const parent = raw.replace(/<[\s\S]*$/, '').trim();
+          if (!parent.includes('.')) merge(cls, [parent]);
+        }
+      }
+    }
+  } else if (language === 'PHP') {
+    for (const [cls, parent] of captures(`(class_declaration name: (name) @cls (base_clause (name) @parent))`)) merge(cls, [parent]);
+    for (const [cls, iface] of captures(`(class_declaration name: (name) @cls (class_interface_clause (name) @iface))`, 'cls', 'iface')) merge(cls, [], [iface]);
+  } else if (language === 'Swift') {
+    for (const decl of ['class_declaration', 'protocol_declaration']) {
+      for (const [cls, raw] of captures(`(${decl} (type_identifier) @cls (inheritance_specifier (user_type) @put))`, 'cls', 'put')) {
+        const parent = raw.replace(/<[\s\S]*$/, '').trim();
+        if (!parent.includes('.')) merge(cls, [parent]);
+      }
+    }
+  } else if (language === 'Scala') {
+    for (const decl of ['class_definition', 'trait_definition', 'object_definition']) {
+      for (const [cls, parent] of captures(`(${decl} (identifier) @cls (extends_clause (type_identifier) @parent))`)) merge(cls, [parent]);
+    }
+  } else if (language === 'Ruby') {
+    for (const [cls, parent] of captures(`(class name: (constant) @cls superclass: (superclass (constant) @parent))`)) merge(cls, [parent]);
+  } else if (language === 'Go') {
+    const query = `(type_declaration (type_spec name: (type_identifier) @cls type: (struct_type (field_declaration_list (field_declaration) @field))))`;
+    for (const match of runQuery(query)) {
+      const cls = match.captures.find(c => c.name === 'cls')?.node.text;
+      const field = match.captures.find(c => c.name === 'field')?.node;
+      if (!cls || !field || field.childForFieldName('name')) continue;
+      const typeNode = field.childForFieldName('type');
+      const embedded = typeNode?.type === 'type_identifier'
+        ? typeNode.text
+        : typeNode?.type === 'pointer_type'
+          ? typeNode.namedChildren.find(c => c.type === 'type_identifier')?.text
+          : undefined;
+      if (embedded) merge(cls, [embedded]);
+    }
+  }
+    return [...byClass.values()];
+  } catch {
+    return [];
+  }
+}
 /**
  * Uniform grammar handle. `withTree` parses, exposes the root + a query runner,
  * and guarantees cleanup afterward — essential for the WASM backend, where
  * trees/queries hold WASM heap memory that corrupts the next parse if not freed.
  */
 interface GrammarHandle {
-  withTree<T>(content: string, fn: (root: TsNodeLike, runQuery: (src: string) => TsMatch[]) => T): T;
+  withTree<T>(content: string, fn: (
+    root: TsNodeLike,
+    runQuery: (src: string) => TsMatch[],
+    runOptionalQuery: (src: string) => TsMatch[],
+  ) => T): T;
   /**
    * Whether `rootNode.hasError` is trustworthy for parse-health (change:
    * add-parse-health-boundary-disclosure). The WASM loader shares one Language object across parses,
@@ -2087,14 +2351,22 @@ async function loadGrammarSoft(
         const runQuery = (src: string): TsMatch[] => {
           if (!_NativeQuery) return [];
           try {
-            const q = new _NativeQuery(lang as unknown as Parser.Language, src);
+            const q = cachedNativeQuery(lang, src);
+            if (!q) throw new Error('tree-sitter query is incompatible with the loaded grammar');
             return q.matches(tree.rootNode) as unknown as TsMatch[];
           } catch (error) {
             markGrammarUnavailable(language, 'query-incompatible', error);
             return [];
           }
         };
-        return fn(root, runQuery);
+        const runOptionalQuery = (src: string): TsMatch[] => {
+          try {
+            return cachedNativeQuery(lang, src)?.matches(tree.rootNode) as unknown as TsMatch[] ?? [];
+          } catch {
+            return [];
+          }
+        };
+        return fn(root, runQuery, runOptionalQuery);
       },
     };
     _grammarHandleCache.set(language, handle);
@@ -2170,8 +2442,17 @@ async function loadWasmGrammarSoft(
             return [];
           }
         };
+        const runOptionalQuery = (src: string): TsMatch[] => {
+          try {
+            const q = WasmQuery ? new WasmQuery(lang, src) : lang.query(src);
+            queries.push(q);
+            return q.matches(tree.rootNode);
+          } catch {
+            return [];
+          }
+        };
         try {
-          return fn(tree.rootNode, runQuery);
+          return fn(tree.rootNode, runQuery, runOptionalQuery);
         } finally {
           for (const q of queries) q.delete?.();
           tree.delete?.();
@@ -2218,6 +2499,8 @@ export function __resetGrammarCacheForTests(): void {
   _warnedUnavailable.clear();
   _NativeParser = undefined;
   _NativeQuery = undefined;
+  _nativeQueries = new WeakMap();
+  _nativeQueryErrors = new WeakMap();
   _nativeParserError = undefined;
   _tsParser = undefined;
   _tsxParser = undefined;
@@ -2242,6 +2525,8 @@ export function __resetGrammarCacheForTests(): void {
 /** Replace the native query constructor after parser warm-up — test-only grammar-drift hook. */
 export function __setNativeQueryForTests(query: typeof Parser.Query): void {
   _NativeQuery = query;
+  _nativeQueries = new WeakMap();
+  _nativeQueryErrors = new WeakMap();
 }
 
 const NAME_CHILD_TYPES = new Set(['identifier', 'name', 'type_identifier', 'simple_identifier', 'word']);
@@ -2289,8 +2574,9 @@ async function extractByQueries(
   const handle = await spec.loader();
   if (!handle) return emptyForUnavailable(spec.language);
 
-  const result = handle.withTree(content, (_root, runQuery) => {
+  const result = handle.withTree(content, (_root, runQuery, runOptionalQuery) => {
     const nodes: FunctionNode[] = [];
+    const nodeIds = new Set<string>();
     const cfgByStart = new Map<number, FunctionCfg>();
     for (const match of runQuery(spec.fnQuery)) {
       const nameCapture = match.captures.find(c => c.name === 'fn.name');
@@ -2301,7 +2587,7 @@ async function extractByQueries(
       const className = (spec.classTypes.size ? enclosingGroupName(fnNode, spec.classTypes) : undefined)
         ?? spec.extraClassName?.(fnNode);
       const id = className ? `${filePath}::${className}.${name}` : `${filePath}::${name}`;
-      if (nodes.some(n => n.id === id)) {
+      if (nodeIds.has(id)) {
         // A colliding id is normally a multi-clause definition / overload and collapses
         // to one node. But a genuinely NESTED function — byte-contained in an already-seen
         // function with a DIFFERENT id — must survive so ensureUniqueNodeIds can re-key it
@@ -2329,6 +2615,7 @@ async function extractByQueries(
         fanIn: 0, fanOut: 0,
         signature: extractDeclaration(content, fnNode.startIndex, fnNode.endIndex, spec.language),
       });
+      nodeIds.add(id);
     }
 
     const definedNames = new Set(nodes.map(n => n.name));
@@ -2356,7 +2643,9 @@ async function extractByQueries(
     const parseHealth = handle.parseHealthReliable === false
       ? undefined
       : tallyParseHealth('', _root as unknown as ParseHealthNode, filePath);
-    return { nodes, rawEdges, cfg, parseHealth };
+    const classRelationships = collectClassRelationshipFacts(spec.language, runOptionalQuery);
+    const dynamicDispatch = collectPass1DynamicDispatch(spec.language, content, _root, nodes, filePath);
+    return { nodes, rawEdges, cfg, parseHealth, classRelationships, dynamicDispatch };
   });
   return grammarStatus(spec.language) === 'unavailable'
     ? emptyForUnavailable(spec.language)
@@ -2551,6 +2840,7 @@ async function extractDartGraph(
   };
 
   const nodes: FunctionNode[] = [];
+  const nodeIds = new Set<string>();
   const collectFns = (n: TsNodeLike): void => {
     if (n.type === 'function_signature') {
       const nameNode = n.childForFieldName('name');
@@ -2561,7 +2851,8 @@ async function extractDartGraph(
         const endIndex = sib && sib.type === 'function_body' ? sib.endIndex : n.endIndex;
         const className = enclosingClass(n);
         const id = className ? `${filePath}::${className}.${nameNode.text}` : `${filePath}::${nameNode.text}`;
-        if (!nodes.some(x => x.id === id)) {
+        if (!nodeIds.has(id)) {
+          nodeIds.add(id);
           nodes.push({
             id, name: nameNode.text, filePath, className, isAsync: false, language: 'Dart',
             startIndex: n.startIndex, endIndex, fanIn: 0, fanOut: 0,
@@ -2619,6 +2910,7 @@ async function extractElixirGraph(
 
   return loaded.withTree(content, (root) => {
   const nodes: FunctionNode[] = [];
+  const nodeById = new Map<string, FunctionNode>();
   const calls: Array<{ name: string; object?: string; pos: number; row: number }> = [];
 
   const targetIdent = (call: TsNodeLike): TsNodeLike | undefined => {
@@ -2652,15 +2944,17 @@ async function extractElixirGraph(
         }
         if (fnName) {
           const id = moduleName ? `${filePath}::${moduleName}.${fnName}` : `${filePath}::${fnName}`;
-          const existing = nodes.find(n => n.id === id);
+          const existing = nodeById.get(id);
           if (existing) {
             existing.signature = `${existing.signature} (+clause)`;
           } else {
-            nodes.push({
+            const created: FunctionNode = {
               id, name: fnName, filePath, className: moduleName, isAsync: false,
               language: 'Elixir', startIndex: node.startIndex, endIndex: node.endIndex,
               fanIn: 0, fanOut: 0, signature: `${kw} ${fnName}/${arity}`,
-            });
+            };
+            nodes.push(created);
+            nodeById.set(id, created);
           }
         }
         // Recurse into the body for nested calls.
@@ -2696,7 +2990,8 @@ async function extractElixirGraph(
     rawEdges.push({ callerId: caller.id, calleeName: c.name, line: c.row + 1, calleeObject: c.object });
   }
   const parseHealth = tallyParseHealth('', root as unknown as ParseHealthNode, filePath);
-  return { nodes, rawEdges, parseHealth };
+  const dynamicDispatch = collectPass1DynamicDispatch('Elixir', content, root, nodes, filePath);
+  return { nodes, rawEdges, parseHealth, dynamicDispatch };
   });
 }
 
@@ -2710,7 +3005,8 @@ async function extractElixirGraph(
  * Uses safeQuery so any query that doesn't match a grammar version is silently
  * skipped rather than crashing.
  */
-async function extractClassRelationships(
+/** @deprecated Test/reference implementation for proving Pass-1 fact equivalence. */
+export async function _extractClassRelationshipsLegacyForTesting(
   files: Array<{ path: string; content: string; language: string }>,
   /**
    * Collects files this pass abandoned at the parse budget (change:
@@ -4330,11 +4626,147 @@ async function synthesizeActorMessageEdges(
   return pairAndEmitEventEdges(sites, allNodes, 'actor-message');
 }
 
+const HANDLER_REF_PREFIX = '\0openlore-handler\0';
+
+function encodeHandlerRef(name: string, preferFile: string): string {
+  return `${HANDLER_REF_PREFIX}${JSON.stringify([preferFile, name])}`;
+}
+
+function decodeHandlerRef(value: string): { name: string; preferFile: string } | undefined {
+  if (!value.startsWith(HANDLER_REF_PREFIX)) return undefined;
+  try {
+    const parsed = JSON.parse(value.slice(HANDLER_REF_PREFIX.length)) as unknown;
+    if (!Array.isArray(parsed) || parsed.length !== 2 || parsed.some(v => typeof v !== 'string')) return undefined;
+    return { preferFile: parsed[0] as string, name: parsed[1] as string };
+  } catch {
+    return undefined;
+  }
+}
+
+/** Collect tree-dependent dynamic-dispatch facts during Pass 1 as structured-clone-safe data. */
+function collectPass1DynamicDispatch(
+  language: string,
+  content: string,
+  rootNode: TsNodeLike,
+  nodes: FunctionNode[],
+  filePath: string,
+): DynamicDispatchFacts | undefined {
+  const events: DynamicDispatchFacts['events'] = [];
+  const callbacks: DynamicDispatchFacts['callbacks'] = [];
+  const tree = { rootNode } as unknown as Parser.Tree;
+  const unresolved: HandlerResolver = (name, preferFile) => {
+    if (!name || RUNTIME_CALLBACK_LOCALS.has(name)) return undefined;
+    return { id: encodeHandlerRef(name, preferFile), name } as FunctionNode;
+  };
+  const addEvents = (
+    group: string,
+    rule: 'event-channel' | 'type-event' | 'actor-message',
+    collect: (sites: EventSites) => void,
+  ): void => {
+    const sites: EventSites = { registrations: [], dispatches: [] };
+    collect(sites);
+    if (sites.registrations.length || sites.dispatches.length) events.push({ group, rule, ...sites });
+  };
+
+  try {
+    if ((language === 'TypeScript' || language === 'JavaScript') && EVENT_PREFILTER.test(content)) {
+      addEvents('TypeScript', 'event-channel', sites => collectTsEventSites(tree, nodes, filePath, unresolved, sites));
+    } else if (language === 'Python' && EVENT_PREFILTER.test(content)) {
+      addEvents('Python', 'event-channel', sites => collectPyEventSites(tree, nodes, filePath, unresolved, sites));
+    } else if (language === 'Ruby' && EVENT_PREFILTER.test(content)) {
+      addEvents('Ruby', 'event-channel', sites => collectRubyEventSites(tree, nodes, filePath, unresolved, sites));
+    } else if (language === 'PHP' && EVENT_PREFILTER.test(content)) {
+      addEvents('PHP', 'event-channel', sites => collectPhpEventSites(tree, nodes, filePath, unresolved, sites));
+    } else if (language === 'Java' && JAVA_TYPE_EVENT_PREFILTER.test(content)) {
+      addEvents('Java', 'type-event', sites => collectJavaTypeEventSites(tree, nodes, filePath, unresolved, sites));
+    } else if (language === 'C#' && CSHARP_TYPE_EVENT_PREFILTER.test(content)) {
+      addEvents('C#', 'type-event', sites => collectCSharpTypeEventSites(tree, nodes, filePath, unresolved, sites));
+    } else if (language === 'Kotlin' && JAVA_TYPE_EVENT_PREFILTER.test(content)) {
+      addEvents('Kotlin', 'type-event', sites => collectKotlinTypeEventSites(tree, nodes, filePath, unresolved, sites));
+    } else if (language === 'Swift' && SWIFT_EVENT_PREFILTER.test(content)) {
+      addEvents('Swift', 'event-channel', sites => collectSwiftEventSites(tree, nodes, filePath, unresolved, sites));
+    } else if (language === 'Elixir' && ELIXIR_ACTOR_PREFILTER.test(content)) {
+      addEvents('Elixir', 'actor-message', sites => collectElixirActorSites(tree, nodes, filePath, unresolved, sites));
+    }
+  } catch {
+    // Event synthesis is optional and independent from callback synthesis.
+    events.length = 0;
+  }
+
+  try {
+    const callbackEdges: CallEdge[] = [];
+    const seen = new Set<string>();
+    if ((language === 'TypeScript' || language === 'JavaScript') && TS_CALLBACK_PREFILTER.test(content)) {
+      collectTsCallbackEdges(tree, nodes, filePath, unresolved, callbackEdges, seen);
+    } else if (language === 'Go' && GO_CALLBACK_PREFILTER.test(content)) {
+      collectGoCallbackEdges(tree, nodes, filePath, unresolved, callbackEdges, seen);
+    } else if (language === 'C++' && CPP_CALLBACK_PREFILTER.test(content)) {
+      collectCppCallbackEdges(tree, nodes, filePath, unresolved, callbackEdges, seen);
+    }
+    for (const edge of callbackEdges) {
+      const group = language === 'Go' ? 'Go' : language === 'C++' ? 'C++' : 'TypeScript';
+      callbacks.push({ group, callerId: edge.callerId, handlerId: edge.calleeId, line: edge.line ?? 0 });
+    }
+  } catch {
+    // Callback synthesis is optional and independent from event synthesis.
+    callbacks.length = 0;
+  }
+
+  return events.length || callbacks.length ? { events, callbacks } : undefined;
+}
+
 export async function synthesizeDynamicDispatchEdges(
   files: Array<{ path: string; content: string; language: string }>,
   allNodes: Map<string, FunctionNode>,
   resolveHandler: HandlerResolver,
+  pass1Facts?: DynamicDispatchFacts[],
 ): Promise<CallEdge[]> {
+  if (pass1Facts) {
+    const groupOrder = ['TypeScript', 'Python', 'Ruby', 'PHP', 'Java', 'C#', 'Kotlin', 'Swift', 'Elixir'];
+    const grouped = new Map<string, { rule: 'event-channel' | 'type-event' | 'actor-message'; sites: EventSites }>();
+    for (const facts of pass1Facts) {
+      for (const event of facts.events) {
+        const bucket = grouped.get(event.group) ?? { rule: event.rule, sites: { registrations: [], dispatches: [] } };
+        bucket.sites.registrations.push(...event.registrations);
+        bucket.sites.dispatches.push(...event.dispatches);
+        grouped.set(event.group, bucket);
+      }
+    }
+    const eventEdges: CallEdge[] = [];
+    const actorEdges: CallEdge[] = [];
+    for (const group of groupOrder) {
+      const bucket = grouped.get(group);
+      if (!bucket) continue;
+      const resolved: EventSites = {
+        registrations: bucket.sites.registrations.map(reg => ({
+          key: reg.key,
+          handlerIds: reg.handlerIds.flatMap(id => {
+            const ref = decodeHandlerRef(id);
+            if (!ref) return [id];
+            const node = resolveHandler(ref.name, ref.preferFile);
+            return node ? [node.id] : [];
+          }),
+        })),
+        dispatches: bucket.sites.dispatches,
+      };
+      const emitted = pairAndEmitEventEdges(resolved, allNodes, bucket.rule);
+      (bucket.rule === 'actor-message' ? actorEdges : eventEdges).push(...emitted);
+    }
+    const callbackEdges: CallEdge[] = [];
+    const callbackSeen = new Set<string>();
+    for (const group of ['TypeScript', 'Go', 'C++'] as const) {
+      for (const facts of pass1Facts) {
+        for (const fact of facts.callbacks) {
+          if (fact.group !== group) continue;
+          const ref = decodeHandlerRef(fact.handlerId);
+          const handler = ref ? resolveHandler(ref.name, ref.preferFile) : allNodes.get(fact.handlerId);
+          if (handler) pushCallbackEdge(callbackEdges, callbackSeen, fact.callerId, handler, fact.line);
+        }
+      }
+    }
+    const routeEdges = await synthesizeRouteHandlerEdges(files, allNodes, resolveHandler).catch(() => []);
+    return [...eventEdges, ...routeEdges, ...callbackEdges, ...actorEdges];
+  }
   const rules: Array<Promise<CallEdge[]>> = [
     synthesizeEventChannelEdges(files, allNodes, resolveHandler).catch(() => []),
     synthesizeRouteHandlerEdges(files, allNodes, resolveHandler).catch(() => []),
@@ -4356,7 +4788,9 @@ function isEmptyExtractResult(result: FileExtractResult | undefined): boolean {
   return result.nodes.length === 0
     && result.rawEdges.length === 0
     && !result.parseHealth
-    && !result.style;
+    && !result.style
+    && !result.classRelationships?.length
+    && !result.dynamicDispatch;
 }
 
 /** Construction-time options for {@link CallGraphBuilder}. */
@@ -4384,17 +4818,21 @@ export interface CallGraphBuilderOptions {
    * embedded caller) means today's behavior: the overlay is returned in memory.
    */
   cfgSpill?: CfgSpill;
+  /** Test-only oracle: run the pre-optimization late parsers for byte-equivalence checks. */
+  legacyLatePassesForTesting?: boolean;
 }
 
 export class CallGraphBuilder {
   private readonly extractionOptions: CallGraphBuilderOptions['extraction'];
   private readonly pass1Cache: Pass1FactCache | undefined;
   private readonly cfgSpill: CfgSpill | undefined;
+  private readonly legacyLatePassesForTesting: boolean;
 
   constructor(options: CallGraphBuilderOptions = {}) {
     this.extractionOptions = options.extraction;
     this.pass1Cache = options.pass1Cache;
     this.cfgSpill = options.cfgSpill;
+    this.legacyLatePassesForTesting = options.legacyLatePassesForTesting === true;
   }
 
   /**
@@ -4422,6 +4860,8 @@ export class CallGraphBuilder {
     const styleByFile = new Map<string, FileStyleRaw>();
     const parseHealthByFile = new Map<string, FileParseHealth>();
     const grammarUnavailableByLanguage = new Map<string, GrammarUnavailableBoundary>();
+    let relationships = new Map<string, { parentClasses: string[]; interfaces: string[] }>();
+    const dynamicDispatchFacts: DynamicDispatchFacts[] = [];
 
     // Pass 1: Extract nodes and raw edges from each file.
     //
@@ -4556,6 +4996,18 @@ export class CallGraphBuilder {
           result.parseHealth.language = file.language;
           parseHealthByFile.set(file.path, result.parseHealth);
         }
+        for (const fact of result.classRelationships ?? []) {
+          const key = `${file.path}::${fact.className}`;
+          const existing = relationships.get(key) ?? { parentClasses: [], interfaces: [] };
+          for (const parent of fact.parentClasses) {
+            if (!existing.parentClasses.includes(parent)) existing.parentClasses.push(parent);
+          }
+          for (const iface of fact.interfaces) {
+            if (!existing.interfaces.includes(iface)) existing.interfaces.push(iface);
+          }
+          relationships.set(key, existing);
+        }
+        if (result.dynamicDispatch) dynamicDispatchFacts.push(result.dynamicDispatch);
       } catch (error) {
         // A throw is never memoized either (see above), so it re-extracts on every run —
         // unless the record already happened and the throw came from the MERGE below it, in
@@ -4623,6 +5075,9 @@ export class CallGraphBuilder {
     const reparsableFiles = abandonedPaths.size > 0
       ? files.filter(f => !abandonedPaths.has(f.path))
       : files;
+    if (this.legacyLatePassesForTesting) {
+      relationships = await _extractClassRelationshipsLegacyForTesting(reparsableFiles);
+    }
 
     const pass1Cache: Pass1CacheDisclosure | undefined = cache
       ? {
@@ -4667,28 +5122,9 @@ export class CallGraphBuilder {
       // exports are still readable and still load-bearing for OTHER files' resolution.
       : buildResolvedImportMap(files);
 
-    // Class inheritance (`filePath::ClassName` → parent simple-names), computed once
-    // here so the resolution loop can resolve `this.m()` / `super.m()` against the
-    // enclosing class AND its ancestors, and reused for the Pass 7 hierarchy build.
-    // A file can pass Pass 1 under the budget and overrun HERE; that loss is recorded below
-    // rather than dropped (change: fix-analyze-native-abort-and-file-cost-budget).
-    const lateBudgetExceeded = new Set<string>();
-    const relationships = await extractClassRelationships(reparsableFiles, lateBudgetExceeded);
-    for (const path of lateBudgetExceeded) {
-      if (parseHealthByFile.has(path)) continue; // already recorded by Pass 1
-      const language = files.find(f => f.path === path)?.language ?? 'unknown';
-      parseHealthByFile.set(path, {
-        filePath: path,
-        language,
-        errorCount: 0,
-        missingCount: 0,
-        errorLines: [],
-        // NOT `parseFailed`: Pass 1 extracted this file fine. What was lost is its inheritance
-        // data, so its symbols are present but its class hierarchy is a lower bound.
-        exclusion: 'budget-exceeded',
-        budgetMs: parseBudgetMs(),
-      });
-    }
+    // Class inheritance facts were collected inside Pass 1 while each tree was already alive.
+    // They are plain data, so fresh serial extraction, worker extraction, and fact-cache reuse all
+    // feed this same map without retaining or re-parsing syntax trees.
 
     /** Resolve an intra-object method call (`this.m()` / `self.m()` / `super.m()`) to
      *  a concrete indexed method by walking the enclosing class chain. For `this`/
@@ -4797,6 +5233,7 @@ export class CallGraphBuilder {
         candidateCount: ids.length,
       });
     };
+    const inferredTypesByCaller = new Map<string, ReturnType<typeof inferTypesFromSource>>();
     for (const raw of allRawEdges) {
       const callerNode = allNodes.get(raw.callerId);
       if (!callerNode) continue;
@@ -4879,8 +5316,13 @@ export class CallGraphBuilder {
       if (!calleeNode && raw.calleeObject) {
         const fileContent = fileContents.get(callerNode.filePath);
         if (fileContent) {
-          const bodySlice = fileContent.slice(callerNode.startIndex, callerNode.endIndex);
-          const inferredTypes = inferTypesFromSource(bodySlice, callerNode.language);
+          let inferredTypes = inferredTypesByCaller.get(callerNode.id);
+          if (!inferredTypes) {
+            const bodySlice = fileContent.slice(callerNode.startIndex, callerNode.endIndex);
+            if (analyzerWorkCounters.enabled) analyzerWorkCounters.typeInferences++;
+            inferredTypes = inferTypesFromSource(bodySlice, callerNode.language);
+            inferredTypesByCaller.set(callerNode.id, inferredTypes);
+          }
           const resolved = resolveViaTypeInference(raw.calleeObject, raw.calleeName, inferredTypes, trie);
           if (resolved) { calleeNode = resolved; confidence = 'type_inference'; }
         }
@@ -5030,8 +5472,7 @@ export class CallGraphBuilder {
 
     // Pass 2b: HTTP cross-language edges (JS/TS caller → Python handler)
     try {
-      const filePaths = files.map(f => f.path);
-      const { edges: httpEdges } = await extractAllHttpEdges(filePaths);
+      const { edges: httpEdges } = await extractAllHttpEdges(files);
       // Group once, then look up per edge. Rebuilt per edge this was an O(edges × nodes) scan.
       const httpNodesByFile = new Map<string, FunctionNode[]>();
       if (httpEdges.length > 0) {
@@ -5124,7 +5565,12 @@ export class CallGraphBuilder {
         if (inFile) return inFile;
         return candidates.length === 1 ? candidates[0] : undefined;
       };
-      edges.push(...await synthesizeDynamicDispatchEdges(reparsableFiles, allNodes, resolveHandler));
+      edges.push(...await synthesizeDynamicDispatchEdges(
+        reparsableFiles,
+        allNodes,
+        resolveHandler,
+        this.legacyLatePassesForTesting ? undefined : dynamicDispatchFacts,
+      ));
     } catch {
       // Synthesis is best-effort; a failure must never abort the build.
     }

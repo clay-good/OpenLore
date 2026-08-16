@@ -174,11 +174,11 @@ function candidatePaths(normalizedUrl: string): string[] {
 /**
  * Extract all HTTP calls from a JavaScript or TypeScript source file.
  */
-export async function extractHttpCalls(filePath: string): Promise<HttpCall[]> {
+export async function extractHttpCalls(filePath: string, residentSource?: string): Promise<HttpCall[]> {
   const ext = extname(filePath).toLowerCase();
   if (!['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs'].includes(ext)) return [];
 
-  const content = await readSourceCapped(filePath);
+  const content = residentSource ?? await readSourceCapped(filePath);
   if (content === null) return [];
 
   const calls: HttpCall[] = [];
@@ -911,7 +911,9 @@ export function buildHttpEdges(
  * Intended to be called once per graph build and its result merged into
  * the DependencyGraphResult edges.
  */
-export async function extractAllHttpEdges(filePaths: string[]): Promise<{
+export type HttpEdgeSource = string | { path: string; content: string };
+
+export async function extractAllHttpEdges(filePaths: HttpEdgeSource[]): Promise<{
   calls: HttpCall[];
   routes: RouteDefinition[];
   edges: HttpEdge[];
@@ -925,7 +927,9 @@ export async function extractAllHttpEdges(filePaths: string[]): Promise<{
   // relies on).
   const perFile = await mapFilesBounded(
     filePaths,
-    async (fp): Promise<{ calls: HttpCall[]; routes: RouteDefinition[] }> => {
+    async (source): Promise<{ calls: HttpCall[]; routes: RouteDefinition[] }> => {
+      const fp = typeof source === 'string' ? source : source.path;
+      const resident = typeof source === 'string' ? undefined : source.content;
       const ext = extname(fp).toLowerCase();
       if (['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs'].includes(ext)) {
         // A JS/TS file can be a client (fetch/axios calls), a server (route
@@ -937,13 +941,13 @@ export async function extractAllHttpEdges(filePaths: string[]): Promise<{
         // Sequentially, not as a nested `Promise.all`: both passes read the SAME file, so
         // running them together held two copies of it per scan slot and doubled the bound
         // this scan exists to enforce.
-        const calls = await extractHttpCalls(fp);
-        const routes = await extractTsRouteDefinitions(fp);
+        const calls = await extractHttpCalls(fp, resident);
+        const routes = await extractTsRouteDefinitions(fp, resident);
         return { calls, routes };
       } else if (['.py', '.pyw'].includes(ext)) {
-        return { calls: [], routes: await extractRouteDefinitions(fp) };
+        return { calls: [], routes: await extractRouteDefinitions(fp, resident) };
       } else if (ext === '.java') {
-        return { calls: [], routes: await extractJavaRouteDefinitions(fp) };
+        return { calls: [], routes: await extractJavaRouteDefinitions(fp, resident) };
       }
       return { calls: [], routes: [] };
     },

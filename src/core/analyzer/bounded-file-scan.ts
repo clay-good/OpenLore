@@ -42,9 +42,9 @@ export type OversizedFileObserver = (path: string, bytes: number) => void;
  * Every caller in this codebase catches per file and returns an empty result instead, so a
  * single unreadable file never aborts a scan.
  */
-export async function mapFilesBounded<T>(
-  paths: readonly string[],
-  fn: (path: string, index: number) => Promise<T>,
+export async function mapFilesBounded<I, T>(
+  paths: readonly I[],
+  fn: (path: I, index: number) => Promise<T>,
   concurrency: number = SOURCE_SCAN_CONCURRENCY,
 ): Promise<T[]> {
   const results = new Array<T>(paths.length);
