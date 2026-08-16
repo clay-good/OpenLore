@@ -1,6 +1,6 @@
 # Harden review rendering and the bundled Action: head-controlled text is hostile, and stale analysis must say so
 
-> Status: PROPOSED (2026-07-03, e2e audit pass 3). `openlore review` interpolates symbol names
+> Status: BUILT (2026-08-15). `openlore review` interpolated symbol names
 > and file basenames from the PR head into Markdown code spans unescaped — a hostile filename can
 > break out of its span and inject arbitrary Markdown into a comment posted with the repo's
 > token. The example workflow's pull_request_target note claims a safety property the Action does
@@ -47,10 +47,16 @@
    whenever a write token is in scope, noting the `latest` default (`action.yml:24-27`).
 3. **Staleness and failure are disclosed.** The analyze step records a failure marker
    (step output/env) instead of only echoing, and the review step surfaces it as a briefing
-   caveat. `composeReview` compares the index fingerprint's commit to HEAD and, on mismatch,
-   emits "blast radius reflects a stale index (built at <sha>)" — the same discipline
-   `openlore import` applies to bundle currency. Extends the existing caveat channel
-   (`review.ts:133-139`); no new output shape.
+   caveat. `composeReview` renders the shared blast-radius confidence boundary when graph-relevant
+   source has diverged from the index build commit, including that commit's SHA. This deliberately
+   reuses OpenLore's existing freshness semantics: a docs-only commit does not make the graph
+   stale, while dirty or committed source divergence does. The existing caveat channel is
+   extended; no new briefing shape is introduced.
+4. **A gate attempts to publish its evidence before failing.** The CLI reserves exit code 3 for an intentional
+   `blastRadius.block` policy result. The Action treats only that receipt as a gate, attempts to
+   post or update the briefing, and then propagates the failure; a comment API failure remains
+   advisory but does not suppress the configured policy. Arbitrary execution errors cannot be
+   mislabeled as policy findings merely because a partial output file exists.
 
 Retained as-is (already solid, not re-fixed): the comment-size double-clamp
 (`review.ts:315-318` head-truncation preserving the marker + the Action-side guard,
@@ -63,8 +69,8 @@ structural diff.
 The review surface is where OpenLore's deterministic conclusions meet an adversarial input (a
 fork's head) and an elevated credential (the repo's comment token). Unescaped head-controlled
 text in a write-token comment is an injection, and a stale blast radius with no caveat violates
-the receipts rule. All fixes are deterministic and local: an escaper, a docs rewrite, and one
-fingerprint-vs-HEAD comparison the codebase already knows how to make.
+the receipts rule. All fixes are deterministic and local: an escaper, a docs rewrite, and
+rendering the semantic freshness result the blast-radius confidence boundary already computes.
 
 ## Impact
 
@@ -79,4 +85,5 @@ fingerprint-vs-HEAD comparison the codebase already knows how to make.
 - Tool surface: unchanged (no MCP tool touched, no payload-budget impact; `structural_diff`'s
   own output is not re-encoded — only the Markdown renderer escapes).
 - Risk: low. Escaping only changes rendering of pathological names; the new caveats are additive
-  lines in an existing section; the workflow example is documentation.
+  lines in an existing section; exit code 3 was previously unused; and the workflow example is
+  documentation.

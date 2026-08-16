@@ -12,11 +12,11 @@ author: 'OpenLore'
 # it becomes part of the program, and any shell metacharacter in the value is executed
 # rather than compared.
 #
-# The defaults here are commit SHAs, but a caller controls every input, and this
-# action can be wired to `pull_request_target` to comment on fork pull requests —
-# a trigger where the values are externally influenced and the job holds a write
-# token. Passed via `env:` they are ordinary shell variables, so quoting keeps them
-# inert as data.
+# The defaults here are commit SHAs, but a caller controls every input. Never combine
+# a `pull_request_target` write token with a checkout of the pull request head: parsing
+# attacker-controlled repository content is a trust-boundary crossing even when the
+# analyzer does not execute that content. Passed via `env:`, input values remain inert
+# shell data; the shipped workflow example documents a split workflow for fork comments.
 
 inputs:
   github-token:
@@ -47,19 +47,38 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Require a resolved OpenLore version pin
+      shell: bash
+      env:
+        OPENLORE_VERSION: ${{ inputs.openlore-version }}
+      run: |
+        if [[ "$OPENLORE_VERSION" == REPLACE_WITH_* ]]; then
+          echo "openlore-version is still a placeholder; pin the reviewed release that matches this Action revision." >&2
+          exit 2
+        fi
+
     - name: Set up Node
       uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
       with:
         node-version: '22'
 
     - name: Build the OpenLore index (optional, for full blast radius)
+      id: analyze
       if: ${{ inputs.analyze == 'true' }}
       shell: bash
       env:
         OPENLORE_VERSION: ${{ inputs.openlore-version }}
       run: |
-        npx --yes "openlore@$OPENLORE_VERSION" analyze --no-embed \
-          || echo "analyze failed — review will show the structural delta only"
+        set +e
+        npx --yes "openlore@$OPENLORE_VERSION" analyze --no-embed
+        RC=$?
+        set -e
+        if [ "$RC" -ne 0 ]; then
+          echo "failed=true" >> "$GITHUB_OUTPUT"
+          echo "analyze failed — review will disclose that the blast radius may be incomplete or stale"
+        else
+          echo "failed=false" >> "$GITHUB_OUTPUT"
+        fi
 
     - name: Run openlore review
       id: review
@@ -69,27 +88,34 @@ runs:
         REVIEW_BASE: ${{ inputs.base }}
         REVIEW_HEAD: ${{ inputs.head }}
         REVIEW_GATE: ${{ inputs.gate }}
+        OPENLORE_REVIEW_ANALYZE_FAILED: ${{ steps.analyze.outputs.failed }}
       run: |
         OUT="$RUNNER_TEMP/openlore-review.md"
+        rm -f "$OUT"
         ARGS=(review --base "$REVIEW_BASE" --head "$REVIEW_HEAD" --format markdown --out "$OUT")
         if [ "$REVIEW_GATE" = "true" ]; then ARGS+=(--hook); fi
         set +e
         npx --yes "openlore@$OPENLORE_VERSION" "${ARGS[@]}"
         RC=$?
         set -e
-        # Distinguish a REAL gate (review ran and a blastRadius.block pattern fired:
-        # the briefing file was written AND exit was non-zero) from review being unable
-        # to run at all (a published openlore without `review`, an unreachable range, a
-        # crash → no briefing file). Only the former fails the job; the latter is advisory.
-        if [ "$REVIEW_GATE" = "true" ] && [ "$RC" -ne 0 ] && [ -s "$OUT" ]; then
-          echo "openlore review: a configured blastRadius.block pattern fired — failing the job (gate mode)."
-          exit "$RC"
+        # Exit 3 is the review CLI's reserved policy-gate receipt. Defer that failure
+        # until after the evidence comment is posted; every other nonzero is an
+        # execution failure and remains advisory.
+        if [ "$REVIEW_GATE" = "true" ] && [ "$RC" -eq 3 ]; then
+          echo "gated=true" >> "$GITHUB_OUTPUT"
+          echo "openlore review: a configured blastRadius.block pattern fired — attempting to post the briefing before failing the job."
+        else
+          echo "gated=false" >> "$GITHUB_OUTPUT"
+          if [ "$RC" -ne 0 ]; then
+            echo "openlore review failed with exit $RC — treating this as advisory because it was not a policy-gate receipt."
+          fi
         fi
         if [ ! -s "$OUT" ]; then
           echo "openlore review produced no briefing — the published 'openlore' (openlore-version: $OPENLORE_VERSION) may not yet ship the 'review' command, or the base..head range was unreachable. Skipping the comment (advisory)."
         fi
 
     - name: Post or update the sticky review comment
+      id: post
       if: ${{ github.event_name == 'pull_request' }}
       uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
       with:
@@ -135,3 +161,14 @@ runs:
               `On pull requests from a fork, GITHUB_TOKEN is read-only and cannot comment; ` +
               `the briefing is available in this job's log.`);
           }
+
+    - name: Fail after attempting gated briefing publication
+      if: ${{ always() && steps.review.outputs.gated == 'true' }}
+      shell: bash
+      env:
+        REVIEW_GATED: ${{ steps.review.outputs.gated }}
+      run: |
+        if [ "$REVIEW_GATED" = "true" ]; then
+          echo "openlore review: failing after attempting to publish the configured policy-gate evidence." >&2
+          exit 3
+        fi

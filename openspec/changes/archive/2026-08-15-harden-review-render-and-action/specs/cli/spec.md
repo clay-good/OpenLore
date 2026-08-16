@@ -28,16 +28,17 @@ comment posted with the repository's token.
 
 ### Requirement: ReviewDisclosesStaleOrFailedAnalysis
 
-When the blast radius in a review briefing is computed from an analysis index that does not match
-the reviewed HEAD — the index fingerprint records a different commit, or the CI analyze step
-failed and a pre-existing index was used — the briefing SHALL carry an explicit caveat naming the
-condition (including the commit the index was built at), rather than presenting the stale result
-as authoritative. This extends the existing honest-degradation caveats (base-ref fallback,
-blast-radius-unavailable) with the same discipline the bundle importer applies to currency.
+When the shared blast-radius confidence boundary reports that graph-relevant source has diverged
+from the analysis index, or the CI analyze step failed and a pre-existing index may have been
+used, the review briefing SHALL carry an explicit caveat naming the condition. A stale-index
+caveat SHALL include the commit at which the index was built. The renderer SHALL use this shared
+freshness result rather than introducing a second commit-comparison rule, so a docs-only commit
+does not incorrectly make the code graph stale.
 
 #### Scenario: A stale index is named, with its build commit
 
-- **GIVEN** an analysis index built at commit `<sha>` and a review of a later HEAD
+- **GIVEN** an analysis index built at commit `<sha>` and graph-relevant source divergence reported
+  by the shared confidence boundary
 - **WHEN** `openlore review` composes the briefing
 - **THEN** the caveats include "blast radius reflects a stale index (built at `<sha>`)"
 
@@ -47,3 +48,12 @@ blast-radius-unavailable) with the same discipline the bundle importer applies t
 - **WHEN** the review step still runs and posts the briefing
 - **THEN** the briefing carries a caveat that the index build failed, so the reader knows the
   blast radius may be incomplete or stale
+
+#### Scenario: A configured policy gate attempts to publish its evidence before failing
+
+- **GIVEN** the bundled Action runs `openlore review` with `blastRadius.block` configured
+- **WHEN** the CLI returns its reserved policy-gate exit code
+- **THEN** the Action attempts to post or update the briefing before propagating the gate failure
+- **AND** a comment API failure remains advisory but does not suppress the configured policy gate
+- **AND** an unrelated CLI execution error is not classified as a policy finding merely because
+  an output file exists

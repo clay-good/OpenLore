@@ -1,5 +1,6 @@
 /**
- * `openlore review` — the PR-review surface (change: add-pr-review-surface).
+ * `openlore review` — the PR-review surface (changes: add-pr-review-surface,
+ * harden-review-render-and-action).
  *
  * Composes two analyses that already ship into ONE deterministic, conclusion-shaped
  * briefing for a `base..head` range, rendered as Markdown for a PR comment (or JSON
@@ -37,6 +38,9 @@ import { frameServedContent, type ServedContentProvenance } from '../../core/ser
  * sticky comment (create once, update in place, never duplicate). MUST be the first
  * line of the rendered markdown so a simple substring match locates it. */
 export const REVIEW_MARKER = '<!-- openlore-review -->';
+/** Reserved machine exit for an intentional blastRadius policy gate. Other nonzero
+ * exits are execution failures and must not be reported as policy findings. */
+export const REVIEW_GATE_EXIT_CODE = 3;
 
 // These shapes mirror `handleStructuralDiff`'s return (it is typed `unknown`); the
 // fields we read are marked optional so the renderer's guards against a partial/error
@@ -88,7 +92,7 @@ async function sameCommit(cwd: string, refA: string, refB: string): Promise<bool
 /** Run both analyses for a `base..head` range and assemble the briefing. Never throws —
  * a thrown handler is captured as that section's `{error}` so an advisory caller (the
  * CLI, the CI Action) is never broken by a composed failure. */
-export async function composeReview(opts: { cwd: string; base?: string; head?: string }): Promise<ReviewBriefing> {
+export async function composeReview(opts: { cwd: string; base?: string; head?: string; analysisFailed?: boolean }): Promise<ReviewBriefing> {
   const caveats: string[] = [];
 
   // Suppress the per-call "Successfully validated directory" chatter from the
@@ -126,6 +130,12 @@ export async function composeReview(opts: { cwd: string; base?: string; head?: s
           'They can differ when --head is not the checked-out commit.',
       );
     }
+  }
+  if (opts.analysisFailed) {
+    caveats.push('The index build failed during this review, so the blast radius may be incomplete or stale.');
+  }
+  if (!('error' in blast) && blast.confidenceBoundary?.staleness) {
+    caveats.push(`Blast radius reflects a stale index (built at "${blast.confidenceBoundary.staleness.indexCommit}").`);
   }
   // Surface a silent base-ref fallback (a typo'd / unreachable --base) so the briefing
   // never misrepresents what it diffed. Derive the resolved base from whichever analysis
@@ -174,7 +184,61 @@ function fileName(p: string): string {
 
 /** Clip an identifier/message to a sane length so no single token dominates the briefing. */
 function clip(s: string, max = MAX_IDENT): string {
-  return s.length > max ? s.slice(0, max - 1) + '…' : s;
+  const codePoints = Array.from(s);
+  return codePoints.length > max ? codePoints.slice(0, max - 1).join('') + '…' : s;
+}
+
+function sanitizeReviewValue(value: string): string {
+  return value
+    .replaceAll(REVIEW_MARKER, '')
+    // eslint-disable-next-line no-control-regex -- repository text must not carry layout/bidi controls into a PR comment
+    .replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200e-\u200f\u2028-\u202e\u2066-\u2069]+/gu, ' ')
+    .replaceAll('&', '&amp;')
+    .replaceAll('@', '@\u200b')
+    .replaceAll('://', ':&#47;&#47;')
+    .replace(/\bwww\./giu, 'www&#46;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;');
+}
+
+/** Render repository-derived prose as inert, single-line Markdown. */
+function markdownText(value: string, max = MAX_IDENT): string {
+  return sanitizeReviewValue(clip(value, max))
+    .replaceAll('#', '&#35;')
+    .replaceAll('`', '&#96;')
+    .replaceAll('\\', '&#92;')
+    .replaceAll('*', '&#42;')
+    // CommonMark does not treat an intraword underscore as emphasis. Preserve that
+    // common identifier spelling while escaping boundary underscores such as _text_.
+    .replace(/(?<![\p{L}\p{N}])_|_(?![\p{L}\p{N}])/gu, '&#95;')
+    .replaceAll('[', '&#91;')
+    .replaceAll(']', '&#93;')
+    .replaceAll('!', '&#33;')
+    .replaceAll('|', '&#124;')
+    .replaceAll('~', '&#126;');
+}
+
+/** Wrap repository-derived text in a CommonMark code span whose fence is longer
+ * than every backtick run in the value, so the value cannot close the span. */
+function inlineCode(value: string, max = MAX_IDENT): string {
+  const safe = sanitizeReviewValue(clip(value, max));
+  const longestRun = Math.max(0, ...Array.from(safe.matchAll(/`+/g), (match) => match[0].length));
+  const fence = '`'.repeat(longestRun + 1);
+  const content = safe.startsWith('`') || safe.endsWith('`') ? ` ${safe} ` : safe;
+  return `${fence}${content}${fence}`;
+}
+
+/** Preserve the established plain-basename rendering for ordinary files, but move
+ * a pathological Markdown-bearing basename into a dynamically fenced code span. */
+function renderedFileName(value: string): string {
+  const clipped = clip(value);
+  const safe = markdownText(clipped);
+  return safe === clipped ? clipped : inlineCode(clipped);
+}
+
+function renderCaveat(value: string): string {
+  return markdownText(value, 500)
+    .replaceAll('&#96;openlore analyze&#96;', '`openlore analyze`');
 }
 
 /** Join an inline list with a bounded count + "…and N more" tail (no unbounded one-liner). */
@@ -229,12 +293,12 @@ export function renderMarkdown(b: ReviewBriefing): string {
   L.push('');
   L.push(`**${headline(b)}**`);
   L.push('');
-  L.push(`<sub>Deterministic structural analysis (no LLM) of \`${b.base}…${b.head}\`.</sub>`);
+  L.push(`<sub>Deterministic structural analysis (no LLM) of ${inlineCode(`${b.base}…${b.head}`, MAX_IDENT * 2 + 1)}.</sub>`);
   L.push('');
 
   const s = b.structural;
   if (s.error) {
-    L.push(`> ⚠ Structural delta unavailable: ${s.error}`);
+    L.push(`> ⚠ Structural delta unavailable: ${markdownText(s.error, 500)}`);
     L.push('');
   } else if (s.summary) {
     // ── Structural delta ───────────────────────────────────────────────────────
@@ -247,24 +311,24 @@ export function renderMarkdown(b: ReviewBriefing): string {
       if (removed.length) {
         L.push(...mdList(removed.map(r => {
           const stale = (r.staleCallers?.length ?? 0);
-          return `**Removed** \`${clip(r.name)}\` (${clip(fileName(r.file))})${stale ? ` — ${stale} caller${stale === 1 ? '' : 's'} now dangling` : ''}`;
+          return `**Removed** ${inlineCode(r.name)} (${renderedFileName(fileName(r.file))})${stale ? ` — ${stale} caller${stale === 1 ? '' : 's'} now dangling` : ''}`;
         })));
       }
       if (sig.length) {
         L.push(...mdList(sig.map(c => {
           const stale = (c.staleCallers?.length ?? 0);
-          return `**Signature changed** \`${clip(c.name)}\` (${clip(fileName(c.file))})${stale ? ` — ${stale} caller${stale === 1 ? '' : 's'} may be stale` : ''}`;
+          return `**Signature changed** ${inlineCode(c.name)} (${renderedFileName(fileName(c.file))})${stale ? ` — ${stale} caller${stale === 1 ? '' : 's'} may be stale` : ''}`;
         })));
       }
       if (added.length) {
-        L.push(...mdList(added.map(a => `**Added** \`${clip(a.name)}\` (${clip(fileName(a.file))})`)));
+        L.push(...mdList(added.map(a => `**Added** ${inlineCode(a.name)} (${renderedFileName(fileName(a.file))})`)));
       }
       if (renames.length) {
-        L.push(...mdList(renames.map(r => `**Renamed/moved** \`${clip(r.from.name)}\` → \`${clip(r.to.name)}\` (${clip(r.confidence, 24)})`)));
+        L.push(...mdList(renames.map(r => `**Renamed/moved** ${inlineCode(r.from.name)} → ${inlineCode(r.to.name)} (${markdownText(r.confidence, 24)})`)));
       }
       L.push('');
     } else if (s.message) {
-      L.push(`_${s.message}_`);
+      L.push(`_${markdownText(s.message, 500)}_`);
       L.push('');
     }
   }
@@ -272,7 +336,7 @@ export function renderMarkdown(b: ReviewBriefing): string {
   // ── Blast radius ─────────────────────────────────────────────────────────────
   const blast = b.blast;
   if ('error' in blast) {
-    L.push(`> ⚠ Blast radius unavailable: ${blast.error}`);
+    L.push(`> ⚠ Blast radius unavailable: ${markdownText(blast.error, 500)}`);
     L.push('');
   } else {
     const hasImpact = blast.impact.hubsTouched.length || blast.impact.layersCrossed.length ||
@@ -280,18 +344,18 @@ export function renderMarkdown(b: ReviewBriefing): string {
     if (hasImpact) {
       L.push('### Blast radius');
       if (blast.impact.hubsTouched.length) {
-        L.push(`- **Hubs touched:** ${inlineList(blast.impact.hubsTouched.map(h => `\`${clip(h.symbol)}\` (${h.fanIn} callers)`))}`);
+        L.push(`- **Hubs touched:** ${inlineList(blast.impact.hubsTouched.map(h => `${inlineCode(h.symbol)} (${h.fanIn} callers)`))}`);
       }
       if (blast.impact.layersCrossed.length) {
-        L.push(`- **Layers crossed:** ${inlineList(blast.impact.layersCrossed.map(l => clip(l, 60)))}`);
+        L.push(`- **Layers crossed:** ${inlineList(blast.impact.layersCrossed.map(l => markdownText(l, 60)))}`);
       }
       if (blast.impact.governingDecisions.length) {
-        L.push(`- **Governing decisions:** ${inlineList(blast.impact.governingDecisionProvenance.map(d => `[${d.provenance}] ${clip(d.title, 200)}`), INLINE_CAP, '; ')}`);
+        L.push(`- **Governing decisions:** ${inlineList(blast.impact.governingDecisionProvenance.map(d => `[${d.provenance}] ${markdownText(d.title, 200)}`), INLINE_CAP, '; ')}`);
       }
       if (blast.tests.unavailable) {
-        L.push(`- **Tests to run:** could not be computed (${clip(blast.tests.unavailable, 200)}) — not the same as "none impacted".`);
+        L.push(`- **Tests to run:** could not be computed (${markdownText(blast.tests.unavailable, 200)}) — not the same as "none impacted".`);
       } else if (blast.tests.count) {
-        const tests = blast.tests.toRun.slice(0, 10).map(t => `\`${t.test}\``).join(', ');
+        const tests = blast.tests.toRun.slice(0, 10).map(t => inlineCode(t.test)).join(', ');
         L.push(`- **Tests to run (${blast.tests.count}):** ${tests}${blast.tests.count > 10 ? ', …' : ''}`);
       }
       L.push('');
@@ -303,15 +367,15 @@ export function renderMarkdown(b: ReviewBriefing): string {
     const DRIFT_CAP = 5;
     const driftLines: string[] = [];
     for (const m of blast.memory.willDrift.slice(0, DRIFT_CAP)) {
-      driftLines.push(`**Memory** [${m.provenance}] ${m.kind === 'memory-orphaned' ? 'orphaned' : 'drifted'}: ${clip(m.message, 200)}`);
+      driftLines.push(`**Memory** [${m.provenance}] ${m.kind === 'memory-orphaned' ? 'orphaned' : 'drifted'}: ${markdownText(m.message, 200)}`);
     }
     const memExtra = blast.memory.drifted + blast.memory.orphaned - Math.min(blast.memory.willDrift.length, DRIFT_CAP);
     if (memExtra > 0) driftLines.push(`…and ${memExtra} more anchored memor${memExtra === 1 ? 'y' : 'ies'}`);
-    for (const d of blast.decisions.items.slice(0, DRIFT_CAP)) driftLines.push(`**Decision** [${d.provenance}] ${d.kind}: ${clip(d.message, 200)}`);
+    for (const d of blast.decisions.items.slice(0, DRIFT_CAP)) driftLines.push(`**Decision** [${d.provenance}] ${markdownText(d.kind, 60)}: ${markdownText(d.message, 200)}`);
     if (blast.decisions.affected > Math.min(blast.decisions.items.length, DRIFT_CAP)) {
       driftLines.push(`…and ${blast.decisions.affected - Math.min(blast.decisions.items.length, DRIFT_CAP)} more decision issue(s)`);
     }
-    for (const sp of blast.specs.items.slice(0, DRIFT_CAP)) driftLines.push(`**Spec** [${sp.provenance}] ${sp.kind}: ${clip(sp.message, 200)}`);
+    for (const sp of blast.specs.items.slice(0, DRIFT_CAP)) driftLines.push(`**Spec** [${sp.provenance}] ${markdownText(sp.kind, 60)}: ${markdownText(sp.message, 200)}`);
     if (blast.specs.willGoStale > Math.min(blast.specs.items.length, DRIFT_CAP)) {
       driftLines.push(`…and ${blast.specs.willGoStale - Math.min(blast.specs.items.length, DRIFT_CAP)} more spec issue(s)`);
     }
@@ -324,7 +388,7 @@ export function renderMarkdown(b: ReviewBriefing): string {
 
   if (b.caveats.length) {
     L.push('### Notes');
-    L.push(...b.caveats.map(c => `- ${c}`));
+    L.push(...b.caveats.map(c => `- ${renderCaveat(c)}`));
     L.push('');
   }
 
@@ -345,12 +409,14 @@ export function renderMarkdown(b: ReviewBriefing): string {
   // so it survives) and append a clear notice.
   if (out.length > MAX_MARKDOWN_CHARS) {
     const notice = '\n\n<sub>⚠ Briefing truncated to fit GitHub\'s comment size limit — run `openlore review` locally for the full output.</sub>\n';
-    let clipped = body.slice(0, Math.max(0, body.length - (out.length - MAX_MARKDOWN_CHARS) - notice.length)) + notice;
-    out = REVIEW_MARKER + '\n' + frameServedContent(clipped, provenances, 'structural review') + '\n';
-    while (out.length > MAX_MARKDOWN_CHARS && clipped.length > notice.length) {
-      clipped = clipped.slice(0, clipped.length - (out.length - MAX_MARKDOWN_CHARS));
-      out = REVIEW_MARKER + '\n' + frameServedContent(clipped, provenances, 'structural review') + '\n';
+    let completedLines = '';
+    for (const line of body.split('\n')) {
+      const candidate = completedLines + line + '\n';
+      const framed = REVIEW_MARKER + '\n' + frameServedContent(candidate + notice, provenances, 'structural review') + '\n';
+      if (framed.length > MAX_MARKDOWN_CHARS) break;
+      completedLines = candidate;
     }
+    out = REVIEW_MARKER + '\n' + frameServedContent(completedLines + notice, provenances, 'structural review') + '\n';
   }
   return out;
 }
@@ -395,7 +461,12 @@ export async function runReviewCli(opts: ReviewCliOptions): Promise<number> {
   const cwd = opts.cwd ?? process.cwd();
   const format = opts.format ?? 'markdown';
 
-  const briefing = await composeReview({ cwd, base: opts.base, head: opts.head });
+  const briefing = await composeReview({
+    cwd,
+    base: opts.base,
+    head: opts.head,
+    analysisFailed: process.env.OPENLORE_REVIEW_ANALYZE_FAILED === 'true',
+  });
 
   const rendered = format === 'json'
     ? JSON.stringify(briefing, null, 2) + '\n'
@@ -434,7 +505,7 @@ export async function runReviewCli(opts: ReviewCliOptions): Promise<number> {
     const fired = triggeredBlockPatterns(briefing.blast, block);
     if (fired.length > 0) {
       process.stderr.write(`\n⛔ openlore review: gated by configured high-risk pattern(s): ${fired.join(', ')}.\n\n`);
-      return 1;
+      return REVIEW_GATE_EXIT_CODE;
     }
   }
   return 0;
