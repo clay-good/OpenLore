@@ -16,9 +16,8 @@
  *   const results = await VectorIndex.search(outputDir, "authenticate user with JWT", embedSvc);
  */
 
-import { existsSync, readFileSync, writeFileSync, rmSync, openSync, writeSync, closeSync } from 'node:fs';
-import { writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { existsSync, readFileSync, writeFileSync, rmSync, openSync, writeSync, closeSync, statSync, realpathSync, renameSync, unlinkSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import type { FunctionNode } from './call-graph.js';
 import type { FileSignatureMap } from './signature-extractor.js';
 import type { Embedder } from './embedding-service.js';
@@ -26,6 +25,8 @@ import { getSkeletonContent, isSkeletonWorthIncluding } from './code-shaper.js';
 import { quietNativeLoggingOnce } from './lance-logging.js';
 import { noteUpdateAndMaybeCompact } from './index-compaction.js';
 import { TOKENIZER_VERSION, tokenize } from './bm25-tokenizer.js';
+import { atomicWriteFile } from '../decisions/atomic-store.js';
+import { acquireLockAt } from '../runtime/advisory-lock.js';
 
 export { TOKENIZER_VERSION, tokenize } from './bm25-tokenizer.js';
 
@@ -86,6 +87,8 @@ export interface VectorIndexMeta {
   dim: number;
   model: string | null;
   builtAt: string;
+  /** Changes only after a complete rebuild; incremental mutations preserve it. */
+  fullBuildAt?: string;
   schemaVersion: number;
   /**
    * Version of the BM25 tokenizer that produced this index's corpus. A mismatch
@@ -94,13 +97,43 @@ export interface VectorIndexMeta {
    * full rebuild re-stamps. A legacy meta without this field is treated as v1.
    */
   tokenizerVersion?: number;
+  /** Present only when an incremental update could neither add nor restore rows. */
+  degraded?: {
+    reason: 'incremental-update-restore-failed';
+    recordedAt: string;
+  };
 }
 
-// Module-level meta cache, keyed by dbPath. Invalidated by build().
-const _metaCache = new Map<string, VectorIndexMeta | null>();
+interface CachedMeta {
+  value: VectorIndexMeta | null;
+  /** Filesystem identity captured after the sidecar was read. */
+  stamp: string | null;
+}
+
+// Module-level meta cache, keyed by dbPath. The filesystem stamp makes it
+// coherent with rebuilds performed by another process.
+const _metaCache = new Map<string, CachedMeta>();
 
 function metaFilePath(outputDir: string): string {
   return join(outputDir, META_FILE);
+}
+
+function dbPathFor(outputDir: string): string {
+  const absolute = resolve(outputDir, DB_FOLDER);
+  try {
+    return realpathSync.native(absolute);
+  } catch {
+    return absolute;
+  }
+}
+
+function metaStamp(outputDir: string): string | null {
+  try {
+    const stat = statSync(metaFilePath(outputDir), { bigint: true });
+    return `${stat.dev}:${stat.ino}:${stat.mtimeNs}:${stat.ctimeNs}:${stat.size}`;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -110,20 +143,35 @@ function metaFilePath(outputDir: string): string {
  * present" to preserve pre-change behaviour for those indexes.
  */
 function readMeta(outputDir: string): VectorIndexMeta | null {
-  const dbPath = join(outputDir, DB_FOLDER);
-  if (_metaCache.has(dbPath)) return _metaCache.get(dbPath) ?? null;
-  let meta: VectorIndexMeta | null;
-  try {
-    meta = JSON.parse(readFileSync(metaFilePath(outputDir), 'utf-8')) as VectorIndexMeta;
-  } catch {
-    meta = null;
+  const dbPath = dbPathFor(outputDir);
+  const stamp = metaStamp(outputDir);
+  const cached = _metaCache.get(dbPath);
+  if (cached && cached.stamp === stamp) return cached.value;
+  if (cached) invalidateDbPathCaches(dbPath);
+
+  // Require a stable pre/post-read stamp. A concurrent atomic rename causes a
+  // retry; a malformed file that exists is never cached as legacy-null.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const before = metaStamp(outputDir);
+    let meta: VectorIndexMeta;
+    try {
+      meta = JSON.parse(readFileSync(metaFilePath(outputDir), 'utf-8')) as VectorIndexMeta;
+    } catch {
+      const after = metaStamp(outputDir);
+      if (before !== after) continue;
+      if (before === null) _metaCache.set(dbPath, { value: null, stamp: null });
+      return null;
+    }
+    const after = metaStamp(outputDir);
+    if (before !== after) continue;
+    _metaCache.set(dbPath, { value: meta, stamp: after });
+    return meta;
   }
-  _metaCache.set(dbPath, meta);
-  return meta;
+  return null;
 }
 
 async function writeMeta(outputDir: string, meta: VectorIndexMeta): Promise<void> {
-  await writeFile(metaFilePath(outputDir), JSON.stringify(meta, null, 2) + '\n', 'utf-8');
+  await atomicWriteFile(metaFilePath(outputDir), JSON.stringify(meta, null, 2) + '\n');
 }
 
 /** Convert a raw LanceDB row to a FunctionRecord (without the vector field). */
@@ -218,6 +266,37 @@ const _identifierVocabularyCache = new Map<string, string[]>();
 // Invalidated by build() when the index is rebuilt.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const _tableCache = new Map<string, { table: any }>();
+const _degradedFallback = new Map<string, {
+  fullBuildAt: string | null;
+  marker: NonNullable<VectorIndexMeta['degraded']>;
+}>();
+
+function invalidateDbPathCaches(dbPath: string): void {
+  _bm25Cache.delete(dbPath);
+  _identifierVocabularyCache.delete(dbPath);
+  _tableCache.delete(dbPath);
+  _metaCache.delete(dbPath);
+}
+
+/** Clear every process-lifetime cache for one on-disk vector index. */
+export function invalidateVectorIndexCaches(outputDir: string): void {
+  invalidateDbPathCaches(dbPathFor(outputDir));
+}
+
+/** Test-only: expose the canonical cache identity used for an index path. */
+export const _vectorIndexCacheIdentityForTesting = dbPathFor;
+
+async function withVectorIndexMutation<T>(outputDir: string, operation: () => Promise<T>): Promise<T> {
+  let lockDir = resolve(outputDir);
+  try { lockDir = realpathSync.native(lockDir); } catch { /* output directory may not exist yet */ }
+  const lock = await acquireLockAt(lockDir, '.vector-index.lock');
+  if ('held' in lock) throw new Error(`Vector index mutation lock is held: ${lock.lockPath}`);
+  try {
+    return await operation();
+  } finally {
+    await lock.release();
+  }
+}
 
 /** Test-only: clear in-memory BM25 + LanceDB caches to force cold path. */
 export function _resetVectorIndexCachesForTesting(): void {
@@ -225,7 +304,57 @@ export function _resetVectorIndexCachesForTesting(): void {
   _identifierVocabularyCache.clear();
   _tableCache.clear();
   _metaCache.clear();
+  _degradedFallback.clear();
 }
+
+interface MutableTable {
+  delete(predicate: string): Promise<unknown>;
+  add(rows: Record<string, unknown>[]): Promise<unknown>;
+}
+
+async function replaceRowsWithRestore(
+  table: MutableTable,
+  predicate: string | null,
+  replacementRows: Record<string, unknown>[],
+  previousRows: Record<string, unknown>[],
+  onRestoreFailure: () => Promise<void>,
+): Promise<void> {
+  if (!predicate) {
+    if (replacementRows.length > 0) await table.add(replacementRows);
+    return;
+  }
+
+  await table.delete(predicate);
+  try {
+    if (replacementRows.length > 0) await table.add(replacementRows);
+  } catch (addError) {
+    try {
+      // An add that rejects is not assumed to be transactionally empty. Remove
+      // any replacement rows it may have partially committed before restoring
+      // the captured pre-update set.
+      await table.delete(predicate);
+      if (previousRows.length > 0) await table.add(previousRows);
+    } catch (restoreError) {
+      let markerError: unknown;
+      try {
+        await onRestoreFailure();
+      } catch (err) {
+        markerError = err;
+      }
+      throw new AggregateError(
+        markerError ? [addError, restoreError, markerError] : [addError, restoreError],
+        markerError
+          ? 'Vector index update, rollback, and degraded-marker persistence failed.'
+          : 'Vector index update and rollback both failed; the index is degraded.',
+        { cause: restoreError },
+      );
+    }
+    throw addError;
+  }
+}
+
+/** Test-only: exercise the transactional delete/add helper without LanceDB. */
+export const _replaceRowsWithRestoreForTesting = replaceRowsWithRestore;
 
 /**
  * Surgically patch the cached BM25 corpus for `dbPath` (Spec 13.1): drop the
@@ -392,6 +521,7 @@ function persistCorpusSidecar(dbPath: string, corpus: Bm25Corpus): void {
 
 /** How many bytes of sidecar text buffer before a write syscall. */
 const CORPUS_WRITE_BUFFER_BYTES = 1 << 20;
+let corpusTempCounter = 0;
 
 /**
  * Persist the sidecar WITHOUT ever holding the corpus, its serialized payload, or the finished
@@ -417,8 +547,11 @@ function persistCorpusSidecarStreaming(
   records: Iterable<{ id: string; text: string }>,
 ): void {
   let fd: number | undefined;
+  const target = corpusFilePath(dbPath);
+  const temp = `${target}.tmp-${process.pid}-${corpusTempCounter++}`;
+  let renamed = false;
   try {
-    fd = openSync(corpusFilePath(dbPath), 'w');
+    fd = openSync(temp, 'w');
     const df = new Map<string, number>();
     let totalLen = 0;
     let n = 0;
@@ -446,11 +579,18 @@ function persistCorpusSidecarStreaming(
     buf += `],"df":${JSON.stringify([...df])},`
       + `"avgLength":${JSON.stringify(n > 0 ? totalLen / n : 1)},"N":${n}}`;
     flush(true);
+    closeSync(fd);
+    fd = undefined;
+    renameSync(temp, target);
+    renamed = true;
   } catch {
     /* optional cache — ignore */
   } finally {
     if (fd !== undefined) {
       try { closeSync(fd); } catch { /* already closed */ }
+    }
+    if (!renamed) {
+      try { unlinkSync(temp); } catch { /* absent or already renamed */ }
     }
   }
 }
@@ -578,6 +718,21 @@ function findSignatureEntry(
 // ============================================================================
 
 export class VectorIndex {
+  /** User-facing disclosure for an index whose incremental rollback also failed. */
+  static degradationNotice(outputDir: string): string | null {
+    const dbPath = dbPathFor(outputDir);
+    const meta = readMeta(outputDir);
+    if (meta?.degraded) return 'Index degraded — re-run "openlore analyze".';
+    const fallback = _degradedFallback.get(dbPath);
+    if (!fallback) return null;
+    const observedFullBuild = meta?.fullBuildAt ?? meta?.builtAt ?? null;
+    if (observedFullBuild !== fallback.fullBuildAt) {
+      _degradedFallback.delete(dbPath);
+      return null;
+    }
+    return 'Index degraded — re-run "openlore analyze".';
+  }
+
   /**
    * Build (or rebuild) the vector index from call graph nodes + signatures.
    *
@@ -605,6 +760,29 @@ export class VectorIndex {
     fileContents?: Map<string, string>,
     /** When true, reuse cached vectors for unchanged functions */
     incremental = false
+  ): Promise<{
+    embedded: number;
+    reused: number;
+    total: number;
+    hasEmbeddings: boolean;
+    productionFunctions: number;
+    testFunctions: number;
+    signatureOnlySymbols: number;
+  }> {
+    return withVectorIndexMutation(outputDir, () => VectorIndex.buildUnlocked(
+      outputDir, nodes, signatures, hubIds, entryPointIds, embedSvc, fileContents, incremental,
+    ));
+  }
+
+  private static async buildUnlocked(
+    outputDir: string,
+    nodes: FunctionNode[],
+    signatures: FileSignatureMap[],
+    hubIds: Set<string>,
+    entryPointIds: Set<string>,
+    embedSvc: Embedder | null,
+    fileContents?: Map<string, string>,
+    incremental = false,
   ): Promise<{
     embedded: number;
     reused: number;
@@ -689,7 +867,7 @@ export class VectorIndex {
       throw new Error('No repository functions to index');
     }
 
-    const dbPath = join(outputDir, DB_FOLDER);
+    const dbPath = dbPathFor(outputDir);
     const productionFunctions = repoNodes.filter((node) => !node.isTest).length;
     const testFunctions = repoNodes.length - productionFunctions;
     const signatureOnlySymbols = candidates.length - repoNodes.length;
@@ -699,29 +877,30 @@ export class VectorIndex {
     // searched with ANN, and record `hasEmbeddings: false` in the sidecar.
     if (!embedSvc) {
       const db = await connect(dbPath);
+      deleteCorpusSidecar(dbPath);
       await db.createTable(
         TABLE_NAME,
         candidates as unknown as Record<string, unknown>[],
         { mode: 'overwrite' }
       );
-      await writeMeta(outputDir, {
-        hasEmbeddings: false,
-        dim: 0,
-        model: null,
-        builtAt: new Date().toISOString(),
-        schemaVersion: META_SCHEMA_VERSION,
-        tokenizerVersion: TOKENIZER_VERSION,
-      });
-      // Persist the tokenized corpus so a cold-start query hydrates it instead of
-      // re-tokenizing the whole `text` column.
+      const builtAt = new Date().toISOString();
+      // Publish corpus first and metadata LAST: the meta rename is the coherence
+      // commit point observed by warm readers in other processes.
       persistCorpusSidecarStreaming(
         dbPath,
         (function* () { for (const r of candidates) yield { id: r.id, text: r.text }; })(),
       );
-      _tableCache.delete(dbPath);
-      _bm25Cache.delete(dbPath);
-      _identifierVocabularyCache.delete(dbPath);
-      _metaCache.delete(dbPath);
+      await writeMeta(outputDir, {
+        hasEmbeddings: false,
+        dim: 0,
+        model: null,
+        builtAt,
+        fullBuildAt: builtAt,
+        schemaVersion: META_SCHEMA_VERSION,
+        tokenizerVersion: TOKENIZER_VERSION,
+      });
+      _degradedFallback.delete(dbPath);
+      invalidateDbPathCaches(dbPath);
       return {
         embedded: 0,
         reused: 0,
@@ -813,28 +992,28 @@ export class VectorIndex {
 
     // ── Write table ──────────────────────────────────────────────────────────
     const db = await connect(dbPath);
+    deleteCorpusSidecar(dbPath);
     await db.createTable(TABLE_NAME, fullRecords as unknown as Record<string, unknown>[], { mode: 'overwrite' });
 
-    await writeMeta(outputDir, {
-      hasEmbeddings: true,
-      dim: fullRecords[0]?.vector.length ?? 0,
-      model: embedSvc.modelName,
-      builtAt: new Date().toISOString(),
-      schemaVersion: META_SCHEMA_VERSION,
-      tokenizerVersion: TOKENIZER_VERSION,
-    });
-    // Persist the tokenized corpus for cold-start hydration (hybrid search still
-    // uses the BM25 sparse half, so the corpus is needed here too).
+    const builtAt = new Date().toISOString();
+    // As above, metadata is the last-published coherence commit.
     persistCorpusSidecarStreaming(
       dbPath,
       (function* () { for (const r of fullRecords) yield { id: r.id, text: r.text }; })(),
     );
+    await writeMeta(outputDir, {
+      hasEmbeddings: true,
+      dim: fullRecords[0]?.vector.length ?? 0,
+      model: embedSvc.modelName,
+      builtAt,
+      fullBuildAt: builtAt,
+      schemaVersion: META_SCHEMA_VERSION,
+      tokenizerVersion: TOKENIZER_VERSION,
+    });
 
     // Invalidate search caches — index was just rebuilt
-    _tableCache.delete(dbPath);
-    _bm25Cache.delete(dbPath);
-    _identifierVocabularyCache.delete(dbPath);
-    _metaCache.delete(dbPath);
+    _degradedFallback.delete(dbPath);
+    invalidateDbPathCaches(dbPath);
 
     return {
       embedded: toEmbed.length,
@@ -871,12 +1050,30 @@ export class VectorIndex {
     embedSvc: Embedder | null | undefined,
     fileContents?: Map<string, string>,
   ): Promise<{ embedded: number; reused: number; total: number; hasEmbeddings: boolean; deferred?: 'model-changed' | 'tokenizer-changed' }> {
+    return withVectorIndexMutation(outputDir, () => VectorIndex.updateFilesUnlocked(
+      outputDir, nodes, changedFilePaths, signatures, hubIds, entryPointIds, embedSvc, fileContents,
+    ));
+  }
+
+  private static async updateFilesUnlocked(
+    outputDir: string,
+    nodes: FunctionNode[],
+    changedFilePaths: Set<string>,
+    signatures: FileSignatureMap[],
+    hubIds: Set<string>,
+    entryPointIds: Set<string>,
+    embedSvc: Embedder | null | undefined,
+    fileContents?: Map<string, string>,
+  ): Promise<{ embedded: number; reused: number; total: number; hasEmbeddings: boolean; deferred?: 'model-changed' | 'tokenizer-changed' }> {
     if (!VectorIndex.exists(outputDir)) {
       return { embedded: 0, reused: 0, total: 0, hasEmbeddings: false };
     }
-    const dbPath = join(outputDir, DB_FOLDER);
+    const dbPath = dbPathFor(outputDir);
     const existingMeta = readMeta(outputDir);
     const indexHasEmbeddings = existingMeta === null ? true : existingMeta.hasEmbeddings;
+    if (changedFilePaths.size === 0) {
+      return { embedded: 0, reused: 0, total: 0, hasEmbeddings: indexHasEmbeddings };
+    }
 
     // A changed tokenizer means the on-disk corpus was tokenized under different
     // rules; incrementally patching it in place would mix token sets. Refuse the
@@ -967,13 +1164,101 @@ export class VectorIndex {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const table: any = await db.openTable(TABLE_NAME);
     const predicate = filePathInPredicate(changedFilePaths);
+    const previousRows = predicate
+      ? await table.query().where(predicate).toArray() as Record<string, unknown>[]
+      : [];
+    const markDegraded = async (): Promise<void> => {
+      const marker: NonNullable<VectorIndexMeta['degraded']> = {
+        reason: 'incremental-update-restore-failed',
+        recordedAt: new Date().toISOString(),
+      };
+      const fullBuildAt = existingMeta?.fullBuildAt ?? existingMeta?.builtAt ?? null;
+      _degradedFallback.set(dbPath, { fullBuildAt, marker });
+      const baseMeta: VectorIndexMeta = existingMeta ?? {
+        hasEmbeddings: indexHasEmbeddings,
+        dim: 0,
+        model: null,
+        builtAt: new Date().toISOString(),
+        schemaVersion: META_SCHEMA_VERSION,
+        tokenizerVersion: TOKENIZER_VERSION,
+      };
+      try {
+        await writeMeta(outputDir, {
+          ...baseMeta,
+          degraded: marker,
+        });
+      } finally {
+        invalidateDbPathCaches(dbPath);
+      }
+    };
+    const publishMutation = async (): Promise<void> => {
+      const fallback = _degradedFallback.get(dbPath);
+      const publishedAt = new Date().toISOString();
+      const updatedMeta: VectorIndexMeta = {
+        ...(existingMeta ?? {
+          hasEmbeddings: indexHasEmbeddings,
+          dim: 0,
+          model: null,
+          schemaVersion: META_SCHEMA_VERSION,
+          tokenizerVersion: TOKENIZER_VERSION,
+        }),
+        builtAt: publishedAt,
+        fullBuildAt: existingMeta?.fullBuildAt ?? existingMeta?.builtAt ?? publishedAt,
+        ...(existingMeta?.degraded || fallback
+          ? { degraded: existingMeta?.degraded ?? fallback?.marker }
+          : {}),
+      };
+      await writeMeta(outputDir, updatedMeta);
+      _metaCache.set(dbPath, { value: updatedMeta, stamp: metaStamp(outputDir) });
+      if (updatedMeta.degraded) {
+        _degradedFallback.set(dbPath, {
+          fullBuildAt: updatedMeta.fullBuildAt ?? updatedMeta.builtAt,
+          marker: updatedMeta.degraded,
+        });
+      }
+    };
+    const publishMutationOrRestore = async (): Promise<void> => {
+      try {
+        await publishMutation();
+      } catch (publishError) {
+        try {
+          if (predicate) {
+            await table.delete(predicate);
+            if (previousRows.length > 0) await table.add(previousRows);
+          }
+        } catch (restoreError) {
+          let markerError: unknown;
+          try {
+            await markDegraded();
+          } catch (error) {
+            markerError = error;
+          }
+          const errors = [publishError, restoreError];
+          if (markerError !== undefined) errors.push(markerError);
+          throw new AggregateError(
+            errors,
+            markerError === undefined
+              ? 'Vector index metadata publication and rollback both failed'
+              : 'Vector index metadata publication, rollback, and degraded marker persistence failed',
+            { cause: restoreError },
+          );
+        } finally {
+          invalidateDbPathCaches(dbPath);
+        }
+        throw publishError;
+      }
+    };
 
     // ── BM25-only index ───────────────────────────────────────────────────────
     if (!embedSvc || !indexHasEmbeddings) {
-      if (predicate) await table.delete(predicate);
-      if (candidates.length > 0) {
-        await table.add(candidates as unknown as Record<string, unknown>[]);
-      }
+      await replaceRowsWithRestore(
+        table,
+        predicate,
+        candidates as unknown as Record<string, unknown>[],
+        previousRows,
+        markDegraded,
+      );
+      await publishMutationOrRestore();
       patchBm25Cache(dbPath, changedFilePaths, candidates as unknown as Record<string, unknown>[]);
       // Reclaim the versions this delete+add left behind (see index-compaction).
       await noteUpdateAndMaybeCompact(dbPath, table as unknown as Parameters<typeof noteUpdateAndMaybeCompact>[1]);
@@ -983,15 +1268,10 @@ export class VectorIndex {
     // ── Embedded index: reuse unchanged vectors for the changed files only ────
     const cachedVectors = new Map<string, number[]>(); // "id::text" → vector
     if (predicate) {
-      try {
-        const existingRows = await table.query().where(predicate).toArray() as Record<string, unknown>[];
-        for (const row of existingRows) {
-          const id = row.id as string;
-          const text = row.text as string;
-          cachedVectors.set(`${id}::${text}`, Array.from(row.vector as ArrayLike<number>));
-        }
-      } catch {
-        // unreadable subset — embed everything fresh
+      for (const row of previousRows) {
+        const id = row.id as string;
+        const text = row.text as string;
+        cachedVectors.set(`${id}::${text}`, Array.from(row.vector as ArrayLike<number>));
       }
     }
 
@@ -1021,10 +1301,14 @@ export class VectorIndex {
       fullRecords[toEmbedIdx[i]] = { ...candidates[toEmbedIdx[i]], vector: newVectors[i] };
     }
 
-    if (predicate) await table.delete(predicate);
-    if (fullRecords.length > 0) {
-      await table.add(fullRecords as unknown as Record<string, unknown>[]);
-    }
+    await replaceRowsWithRestore(
+      table,
+      predicate,
+      fullRecords as unknown as Record<string, unknown>[],
+      previousRows,
+      markDegraded,
+    );
+    await publishMutationOrRestore();
     // Reclaim the versions this delete+add left behind (see index-compaction).
     await noteUpdateAndMaybeCompact(dbPath, table as unknown as Parameters<typeof noteUpdateAndMaybeCompact>[1]);
 
@@ -1063,7 +1347,10 @@ export class VectorIndex {
       throw new Error('Vector index not found. Run "openlore analyze --embed" first.');
     }
 
-    const dbPath = join(outputDir, DB_FOLDER);
+    const dbPath = dbPathFor(outputDir);
+    // readMeta owns the cross-process coherence check and invalidates the table
+    // and corpus handles before either can be reused.
+    const meta = readMeta(outputDir);
     let tableEntry = _tableCache.get(dbPath);
     if (!tableEntry) {
       quietNativeLoggingOnce();
@@ -1080,7 +1367,6 @@ export class VectorIndex {
     // Force BM25 when no embedder is available OR when the index was built
     // without embeddings (no `vector` column). The sidecar is the source of
     // truth: a missing sidecar (legacy index) is treated as embeddings-present.
-    const meta = readMeta(outputDir);
     const indexHasEmbeddings = meta === null ? true : meta.hasEmbeddings;
     if (!embedSvc || !indexHasEmbeddings) {
       return VectorIndex._bm25Only(table, dbPath, query, limit, language, minFanIn);
@@ -1247,7 +1533,7 @@ export class VectorIndex {
     outputDir: string,
     query: string,
   ): Promise<KeywordMissDiagnostics> {
-    const dbPath = join(outputDir, DB_FOLDER);
+    const dbPath = dbPathFor(outputDir);
     let cachedEntry = _bm25Cache.get(dbPath);
 
     if (!cachedEntry) {
@@ -1294,6 +1580,6 @@ export class VectorIndex {
    * Returns true if a vector index has been built for this output directory.
    */
   static exists(outputDir: string): boolean {
-    return existsSync(join(outputDir, DB_FOLDER));
+    return existsSync(dbPathFor(outputDir));
   }
 }

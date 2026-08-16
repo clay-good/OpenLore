@@ -40,6 +40,7 @@ import { extractSignatures, detectLanguage } from '../analyzer/signature-extract
 import type { FunctionNode } from '../analyzer/call-graph.js';
 import { extractFileStyle, extractFileParseHealth } from '../analyzer/call-graph.js';
 import { assembleFromRegions, type StyleFingerprint, type FileStyleRaw } from '../analyzer/style-fingerprint.js';
+import { invalidateVectorIndexCaches } from '../analyzer/vector-index.js';
 import { buildParseHealthReport, type ParseHealthReport, type FileParseHealth } from '../analyzer/parse-health.js';
 import { parseBudgetOverrunMs } from '../analyzer/parse-budget.js';
 import { isTestFile } from '../analyzer/test-file.js';
@@ -909,7 +910,10 @@ export class McpWatcher {
         { cwd: this.rootPath, stdio: 'ignore', detached: true }
       );
       this.rebuildChildren.add(child);
-      child.once('close', () => this.rebuildChildren.delete(child));
+      child.once('close', (code) => {
+        this.rebuildChildren.delete(child);
+        if (code === 0) invalidateVectorIndexCaches(this.outputPath);
+      });
       child.on('error', (err) => {
         process.stderr.write(`[mcp-watcher] background rebuild failed to start (${err.message}) — run "openlore analyze".\n`);
       });
@@ -1007,7 +1011,10 @@ export class McpWatcher {
         { cwd: this.rootPath, stdio: 'ignore', detached: true }
       );
       this.rebuildChildren.add(child);
-      child.once('close', () => this.rebuildChildren.delete(child));
+      child.once('close', (code) => {
+        this.rebuildChildren.delete(child);
+        if (code === 0) invalidateVectorIndexCaches(this.outputPath);
+      });
       child.on('error', (err) => {
         this.graphRebuildRunning = false;
         process.stderr.write(`[mcp-watcher] background graph rebuild failed to start (${err.message}) — run "openlore analyze".\n`);

@@ -1,6 +1,6 @@
 # Harden vector index coherence: a rebuilt index must never be served through stale process caches
 
-> Status: PROPOSED (2026-07-03, e2e audit pass 3). The live MCP server caches the vector index's
+> Status: IMPLEMENTED (2026-08-16). The live MCP server caches the vector index's
 > meta sidecar, BM25 corpus, and LanceDB table handle for the process lifetime — but the watcher
 > heals a stale graph by spawning a DETACHED `analyze --force` child that overwrites the table in
 > another process, so the server keeps serving the pre-rebuild dataset until restart. Two smaller
@@ -75,7 +75,8 @@ threshold), and touch no hot-path semantics on the happy path.
   `src/core/analyzer/local-embedding-service.ts` (memo reset); tests for cross-process
   invalidation, add-failure restore, and extractor retry.
 - Specs: `analyzer` — 2 ADDED requirements (VectorIndexCacheCoherence,
-  IncrementalIndexUpdateNeverDropsRowsSilently).
+  IncrementalIndexUpdateNeverDropsRowsSilently); `mcp-handlers` — 1 ADDED requirement
+  (SearchDisclosesDegradedVectorIndex).
 - Tool surface: unchanged (no new tool; `search_code` output gains a disclosure only in the
   degraded case — negligible payload, re-assert the budget in
   `src/cli/commands/mcp-presets.test.ts`).
