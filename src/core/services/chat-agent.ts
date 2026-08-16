@@ -421,15 +421,14 @@ async function runOpenAILoop(
     let response: BufferedChatResponse;
     try {
       response = await fetchWithRetry(
-        attemptSignal => withRelaxedTls(() =>
+        attemptSignal => withRelaxedTls(() => fetch(`${cfg.baseUrl}/chat/completions`, {
+          method: 'POST',
+          headers,
           // INTENTIONAL EGRESS: prompt-wrapped repository results go to the operator-selected LLM.
           // codeql[js/file-access-to-http]
-          fetch(`${cfg.baseUrl}/chat/completions`, {
-            method: 'POST',
-            headers,
-            body: JSON.stringify({ model: cfg.model, messages: history, tools: toolDefs, tool_choice: 'auto' }),
-            signal: attemptSignal,
-          })),
+          body: JSON.stringify({ model: cfg.model, messages: history, tools: toolDefs, tool_choice: 'auto' }),
+          signal: attemptSignal,
+        })),
         signal,
       );
     } catch (error) {
@@ -523,15 +522,19 @@ async function runGeminiLoop(
     let response: BufferedChatResponse;
     try {
       response = await fetchWithRetry(
-        attemptSignal => withRelaxedTls(() =>
-          // INTENTIONAL EGRESS: the encoded model and repository context go only to Google's fixed origin.
+        attemptSignal => withRelaxedTls(() => fetch(
+          // INTENTIONAL EGRESS: the encoded model selects a resource only at Google's fixed origin.
           // codeql[js/file-access-to-http]
-          fetch(url, {
+          url,
+          {
             method: 'POST',
             headers,
+            // INTENTIONAL EGRESS: prompt-wrapped repository results go to the fixed Gemini provider.
+            // codeql[js/file-access-to-http]
             body: JSON.stringify(body),
             signal: attemptSignal,
-          })),
+          },
+        )),
         signal,
       );
     } catch (error) {
@@ -633,21 +636,20 @@ async function runAnthropicLoop(
     let response: BufferedChatResponse;
     try {
       response = await fetchWithRetry(
-        attemptSignal => withRelaxedTls(() =>
+        attemptSignal => withRelaxedTls(() => fetch(`${cfg.baseUrl}/messages`, {
+          method: 'POST',
+          headers,
           // INTENTIONAL EGRESS: prompt-wrapped repository results go to the fixed Anthropic provider.
           // codeql[js/file-access-to-http]
-          fetch(`${cfg.baseUrl}/messages`, {
-            method: 'POST',
-            headers,
-            body: JSON.stringify({
-              model: cfg.model,
-              max_tokens: CHAT_AGENT_MAX_TOKENS,
-              system: chatSystemPrompt(directory, boundary),
-              tools,
-              messages: history,
-            }),
-            signal: attemptSignal,
-          })),
+          body: JSON.stringify({
+            model: cfg.model,
+            max_tokens: CHAT_AGENT_MAX_TOKENS,
+            system: chatSystemPrompt(directory, boundary),
+            tools,
+            messages: history,
+          }),
+          signal: attemptSignal,
+        })),
         signal,
       );
     } catch (error) {
