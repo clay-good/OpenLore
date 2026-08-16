@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdir, writeFile, rm, readFile } from 'node:fs/promises';
+import { mkdir, writeFile, rm, readFile, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -129,6 +129,21 @@ describe('config-manager', () => {
     it('should return null when config does not exist', async () => {
       const result = await readOpenLoreConfig(testDir);
       expect(result).toBe(null);
+    });
+
+    it('refuses to write config through an outbound .openlore symlink', async () => {
+      const outside = join(tmpdir(), `openlore-config-outside-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+      try {
+        await mkdir(outside, { recursive: true });
+        await symlink(outside, join(testDir, '.openlore'), 'dir');
+
+        await expect(
+          writeOpenLoreConfig(testDir, getDefaultConfig('nodejs', './openspec')),
+        ).rejects.toThrow(/escape|outside/i);
+        await expect(readFile(join(outside, 'config.json'), 'utf8')).rejects.toThrow();
+      } finally {
+        await rm(outside, { recursive: true, force: true });
+      }
     });
   });
 

@@ -85,13 +85,10 @@ describe('Capability declaration — matches observed behavior (mcp-security)', 
     expect(offenders, `declaration claims no shell on surface, but found: ${offenders.join(', ')}`).toEqual([]);
   });
 
-  it('the Windows-launcher accepted-risk entry is justified by real code in src/pi', () => {
-    // The entry exists precisely because src/pi/extension.ts uses shell:true with
-    // fixed args. If that code is removed, the register entry is stale — fail so it
-    // gets pruned (the register must not carry phantom justifications).
+  it('does not retain the removed Windows shell-launcher accepted risk', () => {
     const entry = decl.acceptedRisks.find((r: { id: string }) => r.id === 'windows-extension-launcher-shell');
-    expect(entry, 'expected the windows-extension-launcher-shell entry').toBeTruthy();
+    expect(entry).toBeUndefined();
     const piExt = readFileSync(join(SRC, 'pi', 'extension.ts'), 'utf-8');
-    expect(piExt, 'src/pi/extension.ts should still use shell:true (justifying the entry)').toMatch(/shell\s*:\s*true/);
+    expect(piExt).not.toMatch(/shell\s*:\s*true/);
   });
 });

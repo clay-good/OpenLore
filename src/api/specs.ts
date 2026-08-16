@@ -32,6 +32,7 @@ import { readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_MAPPING } from '../constants.js';
 import { fileExists } from '../utils/command-helpers.js';
+import { safeJoin } from '../utils/path-confinement.js';
 import type { BaseOptions } from './types.js';
 
 export type SpecRequirement = {
@@ -52,11 +53,15 @@ export async function openloreGetSpecRequirements(options: BaseOptions = {}): Pr
   generatedAt?: string;
   requirements: Record<string, SpecRequirement>;
 }> {
-  const rootPath = options.rootPath ?? process.cwd();
-  const mappingPath = join(rootPath, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_MAPPING);
-
-  const result: Record<string, SpecRequirement> = {};
+  const rootPath = resolve(options.rootPath ?? process.cwd());
+  const result: Record<string, SpecRequirement> = Object.create(null);
   let generatedAt: string | undefined = undefined;
+  let mappingPath: string;
+  try {
+    mappingPath = safeJoin(rootPath, join(OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_MAPPING));
+  } catch {
+    return { generatedAt, requirements: result };
+  }
 
   if (!(await fileExists(mappingPath))) {
     // No mapping available; return empty map
@@ -71,13 +76,13 @@ export async function openloreGetSpecRequirements(options: BaseOptions = {}): Pr
     const mappings = mappingJson?.mappings || [];
     for (const m of mappings) {
       // Use the mapping.requirement as the canonical key
-      const reqKey: string = m.requirement;
-      if (!reqKey) continue;
+      const reqKey: unknown = m.requirement;
+      if (typeof reqKey !== 'string' || !reqKey) continue;
       // If we've already loaded this requirement, skip (first-wins)
       if (Object.prototype.hasOwnProperty.call(result, reqKey)) continue;
 
-      const specFileRel = m.specFile;
-      if (!specFileRel) {
+      const specFileRel: unknown = m.specFile;
+      if (typeof specFileRel !== 'string' || !specFileRel) {
         // No spec file recorded — create placeholder
         result[reqKey] = {
           title: reqKey,
@@ -88,7 +93,19 @@ export async function openloreGetSpecRequirements(options: BaseOptions = {}): Pr
         continue;
       }
 
-      const specFileAbs = resolve(rootPath, specFileRel);
+      let specFileAbs: string;
+      try {
+        specFileAbs = safeJoin(rootPath, specFileRel);
+      } catch {
+        result[reqKey] = {
+          title: reqKey,
+          body: '',
+          specFile: specFileRel,
+          domain: m.domain,
+          service: m.service,
+        };
+        continue;
+      }
       if (!(await fileExists(specFileAbs))) {
         result[reqKey] = {
           title: reqKey,

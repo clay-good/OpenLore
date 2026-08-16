@@ -26,7 +26,7 @@
         { "bin": "claude | gemini | vibe (LLM CLIs)", "how": "execFileSync(bin, argv) with fixed argv; bin overridable by env (CLAUDE/GEMINI_CLI/MISTRAL_VIBE_CLI)", "why": "optional CLI-based LLM provider transport (alternative to HTTP)" }
       ],
       "method": "argv arrays only; no shell:true and no shell-binary (-c) invocation anywhere on the core+cli server surface.",
-      "exception": "src/pi (the VS Code extension launcher) uses a Windows-only shell:true with FIXED arguments — see acceptedRisks."
+      "exception": "The Pi configuration wizard invokes cmd.exe /c with a fixed executable and fixed analyze arguments on Windows; repository paths remain in the spawn cwd option and are never interpolated into the command."
     },
     "network": {
       "egress": [
@@ -70,11 +70,6 @@
       "id": "read-artifact-deserialize",
       "pattern": "fs.readFile(.openlore/*.json) -> JSON.parse",
       "why": "On-disk artifacts are treated as untrusted: reads are size-bounded (ARTIFACT_MAX_BYTES), the top-level shape is validated, and parsing fails closed to a 're-run analyze' result. A poisoned artifact cannot crash the server or be emitted as authoritative."
-    },
-    {
-      "id": "windows-extension-launcher-shell",
-      "pattern": "fixed constant argv -> spawn(..., { shell: true }) in src/pi/extension.ts",
-      "why": "The VS Code extension launches the openlore CLI on Windows with shell:true and a FIXED argv ('openlore', ['serve', ...]) — no untrusted value is interpolated into the command. It is the editor-integration launcher, outside the analyzed MCP server surface (src/core, src/cli) that the no-shell gate scans."
     },
     {
       "id": "serve-output-redirect-fds",

@@ -1,16 +1,42 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
+import { access, mkdtemp, mkdir, writeFile, readFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:http';
 
-import { modelsUrl, stripMarker, isUsableConfig, readConfig, formatToolResult, formatCallArgs, compositeToolResult, NAV_TOOLS, PI_DAEMON_PRESET, PI_EXCLUDED_CONCLUSION_TOOLS, PI_SPEC_WORKFLOW_OBSERVATIONS, PI_SPEC_WORKFLOW_EXCLUSIONS, ensureDaemon, callTool, isUsableDaemon, missingDaemonTools, PiDaemonConnectionError } from './extension.js';
+import { modelsUrl, stripMarker, isUsableConfig, readConfig, formatToolResult, formatCallArgs, compositeToolResult, NAV_TOOLS, PI_DAEMON_PRESET, PI_EXCLUDED_CONCLUSION_TOOLS, PI_SPEC_WORKFLOW_OBSERVATIONS, PI_SPEC_WORKFLOW_EXCLUSIONS, ensureDaemon, callTool, isUsableDaemon, missingDaemonTools, piDaemonSpawnCommand, PiDaemonConnectionError } from './extension.js';
 import { TOOL_DEFINITIONS } from '../cli/commands/mcp.js';
 import { startServe } from '../cli/commands/serve.js';
 import { TOOL_OUTPUT_CLASS } from '../core/services/mcp-handlers/tool-contract.js';
 
 it('spawns a full-surface daemon because Pi curates a wider native tool set itself', () => {
   expect(PI_DAEMON_PRESET).toBe('full');
+});
+
+it('launches the Pi daemon without a shell and preserves hostile paths as one argument', async () => {
+  const cwd = 'C:\\repos\\name & whoami | calc ^ test';
+  const launch = piDaemonSpawnCommand(cwd);
+  expect(launch.command).toBe(process.execPath);
+  expect(launch.args).toEqual([
+    expect.stringMatching(/cli[\\/]index\.js$/),
+    'serve', '--directory', cwd, '--preset', 'full',
+  ]);
+  const source = await readFile(new URL('./extension.ts', import.meta.url), 'utf8');
+  expect(source).toContain('spawn(launch.command, launch.args, {');
+  expect(source).not.toMatch(/shell\s*:\s*true/);
+});
+
+it('does not create a Pi daemon log through an outbound .openlore symlink', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'openlore-pi-root-'));
+  const outside = await mkdtemp(join(tmpdir(), 'openlore-pi-outside-'));
+  try {
+    await symlink(outside, join(root, '.openlore'), 'dir');
+    await expect(ensureDaemon(root)).resolves.toBeNull();
+    await expect(access(join(outside, 'serve.log'))).rejects.toThrow();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
 });
 
 it('frames every Pi before-agent corpus block with the shared provenance boundary', async () => {

@@ -88,6 +88,8 @@ async function readDescriptor(directory: string): Promise<ServeDescriptor | null
 async function healthy(desc: ServeDescriptor, expectedRoot: string): Promise<boolean> {
   try {
     const headers = desc.token ? { [OPENLORE_TOKEN_HEADER]: desc.token } : undefined;
+    // INTENTIONAL EGRESS: validated descriptors are loopback-only and redirects are disabled.
+    // codeql[js/file-access-to-http]
     const res = await fetch(`${serveHttpBaseUrl(desc.host, desc.port)}/health`, {
       headers,
       signal: AbortSignal.timeout(HEALTH_PROBE_TIMEOUT_MS),

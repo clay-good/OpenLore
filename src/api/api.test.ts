@@ -3,8 +3,8 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdir, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { openloreGetSpecRequirements } from './specs.js';
 
@@ -446,6 +446,66 @@ describe('openloreGetSpecRequirements — malformed inputs', () => {
     const result = await openloreGetSpecRequirements({ rootPath: testDir });
     expect(result.requirements['Binary Req']).toBeDefined();
     expect(result.requirements['Binary Req'].body).toBe('');
+  });
+
+  it('does not read a mapping path outside the project root', async () => {
+    const outside = join(testDir, '..', `openlore-secret-${Date.now()}.md`);
+    try {
+      await writeFile(outside, '### Requirement: Escaped\nsecret body');
+      await writeMapping(testDir, {
+        mappings: [{ requirement: 'Escaped', specFile: `../${basename(outside)}` }],
+      });
+
+      const result = await openloreGetSpecRequirements({ rootPath: testDir });
+      expect(result.requirements.Escaped.body).toBe('');
+    } finally {
+      await rm(outside, { force: true });
+    }
+  });
+
+  it('does not read through an in-root symlink to an external spec directory', async () => {
+    const outside = join(testDir, '..', `openlore-spec-outside-${Date.now()}`);
+    try {
+      await mkdir(outside, { recursive: true });
+      await writeFile(join(outside, 'spec.md'), '### Requirement: Escaped\nsecret body');
+      await symlink(outside, join(testDir, 'linked-specs'), 'dir');
+      await writeMapping(testDir, {
+        mappings: [{ requirement: 'Escaped', specFile: 'linked-specs/spec.md' }],
+      });
+
+      const result = await openloreGetSpecRequirements({ rootPath: testDir });
+      expect(result.requirements.Escaped.body).toBe('');
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('does not read mapping.json through an outbound .openlore symlink', async () => {
+    const outside = join(testDir, '..', `openlore-mapping-outside-${Date.now()}`);
+    try {
+      await mkdir(join(outside, 'analysis'), { recursive: true });
+      await writeFile(join(outside, 'analysis', 'mapping.json'), JSON.stringify({
+        mappings: [{ requirement: 'External', domain: 'outside' }],
+      }));
+      await symlink(outside, join(testDir, '.openlore'), 'dir');
+
+      const result = await openloreGetSpecRequirements({ rootPath: testDir });
+      expect(result.requirements.External).toBeUndefined();
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves __proto__ as an own data key without prototype mutation', async () => {
+    await writeMapping(testDir, {
+      mappings: [{ requirement: '__proto__', domain: 'hostile' }],
+    });
+
+    const result = await openloreGetSpecRequirements({ rootPath: testDir });
+    expect(Object.prototype.hasOwnProperty.call(result.requirements, '__proto__')).toBe(true);
+    expect(result.requirements['__proto__'].domain).toBe('hostile');
+    expect(Object.getPrototypeOf(result.requirements)).toBeNull();
+    expect(JSON.parse(JSON.stringify(result.requirements))['__proto__'].domain).toBe('hostile');
   });
 });
 

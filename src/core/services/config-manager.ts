@@ -19,6 +19,7 @@ import {
   OPENSPEC_CONFIG_FILENAME,
 } from '../../constants.js';
 import { fileExists } from '../../utils/command-helpers.js';
+import { safeJoin } from '../../utils/path-confinement.js';
 import {
   validateOpenLoreConfig,
   isFatalConfigFinding,
@@ -77,7 +78,8 @@ export function resolveOpenLoreConfigPath(rootPath: string): string {
   if (primaryConfigOverride && resolve(rootPath) === primaryConfigOverride.root) {
     return primaryConfigOverride.configPath;
   }
-  return join(rootPath, OPENLORE_DIR, OPENLORE_CONFIG_FILENAME);
+  const absRoot = resolve(rootPath);
+  return safeJoin(absRoot, join(OPENLORE_DIR, OPENLORE_CONFIG_FILENAME));
 }
 
 /**

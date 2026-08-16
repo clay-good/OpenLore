@@ -273,7 +273,7 @@ describe('openloreAnalyze', () => {
 
       expect(mockAcquireAnalysisOwnership).toHaveBeenCalledWith(
         ROOT,
-        `${ROOT}/.openlore/analysis/`,
+        `${ROOT}/.openlore/analysis`,
         { stage: 'starting' },
       );
       expect(mockAcquireAnalysisOwnership.mock.invocationCallOrder[0]).toBeLessThan(

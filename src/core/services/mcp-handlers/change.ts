@@ -287,7 +287,7 @@ export async function handleGenerateChangeProposal(
     return { error: 'Invalid slug. Use alphanumeric characters and hyphens, e.g. "add-payment-retry".' };
   }
 
-  const changeDir = join(absDir, 'openspec', 'changes', safeSlug);
+  const changeDir = safeJoin(absDir, join('openspec', 'changes', safeSlug));
   const proposalPath = join(changeDir, 'proposal.md');
 
   const generatedAt = new Date().toISOString().split('T')[0];
