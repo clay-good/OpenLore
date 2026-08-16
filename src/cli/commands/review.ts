@@ -469,7 +469,7 @@ export async function runReviewCli(opts: ReviewCliOptions): Promise<number> {
   });
 
   const rendered = format === 'json'
-    ? JSON.stringify(briefing, null, 2) + '\n'
+    ? JSON.stringify({ schemaVersion: 1, ...briefing }, null, 2) + '\n'
     : renderMarkdown(briefing);
 
   if (opts.out) {

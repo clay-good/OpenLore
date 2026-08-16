@@ -13,15 +13,19 @@
  * failure (no graph, not a repo) NEVER blocks.
  */
 
-import { join } from 'node:path';
-import { readFile, writeFile, mkdir, chmod } from 'node:fs/promises';
 import { Command } from 'commander';
 import { writeStdout } from '../output.js';
 import { logger, configureLogger } from '../../utils/logger.js';
-import { fileExists } from '../../utils/command-helpers.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
 import { computeImpactCertificate, type ImpactCertificate } from '../../core/services/mcp-handlers/impact-certificate.js';
 import type { CoveringSurfaceSeverity } from '../../types/index.js';
+import {
+  displayHookPath,
+  hookManagerWarning,
+  isResolvedGitRepository,
+  resolveGitHookTarget,
+  updateHookFile,
+} from '../git-hooks.js';
 
 const HOOK_MARKER = '# openlore-impact-certificate-hook';
 
@@ -50,51 +54,60 @@ fi
 `;
 
 export async function installImpactCertificateHook(rootPath: string): Promise<void> {
-  const hooksDir = join(rootPath, '.git', 'hooks');
-  const hookPath = join(hooksDir, 'pre-commit');
+  const target = await resolveGitHookTarget(rootPath, 'pre-commit');
+  const hookPath = target.hookPath;
 
-  if (!(await fileExists(join(rootPath, '.git')))) {
+  if (!(await isResolvedGitRepository(rootPath, target))) {
     logger.error('Not a git repository. Cannot install hook.');
     process.exitCode = 1;
     return;
   }
-  await mkdir(hooksDir, { recursive: true });
-
-  if (await fileExists(hookPath)) {
-    const existing = await readFile(hookPath, 'utf-8');
-    if (existing.includes(HOOK_MARKER)) {
-      logger.success('Advisory impact-certificate pre-commit hook already installed.');
-      return;
-    }
-    // Coexist with any other openlore hook (decisions gate, blast-radius): append our
-    // block after stripping a trailing `exit 0` so it is not unreachable.
-    const stripped = existing.trimEnd().replace(/\n*\nexit 0\s*$/, '');
-    await writeFile(hookPath, stripped + '\n\n' + HOOK_CONTENT, 'utf-8');
-  } else {
-    await writeFile(hookPath, '#!/bin/sh\n\n' + HOOK_CONTENT, 'utf-8');
+  if (!target.canInstall) {
+    logger.warning(hookManagerWarning(target, 'openlore impact-certificate --hook'));
+    return;
   }
-  await chmod(hookPath, 0o755);
-  logger.success('Advisory impact-certificate pre-commit hook installed at .git/hooks/pre-commit');
+  let alreadyInstalled = false;
+  const result = await updateHookFile(hookPath, (existing) => {
+    if (existing?.includes(HOOK_MARKER)) { alreadyInstalled = true; return null; }
+    const stripped = existing?.trimEnd().replace(/\n*\nexit 0\s*$/, '');
+    return stripped ? stripped + '\n\n' + HOOK_CONTENT : '#!/bin/sh\n\n' + HOOK_CONTENT;
+  });
+  if (result.status === 'unavailable') {
+    logger.warning(`Cannot install the impact-certificate hook at ${displayHookPath(hookPath)}: ${result.reason}`);
+    return;
+  }
+  if (alreadyInstalled) {
+    logger.success('Advisory impact-certificate pre-commit hook already installed.');
+    return;
+  }
+  logger.success(`Advisory impact-certificate pre-commit hook installed at ${displayHookPath(hookPath)}`);
   logger.discovery('It is advisory (never blocks). Set impactCertificate.block in .openlore/config.json to block on a surface severity (e.g. ["critical"]).');
 }
 
 export async function uninstallImpactCertificateHook(rootPath: string): Promise<void> {
-  const hookPath = join(rootPath, '.git', 'hooks', 'pre-commit');
-  if (!(await fileExists(hookPath))) {
+  const { hookPath } = await resolveGitHookTarget(rootPath, 'pre-commit');
+  let found = false;
+  let blockFound = false;
+  const result = await updateHookFile(hookPath, (existing) => {
+    if (existing === null) return null;
+    found = true;
+    const cleaned = existing.replace(
+      new RegExp(`\\n*${HOOK_MARKER}[\\s\\S]*?# end-openlore-impact-certificate-hook\\n*`, 'g'),
+      '\n',
+    );
+    if (cleaned === existing) return null;
+    blockFound = true;
+    return cleaned.trimEnd() + '\n';
+  });
+  if (result.status === 'unavailable') {
+    logger.warning(`Cannot uninstall the impact-certificate hook at ${displayHookPath(hookPath)}: ${result.reason}`);
+  } else if (!found) {
     logger.discovery('No pre-commit hook found; nothing to uninstall.');
-    return;
-  }
-  const existing = await readFile(hookPath, 'utf-8');
-  const cleaned = existing.replace(
-    new RegExp(`\\n*${HOOK_MARKER}[\\s\\S]*?# end-openlore-impact-certificate-hook\\n*`, 'g'),
-    '\n',
-  );
-  if (cleaned === existing) {
+  } else if (!blockFound) {
     logger.discovery('Impact-certificate hook block not present; nothing to uninstall.');
-    return;
+  } else {
+    logger.success('Removed the advisory impact-certificate pre-commit hook block.');
   }
-  await writeFile(hookPath, cleaned.trimEnd() + '\n', 'utf-8');
-  logger.success('Removed the advisory impact-certificate pre-commit hook block.');
 }
 
 /** The surfaces a newly-opened path reaches whose severity is in the configured block list.

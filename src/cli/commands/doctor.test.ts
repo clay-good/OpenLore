@@ -22,7 +22,7 @@ vi.mock('node:fs/promises', async (importOriginal) => {
   return {
     ...actual,
     access: vi.fn().mockResolvedValue(undefined),
-    stat: vi.fn().mockResolvedValue({ mtime: new Date() }),
+    stat: vi.fn().mockResolvedValue({ mtime: new Date(), isDirectory: () => true }),
     // checkMcpWiring reads .claude/settings.json + .mcp.json; default to "absent"
     // so the suite is independent of the repo's own dogfood files.
     readFile: vi.fn().mockRejectedValue(new Error('ENOENT')),
@@ -134,9 +134,14 @@ describe('doctor command', () => {
       expect(Array.isArray(checks)).toBe(true);
     });
 
-    it('should include exactly 11 checks', async () => {
+    it('should include exactly 12 checks', async () => {
       const checks = await runDoctorJson();
-      expect(checks).toHaveLength(11);
+      expect(checks).toHaveLength(12);
+    });
+
+    it('should include a Git hook reachability check', async () => {
+      const checks = await runDoctorJson();
+      expect(checks.find(c => c.name === 'Git hook reachability')).toBeDefined();
     });
 
     it('should include a Config schema check', async () => {
@@ -457,7 +462,10 @@ describe('doctor command', () => {
   describe('analysis artifacts check', () => {
     it('should show ok for fresh analysis (< warning threshold)', async () => {
       const { stat } = await import('node:fs/promises');
-      vi.mocked(stat).mockResolvedValue({ mtime: new Date() } as ReturnType<typeof stat> extends Promise<infer T> ? T : never);
+      vi.mocked(stat).mockResolvedValue({
+        mtime: new Date(),
+        isDirectory: () => true,
+      } as ReturnType<typeof stat> extends Promise<infer T> ? T : never);
 
       const checks = await runDoctorJson();
       const artifactCheck = checks.find(c => c.name === 'Analysis artifacts')!;

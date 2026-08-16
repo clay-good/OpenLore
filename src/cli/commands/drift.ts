@@ -7,7 +7,6 @@
 
 import { Command } from 'commander';
 import { sanitizeForTerminal as safe } from '../../utils/misc.js';
-import { mkdir, readFile, writeFile, chmod } from 'node:fs/promises';
 import { join } from 'node:path';
 import { logger } from '../../utils/logger.js';
 import { resolveTrustedApiBase, resolveTrustedSslVerify } from '../../core/services/repo-config-trust.js';
@@ -37,6 +36,13 @@ import { suggestTestsForDrift } from '../../core/drift/test-suggester.js';
 import { createLLMService } from '../../core/services/llm-service.js';
 import type { LLMService } from '../../core/services/llm-service.js';
 import { resolveOpenspecDir } from '../../utils/openspec-dir.js';
+import {
+  displayHookPath,
+  hookManagerWarning,
+  isResolvedGitRepository,
+  resolveGitHookTarget,
+  updateHookFile,
+} from '../git-hooks.js';
 
 // ============================================================================
 // TYPES
@@ -185,70 +191,73 @@ fi
 # end-openlore-drift-hook
 `.trimStart();
 
-async function installPreCommitHook(rootPath: string): Promise<void> {
-  const hooksDir = join(rootPath, '.git', 'hooks');
-  const hookPath = join(hooksDir, 'pre-commit');
+export async function installPreCommitHook(rootPath: string): Promise<void> {
+  const target = await resolveGitHookTarget(rootPath, 'pre-commit');
+  const hookPath = target.hookPath;
 
-  if (!(await fileExists(join(rootPath, '.git')))) {
+  if (!(await isResolvedGitRepository(rootPath, target))) {
     logger.error('Not a git repository. Cannot install hook.');
     process.exitCode = 1;
     return;
   }
-
-  // Ensure hooks directory exists (may not in bare clones or some CI setups)
-  await mkdir(hooksDir, { recursive: true });
-
-  // Check if hook already exists
-  let existingContent: string;
-  if (await fileExists(hookPath)) {
-    existingContent = await readFile(hookPath, 'utf-8');
-
-    if (existingContent.includes(HOOK_MARKER)) {
-      logger.success('Pre-commit hook is already installed.');
-      return;
-    }
-
-    // Append to existing hook
-    logger.discovery('Existing pre-commit hook found. Appending openlore drift check.');
-    const newContent = existingContent.trimEnd() + '\n\n' + HOOK_CONTENT;
-    await writeFile(hookPath, newContent, 'utf-8');
-  } else {
-    // Create new hook
-    const newContent = '#!/bin/sh\n\n' + HOOK_CONTENT;
-    await writeFile(hookPath, newContent, 'utf-8');
+  if (!target.canInstall) {
+    logger.warning(hookManagerWarning(target, 'openlore drift --fail-on warning --quiet'));
+    return;
   }
 
-  await chmod(hookPath, 0o755);
-  logger.success('Pre-commit hook installed at .git/hooks/pre-commit');
+  let alreadyInstalled = false;
+  let appended = false;
+  const result = await updateHookFile(hookPath, (existing) => {
+    if (existing?.includes(HOOK_MARKER)) {
+      alreadyInstalled = true;
+      return null;
+    }
+    appended = existing !== null;
+    return existing
+      ? existing.trimEnd() + '\n\n' + HOOK_CONTENT
+      : '#!/bin/sh\n\n' + HOOK_CONTENT;
+  });
+  if (result.status === 'unavailable') {
+    logger.warning(`Cannot install the drift hook at ${displayHookPath(hookPath)}: ${result.reason}`);
+    return;
+  }
+  if (alreadyInstalled) {
+    logger.success('Pre-commit hook is already installed.');
+    return;
+  }
+  if (appended) logger.discovery('Existing pre-commit hook found. Appending openlore drift check.');
+  logger.success(`Pre-commit hook installed at ${displayHookPath(hookPath)}`);
   logger.discovery('Drift will be checked before each commit. Use --no-verify to skip.');
 }
 
-async function uninstallPreCommitHook(rootPath: string): Promise<void> {
-  const hookPath = join(rootPath, '.git', 'hooks', 'pre-commit');
-
-  if (!(await fileExists(hookPath))) {
+export async function uninstallPreCommitHook(rootPath: string): Promise<void> {
+  const { hookPath } = await resolveGitHookTarget(rootPath, 'pre-commit');
+  let hookFound = false;
+  let blockFound = false;
+  let deleted = false;
+  const result = await updateHookFile(hookPath, (existing) => {
+    if (existing === null) return null;
+    hookFound = true;
+    if (!existing.includes(HOOK_MARKER)) return null;
+    blockFound = true;
+    const cleaned = existing
+      .replace(/\n*# openlore-drift-hook[\s\S]*?# end-openlore-drift-hook\n*/g, '')
+      .trim();
+    if (!cleaned || cleaned === '#!/bin/sh') {
+      deleted = true;
+      return undefined;
+    }
+    return cleaned + '\n';
+  });
+  if (result.status === 'unavailable') {
+    logger.warning(`Cannot uninstall the drift hook at ${displayHookPath(hookPath)}: ${result.reason}`);
+  } else if (!hookFound) {
     logger.warning('No pre-commit hook found.');
-    return;
-  }
-
-  const content = await readFile(hookPath, 'utf-8');
-  if (!content.includes(HOOK_MARKER)) {
+  } else if (!blockFound) {
     logger.warning('Pre-commit hook does not contain openlore drift check.');
-    return;
-  }
-
-  // Remove the openlore block
-  const newContent = content
-    .replace(/\n*# openlore-drift-hook[\s\S]*?# end-openlore-drift-hook\n*/g, '')
-    .trim();
-
-  if (!newContent || newContent === '#!/bin/sh') {
-    // Hook file is now empty — remove the shebang-only file
-    const { unlink } = await import('node:fs/promises');
-    await unlink(hookPath);
+  } else if (deleted) {
     logger.success('Pre-commit hook removed (file deleted — was only openlore).');
   } else {
-    await writeFile(hookPath, newContent + '\n', 'utf-8');
     logger.success('OpenLore drift check removed from pre-commit hook.');
   }
 }

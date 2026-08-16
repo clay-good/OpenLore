@@ -7,13 +7,20 @@
  */
 
 import { Command } from 'commander';
-import { mkdir, readFile, writeFile, chmod, readdir } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { logger } from '../../utils/logger.js';
 import { fileExists } from '../../utils/command-helpers.js';
 import { gitPathArgs } from '../../utils/git-args.js';
 import { handleAnnotateStory } from '../../core/services/mcp-handlers/change.js';
+import {
+  displayHookPath,
+  hookManagerWarning,
+  isResolvedGitRepository,
+  resolveGitHookTarget,
+  updateHookFile,
+} from '../git-hooks.js';
 
 // ============================================================================
 // HOOK MANAGEMENT
@@ -30,64 +37,64 @@ npx --yes openlore refresh-stories 2>/dev/null || true
 # end-openlore-refresh-hook
 `.trimStart();
 
-async function installPostCommitHook(rootPath: string): Promise<void> {
-  const hooksDir = join(rootPath, '.git', 'hooks');
-  const hookPath = join(hooksDir, 'post-commit');
+export async function installPostCommitHook(rootPath: string): Promise<void> {
+  const target = await resolveGitHookTarget(rootPath, 'post-commit');
+  const hookPath = target.hookPath;
 
-  if (!(await fileExists(join(rootPath, '.git')))) {
+  if (!(await isResolvedGitRepository(rootPath, target))) {
     logger.error('Not a git repository. Cannot install hook.');
     process.exitCode = 1;
     return;
   }
-
-  await mkdir(hooksDir, { recursive: true });
-
-  let existingContent: string;
-  if (await fileExists(hookPath)) {
-    existingContent = await readFile(hookPath, 'utf-8');
-
-    if (existingContent.includes(HOOK_MARKER)) {
-      logger.success('Post-commit hook is already installed.');
-      return;
-    }
-
-    logger.discovery('Existing post-commit hook found. Appending openlore refresh check.');
-    const newContent = existingContent.trimEnd() + '\n\n' + HOOK_CONTENT;
-    await writeFile(hookPath, newContent, 'utf-8');
-  } else {
-    const newContent = '#!/bin/sh\n\n' + HOOK_CONTENT;
-    await writeFile(hookPath, newContent, 'utf-8');
+  if (!target.canInstall) {
+    logger.warning(hookManagerWarning(target, 'openlore refresh-stories'));
+    return;
   }
-
-  await chmod(hookPath, 0o755);
-  logger.success('Post-commit hook installed at .git/hooks/post-commit');
+  let alreadyInstalled = false;
+  let appended = false;
+  const result = await updateHookFile(hookPath, (existing) => {
+    if (existing?.includes(HOOK_MARKER)) { alreadyInstalled = true; return null; }
+    appended = existing !== null;
+    return existing ? existing.trimEnd() + '\n\n' + HOOK_CONTENT : '#!/bin/sh\n\n' + HOOK_CONTENT;
+  });
+  if (result.status === 'unavailable') {
+    logger.warning(`Cannot install the refresh-stories hook at ${displayHookPath(hookPath)}: ${result.reason}`);
+    return;
+  }
+  if (alreadyInstalled) {
+    logger.success('Post-commit hook is already installed.');
+    return;
+  }
+  if (appended) logger.discovery('Existing post-commit hook found. Appending openlore refresh check.');
+  logger.success(`Post-commit hook installed at ${displayHookPath(hookPath)}`);
   logger.discovery('Story risk_context will be refreshed after each commit that touches source files.');
 }
 
-async function uninstallPostCommitHook(rootPath: string): Promise<void> {
-  const hookPath = join(rootPath, '.git', 'hooks', 'post-commit');
-
-  if (!(await fileExists(hookPath))) {
+export async function uninstallPostCommitHook(rootPath: string): Promise<void> {
+  const { hookPath } = await resolveGitHookTarget(rootPath, 'post-commit');
+  let found = false;
+  let blockFound = false;
+  let deleted = false;
+  const result = await updateHookFile(hookPath, (existing) => {
+    if (existing === null) return null;
+    found = true;
+    if (!existing.includes(HOOK_MARKER)) return null;
+    blockFound = true;
+    const cleaned = existing
+      .replace(/\n*# openlore-refresh-hook[\s\S]*?# end-openlore-refresh-hook\n*/g, '')
+      .trim();
+    if (!cleaned || cleaned === '#!/bin/sh') { deleted = true; return undefined; }
+    return cleaned + '\n';
+  });
+  if (result.status === 'unavailable') {
+    logger.warning(`Cannot uninstall the refresh-stories hook at ${displayHookPath(hookPath)}: ${result.reason}`);
+  } else if (!found) {
     logger.warning('No post-commit hook found.');
-    return;
-  }
-
-  const content = await readFile(hookPath, 'utf-8');
-  if (!content.includes(HOOK_MARKER)) {
+  } else if (!blockFound) {
     logger.warning('Post-commit hook does not contain openlore refresh check.');
-    return;
-  }
-
-  const newContent = content
-    .replace(/\n*# openlore-refresh-hook[\s\S]*?# end-openlore-refresh-hook\n*/g, '')
-    .trim();
-
-  if (!newContent || newContent === '#!/bin/sh') {
-    const { unlink } = await import('node:fs/promises');
-    await unlink(hookPath);
+  } else if (deleted) {
     logger.success('Post-commit hook removed (file deleted — was only openlore).');
   } else {
-    await writeFile(hookPath, newContent + '\n', 'utf-8');
     logger.success('OpenLore refresh check removed from post-commit hook.');
   }
 }
