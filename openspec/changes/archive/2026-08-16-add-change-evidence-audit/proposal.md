@@ -1,6 +1,10 @@
 # Change evidence audit: STATUS.md's manual evidence pass, computed
 
-> Status: PROPOSED (2026-07-27, field research sweep — `FIELD-RESEARCH-2026-07.md`). The
+> Status: BUILT (2026-08-16). The deterministic `change-status` CLI, delegated OpenSpec
+> validation, source/spec/task confinement, human/JSON/table outputs, and OpenSpec 1.8 grammar
+> compatibility are covered by 21 unit tests and 2 built-binary end-to-end tests. Four independent
+> adversarial review loops were resolved; the final review was LGTM. Originally proposed in the
+> 2026-07-27 field research sweep (`FIELD-RESEARCH-2026-07.md`). The
 > built/unbuilt status of every open change is decided today by a manual "evidence pass" whose
 > rules `STATUS.md` writes down and whose own maintenance section says to re-run rather than
 > trust. Every rule in that pass is a deterministic check. Compute it.
