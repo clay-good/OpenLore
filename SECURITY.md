@@ -51,6 +51,7 @@ Automated controls cover pull requests, scheduled scans, and releases:
 
 - **Dependency advisories** — the full tree (runtime and development) is gated at high severity.
 - **CodeQL** static analysis on each pull request and on a weekly schedule.
+- **Reviewed egress** — `codeql[js/file-access-to-http]` source comments are audit markers, not scanner suppressions. They keep intentional repository-to-provider flows count-pinned and rationale-bound in the unit suite. CodeQL alerts for those flows are triaged in GitHub as `won't fix` only after confirming the destination is fixed or operator-selected and the transmitted data is required by the feature.
 - **Published-package contents** are verified against the real `npm pack` manifest, in CI and again immediately before publish.
 - **Workflow hardening** — GitHub Actions are pinned to immutable commit SHAs, and a test in the unit suite keeps them pinned. The structural-review Action builds that pinned source with its committed lockfile, an isolated npm configuration, and lifecycle scripts disabled; it does not resolve OpenLore through a runtime npm selector.
 - **Dependabot** watches both npm packages and GitHub Actions.
