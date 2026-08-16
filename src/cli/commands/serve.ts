@@ -48,7 +48,7 @@ import { McpWatcher } from '../../core/services/mcp-watcher.js';
 import { registerRepairHost } from '../../core/services/cold-start-bootstrap.js';
 import { openloreAnalyze } from '../../api/analyze.js';
 import { TOOL_DEFINITIONS, TOOL_PRESETS, presetMembershipError, selectActiveTools } from './mcp.js';
-import { validateToolArgs } from '../../core/services/mcp-handlers/tool-guard.js';
+import { validateKnownProperties, validateToolArgs } from '../../core/services/mcp-handlers/tool-guard.js';
 import {
   isLoopbackHost,
   constantTimeEqual,
@@ -144,7 +144,7 @@ function serveFilePath(root: string): string {
 }
 
 /** Read a JSON request body with a hard size ceiling. Rejects on overflow/parse error. */
-function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
+function readJsonBody(req: IncomingMessage): Promise<unknown> {
   return new Promise((resolve_, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
@@ -161,7 +161,7 @@ function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
       const raw = Buffer.concat(chunks).toString('utf-8').trim();
       if (!raw) return resolve_({});
       try {
-        resolve_(JSON.parse(raw) as Record<string, unknown>);
+        resolve_(JSON.parse(raw) as unknown);
       } catch {
         reject(new Error('invalid JSON body'));
       }
@@ -515,28 +515,53 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
       // Only an authenticated, known, in-surface call keeps the daemon alive.
       // Rejected probes must not mutate process lifecycle state.
       touchActivity();
-      let body: Record<string, unknown>;
+      let parsedBody: unknown;
       try {
-        body = await readJsonBody(req);
+        parsedBody = await readJsonBody(req);
       } catch (err) {
         sendJson(res, 400, { error: err instanceof Error ? err.message : 'bad request' });
         return;
       }
-      // `args` must be a plain object; a primitive/array (e.g. {"args":"foo"}) would throw
-      // on the `args.directory = …` assignment below — coerce it to {} so a malformed body
-      // yields a clean validation error downstream, not a raw TypeError.
-      const rawArgs = body.args;
-      const args: Record<string, unknown> =
-        rawArgs && typeof rawArgs === 'object' && !Array.isArray(rawArgs)
-          ? (rawArgs as Record<string, unknown>)
-          : {};
-      // Directory precedence: explicit body.directory → args.directory → served root.
-      const directory = (typeof body.directory === 'string' && body.directory)
-        || (typeof args.directory === 'string' && args.directory)
-        || root;
+      if (!parsedBody || typeof parsedBody !== 'object' || Array.isArray(parsedBody)) {
+        sendJson(res, 400, { error: 'Invalid request body: expected a JSON object' });
+        return;
+      }
+      const body = parsedBody as Record<string, unknown>;
+      const envelopeError = validateKnownProperties(body, ['args', 'directory']);
+      if (envelopeError) {
+        sendJson(res, 400, { error: `Invalid request body: ${envelopeError}` });
+        return;
+      }
+      // Match the stdio boundary: an omitted args member means {}, but an explicitly
+      // malformed primitive/array/null is a clean 400 rather than a coerced valid call.
+      const rawArgs = Object.prototype.hasOwnProperty.call(body, 'args') ? body.args : {};
+      if (!rawArgs || typeof rawArgs !== 'object' || Array.isArray(rawArgs)) {
+        sendJson(res, 400, { error: `Invalid arguments for "${name}": expected type object` });
+        return;
+      }
+      const args = { ...(rawArgs as Record<string, unknown>) };
+      // Directory precedence: explicit body.directory → explicit args.directory →
+      // served root. Preserve malformed explicit values until schema validation;
+      // only a truly omitted directory receives the default.
+      const hasBodyDirectory = Object.prototype.hasOwnProperty.call(body, 'directory');
+      const hasArgsDirectory = Object.prototype.hasOwnProperty.call(args, 'directory');
+      const selectedDirectory = hasBodyDirectory
+        ? body.directory
+        : hasArgsDirectory ? args.directory : root;
       // Canonicalize the directory once: handlers and boundary policy must read the
       // same repository, even when a caller supplies conflicting body/args values.
-      args.directory = directory;
+      args.directory = selectedDirectory;
+
+      // Reject malformed arguments before directory validation, index inspection,
+      // healing, or dispatch. In particular, an unknown property on a write tool
+      // must not trigger an analysis rebuild before the request is rejected.
+      const argError = validateToolArgs(args, toolDef.inputSchema);
+      if (argError) {
+        sendJson(res, 400, { error: `Invalid arguments for "${name}": ${argError}` });
+        return;
+      }
+
+      const directory = selectedDirectory as string;
 
       try {
         await validateDirectory(directory);
@@ -579,18 +604,6 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
         const rebuilt = await waitForGraphRebuild(directory, 60_000);
         schemaResetByDir.set(directory, !rebuilt);
         if (!rebuilt) logger.warning(`[serve] Graph rebuild timed out — graph tools may return empty results.`);
-      }
-
-      // Validate args against the tool's declared inputSchema before dispatch, so a
-      // missing/malformed required argument returns a clear "Invalid arguments" message
-      // instead of a raw handler TypeError (e.g. "Cannot read properties of undefined").
-      // The MCP stdio transport validates the same way; this keeps the daemon transport —
-      // used directly by the Pi extension and other HTTP clients — from leaking internal
-      // errors to weak tool-callers.
-      const argError = validateToolArgs(args, toolDef.inputSchema);
-      if (argError) {
-        sendJson(res, 400, { error: `Invalid arguments for "${name}": ${argError}` });
-        return;
       }
 
       const dispatchAbort = new AbortController();

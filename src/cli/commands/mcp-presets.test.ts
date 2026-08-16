@@ -616,7 +616,10 @@ describe('tools/list payload budget (spec-28)', () => {
   // pagination, provenance, and honest-degradation controls; this is the measured cost of
   // that public contract rather than silent description drift.
   it('full surface stays within its prefix budget', () => {
-    expect(payloadBytes({ preset: 'full' })).toBeLessThan(92_000);
+    // Strict advertised schemas add one `additionalProperties:false` token per
+    // tool (fix-mcp-argument-contract); 93 KB preserves a narrow ratchet around
+    // that intentional protocol contract rather than treating it as free bytes.
+    expect(payloadBytes({ preset: 'full' })).toBeLessThan(93_000);
   });
 
   it('the DEFAULT surface (no selector) is the substrate payload, well under the full one', () => {
@@ -647,26 +650,32 @@ describe('tools/list payload budget (spec-28)', () => {
     expect(payloadBytes({ preset: 'substrate' })).toBeGreaterThan(payloadBytes({ preset: 'navigation' }));
   });
 
-  it('the two spec composites add less than 1,700 bytes to the default surface', () => {
+  it('the two spec composites add less than 1,750 bytes to the default surface', () => {
     const substrate = selectActiveTools(TOOL_DEFINITIONS, { preset: 'substrate' });
     const withoutSpecComposites = substrate.filter(t => !SPEC_WORKFLOWS.includes(t.name));
-    expect(toolPayloadBytes(substrate) - toolPayloadBytes(withoutSpecComposites)).toBeLessThan(1_700);
+    expect(toolPayloadBytes(substrate) - toolPayloadBytes(withoutSpecComposites)).toBeLessThan(1_750);
   });
 
-  // Lossless-dedup invariant: the `directory` input is shared by every tool, so its
-  // description must stay a short shared string, never the 38-char verbatim repeat
-  // that Spec 28 collapsed. Guards against the duplication silently creeping back.
-  it('the shared directory-param description is short and used by the majority of tools', () => {
-    const dirDescs = TOOL_DEFINITIONS
-      .map(t => {
-        const props = t.inputSchema?.properties as unknown as Record<string, { description?: string }> | undefined;
-        return props?.directory?.description;
-      })
+  // Lossless-dedup + fix-mcp-argument-contract: every tool documents the same
+  // launch-root default, and no schema advertises directory as required.
+  it('every tool documents the shared optional directory default', () => {
+    const directorySchemas = TOOL_DEFINITIONS.map(t => {
+      const schema = t.inputSchema as unknown as { additionalProperties?: boolean; properties?: Record<string, { description?: string }>; required?: string[] };
+      return { additionalProperties: schema.additionalProperties, description: schema.properties?.directory?.description, required: schema.required ?? [] };
+    });
+    const dirDescs = directorySchemas
+      .map(schema => schema.description)
       .filter((d): d is string => typeof d === 'string');
     const counts = new Map<string, number>();
     for (const d of dirDescs) counts.set(d, (counts.get(d) ?? 0) + 1);
     const [dominant, dominantCount] = [...counts].sort((a, b) => b[1] - a[1])[0];
-    expect(dominant.length).toBeLessThanOrEqual(25); // short shared form, not the old 38-char repeat
-    expect(dominantCount).toBeGreaterThanOrEqual(dirDescs.length * 0.8); // most tools reuse it
+    expect(dirDescs).toHaveLength(TOOL_DEFINITIONS.length);
+    expect(dominant).toMatch(/default/i);
+    expect(dominant.length).toBeLessThanOrEqual(30);
+    expect(dominantCount).toBe(dirDescs.length);
+    for (const schema of directorySchemas) {
+      expect(schema.additionalProperties).toBe(false);
+      expect(schema.required).not.toContain('directory');
+    }
   });
 });

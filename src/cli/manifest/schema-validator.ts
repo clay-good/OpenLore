@@ -64,7 +64,9 @@ function validateNode(value: unknown, schema: JsonSchema, path: string, errors: 
 
     if (schema.additionalProperties === false) {
       for (const key of Object.keys(obj)) {
-        if (!(key in props)) errors.push({ path: `${path}/${key}`, message: 'additional property not allowed' });
+        if (!Object.prototype.hasOwnProperty.call(props, key)) {
+          errors.push({ path: `${path}/${key}`, message: 'additional property not allowed' });
+        }
       }
     }
 

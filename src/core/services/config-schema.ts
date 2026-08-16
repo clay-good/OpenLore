@@ -330,10 +330,13 @@ function editDistance(a: string, b: string): number {
  * The closest known key to `unknown` within {@link MAX_SUGGESTION_DISTANCE}, or undefined.
  * Ties broken alphabetically so the suggestion is deterministic.
  */
-function suggestKey(unknown: string, knownKeys: readonly string[]): string | undefined {
+export function suggestKey(unknown: string, knownKeys: readonly string[]): string | undefined {
   let best: string | undefined;
   let bestDist = MAX_SUGGESTION_DISTANCE + 1;
   for (const known of knownKeys) {
+    // A candidate farther away by length alone cannot fall within the bound.
+    // Skip it before allocating the O(a*b) Levenshtein rows for hostile keys.
+    if (Math.abs(unknown.length - known.length) > MAX_SUGGESTION_DISTANCE) continue;
     const d = editDistance(unknown, known);
     if (d < bestDist || (d === bestDist && best !== undefined && known < best)) {
       bestDist = d;

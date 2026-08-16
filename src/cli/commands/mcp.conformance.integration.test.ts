@@ -18,6 +18,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 import { createServer } from 'node:http';
+import { execFileSync } from 'node:child_process';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { ErrorCode, SUPPORTED_PROTOCOL_VERSIONS } from '@modelcontextprotocol/sdk/types.js';
@@ -161,6 +162,96 @@ describe('spec-12 MCP protocol conformance (via SDK Client over stdio)', () => {
     const content = res.content as Array<{ type: string; text?: string }>;
     expect(content[0]?.text).toMatch(/unknown tool/i);
   });
+});
+
+describe('fix-mcp-argument-contract self-contained stdio acceptance', () => {
+  it('runs orient with only a task against an installable analyzed launch root', async () => {
+    expect(existsSync(MCP_BIN), 'run `npm run build` before the MCP boundary suite').toBe(true);
+    const dir = mkdtempSync(join(tmpdir(), 'openlore-orient-default-'));
+    mkdirSync(join(dir, 'src'));
+    writeFileSync(join(dir, 'package.json'), '{"name":"orient-default-fixture","type":"module"}\n');
+    writeFileSync(join(dir, 'src', 'payments.ts'), 'export function chargeCard(): string { return "charged"; }\n');
+    const env = { ...process.env, OPENLORE_NO_AUTO_HEAP: '1' };
+    execFileSync('node', [MCP_BIN, 'init'], { cwd: dir, env, stdio: 'ignore' });
+    execFileSync('node', [MCP_BIN, 'analyze', '--force'], { cwd: dir, env, stdio: 'ignore' });
+    const t = new StdioClientTransport({ command: 'node', args: [MCP_BIN, 'mcp', '--preset', 'full', '--no-watch-auto'], cwd: dir });
+    const c = new Client({ name: 'orient-default-probe', version: '1.0.0' });
+    await c.connect(t);
+    try {
+      const result = await c.callTool({ name: 'orient', arguments: { task: 'change chargeCard behavior' } });
+      expect(result.isError).toBeFalsy();
+      expect(JSON.stringify(result.content)).toMatch(/chargeCard/);
+    } finally {
+      await c.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it('defaults to the launch root and lets a different explicit directory win', async () => {
+    expect(existsSync(MCP_BIN), 'run `npm run build` before the MCP boundary suite').toBe(true);
+    const launchRoot = mkdtempSync(join(tmpdir(), 'openlore-default-root-'));
+    const explicitRoot = mkdtempSync(join(tmpdir(), 'openlore-explicit-root-'));
+    const relativeRoot = join(launchRoot, 'relative-root');
+    mkdirSync(relativeRoot);
+    const t = new StdioClientTransport({ command: 'node', args: [MCP_BIN, 'mcp', '--preset', 'full', '--no-watch-auto'], cwd: launchRoot });
+    const c = new Client({ name: 'directory-default-probe', version: '1.0.0' });
+    await c.connect(t);
+    try {
+      const implicit = await c.callTool({ name: 'remember', arguments: { content: 'implicit root' } });
+      const explicit = await c.callTool({ name: 'remember', arguments: { directory: explicitRoot, content: 'explicit root' } });
+      const relative = await c.callTool({ name: 'remember', arguments: { directory: 'relative-root', content: 'canonical relative root' } });
+      expect(implicit.isError).toBeFalsy();
+      expect(explicit.isError).toBeFalsy();
+      expect(relative.isError).toBeFalsy();
+      expect(existsSync(join(launchRoot, '.openlore', 'memory', 'notes.json'))).toBe(true);
+      expect(existsSync(join(explicitRoot, '.openlore', 'memory', 'notes.json'))).toBe(true);
+      expect(existsSync(join(relativeRoot, '.openlore', 'memory', 'notes.json'))).toBe(true);
+    } finally {
+      await c.close();
+      rmSync(launchRoot, { recursive: true, force: true });
+      rmSync(explicitRoot, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it('rejects misspelled write arguments without persistence or telemetry path creation', async () => {
+    expect(existsSync(MCP_BIN), 'run `npm run build` before the MCP boundary suite').toBe(true);
+    const launchRoot = mkdtempSync(join(tmpdir(), 'openlore-strict-args-'));
+    const missingTarget = join(launchRoot, 'must-not-exist');
+    const env = Object.fromEntries(
+      Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
+    );
+    env.OPENLORE_TELEMETRY = '1';
+    const t = new StdioClientTransport({ command: 'node', args: [MCP_BIN, 'mcp', '--preset', 'full', '--no-watch-auto'], cwd: launchRoot, env });
+    const c = new Client({ name: 'strict-write-probe', version: '1.0.0' });
+    await c.connect(t);
+    try {
+      await expect(c.callTool({
+        name: 'remember',
+        arguments: { directory: missingTarget, content: 'must not persist', anchor: 'chargeCard' },
+      })).rejects.toThrow(/anchor.*did you mean.*anchors/i);
+      expect(existsSync(missingTarget)).toBe(false);
+    } finally {
+      await c.close();
+      rmSync(launchRoot, { recursive: true, force: true });
+    }
+  }, 60_000);
+});
+
+describe('fix-mcp-argument-contract invalid launch root', () => {
+  it('returns an example-bearing error when the captured launch root disappears', async () => {
+    expect(existsSync(MCP_BIN), 'run `npm run build` before the MCP boundary suite').toBe(true);
+    const dir = mkdtempSync(join(tmpdir(), 'openlore-missing-launch-root-'));
+    const t = new StdioClientTransport({ command: 'node', args: [MCP_BIN, 'mcp', '--preset', 'full', '--no-watch-auto'], cwd: dir });
+    const c = new Client({ name: 'missing-launch-root-probe', version: '1.0.0' });
+    await c.connect(t);
+    rmSync(dir, { recursive: true, force: true });
+    try {
+      await expect(c.callTool({ name: 'list_spec_domains', arguments: {} }))
+        .rejects.toThrow(/launch root.*example.*directory/i);
+    } finally {
+      await c.close();
+    }
+  }, 60_000);
 });
 
 // change: default-to-lean-tool-surface — verify on the real wire that a bare

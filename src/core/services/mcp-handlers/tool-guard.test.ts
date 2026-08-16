@@ -23,13 +23,44 @@ describe('validateToolArgs', () => {
     expect(validateToolArgs({ directory: '/p' }, schema)).toBeNull(); // optional omitted
   });
   it('rejects a missing required field', () => {
-    expect(validateToolArgs({ depth: 2 }, schema)).toMatch(/directory/);
+    expect(validateToolArgs({ depth: 2 }, schema)).toMatch(/directory.*type string.*example: "example"/);
   });
   it('rejects a wrong type', () => {
     expect(validateToolArgs({ directory: 5 }, schema)).toMatch(/directory/);
   });
   it('passes when no schema is declared', () => {
     expect(validateToolArgs({ anything: true }, undefined)).toBeNull();
+  });
+  it('rejects an unknown top-level property with a deterministic suggestion', () => {
+    expect(validateToolArgs({ directory: '/p', depths: 2 }, schema))
+      .toBe('unknown property "depths"; did you mean "depth"?');
+  });
+  it.each(['constructor', 'toString', 'valueOf', '__proto__'])('rejects prototype-named property %s', (key) => {
+    const args = JSON.parse(`{"directory":"/p","${key}":true}`) as Record<string, unknown>;
+    expect(validateToolArgs(args, schema)).toBe(`unknown property "${key}"`);
+  });
+  it('bounds hostile unknown keys in the returned error', () => {
+    const key = 'x'.repeat(10_000);
+    const error = validateToolArgs({ directory: '/p', [key]: true }, schema)!;
+    expect(error).toMatch(/^unknown property "/);
+    expect(error.length).toBeLessThan(120);
+  });
+  it('enriches nested missing properties with type and example', () => {
+    const nested = {
+      type: 'object',
+      properties: {
+        tasks: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: { id: { type: 'string' } },
+            required: ['id'],
+          },
+        },
+      },
+      required: ['tasks'],
+    };
+    expect(validateToolArgs({ tasks: [{}] }, nested)).toMatch(/\/tasks\/0\/id.*type string.*example: "example"/);
   });
 });
 

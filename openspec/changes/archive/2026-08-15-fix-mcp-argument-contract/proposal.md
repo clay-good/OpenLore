@@ -1,6 +1,6 @@
 # Fix the MCP argument contract: a sensible directory default, actionable missing-arg errors, no silently ignored arguments
 
-> Status: PROPOSED (2026-07-27, first-run e2e). Three argument-layer frictions hit an agent in
+> Status: IMPLEMENTED (2026-08-15, archived). Three argument-layer frictions hit an agent in
 > its first minutes against the default surface: every tool call fails until the model guesses
 > that a required absolute `directory` must be passed; the failure message gives no hint what to
 > pass; and a mis-named argument is silently dropped — producing a degraded result presented as

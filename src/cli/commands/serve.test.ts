@@ -812,17 +812,67 @@ describe('tool argument validation', () => {
     expect(res.status).toBe(200);
   });
 
+  it('rejects a misspelled write argument before persistence', async () => {
+    const h = await boot({ preset: 'full' });
+    const res = await fetch(`${h.baseUrl}/tool/remember`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ args: { content: 'must not persist', anchor: 'chargeCard' } }),
+    });
+    expect(res.status).toBe(400);
+    const body = await jsonOf(res);
+    expect(String(body.error)).toMatch(/anchor.*did you mean.*anchors/i);
+    expect(await fileExists(join(root, '.openlore', 'memory', 'notes.json'))).toBe(false);
+    expect(await fileExists(join(root, '.openlore', 'analysis'))).toBe(false);
+  });
+
+  it.each([123, null, false, ''])('rejects explicit malformed args.directory %j instead of defaulting it', async (directory) => {
+    const h = await boot({ preset: 'full' });
+    const res = await fetch(`${h.baseUrl}/tool/remember`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ args: { directory, content: 'must not persist' } }),
+    });
+    expect(res.status).toBe(400);
+    expect(await fileExists(join(root, '.openlore', 'memory', 'notes.json'))).toBe(false);
+  });
+
+  it.each([null, [], 42, 'text'])('rejects malformed outer JSON body %j', async (bodyValue) => {
+    const h = await boot({ preset: 'full' });
+    const res = await fetch(`${h.baseUrl}/tool/analyze_codebase`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(bodyValue),
+    });
+    expect(res.status).toBe(400);
+    const body = await jsonOf(res);
+    expect(String(body.error)).toMatch(/expected a JSON object/i);
+    expect(await fileExists(join(root, '.openlore', 'analysis'))).toBe(false);
+  });
+
+  it('rejects a misspelled envelope property before a defaulted write can run', async () => {
+    const h = await boot({ preset: 'full' });
+    const res = await fetch(`${h.baseUrl}/tool/analyze_codebase`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ agrs: { force: true } }),
+    });
+    expect(res.status).toBe(400);
+    const body = await jsonOf(res);
+    expect(String(body.error)).toMatch(/agrs.*did you mean.*args/i);
+    expect(await fileExists(join(root, '.openlore', 'analysis'))).toBe(false);
+  });
+
   it('does not leak a TypeError when args is a non-object primitive', async () => {
-    const h = await boot();
+    const h = await boot({ preset: 'full' });
     const res = await fetch(`${h.baseUrl}/tool/get_route_inventory`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ args: 'notanobject' }),
     });
-    // args coerced to {} → clean dispatch (or clean validation error), never a 500
-    // "Cannot create property 'directory' on string" leak.
-    expect(res.status).not.toBe(500);
+    expect(res.status).toBe(400);
     const body = await jsonOf(res);
+    expect(String(body.error)).toMatch(/expected type object/i);
     expect(String(body.error ?? '')).not.toContain('Cannot create property');
   });
 });

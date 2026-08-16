@@ -18,9 +18,43 @@
 
 import { validateAgainstSchema } from '../../../cli/manifest/schema-validator.js';
 import { MCP_TOOL_TIMEOUT_MS, MCP_TOOL_TIMEOUT_OVERRIDES } from '../../../constants.js';
+import { suggestKey } from '../config-schema.js';
 
 /** Stable MCP tool error-code taxonomy. */
 export type McpToolErrorCode = 'INVALID_ARGS' | 'NOT_ANALYZED' | 'TIMEOUT' | 'OUTPUT_TRUNCATED' | 'INTERNAL';
+
+const MAX_UNKNOWN_KEY_DISPLAY = 80;
+const MAX_SUGGESTION_KEY_LENGTH = 128;
+
+/** Reject the first unknown own property with a bounded, deterministic hint. */
+export function validateKnownProperties(value: unknown, knownKeys: readonly string[]): string | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const known = new Set(knownKeys);
+  const key = Object.keys(value as Record<string, unknown>).find(candidate => !known.has(candidate));
+  if (key === undefined) return null;
+  const shown = key.length <= MAX_UNKNOWN_KEY_DISPLAY
+    ? key
+    : `${key.slice(0, MAX_UNKNOWN_KEY_DISPLAY - 1)}…`;
+  const suggestion = key.length <= MAX_SUGGESTION_KEY_LENGTH
+    ? suggestKey(key, knownKeys)
+    : undefined;
+  return suggestion
+    ? `unknown property "${shown}"; did you mean "${suggestion}"?`
+    : `unknown property "${shown}"`;
+}
+
+function schemaAtPath(schema: Record<string, unknown>, path: string): Record<string, unknown> {
+  let current = schema;
+  for (const rawSegment of path.split('/').slice(1)) {
+    const segment = rawSegment.replace(/~1/g, '/').replace(/~0/g, '~');
+    const next = /^\d+$/.test(segment)
+      ? current.items
+      : (current.properties as Record<string, unknown> | undefined)?.[segment];
+    if (!next || typeof next !== 'object' || Array.isArray(next)) return {};
+    current = next as Record<string, unknown>;
+  }
+  return current;
+}
 
 /**
  * Validate args against a tool's inputSchema. Returns a human-readable message on
@@ -28,9 +62,32 @@ export type McpToolErrorCode = 'INVALID_ARGS' | 'NOT_ANALYZED' | 'TIMEOUT' | 'OU
  */
 export function validateToolArgs(args: unknown, inputSchema: unknown): string | null {
   if (!inputSchema || typeof inputSchema !== 'object') return null;
-  const errors = validateAgainstSchema(args ?? {}, inputSchema as Record<string, unknown>);
+  const schema = inputSchema as Record<string, unknown>;
+  const properties = schema.properties && typeof schema.properties === 'object'
+    ? schema.properties as Record<string, Record<string, unknown>>
+    : {};
+
+  const unknownError = validateKnownProperties(args, Object.keys(properties));
+  if (unknownError) return unknownError;
+
+  const errors = validateAgainstSchema(args ?? {}, schema);
   if (errors.length === 0) return null;
-  return errors.map(e => (e.path ? `${e.path}: ${e.message}` : e.message)).join('; ');
+  return errors.map(error => {
+    if (error.path && error.message === 'missing required property') {
+      const propertySchema = schemaAtPath(schema, error.path);
+      const expected = Array.isArray(propertySchema.type)
+        ? propertySchema.type.join('|')
+        : typeof propertySchema.type === 'string' ? propertySchema.type : 'value';
+      const example = Array.isArray(propertySchema.enum) && propertySchema.enum.length > 0
+        ? propertySchema.enum[0]
+        : expected.includes('string') ? 'example'
+          : expected.includes('number') || expected.includes('integer') ? 1
+            : expected.includes('boolean') ? true
+              : expected.includes('array') ? [] : {};
+      return `${error.path}: missing required property; expected type ${expected}; example: ${JSON.stringify(example)}`;
+    }
+    return error.path ? `${error.path}: ${error.message}` : error.message;
+  }).join('; ');
 }
 
 /** Thrown when a tool exceeds its timeout — classified as TIMEOUT downstream. */

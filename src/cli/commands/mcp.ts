@@ -18,6 +18,7 @@
  */
 
 import { createRequire } from 'node:module';
+import { resolve } from 'node:path';
 const _require = createRequire(import.meta.url);
 const _pkgVersion = (_require('../../../package.json') as { version: string }).version;
 
@@ -140,11 +141,10 @@ export {
 // TOOL DEFINITIONS
 // ============================================================================
 
-// Spec 28 — the `directory` param is the one input every tool shares (50×). Its
-// description was a verbatim 38-char repeat on each tool; a single short shared
-// constant trims that lossless repeat from the cached tools/list prefix without
-// dropping the one fact that matters (it must be absolute, not relative).
-const DIR_DESC = 'Absolute project path';
+// Spec 28 + change: fix-mcp-argument-contract — `directory` is shared by every
+// tool and defaults to the server's captured launch cwd. Keep that contract in
+// one short description so tools/list does not pay for a long repeated prefix.
+const DIR_DESC = 'Absolute path; default cwd';
 
 /**
  * Shared inputSchema property for the concise/detailed verbosity contract
@@ -186,6 +186,7 @@ export const TOOL_DEFINITIONS = [
       'Requires "openlore analyze" to have been run at least once.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: {
           type: 'string',
@@ -213,7 +214,7 @@ export const TOOL_DEFINITIONS = [
           description: 'Opt-in landmark ordering (default "distance"). "pagerank" orders task-scoped landmarks by personalized PageRank seeded on the matched functions — connectivity-weighted relevance, not just nearest distance. Default output unchanged.',
         },
       },
-      required: ['directory', 'task'],
+      required: ['task'],
     },
   },
   {
@@ -225,17 +226,17 @@ export const TOOL_DEFINITIONS = [
       'Results are cached for 1 hour; skip this if the cache is recent.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: {
           type: 'string',
-          description: 'Absolute path to the project directory to analyze',
+          description: DIR_DESC,
         },
         force: {
           type: 'boolean',
           description: 'Force re-analysis even if a recent cache exists (default: false)',
         },
       },
-      required: ['directory'],
     },
   },
   {
@@ -246,13 +247,13 @@ export const TOOL_DEFINITIONS = [
       'Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: {
           type: 'string',
-          description: 'Absolute path to the project directory (must have been analyzed first)',
+          description: DIR_DESC,
         },
       },
-      required: ['directory'],
     },
   },
   {
@@ -260,6 +261,7 @@ export const TOOL_DEFINITIONS = [
     description: 'Return paged evidence for a host to author an OpenSpec domain. Read-only; no LLM or writes.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
         domain: { type: 'string', description: 'Analyzed domain to document.' },
@@ -267,7 +269,7 @@ export const TOOL_DEFINITIONS = [
         maxItems: { type: 'number', minimum: 10, maximum: 200, description: 'Page size (default 80).' },
         maxResponseBytes: { type: 'number', minimum: 8192, maximum: 225280, description: 'Byte budget (default 49,152).' },
       },
-      required: ['directory', 'domain'],
+      required: ['domain'],
     },
   },
   {
@@ -275,6 +277,7 @@ export const TOOL_DEFINITIONS = [
     description: 'Return paged evidence for a host to repair an OpenSpec domain. Read-only; no LLM or writes.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
         domain: { type: 'string', description: 'Existing domain to repair.' },
@@ -283,7 +286,7 @@ export const TOOL_DEFINITIONS = [
         maxItems: { type: 'number', minimum: 10, maximum: 200, description: 'Maximum evidence records per page (default 80).' },
         maxResponseBytes: { type: 'number', minimum: 8192, maximum: 225280, description: 'Byte budget (default 49,152).' },
       },
-      required: ['directory', 'domain'],
+      required: ['domain'],
     },
   },
   {
@@ -295,13 +298,13 @@ export const TOOL_DEFINITIONS = [
       'and cyclic dependencies. Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: {
           type: 'string',
-          description: 'Absolute path to the project directory (must have been analyzed first)',
+          description: DIR_DESC,
         },
       },
-      required: ['directory'],
     },
   },
   {
@@ -312,13 +315,13 @@ export const TOOL_DEFINITIONS = [
       'Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: {
           type: 'string',
           description: DIR_DESC,
         },
       },
-      required: ['directory'],
     },
   },
   {
@@ -335,10 +338,11 @@ export const TOOL_DEFINITIONS = [
       'Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: {
           type: 'string',
-          description: 'Absolute path to the project directory (must have been analyzed first)',
+          description: DIR_DESC,
         },
         responseFormat: {
           type: 'string',
@@ -346,7 +350,6 @@ export const TOOL_DEFINITIONS = [
           description: 'Output verbosity. "concise" (default): stats + the top clone groups + a truncation receipt. "detailed": the full report.',
         },
       },
-      required: ['directory'],
     },
   },
   {
@@ -357,6 +360,7 @@ export const TOOL_DEFINITIONS = [
       'Optionally filter by file path pattern. Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: {
           type: 'string',
@@ -368,7 +372,6 @@ export const TOOL_DEFINITIONS = [
             'Optional substring to filter file paths (e.g. "services", "api", ".py")',
         },
       },
-      required: ['directory'],
     },
   },
   {
@@ -382,6 +385,7 @@ export const TOOL_DEFINITIONS = [
       'Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: {
           type: 'string',
@@ -413,7 +417,7 @@ export const TOOL_DEFINITIONS = [
           description: 'Traverse only directly-resolved edges, ignoring synthesized dynamic-dispatch edges (default false).',
         },
       },
-      required: ['directory', 'functionName'],
+      required: ['functionName'],
     },
   },
   {
@@ -428,6 +432,7 @@ export const TOOL_DEFINITIONS = [
       'find_path returns just the single CHEAPEST route (and accepts role/landmark selectors) for quick reachability.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: {
           type: 'string',
@@ -462,7 +467,7 @@ export const TOOL_DEFINITIONS = [
           description: 'Entry parameter/variable to trace (with valueLevel; omit = all params).',
         },
       },
-      required: ['directory', 'entryFunction', 'targetFunction'],
+      required: ['entryFunction', 'targetFunction'],
     },
   },
   {
@@ -474,6 +479,7 @@ export const TOOL_DEFINITIONS = [
       'Requires openlore generate to have been run at least once.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: {
           type: 'string',
@@ -488,7 +494,6 @@ export const TOOL_DEFINITIONS = [
           description: 'Return only orphan functions (not covered by any requirement)',
         },
       },
-      required: ['directory'],
     },
   },
   {
@@ -502,10 +507,11 @@ export const TOOL_DEFINITIONS = [
       'Requires openlore generate to have been run at least once. No LLM required.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: {
           type: 'string',
-          description: 'Absolute path to the project directory (must be a git repository)',
+          description: DIR_DESC,
         },
         base: {
           type: 'string',
@@ -531,7 +537,6 @@ export const TOOL_DEFINITIONS = [
           description: 'Maximum number of changed files to analyze (default: 100)',
         },
       },
-      required: ['directory'],
     },
   },
   {
@@ -543,6 +548,7 @@ export const TOOL_DEFINITIONS = [
       'Call this before touching any non-trivial function. Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: {
           type: 'string',
@@ -570,7 +576,7 @@ export const TOOL_DEFINITIONS = [
         },
         ...FEDERATION_PROPS,
       },
-      required: ['directory', 'symbol'],
+      required: ['symbol'],
     },
   },
   {
@@ -586,6 +592,7 @@ export const TOOL_DEFINITIONS = [
       'Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
         changedSymbols: {
@@ -601,7 +608,6 @@ export const TOOL_DEFINITIONS = [
         directResolvedOnly: { type: 'boolean', description: 'Traverse only directly-resolved edges, ignoring synthesized dynamic-dispatch edges (default false).' },
         ...FEDERATION_PROPS,
       },
-      required: ['directory'],
     },
   },
   {
@@ -618,13 +624,13 @@ export const TOOL_DEFINITIONS = [
       'into a sensitive surface; this is the all-in-one pre-commit briefing. Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
         baseRef: { type: 'string', description: 'Git ref to diff the working tree against (e.g. "HEAD", "main"). Default HEAD (uncommitted changes).' },
         depth: { type: 'number', description: 'Impact-analysis traversal depth (default 2).' },
         maxSymbols: { type: 'number', description: 'Cap on the number of highest-fan-in changed symbols analyzed for impact (default 12). Truncation is reported.' },
       },
-      required: ['directory'],
     },
   },
   {
@@ -638,6 +644,7 @@ export const TOOL_DEFINITIONS = [
       'and external consumers cause false positives, stated in the response. Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
         ifDeleted: { type: 'string', description: 'Symbol name — returns what becomes dead if it is deleted (delete-impact mode)' },
@@ -646,7 +653,6 @@ export const TOOL_DEFINITIONS = [
         directResolvedOnly: { type: 'boolean', description: 'Restrict reachability to directly-resolved edges, ignoring synthesized dynamic-dispatch edges — strict certainty over completeness (default false).' },
         ...FEDERATION_PROPS,
       },
-      required: ['directory'],
     },
   },
   {
@@ -662,6 +668,7 @@ export const TOOL_DEFINITIONS = [
       'analyze_codebase first for structural kinds.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
         kind: {
@@ -672,7 +679,7 @@ export const TOOL_DEFINITIONS = [
         subject: { type: 'string', description: 'What the claim is about: a function/method name for structural kinds, or an 8-character decision id for decision-current.' },
         object: { type: 'string', description: 'The second symbol — required for relational kinds (calls, reaches, impacts).' },
       },
-      required: ['directory', 'kind', 'subject'],
+      required: ['kind', 'subject'],
     },
   },
   {
@@ -689,6 +696,7 @@ export const TOOL_DEFINITIONS = [
       'symbols modified OUTSIDE the declared write-set and conflicts they open against peerFootprints.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
         baseRef: { type: 'string', description: 'Old state to diff against (default "HEAD")' },
@@ -730,7 +738,6 @@ export const TOOL_DEFINITIONS = [
           items: { type: 'object' },
         },
       },
-      required: ['directory'],
     },
   },
   {
@@ -744,12 +751,12 @@ export const TOOL_DEFINITIONS = [
       'Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
         file: { type: 'string', description: 'A file to query its coupling/volatility. Omit for the most-volatile overview.' },
         limit: { type: 'number', description: 'Cap results (default 20)' },
       },
-      required: ['directory'],
     },
   },
   {
@@ -764,12 +771,12 @@ export const TOOL_DEFINITIONS = [
       'deterministic; complements (does not replace) CI linters. Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
         from: { type: 'string', description: 'Pre-edit mode: the file that would gain the import (relative or absolute). Requires "to".' },
         to: { type: 'string', description: 'Pre-edit mode: the target file path or exported symbol being imported. Requires "from".' },
       },
-      required: ['directory'],
     },
   },
   {
@@ -781,6 +788,7 @@ export const TOOL_DEFINITIONS = [
       'Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: {
           type: 'string',
@@ -795,7 +803,6 @@ export const TOOL_DEFINITIONS = [
           description: 'Optional substring to restrict candidates to matching file paths',
         },
       },
-      required: ['directory'],
     },
   },
   {
@@ -807,6 +814,7 @@ export const TOOL_DEFINITIONS = [
       'Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: {
           type: 'string',
@@ -827,7 +835,6 @@ export const TOOL_DEFINITIONS = [
             'Sort order: "fanIn" (most-called leaves first, default), "name", or "file"',
         },
       },
-      required: ['directory'],
     },
   },
   {
@@ -839,6 +846,7 @@ export const TOOL_DEFINITIONS = [
       'approach (extract, split, facade, delegate). Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: {
           type: 'string',
@@ -853,7 +861,6 @@ export const TOOL_DEFINITIONS = [
           description: 'Minimum fan-in threshold to be considered a hub (default: 3)',
         },
       },
-      required: ['directory'],
     },
   },
   {
@@ -866,6 +873,7 @@ export const TOOL_DEFINITIONS = [
       'without reading thousands of lines of raw source.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: {
           type: 'string',
@@ -876,7 +884,7 @@ export const TOOL_DEFINITIONS = [
           description: 'Path to the file, relative to the project directory',
         },
       },
-      required: ['directory', 'filePath'],
+      required: ['filePath'],
     },
   },
   {
@@ -888,6 +896,7 @@ export const TOOL_DEFINITIONS = [
       'logical blocks to extract. Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: {
           type: 'string',
@@ -902,7 +911,6 @@ export const TOOL_DEFINITIONS = [
           description: 'Minimum fan-out to be considered a god function (default: 8)',
         },
       },
-      required: ['directory'],
     },
   },
   {
@@ -915,6 +923,7 @@ export const TOOL_DEFINITIONS = [
       'Requires "openlore analyze --embed".',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: {
           type: 'string',
@@ -935,7 +944,7 @@ export const TOOL_DEFINITIONS = [
           description: 'Filter by language: "TypeScript", "Python", "Go", "Rust", "Ruby", "Java"',
         },
       },
-      required: ['directory', 'description'],
+      required: ['description'],
     },
   },
   {
@@ -950,6 +959,7 @@ export const TOOL_DEFINITIONS = [
       'Requires "openlore analyze --embed" to have been run at least once.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: {
           type: 'string',
@@ -981,7 +991,7 @@ export const TOOL_DEFINITIONS = [
           description: 'Set "text" to search literal strings in markup/text directly; returns file:line matches.',
         },
       },
-      required: ['directory', 'query'],
+      required: ['query'],
     },
   },
   {
@@ -991,10 +1001,10 @@ export const TOOL_DEFINITIONS = [
       'Use this first when you need to discover what domains exist before doing a targeted search_specs call.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
       },
-      required: ['directory'],
     },
   },
   {
@@ -1006,6 +1016,7 @@ export const TOOL_DEFINITIONS = [
       'Requires "openlore analyze --embed" or "openlore analyze --reindex-specs".',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: {
           type: 'string',
@@ -1028,7 +1039,7 @@ export const TOOL_DEFINITIONS = [
           description: 'Filter by section type: "requirements", "purpose", "design", "architecture", "entities"',
         },
       },
-      required: ['directory', 'query'],
+      required: ['query'],
     },
   },
   {
@@ -1042,6 +1053,7 @@ export const TOOL_DEFINITIONS = [
       'Requires "openlore analyze --embed" and a prior "openlore generate" run.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: {
           type: 'string',
@@ -1068,7 +1080,7 @@ export const TOOL_DEFINITIONS = [
           description: 'Filter spec results by section type: "requirements", "purpose", etc.',
         },
       },
-      required: ['directory', 'query'],
+      required: ['query'],
     },
   },
   {
@@ -1080,6 +1092,7 @@ export const TOOL_DEFINITIONS = [
       'read access to a known domain.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
         domain: {
@@ -1087,7 +1100,7 @@ export const TOOL_DEFINITIONS = [
           description: 'Domain name as returned by list_spec_domains (e.g. "auth", "analyzer")',
         },
       },
-      required: ['directory', 'domain'],
+      required: ['domain'],
     },
   },
   {
@@ -1099,6 +1112,7 @@ export const TOOL_DEFINITIONS = [
       'falls back to a brace-depth scan when the call graph is unavailable.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
         filePath: {
@@ -1110,7 +1124,7 @@ export const TOOL_DEFINITIONS = [
           description: 'Name of the function to extract, e.g. "verifyToken"',
         },
       },
-      required: ['directory', 'filePath', 'functionName'],
+      required: ['filePath', 'functionName'],
     },
   },
   {
@@ -1122,6 +1136,7 @@ export const TOOL_DEFINITIONS = [
       'of a change. Reads the dependency-graph.json produced by "openlore analyze".',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
         filePath: {
@@ -1134,7 +1149,7 @@ export const TOOL_DEFINITIONS = [
           description: '"imports" = what this file depends on, "importedBy" = what depends on this file, "both" = both directions (default)',
         },
       },
-      required: ['directory', 'filePath'],
+      required: ['filePath'],
     },
   },
   {
@@ -1148,6 +1163,7 @@ export const TOOL_DEFINITIONS = [
       'Run analyze_codebase first; spec index optional (degrades gracefully).',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: {
           type: 'string',
@@ -1172,7 +1188,7 @@ export const TOOL_DEFINITIONS = [
             'in the proposal for traceability.',
         },
       },
-      required: ['directory', 'description', 'slug'],
+      required: ['description', 'slug'],
     },
   },
   {
@@ -1186,6 +1202,7 @@ export const TOOL_DEFINITIONS = [
       'generate_change_proposal output. Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: {
           type: 'string',
@@ -1204,7 +1221,7 @@ export const TOOL_DEFINITIONS = [
             'e.g. "add payment retry — must retry up to 3 times on timeout"',
         },
       },
-      required: ['directory', 'storyFilePath', 'description'],
+      required: ['storyFilePath', 'description'],
     },
   },
   {
@@ -1219,10 +1236,10 @@ export const TOOL_DEFINITIONS = [
       'Run analyze_codebase first for the fastest results.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
       },
-      required: ['directory'],
     },
   },
   {
@@ -1238,11 +1255,11 @@ export const TOOL_DEFINITIONS = [
       'Run analyze_codebase first for the fastest results.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
         responseFormat: RESPONSE_FORMAT_PROP,
       },
-      required: ['directory'],
     },
   },
   {
@@ -1257,11 +1274,11 @@ export const TOOL_DEFINITIONS = [
       'Run analyze_codebase first for the fastest results.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
         responseFormat: RESPONSE_FORMAT_PROP,
       },
-      required: ['directory'],
     },
   },
   {
@@ -1276,11 +1293,11 @@ export const TOOL_DEFINITIONS = [
       'Run analyze_codebase first for the fastest results.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
         responseFormat: RESPONSE_FORMAT_PROP,
       },
-      required: ['directory'],
     },
   },
   {
@@ -1296,11 +1313,11 @@ export const TOOL_DEFINITIONS = [
       'Run analyze_codebase first for the fastest results.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
         responseFormat: RESPONSE_FORMAT_PROP,
       },
-      required: ['directory'],
     },
   },
   {
@@ -1313,10 +1330,10 @@ export const TOOL_DEFINITIONS = [
       'otherwise scans manifests live. Run analyze_codebase first for the fastest results.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
       },
-      required: ['directory'],
     },
   },
   {
@@ -1334,6 +1351,7 @@ export const TOOL_DEFINITIONS = [
       'Requires "openlore analyze" to have been run.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
         maxUncovered: {
@@ -1345,7 +1363,6 @@ export const TOOL_DEFINITIONS = [
           description: 'Minimum fanIn to flag a function as a hub gap (default: 5)',
         },
       },
-      required: ['directory'],
     },
   },
   {
@@ -1362,6 +1379,7 @@ export const TOOL_DEFINITIONS = [
       'Defaults to dryRun:true — set dryRun:false to write files to disk.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: {
           type: 'string',
@@ -1386,7 +1404,6 @@ export const TOOL_DEFINITIONS = [
           description: 'Preview generated content without writing files (default: true)',
         },
       },
-      required: ['directory'],
     },
   },
   {
@@ -1400,6 +1417,7 @@ export const TOOL_DEFINITIONS = [
       'Use minCoverage to enforce a CI coverage gate.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: {
           type: 'string',
@@ -1415,7 +1433,6 @@ export const TOOL_DEFINITIONS = [
           description: 'Report belowThreshold:true if effective coverage is below this percentage',
         },
       },
-      required: ['directory'],
     },
   },
   {
@@ -1428,6 +1445,7 @@ export const TOOL_DEFINITIONS = [
       'Typically 200-600 tokens vs orient\'s 2000+. Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
         functionName: { type: 'string', description: 'Exact function or method name' },
@@ -1445,7 +1463,7 @@ export const TOOL_DEFINITIONS = [
           description: 'Optional (pagerank mode): cap callers+callees to ~this many tokens, keeping highest-relevance neighbours and reporting `omittedForBudget` instead of truncating.',
         },
       },
-      required: ['directory', 'functionName'],
+      required: ['functionName'],
     },
   },
   {
@@ -1458,11 +1476,12 @@ export const TOOL_DEFINITIONS = [
       'Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
         functionName: { type: 'string', description: 'Function name to look up the community for' },
       },
-      required: ['directory', 'functionName'],
+      required: ['functionName'],
     },
   },
   {
@@ -1474,12 +1493,12 @@ export const TOOL_DEFINITIONS = [
       'rank as your task needs. Optionally filter to one label. Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
         limit: { type: 'number', description: 'Max landmarks to return, ordered by fan-in (default: 20, max: 200)' },
         label: { type: 'string', description: 'Optional: return only landmarks carrying this label (hub | orchestrator | chokepoint | volatile | entrypoint | dead)' },
       },
-      required: ['directory'],
     },
   },
   {
@@ -1492,11 +1511,11 @@ export const TOOL_DEFINITIONS = [
       'Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
         communityId: { type: 'string', description: 'Optional: drill into this region (a communityId from the region view) at function granularity' },
       },
-      required: ['directory'],
     },
   },
   {
@@ -1511,6 +1530,7 @@ export const TOOL_DEFINITIONS = [
       'Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
         from: { type: 'string', description: 'Start endpoint: a function name, or landmark:<id> / role:entrypoint|hub|sink / file:<path>' },
@@ -1519,7 +1539,7 @@ export const TOOL_DEFINITIONS = [
         directResolvedOnly: { type: 'boolean', description: 'Traverse only directly-resolved edges, ignoring synthesized dynamic-dispatch edges (default false).' },
         ...FEDERATION_PROPS,
       },
-      required: ['directory', 'from', 'to'],
+      required: ['from', 'to'],
     },
   },
   {
@@ -1529,10 +1549,10 @@ export const TOOL_DEFINITIONS = [
       'repo\'s live index state (indexed/stale/unindexed/missing). Index-of-indexes: no merged graph. Read-only.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
       },
-      required: ['directory'],
     },
   },
   {
@@ -1544,10 +1564,10 @@ export const TOOL_DEFINITIONS = [
       'reference-missing, …) and pasteable remediations. Read-only; never blocks.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
       },
-      required: ['directory'],
     },
   },
   {
@@ -1561,12 +1581,12 @@ export const TOOL_DEFINITIONS = [
       'never blocks; orphaned intent is withheld and drifted intent is flagged. No LLM.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
         change: { type: 'string', description: 'The active change id to brief (its proposal lives under the bound store).' },
         tokenBudget: { type: 'number', description: 'Cap the merged briefing to ~this many tokens (default 8000).' },
       },
-      required: ['directory'],
     },
   },
   {
@@ -1580,13 +1600,13 @@ export const TOOL_DEFINITIONS = [
       'delta + stale callers) — this certifies the paths a diff NEWLY OPENS into a sensitive surface. No LLM.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
         baseRef: { type: 'string', description: 'Git ref to diff the working tree against (default HEAD).' },
         change: { type: 'string', description: 'Change id to record on the certificate (spec-store context; default "working-tree").' },
         persist: { type: 'boolean', description: 'Persist under .openlore/impact-certificates/ so the spec-store health check can re-fire it when it decays.' },
       },
-      required: ['directory'],
     },
   },
   {
@@ -1603,6 +1623,7 @@ export const TOOL_DEFINITIONS = [
       'analyze_codebase first.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
         tasks: {
@@ -1621,7 +1642,7 @@ export const TOOL_DEFINITIONS = [
           },
         },
       },
-      required: ['directory', 'tasks'],
+      required: ['tasks'],
     },
   },
   {
@@ -1640,6 +1661,7 @@ export const TOOL_DEFINITIONS = [
       'task list. Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
         baseRef: { type: 'string', description: 'Git ref every change is diffed against (default: resolved default branch).' },
@@ -1664,7 +1686,6 @@ export const TOOL_DEFINITIONS = [
         maxChanges: { type: 'number', description: 'Cap on assessed changes (default 40).' },
         ...FEDERATION_PROPS,
       },
-      required: ['directory'],
     },
   },
   {
@@ -1680,11 +1701,11 @@ export const TOOL_DEFINITIONS = [
       'for repo mode (named-language mode needs no analysis).',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
         language: { type: 'string', description: 'Optional: a specific language name (e.g. "Go", "Kotlin"). Omit to report the repo\'s detected languages.' },
       },
-      required: ['directory'],
     },
   },
   {
@@ -1702,6 +1723,7 @@ export const TOOL_DEFINITIONS = [
       'region (filePattern). Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
         maxResults: { type: 'number', description: 'Limit reported gaps (default 100, capped 500).' },
@@ -1710,7 +1732,6 @@ export const TOOL_DEFINITIONS = [
         diffRef: { type: 'string', description: 'Git ref to diff the working tree against for diff scope (e.g. "HEAD", "main").' },
         directResolvedOnly: { type: 'boolean', description: 'Count only directly-resolved edges as test-reach (ignore synthesized dynamic-dispatch); reports more gaps, more certainly. Default false.' },
       },
-      required: ['directory'],
     },
   },
   {
@@ -1731,12 +1752,12 @@ export const TOOL_DEFINITIONS = [
       'Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
         baseRef: { type: 'string', description: 'Git ref to diff the working tree\'s public surface against (e.g. "HEAD", "main"). Omit to return the surface itself.' },
         maxResults: { type: 'number', description: 'Limit the surface listing in surface mode (default 200, capped 500).' },
       },
-      required: ['directory'],
     },
   },
   {
@@ -1756,13 +1777,13 @@ export const TOOL_DEFINITIONS = [
       'Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
         communityId: { type: 'string', description: 'Profile one community/region by id (list ids with get_map).' },
         filePath: { type: 'string', description: 'Profile a single file (exact path or a unique path suffix). Most specific scope: if both filePath and communityId are given, filePath wins.' },
         language: { type: 'string', description: 'Restrict the returned languages to this one (e.g. "TypeScript").' },
       },
-      required: ['directory'],
     },
   },
   {
@@ -1784,13 +1805,13 @@ export const TOOL_DEFINITIONS = [
       'is the base ref, never wall-clock time. Deterministic, offline, no LLM. Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
         baseRef: { type: 'string', description: 'Git ref to brief changes SINCE (e.g. "main", a PR base, "HEAD~20"). Default "auto": resolves main → master → HEAD~1 → empty tree.' },
         filePattern: { type: 'string', description: 'Region scope — only brief changes whose file path contains this substring.' },
         maxResults: { type: 'number', description: 'Bound on briefed symbols, highest-tier-first (default 50, max 200). Overflow is reported in the truncation receipt.' },
       },
-      required: ['directory'],
     },
   },
   {
@@ -1814,6 +1835,7 @@ export const TOOL_DEFINITIONS = [
       'Deterministic, offline, no LLM. Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
         symbol: { type: 'string', description: 'A function in the index to find clones of: its name, or name::path to disambiguate. Provide exactly one of symbol or snippet.' },
@@ -1821,7 +1843,6 @@ export const TOOL_DEFINITIONS = [
         minSimilarity: { type: 'number', description: 'Near-clone Jaccard floor for this query (default 0.7, clamped to [0.1, 1]). Exact/structural matches are always included.' },
         maxResults: { type: 'number', description: 'Cap on returned matches (default 25, max 200).' },
       },
-      required: ['directory'],
     },
   },
   {
@@ -1842,11 +1863,12 @@ export const TOOL_DEFINITIONS = [
       'spans (no new artifact). Deterministic, offline, no LLM. Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
         symbol: { type: 'string', description: 'The symbol to locate: its name, or name::path to disambiguate.' },
       },
-      required: ['directory', 'symbol'],
+      required: ['symbol'],
     },
   },
   {
@@ -1868,12 +1890,13 @@ export const TOOL_DEFINITIONS = [
       'name only (no subclass hierarchy), disclosed. Deterministic, offline, no LLM. Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
         symbol: { type: 'string', description: 'The function to analyze: its name, or name::path to disambiguate.' },
         maxDepth: { type: 'number', description: 'Callee-traversal depth bound (default 10, clamped to [1, 30]). Truncation is disclosed in boundaries.' },
       },
-      required: ['directory', 'symbol'],
+      required: ['symbol'],
     },
   },
   {
@@ -1894,12 +1917,13 @@ export const TOOL_DEFINITIONS = [
       'analyze_codebase first.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
         name: { type: 'string', description: 'The environment variable to analyze, e.g. DATABASE_URL.' },
         maxDepth: { type: 'number', description: 'Backward-reachability depth bound (default 12, clamped to [1, 30]). Truncation is disclosed in boundaries.' },
       },
-      required: ['directory', 'name'],
+      required: ['name'],
     },
   },
   {
@@ -1913,6 +1937,7 @@ export const TOOL_DEFINITIONS = [
       'Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
         base: {
@@ -1920,7 +1945,6 @@ export const TOOL_DEFINITIONS = [
           description: 'Git ref to diff against (default: HEAD). Use "HEAD~1" for last commit, "main" for branch diff.',
         },
       },
-      required: ['directory'],
     },
   },
   {
@@ -1933,6 +1957,7 @@ export const TOOL_DEFINITIONS = [
       'Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
         limit: {
@@ -1940,7 +1965,6 @@ export const TOOL_DEFINITIONS = [
           description: 'Max items per hotspot list and max topRisks (default: 10, max: 50)',
         },
       },
-      required: ['directory'],
     },
   },
   {
@@ -1952,6 +1976,7 @@ export const TOOL_DEFINITIONS = [
       'Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
         limit: {
@@ -1959,7 +1984,6 @@ export const TOOL_DEFINITIONS = [
           description: 'Max results to return (default: 15, max: 50)',
         },
       },
-      required: ['directory'],
     },
   },
   {
@@ -1973,6 +1997,7 @@ export const TOOL_DEFINITIONS = [
       'verdict instead of a second draft. Use supersedes when a later decision replaces an earlier one.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
         title: { type: 'string', description: 'Short imperative statement, e.g. "Use UUIDs for decision IDs"' },
@@ -1993,7 +2018,7 @@ export const TOOL_DEFINITIONS = [
           description: 'Decision scope. local: single file; component: single module/service; cross-domain: multiple spec domains or service contracts; system: global constraint. Only cross-domain and system generate ADR files. Defaults to component; auto-promoted to cross-domain when multiple domains inferred.',
         },
       },
-      required: ['directory', 'title', 'rationale'],
+      required: ['title', 'rationale'],
     },
   },
   {
@@ -2005,6 +2030,7 @@ export const TOOL_DEFINITIONS = [
       'then sync_decisions to write them to spec.md files.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
         status: {
@@ -2013,7 +2039,6 @@ export const TOOL_DEFINITIONS = [
           description: 'Filter by status (default: returns all)',
         },
       },
-      required: ['directory'],
     },
   },
   {
@@ -2026,12 +2051,13 @@ export const TOOL_DEFINITIONS = [
       'After approving, call sync_decisions to write the decision to the relevant spec.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
         id: { type: 'string', description: '8-character decision ID from list_decisions' },
         note: { type: 'string', description: 'Optional review note' },
       },
-      required: ['directory', 'id'],
+      required: ['id'],
     },
   },
   {
@@ -2040,12 +2066,13 @@ export const TOOL_DEFINITIONS = [
       'Reject a pending decision. Rejected decisions are never synced to spec files.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
         id: { type: 'string', description: '8-character decision ID from list_decisions' },
         note: { type: 'string', description: 'Optional reason for rejection' },
       },
-      required: ['directory', 'id'],
+      required: ['id'],
     },
   },
   {
@@ -2058,12 +2085,12 @@ export const TOOL_DEFINITIONS = [
       'Pass id to sync a single decision by ID.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
         dryRun: { type: 'boolean', description: 'Preview without writing files (default: false)' },
         id: { type: 'string', description: 'Sync only this specific decision ID (default: all approved)' },
       },
-      required: ['directory'],
     },
   },
   {
@@ -2075,6 +2102,7 @@ export const TOOL_DEFINITIONS = [
       'content+anchor updates in place. For spec-synced decisions use record_decision.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
         content: { type: 'string', description: 'The memory to persist (one self-contained fact).' },
@@ -2097,7 +2125,7 @@ export const TOOL_DEFINITIONS = [
         },
         supersedes: { type: 'string', description: 'Id of a prior memory to retire (kept queryable via asOf).' },
       },
-      required: ['directory', 'content'],
+      required: ['content'],
     },
   },
   {
@@ -2109,6 +2137,7 @@ export const TOOL_DEFINITIONS = [
       'history, type filter, federation (surface producer-repo memory on interfaces you call). Omit task to scan all.',
     inputSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
         task: { type: 'string', description: 'What you are about to work on (optional).' },
@@ -2119,7 +2148,6 @@ export const TOOL_DEFINITIONS = [
         type: { type: 'string', description: 'Restrict notes to this type (decisions excluded when set).' },
         ...FEDERATION_PROPS,
       },
-      required: ['directory'],
     },
   },
 ];
@@ -2408,6 +2436,9 @@ export function leanDefaultActive(opts: { minimal?: boolean; preset?: string; al
 }
 
 async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
+  // change: fix-mcp-argument-contract — capture once: callers that omit `directory` use the root the server was
+  // launched for, even if some dependency changes process.cwd() later.
+  const launchRoot = resolve(process.cwd());
   // --list-tools: print the active surface grouped by capability family and exit,
   // WITHOUT starting the JSON-RPC transport. This runs before the stdout→stderr
   // redirection below precisely because here stdout is a normal terminal, not the
@@ -2557,7 +2588,14 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
   });
 
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
-    const { name: _rawName, arguments: args = {} } = request.params;
+    const { name: _rawName, arguments: rawArgs = {} } = request.params;
+    const hadExplicitDirectory = rawArgs !== null
+      && typeof rawArgs === 'object'
+      && !Array.isArray(rawArgs)
+      && Object.prototype.hasOwnProperty.call(rawArgs, 'directory');
+    const args = rawArgs !== null && typeof rawArgs === 'object' && !Array.isArray(rawArgs)
+      ? { ...rawArgs, ...(hadExplicitDirectory ? {} : { directory: launchRoot }) }
+      : rawArgs;
     // Resolve a deprecated tool-name alias to its canonical name up front, so the
     // schema lookup, arg validation, tracking, and dispatch all see one name.
     const name = resolveCanonicalToolName(_rawName);
@@ -2582,6 +2620,34 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
       };
     }
 
+    const _dir = args !== null && typeof args === 'object'
+      ? (args as Record<string, unknown>).directory
+      : undefined;
+    let directory = typeof _dir === 'string' ? _dir : '';
+    const _t0 = Date.now();
+
+    // Validate the normalized argument object before watcher bootstrap or any
+    // persistent side effect. Unknown properties are rejected by the shared
+    // guard instead of being silently discarded by handlers.
+    {
+      const argError = validateToolArgs(args, toolDef.inputSchema);
+      if (argError) {
+        // Do not emit under `directory` here: it has not been validated yet, and
+        // telemetry itself creates files. A rejected request must be side-effect free.
+        throw new McpError(ErrorCode.InvalidParams, `Invalid arguments for "${name}": ${argError}`);
+      }
+      try {
+        directory = await validateDirectory(directory);
+        (args as Record<string, unknown>).directory = directory;
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        const defaultHint = hadExplicitDirectory
+          ? ''
+          : ' The server launch root could not be used; replace the placeholder in this example with an existing absolute project path: {"directory":"/absolute/path/to/project"}.';
+        throw new McpError(ErrorCode.InvalidParams, `Invalid arguments for "${name}": /directory: ${detail}.${defaultHint}`);
+      }
+    }
+
     if (options.watchAuto && !autoWatcher) {
       const dir = (args as Record<string, unknown>).directory;
       if (typeof dir === 'string') {
@@ -2591,7 +2657,6 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
         // watcher racing it. Fall back to an in-process watcher otherwise.
         const ep = await resolveDaemon(dir);
         if (!ep) {
-          const { resolve } = await import('node:path');
           // Cold-start self-bootstrap: if the agent wired the server without ever
           // running `openlore install`, build the index once in the background so
           // the session warms up on its own. Non-blocking and fail-soft. We inject
@@ -2629,21 +2694,6 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
             await autoWatcher!.stop();
           });
         }
-      }
-    }
-
-    const _dir = (args as Record<string, unknown>).directory;
-    const directory = typeof _dir === 'string' ? _dir : '';
-    const _t0 = Date.now();
-
-    // Input validation (spec-10) against the tool's own declared inputSchema, before
-    // dispatch. Invalid args become a JSON-RPC -32602 error (spec-12), not an
-    // isError tool result — a malformed request is a protocol error, not a tool failure.
-    {
-      const argError = validateToolArgs(args, toolDef.inputSchema);
-      if (argError) {
-        emit(directory, 'mcp', { event: 'tool_error', tool: name, ms: Date.now() - _t0, agent: agentName, code: 'INVALID_ARGS', error: argError });
-        throw new McpError(ErrorCode.InvalidParams, `Invalid arguments for "${name}": ${argError}`);
       }
     }
 
