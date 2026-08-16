@@ -66,7 +66,9 @@ sides of persisted LLM logs share deterministic, disclosed credential redaction;
 changed cited files and active watcher/serve hosts schedule repository-scoped repair;
 `align-first-run-ctas-with-repo-shape` (2026-08-09, archived) — install gates the prove CTA on
 the built graph, sparse refusals carry receipts, fresh empty spec stores are informational, and
-uninstall names retained data.
+uninstall names retained data; `fix-mcp-argument-contract` (2026-08-15, archived) — omitted tool
+directories resolve to the validated server launch root, explicit roots still win, and strict
+advertised schemas reject unknown arguments before any watcher, rebuild, telemetry, or write.
 
 After this table was compiled, four research sweeps added 32 more proposals (all validate; not yet
 folded into the table): 10 in `FIELD-RESEARCH-2026-07.md`, 10 in `ECOSYSTEM-RESEARCH-2026-07-27.md`,
