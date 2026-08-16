@@ -3035,3 +3035,15 @@ on the embedding endpoint's `skipSslVerify`.
 - **GIVEN** an embedder records an architectural decision through the API
 - **WHEN** the pending decision is persisted or listed
 - **THEN** its content origin is `agent-recorded`
+
+### Requirement: ApiVerificationProgressQualifiesCompositeConfidence
+
+The verification API SHALL describe `overallConfidence` progress as a weighted
+mixed-evidence composite so an embedder does not mistake the aggregate for a purely
+deterministic confidence measurement.
+
+#### Scenario: Progress names the mixed evidence basis
+
+- **GIVEN** verification completes successfully through the programmatic API
+- **WHEN** the completion progress event reports `overallConfidence`
+- **THEN** the message identifies the value as a weighted mixed-evidence composite

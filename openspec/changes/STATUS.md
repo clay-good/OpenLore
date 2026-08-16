@@ -31,7 +31,7 @@ validate`**, and the archive machinery works again. This pass:
   because their requirements were already synced verbatim (`fix-pi-parity-drift`,
   `fix-redaction-module-gaps`).
 
-## Complete — 130 in `archive/`
+## Complete — 143 in `archive/`
 
 Everything in `openspec/changes/archive/` is shipped (or a settled won't-do), with its
 requirements reflected in the main specs. `openspec list` shows only open work.
@@ -41,7 +41,7 @@ requirements reflected in the main specs. `openspec list` shows only open work.
 No open change has partial code on `main`. A change belongs here the moment its implementation
 starts; move it back out (archive it) the moment its marker/spec evidence lands.
 
-## To build — 116
+## To build — 111
 
 The whole open set is unbuilt backlog. Newest additions: 7 proposals from the 2026-07-27
 first-run e2e (`E2E-FIRSTRUN-2026-07-27.md`). Other thematic indexes:
@@ -74,7 +74,10 @@ streams, provider ceilings are constants-backed, correction requests retain thei
 truncation is disclosed once, and fallback model ids are pricing-consistent;
 `harden-review-render-and-action` (2026-08-15, archived) — PR-head text is inert in Markdown,
 analysis freshness and failures are disclosed, and the bundled Action documents and enforces its
-write-token trust boundary without suppressing configured policy gates.
+write-token trust boundary without suppressing configured policy gates;
+`harden-llm-output-contract` (2026-08-16, archived) — malformed structured entries no longer
+discard valid siblings, truncation and provider errors fail explicitly, and every LLM-derived
+verification metric and mixed composite carries its evidence and model provenance.
 
 After this table was compiled, four research sweeps added 32 more proposals (all validate; not yet
 folded into the table): 10 in `FIELD-RESEARCH-2026-07.md`, 10 in `ECOSYSTEM-RESEARCH-2026-07-27.md`,

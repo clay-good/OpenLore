@@ -1,6 +1,6 @@
 # Harden the LLM output contract: shape-check what you parse, disclose what you drop
 
-> Status: PROPOSED (2026-07-03, e2e audit pass 3). Three verified defects on the consuming
+> Status: BUILT (2026-08-16). Three verified defects on the consuming
 > side of the opt-in LLM layer: the decisions pipeline parses raw completions with a
 > shape-blind `parseJSON` and then dereferences fields that may not exist (a TypeError from
 > a weaker model kills the whole run), a truncated response silently becomes an empty
@@ -46,11 +46,10 @@
    pipeline reports "response truncated at N tokens — decisions may be lost; raise the cap
    or reduce scope" instead of returning `[]`; the misleading "returned 0 decisions"
    warning is reserved for genuinely-empty valid responses.
-3. **LLM-judged scores carry provenance.** The verifier labels `specAccuracyScore` as
-   LLM-judged (with the model id) in report output, keeps the deterministic sub-checks
-   (import/export/requirement coverage) separately attributed, and never blends the two
-   into one undifferentiated number; when no LLM score is available the existing keyword
-   fallback is labeled as such.
+3. **LLM-derived scores carry provenance.** The verifier labels direct LLM judgments with
+   the model id, distinguishes deterministic checks from deterministic comparisons over an
+   LLM prediction, and publishes the weights and evidence basis of mixed composites. When
+   no LLM score is available, deterministic keyword fallbacks are labeled as such.
 
 ## Why this is in scope
 
@@ -73,5 +72,5 @@ boundary; no LLM is added anywhere, and the hot path is untouched.
 - Tool surface: unchanged (no new tool; decisions/verifier are CLI+gate paths, no MCP
   payload-budget impact).
 - Risk: low. Runs that previously crashed or silently emptied now degrade with disclosure;
-  verifier report output gains provenance fields (additive); no behavior change when
-  responses are well-formed.
+  verifier report output gains additive provenance fields, while malformed provider model
+  identifiers and provider-error completions are rejected at the trust boundary.

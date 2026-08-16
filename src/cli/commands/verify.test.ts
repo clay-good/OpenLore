@@ -328,6 +328,7 @@ describe('verify command', () => {
           actuallyImplements: [],
           coverage: 0.25,
           evidence: 'llm-score',
+          provenance: { source: 'llm-judged', model: 'judge-model' },
         },
         overallScore: 0.75,
         llmConfidence: 0.8,
@@ -335,8 +336,27 @@ describe('verify command', () => {
       }, 1, 1, 0.7, false);
 
       const output = log.mock.calls.flat().join('\n');
-      expect(output).toContain('25% coverage (LLM-scored; no per-requirement claims)');
+      expect(output).toContain('25% coverage (LLM-judged by judge-model; no per-requirement claims)');
       expect(output).not.toContain('Requirements: None');
+      log.mockRestore();
+    });
+
+    it('labels named requirement matches as deterministic keyword fallback evidence', async () => {
+      const { displayResult } = await import('./verify.js');
+      const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+      displayResult({
+        filePath: 'src/user.ts', domain: 'user',
+        purposeMatch: { predicted: '', actual: '', similarity: 1 },
+        importMatch: { predicted: [], actual: [], precision: 1, recall: 1, f1Score: 1 },
+        exportMatch: { predicted: [], actual: [], precision: 1, recall: 1, f1Score: 1 },
+        requirementCoverage: {
+          relatedRequirements: ['Auth'], actuallyImplements: ['Auth'], coverage: 1,
+          evidence: 'keyword-match', provenance: { source: 'keyword-fallback' },
+        },
+        overallScore: 1, llmConfidence: 0.8, feedback: [],
+      }, 1, 1, 0.7, false);
+
+      expect(log.mock.calls.flat().join('\n')).toContain('Auth (deterministic keyword fallback)');
       log.mockRestore();
     });
 

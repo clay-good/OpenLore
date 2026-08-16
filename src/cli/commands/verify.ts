@@ -113,28 +113,48 @@ export function displayResult(
 
   // Purpose match
   const purposeStatus = result.purposeMatch.similarity >= 0.5 ? '✓' : '⚠';
-  console.log(`         Purpose: ${purposeStatus} ${result.purposeMatch.similarity >= 0.5 ? 'Correctly identified' : 'Partially matched'}`);
+  const purposeEvidence = result.purposeMatch.provenance?.source === 'llm-judged'
+    ? `LLM-judged by ${safe(result.purposeMatch.provenance.model)}`
+    : result.purposeMatch.provenance?.source === 'keyword-fallback'
+      ? 'deterministic keyword fallback'
+      : 'provenance unavailable';
+  console.log(`         Purpose: ${purposeStatus} ${result.purposeMatch.similarity >= 0.5 ? 'Correctly identified' : 'Partially matched'} (${purposeEvidence})`);
 
   // Import match
   const importPercent = (result.importMatch.f1Score * 100).toFixed(0);
-  console.log(`         Imports: ${result.importMatch.predicted.length}/${result.importMatch.actual.length} predicted (${importPercent}%)`);
+  const importEvidence = result.importMatch.provenance?.source === 'deterministic'
+    ? 'deterministic'
+    : 'provenance unavailable';
+  console.log(`         Imports: ${result.importMatch.predicted.length}/${result.importMatch.actual.length} covered (${importPercent}%; ${importEvidence})`);
 
   // Export match
   const exportPercent = (result.exportMatch.f1Score * 100).toFixed(0);
-  console.log(`         Exports: ${result.exportMatch.predicted.length}/${result.exportMatch.actual.length} predicted (${exportPercent}%)`);
+  const exportEvidence = result.exportMatch.provenance?.source === 'llm-prediction-compared-deterministically'
+    ? `deterministic comparison over ${safe(result.exportMatch.provenance.model)} prediction`
+    : 'provenance unavailable';
+  console.log(`         Exports: ${result.exportMatch.predicted.length}/${result.exportMatch.actual.length} predicted (${exportPercent}%; ${exportEvidence})`);
 
   // Requirement coverage
   if (result.requirementCoverage.evidence === 'llm-score') {
-    console.log(`         Requirements: ${(result.requirementCoverage.coverage * 100).toFixed(0)}% coverage (LLM-scored; no per-requirement claims)`);
+    const model = result.requirementCoverage.provenance?.source === 'llm-judged'
+      ? ` by ${safe(result.requirementCoverage.provenance.model)}`
+      : ' (model provenance unavailable)';
+    console.log(`         Requirements: ${(result.requirementCoverage.coverage * 100).toFixed(0)}% coverage (LLM-judged${model}; no per-requirement claims)`);
   } else if (result.requirementCoverage.relatedRequirements.length > 0) {
     const reqMatches = result.requirementCoverage.actuallyImplements.join(', ') || 'None';
-    console.log(`         Requirements: ${safe(reqMatches)}`);
+    const evidence = result.requirementCoverage.provenance?.source === 'keyword-fallback'
+      ? 'deterministic keyword fallback'
+      : 'provenance unavailable';
+    console.log(`         Requirements: ${safe(reqMatches)} (${evidence})`);
   } else {
     console.log(`         Requirements: Not in specs`);
   }
 
   // Overall score
-  console.log(`         Score: ${(result.overallScore).toFixed(2)} ${status}`);
+  const scoreBasis = result.scoreComposition
+    ? 'weighted mixed-evidence composite: purpose 50%, requirements 35%, imports 5%, exports 10%'
+    : 'provenance unavailable';
+  console.log(`         Composite score: ${(result.overallScore).toFixed(2)} ${status} (${scoreBasis})`);
 
   // Verbose output
   if (verbose && result.feedback.length > 0) {
@@ -160,7 +180,10 @@ export function displaySummary(report: VerificationReport, _threshold: number): 
     ? ((report.passedFiles / report.sampledFiles) * 100).toFixed(0)
     : '0';
 
-  console.log(`   Overall Confidence: ${confidencePercent}%`);
+  const confidenceBasis = report.overallConfidenceBasis
+    ? 'mean of weighted mixed-evidence file composites'
+    : 'provenance unavailable';
+  console.log(`   Overall Composite Confidence: ${confidencePercent}% (${confidenceBasis})`);
   console.log(`   Attempted: ${report.attemptedFiles} files`);
   console.log(`   Verified successfully: ${report.sampledFiles} files`);
   console.log(`   Failed verification: ${report.failedFiles} files`);
@@ -178,14 +201,15 @@ export function displaySummary(report: VerificationReport, _threshold: number): 
 
   // Domain accuracy
   if (report.domainBreakdown.length > 0) {
-    console.log('   Domain Accuracy:');
+    console.log('   Domain Composite Scores:');
     for (let i = 0; i < report.domainBreakdown.length; i++) {
       const domain = report.domainBreakdown[i];
       const scorePercent = (domain.averageScore * 100).toFixed(0);
       const bar = formatScoreBar(domain.averageScore);
       const prefix = i === report.domainBreakdown.length - 1 ? '└─' : '├─';
       const paddedName = `${safe(domain.domain)}/spec.md:`.padEnd(20);
-      console.log(`   ${prefix} ${paddedName} ${scorePercent}% ${bar}`);
+      const basis = domain.averageScoreBasis ?? 'provenance unavailable';
+      console.log(`   ${prefix} ${paddedName} ${scorePercent}% ${bar} (${basis})`);
     }
     console.log('');
   }
@@ -211,7 +235,7 @@ export function displaySummary(report: VerificationReport, _threshold: number): 
   // Recommendation
   let recommendationIcon = '✅';
   let recommendationText = 'READY';
-  let recommendationDetail = 'Specifications accurately describe the codebase.';
+  let recommendationDetail = 'The weighted mixed-evidence composite meets the configured readiness threshold.';
 
   if (report.failedFiles > 0) {
     recommendationIcon = '⚠️';
@@ -229,6 +253,7 @@ export function displaySummary(report: VerificationReport, _threshold: number): 
 
   console.log(`📝 Recommendation: ${recommendationIcon} ${recommendationText}`);
   console.log(`   ${recommendationDetail}`);
+  console.log(`   Basis: ${report.recommendationBasis ?? 'provenance unavailable'}`);
   console.log('');
   console.log(`   Full report: ${OPENLORE_DIR}/${OPENLORE_VERIFICATION_SUBDIR}/REPORT.md`);
   console.log('');
