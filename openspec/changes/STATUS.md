@@ -71,7 +71,10 @@ directories resolve to the validated server launch root, explicit roots still wi
 advertised schemas reject unknown arguments before any watcher, rebuild, telemetry, or write;
 `harden-llm-request-lifecycle` (2026-08-15, archived) — timeouts abort provider fetches and
 streams, provider ceilings are constants-backed, correction requests retain their contract,
-truncation is disclosed once, and fallback model ids are pricing-consistent.
+truncation is disclosed once, and fallback model ids are pricing-consistent;
+`harden-review-render-and-action` (2026-08-15, archived) — PR-head text is inert in Markdown,
+analysis freshness and failures are disclosed, and the bundled Action documents and enforces its
+write-token trust boundary without suppressing configured policy gates.
 
 After this table was compiled, four research sweeps added 32 more proposals (all validate; not yet
 folded into the table): 10 in `FIELD-RESEARCH-2026-07.md`, 10 in `ECOSYSTEM-RESEARCH-2026-07-27.md`,

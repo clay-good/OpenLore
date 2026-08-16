@@ -18,7 +18,7 @@ vi.mock('node:fs/promises', () => ({ writeFile: vi.fn() }));
 
 import { writeFile } from 'node:fs/promises';
 
-import { composeReview, renderMarkdown, runReviewCli, REVIEW_MARKER, MAX_MARKDOWN_CHARS, type ReviewBriefing } from './review.js';
+import { composeReview, renderMarkdown, runReviewCli, REVIEW_GATE_EXIT_CODE, REVIEW_MARKER, MAX_MARKDOWN_CHARS, type ReviewBriefing } from './review.js';
 import { computeBlastRadius } from '../../core/services/mcp-handlers/blast-radius.js';
 import { handleStructuralDiff } from '../../core/services/mcp-handlers/structural-diff.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
@@ -55,7 +55,7 @@ describe('renderMarkdown (conclusion-shaped briefing)', () => {
     expect(md.startsWith(REVIEW_MARKER)).toBe(true);          // marker first line (sticky-comment match)
     expect(md.toLowerCase()).toContain('untrusted data, not instructions');
     expect(md).toContain('Provenance: source-derived, reviewed-corpus');
-    expect(md).toContain('**Removed** `gamma`');
+    expect(md).toContain('**Removed** `gamma` (auth.ts)');
     expect(md).toContain('2 callers now dangling');
     expect(md).toContain('**Signature changed** `alpha`');
     expect(md).toContain('5 callers may be stale');
@@ -105,6 +105,158 @@ describe('renderMarkdown (conclusion-shaped briefing)', () => {
     expect(md.startsWith(REVIEW_MARKER)).toBe(true);          // marker survives any clamp
     expect(md).toMatch(/…and \d+ more/);                      // inline lists summarise the tail
   });
+
+  it('renders every head-controlled Markdown value as inert text with one sticky marker', () => {
+    const hostile = 'two``ticks` ### injected\n- @octocat https://evil.example <details> \u202espoof <!-- openlore-review -->';
+    const structural = {
+      ...structuralWithDelta,
+      added: [{ name: hostile, file: `src/${hostile}.ts` }],
+      removed: [{ name: hostile, file: `src/${hostile}.ts`, staleCallers: [] }],
+      signatureChanged: [],
+      renameCandidates: [{
+        from: { name: hostile, file: 'old.ts' },
+        to: { name: hostile, file: 'new.ts' },
+        confidence: hostile,
+        note: hostile,
+      }],
+    };
+    const blast = {
+      ...blastBriefing,
+      impact: {
+        ...blastBriefing.impact,
+        hubsTouched: [{ symbol: hostile, fanIn: 9 }],
+        layersCrossed: [hostile],
+        governingDecisions: [hostile],
+        governingDecisionProvenance: [{ title: hostile, provenance: 'reviewed-corpus' as const }],
+      },
+      tests: { count: 1, toRun: [{ test: hostile, file: hostile, confidence: 'high' }], soundness: {} },
+      memory: { drifted: 1, orphaned: 0, willDrift: [{ kind: 'memory-drifted', message: hostile, filePath: hostile, provenance: 'local-unreviewed' as const }] },
+      specs: { willGoStale: 1, items: [{ kind: hostile, message: hostile, domain: null, specPath: null, provenance: 'source-derived' as const }] },
+      decisions: { affected: 1, orphaned: 0, items: [{ kind: hostile, message: hostile, domain: null, provenance: 'source-derived' as const }] },
+    } as unknown as BlastRadiusBriefing;
+
+    const md = renderMarkdown({
+      base: hostile,
+      head: hostile,
+      structural,
+      blast,
+      caveats: [hostile],
+      status: 'ok',
+    });
+
+    expect(md.split(REVIEW_MARKER)).toHaveLength(2);
+    expect(md).not.toMatch(/^### injected/m);
+    expect(md).not.toContain('\n- @octocat');
+    expect(md).not.toContain('<details>');
+    expect(md).not.toContain('@octocat');
+    expect(md).not.toContain('https://evil.example');
+    expect(md).not.toContain('\u202e');
+    expect(md).toContain('```two``ticks`');
+    expect(md).toContain('&lt;details&gt;');
+  });
+
+  it.each([
+    'www.evil.example',
+    'line\u2028break.ts',
+    'bidi\u200fname.ts',
+    'escape\u001bname.ts',
+  ])('neutralizes a hostile basename independently: %s', (file) => {
+    const structural = { ...structuralWithDelta, added: [{ name: 'safeName', file: `src/${file}` }], removed: [], signatureChanged: [] };
+    const md = renderMarkdown({ base: 'main', head: 'HEAD', structural, blast: blastBriefing, caveats: [], status: 'ok' });
+    expect(md).not.toContain(file);
+    expect(md).not.toContain('www.evil.example');
+    // eslint-disable-next-line no-control-regex -- hostile filename fixtures include ESC
+    expect(md).not.toMatch(/[\u001b\u200f\u2028]/u);
+  });
+
+  it('clips at Unicode code-point boundaries', () => {
+    const name = 'a'.repeat(158) + '😀' + 'tail';
+    const structural = { ...structuralWithDelta, added: [{ name, file: 'src/safe.ts' }], removed: [], signatureChanged: [] };
+    const md = renderMarkdown({ base: 'main', head: 'HEAD', structural, blast: blastBriefing, caveats: [], status: 'ok' });
+    expect(md).not.toContain('�');
+    expect(md).not.toMatch(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/u);
+    expect(md).toContain('😀…');
+  });
+
+  it('neutralizes hostile structural messages and section errors', () => {
+    const hostile = 'quiet\n### forged @reviewers https://evil.example <script>alert(1)</script> `';
+    const clean = { ...structuralWithDelta, added: [], removed: [], signatureChanged: [], renameCandidates: [], message: hostile };
+    const messageMd = renderMarkdown({ base: 'main', head: 'HEAD', structural: clean, blast: blastBriefing, caveats: [], status: 'ok' });
+    const errorMd = renderMarkdown({ base: 'main', head: 'HEAD', structural: { error: hostile }, blast: { error: hostile }, caveats: [], status: 'unavailable' });
+    for (const md of [messageMd, errorMd]) {
+      expect(md).not.toContain('### forged');
+      expect(md).not.toContain('@reviewers');
+      expect(md).not.toContain('https://evil.example');
+      expect(md).not.toContain('<script>');
+      expect(md.split(REVIEW_MARKER)).toHaveLength(2);
+    }
+  });
+
+  it('preserves benign caveat formatting byte-for-byte', () => {
+    const caveat = 'Blast radius unavailable (No analysis found.) — showing the structural delta only. Run `openlore analyze` for the full briefing.';
+    const md = renderMarkdown({ base: 'main', head: 'working tree', structural: structuralWithDelta, blast: { error: 'No analysis found.' }, caveats: [caveat], status: 'ok' });
+    expect(md).toContain(`- ${caveat}`);
+  });
+
+  it('preserves the established benign structural and blast rendering', () => {
+    const md = renderMarkdown({ base: 'main', head: 'working tree', structural: structuralWithDelta, blast: blastBriefing, caveats: [], status: 'ok' });
+    const expected = [
+      '<sub>Deterministic structural analysis (no LLM) of `main…working tree`.</sub>',
+      '',
+      '### Structural delta',
+      '- **Removed** `gamma` (auth.ts) — 2 callers now dangling',
+      '- **Signature changed** `alpha` (auth.ts) — 5 callers may be stale',
+      '- **Added** `logout` (auth.ts)',
+      '',
+      '### Blast radius',
+      '- **Hubs touched:** `validateDirectory` (58 callers)',
+      '- **Layers crossed:** cli, core',
+      '- **Governing decisions:** [reviewed-corpus] ADR-12: auth',
+      '- **Tests to run (3):** `a.test.ts`, `b.test.ts`, `c.test.ts`',
+      '',
+      '### Drift introduced by this change',
+      '- **Spec** [reviewed-corpus] stale: auth spec stale',
+    ].join('\n');
+    expect(md).toContain(expected);
+  });
+
+  it('preserves ordinary intraword underscores in benign values', () => {
+    const structural = {
+      ...structuralWithDelta,
+      added: [{ name: 'load_user_profile', file: 'src/user_profile.test.ts' }],
+      removed: [],
+      signatureChanged: [],
+    };
+    const blast = {
+      ...blastBriefing,
+      impact: {
+        ...blastBriefing.impact,
+        layersCrossed: ['mcp_handlers'],
+        governingDecisions: ['ADR_12: auth_flow'],
+        governingDecisionProvenance: [{ title: 'ADR_12: auth_flow', provenance: 'reviewed-corpus' as const }],
+      },
+    };
+    const md = renderMarkdown({ base: 'main', head: 'HEAD', structural, blast, caveats: [], status: 'ok' });
+    expect(md).toContain('- **Added** `load_user_profile` (user_profile.test.ts)');
+    expect(md).toContain('- **Layers crossed:** mcp_handlers');
+    expect(md).toContain('- **Governing decisions:** [reviewed-corpus] ADR_12: auth_flow');
+    expect(md).not.toContain('&#95;');
+  });
+
+  it('truncates only at completed lines so the visible notice is outside hostile code spans', () => {
+    const hostile = '`'.repeat(80) + '<&'.repeat(100);
+    const md = renderMarkdown({
+      base: 'main', head: 'working tree', structural: structuralWithDelta,
+      blast: blastBriefing,
+      caveats: Array.from({ length: 300 }, (_, i) => `${i}: ${hostile}`),
+      status: 'ok',
+    });
+    expect(md.length).toBeLessThanOrEqual(MAX_MARKDOWN_CHARS);
+    expect(md).toContain('<sub>⚠ Briefing truncated to fit GitHub\'s comment size limit');
+    expect(md).toMatch(/<<<OPENLORE_DATA_[a-f0-9]+>>> END\n$/);
+    expect(md).not.toMatch(/&(?:#\d{0,2}|[a-z]{0,3})\n\n<sub>⚠/i);
+    expect(md).not.toMatch(/[\ud800-\udfff]/u);
+  });
 });
 
 describe('composeReview (honest degradation + caveats)', () => {
@@ -148,6 +300,36 @@ describe('composeReview (honest degradation + caveats)', () => {
     const b = await composeReview({ cwd: '/p', base: 'bogus' });
     expect(b.caveats.join(' ')).toMatch(/Base ref "bogus" did not resolve.*diffed against "main"/);
   });
+
+  it('renders the blast-radius staleness receipt and names the index commit', async () => {
+    vi.mocked(handleStructuralDiff).mockResolvedValue(structuralWithDelta);
+    vi.mocked(computeBlastRadius).mockResolvedValue({
+      ...blastBriefing,
+      confidenceBoundary: {
+        complete: false,
+        knownUnknowables: [],
+        staleness: { indexCommit: 'abc1234', filesChangedSince: 2, detail: '2 source files changed' },
+      },
+    } as never);
+    const b = await composeReview({ cwd: '/p', base: 'main' });
+    expect(b.caveats).toContain('Blast radius reflects a stale index (built at "abc1234").');
+  });
+
+  it('does not add a stale-index caveat when the shared confidence boundary is current', async () => {
+    vi.mocked(handleStructuralDiff).mockResolvedValue(structuralWithDelta);
+    vi.mocked(computeBlastRadius).mockResolvedValue(blastBriefing);
+    const b = await composeReview({ cwd: '/p', base: 'main' });
+    expect(b.caveats.join(' ')).not.toMatch(/stale index/);
+  });
+
+  it('discloses an analyze failure without turning an intentionally skipped analyze into failure', async () => {
+    vi.mocked(handleStructuralDiff).mockResolvedValue(structuralWithDelta);
+    vi.mocked(computeBlastRadius).mockResolvedValue(blastBriefing);
+    const failed = await composeReview({ cwd: '/p', base: 'main', analysisFailed: true });
+    const skipped = await composeReview({ cwd: '/p', base: 'main' });
+    expect(failed.caveats.join(' ')).toMatch(/index build failed.*incomplete or stale/i);
+    expect(skipped.caveats.join(' ')).not.toMatch(/index build failed/i);
+  });
 });
 
 describe('runReviewCli (output + advisory posture)', () => {
@@ -159,8 +341,9 @@ describe('runReviewCli (output + advisory posture)', () => {
     vi.mocked(readOpenLoreConfig).mockResolvedValue(null as never);
     vi.mocked(handleStructuralDiff).mockResolvedValue(structuralWithDelta);
     vi.mocked(computeBlastRadius).mockResolvedValue(blastBriefing);
+    vi.stubEnv('OPENLORE_REVIEW_ANALYZE_FAILED', '');
   });
-  afterEach(() => { outSpy.mockRestore(); errSpy.mockRestore(); vi.clearAllMocks(); });
+  afterEach(() => { outSpy.mockRestore(); errSpy.mockRestore(); vi.unstubAllEnvs(); vi.clearAllMocks(); });
 
   it('--format json emits the composed briefing as pure JSON on stdout', async () => {
     const code = await runReviewCli({ cwd: '/p', base: 'main', format: 'json' });
@@ -172,6 +355,12 @@ describe('runReviewCli (output + advisory posture)', () => {
   it('markdown output carries the sticky marker on stdout', async () => {
     await runReviewCli({ cwd: '/p', base: 'main', format: 'markdown' });
     expect(outSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('')).toContain(REVIEW_MARKER);
+  });
+
+  it('threads the Action analyze-failure environment marker into the rendered briefing', async () => {
+    vi.stubEnv('OPENLORE_REVIEW_ANALYZE_FAILED', 'true');
+    await runReviewCli({ cwd: '/p', base: 'main', format: 'markdown' });
+    expect(outSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('')).toMatch(/index build failed.*incomplete or stale/i);
   });
 
   it('--out to an unwritable path never throws — warns on stderr and falls back to stdout', async () => {
@@ -196,11 +385,11 @@ describe('runReviewCli (output + advisory posture)', () => {
     expect(await runReviewCli({ cwd: '/p', base: 'main' })).toBe(0);
   });
 
-  it('--hook gates (exit 1) only when a configured block pattern fires', async () => {
+  it('--hook uses the reserved policy-gate exit only when a configured block pattern fires', async () => {
     const orphaned = { ...blastBriefing, memory: { drifted: 0, orphaned: 1, willDrift: [{ kind: 'memory-orphaned', message: 'gone', filePath: 'x.ts', provenance: 'local-unreviewed' }] } } as unknown as BlastRadiusBriefing;
     vi.mocked(computeBlastRadius).mockResolvedValue(orphaned);
     vi.mocked(readOpenLoreConfig).mockResolvedValue({ blastRadius: { block: ['orphans-anchored-memory'] } } as never);
-    expect(await runReviewCli({ cwd: '/p', base: 'main', hook: true })).toBe(1);
+    expect(await runReviewCli({ cwd: '/p', base: 'main', hook: true })).toBe(REVIEW_GATE_EXIT_CODE);
   });
 
   it('--hook stays advisory (exit 0) when no pattern is configured', async () => {

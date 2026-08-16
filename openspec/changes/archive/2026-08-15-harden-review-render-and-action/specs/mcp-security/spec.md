@@ -10,9 +10,11 @@ pairs that analysis with a write-capable token (notably `pull_request_target` wi
 checkout) is a real elevation, not a safe default. The example workflow SHALL warn against
 `pull_request_target` with a head checkout, SHALL document the two-workflow `workflow_run`
 pattern (untrusted analysis under a read-only token; comment posting in a separate trusted job)
-as the recommended way to comment on fork PRs, and SHALL recommend pinning `openlore-version`
-(rather than the `latest` default) whenever a write token is in scope. Guidance SHALL never claim
-the Action "runs no untrusted code" as a justification for elevated triggers.
+as the recommended way to comment on fork PRs. Whenever a write token is in scope, the example
+SHALL require synchronized, reviewed, immutable Action and package-version pins. Before a release
+containing this hardening exists, mandatory placeholders SHALL keep the copied example
+non-runnable and the Action SHALL reject an unresolved package placeholder. Guidance SHALL never
+claim the Action "runs no untrusted code" as a justification for elevated triggers.
 
 #### Scenario: The example workflow no longer blesses pull_request_target
 
@@ -25,5 +27,5 @@ the Action "runs no untrusted code" as a justification for elevated triggers.
 
 - **GIVEN** a workflow granting `pull-requests: write`
 - **WHEN** the maintainer follows the shipped guidance
-- **THEN** it recommends pinning `openlore-version` to a specific release instead of relying on
-  the `latest` default
+- **THEN** it requires the maintainer to replace synchronized fail-closed placeholders with a
+  reviewed immutable Action commit and a package release that contains the same hardening

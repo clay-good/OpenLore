@@ -8,17 +8,27 @@
 # Requirements: a full-history checkout (`fetch-depth: 0`) so the base..head range is
 # reachable, and write permission on pull-request comments.
 #
-# Note: this runs `npx openlore@<openlore-version>`, so it activates once a PUBLISHED
-# openlore ships the `review` command (the release that introduces it). Until then the
-# Action no-ops gracefully (no comment, the check stays green); pin `openlore-version`
-# to that release for reproducibility.
+# This example is deliberately non-runnable until both placeholders below are replaced
+# with the synchronized immutable Action commit and package release containing this
+# hardening. The composite rejects an unresolved package placeholder instead of silently
+# running an older renderer with a write-capable token.
 #
 # Fork PRs: GitHub hands a READ-ONLY `GITHUB_TOKEN` to `pull_request` runs triggered from a
-# fork, so the sticky comment cannot be posted for external contributors — the Action warns
-# and the briefing stays in the job log (it never fails the check). If you need the comment
-# on fork PRs, switch the trigger to `pull_request_target` — but understand the security
-# trade-off (it runs with the base repo's write token; only safe because this Action runs
-# deterministic local analysis, not untrusted head code).
+# fork, so this job cannot post the sticky comment for external contributors. Do NOT switch
+# this job to `pull_request_target` while checking out the PR head: OpenLore parses
+# attacker-controlled repository content, and that combination exposes a write token to an
+# attacker-influenced analysis path.
+#
+# To comment on fork PRs, use two workflows: (1) a `pull_request` workflow with read-only
+# permissions checks out and analyzes the head, then uploads only the rendered briefing as
+# an artifact; (2) a `workflow_run` workflow with `pull-requests: write` does
+# not check out or execute the head, validates/downloads that artifact, and posts its inert
+# text. The trusted job must select the artifact by `workflow_run.id`, verify the source
+# repository/event/conclusion from trusted run metadata, derive the PR number from that metadata
+# (never the artifact), clamp the body, and normalize exactly one leading sticky marker before
+# posting with its own `github-script`; this composite's post step is pull_request-only. Treat the
+# artifact as untrusted data. Pin the Action and `openlore-version` to reviewed immutable releases
+# whenever a write-capable token is in scope.
 
 name: OpenLore review
 
@@ -39,15 +49,19 @@ jobs:
   openlore-review:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0 # full history so the PR base is reachable
+          ref: ${{ github.event.pull_request.head.sha }} # analyze the same head passed to review
+          persist-credentials: false # never leave the write-capable token in the head checkout
 
-      - uses: clay-good/OpenLore/.github/actions/openlore-review@main
+      # Replace both placeholders with the first reviewed release/commit that contains this
+      # hardening. They intentionally fail closed instead of silently selecting a pre-fix build.
+      - uses: clay-good/OpenLore/.github/actions/openlore-review@REPLACE_WITH_REVIEWED_COMMIT_SHA
         with:
           # github-token: ${{ secrets.GITHUB_TOKEN }}   # default; uncomment to override
           # base: ${{ github.event.pull_request.base.sha }}
-          # head: ${{ github.event.pull_request.head.sha }}
+          head: ${{ github.event.pull_request.head.sha }}
           analyze: 'true'            # build the index for the full blast radius
-          openlore-version: 'latest'
+          openlore-version: 'REPLACE_WITH_REVIEWED_RELEASE'
           gate: 'false'              # 'true' = fail the job on a configured blastRadius.block pattern
