@@ -16,7 +16,7 @@
  *   const results = await VectorIndex.search(outputDir, "authenticate user with JWT", embedSvc);
  */
 
-import { existsSync, readFileSync, writeFileSync, rmSync, openSync, writeSync, closeSync, statSync, realpathSync, renameSync, unlinkSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, rmSync, openSync, writeSync, closeSync, statSync, fstatSync, realpathSync, renameSync, unlinkSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import type { FunctionNode } from './call-graph.js';
 import type { FileSignatureMap } from './signature-extractor.js';
@@ -136,6 +136,15 @@ function metaStamp(outputDir: string): string | null {
   }
 }
 
+function openMetaStamp(fd: number): string | null {
+  try {
+    const stat = fstatSync(fd, { bigint: true });
+    return `${stat.dev}:${stat.ino}:${stat.mtimeNs}:${stat.ctimeNs}:${stat.size}`;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Read the index metadata sidecar (cached per dbPath).
  * Returns null when no sidecar exists — e.g. a legacy index built before the
@@ -152,20 +161,26 @@ function readMeta(outputDir: string): VectorIndexMeta | null {
   // Require a stable pre/post-read stamp. A concurrent atomic rename causes a
   // retry; a malformed file that exists is never cached as legacy-null.
   for (let attempt = 0; attempt < 2; attempt++) {
-    const before = metaStamp(outputDir);
-    let meta: VectorIndexMeta;
+    let fd: number | undefined;
+    let before: string | null = null;
     try {
-      meta = JSON.parse(readFileSync(metaFilePath(outputDir), 'utf-8')) as VectorIndexMeta;
+      fd = openSync(metaFilePath(outputDir), 'r');
+      before = openMetaStamp(fd);
+      const meta = JSON.parse(readFileSync(fd, 'utf-8')) as VectorIndexMeta;
+      const after = openMetaStamp(fd);
+      const currentPath = metaStamp(outputDir);
+      if (before !== after || after !== currentPath) continue;
+      _metaCache.set(dbPath, { value: meta, stamp: currentPath });
+      return meta;
     } catch {
-      const after = metaStamp(outputDir);
-      if (before !== after) continue;
+      const after = fd === undefined ? null : openMetaStamp(fd);
+      const currentPath = metaStamp(outputDir);
+      if (before !== after || after !== currentPath) continue;
       if (before === null) _metaCache.set(dbPath, { value: null, stamp: null });
       return null;
+    } finally {
+      if (fd !== undefined) closeSync(fd);
     }
-    const after = metaStamp(outputDir);
-    if (before !== after) continue;
-    _metaCache.set(dbPath, { value: meta, stamp: after });
-    return meta;
   }
   return null;
 }
