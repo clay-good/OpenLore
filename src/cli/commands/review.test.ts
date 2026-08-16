@@ -18,7 +18,7 @@ vi.mock('node:fs/promises', () => ({ writeFile: vi.fn() }));
 
 import { writeFile } from 'node:fs/promises';
 
-import { composeReview, renderMarkdown, runReviewCli, REVIEW_GATE_EXIT_CODE, REVIEW_MARKER, MAX_MARKDOWN_CHARS, type ReviewBriefing } from './review.js';
+import { composeReview, renderHuman, renderMarkdown, runReviewCli, REVIEW_GATE_EXIT_CODE, REVIEW_MARKER, MAX_MARKDOWN_CHARS, type ReviewBriefing } from './review.js';
 import { computeBlastRadius } from '../../core/services/mcp-handlers/blast-radius.js';
 import { handleStructuralDiff } from '../../core/services/mcp-handlers/structural-diff.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
@@ -72,6 +72,26 @@ describe('renderMarkdown (conclusion-shaped briefing)', () => {
     const decisionLines = md.split('\n').filter(l => l.includes('**Decision**')).length;
     expect(decisionLines).toBeLessThanOrEqual(5);
     expect(md).toMatch(/and 18 more decision issue/);        // 23 affected − 5 shown
+  });
+
+  it('renders widening-only and truncation test boundaries when zero tests are selected', () => {
+    const boundaryBlast = {
+      ...blastBriefing,
+      impact: { ...blastBriefing.impact, hubsTouched: [], layersCrossed: [], governingDecisions: [], governingDecisionProvenance: [] },
+      tests: {
+        count: 0,
+        toRun: [],
+        truncatedAtDepth: 2,
+        soundness: { caveats: ['Symbol scope resolved by substring fallback and may have widened.'] },
+      },
+      memory: { drifted: 0, orphaned: 0, willDrift: [] },
+      specs: { willGoStale: 0, items: [] },
+      decisions: { affected: 0, orphaned: 0, items: [] },
+    } as unknown as BlastRadiusBriefing;
+    const briefing = { base: 'main', head: 'working tree', structural: { message: 'No structural changes.' }, blast: boundaryBlast, caveats: [], status: 'ok' as const };
+
+    expect(renderMarkdown(briefing)).toMatch(/truncated at depth 2[\s\S]*substring fallback/i);
+    expect(renderHuman(briefing)).toMatch(/truncated at depth 2[\s\S]*substring fallback/i);
   });
 
   it('discloses a missing index instead of an empty briefing', () => {

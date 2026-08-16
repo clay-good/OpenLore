@@ -141,6 +141,15 @@ function renderHuman(c: ImpactCertificate): string {
     const top = c.tests.toRun.slice(0, 8).map(t => t.test).join(', ');
     lines.push(`   Tests to run (${c.tests.count}): ${top}${c.tests.count > 8 ? ', …' : ''}`);
   }
+  if ('truncatedAtDepth' in c.tests && c.tests.truncatedAtDepth !== undefined) {
+    lines.push(`   ⚠ Test reachability was truncated at depth ${c.tests.truncatedAtDepth}; deeper tests may exist.`);
+  }
+  if ('soundness' in c.tests) {
+    const soundness = c.tests.soundness as { caveats?: string[] } | undefined;
+    for (const caveat of soundness?.caveats ?? []) {
+      if (/substring fallback|may have widened/i.test(caveat)) lines.push(`   ⚠ ${caveat}`);
+    }
+  }
   if ('willGoStale' in c.specs && c.specs.willGoStale > 0) {
     lines.push(`   ⚠ ${c.specs.willGoStale} spec(s) may go stale`);
   }

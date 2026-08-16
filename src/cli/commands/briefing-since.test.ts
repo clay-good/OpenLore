@@ -65,6 +65,22 @@ describe('runBriefingSinceCli', () => {
     expect(out).toContain('Tests to run for this change set: 5');
   });
 
+  it('renders test-selection receipts even when no test was found within the cap', async () => {
+    mockedHandler.mockResolvedValue(fullResult({
+      testsToRun: {
+        count: 0,
+        files: [],
+        truncatedAtDepth: 2,
+        soundness: { caveats: ['Symbol scope for "ren" resolved by substring fallback and may have widened to 2 symbols.'] },
+      },
+    }));
+    const code = await runBriefingSinceCli({ cwd: '/repo' });
+    const out = writes.join('');
+    expect(code).toBe(0);
+    expect(out).toContain('truncated at depth 2');
+    expect(out).toContain('substring fallback');
+  });
+
   it('surfaces the base-ref fallback and shallow-history warnings', async () => {
     mockedHandler.mockResolvedValue(fullResult({
       baseRef: 'main',

@@ -101,6 +101,8 @@ export interface BlastRadiusBriefing {
     count: number;
     toRun: Array<{ test: string; file: string; confidence: string }>;
     soundness: unknown;
+    /** Unmodified reachability-cap receipt from select_tests. */
+    truncatedAtDepth?: number;
     /**
      * Present when test selection THREW. `count: 0` alongside this means "not
      * computed", not "no tests are impacted" — the two are different claims and a
@@ -242,6 +244,7 @@ export async function computeBlastRadius(
   let testCount = 0;
   let testToRun: Array<{ test: string; file: string; confidence: string }> = [];
   let testSoundness: unknown;
+  let testsTruncatedAtDepth: number | undefined;
   let testsUnavailable: string | null = null;
   // Cross-repo (federation) block returned by the composed select_tests, present only
   // when federation was opted in AND a federation scope resolved.
@@ -255,12 +258,14 @@ export async function computeBlastRadius(
     }) as {
       selectedTests?: Array<{ test: string; file: string; confidence: string }>;
       soundness?: unknown;
+      truncatedAtDepth?: number;
       federation?: Record<string, unknown>;
     };
     const tests = sel.selectedTests ?? [];
     testCount = tests.length;
     testToRun = tests.slice(0, 15);
     testSoundness = sel.soundness;
+    testsTruncatedAtDepth = sel.truncatedAtDepth;
     federationResult = sel.federation;
   } catch (err) {
     // Tests are best-effort, but "0 tests" and "tests could not be computed" are
@@ -382,7 +387,13 @@ export async function computeBlastRadius(
         ? { truncated: { omitted: seeds.length - analyzed.length, reason: `only the ${analyzed.length} highest-fan-in symbols were analyzed` } }
         : {}),
     },
-    tests: { count: testCount, toRun: testToRun, soundness: testSoundness, ...(testsUnavailable ? { unavailable: testsUnavailable } : {}) },
+    tests: {
+      count: testCount,
+      toRun: testToRun,
+      soundness: testSoundness,
+      ...(testsTruncatedAtDepth !== undefined ? { truncatedAtDepth: testsTruncatedAtDepth } : {}),
+      ...(testsUnavailable ? { unavailable: testsUnavailable } : {}),
+    },
     memory: { drifted: memDrifted, orphaned: memOrphaned, willDrift: memWillDrift.slice(0, 20) },
     specs: { willGoStale: specItems.length, items: specItems.slice(0, 20) },
     decisions: { affected: decisionItems.length, orphaned: decisionsOrphaned, items: decisionItems.slice(0, 20) },

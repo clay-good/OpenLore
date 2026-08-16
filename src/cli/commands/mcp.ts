@@ -597,7 +597,8 @@ export const TOOL_DEFINITIONS = [
         directory: { type: 'string', description: DIR_DESC },
         changedSymbols: {
           type: 'array',
-          items: { type: 'string' },
+          maxItems: 100,
+          items: { type: 'string', minLength: 1 },
           description: 'Changed function/method names. Optional — if neither this nor diffRef is given, defaults to your current working-tree changes vs HEAD.',
         },
         diffRef: {

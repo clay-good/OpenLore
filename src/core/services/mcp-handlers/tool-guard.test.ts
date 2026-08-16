@@ -160,6 +160,21 @@ describe('capStructuredResult', () => {
     expect(parsed.indexStaleness).toEqual(indexStaleness);
   });
 
+  it('preserves test-selection boundary receipts when a result falls back to an envelope', () => {
+    const soundness = { posture: 'over-approximate', caveats: ['Backward reachability was truncated at depth 2; deeper tests may exist.'] };
+    const result = {
+      seeds: Array.from({ length: 50_000 }, (_, i) => ({ name: `symbol${i}`, file: `src/${i}.ts` })),
+      truncatedAtDepth: 2,
+      soundness,
+    };
+    const r = capStructuredResult(result, 64 * 1024);
+    const parsed = JSON.parse(r.text) as { truncatedAtDepth: number; soundness: typeof soundness };
+
+    expect(r.truncated).toBe(true);
+    expect(parsed.truncatedAtDepth).toBe(2);
+    expect(parsed.soundness).toEqual(soundness);
+  });
+
   it('bounds preserved staleness metadata when its file list alone exceeds the response cap', () => {
     const staleFiles = Array.from({ length: 200 }, (_, i) => `src/${i}-${'nested/'.repeat(200)}file.ts`);
     const result = {

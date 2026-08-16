@@ -188,6 +188,23 @@ describe('computeBlastRadius', () => {
     expect(() => assertConclusionShape('blast_radius', b)).not.toThrow();
   });
 
+  it('forwards test-selection bounds and widening caveats unmodified', async () => {
+    const soundness = {
+      posture: 'over-approximate',
+      caveats: ['Symbol scope for "dir" resolved by substring fallback and may have widened to: validateDirectory (src/utils.ts).'],
+    };
+    vi.mocked(handleSelectTests).mockResolvedValueOnce({
+      selectedTests: [],
+      truncatedAtDepth: 2,
+      soundness,
+    } as never);
+
+    const b = await computeBlastRadius({ directory: '/p' }) as BlastRadiusBriefing;
+
+    expect(b.tests.truncatedAtDepth).toBe(2);
+    expect(b.tests.soundness).toBe(soundness);
+  });
+
   it('when federation is opted in but no scope resolves, discloses that — never "not shipped"', async () => {
     // select_tests ran but returned no federation block (no scope resolved).
     vi.mocked(handleSelectTests).mockResolvedValueOnce({

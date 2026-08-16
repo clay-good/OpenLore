@@ -52,6 +52,7 @@ import { handleBriefingSince } from './briefing-since.js';
 import { readCachedContext } from './utils.js';
 import { getChangedFiles, resolveBaseRefDisclosed } from '../../drift/git-diff.js';
 import { analyzeChangeCoupling } from '../../provenance/change-coupling.js';
+import { handleSelectTests } from './test-impact.js';
 import type { FunctionNode, SerializedCallGraph, CallEdge } from '../../analyzer/call-graph.js';
 
 function node(over: Partial<FunctionNode> & { id: string }): FunctionNode {
@@ -92,7 +93,7 @@ interface BriefingResult {
   briefing: Array<{ name: string; tier: string; labels: string[]; community?: string; evidence: { fanIn: number; priorChurn: number } }>;
   truncation: { bounded: boolean; returned: number; omitted: number; lowestTierReached: string | null; omittedByTier?: Record<string, number> };
   regions: Array<{ community: string; count: number }>;
-  testsToRun: { count: number; files: string[] };
+  testsToRun: { count: number; files: string[]; truncatedAtDepth?: number; soundness?: unknown };
   surprisingChange: { available: boolean; historyCommitsScanned: number };
   note?: string;
   caveats: string[];
@@ -156,6 +157,22 @@ describe('handleBriefingSince', () => {
     expect(r.regions.some(g => g.community === 'core')).toBe(true);
     // baseRef cursor echoed (resolved)
     expect(r.baseRef).toBe('mainsha');
+  });
+
+  it('preserves test-selection bounds and caveats in the briefing', async () => {
+    mockedDiff.mockResolvedValue(diffFiles(['src/core.ts']));
+    mockedCoupling.mockResolvedValue(coupling({ 'src/core.ts': 1 }, 40));
+    const soundness = { posture: 'over-approximate', caveats: ['deeper tests may exist'] };
+    vi.mocked(handleSelectTests).mockResolvedValueOnce({
+      selectedTests: [],
+      truncatedAtDepth: 2,
+      soundness,
+    } as never);
+
+    const r = (await handleBriefingSince({ directory: '/repo' })) as BriefingResult;
+
+    expect(r.testsToRun.truncatedAtDepth).toBe(2);
+    expect(r.testsToRun.soundness).toBe(soundness);
   });
 
   it('mines prior churn strictly before the briefed range (passes the resolved base as the start ref)', async () => {

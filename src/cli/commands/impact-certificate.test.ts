@@ -206,4 +206,19 @@ describe('runImpactCertificateCli (advisory posture & exit codes)', () => {
     expect(code).toBe(0);
     expect(outSpy.mock.calls.length).toBeGreaterThan(0);
   });
+
+  it('human render surfaces zero-test truncation and widening receipts', async () => {
+    vi.mocked(computeImpactCertificate).mockResolvedValue(cert([], {
+      tests: {
+        count: 0,
+        toRun: [],
+        soundness: { caveats: ['Symbol scope resolved by substring fallback and may have widened.'] },
+        truncatedAtDepth: 2,
+      },
+    }));
+    expect(await runImpactCertificateCli({ cwd: '/p' })).toBe(0);
+    const out = outSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('');
+    expect(out).toContain('truncated at depth 2');
+    expect(out).toContain('substring fallback');
+  });
 });

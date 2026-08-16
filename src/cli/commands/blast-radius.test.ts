@@ -152,6 +152,23 @@ describe('runBlastRadiusCli (advisory posture & exit codes)', () => {
     expect(outSpy.mock.calls.length).toBeGreaterThan(0); // human briefing went to stdout, not stderr
   });
 
+  it('human render surfaces zero-test truncation and widening receipts', async () => {
+    const boundary = {
+      ...orphanBriefing,
+      tests: {
+        count: 0,
+        toRun: [],
+        truncatedAtDepth: 2,
+        soundness: { caveats: ['Symbol scope resolved by substring fallback and may have widened.'] },
+      },
+    } as BlastRadiusBriefing;
+    vi.mocked(computeBlastRadius).mockResolvedValue(boundary);
+    expect(await runBlastRadiusCli({ cwd: '/p' })).toBe(0);
+    const out = outSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('');
+    expect(out).toContain('truncated at depth 2');
+    expect(out).toContain('substring fallback');
+  });
+
   it('never blocks on a malformed blastRadius.block (valid JSON, wrong type)', async () => {
     vi.mocked(computeBlastRadius).mockResolvedValue(orphanBriefing);
     // A wrong-typed `block` (object) would throw on iteration if not coerced — must not block.
