@@ -150,6 +150,13 @@ function renderHuman(b: BlastRadiusBriefing): string {
     const top = b.tests.toRun.slice(0, 8).map(t => t.test).join(', ');
     lines.push(`   Tests to run (${b.tests.count}): ${top}${b.tests.count > 8 ? ', …' : ''}`);
   }
+  if (b.tests.truncatedAtDepth !== undefined) {
+    lines.push(`   ⚠ Test reachability was truncated at depth ${b.tests.truncatedAtDepth}; deeper tests may exist.`);
+  }
+  const testSoundness = b.tests.soundness as { caveats?: string[] } | undefined;
+  for (const caveat of testSoundness?.caveats ?? []) {
+    if (/substring fallback|may have widened/i.test(caveat)) lines.push(`   ⚠ ${caveat}`);
+  }
   for (const m of b.memory.willDrift) lines.push(`   ⚠ memory [${m.provenance}] ${m.kind === 'memory-orphaned' ? 'ORPHANED' : 'drifted'}: ${m.message}`);
   const memTotal = b.memory.drifted + b.memory.orphaned;
   if (memTotal > b.memory.willDrift.length) lines.push(`   … and ${memTotal - b.memory.willDrift.length} more anchored memor${memTotal - b.memory.willDrift.length === 1 ? 'y' : 'ies'}`);

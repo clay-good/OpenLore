@@ -16,6 +16,7 @@ vi.mock('../../drift/git-diff.js', () => ({
 }));
 
 import { handleSelectTests, seedsFromSymbols, seedsFromFiles } from './test-impact.js';
+import { handleReportCoverageGaps } from './coverage-gaps.js';
 import { readCachedContext } from './utils.js';
 import { getChangedFiles } from '../../drift/git-diff.js';
 import type { FunctionNode, SerializedCallGraph, CallEdge } from '../../analyzer/call-graph.js';
@@ -155,6 +156,244 @@ describe('handleSelectTests', () => {
     };
     expect(r.confidenceBoundary.complete).toBe(false);
     expect(r.confidenceBoundary.knownUnknowable.some(c => c.rule === 'route-handler')).toBe(true);
+  });
+
+  it('keys sibling fallback by seed identity when same-named functions collide', async () => {
+    const nodes = [
+      node({ id: 'src/covered.ts::render' }),
+      node({ id: 'src/uncovered.ts::render' }),
+      node({ id: 'src/uncovered.ts::helper' }),
+      node({ id: 'test/covered.test.ts::testsCoveredRender', isTest: true }),
+      node({ id: 'test/uncovered.test.ts::testsHelper', isTest: true }),
+    ];
+    const edges = [
+      edge('test/covered.test.ts::testsCoveredRender', 'src/covered.ts::render'),
+      edge('src/uncovered.ts::helper', 'test/uncovered.test.ts::testsHelper', 'tested_by', 'testsHelper'),
+    ];
+    vi.mocked(readCachedContext).mockResolvedValueOnce({ callGraph: graph(nodes, edges) } as never);
+    const r = await handleSelectTests({ directory: '/p', changedSymbols: ['render'] }) as {
+      selectedTests: Array<{ test: string; confidence: string; viaPath: string[] }>;
+      soundness: { caveats: string[] };
+    };
+
+    expect(r.selectedTests).toContainEqual(expect.objectContaining({
+      test: 'testsHelper',
+      confidence: 'low',
+      viaPath: ['testsHelper', '(same file as render)'],
+    }));
+    expect(r.soundness.caveats.join(' ')).toMatch(/sibling-file tests/i);
+  });
+
+  it('does not use sibling fallback for a genuinely covered seed', async () => {
+    const nodes = [
+      node({ id: 'src/subject.ts::subject' }),
+      node({ id: 'src/subject.ts::helper' }),
+      node({ id: 'test/direct.test.ts::testsSubject', isTest: true }),
+      node({ id: 'test/sibling.test.ts::testsHelper', isTest: true }),
+    ];
+    const edges = [
+      edge('test/direct.test.ts::testsSubject', 'src/subject.ts::subject'),
+      edge('src/subject.ts::helper', 'test/sibling.test.ts::testsHelper', 'tested_by', 'testsHelper'),
+    ];
+    vi.mocked(readCachedContext).mockResolvedValueOnce({ callGraph: graph(nodes, edges) } as never);
+
+    const r = await handleSelectTests({ directory: '/p', changedSymbols: ['subject'] }) as {
+      selectedTests: Array<{ test: string }>;
+      soundness: { caveats: string[] };
+    };
+
+    expect(r.selectedTests.map(t => t.test)).toEqual(['testsSubject']);
+    expect(r.soundness.caveats.join(' ')).not.toMatch(/sibling-file tests/i);
+  });
+
+  it('discloses a non-empty frontier at the depth cap and qualifies the empty result', async () => {
+    const nodes = [
+      node({ id: 'src/chain.ts::seed' }),
+      node({ id: 'src/chain.ts::one' }),
+      node({ id: 'src/chain.ts::two' }),
+      node({ id: 'test/chain.test.ts::deepTest', isTest: true }),
+    ];
+    const edges = [
+      edge('test/chain.test.ts::deepTest', 'src/chain.ts::two'),
+      edge('src/chain.ts::two', 'src/chain.ts::one'),
+      edge('src/chain.ts::one', 'src/chain.ts::seed'),
+    ];
+    vi.mocked(readCachedContext).mockResolvedValueOnce({ callGraph: graph(nodes, edges) } as never);
+
+    const r = await handleSelectTests({ directory: '/p', changedSymbols: ['seed'], maxDepth: 2 }) as {
+      selectedTests: unknown[];
+      truncatedAtDepth?: number;
+      soundness: { caveats: string[] };
+    };
+
+    expect(r.selectedTests).toEqual([]);
+    expect(r.truncatedAtDepth).toBe(2);
+    expect(r.soundness.caveats.join(' ')).toMatch(/deeper tests may exist/i);
+    expect(r.soundness.caveats.join(' ')).not.toMatch(/genuinely untested/i);
+
+    vi.mocked(readCachedContext).mockResolvedValueOnce({ callGraph: graph(nodes, edges) } as never);
+    const gaps = await handleReportCoverageGaps({ directory: '/p', changedSymbols: ['seed'] }) as {
+      reachableFromTest: number;
+      coverageGaps: Array<{ name: string }>;
+    };
+    expect(gaps.reachableFromTest).toBe(1);
+    expect(gaps.coverageGaps).not.toContainEqual(expect.objectContaining({ name: 'seed' }));
+  });
+
+  it('omits the truncation receipt when the walk exhausts before the cap', async () => {
+    const r = await handleSelectTests({ directory: '/p', changedSymbols: ['bar'], maxDepth: 4 }) as {
+      truncatedAtDepth?: number;
+    };
+    expect(r.truncatedAtDepth).toBeUndefined();
+  });
+
+  it('names substring-widened symbols while exact matches remain silent', async () => {
+    const widened = await handleSelectTests({ directory: '/p', changedSymbols: ['ar'] }) as {
+      soundness: { caveats: string[] };
+    };
+    expect(widened.soundness.caveats.join(' ')).toMatch(/substring fallback/i);
+    expect(widened.soundness.caveats.join(' ')).toMatch(/bar \(src\/foo\.ts\)/);
+
+    const exact = await handleSelectTests({ directory: '/p', changedSymbols: ['bar'] }) as {
+      soundness: { caveats: string[] };
+    };
+    expect(exact.soundness.caveats.join(' ')).not.toMatch(/substring fallback/i);
+  });
+
+  it('does not treat an exhausted cycle at the cap as truncation', async () => {
+    const nodes = [
+      node({ id: 'src/cycle.ts::seed' }),
+      node({ id: 'src/cycle.ts::one' }),
+      node({ id: 'src/cycle.ts::two' }),
+    ];
+    const edges = [
+      edge('src/cycle.ts::one', 'src/cycle.ts::seed'),
+      edge('src/cycle.ts::two', 'src/cycle.ts::one'),
+      edge('src/cycle.ts::one', 'src/cycle.ts::two'),
+    ];
+    vi.mocked(readCachedContext).mockResolvedValueOnce({ callGraph: graph(nodes, edges) } as never);
+
+    const r = await handleSelectTests({ directory: '/p', changedSymbols: ['seed'], maxDepth: 2 }) as {
+      truncatedAtDepth?: number;
+    };
+    expect(r.truncatedAtDepth).toBeUndefined();
+  });
+
+  it('recognizes every seed reached by one test despite multi-seed parent collisions', async () => {
+    const nodes = [
+      node({ id: 'src/a.ts::seedA' }),
+      node({ id: 'src/b.ts::seedB' }),
+      node({ id: 'src/shared.ts::shared' }),
+      node({ id: 'src/a.ts::siblingA' }),
+      node({ id: 'src/b.ts::siblingB' }),
+      node({ id: 'test/shared.test.ts::testsBoth', isTest: true }),
+      node({ id: 'test/a.test.ts::testsSiblingA', isTest: true }),
+      node({ id: 'test/b.test.ts::testsSiblingB', isTest: true }),
+    ];
+    const edges = [
+      edge('test/shared.test.ts::testsBoth', 'src/shared.ts::shared'),
+      edge('src/shared.ts::shared', 'src/a.ts::seedA'),
+      edge('src/shared.ts::shared', 'src/b.ts::seedB'),
+      edge('src/a.ts::siblingA', 'test/a.test.ts::testsSiblingA', 'tested_by', 'testsSiblingA'),
+      edge('src/b.ts::siblingB', 'test/b.test.ts::testsSiblingB', 'tested_by', 'testsSiblingB'),
+    ];
+    vi.mocked(readCachedContext).mockResolvedValueOnce({ callGraph: graph(nodes, edges) } as never);
+
+    const r = await handleSelectTests({ directory: '/p', changedSymbols: ['seedA', 'seedB'] }) as {
+      selectedTests: Array<{ test: string }>;
+      soundness: { caveats: string[] };
+    };
+    expect(r.selectedTests.map(t => t.test)).toEqual(['testsBoth']);
+    expect(r.soundness.caveats.join(' ')).not.toMatch(/sibling-file tests/i);
+  });
+
+  it('does not count synthesized-only test coverage in direct-resolved-only mode', async () => {
+    const nodes = [
+      node({ id: 'src/strict.ts::seed' }),
+      node({ id: 'src/strict.ts::sibling' }),
+      node({ id: 'test/synth.test.ts::synthTest', isTest: true }),
+      node({ id: 'test/sibling.test.ts::siblingTest', isTest: true }),
+    ];
+    const edges: CallEdge[] = [
+      { callerId: 'test/synth.test.ts::synthTest', calleeId: 'src/strict.ts::seed', calleeName: 'seed', confidence: 'synthesized', kind: 'calls', synthesizedBy: 'callback-argument' },
+      edge('src/strict.ts::sibling', 'test/sibling.test.ts::siblingTest', 'tested_by', 'siblingTest'),
+    ];
+    vi.mocked(readCachedContext).mockResolvedValueOnce({ callGraph: graph(nodes, edges) } as never);
+
+    const r = await handleSelectTests({ directory: '/p', changedSymbols: ['seed'], directResolvedOnly: true }) as {
+      selectedTests: Array<{ test: string; confidence: string }>;
+      soundness: { caveats: string[] };
+    };
+    expect(r.selectedTests).toContainEqual(expect.objectContaining({ test: 'siblingTest', confidence: 'low' }));
+    expect(r.selectedTests.map(t => t.test)).not.toContain('synthTest');
+    expect(r.soundness.caveats.join(' ')).toMatch(/sibling-file tests/i);
+  });
+
+  it('does not report strict-mode truncation across a synthesized-only frontier edge', async () => {
+    const nodes = [
+      node({ id: 'src/strict-cap.ts::seed' }),
+      node({ id: 'src/strict-cap.ts::directCaller' }),
+      node({ id: 'test/strict-cap.test.ts::synthTest', isTest: true }),
+    ];
+    const edges: CallEdge[] = [
+      edge('src/strict-cap.ts::directCaller', 'src/strict-cap.ts::seed'),
+      { callerId: 'test/strict-cap.test.ts::synthTest', calleeId: 'src/strict-cap.ts::directCaller', calleeName: 'directCaller', confidence: 'synthesized', kind: 'calls', synthesizedBy: 'callback-argument' },
+    ];
+    vi.mocked(readCachedContext).mockResolvedValueOnce({ callGraph: graph(nodes, edges) } as never);
+
+    const r = await handleSelectTests({ directory: '/p', changedSymbols: ['seed'], maxDepth: 1, directResolvedOnly: true }) as {
+      truncatedAtDepth?: number;
+    };
+    expect(r.truncatedAtDepth).toBeUndefined();
+  });
+
+  it('recognizes a seed covered exclusively by tested_by identity', async () => {
+    const nodes = [
+      node({ id: 'src/imported.ts::seed' }),
+      node({ id: 'src/imported.ts::sibling' }),
+      node({ id: 'test/seed.test.ts::seedTest', isTest: true }),
+      node({ id: 'test/sibling.test.ts::siblingTest', isTest: true }),
+    ];
+    const edges = [
+      edge('src/imported.ts::seed', 'test/seed.test.ts::seedTest', 'tested_by', 'seedTest'),
+      edge('src/imported.ts::sibling', 'test/sibling.test.ts::siblingTest', 'tested_by', 'siblingTest'),
+    ];
+    vi.mocked(readCachedContext).mockResolvedValueOnce({ callGraph: graph(nodes, edges) } as never);
+
+    const r = await handleSelectTests({ directory: '/p', changedSymbols: ['seed'] }) as {
+      selectedTests: Array<{ test: string; confidence: string }>;
+      soundness: { caveats: string[] };
+    };
+    expect(r.selectedTests).toEqual([expect.objectContaining({ test: 'seedTest', confidence: 'high' })]);
+    expect(r.soundness.caveats.join(' ')).not.toMatch(/sibling-file tests/i);
+  });
+
+  it('rejects empty symbol names instead of widening to the whole graph', async () => {
+    const r = await handleSelectTests({ directory: '/p', changedSymbols: ['   '] }) as { error?: string };
+    expect(r.error).toMatch(/non-empty symbol names/i);
+
+    vi.mocked(readCachedContext).mockResolvedValueOnce({ callGraph: graph(NODES, EDGES) } as never);
+    const gaps = await handleReportCoverageGaps({ directory: '/p', changedSymbols: [''] }) as {
+      analyzedSymbols: number;
+      note?: string;
+    };
+    expect(gaps.analyzedSymbols).toBe(0);
+    expect(gaps.note).toMatch(/nothing matched/i);
+  });
+
+  it('bounds substring-widening examples and points to the complete seed list', async () => {
+    const nodes = Array.from({ length: 12 }, (_, i) => node({ id: `src/f${i}.ts::match${i}` }));
+    vi.mocked(readCachedContext).mockResolvedValueOnce({ callGraph: graph(nodes, []) } as never);
+
+    const r = await handleSelectTests({ directory: '/p', changedSymbols: ['match'] }) as {
+      seeds: Array<{ name: string }>;
+      soundness: { caveats: string[] };
+    };
+    const widening = r.soundness.caveats.find(c => /substring fallback/i.test(c))!;
+    expect(r.seeds).toHaveLength(12);
+    expect(widening).toMatch(/12 symbol/);
+    expect(widening).toMatch(/and 4 more listed in seeds/);
+    expect(widening).not.toContain('match8 (');
   });
 
   it('attaches a confidenceBoundary on the no-seed (message) result', async () => {

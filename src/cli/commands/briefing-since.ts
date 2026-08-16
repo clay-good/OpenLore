@@ -34,7 +34,13 @@ interface BriefingResult {
   briefing: BriefingItem[];
   truncation: { bounded: boolean; returned: number; omitted: number; lowestTierReached: string | null; omittedByTier?: Record<string, number> };
   regions: Array<{ community: string; count: number }>;
-  testsToRun: { count: number; files: string[]; note?: string };
+  testsToRun: {
+    count: number;
+    files: string[];
+    note?: string;
+    truncatedAtDepth?: number;
+    soundness?: { caveats?: string[] };
+  };
   surprisingChange: { available: boolean; reason?: string; historyCommitsScanned: number };
   note?: string;
   caveats: string[];
@@ -100,6 +106,12 @@ function renderHuman(r: BriefingResult): string {
   }
 
   lines.push(`   Tests to run for this change set: ${r.testsToRun.count}${r.testsToRun.files.length ? ` across ${r.testsToRun.files.length} file(s)` : ''}`);
+  if (r.testsToRun.truncatedAtDepth !== undefined) {
+    lines.push(`   ⚠ Test reachability was truncated at depth ${r.testsToRun.truncatedAtDepth}; deeper tests may exist.`);
+  }
+  for (const caveat of r.testsToRun.soundness?.caveats ?? []) {
+    if (/substring fallback|may have widened/i.test(caveat)) lines.push(`   ⚠ ${caveat}`);
+  }
   lines.push('   ' + r.caveats[0]);
   lines.push('');
   return lines.join('\n');

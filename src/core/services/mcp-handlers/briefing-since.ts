@@ -280,11 +280,13 @@ function buildTruncationReceipt(returned: LabeledChange[], omitted: LabeledChang
 async function selectTestsSummary(
   absDir: string,
   baseRef: string,
-): Promise<{ count: number; files: string[]; note?: string }> {
+): Promise<{ count: number; files: string[]; note?: string; truncatedAtDepth?: number; soundness?: unknown }> {
   try {
     const result = (await handleSelectTests({ directory: absDir, diffRef: baseRef })) as {
       selectedTests?: Array<{ file: string }>;
       error?: string;
+      truncatedAtDepth?: number;
+      soundness?: unknown;
     };
     if (result.error) return { count: 0, files: [], note: `test selection unavailable: ${result.error}` };
     const tests = result.selectedTests ?? [];
@@ -292,6 +294,8 @@ async function selectTestsSummary(
     return {
       count: tests.length,
       files: files.slice(0, MAX_TEST_FILES),
+      ...(result.truncatedAtDepth !== undefined ? { truncatedAtDepth: result.truncatedAtDepth } : {}),
+      ...(result.soundness !== undefined ? { soundness: result.soundness } : {}),
       ...(files.length > MAX_TEST_FILES ? { note: `${files.length} test files reach the change set; showing the first ${MAX_TEST_FILES}.` } : {}),
     };
   } catch (err) {

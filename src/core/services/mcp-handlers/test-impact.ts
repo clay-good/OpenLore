@@ -8,6 +8,8 @@
  * a deterministic graph does it instantly over edges we already store (`calls`,
  * `tested_by`, inheritance).
  *
+ * change: fix-test-selection-soundness
+ *
  * Soundness is stated honestly: this is an OVER-APPROXIMATE PRIORITIZER, not a
  * sound replacement for the full suite. Direct/static dispatch is safely
  * over-approximated; dynamic dispatch, reflection, and DI can under-select.
@@ -56,16 +58,41 @@ interface SelectedTest {
 
 /** Resolve changed symbols → seed production nodes (exact name preferred). */
 export function seedsFromSymbols(cg: SerializedCallGraph, symbols: string[]): FunctionNode[] {
+  return resolveSymbolSeeds(cg, symbols).seeds;
+}
+
+interface SymbolSeedResolution {
+  seeds: FunctionNode[];
+  widened: Array<{ query: string; count: number; examples: Array<{ name: string; file: string }> }>;
+}
+
+const WIDENED_SYMBOL_EXAMPLE_LIMIT = 8;
+
+/** Resolve symbols and retain the substring-fallback receipt for callers that disclose it. */
+function resolveSymbolSeeds(cg: SerializedCallGraph, symbols: string[]): SymbolSeedResolution {
   const out = new Map<string, FunctionNode>();
+  const widened: SymbolSeedResolution['widened'] = [];
   for (const sym of symbols) {
     const lower = sym.toLowerCase();
+    if (lower.trim().length === 0) continue;
     const exact = cg.nodes.filter(n => !n.isExternal && !n.isTest && n.name.toLowerCase() === lower);
-    const pick = exact.length > 0
-      ? exact
-      : cg.nodes.filter(n => !n.isExternal && !n.isTest && n.name.toLowerCase().includes(lower));
+    const fallback = exact.length === 0
+      ? cg.nodes.filter(n => !n.isExternal && !n.isTest && n.name.toLowerCase().includes(lower))
+      : [];
+    const pick = exact.length > 0 ? exact : fallback;
+    if (fallback.length > 0) {
+      widened.push({
+        query: sym,
+        count: fallback.length,
+        examples: fallback
+          .map(n => ({ name: n.name, file: n.filePath }))
+          .sort((a, b) => a.file.localeCompare(b.file) || a.name.localeCompare(b.name))
+          .slice(0, WIDENED_SYMBOL_EXAMPLE_LIMIT),
+      });
+    }
     for (const n of pick) out.set(n.id, n);
   }
-  return [...out.values()];
+  return { seeds: [...out.values()], widened };
 }
 
 /** Tolerant file match: exact or suffix either way. */
@@ -111,13 +138,19 @@ export async function handleSelectTests(input: SelectTestsInput): Promise<unknow
   // uncommitted changes?". The result flags that it defaulted, so it's never
   // mysterious.
   const hasSymbols = !!(input.changedSymbols && input.changedSymbols.length > 0);
+  if (hasSymbols && input.changedSymbols!.some(symbol => symbol.trim().length === 0)) {
+    return { error: 'changedSymbols must contain non-empty symbol names.' };
+  }
   const baseRef = input.diffRef && input.diffRef.length > 0 ? input.diffRef : 'HEAD';
   const defaultedToHead = !hasSymbols && (input.diffRef === undefined || input.diffRef === '');
 
   let seeds: FunctionNode[];
+  let widenedSymbolResolutions: SymbolSeedResolution['widened'] = [];
   let changedFiles: string[] = [];
   if (hasSymbols) {
-    seeds = seedsFromSymbols(cg, input.changedSymbols!);
+    const resolution = resolveSymbolSeeds(cg, input.changedSymbols!);
+    seeds = resolution.seeds;
+    widenedSymbolResolutions = resolution.widened;
   } else {
     try {
       const { getChangedFiles } = await import('../../drift/git-diff.js');
@@ -162,6 +195,10 @@ export async function handleSelectTests(input: SelectTestsInput): Promise<unknow
     { directResolvedOnly: input.directResolvedOnly },
     { sortNeighbors: true },
   );
+  const traversalFilter = { directResolvedOnly: input.directResolvedOnly };
+  const truncatedAtDepth = [...depthOf].some(([id, depth]) =>
+    depth === maxDepth && traversal.neighborIds(id, 'backward', traversalFilter).some(neighbor => !depthOf.has(neighbor)),
+  ) ? maxDepth : undefined;
 
   // Path from a reached node down to its seed: [node, …, changedFn].
   const pathToSeed = (id: string): string[] => {
@@ -209,11 +246,31 @@ export async function handleSelectTests(input: SelectTestsInput): Promise<unknow
 
   // Fallback — seeds with no reaching test at all: associate tests of sibling
   // functions in the same file (newly-added / untested functions), low confidence.
+  // Compute coverage in the inverse direction from every concrete test source.
+  // This preserves seed identity even when same-named symbols or multi-seed paths
+  // collide in the display-only `viaPath` parent tree.
   let usedFileFallback = false;
-  const reachedSeedFiles = new Set([...byTest.values()].flatMap(t => t.viaPath));
+  const testSources = new Set(
+    cg.nodes.filter(n => n.isTest && !n.isExternal && depthOf.has(n.id)).map(n => n.id),
+  );
+  for (const e of cg.edges) {
+    if (e.kind === 'tested_by' && e.callerId && depthOf.has(e.callerId)) testSources.add(e.callerId);
+  }
+  const coveredByTest = new Map<string, number>();
+  const coverageQueue = [...testSources];
+  for (const id of coverageQueue) coveredByTest.set(id, 0);
+  for (let head = 0; head < coverageQueue.length; head++) {
+    const id = coverageQueue[head];
+    const depth = coveredByTest.get(id)!;
+    if (depth >= maxDepth) continue;
+    for (const neighbor of traversal.neighborIds(id, 'forward', traversalFilter)) {
+      if (!depthOf.has(neighbor) || coveredByTest.has(neighbor)) continue;
+      coveredByTest.set(neighbor, depth + 1);
+      coverageQueue.push(neighbor);
+    }
+  }
   for (const s of seeds) {
-    const seedHasTest = [...byTest.values()].some(t => t.viaPath.includes(s.name));
-    if (seedHasTest) continue;
+    if (coveredByTest.has(s.id)) continue;
     for (const e of cg.edges) {
       if (e.kind !== 'tested_by') continue;
       const prod = nodeMap.get(e.callerId);
@@ -223,7 +280,6 @@ export async function handleSelectTests(input: SelectTestsInput): Promise<unknow
       usedFileFallback = true;
     }
   }
-  void reachedSeedFiles;
 
   const selectedTests = [...byTest.values()].sort(
     (a, b) => CONF_RANK[b.confidence] - CONF_RANK[a.confidence] ||
@@ -251,8 +307,21 @@ export async function handleSelectTests(input: SelectTestsInput): Promise<unknow
   if (usedFileFallback) {
     caveats.push('Some seeds had no reaching test; sibling-file tests were included at low confidence (likely newly-added or untested functions).');
   }
+  if (truncatedAtDepth !== undefined) {
+    caveats.push(`Backward reachability was truncated at depth ${truncatedAtDepth}; deeper tests may exist — raise maxDepth or consult report_coverage_gaps.`);
+  }
+  for (const resolution of widenedSymbolResolutions) {
+    const examples = resolution.examples.map(n => `${n.name} (${n.file})`).join(', ');
+    const omitted = resolution.count - resolution.examples.length;
+    caveats.push(
+      `Symbol scope for "${resolution.query}" resolved by substring fallback and may have widened to ${resolution.count} symbol(s): ${examples}` +
+      `${omitted > 0 ? `, and ${omitted} more listed in seeds` : ''}.`,
+    );
+  }
   if (selectedTests.length === 0 && testDetection !== 'none') {
-    caveats.push('No test transitively reaches the change. It may be genuinely untested, or reached only via dynamic dispatch this static analysis cannot see.');
+    caveats.push(truncatedAtDepth === undefined
+      ? 'No test transitively reaches the change. It may be genuinely untested, or reached only via dynamic dispatch this static analysis cannot see.'
+      : `No test was found within depth ${truncatedAtDepth}; deeper tests may exist beyond the disclosed traversal cap, or the change may be reached only via dynamic dispatch this static analysis cannot see.`);
   }
 
   // Confidence boundary: the selection rests on the backward call-walk over the
@@ -280,6 +349,7 @@ export async function handleSelectTests(input: SelectTestsInput): Promise<unknow
     changed: hasSymbols ? seeds.map(s => s.name) : changedFiles,
     seeds: seeds.map(s => ({ name: s.name, file: s.filePath })),
     selectedTests,
+    ...(truncatedAtDepth !== undefined ? { truncatedAtDepth } : {}),
     ...(defaultedToHead ? { note: 'No changedSymbols/diffRef given — selected tests for your current working-tree changes vs HEAD.' } : {}),
     ...(federationBlock ? { federation: federationBlock } : {}),
     soundness: { posture: 'over-approximate' as const, caveats },

@@ -1,6 +1,6 @@
 # select_tests soundness receipts: identity-keyed seed coverage, disclosed depth cap, disclosed substring widening
 
-> Status: PROPOSED (2026-07-08, e2e audit fifth pass). Extends `add-test-selection-safeguard-tiers`
+> Status: **BUILT** (2026-08-16). Extends `add-test-selection-safeguard-tiers`
 > (pass 3) with receipts and correctness that change's tiers do not cover (its scope is the test's
 > own file / brand-new tests): the sibling-test fallback is keyed on bare NAMES so a same-named
 > function elsewhere shadows an untested seed; the backward walk's depth cap and the seed
@@ -73,3 +73,14 @@ blocking.
   existing payload budget).
 - Risk: low. The fallback fires in strictly more (correct) cases — selections can only grow, at
   low confidence with the existing caveat; new fields are additive.
+
+## Hardened in review
+
+Three independent adversarial passes tightened the implementation without changing its scope:
+
+- Seed coverage is computed only inside the existing impacted subgraph, avoiding a second
+  repository-wide traversal while preserving node-identity semantics.
+- `blast_radius`, `briefing_since`, impact certificates, and review output preserve the new
+  receipts in both structured and human-readable forms, including zero-test results.
+- Empty symbol names are rejected, substring receipts show a bounded sample and point to the full
+  seed list, and the shared response cap preserves selection-boundary receipts.

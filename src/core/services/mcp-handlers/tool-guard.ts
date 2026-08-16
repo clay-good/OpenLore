@@ -187,12 +187,20 @@ export function capStructuredResult(result: unknown, maxBytes: number): { text: 
   const indexStaleness = result && typeof result === 'object' && !Array.isArray(result)
     ? (result as Record<string, unknown>).indexStaleness
     : undefined;
+  const truncatedAtDepth = result && typeof result === 'object' && !Array.isArray(result)
+    ? (result as Record<string, unknown>).truncatedAtDepth
+    : undefined;
+  const soundness = result && typeof result === 'object' && !Array.isArray(result)
+    ? (result as Record<string, unknown>).soundness
+    : undefined;
   let preservedIndexStaleness = indexStaleness;
   const envelopeWith = (partial: string, staleness: unknown): Record<string, unknown> => ({
     truncated: true,
     note,
     ...(redactions === undefined ? {} : { redactions }),
     ...(staleness === undefined ? {} : { indexStaleness: staleness }),
+    ...(truncatedAtDepth === undefined ? {} : { truncatedAtDepth }),
+    ...(soundness === undefined ? {} : { soundness }),
     partial,
   });
 

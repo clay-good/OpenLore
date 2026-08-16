@@ -30,7 +30,9 @@ backward reachability walk stops at its depth cap while its frontier is non-empt
 SHALL carry a truncation receipt naming the depth, and any "may be genuinely untested" conclusion
 SHALL be qualified by it. When a changed-symbol seed resolved via the substring fallback rather
 than an exact name match, the response SHALL carry the same widening caveat its sibling
-`report_coverage_gaps` emits, naming the widened symbols. Composed consumers (such as
+`report_coverage_gaps` emits, naming a bounded sample of the widened symbols and pointing to the
+complete seed list. Empty changed-symbol names MUST be rejected rather than widening to every
+production symbol. Composed consumers (such as
 `blast_radius`) SHALL surface these receipts unmodified.
 
 #### Scenario: Truncated reachability carries a receipt
@@ -57,3 +59,9 @@ than an exact name match, the response SHALL carry the same widening caveat its 
 - **GIVEN** `blast_radius` composing a truncated or substring-widened selection
 - **WHEN** the briefing is assembled
 - **THEN** the truncation and widening receipts appear in the briefing's test section
+
+#### Scenario: Empty symbols do not widen to the whole graph
+
+- **GIVEN** a changed-symbol list containing an empty name
+- **WHEN** test selection resolves the requested scope
+- **THEN** the request is rejected with an actionable error instead of selecting every symbol

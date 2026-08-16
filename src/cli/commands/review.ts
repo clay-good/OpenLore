@@ -339,8 +339,13 @@ export function renderMarkdown(b: ReviewBriefing): string {
     L.push(`> ⚠ Blast radius unavailable: ${markdownText(blast.error, 500)}`);
     L.push('');
   } else {
+    const testSoundness = blast.tests.soundness as { caveats?: string[] } | undefined;
+    const testBoundaryCaveats = (testSoundness?.caveats ?? []).filter(caveat =>
+      /substring fallback|may have widened/i.test(caveat),
+    );
     const hasImpact = blast.impact.hubsTouched.length || blast.impact.layersCrossed.length ||
-      blast.impact.governingDecisions.length || blast.tests.count || blast.tests.unavailable;
+      blast.impact.governingDecisions.length || blast.tests.count || blast.tests.unavailable ||
+      blast.tests.truncatedAtDepth !== undefined || testBoundaryCaveats.length > 0;
     if (hasImpact) {
       L.push('### Blast radius');
       if (blast.impact.hubsTouched.length) {
@@ -358,6 +363,10 @@ export function renderMarkdown(b: ReviewBriefing): string {
         const tests = blast.tests.toRun.slice(0, 10).map(t => inlineCode(t.test)).join(', ');
         L.push(`- **Tests to run (${blast.tests.count}):** ${tests}${blast.tests.count > 10 ? ', …' : ''}`);
       }
+      if (blast.tests.truncatedAtDepth !== undefined) {
+        L.push(`- **Test-selection boundary:** reachability was truncated at depth ${blast.tests.truncatedAtDepth}; deeper tests may exist.`);
+      }
+      for (const caveat of testBoundaryCaveats) L.push(`- **Test-selection boundary:** ${markdownText(caveat, 500)}`);
       L.push('');
     }
 
@@ -440,6 +449,11 @@ export function renderHuman(b: ReviewBriefing): string {
     if (blast.impact.layersCrossed.length) L.push('   Layers crossed: ' + blast.impact.layersCrossed.join(', '));
     if (blast.tests.unavailable) L.push('   Tests to run: could not be computed — not the same as "none impacted".');
     else if (blast.tests.count) L.push(`   Tests to run (${blast.tests.count}): ${blast.tests.toRun.slice(0, 8).map(t => t.test).join(', ')}${blast.tests.count > 8 ? ', …' : ''}`);
+    if (blast.tests.truncatedAtDepth !== undefined) L.push(`   ⚠ Test reachability was truncated at depth ${blast.tests.truncatedAtDepth}; deeper tests may exist.`);
+    const testSoundness = blast.tests.soundness as { caveats?: string[] } | undefined;
+    for (const caveat of testSoundness?.caveats ?? []) {
+      if (/substring fallback|may have widened/i.test(caveat)) L.push(`   ⚠ ${caveat}`);
+    }
     if (blast.impact.governingDecisions.length) L.push('   Governing decisions: ' + blast.impact.governingDecisionProvenance.map(d => `[${d.provenance}] ${d.title}`).join('; '));
   }
   for (const c of b.caveats) L.push(`   ⚠ ${c}`);
