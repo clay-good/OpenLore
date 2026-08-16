@@ -41,6 +41,7 @@ import { openSync, closeSync } from 'node:fs';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 
 // Task-scoped injection gate + render. This module is intentionally
 // dependency-light (pure tokenization, framing, and token estimation) so importing it
@@ -72,6 +73,7 @@ import {
   readAnalysisContentProvenance,
   reviewedFileContentProvenance,
 } from '../core/services/served-content.js';
+import { safeJoin } from '../utils/path-confinement.js';
 
 // ── Config types & helpers ────────────────────────────────────────────────────
 
@@ -107,7 +109,7 @@ export function isUsableConfig(raw: unknown): raw is OpenLoreConfig {
 
 export async function readConfig(cwd: string): Promise<OpenLoreConfig | null> {
   try {
-    const raw = JSON.parse(await readFile(join(cwd, OPENLORE_DIR, 'config.json'), 'utf-8'));
+    const raw = JSON.parse(await readFile(safeJoin(cwd, join(OPENLORE_DIR, 'config.json')), 'utf-8'));
     return isUsableConfig(raw) ? raw : null;
   } catch { return null; }
 }
@@ -121,7 +123,7 @@ export async function readConfig(cwd: string): Promise<OpenLoreConfig | null> {
  */
 export async function readContextInjection(cwd: string): Promise<ContextInjectionConfig | undefined> {
   try {
-    const raw = JSON.parse(await readFile(join(cwd, OPENLORE_DIR, 'config.json'), 'utf-8')) as unknown;
+    const raw = JSON.parse(await readFile(safeJoin(cwd, join(OPENLORE_DIR, 'config.json')), 'utf-8')) as unknown;
     return raw && typeof raw === 'object'
       ? (raw as { contextInjection?: ContextInjectionConfig }).contextInjection
       : undefined;
@@ -129,8 +131,9 @@ export async function readContextInjection(cwd: string): Promise<ContextInjectio
 }
 
 async function writeConfig(cwd: string, config: OpenLoreConfig): Promise<void> {
-  await mkdir(join(cwd, OPENLORE_DIR), { recursive: true });
-  await writeFile(join(cwd, OPENLORE_DIR, 'config.json'), JSON.stringify(config, null, 2) + '\n', 'utf-8');
+  const configPath = safeJoin(cwd, join(OPENLORE_DIR, 'config.json'));
+  await mkdir(safeJoin(cwd, OPENLORE_DIR), { recursive: true });
+  await writeFile(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
 }
 
 const PROVIDERS = [
@@ -474,7 +477,11 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 // port/pid, non-string token) is treated exactly as absent and no field of it
 // ever becomes a fetch target or request header.
 async function readDescriptor(cwd: string): Promise<ServeDescriptor | null> {
-  return readServeDescriptor(join(cwd, OPENLORE_DIR, 'serve.json'));
+  try {
+    return readServeDescriptor(safeJoin(cwd, join(OPENLORE_DIR, 'serve.json')));
+  } catch {
+    return null;
+  }
 }
 
 async function probeHealth(desc: ServeDescriptor, expectedRoot: string): Promise<DaemonProbe> {
@@ -482,6 +489,8 @@ async function probeHealth(desc: ServeDescriptor, expectedRoot: string): Promise
     // `redirect: 'error'` — a daemon never redirects, and following one would take
     // this probe (and, at the call site below, the token) off the machine.
     const headers = desc.token ? { 'x-openlore-token': desc.token } : undefined;
+    // INTENTIONAL EGRESS: validated descriptors are loopback-only and redirects are disabled.
+    // codeql[js/file-access-to-http]
     const res = await fetch(`${serveHttpBaseUrl(desc.host, desc.port)}/health`, {
       headers,
       signal: AbortSignal.timeout(HEALTH_PROBE_TIMEOUT_MS),
@@ -499,6 +508,15 @@ async function probeHealth(desc: ServeDescriptor, expectedRoot: string): Promise
 export function missingDaemonTools(available: readonly string[], required: readonly string[]): string[] {
   const advertised = new Set(available);
   return required.filter((tool) => !advertised.has(tool));
+}
+
+/** Launch the packaged CLI without a command shell so repository paths stay data. */
+export function piDaemonSpawnCommand(cwd: string): { command: string; args: string[] } {
+  const cliEntry = fileURLToPath(new URL('../cli/index.js', import.meta.url));
+  return {
+    command: process.execPath,
+    args: [cliEntry, 'serve', '--directory', cwd, '--preset', PI_DAEMON_PRESET],
+  };
 }
 
 function incompatibleDaemon(desc: ServeDescriptor): Daemon {
@@ -545,17 +563,16 @@ export async function ensureDaemon(cwd: string): Promise<Daemon | null> {
     // windowsHide can't suppress, and Windows doesn't reap the child on parent
     // exit anyway. macOS/Linux need `detached` (setsid) to outlive us.
     const isWin = process.platform === 'win32';
-    // shell:true joins args verbatim, so quote the cwd ourselves to survive
-    // spaces / metacharacters in the project path. POSIX has no shell, so the
-    // raw path is passed straight through (quoting would become part of it).
-    const dirArg = isWin ? `"${cwd}"` : cwd;
-    await mkdir(join(cwd, OPENLORE_DIR), { recursive: true });
-    const logFd = openSync(join(cwd, OPENLORE_DIR, 'serve.log'), 'a');
+    const openloreDir = safeJoin(cwd, OPENLORE_DIR);
+    const logPath = safeJoin(cwd, join(OPENLORE_DIR, 'serve.log'));
+    await mkdir(openloreDir, { recursive: true });
+    const logFd = openSync(logPath, 'a');
     try {
-      const child = spawn('openlore', ['serve', '--directory', dirArg, '--preset', PI_DAEMON_PRESET], {
+      const launch = piDaemonSpawnCommand(cwd);
+      const child = spawn(launch.command, launch.args, {
         stdio: ['ignore', logFd, logFd],
         windowsHide: true,
-        ...(isWin ? { shell: true } : { detached: true }),
+        detached: !isWin,
       });
       child.on('error', () => { /* daemon not found — polling loop will time out cleanly */ });
       child.unref();
@@ -622,7 +639,7 @@ function truncate(s: string, max: number): string {
 }
 
 async function readDigest(cwd: string): Promise<string> {
-  try { return await readFile(join(cwd, OPENLORE_DIR, 'analysis', 'CODEBASE.md'), 'utf-8'); }
+  try { return await readFile(safeJoin(cwd, join(OPENLORE_DIR, 'analysis', 'CODEBASE.md')), 'utf-8'); }
   catch { return ''; }
 }
 

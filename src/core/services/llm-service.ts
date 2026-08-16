@@ -935,14 +935,14 @@ export class OpenAIProvider implements LLMProvider {
       body.response_format = { type: 'json_object' };
     }
 
-    // INTENTIONAL EGRESS: this provider sends the request to the operator-selected LLM.
-    // codeql[js/file-access-to-http]
     const response = await withRelaxedTls(() => fetch(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${this.apiKey}`,
       },
+      // INTENTIONAL EGRESS: this provider sends the request to the operator-selected LLM.
+      // codeql[js/file-access-to-http]
       body: JSON.stringify(body),
       signal,
     }), this.relaxTls);
@@ -1087,14 +1087,14 @@ export class OpenAICompatibleProvider implements LLMProvider {
       }
     }
 
-    // INTENTIONAL EGRESS: this provider sends the request to the operator-selected LLM.
-    // codeql[js/file-access-to-http]
     const response = await withRelaxedTls(() => fetch(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${this.apiKey}`,
       },
+      // INTENTIONAL EGRESS: this provider sends the request to the operator-selected LLM.
+      // codeql[js/file-access-to-http]
       body: JSON.stringify(body),
       signal,
     }), this.relaxTls);
@@ -1241,14 +1241,14 @@ export class CopilotProvider implements LLMProvider {
       body.response_format = { type: 'json_object' };
     }
 
-    // INTENTIONAL EGRESS: this provider sends the request to the operator-selected LLM.
-    // codeql[js/file-access-to-http]
     const response = await withRelaxedTls(() => fetch(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${this.apiKey}`,
       },
+      // INTENTIONAL EGRESS: this provider sends the request to the operator-selected LLM.
+      // codeql[js/file-access-to-http]
       body: JSON.stringify(body),
       signal,
     }), this.relaxTls);
@@ -1585,11 +1585,11 @@ export class GeminiProvider implements LLMProvider {
     };
 
     const url = `${this.baseUrl}/${this.model}:generateContent?key=${this.apiKey}`;
-    // INTENTIONAL EGRESS: this provider sends the request to the operator-selected LLM.
-    // codeql[js/file-access-to-http]
     const response = await withRelaxedTls(() => fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      // INTENTIONAL EGRESS: this provider sends the request to the operator-selected LLM.
+      // codeql[js/file-access-to-http]
       body: JSON.stringify(body),
       signal,
     }), this.relaxTls);

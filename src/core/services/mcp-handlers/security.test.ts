@@ -525,6 +525,9 @@ describe('Untrusted Artifact Deserialization Safety (mcp-security)', () => {
     const src = readFileSync(join(SRC, 'core', 'services', 'mcp-handlers', 'utils.ts'), 'utf-8');
     expect(src).toMatch(/ARTIFACT_MAX_BYTES\s*=\s*[\d *]+/);
     expect(src).toMatch(/st\.size\s*>\s*ARTIFACT_MAX_BYTES/);
+    expect(src).toContain('const st = await handle.stat()');
+    expect(src).toContain('readUtf8Bounded(handle, ARTIFACT_MAX_BYTES)');
+    expect(src).toContain('Buffer.allocUnsafe(maxBytes + 1)');
   });
 });
 
@@ -567,6 +570,12 @@ describe('Write Confinement for Mutating Tools (mcp-security)', () => {
       rmSync(root, { recursive: true, force: true });
       rmSync(outside, { recursive: true, force: true });
     }
+  });
+
+  it('generate_change_proposal routes its output through the symlink-aware guard', () => {
+    const src = readFileSync(join(SRC, 'core', 'services', 'mcp-handlers', 'change.ts'), 'utf8');
+    expect(src).toMatch(/const changeDir = safeJoin\(absDir, join\('openspec', 'changes', safeSlug\)\)/);
+    expect(src).not.toMatch(/const changeDir = join\(absDir, 'openspec'/);
   });
 });
 

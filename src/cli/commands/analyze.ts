@@ -8,9 +8,10 @@
 import { Command, Option } from 'commander';
 import { sanitizeForTerminal as safe } from '../../utils/misc.js';
 import { mkdir, readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { logger } from '../../utils/logger.js';
 import { fileExists, formatDuration, formatAge, getAnalysisAge } from '../../utils/command-helpers.js';
+import { safeJoin } from '../../utils/path-confinement.js';
 import {
   ARTIFACT_DEPENDENCY_GRAPH,
   ARTIFACT_FINGERPRINT,
@@ -674,7 +675,9 @@ After analysis, run 'openlore generate' to create OpenSpec files.
       // PHASE 1b: --reindex-specs fast path (no full analysis)
       // ========================================================================
       if (opts.reindexSpecs) {
-        const outputPath = join(rootPath, opts.output);
+        const outputPath = opts.output === `${OPENLORE_ANALYSIS_REL_PATH}/`
+          ? safeJoin(rootPath, opts.output)
+          : resolve(rootPath, opts.output);
         await mkdir(outputPath, { recursive: true });
         await runSpecIndexing(rootPath, outputPath, openloreConfig, false, options.freshSpecDirectory === true);
         return;
@@ -683,7 +686,9 @@ After analysis, run 'openlore generate' to create OpenSpec files.
       // ========================================================================
       // PHASE 2: CHECK EXISTING ANALYSIS
       // ========================================================================
-      const outputPath = join(rootPath, opts.output);
+      const outputPath = opts.output === `${OPENLORE_ANALYSIS_REL_PATH}/`
+        ? safeJoin(rootPath, opts.output)
+        : resolve(rootPath, opts.output);
       const analysisAge = await getAnalysisAge(outputPath);
 
       // Skip re-analysis only when the SOURCE is unchanged since the last run — a

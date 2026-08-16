@@ -244,6 +244,8 @@ async function probeDaemon(
     // caller-provided replacement token must never be disclosed to a
     // descriptor-selected listener.
     const headers = desc.token ? { [OPENLORE_TOKEN_HEADER]: desc.token } : undefined;
+    // INTENTIONAL EGRESS: validated descriptors are loopback-only and redirects are disabled.
+    // codeql[js/file-access-to-http]
     const res = await fetch(`${serveHttpBaseUrl(desc.host, desc.port)}/health`, {
       headers,
       signal: AbortSignal.timeout(HEALTH_PROBE_TIMEOUT_MS),
@@ -303,6 +305,8 @@ async function stopDaemon(root: string): Promise<boolean> {
   try {
     const headers = desc.token ? { [OPENLORE_TOKEN_HEADER]: desc.token } : undefined;
     await writeInstanceDescriptor(path, { ...desc, state: 'draining' });
+    // INTENTIONAL EGRESS: the authenticated health probe bound this loopback descriptor to this repo.
+    // codeql[js/file-access-to-http]
     const res = await fetch(`${serveHttpBaseUrl(desc.host, desc.port)}/shutdown`, {
       method: 'POST',
       headers,

@@ -339,9 +339,9 @@ export async function analyzeTestCoverage(opts: {
   }
 
   // ── 7. Per-domain breakdown ──────────────────────────────────────────────
-  const byDomain: Record<string, DomainCoverage> = {};
+  const byDomain: Record<string, DomainCoverage> = Object.create(null);
   for (const s of allScenarios) {
-    if (!byDomain[s.domain]) {
+    if (!Object.prototype.hasOwnProperty.call(byDomain, s.domain)) {
       byDomain[s.domain] = {
         total: 0,
         covered: 0,

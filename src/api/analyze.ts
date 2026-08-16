@@ -5,7 +5,7 @@
  * No side effects (no process.exit, no console.log).
  */
 
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { readFile, stat, mkdir, realpath } from 'node:fs/promises';
 import { ANALYSIS_STALE_THRESHOLD_MS, DEFAULT_MAX_FILES, OPENLORE_ANALYSIS_REL_PATH, ARTIFACT_REPO_STRUCTURE, ARTIFACT_DEPENDENCY_GRAPH, ARTIFACT_LLM_CONTEXT, ARTIFACT_FINGERPRINT, OPENSPEC_DIR } from '../constants.js';
 import { fileExists, readJsonFile } from '../utils/command-helpers.js';
@@ -26,6 +26,7 @@ import {
   acquireAnalysisOwnership,
   type AnalysisOwnerPayload,
 } from '../core/runtime/analysis-ownership.js';
+import { safeJoin } from '../utils/path-confinement.js';
 
 /**
  * Raised when another frontend already owns a full analysis of this repository.
@@ -96,7 +97,12 @@ export async function openloreAnalyze(options: AnalyzeApiOptions = {}): Promise<
   const includePatterns = options.includePatterns ?? [];
   const force = options.force ?? false;
   const outputRelPath = options.outputPath ?? `${OPENLORE_ANALYSIS_REL_PATH}/`;
-  const outputPath = join(rootPath, outputRelPath);
+  // The default internal store is repository-controlled and must not follow a
+  // committed `.openlore` symlink. An explicit outputPath remains an operator-
+  // authorized custom destination for API compatibility.
+  const outputPath = options.outputPath === undefined
+    ? safeJoin(rootPath, outputRelPath)
+    : resolve(rootPath, outputRelPath);
   const { onProgress } = options;
 
   // Validate config exists

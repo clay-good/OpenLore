@@ -5,7 +5,7 @@
  * No side effects (no process.exit, no console.log).
  */
 
-import { resolve, relative } from 'node:path';
+import { resolve } from 'node:path';
 import { OPENLORE_DIR, OPENLORE_CONFIG_REL_PATH, DEFAULT_OPENSPEC_PATH } from '../constants.js';
 import {
   detectProjectType,
@@ -21,6 +21,7 @@ import {
 } from '../core/services/config-manager.js';
 import { ensureGitignored } from '../core/services/gitignore-manager.js';
 import type { InitApiOptions, InitResult, ProgressCallback } from './types.js';
+import { safeJoin } from '../utils/path-confinement.js';
 
 function progress(onProgress: ProgressCallback | undefined, step: string, status: 'start' | 'progress' | 'complete' | 'skip', detail?: string): void {
   onProgress?.({ phase: 'init', step, status, detail });
@@ -36,7 +37,7 @@ function progress(onProgress: ProgressCallback | undefined, step: string, status
  * @throws Error if config exists and force is false
  */
 export async function openloreInit(options: InitApiOptions = {}): Promise<InitResult> {
-  const rootPath = options.rootPath ?? process.cwd();
+  const rootPath = resolve(options.rootPath ?? process.cwd());
   let openspecRelPath = options.openspecPath ?? DEFAULT_OPENSPEC_PATH;
   // Point at existing specs (docs/specs/, specs/) rather than creating an empty
   // openspec/ blind to them, unless an explicit path was given (Spec 26 B5).
@@ -44,15 +45,9 @@ export async function openloreInit(options: InitApiOptions = {}): Promise<InitRe
     const detected = await detectExistingSpecDir(rootPath);
     if (detected && detected.root !== 'openspec') openspecRelPath = detected.root;
   }
-  const openspecFullPath = resolve(rootPath, openspecRelPath);
+  const openspecFullPath = safeJoin(rootPath, openspecRelPath);
   const force = options.force ?? false;
   const { onProgress } = options;
-
-  // Validate path traversal
-  const relPath = relative(rootPath, openspecFullPath);
-  if (relPath.startsWith('..')) {
-    throw new Error('OpenSpec path must be within the project directory.');
-  }
 
   // Detect project type
   progress(onProgress, 'Detecting project type', 'start');

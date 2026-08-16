@@ -801,6 +801,10 @@ describe('normalizeDomainName', () => {
     expect(normalizeDomainName('user--profile')).toBe('user-profile');
   });
 
+  it('normalizes an adversarial hyphen run in linear time', () => {
+    expect(normalizeDomainName(`user${'-'.repeat(100_000)}profile`)).toBe('user-profile');
+  });
+
   it('should remove special characters', () => {
     expect(normalizeDomainName('user@profile!')).toBe('user-profile');
   });

@@ -3,7 +3,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { readFile, readdir, stat } from 'node:fs/promises';
+import { open, readFile, readdir, stat, type FileHandle } from 'node:fs/promises';
 import { extname, join, relative, resolve } from 'node:path';
 import type { LLMContext } from '../../analyzer/artifact-generator.js';
 import { EdgeStore } from '../edge-store.js';
@@ -76,6 +76,17 @@ import { emit } from '../telemetry.js';
 import { redactSecretString } from '../secret-redaction.js';
 
 const ANALYSIS_AGE_WARNING_MS = ANALYSIS_AGE_WARNING_HOURS * 60 * 60 * 1000;
+
+async function readUtf8Bounded(handle: FileHandle, maxBytes: number): Promise<string | null> {
+  const buffer = Buffer.allocUnsafe(maxBytes + 1);
+  let offset = 0;
+  while (offset < buffer.length) {
+    const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, offset);
+    if (bytesRead === 0) break;
+    offset += bytesRead;
+  }
+  return offset > maxBytes ? null : buffer.toString('utf8', 0, offset);
+}
 
 /**
  * Which read-path staleness signal (if any) should heal — a pure, testable
@@ -333,7 +344,12 @@ export async function readCachedContext(directory: string, timeout?: number): Pr
 
   async function load(): Promise<CachedContext | null> {
     try {
-      const st = await stat(filePath);
+      // Keep one descriptor from metadata check through read. A path-based stat
+      // followed by a path-based read lets an untrusted repository swap the file
+      // between those operations and bypass the size check.
+      const handle = await open(filePath, 'r');
+      try {
+      const st = await handle.stat();
       const mtime = st.mtimeMs;
       // Key on the committed generation as well as the artifact mtime. An mtime
       // alone cannot distinguish "same file" from "republished with identical
@@ -368,7 +384,11 @@ export async function readCachedContext(directory: string, timeout?: number): Pr
         return null;
       }
       // Cache miss — read 3.7MB JSON and open EdgeStore connection
-      const raw = await readFile(filePath, 'utf-8');
+      const raw = await readUtf8Bounded(handle, ARTIFACT_MAX_BYTES);
+      if (raw === null) {
+        emit(directory, 'cache', { event: 'cache_read', hit: false, reason: 'artifact_too_large' });
+        return null;
+      }
       const afterGeneration = await readCurrentGeneration(analysisDir, [...REQUIRED_ANALYSIS_ARTIFACTS]);
       const expectedContext = afterGeneration?.artifacts.find(record => record.path === ARTIFACT_LLM_CONTEXT);
       const rawMatches = afterGeneration?.compatibility === 'legacy'
@@ -499,6 +519,9 @@ export async function readCachedContext(directory: string, timeout?: number): Pr
       }
       emit(directory, 'cache', { event: 'cache_read', hit: true });
       return ctx;
+      } finally {
+        await handle.close();
+      }
     } catch {
       emit(directory, 'cache', { event: 'cache_read', hit: false });
       return null;

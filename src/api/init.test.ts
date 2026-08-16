@@ -3,6 +3,9 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { mkdtemp, mkdir, rm, symlink } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { openloreInit } from './init.js';
 
 // ============================================================================
@@ -146,6 +149,21 @@ describe('openloreInit', () => {
       await expect(
         openloreInit({ rootPath: ROOT, openspecPath: './openspec' })
       ).resolves.toBeDefined();
+    });
+
+    it('rejects an openspec symlink that resolves outside the project', async () => {
+      const root = await mkdtemp(join(tmpdir(), 'openlore-init-root-'));
+      const outside = await mkdtemp(join(tmpdir(), 'openlore-init-outside-'));
+      try {
+        await mkdir(root, { recursive: true });
+        await symlink(outside, join(root, 'openspec'), 'dir');
+
+        await expect(openloreInit({ rootPath: root })).rejects.toThrow(/escape|outside/i);
+        expect(mockWriteOpenLoreConfig).not.toHaveBeenCalled();
+      } finally {
+        await rm(root, { recursive: true, force: true });
+        await rm(outside, { recursive: true, force: true });
+      }
     });
   });
 

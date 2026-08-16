@@ -332,7 +332,7 @@ describe('workflow security: supply-chain automation is wired', () => {
 });
 
 describe('workflow security: CodeQL suppressions stay narrow and auditable', () => {
-  it('allows only the five reviewed file-to-HTTP egress sinks', () => {
+  it('allows only the nine reviewed file-to-HTTP egress sinks', () => {
     const suppressions: Record<string, number> = {};
     const unexplained: string[] = [];
 
@@ -354,8 +354,11 @@ describe('workflow security: CodeQL suppressions stay narrow and auditable', () 
       'Every CodeQL suppression must name one query and have an immediately preceding rationale.'
     ).toEqual([]);
     expect(suppressions, 'Changing the reviewed suppression set requires explicit security review.').toEqual({
+      'src/cli/commands/serve.ts': 2,
       'src/core/analyzer/embedding-service.ts': 1,
+      'src/core/services/serve-client.ts': 1,
       'src/core/services/llm-service.ts': 4,
+      'src/pi/extension.ts': 1,
     });
   });
 });

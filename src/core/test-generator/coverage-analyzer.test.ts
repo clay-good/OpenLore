@@ -65,6 +65,20 @@ describe('analyzeTestCoverage', () => {
     expect(report.belowThreshold).toBe(false);
   });
 
+  it('treats a __proto__ domain as data without mutating Object.prototype', async () => {
+    const protoSpecDir = join(tmpDir, 'openspec', 'specs', '__proto__');
+    await mkdir(protoSpecDir, { recursive: true });
+    await writeFile(join(protoSpecDir, 'spec.md'), AUTH_SPEC);
+
+    const report = await analyzeTestCoverage({ rootPath: tmpDir, testDirs: ['spec-tests'] });
+
+    expect(Object.prototype).not.toHaveProperty('total');
+    expect(Object.prototype).not.toHaveProperty('covered');
+    expect(Object.prototype.hasOwnProperty.call(report.byDomain, '__proto__')).toBe(true);
+    expect(report.byDomain['__proto__'].total).toBe(3);
+    expect(JSON.parse(JSON.stringify(report.byDomain))['__proto__'].total).toBe(3);
+  });
+
   it('detects tagged scenarios as covered', async () => {
     const testDir = join(tmpDir, 'spec-tests', 'auth');
     await mkdir(testDir, { recursive: true });

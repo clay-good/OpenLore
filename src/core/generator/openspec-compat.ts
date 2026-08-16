@@ -653,11 +653,12 @@ export function buildDetectedContext(survey: ProjectSurveyResult): DetectedConte
  * Normalize domain name to OpenSpec conventions
  */
 export function normalizeDomainName(name: string): string {
-  return name
+  const normalized = name
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .replace(/--+/g, '-');
+    .replace(/[^a-z0-9]+/g, '-');
+  const start = normalized.startsWith('-') ? 1 : 0;
+  const end = normalized.endsWith('-') ? -1 : undefined;
+  return normalized.slice(start, end);
 }
 
 /**
