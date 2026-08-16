@@ -43,6 +43,7 @@ export interface ServeDescriptor {
   token?: string;
   startedAt: string;
   version: string;
+  state?: 'ready' | 'draining';
 }
 
 export interface ServeHealth {
@@ -54,6 +55,13 @@ export interface ServeHealth {
   tools: string[];
   tokenProtected: boolean;
   tokenAuthenticated: boolean;
+  draining: boolean;
+}
+
+/** Build the loopback HTTP origin, including the brackets required by IPv6 URLs. */
+export function serveHttpBaseUrl(host: string, port: number): string {
+  const normalized = host.replace(/^\[|\]$/g, '');
+  return `http://${normalized.includes(':') ? `[${normalized}]` : normalized}:${port}`;
 }
 
 /** Resolve aliases to the stable filesystem identity used in health proofs. */
@@ -88,6 +96,7 @@ export function validateServeHealth(
     || !h.tools.every((tool) => typeof tool === 'string')
     || typeof h.tokenProtected !== 'boolean'
     || h.tokenAuthenticated !== true
+    || typeof h.draining !== 'boolean'
     || (descriptor !== undefined && h.pid !== descriptor.pid)
     || (descriptor !== undefined && h.tokenProtected !== Boolean(descriptor.token))
   ) return null;
@@ -100,6 +109,7 @@ export function validateServeHealth(
     tools: h.tools as string[],
     tokenProtected: h.tokenProtected,
     tokenAuthenticated: true,
+    draining: h.draining,
   };
 }
 
@@ -118,7 +128,9 @@ export function validateServeDescriptor(parsed: unknown): ServeDescriptor | null
   // outbound fetch target during liveness probing (egress / SSRF).
   const hostOk = typeof d.host === 'string' && isLoopbackHost(d.host);
   const tokenOk = d.token === undefined || typeof d.token === 'string';
-  if (!portOk || !pidOk || !hostOk || !tokenOk) return null;
+  const stateOk = d.state === undefined || d.state === 'ready' || d.state === 'draining';
+  if (!portOk || !pidOk || !hostOk || !tokenOk || !stateOk) return null;
+  const state = d.state === 'ready' || d.state === 'draining' ? d.state : undefined;
   return {
     port: d.port as number,
     pid: d.pid as number,
@@ -126,6 +138,7 @@ export function validateServeDescriptor(parsed: unknown): ServeDescriptor | null
     token: d.token as string | undefined,
     startedAt: typeof d.startedAt === 'string' ? d.startedAt : '',
     version: typeof d.version === 'string' ? d.version : '',
+    ...(state === undefined ? {} : { state }),
   };
 }
 
@@ -135,12 +148,16 @@ export function validateServeDescriptor(parsed: unknown): ServeDescriptor | null
  * resolves to null, so a poisoned descriptor is indistinguishable from an absent
  * one and no field of it ever reaches a fetch target or request header.
  */
-export async function readServeDescriptor(descriptorPath: string): Promise<ServeDescriptor | null> {
+export async function readServeDescriptor(
+  descriptorPath: string,
+  options: { includeDraining?: boolean } = {},
+): Promise<ServeDescriptor | null> {
   let parsed: unknown;
   try {
     parsed = JSON.parse(await readFile(descriptorPath, 'utf-8'));
   } catch {
     return null;
   }
-  return validateServeDescriptor(parsed);
+  const descriptor = validateServeDescriptor(parsed);
+  return descriptor?.state === 'draining' && !options.includeDraining ? null : descriptor;
 }

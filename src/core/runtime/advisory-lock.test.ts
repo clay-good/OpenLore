@@ -130,6 +130,22 @@ describe('superseded-holder safety', () => {
     expect(await readFile(gate, 'utf8')).toBe('4194303');
   });
 
+  it('retries namespace cleanup after a release is temporarily blocked', async () => {
+    const dir = join(root, 'release-retry');
+    const lockPath = join(dir, '.x.lock');
+    const held = await acquireLockAt(dir, '.x.lock', { namespaceGateMaxWaitMs: 20 });
+    if (isLockHeld(held)) throw new Error('setup acquire must own the lock');
+    const gate = `${lockPath}.gate`;
+    await writeFile(gate, '4194303');
+
+    await expect(held.release()).rejects.toBeInstanceOf(NamespaceGateHeldError);
+    expect(await access(lockPath).then(() => true)).toBe(true);
+
+    await rm(gate);
+    await expect(held.release()).resolves.toBeUndefined();
+    await expect(access(lockPath)).rejects.toThrow();
+  });
+
   it('cannot delete or refresh a successor even under an unsafe custom stale policy', async () => {
     const dir = join(root, 'superseded-holder');
     const lockPath = join(dir, '.x.lock');

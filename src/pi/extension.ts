@@ -60,6 +60,7 @@ import {
 // (mcp-security: ServeDescriptorValidatedAtEveryReader).
 import {
   readServeDescriptor,
+  serveHttpBaseUrl,
   validateServeHealth,
   type ServeDescriptor,
   type ServeHealth,
@@ -481,7 +482,7 @@ async function probeHealth(desc: ServeDescriptor, expectedRoot: string): Promise
     // `redirect: 'error'` — a daemon never redirects, and following one would take
     // this probe (and, at the call site below, the token) off the machine.
     const headers = desc.token ? { 'x-openlore-token': desc.token } : undefined;
-    const res = await fetch(`http://${desc.host}:${desc.port}/health`, {
+    const res = await fetch(`${serveHttpBaseUrl(desc.host, desc.port)}/health`, {
       headers,
       signal: AbortSignal.timeout(HEALTH_PROBE_TIMEOUT_MS),
       redirect: 'error',
@@ -502,7 +503,7 @@ export function missingDaemonTools(available: readonly string[], required: reado
 
 function incompatibleDaemon(desc: ServeDescriptor): Daemon {
   return {
-    baseUrl: `http://${desc.host}:${desc.port}`,
+    baseUrl: serveHttpBaseUrl(desc.host, desc.port),
     token: desc.token,
     incompatibility:
       'The running openlore daemon does not report an authenticated, enforced tool surface for ' +
@@ -514,7 +515,7 @@ function incompatibleDaemon(desc: ServeDescriptor): Daemon {
 function daemonFromHealth(desc: ServeDescriptor, health: ServeHealth): Daemon {
   const missing = missingDaemonTools(health.tools, NAV_TOOLS.map((tool) => tool.name));
   return {
-    baseUrl: `http://${desc.host}:${desc.port}`,
+    baseUrl: serveHttpBaseUrl(desc.host, desc.port),
     token: desc.token,
     ...(missing.length > 0
       ? {
@@ -531,6 +532,7 @@ export async function ensureDaemon(cwd: string): Promise<Daemon | null> {
   const existing = await readDescriptor(cwd);
   if (existing) {
     const probe = await probeHealth(existing, cwd);
+    if (probe.health?.draining) return null;
     if (probe.health) return daemonFromHealth(existing, probe.health);
     if (probe.alive) return incompatibleDaemon(existing);
   }
@@ -567,6 +569,7 @@ export async function ensureDaemon(cwd: string): Promise<Daemon | null> {
     const desc = await readDescriptor(cwd);
     if (desc) {
       const probe = await probeHealth(desc, cwd);
+      if (probe.health?.draining) continue;
       if (probe.health) return daemonFromHealth(desc, probe.health);
       if (probe.alive) return incompatibleDaemon(desc);
     }

@@ -190,6 +190,14 @@ The MCP server keeps the index fresh as you edit (file watcher on by default; `n
 | **Your source code** | never leaves the machine — no account, no telemetry (opt-in only), no hosted index |
 | **Lock-in** | none — delete `.openlore/` and nothing about your repo has changed |
 
+Optional telemetry is enabled only with `OPENLORE_TELEMETRY=1`. It stays in the repository's
+gitignored `.openlore/telemetry/` directory, rotates locally, is never transmitted, and records
+filesystem locations in error/module fields as project-relative paths (or `~`-relative paths).
+Token-bearing daemon descriptors are written with owner-only `0o600` permissions on POSIX systems.
+Windows does not expose equivalent POSIX mode enforcement through Node; keep the workspace under a
+user-only ACL when using a daemon token there. Network-visible daemon binds require a token and a
+wildcard host (`0.0.0.0` or `::`); discovery and lifecycle probes remain loopback-only.
+
 Large monorepos take minutes rather than seconds — stated plainly in [Known Limitations](#known-limitations).
 
 <details>

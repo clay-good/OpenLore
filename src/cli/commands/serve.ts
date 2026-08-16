@@ -36,16 +36,17 @@
 import { Command } from 'commander';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createRequire } from 'node:module';
-import { unlink } from 'node:fs/promises';
+import { access, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { logger } from '../../utils/logger.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, FULL_PRESET, FULL_PRESET_ALIAS, LEAN_DEFAULT_PRESET } from '../../constants.js';
 import { dispatchTool, UnknownToolError } from '../../core/services/tool-dispatch.js';
 import { resolveCanonicalToolName } from '../../core/services/mcp-handlers/tool-contract.js';
-import { validateDirectory, waitForGraphRebuild } from '../../core/services/mcp-handlers/utils.js';
+import { releaseContextCache, validateDirectory, waitForGraphRebuild } from '../../core/services/mcp-handlers/utils.js';
 import { EdgeStore } from '../../core/services/edge-store.js';
 import { McpWatcher } from '../../core/services/mcp-watcher.js';
 import { registerRepairHost } from '../../core/services/cold-start-bootstrap.js';
+import { acquireLockAt, isLockHeld } from '../../core/runtime/advisory-lock.js';
 import { openloreAnalyze } from '../../api/analyze.js';
 import { TOOL_DEFINITIONS, TOOL_PRESETS, presetMembershipError, selectActiveTools } from './mcp.js';
 import { validateKnownProperties, validateToolArgs } from '../../core/services/mcp-handlers/tool-guard.js';
@@ -59,6 +60,7 @@ import {
 import {
   readServeDescriptor,
   canonicalServeRoot,
+  serveHttpBaseUrl,
   validateServeHealth,
   type ServeDescriptor,
   type ServeHealth,
@@ -70,6 +72,38 @@ import {
  * is heavier; a few seconds of quiet is the signal that an edit burst is done.
  */
 const REANALYZE_DEBOUNCE_MS = 4000;
+const REBUILD_DRAIN_TIMEOUT_MS = 60_000;
+const SERVE_START_LOCK_FILE = 'serve.lock';
+const SERVE_START_LOCK_WAIT_MS = 30_000;
+const SERVE_STOP_WAIT_MS = REBUILD_DRAIN_TIMEOUT_MS + 5_000;
+
+function discoveryHostForBind(host: string): string | null {
+  if (isLoopbackHost(host)) return host;
+  if (host === '0.0.0.0') return '127.0.0.1';
+  if (host === '::') return '::1';
+  return null;
+}
+
+/** Wait for active rebuilds without letting shutdown hang forever. */
+export async function drainServeRebuilds(
+  rebuilds: Iterable<Promise<void>>,
+  timeoutMs = REBUILD_DRAIN_TIMEOUT_MS,
+): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const drained = await Promise.race([
+    Promise.allSettled([...rebuilds]).then(() => true),
+    new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(false), timeoutMs);
+    }),
+  ]);
+  if (timer) clearTimeout(timer);
+  if (!drained) {
+    logger.warning(
+      `[serve] shutdown proceeded after waiting ${timeoutMs}ms for an in-flight graph rebuild.`,
+    );
+  }
+  return drained;
+}
 
 /**
  * Default minutes of request inactivity before the daemon self-terminates.
@@ -119,6 +153,8 @@ interface ServeCliOptions {
   watch?: boolean;
   /** Minutes of request inactivity before the daemon self-terminates. 0 disables. */
   idleTimeout?: string;
+  /** Internal test seam; the CLI always uses the production startup-lock bound. */
+  startupLockWaitMs?: number;
 }
 
 /** Live daemon handle. Returned by {@link startServe} so callers (tests) can
@@ -190,7 +226,7 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
  * Exported for the serve.json validation tests.
  */
 export async function readDescriptor(root: string): Promise<ServeDescriptor | null> {
-  return readServeDescriptor(serveFilePath(root));
+  return readServeDescriptor(serveFilePath(root), { includeDraining: true });
 }
 
 /**
@@ -208,7 +244,7 @@ async function probeDaemon(
     // caller-provided replacement token must never be disclosed to a
     // descriptor-selected listener.
     const headers = desc.token ? { [OPENLORE_TOKEN_HEADER]: desc.token } : undefined;
-    const res = await fetch(`http://${desc.host}:${desc.port}/health`, {
+    const res = await fetch(`${serveHttpBaseUrl(desc.host, desc.port)}/health`, {
       headers,
       signal: AbortSignal.timeout(HEALTH_PROBE_TIMEOUT_MS),
       // A daemon never redirects; following one would take this probe off-machine.
@@ -225,30 +261,49 @@ async function probeDaemon(
   }
 }
 
-/** Stop the verified daemon for `root` by asking the listener to tear itself down. */
-async function stopDaemon(root: string): Promise<void> {
+/** Stop the verified daemon and wait until its listener has actually closed. */
+async function stopDaemon(root: string): Promise<boolean> {
   const path = serveFilePath(root);
   const desc = await readDescriptor(root);
   if (!desc) {
     logger.warning(`No running openlore serve daemon found for ${root}.`);
-    return;
+    return true;
+  }
+  if (desc.state === 'draining') {
+    const drainingProbe = await probeDaemon(desc, root);
+    if (drainingProbe.health && !drainingProbe.health.draining) {
+      // A stopper can die after publishing draining but before POST /shutdown.
+      // The verified daemon says no teardown began, so resume the stop safely.
+      desc.state = 'ready';
+      await writeInstanceDescriptor(path, desc);
+    } else {
+    const deadline = Date.now() + SERVE_STOP_WAIT_MS;
+    while (Date.now() < deadline) {
+      if ((await readDescriptor(root)) === null) return true;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    logger.error(`Daemon ${desc.pid} is still draining; verify it before manual descriptor cleanup.`);
+    process.exitCode = 1;
+    return false;
+    }
   }
   const probe = await probeDaemon(desc, root);
   if (!probe.alive) {
     await unlink(path).catch(() => {});
     logger.warning(`No live daemon at ${desc.host}:${desc.port}; removed stale ${SERVE_FILE}.`);
-    return;
+    return true;
   }
   if (!probe.health) {
     logger.warning(
       'The announced listener is not an authenticated daemon for this repository; refusing ' +
       'to signal the descriptor PID. Stop or upgrade the legacy daemon manually.',
     );
-    return;
+    return false;
   }
   try {
     const headers = desc.token ? { [OPENLORE_TOKEN_HEADER]: desc.token } : undefined;
-    const res = await fetch(`http://${desc.host}:${desc.port}/shutdown`, {
+    await writeInstanceDescriptor(path, { ...desc, state: 'draining' });
+    const res = await fetch(`${serveHttpBaseUrl(desc.host, desc.port)}/shutdown`, {
       method: 'POST',
       headers,
       signal: AbortSignal.timeout(HEALTH_PROBE_TIMEOUT_MS),
@@ -256,24 +311,35 @@ async function stopDaemon(root: string): Promise<void> {
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     logger.success(`Requested shutdown of openlore serve (pid ${probe.health.pid}).`);
+    const deadline = Date.now() + SERVE_STOP_WAIT_MS;
+    while (Date.now() < deadline) {
+      // Teardown removes the owned descriptor only after watcher stop and the
+      // bounded rebuild drain. Listener closure alone is therefore not enough.
+      if ((await readDescriptor(root)) === null) return true;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    logger.error(
+      `Daemon ${probe.health.pid} acknowledged shutdown but did not stop within ${SERVE_STOP_WAIT_MS}ms. ` +
+      'The startup lock remains fail-closed; verify the PID before manual cleanup.',
+    );
+    process.exitCode = 1;
+    return false;
   } catch {
+    await writeInstanceDescriptor(path, { ...desc, state: 'ready' }).catch(() => {});
     logger.warning('The verified daemon did not accept the shutdown request.');
+    return false;
   }
 }
 
 export async function startServe(options: ServeCliOptions): Promise<ServeHandle | undefined> {
   const root = canonicalServeRoot(options.directory ?? process.cwd());
-
-  if (options.stop) {
-    await stopDaemon(root);
-    return undefined;
-  }
-
   const host = options.host ?? '127.0.0.1';
   const token = options.token ?? (process.env.OPENLORE_SERVE_TOKEN || undefined);
+  const discoveryHost = discoveryHostForBind(host);
+  const presetName = options.preset ?? LEAN_DEFAULT_PRESET;
+  const isFullSurface = presetName === FULL_PRESET_ALIAS || presetName === FULL_PRESET;
 
-  // A non-loopback bind exposes the tool surface to other hosts on the network;
-  // refuse it without a token (mcp-security: Local Daemon Authentication).
+  // Reject static configuration errors before creating .openlore or its lock.
   if (!isLoopbackHost(host) && !token) {
     logger.error(
       `Refusing to bind non-loopback host "${host}" without a token. ` +
@@ -283,6 +349,81 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
     process.exitCode = 1;
     return;
   }
+  if (!discoveryHost) {
+    logger.error(
+      `Refusing non-loopback host "${host}" because safe local daemon discovery requires ` +
+      'a loopback host or wildcard bind (0.0.0.0 or ::).',
+    );
+    process.exitCode = 1;
+    return;
+  }
+  if (!isFullSurface && !TOOL_PRESETS[presetName]) {
+    logger.error(`Unknown --preset "${presetName}". Known: ${Object.keys(TOOL_PRESETS).join(', ')}, ${FULL_PRESET_ALIAS}, ${FULL_PRESET}.`);
+    process.exitCode = 1;
+    return;
+  }
+  if (options.stop) {
+    const openloreDirectory = join(root, OPENLORE_DIR);
+    const exists = await access(openloreDirectory).then(() => true).catch(() => false);
+    if (!exists) {
+      logger.warning(`No running openlore serve daemon found for ${root}.`);
+      return;
+    }
+  }
+
+  // Serialize stop as well as startup. A stop that arrived during bind used to
+  // observe no descriptor and return just before the starter published one.
+  let lockResult: Awaited<ReturnType<typeof acquireLockAt>>;
+  try {
+    const startupLockWaitMs = options.startupLockWaitMs ?? SERVE_START_LOCK_WAIT_MS;
+    lockResult = await acquireLockAt(join(root, OPENLORE_DIR), SERVE_START_LOCK_FILE, {
+      maxWaitMs: startupLockWaitMs,
+      ...(options.startupLockWaitMs !== undefined
+        ? { namespaceGateMaxWaitMs: startupLockWaitMs }
+        : {}),
+    });
+  } catch (err) {
+    logger.error(
+      `The serve startup lock for ${root} is unavailable: ${err instanceof Error ? err.message : String(err)} ` +
+      `Verify that no starter is running, then remove the stranded lock gate under ${join(root, OPENLORE_DIR)}.`,
+    );
+    process.exitCode = 1;
+    return;
+  }
+  if (isLockHeld(lockResult)) {
+    logger.error(
+      `Timed out waiting for ${lockResult.lockPath}. Verify its recorded owner is no longer running ` +
+      'before removing the lock file.',
+    );
+    process.exitCode = 1;
+    return;
+  }
+  let releaseAttempted = false;
+  let startupLockReleased = false;
+  let preserveStartupLock = false;
+  const releaseStartupLock = async (): Promise<void> => {
+    if (releaseAttempted || preserveStartupLock) return;
+    releaseAttempted = true;
+    try {
+      await lockResult.release();
+      startupLockReleased = true;
+    } catch (err) {
+      // Descriptor publication already makes the live daemon discoverable. A
+      // failed release must not replace the returned handle and orphan it; the
+      // PID-bearing lock remains fail-closed and becomes stale after process exit.
+      logger.warning(
+        `[serve] could not release the startup lock: ${err instanceof Error ? err.message : String(err)} ` +
+        'The live daemon remains discoverable; verify its PID before manual lock cleanup.',
+      );
+    }
+  };
+
+  try {
+  if (options.stop) {
+    preserveStartupLock = !(await stopDaemon(root));
+    return undefined;
+  }
+
   // A loopback bind with no token is still reachable by other local processes.
   if (isLoopbackHost(host) && !token) {
     logger.warning(
@@ -291,16 +432,9 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
     );
   }
 
-  const presetName = options.preset ?? LEAN_DEFAULT_PRESET;
   // Full-surface selectors: serve historically used `all`; accept `full` too so
   // the selector vocabulary matches `openlore mcp` (change: default-to-lean-tool-
   // surface added `full`/`all` there). Both mean every tool.
-  const isFullSurface = presetName === FULL_PRESET_ALIAS || presetName === FULL_PRESET;
-  if (!isFullSurface && !TOOL_PRESETS[presetName]) {
-    logger.error(`Unknown --preset "${presetName}". Known: ${Object.keys(TOOL_PRESETS).join(', ')}, ${FULL_PRESET_ALIAS}, ${FULL_PRESET}.`);
-    process.exitCode = 1;
-    return;
-  }
   // Active tool surface: 'all'/'full' = every tool, otherwise the named preset.
   const activeNames = new Set(
     (isFullSurface
@@ -315,9 +449,18 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
   // after listen, once exitAfterTeardown exists.
   const idleMs = idleTimeoutMs(options.idleTimeout);
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  let teardownRequested = false;
+  const rebuildRunning = new Set<string>();
+  const rebuildPending = new Set<string>();
+  const rebuildPromises = new Map<string, Promise<void>>();
+  let lifecycleReady = false;
   function touchActivity(): void {
-    if (shuttingDown || idleMs <= 0) return;
+    if (teardownRequested || idleMs <= 0 || !lifecycleReady) return;
     if (idleTimer) clearTimeout(idleTimer);
+    if (rebuildRunning.size > 0) {
+      idleTimer = undefined;
+      return;
+    }
     idleTimer = setTimeout(() => {
       logger.discovery(`[serve] idle ${idleMs / 60_000}min with no requests — shutting down to free memory.`);
       void exitAfterTeardown();
@@ -329,7 +472,31 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
   // Don't start a second daemon for a root already served by a healthy one —
   // a concurrent spawn (two MCP clients, or pi + MCP) would otherwise leave two
   // watchers racing on the same .openlore/analysis. Reuse the live one instead.
-  const existing = await readDescriptor(root);
+  let existing = await readDescriptor(root);
+  if (existing?.state === 'draining') {
+    const drainingProbe = await probeDaemon(existing, root);
+    if (drainingProbe.health && !drainingProbe.health.draining) {
+      // Recover a stopper that crashed between publishing draining and sending
+      // the shutdown request. Identity/token/root were proved by the probe.
+      existing.state = 'ready';
+      await writeInstanceDescriptor(serveFilePath(root), existing);
+    } else {
+    const deadline = Date.now() + SERVE_STOP_WAIT_MS;
+    while (Date.now() < deadline && existing?.state === 'draining') {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      existing = await readDescriptor(root);
+    }
+    if (existing?.state === 'draining') {
+      logger.error(
+        `The daemon for ${root} is still draining. No replacement was started; ` +
+        'verify the descriptor PID before manual cleanup.',
+      );
+      process.exitCode = 1;
+      preserveStartupLock = true;
+      return;
+    }
+    }
+  }
   if (existing && existing.token !== token) {
     logger.error(
       `Refusing to reuse the daemon announced for ${root}: requested token posture ` +
@@ -340,8 +507,23 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
     process.exitCode = 1;
     return;
   }
-  const existingProbe = existing ? await probeDaemon(existing, root) : null;
-  const existingHealth = existingProbe?.health ?? null;
+  let existingProbe = existing ? await probeDaemon(existing, root) : null;
+  let existingHealth = existingProbe?.health ?? null;
+  if (existingHealth?.draining) {
+    const deadline = Date.now() + SERVE_STOP_WAIT_MS;
+    while (Date.now() < deadline && await readDescriptor(root)) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    existing = await readDescriptor(root);
+    if (existing) {
+      logger.error(`The daemon for ${root} did not finish draining; no replacement was started.`);
+      process.exitCode = 1;
+      preserveStartupLock = true;
+      return;
+    }
+    existingProbe = null;
+    existingHealth = null;
+  }
   if (existing && existingProbe?.alive && !existingHealth) {
     logger.error(
       `Refusing to reuse the daemon already serving ${root} because its health response ` +
@@ -371,13 +553,13 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
       return;
     }
     logger.success(
-      `openlore serve already running for ${root} at http://${existing.host}:${existing.port} — reusing.`,
+      `openlore serve already running for ${root} at ${serveHttpBaseUrl(existing.host, existing.port)} — reusing.`,
     );
     return {
       port: existing.port,
       host: existing.host,
       token,
-      baseUrl: `http://${existing.host}:${existing.port}`,
+      baseUrl: serveHttpBaseUrl(existing.host, existing.port),
       close: async () => {}, // never tear down a daemon this process didn't start
     };
   }
@@ -385,15 +567,14 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
   const startedAt = new Date().toISOString();
   const startMs = Date.now();
 
-  // Per-directory schema-reset flag. Set once (at startup or first request);
-  // cleared after waitForGraphRebuild() succeeds so subsequent requests don't
-  // re-open EdgeStore. Uses a Map because the daemon can serve multiple dirs.
-  const schemaResetByDir = new Map<string, boolean>();
-  let shuttingDown = false;
+  // Root-scoped schema-reset flag. Set once at startup or first request and
+  // cleared after waitForGraphRebuild() succeeds. Foreign directories are
+  // rejected before this state or any EdgeStore handle is touched.
+  let schemaReset: boolean | undefined;
 
-  // Single forced-rebuild coordinator, keyed by directory. BOTH the schema-reset
+  // Single forced-rebuild coordinator. BOTH the schema-reset
   // healer (below) and the watcher's debounced re-analyze (further down) funnel
-  // through here, so at most one `analyze --force` ever runs per directory at a
+  // through here, so at most one `analyze --force` ever runs for the served root at a
   // time — two concurrent ones would clear+repopulate the same EdgeStore
   // non-atomically and could tear the graph. A trigger that arrives mid-rebuild
   // is coalesced into a single follow-up run rather than dropped or stacked.
@@ -403,13 +584,14 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
   // and the watcher's own open only *schedules* a rebuild — so serve still kicks the
   // rebuild explicitly and blocks the first request on it, rather than letting
   // waitForGraphRebuild() poll a not-ready store until it times out.
-  const rebuildRunning = new Set<string>();
-  const rebuildPending = new Set<string>();
-  const rebuildPromises = new Map<string, Promise<void>>();
   function triggerRebuild(directory: string): void {
-    if (shuttingDown) return;
+    if (teardownRequested) return;
     if (rebuildRunning.has(directory)) { rebuildPending.add(directory); return; }
     rebuildRunning.add(directory);
+    if (idleTimer) {
+      clearTimeout(idleTimer);
+      idleTimer = undefined;
+    }
     logger.discovery(`[serve] rebuilding graph index (${directory})`);
     const rebuild = openloreAnalyze({ rootPath: directory, force: true })
       .then(() => logger.discovery(`[serve] graph index rebuilt (${directory})`))
@@ -417,19 +599,20 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
       .finally(() => {
         rebuildPromises.delete(directory);
         rebuildRunning.delete(directory);
-        if (!shuttingDown && rebuildPending.delete(directory)) {
+        if (!teardownRequested && rebuildPending.delete(directory)) {
           // Re-run for the coalesced trigger. For the served root, go back through
           // the debounce so sustained editing doesn't spin back-to-back analyzes;
-          // other dirs (per-request schema heal) re-run immediately.
+          // The root-bound request path cannot schedule a foreign rebuild.
           if (directory === root) scheduleReanalyze();
           else triggerRebuild(directory);
         }
+        if (!teardownRequested && rebuildRunning.size === 0) touchActivity();
       });
     rebuildPromises.set(directory, rebuild);
   }
 
   const server = createServer((req, res) => {
-    if (shuttingDown) {
+    if (teardownRequested) {
       sendJson(res, 503, { error: 'server is shutting down' });
       return;
     }
@@ -438,10 +621,8 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
     });
   });
 
-  let descriptorRemoved = false;
-
   async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const url = new URL(req.url ?? '/', `http://${host}`);
+    const url = new URL(req.url ?? '/', serveHttpBaseUrl(host, boundPort));
 
     // DNS-rebinding / cross-origin defense — runs before ANY dispatch, including
     // /health, so a malicious page can't even probe the daemon's existence.
@@ -464,6 +645,11 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
       }
     }
 
+    if (!lifecycleReady) {
+      sendJson(res, 503, { error: 'daemon is still starting' });
+      return;
+    }
+
     if (req.method === 'GET' && url.pathname === '/health') {
       touchActivity();
       sendJson(res, 200, {
@@ -476,21 +662,28 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
         tools: [...activeNames],
         tokenProtected: Boolean(token),
         tokenAuthenticated,
+        draining: teardownRequested,
         uptimeMs: Date.now() - startMs,
       });
       return;
     }
 
     if (req.method === 'POST' && url.pathname === '/shutdown') {
-      // Claim this instance's discovery entry before acknowledging shutdown.
-      // A replacement started after the 202 must not have its descriptor removed
-      // later by this daemon's slower watcher/cache teardown.
-      await unlink(serveFilePath(root)).catch(() => {});
-      descriptorRemoved = true;
-      sendJson(res, 202, { ok: true, shuttingDown: true });
-      // Closing every owned handle lets a CLI daemon exit naturally, while also
-      // making this endpoint safe for in-process callers such as the test suite.
-      setImmediate(() => void teardown());
+      const shutdown = teardown();
+      const announced = await teardownAnnounced;
+      sendJson(
+        res,
+        announced ? 202 : 500,
+        announced
+          ? { ok: true, shuttingDown: true }
+          : { error: 'shutdown began, but the draining descriptor could not be published' },
+      );
+      void shutdown;
+      return;
+    }
+
+    if (teardownRequested) {
+      sendJson(res, 503, { error: 'daemon is shutting down' });
       return;
     }
 
@@ -561,35 +754,45 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
         return;
       }
 
-      const directory = selectedDirectory as string;
+      const requestedDirectory = selectedDirectory as string;
 
       try {
-        await validateDirectory(directory);
+        const validatedDirectory = await validateDirectory(requestedDirectory);
+        if (canonicalServeRoot(validatedDirectory) !== root) {
+          sendJson(res, 400, {
+            error:
+              `This daemon serves only ${root}. Start a separate openlore serve daemon ` +
+              `for ${validatedDirectory} and send the request to that daemon.`,
+          });
+          return;
+        }
       } catch (err) {
         sendJson(res, 400, { error: err instanceof Error ? err.message : 'invalid directory' });
         return;
       }
+      const directory = root;
+      args.directory = root;
 
       // Auto-heal schema mismatch: on first request for a directory, open
       // EdgeStore once to detect a not-ready (schema-mismatched / quarantined) store;
       // cache the result so we never re-open on subsequent requests. If not ready,
       // block until the rebuild is done.
-      if (!schemaResetByDir.has(directory)) {
+      if (schemaReset === undefined) {
         try {
           const analysisDir = join(directory, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
           if (EdgeStore.exists(analysisDir)) {
             const es = EdgeStore.open(EdgeStore.dbPath(analysisDir));
-            schemaResetByDir.set(directory, es.notReady != null);
+            schemaReset = es.notReady != null;
             es.close();
           } else {
-            schemaResetByDir.set(directory, false);
+            schemaReset = false;
           }
         } catch {
-          schemaResetByDir.set(directory, false);
+          schemaReset = false;
         }
       }
-      if (schemaResetByDir.get(directory)) {
-        if (shuttingDown) {
+      if (schemaReset) {
+        if (teardownRequested) {
           sendJson(res, 503, { error: 'server is shutting down' });
           return;
         }
@@ -602,7 +805,7 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
         // which openloreAnalyze rewrites as its last step — so the poll sees
         // the rebuilt state as soon as analyze completes.
         const rebuilt = await waitForGraphRebuild(directory, 60_000);
-        schemaResetByDir.set(directory, !rebuilt);
+        schemaReset = !rebuilt;
         if (!rebuilt) logger.warning(`[serve] Graph rebuild timed out — graph tools may return empty results.`);
       }
 
@@ -642,27 +845,6 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
   const addr = server.address();
   const boundPort = typeof addr === 'object' && addr ? addr.port : port;
 
-  const descriptor: ServeDescriptor = {
-    port: boundPort,
-    pid: process.pid,
-    host,
-    token,
-    startedAt,
-    version: _pkgVersion,
-  };
-  // 0600 — the descriptor carries the daemon token that gates /tool/*. Discovery is
-  // best-effort (parity with the viewer): a descriptor left by another local user can
-  // make the chmod fail with EPERM, and that must not stop a daemon that is already
-  // listening — the token gate does not depend on the file being written.
-  try {
-    await writeInstanceDescriptor(serveFilePath(root), descriptor);
-  } catch (err) {
-    logger.warning(`Could not write ${serveFilePath(root)} (${err instanceof Error ? err.message : String(err)}); discovery by other clients may fail.`);
-  }
-
-  logger.success(`openlore serve listening on http://${host}:${boundPort} (preset: ${presetName})`);
-  logger.discovery(`Discovery file: ${serveFilePath(root)}`);
-
   // Pre-populate the schema-reset flag for the served root so the startup
   // warning fires immediately and the first request doesn't pay the open cost.
   try {
@@ -671,7 +853,7 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
       const es = EdgeStore.open(EdgeStore.dbPath(analysisDir));
       const reset = es.notReady != null;
       es.close();
-      schemaResetByDir.set(root, reset);
+      schemaReset = reset;
       if (reset) {
         logger.warning(
           `[serve] Graph index not ready (${es.notReady?.reason}) — it is being rebuilt in the background. ` +
@@ -683,11 +865,11 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
         triggerRebuild(root);
       }
     } else {
-      schemaResetByDir.set(root, false);
+      schemaReset = false;
     }
   } catch (err) {
     logger.debug(`[serve] Failed to check schema on startup: ${err instanceof Error ? err.message : String(err)}`);
-    schemaResetByDir.set(root, false);
+    schemaReset = false;
   }
 
   // ── Freshness: watcher (signatures + vector) + debounced call-graph re-analyze ──
@@ -701,7 +883,7 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
   // Debounced call-graph re-analyze. Routes through triggerRebuild so it shares
   // the single-flight lock with the schema-reset healer (no concurrent --force).
   function scheduleReanalyze(): void {
-    if (shuttingDown) return;
+    if (teardownRequested) return;
     if (reanalyzeTimer) clearTimeout(reanalyzeTimer);
     reanalyzeTimer = setTimeout(() => triggerRebuild(root), REANALYZE_DEBOUNCE_MS);
     // Don't keep the daemon alive for this debounce alone — the HTTP socket owns
@@ -746,10 +928,28 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
   // startServe() call (including each test) adds permanent process listeners
   // that accumulate and trigger MaxListenersExceededWarning.
   let teardownPromise: Promise<void> | undefined;
+  let teardownAnnounced: Promise<boolean> = Promise.resolve(true);
   const teardown = (): Promise<void> => {
     if (teardownPromise) return teardownPromise;
-    shuttingDown = true;
+    // Set this synchronously. Until the draining descriptor is published,
+    // /health stays reusable while every mutating route returns 503, so a
+    // concurrent starter can never infer "dead" and create a second writer.
+    teardownRequested = true;
+    teardownAnnounced = (async () => {
+      const announced = await readDescriptor(root);
+      if (announced?.state === 'draining') return true;
+      try {
+        await writeInstanceDescriptor(serveFilePath(root), { ...descriptor, state: 'draining' });
+        return true;
+      } catch (err) {
+        logger.warning(
+          `[serve] could not publish draining state: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return false;
+      }
+    })();
     teardownPromise = (async () => {
+      await teardownAnnounced;
       process.off('SIGINT',  onSigInt);
       process.off('SIGTERM', onSigTerm);
       if (idleTimer) {
@@ -761,27 +961,61 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
         reanalyzeTimer = undefined;
       }
       unregisterRepairHost();
-      const serverClosed = new Promise<void>((resolve) => server.close(() => resolve()));
       if (watcher) await watcher.stop().catch(() => {});
       rebuildPending.clear();
-      await Promise.allSettled([...rebuildPromises.values()]);
-      if (!descriptorRemoved) await unlink(serveFilePath(root)).catch(() => {});
+      await drainServeRebuilds(rebuildPromises.values());
+      const serverClosed = new Promise<void>((resolve) => server.close(() => resolve()));
       await serverClosed;
+      releaseContextCache(root);
+      await unlink(serveFilePath(root)).catch(() => {});
+      if (!startupLockReleased) {
+        await lockResult.release()
+          .then(() => { startupLockReleased = true; })
+          .catch(() => {});
+      }
     })();
     return teardownPromise;
   };
-  const exitAfterTeardown = async (): Promise<void> => {
+  async function exitAfterTeardown(): Promise<void> {
     await teardown();
     process.exit(0);
-  };
+  }
   const onSigInt  = () => void exitAfterTeardown();
   const onSigTerm = () => void exitAfterTeardown();
   process.on('SIGINT',  onSigInt);
   process.on('SIGTERM', onSigTerm);
 
-  // Arm the idle timer now that teardown exists. Until the first request, the
-  // daemon already counts as idle — a client that spawns one but never calls it
-  // (e.g. a crashed session) will still be reaped.
+  // Publish only after teardown, watcher, repair authority, and signal handlers
+  // are live. A waiting stop/reuse caller cannot observe a half-started daemon.
+  lifecycleReady = true;
+  const descriptor: ServeDescriptor = {
+    port: boundPort,
+    pid: process.pid,
+    host: discoveryHost,
+    token,
+    startedAt,
+    version: _pkgVersion,
+    state: 'ready',
+  };
+  try {
+    await writeInstanceDescriptor(serveFilePath(root), descriptor);
+  } catch (err) {
+    await releaseStartupLock();
+    await teardown();
+    logger.error(
+      `Could not publish ${serveFilePath(root)} (${err instanceof Error ? err.message : String(err)}); ` +
+      'the unannounced daemon was closed.',
+    );
+    process.exitCode = 1;
+    return;
+  }
+  await releaseStartupLock();
+
+  logger.success(`openlore serve listening on ${serveHttpBaseUrl(host, boundPort)} (preset: ${presetName})`);
+  logger.discovery(`Discovery file: ${serveFilePath(root)}`);
+
+  // Until the first request, the daemon already counts as idle — a client that
+  // spawns one but never calls it (e.g. a crashed session) will still be reaped.
   touchActivity();
   if (idleMs > 0) logger.discovery(`[serve] idle shutdown after ${idleMs / 60_000}min of inactivity`);
 
@@ -789,16 +1023,19 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
     port: boundPort,
     host,
     token,
-    baseUrl: `http://${host}:${boundPort}`,
+    baseUrl: serveHttpBaseUrl(host, boundPort),
     close: teardown,
   };
+  } finally {
+    await releaseStartupLock();
+  }
 }
 
 export const serveCommand = new Command('serve')
   .description('Start a warm local HTTP daemon exposing openlore tools (loopback, for editor/agent integrations like Pi)')
   .option('-d, --directory <path>', 'Project root to serve (discovery file written here)', process.cwd())
   .option('-p, --port <number>', 'Port to bind (default: ephemeral free port)')
-  .option('--host <host>', 'Host to bind', '127.0.0.1')
+  .option('--host <host>', 'Loopback host, or token-protected wildcard 0.0.0.0/::', '127.0.0.1')
   .option(
     '--preset <name>',
     `Callable tool surface enforced at dispatch (navigation, substrate, minimal, or all/full). Default: ${LEAN_DEFAULT_PRESET}`,

@@ -370,6 +370,7 @@ describe('spec — lean default surface + breadth pointer (via SDK Client over s
           tools: TOOL_DEFINITIONS.map((tool) => tool.name),
           tokenProtected: false,
           tokenAuthenticated: true,
+          draining: false,
         }));
         return;
       }

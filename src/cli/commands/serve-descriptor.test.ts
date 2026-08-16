@@ -21,6 +21,7 @@ import {
   validateServeDescriptor,
   validateServeHealth,
   readServeDescriptor,
+  serveHttpBaseUrl,
 } from './serve-descriptor.js';
 
 const HEALTHY = { port: 8080, pid: 4242, host: '127.0.0.1', token: 't', startedAt: 's', version: 'v' };
@@ -33,7 +34,13 @@ const HEALTH = {
   tools: ['orient'],
   tokenProtected: true,
   tokenAuthenticated: true,
+  draining: false,
 };
+
+it('formats IPv4 and IPv6 loopback origins safely', () => {
+  expect(serveHttpBaseUrl('127.0.0.1', 8080)).toBe('http://127.0.0.1:8080');
+  expect(serveHttpBaseUrl('::1', 8080)).toBe('http://[::1]:8080');
+});
 
 describe('validateServeHealth', () => {
   it('requires an authenticated enforced surface bound to the expected root', () => {
@@ -45,6 +52,8 @@ describe('validateServeHealth', () => {
       { ...HEALTH, tools: [1] },
       { ...HEALTH, tokenProtected: 'yes' },
       { ...HEALTH, tokenAuthenticated: false },
+      { ...HEALTH, draining: 'false' },
+      (({ draining: _, ...withoutDraining }) => withoutDraining)(HEALTH),
     ]) {
       expect(validateServeHealth(bad, '/tmp/project')).toBeNull();
     }
@@ -95,6 +104,12 @@ describe('validateServeDescriptor', () => {
   it('accepts an absent token but rejects a non-string one', () => {
     expect(validateServeDescriptor({ port: 8080, pid: 1, host: '127.0.0.1' })).not.toBeNull();
     expect(validateServeDescriptor({ port: 8080, pid: 1, host: '127.0.0.1', token: 5 })).toBeNull();
+  });
+
+  it('accepts only the ready/draining lifecycle states', () => {
+    expect(validateServeDescriptor({ ...HEALTHY, state: 'ready' })?.state).toBe('ready');
+    expect(validateServeDescriptor({ ...HEALTHY, state: 'draining' })?.state).toBe('draining');
+    expect(validateServeDescriptor({ ...HEALTHY, state: 'starting' })).toBeNull();
   });
 
   it('rejects a non-loopback host (SSRF/egress guard)', () => {
@@ -162,6 +177,17 @@ describe('readServeDescriptor', () => {
     await write(JSON.stringify(HEALTHY));
     try {
       expect(await readServeDescriptor(path())).toEqual(HEALTHY);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('hides draining daemons from normal clients while lifecycle owners can inspect them', async () => {
+    const draining = { ...HEALTHY, state: 'draining' as const };
+    await write(JSON.stringify(draining));
+    try {
+      expect(await readServeDescriptor(path())).toBeNull();
+      expect(await readServeDescriptor(path(), { includeDraining: true })).toEqual(draining);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

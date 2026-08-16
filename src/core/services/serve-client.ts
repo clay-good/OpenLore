@@ -16,6 +16,7 @@ import { join } from 'node:path';
 import { FULL_PRESET, OPENLORE_DIR } from '../../constants.js';
 import {
   readServeDescriptor,
+  serveHttpBaseUrl,
   validateServeHealth,
   type ServeDescriptor,
 } from '../../cli/commands/serve-descriptor.js';
@@ -87,7 +88,7 @@ async function readDescriptor(directory: string): Promise<ServeDescriptor | null
 async function healthy(desc: ServeDescriptor, expectedRoot: string): Promise<boolean> {
   try {
     const headers = desc.token ? { [OPENLORE_TOKEN_HEADER]: desc.token } : undefined;
-    const res = await fetch(`http://${desc.host}:${desc.port}/health`, {
+    const res = await fetch(`${serveHttpBaseUrl(desc.host, desc.port)}/health`, {
       headers,
       signal: AbortSignal.timeout(HEALTH_PROBE_TIMEOUT_MS),
       // The descriptor is confined to loopback, but a local listener answering a
@@ -97,14 +98,15 @@ async function healthy(desc: ServeDescriptor, expectedRoot: string): Promise<boo
     });
     if (!res.ok) return false;
     const body = await res.json().catch(() => null);
-    return validateServeHealth(body, expectedRoot, desc) !== null;
+    const health = validateServeHealth(body, expectedRoot, desc);
+    return health !== null && !health.draining;
   } catch {
     return false;
   }
 }
 
 function endpointOf(desc: ServeDescriptor): ServeEndpoint {
-  return { baseUrl: `http://${desc.host}:${desc.port}`, token: desc.token };
+  return { baseUrl: serveHttpBaseUrl(desc.host, desc.port), token: desc.token };
 }
 
 /**

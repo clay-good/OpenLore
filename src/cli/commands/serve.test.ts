@@ -8,16 +8,19 @@
  */
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { mkdtemp, rm, readFile, access, mkdir, writeFile, realpath } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, access, mkdir, writeFile, realpath, stat, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer, request as httpRequest } from 'node:http';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
-import { startServe, readDescriptor, idleTimeoutMs, type ServeHandle } from './serve.js';
+import { startServe, readDescriptor, idleTimeoutMs, drainServeRebuilds, type ServeHandle } from './serve.js';
 import { TOOL_PRESETS } from './mcp.js';
 import { EdgeStore } from '../../core/services/edge-store.js';
 import * as analyzeApi from '../../api/analyze.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR } from '../../constants.js';
+import { _contextCacheSizeForTesting, readCachedContext } from '../../core/services/mcp-handlers/utils.js';
+import { logger } from '../../utils/logger.js';
 import {
   _resetRepairServiceForTesting,
   requestRepairFromHost,
@@ -51,6 +54,29 @@ describe('host-scoped cold-read repair', () => {
     handle = undefined;
     expect(requestRepairFromHost(root, ['src/payments.ts'])).toBe(false);
   });
+
+  it('closes and evicts the served root cache during teardown', async () => {
+    const h = await boot();
+    const analysisDir = join(root, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
+    await mkdir(analysisDir, { recursive: true });
+    await writeFile(join(analysisDir, 'llm-context.json'), JSON.stringify({
+      phase1_survey: { purpose: 'survey', files: [], estimatedTokens: 0 },
+      phase2_deep: { purpose: 'deep', files: [], totalTokens: 0 },
+      phase3_validation: { purpose: 'validation', files: [], totalTokens: 0 },
+    }));
+    const created = EdgeStore.open(EdgeStore.dbPath(analysisDir));
+    created.close();
+
+    const cached = await readCachedContext(await realpath(root));
+    expect(cached?.edgeStore).toBeDefined();
+    expect(_contextCacheSizeForTesting()).toBe(1);
+    cached!.edgeStore!.close();
+
+    await h.close();
+    handle = undefined;
+    expect(_contextCacheSizeForTesting()).toBe(0);
+    expect(() => cached!.edgeStore!.countNodes()).toThrow();
+  });
 });
 
 async function boot(opts: { token?: string; preset?: string } = {}): Promise<ServeHandle> {
@@ -64,6 +90,20 @@ async function boot(opts: { token?: string; preset?: string } = {}): Promise<Ser
 
 function fileExists(p: string): Promise<boolean> {
   return access(p).then(() => true).catch(() => false);
+}
+
+async function terminateChild(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null) return;
+  child.kill('SIGTERM');
+  const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()));
+  const timedOut = await Promise.race([
+    exited.then(() => false),
+    new Promise<boolean>((resolve) => setTimeout(() => resolve(true), 5_000)),
+  ]);
+  if (timedOut && child.exitCode === null) {
+    child.kill('SIGKILL');
+    await new Promise<void>((resolve) => child.once('exit', () => resolve()));
+  }
 }
 
 // fetch().json() is typed `Promise<any>` but strict callers see `unknown`; cast
@@ -112,6 +152,19 @@ describe('idleTimeoutMs', () => {
 
   it('falls back to the default on non-numeric input', () => {
     expect(idleTimeoutMs('abc')).toBe(15 * 60_000);
+  });
+});
+
+describe('drainServeRebuilds', () => {
+  it('reports a completed drain', async () => {
+    await expect(drainServeRebuilds([Promise.resolve()], 50)).resolves.toBe(true);
+  });
+
+  it('bounds shutdown when a rebuild never settles', async () => {
+    const never = new Promise<void>(() => {});
+    const warning = vi.spyOn(logger, 'warning').mockImplementation(() => {});
+    await expect(drainServeRebuilds([never], 5)).resolves.toBe(false);
+    expect(warning).toHaveBeenCalledWith(expect.stringMatching(/proceeded after waiting 5ms/i));
   });
 });
 
@@ -241,6 +294,26 @@ describe('openlore serve', () => {
     expect(await fileExists(descPath)).toBe(false);
   });
 
+  it.skipIf(process.platform === 'win32')('writes the token-bearing descriptor owner-only', async () => {
+    await boot({ token: 'owner-only' });
+    const mode = (await stat(join(root, '.openlore', 'serve.json'))).mode & 0o777;
+    expect(mode).toBe(0o600);
+  });
+
+  it('closes an unannounced listener and releases its lock when descriptor publication fails', async () => {
+    root = await mkdtemp(join(tmpdir(), 'openlore-serve-publish-fail-'));
+    await mkdir(join(root, OPENLORE_DIR, 'serve.json'), { recursive: true });
+    const previousExitCode = process.exitCode;
+    try {
+      const result = await startServe({ directory: root, port: '0', watch: false });
+      expect(result).toBeUndefined();
+      expect(process.exitCode).toBe(1);
+      expect(await fileExists(join(root, OPENLORE_DIR, 'serve.lock'))).toBe(false);
+    } finally {
+      process.exitCode = previousExitCode;
+    }
+  });
+
   it('rejects a registered tool outside the active preset before dispatch', async () => {
     const h = await boot();
     const res = await fetch(`${h.baseUrl}/tool/get_env_vars`, {
@@ -330,6 +403,30 @@ describe('openlore serve', () => {
     }
   });
 
+  it('rejects foreign roots and subdirectories before opening their caches', async () => {
+    const h = await boot({ preset: 'all' });
+    const otherRoot = await mkdtemp(join(tmpdir(), 'openlore-serve-foreign-'));
+    const subdirectory = join(root, 'packages', 'api');
+    await mkdir(subdirectory, { recursive: true });
+    try {
+      for (const directory of [otherRoot, subdirectory]) {
+        const res = await fetch(`${h.baseUrl}/tool/orient`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ directory, args: { task: 'must stay root-bound' } }),
+        });
+        expect(res.status).toBe(400);
+        const body = await jsonOf(res);
+        expect(String(body.error)).toContain(`serves only ${await realpath(root)}`);
+        expect(String(body.error)).toMatch(/separate openlore serve daemon/i);
+      }
+      expect(await fileExists(join(otherRoot, OPENLORE_DIR))).toBe(false);
+      expect(await fileExists(join(subdirectory, OPENLORE_DIR))).toBe(false);
+    } finally {
+      await rm(otherRoot, { recursive: true, force: true });
+    }
+  });
+
   it('preset "all" exposes non-navigation tools', async () => {
     const h = await boot({ preset: 'all' });
     const res = await fetch(`${h.baseUrl}/health`);
@@ -400,6 +497,12 @@ describe('openlore serve', () => {
     expect(await fileExists(descPath)).toBe(false); // stale descriptor cleaned up
   });
 
+  it('--stop in an untouched root does not create .openlore', async () => {
+    root = await mkdtemp(join(tmpdir(), 'openlore-serve-empty-stop-'));
+    await startServe({ directory: root, stop: true });
+    expect(await fileExists(join(root, OPENLORE_DIR))).toBe(false);
+  });
+
   it('--stop asks the root-bound daemon to shut itself down without signalling descriptor PID data', async () => {
     const h = await boot();
     const kill = vi.spyOn(process, 'kill');
@@ -467,6 +570,218 @@ describe('openlore serve', () => {
     // close() on the reused handle is a no-op — must not tear down h1.
     await h2!.close();
     expect((await fetch(`${h1.baseUrl}/health`)).status).toBe(200);
+  });
+
+  it('serializes concurrent starts so both callers resolve to one daemon', async () => {
+    root = await mkdtemp(join(tmpdir(), 'openlore-serve-race-'));
+    const [first, second] = await Promise.all([
+      startServe({ directory: root, port: '0', watch: false }),
+      startServe({ directory: root, port: '0', watch: false }),
+    ]);
+    expect(first).toBeDefined();
+    expect(second).toBeDefined();
+    expect(second!.port).toBe(first!.port);
+    expect((await readDescriptor(root))?.port).toBe(first!.port);
+    expect(await fileExists(join(root, OPENLORE_DIR, 'serve.lock'))).toBe(false);
+    expect((await fetch(`${first!.baseUrl}/health`)).status).toBe(200);
+    await Promise.all([first!.close(), second!.close()]);
+  });
+
+  it('reuses an authenticated daemon bound on all interfaces through a loopback descriptor', async () => {
+    root = await mkdtemp(join(tmpdir(), 'openlore-serve-nonloopback-race-'));
+    const [first, second] = await Promise.all([
+      startServe({ directory: root, host: '0.0.0.0', token: 'protected', port: '0', watch: false }),
+      startServe({ directory: root, host: '0.0.0.0', token: 'protected', port: '0', watch: false }),
+    ]);
+    expect(first).toBeDefined();
+    expect(second).toBeDefined();
+    expect(second!.port).toBe(first!.port);
+    expect((await readDescriptor(root))?.host).toBe('127.0.0.1');
+    await Promise.all([first!.close(), second!.close()]);
+  });
+
+  it('reuses an authenticated IPv6 wildcard daemon through a bracket-safe loopback descriptor', async () => {
+    root = await mkdtemp(join(tmpdir(), 'openlore-serve-ipv6-race-'));
+    const first = await startServe({ directory: root, host: '::', token: 'protected', port: '0', watch: false });
+    expect(first).toBeDefined();
+    const second = await startServe({ directory: root, host: '::', token: 'protected', port: '0', watch: false });
+    expect(second?.port).toBe(first!.port);
+    expect((await readDescriptor(root))?.host).toBe('::1');
+    expect(second?.baseUrl).toBe(`http://[::1]:${first!.port}`);
+    await Promise.all([first!.close(), second!.close()]);
+  });
+
+  it('recovers a healthy daemon from a stopper that stranded the draining marker', async () => {
+    const first = await boot();
+    const path = join(root, OPENLORE_DIR, 'serve.json');
+    const descriptor = await readDescriptor(root);
+    await writeFile(path, JSON.stringify({ ...descriptor!, state: 'draining' }));
+
+    const reused = await startServe({ directory: root, port: '0', watch: false });
+    expect(reused?.port).toBe(first.port);
+    expect((await readDescriptor(root))?.state).toBe('ready');
+    await reused!.close();
+  });
+
+  it('lets a repeated --stop finish a healthy daemon with a stranded draining marker', async () => {
+    const first = await boot();
+    const path = join(root, OPENLORE_DIR, 'serve.json');
+    const descriptor = await readDescriptor(root);
+    await writeFile(path, JSON.stringify({ ...descriptor!, state: 'draining' }));
+
+    await startServe({ directory: root, stop: true });
+    expect(await readDescriptor(root)).toBeNull();
+    await expect(fetch(`${first.baseUrl}/health`)).rejects.toThrow();
+    handle = undefined;
+  });
+
+  it('announces shutdown before acknowledging a direct shutdown request', async () => {
+    const h = await boot({ token: 'protected' });
+    const response = await fetch(`${h.baseUrl}/shutdown`, {
+      method: 'POST',
+      headers: { 'x-openlore-token': 'protected' },
+    });
+    expect(response.status).toBe(202);
+    const announced = await readDescriptor(root);
+    expect(announced === null || announced.state === 'draining').toBe(true);
+    await h.close();
+    handle = undefined;
+  });
+
+  it('does not acknowledge shutdown when the draining descriptor cannot be published', async () => {
+    const h = await boot({ token: 'protected' });
+    const descriptorPath = join(root, OPENLORE_DIR, 'serve.json');
+    await rm(descriptorPath);
+    await mkdir(descriptorPath);
+
+    const response = await fetch(`${h.baseUrl}/shutdown`, {
+      method: 'POST',
+      headers: { 'x-openlore-token': 'protected' },
+    });
+    expect(response.status).toBe(500);
+    expect(await response.json()).toMatchObject({ error: expect.stringContaining('could not be published') });
+    await h.close();
+    handle = undefined;
+  });
+
+  it('rejects a concrete non-loopback bind that cannot publish a safe discovery endpoint', async () => {
+    root = await mkdtemp(join(tmpdir(), 'openlore-serve-concrete-bind-'));
+    const previousExitCode = process.exitCode;
+    try {
+      const result = await startServe({
+        directory: root,
+        host: '192.0.2.10',
+        token: 'protected',
+        port: '0',
+        watch: false,
+      });
+      expect(result).toBeUndefined();
+      expect(process.exitCode).toBe(1);
+      expect(await fileExists(join(root, OPENLORE_DIR))).toBe(false);
+    } finally {
+      process.exitCode = previousExitCode;
+    }
+  });
+
+  it('serializes real child-process starts and starts exactly one watcher', async () => {
+    root = await mkdtemp(join(tmpdir(), 'openlore-serve-process-race-'));
+    const children: ChildProcess[] = [];
+    const output: string[] = [];
+    const launch = (): ChildProcess => {
+      const child = spawn(process.execPath, [
+        '--import', 'tsx', join(process.cwd(), 'src', 'cli', 'index.ts'),
+        'serve', '--directory', root, '--port', '0', '--idle-timeout', '0',
+      ], { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] });
+      child.stdout?.on('data', (chunk) => output.push(String(chunk)));
+      child.stderr?.on('data', (chunk) => output.push(String(chunk)));
+      children.push(child);
+      return child;
+    };
+
+    launch();
+    launch();
+    try {
+      let descriptor: Awaited<ReturnType<typeof readDescriptor>> = null;
+      await vi.waitFor(async () => {
+        descriptor = await readDescriptor(root);
+        expect(descriptor).not.toBeNull();
+      }, { timeout: 15_000, interval: 50 });
+      await vi.waitFor(() => {
+        expect(children.filter((child) => child.exitCode === null).length).toBe(1);
+      }, { timeout: 15_000, interval: 50 });
+      const winner = children.find((child) => child.exitCode === null)!;
+      const loser = children.find((child) => child !== winner)!;
+      expect(loser.exitCode).toBe(0);
+      expect(descriptor!.pid).toBe(winner.pid);
+      await vi.waitFor(() => {
+        expect(output.join('').match(/\[serve\] watching /g) ?? []).toHaveLength(1);
+        expect(output.join('')).toContain('already running');
+        expect(output.join('')).toContain('reusing');
+      }, { timeout: 15_000, interval: 50 });
+
+      await fetch(`http://${descriptor!.host}:${descriptor!.port}/shutdown`, { method: 'POST' });
+      await vi.waitFor(() => expect(winner.exitCode).not.toBeNull(), { timeout: 15_000, interval: 50 });
+    } finally {
+      await Promise.all(children.map(terminateChild));
+    }
+  }, 30_000);
+
+  it('handles a real SIGTERM and removes discovery only after clean process exit', async () => {
+    root = await mkdtemp(join(tmpdir(), 'openlore-serve-sigterm-'));
+    const child = spawn(process.execPath, [
+      '--import', 'tsx', join(process.cwd(), 'src', 'cli', 'index.ts'),
+      'serve', '--directory', root, '--port', '0', '--no-watch', '--idle-timeout', '0',
+    ], { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] });
+    try {
+      await vi.waitFor(async () => {
+        expect(await readDescriptor(root)).not.toBeNull();
+      }, { timeout: 15_000, interval: 50 });
+
+      child.kill('SIGTERM');
+      await vi.waitFor(() => expect(child.exitCode).toBe(0), { timeout: 15_000, interval: 50 });
+      expect(await readDescriptor(root)).toBeNull();
+    } finally {
+      await terminateChild(child);
+    }
+  }, 20_000);
+
+  it('recovers a stale startup lock left by a crashed process', async () => {
+    root = await mkdtemp(join(tmpdir(), 'openlore-serve-stale-lock-'));
+    const lockPath = join(root, OPENLORE_DIR, 'serve.lock');
+    await mkdir(join(root, OPENLORE_DIR), { recursive: true });
+    await writeFile(lockPath, `2147483647 ${new Date(0).toISOString()}`);
+    const old = new Date(Date.now() - 180_000);
+    await utimes(lockPath, old, old);
+
+    handle = await startServe({ directory: root, port: '0', watch: false });
+    expect(handle).toBeDefined();
+    expect((await fetch(`${handle!.baseUrl}/health`)).status).toBe(200);
+    expect(await fileExists(lockPath)).toBe(false);
+  });
+
+  it.each([
+    { suffix: '', contents: '' },
+    { suffix: '.gate', contents: '2147483647' },
+  ])('fails closed with actionable guidance for an ambiguous abandoned lock$suffix', async ({ suffix, contents }) => {
+    root = await mkdtemp(join(tmpdir(), 'openlore-serve-ambiguous-lock-'));
+    const lockPath = join(root, OPENLORE_DIR, `serve.lock${suffix}`);
+    await mkdir(join(root, OPENLORE_DIR), { recursive: true });
+    await writeFile(lockPath, contents);
+    const error = vi.spyOn(logger, 'error').mockImplementation(() => {});
+    const previousExitCode = process.exitCode;
+    try {
+      const result = await startServe({
+        directory: root,
+        port: '0',
+        watch: false,
+        startupLockWaitMs: 20,
+      });
+      expect(result).toBeUndefined();
+      expect(process.exitCode).toBe(1);
+      expect(error).toHaveBeenCalledWith(expect.stringMatching(/verify.*remove|verify.*before removing/i));
+    } finally {
+      process.exitCode = previousExitCode;
+    }
   });
 
   it('treats all and full as the same security surface when reusing a daemon', async () => {
@@ -676,16 +991,21 @@ describe('openlore serve', () => {
     });
 
     let firstClose: Promise<void> | undefined;
+    const exit = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
     try {
       // Start serve (watch:false so the ONLY possible healer is serve's own trigger).
-      handle = await startServe({ directory: root, port: '0', watch: false });
+      handle = await startServe({ directory: root, port: '0', watch: false, idleTimeout: '0.001' });
       expect(handle).toBeDefined();
       expect(analyze).toHaveBeenCalledTimes(1);
 
-      // Close immediately while the startup rebuild is active. Every concurrent
-      // close caller joins the same teardown, and teardown does not resolve until
-      // the rebuild is quiescent. This is the exact race that previously let test
-      // cleanup remove .openlore/analysis while analyze was still writing to it.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(exit).not.toHaveBeenCalled();
+
+      // Exercise the real signal path while the startup rebuild is active. A
+      // concurrent close caller joins the same teardown, and process.exit must
+      // remain behind that drain.
+      const signalHandler = process.listeners('SIGTERM').at(-1) as () => void;
+      signalHandler();
       firstClose = handle!.close();
       const secondClose = handle!.close();
       expect(secondClose).toBe(firstClose);
@@ -693,12 +1013,16 @@ describe('openlore serve', () => {
       void firstClose.then(() => { closeSettled = true; });
       await Promise.resolve();
       expect(closeSettled).toBe(false);
+      expect(exit).not.toHaveBeenCalled();
     } finally {
       releaseRebuild();
       if (firstClose) await firstClose;
       else if (handle) await handle.close();
       handle = undefined;
+      expect(exit).toHaveBeenCalledWith(0);
+      exit.mockRestore();
     }
+    expect(_contextCacheSizeForTesting()).toBe(0);
 
     const es = EdgeStore.open(dbFile);
     expect(es.notReady).toBeNull();      // healed back to the current schema
@@ -731,6 +1055,7 @@ describe('openlore serve', () => {
     const h = await startServe({ directory: root, port: '0', watch: false, host: '0.0.0.0' });
     expect(h).toBeUndefined();
     expect(process.exitCode).toBe(1);
+    expect(await fileExists(join(root, OPENLORE_DIR))).toBe(false);
     process.exitCode = prev; // don't fail the suite
   });
 
@@ -740,6 +1065,7 @@ describe('openlore serve', () => {
     const h = await startServe({ directory: root, port: '0', watch: false, preset: 'bogus' });
     expect(h).toBeUndefined();
     expect(process.exitCode).toBe(1);
+    expect(await fileExists(join(root, OPENLORE_DIR))).toBe(false);
     process.exitCode = prev; // don't fail the suite
   });
 

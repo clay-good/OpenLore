@@ -280,6 +280,19 @@ export function _resetContextCacheForTesting(): void {
   _contextCache.clear();
 }
 
+/** Release the parsed context and EdgeStore owned by one long-lived host. */
+export function releaseContextCache(directory: string): void {
+  const entry = _contextCache.get(directory);
+  if (!entry) return;
+  _contextCache.delete(directory);
+  try { entry.ctx.edgeStore?.close(); } catch { /* already closed by an in-process consumer */ }
+}
+
+/** Test seam for lifecycle assertions; production code uses {@link releaseContextCache}. */
+export function _contextCacheSizeForTesting(): number {
+  return _contextCache.size;
+}
+
 /**
  * Watch-mode handoff (Spec 13.1). Push an updated context into the in-memory
  * read cache so the next tool call is a cache HIT — no 2.1 MB disk re-parse —
