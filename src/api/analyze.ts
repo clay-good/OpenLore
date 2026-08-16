@@ -20,6 +20,7 @@ import type { AnalyzeApiOptions, AnalyzeResult, ProgressCallback } from './types
 import { SpecSnapshotGenerator } from '../core/analyzer/spec-snapshot-generator.js';
 import { atomicWriteFile } from '../core/decisions/atomic-store.js';
 import { withAnalysisLock } from '../core/runtime/advisory-lock.js';
+import { captureSourceState, reconcileSourceStates } from '../core/analyzer/source-state.js';
 import { publishGeneration, readGenerationSnapshot, REQUIRED_ANALYSIS_ARTIFACTS } from '../core/runtime/analysis-generation.js';
 import { computeProjectFingerprint } from '../core/services/mcp-handlers/utils.js';
 import {
@@ -204,6 +205,7 @@ export async function openloreAnalyze(options: AnalyzeApiOptions = {}): Promise<
       excludePatterns: excludePatterns.length > 0 ? excludePatterns : undefined,
       includePatterns: includePatterns.length > 0 ? includePatterns : undefined,
     });
+    const sourceStateBefore = await captureSourceState(rootPath);
     const repoMap = await mapper.map();
     progress(
       onProgress,
@@ -238,12 +240,13 @@ export async function openloreAnalyze(options: AnalyzeApiOptions = {}): Promise<
       // cheap. Re-extraction is its own opt-in.
       reExtract: options.reExtract ?? false,
     });
-    const fingerprintHash = await computeProjectFingerprint(rootPath);
     let artifacts: AnalyzeResult['artifacts'];
     await withAnalysisLock(outputPath, async () => {
       artifacts = await artifactGenerator.generateAndSave(repoMap, depGraph, undefined, {
         acquireLock: false,
       });
+      const fingerprintHash = await computeProjectFingerprint(rootPath);
+      const sourceState = reconcileSourceStates(sourceStateBefore, await captureSourceState(rootPath));
       await atomicWriteFile(
         join(outputPath, ARTIFACT_DEPENDENCY_GRAPH),
         JSON.stringify(depGraph, null, 2)
@@ -252,7 +255,8 @@ export async function openloreAnalyze(options: AnalyzeApiOptions = {}): Promise<
         join(outputPath, ARTIFACT_FINGERPRINT),
         JSON.stringify({
           hash: fingerprintHash,
-          commit: null,
+          commit: sourceState.commit,
+          sourceTreeState: sourceState.treeState,
           computedAt: new Date().toISOString(),
           fileCount: repoMap.allFiles.length,
         })

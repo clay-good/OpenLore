@@ -17,8 +17,9 @@ Confirm it worked with `openlore doctor` — it reports your config, index fresh
 and LLM/embedding setup, and prints the exact command to fix anything that is missing.
 
 > **Onboarding onto an already-analyzed repo?** Instead of cold-indexing, import a committed graph
-> bundle: `openlore import .openlore/index-bundle.olbundle` — a verified index in seconds (or a
-> transparent rebuild if it's stale). See [shareable-bundle.md](shareable-bundle.md).
+> bundle: `openlore import .openlore/index-bundle.olbundle` — an integrity-checked index in seconds
+> (or a transparent rebuild if it is stale). Producer provenance is verified only for a trusted
+> signature. See [shareable-bundle.md](shareable-bundle.md).
 
 ## Zero-interaction onboarding
 

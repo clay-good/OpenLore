@@ -705,13 +705,13 @@ describe('analyze command', () => {
       vi.mocked(cfgMod.readOpenLoreConfig).mockResolvedValue(null as never);
     });
 
-    function fingerprint(): { hash: string; commit: string | null } {
+    function fingerprint(): { hash: string; commit: string | null; sourceTreeState: 'clean' | 'dirty' | 'unknown' } {
       const call = atomicWriteMock.mock.calls.find(c => String(c[0]).endsWith(ARTIFACT_FINGERPRINT));
       expect(call, 'fingerprint.json was written').toBeDefined();
       return JSON.parse(String((call as unknown[])[1]));
     }
 
-    it('records the short HEAD commit when analyzing a git repo', async () => {
+    it('records the full HEAD commit when analyzing a git repo', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'ol-analyze-git-'));
       const git = (...a: string[]) => execFileSync(
         'git',
@@ -721,12 +721,14 @@ describe('analyze command', () => {
       try {
         git('init', '-q');
         writeFileSync(join(dir, 'a.ts'), 'export const x = 1;\n');
-        git('add', 'a.ts');
+        writeFileSync(join(dir, '.gitignore'), '.openlore/\n');
+        git('add', 'a.ts', '.gitignore');
         git('commit', '-q', '-m', 'init');
-        const head = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: dir }).toString().trim();
+        const head = execFileSync('git', ['rev-parse', '--verify', 'HEAD'], { cwd: dir }).toString().trim();
 
         await runAnalysis(dir, join(dir, '.openlore', 'analysis'), { maxFiles: 100000, include: [], exclude: [] });
         expect(fingerprint().commit).toBe(head);
+        expect(fingerprint().sourceTreeState).toBe('clean');
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
@@ -737,6 +739,7 @@ describe('analyze command', () => {
       const fp = fingerprint();
       expect('commit' in fp).toBe(true);
       expect(fp.commit).toBeNull();
+      expect(fp.sourceTreeState).toBe('unknown');
     });
   });
 });

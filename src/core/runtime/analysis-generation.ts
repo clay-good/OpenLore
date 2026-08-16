@@ -44,6 +44,9 @@ export const REQUIRED_ANALYSIS_ARTIFACTS = [
   'fingerprint.json',
 ] as const;
 
+/** Additional graph files an importer may bind to the same generation commit. */
+const OPTIONAL_GENERATION_ARTIFACTS = new Set(['call-graph.db', 'index-attestation.json']);
+
 export interface GenerationArtifactRecord {
   /** Artifact file name, relative to the analysis directory. */
   path: string;
@@ -180,7 +183,8 @@ export async function readCurrentGeneration(
       && Array.isArray(parsed.artifacts)
       && uniquePaths.size === parsed.artifacts.length
       && legacyArtifacts.every(name => uniquePaths.has(name))
-      && (legacyArtifacts.length === 0 || uniquePaths.size === new Set(legacyArtifacts).size)
+      && (legacyArtifacts.length === 0 || paths.every(name => typeof name === 'string'
+        && (legacyArtifacts.includes(name) || OPTIONAL_GENERATION_ARTIFACTS.has(name))))
       && parsed.artifacts.every(record =>
         record
         && typeof record.path === 'string'
@@ -294,4 +298,17 @@ export async function readGenerationSnapshot<T>(
 /** Remove a manifest, e.g. when abandoning an interrupted publication. */
 export async function discardGeneration(analysisDir: string): Promise<void> {
   await unlink(manifestPathOf(analysisDir)).catch(() => {});
+}
+
+/**
+ * Publish an explicit non-generation before a writer replaces a multi-artifact set.
+ * A malformed-but-present manifest is intentionally different from an absent manifest:
+ * readers return `analysis-unavailable` instead of downgrading the in-flight files to a
+ * synthesized legacy generation.
+ */
+export async function markGenerationUnavailable(analysisDir: string): Promise<void> {
+  await atomicWriteFile(
+    manifestPathOf(analysisDir),
+    JSON.stringify({ version: GENERATION_MANIFEST_VERSION, state: 'publishing' }),
+  );
 }

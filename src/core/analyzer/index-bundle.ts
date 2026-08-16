@@ -26,14 +26,22 @@
  * No new dependency (Node `zlib`/`crypto`), no network, no LLM.
  */
 
-import { createHash } from 'node:crypto';
+import {
+  createHash,
+  createPrivateKey,
+  createPublicKey,
+  randomUUID,
+  sign as signBytes,
+  verify as verifyBytes,
+  type KeyObject,
+} from 'node:crypto';
 import { CFG_SPILL_PREFIX } from './cfg-spill.js';
 import { existsSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { gzipSync, gunzipSync } from 'node:zlib';
-import { readFile, writeFile, readdir, mkdir, mkdtemp, copyFile, rm, stat } from 'node:fs/promises';
+import { readFile, writeFile, readdir, mkdir, mkdtemp, copyFile, rm, stat, rename, open } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, basename, isAbsolute } from 'node:path';
+import { join, basename, isAbsolute, dirname } from 'node:path';
 import {
   ARTIFACT_CALL_GRAPH_DB,
   ARTIFACT_ANALYSIS_ORIGIN,
@@ -41,16 +49,25 @@ import {
   ARTIFACT_INDEX_ATTESTATION,
   ARTIFACT_TRAVERSAL_INDEX,
 } from '../../constants.js';
-import { writeAnalysisContentProvenance } from '../services/served-content.js';
 import {
+  ATTESTATION_VERSION,
   computeAttestation,
   digestProductionGraph,
   type IndexAttestation,
 } from './index-attestation.js';
 import { EdgeStore } from '../services/edge-store.js';
+import type { SourceTreeState } from './source-state.js';
+import { ANALYSIS_LOCK_FILE, withAnalysisLock } from '../runtime/advisory-lock.js';
+import {
+  GENERATION_MANIFEST_FILE,
+  REQUIRED_ANALYSIS_ARTIFACTS,
+  markGenerationUnavailable,
+  publishGeneration,
+} from '../runtime/analysis-generation.js';
+import { atomicWriteFile } from '../decisions/atomic-store.js';
 
 /** Artifact format version. Bump only on a shape change of the envelope below. */
-export const BUNDLE_VERSION = 1;
+export const BUNDLE_VERSION = 2;
 
 /** Default committed artifact path (outside `analysis/` so export never bundles itself). */
 export const BUNDLE_DEFAULT_FILENAME = 'index-bundle.olbundle';
@@ -85,6 +102,12 @@ const EXCLUDED_FILES = new Set([
   // that receives none builds it in memory on first use; the next local `analyze`
   // persists one.
   ARTIFACT_TRAVERSAL_INDEX,
+  // A generation identity is local to the materialized artifact set. Import publishes a
+  // fresh manifest only after every replacement file is in place.
+  GENERATION_MANIFEST_FILE,
+  // Runtime coordination belongs to the importing machine. Replacing this inode while the
+  // lock is held would split the lock namespace and destroy mutual exclusion.
+  ANALYSIS_LOCK_FILE,
 ]);
 
 /**
@@ -104,6 +127,7 @@ function isLocalOnlyDebris(name: string): boolean {
   // leaves one behind, and it must never be shipped in a bundle — it is neither part of the index
   // nor reproducible for a consumer.
   if (name.startsWith(CFG_SPILL_PREFIX)) return true;
+  if (name.startsWith('.import-')) return true;
   return new RegExp(`^${ARTIFACT_CALL_GRAPH_DB.replace('.', '\\.')}\\.(corrupt|export)-`).test(name);
 }
 
@@ -115,6 +139,43 @@ function isLocalOnlyDebris(name: string): boolean {
  * `openlore analyze`; the features that use it degrade gracefully rather than serve stale results).
  */
 const REBUILDABLE_INDEX_SUBDIRS = ['vector-index', 'text-line-index'];
+const IMPORT_STAGE_PREFIX = '.openlore-import-next-';
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+async function sweepDeadImportStages(parent: string, current: string): Promise<void> {
+  for (const entry of await readdir(parent, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !entry.name.startsWith(IMPORT_STAGE_PREFIX)) continue;
+    const candidate = join(parent, entry.name);
+    if (candidate === current) continue;
+    try {
+      const owner = JSON.parse(await readFile(join(candidate, '.owner.json'), 'utf8')) as { pid?: unknown };
+      if (typeof owner.pid === 'number' && Number.isSafeInteger(owner.pid) && !processIsAlive(owner.pid)) {
+        await rm(candidate, { recursive: true, force: true });
+      }
+    } catch {
+      // Unknown ownership is preserved; never delete a possibly active stage by age alone.
+    }
+  }
+}
+
+async function syncDirectory(path: string): Promise<void> {
+  try {
+    const handle = await open(path, 'r');
+    try { await handle.sync(); } finally { await handle.close(); }
+  } catch (err) {
+    // Windows and some filesystems do not permit opening directories. File fsync plus atomic
+    // manifest replacement remains the strongest portable process-interruption guarantee.
+    if (!['EISDIR', 'EINVAL', 'EPERM', 'EACCES'].includes((err as NodeJS.ErrnoException).code ?? '')) throw err;
+  }
+}
 
 /** Self-describing manifest carried with every bundle. No wall-clock field → deterministic. */
 export interface BundleManifest {
@@ -126,12 +187,29 @@ export interface BundleManifest {
   schemaVersion: number;
   /** The source commit the index was built from, or null when it could not be determined. */
   sourceCommit: string | null;
+  /** Source-tree state captured when analysis published this index. Missing on legacy v1 bundles. */
+  sourceTreeState?: SourceTreeState;
   /** The bundled integrity attestation — the trust stamp a consumer validates against. */
   attestation: IndexAttestation;
   /** SHA-256 over the canonical bundled file bytes (tamper / corruption evidence). */
   payloadDigest: string;
   /** Bundled files, sorted by name (the canonical order the digest is computed over). */
   files: Array<{ name: string; bytes: number }>;
+  /** Optional producer authentication. Present only on bundle format v2+. */
+  signature?: BundleSignature;
+}
+
+export interface BundleSignature {
+  algorithm: 'ed25519';
+  /** SHA-256 of the signing public key's canonical SPKI DER, hex encoded. */
+  keyId: string;
+  /** Detached signature over the canonical trust projection, base64 encoded. */
+  value: string;
+}
+
+export interface TrustedBundleSigner {
+  publicKey: string;
+  label?: string;
 }
 
 /** The artifact envelope: manifest + base64-encoded file payload. */
@@ -154,14 +232,22 @@ export class BundleError extends Error {
   }
 }
 
-/** Read the build commit the index was produced at from `fingerprint.json` (null if absent). */
-async function readSourceCommit(analysisDir: string): Promise<string | null> {
+/** Read source identity recorded when the index generation was published. */
+async function readSourceIdentity(
+  analysisDir: string,
+): Promise<{ sourceCommit: string | null; sourceTreeState: SourceTreeState }> {
   try {
     const raw = await readFile(join(analysisDir, ARTIFACT_FINGERPRINT), 'utf-8');
-    const parsed = JSON.parse(raw) as { commit?: unknown };
-    return typeof parsed.commit === 'string' && parsed.commit.length > 0 ? parsed.commit : null;
+    const parsed = JSON.parse(raw) as { commit?: unknown; sourceTreeState?: unknown };
+    const sourceCommit = typeof parsed.commit === 'string' && parsed.commit.length > 0
+      ? parsed.commit
+      : null;
+    const sourceTreeState = parsed.sourceTreeState === 'clean' || parsed.sourceTreeState === 'dirty'
+      ? parsed.sourceTreeState
+      : 'unknown';
+    return { sourceCommit, sourceTreeState };
   } catch {
-    return null;
+    return { sourceCommit: null, sourceTreeState: 'unknown' };
   }
 }
 
@@ -178,6 +264,115 @@ function computePayloadDigest(files: Array<{ name: string; bytes: Buffer }>): st
     h.update(f.bytes);
   }
   return h.digest('hex');
+}
+
+interface BundleTrustProjection {
+  domain: 'openlore.bundle.signature';
+  version: 1;
+  bundleVersion: number;
+  schemaVersion: number;
+  sourceCommit: string | null;
+  sourceTreeState: SourceTreeState;
+  payloadDigest: string;
+  attestation: IndexAttestation;
+  files: Array<{ name: string; bytes: number }>;
+}
+
+/** Canonical trust claims. `openloreVersion` remains unauthenticated display metadata. */
+function trustProjection(manifest: BundleManifest): BundleTrustProjection {
+  const a = manifest.attestation;
+  return {
+    domain: 'openlore.bundle.signature',
+    version: 1,
+    bundleVersion: manifest.bundleVersion,
+    schemaVersion: manifest.schemaVersion,
+    sourceCommit: manifest.sourceCommit,
+    sourceTreeState: manifest.sourceTreeState ?? 'unknown',
+    payloadDigest: manifest.payloadDigest,
+    attestation: {
+      attestationVersion: a.attestationVersion,
+      schemaVersion: a.schemaVersion,
+      digest: a.digest,
+      committed: {
+        files: a.committed.files,
+        functions: a.committed.functions,
+        edges: a.committed.edges,
+        classes: a.committed.classes,
+      },
+    },
+    files: manifest.files.map(file => ({ name: file.name, bytes: file.bytes })),
+  };
+}
+
+function trustProjectionBytes(manifest: BundleManifest): Buffer {
+  return Buffer.from(JSON.stringify(trustProjection(manifest)), 'utf8');
+}
+
+function requireEd25519PrivateKey(key: string | Buffer): KeyObject {
+  let parsed: KeyObject;
+  try {
+    parsed = createPrivateKey(key);
+  } catch {
+    throw new BundleError('unreadable', 'Could not read --sign-key as an unencrypted PKCS#8 private key.');
+  }
+  if (parsed.asymmetricKeyType !== 'ed25519') {
+    throw new BundleError('unreadable', '--sign-key must contain an Ed25519 private key.');
+  }
+  return parsed;
+}
+
+function publicKeyId(key: KeyObject): string {
+  const publicKey = key.type === 'public' ? key : createPublicKey(key);
+  const publicDer = publicKey.export({ type: 'spki', format: 'der' });
+  return createHash('sha256').update(publicDer).digest('hex');
+}
+
+function attachSignature(manifest: BundleManifest, signingKey: string | Buffer): void {
+  const privateKey = requireEd25519PrivateKey(signingKey);
+  manifest.signature = {
+    algorithm: 'ed25519',
+    keyId: publicKeyId(privateKey),
+    value: signBytes(null, trustProjectionBytes(manifest), privateKey).toString('base64'),
+  };
+}
+
+export type BundleSignatureVerdict =
+  | { status: 'unsigned' }
+  | { status: 'verified'; keyId: string; label?: string };
+
+/** Verify a present signature against repository-configured trusted public keys. */
+export function verifyBundleSignature(
+  bundle: Bundle,
+  trustedSigners: readonly TrustedBundleSigner[],
+): BundleSignatureVerdict {
+  const signature = bundle.manifest.signature;
+  if (!signature) return { status: 'unsigned' };
+  if (bundle.manifest.bundleVersion !== BUNDLE_VERSION) {
+    throw new BundleError('unreadable', 'Signed bundles require the current bundle format.');
+  }
+  const rawSignature = Buffer.from(signature.value, 'base64');
+  if (rawSignature.length !== 64 || rawSignature.toString('base64') !== signature.value) {
+    throw new BundleError('unreadable', 'Bundle signature is not canonical Ed25519 base64.');
+  }
+
+  for (const trusted of trustedSigners) {
+    let publicKey: KeyObject;
+    try {
+      publicKey = createPublicKey(trusted.publicKey);
+    } catch {
+      throw new BundleError('unreadable', 'bundle.trustedSigners contains an unreadable public key.');
+    }
+    if (publicKey.asymmetricKeyType !== 'ed25519') {
+      throw new BundleError('unreadable', 'bundle.trustedSigners accepts only Ed25519 public keys.');
+    }
+    const keyId = publicKeyId(publicKey);
+    if (keyId !== signature.keyId) continue;
+    if (!verifyBytes(null, trustProjectionBytes(bundle.manifest), publicKey, rawSignature)) {
+      throw new BundleError('unreadable', `Bundle signature verification failed for trusted key ${keyId}.`);
+    }
+    return { status: 'verified', keyId, ...(trusted.label ? { label: trusted.label } : {}) };
+  }
+  throw new BundleError('unreadable', `Bundle signature key ${signature.keyId} is not trusted by this repository.`);
 }
 
 /**
@@ -308,7 +503,11 @@ async function readStoreWithoutLocalCaches(
  * identically. The caller SHOULD checkpoint the store's WAL into the main db before calling so
  * the bundled `call-graph.db` is self-contained.
  */
-export async function buildBundle(analysisDir: string, openloreVersion: string): Promise<BuildBundleResult> {
+export async function buildBundle(
+  analysisDir: string,
+  openloreVersion: string,
+  options: { signingKey?: string | Buffer } = {},
+): Promise<BuildBundleResult> {
   const dbPath = join(analysisDir, ARTIFACT_CALL_GRAPH_DB);
   if (!existsSync(dbPath)) {
     throw new BundleError(
@@ -318,11 +517,11 @@ export async function buildBundle(analysisDir: string, openloreVersion: string):
   }
 
   const attestation = attestExportedStore(dbPath);
-  const sourceCommit = await readSourceCommit(analysisDir);
+  const { sourceCommit, sourceTreeState } = await readSourceIdentity(analysisDir);
 
   const entries = await readdir(analysisDir, { withFileTypes: true });
   const names = entries
-    .filter(e => e.isFile() && !EXCLUDED_FILES.has(e.name) && !isLocalOnlyDebris(e.name))
+    .filter(e => e.isFile() && !e.name.startsWith('.') && !EXCLUDED_FILES.has(e.name) && !isLocalOnlyDebris(e.name))
     .map(e => e.name)
     .sort();
 
@@ -361,10 +560,12 @@ export async function buildBundle(analysisDir: string, openloreVersion: string):
     openloreVersion,
     schemaVersion: attestation.schemaVersion,
     sourceCommit,
+    sourceTreeState,
     attestation,
     payloadDigest: computePayloadDigest(rawFiles),
     files: manifestFiles,
   };
+  if (options.signingKey) attachSignature(manifest, options.signingKey);
 
   // Fixed key order + sorted payload keys + fixed gzip level → byte-stable output.
   const json = JSON.stringify({ manifest, payload });
@@ -386,15 +587,46 @@ function isBundleShape(v: unknown): v is Bundle {
   const b = v as Record<string, unknown>;
   const m = b.manifest as Record<string, unknown> | undefined;
   if (!m || typeof m !== 'object') return false;
-  if (typeof m.bundleVersion !== 'number') return false;
+  if (typeof m.bundleVersion !== 'number' || !Number.isSafeInteger(m.bundleVersion)) return false;
+  if (typeof m.openloreVersion !== 'string') return false;
   if (typeof m.schemaVersion !== 'number') return false;
+  if (m.sourceCommit !== null && typeof m.sourceCommit !== 'string') return false;
+  if (
+    m.sourceTreeState !== undefined
+    && m.sourceTreeState !== 'clean'
+    && m.sourceTreeState !== 'dirty'
+    && m.sourceTreeState !== 'unknown'
+  ) return false;
+  if (m.bundleVersion >= 2 && m.sourceTreeState === undefined) return false;
   if (typeof m.payloadDigest !== 'string') return false;
   if (!Array.isArray(m.files)) return false;
+  const files = m.files as unknown[];
+  if (!files.every(file => {
+    if (file === null || typeof file !== 'object') return false;
+    const record = file as Record<string, unknown>;
+    return typeof record.name === 'string'
+      && isSafeBundleFileName(record.name)
+      && Number.isSafeInteger(record.bytes)
+      && (record.bytes as number) >= 0;
+  })) return false;
+  const fileNames = files.map(file => (file as { name: string }).name);
+  if (new Set(fileNames).size !== fileNames.length) return false;
   // Validate the attestation's inner fields at the boundary rather than relying on a
   // downstream fail-closed (a missing digest/counts must not depend on later check ordering).
   const att = m.attestation as Record<string, unknown> | null;
   if (att === null || typeof att !== 'object') return false;
-  if (typeof att.digest !== 'string' || typeof att.schemaVersion !== 'number' || !hasAttestationCounts(att.committed)) return false;
+  if (att.attestationVersion !== ATTESTATION_VERSION || typeof att.digest !== 'string'
+      || typeof att.schemaVersion !== 'number' || !hasAttestationCounts(att.committed)) return false;
+  if (m.signature !== undefined) {
+    if (m.bundleVersion < 2 || m.signature === null || typeof m.signature !== 'object') return false;
+    const signature = m.signature as Record<string, unknown>;
+    if (
+      signature.algorithm !== 'ed25519'
+      || typeof signature.keyId !== 'string'
+      || !/^[a-f0-9]{64}$/.test(signature.keyId)
+      || typeof signature.value !== 'string'
+    ) return false;
+  }
   if (b.payload === null || typeof b.payload !== 'object') return false;
   return Object.values(b.payload as Record<string, unknown>).every(x => typeof x === 'string');
 }
@@ -454,6 +686,12 @@ export function parseBundle(raw: Buffer): ImportedBundle {
   if (payloadNames.length !== manifestNames.length || payloadNames.some((n, i) => n !== manifestNames[i])) {
     throw new BundleError('unreadable', 'Bundle manifest file list does not match its payload.');
   }
+  for (const file of parsed.manifest.files) {
+    const decoded = Buffer.from(parsed.payload[file.name], 'base64');
+    if (decoded.byteLength !== file.bytes) {
+      throw new BundleError('unreadable', `Bundle manifest byte count does not match ${JSON.stringify(file.name)}.`);
+    }
+  }
   return { ...parsed, provenance: 'imported' };
 }
 
@@ -464,6 +702,26 @@ export function verifyPayloadIntegrity(bundle: Bundle): boolean {
     bytes: Buffer.from(b64, 'base64'),
   }));
   return computePayloadDigest(rawFiles) === bundle.manifest.payloadDigest;
+}
+
+/** The signed manifest and bundled fingerprint must describe the same analyzed source state. */
+export function verifyBundledSourceIdentity(bundle: Bundle): boolean {
+  if (bundle.manifest.bundleVersion < 2) return true;
+  const encoded = bundle.payload[ARTIFACT_FINGERPRINT];
+  if (!encoded) return false;
+  try {
+    const fingerprint = JSON.parse(Buffer.from(encoded, 'base64').toString('utf8')) as {
+      commit?: unknown;
+      sourceTreeState?: unknown;
+    };
+    const commit = typeof fingerprint.commit === 'string' && fingerprint.commit.length > 0
+      ? fingerprint.commit
+      : null;
+    return commit === bundle.manifest.sourceCommit
+      && fingerprint.sourceTreeState === bundle.manifest.sourceTreeState;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -490,7 +748,7 @@ export async function materializeBundle(bundle: Bundle, targetDir: string): Prom
     // an OpenLore that predates that filter carries it — and materializing one would plant a
     // full, un-stripped copy of THEIR store (extraction cache and all) permanently in this
     // analysis dir. The graph itself is unaffected: nothing reads these names.
-    if (isLocalOnlyDebris(name)) continue;
+    if (name.startsWith('.') || EXCLUDED_FILES.has(name) || isLocalOnlyDebris(name)) continue;
     // Safe names are flat basenames (validated above), so no parent-dir creation is needed.
     await writeFile(join(targetDir, name), Buffer.from(b64, 'base64'));
   }
@@ -501,22 +759,143 @@ export async function materializeBundle(bundle: Bundle, targetDir: string): Prom
  * the excluded vector-index metadata, and any rebuildable search-index subdirectory left over from
  * a PRIOR index (whose embeddings would now mismatch the imported graph) before promoting.
  */
-export async function promoteStagedIndex(bundle: Bundle, stagingDir: string, analysisDir: string): Promise<void> {
+export async function promoteStagedIndex(
+  bundle: Bundle,
+  stagingDir: string,
+  analysisDir: string,
+  testHooks: {
+    afterStep?: (step: string) => void | Promise<void>;
+    beforePublish?: () => void | Promise<void>;
+  } = {},
+): Promise<void> {
   await mkdir(analysisDir, { recursive: true });
-  // A stale -wal/-shm next to the freshly-copied call-graph.db would corrupt the reader's view,
-  // and a stale vector-index-meta.json would describe an index that isn't here; remove them.
-  for (const sidecar of EXCLUDED_FILES) {
-    await rm(join(analysisDir, sidecar), { force: true });
+  const promotionParent = dirname(analysisDir);
+  const promotionDir = await mkdtemp(join(promotionParent, `${IMPORT_STAGE_PREFIX}${randomUUID()}-`));
+  await writeFile(join(promotionDir, '.owner.json'), JSON.stringify({ pid: process.pid }));
+  const staged = new Map<string, string>();
+
+  // Copy every candidate onto the destination filesystem before the commit begins. Each final
+  // rename is therefore an atomic file replacement, including when os.tmpdir() is another mount.
+  try {
+    for (const name of Object.keys(bundle.payload).sort()) {
+      if (!isSafeBundleFileName(name)) {
+        throw new BundleError('unreadable', `Unsafe bundled file name: ${JSON.stringify(name)}.`);
+      }
+      if (name.startsWith('.') || EXCLUDED_FILES.has(name) || isLocalOnlyDebris(name)) continue;
+      const tempPath = join(promotionDir, name);
+      await copyFile(join(stagingDir, name), tempPath);
+      const handle = await open(tempPath, 'r+');
+      try {
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      staged.set(name, tempPath);
+    }
+
+    await withAnalysisLock(analysisDir, async () => {
+      await sweepDeadImportStages(promotionParent, promotionDir);
+      let priorManifest: string | null = null;
+      try {
+        priorManifest = await readFile(join(analysisDir, GENERATION_MANIFEST_FILE), 'utf8');
+      } catch {
+        // A legacy generation has no manifest. Removing the publishing marker restores its
+        // legacy identity if promotion fails before replacing a payload file.
+      }
+
+      // Fold any committed WAL pages into the old main database before detaching its sidecars.
+      // Writers share this lock; readers may keep their already-open inodes on POSIX. On
+      // platforms that refuse the operation, fail before any payload replacement.
+      const liveDbPath = join(analysisDir, ARTIFACT_CALL_GRAPH_DB);
+      if (existsSync(liveDbPath)) {
+        const oldDb = new DatabaseSync(liveDbPath);
+        try {
+          const checkpoint = oldDb.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get() as
+            { busy?: number; log?: number; checkpointed?: number };
+          if (checkpoint.busy !== 0 || (checkpoint.log ?? 0) !== (checkpoint.checkpointed ?? 0)) {
+            throw new BundleError('unreadable', 'Live graph WAL is busy; import promotion was not started.');
+          }
+        } finally {
+          oldDb.close();
+        }
+      }
+
+      // Commit protocol: make the old generation explicitly unavailable before the first
+      // replacement, then publish a fresh manifest only after every required artifact is durable.
+      await markGenerationUnavailable(analysisDir);
+      await testHooks.afterStep?.('generation-unavailable');
+
+      let replacements = 0;
+      const importedNames = new Set(staged.keys());
+      const detachedSidecars = new Map<string, string>();
+      try {
+        // Detach old SQLite state before the new main database can become visible under the
+        // canonical name. Never pair a new DB with an old WAL/SHM file.
+        for (const sidecar of [`${liveDbPath}-wal`, `${liveDbPath}-shm`]) {
+          if (!existsSync(sidecar)) continue;
+          const backup = join(promotionDir, basename(sidecar));
+          await rename(sidecar, backup);
+          detachedSidecars.set(sidecar, backup);
+        }
+
+        for (const [name, tempPath] of staged) {
+          await rename(tempPath, join(analysisDir, name));
+          staged.delete(name);
+          replacements++;
+          await testHooks.afterStep?.(`renamed:${name}`);
+        }
+
+        // Remove ordinary old analysis artifacts that are absent from the imported payload.
+        // Dot-prefixed runtime coordination files are local and deliberately preserved.
+        for (const entry of await readdir(analysisDir, { withFileTypes: true })) {
+          if (entry.isFile() && !entry.name.startsWith('.') &&
+              entry.name !== GENERATION_MANIFEST_FILE && !importedNames.has(entry.name) &&
+              entry.name !== ARTIFACT_ANALYSIS_ORIGIN) {
+            await rm(join(analysisDir, entry.name), { force: true });
+          }
+        }
+        for (const sub of REBUILDABLE_INDEX_SUBDIRS) {
+          await rm(join(analysisDir, sub), { recursive: true, force: true });
+        }
+        await atomicWriteFile(
+          join(analysisDir, ARTIFACT_ANALYSIS_ORIGIN),
+          JSON.stringify({ provenance: 'imported' }),
+        );
+        await testHooks.afterStep?.('files-replaced');
+
+        // Derived search indexes must describe the same graph generation. Build them while the
+        // writer lock is still held, before publishing the generation commit point.
+        await testHooks.beforePublish?.();
+
+        await syncDirectory(analysisDir);
+
+        const manifest = await publishGeneration(analysisDir, [
+          ...REQUIRED_ANALYSIS_ARTIFACTS,
+          ARTIFACT_CALL_GRAPH_DB,
+          ARTIFACT_INDEX_ATTESTATION,
+        ]);
+        if (!manifest) {
+          throw new BundleError(
+            'unreadable',
+            'Imported bundle does not contain the complete artifact set required to publish a generation.',
+          );
+        }
+        await syncDirectory(analysisDir);
+        await testHooks.afterStep?.('generation-published');
+      } catch (err) {
+        if (replacements === 0) {
+          for (const [sidecar, backup] of detachedSidecars) {
+            if (existsSync(backup)) await rename(backup, sidecar);
+          }
+          if (priorManifest) await atomicWriteFile(join(analysisDir, GENERATION_MANIFEST_FILE), priorManifest);
+          else await rm(join(analysisDir, GENERATION_MANIFEST_FILE), { force: true });
+        }
+        throw err;
+      }
+    });
+  } finally {
+    await rm(promotionDir, { recursive: true, force: true }).catch(() => {});
   }
-  // Drop orphaned search-index subdirs from a prior index — they describe a different graph.
-  for (const sub of REBUILDABLE_INDEX_SUBDIRS) {
-    await rm(join(analysisDir, sub), { recursive: true, force: true });
-  }
-  for (const name of Object.keys(bundle.payload)) {
-    if (!isSafeBundleFileName(name)) throw new BundleError('unreadable', `Unsafe bundled file name: ${JSON.stringify(name)}.`);
-    await copyFile(join(stagingDir, name), join(analysisDir, name));
-  }
-  await writeAnalysisContentProvenance(analysisDir, 'imported');
 }
 
 /** Best-effort directory removal (staging cleanup). */

@@ -60,6 +60,23 @@
 > is stripped from `openlore export` bundles, which carry the graph and not this machine's
 > build cache.
 
+### Trusted bundle producers
+
+Signed bundle import is opt-in. Each trusted signer is an inline Ed25519 public key in SPKI PEM
+form; an optional label is display-only, while OpenLore derives identity from the key fingerprint.
+Because this repository-controlled file defines the trust root, review changes to it like any
+other security-sensitive configuration.
+
+```json
+{
+  "bundle": {
+    "trustedSigners": [
+      { "label": "release", "publicKey": "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----" }
+    ]
+  }
+}
+```
+
 > The `EMBED_*` variables configure the **remote** embedding provider only. For on-device embeddings with no endpoint or key, run `openlore embed --local` (or set `embedding.provider: "local"` in `.openlore/config.json`). Keyword (BM25) search is the first-class default and needs none of these. See [docs/semantic-search.md](semantic-search.md#retrieval-modes) for the full embedding/retrieval-mode reference.
 
 ### Repository secret redaction

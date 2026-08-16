@@ -103,6 +103,19 @@ export interface OpenLoreConfig {
   secretRedaction?: {
     toolOutput?: boolean;
   };
+  /** Trusted producers for optional signed graph-bundle imports. */
+  bundle?: BundleConfig;
+}
+
+export interface BundleTrustedSigner {
+  /** Inline Ed25519 public key in SPKI PEM form. */
+  publicKey: string;
+  /** Optional human-readable label; cryptographic identity is always the key fingerprint. */
+  label?: string;
+}
+
+export interface BundleConfig {
+  trustedSigners?: BundleTrustedSigner[];
 }
 
 /**

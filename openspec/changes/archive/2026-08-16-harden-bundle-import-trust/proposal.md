@@ -5,7 +5,8 @@
 > to a trusted producer, so a fabricated bundle passes every check and poisons the graph facts
 > every navigation tool serves as truth. Separately, the promote step can half-clobber the live
 > index on a crash, and a dirty-tree export claims commit-currency it does not have. Fix the
-> wording now, add opt-in local signature verification, make promotion atomic, disclose dirty trees.
+> wording now, add opt-in local signature verification, make promotion generation-committed, and
+> disclose dirty trees.
 
 ## The gap
 
@@ -37,26 +38,36 @@
    becomes: integrity-consistent, currency vs commit `<sha>` — **provenance UNVERIFIED; trust the
    source of this bundle**. The `import.ts:5-6` docstring is corrected to claim tamper-*evidence*
    for accidental corruption plus provenance disclosure, not tamper-proofness.
-2. **Opt-in detached signature verification.** `openlore export --sign-key <path>` writes a plain
-   ed25519 detached signature over the canonical payload digest into the manifest (Node
+2. **Opt-in detached signature verification.** `openlore export bundle --sign-key <path>` writes a
+   plain ed25519 detached signature over a domain-separated canonical trust projection into the
+   manifest. The projection binds the payload digest, source commit, analyzed tree state, schema,
+   graph attestation, and file manifest, so metadata cannot be rewritten under a valid signature (Node
    `node:crypto` ed25519 — no new dependency, no key server, fully local). Import reads a
    trusted-key list from `.openlore/config.json` (`bundle.trustedSigners`: public keys); a bundle
    whose signature verifies against a trusted key earns the stronger "provenance verified
    (signed by <key-id>)" wording. Unsigned bundles keep working with the honest wording; a bundle
    with a signature that FAILS verification is rejected (a broken signature is evidence, not noise).
-3. **Atomic promote.** Build the complete next analysis dir aside (staging already exists —
-   `import.ts:241-244`), then swap via `rename()` (same-filesystem sibling dir + rename over the
-   old, or per-file temp+rename only after every copy has landed). No interleaving of `rm`-live
-   and copy-into-live; a crash at any point leaves either the old index or the new one, never a mix.
-4. **Dirty-tree disclosure.** `buildBundle` records `treeDirty: boolean` in the manifest (one
-   `git status --porcelain` shell-out, execFile array-args like the existing git calls). A
-   dirty-built bundle can never take the `commit-matches-head` "current" branch; it imports with
-   "approximately current — built from a dirty tree at <sha>" and the currency verdict downgraded
-   to unverified.
+3. **Generation-committed promote.** Whole-directory replacement is not portable for non-empty
+   directories and was already rejected by OpenLore's analysis-generation architecture. Import
+   instead stages every file on the destination filesystem, holds the analysis lock, publishes an
+   explicit unavailable generation before the first replacement, atomically renames each complete
+   file, and publishes `generation.json` last. Interrupted promotion is never accepted as a current
+   mixed generation; the importer rebuilds before reporting success. Single-artifact readers may
+   see a replacement during this interval, but no generation-aware multi-artifact read labels a
+   mixed set current. SQLite sidecars are detached before the main database is replaced.
+4. **Analyzed-tree disclosure.** Analysis brackets extraction with full-HEAD and working-tree
+   observations, and records `sourceTreeState: clean | dirty | unknown` in `fingerprint.json`.
+   Only matching clean endpoints earn `clean`; export carries that build-time fact. Measuring only
+   at export would be unsound because a dirty-built graph can be exported after the tree is cleaned.
+   Dirty, legacy-unknown, and locally dirty imports cannot take the "current" branch.
+
+Authenticated bundles use format v2. This is deliberate: retaining v1 would let an older importer
+ignore the new signature and repeat the old "verified current" claim. New importers still accept
+legacy v1 as unsigned with unknown tree state.
 
 Sibling: `add-incremental-bundle-delta` (its proposal defers ancestor catch-up) applies a bundle
 then re-analyzes the delta — its apply path MUST inherit the same provenance wording and the
-atomic promote; this change is the trust substrate it lands on.
+generation-committed promote; this change is the trust substrate it lands on.
 
 Retained as-is (already solid, not re-fixed): the three-layer zip-slip guards
 (`isSafeBundleFileName`, `index-bundle.ts:265-277`, checked at `:301`, `:343`, `:366`), the gunzip
@@ -73,8 +84,9 @@ optional ed25519 verify with keys the operator placed in their own config.
 
 ## Impact
 
-- Files: `src/core/analyzer/index-bundle.ts` (manifest `treeDirty` + optional `signature`,
-  atomic `promoteStagedIndex`), `src/cli/commands/import.ts` (wording, signature verification,
+- Files: `src/core/analyzer/index-bundle.ts` (manifest source state + optional `signature`,
+  generation-committed `promoteStagedIndex`), analysis producers (source-state stamp),
+  `src/cli/commands/import.ts` (wording, signature verification,
   dirty-tree currency downgrade), `src/cli/commands/export.ts` (`--sign-key`),
   `src/core/services/config-manager.ts` (read `bundle.trustedSigners`); tests for each.
 - Specs: `analyzer` — 3 ADDED (BundleProvenanceIsDisclosedNotImplied,
@@ -82,6 +94,6 @@ optional ed25519 verify with keys the operator placed in their own config.
   (OptInDetachedBundleSignatureVerification; complements the existing "Untrusted Artifact
   Deserialization Safety" requirement, which stays as-is).
 - Tool surface: unchanged (no new MCP tool, no payload-budget impact; CLI-only flags).
-- Risk: low-medium. Manifest gains two optional fields (older importers ignore them — bundle
-  format version unchanged); wording changes are user-visible and intended; rename-based promote
-  touches the one path that mutates the live index and is pinned by a kill-mid-promote test.
+- Risk: medium. Authenticated exports move to bundle format v2 so older importers rebuild rather
+  than ignore the signature. Wording changes are user-visible and intended; promotion touches the
+  one path that mutates the live index and is pinned by failure-prefix generation tests.

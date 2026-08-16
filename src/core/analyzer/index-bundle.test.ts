@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -17,15 +17,28 @@ import {
   isSafeBundleFileName,
   BundleError,
   BUNDLE_VERSION,
+  verifyBundleSignature,
+  verifyBundledSourceIdentity,
 } from './index-bundle.js';
 import { gzipSync } from 'node:zlib';
 import { mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
+import { generateKeyPairSync } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
+import {
+  publishGeneration,
+  readCurrentGeneration,
+  REQUIRED_ANALYSIS_ARTIFACTS,
+} from '../runtime/analysis-generation.js';
 import {
   preMaterializeRebuildReason,
   currencyDecision,
   readBundledSignatures,
+  runImport,
 } from '../../cli/commands/import.js';
+import { ANALYSIS_LOCK_FILE } from '../runtime/advisory-lock.js';
+import { logger } from '../../utils/logger.js';
+import { getDefaultConfig } from '../services/config-manager.js';
 
 const VERSION = '9.9.9-test';
 
@@ -50,7 +63,11 @@ function makeClasses(): ClassNode[] {
 }
 
 /** Build a realistic analysis dir: a populated call-graph.db + matching attestation + fingerprint. */
-async function buildAnalysisDir(dir: string, commit: string | null): Promise<void> {
+async function buildAnalysisDir(
+  dir: string,
+  commit: string | null,
+  sourceTreeState: 'clean' | 'dirty' | 'unknown' = 'clean',
+): Promise<void> {
   const { mkdir } = await import('node:fs/promises');
   await mkdir(dir, { recursive: true });
   const nodes = makeNodes();
@@ -70,16 +87,30 @@ async function buildAnalysisDir(dir: string, commit: string | null): Promise<voi
     classes.map(c => ({ id: c.id })),
   );
   await writeAttestation(dir, attestation);
-  if (commit !== null) {
-    await writeFile(join(dir, ARTIFACT_FINGERPRINT), JSON.stringify({ hash: 'h', commit, computedAt: 'x', fileCount: 2 }));
-  }
+  await writeFile(
+    join(dir, ARTIFACT_FINGERPRINT),
+    JSON.stringify({ hash: 'h', commit, sourceTreeState, computedAt: 'x', fileCount: 2 }),
+  );
   // A non-graph JSON artifact, to prove the whole index travels (not just the db).
   await writeFile(join(dir, 'repo-structure.json'), JSON.stringify({ layers: ['core'] }));
+  await writeFile(join(dir, 'llm-context.json'), JSON.stringify({ callGraph: { nodes: [] }, signatures: [] }));
+  await writeFile(join(dir, 'dependency-graph.json'), JSON.stringify({ nodes: [], edges: [] }));
+}
+
+function ed25519PemPair(): { privateKey: string; publicKey: string } {
+  const pair = generateKeyPairSync('ed25519');
+  return {
+    privateKey: pair.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
+    publicKey: pair.publicKey.export({ type: 'spki', format: 'pem' }).toString(),
+  };
 }
 
 let work: string;
 beforeEach(async () => { work = await mkdtemp(join(tmpdir(), 'olbundle-test-')); });
-afterEach(async () => { await rm(work, { recursive: true, force: true }); });
+afterEach(async () => {
+  vi.restoreAllMocks();
+  await rm(work, { recursive: true, force: true });
+});
 
 describe('index-bundle: export', () => {
   it('builds a self-describing bundle with attestation, commit, and a payload manifest', async () => {
@@ -90,12 +121,13 @@ describe('index-bundle: export', () => {
     expect(manifest.bundleVersion).toBe(BUNDLE_VERSION);
     expect(manifest.schemaVersion).toBe(SCHEMA_VERSION);
     expect(manifest.sourceCommit).toBe('abc1234');
+    expect(manifest.sourceTreeState).toBe('clean');
     expect(manifest.openloreVersion).toBe(VERSION);
     expect(manifest.attestation.committed).toEqual({ files: 2, functions: 3, edges: 2, classes: 1 });
     expect(manifest.payloadDigest).toMatch(/^[0-9a-f]{64}$/);
     // call-graph.db + index-attestation.json + fingerprint.json + repo-structure.json
     expect(manifest.files.map(f => f.name).sort()).toContain(ARTIFACT_CALL_GRAPH_DB);
-    expect(manifest.files.length).toBe(4);
+    expect(manifest.files.length).toBe(6);
   });
 
   it('is byte-stable: exporting the same index twice produces an identical artifact', async () => {
@@ -104,6 +136,62 @@ describe('index-bundle: export', () => {
     const a = await buildBundle(src, VERSION);
     const b = await buildBundle(src, VERSION);
     expect(Buffer.compare(a.buffer, b.buffer)).toBe(0);
+  });
+
+  it('signs the complete trust projection with a stable Ed25519 key fingerprint', async () => {
+    const src = join(work, 'signed-analysis');
+    await buildAnalysisDir(src, 'abc1234');
+    const keys = ed25519PemPair();
+    const a = await buildBundle(src, VERSION, { signingKey: keys.privateKey });
+    const b = await buildBundle(src, VERSION, { signingKey: keys.privateKey });
+
+    expect(Buffer.compare(a.buffer, b.buffer)).toBe(0);
+    const parsed = parseBundle(a.buffer);
+    const verdict = verifyBundleSignature(parsed, [{ publicKey: keys.publicKey, label: 'release' }]);
+    expect(verdict).toMatchObject({ status: 'verified', label: 'release' });
+    expect(parsed.manifest.signature?.keyId).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it('rejects manifest provenance edits even when the signed payload bytes are unchanged', async () => {
+    const src = join(work, 'signed-tamper');
+    await buildAnalysisDir(src, 'source-commit');
+    const keys = ed25519PemPair();
+    const parsed = parseBundle((await buildBundle(src, VERSION, { signingKey: keys.privateKey })).buffer);
+
+    parsed.manifest.sourceCommit = 'victim-head';
+    expect(verifyBundledSourceIdentity(parsed)).toBe(false);
+    expect(() => verifyBundleSignature(parsed, [{ publicKey: keys.publicKey }])).toThrow(/verification failed/i);
+  });
+
+  it('rejects signatures from keys the repository did not trust', async () => {
+    const src = join(work, 'untrusted-signer');
+    await buildAnalysisDir(src, 'abc1234');
+    const keys = ed25519PemPair();
+    const parsed = parseBundle((await buildBundle(src, VERSION, { signingKey: keys.privateKey })).buffer);
+    expect(() => verifyBundleSignature(parsed, [])).toThrow(/not trusted/i);
+  });
+
+  it('rejects signed payload tampering even when the attacker recomputes the payload digest', async () => {
+    const src = join(work, 'signed-payload-tamper');
+    await buildAnalysisDir(src, 'abc1234');
+    const keys = ed25519PemPair();
+    const parsed = parseBundle((await buildBundle(src, VERSION, { signingKey: keys.privateKey })).buffer);
+    const fingerprint = JSON.parse(Buffer.from(parsed.payload[ARTIFACT_FINGERPRINT], 'base64').toString('utf8'));
+    fingerprint.hash = 'attacker-edited';
+    const edited = Buffer.from(JSON.stringify(fingerprint));
+    parsed.payload[ARTIFACT_FINGERPRINT] = edited.toString('base64');
+    const record = parsed.manifest.files.find(file => file.name === ARTIFACT_FINGERPRINT)!;
+    record.bytes = edited.length;
+    // The attacker can recompute this unkeyed digest, but cannot update the Ed25519 signature.
+    const forgedRaw = Object.entries(parsed.payload).map(([name, value]) => ({ name, bytes: Buffer.from(value, 'base64') }));
+    const hash = (await import('node:crypto')).createHash('sha256');
+    for (const file of forgedRaw.sort((a, b) => a.name.localeCompare(b.name))) {
+      hash.update(file.name + '\n');
+      hash.update(String(file.bytes.length) + '\n');
+      hash.update(file.bytes);
+    }
+    parsed.manifest.payloadDigest = hash.digest('hex');
+    expect(() => verifyBundleSignature(parsed, [{ publicKey: keys.publicKey }])).toThrow(/verification failed/i);
   });
 
   /**
@@ -196,6 +284,24 @@ describe('index-bundle: export', () => {
     } finally {
       exported.close();
     }
+  });
+
+  it('never exports or materializes the analysis lock', async () => {
+    const src = join(work, 'with-runtime-lock');
+    await buildAnalysisDir(src, 'abc1234');
+    await writeFile(join(src, ANALYSIS_LOCK_FILE), 'producer-lock');
+    const built = await buildBundle(src, VERSION);
+    expect(built.manifest.files.map(file => file.name)).not.toContain(ANALYSIS_LOCK_FILE);
+
+    const forged = parseBundle(built.buffer);
+    forged.payload[ANALYSIS_LOCK_FILE] = Buffer.from('forged-lock').toString('base64');
+    forged.payload['.vector-index.lock'] = Buffer.from('forged-vector-lock').toString('base64');
+    forged.payload[`${ARTIFACT_CALL_GRAPH_DB}-wal`] = Buffer.from('forged-wal').toString('base64');
+    const target = join(work, 'lock-materialized');
+    await materializeBundle(forged, target);
+    expect(existsSync(join(target, ANALYSIS_LOCK_FILE))).toBe(false);
+    expect(existsSync(join(target, '.vector-index.lock'))).toBe(false);
+    expect(existsSync(join(target, `${ARTIFACT_CALL_GRAPH_DB}-wal`))).toBe(false);
   });
 
   /**
@@ -294,6 +400,18 @@ describe('index-bundle: export', () => {
     expect(existsSync(out)).toBe(true);
   });
 
+  it('returns a clean error for an invalid signing key without overwriting the output', async () => {
+    const projectRoot = join(work, 'bad-signing-key');
+    await buildAnalysisDir(join(projectRoot, OPENLORE_ANALYSIS_REL_PATH), 'abc1234');
+    const out = join(work, 'preserve.olbundle');
+    const key = join(work, 'not-a-key.pem');
+    await writeFile(out, 'keep-me');
+    await writeFile(key, 'not a private key');
+
+    expect(await runBundleExport({ out, projectRoot, signKey: key })).toBe(2);
+    expect(await readFile(out, 'utf8')).toBe('keep-me');
+  });
+
   it('refuses to export when no call-graph.db is present', async () => {
     const src = join(work, 'no-db');
     const { mkdir } = await import('node:fs/promises');
@@ -350,14 +468,41 @@ describe('index-bundle: promoteStagedIndex clears orphaned search indexes', () =
     await mkdir(join(live, 'text-line-index'), { recursive: true });
     await writeFile(join(live, 'vector-index', 'stale.lance'), 'STALE');
     await writeFile(join(live, 'vector-index-meta.json'), '{"hasEmbeddings":true}');
+    await writeFile(join(live, 'old-route-inventory.json'), '{"stale":true}');
+    await writeFile(join(live, '.vector-index.lock'), 'local-control');
 
     await promoteStagedIndex(bundle, staging, live);
 
     expect(existsSync(join(live, 'vector-index'))).toBe(false);     // orphan dir cleared
     expect(existsSync(join(live, 'text-line-index'))).toBe(false);  // orphan dir cleared
     expect(existsSync(join(live, 'vector-index-meta.json'))).toBe(false); // stale meta cleared
+    expect(existsSync(join(live, 'old-route-inventory.json'))).toBe(false); // old-only artifact cleared
+    expect(await readFile(join(live, '.vector-index.lock'), 'utf8')).toBe('local-control');
     expect(existsSync(join(live, ARTIFACT_CALL_GRAPH_DB))).toBe(true);    // bundle files promoted
     expect(JSON.parse(await readFile(join(live, 'analysis-origin.json'), 'utf8'))).toEqual({ provenance: 'imported' });
+    expect(await readCurrentGeneration(live, [...REQUIRED_ANALYSIS_ARTIFACTS])).not.toBeNull();
+  });
+
+  it('marks an interrupted promotion unavailable instead of accepting a mixed generation', async () => {
+    const src = join(work, 'next-analysis');
+    await buildAnalysisDir(src, 'next');
+    const bundle = parseBundle((await buildBundle(src, VERSION)).buffer);
+    const staging = join(work, 'interrupt-staging');
+    await materializeBundle(bundle, staging);
+
+    const live = join(work, 'old-analysis');
+    await buildAnalysisDir(live, 'old');
+    expect(await publishGeneration(live, [...REQUIRED_ANALYSIS_ARTIFACTS])).not.toBeNull();
+
+    await expect(promoteStagedIndex(bundle, staging, live, {
+      afterStep: step => {
+        if (step.startsWith('renamed:')) throw new Error('simulated process interruption');
+      },
+    })).rejects.toThrow(/simulated process interruption/);
+
+    expect(await readCurrentGeneration(live, [...REQUIRED_ANALYSIS_ARTIFACTS])).toBeNull();
+    const { readdir } = await import('node:fs/promises');
+    expect(await readdir(live)).not.toEqual(expect.arrayContaining([expect.stringMatching(/^\.import-/)]));
   });
 });
 
@@ -437,6 +582,18 @@ describe('index-bundle: envelope validation hardening', () => {
     (b.manifest.attestation.committed as unknown as Record<string, unknown>).functions = 'lots';
     expect(() => parseBundle(reGzip(b))).toThrow(BundleError);
   });
+
+  it('rejects malformed file and signature records at the untrusted parse boundary', async () => {
+    const badFile = await freshBundleObj();
+    (badFile.manifest.files as unknown[]) = [null];
+    expect(() => parseBundle(reGzip(badFile))).toThrow(BundleError);
+
+    const badSignature = await freshBundleObj();
+    (badSignature.manifest as unknown as Record<string, unknown>).signature = {
+      algorithm: 'rsa', keyId: 'attacker', value: 'not-base64',
+    };
+    expect(() => parseBundle(reGzip(badSignature))).toThrow(BundleError);
+  });
 });
 
 describe('index-bundle: preMaterializeRebuildReason (version + schema gates)', () => {
@@ -453,6 +610,27 @@ describe('index-bundle: preMaterializeRebuildReason (version + schema gates)', (
     const bundle = parseBundle((await buildBundle(src, VERSION)).buffer);
     bundle.manifest.bundleVersion = BUNDLE_VERSION + 1;
     expect(preMaterializeRebuildReason(bundle)?.reason).toBe('bundle-version');
+  });
+
+  it('rejects fractional bundle versions instead of granting legacy semantics', async () => {
+    const src = join(work, 'fractional-version');
+    await buildAnalysisDir(src, 'abc1234');
+    const bundle = parseBundle((await buildBundle(src, VERSION)).buffer);
+    bundle.manifest.bundleVersion = 1.5;
+    expect(() => parseBundle(gzipSync(Buffer.from(JSON.stringify(bundle))))).toThrow(BundleError);
+  });
+
+  it('accepts legacy v1 only as unsigned, with unknown tree currency', async () => {
+    const src = join(work, 'legacy-v1');
+    await buildAnalysisDir(src, 'abc1234');
+    const bundle = parseBundle((await buildBundle(src, VERSION)).buffer);
+    bundle.manifest.bundleVersion = 1;
+    delete bundle.manifest.sourceTreeState;
+    const legacy = parseBundle(gzipSync(Buffer.from(JSON.stringify(bundle), 'utf8')));
+
+    expect(preMaterializeRebuildReason(legacy)).toBeNull();
+    expect(verifyBundleSignature(legacy, [])).toEqual({ status: 'unsigned' });
+    expect(legacy.manifest.sourceTreeState ?? 'unknown').toBe('unknown');
   });
 
   it('flags a mismatched index schema version', async () => {
@@ -486,27 +664,119 @@ describe('index-bundle: import reads bundled signatures (full-symbol search pari
 
 describe('index-bundle: currencyDecision', () => {
   it('imports as-is when the artifact commit matches HEAD', () => {
-    const d = currencyDecision({ isGitRepo: true, sourceCommit: 'abc', commitMatchesHead: true, commitIsAncestor: false });
-    expect(d.action).toBe('import-fresh');
+    const d = currencyDecision({ isGitRepo: true, sourceCommit: 'abc', sourceTreeState: 'clean', commitMatchesHead: true, commitIsAncestor: false });
+    expect(d.action).toBe('import-current');
   });
 
   it('rebuilds (never serves stale) when the artifact is built at an ancestor commit', () => {
-    const d = currencyDecision({ isGitRepo: true, sourceCommit: 'abc', commitMatchesHead: false, commitIsAncestor: true });
+    const d = currencyDecision({ isGitRepo: true, sourceCommit: 'abc', sourceTreeState: 'clean', commitMatchesHead: false, commitIsAncestor: true });
     expect(d).toMatchObject({ action: 'rebuild', reason: 'stale' });
   });
 
   it('rebuilds when the artifact commit is unrelated/diverged', () => {
-    const d = currencyDecision({ isGitRepo: true, sourceCommit: 'abc', commitMatchesHead: false, commitIsAncestor: false });
+    const d = currencyDecision({ isGitRepo: true, sourceCommit: 'abc', sourceTreeState: 'clean', commitMatchesHead: false, commitIsAncestor: false });
     expect(d).toMatchObject({ action: 'rebuild', reason: 'unrelated-commit' });
   });
 
   it('imports with an UNVERIFIED-currency disclosure when there is no git repo', () => {
-    const d = currencyDecision({ isGitRepo: false, sourceCommit: 'abc', commitMatchesHead: false, commitIsAncestor: false });
-    expect(d.action).toBe('import-unverified');
+    const d = currencyDecision({ isGitRepo: false, sourceCommit: 'abc', sourceTreeState: 'clean', commitMatchesHead: false, commitIsAncestor: false });
+    expect(d.action).toBe('import-currency-unknown');
   });
 
   it('imports with an UNVERIFIED-currency disclosure when the build commit is unknown', () => {
-    const d = currencyDecision({ isGitRepo: true, sourceCommit: null, commitMatchesHead: false, commitIsAncestor: false });
-    expect(d.action).toBe('import-unverified');
+    const d = currencyDecision({ isGitRepo: true, sourceCommit: null, sourceTreeState: 'unknown', commitMatchesHead: false, commitIsAncestor: false });
+    expect(d.action).toBe('import-currency-unknown');
+  });
+
+  it('downgrades a dirty build even when its commit matches HEAD', () => {
+    const d = currencyDecision({ isGitRepo: true, sourceCommit: 'abc', sourceTreeState: 'dirty', commitMatchesHead: true, commitIsAncestor: false });
+    expect(d).toMatchObject({ action: 'import-approximate', reason: 'dirty-build' });
+    expect(d.detail).toMatch(/approximately current.*dirty tree/i);
+  });
+
+  it('downgrades a clean bundle imported into a dirty checkout', () => {
+    const d = currencyDecision({
+      isGitRepo: true,
+      sourceCommit: 'abc',
+      sourceTreeState: 'clean',
+      consumerTreeState: 'dirty',
+      commitMatchesHead: true,
+      commitIsAncestor: false,
+    });
+    expect(d).toMatchObject({ action: 'import-approximate', reason: 'dirty-consumer' });
+  });
+
+  it('treats a legacy missing tree state as unknown, never clean', () => {
+    const d = currencyDecision({ isGitRepo: true, sourceCommit: 'abc', sourceTreeState: 'unknown', commitMatchesHead: true, commitIsAncestor: false });
+    expect(d).toMatchObject({ action: 'import-currency-unknown', reason: 'tree-state-unknown' });
+  });
+});
+
+describe('index-bundle: runImport trust boundary', () => {
+  async function gitProject(publicKey?: string): Promise<{ root: string; head: string; analysis: string }> {
+    const root = join(work, 'consumer');
+    await mkdir(join(root, '.openlore'), { recursive: true });
+    await writeFile(join(root, 'a.ts'), 'export const a = 1;\n');
+    await writeFile(join(root, '.gitignore'), '.openlore/analysis/\n');
+    if (publicKey) {
+      const config = { ...getDefaultConfig('nodejs', './openspec'), bundle: { trustedSigners: [{ publicKey, label: 'release' }] } };
+      await writeFile(join(root, '.openlore', 'config.json'), JSON.stringify(config));
+    }
+    const runGit = (...args: string[]) => execFileSync(
+      'git',
+      ['-c', 'user.email=test@example.com', '-c', 'user.name=Test', '-c', 'commit.gpgsign=false', ...args],
+      { cwd: root },
+    ).toString().trim();
+    runGit('init', '-q');
+    runGit('add', '.');
+    runGit('commit', '-q', '-m', 'fixture');
+    return { root, head: runGit('rev-parse', '--verify', 'HEAD'), analysis: join(root, OPENLORE_ANALYSIS_REL_PATH) };
+  }
+
+  it('imports an unsigned current bundle with an explicit UNVERIFIED provenance receipt', async () => {
+    const project = await gitProject();
+    await buildAnalysisDir(project.analysis, project.head);
+    const artifact = join(work, 'unsigned.olbundle');
+    await writeFile(artifact, (await buildBundle(project.analysis, VERSION)).buffer);
+    await rm(project.analysis, { recursive: true, force: true });
+    const success = vi.spyOn(logger, 'success').mockImplementation(() => {});
+
+    expect(await runImport(artifact, { projectRoot: project.root })).toBe(0);
+    expect(success.mock.calls.flat().join(' ')).toMatch(/provenance UNVERIFIED/i);
+    expect(await readCurrentGeneration(project.analysis, [...REQUIRED_ANALYSIS_ARTIFACTS])).not.toBeNull();
+  });
+
+  it('rejects signed manifest tampering before promotion or rebuild', async () => {
+    const keys = ed25519PemPair();
+    const project = await gitProject(keys.publicKey);
+    await buildAnalysisDir(project.analysis, project.head);
+    const signed = parseBundle((await buildBundle(project.analysis, VERSION, { signingKey: keys.privateKey })).buffer);
+    signed.manifest.sourceCommit = '0'.repeat(40);
+    const artifact = join(work, 'tampered.olbundle');
+    await writeFile(artifact, gzipSync(Buffer.from(JSON.stringify(signed))));
+    const sentinel = join(project.analysis, 'sentinel.txt');
+    await writeFile(sentinel, 'unchanged');
+    vi.spyOn(logger, 'error').mockImplementation(() => {});
+
+    expect(await runImport(artifact, { projectRoot: project.root })).toBe(2);
+    expect(await readFile(sentinel, 'utf8')).toBe('unchanged');
+  });
+
+  it('keeps verified provenance separate from dirty-build currency', async () => {
+    const keys = ed25519PemPair();
+    const project = await gitProject(keys.publicKey);
+    await buildAnalysisDir(project.analysis, project.head, 'dirty');
+    const artifact = join(work, 'dirty-signed.olbundle');
+    await writeFile(
+      artifact,
+      (await buildBundle(project.analysis, VERSION, { signingKey: keys.privateKey })).buffer,
+    );
+    await rm(project.analysis, { recursive: true, force: true });
+    const success = vi.spyOn(logger, 'success').mockImplementation(() => {});
+    const warning = vi.spyOn(logger, 'warning').mockImplementation(() => {});
+
+    expect(await runImport(artifact, { projectRoot: project.root })).toBe(0);
+    expect(success.mock.calls.flat().join(' ')).toMatch(/provenance verified/i);
+    expect(warning.mock.calls.flat().join(' ')).toMatch(/approximately current.*dirty tree/i);
   });
 });

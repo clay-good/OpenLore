@@ -67,6 +67,14 @@ export function clearPrimaryConfigPath(): void {
   primaryConfigOverride = null;
 }
 
+/** Retarget an explicit CLI config to the command's effective primary project root. */
+export function retargetPrimaryConfigRoot(rootPath: string): () => void {
+  if (!primaryConfigOverride) return () => {};
+  const prior = { ...primaryConfigOverride };
+  primaryConfigOverride.root = resolve(rootPath);
+  return () => { primaryConfigOverride = prior; };
+}
+
 /**
  * The single source of truth for "where is this root's config file". Returns the
  * registered override ONLY when its root matches the resolved `rootPath`; otherwise
