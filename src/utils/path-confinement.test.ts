@@ -14,7 +14,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { mkdtemp, mkdir, writeFile, symlink, rm, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { safeJoin, safeOpenspecDir, isConfinedPath } from './path-confinement.js';
+import { readFileConfined, safeJoin, safeOpenspecDir, isConfinedPath } from './path-confinement.js';
 
 let root: string;
 let outside: string;
@@ -132,6 +132,16 @@ describe('safeOpenspecDir', () => {
 
   it('neutralizes a symlinked openspec path', () => {
     expect(safeOpenspecDir(root, 'openspec/escaping-dir')).toBe(join(root, 'openspec'));
+  });
+});
+
+describe('readFileConfined', () => {
+  it('reads a stable in-root regular file through its confined descriptor', async () => {
+    await expect(readFileConfined(root, 'openspec/specs/core/spec.md')).resolves.toBe('# real spec\n');
+  });
+
+  it('refuses an escaping symlink before returning any bytes', async () => {
+    await expect(readFileConfined(root, 'openspec/escaping-spec.md')).rejects.toThrow(/Path escape blocked/);
   });
 });
 

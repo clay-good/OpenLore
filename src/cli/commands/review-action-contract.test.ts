@@ -25,11 +25,10 @@ describe('OpenLore review Action trust contract', () => {
     expect(example).toMatch(/workflow_run\.id[\s\S]*trusted run metadata[\s\S]*never the artifact[\s\S]*exactly one leading sticky marker/);
   });
 
-  it('requires reviewed immutable Action and package pins when the token can write', () => {
+  it('requires a reviewed immutable Action pin when the token can write', () => {
     expect(example).toContain('pull-requests: write');
     expect(example).toContain('@REPLACE_WITH_REVIEWED_COMMIT_SHA');
-    expect(example).toContain("openlore-version: 'REPLACE_WITH_REVIEWED_RELEASE'");
-    expect(example).not.toContain("openlore-version: 'latest'");
+    expect(example).not.toContain('openlore-version:');
     expect(example).not.toMatch(/openlore-review@main/);
   });
 
@@ -68,9 +67,15 @@ describe('OpenLore review Action trust contract', () => {
     expect(postIndex).toBeLessThan(failIndex);
   });
 
-  it('rejects an unresolved package pin before advisory execution can swallow it', () => {
-    const guard = actionDoc.runs.steps.find((step) => step.name === 'Require a resolved OpenLore version pin');
-    expect(guard?.run).toContain('REPLACE_WITH_*');
-    expect(guard?.run).toContain('exit 2');
+  it('builds the SHA-pinned Action source with its committed dependency lockfile', () => {
+    const build = actionDoc.runs.steps.find((step) => step.name === 'Build the SHA-pinned OpenLore Action source');
+    expect(build?.env?.ACTION_PATH).toBe('${{ github.action_path }}');
+    expect(build?.run).toContain('ACTION_PATH/../../..');
+    expect(build?.run).toContain('package-lock.json');
+    expect(build?.run).toContain('npm ci --ignore-scripts');
+    expect(build?.run).toContain('npm run build');
+    expect(build?.run).toContain('dist/cli/index.js');
+    expect(action).not.toContain('openlore-version:');
+    expect(action).not.toContain('npx ');
   });
 });

@@ -1590,7 +1590,7 @@ export class GeminiProvider implements LLMProvider {
       },
     };
 
-    const url = `${this.baseUrl}/${this.model}:generateContent?key=${this.apiKey}`;
+    const url = `${this.baseUrl}/${encodeURIComponent(this.model)}:generateContent?key=${this.apiKey}`;
     const response = await withRelaxedTls(() => fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

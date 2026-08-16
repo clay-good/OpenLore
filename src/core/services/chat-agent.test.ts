@@ -642,6 +642,25 @@ describe('runChatAgent', () => {
       expect(result.reply).toBe('Gemini says hi');
     });
 
+    it('encodes a repository-selected model as one URL path segment', async () => {
+      mockReadConfig.mockResolvedValue({
+        generation: { provider: 'gemini', model: '../../other?key=attacker#fragment' },
+      });
+      fetchSpy.mockResolvedValue(mockResponse({
+        candidates: [{ content: { parts: [{ text: 'ok' }], role: 'model' }, finishReason: 'STOP' }],
+      }));
+
+      await runChatAgent({
+        directory: '/project',
+        messages: [{ role: 'user', content: 'hi' }],
+      });
+
+      expect(fetchSpy.mock.calls[0][0]).toBe(
+        'https://generativelanguage.googleapis.com/v1beta/models/' +
+        '..%2F..%2Fother%3Fkey%3Dattacker%23fragment:generateContent?key=gem-key',
+      );
+    });
+
     it('reports an abort before the first request', async () => {
       const controller = new AbortController();
       controller.abort();

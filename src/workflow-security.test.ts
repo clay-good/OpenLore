@@ -329,10 +329,74 @@ describe('workflow security: supply-chain automation is wired', () => {
       expect.arrayContaining(['pull_request', 'schedule'])
     );
   });
+
+  it('builds the release outside the minimal OIDC publishing job', () => {
+    const workflow = parse(read(join(WORKFLOW_DIR, 'release.yml'))) as {
+      jobs: Record<string, {
+        permissions?: Record<string, string>;
+        steps?: { uses?: string; run?: string }[];
+      }>;
+    };
+    const validate = workflow.jobs.validate;
+    const publish = workflow.jobs.publish;
+    const validateRuns = (validate.steps ?? []).map(step => step.run ?? '').join('\n');
+    const publishRuns = (publish.steps ?? []).map(step => step.run ?? '').join('\n');
+    const publishActions = (publish.steps ?? []).map(step => step.uses ?? '').filter(Boolean);
+
+    expect(validate.permissions?.['id-token']).toBeUndefined();
+    expect(validateRuns).toContain('git merge-base --is-ancestor');
+    expect(validateRuns).toContain('npm run audit:gate');
+    expect(validateRuns).toContain('npm pack --json');
+
+    expect(publish.permissions?.['id-token']).toBe('write');
+    expect(publishActions.some(action => action.startsWith('actions/checkout@'))).toBe(false);
+    expect(publishActions.some(action => action.startsWith('actions/download-artifact@'))).toBe(true);
+    expect(publishRuns).toContain('sha256sum --check');
+    expect(publishRuns).toContain('npm publish');
+    expect(publishRuns).toContain('--ignore-scripts');
+    expect(publishRuns).not.toMatch(/npm (ci|install|run|pack)\b/);
+  });
+
+  it('builds the SHA-pinned Action checkout with its locked dependencies and isolated npm config', () => {
+    const action = parse(read(join(REPO_ROOT, '.github', 'actions', 'openlore-review', 'action.yml'))) as {
+      inputs: Record<string, { required?: boolean; default?: string }>;
+      runs: { steps?: { run?: string; env?: Record<string, string> }[] };
+    };
+    const build = (action.runs.steps ?? []).find(step => step.run?.includes('npm ci'));
+    const allRuns = (action.runs.steps ?? []).map(step => step.run ?? '').join('\n');
+
+    expect(action.inputs['openlore-version']).toBeUndefined();
+    expect(build?.env?.ACTION_PATH).toBe('${{ github.action_path }}');
+    expect(build?.run).toContain('ACTION_PATH/../../..');
+    expect(build?.run).toContain('package-lock.json');
+    expect(build?.run).toContain('npm ci --ignore-scripts');
+    expect(build?.run).toContain('npm run build');
+    expect(build?.run).toContain('dist/cli/index.js');
+    expect(build?.env?.NPM_CONFIG_REGISTRY).toBe('https://registry.npmjs.org/');
+    expect(build?.env?.NPM_CONFIG_IGNORE_SCRIPTS).toBe('true');
+    expect(build?.env?.NPM_CONFIG_USERCONFIG).toContain('runner.temp');
+    expect(build?.env?.NPM_CONFIG_GLOBALCONFIG).toContain('runner.temp');
+    expect(allRuns).not.toContain('npm install');
+    expect(allRuns).not.toContain('npx ');
+  });
+
+  it('pins every registry tarball to an integrity digest', () => {
+    const lock = JSON.parse(read(join(REPO_ROOT, 'package-lock.json'))) as {
+      packages?: Record<string, { resolved?: string; integrity?: string }>;
+    };
+    const missing = Object.entries(lock.packages ?? {})
+      .filter(([, pkg]) => pkg.resolved?.startsWith('https://registry.npmjs.org/') && !pkg.integrity)
+      .map(([path]) => path);
+
+    expect(
+      missing,
+      'Every registry tarball must have an SRI digest so npm ci verifies the locked bytes.'
+    ).toEqual([]);
+  });
 });
 
 describe('workflow security: CodeQL suppressions stay narrow and auditable', () => {
-  it('allows only the nine reviewed file-to-HTTP egress sinks', () => {
+  it('allows only the thirteen reviewed file-to-HTTP egress sinks', () => {
     const suppressions: Record<string, number> = {};
     const unexplained: string[] = [];
 
@@ -356,6 +420,7 @@ describe('workflow security: CodeQL suppressions stay narrow and auditable', () 
     expect(suppressions, 'Changing the reviewed suppression set requires explicit security review.').toEqual({
       'src/cli/commands/serve.ts': 2,
       'src/core/analyzer/embedding-service.ts': 1,
+      'src/core/services/chat-agent.ts': 4,
       'src/core/services/serve-client.ts': 1,
       'src/core/services/llm-service.ts': 4,
       'src/pi/extension.ts': 1,

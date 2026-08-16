@@ -19,10 +19,10 @@
  * explicit `unsupported` result, never an empty escape set.
  */
 
-import { join } from 'node:path';
-import { readFile } from 'node:fs/promises';
+import { relative } from 'node:path';
 import type Parser from 'tree-sitter';
-import { validateDirectory, readCachedContext } from './utils.js';
+import { validateDirectory, readCachedContext, safeJoin } from './utils.js';
+import { readFileConfined } from '../../../utils/path-confinement.js';
 import {
   ERROR_PROPAGATION_LANGUAGES,
   getExceptionParser,
@@ -88,7 +88,19 @@ export async function handleAnalyzeErrorPropagation(
   if (!ctx.callGraph) return { error: 'Call graph not available. Re-run analyze_codebase.' };
 
   const cg = ctx.callGraph as SerializedCallGraph;
-  const allNodes = (cg.nodes ?? []) as FunctionNode[];
+  // Normalize every internal artifact path through the symlink-aware project-root
+  // boundary before resolution, traversal, parsing, or output. Poisoned nodes are
+  // omitted; edges to them become the existing unresolved-callee boundary rather
+  // than an out-of-root read.
+  const allNodes = ((cg.nodes ?? []) as FunctionNode[]).flatMap(n => {
+    if (n.isExternal) return [n];
+    try {
+      const absPath = safeJoin(absDir, n.filePath);
+      return [{ ...n, filePath: relative(absDir, absPath) }];
+    } catch {
+      return [];
+    }
+  });
   const edges = (cg.edges ?? []) as CallEdge[];
 
   // ── Resolve the query symbol (find_clones resolution discipline) ───────────
@@ -213,7 +225,9 @@ export async function handleAnalyzeErrorPropagation(
     let tree = treeByFile.get(n.filePath);
     if (tree === undefined) {
       try {
-        const content = await readFile(join(absDir, n.filePath), 'utf-8');
+        // Re-check at the point of use as defense in depth: artifact nodes were
+        // normalized above, but the filesystem may contain symlinks.
+        const content = await readFileConfined(absDir, n.filePath);
         const parser = await getExceptionParser(n.language, n.filePath);
         // Bounded (change: fix-analyze-native-abort-and-file-cost-budget): this parse runs inside
         // the long-lived daemon, so one pathological file must not be able to wedge it. On the

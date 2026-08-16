@@ -255,8 +255,7 @@ function waitForRetry(delay: number, signal?: AbortSignal): Promise<void> {
 }
 
 async function fetchWithRetry(
-  url: string,
-  init: RequestInit,
+  request: (signal: AbortSignal) => Promise<Response>,
   signal?: AbortSignal
 ): Promise<BufferedChatResponse> {
   let lastError: Error = new Error('fetch failed');
@@ -279,7 +278,7 @@ async function fetchWithRetry(
     let response: Response;
     let responseBody: string;
     try {
-      response = await withRelaxedTls(() => fetch(url, { ...init, signal: attemptController.signal }));
+      response = await request(attemptController.signal);
       // Native fetch resolves when headers arrive. Consume the body while the
       // same timeout and caller-abort listener are still active so a provider
       // that stalls mid-stream cannot hang the chat loop indefinitely.
@@ -422,12 +421,14 @@ async function runOpenAILoop(
     let response: BufferedChatResponse;
     try {
       response = await fetchWithRetry(
-        `${cfg.baseUrl}/chat/completions`,
-        {
+        attemptSignal => withRelaxedTls(() => fetch(`${cfg.baseUrl}/chat/completions`, {
           method: 'POST',
           headers,
+          // INTENTIONAL EGRESS: prompt-wrapped repository results go to the operator-selected LLM.
+          // codeql[js/file-access-to-http]
           body: JSON.stringify({ model: cfg.model, messages: history, tools: toolDefs, tool_choice: 'auto' }),
-        },
+          signal: attemptSignal,
+        })),
         signal,
       );
     } catch (error) {
@@ -503,7 +504,9 @@ async function runGeminiLoop(
     parts: [{ text: m.content }],
   }));
 
-  const url = `${cfg.baseUrl}/${cfg.model}:generateContent?key=${cfg.apiKey}`;
+  // A model can come from the analyzed repository's config. Keep it as one path
+  // segment so repository data cannot become request-path or query syntax.
+  const url = `${cfg.baseUrl}/${encodeURIComponent(cfg.model)}:generateContent?key=${cfg.apiKey}`;
   const headers = { 'Content-Type': 'application/json' };
 
   for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
@@ -518,7 +521,22 @@ async function runGeminiLoop(
 
     let response: BufferedChatResponse;
     try {
-      response = await fetchWithRetry(url, { method: 'POST', headers, body: JSON.stringify(body) }, signal);
+      response = await fetchWithRetry(
+        attemptSignal => withRelaxedTls(() => fetch(
+          // INTENTIONAL EGRESS: the encoded model selects a resource only at Google's fixed origin.
+          // codeql[js/file-access-to-http]
+          url,
+          {
+            method: 'POST',
+            headers,
+            // INTENTIONAL EGRESS: prompt-wrapped repository results go to the fixed Gemini provider.
+            // codeql[js/file-access-to-http]
+            body: JSON.stringify(body),
+            signal: attemptSignal,
+          },
+        )),
+        signal,
+      );
     } catch (error) {
       if (signal?.aborted) break;
       throw error;
@@ -618,10 +636,11 @@ async function runAnthropicLoop(
     let response: BufferedChatResponse;
     try {
       response = await fetchWithRetry(
-        `${cfg.baseUrl}/messages`,
-        {
+        attemptSignal => withRelaxedTls(() => fetch(`${cfg.baseUrl}/messages`, {
           method: 'POST',
           headers,
+          // INTENTIONAL EGRESS: prompt-wrapped repository results go to the fixed Anthropic provider.
+          // codeql[js/file-access-to-http]
           body: JSON.stringify({
             model: cfg.model,
             max_tokens: CHAT_AGENT_MAX_TOKENS,
@@ -629,7 +648,8 @@ async function runAnthropicLoop(
             tools,
             messages: history,
           }),
-        },
+          signal: attemptSignal,
+        })),
         signal,
       );
     } catch (error) {

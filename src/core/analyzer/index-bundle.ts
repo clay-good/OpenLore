@@ -73,12 +73,14 @@ export const BUNDLE_VERSION = 2;
 export const BUNDLE_DEFAULT_FILENAME = 'index-bundle.olbundle';
 
 /**
- * Upper bound on the decompressed bundle size read at import. The bundle is untrusted
- * on-disk input (mcp-security: Untrusted Artifact Deserialization Safety) — bound the
- * gunzip output so a maliciously-crafted artifact cannot exhaust memory (zip bomb). A
- * generous 2 GiB cap clears any real index while failing closed on an absurd one.
+ * Import memory bounds for an untrusted on-disk bundle. Real and fixture bundles in this
+ * repository are well below these limits; a measured export of this repository expanded to
+ * 58,717,652 bytes. A 96 MiB decompressed cap leaves about 1.7x growth headroom while bounding
+ * the synchronous gzip buffer, UTF-8 string, and parsed JSON object graph. Keep the compressed
+ * check in both the CLI (before read) and the codec (for direct callers and file-swap races).
  */
-const BUNDLE_MAX_DECOMPRESSED_BYTES = 2 * 1024 * 1024 * 1024;
+export const BUNDLE_MAX_COMPRESSED_BYTES = 64 * 1024 * 1024;
+export const BUNDLE_MAX_DECOMPRESSED_BYTES = 96 * 1024 * 1024;
 
 /**
  * Files never bundled. Transient SQLite sidecars are WAL scratch folded into the main db by a
@@ -659,6 +661,12 @@ export function isSafeBundleFileName(name: string): boolean {
  * failure from an artifact that parses but fails trust validation (which degrades to rebuild).
  */
 export function parseBundle(raw: Buffer): ImportedBundle {
+  if (raw.byteLength > BUNDLE_MAX_COMPRESSED_BYTES) {
+    throw new BundleError(
+      'unreadable',
+      `Not an OpenLore bundle: compressed artifact exceeds the ${BUNDLE_MAX_COMPRESSED_BYTES}-byte size cap.`,
+    );
+  }
   let json: string;
   try {
     json = gunzipSync(raw, { maxOutputLength: BUNDLE_MAX_DECOMPRESSED_BYTES }).toString('utf-8');

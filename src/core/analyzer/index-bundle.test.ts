@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, writeFile, open } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EdgeStore, SCHEMA_VERSION } from '../services/edge-store.js';
@@ -17,10 +17,13 @@ import {
   isSafeBundleFileName,
   BundleError,
   BUNDLE_VERSION,
+  BUNDLE_MAX_COMPRESSED_BYTES,
+  BUNDLE_MAX_DECOMPRESSED_BYTES,
   verifyBundleSignature,
   verifyBundledSourceIdentity,
 } from './index-bundle.js';
-import { gzipSync } from 'node:zlib';
+import { createGzip, gzipSync } from 'node:zlib';
+import { once } from 'node:events';
 import { mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { generateKeyPairSync } from 'node:crypto';
@@ -507,8 +510,39 @@ describe('index-bundle: promoteStagedIndex clears orphaned search indexes', () =
 });
 
 describe('index-bundle: parse + tamper detection', () => {
+  it('keeps the decompressed memory boundary at the measured 96 MiB policy cap', () => {
+    expect(BUNDLE_MAX_DECOMPRESSED_BYTES).toBe(96 * 1024 * 1024);
+  });
+
   it('rejects a non-bundle buffer as unreadable', () => {
     expect(() => parseBundle(Buffer.from('not a bundle'))).toThrow(BundleError);
+  });
+
+  it('rejects an oversized compressed buffer before attempting gzip parsing', () => {
+    const oversized = Buffer.allocUnsafe(BUNDLE_MAX_COMPRESSED_BYTES + 1);
+    expect(() => parseBundle(oversized)).toThrow(/compressed artifact exceeds.*size cap/i);
+  });
+
+  it('rejects a high-ratio gzip one block past the decompressed cap as BundleError', async () => {
+    const gzip = createGzip({ level: 9 });
+    const chunks: Buffer[] = [];
+    gzip.on('data', chunk => chunks.push(Buffer.from(chunk)));
+    const block = Buffer.alloc(1024 * 1024);
+    for (let written = 0; written <= BUNDLE_MAX_DECOMPRESSED_BYTES; written += block.length) {
+      if (!gzip.write(block)) await once(gzip, 'drain');
+    }
+    gzip.end();
+    await once(gzip, 'end');
+    const bomb = Buffer.concat(chunks);
+
+    expect(bomb.byteLength).toBeLessThan(BUNDLE_MAX_COMPRESSED_BYTES);
+    try {
+      parseBundle(bomb);
+      expect.fail('expected the near-cap compression bomb to be rejected');
+    } catch (error) {
+      expect(error).toBeInstanceOf(BundleError);
+      expect((error as Error).message).toMatch(/size cap/i);
+    }
   });
 
   it('detects a tampered payload (flipped byte) via the payload digest', async () => {
@@ -744,6 +778,20 @@ describe('index-bundle: runImport trust boundary', () => {
     expect(await runImport(artifact, { projectRoot: project.root })).toBe(0);
     expect(success.mock.calls.flat().join(' ')).toMatch(/provenance UNVERIFIED/i);
     expect(await readCurrentGeneration(project.analysis, [...REQUIRED_ANALYSIS_ARTIFACTS])).not.toBeNull();
+  });
+
+  it('rejects an oversized compressed artifact before reading it into memory', async () => {
+    const artifact = join(work, 'oversized.olbundle');
+    const handle = await open(artifact, 'w');
+    try {
+      await handle.truncate(BUNDLE_MAX_COMPRESSED_BYTES + 1);
+    } finally {
+      await handle.close();
+    }
+    const error = vi.spyOn(logger, 'error').mockImplementation(() => {});
+
+    expect(await runImport(artifact, { projectRoot: work })).toBe(2);
+    expect(error.mock.calls.flat().join(' ')).toMatch(/compressed bundle size cap/i);
   });
 
   it('rejects signed manifest tampering before promotion or rebuild', async () => {

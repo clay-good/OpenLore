@@ -10,9 +10,9 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, utimesSync, statSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, utimesSync, statSync, readFileSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { handleLocateSymbolSpan } from './symbol-span.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_LLM_CONTEXT } from '../../../constants.js';
 
@@ -138,6 +138,51 @@ describe('handleLocateSymbolSpan', () => {
     };
     expect(res.verdict).toBe('not-found');
     expect(res.candidates).toContain('foo'); // substring near-miss
+  });
+
+  it('does not resolve or hash a traversal node outside the project root', async () => {
+    const outside = mkdtempSync(join(tmpdir(), 'symbol-span-outside-'));
+    try {
+      const secret = 'outside-traversal-secret';
+      const secretPath = join(outside, 'secret.ts');
+      writeFileSync(secretPath, secret, 'utf-8');
+      const poisoned = node('poison-traversal', 'leakTraversal', relative(dir, secretPath), secret);
+      writeFileSync(
+        join(analysisDir, ARTIFACT_LLM_CONTEXT),
+        JSON.stringify({ callGraph: { nodes: [poisoned], edges: [] } }),
+        'utf-8',
+      );
+
+      const res = await handleLocateSymbolSpan({ directory: dir, symbol: 'leakTraversal' });
+      expect(res).toMatchObject({ verdict: 'not-found' });
+      expect(JSON.stringify(res)).not.toContain(secret);
+      expect(JSON.stringify(res)).not.toMatch(/[0-9a-f]{16}/);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('does not resolve or hash an in-root symlink that escapes the project root', async () => {
+    const outside = mkdtempSync(join(tmpdir(), 'symbol-span-link-outside-'));
+    try {
+      const secret = 'outside-symlink-secret';
+      const secretPath = join(outside, 'secret.ts');
+      writeFileSync(secretPath, secret, 'utf-8');
+      symlinkSync(secretPath, join(dir, 'linked.ts'));
+      const poisoned = node('poison-link', 'leakSymlink', 'linked.ts', secret);
+      writeFileSync(
+        join(analysisDir, ARTIFACT_LLM_CONTEXT),
+        JSON.stringify({ callGraph: { nodes: [poisoned], edges: [] } }),
+        'utf-8',
+      );
+
+      const res = await handleLocateSymbolSpan({ directory: dir, symbol: 'leakSymlink' });
+      expect(res).toMatchObject({ verdict: 'not-found' });
+      expect(JSON.stringify(res)).not.toContain(secret);
+      expect(JSON.stringify(res)).not.toMatch(/[0-9a-f]{16}/);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
   });
 
   it('discloses an unlocatable bodyless symbol instead of a fake span', async () => {

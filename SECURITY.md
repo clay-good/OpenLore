@@ -47,15 +47,15 @@ is not a safety guarantee and does not block by default.
 
 ## Automated checks
 
-Every pull request and release runs these:
+Automated controls cover pull requests, scheduled scans, and releases:
 
 - **Dependency advisories** — the full tree (runtime and development) is gated at high severity.
 - **CodeQL** static analysis on each pull request and on a weekly schedule.
 - **Published-package contents** are verified against the real `npm pack` manifest, in CI and again immediately before publish.
-- **Workflow hardening** — GitHub Actions are pinned to immutable commit SHAs, and a test in the unit suite keeps them pinned.
+- **Workflow hardening** — GitHub Actions are pinned to immutable commit SHAs, and a test in the unit suite keeps them pinned. The structural-review Action builds that pinned source with its committed lockfile, an isolated npm configuration, and lifecycle scripts disabled; it does not resolve OpenLore through a runtime npm selector.
 - **Dependabot** watches both npm packages and GitHub Actions.
 - **OpenSSF Scorecard** tracks supply-chain posture weekly.
-- **Releases** are published with npm Trusted Publishing (short-lived OIDC, no long-lived token) and carry a signed `--provenance` attestation tying each tarball to the commit and workflow run that built it.
+- **Releases** build, test, audit, and pack in a job without OIDC. A separate minimal job receives only that integrity-checked tarball, publishes it with npm Trusted Publishing (short-lived OIDC, no long-lived token), and attaches a signed `--provenance` attestation.
 
 Two conventions to follow when changing anything under `.github/`:
 

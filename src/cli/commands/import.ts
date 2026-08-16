@@ -19,7 +19,7 @@
 
 import { Command } from 'commander';
 import { existsSync } from 'node:fs';
-import { readFile, mkdtemp, rm } from 'node:fs/promises';
+import { readFile, mkdtemp, open, rm } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFile } from 'node:child_process';
@@ -47,6 +47,7 @@ import {
   removeDir,
   BundleError,
   BUNDLE_VERSION,
+  BUNDLE_MAX_COMPRESSED_BYTES,
   type Bundle,
   type BundleSignatureVerdict,
 } from '../../core/analyzer/index-bundle.js';
@@ -263,6 +264,34 @@ async function fullRebuild(rootPath: string, analysisDir: string, detail: string
   return 0;
 }
 
+/** Read at most the size verified on one open descriptor; later appends are ignored. */
+async function readBundleFileBounded(artifactPath: string): Promise<Buffer> {
+  const handle = await open(artifactPath, 'r');
+  try {
+    const artifactStat = await handle.stat();
+    if (!artifactStat.isFile()) {
+      throw new BundleError('unreadable', `Artifact is not a regular file: ${artifactPath}`);
+    }
+    if (artifactStat.size > BUNDLE_MAX_COMPRESSED_BYTES) {
+      throw new BundleError(
+        'unreadable',
+        `Artifact exceeds the ${BUNDLE_MAX_COMPRESSED_BYTES}-byte compressed bundle size cap: ${artifactPath}`,
+      );
+    }
+
+    const raw = Buffer.allocUnsafe(artifactStat.size);
+    let offset = 0;
+    while (offset < raw.length) {
+      const { bytesRead } = await handle.read(raw, offset, raw.length - offset, offset);
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    return raw.subarray(0, offset);
+  } finally {
+    await handle.close();
+  }
+}
+
 async function runImportWithEffectiveConfig(artifact: string, opts: ImportOptions): Promise<number> {
   const projectRoot = resolve(opts.projectRoot ?? process.cwd());
   const analysisDir = join(projectRoot, OPENLORE_ANALYSIS_REL_PATH);
@@ -277,13 +306,17 @@ async function runImportWithEffectiveConfig(artifact: string, opts: ImportOption
   // trust failure — we do not silently full-analyze something the user did not intend.
   let bundle: Bundle;
   try {
-    bundle = parseBundle(await readFile(artifactPath));
+    // Size-check and read through one descriptor so path replacement cannot swap in an
+    // oversized file between metadata validation and allocation. A concurrent append is
+    // ignored because the read is capped to the descriptor size observed above.
+    bundle = parseBundle(await readBundleFileBounded(artifactPath));
   } catch (err) {
     if (err instanceof BundleError) {
       logger.error(err.message);
       return 2;
     }
-    throw err;
+    logger.error(`Could not read artifact: ${err instanceof Error ? err.message : String(err)}`);
+    return 2;
   }
 
   // Signature failures are artifact rejections, not rebuild triggers. A hostile signed bundle

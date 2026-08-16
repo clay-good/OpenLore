@@ -425,18 +425,21 @@ it shows the structural delta and says "run `openlore analyze`"; a non-git direc
 base is disclosed rather than emitted as a misleading empty briefing. The structural delta works
 without an index (it builds the old/new graphs from just the changed files).
 
-**GitHub Action.** The repo ships `.github/actions/openlore-review` (composite action: checkout →
-`openlore analyze` → `openlore review` → one sticky comment matched by a hidden `<!-- openlore-review -->`
-marker, created once and updated in place — duplicate-proof via paginated comment lookup) and a
-copy-paste workflow (`.github/workflows/openlore-review.yml.example`). Adoption is one file; it needs a
-full-history checkout (`fetch-depth: 0`) and `pull-requests: write` permission. The Action runs
-`npx openlore@<version>`, so it activates once a **published** `openlore` ships `review` (until then it
-no-ops gracefully — no comment, the check stays green). Advisory by default; gate mode fails the job
+**GitHub Action.** The repo ships `.github/actions/openlore-review` (composite action: build the
+SHA-pinned Action source with its committed lockfile → `openlore analyze` → `openlore review` → one
+sticky comment matched by a hidden `<!-- openlore-review -->` marker, created once and updated in
+place — duplicate-proof via paginated comment lookup) and a copy-paste workflow
+(`.github/workflows/openlore-review.yml.example`). Adoption is one file; it needs a full-history
+checkout (`fetch-depth: 0`) and `pull-requests: write` permission. Dependencies are installed with
+`npm ci` from the reviewed Action revision in an isolated npm configuration with lifecycle scripts
+disabled; the Action does not resolve or execute a mutable `openlore` npm selector. Advisory by
+default; gate mode fails the job
 **only** when the briefing was produced and a configured `blastRadius.block` pattern fired (a missing
 `openlore`/`review` or an unreachable range never produces a false-positive red check). A comment-post
 failure never fails the check either: on a **fork PR** GitHub gives `pull_request` a read-only token, so
 the comment can't be posted for external contributors — the Action warns and leaves the briefing in the
-job log (use `pull_request_target`, with its security trade-offs, if you need the comment on fork PRs).
+job log. Do not combine `pull_request_target` with a checkout of the pull-request head; use a split
+unprivileged analysis workflow and trusted artifact-posting workflow if fork comments are required.
 The briefing is always clamped to GitHub's 65,536-char comment limit.
 
 ### Federation (multi-repo)

@@ -4,7 +4,7 @@ name: Release
 # (OIDC) — no long-lived NPM_TOKEN required. See docs/publishing.md for the
 # one-time setup steps on the npmjs.com side.
 #
-# Triggers (any of these runs validate → [create GitHub Release] → publish):
+# Triggers (any of these runs validate/build/pack → [create GitHub Release] → publish):
 #   - push of a `v*` tag  — the normal path. Pushing the tag auto-creates the
 #     GitHub Release (with generated notes) and publishes to npm in one run.
 #   - a GitHub Release published manually in the UI — the create-release job is
@@ -49,6 +49,8 @@ jobs:
           # workflow_dispatch → the explicitly-named tag.
           # push (tag) and release events → github.ref already points at the tag.
           ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+          fetch-tags: true
           persist-credentials: false
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -82,6 +84,26 @@ jobs:
           fi
           echo "Tag '$TAG' matches package.json version '$PKG'."
 
+      # A tag is not a reviewed release boundary by itself: a collaborator could tag
+      # an off-main commit and bypass branch protection. Require both a real tag at
+      # this checkout and ancestry from the protected default branch.
+      - name: Verify release commit is reachable from main
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          TAG_REF="refs/tags/$RELEASE_TAG^{commit}"
+          TAG_COMMIT="$(git rev-parse --verify "$TAG_REF")"
+          CHECKED_OUT_COMMIT="$(git rev-parse HEAD)"
+          if [ "$TAG_COMMIT" != "$CHECKED_OUT_COMMIT" ]; then
+            echo "::error::Checked-out commit $CHECKED_OUT_COMMIT does not match tag $RELEASE_TAG ($TAG_COMMIT)."
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$TAG_COMMIT" refs/remotes/origin/main; then
+            echo "::error::Release tag $RELEASE_TAG points to a commit that is not reachable from origin/main."
+            exit 1
+          fi
+
       - name: Run linting
         run: npm run lint
 
@@ -91,8 +113,37 @@ jobs:
       - name: Run tests
         run: npm run test:run
 
+      - name: Audit dependencies
+        run: npm run audit:gate
+
       - name: Build
         run: npm run build
+
+      - name: Verify the published tarball contents
+        run: npm run audit:packlist
+
+      # Build the exact immutable input consumed by the OIDC job. Dependency
+      # installation, tests, builds, and package scripts stay in this read-only job.
+      - name: Pack the npm release artifact
+        run: |
+          npm pack --json
+          shopt -s nullglob
+          packages=(openlore-*.tgz)
+          if [ "${#packages[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly one npm tarball, found ${#packages[@]}."
+            exit 1
+          fi
+          sha256sum "${packages[0]}" > openlore-package.sha256
+
+      - name: Upload the npm release artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: npm-package
+          path: |
+            openlore-*.tgz
+            openlore-package.sha256
+          if-no-files-found: error
+          retention-days: 1
 
   create-release:
     name: Create GitHub Release
@@ -167,33 +218,35 @@ jobs:
       url: https://www.npmjs.com/package/openlore
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # This job deliberately has no checkout, dependency install, build, or package
+      # lifecycle execution. Only the tarball produced by the no-OIDC validation job
+      # crosses into the trusted-publishing boundary.
+      - name: Download the npm release artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
-          # Publishing authenticates via OIDC, never via the git-stored token.
-          persist-credentials: false
+          name: npm-package
+          path: release-artifact
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24'
-          cache: 'npm'
           registry-url: 'https://registry.npmjs.org'
 
-      - run: npm ci
-
-      - name: Build
-        run: npm run build
-
-      # Last gate before the one step that cannot be undone. CI already ran this on
-      # the PR, but the tarball is assembled from THIS checkout of THIS tag, so the
-      # only assertion that counts is the one made against the artifact about to be
-      # uploaded.
-      - name: Verify the published tarball contents
-        run: npm run audit:packlist
+      - name: Verify the npm release artifact
+        working-directory: release-artifact
+        run: sha256sum --check openlore-package.sha256
 
       # No NODE_AUTH_TOKEN — npm picks up the OIDC token automatically when
       # `id-token: write` is set and the package is configured for Trusted
       # Publishing on npmjs.com. --provenance attaches a signed attestation
       # linking this build to this repo + this workflow run.
       - name: Publish to npm
-        run: npm publish --provenance --access public
+        working-directory: release-artifact
+        run: |
+          shopt -s nullglob
+          packages=(openlore-*.tgz)
+          if [ "${#packages[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly one npm tarball, found ${#packages[@]}."
+            exit 1
+          fi
+          npm publish "${packages[0]}" --ignore-scripts --provenance --access public

@@ -656,6 +656,15 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
 
     if (req.method === 'GET' && url.pathname === '/health') {
       touchActivity();
+      // A wildcard bind is network-reachable even though daemon discovery uses its
+      // loopback alias. Keep unauthenticated liveness available, but do not disclose
+      // the repository path, PID, version, preset, or tool surface to a remote caller
+      // that merely supplies the allowed wildcard Host header. Authenticated clients
+      // still receive the full root-bound identity proof used by descriptor validation.
+      if (!isLoopbackHost(host) && token && !tokenAuthenticated) {
+        sendJson(res, 200, { ok: true, tokenProtected: true });
+        return;
+      }
       sendJson(res, 200, {
         ok: true,
         presetDispatchEnforced: true,
