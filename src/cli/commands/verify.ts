@@ -54,7 +54,8 @@ interface ExtendedVerifyOptions extends VerifyOptions {
  * Format score as bar
  */
 function formatScoreBar(score: number, width: number = 10): string {
-  const filled = Math.round(score * width);
+  const boundedScore = Number.isFinite(score) ? Math.min(1, Math.max(0, score)) : 0;
+  const filled = Math.round(boundedScore * width);
   const empty = width - filled;
   return '■'.repeat(filled) + '□'.repeat(empty);
 }
@@ -99,7 +100,7 @@ async function loadGenerationReport(rootPath: string): Promise<GenerationReport 
 /**
  * Display individual verification result
  */
-function displayResult(
+export function displayResult(
   result: VerificationResult,
   index: number,
   total: number,
@@ -123,9 +124,11 @@ function displayResult(
   console.log(`         Exports: ${result.exportMatch.predicted.length}/${result.exportMatch.actual.length} predicted (${exportPercent}%)`);
 
   // Requirement coverage
-  if (result.requirementCoverage.relatedRequirements.length > 0) {
+  if (result.requirementCoverage.evidence === 'llm-score') {
+    console.log(`         Requirements: ${(result.requirementCoverage.coverage * 100).toFixed(0)}% coverage (LLM-scored; no per-requirement claims)`);
+  } else if (result.requirementCoverage.relatedRequirements.length > 0) {
     const reqMatches = result.requirementCoverage.actuallyImplements.join(', ') || 'None';
-    console.log(`         Requirements: ${reqMatches}`);
+    console.log(`         Requirements: ${safe(reqMatches)}`);
   } else {
     console.log(`         Requirements: Not in specs`);
   }
@@ -137,7 +140,7 @@ function displayResult(
   if (verbose && result.feedback.length > 0) {
     console.log('         Feedback:');
     for (const fb of result.feedback) {
-      console.log(`           - ${fb}`);
+      console.log(`           - ${safe(fb)}`);
     }
   }
 }
@@ -145,7 +148,7 @@ function displayResult(
 /**
  * Display verification summary
  */
-function displaySummary(report: VerificationReport, _threshold: number): void {
+export function displaySummary(report: VerificationReport, _threshold: number): void {
   console.log('');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('');
@@ -158,7 +161,19 @@ function displaySummary(report: VerificationReport, _threshold: number): void {
     : '0';
 
   console.log(`   Overall Confidence: ${confidencePercent}%`);
-  console.log(`   Passed: ${report.passedFiles}/${report.sampledFiles} files (${passedPercent}%)`);
+  console.log(`   Attempted: ${report.attemptedFiles} files`);
+  console.log(`   Verified successfully: ${report.sampledFiles} files`);
+  console.log(`   Failed verification: ${report.failedFiles} files`);
+  console.log(`   Passed among successful verifications: ${report.passedFiles}/${report.sampledFiles} files (${passedPercent}%)`);
+  if (report.recommendationQualification) {
+    console.log(`   Qualification: ${safe(report.recommendationQualification)}`);
+  }
+  if (report.failures.length > 0) {
+    console.log('   Verification failures:');
+    for (const failure of report.failures) {
+      console.log(`   - ${safe(failure.filePath)}: ${safe(failure.reason)}`);
+    }
+  }
   console.log('');
 
   // Domain accuracy
@@ -169,7 +184,7 @@ function displaySummary(report: VerificationReport, _threshold: number): void {
       const scorePercent = (domain.averageScore * 100).toFixed(0);
       const bar = formatScoreBar(domain.averageScore);
       const prefix = i === report.domainBreakdown.length - 1 ? '└─' : '├─';
-      const paddedName = `${domain.domain}/spec.md:`.padEnd(20);
+      const paddedName = `${safe(domain.domain)}/spec.md:`.padEnd(20);
       console.log(`   ${prefix} ${paddedName} ${scorePercent}% ${bar}`);
     }
     console.log('');
@@ -179,7 +194,7 @@ function displaySummary(report: VerificationReport, _threshold: number): void {
   if (report.commonGaps.length > 0) {
     console.log('⚠️ Identified Gaps:');
     for (let i = 0; i < report.commonGaps.length; i++) {
-      console.log(`   ${i + 1}. ${report.commonGaps[i]}`);
+      console.log(`   ${i + 1}. ${safe(report.commonGaps[i])}`);
     }
     console.log('');
   }
@@ -188,7 +203,7 @@ function displaySummary(report: VerificationReport, _threshold: number): void {
   if (report.suggestedImprovements.length > 0) {
     for (const improvement of report.suggestedImprovements) {
       console.log(`   ${safe(improvement.domain)}: ${safe(improvement.issue)}`);
-      console.log(`      → ${improvement.suggestion}`);
+      console.log(`      → ${safe(improvement.suggestion)}`);
     }
     console.log('');
   }
@@ -198,7 +213,11 @@ function displaySummary(report: VerificationReport, _threshold: number): void {
   let recommendationText = 'READY';
   let recommendationDetail = 'Specifications accurately describe the codebase.';
 
-  if (report.recommendation === 'needs-review') {
+  if (report.failedFiles > 0) {
+    recommendationIcon = '⚠️';
+    recommendationText = report.recommendation === 'regenerate' ? 'INCOMPLETE' : 'NEEDS REVIEW';
+    recommendationDetail = 'Verification was incomplete; review the failed files before relying on this result.';
+  } else if (report.recommendation === 'needs-review') {
     recommendationIcon = '⚠️';
     recommendationText = 'NEEDS REVIEW';
     recommendationDetail = 'The specs cover core functionality but may miss some areas.';
@@ -288,7 +307,7 @@ A score >= threshold indicates specs are production-ready.
 
     const opts: ExtendedVerifyOptions = {
       samples: typeof options.samples === 'string'
-        ? parseInt(options.samples, 10)
+        ? Number(options.samples)
         : options.samples ?? 5,
       threshold: typeof options.threshold === 'string'
         ? parseFloat(options.threshold)
@@ -302,7 +321,7 @@ A score >= threshold indicates specs are production-ready.
       config: OPENLORE_CONFIG_REL_PATH,
     };
 
-    if (isNaN(opts.samples) || opts.samples < 1) {
+    if (!Number.isInteger(opts.samples) || opts.samples < 1) {
       logger.error('--samples must be a positive integer');
       process.exitCode = 1;
       return;
@@ -408,7 +427,7 @@ A score >= threshold indicates specs are production-ready.
         rootPath,
         openspecPath,
         outputDir: verificationDir,
-        filesPerDomain: Math.ceil(opts.samples / 4), // Distribute across domains
+        filesPerDomain: opts.samples,
         passThreshold: opts.threshold,
         generationContext,
       });
@@ -419,17 +438,14 @@ A score >= threshold indicates specs are production-ready.
       }
 
       // Get candidates first to show selection
-      const candidates = engine.selectCandidates(depGraph);
+      const selectedCandidates = await engine.prepareCandidates(depGraph, opts.samples);
 
-      if (candidates.length === 0) {
+      if (selectedCandidates.length === 0) {
         logger.error('No suitable verification candidates found.');
         logger.discovery('Try running with a lower --samples value or check that analysis includes non-test files.');
         process.exitCode = 1;
         return;
       }
-
-      // Limit to requested sample size
-      const selectedCandidates = candidates.slice(0, opts.samples);
 
       if (!opts.json) {
         logger.discovery(`Files selected for verification:`);
@@ -445,7 +461,7 @@ A score >= threshold indicates specs are production-ready.
       // Run verification
       let report: VerificationReport;
       try {
-        report = await engine.verify(depGraph, openloreConfig.version);
+        report = await engine.verify(depGraph, openloreConfig.version, selectedCandidates);
       } catch (error) {
         logger.error(`Verification failed: ${(error as Error).message}`);
         process.exitCode = 1;

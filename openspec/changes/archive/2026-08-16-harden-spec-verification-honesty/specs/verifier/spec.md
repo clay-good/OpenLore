@@ -42,9 +42,9 @@ against the file's content.
 #### Scenario: The LLM-scored path names no requirements
 
 - **GIVEN** a file whose requirement coverage comes from an LLM score
-- **WHEN** feedback is generated
-- **THEN** the feedback reports the coverage score and its LLM provenance
-- **AND** no "Requirements X, Y don't appear to be implemented" claim is emitted
+- **WHEN** its verification result is reported
+- **THEN** the report and interactive output present the coverage score and its LLM provenance
+- **AND** no feedback names individual requirements as implemented or unimplemented
 
 #### Scenario: The evidence-bearing path may still name requirements
 

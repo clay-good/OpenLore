@@ -13,6 +13,7 @@ import type { LLMService } from '../services/llm-service.js';
 import type { DependencyGraphResult, DependencyNode } from '../analyzer/dependency-graph.js';
 import { ImportExportParser } from '../analyzer/import-parser.js';
 import { protectPrompt } from '../../utils/prompt-boundary.js';
+import { sanitizeForTerminal } from '../../utils/misc.js';
 
 // ============================================================================
 // TYPES
@@ -76,6 +77,68 @@ export interface RequirementCoverage {
   relatedRequirements: string[];
   actuallyImplements: string[];
   coverage: number;
+  evidence: 'llm-score' | 'keyword-match' | 'none';
+}
+
+export interface VerificationFailure {
+  filePath: string;
+  reason: string;
+}
+
+const MAX_VERIFICATION_FAILURE_REASON_LENGTH = 1_000;
+
+function escapeMarkdownInline(value: string): string {
+  return value
+    .replace(/[\r\n\t]+/g, ' ')
+    // eslint-disable-next-line no-control-regex -- persisted errors may contain control bytes
+    .replace(/[\x00-\x1f\x7f-\x9f]/g, character =>
+      `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`)
+    .replace(/([\\`*_[\]<>#|])/g, '\\$1');
+}
+
+function requireUnitScore(value: unknown, field: string, fallback?: number): number | undefined {
+  if (value === undefined && fallback !== undefined) return fallback;
+  if (value === undefined) return undefined;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 1) {
+    throw new Error(`${field} must be a finite number between 0 and 1`);
+  }
+  return value;
+}
+
+function requirePresentUnitScore(value: unknown, field: string): number {
+  const score = requireUnitScore(value, field);
+  if (score === undefined) throw new Error(`${field} is required`);
+  return score;
+}
+
+function describeVerificationError(error: unknown): string {
+  let reason = 'Unknown verification error';
+  try {
+    if (error instanceof Error && typeof error.message === 'string' && error.message.trim()) {
+      reason = error.message;
+    } else if (typeof error === 'string' && error.trim()) {
+      reason = error;
+    } else {
+      try {
+        const serialized = JSON.stringify(error);
+        if (serialized) reason = serialized;
+      } catch {
+        // A hostile thrown object may reject every coercion attempt.
+      }
+    }
+  } catch {
+    // Error subclasses may expose a throwing message getter.
+  }
+
+  const normalized = reason
+    .replace(/[\r\n\t]+/g, ' ')
+    // eslint-disable-next-line no-control-regex -- provider errors are untrusted input
+    .replace(/[\x00-\x1f\x7f-\x9f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim() || 'Unknown verification error';
+  if (normalized.length <= MAX_VERIFICATION_FAILURE_REASON_LENGTH) return normalized;
+  const suffix = '... [truncated]';
+  return `${normalized.slice(0, MAX_VERIFICATION_FAILURE_REASON_LENGTH - suffix.length)}${suffix}`;
 }
 
 /**
@@ -119,12 +182,17 @@ export interface SuggestedImprovement {
 export interface VerificationReport {
   timestamp: string;
   specVersion: string;
+  attemptedFiles: number;
   sampledFiles: number;
+  failedFiles: number;
+  failures: VerificationFailure[];
+  aggregateBasis: 'successful-files';
   passedFiles: number;
   overallConfidence: number;
   domainBreakdown: DomainBreakdown[];
   commonGaps: string[];
   recommendation: 'ready' | 'needs-review' | 'regenerate';
+  recommendationQualification?: string;
   suggestedImprovements: SuggestedImprovement[];
   results: VerificationResult[];
 }
@@ -192,9 +260,14 @@ export class SpecVerificationEngine {
   private options: Required<VerificationEngineOptions>;
   private specs: LoadedSpec[] = [];
   private fileDomainMap: Map<string, string> = new Map();
+  private verificationContextPromise: Promise<void> | undefined;
   private parser: ImportExportParser;
 
   constructor(llm: LLMService, options: VerificationEngineOptions) {
+    const passThreshold = options.passThreshold ?? 0.5;
+    if (!Number.isFinite(passThreshold) || passThreshold < 0 || passThreshold > 1) {
+      throw new Error('passThreshold must be a finite number between 0 and 1');
+    }
     this.llm = llm;
     this.parser = new ImportExportParser();
     this.options = {
@@ -204,7 +277,7 @@ export class SpecVerificationEngine {
       minComplexity: options.minComplexity ?? 50,
       maxComplexity: options.maxComplexity ?? 500,
       filesPerDomain: options.filesPerDomain ?? 3,
-      passThreshold: options.passThreshold ?? 0.5,
+      passThreshold,
       generationContext: options.generationContext ?? [],
     };
   }
@@ -214,13 +287,14 @@ export class SpecVerificationEngine {
    */
   async verify(
     depGraph: DependencyGraphResult,
-    specVersion: string
+    specVersion: string,
+    selectedCandidates?: readonly VerificationCandidate[],
   ): Promise<VerificationReport> {
     const startTime = Date.now();
 
-    // Load all specs and the file→domain mapping
-    await this.loadSpecs();
-    await this.loadFileDomainMap();
+    // Load all specs and the file→domain mapping once. prepareCandidates() uses
+    // the same boundary so previewed candidates keep their resolved domains.
+    await this.ensureVerificationContext();
 
     if (this.specs.length === 0) {
       throw new Error('No specs found to verify against');
@@ -229,7 +303,7 @@ export class SpecVerificationEngine {
     logger.analysis(`Loaded ${this.specs.length} spec(s) for verification`);
 
     // Select verification candidates
-    const candidates = this.selectCandidates(depGraph);
+    const candidates = selectedCandidates ? [...selectedCandidates] : this.selectCandidates(depGraph);
     logger.discovery(`Selected ${candidates.length} candidate file(s) for verification`);
 
     if (candidates.length === 0) {
@@ -238,20 +312,23 @@ export class SpecVerificationEngine {
 
     // Run verification for each candidate
     const results: VerificationResult[] = [];
+    const failures: VerificationFailure[] = [];
     for (let i = 0; i < candidates.length; i++) {
       const candidate = candidates[i];
-      logger.analysis(`Verifying ${i + 1}/${candidates.length}: ${candidate.path}`);
+      logger.analysis(`Verifying ${i + 1}/${candidates.length}: ${sanitizeForTerminal(candidate.path)}`);
 
       try {
         const result = await this.verifyFile(candidate);
         results.push(result);
       } catch (error) {
-        logger.warning(`Failed to verify ${candidate.path}: ${(error as Error).message}`);
+        const reason = describeVerificationError(error);
+        failures.push({ filePath: candidate.path, reason });
+        logger.warning(`Failed to verify ${sanitizeForTerminal(candidate.path)}: ${sanitizeForTerminal(reason)}`);
       }
     }
 
     // Generate report
-    const report = this.generateReport(results, specVersion);
+    const report = this.generateReport(results, specVersion, failures);
 
     // Save report
     await this.saveReport(report);
@@ -260,6 +337,42 @@ export class SpecVerificationEngine {
     logger.success(`Verification complete in ${(duration / 1000).toFixed(1)}s`);
 
     return report;
+  }
+
+  /**
+   * Resolve and bound the exact candidate set that a later verify() call will use.
+   * Specs and mapping must be loaded first because domain assignment is part of
+   * candidate identity, not a display-only annotation.
+   */
+  async prepareCandidates(
+    depGraph: DependencyGraphResult,
+    limit?: number,
+  ): Promise<VerificationCandidate[]> {
+    if (limit !== undefined && (!Number.isInteger(limit) || limit < 1)) {
+      throw new Error('candidate limit must be a positive integer');
+    }
+    await this.ensureVerificationContext();
+    if (this.specs.length === 0) {
+      throw new Error('No specs found to verify against');
+    }
+    const candidates = this.selectCandidates(depGraph);
+    return limit === undefined ? candidates : candidates.slice(0, limit);
+  }
+
+  private async ensureVerificationContext(): Promise<void> {
+    if (!this.verificationContextPromise) {
+      this.verificationContextPromise = (async () => {
+        await this.loadSpecs();
+        if (this.specs.length === 0) {
+          throw new Error('No specs found to verify against');
+        }
+        await this.loadFileDomainMap();
+      })().catch(error => {
+        this.verificationContextPromise = undefined;
+        throw error;
+      });
+    }
+    await this.verificationContextPromise;
   }
 
   /**
@@ -566,13 +679,13 @@ Respond in JSON:
         predictedExports: prediction.predictedExports ?? [],
         predictedLogic: prediction.predictedLogic ?? [],
         relatedRequirements: prediction.relatedRequirements ?? [],
-        confidence: prediction.confidence ?? 0.5,
-        specAccuracyScore: typeof prediction.specAccuracyScore === 'number' ? prediction.specAccuracyScore : undefined,
-        requirementCoverageScore: typeof prediction.requirementCoverageScore === 'number' ? prediction.requirementCoverageScore : undefined,
+        confidence: requirePresentUnitScore(prediction.confidence, 'confidence'),
+        specAccuracyScore: requireUnitScore(prediction.specAccuracyScore, 'specAccuracyScore'),
+        requirementCoverageScore: requireUnitScore(prediction.requirementCoverageScore, 'requirementCoverageScore'),
         reasoning: prediction.reasoning ?? '',
       };
     } catch (error) {
-      logger.warning(`Prediction failed for ${candidate.path}: ${(error as Error).message}`);
+      logger.warning(`Prediction failed for ${sanitizeForTerminal(candidate.path)}: ${sanitizeForTerminal(describeVerificationError(error))}`);
       // Re-throw so verify() skips this file rather than recording a misleading 0% score
       throw error;
     }
@@ -825,24 +938,25 @@ Respond in JSON:
   private analyzeRequirementCoverage(domain: string, fileContent: string, llmScore?: number): RequirementCoverage {
     const spec = this.specs.find(s => s.domain === domain);
     if (!spec) {
-      return { relatedRequirements: [], actuallyImplements: [], coverage: 0 };
+      return { relatedRequirements: [], actuallyImplements: [], coverage: 0, evidence: 'none' };
     }
 
     const requirements = this.parseSpecRequirements(spec.content);
     const relatedRequirements = requirements.map(r => r.name);
 
-    // LLM-as-judge: use the score directly, synthesize actuallyImplements proportionally
+    // LLM-as-judge: the scalar is evidence for aggregate coverage only. It cannot
+    // support named per-requirement membership claims.
     if (typeof llmScore === 'number') {
-      const implementedCount = Math.round(llmScore * requirements.length);
       return {
         relatedRequirements,
-        actuallyImplements: relatedRequirements.slice(0, implementedCount),
+        actuallyImplements: [],
         coverage: llmScore,
+        evidence: 'llm-score',
       };
     }
 
     if (requirements.length === 0) {
-      return { relatedRequirements: [], actuallyImplements: [], coverage: 0 };
+      return { relatedRequirements: [], actuallyImplements: [], coverage: 0, evidence: 'none' };
     }
 
     const contentLower = fileContent.toLowerCase();
@@ -864,7 +978,7 @@ Respond in JSON:
     }
 
     const coverage = actuallyImplements.length / requirements.length;
-    return { relatedRequirements, actuallyImplements, coverage };
+    return { relatedRequirements, actuallyImplements, coverage, evidence: 'keyword-match' };
   }
 
   /**
@@ -921,8 +1035,12 @@ Respond in JSON:
     }
 
     // Low requirement coverage
-    if (requirementCoverage.coverage < 0.5 && prediction.relatedRequirements.length > 0) {
-      const missing = prediction.relatedRequirements.filter(r => !requirementCoverage.actuallyImplements.includes(r));
+    if (requirementCoverage.evidence === 'llm-score' && requirementCoverage.coverage < 0.5) {
+      feedback.push(
+        `Requirement coverage: ${(requirementCoverage.coverage * 100).toFixed(0)}% (LLM-scored; no per-requirement claims)`,
+      );
+    } else if (requirementCoverage.evidence === 'keyword-match' && requirementCoverage.coverage < 0.5) {
+      const missing = requirementCoverage.relatedRequirements.filter(r => !requirementCoverage.actuallyImplements.includes(r));
       if (missing.length > 0) {
         feedback.push(`Requirements ${missing.slice(0, 2).join(', ')} don't appear to be implemented in this file`);
       }
@@ -939,7 +1057,11 @@ Respond in JSON:
   /**
    * Generate verification report
    */
-  private generateReport(results: VerificationResult[], specVersion: string): VerificationReport {
+  private generateReport(
+    results: VerificationResult[],
+    specVersion: string,
+    failures: VerificationFailure[] = [],
+  ): VerificationReport {
     const passedFiles = results.filter(r => r.overallScore >= this.options.passThreshold).length;
     const overallConfidence = results.length > 0
       ? results.reduce((sum, r) => sum + r.overallScore, 0) / results.length
@@ -1009,23 +1131,32 @@ Respond in JSON:
 
     // Recommendation
     let recommendation: 'ready' | 'needs-review' | 'regenerate';
-    if (overallConfidence >= 0.75) {
+    if (overallConfidence >= this.options.passThreshold) {
       recommendation = 'ready';
     } else if (overallConfidence >= 0.5) {
       recommendation = 'needs-review';
     } else {
       recommendation = 'regenerate';
     }
+    const recommendationQualification = failures.length > 0
+      ? `${failures.length} of ${results.length + failures.length} attempted files could not be verified; aggregates cover successful files only.`
+      : undefined;
+    if (recommendation === 'ready' && failures.length > 0) recommendation = 'needs-review';
 
     return {
-      timestamp: new Date().toLocaleString(),
+      timestamp: new Date().toISOString(),
       specVersion,
+      attemptedFiles: results.length + failures.length,
       sampledFiles: results.length,
+      failedFiles: failures.length,
+      failures,
+      aggregateBasis: 'successful-files',
       passedFiles,
       overallConfidence,
       domainBreakdown,
       commonGaps,
       recommendation,
+      ...(recommendationQualification ? { recommendationQualification } : {}),
       suggestedImprovements,
       results,
     };
@@ -1058,7 +1189,7 @@ Respond in JSON:
     lines.push('# Spec Verification Report');
     lines.push('');
     lines.push(`Generated: ${report.timestamp}`);
-    lines.push(`Spec Version: ${report.specVersion}`);
+    lines.push(`Spec Version: ${escapeMarkdownInline(report.specVersion)}`);
     lines.push('');
 
     // Summary
@@ -1066,15 +1197,25 @@ Respond in JSON:
     lines.push('');
     lines.push(`| Metric | Value |`);
     lines.push(`|--------|-------|`);
-    lines.push(`| Files Verified | ${report.sampledFiles} |`);
+    lines.push(`| Files Attempted | ${report.attemptedFiles} |`);
+    lines.push(`| Files Verified Successfully | ${report.sampledFiles} |`);
+    lines.push(`| Files Failed Verification | ${report.failedFiles} |`);
     lines.push(`| Files Passed | ${report.passedFiles} (${report.sampledFiles > 0 ? ((report.passedFiles / report.sampledFiles) * 100).toFixed(0) : 'N/A'}%) |`);
     lines.push(`| Overall Confidence | ${(report.overallConfidence * 100).toFixed(1)}% |`);
     lines.push(`| Recommendation | **${report.recommendation}** |`);
+    lines.push(`| Aggregate Basis | ${report.aggregateBasis} |`);
     lines.push('');
+
+    if (report.recommendationQualification) {
+      lines.push(`> ${escapeMarkdownInline(report.recommendationQualification)}`);
+      lines.push('');
+    }
 
     // Recommendation explanation
     lines.push('### Recommendation');
-    if (report.recommendation === 'ready') {
+    if (report.failedFiles > 0) {
+      lines.push('⚠️ Verification was incomplete; review the failed files before relying on this result.');
+    } else if (report.recommendation === 'ready') {
       lines.push('✅ Specs accurately describe the codebase and are ready for use.');
     } else if (report.recommendation === 'needs-review') {
       lines.push('⚠️ Specs need review. Some gaps were identified that should be addressed.');
@@ -1083,6 +1224,15 @@ Respond in JSON:
     }
     lines.push('');
 
+    if (report.failures.length > 0) {
+      lines.push('## Verification Failures');
+      lines.push('');
+      for (const failure of report.failures) {
+        lines.push(`- ${escapeMarkdownInline(failure.filePath)}: ${escapeMarkdownInline(failure.reason)}`);
+      }
+      lines.push('');
+    }
+
     // Domain breakdown
     lines.push('## Domain Breakdown');
     lines.push('');
@@ -1090,7 +1240,7 @@ Respond in JSON:
     lines.push('|--------|-----------|-------|-----------|--------------|');
     for (const domain of report.domainBreakdown) {
       const scorePercent = (domain.averageScore * 100).toFixed(0);
-      lines.push(`| ${domain.domain} | ${domain.specPath} | ${domain.filesVerified} | ${scorePercent}% | ${domain.weakestArea} |`);
+      lines.push(`| ${escapeMarkdownInline(domain.domain)} | ${escapeMarkdownInline(domain.specPath)} | ${domain.filesVerified} | ${scorePercent}% | ${escapeMarkdownInline(domain.weakestArea)} |`);
     }
     lines.push('');
 
@@ -1099,7 +1249,7 @@ Respond in JSON:
       lines.push('## Common Gaps');
       lines.push('');
       for (const gap of report.commonGaps) {
-        lines.push(`- ${gap}`);
+        lines.push(`- ${escapeMarkdownInline(gap)}`);
       }
       lines.push('');
     }
@@ -1109,9 +1259,9 @@ Respond in JSON:
       lines.push('## Suggested Improvements');
       lines.push('');
       for (const improvement of report.suggestedImprovements) {
-        lines.push(`### ${improvement.domain}`);
-        lines.push(`- **Issue**: ${improvement.issue}`);
-        lines.push(`- **Suggestion**: ${improvement.suggestion}`);
+        lines.push(`### ${escapeMarkdownInline(improvement.domain)}`);
+        lines.push(`- **Issue**: ${escapeMarkdownInline(improvement.issue)}`);
+        lines.push(`- **Suggestion**: ${escapeMarkdownInline(improvement.suggestion)}`);
         lines.push('');
       }
     }
@@ -1122,9 +1272,9 @@ Respond in JSON:
     for (const result of report.results) {
       const scorePercent = (result.overallScore * 100).toFixed(0);
       const status = result.overallScore >= this.options.passThreshold ? '✅' : '❌';
-      lines.push(`### ${status} ${result.filePath}`);
+      lines.push(`### ${status} ${escapeMarkdownInline(result.filePath)}`);
       lines.push('');
-      lines.push(`- **Domain**: ${result.domain}`);
+      lines.push(`- **Domain**: ${escapeMarkdownInline(result.domain)}`);
       lines.push(`- **Overall Score**: ${scorePercent}%`);
       lines.push(`- **LLM Confidence**: ${(result.llmConfidence * 100).toFixed(0)}%`);
       lines.push('');
@@ -1133,13 +1283,13 @@ Respond in JSON:
       lines.push(`| Purpose Match | ${(result.purposeMatch.similarity * 100).toFixed(0)}% |`);
       lines.push(`| Import Match (F1) | ${(result.importMatch.f1Score * 100).toFixed(0)}% |`);
       lines.push(`| Export Match (F1) | ${(result.exportMatch.f1Score * 100).toFixed(0)}% |`);
-      lines.push(`| Requirement Coverage | ${(result.requirementCoverage.coverage * 100).toFixed(0)}% |`);
+      lines.push(`| Requirement Coverage | ${(result.requirementCoverage.coverage * 100).toFixed(0)}% (${result.requirementCoverage.evidence}) |`);
       lines.push('');
 
       if (result.feedback.length > 0) {
         lines.push('**Feedback:**');
         for (const fb of result.feedback) {
-          lines.push(`- ${fb}`);
+          lines.push(`- ${escapeMarkdownInline(fb)}`);
         }
         lines.push('');
       }
@@ -1157,9 +1307,7 @@ Respond in JSON:
    * triggers an eager load so callers can preview domains without a full LLM run.
    */
   async getDomains(): Promise<string[]> {
-    if (this.specs.length === 0) {
-      await this.loadSpecs();
-    }
+    await this.ensureVerificationContext();
     return this.specs.map(s => s.domain);
   }
 }

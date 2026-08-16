@@ -10,7 +10,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mkdir, rm, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { decisionsCommand } from './decisions.js';
+import { decisionsCommand, runAutopilotGate } from './decisions.js';
 import { loadDecisionStore, saveDecisionStore } from '../../core/decisions/store.js';
 import { readLedger } from '../../core/decisions/ledger.js';
 import type { Command, Option } from 'commander';
@@ -156,6 +156,27 @@ describe('decision autopilot', () => {
     // One advisory line, pointing at the trail.
     expect(stderrChunks.join('\n')).toContain('auto-accepted');
     expect(stderrChunks.join('\n')).toContain('openlore decisions log');
+  });
+
+  it('fails open while disclosing unassessed drafts from an empty consolidation', async () => {
+    await writeConfig({ autopilot: true });
+    const draft = makeDecision({ status: 'draft' });
+    await saveDecisionStore(dir, makeStore([draft]));
+
+    await runAutopilotGate(dir, {
+      ...BASE_CONFIG,
+      governance: { autopilot: true },
+    } as Parameters<typeof runAutopilotGate>[1], true, [draft]);
+
+    expect(process.exitCode ?? 0).toBe(0);
+    const payload = JSON.parse(stdoutText());
+    expect(payload).toMatchObject({
+      gated: false,
+      autopilot: true,
+      unassessed: [{ id: draft.id, status: 'draft' }],
+      draftsPending: 1,
+    });
+    expect(stderrChunks.join('\n')).toContain('unassessed decision(s) retained as drafts');
   });
 
   it('never resurrects a human-rejected decision', async () => {

@@ -68,6 +68,7 @@ export interface SyncDecisionsOptions extends BaseOptions {
 export interface ConsolidateResult {
   verified: PendingDecision[];
   phantom: PendingDecision[];
+  unassessed: PendingDecision[];
   missing: Array<{ file: string; description: string }>;
   store: DecisionStore;
 }
@@ -155,9 +156,8 @@ export async function openloreConsolidateDecisions(
   });
 
   const store = await loadDecisionStore(rootPath);
-  const originalDraftIds = new Set(
-    store.decisions.filter((decision) => decision.status === 'draft').map((decision) => decision.id),
-  );
+  const originalDrafts = store.decisions.filter((decision) => decision.status === 'draft');
+  const originalDraftIds = new Set(originalDrafts.map((decision) => decision.id));
 
   const openspecPath = resolveOpenspecDir(rootPath, openloreConfig.openspecPath);
   const specMap = await buildSpecMap({ rootPath, openspecPath }).catch(() => undefined);
@@ -168,19 +168,21 @@ export async function openloreConsolidateDecisions(
 
   if (consolidated.length === 0) {
     await llm.saveLogs().catch(() => {});
-    // Consolidation kept nothing — but the drafts still get their verdicts. A
-    // draft that produced no decision must say so, not vanish
-    // (change: explain-decision-rejection).
+    // Without a persisted replacement, omission cannot become rejection.
     const withVerdicts = dispositions.length
       ? await updateDecisionStore(rootPath, (s) => applyConsolidationOutcome(s, {
           originalDraftIds,
+          originalDrafts,
+          capturedDecisions: store.decisions,
           verified: [],
           phantom: [],
           supersededIds,
           dispositions,
         }))
       : store;
-    return { verified: [], phantom: [], missing: [], store: withVerdicts };
+    const persistedUnassessed = originalDrafts.map((decision) =>
+      withVerdicts.decisions.find((stored) => stored.id === decision.id) ?? decision);
+    return { verified: [], phantom: [], unassessed: persistedUnassessed, missing: [], store: withVerdicts };
   }
 
   // Build combined diff + commit messages for verification
@@ -207,9 +209,9 @@ export async function openloreConsolidateDecisions(
   }
 
   progress(onProgress, 'Verifying decisions', 'start');
-  const { verified, phantom, missing } = combinedDiff
+  const { verified, phantom, unassessed, missing } = combinedDiff
     ? await verifyDecisions(consolidated, combinedDiff, llm, commitMessages)
-    : { verified: markVerificationEvidenceAbsent(consolidated), phantom: [], missing: [] };
+    : { verified: markVerificationEvidenceAbsent(consolidated), phantom: [], unassessed: [], missing: [] };
   await llm.saveLogs().catch(() => {});
   progress(onProgress, 'Verifying decisions', 'complete', `${verified.length} verified`);
 
@@ -217,18 +219,40 @@ export async function openloreConsolidateDecisions(
   // replaceDecisions (via applyConsolidationOutcome), NOT upsert: consolidated decisions
   // reuse their drafts' deterministic ids, so an upsert would silently drop the verified
   // status. Matches the CLI consolidation path.
-  const finalDispositions = withVerificationOutcome(dispositions, new Set(phantom.map((d) => d.id)));
+  const unassessedIds = new Set(unassessed.map((decision) => decision.id));
+  const unassessedForPersist = unassessed.map((decision) => ({
+    ...decision,
+    status: 'draft' as const,
+    recordedAt: store.decisions.find((original) => original.id === decision.id)?.recordedAt
+      ?? decision.recordedAt,
+  }));
+  const finalDispositions = withVerificationOutcome(
+    dispositions.filter((disposition) => !unassessedIds.has(disposition.id)),
+    new Set(phantom.map((d) => d.id)),
+  );
   const updatedStore = await updateDecisionStore(rootPath, (s) =>
     applyConsolidationOutcome(s, {
       originalDraftIds,
+      originalDrafts,
+      capturedDecisions: store.decisions,
       verified,
       phantom,
+      unassessed: unassessedForPersist,
       supersededIds,
       dispositions: finalDispositions,
     }),
   );
+  const fromCommittedStore = (decisions: readonly PendingDecision[]): PendingDecision[] =>
+    decisions.map((decision) =>
+      updatedStore.decisions.find((stored) => stored.id === decision.id) ?? decision);
 
-  return { verified, phantom, missing, store: updatedStore };
+  return {
+    verified: fromCommittedStore(verified),
+    phantom: fromCommittedStore(phantom),
+    unassessed: fromCommittedStore(unassessedForPersist),
+    missing,
+    store: updatedStore,
+  };
 }
 
 // ============================================================================

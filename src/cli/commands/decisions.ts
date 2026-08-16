@@ -58,7 +58,7 @@ import {
   CONSOLIDATION_GRACE_PERIOD_MS,
   GATE_REASONS,
 } from '../../constants.js';
-import type { PendingDecision } from '../../types/index.js';
+import type { DecisionStore, PendingDecision } from '../../types/index.js';
 import { runTuiApproval } from '../tui-approval.js';
 import { emit } from '../../core/services/telemetry.js';
 import { resolveOpenspecDir } from '../../utils/openspec-dir.js';
@@ -397,10 +397,11 @@ export async function uninstallClaudeHook(rootPath: string): Promise<void> {
  * decision is never resurrected by autopilot, and concurrent status changes
  * win (the CAS mutate re-checks status on the freshest store).
  */
-async function runAutopilotGate(
+export async function runAutopilotGate(
   rootPath: string,
   config: NonNullable<Awaited<ReturnType<typeof readOpenLoreConfig>>>,
   jsonMode: boolean,
+  unassessed: readonly PendingDecision[] = [],
 ): Promise<void> {
   try {
     let store = await loadDecisionStore(rootPath);
@@ -454,6 +455,10 @@ async function runAutopilotGate(
     const parts: string[] = [];
     if (verifiedIds.length > 0) parts.push(`${verifiedIds.length} decision(s) auto-accepted`);
     if (syncedCount > 0) parts.push(`${syncedCount} synced to specs`);
+    const unassessedDrafts = unassessed.filter((decision) => decision.status === 'draft');
+    const concurrentlyResolved = unassessed.length - unassessedDrafts.length;
+    if (unassessedDrafts.length > 0) parts.push(`${unassessedDrafts.length} unassessed decision(s) retained as drafts`);
+    if (concurrentlyResolved > 0) parts.push(`${concurrentlyResolved} unassessed decision(s) resolved concurrently`);
     if (draftCount > 0) parts.push(`${draftCount} draft(s) pending background consolidation`);
     if (syncErrors.length > 0) parts.push(`${syncErrors.length} sync error(s) — will retry next gate`);
     if (unevidencedCount > 0) parts.push(`${unevidencedCount} unevidenced decision(s) require review`);
@@ -470,6 +475,11 @@ async function runAutopilotGate(
         autopilot: true,
         autoAccepted: verifiedIds.length,
         synced: syncedCount,
+        unassessed: unassessed.map((decision) => ({
+          id: decision.id,
+          title: decision.title,
+          status: decision.status,
+        })),
         draftsPending: draftCount,
         awaitingReview: unreviewedCount,
         unevidencedAwaitingReview: unevidencedCount,
@@ -482,6 +492,45 @@ async function runAutopilotGate(
     console.error(`openlore autopilot: skipped (${(err as Error).message}) — commit not blocked`);
     process.exitCode = 0;
   }
+}
+
+export function reconcileDecisionClassifications(
+  store: DecisionStore,
+  classifications: {
+    verified: readonly PendingDecision[];
+    phantom: readonly PendingDecision[];
+    unassessed: readonly PendingDecision[];
+  },
+): { verified: PendingDecision[]; phantom: PendingDecision[]; unassessed: PendingDecision[] } {
+  const committed = new Map(store.decisions.map((decision) => [decision.id, decision]));
+  const reconcile = (decisions: readonly PendingDecision[]) =>
+    decisions.map((decision) => committed.get(decision.id) ?? decision);
+  return {
+    verified: reconcile(classifications.verified),
+    phantom: reconcile(classifications.phantom),
+    unassessed: reconcile(classifications.unassessed),
+  };
+}
+
+export function classificationsBlockGate(
+  classifications: {
+    verified: readonly PendingDecision[];
+    phantom?: readonly PendingDecision[];
+    unassessed: readonly PendingDecision[];
+  },
+  missingCount: number,
+): boolean {
+  return missingCount > 0
+    || classifications.verified.some(decisionClassificationIsUnresolved)
+    || (classifications.phantom ?? []).some(decisionClassificationIsUnresolved)
+    || classifications.unassessed.some(decisionClassificationIsUnresolved);
+}
+
+export function decisionClassificationIsUnresolved(decision: PendingDecision): boolean {
+  return decision.status === 'draft'
+    || decision.status === 'consolidated'
+    || decision.status === 'verified'
+    || decision.status === 'approved';
 }
 
 // ============================================================================
@@ -777,28 +826,33 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
         // Nothing survived — but every draft still gets its verdict, so the author
         // can read WHY rather than watch the draft disappear
         // (change: explain-decision-rejection).
-        if (dispositions.length > 0) {
-          await updateDecisionStore(rootPath, (s) => applyConsolidationOutcome(s, {
+        const updatedStore = dispositions.length > 0
+          ? await updateDecisionStore(rootPath, (s) => applyConsolidationOutcome(s, {
             originalDraftIds: new Set(drafts.map((draft) => draft.id)),
+            originalDrafts: drafts,
+            capturedDecisions: store.decisions,
             verified: [],
             phantom: [],
             supersededIds,
             dispositions,
-          }), 'agent');
+          }), 'agent')
+          : store;
+        const classifications = reconcileDecisionClassifications(updatedStore, {
+          verified: [],
+          phantom: [],
+          unassessed: drafts,
+        });
+        const unresolvedUnassessed = classifications.unassessed.filter(decisionClassificationIsUnresolved);
+        if (options.gate && openloreConfig.governance?.autopilot === true) {
+          await runAutopilotGate(rootPath, openloreConfig, options.json, classifications.unassessed);
+          return;
         }
         if (!options.json) {
-          console.log('No architectural decisions found in drafts.');
-          for (const d of dispositions) {
-            const entry = DECISION_DISPOSITION_REASONS[d.reason];
-            // The id comes from the analyzed repository's decision store, so it is
-            // untrusted terminal input like any other repo-derived value.
-            console.log(`  ${safe(d.id)}: ${d.disposition} [${d.reason}] — ${entry.description}${entry.nextAction ? ` → ${entry.nextAction}` : ''}`);
-          }
-          if (dispositions.length > 0) console.log('  Read a verdict any time with: openlore decisions status <id>');
+          console.log('No architectural decisions were produced; original drafts remain pending.');
         } else {
-          process.stdout.write(JSON.stringify({ verified: [], phantom: [], missing: [], dispositions }, null, 2) + '\n');
+          process.stdout.write(JSON.stringify({ ...classifications, missing: [], dispositions: [] }, null, 2) + '\n');
         }
-        if (options.gate) process.exitCode = 0;
+        if (options.gate && unresolvedUnassessed.length > 0) process.exitCode = 1;
         return;
       }
 
@@ -823,13 +877,14 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
       }
 
       // Step 3 — Verify
-      const { verified, phantom, missing } = combinedDiff
+      const { verified, phantom, unassessed, missing } = combinedDiff
         ? await verifyDecisions(consolidated, combinedDiff, llm, commitMessages)
-        : { verified: markVerificationEvidenceAbsent(consolidated), phantom: [], missing: [] };
+        : { verified: markVerificationEvidenceAbsent(consolidated), phantom: [], unassessed: [], missing: [] };
 
       // Step 4 — Persist
-      // Reject all original drafts — they've been replaced by consolidated decisions.
-      // Also reject any explicitly superseded IDs from prior sessions.
+      // Consolidated decisions replace their source drafts. An unassessed decision
+      // is persisted as a draft, so omission by the verifier never drops it.
+      // Explicitly superseded IDs from prior sessions are still rejected.
       const originalDraftIds = new Set(drafts.map((d) => d.id));
       const originalById = new Map(store.decisions.map((d) => [d.id, d]));
       // Preserve recordedAt provenance:
@@ -840,46 +895,64 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
         .map((id) => originalById.get(id)?.recordedAt)
         .filter((t): t is string => t !== undefined)
         .sort()[0];
-      const withProvenance = [...verified, ...phantom].map((d) => {
+      const withProvenance = [...verified, ...phantom, ...unassessed].map((d) => {
         const original = originalById.get(d.id);
-        if (original) return { ...d, recordedAt: original.recordedAt };
+        if (original) return { ...d, status: unassessed.some((candidate) => candidate.id === d.id) ? 'draft' as const : d.status, recordedAt: original.recordedAt };
         // Merged decision — anchor to earliest superseded draft's recordedAt
-        if (earliestSupersededAt) return { ...d, recordedAt: earliestSupersededAt };
-        return d;
+        const recordedAt = earliestSupersededAt ?? d.recordedAt;
+        return unassessed.some((candidate) => candidate.id === d.id)
+          ? { ...d, status: 'draft' as const, recordedAt }
+          : { ...d, recordedAt };
       });
       // CAS persist: apply the consolidation result to the FRESHEST store, so a
       // record_decision/approve committed concurrently (different lock) is preserved
       // rather than clobbered by this stale snapshot. replaceDecisions (not upsert)
       // because consolidated decisions share IDs with their original drafts.
-      const finalDispositions = withVerificationOutcome(dispositions, new Set(phantom.map((d) => d.id)));
+      const unassessedIds = new Set(unassessed.map((decision) => decision.id));
+      const finalDispositions = withVerificationOutcome(
+        dispositions.filter((disposition) => !unassessedIds.has(disposition.id)),
+        new Set(phantom.map((d) => d.id)),
+      );
       const updatedStore = await updateDecisionStore(rootPath, (s) => {
         // Every input draft's verdict, written alongside the status transition.
         const next = applyConsolidationOutcome(s, {
           originalDraftIds,
+          originalDrafts: drafts,
+          capturedDecisions: store.decisions,
           verified: withProvenance.filter((decision) => decision.status === 'verified'),
           phantom: withProvenance.filter((decision) => decision.status === 'phantom'),
+          unassessed: withProvenance.filter((decision) => decision.status === 'draft'),
           supersededIds,
           dispositions: finalDispositions,
         });
         return { ...next, lastConsolidatedAt: new Date().toISOString() };
       });
+      const classifications = reconcileDecisionClassifications(updatedStore, {
+        verified,
+        phantom,
+        unassessed: withProvenance.filter((decision) => unassessedIds.has(decision.id)),
+      });
+      const unresolvedVerified = classifications.verified.filter(decisionClassificationIsUnresolved);
+      const reviewableVerified = unresolvedVerified.filter((decision) => decision.status === 'verified');
+      const unresolvedPhantom = classifications.phantom.filter(decisionClassificationIsUnresolved);
+      const unresolvedUnassessed = classifications.unassessed.filter(decisionClassificationIsUnresolved);
 
       // Decision autopilot: resolve the freshly-verified decisions without
       // blocking — auto-accept, sync, advisory line, exit 0. (add-decision-autopilot)
       if (options.gate && openloreConfig.governance?.autopilot === true) {
-        await runAutopilotGate(rootPath, openloreConfig, options.json);
+        await runAutopilotGate(rootPath, openloreConfig, options.json, classifications.unassessed);
         return;
       }
 
       if (options.json) {
-        process.stdout.write(JSON.stringify({ verified, phantom, missing }, null, 2) + '\n');
-        if (options.gate && missing.length > 0) process.exitCode = 1;
+        process.stdout.write(JSON.stringify({ ...classifications, missing }, null, 2) + '\n');
+        if (options.gate && classificationsBlockGate(classifications, missing.length)) process.exitCode = 1;
         return;
       }
 
       // Interactive TUI approval when running in a terminal
-      if (options.gate && process.stdin.isTTY && process.stdout.isTTY && verified.length > 0) {
-        const results = await runTuiApproval(verified);
+      if (options.gate && process.stdin.isTTY && process.stdout.isTTY && reviewableVerified.length > 0) {
+        const results = await runTuiApproval(reviewableVerified);
 
         const reviewedAt = new Date().toISOString();
         const tuiPatches: Array<{ id: string; status: 'approved' | 'rejected' }> = [];
@@ -897,11 +970,11 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
             ...(p.status === 'approved' ? { approvedBy: 'human' as const } : {}),
           }), s), 'human');
 
-        const stillPending = verified.filter(
+        const stillPending = reviewableVerified.filter(
           (d) => !results.has(d.id) || results.get(d.id) === 'skipped',
         );
-        const approved = verified.filter((d) => results.get(d.id) === 'approved');
-        const rejected = verified.filter((d) => results.get(d.id) === 'rejected');
+        const approved = reviewableVerified.filter((d) => results.get(d.id) === 'approved');
+        const rejected = reviewableVerified.filter((d) => results.get(d.id) === 'rejected');
 
         if (approved.length > 0) {
           console.log(`\n${approved.length} decision(s) approved. Run "openlore decisions --sync" to write to spec.md.`);
@@ -913,6 +986,19 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
           logger.warning(`${stillPending.length} decision(s) still pending — commit blocked.`);
           process.exitCode = 1;
         }
+        const concurrentlyPending = unresolvedVerified.filter((decision) => decision.status !== 'verified');
+        if (concurrentlyPending.length > 0) {
+          logger.warning(`${concurrentlyPending.length} verified classification(s) changed concurrently and remain pending — commit blocked.`);
+          process.exitCode = 1;
+        }
+        if (unresolvedUnassessed.length > 0) {
+          logger.warning(`${unresolvedUnassessed.length} decision(s) were not assessed and remain unresolved — commit blocked.`);
+          process.exitCode = 1;
+        }
+        if (unresolvedPhantom.length > 0) {
+          logger.warning(`${unresolvedPhantom.length} phantom classification(s) changed concurrently and remain unresolved — commit blocked.`);
+          process.exitCode = 1;
+        }
 
         displayMissing(missing);
         if (missing.length > 0) process.exitCode = 1;
@@ -922,10 +1008,11 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
       // Non-TTY (agent/IDE context): structured JSON for ACP consumption
       if (options.gate && !process.stdout.isTTY) {
         const payload = {
-          gated: verified.length > 0 || missing.length > 0,
-          verified: verified.map((d) => ({
+          gated: classificationsBlockGate(classifications, missing.length),
+          verified: classifications.verified.map((d) => ({
             id: d.id,
             title: d.title,
+            status: d.status,
             rationale: d.rationale,
             consequences: d.consequences,
             proposedRequirement: d.proposedRequirement,
@@ -935,7 +1022,8 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
             verificationEvidence: d.verificationEvidence,
             contentOrigin: d.contentOrigin,
           })),
-          phantom: phantom.map((d) => ({ id: d.id, title: d.title })),
+          phantom: classifications.phantom.map((d) => ({ id: d.id, title: d.title, status: d.status })),
+          unassessed: classifications.unassessed.map((d) => ({ id: d.id, title: d.title, status: d.status })),
           missing: missing.map((m) => ({ file: m.file, description: m.description })),
           actions: {
             approve: 'openlore decisions --approve <id>',
@@ -951,17 +1039,22 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
       // Plain text recap (non-gate or explicit --list context)
       logger.section('Architectural Decisions — Review Required');
 
-      if (verified.length > 0) {
-        console.log('\nDecisions awaiting review:');
-        for (const d of verified) displayDecision(d, options.verbose);
+      if (unresolvedVerified.length > 0) {
+        console.log('\nVerified classifications still unresolved (current persisted status shown):');
+        for (const d of unresolvedVerified) displayDecision(d, options.verbose);
       }
 
-      if (phantom.length > 0) {
+      if (classifications.phantom.length > 0) {
         console.log('\nPhantom decisions (recorded but not found in diff — may have been rolled back):');
-        for (const d of phantom) displayDecision(d, options.verbose);
+        for (const d of classifications.phantom) displayDecision(d, options.verbose);
       }
 
-      if (verified.length > 0 || phantom.length > 0) printDecisionLegend();
+      if (classifications.unassessed.length > 0) {
+        console.log('\nUnassessed decisions (current persisted status shown — verification did not classify them):');
+        for (const d of classifications.unassessed) displayDecision(d, options.verbose);
+      }
+
+      if (unresolvedVerified.length > 0 || classifications.phantom.length > 0 || classifications.unassessed.length > 0) printDecisionLegend();
 
       displayMissing(missing);
 
@@ -972,7 +1065,13 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
       if (options.gate && missing.length > 0) {
         logger.warning(`\nCommit gated — ${missing.length} undocumented change(s) require a decision. Record with: openlore decisions --record or record_decision MCP tool.`);
         process.exitCode = 1;
-      } else if (options.gate && verified.length > 0) {
+      } else if (options.gate && unresolvedPhantom.length > 0) {
+        logger.warning(`\nCommit gated — ${unresolvedPhantom.length} phantom classification(s) changed concurrently and remain unresolved.`);
+        process.exitCode = 1;
+      } else if (options.gate && unresolvedUnassessed.length > 0) {
+        logger.warning(`\nCommit gated — ${unresolvedUnassessed.length} decision(s) were not assessed and remain unresolved. Re-run consolidation before committing.`);
+        process.exitCode = 1;
+      } else if (options.gate && unresolvedVerified.length > 0) {
         logger.warning('\nDecisions verified — approve them before syncing: openlore decisions --approve <id>');
         process.exitCode = 1;
       }
