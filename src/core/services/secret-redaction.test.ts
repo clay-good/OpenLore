@@ -1,7 +1,20 @@
 import { describe, expect, it } from 'vitest';
-import { redactSecretText, redactSecretsWithReport } from './secret-redaction.js';
+import { redactSecretText, redactSecretTextWithKnownValues, redactSecretsWithReport } from './secret-redaction.js';
 
 describe('repository secret redaction', () => {
+  it('redacts an exact known credential without treating benign config as secret', () => {
+    const credential = 'local-test-value';
+    const result = redactSecretTextWithKnownValues(
+      `model=local-test-model url=https://localhost:11434/v1 echoed=${credential}`,
+      [credential],
+    );
+
+    expect(result.value).toBe(
+      'model=local-test-model url=https://localhost:11434/v1 echoed=[REDACTED:api-key]',
+    );
+    expect(result.redactions).toEqual({ count: 1, kinds: ['api-key'] });
+  });
+
   it.each([
     ['api-key', 'sk-' + 'a'.repeat(24)],
     ['api-key', 'ghp_' + 'g'.repeat(24)],

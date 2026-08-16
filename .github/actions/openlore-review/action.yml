@@ -35,10 +35,6 @@ inputs:
     description: 'Run `openlore analyze` before the review so the blast radius is fully populated.'
     required: false
     default: 'true'
-  openlore-version:
-    description: 'npm version/tag of openlore to run (e.g. "latest", "2.1.4").'
-    required: false
-    default: 'latest'
   gate:
     description: 'Pass `--hook` so a configured blastRadius.block pattern fails the job (opt-in gating).'
     required: false
@@ -47,30 +43,48 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Require a resolved OpenLore version pin
-      shell: bash
-      env:
-        OPENLORE_VERSION: ${{ inputs.openlore-version }}
-      run: |
-        if [[ "$OPENLORE_VERSION" == REPLACE_WITH_* ]]; then
-          echo "openlore-version is still a placeholder; pin the reviewed release that matches this Action revision." >&2
-          exit 2
-        fi
-
     - name: Set up Node
       uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
       with:
-        node-version: '22'
+        node-version: '24'
+
+    - name: Build the SHA-pinned OpenLore Action source
+      id: openlore
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        NPM_CONFIG_CACHE: ${{ runner.temp }}/openlore-npm-cache
+        NPM_CONFIG_GLOBALCONFIG: ${{ runner.temp }}/openlore-empty-global-npmrc
+        NPM_CONFIG_IGNORE_SCRIPTS: 'true'
+        NPM_CONFIG_REGISTRY: 'https://registry.npmjs.org/'
+        NPM_CONFIG_USERCONFIG: ${{ runner.temp }}/openlore-empty-user-npmrc
+      run: |
+        : > "$NPM_CONFIG_GLOBALCONFIG"
+        : > "$NPM_CONFIG_USERCONFIG"
+        ACTION_REPO_ROOT="$(cd "$ACTION_PATH/../../.." && pwd -P)"
+        if [ ! -f "$ACTION_REPO_ROOT/package-lock.json" ]; then
+          echo "The SHA-pinned OpenLore Action checkout has no package-lock.json." >&2
+          exit 2
+        fi
+        cd "$ACTION_REPO_ROOT"
+        npm ci --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org/
+        npm run build
+        CLI="$ACTION_REPO_ROOT/dist/cli/index.js"
+        if [ ! -f "$CLI" ]; then
+          echo "The SHA-pinned OpenLore Action source did not build dist/cli/index.js." >&2
+          exit 2
+        fi
+        echo "cli=$CLI" >> "$GITHUB_OUTPUT"
 
     - name: Build the OpenLore index (optional, for full blast radius)
       id: analyze
       if: ${{ inputs.analyze == 'true' }}
       shell: bash
       env:
-        OPENLORE_VERSION: ${{ inputs.openlore-version }}
+        OPENLORE_CLI: ${{ steps.openlore.outputs.cli }}
       run: |
         set +e
-        npx --yes "openlore@$OPENLORE_VERSION" analyze --no-embed
+        node "$OPENLORE_CLI" analyze --no-embed
         RC=$?
         set -e
         if [ "$RC" -ne 0 ]; then
@@ -84,7 +98,7 @@ runs:
       id: review
       shell: bash
       env:
-        OPENLORE_VERSION: ${{ inputs.openlore-version }}
+        OPENLORE_CLI: ${{ steps.openlore.outputs.cli }}
         REVIEW_BASE: ${{ inputs.base }}
         REVIEW_HEAD: ${{ inputs.head }}
         REVIEW_GATE: ${{ inputs.gate }}
@@ -95,7 +109,7 @@ runs:
         ARGS=(review --base "$REVIEW_BASE" --head "$REVIEW_HEAD" --format markdown --out "$OUT")
         if [ "$REVIEW_GATE" = "true" ]; then ARGS+=(--hook); fi
         set +e
-        npx --yes "openlore@$OPENLORE_VERSION" "${ARGS[@]}"
+        node "$OPENLORE_CLI" "${ARGS[@]}"
         RC=$?
         set -e
         # Exit 3 is the review CLI's reserved policy-gate receipt. Defer that failure
@@ -111,7 +125,7 @@ runs:
           fi
         fi
         if [ ! -s "$OUT" ]; then
-          echo "openlore review produced no briefing — the published 'openlore' (openlore-version: $OPENLORE_VERSION) may not yet ship the 'review' command, or the base..head range was unreachable. Skipping the comment (advisory)."
+          echo "openlore review produced no briefing — the SHA-pinned Action source may not ship the 'review' command, or the base..head range was unreachable. Skipping the comment (advisory)."
         fi
 
     - name: Post or update the sticky review comment

@@ -80,6 +80,18 @@ async function runDoctorJson(): Promise<Array<{ name: string; status: string; de
   return JSON.parse(jsonLine!);
 }
 
+async function runDoctorText(): Promise<string> {
+  doctorCommand.setOptionValue('json', false);
+  const outputs: string[] = [];
+  const spy = vi.spyOn(console, 'log').mockImplementation((msg: string) => { outputs.push(String(msg)); });
+  try {
+    await doctorCommand.parseAsync([], { from: 'user' });
+  } finally {
+    spy.mockRestore();
+  }
+  return outputs.join('\n');
+}
+
 // ============================================================================
 // TESTS
 // ============================================================================
@@ -224,7 +236,14 @@ describe('doctor command', () => {
 
   // --------------------------------------------------------------------------
   describe('LLM connection check', () => {
-    const keyVars = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'OPENAI_COMPAT_API_KEY'];
+    const keyVars = [
+      'ANTHROPIC_API_KEY',
+      'OPENAI_API_KEY',
+      'GEMINI_API_KEY',
+      'GOOGLE_API_KEY',
+      'OPENAI_COMPAT_API_KEY',
+      'OPENAI_COMPAT_BASE_URL',
+    ];
 
     function clearLLMKeys(): Record<string, string | undefined> {
       const saved: Record<string, string | undefined> = {};
@@ -265,6 +284,55 @@ describe('doctor command', () => {
         expect(llmCheck.detail).toContain('gemini');
       } finally {
         restoreLLMKeys(saved);
+      }
+    });
+
+    it('refuses a repository-selected remote OpenAI-compatible endpoint', async () => {
+      const saved = clearLLMKeys();
+      const configManager = await import('../../core/services/config-manager.js');
+      const llmService = await import('../../core/services/llm-service.js');
+      process.env.OPENAI_COMPAT_API_KEY = 'operator-secret';
+      vi.mocked(configManager.readOpenLoreConfig).mockResolvedValue({
+        projectType: 'nodejs', createdAt: '2024-01-01T00:00:00Z', openspecPath: './openspec',
+        maxFiles: 500,
+        generation: { provider: 'openai-compat', openaiCompatBaseUrl: 'https://attacker.invalid/v1' },
+      } as never);
+
+      try {
+        await runDoctorJson();
+        expect(vi.mocked(llmService.createLLMService)).toHaveBeenCalledWith(
+          expect.objectContaining({ openaiCompatBaseUrl: undefined }),
+        );
+      } finally {
+        restoreLLMKeys(saved);
+        vi.mocked(configManager.readOpenLoreConfig).mockResolvedValue({
+          projectType: 'nodejs', createdAt: '2024-01-01T00:00:00Z', openspecPath: './openspec', maxFiles: 500,
+        } as never);
+      }
+    });
+
+    it('prefers an operator-selected compatibility endpoint over repository config', async () => {
+      const saved = clearLLMKeys();
+      const configManager = await import('../../core/services/config-manager.js');
+      const llmService = await import('../../core/services/llm-service.js');
+      process.env.OPENAI_COMPAT_API_KEY = 'operator-secret';
+      process.env.OPENAI_COMPAT_BASE_URL = 'https://operator.example/v1';
+      vi.mocked(configManager.readOpenLoreConfig).mockResolvedValue({
+        projectType: 'nodejs', createdAt: '2024-01-01T00:00:00Z', openspecPath: './openspec',
+        maxFiles: 500,
+        generation: { provider: 'openai-compat', openaiCompatBaseUrl: 'https://attacker.invalid/v1' },
+      } as never);
+
+      try {
+        await runDoctorJson();
+        expect(vi.mocked(llmService.createLLMService)).toHaveBeenCalledWith(
+          expect.objectContaining({ openaiCompatBaseUrl: 'https://operator.example/v1' }),
+        );
+      } finally {
+        restoreLLMKeys(saved);
+        vi.mocked(configManager.readOpenLoreConfig).mockResolvedValue({
+          projectType: 'nodejs', createdAt: '2024-01-01T00:00:00Z', openspecPath: './openspec', maxFiles: 500,
+        } as never);
       }
     });
 
@@ -327,6 +395,28 @@ describe('doctor command', () => {
       }
     });
 
+    it.each([
+      ['JSON', runDoctorJson],
+      ['human-readable', runDoctorText],
+    ])('redacts an exact echoed LLM credential from %s results', async (_format, runDoctor) => {
+      const saved = clearLLMKeys();
+      const credential = 'local-llm-value';
+      process.env.ANTHROPIC_API_KEY = credential;
+      const llmService = await import('../../core/services/llm-service.js');
+      vi.mocked(llmService.createLLMService).mockReturnValueOnce({
+        complete: vi.fn().mockRejectedValue(new Error(`provider reflected ${credential}`)),
+        saveLogs: vi.fn().mockResolvedValue(undefined),
+      } as never);
+      try {
+        const output = JSON.stringify(await runDoctor());
+        expect(output).not.toContain(credential);
+        expect(output).toContain('[REDACTED:api-key]');
+        expect(output).toContain('anthropic');
+      } finally {
+        restoreLLMKeys(saved);
+      }
+    });
+
     it('should include a fix suggestion when degraded', async () => {
       const saved = clearLLMKeys();
       const llmService = await import('../../core/services/llm-service.js');
@@ -339,6 +429,79 @@ describe('doctor command', () => {
         expect(llmCheck.fix).toBeDefined();
       } finally {
         restoreLLMKeys(saved);
+      }
+    });
+  });
+
+  describe('embedding connection check', () => {
+    it('skips a repository-selected remote endpoint instead of sending the operator key', async () => {
+      const configManager = await import('../../core/services/config-manager.js');
+      const savedKey = process.env.EMBED_API_KEY;
+      const savedBase = process.env.EMBED_BASE_URL;
+      delete process.env.EMBED_BASE_URL;
+      process.env.EMBED_API_KEY = 'operator-embedding-secret';
+      vi.mocked(configManager.readOpenLoreConfig).mockResolvedValue({
+        projectType: 'nodejs', createdAt: '2024-01-01T00:00:00Z', openspecPath: './openspec',
+        maxFiles: 500,
+        embedding: { baseUrl: 'https://attacker.invalid/v1', model: 'hostile-model' },
+      } as never);
+      const fetchSpy = vi.fn();
+      vi.stubGlobal('fetch', fetchSpy);
+
+      try {
+        const checks = await runDoctorJson();
+        expect(checks.find(c => c.name === 'Embedding connection')).toBeUndefined();
+        expect(fetchSpy).not.toHaveBeenCalled();
+      } finally {
+        vi.unstubAllGlobals();
+        if (savedKey === undefined) delete process.env.EMBED_API_KEY;
+        else process.env.EMBED_API_KEY = savedKey;
+        if (savedBase === undefined) delete process.env.EMBED_BASE_URL;
+        else process.env.EMBED_BASE_URL = savedBase;
+        vi.mocked(configManager.readOpenLoreConfig).mockResolvedValue({
+          projectType: 'nodejs', createdAt: '2024-01-01T00:00:00Z', openspecPath: './openspec', maxFiles: 500,
+        } as never);
+      }
+    });
+
+    it.each([
+      ['JSON', runDoctorJson],
+      ['human-readable', runDoctorText],
+    ])('redacts an exact echoed embedding credential from %s results', async (_format, runDoctor) => {
+      const configManager = await import('../../core/services/config-manager.js');
+      const savedKey = process.env.EMBED_API_KEY;
+      const savedBase = process.env.EMBED_BASE_URL;
+      const credential = 'local-embedding-value';
+      process.env.EMBED_API_KEY = credential;
+      process.env.EMBED_BASE_URL = 'https://localhost:11434/v1';
+      vi.mocked(configManager.readOpenLoreConfig).mockResolvedValue({
+        projectType: 'nodejs', createdAt: '2024-01-01T00:00:00Z', openspecPath: './openspec', maxFiles: 500,
+        embedding: { model: 'local-embedding-model' },
+      } as never);
+      const fetchSpy = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 401,
+        text: vi.fn().mockResolvedValue(`provider reflected ${credential}`),
+      });
+      vi.stubGlobal('fetch', fetchSpy);
+
+      try {
+        const output = JSON.stringify(await runDoctor());
+        expect(output).not.toContain(credential);
+        expect(output).toContain('[REDACTED:api-key]');
+        expect(fetchSpy).toHaveBeenCalledWith(
+          'https://localhost:11434/v1/embeddings',
+          expect.any(Object),
+        );
+      } finally {
+        vi.unstubAllGlobals();
+        if (savedKey === undefined) delete process.env.EMBED_API_KEY;
+        else process.env.EMBED_API_KEY = savedKey;
+        if (savedBase === undefined) delete process.env.EMBED_BASE_URL;
+        else process.env.EMBED_BASE_URL = savedBase;
+        vi.mocked(configManager.readOpenLoreConfig).mockResolvedValue({
+          projectType: 'nodejs', createdAt: '2024-01-01T00:00:00Z', openspecPath: './openspec', maxFiles: 500,
+        } as never);
       }
     });
   });

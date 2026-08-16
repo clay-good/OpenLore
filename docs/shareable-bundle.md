@@ -110,9 +110,10 @@ since a rebuild is a successful outcome, not an error. A genuine *user* error ex
 that doesn't exist, a file that isn't an OpenLore bundle at all (wrong path / not a `.olbundle`), or `export`
 run before `openlore analyze` (no index to bundle). These are clean errors, never a silent rebuild.
 
-**Untrusted-input safety.** A `.olbundle` is treated as untrusted on-disk input. Import bounds the
-decompressed artifact (2 GiB cap) and fails closed on anything larger — a crafted bundle cannot exhaust
-memory (zip-bomb guard). Every bundled file name must be a plain basename: a payload entry containing a path
+**Untrusted-input safety.** A `.olbundle` is treated as untrusted on-disk input. Import rejects a file over
+64 MiB before reading it and caps decompression at 96 MiB — about 1.7× the 58,717,652-byte expanded
+bundle measured for this repository — so a crafted bundle cannot expand without bound
+(compression-bomb guard). Every bundled file name must be a plain basename: a payload entry containing a path
 separator, `..`, or an absolute path is **rejected before anything is written to disk** (no path-traversal
 arbitrary write), and the manifest's file list must exactly match the payload it describes. The graph itself
 (`call-graph.db`) is validated against the attestation's content digest; the remaining bundled artifacts

@@ -127,6 +127,40 @@ export function redactSecretText(s: string): RedactionResult<string> {
 }
 
 /**
+ * Redact both credential-shaped text and exact credentials already known to the
+ * caller. Exact matching closes the diagnostic-echo case where a real operator
+ * key is intentionally short or otherwise does not resemble a provider token.
+ * Callers must pass credential values only — URLs, model names, and other config
+ * are deliberately not inferred as secrets here.
+ */
+export function redactSecretTextWithKnownValues(
+  s: string,
+  knownValues: Iterable<string | undefined>,
+): RedactionResult<string> {
+  const initial = redactStringWithReport(s, true);
+  let value = initial.value;
+  let count = initial.redactions.count;
+  const kinds = new Set(initial.redactions.kinds);
+  const unique = [...new Set([...knownValues].filter((candidate): candidate is string => Boolean(candidate)))]
+    .sort((a, b) => b.length - a.length);
+
+  for (const secret of unique) {
+    let occurrences = 0;
+    let cursor = 0;
+    while ((cursor = value.indexOf(secret, cursor)) !== -1) {
+      occurrences++;
+      cursor += secret.length;
+    }
+    if (occurrences === 0) continue;
+    value = value.split(secret).join(marker('api-key', true));
+    count += occurrences;
+    kinds.add('api-key');
+  }
+
+  return { value, redactions: { count, kinds: [...kinds].sort() } };
+}
+
+/**
  * Deep-redact a value before it leaves the server on a non-error channel:
  * - strings → credential-shaped substrings replaced;
  * - object fields whose KEY name denotes a secret → value replaced with `[REDACTED]`;

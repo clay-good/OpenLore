@@ -1557,6 +1557,19 @@ describe('GeminiProvider', () => {
     expect(result.finishReason).toBe('stop');
   });
 
+  it('encodes the model as one request-path segment', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(mockResponse(SUCCESS_BODY));
+    vi.stubGlobal('fetch', fetchMock);
+    const provider = new GeminiProvider('key', '../../other?key=attacker#fragment');
+
+    await provider.generateCompletion({ systemPrompt: 'sys', userPrompt: 'hello' });
+
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      'https://generativelanguage.googleapis.com/v1beta/models/' +
+      '..%2F..%2Fother%3Fkey%3Dattacker%23fragment:generateContent?key=key',
+    );
+  });
+
   it('maps MAX_TOKENS finish reason to "length"', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResponse({
       ...SUCCESS_BODY, candidates: [{ ...SUCCESS_BODY.candidates[0], finishReason: 'MAX_TOKENS' }],

@@ -13,7 +13,8 @@
  * motivated this file happened in the first place.
  */
 
-import { realpathSync, lstatSync, readlinkSync } from 'node:fs';
+import { constants, realpathSync, lstatSync, readlinkSync, type Stats } from 'node:fs';
+import { open, realpath, stat } from 'node:fs/promises';
 import { dirname, resolve, sep } from 'node:path';
 
 /** Upper bound on a symlink chain, so a cycle cannot spin the resolver. */
@@ -123,6 +124,48 @@ export function safeJoin(absDir: string, filePath: string): string {
     throw new Error(`Path escape blocked: "${filePath}" canonicalizes outside the project directory`);
   }
   return resolved;
+}
+
+function sameFile(
+  left: Pick<Stats, 'dev' | 'ino'>,
+  right: Pick<Stats, 'dev' | 'ino'>,
+): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+/**
+ * Read a repository file through one descriptor and disclose its contents only while
+ * that descriptor still names the canonically confined file. The repeated identity
+ * check closes the `safeJoin` -> `readFile` swap window for artifact-derived paths:
+ * replacing the file or one of its parent directories makes the read fail closed.
+ */
+export async function readFileConfined(absDir: string, filePath: string): Promise<string> {
+  const lexicalPath = safeJoin(absDir, filePath);
+  const canonicalRoot = await realpath(absDir);
+  const canonicalPath = await realpath(lexicalPath);
+  safeJoin(canonicalRoot, canonicalPath);
+
+  const handle = await open(canonicalPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const opened = await handle.stat();
+    if (!opened.isFile()) throw new Error(`Confined read requires a regular file: "${filePath}"`);
+
+    const verifyIdentity = async (): Promise<void> => {
+      const currentCanonicalPath = await realpath(canonicalPath);
+      safeJoin(canonicalRoot, currentCanonicalPath);
+      const current = await stat(currentCanonicalPath);
+      if (!current.isFile() || !sameFile(opened, current)) {
+        throw new Error(`Confined read target changed during access: "${filePath}"`);
+      }
+    };
+
+    await verifyIdentity();
+    const content = await handle.readFile({ encoding: 'utf-8' });
+    await verifyIdentity();
+    return content;
+  } finally {
+    await handle.close();
+  }
 }
 
 /**

@@ -9,9 +9,9 @@ The CI workflow that does the publish lives at [.github/workflows/release.yml](.
 1. Bump the version locally: `npm version <patch|minor|major>` (this creates a `vX.Y.Z` tag).
 2. `git push --follow-tags` to push both the bump commit and the tag.
 3. That's it. Pushing the tag triggers the `Release` workflow, which:
-   - `validate` — re-runs `lint`, `typecheck`, `test:run`, `build` against the tagged commit.
+   - `validate` — verifies the tag is reachable from `main`, re-runs `lint`, `typecheck`, `test:run`, the dependency audit, and `build`, then packs and uploads the exact npm tarball from a job with no OIDC permission.
    - `create-release` — creates the GitHub Release for the tag with auto-generated notes (idempotent: skipped if a Release for that tag already exists). Created with `GITHUB_TOKEN`, so it does **not** re-trigger the workflow.
-   - `publish` — re-builds and runs `npm publish --provenance --access public`. No token; the OIDC handshake with npm authenticates the run.
+   - `publish` — downloads and integrity-checks that tarball, then runs `npm publish <tarball> --ignore-scripts --provenance --access public`. It does not check out source, install dependencies, build, or run package lifecycle scripts. No token; the OIDC handshake with npm authenticates the run.
 
 If the `npm-publish` environment has a required reviewer, the `publish` job pauses for a human approval click before it can mint the OIDC token.
 
@@ -41,7 +41,7 @@ Sign in to npmjs.com as a maintainer of the `openlore` package, then:
 - Repo → **Settings → Environments → New environment**
 - Name: `npm-publish`
 - (Optional but recommended) Add a **required reviewer** so every publish requires a human approval click before the workflow can mint an OIDC token.
-- (Optional) Restrict to the `main` branch under **Deployment branches**.
+- Restrict deployments to protected release tags under **Deployment branches and tags**. Also protect `v*` tag creation, update, and deletion with a repository ruleset; the workflow independently rejects a release commit that is not reachable from `main`.
 
 ### 3. Revoke any existing npm automation tokens
 
@@ -65,7 +65,7 @@ The attestation includes the GitHub workflow file, the commit SHA, and the run I
 
 ## Why Trusted Publishing matters
 
-Long-lived publish tokens are the supply-chain attacker's favorite target — they bypass 2FA, often live in CI secret stores indefinitely, and have been exploited by worms like Shai-Hulud. Trusted Publishing replaces the token with a short-lived OIDC token minted per-workflow-run, scoped to a specific repo + workflow file + environment. There's nothing useful to steal even if a CI runner is compromised.
+Long-lived publish tokens are the supply-chain attacker's favorite target — they bypass 2FA, often live in CI secret stores indefinitely, and have been exploited by worms like Shai-Hulud. Trusted Publishing replaces the token with a short-lived OIDC token minted per-workflow-run, scoped to a specific repo + workflow file + environment. The workflow further limits exposure by keeping dependency installation, builds, and package scripts out of the OIDC-enabled job; that job receives only the already-built, integrity-checked tarball.
 
 ## Troubleshooting
 

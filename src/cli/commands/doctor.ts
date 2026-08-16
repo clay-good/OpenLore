@@ -43,11 +43,17 @@ import {
   DEFAULT_GEMINI_MODEL,
   DEFAULT_COPILOT_MODEL,
 } from '../../constants.js';
-import { resolveTrustedSslVerify, rejectRepoConfiguredTlsOptOut, discloseRepoConfiguredEndpoint } from '../../core/services/repo-config-trust.js';
+import {
+  refuseRepoConfiguredEndpoint,
+  rejectRepoConfiguredTlsOptOut,
+  resolveTrustedCompatBase,
+  resolveTrustedSslVerify,
+} from '../../core/services/repo-config-trust.js';
 import { describeExclusions, totalExcluded, type ParseHealthReport } from '../../core/analyzer/parse-health.js';
 import { describeMemoryDegradation } from '../../core/analyzer/memory-strategy.js';
 import type { GovernanceFinding } from '../../core/services/mcp-handlers/enforcement-policy.js';
 import { detectInjectionShapes, INJECTION_SHAPE_LIMITS } from '../../core/services/served-content.js';
+import { redactSecretTextWithKnownValues } from '../../core/services/secret-redaction.js';
 import {
   hookManagerWarning,
   isResolvedGitRepository,
@@ -80,6 +86,37 @@ export interface CheckResult {
   fix?: string;
   remediation?: Remediation;
   findings?: GovernanceFinding[];
+}
+
+const DOCTOR_CREDENTIAL_ENV_VARS = [
+  'ANTHROPIC_API_KEY',
+  'OPENAI_API_KEY',
+  'OPENAI_COMPAT_API_KEY',
+  'GEMINI_API_KEY',
+  'GOOGLE_API_KEY',
+  'EMBED_API_KEY',
+] as const;
+
+async function knownDoctorCredentials(rootPath: string): Promise<string[]> {
+  const values = DOCTOR_CREDENTIAL_ENV_VARS.flatMap(name => process.env[name] ? [process.env[name]!] : []);
+  try {
+    const config = await readOpenLoreConfig(rootPath);
+    if (config?.embedding?.apiKey) values.push(config.embedding.apiKey);
+  } catch {
+    // A malformed config is already reported by its check; environment credentials
+    // still cross the redaction boundary below.
+  }
+  return values;
+}
+
+function redactDoctorResults(checks: CheckResult[], knownCredentials: readonly string[]): CheckResult[] {
+  return checks.map(check => ({
+    ...check,
+    detail: redactSecretTextWithKnownValues(check.detail, knownCredentials).value,
+    ...(check.fix === undefined
+      ? {}
+      : { fix: redactSecretTextWithKnownValues(check.fix, knownCredentials).value }),
+  }));
 }
 
 // ============================================================================
@@ -636,8 +673,12 @@ async function checkLLMConnection(rootPath: string): Promise<CheckResult> {
   const sslVerify = resolveTrustedSslVerify(undefined, config?.llm?.sslVerify);
   rejectRepoConfiguredTlsOptOut('generation.skipSslVerify', gen?.skipSslVerify);
 
-  const baseUrl = gen?.openaiCompatBaseUrl ?? process.env.OPENAI_COMPAT_BASE_URL;
-  discloseRepoConfiguredEndpoint('generation.openaiCompatBaseUrl', gen?.openaiCompatBaseUrl);
+  const baseUrl = provider === 'openai-compat'
+    ? resolveTrustedCompatBase(
+        process.env.OPENAI_COMPAT_BASE_URL,
+        gen?.openaiCompatBaseUrl,
+      )
+    : undefined;
 
   let llm;
   try {
@@ -695,8 +736,15 @@ async function checkEmbeddingConnection(rootPath: string): Promise<CheckResult |
     };
   }
 
-  // Resolve base URL from config or env
-  const baseUrl = emb?.baseUrl ?? process.env.EMBED_BASE_URL;
+  // Environment configuration is operator-authorized. A repository-selected remote
+  // endpoint is refused here just as it is in the normal embedding path: `doctor`
+  // must not become a credential-exfiltration side channel.
+  const envBaseUrl = process.env.EMBED_BASE_URL;
+  const baseUrl = envBaseUrl ?? refuseRepoConfiguredEndpoint(
+    'embedding.baseUrl',
+    emb?.baseUrl,
+    'The doctor embedding check is skipped; search/orient still use BM25.',
+  );
   if (!baseUrl) return null; // Embedding not configured — keyword default; skip
 
   // Refused, not honoured: this value comes from the analyzed repo's config.
@@ -865,12 +913,16 @@ Checks performed:
       checkEmbeddingConnection(rootPath),
     ]);
 
-    const checks = [
+    const unredactedChecks = [
       ...staticChecks,
       ...(mcpCheck ? [mcpCheck] : []),
       llmCheck,
       ...(embeddingCheck ? [embeddingCheck] : []),
     ];
+    // One shared output boundary covers human and JSON rendering. Provider error
+    // bodies are attacker-controlled and may reflect the exact credential they
+    // received, including test/local keys that have no recognizable token shape.
+    const checks = redactDoctorResults(unredactedChecks, await knownDoctorCredentials(rootPath));
 
     if (options.json) {
       // Strip the internal `remediation` field so the --json contract is

@@ -134,6 +134,35 @@ function rawGet(
   });
 }
 
+/** Raw JSON GET variant for asserting wildcard-Host response disclosure. */
+function rawJsonGet(
+  port: number,
+  path: string,
+  headers: Record<string, string>,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(
+      { host: '127.0.0.1', port, path, method: 'GET', headers, setHost: false },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (chunk: Buffer) => chunks.push(chunk));
+        res.on('end', () => {
+          try {
+            resolve({
+              status: res.statusCode ?? 0,
+              body: JSON.parse(Buffer.concat(chunks).toString('utf-8')) as Record<string, unknown>,
+            });
+          } catch (err) {
+            reject(err);
+          }
+        });
+      },
+    );
+    req.on('error', reject);
+    req.end();
+  });
+}
+
 describe('idleTimeoutMs', () => {
   it('defaults to 15 minutes when the option is absent or empty', () => {
     expect(idleTimeoutMs(undefined)).toBe(15 * 60_000);
@@ -1057,6 +1086,45 @@ describe('openlore serve', () => {
     expect(process.exitCode).toBe(1);
     expect(await fileExists(join(root, OPENLORE_DIR))).toBe(false);
     process.exitCode = prev; // don't fail the suite
+  });
+
+  it('limits unauthenticated wildcard-bind health to liveness while authenticated health proves identity', async () => {
+    root = await mkdtemp(join(tmpdir(), 'openlore-serve-wildcard-health-'));
+    const h = await startServe({
+      directory: root,
+      port: '0',
+      watch: false,
+      host: '0.0.0.0',
+      token: 'protected-health',
+    });
+    expect(h).toBeDefined();
+    handle = h;
+    const hostHeader = `0.0.0.0:${h!.port}`;
+
+    const unauthenticated = await rawJsonGet(h!.port, '/health', { Host: hostHeader });
+    expect(unauthenticated.status).toBe(200);
+    expect(unauthenticated.body).toEqual({ ok: true, tokenProtected: true });
+    expect(unauthenticated.body).not.toHaveProperty('root');
+    expect(unauthenticated.body).not.toHaveProperty('pid');
+    expect(unauthenticated.body).not.toHaveProperty('preset');
+    expect(unauthenticated.body).not.toHaveProperty('tools');
+    expect(unauthenticated.body).not.toHaveProperty('version');
+
+    const authenticated = await rawJsonGet(h!.port, '/health', {
+      Host: hostHeader,
+      'x-openlore-token': 'protected-health',
+    });
+    expect(authenticated.status).toBe(200);
+    expect(authenticated.body).toMatchObject({
+      ok: true,
+      tokenProtected: true,
+      tokenAuthenticated: true,
+      root: await realpath(root),
+      pid: process.pid,
+      preset: 'substrate',
+    });
+    expect(authenticated.body.tools).toEqual(expect.arrayContaining(['orient', 'search_code']));
+    expect(typeof authenticated.body.version).toBe('string');
   });
 
   it('rejects an unknown preset at startup', async () => {

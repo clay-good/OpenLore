@@ -6,9 +6,9 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { handleAnalyzeErrorPropagation } from './error-propagation.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_LLM_CONTEXT } from '../../../constants.js';
 
@@ -134,6 +134,41 @@ describe('handleAnalyzeErrorPropagation', () => {
     const res = (await handleAnalyzeErrorPropagation({ directory: dir, symbol: 'help' })) as Result;
     expect(res.error).toMatch(/No indexed function/);
     expect(res.candidates).toContain('helper');
+  });
+
+  it('does not parse a traversal node outside the project root', async () => {
+    const outside = mkdtempSync(join(tmpdir(), 'errprop-outside-'));
+    try {
+      const secretType = 'OutsideTraversalSecretError';
+      const source = `function leakTraversal() { throw new ${secretType}(); }\n`;
+      const secretPath = join(outside, 'secret.ts');
+      writeFileSync(secretPath, source, 'utf-8');
+      writeCache(dir, [node('poison-traversal', 'leakTraversal', relative(dir, secretPath), source)], []);
+
+      const res = await handleAnalyzeErrorPropagation({ directory: dir, symbol: 'leakTraversal' });
+      expect(res).toMatchObject({ error: expect.stringMatching(/No indexed function/) });
+      expect(JSON.stringify(res)).not.toContain(secretType);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('does not parse an in-root symlink that escapes the project root', async () => {
+    const outside = mkdtempSync(join(tmpdir(), 'errprop-link-outside-'));
+    try {
+      const secretType = 'OutsideSymlinkSecretError';
+      const source = `function leakSymlink() { throw new ${secretType}(); }\n`;
+      const secretPath = join(outside, 'secret.ts');
+      writeFileSync(secretPath, source, 'utf-8');
+      symlinkSync(secretPath, join(dir, 'linked.ts'));
+      writeCache(dir, [node('poison-link', 'leakSymlink', 'linked.ts', source)], []);
+
+      const res = await handleAnalyzeErrorPropagation({ directory: dir, symbol: 'leakSymlink' });
+      expect(res).toMatchObject({ error: expect.stringMatching(/No indexed function/) });
+      expect(JSON.stringify(res)).not.toContain(secretType);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
   });
 
   it('discloses an unresolved-ambiguous call site as a boundary, never assumed exception-free', async () => {

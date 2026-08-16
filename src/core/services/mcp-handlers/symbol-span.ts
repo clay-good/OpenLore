@@ -33,14 +33,15 @@
  */
 
 import { createHash } from 'node:crypto';
-import { join } from 'node:path';
-import { readFile, stat } from 'node:fs/promises';
+import { join, relative } from 'node:path';
+import { stat } from 'node:fs/promises';
 import {
   OPENLORE_DIR,
   OPENLORE_ANALYSIS_SUBDIR,
   ARTIFACT_LLM_CONTEXT,
 } from '../../../constants.js';
-import { validateDirectory, readCachedContext } from './utils.js';
+import { validateDirectory, readCachedContext, safeJoin } from './utils.js';
+import { readFileConfined } from '../../../utils/path-confinement.js';
 import { hashSpan } from '../../decisions/anchor.js';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
 import { resolveFileFreshness } from './freshness.js';
@@ -91,8 +92,19 @@ export async function handleLocateSymbolSpan(input: LocateSymbolSpanInput): Prom
   const cg = ctx.callGraph as SerializedCallGraph;
   const allNodes = (cg.nodes ?? []) as unknown as SerNode[];
   // Resolution pool: internal symbols only — external/synthesized nodes carry no
-  // source span to locate.
-  const pool = allNodes.filter(n => !n.isExternal);
+  // source span to locate. The cached graph is an untrusted repository artifact,
+  // so drop any internal node whose path escapes the root lexically or through a
+  // symlink before it can participate in resolution or appear in output.
+  const confinedPaths = new Map<SerNode, string>();
+  const pool = allNodes.filter(n => {
+    if (n.isExternal) return false;
+    try {
+      confinedPaths.set(n, safeJoin(absDir, n.filePath));
+      return true;
+    } catch {
+      return false;
+    }
+  });
 
   const sep = sym.indexOf('::');
   const namePart = sep >= 0 ? sym.slice(0, sep) : sym;
@@ -105,7 +117,7 @@ export async function handleLocateSymbolSpan(input: LocateSymbolSpanInput): Prom
 
   if (candidates.length === 0) {
     const nameLower = namePart.toLowerCase();
-    const near = [...new Set(allNodes.map(n => n.name))]
+    const near = [...new Set(pool.map(n => n.name))]
       .filter(nm => nm.toLowerCase().includes(nameLower))
       .slice(0, 10);
     return {
@@ -121,13 +133,15 @@ export async function handleLocateSymbolSpan(input: LocateSymbolSpanInput): Prom
     return {
       verdict: 'ambiguous' as const,
       query: sym,
-      candidates: candidates.slice(0, 10).map(n => `${n.name}::${n.filePath}`),
+      candidates: candidates.slice(0, 10).map(n => `${n.name}::${relative(absDir, confinedPaths.get(n)!)}`),
       hint: `"${sym}" matches ${candidates.length} symbols. Pass name::path to disambiguate.`,
     };
   }
 
   const node = candidates[0];
-  const symbolId = `${node.name}::${node.filePath}`;
+  const abs = confinedPaths.get(node)!;
+  const confinedFile = relative(absDir, abs);
+  const symbolId = `${node.name}::${confinedFile}`;
 
   // Locatability guards — a symbol that resolves but has no trustworthy raw-source
   // span. Disclosed as an explicit reason, never a fabricated offset.
@@ -136,7 +150,7 @@ export async function handleLocateSymbolSpan(input: LocateSymbolSpanInput): Prom
       error: `"${symbolId}" has no source span (external or synthesized symbol) — nothing to locate.`,
     };
   }
-  if (HTML_RE.test(node.filePath)) {
+  if (HTML_RE.test(confinedFile)) {
     return {
       error:
         `"${symbolId}" is an HTML inline-script symbol: its indexed offsets are against transformed ` +
@@ -146,16 +160,15 @@ export async function handleLocateSymbolSpan(input: LocateSymbolSpanInput): Prom
 
   // Re-read the one file the symbol spans. Unreadable/deleted since analysis → the
   // offsets are meaningless; fail safe to `stale`.
-  const abs = join(absDir, node.filePath);
   let content: string;
   try {
-    content = await readFile(abs, 'utf-8');
+    content = await readFileConfined(absDir, confinedFile);
   } catch {
     return {
       verdict: 'stale' as const,
       symbol: symbolId,
-      file: node.filePath,
-      hint: `${node.filePath} could not be read (moved or deleted since analysis). Re-run analyze_codebase.`,
+      file: confinedFile,
+      hint: `${confinedFile} could not be read (moved or deleted since analysis). Re-run analyze_codebase.`,
     };
   }
 
@@ -180,7 +193,7 @@ export async function handleLocateSymbolSpan(input: LocateSymbolSpanInput): Prom
     return {
       verdict,
       symbol: symbolId,
-      file: node.filePath,
+      file: confinedFile,
       hint: 'The index is behind the working tree — the recorded offsets are not trustworthy. Re-run analyze_codebase (or let the watcher catch up) before editing at these offsets.',
     };
   }
@@ -196,7 +209,7 @@ export async function handleLocateSymbolSpan(input: LocateSymbolSpanInput): Prom
   return {
     verdict,
     symbol: symbolId,
-    file: node.filePath,
+    file: confinedFile,
     language: node.language,
     startLine,
     endLine,

@@ -12,6 +12,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, openSync, closeSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { escapeRegExp } from '../../../utils/misc.js';
+import { readFileConfined } from '../../../utils/path-confinement.js';
 import {
   DEFAULT_MAX_FILES,
   DEFAULT_DRIFT_MAX_FILES,
@@ -949,17 +950,40 @@ export async function handleGetMinimalContext(
   if (!ctx?.callGraph) return { error: 'No call graph. Run analyze_codebase first.' };
 
   const cg = ctx.callGraph as SerializedCallGraph;
-  const nodeMap = new Map(cg.nodes.map(n => [n.id, n]));
+  // `llm-context.json` is an untrusted repository artifact (and may arrive through an
+  // unsigned portable bundle). Never let one of its node paths become a read target or
+  // an output path until it has crossed the same symlink-aware root boundary as a tool
+  // argument. Invalid internal neighbours are omitted; an invalid target fails closed as
+  // not-found rather than disclosing where the poisoned path points.
+  const confinedPaths = new Map<string, string>();
+  const confinedPath = (node: (typeof cg.nodes)[number]): string | null => {
+    const cached = confinedPaths.get(node.id);
+    if (cached) return cached;
+    try {
+      const path = safeJoin(absDir, node.filePath);
+      confinedPaths.set(node.id, path);
+      return path;
+    } catch {
+      return null;
+    }
+  };
+  const nodeMap = new Map(
+    cg.nodes
+      .filter(n => n.isExternal || confinedPath(n) !== null)
+      .map(n => [n.id, n]),
+  );
 
   // Find target node(s)
   const candidates = cg.nodes.filter(n =>
     n.name === functionName &&
     !n.isExternal && !n.isTest &&
+    confinedPath(n) !== null &&
     // Anchor on a path separator so "config.ts" doesn't also match "app-config.ts".
     (!filePath || n.filePath === filePath || n.filePath.endsWith('/' + filePath.replace(/^\//, ''))),
   );
   if (candidates.length === 0) return { error: `Function "${functionName}" not found. Run analyze_codebase first.` };
   const target = candidates[0];
+  const targetPath = confinedPath(target)!;
 
   // Risk tier → distance budget + k cap. Neighbours are ranked by nearest
   // call-distance (not arbitrary edge order), so a tightly-coupled chain two hops
@@ -1025,7 +1049,7 @@ export async function handleGetMinimalContext(
       const n = nodeMap.get(id);
       if (!n || n.isExternal) return null;
       const callType = callTypeByEdge.get(`${id}\0${r.predecessor}`) ?? 'direct';
-      return { id, name: n.name, file: relative(absDir, n.filePath), sig: sig(n), callType, isExternal: false, distance: r.distance, hops: r.hops, _rank: n.fanIn, _rel: callerScores.get(id) ?? 0 };
+      return { id, name: n.name, file: relative(absDir, confinedPath(n)!), sig: sig(n), callType, isExternal: false, distance: r.distance, hops: r.hops, _rank: n.fanIn, _rel: callerScores.get(id) ?? 0 };
     })
     .filter((n): n is NonNullable<typeof n> => !!n);
   const { list: callers, omitted: callersOmitted } = select(callerItems);
@@ -1039,7 +1063,7 @@ export async function handleGetMinimalContext(
       const n = nodeMap.get(id);
       if (!n || n.isExternal) return null;
       const callType = callTypeByEdge.get(`${r.predecessor}\0${id}`) ?? 'direct';
-      return { id, name: n.name, file: relative(absDir, n.filePath), sig: sig(n), callType, isExternal: false, kind: undefined as string | undefined, distance: r.distance, hops: r.hops, _rank: n.fanOut, _rel: calleeScores.get(id) ?? 0 };
+      return { id, name: n.name, file: relative(absDir, confinedPath(n)!), sig: sig(n), callType, isExternal: false, kind: undefined as string | undefined, distance: r.distance, hops: r.hops, _rank: n.fanOut, _rel: calleeScores.get(id) ?? 0 };
     })
     .filter((n): n is NonNullable<typeof n> => !!n);
 
@@ -1072,7 +1096,7 @@ export async function handleGetMinimalContext(
   // Function body (byte-range slice from source)
   let body: string | null = null;
   try {
-    const src = await readFile(target.filePath, 'utf-8');
+    const src = await readFileConfined(absDir, relative(absDir, targetPath));
     body = src.slice(target.startIndex, target.endIndex);
   } catch { /* source unavailable */ }
 
@@ -1084,7 +1108,7 @@ export async function handleGetMinimalContext(
   return {
     function: {
       name: target.name,
-      file: relative(absDir, target.filePath),
+      file: relative(absDir, targetPath),
       signature: target.signature ?? target.name,
       language: target.language,
       className: target.className ?? null,

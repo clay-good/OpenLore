@@ -13,7 +13,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -978,6 +978,74 @@ describe('handleGetMinimalContext', () => {
     expect((result.callers as unknown[]).length).toBeGreaterThanOrEqual(0);
     expect(Array.isArray(result.callees)).toBe(true);
     expect(Array.isArray(result.testedBy)).toBe(true);
+  });
+
+  it('reads a valid in-root function body', async () => {
+    const source = 'export function safeFn() { return 42; }\n';
+    await mkdir(join(tmpDir, 'src'), { recursive: true });
+    await writeFile(join(tmpDir, 'src', 'safe.ts'), source, 'utf-8');
+    readCachedContext.mockResolvedValue({
+      callGraph: makeCallGraph({
+        nodes: [{
+          id: 'src/safe.ts::safeFn', name: 'safeFn', filePath: join(tmpDir, 'src', 'safe.ts'),
+          signature: 'safeFn()', language: 'typescript', fanIn: 0, fanOut: 0,
+          startIndex: 0, endIndex: source.length, isExternal: false, isTest: false,
+        }],
+      }),
+    });
+
+    const { handleGetMinimalContext } = await import('./analysis.js');
+    const result = await handleGetMinimalContext(tmpDir, 'safeFn') as { function: { file: string; body: string } };
+
+    expect(result.function.file).toBe('src/safe.ts');
+    expect(result.function.body).toBe(source);
+  });
+
+  it('does not read an absolute node path outside the project root', async () => {
+    const outside = await createTmpDir();
+    const secret = 'outside-absolute-secret';
+    const secretPath = join(outside, 'secret.ts');
+    await writeFile(secretPath, secret, 'utf-8');
+    readCachedContext.mockResolvedValue({
+      callGraph: makeCallGraph({
+        nodes: [{
+          id: 'poison::leakAbsolute', name: 'leakAbsolute', filePath: secretPath,
+          signature: 'leakAbsolute()', language: 'typescript', fanIn: 0, fanOut: 0,
+          startIndex: 0, endIndex: secret.length, isExternal: false, isTest: false,
+        }],
+      }),
+    });
+
+    const { handleGetMinimalContext } = await import('./analysis.js');
+    const result = await handleGetMinimalContext(tmpDir, 'leakAbsolute') as { error: string };
+
+    expect(result.error).toMatch(/not found/);
+    expect(JSON.stringify(result)).not.toContain(secret);
+  });
+
+  it('does not read a node path through an in-root symlink that escapes the root', async () => {
+    const outside = await createTmpDir();
+    const secret = 'outside-symlink-secret';
+    const secretPath = join(outside, 'secret.ts');
+    await writeFile(secretPath, secret, 'utf-8');
+    await mkdir(join(tmpDir, 'src'), { recursive: true });
+    const linkedPath = join(tmpDir, 'src', 'linked.ts');
+    await symlink(secretPath, linkedPath);
+    readCachedContext.mockResolvedValue({
+      callGraph: makeCallGraph({
+        nodes: [{
+          id: 'src/linked.ts::leakSymlink', name: 'leakSymlink', filePath: linkedPath,
+          signature: 'leakSymlink()', language: 'typescript', fanIn: 0, fanOut: 0,
+          startIndex: 0, endIndex: secret.length, isExternal: false, isTest: false,
+        }],
+      }),
+    });
+
+    const { handleGetMinimalContext } = await import('./analysis.js');
+    const result = await handleGetMinimalContext(tmpDir, 'leakSymlink') as { error: string };
+
+    expect(result.error).toMatch(/not found/);
+    expect(JSON.stringify(result)).not.toContain(secret);
   });
 
   it('includes testedBy edges when present', async () => {

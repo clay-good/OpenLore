@@ -8,10 +8,9 @@
 # Requirements: a full-history checkout (`fetch-depth: 0`) so the base..head range is
 # reachable, and write permission on pull-request comments.
 #
-# This example is deliberately non-runnable until both placeholders below are replaced
-# with the synchronized immutable Action commit and package release containing this
-# hardening. The composite rejects an unresolved package placeholder instead of silently
-# running an older renderer with a write-capable token.
+# This example is deliberately non-runnable until the placeholder below is replaced
+# with a reviewed immutable Action commit containing this hardening. The composite builds
+# that revision with its committed lockfile instead of resolving OpenLore by a mutable npm selector.
 #
 # Fork PRs: GitHub hands a READ-ONLY `GITHUB_TOKEN` to `pull_request` runs triggered from a
 # fork, so this job cannot post the sticky comment for external contributors. Do NOT switch
@@ -27,8 +26,8 @@
 # repository/event/conclusion from trusted run metadata, derive the PR number from that metadata
 # (never the artifact), clamp the body, and normalize exactly one leading sticky marker before
 # posting with its own `github-script`; this composite's post step is pull_request-only. Treat the
-# artifact as untrusted data. Pin the Action and `openlore-version` to reviewed immutable releases
-# whenever a write-capable token is in scope.
+# artifact as untrusted data. Pin the Action to a reviewed immutable commit whenever a
+# write-capable token is in scope.
 
 name: OpenLore review
 
@@ -55,13 +54,12 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }} # analyze the same head passed to review
           persist-credentials: false # never leave the write-capable token in the head checkout
 
-      # Replace both placeholders with the first reviewed release/commit that contains this
-      # hardening. They intentionally fail closed instead of silently selecting a pre-fix build.
+      # Replace the placeholder with the first reviewed commit that contains this hardening.
+      # The Action builds that exact revision with its committed dependency lockfile.
       - uses: clay-good/OpenLore/.github/actions/openlore-review@REPLACE_WITH_REVIEWED_COMMIT_SHA
         with:
           # github-token: ${{ secrets.GITHUB_TOKEN }}   # default; uncomment to override
           # base: ${{ github.event.pull_request.base.sha }}
           head: ${{ github.event.pull_request.head.sha }}
           analyze: 'true'            # build the index for the full blast radius
-          openlore-version: 'REPLACE_WITH_REVIEWED_RELEASE'
           gate: 'false'              # 'true' = fail the job on a configured blastRadius.block pattern
