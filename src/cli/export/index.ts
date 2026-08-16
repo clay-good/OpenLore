@@ -30,6 +30,7 @@ const bundleSubcommand = new Command('bundle')
   .description('Export the persisted graph index as a single portable, integrity-stamped artifact a teammate or CI can import without re-analyzing.')
   .option('--out <path>', `Output path for the artifact (default: <project-root>/.openlore/index-bundle.olbundle)`)
   .option('--project-root <path>', 'Project root to export (default: current directory)')
+  .option('--sign-key <path>', 'Attach an Ed25519 signature using an unencrypted PKCS#8 private key')
   .action(async (opts: BundleExportOptions) => {
     const code = await runBundleExport(opts);
     process.exit(code);

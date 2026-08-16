@@ -76,13 +76,13 @@ openlore drift --no-color                # Plain output for CI logs
 
 ### Bootstrap the index from a shared bundle
 
-Turn per-run cold indexing into a verified import plus (at most) a small rebuild: commit a `.olbundle`
+Turn per-run cold indexing into a validated import plus (at most) a rebuild: commit a `.olbundle`
 artifact and `openlore import` it at the top of the job. Because import validates against the checked-out
 commit and falls back to a rebuild when it can't be trusted, it is safe to run unconditionally.
 
 ```bash
 if [ -f .openlore/index-bundle.olbundle ]; then
-  openlore import .openlore/index-bundle.olbundle   # verified import, or transparent rebuild
+  openlore import .openlore/index-bundle.olbundle   # validated import, or transparent rebuild
 else
   openlore analyze
 fi
@@ -99,4 +99,3 @@ See [shareable-bundle.md](shareable-bundle.md#ci-bootstrap-recipe).
 | **Commands** | `analyze`, `drift`, `init` | `generate`, `verify`, `drift --use-llm` |
 | **Reproducibility** | Identical every run | May vary |
 | **Best for** | CI, pre-commit hooks, quick checks | Initial generation, reducing false positives |
-

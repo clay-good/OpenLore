@@ -38,6 +38,7 @@ import type { RunApiOptions, RunResult, InitResult, AnalyzeResult, ProgressCallb
 import { resolveTrustedApiBase, resolveTrustedSslVerify } from '../core/services/repo-config-trust.js';
 import { atomicWriteFile } from '../core/decisions/atomic-store.js';
 import { withAnalysisLock } from '../core/runtime/advisory-lock.js';
+import { captureSourceState, reconcileSourceStates } from '../core/analyzer/source-state.js';
 import { publishGeneration, readGenerationSnapshot, REQUIRED_ANALYSIS_ARTIFACTS } from '../core/runtime/analysis-generation.js';
 import { computeProjectFingerprint } from '../core/services/mcp-handlers/utils.js';
 import { acquireAnalysisOwnership } from '../core/runtime/analysis-ownership.js';
@@ -196,6 +197,7 @@ export async function openloreRun(options: RunApiOptions = {}): Promise<RunResul
     try {
       await ownership.update('scanning', { percent: 0 }).catch(() => {});
       const mapper = new RepositoryMapper(rootPath, { maxFiles });
+      const sourceStateBefore = await captureSourceState(rootPath);
       const repoMap = await mapper.map();
 
       await ownership.update('dependency-graph', { percent: 35 }).catch(() => {});
@@ -214,14 +216,16 @@ export async function openloreRun(options: RunApiOptions = {}): Promise<RunResul
       // that genuinely wants a full re-parse asks for it.
       reExtract: options.reExtract ?? false,
     });
-      const fingerprintHash = await computeProjectFingerprint(rootPath);
       let artifacts: AnalysisArtifacts;
       await withAnalysisLock(analysisPath, async () => {
       artifacts = await artifactGenerator.generateAndSave(repoMap, depGraph, undefined, { acquireLock: false });
+      const fingerprintHash = await computeProjectFingerprint(rootPath);
+      const sourceState = reconcileSourceStates(sourceStateBefore, await captureSourceState(rootPath));
       await atomicWriteFile(join(analysisPath, ARTIFACT_DEPENDENCY_GRAPH), JSON.stringify(depGraph, null, 2));
       await atomicWriteFile(join(analysisPath, ARTIFACT_FINGERPRINT), JSON.stringify({
         hash: fingerprintHash,
-        commit: null,
+        commit: sourceState.commit,
+        sourceTreeState: sourceState.treeState,
         computedAt: new Date().toISOString(),
         fileCount: repoMap.allFiles.length,
       }));

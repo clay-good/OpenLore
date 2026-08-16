@@ -5,8 +5,9 @@
 ### Requirement: OptInDetachedBundleSignatureVerification
 
 The bundle codec SHALL support optional, fully local producer authentication: export MAY attach a
-plain ed25519 detached signature (computed over the canonical payload digest with a key file the
-operator supplies), and import SHALL verify any present signature against a trusted-key list read
+plain ed25519 detached signature computed over a domain-separated canonical trust projection that
+binds the payload digest, source commit, analyzed tree state, schema, graph attestation, and file
+manifest. Import SHALL verify any present signature against a trusted-key list read
 from `.openlore/config.json`. Verification uses only the platform crypto library — no key servers,
 no network, no new dependency. A valid signature from a trusted key earns the "provenance
 verified (signed by <key-id>)" wording; an absent signature degrades to the unsigned provenance
@@ -14,6 +15,10 @@ disclosure; a present signature that fails verification SHALL reject the bundle 
 falling back to unsigned handling. This complements — and does not weaken — the existing
 Untrusted Artifact Deserialization Safety requirement (size caps, safe file names, shape
 validation), which continues to run first on every bundle.
+
+Authenticated bundles SHALL use a bundle format version that older importers reject rather than
+silently ignoring the signature. New importers MAY read legacy unsigned bundles, but SHALL treat
+their source-tree state and provenance as unknown/unverified.
 
 #### Scenario: Signed bundle from a trusted producer
 

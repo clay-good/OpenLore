@@ -12,6 +12,7 @@ import { join, resolve } from 'node:path';
 import {
   resolveOpenLoreConfigPath,
   setPrimaryConfigPath,
+  retargetPrimaryConfigRoot,
   clearPrimaryConfigPath,
   readOpenLoreConfig,
   writeOpenLoreConfig,
@@ -63,6 +64,16 @@ describe('resolveOpenLoreConfigPath', () => {
     setPrimaryConfigPath(root, join(root, 'my.json'));
     clearPrimaryConfigPath();
     expect(resolveOpenLoreConfigPath(root)).toBe(defaultPath(root));
+  });
+
+  it('can retarget an explicit CLI config to a subcommand project root', () => {
+    const custom = join(root, 'trusted.json');
+    setPrimaryConfigPath(root, custom);
+    const restore = retargetPrimaryConfigRoot(peer);
+    expect(resolveOpenLoreConfigPath(peer)).toBe(resolve(custom));
+    expect(resolveOpenLoreConfigPath(root)).toBe(defaultPath(root));
+    restore();
+    expect(resolveOpenLoreConfigPath(root)).toBe(resolve(custom));
   });
 });
 

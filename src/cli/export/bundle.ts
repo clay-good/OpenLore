@@ -9,7 +9,7 @@
  */
 
 import { existsSync } from 'node:fs';
-import { writeFile, mkdir } from 'node:fs/promises';
+import { writeFile, mkdir, readFile } from 'node:fs/promises';
 import { resolve, join, relative, dirname } from 'node:path';
 import { createRequire } from 'node:module';
 import { logger } from '../../utils/logger.js';
@@ -22,6 +22,7 @@ const require = createRequire(import.meta.url);
 export interface BundleExportOptions {
   out?: string;
   projectRoot?: string;
+  signKey?: string;
 }
 
 function toolVersion(): string {
@@ -58,10 +59,15 @@ export async function runBundleExport(opts: BundleExportOptions): Promise<number
 
   let result;
   try {
-    result = await buildBundle(analysisDir, toolVersion());
+    const signingKey = opts.signKey ? await readFile(resolve(opts.signKey)) : undefined;
+    result = await buildBundle(analysisDir, toolVersion(), { signingKey });
   } catch (err) {
     if (err instanceof BundleError) {
       logger.error(err.message);
+      return 2;
+    }
+    if (opts.signKey) {
+      logger.error(`Could not sign bundle: ${err instanceof Error ? err.message : String(err)}`);
       return 2;
     }
     throw err;
@@ -91,6 +97,7 @@ export async function runBundleExport(opts: BundleExportOptions): Promise<number
     `Exported graph bundle → ${relOut}\n` +
     `  ${manifest.files.length} files, ${sizeMb} MB, schema v${manifest.schemaVersion}, ` +
     `commit ${manifest.sourceCommit ?? 'unknown'}\n` +
+    (manifest.signature ? `  provenance signature: ed25519 ${manifest.signature.keyId}\n` : '') +
     '  Tip: this is a generated, regenerate-don\'t-merge artifact. Add to .gitattributes:\n' +
     `    ${gitattrPath} -diff -merge`,
   );

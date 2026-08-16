@@ -24,6 +24,8 @@
 import type {
   AnalysisConfig,
   BlastRadiusConfig,
+  BundleConfig,
+  BundleTrustedSigner,
   CoveringSurfaceConfig,
   CoveringSurfaceMember,
   ContextInjectionConfig,
@@ -204,6 +206,22 @@ const secretRedactionRule: ConfigRule = {
   required: requiredFor<NonNullable<OpenLoreConfig['secretRedaction']>>({}),
 };
 
+const bundleTrustedSignerRule: ConfigRule = {
+  kind: 'object',
+  strict: true,
+  fields: fieldsFor<BundleTrustedSigner>({ publicKey: stringRule, label: stringRule }),
+  required: requiredFor<BundleTrustedSigner>({ publicKey: true }),
+};
+
+const bundleRule: ConfigRule = {
+  kind: 'object',
+  strict: true,
+  fields: fieldsFor<BundleConfig>({
+    trustedSigners: { kind: 'array', element: bundleTrustedSignerRule },
+  }),
+  required: requiredFor<BundleConfig>({}),
+};
+
 const CONFIG_RULE: ConfigRule = {
   kind: 'object',
   fields: fieldsFor<OpenLoreConfig>({
@@ -224,6 +242,7 @@ const CONFIG_RULE: ConfigRule = {
     contextInjection: contextInjectionRule,
     enforcement: enforcementRule,
     secretRedaction: secretRedactionRule,
+    bundle: bundleRule,
   }),
   required: requiredFor<OpenLoreConfig>({
     version: true,
@@ -259,6 +278,7 @@ export const CONFIG_FIELD_KINDS: Record<keyof OpenLoreConfig, ConfigFieldKind> =
   contextInjection: 'object',
   enforcement: 'object',
   secretRedaction: 'object',
+  bundle: 'object',
 };
 
 /** The known top-level config keys, derived from the type-bound field map. */

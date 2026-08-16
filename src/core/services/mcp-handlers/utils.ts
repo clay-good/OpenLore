@@ -15,7 +15,7 @@ import {
 import { readAttestation, reconcile, type IndexIntegrity } from '../../analyzer/index-attestation.js';
 import { recordGraphDigest } from './traversal.js';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
-import { ANALYSIS_AGE_WARNING_HOURS, ANALYSIS_STALE_THRESHOLD_MS, ARTIFACT_FINGERPRINT, ARTIFACT_LLM_CONTEXT, MAX_QUERY_LENGTH, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR, STALE_REGION_REPAIR_THRESHOLD } from '../../../constants.js';
+import { ANALYSIS_AGE_WARNING_HOURS, ANALYSIS_STALE_THRESHOLD_MS, ARTIFACT_CALL_GRAPH_DB, ARTIFACT_FINGERPRINT, ARTIFACT_INDEX_ATTESTATION, ARTIFACT_LLM_CONTEXT, MAX_QUERY_LENGTH, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR, STALE_REGION_REPAIR_THRESHOLD } from '../../../constants.js';
 import { repairInBackground, type RepairReason } from '../cold-start-bootstrap.js';
 
 /**
@@ -496,6 +496,19 @@ export async function readCachedContext(directory: string, timeout?: number): Pr
             ctx.edgeStore = es;
           }
         }
+      }
+      // Opening and attesting the database happens after the JSON generation check above.
+      // Re-check the commit point now so promotion cannot pair old context with a newly
+      // replaced call-graph.db in one cached object.
+      const finalGeneration = await readCurrentGeneration(analysisDir, [...REQUIRED_ANALYSIS_ARTIFACTS]);
+      const boundGraphArtifactsMatch = !finalGeneration
+        || !finalGeneration.artifacts.some(record => record.path === ARTIFACT_CALL_GRAPH_DB)
+        || (await artifactMatchesGeneration(analysisDir, finalGeneration, ARTIFACT_CALL_GRAPH_DB)
+          && await artifactMatchesGeneration(analysisDir, finalGeneration, ARTIFACT_INDEX_ATTESTATION));
+      if (finalGeneration?.generationId !== generation || !boundGraphArtifactsMatch) {
+        try { ctx.edgeStore?.close(); } catch { /* best-effort close on rejected snapshot */ }
+        emit(directory, 'cache', { event: 'cache_read', hit: false, reason: 'analysis_generation_changed' });
+        return null;
       }
       // Self-healing: any read-path staleness signal that today only produces a
       // verdict also triggers the shared at-most-once background repair — detection

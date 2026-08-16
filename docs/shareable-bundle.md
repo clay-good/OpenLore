@@ -3,7 +3,7 @@
 The OpenLore graph index is a deterministic function of the committed source: for a given commit, every
 machine computes the **same** index. So re-indexing it on every teammate's laptop and on every CI run is
 redundant work that scales with team size. A shareable bundle lets a team **index once and bootstrap
-everywhere** — verified, in seconds, or transparently rebuild if the bundle can't be trusted.
+everywhere** — integrity-checked in seconds, or transparently rebuilt if it cannot be used.
 
 > Sharing is **opt-in**. Default single-machine operation is unchanged. No network service, no registry,
 > no LLM — `export`/`import` are local, offline, and deterministic.
@@ -15,18 +15,18 @@ everywhere** — verified, in seconds, or transparently rebuild if the bundle ca
 openlore analyze
 openlore export bundle                       # → .openlore/index-bundle.olbundle
 
-# Consumer: a teammate or CI bootstraps a verified index without re-analyzing
+# Consumer: a teammate or CI bootstraps an integrity-checked index without re-analyzing
 openlore import .openlore/index-bundle.olbundle
 ```
 
 ## The artifact
 
-`openlore export bundle [--out <path>]` serializes the persisted index under `.openlore/analysis/` into a
+`openlore export bundle [--out <path>] [--sign-key <pkcs8.pem>]` serializes the persisted index under `.openlore/analysis/` into a
 single, compact, self-describing file (default `.openlore/index-bundle.olbundle`). It is a gzipped JSON
 envelope of:
 
 - a **manifest** — the bundle format version, the OpenLore version, the index **schema version**, the
-  **source commit** the index was built from, the bundled **integrity attestation** (committed
+  **source commit** and analyzed tree state (`clean`, `dirty`, or `unknown`), the bundled **integrity attestation** (committed
   file/function/edge/class counts + a content digest), and a **payload digest** over the bundled bytes;
 - a **payload** — the graph files (`call-graph.db`, `llm-context.json`, the JSON inventories, …),
   base64-encoded.
@@ -48,10 +48,17 @@ wall-clock field, fixed compression level). The bundled attestation is **re-comp
 export time** so it describes exactly the bytes being exported — this is what makes the import-time digest
 check a true tamper detector rather than a false positive on an index the incremental watcher has touched.
 
+**Optional producer authentication.** `--sign-key` accepts an unencrypted Ed25519 PKCS#8 private
+key. The v2 bundle carries a detached signature that binds every trust-relevant manifest claim and
+the payload digest. Import verifies it only against inline Ed25519 SPKI public keys explicitly
+listed in `bundle.trustedSigners`; unsigned bundles remain supported but are always disclosed as
+`provenance UNVERIFIED`. A present invalid or untrusted signature is rejected (exit `2`), never
+downgraded to unsigned or converted into a rebuild.
+
 ## Import is validate-or-rebuild (safe by construction)
 
-`openlore import <artifact>` never serves a stale, schema-mismatched, or tampered bundle as current. It runs
-this ladder and, on **any** validation failure, degrades transparently to a full local rebuild — so import
+`openlore import <artifact>` separates payload integrity, producer provenance, and source currency. It runs
+this ladder and, on unsigned integrity/currency failure, degrades transparently to a full local rebuild — so import
 never leaves you worse off than having no artifact:
 
 | # | Check | Failure → |
@@ -60,11 +67,20 @@ never leaves you worse off than having no artifact:
 | 2 | Index schema version matches this OpenLore | rebuild (`mismatched`) |
 | 3 | Payload byte-integrity (corrupt / hand-edited / line-merged) | rebuild |
 | 4 | Graph-content digest == bundled attestation, store reconciles healthy | rebuild (tampered) |
-| 5 | **Currency** vs. the working tree (below) | see below |
+| 5 | Present signature validates against `bundle.trustedSigners` | reject on invalid/untrusted |
+| 6 | **Currency** vs. the working tree (below) | see below |
 
 Currency outcomes once the artifact has validated:
 
-- **commit == HEAD** → imported as-is, **verified current** (the fast, no-analyze path).
+- **clean analyzed tree + commit == HEAD** → imported as-is and current versus that commit. An
+  unsigned bundle still says `provenance UNVERIFIED`; only a trusted signature earns
+  `provenance verified`.
+- **dirty analyzed tree + commit == HEAD** → imported as approximately current, with the dirty
+  build disclosed.
+- **locally dirty checkout + commit == HEAD** → imported as approximately current, even when the
+  producer analyzed a clean tree; local edits can make the imported graph incomplete.
+- **legacy/unknown analyzed tree + commit == HEAD** → imported with currency unknown; missing
+  state never means clean.
 - **no git repo / no recorded build commit** → imported as-is, but currency is **disclosed as
   UNVERIFIED** (run `openlore analyze` if the source has changed).
 - **stale (built at an ancestor commit)** or **diverged/unknown** → **full local rebuild**, so the index is
@@ -74,13 +90,17 @@ Currency outcomes once the artifact has validated:
 Any *unexpected* failure during materialization or validation (e.g. a structurally-valid bundle whose
 `call-graph.db` turns out to be corrupt) also degrades to a rebuild rather than crashing the command.
 
+Analysis brackets extraction with full-HEAD and working-tree observations. A generation is stamped
+`clean` only when both endpoints name the same commit and both are clean; transitions and Git
+failures are recorded as `dirty` or `unknown`, never guessed clean.
+
 On a successful as-is import, any **stale search index** from a prior index in the target directory
 (`vector-index/`, `text-line-index/`) is cleared first — its embeddings would otherwise describe a graph
 that no longer matches — and the keyword (BM25) index is rebuilt for the imported graph.
 
 **What works immediately after import.** Everything that reads the call graph — `orient`, `search_code`,
 `search_specs`, `analyze_impact`, `find_path`, `blast_radius`, `select_tests`, `report_coverage_gaps`, and
-the rest — works right away on a verified import, no re-analyze: the keyword (BM25) code and spec search
+the rest — works right away on a successful import, no re-analyze: the keyword (BM25) code and spec search
 indexes are rebuilt on import over the full symbol set. Two things are *not* restored on import and wait for
 the next `openlore analyze`: *semantic* (embedding) search (opt in any time with `openlore embed --local`),
 and the literal-text line index (`text-line-index/`). Everything else matches a fresh analyze.
@@ -125,7 +145,7 @@ git add .openlore/index-bundle.olbundle
 
 ## CI bootstrap recipe
 
-Turn per-run cold indexing into a verified import plus (at most) a small rebuild. Because import validates
+Turn per-run cold indexing into a validated import plus (at most) a rebuild. Because import checks
 against the checked-out commit, it is safe to run unconditionally:
 
 ```yaml
@@ -133,15 +153,15 @@ against the checked-out commit, it is safe to run unconditionally:
 - name: Bootstrap OpenLore index
   run: |
     if [ -f .openlore/index-bundle.olbundle ]; then
-      npx openlore import .openlore/index-bundle.olbundle   # verified import, or transparent rebuild
+      npx openlore import .openlore/index-bundle.olbundle   # validated import, or transparent rebuild
     else
       npx openlore analyze
     fi
 ```
 
 If the committed artifact is at the CI checkout's commit (the regenerate-don't-merge discipline keeps it
-there), import is a fast, verified file-materialization. If the artifact lags the checkout, import rebuilds —
-correct, just not free. Either way the job ends with a current, trustworthy index.
+there), import is a fast file-materialization with separate integrity, provenance, and currency
+receipts. If the artifact lags the checkout, import rebuilds — correct, just not free.
 
 ## What this is not
 
@@ -150,5 +170,5 @@ correct, just not free. Either way the job ends with a current, trustworthy inde
 - Not a hosted cache or registry — it is git-distributed and offline.
 - Not a way to serve a stale graph — validate-or-rebuild is mandatory.
 
-Deferred follow-ups: incremental-delta import for the stale path, artifact signing/provenance beyond the
-content digest, and cross-repo/federated bundles (federation already has its own index-of-indexes).
+Deferred follow-ups: incremental-delta import for the stale path and cross-repo/federated bundles
+(federation already has its own index-of-indexes).

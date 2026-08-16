@@ -65,6 +65,7 @@ import { describeMemoryDegradation } from '../../core/analyzer/memory-strategy.j
 import { writeAnalysisContentProvenance } from '../../core/services/served-content.js';
 import { REQUIRED_ANALYSIS_ARTIFACTS, publishGeneration } from '../../core/runtime/analysis-generation.js';
 import { withAnalysisLock } from '../../core/runtime/advisory-lock.js';
+import { captureSourceState, reconcileSourceStates } from '../../core/analyzer/source-state.js';
 import { atomicWriteFile } from '../../core/decisions/atomic-store.js';
 import {
   PROGRESS_INTERVAL_MS,
@@ -139,23 +140,6 @@ export function formatIndexedFunctionPopulation(result: {
 // ============================================================================
 // CORE ANALYSIS FUNCTION
 // ============================================================================
-
-/**
- * Capture the short HEAD commit so the confidence-boundary staleness marker can
- * name the index's build commit. Best-effort: null for a non-git directory or any
- * git failure — staleness then degrades to a commit-less "working tree changed".
- */
-async function captureBuildCommit(rootPath: string): Promise<string | null> {
-  try {
-    const { promisify } = await import('node:util');
-    const { execFile } = await import('node:child_process');
-    const { stdout } = await promisify(execFile)('git', ['rev-parse', '--short', 'HEAD'], { cwd: rootPath });
-    const commit = stdout.trim();
-    return commit.length > 0 ? commit : null;
-  } catch {
-    return null;
-  }
-}
 
 /**
  * Report the live owner of an in-progress analysis, with its current stage.
@@ -273,6 +257,7 @@ export async function runAnalysis(
     excludePatterns: mergedExclude.length > 0 ? mergedExclude : undefined,
   });
 
+  const sourceStateBefore = await captureSourceState(rootPath);
   const repoMap = await mapper.map();
 
   logger.info('Files found', repoMap.summary.totalFiles);
@@ -427,7 +412,7 @@ export async function runAnalysis(
   // bounded persistence transaction is serialized against the incremental
   // watcher; expensive extraction never blocks it.
   const fingerprintHash = await computeProjectFingerprint(rootPath);
-  const buildCommit = await captureBuildCommit(rootPath);
+  const sourceState = reconcileSourceStates(sourceStateBefore, await captureSourceState(rootPath));
   await withAnalysisLock(outputPath, async () => {
     await artifactGenerator.generateAndSave(repoMap, depGraph, {
       uiComponents,
@@ -440,7 +425,13 @@ export async function runAnalysis(
     await writeJsonAtomicStreaming(join(outputPath, ARTIFACT_DEPENDENCY_GRAPH), depGraph);
     await atomicWriteFile(
       join(outputPath, ARTIFACT_FINGERPRINT),
-      JSON.stringify({ hash: fingerprintHash, commit: buildCommit, computedAt: new Date().toISOString(), fileCount: repoMap.allFiles.length }),
+      JSON.stringify({
+        hash: fingerprintHash,
+        commit: sourceState.commit,
+        sourceTreeState: sourceState.treeState,
+        computedAt: new Date().toISOString(),
+        fileCount: repoMap.allFiles.length,
+      }),
     );
     await writeAnalysisContentProvenance(outputPath, 'source-derived');
 

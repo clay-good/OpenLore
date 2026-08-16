@@ -38,6 +38,7 @@ const FULLY_POPULATED: Required<OpenLoreConfig> = {
   contextInjection: {},
   enforcement: {},
   secretRedaction: {},
+  bundle: {},
 };
 
 describe('config-schema — type-completeness bind', () => {
@@ -149,6 +150,19 @@ describe('config-schema — type mismatches', () => {
   it('accepts lastRun as null and as a string', () => {
     expect(validateOpenLoreConfig({ ...FULLY_POPULATED, lastRun: null })).toEqual([]);
     expect(validateOpenLoreConfig({ ...FULLY_POPULATED, lastRun: '2026-01-01' })).toEqual([]);
+  });
+
+  it('validates trusted bundle signer entries', () => {
+    expect(validateOpenLoreConfig({
+      ...FULLY_POPULATED,
+      bundle: { trustedSigners: [{ publicKey: '-----BEGIN PUBLIC KEY-----\nkey\n-----END PUBLIC KEY-----', label: 'release' }] },
+    })).toEqual([]);
+
+    const findings = validateOpenLoreConfig({
+      ...FULLY_POPULATED,
+      bundle: { trustedSigners: [{ label: 'missing key' }] },
+    });
+    expect(findings.some(f => f.key === 'bundle.trustedSigners[0].publicKey' && f.fatal)).toBe(true);
   });
 
   it('flags lastRun holding a number', () => {

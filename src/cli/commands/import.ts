@@ -2,14 +2,15 @@
  * `openlore import <artifact>` — bootstrap the local graph index from a portable artifact,
  * validate-or-rebuild (change: add-shareable-graph-artifact).
  *
- * Safe by construction: the consumer validates the artifact before trusting it and NEVER
- * serves a stale, schema-mismatched, or tampered bundle as current. The validation ladder:
+ * The consumer validates integrity and currency before promotion, while producer authenticity
+ * is a separate optional signature verdict. Unsigned integrity is never described as authenticity.
  *   1. bundle format version compatible       (else rebuild)
  *   2. payload byte-integrity (tamper/corrupt) (else rebuild)
  *   3. index schema version matches            (else rebuild)
  *   4. graph-content digest == bundled attestation, and the store reconciles healthy (else rebuild)
  *   5. currency vs the working tree:
- *        commit == HEAD            → import as-is (verified current)
+ *        clean build + commit == HEAD → import as-is (current versus that commit)
+ *        dirty / legacy-unknown build → import as-is with approximate/unknown currency
  *        no git / commit unknown   → import as-is, currency disclosed as UNVERIFIED
  *        stale (ancestor) / diverged → full local rebuild (incremental-delta is a deferred optimization)
  * Any validation failure degrades transparently to a local rebuild — import never leaves the
@@ -18,7 +19,7 @@
 
 import { Command } from 'commander';
 import { existsSync } from 'node:fs';
-import { readFile, mkdtemp } from 'node:fs/promises';
+import { readFile, mkdtemp, rm } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFile } from 'node:child_process';
@@ -38,6 +39,8 @@ import { isGitRepository, validateGitRef } from '../../core/drift/git-diff.js';
 import {
   parseBundle,
   verifyPayloadIntegrity,
+  verifyBundleSignature,
+  verifyBundledSourceIdentity,
   recomputeProductionDigest,
   materializeBundle,
   promoteStagedIndex,
@@ -45,8 +48,11 @@ import {
   BundleError,
   BUNDLE_VERSION,
   type Bundle,
+  type BundleSignatureVerdict,
 } from '../../core/analyzer/index-bundle.js';
 import { runAnalysis } from './analyze.js';
+import { readOpenLoreConfig, retargetPrimaryConfigRoot } from '../../core/services/config-manager.js';
+import { captureSourceState, type SourceTreeState } from '../../core/analyzer/source-state.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -60,12 +66,13 @@ export function preMaterializeRebuildReason(
   currentBundleVersion = BUNDLE_VERSION,
   currentSchemaVersion = SCHEMA_VERSION,
 ): { reason: string; detail: string } | null {
-  if (bundle.manifest.bundleVersion !== currentBundleVersion) {
+  if (!Number.isSafeInteger(bundle.manifest.bundleVersion) ||
+      bundle.manifest.bundleVersion < 1 || bundle.manifest.bundleVersion > currentBundleVersion) {
     return {
       reason: 'bundle-version',
       detail:
         `Artifact bundle format v${bundle.manifest.bundleVersion} is not compatible with this OpenLore ` +
-        `(expects v${currentBundleVersion}).`,
+        `(supports v1 through v${currentBundleVersion}).`,
     };
   }
   if (bundle.manifest.schemaVersion !== currentSchemaVersion) {
@@ -79,26 +86,58 @@ export function preMaterializeRebuildReason(
   return null;
 }
 
-export type ImportAction = 'import-fresh' | 'import-unverified' | 'rebuild';
+export type ImportAction = 'import-current' | 'import-approximate' | 'import-currency-unknown' | 'rebuild';
 
 /** Decide currency once the artifact has materialized and validated. Pure — unit-tested. */
 export function currencyDecision(facts: {
   isGitRepo: boolean;
   sourceCommit: string | null;
+  sourceTreeState: SourceTreeState;
+  consumerTreeState?: SourceTreeState;
   commitMatchesHead: boolean;
   commitIsAncestor: boolean;
 }): { action: ImportAction; reason: string; detail: string } {
   if (!facts.isGitRepo || !facts.sourceCommit) {
     return {
-      action: 'import-unverified',
+      action: 'import-currency-unknown',
       reason: 'currency-unverified',
       detail:
-        'Imported as-is, but currency could NOT be verified (no git repository or no recorded build ' +
+        'Currency could NOT be established (no git repository or no recorded build ' +
         'commit). If the source has changed since the artifact was built, run "openlore analyze".',
     };
   }
   if (facts.commitMatchesHead) {
-    return { action: 'import-fresh', reason: 'commit-matches-head', detail: 'Artifact commit matches the working tree — imported as-is, verified current.' };
+    if (facts.sourceTreeState === 'dirty') {
+      return {
+        action: 'import-approximate',
+        reason: 'dirty-build',
+        detail: facts.consumerTreeState === 'dirty'
+          ? `Approximately current — built from a dirty tree at ${facts.sourceCommit}, and the importing checkout also has local changes.`
+          : `Approximately current — built from a dirty tree at ${facts.sourceCommit}.`,
+      };
+    }
+    if (facts.consumerTreeState === 'dirty') {
+      return {
+        action: 'import-approximate',
+        reason: 'dirty-consumer',
+        detail: `Approximately current — the checkout at ${facts.sourceCommit} has local changes.`,
+      };
+    }
+    if (facts.consumerTreeState === 'unknown') {
+      return {
+        action: 'import-currency-unknown',
+        reason: 'consumer-tree-state-unknown',
+        detail: 'Currency is unknown because the importer could not establish whether the checkout is clean.',
+      };
+    }
+    if (facts.sourceTreeState === 'unknown') {
+      return {
+        action: 'import-currency-unknown',
+        reason: 'tree-state-unknown',
+        detail: 'Currency is unknown because the bundle did not prove whether its analyzed tree was clean.',
+      };
+    }
+    return { action: 'import-current', reason: 'commit-matches-head', detail: `Current at commit ${facts.sourceCommit}.` };
   }
   if (facts.commitIsAncestor) {
     return {
@@ -114,6 +153,14 @@ export function currencyDecision(facts: {
     reason: 'unrelated-commit',
     detail: 'Artifact build commit is not an ancestor of the working tree (diverged/unknown) — rebuilding locally.',
   };
+}
+
+export function provenanceDetail(verdict: BundleSignatureVerdict): string {
+  if (verdict.status === 'unsigned') {
+    return 'Integrity-consistent; provenance UNVERIFIED — trust the source of this bundle.';
+  }
+  const named = verdict.label ? `${verdict.label} (${verdict.keyId})` : verdict.keyId;
+  return `Provenance verified (signed by ${named}).`;
 }
 
 async function gitResolveCommit(rootPath: string, ref: string): Promise<string | null> {
@@ -216,7 +263,7 @@ async function fullRebuild(rootPath: string, analysisDir: string, detail: string
   return 0;
 }
 
-export async function runImport(artifact: string, opts: ImportOptions): Promise<number> {
+async function runImportWithEffectiveConfig(artifact: string, opts: ImportOptions): Promise<number> {
   const projectRoot = resolve(opts.projectRoot ?? process.cwd());
   const analysisDir = join(projectRoot, OPENLORE_ANALYSIS_REL_PATH);
   const artifactPath = resolve(artifact);
@@ -239,13 +286,36 @@ export async function runImport(artifact: string, opts: ImportOptions): Promise<
     throw err;
   }
 
+  // Signature failures are artifact rejections, not rebuild triggers. A hostile signed bundle
+  // must not silently fall through to unsigned handling or make the importer perform expensive
+  // source analysis on its behalf.
+  const integrityOk = verifyPayloadIntegrity(bundle);
+  const sourceIdentityOk = verifyBundledSourceIdentity(bundle);
+  let signatureVerdict: BundleSignatureVerdict = { status: 'unsigned' };
+  if (bundle.manifest.signature) {
+    if (!integrityOk || !sourceIdentityOk) {
+      logger.error('Signed bundle integrity or source-identity mismatch; signature cannot be trusted.');
+      return 2;
+    }
+    try {
+      const config = await readOpenLoreConfig(projectRoot);
+      signatureVerdict = verifyBundleSignature(bundle, config?.bundle?.trustedSigners ?? []);
+    } catch (err) {
+      logger.error(err instanceof Error ? err.message : String(err));
+      return 2;
+    }
+  }
+
   // (1)(3) cheap pre-materialize gates — version + schema.
   const pre = preMaterializeRebuildReason(bundle);
   if (pre) return fullRebuild(projectRoot, analysisDir, pre.detail);
 
   // (2) payload byte-integrity (tamper / corruption / hand-merge).
-  if (!verifyPayloadIntegrity(bundle)) {
+  if (!integrityOk) {
     return fullRebuild(projectRoot, analysisDir, 'artifact payload digest mismatch (corrupt or hand-edited).');
+  }
+  if (!sourceIdentityOk) {
+    return fullRebuild(projectRoot, analysisDir, 'bundle manifest source identity does not match fingerprint.json.');
   }
 
   // Materialize to a staging dir so the live index is never half-clobbered by a bundle that
@@ -290,41 +360,66 @@ export async function runImport(artifact: string, opts: ImportOptions): Promise<
     } else {
       // (5) currency vs the working tree.
       const isGitRepo = await isGitRepository(projectRoot);
+      const consumerSourceState = await captureSourceState(projectRoot);
       let commitMatchesHead = false;
       let commitIsAncestor = false;
       if (isGitRepo && sourceCommit) {
-        const head = await gitResolveCommit(projectRoot, 'HEAD');
+        const head = consumerSourceState.commit;
         const source = await gitResolveCommit(projectRoot, sourceCommit);
         commitMatchesHead = !!head && !!source && head === source;
         if (!commitMatchesHead && source && head) {
           commitIsAncestor = await gitIsAncestor(projectRoot, source, head);
         }
       }
-
-      const decision = currencyDecision({ isGitRepo, sourceCommit, commitMatchesHead, commitIsAncestor });
+      const decision = currencyDecision({
+        isGitRepo,
+        sourceCommit,
+        sourceTreeState: bundle.manifest.sourceTreeState ?? 'unknown',
+        consumerTreeState: consumerSourceState.treeState,
+        commitMatchesHead,
+        commitIsAncestor,
+      });
       if (decision.action === 'rebuild') {
         rebuildReason = decision.detail;
       } else {
-        await promoteStagedIndex(bundle, staging, analysisDir);
-        // Rebuild the keyword search indexes so orient/search_code/search_specs work immediately
-        // (offline, no re-parse) — making the imported index equivalent to a fresh analyze.
         let searchBuilt = false;
-        try {
-          searchBuilt = await buildKeywordSearchIndex(projectRoot, analysisDir);
-        } catch (err) {
-          logger.debug(`import: keyword search index not built (${err instanceof Error ? err.message : String(err)})`);
-        }
-        try {
-          await buildSpecSearchIndex(projectRoot, analysisDir);
-        } catch (err) {
-          logger.debug(`import: spec search index not built (${err instanceof Error ? err.message : String(err)})`);
-        }
-        if (decision.action === 'import-unverified') {
-          logger.success(`Imported graph bundle (${bundle.manifest.files.length} files, schema v${bundle.manifest.schemaVersion}).`);
-          logger.warning(decision.detail);
-        } else {
-          logger.success(`Imported graph bundle — verified current at commit ${sourceCommit}.`);
-        }
+        await promoteStagedIndex(bundle, staging, analysisDir, {
+          beforePublish: async () => {
+            // Rebuild derived indexes inside the same writer transaction so another analyze
+            // cannot publish a different graph between graph promotion and search construction.
+            try {
+              searchBuilt = await buildKeywordSearchIndex(projectRoot, analysisDir);
+            } catch (err) {
+              searchBuilt = false;
+              await rm(join(analysisDir, 'vector-index'), { recursive: true, force: true });
+              await rm(join(analysisDir, 'vector-index-meta.json'), { force: true });
+              logger.debug(`import: keyword search index not built (${err instanceof Error ? err.message : String(err)})`);
+            }
+            try {
+              await buildSpecSearchIndex(projectRoot, analysisDir);
+            } catch (err) {
+              searchBuilt = false;
+              await rm(join(analysisDir, 'vector-index'), { recursive: true, force: true });
+              await rm(join(analysisDir, 'vector-index-meta.json'), { force: true });
+              logger.debug(`import: spec search index not built (${err instanceof Error ? err.message : String(err)})`);
+            }
+          },
+        });
+        const finalConsumerState = await captureSourceState(projectRoot);
+        const reportedDecision = finalConsumerState.commit === consumerSourceState.commit
+          && finalConsumerState.treeState === consumerSourceState.treeState
+          ? decision
+          : {
+              action: 'import-currency-unknown' as const,
+              reason: 'consumer-changed-during-import',
+              detail: 'Currency is unknown because the checkout changed while the bundle was being imported.',
+            };
+        logger.success(
+          `Imported graph bundle (${bundle.manifest.files.length} files, schema v${bundle.manifest.schemaVersion}). ` +
+          provenanceDetail(signatureVerdict),
+        );
+        if (reportedDecision.action === 'import-current') logger.info('Currency', reportedDecision.detail);
+        else logger.warning(reportedDecision.detail);
         logger.info(
           'Search',
           searchBuilt
@@ -341,6 +436,18 @@ export async function runImport(artifact: string, opts: ImportOptions): Promise<
 
   if (rebuildReason) return fullRebuild(projectRoot, analysisDir, rebuildReason);
   return 0;
+}
+
+export async function runImport(artifact: string, opts: ImportOptions): Promise<number> {
+  const projectRoot = resolve(opts.projectRoot ?? process.cwd());
+  // Global --config is registered before subcommand options are parsed. Scope its trust policy
+  // to the effective import root, then restore process-global routing for embedders/tests.
+  const restoreConfigRoot = retargetPrimaryConfigRoot(projectRoot);
+  try {
+    return await runImportWithEffectiveConfig(artifact, opts);
+  } finally {
+    restoreConfigRoot();
+  }
 }
 
 export const importCommand = new Command('import')
