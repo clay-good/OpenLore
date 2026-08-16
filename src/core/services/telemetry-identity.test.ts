@@ -9,7 +9,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   emit,
@@ -17,6 +17,8 @@ import {
   setTelemetryIdentity,
   setTelemetryIdentitySource,
   resetTelemetryIdentityForTests,
+  relativizeTelemetryPaths,
+  _relativizeTelemetryPathsWithPrefixes,
 } from './telemetry.js';
 import { OPENLORE_DIR } from '../../constants.js';
 
@@ -129,14 +131,18 @@ describe('telemetry identity', () => {
     expect(event['session_id']).toBeTypeOf('string');
   });
 
-  it('emits nothing at all when telemetry is disabled', () => {
-    delete process.env['OPENLORE_TELEMETRY'];
+  it.each([undefined, '', '0', 'false', 'true', 'typo'])(
+    'emits nothing unless OPENLORE_TELEMETRY is exactly 1 (value: %s)',
+    (value) => {
+    if (value === undefined) delete process.env['OPENLORE_TELEMETRY'];
+    else process.env['OPENLORE_TELEMETRY'] = value;
     setTelemetryIdentity('claude-code', '2.1.0');
 
     emit(dir, 'mcp', { event: 'tool_call', tool: 'orient', ms: 1 });
 
     expect(readEvents('mcp')).toHaveLength(0);
-  });
+    },
+  );
 
   it('still redacts secrets once identity is merged in', () => {
     setTelemetryIdentity('claude-code', '2.1.0');
@@ -144,5 +150,38 @@ describe('telemetry identity', () => {
 
     const line = JSON.stringify(readEvents('mcp')[0]);
     expect(line).not.toContain('sk-ant-secret-value');
+  });
+
+  it('relativizes project and home paths in error and module fields', () => {
+    const projectFile = join(dir, 'src', 'payments.ts');
+    const homeFile = join(homedir(), 'private', 'outside.ts');
+
+    emit(dir, 'mcp', {
+      event: 'tool_error',
+      error: `failed at ${projectFile}:12 and ${homeFile}`,
+      module: projectFile,
+      untouched: projectFile,
+    });
+
+    const [event] = readEvents('mcp');
+    expect(event['error']).toContain('src/payments.ts:12');
+    expect(event['error']).toContain('~/private/outside.ts');
+    expect(event['module']).toBe(join('src', 'payments.ts'));
+    expect(event['untouched']).toBe(projectFile);
+  });
+
+  it('keeps non-path telemetry text byte-identical', () => {
+    expect(relativizeTelemetryPaths(dir, 'auth module timed out')).toBe('auth module timed out');
+  });
+
+  it('relativizes Windows prefixes with either slash spelling', () => {
+    const root = 'C:\\Users\\Ada\\repo';
+    const home = 'C:\\Users\\Ada';
+    const value = 'C:/Users/Ada/repo/src/a.ts C:\\Users\\Ada\\repo\\src\\b.ts ' +
+      'C:/Users/Ada/private/c.ts C:\\Users\\Ada\\private\\d.ts';
+
+    expect(_relativizeTelemetryPathsWithPrefixes(value, root, home, true)).toBe(
+      'src/a.ts src\\b.ts ~/private/c.ts ~/private\\d.ts',
+    );
   });
 });

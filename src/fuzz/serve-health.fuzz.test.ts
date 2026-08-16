@@ -71,8 +71,11 @@ describe('fuzz: serve health validation (daemon identity containment)', () => {
           { weight: 4, arbitrary: fc.constant(true) },
           { weight: 1, arbitrary: fc.anything() },
         ),
+        draining: fc.oneof(
+          { weight: 4, arbitrary: fc.boolean() },
+          { weight: 1, arbitrary: fc.anything() },
+        ),
       },
-      { requiredKeys: [] },
     );
 
     let accepted = 0;
@@ -103,6 +106,7 @@ describe('fuzz: serve health validation (daemon identity containment)', () => {
           Array.isArray(h.tools) &&
           (h.tools as unknown[]).every((t) => typeof t === 'string') &&
           typeof h.tokenProtected === 'boolean' &&
+          typeof h.draining === 'boolean' &&
           // and the returned object is well-formed: root canonicalized, pid copied.
           result.root === canonicalServeRoot(h.root) &&
           result.pid === h.pid
@@ -125,6 +129,7 @@ describe('fuzz: serve health validation (daemon identity containment)', () => {
       tools: fc.array(fc.string()),
       tokenProtected: fc.boolean(),
       tokenAuthenticated: fc.constant(true),
+      draining: fc.boolean(),
     });
     fc.assert(
       fc.property(validExceptRoot, (base) => {
@@ -147,6 +152,7 @@ describe('fuzz: serve health validation (daemon identity containment)', () => {
       tools: ['a', 'b'],
       tokenProtected: true,
       tokenAuthenticated: true,
+      draining: false,
     } as const;
 
     // Sanity: it accepts with a matching descriptor.
@@ -177,6 +183,7 @@ describe('fuzz: serve health validation (daemon identity containment)', () => {
           tools: ['a', 'b'],
           tokenProtected: true,
           tokenAuthenticated: true,
+          draining: false,
         },
         '/tmp/x',
         { pid: 123, token: 't' },

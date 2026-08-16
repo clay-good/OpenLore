@@ -61,7 +61,10 @@ const OWNERSHIP_LOCK_FILE = '.analysis-owner.lock';
 const STALE_MS = 120_000;     // steal a lock older than this (crashed/killed holder)
 const POLL_MS = 150;
 const MAX_WAIT_MS = 180_000;
-const NAMESPACE_GATE_MAX_WAIT_MS = 5_000;
+// Namespace ownership is fail-closed, but a loaded process can pause a holder's
+// event loop for several seconds. Match the serve/start bound before declaring a
+// complete PID-bearing gate stranded; explicit test policies can use shorter waits.
+const NAMESPACE_GATE_MAX_WAIT_MS = 30_000;
 /**
  * Ownership heartbeat window. An owner refreshes its payload at least this often
  * (the progress sidecar runs at 15s, so a live owner refreshes well inside it);
@@ -289,6 +292,7 @@ export async function acquireLockAt(
         // same reason — see `refresh`.) `-1` means identity is unavailable.
         const inode = (await tryHandle(async () => (await fh.stat()).ino)) ?? -1;
         let released = false;
+        let releaseInFlight: Promise<void> | null = null;
         let refreshTail = Promise.resolve();
         return {
           bestEffort: false,
@@ -309,20 +313,32 @@ export async function acquireLockAt(
           },
           release: async () => {
             if (released) return;
-            released = true;
-            await tryHandle(() => fh.close());
-            // The namespace gate makes this identity-check-plus-unlink one
-            // serialized operation relative to every acquire and steal. If a
-            // custom policy ever reclaimed this holder, its successor has a
-            // different inode and remains untouched.
-            await refreshTail;
-            const releaseNamespace = await acquireNamespaceGate(lockPath, namespaceGateMaxWaitMs);
             try {
-              if (inode < 0) return; // unknown identity fails closed
-              const current = await stat(lockPath).catch(() => null);
-              if (current?.ino === inode) await unlink(lockPath).catch(() => {});
-            } finally {
-              await releaseNamespace();
+              if (!releaseInFlight) {
+                releaseInFlight = (async () => {
+                  await tryHandle(() => fh.close());
+                  // The namespace gate makes this identity-check-plus-unlink one
+                  // serialized operation relative to every acquire and steal. If a
+                  // custom policy ever reclaimed this holder, its successor has a
+                  // different inode and remains untouched.
+                  await refreshTail;
+                  const releaseNamespace = await acquireNamespaceGate(lockPath, namespaceGateMaxWaitMs);
+                  try {
+                    if (inode < 0) return; // unknown identity fails closed
+                    const current = await stat(lockPath).catch(() => null);
+                    if (current?.ino === inode) await unlink(lockPath).catch(() => {});
+                  } finally {
+                    await releaseNamespace();
+                  }
+                })();
+              }
+              await releaseInFlight;
+              released = true;
+            } catch (err) {
+              // Closing the fd is irreversible, but namespace cleanup is safe to
+              // retry because it remains bound to the acquired inode identity.
+              releaseInFlight = null;
+              throw err;
             }
           },
         };

@@ -3,6 +3,7 @@
  *
  * Gate: OPENLORE_TELEMETRY=1 (disabled by default).
  * Writes append-only JSONL to .openlore/telemetry/<domain>.jsonl.
+ * Local only: events are never transmitted; error/module paths are relativized.
  * Never throws — telemetry must not crash the hot path.
  *
  * Rotation: when a domain file exceeds ROTATE_THRESHOLD_BYTES, it is renamed
@@ -11,7 +12,8 @@
 
 import { appendFileSync, mkdirSync, renameSync, statSync, unlinkSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { join } from 'node:path';
+import { homedir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { OPENLORE_DIR } from '../../constants.js';
 import { redactSecrets } from './secret-redaction.js';
 
@@ -21,6 +23,46 @@ const ROTATE_THRESHOLD_BYTES = 50 * 1024 * 1024;  // 50 MB
  *  Exported so readers that must span rotation (e.g. the panic accuracy gate) stay in lockstep. */
 export const MAX_ROTATED_FILES = 5;
 const _createdDirs = new Set<string>();
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function pathPrefixPattern(value: string): string {
+  return value.split(/[\\/]+/).map(escapeRegExp).join('[\\\\/]');
+}
+
+/** Shared implementation exported only so separator parity is testable on every OS. */
+export function _relativizeTelemetryPathsWithPrefixes(
+  value: string,
+  root: string,
+  home: string,
+  caseInsensitive = process.platform === 'win32',
+): string {
+  const flags = caseInsensitive ? 'gi' : 'g';
+  const rootPattern = pathPrefixPattern(root);
+  let result = value
+    .replace(new RegExp(`${rootPattern}[\\\\/]`, flags), '')
+    .replace(new RegExp(`${rootPattern}(?=$|[\\s:'"),\\]])`, flags), '.');
+  if (home && home !== root) {
+    const homePattern = pathPrefixPattern(home);
+    result = result
+      .replace(new RegExp(`${homePattern}[\\\\/]`, flags), '~/')
+      .replace(new RegExp(`${homePattern}(?=$|[\\s:'"),\\]])`, flags), '~');
+  }
+  return result;
+}
+
+/**
+ * Remove local absolute-path disclosure from telemetry fields that carry free
+ * text. Paths under the project become project-relative; paths elsewhere under
+ * the user's home become `~`-relative. Other text is unchanged.
+ */
+export function relativizeTelemetryPaths(directory: string, value: string): string {
+  const root = resolve(directory);
+  const home = homedir();
+  return _relativizeTelemetryPathsWithPrefixes(value, root, home);
+}
 
 // ── Emitting identity (change: scope-telemetry-by-agent-and-session) ─────────
 // A repository is a shared surface: two agents (a coding agent and one it spawns)
@@ -134,7 +176,7 @@ export function emit(
   domain: string,
   payload: Record<string, unknown>,
 ): void {
-  if (!process.env['OPENLORE_TELEMETRY']) return;
+  if (process.env['OPENLORE_TELEMETRY'] !== '1') return;
   if (!directory) return;
   try {
     const dir = join(directory, OPENLORE_DIR, TELEMETRY_SUBDIR);
@@ -150,7 +192,14 @@ export function emit(
     // redacted with the payload — the agent name comes from an external client.
     // Payload fields win over identity, so a call site that already states its
     // own `agent` (the orient events) keeps that attribution.
-    const safe = redactSecrets({ ...getTelemetryIdentity(), ...payload });
+    const pathSafePayload = { ...payload };
+    for (const field of ['error', 'module'] as const) {
+      const value = pathSafePayload[field];
+      if (typeof value === 'string') {
+        pathSafePayload[field] = relativizeTelemetryPaths(directory, value);
+      }
+    }
+    const safe = redactSecrets({ ...getTelemetryIdentity(), ...pathSafePayload });
     const line = JSON.stringify({ ts: new Date().toISOString(), ...safe }) + '\n';
     appendFileSync(filePath, line, 'utf-8');
   } catch {

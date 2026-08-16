@@ -25,7 +25,9 @@ write-descriptor window, so two concurrent starts for one root (for example, two
 racing through `ensureServeDaemon`) resolve to exactly one daemon: the loser reuses the winner's
 descriptor instead of binding a second port, running a second watcher on the same analysis
 directory, or orphaning the first daemon by overwriting its descriptor. The lock reuses the
-existing decisions-lock exclusive-create shape, including stale-lock recovery.
+existing decisions-lock exclusive-create shape. A stale PID-bearing ownership lock SHALL be
+reclaimed. A malformed lock or stranded namespace gate SHALL fail closed with bounded,
+actionable manual-recovery guidance rather than wait forever or permit a second daemon.
 
 #### Scenario: Two concurrent starts yield one daemon
 
@@ -34,12 +36,55 @@ existing decisions-lock exclusive-create shape, including stale-lock recovery.
 - **THEN** exactly one binds and writes the descriptor; the other returns the winner's endpoint;
   exactly one watcher runs on the analysis directory
 
-#### Scenario: A crashed starter does not wedge future starts
+#### Scenario: A stale ownership lock is recovered safely
 
-- **GIVEN** a starter that died while holding the lock
+- **GIVEN** a starter that died after writing its PID-bearing ownership lock
 - **WHEN** a later start finds the stale lockfile
 - **THEN** the stale lock is detected and recovered (the decisions-lock discipline) and startup
   proceeds
+
+#### Scenario: An ambiguous abandoned lock fails closed
+
+- **GIVEN** a malformed ownership lock or stranded lock namespace gate
+- **WHEN** a later starter cannot prove that automatic reclamation is safe
+- **THEN** startup stops after a bounded wait and reports the exact operator cleanup condition
+  without binding a second daemon
+
+### Requirement: ServeLifecycleDiscoveryIsCoordinated
+
+The daemon SHALL publish a validated `ready` descriptor only after its watcher, teardown, repair
+host, and signal handlers are initialized. Teardown SHALL announce `draining` before acknowledging
+shutdown, reject new tool work, and remove the descriptor only after rebuild, watcher, listener,
+and cache cleanup. CLI stop SHALL retain the per-root lifecycle lock until that removal. Ordinary
+MCP and Pi readers SHALL treat `draining` as unavailable. A later lifecycle owner MAY restore
+`ready` only when an authenticated root/PID/token health proof says teardown never began.
+
+#### Scenario: A replacement waits for teardown
+
+- **GIVEN** a daemon that has announced `draining` while a rebuild or watcher is still active
+- **WHEN** another client starts or discovers a daemon for the same root
+- **THEN** it does not dispatch to the draining endpoint or bind a replacement until the old
+  descriptor is removed after cleanup
+
+#### Scenario: A stopper crashes before requesting shutdown
+
+- **GIVEN** a verified healthy daemon whose descriptor was changed to `draining` but whose health
+  response says teardown did not begin
+- **WHEN** a later lifecycle owner acquires the root lock
+- **THEN** it MAY restore `ready` and reuse or stop that exact authenticated daemon
+
+### Requirement: ServeNetworkBindHasTrustedDiscovery
+
+A network-visible serve bind SHALL require a token and SHALL use only wildcard `0.0.0.0` or `::`.
+Its descriptor SHALL publish the corresponding loopback address, and every reader SHALL format
+IPv6 loopback with URL brackets. Concrete non-loopback interface binds SHALL be rejected because
+they cannot expose the same listener through the trusted loopback descriptor boundary.
+
+#### Scenario: IPv6 wildcard discovery remains reusable
+
+- **GIVEN** a token-protected daemon bound to `::`
+- **WHEN** CLI, MCP, or Pi reads and probes its descriptor
+- **THEN** discovery uses `http://[::1]:PORT` and reuses the authenticated daemon
 
 ### Requirement: ServeTeardownDrainsInFlightRebuilds
 

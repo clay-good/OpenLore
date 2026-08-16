@@ -1,13 +1,13 @@
 # Harden the daemon lifecycle: protect the token, win the start race, drain before exit, bound the caches
 
-> Status: PROPOSED (2026-07-03, e2e audit pass 3). Five verified defects in `openlore serve`: the
+> Status: ARCHIVED (2026-08-16; proposed 2026-07-03, e2e audit pass 3). Five verified defects in `openlore serve`: the
 > auth token lands world-readable on disk; two concurrent starts both pass the single-instance
 > guard and run two watchers on one analysis dir; shutdown hard-kills a mid-flight rebuild the
 > idle reaper can even trigger during one; every client-supplied directory permanently pins a
 > parsed context and an open SQLite handle; and telemetry error fields can leak absolute paths.
 > Chmod the descriptor, lock the start, drain the teardown, confine to the served root, relativize.
 
-## The gap
+## Why
 
 - **(a) Secret at rest, world-readable.** The daemon's auth token — the thing that stops "any
   local process on this machine" from calling the tools (`serve.ts:326`, warning at `:339-345`) —
@@ -41,20 +41,22 @@
   paths. Telemetry is opt-in and never transmitted off-machine — this is hygiene for a local
   file, not an exfiltration fix.
 
-## What changes
+## What Changes
 
 1. **Descriptor written 0o600**: write, then `chmod` to beat the umask (`serve.ts:599`).
-2. **Exclusive-create start lock**: `.openlore/serve.lock` (the `open(path, 'wx')` shape
-   `src/core/decisions/lock.ts:39` already uses) held across discover → bind → write-descriptor;
-   the loser polls and reuses the winner's descriptor instead of starting. One daemon, one
-   watcher per root.
+2. **Serialized lifecycle discovery**: an exclusive `.openlore/serve.lock` (the shared advisory
+   lock shape) covers discover → bind → ready-descriptor and CLI stop → descriptor removal. The
+   daemon publishes `ready → draining → removed`; ordinary MCP/Pi readers treat `draining` as
+   unavailable, and a replacement waits for removal. A verified healthy daemon can restore a
+   `draining` marker stranded by a stopper that crashed before sending shutdown. One daemon, one
+   watcher, and one rebuild owner per root through startup and teardown.
 3. **Teardown drains**: `teardown` awaits `rebuildRunning` completion (bounded wait, then
    disclose and proceed); the idle reaper is suppressed while a rebuild is in flight (rebuild
    start/finish gates the timer — no new timeout constant). Independent of
    `harden-artifact-write-atomicity` (atomic JSON writes) — this is process-lifetime ordering,
    not file-write atomicity.
-4. **Confine the daemon to its served root** (chosen over an LRU): requests naming a directory
-   other than the served root (or its subdirectories resolving into it) are rejected with an
+4. **Confine the daemon to its exact served root** (chosen over an LRU): requests naming a directory
+   other than the canonical served root (including subdirectories) are rejected with an
    error naming the served root and how to start a daemon for the other path. Justification:
    clients discover a daemon via that root's `serve.json`, so cross-root requests only arise
    from misuse or probing; confinement removes both the unbounded growth and a trust hazard in
@@ -62,6 +64,10 @@
    foreign-directory trust problem. The in-process MCP server path is unaffected.
 5. **Relativize telemetry paths**: error/module fields pass through a path-relativizer (project
    root → relative; home → `~`) before `emit` (`mcp.ts:2479`, `:2666`).
+6. **Keep network discovery local**: token-protected network binds are limited to wildcard
+   `0.0.0.0`/`::`; descriptors publish the corresponding loopback target, and every reader uses
+   an IPv6-bracket-safe shared URL formatter. Concrete interface binds are rejected because they
+   cannot provide a trusted loopback discovery endpoint.
 
 Retained as-is (already solid, not re-fixed): watcher batch coalescing + single-flight flush
 (`mcp-watcher.ts:359-405`), `followSymlinks: false` (`:266`), the EdgeStore per-file transaction
