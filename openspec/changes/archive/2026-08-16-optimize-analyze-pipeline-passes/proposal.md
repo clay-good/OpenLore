@@ -5,7 +5,7 @@
 > and source, type inference runs once per caller, and call attribution uses an interval index.
 > Serial, worker, and warm-cache lanes preserve the complete pre-change graph bytes.
 
-## The gap
+## Why
 
 - **(a) Class relationships re-parse every class-bearing file.** The late
   `extractClassRelationships` pass parsed each supported file a second time.
@@ -26,7 +26,7 @@
 - **(f) Per-file quadratic node handling.** `findEnclosingFunction` linear-scanned all of a
   file's nodes per call site; several extractors also scanned the whole node list for membership.
 
-## What changes
+## What Changes
 
 1. **Extract plain-data class and dynamic-dispatch facts while each Pass-1 tree is alive.** The
    result must survive worker structured-clone and persistent fact-cache JSON boundaries; parser

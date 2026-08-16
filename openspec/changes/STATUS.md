@@ -156,7 +156,6 @@ trust boundary for served content.
 | `harden-spec-verification-honesty` | no silent decision loss, no shrinking denominator, no fabricated requirement claims |
 | `harden-vector-index-coherence` | a rebuilt index must never be served through stale process caches |
 | `harden-view-server-file-confinement` | The view server's file access is lexical-only — a symlink in a cloned repo escapes the project root; and it serves arbitrarily stale analysis as current |
-| `optimize-analyze-pipeline-passes` | One analyze makes 3-4 full passes over the corpus, re-parsing (and re-reading from disk) trees Pass 1 already built |
 | `optimize-incremental-and-coldstart-scale` | A branch switch grinds through the per-file incremental pipeline with no bulk fallback, reloading the full node table once per changed file |
 | `optimize-serving-hot-path-caches` | The default tools rebuild derived graph structures and re-parse multi-MB artifacts on every call, and re-scan the whole corpus per keyword search |
 | `prioritize-incremental-closure-budget` | significance-ordered convergence, and a stale region that says how much it costs you |

@@ -18,7 +18,7 @@
       queries compile once per cache key; type inference runs once per eligible caller
 - [x] Resident HTTP test produces non-empty calls/routes/edges from nonexistent paths with zero
       file opens
-- [ ] Full suite green
+- [x] Full suite green
 
 ## Spec
 - [x] `analyzer` delta: ADD AnalyzeReusesPassOneFacts
