@@ -68,7 +68,10 @@ changed cited files and active watcher/serve hosts schedule repository-scoped re
 the built graph, sparse refusals carry receipts, fresh empty spec stores are informational, and
 uninstall names retained data; `fix-mcp-argument-contract` (2026-08-15, archived) — omitted tool
 directories resolve to the validated server launch root, explicit roots still win, and strict
-advertised schemas reject unknown arguments before any watcher, rebuild, telemetry, or write.
+advertised schemas reject unknown arguments before any watcher, rebuild, telemetry, or write;
+`harden-llm-request-lifecycle` (2026-08-15, archived) — timeouts abort provider fetches and
+streams, provider ceilings are constants-backed, correction requests retain their contract,
+truncation is disclosed once, and fallback model ids are pricing-consistent.
 
 After this table was compiled, four research sweeps added 32 more proposals (all validate; not yet
 folded into the table): 10 in `FIELD-RESEARCH-2026-07.md`, 10 in `ECOSYSTEM-RESEARCH-2026-07-27.md`,
@@ -144,7 +147,6 @@ trust boundary for served content.
 | `harden-llm-log-and-telemetry-honesty` | LLM logs persist full source always-on and unrotated; telemetry's kill-switch is inverted and its disclosure is narrower than what it records |
 | `harden-llm-output-contract` | shape-check what you parse, disclose what you drop |
 | `harden-llm-prompt-injection-boundary` | Untrusted repo content is instruction-level in every LLM prompt, and the agent-CLI providers run it tool-enabled |
-| `harden-llm-request-lifecycle` | a timeout must cancel the request, not abandon it |
 | `harden-openspec-writer-fidelity` | The spec writer deletes human content on merge, discards validation results, and over-deletes domains that a filter never meant to remove |
 | `harden-pi-config-and-daemon-fidelity` | The Pi extension clobbers governance config, blocks the first turn on an unbounded orient, and misdiagnoses a missing binary as "not analyzed" |
 | `harden-review-render-and-action` | head-controlled text is hostile, and stale analysis must say so |

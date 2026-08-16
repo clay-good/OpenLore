@@ -16,6 +16,11 @@ import { announceInsecureTls, withRelaxedTls } from './tls-scope.js';
 import {
   CLAUDE_MAX_CONTEXT_TOKENS,
   CLAUDE_MAX_OUTPUT_TOKENS,
+  ANTHROPIC_MAX_OUTPUT_TOKENS,
+  OPENAI_MAX_OUTPUT_TOKENS,
+  OPENAI_COMPAT_MAX_OUTPUT_TOKENS,
+  COPILOT_MAX_OUTPUT_TOKENS,
+  GEMINI_MAX_OUTPUT_TOKENS,
   MISTRAL_VIBE_MAX_CONTEXT_TOKENS,
   MISTRAL_VIBE_MAX_OUTPUT_TOKENS,
   LLM_CLI_MAX_BUFFER_BYTES,
@@ -351,7 +356,7 @@ export interface CompletionResponse {
  */
 export interface LLMProvider {
   name: string;
-  generateCompletion(request: CompletionRequest): Promise<CompletionResponse>;
+  generateCompletion(request: CompletionRequest, signal?: AbortSignal): Promise<CompletionResponse>;
   countTokens(text: string): number;
   maxContextTokens: number;
   maxOutputTokens: number;
@@ -616,6 +621,41 @@ export function lookupPricing(
   return table.default ?? { input: 3.0, output: 15.0 };
 }
 
+/** Exact priced model ids for consistency checks and fallback catalog construction. */
+export function pricedModelIds(providerName: string): string[] {
+  return Object.keys(PRICING[providerName] ?? {}).filter((id) => id !== 'default');
+}
+
+/**
+ * Return only fallback model ids that have an exact entry in the pricing table
+ * for the endpoint. Unknown endpoints stay empty instead of guessing.
+ */
+export function knownModelsForEndpoint(baseUrl: string): string[] {
+  let hostname: string;
+  try {
+    hostname = new URL(baseUrl).hostname.toLowerCase();
+  } catch {
+    return [];
+  }
+  const compatible = pricedModelIds('openai-compat');
+
+  if (hostname === 'codestral.mistral.ai') {
+    return compatible.filter((id) => id.startsWith('codestral-'));
+  }
+  if (hostname === 'api.mistral.ai') {
+    return compatible.filter((id) => id.startsWith('mistral-') || id.startsWith('codestral-'));
+  }
+  if (hostname === 'api.openai.com') {
+    // OpenAICompatibleProvider accounts against the openai-compat table. Its
+    // generic fallback pricing cannot honestly certify OpenAI catalog entries.
+    return [];
+  }
+  if (hostname === 'api.groq.com') {
+    return compatible.filter((id) => id.startsWith('llama-'));
+  }
+  return [];
+}
+
 // ============================================================================
 // TOKEN ESTIMATION
 // ============================================================================
@@ -655,7 +695,7 @@ function tokenCount(v: unknown): number {
 export class AnthropicProvider implements LLMProvider {
   name = 'anthropic';
   maxContextTokens = 200000;
-  maxOutputTokens = 4096;
+  maxOutputTokens = ANTHROPIC_MAX_OUTPUT_TOKENS;
 
   private apiKey: string;
   private model: string;
@@ -674,7 +714,7 @@ export class AnthropicProvider implements LLMProvider {
     return estimateTokens(text);
   }
 
-  async generateCompletion(request: CompletionRequest): Promise<CompletionResponse> {
+  async generateCompletion(request: CompletionRequest, signal?: AbortSignal): Promise<CompletionResponse> {
     const response = await withRelaxedTls(() => fetch(`${this.baseUrl}/messages`, {
       method: 'POST',
       headers: {
@@ -692,6 +732,7 @@ export class AnthropicProvider implements LLMProvider {
         ],
         stop_sequences: request.stopSequences,
       }),
+      signal,
     }), this.relaxTls);
 
     if (!response.ok) {
@@ -846,7 +887,7 @@ function normalizeOpenAIResponseSchema(schema: object): object {
 export class OpenAIProvider implements LLMProvider {
   name = 'openai';
   maxContextTokens = 128000;
-  maxOutputTokens = 4096;
+  maxOutputTokens = OPENAI_MAX_OUTPUT_TOKENS;
 
   private apiKey: string;
   private model: string;
@@ -865,7 +906,7 @@ export class OpenAIProvider implements LLMProvider {
     return estimateTokens(text);
   }
 
-  async generateCompletion(request: CompletionRequest): Promise<CompletionResponse> {
+  async generateCompletion(request: CompletionRequest, signal?: AbortSignal): Promise<CompletionResponse> {
     const messages: Array<{ role: string; content: string }> = [
       { role: 'system', content: request.systemPrompt },
       { role: 'user', content: request.userPrompt },
@@ -903,6 +944,7 @@ export class OpenAIProvider implements LLMProvider {
         'Authorization': `Bearer ${this.apiKey}`,
       },
       body: JSON.stringify(body),
+      signal,
     }), this.relaxTls);
 
     if (!response.ok) {
@@ -965,7 +1007,7 @@ interface ModelInfo {
 export class OpenAICompatibleProvider implements LLMProvider {
   name = 'openai-compat';
   maxContextTokens = 128000;
-  maxOutputTokens = 4096;
+  maxOutputTokens = OPENAI_COMPAT_MAX_OUTPUT_TOKENS;
 
   private apiKey: string;
   private model: string;
@@ -1014,46 +1056,10 @@ export class OpenAICompatibleProvider implements LLMProvider {
    * Get known models for common API endpoints when /models is not available
    */
   private getKnownModelsForEndpoint(): string[] {
-    const url = this.baseUrl.toLowerCase();
-
-    if (url.includes('codestral.mistral.ai')) {
-      return ['codestral-2508', 'codestral-latest'];
-    }
-
-    if (url.includes('api.mistral.ai')) {
-      return [
-        'mistral-large-3-25-12',
-        'mistral-medium-3-1-25-08',
-        'mistral-small-4-0-26-03',
-        'mistral-nemo-12b-24-07',
-        'codestral-2508',
-        'devstral-2-25-12'
-      ];
-    }
-
-    if (url.includes('api.openai.com')) {
-      return [
-        'gpt-4o',
-        'gpt-4o-mini',
-        'gpt-4-turbo',
-        'gpt-4',
-        'gpt-3.5-turbo'
-      ];
-    }
-
-    if (url.includes('api.groq.com')) {
-      return [
-        'llama-3.1-70b-versatile',
-        'llama-3.1-8b-instant',
-        'mixtral-8x7b-32768'
-      ];
-    }
-
-    // For unknown endpoints, return empty array
-    return [];
+    return knownModelsForEndpoint(this.baseUrl);
   }
 
-  async generateCompletion(request: CompletionRequest): Promise<CompletionResponse> {
+  async generateCompletion(request: CompletionRequest, signal?: AbortSignal): Promise<CompletionResponse> {
     const body: Record<string, unknown> = {
       model: this.model,
       messages: [
@@ -1090,6 +1096,7 @@ export class OpenAICompatibleProvider implements LLMProvider {
         'Authorization': `Bearer ${this.apiKey}`,
       },
       body: JSON.stringify(body),
+      signal,
     }), this.relaxTls);
 
     if (!response.ok) {
@@ -1112,40 +1119,61 @@ export class OpenAICompatibleProvider implements LLMProvider {
     const reader = response.body!.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
+    let reachedTransportEof = false;
+    let cancelPromise: Promise<void> | undefined;
+    const cancelReader = (reason?: unknown) => {
+      cancelPromise ??= reader.cancel(reason).catch(() => undefined);
+      return cancelPromise;
+    };
+    const abortStream = () => {
+      void cancelReader(signal?.reason);
+    };
+    signal?.addEventListener('abort', abortStream, { once: true });
 
-    outer: while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() ?? '';
+    try {
+      outer: while (true) {
+        signal?.throwIfAborted();
+        const { done, value } = await reader.read();
+        signal?.throwIfAborted();
+        if (done) {
+          reachedTransportEof = true;
+          break;
+        }
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
 
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        const data = line.slice(6).trim();
-        if (data === '[DONE]') break outer;
-        try {
-          const chunk = JSON.parse(data) as {
-            choices?: Array<{ delta?: { content?: string }; finish_reason?: string }>;
-            usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
-            model?: string;
-          };
-          const delta = chunk.choices?.[0]?.delta?.content;
-          if (delta) content += delta;
-          const fr = chunk.choices?.[0]?.finish_reason;
-          if (fr) finishReason = fr === 'length' ? 'length' : 'stop';
-          if (chunk.model) model = chunk.model;
-          if (chunk.usage) {
-            const inputTokens = tokenCount(chunk.usage.prompt_tokens);
-            const outputTokens = tokenCount(chunk.usage.completion_tokens);
-            usage = {
-              inputTokens,
-              outputTokens,
-              totalTokens: tokenCount(chunk.usage.total_tokens) || inputTokens + outputTokens,
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          const data = line.slice(6).trim();
+          if (data === '[DONE]') break outer;
+          try {
+            const chunk = JSON.parse(data) as {
+              choices?: Array<{ delta?: { content?: string }; finish_reason?: string }>;
+              usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+              model?: string;
             };
+            const delta = chunk.choices?.[0]?.delta?.content;
+            if (delta) content += delta;
+            const fr = chunk.choices?.[0]?.finish_reason;
+            if (fr) finishReason = fr === 'length' ? 'length' : 'stop';
+            if (chunk.model) model = chunk.model;
+            if (chunk.usage) {
+              const inputTokens = tokenCount(chunk.usage.prompt_tokens);
+              const outputTokens = tokenCount(chunk.usage.completion_tokens);
+              usage = {
+                inputTokens,
+                outputTokens,
+                totalTokens: tokenCount(chunk.usage.total_tokens) || inputTokens + outputTokens,
+              };
+            }
+          } catch { /* ignore malformed SSE chunks */ }
           }
-        } catch { /* ignore malformed SSE chunks */ }
       }
+    } finally {
+      signal?.removeEventListener('abort', abortStream);
+      if (!reachedTransportEof) await cancelReader(signal?.reason);
+      reader.releaseLock();
     }
 
     return { content, usage, model, finishReason };
@@ -1170,7 +1198,7 @@ export class OpenAICompatibleProvider implements LLMProvider {
 export class CopilotProvider implements LLMProvider {
   name = 'copilot';
   maxContextTokens = 128000;
-  maxOutputTokens = 4096;
+  maxOutputTokens = COPILOT_MAX_OUTPUT_TOKENS;
 
   private apiKey: string;
   private model: string;
@@ -1189,7 +1217,7 @@ export class CopilotProvider implements LLMProvider {
     return estimateTokens(text);
   }
 
-  async generateCompletion(request: CompletionRequest): Promise<CompletionResponse> {
+  async generateCompletion(request: CompletionRequest, signal?: AbortSignal): Promise<CompletionResponse> {
     const body: Record<string, unknown> = {
       model: this.model,
       messages: [
@@ -1222,6 +1250,7 @@ export class CopilotProvider implements LLMProvider {
         'Authorization': `Bearer ${this.apiKey}`,
       },
       body: JSON.stringify(body),
+      signal,
     }), this.relaxTls);
 
     if (!response.ok) {
@@ -1520,7 +1549,7 @@ export class CursorAgentProvider implements LLMProvider {
 export class GeminiProvider implements LLMProvider {
   name = 'gemini';
   maxContextTokens = 1000000;
-  maxOutputTokens = 8192;
+  maxOutputTokens = GEMINI_MAX_OUTPUT_TOKENS;
 
   private apiKey: string;
   private model: string;
@@ -1538,7 +1567,7 @@ export class GeminiProvider implements LLMProvider {
     return estimateTokens(text);
   }
 
-  async generateCompletion(request: CompletionRequest): Promise<CompletionResponse> {
+  async generateCompletion(request: CompletionRequest, signal?: AbortSignal): Promise<CompletionResponse> {
     const body: Record<string, unknown> = {
       contents: [
         { role: 'user', parts: [{ text: request.userPrompt }] },
@@ -1562,6 +1591,7 @@ export class GeminiProvider implements LLMProvider {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
+      signal,
     }), this.relaxTls);
 
     if (!response.ok) {
@@ -1798,6 +1828,12 @@ export class LLMService {
 
         const response = await this.executeWithTimeout(request);
 
+        if (response.finishReason === 'length') {
+          const purpose = request.responseFormat === 'json' ? 'JSON completion' : 'text completion';
+          const cap = request.maxTokens ?? this.provider.maxOutputTokens;
+          logger.warning(`LLM ${purpose} was truncated at the ${cap}-token output cap`);
+        }
+
         // Update tracking
         this.updateTracking(response);
 
@@ -1885,7 +1921,9 @@ export class LLMService {
       const correctionRequest: CompletionRequest = {
         ...correctionPrompt,
         temperature: 0.1,
+        maxTokens: request.maxTokens,
         responseFormat: 'json',
+        jsonSchema: schema,
       };
 
       const correctionResponse = await this.complete(correctionRequest);
@@ -1929,6 +1967,7 @@ export class LLMService {
    */
   private async executeWithTimeout(request: CompletionRequest): Promise<CompletionResponse> {
     const timeoutMs = this.retryConfig.timeout;
+    const controller = new AbortController();
 
     // change: fix-process-exit-lifecycle
     // The timeout timer MUST be cleared once the race settles. Without this, a
@@ -1940,12 +1979,13 @@ export class LLMService {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([
-        this.provider.generateCompletion(request),
+        this.provider.generateCompletion(request, controller.signal),
         new Promise<never>((_, reject) => {
-          timer = setTimeout(
-            () => reject(new Error(`LLM request timed out after ${timeoutMs}ms`)),
-            timeoutMs,
-          );
+          timer = setTimeout(() => {
+            const timeoutError = new Error(`LLM request timed out after ${timeoutMs}ms`);
+            reject(timeoutError);
+            controller.abort(timeoutError);
+          }, timeoutMs);
           timer.unref?.();
         }),
       ]);
