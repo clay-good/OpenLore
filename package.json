@@ -115,6 +115,10 @@
       {
         "name": "decisions",
         "summary": "Manage architectural decision records"
+      },
+      {
+        "name": "change-status",
+        "summary": "Compute OpenSpec change status from documented evidence"
       }
     ],
     "skills": [

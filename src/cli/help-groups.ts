@@ -48,6 +48,7 @@ export const COMMAND_GROUPS: ReadonlyArray<{ title: string; commands: readonly s
       'preflight',
       'drift',
       'decisions',
+      'change-status',
       'coverage-gaps',
       'working-set',
       'briefing-since',

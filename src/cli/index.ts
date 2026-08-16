@@ -77,6 +77,7 @@ import { panicReplayCommand } from './commands/panic-replay.js';
 import { gryphWatchCommand } from './commands/gryph-watch.js';
 import { updateCommand } from './commands/update.js';
 import { featuresCommand } from './commands/features.js';
+import { changeStatusCommand } from './commands/change-status.js';
 import { applyJobGroupedHelp } from './help-groups.js';
 import { configureLogger, logger } from '../utils/logger.js';
 import { colorForStderr } from '../utils/colors.js';
@@ -261,6 +262,7 @@ program.addCommand(panicCalibrateCommand);
 program.addCommand(panicReplayCommand);
 program.addCommand(gryphWatchCommand);
 program.addCommand(updateCommand);
+program.addCommand(changeStatusCommand);
 
 // Group the ~49 commands by job in `openlore --help` so the front door is legible
 // (CommandSurfaceGroupedByJob). Presentation only — every command stays invocable.

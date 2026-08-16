@@ -31,7 +31,7 @@ validate`**, and the archive machinery works again. This pass:
   because their requirements were already synced verbatim (`fix-pi-parity-drift`,
   `fix-redaction-module-gaps`).
 
-## Complete — 144 in `archive/`
+## Complete — 146 in `archive/`
 
 Everything in `openspec/changes/archive/` is shipped (or a settled won't-do), with its
 requirements reflected in the main specs. `openspec list` shows only open work.
@@ -41,7 +41,7 @@ requirements reflected in the main specs. `openspec list` shows only open work.
 No open change has partial code on `main`. A change belongs here the moment its implementation
 starts; move it back out (archive it) the moment its marker/spec evidence lands.
 
-## To build — 110
+## To build — 108
 
 The whole open set is unbuilt backlog. Newest additions: 7 proposals from the 2026-07-27
 first-run e2e (`E2E-FIRSTRUN-2026-07-27.md`). Other thematic indexes:
@@ -81,6 +81,9 @@ verification metric and mixed composite carries its evidence and model provenanc
 `fix-commit-gate-delivery` (2026-08-16, archived) — every Git-hook installer targets Git's
 effective hook path, manager-owned hooks fail honestly, doctor checks reachability, concurrent
 edits are atomic, and machine JSON envelopes carry an explicit schema version.
+`add-change-evidence-audit` (2026-08-16, archived) — `openlore change-status` now computes the
+marker/spec-sync evidence pass with receipts, delegates typed non-interactive validation to the
+OpenSpec CLI, and emits human, JSON, or pasteable table output without mutating lifecycle state.
 
 After this table was compiled, four research sweeps added 32 more proposals (all validate; not yet
 folded into the table): 10 in `FIELD-RESEARCH-2026-07.md`, 10 in `ECOSYSTEM-RESEARCH-2026-07-27.md`,

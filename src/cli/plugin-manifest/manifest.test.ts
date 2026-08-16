@@ -23,6 +23,7 @@ import { analyzeCommand } from '../commands/analyze.js';
 import { orientCommand } from '../commands/orient.js';
 import { digestCommand } from '../commands/digest.js';
 import { decisionsCommand } from '../commands/decisions.js';
+import { changeStatusCommand } from '../commands/change-status.js';
 
 // src/cli/plugin-manifest/<this> → repo root is three levels up.
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
@@ -44,6 +45,7 @@ const surfacedCommands = [
   orientCommand,
   digestCommand,
   decisionsCommand,
+  changeStatusCommand,
 ];
 const realNames = new Set(surfacedCommands.map((c) => c.name()));
 
