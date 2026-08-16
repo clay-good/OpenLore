@@ -23,6 +23,7 @@
  * lineage.
  */
 
+import { isDeepStrictEqual } from 'node:util';
 import type {
   AuthorStatement,
   DecisionDisposition,
@@ -93,6 +94,8 @@ export interface DraftDisposition {
   reason: DecisionDispositionReason;
   /** Set exactly when `disposition` is `merged-into`. */
   mergedIntoId?: string;
+  /** Internal lineage used to prove that a verification replacement was persisted. */
+  replacementId?: string;
 }
 
 /** Normalize whitespace so a formatting-only difference is not read as a rewrite. */
@@ -180,7 +183,12 @@ export function withVerificationOutcome(
   if (phantomIds.size === 0) return [...dispositions];
   return dispositions.map(d =>
     phantomIds.has(d.id) || (d.mergedIntoId !== undefined && phantomIds.has(d.mergedIntoId))
-      ? { id: d.id, disposition: 'rejected' as const, reason: 'no-supporting-diff' as const }
+      ? {
+          id: d.id,
+          disposition: 'rejected' as const,
+          reason: 'no-supporting-diff' as const,
+          replacementId: d.mergedIntoId ?? d.id,
+        }
       : d);
 }
 
@@ -197,18 +205,102 @@ export function applyConsolidationOutcome(
   store: DecisionStore,
   result: {
     originalDraftIds: ReadonlySet<string>;
+    originalDrafts?: readonly PendingDecision[];
+    capturedDecisions?: readonly PendingDecision[];
     verified: readonly PendingDecision[];
     phantom: readonly PendingDecision[];
+    unassessed?: readonly PendingDecision[];
     supersededIds: readonly string[];
     dispositions: readonly DraftDisposition[];
   },
 ): DecisionStore {
   let next = store;
-  for (const id of new Set([...result.originalDraftIds, ...result.supersededIds])) {
-    next = patchDecision(next, id, { status: 'rejected' });
+  const capturedById = new Map(
+    (result.capturedDecisions ?? result.originalDrafts ?? []).map((decision) => [decision.id, decision]),
+  );
+  const protectedIds = new Set<string>();
+  for (const id of result.originalDraftIds) {
+    const current = store.decisions.find((decision) => decision.id === id);
+    const captured = capturedById.get(id);
+    if (!current || current.status !== 'draft' || (captured && !sameDecisionRevision(current, captured))) {
+      protectedIds.add(id);
+    }
   }
-  next = replaceDecisions(next, [...result.verified, ...result.phantom]);
-  return applyDispositions(next, result.dispositions);
+
+  // Superseded targets may be established verified/approved decisions rather
+  // than input drafts. Compare them with the same captured snapshot so a human
+  // verdict written during consolidation wins over the stale supersession.
+  for (const id of result.supersededIds) {
+    const current = store.decisions.find((decision) => decision.id === id);
+    const captured = capturedById.get(id);
+    if ((current && !captured)
+        || (!current && captured)
+        || (current && captured && !sameDecisionRevision(current, captured))) {
+      protectedIds.add(id);
+    }
+  }
+
+  const candidateSurvivors = [...result.verified, ...result.phantom, ...(result.unassessed ?? [])];
+  // A newly generated survivor id was not part of the captured draft set. If it
+  // appeared while consolidation was in flight, it belongs to the concurrent
+  // writer and must not be overwritten by stale LLM output.
+  for (const survivor of candidateSurvivors) {
+    if (!result.originalDraftIds.has(survivor.id)
+        && store.decisions.some((decision) => decision.id === survivor.id)) {
+      protectedIds.add(survivor.id);
+    }
+  }
+
+  const survivors = candidateSurvivors
+    .filter((decision) => !protectedIds.has(decision.id));
+  const survivorIds = new Set(survivors.map((decision) => decision.id));
+  const phantomIds = new Set(survivors
+    .filter((decision) => decision.status === 'phantom')
+    .map((decision) => decision.id));
+  const dispositionsById = new Map(result.dispositions.map((disposition) => [disposition.id, disposition]));
+  const rejectedOriginalIds = new Set<string>();
+
+  const persistedReplacementFor = (draftId: string): string | undefined => {
+    if (survivorIds.has(draftId)) return draftId;
+    const disposition = dispositionsById.get(draftId);
+    const replacementId = disposition?.mergedIntoId ?? disposition?.replacementId;
+    return replacementId && survivorIds.has(replacementId) ? replacementId : undefined;
+  };
+  const hasPersistedSuperseder = (targetId: string): boolean =>
+    (result.originalDrafts ?? []).some((draft) =>
+      draft.supersedes === targetId && persistedReplacementFor(draft.id) !== undefined);
+
+  for (const id of result.originalDraftIds) {
+    if (protectedIds.has(id) || survivorIds.has(id)) continue;
+    const disposition = dispositionsById.get(id);
+    const replacementPersisted =
+      (disposition?.mergedIntoId !== undefined && survivorIds.has(disposition.mergedIntoId))
+      || (disposition?.reason === 'superseded-by-later-draft' && hasPersistedSuperseder(id))
+      || (disposition?.reason === 'no-supporting-diff'
+        && phantomIds.has(disposition.replacementId ?? id));
+    if (replacementPersisted) {
+      next = patchDecision(next, id, { status: 'rejected' });
+      rejectedOriginalIds.add(id);
+    }
+  }
+
+  for (const id of result.supersededIds) {
+    if (!protectedIds.has(id) && hasPersistedSuperseder(id)) {
+      next = patchDecision(next, id, { status: 'rejected' });
+    }
+  }
+  next = replaceDecisions(next, survivors);
+
+  const applicableDispositions = result.dispositions.filter((disposition) =>
+    !protectedIds.has(disposition.id)
+    && !(disposition.mergedIntoId && protectedIds.has(disposition.mergedIntoId))
+    && (survivorIds.has(disposition.id) || rejectedOriginalIds.has(disposition.id)),
+  );
+  return applyDispositions(next, applicableDispositions);
+}
+
+function sameDecisionRevision(current: PendingDecision, captured: PendingDecision): boolean {
+  return isDeepStrictEqual(current, captured);
 }
 
 /**

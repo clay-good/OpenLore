@@ -60,6 +60,7 @@ function isVerificationRaw(value: unknown): value is VerificationRaw {
 export interface VerificationResult {
   verified: PendingDecision[];
   phantom: PendingDecision[];
+  unassessed: PendingDecision[];
   missing: Array<{ file: string; description: string }>;
 }
 
@@ -157,7 +158,7 @@ export async function verifyDecisions(
   commitMessages?: string,
 ): Promise<VerificationResult> {
   if (decisions.length === 0) {
-    return { verified: [], phantom: [], missing: [] };
+    return { verified: [], phantom: [], unassessed: [], missing: [] };
   }
 
   const diffByFile = parseDiffByFile(diff);
@@ -227,7 +228,10 @@ export async function verifyDecisions(
     }
   }
 
-  return { verified, phantom, missing: result.missing };
+  // A well-formed but incomplete model response must not delete durable intent.
+  // change: harden-spec-verification-honesty
+  const unassessed = decisions.filter((decision) => !classified.has(decision.id));
+  return { verified, phantom, unassessed, missing: result.missing };
 }
 
 /**

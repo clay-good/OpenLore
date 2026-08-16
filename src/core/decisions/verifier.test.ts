@@ -63,6 +63,7 @@ describe('verifyDecisions — empty', () => {
     const result = await verifyDecisions([], 'some diff', llm);
     expect(result.verified).toHaveLength(0);
     expect(result.phantom).toHaveLength(0);
+    expect(result.unassessed).toHaveLength(0);
     expect(result.missing).toHaveLength(0);
     expect(llm.complete).not.toHaveBeenCalled();
   });
@@ -107,7 +108,7 @@ describe('verifyDecisions — happy path', () => {
     expect(result.missing[0].file).toBe('src/auth.ts');
   });
 
-  it('silently drops verified entries with unknown IDs', async () => {
+  it('retains an input decision as unassessed when the response mentions only an unknown ID', async () => {
     const response = JSON.stringify({
       verified: [{ id: 'unknownid', evidenceFile: 'x.ts', confidence: 'high' }],
       phantom: [],
@@ -117,6 +118,29 @@ describe('verifyDecisions — happy path', () => {
     const d = makeDecision({ id: 'aaaa0001' });
     const result = await verifyDecisions([d], 'diff', llm);
     expect(result.verified).toHaveLength(0);
+    expect(result.unassessed).toEqual([d]);
+  });
+
+  it('partitions every input decision when the LLM omits one', async () => {
+    const decisions = Array.from({ length: 5 }, (_, index) => makeDecision({
+      id: `draft00${index}`,
+      title: `Decision ${index}`,
+      affectedFiles: [],
+    }));
+    const response = JSON.stringify({
+      verified: [],
+      phantom: decisions.slice(0, 4).map(({ id }) => ({ id })),
+      missing: [],
+    });
+
+    const result = await verifyDecisions(decisions, 'diff', makeLLM(response));
+
+    expect(result.verified).toHaveLength(0);
+    expect(result.phantom.map(({ id }) => id)).toEqual(decisions.slice(0, 4).map(({ id }) => id));
+    expect(result.unassessed).toEqual([decisions[4]]);
+    expect(new Set([...result.verified, ...result.phantom, ...result.unassessed].map(({ id }) => id))).toEqual(
+      new Set(decisions.map(({ id }) => id)),
+    );
   });
 
   it('rejects a fabricated evidence file that is absent from the targeted diff', async () => {

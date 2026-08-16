@@ -30,6 +30,7 @@ vi.mock('../core/verifier/verification-engine.js', () => ({
   SpecVerificationEngine: vi.fn().mockImplementation(function(this: unknown) {
     Object.assign(this as object, {
       selectCandidates: vi.fn(),
+      prepareCandidates: vi.fn(),
       verify: vi.fn(),
     });
   }),
@@ -88,7 +89,8 @@ function setupMocks() {
 
   vi.mocked(SpecVerificationEngine).mockImplementation(function(this: unknown) {
     Object.assign(this as object, {
-      selectCandidates: vi.fn().mockResolvedValue(MOCK_CANDIDATES),
+      prepareCandidates: vi.fn().mockImplementation(async (_depGraph, limit?: number) =>
+        limit === undefined ? MOCK_CANDIDATES : MOCK_CANDIDATES.slice(0, limit)),
       verify: vi.fn().mockResolvedValue(MOCK_VERIFY_REPORT),
     });
   });
@@ -112,6 +114,19 @@ describe('openloreVerify', () => {
   });
 
   describe('config and resource validation', () => {
+    it.each([0, -1, 1.5, Number.NaN])('rejects invalid samples %s before loading project state', async samples => {
+      await expect(openloreVerify({ rootPath: ROOT, samples })).rejects.toThrow(/samples must be a positive integer/);
+      expect(mockReadOpenLoreConfig).not.toHaveBeenCalled();
+    });
+
+    it.each([-0.1, 1.1, Number.NaN, Number.POSITIVE_INFINITY])(
+      'rejects invalid threshold %s before loading project state',
+      async threshold => {
+        await expect(openloreVerify({ rootPath: ROOT, threshold })).rejects.toThrow(/threshold must be a finite number between 0 and 1/);
+        expect(mockReadOpenLoreConfig).not.toHaveBeenCalled();
+      },
+    );
+
     it('throws if no openlore config', async () => {
       mockReadOpenLoreConfig.mockResolvedValue(null as unknown as ReturnType<typeof readOpenLoreConfig> extends Promise<infer T> ? T : never);
       await expect(openloreVerify({ rootPath: ROOT })).rejects.toThrow();
@@ -140,7 +155,7 @@ describe('openloreVerify', () => {
     it('throws if no candidates found', async () => {
       vi.mocked(SpecVerificationEngine).mockImplementation(function(this: unknown) {
         Object.assign(this as object, {
-          selectCandidates: vi.fn().mockResolvedValue([]),
+          prepareCandidates: vi.fn().mockResolvedValue([]),
           verify: vi.fn(),
         });
       });
@@ -166,6 +181,23 @@ describe('openloreVerify', () => {
     it('creates LLM service with provided options', async () => {
       await openloreVerify({ rootPath: ROOT, model: 'claude-opus-4-6' });
       expect(mockCreateLLMService).toHaveBeenCalledWith(expect.objectContaining({ model: 'claude-opus-4-6' }));
+    });
+
+    it('passes only the requested sample to verification', async () => {
+      await openloreVerify({ rootPath: ROOT, samples: 1 });
+
+      const engine = vi.mocked(SpecVerificationEngine).mock.results[0].value as unknown as {
+        verify: ReturnType<typeof vi.fn>;
+      };
+      expect(engine.verify).toHaveBeenCalledWith(
+        MOCK_DEP_GRAPH,
+        MOCK_CONFIG.version,
+        [MOCK_CANDIDATES[0]],
+      );
+      expect(vi.mocked(SpecVerificationEngine)).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ filesPerDomain: 1 }),
+      );
     });
   });
 

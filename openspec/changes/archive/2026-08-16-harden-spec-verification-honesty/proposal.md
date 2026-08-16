@@ -1,7 +1,7 @@
 # Harden spec-verification honesty: no silent decision loss, no shrinking denominator, no fabricated requirement claims
 
-> Status: PROPOSED (2026-07-08, e2e audit fifth pass). The verification layer fabricates and
-> silently loses: the decisions persist step drops any consolidated decision the LLM forgot to
+> Status: IMPLEMENTED (2026-08-16). The verification layer previously fabricated claims and
+> silently lost data: the decisions persist step dropped any consolidated decision the LLM forgot to
 > mention (and marks its draft human-'rejected'), the verification report's denominator shrinks
 > to whatever didn't fail, and requirement-level "implemented / not implemented" claims are
 > synthesized positionally from a scalar score. Extends `harden-llm-output-contract` (pass 3) —
@@ -9,7 +9,7 @@
 > survive it intact because they occur AFTER a well-formed response parses cleanly. Its files are
 > not modified here.
 
-## The defects
+## Why
 
 - **(a) The persist step silently discards unmentioned decisions — and brands their drafts
   human-'rejected'.** `verifyDecisions` returns only the decisions the LLM listed under
@@ -39,7 +39,7 @@
 - **Verified minor, folded in:** the report timestamp is `toLocaleString()`
   (`verification-engine.ts:1020`) — locale-dependent where sibling artifacts use ISO.
 
-## What changes
+## What Changes
 
 1. **Partition invariant on decisions verification.** `verified ∪ phantom` (plus an explicit
    `unassessed` remainder) MUST cover the input id set: any input decision the LLM response does
@@ -61,7 +61,7 @@ labels the LLM score's provenance at its consumption site (`verification-engine.
 this change guards what the pipeline DOES with a cleanly parsed response — persistence
 completeness, report denominators, and claims synthesized downstream of the score.
 
-## Why this is in scope
+## Scope rationale
 
 The substrate's contract (decision `c6d1ad07`) is deterministic conclusions with honest
 boundaries; the verification layer is the one place LLM output feeds durable stores and human

@@ -283,6 +283,104 @@ describe('verify command', () => {
         : '0';
       expect(passedPercent).toBe('0');
     });
+
+    it('discloses attempted and failed files in the interactive summary', async () => {
+      const { displaySummary } = await import('./verify.js');
+      const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+      displaySummary({
+        timestamp: '2026-08-16T00:00:00.000Z',
+        specVersion: '1',
+        attemptedFiles: 12,
+        sampledFiles: 3,
+        failedFiles: 9,
+        failures: [{ filePath: 'src/fail.ts', reason: 'rate limited' }],
+        aggregateBasis: 'successful-files',
+        passedFiles: 3,
+        overallConfidence: 0.9,
+        domainBreakdown: [],
+        commonGaps: [],
+        recommendation: 'needs-review',
+        recommendationQualification: '9 of 12 attempted files could not be verified; aggregates cover successful files only.',
+        suggestedImprovements: [],
+        results: [],
+      }, 0.7);
+
+      const output = log.mock.calls.flat().join('\n');
+      expect(output).toContain('Attempted: 12 files');
+      expect(output).toContain('Failed verification: 9 files');
+      expect(output).toContain('9 of 12 attempted files could not be verified');
+      expect(output).toContain('src/fail.ts: rate limited');
+      expect(output).toContain('Verification was incomplete; review the failed files before relying on this result.');
+      log.mockRestore();
+    });
+
+    it('renders an LLM scalar without fabricating per-requirement membership', async () => {
+      const { displayResult } = await import('./verify.js');
+      const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+      displayResult({
+        filePath: 'src/user.ts',
+        domain: 'user',
+        purposeMatch: { predicted: '', actual: '', similarity: 1 },
+        importMatch: { predicted: [], actual: [], precision: 1, recall: 1, f1Score: 1 },
+        exportMatch: { predicted: [], actual: [], precision: 1, recall: 1, f1Score: 1 },
+        requirementCoverage: {
+          relatedRequirements: ['Auth', 'Profile'],
+          actuallyImplements: [],
+          coverage: 0.25,
+          evidence: 'llm-score',
+        },
+        overallScore: 0.75,
+        llmConfidence: 0.8,
+        feedback: [],
+      }, 1, 1, 0.7, false);
+
+      const output = log.mock.calls.flat().join('\n');
+      expect(output).toContain('25% coverage (LLM-scored; no per-requirement claims)');
+      expect(output).not.toContain('Requirements: None');
+      log.mockRestore();
+    });
+
+    it('neutralizes hostile terminal text across result and summary fields', async () => {
+      const { displayResult, displaySummary } = await import('./verify.js');
+      const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+      displayResult({
+        filePath: 'src/user.ts',
+        domain: 'user',
+        purposeMatch: { predicted: '', actual: '', similarity: 0.5 },
+        importMatch: { predicted: [], actual: [], precision: 0, recall: 0, f1Score: 0 },
+        exportMatch: { predicted: [], actual: [], precision: 0, recall: 0, f1Score: 0 },
+        requirementCoverage: {
+          relatedRequirements: ['Auth'],
+          actuallyImplements: ['Auth\nFORGED\u001b[2J'],
+          coverage: 1,
+          evidence: 'keyword-match',
+        },
+        overallScore: 0.5,
+        llmConfidence: 0.5,
+        feedback: ['warning\nFORGED\u001b[2J'],
+      }, 1, 1, 0.7, true);
+      displaySummary({
+        timestamp: '',
+        specVersion: '',
+        attemptedFiles: 1,
+        sampledFiles: 1,
+        failedFiles: 0,
+        failures: [],
+        aggregateBasis: 'successful-files',
+        passedFiles: 0,
+        overallConfidence: 0.5,
+        domainBreakdown: [{ domain: 'user\nFORGED\u001b[2J', specPath: '', filesVerified: 1, averageScore: 2, weakestArea: '' }],
+        commonGaps: ['gap\nFORGED\u001b[2J'],
+        recommendation: 'needs-review',
+        suggestedImprovements: [{ domain: 'user', issue: 'issue', suggestion: 'fix\nFORGED\u001b[2J' }],
+        results: [],
+      }, 0.7);
+
+      const calls = log.mock.calls.flat().map(String);
+      expect(calls.every(line => !line.includes('\n') && !line.includes('\u001b'))).toBe(true);
+      expect(calls.join('\n')).toContain('■■■■■■■■■■');
+      log.mockRestore();
+    });
   });
 
   describe('recommendation logic', () => {
@@ -376,6 +474,14 @@ describe('verify command', () => {
       const { verifyCommand } = await import('./verify.js');
       const { logger } = await import('../../utils/logger.js');
       await verifyCommand.parseAsync(['--samples', '-1'], { from: 'user' });
+      expect(logger.error).toHaveBeenCalledWith('--samples must be a positive integer');
+      expect(process.exitCode).toBe(1);
+    });
+
+    it('should reject a fractional sample count', async () => {
+      const { verifyCommand } = await import('./verify.js');
+      const { logger } = await import('../../utils/logger.js');
+      await verifyCommand.parseAsync(['--samples', '1.5'], { from: 'user' });
       expect(logger.error).toHaveBeenCalledWith('--samples must be a positive integer');
       expect(process.exitCode).toBe(1);
     });

@@ -6,7 +6,13 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { displayDecision, printDecisionLegend } from './decisions.js';
+import {
+  classificationsBlockGate,
+  decisionClassificationIsUnresolved,
+  displayDecision,
+  printDecisionLegend,
+  reconcileDecisionClassifications,
+} from './decisions.js';
 import { configureLogger } from '../../utils/logger.js';
 import type { PendingDecision } from '../../types/index.js';
 
@@ -96,5 +102,55 @@ describe('decisions rendering', () => {
     const out = capture(() => { displayDecision(decision('verified')); printDecisionLegend(); });
     // eslint-disable-next-line no-control-regex
     expect(/\x1b\[/.test(out)).toBe(false);
+  });
+
+  it('keeps every verification classification while reflecting committed statuses', () => {
+    const omitted = decision('draft');
+    const verified = { ...decision('verified'), id: 'verified' };
+    const concurrentlyApproved = { ...omitted, status: 'approved' as const };
+    const classifications = reconcileDecisionClassifications({
+      version: '1',
+      sessionId: 'session',
+      updatedAt: '2026-08-16T00:00:00.000Z',
+      sequence: 0,
+      decisions: [concurrentlyApproved, verified],
+    }, {
+      verified: [verified],
+      phantom: [],
+      unassessed: [{ ...omitted, status: 'consolidated' }],
+    });
+
+    expect(classifications.unassessed).toEqual([concurrentlyApproved]);
+    expect(classifications.verified).toEqual([verified]);
+    expect(classificationsBlockGate(classifications, 0)).toBe(true);
+  });
+
+  it('blocks JSON gate semantics for unresolved verified decisions only', () => {
+    const unresolved = { verified: [decision('verified')], unassessed: [] };
+    const partialApproval = { ...decision('approved'), syncedToSpecs: ['openspec/specs/auth/spec.md'] };
+    const resolved = { verified: [decision('synced')], unassessed: [decision('rejected')] };
+
+    expect(classificationsBlockGate(unresolved, 0)).toBe(true);
+    expect(classificationsBlockGate({ verified: [decision('draft')], unassessed: [] }, 0)).toBe(true);
+    expect(classificationsBlockGate({ verified: [partialApproval], unassessed: [] }, 0)).toBe(true);
+    expect(classificationsBlockGate({ verified: [], phantom: [partialApproval], unassessed: [] }, 0)).toBe(true);
+    expect(classificationsBlockGate(resolved, 0)).toBe(false);
+    expect(classificationsBlockGate(resolved, 1)).toBe(true);
+  });
+
+  it.each([
+    ['draft', [], true],
+    ['consolidated', [], true],
+    ['verified', [], true],
+    ['approved', [], true],
+    ['approved', ['openspec/specs/auth/spec.md'], true],
+    ['auto-approved', [], false],
+    ['rejected', [], false],
+    ['synced', ['openspec/specs/auth/spec.md'], false],
+  ] as const)('classifies %s with synced targets %j as unresolved=%s', (status, syncedToSpecs, unresolved) => {
+    expect(decisionClassificationIsUnresolved({
+      ...decision(status),
+      syncedToSpecs: [...syncedToSpecs],
+    })).toBe(unresolved);
   });
 });

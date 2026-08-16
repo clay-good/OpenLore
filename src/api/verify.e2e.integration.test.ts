@@ -302,14 +302,27 @@ describe('openloreVerify — e2e via public API', () => {
     expect(authResult!.purposeMatch.similarity).toBeGreaterThan(0);
   });
 
-  it('skips files whose LLM prediction fails and excludes them from report', async () => {
+  it('discloses files whose LLM prediction fails without grading them as zero', async () => {
     mockProvider.setDefaultResponse('NOT VALID JSON {{{');
 
     const result = await openloreVerify({ rootPath: rootDir });
 
-    // Fix #3: no phantom 0% results — failed files are simply absent
+    // Failed candidates are absent from scores but present in the denominator receipt.
     expect(result.report.sampledFiles).toBe(0);
     expect(result.report.results).toHaveLength(0);
+    expect(result.report.attemptedFiles).toBeGreaterThan(0);
+    expect(result.report.failedFiles).toBe(result.report.attemptedFiles);
+    expect(result.report.failures).toHaveLength(result.report.failedFiles);
+    expect(result.report.aggregateBasis).toBe('successful-files');
+    expect(result.report.recommendation).not.toBe('ready');
+    expect(result.report.recommendationQualification).toMatch(/could not be verified/);
+    expect(result.report.timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+
+    const reportJson = JSON.parse(await readFile(join(rootDir, '.openlore', 'verification', 'report.json'), 'utf-8'));
+    const reportMarkdown = await readFile(join(rootDir, '.openlore', 'verification', 'REPORT.md'), 'utf-8');
+    expect(reportJson.failedFiles).toBe(result.report.failedFiles);
+    expect(reportMarkdown).toContain('Files Failed Verification');
+    expect(reportMarkdown).toContain('Verification Failures');
   });
 
   it('writes report.json and REPORT.md to .openlore/verification/', async () => {

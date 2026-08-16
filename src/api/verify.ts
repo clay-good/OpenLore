@@ -40,6 +40,13 @@ export async function openloreVerify(options: VerifyApiOptions = {}): Promise<Ve
   const threshold = options.threshold ?? 0.5;
   const { onProgress } = options;
 
+  if (!Number.isInteger(samples) || samples < 1) {
+    throw new Error('samples must be a positive integer');
+  }
+  if (!Number.isFinite(threshold) || threshold < 0 || threshold > 1) {
+    throw new Error('threshold must be a finite number between 0 and 1');
+  }
+
   // Load config
   const openloreConfig = await readOpenLoreConfig(rootPath);
   if (!openloreConfig) {
@@ -127,19 +134,19 @@ export async function openloreVerify(options: VerifyApiOptions = {}): Promise<Ve
     rootPath,
     openspecPath,
     outputDir: verificationDir,
-    filesPerDomain: Math.ceil(samples / 4),
+    filesPerDomain: samples,
     passThreshold: threshold,
     generationContext,
   });
 
-  const candidates = engine.selectCandidates(depGraph);
-  if (candidates.length === 0) {
+  const selectedCandidates = await engine.prepareCandidates(depGraph, samples);
+  if (selectedCandidates.length === 0) {
     throw new Error('No suitable verification candidates found.');
   }
-  progress(onProgress, 'Selecting verification files', 'complete', `${Math.min(candidates.length, samples)} candidates`);
+  progress(onProgress, 'Selecting verification files', 'complete', `${selectedCandidates.length} candidates`);
 
   progress(onProgress, 'Verifying specs against codebase', 'start');
-  const report = await engine.verify(depGraph, openloreConfig.version);
+  const report = await engine.verify(depGraph, openloreConfig.version, selectedCandidates);
   progress(onProgress, 'Verifying specs against codebase', 'complete', `${(report.overallConfidence * 100).toFixed(0)}% confidence`);
 
   // Save LLM logs
