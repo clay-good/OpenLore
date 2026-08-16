@@ -106,7 +106,12 @@ export class LocalEmbeddingService implements Embedder {
           { cause: err }
         );
       }
-    })();
+    })().catch((err) => {
+      // Preserve the actionable error for this call, but do not replay a
+      // transient loader failure for the lifetime of the service instance.
+      this.extractorPromise = null;
+      throw err;
+    });
     return this.extractorPromise;
   }
 

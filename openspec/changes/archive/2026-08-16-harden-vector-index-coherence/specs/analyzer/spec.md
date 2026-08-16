@@ -11,6 +11,9 @@ the meta sidecar's on-disk state (mtime / `builtAt` stamp) against the state cap
 population — not by a time-based expiry, and the watcher SHALL additionally clear the caches when
 a background rebuild it spawned completes. A remediation the system prints (such as "run
 `openlore analyze --force`") SHALL take effect in the live serving process once performed.
+Full and incremental mutations SHALL be serialized across processes. A full build SHALL publish
+its atomically replaced BM25 corpus before atomically publishing metadata as the coherence commit
+point. An incremental row mutation whose metadata commit fails SHALL restore its prior rows.
 
 #### Scenario: Out-of-process rebuild is picked up without restart
 
@@ -25,6 +28,13 @@ a background rebuild it spawned completes. A remediation the system prints (such
 - **GIVEN** the watcher deferred a vector update and told the user to run `openlore analyze --force`
 - **WHEN** the user (or the watcher's own background rebuild) completes that rebuild
 - **THEN** the live server serves the rebuilt index without a process restart
+
+#### Scenario: Publication failure preserves the prior coherent generation
+
+- **GIVEN** an incremental update replaced its changed-file rows
+- **WHEN** publishing the metadata coherence stamp fails
+- **THEN** the system restores the prior rows, and other warm processes remain coherent with the
+  unchanged metadata generation
 
 ### Requirement: IncrementalIndexUpdateNeverDropsRowsSilently
 

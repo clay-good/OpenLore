@@ -236,6 +236,7 @@ export async function handleSearchCode(
     loadMappingIndex(absDir),
     readCachedContext(absDir),
   ]);
+  const indexDegraded = VectorIndex.degradationNotice?.(outputDir) ?? null;
 
   // Zero symbol hits: the string may live in static markup/text that extracts
   // no symbols (UI copy, error messages). Fall back to the literal-text line
@@ -248,7 +249,10 @@ export async function handleSearchCode(
       if (textFallback) {
         return withIndexStaleness(
           absDir,
-          textFallback,
+          {
+            ...textFallback,
+            ...(indexDegraded ? { indexDegraded } : {}),
+          },
           llmCtx,
           textFallback.results.map(hit => hit.filePath),
         );
@@ -332,6 +336,7 @@ export async function handleSearchCode(
       ? { resultsOmitted: omissionNote(budgeted.omitted, 'raise tokenBudget or narrow the query') }
       : {}),
     ...(specPeers.length > 0 ? { specLinkedFunctions: specPeers } : {}),
+    ...(indexDegraded ? { indexDegraded } : {}),
   };
   return withIndexStaleness(absDir, result, llmCtx);
 }
@@ -370,6 +375,7 @@ export async function handleSuggestInsertionPoints(
     VectorIndex.search(outputDir, description, embedSvc, { limit: limit * 4, language }),
     readCachedContext(absDir),
   ]);
+  const indexDegraded = VectorIndex.degradationNotice?.(outputDir) ?? null;
 
   // Normalise search scores to [0, 1] for compositeScore (scores are RRF/BM25: higher = better)
   const maxScore = rawResults.length > 0 ? Math.max(...rawResults.map((r) => r.score)) : 1;
@@ -455,6 +461,7 @@ export async function handleSuggestInsertionPoints(
     description,
     count: top.length,
     candidates: top,
+    ...(indexDegraded ? { indexDegraded } : {}),
     nextSteps:
       top.length > 0
         ? [
