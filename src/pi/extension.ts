@@ -20,6 +20,8 @@
  *
  * Config onboarding: runs on first session when .openlore/config.json is absent;
  * also available anytime via the openlore_configure tool.
+ *
+ * change: harden-pi-config-and-daemon-fidelity
  */
 
 import type {
@@ -78,17 +80,20 @@ import { safeJoin } from '../utils/path-confinement.js';
 // ── Config types & helpers ────────────────────────────────────────────────────
 
 interface OpenLoreConfig {
+  [key: string]: unknown;
   version: string;
   projectType: string;
   openspecPath: string;
   analysis: { maxFiles: number; includePatterns: string[]; excludePatterns: string[] };
   generation: {
+    [key: string]: unknown;
     provider?: string;
     model?: string;
     openaiCompatBaseUrl?: string;
     skipSslVerify?: boolean;
   };
   embedding?: {
+    [key: string]: unknown;
     baseUrl: string;
     model: string;
     apiKey?: string;
@@ -99,6 +104,12 @@ interface OpenLoreConfig {
   createdAt: string;
   lastRun: string | null;
 }
+
+type ExistingOpenLoreConfig = Record<string, unknown>;
+export type ExistingConfigLoad =
+  | { state: 'absent' }
+  | { state: 'invalid'; detail: string }
+  | { state: 'valid'; config: ExistingOpenLoreConfig };
 
 const OPENLORE_DIR = '.openlore';
 
@@ -213,17 +224,44 @@ const SEP_ANALYSIS   = fmtSep('Analysis');
 const SEP_DIVIDER    = fmtSep();
 
 
-async function runConfigWizard(ctx: ExtensionContext, existing?: OpenLoreConfig | null): Promise<void> {
+export async function loadExistingConfig(cwd: string): Promise<ExistingConfigLoad> {
+  const path = safeJoin(cwd, join(OPENLORE_DIR, 'config.json'));
+  let text: string;
+  try {
+    text = await readFile(path, 'utf-8');
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT'
+      ? { state: 'absent' }
+      : { state: 'invalid', detail: 'the existing config could not be read' };
+  }
+  try {
+    const raw = JSON.parse(text) as unknown;
+    return isPlainObject(raw)
+      ? { state: 'valid', config: raw }
+      : { state: 'invalid', detail: 'the existing config root is not a JSON object' };
+  } catch {
+    return { state: 'invalid', detail: 'the existing config is malformed JSON' };
+  }
+}
+
+export async function runConfigWizard(ctx: ExtensionContext, existing?: ExistingOpenLoreConfig | null): Promise<void> {
   const { ui } = ctx;
 
-  let generation: OpenLoreConfig['generation'] = existing?.generation ?? {};
-  let embedding = existing?.embedding;
-  let maxFiles = existing?.analysis?.maxFiles ?? 500;
-  const prevProvider = existing?.generation?.provider;
-  const prevModel = existing?.generation?.model;
+  const existingGeneration = isPlainObject(existing?.generation) ? existing.generation : {};
+  const existingEmbedding = isPlainObject(existing?.embedding) ? existing.embedding : undefined;
+  const existingAnalysis = isPlainObject(existing?.analysis) ? existing.analysis : {};
+  let generation: OpenLoreConfig['generation'] = { ...existingGeneration };
+  let embedding: OpenLoreConfig['embedding'] | undefined =
+    existingEmbedding && typeof existingEmbedding.baseUrl === 'string' && typeof existingEmbedding.model === 'string'
+      ? existingEmbedding as OpenLoreConfig['embedding']
+      : undefined;
+  let maxFiles = typeof existingAnalysis.maxFiles === 'number' ? existingAnalysis.maxFiles : 500;
+  const prevProvider = typeof existingGeneration.provider === 'string' ? existingGeneration.provider : undefined;
+  const prevModel = typeof existingGeneration.model === 'string' ? existingGeneration.model : undefined;
 
   if (embedding?.apiKey) {
-    embedding = { baseUrl: embedding.baseUrl, model: embedding.model, ...(embedding.skipSslVerify ? { skipSslVerify: true } : {}) };
+    embedding = { ...embedding };
+    delete embedding.apiKey;
     ui.notify('Removed stored embedding API key — set OPENLORE_EMBEDDING_API_KEY in your shell instead.', 'warning');
   }
 
@@ -245,7 +283,11 @@ async function runConfigWizard(ctx: ExtensionContext, existing?: OpenLoreConfig 
       if (sel) {
         const next = stripMarker(sel);
         if (next !== generation.provider) {
-          generation = { provider: next };
+          const unmanagedGeneration = { ...generation };
+          delete unmanagedGeneration.model;
+          delete unmanagedGeneration.openaiCompatBaseUrl;
+          delete unmanagedGeneration.skipSslVerify;
+          generation = { ...unmanagedGeneration, provider: next };
           if (!SYSTEM_AUTH_PROVIDERS.has(next) && PROVIDER_ENV_VARS[next] && !process.env[PROVIDER_ENV_VARS[next]]) {
             ui.notify(`Set ${PROVIDER_ENV_VARS[next]} in your shell environment`, 'warning');
           }
@@ -301,7 +343,7 @@ async function runConfigWizard(ctx: ExtensionContext, existing?: OpenLoreConfig 
         embedding?.baseUrl ?? 'http://localhost:11434',
       );
       if (input) {
-        embedding = { baseUrl: input, model: embedding?.model ?? '', ...(embedding?.skipSslVerify ? { skipSslVerify: true } : {}) };
+        embedding = { ...embedding, baseUrl: input, model: embedding?.model ?? '' };
         if (!process.env['OPENLORE_EMBEDDING_API_KEY']) {
           ui.notify('Set OPENLORE_EMBEDDING_API_KEY in your shell (leave unset for Ollama/local endpoints)', 'info');
         }
@@ -354,19 +396,26 @@ async function runConfigWizard(ctx: ExtensionContext, existing?: OpenLoreConfig 
     if (idx !== -1) await menu[idx].handler?.();
   }
 
+  // The wizard owns only the fields rendered above. Preserve every other block,
+  // plus sibling settings inside partially-managed blocks, so a configuration
+  // UI can never erase governance added by a newer OpenLore version.
+  const existingWithoutEmbedding = { ...(existing ?? {}) };
+  delete existingWithoutEmbedding.embedding;
   const config: OpenLoreConfig = {
-    version: existing?.version ?? '1.0.0',
-    projectType: existing?.projectType ?? 'unknown',
-    openspecPath: existing?.openspecPath ?? 'openspec',
+    ...existingWithoutEmbedding,
+    version: typeof existing?.version === 'string' ? existing.version : '1.0.0',
+    projectType: typeof existing?.projectType === 'string' ? existing.projectType : 'unknown',
+    openspecPath: typeof existing?.openspecPath === 'string' ? existing.openspecPath : 'openspec',
     analysis: {
+      ...existingAnalysis,
       maxFiles,
-      includePatterns: existing?.analysis?.includePatterns ?? [],
-      excludePatterns: existing?.analysis?.excludePatterns ?? [],
+      includePatterns: Array.isArray(existingAnalysis.includePatterns) ? existingAnalysis.includePatterns as string[] : [],
+      excludePatterns: Array.isArray(existingAnalysis.excludePatterns) ? existingAnalysis.excludePatterns as string[] : [],
     },
     generation,
     ...(embedding ? { embedding } : {}),
-    createdAt: existing?.createdAt ?? new Date().toISOString(),
-    lastRun: existing?.lastRun ?? null,
+    createdAt: typeof existing?.createdAt === 'string' ? existing.createdAt : new Date().toISOString(),
+    lastRun: typeof existing?.lastRun === 'string' || existing?.lastRun === null ? existing.lastRun : null,
   };
 
   await writeConfig(ctx.cwd, config);
@@ -419,6 +468,8 @@ interface DaemonProbe {
 
 const HEALTH_TIMEOUT_MS = 8000;
 const HEALTH_POLL_MS = 150;
+export const PI_ORIENT_TIMEOUT_MS = 4_000;
+export const PI_SPEC_INDEX_MAX_DOMAINS = 50;
 // Generous per-probe timeout: a cold Node HTTP server on Windows can be slow to
 // answer the first /health. Too short a timeout misreads a live daemon as dead,
 // so we spawn a fresh one and orphan the previous — orphans pile up in RAM.
@@ -546,13 +597,41 @@ function daemonFromHealth(desc: ServeDescriptor, health: ServeHealth): Daemon {
   };
 }
 
-export async function ensureDaemon(cwd: string): Promise<Daemon | null> {
+export type EnsureDaemonResult =
+  | { daemon: Daemon; failure?: undefined }
+  | {
+      daemon: null;
+      failure: string;
+      failureKind: 'draining' | 'launch' | 'preparation' | 'early-exit' | 'health-timeout';
+    };
+
+export function shouldNegativeCacheDaemonFailure(
+  kind: Exclude<EnsureDaemonResult, { daemon: Daemon }>['failureKind'],
+): boolean {
+  return kind !== 'draining' && kind !== 'health-timeout';
+}
+
+export async function ensureDaemonResult(
+  cwd: string,
+  options: {
+    timeoutMs?: number;
+    launch?: { command: string; args: string[] };
+  } = {},
+): Promise<EnsureDaemonResult> {
+  const timeoutMs = options.timeoutMs ?? HEALTH_TIMEOUT_MS;
+  let earlyExitFailure: string | undefined;
   const existing = await readDescriptor(cwd);
   if (existing) {
     const probe = await probeHealth(existing, cwd);
-    if (probe.health?.draining) return null;
-    if (probe.health) return daemonFromHealth(existing, probe.health);
-    if (probe.alive) return incompatibleDaemon(existing);
+    if (probe.health?.draining) {
+      return {
+        daemon: null,
+        failure: 'openlore daemon is draining; retry after shutdown completes.',
+        failureKind: 'draining',
+      };
+    }
+    if (probe.health) return { daemon: daemonFromHealth(existing, probe.health) };
+    if (probe.alive) return { daemon: incompatibleDaemon(existing) };
   }
   try {
     // The daemon must outlive this process and write .openlore/serve.json.
@@ -568,30 +647,69 @@ export async function ensureDaemon(cwd: string): Promise<Daemon | null> {
     await mkdir(openloreDir, { recursive: true });
     const logFd = openSync(logPath, 'a');
     try {
-      const launch = piDaemonSpawnCommand(cwd);
-      const child = spawn(launch.command, launch.args, {
-        stdio: ['ignore', logFd, logFd],
-        windowsHide: true,
-        detached: !isWin,
+      const launch = options.launch ?? piDaemonSpawnCommand(cwd);
+      const spawned = await new Promise<
+        { ok: true; child: ReturnType<typeof spawn> } | { ok: false; code: string }
+      >((resolve) => {
+        const child = spawn(launch.command, launch.args, {
+          stdio: ['ignore', logFd, logFd],
+          windowsHide: true,
+          detached: !isWin,
+        });
+        child.once('spawn', () => resolve({ ok: true, child }));
+        child.once('error', (error) => {
+          const code = 'code' in error && typeof error.code === 'string' ? error.code : error.name;
+          resolve({ ok: false, code });
+        });
       });
-      child.on('error', () => { /* daemon not found — polling loop will time out cleanly */ });
-      child.unref();
+      if (!spawned.ok) {
+        return {
+          daemon: null,
+          failure: `openlore packaged daemon could not be launched (${spawned.code}); reinstall OpenLore and retry.`,
+          failureKind: 'launch',
+        };
+      }
+      const noteEarlyExit = (code: number | null, signal: NodeJS.Signals | null) => {
+        earlyExitFailure =
+          `openlore daemon exited before becoming healthy ` +
+          `(${signal ? `signal ${signal}` : `exit code ${code ?? 'unknown'}`}); inspect \`.openlore/serve.log\` and retry.`;
+      };
+      spawned.child.once('exit', noteEarlyExit);
+      if (spawned.child.exitCode !== null || spawned.child.signalCode !== null) {
+        noteEarlyExit(spawned.child.exitCode, spawned.child.signalCode);
+      }
+      spawned.child.unref();
     } finally {
       closeSync(logFd);
     }
-  } catch { return null; }
-  const deadline = Date.now() + HEALTH_TIMEOUT_MS;
+  } catch {
+    return {
+      daemon: null,
+      failure: 'openlore daemon startup preparation failed; inspect `.openlore/serve.log` and retry.',
+      failureKind: 'preparation',
+    };
+  }
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     await sleep(HEALTH_POLL_MS);
+    if (earlyExitFailure) return { daemon: null, failure: earlyExitFailure, failureKind: 'early-exit' };
     const desc = await readDescriptor(cwd);
     if (desc) {
       const probe = await probeHealth(desc, cwd);
       if (probe.health?.draining) continue;
-      if (probe.health) return daemonFromHealth(desc, probe.health);
-      if (probe.alive) return incompatibleDaemon(desc);
+      if (probe.health) return { daemon: daemonFromHealth(desc, probe.health) };
+      if (probe.alive) return { daemon: incompatibleDaemon(desc) };
     }
   }
-  return null;
+  return {
+    daemon: null,
+    failure: `openlore daemon health check timed out after ${timeoutMs} ms; inspect \`.openlore/serve.log\` and retry.`,
+    failureKind: 'health-timeout',
+  };
+}
+
+export async function ensureDaemon(cwd: string): Promise<Daemon | null> {
+  return (await ensureDaemonResult(cwd)).daemon;
 }
 
 export async function callTool(daemon: Daemon, name: string, args: Record<string, unknown>, cwd: string, signal?: AbortSignal): Promise<unknown> {
@@ -628,6 +746,19 @@ export class PiDaemonConnectionError extends Error {
   }
 }
 
+/** Bound a best-effort Pi operation without abandoning useful background work. */
+export async function awaitWithSignal<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  signal.throwIfAborted();
+  return await new Promise<T>((resolve, reject) => {
+    const abort = () => reject(signal.reason);
+    signal.addEventListener('abort', abort, { once: true });
+    void work.then(
+      (value) => { signal.removeEventListener('abort', abort); resolve(value); },
+      (error) => { signal.removeEventListener('abort', abort); reject(error); },
+    );
+  });
+}
+
 export function isUsableDaemon(daemon: Daemon): boolean {
   return daemon.incompatibility === undefined;
 }
@@ -643,13 +774,18 @@ async function readDigest(cwd: string): Promise<string> {
   catch { return ''; }
 }
 
-async function readSpecIndex(cwd: string): Promise<string> {
+export async function readSpecIndex(cwd: string): Promise<string> {
   try {
     const { readdir } = await import('node:fs/promises');
-    const dirs = (await readdir(join(cwd, 'openspec', 'specs'), { withFileTypes: true }))
-      .filter((d) => d.isDirectory()).map((d) => d.name);
+    const dirs = (await readdir(safeJoin(cwd, join('openspec', 'specs')), { withFileTypes: true }))
+      .filter((d) => d.isDirectory()).map((d) => d.name).sort();
     if (dirs.length === 0) return '';
-    return ['## openlore spec domains', ...dirs.map((d) => `- ${d}`)].join('\n');
+    const shown = dirs.slice(0, PI_SPEC_INDEX_MAX_DOMAINS);
+    return [
+      '## openlore spec domains',
+      ...shown.map((d) => `- ${d}`),
+      ...(dirs.length > shown.length ? [`- … ${dirs.length - shown.length} more domains`] : []),
+    ].join('\n');
   } catch { return ''; }
 }
 
@@ -1368,24 +1504,27 @@ export function formatToolResult(result: unknown, toolName?: string): string {
 
 // ── Extension entry point ─────────────────────────────────────────────────────
 
-export default function openlore(pi: ExtensionAPI): void {
+function registerOpenlore(
+  pi: ExtensionAPI,
+  runtime: { orientTimeoutMs?: number } = {},
+): void {
   const daemons = new Map<string, Daemon>();
+  const daemonFailures = new Map<string, string>();
   // Negative cache: when a daemon can't be reached, remember the failure for a
   // short window so we don't pay the full 8s spawn-and-poll on every call in a
   // repo that simply isn't analyzed yet. Transient failures recover after TTL.
   const failedUntil = new Map<string, number>();
   const DAEMON_RETRY_COOLDOWN_MS = 30_000;
   const primed = new Set<string>();
-  let sessionCwd = process.cwd();
-  let sessionMode: ExtensionContext['mode'] = 'tui';
-
   async function getDaemon(cwd: string): Promise<Daemon | null> {
     const cached = daemons.get(cwd);
     if (cached) return cached;
     if ((failedUntil.get(cwd) ?? 0) > Date.now()) return null;
-    const d = await ensureDaemon(cwd);
+    const result = await ensureDaemonResult(cwd);
+    const d = result.daemon;
     if (d) {
       failedUntil.delete(cwd);
+      daemonFailures.delete(cwd);
       // Incompatible daemons carry remediation to the current call but never
       // enter the usable/keepalive cache. After the operator stops or upgrades
       // one, the very next tool call re-probes and can recover immediately.
@@ -1394,10 +1533,18 @@ export default function openlore(pi: ExtensionAPI): void {
         startKeepalive();
       }
     } else {
-      failedUntil.set(cwd, Date.now() + DAEMON_RETRY_COOLDOWN_MS);
+      daemonFailures.set(cwd, result.failure);
+      if (shouldNegativeCacheDaemonFailure(result.failureKind)) {
+        failedUntil.set(cwd, Date.now() + DAEMON_RETRY_COOLDOWN_MS);
+      } else {
+        failedUntil.delete(cwd);
+      }
     }
     return d;
   }
+
+  const daemonUnavailable = (cwd: string): string =>
+    daemonFailures.get(cwd) ?? 'openlore daemon is temporarily unavailable; retry the tool.';
 
   // Keepalive: ping every known daemon's /health so the in-use one survives the
   // serve idle-shutdown while this session is open. A daemon that no longer
@@ -1428,7 +1575,7 @@ export default function openlore(pi: ExtensionAPI): void {
       parameters: tool.parameters as TSchema,
       async execute(_id, params, signal, _onUpdate, ctx) {
         const daemon = await getDaemon(ctx.cwd);
-        if (!daemon) return toolResult('openlore daemon unavailable — run `openlore analyze` then retry.');
+        if (!daemon) return toolResult(daemonUnavailable(ctx.cwd));
         let result: unknown;
         try {
           result = await callTool(daemon, tool.name, params as Record<string, unknown>, ctx.cwd, signal ?? undefined);
@@ -1481,7 +1628,7 @@ export default function openlore(pi: ExtensionAPI): void {
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
       const daemon = await getDaemon(ctx.cwd);
-      if (!daemon) return toolResult('openlore daemon unavailable — run `openlore analyze` then retry.');
+      if (!daemon) return toolResult(daemonUnavailable(ctx.cwd));
       try {
         const { domain, cursor, maxItems } = params as { domain: string; cursor?: string; maxItems?: number };
         const result = await callTool(
@@ -1510,7 +1657,7 @@ export default function openlore(pi: ExtensionAPI): void {
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
       const daemon = await getDaemon(ctx.cwd);
-      if (!daemon) return toolResult('openlore daemon unavailable — run `openlore analyze` then retry.');
+      if (!daemon) return toolResult(daemonUnavailable(ctx.cwd));
       const { domain, baseRef, cursor, maxItems } = params as { domain: string; baseRef?: string; cursor?: string; maxItems?: number };
       try {
         const result = await callTool(
@@ -1536,8 +1683,11 @@ export default function openlore(pi: ExtensionAPI): void {
     parameters: Type.Object({}),
     async execute(_id, _params, _signal, _onUpdate, ctx) {
       if (!ctx.hasUI) return toolResult('Config wizard requires an interactive session (tui or rpc mode).');
-      const existing = await readConfig(ctx.cwd);
-      await runConfigWizard(ctx, existing);
+      const loaded = await loadExistingConfig(ctx.cwd);
+      if (loaded.state === 'invalid') {
+        return toolResult(`Configuration not changed: ${loaded.detail}. Repair \`.openlore/config.json\` and retry.`);
+      }
+      await runConfigWizard(ctx, loaded.state === 'valid' ? loaded.config : null);
       return toolResult('Configuration saved to .openlore/config.json.');
     },
   });
@@ -1550,18 +1700,24 @@ export default function openlore(pi: ExtensionAPI): void {
         ctx.ui.notify('Config wizard requires an interactive session.', 'error');
         return;
       }
-      const existing = await readConfig(ctx.cwd);
-      await runConfigWizard(ctx, existing);
+      const loaded = await loadExistingConfig(ctx.cwd);
+      if (loaded.state === 'invalid') {
+        ctx.ui.notify(`Configuration not changed: ${loaded.detail}. Repair .openlore/config.json and retry.`, 'error');
+        return;
+      }
+      await runConfigWizard(ctx, loaded.state === 'valid' ? loaded.config : null);
     },
   });
 
   // ── session_start: onboarding + daemon warmup ──
   pi.on('session_start', async (_event: SessionStartEvent, ctx: ExtensionContext) => {
-    sessionCwd = ctx.cwd;
-    sessionMode = ctx.mode;
-
-    if (ctx.hasUI && !(await readConfig(ctx.cwd))) {
-      await runConfigWizard(ctx, null);
+    if (ctx.hasUI) {
+      const loaded = await loadExistingConfig(ctx.cwd);
+      if (loaded.state === 'absent') {
+        await runConfigWizard(ctx, null);
+      } else if (loaded.state === 'invalid') {
+        ctx.ui.notify(`OpenLore config not changed: ${loaded.detail}. Repair .openlore/config.json to configure it.`, 'warning');
+      }
     }
 
     if (ctx.mode !== 'json' && ctx.mode !== 'print') {
@@ -1578,23 +1734,23 @@ export default function openlore(pi: ExtensionAPI): void {
   });
 
   // ── C: context injection on the first turn ──
-  pi.on('before_agent_start', async (event: BeforeAgentStartEvent, _ctx: ExtensionContext): Promise<BeforeAgentStartEventResult | void> => {
-    if (sessionMode === 'json' || sessionMode === 'print') return;
-    if (primed.has(sessionCwd)) return;
-    primed.add(sessionCwd);
+  pi.on('before_agent_start', async (event: BeforeAgentStartEvent, ctx: ExtensionContext): Promise<BeforeAgentStartEventResult | void> => {
+    if (ctx.mode === 'json' || ctx.mode === 'print') return;
+    if (primed.has(ctx.cwd)) return;
+    primed.add(ctx.cwd);
 
     const blocks: string[] = [];
     const [analysisProvenance, specProvenance] = await Promise.all([
-      readAnalysisContentProvenance(sessionCwd),
-      reviewedFileContentProvenance(sessionCwd, 'openspec'),
+      readAnalysisContentProvenance(ctx.cwd),
+      reviewedFileContentProvenance(ctx.cwd, 'openspec'),
     ]);
-    const digest = await readDigest(sessionCwd);
+    const digest = await readDigest(ctx.cwd);
     if (digest) blocks.push(frameServedContent(
       '# Codebase architecture (openlore)\n\n' + truncate(digest, 8000),
       analysisProvenance,
       'codebase architecture digest',
     ));
-    const specIndex = await readSpecIndex(sessionCwd);
+    const specIndex = await readSpecIndex(ctx.cwd);
     if (specIndex) blocks.push(frameServedContent(specIndex, specProvenance, 'specification index'));
 
     // Task-scoped orientation: gate + token-budgeted render, the same pipeline
@@ -1603,7 +1759,7 @@ export default function openlore(pi: ExtensionAPI): void {
     // host only gates and renders. `mode: "off"` opts out (digest/spec index,
     // Pi's own baseline grounding, are unaffected); a weak/absent match degrades
     // to the single ignorable pointer line instead of dumping raw orient JSON.
-    const cfg = resolveInjectionConfig(await readContextInjection(sessionCwd));
+    const cfg = resolveInjectionConfig(await readContextInjection(ctx.cwd));
     // Turn-intent gate, ahead of the daemon round-trip: a repository-management
     // turn (push, open/merge a PR, cut a release) gets the reason-bearing
     // pointer line and no orientation at all — same classifier, same wording as
@@ -1618,12 +1774,19 @@ export default function openlore(pi: ExtensionAPI): void {
         // Resolve/contact the daemon only after the intent gate has admitted the
         // turn. Every failure remains visible as a reason-bearing pointer; a
         // digest already in `blocks` must not accidentally hide orientation loss.
+        const injectionSignal = AbortSignal.timeout(runtime.orientTimeoutMs ?? PI_ORIENT_TIMEOUT_MS);
         try {
-          const daemon = await getDaemon(sessionCwd);
+          const daemon = await awaitWithSignal(getDaemon(ctx.cwd), injectionSignal);
           if (!daemon) {
             blocks.push(pointerLineFor('error'));
           } else {
-            const oriented = await callTool(daemon, 'orient', { task: prompt }, sessionCwd);
+            const oriented = await callTool(
+              daemon,
+              'orient',
+              { task: prompt },
+              ctx.cwd,
+              injectionSignal,
+            );
             const result = oriented && typeof oriented === 'object'
               ? (oriented as LeanOrientResult)
               : { error: 'invalid orient response' };
@@ -1633,7 +1796,9 @@ export default function openlore(pi: ExtensionAPI): void {
               : pointerLineFor(evaluation.reason ?? 'weak-relevance'));
           }
         } catch {
-          daemons.delete(sessionCwd);
+          // A first-turn deadline is not evidence that the daemon is unhealthy.
+          // Discovery continues in the background and may warm the next call.
+          if (!injectionSignal.aborted) daemons.delete(ctx.cwd);
           blocks.push(pointerLineFor('error'));
         }
       }
@@ -1645,6 +1810,18 @@ export default function openlore(pi: ExtensionAPI): void {
 
     return { systemPrompt: event.systemPrompt + '\n\n' + suffix };
   });
+}
+
+/** Build an extension registration function with bounded runtime overrides. @internal */
+export function createPiExtension(
+  runtime: { orientTimeoutMs?: number } = {},
+): (pi: ExtensionAPI) => void {
+  return (pi) => registerOpenlore(pi, runtime);
+}
+
+/** Pi package entry point. */
+export default function openlore(pi: ExtensionAPI): void {
+  registerOpenlore(pi);
 }
 
 export const installPaths = {
