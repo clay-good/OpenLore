@@ -14,6 +14,7 @@ Each language backs a fixed, closed set of capabilities. A capability is either 
 |---|---|---|
 | `signatures` | A dedicated signature extractor (params/return shape) rather than the generic fallback. | `SIGNATURE_LANGUAGES` (`signature-extractor.ts`) |
 | `callGraph` | Function/method node + call-edge extraction — the substrate every reachability conclusion rests on. | `CALLGRAPH_LANGUAGES` (`call-graph.ts`) |
+| `complexity` | Grammar-shaped lexical estimation of per-function cyclomatic complexity for triage and ranking. Unsupported languages carry no complexity value. | `COMPLEXITY_LANGUAGES` (`call-graph-complexity.ts`) |
 | `imports` | Import/package resolution into the `import`-confidence cross-file edge path. TS/JS follows re-export/barrel chains; Python resolves leading-dot modules; Go resolves imported packages and same-package siblings; Java/Kotlin/C#/PHP resolve statically bindable `import`/`using`/`use` bindings from package or namespace declarations. Ruby remains name-only because its load forms do not statically bind names. | `IMPORT_RESOLUTION_LANGUAGES` (`import-resolver-bridge.ts`) |
 | `cfgOverlay` | A control-flow-graph overlay (branches/loops) via the data-driven CFG `SPECS` table. | `cfgSupportsLanguage()` (`cfg.ts`) |
 | `typeInference` | Lightweight receiver-type inference, used to resolve method calls to their class. | `TYPE_INFERENCE_LANGUAGES` (`type-inference-engine.ts`) |
@@ -28,7 +29,7 @@ The declarative registry (`src/core/analyzer/language-support.ts`) is the single
 "what we know about language L" — but it is **computed** from the same structures the extractors
 consult at run time (the table above), never hand-maintained in parallel. So the coverage matrix
 cannot silently drift from what the analyzer actually does. `language-support.test.ts` behaviorally
-cross-checks **every member** of the `signatures`, `callGraph`, `imports`, `typeInference`,
+cross-checks **every member** of the `signatures`, `callGraph`, `complexity`, `imports`, `typeInference`,
 `cfgOverlay`, `styleFingerprint`, `crossServiceHttp`, and `errorPropagation` sets by running the real extractor on a per-language fixture and asserting it produces
 output (a malformed entry that produced nothing fails the test, not just the predicate tautology);
 `cfgOverlay` and `iacProjection` are additionally asserted exactly against their predicates
@@ -77,6 +78,8 @@ an existing one to a new capability:
 1. **Wire the generic extractor for the capability** where one is data-driven:
    - `callGraph`: add an entry to `QUERY_LANG_SPECS` (`call-graph.ts`) with the grammar's node-type
      names, or a dedicated extractor for a native grammar; add `L` to `CALLGRAPH_LANGUAGES`.
+   - `complexity`: add a grammar-shaped decision pattern to `CC_PATTERNS`
+     (`call-graph-complexity.ts`) and a shape fixture to `call-graph-complexity.test.ts`.
    - `cfgOverlay`: add a `CfgLangSpec` to `SPEC_BY_LANGUAGE` (`cfg.ts`) — that is all `cfgOverlay`
      needs (the registry reads `cfgSupportsLanguage` directly).
    - `signatures`: add a case to `extractSignatures` (or an `EXTRA_LANG_PATTERNS` row) and add `L` to

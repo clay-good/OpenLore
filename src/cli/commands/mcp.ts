@@ -56,6 +56,7 @@ import { emit, setTelemetryIdentity } from '../../core/services/telemetry.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
 import { MCP_TOOL_MAX_BYTES, LEAN_DEFAULT_PRESET, FULL_PRESET, FULL_PRESET_ALIAS } from '../../constants.js';
 import { capabilityFamily, groupToolsByFamily, resolveCanonicalToolName } from '../../core/services/mcp-handlers/tool-contract.js';
+import { CAPABILITIES as LANGUAGE_CAPABILITIES } from '../../core/analyzer/language-support.js';
 import {
   handleGetCallGraph,
   handleGetSubgraph,
@@ -1694,8 +1695,7 @@ export const TOOL_DEFINITIONS = [
     description:
       'USE THIS WHEN: a structural result for some file looks empty/weak and you need to know whether ' +
       'that means "nothing found" or "this language is only partly supported" — or when evaluating ' +
-      'coverage for a polyglot repo. Returns the deterministic capability matrix (signatures, callGraph, ' +
-      'testDetection, imports, cfgOverlay, typeInference, styleFingerprint, iacProjection) for the repo\'s DETECTED ' +
+      `coverage for a polyglot repo. Returns the deterministic capability matrix (${LANGUAGE_CAPABILITIES.join(', ')}) for the repo's DETECTED ` +
       'languages, or — with a `language` name — that one language (a pure registry lookup; an unknown ' +
       'language returns an honest all-unsupported record, never an error). Fail-soft: an unsupported ' +
       'capability yields nothing, never a guess. Read-only, deterministic. Run analyze_codebase first ' +

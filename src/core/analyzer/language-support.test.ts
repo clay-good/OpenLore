@@ -30,6 +30,7 @@ import {
 } from './exception-flow.js';
 import { usesTsxGrammar } from './language-detection.js';
 import { TEST_DETECTION_DECISIONS } from './test-file.js';
+import { COMPLEXITY_LANGUAGES } from './call-graph-complexity.js';
 import {
   CROSS_SERVICE_HTTP_LANGUAGES as XSVC,
   extractHttpCalls,
@@ -93,6 +94,18 @@ describe('language-support registry — faithful to live extractor sources', () 
         TEST_DETECTION_DECISIONS.get(lang) === 'supported',
       );
     }
+  });
+
+  it('complexity cell === the estimator pattern table for EVERY language', () => {
+    for (const lang of ALL_LANGUAGES) {
+      const claims = languageSupport(lang).capabilities.includes('complexity');
+      expect(claims, `complexity mismatch for ${lang}`).toBe(COMPLEXITY_LANGUAGES.has(lang));
+    }
+  });
+
+  it('reports an honest complexity gap for an unsupported language', () => {
+    const bash = languageCoverageMatrix(['Bash']).rows[0];
+    expect(bash.supported.complexity).toBe(false);
   });
 
   it('every call-graph language has an explicit test-detection decision', () => {
@@ -358,6 +371,7 @@ describe('completeness + fail-soft + determinism', () => {
     // CAN be tagged with) must have a row — a regression guard for the dogfood-found gap.
     const referenced = new Set<string>([
       ...CALLGRAPH_LANGUAGES, ...SIG, ...TI, ...IMP, ...IAC_LANGUAGES, ...CFG_LANGUAGES,
+      ...COMPLEXITY_LANGUAGES,
     ]);
     for (const lang of referenced) {
       expect(keys.has(lang), `${lang} (referenced by a capability source) is missing from the registry`).toBe(true);
