@@ -1,13 +1,42 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { access, mkdtemp, mkdir, writeFile, readFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:http';
 
-import { modelsUrl, stripMarker, isUsableConfig, readConfig, formatToolResult, formatCallArgs, compositeToolResult, NAV_TOOLS, PI_DAEMON_PRESET, PI_EXCLUDED_CONCLUSION_TOOLS, PI_SPEC_WORKFLOW_OBSERVATIONS, PI_SPEC_WORKFLOW_EXCLUSIONS, ensureDaemon, callTool, isUsableDaemon, missingDaemonTools, piDaemonSpawnCommand, PiDaemonConnectionError } from './extension.js';
+import openloreExtension, { createPiExtension, modelsUrl, stripMarker, isUsableConfig, readConfig, loadExistingConfig, runConfigWizard, readSpecIndex, formatToolResult, formatCallArgs, compositeToolResult, NAV_TOOLS, PI_DAEMON_PRESET, PI_EXCLUDED_CONCLUSION_TOOLS, PI_SPEC_WORKFLOW_OBSERVATIONS, PI_SPEC_WORKFLOW_EXCLUSIONS, ensureDaemon, ensureDaemonResult, callTool, isUsableDaemon, missingDaemonTools, piDaemonSpawnCommand, PiDaemonConnectionError, PI_SPEC_INDEX_MAX_DOMAINS, shouldNegativeCacheDaemonFailure } from './extension.js';
+import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { TOOL_DEFINITIONS } from '../cli/commands/mcp.js';
 import { startServe } from '../cli/commands/serve.js';
 import { TOOL_OUTPUT_CLASS } from '../core/services/mcp-handlers/tool-contract.js';
+import { pointerLineFor } from '../cli/commands/orient-inject-render.js';
+
+type PiEventHandler = (...args: unknown[]) => unknown;
+
+function registerPiHandlers(orientTimeoutMs?: number): Map<string, PiEventHandler> {
+  const handlers = new Map<string, PiEventHandler>();
+  const pi = {
+    registerTool: vi.fn(),
+    registerCommand: vi.fn(),
+    on: vi.fn((event: string, handler: PiEventHandler) => { handlers.set(event, handler); }),
+  } as unknown as ExtensionAPI;
+  (orientTimeoutMs === undefined ? openloreExtension : createPiExtension({ orientTimeoutMs }))(pi);
+  return handlers;
+}
+
+function registerPiCommands(): Map<string, PiEventHandler> {
+  const commands = new Map<string, PiEventHandler>();
+  const pi = {
+    registerTool: vi.fn(),
+    registerCommand: vi.fn((name: string, command: unknown) => {
+      const handler = (command as { handler?: PiEventHandler }).handler;
+      if (handler) commands.set(name, handler);
+    }),
+    on: vi.fn(),
+  } as unknown as ExtensionAPI;
+  openloreExtension(pi);
+  return commands;
+}
 
 it('spawns a full-surface daemon because Pi curates a wider native tool set itself', () => {
   expect(PI_DAEMON_PRESET).toBe('full');
@@ -31,12 +60,58 @@ it('does not create a Pi daemon log through an outbound .openlore symlink', asyn
   const outside = await mkdtemp(join(tmpdir(), 'openlore-pi-outside-'));
   try {
     await symlink(outside, join(root, '.openlore'), 'dir');
-    await expect(ensureDaemon(root)).resolves.toBeNull();
+    const result = await ensureDaemonResult(root);
+    expect(result.daemon).toBeNull();
+    expect(result.failure).toMatch(/startup preparation failed/);
     await expect(access(join(outside, 'serve.log'))).rejects.toThrow();
   } finally {
     await rm(root, { recursive: true, force: true });
     await rm(outside, { recursive: true, force: true });
   }
+});
+
+it('reports a packaged daemon that exits before health instead of mislabeling it as unanalyzed', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'openlore-pi-early-exit-'));
+  try {
+    const result = await ensureDaemonResult(root, {
+      timeoutMs: 1_000,
+      launch: { command: process.execPath, args: ['-e', 'process.exit(7)'] },
+    });
+    expect(result.daemon).toBeNull();
+    expect(result.failure).toMatch(/exited before becoming healthy/);
+    expect(result.failure).toContain('exit code 7');
+    expect(result.failure).not.toMatch(/run `openlore analyze`/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it('reports the packaged launch error code without waiting for a health timeout', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'openlore-pi-launch-error-'));
+  try {
+    const result = await ensureDaemonResult(root, {
+      timeoutMs: 1_000,
+      launch: { command: join(root, 'missing-openlore-runtime'), args: [] },
+    });
+    expect(result).toMatchObject({ daemon: null, failureKind: 'launch' });
+    expect(result.failure).toContain('ENOENT');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it('does not hide draining or just-late daemons behind the long negative cache', () => {
+  expect(shouldNegativeCacheDaemonFailure('draining')).toBe(false);
+  expect(shouldNegativeCacheDaemonFailure('health-timeout')).toBe(false);
+  expect(shouldNegativeCacheDaemonFailure('launch')).toBe(true);
+  expect(shouldNegativeCacheDaemonFailure('preparation')).toBe(true);
+  expect(shouldNegativeCacheDaemonFailure('early-exit')).toBe(true);
+});
+
+it('arms keepalive immediately after a late daemon becomes usable', async () => {
+  const source = await readFile(new URL('./extension.ts', import.meta.url), 'utf8');
+  const getDaemon = source.slice(source.indexOf('async function getDaemon'), source.indexOf('let keepalive:'));
+  expect(getDaemon.indexOf('daemons.set(cwd, d)')).toBeLessThan(getDaemon.indexOf('startKeepalive()'));
 });
 
 it('frames every Pi before-agent corpus block with the shared provenance boundary', async () => {
@@ -49,7 +124,8 @@ it('frames every Pi before-agent corpus block with the shared provenance boundar
 it('applies the Pi intent gate before daemon work and discloses every withheld path', async () => {
   const source = await readFile(new URL('./extension.ts', import.meta.url), 'utf8');
   const hook = source.slice(source.indexOf("pi.on('before_agent_start'"));
-  expect(hook.indexOf('classifyTurnIntent(prompt)')).toBeLessThan(hook.indexOf('await getDaemon(sessionCwd)'));
+  expect(hook.indexOf('classifyTurnIntent(prompt)')).toBeLessThan(hook.indexOf('getDaemon(ctx.cwd)'));
+  expect(hook).toContain('runtime.orientTimeoutMs ?? PI_ORIENT_TIMEOUT_MS');
   expect(hook).toContain("pointerLineFor('empty-prompt')");
   expect(hook).toContain("pointerLineFor('management-intent')");
   expect(hook).toContain("pointerLineFor('error')");
@@ -473,6 +549,316 @@ describe('readConfig', () => {
     expect(cfg?.generation.model).toBe('codestral');
   });
 });
+
+describe('Pi configuration fidelity', () => {
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'openlore-pi-config-fidelity-'));
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('treats a provider-less config as present and reads it for merge-safe editing', async () => {
+    await mkdir(join(dir, '.openlore'), { recursive: true });
+    await writeFile(join(dir, '.openlore', 'config.json'), JSON.stringify({
+      enforcement: { policy: { 'decision-stale': 'block' } },
+      generation: { timeoutMs: 12_000 },
+    }));
+
+    expect(await loadExistingConfig(dir)).toMatchObject({
+      state: 'valid',
+      config: {
+        enforcement: { policy: { 'decision-stale': 'block' } },
+        generation: { timeoutMs: 12_000 },
+      },
+    });
+  });
+
+  it('does not auto-open the wizard when a provider-less config file exists', async () => {
+    await mkdir(join(dir, '.openlore'), { recursive: true });
+    await writeFile(join(dir, '.openlore', 'config.json'), JSON.stringify({ generation: {} }));
+    const handlers = registerPiHandlers();
+    const sessionStart = handlers.get('session_start');
+    expect(sessionStart).toBeDefined();
+    const select = vi.fn();
+    const ctx = {
+      cwd: dir,
+      mode: 'json',
+      hasUI: true,
+      ui: { select, input: vi.fn(), confirm: vi.fn(), notify: vi.fn() },
+    } as unknown as ExtensionContext;
+
+    await sessionStart?.({}, ctx);
+
+    expect(select).not.toHaveBeenCalled();
+  });
+
+  it('preserves governance blocks and sibling settings when the provider changes', async () => {
+    const existing = {
+      version: '1.0.0',
+      projectType: 'nodejs',
+      openspecPath: 'openspec',
+      analysis: { maxFiles: 100, includePatterns: ['src/**'], excludePatterns: [], futureBudget: 9 },
+      generation: { provider: 'openai', model: 'gpt-4o', timeoutMs: 12_000 },
+      enforcement: { policy: { 'decision-stale': 'block' } },
+      impactCertificate: { surfaces: [{ name: 'public-api', symbols: ['serve'] }] },
+      contextInjection: { mode: 'off' as const },
+      createdAt: '2026-08-16T00:00:00.000Z',
+      lastRun: null,
+    };
+    let menuVisits = 0;
+    const select = vi.fn(async (title: string, choices: string[]) => {
+      if (title === 'Provider') return 'anthropic';
+      if (title === 'openlore config') {
+        menuVisits += 1;
+        return menuVisits === 1
+          ? choices.find((choice) => choice.startsWith('Provider'))
+          : '✓ Save & close';
+      }
+      return undefined;
+    });
+    const ctx = {
+      cwd: dir,
+      mode: 'tui',
+      hasUI: true,
+      ui: {
+        select,
+        input: vi.fn(),
+        confirm: vi.fn(async () => false),
+        notify: vi.fn(),
+      },
+    } as unknown as ExtensionContext;
+
+    await runConfigWizard(ctx, existing);
+    const saved = JSON.parse(await readFile(join(dir, '.openlore', 'config.json'), 'utf-8'));
+
+    expect(saved.enforcement).toEqual(existing.enforcement);
+    expect(saved.impactCertificate).toEqual(existing.impactCertificate);
+    expect(saved.contextInjection).toEqual(existing.contextInjection);
+    expect(saved.analysis.futureBudget).toBe(9);
+    expect(saved.generation).toMatchObject({ provider: 'anthropic', timeoutMs: 12_000 });
+    expect(saved.generation).not.toHaveProperty('model');
+    expect(saved.generation).not.toHaveProperty('openaiCompatBaseUrl');
+  });
+
+  it('preserves embedding siblings when its URL changes and removes only an explicitly removed block', async () => {
+    const existing = {
+      version: '1.0.0', projectType: 'nodejs', openspecPath: 'openspec',
+      analysis: { maxFiles: 100, includePatterns: [], excludePatterns: [] },
+      generation: { provider: 'openai', model: 'gpt-4o' },
+      embedding: { baseUrl: 'http://old.test', model: 'embed', dimensions: 768, timeoutMs: 9_000 },
+      createdAt: '2026-08-16T00:00:00.000Z', lastRun: null,
+    };
+    let menuVisits = 0;
+    const ctx = {
+      cwd: dir, mode: 'tui', hasUI: true,
+      ui: {
+        select: vi.fn(async (title: string, choices: string[]) => {
+          if (title !== 'openlore config') return undefined;
+          menuVisits += 1;
+          return menuVisits === 1 ? choices.find((choice) => choice.startsWith('URL')) : '✓ Save & close';
+        }),
+        input: vi.fn(async () => 'http://new.test'),
+        confirm: vi.fn(async () => false),
+        notify: vi.fn(),
+      },
+    } as unknown as ExtensionContext;
+
+    await runConfigWizard(ctx, existing);
+    let saved = JSON.parse(await readFile(join(dir, '.openlore', 'config.json'), 'utf-8'));
+    expect(saved.embedding).toMatchObject({
+      baseUrl: 'http://new.test', model: 'embed', dimensions: 768, timeoutMs: 9_000,
+    });
+
+    menuVisits = 0;
+    const removeCtx = {
+      ...ctx,
+      ui: {
+        ...ctx.ui,
+        select: vi.fn(async (title: string) => {
+          if (title !== 'openlore config') return undefined;
+          menuVisits += 1;
+          return menuVisits === 1 ? '✕ Remove embedding' : '✓ Save & close';
+        }),
+      },
+    } as unknown as ExtensionContext;
+    await runConfigWizard(removeCtx, saved);
+    saved = JSON.parse(await readFile(join(dir, '.openlore', 'config.json'), 'utf-8'));
+    expect(saved).not.toHaveProperty('embedding');
+  });
+
+  it('refuses to overwrite malformed config bytes from the explicit wizard command', async () => {
+    const original = '{ malformed config\n';
+    await mkdir(join(dir, '.openlore'), { recursive: true });
+    const path = join(dir, '.openlore', 'config.json');
+    await writeFile(path, original);
+    const command = registerPiCommands().get('openlore');
+    expect(command).toBeDefined();
+    const select = vi.fn();
+    const notify = vi.fn();
+    const ctx = {
+      cwd: dir, mode: 'tui', hasUI: true,
+      ui: { select, input: vi.fn(), confirm: vi.fn(), notify },
+    } as unknown as ExtensionContext;
+
+    await command?.('', ctx);
+
+    expect(select).not.toHaveBeenCalled();
+    expect(notify).toHaveBeenCalledWith(expect.stringMatching(/malformed JSON.*Repair/), 'error');
+    expect(await readFile(path, 'utf-8')).toBe(original);
+  });
+});
+
+it('uses the current before-agent context root instead of the session-start root', async () => {
+  const first = await mkdtemp(join(tmpdir(), 'openlore-pi-first-root-'));
+  const current = await mkdtemp(join(tmpdir(), 'openlore-pi-current-root-'));
+  try {
+    await mkdir(join(first, '.openlore'), { recursive: true });
+    await writeFile(join(first, '.openlore', 'config.json'), JSON.stringify({ contextInjection: { mode: 'off' } }));
+    await mkdir(join(current, '.openlore', 'analysis'), { recursive: true });
+    await writeFile(join(current, '.openlore', 'config.json'), JSON.stringify({ contextInjection: { mode: 'off' } }));
+    await writeFile(join(current, '.openlore', 'analysis', 'CODEBASE.md'), 'CURRENT ROOT DIGEST');
+    const handlers = registerPiHandlers();
+    const sessionStart = handlers.get('session_start');
+    const beforeAgentStart = handlers.get('before_agent_start');
+    expect(sessionStart).toBeDefined();
+    expect(beforeAgentStart).toBeDefined();
+    const firstCtx = {
+      cwd: first,
+      mode: 'json',
+      hasUI: false,
+      ui: { select: vi.fn(), input: vi.fn(), confirm: vi.fn(), notify: vi.fn() },
+    } as unknown as ExtensionContext;
+    const ctx = {
+      cwd: current,
+      mode: 'tui',
+      hasUI: false,
+      ui: { select: vi.fn(), input: vi.fn(), confirm: vi.fn(), notify: vi.fn() },
+    } as unknown as ExtensionContext;
+
+    await sessionStart?.({}, firstCtx);
+    const result = await beforeAgentStart?.({ prompt: 'inspect code', systemPrompt: 'base' }, ctx) as { systemPrompt?: string } | undefined;
+
+    expect(result?.systemPrompt).toContain('CURRENT ROOT DIGEST');
+    expect(result?.systemPrompt).not.toContain(first);
+  } finally {
+    await rm(first, { recursive: true, force: true });
+    await rm(current, { recursive: true, force: true });
+  }
+});
+
+it('bounds and sorts the Pi spec-domain index with an explicit overflow receipt', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openlore-pi-spec-index-'));
+  try {
+    const root = join(dir, 'openspec', 'specs');
+    await mkdir(root, { recursive: true });
+    const count = PI_SPEC_INDEX_MAX_DOMAINS + 3;
+    await Promise.all(Array.from({ length: count }, (_, i) => mkdir(join(root, `domain-${String(count - i).padStart(3, '0')}`))));
+    const index = await readSpecIndex(dir);
+    const entries = index.split('\n').filter((line) => line.startsWith('- domain-'));
+    expect(entries).toHaveLength(PI_SPEC_INDEX_MAX_DOMAINS);
+    expect(entries).toEqual([...entries].sort());
+    expect(index).toContain('- … 3 more domains');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+it('degrades the real before-agent hook to its pointer line when orient wedges', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openlore-pi-hook-timeout-'));
+  const server = createServer((req, res) => {
+    if (req.url === '/health') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        ok: true,
+        presetDispatchEnforced: true,
+        root: dir,
+        pid: process.pid,
+        preset: 'full',
+        tools: NAV_TOOLS.map((tool) => tool.name),
+        tokenProtected: false,
+        tokenAuthenticated: true,
+        draining: false,
+      }));
+    }
+    // `/tool/orient` deliberately never responds; the hook owns the deadline.
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('hook-timeout server did not bind');
+  try {
+    await mkdir(join(dir, '.openlore'), { recursive: true });
+    await writeFile(join(dir, '.openlore', 'serve.json'), JSON.stringify({
+      port: address.port,
+      pid: process.pid,
+      host: '127.0.0.1',
+      startedAt: new Date().toISOString(),
+      version: 'test',
+    }));
+    const timeoutMs = 50;
+    const handlers = registerPiHandlers(timeoutMs);
+    const beforeAgentStart = handlers.get('before_agent_start');
+    const ctx = {
+      cwd: dir, mode: 'tui', hasUI: false,
+      ui: { select: vi.fn(), input: vi.fn(), confirm: vi.fn(), notify: vi.fn() },
+    } as unknown as ExtensionContext;
+    const startedAt = Date.now();
+
+    const result = await beforeAgentStart?.({ prompt: 'inspect the parser', systemPrompt: 'base' }, ctx) as { systemPrompt?: string } | undefined;
+
+    expect(Date.now() - startedAt).toBeLessThan(timeoutMs + 500);
+    expect(result?.systemPrompt).toContain(pointerLineFor('error'));
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(dir, { recursive: true, force: true });
+  }
+}, 2_000);
+
+it('applies the same first-turn deadline while daemon discovery is wedged', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openlore-pi-discovery-timeout-'));
+  const server = createServer((_req, res) => {
+    setTimeout(() => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        ok: true, presetDispatchEnforced: true, root: dir, pid: process.pid,
+        preset: 'full', tools: NAV_TOOLS.map((tool) => tool.name),
+        tokenProtected: false, tokenAuthenticated: true, draining: false,
+      }));
+    }, 200);
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('discovery-timeout server did not bind');
+  try {
+    await mkdir(join(dir, '.openlore'), { recursive: true });
+    await writeFile(join(dir, '.openlore', 'serve.json'), JSON.stringify({
+      port: address.port, pid: process.pid, host: '127.0.0.1', startedAt: '', version: 'test',
+    }));
+    const timeoutMs = 50;
+    const beforeAgentStart = registerPiHandlers(timeoutMs).get('before_agent_start');
+    const ctx = {
+      cwd: dir, mode: 'tui', hasUI: false,
+      ui: { select: vi.fn(), input: vi.fn(), confirm: vi.fn(), notify: vi.fn() },
+    } as unknown as ExtensionContext;
+    const startedAt = Date.now();
+
+    const result = await beforeAgentStart?.({ prompt: 'inspect the parser', systemPrompt: 'base' }, ctx) as { systemPrompt?: string } | undefined;
+
+    expect(Date.now() - startedAt).toBeLessThan(timeoutMs + 500);
+    expect(result?.systemPrompt).toContain(pointerLineFor('error'));
+    // Discovery is intentionally allowed to warm the daemon after the first-turn
+    // deadline; let that useful background work settle before removing its root.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(dir, { recursive: true, force: true });
+  }
+}, 2_000);
 
 /** The single text block a composite result carries. */
 function compositeText(result: ReturnType<typeof compositeToolResult>): string {
