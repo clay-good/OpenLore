@@ -29,6 +29,7 @@ import {
   extractExceptionFactsFromSource,
 } from './exception-flow.js';
 import { usesTsxGrammar } from './language-detection.js';
+import { TEST_DETECTION_DECISIONS } from './test-file.js';
 import {
   CROSS_SERVICE_HTTP_LANGUAGES as XSVC,
   extractHttpCalls,
@@ -82,6 +83,26 @@ describe('language-support registry — faithful to live extractor sources', () 
     for (const lang of ALL_LANGUAGES) {
       const claims = languageSupport(lang).capabilities.includes('errorPropagation');
       expect(claims, `errorPropagation mismatch for ${lang}`).toBe(ERRP.has(lang));
+    }
+  });
+
+  it('testDetection cell === the explicit detection decision for EVERY language', () => {
+    for (const lang of ALL_LANGUAGES) {
+      const claims = languageSupport(lang).capabilities.includes('testDetection');
+      expect(claims, `testDetection mismatch for ${lang}`).toBe(
+        TEST_DETECTION_DECISIONS.get(lang) === 'supported',
+      );
+    }
+  });
+
+  it('every call-graph language has an explicit test-detection decision', () => {
+    expect(new Set(TEST_DETECTION_DECISIONS.keys())).toEqual(CALLGRAPH_LANGUAGES);
+    for (const lang of CALLGRAPH_LANGUAGES) {
+      const decision = TEST_DETECTION_DECISIONS.get(lang);
+      expect(
+        languageSupport(lang).capabilities.includes('testDetection'),
+        `${lang} is callGraph-backed but has no testDetection capability`,
+      ).toBe(decision === 'supported');
     }
   });
 });

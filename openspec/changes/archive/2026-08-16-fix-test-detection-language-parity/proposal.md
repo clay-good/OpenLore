@@ -1,6 +1,6 @@
 # Test-file detection language parity: every callGraph-backed language deserves a working `isTestFile`
 
-> Status: PROPOSED (2026-07-03, e2e audit pass 3). The canonical test-file predicate is
+> Status: IMPLEMENTED AND ARCHIVED (2026-08-16). The canonical test-file predicate was
 > single-sourced (good) but its pattern coverage badly trails the 18-language call-graph
 > matrix: C#, Ruby, PHP, Elixir, Dart, Lua, Swift, and Rust test conventions are partly or
 > wholly undetected, so `select_tests`, `report_coverage_gaps`, dead-code stats, and every

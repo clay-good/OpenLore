@@ -93,8 +93,8 @@ describe('generateCodebaseDigest', () => {
     await generateCodebaseDigest(makeContext(cg), null, { rootPath: tmpDir, outputDir: tmpDir });
     const content = await readFile(join(tmpDir, 'CODEBASE.md'), 'utf-8');
     expect(content).toContain('## Language coverage');
-    expect(content).toContain('| Language | signatures | callGraph |');
-    expect(content).toMatch(/\| Go \| ✓ \| ✓ \|/);          // Go: signatures + callGraph
+    expect(content).toContain('| Language | signatures | callGraph | testDetection |');
+    expect(content).toMatch(/\| Go \| ✓ \| ✓ \| ✓ \|/);    // Go: signatures + callGraph + test detection
     expect(content).toContain('get_language_support');       // points to the runtime tool
   });
 

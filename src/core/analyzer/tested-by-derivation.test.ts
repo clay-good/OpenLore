@@ -33,6 +33,22 @@ describe('tested_by derivation — relative paths (bug B)', () => {
     expect(testedBy.length).toBeGreaterThan(0);
     expect(testedBy.some(e => e.callerId === add.id)).toBe(true);
   });
+
+  it('marks newly supported language conventions and derives tested_by edges', async () => {
+    const files = [
+      { path: 'lib/calc.rb', content: 'def add(a, b)\n  a + b\nend\n', language: 'Ruby' },
+      { path: 'spec/models/calc_spec.rb', content: 'def verifies_add\n  add(1, 2)\nend\n', language: 'Ruby' },
+      { path: 'src/Calc.cs', content: 'class Calc { int Add(int a, int b) { return a + b; } }', language: 'C#' },
+      { path: 'src/CalcTests.cs', content: 'class CalcTests { int VerifiesAdd() { return Add(1, 2); } }', language: 'C#' },
+    ];
+
+    const cg = serializeCallGraph(await new CallGraphBuilder().build(files));
+    for (const path of ['spec/models/calc_spec.rb', 'src/CalcTests.cs']) {
+      expect(cg.nodes.some(node => node.filePath === path && node.isTest), path).toBe(true);
+    }
+    expect(cg.edges.some(edge => edge.kind === 'tested_by' && edge.callerId.endsWith('::add'))).toBe(true);
+    expect(cg.edges.some(edge => edge.kind === 'tested_by' && edge.callerId.endsWith('::Calc.Add'))).toBe(true);
+  });
 });
 
 describe('tested_by derivation — full analyze pipeline (bugs A + B)', () => {

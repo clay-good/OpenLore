@@ -79,7 +79,8 @@ const DISCLOSURE =
   'A capability is present and exercised, or absent (fail-soft) — an absent capability yields nothing ' +
   'for that language, never a guess or an error. So a quiet result from another tool ("no callers for X" ' +
   'in a Kotlin file) is interpretable here: if `callGraph` is supported the quiet means "no callers"; if ' +
-  'it is unsupported the quiet means "calls are not extracted for this language." `styleFingerprint` is ' +
+  'it is unsupported the quiet means "calls are not extracted for this language." Likewise, an empty ' +
+  '`select_tests` result is only interpretable as "no tests found" when `testDetection` is supported. `styleFingerprint` is ' +
   'not built for any language yet. The matrix is the true backing of the generic extractors, not a roadmap.';
 
 function viewFor(
