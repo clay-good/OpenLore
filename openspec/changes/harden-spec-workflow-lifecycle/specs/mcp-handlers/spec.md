@@ -2,7 +2,7 @@
 
 ### Requirement: Unavailable Coverage Uses Unknown Values
 
-Mapping-dependent coverage metrics SHALL be `null` whenever current deterministic links cannot establish them. The response SHALL carry `mappingCoverage.state = "unavailable"` and a stable reason such as `mapping-not-generated`, `incompatible-provenance`, `fingerprint-mismatch`, or `invalid-json`. Zero SHALL mean an observed count of zero, never unavailable evidence.
+Mapping-dependent coverage metrics in MCP and composite responses SHALL be `null` whenever current deterministic links cannot establish them. The response SHALL carry `mappingCoverage.state = "unavailable"` and a stable reason such as `mapping-not-generated`, `incompatible-provenance`, `fingerprint-mismatch`, or `invalid-json`. Zero in those agent-facing responses SHALL mean an observed count of zero, never unavailable evidence. The public v2 library API MAY retain its numeric summary for source compatibility only when `mappingCoverage` remains the authoritative availability signal.
 
 #### Scenario: Incompatible provenance does not look fully covered
 - **GIVEN** an audit whose mapping cache has incompatible provenance and whose in-memory link derivation cannot establish coverage

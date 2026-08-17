@@ -29,11 +29,12 @@ export function formatMappingCoverageStatus(report: AuditReport): string[] {
   ];
 }
 
-/** Render a nullable metric: `null` is unknown evidence, never a zero count. */
-const metric = (value: number | null): string => (value === null ? 'unknown' : String(value));
+/** The public v2 summary stays numeric; availability determines interpretation. */
+const metric = (value: number, available: boolean): string => (available ? String(value) : 'unknown');
 
 function printReport(report: AuditReport, rootPath: string): void {
   const { summary } = report;
+  const coverageAvailable = report.mappingCoverage.state === 'available';
 
   console.log('');
   console.log('   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
@@ -41,9 +42,9 @@ function printReport(report: AuditReport, rootPath: string): void {
   console.log('   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('');
   for (const line of formatMappingCoverageStatus(report)) console.log(`   ${line}`);
-  console.log(`   Uncovered:      ${metric(summary.uncoveredCount)} functions`);
-  console.log(`   Hub gaps:       ${metric(summary.hubGapCount)} hub functions without spec`);
-  console.log(`   Orphan reqs:    ${metric(summary.orphanRequirementCount)} requirements with no implementation found`);
+  console.log(`   Uncovered:      ${metric(summary.uncoveredCount, coverageAvailable)} functions`);
+  console.log(`   Hub gaps:       ${metric(summary.hubGapCount, coverageAvailable)} hub functions without spec`);
+  console.log(`   Orphan reqs:    ${metric(summary.orphanRequirementCount, coverageAvailable)} requirements with no implementation found`);
   console.log(`   Stale domains:  ${summary.staleDomainCount} domains with source changes since last spec`);
   console.log('');
 
@@ -77,7 +78,7 @@ function printReport(report: AuditReport, rootPath: string): void {
       const hub = fn.isHub ? ' [hub]' : '';
       console.log(`   · ${safe(fn.name)}${hub}  ${safe(fn.file)}`);
     }
-    if (summary.uncoveredCount !== null && summary.uncoveredCount > 20) {
+    if (coverageAvailable && summary.uncoveredCount > 20) {
       console.log(`   … and ${summary.uncoveredCount - 20} more`);
     }
     console.log('');

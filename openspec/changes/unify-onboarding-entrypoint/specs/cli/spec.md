@@ -73,6 +73,20 @@ governance trail with no additional command or flag. Blocking review mode SHALL 
 explicit opt-in. All existing zero-interaction behavior (CI/TTY-guarded postinstall,
 non-blocking cold-start build, `connect --yes`, passive update notifier) is unchanged.
 
+#### Scenario: Installing the package does not touch the project
+
+- **GIVEN** a user runs `npm install -g openlore` (or `npm install openlore`)
+- **WHEN** the install completes
+- **THEN** no project file is created or modified and no index is built by the install itself
+- **AND** at most a single next-step hint is printed, suppressed in CI / non-TTY / opt-out / dependency contexts
+- **AND** the post-install step exits 0 regardless
+
+#### Scenario: Connect is non-interactive with --yes
+
+- **GIVEN** a project with a detectable agent and no TTY picker desired
+- **WHEN** `openlore connect --yes` runs
+- **THEN** every detected agent is wired with no prompt, idempotently, preserving existing content
+
 #### Scenario: One entrypoint yields both faces
 
 - **GIVEN** a repo with no OpenLore state

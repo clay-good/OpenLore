@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openloreAudit } from './audit.js';
 import { SPEC_LINK_INDEX_VERSION } from '../core/generator/spec-link-index.js';
+import type { AuditReport } from '../types/index.js';
 
 const roots: string[] = [];
 
@@ -12,6 +13,16 @@ afterEach(async () => {
 });
 
 type NodeFixture = { name: string; filePath: string; fanIn?: number };
+
+function v2NumericSummaryContract(report: AuditReport): number[] {
+  return [
+    report.summary.coveredFunctions,
+    report.summary.coveragePct,
+    report.summary.uncoveredCount,
+    report.summary.hubGapCount,
+    report.summary.orphanRequirementCount,
+  ];
+}
 
 interface FixtureOptions {
   /** Call-graph functions the audit measures coverage over. */
@@ -66,7 +77,7 @@ const specWith = (requirement: string, anchor?: string): string =>
   `# Spec\n\n### Requirement: ${requirement}\n\nThe system SHALL work.\n${anchor ? `- **Implementation**: \`${anchor}\`\n` : ''}`;
 
 describe('openloreAudit — coverage availability', () => {
-  it('reports unavailable with null metrics when there is no analysis to resolve against', async () => {
+  it('preserves numeric v2 summary fields while reporting unavailable coverage explicitly', async () => {
     const report = await openloreAudit({
       rootPath: await fixture({ withGraph: false, specs: { core: specWith('Works', 'work::src/a.ts') } }),
       save: false,
@@ -77,9 +88,10 @@ describe('openloreAudit — coverage availability', () => {
       remediation: expect.stringContaining('openlore analyze'),
     });
     expect(report.summary).toMatchObject({
-      totalFunctions: 1, coveredFunctions: null, coveragePct: null,
-      uncoveredCount: null, hubGapCount: null, orphanRequirementCount: null,
+      totalFunctions: 1, coveredFunctions: 0, coveragePct: 0,
+      uncoveredCount: 0, hubGapCount: 0, orphanRequirementCount: 0,
     });
+    expect(v2NumericSummaryContract(report)).toEqual([0, 0, 0, 0, 0]);
     expect(report.uncoveredFunctions).toEqual([]);
     expect(report.hubGaps).toEqual([]);
   });
@@ -102,7 +114,7 @@ describe('openloreAudit — coverage availability', () => {
   it('reports unavailable when no specifications exist to derive links from', async () => {
     const report = await openloreAudit({ rootPath: await fixture(), save: false });
     expect(report.mappingCoverage).toMatchObject({ state: 'unavailable', reason: 'specs-unavailable' });
-    expect(report.summary.coveragePct).toBeNull();
+    expect(report.summary.coveragePct).toBe(0);
   });
 
   it('derives coverage in memory when mapping.json has never been generated', async () => {

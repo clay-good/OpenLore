@@ -1,7 +1,7 @@
 ## 1. Deterministic Link Index Foundation
 
 - [x] 1.1 Record the architectural decisions for deterministic mapping, evidence-stream pagination, generation manifests, and repository-scoped analysis ownership before source edits.
-- [x] 1.2 Add versioned deterministic link-index types, nullable coverage-summary types, provenance fields for analysis generation plus spec digest, and compatibility parsing for legacy mapping artifacts.
+- [x] 1.2 Add versioned deterministic link-index types, explicit coverage-availability types, provenance fields for analysis generation plus spec digest, and compatibility parsing for legacy mapping artifacts.
 - [x] 1.3 Extend the canonical spec parser to return requirement-scoped normalized file and exact-symbol anchors without treating arbitrary prose or file-only references as function coverage.
 - [x] 1.4 Implement the pure spec-link-index builder with `linked`, `ambiguous`, `unmapped`, and `stale` states, bounded candidate disclosure, stable ordering, and no LLM/vector/name-similarity fallback.
 - [x] 1.5 Add unit fixtures for exact links, duplicate symbols, deleted symbols, path normalization, file-only anchors, requirements without anchors, malformed specs, and deterministic spec digests.
@@ -10,8 +10,8 @@
 
 - [x] 2.1 Add `openlore mapping refresh` with current-analysis validation, persisted versioned output, concise state counts, bounded ambiguity output, and a strict ambiguity exit option.
 - [x] 2.2 Make audit and Repair derive the current link index in memory when the persisted cache is missing, legacy, invalid, or provenance-incompatible; keep persistence optional on read-only paths.
-- [x] 2.3 Change canonical audit summaries so every mapping-dependent count/percentage is `null` under unavailable coverage while independent totals, stale domains, and structural observations remain available.
-- [x] 2.4 Update API, CLI, MCP, viewer/consumer types and rendering to branch on `mappingCoverage.state` before using nullable metrics.
+- [x] 2.3 Make MCP/composite audit summaries use `null` for unavailable mapping-dependent values while preserving the public v2 API's numeric summary contract.
+- [x] 2.4 Update API, CLI, MCP, viewer/consumer types and rendering to branch on `mappingCoverage.state` before interpreting mapping-dependent metrics.
 - [x] 2.5 Switch standalone generation finalization to derive mapping from the specs it actually wrote, and remove LLM/semantic/heuristic matches as authoritative coverage inputs.
 - [x] 2.6 Add end-to-end tests for missing/stale/legacy mapping, cache-free Repair, explicit-anchor repair, standalone finalization, and refresh idempotence.
 

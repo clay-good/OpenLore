@@ -68,6 +68,21 @@ lock, at a cost that grows with the graph. Because the structure is keyed to the
 to the context bytes, a flush that leaves the call graph unchanged leaves the structure valid, and
 a later read serves it rather than rebuilding it in memory.
 
+#### Scenario: A superseded structure is ruled out without reading it
+
+- **GIVEN** a persisted structure stamped with a graph digest different from the digest already
+  carried by the parsed analysis context
+- **WHEN** a reader considers using it
+- **THEN** the stamp mismatch rules it out before the adjacency payload is read or traversed, and
+  the reader performs no content hashing of the analysis artifact
+
+#### Scenario: The structure tracks the graph, never leads or trails it
+
+- **GIVEN** a persisted structure and a graph being served
+- **WHEN** a traversal handler asks for the structure
+- **THEN** it is used only if its stamp matches the graph digest carried by the exact context from
+  which the served graph was parsed
+
 #### Scenario: The structure is stamped with the graph digest the context carries
 
 - **GIVEN** a completed analyze
@@ -82,3 +97,12 @@ a later read serves it rather than rebuilding it in memory.
 - **THEN** the excluded edges are skipped via the per-edge mask and the result equals the
   filtered per-call BFS answer — including the edges the per-call builder drops because the
   filter also removed the callee that would have made their caller addressable
+
+#### Scenario: An unusable persisted structure degrades to a rebuild, never to a wrong answer
+
+- **GIVEN** a persisted structure that is absent, oversized, truncated, altered in its own bytes,
+  carrying an index outside the bounds of the array it addresses, written by another schema
+  version, byte-ordered for another host, or stamped for another graph
+- **WHEN** a traversal handler asks for the structure
+- **THEN** it is refused and the structure is rebuilt in memory from the served graph, so the
+  answer is unchanged and only its cost differs

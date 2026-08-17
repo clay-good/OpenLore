@@ -5,6 +5,21 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-08-16
+
+**The release where OpenLore learned to show its work.**
+
+- Generate and repair now share bounded, provenance-rich evidence across agents.
+- Analysis, daemon, MCP, and bundle lifecycles are safer under concurrency and untrusted input.
+- Test selection, language detection, coverage reporting, and OpenSpec change status are more accurate.
+- Releases now validate and promote one immutable package artifact.
+
+Existing v2 API consumers remain compatible; coverage availability is explicit through `mappingCoverage`.
+
+**Upgrade:** `npm i -g openlore@2.2.0` — or `openlore update`.
+
+**Full Changelog**: https://github.com/clay-good/OpenLore/compare/v2.1.9...v2.2.0
+
 ## [2.1.9] - 2026-08-09
 
 **The release where OpenLore stopped trusting the vibes.**
