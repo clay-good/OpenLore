@@ -660,17 +660,21 @@ export interface MappingCoverageStatus {
 }
 
 /**
- * Every mapping-dependent metric is nullable: `null` means "not established",
- * numeric zero means an observed count of zero.
+ * Backward-compatible numeric summary for the public v2 API.
+ *
+ * Consumers MUST branch on `AuditReport.mappingCoverage.state` before treating
+ * mapping-dependent values as observations. When coverage is unavailable these
+ * legacy numeric fields remain zero so existing v2 TypeScript consumers keep
+ * their source contract; MCP/composite responses replace them with `null`.
  */
 export interface AuditCoverageSummary {
   /** Mapping-independent: the analyzed function total is always observable. */
   totalFunctions: number;
-  coveredFunctions: number | null;
-  coveragePct: number | null;
-  uncoveredCount: number | null;
-  hubGapCount: number | null;
-  orphanRequirementCount: number | null;
+  coveredFunctions: number;
+  coveragePct: number;
+  uncoveredCount: number;
+  hubGapCount: number;
+  orphanRequirementCount: number;
   /** Mapping-independent: staleness is computed from spec/source timestamps. */
   staleDomainCount: number;
 }

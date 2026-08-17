@@ -10,8 +10,8 @@ function report(
     generatedAt: new Date(0).toISOString(),
     mappingCoverage,
     summary: {
-      totalFunctions: 4, coveredFunctions: null, coveragePct: null, uncoveredCount: null,
-      hubGapCount: null, orphanRequirementCount: null, staleDomainCount: 0,
+      totalFunctions: 4, coveredFunctions: 0, coveragePct: 0, uncoveredCount: 0,
+      hubGapCount: 0, orphanRequirementCount: 0, staleDomainCount: 0,
       ...summary,
     },
     uncoveredFunctions: [], hubGaps: [], orphanRequirements: [], staleDomains: [],

@@ -169,19 +169,20 @@ export async function openloreAudit(options: AuditApiOptions = {}): Promise<Audi
         }))
     : [];
 
-  // Every mapping-dependent metric is null when coverage is unavailable: zero
-  // means an observed count of zero, never unknown evidence.
+  // Preserve the public v2 API's numeric summary. `mappingCoverage` is the
+  // authoritative availability signal; transport/composite adapters replace
+  // these compatibility zeros with null before serving agent-facing evidence.
   const coveredCount = allNodes.length - uncoveredNodes.length;
   const report: AuditReport = {
     generatedAt: new Date().toISOString(),
     mappingCoverage,
     summary: {
       totalFunctions: allNodes.length,
-      coveredFunctions: index ? coveredCount : null,
-      coveragePct: index ? (allNodes.length > 0 ? Math.round((coveredCount / allNodes.length) * 100) : 0) : null,
-      uncoveredCount: index ? uncoveredNodes.length : null,
-      hubGapCount: index ? hubGaps.length : null,
-      orphanRequirementCount: index ? orphanRequirements.length : null,
+      coveredFunctions: index ? coveredCount : 0,
+      coveragePct: index ? (allNodes.length > 0 ? Math.round((coveredCount / allNodes.length) * 100) : 0) : 0,
+      uncoveredCount: index ? uncoveredNodes.length : 0,
+      hubGapCount: index ? hubGaps.length : 0,
+      orphanRequirementCount: index ? orphanRequirements.length : 0,
       staleDomainCount: staleDomains.length,
     },
     uncoveredFunctions,

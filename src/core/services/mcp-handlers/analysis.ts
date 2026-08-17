@@ -822,8 +822,19 @@ export async function handleAuditSpecCoverage(
       domains: scope?.domains,
       ...(analysisArtifacts ? { analysisArtifacts } : {}),
     });
+    const summary = report.mappingCoverage.state === 'available'
+      ? report.summary
+      : {
+          ...report.summary,
+          coveredFunctions: null,
+          coveragePct: null,
+          uncoveredCount: null,
+          hubGapCount: null,
+          orphanRequirementCount: null,
+        };
     return {
       ...report,
+      summary,
       mappingCoverage: {
         ...report.mappingCoverage,
         artifactPath: relative(absDir, report.mappingCoverage.artifactPath),

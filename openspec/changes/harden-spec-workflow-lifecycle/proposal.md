@@ -5,7 +5,7 @@ Real-world use of the new agent-hosted Generate and Repair workflows exposed a c
 ## What Changes
 
 - Replace the LLM-pipeline-owned requirement mapping with a deterministic spec-to-code link index derived from explicit spec anchors and the current graph. Keep `mapping.json` as a rebuildable cache, expose `openlore mapping refresh`, and let audit/Repair derive the index in memory when the cache is absent or stale.
-- Represent unknown mapping-dependent coverage metrics as `null` with a typed unavailable reason; never encode “unknown” as zero.
+- Preserve the public v2 API's numeric audit summary while making `mappingCoverage` its authoritative availability signal. Agent-facing MCP/composite responses represent unavailable mapping-dependent metrics as `null` with a typed reason.
 - Make composite Generate/Repair responses obey a conservative serialized transport budget as well as item limits. Every omitted recoverable item receives a provenance-bound cursor, and a receipt can be `complete` only after the final transport-safe envelope is built.
 - Guarantee that every advertised follow-up is callable in the active surface or provide a typed, exact CLI remediation. Remove follow-ups that merely repeat an unavailable observation.
 - Bind analysis artifacts and MCP caches to one atomic analysis-generation identity, automatically reload a newer generation, and reject mixed-generation evidence.

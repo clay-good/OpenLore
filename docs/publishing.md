@@ -10,7 +10,7 @@ The CI workflow that does the publish lives at [.github/workflows/release.yml](.
 2. `git push --follow-tags` to push both the bump commit and the tag.
 3. That's it. Pushing the tag triggers the `Release` workflow, which:
    - `validate` — verifies the tag is reachable from `main`, re-runs `lint`, `typecheck`, `test:run`, the dependency audit, and `build`, then packs and uploads the exact npm tarball from a job with no OIDC permission.
-   - `create-release` — creates the GitHub Release for the tag with auto-generated notes (idempotent: skipped if a Release for that tag already exists). Created with `GITHUB_TOKEN`, so it does **not** re-trigger the workflow.
+   - `create-release` — creates the GitHub Release for the tag from its `CHANGELOG.md` section, falling back to auto-generated notes (idempotent: skipped if a Release for that tag already exists). Created with `GITHUB_TOKEN`, so it does **not** re-trigger the workflow.
    - `publish` — downloads and integrity-checks that tarball, then runs `npm publish <tarball> --ignore-scripts --provenance --access public`. It does not check out source, install dependencies, build, or run package lifecycle scripts. No token; the OIDC handshake with npm authenticates the run.
 
 If the `npm-publish` environment has a required reviewer, the `publish` job pauses for a human approval click before it can mint the OIDC token.
