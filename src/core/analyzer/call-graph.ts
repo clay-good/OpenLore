@@ -5787,10 +5787,11 @@ export class CallGraphBuilder {
       if (node.isExternal || node.startIndex === undefined || node.endIndex === undefined) continue;
       const content = fileContents.get(node.filePath);
       if (!content) continue;
-      node.cyclomaticComplexity = computeCyclomaticComplexity(
+      const cyclomaticComplexity = computeCyclomaticComplexity(
         content.slice(node.startIndex, node.endIndex),
         node.language,
       );
+      if (cyclomaticComplexity !== undefined) node.cyclomaticComplexity = cyclomaticComplexity;
     }
 
     // Pass 7: Build class hierarchy (inheritance + grouping). `relationships` was
