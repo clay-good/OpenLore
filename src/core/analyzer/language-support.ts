@@ -11,6 +11,7 @@
  * SAME authoritative structure the corresponding extractor consults at run time:
  *   - `signatures`     ← {@link SIGNATURE_LANGUAGES}        (signature-extractor.ts)
  *   - `callGraph`      ← {@link CALLGRAPH_LANGUAGES}        (call-graph.ts)
+ *   - `testDetection`  ← {@link TEST_DETECTION_DECISIONS}   (test-file.ts)
  *   - `imports`        ← {@link IMPORT_RESOLUTION_LANGUAGES} (import-resolver-bridge.ts)
  *   - `cfgOverlay`     ← {@link cfgSupportsLanguage}        (cfg.ts)
  *   - `typeInference`  ← {@link TYPE_INFERENCE_LANGUAGES}   (type-inference-engine.ts)
@@ -36,11 +37,13 @@ import { IMPORT_RESOLUTION_LANGUAGES } from './import-resolver-bridge.js';
 import { STYLE_FINGERPRINT_LANGUAGES } from './style-fingerprint.js';
 import { CROSS_SERVICE_HTTP_LANGUAGES } from './http-capability.js';
 import { ERROR_PROPAGATION_LANGUAGES } from './exception-flow.js';
+import { TEST_DETECTION_DECISIONS } from './test-file.js';
 
 /** The closed set of capabilities the registry tracks, in deterministic column order. */
 export const CAPABILITIES = [
   'signatures',
   'callGraph',
+  'testDetection',
   'imports',
   'cfgOverlay',
   'typeInference',
@@ -56,6 +59,7 @@ export type Capability = (typeof CAPABILITIES)[number];
 export const CAPABILITY_DESCRIPTIONS: Record<Capability, string> = {
   signatures: 'A dedicated signature extractor (parameters, return shape) rather than the best-effort generic fallback.',
   callGraph: 'Function/method node + call-edge extraction (the substrate every reachability conclusion rests on).',
+  testDetection: 'Path-based conventional test-file detection used for isTest nodes, tested_by edges, test selection, and coverage conclusions.',
   imports: 'Relative-import resolution into the `import`-confidence cross-file edge path (raises call-resolution recall).',
   cfgOverlay: 'A control-flow-graph overlay (branches/loops) via the data-driven CFG SPECS table.',
   typeInference: 'Lightweight receiver-type inference, used to resolve method calls to their class.',
@@ -114,6 +118,7 @@ function deriveCapabilities(language: string): Capability[] {
   const out: Capability[] = [];
   if (SIGNATURE_LANGUAGES.has(language)) out.push('signatures');
   if (CALLGRAPH_LANGUAGES.has(language)) out.push('callGraph');
+  if (TEST_DETECTION_DECISIONS.get(language) === 'supported') out.push('testDetection');
   if (IMPORT_RESOLUTION_LANGUAGES.has(language)) out.push('imports');
   if (cfgSupportsLanguage(language)) out.push('cfgOverlay');
   if (TYPE_INFERENCE_LANGUAGES.has(language)) out.push('typeInference');

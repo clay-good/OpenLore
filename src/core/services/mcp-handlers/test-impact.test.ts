@@ -19,7 +19,7 @@ import { handleSelectTests, seedsFromSymbols, seedsFromFiles } from './test-impa
 import { handleReportCoverageGaps } from './coverage-gaps.js';
 import { readCachedContext } from './utils.js';
 import { getChangedFiles } from '../../drift/git-diff.js';
-import type { FunctionNode, SerializedCallGraph, CallEdge } from '../../analyzer/call-graph.js';
+import { CallGraphBuilder, serializeCallGraph, type FunctionNode, type SerializedCallGraph, type CallEdge } from '../../analyzer/call-graph.js';
 
 function node(over: Partial<FunctionNode> & { id: string }): FunctionNode {
   return {
@@ -93,6 +93,28 @@ describe('handleSelectTests', () => {
     expect(r.selectedTests).toEqual([]);
     expect(r.coverage.testDetection).toBe('none');
     expect(r.soundness.caveats.join(' ')).toMatch(/no tests were detected/i);
+  });
+
+  it('reports full detection for a mixed-language graph with detected tests', async () => {
+    const mixed = serializeCallGraph(await new CallGraphBuilder().build([
+      { path: 'src/a.ts', content: 'export function tsFn() { return 1; }', language: 'TypeScript' },
+      { path: 'src/a.test.ts', content: 'function testsTs() { tsFn(); }', language: 'TypeScript' },
+      { path: 'lib/a.rb', content: 'def rbFn\n  1\nend\n', language: 'Ruby' },
+      { path: 'spec/a_spec.rb', content: 'def testsRuby\n  rbFn\nend\n', language: 'Ruby' },
+    ]));
+    expect(mixed.nodes.some(n => n.filePath === 'spec/a_spec.rb' && n.isTest)).toBe(true);
+    vi.mocked(readCachedContext).mockResolvedValue({ callGraph: mixed } as never);
+
+    const selection = await handleSelectTests({
+      directory: '/p',
+      changedSymbols: ['tsFn', 'rbFn'],
+    }) as { coverage: { testDetection: string } };
+    const gaps = await handleReportCoverageGaps({ directory: '/p' }) as {
+      coverage: { testDetection: string };
+    };
+
+    expect(selection.coverage.testDetection).toBe('full');
+    expect(gaps.coverage.testDetection).toBe('full');
   });
 
   it('defaults to a working-tree diff vs HEAD when no args are given, and flags it', async () => {

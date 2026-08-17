@@ -38,6 +38,7 @@ describe('get_language_support — named-language mode (pure registry, no analys
     expect(view.language).toBe('Go');
     expect(view.known).toBe(true);
     expect(view.supported).toContain('callGraph');
+    expect(view.supported).toContain('testDetection');
     expect(view.supported).toContain('cfgOverlay');
     expect(view.supported).toContain('typeInference');
     // Go HAS a style fingerprint (binding := vs var measured; naming-case enforced → null).
@@ -154,5 +155,6 @@ describe('get_language_support — contract', () => {
     expect(() => assertConclusionShape('get_language_support', res)).not.toThrow();
     expect(res.disclosure).toMatch(/fail-soft/i);
     expect(res.capabilities.length).toBeGreaterThan(0);
+    expect(res.capabilities).toContainEqual(expect.objectContaining({ name: 'testDetection' }));
   });
 });
