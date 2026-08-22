@@ -140,6 +140,21 @@ function sameFile(
  * replacing the file or one of its parent directories makes the read fail closed.
  */
 export async function readFileConfined(absDir: string, filePath: string): Promise<string> {
+  return (await readFileConfinedWithStat(absDir, filePath)).content;
+}
+
+export interface ConfinedFileRead {
+  content: string;
+  /** Metadata captured from the same open descriptor after the read completed. */
+  stat: Stats;
+}
+
+/**
+ * The freshness-aware form of {@link readFileConfined}. Content and metadata come
+ * from one descriptor, and neither is returned if that file or its name changes
+ * during the read.
+ */
+export async function readFileConfinedWithStat(absDir: string, filePath: string): Promise<ConfinedFileRead> {
   const lexicalPath = safeJoin(absDir, filePath);
   const canonicalRoot = await realpath(absDir);
   const canonicalPath = await realpath(lexicalPath);
@@ -150,19 +165,35 @@ export async function readFileConfined(absDir: string, filePath: string): Promis
     const opened = await handle.stat();
     if (!opened.isFile()) throw new Error(`Confined read requires a regular file: "${filePath}"`);
 
-    const verifyIdentity = async (): Promise<void> => {
+    const verifyIdentity = async (descriptorStat: Stats): Promise<void> => {
       const currentCanonicalPath = await realpath(canonicalPath);
       safeJoin(canonicalRoot, currentCanonicalPath);
       const current = await stat(currentCanonicalPath);
-      if (!current.isFile() || !sameFile(opened, current)) {
+      if (
+        !current.isFile()
+        || !sameFile(descriptorStat, current)
+        || current.size !== descriptorStat.size
+        || current.mtimeMs !== descriptorStat.mtimeMs
+        || current.ctimeMs !== descriptorStat.ctimeMs
+      ) {
         throw new Error(`Confined read target changed during access: "${filePath}"`);
       }
     };
 
-    await verifyIdentity();
-    const content = await handle.readFile({ encoding: 'utf-8' });
-    await verifyIdentity();
-    return content;
+    await verifyIdentity(opened);
+    const bytes = await handle.readFile();
+    const afterRead = await handle.stat();
+    if (
+      !sameFile(opened, afterRead)
+      || afterRead.size !== opened.size
+      || afterRead.mtimeMs !== opened.mtimeMs
+      || afterRead.ctimeMs !== opened.ctimeMs
+      || bytes.length !== opened.size
+    ) {
+      throw new Error(`Confined read target changed during access: "${filePath}"`);
+    }
+    await verifyIdentity(afterRead);
+    return { content: bytes.toString('utf-8'), stat: afterRead };
   } finally {
     await handle.close();
   }

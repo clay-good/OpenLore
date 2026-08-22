@@ -1110,12 +1110,12 @@ export const TOOL_DEFINITIONS = [
     name: 'get_function_body',
     description:
       'Return the exact source code of a named function in a file. ' +
-      'Use this after search_code or get_function_skeleton to read the full implementation. ' +
-      'Requires a prior "openlore analyze" run for precise byte-range extraction; ' +
-      'falls back to a brace-depth scan when the call graph is unavailable.',
+      'Use focus plus focusKind for stored variable/callee evidence; omit both for the full implementation. ' +
+      'Prior analysis enables exact byte ranges; otherwise it uses a brace-depth scan.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
+      dependentRequired: { focus: ['focusKind'], focusKind: ['focus'] },
       properties: {
         directory: { type: 'string', description: DIR_DESC },
         filePath: {
@@ -1125,6 +1125,16 @@ export const TOOL_DEFINITIONS = [
         functionName: {
           type: 'string',
           description: 'Name of the function to extract, e.g. "verifyToken"',
+        },
+        focus: {
+          type: 'string',
+          maxLength: 200,
+          description: 'Variable or callee name; requires focusKind.',
+        },
+        focusKind: {
+          type: 'string',
+          enum: ['variable', 'callee'],
+          description: 'Required with focus; selects its evidence kind.',
         },
       },
       required: ['filePath', 'functionName'],

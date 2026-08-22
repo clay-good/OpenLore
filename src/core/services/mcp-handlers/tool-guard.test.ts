@@ -18,6 +18,15 @@ const schema = {
 };
 
 describe('validateToolArgs', () => {
+  it('enforces dependentRequired pairs before dispatch', () => {
+    const schema = {
+      type: 'object', properties: { focus: { type: 'string' }, focusKind: { type: 'string' } },
+      dependentRequired: { focus: ['focusKind'], focusKind: ['focus'] },
+    };
+    expect(validateToolArgs({ focus: 'value', focusKind: 'variable' }, schema)).toBeNull();
+    expect(validateToolArgs({ focus: 'value' }, schema)).toMatch(/focusKind.*required by focus/);
+    expect(validateToolArgs({ focusKind: 'variable' }, schema)).toMatch(/focus.*required by focusKind/);
+  });
   it('passes valid args', () => {
     expect(validateToolArgs({ directory: '/p', depth: 2 }, schema)).toBeNull();
     expect(validateToolArgs({ directory: '/p' }, schema)).toBeNull(); // optional omitted

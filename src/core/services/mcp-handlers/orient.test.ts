@@ -13,17 +13,21 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ── Static mocks (hoisted) ────────────────────────────────────────────────────
 
-vi.mock('./utils.js', () => ({
-  validateDirectory: vi.fn(async (dir: string) => dir),
-  loadMappingIndex: vi.fn(async () => null),
-  specsForFile: vi.fn(() => []),
-  functionsForDomain: vi.fn(() => []),
-  readCachedContext: vi.fn(async () => null),
-  isCacheFresh: vi.fn(async () => false),
-  queryTooLongError: vi.fn(() => null),
-  safeJoin: vi.fn((dir: string, p: string) => `${dir}/${p}`),
-  notReadyResult: (error: string, reason: string) => ({ error, notReady: true, reason, remedy: 'openlore analyze' }),
-}));
+vi.mock('./utils.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./utils.js')>();
+  return {
+    ...actual,
+    validateDirectory: vi.fn(async (dir: string) => dir),
+    loadMappingIndex: vi.fn(async () => null),
+    specsForFile: vi.fn(() => []),
+    functionsForDomain: vi.fn(() => []),
+    readCachedContext: vi.fn(async () => null),
+    isCacheFresh: vi.fn(async () => false),
+    queryTooLongError: vi.fn(() => null),
+    safeJoin: vi.fn((dir: string, p: string) => `${dir}/${p}`),
+    notReadyResult: (error: string, reason: string) => ({ error, notReady: true, reason, remedy: 'openlore analyze' }),
+  };
+});
 
 vi.mock('../config-manager.js', () => ({
   readOpenLoreConfig: vi.fn(async () => null),
@@ -161,6 +165,36 @@ describe('handleOrient', () => {
       relevantFiles: 'source-derived',
       specDomains: 'local-unreviewed',
     });
+  });
+
+  it('joins a symbol start line by canonical id and omits malformed lines', async () => {
+    vi.mocked(VectorIndex.exists).mockReturnValue(true);
+    vi.mocked(VectorIndex.search).mockResolvedValue([
+      makeSearchResult({ id: 'src/a.ts::same', name: 'same', filePath: 'src/a.ts' }),
+      makeSearchResult({ id: 'src/b.ts::same', name: 'same', filePath: 'src/b.ts' }),
+      makeSearchResult({ id: 'not-canonical', name: 'same', filePath: 'src/c.ts' }),
+      makeSearchResult({ id: 'src/d.ts::same', name: 'same', filePath: 'src/d.ts' }),
+    ]);
+    vi.mocked(readCachedContext).mockResolvedValue({
+      callGraph: {
+        nodes: [
+          { id: 'src/a.ts::same', startLine: 41 },
+          { id: 'src/b.ts::same', startLine: 0 },
+          { id: 'not-canonical', startLine: 99 },
+          { id: 'src/d.ts::same', startLine: 10 },
+          { id: 'src/d.ts::same', startLine: 20 },
+        ],
+        edges: [],
+      },
+    } as never);
+
+    const result = await handleOrient('/tmp/proj', 'same', 4) as {
+      relevantFunctions: Array<{ filePath: string; startLine?: number }>;
+    };
+    expect(result.relevantFunctions.find(fn => fn.filePath === 'src/a.ts')?.startLine).toBe(41);
+    expect(result.relevantFunctions.find(fn => fn.filePath === 'src/b.ts')).not.toHaveProperty('startLine');
+    expect(result.relevantFunctions.find(fn => fn.filePath === 'src/c.ts')).not.toHaveProperty('startLine');
+    expect(result.relevantFunctions.find(fn => fn.filePath === 'src/d.ts')).not.toHaveProperty('startLine');
   });
 
   it('adds cited-file staleness only when the working tree outruns the served artifact', async () => {

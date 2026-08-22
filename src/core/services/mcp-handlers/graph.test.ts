@@ -489,20 +489,67 @@ describe('handleTraceExecutionPath', () => {
       makeNode({ id: 'c.ts::chargeCard', fanOut: 0 }),
     ];
     const edges = [
-      makeEdge('a.ts::processOrder', 'b.ts::applyDiscounts'),
-      makeEdge('b.ts::applyDiscounts', 'c.ts::chargeCard'),
+      { ...makeEdge('a.ts::processOrder', 'b.ts::applyDiscounts'), line: 12 },
+      { ...makeEdge('a.ts::processOrder', 'b.ts::applyDiscounts'), line: 18 },
+      { ...makeEdge('b.ts::applyDiscounts', 'c.ts::chargeCard'), line: 27 },
     ];
     vi.mocked(readCachedContext).mockResolvedValue({ callGraph: makeGraph(nodes, edges) } as never);
 
     const result = await handleTraceExecutionPath('/tmp/proj', 'processOrder', 'chargeCard') as {
       pathsFound: number;
       shortestPath: string;
-      paths: Array<{ hops: number; chain: string }>;
+      paths: Array<{ hops: number; chain: string; steps: Array<{ callsNext?: Array<{ file: string; line: number }> }> }>;
     };
 
     expect(result.pathsFound).toBe(1);
     expect(result.paths[0].hops).toBe(2);
     expect(result.paths[0].chain).toBe('processOrder → applyDiscounts → chargeCard');
+    expect(result.paths[0].steps[0].callsNext).toEqual([
+      expect.objectContaining({ file: 'a.ts', line: 12 }),
+      expect.objectContaining({ file: 'a.ts', line: 18 }),
+    ]);
+    expect(result.paths[0].steps[1].callsNext).toEqual([
+      expect.objectContaining({ file: 'b.ts', line: 27 }),
+    ]);
+    expect(result.paths[0].steps[2].callsNext).toBeUndefined();
+  });
+
+  it('bounds parallel call-site evidence and reports truncation', async () => {
+    const nodes = [makeNode({ id: 'a.ts::A' }), makeNode({ id: 'b.ts::B' })];
+    const edges = Array.from({ length: 12 }, (_, index) => ({ ...makeEdge('a.ts::A', 'b.ts::B'), line: index + 1 }));
+    vi.mocked(readCachedContext).mockResolvedValue({ callGraph: makeGraph(nodes, edges) } as never);
+    const result = await handleTraceExecutionPath('/tmp/proj', 'A', 'B') as {
+      paths: Array<{ steps: Array<{ callsNext?: unknown[]; callsNextReceipt?: Record<string, number> }> }>;
+    };
+    expect(result.paths[0].steps[0].callsNext).toHaveLength(8);
+    expect(result.paths[0].steps[0].callsNextReceipt).toMatchObject({ returned: 8, totalAtLeast: 9, omittedAtLeast: 1, limit: 8, truncated: true });
+  });
+
+  it('selects the same deduplicated receipt under adversarial edge order', async () => {
+    const nodes = [makeNode({ id: 'a.ts::A' }), makeNode({ id: 'b.ts::B' })];
+    const duplicates = Array.from({ length: 20 }, () => ({ ...makeEdge('a.ts::A', 'b.ts::B'), line: 1 }));
+    const distinct = Array.from({ length: 11 }, (_, index) => ({ ...makeEdge('a.ts::A', 'b.ts::B'), line: index + 2 }));
+    const run = async (edges: CallEdge[]) => {
+      vi.mocked(readCachedContext).mockResolvedValueOnce({ callGraph: makeGraph(nodes, edges) } as never);
+      const result = await handleTraceExecutionPath('/tmp/proj', 'A', 'B') as {
+        paths: Array<{ steps: Array<{ callsNext?: Array<{ line: number }>; callsNextReceipt?: Record<string, number | boolean> }> }>;
+      };
+      return result.paths[0].steps[0];
+    };
+    const forward = await run([...duplicates, ...distinct]);
+    const reversed = await run([...distinct, ...duplicates].reverse());
+    expect(reversed).toEqual(forward);
+    expect(forward.callsNext?.map(item => item.line)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(forward.callsNextReceipt).toMatchObject({ totalAtLeast: 9, returned: 8, omittedAtLeast: 1, truncated: true });
+  });
+
+  it('does not guess a call-site line when the edge has none', async () => {
+    const nodes = [makeNode({ id: 'a.ts::A' }), makeNode({ id: 'b.ts::B' })];
+    vi.mocked(readCachedContext).mockResolvedValue({ callGraph: makeGraph(nodes, [makeEdge('a.ts::A', 'b.ts::B')]) } as never);
+    const result = await handleTraceExecutionPath('/tmp/proj', 'A', 'B') as {
+      paths: Array<{ steps: Array<{ callsNext?: unknown[] }> }>;
+    };
+    expect(result.paths[0].steps[0].callsNext).toBeUndefined();
   });
 
   it('returns multiple paths ordered by length (shortest first)', async () => {
@@ -713,8 +760,8 @@ describe('handleGetSubgraph — edgeStore fast path', () => {
       makeNode({ id: 'src/c.ts::leaf',   fanOut: 0 }),
     ]);
     store.insertEdges([
-      makeEdge('src/a.ts::entry',  'src/b.ts::middle'),
-      makeEdge('src/b.ts::middle', 'src/c.ts::leaf'),
+      { ...makeEdge('src/a.ts::entry',  'src/b.ts::middle'), line: 11 },
+      { ...makeEdge('src/b.ts::middle', 'src/c.ts::leaf'), line: 22 },
     ]);
   });
 
@@ -787,8 +834,8 @@ describe('handleAnalyzeImpact — edgeStore fast path', () => {
       makeNode({ id: 'src/c.ts::leaf',   fanIn: 1, fanOut: 0 }),
     ]);
     store.insertEdges([
-      makeEdge('src/a.ts::entry',  'src/b.ts::middle'),
-      makeEdge('src/b.ts::middle', 'src/c.ts::leaf'),
+      { ...makeEdge('src/a.ts::entry',  'src/b.ts::middle'), line: 11 },
+      { ...makeEdge('src/b.ts::middle', 'src/c.ts::leaf'), line: 22 },
     ]);
   });
 
@@ -804,6 +851,13 @@ describe('handleAnalyzeImpact — edgeStore fast path', () => {
     const blast = result.blastRadius as { total: number; downstream: number; upstream: number };
     expect(blast.downstream).toBe(2); // middle + leaf
     expect(blast.upstream).toBe(0);   // nothing calls entry
+    const chain = result.downstreamCriticalPath as Array<{ name: string; callSites?: Array<{ file: string; line: number }> }>;
+    expect(chain.find(node => node.name === 'middle')?.callSites).toEqual([
+      expect.objectContaining({ file: 'src/a.ts', line: 11 }),
+    ]);
+    expect(chain.find(node => node.name === 'leaf')?.callSites).toEqual([
+      expect.objectContaining({ file: 'src/b.ts', line: 22 }),
+    ]);
   });
 
   it('computes upstream chain for a leaf node', async () => {
@@ -812,6 +866,53 @@ describe('handleAnalyzeImpact — edgeStore fast path', () => {
 
     const blast = result.blastRadius as { total: number; upstream: number };
     expect(blast.upstream).toBe(2); // middle + entry call into leaf
+    const chain = result.upstreamChain as Array<{ name: string; callSites?: Array<{ file: string; line: number }> }>;
+    expect(chain.find(node => node.name === 'middle')?.callSites).toEqual([
+      expect.objectContaining({ file: 'src/b.ts', line: 22 }),
+    ]);
+  });
+
+  it('preserves call sites from every shortest-depth parent', async () => {
+    store.insertNodes([makeNode({ id: 'src/b.ts::other', fanIn: 1, fanOut: 1 })]);
+    store.insertEdges([
+      { ...makeEdge('src/a.ts::entry', 'src/b.ts::other'), line: 12 },
+      { ...makeEdge('src/b.ts::other', 'src/c.ts::leaf'), line: 22 },
+    ]);
+    vi.mocked(readCachedContext).mockResolvedValueOnce({ edgeStore: store } as never);
+    const result = await handleAnalyzeImpact(dir, 'entry', 2) as Record<string, unknown>;
+    const chain = result.downstreamCriticalPath as Array<{ name: string; callSites?: Array<{ file: string; line: number }> }>;
+    expect(chain.find(node => node.name === 'leaf')?.callSites).toEqual([
+      expect.objectContaining({ callerId: 'src/b.ts::middle', file: 'src/b.ts', line: 22 }),
+      expect.objectContaining({ callerId: 'src/b.ts::other', file: 'src/b.ts', line: 22 }),
+    ]);
+    expect(chain.find(node => node.name === 'leaf')).toMatchObject({
+      callSitesReceipt: { returned: 2, total: 2, omitted: 0, truncated: false },
+    });
+  });
+
+  it('bounds call-site evidence across the entire impact response deterministically', async () => {
+    const nodes = Array.from({ length: 140 }, (_, index) =>
+      makeNode({ id: `src/generated-${String(index).padStart(3, '0')}.ts::target${index}` }));
+    store.insertNodes(nodes);
+    store.insertEdges(nodes.map((node, index) => ({
+      ...makeEdge('src/a.ts::entry', node.id),
+      line: index + 100,
+    })));
+
+    vi.mocked(readCachedContext).mockResolvedValue({ edgeStore: store } as never);
+    const first = await handleAnalyzeImpact(dir, 'entry', 1) as Record<string, unknown>;
+    const second = await handleAnalyzeImpact(dir, 'entry', 1) as Record<string, unknown>;
+    const chain = first.downstreamCriticalPath as Array<{ callSites?: unknown[] }>;
+
+    expect(chain.filter(node => node.callSites?.length).length).toBe(128);
+    expect(first.callSiteEvidenceReceipt).toEqual({
+      eligibleEntries: 141,
+      returnedEntries: 128,
+      omittedEntries: 13,
+      limit: 128,
+      truncated: true,
+    });
+    expect(second).toEqual(first);
   });
 
   it('returns riskLevel field', async () => {
@@ -1029,6 +1130,18 @@ describe('handleTraceExecutionPath — value-level opt-in', () => {
     // reported with applied:false (never a silent empty narrowing).
     const r = await handleTraceExecutionPath(dir, 'unused', 'used', 5, 10, false, true, 'x') as { valueLevel: { applied: boolean } };
     expect(r.valueLevel.applied).toBe(false);
+  });
+
+  it('does not let a synthesized data-dependent edge admit an unrelated strict edge', async () => {
+    const target = makeNode({ id: 'p.ts::parallel', fanIn: 2 });
+    const synthesized = { callerId: 'a.ts::entry', calleeId: target.id, calleeName: 'parallel', confidence: 'synthesized' as const, synthesizedBy: 'callback', line: 3 };
+    const direct = { callerId: 'a.ts::entry', calleeId: target.id, calleeName: 'parallel', confidence: 'import' as const, line: 4 };
+    store.insertNodes([target]);
+    store.insertEdges([synthesized, direct]);
+    cg = makeGraph([...cg.nodes, target], [...cg.edges, synthesized, direct]);
+    vi.mocked(readCachedContext).mockResolvedValueOnce({ callGraph: cg, edgeStore: store } as never);
+    const result = await handleTraceExecutionPath(dir, 'entry', 'parallel', 5, 10, true, true, 'a') as { pathsFound: number };
+    expect(result.pathsFound).toBe(0);
   });
 });
 

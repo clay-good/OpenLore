@@ -291,9 +291,9 @@ async function dispatchToolImpl(
     const { directory, domain } = args as { directory: string; domain: string };
     return handleGetSpec(directory, domain);
   } else if (name === 'get_function_body') {
-    const { directory, filePath, functionName } =
-      args as { directory: string; filePath: string; functionName: string };
-    return handleGetFunctionBody(directory, filePath, functionName);
+    const { directory, filePath, functionName, focus, focusKind } =
+      args as { directory: string; filePath: string; functionName: string; focus?: string; focusKind?: 'variable' | 'callee' };
+    return handleGetFunctionBody(directory, filePath, functionName, focus, focusKind);
   } else if (name === 'get_file_dependencies') {
     const { directory, filePath, direction = 'both' } =
       args as { directory: string; filePath: string; direction?: 'imports' | 'importedBy' | 'both' };

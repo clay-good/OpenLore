@@ -4,7 +4,7 @@
  * single internal schema, per spec-05's acceptance criteria.
  *
  * Supported keywords: type (string or array incl. "null"), const, enum,
- * required, properties, additionalProperties (false only), items. The
+ * required, dependentRequired, properties, additionalProperties (false only), items. The
  * `integer` type is distinguished from `number`.
  */
 
@@ -60,6 +60,17 @@ function validateNode(value: unknown, schema: JsonSchema, path: string, errors: 
 
     for (const req of (schema.required as string[] | undefined) ?? []) {
       if (!(req in obj)) errors.push({ path: `${path}/${req}`, message: 'missing required property' });
+    }
+    const dependentRequired = schema.dependentRequired;
+    if (dependentRequired && typeof dependentRequired === 'object' && !Array.isArray(dependentRequired)) {
+      for (const [present, dependencies] of Object.entries(dependentRequired as Record<string, unknown>)) {
+        if (!(present in obj) || !Array.isArray(dependencies)) continue;
+        for (const dependency of dependencies) {
+          if (typeof dependency === 'string' && !(dependency in obj)) {
+            errors.push({ path: `${path}/${dependency}`, message: `missing property required by ${present}` });
+          }
+        }
+      }
     }
 
     if (schema.additionalProperties === false) {

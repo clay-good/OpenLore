@@ -40,7 +40,7 @@ import {
   TRACE_PATH_DEFAULT_MAX_DEPTH,
   TRACE_PATH_MAX_PATHS,
 } from '../../../constants.js';
-import type { SerializedCallGraph, FunctionNode, AmbiguousCallSite } from '../../analyzer/call-graph.js';
+import type { SerializedCallGraph, FunctionNode, AmbiguousCallSite, CallEdge, EdgeConfidence } from '../../analyzer/call-graph.js';
 import { callDistance } from '../../analyzer/call-graph.js';
 import type { DecisionNode } from '../../decisions/project.js';
 import { decisionContentProvenance } from '../served-content.js';
@@ -148,7 +148,7 @@ export function bfsFromDB(
   direction: 'forward' | 'backward',
   maxDepth: number,
   es: CachedContext['edgeStore'],
-  opts?: { directResolvedOnly?: boolean }
+  opts?: { directResolvedOnly?: boolean; onShortestEdge?: (nodeId: string, edge: CallEdge, depth: number) => void }
 ): Map<string, number> {
   const visited = new Map<string, number>();
   for (const id of seeds) visited.set(id, 0);
@@ -165,16 +165,25 @@ export function bfsFromDB(
       : es!.getCallersForIds(frontier);
     // Strict mode: ignore synthesized dynamic-dispatch edges so the traversal rests
     // only on directly-resolved edges (spec: add-synthesized-dynamic-dispatch-edges).
+    const validEdges = Array.isArray(rawEdges) ? rawEdges.filter(e => e
+      && typeof e.callerId === 'string'
+      && typeof e.calleeId === 'string'
+      && CALL_EDGE_CONFIDENCES.has(e.confidence)) : [];
     const edges = opts?.directResolvedOnly
-      ? rawEdges.filter(e => e.confidence !== 'synthesized')
-      : rawEdges;
+      ? validEdges.filter(e => e.confidence !== 'synthesized')
+      : validEdges;
 
     const nextFrontier: string[] = [];
     for (const e of edges) {
       const nId = direction === 'forward' ? e.calleeId : e.callerId;
-      if (!visited.has(nId) && !nId.startsWith('external::')) {
+      if (nId.startsWith('external::')) continue;
+      const existingDepth = visited.get(nId);
+      if (existingDepth === undefined) {
         visited.set(nId, depth + 1);
         nextFrontier.push(nId);
+      }
+      if (existingDepth === undefined || existingDepth === depth + 1) {
+        opts?.onShortestEdge?.(nId, e, depth + 1);
       }
     }
     frontier = nextFrontier;
@@ -326,6 +335,105 @@ export function recommendStrategy(
 export function nodeToSummary(n: FunctionNode | undefined) {
   if (!n) return { name: '', file: '', className: null, depth: 0 };
   return { name: n.name, file: n.filePath, className: n.className ?? null, depth: 0 };
+}
+
+interface CallSiteEvidence {
+  callerId: string;
+  file: string;
+  line: number;
+  confidence: CallEdge['confidence'];
+  synthesizedBy?: CallEdge['synthesizedBy'];
+}
+
+interface CallSiteReceipt {
+  items: CallSiteEvidence[];
+  returned: number;
+  total?: number;
+  omitted?: number;
+  totalAtLeast?: number;
+  omittedAtLeast?: number;
+  limit: number;
+  truncated: boolean;
+}
+
+interface EdgeReceipt {
+  edges: CallEdge[];
+  truncated: boolean;
+}
+
+const CALL_SITE_EVIDENCE_LIMIT = 8;
+const IMPACT_EVIDENCE_ENTRY_LIMIT = 128;
+const CALL_EDGE_CONFIDENCES = new Set<EdgeConfidence>([
+  'self_cls', 'type_inference', 'import', 're_export', 'http_endpoint',
+  'same_file', 'name_only', 'type_name', 'synthesized', 'external',
+]);
+
+function byteCompare(left: string, right: string): number {
+  return Buffer.compare(Buffer.from(left), Buffer.from(right));
+}
+
+function collectEdgeReceipt(target: Map<string, EdgeReceipt>, nodeId: string, edge: CallEdge): void {
+  if (typeof edge.callerId !== 'string' || edge.callerId.length > 4_096
+    || typeof edge.calleeId !== 'string' || edge.calleeId.length > 4_096) return;
+  if (!CALL_EDGE_CONFIDENCES.has(edge.confidence)) return;
+  if (!Number.isSafeInteger(edge.line) || (edge.line ?? 0) < 1) return;
+  if (edge.synthesizedBy !== undefined
+    && (typeof edge.synthesizedBy !== 'string' || edge.synthesizedBy.length > 200)) return;
+  const receipt = target.get(nodeId) ?? { edges: [], truncated: false };
+  const key = `${edge.callerId}\0${edge.line}\0${edge.confidence}\0${edge.synthesizedBy ?? ''}`;
+  if (receipt.edges.some(current =>
+    `${current.callerId}\0${current.line}\0${current.confidence}\0${current.synthesizedBy ?? ''}` === key)) return;
+  receipt.edges.push(edge);
+  receipt.edges.sort((left, right) => byteCompare(left.callerId, right.callerId)
+    || left.line! - right.line!
+    || byteCompare(left.confidence, right.confidence)
+    || byteCompare(left.synthesizedBy ?? '', right.synthesizedBy ?? ''));
+  if (receipt.edges.length > CALL_SITE_EVIDENCE_LIMIT) {
+    receipt.edges.pop();
+    receipt.truncated = true;
+  }
+  target.set(nodeId, receipt);
+}
+
+function callSiteEvidence(
+  edges: CallEdge[],
+  callerNode: (id: string) => FunctionNode | null,
+  directResolvedOnly: boolean,
+  truncatedOverride = false,
+): CallSiteReceipt {
+  const deduped = new Map<string, CallSiteEvidence>();
+  for (const edge of edges) {
+    if (directResolvedOnly && edge.confidence === 'synthesized') continue;
+    if (typeof edge.callerId !== 'string' || !CALL_EDGE_CONFIDENCES.has(edge.confidence)) continue;
+    if (edge.synthesizedBy !== undefined && typeof edge.synthesizedBy !== 'string') continue;
+    if (!Number.isInteger(edge.line) || (edge.line ?? 0) < 1) continue;
+    const caller = callerNode(edge.callerId);
+    if (!caller || caller.isExternal || typeof caller.filePath !== 'string' || caller.filePath.length > 4_096) continue;
+    const evidence: CallSiteEvidence = {
+      callerId: edge.callerId,
+      file: caller.filePath,
+      line: edge.line!,
+      confidence: edge.confidence,
+      ...(edge.synthesizedBy ? { synthesizedBy: edge.synthesizedBy } : {}),
+    };
+    const key = `${evidence.callerId}\0${evidence.line}\0${evidence.confidence}\0${evidence.synthesizedBy ?? ''}`;
+    if (deduped.size < CALL_SITE_EVIDENCE_LIMIT) deduped.set(key, evidence);
+  }
+  const items = [...deduped.values()].sort((a, b) =>
+    byteCompare(a.file, b.file) || a.line - b.line || byteCompare(a.callerId, b.callerId)
+      || byteCompare(a.confidence, b.confidence)
+      || byteCompare(a.synthesizedBy ?? '', b.synthesizedBy ?? ''));
+  if (truncatedOverride) {
+    return {
+      items,
+      returned: items.length,
+      totalAtLeast: CALL_SITE_EVIDENCE_LIMIT + 1,
+      omittedAtLeast: Math.max(1, CALL_SITE_EVIDENCE_LIMIT + 1 - items.length),
+      limit: CALL_SITE_EVIDENCE_LIMIT,
+      truncated: true,
+    };
+  }
+  return { items, returned: items.length, total: items.length, omitted: 0, limit: CALL_SITE_EVIDENCE_LIMIT, truncated: false };
 }
 
 /**
@@ -613,8 +721,16 @@ export async function handleAnalyzeImpact(
 
   const seedIds     = seeds.map(n => n.id);
   const hubIds      = new Set(ctx.edgeStore.getHubs(500).map(n => n.id));
-  const bfsOpts = { directResolvedOnly };
-  const upstreamMap   = bfsFromDB(seedIds, 'backward', depth, ctx.edgeStore, bfsOpts);
+  const upstreamEvidence = new Map<string, EdgeReceipt>();
+  const downstreamEvidence = new Map<string, EdgeReceipt>();
+  const upstreamMap = bfsFromDB(seedIds, 'backward', depth, ctx.edgeStore, {
+    directResolvedOnly,
+    onShortestEdge: (nodeId, edge) => collectEdgeReceipt(upstreamEvidence, nodeId, edge),
+  });
+  const downstreamOpts = {
+    directResolvedOnly,
+    onShortestEdge: (nodeId: string, edge: CallEdge) => collectEdgeReceipt(downstreamEvidence, nodeId, edge),
+  };
 
   // Value-level opt-in (spec: add-intraprocedural-cfg-dataflow-overlay): narrow
   // the downstream forward slice to the calls whose arguments are data-dependent
@@ -641,18 +757,22 @@ export async function handleAnalyzeImpact(
         : valueParam
           ? `value "${valueParam}" is not a parameter or tracked local in this function's overlay; returning function-granularity result`
           : 'function exposes no parameters in the overlay; returning function-granularity result' };
-      downstreamMap = bfsFromDB(seedIds, 'forward', depth, ctx.edgeStore, bfsOpts);
+      downstreamMap = bfsFromDB(seedIds, 'forward', depth, ctx.edgeStore, downstreamOpts);
     } else {
       const { valueReachableLines } = await import('../../analyzer/cfg.js');
       const reached = valueReachableLines(cfg, valueParam);
       const directCallees = ctx.edgeStore.getCallees(seeds[0].id)
-        .filter(e => e.line != null && reached.has(e.line) && e.calleeId && !e.calleeId.startsWith('external::'));
+        .filter(e => (!directResolvedOnly || e.confidence !== 'synthesized')
+          && e.line != null && reached.has(e.line) && e.calleeId && !e.calleeId.startsWith('external::'));
+      for (const edge of directCallees) {
+        collectEdgeReceipt(downstreamEvidence, edge.calleeId, edge);
+      }
       const calleeIds = [...new Set(directCallees.map(e => e.calleeId))];
       // The data-dependent direct callees are depth-1; expand forward from them.
       downstreamMap = new Map<string, number>();
       for (const id of calleeIds) downstreamMap.set(id, 1);
       if (depth > 1 && calleeIds.length > 0) {
-        const expanded = bfsFromDB(calleeIds, 'forward', depth - 1, ctx.edgeStore, bfsOpts);
+        const expanded = bfsFromDB(calleeIds, 'forward', depth - 1, ctx.edgeStore, downstreamOpts);
         for (const [id, d] of expanded) if (!downstreamMap.has(id)) downstreamMap.set(id, d + 1);
       }
       valueLevelInfo = {
@@ -668,10 +788,10 @@ export async function handleAnalyzeImpact(
      // rather than failing analyze_impact.
      if (process.env.DEBUG) console.debug(`[value-level] analyze_impact fell back: ${(error as Error).message}`);
      valueLevelInfo = { applied: false, reason: 'value-level overlay unavailable (error); returning function-granularity result' };
-     downstreamMap = bfsFromDB(seedIds, 'forward', depth, ctx.edgeStore, bfsOpts);
+     downstreamMap = bfsFromDB(seedIds, 'forward', depth, ctx.edgeStore, downstreamOpts);
    }
   } else {
-    downstreamMap = bfsFromDB(seedIds, 'forward', depth, ctx.edgeStore, bfsOpts);
+    downstreamMap = bfsFromDB(seedIds, 'forward', depth, ctx.edgeStore, downstreamOpts);
   }
 
   const resolveNode = (id: string): FunctionNode | undefined =>
@@ -688,12 +808,31 @@ export async function handleAnalyzeImpact(
   const upstreamResolved   = resolve(upstreamMap);
   const downstreamResolved = resolve(downstreamMap);
 
+  const resolvedById = new Map<string, FunctionNode>([
+    ...seeds.map(node => [node.id, node] as const),
+    ...upstreamResolved.map(({ node }) => [node.id, node] as const),
+    ...downstreamResolved.map(({ node }) => [node.id, node] as const),
+  ]);
+  const impactCallSites = (nodeId: string, direction: 'upstream' | 'downstream'): CallSiteReceipt => {
+    const receipt = (direction === 'upstream' ? upstreamEvidence : downstreamEvidence).get(nodeId)
+      ?? { edges: [], truncated: false };
+    return callSiteEvidence(receipt.edges, id => resolvedById.get(id) ?? null, directResolvedOnly, receipt.truncated);
+  };
+
   const upstreamNodes = upstreamResolved
     .filter(x => !isInfraNode(x.node))
-    .map(x => ({ ...nodeToSummary(x.node), depth: x.depth }));
+    .map(x => {
+      const { items, ...receipt } = impactCallSites(x.node.id, 'upstream');
+      return { ...nodeToSummary(x.node), depth: x.depth, ...(items.length > 0
+        ? { callSites: items, callSitesReceipt: receipt } : {}) };
+    });
   const downstreamNodes = downstreamResolved
     .filter(x => !isInfraNode(x.node))
-    .map(x => ({ ...nodeToSummary(x.node), depth: x.depth }));
+    .map(x => {
+      const { items, ...receipt } = impactCallSites(x.node.id, 'downstream');
+      return { ...nodeToSummary(x.node), depth: x.depth, ...(items.length > 0
+        ? { callSites: items, callSitesReceipt: receipt } : {}) };
+    });
 
   // Cross-domain (code↔infra) neighbors — additive, typed, ecosystem-tagged.
   const infraNeighbors = [
@@ -788,6 +927,61 @@ export async function handleAnalyzeImpact(
     };
   });
 
+  // A broad or ambiguous query can return thousands of affected entries. Keep
+  // the evidence envelope bounded across the serialized response, rather than
+  // applying only the per-entry cap and repeating a large receipt for every
+  // match. Selection is canonical and does not perturb the existing node order.
+  const evidenceEntries: Array<{
+    key: string;
+    resultIndex: number;
+    direction: 'upstreamChain' | 'downstreamCriticalPath';
+    nodeIndex: number;
+  }> = [];
+  for (let resultIndex = 0; resultIndex < results.length; resultIndex++) {
+    const result = results[resultIndex];
+    for (const direction of ['upstreamChain', 'downstreamCriticalPath'] as const) {
+      const nodes = result[direction];
+      for (let nodeIndex = 0; nodeIndex < nodes.length; nodeIndex++) {
+        const node = nodes[nodeIndex];
+        if (!node.callSites?.length) continue;
+        evidenceEntries.push({
+          key: `${seeds[resultIndex].id}\0${direction}\0${node.file}\0${node.name}\0${node.depth}\0${nodeIndex}`,
+          resultIndex,
+          direction,
+          nodeIndex,
+        });
+      }
+    }
+  }
+  evidenceEntries.sort((left, right) => byteCompare(left.key, right.key));
+  const retainedEvidence = new Set(evidenceEntries
+    .slice(0, IMPACT_EVIDENCE_ENTRY_LIMIT)
+    .map(entry => `${entry.resultIndex}\0${entry.direction}\0${entry.nodeIndex}`));
+  const omitCallSiteEvidence = (node: (typeof upstreamNodes)[number]) => {
+    const summary = { ...node };
+    delete summary.callSites;
+    delete summary.callSitesReceipt;
+    return summary;
+  };
+  const boundedResults = results.map((result, resultIndex) => ({
+    ...result,
+    upstreamChain: result.upstreamChain.map((node, nodeIndex) => {
+      if (retainedEvidence.has(`${resultIndex}\0upstreamChain\0${nodeIndex}`)) return node;
+      return omitCallSiteEvidence(node);
+    }),
+    downstreamCriticalPath: result.downstreamCriticalPath.map((node, nodeIndex) => {
+      if (retainedEvidence.has(`${resultIndex}\0downstreamCriticalPath\0${nodeIndex}`)) return node;
+      return omitCallSiteEvidence(node);
+    }),
+  }));
+  const callSiteEvidenceReceipt = evidenceEntries.length > 0 ? {
+    eligibleEntries: evidenceEntries.length,
+    returnedEntries: Math.min(evidenceEntries.length, IMPACT_EVIDENCE_ENTRY_LIMIT),
+    omittedEntries: Math.max(0, evidenceEntries.length - IMPACT_EVIDENCE_ENTRY_LIMIT),
+    limit: IMPACT_EVIDENCE_ENTRY_LIMIT,
+    truncated: evidenceEntries.length > IMPACT_EVIDENCE_ENTRY_LIMIT,
+  } : undefined;
+
   // Federation scope (opt-in): who across the fleet consumes this published
   // symbol? Loads scoped repo indexes lazily and names coverage; never a union
   // graph. (change: add-multi-repo-federation)
@@ -826,9 +1020,11 @@ export async function handleAnalyzeImpact(
   const fedOut = federationBlock ? { federation: federationBlock } : {};
 
   if (seeds.length === 1) {
-    return { ...results[0], confidenceBoundary, ...ambiguousBlock, ...fedOut };
+    const result = { ...boundedResults[0], ...(callSiteEvidenceReceipt ? { callSiteEvidenceReceipt } : {}), confidenceBoundary, ...ambiguousBlock, ...fedOut };
+    return withIndexStaleness(absDir, result, ctx);
   }
-  return { matches: results, confidenceBoundary, ...ambiguousBlock, ...fedOut };
+  const result = { matches: boundedResults, ...(callSiteEvidenceReceipt ? { callSiteEvidenceReceipt } : {}), confidenceBoundary, ...ambiguousBlock, ...fedOut };
+  return withIndexStaleness(absDir, result, ctx);
 }
 
 /**
@@ -1256,7 +1452,8 @@ export async function handleTraceExecutionPath(
       const reached = valueReachableLines(fnCfg, valueParam);
       const allowed = new Set<string>();
       for (const e of ctx.edgeStore.getCallees(entry.id)) {
-        if (e.line != null && reached.has(e.line) && e.calleeId) allowed.add(e.calleeId);
+        if ((!directResolvedOnly || e.confidence !== 'synthesized')
+          && e.line != null && reached.has(e.line) && e.calleeId) allowed.add(e.calleeId);
       }
       allowedFirstHop.set(entry.id, allowed);
     }
@@ -1335,12 +1532,34 @@ export async function handleTraceExecutionPath(
 
   allPaths.sort((a, b) => a.length - b.length);
 
+  const returnedPairs = new Set<string>();
+  for (const path of allPaths) {
+    for (let index = 0; index + 1 < path.length; index++) {
+      returnedPairs.add(`${path[index]}\0${path[index + 1]}`);
+    }
+  }
+  const edgesByPair = new Map<string, EdgeReceipt>();
+  for (const edge of cg.edges) {
+    if (!edge.calleeId) continue;
+    if (directResolvedOnly && edge.confidence === 'synthesized') continue;
+    const key = `${edge.callerId}\0${edge.calleeId}`;
+    if (returnedPairs.has(key)) collectEdgeReceipt(edgesByPair, key, edge);
+  }
+
   const paths = allPaths.map(pathIds => {
-    const steps = pathIds.map(id => {
+    const steps = pathIds.map((id, index) => {
       const node = nodeMap.get(id);
-      return node
+      const nextId = pathIds[index + 1];
+      const edgeReceipt = nextId ? edgesByPair.get(`${id}\0${nextId}`) : undefined;
+      const callsNext = edgeReceipt
+        ? callSiteEvidence(edgeReceipt.edges, callerId => nodeMap.get(callerId) ?? null, directResolvedOnly, edgeReceipt.truncated)
+        : undefined;
+      const base = node
         ? { name: node.name, file: node.filePath, className: node.className ?? null }
         : { name: id, file: '', className: null };
+      if (!callsNext || callsNext.items.length === 0) return base;
+      const { items, ...receipt } = callsNext;
+      return { ...base, callsNext: items, callsNextReceipt: receipt };
     });
     return {
       hops: pathIds.length - 1,
@@ -1349,7 +1568,7 @@ export async function handleTraceExecutionPath(
     };
   });
 
-  return {
+  const result = {
     entryFunction:  entryNodes[0].name,
     targetFunction: targetNodes[0].name,
     pathsFound: paths.length,
@@ -1369,4 +1588,5 @@ export async function handleTraceExecutionPath(
     ...(valueLevelInfo ? { valueLevel: valueLevelInfo } : {}),
     confidenceBoundary: assembleBoundary({ basis: edgeBasisForChains(allPaths, pairIndex), staleness: traceStaleness, integrity: ctx?.integrity, repair: repairDisclosure(absDir) }),
   };
+  return withIndexStaleness(absDir, result, ctx);
 }

@@ -607,10 +607,45 @@ describe('handleAnalyzeCodebase (cached path)', () => {
 
 describe('handleGetFunctionBody', () => {
   let tmpDir: string;
+  let readCachedContext: ReturnType<typeof vi.fn>;
 
   beforeEach(async () => {
     tmpDir = await createTmpDir();
+    const utils = await import('./utils.js');
+    readCachedContext = vi.mocked(utils.readCachedContext);
+    readCachedContext.mockResolvedValue(null);
   });
+
+  async function focusedFixture(language = 'TypeScript', baselineHash: string | null = null) {
+    const src = `export function calculate(input: number): number {\n  const total = input + 1;\n  send(total);\n  return total;\n}\n`;
+    await writeFile(join(tmpDir, 'calc.ts'), src, 'utf-8');
+    const node = {
+      id: 'calc.ts::calculate', name: 'calculate', filePath: 'calc.ts', language,
+      startIndex: 0, endIndex: src.length, startLine: 1, endLine: 5,
+    };
+    await writeAnalysisFile(tmpDir, ARTIFACT_LLM_CONTEXT, { callGraph: { nodes: [node] } });
+    const cfg = {
+      blocks: [{ id: 0, kind: 'entry' }, { id: 1, kind: 'exit' }],
+      edges: [{ from: 0, to: 1, kind: 'normal' }],
+      params: ['input'], paramLine: 1,
+      defUse: [
+        { variable: 'input', defLine: 1, useLine: 2, precision: 'exact' },
+        { variable: 'total', defLine: 2, useLine: 3, precision: 'may' },
+        { variable: 'total', defLine: 2, useLine: 4, precision: 'exact' },
+      ],
+    };
+    const edgeStore = {
+      getFileHash: vi.fn(() => baselineHash),
+      getCfg: vi.fn(() => cfg),
+      getCallees: vi.fn(() => [{
+        callerId: node.id, calleeId: 'external::send', calleeName: 'send', line: 3, confidence: 'external',
+      }]),
+    };
+    readCachedContext.mockResolvedValue({
+      callGraph: { nodes: [node], edges: [] }, edgeStore, artifactMtimeMs: Date.now() + 60_000,
+    });
+    return { src, node, cfg, edgeStore };
+  }
 
   it('returns error when file does not exist', async () => {
     const { handleGetFunctionBody } = await import('./analysis.js');
@@ -631,6 +666,12 @@ describe('handleGetFunctionBody', () => {
     expect(typeof result.body).toBe('string');
     expect((result.body as string)).toContain('doSomething');
     expect(result.note).toContain('line scan');
+    expect(result).toEqual({
+      functionName: 'doSomething', filePath: 'util.ts', language: 'TypeScript', className: null,
+      startLine: 1, endLine: 3, body: src.trimEnd(), lineCount: 3,
+      note: 'Extracted via line scan (no call graph available). Run analyze_codebase for exact extraction.',
+      provenance: expect.stringContaining('Untrusted repository source content'),
+    });
   });
 
   it('returns error when function not found in file', async () => {
@@ -640,6 +681,218 @@ describe('handleGetFunctionBody', () => {
     const { handleGetFunctionBody } = await import('./analysis.js');
     const result = await handleGetFunctionBody(tmpDir, 'a.ts', 'missingFn') as { error: string };
     expect(result.error).toContain('"missingFn"');
+  });
+
+  it('returns a sorted precision-preserving variable slice without the full body', async () => {
+    await focusedFixture();
+    const { handleGetFunctionBody } = await import('./analysis.js');
+    const result = await handleGetFunctionBody(tmpDir, 'calc.ts', 'calculate', 'total', 'variable') as Record<string, unknown>;
+
+    expect(result.body).toBeUndefined();
+    expect(result.variableScope).toBe('same-spelling variables within this function');
+    expect(result.slice).toEqual([
+      { line: 2, text: '  const total = input + 1;', dataFlowPrecision: 'may', roles: ['definition'] },
+      { line: 3, text: '  send(total);', dataFlowPrecision: 'may', roles: ['use'] },
+      { line: 4, text: '  return total;', dataFlowPrecision: 'exact', roles: ['use'] },
+    ]);
+  });
+
+  it('returns stored callee call sites without fabricating data-flow precision', async () => {
+    const { edgeStore } = await focusedFixture();
+    edgeStore.getCallees.mockReturnValue([
+      { callerId: 'calc.ts::calculate', calleeId: 'external::send', calleeName: 'send', line: 3, confidence: 'external' },
+      { callerId: 'calc.ts::calculate', calleeId: 'external::send', calleeName: 'send', line: 4, confidence: 'name_only' },
+    ]);
+    const { handleGetFunctionBody } = await import('./analysis.js');
+    const result = await handleGetFunctionBody(tmpDir, 'calc.ts', 'calculate', 'send', 'callee') as Record<string, unknown>;
+    expect(result.slice).toEqual([
+      { line: 3, text: '  send(total);', callConfidence: ['external'] },
+      { line: 4, text: '  return total;', callConfidence: ['name_only'] },
+    ]);
+    for (const line of result.slice as Array<Record<string, unknown>>) {
+      expect(line).not.toHaveProperty('dataFlowPrecision');
+    }
+  });
+
+  it('requires focusKind for every focused read and honors it on a collision', async () => {
+    const { edgeStore } = await focusedFixture();
+    edgeStore.getCallees.mockReturnValue([{ callerId: 'calc.ts::calculate', calleeId: 'external::total', calleeName: 'total', line: 3, confidence: 'name_only' }]);
+    const { handleGetFunctionBody } = await import('./analysis.js');
+    const ambiguous = await handleGetFunctionBody(tmpDir, 'calc.ts', 'calculate', 'total') as Record<string, unknown>;
+    expect(ambiguous.error).toContain('explicit focusKind');
+    const callee = await handleGetFunctionBody(tmpDir, 'calc.ts', 'calculate', 'total', 'callee') as Record<string, unknown>;
+    expect(callee.slice).toEqual([{ line: 3, text: '  send(total);', callConfidence: ['name_only'] }]);
+  });
+
+  it('serves callee evidence for a language without a CFG implementation', async () => {
+    await focusedFixture('Bicep');
+    const { handleGetFunctionBody } = await import('./analysis.js');
+    const result = await handleGetFunctionBody(tmpDir, 'calc.ts', 'calculate', 'send', 'callee') as Record<string, unknown>;
+    expect(result.slice).toEqual([{ line: 3, text: '  send(total);', callConfidence: ['external'] }]);
+  });
+
+  it('discloses a matching callee whose stored edge has no line', async () => {
+    const { edgeStore } = await focusedFixture();
+    edgeStore.getCallees.mockReturnValue([{ callerId: 'calc.ts::calculate', calleeId: 'external::send', calleeName: 'send', confidence: 'external' }] as never);
+    const { handleGetFunctionBody } = await import('./analysis.js');
+    const result = await handleGetFunctionBody(tmpDir, 'calc.ts', 'calculate', 'send', 'callee') as Record<string, unknown>;
+    expect(result.slice).toBeUndefined();
+    expect(result.sliceUnavailable).toMatchObject({ reason: 'call-site-line-unavailable' });
+  });
+
+  it('refuses evidence outside the fresh indexed function span', async () => {
+    const { edgeStore } = await focusedFixture();
+    edgeStore.getCallees.mockReturnValue([{ callerId: 'calc.ts::calculate', calleeId: 'external::send', calleeName: 'send', line: 99, confidence: 'external' }]);
+    const { handleGetFunctionBody } = await import('./analysis.js');
+    const result = await handleGetFunctionBody(tmpDir, 'calc.ts', 'calculate', 'send', 'callee') as Record<string, unknown>;
+    expect(result.slice).toBeUndefined();
+    expect(result.body).toBeUndefined();
+    expect(result.sliceUnavailable).toMatchObject({ reason: 'artifact-invalid' });
+  });
+
+  it('fails closed on a malformed CFG artifact', async () => {
+    const { edgeStore } = await focusedFixture();
+    edgeStore.getCfg.mockReturnValue({ defUse: [{ variable: 'total', defLine: 2, useLine: 3, precision: 'bogus' }] } as never);
+    const { handleGetFunctionBody } = await import('./analysis.js');
+    const result = await handleGetFunctionBody(tmpDir, 'calc.ts', 'calculate', 'total', 'variable') as Record<string, unknown>;
+    expect(result.slice).toBeUndefined();
+    expect(result.sliceUnavailable).toMatchObject({ reason: 'artifact-invalid' });
+  });
+
+  it('distinguishes a tracked but unused parameter from an unknown spelling', async () => {
+    const { edgeStore } = await focusedFixture();
+    edgeStore.getCfg.mockReturnValue({
+      blocks: [{ id: 0, kind: 'entry' }, { id: 1, kind: 'exit' }],
+      edges: [{ from: 0, to: 1, kind: 'normal' }], params: ['unused'], paramLine: 1, defUse: [],
+    });
+    const { handleGetFunctionBody } = await import('./analysis.js');
+    const result = await handleGetFunctionBody(tmpDir, 'calc.ts', 'calculate', 'unused', 'variable') as Record<string, unknown>;
+    expect(result.sliceUnavailable).toMatchObject({ reason: 'focus-has-no-evidence', candidates: ['send', 'unused'] });
+  });
+
+  it('refuses ambiguous same-file symbol records rather than picking one', async () => {
+    const { node, edgeStore } = await focusedFixture();
+    readCachedContext.mockResolvedValue({
+      callGraph: { nodes: [node, { ...node, id: 'calc.ts::calculate#2', startIndex: 1 }], edges: [] }, edgeStore,
+    } as never);
+    const { handleGetFunctionBody } = await import('./analysis.js');
+    const result = await handleGetFunctionBody(tmpDir, 'calc.ts', 'calculate', 'total', 'variable') as Record<string, unknown>;
+    expect(result.verdict).toBe('ambiguous');
+    expect(result.sliceUnavailable).toMatchObject({ reason: 'ambiguous-symbol' });
+  });
+
+  it('does not apply a same-basename vendor symbol to the requested root file', async () => {
+    const { node, edgeStore } = await focusedFixture();
+    readCachedContext.mockResolvedValue({
+      callGraph: { nodes: [{ ...node, id: 'vendor/calc.ts::calculate', filePath: 'vendor/calc.ts' }], edges: [] }, edgeStore,
+    } as never);
+    const { handleGetFunctionBody } = await import('./analysis.js');
+    const result = await handleGetFunctionBody(tmpDir, 'calc.ts', 'calculate', 'total', 'variable') as Record<string, unknown>;
+    expect(result.verdict).toBe('not-found');
+    expect(result.sliceUnavailable).toMatchObject({ reason: 'symbol-not-indexed' });
+  });
+
+  it('bounds malformed class and candidate metadata from persisted artifacts', async () => {
+    const { node, edgeStore } = await focusedFixture();
+    readCachedContext.mockResolvedValue({
+      callGraph: { nodes: [{ ...node, className: 'x'.repeat(1_000_000) }], edges: [] }, edgeStore,
+    } as never);
+    const { handleGetFunctionBody } = await import('./analysis.js');
+    const invalidNode = await handleGetFunctionBody(tmpDir, 'calc.ts', 'calculate', 'total', 'variable') as Record<string, unknown>;
+    expect(invalidNode.sliceUnavailable).toMatchObject({ reason: 'symbol-not-indexed' });
+    expect(JSON.stringify(invalidNode).length).toBeLessThan(1_000);
+
+    edgeStore.getCallees.mockReturnValue([{ callerId: node.id, calleeId: 'external::huge', calleeName: 'y'.repeat(1_000_000), line: 3, confidence: 'external' }] as never);
+    readCachedContext.mockResolvedValue({ callGraph: { nodes: [node], edges: [] }, edgeStore, artifactMtimeMs: Date.now() + 60_000 } as never);
+    const invalidCandidate = await handleGetFunctionBody(tmpDir, 'calc.ts', 'calculate', 'missing', 'variable') as Record<string, unknown>;
+    expect(JSON.stringify(invalidCandidate)).not.toContain('yyyyyyyy');
+    expect(JSON.stringify(invalidCandidate).length).toBeLessThan(2_000);
+  });
+
+  it('refuses focused completeness from a degraded analysis store', async () => {
+    const { node, edgeStore } = await focusedFixture();
+    readCachedContext.mockResolvedValue({
+      callGraph: { nodes: [node], edges: [] }, edgeStore,
+      integrity: { verdict: 'degraded', detail: 'row counts differ' },
+    } as never);
+    const { handleGetFunctionBody } = await import('./analysis.js');
+    const result = await handleGetFunctionBody(tmpDir, 'calc.ts', 'calculate', 'total', 'variable') as Record<string, unknown>;
+    expect(result.body).toBeUndefined();
+    expect(result.sliceUnavailable).toMatchObject({ reason: 'index-integrity-degraded' });
+  });
+
+  it('uses the fresh indexed span, not brace scanning, for missing-overlay degradation', async () => {
+    const src = 'def calculate(value):\n    text = "{ not a block }"\n    return value\n\ndef adjacent():\n    return "secret-adjacent"\n';
+    const endIndex = src.indexOf('\n\ndef adjacent');
+    await writeFile(join(tmpDir, 'calc.py'), src, 'utf-8');
+    const node = { id: 'calc.py::calculate', name: 'calculate', filePath: 'calc.py', language: 'Python', startIndex: 0, endIndex, startLine: 1, endLine: 3 };
+    readCachedContext.mockResolvedValue({
+      callGraph: { nodes: [node], edges: [] }, artifactMtimeMs: Date.now() + 60_000,
+      edgeStore: { getFileHash: vi.fn(() => null), getCfg: vi.fn(() => null), getCallees: vi.fn(() => []) },
+    });
+    const { handleGetFunctionBody } = await import('./analysis.js');
+    const result = await handleGetFunctionBody(tmpDir, 'calc.py', 'calculate', 'value', 'variable') as Record<string, unknown>;
+    expect(result.body).toBe(src.slice(0, endIndex));
+    expect(result.body).not.toContain('secret-adjacent');
+    expect(result.sliceUnavailable).toMatchObject({ reason: 'overlay-unavailable' });
+  });
+
+  it('bounds a large focused slice and reports omitted evidence', async () => {
+    const bodyLines = ['export function large(value: number) {',
+      ...Array.from({ length: 60 }, (_, index) => `  value += ${index};`), '}'];
+    const src = bodyLines.join('\n');
+    await writeFile(join(tmpDir, 'large.ts'), src, 'utf-8');
+    const node = {
+      id: 'large.ts::large', name: 'large', filePath: 'large.ts', language: 'TypeScript',
+      startIndex: 0, endIndex: src.length, startLine: 1, endLine: 62,
+    };
+    readCachedContext.mockResolvedValue({
+      callGraph: { nodes: [node], edges: [] }, artifactMtimeMs: Date.now() + 60_000,
+      edgeStore: {
+        getFileHash: vi.fn(() => null),
+        getCallees: vi.fn(() => []),
+        getCfg: vi.fn(() => ({
+          blocks: [{ id: 0, kind: 'entry' }, { id: 1, kind: 'exit' }],
+          edges: [{ from: 0, to: 1, kind: 'normal' }], params: ['value'], paramLine: 1,
+          defUse: Array.from({ length: 60 }, (_, index) => ({
+            variable: 'value', defLine: index + 1, useLine: index + 2, precision: 'exact',
+          })),
+        })),
+      },
+    });
+    const { handleGetFunctionBody } = await import('./analysis.js');
+    const result = await handleGetFunctionBody(tmpDir, 'large.ts', 'large', 'value', 'variable') as Record<string, unknown>;
+    expect(result.body).toBeUndefined();
+    expect(result.slice).toHaveLength(50);
+    expect(result.evidenceReceipt).toEqual({ total: 61, returned: 50, omitted: 11, limit: 50, truncated: true });
+    expect(JSON.stringify(result).length).toBeLessThan(6_000);
+  });
+
+  it('returns the whole span with a machine-readable boundary for an unsupported language', async () => {
+    await focusedFixture('Bicep');
+    const { handleGetFunctionBody } = await import('./analysis.js');
+    const result = await handleGetFunctionBody(tmpDir, 'calc.ts', 'calculate', 'total', 'variable') as Record<string, unknown>;
+    expect(result.body).toContain('calculate');
+    expect(result.sliceUnavailable).toMatchObject({ reason: 'unsupported-language', language: 'Bicep' });
+  });
+
+  it('refuses indexed lines when the authoritative source hash is stale', async () => {
+    await focusedFixture('TypeScript', 'definitely-not-the-current-hash');
+    const { handleGetFunctionBody } = await import('./analysis.js');
+    const result = await handleGetFunctionBody(tmpDir, 'calc.ts', 'calculate', 'total', 'variable') as Record<string, unknown>;
+    expect(result.body).toBeUndefined();
+    expect(result.sliceUnavailable).toMatchObject({ reason: 'stale-index' });
+    expect(result.slice).toBeUndefined();
+  });
+
+  it('returns exact stored candidates for an unknown focus instead of guessing', async () => {
+    await focusedFixture();
+    const { handleGetFunctionBody } = await import('./analysis.js');
+    const result = await handleGetFunctionBody(tmpDir, 'calc.ts', 'calculate', 'missing', 'variable') as Record<string, unknown>;
+    expect(result.verdict).toBe('not-found');
+    expect(result.sliceUnavailable).toMatchObject({
+      reason: 'focus-not-tracked', candidates: ['input', 'send', 'total'],
+    });
   });
 });
 

@@ -19,7 +19,7 @@ import {
   OPENSPEC_SPECS_SUBDIR,
 } from '../../../constants.js';
 import { fileExists } from '../../../utils/command-helpers.js';
-import { validateDirectory, safeJoin, loadMappingIndex, specsForFile, functionsForDomain, queryTooLongError, notReadyResult, readCachedContext } from './utils.js';
+import { validateDirectory, safeJoin, loadMappingIndex, specsForFile, functionsForDomain, queryTooLongError, notReadyResult, readCachedContext, getCachedNodeStartLine } from './utils.js';
 import { expandHandle, applyTokenBudget, collapseExactDuplicates, omissionNote } from './progressive.js';
 import { readOpenLoreConfig } from '../config-manager.js';
 import {
@@ -237,7 +237,6 @@ export async function handleSearchCode(
     readCachedContext(absDir),
   ]);
   const indexDegraded = VectorIndex.degradationNotice?.(outputDir) ?? null;
-
   // Zero symbol hits: the string may live in static markup/text that extracts
   // no symbols (UI copy, error messages). Fall back to the literal-text line
   // index rather than returning a dead end. This is an optional enrichment —
@@ -286,33 +285,37 @@ export async function handleSearchCode(
     }
   }
 
-  const allResults = results.map((r) => ({
-    score: r.score,
-    name: r.record.name,
-    filePath: r.record.filePath,
-    // Exact expansion handle (Spec 25 P2): get_function_body(directory, filePath, name).
-    expand: expandHandle(r.record.name, r.record.filePath),
-    className: r.record.className || undefined,
-    language: r.record.language,
-    signature: r.record.signature || undefined,
-    docstring: r.record.docstring || undefined,
-    fanIn: r.record.fanIn,
-    fanOut: r.record.fanOut,
-    isHub: r.record.isHub,
-    isEntryPoint: r.record.isEntryPoint,
-    provenance: analysisProvenance,
-    linkedSpecs: mappingIdx ? specsForFile(mappingIdx, r.record.filePath) : undefined,
-    callers: llmCtx?.edgeStore
-      ? llmCtx.edgeStore.getCallers(r.record.id)
-          .map(e => { const n = llmCtx!.edgeStore!.getNode(e.callerId); return n && !n.isExternal ? { name: n.name, filePath: n.filePath } : null; })
-          .filter((x): x is Neighbour => x !== null)
-      : undefined,
-    callees: llmCtx?.edgeStore
-      ? llmCtx.edgeStore.getCallees(r.record.id)
-          .map(e => { const n = llmCtx!.edgeStore!.getNode(e.calleeId); return n && !n.isExternal ? { name: n.name, filePath: n.filePath } : null; })
-          .filter((x): x is Neighbour => x !== null)
-      : undefined,
-  }));
+  const allResults = results.map((r) => {
+    const startLine = getCachedNodeStartLine(llmCtx, r.record.id);
+    return {
+      score: r.score,
+      name: r.record.name,
+      filePath: r.record.filePath,
+      ...(startLine !== undefined ? { startLine } : {}),
+      // Exact expansion handle (Spec 25 P2): get_function_body(directory, filePath, name).
+      expand: expandHandle(r.record.name, r.record.filePath),
+      className: r.record.className || undefined,
+      language: r.record.language,
+      signature: r.record.signature || undefined,
+      docstring: r.record.docstring || undefined,
+      fanIn: r.record.fanIn,
+      fanOut: r.record.fanOut,
+      isHub: r.record.isHub,
+      isEntryPoint: r.record.isEntryPoint,
+      provenance: analysisProvenance,
+      linkedSpecs: mappingIdx ? specsForFile(mappingIdx, r.record.filePath) : undefined,
+      callers: llmCtx?.edgeStore
+        ? llmCtx.edgeStore.getCallers(r.record.id)
+            .map(e => { const n = llmCtx!.edgeStore!.getNode(e.callerId); return n && !n.isExternal ? { name: n.name, filePath: n.filePath } : null; })
+            .filter((x): x is Neighbour => x !== null)
+        : undefined,
+      callees: llmCtx?.edgeStore
+        ? llmCtx.edgeStore.getCallees(r.record.id)
+            .map(e => { const n = llmCtx!.edgeStore!.getNode(e.calleeId); return n && !n.isExternal ? { name: n.name, filePath: n.filePath } : null; })
+            .filter((x): x is Neighbour => x !== null)
+        : undefined,
+    };
+  });
 
   // Progressive disclosure (Spec 25 P2–P4): default returns all hits; with a
   // tokenBudget, collapse exact duplicates then greedily keep the highest-scored

@@ -52,6 +52,18 @@ describe('source-carrying tool output redaction', () => {
     expect(result.redactions).toEqual({ count: 1, kinds: ['secret-field'] });
   });
 
+  it('redacts source text nested inside a focused slice', async () => {
+    const root = await fixtureRoot();
+    const secret = `sk-${'s'.repeat(24)}`;
+    const result = await redactSourceToolResult('get_function_body', {
+      focus: 'token',
+      slice: [{ line: 9, text: `const token = "${secret}";`, precision: 'exact' }],
+    }, root) as Record<string, unknown>;
+
+    expect(JSON.stringify(result)).not.toContain(secret);
+    expect(result.redactions).toEqual({ count: 1, kinds: ['secret-field'] });
+  });
+
   it('honors the trusted-solo config opt-out without a false disclosure', async () => {
     const root = await fixtureRoot();
     const secret = `sk-${'b'.repeat(24)}`;

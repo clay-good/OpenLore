@@ -17,7 +17,7 @@
 import { join, relative } from 'node:path';
 import { readFile, stat } from 'node:fs/promises';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
-import { validateDirectory, loadMappingIndex, specsForFile, functionsForDomain, readCachedContext, safeJoin, safeOpenspecDir, queryTooLongError, notReadyResult } from './utils.js';
+import { validateDirectory, loadMappingIndex, specsForFile, functionsForDomain, readCachedContext, safeJoin, safeOpenspecDir, queryTooLongError, notReadyResult, getCachedNodeStartLine } from './utils.js';
 import { expandHandle, applyTokenBudget, collapseExactDuplicates, omissionNote } from './progressive.js';
 import { readOpenLoreConfig } from '../config-manager.js';
 import { repairStatusFor, REPAIR_REASON_DETAIL } from '../cold-start-bootstrap.js';
@@ -118,6 +118,7 @@ async function loadCondensedCached(cache: ManifestCache, absSpecPath: string, sp
 interface OrientFunction {
   name: string;
   filePath: string;
+  startLine?: number;
   score: number;
   /** Exact expansion handle (Spec 25 P2): get_function_body(directory, filePath, name). */
   expand: string;
@@ -241,21 +242,25 @@ export async function handleOrient(
     .filter(r => r.record.filePath !== 'external' && !r.record.id?.startsWith('external::'))
     .slice(0, clampedLimit);
 
-  const relevantFunctionsAll: OrientFunction[] = topResults.map(r => ({
-    name: r.record.name,
-    filePath: r.record.filePath,
-    score: parseFloat(r.score.toFixed(3)),
-    expand: expandHandle(r.record.name, r.record.filePath),
-    signature: r.record.signature || undefined,
-    docstring: r.record.docstring || undefined,
-    language: r.record.language,
-    fanIn: r.record.fanIn,
-    fanOut: r.record.fanOut,
-    isHub: r.record.isHub,
-    isEntryPoint: r.record.isEntryPoint,
-    linkedSpecs: mappingIdx ? specsForFile(mappingIdx, r.record.filePath) : [],
-    provenance: analysisProvenance,
-  }));
+  const relevantFunctionsAll: OrientFunction[] = topResults.map(r => {
+    const startLine = getCachedNodeStartLine(llmCtx, r.record.id);
+    return {
+      name: r.record.name,
+      filePath: r.record.filePath,
+      ...(startLine !== undefined ? { startLine } : {}),
+      score: parseFloat(r.score.toFixed(3)),
+      expand: expandHandle(r.record.name, r.record.filePath),
+      signature: r.record.signature || undefined,
+      docstring: r.record.docstring || undefined,
+      language: r.record.language,
+      fanIn: r.record.fanIn,
+      fanOut: r.record.fanOut,
+      isHub: r.record.isHub,
+      isEntryPoint: r.record.isEntryPoint,
+      linkedSpecs: mappingIdx ? specsForFile(mappingIdx, r.record.filePath) : [],
+      provenance: analysisProvenance,
+    };
+  });
 
   // Progressive disclosure (Spec 25 P2–P4): when a tokenBudget is set, collapse
   // exact duplicates then greedily keep the highest-scored functions that fit.

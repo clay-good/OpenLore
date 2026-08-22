@@ -2002,6 +2002,48 @@ export function valueReachableLines(cfg: FunctionCfg, target?: string): Set<numb
   return reached;
 }
 
+export interface VariableSliceLine {
+  line: number;
+  precision: DataFlowPrecision;
+  roles: Array<'definition' | 'use'>;
+}
+
+/**
+ * Return the persisted, direct def/use evidence for one variable spelling.
+ *
+ * The overlay deliberately stores display names rather than scope-qualified
+ * identities, so this is a union of same-spelling variables within the function.
+ * Precision is aggregated conservatively per line: one `may` edge makes the line
+ * `may`. This helper shapes existing facts only; it does not infer relevance or a
+ * transitive slice.
+ */
+export function variableSliceLines(cfg: FunctionCfg, target: string): VariableSliceLine[] {
+  const byLine = new Map<number, { precision: DataFlowPrecision; roles: Set<'definition' | 'use'> }>();
+  const add = (line: number, precision: DataFlowPrecision, role: 'definition' | 'use'): void => {
+    const current = byLine.get(line);
+    if (current) {
+      if (precision === 'may') current.precision = 'may';
+      current.roles.add(role);
+    } else {
+      byLine.set(line, { precision, roles: new Set([role]) });
+    }
+  };
+
+  for (const edge of cfg.defUse) {
+    if (edge.variable !== target) continue;
+    add(edge.defLine, edge.precision, 'definition');
+    add(edge.useLine, edge.precision, 'use');
+  }
+
+  return [...byLine.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([line, evidence]) => ({
+      line,
+      precision: evidence.precision,
+      roles: [...evidence.roles].sort(),
+    }));
+}
+
 function findBody(fnNode: CfgNode, spec: CfgLangSpec): CfgNode | undefined {
   const direct = fnNode.childForFieldName(spec.bodyField);
   if (direct) return direct;
