@@ -296,6 +296,35 @@ configuration problem.
 - **THEN** the error names `.openlore/config.json`, the missing key, and the remedy
 - **AND** the message contains no internal property-access text such as `Cannot read properties of undefined`
 
+### Requirement: PreviouslyWrittenConfigsRemainReadable
+
+The system SHALL read any configuration emitted by an earlier release when newly required nested
+fields have canonical defaults. It SHALL add those values in memory before validation, warn with
+the exact field and value, preserve every user-supplied setting, and leave the file unchanged.
+Present but invalid values and missing fields without a derivable default SHALL remain validation
+errors. The schema and canonical defaults SHALL be checked together so a required field cannot be
+added to a default-emitted section without a backfill value.
+
+#### Scenario: A pre-2.2 generation section receives the canonical domains default
+
+- **GIVEN** a valid older config whose customized `generation` section has no `domains` field
+- **WHEN** `readOpenLoreConfig` reads the file
+- **THEN** the returned config contains `generation.domains: "auto"`
+- **AND** the custom provider, model, endpoint, exclusions, and embedding settings are preserved
+- **AND** a warning names the in-memory default while the config file remains unchanged
+
+#### Scenario: An invalid present value is not replaced
+
+- **GIVEN** a config whose `generation.domains` is present with an invalid type
+- **WHEN** `readOpenLoreConfig` validates the file
+- **THEN** the read fails with an attributable error naming `generation.domains`
+
+#### Scenario: Required fields in canonical sections stay defaultable
+
+- **GIVEN** a schema change that makes a field required in a section emitted by `getDefaultConfig`
+- **WHEN** the schema-evolution guard runs
+- **THEN** it fails unless `getDefaultConfig` supplies a value for that field
+
 ## Technical Notes
 
 ## Decisions
