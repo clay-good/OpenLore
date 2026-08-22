@@ -36,6 +36,48 @@ export type CachedContext = LLMContext & {
   artifactMtimeMs?: number;
 };
 
+let _startLineByContext = new WeakMap<CachedContext, ReadonlyMap<string, number>>();
+
+function isCanonicalNodeId(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const separator = value.indexOf('::');
+  return separator > 0 && separator < value.length - 2;
+}
+
+/**
+ * Return a node's stored declaration line without rebuilding a full graph index
+ * for every handler invocation. Cached contexts are generation-scoped objects,
+ * so replacing a context naturally invalidates this lookup.
+ */
+export function getCachedNodeStartLine(
+  context: CachedContext | null | undefined,
+  nodeId: unknown,
+): number | undefined {
+  if (!context || !isCanonicalNodeId(nodeId)) return undefined;
+
+  let startLines = _startLineByContext.get(context);
+  if (!startLines) {
+    const next = new Map<string, number>();
+    const ambiguous = new Set<string>();
+    for (const rawNode of context.callGraph?.nodes ?? []) {
+      if (!rawNode || typeof rawNode !== 'object') continue;
+      const node = rawNode as { id?: unknown; startLine?: unknown };
+      if (!isCanonicalNodeId(node.id)) continue;
+      if (typeof node.startLine !== 'number' || !Number.isSafeInteger(node.startLine) || node.startLine <= 0) continue;
+      if (next.has(node.id) || ambiguous.has(node.id)) {
+        next.delete(node.id);
+        ambiguous.add(node.id);
+        continue;
+      }
+      next.set(node.id, node.startLine);
+    }
+    startLines = next;
+    _startLineByContext.set(context, startLines);
+  }
+
+  return startLines.get(nodeId);
+}
+
 function bindArtifactMtime(ctx: CachedContext, mtime: number): void {
   Object.defineProperty(ctx, 'artifactMtimeMs', {
     value: mtime,
@@ -291,6 +333,7 @@ const ARTIFACT_MAX_BYTES = 512 * 1024 * 1024;
 export function _resetContextCacheForTesting(): void {
   for (const entry of _contextCache.values()) entry.ctx.edgeStore?.close();
   _contextCache.clear();
+  _startLineByContext = new WeakMap();
 }
 
 /** Release the parsed context and EdgeStore owned by one long-lived host. */
@@ -298,6 +341,7 @@ export function releaseContextCache(directory: string): void {
   const entry = _contextCache.get(directory);
   if (!entry) return;
   _contextCache.delete(directory);
+  _startLineByContext.delete(entry.ctx);
   try { entry.ctx.edgeStore?.close(); } catch { /* already closed by an in-process consumer */ }
 }
 

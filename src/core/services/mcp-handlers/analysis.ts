@@ -7,12 +7,13 @@
  */
 
 import { readFile, stat } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { join, relative } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, openSync, closeSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { escapeRegExp } from '../../../utils/misc.js';
-import { readFileConfined } from '../../../utils/path-confinement.js';
+import { readFileConfined, readFileConfinedWithStat } from '../../../utils/path-confinement.js';
 import {
   DEFAULT_MAX_FILES,
   DEFAULT_DRIFT_MAX_FILES,
@@ -38,6 +39,8 @@ import { analyzeForRefactoring } from '../../analyzer/refactor-analyzer.js';
 import { formatSignatureMaps } from '../../analyzer/signature-extractor.js';
 import { getSkeletonContent, isSkeletonWorthIncluding } from '../../analyzer/code-shaper.js';
 import { detectLanguage } from '../../analyzer/language-detection.js';
+import { cfgSupportsLanguage, variableSliceLines, type FunctionCfg } from '../../analyzer/cfg.js';
+import type { EdgeConfidence } from '../../analyzer/call-graph-types.js';
 import { buildArchitectureOverview } from '../../analyzer/architecture-writer.js';
 import { buildDomainEvidence } from '../../generator/domain-evidence.js';
 import type { LLMContext, RepoStructure } from '../../analyzer/artifact-generator.js';
@@ -59,6 +62,7 @@ import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
 import { mappingViewOf, resolveSpecLinkIndex } from '../../generator/spec-link-service.js';
 import { openloreAudit } from '../../../api/audit.js';
 import type { DriftResult } from '../../../types/index.js';
+import { resolveFileFreshness } from './freshness.js';
 
 // ============================================================================
 // HANDLERS
@@ -483,6 +487,28 @@ export async function handleGetFunctionBody(
   directory: string,
   filePath: string,
   functionName: string,
+  focus?: string,
+  focusKind?: 'variable' | 'callee',
+): Promise<unknown> {
+  if (focus === undefined) {
+    if (focusKind !== undefined) return { error: 'focusKind requires focus.' };
+    return handleGetFunctionBodyUnfocused(directory, filePath, functionName);
+  }
+  if (typeof focus !== 'string' || focus.trim().length === 0) {
+    return { error: 'focus must be a non-empty variable or callee name when provided.' };
+  }
+  if (focus.length > 200) return { error: 'focus must be at most 200 characters.' };
+  if (focusKind === undefined) return { error: 'focus requires an explicit focusKind of "variable" or "callee".' };
+  if (focusKind !== undefined && focusKind !== 'variable' && focusKind !== 'callee') {
+    return { error: 'focusKind must be "variable" or "callee" when provided.' };
+  }
+  return handleGetFunctionBodyFocused(directory, filePath, functionName, focus.trim(), focusKind);
+}
+
+async function handleGetFunctionBodyUnfocused(
+  directory: string,
+  filePath: string,
+  functionName: string,
 ): Promise<unknown> {
   const absDir = await validateDirectory(directory);
   const absFile = safeJoin(absDir, filePath);
@@ -554,6 +580,338 @@ export async function handleGetFunctionBody(
     body,
     lineCount: endLine - startLine + 1,
     note: 'Extracted via line scan (no call graph available). Run analyze_codebase for exact extraction.',
+    provenance: REPO_CONTENT_PROVENANCE,
+  };
+}
+
+interface FocusNode {
+  id: string;
+  name: string;
+  filePath: string;
+  language: string;
+  className?: string;
+  startIndex: number;
+  endIndex: number;
+  startLine?: number;
+  endLine?: number;
+}
+
+interface FocusSliceAccumulator {
+  dataFlowPrecision?: 'exact' | 'may';
+  kinds: Set<'definition' | 'use'>;
+  callConfidence: Set<EdgeConfidence>;
+  synthesizedBy: Set<string>;
+  metadataTruncated: boolean;
+}
+
+const FOCUS_EVIDENCE_LIMIT = 50;
+const FOCUS_OVERLAY_EDGE_LIMIT = 20_000;
+const EDGE_CONFIDENCES = new Set<EdgeConfidence>([
+  'self_cls', 'type_inference', 'import', 're_export', 'http_endpoint',
+  'same_file', 'name_only', 'type_name', 'synthesized', 'external',
+]);
+
+function isFocusNode(value: unknown): value is FocusNode {
+  if (!value || typeof value !== 'object') return false;
+  const node = value as Record<string, unknown>;
+  return typeof node.id === 'string' && node.id.length > 0 && node.id.length <= 4_096
+    && typeof node.name === 'string' && node.name.length <= 200
+    && typeof node.filePath === 'string' && node.filePath.length <= 4_096
+    && typeof node.language === 'string' && node.language.length <= 100
+    && (node.className === undefined || (typeof node.className === 'string' && node.className.length <= 200))
+    && Number.isSafeInteger(node.startIndex) && Number.isSafeInteger(node.endIndex);
+}
+
+function isUsableFocusCfg(value: unknown): value is FunctionCfg {
+  if (!value || typeof value !== 'object') return false;
+  const cfg = value as Partial<FunctionCfg>;
+  if (!Array.isArray(cfg.blocks) || cfg.blocks.length > FOCUS_OVERLAY_EDGE_LIMIT
+    || !Array.isArray(cfg.edges) || cfg.edges.length > FOCUS_OVERLAY_EDGE_LIMIT
+    || !Array.isArray(cfg.params) || !Array.isArray(cfg.defUse)
+    || cfg.params.length > FOCUS_OVERLAY_EDGE_LIMIT
+    || cfg.defUse.length > FOCUS_OVERLAY_EDGE_LIMIT
+    || !Number.isInteger(cfg.paramLine) || (cfg.paramLine ?? 0) < 1) return false;
+  return cfg.params.every(param => typeof param === 'string' && param.length <= 200)
+    && cfg.defUse.every(edge => !!edge && typeof edge.variable === 'string' && edge.variable.length <= 200
+      && Number.isInteger(edge.defLine) && edge.defLine > 0
+      && Number.isInteger(edge.useLine) && edge.useLine > 0
+      && (edge.precision === 'exact' || edge.precision === 'may'));
+}
+
+function currentSourceFallback(source: string, filePath: string, functionName: string): Record<string, unknown> {
+  const lines = source.split('\n');
+  const declaration = new RegExp(`\\b${escapeRegExp(functionName)}\\s*[(<]`);
+  const start = lines.findIndex(line => declaration.test(line));
+  if (start < 0) return { functionName, filePath };
+  let depth = 0;
+  let end = start;
+  for (let index = start; index < lines.length; index++) {
+    for (const character of lines[index]) {
+      if (character === '{') depth++;
+      else if (character === '}') depth--;
+    }
+    end = index;
+    if (index > start && depth <= 0) break;
+  }
+  const body = lines.slice(start, end + 1).join('\n');
+  return {
+    functionName,
+    filePath,
+    language: detectLanguage(filePath),
+    className: null,
+    startLine: start + 1,
+    endLine: end + 1,
+    body,
+    lineCount: end - start + 1,
+    note: 'Extracted from the current confined source because indexed focus evidence was unavailable.',
+    provenance: REPO_CONTENT_PROVENANCE,
+  };
+}
+
+async function handleGetFunctionBodyFocused(
+  directory: string,
+  filePath: string,
+  functionName: string,
+  focus: string,
+  focusKind?: 'variable' | 'callee',
+): Promise<unknown> {
+  const absDir = await validateDirectory(directory);
+  const normalizedFile = relative(absDir, safeJoin(absDir, filePath)).replaceAll('\\', '/');
+  let confined: Awaited<ReturnType<typeof readFileConfinedWithStat>>;
+  try {
+    confined = await readFileConfinedWithStat(absDir, normalizedFile);
+  } catch {
+    return { error: `File not found or changed during safe access: ${filePath}` };
+  }
+  const source = confined.content;
+  const fallback = currentSourceFallback(source, normalizedFile, functionName);
+  const refuse = (reason: string, message: string): Record<string, unknown> => ({
+    functionName,
+    filePath: normalizedFile,
+    focus,
+    sliceUnavailable: { reason, message },
+    provenance: REPO_CONTENT_PROVENANCE,
+  });
+  const ctx = await readCachedContext(absDir);
+  if (!ctx?.callGraph || !ctx.edgeStore) {
+    return {
+      ...fallback,
+      focus,
+      sliceUnavailable: {
+        reason: 'index-unavailable',
+        message: 'Focused slicing requires the current call graph and CFG edge store. Re-run analyze_codebase.',
+      },
+    };
+  }
+  if (ctx.integrity && ctx.integrity.verdict !== 'healthy') {
+    return refuse('index-integrity-degraded', 'Focused evidence requires a healthy, generation-matched analysis store. Re-run analyze_codebase.');
+  }
+
+  const nodes = Array.isArray(ctx.callGraph.nodes) ? ctx.callGraph.nodes.filter(isFocusNode) : [];
+  const requestedSuffix = normalizedFile.replace(/^\/+/, '');
+  const candidates = nodes.filter(node => {
+    const indexedFile = node.filePath.replaceAll('\\', '/');
+    return node.name === functionName && indexedFile === requestedSuffix;
+  });
+  if (candidates.length !== 1) {
+    return {
+      verdict: candidates.length === 0 ? 'not-found' : 'ambiguous',
+      functionName,
+      filePath: normalizedFile,
+      focus,
+      sliceUnavailable: {
+        reason: candidates.length === 0 ? 'symbol-not-indexed' : 'ambiguous-symbol',
+        candidates: candidates.slice(0, 10).map(node => ({
+          id: node.id,
+          startLine: Number.isInteger(node.startLine) ? node.startLine : undefined,
+        })),
+      },
+    };
+  }
+
+  const node = candidates[0];
+
+  const currentFileHash = createHash('sha256').update(source).digest('hex');
+  let baselineFileHash: string | null;
+  try {
+    baselineFileHash = ctx.edgeStore.getFileHash(node.filePath);
+  } catch {
+    return refuse('artifact-invalid', 'The persisted file freshness record could not be read safely.');
+  }
+  const artifactMtimeMs = ctx.artifactMtimeMs ?? 0;
+  if (resolveFileFreshness({ baselineFileHash, currentFileHash, sourceMtimeMs: confined.stat.mtimeMs, artifactMtimeMs }) === 'stale') {
+    return {
+      ...refuse('stale-index', 'The source changed after analysis, so indexed line evidence is not safe to serve. Re-run analyze_codebase.'),
+    };
+  }
+
+  if (node.startIndex < 0 || node.endIndex <= node.startIndex || node.endIndex > source.length) {
+    return refuse('artifact-invalid', 'The indexed function span is invalid.');
+  }
+  const exactBody = source.slice(node.startIndex, node.endIndex);
+  const functionStartLine = source.slice(0, node.startIndex).split('\n').length;
+  const functionEndLine = functionStartLine + exactBody.split('\n').length - 1;
+  const identity = {
+    functionName,
+    filePath: normalizedFile,
+    language: node.language,
+    className: node.className ?? null,
+    startIndex: node.startIndex,
+    endIndex: node.endIndex,
+    startLine: functionStartLine,
+    endLine: functionEndLine,
+  };
+  const indexedFallback = {
+    ...identity,
+    body: exactBody,
+    lineCount: exactBody.split('\n').length,
+    provenance: REPO_CONTENT_PROVENANCE,
+  };
+
+  let rawCfg: unknown;
+  let rawCallEdges: unknown;
+  try {
+    rawCfg = ctx.edgeStore.getCfg(node.id);
+    rawCallEdges = ctx.edgeStore.getCallees(node.id);
+  } catch {
+    return { ...indexedFallback, focus, sliceUnavailable: { reason: 'overlay-unavailable' } };
+  }
+  if (Array.isArray(rawCallEdges) && rawCallEdges.length > FOCUS_OVERLAY_EDGE_LIMIT) {
+    return refuse('artifact-invalid', 'The call overlay exceeds the focused evidence bound.');
+  }
+  if (!Array.isArray(rawCallEdges)) {
+    return refuse('artifact-invalid', 'The persisted call overlay has an invalid shape.');
+  }
+  const cfg = isUsableFocusCfg(rawCfg) ? rawCfg : null;
+  const malformedMatch = rawCallEdges.some(edge => {
+    if (!edge || typeof edge !== 'object') return false;
+    const candidate = edge as Record<string, unknown>;
+    if (candidate.calleeName !== focus) return false;
+    return candidate.callerId !== node.id
+      || typeof candidate.calleeName !== 'string' || candidate.calleeName.length > 200
+      || !EDGE_CONFIDENCES.has(candidate.confidence as EdgeConfidence)
+      || (candidate.synthesizedBy !== undefined
+        && (typeof candidate.synthesizedBy !== 'string' || candidate.synthesizedBy.length > 200));
+  });
+  if (malformedMatch) return refuse('artifact-invalid', 'A matching persisted call edge has invalid provenance.');
+  const matchingCallEdges = rawCallEdges.filter(edge => {
+    if (!edge || typeof edge !== 'object') return false;
+    const candidate = edge as Record<string, unknown>;
+    return candidate.callerId === node.id && candidate.calleeName === focus
+      && EDGE_CONFIDENCES.has(candidate.confidence as EdgeConfidence)
+      && (candidate.synthesizedBy === undefined
+        || (typeof candidate.synthesizedBy === 'string' && candidate.synthesizedBy.length <= 200));
+  }) as Array<{ line?: number; confidence: EdgeConfidence; synthesizedBy?: string }>;
+  const callEdges = matchingCallEdges.filter((edge): edge is { line: number; confidence: EdgeConfidence; synthesizedBy?: string } =>
+    Number.isInteger(edge.line) && (edge.line ?? 0) > 0);
+  const hasVariable = !!cfg && (cfg.params.includes(focus) || cfg.defUse.some(edge => edge.variable === focus));
+  const hasCallee = matchingCallEdges.length > 0;
+  const selectedKind = focusKind;
+
+  if (selectedKind === 'variable' && !cfgSupportsLanguage(node.language)) {
+    return {
+      ...indexedFallback,
+      focus,
+      focusKind: selectedKind,
+      sliceUnavailable: {
+        reason: 'unsupported-language',
+        language: node.language,
+        message: `Variable focus requires CFG-overlay support; ${node.language} is outside that boundary.`,
+      },
+    };
+  }
+  if (selectedKind === 'variable' && !cfg) {
+    if (rawCfg != null) return refuse('artifact-invalid', 'The persisted CFG overlay is malformed or exceeds the focused evidence bound.');
+    return { ...indexedFallback, focus, focusKind: selectedKind, sliceUnavailable: { reason: 'overlay-unavailable' } };
+  }
+
+  const variableLines = selectedKind === 'variable' && cfg ? variableSliceLines(cfg, focus) : [];
+  const byLine = new Map<number, FocusSliceAccumulator>();
+  const addVariable = (line: number, precision: 'exact' | 'may', kind: 'definition' | 'use'): void => {
+    const current = byLine.get(line) ?? { kinds: new Set(), callConfidence: new Set(), synthesizedBy: new Set(), metadataTruncated: false };
+    if (!current.dataFlowPrecision || precision === 'may') current.dataFlowPrecision = precision;
+    current.kinds.add(kind);
+    byLine.set(line, current);
+  };
+  for (const evidence of variableLines) {
+    for (const role of evidence.roles) addVariable(evidence.line, evidence.precision, role);
+  }
+  if (selectedKind === 'callee') {
+    for (const edge of callEdges) {
+      const current = byLine.get(edge.line) ?? { kinds: new Set(), callConfidence: new Set(), synthesizedBy: new Set(), metadataTruncated: false };
+      current.callConfidence.add(edge.confidence);
+      if (edge.synthesizedBy) {
+        if (current.synthesizedBy.size < 8) current.synthesizedBy.add(edge.synthesizedBy);
+        else if (!current.synthesizedBy.has(edge.synthesizedBy)) current.metadataTruncated = true;
+      }
+      byLine.set(edge.line, current);
+    }
+  }
+
+  if (byLine.size === 0) {
+    const tracked = [...new Set([
+      ...(cfg?.params ?? []),
+      ...(cfg?.defUse.map(edge => edge.variable) ?? []),
+      ...(Array.isArray(rawCallEdges) ? rawCallEdges.flatMap(edge =>
+        edge && typeof edge === 'object'
+          && typeof (edge as Record<string, unknown>).calleeName === 'string'
+          && ((edge as Record<string, unknown>).calleeName as string).length <= 200
+          ? [(edge as Record<string, unknown>).calleeName as string] : []) : []),
+    ])].sort().slice(0, 20);
+    return {
+      verdict: 'not-found',
+      functionName,
+      filePath: normalizedFile,
+      focus,
+      sliceUnavailable: {
+        reason: selectedKind === 'callee' && hasCallee
+          ? 'call-site-line-unavailable'
+          : hasVariable ? 'focus-has-no-evidence' : 'focus-not-tracked',
+        candidates: tracked,
+      },
+    };
+  }
+
+  const lines = source.split('\n');
+  const evidenceLines = [...byLine.keys()].sort((a, b) => a - b);
+  if (evidenceLines.some(line => line < functionStartLine || line > functionEndLine || line > lines.length)) {
+    return {
+      ...refuse('artifact-invalid', 'Stored line evidence falls outside the selected current function span. Re-run analyze_codebase.'),
+    };
+  }
+
+  const selectedLines = evidenceLines.slice(0, FOCUS_EVIDENCE_LIMIT);
+  return {
+    ...identity,
+    focus,
+    focusKind: selectedKind,
+    sliceScope: selectedKind === 'variable' ? 'stored-direct-def-use' : 'stored-call-sites',
+    variableScope: variableLines.length > 0 ? 'same-spelling variables within this function' : undefined,
+    completeFor: selectedKind === 'variable'
+      ? 'persisted direct same-spelling def/use evidence'
+      : 'persisted call-site evidence with usable lines',
+    evidenceReceipt: {
+      total: evidenceLines.length,
+      returned: selectedLines.length,
+      omitted: evidenceLines.length - selectedLines.length,
+      limit: FOCUS_EVIDENCE_LIMIT,
+      truncated: evidenceLines.length > selectedLines.length,
+    },
+    slice: selectedLines.map(line => {
+      const evidence = byLine.get(line)!;
+      const confidence = [...evidence.callConfidence].sort();
+      const synthesizedBy = [...evidence.synthesizedBy].sort();
+      return {
+        line,
+        text: lines[line - 1],
+        ...(evidence.dataFlowPrecision ? { dataFlowPrecision: evidence.dataFlowPrecision } : {}),
+        ...(evidence.kinds.size > 0 ? { roles: [...evidence.kinds].sort() } : {}),
+        ...(confidence.length > 0 ? { callConfidence: confidence } : {}),
+        ...(synthesizedBy.length > 0 ? { synthesizedBy } : {}),
+        ...(evidence.metadataTruncated ? { metadataTruncated: true } : {}),
+      };
+    }),
+    lineCount: selectedLines.length,
     provenance: REPO_CONTENT_PROVENANCE,
   };
 }

@@ -46,7 +46,7 @@ const EXEMPT: { file: string; line: number; why: string }[] = [
   { file: 'src/cli/commands/serve.ts', line: 310, why: 'loopback http:// authenticated shutdown request' },
   { file: 'src/pi/extension.ts', line: 546, why: 'loopback http:// health probe' },
   { file: 'src/pi/extension.ts', line: 721, why: 'loopback http:// daemon call' },
-  { file: 'src/pi/extension.ts', line: 1560, why: 'loopback http:// health probe' },
+  { file: 'src/pi/extension.ts', line: 1562, why: 'loopback http:// health probe' },
   {
     file: 'src/pi/extension.ts',
     line: 195,

@@ -996,6 +996,27 @@ describe('NAV_TOOLS surface', () => {
     }
   });
 
+  it('keeps focus and focusKind schemas bidirectionally aligned across MCP and Pi', () => {
+    const pi = NAV_TOOLS.find(tool => tool.name === 'get_function_body')!;
+    const mcp = TOOL_DEFINITIONS.find(tool => tool.name === 'get_function_body')!;
+    const piProps = (pi.parameters as { properties?: Record<string, unknown> }).properties ?? {};
+    const mcpProps = (mcp.inputSchema as { properties?: Record<string, unknown> }).properties ?? {};
+    for (const param of ['focus', 'focusKind']) {
+      expect(piProps, `Pi is missing MCP parameter ${param}`).toHaveProperty(param);
+      expect(mcpProps, `MCP is missing Pi parameter ${param}`).toHaveProperty(param);
+    }
+
+    expect(piProps.focus).toMatchObject({ type: 'string', maxLength: 200 });
+    expect(mcpProps.focus).toMatchObject({ type: 'string', maxLength: 200 });
+    const piKinds = ((piProps.focusKind as { anyOf?: Array<{ const?: string }> }).anyOf ?? [])
+      .map(option => option.const).filter((value): value is string => typeof value === 'string').sort();
+    const mcpKinds = [...((mcpProps.focusKind as { enum?: string[] }).enum ?? [])].sort();
+    expect(piKinds).toEqual(['callee', 'variable']);
+    expect(mcpKinds).toEqual(piKinds);
+    expect(pi.parameters).toMatchObject({ dependentRequired: { focus: ['focusKind'], focusKind: ['focus'] } });
+    expect(mcp.inputSchema).toMatchObject({ dependentRequired: { focus: ['focusKind'], focusKind: ['focus'] } });
+  });
+
   // The load-bearing guard in the OTHER direction (spec: PiSurfaceParityIsGuarded).
   // Every dispatchable conclusion tool must be a deliberate Pi decision — either
   // surfaced in NAV_TOOLS or listed in PI_EXCLUDED_CONCLUSION_TOOLS with a reason.

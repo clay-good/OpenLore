@@ -10,11 +10,11 @@
  * by the decision syncer, and `openspec/decisions -> elsewhere` received ADRs.
  */
 
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { mkdtemp, mkdir, writeFile, symlink, rm, realpath } from 'node:fs/promises';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { mkdtemp, mkdir, writeFile, symlink, rm, realpath, open } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { readFileConfined, safeJoin, safeOpenspecDir, isConfinedPath } from './path-confinement.js';
+import { readFileConfined, readFileConfinedWithStat, safeJoin, safeOpenspecDir, isConfinedPath } from './path-confinement.js';
 
 let root: string;
 let outside: string;
@@ -140,8 +140,42 @@ describe('readFileConfined', () => {
     await expect(readFileConfined(root, 'openspec/specs/core/spec.md')).resolves.toBe('# real spec\n');
   });
 
+  it('returns UTF-8 content and post-read metadata from the confined descriptor', async () => {
+    const result = await readFileConfinedWithStat(root, 'openspec/specs/core/spec.md');
+
+    expect(result.content).toBe('# real spec\n');
+    expect(result.stat.isFile()).toBe(true);
+    expect(result.stat.size).toBe(Buffer.byteLength(result.content, 'utf-8'));
+    expect(Number.isFinite(result.stat.mtimeMs)).toBe(true);
+  });
+
+  it('returns neither content nor metadata when the opened file changes during the read', async () => {
+    const path = join(root, 'openspec', 'specs', 'core', 'changing.md');
+    await writeFile(path, '# before\n');
+    const probe = await open(path, 'r');
+    const prototype = Object.getPrototypeOf(probe) as { readFile: (...args: unknown[]) => Promise<Buffer> };
+    await probe.close();
+    const originalReadFile = prototype.readFile;
+    const readSpy = vi.spyOn(prototype, 'readFile').mockImplementationOnce(async function (
+      this: { readFile: (...args: unknown[]) => Promise<Buffer> },
+      ...args: unknown[]
+    ) {
+      const bytes = await originalReadFile.apply(this, args);
+      await writeFile(path, '# after changed\n');
+      return bytes;
+    });
+
+    try {
+      await expect(readFileConfinedWithStat(root, 'openspec/specs/core/changing.md'))
+        .rejects.toThrow(/changed during access/);
+    } finally {
+      readSpy.mockRestore();
+    }
+  });
+
   it('refuses an escaping symlink before returning any bytes', async () => {
     await expect(readFileConfined(root, 'openspec/escaping-spec.md')).rejects.toThrow(/Path escape blocked/);
+    await expect(readFileConfinedWithStat(root, 'openspec/escaping-spec.md')).rejects.toThrow(/Path escape blocked/);
   });
 });
 

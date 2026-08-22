@@ -412,20 +412,46 @@ describe('openlore serve', () => {
     const h = await boot({ preset: 'all' });
     const otherRoot = await mkdtemp(join(tmpdir(), 'openlore-serve-other-'));
     try {
-      await writeFile(join(root, 'auth.ts'), 'export function auth() { return "served-root"; }\n');
-      await writeFile(join(otherRoot, 'auth.ts'), `export function auth() { return "sk-${'v'.repeat(24)}"; }\n`);
+      await mkdir(join(root, OPENLORE_DIR), { recursive: true });
+      await mkdir(join(root, 'openspec', 'specs'), { recursive: true });
+      await writeFile(join(root, OPENLORE_DIR, 'config.json'), JSON.stringify({
+        version: '1.0.0', projectType: 'nodejs', openspecPath: './openspec',
+        analysis: { maxFiles: 100000, includePatterns: [], excludePatterns: [] },
+        generation: { model: 'claude-sonnet-4-6', domains: 'auto' },
+        createdAt: new Date().toISOString(), lastRun: null,
+      }));
+      await writeFile(
+        join(root, 'auth.ts'),
+        'export function auth(input: string): string {\n  const token = input + "-served-root";\n  return token;\n}\n',
+      );
+      await writeFile(
+        join(otherRoot, 'auth.ts'),
+        `export function auth(input: string): string {\n  const token = "sk-${'v'.repeat(24)}";\n  return token;\n}\n`,
+      );
+      await analyzeApi.openloreAnalyze({ rootPath: root, force: true });
 
       const res = await fetch(`${h.baseUrl}/tool/get_function_body`, {
         method: 'POST',
         body: JSON.stringify({
           directory: root,
-          args: { directory: otherRoot, filePath: 'auth.ts', functionName: 'auth' },
+          args: {
+            directory: otherRoot,
+            filePath: 'auth.ts',
+            functionName: 'auth',
+            focus: 'token',
+            focusKind: 'variable',
+          },
         }),
       });
       const body = await jsonOf(res);
 
       expect(res.status).toBe(200);
-      expect(body.body).toContain('served-root');
+      expect(body).toMatchObject({
+        focus: 'token',
+        focusKind: 'variable',
+        sliceScope: 'stored-direct-def-use',
+      });
+      expect(JSON.stringify(body)).toContain('served-root');
       expect(JSON.stringify(body)).not.toContain(`sk-${'v'.repeat(24)}`);
     } finally {
       await rm(otherRoot, { recursive: true, force: true });

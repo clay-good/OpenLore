@@ -177,12 +177,12 @@ Most tools run on **pure static analysis** — no LLM quota consumed. Exceptions
 
 | Tool | Description | Requires prior analysis |
 |------|-------------|:---:|
-| `orient` | **Single entry point for any new task.** Given a natural-language task description, returns in one call: relevant functions, source files, spec domains, call neighbourhoods, insertion-point candidates, matching spec sections, and `suggestedTools` — a ranked list of next tools to call derived from task context (hub presence, spec domains, keywords). Start here. | Yes (+ embedding) |
-| `search_code` | Natural-language semantic search over indexed functions. Returns the closest matches by meaning with similarity score, call-graph neighbourhood enrichment, and spec-linked peer functions. Falls back to BM25 keyword search when no embedding server is configured. | Yes (+ embedding) |
+| `orient` | **Single entry point for any new task.** Given a natural-language task description, returns relevant functions with stored declaration `startLine`, source files, spec domains, call neighbourhoods, insertion-point candidates, matching spec sections, and ranked `suggestedTools`. Start here. | Yes (+ embedding) |
+| `search_code` | Natural-language semantic search over indexed functions. Returns the closest matches by meaning with similarity score, declaration `startLine` when stored, call-graph neighbourhood enrichment, and spec-linked peer functions. Falls back to BM25 keyword search when no embedding server is configured. | Yes (+ embedding) |
 | `suggest_insertion_points` | Semantic search over the vector index to find the best existing functions to extend or hook into when implementing a new feature. Returns ranked candidates with role and strategy. Falls back to BM25 keyword search when no embedding server is configured. | Yes (+ embedding) |
 | `get_subgraph` | Depth-limited subgraph centred on a function. Direction: `downstream` (what it calls), `upstream` (who calls it), or `both`. Output as JSON or Mermaid diagram. | Yes |
-| `trace_execution_path` | Find all call-graph paths between two functions (DFS, configurable depth/max-paths). Use this when debugging: "how does request X reach function Y?" Returns the shortest path (named `shortestPathFound`, with a `truncated` receipt, when enumeration stopped at `maxPaths`), all paths sorted by hops, and a step-by-step chain per path. | Yes |
-| `get_function_body` | Return the exact source code of a named function in a file. | No |
+| `trace_execution_path` | Find all call-graph paths between two functions (DFS, configurable depth/max-paths). Use this when debugging: "how does request X reach function Y?" Returns the shortest path (named `shortestPathFound`, with a `truncated` receipt, when enumeration stopped at `maxPaths`), all paths sorted by hops, and a step-by-step chain whose `callsNext` entries preserve caller identity and every stored call-site line for parallel edges. | Yes |
+| `get_function_body` | Return the exact source code of a named function in a file. Pass `focus` with required `focusKind` to return only stored variable def/use or callee call-site lines. Variable evidence carries data-flow precision; call evidence carries resolution confidence. Omit both for the unchanged full-body response. | No (focus requires analysis) |
 | `get_function_skeleton` | Noise-stripped view of a source file: logs, inline comments, and non-JSDoc block comments removed. Signatures, control flow, return/throw, and call expressions preserved. Returns reduction %. | No |
 | `get_file_dependencies` | Return the file-level import dependencies for a given source file (imports, imported-by, or both). | Yes |
 | `get_architecture_overview` | High-level cluster map: roles (entry layer, orchestrator, core utilities, API layer, internal), inter-cluster dependencies, global entry points, and critical hubs. No LLM required. | Yes |
@@ -209,7 +209,7 @@ Most tools run on **pure static analysis** — no LLM quota consumed. Exceptions
 | `get_refactor_report` | Prioritized list of functions with structural issues: unreachable code, hub overload (high fan-in), god functions (high fan-out), SRP violations, cyclic dependencies. | Yes |
 | `get_critical_hubs` | Highest-impact hub functions ranked by criticality. Each hub gets a stability score (0-100) and a recommended approach: extract, split, facade, or delegate. | Yes |
 | `get_god_functions` | Detect god functions (high fan-out, likely orchestrators) in the project or in a specific file, and return their call-graph neighborhood. Use this to identify which functions need to be refactored and understand what logical blocks to extract. | Yes |
-| `analyze_impact` | Deep impact analysis for a specific function: fan-in/fan-out, upstream call chain, downstream critical path, risk score (0-100), blast radius, and recommended strategy. | Yes |
+| `analyze_impact` | Deep impact analysis for a function: fan-in/fan-out, upstream/downstream chains with bounded stored `callSites` receipts, risk score (0-100), blast radius, and recommended strategy. | Yes |
 | `blast_radius` | Pre-flight structural blast-radius briefing for the current staged/working diff (advisory). Pure orchestration of existing analyses — no LLM: affected callers/layers and hubs (`analyze_impact`), tests to run (`select_tests`), and the anchored memories/decisions the diff will drift/orphan plus specs it will make stale (`check_spec_drift`). One conclusion-shaped briefing, never a graph. CLI: `openlore blast-radius` (+ `--install-hook` for an advisory pre-commit hook). | Yes |
 | `get_low_risk_refactor_candidates` | Safest functions to refactor first: low fan-in, low fan-out, not a hub, no cyclic involvement. Best starting point for incremental, low-risk sessions. | Yes |
 | `get_leaf_functions` | Functions that make no internal calls (leaves of the call graph). Zero downstream blast radius. Sorted by fan-in by default -- most-called leaves have the best unit-test ROI. | Yes |
@@ -452,6 +452,9 @@ depth      number   Traversal depth for upstream/downstream chains (default: 2)
 ```
 
 *Note: If no exact name match is found, `analyze_impact` falls back to semantic search (when a vector index is available) to find the most similar function.*
+Canonically selected affected entries include bounded `callSites` with caller identity, file,
+stored line, and confidence. `callSitesReceipt` reports per-entry totals; the top-level
+`callSiteEvidenceReceipt` discloses when the global 128-entry evidence envelope omits entries.
 
 **`get_low_risk_refactor_candidates`**
 ```
@@ -491,7 +494,16 @@ filePath   string   Path to the file, relative to the project directory
 directory     string   Absolute path to the project directory
 filePath      string   Path to the file, relative to the project directory
 functionName  string   Name of the function to extract
+focus         string   Optional variable or callee name; returns stored structural evidence (max 200 chars)
+focusKind     string   Required with focus: "variable" | "callee"
 ```
+
+A successful focused response omits `body`, returns bounded source lines in `slice`, and includes
+`evidenceReceipt`. Variable slices expose `dataFlowPrecision` and the same-spelling scope boundary;
+callee slices expose stored `callConfidence` without inventing data-flow precision. Stale, ambiguous,
+unsupported, malformed, or out-of-span evidence returns a machine-readable `sliceUnavailable`
+boundary instead of guessed line evidence. Calls that omit `focus` and `focusKind` retain the legacy
+full-body response.
 
 **`get_file_dependencies`**
 ```

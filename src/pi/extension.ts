@@ -1101,12 +1101,14 @@ export const NAV_TOOLS: NavToolSpec[] = [
   {
     name: 'get_function_body',
     label: 'openlore get_function_body',
-    description: 'Read the exact source code of a function by name and file.',
-    guideline: 'After search_code or get_function_skeleton identifies a function, call openlore_get_function_body to read its full implementation instead of opening the file.',
+    description: 'Read a function body, or a precision-tagged structural slice focused on one variable or callee.',
+    guideline: 'After search_code identifies a function, use focus when you need only one variable or callee; omit it to read the full implementation.',
     parameters: Type.Object({
       filePath: Type.String({ description: 'REQUIRED. File path relative to the project directory, e.g. "src/auth/jwt.ts"' }),
       functionName: Type.String({ description: 'REQUIRED. Name of the function to extract, e.g. "verifyToken"' }),
-    }),
+      focus: Type.Optional(Type.String({ maxLength: 200, description: 'Variable or callee name to slice; requires focusKind.' })),
+      focusKind: Type.Optional(Type.Union([Type.Literal('variable'), Type.Literal('callee')], { description: 'Required with focus; selects stored variable or callee evidence.' })),
+    }, { dependentRequired: { focus: ['focusKind'], focusKind: ['focus'] } }),
   },
   {
     name: 'get_file_dependencies',

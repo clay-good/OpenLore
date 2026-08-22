@@ -573,7 +573,7 @@ describe('handleSearchCode — success paths', () => {
     await writeAnalysisFile(tmpDir, 'llm-context.json', {
       callGraph: {
         nodes: [
-          { id: 'src/a.ts::doA', name: 'doA', filePath: 'src/a.ts', language: 'TypeScript', fanIn: 1, fanOut: 0 },
+          { id: 'src/a.ts::doA', name: 'doA', filePath: 'src/a.ts', language: 'TypeScript', fanIn: 1, fanOut: 0, startLine: 17 },
           { id: 'src/b.ts::doB', name: 'doB', filePath: 'src/b.ts', language: 'TypeScript', fanIn: 0, fanOut: 1 },
         ],
         edges: [{ callerId: 'src/b.ts::doB', calleeId: 'src/a.ts::doA' }],
@@ -596,6 +596,29 @@ describe('handleSearchCode — success paths', () => {
     const callers = results[0].callers as Array<{ name: string }> | undefined;
     expect(callers).toBeDefined();
     expect(callers?.some(c => c.name === 'doB')).toBe(true);
+    expect(results[0].startLine).toBe(17);
+  });
+
+  it('preserves indexed TypeScript, Python, and Go start lines by canonical id', async () => {
+    const records = [
+      makeRecord({ id: 'src/a.ts::same', filePath: 'src/a.ts', language: 'TypeScript' }),
+      makeRecord({ id: 'src/a.py::same', filePath: 'src/a.py', language: 'Python' }),
+      makeRecord({ id: 'src/a.go::same', filePath: 'src/a.go', language: 'Go' }),
+    ];
+    vi.doMock('../../analyzer/vector-index.js', () => ({
+      VectorIndex: { exists: vi.fn().mockReturnValue(true), search: vi.fn().mockResolvedValue(records.map(record => ({ score: 0.8, record }))) },
+    }));
+    vi.doMock('../../analyzer/embedding-service.js', () => ({
+      EmbeddingService: { fromEnv: vi.fn().mockReturnValue({}), fromConfig: vi.fn() },
+    }));
+    await writeAnalysisFile(tmpDir, 'llm-context.json', {
+      callGraph: { nodes: records.map((record, index) => ({ ...record, startLine: [11, 22, 33][index] })), edges: [] },
+    });
+    const { handleSearchCode } = await import('./semantic.js');
+    const result = await handleSearchCode(tmpDir, 'same') as { results: Array<{ language: string; startLine?: number }> };
+    expect(result.results.map(item => [item.language, item.startLine])).toEqual([
+      ['TypeScript', 11], ['Python', 22], ['Go', 33],
+    ]);
   });
 
   it('includes specPeers for files that share a domain via mapping.json', async () => {

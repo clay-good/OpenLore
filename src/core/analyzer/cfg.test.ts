@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import Parser from 'tree-sitter';
-import { buildFunctionCfg, cfgSupportsLanguage, isStructurallyValid, valueReachableLines, type CfgNode, type FunctionCfg } from './cfg.js';
+import { buildFunctionCfg, cfgSupportsLanguage, isStructurallyValid, valueReachableLines, variableSliceLines, type CfgNode, type FunctionCfg } from './cfg.js';
 
 // ─── parsing helpers ─────────────────────────────────────────────────────────
 
@@ -447,6 +447,29 @@ describe('value-level forward slice chains through multi-line definitions', () =
     const cfg = cfgFor(`function f(a: number, b: number): number {\n  return a + 1;\n}`, lang, 'TypeScript', TS_FN);
     const reachedB = valueReachableLines(cfg, 'b');
     expect(reachedB.size).toBe(0); // b is unused
+  });
+});
+
+describe('variableSliceLines', () => {
+  it('returns sorted direct def/use evidence and conservatively aggregates precision and roles', () => {
+    const cfg: FunctionCfg = {
+      blocks: [{ id: 0, kind: 'entry' }, { id: 1, kind: 'exit' }],
+      edges: [{ from: 0, to: 1, kind: 'normal' }],
+      params: ['value'],
+      paramLine: 1,
+      defUse: [
+        { variable: 'value', defLine: 1, useLine: 4, precision: 'exact' },
+        { variable: 'value', defLine: 4, useLine: 7, precision: 'may' },
+        { variable: 'other', defLine: 2, useLine: 8, precision: 'exact' },
+      ],
+    };
+
+    expect(variableSliceLines(cfg, 'value')).toEqual([
+      { line: 1, precision: 'exact', roles: ['definition'] },
+      { line: 4, precision: 'may', roles: ['definition', 'use'] },
+      { line: 7, precision: 'may', roles: ['use'] },
+    ]);
+    expect(variableSliceLines(cfg, 'missing')).toEqual([]);
   });
 });
 

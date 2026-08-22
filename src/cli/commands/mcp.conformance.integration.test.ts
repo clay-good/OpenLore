@@ -165,12 +165,15 @@ describe('spec-12 MCP protocol conformance (via SDK Client over stdio)', () => {
 });
 
 describe('fix-mcp-argument-contract self-contained stdio acceptance', () => {
-  it('runs orient with only a task against an installable analyzed launch root', async () => {
+  it('runs orient and a focused function-body read against an installable analyzed launch root', async () => {
     expect(existsSync(MCP_BIN), 'run `npm run build` before the MCP boundary suite').toBe(true);
     const dir = mkdtempSync(join(tmpdir(), 'openlore-orient-default-'));
     mkdirSync(join(dir, 'src'));
     writeFileSync(join(dir, 'package.json'), '{"name":"orient-default-fixture","type":"module"}\n');
-    writeFileSync(join(dir, 'src', 'payments.ts'), 'export function chargeCard(): string { return "charged"; }\n');
+    writeFileSync(
+      join(dir, 'src', 'payments.ts'),
+      'export function chargeCard(amount: number): number {\n  const total = amount + 1;\n  return total;\n}\n',
+    );
     const env = { ...process.env, OPENLORE_NO_AUTO_HEAP: '1' };
     execFileSync('node', [MCP_BIN, 'init'], { cwd: dir, env, stdio: 'ignore' });
     execFileSync('node', [MCP_BIN, 'analyze', '--force'], { cwd: dir, env, stdio: 'ignore' });
@@ -181,6 +184,41 @@ describe('fix-mcp-argument-contract self-contained stdio acceptance', () => {
       const result = await c.callTool({ name: 'orient', arguments: { task: 'change chargeCard behavior' } });
       expect(result.isError).toBeFalsy();
       expect(JSON.stringify(result.content)).toMatch(/chargeCard/);
+
+      const focused = await c.callTool({
+        name: 'get_function_body',
+        arguments: {
+          filePath: 'src/payments.ts',
+          functionName: 'chargeCard',
+          focus: 'total',
+          focusKind: 'variable',
+        },
+      });
+      expect(focused.isError).toBeFalsy();
+      const block = (focused.content as Array<{ type: string; text?: string }>)[0];
+      const body = JSON.parse(block?.text ?? '{}') as {
+        focus?: string;
+        focusKind?: string;
+        sliceScope?: string;
+        slice?: Array<{ line: number; text: string }>;
+      };
+      expect(body).toMatchObject({
+        focus: 'total',
+        focusKind: 'variable',
+        sliceScope: 'stored-direct-def-use',
+      });
+      expect(body.slice?.map(line => line.text)).toEqual([
+        '  const total = amount + 1;',
+        '  return total;',
+      ]);
+      await expect(c.callTool({
+        name: 'get_function_body',
+        arguments: { filePath: 'src/payments.ts', functionName: 'chargeCard', focus: 'total' },
+      })).rejects.toMatchObject({ code: ErrorCode.InvalidParams });
+      await expect(c.callTool({
+        name: 'get_function_body',
+        arguments: { filePath: 'src/payments.ts', functionName: 'chargeCard', focusKind: 'variable' },
+      })).rejects.toMatchObject({ code: ErrorCode.InvalidParams });
     } finally {
       await c.close();
       rmSync(dir, { recursive: true, force: true });
