@@ -182,6 +182,7 @@ describe('openloreGenerate', () => {
     delete process.env.OPENAI_API_KEY;
     delete process.env.GEMINI_API_KEY;
     delete process.env.OPENAI_COMPAT_API_KEY;
+    delete process.env.OPENLORE_LLM_LOGS;
     delete process.env.NODE_TLS_REJECT_UNAUTHORIZED;
   });
 
@@ -380,6 +381,25 @@ describe('openloreGenerate', () => {
   // --------------------------------------------------------------------------
 
   describe('provider auto-detection', () => {
+    it.each([
+      [undefined, false],
+      ['0', false],
+      ['false', false],
+      ['true', false],
+      ['1', true],
+    ])('passes exact LLM-log opt-in options to the API service constructor (value: %s)', async (value, expected) => {
+      if (value === undefined) delete process.env.OPENLORE_LLM_LOGS;
+      else process.env.OPENLORE_LLM_LOGS = value;
+
+      await openloreGenerate({ rootPath: ROOT });
+
+      expect(mockCreateLLMService).toHaveBeenCalledWith(expect.objectContaining({
+        enableLogging: expected,
+        logDir: '/test/project/.openlore/logs',
+        logRoot: ROOT,
+      }));
+    });
+
     it('uses anthropic when only ANTHROPIC_API_KEY is set', async () => {
       process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
       delete process.env.OPENAI_API_KEY;

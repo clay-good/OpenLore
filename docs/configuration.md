@@ -44,6 +44,7 @@
 | `OPENLORE_NO_AUTO_ANALYZE` | -- | Disable the MCP server's cold-start self-bootstrap (no background index build on first run) |
 | `OPENLORE_NO_UPDATE_NOTIFIER` | -- | Silence the passive "update available" banner (`NO_UPDATE_NOTIFIER` is also honored) |
 | `OPENLORE_SKIP_POSTINSTALL` | -- | Suppress the post-install next-step hint |
+| `OPENLORE_LLM_LOGS` | LLM commands/API | Set to exactly `1` to persist redacted prompts and responses under `.openlore/logs/`; disabled by default, new opted-in logging is bounded to six files or 300 MB (older logs are pruned on the next opted-in save) |
 | `OPENLORE_NO_WORKERS` | `analyze` | Run per-file extraction on a single thread instead of the worker pool. Both lanes produce byte-identical analysis output, so this only costs wall-clock — set it to isolate a worker-related problem, or in an environment where extra threads are unwelcome |
 | `OPENLORE_NO_FACT_CACHE` | `analyze` | Re-extract every file instead of reusing the per-file extraction cache, exactly as `--force` does (and, like `--force`, the cache is refilled afterwards). Both lanes produce byte-identical analysis output, so this only costs wall-clock — reach for it when a CLI flag is not available, e.g. from an embedded caller |
 | `OPENLORE_NO_AUTO_HEAP` | CLI | Disable [adaptive heap sizing](#analyzing-at-any-repository-size) — the CLI runs at Node's default heap (or whatever you set) with no re-exec, exactly as before this feature existed |

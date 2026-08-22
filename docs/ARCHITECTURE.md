@@ -348,10 +348,15 @@ interface LLMServiceOptions {
   sslVerify?: boolean;   // SSL certificate verification (default: true)
   maxRetries?: number;
   timeout?: number;
-  logDir?: string;
+  logDir?: string;       // Explicit trusted path, or a path confined by logRoot
+  logRoot?: string;      // Canonical project-root boundary for OpenLore-owned logs
   enableLogging?: boolean;
 }
 ```
+
+When logging is enabled, OpenLore-owned callers always pair their repository-derived
+`logDir` with `logRoot`. Embedders may omit `logRoot` only when they supply an explicit,
+trusted `logDir`; enabling logging with neither boundary nor an explicit path is rejected.
 
 **Supported Providers:**
 - Anthropic Claude (primary, used when `ANTHROPIC_API_KEY` is set)

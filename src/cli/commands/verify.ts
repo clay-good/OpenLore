@@ -27,6 +27,7 @@ import {
 import type { VerifyOptions } from '../../types/index.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
 import { createLLMService, type LLMService } from '../../core/services/llm-service.js';
+import { isLlmLoggingEnabled } from '../../core/services/llm-logging-policy.js';
 import {
   SpecVerificationEngine,
   type VerificationReport,
@@ -434,8 +435,9 @@ A score >= threshold indicates specs are production-ready.
           apiBase: resolveTrustedApiBase(globalOpts.apiBase, openloreConfig?.llm?.apiBase),
           sslVerify: resolveTrustedSslVerify(globalOpts.insecure, openloreConfig?.llm?.sslVerify),
           timeout: globalOpts.timeout ?? openloreConfig.generation?.timeout,
-          enableLogging: true,
+          enableLogging: isLlmLoggingEnabled(),
           logDir: join(rootPath, OPENLORE_DIR, OPENLORE_LOGS_SUBDIR),
+          logRoot: rootPath,
         });
       } catch (error) {
         logger.error(`Failed to create LLM service: ${(error as Error).message}`);

@@ -12,6 +12,7 @@ import {
   readOpenSpecConfig,
 } from '../core/services/config-manager.js';
 import { createLLMService } from '../core/services/llm-service.js';
+import { isLlmLoggingEnabled } from '../core/services/llm-logging-policy.js';
 import type { LLMService } from '../core/services/llm-service.js';
 import { SpecGenerationPipeline } from '../core/generator/spec-pipeline.js';
 import {
@@ -257,8 +258,9 @@ export async function openloreGenerate(options: GenerateApiOptions = {}): Promis
       sslVerify,
       timeout: options.timeout ?? openloreConfig.generation?.timeout,
       disableResponseFormat: openloreConfig.generation?.disableResponseFormat,
-      enableLogging: true,
+      enableLogging: isLlmLoggingEnabled(),
       logDir: safeJoin(rootPath, join(OPENLORE_DIR, OPENLORE_LOGS_SUBDIR)),
+      logRoot: rootPath,
     });
   } catch (error) {
     throw new Error(`Failed to create LLM service: ${(error as Error).message}`, { cause: error });

@@ -10,6 +10,7 @@ import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_LOGS_SUBDIR, OPENLORE_
 import { fileExists, readJsonFile } from '../utils/command-helpers.js';
 import { readOpenLoreConfig } from '../core/services/config-manager.js';
 import { createLLMService } from '../core/services/llm-service.js';
+import { isLlmLoggingEnabled } from '../core/services/llm-logging-policy.js';
 import type { LLMService } from '../core/services/llm-service.js';
 import { SpecVerificationEngine } from '../core/verifier/verification-engine.js';
 import type { DependencyGraphResult } from '../core/analyzer/dependency-graph.js';
@@ -120,8 +121,9 @@ export async function openloreVerify(options: VerifyApiOptions = {}): Promise<Ve
       ),
       openaiCompatBaseUrl: options.openaiCompatBaseUrl,
       timeout: options.timeout ?? openloreConfig.generation?.timeout,
-      enableLogging: true,
+      enableLogging: isLlmLoggingEnabled(),
       logDir: join(rootPath, OPENLORE_DIR, OPENLORE_LOGS_SUBDIR),
+      logRoot: rootPath,
     });
   } catch (error) {
     throw new Error(`Failed to create LLM service: ${(error as Error).message}`, { cause: error });

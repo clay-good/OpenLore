@@ -5,14 +5,17 @@
  * retry logic, token management, and cost tracking.
  */
 
-import { writeFile, mkdir } from 'node:fs/promises';
+import { mkdir, readdir, stat, unlink, realpath, open } from 'node:fs/promises';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import logger from '../../utils/logger.js';
 import { redactSecretsWithReport } from './secret-redaction.js';
 import { protectPrompt } from '../../utils/prompt-boundary.js';
 import { announceInsecureTls, withRelaxedTls } from './tls-scope.js';
+import { safeJoin } from '../../utils/path-confinement.js';
+import { acquireLockAt, isLockHeld } from '../runtime/advisory-lock.js';
 import {
   CLAUDE_MAX_CONTEXT_TOKENS,
   CLAUDE_MAX_OUTPUT_TOKENS,
@@ -38,7 +41,101 @@ import {
   CONTEXT_LIMIT_WARNING_RATIO,
   OPENLORE_DIR,
   OPENLORE_LOGS_SUBDIR,
+  LLM_LOG_RETENTION_MAX_BYTES,
+  LLM_LOG_RETENTION_MAX_FILES,
 } from '../../constants.js';
+
+export interface LlmLogRetentionOptions {
+  maxTotalBytes?: number;
+  maxFiles?: number;
+}
+
+const LLM_LOG_TIMESTAMP = '\\d{4}-\\d{2}-\\d{2}T\\d{2}-\\d{2}-\\d{2}-\\d{3}Z';
+const LLM_LOG_UUID = '[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}';
+const OWNED_LLM_LOG = new RegExp(
+  `^llm-log-${LLM_LOG_TIMESTAMP}(?:-\\d+-${LLM_LOG_UUID})?\\.json$`,
+  'i',
+);
+const LLM_LOG_LOCK_WAIT_MS = 1_000;
+
+interface DirectoryIdentity {
+  dev: number;
+  ino: number;
+}
+
+async function assertDirectoryIdentity(path: string, expected: DirectoryIdentity): Promise<void> {
+  const current = await stat(path);
+  if (current.dev !== expected.dev || current.ino !== expected.ino) {
+    throw new Error('LLM log directory identity changed during persistence; refusing filesystem mutation');
+  }
+}
+
+function retentionBounds(options: LlmLogRetentionOptions): { maxTotalBytes: number; maxFiles: number } {
+  const maxTotalBytes = options.maxTotalBytes ?? LLM_LOG_RETENTION_MAX_BYTES;
+  const maxFiles = options.maxFiles ?? LLM_LOG_RETENTION_MAX_FILES;
+  if (!Number.isSafeInteger(maxTotalBytes) || maxTotalBytes < 0) {
+    throw new RangeError('LLM log retention maxTotalBytes must be a non-negative safe integer');
+  }
+  if (!Number.isSafeInteger(maxFiles) || maxFiles < 0) {
+    throw new RangeError('LLM log retention maxFiles must be a non-negative safe integer');
+  }
+  return { maxTotalBytes, maxFiles };
+}
+
+export function validateLlmLogSize(
+  content: string,
+  maxBytes = LLM_LOG_RETENTION_MAX_BYTES,
+): number {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
+    throw new RangeError('LLM log size limit must be a non-negative safe integer');
+  }
+  const bytes = Buffer.byteLength(content);
+  if (bytes > maxBytes) {
+    throw new Error(`LLM log is ${bytes} bytes, exceeding the ${maxBytes}-byte retention limit; no log was written`);
+  }
+  return bytes;
+}
+
+/**
+ * Remove oldest OpenLore LLM logs until both retention bounds hold.
+ * Unrelated files and symlinks are deliberately outside this function's scope.
+ */
+export async function pruneLlmLogs(
+  logDir: string,
+  options: LlmLogRetentionOptions = {},
+  assertDirectory: () => Promise<void> = async () => {},
+): Promise<void> {
+  const { maxTotalBytes, maxFiles } = retentionBounds(options);
+  const entries = await readdir(logDir, { withFileTypes: true });
+  const candidates = entries.filter(entry =>
+    entry.isFile() && OWNED_LLM_LOG.test(entry.name)
+  );
+  const logs = (await Promise.all(candidates.map(async entry => {
+    try {
+      const details = await stat(join(logDir, entry.name));
+      return { name: entry.name, size: details.size, mtimeMs: details.mtimeMs };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw error;
+    }
+  }))).filter((entry): entry is { name: string; size: number; mtimeMs: number } => entry !== null)
+    .sort((a, b) => a.mtimeMs - b.mtimeMs || a.name.localeCompare(b.name));
+
+  let totalBytes = logs.reduce((sum, entry) => sum + entry.size, 0);
+  while (logs.length > maxFiles || totalBytes > maxTotalBytes) {
+    const oldest = logs.shift();
+    if (!oldest) break;
+    try {
+      await assertDirectory();
+      await unlink(join(logDir, oldest.name));
+      await assertDirectory();
+      totalBytes -= oldest.size;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      totalBytes -= oldest.size;
+    }
+  }
+}
 
 /**
  * Strip NUL bytes from a CLI prompt. Node's `child_process` rejects arguments
@@ -415,6 +512,8 @@ export interface LLMServiceOptions {
   costWarningThreshold?: number;
   /** Log directory for prompts/responses */
   logDir?: string;
+  /** Confinement root for OpenLore-owned log paths; omit only for a trusted explicit logDir. */
+  logRoot?: string;
   /** Enable prompt logging */
   enableLogging?: boolean;
   /** Disable response_format field in requests (for endpoints that don't support it) */
@@ -1739,6 +1838,9 @@ export class LLMService {
   }> = [];
 
   constructor(provider: LLMProvider, options: LLMServiceOptions = {}) {
+    if (options.enableLogging && !options.logRoot && !options.logDir) {
+      throw new Error('LLM logging requires logRoot or an explicit trusted logDir');
+    }
     this.provider = provider;
     this.options = {
       provider: options.provider ?? 'anthropic',
@@ -1752,6 +1854,7 @@ export class LLMService {
       timeout: options.timeout ?? DEFAULT_LLM_TIMEOUT_MS,
       costWarningThreshold: options.costWarningThreshold ?? DEFAULT_LLM_COST_WARNING_THRESHOLD,
       logDir: options.logDir ?? `${OPENLORE_DIR}/${OPENLORE_LOGS_SUBDIR}`,
+      logRoot: options.logRoot ?? '',
       enableLogging: options.enableLogging ?? false,
       disableResponseFormat: options.disableResponseFormat ?? false,
     };
@@ -2109,26 +2212,95 @@ export class LLMService {
   /**
    * Save logs to disk
    */
-  async saveLogs(): Promise<void> {
-    if (this.requestLog.length === 0) return;
+  async saveLogs(): Promise<boolean> {
+    if (this.requestLog.length === 0) return false;
 
-    await mkdir(this.options.logDir, { recursive: true });
-
-    const filename = `llm-log-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
-    const filepath = join(this.options.logDir, filename);
+    const configuredLogDir = this.options.logDir;
+    if (this.options.logRoot) {
+      safeJoin(resolve(this.options.logRoot), configuredLogDir);
+    }
+    await mkdir(configuredLogDir, { recursive: true, mode: 0o700 });
+    const logDir = await realpath(configuredLogDir);
+    if (this.options.logRoot) {
+      safeJoin(await realpath(resolve(this.options.logRoot)), logDir);
+    }
+    const directoryStat = await stat(logDir);
+    const directoryIdentity = { dev: directoryStat.dev, ino: directoryStat.ino };
+    const assertLogDirectory = async (): Promise<void> => {
+      await assertDirectoryIdentity(configuredLogDir, directoryIdentity);
+      if (this.options.logRoot) {
+        const current = await realpath(configuredLogDir);
+        safeJoin(await realpath(resolve(this.options.logRoot)), current);
+      }
+    };
 
     // 0600: the log holds the full prompt corpus (i.e. the repository's source) and
     // provider diagnostics. Redaction is the first defense; not leaving it
     // world-readable to every other local process is the second.
-    await writeFile(filepath, JSON.stringify({
+    const content = JSON.stringify({
       summary: {
         tokenUsage: this.tokenUsage,
         costTracking: this.costTracking,
       },
       requests: this.requestLog,
-    }, null, 2), { mode: 0o600 });
+    }, null, 2);
+    const contentBytes = validateLlmLogSize(content);
+    await assertLogDirectory();
+    const lock = await acquireLockAt(logDir, '.llm-log-retention.lock', {
+      onContended: 'wait',
+      maxWaitMs: LLM_LOG_LOCK_WAIT_MS,
+      namespaceGateMaxWaitMs: LLM_LOG_LOCK_WAIT_MS,
+    });
+    if (isLockHeld(lock)) throw new Error('LLM log retention lock is held by another writer');
+    let filepath: string | undefined;
+    try {
+      await assertLogDirectory();
+      // Reclaim capacity BEFORE publication. If cleanup fails, no new sensitive
+      // artifact is made visible and repeated best-effort callers cannot grow the set.
+      await pruneLlmLogs(logDir, {
+        maxTotalBytes: LLM_LOG_RETENTION_MAX_BYTES - contentBytes,
+        maxFiles: LLM_LOG_RETENTION_MAX_FILES - 1,
+      }, assertLogDirectory);
+
+      for (let attempt = 0; attempt < 10; attempt++) {
+        const filename = `llm-log-${new Date().toISOString().replace(/[:.]/g, '-')}-${process.pid}-${randomUUID()}.json`;
+        const candidate = join(logDir, filename);
+        await assertLogDirectory();
+        let handle: Awaited<ReturnType<typeof open>> | undefined;
+        let createdIdentity: DirectoryIdentity | undefined;
+        try {
+          // The random final path is exclusively created. A crash may expose a
+          // partial artifact, but it remains an exact-owned file already reserved
+          // inside both retention bounds and will be handled by the next prune.
+          handle = await open(candidate, 'wx', 0o600);
+          const created = await handle.stat();
+          createdIdentity = { dev: created.dev, ino: created.ino };
+          await handle.writeFile(content);
+          await handle.close();
+          handle = undefined;
+          await assertLogDirectory();
+          filepath = candidate;
+          break;
+        } catch (error) {
+          await handle?.close().catch(() => {});
+          if ((error as NodeJS.ErrnoException).code === 'EEXIST') continue;
+          if (createdIdentity) {
+            const current = await stat(candidate).catch(() => null);
+            if (current?.dev === createdIdentity.dev && current.ino === createdIdentity.ino) {
+              await assertLogDirectory();
+              await unlink(candidate).catch(() => {});
+            }
+          }
+          throw error;
+        }
+      }
+      if (!filepath) throw new Error('Unable to allocate a unique LLM log filename after 10 attempts');
+    } finally {
+      await lock.release();
+    }
 
     logger.debug(`Saved LLM logs to ${filepath}`);
+    return true;
   }
 
   /**

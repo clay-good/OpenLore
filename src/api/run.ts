@@ -25,6 +25,7 @@ import {
 } from '../core/services/config-manager.js';
 import { ensureGitignored } from '../core/services/gitignore-manager.js';
 import { createLLMService } from '../core/services/llm-service.js';
+import { isLlmLoggingEnabled } from '../core/services/llm-logging-policy.js';
 import type { LLMService } from '../core/services/llm-service.js';
 import { RepositoryMapper } from '../core/analyzer/repository-mapper.js';
 import { DependencyGraphBuilder, type DependencyGraphResult } from '../core/analyzer/dependency-graph.js';
@@ -322,8 +323,9 @@ export async function openloreRun(options: RunApiOptions = {}): Promise<RunResul
       ),
       openaiCompatBaseUrl: options.openaiCompatBaseUrl,
       timeout: options.timeout ?? openloreConfig.generation?.timeout,
-      enableLogging: true,
+      enableLogging: isLlmLoggingEnabled(),
       logDir: join(rootPath, OPENLORE_DIR, OPENLORE_LOGS_SUBDIR),
+      logRoot: rootPath,
     });
   } catch (error) {
     throw new Error(`Failed to create LLM service: ${(error as Error).message}`, { cause: error });

@@ -194,9 +194,16 @@ moving a configured workspace to another machine or changing its Node installati
 | **Your source code** | never leaves the machine — no account, no telemetry (opt-in only), no hosted index |
 | **Lock-in** | none — delete `.openlore/` and nothing about your repo has changed |
 
-Optional telemetry is enabled only with `OPENLORE_TELEMETRY=1`. It stays in the repository's
+Optional telemetry is enabled only with `OPENLORE_TELEMETRY=1`. It records tool calls, agent
+identity, latency, error messages, decision titles, and lease events. It stays in the repository's
 gitignored `.openlore/telemetry/` directory, rotates locally, is never transmitted, and records
 filesystem locations in error/module fields as project-relative paths (or `~`-relative paths).
+Optional LLM diagnostics are enabled only with `OPENLORE_LLM_LOGS=1`; they store prompts and
+responses after secret redaction in the local, gitignored `.openlore/logs/` directory with
+owner-only log-file permissions on POSIX systems. Newly opted-in logging retains at most six files
+or 300 MB; logs left by older releases are pruned on the next opted-in save, or may be removed by
+deleting `.openlore/logs/`.
+Neither telemetry nor LLM logs are uploaded.
 Token-bearing daemon descriptors are written with owner-only `0o600` permissions on POSIX systems.
 Windows does not expose equivalent POSIX mode enforcement through Node; keep the workspace under a
 user-only ACL when using a daemon token there. Network-visible daemon binds require a token and a
