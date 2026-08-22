@@ -46,6 +46,20 @@ vi.mock('../core/runtime/analysis-generation.js', () => ({
 
 vi.mock('../core/services/mcp-handlers/utils.js', () => ({
   computeProjectFingerprint: vi.fn(async () => 'test-fingerprint'),
+  isCacheFresh: vi.fn(async () => false),
+}));
+
+vi.mock('../core/analyzer/analysis-core.js', () => ({
+  runAnalysisCore: vi.fn(),
+  isAnalysisCacheFresh: vi.fn(async () => false),
+  analysisConfigFingerprintInput: vi.fn((_configured, include, exclude, maxFiles) => ({
+    includePatterns: include, excludePatterns: exclude, maxFiles,
+  })),
+  analysisGeneratedExcludes: vi.fn(() => ['.openlore/analysis/**', 'openspec/**']),
+}));
+
+vi.mock('../core/analyzer/analysis-indexes.js', () => ({
+  buildAnalysisIndexes: vi.fn(async () => ({ functionIndex: 'built', textIndex: 'built', specIndex: 'built', degraded: [] })),
 }));
 
 vi.mock('../core/analyzer/repository-mapper.js', () => ({
@@ -88,6 +102,8 @@ import { DependencyGraphBuilder } from '../core/analyzer/dependency-graph.js';
 import { AnalysisArtifactGenerator } from '../core/analyzer/artifact-generator.js';
 import { acquireAnalysisOwnership } from '../core/runtime/analysis-ownership.js';
 import { readGenerationSnapshot } from '../core/runtime/analysis-generation.js';
+import { isAnalysisCacheFresh, runAnalysisCore } from '../core/analyzer/analysis-core.js';
+import { buildAnalysisIndexes } from '../core/analyzer/analysis-indexes.js';
 
 const mockAccess = vi.mocked(access);
 const mockStat = vi.mocked(stat);
@@ -95,6 +111,8 @@ const mockReadFile = vi.mocked(readFile);
 const mockReadOpenLoreConfig = vi.mocked(readOpenLoreConfig);
 const mockAcquireAnalysisOwnership = vi.mocked(acquireAnalysisOwnership);
 const mockReadGenerationSnapshot = vi.mocked(readGenerationSnapshot);
+const mockIsCacheFresh = vi.mocked(isAnalysisCacheFresh);
+const mockRunAnalysisCore = vi.mocked(runAnalysisCore);
 const mockOwnershipUpdate = vi.fn().mockResolvedValue(undefined);
 const mockOwnershipRelease = vi.fn().mockResolvedValue(undefined);
 
@@ -123,6 +141,7 @@ const OLD_MTIME = new Date(Date.now() - 2 * 60 * 60 * 1000); // 2 hours ago
 const RECENT_MTIME = new Date(Date.now() - 5 * 60 * 1000); // 5 minutes ago
 
 function setupMocks() {
+  mockIsCacheFresh.mockResolvedValue(false);
   mockOwnershipUpdate.mockResolvedValue(undefined);
   mockOwnershipRelease.mockResolvedValue(undefined);
   mockAcquireAnalysisOwnership.mockResolvedValue({
@@ -171,6 +190,17 @@ function setupMocks() {
   vi.mocked(AnalysisArtifactGenerator).mockImplementation(function (this: unknown) {
     Object.assign(this as object, { generateAndSave: vi.fn().mockResolvedValue(MOCK_ARTIFACTS) });
   });
+  mockRunAnalysisCore.mockResolvedValue({
+    repoMap: {
+      allFiles: [], highValueFiles: [], entryPoints: [], schemaFiles: [], configFiles: [],
+      metadata: { projectName: '', projectType: 'nodejs', rootPath: ROOT, analyzedAt: '', version: '' },
+      summary: { totalFiles: 1, analyzedFiles: 1, skippedFiles: 0, languages: [], frameworks: [], directories: [] },
+      clusters: { byDirectory: {}, byDomain: {}, byLayer: { presentation: [], business: [], data: [], infrastructure: [] } },
+    },
+    depGraph: JSON.parse(MOCK_DEP_GRAPH),
+    artifacts: MOCK_ARTIFACTS as never,
+    duration: 1,
+  });
 }
 
 // ============================================================================
@@ -203,17 +233,47 @@ describe('openloreAnalyze', () => {
         if (p.includes('dependency-graph')) return Promise.resolve(MOCK_DEP_GRAPH);
         return Promise.resolve(MOCK_REPO_STRUCTURE);
       });
+      mockIsCacheFresh.mockResolvedValue(true);
     });
 
     it('skips mapper when recent cache exists', async () => {
-      await openloreAnalyze({ rootPath: ROOT });
-      expect(RepositoryMapper).not.toHaveBeenCalled();
+      const result = await openloreAnalyze({ rootPath: ROOT });
+      expect(mockRunAnalysisCore).not.toHaveBeenCalled();
       expect(mockAcquireAnalysisOwnership).not.toHaveBeenCalled();
+      expect(result.fromCache).toBe(true);
+      expect(buildAnalysisIndexes).toHaveBeenCalled();
+      expect(buildAnalysisIndexes).toHaveBeenCalledWith(expect.not.objectContaining({ keywordOnly: true }));
+    });
+
+    it('returns cached index degradation disclosures', async () => {
+      vi.mocked(buildAnalysisIndexes).mockResolvedValueOnce({
+        functionIndex: 'built', textIndex: 'skipped', specIndex: 'built',
+        degraded: [{ index: 'text', reason: 'index write failed' }],
+      });
+      const result = await openloreAnalyze({ rootPath: ROOT });
+      expect(result.indexDegradations).toEqual([{ index: 'text', reason: 'index write failed' }]);
+    });
+
+    it('binds cached index validation to the consumed analysis generation', async () => {
+      await openloreAnalyze({ rootPath: ROOT });
+      expect(buildAnalysisIndexes).toHaveBeenCalledWith(expect.objectContaining({ generationId: 'test-generation' }));
+    });
+
+    it('discloses a missing dependency graph instead of fabricating an empty graph', async () => {
+      mockAccess.mockImplementation(async path => {
+        if (String(path).includes('dependency-graph.json')) throw new Error('ENOENT');
+      });
+      const result = await openloreAnalyze({ rootPath: ROOT });
+      expect(result).toMatchObject({
+        fromCache: true,
+        degraded: { artifact: 'dependency-graph.json', reason: 'missing' },
+      });
+      expect(result.depGraph).toBeUndefined();
     });
 
     it('force=true bypasses cache and runs full analysis', async () => {
       await openloreAnalyze({ rootPath: ROOT, force: true });
-      expect(RepositoryMapper).toHaveBeenCalled();
+      expect(mockRunAnalysisCore).toHaveBeenCalled();
     });
 
     it('rebuilds instead of serving a TTL-fresh mixed generation', async () => {
@@ -221,7 +281,7 @@ describe('openloreAnalyze', () => {
         state: 'analysis-changed', message: 'changed',
       });
       await openloreAnalyze({ rootPath: ROOT });
-      expect(RepositoryMapper).toHaveBeenCalled();
+      expect(mockRunAnalysisCore).toHaveBeenCalled();
       expect(mockAcquireAnalysisOwnership).toHaveBeenCalled();
     });
   });
@@ -235,9 +295,7 @@ describe('openloreAnalyze', () => {
     it('runs full analysis pipeline', async () => {
       await openloreAnalyze({ rootPath: ROOT });
 
-      expect(RepositoryMapper).toHaveBeenCalled();
-      expect(DependencyGraphBuilder).toHaveBeenCalled();
-      expect(AnalysisArtifactGenerator).toHaveBeenCalled();
+      expect(mockRunAnalysisCore).toHaveBeenCalled();
     });
   });
 
@@ -249,26 +307,25 @@ describe('openloreAnalyze', () => {
     it('runs full analysis pipeline', async () => {
       await openloreAnalyze({ rootPath: ROOT });
 
-      expect(RepositoryMapper).toHaveBeenCalled();
-      expect(AnalysisArtifactGenerator).toHaveBeenCalled();
+      expect(mockRunAnalysisCore).toHaveBeenCalled();
+    });
+
+    it('checks freshness against a custom analysis output directory', async () => {
+      await openloreAnalyze({ rootPath: ROOT, outputPath: 'custom-analysis' });
+      expect(mockIsCacheFresh).toHaveBeenCalledWith(ROOT, `${ROOT}/custom-analysis`, {
+        includePatterns: [], excludePatterns: [], maxFiles: 100000,
+      });
     });
 
     it('returns analysis result with repo map', async () => {
       const result = await openloreAnalyze({ rootPath: ROOT });
       expect(result.repoMap).toBeDefined();
       expect(result.depGraph).toBeDefined();
+      expect(result.fromCache).toBe(false);
+      expect(buildAnalysisIndexes).toHaveBeenCalledWith(expect.not.objectContaining({ keywordOnly: true }));
     });
 
     it('holds repository ownership across the full analysis and releases it', async () => {
-      const map = vi.fn().mockResolvedValue({
-        allFiles: [],
-        highValueFiles: [],
-        summary: { totalFiles: 1, analyzedFiles: 1, skippedFiles: 0, languages: ['typescript'] },
-      });
-      vi.mocked(RepositoryMapper).mockImplementationOnce(function (this: unknown) {
-        Object.assign(this as object, { map });
-      });
-
       await openloreAnalyze({ rootPath: ROOT });
 
       expect(mockAcquireAnalysisOwnership).toHaveBeenCalledWith(
@@ -277,7 +334,7 @@ describe('openloreAnalyze', () => {
         { stage: 'starting' },
       );
       expect(mockAcquireAnalysisOwnership.mock.invocationCallOrder[0]).toBeLessThan(
-        map.mock.invocationCallOrder[0],
+        mockRunAnalysisCore.mock.invocationCallOrder[0],
       );
       expect(mockOwnershipRelease).toHaveBeenCalledOnce();
     });
@@ -298,24 +355,24 @@ describe('openloreAnalyze', () => {
         progressPath: `${ROOT}/.openlore/runtime/analysis-progress.json`,
       });
 
-      await expect(openloreAnalyze({ rootPath: ROOT })).rejects.toMatchObject({
-        name: 'AnalysisInProgressError',
-        code: 'ANALYSIS_IN_PROGRESS',
+      const error = await openloreAnalyze({ rootPath: ROOT })
+        .then(() => { throw new Error('expected analysis contention'); })
+        .catch(value => value as Error & { code?: string });
+      expect(error).toMatchObject({ name: 'OpenLoreError', code: 'pipeline-failed' });
+      expect(error.cause).toMatchObject({
+        name: 'AnalysisInProgressError', code: 'ANALYSIS_IN_PROGRESS',
         owner: { pid: 4321, stage: 'dependency-graph' },
-        elapsedMs: 1_000,
-        heartbeatAgeMs: 25,
       });
-      expect(RepositoryMapper).not.toHaveBeenCalled();
-      expect(DependencyGraphBuilder).not.toHaveBeenCalled();
-      expect(AnalysisArtifactGenerator).not.toHaveBeenCalled();
+      expect(mockRunAnalysisCore).not.toHaveBeenCalled();
     });
 
     it('releases repository ownership when analysis fails', async () => {
-      vi.mocked(RepositoryMapper).mockImplementationOnce(function (this: unknown) {
-        Object.assign(this as object, { map: vi.fn().mockRejectedValue(new Error('scan failed')) });
-      });
+      mockRunAnalysisCore.mockRejectedValueOnce(new Error('scan failed'));
 
-      await expect(openloreAnalyze({ rootPath: ROOT })).rejects.toThrow('scan failed');
+      await expect(openloreAnalyze({ rootPath: ROOT })).rejects.toMatchObject({
+        code: 'pipeline-failed',
+        cause: expect.objectContaining({ message: 'scan failed' }),
+      });
       expect(mockOwnershipRelease).toHaveBeenCalledOnce();
     });
   });

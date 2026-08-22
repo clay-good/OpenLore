@@ -3,6 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { resolve } from 'node:path';
 import { openloreVerify } from './verify.js';
 
 // ============================================================================
@@ -111,9 +112,18 @@ describe('openloreVerify', () => {
   afterEach(() => {
     delete process.env.ANTHROPIC_API_KEY;
     delete process.env.OPENAI_API_KEY;
+    delete process.env.GEMINI_API_KEY;
+    delete process.env.OPENAI_COMPAT_API_KEY;
+    delete process.env.OPENAI_COMPAT_BASE_URL;
   });
 
   describe('config and resource validation', () => {
+    it('normalizes a relative root and honors the explicit config path', async () => {
+      await openloreVerify({ rootPath: 'relative-project', configPath: 'config/custom.json' });
+
+      expect(mockReadOpenLoreConfig).toHaveBeenCalledWith(resolve('relative-project'), 'config/custom.json');
+    });
+
     it.each([0, -1, 1.5, Number.NaN])('rejects invalid samples %s before loading project state', async samples => {
       await expect(openloreVerify({ rootPath: ROOT, samples })).rejects.toThrow(/samples must be a positive integer/);
       expect(mockReadOpenLoreConfig).not.toHaveBeenCalled();
@@ -129,17 +139,21 @@ describe('openloreVerify', () => {
 
     it('throws if no openlore config', async () => {
       mockReadOpenLoreConfig.mockResolvedValue(null as unknown as ReturnType<typeof readOpenLoreConfig> extends Promise<infer T> ? T : never);
-      await expect(openloreVerify({ rootPath: ROOT })).rejects.toThrow();
+      await expect(openloreVerify({ rootPath: ROOT, configPath: 'config/custom.json' })).rejects.toMatchObject({ code: 'no-config' });
+      expect(mockReadOpenLoreConfig).toHaveBeenCalledWith(ROOT, 'config/custom.json');
     });
 
     it('throws if no specs exist', async () => {
       mockAccess.mockRejectedValue(new Error('ENOENT'));
-      await expect(openloreVerify({ rootPath: ROOT })).rejects.toThrow();
+      const error = await openloreVerify({ rootPath: ROOT }).catch((caught: unknown) => caught);
+
+      expect(error).toMatchObject({ code: 'pipeline-failed' });
+      expect((error as Error).cause).toBeInstanceOf(Error);
     });
 
     it('throws if no analysis (dep graph missing)', async () => {
       mockReadFile.mockRejectedValue(new Error('ENOENT'));
-      await expect(openloreVerify({ rootPath: ROOT })).rejects.toThrow();
+      await expect(openloreVerify({ rootPath: ROOT })).rejects.toMatchObject({ code: 'no-analysis' });
     });
 
     it('throws if no LLM API key', async () => {
@@ -147,7 +161,7 @@ describe('openloreVerify', () => {
       delete process.env.OPENAI_API_KEY;
       delete process.env.GEMINI_API_KEY;
       delete process.env.OPENAI_COMPAT_API_KEY;
-      await expect(openloreVerify({ rootPath: ROOT })).rejects.toThrow(/API key/i);
+      await expect(openloreVerify({ rootPath: ROOT })).rejects.toMatchObject({ code: 'no-api-key' });
     });
   });
 
@@ -220,6 +234,40 @@ describe('openloreVerify', () => {
       delete process.env.ANTHROPIC_API_KEY;
       await openloreVerify({ rootPath: ROOT, provider });
       expect(mockCreateLLMService).toHaveBeenCalledWith(expect.objectContaining({ provider, model: provider }));
+    });
+
+    it('requires the credential selected by the configured provider', async () => {
+      mockReadOpenLoreConfig.mockResolvedValue({
+        ...MOCK_CONFIG,
+        generation: { provider: 'openai', model: 'gpt-5' },
+      } as never);
+
+      await expect(openloreVerify({ rootPath: ROOT })).rejects.toMatchObject({ code: 'no-api-key' });
+      expect(mockCreateLLMService).not.toHaveBeenCalled();
+    });
+
+    it('uses configured model, compat base, timeout, and response-format policy', async () => {
+      delete process.env.ANTHROPIC_API_KEY;
+      process.env.OPENAI_COMPAT_API_KEY = 'compat-key';
+      process.env.OPENAI_COMPAT_BASE_URL = 'https://compat.example/v1';
+      mockReadOpenLoreConfig.mockResolvedValue({
+        ...MOCK_CONFIG,
+        generation: {
+          provider: 'openai-compat', model: 'local-model',
+          openaiCompatBaseUrl: 'https://compat.example/v1', timeout: 45_000,
+          disableResponseFormat: true,
+        },
+      } as never);
+
+      await openloreVerify({ rootPath: ROOT });
+
+      expect(mockCreateLLMService).toHaveBeenCalledWith(expect.objectContaining({
+        provider: 'openai-compat',
+        model: 'local-model',
+        openaiCompatBaseUrl: 'https://compat.example/v1',
+        timeout: 45_000,
+        disableResponseFormat: true,
+      }));
     });
   });
 });

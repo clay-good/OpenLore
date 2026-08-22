@@ -5,7 +5,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { mkdtemp, mkdir, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { openloreInit } from './init.js';
 
 // ============================================================================
@@ -19,6 +19,7 @@ vi.mock('../core/services/project-detector.js', () => ({
 
 vi.mock('../core/services/config-manager.js', () => ({
   getDefaultConfig: vi.fn(),
+  readOpenLoreConfig: vi.fn(),
   writeOpenLoreConfig: vi.fn(),
   openloreConfigExists: vi.fn(),
   openspecDirExists: vi.fn(),
@@ -39,6 +40,7 @@ import {
 } from '../core/services/project-detector.js';
 import {
   getDefaultConfig,
+  readOpenLoreConfig,
   writeOpenLoreConfig,
   openloreConfigExists,
   openspecDirExists,
@@ -54,6 +56,7 @@ import {
 const mockDetectProjectType = vi.mocked(detectProjectType);
 const mockGetProjectTypeName = vi.mocked(getProjectTypeName);
 const mockGetDefaultConfig = vi.mocked(getDefaultConfig);
+const mockReadOpenLoreConfig = vi.mocked(readOpenLoreConfig);
 const mockWriteOpenLoreConfig = vi.mocked(writeOpenLoreConfig);
 const mockOpenLoreConfigExists = vi.mocked(openloreConfigExists);
 const mockOpenspecDirExists = vi.mocked(openspecDirExists);
@@ -75,6 +78,7 @@ beforeEach(() => {
   mockDetectProjectType.mockResolvedValue({ projectType: 'nodejs' } as Awaited<ReturnType<typeof detectProjectType>>);
   mockGetProjectTypeName.mockReturnValue('nodejs');
   mockGetDefaultConfig.mockReturnValue(DEFAULT_CONFIG);
+  mockReadOpenLoreConfig.mockResolvedValue(DEFAULT_CONFIG as Awaited<ReturnType<typeof readOpenLoreConfig>>);
   mockWriteOpenLoreConfig.mockResolvedValue(undefined);
   mockOpenLoreConfigExists.mockResolvedValue(false);
   mockOpenspecDirExists.mockResolvedValue(false);
@@ -91,6 +95,22 @@ beforeEach(() => {
 
 describe('openloreInit', () => {
   describe('happy path — new project', () => {
+    it('normalizes a relative root before calling project services', async () => {
+      await openloreInit({ rootPath: 'relative-project' });
+
+      expect(mockDetectProjectType).toHaveBeenCalledWith(resolve('relative-project'));
+      expect(mockOpenLoreConfigExists).toHaveBeenCalledWith(resolve('relative-project'), undefined);
+    });
+
+    it('honors a custom configPath for exists, write, and result reporting', async () => {
+      const custom = 'config/openlore.json';
+      const result = await openloreInit({ rootPath: ROOT, configPath: custom });
+
+      expect(mockOpenLoreConfigExists).toHaveBeenCalledWith(ROOT, custom);
+      expect(mockWriteOpenLoreConfig).toHaveBeenCalledWith(ROOT, DEFAULT_CONFIG, custom);
+      expect(result.configPath).toBe(custom);
+    });
+
     it('creates config and openspec structure', async () => {
       const result = await openloreInit({ rootPath: ROOT });
 
@@ -126,6 +146,19 @@ describe('openloreInit', () => {
 
       expect(result.created).toBe(false);
       expect(mockWriteOpenLoreConfig).not.toHaveBeenCalled();
+    });
+
+    it('reports the configured openspecPath when an existing custom config is reused', async () => {
+      mockOpenLoreConfigExists.mockResolvedValue(true);
+      mockReadOpenLoreConfig.mockResolvedValue({
+        ...DEFAULT_CONFIG,
+        openspecPath: './docs',
+      } as Awaited<ReturnType<typeof readOpenLoreConfig>>);
+
+      const result = await openloreInit({ rootPath: ROOT, configPath: 'config/custom.json' });
+
+      expect(mockReadOpenLoreConfig).toHaveBeenCalledWith(ROOT, 'config/custom.json');
+      expect(result.openspecPath).toBe('./docs');
     });
 
     it('force=true re-creates config even if it exists', async () => {
@@ -164,6 +197,18 @@ describe('openloreInit', () => {
         await rm(root, { recursive: true, force: true });
         await rm(outside, { recursive: true, force: true });
       }
+    });
+  });
+
+  describe('errors', () => {
+    it('wraps unexpected boundary failures with a typed error and original cause', async () => {
+      const cause = new Error('detector unavailable');
+      mockDetectProjectType.mockRejectedValue(cause);
+
+      await expect(openloreInit({ rootPath: ROOT })).rejects.toMatchObject({
+        code: 'pipeline-failed',
+        cause,
+      });
     });
   });
 

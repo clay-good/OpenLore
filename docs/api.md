@@ -34,6 +34,8 @@ const analysis = await openloreAnalyze({
   maxFiles: 1000,
 });
 console.log(`Analyzed ${analysis.repoMap.summary.analyzedFiles} files`);
+if (analysis.fromCache) console.log('Reused the current analysis');
+if (analysis.degraded) console.warn(`${analysis.degraded.artifact}: ${analysis.degraded.reason}`);
 ```
 
 ### API Functions
@@ -51,20 +53,35 @@ console.log(`Analyzed ${analysis.repoMap.summary.analyzedFiles} files`);
 
 \* `openloreDrift` requires an API key only when `llmEnhanced: true`.
 
-All functions accept an optional `onProgress` callback for status updates and throw errors instead of calling `process.exit`. See [src/api/types.ts](src/api/types.ts) for full option and result type definitions.
+The shared API options include `rootPath`, `configPath`, `quiet`, and an optional `onProgress` callback. API calls are console-silent by default (`quiet: true`); progress is delivered only through the callback. They never call `process.exit`. See [src/api/types.ts](../src/api/types.ts) for the full option and result definitions.
+
+When `configPath` is supplied, APIs that require existing configuration use that exact project-relative or absolute file and report a missing file as `OpenLoreError` with `code: 'no-config'`. `openloreInit` creates the requested configuration when it is missing. `openloreRun({ dryRun: true })` stays read-only and reports `configSchemaVersion: 'unknown'` when the requested configuration does not exist. APIs use the default `.openlore/config.json` only when `configPath` is omitted.
+
+`openloreAnalyze` uses the same analysis and index builders as the CLI. Its result reports `fromCache`, leaves `depGraph` absent when that artifact is unavailable, and explains partial artifacts or indexes through `degraded` and `indexDegradations`.
+
+Generation and run results are discriminated by `dryRun`. A dry run has `dryRun: true` and no fabricated `pipelineResult`; a completed generation has `dryRun: false` and a real `pipelineResult`. `openloreRun({ dryRun: true })` is read-only and returns the stages it would run.
+
+```typescript
+const generated = await openloreGenerate({ rootPath: '/path/to/project', dryRun: preview });
+if (generated.dryRun) {
+  console.log(generated.report.nextSteps);
+} else {
+  console.log(generated.pipelineResult);
+}
+```
 
 ### Error handling
 
-All API functions throw `Error` on failure. Wrap calls in try-catch for production use:
+API boundaries throw `OpenLoreError` on failure. The stable API codes are `no-config`, `no-analysis`, `no-api-key`, and `pipeline-failed`; pipeline failures preserve the original error as `cause`.
 
 ```typescript
-import { openloreRun } from 'openlore';
+import { OpenLoreError, openloreRun } from 'openlore';
 
 try {
   const result = await openloreRun({ rootPath: '/path/to/project' });
   console.log(`Done — ${result.generation.report.filesWritten.length} specs written`);
 } catch (err) {
-  if ((err as Error).message.includes('API key')) {
+  if (err instanceof OpenLoreError && err.code === 'no-api-key') {
     console.error('Set ANTHROPIC_API_KEY or OPENAI_API_KEY');
   } else {
     console.error('openlore failed:', (err as Error).message);

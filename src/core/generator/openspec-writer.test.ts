@@ -16,6 +16,7 @@ import {
 } from './openspec-writer.js';
 import type { GeneratedSpec } from './openspec-format-generator.js';
 import type { ProjectSurveyResult } from './spec-pipeline.js';
+import { OPENLORE_PACKAGE_VERSION } from '../runtime/package-versions.js';
 
 // ============================================================================
 // TEST HELPERS
@@ -832,7 +833,9 @@ rules:
       const report = await writer.writeSpecs(createMockSpecs(), createMockSurvey());
 
       expect(report.timestamp).toBeDefined();
-      expect(report.openloreVersion).toBe('1.5.0');
+      expect(report.openloreVersion).toBe(OPENLORE_PACKAGE_VERSION);
+      expect(report.configSchemaVersion).toBe('1.5.0');
+      expect(report.openspecVersion).toBe('1.9.0');
       expect(report.filesWritten).toBeDefined();
       expect(report.filesSkipped).toBeDefined();
       expect(report.filesBackedUp).toBeDefined();

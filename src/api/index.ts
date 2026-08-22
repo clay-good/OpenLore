@@ -1,5 +1,6 @@
 /**
  * openlore Programmatic API
+ * change: align-api-layer-with-cli-core
  *
  * This is the public API surface for openlore. Consumers (like OpenSpec CLI)
  * can import these functions to use openlore as a library.
@@ -36,21 +37,35 @@ export { openloreRecordDecision, openloreConsolidateDecisions, openloreSyncDecis
 // API option/result types
 export type {
   ProgressCallback,
+  ProgressPhase,
   ProgressEvent,
   BaseOptions,
   InitApiOptions,
   InitResult,
   AnalyzeApiOptions,
+  AnalyzeDegradation,
+  AnalyzeIndexDegradation,
   AnalyzeResult,
   GenerateApiOptions,
+  GenerateDryRunResult,
+  GenerateCompletedResult,
   GenerateResult,
   VerifyApiOptions,
   VerifyResult,
   DriftApiOptions,
   AuditApiOptions,
   RunApiOptions,
+  RunDryRunResult,
+  RunCompletedResult,
   RunResult,
 } from './types.js';
+export type {
+  RecordDecisionOptions,
+  ConsolidateOptions,
+  SyncDecisionsOptions,
+  ConsolidateResult,
+} from './decisions.js';
+export type { SyncResult } from '../core/decisions/syncer.js';
 
 // Re-export key core types that consumers will need
 export type { AuditReport, DriftResult, DriftSeverity, OpenLoreConfig, PendingDecision, DecisionStore, DecisionStatus } from '../types/index.js';
@@ -60,3 +75,5 @@ export type { PipelineResult } from '../core/generator/spec-pipeline.js';
 export type { GenerationReport } from '../core/generator/openspec-writer.js';
 export type { VerificationReport } from '../core/verifier/verification-engine.js';
 export type { SpecRequirement } from './specs.js';
+export { OpenLoreError, errors, isOpenLoreError } from '../utils/errors.js';
+export type { ErrorCode, ApiErrorCode } from '../utils/errors.js';

@@ -749,10 +749,12 @@ function requestExtract<T>(
     // the analyzed repository, so it is sanitized before it reaches a terminal.
     const slowTimer = slow
       ? setTimeout(() => {
-          process.stderr.write(
-            `[warn] still extracting ${sanitizeForTerminal(file.path)} `
-            + `after ${Math.round(SLOW_FILE_DISCLOSURE_MS / 1000)}s\n`,
-          );
+          if (!logger.getOptions().quiet) {
+            process.stderr.write(
+              `[warn] still extracting ${sanitizeForTerminal(file.path)} `
+              + `after ${Math.round(SLOW_FILE_DISCLOSURE_MS / 1000)}s\n`,
+            );
+          }
         }, SLOW_FILE_DISCLOSURE_MS)
       : undefined;
     slowTimer?.unref?.();

@@ -48,25 +48,25 @@ src/cli/
 
 ### API Layer (`src/api/`)
 
-The API layer provides a programmatic interface for external consumers (like OpenSpec CLI). Each CLI command has a corresponding API function that returns typed results without side effects.
+The API layer provides a programmatic interface for external consumers (like OpenSpec CLI). Its analysis and generation entry points are facades over the same core pipelines used by the CLI, so configuration, artifacts, indexes, provider resolution, and cache semantics cannot drift between front ends.
 
 ```
 src/api/
 ├── index.ts           # Barrel export — public API surface
 ├── types.ts           # Option and result type definitions
 ├── init.ts            # openloreInit() — project detection, config creation
-├── analyze.ts         # openloreAnalyze() — static analysis pipeline
-├── generate.ts        # openloreGenerate() — LLM spec generation
+├── analyze.ts         # openloreAnalyze() — shared analysis-core facade
+├── generate.ts        # openloreGenerate() — shared generation-core facade
 ├── verify.ts          # openloreVerify() — spec accuracy testing
 ├── drift.ts           # openloreDrift() — spec-to-code drift detection
 └── run.ts             # openloreRun() — full pipeline orchestration
 ```
 
 **Design Principles:**
-- No `process.exit`, `console.log`, or `process.chdir` — pure library code
+- No `process.exit` or `process.chdir`; logger output is request-scoped and muted by default
 - Progress callbacks (`onProgress`) instead of terminal output
-- Errors are thrown, not swallowed into exit codes
-- All functions return typed result objects
+- Stable `OpenLoreError` codes at public failure boundaries
+- Typed cache/degradation markers and discriminated dry-run results
 - Optional dependencies on LLM providers (only imported when needed)
 
 **Package exports:** `import { openloreAnalyze } from 'openlore'` imports the API; the CLI is available at `openlore/cli`.

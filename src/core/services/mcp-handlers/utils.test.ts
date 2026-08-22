@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, stat, utimes, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { vi } from 'vitest';
@@ -17,7 +17,9 @@ import {
   safeJoin,
   readCachedContext,
   isCacheFresh,
+  isAnalysisCacheFresh,
   computeProjectFingerprint,
+  fingerprintHashOfConfiguration,
   loadMappingIndex,
   clearMappingCache,
   specsForFile,
@@ -432,6 +434,79 @@ describe('isCacheFresh', () => {
     await writeFile(join(userSrc, 'app.ts'), 'export const x = 2;\nexport const y = 3;\n', 'utf-8');
     expect(await computeProjectFingerprint(tmpDir)).not.toBe(before);
     expect(await isCacheFresh(tmpDir)).toBe(false);
+  });
+
+  it('treats a corrupt fingerprint as stale even when llm-context is TTL-fresh', async () => {
+    const analysisDir = join(tmpDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
+    await mkdir(analysisDir, { recursive: true });
+    await writeFile(join(analysisDir, ARTIFACT_LLM_CONTEXT), '{}', 'utf-8');
+    await writeFile(join(analysisDir, ARTIFACT_FINGERPRINT), '{broken', 'utf-8');
+    expect(await isCacheFresh(tmpDir)).toBe(false);
+  });
+
+  it('detects same-size source changes even when mtime is restored', async () => {
+    const source = join(tmpDir, 'same-size.ts');
+    const analysisDir = join(tmpDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
+    await mkdir(analysisDir, { recursive: true });
+    await writeFile(source, 'export const x = 1;\n', 'utf-8');
+    const originalTimes = await stat(source);
+    const hash = await computeProjectFingerprint(tmpDir);
+    await writeFile(join(analysisDir, ARTIFACT_FINGERPRINT), JSON.stringify({ hash }), 'utf-8');
+    await writeFile(source, 'export const x = 2;\n', 'utf-8');
+    await utimes(source, originalTimes.atime, originalTimes.mtime);
+    expect(await isCacheFresh(tmpDir)).toBe(false);
+  });
+
+  it('fingerprints analyzed files outside the former source-extension allowlist', async () => {
+    const source = join(tmpDir, 'schema.sql');
+    await writeFile(source, 'CREATE TABLE users (id INTEGER);\n', 'utf-8');
+    const before = await computeProjectFingerprint(tmpDir);
+    await writeFile(source, 'CREATE TABLE users (id BIGINT);\n', 'utf-8');
+    expect(await computeProjectFingerprint(tmpDir)).not.toBe(before);
+  });
+
+  it('fingerprints explicit includes inside normally skipped directories', async () => {
+    await mkdir(join(tmpDir, 'vendor'), { recursive: true });
+    const source = join(tmpDir, 'vendor', 'included.ts');
+    await writeFile(source, 'export const included = 1;\n');
+    const configuration = { includePatterns: ['vendor/included.ts'], excludePatterns: [], maxFiles: 100 };
+    const before = await computeProjectFingerprint(tmpDir, { configuration });
+    await writeFile(source, 'export const included = 2;\n');
+    expect(await computeProjectFingerprint(tmpDir, { configuration })).not.toBe(before);
+  });
+
+  it('never fingerprints protected generated output even under a broad include', async () => {
+    const output = join(tmpDir, 'generated-analysis');
+    await mkdir(output, { recursive: true });
+    await writeFile(join(tmpDir, 'source.ts'), 'export const source = 1;\n');
+    await writeFile(join(output, 'artifact.ts'), 'export const generated = 1;\n');
+    const configuration = {
+      includePatterns: ['**/*.ts'], excludePatterns: [], protectedExcludePatterns: ['generated-analysis/**'], maxFiles: 100,
+    };
+    const before = await computeProjectFingerprint(tmpDir, { configuration });
+    await writeFile(join(output, 'artifact.ts'), 'export const generated = 2;\n');
+    expect(await computeProjectFingerprint(tmpDir, { configuration })).toBe(before);
+  });
+
+  it('fails closed when the explicit fingerprint byte budget is exceeded', async () => {
+    await writeFile(join(tmpDir, 'source.ts'), 'export const value = 1;\n', 'utf-8');
+    await expect(computeProjectFingerprint(tmpDir, { maxBytes: 4 }))
+      .rejects.toThrow(/fingerprint byte budget/i);
+  });
+
+  it('invalidates freshness when only the effective analysis configuration changes', async () => {
+    const analysisDir = join(tmpDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
+    await mkdir(analysisDir, { recursive: true });
+    await writeFile(join(tmpDir, 'source.ts'), 'export const value = 1;\n');
+    const initial = { includePatterns: [], excludePatterns: ['legacy/**'], maxFiles: 100_000 };
+    const changed = { includePatterns: [], excludePatterns: [], maxFiles: 100_000 };
+    const hash = await computeProjectFingerprint(tmpDir, { configuration: initial });
+    await writeFile(join(analysisDir, ARTIFACT_FINGERPRINT), JSON.stringify({
+      hash,
+      analysisConfigHash: fingerprintHashOfConfiguration(initial),
+    }));
+    expect(await isAnalysisCacheFresh(tmpDir, analysisDir, initial)).toBe(true);
+    expect(await isAnalysisCacheFresh(tmpDir, analysisDir, changed)).toBe(false);
   });
 });
 

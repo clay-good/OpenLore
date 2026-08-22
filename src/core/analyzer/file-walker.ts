@@ -80,6 +80,12 @@ export interface FileWalkerOptions {
   includePatterns?: string[];
   /** Additional glob patterns to exclude */
   excludePatterns?: string[];
+  /** Paths that cannot be force-included (generated analysis/spec output). */
+  protectedExcludePatterns?: string[];
+  /** Hard traversal depth bound; exceeding it fails closed. */
+  maxDepth?: number;
+  /** Hard entry examination bound, checked before directory entries are retained or sorted. */
+  maxEntries?: number;
   /** Progress callback for UI updates */
   onProgress?: (progress: FileWalkerProgress) => void;
   /** AbortController signal for cancellation */
@@ -287,6 +293,7 @@ const MAX_READ_SIZE = 10_000_000;
  * that the fallback scan stays well under a tenth of a second.
  */
 const POST_CAP_PROBE_LIMIT = 10_000;
+const DEFAULT_MAX_WALK_DEPTH = 100;
 
 /**
  * Check if a file has a shebang line
@@ -479,6 +486,8 @@ export class FileWalker {
   private skippedCount = 0;
   private skippedReasons: Record<string, number> = {};
   private directoriesScanned = 0;
+  private entriesExamined = 0;
+  private fatalBudgetError: Error | null = null;
   /**
    * Counters keyed by file extension and by directory path. Both keys come from the
    * scanned repository, so a file whose extension or directory is literally `__proto__`
@@ -494,6 +503,9 @@ export class FileWalker {
       maxFiles: options.maxFiles ?? DEFAULT_MAX_FILES,
       includePatterns: options.includePatterns ?? [],
       excludePatterns: options.excludePatterns ?? [],
+      protectedExcludePatterns: options.protectedExcludePatterns ?? [],
+      maxDepth: options.maxDepth ?? DEFAULT_MAX_WALK_DEPTH,
+      maxEntries: options.maxEntries ?? Math.min(1_000_000, Math.max(100_000, (options.maxFiles ?? DEFAULT_MAX_FILES) * 20)),
       onProgress: options.onProgress ?? (() => {}),
       signal: options.signal ?? new AbortController().signal,
       concurrency: options.concurrency ?? 10,
@@ -652,6 +664,10 @@ export class FileWalker {
    * (avoids re-running `toPosixPath` per file on the walk's hot path).
    */
   private shouldSkipFile(posixPath: string): boolean {
+    for (const pattern of this.options.protectedExcludePatterns) {
+      const normalized = toPosixPath(pattern).replace(/\/\*\*$/, '').replace(/\/$/, '');
+      if (posixPath === normalized || posixPath.startsWith(normalized + '/')) return true;
+    }
     // includePatterns override all exclusions — check first
     if (this.igInclude && this.igInclude.ignores(posixPath)) {
       return false;
@@ -685,6 +701,11 @@ export class FileWalker {
     if (this.options.signal.aborted || this.stopWalk) {
       return;
     }
+    if (depth > this.options.maxDepth) {
+      this.fatalBudgetError = new Error(`Repository walk depth budget exceeded (${this.options.maxDepth}) at ${toPosixPath(relative(this.rootPath, dirPath))}`);
+      this.stopWalk = true;
+      return;
+    }
 
     this.directoriesScanned++;
 
@@ -709,6 +730,16 @@ export class FileWalker {
       let hasGitignore = false;
 
       for await (const entry of dir) {
+        this.entriesExamined++;
+        if (this.entriesExamined > this.options.maxEntries) {
+          if (this.files.length >= this.options.maxFiles) {
+            this.markTruncated(relativeDirPath);
+          } else {
+            this.fatalBudgetError = new Error(`Repository walk entry budget exceeded (${this.options.maxEntries})`);
+          }
+          this.stopWalk = true;
+          break;
+        }
         // A `Dirent` does NOT follow symlinks, so a symlink reports false for BOTH `isDirectory`
         // and `isFile` — it fell out of both lists below and was dropped with no `recordSkip` at
         // all. A repository laid out as `src -> packages/app/src` (pnpm and lerna workspaces, or
@@ -742,6 +773,8 @@ export class FileWalker {
         entries.push({ name: entry.name, isDirectory, isFile, isSymlink });
       }
 
+      entries.sort((left, right) => left.name.localeCompare(right.name));
+
       // Load this directory's own `.gitignore` ONLY when the listing we just built actually
       // contains one. Probing `readFile('.gitignore')` in every directory was one doomed ENOENT
       // syscall per directory across the whole tree; the `opendir` above already told us whether
@@ -770,6 +803,14 @@ export class FileWalker {
         // skip dir, gitignore, or excludePatterns rule would prune it — otherwise the include
         // is a silent no-op because its directory vanished before any file was tested. The
         // file-level check (shouldSkipFile) still admits only the files that actually match.
+        const protectedExclude = this.options.protectedExcludePatterns.some(pattern => {
+          const normalized = toPosixPath(pattern).replace(/\/\*\*$/, '').replace(/\/$/, '');
+          return posixSubPath === normalized || posixSubPath.startsWith(normalized + '/');
+        });
+        if (protectedExclude) {
+          this.recordSkip('pattern');
+          continue;
+        }
         const forceInclude = this.matchesIncludeLineage(relativeSubPath);
 
         if (!forceInclude) {
@@ -936,6 +977,8 @@ export class FileWalker {
     this.skippedCount = 0;
     this.skippedReasons = {};
     this.directoriesScanned = 0;
+    this.entriesExamined = 0;
+    this.fatalBudgetError = null;
     this.extensionCounts = new Map();
     this.directoryCounts = new Map();
     this.stopWalk = false;
@@ -979,6 +1022,7 @@ export class FileWalker {
 
     // Start walking from root
     await this.walkDirectory(this.rootPath, 0);
+    if (this.fatalBudgetError) throw this.fatalBudgetError;
 
     // An include pattern that matched NOTHING is a silent config no-op — the user asked to force
     // something in and it wasn't there (a typo, a wrong path). Surface it so the config failure is

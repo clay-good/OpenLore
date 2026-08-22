@@ -1,6 +1,9 @@
 # The programmatic API is a fork of the CLI pipeline, not a facade over it — realign and make its contract embedder-safe
 
-> Status: PROPOSED (2026-07-03, e2e audit pass 4). `src/api/*.ts` is OpenLore's public
+> Status: BUILT (2026-08-22). The CLI and programmatic API now share bounded analysis,
+> indexing, provider resolution, generation finalization, and coherent locking. Verified by
+> 8,252 unit tests, 189 E2E tests, real CLI/API artifact parity, packed-consumer smoke, and
+> four adversarial multi-agent review/fix loops. `src/api/*.ts` is OpenLore's public
 > embeddable surface (the documented OpenSpec-CLI integration point). It reimplements the
 > analysis and generation pipelines in parallel to the CLI instead of calling the same core,
 > and has drifted on every axis the CLI has since fixed: it ignores config include/exclude

@@ -2,10 +2,10 @@
  * openlore decisions — programmatic API
  *
  * Record, consolidate, and sync architectural decisions.
- * No side effects (no process.exit, no console.log).
+ * Never controls the process and is console-silent by default.
  */
 
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import {
   OPENLORE_DIR,
   OPENLORE_LOGS_SUBDIR,
@@ -27,7 +27,6 @@ import {
 } from '../core/decisions/store.js';
 import { consolidateDrafts } from '../core/decisions/consolidator.js';
 import { applyConsolidationOutcome, withVerificationOutcome } from '../core/decisions/disposition.js';
-import type { ProviderName } from '../utils/command-helpers.js';
 import { markVerificationEvidenceAbsent, verifyDecisions } from '../core/decisions/verifier.js';
 import { syncApprovedDecisions } from '../core/decisions/syncer.js';
 import type { PendingDecision, DecisionStore } from '../types/index.js';
@@ -35,6 +34,9 @@ import type { SyncResult } from '../core/decisions/syncer.js';
 import type { BaseOptions, ProgressCallback } from './types.js';
 import { resolveOpenspecDir } from '../utils/openspec-dir.js';
 import { resolveTrustedApiBase, resolveTrustedSslVerify } from '../core/services/repo-config-trust.js';
+import { errors, isOpenLoreError } from '../utils/errors.js';
+import { withLoggerOptions } from '../utils/logger.js';
+import { resolveGenerationProvider, type ProviderName } from '../core/runtime/generation-core.js';
 
 function progress(cb: ProgressCallback | undefined, step: string, status: 'start' | 'complete' | 'skip', detail?: string): void {
   cb?.({ phase: 'decisions', step, status, detail });
@@ -57,7 +59,9 @@ export interface ConsolidateOptions extends BaseOptions {
   provider?: string;
   model?: string;
   apiBase?: string;
+  openaiCompatBaseUrl?: string;
   sslVerify?: boolean;
+  timeout?: number;
   baseRef?: string;
 }
 
@@ -83,8 +87,8 @@ export interface ConsolidateResult {
  * Called by agents during development (via MCP or directly).
  * Returns the ID of the recorded decision.
  */
-export async function openloreRecordDecision(options: RecordDecisionOptions): Promise<{ id: string }> {
-  const rootPath = options.rootPath ?? process.cwd();
+async function recordDecision(options: RecordDecisionOptions): Promise<{ id: string }> {
+  const rootPath = resolve(options.rootPath ?? process.cwd());
   const store = await loadDecisionStore(rootPath);
 
   const domain = 'unknown';
@@ -118,6 +122,17 @@ export async function openloreRecordDecision(options: RecordDecisionOptions): Pr
   return { id: recordedId };
 }
 
+export function openloreRecordDecision(options: RecordDecisionOptions): Promise<{ id: string }> {
+  return withLoggerOptions({ quiet: true }, async () => {
+    try {
+      return await recordDecision(options);
+    } catch (error) {
+      if (isOpenLoreError(error)) throw error;
+      throw errors.pipelineFailed(`Decision recording failed: ${(error as Error).message}`, error);
+    }
+  });
+}
+
 // ============================================================================
 // CONSOLIDATE + VERIFY
 // ============================================================================
@@ -126,32 +141,33 @@ export async function openloreRecordDecision(options: RecordDecisionOptions): Pr
  * Consolidate draft decisions via LLM, then cross-verify against git diff.
  * Returns verified, phantom, and missing decision sets.
  */
-export async function openloreConsolidateDecisions(
+async function consolidateDecisions(
   options: ConsolidateOptions = {},
 ): Promise<ConsolidateResult> {
-  const rootPath = options.rootPath ?? process.cwd();
+  const rootPath = resolve(options.rootPath ?? process.cwd());
   const { onProgress } = options;
 
-  const openloreConfig = await readOpenLoreConfig(rootPath);
-  if (!openloreConfig) throw new Error('No openlore configuration found. Run openloreInit() first.');
+  const openloreConfig = await readOpenLoreConfig(rootPath, options.configPath);
+  if (!openloreConfig) throw errors.noConfig(options.configPath);
 
-  const providerEnv =
-    process.env.ANTHROPIC_API_KEY ? 'anthropic' :
-    process.env.GEMINI_API_KEY ? 'gemini' :
-    process.env.OPENAI_COMPAT_API_KEY ? 'openai-compat' :
-    process.env.OPENAI_API_KEY ? 'openai' : null;
-
-  const provider = (options.provider ?? openloreConfig.generation?.provider ?? providerEnv) as string | undefined;
-  if (!provider) throw new Error('No LLM provider configured. Set an API key or configure generation.provider.');
+  const resolved = resolveGenerationProvider(openloreConfig, {
+    provider: options.provider as ProviderName | undefined,
+    model: options.model,
+    openaiCompatBaseUrl: options.openaiCompatBaseUrl,
+  });
+  if (!resolved) throw errors.apiNoApiKey();
 
   const llm = createLLMService({
-    provider: provider as ProviderName,
-    model: options.model ?? openloreConfig.generation?.model,
+    provider: resolved.provider,
+    model: resolved.model,
     apiBase: resolveTrustedApiBase(options.apiBase, openloreConfig.llm?.apiBase),
+    openaiCompatBaseUrl: resolved.openaiCompatBaseUrl,
     sslVerify: resolveTrustedSslVerify(
         options.sslVerify === undefined ? undefined : !options.sslVerify,
         openloreConfig.llm?.sslVerify,
       ),
+    timeout: options.timeout ?? openloreConfig.generation?.timeout,
+    disableResponseFormat: openloreConfig.generation?.disableResponseFormat,
     enableLogging: isLlmLoggingEnabled(),
     logDir: join(rootPath, OPENLORE_DIR, OPENLORE_LOGS_SUBDIR),
     logRoot: rootPath,
@@ -257,6 +273,19 @@ export async function openloreConsolidateDecisions(
   };
 }
 
+export function openloreConsolidateDecisions(
+  options: ConsolidateOptions = {},
+): Promise<ConsolidateResult> {
+  return withLoggerOptions({ quiet: options.quiet ?? true }, async () => {
+    try {
+      return await consolidateDecisions(options);
+    } catch (error) {
+      if (isOpenLoreError(error)) throw error;
+      throw errors.pipelineFailed(`Decision consolidation failed: ${(error as Error).message}`, error);
+    }
+  });
+}
+
 // ============================================================================
 // SYNC
 // ============================================================================
@@ -264,14 +293,14 @@ export async function openloreConsolidateDecisions(
 /**
  * Sync all approved decisions into spec.md files and create ADRs.
  */
-export async function openloreSyncDecisions(
+async function syncDecisions(
   options: SyncDecisionsOptions = {},
 ): Promise<SyncResult> {
-  const rootPath = options.rootPath ?? process.cwd();
+  const rootPath = resolve(options.rootPath ?? process.cwd());
   const { onProgress } = options;
 
-  const openloreConfig = await readOpenLoreConfig(rootPath);
-  if (!openloreConfig) throw new Error('No openlore configuration found.');
+  const openloreConfig = await readOpenLoreConfig(rootPath, options.configPath);
+  if (!openloreConfig) throw errors.noConfig(options.configPath);
 
   const openspecPath = resolveOpenspecDir(rootPath, openloreConfig.openspecPath);
   const specsPath = join(openspecPath, OPENSPEC_SPECS_SUBDIR);
@@ -317,4 +346,17 @@ export async function openloreSyncDecisions(
   progress(onProgress, 'Syncing decisions', 'complete', `${result.synced.length} synced`);
 
   return result;
+}
+
+export function openloreSyncDecisions(
+  options: SyncDecisionsOptions = {},
+): Promise<SyncResult> {
+  return withLoggerOptions({ quiet: options.quiet ?? true }, async () => {
+    try {
+      return await syncDecisions(options);
+    } catch (error) {
+      if (isOpenLoreError(error)) throw error;
+      throw errors.pipelineFailed(`Decision sync failed: ${(error as Error).message}`, error);
+    }
+  });
 }

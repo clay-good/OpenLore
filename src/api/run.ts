@@ -1,428 +1,147 @@
 /**
  * openlore run — programmatic API
  *
- * Runs the full pipeline: init → analyze → generate.
- * Smart defaults skip unnecessary steps.
- * No side effects (no process.exit, no console.log).
+ * Thin orchestration over the public init, analyze, and generate APIs. Keeping
+ * this function compositional prevents the full-pipeline entry point from
+ * drifting from the standalone stages.
  */
 
-import { join } from 'node:path';
-import { readFile, mkdir, writeFile, realpath } from 'node:fs/promises';
-import { DEFAULT_MAX_FILES, DEFAULT_ANTHROPIC_MODEL, DEFAULT_OPENAI_MODEL, DEFAULT_GEMINI_MODEL, DEFAULT_OPENAI_COMPAT_MODEL, DEFAULT_COPILOT_MODEL, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_LOGS_SUBDIR, OPENLORE_CONFIG_REL_PATH, OPENLORE_GENERATION_SUBDIR, OPENLORE_RUNS_SUBDIR, DEFAULT_OPENSPEC_PATH, ARTIFACT_REPO_STRUCTURE, ARTIFACT_DEPENDENCY_GRAPH, ARTIFACT_LLM_CONTEXT, ARTIFACT_FINGERPRINT } from '../constants.js';
-import { fileExists, readJsonFile } from '../utils/command-helpers.js';
-import { isCacheFresh } from '../core/services/mcp-handlers/utils.js';
+import type { ProgressCallback, RunApiOptions, RunResult } from './types.js';
+import { openloreInit } from './init.js';
+import { openloreAnalyze } from './analyze.js';
+import { openloreGenerate } from './generate.js';
+import { withLoggerOptions } from '../utils/logger.js';
 import {
-  detectProjectType,
-  getProjectTypeName,
-} from '../core/services/project-detector.js';
-import {
-  getDefaultConfig,
-  readOpenLoreConfig,
-  writeOpenLoreConfig,
-  openloreConfigExists,
-  openspecDirExists,
-  createOpenSpecStructure,
-} from '../core/services/config-manager.js';
-import { ensureGitignored } from '../core/services/gitignore-manager.js';
-import { createLLMService } from '../core/services/llm-service.js';
-import { isLlmLoggingEnabled } from '../core/services/llm-logging-policy.js';
-import type { LLMService } from '../core/services/llm-service.js';
-import { RepositoryMapper } from '../core/analyzer/repository-mapper.js';
-import { DependencyGraphBuilder, type DependencyGraphResult } from '../core/analyzer/dependency-graph.js';
-import { AnalysisArtifactGenerator, repoStructureToRepoMap } from '../core/analyzer/artifact-generator.js';
-import type { RepoStructure, LLMContext, AnalysisArtifacts } from '../core/analyzer/artifact-generator.js';
-import { SpecGenerationPipeline } from '../core/generator/spec-pipeline.js';
-import { OpenSpecFormatGenerator } from '../core/generator/openspec-format-generator.js';
-import { OpenSpecWriter } from '../core/generator/openspec-writer.js';
-import { ADRGenerator } from '../core/generator/adr-generator.js';
-import type { RunApiOptions, RunResult, InitResult, AnalyzeResult, ProgressCallback } from './types.js';
-import { resolveTrustedApiBase, resolveTrustedSslVerify } from '../core/services/repo-config-trust.js';
-import { atomicWriteFile } from '../core/decisions/atomic-store.js';
-import { withAnalysisLock } from '../core/runtime/advisory-lock.js';
-import { captureSourceState, reconcileSourceStates } from '../core/analyzer/source-state.js';
-import { publishGeneration, readGenerationSnapshot, REQUIRED_ANALYSIS_ARTIFACTS } from '../core/runtime/analysis-generation.js';
-import { computeProjectFingerprint } from '../core/services/mcp-handlers/utils.js';
-import { acquireAnalysisOwnership } from '../core/runtime/analysis-ownership.js';
-import { AnalysisInProgressError } from './analyze.js';
+  detectOpenSpecPackageVersion,
+  OPENLORE_PACKAGE_VERSION,
+  resolveGenerationProvider,
+} from '../core/runtime/generation-core.js';
+import { errors, isOpenLoreError } from '../utils/errors.js';
+import { readOpenLoreConfig } from '../core/services/config-manager.js';
+import { resolve } from 'node:path';
+import { estimateCost } from '../utils/command-helpers.js';
 
-function progress(onProgress: ProgressCallback | undefined, step: string, status: 'start' | 'progress' | 'complete' | 'skip', detail?: string): void {
-  onProgress?.({ phase: 'run', step, status, detail });
+function progress(
+  onProgress: ProgressCallback | undefined,
+  step: string,
+  status: 'start' | 'complete',
+): void {
+  onProgress?.({ phase: 'run', step, status });
 }
 
-/**
- * Load cached analysis artifacts from disk.
- */
-async function loadCachedArtifacts(
-  analysisPath: string,
-  repoStructure: RepoStructure,
-): Promise<AnalysisArtifacts> {
-  const llmContext = await readJsonFile<LLMContext>(
-    join(analysisPath, ARTIFACT_LLM_CONTEXT),
-    ARTIFACT_LLM_CONTEXT,
-  ) ?? { phase1_survey: { purpose: '', files: [] }, phase2_deep: { purpose: '', files: [] }, phase3_validation: { purpose: '', files: [] } };
-
-  let summaryMarkdown = '';
-  let dependencyDiagram = '';
-  try { summaryMarkdown = await readFile(join(analysisPath, 'SUMMARY.md'), 'utf-8'); } catch { /* optional */ }
-  try { dependencyDiagram = await readFile(join(analysisPath, 'dependencies.mermaid'), 'utf-8'); } catch { /* optional */ }
-
-  return { repoStructure, summaryMarkdown, dependencyDiagram, llmContext };
-}
-
-/**
- * Run the full openlore pipeline: init → analyze → generate.
- *
- * Uses smart defaults to skip unnecessary steps (e.g., skips init
- * if config exists, skips analysis if recent).
- *
- * @throws Error if no LLM API key found
- * @throws Error if pipeline fails
- */
-export async function openloreRun(options: RunApiOptions = {}): Promise<RunResult> {
+/** Run the full OpenLore pipeline: init → analyze → generate. */
+async function runCore(options: RunApiOptions): Promise<RunResult> {
   const startTime = Date.now();
-  const rootPath = await realpath(options.rootPath ?? process.cwd());
-  const force = options.force ?? false;
-  const reanalyze = options.reanalyze ?? false;
-  const maxFiles = options.maxFiles ?? DEFAULT_MAX_FILES;
-  const adr = options.adr ?? false;
-  const { onProgress } = options;
-
-  // ========================================================================
-  // STEP 1: INITIALIZATION
-  // ========================================================================
-  progress(onProgress, 'Initialization', 'start');
-
-  const detection = await detectProjectType(rootPath);
-  const projectType = getProjectTypeName(detection.projectType);
-
-  let initResult: InitResult;
-  const configExists = await openloreConfigExists(rootPath);
-  let openloreConfig = configExists ? await readOpenLoreConfig(rootPath) : null;
-
-  if (configExists && !force) {
-    initResult = {
-      configPath: OPENLORE_CONFIG_REL_PATH,
-      openspecPath: openloreConfig?.openspecPath ?? DEFAULT_OPENSPEC_PATH,
-      projectType,
-      created: false,
-    };
-    progress(onProgress, 'Initialization', 'skip', 'Config exists');
-  } else {
-    const openspecPath = DEFAULT_OPENSPEC_PATH;
-    openloreConfig = getDefaultConfig(detection.projectType, openspecPath);
-    await writeOpenLoreConfig(rootPath, openloreConfig);
-
-    const fullOpenspecPath = join(rootPath, openspecPath);
-    if (!(await openspecDirExists(fullOpenspecPath))) {
-      await createOpenSpecStructure(fullOpenspecPath);
-    }
-
-    // Ensure .openlore/ analysis artifacts (multi-MB lance binaries) are ignored,
-    // creating .gitignore when absent so a fresh `git init` repo doesn't leak them
-    // into git status and diff-based tools.
-    await ensureGitignored(rootPath, `${OPENLORE_DIR}/`, 'openlore analysis artifacts');
-
-    initResult = {
-      configPath: OPENLORE_CONFIG_REL_PATH,
-      openspecPath: openspecPath,
-      projectType,
-      created: true,
-    };
-    progress(onProgress, 'Initialization', 'complete');
-  }
-
-  // Ensure we have config
-  if (!openloreConfig) {
-    openloreConfig = await readOpenLoreConfig(rootPath);
-    if (!openloreConfig) {
-      throw new Error('Failed to load configuration');
-    }
-  }
-
-  // ========================================================================
-  // STEP 2: ANALYSIS
-  // ========================================================================
-  progress(onProgress, 'Analysis', 'start');
-
-  const analysisPath = join(rootPath, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
-  let analyzeResult!: AnalyzeResult;
-
-  // Check for existing fresh analysis (content-hash or TTL)
-  const repoStructurePath = join(analysisPath, ARTIFACT_REPO_STRUCTURE);
-  let useExisting = false;
-
-  if (!reanalyze && !force && await fileExists(repoStructurePath) && await isCacheFresh(rootPath)) {
-    useExisting = true;
-  }
-
-  if (useExisting) {
-    const snapshot = await readGenerationSnapshot(
-      analysisPath,
-      [...REQUIRED_ANALYSIS_ARTIFACTS],
-      async (): Promise<AnalyzeResult | null> => {
-        const repoStructure = await readJsonFile<RepoStructure>(repoStructurePath, ARTIFACT_REPO_STRUCTURE);
-        if (!repoStructure) return null;
-        const depGraph = await readJsonFile<DependencyGraphResult>(
-          join(analysisPath, ARTIFACT_DEPENDENCY_GRAPH),
-          ARTIFACT_DEPENDENCY_GRAPH,
-        ) ?? undefined;
-        return {
-          repoMap: repoStructureToRepoMap(repoStructure),
-          depGraph: depGraph ?? {
-            nodes: [], edges: [], clusters: [], structuralClusters: [], cycles: [],
-            rankings: { byImportance: [], byConnectivity: [], clusterCenters: [], leafNodes: [], bridgeNodes: [], orphanNodes: [] },
-            statistics: { nodeCount: 0, edgeCount: 0, importEdgeCount: 0, httpEdgeCount: 0, avgDegree: 0, density: 0, clusterCount: 0, structuralClusterCount: 0, cycleCount: 0 },
-          },
-          artifacts: await loadCachedArtifacts(analysisPath, repoStructure),
-          duration: 0,
-        };
-      },
-    );
-    if (snapshot.state === 'ok' && snapshot.value) {
-      analyzeResult = snapshot.value;
-      progress(onProgress, 'Analysis', 'skip', 'Recent analysis exists');
-    } else {
-      // A TTL-fresh but uncommitted/mixed artifact set is not a cache hit.
-      useExisting = false;
-    }
-  }
-
-  if (!useExisting) {
-    await mkdir(analysisPath, { recursive: true });
-
-    const ownership = await acquireAnalysisOwnership(rootPath, analysisPath, { stage: 'starting' });
-    if (ownership.state === 'in-progress') {
-      throw new AnalysisInProgressError(ownership.owner, ownership.elapsedMs, ownership.heartbeatAgeMs);
-    }
-
-    try {
-      await ownership.update('scanning', { percent: 0 }).catch(() => {});
-      const mapper = new RepositoryMapper(rootPath, { maxFiles });
-      const sourceStateBefore = await captureSourceState(rootPath);
-      const repoMap = await mapper.map();
-
-      await ownership.update('dependency-graph', { percent: 35 }).catch(() => {});
-      const graphBuilder = new DependencyGraphBuilder({ rootDir: rootPath });
-      const depGraph = await graphBuilder.build(repoMap.allFiles);
-
-      await ownership.update('artifacts', { percent: 70 }).catch(() => {});
-      const artifactGenerator = new AnalysisArtifactGenerator({
-      rootDir: rootPath,
-      outputDir: analysisPath,
-      maxDeepAnalysisFiles: Math.min(20, Math.ceil(repoMap.highValueFiles.length * 0.3)),
-      maxValidationFiles: 5,
-      // NOT keyed off `force` (change: optimize-hash-keyed-analyze) — here `force` means
-      // "reinitialize / do not skip", never "re-parse every file". The reused extraction
-      // lane is byte-identical, so there is nothing for a forced run to distrust; a caller
-      // that genuinely wants a full re-parse asks for it.
-      reExtract: options.reExtract ?? false,
-    });
-      let artifacts: AnalysisArtifacts;
-      await withAnalysisLock(analysisPath, async () => {
-      artifacts = await artifactGenerator.generateAndSave(repoMap, depGraph, undefined, { acquireLock: false });
-      const fingerprintHash = await computeProjectFingerprint(rootPath);
-      const sourceState = reconcileSourceStates(sourceStateBefore, await captureSourceState(rootPath));
-      await atomicWriteFile(join(analysisPath, ARTIFACT_DEPENDENCY_GRAPH), JSON.stringify(depGraph, null, 2));
-      await atomicWriteFile(join(analysisPath, ARTIFACT_FINGERPRINT), JSON.stringify({
-        hash: fingerprintHash,
-        commit: sourceState.commit,
-        sourceTreeState: sourceState.treeState,
-        computedAt: new Date().toISOString(),
-        fileCount: repoMap.allFiles.length,
-      }));
-      if (!await publishGeneration(analysisPath, [...REQUIRED_ANALYSIS_ARTIFACTS])) {
-        throw new Error('Analysis produced an incomplete required artifact set; generation was not published.');
-      }
-      });
-
-      analyzeResult = {
-        repoMap,
-        depGraph,
-        artifacts: artifacts!,
-        duration: Date.now() - startTime,
-      };
-      progress(onProgress, 'Analysis', 'complete', `${repoMap.summary.analyzedFiles} files`);
-    } finally {
-      await ownership.release();
-    }
-  }
-
-  // ========================================================================
-  // STEP 3: GENERATION
-  // ========================================================================
+  const rootPath = resolve(options.rootPath ?? process.cwd());
 
   if (options.dryRun) {
-    progress(onProgress, 'Generation', 'skip', 'Dry run');
-    return {
-      init: initResult,
-      analysis: analyzeResult,
-      generation: {
-        report: {
-          timestamp: new Date().toISOString(),
-          openspecVersion: openloreConfig?.version ?? '1.0.0',
-          openloreVersion: '1.0.0',
-          filesWritten: [],
-          filesSkipped: [],
-          filesBackedUp: [],
-          filesMerged: [],
-          domainsRemoved: [],
-          configUpdated: false,
-          validationErrors: [],
-          warnings: [],
-          nextSteps: ['Run without --dry-run to generate specs'],
-        },
-        pipelineResult: {} as RunResult['generation']['pipelineResult'],
-        duration: 0,
+    const generationStartTime = Date.now();
+    const config = await readOpenLoreConfig(rootPath, options.configPath);
+    const generation = {
+      dryRun: true as const,
+      report: {
+        timestamp: new Date().toISOString(),
+        openspecVersion: await detectOpenSpecPackageVersion(rootPath),
+        openloreVersion: OPENLORE_PACKAGE_VERSION,
+        configSchemaVersion: config?.version ?? 'unknown',
+        filesWritten: [],
+        filesSkipped: [],
+        filesBackedUp: [],
+        filesMerged: [],
+        domainsRemoved: [],
+        configUpdated: false,
+        validationErrors: [],
+        warnings: [],
+        nextSteps: ['Run without dryRun to initialize, analyze, and generate specs'],
       },
+      duration: Date.now() - generationStartTime,
+    };
+    return {
+      dryRun: true,
+      plan: { init: true, analyze: true, generate: true },
+      generation,
       duration: Date.now() - startTime,
     };
   }
 
-  progress(onProgress, 'Generation', 'start');
-
-  // Check for API key — support all four providers
-  const anthropicKey = process.env.ANTHROPIC_API_KEY;
-  const openaiKey = process.env.OPENAI_API_KEY;
-  const openaiCompatKey = process.env.OPENAI_COMPAT_API_KEY;
-  const geminiKey = process.env.GEMINI_API_KEY;
-  const noKeyProviders = ['claude-code', 'codex-cli', 'mistral-vibe', 'copilot', 'gemini-cli', 'antigravity-cli', 'cursor-agent'];
-  const configuredProvider = options.provider ?? openloreConfig.generation?.provider;
-  if (!noKeyProviders.includes(configuredProvider ?? '') && !anthropicKey && !openaiKey && !openaiCompatKey && !geminiKey) {
-    throw new Error('No LLM API key found. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, OPENAI_COMPAT_API_KEY, or use provider "copilot".');
-  }
-
-  // Create LLM service
-  const envDetectedProvider = anthropicKey ? 'anthropic'
-    : geminiKey ? 'gemini'
-    : openaiCompatKey ? 'openai-compat'
-    : 'openai';
-  const provider = configuredProvider ?? envDetectedProvider;
-  const defaultModels: Record<string, string> = {
-    anthropic: DEFAULT_ANTHROPIC_MODEL,
-    gemini: DEFAULT_GEMINI_MODEL,
-    'openai-compat': DEFAULT_OPENAI_COMPAT_MODEL,
-    copilot: DEFAULT_COPILOT_MODEL,
-    openai: DEFAULT_OPENAI_MODEL,
-    'claude-code': 'claude-code',
-    'codex-cli': 'codex-cli',
-    'mistral-vibe': 'mistral-vibe',
-    'gemini-cli': 'gemini-cli',
-    'antigravity-cli': 'antigravity-cli',
-    'cursor-agent': 'cursor-agent',
-  };
-  const model = options.model ?? defaultModels[provider] ?? DEFAULT_ANTHROPIC_MODEL;
-  let llm: LLMService;
-  try {
-    llm = createLLMService({
-      provider,
-      model,
-      apiBase: resolveTrustedApiBase(options.apiBase, openloreConfig.llm?.apiBase),
-      sslVerify: resolveTrustedSslVerify(
-        options.sslVerify === undefined ? undefined : !options.sslVerify,
-        openloreConfig.llm?.sslVerify,
-      ),
-      openaiCompatBaseUrl: options.openaiCompatBaseUrl,
-      timeout: options.timeout ?? openloreConfig.generation?.timeout,
-      enableLogging: isLlmLoggingEnabled(),
-      logDir: join(rootPath, OPENLORE_DIR, OPENLORE_LOGS_SUBDIR),
-      logRoot: rootPath,
-    });
-  } catch (error) {
-    throw new Error(`Failed to create LLM service: ${(error as Error).message}`, { cause: error });
-  }
-
-  // Load analysis data for pipeline
-  const llmContext = await readJsonFile<LLMContext>(
-    join(analysisPath, ARTIFACT_LLM_CONTEXT),
-    ARTIFACT_LLM_CONTEXT,
-  ) ?? {
-    phase1_survey: { purpose: 'Initial survey', files: [], estimatedTokens: 0 },
-    phase2_deep: { purpose: 'Deep analysis', files: [], totalTokens: 0 },
-    phase3_validation: { purpose: 'Validation', files: [], totalTokens: 0 },
-  };
-
-  const repoStructure = await readJsonFile<RepoStructure>(repoStructurePath, ARTIFACT_REPO_STRUCTURE);
-  if (!repoStructure) {
-    throw new Error(`Failed to load ${ARTIFACT_REPO_STRUCTURE} — run openlore analyze to regenerate`);
-  }
-
-  // Run pipeline
-  const pipeline = new SpecGenerationPipeline(llm, {
-    outputDir: join(rootPath, OPENLORE_DIR, OPENLORE_GENERATION_SUBDIR),
-    saveIntermediate: true,
-    generateADRs: adr,
-  });
-
-  let pipelineResult;
-  try {
-    pipelineResult = await pipeline.run(repoStructure, llmContext, analyzeResult.depGraph);
-  } catch (error) {
-    await llm.saveLogs().catch(() => {});
-    throw new Error(`Pipeline failed: ${(error as Error).message}`, { cause: error });
-  }
-
-  // Format and write specs
-  const formatGenerator = new OpenSpecFormatGenerator({
-    version: openloreConfig.version ?? '1.0.0',
-    includeConfidence: true,
-    includeTechnicalNotes: true,
-  });
-
-  const generatedSpecs = formatGenerator.generateSpecs(pipelineResult);
-
-  if (adr && pipelineResult.adrs && pipelineResult.adrs.length > 0) {
-    const adrGenerator = new ADRGenerator({
-      version: openloreConfig.version ?? '1.0.0',
-      includeMermaid: true,
-    });
-    const adrSpecs = adrGenerator.generateADRs(pipelineResult);
-    generatedSpecs.push(...adrSpecs);
-  }
-
-  const writer = new OpenSpecWriter({
+  const shared = {
     rootPath,
-    writeMode: 'replace',
-    version: openloreConfig.version ?? '1.0.0',
-    createBackups: true,
-    updateConfig: true,
-    validateBeforeWrite: true,
-  });
-
-  const report = await writer.writeSpecs(generatedSpecs, pipelineResult.survey);
-
-  // Save LLM logs
-  await llm.saveLogs().catch(() => {});
-
-  progress(onProgress, 'Generation', 'complete', `${report.filesWritten.length} specs written`);
-
-  // Save run metadata
-  const duration = Date.now() - startTime;
-  const runsDir = join(rootPath, OPENLORE_DIR, OPENLORE_RUNS_SUBDIR);
-  await mkdir(runsDir, { recursive: true });
-  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-  await writeFile(
-    join(runsDir, `${timestamp}.json`),
-    JSON.stringify({
-      version: '1.0.0',
-      timestamp: new Date().toISOString(),
-      duration,
-      steps: {
-        init: { status: initResult.created ? 'completed' : 'skipped' },
-        analyze: { status: useExisting ? 'skipped' : 'completed' },
-        generate: { status: 'completed', specsGenerated: report.filesWritten.length },
-      },
-      result: 'success',
-    }, null, 2)
-  );
-
-  return {
-    init: initResult,
-    analysis: analyzeResult,
-    generation: {
-      report,
-      pipelineResult,
-      duration: Date.now() - startTime,
-    },
-    duration,
+    configPath: options.configPath,
+    onProgress: options.onProgress,
+    quiet: options.quiet,
+    signal: options.signal,
   };
+
+  progress(options.onProgress, 'Initialization', 'start');
+  const init = await openloreInit({ ...shared, force: options.force });
+  progress(options.onProgress, 'Initialization', 'complete');
+
+  progress(options.onProgress, 'Analysis', 'start');
+  let analysis = await openloreAnalyze({
+    ...shared,
+    maxFiles: options.maxFiles,
+    force: options.reanalyze || options.force,
+    reExtract: options.reExtract,
+  });
+  if (!analysis.depGraph) {
+    progress(options.onProgress, 'Healing dependency graph', 'start');
+    analysis = await openloreAnalyze({
+      ...shared,
+      maxFiles: options.maxFiles,
+      force: true,
+      reExtract: options.reExtract,
+    });
+    progress(options.onProgress, 'Healing dependency graph', 'complete');
+  }
+  progress(options.onProgress, 'Analysis', 'complete');
+
+  if (options.confirmGeneration) {
+    const config = await readOpenLoreConfig(rootPath, options.configPath);
+    const resolved = resolveGenerationProvider(config ?? undefined, {
+      provider: options.provider,
+      model: options.model,
+      openaiCompatBaseUrl: options.openaiCompatBaseUrl,
+    });
+    if (!resolved) throw errors.apiNoApiKey();
+    const estimate = estimateCost(analysis.artifacts.llmContext, resolved.provider, resolved.model);
+    const confirmed = await options.confirmGeneration({
+      ...estimate,
+      provider: resolved.provider,
+      model: resolved.model,
+    });
+    if (!confirmed) throw errors.pipelineFailed('Generation cancelled by user');
+  }
+
+  progress(options.onProgress, 'Generation', 'start');
+  const generation = await openloreGenerate({
+    ...shared,
+    provider: options.provider,
+    model: options.model,
+    apiBase: options.apiBase,
+    sslVerify: options.sslVerify,
+    openaiCompatBaseUrl: options.openaiCompatBaseUrl,
+    timeout: options.timeout,
+    adr: options.adr,
+    dryRun: false,
+    force: options.force,
+  });
+  progress(options.onProgress, 'Generation', 'complete');
+
+  if (generation.dryRun) {
+    throw errors.pipelineFailed('Generation unexpectedly returned a dry-run result');
+  }
+
+  return { dryRun: false, init, analysis, generation, duration: Date.now() - startTime };
+}
+
+export async function openloreRun(options: RunApiOptions = {}): Promise<RunResult> {
+  try {
+    return await withLoggerOptions(
+      { quiet: options.quiet ?? true },
+      () => runCore(options),
+    );
+  } catch (error) {
+    if (isOpenLoreError(error)) throw error;
+    throw errors.pipelineFailed(`Run failed: ${(error as Error).message}`, error);
+  }
 }

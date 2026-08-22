@@ -23,6 +23,7 @@ import {
 } from '../../constants.js';
 import { fileExists } from '../../utils/command-helpers.js';
 import { safeJoin } from '../../utils/path-confinement.js';
+import { detectOpenSpecPackageVersion, OPENLORE_PACKAGE_VERSION } from '../runtime/package-versions.js';
 import {
   OpenSpecConfigManager,
   buildDetectedContext,
@@ -88,6 +89,7 @@ export interface GenerationReport {
   timestamp: string;
   openspecVersion: string;
   openloreVersion: string;
+  configSchemaVersion: string;
   filesWritten: string[];
   filesSkipped: string[];
   filesBackedUp: string[];
@@ -185,7 +187,8 @@ export class OpenSpecWriter {
     const report: GenerationReport = {
       timestamp: new Date().toISOString(),
       openspecVersion: await this.detectOpenSpecVersion(),
-      openloreVersion: this.options.version,
+      openloreVersion: OPENLORE_PACKAGE_VERSION,
+      configSchemaVersion: this.options.version,
       filesWritten: [],
       filesSkipped: [],
       filesBackedUp: [],
@@ -520,15 +523,7 @@ export class OpenSpecWriter {
    * Detect OpenSpec version if installed
    */
   private async detectOpenSpecVersion(): Promise<string> {
-    try {
-      // Try to read from package.json or openspec cli
-      const packageJsonPath = join(this.rootPath, 'node_modules', 'openspec', 'package.json');
-      const content = await readFile(packageJsonPath, 'utf-8');
-      const pkg = JSON.parse(content);
-      return pkg.version || 'unknown';
-    } catch {
-      return 'unknown';
-    }
+    return detectOpenSpecPackageVersion(this.rootPath);
   }
 
   /**

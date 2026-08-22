@@ -15,6 +15,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { withLoggerOptions } from '../../utils/logger.js';
 import {
   extractFilesForPass1,
   plannedPoolSize,
@@ -667,7 +668,7 @@ describe('extraction pool — the disclosure reaches a human', () => {
   it('the analyze CLI renders it', () => {
     // If this fails, a lane defect — a worker returning no symbols for a file that has them
     // — is computed and then silently discarded.
-    expect(src('cli/commands/analyze.ts')).toContain('extractionLaneNote');
+    expect(src('core/analyzer/analysis-core.ts')).toContain('extractionLaneNote');
     expect(src('core/analyzer/artifact-generator.ts')).toContain('describeExtractionLane');
   });
 });
@@ -818,6 +819,21 @@ describe('extraction pool — a slow file is attributable', () => {
       expect(stdoutWrites.join(''), 'nothing about this went to stdout').not.toContain('still extracting');
     } finally {
       errSpy.mockRestore(); outSpy.mockRestore(); logSpy.mockRestore();
+    }
+  }, 30_000);
+
+  it('suppresses the live slow-file warning in a request-local quiet context', async () => {
+    const errSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      await withLoggerOptions({ quiet: true }, () => extractFilesForPass1(
+        [{ path: 'src/slow.ts', language: 'TypeScript', content: 'export function z(): void {}\n' }],
+        dispatchFileExtract,
+        isEmpty,
+        { workerFactory: stubWorkerFactory({ delayFor: () => SLOW_FILE_DISCLOSURE_MS + 100 }), poolSize: 1 },
+      ));
+      expect(errSpy.mock.calls.some(call => String(call[0]).includes('still extracting'))).toBe(false);
+    } finally {
+      errSpy.mockRestore();
     }
   }, 30_000);
 

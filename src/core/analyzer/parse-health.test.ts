@@ -318,14 +318,14 @@ describe('analyze renders the skip and exclusion breakdowns', () => {
   const src = (rel: string): string => readFileSync(join(__dirname, '..', '..', rel), 'utf-8');
 
   it('analyze renders the exclusion line, not merely imports the helper', () => {
-    const analyze = src('cli/commands/analyze.ts');
+    const analyze = src('core/analyzer/analysis-core.ts');
     expect(analyze).toMatch(/const excludedNote = describeExclusions\(/);
-    expect(analyze).toMatch(/logger\.warning\(\s*`\$\{excludedNote\}/);
+    expect(analyze).toMatch(/status: 'warning', detail: excludedNote/);
   });
 
   it('analyze renders the per-reason skip breakdown, not a bare count', () => {
-    const analyze = src('cli/commands/analyze.ts');
+    const analyze = src('core/analyzer/analysis-core.ts');
     expect(analyze).toContain('skippedReasons');
-    expect(analyze).toMatch(/logger\.info\(\s*'Files skipped',\s*\n?\s*skipReasons\.length/);
+    expect(analyze).toMatch(/Files skipped:.*skipReasons\.length/);
   });
 });

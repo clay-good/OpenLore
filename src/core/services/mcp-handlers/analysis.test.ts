@@ -1540,11 +1540,11 @@ describe('handleAuditSpecCoverage', () => {
     vi.mocked(utils.validateDirectory).mockResolvedValue(tmpDir);
   });
 
-  it('returns error when audit fails (no analysis)', async () => {
+  it('returns an unavailable coverage disclosure when no analysis exists', async () => {
     const { handleAuditSpecCoverage } = await import('./analysis.js');
-    const result = await handleAuditSpecCoverage(tmpDir) as { error: string };
-    // No analysis cache → openloreAudit throws
-    expect(result.error).toMatch(/Audit failed/);
+    const result = await handleAuditSpecCoverage(tmpDir) as { mappingCoverage: { state: string; remediation?: string } };
+    expect(result.mappingCoverage.state).toBe('unavailable');
+    expect(result.mappingCoverage.remediation).toMatch(/analy/i);
   });
 
   it('reports unavailable coverage with machine-readable remediation when no analysis can resolve anchors', async () => {

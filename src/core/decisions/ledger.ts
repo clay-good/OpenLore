@@ -24,6 +24,7 @@ import { join } from 'node:path';
 import { DECISIONS_LEDGER_FILE, OPENLORE_DIR, OPENLORE_DECISIONS_SUBDIR } from '../../constants.js';
 import { fileExists } from '../../utils/command-helpers.js';
 import type { DecisionStatus, DecisionStore } from '../../types/index.js';
+import { logger } from '../../utils/logger.js';
 
 // Path is built locally (not via store.ts) to keep this module dependency-free
 // of the store, which imports the ledger — no import cycle.
@@ -105,7 +106,7 @@ export async function appendLedgerEntries(rootPath: string, entries: LedgerEntry
     const lines = entries.map((e) => JSON.stringify(e)).join('\n') + '\n';
     await appendFile(path, lines, 'utf-8');
   } catch (err) {
-    console.error(`openlore: decision ledger append failed (trail line lost): ${(err as Error).message}`);
+    logger.error(`Decision ledger append failed (trail line lost): ${(err as Error).message}`);
   }
 }
 

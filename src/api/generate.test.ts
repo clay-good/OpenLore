@@ -4,6 +4,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { openloreGenerate } from './generate.js';
+import { resolve } from 'node:path';
 
 // ============================================================================
 // MOCKS
@@ -17,6 +18,7 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     readFile:  vi.fn(),
     writeFile: vi.fn().mockResolvedValue(undefined),
     mkdir:     vi.fn().mockResolvedValue(undefined),
+    rm:        vi.fn().mockResolvedValue(undefined),
   };
 });
 
@@ -34,6 +36,14 @@ vi.mock('../core/runtime/analysis-generation.js', () => ({
   readGenerationSnapshot: vi.fn(async (_dir: string, _required: string[], read: () => Promise<unknown>) => ({
     state: 'ok', value: await read(), generationId: 'legacy-test', compatibility: 'legacy', coherence: 'full',
   })),
+}));
+
+vi.mock('../core/runtime/generation-lock.js', () => ({
+  withGenerationLock: vi.fn(async (_root: string, callback: () => Promise<unknown>) => callback()),
+}));
+
+vi.mock('../core/runtime/generation-semantic-search.js', () => ({
+  resolveGenerationSemanticSearch: vi.fn(),
 }));
 
 vi.mock('../core/generator/spec-pipeline.js', () => ({
@@ -76,13 +86,18 @@ vi.mock('../core/generator/spec-link-service.js', () => ({
   }),
 }));
 
-import { readFile, access } from 'node:fs/promises';
+import { readFile, access, rm } from 'node:fs/promises';
 import { readOpenLoreConfig } from '../core/services/config-manager.js';
 import { createLLMService } from '../core/services/llm-service.js';
 import { SpecGenerationPipeline } from '../core/generator/spec-pipeline.js';
 import { OpenSpecFormatGenerator } from '../core/generator/openspec-format-generator.js';
 import { OpenSpecWriter } from '../core/generator/openspec-writer.js';
 import { ADRGenerator } from '../core/generator/adr-generator.js';
+import { OpenLoreError } from '../utils/errors.js';
+import { logger } from '../utils/logger.js';
+import { readGenerationSnapshot } from '../core/runtime/analysis-generation.js';
+import { withGenerationLock } from '../core/runtime/generation-lock.js';
+import { resolveGenerationSemanticSearch } from '../core/runtime/generation-semantic-search.js';
 
 const mockReadFile = vi.mocked(readFile);
 const mockAccess = vi.mocked(access);
@@ -150,6 +165,7 @@ function setupMocks() {
     return Promise.resolve('{}');
   });
   mockCreateLLMService.mockReturnValue(MOCK_LLM_SERVICE as unknown as ReturnType<typeof createLLMService>);
+  vi.mocked(resolveGenerationSemanticSearch).mockResolvedValue(undefined);
 
   vi.mocked(SpecGenerationPipeline).mockImplementation(function(this: unknown) {
     Object.assign(this as object, { run: vi.fn().mockResolvedValue(MOCK_PIPELINE_RESULT) });
@@ -187,16 +203,43 @@ describe('openloreGenerate', () => {
   });
 
   describe('config validation', () => {
+    it('normalizes a relative root path before any repository access', async () => {
+      await openloreGenerate({ rootPath: 'relative/project', dryRun: true });
+
+      expect(mockReadOpenLoreConfig).toHaveBeenCalledWith(resolve('relative/project'), undefined);
+    });
+
+    it('honors an absolute analysis path without rebasing it under root', async () => {
+      await openloreGenerate({ rootPath: ROOT, analysisPath: '/external/analysis', dryRun: true });
+
+      expect(readGenerationSnapshot).toHaveBeenCalledWith(
+        '/external/analysis',
+        expect.anything(),
+        expect.anything(),
+        expect.anything(),
+      );
+    });
+
+    it('honors an explicit config path', async () => {
+      await openloreGenerate({ rootPath: ROOT, configPath: 'config/custom.json', dryRun: true });
+
+      expect(mockReadOpenLoreConfig).toHaveBeenCalledWith(ROOT, 'config/custom.json');
+    });
+
     it('throws if no openlore config', async () => {
       mockReadOpenLoreConfig.mockResolvedValue(null as unknown as ReturnType<typeof readOpenLoreConfig> extends Promise<infer T> ? T : never);
-      await expect(openloreGenerate({ rootPath: ROOT })).rejects.toThrow();
+      await expect(openloreGenerate({ rootPath: ROOT })).rejects.toMatchObject({
+        code: 'no-config',
+      });
     });
 
     it('throws if no analysis found', async () => {
       // Simulate repo-structure.json not existing by rejecting readFile with ENOENT
       const enoent = Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
       mockReadFile.mockRejectedValue(enoent);
-      await expect(openloreGenerate({ rootPath: ROOT })).rejects.toThrow();
+      await expect(openloreGenerate({ rootPath: ROOT })).rejects.toMatchObject({
+        code: 'no-analysis',
+      });
     });
 
     it('throws if no LLM API key', async () => {
@@ -204,16 +247,40 @@ describe('openloreGenerate', () => {
       delete process.env.OPENAI_API_KEY;
       delete process.env.GEMINI_API_KEY;
       delete process.env.OPENAI_COMPAT_API_KEY;
-      await expect(openloreGenerate({ rootPath: ROOT })).rejects.toThrow(/API key/i);
+      await expect(openloreGenerate({ rootPath: ROOT })).rejects.toMatchObject({
+        code: 'no-api-key',
+      });
     });
 
-    it('the no-key error points users to the claude-code provider (no API key needed)', async () => {
+    it('returns a typed error when no key or keyless provider is configured', async () => {
       delete process.env.ANTHROPIC_API_KEY;
       delete process.env.OPENAI_API_KEY;
       delete process.env.GEMINI_API_KEY;
       delete process.env.OPENAI_COMPAT_API_KEY;
-      // A user with the Claude Code CLI but no API key must learn the path that works for them.
-      await expect(openloreGenerate({ rootPath: ROOT })).rejects.toThrow(/claude-code/);
+      await expect(openloreGenerate({ rootPath: ROOT })).rejects.toBeInstanceOf(OpenLoreError);
+    });
+
+    it.each([
+      ['anthropic', 'OPENAI_API_KEY'],
+      ['openai', 'ANTHROPIC_API_KEY'],
+      ['openai-compat', 'ANTHROPIC_API_KEY'],
+      ['gemini', 'ANTHROPIC_API_KEY'],
+    ] as const)('returns no-api-key when %s lacks its own credential', async (provider, wrongKey) => {
+      delete process.env.ANTHROPIC_API_KEY;
+      delete process.env.OPENAI_API_KEY;
+      delete process.env.GEMINI_API_KEY;
+      delete process.env.OPENAI_COMPAT_API_KEY;
+      process.env[wrongKey] = 'wrong-provider-key';
+      mockReadOpenLoreConfig.mockResolvedValue({
+        ...MOCK_CONFIG,
+        generation: { ...MOCK_CONFIG.generation, provider },
+      } as ReturnType<typeof readOpenLoreConfig> extends Promise<infer T> ? T : never);
+
+      await expect(openloreGenerate({ rootPath: ROOT })).rejects.toMatchObject({
+        code: 'no-api-key',
+      });
+      expect(mockCreateLLMService).not.toHaveBeenCalled();
+      expect(withGenerationLock).not.toHaveBeenCalled();
     });
 
     it('an embedding TLS opt-out never disables TLS for the host process', async () => {
@@ -235,24 +302,112 @@ describe('openloreGenerate', () => {
       delete process.env.OPENAI_COMPAT_API_KEY;
       const result = await openloreGenerate({ rootPath: ROOT, dryRun: true });
 
+      expect(result.dryRun).toBe(true);
       expect(result.report.filesWritten).toHaveLength(0);
+      expect(result.report.openloreVersion).toBe('2.2.0');
+      expect(result.report.openspecVersion).toBe('1.9.0');
+      expect(result.report.configSchemaVersion).toBe(MOCK_CONFIG.version);
+      expect('pipelineResult' in result).toBe(false);
       expect(mockCreateLLMService).not.toHaveBeenCalled();
       expect(SpecGenerationPipeline).not.toHaveBeenCalled();
+      expect(withGenerationLock).not.toHaveBeenCalled();
     });
   });
 
   describe('happy path', () => {
+    it('suppresses logger output by default for embedders', async () => {
+      const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => {});
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const consoleInfo = vi.spyOn(console, 'info').mockImplementation(() => {});
+      const stdoutWrite = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+      const stderrWrite = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      vi.mocked(OpenSpecWriter).mockImplementation(function(this: unknown) {
+        Object.assign(this as object, {
+          writeSpecs: vi.fn().mockImplementation(async () => {
+            logger.success('must stay out of host stdout');
+            logger.error('must stay out of host stderr');
+            return MOCK_WRITE_REPORT;
+          }),
+        });
+      });
+
+      await openloreGenerate({ rootPath: ROOT });
+
+      expect(consoleLog).not.toHaveBeenCalled();
+      expect(consoleError).not.toHaveBeenCalled();
+      expect(consoleWarn).not.toHaveBeenCalled();
+      expect(consoleInfo).not.toHaveBeenCalled();
+      expect(stdoutWrite).not.toHaveBeenCalled();
+      expect(stderrWrite).not.toHaveBeenCalled();
+      consoleLog.mockRestore();
+      consoleError.mockRestore();
+      consoleWarn.mockRestore();
+      consoleInfo.mockRestore();
+      stdoutWrite.mockRestore();
+      stderrWrite.mockRestore();
+    });
+
+    it('uses a keyless provider configured in the repository', async () => {
+      delete process.env.ANTHROPIC_API_KEY;
+      mockReadOpenLoreConfig.mockResolvedValue({
+        ...MOCK_CONFIG,
+        generation: { ...MOCK_CONFIG.generation, provider: 'codex-cli', model: 'gpt-5-codex' },
+      } as ReturnType<typeof readOpenLoreConfig> extends Promise<infer T> ? T : never);
+
+      await openloreGenerate({ rootPath: ROOT });
+
+      expect(mockCreateLLMService).toHaveBeenCalledWith(expect.objectContaining({
+        provider: 'codex-cli',
+        model: 'gpt-5-codex',
+      }));
+    });
+
     it('runs pipeline and writes specs', async () => {
       const result = await openloreGenerate({ rootPath: ROOT });
 
-      expect(SpecGenerationPipeline).toHaveBeenCalled();
+      expect(SpecGenerationPipeline).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ rootPath: ROOT }),
+      );
       expect(OpenSpecWriter).toHaveBeenCalled();
       expect(result.report.filesWritten).toContain('openspec/auth/spec.md');
+      expect(result.report.openloreVersion).toBe('2.2.0');
+      expect(result.report.openspecVersion).toBe('1.9.0');
+      expect(result.report.configSchemaVersion).toBe(MOCK_CONFIG.version);
+      expect(withGenerationLock).toHaveBeenCalledWith(ROOT, expect.any(Function), { signal: undefined });
+    });
+
+    it('passes the shared semantic retrieval seam into the pipeline', async () => {
+      const semanticSearch = vi.fn();
+      vi.mocked(resolveGenerationSemanticSearch).mockResolvedValue(semanticSearch);
+
+      await openloreGenerate({ rootPath: ROOT, analysisPath: '/custom/analysis' });
+
+      expect(resolveGenerationSemanticSearch).toHaveBeenCalledWith('/custom/analysis', MOCK_CONFIG);
+      expect(SpecGenerationPipeline).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ semanticSearch }),
+      );
+    });
+
+    it('clears the generation cache inside ownership before a forced pipeline run', async () => {
+      await openloreGenerate({ rootPath: ROOT, force: true });
+
+      expect(rm).toHaveBeenCalledWith('/test/project/.openlore/generation', {
+        recursive: true,
+        force: true,
+      });
+      expect(vi.mocked(rm).mock.invocationCallOrder[0]).toBeLessThan(
+        vi.mocked(SpecGenerationPipeline).mock.invocationCallOrder[0],
+      );
     });
 
     it('returns pipeline result and duration', async () => {
       const result = await openloreGenerate({ rootPath: ROOT });
 
+      expect(result.dryRun).toBe(false);
+      if (result.dryRun) throw new Error('expected completed generation');
       expect(result.pipelineResult).toBeDefined();
       expect(result.duration).toBeGreaterThanOrEqual(0);
     });
@@ -355,7 +510,10 @@ describe('openloreGenerate', () => {
         Object.assign(this as object, { run: vi.fn().mockRejectedValue(new Error('LLM timeout')) });
       });
 
-      await expect(openloreGenerate({ rootPath: ROOT })).rejects.toThrow(/LLM timeout|Pipeline/i);
+      await expect(openloreGenerate({ rootPath: ROOT })).rejects.toMatchObject({
+        code: 'pipeline-failed',
+        cause: expect.objectContaining({ message: 'LLM timeout' }),
+      });
     });
   });
 
@@ -465,6 +623,7 @@ describe('openloreGenerate', () => {
 
     it('explicit provider option overrides env auto-detection', async () => {
       process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
+      process.env.GEMINI_API_KEY = 'gemini-test';
 
       await openloreGenerate({ rootPath: ROOT, provider: 'gemini' });
 

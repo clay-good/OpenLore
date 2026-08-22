@@ -3,8 +3,8 @@
  */
 
 import { createHash } from 'node:crypto';
-import { open, readFile, readdir, stat, type FileHandle } from 'node:fs/promises';
-import { extname, join, relative, resolve } from 'node:path';
+import { open, readFile, realpath, stat, type FileHandle } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
 import type { LLMContext } from '../../analyzer/artifact-generator.js';
 import { EdgeStore } from '../edge-store.js';
 import {
@@ -15,8 +15,10 @@ import {
 import { readAttestation, reconcile, type IndexIntegrity } from '../../analyzer/index-attestation.js';
 import { recordGraphDigest } from './traversal.js';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
-import { ANALYSIS_AGE_WARNING_HOURS, ANALYSIS_STALE_THRESHOLD_MS, ARTIFACT_CALL_GRAPH_DB, ARTIFACT_FINGERPRINT, ARTIFACT_INDEX_ATTESTATION, ARTIFACT_LLM_CONTEXT, MAX_QUERY_LENGTH, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR, STALE_REGION_REPAIR_THRESHOLD } from '../../../constants.js';
+import { ANALYSIS_AGE_WARNING_HOURS, ANALYSIS_STALE_THRESHOLD_MS, ARTIFACT_CALL_GRAPH_DB, ARTIFACT_FINGERPRINT, ARTIFACT_INDEX_ATTESTATION, ARTIFACT_LLM_CONTEXT, DEFAULT_MAX_FILES, MAX_QUERY_LENGTH, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR, STALE_REGION_REPAIR_THRESHOLD } from '../../../constants.js';
 import { repairInBackground, type RepairReason } from '../cold-start-bootstrap.js';
+import { isConfinedPath } from '../../../utils/path-confinement.js';
+import { FileWalker } from '../../analyzer/file-walker.js';
 
 /**
  * LLMContext with optional SQLite edge store attached (present when call-graph.db
@@ -596,57 +598,105 @@ export async function waitForGraphRebuild(
 // PROJECT FINGERPRINT — content-hash based cache invalidation
 // ============================================================================
 
-const FINGERPRINT_SKIP_DIRS = new Set([
-  '.git', 'node_modules', 'dist', 'build', '.next', '.openlore',
-  'coverage', '.cache', '__pycache__', '.venv', 'venv', 'target',
-  '.dart_tool', '.pub-cache',
-]);
+const DEFAULT_FINGERPRINT_MAX_FILES = 100_000;
+const DEFAULT_FINGERPRINT_MAX_BYTES = 1024 * 1024 * 1024;
 
-const FINGERPRINT_SOURCE_EXTS = new Set([
-  '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs',
-  '.py', '.go', '.rs', '.rb', '.java', '.kt', '.swift',
-  '.cpp', '.cc', '.cxx', '.c', '.h', '.hpp', '.cs',
-]);
-
-async function walkForFingerprint(
-  dir: string,
-  root: string,
-  out: Array<{ path: string; mtime: number; size: number }>
-): Promise<void> {
-  let entries;
-  try {
-    entries = await readdir(dir, { withFileTypes: true });
-  } catch {
-    return;
-  }
-  for (const entry of entries) {
-    if (entry.isDirectory()) {
-      // Skip the static skip set AND every OpenLore-managed dir (any `.openlore`
-      // prefix: `.openlore` analysis output, `.openlore-live-cache` cloned
-      // fixtures, …). These churn independently of the user's source — including
-      // them makes the content-hash flap, so isCacheFresh would force needless
-      // re-analysis whenever the live-data fixture cache is refreshed.
-      if (!FINGERPRINT_SKIP_DIRS.has(entry.name) && !entry.name.startsWith('.openlore')) {
-        await walkForFingerprint(join(dir, entry.name), root, out);
-      }
-    } else if (entry.isFile() && FINGERPRINT_SOURCE_EXTS.has(extname(entry.name))) {
-      try {
-        const s = await stat(join(dir, entry.name));
-        out.push({ path: relative(root, join(dir, entry.name)), mtime: s.mtimeMs, size: s.size });
-      } catch {
-        // skip unreadable
-      }
-    }
-  }
+export interface FingerprintLimits {
+  maxFiles?: number;
+  maxBytes?: number;
+  configuration?: unknown;
+  includePatterns?: string[];
+  excludePatterns?: string[];
+  protectedExcludePatterns?: string[];
+  maxDepth?: number;
+  maxEntries?: number;
 }
 
-/** Compute a SHA-256 fingerprint of all source file mtimes+sizes under rootDir. */
-export async function computeProjectFingerprint(rootDir: string): Promise<string> {
-  const files: Array<{ path: string; mtime: number; size: number }> = [];
-  await walkForFingerprint(rootDir, rootDir, files);
-  files.sort((a, b) => a.path.localeCompare(b.path));
-  const payload = files.map(f => `${f.path}:${f.mtime}:${f.size}`).join('\n');
-  return createHash('sha256').update(payload).digest('hex');
+/** Compute a SHA-256 fingerprint of source paths and bytes under rootDir. */
+export async function computeProjectFingerprint(rootDir: string, limits: FingerprintLimits = {}): Promise<string> {
+  const canonicalRoot = await realpath(rootDir);
+  const configured = limits.configuration as { includePatterns?: string[]; excludePatterns?: string[]; protectedExcludePatterns?: string[]; maxFiles?: number } | undefined;
+  const maxFiles = limits.maxFiles ?? configured?.maxFiles ?? DEFAULT_FINGERPRINT_MAX_FILES;
+  const walk = await new FileWalker(canonicalRoot, {
+    maxFiles,
+    includePatterns: limits.includePatterns ?? configured?.includePatterns ?? [],
+    excludePatterns: limits.excludePatterns ?? configured?.excludePatterns ?? [],
+    protectedExcludePatterns: limits.protectedExcludePatterns ?? configured?.protectedExcludePatterns ?? [],
+    maxDepth: limits.maxDepth,
+    maxEntries: limits.maxEntries,
+  }).walk();
+  const hash = createHash('sha256');
+  hash.update(`configuration:${fingerprintHashOfConfiguration(limits.configuration)}\n`);
+  hash.update(`corpus:${JSON.stringify(walk.summary.truncated ?? null)}\n`);
+  let bytes = 0;
+  for (const file of [...walk.files].sort((left, right) => left.path.localeCompare(right.path))) {
+    let handle: FileHandle | undefined;
+    try {
+      handle = await open(file.absolutePath, 'r');
+      const opened = await handle.stat();
+      if (!isConfinedPath(canonicalRoot, await realpath(file.absolutePath))) {
+        throw new Error(`Project fingerprint path escaped repository: ${file.path}`);
+      }
+      const contentHash = createHash('sha256');
+      const buffer = Buffer.allocUnsafe(64 * 1024);
+      let position = 0;
+      for (;;) {
+        const { bytesRead } = await handle.read(buffer, 0, buffer.length, position);
+        if (bytesRead === 0) break;
+        bytes += bytesRead;
+        if (bytes > (limits.maxBytes ?? DEFAULT_FINGERPRINT_MAX_BYTES)) {
+          throw new Error(`Project fingerprint byte budget exceeded (${limits.maxBytes ?? DEFAULT_FINGERPRINT_MAX_BYTES})`);
+        }
+        contentHash.update(buffer.subarray(0, bytesRead));
+        position += bytesRead;
+      }
+      const after = await handle.stat();
+      if (position !== opened.size || after.size !== opened.size || after.mtimeMs !== opened.mtimeMs || after.ctimeMs !== opened.ctimeMs) {
+        throw new Error(`Project source changed while fingerprinting: ${file.path}`);
+      }
+      hash.update(`${file.path}:${opened.size}:${contentHash.digest('hex')}\n`);
+    } finally {
+      await handle?.close().catch(() => {});
+    }
+  }
+  return hash.digest('hex');
+}
+
+export function fingerprintHashOfConfiguration(configuration: unknown): string {
+  let cacheConfiguration = configuration ?? null;
+  if (configuration && typeof configuration === 'object' && !Array.isArray(configuration)) {
+    const portable = { ...configuration as Record<string, unknown> };
+    delete portable.protectedExcludePatterns;
+    cacheConfiguration = portable;
+  }
+  return createHash('sha256').update(JSON.stringify(cacheConfiguration)).digest('hex');
+}
+
+/** Content-hash freshness for any analysis output directory. */
+export async function isAnalysisCacheFresh(directory: string, analysisDir: string, configuration?: unknown): Promise<boolean> {
+  let raw: string;
+  try {
+    raw = await readFile(join(analysisDir, ARTIFACT_FINGERPRINT), 'utf-8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return false;
+    try {
+      const s = await stat(join(analysisDir, ARTIFACT_LLM_CONTEXT));
+      return Date.now() - s.mtimeMs < ANALYSIS_STALE_THRESHOLD_MS;
+    } catch {
+      return false;
+    }
+  }
+  try {
+    const stored = JSON.parse(raw) as { hash?: unknown; analysisConfigHash?: unknown };
+    if (typeof stored.hash !== 'string') return false;
+    if (stored.analysisConfigHash === undefined) {
+      return await computeProjectFingerprint(directory) === stored.hash;
+    }
+    if (stored.analysisConfigHash !== fingerprintHashOfConfiguration(configuration)) return false;
+    return await computeProjectFingerprint(directory, { configuration }) === stored.hash;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -654,20 +704,13 @@ export async function computeProjectFingerprint(rootDir: string): Promise<string
  * Uses content-hash fingerprint when available; falls back to TTL check.
  */
 export async function isCacheFresh(directory: string): Promise<boolean> {
-  const fingerprintPath = join(directory, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_FINGERPRINT);
-  try {
-    const stored = JSON.parse(await readFile(fingerprintPath, 'utf-8')) as { hash: string };
-    const current = await computeProjectFingerprint(directory);
-    return current === stored.hash;
-  } catch {
-    // No fingerprint yet — fall back to TTL
-    try {
-      const s = await stat(join(directory, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_LLM_CONTEXT));
-      return Date.now() - s.mtimeMs < ANALYSIS_STALE_THRESHOLD_MS;
-    } catch {
-      return false;
-    }
-  }
+  const config = await import('../config-manager.js').then(module => module.readOpenLoreConfig(directory));
+  const configuration = {
+    includePatterns: [...new Set(config?.analysis?.includePatterns ?? [])],
+    excludePatterns: [...new Set(config?.analysis?.excludePatterns ?? [])],
+    maxFiles: DEFAULT_MAX_FILES,
+  };
+  return isAnalysisCacheFresh(directory, join(directory, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR), configuration);
 }
 
 // ============================================================================

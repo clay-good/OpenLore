@@ -36,12 +36,14 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     // artifact writer (`json-stream.ts`), which writes via a temp file handle + rename rather
     // than `writeFile` — without them analyze aborts at the artifact write and never reaches
     // what these cases actually assert.
-    open: vi.fn().mockResolvedValue({
-      write: vi.fn().mockResolvedValue({ bytesWritten: 0 }),
-      writeFile: vi.fn().mockResolvedValue(undefined),
-      sync: vi.fn().mockResolvedValue(undefined),
-      close: vi.fn().mockResolvedValue(undefined),
-    }),
+    open: vi.fn().mockImplementation((path, flags) => flags === 'r'
+      ? actual.open(path, flags)
+      : Promise.resolve({
+        write: vi.fn().mockResolvedValue({ bytesWritten: 0 }),
+        writeFile: vi.fn().mockResolvedValue(undefined),
+        sync: vi.fn().mockResolvedValue(undefined),
+        close: vi.fn().mockResolvedValue(undefined),
+      })),
     rename: vi.fn().mockResolvedValue(undefined),
     link: vi.fn().mockResolvedValue(undefined),
     unlink: vi.fn().mockResolvedValue(undefined),
@@ -126,14 +128,39 @@ vi.mock('../../core/decisions/atomic-store.js', async (orig) => {
   return { ...actual, atomicWriteFile: vi.fn().mockResolvedValue(undefined) };
 });
 
+vi.mock('../../core/runtime/analysis-generation.js', async (orig) => {
+  const actual = await orig<typeof import('../../core/runtime/analysis-generation.js')>();
+  return {
+    ...actual,
+    readGenerationSnapshot: vi.fn(async (_dir: string, _required: string[], read: () => Promise<unknown>) => ({
+      state: 'ok', value: await read(), generationId: 'test-generation', compatibility: 'manifest', coherence: 'full',
+    })),
+  };
+});
+
 // Partial-mock utils: keep everything real except isCacheFresh, so the action-handler
 // tests can drive the source-unchanged (skip) vs source-changed (re-analyze) decision
 // directly — the skip is now fingerprint-gated, not a wall-clock TTL.
 vi.mock('../../core/services/mcp-handlers/utils.js', async (orig) => {
   const actual = await orig<typeof import('../../core/services/mcp-handlers/utils.js')>();
-  return { ...actual, isCacheFresh: vi.fn().mockResolvedValue(true) };
+  return {
+    ...actual,
+    isCacheFresh: vi.fn().mockResolvedValue(true),
+    computeProjectFingerprint: vi.fn().mockResolvedValue('test-fingerprint'),
+  };
 });
-import { isCacheFresh } from '../../core/services/mcp-handlers/utils.js';
+vi.mock('../../core/analyzer/analysis-core.js', async (orig) => {
+  const actual = await orig<typeof import('../../core/analyzer/analysis-core.js')>();
+  return {
+    ...actual,
+    isAnalysisCacheFresh: vi.fn(async (rootPath: string) => {
+      const { isCacheFresh } = await import('../../core/services/mcp-handlers/utils.js');
+      return isCacheFresh(rootPath);
+    }),
+  };
+});
+import { computeProjectFingerprint, isCacheFresh } from '../../core/services/mcp-handlers/utils.js';
+import { readGenerationSnapshot } from '../../core/runtime/analysis-generation.js';
 
 describe('analyze command', () => {
   describe('indexed function population disclosure', () => {
@@ -419,6 +446,18 @@ describe('analyze command', () => {
         expect.arrayContaining(['dist/**'])
       );
     });
+
+    it('refuses to publish when the same dirty source file changes during analysis', async () => {
+      let fingerprintCall = 0;
+      await vi.mocked(computeProjectFingerprint).withImplementation(
+        async () => fingerprintCall++ === 0 ? 'dirty-file-before' : 'dirty-file-after',
+        async () => {
+          await expect(runAnalysis('/fake/root', '/fake/root/.openlore/analysis', {
+            maxFiles: 100000, include: [], exclude: [],
+          })).rejects.toThrow('Source files changed during analysis');
+        },
+      );
+    });
   });
 
   describe('runAnalysis — includePatterns from config', () => {
@@ -592,6 +631,18 @@ describe('analyze command', () => {
       expect(process.exitCode).toBeUndefined();
     });
 
+    it('re-analyzes when source is unchanged but the cached generation fails manifest validation', async () => {
+      mockReadOpenLoreConfig.mockResolvedValue(FAKE_CONFIG);
+      mockStat.mockResolvedValue({ mtime: new Date(Date.now() - 30 * 60_000) });
+      vi.mocked(isCacheFresh).mockResolvedValue(true);
+      vi.mocked(readGenerationSnapshot).mockResolvedValueOnce({ state: 'analysis-unavailable' });
+      const mapperMod = await import('../../core/analyzer/repository-mapper.js');
+      vi.mocked(mapperMod.RepositoryMapper).mockClear();
+      await analyzeCommand.parseAsync([], { from: 'user' });
+      expect(vi.mocked(mapperMod.RepositoryMapper)).toHaveBeenCalled();
+      expect(process.exitCode).toBeUndefined();
+    });
+
     it('runs analysis even with recent cache when --force is passed', async () => {
       mockReadOpenLoreConfig.mockResolvedValue(FAKE_CONFIG);
       mockStat.mockResolvedValue({ mtime: new Date(Date.now() - 30 * 60_000) });
@@ -726,7 +777,11 @@ describe('analyze command', () => {
         git('commit', '-q', '-m', 'init');
         const head = execFileSync('git', ['rev-parse', '--verify', 'HEAD'], { cwd: dir }).toString().trim();
 
-        await runAnalysis(dir, join(dir, '.openlore', 'analysis'), { maxFiles: 100000, include: [], exclude: [] });
+        const actualUtils = await vi.importActual<typeof import('../../core/services/mcp-handlers/utils.js')>('../../core/services/mcp-handlers/utils.js');
+        await vi.mocked(computeProjectFingerprint).withImplementation(
+          actualUtils.computeProjectFingerprint,
+          () => runAnalysis(dir, join(dir, '.openlore', 'analysis'), { maxFiles: 100000, include: [], exclude: [] }),
+        );
         expect(fingerprint().commit).toBe(head);
         expect(fingerprint().sourceTreeState).toBe('clean');
       } finally {

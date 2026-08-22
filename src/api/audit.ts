@@ -5,8 +5,8 @@
  * No LLM required.
  */
 
-import { join } from 'node:path';
-import { readFile, writeFile } from 'node:fs/promises';
+import { join, relative, resolve } from 'node:path';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { readOpenLoreConfig } from '../core/services/config-manager.js';
 import { SpecSnapshotGenerator } from '../core/analyzer/spec-snapshot-generator.js';
 import {
@@ -35,6 +35,9 @@ import { normalizeAnchorPath } from '../core/generator/spec-link-index.js';
 import type { DependencyGraphResult } from '../core/analyzer/dependency-graph.js';
 import type { SerializedCallGraph, FunctionNode } from '../core/analyzer/call-graph.js';
 import { readGenerationSnapshot, REQUIRED_ANALYSIS_ARTIFACTS } from '../core/runtime/analysis-generation.js';
+import { withLoggerOptions } from '../utils/logger.js';
+import { errors, isOpenLoreError } from '../utils/errors.js';
+import { resolveOpenspecDir } from '../utils/openspec-dir.js';
 
 const DEFAULT_MAX_UNCOVERED = 50;
 const DEFAULT_HUB_THRESHOLD = 5;
@@ -69,8 +72,8 @@ function toAuditFunction(node: FunctionNode, isHub: boolean): AuditUncoveredFunc
 // PUBLIC API
 // ============================================================================
 
-export async function openloreAudit(options: AuditApiOptions = {}): Promise<AuditReport> {
-  const rootPath = options.rootPath ?? process.cwd();
+async function audit(options: AuditApiOptions): Promise<AuditReport> {
+  const rootPath = resolve(options.rootPath ?? process.cwd());
   const maxUncovered = options.maxUncovered ?? DEFAULT_MAX_UNCOVERED;
   const hubThreshold = options.hubThreshold ?? DEFAULT_HUB_THRESHOLD;
   const shouldSave = options.save ?? true;
@@ -79,8 +82,12 @@ export async function openloreAudit(options: AuditApiOptions = {}): Promise<Audi
   const analysisDir = join(rootPath, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
 
   // Load (or refresh) snapshot
-  const openloreConfig = await readOpenLoreConfig(rootPath);
-  const openspecRelPath = openloreConfig?.openspecPath ?? OPENSPEC_DIR;
+  const openloreConfig = await readOpenLoreConfig(rootPath, options.configPath);
+  if (options.configPath !== undefined && !openloreConfig) {
+    throw errors.noConfig(options.configPath);
+  }
+  const openspecPath = resolveOpenspecDir(rootPath, openloreConfig?.openspecPath ?? OPENSPEC_DIR);
+  const openspecRelPath = relative(rootPath, openspecPath) || '.';
   const snapshotGen = new SpecSnapshotGenerator(rootPath, openspecRelPath);
   const snapshot = await snapshotGen.generate({ persist: shouldSave }).catch(() => null);
 
@@ -95,7 +102,14 @@ export async function openloreAudit(options: AuditApiOptions = {}): Promise<Audi
   );
   const [llmContextRaw, depGraphRaw] = coherent?.state === 'ok' ? coherent.value : [null, null];
 
-  const llmContext = supplied?.llmContext ?? (llmContextRaw ? JSON.parse(llmContextRaw) as LLMContext : null);
+  let llmContext: LLMContext | null = supplied?.llmContext ?? null;
+  if (!supplied && llmContextRaw) {
+    try {
+      llmContext = JSON.parse(llmContextRaw) as LLMContext;
+    } catch {
+      llmContext = null;
+    }
+  }
   let depGraph: DependencyGraphResult | null;
   if (supplied) {
     depGraph = supplied.dependencyGraph;
@@ -192,8 +206,20 @@ export async function openloreAudit(options: AuditApiOptions = {}): Promise<Audi
   };
 
   if (shouldSave) {
+    await mkdir(analysisDir, { recursive: true });
     await writeFile(join(analysisDir, ARTIFACT_AUDIT_REPORT), JSON.stringify(report, null, 2));
   }
 
   return report;
+}
+
+export function openloreAudit(options: AuditApiOptions = {}): Promise<AuditReport> {
+  return withLoggerOptions({ quiet: options.quiet ?? true }, async () => {
+    try {
+      return await audit(options);
+    } catch (error) {
+      if (isOpenLoreError(error)) throw error;
+      throw errors.pipelineFailed(`Audit failed: ${(error as Error).message}`, error);
+    }
+  });
 }

@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { Logger } from './logger.js';
+import { Logger, withLoggerOptions } from './logger.js';
 
 describe('Logger', () => {
   let consoleLogSpy: ReturnType<typeof vi.spyOn>;
@@ -118,6 +118,60 @@ describe('Logger', () => {
       logger.error('Critical error');
 
       expect(consoleErrorSpy).toHaveBeenCalledWith(expect.stringContaining('Critical error'));
+    });
+
+    it('scopes quiet mode to one async request without mutating logger options', async () => {
+      const logger = new Logger({ noColor: true });
+
+      await withLoggerOptions({ quiet: true }, async () => {
+        await Promise.resolve();
+        logger.success('hidden');
+        logger.error('hidden-error');
+      });
+      logger.success('visible');
+
+      expect(consoleLogSpy).toHaveBeenCalledTimes(1);
+      expect(consoleLogSpy).toHaveBeenCalledWith(expect.stringContaining('visible'));
+      expect(consoleErrorSpy).not.toHaveBeenCalled();
+      expect(logger.getOptions().quiet).toBe(false);
+    });
+
+    it('keeps overlapping async logger scopes isolated', async () => {
+      const logger = new Logger({ noColor: true });
+      let releaseQuiet!: () => void;
+      const quietGate = new Promise<void>(resolve => { releaseQuiet = resolve; });
+
+      const quietRequest = withLoggerOptions({ quiet: true }, async () => {
+        await quietGate;
+        logger.success('quiet-request');
+      });
+      const normalRequest = withLoggerOptions({ quiet: false }, async () => {
+        logger.success('normal-request');
+        releaseQuiet();
+      });
+      await Promise.all([quietRequest, normalRequest]);
+
+      expect(consoleLogSpy).toHaveBeenCalledTimes(1);
+      expect(consoleLogSpy).toHaveBeenCalledWith(expect.stringContaining('normal-request'));
+    });
+
+    it('does not let a nested scope re-enable any output from a muted request', async () => {
+      const logger = new Logger({ noColor: true });
+
+      await withLoggerOptions({ quiet: true }, async () => {
+        await withLoggerOptions({ quiet: false }, async () => {
+          logger.success('hidden-log');
+          logger.error('hidden-error');
+          logger.blank();
+          logger.section('hidden-section');
+          logger.info('hidden', 'info');
+          logger.listItem('hidden-item');
+          logger.spinner('hidden-spinner').stop();
+        });
+      });
+
+      expect(consoleLogSpy).not.toHaveBeenCalled();
+      expect(consoleErrorSpy).not.toHaveBeenCalled();
     });
   });
 

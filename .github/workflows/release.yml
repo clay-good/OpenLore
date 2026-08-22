@@ -119,6 +119,9 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Verify published API consumer contract
+        run: npm run test:api-consumer
+
       - name: Verify the published tarball contents
         run: npm run audit:packlist
 

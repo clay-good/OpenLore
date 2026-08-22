@@ -2,10 +2,11 @@
  * openlore generate — programmatic API
  *
  * Generates OpenSpec specification files from analysis results using LLM.
- * No side effects (no process.exit, no console.log).
+ * Writes generated artifacts, but never controls the process and is console-silent by default.
  */
 
-import { join, relative } from 'node:path';
+import { join, relative, resolve } from 'node:path';
+import { rm } from 'node:fs/promises';
 import { readJsonFile } from '../utils/command-helpers.js';
 import {
   readOpenLoreConfig,
@@ -27,22 +28,14 @@ import {
 import { ADRGenerator } from '../core/generator/adr-generator.js';
 import {
   requirementAnchorProposals,
-  resolveSpecLinkIndex,
   verifyRequirementAnchors,
 } from '../core/generator/spec-link-service.js';
 import type { SpecSymbolRef } from '../core/generator/spec-link-index.js';
-import { RagManifestGenerator } from '../core/generator/rag-manifest-generator.js';
 import type { RepoStructure, LLMContext } from '../core/analyzer/artifact-generator.js';
 import type { DependencyGraphResult } from '../core/analyzer/dependency-graph.js';
 import type { RefactorReport } from '../core/analyzer/refactor-analyzer.js';
 import type { GenerateApiOptions, GenerateResult, ProgressCallback } from './types.js';
-import { SpecSnapshotGenerator } from '../core/analyzer/spec-snapshot-generator.js';
 import {
-  DEFAULT_ANTHROPIC_MODEL,
-  DEFAULT_OPENAI_MODEL,
-  DEFAULT_OPENAI_COMPAT_MODEL,
-  DEFAULT_COPILOT_MODEL,
-  DEFAULT_GEMINI_MODEL,
   OPENLORE_DIR,
   OPENLORE_LOGS_SUBDIR,
   OPENLORE_ANALYSIS_REL_PATH,
@@ -52,17 +45,26 @@ import {
   ARTIFACT_DEPENDENCY_GRAPH,
   ARTIFACT_FINGERPRINT,
   ARTIFACT_REFACTOR_PRIORITIES,
-  ARTIFACT_RAG_MANIFEST,
 } from '../constants.js';
 import { resolveTrustedApiBase, resolveTrustedCompatBase, resolveTrustedSslVerify, rejectRepoConfiguredTlsOptOut } from '../core/services/repo-config-trust.js';
 import { resolveOpenspecDir } from '../utils/openspec-dir.js';
 import { safeJoin } from '../utils/path-confinement.js';
 import { normalizeDomainName } from '../core/generator/openspec-compat.js';
+import { withLoggerOptions } from '../utils/logger.js';
+import { errors, isOpenLoreError } from '../utils/errors.js';
 import {
   readGenerationSnapshot,
   REQUIRED_ANALYSIS_ARTIFACTS,
   type GenerationManifest,
 } from '../core/runtime/analysis-generation.js';
+import {
+  finalizeGeneration,
+  detectOpenSpecPackageVersion,
+  OPENLORE_PACKAGE_VERSION,
+  resolveGenerationProvider,
+} from '../core/runtime/generation-core.js';
+import { withGenerationLock } from '../core/runtime/generation-lock.js';
+import { resolveGenerationSemanticSearch } from '../core/runtime/generation-semantic-search.js';
 
 function progress(onProgress: ProgressCallback | undefined, step: string, status: 'start' | 'progress' | 'complete' | 'skip', detail?: string): void {
   onProgress?.({ phase: 'generate', step, status, detail });
@@ -96,10 +98,15 @@ export async function loadAnalysisData(
     async () => Promise.all([
       readArtifact<RepoStructure>(join(analysisPath, ARTIFACT_REPO_STRUCTURE), ARTIFACT_REPO_STRUCTURE),
       readArtifact<LLMContext>(join(analysisPath, ARTIFACT_LLM_CONTEXT), ARTIFACT_LLM_CONTEXT),
-      readArtifact<DependencyGraphResult>(join(analysisPath, ARTIFACT_DEPENDENCY_GRAPH), ARTIFACT_DEPENDENCY_GRAPH),
+      readArtifact<DependencyGraphResult>(join(analysisPath, ARTIFACT_DEPENDENCY_GRAPH), ARTIFACT_DEPENDENCY_GRAPH)
+        .catch(error => {
+          if ((error as Error).message.startsWith(`Failed to parse ${ARTIFACT_DEPENDENCY_GRAPH}`)) return null;
+          throw error;
+        }),
       readArtifact<Record<string, unknown>>(join(analysisPath, ARTIFACT_FINGERPRINT), ARTIFACT_FINGERPRINT),
       readArtifact<RefactorReport>(join(analysisPath, ARTIFACT_REFACTOR_PRIORITIES), ARTIFACT_REFACTOR_PRIORITIES),
     ]),
+    value => value[2] ? [] : [ARTIFACT_DEPENDENCY_GRAPH],
   );
 
   if (snapshot.state === 'analysis-changed') {
@@ -110,7 +117,7 @@ export async function loadAnalysisData(
   }
 
   const [repoStructure, llmContext, depGraph, fingerprint, refactorReport] = snapshot.value;
-  if (!repoStructure || (snapshot.compatibility === 'manifest' && (!llmContext || !depGraph || !fingerprint))) {
+  if (!repoStructure || (snapshot.compatibility === 'manifest' && (!llmContext || !fingerprint))) {
     throw new GenerateAnalysisError('analysis-unavailable', 'The current analysis generation is incomplete or invalid. Run openloreAnalyze() again.');
   }
 
@@ -136,18 +143,18 @@ export async function loadAnalysisData(
  * @throws Error if LLM API connectivity fails
  * @throws Error if pipeline fails
  */
-export async function openloreGenerate(options: GenerateApiOptions = {}): Promise<GenerateResult> {
+async function generateCore(options: GenerateApiOptions): Promise<GenerateResult> {
   const startTime = Date.now();
-  const rootPath = options.rootPath ?? process.cwd();
+  const rootPath = resolve(options.rootPath ?? process.cwd());
   const analysisRelPath = options.analysisPath ?? `${OPENLORE_ANALYSIS_REL_PATH}/`;
-  const analysisPath = join(rootPath, analysisRelPath);
+  const analysisPath = resolve(rootPath, analysisRelPath);
   const { onProgress } = options;
 
   // Load config
   progress(onProgress, 'Loading configuration', 'start');
-  const openloreConfig = await readOpenLoreConfig(rootPath);
+  const openloreConfig = await readOpenLoreConfig(rootPath, options.configPath);
   if (!openloreConfig) {
-    throw new Error('No openlore configuration found. Run openloreInit() first.');
+    throw errors.noConfig(options.configPath);
   }
 
   // Confined: this becomes a WRITE target (the RAG manifest, the generated specs), and
@@ -160,7 +167,12 @@ export async function openloreGenerate(options: GenerateApiOptions = {}): Promis
 
   // Load analysis
   progress(onProgress, 'Loading analysis', 'start');
-  const analysisData = await loadAnalysisData(analysisPath);
+  let analysisData: AnalysisData;
+  try {
+    analysisData = await loadAnalysisData(analysisPath);
+  } catch (error) {
+    throw errors.noAnalysis(analysisPath, error);
+  }
   const { repoStructure, llmContext, depGraph, refactorReport, generationCompatibility } = analysisData;
   progress(
     onProgress,
@@ -169,15 +181,16 @@ export async function openloreGenerate(options: GenerateApiOptions = {}): Promis
     `${repoStructure.statistics.analyzedFiles} files (${generationCompatibility} generation)`,
   );
 
-  // Keep the public API's historical dry-run contract: analysis is validated,
-  // but no provider is resolved or constructed and nothing is written.
+  // Validate the generation prerequisites only. A dry run does not resolve a
+  // provider, acquire the generation lock, predict output files, or write state.
   if (options.dryRun) {
     progress(onProgress, 'Dry run complete', 'complete');
     return {
       report: {
         timestamp: new Date().toISOString(),
-        openspecVersion: openloreConfig.version ?? '1.0.0',
-        openloreVersion: '1.0.0',
+        openspecVersion: await detectOpenSpecPackageVersion(rootPath),
+        openloreVersion: OPENLORE_PACKAGE_VERSION,
+        configSchemaVersion: openloreConfig.version,
         filesWritten: [],
         filesSkipped: [],
         filesBackedUp: [],
@@ -188,55 +201,30 @@ export async function openloreGenerate(options: GenerateApiOptions = {}): Promis
         warnings: [],
         nextSteps: ['Run without --dry-run to generate specs'],
       },
-      pipelineResult: {} as GenerateResult['pipelineResult'],
+      dryRun: true,
       duration: Date.now() - startTime,
     };
   }
 
-  // Resolve provider
-  const anthropicKey = process.env.ANTHROPIC_API_KEY;
-  const openaiKey = process.env.OPENAI_API_KEY;
-  const openaiCompatKey = process.env.OPENAI_COMPAT_API_KEY;
-  const geminiKey = process.env.GEMINI_API_KEY;
-
-  const configuredProvider = options.provider ?? openloreConfig.generation.provider;
-  const noKeyProviders = ['claude-code', 'codex-cli', 'mistral-vibe', 'copilot', 'gemini-cli', 'antigravity-cli', 'cursor-agent'];
-
-  if (!noKeyProviders.includes(configuredProvider ?? '') && !anthropicKey && !openaiKey && !openaiCompatKey && !geminiKey) {
-    throw new Error(
-      'No LLM API key found. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, or OPENAI_COMPAT_API_KEY — ' +
-        'or, with the Claude Code CLI installed, set generation.provider to "claude-code" in .openlore/config.json (no API key needed). ' +
-        'Other no-key providers: codex-cli, copilot, gemini-cli, antigravity-cli, mistral-vibe, cursor-agent.'
-    );
+  const resolved = resolveGenerationProvider(openloreConfig, {
+    provider: options.provider,
+    model: options.model,
+    openaiCompatBaseUrl: options.openaiCompatBaseUrl,
+  });
+  if (!resolved) {
+    throw errors.apiNoApiKey();
   }
 
-  const envDetectedProvider = anthropicKey ? 'anthropic'
-    : geminiKey ? 'gemini'
-    : openaiCompatKey ? 'openai-compat'
-    : 'openai';
-
-  const effectiveProvider = configuredProvider ?? envDetectedProvider;
-
-  const defaultModels: Record<string, string> = {
-    anthropic: DEFAULT_ANTHROPIC_MODEL,
-    gemini: DEFAULT_GEMINI_MODEL,
-    'openai-compat': DEFAULT_OPENAI_COMPAT_MODEL,
-    copilot: DEFAULT_COPILOT_MODEL,
-    openai: DEFAULT_OPENAI_MODEL,
-    'claude-code': 'claude-code',
-    'codex-cli': 'codex-cli',
-    'mistral-vibe': 'mistral-vibe',
-    'gemini-cli': 'gemini-cli',
-    'antigravity-cli': 'antigravity-cli',
-    'cursor-agent': 'cursor-agent',
-  };
-  const effectiveModel = options.model || openloreConfig.generation.model || defaultModels[effectiveProvider];
+  const effectiveProvider = resolved.provider;
+  const effectiveModel = resolved.model;
 
   const rootConfig = openloreConfig as unknown as Record<string, string>;
-  const effectiveBaseUrl = resolveTrustedCompatBase(
+  const effectiveBaseUrl = resolved.openaiCompatBaseUrl ?? resolveTrustedCompatBase(
     options.openaiCompatBaseUrl ?? process.env.OPENAI_COMPAT_BASE_URL,
-    openloreConfig.generation.openaiCompatBaseUrl ?? rootConfig['openaiCompatBaseUrl'],
+    rootConfig['openaiCompatBaseUrl'],
   );
+
+  return withGenerationLock(rootPath, async () => {
 
   // `options.*` is supplied by the HOST PROCESS embedding OpenLore, so it is trusted
   // like a CLI flag; the config file is the analyzed repo's and is not.
@@ -263,20 +251,30 @@ export async function openloreGenerate(options: GenerateApiOptions = {}): Promis
       logRoot: rootPath,
     });
   } catch (error) {
-    throw new Error(`Failed to create LLM service: ${(error as Error).message}`, { cause: error });
+    throw errors.pipelineFailed(`Failed to create LLM service: ${(error as Error).message}`, error);
   }
   progress(onProgress, 'Creating LLM service', 'complete', `${effectiveProvider}/${effectiveModel}`);
+
+  if (options.force) {
+    await rm(safeJoin(rootPath, join(OPENLORE_DIR, OPENLORE_GENERATION_SUBDIR)), {
+      recursive: true,
+      force: true,
+    });
+  }
 
   // Run pipeline
   progress(onProgress, 'Running LLM generation pipeline', 'start');
   const adr = options.adr ?? false;
   const adrOnly = options.adrOnly ?? false;
+  const semanticSearch = await resolveGenerationSemanticSearch(analysisPath, openloreConfig);
   const pipeline = new SpecGenerationPipeline(llm, {
     outputDir: safeJoin(rootPath, join(OPENLORE_DIR, OPENLORE_GENERATION_SUBDIR)),
+    rootPath,
     domains: options.domains,
     saveIntermediate: true,
     generateADRs: adr || adrOnly,
     force: options.force,
+    semanticSearch,
     chunkMaxChars: openloreConfig.generation?.chunkMaxChars,
   });
 
@@ -285,7 +283,7 @@ export async function openloreGenerate(options: GenerateApiOptions = {}): Promis
     pipelineResult = await pipeline.run(repoStructure, llmContext, depGraph, refactorReport);
   } catch (error) {
     await llm.saveLogs().catch(() => {});
-    throw new Error(`Pipeline failed: ${(error as Error).message}`, { cause: error });
+    throw errors.pipelineFailed(`Pipeline failed: ${(error as Error).message}`, error);
   }
   progress(onProgress, 'Running LLM generation pipeline', 'complete');
 
@@ -348,60 +346,49 @@ export async function openloreGenerate(options: GenerateApiOptions = {}): Promis
   });
 
   const report = await writer.writeSpecs(generatedSpecs, pipelineResult.survey, metadataSpecs);
+  // The writer's `version` option is the OpenSpec/config schema version. Package
+  // identity is a separate concern and must never be fabricated from that field.
+  report.openloreVersion = OPENLORE_PACKAGE_VERSION;
+  report.openspecVersion = await detectOpenSpecPackageVersion(rootPath);
+  report.configSchemaVersion = openloreConfig.version;
   progress(onProgress, 'Writing OpenSpec files', 'complete', `${report.filesWritten.length} written`);
 
-  // Generate RAG manifest
-  try {
-    if ((options.domains?.length ?? 0) > 0) {
-      progress(onProgress, 'Generating RAG manifest', 'skip', 'Scoped generation leaves the global manifest unchanged');
-    } else {
-      const manifestGen = new RagManifestGenerator();
-      const manifest = manifestGen.generate(metadataSpecs, depGraph);
-      const { writeFile } = await import('node:fs/promises');
-      await writeFile(
-        safeJoin(fullOpenspecPath, ARTIFACT_RAG_MANIFEST),
-        JSON.stringify(manifest, null, 2),
-        'utf-8',
-      );
-      progress(onProgress, 'Generating RAG manifest', 'complete', `${manifest.domains.length} domains`);
-    }
-  } catch {
-    // Non-fatal
-  }
-
-  // Derive the mapping cache from the specs that were actually WRITTEN, not from
-  // the pipeline result. Standalone generation and the agent-hosted skills then
-  // finalize through the same deterministic contract, and a failure here costs
-  // only the cache — audit and Repair re-derive the index in memory.
-  if (options.mapping ?? true) {
-    try {
-      const resolution = await resolveSpecLinkIndex({
-        rootPath,
-        openspecPath: openspecRelPath,
-        persist: true,
-        graph: depGraph,
-      });
-      if (resolution.state === 'available') {
-        progress(onProgress, 'Deriving spec link index', 'complete',
-          `${resolution.index.stats.linked}/${resolution.index.stats.totalRequirements} linked`);
-      } else {
-        progress(onProgress, 'Deriving spec link index', 'skip', resolution.reason);
-      }
-    } catch {
-      // Non-fatal: the cache is rebuildable on demand.
-    }
-  }
-
-  // Update spec snapshot with richer post-generate coverage (non-fatal)
-  const snapshotGenerator = new SpecSnapshotGenerator(rootPath, openspecRelPath);
-  await snapshotGenerator.generate().catch(() => {});
+  await finalizeGeneration({
+    rootPath,
+    openspecRoot: fullOpenspecPath,
+    openspecPath: openspecRelPath,
+    metadataSpecs,
+    depGraph,
+    mapping: options.mapping,
+    scoped: (options.domains?.length ?? 0) > 0,
+    onProgress: (step, status, detail) => {
+      const label = step === 'mapping' ? 'Deriving spec link index'
+        : step === 'rag-manifest' ? 'Generating RAG manifest'
+        : 'Generating spec snapshot';
+      progress(onProgress, label, status, detail);
+    },
+  });
 
   // Save LLM logs
   await llm.saveLogs().catch(() => {});
 
   return {
+    dryRun: false,
     report,
     pipelineResult,
     duration: Date.now() - startTime,
   };
+  }, { signal: options.signal });
+}
+
+export async function openloreGenerate(options: GenerateApiOptions = {}): Promise<GenerateResult> {
+  try {
+    return await withLoggerOptions(
+      { quiet: options.quiet ?? true },
+      () => generateCore(options),
+    );
+  } catch (error) {
+    if (isOpenLoreError(error)) throw error;
+    throw errors.pipelineFailed(`Generation failed: ${(error as Error).message}`, error);
+  }
 }

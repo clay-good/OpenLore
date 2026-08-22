@@ -106,6 +106,8 @@ export interface LockPolicy {
   maxWaitMs?: number;
   /** Bound for the internal namespace gate. A stranded gate fails closed. */
   namespaceGateMaxWaitMs?: number;
+  /** Cancel a contended acquisition without ever proceeding unlocked. */
+  signal?: AbortSignal;
 }
 
 export class NamespaceGateHeldError extends Error {
@@ -167,6 +169,12 @@ async function tryHandle<T>(operation: () => Promise<T>): Promise<T | undefined>
 
 const defaultPayload = (): string => `${process.pid} ${new Date().toISOString()}`;
 
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  if (signal.reason instanceof Error) throw signal.reason;
+  throw new DOMException('Lock acquisition was aborted', 'AbortError');
+}
+
 function decisionsDir(rootPath: string): string {
   return join(rootPath, OPENLORE_DIR, OPENLORE_DECISIONS_SUBDIR);
 }
@@ -204,10 +212,12 @@ const defaultIsStale = (mtimeMs: number, contents: string): boolean => {
 async function acquireNamespaceGate(
   lockPath: string,
   maxWaitMs = NAMESPACE_GATE_MAX_WAIT_MS,
+  signal?: AbortSignal,
 ): Promise<() => Promise<void>> {
   const gatePath = `${lockPath}.gate`;
   const startedAt = Date.now();
   for (;;) {
+    throwIfAborted(signal);
     // Prepare the payload under a unique name before atomically claiming the
     // fixed gate path. A crash can therefore leave either no gate or a complete
     // PID-bearing gate, never an empty gate that nobody can safely reclaim.
@@ -261,6 +271,7 @@ export async function acquireLockAt(
   const bestEffortAfterMaxWait = policy.bestEffortAfterMaxWait ?? false;
   const maxWaitMs = policy.maxWaitMs ?? MAX_WAIT_MS;
   const namespaceGateMaxWaitMs = policy.namespaceGateMaxWaitMs ?? NAMESPACE_GATE_MAX_WAIT_MS;
+  const signal = policy.signal;
 
   await mkdir(dir, { recursive: true });
   const lockPath = join(dir, lockFile);
@@ -271,8 +282,10 @@ export async function acquireLockAt(
   let contended = false;
 
   for (;;) {
-    const releaseGate = await acquireNamespaceGate(lockPath, namespaceGateMaxWaitMs);
+    throwIfAborted(signal);
+    const releaseGate = await acquireNamespaceGate(lockPath, namespaceGateMaxWaitMs, signal);
     try {
+      throwIfAborted(signal);
       try {
         const fh = await open(lockPath, 'wx'); // exclusive create — fails if held
         try {

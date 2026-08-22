@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdir, rm, readdir, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, rm, readdir, symlink, utimes, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -916,6 +916,26 @@ describe('SpecGenerationPipeline', () => {
   });
 
   describe('loadStageResult', () => {
+    it('invalidates a cached stage when the analysis is newer', async () => {
+      const { service: llm } = createMockLLMService();
+      const outputDir = join(tempDir, '.openlore', 'generation');
+      const analysisDir = join(tempDir, '.openlore', 'analysis');
+      await mkdir(outputDir, { recursive: true });
+      await mkdir(analysisDir, { recursive: true });
+      const pipeline = new SpecGenerationPipeline(llm, { outputDir, rootPath: tempDir });
+      await pipeline.saveResult('stage1-survey', {
+        success: true,
+        data: { cached: true },
+        tokens: 1,
+      });
+      const analysisPath = join(analysisDir, 'llm-context.json');
+      await writeFile(analysisPath, '{}');
+      const future = new Date(Date.now() + 10_000);
+      await utimes(analysisPath, future, future);
+
+      expect(await pipeline.loadStageResult('survey')).toBeNull();
+    });
+
     it('returns null when stage result file does not exist', async () => {
       const { service: llm } = createMockLLMService();
       const pipeline = new SpecGenerationPipeline(llm, { outputDir: tempDir });
