@@ -1030,6 +1030,8 @@ function makeDriftResult(overrides: Partial<DriftResult> = {}): DriftResult {
     timestamp: '2026-01-01T00:00:00Z',
     baseRef: 'main',
     totalChangedFiles: 1,
+    analyzedFiles: 1,
+    filesOmitted: 0,
     specRelevantFiles: 1,
     issues: [],
     summary: { gaps: 0, stale: 0, uncovered: 0, orphanedSpecs: 0, adrGaps: 0, adrOrphaned: 0, memoryDrifted: 0, memoryOrphaned: 0, memoryOutOfScope: 0, total: 0 },
@@ -1182,9 +1184,16 @@ describe('handleCheckSpecDrift', () => {
     vi.mocked(buildADRMap).mockResolvedValue(null);
     vi.mocked(detectDrift).mockResolvedValue(makeDriftResult({ totalChangedFiles: 10 }));
     // maxFiles = 3 → detectDrift receives only 3 files
-    await handleCheckSpecDrift(driftDir, 'auto', [], [], 'warning', 3);
+    const result = await handleCheckSpecDrift(driftDir, 'auto', [], [], 'warning', 3) as DriftResult;
     const callArg = vi.mocked(detectDrift).mock.calls[0][0];
     expect(callArg.changedFiles).toHaveLength(3);
+    expect(result).toMatchObject({ totalChangedFiles: 10, analyzedFiles: 3, filesOmitted: 7 });
+  });
+
+  it.each([0, -1, 1.5, Number.NaN])('rejects invalid maxFiles %s before reading git', async (maxFiles) => {
+    const result = await handleCheckSpecDrift(driftDir, 'auto', [], [], 'warning', maxFiles);
+    expect(result).toEqual({ error: 'maxFiles must be a positive integer.' });
+    expect(vi.mocked(getChangedFiles)).not.toHaveBeenCalled();
   });
 
   it('sets totalChangedFiles to actual count (before truncation)', async () => {
@@ -1204,6 +1213,8 @@ describe('handleCheckSpecDrift', () => {
     const result = await handleCheckSpecDrift(driftDir, 'auto', [], [], 'warning', 2) as DriftResult;
     // totalChangedFiles should reflect the original 5, not the truncated 2
     expect(result.totalChangedFiles).toBe(5);
+    expect(result.analyzedFiles).toBe(2);
+    expect(result.filesOmitted).toBe(3);
   });
 });
 

@@ -5,6 +5,10 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ## [Unreleased]
 
+- Drift results now carry required `analyzedFiles` and `filesOmitted` receipts. The drift CLI
+  reserves exit `1` for confirmed drift and uses exit `2` when the check cannot run; reinstalled
+  pre-commit hooks upgrade in place, validate JSON before blocking, preserve existing hook
+  failures, and allow infrastructure failures with an explicit warning.
 - Interference maps now retain unassessable branches, reject unsafe base guesses,
   disclose enumeration limits/failures, and stop treating shared reads as conflicts.
 - Enforcement JSON schema version 2 normalizes governance finding severity to

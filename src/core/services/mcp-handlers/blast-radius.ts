@@ -284,6 +284,7 @@ export async function computeBlastRadius(
   const decisionItems: Array<{ kind: string; message: string; domain: string | null; provenance: ServedContentProvenance }> = [];
   const specProvenance = await reviewedFileContentProvenance(absDir, 'openspec');
   let driftUnavailable: string | null = null;
+  let driftFilesOmitted = 0;
   let driftRaw: unknown;
   try {
     driftRaw = await handleCheckSpecDrift(absDir, resolvedBaseRef, changedFiles, [], 'warning');
@@ -296,6 +297,7 @@ export async function computeBlastRadius(
     driftUnavailable = (driftRaw as { error: string }).error;
   } else {
     const drift = driftRaw as DriftResult;
+    driftFilesOmitted = drift.filesOmitted;
     for (const issue of drift.issues ?? []) {
       if (MEMORY_KINDS.has(issue.kind)) memWillDrift.push({ kind: issue.kind, message: issue.message, filePath: issue.filePath, provenance: 'local-unreviewed' });
       else if (SPEC_KINDS.has(issue.kind)) specItems.push({ kind: issue.kind, message: issue.message, domain: issue.domain, specPath: issue.specPath, provenance: specProvenance });
@@ -322,6 +324,9 @@ export async function computeBlastRadius(
   }
   if (driftUnavailable) {
     caveats.push(`Spec/memory drift could not be evaluated: ${driftUnavailable}`);
+  }
+  if (driftFilesOmitted > 0) {
+    caveats.push(`Spec/memory drift omitted ${driftFilesOmitted} changed file${driftFilesOmitted === 1 ? '' : 's'} after reaching its analysis limit; absence of a finding does not cover those files.`);
   }
   if (testsUnavailable) {
     caveats.push(`Tests to run could not be computed: ${testsUnavailable} — tests.count 0 means "not computed", not "none impacted".`);

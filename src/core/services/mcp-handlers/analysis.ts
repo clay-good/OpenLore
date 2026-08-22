@@ -347,6 +347,10 @@ export async function handleCheckSpecDrift(
 ): Promise<DriftResult | { error: string }> {
   const absDir = await validateDirectory(directory);
 
+  if (!Number.isSafeInteger(maxFiles) || maxFiles < 1) {
+    return { error: 'maxFiles must be a positive integer.' };
+  }
+
   if (!(await isGitRepository(absDir))) {
     return { error: 'Not a git repository. Drift detection requires git.' };
   }
@@ -379,6 +383,8 @@ export async function handleCheckSpecDrift(
       timestamp: new Date().toISOString(),
       baseRef: gitResult.resolvedBase,
       totalChangedFiles: 0,
+      analyzedFiles: 0,
+      filesOmitted: 0,
       specRelevantFiles: 0,
       issues: [],
       summary: { gaps: 0, stale: 0, uncovered: 0, orphanedSpecs: 0, adrGaps: 0, adrOrphaned: 0, memoryDrifted: 0, memoryOrphaned: 0, memoryOutOfScope: 0, total: 0 },
@@ -425,6 +431,8 @@ export async function handleCheckSpecDrift(
 
   result.baseRef = gitResult.resolvedBase;
   result.totalChangedFiles = actualChangedFiles;
+  result.analyzedFiles = gitResult.files.length;
+  result.filesOmitted = actualChangedFiles - gitResult.files.length;
 
   return result;
 }

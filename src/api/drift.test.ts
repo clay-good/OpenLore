@@ -71,6 +71,8 @@ const MOCK_DRIFT_RESULT = {
   timestamp: new Date().toISOString(),
   baseRef: 'main',
   totalChangedFiles: 2,
+  analyzedFiles: 2,
+  filesOmitted: 0,
   specRelevantFiles: 1,
   issues: [],
   summary: { gaps: 0, stale: 0, uncovered: 1, orphanedSpecs: 0, adrGaps: 0, adrOrphaned: 0, memoryDrifted: 0, memoryOrphaned: 0, memoryOutOfScope: 0, total: 1 },
@@ -138,6 +140,8 @@ describe('openloreDrift', () => {
       const result = await openloreDrift({ rootPath: ROOT });
 
       expect(result.totalChangedFiles).toBe(0);
+      expect(result.analyzedFiles).toBe(0);
+      expect(result.filesOmitted).toBe(0);
       expect(result.issues).toHaveLength(0);
       expect(result.hasDrift).toBe(false);
       expect(mockDetectDrift).not.toHaveBeenCalled();
@@ -181,6 +185,11 @@ describe('openloreDrift', () => {
   });
 
   describe('maxFiles limit', () => {
+    it.each([0, -1, 1.5, Number.NaN])('rejects invalid maxFiles %s', async (maxFiles) => {
+      await expect(openloreDrift({ rootPath: ROOT, maxFiles })).rejects.toThrow(/positive integer/i);
+      expect(mockGetChangedFiles).not.toHaveBeenCalled();
+    });
+
     it('slices changed files to maxFiles', async () => {
       const manyFiles = Array.from({ length: 20 }, (_, i) => ({
         path: `src/file${i}.ts`, status: 'modified' as const,
@@ -188,11 +197,13 @@ describe('openloreDrift', () => {
       }));
       mockGetChangedFiles.mockResolvedValue({ files: manyFiles, resolvedBase: 'main', hasUnstagedChanges: false, currentBranch: 'main' } as Awaited<ReturnType<typeof getChangedFiles>>);
 
-      await openloreDrift({ rootPath: ROOT, maxFiles: 5 });
+      const result = await openloreDrift({ rootPath: ROOT, maxFiles: 5 });
 
       // detectDrift should be called with at most 5 files
       const callArgs = mockDetectDrift.mock.calls[0];
       expect(callArgs).toBeDefined();
+      expect(callArgs?.[0].changedFiles).toHaveLength(5);
+      expect(result).toMatchObject({ totalChangedFiles: 20, analyzedFiles: 5, filesOmitted: 15 });
     });
   });
 });

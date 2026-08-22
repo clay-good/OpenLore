@@ -136,6 +136,302 @@ describe('effective Git hook delivery', () => {
     await expect(readFile(join(root, '.githooks', 'post-commit'), 'utf-8')).rejects.toThrow();
   });
 
+  it('allows a commit when drift could not be checked and preserves the failure evidence', async () => {
+    const root = await repository('openlore-drift-infrastructure-failure-');
+    const localBin = join(root, 'node_modules', '.bin');
+    await mkdir(localBin, { recursive: true });
+    await writeFile(
+      join(localBin, 'openlore'),
+      '#!/bin/sh\necho "No openlore configuration found" >&2\nexit 2\n',
+      { mode: 0o755 },
+    );
+    await installDriftHook(root);
+
+    const hookPath = join(root, '.git', 'hooks', 'pre-commit');
+    const result = await execFileAsync(hookPath, [], { cwd: root });
+
+    expect(result.stderr).toContain('No openlore configuration found');
+    expect(result.stdout).toContain('Spec drift could not be checked (exit 2); the drift check will not block this commit.');
+    expect(result.stdout).not.toContain('Spec drift detected!');
+  });
+
+  it('blocks real drift and includes memory kinds in the embedded summary', async () => {
+    const root = await repository('openlore-drift-found-');
+    const localBin = join(root, 'node_modules', '.bin');
+    await mkdir(localBin, { recursive: true });
+    await writeFile(
+      join(localBin, 'openlore'),
+      '#!/bin/sh\nprintf \'%s\\n\' \'{"hasDrift":true,"summary":{"memoryDrifted":1,"memoryOrphaned":2},"issues":[]}\'\nexit 1\n',
+      { mode: 0o755 },
+    );
+    await installDriftHook(root);
+
+    const hookPath = join(root, '.git', 'hooks', 'pre-commit');
+    try {
+      await execFileAsync(hookPath, [], { cwd: root });
+      throw new Error('expected the drift hook to block');
+    } catch (error) {
+      const failure = error as { code: number; stdout: string };
+      expect(failure.code).toBe(1);
+      const stdout = failure.stdout;
+      expect(stdout).toContain('Spec drift detected! Commit blocked.');
+      expect(stdout).toContain('1 memory drifted');
+      expect(stdout).toContain('2 memory orphaned');
+    }
+  });
+
+  it('documents the npx fallback while preferring a repository-local OpenLore binary', async () => {
+    const root = await repository('openlore-drift-local-binary-');
+    await installDriftHook(root);
+
+    const hook = await readFile(join(root, '.git', 'hooks', 'pre-commit'), 'utf-8');
+    expect(hook).toContain('[ -x "./node_modules/.bin/openlore" ]');
+    expect(hook).toContain('OPENLORE_DRIFT_COMMAND=./node_modules/.bin/openlore');
+    expect(hook).toContain('Fall back to the published package via npx only');
+    expect(hook).toContain('OPENLORE_DRIFT_COMMAND=npx');
+    expect(hook).toContain('["--yes", "openlore", "drift"');
+    expect(hook).not.toMatch(/openlore drift[^\n]*2>\/dev\/null/);
+  });
+
+  it('does not let inherited errexit suppress an infrastructure-failure disclosure', async () => {
+    const root = await repository('openlore-drift-errexit-');
+    const hookPath = join(root, '.git', 'hooks', 'pre-commit');
+    await writeFile(hookPath, '#!/bin/sh\nset -e\n', { mode: 0o755 });
+    const localBin = join(root, 'node_modules', '.bin');
+    await mkdir(localBin, { recursive: true });
+    await writeFile(join(localBin, 'openlore'), '#!/bin/sh\necho unavailable >&2\nexit 2\n', { mode: 0o755 });
+    await installDriftHook(root);
+
+    const result = await execFileAsync(hookPath, [], { cwd: root });
+    expect(result.stderr).toContain('unavailable');
+    expect(result.stdout).toContain('could not be checked');
+  });
+
+  it('does not let a verifier launch failure escape inherited errexit', async () => {
+    const root = await repository('openlore-drift-verifier-errexit-');
+    const hookPath = join(root, '.git', 'hooks', 'pre-commit');
+    await writeFile(hookPath, '#!/bin/sh\nset -e\n', { mode: 0o755 });
+    const localBin = join(root, 'node_modules', '.bin');
+    await mkdir(localBin, { recursive: true });
+    await writeFile(join(localBin, 'openlore'), '#!/bin/sh\necho unavailable >&2\nexit 2\n', { mode: 0o755 });
+    await installDriftHook(root);
+
+    const result = await execFileAsync(hookPath, [], { cwd: root, env: { ...process.env, PATH: localBin } });
+    expect(result.stderr).toMatch(/unavailable|node.*not found/i);
+    expect(result.stdout).toContain('could not be checked');
+  });
+
+  it.each([
+    ['', 'empty output'],
+    ['not-json', 'malformed output'],
+    ['{"hasDrift":false,"totalChangedFiles":1,"analyzedFiles":0,"filesOmitted":0,"specRelevantFiles":0}', 'a contradictory clean result'],
+  ])('does not label an external exit 1 as drift for %s (%s)', async (output) => {
+    const root = await repository('openlore-drift-exit-one-');
+    const localBin = join(root, 'node_modules', '.bin');
+    await mkdir(localBin, { recursive: true });
+    await writeFile(
+      join(localBin, 'openlore'),
+      `#!/bin/sh\nprintf '%s\\n' '${output}'\nexit 1\n`,
+      { mode: 0o755 },
+    );
+    await installDriftHook(root);
+
+    const result = await execFileAsync(join(root, '.git', 'hooks', 'pre-commit'), [], { cwd: root });
+    expect(result.stdout).toContain('could not be checked');
+    expect(result.stdout).not.toContain('Spec drift detected!');
+  });
+
+  it('discloses a truncated clean result instead of silently passing it', async () => {
+    const root = await repository('openlore-drift-truncated-');
+    const localBin = join(root, 'node_modules', '.bin');
+    await mkdir(localBin, { recursive: true });
+    await writeFile(
+      join(localBin, 'openlore'),
+      '#!/bin/sh\nprintf \'%s\\n\' \'{"hasDrift":false,"totalChangedFiles":150,"analyzedFiles":100,"filesOmitted":50,"specRelevantFiles":20}\'\n',
+      { mode: 0o755 },
+    );
+    await installDriftHook(root);
+
+    const result = await execFileAsync(join(root, '.git', 'hooks', 'pre-commit'), [], { cwd: root });
+    expect(result.stdout).toContain('could not be fully checked (50 changed file(s) omitted)');
+  });
+
+  it('preserves a failure from hook content that precedes the appended drift block', async () => {
+    const root = await repository('openlore-drift-preserve-prior-');
+    const hookPath = join(root, '.git', 'hooks', 'pre-commit');
+    await writeFile(hookPath, '#!/bin/sh\nfalse\n', { mode: 0o755 });
+    const localBin = join(root, 'node_modules', '.bin');
+    await mkdir(localBin, { recursive: true });
+    await writeFile(
+      join(localBin, 'openlore'),
+      '#!/bin/sh\nprintf \'%s\\n\' \'{"hasDrift":false,"totalChangedFiles":1,"analyzedFiles":1,"filesOmitted":0,"specRelevantFiles":0}\'\n',
+      { mode: 0o755 },
+    );
+    await installDriftHook(root);
+
+    await expect(execFileAsync(hookPath, [], { cwd: root })).rejects.toMatchObject({ code: 1 });
+  });
+
+  it('updates an existing marked drift block when installation is rerun', async () => {
+    const root = await repository('openlore-drift-upgrade-hook-');
+    const hookPath = join(root, '.git', 'hooks', 'pre-commit');
+    await writeFile(
+      hookPath,
+      '#!/bin/sh\n# openlore-drift-hook\necho old-hook\n# end-openlore-drift-hook\n',
+      { mode: 0o755 },
+    );
+    await installDriftHook(root);
+
+    const hook = await readFile(hookPath, 'utf-8');
+    expect(hook).not.toContain('old-hook');
+    expect((hook.match(/# openlore-drift-hook/g) ?? [])).toHaveLength(1);
+    expect(hook).toContain('DRIFT_VERDICT=');
+  });
+
+  it('refuses to append after an unconditional terminal exit', async () => {
+    const root = await repository('openlore-drift-terminal-exit-');
+    const hookPath = join(root, '.git', 'hooks', 'pre-commit');
+    await writeFile(hookPath, '#!/bin/sh\necho managed\nexit 0\n', { mode: 0o755 });
+    const warning = vi.spyOn(logger, 'warning').mockImplementation(() => {});
+
+    await installDriftHook(root);
+
+    expect(await readFile(hookPath, 'utf-8')).not.toContain('# openlore-drift-hook');
+    expect(warning).toHaveBeenCalledWith(expect.stringMatching(/unconditional exit.*manually/i));
+  });
+
+  it('refuses a terminal exit followed only by comments', async () => {
+    const root = await repository('openlore-drift-terminal-exit-comment-');
+    const hookPath = join(root, '.git', 'hooks', 'pre-commit');
+    await writeFile(hookPath, '#!/bin/sh\necho managed\nexit 0 # success\n# managed footer\n', { mode: 0o755 });
+    const warning = vi.spyOn(logger, 'warning').mockImplementation(() => {});
+
+    await installDriftHook(root);
+
+    expect(await readFile(hookPath, 'utf-8')).not.toContain('# openlore-drift-hook');
+    expect(warning).toHaveBeenCalledWith(expect.stringMatching(/unconditional exit.*manually/i));
+  });
+
+  it('leaves malformed drift markers byte-identical on uninstall', async () => {
+    const root = await repository('openlore-drift-malformed-uninstall-');
+    const hookPath = join(root, '.git', 'hooks', 'pre-commit');
+    const original = '#!/bin/sh\n# openlore-drift-hook\necho user-owned\n';
+    await writeFile(hookPath, original, { mode: 0o755 });
+    const warning = vi.spyOn(logger, 'warning').mockImplementation(() => {});
+
+    await uninstallDriftHook(root);
+
+    expect(await readFile(hookPath, 'utf-8')).toBe(original);
+    expect(warning).toHaveBeenCalledWith(expect.stringMatching(/malformed or duplicate markers/i));
+  });
+
+  it('refuses to append shell syntax to a non-shell hook', async () => {
+    const root = await repository('openlore-drift-nonshell-');
+    const hookPath = join(root, '.git', 'hooks', 'pre-commit');
+    await writeFile(hookPath, '#!/usr/bin/env node\nprocess.exit(0);\n', { mode: 0o755 });
+    const warning = vi.spyOn(logger, 'warning').mockImplementation(() => {});
+
+    await installDriftHook(root);
+
+    expect(await readFile(hookPath, 'utf-8')).not.toContain('# openlore-drift-hook');
+    expect(warning).toHaveBeenCalledWith(expect.stringMatching(/non-shell interpreter.*manually/i));
+  });
+
+  it.each([
+    '#!/usr/bin/env node /tmp/bash\n',
+    '#!/usr/bin/python /bin/sh\n',
+  ])('does not accept a non-shell shebang merely because it later mentions a shell: %s', async (shebang) => {
+    const root = await repository('openlore-drift-shebang-bypass-');
+    const hookPath = join(root, '.git', 'hooks', 'pre-commit');
+    await writeFile(hookPath, shebang, { mode: 0o755 });
+    const warning = vi.spyOn(logger, 'warning').mockImplementation(() => {});
+
+    await installDriftHook(root);
+
+    expect(await readFile(hookPath, 'utf-8')).toBe(shebang);
+    expect(warning).toHaveBeenCalledWith(expect.stringMatching(/non-shell interpreter/i));
+  });
+
+  it('refuses to claim an update for malformed drift markers', async () => {
+    const root = await repository('openlore-drift-malformed-marker-');
+    const hookPath = join(root, '.git', 'hooks', 'pre-commit');
+    await writeFile(hookPath, '#!/bin/sh\n# openlore-drift-hook\necho incomplete\n', { mode: 0o755 });
+    const warning = vi.spyOn(logger, 'warning').mockImplementation(() => {});
+
+    await installDriftHook(root);
+
+    expect(await readFile(hookPath, 'utf-8')).toContain('echo incomplete');
+    expect(warning).toHaveBeenCalledWith(expect.stringMatching(/malformed or duplicate markers/i));
+  });
+
+  it('treats contradictory receipt counts as an invalid check result', async () => {
+    const root = await repository('openlore-drift-invalid-receipt-');
+    const localBin = join(root, 'node_modules', '.bin');
+    await mkdir(localBin, { recursive: true });
+    await writeFile(
+      join(localBin, 'openlore'),
+      '#!/bin/sh\nprintf \'%s\\n\' \'{"hasDrift":false,"totalChangedFiles":150,"analyzedFiles":0,"filesOmitted":0,"specRelevantFiles":1}\'\n',
+      { mode: 0o755 },
+    );
+    await installDriftHook(root);
+
+    const result = await execFileAsync(join(root, '.git', 'hooks', 'pre-commit'), [], { cwd: root });
+    expect(result.stdout).toContain('could not be checked');
+  });
+
+  it('sanitizes terminal control characters in drift issue summaries', async () => {
+    const root = await repository('openlore-drift-terminal-safety-');
+    const localBin = join(root, 'node_modules', '.bin');
+    await mkdir(localBin, { recursive: true });
+    const payload = JSON.stringify({
+      hasDrift: true,
+      summary: { gaps: 1 },
+      issues: [{ severity: 'warning', kind: 'gap\nforged', filePath: 'src/evil\u001b]8;;x\u0007\rname.ts' }],
+    });
+    await writeFile(
+      join(localBin, 'openlore'),
+      `#!/bin/sh\nprintf '%s\\n' '${payload}'\nexit 1\n`,
+      { mode: 0o755 },
+    );
+    await installDriftHook(root);
+
+    try {
+      await execFileAsync(join(root, '.git', 'hooks', 'pre-commit'), [], { cwd: root });
+      throw new Error('expected the drift hook to block');
+    } catch (error) {
+      const output = (error as { stdout: string }).stdout;
+      expect(output).not.toContain('\u001b');
+      expect(output).not.toContain('\u0007');
+      expect(output).not.toContain('\r');
+      expect(output).toContain('gap forged');
+      expect(output).toContain('src/evil ]8;;x name.ts');
+    }
+  });
+
+  it('kills TERM-ignoring descendants after bounded output terminates the launcher', async () => {
+    const root = await repository('openlore-drift-process-tree-');
+    const localBin = join(root, 'node_modules', '.bin');
+    await mkdir(localBin, { recursive: true });
+    await writeFile(
+      join(localBin, 'openlore'),
+      [
+        '#!/bin/sh',
+        '( trap "" TERM; sleep 30 ) >/dev/null 2>&1 &',
+        'echo $! > drift-descendant.pid',
+        'awk \'BEGIN { for (i = 0; i < 600000; i++) print "xx" }\'',
+        'wait',
+      ].join('\n') + '\n',
+      { mode: 0o755 },
+    );
+    await installDriftHook(root);
+
+    const result = await execFileAsync(join(root, '.git', 'hooks', 'pre-commit'), [], { cwd: root });
+    expect(result.stdout).toContain('could not be checked');
+    const pid = Number((await readFile(join(root, 'drift-descendant.pid'), 'utf-8')).trim());
+    await new Promise(resolve => setTimeout(resolve, 100));
+    expect(() => process.kill(pid, 0)).toThrow();
+  }, 10_000);
+
   it('runs the post-commit bypass check through its dedicated CLI behavior', async () => {
     const root = await repository('openlore-decisions-post-check-');
     const sentinel = join(root, '.git', 'OPENLORE_GATE_RAN');

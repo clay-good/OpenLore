@@ -618,6 +618,11 @@ describe('detectDrift', () => {
 
     expect(result.issues.length).toBe(0);
     expect(result.hasDrift).toBe(false);
+    expect(result).toMatchObject({
+      totalChangedFiles: 1,
+      analyzedFiles: 1,
+      filesOmitted: 0,
+    });
   });
 
   it('should combine issues from all detection algorithms', async () => {

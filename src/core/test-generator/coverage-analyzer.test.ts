@@ -104,6 +104,19 @@ describe("Auth / UserLogin / SuccessfulLogin", () => {
     expect(report.byDomain['auth'].total).toBe(3);
   });
 
+  it('reaches tagged tests under dotted directories', async () => {
+    const testDir = join(tmpDir, 'spec-tests', 'v1.2');
+    await mkdir(testDir, { recursive: true });
+    await writeFile(
+      join(testDir, 'AuthTests.cs'),
+      '// openlore: {"domain":"auth","requirement":"UserLogin","scenario":"SuccessfulLogin"}\n',
+    );
+
+    const report = await analyzeTestCoverage({ rootPath: tmpDir, testDirs: ['spec-tests'] });
+    expect(report.taggedScenarios).toBe(1);
+    expect(report.coveredScenarios).toBe(1);
+  });
+
   it('counts coverage percentage correctly', async () => {
     const testDir = join(tmpDir, 'spec-tests', 'auth');
     await mkdir(testDir, { recursive: true });
