@@ -534,7 +534,8 @@ export const TOOL_DEFINITIONS = [
           description: 'Minimum severity to report (default: "warning")',
         },
         maxFiles: {
-          type: 'number',
+          type: 'integer',
+          minimum: 1,
           description: 'Maximum number of changed files to analyze (default: 100)',
         },
       },

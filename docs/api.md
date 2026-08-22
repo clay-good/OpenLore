@@ -22,7 +22,9 @@ const drift = await openloreDrift({
   rootPath: '/path/to/project',
   failOn: 'warning',
 });
-if (drift.hasDrift) {
+if (drift.filesOmitted > 0) {
+  console.warn(`Drift result is partial: ${drift.filesOmitted} changed files were omitted`);
+} else if (drift.hasDrift) {
   console.warn(`${drift.summary.total} drift issues found`);
 }
 
@@ -82,4 +84,3 @@ for (const [key, req] of Object.entries(requirements)) {
   console.log(`${key}: ${req.title} (${req.specFile})`);
 }
 ```
-

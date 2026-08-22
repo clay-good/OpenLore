@@ -228,7 +228,7 @@ export function detectGaps(changedFiles: ChangedFile[], specMap: SpecMap, change
 }
 
 /**
- * Detect stale specs: spec references files that were deleted or heavily modified
+ * Detect stale specs: spec references files that were deleted or renamed.
  */
 export function detectStaleSpecs(changedFiles: ChangedFile[], specMap: SpecMap): DriftIssue[] {
   const issues: DriftIssue[] = [];
@@ -854,6 +854,8 @@ export async function detectDrift(options: DriftDetectorOptions): Promise<DriftR
     timestamp: new Date().toISOString(),
     baseRef: options.baseRef ?? '',
     totalChangedFiles: changedFiles.length,
+    analyzedFiles: changedFiles.length,
+    filesOmitted: 0,
     specRelevantFiles,
     issues: dedupedIssues,
     summary: {

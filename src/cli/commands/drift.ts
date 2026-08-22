@@ -7,7 +7,7 @@
 
 import { Command } from 'commander';
 import { sanitizeForTerminal as safe } from '../../utils/misc.js';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { logger } from '../../utils/logger.js';
 import { resolveTrustedApiBase, resolveTrustedSslVerify } from '../../core/services/repo-config-trust.js';
 import { redirectConsoleToStderr } from '../../utils/quiet-stdout.js';
@@ -70,7 +70,7 @@ function severityIcon(severity: DriftSeverity): string {
   }
 }
 
-function kindLabel(kind: string): string {
+export function kindLabel(kind: string): string {
   switch (kind) {
     case 'gap': return 'gap';
     case 'stale': return 'stale';
@@ -78,6 +78,8 @@ function kindLabel(kind: string): string {
     case 'orphaned-spec': return 'orphaned';
     case 'adr-gap': return 'adr-gap';
     case 'adr-orphaned': return 'adr-orphaned';
+    case 'memory-drifted': return 'memory-drifted';
+    case 'memory-orphaned': return 'memory-orphaned';
     default: return kind;
   }
 }
@@ -104,7 +106,7 @@ function displayIssue(issue: DriftIssue, verbose: boolean): void {
   console.log(`      -> ${issue.suggestion}`);
 }
 
-function displaySummary(result: DriftResult): void {
+export function displaySummary(result: DriftResult): void {
   console.log('');
   console.log('   ──────────────────────────────────────');
   console.log('');
@@ -145,49 +147,218 @@ function displaySummary(result: DriftResult): void {
 // ============================================================================
 
 const HOOK_MARKER = '# openlore-drift-hook';
+type HookBlockLocation = { start: number; end: number };
+
+function findDriftHookBlock(content: string): HookBlockLocation | { error: string } | null {
+  const starts = [...content.matchAll(/^# openlore-drift-hook\r?$/gm)];
+  const ends = [...content.matchAll(/^# end-openlore-drift-hook\r?$/gm)];
+  if (starts.length === 0 && ends.length === 0) return null;
+  if (starts.length !== 1 || ends.length !== 1 || starts[0].index === undefined || ends[0].index === undefined) {
+    return { error: 'the existing OpenLore drift block has malformed or duplicate markers' };
+  }
+  const start = starts[0].index;
+  const endStart = ends[0].index;
+  if (endStart <= start) return { error: 'the existing OpenLore drift block markers are out of order' };
+  return { start, end: endStart + ends[0][0].length };
+}
+
+function terminalHookCommand(content: string): 'exit' | 'exec' | null {
+  const executableLines = content.split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(line => line.length > 0 && !line.startsWith('#'));
+  const last = executableLines.at(-1) ?? '';
+  if (/^exit(?:\s+[^#\s]+)?(?:\s+#.*)?$/.test(last)) return 'exit';
+  if (/^exec(?:\s|$)/.test(last)) return 'exec';
+  return null;
+}
+
+const SHELL_INTERPRETERS = new Set(['sh', 'ash', 'bash', 'dash', 'ksh', 'yash', 'zsh']);
+
+function usesShellInterpreter(shebang: string): boolean {
+  if (!shebang.startsWith('#!')) return true;
+  const parts = shebang.slice(2).trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return false;
+  let interpreter = basename(parts[0]);
+  if (interpreter === 'env') {
+    let index = 1;
+    while (parts[index]?.startsWith('-')) index++;
+    interpreter = basename(parts[index] ?? '');
+  }
+  return SHELL_INTERPRETERS.has(interpreter);
+}
+
 const HOOK_CONTENT = `
 ${HOOK_MARKER}
+OPENLORE_DRIFT_PREVIOUS_EXIT=$?
 # Automatically check for spec drift before committing
 # Installed by: openlore drift --install-hook
 
 # Run openlore drift in static mode (fast, no LLM)
-# Use --json for machine-parseable output, suppress only npx banner noise
-DRIFT_OUTPUT=$(npx --yes openlore drift --fail-on warning --json 2>/dev/null)
-DRIFT_EXIT=$?
+# Prefer the repository-local binary so the hook checks with the same OpenLore
+# version as the repository. Fall back to the published package via npx only
+# when no local binary is installed; npx may download or use another version.
+if [ -x "./node_modules/.bin/openlore" ]; then
+  OPENLORE_DRIFT_COMMAND=./node_modules/.bin/openlore
+else
+  OPENLORE_DRIFT_COMMAND=npx
+fi
 
-if [ $DRIFT_EXIT -ne 0 ]; then
+# Bound both runtime and captured output. A broken/skewed launcher is an
+# infrastructure failure, never evidence of drift and never an unbounded commit hang.
+if OPENLORE_DRIFT_OUTPUT=$(node -e '
+const { spawn, spawnSync } = require("node:child_process");
+const requestedCommand = process.argv[1];
+const command = process.platform === "win32"
+  ? (requestedCommand === "npx" ? "npx.cmd" : requestedCommand + ".cmd")
+  : requestedCommand;
+const args = requestedCommand === "npx"
+  ? ["--yes", "openlore", "drift", "--fail-on", "warning", "--json"]
+  : ["drift", "--fail-on", "warning", "--json"];
+const cap = 1024 * 1024;
+const stdoutChunks = [];
+const stderrChunks = [];
+let stdoutBytes = 0;
+let stderrBytes = 0;
+let forcedReason = "";
+let launchError = null;
+const child = spawn(command, args, {
+  detached: process.platform !== "win32",
+  stdio: ["ignore", "pipe", "pipe"],
+  windowsHide: true,
+});
+const killTree = signal => {
+  if (!child.pid) return;
+  if (process.platform === "win32") {
+    spawnSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], { stdio: "ignore", windowsHide: true });
+  } else {
+    try { process.kill(-child.pid, signal); } catch { /* process already exited */ }
+  }
+};
+let killTimer;
+const stop = reason => {
+  if (forcedReason) return;
+  forcedReason = reason;
+  killTree("SIGTERM");
+  killTimer = setTimeout(() => killTree("SIGKILL"), 1000);
+};
+const timeout = setTimeout(() => stop("timed out after 60 seconds"), 60000);
+child.stdout.on("data", chunk => {
+  const remaining = Math.max(0, cap - stdoutBytes);
+  if (remaining > 0) stdoutChunks.push(chunk.subarray(0, remaining));
+  stdoutBytes += chunk.length;
+  if (stdoutBytes > cap) stop("exceeded the 1 MiB stdout limit");
+});
+child.stderr.on("data", chunk => {
+  const remaining = Math.max(0, cap - stderrBytes);
+  if (remaining > 0) stderrChunks.push(chunk.subarray(0, remaining));
+  stderrBytes += chunk.length;
+  if (stderrBytes > cap) stop("exceeded the 1 MiB stderr limit");
+});
+child.on("error", error => { launchError = error; });
+child.on("close", code => {
+  clearTimeout(timeout);
+  // On POSIX, keep the group SIGKILL escalation alive after the leader closes:
+  // a descendant may have ignored SIGTERM and detached its stdio. Windows taskkill
+  // already applies /t /f to the full tree on the first termination request.
+  if (killTimer && (process.platform === "win32" || !forcedReason)) clearTimeout(killTimer);
+  const stdout = Buffer.concat(stdoutChunks).toString("utf8");
+  const stderr = Buffer.concat(stderrChunks).toString("utf8");
+  if (stderr) {
+    const safeStderr = stderr.split(/\\r?\\n/).slice(0, 50).map(line => Array.from(line)
+      .map(ch => { const code = ch.charCodeAt(0); return code < 32 || (code >= 127 && code <= 159) ? " " : ch; })
+      .join("").replace(/ +/g, " ").slice(0, 500)).join("\\n");
+    process.stderr.write(safeStderr + (safeStderr ? "\\n" : ""));
+  }
+  if (stdout) process.stdout.write(stdout);
+  if (forcedReason) console.error("openlore: drift launcher " + forcedReason);
+  if (launchError) console.error("openlore: drift launcher failed: " + launchError.message);
+  process.exitCode = forcedReason || launchError ? 2 : (Number.isInteger(code) ? code : 2);
+});
+' "$OPENLORE_DRIFT_COMMAND"); then
+  OPENLORE_DRIFT_EXIT=0
+else
+  OPENLORE_DRIFT_EXIT=$?
+fi
+
+if OPENLORE_DRIFT_VERDICT=$(printf '%s\n' "$OPENLORE_DRIFT_OUTPUT" | node -e '
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", chunk => { input += chunk; });
+process.stdin.on("end", () => {
+  try {
+    const d = JSON.parse(input);
+    if (d && d.hasDrift === true) process.stdout.write("drift");
+    else if (d && d.hasDrift === false) {
+      const counts = [d.totalChangedFiles, d.analyzedFiles, d.filesOmitted, d.specRelevantFiles];
+      const valid = counts.every(n => Number.isSafeInteger(n) && n >= 0) &&
+        d.totalChangedFiles === d.analyzedFiles + d.filesOmitted &&
+        d.specRelevantFiles <= d.analyzedFiles;
+      process.stdout.write(valid ? (d.filesOmitted > 0 ? "incomplete:" + d.filesOmitted : "clean") : "invalid");
+    } else process.stdout.write("invalid");
+  } catch { process.stdout.write("invalid"); }
+});
+'); then
+  :
+else
+  OPENLORE_DRIFT_VERDICT=invalid
+fi
+
+if [ "$OPENLORE_DRIFT_EXIT" -eq 1 ] && [ "$OPENLORE_DRIFT_VERDICT" = "drift" ]; then
   echo ""
   echo "openlore: Spec drift detected! Commit blocked."
   echo ""
-  # Show concise summary from JSON output
-  if command -v python3 > /dev/null 2>&1; then
-    echo "$DRIFT_OUTPUT" | python3 -c "
-import sys, json
-try:
-    d = json.load(sys.stdin)
-    s = d.get('summary', {})
-    parts = []
-    if s.get('gaps', 0): parts.append(str(s['gaps']) + ' gap(s)')
-    if s.get('stale', 0): parts.append(str(s['stale']) + ' stale')
-    if s.get('uncovered', 0): parts.append(str(s['uncovered']) + ' uncovered')
-    if s.get('orphanedSpecs', 0): parts.append(str(s['orphanedSpecs']) + ' orphaned')
-    print('  Issues: ' + ', '.join(parts))
-    for i in d.get('issues', [])[:5]:
-        sev = i['severity'].upper()
-        print('  [' + sev + '] ' + i['kind'] + ': ' + i['filePath'])
-    if len(d.get('issues', [])) > 5:
-        print('  ... and ' + str(len(d['issues']) - 5) + ' more')
-except: pass
-" 2>/dev/null
-  else
-    echo "  (Install python3 for detailed issue summary in hook output)"
-  fi
+  # Node is guaranteed by OpenLore. Sanitize repository-controlled strings
+  # before printing them to a terminal and keep the summary bounded.
+  printf '%s\n' "$OPENLORE_DRIFT_OUTPUT" | node -e '
+let input = "";
+const safe = value => Array.from(String(value ?? ""))
+  .map(ch => { const code = ch.charCodeAt(0); return code < 32 || (code >= 127 && code <= 159) ? " " : ch; })
+  .join("").replace(/ +/g, " ").slice(0, 240);
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", chunk => { input += chunk; });
+process.stdin.on("end", () => {
+  try {
+    const d = JSON.parse(input);
+    const s = d && typeof d.summary === "object" ? d.summary : {};
+    const fields = [["gaps", "gap(s)"], ["stale", "stale"], ["uncovered", "uncovered"],
+      ["orphanedSpecs", "orphaned"], ["adrGaps", "ADR gap(s)"], ["adrOrphaned", "ADR orphaned"],
+      ["memoryDrifted", "memory drifted"], ["memoryOrphaned", "memory orphaned"]];
+    const parts = fields.filter(([key]) => Number.isFinite(s[key]) && s[key] > 0)
+      .map(([key, label]) => String(s[key]) + " " + label);
+    console.log("  Issues: " + parts.join(", "));
+    const issues = Array.isArray(d.issues) ? d.issues : [];
+    for (const issue of issues.slice(0, 5)) {
+      console.log("  [" + safe(issue && issue.severity).toUpperCase() + "] " +
+        safe(issue && issue.kind) + ": " + safe(issue && issue.filePath));
+    }
+    if (issues.length > 5) console.log("  ... and " + (issues.length - 5) + " more");
+  } catch { /* The verdict parser already classified malformed output. */ }
+});
+' 2>/dev/null
   echo ""
   echo "  Run 'openlore drift' for full details."
   echo "  To skip this check: git commit --no-verify"
   echo ""
   exit 1
+elif [ "$OPENLORE_DRIFT_EXIT" -eq 0 ] && [ "\${OPENLORE_DRIFT_VERDICT%%:*}" = "incomplete" ]; then
+  OPENLORE_DRIFT_OMITTED=\${OPENLORE_DRIFT_VERDICT#incomplete:}
+  echo ""
+  echo "openlore: Spec drift could not be fully checked ($OPENLORE_DRIFT_OMITTED changed file(s) omitted); the drift check will not block this commit."
+  echo "  Re-run with a larger --max-files value before relying on a no-drift result."
+  echo ""
+elif [ "$OPENLORE_DRIFT_EXIT" -ne 0 ] || [ "$OPENLORE_DRIFT_VERDICT" != "clean" ]; then
+  echo ""
+  echo "openlore: Spec drift could not be checked (exit $OPENLORE_DRIFT_EXIT); the drift check will not block this commit."
+  echo "  See the error output above for the reason."
+  echo ""
 fi
+
+# Preserve a failure from hook content that ran before OpenLore was appended.
+if [ "$OPENLORE_DRIFT_PREVIOUS_EXIT" -ne 0 ]; then
+  exit "$OPENLORE_DRIFT_PREVIOUS_EXIT"
+fi
+unset OPENLORE_DRIFT_PREVIOUS_EXIT OPENLORE_DRIFT_COMMAND OPENLORE_DRIFT_OUTPUT
+unset OPENLORE_DRIFT_EXIT OPENLORE_DRIFT_VERDICT OPENLORE_DRIFT_OMITTED
 # end-openlore-drift-hook
 `.trimStart();
 
@@ -197,7 +368,7 @@ export async function installPreCommitHook(rootPath: string): Promise<void> {
 
   if (!(await isResolvedGitRepository(rootPath, target))) {
     logger.error('Not a git repository. Cannot install hook.');
-    process.exitCode = 1;
+    process.exitCode = 2;
     return;
   }
   if (!target.canInstall) {
@@ -205,14 +376,34 @@ export async function installPreCommitHook(rootPath: string): Promise<void> {
     return;
   }
 
-  let alreadyInstalled = false;
+  let updated = false;
   let appended = false;
+  let incompatibleReason: string | null = null;
   const result = await updateHookFile(hookPath, (existing) => {
-    if (existing?.includes(HOOK_MARKER)) {
-      alreadyInstalled = true;
-      return null;
+    if (existing !== null) {
+      const shebang = existing.split(/\r?\n/, 1)[0];
+      if (!usesShellInterpreter(shebang)) {
+        incompatibleReason = `the existing hook uses a non-shell interpreter (${shebang})`;
+        return null;
+      }
+    }
+    if (existing !== null) {
+      const block = findDriftHookBlock(existing);
+      if (block && 'error' in block) {
+        incompatibleReason = block.error;
+        return null;
+      }
+      if (block) {
+        updated = true;
+        return existing.slice(0, block.start) + HOOK_CONTENT.trimEnd() + existing.slice(block.end);
+      }
     }
     appended = existing !== null;
+    const terminal = existing ? terminalHookCommand(existing) : null;
+    if (terminal) {
+      incompatibleReason = `the existing hook ends with an unconditional ${terminal}, so appended checks would be unreachable`;
+      return null;
+    }
     return existing
       ? existing.trimEnd() + '\n\n' + HOOK_CONTENT
       : '#!/bin/sh\n\n' + HOOK_CONTENT;
@@ -221,8 +412,12 @@ export async function installPreCommitHook(rootPath: string): Promise<void> {
     logger.warning(`Cannot install the drift hook at ${displayHookPath(hookPath)}: ${result.reason}`);
     return;
   }
-  if (alreadyInstalled) {
-    logger.success('Pre-commit hook is already installed.');
+  if (incompatibleReason) {
+    logger.warning(`Cannot install the drift hook automatically: ${incompatibleReason}. Add "openlore drift --fail-on warning" to the hook manager manually.`);
+    return;
+  }
+  if (updated) {
+    logger.success('Pre-commit hook updated.');
     return;
   }
   if (appended) logger.discovery('Existing pre-commit hook found. Appending openlore drift check.');
@@ -234,16 +429,20 @@ export async function uninstallPreCommitHook(rootPath: string): Promise<void> {
   const { hookPath } = await resolveGitHookTarget(rootPath, 'pre-commit');
   let hookFound = false;
   let blockFound = false;
+  let malformedReason: string | null = null;
   let deleted = false;
   const result = await updateHookFile(hookPath, (existing) => {
     if (existing === null) return null;
     hookFound = true;
-    if (!existing.includes(HOOK_MARKER)) return null;
+    const block = findDriftHookBlock(existing);
+    if (!block) return null;
+    if ('error' in block) {
+      malformedReason = block.error;
+      return null;
+    }
     blockFound = true;
-    const cleaned = existing
-      .replace(/\n*# openlore-drift-hook[\s\S]*?# end-openlore-drift-hook\n*/g, '')
-      .trim();
-    if (!cleaned || cleaned === '#!/bin/sh') {
+    const cleaned = (existing.slice(0, block.start) + existing.slice(block.end)).trim();
+    if (!cleaned || (cleaned.startsWith('#!') && !cleaned.includes('\n') && usesShellInterpreter(cleaned))) {
       deleted = true;
       return undefined;
     }
@@ -251,6 +450,8 @@ export async function uninstallPreCommitHook(rootPath: string): Promise<void> {
   });
   if (result.status === 'unavailable') {
     logger.warning(`Cannot uninstall the drift hook at ${displayHookPath(hookPath)}: ${result.reason}`);
+  } else if (malformedReason) {
+    logger.warning(`Cannot uninstall the drift hook automatically: ${malformedReason}. Remove the marked block manually.`);
   } else if (!hookFound) {
     logger.warning('No pre-commit hook found.');
   } else if (!blockFound) {
@@ -350,6 +551,11 @@ Pre-commit hook:
   Install with --install-hook to automatically check for drift
   before each commit. The hook runs in static mode (no LLM)
   for fast execution.
+
+Exit codes:
+  0: no drift at or above the configured threshold
+  1: drift found
+  2: drift could not be checked
 `
   )
   .action(async function (this: Command, options: Partial<DriftOptions>) {
@@ -375,7 +581,7 @@ Pre-commit hook:
         // Commander routes --max-files to parent when both parent and subcommand define it.
         // Check globalOpts first for the user-provided value, fall back to subcommand default.
         const raw = globalOpts.maxFiles ?? options.maxFiles ?? String(DEFAULT_DRIFT_MAX_FILES);
-        return typeof raw === 'string' ? parseInt(raw, 10) : raw;
+        return typeof raw === 'string' ? Number(raw) : raw;
       })(),
       verbose: options.verbose ?? globalOpts.verbose ?? false,
       quiet: globalOpts.quiet ?? false,
@@ -383,16 +589,16 @@ Pre-commit hook:
       config: globalOpts.config ?? OPENLORE_CONFIG_REL_PATH,
     };
 
-    if (isNaN(opts.maxFiles) || opts.maxFiles < 1) {
+    if (!Number.isSafeInteger(opts.maxFiles) || opts.maxFiles < 1) {
       logger.error('--max-files must be a positive integer');
-      process.exitCode = 1;
+      process.exitCode = 2;
       return;
     }
 
     // Validate failOn
     if (!['error', 'warning', 'info'].includes(opts.failOn)) {
       logger.error('--fail-on must be one of: error, warning, info');
-      process.exitCode = 1;
+      process.exitCode = 2;
       return;
     }
 
@@ -426,7 +632,7 @@ Pre-commit hook:
       // below-root it refuses rather than silently join mismatched path frames.
       if (!(await isGitRepositoryRoot(rootPath))) {
         logger.error('Not a git repository (or not at its root). Drift detection requires git and must run at the repository root.');
-        process.exitCode = 1;
+        process.exitCode = 2;
         return;
       }
 
@@ -434,7 +640,7 @@ Pre-commit hook:
       const openloreConfig = await readOpenLoreConfig(rootPath);
       if (!openloreConfig) {
         logger.error('No openlore configuration found. Run "openlore init" first.');
-        process.exitCode = 1;
+        process.exitCode = 2;
         return;
       }
 
@@ -445,7 +651,7 @@ Pre-commit hook:
         if (!resolved) {
           logger.error('No LLM API key found. --use-llm requires an API key.');
           logger.discovery('Set ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, or OPENAI_COMPAT_API_KEY + OPENAI_COMPAT_BASE_URL.');
-          process.exitCode = 1;
+          process.exitCode = 2;
           return;
         }
 
@@ -465,7 +671,7 @@ Pre-commit hook:
           }
         } catch (error) {
           logger.error(`Failed to create LLM service: ${(error as Error).message}`);
-          process.exitCode = 1;
+          process.exitCode = 2;
           return;
         }
       }
@@ -477,7 +683,7 @@ Pre-commit hook:
       // Check if specs exist
       if (!(await fileExists(specsPath))) {
         logger.error('No specs found. Run "openlore generate" first.');
-        process.exitCode = 1;
+        process.exitCode = 2;
         return;
       }
 
@@ -521,6 +727,8 @@ Pre-commit hook:
             timestamp: new Date().toISOString(),
             baseRef: gitResult.resolvedBase,
             totalChangedFiles: 0,
+            analyzedFiles: 0,
+            filesOmitted: 0,
             specRelevantFiles: 0,
             issues: [],
             summary: { gaps: 0, stale: 0, uncovered: 0, orphanedSpecs: 0, adrGaps: 0, adrOrphaned: 0, memoryDrifted: 0, memoryOrphaned: 0, memoryOutOfScope: 0, total: 0 },
@@ -605,6 +813,8 @@ Pre-commit hook:
       // Fill in the base ref and actual total count (before --max-files truncation)
       result.baseRef = gitResult.resolvedBase;
       result.totalChangedFiles = actualChangedFiles;
+      result.analyzedFiles = gitResult.files.length;
+      result.filesOmitted = actualChangedFiles - gitResult.files.length;
 
       // ========================================================================
       // PHASE 5: DISPLAY RESULTS
@@ -623,11 +833,23 @@ Pre-commit hook:
           if (warnCount > 0) parts.push(`${warnCount} warning${warnCount > 1 ? 's' : ''}`);
           if (infoCount > 0 && errorCount === 0 && warnCount === 0) parts.push(`${infoCount} info`);
           logger.error(`Drift detected: ${parts.join(', ')}`);
+        } else if (result.filesOmitted > 0) {
+          console.error(
+            `openlore: Drift check incomplete: ${result.analyzedFiles} changed files analyzed, ` +
+            `${result.filesOmitted} omitted.`,
+          );
         }
       } else {
         if (result.issues.length === 0) {
           logger.blank();
-          logger.success('No spec drift detected. Specs are in sync with code changes.');
+          if (result.filesOmitted > 0) {
+            logger.warning(
+              `No drift detected in ${result.analyzedFiles} analyzed changed files; ` +
+              `${result.filesOmitted} changed files were omitted, so the result is incomplete.`,
+            );
+          } else {
+            logger.success('No spec drift detected. Specs are in sync with code changes.');
+          }
           const duration = Date.now() - startTime;
           logger.info('Duration', formatDuration(duration));
         } else {
@@ -677,6 +899,12 @@ Pre-commit hook:
       // Suggest tests for drifted domains
       if (opts.suggestTests && result.hasDrift && !opts.json) {
         const suggestion = await suggestTestsForDrift(result, rootPath);
+        if (suggestion.omittedFiles > 0) {
+          logger.warning(
+            `${suggestion.omittedFiles} test-looking file${suggestion.omittedFiles === 1 ? ' was' : 's were'} ` +
+            'unreadable or above the scan size limit; suggested tests may be incomplete.',
+          );
+        }
         if (suggestion.domains.length > 0) {
           logger.blank();
           console.log('   Suggested tests for affected domains:');
@@ -684,11 +912,11 @@ Pre-commit hook:
           for (const d of suggestion.domains) {
             console.log(`   ${safe(d.domain)}  (${d.testFiles.length} file${d.testFiles.length !== 1 ? 's' : ''})`);
             for (const f of d.testFiles) {
-              console.log(`     → ${f}`);
+              console.log(`     → ${safe(f)}`);
             }
           }
           console.log('');
-          console.log(`   Run: npx vitest ${suggestion.allFiles.join(' ')}`);
+          console.log('   Run the listed files with your project test runner.');
           logger.blank();
         } else {
           logger.blank();
@@ -706,7 +934,7 @@ Pre-commit hook:
       if (process.env.DEBUG) {
         console.error(error);
       }
-      process.exitCode = 1;
+      process.exitCode = 2;
     } finally {
       restoreStdout?.();
     }

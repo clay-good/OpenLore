@@ -505,7 +505,13 @@ export interface DriftIssue {
 export interface DriftResult {
   timestamp: string;
   baseRef: string;
+  /** Total changed files before any analysis limit is applied. */
   totalChangedFiles: number;
+  /** Changed files actually examined by drift detection. */
+  analyzedFiles: number;
+  /** Changed files omitted because the analysis limit was reached. */
+  filesOmitted: number;
+  /** Spec-relevant files among analyzedFiles, not totalChangedFiles. */
   specRelevantFiles: number;
   issues: DriftIssue[];
   summary: {

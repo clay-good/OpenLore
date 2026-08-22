@@ -49,6 +49,10 @@ export async function openloreDrift(options: DriftApiOptions = {}): Promise<Drif
   const maxFiles = options.maxFiles ?? DEFAULT_DRIFT_MAX_FILES;
   const { onProgress } = options;
 
+  if (!Number.isSafeInteger(maxFiles) || maxFiles < 1) {
+    throw new Error('maxFiles must be a positive integer');
+  }
+
   // Validate git repo. Root-only: drift joins git's repo-root-relative changed-file
   // paths against the analyzed-root-relative spec map, so it is correct only when the
   // analyzed root IS the repository root. Below-root support is out of scope here;
@@ -130,6 +134,8 @@ export async function openloreDrift(options: DriftApiOptions = {}): Promise<Drif
       timestamp: new Date().toISOString(),
       baseRef: gitResult.resolvedBase,
       totalChangedFiles: 0,
+      analyzedFiles: 0,
+      filesOmitted: 0,
       specRelevantFiles: 0,
       issues: [],
       summary: { gaps: 0, stale: 0, uncovered: 0, orphanedSpecs: 0, adrGaps: 0, adrOrphaned: 0, memoryDrifted: 0, memoryOrphaned: 0, memoryOutOfScope: 0, total: 0 },
@@ -180,6 +186,8 @@ export async function openloreDrift(options: DriftApiOptions = {}): Promise<Drif
 
   result.baseRef = gitResult.resolvedBase;
   result.totalChangedFiles = actualChangedFiles;
+  result.analyzedFiles = gitResult.files.length;
+  result.filesOmitted = actualChangedFiles - gitResult.files.length;
   progress(onProgress, 'Detecting drift', 'complete', `${result.summary.total} issues`);
 
   // Save LLM logs if applicable

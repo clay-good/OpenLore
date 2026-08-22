@@ -3,8 +3,13 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { join } from 'node:path';
-import { mkdir, rm } from 'node:fs/promises';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
+import type { DriftResult } from '../../types/index.js';
+
+const execFileAsync = promisify(execFile);
 
 // Mock dependencies
 vi.mock('../../utils/logger.js', () => ({
@@ -170,6 +175,25 @@ describe('drift command', () => {
       expect(labels['info']).toBe('INFO');
     });
 
+    it('renders memory-only summaries without claiming that no issues exist', async () => {
+      const { displaySummary } = await import('./drift.js');
+      const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+      const result = {
+        timestamp: '2026-08-22T00:00:00.000Z', baseRef: 'main', totalChangedFiles: 1,
+        analyzedFiles: 1, filesOmitted: 0, specRelevantFiles: 0, issues: [],
+        summary: { gaps: 0, stale: 0, uncovered: 0, orphanedSpecs: 0, adrGaps: 0,
+          adrOrphaned: 0, memoryDrifted: 1, memoryOrphaned: 2, memoryOutOfScope: 0, total: 3 },
+        hasDrift: true, duration: 1, mode: 'static',
+      } satisfies DriftResult;
+
+      displaySummary(result);
+      const output = log.mock.calls.map(([line]) => String(line)).join('\n');
+      expect(output).toContain('Memory drifted: 1');
+      expect(output).toContain('Memory orphaned: 2');
+      expect(output).not.toContain('No issues found');
+      log.mockRestore();
+    });
+
     it('should map severity to icons', () => {
       const icons: Record<string, string> = {
         error: '✗',
@@ -182,16 +206,13 @@ describe('drift command', () => {
       expect(icons['info']).toBe('→');
     });
 
-    it('should map kind to labels', () => {
-      const labels: Record<string, string> = {
-        gap: 'gap',
-        stale: 'stale',
-        uncovered: 'uncovered',
-        'orphaned-spec': 'orphaned',
-      };
+    it('should map every drift kind, including memory kinds, to a visible label', async () => {
+      const { kindLabel } = await import('./drift.js');
 
-      expect(labels['gap']).toBe('gap');
-      expect(labels['orphaned-spec']).toBe('orphaned');
+      expect(kindLabel('gap')).toBe('gap');
+      expect(kindLabel('orphaned-spec')).toBe('orphaned');
+      expect(kindLabel('memory-drifted')).toBe('memory-drifted');
+      expect(kindLabel('memory-orphaned')).toBe('memory-orphaned');
     });
   });
 
@@ -290,6 +311,63 @@ describe('drift command', () => {
       const parsed = parseInt(raw, 10);
       expect(parsed).toBe(50);
     });
+
+    it('serializes the exact default-cap receipt for a real 150-file git changeset', async () => {
+      const originalCwd = process.cwd();
+      const originalWrite = process.stdout.write.bind(process.stdout);
+      const chunks: string[] = [];
+      try {
+        await execFileAsync('git', ['init'], { cwd: testDir });
+        await execFileAsync('git', ['branch', '-M', 'main'], { cwd: testDir });
+        await execFileAsync('git', ['config', 'user.email', 'test@openlore.dev'], { cwd: testDir });
+        await execFileAsync('git', ['config', 'user.name', 'OpenLore Test'], { cwd: testDir });
+        await execFileAsync('git', ['config', 'commit.gpgsign', 'false'], { cwd: testDir });
+        await writeFile(join(testDir, '.openlore', 'config.json'), JSON.stringify({
+          version: '1.0.0', projectType: 'nodejs', openspecPath: './openspec',
+          analysis: { maxFiles: 100000, includePatterns: [], excludePatterns: [] },
+          generation: { model: 'claude-sonnet-4-6', domains: 'auto' },
+          createdAt: '2026-08-22T00:00:00.000Z', lastRun: null,
+        }));
+        await writeFile(join(testDir, 'openspec', 'specs', 'spec.md'), '# Test\n');
+        await mkdir(join(testDir, 'docs'), { recursive: true });
+        const hooksDir = join(testDir, '.git', 'test-hooks');
+        await mkdir(hooksDir, { recursive: true });
+        await execFileAsync('git', ['config', 'core.hooksPath', hooksDir], { cwd: testDir });
+        for (let i = 0; i < 150; i++) {
+          await writeFile(join(testDir, 'docs', `file-${String(i).padStart(3, '0')}.md`), 'before\n');
+        }
+        await execFileAsync('git', ['add', '.'], { cwd: testDir });
+        await execFileAsync('git', ['commit', '-m', 'baseline'], { cwd: testDir });
+        for (let i = 0; i < 150; i++) {
+          await writeFile(join(testDir, 'docs', `file-${String(i).padStart(3, '0')}.md`), 'after\n');
+        }
+
+        process.chdir(testDir);
+        process.stdout.write = ((chunk: string | Uint8Array) => {
+          chunks.push(String(chunk));
+          return true;
+        }) as typeof process.stdout.write;
+        process.exitCode = undefined;
+        const { driftCommand } = await import('./drift.js');
+        await driftCommand.parseAsync(['--json'], { from: 'user' });
+
+        const result = JSON.parse(chunks.join('')) as DriftResult;
+        expect(result).toMatchObject({ totalChangedFiles: 150, analyzedFiles: 100, filesOmitted: 50 });
+        expect(result.totalChangedFiles).toBe(result.analyzedFiles + result.filesOmitted);
+        expect(result.specRelevantFiles).toBeLessThanOrEqual(result.analyzedFiles);
+
+        const { logger } = await import('../../utils/logger.js');
+        vi.clearAllMocks();
+        process.stdout.write = originalWrite;
+        await driftCommand.parseAsync([], { from: 'user' });
+        expect(logger.warning).toHaveBeenCalledWith(expect.stringMatching(/100 analyzed.*50 changed files were omitted.*incomplete/i));
+        expect(logger.success).not.toHaveBeenCalledWith(expect.stringMatching(/in sync/i));
+      } finally {
+        process.stdout.write = originalWrite;
+        process.chdir(originalCwd);
+        process.exitCode = undefined;
+      }
+    }, 20_000);
   });
 
   describe('--max-files input validation', () => {
@@ -303,7 +381,7 @@ describe('drift command', () => {
       const { logger } = await import('../../utils/logger.js');
       await driftCommand.parseAsync(['--max-files', '0'], { from: 'user' });
       expect(logger.error).toHaveBeenCalledWith('--max-files must be a positive integer');
-      expect(process.exitCode).toBe(1);
+      expect(process.exitCode).toBe(2);
     });
 
     it('rejects --max-files -10', async () => {
@@ -311,7 +389,7 @@ describe('drift command', () => {
       const { logger } = await import('../../utils/logger.js');
       await driftCommand.parseAsync(['--max-files', '-10'], { from: 'user' });
       expect(logger.error).toHaveBeenCalledWith('--max-files must be a positive integer');
-      expect(process.exitCode).toBe(1);
+      expect(process.exitCode).toBe(2);
     });
 
     it('rejects non-numeric --max-files', async () => {
@@ -319,7 +397,15 @@ describe('drift command', () => {
       const { logger } = await import('../../utils/logger.js');
       await driftCommand.parseAsync(['--max-files', 'abc'], { from: 'user' });
       expect(logger.error).toHaveBeenCalledWith('--max-files must be a positive integer');
-      expect(process.exitCode).toBe(1);
+      expect(process.exitCode).toBe(2);
+    });
+
+    it('rejects fractional --max-files', async () => {
+      const { driftCommand } = await import('./drift.js');
+      const { logger } = await import('../../utils/logger.js');
+      await driftCommand.parseAsync(['--max-files', '1.5'], { from: 'user' });
+      expect(logger.error).toHaveBeenCalledWith('--max-files must be a positive integer');
+      expect(process.exitCode).toBe(2);
     });
   });
 });

@@ -83,9 +83,13 @@ const NODES = [
 ];
 const EDGES = [edge('src/x.test.ts::testValidate', 'src/utils.ts::validateDirectory')];
 
-function driftResult(issues: DriftResult['issues']): DriftResult {
+function driftResult(issues: DriftResult['issues'], receipt: Pick<DriftResult, 'totalChangedFiles' | 'analyzedFiles' | 'filesOmitted'> = {
+  totalChangedFiles: 1,
+  analyzedFiles: 1,
+  filesOmitted: 0,
+}): DriftResult {
   return {
-    timestamp: 't', baseRef: 'HEAD', totalChangedFiles: 1, specRelevantFiles: 1,
+    timestamp: 't', baseRef: 'HEAD', ...receipt, specRelevantFiles: 1,
     issues,
     summary: { gaps: 0, stale: 0, uncovered: 0, orphanedSpecs: 0, adrGaps: 0, adrOrphaned: 0, memoryDrifted: 0, memoryOrphaned: 0, memoryOutOfScope: 0, total: issues.length },
     hasDrift: issues.length > 0, duration: 1, mode: 'static',
@@ -235,6 +239,16 @@ describe('computeBlastRadius', () => {
     expect(b.memory.orphaned).toBe(0);
     expect(b.specs.willGoStale).toBe(0);
     expect(b.caveats.join(' ')).toMatch(/drift could not be evaluated/i);
+  });
+
+  it('discloses changed files omitted by the composed drift analysis', async () => {
+    vi.mocked(handleCheckSpecDrift).mockResolvedValueOnce(driftResult([], {
+      totalChangedFiles: 150,
+      analyzedFiles: 100,
+      filesOmitted: 50,
+    }));
+    const b = await computeBlastRadius({ directory: '/p' }) as BlastRadiusBriefing;
+    expect(b.caveats.join(' ')).toMatch(/drift omitted 50 changed files.*analysis limit/i);
   });
 
   it('reports the resolved base ref (and caveats the fallback) when the requested ref does not resolve', async () => {
