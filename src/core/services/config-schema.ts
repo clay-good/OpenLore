@@ -54,13 +54,19 @@ type RequiredKeys<T> = {
 type RequiredFieldMap<T> = Record<RequiredKeys<T>, true>
   & Partial<Record<Exclude<keyof T, RequiredKeys<T>>, never>>;
 
-type ConfigRule =
+type ConfigRuleMetadata = {
+  /** Missing values written by older releases may be copied from canonical defaults. */
+  compatibilityDefault?: true;
+};
+
+type ConfigRule = ConfigRuleMetadata & (
   | { kind: 'string' | 'number' | 'boolean' | 'string-or-null' }
   | { kind: 'enum'; values: readonly string[] }
   | { kind: 'array'; element: ConfigRule }
   | { kind: 'string-or-string-array' }
   | { kind: 'record-enum'; values: readonly string[] }
-  | { kind: 'object'; fields: Record<string, ConfigRule>; required: readonly string[]; strict?: boolean };
+  | { kind: 'object'; fields: Record<string, ConfigRule>; required: readonly string[]; strict?: boolean }
+);
 
 function fieldsFor<T>(fields: Record<keyof T, ConfigRule>): Record<string, ConfigRule> {
   return fields as Record<string, ConfigRule>;
@@ -97,7 +103,7 @@ const generationRule: ConfigRule = {
     disableResponseFormat: booleanRule,
     timeout: numberRule,
     chunkMaxChars: numberRule,
-    domains: { kind: 'string-or-string-array' },
+    domains: { kind: 'string-or-string-array', compatibilityDefault: true },
   }),
   required: requiredFor<GenerationConfig>({ domains: true }),
 };
@@ -325,10 +331,10 @@ function isConfigObject(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * Backfill missing required fields inside sections that already exist in both the
- * parsed config and the canonical defaults. Top-level sections are never invented:
- * an empty or hand-truncated config remains invalid, while a config written by an
- * older release can acquire newly-required nested defaults without losing custom values.
+ * Backfill only required fields explicitly marked as upgrade-safe. Nested sections
+ * must already exist in the parsed config; marked top-level fields may be introduced.
+ * This keeps malformed legacy-required structure fatal while allowing deliberate,
+ * default-backed schema additions to remain backward compatible.
  */
 export function backfillRequiredConfigDefaults(
   parsed: unknown,
@@ -347,19 +353,19 @@ export function backfillRequiredConfigDefaults(
     rule: Extract<ConfigRule, { kind: 'object' }>,
     path: string,
   ): void => {
-    if (path !== '') {
-      for (const key of rule.required) {
-        if (!Object.prototype.hasOwnProperty.call(target, key)
-          && Object.prototype.hasOwnProperty.call(fallback, key)) {
-          const childPath = `${path}.${key}`;
-          target[key] = structuredClone(fallback[key]);
-          findings.push({
-            kind: 'default-added',
-            key: childPath,
-            fatal: false,
-            message: `added missing config key '${childPath}' = ${JSON.stringify(fallback[key])} from the current default (file unchanged)`,
-          });
-        }
+    for (const key of rule.required) {
+      const childRule = rule.fields[key];
+      if (childRule?.compatibilityDefault !== true) continue;
+      if (!Object.prototype.hasOwnProperty.call(target, key)
+        && Object.prototype.hasOwnProperty.call(fallback, key)) {
+        const childPath = path ? `${path}.${key}` : key;
+        target[key] = structuredClone(fallback[key]);
+        findings.push({
+          kind: 'default-added',
+          key: childPath,
+          fatal: false,
+          message: `added missing config key '${childPath}' = ${JSON.stringify(fallback[key])} from the current default (file unchanged)`,
+        });
       }
     }
 
@@ -400,6 +406,32 @@ export function findRequiredFieldsWithoutDefaults(defaults: unknown): string[] {
       const childFallback = fallback[key];
       if (!isConfigObject(childFallback)) continue;
       visit(childFallback, childRule, path ? `${path}.${key}` : key);
+    }
+  };
+
+  visit(defaults, CONFIG_RULE, '');
+  return missing;
+}
+
+/** Upgrade-safe fields whose canonical fallback is absent at the same schema path. */
+export function findCompatibilityFieldsWithoutDefaults(defaults: unknown): string[] {
+  const missing: string[] = [];
+
+  const visit = (
+    fallback: unknown,
+    rule: Extract<ConfigRule, { kind: 'object' }>,
+    path: string,
+  ): void => {
+    const fallbackRecord = isConfigObject(fallback) ? fallback : undefined;
+    for (const [key, childRule] of Object.entries(rule.fields)) {
+      const childPath = path ? `${path}.${key}` : key;
+      if (childRule.compatibilityDefault === true
+        && !Object.prototype.hasOwnProperty.call(fallbackRecord ?? {}, key)) {
+        missing.push(childPath);
+      }
+      if (childRule.kind === 'object') {
+        visit(fallbackRecord?.[key], childRule, childPath);
+      }
     }
   };
 

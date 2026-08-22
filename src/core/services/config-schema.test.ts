@@ -12,9 +12,11 @@ import {
   KNOWN_CONFIG_KEYS,
   CONFIG_SCHEMA_VERSION,
   backfillRequiredConfigDefaults,
+  findCompatibilityFieldsWithoutDefaults,
   findRequiredFieldsWithoutDefaults,
   type ConfigMigration,
 } from './config-schema.js';
+import { getDefaultConfig } from './config-manager.js';
 
 /**
  * A fully-populated config typed `Required<OpenLoreConfig>` — TypeScript forces every
@@ -62,17 +64,17 @@ describe('config-schema — type-completeness bind', () => {
   });
 
   it('canonical default sections populate every field the schema requires', () => {
-    const defaults = {
-      version: CONFIG_SCHEMA_VERSION,
-      projectType: 'nodejs',
-      openspecPath: 'openspec',
-      analysis: { maxFiles: 100_000, includePatterns: [], excludePatterns: [] },
-      generation: { model: 'model', domains: 'auto' },
-      createdAt: '2026-08-22T00:00:00.000Z',
-      lastRun: null,
-    };
-
+    const defaults = getDefaultConfig('nodejs', 'openspec');
     expect(findRequiredFieldsWithoutDefaults(defaults)).toEqual([]);
+    expect(findCompatibilityFieldsWithoutDefaults(defaults)).toEqual([]);
+  });
+
+  it('detects an upgrade-safe field missing from the canonical defaults', () => {
+    const defaults = getDefaultConfig('nodejs', 'openspec');
+    delete (defaults.generation as Partial<typeof defaults.generation>).domains;
+
+    expect(findRequiredFieldsWithoutDefaults(defaults)).toContain('generation.domains');
+    expect(findCompatibilityFieldsWithoutDefaults(defaults)).toEqual(['generation.domains']);
   });
 
   it('backfills only missing required values inside existing default sections', () => {
@@ -97,6 +99,25 @@ describe('config-schema — type-completeness bind', () => {
       expect.objectContaining({ kind: 'default-added', key: 'generation.domains', fatal: false }),
     ]);
     expect(parsed.generation).not.toHaveProperty('domains');
+  });
+
+  it('does not repair missing legacy-required fields in a truncated strict section', () => {
+    const defaults = getDefaultConfig('nodejs', 'openspec');
+    const parsed = {
+      ...defaults,
+      analysis: {},
+      generation: {},
+    };
+
+    const result = backfillRequiredConfigDefaults(parsed, defaults);
+
+    expect(result.config).toMatchObject({ analysis: {}, generation: { domains: 'auto' } });
+    expect(result.findings.map(finding => finding.key)).toEqual(['generation.domains']);
+    expect(validateOpenLoreConfig(result.config)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'missing-required', key: 'analysis.maxFiles', fatal: true }),
+      expect.objectContaining({ kind: 'missing-required', key: 'analysis.includePatterns', fatal: true }),
+      expect.objectContaining({ kind: 'missing-required', key: 'analysis.excludePatterns', fatal: true }),
+    ]));
   });
 
   it('requires every non-optional top-level config field', () => {

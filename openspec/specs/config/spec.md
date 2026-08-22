@@ -298,12 +298,13 @@ configuration problem.
 
 ### Requirement: PreviouslyWrittenConfigsRemainReadable
 
-The system SHALL read any configuration emitted by an earlier release when newly required nested
-fields have canonical defaults. It SHALL add those values in memory before validation, warn with
-the exact field and value, preserve every user-supplied setting, and leave the file unchanged.
-Present but invalid values and missing fields without a derivable default SHALL remain validation
-errors. The schema and canonical defaults SHALL be checked together so a required field cannot be
-added to a default-emitted section without a backfill value.
+The system SHALL read every frozen configuration accepted by an earlier supported release. A newly
+required field SHALL be backfilled only when its schema rule explicitly marks the canonical default
+as upgrade-safe. The reader SHALL add that value in memory before validation, warn with the exact
+field and value, preserve every user-supplied setting, and leave the file unchanged. Present but
+invalid values, missing legacy-required fields, and hand-truncated required sections SHALL remain
+validation errors. Schema compatibility metadata and `getDefaultConfig` SHALL be checked together,
+and immutable release fixtures SHALL catch unmarked additions, renames, and type narrowing.
 
 #### Scenario: A pre-2.2 generation section receives the canonical domains default
 
@@ -319,13 +320,39 @@ added to a default-emitted section without a backfill value.
 - **WHEN** `readOpenLoreConfig` validates the file
 - **THEN** the read fails with an attributable error naming `generation.domains`
 
-#### Scenario: Required fields in canonical sections stay defaultable
+#### Scenario: A truncated strict section is not repaired
 
-- **GIVEN** a schema change that makes a field required in a section emitted by `getDefaultConfig`
+- **GIVEN** a config whose `analysis` section omits its legacy-required fields
+- **WHEN** `readOpenLoreConfig` validates the file
+- **THEN** the read fails with attributable errors for the missing analysis fields
+- **AND** canonical defaults are not used to conceal the malformed section
+
+#### Scenario: Upgrade-safe fields have canonical values
+
+- **GIVEN** a schema field marked as safe to backfill during an upgrade
 - **WHEN** the schema-evolution guard runs
 - **THEN** it fails unless `getDefaultConfig` supplies a value for that field
 
+#### Scenario: Historical fixtures remain immutable and readable
+
+- **GIVEN** frozen default and customized configurations from supported release lines
+- **WHEN** the current reader loads the compatibility corpus
+- **THEN** every fixture loads without changing its bytes
+- **AND** a package version change fails the corpus guard until that release adds a fixture
+
+#### Scenario: Configuration producers write the current required field
+
+- **GIVEN** the Pi configuration wizard creates a new config or edits a legacy config without domains
+- **WHEN** it saves the generation section
+- **THEN** it writes `generation.domains: "auto"`
+- **AND** an existing explicit string or string-array domain selection is preserved
+
 ## Technical Notes
+
+- Compatibility schema and normalization: `src/core/services/config-schema.ts`,
+  `src/core/services/config-manager.ts`
+- Frozen corpus: `src/core/services/fixtures/configs/`
+- Secondary config producer: `src/pi/extension.ts`
 
 ## Decisions
 

@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdir, writeFile, rm, readFile, symlink } from 'node:fs/promises';
+import { mkdir, writeFile, rm, readFile, readdir, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -18,6 +18,7 @@ import {
   createOpenSpecStructure,
   mergeOpenSpecConfig,
   detectExistingSpecDir,
+  normalizeOpenLoreConfig,
   resetConfigValidationWarnings,
 } from './config-manager.js';
 import { logger } from '../../utils/logger.js';
@@ -315,45 +316,82 @@ describe('config-manager', () => {
 
     it('loads a pre-2.2 config by backfilling domains without replacing custom settings', async () => {
       const s = spyStderr();
-      const legacy = {
-        version: '1.0.0',
-        projectType: 'nodejs',
-        openspecPath: './custom-specs',
-        analysis: {
-          maxFiles: 500,
-          includePatterns: [],
-          excludePatterns: ['dist/**', 'node_modules/**'],
-        },
-        generation: {
-          provider: 'openai-compat',
-          model: 'codestral-2508',
-          openaiCompatBaseUrl: 'https://api.mistral.ai/v1/',
-        },
-        embedding: { baseUrl: 'http://localhost:8765/v1', model: 'all-MiniLM-L6-v2' },
-        createdAt: '2026-02-28T13:15:28.693Z',
-        lastRun: null,
-      };
+      const source = await readFile(
+        new URL('./fixtures/configs/2.1.9-customized.json', import.meta.url),
+        'utf-8',
+      );
+      const legacy = JSON.parse(source) as Record<string, unknown>;
       try {
-        await writeRawConfig(legacy);
+        const configDir = join(testDir, '.openlore');
+        await mkdir(configDir, { recursive: true });
+        const configPath = join(configDir, 'config.json');
+        await writeFile(configPath, source, 'utf-8');
 
         const result = await readOpenLoreConfig(testDir);
 
-        expect(result).toMatchObject({
-          openspecPath: './custom-specs',
-          analysis: { excludePatterns: ['dist/**', 'node_modules/**'] },
-          generation: {
-            provider: 'openai-compat',
-            model: 'codestral-2508',
-            openaiCompatBaseUrl: 'https://api.mistral.ai/v1/',
-            domains: 'auto',
-          },
-          embedding: { baseUrl: 'http://localhost:8765/v1', model: 'all-MiniLM-L6-v2' },
+        expect(result).toEqual({
+          ...legacy,
+          generation: { ...(legacy.generation as Record<string, unknown>), domains: 'auto' },
         });
-        expect(JSON.parse(await readFile(join(testDir, '.openlore', 'config.json'), 'utf-8'))).toEqual(legacy);
+        expect(await readFile(configPath, 'utf-8')).toBe(source);
         expect(s.lines().some(line => line.includes("generation.domains") && line.includes('"auto"'))).toBe(true);
       } finally {
         s.restore();
       }
+    });
+
+    it('loads every immutable release fixture without changing its bytes', async () => {
+      const fixtureDir = new URL('./fixtures/configs/', import.meta.url);
+      const fixtureNames = (await readdir(fixtureDir)).filter(name => name.endsWith('.json')).sort();
+      const packageJson = JSON.parse(
+        await readFile(new URL('../../../package.json', import.meta.url), 'utf-8'),
+      ) as { version: string };
+      expect(fixtureNames.some(name => name.startsWith(`${packageJson.version}-`))).toBe(true);
+
+      const s = spyStderr();
+      try {
+        for (const fixtureName of fixtureNames) {
+          resetConfigValidationWarnings();
+          const source = await readFile(new URL(fixtureName, fixtureDir), 'utf-8');
+          const configDir = join(testDir, '.openlore');
+          await mkdir(configDir, { recursive: true });
+          const configPath = join(configDir, 'config.json');
+          await writeFile(configPath, source, 'utf-8');
+
+          await expect(readOpenLoreConfig(testDir), fixtureName).resolves.not.toBeNull();
+          expect(await readFile(configPath, 'utf-8'), fixtureName).toBe(source);
+        }
+      } finally {
+        s.restore();
+      }
+    });
+
+    it('normalization is idempotent and preserves explicit domain selections', () => {
+      const legacy = {
+        ...getDefaultConfig('nodejs', 'openspec'),
+        generation: { model: 'custom' },
+      };
+      const first = normalizeOpenLoreConfig(legacy);
+      const second = normalizeOpenLoreConfig(first.config);
+      expect(first.findings.map(finding => finding.key)).toEqual(['generation.domains']);
+      expect(second).toEqual({ config: first.config, findings: [] });
+
+      const explicit = {
+        ...legacy,
+        generation: { model: 'custom', domains: ['auth', 'payments'] },
+      };
+      expect(normalizeOpenLoreConfig(explicit)).toEqual({ config: explicit, findings: [] });
+    });
+
+    it('does not repair a missing or truncated required top-level section', async () => {
+      const defaults = getDefaultConfig('nodejs', 'openspec');
+      const missingGeneration: Partial<typeof defaults> = structuredClone(defaults);
+      delete missingGeneration.generation;
+      await writeRawConfig(missingGeneration);
+      await expect(readOpenLoreConfig(testDir)).rejects.toThrow(/generation/);
+
+      await writeRawConfig({ ...defaults, analysis: {} });
+      await expect(readOpenLoreConfig(testDir)).rejects.toThrow(/analysis\.(maxFiles|includePatterns|excludePatterns)/);
     });
 
     it('still rejects a present but invalid domains value', async () => {

@@ -33,35 +33,20 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 // function created at import time references our controllable vi.fn().
 vi.mock('node:child_process', () => ({ execFile: vi.fn() }));
 
-vi.mock('../../core/services/config-manager.js', () => ({
-  InvalidOpenLoreConfigError: class InvalidOpenLoreConfigError extends Error {},
-  normalizeOpenLoreConfig: (parsed: unknown) => {
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-      return { config: parsed, findings: [] };
-    }
-    const record = parsed as Record<string, unknown>;
-    const generation = record.generation;
-    if (typeof generation !== 'object' || generation === null || Array.isArray(generation)
-      || Object.prototype.hasOwnProperty.call(generation, 'domains')) {
-      return { config: parsed, findings: [] };
-    }
-    return {
-      config: { ...record, generation: { ...generation, domains: 'auto' } },
-      findings: [{
-        kind: 'default-added', key: 'generation.domains', fatal: false,
-        message: "added missing config key 'generation.domains' = \"auto\" from the current default (file unchanged)",
-      }],
-    };
-  },
-  readOpenLoreConfig: vi.fn().mockResolvedValue({
-    projectType: 'nodejs',
-    createdAt: '2024-01-01T00:00:00Z',
-    openspecPath: './openspec',
-    maxFiles: 500,
-  }),
-  // Default resolution: <root>/.openlore/config.json (no --config override in tests).
-  resolveOpenLoreConfigPath: (rootPath: string) => `${rootPath}/.openlore/config.json`,
-}));
+vi.mock('../../core/services/config-manager.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../core/services/config-manager.js')>();
+  return {
+    ...actual,
+    readOpenLoreConfig: vi.fn().mockResolvedValue({
+      projectType: 'nodejs',
+      createdAt: '2024-01-01T00:00:00Z',
+      openspecPath: './openspec',
+      maxFiles: 500,
+    }),
+    // Default resolution: <root>/.openlore/config.json (no --config override in tests).
+    resolveOpenLoreConfigPath: (rootPath: string) => `${rootPath}/.openlore/config.json`,
+  };
+});
 
 vi.mock('../../core/services/llm-service.js', () => ({
   createLLMService: vi.fn().mockReturnValue({
@@ -616,6 +601,7 @@ describe('doctor command', () => {
 
       expect(schemaCheck.status).toBe('warn');
       expect(schemaCheck.detail).toContain('generation.domains');
+      expect(schemaCheck.detail).toContain('"auto"');
       expect(schemaCheck.detail).toContain('compatibility defaults');
       expect(schemaCheck.fix).not.toContain('openlore init');
     });

@@ -310,7 +310,7 @@ async function checkConfigSchema(rootPath: string): Promise<CheckResult> {
       ? [`missing required keys: ${missing.map(f => f.key).join(', ')} — re-run 'openlore init'`]
       : []),
     ...(backfilled.length > 0
-      ? [`using compatibility defaults for: ${backfilled.map(f => f.key).join(', ')} (file unchanged)`]
+      ? [`using compatibility defaults: ${backfilled.map(f => f.message).join('; ')}`]
       : []),
     ...other.slice(0, 3).map(f => f.message),
   ];
