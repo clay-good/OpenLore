@@ -2,11 +2,11 @@
  * openlore drift — programmatic API
  *
  * Detects spec drift: finds code changes not reflected in specs.
- * No side effects (no process.exit, no console.log).
+ * Never controls the process and is console-silent by default.
  */
 
-import { join } from 'node:path';
-import { DEFAULT_DRIFT_MAX_FILES, DEFAULT_ANTHROPIC_MODEL, DEFAULT_OPENAI_MODEL, DEFAULT_GEMINI_MODEL, DEFAULT_OPENAI_COMPAT_MODEL, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_LOGS_SUBDIR, OPENSPEC_DIR, OPENSPEC_SPECS_SUBDIR, ARTIFACT_REPO_STRUCTURE } from '../constants.js';
+import { join, resolve } from 'node:path';
+import { DEFAULT_DRIFT_MAX_FILES, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_LOGS_SUBDIR, OPENSPEC_DIR, OPENSPEC_SPECS_SUBDIR, ARTIFACT_REPO_STRUCTURE } from '../constants.js';
 import { fileExists } from '../utils/command-helpers.js';
 import { readOpenLoreConfig } from '../core/services/config-manager.js';
 import {
@@ -23,6 +23,9 @@ import type { DriftResult } from '../types/index.js';
 import type { DriftApiOptions, ProgressCallback } from './types.js';
 import { resolveOpenspecDir } from '../utils/openspec-dir.js';
 import { resolveTrustedApiBase, resolveTrustedSslVerify } from '../core/services/repo-config-trust.js';
+import { errors, isOpenLoreError } from '../utils/errors.js';
+import { withLoggerOptions } from '../utils/logger.js';
+import { resolveGenerationProvider } from '../core/runtime/generation-core.js';
 
 function progress(onProgress: ProgressCallback | undefined, step: string, status: 'start' | 'progress' | 'complete' | 'skip', detail?: string): void {
   onProgress?.({ phase: 'drift', step, status, detail });
@@ -34,14 +37,11 @@ function progress(onProgress: ProgressCallback | undefined, step: string, status
  * Compares code changes against existing OpenSpec specifications
  * and reports gaps, stale specs, uncovered files, and orphaned specs.
  *
- * @throws Error if not a git repository
- * @throws Error if no openlore configuration found
- * @throws Error if no specs found
- * @throws Error if LLM enhanced mode requested but no API key
+ * @throws OpenLoreError with a stable API code when drift detection cannot complete
  */
-export async function openloreDrift(options: DriftApiOptions = {}): Promise<DriftResult> {
+async function drift(options: DriftApiOptions): Promise<DriftResult> {
   const startTime = Date.now();
-  const rootPath = options.rootPath ?? process.cwd();
+  const rootPath = resolve(options.rootPath ?? process.cwd());
   const baseRef = options.baseRef ?? 'auto';
   const files = options.files ?? [];
   const domains = options.domains ?? [];
@@ -64,9 +64,9 @@ export async function openloreDrift(options: DriftApiOptions = {}): Promise<Drif
   }
 
   // Load config
-  const openloreConfig = await readOpenLoreConfig(rootPath);
+  const openloreConfig = await readOpenLoreConfig(rootPath, options.configPath);
   if (!openloreConfig) {
-    throw new Error('No openlore configuration found. Run openloreInit() first.');
+    throw errors.noConfig(options.configPath);
   }
 
   // Check specs exist
@@ -79,42 +79,23 @@ export async function openloreDrift(options: DriftApiOptions = {}): Promise<Drif
   // Create LLM service if needed — support all four providers
   let llm: LLMService | undefined;
   if (llmEnhanced) {
-    const anthropicKey = process.env.ANTHROPIC_API_KEY;
-    const openaiKey = process.env.OPENAI_API_KEY;
-    const openaiCompatKey = process.env.OPENAI_COMPAT_API_KEY;
-    const geminiKey = process.env.GEMINI_API_KEY;
-    const noKeyProviders = ['claude-code', 'codex-cli', 'mistral-vibe', 'copilot', 'gemini-cli', 'antigravity-cli', 'cursor-agent'];
-    const configuredProvider = options.provider ?? openloreConfig.generation?.provider;
-    if (!noKeyProviders.includes(configuredProvider ?? '') && !anthropicKey && !openaiKey && !openaiCompatKey && !geminiKey) {
-      throw new Error('No LLM API key found. LLM-enhanced drift requires ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, or OPENAI_COMPAT_API_KEY.');
-    }
-    const envDetectedProvider = anthropicKey ? 'anthropic'
-      : geminiKey ? 'gemini'
-      : openaiCompatKey ? 'openai-compat'
-      : 'openai';
-    const provider = configuredProvider ?? envDetectedProvider;
-    const defaultModels: Record<string, string> = {
-      anthropic: DEFAULT_ANTHROPIC_MODEL,
-      gemini: DEFAULT_GEMINI_MODEL,
-      'openai-compat': DEFAULT_OPENAI_COMPAT_MODEL,
-      openai: DEFAULT_OPENAI_MODEL,
-      'claude-code': 'claude-code',
-      'codex-cli': 'codex-cli',
-      'mistral-vibe': 'mistral-vibe',
-      'gemini-cli': 'gemini-cli',
-      'antigravity-cli': 'antigravity-cli',
-      'cursor-agent': 'cursor-agent',
-    };
-    llm = createLLMService({
-      provider,
-      model: options.model ?? defaultModels[provider] ?? DEFAULT_ANTHROPIC_MODEL,
-      apiBase: resolveTrustedApiBase(options.apiBase, openloreConfig.llm?.apiBase),
+    const resolved = resolveGenerationProvider(openloreConfig, {
+      provider: options.provider,
+      model: options.model,
       openaiCompatBaseUrl: options.openaiCompatBaseUrl,
+    });
+    if (!resolved) throw errors.apiNoApiKey();
+    llm = createLLMService({
+      provider: resolved.provider,
+      model: resolved.model,
+      apiBase: resolveTrustedApiBase(options.apiBase, openloreConfig.llm?.apiBase),
+      openaiCompatBaseUrl: resolved.openaiCompatBaseUrl,
       sslVerify: resolveTrustedSslVerify(
         options.sslVerify === undefined ? undefined : !options.sslVerify,
         openloreConfig.llm?.sslVerify,
       ),
       timeout: options.timeout ?? openloreConfig.generation?.timeout,
+      disableResponseFormat: openloreConfig.generation?.disableResponseFormat,
       enableLogging: isLlmLoggingEnabled(),
       logDir: join(rootPath, OPENLORE_DIR, OPENLORE_LOGS_SUBDIR),
       logRoot: rootPath,
@@ -198,4 +179,13 @@ export async function openloreDrift(options: DriftApiOptions = {}): Promise<Drif
   }
 
   return result;
+}
+
+export async function openloreDrift(options: DriftApiOptions = {}): Promise<DriftResult> {
+  try {
+    return await withLoggerOptions({ quiet: options.quiet ?? true }, () => drift(options));
+  } catch (error) {
+    if (isOpenLoreError(error)) throw error;
+    throw errors.pipelineFailed(`Drift detection failed: ${(error as Error).message}`, error);
+  }
 }

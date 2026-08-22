@@ -11,6 +11,7 @@ import {
   readCurrentGeneration,
   readGenerationSnapshot,
 } from './analysis-generation.js';
+import { ARTIFACT_REFACTOR_PRIORITIES } from '../../constants.js';
 
 const roots: string[] = [];
 
@@ -43,6 +44,16 @@ describe('publishGeneration', () => {
       expect(entry.sha256).toMatch(/^[0-9a-f]{64}$/);
       expect(entry.bytes).toBeGreaterThan(0);
     }
+  });
+
+  it('binds refactor priorities when present without requiring them when absent', async () => {
+    const dir = await analysisDir();
+    await writeFile(join(dir, ARTIFACT_REFACTOR_PRIORITIES), JSON.stringify({ priorities: ['hotspot'] }));
+
+    const manifest = await publishGeneration(dir, required);
+
+    expect(manifest?.artifacts.map(entry => entry.path)).toContain(ARTIFACT_REFACTOR_PRIORITIES);
+    expect(await readCurrentGeneration(dir, required)).not.toBeNull();
   });
 
   it('refuses to publish when a required artifact is missing', async () => {
@@ -194,6 +205,52 @@ describe('readGenerationSnapshot', () => {
       await writeFile(join(dir, required[0]), JSON.stringify({ rewritten: true }), 'utf8');
       return 'read-across-an-overwrite';
     });
+    expect(snapshot.state).toBe('analysis-changed');
+  });
+
+  it('rejects refactor evidence rewritten while a generation snapshot is consumed', async () => {
+    const dir = await analysisDir();
+    await writeFile(join(dir, ARTIFACT_REFACTOR_PRIORITIES), '{"priorities":["before"]}', 'utf8');
+    await publishGeneration(dir, required);
+
+    const snapshot = await readGenerationSnapshot(dir, required, async () => {
+      await writeFile(join(dir, ARTIFACT_REFACTOR_PRIORITIES), '{"priorities":["after"]}', 'utf8');
+      return 'mixed-refactor-evidence';
+    });
+
+    expect(snapshot.state).toBe('analysis-changed');
+  });
+
+  it('allows one explicitly degraded artifact while verifying every other real-manifest artifact', async () => {
+    const dir = await analysisDir();
+    const published = await publishGeneration(dir, required);
+    await rm(join(dir, 'dependency-graph.json'));
+
+    const snapshot = await readGenerationSnapshot(
+      dir,
+      required,
+      async () => ({ degraded: 'dependency-graph.json' }),
+      value => [value.degraded],
+    );
+    expect(snapshot).toMatchObject({
+      state: 'ok',
+      value: { degraded: 'dependency-graph.json' },
+      generationId: published!.generationId,
+      compatibility: 'manifest',
+    });
+  });
+
+  it('still rejects an unlisted artifact mismatch when another artifact is degraded', async () => {
+    const dir = await analysisDir();
+    await publishGeneration(dir, required);
+    await rm(join(dir, 'dependency-graph.json'));
+    await writeFile(join(dir, 'llm-context.json'), '{"tampered":true}', 'utf8');
+    const snapshot = await readGenerationSnapshot(
+      dir,
+      required,
+      async () => ({ degraded: 'dependency-graph.json' }),
+      value => [value.degraded],
+    );
     expect(snapshot.state).toBe('analysis-changed');
   });
 

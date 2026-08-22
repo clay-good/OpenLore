@@ -5,6 +5,11 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ## [Unreleased]
 
+- **Programmatic API migration:** analysis results now require `fromCache` and make
+  `depGraph` optional when the persisted graph is missing or corrupt. Generation and full-run
+  results are discriminated by `dryRun`; callers must narrow on `result.dryRun` before reading
+  `pipelineResult`, `init`, or `analysis`. Dry runs no longer fabricate results for stages that
+  did not execute. These are intentional breaking type-shape corrections for embedders.
 - LLM prompt/response diagnostics are now disabled by default, require exact
   `OPENLORE_LLM_LOGS=1` opt-in, redact secrets, and retain at most six files or 300 MB;
   local telemetry documentation now matches its exact gate and recorded event domains.

@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { diffStoreTransitions, appendLedgerEntries, readLedger, ledgerPath } from './ledger.js';
 import { loadDecisionStore, saveDecisionStore, updateDecisionStore, patchDecision } from './store.js';
+import { logger } from '../../utils/logger.js';
 import type { PendingDecision, DecisionStore } from '../../types/index.js';
 
 vi.mock('../../utils/logger.js', () => ({
@@ -120,6 +121,7 @@ describe('ledger append/read', () => {
       await expect(appendLedgerEntries(dir, [
         { id: 'aaaabbbb', title: 'X', from: null, to: 'draft', actor: 'agent', at: '2026-07-18T00:00:00.000Z' },
       ])).resolves.toBeUndefined();
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('Decision ledger append failed'));
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

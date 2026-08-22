@@ -99,6 +99,12 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Verify API analysis and dry-run parity
+        run: npx vitest run --config vitest.integration.config.ts src/api/analyze-parity.integration.test.ts src/api/run-dry-run.integration.test.ts
+
+      - name: Verify published API consumer contract
+        run: npm run test:api-consumer
+
       - name: Verify MCP preset dispatch boundary
         run: npx vitest run --config vitest.integration.config.ts src/cli/commands/mcp.conformance.integration.test.ts
 

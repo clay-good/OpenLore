@@ -143,6 +143,8 @@ export interface RepositoryMapperOptions {
   includePatterns?: string[];
   /** Additional patterns to exclude */
   excludePatterns?: string[];
+  /** Generated directories that cannot be brought into the source corpus by an include. */
+  protectedExcludePatterns?: string[];
   /** Custom scoring configuration */
   scoringConfig?: ScoringConfig;
   /** Progress callback */
@@ -799,6 +801,7 @@ export class RepositoryMapper {
       maxFiles: this.options.maxFiles,
       includePatterns: this.options.includePatterns,
       excludePatterns: this.options.excludePatterns,
+      protectedExcludePatterns: this.options.protectedExcludePatterns,
       onProgress: (progress) => {
         const cap = Math.min(this.options.maxFiles ?? DEFAULT_MAX_FILES, 5_000);
         const pct = 10 + Math.round((Math.min(progress.filesFound, cap) / cap) * 30);

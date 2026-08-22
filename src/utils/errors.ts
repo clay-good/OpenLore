@@ -9,7 +9,9 @@ import {
   OPENLORE_CONFIG_REL_PATH,
 } from '../constants.js';
 
-export type ErrorCode =
+export type ApiErrorCode = 'no-config' | 'no-analysis' | 'no-api-key' | 'pipeline-failed';
+
+export type ErrorCode = ApiErrorCode
   | 'NO_API_KEY'
   | 'NOT_A_REPOSITORY'
   | 'OPENSPEC_EXISTS'
@@ -35,9 +37,10 @@ export class OpenLoreError extends Error {
   constructor(
     message: string,
     public code: ErrorCode,
-    public suggestion?: string
+    public suggestion?: string,
+    options?: ErrorOptions,
   ) {
-    super(message);
+    super(message, options);
     this.name = 'OpenLoreError';
     // Maintains proper stack trace for where error was thrown
     Error.captureStackTrace?.(this, this.constructor);
@@ -68,6 +71,42 @@ export class OpenLoreError extends Error {
  * Error factory functions with predefined messages and suggestions
  */
 export const errors = {
+  noConfig(path?: string, cause?: unknown): OpenLoreError {
+    return new OpenLoreError(
+      `No openlore configuration found${path ? ` at ${path}` : ''}`,
+      'no-config',
+      `Run 'openlore init' to create a configuration file.`,
+      { cause },
+    );
+  },
+
+  noAnalysis(path?: string, cause?: unknown): OpenLoreError {
+    return new OpenLoreError(
+      `No openlore analysis found${path ? ` at ${path}` : ''}`,
+      'no-analysis',
+      `Run 'openlore analyze' before generating specifications.`,
+      { cause },
+    );
+  },
+
+  apiNoApiKey(cause?: unknown): OpenLoreError {
+    return new OpenLoreError(
+      'No API key found for LLM provider',
+      'no-api-key',
+      `Configure an API key or select a supported keyless provider.`,
+      { cause },
+    );
+  },
+
+  pipelineFailed(reason: string, cause?: unknown): OpenLoreError {
+    return new OpenLoreError(
+      reason,
+      'pipeline-failed',
+      `Inspect the underlying cause and retry the pipeline.`,
+      { cause },
+    );
+  },
+
   noApiKey(): OpenLoreError {
     return new OpenLoreError(
       'No API key found for LLM provider',

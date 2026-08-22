@@ -28,7 +28,9 @@ describe('OpenLore-owned LLM logging is explicit opt-in', () => {
     const ownedCallers = files.filter(file => /enableLogging\s*:\s*isLlmLoggingEnabled\(\)/.test(
       readFileSync(join(REPO_ROOT, file), 'utf8'),
     ));
-    expect(ownedCallers).toHaveLength(11);
+    // Both run frontends delegate generation to openloreGenerate instead of
+    // creating another LLM service, so there are 9 production call sites.
+    expect(ownedCallers).toHaveLength(9);
     expect(ownedCallers.filter(file => !/\blogRoot\s*:/.test(
       readFileSync(join(REPO_ROOT, file), 'utf8'),
     )), 'each OpenLore-owned caller must confine its repository-derived log path').toEqual([]);

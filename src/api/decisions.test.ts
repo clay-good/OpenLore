@@ -7,7 +7,8 @@
  * MCP handler and the CLI do — one shared transition table, every door locked.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { resolve } from 'node:path';
 
 const mocks = vi.hoisted(() => ({ saveLogs: vi.fn(async () => {}) }));
 
@@ -67,14 +68,29 @@ vi.mock('../core/decisions/store.js', async (importOriginal) => {
 
 // ── Imports ───────────────────────────────────────────────────────────────────
 
-import { openloreConsolidateDecisions, openloreSyncDecisions } from './decisions.js';
+import { openloreConsolidateDecisions, openloreRecordDecision, openloreSyncDecisions } from './decisions.js';
 import { INACTIVE_STATUSES, loadDecisionStore, updateDecisionStore } from '../core/decisions/store.js';
 import { syncApprovedDecisions } from '../core/decisions/syncer.js';
 import { consolidateDrafts } from '../core/decisions/consolidator.js';
 import { verifyDecisions } from '../core/decisions/verifier.js';
 import { projectDecisions } from '../core/decisions/project.js';
 import { isGitRepositoryRoot } from '../core/drift/index.js';
+import { readOpenLoreConfig } from '../core/services/config-manager.js';
+import { createLLMService } from '../core/services/llm-service.js';
+import { logger } from '../utils/logger.js';
 import type { DecisionStore, PendingDecision } from '../types/index.js';
+
+beforeEach(() => {
+  process.env.ANTHROPIC_API_KEY = 'test-key';
+});
+
+afterEach(() => {
+  delete process.env.ANTHROPIC_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+  delete process.env.GEMINI_API_KEY;
+  delete process.env.OPENAI_COMPAT_API_KEY;
+  delete process.env.OPENAI_COMPAT_BASE_URL;
+});
 
 function makeDecision(overrides: Partial<PendingDecision> = {}): PendingDecision {
   return {
@@ -98,6 +114,111 @@ function makeDecision(overrides: Partial<PendingDecision> = {}): PendingDecision
 function makeStore(decisions: PendingDecision[]): DecisionStore {
   return { version: '1', sessionId: 'test-session', updatedAt: '2026-01-01T00:00:00.000Z', decisions };
 }
+
+describe('decision API boundary contract', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('normalizes the root and honors configPath during sync', async () => {
+    vi.mocked(loadDecisionStore).mockResolvedValue(makeStore([]));
+
+    await openloreSyncDecisions({
+      rootPath: 'relative-project',
+      configPath: 'config/custom.json',
+      dryRun: true,
+    });
+
+    expect(readOpenLoreConfig).toHaveBeenCalledWith(resolve('relative-project'), 'config/custom.json');
+    expect(loadDecisionStore).toHaveBeenCalledWith(resolve('relative-project'));
+  });
+
+  it('normalizes the root when recording a decision', async () => {
+    vi.mocked(loadDecisionStore).mockResolvedValue(makeStore([]));
+
+    await openloreRecordDecision({
+      rootPath: 'relative-project',
+      title: 'Use stable API errors',
+      rationale: 'Callers need machine-readable failures',
+    });
+
+    expect(loadDecisionStore).toHaveBeenCalledWith(resolve('relative-project'));
+    expect(updateDecisionStore).toHaveBeenCalledWith(resolve('relative-project'), expect.any(Function));
+  });
+
+  it('is silent by default even when a decision helper logs an error', async () => {
+    vi.mocked(loadDecisionStore).mockResolvedValue(makeStore([]));
+    vi.mocked(syncApprovedDecisions).mockImplementationOnce(async (store) => {
+      logger.error('hidden decision diagnostic');
+      return { store, result: { synced: [], errors: [], modifiedSpecs: [] } };
+    });
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await openloreSyncDecisions({ rootPath: '/test/project', dryRun: true });
+
+    expect(consoleError).not.toHaveBeenCalled();
+    consoleError.mockRestore();
+  });
+
+  it('returns the named no-config error for a missing explicit config', async () => {
+    vi.mocked(readOpenLoreConfig).mockResolvedValueOnce(null);
+
+    await expect(openloreSyncDecisions({
+      rootPath: '/test/project',
+      configPath: 'config/missing.json',
+    })).rejects.toMatchObject({ code: 'no-config' });
+  });
+
+  it('wraps unexpected decision failures with a typed error and original cause', async () => {
+    const cause = new Error('store unreadable');
+    vi.mocked(loadDecisionStore).mockRejectedValueOnce(cause);
+
+    await expect(openloreConsolidateDecisions({
+      rootPath: '/test/project',
+      provider: 'anthropic',
+    })).rejects.toMatchObject({ code: 'pipeline-failed', cause });
+  });
+
+  it('requires the credential for the selected configured provider', async () => {
+    vi.mocked(readOpenLoreConfig).mockResolvedValueOnce({
+      version: '1.0.0',
+      openspecPath: './openspec',
+      generation: { provider: 'openai', model: 'gpt-5' },
+    } as never);
+
+    await expect(openloreConsolidateDecisions({ rootPath: '/test/project' }))
+      .rejects.toMatchObject({ code: 'no-api-key' });
+    expect(createLLMService).not.toHaveBeenCalled();
+  });
+
+  it('uses configured generation settings for OpenAI-compatible consolidation', async () => {
+    delete process.env.ANTHROPIC_API_KEY;
+    process.env.OPENAI_COMPAT_API_KEY = 'compat-key';
+    process.env.OPENAI_COMPAT_BASE_URL = 'https://trusted.example/v1';
+    vi.mocked(readOpenLoreConfig).mockResolvedValueOnce({
+      version: '1.0.0',
+      openspecPath: './openspec',
+      generation: {
+        provider: 'openai-compat',
+        model: 'custom-model',
+        timeout: 4567,
+        disableResponseFormat: true,
+      },
+    } as never);
+    vi.mocked(loadDecisionStore).mockResolvedValue(makeStore([]));
+    vi.mocked(consolidateDrafts).mockResolvedValue({ decisions: [], supersededIds: [], dispositions: [] });
+
+    await openloreConsolidateDecisions({ rootPath: '/test/project' });
+
+    expect(createLLMService).toHaveBeenCalledWith(expect.objectContaining({
+      provider: 'openai-compat',
+      model: 'custom-model',
+      openaiCompatBaseUrl: 'https://trusted.example/v1',
+      timeout: 4567,
+      disableResponseFormat: true,
+    }));
+  });
+});
 
 describe('openloreSyncDecisions — status-transition guard', () => {
   beforeEach(() => {

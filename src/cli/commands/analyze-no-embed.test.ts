@@ -149,6 +149,14 @@ vi.mock('../../core/analyzer/ai-config-generator.js', () => ({
 
 vi.mock('../../core/services/config-manager.js', () => ({ readOpenLoreConfig: vi.fn() }));
 
+// This suite isolates index-mode selection and uses a deliberately nonexistent
+// repository root. Keep source-stability hashing deterministic so the hardened
+// fingerprint boundary does not turn the fixture into an I/O integration test.
+vi.mock('../../core/services/mcp-handlers/utils.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../core/services/mcp-handlers/utils.js')>();
+  return { ...actual, computeProjectFingerprint: vi.fn().mockResolvedValue('stable-test-fingerprint') };
+});
+
 vi.mock('../../core/analyzer/vector-index.js', () => ({
   VectorIndex: { build: buildMock, exists: vi.fn().mockReturnValue(false) },
 }));

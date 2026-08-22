@@ -16,13 +16,8 @@ import { logger } from '../../utils/logger.js';
 import { resolveTrustedApiBase, resolveTrustedSslVerify, rejectRepoConfiguredTlsOptOut } from '../../core/services/repo-config-trust.js';
 import { resolveOpenspecDir } from '../../utils/openspec-dir.js';
 import { safeJoin } from '../../utils/path-confinement.js';
-import { fileExists, formatDuration, formatAge, parseList, readJsonFile, resolveLLMProvider, estimateCost } from '../../utils/command-helpers.js';
+import { fileExists, formatDuration, formatAge, parseList, readJsonFile, estimateCost } from '../../utils/command-helpers.js';
 import {
-  DEFAULT_ANTHROPIC_MODEL,
-  DEFAULT_OPENAI_MODEL,
-  DEFAULT_OPENAI_COMPAT_MODEL,
-  DEFAULT_COPILOT_MODEL,
-  DEFAULT_GEMINI_MODEL,
   COST_CONFIRMATION_THRESHOLD,
   OPENLORE_DIR,
   OPENLORE_ANALYSIS_REL_PATH,
@@ -36,9 +31,8 @@ import {
   ARTIFACT_LLM_CONTEXT,
   ARTIFACT_DEPENDENCY_GRAPH,
   ARTIFACT_FINGERPRINT,
+  ARTIFACT_REFACTOR_PRIORITIES,
   ARTIFACT_GENERATION_REPORT,
-  ARTIFACT_MAPPING,
-  ARTIFACT_RAG_MANIFEST,
 } from '../../constants.js';
 import type { GenerateOptions } from '../../types/index.js';
 import {
@@ -67,13 +61,15 @@ import {
 import { ADRGenerator } from '../../core/generator/adr-generator.js';
 import type { RepoStructure, LLMContext } from '../../core/analyzer/artifact-generator.js';
 import type { DependencyGraphResult } from '../../core/analyzer/dependency-graph.js';
+import type { RefactorReport } from '../../core/analyzer/refactor-analyzer.js';
 import {
   requirementAnchorProposals,
-  resolveSpecLinkIndex,
   verifyRequirementAnchors,
 } from '../../core/generator/spec-link-service.js';
 import type { SpecSymbolRef } from '../../core/generator/spec-link-index.js';
-import { RagManifestGenerator } from '../../core/generator/rag-manifest-generator.js';
+import { finalizeGeneration, resolveGenerationProvider } from '../../core/runtime/generation-core.js';
+import { acquireGenerationLock } from '../../core/runtime/generation-lock.js';
+import { resolveGenerationSemanticSearch } from '../../core/runtime/generation-semantic-search.js';
 import { createProgress } from '../../utils/progress.js';
 import { getShutdownManager, type ShutdownManager } from '../../utils/shutdown.js';
 import { normalizeDomainName } from '../../core/generator/openspec-compat.js';
@@ -106,6 +102,7 @@ interface AnalysisData {
   repoStructure: RepoStructure;
   llmContext: LLMContext;
   depGraph?: DependencyGraphResult;
+  refactorReport?: RefactorReport;
   age: number;
   timestamp: string;
   generationCompatibility: GenerationManifest['compatibility'];
@@ -286,6 +283,12 @@ export async function loadAnalysis(
         );
         const depGraph = await readArtifact<DependencyGraphResult>(
           join(analysisPath, ARTIFACT_DEPENDENCY_GRAPH), ARTIFACT_DEPENDENCY_GRAPH,
+        ).catch(error => {
+          if ((error as Error).message.startsWith(`Failed to parse ${ARTIFACT_DEPENDENCY_GRAPH}`)) return null;
+          throw error;
+        });
+        const refactorReport = await readArtifact<RefactorReport>(
+          join(analysisPath, ARTIFACT_REFACTOR_PRIORITIES), ARTIFACT_REFACTOR_PRIORITIES,
         );
         // The fingerprint is not consumed by generation, but reading it inside
         // the snapshot makes the complete required artifact set part of this
@@ -298,17 +301,19 @@ export async function loadAnalysis(
           repoStructure,
           llmContext,
           depGraph,
+          refactorReport,
           fingerprint,
           age: Date.now() - stats.mtime.getTime(),
           timestamp: stats.mtime.toISOString(),
         };
       },
+      value => value.depGraph ? [] : [ARTIFACT_DEPENDENCY_GRAPH],
     );
 
     if (snapshot.state !== 'ok') return snapshot;
     const value = snapshot.value;
     if (!value.repoStructure) return { state: 'analysis-unavailable' };
-    if (snapshot.compatibility === 'manifest' && (!value.llmContext || !value.depGraph || !value.fingerprint)) {
+    if (snapshot.compatibility === 'manifest' && (!value.llmContext || !value.fingerprint)) {
       return { state: 'analysis-unavailable' };
     }
     return {
@@ -321,6 +326,7 @@ export async function loadAnalysis(
           phase3_validation: { purpose: 'Validation', files: [], totalTokens: 0 },
         },
         depGraph: value.depGraph ?? undefined,
+        refactorReport: value.refactorReport ?? undefined,
         age: value.age,
         timestamp: value.timestamp,
         generationCompatibility: snapshot.compatibility,
@@ -496,6 +502,7 @@ Each spec.md follows OpenSpec conventions:
     let previewRoot: string | null = null;
     let comparisonOpenspecRoot: string;
     let shutdownManager: ShutdownManager | null = null;
+    let releaseGeneration: (() => Promise<void>) | null = null;
     const removePreview = async (): Promise<void> => {
       if (previewRoot) await rm(previewRoot, { recursive: true, force: true });
     };
@@ -569,14 +576,7 @@ Each spec.md follows OpenSpec conventions:
       // ========================================================================
       logger.section('Loading Analysis');
 
-      const analysisPath = join(rootPath, opts.analysis);
-
-      // --force: clear intermediate stage files so no stale LLM output survives
-      if (options.force === true && !opts.dryRun && !opts.plan && !opts.preview) {
-        const generationDir = join(rootPath, OPENLORE_DIR, OPENLORE_GENERATION_SUBDIR);
-        await rm(generationDir, { recursive: true, force: true });
-        logger.discovery('--force: cleared generation cache');
-      }
+      const analysisPath = resolve(rootPath, opts.analysis);
 
       const analysisData = await loadAnalysis(analysisPath);
 
@@ -591,7 +591,7 @@ Each spec.md follows OpenSpec conventions:
         return;
       }
 
-      const { repoStructure, llmContext, depGraph, age, generationCompatibility } = analysisData.data;
+      const { repoStructure, llmContext, depGraph, refactorReport, age, generationCompatibility } = analysisData.data;
 
       logger.discovery(`Using analysis from ${formatAge(age)}`);
       if (generationCompatibility === 'legacy') {
@@ -644,7 +644,7 @@ Each spec.md follows OpenSpec conventions:
       logger.section('Pre-flight Checks');
 
       // Resolve provider from env vars + config
-      const resolved = resolveLLMProvider(openloreConfig);
+      const resolved = resolveGenerationProvider(openloreConfig, { model: opts.model || undefined });
       if (!resolved) {
         logger.error('No LLM API key found.');
         logger.discovery('Set one of the following environment variables:');
@@ -658,22 +658,7 @@ Each spec.md follows OpenSpec conventions:
       }
       const effectiveProvider = resolved.provider;
       const effectiveBaseUrl = resolved.openaiCompatBaseUrl;
-
-      // Resolve model with priority: CLI flag > config > provider default
-      const defaultModels: Record<string, string> = {
-        anthropic: DEFAULT_ANTHROPIC_MODEL,
-        gemini: DEFAULT_GEMINI_MODEL,
-        'openai-compat': DEFAULT_OPENAI_COMPAT_MODEL,
-        copilot: DEFAULT_COPILOT_MODEL,
-        openai: DEFAULT_OPENAI_MODEL,
-        'claude-code': 'claude-code',
-        'codex-cli': 'codex-cli',
-        'mistral-vibe': 'mistral-vibe',
-        'gemini-cli': 'gemini-cli',
-        'antigravity-cli': 'antigravity-cli',
-        'cursor-agent': 'cursor-agent',
-      };
-      const effectiveModel = opts.model || openloreConfig.generation.model || defaultModels[effectiveProvider];
+      const effectiveModel = resolved.model;
 
       // Only `--insecure` (operator-supplied) may relax TLS. A repo-committed
       // `skipSslVerify` is refused — see repo-config-trust.ts. This sits ~85 lines
@@ -739,6 +724,7 @@ Each spec.md follows OpenSpec conventions:
           apiBase: resolveTrustedApiBase(globalOpts.apiBase, openloreConfig?.llm?.apiBase),
           sslVerify: resolveTrustedSslVerify(globalOpts.insecure, openloreConfig?.llm?.sslVerify),
           timeout: globalOpts.timeout ?? openloreConfig.generation?.timeout,
+          disableResponseFormat: openloreConfig.generation?.disableResponseFormat,
           enableLogging: isLlmLoggingEnabled(),
           logDir: previewRoot
             ? join(previewRoot, OPENLORE_DIR, OPENLORE_LOGS_SUBDIR)
@@ -758,20 +744,19 @@ Each spec.md follows OpenSpec conventions:
         return;
       }
 
-      // Wire semantic search if a vector index exists (used by pipeline + mapping)
-      const analysisDir = join(rootPath, '.openlore', 'analysis');
-      let semanticSearch: import('./../../core/generator/mapping-generator.js').SemanticSearchFn | undefined;
-      {
-        const { VectorIndex } = await import('../../core/analyzer/vector-index.js');
-        if (VectorIndex.exists(analysisDir)) {
-          const { resolveEmbedder } = await import('../../core/analyzer/embedder.js');
-          const embedSvc = await resolveEmbedder(openloreConfig) ?? undefined;
-          if (embedSvc) {
-            const svc = embedSvc;
-            semanticSearch = (query, limit) => VectorIndex.search(analysisDir, query, svc, { limit });
-            logger.analysis('Vector index found — using semantic search for file selection');
-          }
-        }
+      // Wire the same optional semantic retrieval seam used by the API.
+      const semanticSearch = await resolveGenerationSemanticSearch(analysisPath, openloreConfig);
+      if (semanticSearch) logger.analysis('Vector index found — using semantic search for file selection');
+
+      // Paid preview writes only to its private workspace. Real generation owns
+      // the repository from the first stage-cache mutation through finalization.
+      if (!opts.preview) releaseGeneration = await acquireGenerationLock(rootPath);
+
+      // --force: clear intermediate stage files while holding generation ownership.
+      if (options.force === true && !opts.preview) {
+        const generationDir = join(rootPath, OPENLORE_DIR, OPENLORE_GENERATION_SUBDIR);
+        await rm(generationDir, { recursive: true, force: true });
+        logger.discovery('--force: cleared generation cache');
       }
 
       // Run generation pipeline
@@ -804,7 +789,7 @@ Each spec.md follows OpenSpec conventions:
 
       let pipelineResult: PipelineResult;
       try {
-        pipelineResult = await pipeline.run(repoStructure, llmContext, depGraph);
+        pipelineResult = await pipeline.run(repoStructure, llmContext, depGraph, refactorReport);
         progress.succeed('Pipeline completed');
       } catch (error) {
         progress.fail(`Pipeline failed: ${(error as Error).message}`);
@@ -929,51 +914,25 @@ Each spec.md follows OpenSpec conventions:
         return;
       }
 
-      // Derive the mapping cache from the specs that were actually WRITTEN, under
-      // the same deterministic contract the agent-hosted skills finalize through.
-      // A failure here costs only the cache — audit and Repair re-derive in memory.
-      try {
-        const resolution = await resolveSpecLinkIndex({
-          rootPath: opts.outputDir ? fullOpenspecPath : rootPath,
-          openspecPath: opts.outputDir ? '.' : relative(rootPath, fullOpenspecPath) || OPENSPEC_DIR,
-          persist: true,
-          graph: depGraph,
-        });
-        if (resolution.state === 'available') {
-          const { stats } = resolution.index;
-          logger.success(
-            `Spec link index: ${stats.linked}/${stats.totalRequirements} requirements linked ` +
-            `(${stats.ambiguous} ambiguous, ${stats.unmapped} unmapped, ${stats.stale} stale) → ` +
-            `${relative(rootPath, resolution.artifactPath) || ARTIFACT_MAPPING}`,
-          );
-        } else {
-          logger.warning(`Spec link index unavailable (${resolution.reason}): ${resolution.remediation}`);
-        }
-      } catch (error) {
-        logger.warning(`Could not derive the spec link index: ${(error as Error).message}`);
-      }
-
-      // Generate RAG manifest
-      try {
-        if (opts.domains.length > 0 && !hasOperatorOutputDir) {
-          logger.warning('Scoped generation leaves the global RAG manifest unchanged. Run without --domains to refresh it.');
-        } else {
-          const manifestGen = new RagManifestGenerator();
-          const manifest = manifestGen.generate(metadataSpecs, depGraph);
-          const { writeFile } = await import('node:fs/promises');
-          await writeFile(
-            safeJoin(fullOpenspecPath, ARTIFACT_RAG_MANIFEST),
-            JSON.stringify(manifest, null, 2),
-            'utf-8',
-          );
-          // Report where it ACTUALLY went. `openloreConfig.openspecPath` is the
-          // requested value, which may have been clamped back into the root — printing
-          // it made the tool claim a destination it had deliberately refused to use.
-          logger.success(`RAG manifest: ${manifest.domains.length} domains → ${relative(rootPath, join(fullOpenspecPath, ARTIFACT_RAG_MANIFEST)) || ARTIFACT_RAG_MANIFEST}`);
-        }
-      } catch (error) {
-        logger.warning(`Could not generate RAG manifest: ${(error as Error).message}`);
-      }
+      await finalizeGeneration({
+        rootPath,
+        openspecRoot: fullOpenspecPath,
+        openspecPath: relative(rootPath, fullOpenspecPath) || OPENSPEC_DIR,
+        mappingRootPath: opts.outputDir ? fullOpenspecPath : rootPath,
+        mappingOpenspecPath: opts.outputDir ? '.' : relative(rootPath, fullOpenspecPath) || OPENSPEC_DIR,
+        snapshotRootPath: previewRoot ?? rootPath,
+        snapshotOpenspecPath: previewRoot ? '.' : undefined,
+        metadataSpecs,
+        depGraph,
+        scoped: opts.domains.length > 0 && !hasOperatorOutputDir,
+        onProgress: (step, status, detail) => {
+          const label = step === 'mapping' ? 'Spec link index'
+            : step === 'rag-manifest' ? 'RAG manifest'
+            : 'Spec snapshot';
+          if (status === 'complete') logger.success(`${label}: ${detail}`);
+          else logger.warning(`${label} unavailable: ${detail}`);
+        },
+      });
 
       // ========================================================================
       // PHASE 6: POST-GENERATION
@@ -1059,6 +1018,7 @@ Each spec.md follows OpenSpec conventions:
       }
       process.exitCode = 1;
     } finally {
+      if (releaseGeneration) await releaseGeneration();
       // A preview workspace is disposable by definition: remove it whether the
       // pipeline succeeded, failed, or threw mid-provider-call.
       if (previewRoot) {

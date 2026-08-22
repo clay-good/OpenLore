@@ -65,8 +65,8 @@ graph TD
     API_RUN --> API_INIT & API_ANALYZE & API_GENERATE
 
     API_INIT --> Init
-    API_ANALYZE --> Analyze
-    API_GENERATE --> Generate
+    API_ANALYZE -->|shared core| Analyze
+    API_GENERATE -->|shared core| Generate
     API_VERIFY --> Verify
     API_DRIFT --> Drift
     API_DECISIONS --> Decisions
@@ -96,4 +96,3 @@ graph TD
     DS --> SPECS
     DS --> ADRS
 ```
-

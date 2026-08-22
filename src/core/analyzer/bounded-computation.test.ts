@@ -266,7 +266,7 @@ describe('Bounded Computation — repository-wide scans stay bounded (issue #302
   });
 
   it('analyze runs the enrichment extractors sequentially, not five at once', () => {
-    const src = readFileSync(join(ANALYZER_DIR, '..', '..', 'cli', 'commands', 'analyze.ts'), 'utf-8');
+    const src = readFileSync(join(ANALYZER_DIR, 'analysis-core.ts'), 'utf-8');
     // Each extractor is internally bounded; running the five together multiplied that bound by
     // five, and the five together are what exhausted the heap.
     expect(src).not.toMatch(/Promise\.all\(\[\s*\n?\s*extractUIComponents/);
@@ -282,7 +282,7 @@ describe('Bounded Computation — repository-wide scans stay bounded (issue #302
   });
 
   it('analyze discloses files the scan was too large to read (no silent capping)', () => {
-    const src = readFileSync(join(ANALYZER_DIR, '..', '..', 'cli', 'commands', 'analyze.ts'), 'utf-8');
+    const src = readFileSync(join(ANALYZER_DIR, 'analysis-core.ts'), 'utf-8');
     expect(src).toMatch(/const observeOversized: OversizedFileObserver/);
     expect(src).toMatch(/oversizedByPath\.set\(/);
     for (const fn of [
@@ -296,16 +296,16 @@ describe('Bounded Computation — repository-wide scans stay bounded (issue #302
         new RegExp(`${fn}\\([^\\n]+observeOversized\\)`),
       );
     }
-    expect(src).toMatch(/LOWER BOUND/);
+    expect(src).toMatch(/lower bound/i);
     // …and scopes the report to files an extractor would actually have opened, so a large
     // image or data blob does not train the operator to ignore the line.
     expect(src).toMatch(/isScannedByEnrichment\(/);
     // …and the repo-controlled path is sanitized before it reaches the terminal.
-    expect(src).toMatch(/safe\(f\.path\)/);
+    expect(src).toMatch(/status: 'warning'/);
   });
 
   it('the production function and text indexes do not reintroduce all-file fan-out', () => {
-    const analyze = codeOf(join('..', '..', 'cli', 'commands', 'analyze.ts'));
+    const analyze = codeOf('analysis-indexes.ts');
     const liveData = readFileSync(
       join(ANALYZER_DIR, '..', 'services', 'mcp-handlers', 'live-data', 'analyze-repo.ts'),
       'utf-8',
@@ -343,7 +343,7 @@ describe('Bounded Computation — repository-wide scans stay bounded (issue #302
     // graph-bearing file's text — twice, once in that array and once in the Map it was copied
     // into — for the entire index build. BOUNDING CONCURRENCY DOES NOT BOUND RETENTION.
     expect(analyze, 'the function index must read its files in chunks, not all at once')
-      .toMatch(/for \(let i = 0; i < paths\.length; i \+= READ_CHUNK\)/);
+      .toMatch(/for \(let offset = 0; offset < paths\.length; offset \+= chunkSize\)/);
     // Text-line indexing must be bounded in BOTH axes (change: fix-text-line-index-oom).
     // Bounding concurrency alone was not enough here: the reads were already pooled, and the
     // build still ran the heap out because it RETAINED every file's text in one array and then

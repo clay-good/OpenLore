@@ -33,7 +33,7 @@ const INLINE_RENAME = /\brename\s*\(/g;
 
 const ARTIFACT_GENERATOR = 'core/analyzer/artifact-generator.ts';
 const WATCHER = 'core/services/mcp-watcher.ts';
-const ANALYZE_COMMAND = 'cli/commands/analyze.ts';
+const ANALYZE_COMMAND = 'core/analyzer/analysis-core.ts';
 
 describe('harden-artifact-write-atomicity: every artifact writer adopts the shared discipline', () => {
   it('the analyze artifact generator writes only through atomicWriteFile — no bare writeFile', () => {
@@ -83,7 +83,7 @@ describe('harden-artifact-write-atomicity: every artifact writer adopts the shar
   it('holds one analysis lock from the first full-artifact write through generation publication', () => {
     const src = read(ANALYZE_COMMAND);
     const fence = src.indexOf('withAnalysisLock(outputPath');
-    const artifactWrite = src.indexOf('artifactGenerator.generateAndSave', fence);
+    const artifactWrite = src.indexOf('generator.generateAndSave', fence);
     const dependencyWrite = src.indexOf('ARTIFACT_DEPENDENCY_GRAPH', artifactWrite);
     const fingerprintWrite = src.indexOf('ARTIFACT_FINGERPRINT', dependencyWrite);
     const publication = src.indexOf('publishGeneration(', fingerprintWrite);

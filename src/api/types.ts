@@ -30,9 +30,20 @@ export type { DriftResult, DriftSeverity };
 /** Progress callback for consumers to show their own UI */
 export type ProgressCallback = (event: ProgressEvent) => void;
 
+/** Built-in API phases. The open string intersection permits third-party facade phases. */
+export type ProgressPhase =
+  | 'init'
+  | 'analyze'
+  | 'generate'
+  | 'verify'
+  | 'drift'
+  | 'run'
+  | 'decisions'
+  | (string & Record<never, never>);
+
 export interface ProgressEvent {
-  /** Which phase is reporting: 'init' | 'analyze' | 'generate' | 'verify' | 'drift' */
-  phase: string;
+  /** Built-in phase name, or a host-defined extension phase. */
+  phase: ProgressPhase;
   /** Human-readable step description */
   step: string;
   /** Current status of this step */
@@ -51,6 +62,10 @@ export interface BaseOptions {
   rootPath?: string;
   /** Path to openlore config file. Default: '.openlore/config.json' */
   configPath?: string;
+  /** Suppress all logger output for this async API call. Default: true. */
+  quiet?: boolean;
+  /** Cancel while waiting for repository ownership. */
+  signal?: AbortSignal;
   /** Progress callback for status updates */
   onProgress?: ProgressCallback;
 }
@@ -82,7 +97,7 @@ export interface InitResult {
 // ============================================================================
 
 export interface AnalyzeApiOptions extends BaseOptions {
-  /** Maximum files to analyze. Default: 500 */
+  /** Maximum files to analyze. Default: 100,000 */
   maxFiles?: number;
   /** Additional glob patterns to include */
   includePatterns?: string[];
@@ -102,11 +117,31 @@ export interface AnalyzeApiOptions extends BaseOptions {
   outputPath?: string;
 }
 
+export interface AnalyzeDegradation {
+  /** Analysis artifact that could not be loaded. */
+  artifact: string;
+  /** Why the artifact is unavailable. */
+  reason: 'missing' | 'corrupt';
+}
+
+export interface AnalyzeIndexDegradation {
+  /** Search index that could not be built at full fidelity. */
+  index: 'function' | 'text' | 'spec';
+  /** Stable human-readable explanation from the index builder. */
+  reason: string;
+}
+
 export interface AnalyzeResult {
   repoMap: CoreRepositoryMap;
-  depGraph: DependencyGraphResult;
+  depGraph?: DependencyGraphResult;
   artifacts: AnalysisArtifacts;
   duration: number;
+  /** True when the result was loaded from a current persisted analysis. */
+  fromCache: boolean;
+  /** Present when a missing or corrupt optional artifact makes the result partial. */
+  degraded?: AnalyzeDegradation;
+  /** Non-empty when one or more search indexes could not be built at full fidelity. */
+  indexDegradations?: AnalyzeIndexDegradation[];
 }
 
 // ============================================================================
@@ -144,11 +179,21 @@ export interface GenerateApiOptions extends BaseOptions {
   force?: boolean;
 }
 
-export interface GenerateResult {
+export interface GenerateDryRunResult {
+  dryRun: true;
+  report: GenerationReport;
+  duration: number;
+}
+
+export interface GenerateCompletedResult {
+  dryRun: false;
   report: GenerationReport;
   pipelineResult: PipelineResult;
   duration: number;
 }
+
+/** Dry runs never fabricate a pipeline result that did not execute. */
+export type GenerateResult = GenerateDryRunResult | GenerateCompletedResult;
 
 // ============================================================================
 // VERIFY
@@ -240,20 +285,36 @@ export interface RunApiOptions extends BaseOptions {
   openaiCompatBaseUrl?: string;
   /** LLM request timeout in milliseconds. Default: 120000 (2 minutes) */
   timeout?: number;
-  /** Maximum files to analyze. Default: 500 */
+  /** Maximum files to analyze. Default: 100,000 */
   maxFiles?: number;
   /** Generate Architecture Decision Records */
   adr?: boolean;
   /** Preview what would happen without changes */
   dryRun?: boolean;
+  /** Optional host consent gate, called after analysis and before paid generation. */
+  confirmGeneration?: (estimate: { tokens: number; cost: number; provider: string; model: string }) => boolean | Promise<boolean>;
 }
 
-export interface RunResult {
-  init: InitResult;
-  analysis: AnalyzeResult;
-  generation: GenerateResult;
+export interface RunDryRunResult {
+  dryRun: true;
+  plan: {
+    init: boolean;
+    analyze: boolean;
+    generate: boolean;
+  };
+  generation: GenerateDryRunResult;
   duration: number;
 }
+
+export interface RunCompletedResult {
+  dryRun: false;
+  init: InitResult;
+  analysis: AnalyzeResult;
+  generation: GenerateCompletedResult;
+  duration: number;
+}
+
+export type RunResult = RunDryRunResult | RunCompletedResult;
 
 // ============================================================================
 // AUDIT

@@ -15,7 +15,12 @@ import {
 } from '../constants.js';
 import { lookupPricing } from '../core/services/llm-service.js';
 import type { LLMContext } from '../core/analyzer/artifact-generator.js';
-import { resolveTrustedCompatBase } from '../core/services/repo-config-trust.js';
+import {
+  resolveGenerationProvider,
+  type ProviderName,
+} from '../core/runtime/llm-provider-resolution.js';
+
+export type { ProviderName };
 
 /**
  * Check whether a file or directory exists at the given path.
@@ -64,8 +69,6 @@ export function parseList(value: string): string[] {
   return value.split(',').map((s) => s.trim()).filter(Boolean);
 }
 
-export type ProviderName = 'anthropic' | 'openai' | 'openai-compat' | 'gemini' | 'claude-code' | 'codex-cli' | 'mistral-vibe' | 'copilot' | 'gemini-cli' | 'antigravity-cli' | 'cursor-agent';
-
 /**
  * Resolve the LLM provider and base URL from environment variables.
  * Returns null when no key is found, allowing callers to handle the error their own way.
@@ -73,36 +76,12 @@ export type ProviderName = 'anthropic' | 'openai' | 'openai-compat' | 'gemini' |
  * Priority: ANTHROPIC_API_KEY > GEMINI_API_KEY > OPENAI_COMPAT_API_KEY > OPENAI_API_KEY
  */
 export function resolveLLMProvider(openloreConfig?: {
-  generation?: { provider?: string; openaiCompatBaseUrl?: string };
+  generation?: { provider?: string; model?: string; openaiCompatBaseUrl?: string };
 }): { provider: ProviderName; openaiCompatBaseUrl?: string } | null {
-  const anthropicKey = process.env.ANTHROPIC_API_KEY;
-  const geminiKey = process.env.GEMINI_API_KEY;
-  const openaiCompatKey = process.env.OPENAI_COMPAT_API_KEY;
-  const openaiKey = process.env.OPENAI_API_KEY;
-
-  const configProvider = openloreConfig?.generation?.provider as ProviderName | undefined;
-
-  // These providers don't need an API key
-  if (configProvider === 'claude-code' || configProvider === 'codex-cli' || configProvider === 'mistral-vibe' || configProvider === 'copilot' || configProvider === 'gemini-cli' || configProvider === 'antigravity-cli' || configProvider === 'cursor-agent') {
-    return { provider: configProvider };
-  }
-
-  if (!anthropicKey && !geminiKey && !openaiCompatKey && !openaiKey) return null;
-
-  const envProvider: ProviderName = anthropicKey ? 'anthropic'
-    : geminiKey ? 'gemini'
-    : openaiCompatKey ? 'openai-compat'
-    : 'openai';
-
-  const provider = configProvider ?? envProvider;
-  const openaiCompatBaseUrl = provider === 'openai-compat'
-    ? resolveTrustedCompatBase(
-      process.env.OPENAI_COMPAT_BASE_URL,
-      openloreConfig?.generation?.openaiCompatBaseUrl,
-    )
-    : undefined;
-
-  return { provider, openaiCompatBaseUrl };
+  const resolved = resolveGenerationProvider(openloreConfig);
+  return resolved
+    ? { provider: resolved.provider, openaiCompatBaseUrl: resolved.openaiCompatBaseUrl }
+    : null;
 }
 
 /**

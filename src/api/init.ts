@@ -2,7 +2,7 @@
  * openlore init — programmatic API
  *
  * Detects project type and creates openlore configuration.
- * No side effects (no process.exit, no console.log).
+ * Performs the documented filesystem initialization without process control or console output.
  */
 
 import { resolve } from 'node:path';
@@ -13,6 +13,7 @@ import {
 } from '../core/services/project-detector.js';
 import {
   getDefaultConfig,
+  readOpenLoreConfig,
   writeOpenLoreConfig,
   openloreConfigExists,
   openspecDirExists,
@@ -22,6 +23,8 @@ import {
 import { ensureGitignored } from '../core/services/gitignore-manager.js';
 import type { InitApiOptions, InitResult, ProgressCallback } from './types.js';
 import { safeJoin } from '../utils/path-confinement.js';
+import { withLoggerOptions } from '../utils/logger.js';
+import { errors, isOpenLoreError } from '../utils/errors.js';
 
 function progress(onProgress: ProgressCallback | undefined, step: string, status: 'start' | 'progress' | 'complete' | 'skip', detail?: string): void {
   onProgress?.({ phase: 'init', step, status, detail });
@@ -33,11 +36,11 @@ function progress(onProgress: ProgressCallback | undefined, step: string, status
  * Creates `.openlore/config.json`, the `openspec/` directory structure,
  * and updates `.gitignore`.
  *
- * @throws Error if openspec path is outside project root
- * @throws Error if config exists and force is false
+ * @throws OpenLoreError if initialization fails; an existing config returns `created: false`
  */
-export async function openloreInit(options: InitApiOptions = {}): Promise<InitResult> {
+async function init(options: InitApiOptions): Promise<InitResult> {
   const rootPath = resolve(options.rootPath ?? process.cwd());
+  const configPath = options.configPath ?? OPENLORE_CONFIG_REL_PATH;
   let openspecRelPath = options.openspecPath ?? DEFAULT_OPENSPEC_PATH;
   // Point at existing specs (docs/specs/, specs/) rather than creating an empty
   // openspec/ blind to them, unless an explicit path was given (Spec 26 B5).
@@ -56,12 +59,13 @@ export async function openloreInit(options: InitApiOptions = {}): Promise<InitRe
   progress(onProgress, 'Detecting project type', 'complete', projectType);
 
   // Check existing config
-  const configExists = await openloreConfigExists(rootPath);
+  const configExists = await openloreConfigExists(rootPath, options.configPath);
   if (configExists && !force) {
+    const existingConfig = await readOpenLoreConfig(rootPath, options.configPath);
     progress(onProgress, 'Configuration exists', 'skip');
     return {
-      configPath: OPENLORE_CONFIG_REL_PATH,
-      openspecPath: openspecRelPath,
+      configPath,
+      openspecPath: existingConfig?.openspecPath ?? openspecRelPath,
       projectType,
       created: false,
     };
@@ -70,7 +74,7 @@ export async function openloreInit(options: InitApiOptions = {}): Promise<InitRe
   // Create config
   progress(onProgress, 'Creating configuration', 'start');
   const config = getDefaultConfig(detection.projectType, openspecRelPath);
-  await writeOpenLoreConfig(rootPath, config);
+  await writeOpenLoreConfig(rootPath, config, options.configPath);
   progress(onProgress, 'Creating configuration', 'complete');
 
   // Create openspec directory
@@ -90,9 +94,20 @@ export async function openloreInit(options: InitApiOptions = {}): Promise<InitRe
   progress(onProgress, 'Updating .gitignore', gitignoreResult === 'present' ? 'skip' : 'complete');
 
   return {
-    configPath: OPENLORE_CONFIG_REL_PATH,
+    configPath,
     openspecPath: openspecRelPath,
     projectType,
     created: true,
   };
+}
+
+export function openloreInit(options: InitApiOptions = {}): Promise<InitResult> {
+  return withLoggerOptions({ quiet: options.quiet ?? true }, async () => {
+    try {
+      return await init(options);
+    } catch (error) {
+      if (isOpenLoreError(error)) throw error;
+      throw errors.pipelineFailed(`Initialization failed: ${(error as Error).message}`, error);
+    }
+  });
 }

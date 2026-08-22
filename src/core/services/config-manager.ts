@@ -83,11 +83,12 @@ export function retargetPrimaryConfigRoot(rootPath: string): () => void {
  * check — and the two direct readers outside this module — routes through here so
  * an explicit `--config` is honored uniformly.
  */
-export function resolveOpenLoreConfigPath(rootPath: string): string {
+export function resolveOpenLoreConfigPath(rootPath: string, configPath?: string): string {
+  const absRoot = resolve(rootPath);
+  if (configPath) return resolve(absRoot, configPath);
   if (primaryConfigOverride && resolve(rootPath) === primaryConfigOverride.root) {
     return primaryConfigOverride.configPath;
   }
-  const absRoot = resolve(rootPath);
   return safeJoin(absRoot, join(OPENLORE_DIR, OPENLORE_CONFIG_FILENAME));
 }
 
@@ -203,8 +204,8 @@ function emitConfigValidationWarnings(
 /**
  * Read openlore configuration from .openlore/config.json
  */
-export async function readOpenLoreConfig(rootPath: string): Promise<OpenLoreConfig | null> {
-  const configPath = resolveOpenLoreConfigPath(rootPath);
+export async function readOpenLoreConfig(rootPath: string, explicitConfigPath?: string): Promise<OpenLoreConfig | null> {
+  const configPath = resolveOpenLoreConfigPath(rootPath, explicitConfigPath);
   let content: string;
   try {
     content = await readFile(configPath, 'utf-8');
@@ -234,9 +235,10 @@ export async function readOpenLoreConfig(rootPath: string): Promise<OpenLoreConf
  */
 export async function writeOpenLoreConfig(
   rootPath: string,
-  config: OpenLoreConfig
+  config: OpenLoreConfig,
+  explicitConfigPath?: string,
 ): Promise<void> {
-  const configPath = resolveOpenLoreConfigPath(rootPath);
+  const configPath = resolveOpenLoreConfigPath(rootPath, explicitConfigPath);
 
   await ensureDir(dirname(configPath));
   await writeFile(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
@@ -245,8 +247,8 @@ export async function writeOpenLoreConfig(
 /**
  * Check if openlore config already exists
  */
-export async function openloreConfigExists(rootPath: string): Promise<boolean> {
-  return fileExists(resolveOpenLoreConfigPath(rootPath));
+export async function openloreConfigExists(rootPath: string, configPath?: string): Promise<boolean> {
+  return fileExists(resolveOpenLoreConfigPath(rootPath, configPath));
 }
 
 /**

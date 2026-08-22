@@ -188,7 +188,7 @@ describe('generate command', () => {
       const source = readFileSync(fileURLToPath(new URL('./generate.ts', import.meta.url)), 'utf-8');
       expect(source).toContain('openspecRoot: fullOpenspecPath');
       expect(source).toContain('updateConfig: hasOperatorOutputDir || opts.domains.length === 0');
-      expect(source).toContain('Scoped generation leaves the global RAG manifest unchanged');
+      expect(source).toContain('scoped: opts.domains.length > 0 && !hasOperatorOutputDir');
     });
 
     it('derives the link index from the specs it wrote, not from the pipeline result', () => {
@@ -197,7 +197,7 @@ describe('generate command', () => {
       expect(source).toContain('verifyRequirementAnchors(requirementAnchorProposals(pipelineResult), depGraph)');
       // …and the persisted index is derived AFTER it, from the files on disk.
       const write = source.indexOf('await writer.writeSpecs(');
-      const derive = source.indexOf('resolveSpecLinkIndex({');
+      const derive = source.indexOf('await finalizeGeneration({');
       expect(write).toBeGreaterThan(-1);
       expect(derive).toBeGreaterThan(write);
       // No probabilistic matcher survives as a coverage input.
@@ -478,7 +478,7 @@ describe('generate preview modes', () => {
   it('runs dry-run and plan mode before provider resolution or construction', () => {
     const source = readFileSync(fileURLToPath(new URL('./generate.ts', import.meta.url)), 'utf-8');
     const planReturn = source.indexOf("logger.success(`${opts.dryRun ? 'Dry run' : 'Plan'} complete");
-    const providerResolved = source.indexOf('const resolved = resolveLLMProvider(');
+    const providerResolved = source.indexOf('const resolved = resolveGenerationProvider(');
     const providerCreated = source.indexOf('llm = createLLMService(');
     expect(planReturn).toBeGreaterThan(-1);
     expect(providerResolved).toBeGreaterThan(planReturn);
@@ -490,6 +490,7 @@ describe('generate preview modes', () => {
     expect(source).toContain("mkdtemp(join(tmpdir(), 'openlore-preview-'))");
     expect(source).toContain('opts.outputDir = previewRoot;');
     expect(source).toContain('? join(previewRoot, OPENLORE_DIR, OPENLORE_LOGS_SUBDIR)');
+    expect(source).toContain('snapshotRootPath: previewRoot ?? rootPath');
     // Cleanup runs in a finally, so a provider failure cannot leak the workspace.
     expect(source).toMatch(/finally \{[\s\S]*if \(previewRoot\)[\s\S]*rm\(previewRoot/);
   });

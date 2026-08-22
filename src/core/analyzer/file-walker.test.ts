@@ -466,4 +466,17 @@ describe('FileWalker', () => {
       expect(meta!.lines).toBeGreaterThan(0);
     });
   });
+
+  describe('traversal resource bounds', () => {
+    it('fails closed before retaining more than the entry budget', async () => {
+      await Promise.all(Array.from({ length: 5 }, (_, index) => writeFile(join(testDir, `file-${index}.ts`), '')));
+      await expect(walkDirectory(testDir, { maxEntries: 4 })).rejects.toThrow(/entry budget exceeded/i);
+    });
+
+    it('fails closed when the directory depth budget is exceeded', async () => {
+      await mkdir(join(testDir, 'one', 'two'), { recursive: true });
+      await writeFile(join(testDir, 'one', 'two', 'deep.ts'), '');
+      await expect(walkDirectory(testDir, { maxDepth: 1 })).rejects.toThrow(/depth budget exceeded/i);
+    });
+  });
 });

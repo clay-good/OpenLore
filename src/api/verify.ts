@@ -2,11 +2,11 @@
  * openlore verify — programmatic API
  *
  * Tests generated spec accuracy against actual source code.
- * No side effects (no process.exit, no console.log).
+ * Never controls the process and is console-silent by default.
  */
 
-import { join } from 'node:path';
-import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_LOGS_SUBDIR, OPENLORE_OUTPUTS_SUBDIR, OPENLORE_VERIFICATION_SUBDIR, OPENSPEC_SPECS_SUBDIR, ARTIFACT_DEPENDENCY_GRAPH, ARTIFACT_GENERATION_REPORT, DEFAULT_ANTHROPIC_MODEL, DEFAULT_OPENAI_MODEL, DEFAULT_GEMINI_MODEL, DEFAULT_OPENAI_COMPAT_MODEL } from '../constants.js';
+import { join, resolve } from 'node:path';
+import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_LOGS_SUBDIR, OPENLORE_OUTPUTS_SUBDIR, OPENLORE_VERIFICATION_SUBDIR, OPENSPEC_SPECS_SUBDIR, ARTIFACT_DEPENDENCY_GRAPH, ARTIFACT_GENERATION_REPORT } from '../constants.js';
 import { fileExists, readJsonFile } from '../utils/command-helpers.js';
 import { readOpenLoreConfig } from '../core/services/config-manager.js';
 import { createLLMService } from '../core/services/llm-service.js';
@@ -18,6 +18,9 @@ import type { GenerationReport } from '../core/generator/openspec-writer.js';
 import type { VerifyApiOptions, VerifyResult, ProgressCallback } from './types.js';
 import { resolveOpenspecDir } from '../utils/openspec-dir.js';
 import { resolveTrustedApiBase, resolveTrustedSslVerify } from '../core/services/repo-config-trust.js';
+import { errors, isOpenLoreError } from '../utils/errors.js';
+import { withLoggerOptions } from '../utils/logger.js';
+import { resolveGenerationProvider } from '../core/runtime/generation-core.js';
 
 function progress(onProgress: ProgressCallback | undefined, step: string, status: 'start' | 'progress' | 'complete' | 'skip', detail?: string): void {
   onProgress?.({ phase: 'verify', step, status, detail });
@@ -29,14 +32,11 @@ function progress(onProgress: ProgressCallback | undefined, step: string, status
  * Samples files and validates that specs accurately describe behavior
  * using an LLM to predict behavior from specs and compare against code.
  *
- * @throws Error if no openlore configuration found
- * @throws Error if no specs or analysis found
- * @throws Error if no LLM API key found
- * @throws Error if no verification candidates found
+ * @throws OpenLoreError with a stable API code when verification cannot complete
  */
-export async function openloreVerify(options: VerifyApiOptions = {}): Promise<VerifyResult> {
+async function verify(options: VerifyApiOptions): Promise<VerifyResult> {
   const startTime = Date.now();
-  const rootPath = options.rootPath ?? process.cwd();
+  const rootPath = resolve(options.rootPath ?? process.cwd());
   const samples = options.samples ?? 5;
   const threshold = options.threshold ?? 0.5;
   const { onProgress } = options;
@@ -49,9 +49,9 @@ export async function openloreVerify(options: VerifyApiOptions = {}): Promise<Ve
   }
 
   // Load config
-  const openloreConfig = await readOpenLoreConfig(rootPath);
+  const openloreConfig = await readOpenLoreConfig(rootPath, options.configPath);
   if (!openloreConfig) {
-    throw new Error('No openlore configuration found. Run openloreInit() first.');
+    throw errors.noConfig(options.configPath);
   }
 
   // Check specs exist
@@ -64,12 +64,17 @@ export async function openloreVerify(options: VerifyApiOptions = {}): Promise<Ve
   // Load dependency graph
   progress(onProgress, 'Loading analysis', 'start');
   const analysisPath = join(rootPath, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
-  const depGraph = await readJsonFile<DependencyGraphResult>(
-    join(analysisPath, ARTIFACT_DEPENDENCY_GRAPH),
-    ARTIFACT_DEPENDENCY_GRAPH,
-  );
+  let depGraph: DependencyGraphResult | null;
+  try {
+    depGraph = await readJsonFile<DependencyGraphResult>(
+      join(analysisPath, ARTIFACT_DEPENDENCY_GRAPH),
+      ARTIFACT_DEPENDENCY_GRAPH,
+    );
+  } catch (error) {
+    throw errors.noAnalysis(analysisPath, error);
+  }
   if (!depGraph) {
-    throw new Error('No analysis found. Run openloreAnalyze() first.');
+    throw errors.noAnalysis(analysisPath);
   }
 
   // Load generation report
@@ -80,47 +85,25 @@ export async function openloreVerify(options: VerifyApiOptions = {}): Promise<Ve
   const generationContext: string[] = genReport?.filesWritten ?? [];
   progress(onProgress, 'Loading analysis', 'complete');
 
-  // Create LLM service — support all four providers
-  const anthropicKey = process.env.ANTHROPIC_API_KEY;
-  const openaiKey = process.env.OPENAI_API_KEY;
-  const openaiCompatKey = process.env.OPENAI_COMPAT_API_KEY;
-  const geminiKey = process.env.GEMINI_API_KEY;
-  const noKeyProviders = ['claude-code', 'codex-cli', 'mistral-vibe', 'copilot', 'gemini-cli', 'antigravity-cli', 'cursor-agent'];
-  const configuredProvider = options.provider ?? openloreConfig.generation?.provider;
-  if (!noKeyProviders.includes(configuredProvider ?? '') && !anthropicKey && !openaiKey && !openaiCompatKey && !geminiKey) {
-    throw new Error('No LLM API key found. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, or OPENAI_COMPAT_API_KEY.');
-  }
-
-  const envDetectedProvider = anthropicKey ? 'anthropic'
-    : geminiKey ? 'gemini'
-    : openaiCompatKey ? 'openai-compat'
-    : 'openai';
-  const provider = configuredProvider ?? envDetectedProvider;
-  const defaultModels: Record<string, string> = {
-    anthropic: DEFAULT_ANTHROPIC_MODEL,
-    gemini: DEFAULT_GEMINI_MODEL,
-    'openai-compat': DEFAULT_OPENAI_COMPAT_MODEL,
-    openai: DEFAULT_OPENAI_MODEL,
-    'claude-code': 'claude-code',
-    'codex-cli': 'codex-cli',
-    'mistral-vibe': 'mistral-vibe',
-    'gemini-cli': 'gemini-cli',
-    'antigravity-cli': 'antigravity-cli',
-    'cursor-agent': 'cursor-agent',
-  };
-  const effectiveModel = options.model ?? defaultModels[provider] ?? DEFAULT_ANTHROPIC_MODEL;
+  const resolved = resolveGenerationProvider(openloreConfig, {
+    provider: options.provider,
+    model: options.model,
+    openaiCompatBaseUrl: options.openaiCompatBaseUrl,
+  });
+  if (!resolved) throw errors.apiNoApiKey();
   let llm: LLMService;
   try {
     llm = createLLMService({
-      provider,
-      model: effectiveModel,
+      provider: resolved.provider,
+      model: resolved.model,
       apiBase: resolveTrustedApiBase(options.apiBase, openloreConfig.llm?.apiBase),
       sslVerify: resolveTrustedSslVerify(
         options.sslVerify === undefined ? undefined : !options.sslVerify,
         openloreConfig.llm?.sslVerify,
       ),
-      openaiCompatBaseUrl: options.openaiCompatBaseUrl,
+      openaiCompatBaseUrl: resolved.openaiCompatBaseUrl,
       timeout: options.timeout ?? openloreConfig.generation?.timeout,
+      disableResponseFormat: openloreConfig.generation?.disableResponseFormat,
       enableLogging: isLlmLoggingEnabled(),
       logDir: join(rootPath, OPENLORE_DIR, OPENLORE_LOGS_SUBDIR),
       logRoot: rootPath,
@@ -163,4 +146,13 @@ export async function openloreVerify(options: VerifyApiOptions = {}): Promise<Ve
     report,
     duration: Date.now() - startTime,
   };
+}
+
+export async function openloreVerify(options: VerifyApiOptions = {}): Promise<VerifyResult> {
+  try {
+    return await withLoggerOptions({ quiet: options.quiet ?? true }, () => verify(options));
+  } catch (error) {
+    if (isOpenLoreError(error)) throw error;
+    throw errors.pipelineFailed(`Verification failed: ${(error as Error).message}`, error);
+  }
 }

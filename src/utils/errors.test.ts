@@ -9,6 +9,14 @@ import {
 
 describe('OpenLoreError', () => {
   describe('constructor', () => {
+    it('preserves an internal cause for typed API errors', () => {
+      const cause = new SyntaxError('bad json');
+      const error = new OpenLoreError('Pipeline failed', 'pipeline-failed', undefined, { cause });
+
+      expect(error.code).toBe('pipeline-failed');
+      expect(error.cause).toBe(cause);
+    });
+
     it('should create error with code and message', () => {
       const error = new OpenLoreError('Test message', 'NO_API_KEY');
 
@@ -79,6 +87,24 @@ describe('OpenLoreError', () => {
 });
 
 describe('error factory functions', () => {
+  describe('stable API errors', () => {
+    it.each([
+      [errors.noConfig(), 'no-config'],
+      [errors.noAnalysis(), 'no-analysis'],
+      [errors.apiNoApiKey(), 'no-api-key'],
+    ] as const)('creates a lowercase typed error', (error, code) => {
+      expect(error).toBeInstanceOf(OpenLoreError);
+      expect(error.code).toBe(code);
+    });
+
+    it('carries the pipeline failure cause', () => {
+      const cause = new Error('provider exploded');
+      const error = errors.pipelineFailed('Generation failed', cause);
+      expect(error.code).toBe('pipeline-failed');
+      expect(error.cause).toBe(cause);
+    });
+  });
+
   describe('noApiKey', () => {
     it('should create NO_API_KEY error', () => {
       const error = errors.noApiKey();

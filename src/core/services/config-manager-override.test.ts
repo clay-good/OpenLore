@@ -5,7 +5,7 @@
  * wire-global-config-path).
  */
 
-import { describe, it, expect, afterEach, beforeEach } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { mkdtemp, writeFile, rm, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -20,6 +20,7 @@ import {
 } from './config-manager.js';
 import { OPENLORE_DIR, OPENLORE_CONFIG_FILENAME } from '../../constants.js';
 import { getDefaultConfig } from './config-manager.js';
+import { withLoggerOptions } from '../../utils/logger.js';
 
 let root: string;
 let peer: string;
@@ -78,6 +79,44 @@ describe('resolveOpenLoreConfigPath', () => {
 });
 
 describe('read/write/exists honor the override', () => {
+  it('does not emit config warnings from a nested unquiet scope inside a muted API request', async () => {
+    const custom = join(root, 'warning.json');
+    await writeFile(custom, JSON.stringify({
+      ...getDefaultConfig('nodejs', './openspec'),
+      unexpectedKey: true,
+    }));
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    await withLoggerOptions({ quiet: true }, () =>
+      withLoggerOptions({ quiet: false }, () => readOpenLoreConfig(root, custom)));
+
+    expect(stderr).not.toHaveBeenCalled();
+    stderr.mockRestore();
+  });
+
+  it('accepts an explicit per-call path without changing another concurrent caller', async () => {
+    const rootConfig = join(root, 'root-config.json');
+    const peerConfig = join(peer, 'peer-config.json');
+    await Promise.all([
+      writeOpenLoreConfig(root, getDefaultConfig('nodejs', './openspec'), rootConfig),
+      writeOpenLoreConfig(peer, getDefaultConfig('python', './specs'), peerConfig),
+    ]);
+
+    const [rootResult, peerResult] = await Promise.all([
+      readOpenLoreConfig(root, rootConfig),
+      readOpenLoreConfig(peer, peerConfig),
+    ]);
+
+    expect(rootResult?.projectType).toBe('nodejs');
+    expect(peerResult?.projectType).toBe('python');
+    expect(await openloreConfigExists(root, rootConfig)).toBe(true);
+    expect(await openloreConfigExists(root)).toBe(false);
+  });
+
+  it('resolves a relative per-call path from the project root', () => {
+    expect(resolveOpenLoreConfigPath(root, 'config/custom.json')).toBe(join(root, 'config', 'custom.json'));
+  });
+
   it('readOpenLoreConfig reads the explicit path, not the default', async () => {
     const custom = join(root, 'elsewhere.json');
     await writeFile(custom, JSON.stringify({ ...getDefaultConfig('nodejs', './openspec'), projectType: 'python' }));

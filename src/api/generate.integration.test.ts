@@ -33,7 +33,12 @@ vi.mock('../utils/logger.js', () => {
     section: vi.fn(), info: vi.fn(), warning: vi.fn(), error: vi.fn(),
     success: vi.fn(), discovery: vi.fn(), analysis: vi.fn(), blank: vi.fn(),
   };
-  return { logger: stub, default: stub, configureLogger: vi.fn() };
+  return {
+    logger: stub,
+    default: stub,
+    configureLogger: vi.fn(),
+    withLoggerOptions: vi.fn((_options: unknown, callback: () => unknown) => callback()),
+  };
 });
 
 // Mock the LLM service factory — no real API key needed

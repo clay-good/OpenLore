@@ -24,6 +24,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { readFile, stat, unlink } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { atomicWriteFile } from '../decisions/atomic-store.js';
+import { ARTIFACT_REFACTOR_PRIORITIES } from '../../constants.js';
 
 /** Name of the manifest inside the analysis output directory. */
 export const GENERATION_MANIFEST_FILE = 'generation.json';
@@ -45,7 +46,11 @@ export const REQUIRED_ANALYSIS_ARTIFACTS = [
 ] as const;
 
 /** Additional graph files an importer may bind to the same generation commit. */
-const OPTIONAL_GENERATION_ARTIFACTS = new Set(['call-graph.db', 'index-attestation.json']);
+const OPTIONAL_GENERATION_ARTIFACTS = new Set([
+  'call-graph.db',
+  'index-attestation.json',
+  ARTIFACT_REFACTOR_PRIORITIES,
+]);
 
 export interface GenerationArtifactRecord {
   /** Artifact file name, relative to the analysis directory. */
@@ -131,6 +136,12 @@ export async function publishGeneration(
     const record = await digestOf(analysisDir, name);
     if (!record) return null;
     records.push(record);
+  }
+  // Refactor evidence is optional for legacy/minimal analyzers, but when present it
+  // is consumed by generation and must therefore share the committed identity.
+  if (!requiredArtifacts.includes(ARTIFACT_REFACTOR_PRIORITIES)) {
+    const refactorRecord = await digestOf(analysisDir, ARTIFACT_REFACTOR_PRIORITIES);
+    if (refactorRecord) records.push(refactorRecord);
   }
 
   const manifest: GenerationManifest = {
@@ -256,8 +267,13 @@ export type GenerationSnapshot<T> =
  * and size, which already moves on any rewrite), so there is nothing to verify and
  * it passes.
  */
-async function artifactsStillMatch(analysisDir: string, manifest: GenerationManifest): Promise<boolean> {
+async function artifactsStillMatch(
+  analysisDir: string,
+  manifest: GenerationManifest,
+  allowedMismatches: ReadonlySet<string> = new Set(),
+): Promise<boolean> {
   for (const recorded of manifest.artifacts) {
+    if (allowedMismatches.has(recorded.path)) continue;
     if (!recorded.sha256) continue; // legacy: no digest was ever taken
     const current = await digestOf(analysisDir, recorded.path);
     if (!current || current.sha256 !== recorded.sha256) return false;
@@ -277,6 +293,7 @@ export async function readGenerationSnapshot<T>(
   analysisDir: string,
   legacyArtifacts: string[],
   read: (generationId: string) => Promise<T>,
+  allowedArtifactMismatches?: (value: T) => Iterable<string>,
 ): Promise<GenerationSnapshot<T>> {
   for (let attempt = 0; attempt < 2; attempt++) {
     const before = await readCurrentGeneration(analysisDir, legacyArtifacts);
@@ -285,7 +302,8 @@ export async function readGenerationSnapshot<T>(
     const value = await read(before.generationId);
 
     const after = await readCurrentGeneration(analysisDir, legacyArtifacts);
-    if (after && after.generationId === before.generationId && await artifactsStillMatch(analysisDir, after)) {
+    const allowed = new Set(allowedArtifactMismatches?.(value) ?? []);
+    if (after && after.generationId === before.generationId && await artifactsStillMatch(analysisDir, after, allowed)) {
       return { state: 'ok', value, generationId: before.generationId, compatibility: before.compatibility, coherence: before.coherence ?? 'full' };
     }
   }

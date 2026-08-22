@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { openloreAudit } from './audit.js';
 import { SPEC_LINK_INDEX_VERSION } from '../core/generator/spec-link-index.js';
 import type { AuditReport } from '../types/index.js';
+import { getDefaultConfig } from '../core/services/config-manager.js';
 
 const roots: string[] = [];
 
@@ -33,6 +34,10 @@ interface FixtureOptions {
   mapping?: string;
   /** Omit the dependency graph to simulate a repository with no analysis. */
   withGraph?: boolean;
+  /** Raw llm-context content for corrupt-artifact coverage. */
+  llmContext?: string;
+  /** Skip creating the analysis directory before an audit save. */
+  withAnalysisDir?: boolean;
 }
 
 async function fixture(options: FixtureOptions = {}): Promise<string> {
@@ -40,9 +45,9 @@ async function fixture(options: FixtureOptions = {}): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'openlore-audit-'));
   roots.push(root);
   const analysis = join(root, '.openlore', 'analysis');
-  await mkdir(analysis, { recursive: true });
+  if (options.withAnalysisDir !== false) await mkdir(analysis, { recursive: true });
 
-  await writeFile(join(analysis, 'llm-context.json'), JSON.stringify({
+  if (options.withAnalysisDir !== false) await writeFile(join(analysis, 'llm-context.json'), options.llmContext ?? JSON.stringify({
     callGraph: {
       nodes: nodes.map(node => ({
         id: `${node.filePath}::${node.name}`, name: node.name, filePath: node.filePath,
@@ -52,7 +57,7 @@ async function fixture(options: FixtureOptions = {}): Promise<string> {
     },
   }));
 
-  if (options.withGraph !== false) {
+  if (options.withAnalysisDir !== false && options.withGraph !== false) {
     const byFile = new Map<string, NodeFixture[]>();
     for (const node of nodes) byFile.set(node.filePath, [...(byFile.get(node.filePath) ?? []), node]);
     await writeFile(join(analysis, 'dependency-graph.json'), JSON.stringify({
@@ -77,6 +82,91 @@ const specWith = (requirement: string, anchor?: string): string =>
   `# Spec\n\n### Requirement: ${requirement}\n\nThe system SHALL work.\n${anchor ? `- **Implementation**: \`${anchor}\`\n` : ''}`;
 
 describe('openloreAudit — coverage availability', () => {
+  it('normalizes a relative project root before reading artifacts', async () => {
+    const root = await fixture({ specs: { core: specWith('Works', 'work::src/a.ts') } });
+    const report = await openloreAudit({ rootPath: relative(process.cwd(), root), save: false });
+
+    expect(report.summary.coveredFunctions).toBe(1);
+  });
+
+  it('reads openspecPath from the explicit API configPath', async () => {
+    const root = await fixture();
+    const configPath = join(root, 'config', 'openlore.json');
+    await mkdir(join(root, 'config'), { recursive: true });
+    await writeFile(configPath, JSON.stringify(getDefaultConfig('nodejs', './custom-spec')));
+    await mkdir(join(root, 'custom-spec', 'specs', 'core'), { recursive: true });
+    await writeFile(join(root, 'custom-spec', 'specs', 'core', 'spec.md'), specWith('Works', 'work::src/a.ts'));
+
+    const report = await openloreAudit({ rootPath: root, configPath: 'config/openlore.json', save: false });
+
+    expect(report.mappingCoverage.state).toBe('available');
+    expect(report.summary.coveredFunctions).toBe(1);
+  });
+
+  it('rejects a missing explicit config instead of silently using the default corpus', async () => {
+    const root = await fixture({ specs: { core: specWith('Works', 'work::src/a.ts') } });
+
+    await expect(openloreAudit({
+      rootPath: root,
+      configPath: 'config/missing.json',
+      save: false,
+    })).rejects.toMatchObject({ code: 'no-config' });
+  });
+
+  it('confines a configured OpenSpec symlink to the project root', async () => {
+    const root = await fixture({ specs: { core: specWith('Inside Without Anchor') } });
+    const outside = await mkdtemp(join(tmpdir(), 'openlore-audit-outside-'));
+    roots.push(outside);
+    await mkdir(join(outside, 'specs', 'outside'), { recursive: true });
+    await writeFile(join(outside, 'specs', 'outside', 'spec.md'), specWith('Outside', 'work::src/a.ts'));
+    await symlink(outside, join(root, 'linked-specs'), 'dir');
+    await mkdir(join(root, 'config'), { recursive: true });
+    await writeFile(
+      join(root, 'config', 'openlore.json'),
+      JSON.stringify(getDefaultConfig('nodejs', './linked-specs')),
+    );
+
+    const report = await openloreAudit({
+      rootPath: root,
+      configPath: 'config/openlore.json',
+      save: false,
+    });
+
+    expect(report.summary.coveredFunctions).toBe(0);
+    expect(report.orphanRequirements).toEqual([
+      expect.objectContaining({ requirement: 'Inside Without Anchor', domain: 'core' }),
+    ]);
+  });
+
+  it('treats a corrupt llm-context artifact as unavailable instead of leaking SyntaxError', async () => {
+    const report = await openloreAudit({
+      rootPath: await fixture({ llmContext: '{not json', specs: { core: specWith('Works') } }),
+      save: false,
+    });
+
+    expect(report.summary.totalFunctions).toBe(0);
+  });
+
+  it('creates the analysis directory before saving the report', async () => {
+    const root = await fixture({ withAnalysisDir: false });
+
+    await openloreAudit({ rootPath: root, save: true });
+
+    await expect(readFile(join(root, '.openlore', 'analysis', 'audit-report.json'), 'utf-8'))
+      .resolves.toContain('generatedAt');
+  });
+
+  it('wraps unexpected filesystem failures with a typed error and cause', async () => {
+    const root = await fixture({ withAnalysisDir: false });
+
+    await rm(root, { recursive: true, force: true });
+    await writeFile(root, 'not a directory');
+    await expect(openloreAudit({ rootPath: root, save: true })).rejects.toMatchObject({
+      code: 'pipeline-failed',
+      cause: expect.any(Error),
+    });
+  });
+
   it('preserves numeric v2 summary fields while reporting unavailable coverage explicitly', async () => {
     const report = await openloreAudit({
       rootPath: await fixture({ withGraph: false, specs: { core: specWith('Works', 'work::src/a.ts') } }),
