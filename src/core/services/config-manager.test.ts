@@ -313,6 +313,58 @@ describe('config-manager', () => {
       }
     });
 
+    it('loads a pre-2.2 config by backfilling domains without replacing custom settings', async () => {
+      const s = spyStderr();
+      const legacy = {
+        version: '1.0.0',
+        projectType: 'nodejs',
+        openspecPath: './custom-specs',
+        analysis: {
+          maxFiles: 500,
+          includePatterns: [],
+          excludePatterns: ['dist/**', 'node_modules/**'],
+        },
+        generation: {
+          provider: 'openai-compat',
+          model: 'codestral-2508',
+          openaiCompatBaseUrl: 'https://api.mistral.ai/v1/',
+        },
+        embedding: { baseUrl: 'http://localhost:8765/v1', model: 'all-MiniLM-L6-v2' },
+        createdAt: '2026-02-28T13:15:28.693Z',
+        lastRun: null,
+      };
+      try {
+        await writeRawConfig(legacy);
+
+        const result = await readOpenLoreConfig(testDir);
+
+        expect(result).toMatchObject({
+          openspecPath: './custom-specs',
+          analysis: { excludePatterns: ['dist/**', 'node_modules/**'] },
+          generation: {
+            provider: 'openai-compat',
+            model: 'codestral-2508',
+            openaiCompatBaseUrl: 'https://api.mistral.ai/v1/',
+            domains: 'auto',
+          },
+          embedding: { baseUrl: 'http://localhost:8765/v1', model: 'all-MiniLM-L6-v2' },
+        });
+        expect(JSON.parse(await readFile(join(testDir, '.openlore', 'config.json'), 'utf-8'))).toEqual(legacy);
+        expect(s.lines().some(line => line.includes("generation.domains") && line.includes('"auto"'))).toBe(true);
+      } finally {
+        s.restore();
+      }
+    });
+
+    it('still rejects a present but invalid domains value', async () => {
+      await writeRawConfig({
+        ...getDefaultConfig('nodejs', 'openspec'),
+        generation: { domains: 42 },
+      });
+
+      await expect(readOpenLoreConfig(testDir)).rejects.toThrow(/generation\.domains/);
+    });
+
     it('warns with a did-you-mean on a typo\'d key, and still applies defaults', async () => {
       const s = spyStderr();
       try {

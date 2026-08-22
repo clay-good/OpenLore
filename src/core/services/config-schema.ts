@@ -222,7 +222,7 @@ const bundleRule: ConfigRule = {
   required: requiredFor<BundleConfig>({}),
 };
 
-const CONFIG_RULE: ConfigRule = {
+const CONFIG_RULE: Extract<ConfigRule, { kind: 'object' }> = {
   kind: 'object',
   fields: fieldsFor<OpenLoreConfig>({
     version: stringRule,
@@ -304,7 +304,7 @@ export const CONFIG_MIGRATIONS: readonly ConfigMigration[] = [];
 
 /** A single deterministic finding from validating a config object. */
 export interface ConfigValidationFinding {
-  kind: 'unknown-key' | 'missing-required' | 'type-mismatch' | 'version-older' | 'version-newer';
+  kind: 'unknown-key' | 'missing-required' | 'type-mismatch' | 'version-older' | 'version-newer' | 'default-added';
   /** The offending key, when the finding is about one. */
   key?: string;
   /** Human-readable message. */
@@ -313,6 +313,98 @@ export interface ConfigValidationFinding {
   suggestion?: string;
   /** Whether returning the parsed object would expose an unsafe required runtime shape. */
   fatal?: boolean;
+}
+
+export interface ConfigCompatibilityResult {
+  config: unknown;
+  findings: ConfigValidationFinding[];
+}
+
+function isConfigObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Backfill missing required fields inside sections that already exist in both the
+ * parsed config and the canonical defaults. Top-level sections are never invented:
+ * an empty or hand-truncated config remains invalid, while a config written by an
+ * older release can acquire newly-required nested defaults without losing custom values.
+ */
+export function backfillRequiredConfigDefaults(
+  parsed: unknown,
+  defaults: unknown,
+): ConfigCompatibilityResult {
+  if (!isConfigObject(parsed) || !isConfigObject(defaults)) {
+    return { config: parsed, findings: [] };
+  }
+
+  const config = structuredClone(parsed) as Record<string, unknown>;
+  const findings: ConfigValidationFinding[] = [];
+
+  const visit = (
+    target: Record<string, unknown>,
+    fallback: Record<string, unknown>,
+    rule: Extract<ConfigRule, { kind: 'object' }>,
+    path: string,
+  ): void => {
+    if (path !== '') {
+      for (const key of rule.required) {
+        if (!Object.prototype.hasOwnProperty.call(target, key)
+          && Object.prototype.hasOwnProperty.call(fallback, key)) {
+          const childPath = `${path}.${key}`;
+          target[key] = structuredClone(fallback[key]);
+          findings.push({
+            kind: 'default-added',
+            key: childPath,
+            fatal: false,
+            message: `added missing config key '${childPath}' = ${JSON.stringify(fallback[key])} from the current default (file unchanged)`,
+          });
+        }
+      }
+    }
+
+    for (const [key, childRule] of Object.entries(rule.fields)) {
+      if (childRule.kind !== 'object') continue;
+      const childTarget = target[key];
+      const childFallback = fallback[key];
+      if (!isConfigObject(childTarget) || !isConfigObject(childFallback)) continue;
+      visit(childTarget, childFallback, childRule, path ? `${path}.${key}` : key);
+    }
+  };
+
+  visit(config, defaults, CONFIG_RULE, '');
+  return { config, findings };
+}
+
+/**
+ * Required fields missing from sections emitted by the canonical defaults. This is a
+ * schema-evolution guard: adding a required field to a default section must update the
+ * defaults in the same change, otherwise older configs cannot be backfilled safely.
+ */
+export function findRequiredFieldsWithoutDefaults(defaults: unknown): string[] {
+  if (!isConfigObject(defaults)) return CONFIG_RULE.required.map(key => key);
+  const missing: string[] = [];
+
+  const visit = (
+    fallback: Record<string, unknown>,
+    rule: Extract<ConfigRule, { kind: 'object' }>,
+    path: string,
+  ): void => {
+    for (const key of rule.required) {
+      if (!Object.prototype.hasOwnProperty.call(fallback, key)) {
+        missing.push(path ? `${path}.${key}` : key);
+      }
+    }
+    for (const [key, childRule] of Object.entries(rule.fields)) {
+      if (childRule.kind !== 'object') continue;
+      const childFallback = fallback[key];
+      if (!isConfigObject(childFallback)) continue;
+      visit(childFallback, childRule, path ? `${path}.${key}` : key);
+    }
+  };
+
+  visit(defaults, CONFIG_RULE, '');
+  return missing;
 }
 
 /** Findings that make the parsed object unsafe to expose as `OpenLoreConfig`. */

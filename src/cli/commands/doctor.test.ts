@@ -35,6 +35,24 @@ vi.mock('node:child_process', () => ({ execFile: vi.fn() }));
 
 vi.mock('../../core/services/config-manager.js', () => ({
   InvalidOpenLoreConfigError: class InvalidOpenLoreConfigError extends Error {},
+  normalizeOpenLoreConfig: (parsed: unknown) => {
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      return { config: parsed, findings: [] };
+    }
+    const record = parsed as Record<string, unknown>;
+    const generation = record.generation;
+    if (typeof generation !== 'object' || generation === null || Array.isArray(generation)
+      || Object.prototype.hasOwnProperty.call(generation, 'domains')) {
+      return { config: parsed, findings: [] };
+    }
+    return {
+      config: { ...record, generation: { ...generation, domains: 'auto' } },
+      findings: [{
+        kind: 'default-added', key: 'generation.domains', fatal: false,
+        message: "added missing config key 'generation.domains' = \"auto\" from the current default (file unchanged)",
+      }],
+    };
+  },
   readOpenLoreConfig: vi.fn().mockResolvedValue({
     projectType: 'nodejs',
     createdAt: '2024-01-01T00:00:00Z',
@@ -580,6 +598,26 @@ describe('doctor command', () => {
       expect(schemaCheck.detail).toContain('analysis');
       expect(schemaCheck.detail).toContain('openlore init');
       expect(schemaCheck.detail).not.toContain('all keys known and well-typed');
+    });
+
+    it('reports an in-memory compatibility default without recommending init', async () => {
+      const { readFile } = await import('node:fs/promises');
+      vi.mocked(readFile).mockResolvedValue(
+        JSON.stringify({
+          version: '1.0.0', projectType: 'nodejs', openspecPath: 'openspec',
+          analysis: { maxFiles: 1, includePatterns: [], excludePatterns: ['dist/**'] },
+          generation: { model: 'custom-model' },
+          createdAt: '2026-01-01T00:00:00Z', lastRun: null,
+        }) as never
+      );
+
+      const checks = await runDoctorJson();
+      const schemaCheck = checks.find(c => c.name === 'Config schema')!;
+
+      expect(schemaCheck.status).toBe('warn');
+      expect(schemaCheck.detail).toContain('generation.domains');
+      expect(schemaCheck.detail).toContain('compatibility defaults');
+      expect(schemaCheck.fix).not.toContain('openlore init');
     });
 
     it('reports nested type mismatches', async () => {

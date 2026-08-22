@@ -11,6 +11,8 @@ import {
   CONFIG_FIELD_KINDS,
   KNOWN_CONFIG_KEYS,
   CONFIG_SCHEMA_VERSION,
+  backfillRequiredConfigDefaults,
+  findRequiredFieldsWithoutDefaults,
   type ConfigMigration,
 } from './config-schema.js';
 
@@ -57,6 +59,44 @@ describe('config-schema — type-completeness bind', () => {
 
   it('a fully-populated, correctly-typed config yields zero findings', () => {
     expect(validateOpenLoreConfig(FULLY_POPULATED)).toEqual([]);
+  });
+
+  it('canonical default sections populate every field the schema requires', () => {
+    const defaults = {
+      version: CONFIG_SCHEMA_VERSION,
+      projectType: 'nodejs',
+      openspecPath: 'openspec',
+      analysis: { maxFiles: 100_000, includePatterns: [], excludePatterns: [] },
+      generation: { model: 'model', domains: 'auto' },
+      createdAt: '2026-08-22T00:00:00.000Z',
+      lastRun: null,
+    };
+
+    expect(findRequiredFieldsWithoutDefaults(defaults)).toEqual([]);
+  });
+
+  it('backfills only missing required values inside existing default sections', () => {
+    const defaults = {
+      ...FULLY_POPULATED,
+      analysis: { maxFiles: 100_000, includePatterns: [], excludePatterns: [] },
+      generation: { model: 'default-model', domains: 'auto' },
+    };
+    const parsed = {
+      ...FULLY_POPULATED,
+      analysis: { maxFiles: 25, includePatterns: [], excludePatterns: ['dist/**'] },
+      generation: { model: 'custom-model' },
+    };
+
+    const result = backfillRequiredConfigDefaults(parsed, defaults);
+
+    expect(result.config).toMatchObject({
+      analysis: { maxFiles: 25, excludePatterns: ['dist/**'] },
+      generation: { model: 'custom-model', domains: 'auto' },
+    });
+    expect(result.findings).toEqual([
+      expect.objectContaining({ kind: 'default-added', key: 'generation.domains', fatal: false }),
+    ]);
+    expect(parsed.generation).not.toHaveProperty('domains');
   });
 
   it('requires every non-optional top-level config field', () => {
