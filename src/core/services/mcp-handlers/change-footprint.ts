@@ -393,14 +393,14 @@ export function classifyHazard(a: Footprint, b: Footprint): HazardVerdict {
     return { kind: 'shared-append', witnesses: sharedWrites };
   }
 
-  // --- WAR / low-risk: same file disjoint symbols, or read-only overlap (ambient excluded) ---
+  // --- WAR / low-risk: same file, disjoint written symbols ---
+  // A read∩read overlap is not a data hazard: neither task mutates the shared
+  // symbol, so counting it would turn common dependencies into false conflicts.
   const filesA = new Set(a.writeSet.map(w => w.filePath));
   const filesB = new Set(b.writeSet.map(w => w.filePath));
   const sharedFiles = intersectSorted(filesA, filesB);
-  const sharedReads = intersectSorted(a.readSet, new Set(b.readSet));
-  if (sharedFiles.length > 0 || sharedReads.length > 0) {
-    const witnesses = [...new Set([...sharedFiles, ...sharedReads])].sort();
-    return { kind: 'WAR', witnesses };
+  if (sharedFiles.length > 0) {
+    return { kind: 'WAR', witnesses: sharedFiles };
   }
 
   // --- soft-coupling: write-set files co-change, no static relation ---

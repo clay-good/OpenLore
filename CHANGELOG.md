@@ -5,6 +5,11 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ## [Unreleased]
 
+- Interference maps now retain unassessable branches, reject unsafe base guesses,
+  disclose enumeration limits/failures, and stop treating shared reads as conflicts.
+- Enforcement JSON schema version 2 normalizes governance finding severity to
+  `info`, `warning`, `error`, or `critical` (`warn` is now `warning`).
+
 ## [2.2.0] - 2026-08-16
 
 **The release where OpenLore learned to show its work.**

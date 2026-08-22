@@ -71,7 +71,7 @@ describe('findStaleDecisionReferences', () => {
     expect(out).toHaveLength(1);
     expect(out[0]).toMatchObject({
       code: 'stale-decision-reference',
-      severity: 'warn',
+      severity: 'warning',
       referencingArtifact: { kind: 'decision', id: 'aaaaaaaa' },
       retiredDecision: 'bbbbbbbb',
       supersededBy: 'cccccccc',

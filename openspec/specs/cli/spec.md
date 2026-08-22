@@ -5,7 +5,9 @@
 ## Purpose
 
 Manages and displays progress indicators for CLI operations, including spinners and progress bars.
+
 ## Requirements
+
 ### Requirement: Start
 
 The system SHALL starts a new spinner with a message.
@@ -2063,6 +2065,20 @@ display column, never as a verdict input.
 - **GIVEN** a change whose spec delta fails to parse
 - **WHEN** `change-status` runs
 - **THEN** the verdict is `not-assessed` with the parse error — never `unbuilt`
+
+### Requirement: EnforcementJsonUsesVersionedSeverityVocabulary
+
+`openlore enforce --json` SHALL identify its serialized contract as `schemaVersion: 2`. Every finding
+in its `blocking`, `advisory`, and `off` arrays SHALL use the canonical severity vocabulary `info`,
+`warning`, `error`, or `critical`. Version 2 SHALL replace the legacy warning spelling `warn` with
+`warning` so consumers can migrate with an explicit envelope version.
+
+#### Scenario: Enforcement JSON declares the normalized contract
+
+- **GIVEN** an enforcement run that emits a warning-level governance finding
+- **WHEN** the caller requests JSON output
+- **THEN** the envelope reports `schemaVersion: 2`
+- **AND** the finding severity is `warning`, not `warn`
 
 ## Technical Notes
 

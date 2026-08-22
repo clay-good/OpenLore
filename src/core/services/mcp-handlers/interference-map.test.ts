@@ -8,21 +8,31 @@ vi.mock('./utils.js', () => ({
 // them so the tests never shell out to git or read a real spec-store binding.
 vi.mock('../../drift/git-diff.js', () => ({
   resolveBaseRef: vi.fn(async (_dir: string, ref: string) => (ref === 'auto' ? 'main' : ref)),
+  resolveBaseRefDisclosed: vi.fn(async (_dir: string, requested: string) => ({
+    requested,
+    resolved: requested === 'auto' ? 'main' : requested,
+    fellBack: false,
+  })),
+  refExists: vi.fn(async () => true),
 }));
 vi.mock('./spec-store.js', () => ({ handleSpecStoreStatus: vi.fn() }));
 
 import {
   computeInterferenceMap,
+  defaultEnumerateBranches,
+  defaultEnumeratePullRequests,
   parseUnifiedDiff,
   writeSetFromHunks,
   type InterferenceMap,
   type InFlightProviders,
   type RawChange,
+  type RawChangeEnumeration,
   type BaseSymbol,
   type FileHunks,
 } from './interference-map.js';
 import { readCachedContext } from './utils.js';
 import { handleSpecStoreStatus } from './spec-store.js';
+import { resolveBaseRefDisclosed } from '../../drift/git-diff.js';
 import { assertConclusionShape, TOOL_OUTPUT_CLASS } from './tool-contract.js';
 import { isKnownFindingCode, resolveEnforcementClass } from './enforcement-policy.js';
 import type { FunctionNode, CallEdge, SerializedCallGraph } from '../../analyzer/call-graph.js';
@@ -82,8 +92,8 @@ function change(
 
 /** Providers that return a fixed set of branches/PRs, never touching git/gh. */
 function providers(opts: {
-  branchesByRepo?: Record<string, RawChange[]>;
-  prsByRepo?: Record<string, RawChange[]>;
+  branchesByRepo?: Record<string, RawChange[] | RawChangeEnumeration>;
+  prsByRepo?: Record<string, RawChange[] | RawChangeEnumeration>;
   gh?: boolean;
 }): InFlightProviders {
   return {
@@ -538,6 +548,37 @@ describe('adversarial — hazard classes beyond WAW', () => {
     expect(map.findingCount).toBe(0);
   });
 
+  it('does not count or render a conflict for disjoint writers that only share a read', async () => {
+    const cg = graph([
+      node({ id: 'a.ts::one' }),
+      node({ id: 'b.ts::two' }),
+      node({ id: 'lib.ts::util' }),
+    ], [
+      edge('a.ts::one', 'lib.ts::util'),
+      edge('b.ts::two', 'lib.ts::util'),
+    ]);
+    mockHome(cg);
+    const a = change({
+      ref: 'feat-a', actor: 'Alice', repo: 'this-repo', kind: 'branch',
+      files: [{ path: 'a.ts', status: 'modified', hunks: [modifyHunk(1)] }],
+      baseSymbolsByFile: new Map([['a.ts', [baseSym('a.ts::one', 1, 10)]]]),
+    });
+    const b = change({
+      ref: 'feat-b', actor: 'Bob', repo: 'this-repo', kind: 'branch',
+      files: [{ path: 'b.ts', status: 'modified', hunks: [modifyHunk(1)] }],
+      baseSymbolsByFile: new Map([['b.ts', [baseSym('b.ts::two', 1, 10)]]]),
+    });
+
+    const map = await run(
+      { directory: '/p', includePullRequests: false },
+      providers({ branchesByRepo: { 'this-repo': [a, b] } }),
+    );
+
+    expect(map.conflictCount).toBe(0);
+    expect(map.conflicts).toEqual([]);
+    expect(map.headline).toMatch(/no structural conflicts/i);
+  });
+
   it('reports soft-coupling when write-set files co-change with no call edge', async () => {
     const cg = graph([node({ id: 'x.ts::fx' }), node({ id: 'y.ts::fy' })]);
     vi.mocked(readCachedContext).mockResolvedValue({
@@ -560,6 +601,261 @@ describe('adversarial — hazard classes beyond WAW', () => {
       providers({ branchesByRepo: { 'this-repo': [a, b] } }),
     );
     expect(map.conflicts[0]?.hazard).toBe('soft-coupling');
+  });
+});
+
+describe('default providers disclose assessment gaps', () => {
+  const branchList = async (_repoPath: string, args: string[]): Promise<string> => {
+    if (args[0] === 'for-each-ref') return 'main\nfeature\n';
+    if (args[0] === 'rev-parse' && args[1] === '--verify') return 'main\n';
+    throw new Error(`unexpected git ${args.join(' ')}`);
+  };
+
+  it.each([
+    ['merge-base', async (repoPath: string, args: string[]) => {
+      if (args[0] === 'merge-base') throw new Error('shallow history');
+      return branchList(repoPath, args);
+    }],
+    ['tip resolution', async (repoPath: string, args: string[]) => {
+      if (args[0] === 'merge-base') return 'abc123\n';
+      if (args[0] === 'rev-parse' && args[1] === 'feature') throw new Error('missing tip');
+      return branchList(repoPath, args);
+    }],
+    ['diff', async (repoPath: string, args: string[]) => {
+      if (args[0] === 'merge-base') return 'abc123\n';
+      if (args[0] === 'rev-parse' && args[1] === 'feature') return 'def456\n';
+      if (args[0] === 'diff') throw new Error('object unavailable');
+      return branchList(repoPath, args);
+    }],
+  ])('keeps a branch as diff-unfetchable when %s fails', async (_label, runGit) => {
+    const result = await defaultEnumerateBranches('/repo', 'this-repo', 'main', undefined, runGit);
+    const changes = Array.isArray(result) ? result : result.changes;
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({
+      ref: 'feature',
+      kind: 'branch',
+      fetchError: expect.stringMatching(/failed/i),
+    });
+    expect(changes[0].fetchError).toMatch(new RegExp(String(_label).split(' ')[0], 'i'));
+  });
+
+  it('carries an unverifiable repo base as a map-level caveat', async () => {
+    const runGit = async (_repoPath: string, args: string[]): Promise<string> => {
+      if (args[0] === 'for-each-ref') return 'feature\n';
+      throw new Error('no refs available');
+    };
+    const result = await defaultEnumerateBranches('/repo', 'this-repo', 'missing-base', undefined, runGit, async () => {
+      throw new Error('auto resolution failed');
+    });
+    expect(Array.isArray(result)).toBe(false);
+    expect((result as RawChangeEnumeration).caveats).toEqual([
+      expect.stringMatching(/missing-base.*could not be verified/i),
+    ]);
+    expect((result as RawChangeEnumeration).changes[0]).toMatchObject({
+      ref: 'feature',
+      fetchError: expect.stringMatching(/merge-base/i),
+    });
+  });
+
+  it('discloses a successful per-repo fallback to a different base', async () => {
+    const runGit = async (_repoPath: string, args: string[]): Promise<string> => {
+      if (args[0] === 'for-each-ref') return 'master\nfeature\n';
+      if (args[0] === 'rev-parse' && args[1] === '--verify' && args[2] === 'main^{commit}') throw new Error('main missing');
+      if (args[0] === 'rev-parse' && args[1] === '--verify' && args[2] === 'master^{commit}') return 'master\n';
+      if (args[0] === 'merge-base') throw new Error('unrelated history');
+      throw new Error(`unexpected git ${args.join(' ')}`);
+    };
+    const result = await defaultEnumerateBranches(
+      '/repo', 'federated-repo', 'main', undefined, runGit, async () => 'master',
+    );
+    expect(result.caveats).toContainEqual(expect.stringMatching(/main.*could not be verified as a commit.*master/i));
+  });
+
+  it('discloses when PR enumeration reaches the 50-row limit', async () => {
+    const prs = Array.from({ length: 50 }, (_, i) => ({
+      number: i + 1,
+      headRefName: `feature-${i + 1}`,
+      author: { login: 'agent' },
+      title: `PR ${i + 1}`,
+    }));
+    const runGh = async (_repoPath: string, args: string[]): Promise<string> =>
+      args[1] === 'list' ? JSON.stringify(prs) : '';
+    const runGit = async (): Promise<string> => 'main\n';
+    const result = await defaultEnumeratePullRequests('/repo', 'this-repo', 'main', runGh, runGit);
+    expect(Array.isArray(result)).toBe(false);
+    expect((result as RawChangeEnumeration).caveats).toEqual([
+      expect.stringMatching(/50.*may be truncated/i),
+    ]);
+  });
+
+  it('threads provider caveats into the map result', async () => {
+    const map = await run(
+      { directory: '/p', includePullRequests: false },
+      providers({ branchesByRepo: { 'this-repo': { changes: [], caveats: ['base unavailable'] } } }),
+    );
+    expect(map.caveats).toContain('base unavailable');
+  });
+
+  it('turns a default-provider branch failure into a final not-assessed node', async () => {
+    const runGit = async (_repoPath: string, args: string[]): Promise<string> => {
+      if (args[0] === 'for-each-ref') return 'main\nfeature\n';
+      if (args[0] === 'rev-parse' && args[1] === '--verify') return 'main\n';
+      if (args[0] === 'merge-base') throw new Error('shallow history');
+      throw new Error(`unexpected git ${args.join(' ')}`);
+    };
+    const enumeration = await defaultEnumerateBranches('/repo', 'this-repo', 'main', undefined, runGit);
+    const map = await run(
+      { directory: '/p', includePullRequests: false },
+      providers({ branchesByRepo: { 'this-repo': enumeration } }),
+    );
+    expect(map.notAssessedCount).toBe(1);
+    expect(map.changes[0]).toMatchObject({ ref: 'feature', assessed: false, reason: 'diff-unfetchable' });
+    expect(map.headline).toMatch(/not assessed/i);
+    expect(map.findings).toEqual([]);
+  });
+
+  it('does not claim all-clear when assessed and unassessed changes are mixed', async () => {
+    const assessed = change({
+      ref: 'clean', actor: 'Alice', repo: 'this-repo', kind: 'branch',
+      files: [{ path: 'a.ts', status: 'modified', hunks: [modifyHunk(1)] }],
+      baseSymbolsByFile: new Map([['a.ts', [baseSym('a.ts::foo', 1, 10)]]]),
+    });
+    const unavailable = change({ ref: 'unknown', actor: 'Bob', repo: 'this-repo', kind: 'branch', fetchError: 'merge-base failed' });
+    const map = await run(
+      { directory: '/p', includePullRequests: false },
+      providers({ branchesByRepo: { 'this-repo': [assessed, unavailable] } }),
+    );
+    expect(map.headline).toMatch(/no structural conflicts among assessed changes; 1 not assessed/i);
+  });
+
+  it('discloses an explicit invalid base before falling back', async () => {
+    vi.mocked(resolveBaseRefDisclosed).mockResolvedValueOnce({
+      requested: 'missing-base', resolved: 'main', fellBack: true,
+    });
+    const map = await run(
+      { directory: '/p', baseRef: 'missing-base', includeBranches: false, includePullRequests: false },
+      providers({}),
+    );
+    expect(map.baseRef).toBe('missing-base');
+    expect(map.resolvedBaseRef).toBe('main');
+    expect(map.caveats).toContainEqual(expect.stringMatching(/missing-base.*could not be verified.*main/i));
+  });
+
+  it('rejects an auto base that resolves only to HEAD~1 before invoking providers', async () => {
+    vi.mocked(resolveBaseRefDisclosed).mockResolvedValueOnce({
+      requested: 'auto', resolved: 'HEAD~1', fellBack: false,
+    });
+    const enumerateBranches = vi.fn(async () => []);
+    const result = await computeInterferenceMap(
+      { directory: '/p', baseRef: 'auto' },
+      { enumerateBranches, enumeratePullRequests: async () => [], ghAvailable: async () => false },
+    );
+    expect(result).toEqual({ error: expect.stringMatching(/HEAD~1.*incomplete change window/i) });
+    expect(enumerateBranches).not.toHaveBeenCalled();
+  });
+
+  it('preserves a repo-specific gh pr list failure caveat', async () => {
+    const map = await run(
+      { directory: '/p', includeBranches: false },
+      {
+        enumerateBranches: async () => [],
+        enumeratePullRequests: async () => { throw new Error('gh pr list failed: authentication required'); },
+        ghAvailable: async () => true,
+      },
+    );
+    expect(map.caveats).toContainEqual(expect.stringMatching(/PR enumeration failed for this-repo.*authentication/i));
+    expect(map.caveats).not.toContainEqual(expect.stringMatching(/none open/i));
+  });
+
+  it('marks a change over the per-change file cap as not assessed', async () => {
+    const patch = (count: number) => Array.from({ length: count }, (_, i) => [
+      `diff --git a/f${i}.ts b/f${i}.ts`,
+      'new file mode 100644',
+      '--- /dev/null',
+      `+++ b/f${i}.ts`,
+      '@@ -0,0 +1,1 @@',
+      '+new',
+    ].join('\n')).join('\n');
+    let fileCount = 400;
+    const runGit = async (_repoPath: string, args: string[]): Promise<string> => {
+      if (args[0] === 'for-each-ref') return 'main\nfeature\n';
+      if (args[0] === 'rev-parse' && args[1] === '--verify') return 'main\n';
+      if (args[0] === 'merge-base') return 'abc123\n';
+      if (args[0] === 'rev-parse') return 'def456\n';
+      if (args[0] === 'diff') return patch(fileCount);
+      throw new Error(`unexpected git ${args.join(' ')}`);
+    };
+    const atLimit = await defaultEnumerateBranches('/repo', 'this-repo', 'main', undefined, runGit);
+    expect(atLimit.changes[0].assessmentError).toBeUndefined();
+    fileCount = 401;
+    const enumeration = await defaultEnumerateBranches('/repo', 'this-repo', 'main', undefined, runGit);
+    const map = await run(
+      { directory: '/p', includePullRequests: false },
+      providers({ branchesByRepo: { 'this-repo': enumeration } }),
+    );
+    expect(map.changes[0]).toMatchObject({ assessed: false, reason: 'assessment-capped' });
+    expect(map.changes[0].detail).toMatch(/401.*400-file/i);
+  });
+
+  it.each(['HEAD~1', '4b825dc642cb6eb9a060e54bf899d15f71049056'])(
+    'does not claim an auto fallback without a default-branch commit: %s',
+    async (fallback) => {
+      const runGit = async (_repoPath: string, args: string[]): Promise<string> => {
+        if (args[0] === 'for-each-ref') return 'feature\n';
+        throw new Error(`unavailable: ${args.join(' ')}`);
+      };
+      const result = await defaultEnumerateBranches(
+        '/repo', 'this-repo', 'main', undefined, runGit, async () => fallback,
+      );
+      expect(result.caveats).toContainEqual(expect.stringMatching(/main.*could not be verified/i));
+      expect(result.changes[0]).toMatchObject({ ref: 'feature', fetchError: expect.stringMatching(/merge-base/i) });
+      expect(result.caveats.join(' ')).not.toMatch(/using "HEAD~1"|using "4b825/i);
+    },
+  );
+
+  it('surfaces gh pr list command and JSON failures', async () => {
+    const runGit = async (): Promise<string> => 'main\n';
+    await expect(defaultEnumeratePullRequests(
+      '/repo', 'this-repo', 'main', async () => { throw new Error('authentication required'); }, runGit,
+    )).rejects.toThrow(/gh pr list.*authentication/i);
+    await expect(defaultEnumeratePullRequests(
+      '/repo', 'this-repo', 'main', async () => 'not-json', runGit,
+    )).rejects.toThrow(/gh pr list.*JSON/i);
+  });
+
+  it('applies the 400-file assessment boundary symmetrically to pull requests', async () => {
+    const patch = (count: number) => Array.from({ length: count }, (_, i) => [
+      `diff --git a/f${i}.ts b/f${i}.ts`,
+      'new file mode 100644',
+      '--- /dev/null',
+      `+++ b/f${i}.ts`,
+      '@@ -0,0 +1,1 @@',
+      '+new',
+    ].join('\n')).join('\n');
+    const prList = JSON.stringify([{ number: 1, headRefName: 'feature', author: { login: 'agent' }, title: 'large' }]);
+    const runGit = async (): Promise<string> => 'main\n';
+    const atLimit = await defaultEnumeratePullRequests(
+      '/repo', 'this-repo', 'main', async (_path, args) => args[1] === 'list' ? prList : patch(400), runGit,
+    );
+    expect(atLimit.changes[0].assessmentError).toBeUndefined();
+    const overLimit = await defaultEnumeratePullRequests(
+      '/repo', 'this-repo', 'main', async (_path, args) => args[1] === 'list' ? prList : patch(401), runGit,
+    );
+    expect(overLimit.changes[0]).toMatchObject({
+      ref: 'PR #1',
+      assessmentError: expect.stringMatching(/401.*400-file/i),
+    });
+  });
+
+  it.each(['--show-toplevel', 'bad ref'])('rejects an invalid base ref before invoking providers: %s', async (baseRef) => {
+    vi.mocked(resolveBaseRefDisclosed).mockRejectedValueOnce(new Error(`Invalid git ref: "${baseRef}"`));
+    const enumerateBranches = vi.fn(async () => []);
+    const result = await computeInterferenceMap(
+      { directory: '/p', baseRef },
+      { enumerateBranches, enumeratePullRequests: async () => [], ghAvailable: async () => false },
+    );
+    expect(result).toEqual({ error: expect.stringMatching(/Cannot resolve base ref.*Invalid git ref/i) });
+    expect(enumerateBranches).not.toHaveBeenCalled();
   });
 });
 
@@ -758,6 +1054,25 @@ describe('round-2 — CRLF parsing (C1) + honest caveats (M-A, FINDING 2)', () =
     );
     expect(map.assessedCount).toBe(1); // still assessed on a.ts
     expect(map.caveats.some(cv => /could not be read/i.test(cv) && /b\.ts|feat-partial/.test(cv))).toBe(true);
+  });
+
+  it('discloses when every changed base file is unreadable', async () => {
+    const c = change({
+      ref: 'feat-unreadable', actor: 'Alice', repo: 'this-repo', kind: 'branch',
+      files: [{ path: 'lost.ts', status: 'modified', hunks: [modifyHunk(1)] }],
+      baseSymbolsByFile: new Map(),
+      unreadableFiles: ['lost.ts'],
+    });
+    const map = await run(
+      { directory: '/p', includePullRequests: false },
+      providers({ branchesByRepo: { 'this-repo': [c] } }),
+    );
+    expect(map.changes[0]).toMatchObject({
+      assessed: false,
+      reason: 'no-resolvable-symbols',
+      detail: expect.stringMatching(/base content could not be read/i),
+    });
+    expect(map.caveats).toContainEqual(expect.stringMatching(/could not be read.*feat-unreadable/i));
   });
 
   it('when gh is installed but no PRs are enumerated, says so (no misleading "read against local base")', async () => {

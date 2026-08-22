@@ -14,6 +14,10 @@ import {
   type EnforcementPolicy,
 } from './enforcement-policy.js';
 
+// @ts-expect-error `warning` is the canonical spelling; legacy `warn` is rejected.
+const invalidSeverity: GovernanceFinding = { code: 'x', severity: 'warn', source: 'x', subject: 'x', message: 'x' };
+void invalidSeverity;
+
 describe('applyPolicyPrecedence — pure precedence core', () => {
   // Spec: off > blocking > advisory > source default. Exercises the "source default
   // is blocking" branch the registry never uses, proving precedence independently.
@@ -121,7 +125,7 @@ describe('lowerLegacyBlockConfig — legacy block sugar lowers onto the unified 
 
 describe('classifyFindings — one gate over one policy', () => {
   const findings: GovernanceFinding[] = [
-    { code: 'stale-decision-reference', severity: 'warn', source: 'stale-decision-reference', subject: 'memory:abc1', message: 'cites retired b' },
+    { code: 'stale-decision-reference', severity: 'warning', source: 'stale-decision-reference', subject: 'memory:abc1', message: 'cites retired b' },
     { code: 'surface-critical', severity: 'error', source: 'impact-certificate', subject: 'client', message: 'new path' },
   ];
 

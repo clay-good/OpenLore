@@ -531,6 +531,16 @@ describe('resolveBaseRefDisclosed', () => {
     expect(r.fellBack).toBe(false);
   });
 
+  it('prefers a remote-only default branch over the local HEAD parent', async () => {
+    await writeFile(join(tmpDir, 'a.ts'), 'v2', 'utf-8');
+    await commit(tmpDir, 'feature work');
+    await execFileAsync('git', ['update-ref', 'refs/remotes/origin/main', 'HEAD~1'], { cwd: tmpDir });
+    await execFileAsync('git', ['branch', '-m', 'feature'], { cwd: tmpDir });
+
+    const r = await resolveBaseRefDisclosed(tmpDir, 'auto');
+    expect(r).toEqual({ requested: 'auto', resolved: 'origin/main', fellBack: false });
+  });
+
   it('an empty request is treated as auto (no fallback flag)', async () => {
     const r = await resolveBaseRefDisclosed(tmpDir, '');
     expect(r.fellBack).toBe(false);
