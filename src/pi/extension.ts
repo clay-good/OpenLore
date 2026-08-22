@@ -91,6 +91,7 @@ interface OpenLoreConfig {
     model?: string;
     openaiCompatBaseUrl?: string;
     skipSslVerify?: boolean;
+    domains?: string | string[];
   };
   embedding?: {
     [key: string]: unknown;
@@ -250,7 +251,7 @@ export async function runConfigWizard(ctx: ExtensionContext, existing?: Existing
   const existingGeneration = isPlainObject(existing?.generation) ? existing.generation : {};
   const existingEmbedding = isPlainObject(existing?.embedding) ? existing.embedding : undefined;
   const existingAnalysis = isPlainObject(existing?.analysis) ? existing.analysis : {};
-  let generation: OpenLoreConfig['generation'] = { ...existingGeneration };
+  let generation: OpenLoreConfig['generation'] = { domains: 'auto', ...existingGeneration };
   let embedding: OpenLoreConfig['embedding'] | undefined =
     existingEmbedding && typeof existingEmbedding.baseUrl === 'string' && typeof existingEmbedding.model === 'string'
       ? existingEmbedding as OpenLoreConfig['embedding']

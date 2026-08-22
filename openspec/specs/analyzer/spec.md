@@ -6500,6 +6500,13 @@ The system SHALL the function shall read and return the openlore configuration f
 - **WHEN** the function is called
 - **THEN** it SHALL return the OpenLoreConfig
 
+#### Scenario: Config from an older release has a safe nested default omitted
+- **GIVEN** a root path with a previously valid `.openlore/config.json` whose existing section omits
+  a newly required field supplied by the current canonical defaults
+- **WHEN** the function is called
+- **THEN** it SHALL return the normalized `OpenLoreConfig` with that default added in memory, preserve
+  all explicit values, and leave the file unchanged
+
 ### Sub-component: Bfs
 
 > Implements: `bfs`

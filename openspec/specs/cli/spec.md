@@ -1804,6 +1804,13 @@ commands.
 - **WHEN** `openlore doctor` and `openlore analyze` are both run against it
 - **THEN** either both accept it, or `doctor` reports a finding describing why the command rejected it
 
+#### Scenario: Doctor recognizes a backward-compatible default
+
+- **GIVEN** a previously valid config missing a newly required nested field with a canonical default
+- **WHEN** `openlore doctor` and a command both read it
+- **THEN** both use the same in-memory default, `doctor` names the compatibility value and unchanged
+  file, and its remediation does not recommend destructive reinitialization
+
 ### Requirement: ReviewMarkdownEscapesHeadControlledText
 
 The `openlore review` Markdown renderer SHALL treat every value originating from the diffed head —

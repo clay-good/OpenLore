@@ -639,9 +639,35 @@ describe('Pi configuration fidelity', () => {
     expect(saved.impactCertificate).toEqual(existing.impactCertificate);
     expect(saved.contextInjection).toEqual(existing.contextInjection);
     expect(saved.analysis.futureBudget).toBe(9);
-    expect(saved.generation).toMatchObject({ provider: 'anthropic', timeoutMs: 12_000 });
+    expect(saved.generation).toMatchObject({ provider: 'anthropic', timeoutMs: 12_000, domains: 'auto' });
     expect(saved.generation).not.toHaveProperty('model');
     expect(saved.generation).not.toHaveProperty('openaiCompatBaseUrl');
+  });
+
+  it('writes the compatibility default for a fresh config and preserves explicit domains', async () => {
+    const saveImmediately = () => ({
+      cwd: dir,
+      mode: 'tui',
+      hasUI: true,
+      ui: {
+        select: vi.fn(async () => '✓ Save & close'),
+        input: vi.fn(),
+        confirm: vi.fn(async () => false),
+        notify: vi.fn(),
+      },
+    }) as unknown as ExtensionContext;
+
+    await runConfigWizard(saveImmediately(), null);
+    let saved = JSON.parse(await readFile(join(dir, '.openlore', 'config.json'), 'utf-8'));
+    expect(saved.generation).toEqual({ domains: 'auto' });
+
+    const explicit = {
+      ...saved,
+      generation: { provider: 'openai', model: 'gpt-4o', domains: ['auth', 'payments'] },
+    };
+    await runConfigWizard(saveImmediately(), explicit);
+    saved = JSON.parse(await readFile(join(dir, '.openlore', 'config.json'), 'utf-8'));
+    expect(saved.generation.domains).toEqual(['auth', 'payments']);
   });
 
   it('preserves embedding siblings when its URL changes and removes only an explicitly removed block', async () => {

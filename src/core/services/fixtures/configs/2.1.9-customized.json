@@ -1,0 +1,27 @@
+{
+  "version": "1.0.0",
+  "projectType": "nodejs",
+  "openspecPath": "./custom-specs",
+  "analysis": {
+    "maxFiles": 500,
+    "includePatterns": [],
+    "excludePatterns": [
+      "dist/**",
+      "node_modules/**"
+    ]
+  },
+  "generation": {
+    "provider": "openai-compat",
+    "model": "codestral-2508",
+    "openaiCompatBaseUrl": "https://api.mistral.ai/v1/"
+  },
+  "embedding": {
+    "baseUrl": "http://localhost:8765/v1",
+    "model": "all-MiniLM-L6-v2"
+  },
+  "panicResponse": {
+    "mode": "off"
+  },
+  "createdAt": "2026-08-15T00:00:00.000Z",
+  "lastRun": null
+}

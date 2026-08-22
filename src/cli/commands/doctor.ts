@@ -18,6 +18,7 @@ import { palette } from '../../utils/colors.js';
 import {
   InvalidOpenLoreConfigError,
   readOpenLoreConfig,
+  normalizeOpenLoreConfig,
   resolveOpenLoreConfigPath,
 } from '../../core/services/config-manager.js';
 import { validateOpenLoreConfig } from '../../core/services/config-schema.js';
@@ -296,15 +297,20 @@ async function checkConfigSchema(rootPath: string): Promise<CheckResult> {
     // No config, or unparseable JSON — checkConfig already reports both. Nothing to add.
     return { name: 'Config schema', status: 'ok', detail: 'no config to validate' };
   }
-  const findings = validateOpenLoreConfig(parsed);
+  const normalized = normalizeOpenLoreConfig(parsed);
+  const findings = [...normalized.findings, ...validateOpenLoreConfig(normalized.config)];
   if (findings.length === 0) {
     return { name: 'Config schema', status: 'ok', detail: 'all required fields present and all declared fields well-typed' };
   }
   const missing = findings.filter(f => f.kind === 'missing-required');
-  const other = findings.filter(f => f.kind !== 'missing-required');
+  const backfilled = findings.filter(f => f.kind === 'default-added');
+  const other = findings.filter(f => f.kind !== 'missing-required' && f.kind !== 'default-added');
   const parts = [
     ...(missing.length > 0
       ? [`missing required keys: ${missing.map(f => f.key).join(', ')} — re-run 'openlore init'`]
+      : []),
+    ...(backfilled.length > 0
+      ? [`using compatibility defaults: ${backfilled.map(f => f.message).join('; ')}`]
       : []),
     ...other.slice(0, 3).map(f => f.message),
   ];
@@ -315,7 +321,9 @@ async function checkConfigSchema(rootPath: string): Promise<CheckResult> {
     name: 'Config schema',
     status: 'warn',
     detail: `${findings.length} config finding(s): ${summary}${more}`,
-    fix: `Edit ${OPENLORE_CONFIG_REL_PATH} to correct the key(s), or re-run 'openlore init'`,
+    fix: missing.length > 0 || other.length > 0
+      ? `Edit ${OPENLORE_CONFIG_REL_PATH} to correct the key(s), or re-run 'openlore init'`
+      : `Add the listed default key(s) to ${OPENLORE_CONFIG_REL_PATH} to silence this compatibility warning`,
   };
 }
 

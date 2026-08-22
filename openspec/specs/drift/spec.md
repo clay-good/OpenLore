@@ -696,6 +696,19 @@ stand in for either outcome.
 - **WHEN** repository detection runs
 - **THEN** the directory is recognized as a git repository
 
+### Requirement: DriftLoadsBackwardCompatibleConfiguration
+
+The drift command SHALL use the shared normalized configuration read boundary. A config written by
+an earlier release that omits a newly required nested field with a canonical default SHALL NOT stop
+static drift detection, and the command SHALL preserve the user's config file and explicit values.
+
+#### Scenario: Older config does not block drift analysis
+
+- **GIVEN** a previously valid config whose existing generation section omits a newly required field
+  supplied by the canonical defaults
+- **WHEN** `openlore drift` loads its configuration
+- **THEN** drift analysis proceeds with the in-memory default and the config file remains unchanged
+
 ## Sub-components
 
 > `DriftDetector` is an orchestrator. Each sub-component below implements one logical block.

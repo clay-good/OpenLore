@@ -22,6 +22,7 @@ import { fileExists } from '../../utils/command-helpers.js';
 import { safeJoin } from '../../utils/path-confinement.js';
 import {
   validateOpenLoreConfig,
+  backfillRequiredConfigDefaults,
   isFatalConfigFinding,
   CONFIG_SCHEMA_VERSION,
   type ConfigValidationFinding,
@@ -127,6 +128,23 @@ export function getDefaultConfig(projectType: ProjectType, openspecPath: string)
   };
 }
 
+/** Apply non-destructive compatibility defaults before schema validation. */
+export function normalizeOpenLoreConfig(parsed: unknown): {
+  config: unknown;
+  findings: ConfigValidationFinding[];
+} {
+  const record = typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+    ? parsed as Record<string, unknown>
+    : {};
+  const projectType = typeof record.projectType === 'string'
+    ? record.projectType as ProjectType
+    : 'unknown';
+  const openspecPath = typeof record.openspecPath === 'string'
+    ? record.openspecPath
+    : './openspec';
+  return backfillRequiredConfigDefaults(parsed, getDefaultConfig(projectType, openspecPath));
+}
+
 /**
  * Per-process memory of config-validation warnings already emitted, so a hub caller
  * (`readOpenLoreConfig` has ~45 call sites) emits each finding at most once per process
@@ -193,21 +211,22 @@ export async function readOpenLoreConfig(rootPath: string): Promise<OpenLoreConf
   } catch {
     return null; // File doesn't exist — normal case before init
   }
-  let parsed: OpenLoreConfig;
+  let parsed: unknown;
   try {
-    parsed = JSON.parse(content) as OpenLoreConfig;
+    parsed = JSON.parse(content) as unknown;
   } catch (err) {
     logger.warning(`Failed to parse ${configPath}: ${(err as Error).message}`);
     logger.warning(`Delete ${configPath} and run 'openlore init' to recreate it.`);
     return null;
   }
-  const findings = validateOpenLoreConfig(parsed);
-  emitConfigValidationWarnings(configPath, findings);
-  const fatalFindings = findings.filter(isFatalConfigFinding);
+  const normalized = normalizeOpenLoreConfig(parsed);
+  const validationFindings = validateOpenLoreConfig(normalized.config);
+  emitConfigValidationWarnings(configPath, [...normalized.findings, ...validationFindings]);
+  const fatalFindings = validationFindings.filter(isFatalConfigFinding);
   if (fatalFindings.length > 0) {
     throw new InvalidOpenLoreConfigError(configPath, fatalFindings);
   }
-  return parsed;
+  return normalized.config as OpenLoreConfig;
 }
 
 /**

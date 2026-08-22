@@ -33,17 +33,20 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 // function created at import time references our controllable vi.fn().
 vi.mock('node:child_process', () => ({ execFile: vi.fn() }));
 
-vi.mock('../../core/services/config-manager.js', () => ({
-  InvalidOpenLoreConfigError: class InvalidOpenLoreConfigError extends Error {},
-  readOpenLoreConfig: vi.fn().mockResolvedValue({
-    projectType: 'nodejs',
-    createdAt: '2024-01-01T00:00:00Z',
-    openspecPath: './openspec',
-    maxFiles: 500,
-  }),
-  // Default resolution: <root>/.openlore/config.json (no --config override in tests).
-  resolveOpenLoreConfigPath: (rootPath: string) => `${rootPath}/.openlore/config.json`,
-}));
+vi.mock('../../core/services/config-manager.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../core/services/config-manager.js')>();
+  return {
+    ...actual,
+    readOpenLoreConfig: vi.fn().mockResolvedValue({
+      projectType: 'nodejs',
+      createdAt: '2024-01-01T00:00:00Z',
+      openspecPath: './openspec',
+      maxFiles: 500,
+    }),
+    // Default resolution: <root>/.openlore/config.json (no --config override in tests).
+    resolveOpenLoreConfigPath: (rootPath: string) => `${rootPath}/.openlore/config.json`,
+  };
+});
 
 vi.mock('../../core/services/llm-service.js', () => ({
   createLLMService: vi.fn().mockReturnValue({
@@ -580,6 +583,27 @@ describe('doctor command', () => {
       expect(schemaCheck.detail).toContain('analysis');
       expect(schemaCheck.detail).toContain('openlore init');
       expect(schemaCheck.detail).not.toContain('all keys known and well-typed');
+    });
+
+    it('reports an in-memory compatibility default without recommending init', async () => {
+      const { readFile } = await import('node:fs/promises');
+      vi.mocked(readFile).mockResolvedValue(
+        JSON.stringify({
+          version: '1.0.0', projectType: 'nodejs', openspecPath: 'openspec',
+          analysis: { maxFiles: 1, includePatterns: [], excludePatterns: ['dist/**'] },
+          generation: { model: 'custom-model' },
+          createdAt: '2026-01-01T00:00:00Z', lastRun: null,
+        }) as never
+      );
+
+      const checks = await runDoctorJson();
+      const schemaCheck = checks.find(c => c.name === 'Config schema')!;
+
+      expect(schemaCheck.status).toBe('warn');
+      expect(schemaCheck.detail).toContain('generation.domains');
+      expect(schemaCheck.detail).toContain('"auto"');
+      expect(schemaCheck.detail).toContain('compatibility defaults');
+      expect(schemaCheck.fix).not.toContain('openlore init');
     });
 
     it('reports nested type mismatches', async () => {

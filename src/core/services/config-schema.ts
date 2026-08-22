@@ -54,13 +54,19 @@ type RequiredKeys<T> = {
 type RequiredFieldMap<T> = Record<RequiredKeys<T>, true>
   & Partial<Record<Exclude<keyof T, RequiredKeys<T>>, never>>;
 
-type ConfigRule =
+type ConfigRuleMetadata = {
+  /** Missing values written by older releases may be copied from canonical defaults. */
+  compatibilityDefault?: true;
+};
+
+type ConfigRule = ConfigRuleMetadata & (
   | { kind: 'string' | 'number' | 'boolean' | 'string-or-null' }
   | { kind: 'enum'; values: readonly string[] }
   | { kind: 'array'; element: ConfigRule }
   | { kind: 'string-or-string-array' }
   | { kind: 'record-enum'; values: readonly string[] }
-  | { kind: 'object'; fields: Record<string, ConfigRule>; required: readonly string[]; strict?: boolean };
+  | { kind: 'object'; fields: Record<string, ConfigRule>; required: readonly string[]; strict?: boolean }
+);
 
 function fieldsFor<T>(fields: Record<keyof T, ConfigRule>): Record<string, ConfigRule> {
   return fields as Record<string, ConfigRule>;
@@ -97,7 +103,7 @@ const generationRule: ConfigRule = {
     disableResponseFormat: booleanRule,
     timeout: numberRule,
     chunkMaxChars: numberRule,
-    domains: { kind: 'string-or-string-array' },
+    domains: { kind: 'string-or-string-array', compatibilityDefault: true },
   }),
   required: requiredFor<GenerationConfig>({ domains: true }),
 };
@@ -222,7 +228,7 @@ const bundleRule: ConfigRule = {
   required: requiredFor<BundleConfig>({}),
 };
 
-const CONFIG_RULE: ConfigRule = {
+const CONFIG_RULE: Extract<ConfigRule, { kind: 'object' }> = {
   kind: 'object',
   fields: fieldsFor<OpenLoreConfig>({
     version: stringRule,
@@ -304,7 +310,7 @@ export const CONFIG_MIGRATIONS: readonly ConfigMigration[] = [];
 
 /** A single deterministic finding from validating a config object. */
 export interface ConfigValidationFinding {
-  kind: 'unknown-key' | 'missing-required' | 'type-mismatch' | 'version-older' | 'version-newer';
+  kind: 'unknown-key' | 'missing-required' | 'type-mismatch' | 'version-older' | 'version-newer' | 'default-added';
   /** The offending key, when the finding is about one. */
   key?: string;
   /** Human-readable message. */
@@ -313,6 +319,124 @@ export interface ConfigValidationFinding {
   suggestion?: string;
   /** Whether returning the parsed object would expose an unsafe required runtime shape. */
   fatal?: boolean;
+}
+
+export interface ConfigCompatibilityResult {
+  config: unknown;
+  findings: ConfigValidationFinding[];
+}
+
+function isConfigObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Backfill only required fields explicitly marked as upgrade-safe. Nested sections
+ * must already exist in the parsed config; marked top-level fields may be introduced.
+ * This keeps malformed legacy-required structure fatal while allowing deliberate,
+ * default-backed schema additions to remain backward compatible.
+ */
+export function backfillRequiredConfigDefaults(
+  parsed: unknown,
+  defaults: unknown,
+): ConfigCompatibilityResult {
+  if (!isConfigObject(parsed) || !isConfigObject(defaults)) {
+    return { config: parsed, findings: [] };
+  }
+
+  const config = structuredClone(parsed) as Record<string, unknown>;
+  const findings: ConfigValidationFinding[] = [];
+
+  const visit = (
+    target: Record<string, unknown>,
+    fallback: Record<string, unknown>,
+    rule: Extract<ConfigRule, { kind: 'object' }>,
+    path: string,
+  ): void => {
+    for (const key of rule.required) {
+      const childRule = rule.fields[key];
+      if (childRule?.compatibilityDefault !== true) continue;
+      if (!Object.prototype.hasOwnProperty.call(target, key)
+        && Object.prototype.hasOwnProperty.call(fallback, key)) {
+        const childPath = path ? `${path}.${key}` : key;
+        target[key] = structuredClone(fallback[key]);
+        findings.push({
+          kind: 'default-added',
+          key: childPath,
+          fatal: false,
+          message: `added missing config key '${childPath}' = ${JSON.stringify(fallback[key])} from the current default (file unchanged)`,
+        });
+      }
+    }
+
+    for (const [key, childRule] of Object.entries(rule.fields)) {
+      if (childRule.kind !== 'object') continue;
+      const childTarget = target[key];
+      const childFallback = fallback[key];
+      if (!isConfigObject(childTarget) || !isConfigObject(childFallback)) continue;
+      visit(childTarget, childFallback, childRule, path ? `${path}.${key}` : key);
+    }
+  };
+
+  visit(config, defaults, CONFIG_RULE, '');
+  return { config, findings };
+}
+
+/**
+ * Required fields missing from sections emitted by the canonical defaults. This is a
+ * schema-evolution guard: adding a required field to a default section must update the
+ * defaults in the same change, otherwise older configs cannot be backfilled safely.
+ */
+export function findRequiredFieldsWithoutDefaults(defaults: unknown): string[] {
+  if (!isConfigObject(defaults)) return CONFIG_RULE.required.map(key => key);
+  const missing: string[] = [];
+
+  const visit = (
+    fallback: Record<string, unknown>,
+    rule: Extract<ConfigRule, { kind: 'object' }>,
+    path: string,
+  ): void => {
+    for (const key of rule.required) {
+      if (!Object.prototype.hasOwnProperty.call(fallback, key)) {
+        missing.push(path ? `${path}.${key}` : key);
+      }
+    }
+    for (const [key, childRule] of Object.entries(rule.fields)) {
+      if (childRule.kind !== 'object') continue;
+      const childFallback = fallback[key];
+      if (!isConfigObject(childFallback)) continue;
+      visit(childFallback, childRule, path ? `${path}.${key}` : key);
+    }
+  };
+
+  visit(defaults, CONFIG_RULE, '');
+  return missing;
+}
+
+/** Upgrade-safe fields whose canonical fallback is absent at the same schema path. */
+export function findCompatibilityFieldsWithoutDefaults(defaults: unknown): string[] {
+  const missing: string[] = [];
+
+  const visit = (
+    fallback: unknown,
+    rule: Extract<ConfigRule, { kind: 'object' }>,
+    path: string,
+  ): void => {
+    const fallbackRecord = isConfigObject(fallback) ? fallback : undefined;
+    for (const [key, childRule] of Object.entries(rule.fields)) {
+      const childPath = path ? `${path}.${key}` : key;
+      if (childRule.compatibilityDefault === true
+        && !Object.prototype.hasOwnProperty.call(fallbackRecord ?? {}, key)) {
+        missing.push(childPath);
+      }
+      if (childRule.kind === 'object') {
+        visit(fallbackRecord?.[key], childRule, childPath);
+      }
+    }
+  };
+
+  visit(defaults, CONFIG_RULE, '');
+  return missing;
 }
 
 /** Findings that make the parsed object unsafe to expose as `OpenLoreConfig`. */
