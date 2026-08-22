@@ -119,6 +119,80 @@ describe('extractEnvVars', () => {
     expect(names).toContain('SECRET_KEY');
   });
 
+  it('should classify Ruby bracket and fetch forms by their runtime semantics', async () => {
+    mockReadFile.mockResolvedValue(
+      'soft = ENV["SOFT"]\nhard = ENV.fetch("HARD")\ndefaulted = ENV.fetch("DEFAULTED", "d")\n',
+    );
+    const result = await extractEnvVars(['/root/config.rb'], '/root');
+
+    expect(result.find(v => v.name === 'SOFT')?.required).toBe(false);
+    expect(result.find(v => v.name === 'HARD')?.required).toBe(true);
+    expect(result.find(v => v.name === 'DEFAULTED')?.required).toBe(false);
+  });
+
+  it('should detect Go os.LookupEnv as an optional checked read', async () => {
+    mockReadFile.mockResolvedValue('value, ok := os.LookupEnv("OPTIONAL")\n');
+    const result = await extractEnvVars(['/root/main.go'], '/root');
+
+    expect(result).toContainEqual(expect.objectContaining({ name: 'OPTIONAL', required: false }));
+  });
+
+  it('should detect TypeScript process.env destructuring', async () => {
+    mockReadFile.mockResolvedValue('const { API_KEY, REGION } = process.env;\n');
+    const result = await extractEnvVars(['/root/config.ts'], '/root');
+
+    expect(result.map(v => v.name)).toEqual(['API_KEY', 'REGION']);
+    expect(result.every(v => v.required)).toBe(true);
+  });
+
+  it('should detect JavaScript process.env destructuring', async () => {
+    mockReadFile.mockResolvedValue('const { API_KEY, REGION } = process.env;\n');
+    const result = await extractEnvVars(['/root/config.js'], '/root');
+
+    expect(result.map(v => v.name)).toEqual(['API_KEY', 'REGION']);
+  });
+
+  it('should evaluate TypeScript fallbacks per read site', async () => {
+    mockReadFile.mockResolvedValue(
+      'const optional = process.env.OPTIONAL ?? "default";\nconst required = process.env.REQUIRED;\n',
+    );
+    const result = await extractEnvVars(['/root/config.ts'], '/root');
+
+    expect(result.find(v => v.name === 'OPTIONAL')?.required).toBe(false);
+    expect(result.find(v => v.name === 'REQUIRED')?.required).toBe(true);
+  });
+
+  it('handles typed destructuring and nested default expressions per property', async () => {
+    mockReadFile.mockResolvedValue(
+      'const { API_KEY = make({ nested: true }), REGION }: NodeJS.ProcessEnv = process.env;\n',
+    );
+    const result = await extractEnvVars(['/root/config.ts'], '/root');
+    expect(result.find(v => v.name === 'API_KEY')?.required).toBe(false);
+    expect(result.find(v => v.name === 'REGION')?.required).toBe(true);
+  });
+
+  it('handles semicolons inside an inline object type annotation', async () => {
+    mockReadFile.mockResolvedValue(
+      'const { API_KEY }: { API_KEY?: string; REGION?: string } = process.env;\n',
+    );
+    const result = await extractEnvVars(['/root/config.ts'], '/root');
+    expect(result.map(v => v.name)).toEqual(['API_KEY']);
+  });
+
+  it('ignores comment syntax while parsing destructuring structure and defaults', async () => {
+    mockReadFile.mockResolvedValue(
+      'const { API_KEY /* = not a default } */, REGION } = process.env;\n',
+    );
+    const result = await extractEnvVars(['/root/config.ts'], '/root');
+    expect(result.find(v => v.name === 'API_KEY')?.required).toBe(true);
+    expect(result.find(v => v.name === 'REGION')?.required).toBe(true);
+  });
+
+  it('does not match environment APIs as suffixes of other identifiers', async () => {
+    mockReadFile.mockResolvedValue('myprocess.env.FAKE; myos.LookupEnv("NOPE"); MYENV.fetch("NEVER")\n');
+    expect(await extractEnvVars(['/root/config.ts'], '/root')).toEqual([]);
+  });
+
   it('should merge vars from declaration files and source files', async () => {
     mockReadFile
       .mockResolvedValueOnce('DATABASE_URL=postgres://localhost/db\n')  // .env.example
@@ -217,9 +291,9 @@ describe('extractEnvReadSites (change: add-env-config-impact-graph)', () => {
     expect(extractEnvReadSites(src, 'main.go', '.go')[0]).toMatchObject({ name: 'PORT', required: false });
   });
 
-  it('treats Ruby ENV[] strict and ENV.fetch default-aware (positional and block defaults)', () => {
+  it('treats Ruby ENV[] as soft and ENV.fetch as default-aware (positional and block defaults)', () => {
     const src = [
-      "a = ENV['SECRET']",                   // strict subscript → required
+      "a = ENV['SECRET']",                   // missing subscript → nil, not required
       "b = ENV.fetch('REGION')",             // fetch, no default → required
       "c = ENV.fetch('OPT', 'd')",           // fetch with positional default → not required
       "d = ENV.fetch('BRACE') { 'x' }",      // fetch with block default → not required
@@ -228,11 +302,42 @@ describe('extractEnvReadSites (change: add-env-config-impact-graph)', () => {
       'end',
     ].join('\n') + '\n';
     const sites = extractEnvReadSites(src, 'app.rb', '.rb');
-    expect(sites.find(s => s.name === 'SECRET')).toMatchObject({ required: true });
+    expect(sites.find(s => s.name === 'SECRET')).toMatchObject({ required: false });
     expect(sites.find(s => s.name === 'REGION')).toMatchObject({ required: true });
     expect(sites.find(s => s.name === 'OPT')).toMatchObject({ required: false });
     expect(sites.find(s => s.name === 'BRACE')).toMatchObject({ required: false });
     expect(sites.find(s => s.name === 'DOO')).toMatchObject({ required: false });
+  });
+
+  it('detects Go os.LookupEnv as an optional checked read site', () => {
+    const sites = extractEnvReadSites('package main\nvar value, ok = os.LookupEnv("OPTIONAL")\n', 'main.go', '.go');
+    expect(sites).toEqual([{ name: 'OPTIONAL', file: 'main.go', line: 2, required: false }]);
+  });
+
+  it('detects each TypeScript process.env destructuring read site', () => {
+    const sites = extractEnvReadSites(
+      'const { API_KEY, REGION } = process.env;\n',
+      'src/config.ts', '.ts',
+    );
+    expect(sites).toEqual([
+      { name: 'API_KEY', file: 'src/config.ts', line: 1, required: true },
+      { name: 'REGION', file: 'src/config.ts', line: 1, required: true },
+    ]);
+  });
+
+  it('recognizes transparent comments before a TypeScript fallback', () => {
+    const sites = extractEnvReadSites('const port = process.env.PORT /* optional */ ?? "3000";\n', 'a.ts', '.ts');
+    expect(sites[0]).toMatchObject({ name: 'PORT', required: false });
+  });
+
+  it('classifies parenthesis-free Ruby fetch forms', () => {
+    const sites = extractEnvReadSites(
+      "a = ENV.fetch 'HARD'\nb = ENV.fetch 'SOFT', 'd'\nc = ENV.fetch 'BLOCK' do\n  'd'\nend\n",
+      'app.rb', '.rb',
+    );
+    expect(sites.find(s => s.name === 'HARD')).toMatchObject({ required: true });
+    expect(sites.find(s => s.name === 'SOFT')).toMatchObject({ required: false });
+    expect(sites.find(s => s.name === 'BLOCK')).toMatchObject({ required: false });
   });
 
   it('returns nothing for an unsupported language', () => {

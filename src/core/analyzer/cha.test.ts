@@ -455,4 +455,28 @@ describe('arityFromSignature', () => {
     expect(arityFromSignature(undefined)).toBeUndefined();
     expect(arityFromSignature('noParens')).toBeUndefined();
   });
+
+  it('skips the Go receiver group and counts the actual method parameters', () => {
+    expect(arityFromSignature('func (s *Server) handle(w http.ResponseWriter, r *http.Request)')).toBe(2);
+    expect(arityFromSignature('func (s Server) ready() bool')).toBe(0);
+    expect(arityFromSignature('func /* receiver */ (s Server) ready() bool')).toBe(0);
+    expect(arityFromSignature('func /* one */ /* two */ (s Server) ready() bool')).toBe(0);
+    expect(arityFromSignature('func(a int)')).toBe(1);
+    expect(arityFromSignature('func()')).toBe(0);
+  });
+
+  it('filters arity-mismatched Go embed overrides while keeping matching ones', async () => {
+    const b = await new CallGraphBuilder().build([{ path: 'server.go', language: 'Go', content: `package server
+      type Base struct{}
+      func (b Base) Handle(w int, r int) {}
+      func (b Base) Ready() bool { return true }
+      type Derived struct { Base }
+      func (d Derived) Handle(w int) {}
+      func (d Derived) Ready() bool { return false }
+    ` }]);
+    const overrides = new Set(b.edges.filter(e => e.synthesizedBy === 'override').map(e => `${e.callerId}->${e.calleeId}`));
+
+    expect(overrides.has('server.go::Base.Handle->server.go::Derived.Handle')).toBe(false);
+    expect(overrides.has('server.go::Base.Ready->server.go::Derived.Ready')).toBe(true);
+  });
 });

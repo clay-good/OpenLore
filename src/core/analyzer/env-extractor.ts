@@ -87,32 +87,31 @@ function parseEnvFile(content: string, relPath: string): EnvVar[] {
 // ============================================================================
 
 // JS/TS: process.env.VAR_NAME or process.env['VAR_NAME'] or process.env["VAR_NAME"]
-const TS_ENV_RE = /process\.env\.([A-Z_][A-Z0-9_]*)|process\.env\[['"]([A-Z_][A-Z0-9_]*)['"]]/g;
-// Fallback detection: process.env.X ?? 'default' or process.env.X || 'default'
-const TS_HAS_FALLBACK_RE = /process\.env\.(?:[A-Z_][A-Z0-9_]*|\[['"][A-Z_][A-Z0-9_]*['"]])\s*(?:\?\?|(?<!\|)\|\|)/;
+const TS_ENV_RE = /(?<![\w$.])process\.env\.([A-Z_][A-Z0-9_]*)|(?<![\w$.])process\.env\[['"]([A-Z_][A-Z0-9_]*)['"]]/g;
+const TS_ENV_DESTRUCTURE_START_RE = /\b(?:const|let|var)\s*\{/g;
 
 // Python: os.environ["X"], os.environ['X'], os.environ.get("X"), os.getenv("X")
 const PY_ENV_RE = /os\.environ\[['"]([A-Z_][A-Z0-9_]*)['"]|os\.environ\.get\(['"]([A-Z_][A-Z0-9_]*)['"]|os\.getenv\(['"]([A-Z_][A-Z0-9_]*)['"]/g;
 
-// Go: os.Getenv("X")
-const GO_ENV_RE = /os\.Getenv\("([A-Z_][A-Z0-9_]*)"\)/g;
+// Go: os.Getenv("X") or the idiomatic checked os.LookupEnv("X") form.
+const GO_ENV_RE = /(?<![\w$.])os\.(?:Getenv|LookupEnv)\s*\(\s*"([A-Z_][A-Z0-9_]*)"\s*\)/g;
 
 // Ruby: ENV["X"], ENV['X'], ENV.fetch("X")
-const RUBY_ENV_RE = /ENV\[['"]([A-Z_][A-Z0-9_]*)['"]|ENV\.fetch\(['"]([A-Z_][A-Z0-9_]*)['"]/g;
+const RUBY_ENV_RE = /(?<![\w$:])ENV\[['"]([A-Z_][A-Z0-9_]*)['"]|(?<![\w$:])ENV\.fetch(?:\(\s*|[ \t]+)['"]([A-Z_][A-Z0-9_]*)['"]/g;
 
 function extractFromSource(source: string, relPath: string, ext: string): Array<{ name: string; required: boolean }> {
   const found: Array<{ name: string; required: boolean }> = [];
 
   let re: RegExp;
-  let hasFallback: boolean;
-
   if (['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'].includes(ext)) {
     re = new RegExp(TS_ENV_RE.source, 'g');
-    hasFallback = TS_HAS_FALLBACK_RE.test(source);
     let m: RegExpExecArray | null;
     while ((m = re.exec(source)) !== null) {
       const name = m[1] ?? m[2];
-      if (name) found.push({ name, required: !hasFallback });
+      if (name) found.push({ name, required: tsSiteRequired(source, m.index + m[0].length) });
+    }
+    for (const read of extractTsDestructuredReads(source)) {
+      found.push({ name: read.name, required: read.required });
     }
   } else if (['.py', '.pyw'].includes(ext)) {
     re = new RegExp(PY_ENV_RE.source, 'g');
@@ -134,8 +133,8 @@ function extractFromSource(source: string, relPath: string, ext: string): Array<
     let m: RegExpExecArray | null;
     while ((m = re.exec(source)) !== null) {
       const name = m[1] ?? m[2];
-      const isStrict = m[1] !== undefined; // ENV.fetch has optional default
-      if (name) found.push({ name, required: isStrict });
+      const afterIdx = m.index + m[0].length;
+      if (name) found.push({ name, required: m[1] === undefined && rubyFetchRequired(source, afterIdx) });
     }
   }
 
@@ -293,9 +292,112 @@ function lineLookup(source: string): (idx: number) => number {
 
 /** JS/TS: a read has a site-local fallback when `?? `/`||` immediately follows. */
 function tsSiteRequired(source: string, afterIdx: number): boolean {
-  // Skip optional TS non-null `!` and whitespace, then look for ?? or ||.
-  const tail = source.slice(afterIdx).replace(/^\s*!?\s*/, '');
+  // Skip optional TS non-null `!`, whitespace, and transparent block comments,
+  // then look for a site-local ?? or || fallback.
+  let tail = source.slice(afterIdx);
+  while (true) {
+    const next = tail.replace(/^\s*(?:!|\/\*[\s\S]*?\*\/)/, '');
+    if (next === tail) break;
+    tail = next;
+  }
+  tail = tail.replace(/^\s*/, '');
   return !(tail.startsWith('??') || tail.startsWith('||'));
+}
+
+/** TS/JS object destructuring reads one environment key per property. */
+function extractTsDestructuredReads(source: string): Array<{ name: string; index: number; required: boolean }> {
+  const reads: Array<{ name: string; index: number; required: boolean }> = [];
+  const structural = maskJsComments(source);
+  const starts = new RegExp(TS_ENV_DESTRUCTURE_START_RE.source, 'g');
+  let start: RegExpExecArray | null;
+  while ((start = starts.exec(structural)) !== null) {
+    const open = start.index + start[0].lastIndexOf('{');
+    const close = findMatchingBrace(structural, open);
+    if (close === -1) continue;
+    const tail = structural.slice(close + 1);
+    if (!/^\s*(?::(?:[^=;{}]|\{[^{}]*\})+)?=\s*process\.env\b/.test(tail)) continue;
+    const body = structural.slice(open + 1, close);
+    for (const part of splitTopLevelProperties(body)) {
+      const field = /^\s*([A-Z_][A-Z0-9_]*)\b/.exec(part.text);
+      if (!field) continue;
+      reads.push({
+        name: field[1],
+        index: open + 1 + part.offset + (field.index ?? 0) + field[0].indexOf(field[1]),
+        required: !part.text.includes('='),
+      });
+    }
+    starts.lastIndex = close + 1;
+  }
+  return reads;
+}
+
+function maskJsComments(source: string): string {
+  const chars = [...source];
+  let quote = '';
+  let escaped = false;
+  for (let i = 0; i < chars.length; i++) {
+    const ch = chars[i];
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === quote) quote = '';
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === '`') { quote = ch; continue; }
+    if (ch === '/' && chars[i + 1] === '/') {
+      chars[i++] = ' '; chars[i] = ' ';
+      while (i + 1 < chars.length && chars[i + 1] !== '\n') chars[++i] = ' ';
+    } else if (ch === '/' && chars[i + 1] === '*') {
+      chars[i++] = ' '; chars[i] = ' ';
+      while (i + 1 < chars.length) {
+        if (chars[i] === '*' && chars[i + 1] === '/') { chars[i] = ' '; chars[++i] = ' '; break; }
+        if (chars[i] !== '\n') chars[i] = ' ';
+        i++;
+      }
+    }
+  }
+  return chars.join('');
+}
+
+function findMatchingBrace(source: string, open: number): number {
+  let depth = 0;
+  let quote = '';
+  let escaped = false;
+  for (let i = open; i < source.length; i++) {
+    const ch = source[i];
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === quote) quote = '';
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === '`') { quote = ch; continue; }
+    if (ch === '{') depth++;
+    else if (ch === '}' && --depth === 0) return i;
+  }
+  return -1;
+}
+
+function splitTopLevelProperties(body: string): Array<{ text: string; offset: number }> {
+  const parts: Array<{ text: string; offset: number }> = [];
+  let start = 0;
+  let depth = 0;
+  let quote = '';
+  let escaped = false;
+  for (let i = 0; i <= body.length; i++) {
+    const ch = body[i] ?? ',';
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === quote) quote = '';
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === '`') { quote = ch; continue; }
+    if (ch === '(' || ch === '[' || ch === '{') depth++;
+    else if (ch === ')' || ch === ']' || ch === '}') depth--;
+    else if (ch === ',' && depth === 0) { parts.push({ text: body.slice(start, i), offset: start }); start = i + 1; }
+  }
+  return parts;
 }
 
 /**
@@ -316,7 +418,7 @@ function callHasNoDefaultArg(source: string, afterIdx: number): boolean {
 function rubyFetchRequired(source: string, afterIdx: number): boolean {
   if (!callHasNoDefaultArg(source, afterIdx)) return false; // positional default
   // After the closing paren, a `{` or `do` is a block default.
-  const afterParen = source.slice(afterIdx).replace(/^\s*\)\s*/, '');
+  const afterParen = source.slice(afterIdx).replace(/^\s*\)?\s*/, '');
   if (afterParen.startsWith('{') || /^do\b/.test(afterParen)) return false;
   return true;
 }
@@ -339,6 +441,9 @@ export function extractEnvReadSites(source: string, relPath: string, ext: string
       if (!name) continue;
       const afterIdx = m.index + m[0].length;
       sites.push({ name, file: relPath, line: lineOf(m.index), required: tsSiteRequired(source, afterIdx) });
+    }
+    for (const read of extractTsDestructuredReads(source)) {
+      sites.push({ name: read.name, file: relPath, line: lineOf(read.index), required: read.required });
     }
   } else if (['.py', '.pyw'].includes(ext)) {
     const re = new RegExp(PY_ENV_RE.source, 'g');
@@ -366,8 +471,8 @@ export function extractEnvReadSites(source: string, relPath: string, ext: string
       const name = m[1] ?? m[2];
       if (!name) continue;
       const afterIdx = m.index + m[0].length;
-      // ENV["X"] (m[1]) is strict; ENV.fetch("X") (m[2]) is strict only without a default arg.
-      const required = m[1] !== undefined ? true : rubyFetchRequired(source, afterIdx);
+      // ENV["X"] returns nil; ENV.fetch("X") is strict only without a default.
+      const required = m[1] === undefined && rubyFetchRequired(source, afterIdx);
       sites.push({ name, file: relPath, line: lineOf(m.index), required });
     }
   }
