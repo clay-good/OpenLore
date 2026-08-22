@@ -1,13 +1,16 @@
 # Windows invocation surface: spawns that ENOENT, configs that can't launch, and no support statement
 
-> Status: PROPOSED (2026-07-03, e2e audit follow-up). On Windows, `openlore update` spawns
+> Status: BUILT (2026-08-22). PR #391 implements the shared resolver, generated-config updates,
+> shipped skill fallback, explicit support statement, and required Windows smoke coverage. The
+> first CI run passed Windows Smoke (5m50s), Unit Tests (5m6s), build, lint/type-check, CodeQL, and
+> the aggregate CI Success gate. On Windows, `openlore update` previously spawned
 > `npm`/`brew` without shell resolution (they are `.cmd` shims → ENOENT), and every generated
 > agent config hardcodes bare `npx` that MCP clients spawning directly cannot resolve. Meanwhile
 > nothing anywhere states what platforms are supported. One platform-aware command-resolution
 > helper for both surfaces, plus either a Windows CI smoke job or an explicit documented support
 > tier — working or disclosed, never implied-working.
 
-## The gap
+## Why
 
 - **`openlore update` cannot execute its own upgrade on Windows.** `runCommand`
   (`src/cli/commands/update.ts:53-59`) calls `spawn(cmd, args, { stdio: 'inherit' })` with no
@@ -30,7 +33,7 @@
   platform-specific content is a Nix/NixOS snippet (`README.md:207`). A Windows user cannot tell
   whether a broken spawn is their environment or an unsupported platform.
 
-## What changes
+## What Changes
 
 **Platform-aware command resolution in one shared helper; support honestly stated.**
 
