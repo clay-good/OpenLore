@@ -22,6 +22,7 @@ describe('openlore-orient skill bundle', () => {
     const src = await readFile(HELPER, 'utf8');
     expect(src).toContain("'openlore'");
     expect(src).toContain("'mcp'");
+    expect(src).toContain("'node_modules', 'npm', 'bin', 'npx-cli.js'");
     expect(src).toContain('tools/call');
     expect(src).toContain('initialize');
   });

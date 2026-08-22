@@ -124,10 +124,66 @@ jobs:
           path: dist/
           retention-days: 7
 
+  windows-smoke:
+    name: Windows Smoke
+    runs-on: windows-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Build and install the packed CLI
+        shell: pwsh
+        run: |
+          npm run build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $package = (npm pack --silent | Select-Object -Last 1).Trim()
+          if (-not (Test-Path $package)) { throw 'npm pack did not produce a tarball' }
+          npm install --global "./$package"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Exercise install, version, and analyze
+        shell: pwsh
+        working-directory: src/core/scip/fixtures/tiny-repo
+        run: |
+          openlore --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          openlore install --agent claude-code --no-analyze
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $mcp = Get-Content .mcp.json -Raw | ConvertFrom-Json
+          if (-not $mcp.mcpServers.openlore.command.EndsWith('\node.exe')) {
+            throw 'Windows install did not emit a launchable MCP command'
+          }
+          if (-not $mcp.mcpServers.openlore.args[0].EndsWith('\npm\bin\npx-cli.js')) {
+            throw 'Windows install did not emit the absolute npx CLI path'
+          }
+          Set-Content -Path npx.cmd -Value '@exit /b 91'
+          $command = $mcp.mcpServers.openlore.command
+          $probeArgs = @($mcp.mcpServers.openlore.args[0..2]) + '--version'
+          & $command @probeArgs
+          if ($LASTEXITCODE -ne 0) { throw 'Generated Windows launcher did not execute successfully' }
+          openlore init
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          openlore analyze --no-embed --max-files 20
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path .openlore/analysis/llm-context.json)) {
+            throw 'Windows analyze did not produce llm-context.json'
+          }
+
   ci-success:
     name: CI Success
     runs-on: ubuntu-latest
-    needs: [lint, test, build]
+    needs: [lint, test, build, windows-smoke]
     if: always()
     permissions:
       contents: read
@@ -136,7 +192,8 @@ jobs:
         run: |
           if [[ "${{ needs.lint.result }}" != "success" ]] || \
              [[ "${{ needs.test.result }}" != "success" ]] || \
-             [[ "${{ needs.build.result }}" != "success" ]]; then
+             [[ "${{ needs.build.result }}" != "success" ]] || \
+             [[ "${{ needs.windows-smoke.result }}" != "success" ]]; then
             echo "One or more required jobs failed"
             exit 1
           fi

@@ -17,6 +17,7 @@ import { mergeEntries, readMeta, removeManaged, isHandEdited, editJsonPreserving
 import { previewCreate, previewDiff } from '../diff.js';
 import type { Adapter, ApplyContext, ApplyResult, PlannedChange } from './types.js';
 import { LEAN_DEFAULT_PRESET } from '../../../constants.js';
+import { formatPlatformCommand, resolvePlatformCommand } from '../../../utils/platform-command.js';
 
 const MD_FILE = 'CLAUDE.md';
 const SETTINGS_PATH = '.claude/settings.json';
@@ -33,11 +34,17 @@ const OPENLORE_PERMISSION = 'Bash(openlore:*)';
  * explicitly so the wired surface is visible in `.mcp.json` and never relies on
  * the bare-command default (change: default-to-lean-tool-surface).
  */
-function mcpEntry(preset?: string): { command: string; args: string[] } {
-  return {
-    command: 'npx',
-    args: ['--yes', 'openlore', 'mcp', '--preset', preset ?? LEAN_DEFAULT_PRESET],
-  };
+function mcpEntry(
+  preset: string | undefined,
+  platform: NodeJS.Platform,
+  runtime: ApplyContext['platformCommandRuntime'],
+): { command: string; args: string[] } {
+  return resolvePlatformCommand(
+    'npx',
+    ['--yes', 'openlore', 'mcp', '--preset', preset ?? LEAN_DEFAULT_PRESET],
+    platform,
+    runtime,
+  );
 }
 
 /**
@@ -53,14 +60,22 @@ function mcpEntry(preset?: string): { command: string; args: string[] } {
  *     block so the first turn begins already oriented
  *     (change: add-task-scoped-context-injection).
  */
-const ORIENT_COMMAND = 'npx --yes openlore orient --json';
-const INJECT_COMMAND = 'npx --yes openlore orient --inject';
-
-/** The hook keys OpenLore manages, each with its command. */
-const MANAGED_HOOKS: ReadonlyArray<{ key: string; command: string }> = [
-  { key: 'SessionStart', command: ORIENT_COMMAND },
-  { key: 'UserPromptSubmit', command: INJECT_COMMAND },
-];
+/** The hook keys OpenLore manages, with commands resolved for the generating host. */
+function managedHooks(
+  platform: NodeJS.Platform,
+  runtime: ApplyContext['platformCommandRuntime'],
+): ReadonlyArray<{ key: string; command: string }> {
+  return [
+    {
+      key: 'SessionStart',
+      command: formatPlatformCommand(resolvePlatformCommand('npx', ['--yes', 'openlore', 'orient', '--json'], platform, runtime)),
+    },
+    {
+      key: 'UserPromptSubmit',
+      command: formatPlatformCommand(resolvePlatformCommand('npx', ['--yes', 'openlore', 'orient', '--inject'], platform, runtime)),
+    },
+  ];
+}
 
 function ourHookGroup(command: string): Record<string, unknown> {
   return {
@@ -214,7 +229,7 @@ export const claudeCodeAdapter: Adapter = {
       mdResult.conflict = true;
       return mdResult;
     }
-    const entry = mcpEntry(ctx.preset);
+    const entry = mcpEntry(ctx.preset, ctx.platform, ctx.platformCommandRuntime);
     const { next: nextMcp, action: mcpAction } = mergeEntries(existingMcp, [
       { path: 'mcpServers.openlore', value: entry },
     ]);
@@ -274,7 +289,7 @@ export const claudeCodeAdapter: Adapter = {
           : { path: ['mcpServers', 'openlore'], value: undefined },
       );
     }
-    for (const { key, command } of MANAGED_HOOKS) {
+    for (const { key, command } of managedHooks(ctx.platform, ctx.platformCommandRuntime)) {
       const merged = mergeOurHook((base.hooks as Record<string, unknown>)?.[key], command);
       nextHooks[key] = merged;
       settingsEdits.push({ path: ['hooks', key], value: merged });
@@ -397,7 +412,7 @@ export const claudeCodeAdapter: Adapter = {
     const removalEdits: JsonPathEdit[] = [];
     const hooksObj = parsed.hooks as Record<string, unknown> | undefined;
     if (hooksObj) {
-      for (const { key } of MANAGED_HOOKS) {
+      for (const { key } of managedHooks(ctx.platform, ctx.platformCommandRuntime)) {
         if (!Array.isArray(hooksObj[key])) continue;
         const original = hooksObj[key] as unknown[];
         const filtered = stripOurHook(original);

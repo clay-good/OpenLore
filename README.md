@@ -180,6 +180,10 @@ openlore update                 # upgrade (detects npm / Homebrew / npx)
 
 The MCP server keeps the index fresh as you edit (file watcher on by default; `node_modules/`, `dist/`, `target/` pruned automatically). See [docs/install.md](docs/install.md).
 
+**Platform support:** Linux and Windows are exercised in CI; macOS is supported. Agent launch
+configurations are generated for the host that runs `openlore install`; regenerate them after
+moving a configured workspace to another machine or changing its Node installation.
+
 **What it asks for** — measured on a fresh clone of [ripgrep](https://github.com/BurntSushi/ripgrep) with the published `openlore@2.1.6` (`npx openlore init && time npx openlore analyze && du -sh .openlore`):
 
 | What it costs | On ripgrep (232 files indexed) |

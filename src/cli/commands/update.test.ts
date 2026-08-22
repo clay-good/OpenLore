@@ -75,4 +75,15 @@ describe('upgradeCommandFor', () => {
     const local = upgradeCommandFor('npm-local');
     expect(local?.args).not.toContain('-g');
   });
+
+  it('resolves the exact Windows invocation printed by --dry-run', () => {
+    expect(upgradeCommandFor('npm-global', 'win32', {
+      nodeExecutable: 'C:\\Program Files\\nodejs\\node.exe',
+      pathValue: '',
+      fileExists: () => true,
+    })).toEqual({
+      cmd: 'C:\\Program Files\\nodejs\\node.exe',
+      args: ['C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js', 'install', '-g', 'openlore@latest'],
+    });
+  });
 });

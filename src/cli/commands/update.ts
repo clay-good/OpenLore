@@ -16,6 +16,11 @@ import { createRequire } from 'node:module';
 import { existsSync, readFileSync } from 'node:fs';
 import { promisify } from 'node:util';
 import { logger } from '../../utils/logger.js';
+import {
+  formatPlatformCommand,
+  resolvePlatformCommand,
+  type PlatformCommandRuntime,
+} from '../../utils/platform-command.js';
 import { fetchLatestVersion, isNewer } from '../../core/services/update-notifier.js';
 
 const require = createRequire(import.meta.url);
@@ -115,9 +120,13 @@ function enclosingProjectDeclaresOpenlore(modulePath: string): boolean {
 }
 
 /** The global `node_modules` root reported by `npm root -g` ([] if npm is absent/slow). */
-async function queryNpmGlobalRoots(): Promise<string[]> {
+async function queryNpmGlobalRoots(
+  platform: NodeJS.Platform,
+  runtime: PlatformCommandRuntime,
+): Promise<string[]> {
   try {
-    const { stdout } = await execFileAsync('npm', ['root', '-g'], {
+    const invocation = resolvePlatformCommand('npm', ['root', '-g'], platform, runtime);
+    const { stdout } = await execFileAsync(invocation.command, invocation.args, {
       timeout: 3000,
       windowsHide: true,
     });
@@ -133,9 +142,13 @@ async function queryNpmGlobalRoots(): Promise<string[]> {
  * Gather the deterministic local evidence `detectInstallMethod` needs. Impure
  * (one local subprocess + one file read), fail-soft, no network.
  */
-export async function gatherInstallEvidence(modulePath: string): Promise<InstallEvidence> {
+export async function gatherInstallEvidence(
+  modulePath: string,
+  platform: NodeJS.Platform = process.platform,
+  runtime: PlatformCommandRuntime = {},
+): Promise<InstallEvidence> {
   return {
-    npmGlobalRoots: await queryNpmGlobalRoots(),
+    npmGlobalRoots: await queryNpmGlobalRoots(platform, runtime),
     declaredAsProjectDependency: enclosingProjectDeclaresOpenlore(modulePath),
   };
 }
@@ -145,24 +158,33 @@ export async function gatherInstallEvidence(modulePath: string): Promise<Install
  * `npm-local` returns the per-project command, but `runUpdate` only PRINTS it —
  * a local dependency is never mutated for the user.
  */
-export function upgradeCommandFor(method: InstallMethod): { cmd: string; args: string[] } | null {
+export function upgradeCommandFor(
+  method: InstallMethod,
+  platform: NodeJS.Platform = process.platform,
+  runtime: PlatformCommandRuntime = {},
+): { cmd: string; args: string[] } | null {
+  let command: { command: string; args: string[] } | null;
   switch (method) {
     case 'homebrew':
-      return { cmd: 'brew', args: ['upgrade', 'openlore'] };
+      command = resolvePlatformCommand('brew', ['upgrade', 'openlore'], platform, runtime);
+      break;
     case 'npm-global':
-      return { cmd: 'npm', args: ['install', '-g', 'openlore@latest'] };
+      command = resolvePlatformCommand('npm', ['install', '-g', 'openlore@latest'], platform, runtime);
+      break;
     case 'npm-local':
-      return { cmd: 'npm', args: ['install', 'openlore@latest'] };
+      command = resolvePlatformCommand('npm', ['install', 'openlore@latest'], platform, runtime);
+      break;
     default:
-      return null;
+      command = null;
   }
+  return command ? { cmd: command.command, args: command.args } : null;
 }
 
 function runCommand(cmd: string, args: string[]): Promise<number> {
   return new Promise((resolve) => {
     const child = spawn(cmd, args, { stdio: 'inherit' });
     child.on('error', () => resolve(127));
-    child.on('close', (code) => resolve(code ?? 0));
+    child.on('close', (code) => resolve(code ?? 1));
   });
 }
 
@@ -171,7 +193,11 @@ interface UpdateOpts {
   dryRun?: boolean;
 }
 
-export async function runUpdate(opts: UpdateOpts): Promise<number> {
+export async function runUpdate(
+  opts: UpdateOpts,
+  platform: NodeJS.Platform = process.platform,
+  runtime: PlatformCommandRuntime = {},
+): Promise<number> {
   const { version: current } = require('../../../package.json') as { version: string };
 
   logger.discovery('Checking npm for the latest openlore…');
@@ -190,7 +216,10 @@ export async function runUpdate(opts: UpdateOpts): Promise<number> {
   if (opts.check) return 0;
 
   const modulePath = fileURLToPath(import.meta.url);
-  const method = detectInstallMethod(modulePath, await gatherInstallEvidence(modulePath));
+  const method = detectInstallMethod(
+    modulePath,
+    await gatherInstallEvidence(modulePath, platform, runtime),
+  );
   if (method === 'npx') {
     logger.info(
       'npx',
@@ -204,16 +233,16 @@ export async function runUpdate(opts: UpdateOpts): Promise<number> {
   // project's lockfile is the user's call. Report the newer version and the
   // exact per-project command; run nothing global.
   if (method === 'npm-local') {
-    const local = upgradeCommandFor(method)!;
+    const local = upgradeCommandFor(method, platform, runtime)!;
     logger.info(
       'Project dependency',
       `openlore is a project-local dependency here. Upgrade it in your project with:\n  ` +
-        `${local.cmd} ${local.args.join(' ')}`
+        formatPlatformCommand({ command: local.cmd, args: local.args })
     );
     return 0;
   }
 
-  const upgrade = upgradeCommandFor(method);
+  const upgrade = upgradeCommandFor(method, platform, runtime);
   if (!upgrade) {
     logger.warning(
       `Could not determine how openlore was installed. Upgrade manually with one of:\n` +
@@ -223,7 +252,7 @@ export async function runUpdate(opts: UpdateOpts): Promise<number> {
     return 1;
   }
 
-  const printable = `${upgrade.cmd} ${upgrade.args.join(' ')}`;
+  const printable = formatPlatformCommand({ command: upgrade.cmd, args: upgrade.args });
   if (opts.dryRun) {
     logger.info('Would run', printable);
     return 0;

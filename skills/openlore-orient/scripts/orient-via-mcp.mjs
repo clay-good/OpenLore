@@ -12,6 +12,8 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 
 const task = process.argv[2];
@@ -28,8 +30,28 @@ if (!task) {
 // get a response. Pass --no-watch-auto, but only if this openlore build
 // supports it: older versions error on unknown options. Detect via `mcp --help`.
 const mcpArgs = ['--yes', 'openlore', 'mcp'];
+const npxCommand = process.platform === 'win32' ? process.execPath : 'npx';
+let npxArgs = [];
+if (process.platform === 'win32') {
+  const candidates = [];
+  if (process.env.npm_execpath && isAbsolute(process.env.npm_execpath)) {
+    candidates.push(join(dirname(process.env.npm_execpath), 'npx-cli.js'));
+  }
+  const cwd = resolve(process.cwd()).toLowerCase();
+  for (const dir of (process.env.PATH ?? '').split(delimiter)) {
+    if (!isAbsolute(dir) || resolve(dir).toLowerCase() === cwd) continue;
+    candidates.push(join(dir, 'node_modules', 'npm', 'bin', 'npx-cli.js'));
+  }
+  candidates.push(join(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npx-cli.js'));
+  const npxCli = [...new Set(candidates)].find((candidate) => existsSync(candidate));
+  if (!npxCli) {
+    process.stderr.write('orient-via-mcp: could not locate npx-cli.js in the Windows npm installation\n');
+    process.exit(1);
+  }
+  npxArgs = [npxCli];
+}
 try {
-  const help = spawnSync('npx', ['--yes', 'openlore', 'mcp', '--help'], {
+  const help = spawnSync(npxCommand, [...npxArgs, '--yes', 'openlore', 'mcp', '--help'], {
     encoding: 'utf8',
     timeout: 60_000,
   });
@@ -40,7 +62,7 @@ try {
   // If detection fails, fall through without the flag (safe default).
 }
 
-const child = spawn('npx', mcpArgs, {
+const child = spawn(npxCommand, [...npxArgs, ...mcpArgs], {
   stdio: ['pipe', 'pipe', 'inherit'],
 });
 

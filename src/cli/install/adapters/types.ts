@@ -8,6 +8,7 @@
  */
 
 import type { AgentName } from '../detect.js';
+import type { PlatformCommandRuntime } from '../../../utils/platform-command.js';
 
 export interface PlannedChange {
   /** Absolute path the change applies to. */
@@ -22,6 +23,10 @@ export interface PlannedChange {
 
 export interface ApplyContext {
   root: string;
+  /** Platform on which generated launch commands will execute. */
+  platform: NodeJS.Platform;
+  /** Trusted executable roots used when emitting Windows command wrappers. */
+  platformCommandRuntime: PlatformCommandRuntime;
   /** Template content for the markdown instruction block. */
   instructionTemplate: string;
   dryRun: boolean;

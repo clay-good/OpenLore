@@ -23,10 +23,12 @@
       "spawns": [
         { "bin": "git", "how": "execFile/execFileSync/spawnSync with an argv array (no shell); refs validated against argument injection (leading-dash + shell-meta)", "why": "history, diffs, change coupling, drift detection" },
         { "bin": "openlore (self)", "how": "spawn(process.execPath | resolved bin, ['decisions','--consolidate'|'analyze']) with fixed argv", "why": "background decision consolidation / re-analyze" },
+        { "bin": "npm | npx", "how": "direct argv; on Windows, the absolute running node.exe launches npm-cli.js or npx-cli.js by absolute path", "why": "installation evidence, updates, and generated agent launch commands" },
+        { "bin": "open | xdg-open | cmd start", "how": "spawn with a fixed browser-launch verb and URL argument", "why": "open the local viewer in the platform browser" },
         { "bin": "claude | gemini | vibe (LLM CLIs)", "how": "execFileSync(bin, argv) with fixed argv; bin overridable by env (CLAUDE/GEMINI_CLI/MISTRAL_VIBE_CLI)", "why": "optional CLI-based LLM provider transport (alternative to HTTP)" }
       ],
-      "method": "argv arrays only; no shell:true and no shell-binary (-c) invocation anywhere on the core+cli server surface.",
-      "exception": "The Pi configuration wizard invokes cmd.exe /c with a fixed executable and fixed analyze arguments on Windows; repository paths remain in the spawn cwd option and are never interpolated into the command."
+      "method": "argv arrays only; no shell:true. Windows npm/npx commands launch their CLI modules through the absolute running Node executable; no repository path or user-authored command is interpolated.",
+      "exception": "The local-viewer launcher and Pi configuration wizard invoke cmd.exe /c only with fixed executables and validated argv on Windows; repository paths remain in spawn cwd options and are never interpolated into commands."
     },
     "network": {
       "egress": [

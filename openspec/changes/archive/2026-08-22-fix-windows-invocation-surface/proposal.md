@@ -1,13 +1,16 @@
 # Windows invocation surface: spawns that ENOENT, configs that can't launch, and no support statement
 
-> Status: PROPOSED (2026-07-03, e2e audit follow-up). On Windows, `openlore update` spawns
+> Status: BUILT (2026-08-22). PR #391 implements the shared resolver, generated-config updates,
+> shipped skill fallback, explicit support statement, and required Windows smoke coverage. The
+> first CI run passed Windows Smoke (5m50s), Unit Tests (5m6s), build, lint/type-check, CodeQL, and
+> the aggregate CI Success gate. On Windows, `openlore update` previously spawned
 > `npm`/`brew` without shell resolution (they are `.cmd` shims → ENOENT), and every generated
 > agent config hardcodes bare `npx` that MCP clients spawning directly cannot resolve. Meanwhile
 > nothing anywhere states what platforms are supported. One platform-aware command-resolution
 > helper for both surfaces, plus either a Windows CI smoke job or an explicit documented support
 > tier — working or disclosed, never implied-working.
 
-## The gap
+## Why
 
 - **`openlore update` cannot execute its own upgrade on Windows.** `runCommand`
   (`src/cli/commands/update.ts:53-59`) calls `spawn(cmd, args, { stdio: 'inherit' })` with no
@@ -21,7 +24,8 @@
   `command: 'npx'` for the MCP server (`src/cli/install/adapters/claude-code.ts:38`) and
   `npx --yes openlore orient …` hook commands (`claude-code.ts:56-57`); Cursor
   (`adapters/cursor.ts:30`) and Continue (`adapters/continue.ts:23`) do the same. An MCP client
-  spawning the server directly on Windows needs `npx.cmd` (or `cmd /c npx`). This is a real gap,
+  spawning the server directly on Windows cannot execute that batch shim without an explicit
+  launch boundary. This is a real gap,
   not out-of-scope: the tree already carries win32 intent — `skills/openlore-orient/scripts/orient.ps1`
   exists and `src/pi/extension.ts:359,425` branch on `process.platform === 'win32'` — so the
   install adapters are the surface that never got the treatment.
@@ -29,15 +33,16 @@
   platform-specific content is a Nix/NixOS snippet (`README.md:207`). A Windows user cannot tell
   whether a broken spawn is their environment or an unsupported platform.
 
-## What changes
+## What Changes
 
 **Platform-aware command resolution in one shared helper; support honestly stated.**
 
-- One dependency-light helper (e.g. `resolvePlatformCommand(cmd)`) owns the Windows rule — on
-  win32, resolve `npm`/`npx` to their `.cmd` form (or wrap via `cmd /c`), pass through elsewhere —
-  used by BOTH surfaces: `runCommand` in `update.ts` and the adapter-generated MCP/hook commands
-  in `claude-code.ts` / `cursor.ts` / `continue.ts`. No per-site duplication; the same
-  fix-once-adopt-everywhere shape as the git-quoting change.
+- One dependency-light helper (`resolvePlatformCommand`) owns the Windows rule: discover a real,
+  absolute npm CLI entry point and invoke it through the absolute running `node.exe`, while
+  passing commands through unchanged elsewhere. Both surfaces use it: update evidence/upgrades
+  and the adapter-generated MCP, hook, and slash commands. This avoids both direct `.cmd`
+  execution and shell parsing, validates the discovered entry point before emitting a command,
+  and keeps the rule in one place.
 - Generated configs become platform-correct at generation time: `openlore install` run on Windows
   writes the resolvable command; docs note that a config generated on one OS and reused on
   another may need regeneration (deterministic, disclosed).

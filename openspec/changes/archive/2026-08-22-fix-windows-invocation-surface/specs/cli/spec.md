@@ -4,14 +4,14 @@
 
 ### Requirement: WindowsInvocationResolvesOrDiscloses
 
-Every command the CLI executes on the user's behalf, and every launch command it writes into a
-generated agent config (MCP server entries, hooks, slash commands), SHALL be resolvable on the
-platform where it will run: on Windows, package-manager and `npx` invocations SHALL be emitted or
-spawned in a form the platform can execute (`.cmd` resolution or an equivalent wrapper), through
-one shared platform-resolution helper rather than per-site fixes. The project SHALL additionally
-state its platform support explicitly: either Windows is exercised by CI, or the documentation
-declares its support tier and `doctor` discloses it at runtime — a platform is never
-implied-working while known-broken.
+The package-manager commands used by `openlore update` for install evidence and upgrades, and every
+launch command written into a generated agent config (MCP server entries, hooks, slash commands),
+SHALL be resolvable on the platform where it will run. On Windows, `npm` and `npx` invocations SHALL
+be emitted or spawned through an explicit launchable invocation, owned by one shared
+platform-resolution helper rather than per-site fixes. The project SHALL additionally state its
+platform support explicitly: either Windows is exercised by CI, or the documentation declares its
+support tier and `doctor` discloses it at runtime — a platform is never implied-working while
+known-broken.
 
 #### Scenario: `openlore update` executes its upgrade on Windows
 

@@ -13,6 +13,7 @@ import { mergeEntries, readMeta, removeManaged, isHandEdited } from '../json-man
 import { previewCreate, previewDiff } from '../diff.js';
 import type { Adapter, ApplyContext, ApplyResult, PlannedChange } from './types.js';
 import { LEAN_DEFAULT_PRESET } from '../../../constants.js';
+import { resolvePlatformCommand } from '../../../utils/platform-command.js';
 
 const RULES_FILE = '.cursorrules';
 const MDC_FILE = '.cursor/rules/openlore.mdc';
@@ -25,11 +26,17 @@ const MCP_FILE = '.cursor/mcp.json';
  * is visible in the config and never relies on the bare-command default
  * (change: default-to-lean-tool-surface).
  */
-function mcpEntry(preset?: string): { command: string; args: string[] } {
-  return {
-    command: 'npx',
-    args: ['--yes', 'openlore', 'mcp', '--preset', preset ?? LEAN_DEFAULT_PRESET],
-  };
+function mcpEntry(
+  preset: string | undefined,
+  platform: NodeJS.Platform,
+  runtime: ApplyContext['platformCommandRuntime'],
+): { command: string; args: string[] } {
+  return resolvePlatformCommand(
+    'npx',
+    ['--yes', 'openlore', 'mcp', '--preset', preset ?? LEAN_DEFAULT_PRESET],
+    platform,
+    runtime,
+  );
 }
 
 async function loadMdcTemplate(): Promise<string> {
@@ -148,7 +155,7 @@ export const cursorAdapter: Adapter = {
       return rulesResult;
     }
     const { next: nextMcp, action: mcpAction } = mergeEntries(mcpExisting, [
-      { path: 'mcpServers.openlore', value: mcpEntry(ctx.preset) },
+      { path: 'mcpServers.openlore', value: mcpEntry(ctx.preset, ctx.platform, ctx.platformCommandRuntime) },
     ]);
     const beforeMcp = mcpHad ? JSON.stringify(mcpExisting, null, 2) + '\n' : '';
     const afterMcp = JSON.stringify(nextMcp, null, 2) + '\n';
