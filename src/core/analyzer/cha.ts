@@ -52,6 +52,24 @@ function dirOfPath(p: string): string {
   return i >= 0 ? p.slice(0, i) : '';
 }
 
+/** Return the opening receiver parenthesis for a Go method-shaped signature. */
+function goReceiverOpen(signature: string): number | undefined {
+  let i = 0;
+  while (/\s/.test(signature[i] ?? '')) i++;
+  if (signature.slice(i, i + 4) !== 'func' || /[\w$]/.test(signature[i + 4] ?? '')) {
+    return undefined;
+  }
+  i += 4;
+  while (i < signature.length) {
+    while (/\s/.test(signature[i] ?? '')) i++;
+    if (signature.slice(i, i + 2) !== '/*') break;
+    const close = signature.indexOf('*/', i + 2);
+    if (close === -1) return undefined;
+    i = close + 2;
+  }
+  return signature[i] === '(' ? i : undefined;
+}
+
 /**
  * Extract a parameter count from a function declaration signature. Returns
  * `undefined` when no parameter list is recoverable, in which case arity is
@@ -60,8 +78,25 @@ function dirOfPath(p: string): string {
  */
 export function arityFromSignature(signature: string | undefined): number | undefined {
   if (!signature) return undefined;
-  const open = signature.indexOf('(');
+  let open = signature.indexOf('(');
   if (open === -1) return undefined;
+  // Go method signatures put the receiver before the method name:
+  // `func (s *Server) handle(w, r)`. The receiver is not a call argument, so
+  // skip its balanced group and count the following parameter list.
+  const receiverOpen = goReceiverOpen(signature);
+  if (receiverOpen !== undefined) {
+    open = receiverOpen;
+    let receiverDepth = 0;
+    let receiverClose = -1;
+    for (let i = open; i < signature.length; i++) {
+      if (signature[i] === '(') receiverDepth++;
+      else if (signature[i] === ')' && --receiverDepth === 0) { receiverClose = i; break; }
+    }
+    const parameterOpen = receiverClose === -1 ? -1 : signature.indexOf('(', receiverClose + 1);
+    // No second group means this is a function literal/type (`func(a int)`),
+    // not a method receiver. Count its original parameter list unchanged.
+    if (parameterOpen !== -1) open = parameterOpen;
+  }
   let depth = 0;
   let params = '';
   for (let i = open; i < signature.length; i++) {

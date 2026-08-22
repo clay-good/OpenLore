@@ -684,6 +684,132 @@ describe('Ruby overlay', () => {
     // case/when (10) + case/else (12) reach the return; the if's defs were overwritten.
     expect(defLinesTo(cfg, 'x', 14)).toEqual([10, 12]);
   });
+
+  it('visits method-call receivers and arguments without treating the method name as a variable', async () => {
+    const lang = await rubyLang();
+    const cfg = cfgFor('def f(a, x)\n  y = a.transform(x)\n  return y\nend', lang, 'Ruby', FN);
+
+    expect(cfg.defUse.some(e => e.variable === 'a' && e.useLine === 2)).toBe(true);
+    expect(cfg.defUse.some(e => e.variable === 'x' && e.useLine === 2)).toBe(true);
+    expect(cfg.defUse.some(e => e.variable === 'transform')).toBe(false);
+    expect(valueReachableLines(cfg, 'x')).toContain(2);
+  });
+
+  it('models rescue and ensure bodies without a false exact edge across a rescue kill', async () => {
+    const lang = await rubyLang();
+    const cfg = cfgFor(
+      'def f(a)\n  x = initial(a)\n  begin\n    risky()\n  rescue StandardError\n    x = recovered(a)\n  ensure\n    audit(x)\n  end\n  return x\nend',
+      lang, 'Ruby', FN,
+    );
+
+    expect(cfg.defUse.some(e => e.variable === 'x' && e.defLine === 6 && e.useLine === 8)).toBe(true);
+    expect(cfg.defUse.some(e => e.variable === 'x' && e.defLine === 6 && e.useLine === 10)).toBe(true);
+    expect(cfg.defUse).toContainEqual(expect.objectContaining({ variable: 'x', defLine: 2, useLine: 10, precision: 'may' }));
+    expect(cfg.defUse.some(e => e.variable === 'x' && e.defLine === 2 && e.useLine === 10 && e.precision === 'exact')).toBe(false);
+  });
+
+  it('preserves Ruby getter member paths without treating the method as a scalar', async () => {
+    const cfg = cfgFor('def f(a, x)\n  a.status = x\n  return a.status\nend', await rubyLang(), 'Ruby', FN);
+    expect(cfg.defUse).toContainEqual(expect.objectContaining({ variable: 'a.status', defLine: 2, useLine: 3, precision: 'may' }));
+    expect(cfg.defUse.some(e => e.variable === 'status')).toBe(false);
+  });
+
+  it('lets definitions in a protected region reach a Ruby rescue handler', async () => {
+    const cfg = cfgFor(
+      'def f(a)\n  begin\n    x = prepare(a)\n    risky()\n  rescue StandardError => error\n    report(x, error)\n  end\nend',
+      await rubyLang(), 'Ruby', FN,
+    );
+    expect(cfg.defUse).toContainEqual(expect.objectContaining({ variable: 'x', defLine: 3, useLine: 6 }));
+    expect(cfg.defUse).toContainEqual(expect.objectContaining({ variable: 'error', defLine: 5, useLine: 6, precision: 'exact' }));
+  });
+
+  it('preserves each straight-line state that can reach a Ruby rescue', async () => {
+    const cfg = cfgFor(
+      'def f(a)\n  begin\n    x = old(a)\n    x = risky(a)\n  rescue\n    report(x)\n  end\nend',
+      await rubyLang(), 'Ruby', FN,
+    );
+    expect(cfg.defUse.some(e => e.variable === 'x' && e.defLine === 3 && e.useLine === 6)).toBe(true);
+    expect(cfg.defUse.some(e => e.variable === 'x' && e.defLine === 4 && e.useLine === 6)).toBe(true);
+  });
+
+  it('models method-level Ruby rescue and ensure clauses', async () => {
+    const cfg = cfgFor(
+      'def f(a)\n  x = prepare(a)\n  risky()\nrescue StandardError\n  x = recover(a)\nensure\n  audit(x)\nend',
+      await rubyLang(), 'Ruby', FN,
+    );
+    expect(cfg.defUse).toContainEqual(expect.objectContaining({ variable: 'x', defLine: 5, useLine: 7 }));
+  });
+
+  it('routes a Ruby return through ensure before exiting', async () => {
+    const cfg = cfgFor(
+      'def f(a)\n  begin\n    x = prepare(a)\n    return x\n  ensure\n    audit(x)\n  end\nend',
+      await rubyLang(), 'Ruby', FN,
+    );
+    expect(cfg.defUse).toContainEqual(expect.objectContaining({ variable: 'x', defLine: 3, useLine: 6 }));
+  });
+
+  it('routes break and continue through ensure before their loop targets', async () => {
+    const breakCfg = cfgFor(
+      'def f(flag)\n  while flag\n    begin\n      x = value(flag)\n      break\n    ensure\n      audit(x)\n    end\n  end\nend',
+      await rubyLang(), 'Ruby', FN,
+    );
+    expect(breakCfg.defUse).toContainEqual(expect.objectContaining({ variable: 'x', defLine: 4, useLine: 7 }));
+    const continueCfg = cfgFor(
+      'def f(flag)\n  while flag\n    begin\n      x = value(flag)\n      next\n    ensure\n      audit(x)\n    end\n  end\nend',
+      await rubyLang(), 'Ruby', FN,
+    );
+    expect(continueCfg.defUse).toContainEqual(expect.objectContaining({ variable: 'x', defLine: 4, useLine: 7 }));
+  });
+});
+
+describe('destructured parameter bindings', () => {
+  it('seeds value reachability from TypeScript object-pattern parameters', async () => {
+    const cfg = cfgFor(
+      'function handler({ req, res }: any, plain: string) {\n  const value = normalize(req);\n  res.send(value);\n  return plain;\n}',
+      await tsLang(), 'TypeScript', TS_FN,
+    );
+
+    expect(cfg.params).toEqual(expect.arrayContaining(['req', 'res', 'plain']));
+    expect(valueReachableLines(cfg, 'req')).toContain(2);
+    expect(valueReachableLines(cfg, 'res')).toContain(3);
+  });
+
+  it('extracts JavaScript object-pattern parameters', async () => {
+    const cfg = cfgFor(
+      'function handler({ req, res }, plain) {\n  res.send(req);\n  return plain;\n}',
+      await tsLang(), 'JavaScript', TS_FN,
+    );
+
+    expect(cfg.params).toEqual(expect.arrayContaining(['req', 'res', 'plain']));
+    expect(valueReachableLines(cfg, 'req')).toContain(2);
+  });
+
+  it('keeps destructured parameters out of the nested closure capture set', async () => {
+    const cfg = cfgFor(
+      'function handler({ req }: any) {\n  const callback = () => consume(req);\n  return callback;\n}',
+      await tsLang(), 'TypeScript', TS_FN,
+    );
+
+    expect(cfg.params).toContain('req');
+    expect(cfg.defUse).toContainEqual(expect.objectContaining({ variable: 'req', defLine: 1, useLine: 2, precision: 'may' }));
+  });
+
+  it('does not treat destructuring default expressions as parameter bindings', async () => {
+    const cfg = cfgFor(
+      'function handler({ req = fallback }, [res = other]: any) {\n  return req + res;\n}',
+      await tsLang(), 'TypeScript', TS_FN,
+    );
+
+    expect(cfg.params).toEqual(['req', 'res']);
+  });
+
+  it('does not treat an outer parameter default as a binding', async () => {
+    const cfg = cfgFor(
+      'function handler({ req }: any = fallback) {\n  return req;\n}',
+      await tsLang(), 'TypeScript', TS_FN,
+    );
+    expect(cfg.params).toEqual(['req']);
+  });
 });
 
 // ─── extended-language adversarial fixes (real-repo agent findings) ───────────

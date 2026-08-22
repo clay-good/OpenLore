@@ -532,11 +532,19 @@ interface LoopCtx {
   breakTarget: number;
 }
 
+interface FinallyRoute {
+  entry: number;
+  destination: number;
+  kind: CfgEdgeKind;
+}
+
 class CfgBuilder {
   blocks: InternalBlock[] = [];
   edges: CfgEdge[] = [];
   readonly ENTRY: number;
   readonly EXIT: number;
+  private finallyRoutes: Map<string, FinallyRoute> | null = null;
+  private rescuePrecisionBoundaries: Array<{ variable: string; rescueLine: number }> = [];
 
   /** identifier startIndex → scope-resolved key (`name#scopeId`). */
   constructor(private readonly spec: CfgLangSpec, private readonly scopeKeys: Map<number, string> = new Map(), private readonly language: string = '') {
@@ -559,7 +567,11 @@ class CfgBuilder {
     // 'branch'/'loop' when the first statement is a control-flow construct).
     const start = this.newBlock('normal');
     this.addEdge(this.ENTRY, start, 'normal');
-    const exit = this.processSeq(this.stmtChildren(body), start, null);
+    const rubyBodyTry = this.language === 'Ruby' && body.type === 'body_statement' &&
+      body.namedChildren.some(c => c.type === 'rescue' || c.type === 'ensure');
+    const exit = rubyBodyTry
+      ? this.processTry(body, start, null)
+      : this.processSeq(this.stmtChildren(body), start, null);
     if (exit !== null) this.addEdge(exit, this.EXIT, 'normal');
   }
 
@@ -571,6 +583,38 @@ class CfgBuilder {
 
   private addEdge(from: number, to: number, kind: CfgEdgeKind): void {
     this.edges.push({ from, to, kind });
+  }
+
+  private addAbruptEdge(from: number, destination: number, kind: CfgEdgeKind): void {
+    if (!this.finallyRoutes) { this.addEdge(from, destination, kind); return; }
+    const key = `${destination}:${kind}`;
+    let route = this.finallyRoutes.get(key);
+    if (!route) {
+      route = { entry: this.newBlock('merge'), destination, kind };
+      this.finallyRoutes.set(key, route);
+    }
+    this.addEdge(from, route.entry, kind);
+  }
+
+  rescueCrosses(variable: string, defLine: number, useLine: number): boolean {
+    return this.rescuePrecisionBoundaries.some(b => b.variable === variable && defLine < b.rescueLine && useLine > b.rescueLine);
+  }
+
+  private recordRescuePrecisionBoundary(clause: CfgNode): void {
+    const assigned = new Set<string>();
+    const walk = (n: CfgNode): void => {
+      if (this.spec.nestedFnTypes.has(n.type)) return;
+      if (this.spec.assignTypes.has(n.type) || this.spec.augAssignTypes.has(n.type)) {
+        const left = n.childForFieldName(this.spec.leftField) ?? n.namedChildren[0];
+        if (left && !this.spec.memberTypes.has(left.type) && !this.spec.subscriptTypes.has(left.type)) {
+          collectIdentLeaves(left, this.spec, assigned);
+        }
+      }
+      for (const c of n.namedChildren) walk(c);
+    };
+    walk(clause);
+    const rescueLine = clause.startPosition.row + 1;
+    for (const variable of assigned) this.rescuePrecisionBoundaries.push({ variable, rescueLine });
   }
 
   private setKind(block: number, kind: CfgBlockKind): void {
@@ -590,6 +634,18 @@ class CfgBuilder {
     for (const stmt of stmts) {
       if (current === null) break; // unreachable after a divert
       current = this.processStmt(stmt, current, loop);
+    }
+    return current;
+  }
+
+  /** Split protected statements so a handler sees the state before each possible throw. */
+  private processProtectedSeq(stmts: CfgNode[], entry: number, loop: LoopCtx | null): number | null {
+    let current: number | null = entry;
+    for (const stmt of stmts) {
+      if (current === null) break;
+      const statementBlock = this.newBlock('normal');
+      this.addEdge(current, statementBlock, 'normal');
+      current = this.processStmt(stmt, statementBlock, loop);
     }
     return current;
   }
@@ -635,17 +691,17 @@ class CfgBuilder {
 
     if (spec.returnTypes.has(t) || spec.throwTypes.has(t)) {
       this.recordExpr(stmt, current); // return/throw value is a use
-      this.addEdge(current, this.EXIT, 'exit');
+      this.addAbruptEdge(current, this.EXIT, 'exit');
       return null;
     }
     if (spec.breakTypes.has(t)) {
-      if (loop) this.addEdge(current, loop.breakTarget, 'normal');
-      else this.addEdge(current, this.EXIT, 'exit');
+      if (loop) this.addAbruptEdge(current, loop.breakTarget, 'normal');
+      else this.addAbruptEdge(current, this.EXIT, 'exit');
       return null;
     }
     if (spec.continueTypes.has(t)) {
-      if (loop) this.addEdge(current, loop.continueTarget, 'back');
-      else this.addEdge(current, this.EXIT, 'exit');
+      if (loop) this.addAbruptEdge(current, loop.continueTarget, 'back');
+      else this.addAbruptEdge(current, this.EXIT, 'exit');
       return null;
     }
 
@@ -869,18 +925,31 @@ class CfgBuilder {
     const { spec } = this;
     this.setKind(current, 'branch');
 
+    const rubyClauses = new Set(['rescue', 'else', 'ensure']);
+    const rubyTryStatements = stmt.type === 'begin' || stmt.type === 'body_statement'
+      ? stmt.namedChildren.filter(c => !rubyClauses.has(c.type))
+      : undefined;
+    const finallyClause = stmt.namedChildren.find(c => c.type === 'finally_clause' || c.type === 'ensure');
+    const priorFinallyRoutes = this.finallyRoutes;
+    const localFinallyRoutes = finallyClause ? new Map<string, FinallyRoute>() : null;
+    if (localFinallyRoutes) this.finallyRoutes = localFinallyRoutes;
     const tryBody = stmt.childForFieldName(spec.bodyField) ?? stmt.namedChildren.find(c => spec.blockTypes.has(c.type));
+    const tryRegionStart = this.blocks.length;
     const tryBlock = this.newBlock('normal');
     this.addEdge(current, tryBlock, 'true');
-    const tryExit = tryBody ? this.processSeq(this.stmtChildren(tryBody), tryBlock, loop) : tryBlock;
+    const tryExit = rubyTryStatements
+      ? this.processProtectedSeq(rubyTryStatements, tryBlock, loop)
+      : tryBody ? this.processSeq(this.stmtChildren(tryBody), tryBlock, loop) : tryBlock;
+    const tryRegionEnd = this.blocks.length;
 
     // Python `try ... else:` runs on the NO-exception path, after the try body
     // completes — so the normal path continues through it before the join.
     let normalExit = tryExit;
-    const elseClause = stmt.namedChildren.find(c => c.type === 'else_clause');
+    const elseClause = stmt.namedChildren.find(c => c.type === 'else_clause' || c.type === 'else');
     if (elseClause && normalExit !== null) {
       const elseBody = elseClause.childForFieldName(spec.bodyField) ?? elseClause.namedChildren.find(c => spec.blockTypes.has(c.type));
-      normalExit = elseBody ? this.processSeq(this.stmtChildren(elseBody), normalExit, loop) : normalExit;
+      const elseStatements = elseBody ? this.stmtChildren(elseBody) : elseClause.namedChildren;
+      normalExit = elseStatements.length > 0 ? this.processSeq(elseStatements, normalExit, loop) : normalExit;
     }
 
     const merge = this.newBlock('merge');
@@ -889,31 +958,48 @@ class CfgBuilder {
     // Each catch/except clause is an alternative path from `current`.
     let sawCatch = false;
     for (const clause of stmt.namedChildren) {
-      if (clause.type !== 'catch_clause' && clause.type !== 'except_clause') continue;
+      if (clause.type !== 'catch_clause' && clause.type !== 'except_clause' && clause.type !== 'rescue') continue;
       sawCatch = true;
+      if (clause.type === 'rescue') this.recordRescuePrecisionBoundary(clause);
       const catchBlock = this.newBlock('normal');
       this.addEdge(current, catchBlock, 'false');
+      // An exception may be raised after any definition in the protected
+      // region. Conservatively let every protected block reach the handler;
+      // using only `current` silently loses values defined before the throw.
+      for (let id = tryRegionStart; id < tryRegionEnd; id++) this.addEdge(id, catchBlock, 'false');
       // The bound exception variable is a definition (TS `catch (e)`, Py `except X as e`).
-      const param = clause.childForFieldName('parameter');
-      if (param && spec.identTypes.has(param.type)) {
-        this.block(catchBlock).ops.push({ op: 'def', variable: param.text, key: this.keyFor(param, param.text), line: param.startPosition.row + 1, precision: 'exact' });
+      const param = clause.childForFieldName('parameter') ?? clause.childForFieldName('variable');
+      const paramIdent = param && (spec.identTypes.has(param.type) ? param : findDescendantOfType(param, 'identifier', 2));
+      if (paramIdent) {
+        this.block(catchBlock).ops.push({ op: 'def', variable: paramIdent.text, key: this.keyFor(paramIdent, paramIdent.text), line: paramIdent.startPosition.row + 1, precision: 'exact' });
       } else {
         const asName = clause.namedChildren.find(c => spec.identTypes.has(c.type));
         if (asName) this.block(catchBlock).ops.push({ op: 'def', variable: asName.text, key: this.keyFor(asName, asName.text), line: asName.startPosition.row + 1, precision: 'may' });
       }
       const catchBody = clause.childForFieldName(spec.bodyField) ?? clause.namedChildren.find(c => spec.blockTypes.has(c.type));
-      const catchExit = catchBody ? this.processSeq(this.stmtChildren(catchBody), catchBlock, loop) : catchBlock;
+      const catchStatements = catchBody
+        ? this.stmtChildren(catchBody)
+        : clause.namedChildren.filter(c => c.type !== 'exceptions' && c.type !== 'exception_variable');
+      const catchExit = catchStatements.length > 0 ? this.processSeq(catchStatements, catchBlock, loop) : catchBlock;
       if (catchExit !== null) this.addEdge(catchExit, merge, 'normal');
     }
     // No catch (try/finally only): the try body may still throw past the merge,
     // but the non-exceptional path reaches it — keep `current`→merge as that edge.
     if (!sawCatch) this.addEdge(current, merge, 'false');
 
-    // finally runs on every path → process it sequentially from the join.
-    const finallyClause = stmt.namedChildren.find(c => c.type === 'finally_clause');
+    this.finallyRoutes = priorFinallyRoutes;
+
+    // finally runs on both fall-through and abrupt-exit paths. Duplicate its
+    // small CFG so the former can continue after the try while the latter still
+    // exits after executing the same source statements.
     if (finallyClause) {
       const finBody = finallyClause.childForFieldName(spec.bodyField) ?? finallyClause.namedChildren.find(c => spec.blockTypes.has(c.type));
-      const finExit = finBody ? this.processSeq(this.stmtChildren(finBody), merge, loop) : merge;
+      const finStatements = finBody ? this.stmtChildren(finBody) : finallyClause.namedChildren;
+      const finExit = finStatements.length > 0 ? this.processSeq(finStatements, merge, loop) : merge;
+      for (const route of localFinallyRoutes?.values() ?? []) {
+        const abruptFinExit = finStatements.length > 0 ? this.processSeq(finStatements, route.entry, loop) : route.entry;
+        if (abruptFinExit !== null) this.addAbruptEdge(abruptFinExit, route.destination, route.kind);
+      }
       return finExit;
     }
     return merge;
@@ -1267,6 +1353,21 @@ class CfgBuilder {
         }
         return;
       }
+      if (spec.callTypes.has(t)) {
+        // This precedes member access because Ruby represents both `obj.m` and
+        // `obj.m(arg)` as `call` nodes.
+        const fn = n.childForFieldName(spec.callNameField) ?? n.childForFieldName('function') ?? n.namedChildren[0];
+        for (const c of n.namedChildren) {
+          if (sameNode(c, fn) && fn && spec.identTypes.has(fn.type)) continue;
+          visit(c);
+        }
+        const receiver = n.childForFieldName('receiver');
+        const args = n.childForFieldName('arguments');
+        if (spec.memberTypes.has(t) && receiver && !args) {
+          this.block(block).ops.push({ op: 'use', variable: normalizeLValue(n.text), key: normalizeLValue(n.text), line: n.startPosition.row + 1, precision: 'may', inDefLine: enclosingDefLine });
+        }
+        return;
+      }
       if (spec.memberTypes.has(t)) {
         // obj.field read: base obj is an exact use, the field path is a may use.
         const base = n.namedChildren[0];
@@ -1277,15 +1378,6 @@ class CfgBuilder {
       if (spec.subscriptTypes.has(t)) {
         for (const c of n.namedChildren) visit(c);
         this.block(block).ops.push({ op: 'use', variable: normalizeLValue(n.text), key: normalizeLValue(n.text), line: n.startPosition.row + 1, precision: 'may', inDefLine: enclosingDefLine });
-        return;
-      }
-      if (spec.callTypes.has(t)) {
-        // Skip the callee identifier; collect uses from arguments and receiver.
-        const fn = n.childForFieldName(spec.callNameField) ?? n.childForFieldName('function') ?? n.namedChildren[0];
-        for (const c of n.namedChildren) {
-          if (sameNode(c, fn) && fn && spec.identTypes.has(fn.type)) continue;
-          visit(c);
-        }
         return;
       }
       if (spec.identTypes.has(t)) {
@@ -1654,7 +1746,8 @@ function computeReachingDefs(builder: CfgBuilder, params: string[], paramLine: n
             // A variable that escapes (closure-mutated or address-taken) can be
             // changed outside the visible control flow, so its dependence is `may`.
             const precision: DataFlowPrecision =
-              (d.precision === 'may' || op.precision === 'may' || escaped.has(op.variable)) ? 'may' : 'exact';
+              (d.precision === 'may' || op.precision === 'may' || escaped.has(op.variable) ||
+                builder.rescueCrosses(op.variable, d.line, op.line)) ? 'may' : 'exact';
             const ekey = `${op.variable}|${d.line}|${op.line}|${precision}|${op.inDefLine ?? ''}`;
             if (!emitted.has(ekey)) {
               emitted.add(ekey);
@@ -1704,6 +1797,11 @@ function setEq(a: Set<number>, b: Set<number>): boolean {
 function collectIdentLeaves(node: CfgNode, spec: CfgLangSpec, into: Set<string>): void {
   if (spec.identTypes.has(node.type) || node.type === 'shorthand_property_identifier_pattern' || node.type === 'shorthand_property_identifier') {
     into.add(node.text); return;
+  }
+  if (node.type === 'assignment_pattern' || node.type === 'object_assignment_pattern') {
+    const left = node.childForFieldName('left') ?? node.namedChildren[0];
+    if (left) collectIdentLeaves(left, spec, into);
+    return;
   }
   if (node.type === 'pair_pattern') {
     const v = node.childForFieldName('value') ?? node.namedChildren[node.namedChildren.length - 1];
@@ -1931,8 +2029,26 @@ function extractParamNames(fnNode: CfgNode, spec: CfgLangSpec): string[] {
     ?? findDescendantOfType(fnNode, 'parameter_list', 4);
   if (!params) return [];
   const names: string[] = [];
-  const isBinder = (ty: string): boolean => ty === 'identifier' || spec.identTypes.has(ty); // PHP: variable_name
+  const isBinder = (ty: string): boolean =>
+    ty === 'identifier' || spec.identTypes.has(ty) ||
+    ty === 'shorthand_property_identifier_pattern' || ty === 'shorthand_property_identifier'; // PHP: variable_name
   const visit = (n: CfgNode): void => {
+    if (n.type === 'required_parameter' || n.type === 'optional_parameter') {
+      const pattern = n.childForFieldName('pattern') ?? n.childForFieldName('name') ?? n.namedChildren[0];
+      if (pattern) visit(pattern);
+      return;
+    }
+    if (n.type === 'assignment_pattern' || n.type === 'object_assignment_pattern') {
+      const left = n.childForFieldName('left') ?? n.namedChildren[0];
+      if (left) visit(left);
+      return;
+    }
+    if (n.type === 'object_pattern' || n.type === 'array_pattern') {
+      const bound = new Set<string>();
+      collectIdentLeaves(n, spec, bound);
+      names.push(...bound);
+      return;
+    }
     // A parameter's binding identifier: required_parameter/optional_parameter
     // (TS), typed_parameter/identifier (Python), parameter_declaration (Go),
     // simple_parameter/variable_name (PHP).
