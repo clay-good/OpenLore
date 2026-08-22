@@ -11,6 +11,8 @@ SHALL never be silently omitted from the map because a git or gh invocation fail
 ref for a repository could not be verified, the map SHALL carry a caveat naming that base rather
 than letting every dependent merge-base fail silently; when pull-request enumeration hits its
 listing limit, the map SHALL disclose possible truncation.
+When a fetched diff exceeds the bounded per-change file budget, the change SHALL remain visible as
+not assessed with reason `assessment-capped`, naming both the observed file count and the cap.
 
 #### Scenario: A branch whose merge-base fails is not assessed, not absent
 
@@ -38,6 +40,13 @@ listing limit, the map SHALL disclose possible truncation.
 - **WHEN** pull requests are enumerated
 - **THEN** the map carries a caveat that the open-PR list may be truncated
 
+#### Scenario: An oversized diff is not partially cleared
+
+- **GIVEN** an in-flight change whose diff exceeds the per-change file assessment cap
+- **WHEN** the interference map is built
+- **THEN** the change appears as not assessed with reason `assessment-capped`
+- **AND** the detail names the observed file count and the cap
+
 ### Requirement: ReadOnlyOverlapIsNotAConflict
 
 The system SHALL NOT classify two footprints as a WAR hazard when their write-sets share no file:
@@ -60,9 +69,31 @@ changes read the shared symbols and that no write conflict exists.
 - **WHEN** the hazard is classified
 - **THEN** the verdict is WAR with the shared file as witness
 
-#### Scenario: The advisory message for shared reads is honest
+## MODIFIED Requirements
 
-- **GIVEN** a read-only overlap surfaced as the lowest-tier advisory
-- **WHEN** the suggestion text is rendered
-- **THEN** it states both changes read the shared symbols with no write conflict
-- **AND** it does not claim the changes touch the same file
+### Requirement: GovernanceFindingsCarryStableCodeAndIntrinsicSeverity
+
+Every governance finding source SHALL emit each finding carrying a stable, documented `code` and an
+intrinsic `severity`. The `code` SHALL be stable across releases so a declared `enforcement.policy` can
+name it; the `severity` SHALL be owned by the emitting source and SHALL NOT be overridden by the
+enforcement policy. The canonical severity vocabulary SHALL be the closed set `info`, `warning`,
+`error`, and `critical`; emitters SHALL normalize the legacy spelling `warn` to `warning`. Findings
+SHALL be shaped so a single enforcement-class resolver can govern findings from all sources uniformly.
+
+#### Scenario: A finding exposes the fields the policy needs
+
+- **GIVEN** any governance finding emitted by any source
+- **WHEN** the finding is inspected
+- **THEN** it carries a stable `code` and an intrinsic severity from the canonical four-value vocabulary
+
+#### Scenario: Existing per-surface block sugar maps onto the unified policy
+
+- **GIVEN** a repository that previously expressed opt-in blocking through a per-surface `block: [...]` config
+- **WHEN** the unified enforcement policy resolves that surface's finding codes
+- **THEN** the resolved classes match the prior `block: [...]` intent
+
+#### Scenario: Legacy warning spelling is normalized
+
+- **GIVEN** a warning-level governance finding from any source
+- **WHEN** the finding is serialized or passed to the enforcement resolver
+- **THEN** its severity is `warning`, never the legacy value `warn`

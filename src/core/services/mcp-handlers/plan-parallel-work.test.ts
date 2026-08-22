@@ -110,6 +110,28 @@ describe('computePlanParallelWork — scheduling', () => {
     expect(p.conflicts).toEqual([]);
   });
 
+  it('tasks that only share a read stay in one wave with no conflict or advisory', async () => {
+    const cg = graph([
+      node({ id: 'a.ts::writerA' }),
+      node({ id: 'b.ts::writerB' }),
+      node({ id: 'lib.ts::sharedRead' }),
+    ], [
+      edge('a.ts::writerA', 'lib.ts::sharedRead'),
+      edge('b.ts::writerB', 'lib.ts::sharedRead'),
+    ]);
+    mockCtx(cg);
+    const p = await plan([
+      { id: 'a', seedSymbols: ['a.ts::writerA'] },
+      { id: 'b', seedSymbols: ['b.ts::writerB'] },
+    ]);
+    expect(p.waves).toHaveLength(1);
+    expect(p.footprints.find(f => f.taskId === 'a')?.readSet).toContain('lib.ts::sharedRead');
+    expect(p.footprints.find(f => f.taskId === 'b')?.readSet).toContain('lib.ts::sharedRead');
+    expect(p.conflicts).toEqual([]);
+    expect(p.conflictCount).toBe(0);
+    expect(p.advisories).toEqual([]);
+  });
+
   it('a WAW pair splits across waves and emits an advisory-by-default finding', async () => {
     const p = await plan([
       { id: 't1', seedSymbols: ['shared.ts::shared'] },

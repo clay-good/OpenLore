@@ -1,6 +1,6 @@
 # map_in_flight_conflicts honesty: no silently dropped branches, no fake WAR from shared reads
 
-> Status: PROPOSED (2026-07-08, e2e audit fifth pass). The interference map promises "a change
+> Status: BUILT (2026-08-22). The interference map promises "a change
 > whose diff can't be fetched is a clearly-labeled 'not assessed' node — NEVER a false 'no
 > conflict'" — and then its branch provider drops branches with three bare `catch { continue; }`.
 > Separately, the hazard classifier labels pure read∩read overlap "WAR" with a false low-risk

@@ -572,13 +572,16 @@ openlore briefing-since --base main --json           # machine-readable (stable 
 
 ```bash
 openlore enforce                 # human-readable gate report for the working tree (advisory)
-openlore enforce --json          # documented JSON: gated, blocking[], advisory[], off[], unknownPolicyCodes[], caveats[]
+openlore enforce --json          # schemaVersion:2 JSON: gated, blocking[], advisory[], off[], unknownPolicyCodes[], caveats[]
 openlore enforce --hook          # hook mode: stderr + exit 1 only on a blocking-classed finding
 openlore enforce --install-hook  # install the unified pre-commit hook (coexists with the decisions gate)
 openlore enforce --uninstall-hook
 ```
 
 Sources: the **stale-decision-reference** check always runs (a cheap walk of the decision graph + anchored references — it flags a live, authoritative artifact that still cites a superseded decision); the **blast-radius** orphan patterns and **impact-certificate** surfaces are collected only when the repository has configured them (those analyses are diff-heavy). Every source is advisory-safe — a throw degrades to a caveat and never blocks. Advisory by default: a repository that declares no `enforcement.policy` never blocks, and an `off`-classed finding is still listed (silenced, not invisible). Deterministic, no LLM. This gate is the recommended single posture; the per-surface `blast-radius --hook` / `impact-certificate --hook` remain for repositories that prefer one source per hook.
+
+The version 2 JSON envelope uses the closed finding-severity vocabulary `info | warning | error |
+critical`. Version 1 consumers that matched the legacy value `warn` must migrate to `warning`.
 
 ---
 

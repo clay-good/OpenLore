@@ -48,7 +48,7 @@ export interface GovernanceFinding {
   /** Stable, documented code — the key a declared policy names. */
   code: string;
   /** The emitting source's intrinsic severity. Never altered by the policy. */
-  severity: string;
+  severity: 'info' | 'warning' | 'error' | 'critical';
   /** Which source produced it (for attribution in gate output). */
   source: string;
   /** The artifact/surface/symbol the finding concerns. */

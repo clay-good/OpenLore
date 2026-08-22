@@ -432,7 +432,7 @@ export function isStrictConclusionContract(): boolean {
 export function conclusionShapeFinding(toolName: string, violation: string): GovernanceFinding {
   return {
     code: CONCLUSION_SHAPE_VIOLATION_CODE,
-    severity: 'warn',
+    severity: 'warning',
     source: 'conclusion-contract',
     subject: toolName,
     message: `Tool "${toolName}" returned a graph-shaped response instead of a conclusion: ${violation}`,

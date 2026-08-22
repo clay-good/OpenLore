@@ -80,7 +80,7 @@ type GateJson = {
   schemaVersion: number;
   gated: boolean;
   blocking: Array<{ code: string }>;
-  advisory: Array<{ code: string }>;
+  advisory: Array<{ code: string; severity: string }>;
   off: Array<{ code: string }>;
   unknownPolicyCodes: string[];
 };
@@ -213,10 +213,10 @@ describe('impactCertificateFindings — surface severities map to per-severity c
     expect(out).toHaveLength(1);
     expect(out[0].subject).toBe('alpha,zeta'); // deterministic sort
   });
-  it('intrinsic severity mirrors the surface severity (info→info, warn→warn, critical→error)', () => {
+  it('normalizes intrinsic surface severity (info→info, warn→warning, critical→error)', () => {
     const sev = (s: string) => impactCertificateFindings(cert([{ surface: 'x', surfaceSeverity: s }]))[0].severity;
     expect(sev('info')).toBe('info');
-    expect(sev('warn')).toBe('warn');
+    expect(sev('warn')).toBe('warning');
     expect(sev('critical')).toBe('error');
   });
   it('block:["critical"] equivalent — surface-critical classifies as blocking', () => {
@@ -235,7 +235,8 @@ describe('enforce gate decision', () => {
     await writeStaleScenario(root);
     const { code, json } = await gateJson(root);
     expect(code).toBe(0);
-    expect(json.schemaVersion).toBe(1);
+    expect(json.schemaVersion).toBe(2);
+    expect(json.advisory.every((finding) => ['info', 'warning', 'error', 'critical'].includes(finding.severity))).toBe(true);
     expect(json.gated).toBe(false);
     expect(json.advisory.map((f) => f.code)).toContain('stale-decision-reference');
   });

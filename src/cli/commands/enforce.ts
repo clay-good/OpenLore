@@ -171,7 +171,11 @@ export function blastRadiusFindings(b: BlastRadiusBriefing): GovernanceFinding[]
 }
 
 /** The intrinsic severity a surface finding carries, mirroring the certificate's own convention. */
-const SURFACE_SEVERITY: Record<string, string> = { info: 'info', warn: 'warn', critical: 'error' };
+const SURFACE_SEVERITY: Record<string, GovernanceFinding['severity']> = {
+  info: 'info',
+  warn: 'warning',
+  critical: 'error',
+};
 
 /**
  * Map an impact certificate onto unified governance findings — one per declared
@@ -180,7 +184,7 @@ const SURFACE_SEVERITY: Record<string, string> = { info: 'info', warn: 'warn', c
  * blocks on (`triggeredBlockSeverities`), grouped into the per-severity
  * `surface-<sev>` codes a policy can name, so the two block on identical diffs.
  * Deterministic: surfaces are sorted; the intrinsic severity reflects the actual
- * surface severity (info→info, warn→warn, critical→error). Pure; no I/O.
+ * surface severity (info→info, warn→warning, critical→error). Pure; no I/O.
  */
 export function impactCertificateFindings(cert: ImpactCertificate): GovernanceFinding[] {
   const bySeverity = new Map<string, Set<string>>();
@@ -193,7 +197,7 @@ export function impactCertificateFindings(cert: ImpactCertificate): GovernanceFi
   for (const [sev, surfaces] of bySeverity) {
     const named = [...surfaces].sort();
     out.push({
-      code: `surface-${sev}`, severity: SURFACE_SEVERITY[sev] ?? 'warn', source: 'impact-certificate',
+      code: `surface-${sev}`, severity: SURFACE_SEVERITY[sev] ?? 'warning', source: 'impact-certificate',
       subject: named.join(','),
       message: `the change opens a new path into ${named.length} ${sev} surface(s): ${named.join(', ')}.`,
     });
@@ -293,7 +297,7 @@ export async function runEnforceCli(opts: EnforceCliOptions): Promise<number> {
 
   if (opts.json) {
     await writeStdout(JSON.stringify({
-      schemaVersion: 1,
+      schemaVersion: 2,
       gated: result.gated,
       blocking: result.blocking,
       advisory: result.advisory,

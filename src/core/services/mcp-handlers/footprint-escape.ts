@@ -310,7 +310,7 @@ export function analyzeEscape(
   for (const e of escapes) {
     findings.push({
       code: 'footprint-escape',
-      severity: e.classification === 'scope-creep-within-file' ? 'info' : 'warn',
+      severity: e.classification === 'scope-creep-within-file' ? 'info' : 'warning',
       source: 'footprint-escape',
       subject: e.id,
       message: `Diff modified "${e.name}" (${e.filePath}) outside task "${declared.taskId}"'s declared write-footprint — ${e.classification}.`,
@@ -319,7 +319,7 @@ export function analyzeEscape(
   for (const c of newlyOpenedConflicts) {
     findings.push({
       code: 'footprint-escape-new-conflict',
-      severity: 'warn',
+      severity: 'warning',
       source: 'footprint-escape',
       subject: c.symbol,
       message: `An out-of-scope write to "${c.name}" opened a new write-write conflict with peer task "${c.peerTaskId}".`,
@@ -328,7 +328,7 @@ export function analyzeEscape(
   for (const m of misDeclaredAppends) {
     findings.push({
       code: 'mis-declared-append',
-      severity: 'warn',
+      severity: 'warning',
       source: 'footprint-escape',
       subject: m.symbol,
       message: `"${m.name}" was declared writeMode "append" but the diff modified existing code (mis-declared append).`,

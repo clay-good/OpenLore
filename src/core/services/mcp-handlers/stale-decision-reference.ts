@@ -38,7 +38,7 @@ const DECISION_ID = /\b[0-9a-f]{8}\b/g;
 export interface StaleDecisionReferenceFinding {
   code: 'stale-decision-reference';
   /** Intrinsic severity, owned by this source (never altered by the enforcement policy). */
-  severity: 'warn';
+  severity: 'warning';
   /** The live, authoritative artifact that references the retired decision. */
   referencingArtifact: {
     kind: 'decision' | 'memory' | 'spec';
@@ -198,7 +198,7 @@ export function findStaleDecisionReferences(input: StaleReferenceInputs): StaleD
   ) => {
     findings.push({
       code: 'stale-decision-reference',
-      severity: 'warn',
+      severity: 'warning',
       referencingArtifact: { kind, id, label },
       retiredDecision: retiredId,
       supersededBy: supersededBy.get(retiredId)!,

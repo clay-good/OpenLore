@@ -270,10 +270,12 @@ export async function resolveBaseRef(rootPath: string, preferredRef: string): Pr
     }
   }
 
-  // Try common default branches
-  for (const ref of ['main', 'master']) {
+  // Try common local and remote default branches. CI/PR clones frequently omit a
+  // local `main` while retaining `origin/main` or the remote HEAD symbolic ref;
+  // preferring those before HEAD~1 preserves the full branch comparison window.
+  for (const ref of ['main', 'master', 'refs/remotes/origin/HEAD', 'origin/main', 'origin/master']) {
     try {
-      await execFileAsync('git', ['rev-parse', '--verify', ref], { cwd: rootPath });
+      await execFileAsync('git', ['rev-parse', '--verify', `${ref}^{commit}`], { cwd: rootPath });
       return ref;
     } catch {
       continue;

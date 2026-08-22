@@ -88,6 +88,7 @@ export type ActorKind = 'branch' | 'pull-request' | 'agent-task';
 /** A stable reason a change could not be structurally assessed — never a false "no conflict". */
 export type NotAssessedReason =
   | 'diff-unfetchable'      // the change's diff could not be read (e.g. gh failed)
+  | 'assessment-capped'     // the diff exceeded the bounded per-change assessment budget
   | 'no-resolvable-symbols' // the diff touched no symbol resolvable in the index
   | 'index-stale'           // the change's repo index is stale (federation target)
   | 'index-missing';        // the change's repo has no usable index
@@ -448,16 +449,26 @@ export interface RawChange {
   baseSymbolsByFile: Map<string, BaseSymbol[]>;
   /** Set when the change's diff could not be fetched → a "not assessed" node. */
   fetchError?: string;
+  /** Set when a fetched diff exceeds a bounded assessment budget. */
+  assessmentError?: string;
   /** Changed code files whose BASE content could not be read (their symbols are absent
    *  from the write-set) — surfaced as a caveat so the partial assessment is honest. */
   unreadableFiles?: string[];
 }
 
+/** Provider output plus map-level disclosures discovered during enumeration. */
+export interface RawChangeEnumeration {
+  changes: RawChange[];
+  caveats: string[];
+}
+
+type EnumerationOutput = RawChange[] | RawChangeEnumeration;
+
 export interface InFlightProviders {
   /** Enumerate local branch changes ahead of base in a repo. */
-  enumerateBranches(repoPath: string, repoName: string, baseRef: string, only?: string[]): Promise<RawChange[]>;
+  enumerateBranches(repoPath: string, repoName: string, baseRef: string, only?: string[]): Promise<EnumerationOutput>;
   /** Enumerate open pull requests in a repo (via gh). Resolves to [] when gh is absent. */
-  enumeratePullRequests(repoPath: string, repoName: string, baseRef: string): Promise<RawChange[]>;
+  enumeratePullRequests(repoPath: string, repoName: string, baseRef: string): Promise<EnumerationOutput>;
   /** Whether `gh` is available at all (drives the "PRs not enumerated" caveat). */
   ghAvailable(repoPath: string): Promise<boolean>;
 }
@@ -465,6 +476,13 @@ export interface InFlightProviders {
 async function git(repoPath: string, args: string[]): Promise<string> {
   const { stdout } = await execFileAsync('git', args, { cwd: repoPath, maxBuffer: 64 * 1024 * 1024 });
   return stdout;
+}
+
+type CommandRunner = (repoPath: string, args: string[]) => Promise<string>;
+type AutoBaseResolver = (repoPath: string) => Promise<string>;
+
+function errorDetail(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /**
@@ -506,7 +524,10 @@ async function buildBaseSymbols(
   const byFile = new Map<string, BaseSymbol[]>();
   const unreadable: string[] = [];
   for (const f of files.slice(0, MAX_FILES_PER_CHANGE)) {
-    if (f.status === 'added') continue; // no base content — all its symbols are new
+    // No base content exists for an added file. Two branches adding the same path
+    // are therefore a textual-conflict case for add-merge-tree-conflict-oracle;
+    // this symbol-based classifier must not pretend it assessed their new symbols.
+    if (f.status === 'added') continue;
     const basePath = f.oldPath ?? f.path; // a renamed file's base content lives at oldPath
     const lang = detectLanguage(basePath);
     if (!lang || lang === 'Unknown' || lang === 'unknown') continue; // non-code file → no symbols
@@ -537,24 +558,61 @@ async function buildBaseSymbols(
  * re-resolve it per repo (main → master → HEAD~1) when it doesn't verify locally,
  * rather than letting every `merge-base` fail and silently skip the target's branches.
  */
-async function resolveRepoBase(repoPath: string, baseRef: string): Promise<string> {
-  try { await git(repoPath, ['rev-parse', '--verify', baseRef]); return baseRef; } catch { /* re-resolve below */ }
+async function resolveRepoBase(
+  repoPath: string,
+  repoName: string,
+  baseRef: string,
+  runGit: CommandRunner = git,
+  autoResolve?: AutoBaseResolver,
+): Promise<{ ref: string; caveat?: string }> {
+  try { await runGit(repoPath, ['rev-parse', '--verify', `${baseRef}^{commit}`]); return { ref: baseRef }; } catch { /* re-resolve below */ }
   try {
-    const { resolveBaseRef } = await import('../../drift/git-diff.js');
-    return await resolveBaseRef(repoPath, 'auto');
-  } catch { return baseRef; }
+    const resolver = autoResolve ?? (async (path: string) => {
+      const { resolveBaseRef } = await import('../../drift/git-diff.js');
+      return resolveBaseRef(path, 'auto');
+    });
+    const fallback = await resolver(repoPath);
+    if (fallback === 'HEAD~1' || fallback === '4b825dc642cb6eb9a060e54bf899d15f71049056') {
+      throw new Error('no local or remote default branch resolves to a usable commit');
+    }
+    await runGit(repoPath, ['rev-parse', '--verify', `${fallback}^{commit}`]);
+    return {
+      ref: fallback,
+      caveat: `Base ref "${baseRef}" could not be verified as a commit in ${repoName}; using "${fallback}" for that repository.`,
+    };
+  } catch {
+    return {
+      ref: baseRef,
+      caveat: `Base ref "${baseRef}" could not be verified in ${repoName}; branch and pull-request assessments that depend on it may be unavailable.`,
+    };
+  }
+}
+
+function failedBranch(repoName: string, branch: string, operation: string, error: unknown): RawChange {
+  return {
+    actor: branch,
+    ref: branch,
+    title: branch,
+    repo: repoName,
+    kind: 'branch',
+    files: [],
+    baseSymbolsByFile: new Map(),
+    fetchError: `${operation} failed for branch "${branch}": ${errorDetail(error)}`,
+  };
 }
 
 /** Default provider: enumerate local branches ahead of base via git. */
-async function defaultEnumerateBranches(
+export async function defaultEnumerateBranches(
   repoPath: string,
   repoName: string,
   baseRefIn: string,
   only?: string[],
-): Promise<RawChange[]> {
+  runGit: CommandRunner = git,
+  autoResolve?: AutoBaseResolver,
+): Promise<RawChangeEnumeration> {
   let names: string[];
   try {
-    names = (await git(repoPath, ['for-each-ref', '--format=%(refname:short)', 'refs/heads/']))
+    names = (await runGit(repoPath, ['for-each-ref', '--format=%(refname:short)', 'refs/heads/']))
       .split('\n').map(s => s.trim()).filter(Boolean);
   } catch (err) {
     // Propagate rather than returning []. The caller has a caveat for exactly this
@@ -564,7 +622,8 @@ async function defaultEnumerateBranches(
     // work interferes" when nothing had been enumerated at all.
     throw err instanceof Error ? err : new Error(String(err));
   }
-  const baseRef = await resolveRepoBase(repoPath, baseRefIn);
+  const base = await resolveRepoBase(repoPath, repoName, baseRefIn, runGit, autoResolve);
+  const baseRef = base.ref;
   // The currently-checked-out branch is NOT excluded: it is a legitimate in-flight change
   // that can genuinely conflict with a teammate's branch (a true positive the user wants).
   const wanted = only && only.length > 0 ? new Set(only) : null;
@@ -573,58 +632,110 @@ async function defaultEnumerateBranches(
     if (branch === baseRef) continue;
     if (wanted && !wanted.has(branch)) continue;
     let mergeBase: string;
-    try { mergeBase = (await git(repoPath, ['merge-base', baseRef, branch])).trim(); } catch { continue; }
+    try {
+      mergeBase = (await runGit(repoPath, ['merge-base', baseRef, branch])).trim();
+      if (!mergeBase) throw new Error('git returned an empty merge base');
+    } catch (error) {
+      out.push(failedBranch(repoName, branch, 'merge-base', error));
+      continue;
+    }
     let tip: string;
-    try { tip = (await git(repoPath, ['rev-parse', branch])).trim(); } catch { continue; }
-    if (!mergeBase || mergeBase === tip) continue; // branch not ahead of base → nothing in flight
+    try {
+      tip = (await runGit(repoPath, ['rev-parse', branch])).trim();
+      if (!tip) throw new Error('git returned an empty branch tip');
+    } catch (error) {
+      out.push(failedBranch(repoName, branch, 'tip resolution', error));
+      continue;
+    }
+    if (mergeBase === tip) continue; // branch not ahead of base → nothing in flight
     let patch: string;
-    try { patch = await git(repoPath, ['diff', '--unified=0', '--no-color', `${mergeBase}..${branch}`]); } catch { continue; }
+    try { patch = await runGit(repoPath, ['diff', '--unified=0', '--no-color', `${mergeBase}..${branch}`]); }
+    catch (error) {
+      out.push(failedBranch(repoName, branch, 'diff', error));
+      continue;
+    }
     const files = parseUnifiedDiff(patch);
     if (files.length === 0) continue;
+    if (files.length > MAX_FILES_PER_CHANGE) {
+      out.push({
+        actor: branch,
+        ref: branch,
+        title: branch,
+        repo: repoName,
+        kind: 'branch',
+        files: [],
+        baseSymbolsByFile: new Map(),
+        assessmentError: `diff contains ${files.length} changed files, exceeding the ${MAX_FILES_PER_CHANGE}-file assessment cap`,
+      });
+      continue;
+    }
     let actor = branch;
-    try { actor = (await git(repoPath, ['log', '-1', '--format=%an', branch])).trim() || branch; } catch { /* keep branch as actor */ }
+    try { actor = (await runGit(repoPath, ['log', '-1', '--format=%an', branch])).trim() || branch; } catch { /* keep branch as actor */ }
     const { byFile, unreadable } = await buildBaseSymbols(repoPath, mergeBase, files);
     out.push({ actor, ref: branch, title: branch, repo: repoName, kind: 'branch', files, baseSymbolsByFile: byFile, ...(unreadable.length ? { unreadableFiles: unreadable } : {}) });
   }
-  return out;
+  return { changes: out, caveats: base.caveat ? [base.caveat] : [] };
 }
 
 interface GhPr { number: number; headRefName: string; author?: { login?: string }; title?: string }
 
 /** Default provider: enumerate open PRs via gh, diffing each against the local base. */
-async function defaultEnumeratePullRequests(
+export async function defaultEnumeratePullRequests(
   repoPath: string,
   repoName: string,
   baseRefIn: string,
-): Promise<RawChange[]> {
+  runGh: CommandRunner = async (path, args) => {
+    const { stdout } = await execFileAsync('gh', args, { cwd: path, maxBuffer: args[1] === 'diff' ? 64 * 1024 * 1024 : 16 * 1024 * 1024 });
+    return stdout;
+  },
+  runGit: CommandRunner = git,
+  autoResolve?: AutoBaseResolver,
+): Promise<RawChangeEnumeration> {
   let prs: GhPr[];
   try {
-    const { stdout } = await execFileAsync('gh', ['pr', 'list', '--state', 'open', '--json', 'number,headRefName,author,title', '--limit', '50'], { cwd: repoPath, maxBuffer: 16 * 1024 * 1024 });
+    const stdout = await runGh(repoPath, ['pr', 'list', '--state', 'open', '--json', 'number,headRefName,author,title', '--limit', '50']);
     prs = JSON.parse(stdout) as GhPr[];
-  } catch {
-    return []; // gh absent / not a GitHub remote → no PRs (the caller adds a caveat)
+  } catch (error) {
+    throw new Error(`gh pr list failed for ${repoName}: ${errorDetail(error)}`, { cause: error });
   }
-  const baseRef = await resolveRepoBase(repoPath, baseRefIn);
+  const base = await resolveRepoBase(repoPath, repoName, baseRefIn, runGit, autoResolve);
+  const baseRef = base.ref;
+  const caveats = base.caveat ? [base.caveat] : [];
+  if (prs.length === 50) {
+    caveats.push(`Open pull-request enumeration for ${repoName} reached the 50-row limit and may be truncated.`);
+  }
   const out: RawChange[] = [];
   for (const pr of prs.sort((a, b) => a.number - b.number)) {
     const ref = `PR #${pr.number}`;
     const actor = pr.author?.login || 'unknown';
     let patch: string;
     try {
-      const { stdout } = await execFileAsync('gh', ['pr', 'diff', String(pr.number), '--patch'], { cwd: repoPath, maxBuffer: 64 * 1024 * 1024 });
-      patch = stdout;
+      patch = await runGh(repoPath, ['pr', 'diff', String(pr.number), '--patch']);
     } catch {
       out.push({ actor, ref, title: pr.title, repo: repoName, kind: 'pull-request', files: [], baseSymbolsByFile: new Map(), fetchError: `gh pr diff ${pr.number} failed` });
       continue;
     }
     const files = parseUnifiedDiff(patch);
     if (files.length === 0) continue;
+    if (files.length > MAX_FILES_PER_CHANGE) {
+      out.push({
+        actor,
+        ref,
+        title: pr.title,
+        repo: repoName,
+        kind: 'pull-request',
+        files: [],
+        baseSymbolsByFile: new Map(),
+        assessmentError: `diff contains ${files.length} changed files, exceeding the ${MAX_FILES_PER_CHANGE}-file assessment cap`,
+      });
+      continue;
+    }
     // Old content is read from the LOCAL base ref (an approximation when the PR's base
     // has advanced past local) — disclosed in the caveats.
     const { byFile, unreadable } = await buildBaseSymbols(repoPath, baseRef, files);
     out.push({ actor, ref, title: pr.title, repo: repoName, kind: 'pull-request', files, baseSymbolsByFile: byFile, ...(unreadable.length ? { unreadableFiles: unreadable } : {}) });
   }
-  return out;
+  return { changes: out, caveats };
 }
 
 async function defaultGhAvailable(repoPath: string): Promise<boolean> {
@@ -636,6 +747,15 @@ const DEFAULT_PROVIDERS: InFlightProviders = {
   enumeratePullRequests: defaultEnumeratePullRequests,
   ghAvailable: defaultGhAvailable,
 };
+
+function appendEnumeration(output: EnumerationOutput, raw: RawChange[], caveats: string[]): void {
+  if (Array.isArray(output)) {
+    raw.push(...output);
+    return;
+  }
+  raw.push(...output.changes);
+  for (const caveat of output.caveats) if (!caveats.includes(caveat)) caveats.push(caveat);
+}
 
 // ── repo resolution (federation) ────────────────────────────────────────────
 
@@ -715,13 +835,25 @@ export async function computeInterferenceMap(
   const homeCg = ctx.callGraph as SerializedCallGraph;
 
   const baseRefInput = input.baseRef && input.baseRef.length > 0 ? input.baseRef : 'auto';
-  let resolvedBaseRef = baseRefInput;
-  try {
-    const { resolveBaseRef } = await import('../../drift/git-diff.js');
-    resolvedBaseRef = await resolveBaseRef(absDir, baseRefInput);
-  } catch { /* keep the input; enumeration may still work or yield no changes */ }
-
+  let resolvedBaseRef: string;
   const caveats: string[] = [];
+  try {
+    const { resolveBaseRefDisclosed, refExists } = await import('../../drift/git-diff.js');
+    const base = await resolveBaseRefDisclosed(absDir, baseRefInput);
+    if (baseRefInput === 'auto' && base.resolved === 'HEAD~1') {
+      return { error: 'Cannot infer a default-branch base: auto-resolution reached only HEAD~1, which would assess an incomplete change window. Pass an explicit commit or default-branch ref.' };
+    }
+    if (!(await refExists(absDir, base.resolved))) {
+      return { error: `Cannot resolve base ref "${baseRefInput}" to a usable commit. Pass an explicit commit or default-branch ref.` };
+    }
+    resolvedBaseRef = base.resolved;
+    if (base.fellBack) {
+      caveats.push(`Requested base ref "${base.requested}" could not be verified; using "${base.resolved}" with this fallback disclosed.`);
+    }
+  } catch (error) {
+    return { error: `Cannot resolve base ref "${baseRefInput}": ${errorDetail(error)}` };
+  }
+
   const homeEdgeStore = ctx.edgeStore as AssessedRepo['edgeStore'] | undefined;
   const { repos, unusable, caveats: repoCaveats } = await resolveRepos(absDir, homeCg, homeEdgeStore, input);
   caveats.push(...repoCaveats);
@@ -733,9 +865,10 @@ export async function computeInterferenceMap(
   const includeBranches = input.includeBranches !== false;
   const includePrs = input.includePullRequests !== false;
   let anyGh = false;
+  let anyPrEnumerationSucceeded = false;
   for (const repo of repos) {
     if (includeBranches) {
-      try { raw.push(...await providers.enumerateBranches(repo.path, repo.name, resolvedBaseRef, input.branches)); }
+      try { appendEnumeration(await providers.enumerateBranches(repo.path, repo.name, resolvedBaseRef, input.branches), raw, caveats); }
       catch (err) {
         // Carry the reason: "not a git worktree" and "safe.directory rejected" need
         // different fixes, and a bare failure notice is not actionable.
@@ -746,15 +879,19 @@ export async function computeInterferenceMap(
       const has = await providers.ghAvailable(repo.path).catch(() => false);
       anyGh = anyGh || has;
       if (has) {
-        try { raw.push(...await providers.enumeratePullRequests(repo.path, repo.name, resolvedBaseRef)); }
-        catch { caveats.push(`PR enumeration failed for ${repo.name}.`); }
+        try {
+          appendEnumeration(await providers.enumeratePullRequests(repo.path, repo.name, resolvedBaseRef), raw, caveats);
+          anyPrEnumerationSucceeded = true;
+        } catch (error) {
+          caveats.push(`PR enumeration failed for ${repo.name}: ${errorDetail(error)}`);
+        }
       }
     }
   }
   const anyPrEnumerated = raw.some(r => r.kind === 'pull-request');
   if (includePrs && !anyGh) {
     caveats.push('`gh` is not available, so open pull requests were not enumerated (branches and tasks only). Install GitHub CLI to include PRs.');
-  } else if (includePrs && anyGh && !anyPrEnumerated) {
+  } else if (includePrs && anyGh && anyPrEnumerationSucceeded && !anyPrEnumerated) {
     // gh binary present but it returned no PRs — typically no open PRs, or this repo has
     // no GitHub remote. Say so honestly rather than implying PRs were assessed.
     caveats.push('`gh` is installed but no open pull requests were enumerated (none open, or this repo has no GitHub remote). PR coverage is empty.');
@@ -791,16 +928,25 @@ export async function computeInterferenceMap(
       notAssessed.push({ actor: rc.actor, ref: rc.ref, title: rc.title, repo: rc.repo, kind: rc.kind, provenance: 'foreign-actor', assessed: false, reason: 'diff-unfetchable', detail: rc.fetchError });
       continue;
     }
+    if (rc.assessmentError) {
+      notAssessed.push({ actor: rc.actor, ref: rc.ref, title: rc.title, repo: rc.repo, kind: rc.kind, provenance: 'foreign-actor', assessed: false, reason: 'assessment-capped', detail: rc.assessmentError });
+      continue;
+    }
     if (!repo) {
       notAssessed.push({ actor: rc.actor, ref: rc.ref, title: rc.title, repo: rc.repo, kind: rc.kind, provenance: 'foreign-actor', assessed: false, reason: 'index-missing', detail: `no usable index for ${rc.repo}` });
       continue;
     }
     const writeMembers = writeSetFromHunks(rc.files, rc.baseSymbolsByFile);
+    if (rc.unreadableFiles && rc.unreadableFiles.length > 0) {
+      partialReads.push({ ref: rc.ref, files: rc.unreadableFiles.length });
+    }
     if (writeMembers.length === 0) {
-      notAssessed.push({ actor: rc.actor, ref: rc.ref, title: rc.title, repo: rc.repo, kind: rc.kind, provenance: 'foreign-actor', assessed: false, reason: 'no-resolvable-symbols', detail: 'the diff touched no symbol resolvable in the index' });
+      const detail = rc.unreadableFiles && rc.unreadableFiles.length > 0
+        ? `base content could not be read for ${rc.unreadableFiles.length} changed file(s), and the remaining diff touched no symbol resolvable in the index`
+        : 'the diff touched no symbol resolvable in the index';
+      notAssessed.push({ actor: rc.actor, ref: rc.ref, title: rc.title, repo: rc.repo, kind: rc.kind, provenance: 'foreign-actor', assessed: false, reason: 'no-resolvable-symbols', detail });
       continue;
     }
-    if (rc.unreadableFiles && rc.unreadableFiles.length > 0) partialReads.push({ ref: rc.ref, files: rc.unreadableFiles.length });
     const footprint = footprintForChange(repo.cg, rc.ref, writeMembers, fpOptsFor(repo));
     const stableByNodeId = new Map<string, string>();
     for (const w of writeMembers) if (w.stableId) stableByNodeId.set(w.id, w.stableId);
@@ -944,7 +1090,9 @@ function renderHeadline(map: InterferenceMap): string {
   }
   const waw = map.findingCount;
   const parts = [`${map.assessedCount} in-flight change(s)${repoNote}`];
-  if (map.conflictCount === 0) parts.push('no structural conflicts');
+  if (map.conflictCount === 0) {
+    parts.push(map.notAssessedCount > 0 ? 'no structural conflicts among assessed changes' : 'no structural conflicts');
+  }
   else {
     parts.push(`${map.conflictCount} conflict pair(s)`);
     if (waw > 0) parts.push(`${waw} write-write (must serialize)`);

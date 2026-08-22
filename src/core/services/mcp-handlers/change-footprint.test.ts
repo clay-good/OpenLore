@@ -349,10 +349,10 @@ describe('classifyHazard', () => {
     expect(classifyHazard(a, b)).toEqual({ kind: 'WAR', witnesses: ['shared.ts'] });
   });
 
-  it('WAR: a read-only overlap is low-risk', () => {
+  it('none: a read-only overlap is not a data hazard', () => {
     const a = fp('A', [{ id: 'a.ts::one' }], { readSet: ['lib.ts::util'] });
     const b = fp('B', [{ id: 'b.ts::two' }], { readSet: ['lib.ts::util'] });
-    expect(classifyHazard(a, b)).toEqual({ kind: 'WAR', witnesses: ['lib.ts::util'] });
+    expect(classifyHazard(a, b)).toEqual({ kind: 'none', witnesses: [] });
   });
 
   it('soft-coupling: co-change with no static relation is advisory only', () => {
