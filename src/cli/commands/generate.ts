@@ -49,6 +49,7 @@ import {
   createLLMService,
   type LLMService,
 } from '../../core/services/llm-service.js';
+import { isLlmLoggingEnabled } from '../../core/services/llm-logging-policy.js';
 import {
   SpecGenerationPipeline,
   type PipelineResult,
@@ -738,10 +739,11 @@ Each spec.md follows OpenSpec conventions:
           apiBase: resolveTrustedApiBase(globalOpts.apiBase, openloreConfig?.llm?.apiBase),
           sslVerify: resolveTrustedSslVerify(globalOpts.insecure, openloreConfig?.llm?.sslVerify),
           timeout: globalOpts.timeout ?? openloreConfig.generation?.timeout,
-          enableLogging: true,
+          enableLogging: isLlmLoggingEnabled(),
           logDir: previewRoot
             ? join(previewRoot, OPENLORE_DIR, OPENLORE_LOGS_SUBDIR)
             : safeJoin(rootPath, join(OPENLORE_DIR, OPENLORE_LOGS_SUBDIR)),
+          logRoot: previewRoot ?? rootPath,
         });
       } catch (error) {
         logger.error(`Failed to create LLM service: ${(error as Error).message}`);
@@ -809,10 +811,11 @@ Each spec.md follows OpenSpec conventions:
 
         // Save logs on failure
         try {
-          await llm.saveLogs();
-          logger.discovery(opts.preview
-            ? 'LLM logs were isolated with the preview workspace and will be discarded.'
-            : `LLM logs saved to ${OPENLORE_DIR}/${OPENLORE_LOGS_SUBDIR}/`);
+          if (await llm.saveLogs()) {
+            logger.discovery(opts.preview
+              ? 'LLM logs were isolated with the preview workspace and will be discarded.'
+              : `LLM logs saved to ${OPENLORE_DIR}/${OPENLORE_LOGS_SUBDIR}/`);
+          }
         } catch {
           // Ignore log save errors
         }

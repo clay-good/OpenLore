@@ -16,6 +16,7 @@ import {
 import { fileExists } from '../utils/command-helpers.js';
 import { readOpenLoreConfig } from '../core/services/config-manager.js';
 import { createLLMService } from '../core/services/llm-service.js';
+import { isLlmLoggingEnabled } from '../core/services/llm-logging-policy.js';
 import { isGitRepositoryRoot, getChangedFiles, getFileDiff, getCommitMessages, resolveBaseRef, buildSpecMap } from '../core/drift/index.js';
 import {
   loadDecisionStore,
@@ -151,8 +152,9 @@ export async function openloreConsolidateDecisions(
         options.sslVerify === undefined ? undefined : !options.sslVerify,
         openloreConfig.llm?.sslVerify,
       ),
-    enableLogging: true,
+    enableLogging: isLlmLoggingEnabled(),
     logDir: join(rootPath, OPENLORE_DIR, OPENLORE_LOGS_SUBDIR),
+    logRoot: rootPath,
   });
 
   const store = await loadDecisionStore(rootPath);

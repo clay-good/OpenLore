@@ -26,6 +26,7 @@ import { resolveTrustedApiBase, resolveTrustedSslVerify } from '../../core/servi
 import { parseList, resolveLLMProvider } from '../../utils/command-helpers.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
 import { createLLMService } from '../../core/services/llm-service.js';
+import { isLlmLoggingEnabled } from '../../core/services/llm-logging-policy.js';
 import type { LLMService } from '../../core/services/llm-service.js';
 import { analyzeTestCoverage } from '../../core/test-generator/index.js';
 import type { TestCoverageReport } from '../../types/test-generator.js';
@@ -173,8 +174,9 @@ To write tests, use the openlore-write-tests skill:
           apiBase: resolveTrustedApiBase(globalOpts.apiBase, config?.llm?.apiBase),
           sslVerify: resolveTrustedSslVerify(globalOpts.insecure, config?.llm?.sslVerify),
           timeout: globalOpts.timeout ?? config?.generation?.timeout,
-          enableLogging: true,
+          enableLogging: isLlmLoggingEnabled(),
           logDir: join(rootPath, OPENLORE_DIR, OPENLORE_LOGS_SUBDIR),
+          logRoot: rootPath,
         });
       } catch (err) {
         logger.error(`LLM setup failed: ${(err as Error).message}`);

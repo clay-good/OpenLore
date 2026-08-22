@@ -352,6 +352,13 @@ export const DEFAULT_LLM_TIMEOUT_MS = 120_000;
 /** Default cost warning threshold (USD) */
 export const DEFAULT_LLM_COST_WARNING_THRESHOLD = 10.0;
 
+/**
+ * Local LLM request logs retain at most the same six 50 MB generations as
+ * telemetry (change: harden-llm-log-and-telemetry-honesty).
+ */
+export const LLM_LOG_RETENTION_MAX_BYTES = 6 * 50 * 1024 * 1024;
+export const LLM_LOG_RETENTION_MAX_FILES = 6;
+
 /** Fraction of max context tokens at which a warning is emitted */
 export const CONTEXT_LIMIT_WARNING_RATIO = 0.9;
 

@@ -1399,7 +1399,7 @@ The API SHALL support `POST /api/verify` to verify generated specs against actua
 - **WHEN** POST /api/verify is called with valid parameters
 - **THEN** 200 OK with verification report and duration
 - **AND** Progress updates are sent via onProgress callback
-- **AND** LLM logs are saved
+- **AND** LLM logs are saved only when `OPENLORE_LLM_LOGS=1`
 
 #### Scenario: MissingConfiguration
 - **GIVEN** No openlore configuration exists

@@ -5,7 +5,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'child_process';
 import { writeFileSync } from 'node:fs';
-import { mkdir, rm, readdir, readFile } from 'node:fs/promises';
+import { chmod, mkdir, rm, readdir, readFile, stat, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -30,8 +30,12 @@ import {
   pricedModelIds,
   parseRetryAfterMs,
   sanitizeCliPrompt,
+  pruneLlmLogs,
+  validateLlmLogSize,
   type CompletionRequest,
 } from './llm-service.js';
+import { isLlmLoggingEnabled } from './llm-logging-policy.js';
+import { acquireLockAt, isLockHeld } from '../runtime/advisory-lock.js';
 import { resetTlsScopeForTests } from './tls-scope.js';
 import logger from '../../utils/logger.js';
 import {
@@ -40,6 +44,8 @@ import {
   OPENAI_COMPAT_MAX_OUTPUT_TOKENS,
   COPILOT_MAX_OUTPUT_TOKENS,
   GEMINI_MAX_OUTPUT_TOKENS,
+  LLM_LOG_RETENTION_MAX_BYTES,
+  LLM_LOG_RETENTION_MAX_FILES,
 } from '../../constants.js';
 
 // Mock child_process for CLI provider tests (hoisted before module load)
@@ -737,6 +743,26 @@ describe('LLMService', () => {
   });
 
   describe('Logging', () => {
+    it.each([
+      [undefined, false],
+      ['', false],
+      ['0', false],
+      ['false', false],
+      ['true', false],
+      ['1', true],
+    ])('requires OPENLORE_LLM_LOGS=1 (value: %s)', (value, expected) => {
+      expect(isLlmLoggingEnabled({ OPENLORE_LLM_LOGS: value })).toBe(expected);
+    });
+
+    it('requires an explicit trusted directory or confinement root when logging is enabled', () => {
+      expect(() => new LLMService(new MockLLMProvider(), { enableLogging: true }))
+        .toThrow(/logRoot or an explicit trusted logDir/);
+      expect(() => new LLMService(new MockLLMProvider(), {
+        enableLogging: true,
+        logDir: join(tempDir, 'trusted-logs'),
+      })).not.toThrow();
+    });
+
     it('should save logs to disk when enabled', async () => {
       const logDir = join(tempDir, 'logs');
 
@@ -752,7 +778,7 @@ describe('LLMService', () => {
         userPrompt: 'User',
       });
 
-      await service.saveLogs();
+      expect(await service.saveLogs()).toBe(true);
 
       const files = await readdir(logDir);
       expect(files.length).toBeGreaterThan(0);
@@ -762,6 +788,15 @@ describe('LLMService', () => {
       const logContent = JSON.parse(await readFile(join(logDir, files[0]), 'utf-8'));
       expect(logContent.summary.tokenUsage.requests).toBe(1);
       expect(logContent.requests).toHaveLength(1);
+    });
+
+    it('reports that no log was persisted when logging captured no requests', async () => {
+      const { service } = createMockLLMService({
+        logDir: join(tempDir, 'logs'),
+        enableLogging: false,
+      });
+
+      expect(await service.saveLogs()).toBe(false);
     });
 
     it('should redact secrets in logs', async () => {
@@ -791,6 +826,176 @@ describe('LLMService', () => {
       expect(logContent).not.toContain(responseSecret);
       expect(parsed.requests[0].redactions.count).toBeGreaterThanOrEqual(3);
       expect(parsed.requests[0].redactions.kinds).toEqual(expect.arrayContaining(['api-key', 'secret-field']));
+    });
+
+    it('evicts oldest matching logs within both retention bounds and preserves unrelated files', async () => {
+      const logDir = join(tempDir, 'logs');
+      await mkdir(logDir, { recursive: true });
+      await writeFile(join(logDir, 'llm-log-2026-01-01T00-00-00-000Z.json'), '1111');
+      await writeFile(join(logDir, 'llm-log-2026-01-02T00-00-00-000Z.json'), '2222');
+      await writeFile(join(logDir, 'llm-log-2026-01-03T00-00-00-000Z.json'), '3333');
+      await writeFile(join(logDir, 'keep.json'), 'unrelated');
+
+      await pruneLlmLogs(logDir, { maxTotalBytes: 8, maxFiles: 2 });
+
+      expect((await readdir(logDir)).sort()).toEqual([
+        'keep.json',
+        'llm-log-2026-01-02T00-00-00-000Z.json',
+        'llm-log-2026-01-03T00-00-00-000Z.json',
+      ]);
+    });
+
+    it('preserves prefix-sharing files that are not OpenLore log artifacts', async () => {
+      const logDir = join(tempDir, 'logs');
+      await mkdir(logDir, { recursive: true });
+      await writeFile(join(logDir, 'llm-log-backup.json'), 'unrelated');
+      await writeFile(join(logDir, 'llm-log-2026-01-01T00-00-00-000Z.json'), 'owned');
+
+      await pruneLlmLogs(logDir, { maxTotalBytes: 0, maxFiles: 0 });
+
+      expect(await readdir(logDir)).toEqual(['llm-log-backup.json']);
+    });
+
+    it('rejects invalid retention bounds and an individually oversized log', async () => {
+      const logDir = join(tempDir, 'logs');
+      await mkdir(logDir, { recursive: true });
+      await expect(pruneLlmLogs(logDir, { maxTotalBytes: Number.NaN })).rejects.toThrow(/non-negative safe integer/);
+      await expect(pruneLlmLogs(logDir, { maxFiles: 1.5 })).rejects.toThrow(/non-negative safe integer/);
+      expect(() => validateLlmLogSize('1234', 3)).toThrow(/no log was written/);
+      expect(validateLlmLogSize('1234', 4)).toBe(4);
+    });
+
+    it('enforces the production retention bounds through saveLogs', async () => {
+      const logDir = join(tempDir, 'logs');
+      await mkdir(logDir, { recursive: true });
+      for (let i = 1; i <= LLM_LOG_RETENTION_MAX_FILES; i++) {
+        const path = join(logDir, `llm-log-2026-01-0${i}T00-00-00-000Z.json`);
+        await writeFile(path, 'x');
+      }
+      const { service, provider } = createMockLLMService({ logDir, enableLogging: true });
+      provider.setDefaultResponse('Response');
+      await service.complete({ systemPrompt: 'System', userPrompt: 'User' });
+
+      await service.saveLogs();
+
+      const logs = (await readdir(logDir)).filter(file => /^llm-log-/.test(file));
+      const sizes = await Promise.all(logs.map(file => stat(join(logDir, file)).then(s => s.size)));
+      expect(logs.length).toBeLessThanOrEqual(LLM_LOG_RETENTION_MAX_FILES);
+      expect(sizes.reduce((sum, size) => sum + size, 0)).toBeLessThanOrEqual(LLM_LOG_RETENTION_MAX_BYTES);
+      expect(logs.some(file => file.includes('2026-01-01'))).toBe(false);
+      expect(logs.some(file => file.includes('2026-01-02'))).toBe(true);
+    });
+
+    it('preserves unrelated temp files while saving', async () => {
+      const logDir = join(tempDir, 'logs');
+      await mkdir(logDir, { recursive: true });
+      await writeFile(join(logDir, '.llm-log-not-owned.tmp'), 'keep');
+      const { service, provider } = createMockLLMService({ logDir, enableLogging: true });
+      provider.setDefaultResponse('Response');
+      await service.complete({ systemPrompt: 'System', userPrompt: 'User' });
+
+      await service.saveLogs();
+
+      const files = await readdir(logDir);
+      expect(files).toContain('.llm-log-not-owned.tmp');
+    });
+
+    it('fails quickly without publishing when another writer holds the retention lock', async () => {
+      const logDir = join(tempDir, 'logs');
+      await mkdir(logDir, { recursive: true });
+      const held = await acquireLockAt(logDir, '.llm-log-retention.lock');
+      expect(isLockHeld(held)).toBe(false);
+      if (isLockHeld(held)) throw new Error('failed to arrange held logging lock');
+      try {
+        const { service, provider } = createMockLLMService({ logDir, enableLogging: true });
+        provider.setDefaultResponse('Response');
+        await service.complete({ systemPrompt: 'System', userPrompt: 'User' });
+        const startedAt = Date.now();
+
+        await expect(service.saveLogs()).rejects.toThrow(/lock is held/);
+
+        expect(Date.now() - startedAt).toBeLessThan(2_000);
+        expect((await readdir(logDir)).filter(file => /^llm-log-.*\.json$/.test(file))).toEqual([]);
+      } finally {
+        await held.release();
+      }
+    });
+
+    it('waits briefly for a concurrent writer and then saves', async () => {
+      const logDir = join(tempDir, 'logs');
+      await mkdir(logDir, { recursive: true });
+      const held = await acquireLockAt(logDir, '.llm-log-retention.lock');
+      if (isLockHeld(held)) throw new Error('failed to arrange held logging lock');
+      const release = setTimeout(() => void held.release(), 100);
+      try {
+        const { service, provider } = createMockLLMService({ logDir, enableLogging: true });
+        provider.setDefaultResponse('Response');
+        await service.complete({ systemPrompt: 'System', userPrompt: 'User' });
+
+        await service.saveLogs();
+
+        expect((await readdir(logDir)).filter(file => /^llm-log-.*\.json$/.test(file))).toHaveLength(1);
+      } finally {
+        clearTimeout(release);
+        await held.release();
+      }
+    });
+
+    it('writes collision-safe owner-only log files', async () => {
+      const logDir = join(tempDir, 'logs');
+      const { service, provider } = createMockLLMService({ logDir, enableLogging: true });
+      provider.setDefaultResponse('Response');
+      await service.complete({ systemPrompt: 'System', userPrompt: 'User' });
+
+      await Promise.all([service.saveLogs(), service.saveLogs()]);
+
+      const files = (await readdir(logDir)).filter(file => file.startsWith('llm-log-'));
+      expect(files).toHaveLength(2);
+      for (const file of files) {
+        const content = await readFile(join(logDir, file), 'utf8');
+        expect(() => JSON.parse(content)).not.toThrow();
+      }
+      expect((await readdir(logDir)).some(file => file.endsWith('.tmp'))).toBe(false);
+      if (process.platform !== 'win32') {
+        for (const file of files) {
+          expect((await stat(join(logDir, file))).mode & 0o777).toBe(0o600);
+        }
+      }
+    });
+
+    it('refuses an OpenLore-owned log directory that escapes through a symlink', async () => {
+      const root = join(tempDir, 'repo');
+      const outside = join(tempDir, 'outside');
+      await mkdir(join(root, '.openlore'), { recursive: true });
+      await mkdir(outside, { recursive: true });
+      await writeFile(join(outside, 'llm-log-backup.json'), 'must survive');
+      await symlink(outside, join(root, '.openlore', 'logs'), 'dir');
+      const { service, provider } = createMockLLMService({
+        logDir: join(root, '.openlore', 'logs'),
+        logRoot: root,
+        enableLogging: true,
+      });
+      provider.setDefaultResponse('Response');
+      await service.complete({ systemPrompt: 'System', userPrompt: 'User' });
+
+      await expect(service.saveLogs()).rejects.toThrow(/escape|outside/i);
+      expect(await readdir(outside)).toEqual(['llm-log-backup.json']);
+      expect(await readFile(join(outside, 'llm-log-backup.json'), 'utf8')).toBe('must survive');
+    });
+
+    it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)('does not publish a new log when the directory is not writable', async () => {
+      const logDir = join(tempDir, 'logs');
+      await mkdir(logDir, { recursive: true });
+      const { service, provider } = createMockLLMService({ logDir, enableLogging: true });
+      provider.setDefaultResponse('Response');
+      await service.complete({ systemPrompt: 'System', userPrompt: 'User' });
+      await chmod(logDir, 0o500);
+      try {
+        await expect(service.saveLogs()).rejects.toThrow();
+      } finally {
+        await chmod(logDir, 0o700);
+      }
+      expect((await readdir(logDir)).filter(file => file.startsWith('llm-log-'))).toEqual([]);
     });
   });
 

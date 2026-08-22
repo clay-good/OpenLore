@@ -2,7 +2,9 @@
  * Opt-in telemetry writer for openlore.
  *
  * Gate: OPENLORE_TELEMETRY=1 (disabled by default).
- * Writes append-only JSONL to .openlore/telemetry/<domain>.jsonl.
+ * Records tool calls, agent identity and latency, error messages, decision
+ * titles, and lease events as append-only JSONL under
+ * .openlore/telemetry/<domain>.jsonl.
  * Local only: events are never transmitted; error/module paths are relativized.
  * Never throws — telemetry must not crash the hot path.
  *

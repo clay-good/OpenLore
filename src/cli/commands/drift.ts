@@ -34,6 +34,7 @@ import {
 } from '../../core/drift/index.js';
 import { suggestTestsForDrift } from '../../core/drift/test-suggester.js';
 import { createLLMService } from '../../core/services/llm-service.js';
+import { isLlmLoggingEnabled } from '../../core/services/llm-logging-policy.js';
 import type { LLMService } from '../../core/services/llm-service.js';
 import { resolveOpenspecDir } from '../../utils/openspec-dir.js';
 import {
@@ -663,8 +664,9 @@ Exit codes:
             apiBase: resolveTrustedApiBase(globalOpts.apiBase, openloreConfig?.llm?.apiBase),
             sslVerify: resolveTrustedSslVerify(globalOpts.insecure, openloreConfig?.llm?.sslVerify),
             timeout: globalOpts.timeout ?? openloreConfig.generation?.timeout,
-            enableLogging: true,
+            enableLogging: isLlmLoggingEnabled(),
             logDir: join(rootPath, OPENLORE_DIR, OPENLORE_LOGS_SUBDIR),
+            logRoot: rootPath,
           });
           if (!opts.json) {
             logger.discovery(`LLM enabled (${resolved.provider}) — gap issues will be semantically analyzed`);

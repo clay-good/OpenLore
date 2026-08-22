@@ -17,6 +17,7 @@ import {
   detectDrift,
 } from '../core/drift/index.js';
 import { createLLMService } from '../core/services/llm-service.js';
+import { isLlmLoggingEnabled } from '../core/services/llm-logging-policy.js';
 import type { LLMService } from '../core/services/llm-service.js';
 import type { DriftResult } from '../types/index.js';
 import type { DriftApiOptions, ProgressCallback } from './types.js';
@@ -114,8 +115,9 @@ export async function openloreDrift(options: DriftApiOptions = {}): Promise<Drif
         openloreConfig.llm?.sslVerify,
       ),
       timeout: options.timeout ?? openloreConfig.generation?.timeout,
-      enableLogging: true,
+      enableLogging: isLlmLoggingEnabled(),
       logDir: join(rootPath, OPENLORE_DIR, OPENLORE_LOGS_SUBDIR),
+      logRoot: rootPath,
     });
   }
 

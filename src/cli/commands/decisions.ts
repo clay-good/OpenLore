@@ -24,6 +24,7 @@ import { redirectConsoleToStderr } from '../../utils/quiet-stdout.js';
 import { fileExists, resolveLLMProvider } from '../../utils/command-helpers.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
 import { createLLMService } from '../../core/services/llm-service.js';
+import { isLlmLoggingEnabled } from '../../core/services/llm-logging-policy.js';
 import { isGitRepositoryRoot, getChangedFiles, getFileDiff, getCommitMessages, resolveBaseRef, buildSpecMap, validateGitRef } from '../../core/drift/index.js';
 import {
   loadDecisionStore,
@@ -841,8 +842,9 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
         openaiCompatBaseUrl: resolved.openaiCompatBaseUrl,
         apiBase: resolveTrustedApiBase(globalOpts.apiBase, openloreConfig?.llm?.apiBase),
         sslVerify: resolveTrustedSslVerify(globalOpts.insecure, openloreConfig?.llm?.sslVerify),
-        enableLogging: true,
+        enableLogging: isLlmLoggingEnabled(),
         logDir: join(rootPath, OPENLORE_DIR, OPENLORE_LOGS_SUBDIR),
+        logRoot: rootPath,
       });
 
       // Step 1 — Consolidate drafts OR extract from diff as fallback

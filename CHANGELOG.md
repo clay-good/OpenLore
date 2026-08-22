@@ -5,6 +5,9 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ## [Unreleased]
 
+- LLM prompt/response diagnostics are now disabled by default, require exact
+  `OPENLORE_LLM_LOGS=1` opt-in, redact secrets, and retain at most six files or 300 MB;
+  local telemetry documentation now matches its exact gate and recorded event domains.
 - Drift results now carry required `analyzedFiles` and `filesOmitted` receipts. The drift CLI
   reserves exit `1` for confirmed drift and uses exit `2` when the check cannot run; reinstalled
   pre-commit hooks upgrade in place, validate JSON before blocking, preserve existing hook
