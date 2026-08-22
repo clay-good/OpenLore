@@ -14,14 +14,20 @@ import { dirname, join } from 'node:path';
 import { mergeEntries, readMeta, removeManaged, isHandEdited } from '../json-managed.js';
 import { previewCreate, previewDiff } from '../diff.js';
 import type { Adapter, ApplyContext, ApplyResult, PlannedChange } from './types.js';
+import { formatPlatformCommand, resolvePlatformCommand } from '../../../utils/platform-command.js';
 
 const CONFIG_PATH = '.continue/config.json';
 
-const SLASH_COMMAND = {
-  name: 'orient',
-  description: 'Call openlore orient() for the current task context',
-  run: 'npx --yes openlore orient --json',
-};
+function slashCommand(
+  platform: NodeJS.Platform,
+  runtime: ApplyContext['platformCommandRuntime'],
+): Record<string, string> {
+  return {
+    name: 'orient',
+    description: 'Call openlore orient() for the current task context',
+    run: formatPlatformCommand(resolvePlatformCommand('npx', ['--yes', 'openlore', 'orient', '--json'], platform, runtime)),
+  };
+}
 
 export const continueAdapter: Adapter = {
   name: 'continue',
@@ -64,7 +70,7 @@ export const continueAdapter: Adapter = {
     const otherSlash = (existingSlash as Array<Record<string, unknown>>).filter(
       (c) => c?.name !== 'orient'
     );
-    const nextSlash = [...otherSlash, SLASH_COMMAND];
+    const nextSlash = [...otherSlash, slashCommand(ctx.platform, ctx.platformCommandRuntime)];
 
     const { next, action } = mergeEntries(existing, [
       { path: 'slashCommands', value: nextSlash },

@@ -74,8 +74,8 @@ describe('Capability declaration — matches observed behavior (mcp-security)', 
     expect(declared).toContain('127.0.0.1');
   });
 
-  it('the no-shell claim holds: no shell:true / shell-binary on the core+cli surface', () => {
-    // The declaration asserts argv-only subprocess on the server surface; verify it.
+  it('the no-shell claim holds outside the reviewed Windows shim wrapper', () => {
+    // The declaration forbids broad shell execution on the server surface; verify it.
     const offenders: string[] = [];
     const SHELL_INVOKE = /(?:exec|execFile|execFileSync|spawn|spawnSync)\(\s*['"`](?:\/bin\/)?(?:sh|bash|zsh|dash)['"`]\s*,\s*\[\s*['"`]-c['"`]/;
     for (const f of SURFACE) {
@@ -83,6 +83,21 @@ describe('Capability declaration — matches observed behavior (mcp-security)', 
       if (/shell\s*:\s*true/.test(src) || SHELL_INVOKE.test(src)) offenders.push(f.replace(SRC, 'src'));
     }
     expect(offenders, `declaration claims no shell on surface, but found: ${offenders.join(', ')}`).toEqual([]);
+
+    const wrapper = readFileSync(join(SRC, 'utils', 'platform-command.ts'), 'utf-8');
+    expect(wrapper).toContain("const WINDOWS_COMMAND_SHIMS = new Set(['npm', 'npx'])");
+    expect(wrapper).toContain("'node_modules', 'npm', 'bin', cli");
+    expect(wrapper).not.toMatch(/shell\s*:\s*true/);
+
+    const cmdShellFiles = [
+      ...SURFACE,
+      join(SRC, 'utils', 'platform-command.ts'),
+    ].filter((file) => /['"]\/c['"]/.test(readFileSync(file, 'utf-8')))
+      .map((file) => file.replace(SRC, 'src'))
+      .sort();
+    expect(cmdShellFiles).toEqual([
+      'src/cli/commands/view.ts',
+    ]);
   });
 
   it('does not retain the removed Windows shell-launcher accepted risk', () => {

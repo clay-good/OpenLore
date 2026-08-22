@@ -21,7 +21,8 @@
   `command: 'npx'` for the MCP server (`src/cli/install/adapters/claude-code.ts:38`) and
   `npx --yes openlore orient …` hook commands (`claude-code.ts:56-57`); Cursor
   (`adapters/cursor.ts:30`) and Continue (`adapters/continue.ts:23`) do the same. An MCP client
-  spawning the server directly on Windows needs `npx.cmd` (or `cmd /c npx`). This is a real gap,
+  spawning the server directly on Windows cannot execute that batch shim without an explicit
+  launch boundary. This is a real gap,
   not out-of-scope: the tree already carries win32 intent — `skills/openlore-orient/scripts/orient.ps1`
   exists and `src/pi/extension.ts:359,425` branch on `process.platform === 'win32'` — so the
   install adapters are the surface that never got the treatment.
@@ -33,11 +34,12 @@
 
 **Platform-aware command resolution in one shared helper; support honestly stated.**
 
-- One dependency-light helper (e.g. `resolvePlatformCommand(cmd)`) owns the Windows rule — on
-  win32, resolve `npm`/`npx` to their `.cmd` form (or wrap via `cmd /c`), pass through elsewhere —
-  used by BOTH surfaces: `runCommand` in `update.ts` and the adapter-generated MCP/hook commands
-  in `claude-code.ts` / `cursor.ts` / `continue.ts`. No per-site duplication; the same
-  fix-once-adopt-everywhere shape as the git-quoting change.
+- One dependency-light helper (`resolvePlatformCommand`) owns the Windows rule: discover a real,
+  absolute npm CLI entry point and invoke it through the absolute running `node.exe`, while
+  passing commands through unchanged elsewhere. Both surfaces use it: update evidence/upgrades
+  and the adapter-generated MCP, hook, and slash commands. This avoids both direct `.cmd`
+  execution and shell parsing, validates the discovered entry point before emitting a command,
+  and keeps the rule in one place.
 - Generated configs become platform-correct at generation time: `openlore install` run on Windows
   writes the resolvable command; docs note that a config generated on one OS and reused on
   another may need regeneration (deterministic, disclosed).

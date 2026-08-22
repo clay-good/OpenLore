@@ -264,6 +264,13 @@ export async function runInstall(opts: InstallOptions): Promise<number> {
     const adapter = ADAPTERS[surface.agent];
     const ctx: ApplyContext = {
       root: surface.root,
+      platform: process.platform,
+      platformCommandRuntime: {
+        nodeExecutable: process.execPath,
+        npmExecPath: process.env.npm_execpath,
+        pathValue: process.env.PATH,
+        cwd: process.cwd(),
+      },
       instructionTemplate,
       dryRun: !!opts.dryRun,
       force: !!opts.force,
