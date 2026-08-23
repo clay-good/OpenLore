@@ -68,3 +68,10 @@ applied to the project's own decisions.
 - Risk: corpus rot as tools evolve (mitigated: tasks name tools by id; a corpus referencing a
   removed tool fails validation loudly); cost of live runs (mitigated: `--dry-run` validates the
   pipeline at $0, the `bench-agent.ts` precedent, and deterministic sub-benchmarks run free).
+
+## Standing-cost input now available
+
+`bound-standing-context-cost` measured the cost half of future preset comparisons with the
+versioned offline `utf8-bytes-div-4-v1` regression unit. Its first exact-wire baselines are
+`navigation` 3,533, `substrate` 5,131, and `full` 24,140 estimated tokens; the generalized harness SHALL read
+the live measurement rather than copying these point-in-time values into scoring code.

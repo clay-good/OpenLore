@@ -12,10 +12,10 @@
 import { Command } from 'commander';
 import { writeStdout } from '../output.js';
 import {
-  handleWorkingSetContext,
   type WorkingSetContextReport,
   type WorkingSetFinding,
 } from '../../core/services/mcp-handlers/working-set.js';
+import { dispatchTool } from '../../core/services/tool-dispatch.js';
 import { configureLogger, logger } from '../../utils/logger.js';
 
 const SEVERITY_MARK: Record<WorkingSetFinding['severity'], string> = {
@@ -80,7 +80,11 @@ export async function runWorkingSetContextCli(opts: WorkingSetContextCliOptions)
   configureLogger({ quiet: true });
   let report: WorkingSetContextReport;
   try {
-    report = await handleWorkingSetContext(cwd, opts.change, opts.tokenBudget);
+    report = await dispatchTool('working_set_context', {
+      directory: cwd,
+      change: opts.change,
+      tokenBudget: opts.tokenBudget,
+    }, cwd) as WorkingSetContextReport;
   } catch (err) {
     // Defensive: the handler is designed never to throw, but a surprise must still
     // surface cleanly and exit 0.

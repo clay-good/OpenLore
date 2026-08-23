@@ -16,7 +16,7 @@ import { Command } from 'commander';
 import { logger, configureLogger } from '../../utils/logger.js';
 import { writeStdout } from '../output.js';
 import { toCliVocabulary } from '../surface-vocabulary.js';
-import { handleAnalyzeErrorPropagation } from '../../core/services/mcp-handlers/error-propagation.js';
+import { dispatchTool } from '../../core/services/tool-dispatch.js';
 
 interface EscapeView {
   type: string;
@@ -102,11 +102,11 @@ export async function runErrorPropagationCli(opts: ErrorPropagationCliOptions): 
   configureLogger({ quiet: true });
   let result: unknown;
   try {
-    result = await handleAnalyzeErrorPropagation({
+    result = await dispatchTool('analyze_error_propagation', {
       directory: cwd,
       symbol: opts.symbol,
       maxDepth: opts.maxDepth,
-    });
+    }, cwd);
   } catch (err) {
     result = { error: err instanceof Error ? err.message : String(err) };
   } finally {

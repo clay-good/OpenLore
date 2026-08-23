@@ -10,7 +10,8 @@
 
 import { Command } from 'commander';
 import { writeStdout } from '../output.js';
-import { handleSpecStoreStatus, type SpecStoreStatusReport, type SpecStoreFinding } from '../../core/services/mcp-handlers/spec-store.js';
+import type { SpecStoreStatusReport, SpecStoreFinding } from '../../core/services/mcp-handlers/spec-store.js';
+import { dispatchTool } from '../../core/services/tool-dispatch.js';
 import { configureLogger, logger } from '../../utils/logger.js';
 
 const SEVERITY_MARK: Record<SpecStoreFinding['severity'], string> = {
@@ -60,7 +61,7 @@ export async function runSpecStoreStatusCli(opts: SpecStoreStatusCliOptions): Pr
   configureLogger({ quiet: true });
   let report: SpecStoreStatusReport;
   try {
-    report = await handleSpecStoreStatus(cwd);
+    report = await dispatchTool('spec_store_status', { directory: cwd }, cwd) as SpecStoreStatusReport;
   } catch (err) {
     // Defensive: the handler is designed never to throw, but a surprise (e.g. a
     // corrupt federation manifest) must still surface cleanly and exit 0.

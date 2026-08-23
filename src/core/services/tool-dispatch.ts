@@ -25,7 +25,7 @@ import { prepareSpecGeneration, prepareSpecRepair } from './spec-workflow.js';
 
 import { handleOrient } from './mcp-handlers/orient.js';
 import { handleSelectTests } from './mcp-handlers/test-impact.js';
-import { handleBlastRadius } from './mcp-handlers/blast-radius.js';
+import { computeBlastRadius } from './mcp-handlers/blast-radius.js';
 import { handlePlanParallelWork } from './mcp-handlers/plan-parallel-work.js';
 import { handleMapInFlightConflicts } from './mcp-handlers/interference-map.js';
 import { handleGetLanguageSupport } from './mcp-handlers/language-support.js';
@@ -52,7 +52,7 @@ import { handleFindPath } from './mcp-handlers/pathfind.js';
 import { handleFederationStatus } from './mcp-handlers/federation.js';
 import { handleSpecStoreStatus } from './mcp-handlers/spec-store.js';
 import { handleWorkingSetContext } from './mcp-handlers/working-set.js';
-import { handleChangeImpactCertificate } from './mcp-handlers/impact-certificate.js';
+import { computeImpactCertificate } from './mcp-handlers/impact-certificate.js';
 import { handleCheckArchitecture } from './mcp-handlers/architecture.js';
 import { handleGenerateChangeProposal, handleAnnotateStory } from './mcp-handlers/change.js';
 import {
@@ -182,7 +182,9 @@ async function dispatchToolImpl(
   name = resolveCanonicalToolName(name);
   if (name === 'orient') {
     const { task, limit = 5, tokenBudget, lean, rankBy } = args as { task: string; limit?: number; tokenBudget?: number; lean?: boolean; rankBy?: 'distance' | 'pagerank' };
-    return handleOrient(directory, task, limit, tokenBudget, lean, rankBy);
+    return rankBy === undefined
+      ? handleOrient(directory, task, limit, tokenBudget, lean)
+      : handleOrient(directory, task, limit, tokenBudget, lean, rankBy);
   } else if (name === 'analyze_codebase') {
     const { directory, force = false } = args as { directory: string; force?: boolean };
     return handleAnalyzeCodebase(directory, force);
@@ -226,7 +228,7 @@ async function dispatchToolImpl(
   } else if (name === 'blast_radius') {
     const { directory, baseRef, depth, maxSymbols } =
       args as { directory: string; baseRef?: string; depth?: number; maxSymbols?: number };
-    return handleBlastRadius({ directory, baseRef, depth, maxSymbols });
+    return computeBlastRadius({ directory, baseRef, depth, maxSymbols });
   } else if (name === 'find_dead_code') {
     const { directory, ifDeleted, maxResults, filePattern, directResolvedOnly, federation, federationRepos } =
       args as { directory: string; ifDeleted?: string; maxResults?: number; filePattern?: string; directResolvedOnly?: boolean; federation?: boolean; federationRepos?: string[] };
@@ -273,7 +275,9 @@ async function dispatchToolImpl(
   } else if (name === 'search_code') {
     const { directory, query, limit = 10, language, minFanIn, tokenBudget, mode } =
       args as { directory: string; query: string; limit?: number; language?: string; minFanIn?: number; tokenBudget?: number; mode?: 'text' };
-    return handleSearchCode(directory, query, limit, language, minFanIn, tokenBudget, mode);
+    return mode === undefined
+      ? handleSearchCode(directory, query, limit, language, minFanIn, tokenBudget)
+      : handleSearchCode(directory, query, limit, language, minFanIn, tokenBudget, mode);
   } else if (name === 'suggest_insertion_points') {
     const { directory, description, limit = 5, language } =
       args as { directory: string; description: string; limit?: number; language?: string };
@@ -383,8 +387,8 @@ async function dispatchToolImpl(
     const { directory, change, tokenBudget } = args as { directory: string; change?: string; tokenBudget?: number };
     return handleWorkingSetContext(directory, change, tokenBudget);
   } else if (name === 'change_impact_certificate') {
-    const { directory, baseRef, change, persist } = args as { directory: string; baseRef?: string; change?: string; persist?: boolean };
-    return handleChangeImpactCertificate({ directory, baseRef, change, persist });
+    const { directory, baseRef, change, persist, allowBaseFallback } = args as { directory: string; baseRef?: string; change?: string; persist?: boolean; allowBaseFallback?: boolean };
+    return computeImpactCertificate({ directory, baseRef, change, persist, allowBaseFallback });
   } else if (name === 'detect_changes') {
     const { directory, base } = args as { directory: string; base?: string };
     return handleDetectChanges(directory, base);
@@ -443,8 +447,8 @@ async function dispatchToolImpl(
       args as { directory: string; maxResults?: number; filePattern?: string; changedSymbols?: string[]; diffRef?: string; directResolvedOnly?: boolean };
     return handleReportCoverageGaps({ directory, maxResults, filePattern, changedSymbols, diffRef, directResolvedOnly });
   } else if (name === 'certify_public_surface') {
-    const { directory, baseRef, maxResults } = args as { directory: string; baseRef?: string; maxResults?: number };
-    return handleCertifyPublicSurface({ directory, baseRef, maxResults });
+    const { directory, baseRef, maxResults, allowBaseFallback } = args as { directory: string; baseRef?: string; maxResults?: number; allowBaseFallback?: boolean };
+    return handleCertifyPublicSurface({ directory, baseRef, maxResults, allowBaseFallback });
   } else if (name === 'get_style_fingerprint') {
     const { directory, communityId, filePath, language } =
       args as { directory: string; communityId?: string; filePath?: string; language?: string };

@@ -14,7 +14,7 @@ import { Command } from 'commander';
 import { logger, configureLogger } from '../../utils/logger.js';
 import { writeStdout } from '../output.js';
 import { toCliVocabulary } from '../surface-vocabulary.js';
-import { handleFindClones } from '../../core/services/mcp-handlers/clone-query.js';
+import { dispatchTool } from '../../core/services/tool-dispatch.js';
 
 interface CloneMatchView {
   type: 'exact' | 'structural' | 'near';
@@ -87,13 +87,13 @@ export async function runFindClonesCli(opts: FindClonesCliOptions): Promise<numb
   configureLogger({ quiet: true });
   let result: unknown;
   try {
-    result = await handleFindClones({
+    result = await dispatchTool('find_clones', {
       directory: cwd,
       symbol: opts.symbol,
       snippet: opts.snippet,
       minSimilarity: opts.min,
       maxResults: opts.max,
-    });
+    }, cwd);
   } catch (err) {
     result = { error: err instanceof Error ? err.message : String(err) };
   } finally {

@@ -34,7 +34,7 @@ or for local development:
 
 ### Recommended lean surface (cost, Spec 25 P1 · Spec 28)
 
-MCP clients send every tool's JSON Schema on every request, so tools the agent never calls are pure per-request overhead. The full surface is **76 tools / ~93 KB / ~23k tokens** of `tools/list`. The Spec 14 benchmark showed this prefix is what made openlore *lose* on small repos — and that a lean, navigation-focused surface flips it to a win (see the [Value Scorecard](../README.md#value-scorecard--does-it-pay-for-itself)).
+MCP clients send every tool's JSON Schema on every request, so tools the agent never calls are pure per-request overhead. The full surface is **76 tools / ~93 KB / ~24k estimated tokens** of `tools/list`. The Spec 14 benchmark showed this prefix is what made openlore *lose* on small repos — and that a lean, navigation-focused surface flips it to a win (see the [Value Scorecard](../README.md#value-scorecard--does-it-pay-for-itself)).
 
 **The default surface is the `substrate` preset (the navigation core plus governance and spec-workflow reads)**, not an extra step: `openlore install` (and a bare `openlore mcp`) wires the **`substrate`** preset — 15 tools: the navigation graph-traversal core, the three highest-value governance reads (`recall`, `verify_claim`, `blast_radius`), and `prepare_spec_generation` / `prepare_spec_repair`. An out-of-box capable MCP agent can therefore obtain a bounded evidence bundle and author specs with its native editor; OpenLore performs no internal LLM call in these composites. The lean navigate-only **`navigation`** preset (10 tools) stays a one-flag escape (`--preset navigation`); the full surface is one explicit opt-in away (`--preset full` / `--all-tools`). When the default surface is active, the server advertises breadth once via its `instructions` channel (no extra tool schemas) so an agent never concludes a capability is absent. To restore the prior all-tools default: `openlore install --preset full`.
 
@@ -44,6 +44,43 @@ MCP clients send every tool's JSON Schema on every request, so tools the agent n
 2. **`--preset navigation` (server-side, navigation-only — the lean escape below the default).** A bare `openlore mcp` / `openlore install` wires the wider `substrate` default (see below); `--preset navigation` is the one-flag way down to the navigate-only core: a graph-traversal surface of 10 tools (orient, search_code, get_subgraph, trace_execution_path, analyze_impact, suggest_insertion_points, get_function_skeleton, get_landmarks, get_map, find_path). It is exactly the configuration the benchmark measured (−7%→−21% cost, −26% round-trips on deep traces). Note it omits the governance tools (`record_decision`, `check_architecture`, inventories, and the `substrate` default's governance reads), so if you use the decision gate or architecture checks during a session, prefer option 1 (deferred schemas) or wire a governance-bearing preset (`--minimal`, or the full surface with `--preset full`).
 
 The tool list and schemas are emitted in a fixed, deterministic order with no per-request variation, so the provider KV-cache holds the surface and its cost drops sharply after the first call (guarded by a regression test).
+
+#### Measured standing context cost
+
+OpenLore measures the exact live `tools/list` result that each preset places in context before the
+first call: names, descriptions, input/output schemas, annotations, and any future wire fields. The
+offline `utf8-bytes-div-4-v1` approximation is
+`ceil(UTF-8 bytes / 4)`: it is a stable regression unit, not a model-specific billing claim.
+CI fails when a measured value exceeds its reviewed budget, and this table is checked against the
+live registry.
+
+<!-- standing-context-cost:start -->
+| Preset | Tools | Measured tokens | Budget |
+|---|---:|---:|---:|
+| `minimal` | 6 | 2,736 | 2,950 |
+| `navigation` | 10 | 3,533 | 3,800 |
+| `memory` | 3 | 1,216 | 1,300 |
+| `verify` | 3 | 1,262 | 1,350 |
+| `federation` | 10 | 3,837 | 4,100 |
+| `coordination` | 5 | 2,487 | 2,650 |
+| `substrate` | 15 | 5,131 | 5,500 |
+| `full` | 76 | 24,140 | 25,500 |
+<!-- standing-context-cost:end -->
+
+#### Choose MCP or the command line
+
+MCP and the command line are both first-class, supported delivery paths; neither supersedes or
+deprecates the other. Use MCP when an agent should decide mid-conversation when to retrieve a
+conclusion. Use `openlore` CLI commands for scripts, CI, or shell-capable agents that can retrieve
+on demand and want zero standing context cost before invocation. Paired capabilities route through
+the same conclusion implementation. Successful semantic conclusions agree before transport;
+protocol error envelopes, human rendering, and MCP's final byte cap may differ.
+
+The shared input projection is guarded. MCP additionally exposes `orient.rankBy`,
+`search_code.mode`, `blast_radius.depth` / `maxSymbols`, and
+`report_coverage_gaps.directResolvedOnly`. The CLI alone exposes `--allow-base-fallback` for
+`impact-certificate` and `certify-public-surface`; these controls are declared asymmetries, not
+silent parity claims.
 
 ### Capability families (one substrate, two faces)
 

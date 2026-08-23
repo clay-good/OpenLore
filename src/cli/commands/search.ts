@@ -5,8 +5,7 @@
 
 import { Command } from 'commander';
 import { configureLogger, logger } from '../../utils/logger.js';
-import { handleSearchCode, handleSearchSpecs } from '../../core/services/mcp-handlers/semantic.js';
-import { handleExplainRetrievalMiss } from '../../core/services/mcp-handlers/retrieval-miss.js';
+import { dispatchTool } from '../../core/services/tool-dispatch.js';
 import { writeStdout } from '../output.js';
 
 type TargetKind = 'symbol' | 'file' | 'requirement';
@@ -166,7 +165,8 @@ export async function runSearchCli(query: string, opts: SearchCliOptions): Promi
   let result: unknown;
   try {
     if (opts.explain) {
-      result = await handleExplainRetrievalMiss(directory, {
+      result = await dispatchTool('explain_retrieval_miss', {
+        directory,
         query,
         surface: opts.specs ? 'spec' : 'code',
         target: {
@@ -179,11 +179,16 @@ export async function runSearchCli(query: string, opts: SearchCliOptions): Promi
         ...(opts.minFanIn !== undefined ? { minFanIn: opts.minFanIn } : {}),
         ...(opts.domain ? { domain: opts.domain } : {}),
         ...(opts.section ? { section: opts.section } : {}),
-      });
+      }, directory);
     } else if (opts.specs) {
-      result = await handleSearchSpecs(directory, query, limit, opts.domain, opts.section);
+      result = await dispatchTool('search_specs', {
+        directory, query, limit, domain: opts.domain, section: opts.section,
+      }, directory);
     } else {
-      result = await handleSearchCode(directory, query, limit, opts.language, opts.minFanIn, opts.tokenBudget);
+      result = await dispatchTool('search_code', {
+        directory, query, limit, language: opts.language, minFanIn: opts.minFanIn,
+        tokenBudget: opts.tokenBudget,
+      }, directory);
     }
   } catch (error) {
     result = { error: error instanceof Error ? error.message : String(error) };

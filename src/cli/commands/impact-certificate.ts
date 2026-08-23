@@ -17,7 +17,8 @@ import { Command } from 'commander';
 import { writeStdout } from '../output.js';
 import { logger, configureLogger } from '../../utils/logger.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
-import { computeImpactCertificate, type ImpactCertificate } from '../../core/services/mcp-handlers/impact-certificate.js';
+import type { ImpactCertificate } from '../../core/services/mcp-handlers/impact-certificate.js';
+import { dispatchTool } from '../../core/services/tool-dispatch.js';
 import type { CoveringSurfaceSeverity } from '../../types/index.js';
 import {
   displayHookPath,
@@ -183,9 +184,15 @@ export async function runImpactCertificateCli(opts: ImpactCertificateCliOptions)
   // an unresolvable base (fix-cli-conclusion-honesty) unless --allow-base-fallback.
   const allowBaseFallback = opts.allowBaseFallback || opts.hook === true;
   configureLogger({ quiet: true });
-  let result: Awaited<ReturnType<typeof computeImpactCertificate>>;
+  let result: ImpactCertificate | { error: string; baseUnresolved?: boolean };
   try {
-    result = await computeImpactCertificate({ directory: cwd, baseRef: opts.base, change: opts.change, persist, allowBaseFallback });
+    result = await dispatchTool('change_impact_certificate', {
+      directory: cwd,
+      baseRef: opts.base,
+      change: opts.change,
+      persist,
+      allowBaseFallback,
+    }, cwd) as ImpactCertificate | { error: string; baseUnresolved?: boolean };
   } catch (err) {
     // Final advisory safety net: a throw must NEVER block a commit.
     result = { error: err instanceof Error ? err.message : String(err) };

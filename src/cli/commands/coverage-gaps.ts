@@ -12,7 +12,7 @@
 import { Command } from 'commander';
 import { logger, configureLogger } from '../../utils/logger.js';
 import { writeStdout } from '../output.js';
-import { handleReportCoverageGaps } from '../../core/services/mcp-handlers/coverage-gaps.js';
+import { dispatchTool } from '../../core/services/tool-dispatch.js';
 
 interface CoverageGapItem {
   name: string;
@@ -131,13 +131,13 @@ export async function runCoverageGapsCli(opts: CoverageGapsCliOptions): Promise<
   configureLogger({ quiet: true });
   let result: unknown;
   try {
-    result = await handleReportCoverageGaps({
+    result = await dispatchTool('report_coverage_gaps', {
       directory: cwd,
       maxResults: opts.max,
       filePattern: opts.filePattern,
       changedSymbols: opts.symbols,
       diffRef: opts.base,
-    });
+    }, cwd);
   } catch (err) {
     result = { error: err instanceof Error ? err.message : String(err) };
   } finally {
