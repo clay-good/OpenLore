@@ -11,7 +11,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CallGraphBuilder, serializeCallGraph, type FunctionNode } from '../analyzer/call-graph.js';
-import { stableSymbolId, stableClassId, signatureShape } from './moniker.js';
+import { arityOf, stableSymbolId, stableClassId, signatureShape } from './moniker.js';
 import { EdgeStore } from '../services/edge-store.js';
 
 type InFile = { path: string; content: string; language: string };
@@ -24,6 +24,23 @@ async function build(files: InFile[]): Promise<FunctionNode[]> {
 const byName = (nodes: FunctionNode[], name: string) => nodes.find(n => n.name === name);
 
 describe('stableSymbolId (unit)', () => {
+  it('SCIP arity prefers live-AST metadata and refuses a collapsed overload', () => {
+    const node = {
+      name: 'f', signature: 'function f(a, b, c)',
+      callArity: { required: 1, total: 2, variadic: false, hasOptionalOrDefault: true, implicitReceiverCount: 0 },
+    } as FunctionNode;
+    expect(arityOf(node)).toBe(2);
+    expect(arityOf({
+      ...node,
+      callArity: { ...node.callArity!, total: 1, variadic: true, variadicParameterCount: 1, implicitReceiverCount: 1 },
+    })).toBe(3); // one fixed + one source receiver + one variadic declaration parameter
+    expect(arityOf({
+      ...node,
+      callArity: { ...node.callArity!, total: 1, variadic: true, variadicParameterCount: 2, implicitReceiverCount: 1 },
+    })).toBe(4); // Python may declare both *args and **kwargs
+    expect(arityOf({ ...node, callArity: { ...node.callArity!, overloaded: true } })).toBeUndefined();
+  });
+
   it('excludes the file path by construction', () => {
     const node = { name: 'foo', filePath: 'src/a.ts', signature: 'function foo(x: number): void' } as FunctionNode;
     const id = stableSymbolId(node)!;

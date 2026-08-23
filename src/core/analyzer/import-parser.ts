@@ -27,6 +27,14 @@ export interface ImportInfo {
   isPackage: boolean;
   isBuiltin: boolean;
   importedNames: string[];
+  /**
+   * Exact names bound from the source module for statically named imports.
+   * Unlike importedNames, aliases retain their source identity (`X as Y` -> X).
+   * Absent for default, namespace, star, dynamic, and otherwise uncertain forms.
+   */
+  importedSourceNames?: string[];
+  /** Python only: true when the import is module-level and therefore may re-export a binding. */
+  isTopLevel?: boolean;
   hasDefault: boolean;
   hasNamespace: boolean;
   isTypeOnly: boolean;
@@ -176,6 +184,14 @@ function parseNamedImports(namesStr: string): string[] {
     .filter(name => name && !name.includes(' '));
 }
 
+/** Source-module identity for exact named bindings (`X as Y` -> X). */
+function parseNamedImportSources(namesStr: string): string[] {
+  return namesStr
+    .split(',')
+    .map(name => name.trim().replace(/^type\s+/, '').split(/\s+as\s+/)[0]?.trim())
+    .filter((name): name is string => !!name && /^[$A-Z_a-z][$\w]*$/.test(name));
+}
+
 // ============================================================================
 // JAVASCRIPT/TYPESCRIPT PARSER
 // ============================================================================
@@ -224,6 +240,7 @@ export function parseJSImports(content: string): ImportInfo[] {
       isPackage: !isRelativeImport(source) && !isBuiltinModule(source),
       isBuiltin: isBuiltinModule(source),
       importedNames: names,
+      importedSourceNames: parseNamedImportSources(match[2]),
       hasDefault: true,
       hasNamespace: false,
       isTypeOnly: false,
@@ -254,6 +271,7 @@ export function parseJSImports(content: string): ImportInfo[] {
       isPackage: !isRelativeImport(source) && !isBuiltinModule(source),
       isBuiltin: isBuiltinModule(source),
       importedNames: names,
+      importedSourceNames: parseNamedImportSources(match[1]),
       hasDefault: false,
       hasNamespace: false,
       isTypeOnly: false,
@@ -309,6 +327,7 @@ export function parseJSImports(content: string): ImportInfo[] {
       isPackage: !isRelativeImport(source) && !isBuiltinModule(source),
       isBuiltin: isBuiltinModule(source),
       importedNames: names,
+      ...(match[1] ? { importedSourceNames: parseNamedImportSources(match[1]) } : {}),
       hasDefault: !!match[2],
       hasNamespace: false,
       isTypeOnly: true,
@@ -328,6 +347,7 @@ export function parseJSImports(content: string): ImportInfo[] {
       isPackage: !isRelativeImport(source) && !isBuiltinModule(source),
       isBuiltin: isBuiltinModule(source),
       importedNames: names,
+      ...(match[2] ? { importedSourceNames: parseNamedImportSources(match[2]) } : {}),
       hasDefault: !!match[1],
       hasNamespace: false,
       isTypeOnly: false,
@@ -602,6 +622,7 @@ export function parsePythonImports(content: string): ImportInfo[] {
         isPackage: !source.startsWith('.'),
         isBuiltin: PYTHON_BUILTINS.has(source.split('.')[0]),
         importedNames: [mod.includes(' as ') ? mod.split(/\s+as\s+/)[1].trim() : source.split('.').pop()!],
+        isTopLevel: !/^[ \t]/.test(match[0]),
         hasDefault: false,
         hasNamespace: true,
         isTypeOnly: false,
@@ -626,6 +647,7 @@ export function parsePythonImports(content: string): ImportInfo[] {
         isPackage: !source.startsWith('.'),
         isBuiltin: PYTHON_BUILTINS.has(source.split('.')[0]),
         importedNames: ['*'],
+        isTopLevel: !/^[ \t]/.test(match[0]),
         hasDefault: false,
         hasNamespace: true,
         isTypeOnly: false,
@@ -633,7 +655,8 @@ export function parsePythonImports(content: string): ImportInfo[] {
         line: getLineNumber(cleanContent, match.index),
       });
     } else {
-      const names = importsPart.split(',').map(n => {
+      const parts = importsPart.split(',');
+      const names = parts.map(n => {
         const trimmed = n.trim();
         return trimmed.includes(' as ') ? trimmed.split(/\s+as\s+/)[1].trim() : trimmed;
       }).filter(Boolean);
@@ -644,6 +667,8 @@ export function parsePythonImports(content: string): ImportInfo[] {
         isPackage: !source.startsWith('.'),
         isBuiltin: PYTHON_BUILTINS.has(source.split('.')[0]),
         importedNames: names,
+        importedSourceNames: parts.map(n => n.trim().split(/\s+as\s+/)[0]?.trim()).filter(Boolean),
+        isTopLevel: !/^[ \t]/.test(match[0]),
         hasDefault: false,
         hasNamespace: false,
         isTypeOnly: false,
@@ -1171,6 +1196,39 @@ export class ImportExportParser {
     return 'unknown';
   }
 
+  /** Parse caller-supplied bytes without re-reading a path that may have changed. */
+  parseContent(filePath: string, content: string): FileAnalysis {
+    const analysis: FileAnalysis = {
+      filePath, imports: [], exports: [], localImports: [], externalImports: [], parseErrors: [],
+    };
+    const fileType = this.getFileType(filePath);
+    if (fileType === 'js' || fileType === 'ts') {
+      analysis.imports = parseJSImports(content);
+      analysis.exports = parseJSExports(content);
+    } else if (fileType === 'python') {
+      analysis.imports = parsePythonImports(content);
+      analysis.exports = parsePythonExports(content);
+    } else if (fileType === 'java') {
+      analysis.imports = parseJavaImports(content);
+      analysis.exports = parseJavaExports(content);
+      analysis.javaPackage = parseJavaPackage(content);
+    } else if (fileType === 'html') {
+      analysis.imports = parseHtmlAssetImports(content);
+    } else {
+      analysis.parseErrors.push(`Unsupported file type: ${extname(filePath)}`);
+    }
+    for (const imp of analysis.imports) {
+      if (imp.isRelative) analysis.localImports.push(imp.source);
+      else if (imp.isPackage) {
+        const pkgName = imp.source.startsWith('@')
+          ? imp.source.split('/').slice(0, 2).join('/')
+          : imp.source.split('/')[0];
+        if (!analysis.externalImports.includes(pkgName)) analysis.externalImports.push(pkgName);
+      }
+    }
+    return analysis;
+  }
+
   /**
    * Parse a file and extract imports/exports
    */
@@ -1201,39 +1259,7 @@ export class ImportExportParser {
         }
         throw new Error('source is unreadable or is not a regular file');
       }
-      const fileType = this.getFileType(filePath);
-
-      if (fileType === 'js' || fileType === 'ts') {
-        analysis.imports = parseJSImports(content);
-        analysis.exports = parseJSExports(content);
-      } else if (fileType === 'python') {
-        analysis.imports = parsePythonImports(content);
-        analysis.exports = parsePythonExports(content);
-      } else if (fileType === 'java') {
-        analysis.imports = parseJavaImports(content);
-        analysis.exports = parseJavaExports(content);
-        analysis.javaPackage = parseJavaPackage(content);
-      } else if (fileType === 'html') {
-        // HTML asset references (decision b555b680): <script src>, <link stylesheet>.
-        analysis.imports = parseHtmlAssetImports(content);
-      } else {
-        analysis.parseErrors.push(`Unsupported file type: ${extname(filePath)}`);
-      }
-
-      // Categorize imports
-      for (const imp of analysis.imports) {
-        if (imp.isRelative) {
-          analysis.localImports.push(imp.source);
-        } else if (imp.isPackage) {
-          // Extract package name (first part of path)
-          const pkgName = imp.source.startsWith('@')
-            ? imp.source.split('/').slice(0, 2).join('/')
-            : imp.source.split('/')[0];
-          if (!analysis.externalImports.includes(pkgName)) {
-            analysis.externalImports.push(pkgName);
-          }
-        }
-      }
+      Object.assign(analysis, this.parseContent(filePath, content));
     } catch (error) {
       analysis.parseErrors.push(`Failed to read file: ${(error as Error).message}`);
     }

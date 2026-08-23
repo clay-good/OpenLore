@@ -97,6 +97,15 @@ describe('FINDING_CODE_REGISTRY', () => {
       expect(FINDING_CODE_REGISTRY[code].source).toBe('footprint-escape');
     }
   });
+  it('registers edit-verdict findings as advisory and policy-governable', () => {
+    for (const code of ['edit-broken-reference', 'edit-arity-mismatch', 'edit-import-breakage']) {
+      expect(FINDING_CODE_REGISTRY[code]).toMatchObject({
+        source: 'edit-verdict',
+        defaultClass: 'advisory',
+      });
+      expect(resolveEnforcementClass(code, { [code]: 'blocking' })).toBe('blocking');
+    }
+  });
   it('registers every corpus-integrity code with its specified source default', () => {
     for (const [code, defaultClass] of Object.entries(CORPUS_DEFAULT_CLASSES)) {
       expect(isKnownFindingCode(code), code).toBe(true);

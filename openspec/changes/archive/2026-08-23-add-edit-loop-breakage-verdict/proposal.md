@@ -1,6 +1,6 @@
 # The graph learns about a breaking edit in milliseconds; the agent learns at commit time
 
-> Status: PROPOSED (2026-07-23, competitive substrate sweep). Deterministic per-edit
+> Status: BUILT (2026-08-23). Deterministic per-edit
 > verification is the single best-evidenced lever for agent success in the current literature —
 > error-guided feedback loops raise correctness 21–32 pts (https://arxiv.org/html/2504.06939v2),
 > and telling the agent *which tests to check per edit* drives self-correction
@@ -11,7 +11,7 @@
 > agent loop; this change computes new STRUCTURAL breakage findings at edit time and reuses the
 > same delivery discipline. `structural_diff` remains the git-ref, review-time sibling.
 
-## The gap
+## Why
 
 - **The watcher compares old vs new symbols only to route re-resolution.** `handleBatch`
   captures `oldNames` (`src/core/services/mcp-watcher.ts:556`) and uses the delta solely to
@@ -31,7 +31,7 @@
   hook", not "no hook": the watcher already does the analysis; the hook only needs to read the
   verdict.
 
-## What changes
+## What Changes
 
 1. **Call sites gain an argument count at extraction.** `RawEdge`/`CallEdge` carry `argCount`
    (captured at the call node — the extractor is already there), alongside the existing `line`.
@@ -42,25 +42,26 @@
    - `edit-arity-mismatch` — a signature change (or a pre-existing call to this file's symbols)
      where the call site is PROVABLY incompatible: fewer args than required params, or more
      args than total params with no variadic/spread/default in play. Anything short of provable
-     is silent — never a guess. Scope: TS/JS/Python signatures (disclosed; other languages
-     fail-soft to no arity finding);
+     is silent — never a guess. Scope: TypeScript and Python signatures. JavaScript call sites
+     retain argument counts, but JavaScript's runtime arity rules are not treated as proof;
    - `edit-import-breakage` — an import of a name the edited file no longer exports;
-   - plus the reaching tests for the edited symbols (the existing `select_tests` reachability,
-     scoped to the edit) so the verdict says what to run, not just what broke.
-   The verdict persists beside the artifacts with the edit's content hash; computing it is
-   O(edited symbols' callers) — bounded by the same closure the watcher already re-resolves.
+   - plus exact-ID reaching tests from the retained full-analysis graph, scoped to the edit, so
+     the verdict says what to run without adding test nodes to the production EdgeStore.
+   The verdict persists beside the artifacts with generation, content, and fact-basis hashes.
+   Reads, reachability, findings, and artifact size are bounded and fail open when freshness
+   cannot be proved.
 3. **Delivery: read, never compute, in the loop.** `openlore check-edit [--json] [--hook]`
-   returns the latest verdict for the file (or the working set) in one read. Hook mode follows
-   the impact-certificate discipline verbatim: infrastructure failure or absent daemon never
+   returns the latest current verdict for the file (or the working set) without analysis. Hook
+   mode follows the impact-certificate discipline: infrastructure failure or absent daemon never
    blocks (`impact-certificate.ts:162-181` precedent), human rendering to stderr, blocking
-   opt-in only via `enforcement.policy` on the new codes. With no daemon running, `check-edit`
-   computes a one-file scoped diff directly (the `structural_diff` machinery bounded to one
-   file), disclosed as the slower path.
+   opt-in only via `enforcement.policy` on the new codes. Missing, stale, malformed, or
+   unavailable watcher state is disclosed and fails open; `structural_diff` is not used as an
+   approximate fallback because it cannot reproduce the same call-arity and import facts.
 4. **The finding codes are governed like all others:** `edit-broken-reference`,
    `edit-arity-mismatch`, `edit-import-breakage` register in `FINDING_CODE_REGISTRY` with
    source-declared severities, advisory by default, emitted in the unified `GovernanceFinding`
-   shape — so `openlore enforce`, the review action, and the loop hook all speak them without
-   new plumbing.
+   shape. `check-edit --hook` resolves those codes through the shared policy machinery; general
+   `enforce` and review ingestion remain separate collectors.
 
 **Deliberately NOT borrowed** from the verification-loop literature: no typechecker or compiler
 invocation (that is the opt-in LSP evidence tier's territory, `add-lsp-evidence-tier`), no test
@@ -73,8 +74,17 @@ graph already holds, with everything unprovable staying silent.
 This closes the substrate's loop-latency gap: OpenLore currently knows about breakage before
 any other tool on the machine and tells the agent last (at commit). Turning patch-time knowledge
 into a sub-second conclusion is the "deterministic checker inside the agent's turn" pattern the
-evidence ranks first, built entirely from shipped machinery — watcher, edge lines, select_tests,
-finding registry, hook discipline.
+evidence ranks first, built entirely from shipped machinery — watcher, edge lines, retained
+full-analysis reachability, finding registry, and hook discipline.
+
+## Resolved boundaries
+
+- Whole-file deletion invalidates the prior generation but does not synthesize a fresh verdict;
+  the deletion lane cannot preserve the required pre/post caller proof today.
+- Reaching tests are explicitly based on the last full analysis and are content-hash checked;
+  a changed source or test basis makes the verdict stale.
+- Direct and hook reads never approximate missing watcher facts. Unavailable proof is a
+  disclosed non-blocking result.
 
 ## Impact
 

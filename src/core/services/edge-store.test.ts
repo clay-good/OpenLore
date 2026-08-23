@@ -136,6 +136,7 @@ describe('EdgeStore', () => {
 
     it('open() on a stale-version DB reports schema-mismatch and destroys no data (no DROP, no re-stamp)', async () => {
       const { d, p } = await makeStaleStore(1);
+      const before = readFileSync(p);
       const es = EdgeStore.open(p);
       try {
         expect(es.notReady).not.toBeNull();
@@ -146,10 +147,9 @@ describe('EdgeStore', () => {
       } finally {
         es.close();
       }
-      // The read ran no destructive migration: the stale data row survives and the
-      // on-disk schema version is NOT re-stamped to current — so the next analyze
-      // still detects the mismatch and rebuilds. (SQLite flips the WAL header bit on
-      // any open; that is not data destruction, which is the invariant that matters.)
+      // The read ran no migration or writable pragma: bytes remain identical, the
+      // stale data survives, and the next analyze still detects the old version.
+      expect(readFileSync(p)).toEqual(before);
       const raw = new DatabaseSync(p);
       try {
         expect((raw.prepare('SELECT COUNT(*) c FROM nodes').get() as { c: number }).c).toBe(1);
@@ -176,6 +176,58 @@ describe('EdgeStore', () => {
         w.close();
         await rm(d, { recursive: true, force: true });
       }
+    });
+
+    it('open() leaves an existing zero-byte store byte-identical and reports not-ready', async () => {
+      const d = await makeTmpDir();
+      const p = join(d, 'empty.db');
+      writeFileSync(p, '');
+      const before = readFileSync(p);
+      const es = EdgeStore.open(p);
+      try {
+        expect(es.notReady?.reason).toBe('schema-mismatch');
+        expect(es.notReady?.onDiskVersion).toBeUndefined();
+      } finally {
+        es.close();
+      }
+      expect(readFileSync(p)).toEqual(before);
+      expect(existsSync(`${p}-wal`)).toBe(false);
+      expect(existsSync(`${p}-shm`)).toBe(false);
+
+      const writer = EdgeStore.openForAnalyze(p);
+      try {
+        expect(writer.notReady).toBeNull();
+        expect(writer.getSchemaVersion()).toBe(SCHEMA_VERSION);
+      } finally {
+        writer.close();
+        await rm(d, { recursive: true, force: true });
+      }
+    });
+
+    it.each([
+      ['missing schema_version table', false],
+      ['schema_version table with no row', true],
+    ])('open() leaves a DB with %s byte-identical', async (_label, createVersionTable) => {
+      const d = await makeTmpDir();
+      const p = join(d, 'partial.db');
+      const raw = new DatabaseSync(p);
+      raw.exec('CREATE TABLE sentinel (value TEXT NOT NULL)');
+      raw.prepare('INSERT INTO sentinel VALUES (?)').run('preserve me');
+      if (createVersionTable) raw.exec('CREATE TABLE schema_version (version INTEGER NOT NULL)');
+      raw.close();
+      const before = readFileSync(p);
+
+      const es = EdgeStore.open(p);
+      try {
+        expect(es.notReady?.reason).toBe('schema-mismatch');
+        expect(es.notReady?.onDiskVersion).toBeUndefined();
+      } finally {
+        es.close();
+      }
+      expect(readFileSync(p)).toEqual(before);
+      expect(existsSync(`${p}-wal`)).toBe(false);
+      expect(existsSync(`${p}-shm`)).toBe(false);
+      await rm(d, { recursive: true, force: true });
     });
   });
 
@@ -355,6 +407,54 @@ describe('EdgeStore', () => {
 
       expect(store.getCallees(duplicate.callerId)).toEqual([duplicate]);
     });
+
+    it('round-trips argument facts and keeps distinct same-line call shapes', () => {
+      const base = {
+        callerId: 'src/same-line.ts::run', calleeId: 'src/a.ts::foo', calleeName: 'foo',
+        confidence: 'import' as const, kind: 'calls' as const, line: 9,
+      };
+      store.insertEdges([
+        { ...base, argCount: 1 },
+        { ...base, argCount: 0, argCountLowerBound: true },
+      ]);
+
+      const calls = store.getCallees(base.callerId);
+      expect(calls).toEqual(expect.arrayContaining([
+        expect.objectContaining({ argCount: 1 }),
+        expect.objectContaining({ argCount: 0, argCountLowerBound: true }),
+      ]));
+      expect(calls.find(e => e.argCount === 1)?.argCountLowerBound).toBeUndefined();
+      expect(calls).toHaveLength(2);
+    });
+
+    it('omits hostile optional edge facts and drops rows with unknown enums', () => {
+      const invalidEnum: CallEdge = {
+        callerId: 'src/enum.ts::caller', calleeId: edgeCA.calleeId,
+        calleeName: edgeCA.calleeName, confidence: 'import',
+      };
+      store.insertEdges([invalidEnum]);
+      store.close();
+      const raw = new DatabaseSync(dbPath);
+      raw.prepare(`
+        UPDATE edges
+        SET line = -1, synthesized_by = 'forged',
+            arg_count = 3, arg_count_lower_bound = 2
+        WHERE caller_id = ?
+      `).run(edgeCA.callerId);
+      raw.prepare("UPDATE edges SET confidence = 'forged' WHERE caller_id = ?").run(edgeAB.callerId);
+      raw.prepare("UPDATE edges SET kind = 'forged', call_type = 'forged' WHERE caller_id = ?").run(invalidEnum.callerId);
+      raw.close();
+      store = EdgeStore.open(dbPath);
+
+      const edges = store.getAllEdges();
+      expect(edges).toHaveLength(1);
+      expect(edges[0]).toEqual({
+        callerId: edgeCA.callerId,
+        calleeId: edgeCA.calleeId,
+        calleeName: edgeCA.calleeName,
+        confidence: edgeCA.confidence,
+      });
+    });
   });
 
   describe('nodes', () => {
@@ -381,6 +481,49 @@ describe('EdgeStore', () => {
       expect(got?.filePath).toBe('src/a.ts');
       expect(got?.isAsync).toBe(false);
       expect(got?.fanIn).toBe(1);
+    });
+
+    it('round-trips structured invocation arity', () => {
+      const withArity: FunctionNode = {
+        ...nodeA,
+        callArity: {
+          required: 1, total: 2, variadic: false, hasOptionalOrDefault: true,
+          implicitReceiverCount: 0,
+        },
+      };
+      store.insertNodes([withArity]);
+      expect(store.getNode(withArity.id)?.callArity).toEqual(withArity.callArity);
+    });
+
+    it('omits hostile callArity JSON unless every invariant is valid', () => {
+      const invalid = [
+        { ...nodeA, id: 'src/a.ts::required', name: 'required' },
+        { ...nodeA, id: 'src/a.ts::boolean', name: 'boolean' },
+        { ...nodeA, id: 'src/a.ts::receiver', name: 'receiver' },
+        { ...nodeA, id: 'src/a.ts::variadic', name: 'variadic' },
+        { ...nodeA, id: 'src/a.ts::overload', name: 'overload' },
+        { ...nodeA, id: 'src/a.ts::optional', name: 'optional' },
+        { ...nodeA, id: 'src/a.ts::extra', name: 'extra' },
+      ];
+      const valid = { ...nodeA, id: 'src/a.ts::legacy-variadic', name: 'legacy-variadic' };
+      store.insertNodes([...invalid, valid]);
+      store.close();
+      const raw = new DatabaseSync(dbPath);
+      const update = raw.prepare('UPDATE nodes SET call_arity = ? WHERE id = ?');
+      const base = { required: 0, total: 0, variadic: false, hasOptionalOrDefault: false, implicitReceiverCount: 0 };
+      update.run(JSON.stringify({ ...base, required: 2, total: 1 }), invalid[0].id);
+      update.run(JSON.stringify({ ...base, variadic: 'yes' }), invalid[1].id);
+      update.run(JSON.stringify({ ...base, implicitReceiverCount: 2 }), invalid[2].id);
+      update.run(JSON.stringify({ ...base, variadicParameterCount: 1 }), invalid[3].id);
+      update.run(JSON.stringify({ ...base, overloaded: false }), invalid[4].id);
+      update.run(JSON.stringify({ ...base, hasOptionalOrDefault: true }), invalid[5].id);
+      update.run(JSON.stringify({ ...base, surprise: true }), invalid[6].id);
+      update.run(JSON.stringify({ ...base, variadic: true }), valid.id);
+      raw.close();
+      store = EdgeStore.open(dbPath);
+
+      for (const node of invalid) expect(store.getNode(node.id)?.callArity).toBeUndefined();
+      expect(store.getNode(valid.id)?.callArity).toEqual({ ...base, variadic: true });
     });
 
     it('getNode returns null for unknown id', () => {

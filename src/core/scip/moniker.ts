@@ -148,12 +148,19 @@ function parameterGroupStart(sig: string, language?: string, name?: string): num
 }
 
 /**
- * Best-effort parameter count from a node's declaration `signature`. Counts
- * top-level comma-separated parameters inside the parameter group.
- * Returns `undefined` when no signature is available (the analyzer does not
- * persist arity directly — TODO(spec-04-followup): arity in analyzer).
+ * Parameter count for a definition moniker. Prefer the analyzer's live-AST facts;
+ * retain signature parsing for legacy/imported graphs that predate those facts.
+ * A collapsed overload has no single truthful arity and therefore stays unknown.
  */
 export function arityOf(node: FunctionNode): number | undefined {
+  if (node.callArity?.overloaded) return undefined;
+  if (node.callArity) {
+    // SCIP disambiguates the declaration, so retain source-level receiver/rest
+    // parameters even though invocation bounds intentionally exclude them.
+    return node.callArity.total
+      + node.callArity.implicitReceiverCount
+      + (node.callArity.variadicParameterCount ?? (node.callArity.variadic ? 1 : 0));
+  }
   const sig = node.signature;
   if (!sig) return undefined;
   const open = parameterGroupStart(sig, node.language, node.name);

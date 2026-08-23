@@ -293,6 +293,7 @@ describe('ImportExportParser', () => {
       expect(analysis.imports).toHaveLength(1);
       expect(analysis.imports[0].importedNames).toContain('bar');
       expect(analysis.imports[0].importedNames).toContain('qux');
+      expect(analysis.imports[0].importedSourceNames).toEqual(['foo', 'baz']);
     });
 
     it('should parse mixed import (default + named)', async () => {
@@ -718,6 +719,16 @@ describe('ImportExportParser', () => {
 
       expect(analysis.imports).toHaveLength(1);
       expect(analysis.imports[0].importedNames).toEqual(['path', 'getcwd', 'chdir']);
+    });
+
+    it('should retain exact source identities for aliased from imports', async () => {
+      const filePath = await createFile(tempDir, 'test.py', 'from service import original as local_name\n');
+      const analysis = await parser.parseFile(filePath);
+
+      expect(analysis.imports[0]).toMatchObject({
+        importedNames: ['local_name'],
+        importedSourceNames: ['original'],
+      });
     });
 
     it('should parse from import star', async () => {

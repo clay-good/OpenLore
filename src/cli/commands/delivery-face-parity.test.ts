@@ -79,6 +79,7 @@ const CLI_ONLY_CONCLUSIONS: ReadonlyArray<{ command: string; reason: string }> =
   { command: 'review', reason: 'Composes review findings and gate policy for a branch.' },
   { command: 'review-corpus', reason: 'Reviews governance-corpus intent as a CLI workflow.' },
   { command: 'enforce', reason: 'Applies repository enforcement policy and process exit semantics.' },
+  { command: 'check-edit', reason: 'Reads the watcher-produced per-edit structural verdict and applies agent-hook exit semantics.' },
   { command: 'change-status', reason: 'Combines OpenSpec lifecycle state with validation output.' },
 ];
 

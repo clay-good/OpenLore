@@ -72,6 +72,7 @@ import type { Pass1FactCache, Pass1CacheDisclosure } from './pass1-fact-cache.js
 import type {
   RawEdge,
   FunctionNode,
+  FunctionCallArity,
   CallEdge,
   EdgeConfidence,
   CallType,
@@ -114,6 +115,7 @@ export type {
   EdgeKind,
   CallType,
   FunctionNode,
+  FunctionCallArity,
   ExternalKind,
   CallEdge,
   LayerViolation,
@@ -817,6 +819,113 @@ function materializeCfgByNodeId(
   return cfg;
 }
 
+/** Count arguments while the call AST is live. Spread/splat operands contribute no
+ * fixed argument because they may expand to zero values; the retained count is the
+ * provable lower bound. */
+function callArgumentFacts(callNode: Parser.SyntaxNode, language: 'TypeScript' | 'JavaScript' | 'Python'):
+  Pick<RawEdge, 'argCount' | 'argCountLowerBound'> | undefined {
+  const group = callNode.childForFieldName('arguments')
+    ?? callNode.namedChildren.find((c) => c.type === 'arguments' || c.type === 'argument_list');
+  if (!group) return undefined;
+  const spreadTypes = language === 'Python'
+    ? new Set(['list_splat', 'dictionary_splat'])
+    : new Set(['spread_element']);
+  let fixed = 0;
+  let lowerBound = false;
+  for (const arg of group.namedChildren) {
+    if (arg.type === 'comment') continue;
+    if (spreadTypes.has(arg.type)) lowerBound = true;
+    else fixed++;
+  }
+  return { argCount: fixed, ...(lowerBound ? { argCountLowerBound: true as const } : {}) };
+}
+
+function containsNodeType(node: Parser.SyntaxNode, types: ReadonlySet<string>): boolean {
+  if (types.has(node.type)) return true;
+  for (const type of types) if (node.descendantsOfType(type).length > 0) return true;
+  return false;
+}
+
+/** Recover invocation bounds from declaration AST, excluding parameters that are
+ * syntactically present but never supplied by an ordinary call (`self`/`cls`, TS `this`). */
+function declarationCallArity(
+  callable: Parser.SyntaxNode,
+  language: 'TypeScript' | 'Python',
+  pythonMethod = false,
+): FunctionCallArity | undefined {
+  const group = callable.childForFieldName('parameters')
+    ?? callable.namedChildren.find((c) => c.type === 'formal_parameters' || c.type === 'parameters');
+  const single = callable.childForFieldName('parameter');
+  const params = group ? group.namedChildren : single ? [single] : [];
+  // A declaration with an explicit empty group is known to take zero arguments.
+  if (!group && !single) return undefined;
+
+  const variadicTypes = language === 'Python'
+    ? new Set(['list_splat_pattern', 'dictionary_splat_pattern'])
+    : new Set(['rest_pattern']);
+  const optionalTypes = language === 'Python'
+    ? new Set(['default_parameter', 'typed_default_parameter'])
+    : new Set(['optional_parameter', 'assignment_pattern']);
+  let required = 0;
+  let total = 0;
+  let variadic = false;
+  let variadicParameterCount = 0;
+  let hasOptionalOrDefault = false;
+  let implicitReceiverCount = 0;
+  const pythonStaticMethod = language === 'Python'
+    && callable.parent?.type === 'decorated_definition'
+    && callable.parent.namedChildren.some(c => c.type === 'decorator' && /\bstaticmethod\b/.test(c.text));
+
+  for (const param of params) {
+    if (param.type === 'comment' ||
+        (language === 'Python' && (param.type === 'positional_separator' || param.type === 'keyword_separator' || param.type === '/' || param.type === '*'))) {
+      continue;
+    }
+    const isVariadic = containsNodeType(param, variadicTypes);
+    if (isVariadic) {
+      variadic = true;
+      variadicParameterCount++;
+      continue;
+    }
+    const text = param.text.trim();
+    const implicit = language === 'Python'
+      ? pythonMethod && !pythonStaticMethod && implicitReceiverCount === 0
+      : implicitReceiverCount === 0 && /^this(?:\s*[:,?]|$)/.test(text);
+    if (implicit) {
+      implicitReceiverCount++;
+      continue;
+    }
+    total++;
+    if (containsNodeType(param, optionalTypes) || param.childForFieldName('value') !== null) {
+      hasOptionalOrDefault = true;
+    }
+    else required++;
+  }
+  return { required, total, variadic, variadicParameterCount, hasOptionalOrDefault, implicitReceiverCount };
+}
+
+/** Same-scope overload declarations intentionally collapse to one graph node. Mark
+ * that loss of uniqueness so precision-sensitive consumers never trust one shape. */
+function markCollapsedOverloads(nodes: FunctionNode[]): void {
+  const byId = new Map<string, FunctionNode[]>();
+  for (const n of nodes) {
+    if (!n.callArity) continue;
+    const group = byId.get(n.id) ?? [];
+    group.push(n);
+    byId.set(n.id, group);
+  }
+  for (const group of byId.values()) {
+    // Export/decorator query arms produce a wrapper plus the contained declaration.
+    // Count only innermost distinct declarations, not those duplicate wrappers.
+    const declarations = group.filter((n) => !group.some((m) =>
+      m !== n && n.startIndex <= m.startIndex && m.endIndex <= n.endIndex
+      && (n.startIndex < m.startIndex || m.endIndex < n.endIndex),
+    ));
+    const overloaded = new Set(declarations.map(n => `${n.startIndex}:${n.endIndex}`)).size > 1;
+    if (overloaded) for (const n of group) n.callArity!.overloaded = true;
+  }
+}
+
 function findEnclosingFunction(
   nodes: FunctionNode[],
   callPos: number,
@@ -981,11 +1090,17 @@ const TS_FN_QUERY = `
   (function_declaration
     name: (identifier) @fn.name) @fn.node
 
+  (function_signature
+    name: (identifier) @fn.name) @fn.node
+
   (export_statement
     declaration: (function_declaration
       name: (identifier) @fn.name)) @fn.node
 
   (method_definition
+    name: (property_identifier) @fn.name) @fn.node
+
+  (method_signature
     name: (property_identifier) @fn.name) @fn.node
 
   (lexical_declaration
@@ -1085,7 +1200,8 @@ async function extractTSGraph(
     let className: string | undefined;
     let cursor = fnNode.parent;
     while (cursor) {
-      if (cursor.type === 'class_declaration') {
+      if (cursor.type === 'class_declaration' || cursor.type === 'interface_declaration' ||
+          (fnNode.type === 'method_signature' && cursor.type === 'type_alias_declaration')) {
         const classNameNode = cursor.children.find(c => c.type === 'type_identifier' || c.type === 'identifier');
         if (classNameNode) className = classNameNode.text;
         break;
@@ -1139,6 +1255,9 @@ async function extractTSGraph(
       fanOut: 0,
       docstring: extractDocstringBefore(content, fnNode.startIndex, 'TypeScript'),
       signature: extractDeclaration(content, fnNode.startIndex, fnNode.endIndex, 'TypeScript'),
+      ...(language === 'TypeScript'
+        ? { callArity: declarationCallArity(valueNode ?? nameCapture.node.parent ?? fnNode, 'TypeScript') }
+        : {}),
     });
 
     const fnCfg = buildCfgFor(fnNode, 'TypeScript');
@@ -1147,6 +1266,7 @@ async function extractTSGraph(
 
   // --- Extract calls ---
   ensureUniqueNodeIds(nodes);
+  markCollapsedOverloads(nodes);
   const rawEdges: RawEdge[] = [];
   const callMatches = callQuery.matches(tree.rootNode);
 
@@ -1178,6 +1298,7 @@ async function extractTSGraph(
       line: nodeCapture.node.startPosition.row + 1,
       calleeObject: objectCapture?.node.text,
       callType,
+      ...callArgumentFacts(nodeCapture.node, language),
     });
   }
 
@@ -1265,6 +1386,9 @@ async function extractPyGraph(
         if (classNameNode) className = classNameNode.text;
         break;
       }
+      // A function nested inside a method is not itself descriptor-bound by the
+      // enclosing class, so its first parameter remains an ordinary call argument.
+      if (cursor.type === 'function_definition') break;
       cursor = cursor.parent;
     }
 
@@ -1291,6 +1415,7 @@ async function extractPyGraph(
       fanOut: 0,
       docstring: extractDocstringBefore(content, fnNode.startIndex, 'Python'),
       signature: extractDeclaration(content, fnNode.startIndex, fnNode.endIndex, 'Python'),
+      callArity: declarationCallArity(nameCapture.node.parent ?? fnNode, 'Python', className !== undefined),
     });
 
     const fnCfg = buildCfgFor(fnNode, 'Python');
@@ -1299,6 +1424,7 @@ async function extractPyGraph(
 
   // --- Extract calls ---
   ensureUniqueNodeIds(nodes);
+  markCollapsedOverloads(nodes);
   const rawEdges: RawEdge[] = [];
 
   const directCallQuery = nativeQuerySoft('Python', lang, PY_DIRECT_CALL_QUERY);
@@ -1325,6 +1451,7 @@ async function extractPyGraph(
       calleeName,
       line: nodeCapture.node.startPosition.row + 1,
       callType,
+      ...callArgumentFacts(nodeCapture.node, 'Python'),
     });
   }
 
@@ -1351,6 +1478,7 @@ async function extractPyGraph(
       line: nodeCapture.node.startPosition.row + 1,
       calleeObject: objectCapture.node.text,
       callType: methodCallType,
+      ...callArgumentFacts(nodeCapture.node, 'Python'),
     });
   }
 
@@ -5467,6 +5595,8 @@ export class CallGraphBuilder {
         confidence,
         kind: 'calls',
         callType,
+        ...(raw.argCount !== undefined ? { argCount: raw.argCount } : {}),
+        ...(raw.argCountLowerBound ? { argCountLowerBound: true } : {}),
       });
     }
 

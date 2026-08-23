@@ -933,6 +933,98 @@ describe('CallGraphBuilder — widen-js async metadata (RHS value node)', () => 
     expect(Array.from(result.nodes.values()).find(n => n.name === 'load')?.isAsync).toBe(true);
     expect(Array.from(result.nodes.values()).find(n => n.name === 'sync')?.isAsync).toBe(false);
   });
+
+  it('stores exact/lower-bound call counts and AST-derived TypeScript invocation bounds', async () => {
+    const result = await new CallGraphBuilder().build([{
+      path: 'src/arity.ts', language: 'TypeScript', content: `
+        function exact(a: number, b: object, c: number) {}
+        function optional(a: number, b?: number) {}
+        function defaulted(a: number, b = 1) {}
+        function withThis(this: object, value: number) {}
+        function rest(a: number, ...tail: number[]) {}
+        function run(xs: number[]) {
+          exact(1, { nested: [2, 3] }, optional(4));
+          rest(1, ...xs);
+        }
+      `,
+    }]);
+    const nodes = [...result.nodes.values()];
+    expect(nodes.find(n => n.name === 'exact')?.callArity).toMatchObject({
+      required: 3, total: 3, variadic: false, hasOptionalOrDefault: false, implicitReceiverCount: 0,
+    });
+    expect(nodes.find(n => n.name === 'optional')?.callArity).toMatchObject({
+      required: 1, total: 2, variadic: false, hasOptionalOrDefault: true,
+    });
+    expect(nodes.find(n => n.name === 'defaulted')?.callArity).toMatchObject({
+      required: 1, total: 2, variadic: false, hasOptionalOrDefault: true,
+    });
+    expect(nodes.find(n => n.name === 'withThis')?.callArity).toMatchObject({
+      required: 1, total: 1, implicitReceiverCount: 1,
+    });
+    expect(nodes.find(n => n.name === 'rest')?.callArity).toMatchObject({
+      required: 1, total: 1, variadic: true, hasOptionalOrDefault: false,
+    });
+    expect(result.edges.find(e => e.calleeName === 'exact')).toMatchObject({ argCount: 3 });
+    expect(result.edges.find(e => e.calleeName === 'rest')).toMatchObject({
+      argCount: 1, argCountLowerBound: true,
+    });
+  });
+
+  it('does not count TypeScript comments as call or declaration arguments', async () => {
+    const result = await new CallGraphBuilder().build([{
+      path: 'src/comment-arity.ts', language: 'TypeScript', content: `
+        function target(a: number, /* declaration comment */ b: number) {}
+        function run() { target(1, /* call comment */ 2); }
+      `,
+    }]);
+    expect([...result.nodes.values()].find(n => n.name === 'target')?.callArity).toMatchObject({
+      required: 2, total: 2, variadicParameterCount: 0,
+    });
+    expect(result.edges.find(e => e.calleeName === 'target')).toMatchObject({ argCount: 2 });
+  });
+
+  it('keeps interface and type-literal signatures distinct from executable functions', async () => {
+    const result = await new CallGraphBuilder().build([{
+      path: 'src/type-surfaces.ts', language: 'TypeScript', content: `
+        interface Contract { execute(value: string): void; }
+        type CallbackShape = { execute(value: string, radix: number): void };
+        function execute(value: string) { return value; }
+        class Service { execute(value: string) { return value; } }
+      `,
+    }]);
+    const execute = [...result.nodes.values()].filter(n => n.name === 'execute');
+    expect(execute.map(n => n.id).sort()).toEqual([
+      'src/type-surfaces.ts::CallbackShape.execute',
+      'src/type-surfaces.ts::Contract.execute',
+      'src/type-surfaces.ts::Service.execute',
+      'src/type-surfaces.ts::execute',
+    ]);
+    expect(execute.every(n => n.callArity?.overloaded !== true)).toBe(true);
+  });
+
+  it('captures JavaScript call counts without claiming definition arity semantics', async () => {
+    const result = await new CallGraphBuilder().build([{
+      path: 'src/arity.js', language: 'JavaScript',
+      content: 'function target(a) {} function run(xs) { target(1); target(...xs); }',
+    }]);
+    expect([...result.nodes.values()].find(n => n.name === 'target')?.callArity).toBeUndefined();
+    const calls = result.edges.filter(e => e.calleeName === 'target');
+    expect(calls).toEqual(expect.arrayContaining([
+      expect.objectContaining({ argCount: 1 }),
+      expect.objectContaining({ argCount: 0, argCountLowerBound: true }),
+    ]));
+  });
+
+  it('marks collapsed TypeScript overloads so no consumer trusts one declaration shape', async () => {
+    const result = await new CallGraphBuilder().build([{
+      path: 'src/over.ts', language: 'TypeScript', content: `
+        function parse(a: string): void;
+        function parse(a: string, radix: number): void;
+        function parse(a: string, radix?: number): void {}
+      `,
+    }]);
+    expect([...result.nodes.values()].find(n => n.name === 'parse')?.callArity?.overloaded).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -961,6 +1053,112 @@ def validate():
     expect(nodeNames(result)).toEqual(['main', 'process', 'validate']);
     expect(fanIn(result, 'validate')).toBe(2);
     expect(fanOut(result, 'main')).toBe(2);
+  });
+
+  it('stores Python call counts and excludes implicit receivers from invocation bounds', async () => {
+    const result = await new CallGraphBuilder().build([{
+      path: 'arity.py', language: 'Python', content: `
+def target(a, b=1, *rest, **kwargs):
+    pass
+
+def standalone(self):
+    pass
+
+class Service:
+    def method(self, value):
+        target(value, named=2)
+        target(value, *rest)
+
+    @staticmethod
+    def static(self):
+        pass
+      `,
+    }]);
+    const nodes = [...result.nodes.values()];
+    expect(nodes.find(n => n.name === 'target')?.callArity).toMatchObject({
+      required: 1, total: 2, variadic: true, variadicParameterCount: 2,
+      hasOptionalOrDefault: true, implicitReceiverCount: 0,
+    });
+    expect(nodes.find(n => n.name === 'method')?.callArity).toMatchObject({
+      required: 1, total: 1, variadic: false, implicitReceiverCount: 1,
+    });
+    expect(nodes.find(n => n.name === 'standalone')?.callArity).toMatchObject({
+      required: 1, total: 1, implicitReceiverCount: 0,
+    });
+    expect(nodes.find(n => n.name === 'static')?.callArity).toMatchObject({
+      required: 1, total: 1, implicitReceiverCount: 0,
+    });
+    const calls = result.edges.filter(e => e.calleeName === 'target');
+    expect(calls).toEqual(expect.arrayContaining([
+      expect.objectContaining({ argCount: 2 }),
+      expect.objectContaining({ argCount: 1, argCountLowerBound: true }),
+    ]));
+  });
+
+  it('excludes Python comments and positional/keyword separators from exact counts', async () => {
+    const result = await new CallGraphBuilder().build([{
+      path: 'comment_arity.py', language: 'Python', content: `
+def target(a,  # declaration comment
+           /, b, *, c):
+    pass
+
+def run():
+    target(1,  # call comment
+           2, c=3)
+      `,
+    }]);
+    expect([...result.nodes.values()].find(n => n.name === 'target')?.callArity).toMatchObject({
+      required: 3, total: 3, variadic: false, variadicParameterCount: 0,
+    });
+    expect(result.edges.find(e => e.calleeName === 'target')).toMatchObject({ argCount: 3 });
+  });
+
+  it('binds the first parameter of every non-static Python method regardless of its name', async () => {
+    const result = await new CallGraphBuilder().build([{
+      path: 'receiver.py', language: 'Python', content: `
+class Service:
+    def method(receiver, value):
+        def helper(value):
+            return value
+        return value
+
+    @classmethod
+    def create(klass, value):
+        return value
+
+    @staticmethod
+    def static(receiver, value):
+        return value
+      `,
+    }]);
+    const nodes = [...result.nodes.values()];
+    expect(nodes.find(n => n.name === 'method')?.callArity).toMatchObject({
+      required: 1, total: 1, implicitReceiverCount: 1,
+    });
+    expect(nodes.find(n => n.name === 'create')?.callArity).toMatchObject({
+      required: 1, total: 1, implicitReceiverCount: 1,
+    });
+    expect(nodes.find(n => n.name === 'static')?.callArity).toMatchObject({
+      required: 2, total: 2, implicitReceiverCount: 0,
+    });
+    expect(nodes.find(n => n.name === 'helper')?.callArity).toMatchObject({
+      required: 1, total: 1, implicitReceiverCount: 0,
+    });
+  });
+
+  it('marks collapsed Python overload declarations as non-authoritative arity', async () => {
+    const result = await new CallGraphBuilder().build([{
+      path: 'over.py', language: 'Python', content: `
+from typing import overload
+@overload
+def parse(value: str): ...
+@overload
+def parse(value: str, radix: int): ...
+def parse(value, radix=None):
+    pass
+      `,
+    }]);
+    expect([...result.nodes.values()].find(n => n.name === 'parse')?.callArity?.overloaded).toBe(true);
   });
 
   it('extracts class methods and resolves self.method() calls', async () => {

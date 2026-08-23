@@ -20,32 +20,44 @@
 export function readStdin(
   stream: NodeJS.ReadStream = process.stdin,
   timeoutMs = 1500,
+  maxBytes = Number.POSITIVE_INFINITY,
 ): Promise<string> {
-  return new Promise(resolve => {
+  return new Promise((resolve, reject) => {
     if (stream.isTTY) return resolve('');
     let data = '';
+    let bytes = 0;
     let settled = false;
     const onData = (chunk: string): void => {
+      bytes += Buffer.byteLength(chunk, 'utf8');
+      if (bytes > maxBytes) {
+        done(new Error(`Hook stdin exceeds the ${maxBytes}-byte safety limit.`));
+        return;
+      }
       data += chunk;
     };
-    const done = (): void => {
+    const done = (error?: Error): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       stream.removeListener('data', onData);
-      stream.removeListener('end', done);
-      stream.removeListener('error', done);
+      stream.removeListener('end', onEnd);
+      stream.removeListener('error', onError);
       stream.pause();
       stream.unref?.();
-      resolve(data);
+      if (error) reject(error);
+      else resolve(data);
     };
-    stream.setEncoding('utf8');
-    stream.on('data', onData);
-    stream.on('end', done);
-    stream.on('error', done);
-    // A hook must never hang the user's turn: if stdin neither closes nor errors,
-    // proceed with whatever arrived (typically '') and detach.
+    const onEnd = (): void => done();
+    const onError = (): void => done();
+    // Arm before attaching data listeners: a stream may synchronously flush
+    // already-buffered bytes as soon as it enters flowing mode.
     const timer = setTimeout(done, timeoutMs);
     timer.unref?.();
+    stream.setEncoding('utf8');
+    stream.on('data', onData);
+    stream.on('end', onEnd);
+    stream.on('error', onError);
+    // A hook must never hang the user's turn: if stdin neither closes nor errors,
+    // proceed with whatever arrived (typically '') and detach.
   });
 }

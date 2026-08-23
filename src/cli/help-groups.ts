@@ -42,6 +42,7 @@ export const COMMAND_GROUPS: ReadonlyArray<{ title: string; commands: readonly s
     commands: [
       'blast-radius',
       'impact-certificate',
+      'check-edit',
       'certify-public-surface',
       'enforce',
       'review',

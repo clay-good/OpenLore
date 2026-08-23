@@ -42,10 +42,31 @@ function isCorruptionError(err: unknown): boolean {
   return /malformed|not a database|file is encrypted|disk image|not a valid|corrupt/.test(m);
 }
 
-function openDatabase(dbPath: string): DatabaseSync {
-  const db = new DatabaseSync(dbPath);
-  db.exec('PRAGMA journal_mode = WAL');
-  db.exec('PRAGMA synchronous = NORMAL');
+function missingSchemaVersionFault(): StoreLifecycleFault {
+  return {
+    reason: 'schema-mismatch',
+    message: `graph index has no valid schema version — run \`openlore analyze\` to rebuild it`,
+  };
+}
+
+function schemaMismatchFault(onDiskVersion: number): StoreLifecycleFault {
+  return {
+    reason: 'schema-mismatch',
+    onDiskVersion,
+    message:
+      `graph index was built by a different OpenLore (schema v${onDiskVersion}, ` +
+      `expected v${SCHEMA_VERSION}) — run \`openlore analyze\` to rebuild it`,
+  };
+}
+
+function openDatabase(dbPath: string, readOnly = false): DatabaseSync {
+  const db = new DatabaseSync(dbPath, { readOnly });
+  // journal_mode and synchronous can rewrite a database header even when no
+  // application rows change. A read handle must therefore set neither pragma.
+  if (!readOnly) {
+    db.exec('PRAGMA journal_mode = WAL');
+    db.exec('PRAGMA synchronous = NORMAL');
+  }
   // Wait (don't immediately throw "database is locked") when another process
   // holds the write lock — e.g. the incremental watcher marking files stale
   // while a post-commit `analyze --force` rebuilds the store. Without this the
@@ -120,7 +141,7 @@ async function runTransactionAsync<T>(db: DatabaseSync, fn: () => Promise<T>): P
 }
 
 /** Bump when schema changes. Old DBs are dropped and rebuilt on next analyze --force. */
-export const SCHEMA_VERSION = 9;
+export const SCHEMA_VERSION = 10;
 
 export class EdgeStore {
   /**
@@ -141,12 +162,37 @@ export class EdgeStore {
   private _fault: StoreLifecycleFault | null = null;
   get notReady(): StoreLifecycleFault | null { return this._fault; }
 
-  private constructor(private readonly db: DatabaseSync, mode: 'read' | 'analyze') {
-    this.initSchema(mode);
+  private constructor(
+    private readonly db: DatabaseSync,
+    mode: 'read' | 'analyze',
+    bootstrapMissingRead = false,
+  ) {
+    this.initSchema(mode, bootstrapMissingRead);
   }
 
-  private initSchema(mode: 'read' | 'analyze'): void {
-    // Version check. Reading `schema_version` on an existing table is non-mutating.
+  private initSchema(mode: 'read' | 'analyze', bootstrapMissingRead: boolean): void {
+    // Existing read targets are opened read-only and inspected before any DDL.
+    // Keep bootstrapping a path that did not exist for legacy programmatic callers;
+    // an existing zero-byte or partially initialized file is never stamped healthy.
+    if (mode === 'read' && !bootstrapMissingRead) {
+      const hasVersionTable = this.db.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_version' LIMIT 1",
+      ).get() !== undefined;
+      if (!hasVersionTable) {
+        this._fault = missingSchemaVersionFault();
+        return;
+      }
+      const row = this.db.prepare('SELECT version FROM schema_version LIMIT 1').get() as { version: unknown } | undefined;
+      if (row === undefined || !Number.isSafeInteger(row.version)) {
+        this._fault = missingSchemaVersionFault();
+        return;
+      }
+      if (row.version !== SCHEMA_VERSION) {
+        this._fault = schemaMismatchFault(row.version as number);
+      }
+      return;
+    }
+
     this.db.exec(`CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)`);
     const row = this.db.prepare('SELECT version FROM schema_version LIMIT 1').get() as { version: number } | undefined;
     if (row === undefined) {
@@ -156,13 +202,7 @@ export class EdgeStore {
         // ReadPathsNeverDestroyTheIndex: a read NEVER runs the destructive migration.
         // Record the mismatch and STOP before any CREATE/INDEX statement, so the
         // on-disk store is byte-identical — the next `analyze` (write path) rebuilds it.
-        this._fault = {
-          reason: 'schema-mismatch',
-          onDiskVersion: row.version,
-          message:
-            `graph index was built by a different OpenLore (schema v${row.version}, ` +
-            `expected v${SCHEMA_VERSION}) — run \`openlore analyze\` to rebuild it`,
-        };
+        this._fault = schemaMismatchFault(row.version);
         return;
       }
       // analyze/write path only — rebuild-on-bump, repopulated immediately by the caller.
@@ -197,7 +237,9 @@ export class EdgeStore {
         confidence     TEXT,
         kind           TEXT,
         call_type      TEXT,
-        synthesized_by TEXT
+        synthesized_by TEXT,
+        arg_count      INTEGER,
+        arg_count_lower_bound INTEGER
       );
       CREATE INDEX IF NOT EXISTS idx_caller_id   ON edges(caller_id);
       CREATE INDEX IF NOT EXISTS idx_callee_id   ON edges(callee_id);
@@ -211,7 +253,9 @@ export class EdgeStore {
         COALESCE(confidence, ''),
         COALESCE(kind, ''),
         COALESCE(call_type, ''),
-        COALESCE(synthesized_by, '')
+        COALESCE(synthesized_by, ''),
+        COALESCE(arg_count, -1),
+        COALESCE(arg_count_lower_bound, 0)
       );
       -- callee_name is filtered by the incremental closure's consumer lookups
       -- (getExternalConsumerFiles / getNameOnlyConsumers / getExternalConsumers)
@@ -249,7 +293,8 @@ export class EdgeStore {
         is_entry_point INTEGER NOT NULL DEFAULT 0,
         -- Content-addressed location-independent identity (add-content-addressed-stable-symbol-ids).
         -- Nullable: anonymous/synthetic symbols and pre-bump stores carry none. Additive: id stays PK.
-        stable_id     TEXT
+        stable_id     TEXT,
+        call_arity    TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_node_file ON nodes(file_path);
       CREATE INDEX IF NOT EXISTS idx_node_name ON nodes(name);
@@ -396,10 +441,10 @@ export class EdgeStore {
   getEdgesForFile(file: string): { outgoing: CallEdge[]; incoming: CallEdge[] } {
     const outgoing = (
       this.db.prepare('SELECT * FROM edges WHERE caller_file = ?').all(file) as unknown as RawEdge[]
-    ).map(rawToCallEdge);
+    ).flatMap(rawToCallEdge);
     const incoming = (
       this.db.prepare('SELECT * FROM edges WHERE callee_file = ?').all(file) as unknown as RawEdge[]
-    ).map(rawToCallEdge);
+    ).flatMap(rawToCallEdge);
     return { outgoing, incoming };
   }
 
@@ -407,14 +452,14 @@ export class EdgeStore {
   getCallees(nodeId: string): CallEdge[] {
     return (
       this.db.prepare('SELECT * FROM edges WHERE caller_id = ?').all(nodeId) as unknown as RawEdge[]
-    ).map(rawToCallEdge);
+    ).flatMap(rawToCallEdge);
   }
 
   /** Incoming edges to a node ID (its direct callers). */
   getCallers(nodeId: string): CallEdge[] {
     return (
       this.db.prepare('SELECT * FROM edges WHERE callee_id = ?').all(nodeId) as unknown as RawEdge[]
-    ).map(rawToCallEdge);
+    ).flatMap(rawToCallEdge);
   }
 
   /**
@@ -430,7 +475,7 @@ export class EdgeStore {
       this.db
         .prepare("SELECT * FROM edges WHERE callee_name = ? AND confidence = 'external'")
         .all(symbolName) as unknown as RawEdge[]
-    ).map(rawToCallEdge);
+    ).flatMap(rawToCallEdge);
   }
 
   /**
@@ -489,7 +534,7 @@ export class EdgeStore {
     const placeholders = callerIds.map(() => '?').join(',');
     return (
       this.db.prepare(`SELECT * FROM edges WHERE caller_id IN (${placeholders})`).all(...callerIds) as unknown as RawEdge[]
-    ).map(rawToCallEdge);
+    ).flatMap(rawToCallEdge);
   }
 
   /** Batch: incoming edges for a set of callee IDs — one query instead of N. */
@@ -498,7 +543,7 @@ export class EdgeStore {
     const placeholders = calleeIds.map(() => '?').join(',');
     return (
       this.db.prepare(`SELECT * FROM edges WHERE callee_id IN (${placeholders})`).all(...calleeIds) as unknown as RawEdge[]
-    ).map(rawToCallEdge);
+    ).flatMap(rawToCallEdge);
   }
 
   /**
@@ -509,7 +554,7 @@ export class EdgeStore {
   getAllEdges(): CallEdge[] {
     return (
       this.db.prepare('SELECT * FROM edges').all() as unknown as RawEdge[]
-    ).map(rawToCallEdge);
+    ).flatMap(rawToCallEdge);
   }
 
   // ── Edge mutations ────────────────────────────────────────────────────────────
@@ -527,8 +572,8 @@ export class EdgeStore {
   /** Bulk-insert edges in a single transaction. */
   insertEdges(edges: CallEdge[]): void {
     const stmt: StatementSync = this.db.prepare(`
-      INSERT OR IGNORE INTO edges (caller_id, caller_file, callee_id, callee_file, callee_name, line, confidence, kind, call_type, synthesized_by)
-      VALUES (@callerId, @callerFile, @calleeId, @calleeFile, @calleeName, @line, @confidence, @kind, @callType, @synthesizedBy)
+      INSERT OR IGNORE INTO edges (caller_id, caller_file, callee_id, callee_file, callee_name, line, confidence, kind, call_type, synthesized_by, arg_count, arg_count_lower_bound)
+      VALUES (@callerId, @callerFile, @calleeId, @calleeFile, @calleeName, @line, @confidence, @kind, @callType, @synthesizedBy, @argCount, @argCountLowerBound)
     `);
     runTransaction(this.db, () => {
       for (const e of edges) {
@@ -545,6 +590,8 @@ export class EdgeStore {
           '@kind':       e.kind ?? null,
           '@callType':   e.callType ?? null,
           '@synthesizedBy': e.synthesizedBy ?? null,
+          '@argCount': e.argCount ?? null,
+          '@argCountLowerBound': e.argCountLowerBound ? 1 : null,
         });
       }
     });
@@ -717,10 +764,10 @@ export class EdgeStore {
     const stmt: StatementSync = this.db.prepare(`
       INSERT OR REPLACE INTO nodes
         (id, name, file_path, class_name, is_async, language, start_index, end_index,
-         fan_in, fan_out, docstring, signature, is_external, external_kind, is_hub, is_entry_point, stable_id)
+         fan_in, fan_out, docstring, signature, is_external, external_kind, is_hub, is_entry_point, stable_id, call_arity)
       VALUES
         (@id, @name, @filePath, @className, @isAsync, @language, @startIndex, @endIndex,
-         @fanIn, @fanOut, @docstring, @signature, @isExternal, @externalKind, @isHub, @isEntryPoint, @stableId)
+         @fanIn, @fanOut, @docstring, @signature, @isExternal, @externalKind, @isHub, @isEntryPoint, @stableId, @callArity)
     `);
     const ftsStmt: StatementSync = this.db.prepare('INSERT OR REPLACE INTO nodes_fts (node_id, name) VALUES (?, ?)');
     runTransaction(this.db, () => {
@@ -743,6 +790,7 @@ export class EdgeStore {
           '@isHub':        hubIds ? (hubIds.has(n.id) ? 1 : 0) : 0,
           '@isEntryPoint': entryIds ? (entryIds.has(n.id) ? 1 : 0) : 0,
           '@stableId':     n.stableId ?? null,
+          '@callArity':    n.callArity ? JSON.stringify(n.callArity) : null,
         });
         if (!n.isExternal) ftsStmt.run(n.id, n.name);
       }
@@ -1229,8 +1277,22 @@ export class EdgeStore {
   }
 
   private static openInternal(dbPath: string, mode: 'read' | 'analyze'): EdgeStore {
+    const existed = existsSync(dbPath);
     try {
-      return new EdgeStore(openDatabase(dbPath), mode);
+      const store = new EdgeStore(
+        openDatabase(dbPath, mode === 'read' && existed),
+        mode,
+        mode === 'read' && !existed,
+      );
+      // Existing read targets are probed through a read-only handle so an invalid
+      // schema cannot be altered merely by opening it. A healthy current store is
+      // then reopened with the historical writable handle expected by incremental
+      // callers; schema inspection on that second handle still executes no DDL.
+      if (mode === 'read' && existed && store.notReady === null) {
+        store.close();
+        return new EdgeStore(openDatabase(dbPath), 'read');
+      }
+      return store;
     } catch (err) {
       // A locked/busy open is transient, not corruption — surface it for the caller
       // to retry rather than quarantining a healthy store.
@@ -1273,11 +1335,13 @@ interface RawEdge {
   callee_id:   string;
   callee_file: string | null;
   callee_name: string;
-  line:        number | null;
-  confidence:  string;
-  kind:        string | null;
-  call_type:   string | null;
-  synthesized_by: string | null;
+  line:        unknown;
+  confidence:  unknown;
+  kind:        unknown;
+  call_type:   unknown;
+  synthesized_by: unknown;
+  arg_count: unknown;
+  arg_count_lower_bound: unknown;
 }
 
 interface RawNode {
@@ -1298,6 +1362,7 @@ interface RawNode {
   is_hub:         number;
   is_entry_point: number;
   stable_id:      string | null;
+  call_arity:     unknown;
 }
 
 interface RawClass {
@@ -1388,20 +1453,76 @@ function rawToDecisionNode(r: RawDecision): DecisionNode {
   };
 }
 
-function rawToCallEdge(r: RawEdge): CallEdge {
-  return {
+const EDGE_CONFIDENCES = new Set<CallEdge['confidence']>([
+  'self_cls', 'type_inference', 'import', 're_export', 'http_endpoint',
+  'same_file', 'name_only', 'type_name', 'synthesized', 'external',
+]);
+const EDGE_KINDS = new Set<NonNullable<CallEdge['kind']>>([
+  'calls', 'overrides', 'tested_by', 'references', 'depends_on',
+  'affects', 'authored_by', 'changed_in_pr',
+]);
+const CALL_TYPES = new Set<NonNullable<CallEdge['callType']>>([
+  'direct', 'method', 'awaited', 'constructor',
+]);
+const CALL_ARITY_KEYS = new Set([
+  'required', 'total', 'variadic', 'variadicParameterCount',
+  'hasOptionalOrDefault', 'implicitReceiverCount', 'overloaded',
+]);
+
+function isSafeNonnegativeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+/** Invalid required edge facts drop the row; invalid optional facts are omitted. */
+function rawToCallEdge(r: RawEdge): CallEdge[] {
+  if (typeof r.confidence !== 'string' || !EDGE_CONFIDENCES.has(r.confidence as CallEdge['confidence'])) {
+    return [];
+  }
+  if (r.kind !== null
+    && (typeof r.kind !== 'string' || !EDGE_KINDS.has(r.kind as NonNullable<CallEdge['kind']>))) {
+    return [];
+  }
+  if (r.call_type !== null
+    && (typeof r.call_type !== 'string' || !CALL_TYPES.has(r.call_type as NonNullable<CallEdge['callType']>))) {
+    return [];
+  }
+  const confidence = r.confidence as CallEdge['confidence'];
+  const line = isSafeNonnegativeInteger(r.line) ? r.line : undefined;
+  const kind = typeof r.kind === 'string'
+    ? r.kind as NonNullable<CallEdge['kind']>
+    : undefined;
+  const callType = typeof r.call_type === 'string'
+    ? r.call_type as NonNullable<CallEdge['callType']>
+    : undefined;
+  if (callType && kind && kind !== 'calls') return [];
+  const lowerBoundMarkerValid = r.arg_count_lower_bound === null
+    || r.arg_count_lower_bound === 0
+    || r.arg_count_lower_bound === 1;
+  const argCount = lowerBoundMarkerValid && isSafeNonnegativeInteger(r.arg_count)
+    ? r.arg_count
+    : undefined;
+
+  return [{
     callerId:   r.caller_id,
     calleeId:   r.callee_id,
     calleeName: r.callee_name,
-    ...(r.line !== null && { line: r.line }),
-    confidence: r.confidence as CallEdge['confidence'],
-    ...(r.kind      && { kind:     r.kind     as CallEdge['kind'] }),
-    ...(r.call_type && { callType: r.call_type as CallEdge['callType'] }),
-    ...(r.synthesized_by && { synthesizedBy: r.synthesized_by }),
-  };
+    ...(line !== undefined && { line }),
+    confidence,
+    ...(kind && { kind }),
+    ...(callType && { callType }),
+    ...(confidence === 'synthesized' && typeof r.synthesized_by === 'string' && r.synthesized_by.length > 0
+      && { synthesizedBy: r.synthesized_by }),
+    ...(argCount !== undefined && { argCount }),
+    ...(argCount !== undefined && r.arg_count_lower_bound === 1 && { argCountLowerBound: true }),
+  }];
 }
 
 function rawToFunctionNode(r: RawNode): FunctionNode {
+  let callArity: FunctionNode['callArity'];
+  if (typeof r.call_arity === 'string' && r.call_arity.length <= 1024) {
+    try { callArity = validateCallArity(JSON.parse(r.call_arity)); }
+    catch { callArity = undefined; }
+  }
   return {
     id:          r.id,
     name:        r.name,
@@ -1418,7 +1539,34 @@ function rawToFunctionNode(r: RawNode): FunctionNode {
     ...(r.is_external  && { isExternal:   true }),
     ...(r.external_kind && { externalKind: r.external_kind as FunctionNode['externalKind'] }),
     ...(r.stable_id    && { stableId:     r.stable_id }),
+    ...(callArity && { callArity }),
   };
+}
+
+function validateCallArity(value: unknown): FunctionNode['callArity'] {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const arity = value as Record<string, unknown>;
+  if (Object.keys(arity).some((key) => !CALL_ARITY_KEYS.has(key))) return undefined;
+  if (!isSafeNonnegativeInteger(arity.required)
+    || !isSafeNonnegativeInteger(arity.total)
+    || arity.required > arity.total
+    || typeof arity.variadic !== 'boolean'
+    || typeof arity.hasOptionalOrDefault !== 'boolean'
+    || arity.hasOptionalOrDefault !== (arity.required < arity.total)
+    || !isSafeNonnegativeInteger(arity.implicitReceiverCount)
+    || arity.implicitReceiverCount > 1
+    || (arity.overloaded !== undefined && arity.overloaded !== true)) {
+    return undefined;
+  }
+  if (arity.variadicParameterCount !== undefined) {
+    if (!isSafeNonnegativeInteger(arity.variadicParameterCount)
+      || arity.variadicParameterCount > 2
+      || (arity.variadic && arity.variadicParameterCount === 0)
+      || (!arity.variadic && arity.variadicParameterCount !== 0)) {
+      return undefined;
+    }
+  }
+  return arity as unknown as NonNullable<FunctionNode['callArity']>;
 }
 
 function rawToClassNode(r: RawClass): ClassNode {

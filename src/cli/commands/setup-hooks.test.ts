@@ -4,10 +4,10 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { installPanicCheckHook, installGryphWatchHook, uninstallPanicHooks, panicCheckHookCommand, evaluatePanicActivation, PANIC_DISABLED_SENTINEL } from './setup.js';
+import { installPanicCheckHook, installGryphWatchHook, uninstallPanicHooks, installCheckEditHook, uninstallCheckEditHook, panicCheckHookCommand, evaluatePanicActivation, PANIC_DISABLED_SENTINEL } from './setup.js';
 import { validatePanicSignal } from '../../core/services/mcp-handlers/panic-validation.js';
 import type { PanicTelemetryEvent } from '../../core/services/mcp-handlers/panic-validation.js';
 import { PANIC_GATE } from '../../core/services/mcp-handlers/panic-validation.js';
@@ -15,6 +15,7 @@ import { PANIC_GATE } from '../../core/services/mcp-handlers/panic-validation.js
 interface Settings {
   hooks?: {
     PreToolUse?: Array<{ command?: string }>;
+    PostToolUse?: Array<{ matcher?: string; _openlore?: boolean; hooks?: Array<{ command?: string }> }>;
     UserPromptSubmit?: Array<{ command?: string }>;
   };
 }
@@ -78,6 +79,126 @@ describe('panic hook lifecycle', () => {
 
   it('uninstall is a no-op (never throws) when no settings file exists', async () => {
     await expect(uninstallPanicHooks(dir)).resolves.toBeUndefined();
+  });
+});
+
+describe('check-edit PostToolUse hook lifecycle', () => {
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'openlore-check-edit-hook-'));
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('installs a read-only, edit-scoped Claude PostToolUse hook', async () => {
+    await installCheckEditHook(dir);
+    const settings = await readSettings(dir);
+    expect(settings.hooks?.PostToolUse).toEqual([{
+      matcher: 'Edit|Write|MultiEdit|NotebookEdit',
+      _openlore: true,
+      hooks: [{ type: 'command', command: 'openlore check-edit --hook' }],
+    }]);
+    const serialized = JSON.stringify(settings.hooks?.PostToolUse);
+    expect(serialized).not.toContain('analyze');
+    expect(serialized).not.toContain('structural_diff');
+  });
+
+  it('is idempotent and repairs a stale marker-matched entry', async () => {
+    await installCheckEditHook(dir);
+    await installCheckEditHook(dir);
+    let settings = await readSettings(dir);
+    expect(settings.hooks?.PostToolUse).toHaveLength(1);
+
+    settings.hooks!.PostToolUse![0].matcher = '';
+    await writeFile(join(dir, '.claude', 'settings.json'), JSON.stringify(settings, null, 2), 'utf-8');
+    await installCheckEditHook(dir);
+    settings = await readSettings(dir);
+    expect(settings.hooks?.PostToolUse).toHaveLength(1);
+    expect(settings.hooks?.PostToolUse?.[0].matcher).toBe('Edit|Write|MultiEdit|NotebookEdit');
+  });
+
+  it('uninstalls only the OpenLore entry and preserves user-authored PostToolUse hooks', async () => {
+    await installCheckEditHook(dir);
+    const settings = await readSettings(dir);
+    settings.hooks!.PostToolUse!.push({ matcher: 'Edit', hooks: [{ command: 'my-check' }] });
+    await writeFile(join(dir, '.claude', 'settings.json'), JSON.stringify(settings, null, 2), 'utf-8');
+
+    await uninstallCheckEditHook(dir);
+    const after = await readSettings(dir);
+    expect(after.hooks?.PostToolUse).toEqual([{ matcher: 'Edit', hooks: [{ command: 'my-check' }] }]);
+  });
+
+  it('refuses to overwrite corrupt settings', async () => {
+    await mkdir(join(dir, '.claude'), { recursive: true });
+    const path = join(dir, '.claude', 'settings.json');
+    await writeFile(path, '{broken', 'utf-8');
+    await installCheckEditHook(dir);
+    expect(await readFile(path, 'utf-8')).toBe('{broken');
+  });
+
+  it('refuses malformed-but-parseable hook containers without changing bytes', async () => {
+    await mkdir(join(dir, '.claude'), { recursive: true });
+    const path = join(dir, '.claude', 'settings.json');
+    const original = '{\n  "hooks": { "PostToolUse": "user-value" }\n}\n';
+    await writeFile(path, original, 'utf-8');
+    expect(await installCheckEditHook(dir)).toBe(false);
+    expect(await readFile(path, 'utf-8')).toBe(original);
+  });
+
+  it('refuses a parseable non-object settings root without changing bytes', async () => {
+    await mkdir(join(dir, '.claude'), { recursive: true });
+    const path = join(dir, '.claude', 'settings.json');
+    const original = 'null\n';
+    await writeFile(path, original, 'utf-8');
+    expect(await installCheckEditHook(dir)).toBe(false);
+    expect(await readFile(path, 'utf-8')).toBe(original);
+  });
+
+  it('rejects a symlinked .claude directory without mutating its outside target', async () => {
+    const outside = await mkdtemp(join(tmpdir(), 'openlore-hook-outside-'));
+    const outsideSettings = join(outside, 'settings.json');
+    const original = '{"outside":true}\n';
+    await writeFile(outsideSettings, original, 'utf-8');
+    await symlink(outside, join(dir, '.claude'), 'dir');
+    try {
+      expect(await installCheckEditHook(dir)).toBe(false);
+      expect(await uninstallCheckEditHook(dir)).toBe(false);
+      expect(await readFile(outsideSettings, 'utf-8')).toBe(original);
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a symlinked settings file without mutating its outside target', async () => {
+    const outside = await mkdtemp(join(tmpdir(), 'openlore-hook-outside-file-'));
+    const outsideSettings = join(outside, 'settings.json');
+    const original = '{"outside":true}\n';
+    await writeFile(outsideSettings, original, 'utf-8');
+    await mkdir(join(dir, '.claude'));
+    await symlink(outsideSettings, join(dir, '.claude', 'settings.json'));
+    try {
+      expect(await installCheckEditHook(dir)).toBe(false);
+      expect(await uninstallCheckEditHook(dir)).toBe(false);
+      expect(await readFile(outsideSettings, 'utf-8')).toBe(original);
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('atomically installs and uninstalls without leaving a torn temp sibling', async () => {
+    expect(await installCheckEditHook(dir)).toBe(true);
+    const installed = await readFile(join(dir, '.claude', 'settings.json'), 'utf-8');
+    expect(() => JSON.parse(installed)).not.toThrow();
+    expect((await readdir(join(dir, '.claude'))).filter(name => name.includes('.tmp-'))).toEqual([]);
+
+    expect(await uninstallCheckEditHook(dir)).toBe(true);
+    const uninstalled = await readFile(join(dir, '.claude', 'settings.json'), 'utf-8');
+    expect(() => JSON.parse(uninstalled)).not.toThrow();
+    expect((await readdir(join(dir, '.claude'))).filter(name => name.includes('.tmp-'))).toEqual([]);
   });
 });
 
