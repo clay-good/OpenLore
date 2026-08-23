@@ -53,6 +53,12 @@ describe('effective Git hook delivery', () => {
       '#!/bin/sh\nprintf ran > hook-ran\n',
       { mode: 0o755 },
     );
+    await mkdir(join(root, 'node_modules', '.bin'), { recursive: true });
+    await writeFile(
+      join(root, 'node_modules', '.bin', 'openlore'),
+      '#!/bin/sh\nif [ "$2" = "--help" ]; then echo --hook; fi\nexit 0\n',
+      { mode: 0o755 },
+    );
 
     await installEnforcementHook(root);
 
