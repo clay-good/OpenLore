@@ -292,6 +292,21 @@ describe('verify_claim — decision-current', () => {
     expect(r.reason).toMatch(/cite cccccccc instead/);
   });
 
+  it('is unverifiable when the decision belongs to a supersession cycle', async () => {
+    await writeStore([
+      decision({ id: 'aaaaaaaa', title: 'Approach A', supersedes: 'bbbbbbbb' }),
+      decision({ id: 'bbbbbbbb', title: 'Approach B', supersedes: 'aaaaaaaa' }),
+    ]);
+    for (const subject of ['aaaaaaaa', 'bbbbbbbb']) {
+      const r = await handleVerifyClaim({ directory: root, kind: 'decision-current', subject }) as {
+        verdict: string; reason: string; receipt?: unknown;
+      };
+      expect(r.verdict).toBe('unverifiable');
+      expect(r.reason).toMatch(/supersession cycle.*aaaaaaaa.*bbbbbbbb/i);
+      expect(r.receipt).toBeUndefined();
+    }
+  });
+
   it('refutes a rejected decision', async () => {
     await writeStore([decision({ id: 'deadbeef', title: 'Rejected idea', status: 'rejected' })]);
     const r = await handleVerifyClaim({ directory: root, kind: 'decision-current', subject: 'deadbeef' }) as {

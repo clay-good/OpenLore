@@ -339,6 +339,9 @@ function validateDecisionRenderInputs(decision: PendingDecision): void {
       : [['proposedRequirement', decision.proposedRequirement] as [string, string]]),
     ...decision.affectedDomains.map((value, index) => [`affectedDomains[${index}]`, value] as [string, string]),
     ...decision.affectedFiles.map((value, index) => [`affectedFiles[${index}]`, value] as [string, string]),
+    ...(decision.supersedes == null
+      ? []
+      : [['supersedes', decision.supersedes] as [string, string]]),
   ];
   const multiline = fields.find(([, value]) => /[\r\n]/.test(value));
   if (multiline) {
@@ -485,6 +488,7 @@ function buildDecisionEntry(decision: PendingDecision): string {
 **Status:** ${specStatusLabel(decision)}
 **Date:** ${(decision.syncedAt ?? new Date().toISOString()).slice(0, 10)}
 **ID:** ${decision.id}
+${decision.supersedes ? `**Supersedes:** ${decision.supersedes}\n` : ''}
 
 ${decision.rationale}
 
@@ -550,6 +554,7 @@ ${decision.consequences}
 
 > Recorded by openlore decisions on ${(decision.syncedAt ?? new Date().toISOString()).slice(0, 10)}
 > Decision ID: ${decision.id}
+${decision.supersedes ? `> Supersedes: ${decision.supersedes}\n` : ''}
 `;
 
   await writeFile(adrPath, content, 'utf-8');

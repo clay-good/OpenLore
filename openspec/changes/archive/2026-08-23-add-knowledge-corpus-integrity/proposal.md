@@ -1,6 +1,6 @@
 # Knowledge-corpus integrity: the governance corpus is a typed graph, and nothing checks it
 
-> Status: PROPOSED (2026-07-31, external-pattern study). OpenLore verifies the *code* graph
+> Status: BUILT (2026-08-23). OpenLore verifies the *code* graph
 > exhaustively and the *knowledge* graph not at all. Specs cite decision ids, changes cite spec
 > domains, decisions supersede decisions, memories anchor to symbols and cite decisions — every one
 > of those is a typed edge with a declared range, direction, and liveness rule, and every one can

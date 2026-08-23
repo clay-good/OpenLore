@@ -422,7 +422,25 @@ async function verifyDecisionCurrent(absDir: string, subject: string): Promise<u
   }
 
   const indexCommit = await readIndexCommit(absDir);
-  const supersededBy = buildRetirementGraph(decisions).supersededBy.get(id);
+  const retirement = buildRetirementGraph(decisions);
+  const cycle = retirement.cycles.find((members) => members.includes(id));
+  if (cycle) {
+    return {
+      claim,
+      verdict: 'unverifiable' as Verdict,
+      reason: `Decision "${id}" belongs to a supersession cycle (${cycle.join(' → ')} → ${cycle[0]}). No member is an authoritative terminal replacement; repair the decision history before citing any member as current.`,
+      confidenceBoundary: cleanBoundary,
+    };
+  }
+  if (retirement.retiredDecisionIds.has(id) && !retirement.supersededBy.has(id)) {
+    return {
+      claim,
+      verdict: 'unverifiable' as Verdict,
+      reason: `Decision "${id}" has a supersession chain that enters a cycle, so no authoritative terminal replacement can be determined. Repair the decision history before citing it as current.`,
+      confidenceBoundary: cleanBoundary,
+    };
+  }
+  const supersededBy = retirement.supersededBy.get(id);
   if (supersededBy) {
     const superseder = decisions.find((d) => d.id === supersededBy);
     const evidence = `decision ${id} ("${shortTitle(target.title)}") was superseded by ${supersededBy}${superseder ? ` ("${shortTitle(superseder.title)}")` : ''}`;

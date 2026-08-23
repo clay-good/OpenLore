@@ -7,8 +7,8 @@
  * `enforcement.policy` (with the legacy `blastRadius.block` / `impactCertificate.block`
  * sugar lowered onto it), and — in `--hook` mode — fails the commit ONLY when at
  * least one finding resolves to `blocking`. Findings are sorted by a stable key so
- * output is reproducible. Advisory by default: a repository that declares no policy
- * never blocks. An `off`-classed finding is still listed (silenced, not invisible).
+ * output is reproducible. Each source declares its default class; an `off`-classed
+ * finding remains listed (silenced, not invisible).
  *
  * Sources:
  *   - stale-decision-reference — always (cheap: a pure walk of the decision graph
@@ -19,8 +19,8 @@
  *   - impact-certificate surfaces — collected only when the repo declared covering
  *     surfaces, for the same reason.
  *
- * Sources remain advisory by default; configured frozen sources fail closed when
- * their assessment cannot be completed. Deterministic, no LLM (north star `c6d1ad07`).
+ * Blocking and frozen sources fail closed when their assessment cannot be completed.
+ * Deterministic, no LLM (north star `c6d1ad07`).
  */
 
 import { execFile } from 'node:child_process';
@@ -31,16 +31,22 @@ import { Command } from 'commander';
 import { gitPathArgs } from '../../utils/git-args.js';
 import { logger, configureLogger } from '../../utils/logger.js';
 import { writeStdout } from '../output.js';
+import { sanitizeForTerminal } from '../../utils/misc.js';
 import { readOpenLoreConfigStrict } from '../../core/services/config-manager.js';
 import {
   effectivePolicy,
   normalizeEnforcementPolicy,
   unknownPolicyCodes,
   classifyFindings,
+  resolveEnforcementClass,
   type GovernanceFinding,
 } from '../../core/services/mcp-handlers/enforcement-policy.js';
 import { applyEnforcementBaseline } from '../../core/services/mcp-handlers/enforcement-baseline.js';
 import { detectStaleDecisionReferences } from '../../core/services/mcp-handlers/stale-decision-reference.js';
+import {
+  CORPUS_FINDING_CODES,
+  detectCorpusIntegrity,
+} from '../../core/decisions/corpus-integrity.js';
 import { computeBlastRadius, type BlastRadiusBriefing } from '../../core/services/mcp-handlers/blast-radius.js';
 import { computeImpactCertificate, type ImpactCertificate } from '../../core/services/mcp-handlers/impact-certificate.js';
 import type { OpenLoreConfig } from '../../types/index.js';
@@ -262,6 +268,17 @@ export async function collectGovernanceFindings(
     failedCodes.add('stale-decision-reference');
   }
 
+  // Governance-corpus integrity — always (bounded local artifact walk, no LLM).
+  // Keep the legacy stale-decision source above for compatibility; this pass owns
+  // the closed typed-edge contract and the corpus-* finding vocabulary.
+  try {
+    findings.push(...await detectCorpusIntegrity(cwd, { openspecPath: config?.openspecPath }));
+    for (const code of CORPUS_FINDING_CODES) assessedCodes.add(code);
+  } catch (err) {
+    caveats.push(`corpus-integrity check unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    for (const code of CORPUS_FINDING_CODES) failedCodes.add(code);
+  }
+
   // blast-radius orphan patterns — only when configured (diff-heavy).
   if (blastRadiusInUse(config, policy)) {
     try {
@@ -415,8 +432,19 @@ export async function runEnforceCli(opts: EnforceCliOptions): Promise<number> {
     .some(([code, enforcementClass]) => enforcementClass === 'frozen' && collected.assessedCodes.has(code));
   const activeGatePolicy = Object.values(policy)
     .some((enforcementClass) => enforcementClass === 'blocking' || enforcementClass === 'frozen');
-  const failedFrozenCodes = [...collected.failedCodes]
-    .filter((code) => policy[code] === 'frozen')
+  // Source-declared defaults are policy too. A default-blocking source must
+  // compare the working tree with the index even when the operator has not
+  // repeated that default in .openlore/config.json.
+  const activeGateAssessment = [...collected.assessedCodes]
+    .some((code) => {
+      const enforcementClass = resolveEnforcementClass(code, policy);
+      return enforcementClass === 'blocking' || enforcementClass === 'frozen';
+    });
+  const failedGateCodes = [...collected.failedCodes]
+    .filter((code) => {
+      const cls = resolveEnforcementClass(code, policy);
+      return cls === 'blocking' || cls === 'frozen';
+    })
     .sort();
   const trustedBaseline = activeFrozenAssessment || opts.hook
     ? await trustedBaselineAtHead(cwd)
@@ -454,9 +482,9 @@ export async function runEnforceCli(opts: EnforceCliOptions): Promise<number> {
     result.gated = true;
     collected.caveats.push(`enforcement config unavailable: ${configReadError}`);
   }
-  if (failedFrozenCodes.length > 0) {
+  if (failedGateCodes.length > 0) {
     result.gated = true;
-    collected.caveats.push(`frozen assessment failed for ${failedFrozenCodes.join(', ')}; baseline bytes were preserved`);
+    collected.caveats.push(`frozen assessment failed or blocking source unavailable for ${failedGateCodes.join(', ')}; baseline bytes were preserved where applicable`);
   }
   if (trustedBaselineError) {
     result.gated = true;
@@ -473,9 +501,9 @@ export async function runEnforceCli(opts: EnforceCliOptions): Promise<number> {
     result.gated = true;
     collected.caveats.push('enforcement config differs between the Git index and working tree');
   }
-  const requiresFullWorktreeCheck = activeGatePolicy || activeFrozenAssessment || failedFrozenCodes.length > 0 ||
+  const requiresFullWorktreeCheck = activeGatePolicy || activeGateAssessment || activeFrozenAssessment || failedGateCodes.length > 0 ||
     configReadError !== null || configMismatch;
-  const worktreeStatus = opts.hook && requiresFullWorktreeCheck
+  const worktreeStatus = opts.hook && requiresFullWorktreeCheck && !irrelevantNoPolicyAbsence
     ? await inspectWorktreeStatus(cwd)
     : { dirty: false };
   const baselineDirty = configMismatch || worktreeStatus.dirty;
@@ -501,16 +529,16 @@ export async function runEnforceCli(opts: EnforceCliOptions): Promise<number> {
         retiredCount: reconciled.baseline.removed,
         baselineChanged: reconciled.baseline.written,
         requiresInitialization: reconciled.baseline.requiresInitialization ?? [],
-        failedAssessmentCodes: failedFrozenCodes,
+        failedAssessmentCodes: failedGateCodes,
         unstaged: baselineDirty,
       },
       unknownPolicyCodes: unknown,
       caveats: collected.caveats,
     }, null, 2) + '\n');
   } else {
-    const showRatchetReceipt = activeFrozenAssessment || failedFrozenCodes.length > 0;
+    const showRatchetReceipt = activeFrozenAssessment || failedGateCodes.length > 0;
     const out = renderHuman(result, unknown, collected.caveats, reconciled.baseline, baselineDirty, showRatchetReceipt);
-    if (opts.hook) process.stderr.write(out + '\n');
+    if (opts.hook) process.stderr.write(sanitizeForTerminal(out + '\n', { keepNewlines: true }));
     else await writeStdout(out + '\n');
   }
 
@@ -521,8 +549,8 @@ export async function runEnforceCli(opts: EnforceCliOptions): Promise<number> {
         ? `   Run openlore enforce outside hook mode, review the new baseline, and stage it before committing.\n`
         : configReadError
           ? `   Repair or restore .openlore/config.json so the enforcement policy can be verified.\n`
-          : failedFrozenCodes.length > 0
-            ? `   Restore a complete assessment for ${failedFrozenCodes.join(', ')}; the frozen baseline was preserved.\n`
+          : failedGateCodes.length > 0
+            ? `   Restore a complete assessment for ${failedGateCodes.join(', ')}; blocking/frozen sources were not treated as clean.\n`
         : trustedBaselineError
           ? `   Restore a readable Git HEAD so the committed frozen baseline can be verified.\n`
         : worktreeStatus.error
@@ -573,7 +601,7 @@ function renderHuman(
 }
 
 export const enforceCommand = new Command('enforce')
-  .description('Unified finding-enforcement gate: blocking fails immediately; frozen adopts existing debt and blocks only new findings; advisory is the default.')
+  .description('Unified finding-enforcement gate: each source declares its default; frozen adopts existing debt and blocks only new findings.')
   .option('--base <ref>', 'Git ref to diff the working tree against for diff-based sources (default HEAD)')
   .option('--json', 'Emit the gate result as JSON', false)
   .option('--hook', 'Hook mode: exit 1 on blocking/new frozen findings, invalid config, incomplete frozen assessment, or unverifiable staged bytes', false)

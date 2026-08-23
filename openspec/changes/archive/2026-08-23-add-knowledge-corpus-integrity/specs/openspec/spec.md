@@ -5,8 +5,8 @@
 ### Requirement: CorpusEdgesAreDeclaredAndResolved
 
 The governance corpus SHALL be validated as a typed graph. Every cross-artifact reference kind —
-a requirement citing a decision, a decision superseding a decision, a change delta targeting a
-spec domain, a memory citing a decision, and an artifact anchoring to a symbol or file — SHALL be
+a requirement or proposal citing a decision or requirement, a decision superseding a decision, a
+change delta targeting a spec domain, a memory citing a decision, and an artifact anchoring to a symbol or file — SHALL be
 declared in a single source-declared edge registry stating that edge's source artifact type,
 target range, directionality, whether it may form a cycle, and whether a live source may reference
 a retired target.
@@ -25,6 +25,11 @@ operator's enforcement policy, and the pass SHALL introduce no finding that the 
 The check SHALL be deterministic and offline: identical corpus bytes SHALL produce an identical,
 ordered finding list, with no model, embedding, or network call in the path. Adding an artifact
 type or reference kind without registering its edge SHALL fail a closure guard in CI.
+
+A change delta that targets a capability declared under its proposal's `New Capabilities` section
+SHALL resolve to that prospective domain; it SHALL NOT be misreported as orphaned merely because
+the main corpus does not contain the new domain before archival. An unreadable or malformed corpus
+source SHALL make the assessment unavailable rather than being treated as an empty artifact set.
 
 #### Scenario: A requirement citing a superseded decision is reported
 
@@ -47,6 +52,13 @@ type or reference kind without registering its edge SHALL fail a closure guard i
 - **WHEN** the corpus integrity pass runs
 - **THEN** a `corpus-reference-unresolved` finding names the change, the delta path, and the
   unresolved domain
+
+#### Scenario: A declared new capability is a valid delta target
+
+- **GIVEN** a proposal declaring a capability under `New Capabilities`
+- **AND** a delta directory targeting that capability
+- **WHEN** the corpus integrity pass runs before archival creates the main spec domain
+- **THEN** the delta target resolves without an unresolved-reference finding
 
 #### Scenario: Duplicate identity is detected before it is trusted
 

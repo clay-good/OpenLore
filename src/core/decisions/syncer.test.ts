@@ -8,6 +8,7 @@ import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { syncApprovedDecisions } from './syncer.js';
+import { detectCorpusIntegrity } from './corpus-integrity.js';
 import type { PendingDecision, DecisionStore, SpecMap } from '../../types/index.js';
 
 vi.mock('../../utils/logger.js', () => ({
@@ -661,6 +662,65 @@ describe('syncApprovedDecisions — filesystem writes', () => {
     expect(ids).not.toContain('app00001');
     expect(ids).toContain('ver00001');
   });
+
+  it('preserves supersession authority after sync purges the pending store', async () => {
+    const { writeFile } = await import('node:fs/promises');
+    const specDir = join(tmpDir, 'openspec', 'specs', 'services');
+    await mkdir(specDir, { recursive: true });
+    const specPath = join(specDir, 'spec.md');
+    await writeFile(specPath, `${MINIMAL_SPEC.trimEnd()}
+
+### Requirement: DurableDecisionCitation
+
+The system SHALL retain a durable decision citation.
+
+> Corpus edge: spec-cites-decision aaaaaaaa
+`, 'utf8');
+
+    const oldDecision = makeDecision({
+      id: 'aaaaaaaa',
+      title: 'Use the original cache',
+      proposedRequirement: null,
+    });
+    const replacement = makeDecision({
+      id: 'bbbbbbbb',
+      title: 'Replace the original cache',
+      proposedRequirement: null,
+      supersedes: oldDecision.id,
+    });
+    const store = makeStore([oldDecision, replacement]);
+    await mkdir(join(tmpDir, '.openlore', 'decisions'), { recursive: true });
+    await writeFile(
+      join(tmpDir, '.openlore', 'decisions', 'pending.json'),
+      JSON.stringify(store, null, 2) + '\n',
+      'utf8',
+    );
+
+    const before = await detectCorpusIntegrity(tmpDir);
+    expect(before).toContainEqual(expect.objectContaining({
+      code: 'corpus-target-retired',
+      discriminator: 'spec-cites-decision:aaaaaaaa',
+      message: expect.stringContaining('cite bbbbbbbb instead'),
+    }));
+
+    const { store: persisted } = await syncApprovedDecisions(store, {
+      rootPath: tmpDir,
+      openspecPath: join(tmpDir, 'openspec'),
+      specMap: makeSpecMap('services', 'openspec/specs/services/spec.md'),
+    });
+    expect(persisted.decisions).toEqual([]);
+    const syncedSpec = await readFile(specPath, 'utf8');
+    expect(syncedSpec).toContain('**ID:** bbbbbbbb\n**Supersedes:** aaaaaaaa');
+
+    const after = await detectCorpusIntegrity(tmpDir);
+    expect(after).toContainEqual(expect.objectContaining({
+      code: 'corpus-target-retired',
+      discriminator: 'spec-cites-decision:aaaaaaaa',
+      message: expect.stringContaining('cite bbbbbbbb instead'),
+    }));
+    expect(after.filter((finding) => finding.code === 'corpus-target-retired'))
+      .toEqual(before.filter((finding) => finding.code === 'corpus-target-retired'));
+  });
 });
 
 // ============================================================================
@@ -724,6 +784,25 @@ describe('ADR creation — always writes ADR regardless of content', () => {
 
     const files = await readdir(join(tmpDir, 'openspec', 'decisions'));
     expect(files.some((f) => f.startsWith('adr-'))).toBe(true);
+  });
+
+  it('writes optional supersession metadata to the ADR', async () => {
+    const { writeFile, readdir } = await import('node:fs/promises');
+    const specDir = join(tmpDir, 'openspec', 'specs', 'services');
+    await mkdir(specDir, { recursive: true });
+    await writeFile(join(specDir, 'spec.md'), MINIMAL_SPEC, 'utf8');
+    await syncApprovedDecisions(makeStore([makeDecision({
+      scope: 'system',
+      supersedes: '1234abcd',
+    })]), {
+      rootPath: tmpDir,
+      openspecPath: join(tmpDir, 'openspec'),
+      specMap: makeSpecMap('services', 'openspec/specs/services/spec.md'),
+    });
+
+    const [filename] = await readdir(join(tmpDir, 'openspec', 'decisions'));
+    expect(await readFile(join(tmpDir, 'openspec', 'decisions', filename), 'utf8'))
+      .toContain('> Supersedes: 1234abcd');
   });
 
   it('increments ADR number for each successive decision', async () => {

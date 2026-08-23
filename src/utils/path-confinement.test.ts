@@ -140,6 +140,11 @@ describe('readFileConfined', () => {
     await expect(readFileConfined(root, 'openspec/specs/core/spec.md')).resolves.toBe('# real spec\n');
   });
 
+  it('rejects an oversized file from descriptor metadata before returning content', async () => {
+    await expect(readFileConfined(root, 'openspec/specs/core/spec.md', 2))
+      .rejects.toThrow(/exceeds byte limit/);
+  });
+
   it('returns UTF-8 content and post-read metadata from the confined descriptor', async () => {
     const result = await readFileConfinedWithStat(root, 'openspec/specs/core/spec.md');
 

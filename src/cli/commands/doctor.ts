@@ -53,6 +53,7 @@ import {
 import { describeExclusions, totalExcluded, type ParseHealthReport } from '../../core/analyzer/parse-health.js';
 import { describeMemoryDegradation } from '../../core/analyzer/memory-strategy.js';
 import type { GovernanceFinding } from '../../core/services/mcp-handlers/enforcement-policy.js';
+import { detectCorpusIntegrity } from '../../core/decisions/corpus-integrity.js';
 import { detectInjectionShapes, INJECTION_SHAPE_LIMITS } from '../../core/services/served-content.js';
 import { redactSecretTextWithKnownValues } from '../../core/services/secret-redaction.js';
 import {
@@ -390,6 +391,36 @@ export async function checkServedContentTrust(
     findings,
     fix: 'Review the named content and its provenance; do not rewrite it automatically.',
   };
+}
+
+/** Validate the governance corpus as a closed typed graph. Read-only and offline. */
+export async function checkCorpusIntegrity(rootPath: string): Promise<CheckResult> {
+  try {
+    const config = await readOpenLoreConfig(rootPath);
+    const findings = await detectCorpusIntegrity(rootPath, { openspecPath: config?.openspecPath });
+    if (findings.length === 0) {
+      return {
+        name: 'Corpus integrity',
+        status: 'ok',
+        detail: 'all declared governance references resolve',
+      };
+    }
+    const errors = findings.filter((finding) => finding.severity === 'error').length;
+    return {
+      name: 'Corpus integrity',
+      status: errors > 0 ? 'fail' : 'warn',
+      detail: `${findings.length} finding(s): ${errors} graph error(s), ${findings.length - errors} advisory`,
+      findings,
+      fix: 'Repair the named corpus references; OpenLore never rewrites governance edges automatically.',
+    };
+  } catch (error) {
+    return {
+      name: 'Corpus integrity',
+      status: 'warn',
+      detail: `check unavailable: ${error instanceof Error ? error.message : String(error)}`,
+      fix: 'Restore readable OpenSpec and .openlore decision/memory stores, then rerun doctor.',
+    };
+  }
 }
 
 /** JSON stores serve their string values, not their serialized line layout. */
@@ -883,6 +914,7 @@ Checks performed:
   • Analysis artifacts freshness
   • Graph store lifecycle (schema mismatch / quarantined index)
   • OpenSpec directory presence
+  • Governance corpus reference integrity
   • Injection-shaped unreviewed content (lexical advisory; never a guarantee)
   • MCP wiring (Claude Code reads .mcp.json, not .claude/settings.json)
   • LLM connection (live request with 10s timeout)
@@ -913,6 +945,7 @@ Checks performed:
         checkGraphStore(rootPath),
         checkParseHealth(rootPath),
         checkOpenSpecDir(rootPath),
+        checkCorpusIntegrity(rootPath),
         checkServedContentTrust(rootPath),
         checkDiskSpace(rootPath),
       ]),

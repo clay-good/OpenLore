@@ -58,6 +58,10 @@ export interface StaleDecisionReferenceFinding {
 export interface RetirementGraph {
   /** retiredId → the id of the active decision that superseded it. */
   supersededBy: Map<string, string>;
+  /** Every target of an effective supersession edge, even when no live terminal exists. */
+  retiredDecisionIds: Set<string>;
+  /** Supersession cycles, with both each cycle and the outer list stably sorted. */
+  cycles: string[][];
 }
 
 /**
@@ -77,21 +81,46 @@ export function buildRetirementGraph(decisions: readonly PendingDecision[]): Ret
     const existing = immediate.get(target);
     if (existing === undefined || c.id < existing) immediate.set(target, c.id);
   }
-  // Resolve each retired target to its LIVE terminal superseder: if the immediate
-  // superseder is itself retired (a chain A←B←C), follow to the live end so the
-  // remediation never points the user at a decision that is also dead. Cycle-guarded.
-  const retiredTargets = new Set(immediate.keys());
-  const supersededBy = new Map<string, string>();
-  for (const target of immediate.keys()) {
-    let cur = immediate.get(target)!;
-    const visited = new Set<string>([target]);
-    while (retiredTargets.has(cur) && !visited.has(cur)) {
-      visited.add(cur);
+  const retiredDecisionIds = [...immediate.keys()].sort(stableCompare);
+
+  // Find cycles in the canonical immediate-superseder graph before resolving live
+  // terminals. A cycle has no authoritative terminal decision; reporting one of its
+  // members as the other's live replacement (or, worse, as its own replacement) would
+  // manufacture authority. Canonicalize membership so consumers can emit one stable
+  // finding per cycle regardless of decision-store order or cycle entry point.
+  const cycleByKey = new Map<string, string[]>();
+  for (const target of retiredDecisionIds) {
+    const path: string[] = [];
+    const position = new Map<string, number>();
+    let cur = target;
+    while (immediate.has(cur)) {
+      const at = position.get(cur);
+      if (at !== undefined) {
+        const cycle = path.slice(at).sort(stableCompare);
+        cycleByKey.set(cycle.join('\x00'), cycle);
+        break;
+      }
+      position.set(cur, path.length);
+      path.push(cur);
       cur = immediate.get(cur)!;
     }
-    supersededBy.set(target, cur);
   }
-  return { supersededBy };
+  const cycles = [...cycleByKey.values()].sort((a, b) => stableCompare(a.join('\x00'), b.join('\x00')));
+  const cycleMembers = new Set(cycles.flat());
+
+  // Resolve each retired target to its LIVE terminal superseder: if the immediate
+  // superseder is itself retired (a chain A←B←C), follow to the live end so the
+  // remediation never points the user at a decision that is also dead. Any chain that
+  // enters a cycle is omitted because it has no live terminal replacement.
+  const supersededBy = new Map<string, string>();
+  for (const target of retiredDecisionIds) {
+    let cur = immediate.get(target)!;
+    while (immediate.has(cur) && !cycleMembers.has(cur)) {
+      cur = immediate.get(cur)!;
+    }
+    if (!cycleMembers.has(cur)) supersededBy.set(target, cur);
+  }
+  return { supersededBy, retiredDecisionIds: new Set(retiredDecisionIds), cycles };
 }
 
 /** Map of retired target → the set of its immediate superseders (a target may have >1). */
