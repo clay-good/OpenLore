@@ -22,7 +22,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, writeFile, mkdir, readFile, rename, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, mkdir, readFile, realpath, rename, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -34,6 +34,7 @@ import { registerRepairHost } from './cold-start-bootstrap.js';
 import { computeIndexStaleness } from './mcp-handlers/index-staleness.js';
 import { ServeWatchRepairCoordinator } from '../../cli/commands/serve.js';
 import * as analyzeApi from '../../api/analyze.js';
+import { readEditVerdictStore } from './edit-verdict.js';
 
 // Prevent a real chokidar watcher from opening (handleChange path never starts one,
 // but retain an event-complete deterministic watcher harness for the serve/watch
@@ -109,7 +110,9 @@ async function writeFiles(files: Files): Promise<void> {
 /** From-scratch ("analyze --force") build over the whole file-set — the oracle. */
 async function fullBuild(files: Files): Promise<{ nodes: FunctionNode[]; edges: CallEdge[] }> {
   const { CallGraphBuilder } = await import('../analyzer/call-graph.js');
-  const input = Object.entries(files).map(([path, content]) => ({ path, content, language: 'TypeScript' }));
+  const input = Object.entries(files).map(([path, content]) => ({
+    path, content, language: path.endsWith('.py') ? 'Python' : 'TypeScript',
+  }));
   const r = await new CallGraphBuilder().build(input);
   return { nodes: Array.from(r.nodes.values()), edges: r.edges };
 }
@@ -182,6 +185,338 @@ function oracleOutgoingSig(edges: CallEdge[], file: string): string[] {
 describe('incremental watch converges to analyze --force (parity oracle)', () => {
   beforeEach(() => {
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+  });
+
+  it('persists both surviving caller sites after one completed producer edit', async () => {
+    const v1: Files = {
+      'src/api.ts': 'export function target() { return 1; }\n',
+      'src/a.ts': "import { target } from './api';\nexport function a() { return target(); }\n",
+      'src/b.ts': "import { target } from './api';\nexport function b() { return target(); }\n",
+    };
+    await writeFiles(v1);
+    const graph = await fullBuild(v1);
+    const store = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    seedStore(store, v1, graph);
+    store.close();
+    await writeFile(join(outputPath, 'repo-structure.json'), '{}');
+    await writeFile(join(outputPath, 'fingerprint.json'), '{}');
+    await writeFile(join(outputPath, 'dependency-graph.json'), JSON.stringify({ nodes: [], edges: [] }));
+
+    await writeFiles({ 'src/api.ts': 'export function renamed() { return 1; }\n' });
+    const { McpWatcher } = await import('./mcp-watcher.js');
+    await new McpWatcher({ rootPath: root, outputPath, embed: false })
+      .handleChange(join(root, 'src/api.ts'));
+
+    const verdictStore = await readEditVerdictStore(outputPath);
+    const findings = verdictStore?.entries[0]?.findings ?? [];
+    expect(findings.map(f => f.code)).toEqual([
+      'edit-broken-reference',
+      'edit-broken-reference',
+    ]);
+    expect(findings.map(f => f.location?.path).sort()).toEqual(['src/a.ts', 'src/b.ts']);
+  });
+
+  it('refreshes export facts and reports only a surviving exact named import', async () => {
+    const v1: Files = {
+      'src/api.ts': 'export function target() { return 1; }\n',
+      'src/use.ts': "import { target } from './api';\nexport function use() { return target(); }\n",
+    };
+    await writeFiles(v1);
+    const graph = await fullBuild(v1);
+    const store = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    seedStore(store, v1, graph);
+    store.close();
+    const apiAbs = join(root, 'src/api.ts');
+    const useAbs = join(root, 'src/use.ts');
+    await writeFile(join(outputPath, 'repo-structure.json'), '{}');
+    await writeFile(join(outputPath, 'fingerprint.json'), '{}');
+    await writeFile(join(outputPath, 'dependency-graph.json'), JSON.stringify({
+      nodes: [
+        { id: apiAbs, file: { path: 'src/api.ts', absolutePath: apiAbs }, exports: [{ name: 'target', isDefault: false, isReExport: false }], metrics: {} },
+        { id: useAbs, file: { path: 'src/use.ts', absolutePath: useAbs }, exports: [], metrics: {} },
+      ],
+      edges: [{ source: useAbs, target: apiAbs, importedNames: ['target'], importedSourceNames: ['target'], isTypeOnly: false, weight: 1 }],
+    }));
+
+    await writeFiles({ 'src/api.ts': 'export function renamed() { return 1; }\n' });
+    const { McpWatcher } = await import('./mcp-watcher.js');
+    await new McpWatcher({ rootPath: root, outputPath, embed: false })
+      .handleChange(apiAbs);
+
+    const dependency = JSON.parse(await readFile(join(outputPath, 'dependency-graph.json'), 'utf8'));
+    expect(dependency.nodes.find((n: { id: string }) => n.id === apiAbs).exports.map((e: { name: string }) => e.name))
+      .toContain('renamed');
+    const verdictStore = await readEditVerdictStore(outputPath);
+    expect(verdictStore?.entries[0]?.findings.map(f => f.code)).toContain('edit-import-breakage');
+  });
+
+  it('reuses canonical dependency node identities when the watcher root is a symlink alias', async () => {
+    const aliasParent = await mkdtemp(join(tmpdir(), 'ol-parity-alias-'));
+    try {
+      const canonicalRoot = await realpath(root);
+      const aliasRoot = join(aliasParent, 'repo');
+      await symlink(canonicalRoot, aliasRoot, 'dir');
+      await writeFiles({
+        'src/api.ts': 'export function target() { return 1; }\n',
+        'src/use.ts': "import { target } from './api';\nexport function use() { return target(); }\n",
+      });
+      const apiAbs = join(canonicalRoot, 'src/api.ts');
+      const useAbs = join(canonicalRoot, 'src/use.ts');
+      await writeFile(join(outputPath, 'dependency-graph.json'), JSON.stringify({
+        nodes: [
+          { id: apiAbs, file: { path: 'src/api.ts', absolutePath: apiAbs }, exports: [{ name: 'target' }], metrics: {} },
+          { id: useAbs, file: { path: 'src/use.ts', absolutePath: useAbs }, exports: [], metrics: {} },
+        ],
+        edges: [{ source: useAbs, target: apiAbs, importedSourceNames: ['target'] }],
+      }));
+      const { McpWatcher } = await import('./mcp-watcher.js');
+      const watcher = new McpWatcher({ rootPath: aliasRoot, outputPath, embed: false }) as unknown as {
+        updateDependencyGraph(files: Array<{ rel: string; content: string }>): Promise<Map<string, Array<{ importerFile: string; importedName: string }>>>;
+      };
+      const breakages = await watcher.updateDependencyGraph([
+        { rel: 'src/api.ts', content: 'export function renamed() { return 1; }\n' },
+      ]);
+      const dependency = JSON.parse(await readFile(join(outputPath, 'dependency-graph.json'), 'utf8')) as {
+        nodes: Array<{ id: string; file?: { path?: string } }>;
+      };
+      expect(dependency.nodes.filter(node => node.file?.path === 'src/api.ts').map(node => node.id)).toEqual([apiAbs]);
+      expect(breakages.get('src/api.ts')).toEqual([{ importerFile: 'src/use.ts', importedName: 'target' }]);
+    } finally {
+      await rm(aliasParent, { recursive: true, force: true });
+    }
+  });
+
+  it('compares an aliased named import by its exact source export identity', async () => {
+    const v1: Files = {
+      'src/api.ts': 'export function target() { return 1; }\n',
+      'src/use.ts': "import { target as localTarget } from './api';\nexport function use() { return localTarget(); }\n",
+    };
+    await writeFiles(v1);
+    const graph = await fullBuild(v1);
+    const store = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    seedStore(store, v1, graph);
+    store.close();
+    const apiAbs = join(root, 'src/api.ts');
+    const useAbs = join(root, 'src/use.ts');
+    await writeFile(join(outputPath, 'repo-structure.json'), '{}');
+    await writeFile(join(outputPath, 'fingerprint.json'), '{}');
+    await writeFile(join(outputPath, 'dependency-graph.json'), JSON.stringify({
+      nodes: [
+        { id: apiAbs, file: { path: 'src/api.ts', absolutePath: apiAbs }, exports: [{ name: 'target', isDefault: false, isReExport: false }], metrics: {} },
+        { id: useAbs, file: { path: 'src/use.ts', absolutePath: useAbs }, exports: [], metrics: {} },
+      ],
+      edges: [{ source: useAbs, target: apiAbs, importedNames: ['localTarget'], importedSourceNames: ['target'], weight: 1 }],
+    }));
+    await writeFiles({ 'src/api.ts': 'export function renamed() { return 1; }\n' });
+    const { McpWatcher } = await import('./mcp-watcher.js');
+    await new McpWatcher({ rootPath: root, outputPath, embed: false }).handleChange(apiAbs);
+    const findings = (await readEditVerdictStore(outputPath))?.entries[0]?.findings ?? [];
+    expect(findings).toContainEqual(expect.objectContaining({ code: 'edit-import-breakage', subject: 'target' }));
+  });
+
+  it('treats a direct named export converted to an effective named re-export as preserved', async () => {
+    const v1: Files = {
+      'src/origin.ts': 'export function target() { return 1; }\n',
+      'src/api.ts': 'export function target() { return 1; }\n',
+      'src/use.ts': "import { target } from './api';\nexport function use() { return target(); }\n",
+    };
+    await writeFiles(v1);
+    const graph = await fullBuild(v1);
+    const store = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    seedStore(store, v1, graph);
+    store.close();
+    const apiAbs = join(root, 'src/api.ts');
+    const useAbs = join(root, 'src/use.ts');
+    const originAbs = join(root, 'src/origin.ts');
+    await writeFile(join(outputPath, 'repo-structure.json'), '{}');
+    await writeFile(join(outputPath, 'fingerprint.json'), '{}');
+    await writeFile(join(outputPath, 'dependency-graph.json'), JSON.stringify({
+      nodes: [
+        { id: originAbs, file: { path: 'src/origin.ts', absolutePath: originAbs }, exports: [{ name: 'target' }], metrics: {} },
+        { id: apiAbs, file: { path: 'src/api.ts', absolutePath: apiAbs }, exports: [{ name: 'target', isDefault: false, isReExport: false }], metrics: {} },
+        { id: useAbs, file: { path: 'src/use.ts', absolutePath: useAbs }, exports: [], metrics: {} },
+      ],
+      edges: [{ source: useAbs, target: apiAbs, importedNames: ['target'], importedSourceNames: ['target'], weight: 1 }],
+    }));
+    await writeFiles({ 'src/api.ts': "export { target } from './origin';\n" });
+    const { McpWatcher } = await import('./mcp-watcher.js');
+    await new McpWatcher({ rootPath: root, outputPath, embed: false }).handleChange(apiAbs);
+    const findings = (await readEditVerdictStore(outputPath))?.entries[0]?.findings ?? [];
+    expect(findings.filter(finding => finding.code === 'edit-import-breakage')).toEqual([]);
+  });
+
+  it('stays silent when a direct export becomes an unresolved star re-export', async () => {
+    const v1: Files = {
+      'src/origin.ts': 'export function target() { return 1; }\n',
+      'src/api.ts': 'export function target() { return 1; }\n',
+      'src/use.ts': "import { target } from './api';\nexport function use() { return target(); }\n",
+    };
+    await writeFiles(v1);
+    const graph = await fullBuild(v1);
+    const store = EdgeStore.open(EdgeStore.dbPath(outputPath)); seedStore(store, v1, graph); store.close();
+    const apiAbs = join(root, 'src/api.ts'); const useAbs = join(root, 'src/use.ts'); const originAbs = join(root, 'src/origin.ts');
+    await writeFile(join(outputPath, 'repo-structure.json'), '{}'); await writeFile(join(outputPath, 'fingerprint.json'), '{}');
+    await writeFile(join(outputPath, 'dependency-graph.json'), JSON.stringify({ nodes: [
+      { id: originAbs, exports: [{ name: 'target' }], metrics: {} },
+      { id: apiAbs, exports: [{ name: 'target' }], metrics: {} }, { id: useAbs, exports: [], metrics: {} },
+    ], edges: [{ source: useAbs, target: apiAbs, importedSourceNames: ['target'] }] }));
+    await writeFiles({ 'src/api.ts': "export * from './origin';\n" });
+    const { McpWatcher } = await import('./mcp-watcher.js');
+    await new McpWatcher({ rootPath: root, outputPath, embed: false }).handleChange(apiAbs);
+    expect((await readEditVerdictStore(outputPath))?.entries[0]?.findings.filter(f => f.code === 'edit-import-breakage')).toEqual([]);
+  });
+
+  it('recognizes an exact module-level Python named re-export', async () => {
+    const v1: Files = {
+      'src/origin.py': 'def target():\n    return 1\n',
+      'src/api.py': 'def target():\n    return 1\n',
+      'src/use.py': 'from .api import target\ndef use():\n    return target()\n',
+    };
+    await writeFiles(v1);
+    const graph = await fullBuild(v1);
+    const store = EdgeStore.open(EdgeStore.dbPath(outputPath)); seedStore(store, v1, graph); store.close();
+    const apiAbs = join(root, 'src/api.py'); const useAbs = join(root, 'src/use.py'); const originAbs = join(root, 'src/origin.py');
+    await writeFile(join(outputPath, 'repo-structure.json'), '{}'); await writeFile(join(outputPath, 'fingerprint.json'), '{}');
+    await writeFile(join(outputPath, 'dependency-graph.json'), JSON.stringify({ nodes: [
+      { id: originAbs, exports: [{ name: 'target' }], metrics: {} },
+      { id: apiAbs, exports: [{ name: 'target' }], metrics: {} }, { id: useAbs, exports: [], metrics: {} },
+    ], edges: [{ source: useAbs, target: apiAbs, importedSourceNames: ['target'] }] }));
+    await writeFiles({ 'src/api.py': 'from .origin import target\n' });
+    const { McpWatcher } = await import('./mcp-watcher.js');
+    await new McpWatcher({ rootPath: root, outputPath, embed: false }).handleChange(apiAbs);
+    expect((await readEditVerdictStore(outputPath))?.entries[0]?.findings.filter(f => f.code === 'edit-import-breakage')).toEqual([]);
+  });
+
+  it('reports an exact TypeScript arity mismatch from persisted edge facts', async () => {
+    const v1: Files = {
+      'src/api.ts': 'export function target(a: number) { return a; }\n',
+      'src/use.ts': "import { target } from './api';\nexport function use() { return target(1); }\n",
+    };
+    await writeFiles(v1);
+    const graph = await fullBuild(v1);
+    const store = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    seedStore(store, v1, graph);
+    store.close();
+    await writeFile(join(outputPath, 'repo-structure.json'), '{}');
+    await writeFile(join(outputPath, 'fingerprint.json'), '{}');
+    await writeFile(join(outputPath, 'dependency-graph.json'), JSON.stringify({ nodes: [], edges: [] }));
+
+    await writeFiles({ 'src/api.ts': 'export function target(a: number, b: number) { return a + b; }\n' });
+    const { McpWatcher } = await import('./mcp-watcher.js');
+    await new McpWatcher({ rootPath: root, outputPath, embed: false })
+      .handleChange(join(root, 'src/api.ts'));
+
+    const verdictStore = await readEditVerdictStore(outputPath);
+    expect(verdictStore?.entries[0]?.findings).toMatchObject([{
+      code: 'edit-arity-mismatch',
+      location: { path: 'src/use.ts', line: 2 },
+    }]);
+  });
+
+  it('does not persist transient breakage when producer and consumer are one batch', async () => {
+    const v1: Files = {
+      'src/api.ts': 'export function target() { return 1; }\n',
+      'src/use.ts': "import { target } from './api';\nexport function use() { return target(); }\n",
+    };
+    await writeFiles(v1);
+    const graph = await fullBuild(v1);
+    const store = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    seedStore(store, v1, graph);
+    store.close();
+    const apiAbs = join(root, 'src/api.ts');
+    const useAbs = join(root, 'src/use.ts');
+    await writeFile(join(outputPath, 'repo-structure.json'), '{}');
+    await writeFile(join(outputPath, 'fingerprint.json'), '{}');
+    await writeFile(join(outputPath, 'dependency-graph.json'), JSON.stringify({
+      nodes: [
+        { id: apiAbs, file: { path: 'src/api.ts', absolutePath: apiAbs }, exports: [{ name: 'target', isDefault: false, isReExport: false }], metrics: {} },
+        { id: useAbs, file: { path: 'src/use.ts', absolutePath: useAbs }, exports: [], metrics: {} },
+      ],
+      edges: [{ source: useAbs, target: apiAbs, importedNames: ['target'], importedSourceNames: ['target'], isTypeOnly: false, weight: 1 }],
+    }));
+    await writeFiles({
+      'src/api.ts': 'export function renamed() { return 1; }\n',
+      'src/use.ts': "import { renamed } from './api';\nexport function use() { return renamed(); }\n",
+    });
+
+    const { McpWatcher } = await import('./mcp-watcher.js');
+    const watcher = new McpWatcher({ rootPath: root, outputPath, embed: false });
+    await (watcher as unknown as {
+      handleBatch(paths: string[], options: { syncFlush: boolean }): Promise<void>;
+    }).handleBatch([apiAbs, useAbs], { syncFlush: true });
+
+    const verdictStore = await readEditVerdictStore(outputPath);
+    expect(verdictStore?.entries.flatMap(entry => entry.findings)).toEqual([]);
+  });
+
+  it('keeps latest unrelated verdicts across batches and invalidates a changed semantic basis', async () => {
+    const v1: Files = {
+      'src/one.ts': 'export function one() { return 1; }\n',
+      'src/two.ts': 'export function two() { return 2; }\n',
+      'src/use-one.ts': "import { one } from './one';\nexport function useOne() { return one(); }\n",
+      'src/use-two.ts': "import { two } from './two';\nexport function useTwo() { return two(); }\n",
+    };
+    await writeFiles(v1);
+    const graph = await fullBuild(v1);
+    const store = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    seedStore(store, v1, graph);
+    store.close();
+    await writeFile(join(outputPath, 'repo-structure.json'), '{}');
+    await writeFile(join(outputPath, 'fingerprint.json'), '{}');
+    await writeFile(join(outputPath, 'dependency-graph.json'), JSON.stringify({ nodes: [], edges: [] }));
+    const { McpWatcher } = await import('./mcp-watcher.js');
+    const watcher = new McpWatcher({ rootPath: root, outputPath, embed: false });
+
+    await writeFiles({ 'src/one.ts': 'export function oneRenamed() { return 1; }\n' });
+    await watcher.handleChange(join(root, 'src/one.ts'));
+    await writeFiles({ 'src/two.ts': 'export function twoRenamed() { return 2; }\n' });
+    await watcher.handleChange(join(root, 'src/two.ts'));
+    expect((await readEditVerdictStore(outputPath))?.entries.map(entry => entry.file)).toEqual([
+      'src/one.ts', 'src/two.ts',
+    ]);
+
+    await writeFiles({ 'src/use-one.ts': "import { oneRenamed } from './one';\nexport function useOne() { return oneRenamed(); }\n" });
+    await watcher.handleChange(join(root, 'src/use-one.ts'));
+    expect((await readEditVerdictStore(outputPath))?.entries.map(entry => entry.file)).toEqual([
+      'src/two.ts', 'src/use-one.ts',
+    ]);
+  });
+
+  it('selects a real direct test from the retained full-analysis graph after a production watcher edit', async () => {
+    await writeFiles({
+      'src/api.ts': 'export function target(a: number) { return a; }\n',
+      'src/api.test.ts': "import { target } from './api';\nexport function verifiesTarget() { return target(1); }\n",
+    });
+    const { runAnalysis } = await import('../../cli/commands/analyze.js');
+    await runAnalysis(root, outputPath, { maxFiles: 50, include: [], exclude: [] });
+    await writeFiles({ 'src/api.ts': 'export function target(a: number, b: number) { return a + b; }\n' });
+    const { McpWatcher } = await import('./mcp-watcher.js');
+    await new McpWatcher({ rootPath: root, outputPath, embed: false }).handleChange(join(root, 'src/api.ts'));
+    const verdict = (await readEditVerdictStore(outputPath))?.entries.find(entry => entry.file === 'src/api.ts');
+    expect(verdict?.boundaries.reachingTestsBasis).toBe('last-full-analysis');
+    expect(verdict?.reachingTests).toEqual(expect.arrayContaining([
+      expect.objectContaining({ file: 'src/api.test.ts', test: 'verifiesTarget' }),
+    ]));
+    expect(verdict?.basis?.map(basis => basis.file)).toContain('src/api.test.ts');
+  });
+
+  it('keeps fact basis tied to analyzed snapshots and fails closed when a required snapshot is absent', async () => {
+    await writeFiles({ 'src/api.ts': 'new', 'src/use.ts': 'analyzed-caller' });
+    const { McpWatcher } = await import('./mcp-watcher.js');
+    const watcher = new McpWatcher({ rootPath: root, outputPath, embed: false }) as unknown as {
+      buildVerdictBasis(input: Record<string, unknown>, imports: []): Promise<Array<{ file: string; contentHash: string }> | null>;
+    };
+    const apiHash = createHash('sha256').update('new').digest('hex');
+    const callerHash = createHash('sha256').update('analyzed-caller').digest('hex');
+    const input = {
+      file: 'src/api.ts', contentHash: apiHash, oldNodes: [], newNodes: [],
+      oldIncoming: [{ callerId: 'src/use.ts::u', callerFile: 'src/use.ts', calleeId: 'src/api.ts::f', calleeName: 'f' }],
+      postIncoming: [], postOutgoingByCaller: new Map(), recomputedCallerFiles: new Set(['src/use.ts']),
+      staleFiles: [], reachingTests: [], basisSnapshots: new Map([['src/api.ts', apiHash], ['src/use.ts', callerHash]]),
+    };
+    await writeFiles({ 'src/use.ts': 'mutated-after-analysis' });
+    expect(await watcher.buildVerdictBasis(input, [])).toContainEqual({ file: 'src/use.ts', contentHash: callerHash });
+    expect(await watcher.buildVerdictBasis({ ...input, basisSnapshots: new Map([['src/api.ts', apiHash]]) }, [])).toBeNull();
   });
 
   it('Scenario 2: a newly-added symbol is resolved by a prior NON-caller', async () => {

@@ -72,11 +72,19 @@ describe('Pass-1 late-fact reuse', () => {
     const graph = await new CallGraphBuilder().build(preChangeGoldenFiles);
     const bytes = JSON.stringify(serializeCallGraph(graph));
     expect(createHash('sha256').update(bytes).digest('hex'))
-      .toBe('31bf57333047a20849b7f37736e1ee9e9ba6d0f11eb11876428a6c2019f3c806');
-    expect(bytes).toHaveLength(9387);
+      .toBe('edf9d06200bb0e7477d2634800c780f02636ef145531dc329a5c5697cd27d652');
+    expect(bytes).toHaveLength(11233);
     expect(graph.nodes.size).toBe(12);
     expect(graph.edges).toHaveLength(10);
     expect(graph.inheritanceEdges).toHaveLength(2);
+    expect([...graph.nodes.values()].find(node => node.name === 'handler')?.callArity).toEqual({
+      required: 0,
+      total: 0,
+      variadic: false,
+      variadicParameterCount: 0,
+      hasOptionalOrDefault: false,
+      implicitReceiverCount: 0,
+    });
   });
 
   it('is byte-identical to the pre-optimization class and dynamic-dispatch passes', async () => {

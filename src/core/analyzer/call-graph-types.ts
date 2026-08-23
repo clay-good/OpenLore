@@ -54,6 +54,10 @@ export interface RawEdge {
   calleeObject?: string;
   /** Call type detected from AST shape at extraction time */
   callType?: CallType;
+  /** Number of arguments known to be present at the call site. */
+  argCount?: number;
+  /** True when a spread/splat makes argCount a lower bound rather than an exact count. */
+  argCountLowerBound?: true;
 }
 
 /** Plain-data class relationship extracted while the Pass-1 syntax tree is alive. */
@@ -80,6 +84,23 @@ export interface DynamicCallbackFact {
 export interface DynamicDispatchFacts {
   events: DynamicEventFacts[];
   callbacks: DynamicCallbackFact[];
+}
+
+/** Invocation-arity facts recovered from a live declaration AST. */
+export interface FunctionCallArity {
+  /** Required arguments at an ordinary call site (implicit receivers excluded). */
+  required: number;
+  /** Maximum fixed arguments before any variadic parameter (implicit receivers excluded). */
+  total: number;
+  variadic: boolean;
+  /** Exact number of source variadic declarations (`...rest`, `*args`, `**kwargs`). */
+  variadicParameterCount?: number;
+  /** Optional/defaulted parameters exist; conservative verdict consumers must stay silent. */
+  hasOptionalOrDefault: boolean;
+  /** Source parameters such as Python self/cls or a TypeScript pseudo-this, excluded above. */
+  implicitReceiverCount: number;
+  /** Multiple same-scope declarations collapsed to this graph node. */
+  overloaded?: true;
 }
 
 export interface FunctionNode {
@@ -123,6 +144,8 @@ export interface FunctionNode {
    * anonymous/synthetic symbols with no derivable descriptor.
    */
   stableId?: string;
+  /** AST-derived invocation bounds. Present only for supported, unambiguous declaration shapes. */
+  callArity?: FunctionCallArity;
 }
 
 /** Broad category of an external (unresolved) call */
@@ -181,6 +204,10 @@ export interface CallEdge {
   kind?: EdgeKind;
   /** Semantic call type; only set when kind === 'calls' */
   callType?: CallType;
+  /** Number of arguments known to be present at the call site. */
+  argCount?: number;
+  /** True when a spread/splat makes argCount a lower bound rather than an exact count. */
+  argCountLowerBound?: true;
   /**
    * Name of the synthesis rule that produced this edge (e.g. 'event-channel',
    * 'route-handler'). Set only when `confidence === 'synthesized'`; absent on

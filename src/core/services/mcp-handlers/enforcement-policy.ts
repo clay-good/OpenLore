@@ -143,6 +143,22 @@ export const FINDING_CODE_REGISTRY: Record<string, FindingCodeSpec> = {
     source: 'impact-certificate',
     description: 'The change opens a new path into a declared covering surface marked `critical`.',
   },
+  // ── per-edit structural verdict (add-edit-loop-breakage-verdict) ──
+  'edit-broken-reference': {
+    defaultClass: 'advisory',
+    source: 'edit-verdict',
+    description: 'An edited file removed or renamed a symbol that still has a resolved call site.',
+  },
+  'edit-arity-mismatch': {
+    defaultClass: 'advisory',
+    source: 'edit-verdict',
+    description: 'An edited signature is provably incompatible with a stored call-site argument count.',
+  },
+  'edit-import-breakage': {
+    defaultClass: 'advisory',
+    source: 'edit-verdict',
+    description: 'An edited file no longer exports a name that another file still imports.',
+  },
   // ── parse-health (add-parse-health-boundary-disclosure) ──
   'parse-health': {
     defaultClass: 'advisory',

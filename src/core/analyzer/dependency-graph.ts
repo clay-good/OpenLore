@@ -68,6 +68,8 @@ export interface DependencyEdge {
   source: string;
   target: string;
   importedNames: string[];
+  /** Exact source-export identities for statically named imports; aliases are resolved. */
+  importedSourceNames?: string[];
   isTypeOnly: boolean;
   weight: number;
   /** Present when this edge was derived from an HTTP call rather than a static import */
@@ -198,6 +200,7 @@ export async function computeFileImportEdges(
       source: fromAbs,
       target: resolvedPath,
       importedNames: imp.importedNames,
+      ...(imp.importedSourceNames ? { importedSourceNames: imp.importedSourceNames } : {}),
       isTypeOnly: imp.isTypeOnly,
       weight: imp.isTypeOnly ? 0.5 : 1,
     };

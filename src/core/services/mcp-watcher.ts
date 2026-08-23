@@ -24,13 +24,14 @@
  *     OPENLORE_WATCH_DEBUG).
  */
 
-import { readFile, readdir, unlink } from 'node:fs/promises';
+import { readFile, readdir, realpath, unlink } from 'node:fs/promises';
 import { atomicWriteFile } from '../decisions/atomic-store.js';
 import { acquireAnalysisLock } from '../runtime/advisory-lock.js';
 import {
   REQUIRED_ANALYSIS_ARTIFACTS,
   discardGeneration,
   publishGeneration,
+  readCurrentGeneration,
 } from '../runtime/analysis-generation.js';
 import { createHash } from 'node:crypto';
 import { join, relative, posix } from 'node:path';
@@ -47,6 +48,18 @@ import { isTestFile } from '../analyzer/test-file.js';
 import { EdgeStore } from './edge-store.js';
 import { refreshAttestationCounts } from '../analyzer/index-attestation.js';
 import { primeContextCache, type CachedContext } from './mcp-handlers/utils.js';
+import {
+  deriveEditVerdict,
+  selectReachingTestsFromFullGraph,
+  writeEditVerdictStore,
+  type EditCallSite,
+  type GraphVerdictInput,
+  type ImportBreakageSite,
+  MAX_EDIT_VERDICT_BASIS_FILES,
+  MAX_EDIT_VERDICT_BASIS_FILE_BYTES,
+  MAX_EDIT_VERDICT_BASIS_TOTAL_BYTES,
+} from './edit-verdict.js';
+import { readFileConfined } from '../../utils/path-confinement.js';
 import {
   OPENLORE_DIR,
   OPENLORE_ANALYSIS_SUBDIR,
@@ -631,7 +644,7 @@ export class McpWatcher {
       if (detectLanguage(rel) === 'unknown' && !HTML_EXTENSIONS.test(rel)) continue;
       let content: string;
       try {
-        content = await readFile(abs, 'utf-8');
+        content = await readFileConfined(this.rootPath, rel, MAX_EDIT_VERDICT_BASIS_FILE_BYTES);
       } catch {
         continue; // file may have been deleted between the event and now
       }
@@ -643,11 +656,21 @@ export class McpWatcher {
     // Hold the same fence across both mutations; splitting them into two sections
     // lets a full analyze overwrite the DB between the watcher's DB and JSON writes.
     const releaseAnalysis = await acquireAnalysisLock(this.outputPath);
+    let previousGenerationId: string | undefined;
     let context: CachedContext;
     const changedFiles: ChangedFile[] = [];
     const changedNodes: FunctionNode[] = [];
+    const graphVerdictInputs: GraphVerdictInput[] = [];
     try {
-    // 2. Incremental edge update (CGC _handle_modification algorithm), one open
+      previousGenerationId = (await readCurrentGeneration(
+        this.outputPath, [...REQUIRED_ANALYSIS_ARTIFACTS],
+      ))?.generationId;
+      const loaded = await this.loadContext();
+      if (!loaded) {
+        process.stderr.write(`[mcp-watcher] no context at ${this.contextPath} — run analyze first\n`);
+        return;
+      }
+      // 2. Incremental edge update (CGC _handle_modification algorithm), one open
     //    store for the whole batch. Content-hash skip drops no-op autosaves.
     if (EdgeStore.exists(this.outputPath)) {
       const store = EdgeStore.open(EdgeStore.dbPath(this.outputPath));
@@ -663,10 +686,64 @@ export class McpWatcher {
           );
           this.scheduleBackgroundRebuild();
         }
-        for (const f of files) {
-          if (store.notReady) break;
+        // Capture every file's pre-edit facts before mutating any file in this
+        // coalesced batch. A producer and its consumer can be saved in the same
+        // debounce; deriving between their swaps would persist a transient false
+        // broken-reference finding.
+        const work: Array<{
+          f: { rel: string; abs: string; content: string };
+          newHash: string;
+          oldNodes: FunctionNode[];
+          oldIncoming: EditCallSite[];
+          preTests: ReturnType<typeof selectReachingTestsFromFullGraph>;
+          preTestHashes: Map<string, string>;
+        }> = [];
+        for (const f of store.notReady ? [] : files) {
           const newHash = createHash('sha256').update(f.content).digest('hex');
-          if (store.getFileHash(f.rel) === newHash) continue; // no-op autosave
+          if (store.getFileHash(f.rel) === newHash) continue;
+          const oldNodes = store.getNodesForFile(f.rel);
+          const oldIncoming: EditCallSite[] = [];
+          for (const node of oldNodes) {
+            for (const edge of store.getCallers(node.id)) {
+              const caller = store.getNode(edge.callerId);
+              if (!caller) continue;
+              oldIncoming.push({
+                callerId: edge.callerId,
+                callerFile: caller.filePath,
+                calleeId: edge.calleeId,
+                calleeName: edge.calleeName,
+                confidence: edge.confidence,
+                ...(edge.kind !== undefined ? { kind: edge.kind } : {}),
+                ...(edge.line !== undefined ? { line: edge.line } : {}),
+                ...(edge.argCount !== undefined ? { argCount: edge.argCount } : {}),
+                ...(edge.argCountLowerBound ? { argCountLowerBound: true as const } : {}),
+              });
+            }
+          }
+          const preTests = selectReachingTestsFromFullGraph(loaded.callGraph, oldNodes.map(n => n.id));
+          const testPaths = preTests.tests.flatMap(test => test.basisFiles ?? [test.file]);
+          const preTestHashes = await this.snapshotVerdictFiles(testPaths) ?? new Map<string, string>();
+          if (testPaths.length > 0 && preTestHashes.size === 0) {
+            preTests.tests = [];
+            preTests.truncated = true;
+          }
+          work.push({ f, newHash, oldNodes, oldIncoming, preTests, preTestHashes });
+        }
+        const pendingVerdicts: Array<{
+          file: string;
+          contentHash: string;
+          oldNodes: FunctionNode[];
+          newNodes: FunctionNode[];
+          oldIncoming: EditCallSite[];
+          recomputedCallerFiles: Set<string>;
+          staleFiles: string[];
+          preTests: ReturnType<typeof selectReachingTestsFromFullGraph>;
+          basisSnapshots: Map<string, string>;
+        }> = [];
+
+        for (const item of work) {
+          if (store.notReady) break;
+          const { f, newHash, oldNodes, oldIncoming, preTests, preTestHashes } = item;
 
           // Symbol names present BEFORE the edit — diffed against the re-parsed
           // result to find names this edit ADDS (which may now bind prior
@@ -770,6 +847,19 @@ export class McpWatcher {
             }
           });
 
+          const staleNow = skipped.length > 0 ? [...dropped, ...skipped] : dropped;
+          pendingVerdicts.push({
+            file: f.rel,
+            contentHash: newHash,
+            oldNodes,
+            newNodes,
+            oldIncoming,
+            recomputedCallerFiles: new Set(recomputed),
+            staleFiles: staleNow,
+            preTests,
+            basisSnapshots: new Map([...preTestHashes, ...sub.analyzedFileHashes]),
+          });
+
           changedFiles.push({ rel: f.rel, content: f.content });
           for (const n of newNodes) changedNodes.push(n);
           if (this.debug) {
@@ -780,6 +870,43 @@ export class McpWatcher {
               `${staleCount ? `, ${staleCount} → stale${skipped.length ? ` (${skipped.length} unreadable)` : ''}` : ''})\n`,
             );
           }
+        }
+        // All swaps in the debounce are now committed. Only now inspect the post
+        // graph, so a consumer changed later in this same batch can clear a site.
+        for (const pendingVerdict of pendingVerdicts) {
+          const postIncoming: EditCallSite[] = [];
+          for (const node of pendingVerdict.newNodes) {
+            for (const edge of store.getCallers(node.id)) {
+              const caller = store.getNode(edge.callerId);
+              if (!caller) continue;
+              postIncoming.push({
+                callerId: edge.callerId,
+                callerFile: caller.filePath,
+                calleeId: edge.calleeId,
+                calleeName: edge.calleeName,
+                confidence: edge.confidence,
+                ...(edge.kind !== undefined ? { kind: edge.kind } : {}),
+                ...(edge.line !== undefined ? { line: edge.line } : {}),
+                ...(edge.argCount !== undefined ? { argCount: edge.argCount } : {}),
+                ...(edge.argCountLowerBound ? { argCountLowerBound: true as const } : {}),
+              });
+            }
+          }
+          const postOutgoingByCaller = new Map<string, import('../analyzer/call-graph.js').CallEdge[]>();
+          for (const site of pendingVerdict.oldIncoming) {
+            if (!postOutgoingByCaller.has(site.callerId)) {
+              postOutgoingByCaller.set(site.callerId, store.getCallees(site.callerId));
+            }
+          }
+          graphVerdictInputs.push({
+            ...pendingVerdict,
+            postOutgoingByCaller,
+            postIncoming,
+            reachingTests: pendingVerdict.preTests.tests,
+            reachingTestsTruncated: pendingVerdict.preTests.truncated,
+            reachingTestsBasis: 'last-full-analysis',
+            basis: [],
+          });
         }
         // Keep the index attestation's counts in lockstep with the now-mutated store so
         // the load-time verdict doesn't falsely report `degraded` on a valid incremental
@@ -809,11 +936,6 @@ export class McpWatcher {
     // directory — including the watcher's own self-heal `analyze --reanalyze` spawn
     // (change: harden-artifact-write-atomicity). loadContext is INSIDE the lock so
     // our persist can never clobber a fresh full write that landed after we read.
-      const loaded = await this.loadContext();
-      if (!loaded) {
-        process.stderr.write(`[mcp-watcher] no context at ${this.contextPath} — run analyze first\n`);
-        return;
-      }
       if (!loaded.signatures) loaded.signatures = [];
       for (const f of changedFiles) {
         const newMap = extractSignatures(f.rel, f.content);
@@ -834,7 +956,7 @@ export class McpWatcher {
       //      O(change): re-resolve the changed files' imports and splice their
       //      edges, recompute in/out-degree. Global metrics (pageRank, clusters,
       //      betweenness) are O(graph) and left to the next full `analyze`.
-      await this.updateDependencyGraph(changedFiles);
+      const importBreakages = await this.updateDependencyGraph(changedFiles);
 
       // 3.7. Style fingerprint — keep style-fingerprint.json's per-file idiom counters live for the
       //      changed files (change: add-codebase-style-fingerprint). Incremental: re-tally only the
@@ -848,7 +970,40 @@ export class McpWatcher {
       //      must be able to create it, and a repaired file must be able to remove its entry (and the
       //      artifact once empty).
       await this.updateParseHealth(changedFiles);
-      await this.republishGeneration();
+      const generationId = await this.republishGeneration();
+      if (generationId && graphVerdictInputs.length > 0) {
+        const derived = await Promise.all(graphVerdictInputs.map(async input => {
+          const sites = importBreakages.get(input.file) ?? [];
+          const basis = await this.buildVerdictBasis(input, sites);
+          if (!basis) return null;
+          return deriveEditVerdict({
+            ...input,
+            importBreakages: sites,
+            basis,
+          });
+        }));
+        const verdicts = derived.filter(verdict => verdict !== null);
+        const invalidatedFiles = new Set(files.map(file => file.rel));
+        for (const input of graphVerdictInputs) {
+          for (const file of input.recomputedCallerFiles) invalidatedFiles.add(file);
+          for (const file of input.staleFiles) invalidatedFiles.add(file);
+        }
+        try {
+          const evictedFiles = graphVerdictInputs
+            .filter((_input, index) => derived[index] === null)
+            .map(input => input.file);
+          await writeEditVerdictStore(this.outputPath, generationId, verdicts, {
+            previousGenerationId,
+            invalidatedFiles: [...invalidatedFiles],
+            evictedFiles,
+          });
+        } catch (err) {
+          // The generation already advanced, so any previous verdict is rejected
+          // as stale by readers. Preserve graph freshness and disclose the missing
+          // optional delivery artifact rather than rolling back committed analysis.
+          process.stderr.write(`[mcp-watcher] edit-verdict write error: ${(err as Error).message}\n`);
+        }
+      }
       context = loaded;
     } finally {
       await releaseAnalysis();
@@ -1240,14 +1395,58 @@ export class McpWatcher {
    * clusters) are O(graph) and deliberately left to the next full `analyze`.
    * No-op when no dependency graph exists. Never throws into the batch loop.
    */
-  private async updateDependencyGraph(changedFiles: ChangedFile[]): Promise<void> {
+  private async snapshotVerdictFiles(paths: readonly string[]): Promise<Map<string, string> | null> {
+    const files = [...new Set(paths)].sort();
+    if (files.length > MAX_EDIT_VERDICT_BASIS_FILES) return null;
+    const hashes = new Map<string, string>();
+    let totalBytes = 0;
+    for (const file of files) {
+      try {
+        const content = await readFileConfined(this.rootPath, file, MAX_EDIT_VERDICT_BASIS_FILE_BYTES);
+        totalBytes += Buffer.byteLength(content);
+        if (totalBytes > MAX_EDIT_VERDICT_BASIS_TOTAL_BYTES) return null;
+        hashes.set(file, createHash('sha256').update(content).digest('hex'));
+      } catch {
+        return null;
+      }
+    }
+    return hashes;
+  }
+
+  private async buildVerdictBasis(
+    input: GraphVerdictInput,
+    importBreakages: readonly ImportBreakageSite[],
+  ): Promise<Array<{ file: string; contentHash: string }> | null> {
+    const snapshots = new Map(input.basisSnapshots ?? []);
+    snapshots.set(input.file, input.contentHash);
+    const importHashes = await this.snapshotVerdictFiles(importBreakages.map(site => site.importerFile));
+    if (!importHashes) return null;
+    for (const [file, hash] of importHashes) snapshots.set(file, hash);
+    const required = new Set<string>([input.file]);
+    for (const site of input.oldIncoming) {
+      if (input.recomputedCallerFiles.has(site.callerFile)) required.add(site.callerFile);
+    }
+    for (const site of input.postIncoming) {
+      if (!input.staleFiles.includes(site.callerFile)) required.add(site.callerFile);
+    }
+    for (const site of importBreakages) required.add(site.importerFile);
+    for (const test of input.reachingTests) for (const file of test.basisFiles ?? [test.file]) required.add(file);
+    // Every snapshot was captured while deriving a graph fact (including barrel
+    // resolution and intermediate reaching-test nodes), so it is mandatory.
+    for (const file of snapshots.keys()) required.add(file);
+    if (required.size > MAX_EDIT_VERDICT_BASIS_FILES || [...required].some(file => !snapshots.has(file))) return null;
+    return [...required].sort().map(file => ({ file, contentHash: snapshots.get(file)! }));
+  }
+
+  private async updateDependencyGraph(changedFiles: ChangedFile[]): Promise<Map<string, ImportBreakageSite[]>> {
     const graphPath = join(this.outputPath, ARTIFACT_DEPENDENCY_GRAPH);
+    const breakages = new Map<string, ImportBreakageSite[]>();
     try {
       let raw: string;
       try {
         raw = await readFile(graphPath, 'utf-8');
       } catch {
-        return; // no dependency graph yet — nothing to keep fresh
+        return breakages; // no dependency graph yet — nothing to keep fresh
       }
       // Narrow view for the fields we touch. We MUTATE the parsed object in place
       // and re-serialize it, so untyped node fields not modeled here (file,
@@ -1256,19 +1455,48 @@ export class McpWatcher {
         nodes: Array<{ id: string; file?: { path: string; absolutePath: string }; exports?: unknown[]; metrics?: Record<string, number> }>;
         edges: Array<{ source: string; target: string; httpEdge?: unknown; isCallEdge?: boolean }>;
       };
-      if (!Array.isArray(graph.nodes) || !Array.isArray(graph.edges)) return;
+      if (!Array.isArray(graph.nodes) || !Array.isArray(graph.edges)) return breakages;
 
       const { ImportExportParser } = await import('../analyzer/import-parser.js');
       const { computeFileImportEdges } = await import('../analyzer/dependency-graph.js');
+      type ExportFact = { name?: unknown; isDefault?: unknown; isReExport?: unknown };
+      type ImportEdge = { source: string; target: string; importedSourceNames?: unknown; httpEdge?: unknown; isCallEdge?: boolean };
       const fileSet = new Set(graph.nodes.map((n) => n.id)); // absolute paths
+      const canonicalRoot = await realpath(this.rootPath).catch(() => this.rootPath);
+      // Preserve the identity convention already used by the artifact. Full
+      // analysis uses canonical IDs, while older/hand-seeded graphs may use the
+      // watcher's lexical root. Mixing the two retains stale edges and creates
+      // duplicate nodes.
+      const usesLexicalIds = graph.nodes.some((node) => {
+        const rel = relative(this.rootPath, node.id);
+        return rel === '' || (!rel.startsWith('/') && !rel.startsWith('\\') &&
+          !/^[A-Za-z]:[\\/]/.test(rel) && rel !== '..' && !rel.split(/[\\/]/).includes('..'));
+      });
+      const artifactRoot = usesLexicalIds ? this.rootPath : canonicalRoot;
+      const relativePathById = new Map(
+        graph.nodes
+          .filter((node): node is typeof node & { file: { path: string; absolutePath: string } } =>
+            typeof node.file?.path === 'string')
+          .map(node => [node.id, node.file.path]),
+      );
+      const absolutePathByRel = new Map<string, string>();
       const parser = new ImportExportParser();
       let changed = false;
+      const oldExports = new Map<string, Set<string>>();
+      const newExports = new Map<string, Set<string>>();
+      const unresolvedStarExports = new Set<string>();
 
       for (const f of changedFiles) {
-        const abs = join(this.rootPath, f.rel);
+        // Full analysis canonicalizes its root. Reuse that artifact identity
+        // when the watcher was opened through a symlink alias, or a lexical
+        // duplicate node would be inserted and exact target joins would fail.
+        const existingNode = graph.nodes.find(node => node.file?.path === f.rel) ??
+          graph.nodes.find(node => node.id === join(artifactRoot, f.rel));
+        const abs = existingNode?.id ?? join(artifactRoot, f.rel);
+        absolutePathByRel.set(f.rel, abs);
         let analysis;
         try {
-          analysis = await parser.parseFile(abs);
+          analysis = parser.parseContent(abs, f.content);
         } catch {
           continue;
         }
@@ -1280,7 +1508,29 @@ export class McpWatcher {
           graph.nodes.push({ id: abs, file: { path: f.rel, absolutePath: abs }, exports: [], metrics: { inDegree: 0, outDegree: 0 } });
           fileSet.add(abs);
         }
-        const newEdges = await computeFileImportEdges(abs, analysis, fileSet, this.rootPath);
+        const node = existingNode ?? graph.nodes.find(n => n.id === abs);
+        const old = new Set(
+          ((node?.exports ?? []) as ExportFact[])
+            .filter(e => typeof e.name === 'string' && e.name !== '*' && e.isDefault !== true)
+            .map(e => e.name as string),
+        );
+        const fresh = new Set(
+          analysis.exports
+            .filter(e => e.name !== '*' && !e.isDefault)
+            .map(e => e.name),
+        );
+        if (detectLanguage(f.rel) === 'Python') {
+          for (const imported of analysis.imports) {
+            if (!imported.isTopLevel) continue;
+            if (imported.importedNames.includes('*')) unresolvedStarExports.add(f.rel);
+            else for (const name of imported.importedNames) if (!name.startsWith('_')) fresh.add(name);
+          }
+        }
+        if (analysis.exports.some(e => e.name === '*' && e.isReExport)) unresolvedStarExports.add(f.rel);
+        oldExports.set(f.rel, old);
+        newExports.set(f.rel, fresh);
+        if (node) node.exports = analysis.exports;
+        const newEdges = await computeFileImportEdges(abs, analysis, fileSet, artifactRoot);
         // Drop this file's previous IMPORT edges (keep HTTP / call-synthesized
         // edges, which the watcher does not rebuild), then splice in the fresh set.
         graph.edges = graph.edges.filter(
@@ -1289,7 +1539,33 @@ export class McpWatcher {
         graph.edges.push(...(newEdges as typeof graph.edges));
         changed = true;
       }
-      if (!changed) return;
+      if (!changed) return breakages;
+
+      // Inspect the fully-patched batch, not each source independently. If a
+      // consumer removed or renamed its import in the same debounce, its fresh
+      // edge is absent and no transient finding survives.
+      const removedByTarget = new Map<string, { rel: string; names: Set<string> }>();
+      for (const f of changedFiles) {
+        if (unresolvedStarExports.has(f.rel)) continue;
+        const names = new Set([...oldExports.get(f.rel) ?? []].filter(name => !newExports.get(f.rel)?.has(name)));
+        const target = absolutePathByRel.get(f.rel);
+        if (target && names.size > 0) removedByTarget.set(target, { rel: f.rel, names });
+      }
+      for (const edge of graph.edges as ImportEdge[]) {
+        const removed = removedByTarget.get(edge.target);
+        if (!removed || edge.source === edge.target || edge.httpEdge !== undefined || edge.isCallEdge === true ||
+            !Array.isArray(edge.importedSourceNames)) continue;
+        const importerFile = relativePathById.get(edge.source) ?? relative(artifactRoot, edge.source);
+        if (importerFile.startsWith('/') || importerFile.startsWith('\\') || /^[A-Za-z]:[\\/]/.test(importerFile) ||
+            importerFile === '..' || importerFile.split(/[\\/]/).includes('..')) continue;
+        const sites = breakages.get(removed.rel) ?? [];
+        for (const name of edge.importedSourceNames) {
+          if (typeof name === 'string' && name !== '*' && name !== 'default' && removed.names.has(name)) {
+            sites.push({ importerFile, importedName: name });
+          }
+        }
+        if (sites.length > 0) breakages.set(removed.rel, sites);
+      }
 
       // Recompute file-level in/out degree from the patched edge set (cheap).
       const out = new Map<string, Set<string>>();
@@ -1320,6 +1596,7 @@ export class McpWatcher {
     } catch (err) {
       process.stderr.write(`[mcp-watcher] dependency-graph error: ${(err as Error).message}\n`);
     }
+    return breakages;
   }
 
   /**
@@ -1594,7 +1871,7 @@ export class McpWatcher {
    * generation id would keep serving superseded structure. Always called inside the
    * artifact lock, after the whole write set is durable.
    */
-  private async republishGeneration(): Promise<void> {
+  private async republishGeneration(): Promise<string | null> {
     try {
       const manifest = await publishGeneration(
         this.outputPath,
@@ -1604,9 +1881,14 @@ export class McpWatcher {
       // An incomplete artifact set cannot be published. Drop the manifest rather
       // than leave one vouching for content it no longer describes — readers then
       // fall back to the disclosed legacy identity, which does track the rewrite.
-      if (!manifest) await discardGeneration(this.outputPath);
+      if (!manifest) {
+        await discardGeneration(this.outputPath);
+        return null;
+      }
+      return manifest.generationId;
     } catch (err) {
       process.stderr.write(`[mcp-watcher] generation republish error: ${(err as Error).message}\n`);
+      return null;
     }
   }
 
@@ -1713,6 +1995,7 @@ export async function buildGraphSubset(
    * (fix-transitive-incremental-staleness).
    */
   skipped: string[];
+  analyzedFileHashes: Map<string, string>;
 }> {
   let lang = detectLanguage(changedRel);
   let content = changedContent;
@@ -1723,25 +2006,29 @@ export async function buildGraphSubset(
   if (lang === 'unknown' && HTML_EXTENSIONS.test(changedRel)) {
     const { extractHtmlScripts } = await import('../analyzer/html-script-extractor.js');
     const blanked = extractHtmlScripts(changedContent);
-    if (!blanked) return { edges: [], nodes: [], cfgs: [], skipped: [] }; // no inline JS
+    if (!blanked) return { edges: [], nodes: [], cfgs: [], skipped: [], analyzedFileHashes: new Map([[changedRel, createHash('sha256').update(changedContent).digest('hex')]]) }; // no inline JS
     content = blanked;
     lang = 'JavaScript';
   }
-  if (!CALL_GRAPH_LANGS.has(lang)) return { edges: [], nodes: [], cfgs: [], skipped: [] };
+  if (!CALL_GRAPH_LANGS.has(lang)) return { edges: [], nodes: [], cfgs: [], skipped: [], analyzedFileHashes: new Map([[changedRel, createHash('sha256').update(changedContent).digest('hex')]]) };
 
   const { CallGraphBuilder } = await import('../analyzer/call-graph.js');
   // Use relative paths as node IDs (consistent with analyze output)
   const files: Array<{ path: string; content: string; language: string }> = [
     { path: changedRel, content, language: lang },
   ];
+  const analyzedFileHashes = new Map<string, string>([
+    [changedRel, createHash('sha256').update(changedContent).digest('hex')],
+  ]);
 
   const skipped: string[] = [];
   for (const cf of callerFiles) {
     const cfLang = detectLanguage(cf);
     if (!CALL_GRAPH_LANGS.has(cfLang)) continue; // ungraphable lang — never had edges; not stale
     try {
-      const cfContent = await readFile(join(rootDir, cf), 'utf-8');
+      const cfContent = await readFileConfined(rootDir, cf, MAX_EDIT_VERDICT_BASIS_FILE_BYTES);
       files.push({ path: cf, content: cfContent, language: cfLang });
+      analyzedFileHashes.set(cf, createHash('sha256').update(cfContent).digest('hex'));
     } catch {
       // Present-but-unreadable: report it so the caller marks it stale rather
       // than deleting its edges and asserting it fresh.
@@ -1771,7 +2058,8 @@ export async function buildGraphSubset(
     ];
     for (const rel of candidates) {
       try {
-        const modContent = await readFile(join(rootDir, rel), 'utf-8');
+        const modContent = await readFileConfined(rootDir, rel, MAX_EDIT_VERDICT_BASIS_FILE_BYTES);
+        analyzedFileHashes.set(rel, createHash('sha256').update(modContent).digest('hex'));
         return { path: rel, content: modContent, language: detectLanguage(rel) };
       } catch {
         // try next candidate
@@ -1805,5 +2093,5 @@ export async function buildGraphSubset(
     }
   }
 
-  return { edges: resultEdges, nodes: changedNodes, cfgs, skipped };
+  return { edges: resultEdges, nodes: changedNodes, cfgs, skipped, analyzedFileHashes };
 }

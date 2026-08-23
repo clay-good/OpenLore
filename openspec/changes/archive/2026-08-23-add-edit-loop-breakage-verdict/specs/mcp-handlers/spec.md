@@ -9,7 +9,11 @@ the pre/post facts already in hand: removed-or-renamed symbols with surviving re
 sites (`edit-broken-reference`, each caller named `file:line`), provably incompatible call
 sites against changed signatures (`edit-arity-mismatch`), imports of names the file no longer
 exports (`edit-import-breakage`), and the reaching tests for the edited symbols. The verdict
-SHALL persist beside the artifacts keyed to the edit's content hash, and `openlore check-edit`
+SHALL be derived after the entire coalesced edit batch has been patched. Reaching tests SHALL
+be selected by exact node identity from the retained full-analysis graph, SHALL disclose that
+basis, and SHALL become stale when a source or test basis hash changes. Production graph APIs
+SHALL NOT be widened with test nodes solely for this feature. The verdict SHALL persist beside
+the artifacts keyed to its analysis generation, edit content hash, and fact-basis hashes, and `openlore check-edit`
 SHALL serve it as a read — no analysis in the read path. In hook mode, infrastructure failure or
 an absent daemon SHALL never block (advisory default; blocking only via `enforcement.policy` on
 the registered codes), and with no daemon the command MAY compute a one-file scoped diff

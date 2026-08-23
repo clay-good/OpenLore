@@ -16,8 +16,8 @@
  */
 
 import { Command } from 'commander';
-import { readFile, writeFile, mkdir, access, unlink } from 'node:fs/promises';
-import { join, dirname } from 'node:path';
+import { readFile, writeFile, mkdir, access, unlink, lstat, realpath } from 'node:fs/promises';
+import { join, dirname, relative, isAbsolute } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { checkbox } from '@inquirer/prompts';
@@ -27,6 +27,7 @@ import { readOpenLoreConfig, writeOpenLoreConfig } from '../../core/services/con
 import { validatePanicSignal, readPanicTelemetry } from '../../core/services/mcp-handlers/panic-validation.js';
 import type { PanicGateReport } from '../../core/services/mcp-handlers/panic-validation.js';
 import type { PanicResponseMode } from '../../types/index.js';
+import { atomicWriteFile } from '../../core/decisions/atomic-store.js';
 
 // ============================================================================
 // TYPES
@@ -310,6 +311,7 @@ async function runSetup(
 
 const PANIC_CHECK_HOOK_MARKER = 'openlore panic-check';
 const GRYPH_WATCH_HOOK_MARKER = 'openlore gryph-watch';
+const CHECK_EDIT_HOOK_MARKER = 'openlore check-edit --hook';
 
 /** Sentinel written by `setup --panic off|observe`. When present, the guarded PreToolUse hook skips
  *  spawning Node entirely (the hook is a pure no-op in those modes) — off/observe cost nothing per
@@ -352,29 +354,160 @@ export function evaluatePanicActivation(
 interface ClaudeHookSettings {
   hooks?: {
     PreToolUse?: Array<{ _comment?: string; [key: string]: unknown }>;
+    PostToolUse?: Array<{ _comment?: string; [key: string]: unknown }>;
     UserPromptSubmit?: Array<{ _comment?: string; [key: string]: unknown }>;
     [key: string]: unknown;
   };
   [key: string]: unknown;
 }
 
+/** Install the read-only per-edit verdict consumer as a Claude Code PostToolUse hook. */
+export async function installCheckEditHook(rootPath: string): Promise<boolean> {
+  const settingsPath = await verifiedCheckEditSettingsPath(rootPath, true);
+  if (!settingsPath) return false;
+  let settings: ClaudeHookSettings;
+  try { settings = await readClaudeSettings(settingsPath); }
+  catch (e) { logger.error((e as Error).message); return false; }
+
+  if (settings.hooks !== undefined &&
+      (settings.hooks === null || typeof settings.hooks !== 'object' || Array.isArray(settings.hooks))) {
+    logger.error(`${settingsPath} has a non-object hooks field — refusing to overwrite it.`);
+    return false;
+  }
+  if (settings.hooks?.PostToolUse !== undefined && !Array.isArray(settings.hooks.PostToolUse)) {
+    logger.error(`${settingsPath} has a non-array hooks.PostToolUse field — refusing to overwrite it.`);
+    return false;
+  }
+
+  const hooks = settings.hooks?.PostToolUse ?? [];
+  const hookEntry = {
+    matcher: 'Edit|Write|MultiEdit|NotebookEdit',
+    _openlore: true,
+    hooks: [{ type: 'command', command: CHECK_EDIT_HOOK_MARKER }],
+  };
+  const existing = hooks.findIndex((entry) => JSON.stringify(entry).includes(CHECK_EDIT_HOOK_MARKER));
+  if (existing !== -1 && JSON.stringify(hooks[existing]) === JSON.stringify(hookEntry)) {
+    logger.success('check-edit PostToolUse hook already present in .claude/settings.json');
+    return true;
+  }
+
+  const next = hooks.filter((entry) => !JSON.stringify(entry).includes(CHECK_EDIT_HOOK_MARKER));
+  if (existing === -1) next.push(hookEntry);
+  else next.splice(Math.min(existing, next.length), 0, hookEntry);
+  settings.hooks ??= {};
+  settings.hooks.PostToolUse = next;
+  const verifiedWritePath = await verifiedCheckEditSettingsPath(rootPath, true);
+  if (!verifiedWritePath || verifiedWritePath !== settingsPath) return false;
+  await atomicWriteFile(settingsPath, JSON.stringify(settings, null, 2) + '\n');
+  logger.success('check-edit PostToolUse hook added to .claude/settings.json');
+  return true;
+}
+
+/** Remove only OpenLore's check-edit PostToolUse entry, preserving user hooks. */
+export async function uninstallCheckEditHook(rootPath: string): Promise<boolean> {
+  const settingsPath = await verifiedCheckEditSettingsPath(rootPath, false);
+  if (!settingsPath) return !(await fileExists(join(rootPath, '.claude')));
+  if (!(await fileExists(settingsPath))) return true;
+  let settings: ClaudeHookSettings;
+  try { settings = await readClaudeSettings(settingsPath); }
+  catch (e) { logger.error((e as Error).message); return false; }
+
+  const hooks = settings.hooks?.PostToolUse;
+  if (hooks !== undefined && !Array.isArray(hooks)) {
+    logger.error(`${settingsPath} has a non-array hooks.PostToolUse field — refusing to overwrite it.`);
+    return false;
+  }
+  if (!hooks) return true;
+  const filtered = hooks.filter((entry) => !JSON.stringify(entry).includes(CHECK_EDIT_HOOK_MARKER));
+  if (filtered.length === hooks.length) return true;
+  if (filtered.length === 0) delete settings.hooks!.PostToolUse;
+  else settings.hooks!.PostToolUse = filtered;
+  const verifiedWritePath = await verifiedCheckEditSettingsPath(rootPath, false);
+  if (!verifiedWritePath || verifiedWritePath !== settingsPath) return false;
+  await atomicWriteFile(settingsPath, JSON.stringify(settings, null, 2) + '\n');
+  logger.success('Removed the check-edit PostToolUse hook from .claude/settings.json');
+  return true;
+}
+
 /** Thrown when settings.json exists but is unparseable — we must NOT overwrite user content. */
 class CorruptSettingsError extends Error {}
+
+function isContainedPath(root: string, candidate: string): boolean {
+  const rel = relative(root, candidate);
+  return rel !== '..' && !rel.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) && !isAbsolute(rel);
+}
+
+/** Resolve the check-edit hook settings destination without following a user-controlled
+ * `.claude` directory or `settings.json` symlink. The destination is checked again
+ * immediately before the atomic rename so an observed escape is always refused. */
+async function verifiedCheckEditSettingsPath(rootPath: string, createDirectory: boolean): Promise<string | undefined> {
+  let root: string;
+  try { root = await realpath(rootPath); }
+  catch {
+    logger.error(`setup --check-edit-hook: repository root is missing or unreadable — refusing to write.`);
+    return undefined;
+  }
+  const claudeDir = join(root, '.claude');
+  try {
+    const info = await lstat(claudeDir);
+    if (info.isSymbolicLink() || !info.isDirectory()) {
+      logger.error(`${claudeDir} is not a real in-repository directory — refusing to write hook settings.`);
+      return undefined;
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || !createDirectory) return undefined;
+    await mkdir(claudeDir);
+  }
+  let canonicalDir: string;
+  try { canonicalDir = await realpath(claudeDir); }
+  catch {
+    logger.error(`${claudeDir} is missing or unreadable — refusing to write hook settings.`);
+    return undefined;
+  }
+  if (!isContainedPath(root, canonicalDir)) {
+    logger.error(`${claudeDir} resolves outside the repository — refusing to write hook settings.`);
+    return undefined;
+  }
+  const settingsPath = join(canonicalDir, 'settings.json');
+  try {
+    const info = await lstat(settingsPath);
+    if (info.isSymbolicLink() || !info.isFile()) {
+      logger.error(`${settingsPath} is not a regular in-repository file — refusing to overwrite it.`);
+      return undefined;
+    }
+    const canonicalSettings = await realpath(settingsPath);
+    if (!isContainedPath(root, canonicalSettings)) {
+      logger.error(`${settingsPath} resolves outside the repository — refusing to overwrite it.`);
+      return undefined;
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      logger.error(`${settingsPath} is unreadable — refusing to overwrite it.`);
+      return undefined;
+    }
+  }
+  return settingsPath;
+}
 
 async function readClaudeSettings(settingsPath: string): Promise<ClaudeHookSettings> {
   let raw: string;
   try {
     raw = await readFile(settingsPath, 'utf-8');
-  } catch {
-    return {}; // file genuinely missing → safe to start fresh
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {};
+    throw new CorruptSettingsError(`${settingsPath} is unreadable — refusing to overwrite it.`);
   }
   if (raw.trim() === '') return {}; // empty file → start fresh
   try {
-    return JSON.parse(raw) as ClaudeHookSettings;
+    const parsed = JSON.parse(raw) as unknown;
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('settings root is not an object');
+    }
+    return parsed as ClaudeHookSettings;
   } catch {
     // Exists with content but is invalid JSON — refuse to clobber the user's file.
     throw new CorruptSettingsError(
-      `${settingsPath} exists but is not valid JSON — refusing to overwrite it. Fix or remove the file, then re-run.`,
+      `${settingsPath} exists but is not a valid JSON settings object — refusing to overwrite it. Fix or remove the file, then re-run.`,
     );
   }
 }
@@ -535,9 +668,10 @@ export const setupCommand = new Command('setup')
   .option('--dir <path>', 'Project root directory', process.cwd())
   .option('--global', 'For the pi target: install the extension to ~/.pi/agent/extensions/ instead of the project', false)
   .option('--hooks <format>', 'Install the opt-in panic-check + gryph-watch hooks for the given agent format: claude|kilo|codex (use "none" to remove them)')
+  .option('--check-edit-hook <mode>', 'Install the read-only per-edit verdict hook: claude|none')
   .option('--panic <mode>', 'Set panic response mode in .openlore/config.json: off|observe|advisory|experimental_blocking')
   .option('--acknowledge-unvalidated', 'Activate an interventional panic mode even though the accuracy gate has not CLEARED (recorded)', false)
-  .action(async (options: { tools?: string; force: boolean; dir: string; global: boolean; hooks?: string; panic?: string; acknowledgeUnvalidated: boolean }) => {
+  .action(async (options: { tools?: string; force: boolean; dir: string; global: boolean; hooks?: string; checkEditHook?: string; panic?: string; acknowledgeUnvalidated: boolean }) => {
     const projectRoot = options.dir;
 
     // Opt-in panic setup — runs independently of skill install and needs no TTY.
@@ -556,8 +690,24 @@ export const setupCommand = new Command('setup')
         await installGryphWatchHook(projectRoot);
       }
     }
+    if (options.checkEditHook) {
+      let ok: boolean;
+      if (options.checkEditHook === 'none' || options.checkEditHook === 'off') {
+        ok = await uninstallCheckEditHook(projectRoot);
+      } else if (options.checkEditHook === 'claude') {
+        ok = await installCheckEditHook(projectRoot);
+      } else {
+        logger.error(`Unknown check-edit hook mode "${options.checkEditHook}". Valid: claude, none`);
+        process.exitCode = 1;
+        return;
+      }
+      if (!ok) { process.exitCode = 1; return; }
+      // This explicit lifecycle request is self-contained; do not unexpectedly
+      // continue into the interactive skill picker when no tools were requested.
+      if (!options.tools && !options.hooks && options.panic === undefined) return;
+    }
     // If only panic flags were requested (no skill install), we're done — don't prompt.
-    if (!options.tools && (options.hooks || options.panic !== undefined) && !process.stdout.isTTY) {
+    if (!options.tools && (options.hooks || options.checkEditHook || options.panic !== undefined) && !process.stdout.isTTY) {
       return;
     }
     const allTools: ToolName[] = ['vibe', 'cline', 'gsd', 'bmad', 'claude', 'opencode', 'omoa', 'pi'];
