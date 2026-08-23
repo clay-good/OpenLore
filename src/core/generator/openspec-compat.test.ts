@@ -17,6 +17,7 @@ import {
   validateSpecsDirectory,
   createOpenSpecCompat,
   spliceTopLevelBlock,
+  parseOpenSpecRequirements,
   type OpenSpecConfig,
   type OpenLoreMetadata,
 } from './openspec-compat.js';
@@ -50,6 +51,57 @@ function createMockSurvey(): ProjectSurveyResult {
 // ============================================================================
 // VALIDATOR TESTS
 // ============================================================================
+
+describe('parseOpenSpecRequirements', () => {
+  it('parses requirement prose, normative strength, and complete scenario blocks', () => {
+    const parsed = parseOpenSpecRequirements(`# Example\n\n## Requirements\n\n### Requirement: BoundedWork\n\n> Implementation: worker in \`src/worker.ts\`\n\nThe system SHALL finish within 200 ms.\n\n#### Scenario: Fast path\n- **GIVEN** cached input\n- **WHEN** work runs\n- **THEN** it finishes within 20 ms\n\n#### Scenario: Slow path\n- **GIVEN** uncached input\n- **WHEN** work runs\n- **THEN** it finishes within 200 ms\n`);
+
+    expect(parsed).toEqual([{
+      name: 'BoundedWork',
+      text: 'The system SHALL finish within 200 ms.',
+      scenarios: [
+        { name: 'Fast path', text: '- **GIVEN** cached input\n- **WHEN** work runs\n- **THEN** it finishes within 20 ms' },
+        { name: 'Slow path', text: '- **GIVEN** uncached input\n- **WHEN** work runs\n- **THEN** it finishes within 200 ms' },
+      ],
+      normativeKeyword: 'SHALL',
+      normativeRank: 3,
+      deltaKind: null,
+    }]);
+  });
+
+  it('uses the strongest keyword and accepts delta requirement headings', () => {
+    const [parsed] = parseOpenSpecRequirements(`## MODIFIED Requirements\n\n### Requirement: Mixed\n\nThe system MAY cache results but MUST preserve ordering.\n`);
+
+    expect(parsed.normativeKeyword).toBe('MUST');
+    expect(parsed.normativeRank).toBe(3);
+    expect(parsed.deltaKind).toBe('MODIFIED');
+  });
+
+  it('ignores requirement and scenario headings inside fenced examples', () => {
+    const parsed = parseOpenSpecRequirements(`## REMOVED Requirements\n\n### Requirement: Real\n\nThe system SHALL work.\n\n\`\`\`markdown\n### Requirement: Forged\n#### Scenario: Forged scenario\n\`\`\`\n\n#### Scenario: Real scenario\n- **GIVEN** input\n- **WHEN** work runs\n- **THEN** it works\n`);
+
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0]).toMatchObject({
+      name: 'Real',
+      deltaKind: 'REMOVED',
+      scenarios: [{ name: 'Real scenario' }],
+    });
+  });
+
+  it('ignores HTML-comment headings and resets delta kind at a later section', () => {
+    const parsed = parseOpenSpecRequirements(`## REMOVED Requirements\n\n### Requirement: Removed\n\nThe system SHALL retire.\n\n<!--\n### Requirement: Hidden\n#### Scenario: Hidden\n-->\n\n## Migration Notes\n\n### Requirement: ExampleOnly\n\nThe system SHALL remain illustrative.\n`);
+
+    expect(parsed.map(({ name, deltaKind }) => ({ name, deltaKind }))).toEqual([
+      { name: 'Removed', deltaKind: 'REMOVED' },
+      { name: 'ExampleOnly', deltaKind: null },
+    ]);
+  });
+
+  it('does not let an HTML comment literal inside a fence mask later requirements', () => {
+    const parsed = parseOpenSpecRequirements(`## Requirements\n\n\`\`\`html\n<!--\n\`\`\`\n\n### Requirement: Real\n\nThe system SHALL work.\n`);
+    expect(parsed.map((requirement) => requirement.name)).toEqual(['Real']);
+  });
+});
 
 describe('OpenSpecValidator', () => {
   let validator: OpenSpecValidator;

@@ -40,6 +40,7 @@ import {
   classifyFindings,
   resolveEnforcementClass,
   type GovernanceFinding,
+  CORPUS_INTENT_FINDING_CODES,
 } from '../../core/services/mcp-handlers/enforcement-policy.js';
 import { applyEnforcementBaseline } from '../../core/services/mcp-handlers/enforcement-baseline.js';
 import { detectStaleDecisionReferences } from '../../core/services/mcp-handlers/stale-decision-reference.js';
@@ -47,6 +48,12 @@ import {
   CORPUS_FINDING_CODES,
   detectCorpusIntegrity,
 } from '../../core/decisions/corpus-integrity.js';
+import { reviewCorpusIntent, type CorpusIntentFinding } from '../../core/drift/corpus-intent-review.js';
+import {
+  materializeOpenSpecCorpus,
+  prepareOpenSpecCorpusSource,
+  resolveBaseRefDisclosed,
+} from '../../core/drift/git-diff.js';
 import { computeBlastRadius, type BlastRadiusBriefing } from '../../core/services/mcp-handlers/blast-radius.js';
 import { computeImpactCertificate, type ImpactCertificate } from '../../core/services/mcp-handlers/impact-certificate.js';
 import type { OpenLoreConfig } from '../../types/index.js';
@@ -227,6 +234,45 @@ export function impactCertificateFindings(cert: ImpactCertificate): GovernanceFi
   });
 }
 
+/** Adapt source-rich corpus intent findings to the unified enforcement shape. */
+export function corpusIntentGovernanceFindings(
+  findings: readonly CorpusIntentFinding[],
+): GovernanceFinding[] {
+  return findings.map((finding) => ({
+    code: finding.code,
+    severity: 'warning',
+    source: 'corpus-intent-review',
+    subject: finding.artifact,
+    message: finding.message,
+    discriminator: JSON.stringify([
+      finding.requirement ?? null,
+      finding.baseValue ?? null,
+      finding.headValue ?? null,
+    ]),
+  }));
+}
+
+async function collectCorpusIntentFindings(
+  cwd: string,
+  baseRef?: string,
+): Promise<GovernanceFinding[]> {
+  const requested = baseRef ?? 'HEAD';
+  const resolution = await resolveBaseRefDisclosed(cwd, requested);
+  if (resolution.fellBack) {
+    throw new Error(
+      `Base ref "${resolution.requested}" did not resolve; refusing to substitute ` +
+      `"${resolution.resolved}".`,
+    );
+  }
+  const baseSource = { kind: 'revision' as const, revision: resolution.resolved };
+  const headSource = { kind: 'directory' as const, directory: cwd };
+  const preparedBase = await prepareOpenSpecCorpusSource(cwd, baseSource);
+  const preparedHead = await prepareOpenSpecCorpusSource(cwd, headSource);
+  const base = await materializeOpenSpecCorpus({ rootPath: cwd, ...preparedBase });
+  const head = await materializeOpenSpecCorpus({ rootPath: cwd, ...preparedHead });
+  return corpusIntentGovernanceFindings(reviewCorpusIntent(base.files, head.files).findings);
+}
+
 function impactCertificateAssessmentComplete(cert: ImpactCertificate): boolean {
   if (cert.findings.some((finding) => finding.code === 'unresolved-added-call')) return false;
   return !cert.caveats.some((caveat) =>
@@ -277,6 +323,16 @@ export async function collectGovernanceFindings(
   } catch (err) {
     caveats.push(`corpus-integrity check unavailable: ${err instanceof Error ? err.message : String(err)}`);
     for (const code of CORPUS_FINDING_CODES) failedCodes.add(code);
+  }
+
+  // Corpus intent delta — always (bounded, deterministic comparison of the
+  // selected base corpus with the working tree; no checkout or worktree).
+  try {
+    findings.push(...await collectCorpusIntentFindings(cwd, baseRef));
+    for (const code of CORPUS_INTENT_FINDING_CODES) assessedCodes.add(code);
+  } catch (err) {
+    caveats.push(`corpus-intent review unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    for (const code of CORPUS_INTENT_FINDING_CODES) failedCodes.add(code);
   }
 
   // blast-radius orphan patterns — only when configured (diff-heavy).

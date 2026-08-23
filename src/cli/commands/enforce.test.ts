@@ -23,6 +23,7 @@ import {
   blastRadiusFindings,
   blastRadiusAssessmentComplete,
   impactCertificateFindings,
+  corpusIntentGovernanceFindings,
 } from './enforce.js';
 import { classifyFindings } from '../../core/services/mcp-handlers/enforcement-policy.js';
 import { applyEnforcementBaseline } from '../../core/services/mcp-handlers/enforcement-baseline.js';
@@ -393,6 +394,60 @@ describe('impactCertificateFindings — surface severities map to per-severity c
     expect(result.gate.gated).toBe(false);
     expect(result.baseline.removed).toBe(1);
     expect(result.gate.frozen[0]).toMatchObject({ subject: 'zeta', baselineState: 'frozen' });
+  });
+});
+
+describe('corpus intent findings — reviewer output maps to the unified gate', () => {
+  const finding = {
+    code: 'corpus-normative-weakened' as const,
+    artifact: 'openspec/specs/auth/spec.md',
+    requirement: 'RejectInvalidTokens',
+    message: 'RejectInvalidTokens weakened SHALL to SHOULD.',
+    baseValue: 'SHALL',
+    headValue: 'SHOULD',
+  };
+
+  it('preserves artifact and message with a stable per-requirement identity', () => {
+    expect(corpusIntentGovernanceFindings([finding])).toEqual([{
+      code: 'corpus-normative-weakened',
+      severity: 'warning',
+      source: 'corpus-intent-review',
+      subject: 'openspec/specs/auth/spec.md',
+      message: 'RejectInvalidTokens weakened SHALL to SHOULD.',
+      discriminator: JSON.stringify(['RejectInvalidTokens', 'SHALL', 'SHOULD']),
+    }]);
+  });
+
+  it('is advisory by default and becomes blocking only through policy', () => {
+    const findings = corpusIntentGovernanceFindings([finding]);
+    expect(classifyFindings(findings, {}).gated).toBe(false);
+    expect(classifyFindings(findings, {
+      'corpus-normative-weakened': 'blocking',
+    }).gated).toBe(true);
+  });
+
+  it('collects corpus intent changes in the real enforce path', async () => {
+    const root = await mkRepo();
+    await initializeGitHead(root);
+    const specDir = join(root, 'openspec', 'specs', 'auth');
+    await mkdir(specDir, { recursive: true });
+    const base = '# Auth\n\n## Requirements\n\n### Requirement: RejectInvalidTokens\n\n' +
+      'The system SHALL reject invalid tokens.\n\n#### Scenario: Reject\n\n' +
+      '- **GIVEN** an invalid token\n- **WHEN** authentication runs\n- **THEN** the request is rejected\n';
+    await writeFile(join(specDir, 'spec.md'), base);
+    await execFileAsync('git', ['add', 'openspec'], { cwd: root });
+    await execFileAsync('git', [
+      '-c', 'user.name=OpenLore Test', '-c', 'user.email=openlore@example.test',
+      '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'base corpus',
+    ], { cwd: root });
+    await writeFile(join(specDir, 'spec.md'), base.replace('SHALL', 'SHOULD'));
+
+    const result = await gateJson(root);
+
+    expect(result.code).toBe(0);
+    expect(result.json.advisory).toContainEqual(expect.objectContaining({
+      code: 'corpus-normative-weakened',
+    }));
   });
 });
 

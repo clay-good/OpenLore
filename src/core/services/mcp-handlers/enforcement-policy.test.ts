@@ -10,9 +10,11 @@ import {
   isKnownFindingCode,
   sourceDefaultClass,
   FINDING_CODE_REGISTRY,
+  CORPUS_INTENT_FINDING_CODES,
   type GovernanceFinding,
   type EnforcementPolicy,
 } from './enforcement-policy.js';
+import { CORPUS_INTENT_RULES } from '../../drift/corpus-intent-review.js';
 
 // @ts-expect-error `warning` is the canonical spelling; legacy `warn` is rejected.
 const invalidSeverity: GovernanceFinding = { code: 'x', severity: 'warn', source: 'x', subject: 'x', message: 'x' };
@@ -103,6 +105,17 @@ describe('FINDING_CODE_REGISTRY', () => {
         defaultClass,
       });
       expect(sourceDefaultClass(code)).toBe(defaultClass);
+    }
+  });
+  it('registers every corpus-intent finding as advisory', () => {
+    expect(CORPUS_INTENT_FINDING_CODES).toHaveLength(7);
+    expect(CORPUS_INTENT_FINDING_CODES).toEqual(CORPUS_INTENT_RULES.map((rule) => rule.code));
+    for (const code of CORPUS_INTENT_FINDING_CODES) {
+      expect(FINDING_CODE_REGISTRY[code]).toMatchObject({
+        source: 'corpus-intent-review',
+        defaultClass: 'advisory',
+      });
+      expect(isKnownFindingCode(code)).toBe(true);
     }
   });
 });

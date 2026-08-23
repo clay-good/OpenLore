@@ -70,9 +70,8 @@ describe('knowledge-corpus integrity surfaces', () => {
     const result = await collectGovernanceFindings(root, null, {});
 
     expect(result.findings.map((finding) => finding.code)).toContain('corpus-reference-unresolved');
-    expect([...result.assessedCodes].filter((code) => code.startsWith('corpus-')).sort())
-      .toEqual([...CORPUS_FINDING_CODES].sort());
-    expect(result.failedCodes.size).toBe(0);
+    expect(CORPUS_FINDING_CODES.every((code) => result.assessedCodes.has(code))).toBe(true);
+    expect(CORPUS_FINDING_CODES.every((code) => !result.failedCodes.has(code))).toBe(true);
   });
 
   it('doctor stays clean for a corpus with no declared cross-artifact references', async () => {

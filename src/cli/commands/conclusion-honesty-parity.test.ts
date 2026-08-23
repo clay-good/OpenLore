@@ -35,6 +35,7 @@ const BASE_REF_COMMANDS: Record<string, { handler: string } | { delegatesTo: str
   'blast-radius': { handler: 'src/core/services/mcp-handlers/blast-radius.ts' },
   'briefing-since': { handler: 'src/core/services/mcp-handlers/briefing-since.ts' },
   'coverage-gaps': { handler: 'src/core/services/mcp-handlers/coverage-gaps.ts' },
+  'review-corpus': { handler: 'src/cli/commands/review-corpus.ts' },
   // enforce + review are composers: they forward `--base` to computeBlastRadius /
   // computeImpactCertificate, which resolve-or-disclose through the shared helper.
   enforce: { delegatesTo: ['src/core/services/mcp-handlers/blast-radius.ts'] },

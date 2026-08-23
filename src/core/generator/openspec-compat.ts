@@ -130,6 +130,152 @@ export interface ContextUpdateOptions {
   version: string;
 }
 
+export interface ParsedOpenSpecScenario {
+  name: string;
+  text: string;
+}
+
+export interface ParsedOpenSpecRequirement {
+  name: string;
+  /** Normative prose only; scenario blocks and provenance blockquotes are excluded. */
+  text: string;
+  scenarios: ParsedOpenSpecScenario[];
+  normativeKeyword: 'SHALL' | 'MUST' | 'SHOULD' | 'MAY' | null;
+  normativeRank: 0 | 1 | 2 | 3;
+  deltaKind: 'ADDED' | 'MODIFIED' | 'REMOVED' | null;
+}
+
+const NORMATIVE_RANK = {
+  MAY: 1,
+  SHOULD: 2,
+  SHALL: 3,
+  MUST: 3,
+} as const;
+
+/**
+ * Parse the requirement/scenario structure shared by baseline and delta specs.
+ *
+ * This intentionally parses only OpenSpec's declared heading grammar. It does
+ * not infer requirements from prose, and it excludes blockquote provenance from
+ * requirement text so an implementation hint cannot become normative content.
+ */
+export function parseOpenSpecRequirements(content: string): ParsedOpenSpecRequirement[] {
+  const lines = content.replace(/\r\n?/g, '\n').split('\n');
+  const masked = markdownStructuralMask(lines);
+  const parsed: ParsedOpenSpecRequirement[] = [];
+  let deltaKind: ParsedOpenSpecRequirement['deltaKind'] = null;
+
+  for (let index = 0; index < lines.length;) {
+    const deltaHeading = masked[index]
+      ? null
+      : lines[index].match(/^##\s+(ADDED|MODIFIED|REMOVED)\s+Requirements\s*$/i);
+    if (!masked[index] && /^##\s+/.test(lines[index])) {
+      deltaKind = deltaHeading
+        ? deltaHeading[1].toUpperCase() as Exclude<typeof deltaKind, null>
+        : null;
+    }
+    const requirementHeading = masked[index]
+      ? null
+      : lines[index].match(/^###\s+Requirement:\s*(.+?)\s*$/);
+    if (!requirementHeading) {
+      index++;
+      continue;
+    }
+
+    const name = requirementHeading[1].trim();
+    const prose: string[] = [];
+    const scenarios: ParsedOpenSpecScenario[] = [];
+    index++;
+
+    while (index < lines.length && (masked[index] || !/^#{1,3}\s/.test(lines[index]))) {
+      const scenarioHeading = masked[index]
+        ? null
+        : lines[index].match(/^####\s+Scenario:\s*(.+?)\s*$/);
+      if (scenarioHeading) {
+        const scenarioLines: string[] = [];
+        index++;
+        while (index < lines.length && (masked[index] || !/^#{1,4}\s/.test(lines[index]))) {
+          if (!masked[index]) scenarioLines.push(lines[index]);
+          index++;
+        }
+        scenarios.push({
+          name: scenarioHeading[1].trim(),
+          text: trimBlankLines(scenarioLines).join('\n'),
+        });
+        continue;
+      }
+
+      // Provenance hints are metadata, not part of the normative statement.
+      if (!masked[index] && !/^\s*>/.test(lines[index])) prose.push(lines[index]);
+      index++;
+    }
+
+    const text = trimBlankLines(prose).join('\n').trim();
+    let normativeKeyword: ParsedOpenSpecRequirement['normativeKeyword'] = null;
+    let normativeRank: ParsedOpenSpecRequirement['normativeRank'] = 0;
+    for (const match of text.matchAll(/\b(SHALL|MUST|SHOULD|MAY)(?:\s+NOT)?\b/g)) {
+      const keyword = match[1] as Exclude<ParsedOpenSpecRequirement['normativeKeyword'], null>;
+      const rank = NORMATIVE_RANK[keyword];
+      if (rank > normativeRank) {
+        normativeKeyword = keyword;
+        normativeRank = rank;
+      }
+    }
+
+    parsed.push({ name, text, scenarios, normativeKeyword, normativeRank, deltaKind });
+  }
+
+  return parsed;
+}
+
+/** Markdown lines with fenced blocks and HTML comments blanked for structural metadata parsing. */
+export function structuralMarkdownLines(content: string): string[] {
+  const lines = content.replace(/\r\n?/g, '\n').split('\n');
+  const masked = markdownStructuralMask(lines);
+  return lines.map((line, index) => masked[index] ? '' : line);
+}
+
+function markdownStructuralMask(lines: readonly string[]): boolean[] {
+  const masked: boolean[] = [];
+  let fence: { marker: '`' | '~'; length: number } | null = null;
+  let htmlComment = false;
+  for (const line of lines) {
+    const opening = line.match(/^ {0,3}(`{3,}|~{3,})/);
+    if (fence !== null) {
+      masked.push(true);
+      const closing = line.match(/^ {0,3}(`{3,}|~{3,})\s*$/);
+      if (closing && closing[1][0] === fence.marker && closing[1].length >= fence.length) fence = null;
+      continue;
+    }
+    if (htmlComment) {
+      masked.push(true);
+      if (line.includes('-->')) htmlComment = false;
+      continue;
+    }
+    if (opening) {
+      masked.push(true);
+      fence = { marker: opening[1][0] as '`' | '~', length: opening[1].length };
+      continue;
+    }
+    const commentStart = line.indexOf('<!--');
+    if (commentStart !== -1) {
+      masked.push(true);
+      htmlComment = line.indexOf('-->', commentStart + 4) === -1;
+      continue;
+    }
+    masked.push(false);
+  }
+  return masked;
+}
+
+function trimBlankLines(lines: string[]): string[] {
+  let start = 0;
+  let end = lines.length;
+  while (start < end && lines[start].trim() === '') start++;
+  while (end > start && lines[end - 1].trim() === '') end--;
+  return lines.slice(start, end);
+}
+
 // ============================================================================
 // OPENSPEC VALIDATION
 // ============================================================================
