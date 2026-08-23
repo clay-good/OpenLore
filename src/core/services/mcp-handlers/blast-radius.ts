@@ -114,6 +114,8 @@ export interface BlastRadiusBriefing {
     drifted: number;
     orphaned: number;
     willDrift: Array<{ kind: string; message: string; filePath: string; provenance: ServedContentProvenance }>;
+    /** Uncapped stable identities used by the enforcement ratchet, never the display-capped list. */
+    orphanFindings: Array<{ id: string; filePath: string; message: string }>;
   };
   specs: {
     willGoStale: number;
@@ -125,6 +127,15 @@ export interface BlastRadiusBriefing {
      * never `items` — `items` is display-capped and could omit a triggering issue. */
     orphaned: number;
     items: Array<{ kind: string; message: string; domain: string | null; provenance: ServedContentProvenance }>;
+    /** Uncapped stable identities used by the enforcement ratchet, never the display-capped list. */
+    orphanFindings: Array<{ id: string; filePath: string; message: string }>;
+  };
+  /** Whether the composed drift pass was complete enough to initialize or shrink a baseline. */
+  driftAssessment: {
+    complete: boolean;
+    filesOmitted: number;
+    detailsTruncated: boolean;
+    unavailable?: string;
   };
   /**
    * Cross-repo (federation) impact. `evaluated: false` carries a truthful note about
@@ -282,6 +293,8 @@ export async function computeBlastRadius(
   const memWillDrift: Array<{ kind: string; message: string; filePath: string; provenance: ServedContentProvenance }> = [];
   const specItems: Array<{ kind: string; message: string; domain: string | null; specPath: string | null; provenance: ServedContentProvenance }> = [];
   const decisionItems: Array<{ kind: string; message: string; domain: string | null; provenance: ServedContentProvenance }> = [];
+  const memoryOrphanFindings: Array<{ id: string; filePath: string; message: string }> = [];
+  const decisionOrphanFindings: Array<{ id: string; filePath: string; message: string }> = [];
   const specProvenance = await reviewedFileContentProvenance(absDir, 'openspec');
   let driftUnavailable: string | null = null;
   let driftFilesOmitted = 0;
@@ -299,9 +312,15 @@ export async function computeBlastRadius(
     const drift = driftRaw as DriftResult;
     driftFilesOmitted = drift.filesOmitted;
     for (const issue of drift.issues ?? []) {
-      if (MEMORY_KINDS.has(issue.kind)) memWillDrift.push({ kind: issue.kind, message: issue.message, filePath: issue.filePath, provenance: 'local-unreviewed' });
+      if (MEMORY_KINDS.has(issue.kind)) {
+        memWillDrift.push({ kind: issue.kind, message: issue.message, filePath: issue.filePath, provenance: 'local-unreviewed' });
+        if (issue.kind === 'memory-orphaned') memoryOrphanFindings.push({ id: issue.id, filePath: issue.filePath, message: issue.message });
+      }
       else if (SPEC_KINDS.has(issue.kind)) specItems.push({ kind: issue.kind, message: issue.message, domain: issue.domain, specPath: issue.specPath, provenance: specProvenance });
-      else if (DECISION_KINDS.has(issue.kind)) decisionItems.push({ kind: issue.kind, message: issue.message, domain: issue.domain, provenance: specProvenance });
+      else if (DECISION_KINDS.has(issue.kind)) {
+        decisionItems.push({ kind: issue.kind, message: issue.message, domain: issue.domain, provenance: specProvenance });
+        if (issue.kind === 'adr-orphaned') decisionOrphanFindings.push({ id: issue.id, filePath: issue.filePath, message: issue.message });
+      }
     }
   }
   const memOrphaned = memWillDrift.filter(m => m.kind === 'memory-orphaned').length;
@@ -347,6 +366,7 @@ export async function computeBlastRadius(
   if (capped.length > 0) {
     caveats.push(`Detail lists truncated for brevity: ${capped.join(', ')} — see the counts for totals.`);
   }
+  const driftDetailsTruncated = memWillDrift.length > 20 || specItems.length > 20 || decisionItems.length > 20;
 
   // Index-staleness disclosure: a risk headline computed from a graph that predates
   // the working tree must say so (fix-cli-conclusion-honesty). Same shared shape the
@@ -399,9 +419,15 @@ export async function computeBlastRadius(
       ...(testsTruncatedAtDepth !== undefined ? { truncatedAtDepth: testsTruncatedAtDepth } : {}),
       ...(testsUnavailable ? { unavailable: testsUnavailable } : {}),
     },
-    memory: { drifted: memDrifted, orphaned: memOrphaned, willDrift: memWillDrift.slice(0, 20) },
+    memory: { drifted: memDrifted, orphaned: memOrphaned, willDrift: memWillDrift.slice(0, 20), orphanFindings: memoryOrphanFindings },
     specs: { willGoStale: specItems.length, items: specItems.slice(0, 20) },
-    decisions: { affected: decisionItems.length, orphaned: decisionsOrphaned, items: decisionItems.slice(0, 20) },
+    decisions: { affected: decisionItems.length, orphaned: decisionsOrphaned, items: decisionItems.slice(0, 20), orphanFindings: decisionOrphanFindings },
+    driftAssessment: {
+      complete: driftUnavailable === null && driftFilesOmitted === 0 && !driftDetailsTruncated,
+      filesOmitted: driftFilesOmitted,
+      detailsTruncated: driftDetailsTruncated,
+      ...(driftUnavailable ? { unavailable: driftUnavailable } : {}),
+    },
     federation,
     headline: '',
     posture: 'advisory',

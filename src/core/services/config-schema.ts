@@ -39,7 +39,7 @@ import type {
 } from '../../types/index.js';
 
 /** The current config-schema version stamped into `.openlore/config.json`. */
-export const CONFIG_SCHEMA_VERSION = '1.0.0';
+export const CONFIG_SCHEMA_VERSION = '1.1.0';
 
 /**
  * Top-level value shapes retained as the public compatibility map for callers and tests.
@@ -201,7 +201,7 @@ const contextInjectionRule: ConfigRule = {
 const enforcementRule: ConfigRule = {
   kind: 'object',
   fields: fieldsFor<EnforcementConfig>({
-    policy: { kind: 'record-enum', values: ['blocking', 'advisory', 'off'] },
+    policy: { kind: 'record-enum', values: ['blocking', 'frozen', 'advisory', 'off'] },
   }),
   required: requiredFor<EnforcementConfig>({}),
 };

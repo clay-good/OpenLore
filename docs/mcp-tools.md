@@ -378,7 +378,8 @@ change                 string   the change id (or "working-tree")
 baseRef, resolvedBaseRef  string   requested vs the ref git actually diffed against
 changed                { files, symbols }
 surfaces               [ { name, severity, resolvedSymbols, unresolvedMembers[] } ]
-newlyOpenedPaths       [ { surface, surfaceSeverity, openingEdge: { from, to }, path[], reaches } ]
+newlyOpenedPaths       [ { surface, surfaceSeverity, openingEdge: { from, to }, path[], pathIds[], reaches } ]
+                       pathIds is the uncapped canonical graph-id path used for stable identity
 impact / tests / specs    reused verbatim from blast_radius (or { unavailable })
 lease                  { anchors[] }   the touched-symbol anchors that drive decay
 findings               [ { code, severity, subject, message, remediation, surfaceSeverity? } ]

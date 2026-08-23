@@ -120,11 +120,12 @@ export interface BundleConfig {
 
 /**
  * How the gate treats a governance finding, independent of the finding's severity
- * (change: add-finding-enforcement-policy). `blocking` fails the gate; `advisory`
- * reports without failing (the default); `off` is a recorded, inspectable silence —
- * the finding is still listed as informational so a deliberate silence is never invisible.
+ * (changes: add-finding-enforcement-policy, add-enforcement-baseline-ratchet).
+ * `blocking` fails the gate; `frozen` records existing debt and fails only on findings
+ * outside that baseline; `advisory` reports without failing (the default); `off` is a
+ * recorded, inspectable silence — the finding remains visible.
  */
-export type EnforcementClass = 'blocking' | 'advisory' | 'off';
+export type EnforcementClass = 'blocking' | 'frozen' | 'advisory' | 'off';
 
 /**
  * A repository's declared enforcement policy: a map from a stable finding `code`

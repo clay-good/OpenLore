@@ -1,7 +1,8 @@
 # Enforcement baseline ratchet: a `frozen` class that blocks only NEW findings
 
-> Status: PROPOSED (2026-07-03, e2e audit follow-up). A fourth categorical enforcement class,
-> `frozen`: first run records existing violations into a plain-text, VCS-committable baseline;
+> Status: IMPLEMENTED (2026-08-23). A fourth categorical enforcement class,
+> `frozen`: an explicit non-hook bootstrap records existing violations into a plain-text,
+> VCS-committable baseline;
 > subsequent runs block only findings NOT in the baseline; a finding that disappears is
 > auto-removed (the ratchet — fixed debt can't sneak back). Prior art: ArchUnit's
 > FreezingArchRule (https://www.archunit.org/userguide/html/000_Index.html), the mechanism that
@@ -10,7 +11,8 @@
 
 ## The gap
 
-`enforcement.policy` maps a finding code to exactly `blocking | advisory | off`
+Before this change, `enforcement.policy` maps a finding code to exactly
+`blocking | advisory | off`
 (`src/types/index.ts:97`; `ENFORCEMENT_CLASSES`,
 `src/core/services/mcp-handlers/enforcement-policy.ts:35`), resolved per finding by
 `resolveEnforcementClass` (`enforcement-policy.ts:186`) over the registered codes in
@@ -30,11 +32,11 @@ adoptable at all.
 - **A fourth enforcement class, `frozen`** — added to the `EnforcementClass` union,
   `ENFORCEMENT_CLASSES`, and the `resolveEnforcementClass` ladder. Categorical, like the other
   three: no threshold, no constant.
-- **Baseline store, plain text, committed.** On the first run with a code mapped `frozen`,
-  existing findings for that code are recorded in a human-readable file under `.openlore/` (one
-  line per finding identity), intended for version control so a reviewer sees exactly which debt
-  was frozen, as a diff. A baseline is written only under an explicit `frozen` policy — never
-  silently.
+- **Baseline store, plain text, committed.** An ordinary `openlore enforce` run explicitly
+  bootstraps successfully assessed frozen codes into a human-readable JSON-lines file under
+  `.openlore/`. Per-code initialized records preserve the difference between "initialized at
+  zero" and "never initialized." The managed ignore rules make both the policy config and
+  baseline visible to normal Git staging. Hooks and review never bootstrap candidate debt.
 - **Finding identity = `code` + `subject` (+ a stable discriminator** where one code can fire
   more than once per subject). The unified `GovernanceFinding` shape already carries stable
   `code` and `subject` fields (`enforcement-policy.ts:47-57` —
@@ -44,20 +46,23 @@ adoptable at all.
 - **Gate semantics.** A `frozen`-classed finding present in the baseline reports as frozen
   (advisory, labeled); one absent from the baseline blocks like `blocking`. Output always
   discloses the ratchet state: "312 frozen, 2 new → blocked on the 2."
-- **The ratchet.** A baseline entry whose finding no longer fires is auto-removed on the next
-  run — regressions cannot sneak back behind the freeze. Baseline shrinkage shows up as committed
-  diffs (visible progress).
-- **Surfaces.** `openlore enforce` (`src/cli/commands/enforce.ts`, including `--hook` mode) and
-  the review pipeline (`src/cli/commands/review.ts` + the bundled
-  `.github/actions/openlore-review/action.yml`) gain frozen semantics. A policy downgrade
-  (`frozen` → `advisory`) leaves the baseline file in place but stops blocking; re-upgrading
-  resumes against the ratcheted baseline.
+- **The ratchet is trusted and shrink-only.** Once a code is initialized, hook/review compare the
+  candidate baseline with the trusted committed baseline. Removals are legal after a complete
+  assessment; added identities or removed initialized markers fail integrity checking. Hooks
+  require shrinkage to be staged. Partial or failed assessment never removes trusted entries.
+- **Surfaces.** `openlore enforce` owns bootstrap and ratchet writes. `openlore review` and the
+  bundled Action apply the same frozen/new semantics to the blast-radius orphan findings already
+  computed for the briefing, read-only; they direct the operator to run enforce for shrinkage.
+  A policy downgrade (`frozen` → `advisory`) preserves the store byte-for-byte, and re-upgrading
+  resumes against it.
 
 Deliberately NOT borrowed from ArchUnit: freezing by violation-message text (fragile — identity
 here is the structural `code`+`subject`, so a reworded message or moved line never un-freezes),
 its per-rule ViolationStore plumbing and JVM configuration surface, and any
 `allowStoreUpdate`-style mutable-store toggle — the only writes are the explicit first freeze and
-the automatic ratchet removal, both visible as VCS diffs.
+the automatic shrink-only ratchet removal, both visible as VCS diffs. Baseline growth for an
+already initialized code is deliberately rejected even if it is staged or committed on the
+candidate branch.
 
 ## Why this is in scope
 

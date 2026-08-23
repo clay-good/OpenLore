@@ -44,6 +44,10 @@ export const OPENLORE_CONFIG_FILENAME = 'config.json';
 /** Relative path to the openlore config file */
 export const OPENLORE_CONFIG_REL_PATH = `${OPENLORE_DIR}/${OPENLORE_CONFIG_FILENAME}`;
 
+/** Version-controlled identities frozen by enforcement.policy (change: add-enforcement-baseline-ratchet). */
+export const ENFORCEMENT_BASELINE_FILENAME = 'enforcement-baseline.jsonl';
+export const ENFORCEMENT_BASELINE_REL_PATH = `${OPENLORE_DIR}/${ENFORCEMENT_BASELINE_FILENAME}`;
+
 /** Relative path to the analysis output directory */
 export const OPENLORE_ANALYSIS_REL_PATH = `${OPENLORE_DIR}/${OPENLORE_ANALYSIS_SUBDIR}`;
 

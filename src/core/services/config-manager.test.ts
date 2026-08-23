@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import {
   getDefaultConfig,
   readOpenLoreConfig,
+  readOpenLoreConfigStrict,
   writeOpenLoreConfig,
   openloreConfigExists,
   readOpenSpecConfig,
@@ -73,7 +74,7 @@ describe('config-manager', () => {
     it('should return config with correct defaults', () => {
       const config = getDefaultConfig('nodejs', './openspec');
 
-      expect(config.version).toBe('1.0.0');
+      expect(config.version).toBe('1.1.0');
       expect(config.projectType).toBe('nodejs');
       expect(config.openspecPath).toBe('./openspec');
       expect(config.analysis.maxFiles).toBe(100_000);
@@ -273,6 +274,31 @@ describe('config-manager', () => {
 
       const result = await readOpenLoreConfig(testDir);
       expect(result).toBeNull();
+    });
+  });
+
+  describe('readOpenLoreConfigStrict', () => {
+    it('returns null only when config.json is absent', async () => {
+      await expect(readOpenLoreConfigStrict(testDir)).resolves.toBeNull();
+    });
+
+    it('rejects malformed JSON instead of lowering it to no policy', async () => {
+      const configDir = join(testDir, '.openlore');
+      await mkdir(configDir, { recursive: true });
+      await writeFile(join(configDir, 'config.json'), '{ invalid json !!!', 'utf-8');
+
+      await expect(readOpenLoreConfigStrict(testDir)).rejects.toThrow(/Invalid JSON.*config\.json/i);
+    });
+
+    it('rejects fatal schema findings', async () => {
+      const configDir = join(testDir, '.openlore');
+      await mkdir(configDir, { recursive: true });
+      await writeFile(join(configDir, 'config.json'), JSON.stringify({
+        ...getDefaultConfig('nodejs', 'openspec'),
+        enforcement: { policy: { 'stale-decision-reference': 'not-a-class' } },
+      }), 'utf-8');
+
+      await expect(readOpenLoreConfigStrict(testDir)).rejects.toThrow(/enforcement\.policy/i);
     });
   });
 

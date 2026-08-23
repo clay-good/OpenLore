@@ -231,6 +231,41 @@ export async function readOpenLoreConfig(rootPath: string, explicitConfigPath?: 
 }
 
 /**
+ * Strict config boundary for enforcement surfaces. Unlike the compatibility reader,
+ * only an absent file is represented by null; unreadable, malformed, and schema-fatal
+ * files throw so a configured gate cannot silently degrade to the no-policy default.
+ */
+export async function readOpenLoreConfigStrict(
+  rootPath: string,
+  explicitConfigPath?: string,
+): Promise<OpenLoreConfig | null> {
+  const configPath = resolveOpenLoreConfigPath(rootPath, explicitConfigPath);
+  let content: string;
+  try {
+    content = await readFile(configPath, 'utf-8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw new Error(`Unable to read ${configPath}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content) as unknown;
+  } catch (error) {
+    throw new Error(`Invalid JSON in ${configPath}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+  }
+  const normalized = normalizeOpenLoreConfig(parsed);
+  const validationFindings = validateOpenLoreConfig(normalized.config);
+  emitConfigValidationWarnings(configPath, [...normalized.findings, ...validationFindings]);
+  const fatalFindings = validationFindings.filter((finding) =>
+    isFatalConfigFinding(finding) ||
+    finding.key === 'enforcement.policy' ||
+    finding.key?.startsWith('enforcement.policy.') === true,
+  );
+  if (fatalFindings.length > 0) throw new InvalidOpenLoreConfigError(configPath, fatalFindings);
+  return normalized.config as OpenLoreConfig;
+}
+
+/**
  * Write openlore configuration to .openlore/config.json
  */
 export async function writeOpenLoreConfig(

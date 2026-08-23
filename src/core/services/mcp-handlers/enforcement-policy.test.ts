@@ -30,6 +30,9 @@ describe('applyPolicyPrecedence — pure precedence core', () => {
   it('explicit advisory wins over a blocking default', () => {
     expect(applyPolicyPrecedence('advisory', 'blocking')).toBe('advisory');
   });
+  it('explicit frozen selects the baseline-ratchet class', () => {
+    expect(applyPolicyPrecedence('frozen', 'advisory')).toBe('frozen');
+  });
   it('absent explicit class falls through to the source default', () => {
     expect(applyPolicyPrecedence(undefined, 'blocking')).toBe('blocking');
     expect(applyPolicyPrecedence(undefined, 'advisory')).toBe('advisory');
@@ -86,6 +89,10 @@ describe('normalizeEnforcementPolicy — tolerant of malformed config', () => {
   it('drops entries whose value is not a valid class', () => {
     const raw = { policy: { 'stale-decision-reference': 'blocking', 'surface-critical': 'nope', x: 5 } } as never;
     expect(normalizeEnforcementPolicy(raw)).toEqual({ 'stale-decision-reference': 'blocking' });
+  });
+  it('accepts the categorical frozen class', () => {
+    expect(normalizeEnforcementPolicy({ policy: { 'stale-decision-reference': 'frozen' } }))
+      .toEqual({ 'stale-decision-reference': 'frozen' });
   });
   it('a non-object policy degrades to empty', () => {
     expect(normalizeEnforcementPolicy({ policy: [] as never })).toEqual({});
@@ -150,10 +157,24 @@ describe('classifyFindings — one gate over one policy', () => {
     expect(a.classified.map((f) => f.subject)).toEqual(b.classified.map((f) => f.subject));
   });
 
+  it('collapses exact duplicate emissions in every partition', () => {
+    const duplicated = [findings[0]!, findings[0]!, findings[1]!];
+    const r = classifyFindings(duplicated, { 'stale-decision-reference': 'frozen' });
+    expect(r.classified).toHaveLength(2);
+    expect(r.frozen).toHaveLength(1);
+    expect(r.advisory).toHaveLength(1);
+  });
+
   it('does not alter a finding severity', () => {
     const r = classifyFindings(findings, { 'surface-critical': 'blocking' });
     const sc = r.classified.find((f) => f.code === 'surface-critical')!;
     expect(sc.severity).toBe('error');
     expect(sc.enforcementClass).toBe('blocking');
+  });
+
+  it('partitions frozen findings without gating before baseline reconciliation', () => {
+    const r = classifyFindings(findings, { 'stale-decision-reference': 'frozen' });
+    expect(r.gated).toBe(false);
+    expect(r.frozen.map((f) => f.code)).toEqual(['stale-decision-reference']);
   });
 });

@@ -67,7 +67,7 @@ Two things, both deterministic and local — OpenLore **remembers** your archite
 - **Breaking-change verdict** — `certify_public_surface` classifies every changed export `breaking / non-breaking / potentially-breaking` and **names the consumers each break hits**. Conservative — never silently "safe."
 - **Sensitive-boundary check** — `change_impact_certificate` flags when a diff **opens a new path into a boundary you declared** (reachable after the change, not before).
 - **Grounded claims** — `verify_claim` returns `confirmed / refuted / unverifiable` with a citation, before an agent asserts "X is dead" or "Y is safe to change."
-- **One commit gate** — `openlore enforce` blocks only on findings you mark `blocking`. Advisory by default, no API key.
+- **One commit gate** — `openlore enforce` blocks on findings you mark `blocking`, new debt under `frozen`, or an unverifiable frozen baseline. Advisory by default, no API key.
 
 Full guardrail table with commands: [Governance](#governance).
 
@@ -248,10 +248,10 @@ Memory makes an agent fast. Governance makes it *safe*. As agents get more auton
 | **`certify_public_surface`** | A breaking-change verdict per changed export, each break paired with the in-repo consumers it hits. What it can't prove safe is never called safe. | `openlore certify-public-surface --base main` |
 | **`check_architecture`** | "May a file under A import B?" against your declared layer / forbidden rules — a **pre-write** verdict, cross-language, instead of a post-hoc CI failure. | declare rules in `.openlore/architecture.json` |
 | **`verify_claim`** | A `confirmed / refuted / unverifiable` verdict **with a citation receipt** before an agent asserts "X is dead" or "decision `abc12345` still governs this." | MCP tool (`verify` preset) |
-| **`openlore enforce`** | One commit gate over **every** governance finding. Map each finding → `blocking / advisory / off`; blocks only on what you class blocking. | `openlore enforce --hook` |
+| **`openlore enforce`** | One commit gate over **every** governance finding. Map each finding → `blocking / frozen / advisory / off`; `frozen` adopts existing debt but blocks new findings. | `openlore enforce --hook` |
 | **Epistemic Lease** | Tells the agent when its context has gone stale so a long session can't drift onto confident-but-wrong assumptions. **Facts, never commands.** | automatic on every MCP response |
 
-**No agent required:** `openlore review --base main` composes the structural delta and blast radius into one Markdown briefing, and the bundled GitHub Action posts it as a single sticky PR comment (advisory by default).
+**No agent required:** `openlore review --base main` composes the structural delta and blast radius into one Markdown briefing, and the bundled GitHub Action posts it as a single sticky PR comment. Review is read-only and advisory by default; with `gate: true`, opted-in blast-radius orphan enforcement fails on blocking, frozen-new, uninitialized, or unverifiable state, and an invalid candidate enforcement config fails closed.
 
 ---
 
@@ -371,7 +371,7 @@ Everything else (read a file, grep, list files) uses your native tools. Full ref
 - **`certify_public_surface`** *(no key, opt-in)* — breaking-change verdict per export, consumers named. Renamed exports detected via symbol-identity continuity. CLI: `openlore certify-public-surface`.
 - **`check_architecture`** *(no key)* — turns a layer rule into a pre-write verdict. Declare `layers` / `forbidden` in `.openlore/architecture.json`. → [docs/architecture-invariants.md](docs/architecture-invariants.md)
 - **`verify_claim`** *(no key, opt-in)* — `confirmed / refuted / unverifiable` with a citation receipt, never an LLM guess.
-- **`openlore enforce`** *(no key, advisory)* — the unified gate over all governance findings; one `enforcement.policy` maps each finding → `blocking / advisory / off`. → [docs/configuration.md](docs/configuration.md#enforcement-policy)
+- **`openlore enforce`** *(no key, advisory)* — the unified gate over all governance findings; one `enforcement.policy` maps each finding → `blocking / frozen / advisory / off`. → [docs/configuration.md](docs/configuration.md#enforcement-policy)
 - **Decisions on the graph** *(API key for consolidation)* — `record_decision` before writing code; a pre-commit hook gates until reviewed. Decisions become `decision::` nodes joined to the files they govern, so `analyze_impact` returns them as neighbors.
 - **Epistemic Lease** *(no key)* — models drift as a navigation phenomenon; every MCP response carries a brief, factual freshness note once context ages. `orient()` resets it.
 - **`structural_diff`** *(no key)* — the structural complement to `git diff`: functions/edges added/removed, signature changes, and callers now stale. → [docs/structural-diff.md](docs/structural-diff.md)
@@ -401,7 +401,7 @@ Everything else (read a file, grep, list files) uses your native tools. Full ref
 ## Federation, interop & PR review
 
 - **Federation (cross-repo)** — each repo keeps its own `.openlore` index; a local registry references peers, and federated queries load only what they need (**no merged graph is ever materialized**). `analyze_impact`, `find_dead_code`, `select_tests`, and `find_path` take an opt-in `federation` flag and answer across the fleet, always naming the repos consulted vs. skipped. → [docs/federation.md](docs/federation.md)
-- **PR review (no agent)** — `openlore review --base main` composes the structural delta and blast radius into one comment; the bundled GitHub Action posts it as one sticky comment. → [docs/cli-reference.md](docs/cli-reference.md#pr-review-openlore-review)
+- **PR review (no agent)** — `openlore review --base main` composes the structural delta and blast radius into one read-only comment; the bundled GitHub Action posts it as one sticky comment and, only with `gate: true`, fails on blocking, frozen-new, uninitialized, or unverifiable orphan enforcement, plus invalid candidate enforcement config. → [docs/cli-reference.md](docs/cli-reference.md#pr-review-openlore-review)
 - **Interop (SCIP)** — `openlore export scip` writes `index.scip` for Sourcegraph, GitHub stack graphs, Glean, or any SCIP-aware tool. → [docs/scip-export.md](docs/scip-export.md)
 - **OpenSpec plugin** — OpenLore is the inaugural engine and reference plugin for the OpenSpec marketplace; OpenSpec invokes it as a subprocess, never importing its code. → [docs/OPENSPEC-INTEGRATION.md](docs/OPENSPEC-INTEGRATION.md)
 

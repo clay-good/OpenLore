@@ -13,15 +13,22 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('../../core/services/mcp-handlers/blast-radius.js', () => ({ computeBlastRadius: vi.fn() }));
 vi.mock('../../core/services/mcp-handlers/structural-diff.js', () => ({ handleStructuralDiff: vi.fn() }));
-vi.mock('../../core/services/config-manager.js', () => ({ readOpenLoreConfig: vi.fn() }));
-vi.mock('node:fs/promises', () => ({ writeFile: vi.fn() }));
+vi.mock('../../core/services/config-manager.js', () => ({ readOpenLoreConfigStrict: vi.fn() }));
+vi.mock('node:fs/promises', async (importOriginal) => ({
+  ...await importOriginal<typeof import('node:fs/promises')>(),
+  writeFile: vi.fn(),
+}));
 
-import { writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 
 import { composeReview, renderHuman, renderMarkdown, runReviewCli, REVIEW_GATE_EXIT_CODE, REVIEW_MARKER, MAX_MARKDOWN_CHARS, type ReviewBriefing } from './review.js';
 import { computeBlastRadius } from '../../core/services/mcp-handlers/blast-radius.js';
 import { handleStructuralDiff } from '../../core/services/mcp-handlers/structural-diff.js';
-import { readOpenLoreConfig } from '../../core/services/config-manager.js';
+import { readOpenLoreConfigStrict } from '../../core/services/config-manager.js';
 import type { BlastRadiusBriefing } from '../../core/services/mcp-handlers/blast-radius.js';
 
 // ── Fixtures ───────────────────────────────────────────────────────────────────
@@ -44,9 +51,27 @@ const blastBriefing = {
   memory: { drifted: 0, orphaned: 0, willDrift: [] },
   specs: { willGoStale: 1, items: [{ kind: 'stale', message: 'auth spec stale', domain: 'auth', specPath: 'openspec/specs/auth/spec.md', provenance: 'reviewed-corpus' }] },
   decisions: { affected: 0, orphaned: 0, items: [] },
+  driftAssessment: { complete: true, filesOmitted: 0, detailsTruncated: false },
   federation: { evaluated: false, note: '' },
   caveats: [],
 } as unknown as BlastRadiusBriefing;
+
+const execFileAsync = promisify(execFile);
+
+async function makeCommittedReviewRepo(files: Record<string, string>): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), 'openlore-review-'));
+  for (const [path, content] of Object.entries(files)) {
+    await mkdir(join(root, path, '..'), { recursive: true });
+    await appendFile(join(root, path), content, 'utf8');
+  }
+  await execFileAsync('git', ['init', '-q'], { cwd: root });
+  await execFileAsync('git', ['add', '.'], { cwd: root });
+  await execFileAsync('git', [
+    '-c', 'user.name=OpenLore Test', '-c', 'user.email=openlore@example.test', '-c', 'commit.gpgsign=false',
+    'commit', '-q', '-m', 'trusted review state',
+  ], { cwd: root });
+  return root;
+}
 
 describe('renderMarkdown (conclusion-shaped briefing)', () => {
   it('names removed + signature-changed symbols with their stale callers, hubs, tests, drift, and the sticky marker', () => {
@@ -64,6 +89,57 @@ describe('renderMarkdown (conclusion-shaped briefing)', () => {
     expect(md).toContain('ADR-12: auth');                    // governing decision
     expect(md).toContain('auth spec stale');                 // drift
     expect(md).toContain('Advisory');                        // advisory footer
+  });
+
+  it('renders the frozen/new ratchet receipt and initialization action', () => {
+    const md = renderMarkdown({
+      base: 'main', head: 'working tree', structural: structuralWithDelta, blast: blastBriefing,
+      caveats: [], status: 'ok',
+      enforcement: {
+        gated: true, frozen: 12, new: 2, retired: 1,
+        requiresInitialization: ['orphans-anchored-memory'],
+        evidence: [{ code: 'orphans-anchored-memory', state: 'frozen:new' }],
+        omittedEvidence: 0,
+      },
+    });
+    expect(md).toMatch(/Blast-radius orphan enforcement[\s\S]*12 frozen, 2 new, 1 retired[\s\S]*gate blocked/);
+    expect(md).toMatch(/Gate evidence:[\s\S]*orphans-anchored-memory[\s\S]*frozen:new/);
+    expect(md).toMatch(/openlore enforce[\s\S]*orphans-anchored-memory/);
+  });
+
+  it('renders bounded gate evidence with an omission receipt', () => {
+    const evidence = Array.from({ length: 12 }, (_, i) => ({ code: `finding-${i}`, state: 'blocking' as const }));
+    const md = renderMarkdown({
+      base: 'main', head: 'working tree', structural: structuralWithDelta, blast: blastBriefing,
+      caveats: [], status: 'ok',
+      enforcement: { gated: true, frozen: 0, new: 0, retired: 0, requiresInitialization: [], evidence, omittedEvidence: 3 },
+    });
+    expect(md).toContain('`finding-11` (blocking)');
+    expect(md).toContain('…and 3 more');
+  });
+
+  it('preserves gate evidence when hostile caveats force the GitHub-size clamp', () => {
+    const hostile = '`'.repeat(80) + '<&'.repeat(100);
+    const md = renderMarkdown({
+      base: 'main', head: 'working tree', structural: structuralWithDelta, blast: blastBriefing,
+      caveats: Array.from({ length: 300 }, (_, i) => `${i}: ${hostile}`), status: 'ok',
+      enforcement: {
+        gated: true, frozen: 0, new: 1, retired: 0, requiresInitialization: [],
+        evidence: [{ code: 'orphans-anchored-memory', state: 'frozen:new' }], omittedEvidence: 0,
+      },
+    });
+    expect(md.length).toBeLessThanOrEqual(MAX_MARKDOWN_CHARS);
+    expect(md).toMatch(/Blast-radius orphan enforcement[\s\S]*Gate evidence:[\s\S]*orphans-anchored-memory[\s\S]*frozen:new/);
+    expect(md).toContain('Briefing truncated to fit GitHub');
+  });
+
+  it('directs read-only review users to apply a would-be baseline shrink locally', () => {
+    const md = renderMarkdown({
+      base: 'main', head: 'working tree', structural: structuralWithDelta, blast: blastBriefing,
+      caveats: [], status: 'ok',
+      enforcement: { gated: false, frozen: 2, new: 0, retired: 1, requiresInitialization: [], evidence: [], omittedEvidence: 0 },
+    });
+    expect(md).toMatch(/1 retired[\s\S]*openlore enforce[\s\S]*stage the baseline shrink/);
   });
 
   it('caps a wide drift list to a briefing, not a wall of text', () => {
@@ -280,7 +356,7 @@ describe('renderMarkdown (conclusion-shaped briefing)', () => {
 });
 
 describe('composeReview (honest degradation + caveats)', () => {
-  beforeEach(() => { vi.mocked(readOpenLoreConfig).mockResolvedValue(null as never); });
+  beforeEach(() => { vi.mocked(readOpenLoreConfigStrict).mockResolvedValue(null as never); });
   afterEach(() => vi.clearAllMocks());
 
   it('blast error → status "ok" (structural present) with a disclosure caveat', async () => {
@@ -358,7 +434,7 @@ describe('runReviewCli (output + advisory posture)', () => {
   beforeEach(() => {
     outSpy = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
     errSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
-    vi.mocked(readOpenLoreConfig).mockResolvedValue(null as never);
+    vi.mocked(readOpenLoreConfigStrict).mockResolvedValue(null as never);
     vi.mocked(handleStructuralDiff).mockResolvedValue(structuralWithDelta);
     vi.mocked(computeBlastRadius).mockResolvedValue(blastBriefing);
     vi.stubEnv('OPENLORE_REVIEW_ANALYZE_FAILED', '');
@@ -370,7 +446,7 @@ describe('runReviewCli (output + advisory posture)', () => {
     expect(code).toBe(0);
     const payload = JSON.parse(outSpy.mock.calls.map((c: unknown[]) => String(c[0])).join(''));
     expect(payload).toMatchObject({
-      schemaVersion: 1,
+      schemaVersion: 2,
       status: 'ok',
       structural: { summary: { removedFunctions: 1 } },
     });
@@ -403,21 +479,195 @@ describe('runReviewCli (output + advisory posture)', () => {
   });
 
   it('advisory by default (exit 0) even with a block pattern configured but no --hook', async () => {
-    const orphaned = { ...blastBriefing, memory: { drifted: 0, orphaned: 1, willDrift: [{ kind: 'memory-orphaned', message: 'gone', filePath: 'x.ts', provenance: 'local-unreviewed' }] } } as unknown as BlastRadiusBriefing;
+    const orphaned = { ...blastBriefing, memory: { drifted: 0, orphaned: 1, willDrift: [{ kind: 'memory-orphaned', message: 'gone', filePath: 'x.ts', provenance: 'local-unreviewed' }], orphanFindings: [{ id: 'memory-1', filePath: 'x.ts', message: 'gone' }] } } as unknown as BlastRadiusBriefing;
     vi.mocked(computeBlastRadius).mockResolvedValue(orphaned);
-    vi.mocked(readOpenLoreConfig).mockResolvedValue({ blastRadius: { block: ['orphans-anchored-memory'] } } as never);
+    vi.mocked(readOpenLoreConfigStrict).mockResolvedValue({ blastRadius: { block: ['orphans-anchored-memory'] } } as never);
     expect(await runReviewCli({ cwd: '/p', base: 'main' })).toBe(0);
   });
 
   it('--hook uses the reserved policy-gate exit only when a configured block pattern fires', async () => {
-    const orphaned = { ...blastBriefing, memory: { drifted: 0, orphaned: 1, willDrift: [{ kind: 'memory-orphaned', message: 'gone', filePath: 'x.ts', provenance: 'local-unreviewed' }] } } as unknown as BlastRadiusBriefing;
+    const orphaned = { ...blastBriefing, memory: { drifted: 0, orphaned: 1, willDrift: [{ kind: 'memory-orphaned', message: 'gone', filePath: 'x.ts', provenance: 'local-unreviewed' }], orphanFindings: [{ id: 'memory-1', filePath: 'x.ts', message: 'gone' }] } } as unknown as BlastRadiusBriefing;
     vi.mocked(computeBlastRadius).mockResolvedValue(orphaned);
-    vi.mocked(readOpenLoreConfig).mockResolvedValue({ blastRadius: { block: ['orphans-anchored-memory'] } } as never);
+    vi.mocked(readOpenLoreConfigStrict).mockResolvedValue({ blastRadius: { block: ['orphans-anchored-memory'] } } as never);
     expect(await runReviewCli({ cwd: '/p', base: 'main', hook: true })).toBe(REVIEW_GATE_EXIT_CODE);
+    const markdown = outSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('');
+    expect(markdown).toMatch(/Blast-radius orphan enforcement[\s\S]*Gate evidence:[\s\S]*orphans-anchored-memory[\s\S]*blocking/);
   });
 
   it('--hook stays advisory (exit 0) when no pattern is configured', async () => {
     expect(await runReviewCli({ cwd: '/p', base: 'main', hook: true })).toBe(0);
+  });
+
+  it('--hook stays advisory in a real Git repository with no .openlore directory', async () => {
+    const root = await makeCommittedReviewRepo({ 'README.md': 'fixture\n' });
+    try {
+      vi.mocked(computeBlastRadius).mockResolvedValue({ ...blastBriefing, baseRef: 'HEAD', resolvedBaseRef: 'HEAD' } as BlastRadiusBriefing);
+      expect(await runReviewCli({ cwd: root, base: 'HEAD', hook: true })).toBe(0);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('--hook fails closed when it cannot verify the trusted frozen baseline', async () => {
+    const orphaned = { ...blastBriefing, memory: { drifted: 0, orphaned: 1, willDrift: [], orphanFindings: [{ id: 'memory-1', filePath: 'x.ts', message: 'gone' }] } } as unknown as BlastRadiusBriefing;
+    vi.mocked(computeBlastRadius).mockResolvedValue(orphaned);
+    vi.mocked(readOpenLoreConfigStrict).mockResolvedValue({ enforcement: { policy: { 'orphans-anchored-memory': 'frozen' } } } as never);
+    expect(await runReviewCli({ cwd: '/p', base: 'main', hook: true })).toBe(REVIEW_GATE_EXIT_CODE);
+    const markdown = outSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('');
+    expect(markdown).toMatch(/Blast-radius orphan enforcement[\s\S]*Gate evidence:[\s\S]*frozen:invalid/);
+  });
+
+  it('does not reconcile or report frozen counts from an incomplete drift assessment', async () => {
+    const partial = {
+      ...blastBriefing,
+      memory: { drifted: 0, orphaned: 1, willDrift: [], orphanFindings: [{ id: 'memory-1', filePath: 'x.ts', message: 'gone' }] },
+      driftAssessment: { complete: false, filesOmitted: 1, detailsTruncated: false },
+    } as unknown as BlastRadiusBriefing;
+    vi.mocked(computeBlastRadius).mockResolvedValue(partial);
+    vi.mocked(readOpenLoreConfigStrict).mockResolvedValue({ enforcement: { policy: { 'orphans-anchored-memory': 'frozen' } } } as never);
+
+    expect(await runReviewCli({ cwd: '/p', base: 'main', hook: true })).toBe(REVIEW_GATE_EXIT_CODE);
+    const markdown = outSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('');
+    expect(markdown).toMatch(/baseline was not reconciled because drift analysis was incomplete/i);
+    expect(markdown).toMatch(/Blast-radius orphan enforcement[\s\S]*0 frozen, 0 new[\s\S]*orphans-anchored-memory[\s\S]*frozen:invalid/);
+  });
+
+  it('fails closed with frozen invalid evidence when blast-radius is unavailable', async () => {
+    vi.mocked(computeBlastRadius).mockResolvedValue({ error: 'index unavailable' });
+    vi.mocked(readOpenLoreConfigStrict).mockResolvedValue({ enforcement: { policy: { 'orphans-anchored-memory': 'frozen' } } } as never);
+
+    expect(await runReviewCli({ cwd: '/p', base: 'main', hook: true })).toBe(REVIEW_GATE_EXIT_CODE);
+    const markdown = outSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('');
+    expect(markdown).toMatch(/Blast-radius orphan enforcement[\s\S]*orphans-anchored-memory[\s\S]*frozen:invalid/);
+    expect(markdown).toMatch(/Blast radius unavailable.*index unavailable/i);
+  });
+
+  it('retains the trusted frozen policy when the candidate config is malformed', async () => {
+    const root = await makeCommittedReviewRepo({
+      '.openlore/config.json': JSON.stringify({ enforcement: { policy: { 'orphans-anchored-memory': 'frozen' } } }) + '\n',
+    });
+    try {
+      vi.mocked(computeBlastRadius).mockResolvedValue({ ...blastBriefing, baseRef: 'HEAD', resolvedBaseRef: 'HEAD' } as BlastRadiusBriefing);
+      vi.mocked(readOpenLoreConfigStrict).mockRejectedValue(new Error('Invalid JSON in candidate config'));
+      expect(await runReviewCli({ cwd: root, base: 'HEAD', hook: true })).toBe(REVIEW_GATE_EXIT_CODE);
+      const markdown = outSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('');
+      expect(markdown).toMatch(/orphans-anchored-memory[\s\S]*frozen:invalid/);
+      expect(markdown).toMatch(/Candidate config is invalid.*retained the trusted enforcement policy/i);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed when both candidate and trusted configs are unverifiable', async () => {
+    vi.mocked(readOpenLoreConfigStrict).mockRejectedValue(new Error('Invalid JSON in candidate config'));
+    expect(await runReviewCli({ cwd: '/p', base: 'main', hook: true })).toBe(REVIEW_GATE_EXIT_CODE);
+    const markdown = outSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('');
+    expect(markdown).toMatch(/enforcement-config[\s\S]*config:invalid/);
+    expect(markdown).toMatch(/trusted config could not be read/i);
+  });
+
+  it.each([
+    { state: 'unchanged', candidate: '# OpenLore frozen enforcement baseline v1\n["code","orphans-anchored-memory"]\n', expected: 0 },
+    { state: 'deleted', candidate: null, expected: REVIEW_GATE_EXIT_CODE },
+    { state: 'grown', candidate: '# OpenLore frozen enforcement baseline v1\n["code","orphans-anchored-memory"]\n["finding","orphans-anchored-memory","x.ts","memory-1"]\n', expected: REVIEW_GATE_EXIT_CODE },
+  ])('protects trusted baseline bytes after an all-code downgrade ($state)', async ({ candidate, expected }) => {
+    const trustedBaseline = '# OpenLore frozen enforcement baseline v1\n["code","orphans-anchored-memory"]\n';
+    const root = await makeCommittedReviewRepo({
+      '.openlore/config.json': JSON.stringify({ enforcement: { policy: { 'orphans-anchored-memory': 'frozen' } } }) + '\n',
+      '.openlore/enforcement-baseline.jsonl': trustedBaseline,
+    });
+    try {
+      const baselinePath = join(root, '.openlore/enforcement-baseline.jsonl');
+      if (candidate !== trustedBaseline) {
+        await rm(baselinePath);
+        if (candidate !== null) await appendFile(baselinePath, candidate, 'utf8');
+      }
+      vi.mocked(computeBlastRadius).mockResolvedValue({ ...blastBriefing, baseRef: 'HEAD', resolvedBaseRef: 'HEAD' } as BlastRadiusBriefing);
+      vi.mocked(readOpenLoreConfigStrict).mockResolvedValue({ enforcement: { policy: { 'orphans-anchored-memory': 'advisory' } } } as never);
+      expect(await runReviewCli({ cwd: root, base: 'HEAD', hook: true })).toBe(expected);
+      if (expected !== 0) {
+        const markdown = outSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('');
+        expect(markdown).toMatch(/frozen baseline integrity check failed/i);
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed on downgrade when the trusted frozen baseline cannot be read', async () => {
+    const root = await makeCommittedReviewRepo({
+      '.openlore/config.json': JSON.stringify({ enforcement: { policy: { 'orphans-anchored-memory': 'frozen' } } }) + '\n',
+      '.openlore/enforcement-baseline.jsonl': '# OpenLore frozen enforcement baseline v1\n' + 'x'.repeat(2_100_000),
+    });
+    try {
+      vi.mocked(computeBlastRadius).mockResolvedValue({ ...blastBriefing, baseRef: 'HEAD', resolvedBaseRef: 'HEAD' } as BlastRadiusBriefing);
+      vi.mocked(readOpenLoreConfigStrict).mockResolvedValue({ enforcement: { policy: { 'orphans-anchored-memory': 'advisory' } } } as never);
+      expect(await runReviewCli({ cwd: root, base: 'HEAD', hook: true })).toBe(REVIEW_GATE_EXIT_CODE);
+      const markdown = outSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('');
+      expect(markdown).toMatch(/orphans-anchored-memory[\s\S]*frozen:invalid/);
+      expect(markdown).toMatch(/Frozen baseline trust check failed/i);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('reports would-be retired identities without modifying the baseline', async () => {
+    const baseline = '# OpenLore frozen enforcement baseline v1\n' +
+      '["code","orphans-anchored-memory"]\n' +
+      '["finding","orphans-anchored-memory","gone.ts","memory-1"]\n';
+    const root = await makeCommittedReviewRepo({
+      '.openlore/config.json': JSON.stringify({ enforcement: { policy: { 'orphans-anchored-memory': 'frozen' } } }) + '\n',
+      '.openlore/enforcement-baseline.jsonl': baseline,
+    });
+    try {
+      vi.mocked(computeBlastRadius).mockResolvedValue({ ...blastBriefing, baseRef: 'HEAD', resolvedBaseRef: 'HEAD' } as BlastRadiusBriefing);
+      vi.mocked(readOpenLoreConfigStrict).mockResolvedValue({ enforcement: { policy: { 'orphans-anchored-memory': 'frozen' } } } as never);
+      expect(await runReviewCli({ cwd: root, base: 'HEAD', hook: true })).toBe(0);
+      const markdown = outSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('');
+      expect(markdown).toMatch(/1 retired[\s\S]*openlore enforce[\s\S]*stage the baseline shrink/);
+      const bytes = await import('node:fs/promises').then((fs) => fs.readFile(join(root, '.openlore/enforcement-baseline.jsonl'), 'utf8'));
+      expect(bytes).toBe(baseline);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('trusts ratchet progress on the selected base tip, not the older fork point', async () => {
+    const oldBaseline = '# OpenLore frozen enforcement baseline v1\n' +
+      '["code","orphans-anchored-memory"]\n' +
+      '["finding","orphans-anchored-memory","x.ts","memory-1"]\n';
+    const root = await makeCommittedReviewRepo({
+      '.openlore/config.json': JSON.stringify({ enforcement: { policy: { 'orphans-anchored-memory': 'frozen' } } }) + '\n',
+      '.openlore/enforcement-baseline.jsonl': oldBaseline,
+    });
+    try {
+      await execFileAsync('git', ['branch', '-M', 'main'], { cwd: root });
+      await execFileAsync('git', ['branch', 'feature'], { cwd: root });
+      const baselinePath = join(root, '.openlore/enforcement-baseline.jsonl');
+      await rm(baselinePath);
+      await appendFile(baselinePath, '# OpenLore frozen enforcement baseline v1\n["code","orphans-anchored-memory"]\n', 'utf8');
+      await execFileAsync('git', ['add', '.openlore/enforcement-baseline.jsonl'], { cwd: root });
+      await execFileAsync('git', [
+        '-c', 'user.name=OpenLore Test', '-c', 'user.email=openlore@example.test', '-c', 'commit.gpgsign=false',
+        'commit', '-q', '-m', 'ratchet base debt',
+      ], { cwd: root });
+      await execFileAsync('git', ['checkout', '-q', 'feature'], { cwd: root });
+
+      const orphaned = {
+        ...blastBriefing,
+        baseRef: 'main', resolvedBaseRef: 'main',
+        memory: { drifted: 0, orphaned: 1, willDrift: [], orphanFindings: [{ id: 'memory-1', filePath: 'x.ts', message: 'gone' }] },
+      } as unknown as BlastRadiusBriefing;
+      vi.mocked(computeBlastRadius).mockResolvedValue(orphaned);
+      vi.mocked(readOpenLoreConfigStrict).mockResolvedValue({ enforcement: { policy: { 'orphans-anchored-memory': 'frozen' } } } as never);
+
+      expect(await runReviewCli({ cwd: root, base: 'main', hook: true })).toBe(REVIEW_GATE_EXIT_CODE);
+      const markdown = outSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('');
+      expect(markdown).toMatch(/frozen baseline integrity check failed.*grew/i);
+      expect(markdown).toMatch(/orphans-anchored-memory.*frozen:invalid/i);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
 

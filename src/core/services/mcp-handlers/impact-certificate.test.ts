@@ -173,6 +173,7 @@ describe('detectNewlyOpenedPaths', () => {
     const p = out[0];
     expect(p.surface).toBe('client');
     expect(p.path).toEqual(['A', 'B', 'surfaceFn']);
+    expect(p.pathIds).toEqual([A, B, S]);
     expect(p.openingEdge).toEqual({ from: 'A', to: 'B' });
     expect(p.reaches).toBe('surfaceFn');
   });
@@ -210,8 +211,8 @@ describe('triggeredBlockSeverities', () => {
     impact: { unavailable: 'x' }, tests: { unavailable: 'x' }, specs: { unavailable: 'x' },
     lease: { anchors: [] }, findings: [], highestSurfaceSeverity: 'none', posture: 'advisory', caveats: [], headline: '',
   });
-  const crit: NewlyOpenedPath = { surface: 'client', surfaceSeverity: 'critical', openingEdge: { from: 'A', to: 'B' }, path: ['A', 'B'], reaches: 'B' };
-  const warn: NewlyOpenedPath = { surface: 'logs', surfaceSeverity: 'warn', openingEdge: { from: 'A', to: 'L' }, path: ['A', 'L'], reaches: 'L' };
+  const crit: NewlyOpenedPath = { surface: 'client', surfaceSeverity: 'critical', openingEdge: { from: 'A', to: 'B' }, path: ['A', 'B'], pathIds: ['a::A', 'b::B'], reaches: 'B' };
+  const warn: NewlyOpenedPath = { surface: 'logs', surfaceSeverity: 'warn', openingEdge: { from: 'A', to: 'L' }, path: ['A', 'L'], pathIds: ['a::A', 'l::L'], reaches: 'L' };
 
   it('fires only on a configured severity', () => {
     expect(triggeredBlockSeverities(cert([crit]), ['critical'])).toEqual(['critical']);
@@ -230,7 +231,7 @@ describe('contract', () => {
       kind: 'impact-certificate', version: 1, baseRef: 'HEAD', resolvedBaseRef: 'HEAD', change: 'add-x',
       changed: { files: 2, symbols: 4 },
       surfaces: [{ name: 'client', severity: 'critical', resolvedSymbols: 3, unresolvedMembers: [] }],
-      newlyOpenedPaths: [{ surface: 'client', surfaceSeverity: 'critical', openingEdge: { from: 'A', to: 'B' }, path: ['A', 'B', 'send'], reaches: 'send' }],
+      newlyOpenedPaths: [{ surface: 'client', surfaceSeverity: 'critical', openingEdge: { from: 'A', to: 'B' }, path: ['A', 'B', 'send'], pathIds: ['a::A', 'b::B', 'b::send'], reaches: 'send' }],
       impact: { highestRiskLevel: 'high', maxAffectedCallers: 4, hubsTouched: [], layersCrossed: [], governingDecisions: [], governingDecisionProvenance: [], topSymbols: [], analyzedSymbolCount: 1 },
       tests: { count: 2, toRun: [], soundness: {} },
       specs: { willGoStale: 1, items: [] },

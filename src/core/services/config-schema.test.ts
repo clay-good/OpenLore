@@ -46,6 +46,11 @@ const FULLY_POPULATED: Required<OpenLoreConfig> = {
 };
 
 describe('config-schema — type-completeness bind', () => {
+  it('signals the additive frozen-policy enum with schema version 1.1.0', () => {
+    expect(CONFIG_SCHEMA_VERSION).toBe('1.1.0');
+    expect(checkConfigVersion('1.0.0')).toEqual([]);
+  });
+
   it('validator field map covers exactly the keys of a fully-populated OpenLoreConfig', () => {
     const typeKeys = Object.keys(FULLY_POPULATED).sort();
     const validatorKeys = [...KNOWN_CONFIG_KEYS].sort();
@@ -61,6 +66,13 @@ describe('config-schema — type-completeness bind', () => {
 
   it('a fully-populated, correctly-typed config yields zero findings', () => {
     expect(validateOpenLoreConfig(FULLY_POPULATED)).toEqual([]);
+  });
+
+  it('accepts frozen as a categorical enforcement policy class', () => {
+    expect(validateOpenLoreConfig({
+      ...FULLY_POPULATED,
+      enforcement: { policy: { 'stale-decision-reference': 'frozen' } },
+    })).toEqual([]);
   });
 
   it('canonical default sections populate every field the schema requires', () => {
