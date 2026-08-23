@@ -6,7 +6,7 @@
  * Never rewrites existing content.
  */
 
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, mkdir, rm } from 'node:fs/promises';
 import { dirname, join, relative } from 'node:path';
 import { fileExists } from '../../utils/command-helpers.js';
 import { safeJoin } from '../../utils/path-confinement.js';
@@ -14,6 +14,8 @@ import { logger } from '../../utils/logger.js';
 import { parseSpecHeader } from '../drift/spec-mapper.js';
 import type { PendingDecision, DecisionStore, SpecMap, DecisionScope } from '../../types/index.js';
 import { patchDecision, purgeInactiveDecisions, updateDecisionStore } from './store.js';
+import { renderDecisionConstraintMarker, validateDecisionConstraintBlock } from './constraint-ledger.js';
+import { atomicWriteFile } from './atomic-store.js';
 
 /**
  * ADRs are durable architectural memory, not a log of every implementation choice.
@@ -60,6 +62,8 @@ export async function syncApprovedDecisions(
   const synced: PendingDecision[] = [];
   const errors: Array<{ id: string; error: string }> = [];
   const modifiedSpecs = new Set<string>();
+  const originalById = new Map(store.decisions.map((decision) => [decision.id, decision]));
+  const concurrencyConflicts = new Set<string>();
 
   let updatedStore = store;
 
@@ -108,15 +112,48 @@ export async function syncApprovedDecisions(
     // write is preserved rather than clobbered.
     const snapshot = updatedStore;
     const snapshotIds = new Set(snapshot.decisions.map((d) => d.id));
+    const attemptedIds = new Set([...approved, ...autoApproved].map((decision) => decision.id));
     updatedStore = await updateDecisionStore(options.rootPath, (disk) => {
+      const changedDuringSync = disk.decisions.filter((decision) => {
+        if (!attemptedIds.has(decision.id)) return false;
+        return JSON.stringify(decision) !== JSON.stringify(originalById.get(decision.id));
+      });
+      for (const decision of changedDuringSync) concurrencyConflicts.add(decision.id);
+      const conflictIds = new Set(changedDuringSync.map((decision) => decision.id));
       const extras = disk.decisions.filter((d) => !snapshotIds.has(d.id));
-      return purgeInactiveDecisions({
+      const merged = {
         ...snapshot,
         sessionId: disk.sessionId,
         lastConsolidatedAt: disk.lastConsolidatedAt ?? snapshot.lastConsolidatedAt,
-        decisions: [...snapshot.decisions, ...extras],
-      });
+        decisions: [
+          ...snapshot.decisions.filter((decision) => !conflictIds.has(decision.id)),
+          ...changedDuringSync,
+          ...extras,
+        ],
+      };
+      const purged = purgeInactiveDecisions(merged);
+      // Retain a concurrent rejection/phantom tombstone while the older durable
+      // projection exists, so a later sync cannot reactivate rejected policy.
+      const inactiveConflicts = changedDuringSync.filter((decision) =>
+        decision.status === 'rejected' || decision.status === 'phantom');
+      return inactiveConflicts.length > 0
+        ? {
+            ...purged,
+            decisions: [
+              ...purged.decisions,
+              ...inactiveConflicts.map((decision) => ({ ...decision, durableLifecycleConflict: true })),
+            ],
+          }
+        : purged;
     });
+    if (concurrencyConflicts.size > 0) {
+      for (const id of concurrencyConflicts) {
+        errors.push({ id, error: 'decision changed concurrently during sync; durable output is non-authoritative until reconciled' });
+      }
+      for (let index = synced.length - 1; index >= 0; index--) {
+        if (concurrencyConflicts.has(synced[index].id)) synced.splice(index, 1);
+      }
+    }
   }
 
   return {
@@ -130,6 +167,12 @@ async function syncDecision(
   options: SyncOptions,
 ): Promise<string[]> {
   validateDecisionRenderInputs(decision);
+  if (decision.constraints) {
+    const findings = validateDecisionConstraintBlock(decision, decision.constraints);
+    if (findings.length > 0) {
+      throw new Error(findings.map((finding) => finding.message).join('; '));
+    }
+  }
   const modified: string[] = [];
 
   // Resolve each affected domain to a real spec file, preserving order.
@@ -166,38 +209,89 @@ async function syncDecision(
   // e.g. an MCP-preset requirement bolted onto the drift, analyzer, and cli specs.
   // (Requirement: DecisionSyncWritesOneOwningDomain)
   const [owner, ...others] = resolved;
-  if (owner) {
-    if (!options.dryRun) await appendToSpec(owner.specAbsPath, decision);
-    modified.push(owner.specPath);
-
-    for (const other of others) {
+  if (decision.constraints && !owner && !qualifiesForADR(decision)) {
+    throw new Error(
+      `Decision ${decision.id} carries constraints but has no durable owning spec or ADR target; refusing to purge its only policy copy`,
+    );
+  }
+  const backups = new Map<string, string>();
+  const writtenBySync = new Map<string, string>();
+  if (!options.dryRun) {
+    for (const target of resolved) backups.set(target.specAbsPath, await readFile(target.specAbsPath, 'utf8'));
+  }
+  let createdADR: string | undefined;
+  try {
+    if (owner) {
       if (!options.dryRun) {
-        await appendDecisionPointer(
-          other.specAbsPath,
-          other.specPath,
-          decision,
-          owner.domain,
-          owner.specPath,
+        writtenBySync.set(owner.specAbsPath, await appendToSpec(owner.specAbsPath, decision));
+      }
+      modified.push(owner.specPath);
+
+      for (const other of others) {
+        if (!options.dryRun) {
+          const intended = await appendDecisionPointer(
+            other.specAbsPath,
+            other.specPath,
+            decision,
+            owner.domain,
+            owner.specPath,
+          );
+          writtenBySync.set(other.specAbsPath, intended);
+        }
+        modified.push(other.specPath);
+      }
+    }
+
+    if (qualifiesForADR(decision)) {
+      if (options.dryRun) {
+        const slug = toKebabCase(decision.title);
+        modified.push(join(relative(options.rootPath, options.openspecPath), 'decisions', `adr-XXXX-${slug}.md`));
+      } else {
+        const adrPath = await createADR(decision, options);
+        if (adrPath) {
+          createdADR = join(options.rootPath, adrPath);
+          modified.push(adrPath);
+        }
+      }
+    }
+
+    if (decision.constraints && !owner) {
+      const durableADR = options.dryRun
+        ? qualifiesForADR(decision)
+        : Boolean(createdADR);
+      if (!durableADR) {
+        throw new Error(
+          `Decision ${decision.id} carries constraints but no durable projection was written; retaining its pending policy copy`,
         );
       }
-      modified.push(other.specPath);
     }
-  }
-
-  if (qualifiesForADR(decision)) {
-    if (options.dryRun) {
-      const slug = toKebabCase(decision.title);
-      modified.push(`openspec/decisions/adr-XXXX-${slug}.md`);
-    } else {
-      const adrPath = await createADR(decision, options);
-      if (adrPath) modified.push(adrPath);
+  } catch (error) {
+    if (!options.dryRun) {
+      const rollbackErrors: string[] = [];
+      for (const [path, content] of backups) {
+        try {
+          const current = await readFile(path, 'utf8');
+          if (writtenBySync.has(path) && current !== writtenBySync.get(path)) {
+            rollbackErrors.push(`${path} changed concurrently; preserving those bytes instead of rolling them back`);
+          } else if (writtenBySync.has(path)) {
+            await atomicWriteFile(path, content);
+          }
+        } catch (rollbackError) { rollbackErrors.push(String(rollbackError)); }
+      }
+      if (createdADR) {
+        try { await rm(createdADR, { force: true }); } catch (rollbackError) { rollbackErrors.push(String(rollbackError)); }
+      }
+      if (rollbackErrors.length > 0) {
+        throw new Error(`${String(error)}; rollback incomplete: ${rollbackErrors.join('; ')}`, { cause: error });
+      }
     }
+    throw error;
   }
 
   return modified;
 }
 
-async function appendToSpec(specPath: string, decision: PendingDecision): Promise<void> {
+async function appendToSpec(specPath: string, decision: PendingDecision): Promise<string> {
   let content = await readFile(specPath, 'utf-8');
 
   // 1. Update > Source files: header if new files present
@@ -211,7 +305,8 @@ async function appendToSpec(specPath: string, decision: PendingDecision): Promis
   // 3. Append to ## Decisions section (create if absent)
   content = appendDecisionSection(content, decision);
 
-  await writeFile(specPath, content, 'utf-8');
+  await atomicWriteFile(specPath, content);
+  return content;
 }
 
 /** Write a schema-valid deferral or decision pointer into a non-owning domain.
@@ -223,7 +318,7 @@ async function appendDecisionPointer(
   decision: PendingDecision,
   ownerDomain: string,
   ownerSpecPath: string,
-): Promise<void> {
+): Promise<string> {
   const content = await readFile(specPath, 'utf-8');
   const next = appendDecisionPointerLine(
     content,
@@ -232,7 +327,8 @@ async function appendDecisionPointer(
     ownerDomain,
     ownerSpecPath,
   );
-  if (next !== content) await writeFile(specPath, next, 'utf-8');
+  if (next !== content) await atomicWriteFile(specPath, next);
+  return next;
 }
 
 function appendDecisionPointerLine(
@@ -483,12 +579,14 @@ function specStatusLabel(decision: PendingDecision): string {
 }
 
 function buildDecisionEntry(decision: PendingDecision): string {
+  const constraintMarker = renderDecisionConstraintMarker(decision);
   return `### ${decision.title}
 
 **Status:** ${specStatusLabel(decision)}
 **Date:** ${(decision.syncedAt ?? new Date().toISOString()).slice(0, 10)}
 **ID:** ${decision.id}
 ${decision.supersedes ? `**Supersedes:** ${decision.supersedes}\n` : ''}
+${constraintMarker ? `${constraintMarker}\n` : ''}
 
 ${decision.rationale}
 
@@ -532,6 +630,7 @@ async function createADR(
   const adrStatus = decision.approvedBy === 'autopilot' && !decision.humanReviewedAt
     ? 'accepted (auto-accepted, unreviewed)'
     : 'accepted';
+  const constraintMarker = renderDecisionConstraintMarker(decision);
   const content = `# ADR-${num}: ${decision.title}
 
 ## Status
@@ -555,10 +654,11 @@ ${decision.consequences}
 > Recorded by openlore decisions on ${(decision.syncedAt ?? new Date().toISOString()).slice(0, 10)}
 > Decision ID: ${decision.id}
 ${decision.supersedes ? `> Supersedes: ${decision.supersedes}\n` : ''}
+${constraintMarker ? `${constraintMarker}\n` : ''}
 `;
 
-  await writeFile(adrPath, content, 'utf-8');
-  return `openspec/decisions/${filename}`;
+  await atomicWriteFile(adrPath, content);
+  return relative(options.rootPath, adrPath);
 }
 
 // ============================================================================
@@ -629,7 +729,7 @@ export async function rewriteSyncedDecisionStatus(
     }
 
     if (content !== before) {
-      await writeFile(absPath, content, 'utf-8');
+      await atomicWriteFile(absPath, content);
       modified.push(relPath);
     }
   }

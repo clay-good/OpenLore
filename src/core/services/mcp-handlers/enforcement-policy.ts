@@ -57,6 +57,16 @@ export interface GovernanceFinding {
   message: string;
   /** Stable source-owned discriminator when one code can fire repeatedly for one subject. */
   discriminator?: string;
+  /** Grounded source location; line is omitted when the dependency artifact has none. */
+  location?: { path: string; line?: number };
+  /** Governing decision receipt for decision-bound architecture findings. */
+  decision?: {
+    id: string;
+    title: string;
+    rationale: string;
+    ruleId: string;
+    servedContentMetadata?: { provenance: 'reviewed-corpus' | 'local-unreviewed' };
+  };
 }
 
 /** A finding paired with the enforcement class the policy resolved for it. */
@@ -94,6 +104,17 @@ export const CORPUS_INTENT_FINDING_CODES = [
 ] as const;
 
 export const FINDING_CODE_REGISTRY: Record<string, FindingCodeSpec> = {
+  // ── decision-bound architecture constraints ──
+  'decision-constraint-violation': {
+    defaultClass: 'advisory',
+    source: 'decision-constraint',
+    description: 'A dependency violates a machine-checkable rule carried by an authoritative architectural decision.',
+  },
+  'decision-constraint-malformed': {
+    defaultClass: 'advisory',
+    source: 'decision-constraint',
+    description: 'A decision constraint block is malformed, unsupported, conflicting, or unsafe and was not evaluated.',
+  },
   // ── blast-radius guard (add-preflight-blast-radius-guard) ──
   'orphans-anchored-memory': {
     defaultClass: 'advisory',

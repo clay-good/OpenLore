@@ -667,16 +667,25 @@ async function readSpecs(
   return out;
 }
 
-interface DurableDecision {
+export interface DurableDecision {
   decision: PendingDecision;
   path: string;
   text: string;
+  statusError?: string;
 }
 
-function durableStatus(value: string | undefined): PendingDecision['status'] {
-  if (/^rejected\b/i.test(value ?? '')) return 'rejected';
-  if (/^phantom\b/i.test(value ?? '')) return 'phantom';
-  return 'synced';
+function durableStatus(value: string | undefined): { status: PendingDecision['status']; error?: string } {
+  const normalized = value?.trim() ?? '';
+  if (/^auto-accepted\s*\(unreviewed\)$/i.test(normalized)
+    || /^accepted\s*\(auto-accepted,\s*unreviewed\)$/i.test(normalized)) return { status: 'auto-approved' };
+  if (/^(?:approved|accepted)$/i.test(normalized)) return { status: 'synced' };
+  if (/^rejected\b/i.test(normalized)) return { status: 'rejected' };
+  if (/^phantom\b/i.test(normalized)) return { status: 'phantom' };
+  if (/^(?:superseded|deprecated|withdrawn)\b/i.test(normalized)) return { status: 'rejected' };
+  return {
+    status: 'draft',
+    error: `durable decision status ${JSON.stringify(normalized || 'missing')} is not authoritative`,
+  };
 }
 
 function durableDecision(
@@ -686,12 +695,19 @@ function durableDecision(
   path: string,
   text: string,
 ): DurableDecision {
+  const parsedStatus = durableStatus(status);
+  const title = text.match(/^###\s+(.+)$/m)?.[1]?.trim()
+    ?? text.match(/^#\s+ADR-[^:]+:\s*(.+)$/m)?.[1]?.trim()
+    ?? '';
+  const rationale = text.match(/^## Context\s*\n\s*\n([\s\S]*?)(?=^##\s)/m)?.[1]?.trim()
+    ?? text.match(/^> OpenLore constraints:[^\n]*\n\s*\n([\s\S]*?)(?=^\*\*Consequences:\*\*)/m)?.[1]?.trim()
+    ?? '';
   return {
     decision: {
       id,
-      status: durableStatus(status),
-      title: '',
-      rationale: '',
+      status: parsedStatus.status,
+      title,
+      rationale,
       consequences: '',
       proposedRequirement: null,
       affectedDomains: [],
@@ -703,6 +719,7 @@ function durableDecision(
       contentOrigin: 'legacy-unknown',
       syncedToSpecs: [path],
     },
+    ...(parsedStatus.error ? { statusError: parsedStatus.error } : {}),
     path,
     text,
   };
@@ -781,17 +798,64 @@ async function readADRDecisions(
   for (const filename of files) {
     const path = join(decisionsDir, filename);
     const text = await readCorpusFile(rootPath, relative(rootPath, path), budget);
-    const id = text.match(/^> Decision ID:\s*([0-9a-f]{8})\s*$/m)?.[1];
-    if (!id) continue;
+    const idMatches = [...text.matchAll(/^> Decision ID:\s*([0-9a-f]{8})\s*$/gm)];
+    const idMatch = idMatches.at(-1);
+    const id = idMatch?.[1];
+    if (!id || idMatch?.index === undefined) continue;
+    const footerText = text.slice(idMatch.index);
     out.push(durableDecision(
       id,
       text.match(/^## Status\s*\n\s*\n([^\n]+)/m)?.[1],
-      text.match(/^> Supersedes:\s*([0-9a-f]{8})\s*$/m)?.[1],
+      footerText.match(/^> Supersedes:\s*([0-9a-f]{8})\s*$/m)?.[1],
       relative(rootPath, path),
       text,
     ));
   }
   return out;
+}
+
+/**
+ * Read the durable decision corpus once for lifecycle-aware consumers. Synced
+ * decisions may be projected into several specs and an ADR; those projections
+ * are coalesced by stable decision id, preferring the spec entry that carries
+ * the human-visible Decisions record. Resource limits and path confinement are
+ * the same as the governance-corpus integrity pass.
+ */
+export async function loadDurableDecisionCorpus(
+  rootPath: string,
+  openspecPath = 'openspec',
+): Promise<DurableDecision[]> {
+  const openspecRoot = safeJoin(rootPath, openspecPath);
+  const budget: CorpusReadBudget = { bytes: 0, directoryEntries: 0 };
+  const [specs, adrs] = await Promise.all([
+    readSpecs(rootPath, openspecRoot, budget),
+    readADRDecisions(rootPath, openspecRoot, budget),
+  ]);
+  const byId = new Map<string, DurableDecision>();
+  for (const record of coalesceSpecDecisionProjections(specs.flatMap(specDecisionEntries))) {
+    if (!byId.has(record.decision.id)) byId.set(record.decision.id, record);
+  }
+  for (const record of adrs) {
+    if (!byId.has(record.decision.id)) byId.set(record.decision.id, record);
+  }
+  return [...byId.values()].sort((a, b) => stableCompare(a.decision.id, b.decision.id));
+}
+
+/** All durable projections, retained for consumers that must detect conflicts. */
+export async function loadDurableDecisionProjections(
+  rootPath: string,
+  openspecPath = 'openspec',
+): Promise<DurableDecision[]> {
+  const openspecRoot = safeJoin(rootPath, openspecPath);
+  const budget: CorpusReadBudget = { bytes: 0, directoryEntries: 0 };
+  const [specs, adrs] = await Promise.all([
+    readSpecs(rootPath, openspecRoot, budget),
+    readADRDecisions(rootPath, openspecRoot, budget),
+  ]);
+  return [...specs.flatMap(specDecisionEntries), ...adrs].sort((a, b) => stableCompare(
+    `${a.decision.id}\0${a.path}\0${a.text}`,
+    `${b.decision.id}\0${b.path}\0${b.text}`,
+  ));
 }
 
 export interface DetectCorpusIntegrityOptions {

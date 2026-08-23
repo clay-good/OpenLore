@@ -35,6 +35,7 @@ import {
   illegalPromotionToApproved,
 } from '../../core/decisions/store.js';
 import { readLedger } from '../../core/decisions/ledger.js';
+import { loadDecisionConstraintState } from '../../core/decisions/constraint-ledger.js';
 import { rewriteSyncedDecisionStatus } from '../../core/decisions/syncer.js';
 import { consolidateDrafts } from '../../core/decisions/consolidator.js';
 import {
@@ -1377,6 +1378,54 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
 // ============================================================================
 // SUBCOMMANDS: log · review (change: add-decision-autopilot)
 // ============================================================================
+
+decisionsCommand
+  .command('constraints')
+  .description('Show declared decision-constraint eligibility and lifecycle coverage')
+  .option('--json', 'Output as JSON', false)
+  .action(async (opts: { json: boolean }, cmd: Command) => {
+    const parentOpts = (cmd.parent?.opts() ?? {}) as { json?: boolean };
+    const json = Boolean(opts.json || parentOpts.json);
+    const restoreStdout = json ? redirectConsoleToStderr() : null;
+    try {
+      const rootPath = process.cwd();
+      const config = await readOpenLoreConfig(rootPath);
+      const state = await loadDecisionConstraintState(rootPath, config?.openspecPath);
+      const report = {
+        ...state.ledger,
+        retiredRules: state.retiredRules,
+        malformedFindings: state.malformedFindings,
+      };
+      if (json) {
+        process.stdout.write(JSON.stringify(report, null, 2) + '\n');
+        return;
+      }
+      const adoption = report.adoption.ratio === null
+        ? 'not applicable (0 authoritative)'
+        : `${report.adoption.constrained}/${report.adoption.authoritative} (${(report.adoption.ratio * 100).toFixed(1)}%)`;
+      const coverage = report.coverage.ratio === null
+        ? 'not applicable (0 eligible)'
+        : `${report.coverage.constrainedEligible}/${report.coverage.eligible} (${(report.coverage.ratio * 100).toFixed(1)}%)`;
+      const lines = [
+        'Decision constraint eligibility',
+        `Adoption: ${adoption}`,
+        `Coverage: ${coverage}`,
+        `Unclassified: ${report.unclassifiedCount}`,
+        `Active rules: ${report.activeRuleCount}`,
+        `Retired rules: ${report.retiredRules.length}`,
+        `Malformed blocks: ${report.malformedFindings.length}`,
+      ];
+      if (report.coverageGaps.length > 0) {
+        lines.push(`Coverage gaps: ${report.coverageGaps.map((gap) => `${gap.decisionId} ${gap.title}`).join('; ')}`);
+      }
+      process.stdout.write(safe(lines.join('\n') + '\n', { keepNewlines: true }));
+    } catch (error) {
+      logger.error(`decision constraint report failed: ${(error as Error).message}`);
+      process.exitCode = 1;
+    } finally {
+      restoreStdout?.();
+    }
+  });
 
 /** Resolve a `--since` value to an epoch ms cutoff: ISO date, or a git ref's commit time. */
 async function resolveSinceCutoff(rootPath: string, since: string): Promise<number> {

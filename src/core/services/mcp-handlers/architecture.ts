@@ -21,10 +21,13 @@ import { loadArchitectureRules } from '../../architecture/rules.js';
 import type { ArchitectureRule } from '../../architecture/rules.js';
 import { scanViolations, canImport } from '../../architecture/check.js';
 import type { DependencyGraphResult } from '../../analyzer/dependency-graph.js';
+import { readOpenLoreConfig } from '../config-manager.js';
+import { assessStalenessForAnalysis } from './confidence-boundary.js';
+import type { DecisionConstraintState } from '../../decisions/constraint-ledger.js';
 
 const VIOLATION_REPORT_CAP = 200;
 
-async function loadDepGraph(absDir: string): Promise<DependencyGraphResult | null> {
+export async function loadDepGraph(absDir: string): Promise<DependencyGraphResult | null> {
   try {
     const raw = await readFile(
       join(absDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_DEPENDENCY_GRAPH),
@@ -68,13 +71,55 @@ export interface CheckArchitectureArgs {
 
 export async function handleCheckArchitecture(args: CheckArchitectureArgs): Promise<unknown> {
   const absDir = await validateDirectory(args.directory);
-  const rules = await loadArchitectureRules(absDir);
+  const config = await readOpenLoreConfig(absDir);
+  const openspecPath = config?.openspecPath ?? 'openspec';
+  const rules = await loadArchitectureRules(absDir, { openspecPath });
+  const { loadDecisionConstraintState } = await import('../../decisions/constraint-ledger.js');
+  let decisionConstraints: DecisionConstraintState | undefined;
+  let decisionConstraintError: string | undefined;
+  try {
+    decisionConstraints = await loadDecisionConstraintState(absDir, openspecPath);
+  } catch (error) {
+    decisionConstraintError = error instanceof Error ? error.message : String(error);
+  }
   const depGraph = await loadDepGraph(absDir);
+  const graphFreshness = depGraph && rules.rules.length > 0
+    ? await assessStalenessForAnalysis(
+        absDir,
+        join(absDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR),
+        Date.now(),
+        false,
+      )
+    : undefined;
+  const graphAssessmentComplete = rules.rules.length === 0
+    || (Boolean(depGraph)
+      && Boolean(graphFreshness?.indexCommit)
+      && graphFreshness?.changedSourceFiles === 0);
 
   const preEdit = typeof args.from === 'string' && typeof args.to === 'string';
 
   // ---- Pre-edit verdict mode ----
   if (preEdit) {
+    if (decisionConstraintError) {
+      return {
+        mode: 'pre-edit', rulesDeclared: rules.rules.length > 0, allowed: null,
+        reason: 'decision constraint corpus is unavailable, so an allow verdict cannot be certified',
+        assessmentComplete: false,
+        decisionConstraintAssessment: { complete: false, caveat: decisionConstraintError },
+      };
+    }
+    if (decisionConstraints && !decisionConstraints.violationAssessmentComplete) {
+      return {
+        mode: 'pre-edit',
+        rulesDeclared: decisionConstraints.ledger.activeRuleCount > 0,
+        allowed: null,
+        reason: 'decision constraint assessment incomplete — repair the malformed authoritative policy before relying on an allow verdict',
+        assessmentComplete: false,
+        decisionEligibility: decisionConstraints.ledger,
+        retiredDecisionRules: decisionConstraints.retiredRules,
+        malformedDecisionConstraints: decisionConstraints.malformedFindings,
+      };
+    }
     if (rules.rules.length === 0) {
       return {
         mode: 'pre-edit',
@@ -82,6 +127,12 @@ export async function handleCheckArchitecture(args: CheckArchitectureArgs): Prom
         allowed: true,
         reason: 'no architecture rules declared — inert',
         note: INERT_NOTE,
+        decisionEligibility: decisionConstraints?.ledger,
+        retiredDecisionRules: decisionConstraints?.retiredRules,
+        malformedDecisionConstraints: decisionConstraints?.malformedFindings,
+        decisionConstraintAssessment: decisionConstraintError
+          ? { complete: false, caveat: decisionConstraintError }
+          : { complete: true },
       };
     }
     const verdict = canImport(args.from!, args.to!, rules, depGraph ?? undefined);
@@ -90,16 +141,49 @@ export async function handleCheckArchitecture(args: CheckArchitectureArgs): Prom
       rulesDeclared: true,
       from: args.from,
       to: args.to,
-      allowed: verdict.allowed,
+      allowed: verdict.allowed ? (graphAssessmentComplete ? true : null) : false,
       rule: verdict.rule,
       resolvedTo: verdict.resolvedTo,
       reason: verdict.reason,
       warnings: rules.warnings.length ? rules.warnings : undefined,
       note: ACTIVE_NOTE,
+      decisionEligibility: decisionConstraints?.ledger,
+      retiredDecisionRules: decisionConstraints?.retiredRules,
+      malformedDecisionConstraints: decisionConstraints?.malformedFindings,
+      decisionConstraintAssessment: decisionConstraintError
+        ? { complete: false, caveat: decisionConstraintError }
+        : { complete: true },
+      assessmentComplete: graphAssessmentComplete,
+      graphFreshness: graphFreshness ? {
+        indexCommit: graphFreshness.indexCommit,
+        changedSourceFiles: graphFreshness.changedSourceFiles,
+        complete: graphAssessmentComplete,
+      } : undefined,
     };
   }
 
   // ---- Full scan mode ----
+  if (decisionConstraintError && rules.rules.length === 0) {
+    return {
+      mode: 'scan', rulesDeclared: false, assessmentComplete: false,
+      violationCount: null, violations: [],
+      reason: 'decision constraint corpus is unavailable, so a clean scan cannot be certified',
+      decisionConstraintAssessment: { complete: false, caveat: decisionConstraintError },
+    };
+  }
+  if (decisionConstraints && !decisionConstraints.violationAssessmentComplete) {
+    return {
+      mode: 'scan',
+      rulesDeclared: decisionConstraints.ledger.activeRuleCount > 0,
+      assessmentComplete: false,
+      violationCount: null,
+      violations: [],
+      reason: 'decision constraint assessment incomplete — malformed authoritative policy prevents a clean scan',
+      decisionEligibility: decisionConstraints.ledger,
+      retiredDecisionRules: decisionConstraints.retiredRules,
+      malformedDecisionConstraints: decisionConstraints.malformedFindings,
+    };
+  }
   if (rules.rules.length === 0) {
     return {
       mode: 'scan',
@@ -107,15 +191,30 @@ export async function handleCheckArchitecture(args: CheckArchitectureArgs): Prom
       violationCount: 0,
       violations: [],
       note: INERT_NOTE,
+      decisionEligibility: decisionConstraints?.ledger,
+      retiredDecisionRules: decisionConstraints?.retiredRules,
+      malformedDecisionConstraints: decisionConstraints?.malformedFindings,
+      decisionConstraintAssessment: decisionConstraintError
+        ? { complete: false, caveat: decisionConstraintError }
+        : { complete: true },
     };
   }
 
   if (!depGraph) {
-    return { error: 'No analysis found. Run analyze_codebase first.' };
+    return {
+      error: 'No analysis found. Run analyze_codebase first.',
+      decisionEligibility: decisionConstraints?.ledger,
+      retiredDecisionRules: decisionConstraints?.retiredRules,
+      malformedDecisionConstraints: decisionConstraints?.malformedFindings,
+      decisionConstraintAssessment: decisionConstraintError
+        ? { complete: false, caveat: decisionConstraintError }
+        : { complete: true },
+    };
   }
 
   const scan = scanViolations(depGraph, rules);
   const capped = scan.violations.slice(0, VIOLATION_REPORT_CAP);
+  const assessmentComplete = !decisionConstraintError && graphAssessmentComplete;
   return {
     mode: 'scan',
     rulesDeclared: true,
@@ -127,7 +226,16 @@ export async function handleCheckArchitecture(args: CheckArchitectureArgs): Prom
       ? `showing first ${capped.length} of ${scan.violations.length}`
       : undefined,
     checkedEdges: scan.checkedEdges,
+    assessmentComplete,
+    graphFreshness: graphFreshness ? {
+      indexCommit: graphFreshness.indexCommit,
+      changedSourceFiles: graphFreshness.changedSourceFiles,
+      complete: assessmentComplete,
+    } : undefined,
     warnings: scan.warnings.length ? scan.warnings : undefined,
+    decisionEligibility: decisionConstraints?.ledger,
+    retiredDecisionRules: decisionConstraints?.retiredRules,
+    malformedDecisionConstraints: decisionConstraints?.malformedFindings,
     note: ACTIVE_NOTE,
   };
 }

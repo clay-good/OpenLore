@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { copyFile, mkdir, rm, readFile } from 'node:fs/promises';
+import { copyFile, mkdir, rm, readFile, symlink } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -803,6 +803,91 @@ describe('ADR creation — always writes ADR regardless of content', () => {
     const [filename] = await readdir(join(tmpDir, 'openspec', 'decisions'));
     expect(await readFile(join(tmpDir, 'openspec', 'decisions', filename), 'utf8'))
       .toContain('> Supersedes: 1234abcd');
+  });
+
+  it('round-trips a decision constraint through the owning spec and ADR before purging', async () => {
+    const { writeFile, readdir } = await import('node:fs/promises');
+    const specDir = join(tmpDir, 'openspec', 'specs', 'services');
+    await mkdir(specDir, { recursive: true });
+    await writeFile(join(specDir, 'spec.md'), MINIMAL_SPEC, 'utf8');
+    const constraints = {
+      version: 1 as const,
+      eligibility: {
+        status: 'eligible' as const,
+        enforcedBoundary: 'Services do not import the CLI.',
+        humanReviewRemainder: 'Humans judge semantic alignment.',
+      },
+      rules: [{
+        id: 'services-no-cli',
+        scope: 'src/services',
+        kind: 'forbidden' as const,
+        from: 'src/services',
+        to: 'src/cli',
+      }],
+    };
+    await syncApprovedDecisions(makeStore([makeDecision({ scope: 'system', constraints })]), {
+      rootPath: tmpDir,
+      openspecPath: join(tmpDir, 'openspec'),
+      specMap: makeSpecMap('services', 'openspec/specs/services/spec.md'),
+    });
+
+    const spec = await readFile(join(specDir, 'spec.md'), 'utf8');
+    const [filename] = await readdir(join(tmpDir, 'openspec', 'decisions'));
+    const adr = await readFile(join(tmpDir, 'openspec', 'decisions', filename), 'utf8');
+    expect(spec).toContain('> OpenLore constraints: {"decisionId":"aaaabbbb"');
+    expect(adr).toContain('> OpenLore constraints: {"decisionId":"aaaabbbb"');
+    expect(spec).not.toContain('"ruleId"');
+
+    const { loadDecisionConstraintState } = await import('./constraint-ledger.js');
+    const state = await loadDecisionConstraintState(tmpDir);
+    expect(state.malformedFindings).toEqual([]);
+    expect(state.rules).toEqual([
+      expect.objectContaining({ ruleId: 'services-no-cli', decision: expect.objectContaining({ id: 'aaaabbbb' }) }),
+    ]);
+  });
+
+  it('refuses to purge constrained component decisions with no durable target', async () => {
+    const constrained = makeDecision({
+      scope: 'component',
+      affectedDomains: ['missing'],
+      constraints: {
+        version: 1,
+        eligibility: { status: 'eligible', enforcedBoundary: 'A boundary.' },
+        rules: [{ id: 'r1', scope: 'src/a', kind: 'forbidden', from: 'src/a', to: 'src/b' }],
+      },
+    });
+    const result = await syncApprovedDecisions(makeStore([constrained]), {
+      rootPath: tmpDir,
+      openspecPath: join(tmpDir, 'openspec'),
+      specMap: makeSpecMap('services', 'openspec/specs/services/spec.md'),
+    });
+    expect(result.result.errors[0]?.error).toContain('no durable owning spec or ADR target');
+    expect(result.result.synced).toEqual([]);
+  });
+
+  it('retains a constrained system decision when ADR confinement blocks the only durable write', async () => {
+    const outside = await createTempDir();
+    await mkdir(join(tmpDir, 'openspec'), { recursive: true });
+    await symlink(outside, join(tmpDir, 'openspec', 'decisions'));
+    const constrained = makeDecision({
+      scope: 'system',
+      affectedDomains: ['missing'],
+      constraints: {
+        version: 1,
+        eligibility: { status: 'eligible', enforcedBoundary: 'A boundary.' },
+        rules: [{ id: 'r1', scope: 'src/a', kind: 'forbidden', from: 'src/a', to: 'src/b' }],
+      },
+    });
+
+    const result = await syncApprovedDecisions(makeStore([constrained]), {
+      rootPath: tmpDir,
+      openspecPath: join(tmpDir, 'openspec'),
+      specMap: makeSpecMap('services', 'openspec/specs/services/spec.md'),
+    });
+
+    expect(result.result.errors[0]?.error).toContain('no durable projection was written');
+    expect(result.result.synced).toEqual([]);
+    await rm(outside, { recursive: true, force: true });
   });
 
   it('increments ADR number for each successive decision', async () => {

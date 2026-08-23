@@ -380,9 +380,9 @@ async function dispatchToolImpl(
     const { directory, limit } = args as { directory: string; limit?: number };
     return handleGetSurprisingConnections({ directory, limit });
   } else if (name === 'record_decision') {
-    const { directory, title, rationale, consequences, affectedFiles, supersedes, scope } =
-      args as { directory: string; title: string; rationale: string; consequences?: string; affectedFiles?: string[]; supersedes?: string; scope?: DecisionScope };
-    return handleRecordDecision(directory, title, rationale, consequences, affectedFiles, supersedes, scope);
+    const { directory, title, rationale, consequences, affectedFiles, supersedes, scope, constraints } =
+      args as { directory: string; title: string; rationale: string; consequences?: string; affectedFiles?: string[]; supersedes?: string; scope?: DecisionScope; constraints?: import('../../types/index.js').DecisionConstraintBlock };
+    return handleRecordDecision(directory, title, rationale, consequences, affectedFiles, supersedes, scope, constraints);
   } else if (name === 'list_decisions') {
     const { directory, status } = args as { directory: string; status?: string };
     return handleListDecisions(directory, status);

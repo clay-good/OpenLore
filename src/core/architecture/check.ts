@@ -22,6 +22,9 @@ export interface Violation {
   to: string;
   reason: string;
   source: RuleSource;
+  ruleId?: string;
+  scope?: string;
+  decision?: ArchitectureRule['decision'];
 }
 
 /** Result of a full scan. */
@@ -64,6 +67,9 @@ export function pathMatches(rel: string, pattern: string): boolean {
  * string when the edge violates the rule, or null when it's legal under that rule.
  */
 function edgeViolation(fromRel: string, toRel: string, rule: ArchitectureRule): string | null {
+  // Decision rule scope bounds the source code governed by the rule. Config and
+  // legacy rules have no scope and retain their exact behavior.
+  if (rule.scope && !pathMatches(fromRel, rule.scope)) return null;
   switch (rule.kind) {
     case 'layers': {
       const cls = classifyLayerEdge(fromRel, toRel, rule.layers);
@@ -145,10 +151,19 @@ export function scanViolations(depGraph: DependencyGraphResult, rules: Architect
     for (const rule of rules.rules) {
       const reason = edgeViolation(fromRel, toRelPath, rule);
       if (reason) {
-        const key = `${rule.kind}|${fromRel}|${toRelPath}|${reason}`;
+        const key = `${rule.kind}|${rule.decision?.id ?? ''}|${rule.ruleId ?? ''}|${fromRel}|${toRelPath}|${reason}`;
         if (seen.has(key)) continue;
         seen.add(key);
-        violations.push({ kind: rule.kind, from: fromRel, to: toRelPath, reason, source: rule.source });
+        violations.push({
+          kind: rule.kind,
+          from: fromRel,
+          to: toRelPath,
+          reason,
+          source: rule.source,
+          ...(rule.ruleId ? { ruleId: rule.ruleId } : {}),
+          ...(rule.scope ? { scope: rule.scope } : {}),
+          ...(rule.decision ? { decision: rule.decision } : {}),
+        });
       }
     }
   }
@@ -157,7 +172,9 @@ export function scanViolations(depGraph: DependencyGraphResult, rules: Architect
   violations.sort((a, b) =>
     a.from !== b.from ? (a.from < b.from ? -1 : 1)
       : a.to !== b.to ? (a.to < b.to ? -1 : 1)
-        : a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0);
+        : a.kind !== b.kind ? (a.kind < b.kind ? -1 : 1)
+          : `${a.decision?.id ?? ''}\0${a.ruleId ?? ''}` < `${b.decision?.id ?? ''}\0${b.ruleId ?? ''}` ? -1
+            : `${a.decision?.id ?? ''}\0${a.ruleId ?? ''}` > `${b.decision?.id ?? ''}\0${b.ruleId ?? ''}` ? 1 : 0);
 
   return { violations, warnings, checkedEdges: depGraph.edges.length, rulesApplied: rules.rules.length };
 }

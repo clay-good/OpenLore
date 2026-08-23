@@ -261,8 +261,20 @@ export async function consolidateDrafts(
       consolidatedAt: now,
       syncedToSpecs: [],
       ...(authorStatement ? { authorStatement } : {}),
+      ...(source?.constraints ? { constraints: source.constraints } : {}),
     };
   });
+
+  const droppedConstrained = drafts
+    .filter((draft) => draft.constraints && !decisions.some((decision) => decision.id === draft.id))
+    .map((draft) => draft.id)
+    .sort();
+  if (droppedConstrained.length > 0) {
+    throw new Error(
+      `Consolidation cannot merge or omit constrained decision draft(s): ${droppedConstrained.join(', ')}. ` +
+      'Constraint identity must remain outside LLM authority.',
+    );
+  }
 
   // One verdict per input draft — including the drafts the LLM did not return.
   let dispositions = computeDraftDispositions({

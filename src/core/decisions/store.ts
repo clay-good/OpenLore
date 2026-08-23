@@ -244,7 +244,8 @@ export function illegalPromotionToApproved(
 export function purgeInactiveDecisions(store: DecisionStore): DecisionStore {
   return {
     ...store,
-    decisions: store.decisions.filter((d) => !INACTIVE_STATUSES.has(d.status)),
+    decisions: store.decisions.filter((d) =>
+      d.durableLifecycleConflict || !INACTIVE_STATUSES.has(d.status)),
   };
 }
 

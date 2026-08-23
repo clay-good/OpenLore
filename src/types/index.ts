@@ -751,6 +751,40 @@ export type DecisionStatus =
   | 'rejected'      // human/agent rejected
   | 'synced';       // written to spec files
 
+export type DecisionConstraintEligibilityStatus = 'eligible' | 'ineligible' | 'unclassified';
+
+export type DecisionConstraintEligibility =
+  | { status: 'unclassified' }
+  | { status: 'ineligible'; reason: string }
+  | {
+      status: 'eligible';
+      /** The concrete repository property covered by the declared rules. */
+      enforcedBoundary: string;
+      /** The part of the decision that still requires human judgment. */
+      humanReviewRemainder?: string;
+    };
+
+interface DecisionConstraintBase {
+  /** Stable within the governing decision. */
+  id: string;
+  /** Repository-relative path prefix that bounds where this rule is evaluated. */
+  scope: string;
+  reason?: string;
+}
+
+export type DecisionConstraintRule =
+  | (DecisionConstraintBase & { kind: 'layers'; layers: Record<string, string[]> })
+  | (DecisionConstraintBase & { kind: 'forbidden'; from: string; to: string })
+  | (DecisionConstraintBase & { kind: 'allowedOnly'; module: string; mayDependOn: string[] });
+
+export interface DecisionConstraintBlock {
+  /** Open integer so unsupported persisted versions can be reported, never cast away. */
+  version: number;
+  /** Absence is normalized to the honest unclassified state. */
+  eligibility?: DecisionConstraintEligibility;
+  rules: DecisionConstraintRule[];
+}
+
 /** A single architectural decision recorded during a dev session. */
 export interface PendingDecision {
   /** Stable 8-char ID: sha1(sessionId:domain:title).slice(0,8) */
@@ -805,6 +839,15 @@ export interface PendingDecision {
 
   // Scope — gates ADR creation: only cross-domain and system produce ADRs
   scope?: DecisionScope;
+
+  /**
+   * Optional deterministic architecture constraints governed by this decision's
+   * lifecycle (change: add-decision-bound-code-constraints). Legacy records omit
+   * the block and remain valid and unclassified.
+   */
+  constraints?: DecisionConstraintBlock;
+  /** Retained lifecycle tombstone while an older durable projection still exists. */
+  durableLifecycleConflict?: boolean;
 
   // Verification output
   confidence: 'high' | 'medium' | 'low';

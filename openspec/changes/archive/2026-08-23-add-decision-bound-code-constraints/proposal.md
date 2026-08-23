@@ -1,6 +1,6 @@
 # Decision-bound constraints: the rule lives in the decision that motivated it, and the coverage is published
 
-> Status: PROPOSED (2026-07-31, external-pattern study). OpenLore records architectural decisions
+> Status: BUILT (2026-08-23). OpenLore records architectural decisions
 > and, separately, evaluates architecture rules from `.openlore/architecture.json`. The two never
 > meet: a violation cites an anonymous rule with no rationale, a superseded decision's rule keeps
 > binding forever, and nobody can say what fraction of the decision corpus is machine-enforced

@@ -206,6 +206,34 @@ describe('handleRecordDecision', () => {
     expect(store.decisions[0].rationale).toBe('JSON too big');
   });
 
+  it('validates and persists an optional decision constraint block', async () => {
+    const constraints = {
+      version: 1 as const,
+      eligibility: { status: 'eligible' as const, enforcedBoundary: 'Core does not import CLI.' },
+      rules: [{ id: 'core-no-cli', scope: 'src/core', kind: 'forbidden' as const, from: 'src/core', to: 'src/cli' }],
+    };
+    const result = await handleRecordDecision(
+      tmpDir, 'Keep core UI agnostic', 'Preserve dependency direction', undefined, undefined, undefined, undefined, constraints,
+    ) as { id: string };
+    expect(result.id).toHaveLength(8);
+    expect((await readStore(tmpDir)).decisions[0].constraints).toEqual(constraints);
+  });
+
+  it('rejects malformed constraints before writing a draft', async () => {
+    const result = await handleRecordDecision(
+      tmpDir,
+      'Unsafe rule',
+      'Would escape the repository',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { version: 1, rules: [{ id: 'escape', scope: '../src', kind: 'forbidden', from: 'src/a', to: 'src/b' }] },
+    ) as { error: string };
+    expect(result.error).toContain('confined repository-relative');
+    await expect(readStore(tmpDir)).rejects.toThrow();
+  });
+
   it('stores consequences and affectedFiles when provided', async () => {
     await handleRecordDecision(
       tmpDir, 'Use SQLite', 'JSON too big',

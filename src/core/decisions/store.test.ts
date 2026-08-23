@@ -269,6 +269,18 @@ describe('purgeInactiveDecisions', () => {
     expect(result.decisions[0].id).toBe('cccc0003');
   });
 
+  it('retains lifecycle tombstones until conflicting durable policy is retired', () => {
+    const store: DecisionStore = {
+      ...emptyStore(),
+      decisions: [makeDecision({
+        id: 'aaaa0001',
+        status: 'rejected',
+        durableLifecycleConflict: true,
+      })],
+    };
+    expect(purgeInactiveDecisions(store).decisions).toEqual(store.decisions);
+  });
+
   it('preserves all active statuses', () => {
     const store: DecisionStore = {
       ...emptyStore(),
