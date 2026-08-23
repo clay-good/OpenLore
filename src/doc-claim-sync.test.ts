@@ -24,6 +24,10 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { CODE_LANGUAGES } from './core/analyzer/language-support.js';
 import { IAC_LANGUAGES, isIacLanguage } from './core/analyzer/iac/types.js';
+import {
+  DERIVED_ARTIFACT_EQUIVALENCE_MATRIX,
+  SEMANTIC_ANSWER_PROJECTION,
+} from './core/analyzer/derived-artifact-equivalence.js';
 
 // src/<this> → repo root is one level up.
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -124,5 +128,129 @@ describe('doc-claim sync: package metadata matches the recorded north star', () 
       /reverse-engineer/i.test(pkg.openspec.summary),
       `package.json openspec.summary still restates the retired "reverse-engineer specs" framing: "${pkg.openspec.summary}"`,
     ).toBe(false);
+  });
+});
+
+type CertifiedMeasurement = {
+  operation: string;
+  metric: string;
+  value: number;
+  unit: string;
+  label: 'measured' | 'extrapolated';
+  measuredAt: string;
+  fixture: string;
+  referenceEnvironment: string;
+  sourceCommand: string;
+  basis?: string;
+  method?: string;
+};
+
+type CertifiedScaleManifest = {
+  schemaVersion: number;
+  projection: string;
+  certifiedTier: {
+    id: string;
+    fixture: {
+      id: string;
+      source: string;
+      dimensions: { files: number; sourceBytes: number; languages: number; expectedSymbols: number };
+      label: 'measured' | 'extrapolated';
+      measuredAt: string;
+      referenceEnvironment: string;
+      sourceCommand: string;
+    };
+    objectives: Record<string, { ceiling: number; unit: string }>;
+  };
+  referenceEnvironment: {
+    id: string; platform: string; arch: string; osRelease: string; node: string;
+    cpu: string; logicalCpus: number; totalMemoryBytes: number;
+  };
+  measurements: CertifiedMeasurement[];
+  equivalence: { suite: string; projection: string; requiredRows: string[] };
+  policy: { ci: string; beyondCertifiedTier: string };
+};
+
+const formatNumber = (value: number): string => value.toLocaleString('en-US', {
+  useGrouping: true,
+  maximumFractionDigits: 3,
+});
+
+describe('doc-claim sync: certified scale envelope is manifest-bound', () => {
+  const manifest = JSON.parse(read('benchmarks/certified-scale-v1.json')) as CertifiedScaleManifest;
+  const envelope = read('docs/performance-envelope.md');
+  const requiredOperations = new Set(['cold', 'warm', 'edit', 'add', 'delete', 'rename', 'peak-memory']);
+
+  it('has complete, uniquely labelled measurements with reproducible provenance', () => {
+    expect(manifest.schemaVersion).toBe(1);
+    expect(manifest.projection).toBe(SEMANTIC_ANSWER_PROJECTION);
+    expect(new Set(manifest.measurements.map(({ operation }) => operation))).toEqual(requiredOperations);
+    expect(manifest.measurements).toHaveLength(requiredOperations.size);
+    expect(manifest.certifiedTier.fixture.label).toBe('measured');
+    expect(manifest.certifiedTier.fixture.measuredAt).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(manifest.certifiedTier.fixture.referenceEnvironment).toBe(manifest.referenceEnvironment.id);
+    expect(manifest.certifiedTier.fixture.sourceCommand).toBe('npm run measure:certified-scale');
+    expect(read(manifest.certifiedTier.fixture.source)).toContain('certified-scale-typescript-v1');
+
+    for (const measurement of manifest.measurements) {
+      expect(Number.isFinite(measurement.value) && measurement.value > 0, `${measurement.operation} must have a positive observation`).toBe(true);
+      expect(['measured', 'extrapolated'], `${measurement.operation} must be labelled measured or extrapolated`).toContain(measurement.label);
+      expect(measurement.measuredAt, `${measurement.operation} lacks a measurement date`).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      expect(measurement.fixture, `${measurement.operation} lacks fixture provenance`).toBe(manifest.certifiedTier.fixture.id);
+      expect(measurement.referenceEnvironment, `${measurement.operation} lacks environment provenance`).toBe(manifest.referenceEnvironment.id);
+      expect(measurement.sourceCommand, `${measurement.operation} lacks a source command`).toBe('npm run measure:certified-scale');
+      if (measurement.label === 'extrapolated') {
+        expect(measurement.basis, `${measurement.operation} extrapolation lacks a measured basis`).toBeTruthy();
+        expect(measurement.method, `${measurement.operation} extrapolation lacks a method`).toBeTruthy();
+      }
+    }
+  });
+
+  it('keeps every certified observation within its declared objective', () => {
+    const objectiveFor = (operation: string): { ceiling: number; unit: string } => {
+      if (operation === 'cold') return manifest.certifiedTier.objectives.coldAnalyze;
+      if (operation === 'warm') return manifest.certifiedTier.objectives.warmQuery;
+      if (operation === 'peak-memory') return manifest.certifiedTier.objectives.peakMemory;
+      return manifest.certifiedTier.objectives.singleFilePublication;
+    };
+    for (const measurement of manifest.measurements) {
+      const objective = objectiveFor(measurement.operation);
+      expect(measurement.unit, `${measurement.operation} unit must match its objective`).toBe(objective.unit);
+      expect(measurement.value, `${measurement.operation} exceeds its certified objective`).toBeLessThanOrEqual(objective.ceiling);
+    }
+  });
+
+  it('binds certification to the complete finite equivalence registry', () => {
+    expect(manifest.equivalence.projection).toBe(SEMANTIC_ANSWER_PROJECTION);
+    expect(new Set(manifest.equivalence.requiredRows)).toEqual(
+      new Set(DERIVED_ARTIFACT_EQUIVALENCE_MATRIX.map(({ id }) => id)),
+    );
+    expect(manifest.equivalence.requiredRows).toHaveLength(DERIVED_ARTIFACT_EQUIVALENCE_MATRIX.length);
+    expect(manifest.equivalence.suite).toBe('npm run test:equivalence');
+  });
+
+  it('publishes every fixture, objective, environment, and measurement figure from the manifest', () => {
+    const { fixture, objectives } = manifest.certifiedTier;
+    expect(envelope).toContain(manifest.certifiedTier.id);
+    expect(envelope).toContain(fixture.id);
+    for (const value of Object.values(fixture.dimensions)) expect(envelope).toContain(formatNumber(value));
+    for (const objective of Object.values(objectives)) {
+      expect(envelope).toContain(`${formatNumber(objective.ceiling)} ${objective.unit}`);
+    }
+    expect(envelope).toContain(manifest.referenceEnvironment.id);
+    expect(envelope).toContain(manifest.referenceEnvironment.cpu);
+    expect(envelope).toContain(`${manifest.referenceEnvironment.logicalCpus} logical CPUs`);
+    expect(envelope).toContain(`${formatNumber(manifest.referenceEnvironment.totalMemoryBytes)} bytes`);
+
+    for (const measurement of manifest.measurements) {
+      const row = `| ${measurement.operation} | ${measurement.metric} | ${formatNumber(measurement.value)} ${measurement.unit} | ${measurement.label} |`;
+      expect(envelope, `published envelope is missing the manifest row: ${row}`).toContain(row);
+    }
+  });
+
+  it('states the honest beyond-tier and wall-clock policies', () => {
+    expect(manifest.policy.beyondCertifiedTier).toBe('best-effort');
+    expect(envelope).toMatch(/Beyond the certified tier[\s\S]*\*\*best-effort\*\*/);
+    expect(envelope).toContain('does not treat machine-specific wall-clock observations as portable thresholds');
+    expect(manifest.policy.ci).toContain('do not enforce checked-in wall-clock observations as portable thresholds');
   });
 });

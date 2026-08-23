@@ -17,8 +17,12 @@ Operation beyond the certified envelope SHALL remain supported and SHALL be desc
 best-effort. The system SHALL NOT describe an uncertified size as certified, and an uncertified
 size SHALL NOT block improvements or releases within the current envelope.
 
-Every published performance figure SHALL be labelled as measured or extrapolated and SHALL state
-the reference machine it was obtained on. A figure SHALL NOT be published without that label.
+The complete certified matrix SHALL be checked in as a machine-readable measurement manifest. The
+published envelope SHALL be generated from that manifest. Every observed figure SHALL carry a `measured` or
+`extrapolated` label, measurement date, reference environment, source command, and fixture identity.
+An extrapolated figure SHALL additionally identify its measured basis and method. A figure SHALL
+NOT be published without those provenance fields, and a generated envelope SHALL NOT omit a
+required matrix operation.
 
 #### Scenario: The envelope is stated, not implied
 
@@ -42,9 +46,16 @@ the reference machine it was obtained on. A figure SHALL NOT be published withou
 - **WHEN** it lacks a measured-or-extrapolated label or a stated reference machine
 - **THEN** it is not published in that form
 
+#### Scenario: The published envelope is derived from the manifest
+
+- **GIVEN** a checked-in certified-scale measurement manifest
+- **WHEN** the published envelope is validated
+- **THEN** every certified objective and measured matrix result matches the manifest
+- **AND** no certified figure lacks fixture, date, command, environment, or measurement label
+
 #### Scenario: Beyond the envelope still works
 
 - **GIVEN** a repository larger than the certified size
 - **WHEN** the system is used on it
-- **THEN** it produces the same correct answers
-- **AND** its latency is presented as best-effort rather than as a certified objective
+- **THEN** the repository remains supported without a certified latency objective
+- **AND** its performance is presented as best-effort rather than certified

@@ -22,24 +22,52 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, writeFile, mkdir, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, mkdir, readFile, rename, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { EdgeStore } from './edge-store.js';
 import { _resetContextCacheForTesting } from './mcp-handlers/utils.js';
 import type { CallEdge, FunctionNode } from '../analyzer/call-graph.js';
+import { semanticAnswerBytes } from '../analyzer/derived-artifact-equivalence.js';
+import { registerRepairHost } from './cold-start-bootstrap.js';
+import { computeIndexStaleness } from './mcp-handlers/index-staleness.js';
+import { ServeWatchRepairCoordinator } from '../../cli/commands/serve.js';
+import * as analyzeApi from '../../api/analyze.js';
 
 // Prevent a real chokidar watcher from opening (handleChange path never starts one,
-// but the module imports chokidar at load).
+// but retain an event-complete deterministic watcher harness for the serve/watch
+// parity gate below. `ready` resolves on a microtask; tests emit production events
+// explicitly and drive debounce timers with Vitest's fake clock.
+const chokidarHarness = vi.hoisted(() => ({
+  watches: [] as Array<{
+    target: unknown;
+    handlers: Map<string, Array<(...args: unknown[]) => void>>;
+  }>,
+}));
 vi.mock('chokidar', () => ({
-  default: { watch: vi.fn(() => ({ on: vi.fn(), close: vi.fn().mockResolvedValue(undefined) })) },
+  default: { watch: vi.fn((target: unknown) => {
+    const record = { target, handlers: new Map<string, Array<(...args: unknown[]) => void>>() };
+    chokidarHarness.watches.push(record);
+    const watcher = {
+      on: vi.fn((event: string, handler: (...args: unknown[]) => void) => {
+        const handlers = record.handlers.get(event) ?? [];
+        handlers.push(handler);
+        record.handlers.set(event, handlers);
+        if (event === 'ready') queueMicrotask(() => handler());
+        return watcher;
+      }),
+      close: vi.fn().mockResolvedValue(undefined),
+    };
+    return watcher;
+  }) },
 }));
 
 let root: string;
 let outputPath: string;
 
 beforeEach(async () => {
+  chokidarHarness.watches.length = 0;
   root = await mkdtemp(join(tmpdir(), 'ol-parity-'));
   outputPath = join(root, '.openlore', 'analysis');
   await mkdir(outputPath, { recursive: true });
@@ -49,6 +77,15 @@ beforeEach(async () => {
     JSON.stringify({ signatures: [], callGraph: null }, null, 2),
     'utf-8',
   );
+  await writeFile(join(root, '.openlore', 'config.json'), JSON.stringify({
+    version: '1.0.0',
+    projectType: 'nodejs',
+    openspecPath: './openspec',
+    analysis: { maxFiles: 100, includePatterns: [], excludePatterns: [] },
+    generation: { provider: 'openai', model: 'test', domains: 'auto' },
+    createdAt: new Date().toISOString(),
+    lastRun: null,
+  }));
   _resetContextCacheForTesting();
 });
 
@@ -75,6 +112,45 @@ async function fullBuild(files: Files): Promise<{ nodes: FunctionNode[]; edges: 
   const input = Object.entries(files).map(([path, content]) => ({ path, content, language: 'TypeScript' }));
   const r = await new CallGraphBuilder().build(input);
   return { nodes: Array.from(r.nodes.values()), edges: r.edges };
+}
+
+/** Read the authoritative post-change source snapshot from disk. */
+async function readFiles(paths: readonly string[]): Promise<Files> {
+  const files: Files = {};
+  for (const rel of [...paths].sort()) files[rel] = await readFile(join(root, rel), 'utf-8');
+  return files;
+}
+
+/**
+ * The host repair barrier used by serve/watch-auto: rebuild the graph from the
+ * authoritative post-change bytes, publish it, then resolve the barrier. Tests
+ * await this promise directly; there are no debounce guesses or sleeps.
+ */
+async function fullRepair(files: Files): Promise<{ nodes: FunctionNode[]; edges: CallEdge[] }> {
+  const graph = await fullBuild(files);
+  const store = EdgeStore.open(EdgeStore.dbPath(outputPath));
+  store.clearAll();
+  seedStore(store, files, graph);
+  store.close();
+  _resetContextCacheForTesting();
+  return graph;
+}
+
+function graphProjection(graph: { nodes: FunctionNode[]; edges: CallEdge[] }): unknown {
+  return {
+    // EdgeStore's portable production projection deliberately omits synthesized
+    // external placeholder nodes while retaining the external call edges.
+    nodes: graph.nodes.filter((n) => !n.isExternal)
+      .map((n) => ({ id: n.id, name: n.name, file: n.filePath })).sort((a, b) => a.id.localeCompare(b.id)),
+    edges: graph.edges.map((e) => ({
+      caller: e.callerId, callee: e.calleeId, name: e.calleeName,
+      confidence: e.confidence, kind: e.kind ?? 'calls',
+    })).sort((a, b) => `${a.caller}\0${a.callee}`.localeCompare(`${b.caller}\0${b.callee}`)),
+  };
+}
+
+function storedGraphProjection(store: EdgeStore): unknown {
+  return graphProjection({ nodes: store.getAllInternalNodes(), edges: store.getAllEdges() });
 }
 
 /** Seed the edge store with a complete graph + per-file content hashes. */
@@ -221,6 +297,216 @@ describe('incremental watch converges to analyze --force (parity oracle)', () =>
     }
     store2.close();
     expect(staleEdges).toBe(0);
+  });
+});
+
+describe('incremental-full-repair semantic-answer parity gate', () => {
+  beforeEach(() => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+  });
+
+  async function servedProjection(functionName: string): Promise<string> {
+    _resetContextCacheForTesting();
+    const { handleGetSubgraph } = await import('./mcp-handlers/graph.js');
+    const answer = await handleGetSubgraph(root, functionName, 'downstream', 3) as Record<string, unknown>;
+    // These are the stable conclusion fields registered by semantic-answer-v1.
+    // Freshness, repair progress, generation identity, and timing are asserted
+    // independently and are intentionally not used to make parity pass.
+    return semanticAnswerBytes({
+      query: answer.query,
+      seeds: answer.seeds,
+      stats: answer.stats,
+      nodes: answer.nodes,
+      edges: answer.edges,
+      governingDecisions: answer.governingDecisions,
+    });
+  }
+
+  const initial: Files = {
+    'src/service.ts': 'export function target() { return 1; }\n',
+    'src/caller.ts': 'export function entry() { return target(); }\n',
+  };
+
+  const cases: Array<{
+    name: string;
+    query: string;
+    mutate(live: Set<string>, emit: (event: 'change' | 'add' | 'unlink', path: string) => void): Promise<void>;
+  }> = [
+    {
+      name: 'file edit', query: 'helper',
+      async mutate(_live, emit) {
+        await writeFiles({ 'src/service.ts': 'export function target() { return 2; }\nexport function helper() { return 3; }\n' });
+        emit('change', join(root, 'src/service.ts'));
+      },
+    },
+    {
+      name: 'file add', query: 'added',
+      async mutate(live, emit) {
+        live.add('src/added.ts');
+        await writeFiles({ 'src/added.ts': 'export function added() { return target(); }\n' });
+        emit('add', join(root, 'src/added.ts'));
+      },
+    },
+    {
+      name: 'file delete', query: 'entry',
+      async mutate(live, emit) {
+        live.delete('src/service.ts');
+        const abs = join(root, 'src/service.ts');
+        await rm(abs);
+        emit('unlink', abs);
+      },
+    },
+    {
+      name: 'path rename', query: 'entry',
+      async mutate(live, emit) {
+        const before = join(root, 'src/caller.ts');
+        const after = join(root, 'src/runner.ts');
+        await rename(before, after);
+        live.delete('src/caller.ts');
+        live.add('src/runner.ts');
+        // Chokidar reports rename as unlink + add. The serve coordinator must
+        // coalesce both receipts into one full publication.
+        emit('unlink', before);
+        emit('add', after);
+      },
+    },
+  ];
+
+  for (const state of cases) {
+    it(`${state.name}: post-barrier graph and served answer equal a fresh full oracle`, async () => {
+      await writeFiles(initial);
+      const seed = await fullBuild(initial);
+      const seeded = EdgeStore.open(EdgeStore.dbPath(outputPath));
+      seedStore(seeded, initial, seed);
+      seeded.close();
+
+      const live = new Set(Object.keys(initial));
+      const { McpWatcher } = await import('./mcp-watcher.js');
+      let watcher: InstanceType<typeof McpWatcher> | undefined;
+      try {
+        let releaseBarrier!: () => void;
+        let rejectBarrier!: (error: unknown) => void;
+        const barrier = new Promise<void>((resolve, reject) => {
+          releaseBarrier = resolve;
+          rejectBarrier = reject;
+        });
+        const analyze = vi.spyOn(analyzeApi, 'openloreAnalyze');
+        const coordinator = new ServeWatchRepairCoordinator(() => {
+          void analyzeApi.openloreAnalyze({ rootPath: root, force: true })
+            .then(releaseBarrier, rejectBarrier);
+        });
+        watcher = new McpWatcher({
+          rootPath: root,
+          outputPath,
+          embed: false,
+          onBatchFlushed: () => coordinator.schedule(),
+          onGraphStale: () => coordinator.schedule(),
+        });
+        await watcher.start();
+        const sourceWatch = chokidarHarness.watches.find((watch) => watch.target === root);
+        expect(sourceWatch).toBeDefined();
+        const emit = (event: 'change' | 'add' | 'unlink', path: string): void => {
+          for (const handler of sourceWatch!.handlers.get(event) ?? []) handler(path);
+        };
+
+        vi.useFakeTimers();
+        await state.mutate(live, emit);
+        await vi.advanceTimersByTimeAsync(500);  // watcher publication debounce
+        await vi.advanceTimersByTimeAsync(4_000); // serve full-repair debounce
+        // The debounce/coalescing boundary is now crossed. The analyzer itself
+        // owns real watchdog timers, so restore the clock while awaiting its
+        // observable publication barrier.
+        vi.useRealTimers();
+        await barrier;
+        expect(analyze).toHaveBeenCalledTimes(1);
+        expect(analyze).toHaveBeenCalledWith({ rootPath: root, force: true });
+      } finally {
+        vi.useRealTimers();
+        await watcher?.stop();
+      }
+
+      const postChange = await readFiles([...live]);
+      const repaired = await fullBuild(postChange);
+
+      const repairedStore = EdgeStore.open(EdgeStore.dbPath(outputPath));
+      expect(semanticAnswerBytes(storedGraphProjection(repairedStore)))
+        .toBe(semanticAnswerBytes(graphProjection(repaired)));
+      repairedStore.close();
+      const acceleratedAnswer = await servedProjection(state.query);
+
+      // Build a second, fresh full oracle from exactly the same post-change bytes
+      // and compare the public structural handler's stable conclusion projection.
+      const oracle = await fullBuild(postChange);
+      const oracleStore = EdgeStore.open(EdgeStore.dbPath(outputPath));
+      oracleStore.clearAll();
+      seedStore(oracleStore, postChange, oracle);
+      expect(semanticAnswerBytes(graphProjection(repaired)))
+        .toBe(semanticAnswerBytes(graphProjection(oracle)));
+      oracleStore.close();
+      expect(acceleratedAnswer).toBe(await servedProjection(state.query));
+    });
+  }
+
+  it('over-budget state discloses stale serving and accepted repair before convergence', async () => {
+    vi.useFakeTimers();
+    const files: Files = { 'src/hub.ts': 'export function target() { return 1; }\n' };
+    for (let i = 0; i < 5; i++) files[`src/caller${i}.ts`] = `export function call${i}() { return target(); }\n`;
+    await writeFiles(files);
+    const seeded = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    seedStore(seeded, files, await fullBuild(files));
+    seeded.close();
+
+    let repairRequested = false;
+    const { McpWatcher } = await import('./mcp-watcher.js');
+    const watcher = new McpWatcher({
+      rootPath: root,
+      outputPath,
+      embed: false,
+      closureBudget: 1,
+      onGraphStale: () => { repairRequested = true; },
+    });
+    const unregister = registerRepairHost(root, staleFiles => watcher.requestColdReadRepair(staleFiles));
+    try {
+      files['src/hub.ts'] = 'export function renamed() { return 1; }\n';
+      await writeFiles({ 'src/hub.ts': files['src/hub.ts'] });
+      await watcher.handleChange(join(root, 'src/hub.ts'));
+
+      const staleStore = EdgeStore.open(EdgeStore.dbPath(outputPath));
+      const staleFiles = staleStore.getStaleFiles();
+      expect(staleFiles).toHaveLength(4);
+      const disclosure = await computeIndexStaleness(
+        root,
+        null,
+        { edgeStore: staleStore, artifactMtimeMs: Number.MAX_SAFE_INTEGER },
+        [staleFiles[0]],
+      );
+      staleStore.close();
+      expect(disclosure).toMatchObject({
+        staleFiles: [staleFiles[0]],
+        repairScheduled: true,
+        note: expect.stringMatching(/results may omit recent edits/i),
+      });
+      expect(repairRequested).toBe(false); // scheduled is not converged
+
+      // Force the watcher's documented debounce barrier deterministically.
+      await vi.runAllTimersAsync();
+      expect(repairRequested).toBe(true);
+      const repaired = await fullRepair(await readFiles(Object.keys(files)));
+      const converged = EdgeStore.open(EdgeStore.dbPath(outputPath));
+      expect(converged.getStaleFiles()).toEqual([]);
+      expect(await computeIndexStaleness(
+        root,
+        null,
+        { edgeStore: converged, artifactMtimeMs: Number.MAX_SAFE_INTEGER },
+        [staleFiles[0]],
+      )).toBeUndefined();
+      expect(semanticAnswerBytes(storedGraphProjection(converged)))
+        .toBe(semanticAnswerBytes(graphProjection(repaired)));
+      converged.close();
+    } finally {
+      unregister();
+      vi.useRealTimers();
+    }
   });
 });
 

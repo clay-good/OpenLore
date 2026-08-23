@@ -1,9 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, stat, symlink, unlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SpecVectorIndex } from './spec-vector-index.js';
+import {
+  SpecVectorIndex,
+  _resetSpecVectorIndexVerificationCacheForTesting,
+} from './spec-vector-index.js';
 import type { EmbeddingService } from './embedding-service.js';
+import { semanticAnswerBytes } from './derived-artifact-equivalence.js';
 
 // ============================================================================
 // FIXTURES
@@ -156,6 +160,26 @@ describe('SpecVectorIndex', () => {
       await SpecVectorIndex.build(tmpDir, specsDir, embedSvc);
       expect(SpecVectorIndex.exists(tmpDir)).toBe(true);
     });
+
+    it('keeps a genuinely missing sidecar readable as a legacy index', async () => {
+      const specsDir = await createSpecsDir(tmpDir, { auth: SAMPLE_SPEC_AUTH });
+      await SpecVectorIndex.build(tmpDir, specsDir, makeMockEmbedSvc());
+      await unlink(join(tmpDir, 'spec-index-meta.json'));
+      expect(SpecVectorIndex.exists(tmpDir)).toBe(true);
+    });
+
+    it('recognizes a valid schema-v1 sidecar as legacy rather than malformed', async () => {
+      const specsDir = await createSpecsDir(tmpDir, { auth: SAMPLE_SPEC_AUTH });
+      await SpecVectorIndex.build(tmpDir, specsDir, makeMockEmbedSvc());
+      await writeFile(join(tmpDir, 'spec-index-meta.json'), JSON.stringify({
+        hasEmbeddings: true,
+        dim: DIM,
+        model: 'legacy-model',
+        builtAt: '2026-01-01T00:00:00.000Z',
+        schemaVersion: 1,
+      }), 'utf-8');
+      expect(SpecVectorIndex.exists(tmpDir)).toBe(true);
+    });
   });
 
   // --------------------------------------------------------------------------
@@ -170,6 +194,52 @@ describe('SpecVectorIndex', () => {
       await expect(SpecVectorIndex.build(tmpDir, emptyDir, embedSvc)).rejects.toThrow(
         'exists but contains no spec.md files'
       );
+    });
+
+    it('fails closed when any authoritative spec is oversized instead of publishing a partial index', async () => {
+      const specsDir = await createSpecsDir(tmpDir, {
+        auth: SAMPLE_SPEC_AUTH,
+        oversized: 'x'.repeat(4 * 1024 * 1024 + 1),
+      });
+      await expect(SpecVectorIndex.build(tmpDir, specsDir, null)).rejects.toThrow(
+        /Cannot read authoritative spec artifact oversized\/spec\.md/,
+      );
+    });
+
+    it('does not follow a spec symlink outside the confined specs directory', async () => {
+      const specsDir = join(tmpDir, 'openspec', 'specs');
+      const domainDir = join(specsDir, 'escaped');
+      const outside = join(tmpDir, 'outside.md');
+      await mkdir(domainDir, { recursive: true });
+      await writeFile(outside, SAMPLE_SPEC_AUTH, 'utf8');
+      await symlink(outside, join(domainDir, 'spec.md'));
+
+      await expect(SpecVectorIndex.build(tmpDir, specsDir, null)).rejects.toThrow(
+        'contains no spec.md files',
+      );
+    });
+
+    it('fails closed instead of silently omitting an oversized authoritative decision', async () => {
+      const specsDir = await createSpecsDir(tmpDir, { auth: SAMPLE_SPEC_AUTH });
+      const decisionsDir = join(tmpDir, 'openspec', 'decisions');
+      await mkdir(decisionsDir, { recursive: true });
+      await writeFile(join(decisionsDir, 'adr-0001-oversized.md'), 'x'.repeat(4 * 1024 * 1024 + 1));
+
+      await expect(SpecVectorIndex.build(tmpDir, specsDir, null, undefined, decisionsDir))
+        .rejects.toThrow(/Cannot read authoritative decision artifact adr-0001-oversized\.md/);
+    });
+
+    it('does not follow an ADR symlink outside the confined decisions directory', async () => {
+      const specsDir = await createSpecsDir(tmpDir, { auth: SAMPLE_SPEC_AUTH });
+      const decisionsDir = join(tmpDir, 'openspec', 'decisions');
+      const outside = join(tmpDir, 'outside-adr.md');
+      await mkdir(decisionsDir, { recursive: true });
+      await writeFile(outside, '# ADR-1: Escaped\n\noutside secret', 'utf8');
+      await symlink(outside, join(decisionsDir, 'adr-0001-escaped.md'));
+      const baseline = await SpecVectorIndex.build(tmpDir, specsDir, null);
+
+      const rebuilt = await SpecVectorIndex.build(tmpDir, specsDir, null, undefined, decisionsDir);
+      expect(rebuilt.recordCount).toBe(baseline.recordCount);
     });
 
     it('throws a "does not exist" error when the spec dir is missing', async () => {
@@ -239,6 +309,142 @@ describe('SpecVectorIndex', () => {
       const embedSvc = makeMockEmbedSvc();
       await SpecVectorIndex.build(tmpDir, specsDir, embedSvc);
       await expect(SpecVectorIndex.build(tmpDir, specsDir, embedSvc)).resolves.not.toThrow();
+      expect(embedSvc.embed).toHaveBeenCalledTimes(1);
+    });
+
+    it('rebuilds after a size- and mtime-preserving spec content rewrite', async () => {
+      const specsDir = await createSpecsDir(tmpDir, { auth: SAMPLE_SPEC_AUTH });
+      const specPath = join(specsDir, 'auth', 'spec.md');
+      const embedSvc = makeMockEmbedSvc();
+      await SpecVectorIndex.build(tmpDir, specsDir, embedSvc);
+      const beforeMeta = JSON.parse(await readFile(join(tmpDir, 'spec-index-meta.json'), 'utf-8')) as {
+        recordsDigest: string;
+      };
+      const beforeStat = await stat(specPath);
+      const rewritten = SAMPLE_SPEC_AUTH.replace('ValidateEmail', 'SanitizeEmail');
+      expect(Buffer.byteLength(rewritten)).toBe(Buffer.byteLength(SAMPLE_SPEC_AUTH));
+      await writeFile(specPath, rewritten, 'utf-8');
+      await utimes(specPath, beforeStat.atime, beforeStat.mtime);
+
+      await SpecVectorIndex.build(tmpDir, specsDir, embedSvc);
+
+      const afterMeta = JSON.parse(await readFile(join(tmpDir, 'spec-index-meta.json'), 'utf-8')) as {
+        recordsDigest: string;
+      };
+      expect(embedSvc.embed).toHaveBeenCalledTimes(2);
+      expect(afterMeta.recordsDigest).not.toBe(beforeMeta.recordsDigest);
+    });
+
+    it.each([
+      ['malformed JSON', '{'],
+      ['wrong-shaped JSON', JSON.stringify({ hasEmbeddings: true })],
+    ])('invalidates and rebuilds an index with %s metadata', async (_description, metadata) => {
+      const specsDir = await createSpecsDir(tmpDir, { auth: SAMPLE_SPEC_AUTH });
+      const embedSvc = makeMockEmbedSvc();
+      await SpecVectorIndex.build(tmpDir, specsDir, embedSvc);
+      const baseline = await SpecVectorIndex.search(tmpDir, 'email validation', embedSvc, { limit: 20 });
+      await writeFile(join(tmpDir, 'spec-index-meta.json'), metadata, 'utf-8');
+      expect(SpecVectorIndex.exists(tmpDir)).toBe(false);
+
+      await SpecVectorIndex.build(tmpDir, specsDir, embedSvc);
+
+      expect(embedSvc.embed).toHaveBeenCalledTimes(3); // initial build + baseline query + repair build
+      expect(SpecVectorIndex.exists(tmpDir)).toBe(true);
+      const repaired = JSON.parse(await readFile(join(tmpDir, 'spec-index-meta.json'), 'utf-8')) as Record<string, unknown>;
+      expect(repaired).toMatchObject({ schemaVersion: 2, recordCount: expect.any(Number) });
+      expect(repaired.recordsDigest).toMatch(/^[a-f0-9]{64}$/);
+      expect(semanticAnswerBytes(await SpecVectorIndex.search(tmpDir, 'email validation', embedSvc, { limit: 20 })))
+        .toBe(semanticAnswerBytes(baseline));
+    });
+
+    it('rebuilds instead of reusing a table whose persisted content was rewritten', async () => {
+      const specsDir = await createSpecsDir(tmpDir, { auth: SAMPLE_SPEC_AUTH });
+      const embedSvc = makeMockEmbedSvc();
+      await SpecVectorIndex.build(tmpDir, specsDir, embedSvc);
+      const { connect } = await import('@lancedb/lancedb');
+      const db = await connect(join(tmpDir, 'vector-index'));
+      const table = await db.openTable('specs');
+      const rows = await table.query().toArray() as Record<string, unknown>[];
+      await table.update({
+        where: `\`id\` = '${String(rows[0].id).replaceAll("'", "''")}'`,
+        values: { text: `${String(rows[0].text)} tampered` },
+      });
+
+      await SpecVectorIndex.build(tmpDir, specsDir, embedSvc);
+
+      expect(embedSvc.embed).toHaveBeenCalledTimes(2);
+      const repairedRows = await (await db.openTable('specs')).query().toArray() as Record<string, unknown>[];
+      expect(repairedRows.some(row => String(row.text).endsWith(' tampered'))).toBe(false);
+    });
+
+    it('rebuilds instead of reusing a table whose dense vector was rewritten', async () => {
+      const specsDir = await createSpecsDir(tmpDir, { auth: SAMPLE_SPEC_AUTH });
+      const embedSvc = makeMockEmbedSvc();
+      await SpecVectorIndex.build(tmpDir, specsDir, embedSvc);
+      const { connect } = await import('@lancedb/lancedb');
+      const db = await connect(join(tmpDir, 'vector-index'));
+      const table = await db.openTable('specs');
+      const [first] = await table.query().limit(1).toArray() as Record<string, unknown>[];
+      await table.update({
+        where: `\`id\` = '${String(first.id).replaceAll("'", "''")}'`,
+        values: { vector: new Array(DIM).fill(0.875) },
+      });
+
+      await SpecVectorIndex.build(tmpDir, specsDir, embedSvc);
+
+      expect(embedSvc.embed).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not repeat the full integrity scan for unchanged warm searches', async () => {
+      const specsDir = await createSpecsDir(tmpDir, { auth: SAMPLE_SPEC_AUTH });
+      const embedSvc = makeMockEmbedSvc();
+      await SpecVectorIndex.build(tmpDir, specsDir, embedSvc);
+      _resetSpecVectorIndexVerificationCacheForTesting();
+
+      const { connect } = await import('@lancedb/lancedb');
+      const table = await (await connect(join(tmpDir, 'vector-index'))).openTable('specs');
+      const querySpy = vi.spyOn(Object.getPrototypeOf(table) as { query(): unknown }, 'query');
+
+      await SpecVectorIndex.search(tmpDir, 'email', embedSvc);
+      await SpecVectorIndex.search(tmpDir, 'authentication', embedSvc);
+
+      // First search: one full integrity scan + one ANN query. Second search:
+      // one ANN query only because metadata and every Lance table file are unchanged.
+      expect(querySpy).toHaveBeenCalledTimes(3);
+      querySpy.mockRestore();
+    });
+
+    it('invalidates warm verification when Lance publishes a new table version', async () => {
+      const specsDir = await createSpecsDir(tmpDir, { auth: SAMPLE_SPEC_AUTH });
+      const embedSvc = makeMockEmbedSvc();
+      await SpecVectorIndex.build(tmpDir, specsDir, embedSvc);
+      _resetSpecVectorIndexVerificationCacheForTesting();
+
+      const { connect } = await import('@lancedb/lancedb');
+      const table = await (await connect(join(tmpDir, 'vector-index'))).openTable('specs');
+      const querySpy = vi.spyOn(Object.getPrototypeOf(table) as { query(): unknown }, 'query');
+      await SpecVectorIndex.search(tmpDir, 'email', embedSvc);
+
+      const [first] = await table.query().limit(1).toArray() as Record<string, unknown>[];
+      await table.update({
+        where: `\`id\` = '${String(first.id).replaceAll("'", "''")}'`,
+        values: { text: `${String(first.text)} tampered` },
+      });
+
+      await expect(SpecVectorIndex.search(tmpDir, 'authentication', embedSvc))
+        .rejects.toThrow(/content does not match its metadata/);
+      // First search scans + ANN; after the constant-cost version changes, the
+      // second request performs one integrity scan and fails before ANN serving.
+      expect(querySpy).toHaveBeenCalledTimes(4);
+      querySpy.mockRestore();
+    });
+
+    it('publishes metadata atomically without leaving a sibling temp file', async () => {
+      const specsDir = await createSpecsDir(tmpDir, { auth: SAMPLE_SPEC_AUTH });
+      await SpecVectorIndex.build(tmpDir, specsDir, makeMockEmbedSvc());
+      const entries = await readdir(tmpDir);
+      expect(entries).toContain('spec-index-meta.json');
+      expect(entries.some(entry => entry.startsWith('.spec-index-meta.json.tmp-'))).toBe(false);
     });
 
     it('proceeds without enrichment if mapping.json is missing', async () => {
@@ -259,6 +465,25 @@ describe('SpecVectorIndex', () => {
   // --------------------------------------------------------------------------
 
   describe('search()', () => {
+    it.each([
+      ['missing', null],
+      ['schema-v1 claiming embeddings', {
+        hasEmbeddings: true,
+        dim: DIM,
+        model: 'legacy-model',
+        builtAt: '2026-01-01T00:00:00.000Z',
+        schemaVersion: 1,
+      }],
+    ])('probes a BM25-only table when metadata is %s before selecting ANN', async (_label, legacyMeta) => {
+      const specsDir = await createSpecsDir(tmpDir, { auth: SAMPLE_SPEC_AUTH });
+      await SpecVectorIndex.build(tmpDir, specsDir, null);
+      const metaPath = join(tmpDir, 'spec-index-meta.json');
+      if (legacyMeta === null) await unlink(metaPath);
+      else await writeFile(metaPath, JSON.stringify(legacyMeta), 'utf8');
+
+      const results = await SpecVectorIndex.search(tmpDir, 'validate email', makeMockEmbedSvc());
+      expect(results.some(result => result.record.id === 'auth.validateEmail')).toBe(true);
+    });
     it('returns up to limit results', async () => {
       const specsDir = await createSpecsDir(tmpDir, { auth: SAMPLE_SPEC_AUTH });
       const embedSvc = makeMockEmbedSvc();
@@ -343,6 +568,22 @@ describe('SpecVectorIndex', () => {
       await expect(
         SpecVectorIndex.search(tmpDir, 'query', embedSvc, { limit: 5 })
       ).rejects.toThrow('No spec index found');
+    });
+
+    it('invalidates persisted table content that disagrees with current metadata', async () => {
+      const specsDir = await createSpecsDir(tmpDir, { auth: SAMPLE_SPEC_AUTH });
+      await SpecVectorIndex.build(tmpDir, specsDir, null);
+      const { connect } = await import('@lancedb/lancedb');
+      const table = await (await connect(join(tmpDir, 'vector-index'))).openTable('specs');
+      const [first] = await table.query().limit(1).toArray() as Record<string, unknown>[];
+      await table.update({
+        where: `\`id\` = '${String(first.id).replaceAll("'", "''")}'`,
+        values: { text: `${String(first.text)} tampered` },
+      });
+
+      await expect(SpecVectorIndex.search(tmpDir, 'tampered', null)).rejects.toThrow(
+        'Spec index content does not match its metadata',
+      );
     });
 
     it('returns empty array when domain filter matches nothing', async () => {
