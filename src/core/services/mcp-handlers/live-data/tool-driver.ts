@@ -211,6 +211,18 @@ export const TOOL_REGISTRY: Record<string, ToolPlan> = {
   orient: { kind: 'read', buildArgs: needQuery((f, q) => ({ directory: f.directory, task: q, limit: 5 })) },
   search_code: { kind: 'read', buildArgs: needQuery((f, q) => ({ directory: f.directory, query: q, limit: 10 })) },
   search_specs: { kind: 'read', buildArgs: needQuery((f, q) => ({ directory: f.directory, query: q, limit: 10 })) },
+  explain_retrieval_miss: {
+    kind: 'read',
+    buildArgs: (f) => f.searchTerm && f.functionName
+      ? {
+          directory: f.directory,
+          query: f.searchTerm,
+          surface: 'code',
+          target: { kind: 'symbol', value: f.functionName, ...(f.filePath ? { filePath: f.filePath } : {}) },
+          limit: 10,
+        }
+      : null,
+  },
   search_unified: { kind: 'read', buildArgs: needQuery((f, q) => ({ directory: f.directory, query: q, limit: 10 })) },
   suggest_insertion_points: {
     kind: 'read',

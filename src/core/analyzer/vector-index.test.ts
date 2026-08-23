@@ -285,6 +285,23 @@ describe('VectorIndex', () => {
       }
     });
 
+    it('emits honest evidence for hybrid and dense-only production paths', async () => {
+      const embedSvc = makeMockEmbedSvc();
+      await VectorIndex.build(tmpDir, SAMPLE_NODES, SAMPLE_SIGNATURES, new Set(), new Set(), embedSvc);
+
+      const hybrid = await VectorIndex.search(tmpDir, 'authenticate', embedSvc, { limit: 10 });
+      const auth = hybrid.find((result) => result.record.name === 'authenticate');
+      expect(auth?.matchEvidence).toMatchObject({ field: 'symbol', terms: ['authenticate'], tier: 2 });
+
+      const dense = await VectorIndex.search(tmpDir, 'authenticate', embedSvc, { limit: 10, hybrid: false });
+      expect(dense.length).toBeGreaterThan(0);
+      expect(dense.every((result) =>
+        result.matchEvidence?.field === 'vector' &&
+        result.matchEvidence.tier === 3 &&
+        result.matchEvidence.terms.length === 0,
+      )).toBe(true);
+    });
+
     it('result records do not include the vector field', async () => {
       const embedSvc = makeMockEmbedSvc();
       await VectorIndex.build(tmpDir, SAMPLE_NODES, SAMPLE_SIGNATURES, new Set(), new Set(), embedSvc);
@@ -388,6 +405,7 @@ describe('VectorIndex', () => {
       const auth = results.find(r => r.record.name === 'authenticate');
       expect(auth).toBeDefined();
       expect(auth!.record.isHub).toBe(true);
+      expect(auth!.matchEvidence).toMatchObject({ field: 'symbol', terms: ['authenticate'], tier: 1 });
       expect((auth!.record as Record<string, unknown>)['vector']).toBeUndefined();
       for (const r of results) expect(typeof r.score).toBe('number');
     });

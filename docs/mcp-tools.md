@@ -34,13 +34,13 @@ or for local development:
 
 ### Recommended lean surface (cost, Spec 25 P1 · Spec 28)
 
-MCP clients send every tool's JSON Schema on every request, so tools the agent never calls are pure per-request overhead. The full surface is **75 tools / ~93 KB / ~23k tokens** of `tools/list`. The Spec 14 benchmark showed this prefix is what made openlore *lose* on small repos — and that a lean, navigation-focused surface flips it to a win (see the [Value Scorecard](../README.md#value-scorecard--does-it-pay-for-itself)).
+MCP clients send every tool's JSON Schema on every request, so tools the agent never calls are pure per-request overhead. The full surface is **76 tools / ~93 KB / ~23k tokens** of `tools/list`. The Spec 14 benchmark showed this prefix is what made openlore *lose* on small repos — and that a lean, navigation-focused surface flips it to a win (see the [Value Scorecard](../README.md#value-scorecard--does-it-pay-for-itself)).
 
 **The default surface is the `substrate` preset (the navigation core plus governance and spec-workflow reads)**, not an extra step: `openlore install` (and a bare `openlore mcp`) wires the **`substrate`** preset — 15 tools: the navigation graph-traversal core, the three highest-value governance reads (`recall`, `verify_claim`, `blast_radius`), and `prepare_spec_generation` / `prepare_spec_repair`. An out-of-box capable MCP agent can therefore obtain a bounded evidence bundle and author specs with its native editor; OpenLore performs no internal LLM call in these composites. The lean navigate-only **`navigation`** preset (10 tools) stays a one-flag escape (`--preset navigation`); the full surface is one explicit opt-in away (`--preset full` / `--all-tools`). When the default surface is active, the server advertises breadth once via its `instructions` channel (no extra tool schemas) so an agent never concludes a capability is absent. To restore the prior all-tools default: `openlore install --preset full`.
 
 **Spec 28 measured how far the *server* can shrink that prefix, honestly:** MCP has no server-driven lazy-schema mechanism (`tools/list` always returns full schemas), and the lossless server-side byte-lever is only ~2% — the payload is dominated by irreducible per-tool schema structure plus the selection text an agent needs to pick a tool. So the real lever is the *client* (deferred schemas, below) and *tool count* (`--preset`), not byte-shaving. The surface has been trimmed losslessly anyway (shared param descriptions, no boilerplate) and is now **bounded by a regression guard** so it can't silently bloat. Two ways to get the lean surface, in order of preference:
 
-1. **Deferred schemas (best — keeps every tool available).** If your client supports it (Claude Code: `alwaysLoad: false`), advertise tool *names* cheaply and load a tool's schema only when it's used. See the [two-server setup](agent-setup.md) — you keep all 75 tools without paying their schema cost up front.
+1. **Deferred schemas (best — keeps every tool available).** If your client supports it (Claude Code: `alwaysLoad: false`), advertise tool *names* cheaply and load a tool's schema only when it's used. See the [two-server setup](agent-setup.md) — you keep all 76 tools without paying their schema cost up front.
 2. **`--preset navigation` (server-side, navigation-only — the lean escape below the default).** A bare `openlore mcp` / `openlore install` wires the wider `substrate` default (see below); `--preset navigation` is the one-flag way down to the navigate-only core: a graph-traversal surface of 10 tools (orient, search_code, get_subgraph, trace_execution_path, analyze_impact, suggest_insertion_points, get_function_skeleton, get_landmarks, get_map, find_path). It is exactly the configuration the benchmark measured (−7%→−21% cost, −26% round-trips on deep traces). Note it omits the governance tools (`record_decision`, `check_architecture`, inventories, and the `substrate` default's governance reads), so if you use the decision gate or architecture checks during a session, prefer option 1 (deferred schemas) or wire a governance-bearing preset (`--minimal`, or the full surface with `--preset full`).
 
 The tool list and schemas are emitted in a fixed, deterministic order with no per-request variation, so the provider KV-cache holds the surface and its cost drops sharply after the first call (guarded by a regression test).
@@ -179,6 +179,7 @@ Most tools run on **pure static analysis** — no LLM quota consumed. Exceptions
 |------|-------------|:---:|
 | `orient` | **Single entry point for any new task.** Given a natural-language task description, returns relevant functions with stored declaration `startLine`, source files, spec domains, call neighbourhoods, insertion-point candidates, matching spec sections, and ranked `suggestedTools`. Start here. | Yes (+ embedding) |
 | `search_code` | Natural-language semantic search over indexed functions. Returns the closest matches by meaning with similarity score, declaration `startLine` when stored, call-graph neighbourhood enrichment, and spec-linked peer functions. Falls back to BM25 keyword search when no embedding server is configured. | Yes (+ embedding) |
+| `explain_retrieval_miss` | Full-preset, read-only diagnostic for one exact symbol, file, or canonical requirement ID. Reuses the ordinary requested-limit candidate window and reports a surfaced rank/evidence or one closed miss cause. It never enumerates all misses. | Yes |
 | `suggest_insertion_points` | Semantic search over the vector index to find the best existing functions to extend or hook into when implementing a new feature. Returns ranked candidates with role and strategy. Falls back to BM25 keyword search when no embedding server is configured. | Yes (+ embedding) |
 | `get_subgraph` | Depth-limited subgraph centred on a function. Direction: `downstream` (what it calls), `upstream` (who calls it), or `both`. Output as JSON or Mermaid diagram. | Yes |
 | `trace_execution_path` | Find all call-graph paths between two functions (DFS, configurable depth/max-paths). Use this when debugging: "how does request X reach function Y?" Returns the shortest path (named `shortestPathFound`, with a `truncated` receipt, when enumeration stopped at `maxPaths`), all paths sorted by hops, and a step-by-step chain whose `callsNext` entries preserve caller identity and every stored call-site line for parallel edges. | Yes |
@@ -560,6 +561,25 @@ limit      number   Maximum number of results to return (default: 10)
 domain     string   Filter by domain name (e.g. "auth", "analyzer")
 section    string   Filter by section type: "requirements" | "purpose" | "design" | "architecture" | "entities"
 ```
+
+**`explain_retrieval_miss`** *(full preset only)*
+```
+directory       string   Absolute project directory
+query           string   The original search query
+surface         string   "code" | "spec"
+target.kind     string   "symbol" | "file" | "requirement"
+target.value    string   Exact name, repo-relative file, or canonical requirement ID
+target.filePath string   Optional symbol disambiguation path
+limit           integer  Ordinary result cutoff (default: 10)
+language        string   Code-only language filter
+minFanIn        integer  Code-only minimum-caller filter
+domain          string   Spec-only domain filter
+section         string   Spec-only section filter
+```
+
+Incompatible target/filter combinations return a usage error. `budget-truncated` names the
+ordinary bounded candidate window; presentation token budgets and the transport cap are outside
+this retrieval trace.
 
 **`generate_change_proposal`**
 ```

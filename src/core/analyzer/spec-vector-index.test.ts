@@ -268,6 +268,22 @@ describe('SpecVectorIndex', () => {
       expect(results.length).toBeLessThanOrEqual(2);
     });
 
+    it('bounds BM25 diagnostic trace candidates to the ordinary oversample window', async () => {
+      const requirements = Array.from({ length: 12 }, (_, i) =>
+        `### Requirement: Common${i}\n\nThe system SHALL handle common behavior ${i}.`,
+      ).join('\n\n');
+      const specsDir = await createSpecsDir(tmpDir, {
+        common: `# Common\n\n## Requirements\n\n${requirements}\n`,
+      });
+      await SpecVectorIndex.build(tmpDir, specsDir, null);
+
+      const results = await SpecVectorIndex.search(tmpDir, 'common', null, {
+        limit: 2,
+        traceCandidates: true,
+      });
+      expect(results).toHaveLength(6);
+    });
+
     it('each result has a score field', async () => {
       const specsDir = await createSpecsDir(tmpDir, { auth: SAMPLE_SPEC_AUTH });
       const embedSvc = makeMockEmbedSvc();
@@ -276,6 +292,7 @@ describe('SpecVectorIndex', () => {
       const results = await SpecVectorIndex.search(tmpDir, 'email', embedSvc, { limit: 10 });
       for (const r of results) {
         expect(typeof r.score).toBe('number');
+        expect(r.matchEvidence).toEqual({ field: 'vector', terms: [], tier: 3 });
       }
     });
 

@@ -26,6 +26,7 @@ describe('source-carrying tool output redaction', () => {
       'find_clones',
       'analyze_env_impact',
       'search_code',
+      'explain_retrieval_miss',
       'prepare_spec_generation',
       'prepare_spec_repair',
     ]);

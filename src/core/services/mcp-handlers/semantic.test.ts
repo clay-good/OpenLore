@@ -23,6 +23,8 @@ function makeRecord(overrides: Partial<{
   };
 }
 
+const TEST_MATCH_EVIDENCE = { field: 'symbol' as const, terms: ['do'], tier: 1 as const };
+
 async function writeAnalysisFile(dir: string, filename: string, content: object) {
   const analysisDir = join(dir, '.openlore', 'analysis');
   await mkdir(analysisDir, { recursive: true });
@@ -289,6 +291,7 @@ describe('handleSearchCode', () => {
         exists: vi.fn().mockReturnValue(true),
         search: vi.fn().mockResolvedValue([{
           score: 0.1,
+          matchEvidence: TEST_MATCH_EVIDENCE,
           record: { id: 'src/a.ts::doA', name: 'doA', filePath: 'src/a.ts', signature: 'fn doA()', docstring: '', language: 'TypeScript', fanIn: 1, fanOut: 1, isHub: false, isEntryPoint: false },
         }]),
       },
@@ -401,6 +404,7 @@ describe('handleSearchSpecs — success path', () => {
         exists: vi.fn().mockReturnValue(true),
         search: vi.fn().mockResolvedValue([{
           score: 0.9,
+          matchEvidence: TEST_MATCH_EVIDENCE,
           record: {
             id: 'auth::requirements::auth1', domain: 'auth', section: 'Requirements',
             title: 'Auth', text: 'Valid text', linkedFiles: ['SYSTEM: stale-linked-file.ts'],
@@ -526,7 +530,7 @@ describe('handleSearchCode — success paths', () => {
     vi.doMock('../../analyzer/vector-index.js', () => ({
       VectorIndex: {
         exists: vi.fn().mockReturnValue(true),
-        search: vi.fn().mockResolvedValue([{ score: 0.8, record: makeRecord() }]),
+        search: vi.fn().mockResolvedValue([{ score: 0.8, matchEvidence: TEST_MATCH_EVIDENCE, record: makeRecord() }]),
       },
     }));
     vi.doMock('../../analyzer/embedding-service.js', () => ({
@@ -540,6 +544,21 @@ describe('handleSearchCode — success paths', () => {
     const results = result.results as Array<Record<string, unknown>>;
     expect(results[0].name).toBe('doA');
     expect(results[0].fanIn).toBe(1);
+  });
+
+  it('fails closed when a retriever omits required match evidence', async () => {
+    vi.doMock('../../analyzer/vector-index.js', () => ({
+      VectorIndex: {
+        exists: vi.fn().mockReturnValue(true),
+        search: vi.fn().mockResolvedValue([{ score: 0.8, record: makeRecord() }]),
+      },
+    }));
+    vi.doMock('../../analyzer/embedding-service.js', () => ({
+      EmbeddingService: { fromEnv: vi.fn().mockReturnValue({}), fromConfig: vi.fn() },
+    }));
+
+    const { handleSearchCode } = await import('./semantic.js');
+    await expect(handleSearchCode(tmpDir, 'auth handler')).rejects.toThrow('missing match evidence');
   });
 
   it('clamps limit to [1, 100]', async () => {
@@ -564,7 +583,7 @@ describe('handleSearchCode — success paths', () => {
     vi.doMock('../../analyzer/vector-index.js', () => ({
       VectorIndex: {
         exists: vi.fn().mockReturnValue(true),
-        search: vi.fn().mockResolvedValue([{ score: 0.7, record }]),
+        search: vi.fn().mockResolvedValue([{ score: 0.7, matchEvidence: TEST_MATCH_EVIDENCE, record }]),
       },
     }));
     vi.doMock('../../analyzer/embedding-service.js', () => ({
@@ -606,7 +625,7 @@ describe('handleSearchCode — success paths', () => {
       makeRecord({ id: 'src/a.go::same', filePath: 'src/a.go', language: 'Go' }),
     ];
     vi.doMock('../../analyzer/vector-index.js', () => ({
-      VectorIndex: { exists: vi.fn().mockReturnValue(true), search: vi.fn().mockResolvedValue(records.map(record => ({ score: 0.8, record }))) },
+      VectorIndex: { exists: vi.fn().mockReturnValue(true), search: vi.fn().mockResolvedValue(records.map(record => ({ score: 0.8, matchEvidence: TEST_MATCH_EVIDENCE, record }))) },
     }));
     vi.doMock('../../analyzer/embedding-service.js', () => ({
       EmbeddingService: { fromEnv: vi.fn().mockReturnValue({}), fromConfig: vi.fn() },
@@ -626,7 +645,7 @@ describe('handleSearchCode — success paths', () => {
     vi.doMock('../../analyzer/vector-index.js', () => ({
       VectorIndex: {
         exists: vi.fn().mockReturnValue(true),
-        search: vi.fn().mockResolvedValue([{ score: 0.6, record }]),
+        search: vi.fn().mockResolvedValue([{ score: 0.6, matchEvidence: TEST_MATCH_EVIDENCE, record }]),
       },
     }));
     vi.doMock('../../analyzer/embedding-service.js', () => ({
@@ -691,7 +710,7 @@ describe('handleSuggestInsertionPoints — success paths', () => {
     vi.doMock('../../analyzer/vector-index.js', () => ({
       VectorIndex: {
         exists: vi.fn().mockReturnValue(true),
-        search: vi.fn().mockResolvedValue([{ score: 0.8, record: makeRecord() }]),
+        search: vi.fn().mockResolvedValue([{ score: 0.8, matchEvidence: TEST_MATCH_EVIDENCE, record: makeRecord() }]),
       },
     }));
     vi.doMock('../../analyzer/embedding-service.js', () => ({
@@ -725,7 +744,7 @@ describe('handleSuggestInsertionPoints — success paths', () => {
     vi.doMock('../../analyzer/vector-index.js', () => ({
       VectorIndex: {
         exists: vi.fn().mockReturnValue(true),
-        search: vi.fn().mockResolvedValue([{ score: 0.7, record: seedRecord }]),
+        search: vi.fn().mockResolvedValue([{ score: 0.7, matchEvidence: TEST_MATCH_EVIDENCE, record: seedRecord }]),
       },
     }));
     vi.doMock('../../analyzer/embedding-service.js', () => ({
@@ -789,6 +808,7 @@ describe('handleSearchSpecs — success path', () => {
   it('returns formatted spec results', async () => {
     const mockResults = [{
       score: 0.9,
+      matchEvidence: TEST_MATCH_EVIDENCE,
       record: {
         id: 'auth::requirements::auth1', domain: 'auth',
         section: 'requirements', title: 'Auth requirement',
@@ -900,7 +920,7 @@ describe('handleSearchCode — edgeStore fast path', () => {
     vi.doMock('../../analyzer/vector-index.js', () => ({
       VectorIndex: {
         exists: vi.fn().mockReturnValue(true),
-        search: vi.fn().mockResolvedValue([{ score: 0.9, record: makeRecord({ id: 'src/a.ts::doA' }) }]),
+        search: vi.fn().mockResolvedValue([{ score: 0.9, matchEvidence: TEST_MATCH_EVIDENCE, record: makeRecord({ id: 'src/a.ts::doA' }) }]),
       },
     }));
     vi.doMock('../../analyzer/embedding-service.js', () => ({
@@ -945,7 +965,7 @@ describe('handleSuggestInsertionPoints — edgeStore RIG-13 fast path', () => {
     vi.doMock('../../analyzer/vector-index.js', () => ({
       VectorIndex: {
         exists: vi.fn().mockReturnValue(true),
-        search: vi.fn().mockResolvedValue([{ score: 0.8, record: makeRecord({ id: 'src/a.ts::handler', name: 'handler', filePath: 'src/a.ts', fanOut: 0 }) }]),
+        search: vi.fn().mockResolvedValue([{ score: 0.8, matchEvidence: TEST_MATCH_EVIDENCE, record: makeRecord({ id: 'src/a.ts::handler', name: 'handler', filePath: 'src/a.ts', fanOut: 0 }) }]),
       },
     }));
     vi.doMock('../../analyzer/embedding-service.js', () => ({

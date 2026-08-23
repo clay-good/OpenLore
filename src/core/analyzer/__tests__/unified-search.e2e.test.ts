@@ -83,7 +83,10 @@ vi.mock('../vector-index.js', async (importOriginal) => {
           });
         }
 
-        return Promise.resolve(results.slice(0, opts.limit));
+        return Promise.resolve(results.slice(0, opts.limit).map((result) => ({
+          ...result,
+          matchEvidence: { field: 'vector', terms: [], tier: 3 },
+        })));
       })
     }
   };
@@ -140,7 +143,10 @@ vi.mock('../spec-vector-index.js', async (importOriginal) => {
           });
         }
 
-        return Promise.resolve(results.slice(0, opts.limit));
+        return Promise.resolve(results.slice(0, opts.limit).map((result) => ({
+          ...result,
+          matchEvidence: { field: 'vector', terms: [], tier: 3 },
+        })));
       })
     }
   };
@@ -489,7 +495,8 @@ describe('UnifiedSearch E2E', () => {
             isEntryPoint: false,
             text: `[TypeScript] src/file${i}.ts function${i}\nfunction${i}(): void\nFunction ${i}`
           },
-          score: 0.5 + i * 0.01
+          score: 0.5 + i * 0.01,
+          matchEvidence: { field: 'vector' as const, terms: [], tier: 3 as const },
         }))
       );
 
@@ -503,7 +510,8 @@ describe('UnifiedSearch E2E', () => {
             text: `[spec:domain${i}] Requirement: Requirement${i}\nRequirement ${i} text...`,
             linkedFiles: []
           },
-          score: 0.4 + i * 0.01
+          score: 0.4 + i * 0.01,
+          matchEvidence: { field: 'vector' as const, terms: [], tier: 3 as const },
         }))
       );
 

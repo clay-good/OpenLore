@@ -29,6 +29,7 @@ import {
   type AnalysisContentProvenance,
 } from '../served-content.js';
 import { withIndexStaleness } from './index-staleness.js';
+import { requireMatchEvidence } from '../../analyzer/retrieval-evidence.js';
 
 // ============================================================================
 // INSERTION POINT HELPERS
@@ -150,7 +151,15 @@ interface TextSearchPayload {
   query: string;
   searchMode: 'text' | 'text_fallback';
   count: number;
-  results: Array<{ filePath: string; line: number; text: string; score: number; kind: 'text'; provenance: AnalysisContentProvenance }>;
+  results: Array<{
+    filePath: string;
+    line: number;
+    text: string;
+    score: number;
+    kind: 'text';
+    matchEvidence: import('../../analyzer/retrieval-evidence.js').MatchEvidence;
+    provenance: AnalysisContentProvenance;
+  }>;
   note?: string;
 }
 
@@ -182,6 +191,7 @@ async function searchTextLines(
       text: h.text,
       score: h.score,
       kind: 'text' as const,
+      matchEvidence: h.matchEvidence,
       provenance,
     })),
   };
@@ -289,6 +299,7 @@ export async function handleSearchCode(
     const startLine = getCachedNodeStartLine(llmCtx, r.record.id);
     return {
       score: r.score,
+      matchEvidence: requireMatchEvidence(r.matchEvidence),
       name: r.record.name,
       filePath: r.record.filePath,
       ...(startLine !== undefined ? { startLine } : {}),
@@ -592,6 +603,7 @@ export async function handleSearchSpecs(
   ]);
   const servedResults = await Promise.all(results.map(async (r) => ({
     score: r.score,
+    matchEvidence: requireMatchEvidence(r.matchEvidence),
     id: r.record.id,
     domain: r.record.domain,
     section: r.record.section,

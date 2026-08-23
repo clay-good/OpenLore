@@ -20,7 +20,7 @@ vi.mock('../../analyzer/vector-index.js', () => ({
   VectorIndex: {
     exists: vi.fn(() => true),
     search: vi.fn(async () => [
-      { score: 0.9, record: { id: 'src/foo.ts::fooHandler', name: 'fooHandler', filePath: 'src/foo.ts', language: 'typescript', fanIn: 0, fanOut: 0, isHub: false, isEntryPoint: false } },
+      { score: 0.9, matchEvidence: { field: 'symbol', terms: ['foohandler'], tier: 1 }, record: { id: 'src/foo.ts::fooHandler', name: 'fooHandler', filePath: 'src/foo.ts', language: 'typescript', fanIn: 0, fanOut: 0, isHub: false, isEntryPoint: false } },
     ]),
   },
 }));

@@ -35,6 +35,7 @@ import { handleGetStyleFingerprint } from './mcp-handlers/style-fingerprint.js';
 import { handleBriefingSince } from './mcp-handlers/briefing-since.js';
 import { handleFindClones } from './mcp-handlers/clone-query.js';
 import { handleLocateSymbolSpan } from './mcp-handlers/symbol-span.js';
+import { handleExplainRetrievalMiss, type ExplainRetrievalMissInput } from './mcp-handlers/retrieval-miss.js';
 import { handleAnalyzeErrorPropagation } from './mcp-handlers/error-propagation.js';
 import { handleAnalyzeEnvImpact } from './mcp-handlers/env-impact.js';
 import type { TaskDescriptor } from './mcp-handlers/change-footprint.js';
@@ -152,6 +153,7 @@ export const SOURCE_CARRYING_TOOLS = new Set([
   'find_clones',
   'analyze_env_impact',
   'search_code',
+  'explain_retrieval_miss',
   'prepare_spec_generation',
   'prepare_spec_repair',
 ]);
@@ -280,6 +282,19 @@ async function dispatchToolImpl(
     const { directory, query, limit = 10, domain, section } =
       args as { directory: string; query: string; limit?: number; domain?: string; section?: string };
     return handleSearchSpecs(directory, query, limit, domain, section);
+  } else if (name === 'explain_retrieval_miss') {
+    const { query, surface, target, limit, language, minFanIn, domain, section } =
+      args as unknown as ExplainRetrievalMissInput;
+    return handleExplainRetrievalMiss(directory, {
+      query,
+      surface,
+      target,
+      ...(limit !== undefined ? { limit } : {}),
+      ...(language !== undefined ? { language } : {}),
+      ...(minFanIn !== undefined ? { minFanIn } : {}),
+      ...(domain !== undefined ? { domain } : {}),
+      ...(section !== undefined ? { section } : {}),
+    });
   } else if (name === 'search_unified') {
     const { directory, query, limit = 10, language, domain, section } =
       args as { directory: string; query: string; limit?: number; language?: string; domain?: string; section?: string };

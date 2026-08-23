@@ -32,9 +32,11 @@ import { noteUpdateAndMaybeCompact } from './index-compaction.js';
 import {
   buildBm25Corpus,
   tokenize,
+  bm25MatchEvidence,
   bm25Score,
   type Bm25Corpus,
 } from './vector-index.js';
+import type { MatchEvidence } from './retrieval-evidence.js';
 
 // ============================================================================
 // TYPES
@@ -57,6 +59,7 @@ export interface TextSearchResult {
   text: string;
   /** BM25 relevance score, higher = more relevant. */
   score: number;
+  matchEvidence: MatchEvidence;
 }
 
 /** A file to index: its repo-relative path and full content. */
@@ -196,6 +199,22 @@ export class TextLineIndex {
   /** Returns true if a text-line index has been built for this output dir. */
   static exists(outputDir: string): boolean {
     return existsSync(join(outputDir, DB_FOLDER));
+  }
+
+  /** Whether the literal-text index contains at least one row for a file. */
+  static async hasFile(outputDir: string, filePath: string): Promise<boolean> {
+    if (!TextLineIndex.exists(outputDir)) return false;
+    try {
+      quietNativeLoggingOnce();
+      const { connect } = await import('@lancedb/lancedb');
+      const db = await connect(join(outputDir, DB_FOLDER));
+      const table = await db.openTable(TABLE_NAME);
+      const escaped = filePath.replace(/'/g, "''");
+      const rows = await table.query().where(`\`filePath\` = '${escaped}'`).limit(1).toArray();
+      return rows.length > 0;
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -350,9 +369,9 @@ export class TextLineIndex {
   static async searchText(
     outputDir: string,
     query: string,
-    opts: { limit?: number; filePath?: string } = {},
+    opts: { limit?: number; filePath?: string; traceCandidates?: boolean } = {},
   ): Promise<TextSearchResult[]> {
-    const { limit = 10, filePath } = opts;
+    const { limit = 10, filePath, traceCandidates = false } = opts;
     if (!TextLineIndex.exists(outputDir)) return [];
 
     const dbPath = join(outputDir, DB_FOLDER);
@@ -395,16 +414,17 @@ export class TextLineIndex {
       )
       .map(({ idx, score }) => {
         const rec = recById.get(corpus.docs[idx].id);
-        return rec ? { rec, score } : null;
+        return rec ? { rec, idx, score } : null;
       })
-      .filter((x): x is { rec: TextLineRecord; score: number } => x !== null)
+      .filter((x): x is { rec: TextLineRecord; idx: number; score: number } => x !== null)
       .filter(({ rec }) => (filePath ? rec.filePath === filePath : true))
-      .slice(0, limit)
-      .map(({ rec, score }) => ({
+      .slice(0, traceCandidates ? limit * 3 : limit)
+      .map(({ rec, idx, score }) => ({
         filePath: rec.filePath,
         lineNumber: rec.lineNumber,
         text: rec.text,
         score,
+        matchEvidence: bm25MatchEvidence(corpus, queryTokens, idx, { body: rec.text }, 1),
       }));
   }
 

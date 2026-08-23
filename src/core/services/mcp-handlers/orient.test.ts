@@ -95,6 +95,7 @@ function makeSearchResult(overrides: Partial<{
 }> = {}) {
   return {
     score: 0.2,
+    matchEvidence: { field: 'symbol' as const, terms: ['foo'], tier: 1 as const },
     record: {
       id: overrides.id ?? 'src/foo.ts::doFoo',
       name: overrides.name ?? 'doFoo',
@@ -158,6 +159,9 @@ describe('handleOrient', () => {
     expect(Array.isArray(result.relevantFunctions)).toBe(true);
     expect(Array.isArray(result.callPaths)).toBe(true);
     expect(Array.isArray(result.insertionPoints)).toBe(true);
+    expect((result.insertionPoints as Array<{ matchEvidence: unknown }>)[0].matchEvidence).toEqual({
+      field: 'symbol', terms: ['foo'], tier: 1,
+    });
     expect(Array.isArray(result.nextSteps)).toBe(true);
     expect((result.relevantFunctions as unknown[]).length).toBeGreaterThan(0);
     expect((result.relevantFunctions as Array<{ provenance: string }>)[0].provenance).toBe('source-derived');
@@ -709,6 +713,7 @@ describe('handleOrient', () => {
     vi.mocked(SpecVectorIndex.exists).mockReturnValue(true);
     vi.mocked(SpecVectorIndex.search).mockResolvedValue([{
       score: 0.1,
+      matchEvidence: { field: 'vector', terms: [], tier: 3 },
       record: { domain: 'auth', section: '## Auth Flow', title: 'Authentication', text: 'Auth text here', id: 'auth::1' },
     } as never]);
     vi.mocked(VectorIndex.search).mockResolvedValue([makeSearchResult()]);
@@ -724,8 +729,8 @@ describe('handleOrient', () => {
     vi.mocked(VectorIndex.exists).mockReturnValue(true);
     vi.mocked(VectorIndex.search).mockResolvedValue([
       makeSearchResult({ name: 'realFn', filePath: 'src/real.ts' }),
-      { score: 0.5, record: { ...makeSearchResult().record, id: 'external::fetch', name: 'fetch', filePath: 'external' } },
-      { score: 0.4, record: { ...makeSearchResult().record, id: 'external::https.request', name: 'https.request', filePath: 'src/real.ts' } },
+      { ...makeSearchResult(), score: 0.5, record: { ...makeSearchResult().record, id: 'external::fetch', name: 'fetch', filePath: 'external' } },
+      { ...makeSearchResult(), score: 0.4, record: { ...makeSearchResult().record, id: 'external::https.request', name: 'https.request', filePath: 'src/real.ts' } },
     ]);
 
     const result = await handleOrient('/tmp/proj', 'fetch task') as Record<string, unknown>;

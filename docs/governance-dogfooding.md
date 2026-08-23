@@ -27,7 +27,7 @@ evidence is the synced spec sections + ADRs.
 | EdgeStore uses SCHEMA_VERSION rebuild-on-bump instead of migrations | component | `openspec/specs/analyzer/spec.md` |
 | BM25 keyword retrieval is the zero-network floor; embeddings optional | component | `openspec/specs/analyzer/spec.md` |
 | North star: a deterministic structural context substrate for agents | system | `openspec/specs/overview/spec.md` + `openspec/decisions/adr-0001-*.md` |
-| The default MCP surface is the lean `substrate` preset, not all 75 tools (Spec 14 / ADR-0023, superseding ADR-0022) | component | `openspec/specs/cli/spec.md` |
+| The default MCP surface is the lean `substrate` preset, not all 76 tools (Spec 14 / ADR-0023, superseding ADR-0022) | component | `openspec/specs/cli/spec.md` |
 
 ¹ recorded as `cross-domain` but the consolidator re-scoped it to `component`.
 

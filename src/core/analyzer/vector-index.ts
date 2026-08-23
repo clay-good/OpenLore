@@ -27,6 +27,14 @@ import { noteUpdateAndMaybeCompact } from './index-compaction.js';
 import { TOKENIZER_VERSION, tokenize } from './bm25-tokenizer.js';
 import { atomicWriteFile } from '../decisions/atomic-store.js';
 import { acquireLockAt } from '../runtime/advisory-lock.js';
+import {
+  LEXICAL_MATCH_FIELDS,
+  type MatchEvidence,
+  type SearchableFields,
+  vectorMatchEvidence,
+} from './retrieval-evidence.js';
+
+export type { MatchEvidence, MatchField, RetrievalTier } from './retrieval-evidence.js';
 
 export { TOKENIZER_VERSION, tokenize } from './bm25-tokenizer.js';
 
@@ -59,6 +67,8 @@ export interface SearchResult {
    * For dense-only search: cosine distance from LanceDB, lower = more similar.
    */
   score: number;
+  /** Optional for legacy test doubles; every production search path emits it. */
+  matchEvidence?: MatchEvidence;
 }
 
 export interface KeywordMissDiagnostics {
@@ -256,12 +266,61 @@ export function bm25Score(corpus: Bm25Corpus, queryTokens: string[], docIdx: num
     if (df === 0) continue;
     const idf = Math.log((corpus.N - df + 0.5) / (df + 0.5) + 1);
     const tf = doc.tfMap.get(q) ?? 0;
+    if (tf === 0) continue;
     const tfNorm =
       (tf * (BM25_K1 + 1)) /
       (tf + BM25_K1 * (1 - BM25_B + BM25_B * (doc.length / corpus.avgLength)));
     score += idf * tfNorm;
   }
   return score;
+}
+
+/** Attribute the ranker's exact aggregate term contributions across one bounded candidate's fields. */
+export function bm25MatchEvidence(
+  corpus: Bm25Corpus,
+  queryTokens: string[],
+  docIdx: number,
+  fields: SearchableFields,
+  tier: 1 | 2 = 1,
+): MatchEvidence {
+  const doc = corpus.docs[docIdx];
+  const fieldScores = new Map(LEXICAL_MATCH_FIELDS.map((field) => [field, 0]));
+  const fieldTfMaps = new Map(LEXICAL_MATCH_FIELDS.map((field) => {
+    const frequencies = new Map<string, number>();
+    for (const token of tokenize(fields[field] ?? '')) {
+      frequencies.set(token, (frequencies.get(token) ?? 0) + 1);
+    }
+    return [field, frequencies] as const;
+  }));
+  for (const q of queryTokens) {
+    const df = corpus.df.get(q) ?? 0;
+    if (df === 0) continue;
+    const idf = Math.log((corpus.N - df + 0.5) / (df + 0.5) + 1);
+    const tf = doc.tfMap.get(q) ?? 0;
+    if (tf === 0) continue;
+    const tfNorm =
+      (tf * (BM25_K1 + 1)) /
+      (tf + BM25_K1 * (1 - BM25_B + BM25_B * (doc.length / corpus.avgLength)));
+    const termScore = idf * tfNorm;
+    for (const field of LEXICAL_MATCH_FIELDS) {
+      const fieldTf = fieldTfMaps.get(field)?.get(q) ?? 0;
+      if (fieldTf === 0) continue;
+      // Attribute the contribution that actually entered the aggregate score.
+      // Fields partition the flattened document, so occurrence share preserves
+      // the aggregate term contribution instead of re-saturating each field as
+      // an independent (and differently ranked) BM25 document.
+      fieldScores.set(field, (fieldScores.get(field) ?? 0) + termScore * (fieldTf / tf));
+    }
+  }
+  let winningField: (typeof LEXICAL_MATCH_FIELDS)[number] = LEXICAL_MATCH_FIELDS[0];
+  for (const field of LEXICAL_MATCH_FIELDS.slice(1)) {
+    if ((fieldScores.get(field) ?? 0) > (fieldScores.get(winningField) ?? 0)) winningField = field;
+  }
+  return {
+    field: winningField,
+    terms: queryTokens.filter((token) => (fieldTfMaps.get(winningField)?.get(token) ?? 0) > 0),
+    tier,
+  };
 }
 
 /**
@@ -697,6 +756,25 @@ function buildText(
   }
 
   return parts.join('\n');
+}
+
+export function searchableFieldsForFunctionRow(row: Record<string, unknown>): SearchableFields {
+  const name = String(row.name ?? '');
+  const className = String(row.className ?? '');
+  const filePath = String(row.filePath ?? '');
+  const signature = String(row.signature ?? '');
+  const docstring = String(row.docstring ?? '');
+  const language = String(row.language ?? '');
+  const text = String(row.text ?? '');
+  const symbol = className ? `${className}.${name}` : name;
+  const prefix = [`[${language}] ${filePath} ${symbol}`, signature, docstring]
+    .filter(Boolean)
+    .join('\n');
+  const body = text.startsWith(`${prefix}\n`) ? text.slice(prefix.length + 1) : '';
+  // Include the language marker with the path because both occupy the same
+  // prefix segment in the flattened text scored by BM25. Every attributed
+  // token must come from that scored text; fields are not extra query inputs.
+  return { symbol, path: `[${language}] ${filePath}`, signature, doc: docstring, body };
 }
 
 /**
@@ -1354,9 +1432,11 @@ export class VectorIndex {
       minFanIn?: number;
       /** Enable hybrid dense+sparse retrieval via RRF (default: true when embedSvc available) */
       hybrid?: boolean;
+      /** Internal diagnostic: return the ordinary bounded candidate window before result cutoff. */
+      traceCandidates?: boolean;
     } = {}
   ): Promise<SearchResult[]> {
-    const { limit = 10, language, minFanIn, hybrid = true } = opts;
+    const { limit = 10, language, minFanIn, hybrid = true, traceCandidates = false } = opts;
 
     if (!VectorIndex.exists(outputDir)) {
       throw new Error('Vector index not found. Run "openlore analyze --embed" first.');
@@ -1384,7 +1464,7 @@ export class VectorIndex {
     // truth: a missing sidecar (legacy index) is treated as embeddings-present.
     const indexHasEmbeddings = meta === null ? true : meta.hasEmbeddings;
     if (!embedSvc || !indexHasEmbeddings) {
-      return VectorIndex._bm25Only(table, dbPath, query, limit, language, minFanIn);
+      return VectorIndex._bm25Only(table, dbPath, query, limit, language, minFanIn, traceCandidates);
     }
 
     // ── Dense recall ──────────────────────────────────────────────────────────
@@ -1393,7 +1473,7 @@ export class VectorIndex {
       [queryVector] = await embedSvc.embed([query]);
     } catch {
       // Embedding server unreachable — fall back to BM25
-      return VectorIndex._bm25Only(table, dbPath, query, limit, language, minFanIn);
+      return VectorIndex._bm25Only(table, dbPath, query, limit, language, minFanIn, traceCandidates);
     }
     if (!queryVector) throw new Error('Failed to embed query');
 
@@ -1402,7 +1482,7 @@ export class VectorIndex {
     // full rebuild), ANN search would throw deep inside LanceDB. Degrade to BM25
     // rather than crashing the tool — the index is stale, not broken.
     if (meta && meta.dim > 0 && queryVector.length !== meta.dim) {
-      return VectorIndex._bm25Only(table, dbPath, query, limit, language, minFanIn);
+      return VectorIndex._bm25Only(table, dbPath, query, limit, language, minFanIn, traceCandidates);
     }
 
     const denseFetch = hybrid ? Math.min(limit * 5, 500) : Math.min(limit * 10, 1000);
@@ -1419,8 +1499,12 @@ export class VectorIndex {
     if (!hybrid) {
       return denseRows
         .filter(passesFilters)
-        .slice(0, limit)
-        .map(row => ({ record: rowToRecord(row), score: row._distance as number }));
+        .slice(0, traceCandidates ? undefined : limit)
+        .map(row => ({
+          record: rowToRecord(row),
+          score: row._distance as number,
+          matchEvidence: vectorMatchEvidence(3),
+        }));
     }
 
     // ── Sparse recall (BM25 over full corpus) ─────────────────────────────────
@@ -1473,19 +1557,34 @@ export class VectorIndex {
     // candidate never appeared in the sparse list, and vice versa).
     const denseRankById = new Map(denseRows.map((r, i) => [r.id as string, i]));
     const sparseRankById = new Map(sparseScored.map(({ idx }, i) => [corpus.docs[idx].id, i]));
+    const sparseEvidenceById = new Map(
+      sparseScored
+        .filter(({ score }) => score > 0)
+        .map(({ idx }) => {
+          const id = corpus.docs[idx].id;
+          const row = rowById.get(id);
+          return [id, row
+            ? bm25MatchEvidence(corpus, queryTokens, idx, searchableFieldsForFunctionRow(row), 2)
+            : vectorMatchEvidence(2)] as const;
+        }),
+    );
 
     const merged = [...candidates.values()].map((row) => {
       const id = row.id as string;
       const dr = denseRankById.get(id) ?? Infinity;
       const sr = sparseRankById.get(id) ?? Infinity;
-      return { row, score: rrfScore(dr, sr) };
+      return {
+        row,
+        score: rrfScore(dr, sr),
+        matchEvidence: sparseEvidenceById.get(id) ?? vectorMatchEvidence(2),
+      };
     });
 
     return merged
       .sort((a, b) => b.score - a.score)
       .filter(({ row }) => passesFilters(row))
-      .slice(0, limit)
-      .map(({ row, score }) => ({ record: rowToRecord(row), score }));
+      .slice(0, traceCandidates ? undefined : limit)
+      .map(({ row, score, matchEvidence }) => ({ record: rowToRecord(row), score, matchEvidence }));
   }
 
   /**
@@ -1499,6 +1598,7 @@ export class VectorIndex {
     limit: number,
     language?: string,
     minFanIn?: number,
+    traceCandidates = false,
   ): Promise<SearchResult[]> {
     let cachedEntry = _bm25Cache.get(dbPath);
     let allRows: Record<string, unknown>[];
@@ -1526,17 +1626,21 @@ export class VectorIndex {
       .slice(0, limit * 3) // oversample before filtering
       .map(({ idx, score }) => {
         const row = rowById.get(corpus.docs[idx].id);
-        return row ? { row, score } : null;
+        return row ? { row, idx, score } : null;
       })
-      .filter((x): x is { row: Record<string, unknown>; score: number } => x !== null)
+      .filter((x): x is { row: Record<string, unknown>; idx: number; score: number } => x !== null)
       .filter(({ row }) => {
         if (!isRepoFunctionRow(row)) return false;
         if (language && (row.language as string) !== language) return false;
         if (minFanIn !== undefined && minFanIn > 0 && (row.fanIn as number) < minFanIn) return false;
         return true;
       })
-      .slice(0, limit)
-      .map(({ row, score }) => ({ record: rowToRecord(row), score }));
+      .slice(0, traceCandidates ? undefined : limit)
+      .map(({ row, idx, score }) => ({
+        record: rowToRecord(row),
+        score,
+        matchEvidence: bm25MatchEvidence(corpus, queryTokens, idx, searchableFieldsForFunctionRow(row), 1),
+      }));
   }
 
   /**
