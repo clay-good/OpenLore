@@ -28,6 +28,7 @@ import { lstat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { Command } from 'commander';
+import { OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR } from '../../constants.js';
 import { gitPathArgs } from '../../utils/git-args.js';
 import { logger, configureLogger } from '../../utils/logger.js';
 import { writeStdout } from '../output.js';
@@ -56,6 +57,13 @@ import {
 } from '../../core/drift/git-diff.js';
 import { computeBlastRadius, type BlastRadiusBriefing } from '../../core/services/mcp-handlers/blast-radius.js';
 import { computeImpactCertificate, type ImpactCertificate } from '../../core/services/mcp-handlers/impact-certificate.js';
+import {
+  decisionConstraintViolationFindings,
+  loadDecisionConstraintState,
+  type DecisionConstraintState,
+} from '../../core/decisions/constraint-ledger.js';
+import { loadDepGraph } from '../../core/services/mcp-handlers/architecture.js';
+import { assessStalenessForAnalysis } from '../../core/services/mcp-handlers/confidence-boundary.js';
 import type { OpenLoreConfig } from '../../types/index.js';
 import {
   displayHookPath,
@@ -290,11 +298,18 @@ export async function collectGovernanceFindings(
   config: OpenLoreConfig | null,
   policy: Record<string, string>,
   baseRef?: string,
-): Promise<{ findings: GovernanceFinding[]; caveats: string[]; assessedCodes: Set<string>; failedCodes: Set<string> }> {
+): Promise<{
+  findings: GovernanceFinding[];
+  caveats: string[];
+  assessedCodes: Set<string>;
+  failedCodes: Set<string>;
+  decisionConstraints?: Pick<DecisionConstraintState, 'ledger' | 'retiredRules'>;
+}> {
   const findings: GovernanceFinding[] = [];
   const caveats: string[] = [];
   const assessedCodes = new Set<string>();
   const failedCodes = new Set<string>();
+  let decisionConstraints: Pick<DecisionConstraintState, 'ledger' | 'retiredRules'> | undefined;
 
   // stale-decision-reference — always (cheap).
   try {
@@ -312,6 +327,49 @@ export async function collectGovernanceFindings(
   } catch (err) {
     caveats.push(`stale-decision-reference check unavailable: ${err instanceof Error ? err.message : String(err)}`);
     failedCodes.add('stale-decision-reference');
+  }
+
+  // Decision-bound constraints — always load the declared eligibility corpus.
+  // An active rule requires the whole stored dependency graph; malformed blocks
+  // remain visible even when no graph is available.
+  try {
+    const state = await loadDecisionConstraintState(cwd, config?.openspecPath);
+    decisionConstraints = { ledger: state.ledger, retiredRules: state.retiredRules };
+    findings.push(...state.malformedFindings);
+    assessedCodes.add('decision-constraint-malformed');
+    if (!state.violationAssessmentComplete) {
+      caveats.push('decision-constraint violation assessment incomplete: an authoritative constraint or lifecycle record is malformed');
+      failedCodes.add('decision-constraint-violation');
+    } else if (state.rules.length === 0) {
+      assessedCodes.add('decision-constraint-violation');
+    } else {
+      const graph = await loadDepGraph(cwd);
+      if (!graph) {
+        caveats.push('decision-constraint check unavailable: no dependency graph; run openlore analyze');
+        failedCodes.add('decision-constraint-violation');
+      } else {
+        findings.push(...decisionConstraintViolationFindings(graph, state));
+        const freshness = await assessStalenessForAnalysis(
+          cwd,
+          join(cwd, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR),
+          Date.now(),
+          false,
+        );
+        if (!freshness.indexCommit || freshness.changedSourceFiles === null) {
+          caveats.push('decision-constraint violation assessment incomplete: dependency graph freshness is unknown; run openlore analyze in this Git worktree');
+          failedCodes.add('decision-constraint-violation');
+        } else if (freshness.changedSourceFiles > 0) {
+          caveats.push(`decision-constraint violation assessment incomplete: ${freshness.changedSourceFiles} graph-source file(s) changed since analysis; run openlore analyze`);
+          failedCodes.add('decision-constraint-violation');
+        } else {
+          assessedCodes.add('decision-constraint-violation');
+        }
+      }
+    }
+  } catch (err) {
+    caveats.push(`decision-constraint check unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    failedCodes.add('decision-constraint-malformed');
+    failedCodes.add('decision-constraint-violation');
   }
 
   // Governance-corpus integrity — always (bounded local artifact walk, no LLM).
@@ -393,7 +451,7 @@ export async function collectGovernanceFindings(
     }
   }
 
-  return { findings, caveats, assessedCodes, failedCodes };
+  return { findings, caveats, assessedCodes, failedCodes, decisionConstraints };
 }
 
 const ICON: Record<string, string> = { blocking: '⛔', frozen: '❄', advisory: '⚠', off: '🔇' };
@@ -589,13 +647,28 @@ export async function runEnforceCli(opts: EnforceCliOptions): Promise<number> {
         unstaged: baselineDirty,
       },
       unknownPolicyCodes: unknown,
+      decisionEligibility: collected.decisionConstraints
+        ? {
+            ...collected.decisionConstraints.ledger,
+            retiredRules: collected.decisionConstraints.retiredRules,
+          }
+        : undefined,
       caveats: collected.caveats,
     }, null, 2) + '\n');
   } else {
     const showRatchetReceipt = activeFrozenAssessment || failedGateCodes.length > 0;
-    const out = renderHuman(result, unknown, collected.caveats, reconciled.baseline, baselineDirty, showRatchetReceipt);
-    if (opts.hook) process.stderr.write(sanitizeForTerminal(out + '\n', { keepNewlines: true }));
-    else await writeStdout(out + '\n');
+    const out = renderHuman(
+      result,
+      unknown,
+      collected.caveats,
+      reconciled.baseline,
+      baselineDirty,
+      showRatchetReceipt,
+      collected.decisionConstraints,
+    );
+    const safeOut = sanitizeForTerminal(out + '\n', { keepNewlines: true });
+    if (opts.hook) process.stderr.write(safeOut);
+    else await writeStdout(safeOut);
   }
 
   if (opts.hook && result.gated) {
@@ -628,6 +701,7 @@ function renderHuman(
   baseline: Awaited<ReturnType<typeof applyEnforcementBaseline>>['baseline'],
   baselineDirty: boolean,
   showRatchetReceipt: boolean,
+  decisionConstraints?: Pick<DecisionConstraintState, 'ledger' | 'retiredRules'>,
 ): string {
   const lines: string[] = ['', '🛡 Enforcement gate' + (result.gated ? ' (BLOCKED)' : ' (advisory)')];
   if (result.classified.length === 0) {
@@ -650,6 +724,25 @@ function renderHuman(
   if (baselineDirty) lines.push('   ⚠ The working tree differs from the staged commit; frozen assessment cannot certify those different bytes.');
   if (unknown.length > 0) {
     lines.push(`   ℹ enforcement.policy names ${unknown.length} unrecognized code(s) — retained, no source emits them yet: ${unknown.join(', ')}`);
+  }
+  if (decisionConstraints) {
+    const { ledger } = decisionConstraints;
+    const adoption = ledger.adoption.ratio === null
+      ? 'not applicable (0 authoritative)'
+      : `${ledger.adoption.constrained}/${ledger.adoption.authoritative} (${(ledger.adoption.ratio * 100).toFixed(1)}%)`;
+    const coverage = ledger.coverage.ratio === null
+      ? `not applicable (0 eligible)`
+      : `${ledger.coverage.constrainedEligible}/${ledger.coverage.eligible} (${(ledger.coverage.ratio * 100).toFixed(1)}%)`;
+    lines.push(`   Decision constraint adoption: ${adoption}.`);
+    lines.push(`   Decision constraint coverage: ${coverage}.`);
+    lines.push(`   Decision eligibility unclassified: ${ledger.unclassifiedCount}.`);
+    lines.push(`   Active decision rules: ${ledger.activeRuleCount}.`);
+    if (ledger.coverageGaps.length > 0) {
+      lines.push(`   Coverage gaps: ${ledger.coverageGaps.map((gap) => `${gap.decisionId} ${gap.title}`).join('; ')}.`);
+    }
+    if (decisionConstraints.retiredRules.length > 0) {
+      lines.push(`   Retired decision rules: ${decisionConstraints.retiredRules.length}.`);
+    }
   }
   for (const c of caveats) lines.push(`   ⚠ ${c}`);
   lines.push('');

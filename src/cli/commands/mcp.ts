@@ -2012,8 +2012,8 @@ export const TOOL_DEFINITIONS = [
       additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
-        title: { type: 'string', description: 'Short imperative statement, e.g. "Use UUIDs for decision IDs"' },
-        rationale: { type: 'string', description: 'Why this decision was made' },
+        title: { type: 'string', minLength: 1, maxLength: 4096, description: 'Short imperative statement, e.g. "Use UUIDs for decision IDs"' },
+        rationale: { type: 'string', minLength: 1, maxLength: 4096, description: 'Why this decision was made' },
         consequences: { type: 'string', description: 'What changes as a result (optional)' },
         affectedFiles: {
           type: 'array',
@@ -2028,6 +2028,80 @@ export const TOOL_DEFINITIONS = [
           type: 'string',
           enum: ['local', 'component', 'cross-domain', 'system'],
           description: 'Decision scope. local: single file; component: single module/service; cross-domain: multiple spec domains or service contracts; system: global constraint. Only cross-domain and system generate ADR files. Defaults to component; auto-promoted to cross-domain when multiple domains inferred.',
+        },
+        constraints: {
+          type: 'object',
+          additionalProperties: false,
+          description: 'Optional versioned architecture constraints. Rules use the existing layers / forbidden / allowedOnly vocabulary and inherit this decision\'s lifecycle.',
+          properties: {
+            version: { type: 'integer', enum: [1] },
+            eligibility: {
+              oneOf: [
+                {
+                  type: 'object', additionalProperties: false,
+                  properties: {
+                    status: { type: 'string', enum: ['eligible'] },
+                    enforcedBoundary: { type: 'string', minLength: 1, maxLength: 4096 },
+                    humanReviewRemainder: { type: 'string', minLength: 1, maxLength: 4096 },
+                  },
+                  required: ['status', 'enforcedBoundary'],
+                },
+                {
+                  type: 'object', additionalProperties: false,
+                  properties: {
+                    status: { type: 'string', enum: ['ineligible'] },
+                    reason: { type: 'string', minLength: 1, maxLength: 4096 },
+                  },
+                  required: ['status', 'reason'],
+                },
+                {
+                  type: 'object', additionalProperties: false,
+                  properties: { status: { type: 'string', enum: ['unclassified'] } },
+                  required: ['status'],
+                },
+              ],
+            },
+            rules: {
+              type: 'array',
+              maxItems: 10,
+              items: {
+                oneOf: [
+                  {
+                    type: 'object', additionalProperties: false,
+                    properties: {
+                      id: { type: 'string', minLength: 1, maxLength: 128 }, scope: { type: 'string', minLength: 1, maxLength: 256 },
+                      kind: { type: 'string', enum: ['layers'] }, reason: { type: 'string', maxLength: 2048 },
+                      layers: {
+                        type: 'object', maxProperties: 8,
+                        additionalProperties: { type: 'array', maxItems: 4, items: { type: 'string', minLength: 1, maxLength: 256 } },
+                      },
+                    },
+                    required: ['id', 'scope', 'kind', 'layers'],
+                  },
+                  {
+                    type: 'object', additionalProperties: false,
+                    properties: {
+                      id: { type: 'string', minLength: 1, maxLength: 128 }, scope: { type: 'string', minLength: 1, maxLength: 256 },
+                      kind: { type: 'string', enum: ['forbidden'] }, reason: { type: 'string', maxLength: 2048 },
+                      from: { type: 'string', minLength: 1, maxLength: 256 }, to: { type: 'string', minLength: 1, maxLength: 256 },
+                    },
+                    required: ['id', 'scope', 'kind', 'from', 'to'],
+                  },
+                  {
+                    type: 'object', additionalProperties: false,
+                    properties: {
+                      id: { type: 'string', minLength: 1, maxLength: 128 }, scope: { type: 'string', minLength: 1, maxLength: 256 },
+                      kind: { type: 'string', enum: ['allowedOnly'] }, reason: { type: 'string', maxLength: 2048 },
+                      module: { type: 'string', minLength: 1, maxLength: 256 },
+                      mayDependOn: { type: 'array', maxItems: 32, items: { type: 'string', minLength: 1, maxLength: 256 } },
+                    },
+                    required: ['id', 'scope', 'kind', 'module', 'mayDependOn'],
+                  },
+                ],
+              },
+            },
+          },
+          required: ['version', 'rules'],
         },
       },
       required: ['title', 'rationale'],

@@ -9,15 +9,13 @@ import { join, resolve } from 'node:path';
 import {
   OPENLORE_DIR,
   OPENLORE_LOGS_SUBDIR,
-  OPENSPEC_SPECS_SUBDIR,
   DECISIONS_EXTRACTION_MAX_FILES,
   DECISIONS_DIFF_MAX_CHARS,
 } from '../constants.js';
-import { fileExists } from '../utils/command-helpers.js';
 import { readOpenLoreConfig } from '../core/services/config-manager.js';
 import { createLLMService } from '../core/services/llm-service.js';
 import { isLlmLoggingEnabled } from '../core/services/llm-logging-policy.js';
-import { isGitRepositoryRoot, getChangedFiles, getFileDiff, getCommitMessages, resolveBaseRef, buildSpecMap } from '../core/drift/index.js';
+import { isGitRepositoryRoot, getChangedFiles, getFileDiff, getCommitMessages, resolveBaseRef, buildSpecMap, matchFileToDomains } from '../core/drift/index.js';
 import {
   loadDecisionStore,
   updateDecisionStore,
@@ -29,7 +27,7 @@ import { consolidateDrafts } from '../core/decisions/consolidator.js';
 import { applyConsolidationOutcome, withVerificationOutcome } from '../core/decisions/disposition.js';
 import { markVerificationEvidenceAbsent, verifyDecisions } from '../core/decisions/verifier.js';
 import { syncApprovedDecisions } from '../core/decisions/syncer.js';
-import type { PendingDecision, DecisionStore } from '../types/index.js';
+import type { DecisionConstraintBlock, DecisionScope, PendingDecision, DecisionStore } from '../types/index.js';
 import type { SyncResult } from '../core/decisions/syncer.js';
 import type { BaseOptions, ProgressCallback } from './types.js';
 import { resolveOpenspecDir } from '../utils/openspec-dir.js';
@@ -37,6 +35,7 @@ import { resolveTrustedApiBase, resolveTrustedSslVerify } from '../core/services
 import { errors, isOpenLoreError } from '../utils/errors.js';
 import { withLoggerOptions } from '../utils/logger.js';
 import { resolveGenerationProvider, type ProviderName } from '../core/runtime/generation-core.js';
+import { validateDecisionConstraintBlock } from '../core/decisions/constraint-ledger.js';
 
 function progress(cb: ProgressCallback | undefined, step: string, status: 'start' | 'complete' | 'skip', detail?: string): void {
   cb?.({ phase: 'decisions', step, status, detail });
@@ -53,6 +52,8 @@ export interface RecordDecisionOptions {
   consequences?: string;
   affectedFiles?: string[];
   supersedes?: string;
+  scope?: DecisionScope;
+  constraints?: DecisionConstraintBlock;
 }
 
 export interface ConsolidateOptions extends BaseOptions {
@@ -90,20 +91,53 @@ export interface ConsolidateResult {
 async function recordDecision(options: RecordDecisionOptions): Promise<{ id: string }> {
   const rootPath = resolve(options.rootPath ?? process.cwd());
   const store = await loadDecisionStore(rootPath);
+  const title = options.title.trim();
+  const rationale = options.rationale.trim();
+  if (!title) throw new Error('title is required and must not be empty');
+  if (!rationale) throw new Error('rationale is required and must not be empty');
 
-  const domain = 'unknown';
-  const id = makeDecisionId(store.sessionId, domain, options.title);
+  const config = await readOpenLoreConfig(rootPath);
+  const openspecPath = resolveOpenspecDir(rootPath, config?.openspecPath);
+  let affectedDomains: string[] = [];
+  if (options.affectedFiles?.length) {
+    try {
+      const specMap = await buildSpecMap({ rootPath, openspecPath });
+      affectedDomains = [...new Set(options.affectedFiles.flatMap((file) => matchFileToDomains(file, specMap)))];
+    } catch {
+      // Recording remains available before a spec corpus exists.
+    }
+  }
+  const domain = affectedDomains[0] ?? 'unknown';
+  let resolvedScope: DecisionScope = options.scope ?? 'component';
+  if (!options.scope) {
+    const topLevelDirs = new Set((options.affectedFiles ?? []).map((file) => file.split('/').slice(0, 2).join('/')));
+    const lowerRationale = rationale.toLowerCase();
+    const semanticCrossDomain = affectedDomains.length >= 2
+      && !/\b(refactor|rename|extract|util|helper|constant|config|logging|test)\b/.test(lowerRationale)
+      && /\b(api|schema|contract|interface|protocol|auth|database|event|migration)\b/.test(lowerRationale);
+    if (topLevelDirs.size >= 2 || semanticCrossDomain) resolvedScope = 'cross-domain';
+  }
+  const id = makeDecisionId(store.sessionId, domain, title);
+  if (options.constraints) {
+    const findings = validateDecisionConstraintBlock(
+      { id, title, rationale },
+      options.constraints,
+    );
+    if (findings.length > 0) throw new Error(findings.map((finding) => finding.message).join('; '));
+  }
 
   const decision: PendingDecision = {
     id,
     status: 'draft',
-    title: options.title,
-    rationale: options.rationale,
+    scope: resolvedScope,
+    title,
+    rationale,
     consequences: options.consequences ?? '',
     proposedRequirement: null,
-    affectedDomains: [],
+    affectedDomains,
     affectedFiles: options.affectedFiles ?? [],
     supersedes: options.supersedes,
+    constraints: options.constraints,
     sessionId: store.sessionId,
     recordedAt: new Date().toISOString(),
     contentOrigin: 'agent-recorded',
@@ -303,9 +337,6 @@ async function syncDecisions(
   if (!openloreConfig) throw errors.noConfig(options.configPath);
 
   const openspecPath = resolveOpenspecDir(rootPath, openloreConfig.openspecPath);
-  const specsPath = join(openspecPath, OPENSPEC_SPECS_SUBDIR);
-  if (!(await fileExists(specsPath))) throw new Error('No specs found. Run openloreGenerate() first.');
-
   const specMap = await buildSpecMap({ rootPath, openspecPath });
   let store = await loadDecisionStore(rootPath);
 

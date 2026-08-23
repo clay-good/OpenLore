@@ -55,6 +55,24 @@ describe('handleCheckArchitecture', () => {
     const allowed = (await handleCheckArchitecture({
       directory: dir, from: 'src/domain/order.ts', to: 'src/domain/money.ts',
     })) as Record<string, unknown>;
-    expect(allowed.allowed).toBe(true);
+    expect(allowed).toMatchObject({ allowed: null, assessmentComplete: false });
+  });
+
+  it('does not present malformed authoritative constraints as a clean allow or zero scan', async () => {
+    await mkdir(join(dir, '.openlore', 'decisions'), { recursive: true });
+    await writeFile(join(dir, '.openlore', 'decisions', 'pending.json'), JSON.stringify({
+      version: '1', sessionId: 's1', updatedAt: '2026-08-23T00:00:00Z', decisions: [{
+        id: 'aaaaaaaa', status: 'approved', title: 'Malformed policy', rationale: 'A rationale.',
+        consequences: '', proposedRequirement: null, affectedDomains: [], affectedFiles: [],
+        sessionId: 's1', recordedAt: '2026-08-23T00:00:00Z', contentOrigin: 'agent-recorded',
+        confidence: 'high', syncedToSpecs: [], constraints: { version: 2, rules: [] },
+      }],
+    }));
+
+    const preEdit = await handleCheckArchitecture({ directory: dir, from: 'src/a.ts', to: 'src/b.ts' }) as Record<string, unknown>;
+    expect(preEdit).toMatchObject({ mode: 'pre-edit', allowed: null, assessmentComplete: false });
+
+    const scan = await handleCheckArchitecture({ directory: dir }) as Record<string, unknown>;
+    expect(scan).toMatchObject({ mode: 'scan', violationCount: null, assessmentComplete: false });
   });
 });

@@ -60,6 +60,7 @@ function decision(p: Partial<PendingDecision> & { id: string }): PendingDecision
     rationale: p.rationale ?? '', consequences: '', proposedRequirement: null,
     affectedDomains: [], affectedFiles: [], supersedes: p.supersedes,
     sessionId: 's1', recordedAt: '2026-06-23T00:00:00Z', contentOrigin: 'agent-recorded', confidence: 'high', syncedToSpecs: [],
+    constraints: p.constraints,
   };
 }
 
@@ -120,7 +121,40 @@ type GateJson = {
     unstaged: boolean;
   };
   caveats: string[];
+  decisionEligibility?: {
+    adoption: { constrained: number; authoritative: number; ratio: number };
+    coverage: { constrainedEligible: number; eligible: number; ratio: number | null };
+    unclassifiedCount: number;
+    activeRuleCount: number;
+  };
 };
+
+async function writeDecisionConstraintScenario(root: string): Promise<void> {
+  const decisionsDir = join(root, OPENLORE_DIR, OPENLORE_DECISIONS_SUBDIR);
+  const analysisDir = join(root, OPENLORE_DIR, 'analysis');
+  await mkdir(decisionsDir, { recursive: true });
+  await mkdir(analysisDir, { recursive: true });
+  const constrained = decision({
+    id: 'aaaaaaaa',
+    title: 'Keep app database agnostic',
+    rationale: 'Persistence stays behind the service boundary.',
+    constraints: {
+      version: 1,
+      eligibility: { status: 'eligible', enforcedBoundary: 'src/app does not depend on src/db.' },
+      rules: [{ id: 'app-no-db', scope: 'src/app', kind: 'forbidden', from: 'src/app', to: 'src/db' }],
+    },
+  });
+  await writeFile(join(decisionsDir, DECISIONS_PENDING_FILE), JSON.stringify({
+    version: '1', sessionId: 's1', updatedAt: '2026-08-23T00:00:00Z', decisions: [constrained],
+  }, null, 2) + '\n');
+  await writeFile(join(analysisDir, 'dependency-graph.json'), JSON.stringify({
+    nodes: [
+      { id: '/repo/src/app/a.ts', file: { path: 'src/app/a.ts', absolutePath: '/repo/src/app/a.ts' }, exports: [], metrics: {} },
+      { id: '/repo/src/db/b.ts', file: { path: 'src/db/b.ts', absolutePath: '/repo/src/db/b.ts' }, exports: [], metrics: {} },
+    ],
+    edges: [{ source: '/repo/src/app/a.ts', target: '/repo/src/db/b.ts', importedNames: [], isTypeOnly: false, weight: 1 }],
+  }, null, 2));
+}
 
 async function gateJson(root: string, hook = false): Promise<{ code: number; json: GateJson }> {
   const out: string[] = [];
@@ -853,5 +887,64 @@ describe('enforce gate decision', () => {
       expect(result.json.gated, mutation).toBe(true);
       expect(result.json.caveats.join(' '), mutation).toMatch(/integrity check failed.*unassessed or non-frozen code/i);
     }
+  });
+});
+
+describe('decision-bound constraint enforcement and reporting', () => {
+  it('emits a receipt-bearing advisory finding and four separate ledger measurements', async () => {
+    const root = await mkRepo();
+    await writeDecisionConstraintScenario(root);
+    const { code, json } = await gateJson(root);
+    expect(code).toBe(0);
+    const finding = json.advisory.find((item) => item.code === 'decision-constraint-violation') as
+      | { code: string; decision?: { id: string; title: string; rationale: string; ruleId: string } }
+      | undefined;
+    expect(finding?.decision).toEqual({
+      id: 'aaaaaaaa',
+      title: 'Keep app database agnostic',
+      rationale: 'Persistence stays behind the service boundary.',
+      ruleId: 'app-no-db',
+      servedContentMetadata: { provenance: 'reviewed-corpus' },
+    });
+    expect(json.decisionEligibility).toMatchObject({
+      adoption: { constrained: 1, authoritative: 1, ratio: 1 },
+      coverage: { constrainedEligible: 1, eligible: 1, ratio: 1 },
+      unclassifiedCount: 0,
+      activeRuleCount: 1,
+    });
+
+    const human = await gateHuman(root);
+    expect(human).toContain('Decision constraint adoption: 1/1 (100.0%).');
+    expect(human).toContain('Decision constraint coverage: 1/1 (100.0%).');
+    expect(human).toContain('Decision eligibility unclassified: 0.');
+    expect(human).toContain('Active decision rules: 1.');
+    expect(human).not.toMatch(/combined|overall.*percentage|coverageScore/i);
+  });
+
+  it('honors an explicit blocking policy and fails closed when its graph is missing', async () => {
+    const root = await mkRepo();
+    await initializeGitHead(root);
+    await writeDecisionConstraintScenario(root);
+    await writePolicy(root, { 'decision-constraint-violation': 'blocking' });
+    const assessed = await gateJson(root);
+    expect(assessed.json.blocking.map((finding) => finding.code)).toContain('decision-constraint-violation');
+
+    await rm(join(root, OPENLORE_DIR, 'analysis', 'dependency-graph.json'));
+    const missing = await gateJson(root, true);
+    expect(missing.code).toBe(1);
+    expect(missing.json.ratchet.failedAssessmentCodes).toContain('decision-constraint-violation');
+  });
+
+  it('sanitizes hostile decision text in normal terminal output', async () => {
+    const root = await mkRepo();
+    await writeDecisionConstraintScenario(root);
+    const storePath = join(root, OPENLORE_DIR, OPENLORE_DECISIONS_SUBDIR, DECISIONS_PENDING_FILE);
+    const store = JSON.parse(await readFile(storePath, 'utf8')) as DecisionStore;
+    store.decisions[0].title = 'hostile\u001b]8;;https://evil.example\u0007link';
+    store.decisions[0].rationale = 'reason\u001b[2J';
+    await writeFile(storePath, JSON.stringify(store));
+    const human = await gateHuman(root);
+    expect(human).not.toContain('\u001b');
+    expect(human).not.toContain('\u0007');
   });
 });

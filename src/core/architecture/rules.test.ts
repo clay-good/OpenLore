@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { parseArchitectureRules, parseInvariantMarkers, rulesAreInert } from './rules.js';
+import { mkdtemp, mkdir, symlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { loadArchitectureRules, parseArchitectureRules, parseInvariantMarkers, rulesAreInert } from './rules.js';
 
 describe('parseArchitectureRules', () => {
   it('parses layers, forbidden, and allowedOnly', () => {
@@ -62,5 +65,42 @@ describe('parseInvariantMarkers', () => {
 
   it('returns nothing when there are no markers', () => {
     expect(parseInvariantMarkers('no markers here\njust text')).toEqual([]);
+  });
+
+  it('preserves statusless legacy ADR rules while retiring explicitly rejected ones', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'openlore-legacy-invariant-'));
+    const decisions = join(root, 'openspec', 'decisions');
+    await mkdir(decisions, { recursive: true });
+    await writeFile(join(decisions, 'adr-0001-legacy.md'), [
+      '# ADR-0001: Legacy', '', '> Decision ID: aaaaaaaa',
+      'Invariant: forbidden src/a -> src/b', '',
+    ].join('\n'));
+    await writeFile(join(decisions, 'adr-0002-rejected.md'), [
+      '# ADR-0002: Rejected', '', '## Status', '', 'rejected', '',
+      '> Decision ID: bbbbbbbb', 'Invariant: forbidden src/c -> src/d', '',
+    ].join('\n'));
+
+    const loaded = await loadArchitectureRules(root);
+
+    expect(loaded.rules.map((rule) => rule.ruleId)).toEqual(['legacy-1']);
+    expect(loaded.warnings.join(' ')).toMatch(/retired.*rejected/i);
+  });
+
+  it('does not follow an individual ADR symlink outside the repository', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'openlore-legacy-symlink-'));
+    const outside = await mkdtemp(join(tmpdir(), 'openlore-legacy-outside-'));
+    const decisions = join(root, 'openspec', 'decisions');
+    await mkdir(decisions, { recursive: true });
+    const target = join(outside, 'outside.md');
+    await writeFile(target, [
+      '# ADR-0001: Outside', '', '## Status', '', 'accepted', '',
+      '> Decision ID: aaaaaaaa', 'Invariant: forbidden src/a -> src/b', '',
+    ].join('\n'));
+    await symlink(target, join(decisions, 'adr-0001-outside.md'));
+
+    const loaded = await loadArchitectureRules(root);
+
+    expect(loaded.rules).toEqual([]);
+    expect(loaded.warnings).toContain('could not read decision file adr-0001-outside.md');
   });
 });

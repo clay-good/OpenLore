@@ -617,9 +617,10 @@ describe('tools/list payload budget (spec-28)', () => {
   // that public contract rather than silent description drift.
   it('full surface stays within its prefix budget', () => {
     // Strict advertised schemas add one `additionalProperties:false` token per
-    // tool (fix-mcp-argument-contract); 93 KB preserves a narrow ratchet around
-    // that intentional protocol contract rather than treating it as free bytes.
-    expect(payloadBytes({ preset: 'full' })).toBeLessThan(93_000);
+    // tool (fix-mcp-argument-contract), plus the typed v1 decision-constraint
+    // block. 95.5 KB preserves a narrow ratchet around those intentional public
+    // contracts rather than treating the added schema as free bytes.
+    expect(payloadBytes({ preset: 'full' })).toBeLessThan(95_500);
   });
 
   it('the DEFAULT surface (no selector) is the substrate payload, well under the full one', () => {

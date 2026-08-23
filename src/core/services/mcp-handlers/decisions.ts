@@ -25,13 +25,14 @@ import { buildSpecMap, matchFileToDomains } from '../../../core/drift/spec-mappe
 import { AnchorContext } from '../../decisions/anchor-adapter.js';
 import { readOpenLoreConfig } from '../config-manager.js';
 import { join } from 'node:path';
-import type { PendingDecision, DecisionScope } from '../../../types/index.js';
+import type { DecisionConstraintBlock, PendingDecision, DecisionScope } from '../../../types/index.js';
 import { decisionContentProvenance } from '../served-content.js';
 import {
   DECISION_DISPOSITION_REASONS,
   describeDisposition,
   readDisposition,
 } from '../../decisions/disposition.js';
+import { validateDecisionConstraintBlock } from '../../decisions/constraint-ledger.js';
 
 type ConsolidateSpawnOutcome =
   | { outcome: 'started' }
@@ -107,6 +108,7 @@ export async function handleRecordDecision(
   affectedFiles?: string[],
   supersedes?: string,
   scope?: DecisionScope,
+  constraints?: DecisionConstraintBlock,
 ): Promise<unknown> {
   try {
     if (!title?.trim()) return { error: 'title is required and must not be empty.' };
@@ -137,6 +139,12 @@ export async function handleRecordDecision(
     }
 
     const id = makeDecisionId(store.sessionId, primaryDomain, title.trim());
+    if (constraints) {
+      const findings = validateDecisionConstraintBlock({ id, title: title.trim(), rationale: rationale.trim() }, constraints);
+      if (findings.length > 0) {
+        return { error: findings.map((finding) => finding.message).join('; ') };
+      }
+    }
 
     // Re-recording something already decided must return that verdict, not open a
     // second draft the author will watch disappear the same way
@@ -220,6 +228,7 @@ export async function handleRecordDecision(
       affectedFiles: affectedFiles ?? [],
       anchors,
       supersedes,
+      constraints,
       sessionId: store.sessionId,
       recordedAt: new Date().toISOString(),
       contentOrigin: 'agent-recorded',
@@ -318,6 +327,7 @@ export async function handleListDecisions(
         // authoritative but never presented as human-reviewed. (add-decision-autopilot)
         ...(d.approvedBy ? { approvedBy: d.approvedBy } : {}),
         ...(d.humanReviewedAt ? { humanReviewedAt: d.humanReviewedAt } : {}),
+        ...(d.constraints ? { constraints: d.constraints } : {}),
       })),
     };
   } catch (err) {

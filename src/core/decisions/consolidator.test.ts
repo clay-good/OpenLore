@@ -123,6 +123,58 @@ describe('consolidateDrafts — id anchoring', () => {
     expect(result.decisions).toHaveLength(1);
     expect(result.decisions[0].id).toBe('draft0000');
   });
+
+  it('preserves authored constraints when the consolidated decision keeps the draft id', async () => {
+    const response = JSON.stringify([{
+      id: 'draft0000',
+      title: 'Consolidated title',
+      rationale: 'r',
+      consequences: 'c',
+      affectedDomains: ['api'],
+      affectedFiles: ['src/api/example.ts'],
+      proposedRequirement: 'The system SHALL do x',
+    }]);
+    const llm = makeLLM(response);
+    const constraints = {
+      version: 1 as const,
+      eligibility: {
+        status: 'eligible' as const,
+        enforcedBoundary: 'API code must stay independent from the LLM service.',
+      },
+      rules: [{
+        id: 'api-no-llm',
+        kind: 'forbidden' as const,
+        scope: 'src/api',
+        from: 'src/api',
+        to: 'src/core/services/llm-service.ts',
+      }],
+    };
+    const store = makeStore([{ title: 'Original draft title', constraints }]);
+
+    const result = await consolidateDrafts(store, llm);
+
+    expect(result.decisions[0].constraints).toEqual(constraints);
+  });
+
+  it('refuses to let LLM consolidation merge away a constrained draft identity', async () => {
+    const response = JSON.stringify([{
+      title: 'Merged title',
+      rationale: 'r',
+      consequences: 'c',
+      affectedDomains: ['api'],
+      affectedFiles: [],
+      proposedRequirement: 'The system SHALL do x',
+    }]);
+    const constraints = {
+      version: 1 as const,
+      rules: [{ id: 'r1', scope: 'src/api', kind: 'forbidden' as const, from: 'src/api', to: 'src/db' }],
+    };
+
+    await expect(consolidateDrafts(
+      makeStore([{ title: 'Constrained draft', constraints }]),
+      makeLLM(response),
+    )).rejects.toThrow(/cannot merge or omit constrained decision draft/i);
+  });
 });
 
 // ============================================================================
