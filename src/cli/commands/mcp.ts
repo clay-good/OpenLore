@@ -958,8 +958,8 @@ export const TOOL_DEFINITIONS = [
       '"what handles authentication?". Beats grep when the function name is unknown. ' +
       'Falls back to keyword search if the embedding server is down, and to a ' +
       'literal-text index on zero hits so strings in markup/text are still found ' +
-      '(mode:"text" forces it). ' +
-      'Requires "openlore analyze --embed" to have been run at least once.',
+      '(mode:"text" forces it). Use search_specs for requirements. The full-only ' +
+      'explain_retrieval_miss tool diagnoses one named miss. Requires prior analysis.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -1015,7 +1015,8 @@ export const TOOL_DEFINITIONS = [
     description:
       'USE THIS WHEN: asked "which spec covers X?", "what does the spec say about Y?", ' +
       '"which requirement describes Z?". Searches specs by meaning and returns linked source files. ' +
-      'Use spec-first: check what the spec says before reading or writing code. ' +
+      'Use spec-first: check what the spec says before reading or writing code. Use search_code for ' +
+      'implementations; the full-only explain_retrieval_miss tool diagnoses one named miss. ' +
       'Requires "openlore analyze --embed" or "openlore analyze --reindex-specs".',
     inputSchema: {
       type: 'object',
@@ -1043,6 +1044,50 @@ export const TOOL_DEFINITIONS = [
         },
       },
       required: ['query'],
+    },
+  },
+  {
+    name: 'explain_retrieval_miss',
+    description:
+      'Explain why one named target missed search_code or search_specs; unlike either search, requires an exact target.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        directory: { type: 'string', description: DIR_DESC },
+        query: { type: 'string', maxLength: 1000 },
+        surface: {
+          type: 'string',
+          enum: ['code', 'spec'],
+        },
+        target: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            kind: {
+              type: 'string',
+              enum: ['symbol', 'file', 'requirement'],
+            },
+            value: {
+              type: 'string',
+              minLength: 1,
+              maxLength: 2048,
+            },
+            filePath: {
+              type: 'string',
+              minLength: 1,
+              maxLength: 2048,
+            },
+          },
+          required: ['kind', 'value'],
+        },
+        limit: { type: 'integer', minimum: 1, maximum: 100 },
+        language: { type: 'string', maxLength: 256 },
+        minFanIn: { type: 'integer', minimum: 0 },
+        domain: { type: 'string', maxLength: 256 },
+        section: { type: 'string', maxLength: 256 },
+      },
+      required: ['query', 'surface', 'target'],
     },
   },
   {
@@ -2258,6 +2303,7 @@ const TOOL_ANNOTATIONS: Record<string, typeof _RO | typeof _RWI | typeof _RW> = 
   get_critical_hubs: _RO, get_function_skeleton: _RO, get_god_functions: _RO,
   suggest_insertion_points: _RO, search_code: _RO, list_spec_domains: _RO,
   search_specs: _RO, search_unified: _RO, get_spec: _RO, get_function_body: _RO,
+  explain_retrieval_miss: _RO,
   get_file_dependencies: _RO, generate_change_proposal: _RW, annotate_story: _RW,
   get_route_inventory: _RO, get_middleware_inventory: _RO,
   get_schema_inventory: _RO, get_ui_component_inventory: _RO, get_env_vars: _RO,

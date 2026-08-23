@@ -22,7 +22,9 @@ import { join, basename, dirname } from 'node:path';
 import { fileExists } from '../../utils/command-helpers.js';
 import { isConfinedPath } from '../../utils/path-confinement.js';
 import type { Embedder } from './embedding-service.js';
-import { tokenize, buildBm25Corpus, bm25Score } from './vector-index.js';
+import { tokenize, buildBm25Corpus, bm25MatchEvidence, bm25Score } from './vector-index.js';
+import type { MatchEvidence, SearchableFields } from './retrieval-evidence.js';
+import { vectorMatchEvidence } from './retrieval-evidence.js';
 
 // ============================================================================
 // TYPES
@@ -52,6 +54,8 @@ export interface SpecSearchResult {
     linkedFiles: string[];
   };
   score: number;
+  /** Optional for legacy test doubles; every production search path emits it. */
+  matchEvidence?: MatchEvidence;
 }
 
 // ============================================================================
@@ -228,6 +232,19 @@ function buildText(domain: string, section: ParsedSection): string {
   const parts = [`[spec:${domain}] ${section.title}`];
   if (section.content) parts.push(section.content);
   return parts.join('\n');
+}
+
+export function searchableFieldsForSpecRow(row: Record<string, unknown>): SearchableFields {
+  const domain = String(row.domain ?? '');
+  const title = String(row.title ?? '');
+  const text = String(row.text ?? '');
+  const header = `[spec:${domain}] ${title}`;
+  const prose = text.startsWith(`${header}\n`) ? text.slice(header.length + 1) : '';
+  return {
+    symbol: title,
+    path: `[spec:${domain}]`,
+    doc: prose,
+  };
 }
 
 // ============================================================================
@@ -436,11 +453,13 @@ export class SpecVectorIndex {
       limit?: number;
       domain?: string;
       section?: string;
+      /** Internal diagnostic: return the ordinary bounded candidate window before result cutoff. */
+      traceCandidates?: boolean;
     } = {}
   ): Promise<SpecSearchResult[]> {
     const { connect } = await import('@lancedb/lancedb');
 
-    const { limit = 10, domain, section } = opts;
+    const { limit = 10, domain, section, traceCandidates = false } = opts;
 
     if (!SpecVectorIndex.exists(outputDir)) {
       throw new Error('No spec index found. Run "openlore analyze" first.');
@@ -457,7 +476,7 @@ export class SpecVectorIndex {
     const meta = readSpecMeta(outputDir);
     const indexHasEmbeddings = meta === null ? true : meta.hasEmbeddings;
     if (!embedSvc || !indexHasEmbeddings) {
-      return SpecVectorIndex._bm25Only(table, query, limit, domain, section);
+      return SpecVectorIndex._bm25Only(table, query, limit, domain, section, traceCandidates);
     }
 
     let queryVector: number[];
@@ -465,14 +484,14 @@ export class SpecVectorIndex {
       [queryVector] = await embedSvc.embed([query]);
     } catch {
       // Embedder unreachable / unavailable — degrade to BM25 rather than erroring.
-      return SpecVectorIndex._bm25Only(table, query, limit, domain, section);
+      return SpecVectorIndex._bm25Only(table, query, limit, domain, section, traceCandidates);
     }
     if (!queryVector) throw new Error('Failed to embed query');
 
     // Dimension safety-net: a model switch without a spec-index rebuild would make
     // the query vector's dimension disagree with the stored vectors and crash ANN.
     if (meta && meta.dim > 0 && queryVector.length !== meta.dim) {
-      return SpecVectorIndex._bm25Only(table, query, limit, domain, section);
+      return SpecVectorIndex._bm25Only(table, query, limit, domain, section, traceCandidates);
     }
 
     const fetchLimit = Math.min(limit * 10, 500);
@@ -484,7 +503,7 @@ export class SpecVectorIndex {
         if (section && (row.section as string) !== section) return false;
         return true;
       })
-      .slice(0, limit);
+      .slice(0, traceCandidates ? undefined : limit);
 
     return filtered.map((row: Record<string, unknown>) => {
       let linkedFiles: string[] = [];
@@ -502,6 +521,7 @@ export class SpecVectorIndex {
           linkedFiles,
         },
         score: row._distance as number,
+        matchEvidence: vectorMatchEvidence(3),
       };
     });
   }
@@ -517,6 +537,7 @@ export class SpecVectorIndex {
     limit: number,
     domain?: string,
     section?: string,
+    traceCandidates = false,
   ): Promise<SpecSearchResult[]> {
     const allRows = await table.query().toArray() as Record<string, unknown>[];
     const corpus = buildBm25Corpus(
@@ -532,16 +553,16 @@ export class SpecVectorIndex {
       .sort((a, b) => b.score - a.score || (corpus.docs[a.idx].id < corpus.docs[b.idx].id ? -1 : 1))
       .map(({ idx, score }) => {
         const row = rowById.get(corpus.docs[idx].id);
-        return row ? { row, score } : null;
+        return row ? { row, idx, score } : null;
       })
-      .filter((x): x is { row: Record<string, unknown>; score: number } => x !== null)
+      .filter((x): x is { row: Record<string, unknown>; idx: number; score: number } => x !== null)
       .filter(({ row }) => {
         if (domain && (row.domain as string) !== domain) return false;
         if (section && (row.section as string) !== section) return false;
         return true;
       })
-      .slice(0, limit)
-      .map(({ row, score }) => {
+      .slice(0, traceCandidates ? limit * 3 : limit)
+      .map(({ row, idx, score }) => {
         let linkedFiles: string[] = [];
         try {
           linkedFiles = JSON.parse(row.linkedFiles as string) as string[];
@@ -556,6 +577,7 @@ export class SpecVectorIndex {
             linkedFiles,
           },
           score,
+          matchEvidence: bm25MatchEvidence(corpus, queryTokens, idx, searchableFieldsForSpecRow(row), 1),
         };
       });
   }

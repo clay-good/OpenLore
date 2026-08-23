@@ -4,7 +4,8 @@
 
 ### Requirement: SearchResultsCarryMatchEvidence
 
-Every result served by a search surface SHALL carry a non-empty match-evidence structure stating
+Every result served by `search_code`, `search_specs`, or a search-derived section of `orient` SHALL
+carry a non-empty match-evidence structure stating
 which field matched, which query terms matched, and the retrieval tier. The matched field SHALL be
 drawn from a closed enumeration covering the symbol name, the path, the signature, the
 documentation text, the body, and a dense-vector neighbourhood. Matched terms SHALL be reported in
@@ -12,9 +13,25 @@ query order in the tokenized form the matcher compared. For a dense-vector match
 list SHALL be empty and the field SHALL state that the match was a vector neighbourhood; the system
 SHALL NOT fabricate a lexical explanation for a non-lexical match.
 
-The evidence SHALL be read from the same scoring pass that produced the ranking. The system SHALL
-NOT compute the evidence with a second matching path, re-scan, or heuristic that could disagree
-with the ranking actually served.
+The repository-wide aggregate corpus SHALL remain unchanged. Once the scorer selects its bounded
+candidate window, it SHALL allocate each candidate's exact aggregate query-term contribution over
+the fields of that scored row with the same tokenizer. It SHALL NOT build a second corpus, query the
+index again, or compute an alternative ranking, and field attribution SHALL NOT change scores or
+candidate order.
+
+The lexical scorer SHALL preserve its aggregate term-frequency score and ordering while attributing
+per-field contributions for bounded candidates. The field with the greatest contribution SHALL win; ties SHALL use the
+fixed order `symbol`, `path`, `signature`, `doc`, `body`. Code symbols, signatures, documentation,
+and bodies SHALL map directly; the language marker and file path that share the scored prefix SHALL
+map to `path`. For specs, requirement-title tokens SHALL map to `symbol`, the scored spec/domain
+marker to `path`, and requirement prose to `doc`. Canonical IDs and section labels SHALL remain
+target/filter metadata and SHALL NOT be presented as lexical matches because the current ranker
+does not score them. Literal-line search results SHALL map to `body`. Repeated
+matched query tokens SHALL remain repeated and in query order.
+
+The tier SHALL be one of `1` (lexical/BM25), `2` (hybrid fusion), or `3` (dense-only). A hybrid
+candidate with a non-zero lexical contribution SHALL name its winning lexical field; a candidate
+admitted only by dense retrieval SHALL name the vector field.
 
 The evidence SHALL describe the structural match only. It SHALL NOT carry a relevance judgment,
 quality score, confidence value, or any number other than the tier.
@@ -59,7 +76,8 @@ evidence.
 
 ### Requirement: RetrievalMissesAreExplainedForANamedTarget
 
-The system SHALL provide a diagnostic that, given a query and a named target, reports
+The system SHALL provide a diagnostic that, given a query, a search surface, and a discriminated
+named target, reports
 deterministically why that target did not surface. The reported cause SHALL be drawn from a closed
 set distinguishing at minimum: the target is not in the index; the capability is unsupported for
 the target's language; no query term matched any field of the target; a filter excluded it, naming
@@ -69,8 +87,20 @@ the result budget truncated it.
 The diagnostic SHALL require a named target. Invoking it without one SHALL be a usage error, and
 the system SHALL NOT enumerate everything that failed to match.
 
-The diagnosis SHALL be a trace over the same matcher, tokenizer, filter, and budgeting path that
-produced the result set, never a parallel implementation. The diagnostic SHALL explain existing
+The target kind SHALL be `symbol`, `file`, or `requirement`. A symbol MAY be scoped by file; an
+unscoped ambiguous symbol SHALL return a usage error with bounded candidates. A requirement SHALL
+use its canonical id. A target that surfaced SHALL return its 1-based rank and match evidence and
+SHALL NOT be assigned a miss cause.
+
+Miss causes SHALL be evaluated in this order: capability unsupported for the resolved target
+language; target not indexed; filter exclusion; no matching lexical query term for a target absent
+from the candidate trace; rank below the clamped requested limit within that trace; then omission
+by the ordinary bounded candidate window. `cutoff` SHALL mean the clamped requested result limit.
+`budget-truncated` SHALL name `candidate-window`; presentation token budgets and transport-level
+response capping SHALL NOT be diagnosed because they are not observable by this retrieval trace.
+
+The diagnosis SHALL use the same requested-limit matcher candidate window, tokenizer, and filter
+path that produced the result set, never a widened or parallel ranking. The diagnostic SHALL explain existing
 behavior and SHALL NOT change it: no result matches, ranks, filters, or truncates differently
 because the diagnostic exists, and existing search results remain byte-identical apart from the
 additive match-evidence field.

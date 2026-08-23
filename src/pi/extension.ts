@@ -1242,6 +1242,7 @@ export const NAV_TOOLS: NavToolSpec[] = [
 // conclusion tool fails CI until its author makes this decision explicitly, the
 // same fails-until-you-classify discipline tool-contract.test.ts enforces.
 export const PI_EXCLUDED_CONCLUSION_TOOLS: Record<string, string> = {
+  explain_retrieval_miss: 'opt-in full-preset retrieval diagnostic; Pi exposes the primary search_code/search_specs paths',
   prepare_spec_generation: 'surfaced by the dedicated openlore_prepare_spec_generation entry point',
   prepare_spec_repair: 'surfaced by the dedicated openlore_prepare_spec_repair entry point',
   // Opt-in preset surfaces — federation/coordination tools ship behind

@@ -615,12 +615,16 @@ describe('tools/list payload budget (spec-28)', () => {
   // joined the registry (change: add-mcp-spec-workflow-composites). Their schemas expose
   // pagination, provenance, and honest-degradation controls; this is the measured cost of
   // that public contract rather than silent description drift.
+  // Bumped 95_500 → 97_000 for the full-only `explain_retrieval_miss` conclusion
+  // (change: add-retrieval-match-evidence). Measured full payload: 96,559 B; the
+  // default and navigation presets are unchanged. This preserves useful search
+  // guidance while accounting explicitly for the target/filter schema.
   it('full surface stays within its prefix budget', () => {
     // Strict advertised schemas add one `additionalProperties:false` token per
     // tool (fix-mcp-argument-contract), plus the typed v1 decision-constraint
-    // block. 95.5 KB preserves a narrow ratchet around those intentional public
+    // block. 97 KB preserves a narrow ratchet around those intentional public
     // contracts rather than treating the added schema as free bytes.
-    expect(payloadBytes({ preset: 'full' })).toBeLessThan(95_500);
+    expect(payloadBytes({ preset: 'full' })).toBeLessThan(97_000);
   });
 
   it('the DEFAULT surface (no selector) is the substrate payload, well under the full one', () => {

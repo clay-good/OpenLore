@@ -17,6 +17,7 @@ import { join } from 'node:path';
 import type { Embedder } from './embedding-service.js';
 import type { SearchResult as CodeSearchResult } from './vector-index.js';
 import type { SpecSearchResult } from './spec-vector-index.js';
+import { requireMatchEvidence, type MatchEvidence } from './retrieval-evidence.js';
 
 // ============================================================================
 // TYPES
@@ -28,6 +29,7 @@ export interface UnifiedSearchResult {
   score: number;
   baseScore: number;
   mappingBoost: number;
+  matchEvidence: MatchEvidence;
   source: {
     filePath?: string;
     functionName?: string;
@@ -299,6 +301,7 @@ export class UnifiedSearch {
           score: finalScore,
           baseScore: result.score,
           mappingBoost,
+          matchEvidence: requireMatchEvidence(result.matchEvidence),
           source: extractSourceMetadata(result),
           linkedArtifacts,
         },
@@ -319,6 +322,7 @@ export class UnifiedSearch {
           score: finalScore,
           baseScore: result.score,
           mappingBoost,
+          matchEvidence: requireMatchEvidence(result.matchEvidence),
           source: extractSourceMetadata(result),
           linkedArtifacts,
         },

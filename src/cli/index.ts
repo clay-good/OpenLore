@@ -79,6 +79,7 @@ import { gryphWatchCommand } from './commands/gryph-watch.js';
 import { updateCommand } from './commands/update.js';
 import { featuresCommand } from './commands/features.js';
 import { changeStatusCommand } from './commands/change-status.js';
+import { searchCommand } from './commands/search.js';
 import { applyJobGroupedHelp } from './help-groups.js';
 import { configureLogger, logger } from '../utils/logger.js';
 import { colorForStderr } from '../utils/colors.js';
@@ -189,6 +190,7 @@ Get started (one command, no API key):
 Core commands (no API key):
   openlore install      One-command setup: wire agent surfaces + build the index
   openlore orient       Relevant functions, callers, specs & insertion points for a task
+  openlore search       Search indexed code/specs or explain a named retrieval miss
   openlore mcp          Run the MCP server your agent connects to (substrate preset by default)
   openlore analyze      (Re)build the structural index from static analysis
   openlore prove        Measure OpenLore's token value on YOUR repo (--estimate = no API key)
@@ -265,6 +267,7 @@ program.addCommand(panicReplayCommand);
 program.addCommand(gryphWatchCommand);
 program.addCommand(updateCommand);
 program.addCommand(changeStatusCommand);
+program.addCommand(searchCommand);
 
 // Group the ~49 commands by job in `openlore --help` so the front door is legible
 // (CommandSurfaceGroupedByJob). Presentation only — every command stays invocable.

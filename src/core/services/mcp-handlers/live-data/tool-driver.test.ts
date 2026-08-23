@@ -58,6 +58,11 @@ describe('spec-09 arg-builders', () => {
 
   it('derives query- and file-scoped args from real facts', () => {
     expect(TOOL_REGISTRY.search_code.buildArgs(fullFacts)).toMatchObject({ query: 'option' });
+    expect(TOOL_REGISTRY.explain_retrieval_miss.buildArgs(fullFacts)).toMatchObject({
+      query: 'option',
+      surface: 'code',
+      target: { kind: 'symbol', value: 'Command', filePath: 'lib/command.js' },
+    });
     expect(TOOL_REGISTRY.orient.buildArgs(fullFacts)).toMatchObject({ task: 'option' });
     expect(TOOL_REGISTRY.get_function_skeleton.buildArgs(fullFacts)).toMatchObject({ filePath: 'lib/command.js' });
   });

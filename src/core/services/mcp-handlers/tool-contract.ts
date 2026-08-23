@@ -76,6 +76,7 @@ export const TOOL_OUTPUT_CLASS: Record<string, ToolOutputClass> = {
   search_code: 'conclusion',
   suggest_insertion_points: 'conclusion',
   search_specs: 'conclusion',
+  explain_retrieval_miss: 'conclusion',
   search_unified: 'conclusion',
   list_spec_domains: 'conclusion',
   get_spec: 'conclusion',
@@ -210,6 +211,7 @@ export const TOOL_CAPABILITY_FAMILY: Record<string, CapabilityFamily> = {
   search_code: 'navigate',
   suggest_insertion_points: 'navigate',
   search_specs: 'navigate',
+  explain_retrieval_miss: 'navigate',
   search_unified: 'navigate',
   list_spec_domains: 'navigate',
   get_spec: 'navigate',
@@ -285,6 +287,9 @@ export function capabilityFamily(name: string): CapabilityFamily | undefined {
  * `tool-contract.test.ts` fails if a member does not cross-reference its group.
  */
 export const ADJACENT_TOOL_GROUPS: ReadonlyArray<readonly string[]> = [
+  // Same retrieval pipeline, three distinct questions: code matches, spec matches,
+  // and why one named target did not surface in either result set.
+  ['search_code', 'search_specs', 'explain_retrieval_miss'],
   // Same graph, four diff conclusions: advisory briefing vs. graph delta + stale
   // callers vs. paths newly opened into a covering surface.
   ['blast_radius', 'structural_diff', 'change_impact_certificate'],

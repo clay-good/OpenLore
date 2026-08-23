@@ -32,6 +32,7 @@ import {
   type LanguageProfile,
 } from '../../analyzer/style-fingerprint.js';
 import { scanViolations } from '../../architecture/check.js';
+import { requireMatchEvidence, type MatchEvidence } from '../../analyzer/retrieval-evidence.js';
 import { loadParseHealthReport, parseHealthBoundary } from './parse-health-boundary.js';
 import {
   classifyRole,
@@ -120,6 +121,7 @@ interface OrientFunction {
   filePath: string;
   startLine?: number;
   score: number;
+  matchEvidence: MatchEvidence;
   /** Exact expansion handle (Spec 25 P2): get_function_body(directory, filePath, name). */
   expand: string;
   signature?: string;
@@ -159,6 +161,7 @@ interface OrientInsertionPoint {
   strategy: string;
   reason: string;
   score: number;
+  matchEvidence: MatchEvidence;
   provenance: AnalysisContentProvenance;
 }
 
@@ -167,6 +170,7 @@ interface OrientSpecMatch {
   section: string;
   title: string;
   score: number;
+  matchEvidence: MatchEvidence;
   text: string;
   provenance: Extract<ServedContentProvenance, 'reviewed-corpus' | 'local-unreviewed'>;
 }
@@ -249,6 +253,7 @@ export async function handleOrient(
       filePath: r.record.filePath,
       ...(startLine !== undefined ? { startLine } : {}),
       score: parseFloat(r.score.toFixed(3)),
+      matchEvidence: requireMatchEvidence(r.matchEvidence),
       expand: expandHandle(r.record.name, r.record.filePath),
       signature: r.record.signature || undefined,
       docstring: r.record.docstring || undefined,
@@ -355,6 +360,7 @@ export async function handleOrient(
     return {
       name: r.record.name,
       filePath: r.record.filePath,
+      matchEvidence: requireMatchEvidence(r.matchEvidence),
       role, strategy, score,
       reason: buildReason(r.record.name, role, strategy, r.record.fanIn, r.record.fanOut),
     };
@@ -383,6 +389,7 @@ export async function handleOrient(
         section: r.record.section,
         title: r.record.title,
         score: parseFloat(r.score.toFixed(3)),
+        matchEvidence: requireMatchEvidence(r.matchEvidence),
         text: r.record.text.slice(0, 300) + (r.record.text.length > 300 ? '…' : ''),
         provenance: await indexedSpecContentProvenance(
           absDir,

@@ -15,6 +15,7 @@
 | `openlore embed --off` | Revert to the first-class keyword (BM25) default and rebuild | No |
 | `openlore orient` | Relevant functions, callers, specs, and insertion points for a task (the flagship) | No |
 | `openlore orient --inject` | Emit a bounded, ignorable task-scoped orientation block for a pre-turn hook | No |
+| `openlore search <query>` | Search indexed code or specs; optionally explain one named target | No |
 | `openlore generate` | Generate specs from analysis | Yes |
 | `openlore generate --adr` | Also generate Architecture Decision Records | Yes |
 | `openlore generate --dry-run` | List the stages and domains that would run, then stop — no provider call, no cost, no writes | No |
@@ -104,6 +105,30 @@ openlore orient [options]
 With no `--task`, `orient` prints a session-start primer. Requires `openlore analyze`
 to have run at least once.
 
+### Search Options
+
+```bash
+openlore search <query> [options]
+
+  --specs                # Search requirements instead of code
+  --limit <n>            # Result cutoff (default: 10)
+  --language <name>      # Code language filter
+  --min-fan-in <n>       # Code minimum-caller filter
+  --domain <name>        # Spec domain filter
+  --section <name>       # Spec section filter
+  --token-budget <n>     # Cap ordinary code-search output
+  --explain <target>     # Explain one surfaced or missing target
+  --target-kind <kind>   # symbol | file | requirement (required with --explain)
+  --file <path>          # Disambiguate a symbol target
+  --directory <path>     # Project directory (default: cwd)
+  --json                 # Emit the shared handler response unchanged
+```
+
+`--explain` uses the same requested-limit candidate window as ordinary retrieval. It reports
+`not-indexed`, unsupported language, filter exclusion, no lexical term match, an exact rank within
+that window, or candidate-window truncation. Use `--specs --target-kind requirement` for canonical
+requirement IDs. Presentation token caps are not diagnosed.
+
 ### Install Options
 
 ```bash
@@ -114,7 +139,7 @@ openlore install [options]   # detect agents, wire surfaces, build the index
   --preset <name>        # MCP tool preset to wire: substrate (default; navigation core +
                          #   spec workflows + recall + verify_claim + blast_radius), navigation (lean escape),
                          #   minimal, memory, verify, federation, coordination, or full
-  --all-tools            # Wire the full 75-tool surface (alias of --preset full)
+  --all-tools            # Wire the full 76-tool surface (alias of --preset full)
   --dry-run              # Print planned changes without writing any files
   --force                # Overwrite OpenLore-managed blocks even if hand-edited
   --uninstall            # Remove OpenLore-managed blocks and entries
@@ -130,7 +155,7 @@ openlore connect remove [agent]      # disconnect that agent
   <agent>                # Positional: claude-code | cursor | cline | continue |
                          #   agents-md (omit for an interactive picker)
   --preset <name>        # MCP tool preset to wire (same names as install)
-  --all-tools            # Wire the full 75-tool surface (alias of --preset full)
+  --all-tools            # Wire the full 76-tool surface (alias of --preset full)
   --dry-run              # Print planned changes without writing any files
   --force                # Overwrite OpenLore-managed blocks even if hand-edited
   --no-analyze           # Configure surfaces only; do not build the index
@@ -142,7 +167,7 @@ openlore connect remove [agent]      # disconnect that agent
 A bare `openlore install` wires the `substrate` surface (15 tools — navigation core + governance reads + spec-workflow composites) and, for
 Claude Code, both a `SessionStart` primer hook and a `UserPromptSubmit` task-scoped
 injection hook. Use `--preset navigation` for the lean navigate-only core (10 tools), or
-`--preset full` for all 75 tools.
+`--preset full` for all 76 tools.
 
 ### MCP Server Options
 
@@ -151,7 +176,7 @@ openlore mcp [options]             # start the stdio MCP server
 
   --preset <name>        # Expose a named preset (default: substrate, 15 tools — nav + governance + spec workflows)
   --minimal              # Expose only the core 6 governance tools
-  --all-tools            # Expose the full surface — all 75 tools (alias --preset full)
+  --all-tools            # Expose the full surface — all 76 tools (alias --preset full)
   --list-tools           # Print the active surface grouped by capability family and exit
   --watch-auto           # Auto-detect + incrementally re-index the project dir
   --no-watch-auto        # Disable auto-watch (use for one-shot tool calls)
@@ -643,7 +668,7 @@ over plain HTTP so non-MCP clients (e.g. the [Pi](https://pi.dev) extension in
 
 ```bash
 openlore serve                          # substrate preset, ephemeral port, watch on
-openlore serve --preset all --port 7077 # all 75 tools on a fixed port
+openlore serve --preset all --port 7077 # all 76 tools on a fixed port
 openlore serve --no-watch               # transport only, no freshness lane
 openlore serve --stop                   # stop the daemon serving this directory
 ```

@@ -8,6 +8,8 @@ import type { EmbeddingService } from '../embedding-service.js';
 import type { SearchResult as CodeSearchResult } from '../vector-index.js';
 import type { SpecSearchResult } from '../spec-vector-index.js';
 
+const TEST_MATCH_EVIDENCE = { field: 'vector' as const, terms: [], tier: 3 as const };
+
 // Simple mock data for testing
 const mockMapping = {
   mappings: [
@@ -124,8 +126,8 @@ describe('UnifiedSearch', () => {
 
       vi.spyOn(VectorIndex, 'exists').mockReturnValue(true);
       vi.spyOn(SpecVectorIndex, 'exists').mockReturnValue(true);
-      vi.spyOn(VectorIndex, 'search').mockResolvedValue(mockCodeResults);
-      vi.spyOn(SpecVectorIndex, 'search').mockResolvedValue(mockSpecResults);
+      vi.spyOn(VectorIndex, 'search').mockResolvedValue(mockCodeResults.map((result) => ({ ...result, matchEvidence: TEST_MATCH_EVIDENCE })));
+      vi.spyOn(SpecVectorIndex, 'search').mockResolvedValue(mockSpecResults.map((result) => ({ ...result, matchEvidence: TEST_MATCH_EVIDENCE })));
 
       const results = await UnifiedSearch.unifiedSearch(
         mockOutputDir,
@@ -191,8 +193,8 @@ describe('UnifiedSearch', () => {
 
       vi.spyOn(VectorIndex, 'exists').mockReturnValue(true);
       vi.spyOn(SpecVectorIndex, 'exists').mockReturnValue(true);
-      vi.spyOn(VectorIndex, 'search').mockResolvedValue(mockCodeResults);
-      vi.spyOn(SpecVectorIndex, 'search').mockResolvedValue(mockSpecResults);
+      vi.spyOn(VectorIndex, 'search').mockResolvedValue(mockCodeResults.map((result) => ({ ...result, matchEvidence: TEST_MATCH_EVIDENCE })));
+      vi.spyOn(SpecVectorIndex, 'search').mockResolvedValue(mockSpecResults.map((result) => ({ ...result, matchEvidence: TEST_MATCH_EVIDENCE })));
 
       const results = await UnifiedSearch.unifiedSearch(
         mockOutputDir,
@@ -260,8 +262,8 @@ describe('UnifiedSearch', () => {
 
       vi.spyOn(VectorIndex, 'exists').mockReturnValue(true);
       vi.spyOn(SpecVectorIndex, 'exists').mockReturnValue(true);
-      vi.spyOn(VectorIndex, 'search').mockResolvedValue(mockCodeResults);
-      vi.spyOn(SpecVectorIndex, 'search').mockResolvedValue(mockSpecResults);
+      vi.spyOn(VectorIndex, 'search').mockResolvedValue(mockCodeResults.map((result) => ({ ...result, matchEvidence: TEST_MATCH_EVIDENCE })));
+      vi.spyOn(SpecVectorIndex, 'search').mockResolvedValue(mockSpecResults.map((result) => ({ ...result, matchEvidence: TEST_MATCH_EVIDENCE })));
 
       const results = await UnifiedSearch.unifiedSearch(mockOutputDir, 'logging', mockEmbedSvc, {
         limit: 10,
@@ -338,8 +340,8 @@ describe('UnifiedSearch', () => {
 
       vi.spyOn(VectorIndex, 'exists').mockReturnValue(true);
       vi.spyOn(SpecVectorIndex, 'exists').mockReturnValue(true);
-      vi.spyOn(VectorIndex, 'search').mockResolvedValue(mockCodeResults);
-      vi.spyOn(SpecVectorIndex, 'search').mockResolvedValue(mockSpecResults);
+      vi.spyOn(VectorIndex, 'search').mockResolvedValue(mockCodeResults.map((result) => ({ ...result, matchEvidence: TEST_MATCH_EVIDENCE })));
+      vi.spyOn(SpecVectorIndex, 'search').mockResolvedValue(mockSpecResults.map((result) => ({ ...result, matchEvidence: TEST_MATCH_EVIDENCE })));
 
       const results = await UnifiedSearch.unifiedSearch(
         mockOutputDir,
@@ -393,8 +395,8 @@ describe('UnifiedSearch', () => {
 
       vi.spyOn(VectorIndex, 'exists').mockReturnValue(true);
       vi.spyOn(SpecVectorIndex, 'exists').mockReturnValue(true);
-      vi.spyOn(VectorIndex, 'search').mockResolvedValue(mockCodeResults);
-      vi.spyOn(SpecVectorIndex, 'search').mockResolvedValue(mockSpecResults);
+      vi.spyOn(VectorIndex, 'search').mockResolvedValue(mockCodeResults.map((result) => ({ ...result, matchEvidence: TEST_MATCH_EVIDENCE })));
+      vi.spyOn(SpecVectorIndex, 'search').mockResolvedValue(mockSpecResults.map((result) => ({ ...result, matchEvidence: TEST_MATCH_EVIDENCE })));
 
       const results = await UnifiedSearch.unifiedSearch(mockOutputDir, 'test', mockEmbedSvc, {
         limit: 3,
@@ -463,8 +465,8 @@ describe('UnifiedSearch', () => {
 
       vi.spyOn(VectorIndex, 'exists').mockReturnValue(true);
       vi.spyOn(SpecVectorIndex, 'exists').mockReturnValue(true);
-      vi.spyOn(VectorIndex, 'search').mockResolvedValue(mockCodeResults);
-      vi.spyOn(SpecVectorIndex, 'search').mockResolvedValue(mockSpecResults);
+      vi.spyOn(VectorIndex, 'search').mockResolvedValue(mockCodeResults.map((result) => ({ ...result, matchEvidence: TEST_MATCH_EVIDENCE })));
+      vi.spyOn(SpecVectorIndex, 'search').mockResolvedValue(mockSpecResults.map((result) => ({ ...result, matchEvidence: TEST_MATCH_EVIDENCE })));
 
       const results = await UnifiedSearch.unifiedSearch(
         mockOutputDir,
@@ -521,8 +523,8 @@ describe('UnifiedSearch', () => {
 
       vi.spyOn(VectorIndex, 'exists').mockReturnValue(true);
       vi.spyOn(SpecVectorIndex, 'exists').mockReturnValue(true);
-      vi.spyOn(VectorIndex, 'search').mockResolvedValue(mockCodeResults);
-      vi.spyOn(SpecVectorIndex, 'search').mockResolvedValue(mockSpecResults);
+      vi.spyOn(VectorIndex, 'search').mockResolvedValue(mockCodeResults.map((result) => ({ ...result, matchEvidence: TEST_MATCH_EVIDENCE })));
+      vi.spyOn(SpecVectorIndex, 'search').mockResolvedValue(mockSpecResults.map((result) => ({ ...result, matchEvidence: TEST_MATCH_EVIDENCE })));
 
       const results = await UnifiedSearch.unifiedSearch(
         mockOutputDir,
@@ -576,8 +578,8 @@ describe('UnifiedSearch', () => {
 
       vi.spyOn(VectorIndex, 'exists').mockReturnValue(true);
       vi.spyOn(SpecVectorIndex, 'exists').mockReturnValue(true);
-      vi.spyOn(VectorIndex, 'search').mockResolvedValue(mockCodeResults);
-      vi.spyOn(SpecVectorIndex, 'search').mockResolvedValue(mockSpecResults);
+      vi.spyOn(VectorIndex, 'search').mockResolvedValue(mockCodeResults.map((result) => ({ ...result, matchEvidence: TEST_MATCH_EVIDENCE })));
+      vi.spyOn(SpecVectorIndex, 'search').mockResolvedValue(mockSpecResults.map((result) => ({ ...result, matchEvidence: TEST_MATCH_EVIDENCE })));
 
       const results = await UnifiedSearch.unifiedSearch(
         mockOutputDir,
@@ -631,8 +633,8 @@ describe('UnifiedSearch', () => {
 
       vi.spyOn(VectorIndex, 'exists').mockReturnValue(true);
       vi.spyOn(SpecVectorIndex, 'exists').mockReturnValue(true);
-      vi.spyOn(VectorIndex, 'search').mockResolvedValue(mockCodeResults);
-      vi.spyOn(SpecVectorIndex, 'search').mockResolvedValue(mockSpecResults);
+      vi.spyOn(VectorIndex, 'search').mockResolvedValue(mockCodeResults.map((result) => ({ ...result, matchEvidence: TEST_MATCH_EVIDENCE })));
+      vi.spyOn(SpecVectorIndex, 'search').mockResolvedValue(mockSpecResults.map((result) => ({ ...result, matchEvidence: TEST_MATCH_EVIDENCE })));
 
       const results = await UnifiedSearch.unifiedSearch(mockOutputDir, 'logging', mockEmbedSvc, {
         limit: 10,
@@ -675,7 +677,7 @@ describe('UnifiedSearch', () => {
 
       vi.spyOn(VectorIndex, 'exists').mockReturnValue(true);
       vi.spyOn(SpecVectorIndex, 'exists').mockReturnValue(true);
-      vi.spyOn(VectorIndex, 'search').mockResolvedValue(mockCodeResults);
+      vi.spyOn(VectorIndex, 'search').mockResolvedValue(mockCodeResults.map((result) => ({ ...result, matchEvidence: TEST_MATCH_EVIDENCE })));
       vi.spyOn(SpecVectorIndex, 'search').mockResolvedValue([]);
 
       const results = await UnifiedSearch.unifiedSearch(
@@ -716,7 +718,7 @@ describe('UnifiedSearch', () => {
       vi.spyOn(VectorIndex, 'exists').mockReturnValue(true);
       vi.spyOn(SpecVectorIndex, 'exists').mockReturnValue(true);
       vi.spyOn(VectorIndex, 'search').mockResolvedValue([]);
-      vi.spyOn(SpecVectorIndex, 'search').mockResolvedValue(mockSpecResults);
+      vi.spyOn(SpecVectorIndex, 'search').mockResolvedValue(mockSpecResults.map((result) => ({ ...result, matchEvidence: TEST_MATCH_EVIDENCE })));
 
       const results = await UnifiedSearch.unifiedSearch(
         mockOutputDir,

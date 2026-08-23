@@ -35,7 +35,7 @@ export const COMMAND_GROUPS: ReadonlyArray<{ title: string; commands: readonly s
   },
   {
     title: 'Navigate the code',
-    commands: ['orient', 'prove'],
+    commands: ['orient', 'search', 'prove'],
   },
   {
     title: 'Govern a change',

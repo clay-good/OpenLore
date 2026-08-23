@@ -70,6 +70,7 @@ describe('TextLineIndex — literal search', () => {
     expect(hits[0].filePath).toBe('index.html');
     expect(hits[0].lineNumber).toBe(4);
     expect(hits[0].text).toContain('Message completed');
+    expect(hits[0].matchEvidence).toEqual({ field: 'body', terms: ['message', 'completed'], tier: 1 });
   });
 
   it('finds a literal inside an inline <script> string', async () => {
@@ -91,6 +92,18 @@ describe('TextLineIndex — literal search', () => {
     await TextLineIndex.build(outputDir, [{ filePath: 'a.txt', content: 'hello world' }]);
     _resetTextLineIndexCachesForTesting();
     expect(await TextLineIndex.searchText(outputDir, '   ')).toEqual([]);
+  });
+
+  it('bounds diagnostic trace candidates to the ordinary oversample window', async () => {
+    await TextLineIndex.build(outputDir, [{
+      filePath: 'many.txt',
+      content: Array.from({ length: 20 }, (_, i) => `common token ${i}`).join('\n'),
+    }]);
+    const hits = await TextLineIndex.searchText(outputDir, 'common', {
+      limit: 2,
+      traceCandidates: true,
+    });
+    expect(hits).toHaveLength(6);
   });
 
   it('exists() is false before build', () => {

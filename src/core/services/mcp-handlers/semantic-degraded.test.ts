@@ -41,6 +41,7 @@ describe('vector-index degradation disclosure', () => {
     root = await mkdtemp(join(tmpdir(), 'openlore-degraded-search-'));
     vector.search.mockReset().mockResolvedValue([{
       score: 1,
+      matchEvidence: { field: 'symbol', terms: ['a'], tier: 1 },
       record: {
         id: 'src/a.ts::a', name: 'a', filePath: 'src/a.ts', className: '',
         language: 'TypeScript', signature: '', docstring: '', fanIn: 1, fanOut: 0,

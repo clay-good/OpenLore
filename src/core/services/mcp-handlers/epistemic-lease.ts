@@ -137,6 +137,7 @@ const TOOL_WEIGHTS: Record<string, number> = {
   // Lightweight: search / read operations
   search_code: 1,
   search_specs: 1,
+  explain_retrieval_miss: 1, // diagnostic read over the same indexes as search_code/search_specs
   search_unified: 1,
   list_spec_domains: 1,
   list_decisions: 1,
