@@ -1,6 +1,8 @@
 # Standing context cost: measure the tax the surface charges before it answers anything
 
-> Status: PROPOSED (2026-07-31, external-pattern study). OpenLore counts its tools and caps a
+> Status: BUILT (2026-08-23). The deterministic measurement, source-declared budgets,
+> guarded baselines, delivery guidance, and CLI/MCP semantic-parity registry are implemented and
+> verified through five adversarial review loops plus the full local CI matrix. OpenLore counts its tools and caps a
 > serialized byte prefix, but never measures the thing that actually matters: the **tokens every
 > session pays** to load a preset's descriptions and schemas before a single question is asked. A
 > knowledge server that costs 20,000 tokens to have available is part of the context problem it was
@@ -24,7 +26,7 @@
   currently an assertion. The `substrate` default was chosen on benchmark evidence for *selection
   accuracy* (ADR-0023); its *standing cost* was never part of that evidence, so half the trade-off
   was decided on feel.
-- **The zero-cost path is undersold and unguarded.** Every conclusion tool has a CLI twin. A CLI
+- **The zero-cost path is undersold and unguarded.** Several conclusion tools have CLI twins. A CLI
   spends nothing until it is invoked — strictly cheaper than MCP for scripted agents, CI jobs, and
   pipeline grounding. The docs treat it as a convenience rather than a first-class delivery choice,
   and nothing pins the two faces together: `PiSurfaceParityIsGuarded` covers MCP↔Pi, and
@@ -34,7 +36,7 @@
 ## What changes
 
 1. **Measure the standing cost, per preset, deterministically.** A test computes the token cost of
-   each preset's full `tools/list` payload — names, descriptions, and input schemas — with a
+   each preset's exact served `tools/list` payload — including schemas and annotations — with a
    fixed, offline tokenizer approximation that is stated and version-pinned. No model call, no
    network. The number is a property of the registry, so it is byte-stable.
 
@@ -53,10 +55,11 @@
    the agent can shell out and wants to pay nothing until it does — and state that neither is
    deprecated in favour of the other.
 
-5. **A CLI↔MCP conclusion-parity guard.** For every conclusion capability exposed on both faces,
-   the same inputs SHALL produce the same conclusion, including its disclosed boundaries and
-   staleness signals. One implementation, two renderings. A test enumerates the pairs and fails
-   when a capability exists on one face only without a declared reason.
+5. **A CLI↔MCP semantic-conclusion parity guard.** For every conclusion capability exposed on both
+   faces, the common input projection SHALL produce the same successful pre-transport conclusion,
+   including disclosed boundaries and staleness signals. One implementation, two renderings. The
+   registry declares face-only capabilities and input controls. Protocol error envelopes and MCP's
+   transport byte cap remain transport concerns rather than semantic conclusions.
 
 ## Why this is in scope
 
@@ -85,3 +88,11 @@ checkable instead of aspirational.
   the size of the *surface*. `add-benchmark-harness-protocol` owns selection-accuracy evidence for
   default-surface decisions; this supplies the cost half of that trade-off, which ADR-0023 decided
   without it.
+
+## Measured baseline
+
+The first `utf8-bytes-div-4-v1` run over `origin/main` at `cf5be19e` measured the exact served
+`tools/list` result, including annotations: `minimal` 2,736; `navigation` 3,533; `memory` 1,216;
+`verify` 1,262; `federation` 3,837; `coordination` 2,487; `substrate` 5,131; and `full` 24,140
+estimated tokens. The source-declared ceilings retain 5.6%–7.8% headroom. These are regression
+units, not provider-specific billing claims.

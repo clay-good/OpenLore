@@ -12,7 +12,7 @@
 import { Command } from 'commander';
 import { logger, configureLogger } from '../../utils/logger.js';
 import { writeStdout } from '../output.js';
-import { handleGetStyleFingerprint } from '../../core/services/mcp-handlers/style-fingerprint.js';
+import { dispatchTool } from '../../core/services/tool-dispatch.js';
 import { IDIOM_KEYS, type LanguageProfile, type IdiomSignal } from '../../core/analyzer/style-fingerprint.js';
 
 interface RepoResult {
@@ -76,12 +76,12 @@ export async function runStyleFingerprintCli(opts: StyleFingerprintCliOptions): 
   configureLogger({ quiet: true });
   let result: unknown;
   try {
-    result = await handleGetStyleFingerprint({
+    result = await dispatchTool('get_style_fingerprint', {
       directory: cwd,
       communityId: opts.community,
       filePath: opts.file,
       language: opts.language,
-    });
+    }, cwd);
   } catch (err) {
     result = { error: err instanceof Error ? err.message : String(err) };
   } finally {

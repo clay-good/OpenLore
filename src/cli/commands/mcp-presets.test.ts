@@ -7,9 +7,10 @@
  * surface), and the selector's precedence/error behaviour must hold.
  */
 import { describe, it, expect } from 'vitest';
-import { selectActiveTools, TOOL_PRESETS, TOOL_DEFINITIONS, mcpCommand, BREADTH_POINTER, leanDefaultActive, resolvePresetName, renderToolSurfaceByFamily, renderActiveToolSurface, presetMembershipError } from './mcp.js';
+import { selectActiveTools, TOOL_PRESETS, TOOL_DEFINITIONS, STANDING_CONTEXT_BUDGETS, mcpCommand, BREADTH_POINTER, leanDefaultActive, resolvePresetName, renderToolSurfaceByFamily, renderActiveToolSurface, presetMembershipError } from './mcp.js';
 import { LEAN_DEFAULT_PRESET } from '../../constants.js';
 import { capabilityFamily, type CapabilityFamily } from '../../core/services/mcp-handlers/tool-contract.js';
+import { assertStandingContextBudget, buildToolListPayload, measureStandingContextTokens } from '../../core/services/mcp-standing-cost.js';
 
 const NAV = [
   'orient', 'search_code', 'get_subgraph', 'trace_execution_path',
@@ -19,6 +20,48 @@ const NAV = [
 const SPEC_WORKFLOWS = ['prepare_spec_generation', 'prepare_spec_repair'];
 
 describe('MCP tool presets', () => {
+  it('keeps every curated preset and the full surface within its declared standing-token budget', () => {
+    const surfaces: Record<string, typeof TOOL_DEFINITIONS> = {
+      ...Object.fromEntries(Object.entries(TOOL_PRESETS).map(([name, active]) => [
+        name,
+        TOOL_DEFINITIONS.filter((tool) => active.has(tool.name)),
+      ])),
+      full: TOOL_DEFINITIONS,
+    };
+    expect(Object.keys(STANDING_CONTEXT_BUDGETS).sort()).toEqual(Object.keys(surfaces).sort());
+    for (const [name, tools] of Object.entries(surfaces)) {
+      const budget = STANDING_CONTEXT_BUDGETS[name];
+      expect(budget.rationale.trim(), `${name} budget must include its review rationale`).not.toBe('');
+      expect(Number.isSafeInteger(budget.maxTokens) && budget.maxTokens > 0, `${name} budget must be a positive safe integer`).toBe(true);
+      const measured = measureStandingContextTokens(buildToolListPayload(tools, toolAnnotations));
+      expect(Number.isSafeInteger(budget.baselineTokens) && budget.baselineTokens > 0, `${name} adoption baseline must be a positive safe integer`).toBe(true);
+      const headroomPercent = (((budget.maxTokens - budget.baselineTokens) / budget.baselineTokens) * 100).toFixed(1);
+      expect(budget.rationale, `${name} rationale must state its ${headroomPercent}% headroom`).toContain(`${headroomPercent}%`);
+      expect(
+        budget.maxTokens,
+        `${name} budget may retain at most 10% headroom over its adoption baseline`,
+      ).toBeLessThanOrEqual(Math.ceil(budget.baselineTokens * 1.1));
+      expect(() => assertStandingContextBudget(
+        name,
+        measured,
+        budget,
+      )).not.toThrow();
+    }
+  });
+
+  it('fails with a named receipt when a description edit inflates a preset past budget', () => {
+    const tools = TOOL_DEFINITIONS.filter((tool) => TOOL_PRESETS.navigation.has(tool.name));
+    const measured = measureStandingContextTokens(buildToolListPayload(tools, toolAnnotations));
+    const inflated = tools.map((tool, index) => index === 0
+      ? { ...tool, description: `${tool.description}${' regression'.repeat(100)}` }
+      : tool);
+    expect(() => assertStandingContextBudget('navigation', measureStandingContextTokens(buildToolListPayload(inflated, toolAnnotations)), {
+      baselineTokens: measured,
+      maxTokens: measured,
+      rationale: 'Mutation-test budget fixed at the measured baseline.',
+    })).toThrow(/navigation.*measured.*budget/i);
+  });
+
   it('every preset references only real, defined tools (no stale names)', () => {
     const real = new Set(TOOL_DEFINITIONS.map(t => t.name));
     for (const [name, set] of Object.entries(TOOL_PRESETS)) {

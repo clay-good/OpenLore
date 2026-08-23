@@ -4,8 +4,8 @@
 
 ### Requirement: StandingSurfaceCostIsMeasuredAndBudgeted
 
-The standing context cost of each tool preset — the token cost of the tool names, descriptions, and
-input schemas a client loads at session start, before any tool is called — SHALL be measured
+The standing context cost of each tool preset — the token cost of the exact served `tools/list`
+result a client loads at session start, before any tool is called — SHALL be measured
 deterministically and offline, with no model call and no network request. The measurement SHALL use
 a stated, version-pinned tokenizer approximation, so that the same registry yields the same number.
 
@@ -54,22 +54,23 @@ surface lets a model decide when to retrieve mid-conversation at a standing cont
 command-line surface costs nothing until it is invoked. Neither SHALL be documented as deprecated
 in favour of the other.
 
-For every conclusion capability exposed on both faces, the same inputs SHALL yield the same
-conclusion, including its disclosed boundaries, truncation receipts, and staleness signals. The
-two faces SHALL be renderings of one implementation, not two implementations that agree by
-convention. A guard SHALL enumerate the paired capabilities and SHALL fail when a capability exists
-on one face only without a declared reason, or when the two faces produce different conclusions for
-the same inputs.
+For every conclusion capability exposed on both faces, their common input projection SHALL yield
+the same successful semantic conclusion before transport serialization, including its disclosed
+boundaries, semantic truncation receipts, and staleness signals. The two faces SHALL use one
+dispatch implementation, not two implementations that agree by convention. Protocol-specific
+error envelopes and MCP's transport byte cap are not semantic conclusions and MAY differ. A guard
+SHALL enumerate paired and face-only capabilities, declare face-only input controls, and fail when
+the shared dispatch inputs or semantic conclusion diverge.
 
 #### Scenario: The two faces agree
 
 - **GIVEN** a conclusion capability available on both the command-line and the tool surface
-- **WHEN** the same inputs are supplied to each
-- **THEN** the conclusions are identical, including disclosed boundaries and staleness signals
+- **WHEN** the same common inputs produce a successful result on each
+- **THEN** the pre-transport conclusions are identical, including semantic boundaries and staleness signals
 
 #### Scenario: An unpaired capability is declared, not silent
 
-- **GIVEN** a conclusion capability present on one face and absent from the other
+- **GIVEN** a registered conclusion capability present on one face and absent from the other
 - **WHEN** the parity guard runs
 - **THEN** the build fails unless the asymmetry is declared with its reason
 

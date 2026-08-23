@@ -76,6 +76,7 @@ import {
 import { dispatchTool, UnknownToolError } from '../../core/services/tool-dispatch.js';
 import { ensureServeDaemon, callServeTool, isServePresetRejection, type ServeEndpoint } from '../../core/services/serve-client.js';
 import { createShutdownCoordinator } from '../../utils/shutdown.js';
+import { buildToolListPayload } from '../../core/services/mcp-standing-cost.js';
 import {
   handleAnalyzeCodebase,
   handleGetArchitectureOverview,
@@ -2457,6 +2458,31 @@ export const TOOL_PRESETS: Record<string, Set<string>> = {
 };
 
 /**
+ * Reviewed ceilings for the deterministic standing-context estimator.
+ *
+ * Every entry records its first measured baseline and bounded headroom. A future
+ * raise therefore changes both a number and its review rationale. `full` is
+ * included because it is a supported preset selector even though it is derived
+ * from the complete registry.
+ *
+ * change: bound-standing-context-cost
+ */
+export const STANDING_CONTEXT_BUDGETS: Record<string, {
+  baselineTokens: number;
+  maxTokens: number;
+  rationale: string;
+}> = {
+  minimal: { baselineTokens: 2_736, maxTokens: 2_950, rationale: 'Exact v1 wire baseline plus 7.8% headroom.' },
+  navigation: { baselineTokens: 3_533, maxTokens: 3_800, rationale: 'Exact v1 wire baseline plus 7.6% headroom.' },
+  memory: { baselineTokens: 1_216, maxTokens: 1_300, rationale: 'Exact v1 wire baseline plus 6.9% headroom.' },
+  verify: { baselineTokens: 1_262, maxTokens: 1_350, rationale: 'Exact v1 wire baseline plus 7.0% headroom.' },
+  federation: { baselineTokens: 3_837, maxTokens: 4_100, rationale: 'Exact v1 wire baseline plus 6.9% headroom.' },
+  coordination: { baselineTokens: 2_487, maxTokens: 2_650, rationale: 'Exact v1 wire baseline plus 6.6% headroom.' },
+  substrate: { baselineTokens: 5_131, maxTokens: 5_500, rationale: 'Exact v1 wire baseline plus 7.2% headroom.' },
+  full: { baselineTokens: 24_140, maxTokens: 25_500, rationale: 'Exact v1 wire baseline plus 5.6% headroom.' },
+};
+
+/**
  * Return an actionable error when a registered tool is outside the active preset.
  * Membership is derived from the same sets that drive tools/list; `full` is the
  * registry itself, so it is appended rather than maintained as another set.
@@ -2642,9 +2668,8 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
     { capabilities: { tools: {} } }
   );
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: activeTools.map(t => ({ ...t, annotations: toolAnnotations(t.name) })),
-  }));
+  server.setRequestHandler(ListToolsRequestSchema, async () =>
+    buildToolListPayload(activeTools, toolAnnotations));
 
   // Per-session epistemic lease tracker — re-initialized when directory changes.
   let tracker: EpistemicTracker | undefined;

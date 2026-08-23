@@ -15,7 +15,8 @@ import { Command } from 'commander';
 import { writeStdout } from '../output.js';
 import { logger, configureLogger } from '../../utils/logger.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
-import { computeBlastRadius, type BlastRadiusBriefing } from '../../core/services/mcp-handlers/blast-radius.js';
+import type { BlastRadiusBriefing } from '../../core/services/mcp-handlers/blast-radius.js';
+import { dispatchTool } from '../../core/services/tool-dispatch.js';
 import type { BlastRadiusBlockPattern } from '../../types/index.js';
 import {
   displayHookPath,
@@ -187,9 +188,9 @@ export async function runBlastRadiusCli(opts: BlastRadiusCliOptions): Promise<nu
   // Suppress the per-call "Successfully validated directory" chatter from the
   // composed handlers so the briefing (and --json) is the only thing on stdout.
   configureLogger({ quiet: true });
-  let result: Awaited<ReturnType<typeof computeBlastRadius>>;
+  let result: BlastRadiusBriefing | { error: string };
   try {
-    result = await computeBlastRadius({ directory: cwd, baseRef: opts.base });
+    result = await dispatchTool('blast_radius', { directory: cwd, baseRef: opts.base }, cwd) as BlastRadiusBriefing | { error: string };
   } catch (err) {
     // Final advisory safety net: a throw from a composed handler (e.g.
     // validateDirectory on a bad path, corrupt config/JSON) must NEVER block a

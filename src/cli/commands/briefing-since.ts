@@ -12,7 +12,7 @@
 import { Command } from 'commander';
 import { logger, configureLogger } from '../../utils/logger.js';
 import { writeStdout } from '../output.js';
-import { handleBriefingSince } from '../../core/services/mcp-handlers/briefing-since.js';
+import { dispatchTool } from '../../core/services/tool-dispatch.js';
 
 interface BriefingItem {
   name: string;
@@ -131,12 +131,12 @@ export async function runBriefingSinceCli(opts: BriefingSinceCliOptions): Promis
   configureLogger({ quiet: true });
   let result: unknown;
   try {
-    result = await handleBriefingSince({
+    result = await dispatchTool('briefing_since', {
       directory: cwd,
       baseRef: opts.base,
       filePattern: opts.filePattern,
       maxResults: opts.max,
-    });
+    }, cwd);
   } catch (err) {
     result = { error: err instanceof Error ? err.message : String(err) };
   } finally {

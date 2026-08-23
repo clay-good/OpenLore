@@ -16,7 +16,7 @@ import { Command } from 'commander';
 import { logger, configureLogger } from '../../utils/logger.js';
 import { writeStdout } from '../output.js';
 import { toCliVocabulary } from '../surface-vocabulary.js';
-import { handleAnalyzeEnvImpact } from '../../core/services/mcp-handlers/env-impact.js';
+import { dispatchTool } from '../../core/services/tool-dispatch.js';
 
 interface ReadSiteView {
   file: string;
@@ -107,11 +107,11 @@ export async function runEnvImpactCli(opts: EnvImpactCliOptions): Promise<number
   configureLogger({ quiet: true });
   let result: unknown;
   try {
-    result = await handleAnalyzeEnvImpact({
+    result = await dispatchTool('analyze_env_impact', {
       directory: cwd,
       name: opts.name,
       maxDepth: opts.maxDepth,
-    });
+    }, cwd);
   } catch (err) {
     result = { error: err instanceof Error ? err.message : String(err) };
   } finally {

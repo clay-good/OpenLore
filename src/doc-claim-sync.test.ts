@@ -28,6 +28,8 @@ import {
   DERIVED_ARTIFACT_EQUIVALENCE_MATRIX,
   SEMANTIC_ANSWER_PROJECTION,
 } from './core/analyzer/derived-artifact-equivalence.js';
+import { buildToolListPayload, measureStandingContextTokens, STANDING_CONTEXT_TOKENIZER } from './core/services/mcp-standing-cost.js';
+import { STANDING_CONTEXT_BUDGETS, TOOL_DEFINITIONS, TOOL_PRESETS, toolAnnotations } from './cli/commands/mcp.js';
 
 // src/<this> → repo root is one level up.
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -46,6 +48,40 @@ const IAC_COUNT = IAC_LANGUAGES.length; // 12
 // published floor in any surface and this constant must move with it, in the same change.
 // It is a FLOOR — published with a "+" suffix, never restated as a measured exact figure.
 const MIN_TEST_FLOOR = 5500;
+
+describe('doc-claim sync: standing MCP context costs are registry-bound', () => {
+  const docs = read('docs/mcp-tools.md');
+  const section = /<!-- standing-context-cost:start -->([\s\S]*?)<!-- standing-context-cost:end -->/.exec(docs)?.[1];
+  const surfaces: Record<string, typeof TOOL_DEFINITIONS> = {
+    ...Object.fromEntries(Object.entries(TOOL_PRESETS).map(([name, active]) => [
+      name,
+      TOOL_DEFINITIONS.filter((tool) => active.has(tool.name)),
+    ])),
+    full: TOOL_DEFINITIONS,
+  };
+
+  it('publishes the versioned approximation and every live measured value and budget', () => {
+    expect(docs).toContain(STANDING_CONTEXT_TOKENIZER);
+    expect(section, 'docs/mcp-tools.md must retain the guarded standing-context table').toBeDefined();
+    const rows = [
+      '| Preset | Tools | Measured tokens | Budget |',
+      '|---|---:|---:|---:|',
+    ];
+    for (const [name, tools] of Object.entries(surfaces)) {
+      const measured = measureStandingContextTokens(buildToolListPayload(tools, toolAnnotations)).toLocaleString('en-US');
+      const budget = STANDING_CONTEXT_BUDGETS[name].maxTokens.toLocaleString('en-US');
+      rows.push(`| \`${name}\` | ${tools.length} | ${measured} | ${budget} |`);
+    }
+    expect(section!.trim(), 'standing-context table must exactly match live surfaces, with no stale or duplicate rows')
+      .toBe(rows.join('\n'));
+  });
+
+  it('documents both delivery faces without deprecating either one', () => {
+    expect(docs).toMatch(/MCP and the command line are both first-class, supported delivery paths/i);
+    expect(docs).toMatch(/zero standing context cost before invocation/i);
+    expect(docs).toMatch(/neither supersedes or\s+deprecates the other/i);
+  });
+});
 
 // Keywords / summaries that restate the retired "reverse-engineer specs from code" product,
 // contradicting the package `description` ("Persistent architectural memory and structural

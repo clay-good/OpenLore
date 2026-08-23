@@ -20,7 +20,7 @@ import { logger } from '../../utils/logger.js';
 // lines carry intentional \n spacing that the sanitizer would strip.
 import { sanitizeForTerminal as safe } from '../../utils/misc.js';
 import { withQuietStdout } from '../../utils/quiet-stdout.js';
-import { handleOrient } from '../../core/services/mcp-handlers/orient.js';
+import { dispatchTool } from '../../core/services/tool-dispatch.js';
 import { estimateTokens } from '../../core/services/llm-service.js';
 import { OPENLORE_ANALYSIS_REL_PATH } from '../../constants.js';
 import { buildInjection, extractPrompt } from './orient-inject.js';
@@ -228,8 +228,12 @@ prints a short session-start primer (used by the install SessionStart hook).
       const lean = opts.lean ?? false;
       const startNs = opts.metrics ? process.hrtime.bigint() : 0n;
       const result = (asJson
-        ? await withQuietStdout(() => handleOrient(directory, task, limit, tokenBudget, lean))
-        : await handleOrient(directory, task, limit, tokenBudget, lean)) as Record<string, unknown>;
+        ? await withQuietStdout(() => dispatchTool('orient', {
+            directory, task, limit, tokenBudget, lean,
+          }, directory))
+        : await dispatchTool('orient', {
+            directory, task, limit, tokenBudget, lean,
+          }, directory)) as Record<string, unknown>;
       if (opts.metrics) reportMetrics(startNs, result);
       // Always emit structured results (including the "no analysis" error object)
       // on stdout so wrapper scripts can parse them — mirroring the MCP tool.

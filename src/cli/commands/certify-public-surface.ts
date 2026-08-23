@@ -11,7 +11,7 @@
 import { Command } from 'commander';
 import { logger, configureLogger } from '../../utils/logger.js';
 import { writeStdout } from '../output.js';
-import { handleCertifyPublicSurface } from '../../core/services/mcp-handlers/public-surface.js';
+import { dispatchTool } from '../../core/services/tool-dispatch.js';
 
 interface SurfaceChangeOut {
   changeKind: string;
@@ -96,7 +96,12 @@ export async function runCertifyPublicSurfaceCli(opts: CertifyPublicSurfaceCliOp
   configureLogger({ quiet: true });
   let result: unknown;
   try {
-    result = await handleCertifyPublicSurface({ directory: cwd, baseRef: opts.base, maxResults: opts.max, allowBaseFallback: opts.allowBaseFallback });
+    result = await dispatchTool('certify_public_surface', {
+      directory: cwd,
+      baseRef: opts.base,
+      maxResults: opts.max,
+      allowBaseFallback: opts.allowBaseFallback,
+    }, cwd);
   } catch (err) {
     result = { error: err instanceof Error ? err.message : String(err) };
   } finally {
