@@ -75,8 +75,14 @@ jobs:
 
       - run: npm ci
 
-      - name: Run tests
-        run: npm run test:run
+      - name: Certify derived-artifact answer equivalence
+        run: npm run test:equivalence
+        timeout-minutes: 3
+
+      # Equivalence files run in the bounded gate above; exclude them here so the
+      # the same certification assertions are not paid for twice in this job.
+      - name: Run remaining unit tests
+        run: npm run test:unit
 
   build:
     name: Build

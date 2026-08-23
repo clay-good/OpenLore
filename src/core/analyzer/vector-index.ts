@@ -16,7 +16,8 @@
  *   const results = await VectorIndex.search(outputDir, "authenticate user with JWT", embedSvc);
  */
 
-import { existsSync, readFileSync, writeFileSync, rmSync, openSync, writeSync, closeSync, statSync, fstatSync, realpathSync, renameSync, unlinkSync } from 'node:fs';
+import { constants, existsSync, readFileSync, writeFileSync, rmSync, openSync, readSync, writeSync, closeSync, statSync, fstatSync, realpathSync, renameSync, unlinkSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import type { FunctionNode } from './call-graph.js';
 import type { FileSignatureMap } from './signature-extractor.js';
@@ -114,8 +115,11 @@ export interface VectorIndexMeta {
   };
 }
 
+const INVALID_META = Symbol('invalid-vector-index-meta');
+type MetaReadResult = VectorIndexMeta | null | typeof INVALID_META;
+
 interface CachedMeta {
-  value: VectorIndexMeta | null;
+  value: MetaReadResult;
   /** Filesystem identity captured after the sidecar was read. */
   stamp: string | null;
 }
@@ -157,11 +161,11 @@ function openMetaStamp(fd: number): string | null {
 
 /**
  * Read the index metadata sidecar (cached per dbPath).
- * Returns null when no sidecar exists — e.g. a legacy index built before the
- * sidecar was introduced. Callers treat a missing sidecar as "embeddings
- * present" to preserve pre-change behaviour for those indexes.
+ * Returns null only when no sidecar exists — e.g. a legacy index built before
+ * the sidecar was introduced. A present but malformed sidecar is explicitly
+ * invalid, so callers never mistake corruption for a valid dense legacy index.
  */
-function readMeta(outputDir: string): VectorIndexMeta | null {
+function readMeta(outputDir: string): MetaReadResult {
   const dbPath = dbPathFor(outputDir);
   const stamp = metaStamp(outputDir);
   const cached = _metaCache.get(dbPath);
@@ -176,23 +180,54 @@ function readMeta(outputDir: string): VectorIndexMeta | null {
     try {
       fd = openSync(metaFilePath(outputDir), 'r');
       before = openMetaStamp(fd);
-      const meta = JSON.parse(readFileSync(fd, 'utf-8')) as VectorIndexMeta;
+      const parsed = JSON.parse(readFileSync(fd, 'utf-8')) as unknown;
       const after = openMetaStamp(fd);
       const currentPath = metaStamp(outputDir);
       if (before !== after || after !== currentPath) continue;
+      const meta = isVectorIndexMeta(parsed) ? parsed : INVALID_META;
       _metaCache.set(dbPath, { value: meta, stamp: currentPath });
       return meta;
     } catch {
       const after = fd === undefined ? null : openMetaStamp(fd);
       const currentPath = metaStamp(outputDir);
       if (before !== after || after !== currentPath) continue;
-      if (before === null) _metaCache.set(dbPath, { value: null, stamp: null });
-      return null;
+      const value = before === null ? null : INVALID_META;
+      _metaCache.set(dbPath, { value, stamp: currentPath });
+      return value;
     } finally {
       if (fd !== undefined) closeSync(fd);
     }
   }
-  return null;
+  return INVALID_META;
+}
+
+function isVectorIndexMeta(value: unknown): value is VectorIndexMeta {
+  if (!value || typeof value !== 'object') return false;
+  const meta = value as Record<string, unknown>;
+  if (typeof meta.hasEmbeddings !== 'boolean') return false;
+  if (!Number.isInteger(meta.dim) || (meta.dim as number) < 0) return false;
+  if (meta.model !== null && typeof meta.model !== 'string') return false;
+  if (typeof meta.builtAt !== 'string' || meta.builtAt.length === 0) return false;
+  if (meta.fullBuildAt !== undefined && typeof meta.fullBuildAt !== 'string') return false;
+  if (meta.schemaVersion !== META_SCHEMA_VERSION) return false;
+  if (meta.tokenizerVersion !== undefined && !Number.isInteger(meta.tokenizerVersion)) return false;
+  if (meta.hasEmbeddings) {
+    if ((meta.dim as number) === 0 || typeof meta.model !== 'string' || meta.model.length === 0) return false;
+  } else if (meta.dim !== 0 || meta.model !== null) {
+    return false;
+  }
+  if (meta.degraded !== undefined) {
+    if (!meta.degraded || typeof meta.degraded !== 'object') return false;
+    const degraded = meta.degraded as Record<string, unknown>;
+    if (degraded.reason !== 'incremental-update-restore-failed'
+        || typeof degraded.recordedAt !== 'string') return false;
+  }
+  return true;
+}
+
+/** Missing metadata is the only supported dense legacy shape; corruption fails closed to BM25. */
+function metaHasEmbeddings(meta: MetaReadResult): boolean {
+  return meta === null || (meta !== INVALID_META && meta.hasEmbeddings);
 }
 
 async function writeMeta(outputDir: string, meta: VectorIndexMeta): Promise<void> {
@@ -340,6 +375,7 @@ const _identifierVocabularyCache = new Map<string, string[]>();
 // Invalidated by build() when the index is rebuilt.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const _tableCache = new Map<string, { table: any }>();
+const _cacheStats = { tableHits: 0, tableMisses: 0, bm25Hits: 0, bm25Misses: 0 };
 const _degradedFallback = new Map<string, {
   fullBuildAt: string | null;
   marker: NonNullable<VectorIndexMeta['degraded']>;
@@ -379,6 +415,15 @@ export function _resetVectorIndexCachesForTesting(): void {
   _tableCache.clear();
   _metaCache.clear();
   _degradedFallback.clear();
+  _cacheStats.tableHits = 0;
+  _cacheStats.tableMisses = 0;
+  _cacheStats.bm25Hits = 0;
+  _cacheStats.bm25Misses = 0;
+}
+
+/** Test-only proof that a cold request populated, and a warm request reused, each search cache. */
+export function _vectorIndexCacheStatsForTesting(): Readonly<typeof _cacheStats> {
+  return { ..._cacheStats };
 }
 
 interface MutableTable {
@@ -539,10 +584,16 @@ export const _patchBm25CorpusForTesting = patchBm25Corpus;
 const CORPUS_FILE = 'bm25-corpus.json';
 /** Serialization-format version, independent of TOKENIZER_VERSION. */
 const CORPUS_SCHEMA_VERSION = 1;
+const CORPUS_MIN_MAX_BYTES = 1024 * 1024;
+const CORPUS_ABSOLUTE_MAX_BYTES = 512 * 1024 * 1024;
 
 interface SerializedBm25Corpus {
   schemaVersion: number;
   tokenizerVersion: number;
+  /** Commitment to the authoritative table rows whose text produced this corpus. */
+  contentHash: string;
+  /** Commitment to the derived corpus payload itself (all fields below). */
+  payloadHash: string;
   avgLength: number;
   N: number;
   df: Array<[string, number]>;
@@ -553,10 +604,37 @@ function corpusFilePath(dbPath: string): string {
   return join(dbPath, CORPUS_FILE);
 }
 
-function serializeBm25Corpus(corpus: Bm25Corpus): string {
+function hashIndexedRows(records: Iterable<{ id: string; text: string }>): string {
+  const rowDigests: string[] = [];
+  for (const record of records) {
+    rowDigests.push(createHash('sha256').update(JSON.stringify([record.id, record.text])).digest('hex'));
+  }
+  rowDigests.sort();
+  return createHash('sha256')
+    .update('openlore-vector-index-rows-v1\0')
+    .update(rowDigests.join(''))
+    .digest('hex');
+}
+
+function hashBm25CorpusPayload(corpus: Bm25Corpus): string {
+  const hash = createHash('sha256');
+  hash.update('openlore-bm25-corpus-payload-v1\0');
+  for (const doc of corpus.docs) {
+    const encoded = JSON.stringify({ id: doc.id, length: doc.length, tf: [...doc.tfMap] });
+    hash.update(`${Buffer.byteLength(encoded)}:${encoded}\n`);
+  }
+  const df = JSON.stringify([...corpus.df]);
+  hash.update(`${Buffer.byteLength(df)}:${df}\n`);
+  hash.update(`${JSON.stringify(corpus.avgLength)}\n${JSON.stringify(corpus.N)}\n`);
+  return hash.digest('hex');
+}
+
+function serializeBm25Corpus(corpus: Bm25Corpus, contentHash: string): string {
   const payload: SerializedBm25Corpus = {
     schemaVersion: CORPUS_SCHEMA_VERSION,
     tokenizerVersion: TOKENIZER_VERSION,
+    contentHash,
+    payloadHash: hashBm25CorpusPayload(corpus),
     avgLength: corpus.avgLength,
     N: corpus.N,
     df: [...corpus.df],
@@ -566,28 +644,130 @@ function serializeBm25Corpus(corpus: Bm25Corpus): string {
 }
 
 /** Parse a sidecar back into a corpus, or null if absent/corrupt/version-skewed. */
-function deserializeBm25Corpus(json: string): Bm25Corpus | null {
+function deserializeBm25Corpus(json: string): { corpus: Bm25Corpus; contentHash: string } | null {
   try {
-    const p = JSON.parse(json) as SerializedBm25Corpus;
+    const parsed: unknown = JSON.parse(json);
+    if (!parsed || typeof parsed !== 'object') return null;
+    const p = parsed as Record<string, unknown>;
     if (p.schemaVersion !== CORPUS_SCHEMA_VERSION) return null;
     if (p.tokenizerVersion !== TOKENIZER_VERSION) return null;
+    if (typeof p.contentHash !== 'string' || !/^[a-f0-9]{64}$/.test(p.contentHash)) return null;
+    if (typeof p.payloadHash !== 'string' || !/^[a-f0-9]{64}$/.test(p.payloadHash)) return null;
     if (!Array.isArray(p.docs) || !Array.isArray(p.df)) return null;
+    if (!Number.isSafeInteger(p.N) || (p.N as number) < 0 || p.N !== p.docs.length) return null;
+    if (typeof p.avgLength !== 'number' || !Number.isFinite(p.avgLength) || p.avgLength <= 0) return null;
+
+    // Validate the complete shape before constructing the corpus Maps. This
+    // prevents hostile-but-valid JSON from smuggling negative/duplicate counts,
+    // non-finite arithmetic, or inconsistent aggregate fields into scoring.
+    const expectedDf = new Map<string, number>();
+    const seenDocIds = new Set<string>();
+    let totalLength = 0;
+    for (const rawDoc of p.docs) {
+      if (!rawDoc || typeof rawDoc !== 'object') return null;
+      const doc = rawDoc as Record<string, unknown>;
+      if (typeof doc.id !== 'string' || doc.id.length === 0 || seenDocIds.has(doc.id)) return null;
+      seenDocIds.add(doc.id);
+      if (!Number.isSafeInteger(doc.length) || (doc.length as number) < 0) return null;
+      if (!Array.isArray(doc.tf)) return null;
+      const seen = new Set<string>();
+      let counted = 0;
+      for (const pair of doc.tf) {
+        if (!Array.isArray(pair) || pair.length !== 2
+          || typeof pair[0] !== 'string' || pair[0].length === 0
+          || !Number.isSafeInteger(pair[1]) || (pair[1] as number) <= 0
+          || seen.has(pair[0])) return null;
+        seen.add(pair[0]);
+        counted += pair[1] as number;
+        if (!Number.isSafeInteger(counted)) return null;
+      }
+      if (counted !== doc.length) return null;
+      totalLength += doc.length as number;
+      if (!Number.isSafeInteger(totalLength)) return null;
+      for (const token of seen) expectedDf.set(token, (expectedDf.get(token) ?? 0) + 1);
+    }
+    const seenDf = new Set<string>();
+    for (const pair of p.df) {
+      if (!Array.isArray(pair) || pair.length !== 2
+        || typeof pair[0] !== 'string' || pair[0].length === 0
+        || !Number.isSafeInteger(pair[1]) || (pair[1] as number) <= 0
+        || (pair[1] as number) > (p.N as number) || seenDf.has(pair[0])
+        || expectedDf.get(pair[0]) !== pair[1]) return null;
+      seenDf.add(pair[0]);
+    }
+    if (seenDf.size !== expectedDf.size) return null;
+    const expectedAverage = (p.N as number) > 0 ? totalLength / (p.N as number) : 1;
+    if (p.avgLength !== expectedAverage) return null;
+
+    const corpus: Bm25Corpus = {
+        docs: p.docs.map((rawDoc) => {
+          const doc = rawDoc as { id: string; length: number; tf: Array<[string, number]> };
+          return { id: doc.id, length: doc.length, tfMap: new Map(doc.tf) };
+        }),
+        df: new Map(p.df as Array<[string, number]>),
+        avgLength: p.avgLength,
+        N: p.N as number,
+    };
+    if (hashBm25CorpusPayload(corpus) !== p.payloadHash) return null;
     return {
-      docs: p.docs.map((d) => ({ id: d.id, length: d.length, tfMap: new Map(d.tf) })),
-      df: new Map(p.df),
-      avgLength: p.avgLength,
-      N: p.N,
+      corpus,
+      contentHash: p.contentHash,
     };
   } catch {
     return null;
   }
 }
 
+function corpusSidecarMaxBytes(records: readonly { id: string; text: string }[]): number {
+  let inputBytes = 0;
+  for (const record of records) {
+    inputBytes = Math.min(
+      CORPUS_ABSOLUTE_MAX_BYTES,
+      inputBytes + Buffer.byteLength(record.id) + Buffer.byteLength(record.text),
+    );
+  }
+  return Math.min(
+    CORPUS_ABSOLUTE_MAX_BYTES,
+    Math.max(CORPUS_MIN_MAX_BYTES, inputBytes * 8 + records.length * 1024),
+  );
+}
+
+function readCorpusSidecarBounded(path: string, maxBytes: number): string | null {
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const opened = fstatSync(fd);
+    if (!opened.isFile() || opened.size > maxBytes) return null;
+    const chunks: Buffer[] = [];
+    let total = 0;
+    while (total <= maxBytes) {
+      const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, maxBytes + 1 - total));
+      const bytesRead = readSync(fd, buffer, 0, buffer.length, null);
+      if (bytesRead === 0) break;
+      chunks.push(buffer.subarray(0, bytesRead));
+      total += bytesRead;
+    }
+    if (total > maxBytes) return null;
+    const after = fstatSync(fd);
+    if (after.dev !== opened.dev || after.ino !== opened.ino || after.size !== opened.size
+      || after.mtimeMs !== opened.mtimeMs || after.ctimeMs !== opened.ctimeMs) return null;
+    return Buffer.concat(chunks, total).toString('utf8');
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
 /** Best-effort persist (the sidecar is an optional cache — a failure just means
  * the next cold start rebuilds from raw text). */
-function persistCorpusSidecar(dbPath: string, corpus: Bm25Corpus): void {
+function persistCorpusSidecar(
+  dbPath: string,
+  corpus: Bm25Corpus,
+  contentHash: string,
+): void {
   try {
-    writeFileSync(corpusFilePath(dbPath), serializeBm25Corpus(corpus), 'utf-8');
+    writeFileSync(corpusFilePath(dbPath), serializeBm25Corpus(corpus, contentHash), 'utf-8');
   } catch {
     /* optional cache — ignore */
   }
@@ -608,8 +788,9 @@ let corpusTempCounter = 0;
  * 152,046-function repository. Nothing read the corpus afterwards.
  *
  * So each record is tokenized, written, and dropped. What remains resident is the document
- * frequency map, which is keyed by DISTINCT TOKEN (~31,000 entries on that same repository) rather
- * than by function, and one document's token counts.
+ * frequency map, which is keyed by DISTINCT TOKEN (~31,000 entries on that same repository), one
+ * document's token counts, and one fixed-size digest string per row for an order-independent
+ * commitment to the authoritative input. None retains the per-document token corpus.
  *
  * `df` and the totals land at the END of the object because they are only known once every
  * document has been seen. JSON objects are unordered and the reader takes fields by name, so the
@@ -627,6 +808,9 @@ function persistCorpusSidecarStreaming(
   try {
     fd = openSync(temp, 'w');
     const df = new Map<string, number>();
+    const rowDigests: string[] = [];
+    const payloadHash = createHash('sha256');
+    payloadHash.update('openlore-bm25-corpus-payload-v1\0');
     let totalLen = 0;
     let n = 0;
     let buf = `{"schemaVersion":${JSON.stringify(CORPUS_SCHEMA_VERSION)},`
@@ -638,20 +822,33 @@ function persistCorpusSidecarStreaming(
     };
 
     for (const r of records) {
+      rowDigests.push(createHash('sha256').update(JSON.stringify([r.id, r.text])).digest('hex'));
       const tokens = tokenize(r.text);
       const tfMap = new Map<string, number>();
       for (const t of tokens) tfMap.set(t, (tfMap.get(t) ?? 0) + 1);
       // Same accumulation order as buildBm25Corpus, so `df`'s entry order matches too.
       for (const t of tfMap.keys()) df.set(t, (df.get(t) ?? 0) + 1);
       totalLen += tokens.length;
-      buf += `${n > 0 ? ',' : ''}{"id":${JSON.stringify(r.id)},"length":${tokens.length},`
-        + `"tf":${JSON.stringify([...tfMap])}}`;
+      const encodedDoc = JSON.stringify({ id: r.id, length: tokens.length, tf: [...tfMap] });
+      payloadHash.update(`${Buffer.byteLength(encodedDoc)}:${encodedDoc}\n`);
+      buf += `${n > 0 ? ',' : ''}${encodedDoc}`;
       n++;
       flush(false);
     }
 
-    buf += `],"df":${JSON.stringify([...df])},`
-      + `"avgLength":${JSON.stringify(n > 0 ? totalLen / n : 1)},"N":${n}}`;
+    rowDigests.sort();
+    const contentHash = createHash('sha256')
+      .update('openlore-vector-index-rows-v1\0')
+      .update(rowDigests.join(''))
+      .digest('hex');
+    const encodedDf = JSON.stringify([...df]);
+    const avgLength = n > 0 ? totalLen / n : 1;
+    payloadHash.update(`${Buffer.byteLength(encodedDf)}:${encodedDf}\n`);
+    payloadHash.update(`${JSON.stringify(avgLength)}\n${JSON.stringify(n)}\n`);
+    buf += `],"df":${encodedDf},`
+      + `"contentHash":${JSON.stringify(contentHash)},`
+      + `"payloadHash":${JSON.stringify(payloadHash.digest('hex'))},`
+      + `"avgLength":${JSON.stringify(avgLength)},"N":${n}}`;
     flush(true);
     closeSync(fd);
     fd = undefined;
@@ -687,16 +884,19 @@ function deleteCorpusSidecar(dbPath: string): void {
  * incremental patch deletes it).
  */
 function loadOrBuildBm25Corpus(dbPath: string, allRows: Record<string, unknown>[]): Bm25Corpus {
-  let loaded: Bm25Corpus | null;
-  try {
-    loaded = deserializeBm25Corpus(readFileSync(corpusFilePath(dbPath), 'utf-8'));
-  } catch {
-    loaded = null; // missing sidecar (legacy index) or unreadable — rebuild
-  }
-  if (loaded && loaded.N === allRows.length) return loaded;
+  const authoritativeRecords = allRows.map((r) => ({ id: r.id as string, text: r.text as string }));
+  const sidecar = readCorpusSidecarBounded(
+    corpusFilePath(dbPath),
+    corpusSidecarMaxBytes(authoritativeRecords),
+  );
+  const loaded = sidecar === null ? null : deserializeBm25Corpus(sidecar);
+  const authoritativeHash = hashIndexedRows(authoritativeRecords);
+  if (loaded
+      && loaded.corpus.N === allRows.length
+      && loaded.contentHash === authoritativeHash) return loaded.corpus;
 
-  const corpus = buildBm25Corpus(allRows.map((r) => ({ id: r.id as string, text: r.text as string })));
-  persistCorpusSidecar(dbPath, corpus);
+  const corpus = buildBm25Corpus(authoritativeRecords);
+  persistCorpusSidecar(dbPath, corpus, authoritativeHash);
   return corpus;
 }
 
@@ -815,10 +1015,12 @@ export class VectorIndex {
   static degradationNotice(outputDir: string): string | null {
     const dbPath = dbPathFor(outputDir);
     const meta = readMeta(outputDir);
-    if (meta?.degraded) return 'Index degraded — re-run "openlore analyze".';
+    if (meta !== null && meta !== INVALID_META && meta.degraded) return 'Index degraded — re-run "openlore analyze".';
     const fallback = _degradedFallback.get(dbPath);
     if (!fallback) return null;
-    const observedFullBuild = meta?.fullBuildAt ?? meta?.builtAt ?? null;
+    const observedFullBuild = meta !== null && meta !== INVALID_META
+      ? meta.fullBuildAt ?? meta.builtAt
+      : null;
     if (observedFullBuild !== fallback.fullBuildAt) {
       _degradedFallback.delete(dbPath);
       return null;
@@ -1019,7 +1221,7 @@ export class VectorIndex {
     const canReuseVectors =
       incremental &&
       VectorIndex.exists(outputDir) &&
-      existingMeta !== null &&
+      existingMeta !== null && existingMeta !== INVALID_META &&
       existingMeta.hasEmbeddings &&
       existingMeta.model === embedSvc.modelName;
 
@@ -1097,7 +1299,10 @@ export class VectorIndex {
     await writeMeta(outputDir, {
       hasEmbeddings: true,
       dim: fullRecords[0]?.vector.length ?? 0,
-      model: embedSvc.modelName,
+      // Runtime test doubles and third-party embedders predating `modelName`
+      // can omit it despite the current type contract. Persist a valid,
+      // conservative identity rather than publishing malformed metadata.
+      model: embedSvc.modelName ?? 'unknown',
       builtAt,
       fullBuildAt: builtAt,
       schemaVersion: META_SCHEMA_VERSION,
@@ -1163,7 +1368,7 @@ export class VectorIndex {
     }
     const dbPath = dbPathFor(outputDir);
     const existingMeta = readMeta(outputDir);
-    const indexHasEmbeddings = existingMeta === null ? true : existingMeta.hasEmbeddings;
+    const indexHasEmbeddings = metaHasEmbeddings(existingMeta);
     if (changedFilePaths.size === 0) {
       return { embedded: 0, reused: 0, total: 0, hasEmbeddings: indexHasEmbeddings };
     }
@@ -1174,7 +1379,8 @@ export class VectorIndex {
     // and leave the index consistent until a full `analyze --force` rebuilds and
     // re-stamps it. A legacy meta without the stamp is treated as v1. `deferred`
     // lets the caller surface this honestly rather than logging a no-op.
-    if (existingMeta !== null && (existingMeta.tokenizerVersion ?? 1) !== TOKENIZER_VERSION) {
+    if (existingMeta !== null && existingMeta !== INVALID_META
+        && (existingMeta.tokenizerVersion ?? 1) !== TOKENIZER_VERSION) {
       return { embedded: 0, reused: 0, total: 0, hasEmbeddings: indexHasEmbeddings, deferred: 'tokenizer-changed' };
     }
 
@@ -1184,7 +1390,7 @@ export class VectorIndex {
     // dimension-consistent until a full `analyze --force` rebuilds it under the new
     // model. Watch-mode freshness is best-effort; correctness wins over staleness.
     // `deferred` lets the caller surface this honestly rather than logging a no-op.
-    if (embedSvc && existingMeta !== null && existingMeta.hasEmbeddings &&
+    if (embedSvc && existingMeta !== null && existingMeta !== INVALID_META && existingMeta.hasEmbeddings &&
         existingMeta.model !== embedSvc.modelName) {
       return { embedded: 0, reused: 0, total: 0, hasEmbeddings: true, deferred: 'model-changed' };
     }
@@ -1265,9 +1471,10 @@ export class VectorIndex {
         reason: 'incremental-update-restore-failed',
         recordedAt: new Date().toISOString(),
       };
-      const fullBuildAt = existingMeta?.fullBuildAt ?? existingMeta?.builtAt ?? null;
+      const validExistingMeta = existingMeta === INVALID_META ? null : existingMeta;
+      const fullBuildAt = validExistingMeta?.fullBuildAt ?? validExistingMeta?.builtAt ?? null;
       _degradedFallback.set(dbPath, { fullBuildAt, marker });
-      const baseMeta: VectorIndexMeta = existingMeta ?? {
+      const baseMeta: VectorIndexMeta = validExistingMeta ?? {
         hasEmbeddings: indexHasEmbeddings,
         dim: 0,
         model: null,
@@ -1287,8 +1494,9 @@ export class VectorIndex {
     const publishMutation = async (): Promise<void> => {
       const fallback = _degradedFallback.get(dbPath);
       const publishedAt = new Date().toISOString();
+      const validExistingMeta = existingMeta === INVALID_META ? null : existingMeta;
       const updatedMeta: VectorIndexMeta = {
-        ...(existingMeta ?? {
+        ...(validExistingMeta ?? {
           hasEmbeddings: indexHasEmbeddings,
           dim: 0,
           model: null,
@@ -1296,9 +1504,9 @@ export class VectorIndex {
           tokenizerVersion: TOKENIZER_VERSION,
         }),
         builtAt: publishedAt,
-        fullBuildAt: existingMeta?.fullBuildAt ?? existingMeta?.builtAt ?? publishedAt,
-        ...(existingMeta?.degraded || fallback
-          ? { degraded: existingMeta?.degraded ?? fallback?.marker }
+        fullBuildAt: validExistingMeta?.fullBuildAt ?? validExistingMeta?.builtAt ?? publishedAt,
+        ...(validExistingMeta?.degraded || fallback
+          ? { degraded: validExistingMeta?.degraded ?? fallback?.marker }
           : {}),
       };
       await writeMeta(outputDir, updatedMeta);
@@ -1448,6 +1656,7 @@ export class VectorIndex {
     const meta = readMeta(outputDir);
     let tableEntry = _tableCache.get(dbPath);
     if (!tableEntry) {
+      _cacheStats.tableMisses++;
       quietNativeLoggingOnce();
       const { connect } = await import('@lancedb/lancedb');
       const db = await connect(dbPath);
@@ -1455,6 +1664,8 @@ export class VectorIndex {
       const table: any = await db.openTable(TABLE_NAME);
       tableEntry = { table };
       _tableCache.set(dbPath, tableEntry);
+    } else {
+      _cacheStats.tableHits++;
     }
     const table = tableEntry.table;
 
@@ -1462,7 +1673,7 @@ export class VectorIndex {
     // Force BM25 when no embedder is available OR when the index was built
     // without embeddings (no `vector` column). The sidecar is the source of
     // truth: a missing sidecar (legacy index) is treated as embeddings-present.
-    const indexHasEmbeddings = meta === null ? true : meta.hasEmbeddings;
+    const indexHasEmbeddings = metaHasEmbeddings(meta);
     if (!embedSvc || !indexHasEmbeddings) {
       return VectorIndex._bm25Only(table, dbPath, query, limit, language, minFanIn, traceCandidates);
     }
@@ -1481,7 +1692,7 @@ export class VectorIndex {
     // index's recorded dimension (e.g. the embedding model was switched without a
     // full rebuild), ANN search would throw deep inside LanceDB. Degrade to BM25
     // rather than crashing the tool — the index is stale, not broken.
-    if (meta && meta.dim > 0 && queryVector.length !== meta.dim) {
+    if (meta !== null && meta !== INVALID_META && meta.dim > 0 && queryVector.length !== meta.dim) {
       return VectorIndex._bm25Only(table, dbPath, query, limit, language, minFanIn, traceCandidates);
     }
 
@@ -1512,11 +1723,13 @@ export class VectorIndex {
     let allRows: Record<string, unknown>[];
 
     if (!cachedEntry) {
+      _cacheStats.bm25Misses++;
       allRows = (await table.query().toArray() as Record<string, unknown>[]).filter(isRepoFunctionRow);
       const corpus = loadOrBuildBm25Corpus(dbPath, allRows);
       cachedEntry = { corpus, rowCount: allRows.length, rows: allRows };
       _bm25Cache.set(dbPath, cachedEntry);
     } else {
+      _cacheStats.bm25Hits++;
       // Use cached rows — invalidated by build() when index is rebuilt
       allRows = cachedEntry.rows;
     }
@@ -1604,11 +1817,13 @@ export class VectorIndex {
     let allRows: Record<string, unknown>[];
 
     if (!cachedEntry) {
+      _cacheStats.bm25Misses++;
       allRows = (await table.query().toArray() as Record<string, unknown>[]).filter(isRepoFunctionRow);
       const corpus = loadOrBuildBm25Corpus(dbPath, allRows);
       cachedEntry = { corpus, rowCount: allRows.length, rows: allRows };
       _bm25Cache.set(dbPath, cachedEntry);
     } else {
+      _cacheStats.bm25Hits++;
       // Use cached rows — invalidated by build() when index is rebuilt
       allRows = cachedEntry.rows;
     }
@@ -1699,6 +1914,7 @@ export class VectorIndex {
    * Returns true if a vector index has been built for this output directory.
    */
   static exists(outputDir: string): boolean {
-    return existsSync(dbPathFor(outputDir));
+    if (!existsSync(dbPathFor(outputDir))) return false;
+    return readMeta(outputDir) !== INVALID_META;
   }
 }

@@ -1574,6 +1574,14 @@ export class McpWatcher {
     if (this.debug) {
       process.stderr.write(`[mcp-watcher] reconciled ${rels.length} deletion(s)\n`);
     }
+
+    // Deletions change the same authoritative repository snapshot as edits and
+    // additions. Hand them to the host's full-repair coordinator too: the
+    // incremental delete removes dangling graph state immediately, while the
+    // repair rebuild re-resolves surviving callers (for example, to an external
+    // target) and refreshes whole-graph artifacts. A path rename arrives as an
+    // unlink + add; the host debounce coalesces both receipts into one rebuild.
+    try { this.onBatchFlushed?.(absPaths); } catch { /* host lane is best-effort */ }
   }
 
   /**

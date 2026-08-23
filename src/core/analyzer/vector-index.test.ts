@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -7,6 +7,7 @@ import { VectorIndex, _resetVectorIndexCachesForTesting } from './vector-index.j
 import type { FunctionNode } from './call-graph.js';
 import type { FileSignatureMap } from './signature-extractor.js';
 import type { EmbeddingService } from './embedding-service.js';
+import { semanticAnswerBytes } from './derived-artifact-equivalence.js';
 
 // ============================================================================
 // FIXTURES
@@ -460,6 +461,25 @@ describe('VectorIndex', () => {
       const results = await VectorIndex.search(tmpDir, 'authenticate', spy, { limit: 10 });
       expect(spy.embed).not.toHaveBeenCalled();
       expect(results.length).toBeGreaterThan(0);
+    });
+
+    it.each([
+      ['unparseable', 'not json {{{'],
+      ['structurally invalid', JSON.stringify({ hasEmbeddings: 'true' })],
+    ])('rejects and repairs %s metadata instead of treating it as a dense legacy index', async (_kind, malformed) => {
+      const embedSvc = makeMockEmbedSvc();
+      await VectorIndex.build(tmpDir, SAMPLE_NODES, SAMPLE_SIGNATURES, new Set(), new Set(), embedSvc);
+      const baseline = await VectorIndex.search(tmpDir, 'authenticate', embedSvc, { limit: 10 });
+      await writeFile(join(tmpDir, META), malformed, 'utf-8');
+      _resetVectorIndexCachesForTesting();
+
+      expect(VectorIndex.exists(tmpDir)).toBe(false);
+      const repairedEmbedder = makeMockEmbedSvc();
+      await VectorIndex.build(tmpDir, SAMPLE_NODES, SAMPLE_SIGNATURES, new Set(), new Set(), repairedEmbedder);
+      const results = await VectorIndex.search(tmpDir, 'authenticate', repairedEmbedder, { limit: 10 });
+      expect(VectorIndex.exists(tmpDir)).toBe(true);
+      expect(semanticAnswerBytes(results)).toBe(semanticAnswerBytes(baseline));
+      expect(results.some((result) => result.record.name === 'authenticate')).toBe(true);
     });
 
     it('BM25 ranking is deterministic across runs for a fixed query + corpus', async () => {

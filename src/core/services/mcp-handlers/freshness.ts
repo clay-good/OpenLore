@@ -21,6 +21,8 @@ import { detectLanguage } from '../../analyzer/language-detection.js';
 
 export interface FileHashStore {
   getFileHash(filePath: string): string | null;
+  /** Explicit topology-staleness receipt from a budget-bounded watcher update. */
+  isFileStale?(filePath: string): boolean;
 }
 
 export interface CitedFileFreshnessContext {
@@ -279,6 +281,16 @@ export async function checkCitedFileFreshness(
     try {
       const absPath = safeJoin(root, filePath);
       confined = true;
+      // An unchanged file can still have stale topology when a changed hub's
+      // reverse-dependency closure exceeded the watcher budget. Its content hash
+      // correctly matches, but the served graph facts are not authoritative.
+      // Honor that explicit receipt before hash/mtime checks so conclusions are
+      // honest and can request the host's full-repair barrier.
+      if (context.edgeStore?.isFileStale?.(filePath) === true) {
+        staleFiles.push(filePath);
+        repairableStaleFiles.push(filePath);
+        continue;
+      }
       const baselineFileHash = context.edgeStore?.getFileHash(filePath) ?? null;
       checks.push({ filePath, absPath, baselineFileHash });
     } catch {

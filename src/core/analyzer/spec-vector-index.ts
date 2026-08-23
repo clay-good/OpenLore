@@ -16,15 +16,17 @@
  *   const results = await SpecVectorIndex.search(outputDir, "email validation", embedSvc);
  */
 
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
-import { readdir, readFile, writeFile } from 'node:fs/promises';
-import { join, basename, dirname } from 'node:path';
+import { readdir, readFile } from 'node:fs/promises';
+import { join, basename, dirname, relative } from 'node:path';
 import { fileExists } from '../../utils/command-helpers.js';
-import { isConfinedPath } from '../../utils/path-confinement.js';
+import { isConfinedPath, readFileConfined } from '../../utils/path-confinement.js';
 import type { Embedder } from './embedding-service.js';
 import { tokenize, buildBm25Corpus, bm25MatchEvidence, bm25Score } from './vector-index.js';
 import type { MatchEvidence, SearchableFields } from './retrieval-evidence.js';
 import { vectorMatchEvidence } from './retrieval-evidence.js';
+import { atomicWriteFile } from '../decisions/atomic-store.js';
 
 // ============================================================================
 // TYPES
@@ -72,7 +74,8 @@ const TABLE_NAME = 'specs';
  * supports ANN search.
  */
 const META_FILE = 'spec-index-meta.json';
-const META_SCHEMA_VERSION = 1;
+const META_SCHEMA_VERSION = 2;
+const SPEC_ARTIFACT_MAX_BYTES = 4 * 1024 * 1024;
 
 interface SpecIndexMeta {
   hasEmbeddings: boolean;
@@ -80,23 +83,107 @@ interface SpecIndexMeta {
   model: string | null;
   builtAt: string;
   schemaVersion: number;
+  /** SHA-256 of the canonical, authoritative records used to build the table. */
+  recordsDigest: string;
+  recordCount: number;
+  /** SHA-256 of every persisted search-relevant field, including dense vectors. */
+  tableDigest: string;
 }
+
+type SpecMetaState =
+  | { kind: 'missing' }
+  | { kind: 'legacy'; meta: Omit<SpecIndexMeta, 'recordsDigest' | 'recordCount' | 'tableDigest'> }
+  | { kind: 'current'; meta: SpecIndexMeta }
+  | { kind: 'malformed' };
 
 function specMetaPath(outputDir: string): string {
   return join(outputDir, META_FILE);
 }
 
-/** Read the spec-index meta sidecar. Missing sidecar ⇒ legacy embedded index. */
-function readSpecMeta(outputDir: string): SpecIndexMeta | null {
+function isLegacySpecMeta(
+  value: unknown,
+): value is Omit<SpecIndexMeta, 'recordsDigest' | 'recordCount' | 'tableDigest'> {
+  if (!value || typeof value !== 'object') return false;
+  const meta = value as Record<string, unknown>;
+  return meta.schemaVersion === 1
+    && typeof meta.hasEmbeddings === 'boolean'
+    && typeof meta.dim === 'number' && Number.isInteger(meta.dim) && meta.dim >= 0
+    && (typeof meta.model === 'string' || meta.model === null)
+    && typeof meta.builtAt === 'string'
+    && (meta.hasEmbeddings ? meta.dim > 0 : meta.dim === 0 && meta.model === null);
+}
+
+function isCurrentSpecMeta(value: unknown): value is SpecIndexMeta {
+  if (!value || typeof value !== 'object') return false;
+  const meta = value as Record<string, unknown>;
+  return meta.schemaVersion === META_SCHEMA_VERSION
+    && typeof meta.hasEmbeddings === 'boolean'
+    && typeof meta.dim === 'number' && Number.isInteger(meta.dim) && meta.dim >= 0
+    && (typeof meta.model === 'string' || meta.model === null)
+    && typeof meta.builtAt === 'string'
+    && typeof meta.recordsDigest === 'string' && /^[a-f0-9]{64}$/.test(meta.recordsDigest)
+    && typeof meta.recordCount === 'number' && Number.isInteger(meta.recordCount) && meta.recordCount > 0
+    && typeof meta.tableDigest === 'string' && /^[a-f0-9]{64}$/.test(meta.tableDigest)
+    && (meta.hasEmbeddings ? meta.dim > 0 : meta.dim === 0 && meta.model === null);
+}
+
+/** Missing is a legitimate legacy state; malformed or foreign-shaped bytes are not. */
+function readSpecMeta(outputDir: string): SpecMetaState {
+  const path = specMetaPath(outputDir);
+  if (!existsSync(path)) return { kind: 'missing' };
   try {
-    return JSON.parse(readFileSync(specMetaPath(outputDir), 'utf-8')) as SpecIndexMeta;
+    const value: unknown = JSON.parse(readFileSync(path, 'utf-8'));
+    if (isCurrentSpecMeta(value)) return { kind: 'current', meta: value };
+    if (isLegacySpecMeta(value)) return { kind: 'legacy', meta: value };
+    return { kind: 'malformed' };
   } catch {
-    return null;
+    return { kind: 'malformed' };
   }
 }
 
 async function writeSpecMeta(outputDir: string, meta: SpecIndexMeta): Promise<void> {
-  await writeFile(specMetaPath(outputDir), JSON.stringify(meta, null, 2) + '\n', 'utf-8');
+  await atomicWriteFile(specMetaPath(outputDir), JSON.stringify(meta, null, 2) + '\n');
+}
+
+type AuthoritativeSpecRecord = Omit<SpecRecord, 'vector'>;
+
+/** Order-independent digest of exactly the fields from which the searchable table is derived. */
+function digestSpecRecords(records: readonly AuthoritativeSpecRecord[]): string {
+  const canonical = records.map(record => JSON.stringify({
+    id: record.id,
+    domain: record.domain,
+    section: record.section,
+    title: record.title,
+    text: record.text,
+    linkedFiles: record.linkedFiles,
+  })).sort();
+  const hash = createHash('sha256');
+  hash.update(`spec-records-v1\n${canonical.length}\n`);
+  for (const record of canonical) hash.update(`${Buffer.byteLength(record)}:${record}\n`);
+  return hash.digest('hex');
+}
+
+function digestPersistedSpecRows(rows: readonly Record<string, unknown>[]): string {
+  const canonical = rows.map(row => JSON.stringify({
+    id: String(row.id ?? ''),
+    domain: String(row.domain ?? ''),
+    section: String(row.section ?? ''),
+    title: String(row.title ?? ''),
+    text: String(row.text ?? ''),
+    linkedFiles: String(row.linkedFiles ?? ''),
+    vector: row.vector == null ? null : Array.from(row.vector as ArrayLike<number>),
+  })).sort();
+  const hash = createHash('sha256');
+  hash.update(`persisted-spec-records-v1\n${canonical.length}\n`);
+  for (const record of canonical) hash.update(`${Buffer.byteLength(record)}:${record}\n`);
+  return hash.digest('hex');
+}
+
+const verifiedSpecTables = new Map<string, { metaDigest: string; tableVersion: number }>();
+
+/** Test-only: force the next search through the cold verification path. */
+export function _resetSpecVectorIndexVerificationCacheForTesting(): void {
+  verifiedSpecTables.clear();
 }
 
 // Mapping entry shape from .openlore/analysis/mapping.json
@@ -269,8 +356,8 @@ async function findAdrFiles(decisionsDir: string): Promise<string[]> {
       .map((f) => join(decisionsDir, f))
       // Same symlink vector as findSpecFiles: an ADR-named link out of the repo.
       .filter((p) => isConfinedPath(decisionsDir, p));
-  } catch {
-    return [];
+  } catch (error) {
+    throw new Error(`Cannot enumerate authoritative decision directory ${decisionsDir}`, { cause: error });
   }
 }
 
@@ -280,7 +367,13 @@ async function parseAdrFiles(decisionsDir: string): Promise<AdrRecord[]> {
 
   for (const filePath of files) {
     try {
-      const content = await readFile(filePath, 'utf-8');
+      const content = await readFileConfined(
+        decisionsDir,
+        relative(decisionsDir, filePath),
+        SPEC_ARTIFACT_MAX_BYTES,
+        false,
+        true,
+      );
       const titleMatch = content.match(/^#\s+(ADR-\d+):\s+(.+)$/m);
       if (!titleMatch) continue;
       const adrNum = titleMatch[1];
@@ -294,8 +387,11 @@ async function parseAdrFiles(decisionsDir: string): Promise<AdrRecord[]> {
         text: `[decision] ${adrNum}: ${title}\n${content}`,
         linkedFiles: '[]',
       });
-    } catch {
-      continue;
+    } catch (error) {
+      throw new Error(
+        `Cannot read authoritative decision artifact ${relative(decisionsDir, filePath)}: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
+      );
     }
   }
 
@@ -348,15 +444,24 @@ export class SpecVectorIndex {
     }
 
     // Parse all specs into records (without vectors)
-    const records: Omit<SpecRecord, 'vector'>[] = [];
+    const records: AuthoritativeSpecRecord[] = [];
 
     for (const specFile of specFiles) {
       const domain = basename(dirname(specFile));
       let markdown: string;
       try {
-        markdown = await readFile(specFile, 'utf-8');
-      } catch {
-        continue;
+        markdown = await readFileConfined(
+          specsDir,
+          relative(specsDir, specFile),
+          SPEC_ARTIFACT_MAX_BYTES,
+          false,
+          true,
+        );
+      } catch (error) {
+        throw new Error(
+          `Cannot read authoritative spec artifact ${relative(specsDir, specFile)}: ${error instanceof Error ? error.message : String(error)}`,
+          { cause: error },
+        );
       }
 
       const sections = parseSpecFile(markdown);
@@ -394,23 +499,45 @@ export class SpecVectorIndex {
     }
 
     const dbPath = join(outputDir, DB_FOLDER);
+    const recordsDigest = digestSpecRecords(records);
+    const metaState = readSpecMeta(outputDir);
+
+    // Reuse is allowed only when both the authoritative inputs and the persisted
+    // table agree with the atomically-published metadata. Missing legacy metadata
+    // is still readable by search(), but is intentionally rebuilt here because it
+    // cannot prove which inputs produced the table.
+    if (metaState.kind === 'current'
+      && metaState.meta.recordsDigest === recordsDigest
+      && metaState.meta.recordCount === records.length
+      && metaState.meta.hasEmbeddings === Boolean(embedSvc)
+      && metaState.meta.model === (embedSvc?.modelName ?? null)
+      && SpecVectorIndex.exists(outputDir)
+      && await SpecVectorIndex._tableMatchesDigest(outputDir, metaState.meta)) {
+      return { recordCount: records.length, hasEmbeddings: metaState.meta.hasEmbeddings };
+    }
 
     // ── BM25-only build (no embedding service) ───────────────────────────────
     // Write records without a `vector` column and record hasEmbeddings:false.
     if (!embedSvc) {
       const db = await connect(dbPath);
-      await db.createTable(
+      const table = await db.createTable(
         TABLE_NAME,
         records as unknown as Record<string, unknown>[],
         { mode: 'overwrite' }
       );
-      await writeSpecMeta(outputDir, {
+      const rows = await table.query().toArray() as Record<string, unknown>[];
+      const meta: SpecIndexMeta = {
         hasEmbeddings: false,
         dim: 0,
         model: null,
         builtAt: new Date().toISOString(),
         schemaVersion: META_SCHEMA_VERSION,
-      });
+        recordsDigest,
+        recordCount: records.length,
+        tableDigest: digestPersistedSpecRows(rows),
+      };
+      await writeSpecMeta(outputDir, meta);
+      await SpecVectorIndex._rememberVerifiedTable(outputDir, table, meta);
       return { recordCount: records.length, hasEmbeddings: false };
     }
 
@@ -429,15 +556,21 @@ export class SpecVectorIndex {
 
     // Write to LanceDB (same DB folder, table "specs")
     const db = await connect(dbPath);
-    await db.createTable(TABLE_NAME, fullRecords as unknown as Record<string, unknown>[], { mode: 'overwrite' });
+    const table = await db.createTable(TABLE_NAME, fullRecords as unknown as Record<string, unknown>[], { mode: 'overwrite' });
+    const persistedRows = await table.query().toArray() as Record<string, unknown>[];
 
-    await writeSpecMeta(outputDir, {
+    const meta: SpecIndexMeta = {
       hasEmbeddings: true,
       dim: fullRecords[0]?.vector.length ?? 0,
-      model: embedSvc.modelName,
+      model: embedSvc.modelName ?? null,
       builtAt: new Date().toISOString(),
       schemaVersion: META_SCHEMA_VERSION,
-    });
+      recordsDigest,
+      recordCount: fullRecords.length,
+      tableDigest: digestPersistedSpecRows(persistedRows),
+    };
+    await writeSpecMeta(outputDir, meta);
+    await SpecVectorIndex._rememberVerifiedTable(outputDir, table, meta);
 
     return { recordCount: fullRecords.length, hasEmbeddings: true };
   }
@@ -473,8 +606,18 @@ export class SpecVectorIndex {
     // ── BM25-only path ─────────────────────────────────────────────────────────
     // Force BM25 when no embedder is available OR the spec index was built
     // without embeddings (no `vector` column). Missing sidecar ⇒ legacy embedded.
-    const meta = readSpecMeta(outputDir);
-    const indexHasEmbeddings = meta === null ? true : meta.hasEmbeddings;
+    const metaState = readSpecMeta(outputDir);
+    const meta = metaState.kind === 'current' || metaState.kind === 'legacy' ? metaState.meta : null;
+    if (metaState.kind === 'current'
+      && !await SpecVectorIndex._tableMatchesDigest(outputDir, metaState.meta, table)) {
+      throw new Error('Spec index content does not match its metadata. Run "openlore analyze" to rebuild it.');
+    }
+    // Schema-v1 and missing metadata cannot prove table shape. Probe the actual
+    // table before selecting ANN so a missing/corrupt sidecar on a BM25-only
+    // table never turns into a nearestTo() call against a nonexistent column.
+    const indexHasEmbeddings = metaState.kind === 'current'
+      ? metaState.meta.hasEmbeddings
+      : (await table.schema()).fields.some((field: { name: string }) => field.name === 'vector');
     if (!embedSvc || !indexHasEmbeddings) {
       return SpecVectorIndex._bm25Only(table, query, limit, domain, section, traceCandidates);
     }
@@ -587,7 +730,69 @@ export class SpecVectorIndex {
    */
   static exists(outputDir: string): boolean {
     // LanceDB stores each table as a subfolder inside the DB folder
-    return existsSync(join(outputDir, DB_FOLDER, `${TABLE_NAME}.lance`));
+    if (!existsSync(join(outputDir, DB_FOLDER, `${TABLE_NAME}.lance`))) return false;
+    return readSpecMeta(outputDir).kind !== 'malformed';
+  }
+
+  private static async _rememberVerifiedTable(
+    outputDir: string,
+    table: { version(): Promise<number> },
+    meta: SpecIndexMeta,
+  ): Promise<void> {
+    verifiedSpecTables.set(join(outputDir, DB_FOLDER), {
+      metaDigest: JSON.stringify(meta),
+      tableVersion: await table.version(),
+    });
+  }
+
+  private static async _tableMatchesDigest(
+    outputDir: string,
+    meta: SpecIndexMeta,
+    existingTable?: { version(): Promise<number>; query(): { toArray(): Promise<Record<string, unknown>[]> } },
+  ): Promise<boolean> {
+    try {
+      let table = existingTable;
+      if (!table) {
+        const { connect } = await import('@lancedb/lancedb');
+        const db = await connect(join(outputDir, DB_FOLDER));
+        table = await db.openTable(TABLE_NAME);
+      }
+      const dbPath = join(outputDir, DB_FOLDER);
+      const metaDigest = JSON.stringify(meta);
+      // Lance publishes supported mutations as immutable table versions. This
+      // lookup is constant-cost; recursively statting every fragment made every
+      // warm query scale with the physical table layout.
+      const tableVersion = await table.version();
+      const cached = verifiedSpecTables.get(dbPath);
+      if (cached?.metaDigest === metaDigest && cached.tableVersion === tableVersion) return true;
+
+      const rows = await table.query().toArray() as Record<string, unknown>[];
+      if (rows.length !== meta.recordCount) return false;
+      const vectorLengths = rows.map(row => row.vector == null
+        ? null
+        : Array.from(row.vector as ArrayLike<number>).length);
+      if (meta.hasEmbeddings) {
+        if (meta.dim <= 0 || vectorLengths.some(length => length !== meta.dim)) return false;
+      } else if (meta.dim !== 0 || vectorLengths.some(length => length !== null)) {
+        return false;
+      }
+      const records = rows.map(row => ({
+        id: String(row.id ?? ''),
+        domain: String(row.domain ?? ''),
+        section: String(row.section ?? ''),
+        title: String(row.title ?? ''),
+        text: String(row.text ?? ''),
+        linkedFiles: String(row.linkedFiles ?? ''),
+      }));
+      const matches = digestSpecRecords(records) === meta.recordsDigest
+        && digestPersistedSpecRows(rows) === meta.tableDigest;
+      if (matches) {
+        verifiedSpecTables.set(dbPath, { metaDigest, tableVersion });
+      }
+      return matches;
+    } catch {
+      return false;
+    }
   }
 }
 

@@ -77,6 +77,35 @@ const SERVE_START_LOCK_FILE = 'serve.lock';
 const SERVE_START_LOCK_WAIT_MS = 30_000;
 const SERVE_STOP_WAIT_MS = REBUILD_DRAIN_TIMEOUT_MS + 5_000;
 
+/**
+ * Root watcher → full-repair debounce used by the serve daemon. Exported so the
+ * equivalence gate can drive the exact production coordination primitive without
+ * opening an HTTP socket. The callback remains the authority for singleflight and
+ * publication; this class owns only quiet-window coalescing.
+ */
+export class ServeWatchRepairCoordinator {
+  private timer?: ReturnType<typeof setTimeout>;
+
+  constructor(
+    private readonly repair: () => void,
+    private readonly debounceMs = REANALYZE_DEBOUNCE_MS,
+  ) {}
+
+  schedule(): void {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = setTimeout(() => {
+      this.timer = undefined;
+      this.repair();
+    }, this.debounceMs);
+    this.timer.unref?.();
+  }
+
+  cancel(): void {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = undefined;
+  }
+}
+
 function discoveryHostForBind(host: string): string | null {
   if (isLoopbackHost(host)) return host;
   if (host === '0.0.0.0') return '127.0.0.1';
@@ -891,18 +920,13 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
   // the CALL GRAPH (which the watcher deliberately skips) also stays fresh between
   // commits — turning divergence from "wait for the next commit" into continuous.
   let watcher: McpWatcher | undefined;
-  let reanalyzeTimer: ReturnType<typeof setTimeout> | undefined;
+  const watchRepair = new ServeWatchRepairCoordinator(() => triggerRebuild(root));
 
   // Debounced call-graph re-analyze. Routes through triggerRebuild so it shares
   // the single-flight lock with the schema-reset healer (no concurrent --force).
   function scheduleReanalyze(): void {
     if (teardownRequested) return;
-    if (reanalyzeTimer) clearTimeout(reanalyzeTimer);
-    reanalyzeTimer = setTimeout(() => triggerRebuild(root), REANALYZE_DEBOUNCE_MS);
-    // Don't keep the daemon alive for this debounce alone — the HTTP socket owns
-    // the daemon's lifetime; a pending re-analyze must never delay a shutdown
-    // (change: fix-process-exit-lifecycle; parity with idleTimer above).
-    reanalyzeTimer.unref?.();
+    watchRepair.schedule();
   }
 
   if (options.watch !== false) {
@@ -969,10 +993,7 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
         clearTimeout(idleTimer);
         idleTimer = undefined;
       }
-      if (reanalyzeTimer) {
-        clearTimeout(reanalyzeTimer);
-        reanalyzeTimer = undefined;
-      }
+      watchRepair.cancel();
       unregisterRepairHost();
       if (watcher) await watcher.stop().catch(() => {});
       rebuildPending.clear();

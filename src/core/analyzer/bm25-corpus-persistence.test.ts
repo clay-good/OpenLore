@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, open, readFile, stat, writeFile, rm } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -111,14 +111,16 @@ describe('BM25 corpus persistence', () => {
     expect(p.docs).toHaveLength(NODES.length);
   });
 
-  it('a cold-start query hydrates from the sidecar (does not re-tokenize)', async () => {
+  it('a valid-JSON payload mutation is rejected and rebuilt from authoritative text', async () => {
     await VectorIndex.build(tmpDir, NODES, SIGS, new Set(), new Set(), null);
     await injectMarkerIntoSidecar();
     _resetVectorIndexCachesForTesting();
 
-    // MARKER is only in the sidecar, never in raw text — a hit proves hydration.
+    // MARKER is only in the mutated sidecar, never in raw text. Payload integrity
+    // validation must reject it even though the authoritative content hash still matches.
     const results = await VectorIndex.search(tmpDir, MARKER, null, { limit: 10 });
-    expect(results.some((r) => r.record.name === 'getUserById')).toBe(true);
+    expect(results).toEqual([]);
+    expect(await readFile(sidecar, 'utf-8')).not.toContain(MARKER);
   });
 
   it('a tokenizer-version mismatch rebuilds and never serves the stale sidecar', async () => {
@@ -176,6 +178,40 @@ describe('BM25 corpus persistence', () => {
     expect(p.tokenizerVersion).toBe(TOKENIZER_VERSION);
   });
 
+  it('rejects an oversized sidecar before JSON parsing and rebuilds it', async () => {
+    await VectorIndex.build(tmpDir, NODES, SIGS, new Set(), new Set(), null);
+    const handle = await open(sidecar, 'w');
+    try {
+      // This fixture's authoritative corpus permits the 1 MiB minimum cap.
+      // A sparse file keeps the adversarial test cheap while proving the stat
+      // guard runs before allocation/JSON parsing.
+      await handle.truncate(1024 * 1024 + 1);
+    } finally {
+      await handle.close();
+    }
+    _resetVectorIndexCachesForTesting();
+
+    const results = await VectorIndex.search(tmpDir, 'user', null, { limit: 10 });
+    expect(results.some(result => result.record.name === 'getUserById')).toBe(true);
+    expect((await stat(sidecar)).size).toBeLessThan(1024 * 1024);
+  });
+
+  it('rejects malformed numeric corpus fields before constructing scoring maps', async () => {
+    await VectorIndex.build(tmpDir, NODES, SIGS, new Set(), new Set(), null);
+    const malformed = JSON.parse(await readFile(sidecar, 'utf8'));
+    malformed.docs[0].length = -1;
+    malformed.docs[0].tf[0][1] = -1;
+    malformed.avgLength = -1;
+    await writeFile(sidecar, JSON.stringify(malformed), 'utf8');
+    _resetVectorIndexCachesForTesting();
+
+    const results = await VectorIndex.search(tmpDir, 'user', null, { limit: 10 });
+    expect(results.some(result => result.record.name === 'getUserById')).toBe(true);
+    const repaired = JSON.parse(await readFile(sidecar, 'utf8'));
+    expect(repaired.avgLength).toBeGreaterThan(0);
+    expect(repaired.docs.every((doc: { length: number }) => doc.length >= 0)).toBe(true);
+  });
+
   it('an incremental update invalidates the sidecar', async () => {
     await VectorIndex.build(tmpDir, NODES, SIGS, new Set(), new Set(), null);
     expect(existsSync(sidecar)).toBe(true);
@@ -194,6 +230,32 @@ describe('BM25 corpus persistence', () => {
 
     const results = await VectorIndex.search(tmpDir, 'user', null, { limit: 10 });
     expect(results.some((r) => r.record.name === 'getUserById')).toBe(true);
+  });
+
+  it('rejects a same-count corpus sidecar after authoritative indexed text changes', async () => {
+    await VectorIndex.build(tmpDir, NODES, SIGS, new Set(), new Set(), null);
+    await injectMarkerIntoSidecar();
+    const stale = JSON.parse(await readFile(sidecar, 'utf-8'));
+
+    // Mutate the authoritative table out of band without changing its row count
+    // or deleting the old corpus. Count-only validation would serve stale tokens.
+    const { connect } = await import('@lancedb/lancedb');
+    const db = await connect(join(tmpDir, 'vector-index'));
+    const table = await db.openTable('functions');
+    const rows = await table.query().toArray() as Record<string, unknown>[];
+    const target = rows.find((row) => row.id === 'src/users.ts::getUserById')!;
+    target.name = 'findAccountByKey';
+    target.text = '[TypeScript] src/users.ts findAccountByKey\nfind account by key';
+    await db.createTable('functions', rows, { mode: 'overwrite' });
+    _resetVectorIndexCachesForTesting();
+
+    expect(await VectorIndex.search(tmpDir, MARKER, null, { limit: 10 })).toEqual([]);
+    const fresh = await VectorIndex.search(tmpDir, 'findAccountByKey', null, { limit: 10 });
+    expect(fresh.some((result) => result.record.name === 'findAccountByKey')).toBe(true);
+
+    const rebuilt = JSON.parse(await readFile(sidecar, 'utf-8'));
+    expect(rebuilt.N).toBe(stale.N);
+    expect(rebuilt.contentHash).not.toBe(stale.contentHash);
   });
 
   it('hydrated results equal a fresh rebuild for the same query', async () => {

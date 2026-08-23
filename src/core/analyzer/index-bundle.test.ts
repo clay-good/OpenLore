@@ -26,7 +26,7 @@ import { createGzip, gzipSync } from 'node:zlib';
 import { once } from 'node:events';
 import { mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { generateKeyPairSync } from 'node:crypto';
+import { createHash, generateKeyPairSync } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import {
   publishGeneration,
@@ -42,6 +42,10 @@ import {
 import { ANALYSIS_LOCK_FILE } from '../runtime/advisory-lock.js';
 import { logger } from '../../utils/logger.js';
 import { getDefaultConfig } from '../services/config-manager.js';
+import { CallGraphBuilder, serializeCallGraph } from './call-graph.js';
+import { semanticAnswerBytes } from './derived-artifact-equivalence.js';
+import { handleAnalyzeImpact, handleGetSubgraph } from '../services/mcp-handlers/graph.js';
+import { _resetContextCacheForTesting } from '../services/mcp-handlers/utils.js';
 
 const VERSION = '9.9.9-test';
 
@@ -100,6 +104,60 @@ async function buildAnalysisDir(
   await writeFile(join(dir, 'dependency-graph.json'), JSON.stringify({ nodes: [], edges: [] }));
 }
 
+/** Persist the real graph produced from source in the same artifacts structural MCP handlers read. */
+async function buildStructuralAnalysis(
+  projectRoot: string,
+  files: Readonly<Record<string, string>>,
+  commit: string,
+): Promise<string> {
+  const analysisDir = join(projectRoot, OPENLORE_ANALYSIS_REL_PATH);
+  await mkdir(analysisDir, { recursive: true });
+  const built = await new CallGraphBuilder().build(Object.entries(files).map(([path, content]) => ({
+    path,
+    content,
+    language: 'TypeScript',
+  })));
+  const graph = serializeCallGraph(built);
+
+  const store = EdgeStore.open(join(analysisDir, ARTIFACT_CALL_GRAPH_DB));
+  try {
+    store.insertNodes(graph.nodes);
+    store.insertEdges(graph.edges);
+    store.insertClasses(graph.classes);
+    for (const [path, content] of Object.entries(files)) {
+      store.setFileHash(path, createHash('sha256').update(content).digest('hex'));
+    }
+    store.checkpoint();
+  } finally {
+    store.close();
+  }
+
+  const attestation = computeAttestation(
+    SCHEMA_VERSION,
+    graph.nodes.map(node => ({ id: node.id, filePath: node.filePath })),
+    graph.edges.map(edge => ({
+      callerId: edge.callerId,
+      calleeId: edge.calleeId,
+      calleeName: edge.calleeName,
+    })),
+    graph.classes.map(node => ({ id: node.id })),
+  );
+  await writeAttestation(analysisDir, attestation);
+  await writeFile(
+    join(analysisDir, ARTIFACT_FINGERPRINT),
+    JSON.stringify({ hash: 'structural-fixture-v1', commit, sourceTreeState: 'clean', computedAt: 'fixture', fileCount: Object.keys(files).length }),
+  );
+  await writeFile(join(analysisDir, 'llm-context.json'), JSON.stringify({ callGraph: graph, signatures: [] }));
+  await writeFile(join(analysisDir, 'repo-structure.json'), JSON.stringify({ layers: ['src'] }));
+  await writeFile(join(analysisDir, 'dependency-graph.json'), JSON.stringify({ nodes: [], edges: [] }));
+  await publishGeneration(analysisDir, [
+    ...REQUIRED_ANALYSIS_ARTIFACTS,
+    ARTIFACT_CALL_GRAPH_DB,
+    'index-attestation.json',
+  ]);
+  return analysisDir;
+}
+
 function ed25519PemPair(): { privateKey: string; publicKey: string } {
   const pair = generateKeyPairSync('ed25519');
   return {
@@ -112,6 +170,7 @@ let work: string;
 beforeEach(async () => { work = await mkdtemp(join(tmpdir(), 'olbundle-test-')); });
 afterEach(async () => {
   vi.restoreAllMocks();
+  _resetContextCacheForTesting();
   await rm(work, { recursive: true, force: true });
 });
 
@@ -769,6 +828,7 @@ describe('index-bundle: runImport trust boundary', () => {
 
   it('imports an unsigned current bundle with an explicit UNVERIFIED provenance receipt', async () => {
     const project = await gitProject();
+    await mkdir(join(project.root, 'openspec', 'specs'), { recursive: true });
     await buildAnalysisDir(project.analysis, project.head);
     const artifact = join(work, 'unsigned.olbundle');
     await writeFile(artifact, (await buildBundle(project.analysis, VERSION)).buffer);
@@ -778,6 +838,7 @@ describe('index-bundle: runImport trust boundary', () => {
     expect(await runImport(artifact, { projectRoot: project.root })).toBe(0);
     expect(success.mock.calls.flat().join(' ')).toMatch(/provenance UNVERIFIED/i);
     expect(await readCurrentGeneration(project.analysis, [...REQUIRED_ANALYSIS_ARTIFACTS])).not.toBeNull();
+    expect(existsSync(join(project.analysis, 'vector-index', 'bm25-corpus.json'))).toBe(true);
   });
 
   it('rejects an oversized compressed artifact before reading it into memory', async () => {
@@ -826,5 +887,78 @@ describe('index-bundle: runImport trust boundary', () => {
     expect(await runImport(artifact, { projectRoot: project.root })).toBe(0);
     expect(success.mock.calls.flat().join(' ')).toMatch(/provenance verified/i);
     expect(warning.mock.calls.flat().join(' ')).toMatch(/approximately current.*dirty tree/i);
+  });
+
+  it('certifies imported-local-structural answers after integrity, trust, and source binding', async () => {
+    const keys = ed25519PemPair();
+    const producer = join(work, 'structural-producer');
+    const consumer = join(work, 'structural-consumer');
+    const files = {
+      'src/pipeline.ts': [
+        'export function receive(raw: string): number {',
+        '  return normalize(raw);',
+        '}',
+        'function normalize(raw: string): number {',
+        '  return persist(raw.trim());',
+        '}',
+        'function persist(value: string): number {',
+        '  return value.length;',
+        '}',
+        '',
+      ].join('\n'),
+    } as const;
+    await mkdir(join(producer, '.openlore'), { recursive: true });
+    for (const [relativePath, content] of Object.entries(files)) {
+      await mkdir(join(producer, relativePath, '..'), { recursive: true });
+      await writeFile(join(producer, relativePath), content);
+    }
+    await writeFile(join(producer, '.gitignore'), '.openlore/analysis/\n');
+    const config = {
+      ...getDefaultConfig('nodejs', './openspec'),
+      bundle: { trustedSigners: [{ publicKey: keys.publicKey, label: 'equivalence-fixture' }] },
+    };
+    await writeFile(join(producer, '.openlore', 'config.json'), JSON.stringify(config));
+    const git = (cwd: string, ...args: string[]) => execFileSync(
+      'git',
+      ['-c', 'user.email=test@example.com', '-c', 'user.name=Test', '-c', 'commit.gpgsign=false', ...args],
+      { cwd },
+    ).toString().trim();
+    git(producer, 'init', '-q');
+    git(producer, 'add', '.');
+    git(producer, 'commit', '-q', '-m', 'structural fixture');
+    const head = git(producer, 'rev-parse', '--verify', 'HEAD');
+    const producerAnalysis = await buildStructuralAnalysis(producer, files, head);
+
+    const localSubgraph = await handleGetSubgraph(producer, 'receive', 'downstream', 2);
+    const localImpact = await handleAnalyzeImpact(producer, 'receive', 2);
+    expect(localSubgraph).toMatchObject({ stats: { nodes: 3, edges: 2 } });
+    expect(localImpact).toMatchObject({ blastRadius: { downstream: 2 } });
+
+    const artifact = join(work, 'structural.olbundle');
+    const builtBundle = await buildBundle(producerAnalysis, VERSION, { signingKey: keys.privateKey });
+    await writeFile(artifact, builtBundle.buffer);
+    const parsed = parseBundle(builtBundle.buffer);
+
+    // These are production gates, asserted before any imported answer is queried.
+    expect(verifyPayloadIntegrity(parsed)).toBe(true);
+    expect(verifyBundledSourceIdentity(parsed)).toBe(true);
+    expect(parsed.manifest).toMatchObject({ sourceCommit: head, sourceTreeState: 'clean' });
+    expect(verifyBundleSignature(parsed, config.bundle.trustedSigners)).toMatchObject({
+      status: 'verified',
+      label: 'equivalence-fixture',
+    });
+
+    execFileSync('git', ['clone', '-q', producer, consumer]);
+    const success = vi.spyOn(logger, 'success').mockImplementation(() => {});
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => {});
+    expect(await runImport(artifact, { projectRoot: consumer })).toBe(0);
+    expect(success.mock.calls.flat().join(' ')).toMatch(/provenance verified/i);
+    expect(info.mock.calls.flat().join(' ')).toMatch(/Current at commit/);
+    expect(git(consumer, 'rev-parse', '--verify', 'HEAD')).toBe(head);
+
+    const importedSubgraph = await handleGetSubgraph(consumer, 'receive', 'downstream', 2);
+    const importedImpact = await handleAnalyzeImpact(consumer, 'receive', 2);
+    expect(semanticAnswerBytes(importedSubgraph)).toBe(semanticAnswerBytes(localSubgraph));
+    expect(semanticAnswerBytes(importedImpact)).toBe(semanticAnswerBytes(localImpact));
   });
 });

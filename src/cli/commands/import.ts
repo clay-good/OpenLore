@@ -431,9 +431,6 @@ async function runImportWithEffectiveConfig(artifact: string, opts: ImportOption
             try {
               await buildSpecSearchIndex(projectRoot, analysisDir);
             } catch (err) {
-              searchBuilt = false;
-              await rm(join(analysisDir, 'vector-index'), { recursive: true, force: true });
-              await rm(join(analysisDir, 'vector-index-meta.json'), { force: true });
               logger.debug(`import: spec search index not built (${err instanceof Error ? err.message : String(err)})`);
             }
           },

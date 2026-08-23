@@ -1,0 +1,147 @@
+{
+  "schemaVersion": 1,
+  "projection": "semantic-answer-v1",
+  "certifiedTier": {
+    "id": "ci-small-v1",
+    "fixture": {
+      "id": "certified-scale-typescript-v1",
+      "source": "scripts/measure-certified-scale.ts",
+      "dimensions": {
+        "files": 24,
+        "sourceBytes": 1721,
+        "languages": 1,
+        "expectedSymbols": 24
+      },
+      "label": "measured",
+      "measuredAt": "2026-08-23",
+      "referenceEnvironment": "darwin-arm64-node-26.7.0",
+      "sourceCommand": "npm run measure:certified-scale"
+    },
+    "objectives": {
+      "coldAnalyze": {
+        "ceiling": 5000,
+        "unit": "ms"
+      },
+      "warmQuery": {
+        "ceiling": 100,
+        "unit": "ms"
+      },
+      "singleFilePublication": {
+        "ceiling": 10000,
+        "unit": "ms"
+      },
+      "peakMemory": {
+        "ceiling": 536870912,
+        "unit": "bytes"
+      }
+    }
+  },
+  "referenceEnvironment": {
+    "id": "darwin-arm64-node-26.7.0",
+    "platform": "darwin",
+    "arch": "arm64",
+    "osRelease": "25.6.0",
+    "node": "26.7.0",
+    "cpu": "Apple M4",
+    "logicalCpus": 10,
+    "totalMemoryBytes": 34359738368
+  },
+  "measurements": [
+    {
+      "operation": "cold",
+      "metric": "elapsed",
+      "value": 609.43,
+      "unit": "ms",
+      "label": "measured",
+      "measuredAt": "2026-08-23",
+      "fixture": "certified-scale-typescript-v1",
+      "referenceEnvironment": "darwin-arm64-node-26.7.0",
+      "sourceCommand": "npm run measure:certified-scale"
+    },
+    {
+      "operation": "warm",
+      "metric": "elapsed",
+      "value": 2.051,
+      "unit": "ms",
+      "label": "measured",
+      "measuredAt": "2026-08-23",
+      "fixture": "certified-scale-typescript-v1",
+      "referenceEnvironment": "darwin-arm64-node-26.7.0",
+      "sourceCommand": "npm run measure:certified-scale"
+    },
+    {
+      "operation": "edit",
+      "metric": "elapsed",
+      "value": 4887.198,
+      "unit": "ms",
+      "label": "measured",
+      "measuredAt": "2026-08-23",
+      "fixture": "certified-scale-typescript-v1",
+      "referenceEnvironment": "darwin-arm64-node-26.7.0",
+      "sourceCommand": "npm run measure:certified-scale"
+    },
+    {
+      "operation": "add",
+      "metric": "elapsed",
+      "value": 4606.903,
+      "unit": "ms",
+      "label": "measured",
+      "measuredAt": "2026-08-23",
+      "fixture": "certified-scale-typescript-v1",
+      "referenceEnvironment": "darwin-arm64-node-26.7.0",
+      "sourceCommand": "npm run measure:certified-scale"
+    },
+    {
+      "operation": "delete",
+      "metric": "elapsed",
+      "value": 4536.25,
+      "unit": "ms",
+      "label": "measured",
+      "measuredAt": "2026-08-23",
+      "fixture": "certified-scale-typescript-v1",
+      "referenceEnvironment": "darwin-arm64-node-26.7.0",
+      "sourceCommand": "npm run measure:certified-scale"
+    },
+    {
+      "operation": "rename",
+      "metric": "elapsed",
+      "value": 4525.402,
+      "unit": "ms",
+      "label": "measured",
+      "measuredAt": "2026-08-23",
+      "fixture": "certified-scale-typescript-v1",
+      "referenceEnvironment": "darwin-arm64-node-26.7.0",
+      "sourceCommand": "npm run measure:certified-scale"
+    },
+    {
+      "operation": "peak-memory",
+      "metric": "maximum-resident-set",
+      "value": 231964672,
+      "unit": "bytes",
+      "label": "measured",
+      "measuredAt": "2026-08-23",
+      "fixture": "certified-scale-typescript-v1",
+      "referenceEnvironment": "darwin-arm64-node-26.7.0",
+      "sourceCommand": "npm run measure:certified-scale"
+    }
+  ],
+  "equivalence": {
+    "suite": "npm run test:equivalence",
+    "projection": "semantic-answer-v1",
+    "requiredRows": [
+      "cold-warm-context",
+      "memo-hit-miss",
+      "parallel-serial-extraction",
+      "precomputed-live-traversal",
+      "incremental-full-repair",
+      "imported-local-structural",
+      "bm25-cached-uncached",
+      "function-vector-repair",
+      "spec-vector-repair"
+    ]
+  },
+  "policy": {
+    "ci": "Validate manifest completeness, published-document synchronization, and equivalence outcomes; do not enforce checked-in wall-clock observations as portable thresholds.",
+    "beyondCertifiedTier": "best-effort"
+  }
+}
