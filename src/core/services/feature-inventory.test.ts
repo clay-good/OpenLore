@@ -148,6 +148,18 @@ describe('feature-inventory', () => {
     expect(ep.detail).toMatch(/1 blocking/);
   });
 
+  it('detects frozen enforcement codes without calling them advisory', async () => {
+    await writeConfig({ enforcement: { policy: { 'stale-decision-reference': 'frozen' } } });
+    const ep = byId((await collectFeatureInventory(dir)).features, 'enforcement-policy');
+    expect(ep.detail).toMatch(/1 frozen/);
+    expect(ep.detail).not.toMatch(/all advisory/);
+  });
+
+  it('advertises both immediate blocking and frozen ratchet activation', async () => {
+    const ep = byId((await collectFeatureInventory(dir)).features, 'enforcement-policy');
+    expect(ep.activate).toMatch(/"blocking" or "frozen"/);
+  });
+
   it('detects blast-radius blocking patterns', async () => {
     await writeConfig({ blastRadius: { block: ['orphans-anchored-decision'] } });
     const inv = await collectFeatureInventory(dir);

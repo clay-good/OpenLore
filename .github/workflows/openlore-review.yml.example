@@ -3,7 +3,9 @@
 # Posts ONE sticky comment on each pull request with the deterministic structural
 # briefing (structural delta + blast radius). Advisory by default: it informs, it
 # never fails the check. To opt into gating, set `gate: 'true'` below and configure
-# `blastRadius.block` in `.openlore/config.json`.
+# `enforcement.policy` in `.openlore/config.json` (legacy `blastRadius.block` lowers
+# to the same policy). Gate mode covers blocking findings, new debt under `frozen`,
+# uninitialized or unverifiable frozen baselines, and invalid candidate config.
 #
 # Requirements: a full-history checkout (`fetch-depth: 0`) so the base..head range is
 # reachable, and write permission on pull-request comments.
@@ -62,4 +64,4 @@ jobs:
           # base: ${{ github.event.pull_request.base.sha }}
           head: ${{ github.event.pull_request.head.sha }}
           analyze: 'true'            # build the index for the full blast radius
-          gate: 'false'              # 'true' = fail the job on a configured blastRadius.block pattern
+          gate: 'false'              # 'true' = gate orphan enforcement and invalid candidate config

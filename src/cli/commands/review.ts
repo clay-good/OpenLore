@@ -14,8 +14,9 @@
  *     so `review` does not separately re-run `detectDrift`.
  *
  * No new structural computation, no LLM, no new MCP tool (north star c6d1ad07).
- * Advisory by default (exit 0); opt-in gating reuses the `.openlore/config.json`
- * `blastRadius.block` convention. Degrades honestly — a missing index, an unreachable
+ * Advisory by default (exit 0); opt-in gating classifies the blast-radius orphan
+ * findings through `.openlore/config.json` `enforcement.policy` (including the legacy
+ * `blastRadius.block` lowering). Degrades honestly — a missing index, an unreachable
  * base, or a non-git directory states what it could not compute rather than emitting
  * a misleading empty briefing. Decision: 4f3efb11.
  */
@@ -24,15 +25,20 @@ import { writeFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { Command } from 'commander';
+import { gitPathArgs } from '../../utils/git-args.js';
 import { logger, configureLogger } from '../../utils/logger.js';
-import { readOpenLoreConfig } from '../../core/services/config-manager.js';
+import { readOpenLoreConfigStrict } from '../../core/services/config-manager.js';
 import { writeStdout } from '../output.js';
 import { computeBlastRadius, type BlastRadiusBriefing } from '../../core/services/mcp-handlers/blast-radius.js';
 import { handleStructuralDiff } from '../../core/services/mcp-handlers/structural-diff.js';
 import { isGitRepositoryRoot } from '../../core/drift/git-diff.js';
-import type { BlastRadiusBlockPattern } from '../../types/index.js';
-import { triggeredBlockPatterns } from './blast-radius.js';
+import { blastRadiusAssessmentComplete, blastRadiusFindings } from './enforce.js';
+import { classifyFindings, effectivePolicy } from '../../core/services/mcp-handlers/enforcement-policy.js';
+import { applyEnforcementBaseline, enforcementFindingIdentity } from '../../core/services/mcp-handlers/enforcement-baseline.js';
 import { frameServedContent, type ServedContentProvenance } from '../../core/services/served-content.js';
+import { ENFORCEMENT_BASELINE_REL_PATH, OPENLORE_CONFIG_REL_PATH } from '../../constants.js';
+import type { GovernanceFinding } from '../../core/services/mcp-handlers/enforcement-policy.js';
+import type { OpenLoreConfig } from '../../types/index.js';
 
 /** Hidden HTML marker the GitHub Action greps for to find-and-update its single
  * sticky comment (create once, update in place, never duplicate). MUST be the first
@@ -68,6 +74,16 @@ export interface ReviewBriefing {
   structural: StructuralResult;
   blast: BlastRadiusBriefing | { error: string };
   caveats: string[];
+  enforcement?: {
+    gated: boolean;
+    frozen: number;
+    new: number;
+    retired: number;
+    requiresInitialization: string[];
+    /** Bounded evidence for the blast-radius orphan findings that caused the gate. */
+    evidence: Array<{ code: string; state: 'blocking' | 'frozen:new' | 'frozen:uninitialized' | 'frozen:invalid' | 'config:invalid' }>;
+    omittedEvidence: number;
+  };
   /** `ok` when at least one of the two analyses produced a real result; `unavailable`
    * when both failed (e.g. not a git repo). The CLI/Action stays advisory either way. */
   status: 'ok' | 'unavailable';
@@ -87,6 +103,65 @@ async function sameCommit(cwd: string, refA: string, refB: string): Promise<bool
   } catch {
     return false;
   }
+}
+
+/** Read the baseline from the selected trusted base ref. Using the base tip rather
+ * than the merge-base incorporates ratchet progress that landed after the branch
+ * fork; a stale candidate must rebase instead of restoring retired exceptions.
+ * A missing path is distinct from an unreadable ref: only the former is trusted absence. */
+async function readTrustedBaseline(cwd: string, baseRef: string): Promise<{ text: string | null } | { error: string }> {
+  try {
+    const baseCommit = (await execFileAsync('git', ['rev-parse', '--verify', `${baseRef}^{commit}`], { cwd })).stdout.trim();
+    if (!baseCommit) return { error: `could not resolve trusted base "${baseRef}"` };
+    const listed = (await execFileAsync(
+      'git', gitPathArgs('ls-tree', '-z', '--name-only', baseCommit, '--', ENFORCEMENT_BASELINE_REL_PATH),
+      { cwd, maxBuffer: 2 * 1024 * 1024 },
+    )).stdout;
+    if (listed.length === 0) return { text: null };
+    if (listed !== `${ENFORCEMENT_BASELINE_REL_PATH}\0`) return { error: 'trusted baseline path resolved ambiguously' };
+    const shown = await execFileAsync(
+      'git', ['show', `${baseCommit}:${ENFORCEMENT_BASELINE_REL_PATH}`],
+      { cwd, maxBuffer: 2 * 1024 * 1024 },
+    );
+    return { text: shown.stdout };
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/** Read the committed policy at the same trusted base as the baseline. This keeps a
+ * malformed candidate config from silently downgrading a previously frozen code. */
+async function readTrustedConfig(cwd: string, baseRef: string): Promise<{ config: OpenLoreConfig | null } | { error: string }> {
+  try {
+    const baseCommit = (await execFileAsync('git', ['rev-parse', '--verify', `${baseRef}^{commit}`], { cwd })).stdout.trim();
+    if (!baseCommit) return { error: `could not resolve trusted base "${baseRef}"` };
+    const listed = (await execFileAsync(
+      'git', gitPathArgs('ls-tree', '-z', '--name-only', baseCommit, '--', OPENLORE_CONFIG_REL_PATH),
+      { cwd, maxBuffer: 1_048_576 },
+    )).stdout;
+    if (listed.length === 0) return { config: null };
+    if (listed !== `${OPENLORE_CONFIG_REL_PATH}\0`) return { error: 'trusted config path resolved ambiguously' };
+    const shown = await execFileAsync('git', ['show', `${baseCommit}:${OPENLORE_CONFIG_REL_PATH}`], { cwd, maxBuffer: 1_048_576 });
+    const parsed = JSON.parse(shown.stdout) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { error: 'trusted config is not an object' };
+    return { config: parsed as OpenLoreConfig };
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function wouldRetireCount(trustedText: string | null, findings: readonly GovernanceFinding[], frozenCodes: ReadonlySet<string>): number {
+  if (!trustedText) return 0;
+  const current = new Set(findings.map((finding) => JSON.stringify(enforcementFindingIdentity(finding))));
+  const retired = new Set<string>();
+  for (const line of trustedText.split('\n').slice(1)) {
+    if (!line.trim()) continue;
+    const record = JSON.parse(line) as unknown;
+    if (!Array.isArray(record) || record[0] !== 'finding' || typeof record[1] !== 'string') continue;
+    const key = JSON.stringify(record);
+    if (frozenCodes.has(record[1]) && !current.has(key)) retired.add(key);
+  }
+  return retired.size;
 }
 
 /** Run both analyses for a `base..head` range and assemble the briefing. Never throws —
@@ -296,6 +371,22 @@ export function renderMarkdown(b: ReviewBriefing): string {
   L.push(`<sub>Deterministic structural analysis (no LLM) of ${inlineCode(`${b.base}…${b.head}`, MAX_IDENT * 2 + 1)}.</sub>`);
   L.push('');
 
+  // Keep the gate receipt before any repository-derived detail/caveats. The final
+  // GitHub-size clamp preserves this prefix, so the Action never fails without evidence.
+  if (b.enforcement && (b.enforcement.gated || b.enforcement.frozen || b.enforcement.new || b.enforcement.retired || b.enforcement.requiresInitialization.length)) {
+    L.push('### Blast-radius orphan enforcement');
+    L.push(`- **State:** ${b.enforcement.frozen} frozen, ${b.enforcement.new} new, ${b.enforcement.retired} retired${b.enforcement.gated ? ' — gate blocked' : ''}.`);
+    if (b.enforcement.evidence.length) {
+      L.push(`- **Gate evidence:** ${inlineList(b.enforcement.evidence.map((item) => `${inlineCode(item.code)} (${markdownText(item.state, 24)})`))}${b.enforcement.omittedEvidence ? `; …and ${b.enforcement.omittedEvidence} more` : ''}.`);
+    }
+    if (b.enforcement.requiresInitialization.length) {
+      L.push(`- **Action:** run \`openlore enforce\` locally to initialize ${inlineList(b.enforcement.requiresInitialization.map((code) => inlineCode(code)))}, then review and commit the baseline.`);
+    } else if (b.enforcement.retired > 0) {
+      L.push(`- **Action:** run \`openlore enforce\` locally to retire ${b.enforcement.retired} resolved baseline ${b.enforcement.retired === 1 ? 'identity' : 'identities'}, then review and stage the baseline shrink.`);
+    }
+    L.push('');
+  }
+
   const s = b.structural;
   if (s.error) {
     L.push(`> ⚠ Structural delta unavailable: ${markdownText(s.error, 500)}`);
@@ -401,7 +492,7 @@ export function renderMarkdown(b: ReviewBriefing): string {
     L.push('');
   }
 
-  L.push('<sub>Advisory — informational, never a gate (unless your repo opts into `blastRadius.block`). Generated by [OpenLore](https://github.com/clay-good/OpenLore) `openlore review`.</sub>');
+  L.push('<sub>Advisory by default — gate mode covers opted-in blast-radius orphan enforcement and rejects an invalid candidate enforcement config. Generated by [OpenLore](https://github.com/clay-good/OpenLore) `openlore review`.</sub>');
   const body = L.slice(1).join('\n') + '\n';
   const bodyProvenances = new Set<ServedContentProvenance>(['source-derived']);
   if (!('error' in blast)) {
@@ -457,6 +548,10 @@ export function renderHuman(b: ReviewBriefing): string {
     if (blast.impact.governingDecisions.length) L.push('   Governing decisions: ' + blast.impact.governingDecisionProvenance.map(d => `[${d.provenance}] ${d.title}`).join('; '));
   }
   for (const c of b.caveats) L.push(`   ⚠ ${c}`);
+  if (b.enforcement?.gated) {
+    const evidence = b.enforcement.evidence.map((item) => `${item.code} (${item.state})`).join(', ');
+    L.push(`   ⛔ Blast-radius orphan enforcement blocked${evidence ? `: ${evidence}` : '.'}`);
+  }
   L.push('');
   return L.join('\n');
 }
@@ -467,7 +562,7 @@ export interface ReviewCliOptions {
   head?: string;
   format?: 'markdown' | 'json';
   out?: string;
-  /** Hook/gating mode: honor `blastRadius.block` and exit non-zero on a triggered pattern. */
+  /** Hook/gating mode: govern blast-radius orphan findings through the effective policy. */
   hook?: boolean;
 }
 
@@ -482,8 +577,95 @@ export async function runReviewCli(opts: ReviewCliOptions): Promise<number> {
     analysisFailed: process.env.OPENLORE_REVIEW_ANALYZE_FAILED === 'true',
   });
 
+  const orphanCodes = ['orphans-anchored-memory', 'orphans-anchored-decision'] as const;
+  const trustedBaseRef = briefing.base || opts.base || 'HEAD~1';
+  let candidateConfig: OpenLoreConfig | null = null;
+  let candidateConfigError: string | null = null;
+  try {
+    candidateConfig = await readOpenLoreConfigStrict(cwd);
+  } catch (error) {
+    candidateConfigError = error instanceof Error ? error.message : String(error);
+  }
+  const trustedConfig = await readTrustedConfig(cwd, trustedBaseRef);
+  const trustedPolicy = effectivePolicy('config' in trustedConfig ? trustedConfig.config : null);
+  const policy = effectivePolicy(candidateConfigError && 'config' in trustedConfig ? trustedConfig.config : candidateConfig);
+  const frozenOrphanCodes = orphanCodes.filter((code) => policy[code] === 'frozen');
+  const trustedFrozenOrphanCodes = orphanCodes.filter((code) => trustedPolicy[code] === 'frozen');
+  if (candidateConfigError) {
+    if ('error' in trustedConfig) {
+      briefing.caveats.push(`Candidate config is invalid and the trusted config could not be read; enforcement policy is unverifiable: ${candidateConfigError}`);
+      briefing.caveats.push(`Trusted config could not be read: ${trustedConfig.error}`);
+    } else if (trustedConfig.config === null) {
+      briefing.caveats.push(`Candidate config is invalid and the trusted base has no config; enforcement policy is unverifiable: ${candidateConfigError}`);
+    } else {
+      briefing.caveats.push(`Candidate config is invalid; review retained the trusted enforcement policy: ${candidateConfigError}`);
+    }
+  }
+
+  const blastBriefing = 'error' in briefing.blast ? null : briefing.blast;
+  const blastAvailable = blastBriefing !== null;
+  const assessmentComplete = blastBriefing !== null && blastRadiusAssessmentComplete(blastBriefing);
+  const assessedCodes = assessmentComplete ? new Set<string>(orphanCodes) : new Set<string>();
+  if (blastAvailable && !assessmentComplete) {
+    briefing.caveats.push('Blast-radius orphan baseline was not reconciled because drift analysis was incomplete.');
+  }
+  const trusted = await readTrustedBaseline(cwd, trustedBaseRef);
+  const trustedReadError = 'error' in trusted ? trusted.error : null;
+  const findings = blastBriefing === null ? [] : blastRadiusFindings(blastBriefing);
+  const reconciled = await applyEnforcementBaseline(
+    cwd,
+    classifyFindings(findings, policy),
+    policy,
+    assessedCodes,
+    'read-only',
+    // `null` means the path was proven absent at the trusted ref. An unreadable
+    // ref is not absence and must remain `undefined` so it cannot establish trust.
+    'text' in trusted ? trusted.text : undefined,
+  );
+  const gateEvidence: NonNullable<ReviewBriefing['enforcement']>['evidence'] = reconciled.gate.blocking.map((finding) => ({
+    code: finding.code,
+    state: finding.enforcementClass === 'frozen' ? 'frozen:new' as const : 'blocking' as const,
+  }));
+  const evidenceByCode = new Map(gateEvidence.map((item) => [item.code, item]));
+  if (candidateConfigError) evidenceByCode.set('enforcement-config', { code: 'enforcement-config', state: 'config:invalid' });
+  for (const code of reconciled.baseline.requiresInitialization ?? []) {
+    if (!evidenceByCode.has(code)) evidenceByCode.set(code, { code, state: 'frozen:uninitialized' });
+  }
+  const frozenAssessmentInvalid = (frozenOrphanCodes.length > 0 && (
+    !assessmentComplete || candidateConfigError !== null || trustedReadError !== null || reconciled.baseline.integrityError === true
+  )) || (trustedFrozenOrphanCodes.length > 0 && trustedReadError !== null);
+  if (frozenAssessmentInvalid) {
+    for (const code of frozenOrphanCodes) evidenceByCode.set(code, { code, state: 'frozen:invalid' });
+  }
+  if (reconciled.baseline.integrityError) {
+    for (const code of trustedFrozenOrphanCodes) evidenceByCode.set(code, { code, state: 'frozen:invalid' });
+  }
+  if (trustedReadError) {
+    for (const code of trustedFrozenOrphanCodes) evidenceByCode.set(code, { code, state: 'frozen:invalid' });
+  }
+  const evidence = [...evidenceByCode.values()];
+  const retired = assessmentComplete && !frozenAssessmentInvalid && 'text' in trusted
+    ? wouldRetireCount(trusted.text, findings, new Set(frozenOrphanCodes))
+    : 0;
+  const enforcementGated = reconciled.gate.gated || frozenAssessmentInvalid || candidateConfigError !== null;
+  if (enforcementGated || evidence.length > 0 || frozenOrphanCodes.length > 0 || trustedFrozenOrphanCodes.length > 0) {
+    briefing.enforcement = {
+      gated: enforcementGated,
+      frozen: frozenAssessmentInvalid ? 0 : reconciled.baseline.frozen,
+      new: frozenAssessmentInvalid ? 0 : reconciled.baseline.new,
+      retired,
+      requiresInitialization: reconciled.baseline.requiresInitialization ?? [],
+      evidence: evidence.slice(0, INLINE_CAP),
+      omittedEvidence: Math.max(0, evidence.length - INLINE_CAP),
+    };
+  }
+  if (reconciled.baseline.caveat) briefing.caveats.push(reconciled.baseline.caveat);
+  if (trustedReadError && (candidateConfigError !== null || frozenOrphanCodes.length > 0 || trustedFrozenOrphanCodes.length > 0)) {
+    briefing.caveats.push(`Frozen baseline trust check failed: ${trustedReadError}`);
+  }
+
   const rendered = format === 'json'
-    ? JSON.stringify({ schemaVersion: 1, ...briefing }, null, 2) + '\n'
+    ? JSON.stringify({ schemaVersion: 2, ...briefing }, null, 2) + '\n'
     : renderMarkdown(briefing);
 
   if (opts.out) {
@@ -507,20 +689,9 @@ export async function runReviewCli(opts: ReviewCliOptions): Promise<number> {
     if (process.stderr.isTTY) process.stderr.write(renderHuman(briefing) + '\n');
   }
 
-  // Opt-in gating: reuse the exact `blastRadius.block` convention — no second config
-  // dialect. Advisory unless --hook AND a configured pattern actually fires.
-  if (opts.hook && !('error' in briefing.blast)) {
-    let block: BlastRadiusBlockPattern[];
-    try {
-      const config = await readOpenLoreConfig(cwd);
-      const raw = config?.blastRadius?.block;
-      block = Array.isArray(raw) ? raw : [];
-    } catch { block = []; }
-    const fired = triggeredBlockPatterns(briefing.blast, block);
-    if (fired.length > 0) {
-      process.stderr.write(`\n⛔ openlore review: gated by configured high-risk pattern(s): ${fired.join(', ')}.\n\n`);
-      return REVIEW_GATE_EXIT_CODE;
-    }
+  if (opts.hook && enforcementGated) {
+    process.stderr.write('\n⛔ openlore review: enforcement found blocking, new, uninitialized, unverifiable, or invalid-config state.\n\n');
+    return REVIEW_GATE_EXIT_CODE;
   }
   return 0;
 }
@@ -531,7 +702,7 @@ export const reviewCommand = new Command('review')
   .option('--head <ref>', 'Head git ref (default: working tree)')
   .option('--format <fmt>', 'Output format: markdown (default) or json', 'markdown')
   .option('--out <path>', 'Write the briefing to a file instead of stdout')
-  .option('--hook', 'Honor blastRadius.block and exit non-zero on a triggered high-risk pattern', false)
+  .option('--hook', 'Gate blocking, frozen-new, uninitialized, or unverifiable blast-radius orphan enforcement, plus invalid candidate config', false)
   .action(async (opts: { base?: string; head?: string; format?: string; out?: string; hook?: boolean }) => {
     const format = opts.format === 'json' ? 'json' : 'markdown';
     if (opts.format && opts.format !== 'json' && opts.format !== 'markdown') {

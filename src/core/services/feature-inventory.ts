@@ -223,6 +223,7 @@ export async function collectFeatureInventory(rootPath: string): Promise<Feature
   const policy = config?.enforcement?.policy ?? {};
   const policyCodes = Object.keys(policy);
   const blockingCodes = policyCodes.filter((c) => policy[c] === 'blocking');
+  const frozenCodes = policyCodes.filter((c) => policy[c] === 'frozen');
   features.push({
     id: 'enforcement-policy',
     title: 'Enforcement policy',
@@ -231,12 +232,12 @@ export async function collectFeatureInventory(rootPath: string): Promise<Feature
     optIn: true,
     detail:
       policyCodes.length > 0
-        ? `${policyCodes.length} finding code(s) mapped${blockingCodes.length > 0 ? `, ${blockingCodes.length} blocking` : ' (all advisory)'}`
+        ? `${policyCodes.length} finding code(s) mapped${blockingCodes.length > 0 ? `, ${blockingCodes.length} blocking` : ''}${frozenCodes.length > 0 ? `, ${frozenCodes.length} frozen` : ''}${blockingCodes.length === 0 && frozenCodes.length === 0 ? ' (all advisory/off)' : ''}`
         : 'no policy declared — all findings advisory by default',
     activate:
       policyCodes.length > 0
         ? ''
-        : 'map a finding code → "blocking" under enforcement.policy in .openlore/config.json',
+        : 'map a finding code → "blocking" or "frozen" under enforcement.policy in .openlore/config.json',
     docs: 'docs/governance-dogfooding.md',
   });
 

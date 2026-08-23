@@ -65,6 +65,7 @@ describe('OpenLore review Action trust contract', () => {
     expect(steps[failIndex]?.if).not.toContain('steps.post.outputs');
     expect(reviewIndex).toBeLessThan(postIndex);
     expect(postIndex).toBeLessThan(failIndex);
+    expect(action).toMatch(/blocking, frozen-new, uninitialized, or unverifiable blast-radius orphan enforcement/);
   });
 
   it('builds the SHA-pinned Action source with its committed dependency lockfile', () => {

@@ -8,7 +8,7 @@
 
 ```json
 {
-  "version": "1.0.0",
+  "version": "1.1.0",
   "projectType": "nodejs",
   "openspecPath": "./openspec",
   "analysis": {
@@ -170,14 +170,14 @@ A surface is resolved against the indexed graph (plus any symbol the same diff j
 
 ### Enforcement policy
 
-An optional `enforcement.policy` block is the **single source of truth** for what blocks a commit, what merely advises, and what is deliberately silenced. It maps a stable governance finding **code** to one enforcement class — `blocking`, `advisory`, or `off` — decoupling a finding's *intrinsic severity* (owned by the source that computes it) from this repository's *risk posture* (owned here). It is consumed by [`openlore enforce`](cli-reference.md#enforcement-gate), the unified gate.
+An optional `enforcement.policy` block is the **single source of truth** for what blocks a commit, freezes existing debt, merely advises, or is deliberately silenced. It maps a stable governance finding **code** to one enforcement class — `blocking`, `frozen`, `advisory`, or `off` — decoupling a finding's *intrinsic severity* (owned by the source that computes it) from this repository's *risk posture* (owned here). It is consumed by [`openlore enforce`](cli-reference.md#enforcement-gate), the unified gate.
 
 ```json
 {
   "enforcement": {
     "policy": {
       "stale-decision-reference": "blocking",
-      "surface-critical": "blocking",
+      "surface-critical": "frozen",
       "orphans-anchored-memory": "off"
     }
   }
@@ -185,7 +185,10 @@ An optional `enforcement.policy` block is the **single source of truth** for wha
 ```
 
 - **Additive and optional.** An absent or empty policy preserves today's behavior exactly — every finding stays **advisory by default**, so nothing newly blocks.
-- **Deterministic precedence.** A finding's class is a pure function of `(code, policy)`: an explicit `off` wins over an explicit `blocking`, which wins over an explicit `advisory`, which wins over the source-declared default. Resolution is order-independent.
+- **Brownfield ratchet.** `frozen` records the code's current finding identities in `.openlore/enforcement-baseline.jsonl`; later findings absent from that committed baseline block, and fixed identities are removed. Run `openlore enforce` outside hook mode to initialize or shrink the baseline. Review the result, then run `git add .gitignore` and `git add .openlore/config.json .openlore/enforcement-baseline.jsonl` before enabling the hook. Hooks and PR review never initialize debt from the candidate change, and PR review never shrinks the baseline.
+- **Stable identity.** Baseline matching uses code + subject + a source-owned discriminator where needed. It never uses message wording or file:line, so moving a violation does not un-freeze it.
+- **Reviewable progress.** A hook that ratchets the baseline keeps the commit blocked until the changed baseline is staged. Read-only PR review reports identities that would retire and directs the operator to run `openlore enforce` locally. An invalid candidate config cannot silently disable a frozen policy from the trusted base. Downgrading `frozen` to `advisory` through a valid config leaves its baseline bytes untouched; re-upgrading resumes from them.
+- **Deterministic precedence.** A finding's class is a pure function of `(code, policy)`: a direct `enforcement.policy` value (`blocking`, `frozen`, `advisory`, or `off`) wins over legacy sugar, and legacy sugar wins over the source-declared default. Each code has one effective class; there is no priority ordering among explicit class values.
 - **Severity is never changed.** The policy decides *enforcement class* only; the emitting source remains the sole authority on a finding's intrinsic severity.
 - **`off` is visible, not invisible.** A silenced finding is still listed in the gate output (marked `off`), so a deliberate silence is auditable.
 - **Legacy `block` sugar lowers onto it.** `blastRadius.block: ["orphans-anchored-decision"]` and `impactCertificate.block: ["critical"]` are thin equivalents of `enforcement.policy: { "orphans-anchored-decision": "blocking" }` and `{ "surface-critical": "blocking" }`. A direct `enforcement.policy` entry always wins over inherited legacy sugar.

@@ -42,7 +42,7 @@
 | `openlore spec-store status` | Report the health of the spec-store binding (read-only, advisory) | No |
 | `openlore working-set context` | Assemble the working-set briefing for an active change across its targets (read-only, advisory) | Targets indexed |
 | `openlore impact-certificate` | Certify what the current diff opens into declared covering surfaces, before it lands (advisory; opt-in blocking) | Yes |
-| `openlore enforce` | Unified finding-enforcement gate: resolve every governance finding through `enforcement.policy` and block only on a `blocking`-classed finding (advisory by default) | Decisions/specs present |
+| `openlore enforce` | Unified finding-enforcement gate: blocks on `blocking`, new debt under `frozen`, or an unverifiable frozen baseline (advisory by default) | Decisions/specs present |
 | `openlore plugin-manifest emit\|validate` | Inspect/validate the OpenSpec plugin manifest (distinct from the federation `manifest`) | No |
 | `openlore mcp` | Start MCP server (stdio, for Cline / Claude Code) | No |
 | `openlore serve` | Start a warm local HTTP daemon exposing tools (loopback, for Pi / editors) | No |
@@ -407,23 +407,38 @@ human reviewer and bundled as a GitHub Action that posts it as one sticky PR com
 ```bash
 openlore review                                  # markdown briefing for the current diff (auto-detected base)
 openlore review --base main --head HEAD          # explicit range
-openlore review --format json                    # machine-readable briefing on stdout
+openlore review --format json                    # schemaVersion:2 briefing on stdout
 openlore review --out review.md                  # write the markdown to a file (used by the Action)
-openlore review --hook                           # honor blastRadius.block and fail on a configured pattern
+openlore review --hook                           # gate orphan enforcement and invalid candidate config
 ```
 
 | Option | Description |
 |--------|-------------|
 | `--base <ref>` | Base ref to compare against (default: auto-detected — requested → `main` → `master` → `HEAD~1`) |
 | `--head <ref>` | Head ref (default: working tree). Blast radius is computed against the working tree; in CI the runner checks out the head SHA so they align (a caveat is printed when an explicit `--head` could differ) |
-| `--format <fmt>` | `markdown` (default, for PR comments) or `json` (programmatic consumers); unknown value exits 2 |
+| `--format <fmt>` | `markdown` (default, for PR comments) or `json` (`schemaVersion: 2`, for programmatic consumers); unknown value exits 2 |
 | `--out <path>` | Write the briefing to a file instead of stdout |
-| `--hook` | Opt-in gating: exit non-zero when a configured `.openlore/config.json` `blastRadius.block` pattern fires. Advisory (exit 0) otherwise |
+| `--hook` | Opt-in gating: exit non-zero on blocking, frozen-new, uninitialized, or unverifiable blast-radius orphan enforcement (legacy `blastRadius.block` lowers to the same policy), or an invalid candidate enforcement config. |
 
 Advisory by default — it informs, it never fails the check. Degrades honestly: with no analysis index
 it shows the structural delta and says "run `openlore analyze`"; a non-git directory or unreachable
 base is disclosed rather than emitted as a misleading empty briefing. The structural delta works
 without an index (it builds the old/new graphs from just the changed files).
+
+Review is read-only: it never initializes or shrinks a frozen baseline. To adopt existing debt or
+record progress, run `openlore enforce` locally, inspect the baseline change, then stage the config,
+baseline, and generated ignore exception:
+
+```bash
+git add .gitignore
+git add .openlore/config.json .openlore/enforcement-baseline.jsonl
+```
+
+When a complete review sees resolved baseline identities, its receipt reports how many would retire
+and directs you to run `openlore enforce` locally. An incomplete or unavailable blast-radius
+assessment or an unverifiable baseline fails closed for orphan codes already mapped `frozen`.
+An invalid candidate config gates independently; the candidate cannot disable a trusted frozen policy
+by corrupting or removing config, and a deliberate downgrade must leave that code's baseline records unchanged.
 
 **GitHub Action.** The repo ships `.github/actions/openlore-review` (composite action: build the
 SHA-pinned Action source with its committed lockfile → `openlore analyze` → `openlore review` → one
@@ -433,9 +448,10 @@ place — duplicate-proof via paginated comment lookup) and a copy-paste workflo
 checkout (`fetch-depth: 0`) and `pull-requests: write` permission. Dependencies are installed with
 `npm ci` from the reviewed Action revision in an isolated npm configuration with lifecycle scripts
 disabled; the Action does not resolve or execute a mutable `openlore` npm selector. Advisory by
-default; gate mode fails the job
-**only** when the briefing was produced and a configured `blastRadius.block` pattern fired (a missing
-`openlore`/`review` or an unreachable range never produces a false-positive red check). A comment-post
+default; gate mode fails the job when review finds a blocking orphan, new debt under `frozen`, an
+uninitialized or unverifiable frozen baseline, or invalid candidate enforcement config (legacy
+`blastRadius.block` lowers to the same policy). A missing `openlore`/`review` or an unreachable range
+never produces a false-positive red check. A comment-post
 failure never fails the check either: on a **fork PR** GitHub gives `pull_request` a read-only token, so
 the comment can't be posted for external contributors — the Action warns and leaves the briefing in the
 job log. Do not combine `pull_request_target` with a checkout of the pull-request head; use a split
@@ -568,20 +584,19 @@ openlore briefing-since --base main --json           # machine-readable (stable 
 
 #### Enforcement gate
 
-`openlore enforce` is the **unified** finding-enforcement gate. It collects governance findings from every in-scope source, resolves each finding's enforcement class through the single declared [`enforcement.policy`](configuration.md#enforcement-policy) (with the legacy `blastRadius.block` / `impactCertificate.block` sugar lowered onto it), and — in `--hook` mode — fails the commit only when at least one finding resolves to `blocking`:
+`openlore enforce` is the **unified** finding-enforcement gate. It collects governance findings from every in-scope source, resolves each finding's enforcement class through the single declared [`enforcement.policy`](configuration.md#enforcement-policy) (with the legacy `blastRadius.block` / `impactCertificate.block` sugar lowered onto it), and — in `--hook` mode — fails the commit on an ordinary `blocking` finding, a new finding under `frozen`, an invalid baseline, or an unstaged ratchet update:
 
 ```bash
 openlore enforce                 # human-readable gate report for the working tree (advisory)
-openlore enforce --json          # schemaVersion:2 JSON: gated, blocking[], advisory[], off[], unknownPolicyCodes[], caveats[]
-openlore enforce --hook          # hook mode: stderr + exit 1 only on a blocking-classed finding
+openlore enforce --json          # schemaVersion:3 JSON: gated, blocking[], new[], frozen[], advisory[], off[], ratchet{}, caveats[]
+openlore enforce --hook          # hook mode: exit 1 on policy or frozen-baseline gate failures
 openlore enforce --install-hook  # install the unified pre-commit hook (coexists with the decisions gate)
 openlore enforce --uninstall-hook
 ```
 
-Sources: the **stale-decision-reference** check always runs (a cheap walk of the decision graph + anchored references — it flags a live, authoritative artifact that still cites a superseded decision); the **blast-radius** orphan patterns and **impact-certificate** surfaces are collected only when the repository has configured them (those analyses are diff-heavy). Every source is advisory-safe — a throw degrades to a caveat and never blocks. Advisory by default: a repository that declares no `enforcement.policy` never blocks, and an `off`-classed finding is still listed (silenced, not invisible). Deterministic, no LLM. This gate is the recommended single posture; the per-surface `blast-radius --hook` / `impact-certificate --hook` remain for repositories that prefer one source per hook.
+Sources: the **stale-decision-reference** check always runs (a cheap walk of the decision graph + anchored references — it flags a live, authoritative artifact that still cites a superseded decision); the **blast-radius** orphan patterns and **impact-certificate** surfaces are collected only when the repository has configured them (those analyses are diff-heavy). Only successfully assessed sources may initialize or shrink a frozen baseline. Advisory by default: a repository that declares no `enforcement.policy` never blocks, and an `off`-classed finding is still listed (silenced, not invisible). To adopt brownfield debt, map a code to `frozen`, run `openlore enforce` outside hook mode, review the resulting config and baseline, then stage `.gitignore` plus both `.openlore/config.json` and `.openlore/enforcement-baseline.jsonl`. Hook and PR-review modes refuse to initialize a missing baseline; PR review is read-only and never shrinks one. Deterministic, no LLM.
 
-The version 2 JSON envelope uses the closed finding-severity vocabulary `info | warning | error |
-critical`. Version 1 consumers that matched the legacy value `warn` must migrate to `warning`.
+The version 3 JSON envelope adds disjoint `new[]` and `frozen[]` ratchet partitions plus `ratchet` metadata while retaining `blocking[]` as the complete list of finding-driven gate causes. Non-finding failures, such as baseline integrity, configuration, or staging failures, are reported in `ratchet` and `caveats`. It keeps the closed finding-severity vocabulary `info | warning | error | critical`. Version 2 consumers can continue reading the existing partitions; version 1 consumers that matched the legacy value `warn` must migrate to `warning`.
 
 ---
 

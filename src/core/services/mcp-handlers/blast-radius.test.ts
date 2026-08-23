@@ -143,11 +143,18 @@ describe('computeBlastRadius', () => {
 
     // Anchored memory / decision / spec drift, named
     expect(b.memory.orphaned).toBe(1);
+    expect(b.memory.orphanFindings).toEqual([
+      { id: 'm1', filePath: 'src/utils.ts', message: 'memory anchored to gone symbol' },
+    ]);
     expect(b.decisions.items[0].provenance).toBe('local-unreviewed');
     expect(b.memory.willDrift[0].kind).toBe('memory-orphaned');
     expect(b.specs.willGoStale).toBe(1);
     expect(b.decisions.affected).toBe(1);
     expect(b.decisions.orphaned).toBe(1); // uncapped count the block gate reads
+    expect(b.decisions.orphanFindings).toEqual([
+      { id: 'a1', filePath: 'src/utils.ts', message: 'ADR references a domain that no longer exists' },
+    ]);
+    expect(b.driftAssessment).toEqual({ complete: true, filesOmitted: 0, detailsTruncated: false });
     expect(b.indexStaleness?.staleFiles).toEqual(expect.arrayContaining(['src/x.test.ts', 'src/utils.ts']));
 
     // Federation is honestly out of scope — and never claims the shipped capability is unshipped.
@@ -238,6 +245,7 @@ describe('computeBlastRadius', () => {
     const b = await computeBlastRadius({ directory: '/p' }) as BlastRadiusBriefing;
     expect(b.memory.orphaned).toBe(0);
     expect(b.specs.willGoStale).toBe(0);
+    expect(b.driftAssessment).toMatchObject({ complete: false, unavailable: 'No specs found.' });
     expect(b.caveats.join(' ')).toMatch(/drift could not be evaluated/i);
   });
 
@@ -248,7 +256,29 @@ describe('computeBlastRadius', () => {
       filesOmitted: 50,
     }));
     const b = await computeBlastRadius({ directory: '/p' }) as BlastRadiusBriefing;
+    expect(b.driftAssessment).toMatchObject({ complete: false, filesOmitted: 50 });
     expect(b.caveats.join(' ')).toMatch(/drift omitted 50 changed files.*analysis limit/i);
+  });
+
+  it('marks a display-capped drift pass incomplete even though orphan identities remain uncapped', async () => {
+    vi.mocked(handleCheckSpecDrift).mockResolvedValueOnce(driftResult(
+      Array.from({ length: 21 }, (_, index) => ({
+        id: `memory-orphaned:note:${index}`,
+        kind: 'memory-orphaned' as const,
+        severity: 'warning' as const,
+        message: `memory ${index} orphaned`,
+        filePath: `src/${index}.ts`,
+        domain: null,
+        specPath: null,
+        suggestion: '',
+      })),
+    ));
+
+    const b = await computeBlastRadius({ directory: '/p' }) as BlastRadiusBriefing;
+
+    expect(b.memory.willDrift).toHaveLength(20);
+    expect(b.memory.orphanFindings).toHaveLength(21);
+    expect(b.driftAssessment).toMatchObject({ complete: false, detailsTruncated: true });
   });
 
   it('reports the resolved base ref (and caveats the fallback) when the requested ref does not resolve', async () => {

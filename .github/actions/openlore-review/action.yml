@@ -1,7 +1,7 @@
 name: 'OpenLore structural review'
 description: >
   Post a deterministic structural PR briefing (structural delta + blast radius) as ONE sticky comment.
-  Advisory by default — informs, never fails the check (unless you opt into blastRadius.block).
+  Advisory by default — with gate:true, fails on opted-in blast-radius orphan enforcement or an invalid candidate enforcement config.
 author: 'OpenLore'
 
 # SECURITY NOTE — why every input below reaches the shell through `env:` and never
@@ -36,7 +36,7 @@ inputs:
     required: false
     default: 'true'
   gate:
-    description: 'Pass `--hook` so a configured blastRadius.block pattern fails the job (opt-in gating).'
+    description: 'Pass `--hook` so blocking, frozen-new, uninitialized, or unverifiable blast-radius orphan enforcement, or invalid candidate config, fails the job.'
     required: false
     default: 'false'
 
@@ -117,7 +117,7 @@ runs:
         # execution failure and remains advisory.
         if [ "$REVIEW_GATE" = "true" ] && [ "$RC" -eq 3 ]; then
           echo "gated=true" >> "$GITHUB_OUTPUT"
-          echo "openlore review: a configured blastRadius.block pattern fired — attempting to post the briefing before failing the job."
+          echo "openlore review: configured review enforcement gated this change — attempting to post the briefing before failing the job."
         else
           echo "gated=false" >> "$GITHUB_OUTPUT"
           if [ "$RC" -ne 0 ]; then
@@ -183,6 +183,6 @@ runs:
         REVIEW_GATED: ${{ steps.review.outputs.gated }}
       run: |
         if [ "$REVIEW_GATED" = "true" ]; then
-          echo "openlore review: failing after attempting to publish the configured policy-gate evidence." >&2
+          echo "openlore review: failing after attempting to publish the review gate evidence." >&2
           exit 3
         fi

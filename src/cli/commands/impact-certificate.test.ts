@@ -96,7 +96,7 @@ describe('impact-certificate git hook install/uninstall', () => {
   });
 });
 
-const CRIT_PATH = { surface: 'client', surfaceSeverity: 'critical' as const, openingEdge: { from: 'A', to: 'B' }, path: ['A', 'B'], reaches: 'B' };
+const CRIT_PATH = { surface: 'client', surfaceSeverity: 'critical' as const, openingEdge: { from: 'A', to: 'B' }, path: ['A', 'B'], pathIds: ['a::A', 'b::B'], reaches: 'B' };
 function cert(paths: ImpactCertificate['newlyOpenedPaths'], over: Partial<ImpactCertificate> = {}): ImpactCertificate {
   return {
     kind: 'impact-certificate', version: 1, baseRef: 'HEAD', resolvedBaseRef: 'HEAD', change: 'working-tree',
@@ -181,7 +181,7 @@ describe('runImpactCertificateCli (advisory posture & exit codes)', () => {
   });
 
   it('does not block on a non-configured severity (warn opening, block=[critical])', async () => {
-    const warnPath = { surface: 'logs', surfaceSeverity: 'warn' as const, openingEdge: { from: 'A', to: 'L' }, path: ['A', 'L'], reaches: 'L' };
+    const warnPath = { surface: 'logs', surfaceSeverity: 'warn' as const, openingEdge: { from: 'A', to: 'L' }, path: ['A', 'L'], pathIds: ['a::A', 'l::L'], reaches: 'L' };
     vi.mocked(computeImpactCertificate).mockResolvedValue(cert([warnPath], { highestSurfaceSeverity: 'warn' }));
     vi.mocked(readOpenLoreConfig).mockResolvedValue({ impactCertificate: { block: ['critical'] } } as never);
     expect(await runImpactCertificateCli({ cwd: '/p', hook: true })).toBe(0);

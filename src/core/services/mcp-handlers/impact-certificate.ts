@@ -91,6 +91,8 @@ export interface NewlyOpenedPath {
   openingEdge: { from: string; to: string };
   /** The shortest opening path, as named symbols `A → B → surfaceMember`. */
   path: string[];
+  /** The same uncapped path by canonical graph node id, used for stable identity. */
+  pathIds: string[];
   /** The surface member the path lands on. */
   reaches: string;
 }
@@ -578,6 +580,7 @@ export function detectNewlyOpenedPaths(
         surfaceSeverity: surface.severity,
         openingEdge: { from: nameOf(edge.from), to: nameOf(edge.to) },
         path: named.length > MAX_PATH_LEN ? [...named.slice(0, MAX_PATH_LEN - 1), '…', reaches] : named,
+        pathIds: idPath,
         reaches,
       });
     }
@@ -589,7 +592,8 @@ export function detectNewlyOpenedPaths(
       a.openingEdge.from.localeCompare(b.openingEdge.from) ||
       a.openingEdge.to.localeCompare(b.openingEdge.to) ||
       a.reaches.localeCompare(b.reaches) ||
-      a.path.join('\u0001').localeCompare(b.path.join('\u0001')));
+      a.path.join('\u0001').localeCompare(b.path.join('\u0001')) ||
+      a.pathIds.join('\u0001').localeCompare(b.pathIds.join('\u0001')));
     // No per-surface cap here — the caller bounds for presentation and reports the
     // true count + a truncation caveat (no-silent-truncation).
     out.push(...perSurface);

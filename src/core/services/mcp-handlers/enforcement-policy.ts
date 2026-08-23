@@ -15,7 +15,7 @@
  *     by `.openlore/config.json` `enforcement.policy` (a `code → class` map).
  *
  * Resolution is a pure, order-independent function with a fixed precedence:
- *   explicit `off` > explicit `blocking` > explicit `advisory` > source default.
+ *   an explicit class > source default.
  * `advisory` is the source default for every code, so a repository that declares
  * no policy behaves exactly as it does today. Deterministic, no LLM (north star
  * `c6d1ad07`).
@@ -31,8 +31,8 @@ import type {
 /** A repository's declared policy after normalization: a clean `code → class` map. */
 export type EnforcementPolicy = Record<string, EnforcementClass>;
 
-/** The three enforcement classes, for runtime validation. */
-const ENFORCEMENT_CLASSES: readonly EnforcementClass[] = ['blocking', 'advisory', 'off'];
+/** The four enforcement classes, for runtime validation. */
+const ENFORCEMENT_CLASSES: readonly EnforcementClass[] = ['blocking', 'frozen', 'advisory', 'off'];
 
 function isEnforcementClass(v: unknown): v is EnforcementClass {
   return typeof v === 'string' && (ENFORCEMENT_CLASSES as readonly string[]).includes(v);
@@ -55,11 +55,15 @@ export interface GovernanceFinding {
   subject: string;
   /** Human-readable conclusion. */
   message: string;
+  /** Stable source-owned discriminator when one code can fire repeatedly for one subject. */
+  discriminator?: string;
 }
 
 /** A finding paired with the enforcement class the policy resolved for it. */
 export interface ClassifiedFinding extends GovernanceFinding {
   enforcementClass: EnforcementClass;
+  /** Present when a `frozen` policy was reconciled against its persisted baseline. */
+  baselineState?: 'frozen' | 'new';
 }
 
 /**
@@ -179,7 +183,7 @@ export function sourceDefaultClass(code: string): EnforcementClass {
 /**
  * The pure precedence core. Given the policy's explicit class for a code (if any)
  * and the source-declared default, pick the effective class:
- *   explicit `off` > explicit `blocking` > explicit `advisory` > source default.
+ *   explicit class > source default.
  * Order-independent and total. Exposed separately so the precedence is unit-tested
  * directly, including a source default of `blocking` (which no current code uses).
  */
@@ -189,6 +193,7 @@ export function applyPolicyPrecedence(
 ): EnforcementClass {
   if (explicit === 'off') return 'off';
   if (explicit === 'blocking') return 'blocking';
+  if (explicit === 'frozen') return 'frozen';
   if (explicit === 'advisory') return 'advisory';
   return sourceDefault;
 }
@@ -281,7 +286,7 @@ function stableCompare(a: string, b: string): number {
 
 /** A stable sort key so identical findings produce identical, reproducible gate output. */
 function findingKey(f: GovernanceFinding): string {
-  return `${f.code}\0${f.subject}\0${f.message}`;
+  return [f.code, f.subject, f.discriminator ?? '', f.source, f.severity, f.message].join('\0');
 }
 
 export interface GateResult {
@@ -289,9 +294,11 @@ export interface GateResult {
   classified: ClassifiedFinding[];
   blocking: ClassifiedFinding[];
   advisory: ClassifiedFinding[];
+  /** Findings protected by a persisted frozen baseline. */
+  frozen: ClassifiedFinding[];
   /** Deliberately silenced findings — listed as informational, never failing. */
   off: ClassifiedFinding[];
-  /** True iff at least one finding resolved to `blocking`. */
+  /** True when an explicit blocking finding or a frozen-baseline condition fails the gate. */
   gated: boolean;
 }
 
@@ -305,11 +312,19 @@ export function classifyFindings(
   findings: readonly GovernanceFinding[],
   policy: EnforcementPolicy | undefined,
 ): GateResult {
-  const classified: ClassifiedFinding[] = findings
-    .map((f) => ({ ...f, enforcementClass: resolveEnforcementClass(f.code, policy, f.severity) }))
-    .sort((a, b) => stableCompare(findingKey(a), findingKey(b)));
+  const unique = new Map<string, ClassifiedFinding>();
+  for (const finding of findings) {
+    const classified = {
+      ...finding,
+      enforcementClass: resolveEnforcementClass(finding.code, policy, finding.severity),
+    };
+    const key = findingKey(classified);
+    if (!unique.has(key)) unique.set(key, classified);
+  }
+  const classified = [...unique.values()].sort((a, b) => stableCompare(findingKey(a), findingKey(b)));
   const blocking = classified.filter((f) => f.enforcementClass === 'blocking');
   const advisory = classified.filter((f) => f.enforcementClass === 'advisory');
+  const frozen = classified.filter((f) => f.enforcementClass === 'frozen');
   const off = classified.filter((f) => f.enforcementClass === 'off');
-  return { classified, blocking, advisory, off, gated: blocking.length > 0 };
+  return { classified, blocking, advisory, frozen, off, gated: blocking.length > 0 };
 }
