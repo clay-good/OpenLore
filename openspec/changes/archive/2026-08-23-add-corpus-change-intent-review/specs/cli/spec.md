@@ -12,9 +12,10 @@ same findings and verdict.
 
 The command SHALL exit successfully when the verdict is no-review-needed and when review is
 recommended but no finding is classified blocking under the active enforcement policy; it SHALL
-exit non-zero only when at least one finding is blocking. A base reference that git cannot resolve
-SHALL be disclosed as a resolution failure and SHALL NOT be silently replaced by a different
-reference — the same base-reference honesty the other between-revisions commands follow.
+exit 1 when at least one finding is blocking. Operational or configuration failures SHALL exit 2.
+A base reference that git cannot resolve SHALL be disclosed as an operational resolution failure
+and SHALL NOT be silently replaced by a different reference — the same base-reference honesty the
+other between-revisions commands follow.
 
 All machine-readable output SHALL be written to standard output and all diagnostics to standard
 error, so the JSON mode is pipeable. The command SHALL be deterministic: repeated runs against the

@@ -82,6 +82,17 @@ export interface FindingCodeSpec {
   description: string;
 }
 
+/** Finding codes emitted by the deterministic corpus-intent delta reviewer. */
+export const CORPUS_INTENT_FINDING_CODES = [
+  'corpus-normative-weakened',
+  'corpus-scenario-removed',
+  'corpus-requirement-removed',
+  'corpus-specificity-lost',
+  'corpus-boundary-clause-removed',
+  'corpus-decision-status-regressed',
+  'corpus-delta-orphaned',
+] as const;
+
 export const FINDING_CODE_REGISTRY: Record<string, FindingCodeSpec> = {
   // ── blast-radius guard (add-preflight-blast-radius-guard) ──
   'orphans-anchored-memory': {
@@ -218,6 +229,42 @@ export const FINDING_CODE_REGISTRY: Record<string, FindingCodeSpec> = {
     defaultClass: 'advisory',
     source: 'corpus-integrity',
     description: 'Corpus prose names another artifact without declaring the corresponding graph edge.',
+  },
+  // ── corpus intent delta review (add-corpus-change-intent-review) ──
+  'corpus-normative-weakened': {
+    defaultClass: 'advisory',
+    source: 'corpus-intent-review',
+    description: 'A requirement uses a weaker normative keyword than it did in the compared base corpus.',
+  },
+  'corpus-scenario-removed': {
+    defaultClass: 'advisory',
+    source: 'corpus-intent-review',
+    description: 'A requirement has fewer acceptance scenarios than it did in the compared base corpus.',
+  },
+  'corpus-requirement-removed': {
+    defaultClass: 'advisory',
+    source: 'corpus-intent-review',
+    description: 'A base requirement has no exact-name or identical-scenario successor in the compared head corpus.',
+  },
+  'corpus-specificity-lost': {
+    defaultClass: 'advisory',
+    source: 'corpus-intent-review',
+    description: 'A measurable clause from a requirement is absent from the compared head corpus.',
+  },
+  'corpus-boundary-clause-removed': {
+    defaultClass: 'advisory',
+    source: 'corpus-intent-review',
+    description: 'A disclosed-boundary or honesty clause was removed from the compared head corpus.',
+  },
+  'corpus-decision-status-regressed': {
+    defaultClass: 'advisory',
+    source: 'corpus-intent-review',
+    description: 'A decision moved from an authoritative status to a weaker status without a recorded superseder.',
+  },
+  'corpus-delta-orphaned': {
+    defaultClass: 'advisory',
+    source: 'corpus-intent-review',
+    description: 'An active change delta targets a requirement that disappeared from the compared corpus.',
   },
 };
 

@@ -45,6 +45,7 @@ export const COMMAND_GROUPS: ReadonlyArray<{ title: string; commands: readonly s
       'certify-public-surface',
       'enforce',
       'review',
+      'review-corpus',
       'preflight',
       'drift',
       'decisions',

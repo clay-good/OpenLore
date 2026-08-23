@@ -139,8 +139,14 @@ function sameFile(
  * check closes the `safeJoin` -> `readFile` swap window for artifact-derived paths:
  * replacing the file or one of its parent directories makes the read fail closed.
  */
-export async function readFileConfined(absDir: string, filePath: string, maxBytes?: number): Promise<string> {
-  return (await readFileConfinedWithStat(absDir, filePath, maxBytes)).content;
+export async function readFileConfined(
+  absDir: string,
+  filePath: string,
+  maxBytes?: number,
+  rejectSymlinkPath = false,
+  fatalUtf8 = false,
+): Promise<string> {
+  return (await readFileConfinedWithStat(absDir, filePath, maxBytes, rejectSymlinkPath, fatalUtf8)).content;
 }
 
 export interface ConfinedFileRead {
@@ -158,11 +164,16 @@ export async function readFileConfinedWithStat(
   absDir: string,
   filePath: string,
   maxBytes?: number,
+  rejectSymlinkPath = false,
+  fatalUtf8 = false,
 ): Promise<ConfinedFileRead> {
   const lexicalPath = safeJoin(absDir, filePath);
   const canonicalRoot = await realpath(absDir);
   const canonicalPath = await realpath(lexicalPath);
   safeJoin(canonicalRoot, canonicalPath);
+  if (rejectSymlinkPath && canonicalPath !== lexicalPath) {
+    throw new Error(`Path escape blocked: symbolic-link path component in "${filePath}"`);
+  }
 
   const handle = await open(canonicalPath, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
@@ -175,6 +186,9 @@ export async function readFileConfinedWithStat(
     const verifyIdentity = async (descriptorStat: Stats): Promise<void> => {
       const currentCanonicalPath = await realpath(canonicalPath);
       safeJoin(canonicalRoot, currentCanonicalPath);
+      if (rejectSymlinkPath && currentCanonicalPath !== canonicalPath) {
+        throw new Error(`Confined read target changed during access: "${filePath}"`);
+      }
       const current = await stat(currentCanonicalPath);
       if (
         !current.isFile()
@@ -200,7 +214,12 @@ export async function readFileConfinedWithStat(
       throw new Error(`Confined read target changed during access: "${filePath}"`);
     }
     await verifyIdentity(afterRead);
-    return { content: bytes.toString('utf-8'), stat: afterRead };
+    return {
+      content: fatalUtf8
+        ? new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+        : bytes.toString('utf-8'),
+      stat: afterRead,
+    };
   } finally {
     await handle.close();
   }
