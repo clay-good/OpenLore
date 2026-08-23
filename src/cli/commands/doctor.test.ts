@@ -55,6 +55,10 @@ vi.mock('../../core/services/llm-service.js', () => ({
   }),
 }));
 
+vi.mock('../../core/decisions/corpus-integrity.js', () => ({
+  detectCorpusIntegrity: vi.fn().mockResolvedValue([]),
+}));
+
 // ============================================================================
 // HELPERS
 // ============================================================================
@@ -149,9 +153,14 @@ describe('doctor command', () => {
       expect(Array.isArray(checks)).toBe(true);
     });
 
-    it('should include exactly 12 checks', async () => {
+    it('should include exactly 13 checks', async () => {
       const checks = await runDoctorJson();
-      expect(checks).toHaveLength(12);
+      expect(checks).toHaveLength(13);
+    });
+
+    it('should include a governance corpus integrity check', async () => {
+      const checks = await runDoctorJson();
+      expect(checks.find(c => c.name === 'Corpus integrity')).toBeDefined();
     });
 
     it('should include a Git hook reachability check', async () => {

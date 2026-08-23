@@ -146,6 +146,17 @@ async function gateHuman(root: string): Promise<string> {
   return out.join('');
 }
 
+async function gateHookHuman(root: string): Promise<{ code: number; stderr: string }> {
+  const out: string[] = [];
+  const orig = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((s: string | Uint8Array) => { out.push(String(s)); return true; }) as typeof process.stderr.write;
+  try {
+    return { code: await runEnforceCli({ cwd: root, hook: true }), stderr: out.join('') };
+  } finally {
+    process.stderr.write = orig;
+  }
+}
+
 describe('enforce git hook install/uninstall', () => {
   const readHook = (root: string) => readFile(join(root, '.git', 'hooks', 'pre-commit'), 'utf-8');
 
@@ -386,6 +397,77 @@ describe('impactCertificateFindings — surface severities map to per-severity c
 });
 
 describe('enforce gate decision', () => {
+  it('applies corpus source defaults and honors an explicit advisory downgrade', async () => {
+    const root = await mkRepo();
+    await initializeGitHead(root);
+    const specDir = join(root, 'openspec', 'specs', 'demo');
+    await mkdir(specDir, { recursive: true });
+    await writeFile(join(specDir, 'spec.md'),
+      '# Demo\n\n## Requirements\n\n### Requirement: Broken\n\n> Decision recorded: deadbeef\n');
+    await execFileAsync('git', ['add', 'openspec/specs/demo/spec.md'], { cwd: root });
+
+    const blocked = await gateJson(root, true);
+    expect(blocked.code).toBe(1);
+    expect(blocked.json.blocking.map((finding) => finding.code)).toContain('corpus-reference-unresolved');
+
+    await writePolicy(root, { 'corpus-reference-unresolved': 'advisory' });
+    await execFileAsync('git', ['add', '.openlore/config.json'], { cwd: root });
+    const downgraded = await gateJson(root, true);
+    expect(downgraded.code).toBe(0);
+    expect(downgraded.json.advisory.map((finding) => finding.code)).toContain('corpus-reference-unresolved');
+  });
+
+  it('does not gate when undeclared-reference advice is the only corpus finding', async () => {
+    const root = await mkRepo();
+    await initializeGitHead(root);
+    const specDir = join(root, 'openspec', 'specs', 'demo');
+    const changeDir = join(root, 'openspec', 'changes', 'active');
+    await mkdir(specDir, { recursive: true });
+    await mkdir(changeDir, { recursive: true });
+    await writeFile(join(specDir, 'spec.md'),
+      '# Demo\n\n## Decisions\n\n### Known\n\n**Status:** Approved\n**ID:** aaaaaaaa\n');
+    await writeFile(join(changeDir, 'proposal.md'), '# Proposal\n\nDecision aaaaaaaa informs this work.\n');
+    await execFileAsync('git', ['add', 'openspec'], { cwd: root });
+
+    const result = await gateJson(root, true);
+    expect(result.code).toBe(0);
+    expect(result.json.gated).toBe(false);
+    expect(result.json.advisory.map((finding) => finding.code)).toEqual(['corpus-reference-undeclared']);
+  });
+
+  it('checks index/worktree parity for source-default blocking corpus findings', async () => {
+    const root = await mkRepo();
+    await initializeGitHead(root);
+    const specDir = join(root, 'openspec', 'specs', 'demo');
+    await mkdir(specDir, { recursive: true });
+    const bad = '# Demo\n\n## Requirements\n\n### Requirement: Broken\n\nThe system SHALL fail closed.\n\n> Decision recorded: deadbeef\n';
+    const clean = '# Demo\n\n## Requirements\n\n### Requirement: Clean\n\nThe system SHALL remain valid.\n';
+    await writeFile(join(specDir, 'spec.md'), bad, 'utf8');
+    await execFileAsync('git', ['add', 'openspec/specs/demo/spec.md'], { cwd: root });
+    await writeFile(join(specDir, 'spec.md'), clean, 'utf8');
+
+    const { code, json } = await gateJson(root, true);
+    expect(code).toBe(1);
+    expect(json.gated).toBe(true);
+    expect(json.ratchet.unstaged).toBe(true);
+  });
+
+  it('sanitizes repository-authored control bytes in hook output', async () => {
+    const root = await mkRepo();
+    await initializeGitHead(root);
+    const specDir = join(root, 'openspec', 'specs', 'demo');
+    await mkdir(specDir, { recursive: true });
+    await writeFile(join(specDir, 'spec.md'),
+      '# Demo\n\n## Requirements\n\n### Requirement: hostile-\u001b[2J-name\n\nThe system SHALL cite.\n\n> Decision recorded: deadbeef\n', 'utf8');
+    await execFileAsync('git', ['add', 'openspec/specs/demo/spec.md'], { cwd: root });
+
+    const result = await gateHookHuman(root);
+    expect(result.code).toBe(1);
+    expect(result.stderr).not.toContain('\u001b');
+    expect(result.stderr).not.toContain('\r');
+    expect(result.stderr).toContain('hostile-[2J-name');
+  });
+
   it('advisory by default — a stale-decision-reference does not block (exit 0)', async () => {
     const root = await mkRepo();
     await writeStaleScenario(root);

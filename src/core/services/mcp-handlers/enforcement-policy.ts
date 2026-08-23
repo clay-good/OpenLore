@@ -16,9 +16,9 @@
  *
  * Resolution is a pure, order-independent function with a fixed precedence:
  *   an explicit class > source default.
- * `advisory` is the source default for every code, so a repository that declares
- * no policy behaves exactly as it does today. Deterministic, no LLM (north star
- * `c6d1ad07`).
+ * Most sources default to `advisory`; sources may declare stricter defaults when
+ * an invalid artifact would otherwise be trusted. Deterministic, no LLM (north
+ * star `c6d1ad07`).
  */
 
 import type {
@@ -72,9 +72,9 @@ export interface ClassifiedFinding extends GovernanceFinding {
  * class, so (a) a declared policy that names an unknown code can be flagged, and
  * (b) the catalogue is the documented contract for what an operator may govern.
  *
- * `defaultClass` is `advisory` for every code: blocking is always opt-in, per
- * `add-preflight-blast-radius-guard`/AdvisoryByDefault. The field exists so a
- * future source CAN declare a stricter default without changing the resolver.
+ * `defaultClass` is source-owned. Most findings are advisory by default, while
+ * corpus resolution and graph-shape failures are blocking because an invalid
+ * governance graph must not be trusted as authoritative.
  */
 export interface FindingCodeSpec {
   defaultClass: EnforcementClass;
@@ -167,6 +167,57 @@ export const FINDING_CODE_REGISTRY: Record<string, FindingCodeSpec> = {
     defaultClass: 'advisory',
     source: 'doctor',
     description: 'Unreviewed served content lexically resembles an imperative override, message impersonation, or direction away from a recorded decision. The check is incomplete and review-only.',
+  },
+  // ── governance corpus integrity (add-knowledge-corpus-integrity) ──
+  'corpus-reference-unresolved': {
+    defaultClass: 'blocking',
+    source: 'corpus-integrity',
+    description: 'A declared corpus edge names a target that cannot be resolved.',
+  },
+  'corpus-reference-ambiguous': {
+    defaultClass: 'blocking',
+    source: 'corpus-integrity',
+    description: 'A declared corpus edge resolves to more than one target.',
+  },
+  'corpus-self-reference': {
+    defaultClass: 'blocking',
+    source: 'corpus-integrity',
+    description: 'A corpus artifact declares a graph edge to itself where self-reference is invalid.',
+  },
+  'corpus-duplicate-identifier': {
+    defaultClass: 'blocking',
+    source: 'corpus-integrity',
+    description: 'Multiple corpus artifacts declare the same identifier.',
+  },
+  'corpus-edge-unsupported': {
+    defaultClass: 'blocking',
+    source: 'corpus-integrity',
+    description: 'A corpus artifact declares an edge kind that its artifact type does not support.',
+  },
+  'corpus-target-type-mismatch': {
+    defaultClass: 'blocking',
+    source: 'corpus-integrity',
+    description: 'A declared corpus edge resolves to an artifact outside the edge\'s target range.',
+  },
+  'corpus-target-retired': {
+    defaultClass: 'advisory',
+    source: 'corpus-integrity',
+    description: 'A live corpus artifact references a superseded, rejected, or otherwise retired target.',
+  },
+  'corpus-supersession-cycle': {
+    defaultClass: 'blocking',
+    source: 'corpus-integrity',
+    description: 'Decision supersession edges form a cycle, so no member can be treated as authoritative.',
+  },
+  'corpus-anchor-target-missing': {
+    defaultClass: 'advisory',
+    source: 'corpus-integrity',
+    description: 'A corpus artifact anchor names a symbol or file that no longer exists.',
+  },
+  'corpus-reference-undeclared': {
+    defaultClass: 'advisory',
+    source: 'corpus-integrity',
+    description: 'Corpus prose names another artifact without declaring the corresponding graph edge.',
   },
 };
 

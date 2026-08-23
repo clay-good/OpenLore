@@ -199,11 +199,32 @@ describe('findStaleDecisionReferences — adversarial edge cases', () => {
     expect(forA.supersededBy).toBe('c0c0c0c0'); // terminal, not the dead b0b0b0b0
   });
 
-  it('a chain cycle does not hang (cycle-guarded)', () => {
-    // pathological: X supersedes Y and Y supersedes X
-    const x = decision({ id: 'x0x0x0x0', supersedes: 'y0y0y0y0' });
-    const y = decision({ id: 'y0y0y0y0', supersedes: 'x0x0x0x0' });
-    expect(() => buildRetirementGraph([x, y])).not.toThrow();
+  it('discloses deterministic cycle membership without inventing a live superseder', () => {
+    // pathological: A supersedes B and B supersedes A. Neither is an authoritative
+    // terminal replacement, and in particular neither may resolve to itself.
+    const a = decision({ id: 'aaaaaaaa', supersedes: 'bbbbbbbb' });
+    const b = decision({ id: 'bbbbbbbb', supersedes: 'aaaaaaaa' });
+    const forward = buildRetirementGraph([a, b]);
+    const reverse = buildRetirementGraph([b, a]);
+    expect(forward.supersededBy.size).toBe(0);
+    expect(forward.cycles).toEqual([['aaaaaaaa', 'bbbbbbbb']]);
+    expect(reverse.cycles).toEqual(forward.cycles);
+  });
+
+  it('canonicalizes multiple cycles despite competing superseders and shuffled input', () => {
+    const a = decision({ id: 'aaaaaaaa', supersedes: 'bbbbbbbb' });
+    const b = decision({ id: 'bbbbbbbb', supersedes: 'aaaaaaaa' });
+    const c = decision({ id: 'cccccccc', supersedes: 'aaaaaaaa' });
+    const d = decision({ id: 'dddddddd', supersedes: 'eeeeeeee' });
+    const e = decision({ id: 'eeeeeeee', supersedes: 'ffffffff' });
+    const f = decision({ id: 'ffffffff', supersedes: 'dddddddd' });
+    const g = buildRetirementGraph([f, c, d, b, e, a]);
+    expect(g.cycles).toEqual([
+      ['aaaaaaaa', 'bbbbbbbb'],
+      ['dddddddd', 'eeeeeeee', 'ffffffff'],
+    ]);
+    expect(g.supersededBy.has('cccccccc')).toBe(false); // superseder, not retired target
+    expect(g.supersededBy.size).toBe(0);
   });
 
   // H2: a retired id embedded in a longer hex blob (e.g. a 40-char git SHA) has no word

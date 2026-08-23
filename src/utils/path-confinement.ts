@@ -139,8 +139,8 @@ function sameFile(
  * check closes the `safeJoin` -> `readFile` swap window for artifact-derived paths:
  * replacing the file or one of its parent directories makes the read fail closed.
  */
-export async function readFileConfined(absDir: string, filePath: string): Promise<string> {
-  return (await readFileConfinedWithStat(absDir, filePath)).content;
+export async function readFileConfined(absDir: string, filePath: string, maxBytes?: number): Promise<string> {
+  return (await readFileConfinedWithStat(absDir, filePath, maxBytes)).content;
 }
 
 export interface ConfinedFileRead {
@@ -154,7 +154,11 @@ export interface ConfinedFileRead {
  * from one descriptor, and neither is returned if that file or its name changes
  * during the read.
  */
-export async function readFileConfinedWithStat(absDir: string, filePath: string): Promise<ConfinedFileRead> {
+export async function readFileConfinedWithStat(
+  absDir: string,
+  filePath: string,
+  maxBytes?: number,
+): Promise<ConfinedFileRead> {
   const lexicalPath = safeJoin(absDir, filePath);
   const canonicalRoot = await realpath(absDir);
   const canonicalPath = await realpath(lexicalPath);
@@ -164,6 +168,9 @@ export async function readFileConfinedWithStat(absDir: string, filePath: string)
   try {
     const opened = await handle.stat();
     if (!opened.isFile()) throw new Error(`Confined read requires a regular file: "${filePath}"`);
+    if (maxBytes !== undefined && opened.size > maxBytes) {
+      throw new Error(`Confined read exceeds byte limit (${maxBytes}): "${filePath}"`);
+    }
 
     const verifyIdentity = async (descriptorStat: Stats): Promise<void> => {
       const currentCanonicalPath = await realpath(canonicalPath);

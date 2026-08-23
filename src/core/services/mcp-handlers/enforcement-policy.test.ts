@@ -18,6 +18,19 @@ import {
 const invalidSeverity: GovernanceFinding = { code: 'x', severity: 'warn', source: 'x', subject: 'x', message: 'x' };
 void invalidSeverity;
 
+const CORPUS_DEFAULT_CLASSES = {
+  'corpus-reference-unresolved': 'blocking',
+  'corpus-reference-ambiguous': 'blocking',
+  'corpus-self-reference': 'blocking',
+  'corpus-duplicate-identifier': 'blocking',
+  'corpus-edge-unsupported': 'blocking',
+  'corpus-target-type-mismatch': 'blocking',
+  'corpus-target-retired': 'advisory',
+  'corpus-supersession-cycle': 'blocking',
+  'corpus-anchor-target-missing': 'advisory',
+  'corpus-reference-undeclared': 'advisory',
+} as const;
+
 describe('applyPolicyPrecedence — pure precedence core', () => {
   // Spec: off > blocking > advisory > source default. Exercises the "source default
   // is blocking" branch the registry never uses, proving precedence independently.
@@ -61,9 +74,12 @@ describe('resolveEnforcementClass', () => {
 });
 
 describe('FINDING_CODE_REGISTRY', () => {
-  it('every registered code defaults to advisory (blocking is always opt-in)', () => {
-    for (const spec of Object.values(FINDING_CODE_REGISTRY)) {
-      expect(spec.defaultClass).toBe('advisory');
+  it('keeps every pre-existing source advisory by default and declares complete metadata', () => {
+    for (const [code, spec] of Object.entries(FINDING_CODE_REGISTRY)) {
+      expect(['blocking', 'frozen', 'advisory', 'off'], code).toContain(spec.defaultClass);
+      expect(spec.source, code).not.toBe('');
+      expect(spec.description, code).not.toBe('');
+      if (!(code in CORPUS_DEFAULT_CLASSES)) expect(spec.defaultClass, code).toBe('advisory');
     }
   });
   it('registers the stale-decision-reference code and the lowered surface codes', () => {
@@ -77,6 +93,16 @@ describe('FINDING_CODE_REGISTRY', () => {
     for (const code of ['footprint-escape', 'footprint-escape-new-conflict', 'mis-declared-append']) {
       expect(isKnownFindingCode(code)).toBe(true);
       expect(FINDING_CODE_REGISTRY[code].source).toBe('footprint-escape');
+    }
+  });
+  it('registers every corpus-integrity code with its specified source default', () => {
+    for (const [code, defaultClass] of Object.entries(CORPUS_DEFAULT_CLASSES)) {
+      expect(isKnownFindingCode(code), code).toBe(true);
+      expect(FINDING_CODE_REGISTRY[code]).toMatchObject({
+        source: 'corpus-integrity',
+        defaultClass,
+      });
+      expect(sourceDefaultClass(code)).toBe(defaultClass);
     }
   });
 });
