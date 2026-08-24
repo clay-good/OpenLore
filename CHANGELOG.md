@@ -3,6 +3,16 @@
 All notable changes to OpenLore are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.1] - 2026-08-23
+
+- Release validation now builds the trusted OpenLore launcher before exercising hook
+  installation tests, matching the required CI lane and preserving the production
+  fail-closed behavior. No runtime behavior or public API changed from 3.0.0.
+
+**Upgrade:** `npm i -g openlore@3.0.1`
+
+**Full Changelog**: https://github.com/clay-good/OpenLore/compare/v3.0.0...v3.0.1
+
 ## [3.0.0] - 2026-08-23
 
 - **Programmatic API migration:** analysis results now require `fromCache` and make

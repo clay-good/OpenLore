@@ -18,13 +18,13 @@
         {
           default = pkgs.buildNpmPackage {
             pname = "openlore";
-            version = "3.0.0";
+            version = "3.0.1";
 
             src = ./.;
 
             npmDepsFetcherVersion = 2;
             makeCacheWritable = true;
-            npmDepsHash = "sha256-4LknIuY4oBlrLTWa21IiCWceZiPKsR6ZWtT1t9UBThY=";
+            npmDepsHash = "sha256-ShIHDCDAhCQbC9Gq5nCdXG9vHgsOqioeBZVzegqIJE0=";
 
             # Build TypeScript
             buildPhase = ''

@@ -110,6 +110,11 @@ jobs:
       - name: Run type check
         run: npm run typecheck
 
+      # Hook-installation tests exercise the real installation-derived launcher.
+      # Build it before the test suite, just as the required CI unit lane does.
+      - name: Build
+        run: npm run build
+
       - name: Run tests
         run: npm run test:run
 
@@ -118,9 +123,6 @@ jobs:
 
       - name: Audit dependencies
         run: npm run audit:gate
-
-      - name: Build
-        run: npm run build
 
       - name: Verify published API consumer contract
         run: npm run test:api-consumer
