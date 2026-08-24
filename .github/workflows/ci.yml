@@ -75,6 +75,11 @@ jobs:
 
       - run: npm ci
 
+      # Hook-installation tests pin the same built, external OpenLore launcher
+      # that production installs. Build it before exercising those tests.
+      - name: Build trusted hook launcher
+        run: npm run build
+
       - name: Certify derived-artifact answer equivalence
         run: npm run test:equivalence
         timeout-minutes: 3
