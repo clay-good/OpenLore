@@ -16,12 +16,12 @@ Each language backs a fixed, closed set of capabilities. A capability is either 
 | `callGraph` | Function/method node + call-edge extraction — the substrate every reachability conclusion rests on. | `CALLGRAPH_LANGUAGES` (`call-graph.ts`) |
 | `complexity` | Grammar-shaped lexical estimation of per-function cyclomatic complexity for triage and ranking. Unsupported languages carry no complexity value. | `COMPLEXITY_LANGUAGES` (`call-graph-complexity.ts`) |
 | `imports` | Import/package resolution into the `import`-confidence cross-file edge path. TS/JS follows re-export/barrel chains; Python resolves leading-dot modules; Go resolves imported packages and same-package siblings; Java/Kotlin/C#/PHP resolve statically bindable `import`/`using`/`use` bindings from package or namespace declarations. Ruby remains name-only because its load forms do not statically bind names. | `IMPORT_RESOLUTION_LANGUAGES` (`import-resolver-bridge.ts`) |
-| `cfgOverlay` | A control-flow-graph overlay (branches/loops) via the data-driven CFG `SPECS` table. | `cfgSupportsLanguage()` (`cfg.ts`) |
+| `cfgOverlay` | A control-flow-graph overlay (branches/loops) via the data-driven CFG language table and grammar-shape adapters. | `cfgSupportsLanguage()` (`cfg.ts`) |
 | `typeInference` | Lightweight receiver-type inference, used to resolve method calls to their class. | `TYPE_INFERENCE_LANGUAGES` (`type-inference-engine.ts`) |
 | `styleFingerprint` | Descriptive per-language idiom-frequency profile (function form, binding, conditional, async, string, naming case) with an evidence floor + enforcement-awareness. Backed for TypeScript/JavaScript/Python/Go. | `STYLE_FINGERPRINT_LANGUAGES` (`style-fingerprint.ts`) |
 | `iacProjection` | Infrastructure-as-code projection (resources/edges) onto the unified graph. | `isIacLanguage()` / `IAC_LANGUAGES` (`iac/types.ts`) |
-| `crossServiceHttp` | Cross-service API topology: outbound HTTP client call sites (`fetch`/`axios`/`ky`/`got`) and/or server route registrations are matched into `http_endpoint` edges across the process (and, under federation, the repo) boundary, so `analyze_impact`/`find_path`/`blast_radius` answer "who calls this endpoint?". Clients: TS/JS; routes: TS/JS (Express/NestJS/Next), Python (FastAPI/Flask/Django), Java (Spring/JAX-RS). | `CROSS_SERVICE_HTTP_LANGUAGES` (`http-route-parser.ts`) |
-| `errorPropagation` | Static throw/raise + typed/untyped catch extraction, so `analyze_error_propagation` can compute the exceptions that escape a function vs. those caught within it. Throw types resolved from `throw new X()` / `raise X()`; TS/JS `catch` is catch-all, Python `except` matched by exact name (no subclass hierarchy); containment is byte-precise. Backed for TypeScript/JavaScript/Python. | `ERROR_PROPAGATION_LANGUAGES` (`exception-flow.ts`) |
+| `crossServiceHttp` | Cross-service API topology: outbound HTTP client call sites and/or server route registrations are matched into `http_endpoint` edges across the process (and, under federation, the repo) boundary. Clients: TS/JS (`fetch`/`axios`/`ky`/`got`), Python (`requests`/`httpx`), and Go (`net/http`); routes: TS/JS (Express/NestJS/Next), Python (FastAPI/Flask/Django), Java (Spring/JAX-RS). | `CROSS_SERVICE_HTTP_LANGUAGES` (`http-route-parser.ts`) |
+| `errorPropagation` | Static exception escape/handler extraction for TypeScript, JavaScript, Python, Java, and C#; Java/C# typed handlers are exact-name lower bounds, with finally/resource-cleanup limits disclosed. Go uses a separate value-shaped model for proven returned-error positions and a narrow unconditional deferred-recover pattern; ambiguous result types, unwind ordering, and unresolved calls are boundaries, never exception terminology. | `ERROR_PROPAGATION_LANGUAGES` (`exception-flow.ts`) |
 
 ## The registry is derived, not hand-listed
 
@@ -80,8 +80,9 @@ an existing one to a new capability:
      names, or a dedicated extractor for a native grammar; add `L` to `CALLGRAPH_LANGUAGES`.
    - `complexity`: add a grammar-shaped decision pattern to `CC_PATTERNS`
      (`call-graph-complexity.ts`) and a shape fixture to `call-graph-complexity.test.ts`.
-   - `cfgOverlay`: add a `CfgLangSpec` to `SPEC_BY_LANGUAGE` (`cfg.ts`) — that is all `cfgOverlay`
-     needs (the registry reads `cfgSupportsLanguage` directly).
+   - `cfgOverlay`: add a `CfgLangSpec` to `SPEC_BY_LANGUAGE` (`cfg.ts`), including a small
+     grammar-shape adapter when the language uses positional control-flow nodes; the registry reads
+     `cfgSupportsLanguage` directly.
    - `signatures`: add a case to `extractSignatures` (or an `EXTRA_LANG_PATTERNS` row) and add `L` to
      `SIGNATURE_LANGUAGES`.
    - `typeInference`: add a case to `inferTypesFromSource` and add `L` to `TYPE_INFERENCE_LANGUAGES`.

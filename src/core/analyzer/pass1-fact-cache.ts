@@ -58,7 +58,7 @@ const NO_FACT_CACHE_ENV = 'OPENLORE_NO_FACT_CACHE';
  * Serialized-payload format version. Bump when {@link serializeFacts} changes shape — it is
  * folded into the stamp, so a bump invalidates every row written by an older format.
  */
-const FACT_FORMAT_VERSION = 3;
+const FACT_FORMAT_VERSION = 5;
 
 /** One file's Pass-1 facts as they are stored. */
 export interface Pass1FactRow {
@@ -150,6 +150,8 @@ interface SerializedFacts {
   h?: FileExtractResult['parseHealth'];
   r?: FileExtractResult['classRelationships'];
   d?: FileExtractResult['dynamicDispatch'];
+  t?: FileExtractResult['httpCalls'];
+  x?: FileExtractResult['httpDegradations'];
 }
 
 /**
@@ -168,6 +170,8 @@ export function serializeFacts(facts: FileExtractResult | undefined): string {
   if (facts.parseHealth) payload.h = facts.parseHealth;
   if (facts.classRelationships?.length) payload.r = facts.classRelationships;
   if (facts.dynamicDispatch) payload.d = facts.dynamicDispatch;
+  if (facts.httpCalls !== undefined) payload.t = facts.httpCalls;
+  if (facts.httpDegradations?.length) payload.x = facts.httpDegradations;
   return JSON.stringify(payload);
 }
 
@@ -194,6 +198,8 @@ export function deserializeFacts(raw: string): { facts: FileExtractResult | unde
   if (p.h) facts.parseHealth = p.h;
   if (p.r) facts.classRelationships = p.r;
   if (p.d) facts.dynamicDispatch = p.d;
+  if (p.t !== undefined) facts.httpCalls = p.t;
+  if (p.x) facts.httpDegradations = p.x;
   return { facts };
 }
 

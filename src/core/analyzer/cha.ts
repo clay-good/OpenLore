@@ -28,7 +28,7 @@
  */
 import type { FunctionNode, ClassNode, InheritanceEdge, CallEdge } from './call-graph.js';
 import type { ImportMap } from './import-resolver-bridge.js';
-import { inferTypesFromSource } from './type-inference-engine.js';
+import { inferReceiverTypeAt, inferTypesFromSource } from './type-inference-engine.js';
 import { logger } from '../../utils/logger.js';
 
 /** Per-call-site / per-base-method target fan-out cap — mirrors the dynamic-dispatch bound. */
@@ -42,6 +42,7 @@ export interface RawMethodCall {
   /** Method name `m`. */
   method: string;
   line: number;
+  offset?: number;
 }
 
 const SELF_RECEIVERS = new Set(['self', 'this', 'cls']);
@@ -337,16 +338,22 @@ function synthesizeVirtualDispatchEdges(
     if (SELF_RECEIVERS.has(call.recv)) {
       declaredType = caller.className; // self/this/cls dispatch over the enclosing class subtree
     } else {
+      const content = fileContents.get(caller.filePath);
+      const body = content && caller.startIndex !== undefined && caller.endIndex !== undefined
+        ? content.slice(caller.startIndex, caller.endIndex)
+        : '';
+      if ((caller.language === 'Kotlin' || caller.language === 'Dart') && call.offset !== undefined) {
+        declaredType = inferReceiverTypeAt(body, caller.language, call.recv, call.offset - caller.startIndex);
+        // Name-only hierarchy fan-out would undo the call-site binding contract.
+        if (!declaredType) continue;
+      } else {
       let inferred = typesByCaller.get(call.callerId);
       if (!inferred) {
-        const content = fileContents.get(caller.filePath);
-        const body = content && caller.startIndex !== undefined && caller.endIndex !== undefined
-          ? content.slice(caller.startIndex, caller.endIndex)
-          : '';
         inferred = body ? inferTypesFromSource(body, caller.language) : new Map();
         typesByCaller.set(call.callerId, inferred);
       }
       declaredType = inferred.get(call.recv);
+      }
     }
 
     // ── Resolve targets + provenance label ──────────────────────────────────

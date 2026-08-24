@@ -14,8 +14,8 @@
  * the source the reachable functions span — the `find_clones` precedent: no new
  * persisted artifact, no schema migration, no edit to the hot analyze walk.
  *
- * Scope: TypeScript / JavaScript / Python (the languages with cleanly extractable
- * throw + typed/untyped catch semantics). A query in any other language returns an
+ * Scope: TypeScript / JavaScript / Python / Java / C# exception semantics and a
+ * separate Go returned-error + panic/recover model. A query in any other language returns an
  * explicit `unsupported` result, never an empty escape set.
  */
 
@@ -29,7 +29,11 @@ import {
   extractExceptionFacts,
   guardsCatch,
   DYNAMIC_TYPE,
+  extractGoErrorFacts,
+  resolveCurrentFunctionSpan,
+  rootAstIndexWithinBudget,
   type FunctionExceptionFacts,
+  type GoErrorFacts,
 } from '../../analyzer/exception-flow.js';
 import type { SerializedCallGraph, FunctionNode, CallEdge, AmbiguousCallSite } from '../../analyzer/call-graph.js';
 import { parseWithBudget, type BudgetableParser } from '../../analyzer/parse-budget.js';
@@ -47,12 +51,21 @@ const MIN_DEPTH = 1;
 const MAX_DEPTH = 30;
 /** Cap on functions parsed for one query — bounds work on a huge subtree. */
 const MAX_FUNCTIONS = 800;
+const MAX_SOURCE_FILE_BYTES = 4 * 1024 * 1024;
+const MAX_TOTAL_SOURCE_BYTES = 64 * 1024 * 1024;
+
+function releaseTrees(trees: Map<string, Parser.Tree | null>): void {
+  for (const tree of trees.values()) {
+    try { (tree as Parser.Tree & { delete?: () => void } | null)?.delete?.(); } catch { /* best-effort native resource release */ }
+  }
+  trees.clear();
+}
 
 /** One exception that can escape the query function. */
 interface EscapeEntry {
   type: string;
   /** 'direct' = thrown by the query itself; 'propagated' = from a callee. */
-  kind: 'direct' | 'propagated';
+  kind: 'direct' | 'declared' | 'propagated';
   originFunction: string;
   originFile: string;
   originLine: number;
@@ -165,6 +178,17 @@ export async function handleAnalyzeErrorPropagation(
     if (arr) arr.push(e);
     else calleesByCaller.set(e.callerId, [e]);
   }
+  // Artifact edge order is not semantic, but every traversal below is budgeted.
+  // Canonicalize before consuming a function/byte budget so reversing persisted
+  // edges cannot change which subtree is analyzed or which boundary is reported.
+  for (const outgoing of calleesByCaller.values()) {
+    outgoing.sort((a, b) =>
+      (a.line ?? -1) - (b.line ?? -1) ||
+      a.calleeId.localeCompare(b.calleeId) ||
+      a.calleeName.localeCompare(b.calleeName) ||
+      (a.confidence ?? '').localeCompare(b.confidence ?? '') ||
+      (a.kind ?? '').localeCompare(b.kind ?? ''));
+  }
   // Unresolved-ambiguous call sites indexed by caller (change:
   // harden-call-resolution-ambiguity) — a call the resolver refused to bind because
   // >1 candidate was viable. Like an unresolved self-call, its callees' exceptions are
@@ -180,8 +204,200 @@ export async function handleAnalyzeErrorPropagation(
     ? Math.max(MIN_DEPTH, Math.min(input.maxDepth as number, MAX_DEPTH))
     : DEFAULT_DEPTH;
 
+  // Go is deliberately analyzed through returned values + panic/recover, not
+  // through the exception-shaped ThrowSite/TryGuard machinery below.
+  if (query.language === 'Go') {
+    const trees = new Map<string, Parser.Tree | null>();
+    const degradedFiles = new Set<string>();
+    const cache = new Map<string, GoErrorFacts | null>();
+    const boundaries = new Set<string>();
+    const external = new Set<string>();
+    const testCallees = new Set<string>();
+    let analyzed = 0;
+    let sourceBytes = 0;
+    let bounded = false;
+    let lastGoFactsTruncated = false;
+
+    async function factsForGo(n: FunctionNode): Promise<GoErrorFacts | null> {
+      lastGoFactsTruncated = false;
+      if (cache.has(n.id)) return cache.get(n.id)!;
+      if (n.language !== 'Go') {
+        boundaries.add(`callee in unsupported language not analyzed (${n.language})`);
+        cache.set(n.id, null);
+        return null;
+      }
+      if (!(n.startIndex < n.endIndex)) {
+        boundaries.add(`Go callee has no extractable body (${labelOf(n)})`);
+        cache.set(n.id, null);
+        return null;
+      }
+      if (analyzed >= MAX_FUNCTIONS) { bounded = true; lastGoFactsTruncated = true; return null; }
+      let tree = trees.get(n.filePath);
+      if (tree === undefined) {
+        try {
+          const source = await readFileConfined(absDir, n.filePath, MAX_SOURCE_FILE_BYTES);
+          const bytes = Buffer.byteLength(source);
+          if (sourceBytes + bytes > MAX_TOTAL_SOURCE_BYTES) {
+            bounded = true;
+            boundaries.add(`source byte budget exceeded (≤ ${MAX_TOTAL_SOURCE_BYTES} bytes); ${n.filePath} not analyzed`);
+            tree = null;
+          } else {
+            sourceBytes += bytes;
+          const parser = await getExceptionParser('Go', n.filePath);
+          tree = parser ? parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, source) : null;
+          if (tree?.rootNode.hasError) degradedFiles.add(n.filePath);
+          }
+        } catch (error) {
+          if (error instanceof Error && error.message.includes('exceeds byte limit')) {
+            boundaries.add(`source file exceeds per-file byte budget (≤ ${MAX_SOURCE_FILE_BYTES} bytes); ${n.filePath} not analyzed`);
+          }
+          tree = null;
+        }
+        trees.set(n.filePath, tree);
+      }
+      if (!tree) {
+        boundaries.add(`source unreadable or too costly to parse — re-run analyze_codebase (${n.filePath})`);
+        cache.set(n.id, null);
+        return null;
+      }
+      if (degradedFiles.has(n.filePath)) {
+        boundaries.add(`source contains syntax errors — re-run analyze_codebase after fixing (${n.filePath})`);
+        cache.set(n.id, null);
+        return null;
+      }
+      if (!rootAstIndexWithinBudget(tree.rootNode)) {
+        boundaries.add(`AST traversal budget exceeded — ${n.filePath} not analyzed`);
+        cache.set(n.id, null);
+        return null;
+      }
+      const span = resolveCurrentFunctionSpan(tree.rootNode, n.startIndex, n.endIndex, n.language, n.name);
+      if (!span) {
+        boundaries.add(`indexed function span is stale — re-run analyze_codebase (${labelOf(n)})`);
+        cache.set(n.id, null);
+        return null;
+      }
+      if (span.startIndex !== n.startIndex || span.endIndex !== n.endIndex) {
+        boundaries.add(`indexed function span changed and was re-resolved — re-run analyze_codebase (${labelOf(n)})`);
+      }
+      analyzed++;
+      const facts = extractGoErrorFacts(tree.rootNode, span.startIndex, span.endIndex);
+      for (const b of facts.boundaries) boundaries.add(`${n.filePath}: ${b}`);
+      cache.set(n.id, facts);
+      return facts;
+    }
+
+    interface GoEscape { value: string; kind: 'returned_error' | 'propagated_error' | 'panic'; originFunction: string; originFile: string; originLine: number; path: string[] }
+    interface GoHandled { value: string; kind: 'checked_error' | 'recovered_panic'; handledIn: string; handledAtLine: number; fromCallee?: string }
+    const handled: GoHandled[] = [];
+    const memo = new Map<string, GoEscape[]>();
+    async function walk(n: FunctionNode, depth: number, stack: Set<string>): Promise<{ esc: GoEscape[]; complete: boolean }> {
+      if (stack.has(n.id)) return { esc: [], complete: true };
+      if (depth > depthBound) { bounded = true; boundaries.add(`traversal bounded at depth ${depthBound}; deeper callees not analyzed`); return { esc: [], complete: false }; }
+      if (memo.has(n.id)) return { esc: memo.get(n.id)!, complete: true };
+      const facts = await factsForGo(n);
+      if (!facts) return { esc: [], complete: !lastGoFactsTruncated };
+      const self = labelOf(n);
+      const out: GoEscape[] = facts.escapes.map(e => ({ value: e.value, kind: e.kind, originFunction: self, originFile: n.filePath, originLine: e.line, path: [self] }));
+      for (const h of facts.handledInternally) handled.push({ value: h.value, kind: h.kind, handledIn: self, handledAtLine: h.line, fromCallee: h.fromCallee });
+      let complete = true;
+      const resolvedSites = new Set((calleesByCaller.get(n.id) ?? []).map(e => `${e.calleeName}@${e.line ?? -1}`));
+      for (const site of facts.callSites) {
+        if (!resolvedSites.has(`${site.calleeName}@${site.line}`)) boundaries.add(`${self}:${site.line} call to ${site.calleeName} has no resolved call-graph edge`);
+      }
+      for (const discarded of facts.discardedResults) {
+        if (!resolvedSites.has(`${discarded.calleeName}@${discarded.line}`)) {
+          boundaries.add(`${self}:${discarded.line} discarded result ${discarded.resultIndex} from unresolved ${discarded.calleeName || 'call'} may contain an error`);
+        }
+      }
+      for (const site of ambiguousByCaller.get(n.id) ?? []) boundaries.add(`${self}:${site.line ?? '?'} call to ${site.calleeName} is unresolved-ambiguous (${site.candidateCount} candidates)`);
+      const next = new Set(stack); next.add(n.id);
+      for (const edge of calleesByCaller.get(n.id) ?? []) {
+        const callee = nodeById.get(edge.calleeId);
+        const matchingDiscarded = facts.discardedResults.filter(d =>
+          d.calleeName === edge.calleeName && d.line === (edge.line ?? -1)
+        );
+        if (!callee || callee.isExternal) {
+          external.add(edge.calleeName);
+          for (const discarded of matchingDiscarded) boundaries.add(`${self}:${discarded.line} discarded result ${discarded.resultIndex} from unresolved ${edge.calleeName} may contain an error`);
+          continue;
+        }
+        if (callee.isTest) { testCallees.add(edge.calleeName); continue; }
+        if (callee.id === n.id) continue;
+        const calleeFacts = await factsForGo(callee);
+        const returnsChildError = calleeFacts?.returnsError === true;
+        const matchingCallSites = facts.callSites.filter(site => site.calleeName === edge.calleeName && site.line === (edge.line ?? -1));
+        const siteUnambiguous = matchingCallSites.length === 1;
+        if (matchingCallSites.length > 1) boundaries.add(`${self}:${edge.line ?? '?'} has multiple ${edge.calleeName} call sites on one line; error handling/return attribution is not proven`);
+        for (const discarded of matchingDiscarded) {
+          if (!calleeFacts) boundaries.add(`${self}:${discarded.line} discarded result ${discarded.resultIndex} from ${labelOf(callee)} could not be typed`);
+          else if (calleeFacts.errorResultIndices.includes(discarded.resultIndex)) boundaries.add(`${self}:${discarded.line} discards error result ${discarded.resultIndex} from ${labelOf(callee)}`);
+        }
+        const callerReturns = facts.escapes.some(s =>
+          siteUnambiguous && s.kind === 'returned_error' && s.calleeName === edge.calleeName && s.callLine === (edge.line ?? -1) &&
+          (s.callResultIndex === undefined || calleeFacts?.errorResultIndices.includes(s.callResultIndex))
+        );
+        const checkedCandidate = facts.checkedCandidates.find(s =>
+          siteUnambiguous && s.fromCallee === edge.calleeName && s.callLine === (edge.line ?? -1) &&
+          s.callResultIndex !== undefined && calleeFacts?.errorResultIndices.includes(s.callResultIndex)
+        );
+        const callerHandles = checkedCandidate !== undefined;
+        if (checkedCandidate) handled.push({ value: checkedCandidate.value, kind: 'checked_error', handledIn: self, handledAtLine: checkedCandidate.line, fromCallee: labelOf(callee) });
+        if (returnsChildError && !callerReturns && !callerHandles) {
+          boundaries.add(`${self}:${edge.line ?? '?'} ignores an error result from ${labelOf(callee)}`);
+        }
+        const childResult = await walk(callee, depth + 1, next);
+        if (!childResult.complete) complete = false;
+        for (const child of childResult.esc) {
+          if (child.kind === 'panic') {
+            const recoveredAtSite = facts.recoveryDeferIndex !== undefined && facts.callSites.some(site =>
+              site.calleeName === edge.calleeName && site.line === (edge.line ?? -1) && facts.recoveryDeferIndex! < site.index
+            );
+            if (recoveredAtSite) handled.push({ value: child.value, kind: 'recovered_panic', handledIn: self, handledAtLine: edge.line ?? 0, fromCallee: labelOf(callee) });
+            else out.push({ ...child, path: [self, ...child.path] });
+          } else if (callerReturns) {
+            const proxyLines = new Set(facts.escapes.filter(s => s.kind === 'returned_error' && s.calleeName === edge.calleeName && s.callLine === (edge.line ?? -1)).map(s => s.line));
+            for (let i = out.length - 1; i >= 0; i--) {
+              if (out[i].originFunction === self && out[i].kind === 'returned_error' && proxyLines.has(out[i].originLine)) out.splice(i, 1);
+            }
+            out.push({ ...child, kind: 'propagated_error', path: [self, ...child.path] });
+          }
+        }
+      }
+      const byKey = new Map<string, GoEscape>();
+      for (const escape of out) {
+        const key = `${escape.kind}@@${escape.originFunction}@@${escape.originLine}@@${escape.value}`;
+        const previous = byKey.get(key);
+        const pathKey = escape.path.join('\0');
+        const previousPathKey = previous?.path.join('\0') ?? '';
+        if (!previous || escape.path.length < previous.path.length ||
+          (escape.path.length === previous.path.length && pathKey < previousPathKey)) byKey.set(key, escape);
+      }
+      const deduped = [...byKey.values()];
+      if (complete) memo.set(n.id, deduped);
+      return { esc: deduped, complete };
+    }
+    const escapes = (await walk(query, 0, new Set())).esc;
+    escapes.sort((a, b) => a.kind.localeCompare(b.kind) || a.originFunction.localeCompare(b.originFunction) ||
+      a.originLine - b.originLine || a.value.localeCompare(b.value) || a.path.join('\0').localeCompare(b.path.join('\0')));
+    const handledList = [...new Map(handled.map(h => [`${h.kind}@@${h.handledIn}@@${h.handledAtLine}@@${h.value}@@${h.fromCallee ?? ''}`, h])).values()]
+      .sort((a, b) => a.kind.localeCompare(b.kind) || a.handledIn.localeCompare(b.handledIn) ||
+        a.handledAtLine - b.handledAtLine || a.value.localeCompare(b.value) || (a.fromCallee ?? '').localeCompare(b.fromCallee ?? ''));
+    if (bounded) boundaries.add(`analysis bounded (≤ ${MAX_FUNCTIONS} functions / depth ${depthBound}); some callees not analyzed`);
+    if (external.size) boundaries.add(`${external.size} external/unresolved callee(s) not analyzed — their returned errors and panics are out of scope, never assumed none.`);
+    if (testCallees.size) boundaries.add(`${testCallees.size} test-only callee(s) excluded from the production Go error-flow result.`);
+    releaseTrees(trees);
+    return {
+      query: queryLabel, errorModel: 'go-value',
+      summary: { escapes: escapes.length, returnedErrors: escapes.filter(e => e.kind !== 'panic').length, panics: escapes.filter(e => e.kind === 'panic').length, propagated: escapes.filter(e => e.kind === 'propagated_error').length, handledInternally: handledList.length, functionsAnalyzed: analyzed, externalCalleesNotAnalyzed: external.size },
+      escapes, handledInternally: handledList, boundaries: [...boundaries].sort(),
+      ...(external.size ? { externalCalleesNotAnalyzed: { count: external.size, sample: [...external].sort().slice(0, 15) } } : {}),
+      note: 'Go model: escapes are returned error values and unrecovered panics; handledInternally are checked-and-not-returned errors and recovered panics. This is a sound lower bound: unresolved calls and discarded results are disclosed in boundaries.',
+    };
+  }
+
   // ── Live exception-facts cache (parse each file once) ──────────────────────
   const treeByFile = new Map<string, Parser.Tree | null>();
+  const degradedFiles = new Set<string>();
   const factsById = new Map<string, FunctionExceptionFacts | null>();
   const boundaries = new Set<string>();
   // External / unresolved callees are collapsed into a counted summary so a few
@@ -198,6 +414,7 @@ export async function handleAnalyzeErrorPropagation(
   // disclosed once regardless of how often the node is revisited.
   const ambiguousCallSites = new Map<string, string>();
   let parsedCount = 0;
+  let sourceBytes = 0;
   let capHit = false;
   // Set true by factsFor ONLY when it returned null because the parse cap was hit
   // (a budget truncation) — distinct from a genuine terminal null (unsupported
@@ -227,13 +444,25 @@ export async function handleAnalyzeErrorPropagation(
       try {
         // Re-check at the point of use as defense in depth: artifact nodes were
         // normalized above, but the filesystem may contain symlinks.
-        const content = await readFileConfined(absDir, n.filePath);
+        const content = await readFileConfined(absDir, n.filePath, MAX_SOURCE_FILE_BYTES);
+        const bytes = Buffer.byteLength(content);
+        if (sourceBytes + bytes > MAX_TOTAL_SOURCE_BYTES) {
+          capHit = true;
+          boundaries.add(`source byte budget exceeded (≤ ${MAX_TOTAL_SOURCE_BYTES} bytes); ${n.filePath} not analyzed`);
+          tree = null;
+        } else {
+          sourceBytes += bytes;
         const parser = await getExceptionParser(n.language, n.filePath);
         // Bounded (change: fix-analyze-native-abort-and-file-cost-budget): this parse runs inside
         // the long-lived daemon, so one pathological file must not be able to wedge it. On the
         // budget the file becomes a disclosed boundary below, never a silent "no exceptions".
         tree = parser ? parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, content) : null;
-      } catch {
+        if (tree?.rootNode.hasError) degradedFiles.add(n.filePath);
+        }
+      } catch (error) {
+        if (error instanceof Error && error.message.includes('exceeds byte limit')) {
+          boundaries.add(`source file exceeds per-file byte budget (≤ ${MAX_SOURCE_FILE_BYTES} bytes); ${n.filePath} not analyzed`);
+        }
         tree = null;
       }
       treeByFile.set(n.filePath, tree);
@@ -243,12 +472,32 @@ export async function handleAnalyzeErrorPropagation(
       factsById.set(n.id, null);
       return null;
     }
+    if (degradedFiles.has(n.filePath)) {
+      boundaries.add(`source contains syntax errors — re-run analyze_codebase after fixing (${n.filePath})`);
+      factsById.set(n.id, null);
+      return null;
+    }
+    if (!rootAstIndexWithinBudget(tree.rootNode)) {
+      boundaries.add(`AST traversal budget exceeded — ${n.filePath} not analyzed`);
+      factsById.set(n.id, null);
+      return null;
+    }
+    const span = resolveCurrentFunctionSpan(tree.rootNode, n.startIndex, n.endIndex, n.language, n.name);
+    if (!span) {
+      boundaries.add(`indexed function span is stale — re-run analyze_codebase (${labelOf(n)})`);
+      factsById.set(n.id, null);
+      return null;
+    }
+    if (span.startIndex !== n.startIndex || span.endIndex !== n.endIndex) {
+      boundaries.add(`indexed function span changed and was re-resolved — re-run analyze_codebase (${labelOf(n)})`);
+    }
     parsedCount++;
-    const facts = extractExceptionFacts(tree.rootNode, n.startIndex, n.endIndex, n.language);
+    const facts = extractExceptionFacts(tree.rootNode, span.startIndex, span.endIndex, n.language);
     factsById.set(n.id, facts);
+    for (const boundary of facts.boundaries) boundaries.add(`${n.filePath}: ${boundary}`);
     if (facts.tryGuards.some(g => g.caughtTypes.length > 0)) {
       boundaries.add(
-        'Python typed `except` is matched by exact type name only — subclass catches are not ' +
+        `${facts.language} typed handlers are matched by exact type name only — subclass catches are not ` +
           'modeled, so a typed handler may catch more than reported (conservative: it propagates).',
       );
     }
@@ -276,19 +525,26 @@ export async function handleAnalyzeErrorPropagation(
     return matches.every(cs => guardsCatch(cs.guards, type));
   }
 
+  function suppressedAtCallSite(facts: FunctionExceptionFacts, edge: CallEdge): boolean {
+    const matches = facts.callSites.filter(
+      cs => cs.calleeName === edge.calleeName && cs.line === (edge.line ?? -1),
+    );
+    return matches.length > 0 && matches.every(cs => cs.guards.some(g => g.suppresses));
+  }
+
   async function escapes(
     n: FunctionNode,
     depth: number,
     stack: Set<string>,
   ): Promise<{ esc: EscapeEntry[]; complete: boolean }> {
-    const cached = memo.get(n.id);
-    if (cached) return { esc: cached, complete: true };
     if (stack.has(n.id)) return { esc: [], complete: true }; // cycle back-edge — no new escapes
     if (depth > depthBound) {
       capHit = true;
       boundaries.add(`traversal bounded at depth ${depthBound}; deeper callees not analyzed`);
       return { esc: [], complete: false };
     }
+    const cached = memo.get(n.id);
+    if (cached) return { esc: cached, complete: true };
 
     const facts = await factsFor(n);
     if (!facts || !facts.supported) {
@@ -308,7 +564,7 @@ export async function handleAnalyzeErrorPropagation(
     const myEdges = calleesByCaller.get(n.id) ?? [];
     const resolvedHere = new Set(myEdges.map(e => `${e.calleeName}@${e.line ?? -1}`));
     for (const cs of facts.callSites) {
-      if (cs.receiver !== 'self') continue;
+      if (cs.receiver !== 'self' && cs.receiver !== 'constructor') continue;
       if (resolvedHere.has(`${cs.calleeName}@${cs.line}`)) continue;
       unresolvedSelfCalls.set(`${n.id}@${cs.line}@${cs.calleeName}`, `${selfLabel}:${cs.line} (${cs.calleeName})`);
     }
@@ -330,7 +586,7 @@ export async function handleAnalyzeErrorPropagation(
       if (ts.locallyHandled) continue;
       out.push({
         type: ts.type,
-        kind: 'direct',
+        kind: ts.source === 'throws_clause' ? 'declared' : 'direct',
         originFunction: selfLabel,
         originFile: n.filePath,
         originLine: ts.line,
@@ -355,7 +611,9 @@ export async function handleAnalyzeErrorPropagation(
       const child = await escapes(callee, depth + 1, nextStack);
       if (!child.complete) complete = false;
       for (const e of child.esc) {
-        if (caughtAtCallSite(facts, edge, e.type)) {
+        if (suppressedAtCallSite(facts, edge)) {
+          continue;
+        } else if (caughtAtCallSite(facts, edge, e.type)) {
           handled.push({
             type: e.type,
             caughtIn: selfLabel,
@@ -371,9 +629,12 @@ export async function handleAnalyzeErrorPropagation(
     // Dedupe by (type, origin) keeping the shortest path — a stable set.
     const byKey = new Map<string, EscapeEntry>();
     for (const e of out) {
-      const key = `${e.type}@@${e.originFunction}@@${e.originLine}`;
+      const key = `${e.kind}@@${e.type}@@${e.originFunction}@@${e.originLine}`;
       const prev = byKey.get(key);
-      if (!prev || e.path.length < prev.path.length) byKey.set(key, e);
+      const pathKey = e.path.join('\0');
+      const previousPathKey = prev?.path.join('\0') ?? '';
+      if (!prev || e.path.length < prev.path.length ||
+        (e.path.length === prev.path.length && pathKey < previousPathKey)) byKey.set(key, e);
     }
     const deduped = [...byKey.values()];
     if (complete) memo.set(n.id, deduped); // never cache a truncated result
@@ -384,13 +645,14 @@ export async function handleAnalyzeErrorPropagation(
 
   // Dedupe handled events.
   const handledByKey = new Map<string, HandledEntry>();
-  for (const h of handled) handledByKey.set(`${h.type}@@${h.caughtIn}@@${h.fromCallee}`, h);
+  for (const h of handled) handledByKey.set(`${h.type}@@${h.caughtIn}@@${h.caughtAtLine}@@${h.fromCallee}`, h);
   const handledList = [...handledByKey.values()];
 
   // Stable, deterministic ordering (full tiebreak set so cache edge order never
   // perturbs output for entries that differ only in a later field).
   const sortEsc = (a: EscapeEntry, b: EscapeEntry): number =>
-    a.type.localeCompare(b.type) || a.originFunction.localeCompare(b.originFunction) || a.originLine - b.originLine;
+    a.type.localeCompare(b.type) || a.originFunction.localeCompare(b.originFunction) || a.originLine - b.originLine ||
+    a.kind.localeCompare(b.kind) || a.path.join('\0').localeCompare(b.path.join('\0'));
   escapeList.sort(sortEsc);
   handledList.sort(
     (a, b) =>
@@ -418,8 +680,8 @@ export async function handleAnalyzeErrorPropagation(
   const unresolvedSelfSample = [...unresolvedSelfCalls.values()].sort();
   if (unresolvedSelfCalls.size > 0) {
     boundaries.add(
-      `${unresolvedSelfCalls.size} intra-object call site(s) (this./super./self./cls.) could not be ` +
-        'resolved to an indexed method (a call-graph resolution limit) — their exceptions are out of ' +
+      `${unresolvedSelfCalls.size} intra-object call site(s) or constructor call(s) could not be ` +
+        'resolved to an indexed target (a call-graph resolution limit) — their exceptions are out of ' +
         'scope, NEVER assumed none. A clean escape set does not clear these paths.',
     );
   }
@@ -434,14 +696,18 @@ export async function handleAnalyzeErrorPropagation(
   }
 
   const directCount = escapeList.filter(e => e.kind === 'direct').length;
+  const declaredCount = escapeList.filter(e => e.kind === 'declared').length;
+  const propagatedCount = escapeList.filter(e => e.kind === 'propagated').length;
   const dynamicCount = escapeList.filter(e => e.type === DYNAMIC_TYPE).length;
 
+  releaseTrees(treeByFile);
   return {
     query: queryLabel,
     summary: {
       escapes: escapeList.length,
       direct: directCount,
-      propagated: escapeList.length - directCount,
+      propagated: propagatedCount,
+      ...(declaredCount > 0 ? { declared: declaredCount } : {}),
       dynamic: dynamicCount,
       handledInternally: handledList.length,
       functionsAnalyzed: parsedCount,

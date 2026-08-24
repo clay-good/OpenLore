@@ -2093,6 +2093,270 @@ describe('CallGraphBuilder — Swift', () => {
   });
 });
 
+describe('widened receiver type inference', () => {
+  for (const fixture of [
+    {
+      language: 'Kotlin', path: 'Parser.kt', caller: 'useParser', callee: 'run',
+      content: 'class Parser { fun run() {} }\nfun useParser() { val p = Parser(); p.run() }',
+    },
+    {
+      language: 'Dart', path: 'parser.dart', caller: 'useParser', callee: 'run',
+      content: 'class Parser { void run() {} }\nvoid useParser() { final p = Parser(); p.run(); }',
+    },
+  ]) {
+    it(`${fixture.language} resolves a local receiver through its constructor type`, async () => {
+      const result = await new CallGraphBuilder().build([fixture]);
+      const caller = [...result.nodes.values()].find(n => n.name === fixture.caller);
+      const callee = [...result.nodes.values()].find(n => n.name === fixture.callee && n.className === 'Parser');
+      const edge = result.edges.find(e => e.callerId === caller?.id && e.calleeId === callee?.id);
+      expect(edge?.confidence).toBe('type_inference');
+    });
+  }
+
+  for (const fixture of [
+    { language: 'Kotlin', path: 'post-shadow.kt', content: 'class A { fun run() {} }\nclass B { fun run() {} }\nfun use(){ val p=A(); run { val p=B() }; p.run() }' },
+    { language: 'Dart', path: 'post-shadow.dart', content: 'class A { void run() {} } class B { void run() {} }\nvoid use(){ final p=A(); { final p=B(); } p.run(); }' },
+  ]) {
+    it(`${fixture.language} retains the outer receiver after a closed shadow scope`, async () => {
+      const result = await new CallGraphBuilder().build([fixture]);
+      expect(result.edges).toContainEqual(expect.objectContaining({ callerId: `${fixture.path}::use`, calleeId: `${fixture.path}::A.run`, confidence: 'type_inference' }));
+    });
+  }
+
+  for (const fixture of [
+    { language: 'Kotlin', path: 'write.kt', content: 'class A { fun run() {} }\nclass B { fun run() {} }\nfun use(){ var p=A(); p=B(); p.run() }' },
+    { language: 'Dart', path: 'write.dart', content: 'class A { void run() {} }\nclass B { void run() {} }\nvoid use(){ var p=A(); p=B(); p.run(); }' },
+  ]) {
+    it(`${fixture.language} refuses dispatch after an unmodeled receiver write`, async () => {
+      const result = await new CallGraphBuilder().build([fixture]);
+      const calls = result.edges.filter(edge => edge.callerId === `${fixture.path}::use` && edge.calleeName === 'run');
+      expect(calls.every(edge => edge.confidence === 'external')).toBe(true);
+    });
+  }
+
+  for (const fixture of [
+    {
+      language: 'Kotlin', path: 'annotated.kt',
+      content: 'class Parser { fun run() {} }\nfun provide(): Parser = Parser()\nfun use() { val p: Parser = provide(); p.run() }',
+    },
+    {
+      language: 'Dart', path: 'annotated.dart',
+      content: 'class Parser { void run() {} }\nParser provide() => Parser();\nvoid use() { final Parser p = provide(); p.run(); }',
+    },
+  ]) {
+    it(`${fixture.language} dispatches an explicitly annotated receiver end to end`, async () => {
+      const result = await new CallGraphBuilder().build([fixture]);
+      expect(result.edges).toContainEqual(expect.objectContaining({
+        callerId: `${fixture.path}::use`,
+        calleeId: `${fixture.path}::Parser.run`,
+        confidence: 'type_inference',
+      }));
+    });
+  }
+
+  for (const fixture of [
+    {
+      language: 'Kotlin', path: 'shadow.kt',
+      content: 'class A { fun run() {} }\nclass B { fun run() {} }\nfun use() {\n val p = A()\n p.run()\n run { val p = B(); p.run() }\n}',
+    },
+    {
+      language: 'Dart', path: 'shadow.dart',
+      content: 'class A { void run() {} }\nclass B { void run() {} }\nvoid use() {\n final p = A();\n p.run();\n { final p = B(); p.run(); }\n}',
+    },
+  ]) {
+    it(`${fixture.language} resolves each shadowed receiver in its lexical scope`, async () => {
+      const result = await new CallGraphBuilder().build([fixture]);
+      const receiverCalls = result.edges.filter(edge => edge.callerId === `${fixture.path}::use` && edge.calleeName === 'run');
+      expect(receiverCalls).toEqual(expect.arrayContaining([
+        expect.objectContaining({ calleeId: `${fixture.path}::A.run`, confidence: 'type_inference' }),
+        expect.objectContaining({ calleeId: `${fixture.path}::B.run`, confidence: 'type_inference' }),
+      ]));
+    });
+  }
+
+  for (const fixture of [
+    { language: 'Kotlin', path: 'late.kt', content: 'class A { fun run() {} }\nfun use(){ p.run(); val p=A() }' },
+    { language: 'Dart', path: 'late.dart', content: 'class A { void run() {} }\nvoid use(){ p.run(); final p=A(); }' },
+  ]) {
+    it(`${fixture.language} does not resolve a receiver from a later declaration`, async () => {
+      const result = await new CallGraphBuilder().build([fixture]);
+      expect(result.edges.some(edge => edge.callerId === `${fixture.path}::use` && edge.calleeName === 'run' && edge.confidence !== 'external')).toBe(false);
+    });
+  }
+
+  it('does not attach the assigned variable as a receiver of a Dart constructor', async () => {
+    const result = await new CallGraphBuilder().build([{
+      language: 'Dart', path: 'parser.dart',
+      content: 'class Parser { void run() {} }\nvoid useParser() { final p = Parser(); p.run(); }',
+    }]);
+    expect(result.edges.some(e => e.calleeId === 'external::p.Parser')).toBe(false);
+    expect(result.edges.some(e => e.calleeId === 'parser.dart::Parser.run' && e.confidence === 'type_inference')).toBe(true);
+  });
+
+  it('records duplicate inferred receiver types as ambiguity independent of file order', async () => {
+    const parser = (path: string) => ({ path, language: 'Kotlin', content: 'class Parser { fun run() {} }' });
+    const caller = { path: 'use.kt', language: 'Kotlin', content: 'fun use() { val p = Parser(); p.run() }' };
+    const snapshots: string[] = [];
+    for (const files of [[parser('a.kt'), parser('z.kt'), caller], [parser('z.kt'), parser('a.kt'), caller]]) {
+      const result = await new CallGraphBuilder().build(files);
+      expect(result.edges.some(e => e.confidence === 'type_inference')).toBe(false);
+      const site = result.ambiguousSites?.find(s => s.strategy === 'type_inference' && s.calleeName === 'run');
+      expect(site?.candidateIds).toEqual(['a.kt::Parser.run', 'z.kt::Parser.run']);
+      snapshots.push(JSON.stringify(site));
+    }
+    expect(snapshots[0]).toBe(snapshots[1]);
+  });
+
+  it('uses same-file affinity for an inferred receiver when another file has the same class', async () => {
+    const result = await new CallGraphBuilder().build([
+      { path: 'local.kt', language: 'Kotlin', content: 'class Parser { fun run() {} }\nfun use() { val p = Parser(); p.run() }' },
+      { path: 'other.kt', language: 'Kotlin', content: 'class Parser { fun run() {} }' },
+    ]);
+    const edge = result.edges.find(e => e.confidence === 'type_inference');
+    expect(edge?.calleeId).toBe('local.kt::Parser.run');
+    expect(result.ambiguousSites?.some(s => s.strategy === 'type_inference')).not.toBe(true);
+  });
+});
+
+describe('HTTP call-site identity', () => {
+  it('rejects malformed client syntax and discloses the HTTP degradation', async () => {
+    const result = await new CallGraphBuilder().build([
+      { path: 'bad.py', language: 'Python', content: 'import requests\ndef f(:\n requests.get("/x")' },
+      { path: 'api.py', language: 'Python', content: 'from fastapi import FastAPI\napp=FastAPI()\n@app.get("/x")\ndef x(): return 1' },
+    ]);
+    expect(result.edges.some(edge => edge.confidence === 'http_endpoint')).toBe(false);
+    expect(result.httpClientDegradations).toContainEqual(expect.objectContaining({ file: 'bad.py', reason: 'parse-failure' }));
+  });
+
+  it('preserves traversal-budget degradation while healthy sibling edges survive', async () => {
+    const deep = `import requests\nx=${'('.repeat(5_000)}1${')'.repeat(5_000)}`;
+    const result = await new CallGraphBuilder().build([
+      { path: 'deep.py', language: 'Python', content: deep },
+      { path: 'client.py', language: 'Python', content: 'import requests\ndef load(): return requests.get("/x")' },
+      { path: 'api.py', language: 'Python', content: 'from fastapi import FastAPI\napp=FastAPI()\n@app.get("/x")\ndef x(): return 1' },
+    ]);
+    expect(result.edges).toContainEqual(expect.objectContaining({ callerId: 'client.py::load', calleeId: 'api.py::x', confidence: 'http_endpoint' }));
+    expect(result.httpClientDegradations).toContainEqual({ file: 'deep.py', reason: 'traversal-budget' });
+  });
+  it('wires two same-line functions that call the same endpoint', async () => {
+    const result = await new CallGraphBuilder().build([
+      {
+        path: 'client.ts', language: 'TypeScript',
+        content: 'function a(){ fetch("/x") } function b(){ fetch("/x") }',
+      },
+      {
+        path: 'api.py', language: 'Python',
+        content: 'from fastapi import FastAPI\napp=FastAPI()\n@app.get("/x")\ndef x(): return 1',
+      },
+    ]);
+    const httpEdges = result.edges.filter(edge => edge.confidence === 'http_endpoint');
+    expect(httpEdges.map(edge => edge.callerId).sort()).toEqual(['client.ts::a', 'client.ts::b']);
+  });
+
+  for (const fixture of [
+    {
+      language: 'Python', path: 'client.py', caller: 'load',
+      content: 'import httpx\nasync def load():\n async with httpx.AsyncClient() as c:\n  return await c.get("/x")',
+    },
+    {
+      language: 'Go', path: 'client.go', caller: 'Load',
+      content: 'package p\nimport "net/http"\nfunc Load(){ c:=http.DefaultClient; req,_:=http.NewRequest(http.MethodGet,"/x",nil); c.Do(req) }',
+    },
+  ]) {
+    it(`wires the canonical ${fixture.language} client flow to a route`, async () => {
+      const result = await new CallGraphBuilder().build([
+        fixture,
+        { path: 'api.py', language: 'Python', content: 'from fastapi import FastAPI\napp=FastAPI()\n@app.get("/x")\ndef x(): return 1' },
+      ]);
+      expect(result.edges).toContainEqual(expect.objectContaining({
+        callerId: `${fixture.path}::${fixture.caller}`,
+        calleeId: 'api.py::x',
+        confidence: 'http_endpoint',
+      }));
+    });
+  }
+});
+
+describe('widened CFG parameter and foreach semantics', () => {
+  it('Dart models a C-style for initializer, condition, and update', async () => {
+    const result = await new CallGraphBuilder().build([{
+      language: 'Dart', path: 'cstyle.dart',
+      content: 'void f(int n) {\n for (var i = 0; i < n; i++) { print(i); }\n}',
+    }]);
+    const cfg = [...(result.cfgs?.values() ?? [])][0];
+    expect(cfg?.defUse).toContainEqual(expect.objectContaining({ variable: 'n', defLine: 1, useLine: 2 }));
+    expect(cfg?.defUse).toContainEqual(expect.objectContaining({ variable: 'i', defLine: 2, useLine: 2 }));
+  });
+
+  it('Dart runs a C-style update after the body, not in the preheader', async () => {
+    const result = await new CallGraphBuilder().build([{
+      language: 'Dart', path: 'order.dart',
+      content: 'void f(int n) {\n var i = 0;\n for (; i < n; i++) {\n  print(i);\n }\n}',
+    }]);
+    const cfg = [...(result.cfgs?.values() ?? [])][0];
+    expect(cfg?.defUse).toContainEqual(expect.objectContaining({ variable: 'i', defLine: 2, useLine: 4 }));
+  });
+
+  it('Scala fails soft for multiple generators rather than dropping later header semantics', async () => {
+    const result = await new CallGraphBuilder().build([{
+      language: 'Scala', path: 'multi.scala',
+      content: 'object C { def f(xs: List[Int], ys: List[Int]) = {\n for { x <- xs; y <- ys } yield x + y\n} }',
+    }]);
+    expect([...(result.cfgs?.values() ?? [])]).toEqual([]);
+  });
+
+  it('Scala fails soft for a guarded generator rather than dropping its iterable', async () => {
+    const result = await new CallGraphBuilder().build([{
+      language: 'Scala', path: 'guard.scala',
+      content: 'object C { def f(xs: List[Int], limit: Int) = {\n for (x <- xs if x > limit) { println(x) }\n} }',
+    }]);
+    expect([...(result.cfgs?.values() ?? [])]).toEqual([]);
+  });
+
+  for (const fixture of [
+    {
+      language: 'Kotlin', path: 'loop.kt',
+      content: 'fun f(xs: List<Int>) {\n for (x in xs) {\n  println(x)\n }\n}',
+    },
+    {
+      language: 'Swift', path: 'loop.swift',
+      content: 'func f(_ xs: [Int]) {\n for x in xs {\n  print(x)\n }\n}',
+    },
+    {
+      language: 'Scala', path: 'loop.scala',
+      content: 'object C { def f(xs: List[Int]) = {\n for (x <- xs) {\n  println(x)\n }\n} }',
+    },
+    {
+      language: 'Dart', path: 'loop.dart',
+      content: 'void f(List<int> xs) {\n for (final x in xs) {\n  print(x);\n }\n}',
+    },
+  ]) {
+    it(`${fixture.language} records its parameter, iterable use, and iteration binding`, async () => {
+      const result = await new CallGraphBuilder().build([fixture]);
+      const cfg = [...(result.cfgs?.values() ?? [])][0];
+      expect(cfg?.params).toContain('xs');
+      expect(cfg?.defUse).toContainEqual(expect.objectContaining({ variable: 'xs', defLine: 1, useLine: 2 }));
+      expect(cfg?.defUse).toContainEqual(expect.objectContaining({ variable: 'x', defLine: 2, useLine: 3 }));
+    });
+  }
+
+  for (const fixture of [
+    {
+      language: 'Kotlin', path: 'conditional.kt',
+      content: 'fun f(x:Int):Int { var y = if (x>0) 1 else 2; while(y<3){y=y+1}; return y }',
+    },
+    {
+      language: 'Scala', path: 'conditional.scala',
+      content: 'object C { def f(x:Int):Int = { var y = if (x>0) 1 else 2; while(y<3){y += 1}; y } }',
+    },
+  ]) {
+    it(`${fixture.language} refuses an expression-valued if rather than omitting its branch`, async () => {
+      const result = await new CallGraphBuilder().build([fixture]);
+      expect([...(result.cfgs?.values() ?? [])]).toEqual([]);
+    });
+  }
+});
+
 // ---------------------------------------------------------------------------
 // callDistance — confidence-weighted edge cost
 // ---------------------------------------------------------------------------

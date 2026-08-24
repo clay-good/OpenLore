@@ -36,6 +36,9 @@ import {
 import { blankCommentsPreservingLayout } from './comment-blanking.js';
 import { scanJavaMethodDeclarations } from './java-method-scanner.js';
 import { lineFromIndex } from './line-index.js';
+import { getExceptionParser } from './exception-flow.js';
+import type Parser from 'tree-sitter';
+import { parseBudgetOverrunMs, parseWithBudget, type BudgetableParser } from './parse-budget.js';
 
 // ============================================================================
 // TYPES
@@ -53,9 +56,19 @@ export interface HttpCall {
   normalizedUrl: string;
   /** 1-based source line */
   line: number;
+  /** Byte offset of the call expression when the extractor can prove it. */
+  offset?: number;
   /** axios / fetch / ky / got / custom */
   client: string;
 }
+
+export interface HttpExtractionDegradation {
+  file: string;
+  reason: 'budget-exceeded' | 'parse-failure' | 'traversal-budget';
+  budgetMs?: number;
+}
+
+type HttpDegradationObserver = (degradation: HttpExtractionDegradation) => void;
 
 /** A route handler found in a Python source file */
 export interface RouteDefinition {
@@ -174,12 +187,28 @@ function candidatePaths(normalizedUrl: string): string[] {
 /**
  * Extract all HTTP calls from a JavaScript or TypeScript source file.
  */
-export async function extractHttpCalls(filePath: string, residentSource?: string): Promise<HttpCall[]> {
+export async function extractHttpCalls(
+  filePath: string,
+  residentSource?: string,
+  onDegraded?: HttpDegradationObserver,
+): Promise<HttpCall[]> {
   const ext = extname(filePath).toLowerCase();
-  if (!['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs'].includes(ext)) return [];
+  if (!['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.py', '.pyw', '.go'].includes(ext)) return [];
 
   const content = residentSource ?? await readSourceCapped(filePath);
   if (content === null) return [];
+  // The AST extractors are the authority for syntax/binding correctness, but a
+  // repository-wide HTTP pass should not pay for a second parse of every unrelated
+  // Python/Go file. These token checks may over-admit strings/comments (only costing
+  // a parse); they can never create an edge because the AST pass still decides.
+  if (ext === '.py' || ext === '.pyw') {
+    if (!content.includes('requests') && !content.includes('httpx')) return [];
+    return extractPythonHttpCalls(filePath, content, onDegraded);
+  }
+  if (ext === '.go') {
+    if (!content.includes('net/http')) return [];
+    return extractGoHttpCalls(filePath, content, onDegraded);
+  }
 
   const calls: HttpCall[] = [];
 
@@ -214,6 +243,7 @@ export async function extractHttpCalls(filePath: string, residentSource?: string
       url: rawUrl,
       normalizedUrl: normalizeUrl(rawUrl),
       line: getLine(lines, m.index),
+      offset: m.index,
       client: 'fetch',
     });
   }
@@ -233,6 +263,7 @@ export async function extractHttpCalls(filePath: string, residentSource?: string
       url: rawUrl,
       normalizedUrl: normalizeUrl(rawUrl),
       line: getLine(lines, m.index),
+      offset: m.index,
       client: 'axios',
     });
   }
@@ -252,6 +283,7 @@ export async function extractHttpCalls(filePath: string, residentSource?: string
       url: rawUrl,
       normalizedUrl: normalizeUrl(rawUrl),
       line: getLine(lines, m.index),
+      offset: m.index,
       client: 'axios',
     });
   }
@@ -267,6 +299,7 @@ export async function extractHttpCalls(filePath: string, residentSource?: string
       url: rawUrl,
       normalizedUrl: normalizeUrl(rawUrl),
       line: getLine(lines, m.index),
+      offset: m.index,
       client: 'ky',
     });
   }
@@ -282,6 +315,7 @@ export async function extractHttpCalls(filePath: string, residentSource?: string
       url: rawUrl,
       normalizedUrl: normalizeUrl(rawUrl),
       line: getLine(lines, m.index),
+      offset: m.index,
       client: 'got',
     });
   }
@@ -290,6 +324,372 @@ export async function extractHttpCalls(filePath: string, residentSource?: string
   // useQuery(['key', id], () => fetch('/api/items'))   — already caught above
   // useMutation(() => axios.post('/api/items'))        — already caught above
 
+  return calls;
+}
+
+type SyntaxNode = Parser.SyntaxNode;
+const MAX_HTTP_AST_DEPTH = 512;
+const MAX_HTTP_AST_NODES = 250_000;
+
+function httpAstWithinTraversalBudget(root: SyntaxNode): boolean {
+  const stack: Array<{ node: SyntaxNode; depth: number }> = [{ node: root, depth: 0 }];
+  let visited = 0;
+  while (stack.length > 0) {
+    const { node, depth } = stack.pop()!;
+    if (depth > MAX_HTTP_AST_DEPTH || ++visited > MAX_HTTP_AST_NODES) return false;
+    for (let i = node.namedChildren.length - 1; i >= 0; i--) {
+      stack.push({ node: node.namedChildren[i], depth: depth + 1 });
+    }
+  }
+  return true;
+}
+type PythonBinding = 'requests-module' | 'httpx-module' | 'requests-client' | 'httpx-client' | 'invalid';
+interface BindingEvent { name: string; index: number; binding: PythonBinding }
+interface PythonScope { node: SyntaxNode; parent?: PythonScope; kind?: 'class'; locals: Set<string>; events: BindingEvent[] }
+
+const HTTP_METHODS = new Set(['get', 'post', 'put', 'patch', 'delete', 'head', 'options']);
+
+function staticString(node: SyntaxNode | undefined, language: 'Python' | 'Go'): string | undefined {
+  if (!node) return undefined;
+  if (language === 'Go') {
+    if (node.type === 'raw_string_literal') return node.text.slice(1, -1);
+    if (node.type !== 'interpreted_string_literal') return undefined;
+    const raw = node.text.slice(1, -1);
+    // Decoding arbitrary Go escapes incorrectly could invent a path. HTTP literals
+    // normally need none; reject them conservatively rather than guess.
+    return raw.includes('\\') ? undefined : raw;
+  }
+  if (node.type !== 'string' || node.namedChildren.some(c => c.type === 'interpolation')) return undefined;
+  const match = node.text.match(/^([rRuUbBfF]*)(['"])([\s\S]*)\2$/);
+  if (!match || /f/i.test(match[1]) || match[3].includes('\\')) return undefined;
+  return match[3];
+}
+
+function pythonAttribute(node: SyntaxNode | undefined): { receiver: string; member: string } | undefined {
+  if (node?.type !== 'attribute' || node.namedChildren.length < 2) return undefined;
+  const receiver = node.namedChildren[0];
+  const member = node.namedChildren.at(-1)!;
+  if (receiver.type !== 'identifier' || member.type !== 'identifier') return undefined;
+  return { receiver: receiver.text, member: member.text };
+}
+
+function assignmentTargets(node: SyntaxNode): string[] {
+  const left = node.childForFieldName('left') ?? node.namedChildren[0];
+  if (!left) return [];
+  if (left.type === 'identifier') return [left.text];
+  return left.namedChildren.filter(c => c.type === 'identifier').map(c => c.text);
+}
+
+function resolvePython(scope: PythonScope, name: string, at: number): PythonBinding | undefined {
+  let current: PythonScope | undefined = scope;
+  const origin = scope;
+  while (current) {
+    // A method does not close over its class namespace. Class attributes require
+    // `C.name`/`self.name`, so an unqualified import here is not visible below.
+    if (current.kind === 'class' && current !== origin) { current = current.parent; continue; }
+    const local = current.locals.has(name);
+    const event = current.events.filter(e => e.name === name && e.index < at).at(-1);
+    if (event) return event.binding === 'invalid' ? undefined : event.binding;
+    if (local) return undefined;
+    current = current.parent;
+  }
+  return undefined;
+}
+
+function pythonKeywordArgument(args: SyntaxNode | undefined, name: string): SyntaxNode | undefined {
+  const keyword = args?.namedChildren.find(child => {
+    if (child.type !== 'keyword_argument') return false;
+    const key = child.childForFieldName('name') ?? child.namedChildren[0];
+    return key?.text === name;
+  });
+  return keyword?.childForFieldName('value') ?? keyword?.namedChildren.at(-1);
+}
+
+/** AST-backed lower-bound extraction. Parsing, rather than masking regexes, keeps
+ * comments/docstrings/ordinary strings out of the call stream and preserves exact offsets. */
+async function extractPythonHttpCalls(filePath: string, content: string, onDegraded?: HttpDegradationObserver): Promise<HttpCall[]> {
+  const parser = await getExceptionParser('Python', filePath);
+  if (!parser) return [];
+  let root: SyntaxNode;
+  try {
+    root = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, content).rootNode;
+  } catch (error) {
+    const budgetMs = parseBudgetOverrunMs((error as Error).message);
+    onDegraded?.({ file: filePath, reason: budgetMs === undefined ? 'parse-failure' : 'budget-exceeded', ...(budgetMs === undefined ? {} : { budgetMs }) });
+    return [];
+  }
+  return extractPythonHttpCallsFromRoot(filePath, root);
+}
+
+export function extractPythonHttpCallsFromRoot(filePath: string, root: SyntaxNode, onDegraded?: HttpDegradationObserver): HttpCall[] {
+  if (root.hasError) { onDegraded?.({ file: filePath, reason: 'parse-failure' }); return []; }
+  if (!httpAstWithinTraversalBudget(root)) { onDegraded?.({ file: filePath, reason: 'traversal-budget' }); return []; }
+  const rootScope: PythonScope = { node: root, locals: new Set(), events: [] };
+  const scopes = new Map<number, PythonScope>([[root.startIndex, rootScope]]);
+
+  const buildScopes = (node: SyntaxNode, scope: PythonScope): void => {
+    let active = scope;
+    if (node !== root && node.type === 'class_definition') {
+      active = { node, parent: scope, kind: 'class', locals: new Set(), events: [] };
+      scopes.set(node.startIndex, active);
+    } else if (node !== root && (node.type === 'function_definition' || node.type === 'lambda')) {
+      active = { node, parent: scope, locals: new Set(), events: [] };
+      scopes.set(node.startIndex, active);
+      const params = node.childForFieldName('parameters');
+      if (params) for (const id of params.namedChildren) {
+        const name = id.type === 'identifier' ? id.text : id.namedChildren.find(c => c.type === 'identifier')?.text;
+        if (name) active.locals.add(name);
+      }
+    }
+    if (node.type === 'import_statement') {
+      const conditional = (() => {
+        let parent = node.parent;
+        while (parent && parent !== active.node) {
+          if (['if_statement', 'for_statement', 'while_statement', 'try_statement', 'match_statement'].includes(parent.type)) return true;
+          parent = parent.parent;
+        }
+        return false;
+      })();
+      for (const item of node.namedChildren) {
+        const source = item.type === 'aliased_import' ? item.namedChildren[0]?.text : item.text;
+        const alias = item.type === 'aliased_import' ? item.namedChildren.at(-1)?.text : source?.split('.')[0];
+        if (alias) {
+          active.locals.add(alias);
+          const binding = !conditional && (source === 'requests' || source === 'httpx')
+            ? `${source}-module` as PythonBinding
+            : 'invalid';
+          active.events.push({ name: alias, index: node.startIndex, binding });
+        }
+      }
+    } else if (node.type === 'import_from_statement') {
+      // Any imported name can shadow a previously proven HTTP binding. Direct
+      // function imports are not modeled as clients, so record invalidations.
+      for (const item of node.namedChildren.slice(1)) {
+        const alias = item.type === 'aliased_import' ? item.namedChildren.at(-1)?.text : item.text;
+        if (alias && /^\w+$/.test(alias)) {
+          active.locals.add(alias);
+          active.events.push({ name: alias, index: node.startIndex, binding: 'invalid' });
+        }
+      }
+    } else if (node.type === 'assignment' || node.type === 'named_expression') {
+      const targets = assignmentTargets(node);
+      const right = node.childForFieldName('right') ?? node.namedChildren.at(-1);
+      let binding: PythonBinding = 'invalid';
+      if (right?.type === 'call') {
+        const attr = pythonAttribute(right.childForFieldName('function') ?? right.namedChildren[0]);
+        if (attr && ((attr.member === 'Session') || (attr.member === 'Client'))) {
+          const owner = resolvePython(active, attr.receiver, node.startIndex);
+          if (owner === 'requests-module' && attr.member === 'Session') binding = 'requests-client';
+          if (owner === 'httpx-module' && attr.member === 'Client') binding = 'httpx-client';
+        }
+      }
+      for (const name of targets) {
+        active.locals.add(name);
+        active.events.push({ name, index: node.startIndex, binding });
+      }
+    } else if (node.type === 'with_item') {
+      const pattern = node.namedChildren.find(c => c.type === 'as_pattern');
+      const value = pattern?.namedChildren[0];
+      const aliasNode = pattern?.childForFieldName('alias') ?? pattern?.namedChildren.at(-1);
+      const alias = aliasNode?.type === 'identifier'
+        ? aliasNode
+        : aliasNode?.namedChildren.find(c => c.type === 'identifier');
+      if (value?.type === 'call' && alias) {
+        const attr = pythonAttribute(value.childForFieldName('function') ?? value.namedChildren[0]);
+        const owner = attr ? resolvePython(active, attr.receiver, node.startIndex) : undefined;
+        if (owner === 'httpx-module' && attr?.member === 'AsyncClient') {
+          active.locals.add(alias.text);
+          active.events.push({ name: alias.text, index: node.startIndex, binding: 'httpx-client' });
+          const withStatement = node.parent?.parent;
+          if (withStatement?.type === 'with_statement') {
+            active.events.push({ name: alias.text, index: withStatement.endIndex, binding: 'invalid' });
+          }
+        }
+      }
+    }
+    for (const child of node.namedChildren) buildScopes(child, active);
+  };
+  buildScopes(root, rootScope);
+  for (const scope of scopes.values()) scope.events.sort((a, b) => a.index - b.index);
+
+  const calls: HttpCall[] = [];
+  const visit = (node: SyntaxNode, scope: PythonScope): void => {
+    const nested = scopes.get(node.startIndex);
+    const active = nested ?? scope;
+    if (node.type === 'call') {
+      const attr = pythonAttribute(node.childForFieldName('function') ?? node.namedChildren[0]);
+      const args = node.childForFieldName('arguments') ?? node.namedChildren.find(c => c.type === 'argument_list');
+      const values = args?.namedChildren.filter(c => c.type !== 'keyword_argument') ?? [];
+      if (attr) {
+        const binding = resolvePython(active, attr.receiver, node.startIndex);
+        const client = binding?.startsWith('requests') ? 'requests' : binding?.startsWith('httpx') ? 'httpx' : undefined;
+        let method: string | undefined;
+        let urlNode: SyntaxNode | undefined;
+        if (HTTP_METHODS.has(attr.member.toLowerCase())) {
+          method = attr.member.toUpperCase();
+          urlNode = values[0] ?? pythonKeywordArgument(args, 'url');
+        } else if (attr.member === 'request') {
+          method = staticString(values[0] ?? pythonKeywordArgument(args, 'method'), 'Python')?.toUpperCase();
+          urlNode = values[1] ?? pythonKeywordArgument(args, 'url');
+        }
+        const rawUrl = staticString(urlNode, 'Python');
+        if (client && method && HTTP_METHODS.has(method.toLowerCase()) && rawUrl !== undefined) {
+          calls.push({ file: filePath, method, url: rawUrl, normalizedUrl: normalizeUrl(rawUrl), line: node.startPosition.row + 1, offset: node.startIndex, client });
+        }
+      }
+    }
+    for (const child of node.namedChildren) visit(child, active);
+  };
+  visit(root, rootScope);
+  return calls;
+}
+
+function goSelector(node: SyntaxNode | undefined): string[] | undefined {
+  if (!node) return undefined;
+  if (node.type === 'identifier') return [node.text];
+  if (node.type !== 'selector_expression') return undefined;
+  const left = goSelector(node.namedChildren[0]);
+  const right = node.namedChildren.at(-1)?.text;
+  return left && right ? [...left, right] : undefined;
+}
+
+function goHttpImportAliases(root: SyntaxNode): Set<string> {
+  const aliases = new Set<string>();
+  const visit = (node: SyntaxNode): void => {
+    if (node.type === 'import_spec') {
+      const pathNode = node.namedChildren.find(child => staticString(child, 'Go') === 'net/http');
+      if (pathNode) {
+        const explicit = node.namedChildren.find(child => staticString(child, 'Go') !== 'net/http')?.text;
+        const alias = explicit ?? 'http';
+        // Dot imports have no receiver to prove and blank imports expose no symbols.
+        if (alias !== '.' && alias !== '_') aliases.add(alias);
+      }
+    }
+    for (const child of node.namedChildren) visit(child);
+  };
+  visit(root);
+  return aliases;
+}
+
+function goHttpMethod(node: SyntaxNode | undefined, aliases: ReadonlySet<string>): string | undefined {
+  const literal = staticString(node, 'Go')?.toUpperCase();
+  if (literal && HTTP_METHODS.has(literal.toLowerCase())) return literal;
+  const selector = goSelector(node);
+  if (!selector || selector.length !== 2 || !aliases.has(selector[0])) return undefined;
+  const suffix = selector[1].match(/^Method(Get|Post|Put|Patch|Delete|Head|Options)$/)?.[1];
+  return suffix?.toUpperCase();
+}
+
+/** AST-backed net/http extraction. Request construction and Do must be tied in the
+ * same lexical function; dynamic methods, URLs, and request variables are skipped. */
+async function extractGoHttpCalls(filePath: string, content: string, onDegraded?: HttpDegradationObserver): Promise<HttpCall[]> {
+  const parser = await getExceptionParser('Go', filePath);
+  if (!parser) return [];
+  let root: SyntaxNode;
+  try {
+    root = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, content).rootNode;
+  } catch (error) {
+    const budgetMs = parseBudgetOverrunMs((error as Error).message);
+    onDegraded?.({ file: filePath, reason: budgetMs === undefined ? 'parse-failure' : 'budget-exceeded', ...(budgetMs === undefined ? {} : { budgetMs }) });
+    return [];
+  }
+  return extractGoHttpCallsFromRoot(filePath, root);
+}
+
+export function extractGoHttpCallsFromRoot(filePath: string, root: SyntaxNode, onDegraded?: HttpDegradationObserver): HttpCall[] {
+  if (root.hasError) { onDegraded?.({ file: filePath, reason: 'parse-failure' }); return []; }
+  if (!httpAstWithinTraversalBudget(root)) { onDegraded?.({ file: filePath, reason: 'traversal-budget' }); return []; }
+  const importAliases = goHttpImportAliases(root);
+  if (importAliases.size === 0) return [];
+  const calls: HttpCall[] = [];
+  const functions = root.namedChildren.flatMap(function collect(n): SyntaxNode[] {
+    if (n.type === 'function_declaration' || n.type === 'method_declaration') return [n];
+    return n.namedChildren.flatMap(collect);
+  });
+  for (const fn of functions) {
+    // A single function-wide provenance map cannot soundly distinguish two
+    // same-named bindings in nested Go blocks. Refuse those names rather than
+    // letting a static inner request escape its lexical scope and rewrite an
+    // outer dynamic request.
+    const definitionCounts = new Map<string, number>();
+    const countDefinition = (name: string): void => {
+      definitionCounts.set(name, (definitionCounts.get(name) ?? 0) + 1);
+    };
+    const countDefinitions = (node: SyntaxNode): void => {
+      if (node !== fn && (node.type === 'function_declaration' || node.type === 'method_declaration' || node.type === 'func_literal')) return;
+      if (node.type === 'short_var_declaration' || node.type === 'assignment_statement') {
+        const left = node.childForFieldName('left');
+        for (const child of left?.namedChildren ?? []) if (child.type === 'identifier') countDefinition(child.text);
+      } else if (node.type === 'parameter_declaration' || node.type === 'variadic_parameter_declaration') {
+        const names = node.childForFieldName('name');
+        if (names?.type === 'identifier') countDefinition(names.text);
+        else for (const child of node.namedChildren.slice(0, -1)) if (child.type === 'identifier') countDefinition(child.text);
+      }
+      for (const child of node.namedChildren) countDefinitions(child);
+    };
+    countDefinitions(fn);
+    const availableAliases = new Set([...importAliases].filter(alias => !definitionCounts.has(alias)));
+    const uniqueBinding = (name: string): boolean => definitionCounts.get(name) === 1;
+    const requests = new Map<string, { method: string; url: string; block: number }>();
+    const httpClients = new Map<string, number>();
+    const lexicalBlock = (node: SyntaxNode): number | undefined => {
+      let current: SyntaxNode | null = node;
+      while (current && current !== fn) {
+        if (current.type === 'block') return current.startIndex;
+        current = current.parent;
+      }
+      return fn.childForFieldName('body')?.startIndex;
+    };
+    const walk = (node: SyntaxNode): void => {
+      if (node !== fn && (node.type === 'function_declaration' || node.type === 'method_declaration' || node.type === 'func_literal')) return;
+      if (node.type === 'short_var_declaration' || node.type === 'assignment_statement') {
+        const left = node.childForFieldName('left');
+        const right = node.childForFieldName('right');
+        const names = left?.namedChildren.filter(c => c.type === 'identifier').map(c => c.text) ?? [];
+        const rhs = right?.namedChildren ?? [];
+        for (const name of names) { requests.delete(name); httpClients.delete(name); }
+        const call = rhs.find(c => c.type === 'call_expression');
+        const target = goSelector(call?.childForFieldName('function') ?? call?.namedChildren[0]);
+        const args = call?.childForFieldName('arguments')?.namedChildren ?? [];
+        if (call && target && availableAliases.has(target[0]) && (target.at(-1) === 'NewRequest' || target.at(-1) === 'NewRequestWithContext')) {
+          const offset = target.at(-1) === 'NewRequestWithContext' ? 1 : 0;
+          const method = goHttpMethod(args[offset], availableAliases);
+          const url = staticString(args[offset + 1], 'Go');
+          const reqName = names[0];
+          const block = lexicalBlock(node);
+          if (reqName && block !== undefined && uniqueBinding(reqName) && method && HTTP_METHODS.has(method.toLowerCase()) && url !== undefined) requests.set(reqName, { method, url, block });
+        }
+        const rightText = (right?.text ?? '').replace(/\s/g, '');
+        if (names[0] && uniqueBinding(names[0]) && [...availableAliases].some(alias =>
+          rightText.startsWith(`&${alias}.Client{`) || rightText.startsWith(`${alias}.Client{`) ||
+          rightText === `${alias}.DefaultClient`)) {
+          const block = lexicalBlock(node);
+          if (block !== undefined) httpClients.set(names[0], block);
+        }
+      }
+      if (node.type === 'call_expression') {
+        const target = goSelector(node.childForFieldName('function') ?? node.namedChildren[0]);
+        const args = node.childForFieldName('arguments')?.namedChildren ?? [];
+        if (target?.length === 2 && availableAliases.has(target[0]) && ['Get', 'Head', 'Post', 'PostForm'].includes(target[1])) {
+          const rawUrl = staticString(args[0], 'Go');
+          if (rawUrl !== undefined) {
+            const method = target[1] === 'Get' ? 'GET' : target[1] === 'Head' ? 'HEAD' : 'POST';
+            calls.push({ file: filePath, method, url: rawUrl, normalizedUrl: normalizeUrl(rawUrl), line: node.startPosition.row + 1, offset: node.startIndex, client: 'net/http' });
+          }
+        } else if (target?.at(-1) === 'Do' && args[0]?.type === 'identifier') {
+          const request = requests.get(args[0].text);
+          const owner = target.slice(0, -1).join('.');
+          const defaultClient = [...availableAliases].some(alias => owner === `${alias}.DefaultClient`);
+          const block = lexicalBlock(node);
+          if (request && block === request.block && (defaultClient || httpClients.get(owner) === block)) {
+            calls.push({ file: filePath, method: request.method, url: request.url, normalizedUrl: normalizeUrl(request.url), line: node.startPosition.row + 1, offset: node.startIndex, client: 'net/http' });
+          }
+        }
+      }
+      for (const child of node.namedChildren) walk(child);
+    };
+    walk(fn);
+  }
   return calls;
 }
 
@@ -892,10 +1292,13 @@ export function buildHttpEdges(
     }
   }
 
-  // Deduplicate: same caller file + handler file + method + path
+  // Deduplicate one projected edge per call site. The line is essential: collapsing
+  // at file granularity drops the second of two functions that call the same route
+  // before call-graph synthesis has a chance to resolve their enclosing functions.
   const seen = new Set<string>();
   return edges.filter(e => {
-    const key = `${e.callerFile}|${e.handlerFile}|${e.method}|${e.path}`;
+    const site = e.call.offset !== undefined ? `offset:${e.call.offset}` : `line:${e.call.line}`;
+    const key = `${e.callerFile}|${site}|${e.handlerFile}|${e.method}|${e.path}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
@@ -913,10 +1316,14 @@ export function buildHttpEdges(
  */
 export type HttpEdgeSource = string | { path: string; content: string };
 
-export async function extractAllHttpEdges(filePaths: HttpEdgeSource[]): Promise<{
+export async function extractAllHttpEdges(
+  filePaths: HttpEdgeSource[],
+  precomputedCalls?: ReadonlyMap<string, readonly HttpCall[]>,
+): Promise<{
   calls: HttpCall[];
   routes: RouteDefinition[];
   edges: HttpEdge[];
+  degradations: HttpExtractionDegradation[];
 }> {
   // Collect per-file results over a BOUNDED scan and flatten in filePaths order.
   // `mapFilesBounded` resolves in INPUT order regardless of completion order (and
@@ -927,10 +1334,14 @@ export async function extractAllHttpEdges(filePaths: HttpEdgeSource[]): Promise<
   // relies on).
   const perFile = await mapFilesBounded(
     filePaths,
-    async (source): Promise<{ calls: HttpCall[]; routes: RouteDefinition[] }> => {
+    async (source): Promise<{ calls: HttpCall[]; routes: RouteDefinition[]; degradations: HttpExtractionDegradation[] }> => {
       const fp = typeof source === 'string' ? source : source.path;
       const resident = typeof source === 'string' ? undefined : source.content;
       const ext = extname(fp).toLowerCase();
+      const degradations: HttpExtractionDegradation[] = [];
+      const observe = (degradation: HttpExtractionDegradation): void => { degradations.push(degradation); };
+      const cachedCalls = precomputedCalls?.get(fp);
+      try {
       if (['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs'].includes(ext)) {
         // A JS/TS file can be a client (fetch/axios calls), a server (route
         // registrations), or both (a full-stack monorepo). Extract BOTH so a
@@ -941,22 +1352,29 @@ export async function extractAllHttpEdges(filePaths: HttpEdgeSource[]): Promise<
         // Sequentially, not as a nested `Promise.all`: both passes read the SAME file, so
         // running them together held two copies of it per scan slot and doubled the bound
         // this scan exists to enforce.
-        const calls = await extractHttpCalls(fp, resident);
+        const calls = cachedCalls ? [...cachedCalls] : await extractHttpCalls(fp, resident, observe);
         const routes = await extractTsRouteDefinitions(fp, resident);
-        return { calls, routes };
+        return { calls, routes, degradations };
       } else if (['.py', '.pyw'].includes(ext)) {
-        return { calls: [], routes: await extractRouteDefinitions(fp, resident) };
+        return { calls: cachedCalls ? [...cachedCalls] : await extractHttpCalls(fp, resident, observe), routes: await extractRouteDefinitions(fp, resident), degradations };
+      } else if (ext === '.go') {
+        return { calls: cachedCalls ? [...cachedCalls] : await extractHttpCalls(fp, resident, observe), routes: [], degradations };
       } else if (ext === '.java') {
-        return { calls: [], routes: await extractJavaRouteDefinitions(fp, resident) };
+        return { calls: [], routes: await extractJavaRouteDefinitions(fp, resident), degradations };
       }
-      return { calls: [], routes: [] };
+      return { calls: [], routes: [], degradations };
+      } catch {
+        observe({ file: fp, reason: 'parse-failure' });
+        return { calls: cachedCalls ? [...cachedCalls] : [], routes: [], degradations };
+      }
     },
   );
   const allCalls: HttpCall[] = perFile.flatMap(r => r.calls);
   const allRoutes: RouteDefinition[] = perFile.flatMap(r => r.routes);
+  const degradations = perFile.flatMap(r => r.degradations);
 
   const edges = buildHttpEdges(allCalls, allRoutes);
-  return { calls: allCalls, routes: allRoutes, edges };
+  return { calls: allCalls, routes: allRoutes, edges, degradations };
 }
 
 // ============================================================================

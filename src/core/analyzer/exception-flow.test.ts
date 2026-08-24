@@ -8,6 +8,8 @@ import {
   guardsCatch,
   DYNAMIC_TYPE,
   ERROR_PROPAGATION_LANGUAGES,
+  extractGoErrorFactsFromSource,
+  resolveCurrentFunctionSpan,
   type TryGuard,
 } from './exception-flow.js';
 
@@ -214,7 +216,7 @@ describe('extractExceptionFacts — adversarial soundness (regression for review
 });
 
 describe('extractExceptionFacts — fail-soft + determinism', () => {
-  it('an unsupported language returns an unsupported record, not a guess', async () => {
+  it('Go is claimed through its separate value-flow model, not exception facts', async () => {
     const facts = await extractExceptionFactsFromSource(
       `func f() error { return errors.New("x") }`,
       'Go',
@@ -222,7 +224,7 @@ describe('extractExceptionFacts — fail-soft + determinism', () => {
     expect(facts.supported).toBe(false);
     expect(facts.throwSites).toEqual([]);
     expect(facts.tryGuards).toEqual([]);
-    expect(ERROR_PROPAGATION_LANGUAGES.has('Go')).toBe(false);
+    expect(ERROR_PROPAGATION_LANGUAGES.has('Go')).toBe(true);
   });
 
   it('is deterministic across runs', async () => {
@@ -230,6 +232,202 @@ describe('extractExceptionFacts — fail-soft + determinism', () => {
     const a = await extractExceptionFactsFromSource(src, 'TypeScript');
     const b = await extractExceptionFactsFromSource(src, 'TypeScript');
     expect(JSON.stringify(a)).toBe(JSON.stringify(b));
+  });
+});
+
+describe('extractGoErrorFacts — value-shaped Go semantics', () => {
+  it('separates returned errors, checked errors, panic, recovery, and discarded results', async () => {
+    const returned = await extractGoErrorFactsFromSource(`package p\nfunc f() error { err := g(); if err != nil { return err }; return nil }`);
+    expect(returned.escapes).toEqual([expect.objectContaining({ value: 'err', kind: 'returned_error', calleeName: 'g' })]);
+
+    const handled = await extractGoErrorFactsFromSource(`package p\nfunc f() { err := g(); if err != nil { log.Print(err) } }`);
+    expect(handled.handledInternally).toEqual([]);
+    expect(handled.checkedCandidates).toEqual([expect.objectContaining({ value: 'err', kind: 'checked_error', fromCallee: 'g', callResultIndex: 0 })]);
+
+    const recovered = await extractGoErrorFactsFromSource(`package p\nfunc f() { defer func(){ recover() }(); panic("x"); _ = g() }`);
+    expect(recovered.escapes).toEqual([]);
+    expect(recovered.handledInternally.some(h => h.kind === 'recovered_panic')).toBe(true);
+    expect(recovered.discardedResults).toEqual([expect.objectContaining({ calleeName: 'g', resultIndex: 0 })]);
+  });
+
+  it('does not treat a non-deferred recover as shielding panic', async () => {
+    const facts = await extractGoErrorFactsFromSource(`package p\nfunc f() { recover(); panic("x") }`);
+    expect(facts.escapes).toEqual([expect.objectContaining({ kind: 'panic' })]);
+  });
+
+  it('does not treat defer recover() or a conditionally unreachable recover as effective', async () => {
+    for (const source of [
+      `package p\nfunc f() { defer recover(); panic("x") }`,
+      `package p\nfunc f() { defer func(){ if false { recover() } }(); panic("x") }`,
+      `package p\nfunc f() { defer func(){ for false { recover() } }(); panic("x") }`,
+      `package p\nfunc f() { defer func(){ _ = func(){ recover() } }(); panic("x") }`,
+    ]) {
+      const facts = await extractGoErrorFactsFromSource(source);
+      expect(facts.escapes).toEqual([expect.objectContaining({ kind: 'panic' })]);
+    }
+  });
+
+  it('attributes deferred literal panics to the enclosing function and bounds goroutine panics', async () => {
+    const deferred = await extractGoErrorFactsFromSource(`package p\nfunc f() { defer func(){ panic("deferred") }() }`);
+    expect(deferred.escapes).toEqual([expect.objectContaining({ kind: 'panic', value: '("deferred")' })]);
+    const async = await extractGoErrorFactsFromSource(`package p\nfunc f() { go func(){ panic("async") }() }`);
+    expect(async.escapes).toEqual([]);
+    expect(async.boundaries.some(b => /goroutine literal.*asynchronous/.test(b))).toBe(true);
+  });
+
+  it('does not call an error handled when it is returned after the check', async () => {
+    const facts = await extractGoErrorFactsFromSource(`package p\nfunc f() error { err := g(); if err != nil { log.Print(err) }; return err }`);
+    expect(facts.escapes).toEqual([expect.objectContaining({ kind: 'returned_error', value: 'err' })]);
+    expect(facts.checkedCandidates).toEqual([]);
+  });
+
+  it('tracks the error result position instead of relying on an err variable name', async () => {
+    const facts = await extractGoErrorFactsFromSource(`package p\nfunc f() (int, error) { failure := g(); return 1, failure }`);
+    expect(facts.escapes).toEqual([expect.objectContaining({ value: 'failure', kind: 'returned_error', calleeName: 'g' })]);
+  });
+
+  it('does not call a wrapped return or panic(err) internally handled', async () => {
+    for (const action of ['return fmt.Errorf("wrap: %w", err)', 'panic(err)']) {
+      const facts = await extractGoErrorFactsFromSource(`package p\nfunc f() error { err := g(); if err != nil { ${action} }; return nil }`);
+      expect(facts.checkedCandidates).toEqual([]);
+    }
+  });
+
+  it('does not prove recovery after the panic, with repanic, or with competing defers', async () => {
+    for (const source of [
+      `package p\nfunc f() { panic("x"); defer func(){ recover() }() }`,
+      `package p\nfunc f() { defer func(){ recover(); panic("replacement") }(); panic("x") }`,
+      `package p\nfunc f() { defer cleanup(); defer func(){ recover() }(); panic("x") }`,
+    ]) {
+      const facts = await extractGoErrorFactsFromSource(source);
+      expect(facts.escapes.some(e => e.kind === 'panic')).toBe(true);
+      expect(facts.boundaries.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('discloses a named custom result type instead of treating it as error-free', async () => {
+    const facts = await extractGoErrorFactsFromSource(`package p\ntype Failure error\nfunc f() Failure { return nil }`);
+    expect(facts.boundaries.some(b => /custom Go result type Failure/.test(b))).toBe(true);
+  });
+
+  it('tracks lexical shadowing, assignment invalidation, and named-result bare returns', async () => {
+    const shadowed = await extractGoErrorFactsFromSource(`package p\nfunc f() error { err := g(); { err := h(); _ = err }; return err }`);
+    expect(shadowed.escapes).toEqual([expect.objectContaining({ calleeName: 'g' })]);
+
+    const overwritten = await extractGoErrorFactsFromSource(`package p\nfunc f() error { err := g(); err = nil; return err }`);
+    expect(overwritten.escapes).toEqual([]);
+
+    const named = await extractGoErrorFactsFromSource(`package p\nfunc f() (err error) { err = g(); return }`);
+    expect(named.escapes).toEqual([expect.objectContaining({ value: 'err', calleeName: 'g' })]);
+    expect(named.boundaries.some(b => /bare return/.test(b))).toBe(false);
+  });
+
+  it('pairs independent RHS calls separately from one multi-result call', async () => {
+    const independent = await extractGoErrorFactsFromSource(`package p\nfunc f() error { _, err := value(), makeErr(); return err }`);
+    expect(independent.escapes).toEqual([expect.objectContaining({ calleeName: 'makeErr', callResultIndex: 0 })]);
+    expect(independent.discardedResults).toEqual([expect.objectContaining({ calleeName: 'value', resultIndex: 0 })]);
+
+    const multi = await extractGoErrorFactsFromSource(`package p\nfunc f() error { _, err := pair(); return err }`);
+    expect(multi.escapes).toEqual([expect.objectContaining({ calleeName: 'pair', callResultIndex: 1 })]);
+  });
+
+  it('does not promote an unregistered conditional defer panic and honors simple LIFO replacement', async () => {
+    const conditional = await extractGoErrorFactsFromSource(`package p\nfunc f() { if false { defer func(){ panic("x") }() } }`);
+    expect(conditional.escapes).toEqual([]);
+    expect(conditional.boundaries.some(b => /not proven registered/.test(b))).toBe(true);
+
+    const replacement = await extractGoErrorFactsFromSource(`package p\nfunc f() { defer func(){panic("first")}(); defer func(){panic("second")}(); panic("body") }`);
+    expect(replacement.escapes).toEqual([expect.objectContaining({ value: '("first")' })]);
+    expect(replacement.boundaries.some(b => /LIFO replacement/.test(b))).toBe(false);
+  });
+
+  it('models only trivial proven LIFO recovery and panic ordering', async () => {
+    const recovered = await extractGoErrorFactsFromSource(`package p\nfunc f() { defer func(){ recover() }(); defer func(){ panic("later") }() }`);
+    expect(recovered.escapes).toEqual([]);
+    expect(recovered.handledInternally).toEqual([expect.objectContaining({ kind: 'recovered_panic', value: '("later")' })]);
+
+    const escapes = await extractGoErrorFactsFromSource(`package p\nfunc f() { defer func(){ panic("last") }(); defer func(){ recover() }() }`);
+    expect(escapes.escapes).toEqual([expect.objectContaining({ kind: 'panic', value: '("last")' })]);
+
+    const bodyThenReplacement = await extractGoErrorFactsFromSource(`package p\nfunc f() { defer func(){ panic("last") }(); defer func(){ recover() }(); panic("body") }`);
+    expect(bodyThenReplacement.escapes).toEqual([expect.objectContaining({ value: '("last")' })]);
+    expect(bodyThenReplacement.handledInternally).toEqual([expect.objectContaining({ value: '("body")' })]);
+  });
+
+  it('returns a parse-degraded boundary instead of facts from malformed Go', async () => {
+    const facts = await extractGoErrorFactsFromSource(`package p\nfunc f() error { err := g(); return err`);
+    expect(facts.escapes).toEqual([]);
+    expect(facts.boundaries.some(b => /syntax errors/.test(b))).toBe(true);
+  });
+});
+
+describe('extractExceptionFacts — Java and C#', () => {
+  it('extracts Java throws declarations and selects the matching catch clause independently', async () => {
+    const declared = await extractExceptionFactsFromSource(`class C { void f() throws IOException { throw new IOException(); } }`, 'Java');
+    expect(declared.throwSites).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'IOException', source: 'throws_clause' }),
+      expect.objectContaining({ type: 'IOException', source: 'throw' }),
+    ]));
+    const caught = await extractExceptionFactsFromSource(`class C { void f(){ try { throw new IOException(); } catch(IOException e){} catch(Other e){ throw e; } } }`, 'Java');
+    expect(caught.throwSites.find(s => s.type === 'IOException')?.locallyHandled).toBe(true);
+  });
+
+  it('distinguishes replacement throws from rethrowing the caught exception', async () => {
+    for (const [language, source, original, replacement] of [
+      ['Java', `class C { void f(){ try { throw new IOException(); } catch(IOException e){ throw new RuntimeException(); } } }`, 'IOException', 'RuntimeException'],
+      ['C#', `class C { void F(){ try { throw new IOException(); } catch(IOException e){ throw new InvalidOperationException(); } } }`, 'IOException', 'InvalidOperationException'],
+      ['TypeScript', `function f(){ try { throw new OldError(); } catch(e) { throw new NewError(); } }`, 'OldError', 'NewError'],
+      ['Python', `def f():\n    try:\n        raise OldError()\n    except OldError as e:\n        raise NewError()\n`, 'OldError', 'NewError'],
+    ] as const) {
+      const facts = await extractExceptionFactsFromSource(source, language);
+      expect(facts.throwSites.find(s => s.type === original)?.locallyHandled, language).toBe(true);
+      expect(facts.throwSites.find(s => s.type === replacement)?.locallyHandled, language).toBe(false);
+    }
+    const javaRethrow = await extractExceptionFactsFromSource(`class C { void f(){ try { throw new IOException(); } catch(IOException e){ throw e; } } }`, 'Java');
+    expect(javaRethrow.throwSites.find(s => s.type === 'IOException')?.locallyHandled).toBe(false);
+    const csharpBare = await extractExceptionFactsFromSource(`class C { void F(){ try { throw new IOException(); } catch(IOException e){ throw; } } }`, 'C#');
+    expect(csharpBare.throwSites.find(s => s.type === 'IOException')?.locallyHandled).toBe(false);
+  });
+
+  it('does not claim that a filtered C# catch always handles', async () => {
+    const facts = await extractExceptionFactsFromSource(`class C { void F(){ try { throw new IOException(); } catch(IOException e) when (e.Code > 0) {} } }`, 'C#');
+    expect(facts.throwSites.find(s => s.type === 'IOException')?.locallyHandled).toBe(false);
+  });
+
+  it('does not treat Java Exception as catching Error subclasses', async () => {
+    const facts = await extractExceptionFactsFromSource(`class C { void f(){ try { throw new AssertionError(); } catch(Exception e){} } }`, 'Java');
+    expect(facts.throwSites.find(s => s.type === 'AssertionError')?.locallyHandled).toBe(false);
+  });
+
+  it('discloses finally control transfer and try-with-resources cleanup boundaries', async () => {
+    const java = await extractExceptionFactsFromSource(`class C { void f(){ try (R r = open()) { risky(); } finally { return; } } }`, 'Java');
+    expect(java.boundaries).toEqual(expect.arrayContaining([expect.stringMatching(/finally/), expect.stringMatching(/try-with-resources/) ]));
+    const cs = await extractExceptionFactsFromSource(`class C { void F(){ try { Risky(); } finally { return; } } }`, 'C#');
+    expect(cs.boundaries.some(b => /finally/.test(b))).toBe(true);
+    const csUsing = await extractExceptionFactsFromSource(`class C { async Task F(){ await using var r = Open(); await Risky(); } }`, 'C#');
+    expect(csUsing.boundaries.some(b => /using\/await-using cleanup/.test(b))).toBe(true);
+  });
+
+  it('classifies Java/C# self calls and constructors for unresolved-boundary handling', async () => {
+    const java = await extractExceptionFactsFromSource(`class C { void f(){ this.risky(); new Risky(); } }`, 'Java');
+    expect(java.callSites.map(c => c.receiver)).toEqual(['self', 'constructor']);
+    const cs = await extractExceptionFactsFromSource(`class C { void F(){ this.Risky(); new Risky(); } }`, 'C#');
+    expect(cs.callSites.map(c => c.receiver)).toEqual(['self', 'constructor']);
+  });
+
+  it('suppresses try-body escapes when a finally definitely completes abruptly', async () => {
+    const java = await extractExceptionFactsFromSource(`class C { int f(){ try { throw new IOException(); } finally { return 1; } } }`, 'Java');
+    expect(java.throwSites.find(s => s.type === 'IOException')?.locallyHandled).toBe(true);
+
+    const cs = await extractExceptionFactsFromSource(`class C { void F(){ try { throw new IOException(); } finally { throw new OtherException(); } } }`, 'C#');
+    expect(cs.throwSites.find(s => s.type === 'IOException')?.locallyHandled).toBe(true);
+    expect(cs.throwSites.find(s => s.type === 'OtherException')?.locallyHandled).toBe(false);
+  });
+
+  it('returns a parse-degraded boundary instead of a clean malformed Java result', async () => {
+    const facts = await extractExceptionFactsFromSource(`class C { void f(){ try { risky(); }`, 'Java');
+    expect(facts.throwSites).toEqual([]);
+    expect(facts.boundaries.some(b => /syntax errors/.test(b))).toBe(true);
   });
 });
 
@@ -256,6 +454,31 @@ describe('extractExceptionFacts — call-site receiver classification', () => {
     expect(r('b')).toBe('self');
     expect(r('c')).toBe('other');
     expect(r('d')).toBe('none');
+  });
+});
+
+describe('extractExceptionFacts — hostile AST bounds', () => {
+  it('re-resolves assignment-defined TS/JS function identities used by the call graph', async () => {
+    const parser = await getExceptionParser('JavaScript', 'handlers.js');
+    expect(parser).toBeTruthy();
+    for (const [source, name] of [
+      [`h = () => { throw new Error("x") }`, 'h'],
+      [`exports.h = function() { throw new Error("x") }`, 'exports.h'],
+      [`class C { h = () => { throw new Error("x") } }`, 'h'],
+    ] as const) {
+      const tree = parser!.parse(source);
+      expect(resolveCurrentFunctionSpan(tree.rootNode, 0, source.length, 'JavaScript', name), source).not.toBeNull();
+    }
+  });
+
+  it('fails soft when a Go function exceeds the traversal-depth budget', async () => {
+    const depth = 600;
+    const source = `package p\nfunc f() error {\n${'{\n'.repeat(depth)}return nil\n${'}\n'.repeat(depth + 1)}`;
+
+    const facts = await extractGoErrorFactsFromSource(source);
+
+    expect(facts.escapes).toEqual([]);
+    expect(facts.boundaries.some(boundary => /traversal budget/.test(boundary))).toBe(true);
   });
 });
 

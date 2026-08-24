@@ -379,7 +379,7 @@ Everything else (read a file, grep, list files) uses your native tools. Full ref
 - **`report_coverage_gaps`** *(no key, opt-in)* — which load-bearing code has no test reaching it, ranked by significance. Never claims a symbol is "tested." → [docs/coverage-gaps.md](docs/coverage-gaps.md)
 - **`get_style_fingerprint`** — a descriptive idiom profile so an agent matches the house style; a counter below the evidence floor reports null, never a guess.
 - **`find_clones`** — the edit-time "does a near-duplicate already exist?" query (a symbol or raw snippet), ranked exact > structural > near.
-- **`analyze_error_propagation`** — exceptions that escape vs. those caught within a function (TS/JS/Python); a sound lower bound.
+- **`analyze_error_propagation`** — exceptions that escape vs. those caught (TS/JS/Python/Java/C#), or returned errors and panic/recover flow in Go; a sound lower bound.
 - **`analyze_env_impact`** — "what breaks if I remove this env var?": read sites, upstream callers, tests, per-site `required`.
 - **`briefing_since`** — the catch-up lens: changed symbols since a base ref, ranked into a fixed tier order.
 - **`plan_parallel_work` / `map_in_flight_conflicts`** — a hazard-typed conflict graph over a task list, or over every in-flight branch/PR/agent-task (opt-in `coordination` preset).

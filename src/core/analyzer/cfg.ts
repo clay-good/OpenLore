@@ -178,6 +178,17 @@ interface CfgLangSpec {
   rightField: string;
   /** Field name for a function's parameter list. */
   paramsField: string;
+  /** Optional grammar-shape adapters for languages whose control/declaration nodes
+   * are positional or use non-C-family field names. */
+  conditionNode?: (node: CfgNode) => CfgNode | null;
+  consequenceNode?: (node: CfgNode) => CfgNode | null;
+  alternativeNode?: (node: CfgNode) => CfgNode | null;
+  bodyNode?: (node: CfgNode) => CfgNode | null;
+  leftNode?: (node: CfgNode) => CfgNode | null;
+  rightNode?: (node: CfgNode) => CfgNode | null;
+  loopTargetNode?: (node: CfgNode) => CfgNode | null;
+  loopIterableNode?: (node: CfgNode) => CfgNode | null;
+  transferKind?: (node: CfgNode) => 'return' | 'break' | 'continue' | 'throw' | undefined;
 }
 
 const TS_SPEC: CfgLangSpec = {
@@ -478,6 +489,131 @@ const PHP_SPEC: CfgLangSpec = {
   paramsField: 'parameters',
 };
 
+const firstNamedOutside = (node: CfgNode, excluded: Set<string>): CfgNode | null =>
+  node.namedChildren.find(c => !excluded.has(c.type)) ?? null;
+
+const KOTLIN_BLOCKS = new Set(['function_body', 'statements', 'control_structure_body']);
+const KOTLIN_SPEC: CfgLangSpec = {
+  ifTypes: new Set(['if_expression']),
+  loopTypes: new Set(['while_statement', 'for_statement']),
+  // Kotlin catch/finally nodes are positional `catch_block`/`finally_block`, which
+  // the generic try adapter does not model. Keep the claim honest until that
+  // complete shape (including abrupt-finally routing) is supported.
+  tryTypes: new Set([]), switchTypes: new Set([]),
+  nestedFnTypes: new Set(['anonymous_function', 'lambda_literal', 'function_declaration']),
+  switchFallsThrough: false, blockScoped: true, comprehensionTypes: new Set([]),
+  returnTypes: new Set([]), breakTypes: new Set([]), continueTypes: new Set([]), throwTypes: new Set([]),
+  blockTypes: KOTLIN_BLOCKS,
+  assignTypes: new Set(['assignment']), augAssignTypes: new Set([]),
+  declTypes: new Set(['property_declaration']), declContainerTypes: new Set([]),
+  memberTypes: new Set(['navigation_expression']), subscriptTypes: new Set(['indexing_expression']),
+  identTypes: new Set(['simple_identifier']), callTypes: new Set(['call_expression']), callNameField: 'function',
+  updateTypes: new Set([]),
+  conditionField: 'condition', consequenceField: 'consequence', alternativeField: 'alternative', bodyField: 'body',
+  leftField: 'left', rightField: 'right', paramsField: 'parameters',
+  conditionNode: n => n.type === 'for_statement' ? null : firstNamedOutside(n, KOTLIN_BLOCKS),
+  consequenceNode: n => n.namedChildren.find(c => KOTLIN_BLOCKS.has(c.type)) ?? null,
+  alternativeNode: n => n.namedChildren.filter(c => KOTLIN_BLOCKS.has(c.type))[1] ?? null,
+  bodyNode: n => n.childForFieldName('body') ?? n.namedChildren.find(c => KOTLIN_BLOCKS.has(c.type)) ?? null,
+  leftNode: n => n.namedChildren.find(c => c.type === 'variable_declaration') ?? n.namedChildren[0] ?? null,
+  rightNode: n => n.namedChildren[n.namedChildren.length - 1] ?? null,
+  loopTargetNode: n => n.type === 'for_statement'
+    ? findDescendantOfType(
+      n.namedChildren.find(c => c.type === 'variable_declaration') ?? n,
+      'simple_identifier',
+      2,
+    ) ?? null
+    : null,
+  loopIterableNode: n => n.type === 'for_statement'
+    ? n.namedChildren.find(c => c.type !== 'variable_declaration' && !KOTLIN_BLOCKS.has(c.type)) ?? null
+    : null,
+  transferKind: n => {
+    if (n.type !== 'jump_expression') return undefined;
+    const keyword = n.text.trim().match(/^(return|break|continue|throw)\b/)?.[1];
+    return keyword as 'return' | 'break' | 'continue' | 'throw' | undefined;
+  },
+};
+
+const SWIFT_BLOCKS = new Set(['function_body', 'statements']);
+const SWIFT_SPEC: CfgLangSpec = {
+  ifTypes: new Set(['if_statement']),
+  loopTypes: new Set(['while_statement', 'for_statement']),
+  tryTypes: new Set([]), switchTypes: new Set([]),
+  nestedFnTypes: new Set(['lambda_literal', 'function_declaration']),
+  switchFallsThrough: false, blockScoped: true, comprehensionTypes: new Set([]),
+  returnTypes: new Set([]), breakTypes: new Set([]), continueTypes: new Set([]), throwTypes: new Set([]),
+  blockTypes: SWIFT_BLOCKS,
+  assignTypes: new Set(['assignment']), augAssignTypes: new Set([]),
+  declTypes: new Set(['property_declaration']), declContainerTypes: new Set([]),
+  memberTypes: new Set(['navigation_expression']), subscriptTypes: new Set(['subscript_expression']),
+  identTypes: new Set(['simple_identifier', 'bound_identifier']), callTypes: new Set(['call_expression']), callNameField: 'function',
+  updateTypes: new Set([]),
+  conditionField: 'condition', consequenceField: 'consequence', alternativeField: 'alternative', bodyField: 'body',
+  leftField: 'target', rightField: 'result', paramsField: 'parameters',
+  consequenceNode: n => n.namedChildren.find(c => c.type === 'statements') ?? null,
+  alternativeNode: n => n.namedChildren.filter(c => c.type === 'statements')[1] ?? null,
+  bodyNode: n => n.childForFieldName('body') ?? n.namedChildren.find(c => SWIFT_BLOCKS.has(c.type)) ?? null,
+  loopTargetNode: n => n.type === 'for_statement' ? n.childForFieldName('item') : null,
+  loopIterableNode: n => n.type === 'for_statement' ? n.childForFieldName('collection') : null,
+  transferKind: n => {
+    if (n.type !== 'control_transfer_statement') return undefined;
+    const keyword = n.text.trim().match(/^(return|break|continue|throw)\b/)?.[1];
+    return keyword as 'return' | 'break' | 'continue' | 'throw' | undefined;
+  },
+};
+
+const DART_SPEC: CfgLangSpec = {
+  ifTypes: new Set(['if_statement']), loopTypes: new Set(['while_statement', 'for_statement']),
+  tryTypes: new Set(['try_statement']), switchTypes: new Set([]),
+  nestedFnTypes: new Set(['function_expression', 'local_function_declaration']),
+  switchFallsThrough: false, blockScoped: true, comprehensionTypes: new Set([]),
+  returnTypes: new Set(['return_statement']), breakTypes: new Set(['break_statement']),
+  continueTypes: new Set(['continue_statement']), throwTypes: new Set(['throw_expression']),
+  blockTypes: new Set(['function_body', 'block']),
+  assignTypes: new Set(['assignment_expression']), augAssignTypes: new Set([]),
+  declTypes: new Set(['initialized_variable_definition']), declContainerTypes: new Set(['local_variable_declaration']),
+  memberTypes: new Set(['selector', 'unconditional_assignable_selector']), subscriptTypes: new Set(['index_expression']),
+  identTypes: new Set(['identifier']), callTypes: new Set([]), callNameField: 'function', updateTypes: new Set(['postfix_expression']),
+  conditionField: 'condition', consequenceField: 'consequence', alternativeField: 'alternative', bodyField: 'body',
+  leftField: 'left', rightField: 'right', paramsField: 'parameters',
+  conditionNode: n => n.type === 'for_statement'
+    ? null
+    : n.childForFieldName('condition') ?? firstNamedOutside(n, new Set(['block'])),
+  loopTargetNode: n => n.type === 'for_statement'
+    ? n.namedChildren.find(c => c.type === 'for_loop_parts')?.childForFieldName('name') ?? null
+    : null,
+  loopIterableNode: n => n.type === 'for_statement'
+    ? n.namedChildren.find(c => c.type === 'for_loop_parts')?.childForFieldName('value') ?? null
+    : null,
+};
+
+const SCALA_SPEC: CfgLangSpec = {
+  ifTypes: new Set(['if_expression']), loopTypes: new Set(['while_expression', 'for_expression']),
+  tryTypes: new Set(['try_expression']), switchTypes: new Set([]),
+  nestedFnTypes: new Set(['lambda_expression', 'function_definition']),
+  switchFallsThrough: false, blockScoped: true, comprehensionTypes: new Set([]),
+  returnTypes: new Set(['return_expression']), breakTypes: new Set([]), continueTypes: new Set([]), throwTypes: new Set(['throw_expression']),
+  blockTypes: new Set(['block', 'indented_block']),
+  assignTypes: new Set(['assignment_expression']), augAssignTypes: new Set([]),
+  declTypes: new Set(['var_definition', 'val_definition']), declContainerTypes: new Set([]),
+  memberTypes: new Set(['field_expression']), subscriptTypes: new Set([]),
+  identTypes: new Set(['identifier']), callTypes: new Set(['call_expression']), callNameField: 'function', updateTypes: new Set([]),
+  conditionField: 'condition', consequenceField: 'consequence', alternativeField: 'alternative', bodyField: 'body',
+  leftField: 'left', rightField: 'right', paramsField: 'parameters',
+  loopTargetNode: n => {
+    if (n.type !== 'for_expression') return null;
+    const enumerator = n.namedChildren.find(c => c.type === 'enumerators')?.namedChildren
+      .find(c => c.type === 'enumerator');
+    return enumerator?.namedChildren[0] ?? null;
+  },
+  loopIterableNode: n => {
+    if (n.type !== 'for_expression') return null;
+    const enumerator = n.namedChildren.find(c => c.type === 'enumerators')?.namedChildren
+      .find(c => c.type === 'enumerator');
+    return enumerator?.namedChildren[enumerator.namedChildren.length - 1] ?? null;
+  },
+};
+
 const SPEC_BY_LANGUAGE: Record<string, CfgLangSpec> = {
   TypeScript: TS_SPEC,
   JavaScript: TS_SPEC,
@@ -490,6 +626,10 @@ const SPEC_BY_LANGUAGE: Record<string, CfgLangSpec> = {
   PHP: PHP_SPEC,
   Rust: RUST_SPEC,
   Ruby: RUBY_SPEC,
+  Kotlin: KOTLIN_SPEC,
+  Swift: SWIFT_SPEC,
+  Dart: DART_SPEC,
+  Scala: SCALA_SPEC,
 };
 
 /**
@@ -689,6 +829,23 @@ class CfgBuilder {
       return current;
     }
 
+    const adaptedTransfer = spec.transferKind?.(stmt);
+    if (adaptedTransfer === 'return' || adaptedTransfer === 'throw') {
+      this.recordExpr(stmt, current);
+      this.addAbruptEdge(current, this.EXIT, 'exit');
+      return null;
+    }
+    if (adaptedTransfer === 'break') {
+      if (loop) this.addAbruptEdge(current, loop.breakTarget, 'normal');
+      else this.addAbruptEdge(current, this.EXIT, 'exit');
+      return null;
+    }
+    if (adaptedTransfer === 'continue') {
+      if (loop) this.addAbruptEdge(current, loop.continueTarget, 'back');
+      else this.addAbruptEdge(current, this.EXIT, 'exit');
+      return null;
+    }
+
     if (spec.returnTypes.has(t) || spec.throwTypes.has(t)) {
       this.recordExpr(stmt, current); // return/throw value is a use
       this.addAbruptEdge(current, this.EXIT, 'exit');
@@ -742,10 +899,10 @@ class CfgBuilder {
   private processIf(stmt: CfgNode, current: number, loop: LoopCtx | null): number | null {
     const { spec } = this;
     this.setKind(current, 'branch');
-    const cond = stmt.childForFieldName(spec.conditionField);
+    const cond = stmt.childForFieldName(spec.conditionField) ?? spec.conditionNode?.(stmt) ?? null;
     if (cond) this.recordUses(cond, current);
 
-    const consequence = stmt.childForFieldName(spec.consequenceField);
+    const consequence = stmt.childForFieldName(spec.consequenceField) ?? spec.consequenceNode?.(stmt) ?? null;
     const thenBlock = this.newBlock('normal');
     this.addEdge(current, thenBlock, 'true');
     const thenExit = consequence
@@ -786,7 +943,7 @@ class CfgBuilder {
       return merge;
     }
 
-    const alternative = stmt.childForFieldName(spec.alternativeField);
+    const alternative = stmt.childForFieldName(spec.alternativeField) ?? spec.alternativeNode?.(stmt) ?? null;
     if (alternative) {
       const elseBlock = this.newBlock('normal');
       this.addEdge(current, elseBlock, 'false');
@@ -838,7 +995,8 @@ class CfgBuilder {
 
     const condBlock = this.newBlock('loop');
     this.addEdge(current, condBlock, 'normal');
-    let cond = stmt.childForFieldName(spec.conditionField) ?? loopHeaderField(stmt, spec.conditionField);
+    let cond = stmt.childForFieldName(spec.conditionField) ?? loopHeaderField(stmt, spec.conditionField)
+      ?? spec.conditionNode?.(stmt) ?? null;
     // Go exposes `for cond {}` as a bare expression child with no condition field —
     // recover it (the named child that is neither the body nor a for/range clause)
     // so its loop-variable reads are recorded and it is not mistaken for `for {}`.
@@ -861,12 +1019,16 @@ class CfgBuilder {
     // the body and reach post-loop code as an unsound `exact`.
     if (!this.isInfiniteLoop(stmt, cond)) this.addEdge(condBlock, afterBlock, 'false');
 
-    const body = stmt.childForFieldName(spec.bodyField);
-    const innerLoop: LoopCtx = { continueTarget: condBlock, breakTarget: afterBlock };
+    const body = stmt.childForFieldName(spec.bodyField) ?? spec.bodyNode?.(stmt) ?? null;
+    const update = loopHeaderField(stmt, 'update') ?? loopHeaderField(stmt, 'increment');
+    const updateBlock = update ? this.newBlock('normal') : null;
+    if (update && updateBlock !== null) this.recordUses(update, updateBlock);
+    const innerLoop: LoopCtx = { continueTarget: updateBlock ?? condBlock, breakTarget: afterBlock };
     const bodyExit = body
       ? this.processSeq(this.stmtChildren(body), bodyBlock, innerLoop)
       : bodyBlock;
-    if (bodyExit !== null) this.addEdge(bodyExit, condBlock, 'back');
+    if (bodyExit !== null) this.addEdge(bodyExit, updateBlock ?? condBlock, updateBlock === null ? 'back' : 'normal');
+    if (updateBlock !== null) this.addEdge(updateBlock, condBlock, 'back');
 
     return afterBlock;
   }
@@ -885,6 +1047,7 @@ class CfgBuilder {
     if (stmt.type === 'loop_expression') return true;  // Rust `loop {}`
     if (stmt.type === 'for_statement') {
       if (this.language === 'Python') return false;                              // Python `for x in xs` = foreach
+      if (this.language === 'Kotlin' || this.language === 'Swift' || this.language === 'Dart') return false;
       if (stmt.namedChildren.some(c => c.type === 'range_clause')) return false;  // Go `for range`
       // A conditionless c-style `for` (`for(;;)`, `for(init;;update)`) and Go's
       // bare `for {}` always run their body — only `break` exits.
@@ -903,12 +1066,12 @@ class CfgBuilder {
     const condBlock = this.newBlock('loop');
     const afterBlock = this.newBlock('merge');
 
-    const body = stmt.childForFieldName(spec.bodyField);
+    const body = stmt.childForFieldName(spec.bodyField) ?? spec.bodyNode?.(stmt) ?? null;
     const innerLoop: LoopCtx = { continueTarget: condBlock, breakTarget: afterBlock };
     const bodyExit = body ? this.processSeq(this.stmtChildren(body), bodyBlock, innerLoop) : bodyBlock;
     if (bodyExit !== null) this.addEdge(bodyExit, condBlock, 'normal');
 
-    const cond = stmt.childForFieldName(spec.conditionField);
+    const cond = stmt.childForFieldName(spec.conditionField) ?? spec.conditionNode?.(stmt) ?? null;
     if (cond) this.recordUses(cond, condBlock);
     this.addEdge(condBlock, bodyBlock, 'back');   // true → run the body again
     this.addEdge(condBlock, afterBlock, 'false'); // false → exit
@@ -1191,8 +1354,8 @@ class CfgBuilder {
 
   private recordAssignment(node: CfgNode, block: number, augmented: boolean): void {
     const { spec } = this;
-    const left = node.childForFieldName(spec.leftField) ?? node.namedChildren[0];
-    const right = node.childForFieldName(spec.rightField) ?? node.namedChildren[node.namedChildren.length - 1];
+    const left = node.childForFieldName(spec.leftField) ?? spec.leftNode?.(node) ?? node.namedChildren[0];
+    const right = node.childForFieldName(spec.rightField) ?? spec.rightNode?.(node) ?? node.namedChildren[node.namedChildren.length - 1];
     const line = node.startPosition.row + 1;
 
     // Detect a compound operator (`+=`, `-=`, …) from its text, so languages that
@@ -1217,8 +1380,9 @@ class CfgBuilder {
     const line = node.startPosition.row + 1;
     // Go short_var_declaration / var_spec: left & right are expression_lists.
     // C/C++ init_declarator uses a `declarator` field for the binding target.
-    const left = node.childForFieldName(spec.leftField) ?? node.childForFieldName('name') ?? node.childForFieldName('declarator');
-    const right = node.childForFieldName(spec.rightField) ?? node.childForFieldName('value');
+    const left = node.childForFieldName(spec.leftField) ?? spec.leftNode?.(node)
+      ?? node.childForFieldName('name') ?? node.childForFieldName('pattern') ?? node.childForFieldName('declarator');
+    const right = node.childForFieldName(spec.rightField) ?? spec.rightNode?.(node) ?? node.childForFieldName('value');
     if (right) this.recordUses(right, block, line);
     if (left) {
       this.recordTarget(left, block, line);
@@ -1305,12 +1469,12 @@ class CfgBuilder {
     // these in a for_clause/range_clause child (loopHeaderField descends into it).
     const init = loopHeaderField(stmt, 'initializer') ?? loopHeaderField(stmt, 'init');
     if (init) this.recordStmt(init, block);
-    const update = loopHeaderField(stmt, 'update') ?? loopHeaderField(stmt, 'increment');
-    if (update) this.recordUses(update, block);
     // for (const x of xs) / for x in xs / for i, v := range xs / Rust `for i in xs` /
     // Java enhanced-for `for (T name : value)` exposes the loop var in `name`.
-    const left = loopHeaderField(stmt, 'left') ?? loopHeaderField(stmt, 'pattern') ?? loopHeaderField(stmt, 'name');
-    const right = loopHeaderField(stmt, 'right') ?? loopHeaderField(stmt, 'value');
+    const left = loopHeaderField(stmt, 'left') ?? loopHeaderField(stmt, 'pattern')
+      ?? loopHeaderField(stmt, 'name') ?? spec.loopTargetNode?.(stmt) ?? null;
+    const right = loopHeaderField(stmt, 'right') ?? loopHeaderField(stmt, 'value')
+      ?? spec.loopIterableNode?.(stmt) ?? null;
     if (right) this.recordUses(right, block);
     if (left && (spec.identTypes.has(left.type) || left.type.includes('pattern') || left.type === 'expression_list')) {
       this.recordTarget(left, block, line);
@@ -1433,7 +1597,8 @@ function normalizeLValue(text: string): string {
  * directly. This descends into the clause when present.
  */
 function loopHeaderField(stmt: CfgNode, field: string): CfgNode | null {
-  const clause = stmt.namedChildren.find(c => c.type === 'for_clause' || c.type === 'range_clause');
+  const clause = stmt.namedChildren.find(c =>
+    c.type === 'for_clause' || c.type === 'range_clause' || c.type === 'for_loop_parts');
   return (clause ?? stmt).childForFieldName(field);
 }
 
@@ -1891,12 +2056,19 @@ function resolveScopes(body: CfgNode, spec: CfgLangSpec, params: string[]): Map<
  * @param fnNode    The function/method declaration node.
  * @param language  Source language (TypeScript/JavaScript/Python/Go in v1).
  */
-export function buildFunctionCfg(fnNode: CfgNode, language: string): FunctionCfg | undefined {
+export function buildFunctionCfg(fnNode: CfgNode, language: string, bodyOverride?: CfgNode): FunctionCfg | undefined {
   const spec = SPEC_BY_LANGUAGE[language];
   if (!spec) return undefined;
   try {
-    const body = findBody(fnNode, spec);
+    const body = bodyOverride ?? findBody(fnNode, spec);
     if (!body) return undefined;
+    // Kotlin and Scala commonly use `if` as the RHS of a declaration. The
+    // statement-oriented builder cannot yet place the declaration's definition
+    // after both expression branches without fabricating straight-line flow.
+    // Refuse the whole overlay for that function instead of emitting a valid-
+    // looking CFG that silently omits the branch.
+    if ((language === 'Kotlin' || language === 'Scala') && hasNestedIfInitializer(body, spec)) return undefined;
+    if (language === 'Scala' && hasMultiEnumeratorFor(body)) return undefined;
     const params = extractParamNames(fnNode, spec);
     const paramLine = fnNode.startPosition.row + 1;
 
@@ -1929,6 +2101,39 @@ export function buildFunctionCfg(fnNode: CfgNode, language: string): FunctionCfg
   } catch {
     return undefined; // fail-soft: any visitor/grammar surprise yields no overlay
   }
+}
+
+function hasNestedIfInitializer(body: CfgNode, spec: CfgLangSpec): boolean {
+  const containsIf = (node: CfgNode): boolean => {
+    if (spec.nestedFnTypes.has(node.type)) return false;
+    if (spec.ifTypes.has(node.type)) return true;
+    return node.namedChildren.some(containsIf);
+  };
+  const visit = (node: CfgNode): boolean => {
+    if (node !== body && spec.nestedFnTypes.has(node.type)) return false;
+    if (spec.declTypes.has(node.type) || spec.assignTypes.has(node.type)) {
+      const rhs = node.childForFieldName(spec.rightField) ?? node.childForFieldName('value') ?? node.namedChildren.at(-1);
+      if (rhs && containsIf(rhs)) return true;
+    }
+    return node.namedChildren.some(visit);
+  };
+  return visit(body);
+}
+
+/** Scala's later generators are nested flatMap/withFilter operations. A single
+ * loop header cannot represent them without dropping iterable and binding facts. */
+function hasMultiEnumeratorFor(body: CfgNode): boolean {
+  const visit = (node: CfgNode): boolean => {
+    if (node !== body && SCALA_SPEC.nestedFnTypes.has(node.type)) return false;
+    if (node.type === 'for_expression') {
+      const enumerators = node.namedChildren.find(c => c.type === 'enumerators');
+      const entries = enumerators?.namedChildren.filter(c => c.type === 'enumerator') ?? [];
+      const containsGuard = (n: CfgNode): boolean => n.type === 'guard' || n.namedChildren.some(containsGuard);
+      if (entries.length !== 1 || entries.some(containsGuard)) return true;
+    }
+    return node.namedChildren.some(visit);
+  };
+  return visit(body);
 }
 
 /**
@@ -2045,7 +2250,7 @@ export function variableSliceLines(cfg: FunctionCfg, target: string): VariableSl
 }
 
 function findBody(fnNode: CfgNode, spec: CfgLangSpec): CfgNode | undefined {
-  const direct = fnNode.childForFieldName(spec.bodyField);
+  const direct = fnNode.childForFieldName(spec.bodyField) ?? spec.bodyNode?.(fnNode) ?? null;
   if (direct) return direct;
   // Fallback: first block-type child (arrow functions, lambdas with block bodies).
   for (const c of fnNode.namedChildren) if (spec.blockTypes.has(c.type)) return c;
@@ -2067,14 +2272,21 @@ function extractParamNames(fnNode: CfgNode, spec: CfgLangSpec): string[] {
   const params = fnNode.childForFieldName(spec.paramsField)
     // C/C++ nest the parameter_list under the `function_declarator`.
     ?? fnNode.childForFieldName('declarator')?.childForFieldName('parameters')
-    ?? fnNode.namedChildren.find(c => c.type === 'parameters' || c.type === 'parameter_list' || c.type === 'formal_parameters')
+    ?? fnNode.namedChildren.find(c => c.type === 'parameters' || c.type === 'parameter_list' || c.type === 'formal_parameters' || c.type === 'function_value_parameters' || c.type === 'formal_parameter_list')
     ?? findDescendantOfType(fnNode, 'parameter_list', 4);
-  if (!params) return [];
+  const directParams = params ? params.namedChildren : fnNode.namedChildren.filter(c => c.type === 'parameter');
+  if (directParams.length === 0) return [];
   const names: string[] = [];
   const isBinder = (ty: string): boolean =>
     ty === 'identifier' || spec.identTypes.has(ty) ||
     ty === 'shorthand_property_identifier_pattern' || ty === 'shorthand_property_identifier'; // PHP: variable_name
   const visit = (n: CfgNode): void => {
+    // Swift has no parameter-list wrapper. Each direct `parameter` carries an
+    // external label and the actual local binding in its `name` field.
+    if (n.type === 'parameter') {
+      const name = n.childForFieldName('name');
+      if (name) { names.push(name.text); return; }
+    }
     if (n.type === 'required_parameter' || n.type === 'optional_parameter') {
       const pattern = n.childForFieldName('pattern') ?? n.childForFieldName('name') ?? n.namedChildren[0];
       if (pattern) visit(pattern);
@@ -2106,7 +2318,7 @@ function extractParamNames(fnNode: CfgNode, spec: CfgLangSpec): string[] {
       }
     }
   };
-  for (const c of params.namedChildren) visit(c);
+  for (const c of directParams) visit(c);
   // Go named return values (`func f() (x int) { x = 5; return }`) live in a
   // second `parameter_list` under the `result` field — they are real in-scope
   // locals (zero-initialized), so treat them as parameters.

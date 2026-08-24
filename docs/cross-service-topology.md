@@ -80,7 +80,17 @@ registration is skipped, never queried out of date.)
 
 Which languages participate is an observable fact: the `crossServiceHttp` capability in the
 [language-support matrix](language-support.md) (and the `get_language_support` MCP tool) reports clients
-for TS/JS and routes for TS/JS, Python, and Java. A language that backs neither reads `·`, honestly.
+for TS/JS, Python, and Go, and routes for TS/JS, Python, and Java. A language that backs neither reads
+`·`, honestly.
+
+Python client extraction covers module aliases, direct variables proven to come from
+`requests.Session()` or `httpx.Client()`, and `httpx.AsyncClient()` aliases within their context-manager
+lifetime. Go covers aliased or unaliased `net/http` convenience calls and a literal
+`NewRequest`/`NewRequestWithContext` (including `http.MethodGet`-style constants) tied in the same
+lexical block to `DefaultClient.Do`, a proven `DefaultClient` alias, or a proven `http.Client`
+variable. Dynamic URLs/methods, conditional or out-of-scope provenance, shadowed bindings, custom
+transports, and flows across functions are skipped rather than guessed. Parse or traversal-budget
+failures in this optional projection are disclosed separately from primary call-graph parse health.
 
 ## Out of scope (deferred)
 

@@ -22,7 +22,7 @@ import { isCfgOverlayShed } from './memory-strategy.js';
  * so arrow/function-expression bodies and params are analyzed too. Fail-soft:
  * returns undefined for unsupported languages or any analysis surprise.
  */
-export function buildCfgFor(fnNode: CfgNode, language: string): FunctionCfg | undefined {
+export function buildCfgFor(fnNode: CfgNode, language: string, bodyOverride?: CfgNode): FunctionCfg | undefined {
   // Graceful-degradation ladder tier 1 (change: make-analyze-scale-to-any-repo): when the
   // pre-flight estimate says the overlay will not fit the heap, it is shed WHOLESALE — no CFG is
   // built for any function, saving both its build cost and its resident size. `isCfgOverlayShed()`
@@ -56,7 +56,7 @@ export function buildCfgFor(fnNode: CfgNode, language: string): FunctionCfg | un
         stack.push(...n.namedChildren);
       }
     }
-    return buildFunctionCfg(target as unknown as CfgNode, language);
+    return buildFunctionCfg(target as unknown as CfgNode, language, bodyOverride);
   } catch (error) {
     if (process.env.DEBUG) {
       console.debug(`[cfg] overlay skipped for a ${language} function: ${(error as Error).message}`);

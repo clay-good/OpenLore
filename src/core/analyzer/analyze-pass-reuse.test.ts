@@ -37,8 +37,9 @@ export function inferred(): void {
   },
 ];
 
-// Captured from origin/main@3cf8a077 before this optimization. Keep this fixture separate
-// from the retained late-pass oracle so shared helper changes cannot bless output drift.
+// Captured from origin/main@3cf8a077 and updated when exact HTTP call-site offsets made
+// the one-line fire() call resolvable. Keep this fixture separate from the retained late-pass
+// oracle so shared helper changes cannot bless unrelated output drift.
 const preChangeGoldenFiles = [
   {
     path: '/virtual/app.ts',
@@ -72,10 +73,10 @@ describe('Pass-1 late-fact reuse', () => {
     const graph = await new CallGraphBuilder().build(preChangeGoldenFiles);
     const bytes = JSON.stringify(serializeCallGraph(graph));
     expect(createHash('sha256').update(bytes).digest('hex'))
-      .toBe('edf9d06200bb0e7477d2634800c780f02636ef145531dc329a5c5697cd27d652');
-    expect(bytes).toHaveLength(11233);
+      .toBe('f922c97fc36b0a43759a64256bdd0c2c1810ca43d8ff3d138ebce6f6a4216f00');
+    expect(bytes).toHaveLength(11412);
     expect(graph.nodes.size).toBe(12);
-    expect(graph.edges).toHaveLength(10);
+    expect(graph.edges).toHaveLength(11);
     expect(graph.inheritanceEdges).toHaveLength(2);
     expect([...graph.nodes.values()].find(node => node.name === 'handler')?.callArity).toEqual({
       required: 0,

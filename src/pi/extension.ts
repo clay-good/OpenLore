@@ -1015,8 +1015,8 @@ export const NAV_TOOLS: NavToolSpec[] = [
   {
     name: 'analyze_error_propagation',
     label: 'openlore analyze_error_propagation',
-    description: 'See what exceptions can propagate OUT of a function to its callers, and which are already caught inside it — the error-handling analogue of analyze_impact.',
-    guideline: 'Before calling a function, or after changing one to throw, call openlore_analyze_error_propagation with `symbol` to learn what escapes to callers and what is handled internally. TypeScript/JavaScript/Python; other languages return an explicit unsupported result.',
+    description: 'See what exceptions (TS/JS/Python/Java/C#) or returned errors and panics (Go) can propagate OUT of a function, and which are handled inside it.',
+    guideline: 'Before calling a function, or after changing its error behavior, call openlore_analyze_error_propagation with `symbol`. TS/JS/Python/Java/C# return exception-shaped entries; Go returns `errorModel: go-value` with `value`-shaped returned-error/panic entries and disclosed static-analysis boundaries. Other languages return an explicit unsupported result.',
     parameters: Type.Object({
       symbol: Type.String({ description: 'REQUIRED. The function to analyze: its name, or name::path to disambiguate.' }),
       maxDepth: Type.Optional(Type.Number({ description: 'Callee-traversal depth bound (default 10, clamped to [1, 30]).' })),

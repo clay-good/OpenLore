@@ -2036,6 +2036,63 @@ export async function buildGraphSubset(
     }
   }
 
+  // HTTP topology has no import/call edge before the first client↔route match,
+  // so the ordinary reverse-caller closure cannot discover the counterpart of
+  // a newly added client or route. Bring a small, deterministic set of known
+  // HTTP-capable files into this subset as resolution context. If the set is too
+  // large, mark the omitted files stale so the existing self-healing rebuild
+  // converges them rather than silently serving a partial topology.
+  const HTTP_CONTEXT_CAP = 64;
+  const HTTP_CONTEXT_SCAN_CAP = 1_024;
+  const HTTP_CONTEXT_EXT = /\.(?:py|pyw|go|ts|tsx|js|jsx|mjs|cjs|java)$/i;
+  const httpRoles = (path: string, source: string): { client: boolean; route: boolean } => {
+    const ext = posix.extname(path).toLowerCase();
+    const client = ext === '.go'
+      ? /["`]net\/http["`]/.test(source)
+      : ext === '.py' || ext === '.pyw'
+        ? /\b(?:requests|httpx)\b/.test(source)
+        : /\.(?:[cm]?[jt]sx?)$/.test(path)
+          ? /\b(?:fetch|axios|ky|got)\b/.test(source)
+          : false;
+    const route = ext === '.py' || ext === '.pyw'
+      ? /@[^\n]+\.(?:get|post|put|patch|delete|head|options|route)\s*\(|\b(?:path|re_path)\s*\(/i.test(source)
+      : ext === '.java'
+        ? /@(?:RequestMapping|GetMapping|PostMapping|PutMapping|PatchMapping|DeleteMapping)\b/.test(source)
+        : /\.(?:[cm]?[jt]sx?)$/.test(path)
+          ? /\.(?:get|post|put|patch|delete|head|options)\s*\(|@(?:Get|Post|Put|Patch|Delete)\s*\(/.test(source) ||
+            /(?:^|\/)app\/.*\/route\.[jt]sx?$|(?:^|\/)pages\/api\//.test(path.replace(/\\/g, '/'))
+          : false;
+    return { client, route };
+  };
+  const changedHttpRoles = httpRoles(changedRel, changedContent);
+  const needsHttpContext = changedHttpRoles.client || changedHttpRoles.route;
+  const alreadyIncluded = new Set(files.map(file => file.path));
+  const contextCandidates = needsHttpContext ? [...new Set((resolutionNodes ?? [])
+    .map(node => node.filePath)
+    .filter(path => HTTP_CONTEXT_EXT.test(path) && !alreadyIncluded.has(path)))]
+    .sort() : [];
+  const contextFiles: Array<{ path: string; content: string; language: string }> = [];
+  for (const rel of contextCandidates.slice(0, HTTP_CONTEXT_SCAN_CAP)) {
+    try {
+      const contextContent = await readFileConfined(rootDir, rel, MAX_EDIT_VERDICT_BASIS_FILE_BYTES);
+      const roles = httpRoles(rel, contextContent);
+      const isCounterpart = (changedHttpRoles.client && roles.route) || (changedHttpRoles.route && roles.client);
+      if (!isCounterpart) continue;
+      if (contextFiles.length >= HTTP_CONTEXT_CAP) {
+        skipped.push(rel);
+        continue;
+      }
+      contextFiles.push({ path: rel, content: contextContent, language: detectLanguage(rel) });
+      analyzedFileHashes.set(rel, createHash('sha256').update(contextContent).digest('hex'));
+    } catch {
+      skipped.push(rel);
+    }
+  }
+  // Beyond the scan bound a relevant counterpart may exist. Mark only this
+  // genuinely uninspected tail stale; the watcher schedules its existing
+  // self-healing rebuild. Ordinary non-HTTP edits never enter this scan.
+  skipped.push(...contextCandidates.slice(HTTP_CONTEXT_SCAN_CAP));
+
   // Re-export barrels a subset file imports through are neither the changed file nor a
   // caller of it, so they are absent from the subset — without them buildResolvedImportMap
   // cannot follow the chain and a barrel call degrades from `re_export`/`import` to
@@ -2069,7 +2126,7 @@ export async function buildGraphSubset(
   };
   const barrels = await collectReExportBarrels(files, readModule);
   const barrelPaths = new Set(barrels.map((b) => b.path));
-  const buildInput = barrels.length > 0 ? [...files, ...barrels] : files;
+  const buildInput = [...files, ...contextFiles, ...barrels];
 
   const builder = new CallGraphBuilder();
   const result = await builder.build(buildInput, undefined, undefined, resolutionNodes);
@@ -2077,10 +2134,14 @@ export async function buildGraphSubset(
   // Only return nodes from changedFile — callerFiles nodes are already in DB and unchanged.
   // Barrel context files are resolution-only: never persist their nodes or edges.
   const changedNodes = Array.from(result.nodes.values()).filter((n) => n.filePath === changedRel);
-  const resultEdges =
-    barrelPaths.size > 0
-      ? result.edges.filter((e) => !barrelPaths.has(e.callerId.slice(0, e.callerId.indexOf('::'))))
-      : result.edges;
+  const primaryPaths = new Set(files.map(file => file.path));
+  const resultEdges = result.edges.filter((edge) => {
+    const callerFile = edge.callerId.slice(0, edge.callerId.indexOf('::'));
+    if (barrelPaths.has(callerFile)) return false;
+    if (primaryPaths.has(callerFile)) return true;
+    if (edge.confidence !== 'http_endpoint') return false;
+    return result.nodes.get(edge.calleeId)?.filePath === changedRel;
+  });
 
   // CFG/def-use overlay (spec: add-intraprocedural-cfg-dataflow-overlay) for the
   // changed file's functions only — intra-procedural, so caller files' overlays

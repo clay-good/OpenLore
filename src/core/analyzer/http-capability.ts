@@ -10,8 +10,8 @@
  * actually extracts a client call or a route, so the registry cannot over-claim.
  */
 
-/** Languages OpenLore extracts outbound HTTP CLIENT call sites from (fetch/axios/ky/got). */
-export const HTTP_CLIENT_LANGUAGES: ReadonlySet<string> = new Set(['TypeScript', 'JavaScript']);
+/** Languages OpenLore extracts outbound HTTP CLIENT call sites from. */
+export const HTTP_CLIENT_LANGUAGES: ReadonlySet<string> = new Set(['TypeScript', 'JavaScript', 'Python', 'Go']);
 
 /** Languages OpenLore extracts server ROUTE registrations from (the handler half of an edge). */
 export const HTTP_ROUTE_LANGUAGES: ReadonlySet<string> = new Set([

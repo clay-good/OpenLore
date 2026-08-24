@@ -48,6 +48,22 @@ describe('get_language_support — named-language mode (pure registry, no analys
     expect(readCachedContext).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['Go', ['errorPropagation', 'crossServiceHttp']],
+    ['Java', ['errorPropagation']],
+    ['C#', ['errorPropagation']],
+    ['Kotlin', ['cfgOverlay', 'typeInference']],
+    ['Dart', ['cfgOverlay', 'typeInference']],
+    ['Swift', ['cfgOverlay']],
+    ['Scala', ['cfgOverlay']],
+  ] as const)('%s exposes every widened capability through the user-facing matrix', async (language, capabilities) => {
+    const res = await run({ directory: '/p', language });
+    const view = res.languages[0];
+    expect(view.known).toBe(true);
+    for (const capability of capabilities) expect(view.supported).toContain(capability);
+    expect(readCachedContext).not.toHaveBeenCalled();
+  });
+
   it('fail-soft: an unknown language is labeled, not errored', async () => {
     const res = await run({ directory: '/p', language: 'Haskell' });
     const view = res.languages[0];
@@ -103,10 +119,10 @@ describe('get_language_support — repo mode (coverage over detected languages)'
     expect(res.mode).toBe('repo');
     expect(res.detectedLanguages).toEqual(['Go', 'Kotlin', 'TypeScript']); // sorted, ext/unknown dropped
     const kotlin = res.languages.find(l => l.language === 'Kotlin')!;
-    // Kotlin has callGraph + signatures but NOT cfgOverlay/typeInference — the interpretable gap.
+    // Kotlin's widened overlays are derived from the live CFG/type-inference registries.
     expect(kotlin.supported).toContain('callGraph');
-    expect(kotlin.unsupported).toContain('cfgOverlay');
-    expect(kotlin.unsupported).toContain('typeInference');
+    expect(kotlin.supported).toContain('cfgOverlay');
+    expect(kotlin.supported).toContain('typeInference');
     expect(kotlin.detectedInRepo).toBe(true);
   });
 

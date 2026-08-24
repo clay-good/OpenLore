@@ -971,8 +971,9 @@ describe('PHP/C# indirection escapes (no unsound exact)', () => {
 
 describe('language contract: supported set + fail-soft for everything else', () => {
   // Every code language OpenLore detects (signature-extractor.ts detectLanguage).
-  const OVERLAY_LANGS = ['TypeScript', 'JavaScript', 'Python', 'Go', 'Java', 'C++', 'Rust', 'Ruby', 'C', 'C#', 'PHP'];
-  const FAIL_SOFT_LANGS = ['Kotlin', 'Swift', 'Scala', 'Dart', 'Lua', 'Elixir', 'Bash',
+  const OVERLAY_LANGS = ['TypeScript', 'JavaScript', 'Python', 'Go', 'Java', 'C++', 'Rust', 'Ruby', 'C', 'C#', 'PHP',
+    'Kotlin', 'Swift', 'Scala', 'Dart'];
+  const FAIL_SOFT_LANGS = ['Lua', 'Elixir', 'Bash',
     'Terraform', 'Kubernetes', 'Helm', 'CloudFormation', 'Ansible', 'Dockerfile', 'Docker Compose',
     'GitHub Actions', 'unknown', 'COBOL'];
 
