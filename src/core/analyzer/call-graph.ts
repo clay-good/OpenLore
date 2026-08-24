@@ -24,12 +24,17 @@ import {
   PACKAGE_SCOPE_IMPORT,
   PACKAGE_SCOPE_NAME,
 } from './import-resolver-bridge.js';
-import { inferTypesFromSource, resolveViaTypeInference } from './type-inference-engine.js';
+import { findAmbiguousTypeBindings, inferReceiverTypeAt, inferTypesFromSource } from './type-inference-engine.js';
 import {
   extractAllHttpEdges,
   extractTsRouteDefinitions,
   extractRouteDefinitions,
   extractJavaRouteDefinitions,
+  extractHttpCalls,
+  extractPythonHttpCallsFromRoot,
+  extractGoHttpCallsFromRoot,
+  type HttpCall,
+  type HttpExtractionDegradation,
   type RouteDefinition,
 } from './http-route-parser.js';
 import { mapFilesBounded } from './bounded-file-scan.js';
@@ -1308,7 +1313,8 @@ async function extractTSGraph(
   const classRelationships = collectClassRelationshipFacts('TypeScript', source =>
     safeQuery(lang, source, tree.rootNode) as unknown as TsMatch[]);
   const dynamicDispatch = collectPass1DynamicDispatch('TypeScript', content, tree.rootNode as unknown as TsNodeLike, nodes, filePath);
-  return { nodes, rawEdges, cfg, style, parseHealth, classRelationships, dynamicDispatch };
+  const httpCalls = await extractHttpCalls(filePath, content);
+  return { nodes, rawEdges, cfg, style, parseHealth, classRelationships, dynamicDispatch, httpCalls };
 }
 
 // ============================================================================
@@ -1488,7 +1494,9 @@ async function extractPyGraph(
   const classRelationships = collectClassRelationshipFacts('Python', source =>
     safeQuery(lang, source, tree.rootNode) as unknown as TsMatch[]);
   const dynamicDispatch = collectPass1DynamicDispatch('Python', content, tree.rootNode as unknown as TsNodeLike, nodes, filePath);
-  return { nodes, rawEdges, cfg, style, parseHealth, classRelationships, dynamicDispatch };
+  const httpDegradations: HttpExtractionDegradation[] = [];
+  const httpCalls = extractPythonHttpCallsFromRoot(filePath, tree.rootNode, d => httpDegradations.push(d));
+  return { nodes, rawEdges, cfg, style, parseHealth, classRelationships, dynamicDispatch, httpCalls, httpDegradations };
 }
 
 // ============================================================================
@@ -1587,7 +1595,9 @@ async function extractGoGraph(
   const classRelationships = collectClassRelationshipFacts('Go', source =>
     safeQuery(lang, source, tree.rootNode) as unknown as TsMatch[]);
   const dynamicDispatch = collectPass1DynamicDispatch('Go', content, tree.rootNode as unknown as TsNodeLike, nodes, filePath);
-  return { nodes, rawEdges, cfg, style, parseHealth, classRelationships, dynamicDispatch };
+  const httpDegradations: HttpExtractionDegradation[] = [];
+  const httpCalls = extractGoHttpCallsFromRoot(filePath, tree.rootNode, d => httpDegradations.push(d));
+  return { nodes, rawEdges, cfg, style, parseHealth, classRelationships, dynamicDispatch, httpCalls, httpDegradations };
 }
 
 // ============================================================================
@@ -2230,6 +2240,7 @@ async function extractSwiftGraph(
   if (!fnQuery || !directCallQuery || !navCallQuery) return emptyForUnavailable('Swift', false);
 
   const nodes: FunctionNode[] = [];
+  const cfgByStart = new Map<number, FunctionCfg>();
   for (const match of fnQuery.matches(tree.rootNode)) {
     const nameCapture = match.captures.find(c => c.name === 'fn.name');
     const nodeCapture = match.captures.find(c => c.name === 'fn.node');
@@ -2263,6 +2274,8 @@ async function extractSwiftGraph(
       docstring: extractDocstringBefore(content, fnNode.startIndex, 'Swift'),
       signature: extractDeclaration(content, fnNode.startIndex, fnNode.endIndex, 'Swift'),
     });
+    const fnCfg = buildCfgFor(fnNode as unknown as CfgNode, 'Swift');
+    if (fnCfg) cfgByStart.set(fnNode.startIndex, fnCfg);
   }
 
   ensureUniqueNodeIds(nodes);
@@ -2307,7 +2320,8 @@ async function extractSwiftGraph(
   const classRelationships = collectClassRelationshipFacts('Swift', source =>
     safeQuery(lang, source, tree.rootNode) as unknown as TsMatch[]);
   const dynamicDispatch = collectPass1DynamicDispatch('Swift', content, tree.rootNode as unknown as TsNodeLike, nodes, filePath);
-  return { nodes, rawEdges, parseHealth, classRelationships, dynamicDispatch };
+  const cfg = materializeCfgByNodeId(nodes, cfgByStart);
+  return { nodes, rawEdges, cfg, parseHealth, classRelationships, dynamicDispatch };
 }
 
 // ============================================================================
@@ -2764,7 +2778,7 @@ async function extractByQueries(
       const key = `${caller.id}\0${calleeName}\0${calleeObject ?? ''}\0${nodeCapture.node.startIndex}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      rawEdges.push({ callerId: caller.id, calleeName, line: nodeCapture.node.startPosition.row + 1, calleeObject });
+      rawEdges.push({ callerId: caller.id, calleeName, line: nodeCapture.node.startPosition.row + 1, calleeObject, offset: nodeCapture.node.startIndex });
     }
     const cfg = materializeCfgByNodeId(nodes, cfgByStart);
     // WASM grammars (e.g. Lua) yield spurious errors after the first parse — skip parse-health there.
@@ -2953,7 +2967,7 @@ const DART_CLASS_TYPES = new Set(['class_definition', 'mixin_declaration', 'exte
 async function extractDartGraph(
   filePath: string,
   content: string,
-): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[]; parseHealth?: FileParseHealth }> {
+): Promise<FileExtractResult> {
   const handle = await loadWasmGrammarSoft('Dart', 'tree-sitter-wasms/out/tree-sitter-dart.wasm');
   if (!handle) return { nodes: [], rawEdges: [] };
 
@@ -2969,6 +2983,7 @@ async function extractDartGraph(
 
   const nodes: FunctionNode[] = [];
   const nodeIds = new Set<string>();
+  const cfgByStart = new Map<number, FunctionCfg>();
   const collectFns = (n: TsNodeLike): void => {
     if (n.type === 'function_signature') {
       const nameNode = n.childForFieldName('name');
@@ -2986,6 +3001,14 @@ async function extractDartGraph(
             startIndex: n.startIndex, endIndex, fanIn: 0, fanOut: 0,
             signature: extractDeclaration(content, n.startIndex, n.endIndex, 'Dart'),
           });
+          if (sib?.type === 'function_body') {
+            const fnCfg = buildCfgFor(
+              n as unknown as CfgNode,
+              'Dart',
+              sib as unknown as CfgNode,
+            );
+            if (fnCfg) cfgByStart.set(n.startIndex, fnCfg);
+          }
         }
       }
     }
@@ -3011,7 +3034,17 @@ async function extractDartGraph(
           const key = `${caller.id}\0${name}\0${n.startIndex}`;
           if (!seen.has(key)) {
             seen.add(key);
-            rawEdges.push({ callerId: caller.id, calleeName: name, line: n.startPosition.row + 1 });
+            // A bare call's previous sibling is its callee identifier. Only a
+            // selector has a receiver before it; treating `final p = Parser()`
+            // as receiver `p` fabricates an external `p.Parser` method edge.
+            const receiver = prev?.type === 'identifier' ? undefined : prev?.previousNamedSibling;
+            rawEdges.push({
+              callerId: caller.id,
+              calleeName: name,
+              line: n.startPosition.row + 1,
+              offset: n.startIndex,
+              ...(receiver?.type === 'identifier' ? { calleeObject: receiver.text } : {}),
+            });
           }
         }
       }
@@ -3022,7 +3055,8 @@ async function extractDartGraph(
   // Dart loads via the WASM path, whose shared Language heap yields spurious ERROR nodes after the
   // first parse — parse-health is fail-soft (not tallied) for it (change:
   // add-parse-health-boundary-disclosure).
-  return { nodes, rawEdges };
+  const cfg = materializeCfgByNodeId(nodes, cfgByStart);
+  return { nodes, rawEdges, cfg };
   });
 }
 
@@ -4918,7 +4952,9 @@ function isEmptyExtractResult(result: FileExtractResult | undefined): boolean {
     && !result.parseHealth
     && !result.style
     && !result.classRelationships?.length
-    && !result.dynamicDispatch;
+    && !result.dynamicDispatch
+    && !result.httpCalls?.length
+    && !result.httpDegradations?.length;
 }
 
 /** Construction-time options for {@link CallGraphBuilder}. */
@@ -4990,6 +5026,8 @@ export class CallGraphBuilder {
     const grammarUnavailableByLanguage = new Map<string, GrammarUnavailableBoundary>();
     let relationships = new Map<string, { parentClasses: string[]; interfaces: string[] }>();
     const dynamicDispatchFacts: DynamicDispatchFacts[] = [];
+    const httpCallFacts = new Map<string, HttpCall[]>();
+    const pass1HttpDegradations: HttpExtractionDegradation[] = [];
 
     // Pass 1: Extract nodes and raw edges from each file.
     //
@@ -5136,6 +5174,8 @@ export class CallGraphBuilder {
           relationships.set(key, existing);
         }
         if (result.dynamicDispatch) dynamicDispatchFacts.push(result.dynamicDispatch);
+        if (result.httpCalls) httpCallFacts.set(file.path, result.httpCalls);
+        if (result.httpDegradations) pass1HttpDegradations.push(...result.httpDegradations);
       } catch (error) {
         // A throw is never memoized either (see above), so it re-extracts on every run —
         // unless the record already happened and the throw came from the MERGE below it, in
@@ -5362,6 +5402,7 @@ export class CallGraphBuilder {
       });
     };
     const inferredTypesByCaller = new Map<string, ReturnType<typeof inferTypesFromSource>>();
+    const ambiguousInferredBindingsByCaller = new Map<string, ReadonlySet<string>>();
     for (const raw of allRawEdges) {
       const callerNode = allNodes.get(raw.callerId);
       if (!callerNode) continue;
@@ -5444,15 +5485,35 @@ export class CallGraphBuilder {
       if (!calleeNode && raw.calleeObject) {
         const fileContent = fileContents.get(callerNode.filePath);
         if (fileContent) {
+          const bodySlice = fileContent.slice(callerNode.startIndex, callerNode.endIndex);
           let inferredTypes = inferredTypesByCaller.get(callerNode.id);
           if (!inferredTypes) {
-            const bodySlice = fileContent.slice(callerNode.startIndex, callerNode.endIndex);
             if (analyzerWorkCounters.enabled) analyzerWorkCounters.typeInferences++;
             inferredTypes = inferTypesFromSource(bodySlice, callerNode.language);
             inferredTypesByCaller.set(callerNode.id, inferredTypes);
+            ambiguousInferredBindingsByCaller.set(
+              callerNode.id,
+              findAmbiguousTypeBindings(bodySlice, callerNode.language),
+            );
           }
-          const resolved = resolveViaTypeInference(raw.calleeObject, raw.calleeName, inferredTypes, trie);
-          if (resolved) { calleeNode = resolved; confidence = 'type_inference'; }
+          const inferredClass = raw.offset !== undefined &&
+            (callerNode.language === 'Kotlin' || callerNode.language === 'Dart')
+            ? inferReceiverTypeAt(
+              bodySlice,
+              callerNode.language,
+              raw.calleeObject,
+              raw.offset - callerNode.startIndex,
+            )
+            : inferredTypes.get(raw.calleeObject);
+          if (inferredClass) {
+            const picked = pickByAffinity(
+              trie.findByQualifiedName(inferredClass, raw.calleeName),
+              callerNode.filePath,
+              inferredClass,
+            );
+            if (picked.kind === 'unique') { calleeNode = picked.node; confidence = 'type_inference'; }
+            else if (picked.kind === 'ambiguous') { recordAmbiguous(raw, 'type_inference', picked.candidates); continue; }
+          }
         }
       }
 
@@ -5524,7 +5585,11 @@ export class CallGraphBuilder {
       if (
         !calleeNode &&
         (!raw.calleeObject ||
-          RECOVERED_RECEIVER_LANGUAGES.has(callerNode.language))
+          (RECOVERED_RECEIVER_LANGUAGES.has(callerNode.language) &&
+            (callerNode.language !== 'Kotlin' ||
+              !/^[A-Za-z_][A-Za-z0-9_]*$/.test(raw.calleeObject) ||
+              /^[A-Z]/.test(raw.calleeObject)) &&
+            !ambiguousInferredBindingsByCaller.get(callerNode.id)?.has(raw.calleeObject)))
       ) {
         const candidates = trie.findBySimpleName(raw.calleeName);
         if (candidates.length === 0) {
@@ -5601,8 +5666,10 @@ export class CallGraphBuilder {
     }
 
     // Pass 2b: HTTP cross-language edges (JS/TS caller → Python handler)
+    const httpClientDegradations: HttpExtractionDegradation[] = [...pass1HttpDegradations];
     try {
-      const { edges: httpEdges } = await extractAllHttpEdges(files);
+      const { edges: httpEdges, degradations } = await extractAllHttpEdges(files, httpCallFacts);
+      httpClientDegradations.push(...degradations);
       // Group once, then look up per edge. Rebuilt per edge this was an O(edges × nodes) scan.
       const httpNodesByFile = new Map<string, FunctionNode[]>();
       if (httpEdges.length > 0) {
@@ -5628,6 +5695,9 @@ export class CallGraphBuilder {
         const callerContent = fileContents.get(he.callerFile);
         const callerNode = callerContent
           ? (() => {
+              if (he.call.offset !== undefined) {
+                return findEnclosingFunction(httpNodesByFile.get(he.callerFile) ?? [], he.call.offset);
+              }
               let offset = 0;
               const lines = callerContent.split('\n');
               for (let i = 0; i < he.call.line - 1 && i < lines.length; i++) {
@@ -5961,6 +6031,7 @@ export class CallGraphBuilder {
           recv: raw.calleeObject,
           method: raw.calleeName,
           line: raw.line,
+          offset: raw.offset,
         });
       }
       edges.push(...synthesizeTypeHierarchyEdges({
@@ -6000,6 +6071,7 @@ export class CallGraphBuilder {
       },
       styleByFile: styleByFile.size > 0 ? styleByFile : undefined,
       parseHealthByFile: parseHealthByFile.size > 0 ? parseHealthByFile : undefined,
+      httpClientDegradations: httpClientDegradations.length > 0 ? httpClientDegradations : undefined,
       grammarUnavailable: grammarUnavailableByLanguage.size > 0
         ? [...grammarUnavailableByLanguage.values()].sort((a, b) => a.language < b.language ? -1 : a.language > b.language ? 1 : 0)
         : undefined,

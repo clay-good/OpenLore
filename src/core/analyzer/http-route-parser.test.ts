@@ -258,9 +258,234 @@ describe('extractHttpCalls', () => {
     expect(await extractHttpCalls(filePath)).toHaveLength(0);
   });
 
-  it('should return empty array for Python files', async () => {
+  it('should return empty array for Python files without supported clients', async () => {
     const filePath = await createFile(tempDir, 'main.py', 'print("hello")');
     expect(await extractHttpCalls(filePath)).toHaveLength(0);
+  });
+
+  it('cheaply rejects unrelated Go files before HTTP parsing', async () => {
+    const filePath = await createFile(tempDir, 'main.go', 'package main\nfunc main() { println("hello") }');
+    expect(await extractHttpCalls(filePath)).toHaveLength(0);
+  });
+
+  describe('Python requests/httpx', () => {
+    it('extracts literal requests and httpx calls with methods and lines', async () => {
+      const filePath = await createFile(tempDir, 'client.py', [
+        'import requests',
+        'import httpx',
+        'def load():',
+        '    requests.get("http://svc/items")',
+        '    return httpx.post("/events")',
+      ].join('\n'));
+      expect(await extractHttpCalls(filePath)).toMatchObject([
+        { method: 'GET', normalizedUrl: '/items', line: 4, client: 'requests' },
+        { method: 'POST', normalizedUrl: '/events', line: 5, client: 'httpx' },
+      ]);
+    });
+
+    it('does not guess dynamic URLs, unimported lookalikes, comments, or docstrings', async () => {
+      const filePath = await createFile(tempDir, 'client.py', [
+        '"""requests.get("/doc")"""',
+        '# requests.get("/comment")',
+        'requests.get("/unimported")',
+        'import httpx',
+        'httpx.get(url)',
+        'httpx.get(f"/items/{item_id}")',
+      ].join('\n'));
+      expect(await extractHttpCalls(filePath)).toEqual([]);
+    });
+
+    it('uses import aliases and bound Session/Client instances while preserving fragments', async () => {
+      const filePath = await createFile(tempDir, 'aliases.py', [
+        'import requests as rq',
+        'import httpx as hx',
+        'session = rq.Session()',
+        'client = hx.Client()',
+        'def load():',
+        '    session.get("http://svc/items#details")',
+        '    return client.request("PUT", "/events")',
+      ].join('\n'));
+      expect(await extractHttpCalls(filePath)).toMatchObject([
+        { method: 'GET', normalizedUrl: '/items', line: 6, client: 'requests' },
+        { method: 'PUT', normalizedUrl: '/events', line: 7, client: 'httpx' },
+      ]);
+    });
+
+    it('extracts statically-known keyword method and URL arguments', async () => {
+      const filePath = await createFile(tempDir, 'keywords.py', [
+        'import requests',
+        'requests.get(url="/items")',
+        'requests.request(method="DELETE", url="/events")',
+      ].join('\n'));
+      expect(await extractHttpCalls(filePath)).toMatchObject([
+        { method: 'GET', normalizedUrl: '/items', line: 2 },
+        { method: 'DELETE', normalizedUrl: '/events', line: 3 },
+      ]);
+    });
+
+    it('rejects calls in ordinary strings and shadowed package/client names', async () => {
+      const filePath = await createFile(tempDir, 'shadowed.py', [
+        'import requests',
+        'session = requests.Session()',
+        'fake = \'requests.get("/string")\'',
+        'def package_shadow(requests):',
+        '    return requests.get("/shadowed-package")',
+        'def client_shadow():',
+        '    session = object()',
+        '    return session.get("/shadowed-client")',
+      ].join('\n'));
+      expect(await extractHttpCalls(filePath)).toEqual([]);
+    });
+
+    it('does not leak a class-namespace import into an unqualified method name', async () => {
+      const filePath = await createFile(tempDir, 'class-scope.py', [
+        'class C:',
+        '    import requests as r',
+        '    def load(self):',
+        '        return r.get("/not-visible")',
+      ].join('\n'));
+      expect(await extractHttpCalls(filePath)).toEqual([]);
+    });
+
+    it('resolves a module import while executing the class body itself', async () => {
+      const filePath = await createFile(tempDir, 'class-body.py', 'class C:\n import requests as r\n value = r.get("/class-load")');
+      expect(await extractHttpCalls(filePath)).toMatchObject([{ normalizedUrl: '/class-load' }]);
+    });
+
+    it('invalidates HTTP module aliases on imports and conditional imports', async () => {
+      for (const [name, source] of [
+        ['rebind.py', 'import requests as r\nimport fake as r\nr.get("/x")'],
+        ['conditional.py', 'if False:\n import requests\nrequests.get("/x")'],
+      ] as const) expect(await extractHttpCalls(await createFile(tempDir, name, source)), name).toEqual([]);
+    });
+
+    it('tracks an httpx AsyncClient bound by an async context manager', async () => {
+      const filePath = await createFile(tempDir, 'async-client.py', [
+        'import httpx',
+        'async def load():',
+        '    async with httpx.AsyncClient() as client:',
+        '        return await client.get("/items")',
+      ].join('\n'));
+      expect(await extractHttpCalls(filePath)).toMatchObject([
+        { method: 'GET', normalizedUrl: '/items', line: 4, client: 'httpx' },
+      ]);
+    });
+
+    it('invalidates an AsyncClient alias after its context exits', async () => {
+      const filePath = await createFile(tempDir, 'closed-client.py', 'import httpx\nasync def f():\n async with httpx.AsyncClient() as c:\n  pass\n return await c.get("/closed")');
+      expect(await extractHttpCalls(filePath)).toEqual([]);
+    });
+  });
+
+  describe('Go net/http', () => {
+    it('extracts package-qualified literal calls', async () => {
+      const filePath = await createFile(tempDir, 'client.go', [
+        'package client',
+        'import "net/http"',
+        'func Load() {',
+        '  http.Get("http://svc/items")',
+        '  http.Post(`/events`, "application/json", nil)',
+        '}',
+      ].join('\n'));
+      expect(await extractHttpCalls(filePath)).toMatchObject([
+        { method: 'GET', normalizedUrl: '/items', line: 4, client: 'net/http' },
+        { method: 'POST', normalizedUrl: '/events', line: 5, client: 'net/http' },
+      ]);
+    });
+
+    it('extracts grouped and aliased net/http imports', async () => {
+      const grouped = await createFile(tempDir, 'grouped.go', [
+        'package p',
+        'import ("net/http")',
+        'func F(){ http.Get("http://svc/items") }',
+      ].join('\n'));
+      const aliased = await createFile(tempDir, 'aliased.go', [
+        'package p',
+        'import h "net/http"',
+        'func F(){ h.Get("http://svc/events") }',
+      ].join('\n'));
+      expect(await extractHttpCalls(grouped)).toMatchObject([{ method: 'GET', normalizedUrl: '/items' }]);
+      expect(await extractHttpCalls(aliased)).toMatchObject([{ method: 'GET', normalizedUrl: '/events' }]);
+    });
+
+    it('does not guess dynamic URLs or a local http lookalike', async () => {
+      const dynamic = await createFile(tempDir, 'dynamic.go', 'package p\nimport "net/http"\nfunc F(){ http.Get(url) }');
+      const lookalike = await createFile(tempDir, 'lookalike.go', 'package p\nfunc F(){ http.Get("/items") }');
+      expect(await extractHttpCalls(dynamic)).toEqual([]);
+      expect(await extractHttpCalls(lookalike)).toEqual([]);
+    });
+
+    it('ties NewRequest/NewRequestWithContext literals to DefaultClient and Client.Do', async () => {
+      const filePath = await createFile(tempDir, 'requests.go', [
+        'package p',
+        'import "net/http"',
+        'func F(ctx context.Context) {',
+        '  first, _ := http.NewRequest("PUT", "http://svc/items#details", nil)',
+        '  http.DefaultClient.Do(first)',
+        '  client := &http.Client{}',
+        '  second, _ := http.NewRequestWithContext(ctx, "DELETE", `/events`, nil)',
+        '  client.Do(second)',
+        '}',
+      ].join('\n'));
+      expect(await extractHttpCalls(filePath)).toMatchObject([
+        { method: 'PUT', normalizedUrl: '/items', line: 5, client: 'net/http' },
+        { method: 'DELETE', normalizedUrl: '/events', line: 8, client: 'net/http' },
+      ]);
+    });
+
+    it('does not let an inner static request rewrite an outer dynamic binding', async () => {
+      const filePath = await createFile(tempDir, 'scoped-request.go', [
+        'package p',
+        'import "net/http"',
+        'func F(url string){',
+        '  req, _ := http.NewRequest("GET", url, nil)',
+        '  { req, _ := http.NewRequest("GET", "http://svc/static", nil); _ = req }',
+        '  http.DefaultClient.Do(req)',
+        '}',
+      ].join('\n'));
+      expect(await extractHttpCalls(filePath)).toEqual([]);
+    });
+
+    it('rejects dynamic requests, comments, raw-string lookalikes, and shadowed http names', async () => {
+      for (const [name, source] of [
+        ['dynamic.go', 'package p\nimport "net/http"\nfunc F(){ req,_:=http.NewRequest(method, url, nil); http.DefaultClient.Do(req) }'],
+        ['comment.go', 'package p\nimport "net/http"\nfunc F(){ x:=1// http.Get("/comment")\n_ = x }'],
+        ['string.go', 'package p\nimport "net/http"\nfunc F(){ _ = `http.Get("/string")` }'],
+        ['shadow.go', 'package p\nimport "net/http"\nfunc F(){ http := fake; http.Get("/shadow") }'],
+        ['param.go', 'package p\nimport "net/http"\nfunc F(http Client){ http.Get("/shadow") }'],
+      ] as const) {
+        expect(await extractHttpCalls(await createFile(tempDir, name, source)), name).toEqual([]);
+      }
+    });
+
+    it('does not let block-comment markers inside a URL corrupt the literal', async () => {
+      const filePath = await createFile(tempDir, 'marker.go', 'package p\nimport "net/http"\nfunc F(){ http.Get("http://svc/a/*literal*/b") }');
+      expect(await extractHttpCalls(filePath)).toMatchObject([
+        { method: 'GET', normalizedUrl: '/a/*literal*/b', line: 3 },
+      ]);
+    });
+
+    it('recognizes net/http method constants and a proven DefaultClient alias', async () => {
+      const filePath = await createFile(tempDir, 'constants.go', [
+        'package p',
+        'import "net/http"',
+        'func F(){',
+        '  client := http.DefaultClient',
+        '  req, _ := http.NewRequest(http.MethodGet, "/items", nil)',
+        '  client.Do(req)',
+        '}',
+      ].join('\n'));
+      expect(await extractHttpCalls(filePath)).toMatchObject([
+        { method: 'GET', normalizedUrl: '/items', line: 6, client: 'net/http' },
+      ]);
+    });
+
+    it('does not correlate request/client bindings across blocks or conditional construction', async () => {
+      for (const [name, source] of [
+        ['scope.go', 'package p\nimport "net/http"\nfunc F(){ { c:=http.DefaultClient; req,_:=http.NewRequest(http.MethodGet,"/x",nil); _=c; _=req }; c.Do(req) }'],
+        ['branch.go', 'package p\nimport "net/http"\nfunc F(ok bool){ var req *http.Request; if ok { req,_=http.NewRequest(http.MethodGet,"/x",nil) }; http.DefaultClient.Do(req) }'],
+      ] as const) expect(await extractHttpCalls(await createFile(tempDir, name, source)), name).toEqual([]);
+    });
   });
 
   it('reports correct line numbers for calls AFTER a comment (length-preserving mask)', async () => {
@@ -869,6 +1094,13 @@ describe('buildHttpEdges', () => {
     expect(edges).toHaveLength(1);
   });
 
+  it('keeps distinct same-line call sites when byte offsets are available', () => {
+    const first = makeCall({ file: '/front/api.ts', url: '/items', offset: 10 });
+    const second = makeCall({ file: '/front/api.ts', url: '/items', offset: 40 });
+    const route = makeRoute({ file: '/back/items.py', path: '/items' });
+    expect(buildHttpEdges([first, second], [route])).toHaveLength(2);
+  });
+
   it('should attach call and route references to the edge', () => {
     const call = makeCall({ file: '/front/api.ts', url: '/items', method: 'GET' });
     const route = makeRoute({ file: '/back/items.py', path: '/items', method: 'GET' });
@@ -941,6 +1173,30 @@ describe('extractAllHttpEdges', () => {
     // so re-analysis is byte-stable. Swapping inputs swaps the output order.
     expect((await extractAllHttpEdges([a, b])).calls.map(c => c.normalizedUrl)).toEqual(['/api/a', '/api/b']);
     expect((await extractAllHttpEdges([b, a])).calls.map(c => c.normalizedUrl)).toEqual(['/api/b', '/api/a']);
+  });
+
+  it('reuses pass-1 call facts, including a proven-empty file, without changing edges', async () => {
+    const frontend = await createFile(tempDir, 'api.go', 'package p\nimport "net/http"\nfunc load(){ http.Get("/items") }');
+    const backend = await createFile(tempDir, 'main.py', '@app.get("/items")\ndef items():\n    return []\n');
+    const cached = new Map<string, readonly HttpCall[]>([
+      [frontend, [{ file: frontend, method: 'GET', url: '/items', normalizedUrl: '/items', line: 3, offset: 51, client: 'net/http' }]],
+      [backend, []],
+    ]);
+
+    const result = await extractAllHttpEdges([frontend, backend], cached);
+
+    expect(result.calls).toEqual(cached.get(frontend));
+    expect(result.edges).toHaveLength(1);
+  });
+
+  it('isolates an over-deep AST so a healthy neighboring file is still extracted', async () => {
+    const depth = 600;
+    const hostile = await createFile(tempDir, 'deep.go', `package p\nimport "net/http"\nfunc f(){\n${'{\n'.repeat(depth)}http.Get("/lost")\n${'}\n'.repeat(depth + 1)}`);
+    const healthy = await createFile(tempDir, 'healthy.ts', `fetch('/kept')`);
+
+    const result = await extractAllHttpEdges([hostile, healthy]);
+
+    expect(result.calls.map(call => call.normalizedUrl)).toEqual(['/kept']);
   });
 
   it('should find no edges when there are only backend files', async () => {

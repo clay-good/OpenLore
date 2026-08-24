@@ -973,6 +973,17 @@ describe('NAV_TOOLS surface', () => {
     }
   });
 
+  it('describes every analyze_error_propagation model exposed by the daemon', () => {
+    const tool = NAV_TOOLS.find(t => t.name === 'analyze_error_propagation')!;
+    const contract = `${tool.description} ${tool.guideline}`;
+    for (const language of ['TS', 'JS', 'Python', 'Java', 'C#', 'Go']) {
+      expect(contract, `missing ${language} error-flow scope`).toContain(language);
+    }
+    expect(contract).toContain('errorModel: go-value');
+    expect(contract).toMatch(/returned-error\/panic|returned errors and panics/);
+    expect(contract).toMatch(/Other languages.*unsupported/);
+  });
+
   // The load-bearing guard: every Pi-surfaced tool must be a real dispatchable
   // daemon tool. A renamed/removed tool (e.g. get_decisions, removed in #179)
   // would otherwise 404 silently at call time — this fails the build instead.

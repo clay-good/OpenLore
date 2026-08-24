@@ -62,8 +62,10 @@ conformance fixtures; non-member languages SHALL continue returning an empty inf
 ### Requirement: CfgOverlayCoversKotlinSwiftDartScala
 
 The CFG overlay SHALL support Kotlin, Swift, Dart, and Scala via new `CfgLangSpec` entries in the
-data-driven `SPEC_BY_LANGUAGE` table — table data, not engine changes. Each added language SHALL
-ship a conformance fixture whose branchy function yields a structurally-valid CFG, and
+data-driven `SPEC_BY_LANGUAGE` table. A language whose grammar exposes positional control-flow
+children or a sibling function body MAY provide a small adapter through the table's shared adapter
+hooks; these hooks SHALL remain grammar-shape normalization, not language-specific CFG semantics.
+Each added language SHALL ship a conformance fixture whose branchy function yields a structurally-valid CFG, and
 `CFG_LANGUAGES` (derived from the table's keys) SHALL flip the registry's `cfgOverlay` cell
 without hand edits.
 

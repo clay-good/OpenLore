@@ -22,11 +22,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CallGraphBuilder } from './call-graph.js';
 import { CALLGRAPH_LANGUAGES, grammarLoadFailed } from './call-graph.js';
-import { ERROR_PROPAGATION_LANGUAGES, extractExceptionFactsFromSource } from './exception-flow.js';
+import { ERROR_PROPAGATION_LANGUAGES, extractExceptionFactsFromSource, extractGoErrorFactsFromSource } from './exception-flow.js';
 import { cfgSupportsLanguage, isStructurallyValid } from './cfg.js';
 import { inferTypesFromSource, TYPE_INFERENCE_LANGUAGES } from './type-inference-engine.js';
 import { STYLE_FINGERPRINT_LANGUAGES } from './style-fingerprint.js';
-import { CROSS_SERVICE_HTTP_LANGUAGES, HTTP_CLIENT_LANGUAGES } from './http-capability.js';
+import { CROSS_SERVICE_HTTP_LANGUAGES, HTTP_CLIENT_LANGUAGES, HTTP_ROUTE_LANGUAGES } from './http-capability.js';
 import { extractRoutesFromFile, extractHttpCalls } from './http-route-parser.js';
 import { CODE_LANGUAGES } from './language-support.js';
 import { IMPORT_RESOLUTION_LANGUAGES } from './import-resolver-bridge.js';
@@ -187,9 +187,24 @@ describe('language conformance — error propagation overlay', () => {
     expect(f.supported).toBe(true);
     expect(f.throwSites.map((t) => t.type)).toContain('ValueError');
   });
+  it('Go extracts value-shaped returned errors and panics', async () => {
+    const f = await extractGoErrorFactsFromSource(`package m\nfunc risky(){ panic("x") }`);
+    expect(f.supported).toBe(true);
+    expect(f.escapes).toEqual([expect.objectContaining({ kind: 'panic' })]);
+  });
+  for (const [language, source, type] of [
+    ['Java', 'class C { void risky(){ throw new IOException(); } }', 'IOException'],
+    ['C#', 'class C { void Risky(){ throw new IOException(); } }', 'IOException'],
+  ] as const) {
+    it(`${language} extracts a thrown type`, async () => {
+      const f = await extractExceptionFactsFromSource(source, language);
+      expect(f.supported).toBe(true);
+      expect(f.throwSites.map(t => t.type)).toContain(type);
+    });
+  }
   it('a non-claimed language is honestly reported unsupported, never silently empty', async () => {
-    const f = await extractExceptionFactsFromSource(`package m\nfunc risky(){ panic("x") }`, 'Go');
-    expect(ERROR_PROPAGATION_LANGUAGES.has('Go')).toBe(false);
+    const f = await extractExceptionFactsFromSource(`fn risky(){ panic!("x") }`, 'Rust');
+    expect(ERROR_PROPAGATION_LANGUAGES.has('Rust')).toBe(false);
     expect(f.supported).toBe(false);
   });
 });
@@ -207,6 +222,10 @@ const CFG_FIX: Array<{ language: string; path: string; content: string }> = [
   { language: 'C#', path: 'C.cs', content: `class C { int f(int x){ if (x>0){ return 1; } else { return 2; } } }` },
   { language: 'C++', path: 'c.cpp', content: `int f(int x){ if (x>0){ return 1; } else { return 2; } }` },
   { language: 'C', path: 'c.c', content: `int f(int x){ if (x>0){ return 1; } else { return 2; } }` },
+  { language: 'Kotlin', path: 'c.kt', content: `fun f(x: Int): Int { var y = 0; if (x > 0) { y = 1 } else { y = 2 }; while (y < 3) { y = y + 1 }; return y }` },
+  { language: 'Swift', path: 'c.swift', content: `func f(_ x: Int) -> Int { var y = 0; if x > 0 { y = 1 } else { y = 2 }; while y < 3 { y += 1 }; return y }` },
+  { language: 'Dart', path: 'c.dart', content: `int f(int x) { var y = 0; if (x > 0) { y = 1; } else { y = 2; } while (y < 3) { y++; } return y; }` },
+  { language: 'Scala', path: 'c.scala', content: `object C { def f(x: Int): Int = { var y = 0; if (x > 0) { y = 1 } else { y = 2 }; while (y < 3) { y += 1 }; y } }` },
 ];
 
 describe('language conformance — CFG overlay', () => {
@@ -223,6 +242,16 @@ describe('language conformance — CFG overlay', () => {
       const cfgs = r.cfgs ? [...r.cfgs.values()] : [];
       expect(cfgs.length, `${f.language} cfgs`).toBeGreaterThan(0);
       expect(cfgs.every((c) => isStructurallyValid(c)), `${f.language} CFG validity`).toBe(true);
+      if (['Kotlin', 'Swift', 'Dart', 'Scala'].includes(f.language)) {
+        expect(cfgs.some(c => c.blocks.some(b => {
+          if (b.kind !== 'branch') return false;
+          const outgoing = c.edges.filter(e => e.from === b.id);
+          return outgoing.some(e => e.kind === 'true') && outgoing.some(e => e.kind === 'false');
+        })), `${f.language} divergent branch`).toBe(true);
+        expect(cfgs.some(c => c.edges.some(e =>
+          e.kind === 'back' && c.blocks.some(b => b.id === e.to && b.kind === 'loop')
+        )), `${f.language} loop back-edge`).toBe(true);
+      }
     });
   }
 });
@@ -238,6 +267,8 @@ const TYPE_FIX: Array<{ language: string; src: string }> = [
   { language: 'Java', src: `Foo x = new Foo();` },
   { language: 'C#', src: `Foo x = new Foo();` },
   { language: 'C++', src: `Foo x;` },
+  { language: 'Kotlin', src: `val x = Foo()` },
+  { language: 'Dart', src: `final x = Foo();` },
 ];
 
 describe('language conformance — type inference', () => {
@@ -306,10 +337,23 @@ describe('language conformance — cross-service HTTP', () => {
     { language: 'Java', name: 'R.java', content: `@RestController\nclass R {\n  @GetMapping("/users")\n  public String users() { return "ok"; }\n}` },
   ];
 
+  const CLIENT_FIX = [
+    { language: 'TypeScript', name: 'cl.ts', content: `async function go(){ return await fetch('https://api.example.com/users'); }` },
+    { language: 'JavaScript', name: 'cl.js', content: `async function go(){ return await fetch('https://api.example.com/items'); }` },
+    { language: 'Python', name: 'cl.py', content: `import requests\ndef go():\n    return requests.get("https://api.example.com/items")` },
+    { language: 'Go', name: 'cl.go', content: `package m\nimport "net/http"\nfunc Go(){ http.Get("https://api.example.com/items") }` },
+  ];
+
   it('covers every language the registry claims supports cross-service HTTP', () => {
     const covered = new Set(ROUTE_FIX.map((f) => f.language));
+    for (const f of CLIENT_FIX) covered.add(f.language);
     const uncovered = [...CROSS_SERVICE_HTTP_LANGUAGES].filter((l) => !covered.has(l));
     expect(uncovered, `cross-service HTTP languages with no fixture: ${uncovered.join(', ')}`).toEqual([]);
+  });
+
+  it('covers every claimed client and route language on its actual half', () => {
+    expect([...HTTP_CLIENT_LANGUAGES].filter(l => !CLIENT_FIX.some(f => f.language === l))).toEqual([]);
+    expect([...HTTP_ROUTE_LANGUAGES].filter(l => !ROUTE_FIX.some(f => f.language === l))).toEqual([]);
   });
 
   for (const f of ROUTE_FIX) {
@@ -319,10 +363,7 @@ describe('language conformance — cross-service HTTP', () => {
     });
   }
 
-  for (const f of [
-    { language: 'TypeScript', name: 'cl.ts', content: `async function go(){ return await fetch('https://api.example.com/users'); }` },
-    { language: 'JavaScript', name: 'cl.js', content: `async function go(){ return await fetch('https://api.example.com/items'); }` },
-  ]) {
+  for (const f of CLIENT_FIX) {
     it(`${f.language}: extracts an outbound HTTP client call`, async () => {
       expect(HTTP_CLIENT_LANGUAGES.has(f.language)).toBe(true);
       const calls = await extractHttpCalls(writeFix(f.name, f.content));
@@ -684,12 +725,13 @@ describe('language conformance — resolver refuses to guess on ambiguity', () =
     expect(boundEdgesFrom(r, 'main').find(e => e.calleeName === 'helper')?.confidence).toBe('import');
   });
 
-  it('recovered Kotlin receivers retain the pre-change name_only fallback when no import binds', async () => {
+  it('an untyped Kotlin value receiver stays external instead of guessing by method name', async () => {
     const r = await build([
       { path: 'a.kt', language: 'Kotlin', content: 'fun main(){ service.helper() }' },
       { path: 'b.kt', language: 'Kotlin', content: 'fun helper() {}' },
     ]);
-    expect(boundEdgesFrom(r, 'main').find(e => e.calleeName === 'helper')?.confidence).toBe('name_only');
+    expect(boundEdgesFrom(r, 'main').find(e => e.calleeName === 'helper')).toBeUndefined();
+    expect([...r.edges].find(e => e.callerId.endsWith('::main') && e.calleeName === 'helper')?.confidence).toBe('external');
   });
 
   it('C# object return types are not misindexed as declarations', async () => {

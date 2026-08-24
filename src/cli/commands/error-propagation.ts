@@ -19,8 +19,9 @@ import { toCliVocabulary } from '../surface-vocabulary.js';
 import { dispatchTool } from '../../core/services/tool-dispatch.js';
 
 interface EscapeView {
-  type: string;
-  kind: 'direct' | 'propagated';
+  type?: string;
+  value?: string;
+  kind: 'direct' | 'declared' | 'propagated' | 'returned_error' | 'propagated_error' | 'panic';
   originFunction: string;
   originFile: string;
   originLine: number;
@@ -28,10 +29,14 @@ interface EscapeView {
 }
 
 interface HandledView {
-  type: string;
-  caughtIn: string;
-  caughtAtLine: number;
-  fromCallee: string;
+  type?: string;
+  value?: string;
+  kind?: 'checked_error' | 'recovered_panic';
+  caughtIn?: string;
+  caughtAtLine?: number;
+  handledIn?: string;
+  handledAtLine?: number;
+  fromCallee?: string;
 }
 
 export interface ErrorPropagationView {
@@ -39,15 +44,19 @@ export interface ErrorPropagationView {
   candidates?: string[];
   hint?: string;
   unsupported?: boolean;
+  errorModel?: 'go-value';
   query?: Record<string, unknown>;
   summary?: {
     escapes: number;
-    direct: number;
+    direct?: number;
     propagated: number;
-    dynamic: number;
+    dynamic?: number;
+    declared?: number;
     handledInternally: number;
     functionsAnalyzed: number;
     unresolvedSelfCalls?: number;
+    returnedErrors?: number;
+    panics?: number;
   };
   escapes?: EscapeView[];
   handledInternally?: HandledView[];
@@ -67,21 +76,40 @@ export function renderHuman(r: ErrorPropagationView): string {
     return lines.join('\n');
   }
 
+  if (r.errorModel === 'go-value') {
+    const s = r.summary ?? { escapes: 0, direct: 0, propagated: 0, dynamic: 0, handledInternally: 0, functionsAnalyzed: 0 };
+    lines.push(`   ${s.escapes} escaping Go error value/panic site${s.escapes === 1 ? '' : 's'} (${s.returnedErrors ?? 0} returned errors, ${s.panics ?? 0} panics) · ${s.handledInternally} handled internally · ${s.functionsAnalyzed} functions analyzed`);
+    for (const e of r.escapes ?? []) lines.push(`     ${(e.value ?? 'error').padEnd(20)} ${e.originFunction}:${e.originLine}  (${e.kind.replaceAll('_', ' ')})`);
+    if (!(r.escapes ?? []).length) lines.push((r.boundaries ?? []).length
+      ? '     (no returned error values or unrecovered panics proven in the analyzed portion)'
+      : '     (no returned error values or unrecovered panics escape this function)');
+    if ((r.handledInternally ?? []).length) {
+      lines.push('   handled internally:');
+      for (const h of r.handledInternally ?? []) lines.push(`     ${(h.value ?? 'error').padEnd(20)} ${h.kind?.replaceAll('_', ' ')} in ${h.handledIn}:${h.handledAtLine}`);
+    }
+    for (const b of r.boundaries ?? []) lines.push(`   · ${b}`);
+    lines.push('');
+    return lines.join('\n');
+  }
+
   const s = r.summary ?? { escapes: 0, direct: 0, propagated: 0, dynamic: 0, handledInternally: 0, functionsAnalyzed: 0 };
+  const declared = s.declared ? `, declared ${s.declared}` : '';
   lines.push(
     `   ${s.escapes} escaping exception${s.escapes === 1 ? '' : 's'} (direct ${s.direct}, propagated ${s.propagated}, ` +
-      `dynamic ${s.dynamic}) · ${s.handledInternally} handled internally · ${s.functionsAnalyzed} functions analyzed`,
+      `dynamic ${s.dynamic}${declared}) · ${s.handledInternally} handled internally · ${s.functionsAnalyzed} functions analyzed`,
   );
   for (const e of r.escapes ?? []) {
-    const via = e.kind === 'direct' ? 'thrown here' : `via ${e.path.slice(1).join(' → ')}`;
-    lines.push(`     ${e.type.padEnd(20)} ${e.originFunction}:${e.originLine}  (${via})`);
+    const via = e.kind === 'direct' ? 'thrown here' : e.kind === 'declared' ? 'declared in throws clause' : `via ${e.path.slice(1).join(' → ')}`;
+    lines.push(`     ${(e.type ?? '<dynamic>').padEnd(20)} ${e.originFunction}:${e.originLine}  (${via})`);
   }
-  if ((r.escapes ?? []).length === 0) lines.push('     (no exceptions escape this function)');
+  if ((r.escapes ?? []).length === 0) lines.push((r.boundaries ?? []).length
+    ? '     (no escaping exceptions proven in the analyzed portion)'
+    : '     (no exceptions escape this function)');
 
   if ((r.handledInternally ?? []).length > 0) {
     lines.push('   handled internally (callers shielded):');
     for (const h of r.handledInternally ?? []) {
-      lines.push(`     ${h.type.padEnd(20)} caught in ${h.caughtIn}:${h.caughtAtLine}  (from ${h.fromCallee})`);
+      lines.push(`     ${(h.type ?? '<dynamic>').padEnd(20)} caught in ${h.caughtIn}:${h.caughtAtLine}  (from ${h.fromCallee})`);
     }
   }
 
@@ -130,7 +158,7 @@ export async function runErrorPropagationCli(opts: ErrorPropagationCliOptions): 
 }
 
 export const errorPropagationCommand = new Command('error-propagation')
-  .description('Analyze the exceptions that escape a function and which are caught within it (TS/JS/Python). Read-only, deterministic, never blocks.')
+  .description('Analyze escaping exceptions (TS/JS/Python/Java/C#) or returned errors and panics (Go). Read-only, deterministic, never blocks.')
   .option('--symbol <name>', 'The function to analyze: its name, or name::path to disambiguate')
   .option('--max-depth <n>', 'Callee-traversal depth bound (default 10, clamped to [1, 30])', (v) => parseInt(v, 10))
   .option('--json', 'Emit the result as JSON', false)

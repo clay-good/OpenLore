@@ -178,6 +178,33 @@ describe('reused facts are indistinguishable from re-extracted ones', () => {
     expect(warm.graph).toBe(await buildFresh(files));
   });
 
+  it('a warm memo preserves cross-language HTTP edges without reparsing client facts', async () => {
+    const files: ExtractionInput[] = [
+      {
+        path: 'client.go',
+        language: 'Go',
+        content: 'package p\nimport "net/http"\nfunc load(){ http.Get("/items") }',
+      },
+      {
+        path: 'api.py',
+        language: 'Python',
+        content: '@app.get("/items")\ndef items():\n    return []\n',
+      },
+    ];
+    const storage = new MemoryStorage();
+    const cold = await buildWith(files, storage, 'stamp-http');
+    storage.absorb(cold.cache);
+
+    const warm = await buildWith(files, storage, 'stamp-http');
+
+    expect(warm.reused).toBe(2);
+    expect(warm.extracted).toBe(0);
+    expect(warm.graph).toBe(cold.graph);
+    expect(JSON.parse(warm.graph).edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ confidence: 'http_endpoint' }),
+    ]));
+  });
+
   it('an edit re-extracts exactly one file and still matches a full re-extraction', async () => {
     const files = corpus();
     const storage = new MemoryStorage();
@@ -398,6 +425,11 @@ describe('serialization round-trips the extractor’s own answer', () => {
       }],
       callbacks: [{ group: 'TypeScript', callerId: 'caller', handlerId: 'handler-ref', line: 8 }],
     };
+    facts!.httpCalls = [{
+      file: file.path, method: 'GET', url: '/health', normalizedUrl: '/health',
+      line: 1, offset: 0, client: 'fetch',
+    }];
+    facts!.httpDegradations = [{ file: file.path, reason: 'traversal-budget' }];
 
     const round = deserializeFacts(serializeFacts(facts));
     expect(round).toBeDefined();
@@ -410,6 +442,16 @@ describe('serialization round-trips the extractor’s own answer', () => {
     expect(back.parseHealth).toEqual(facts!.parseHealth);
     expect(back.classRelationships).toEqual(facts!.classRelationships);
     expect(back.dynamicDispatch).toEqual(facts!.dynamicDispatch);
+    expect(back.httpCalls).toEqual(facts!.httpCalls);
+    expect(back.httpDegradations).toEqual(facts!.httpDegradations);
+  });
+
+  it('preserves a proven-empty HTTP call fact instead of turning it into a warm-cache reparse', () => {
+    const facts = { nodes: [], rawEdges: [], httpCalls: [] };
+    const back = deserializeFacts(serializeFacts(facts))?.facts;
+
+    expect(back).toHaveProperty('httpCalls');
+    expect(back?.httpCalls).toEqual([]);
   });
 
   it('stores "no extractor for this language" as a reusable answer, not a miss', () => {

@@ -50,6 +50,8 @@ export interface RawEdge {
   callerId: string;
   calleeName: string;
   line: number;
+  /** Source offset of the call expression, when retained by the extractor. */
+  offset?: number;
   /** Receiver variable name in `obj.method()` calls */
   calleeObject?: string;
   /** Call type detected from AST shape at extraction time */
@@ -162,7 +164,7 @@ export type ExternalKind = 'http' | 'database' | 'filesystem' | 'stdlib' | 'unkn
 export const AMBIGUOUS_CANDIDATE_CAP = 8;
 
 /** Which resolution strategy refused to bind because the candidate set was ambiguous. */
-export type AmbiguousStrategy = 'name_only' | 'self_cls' | 'type_name' | 'overload';
+export type AmbiguousStrategy = 'name_only' | 'self_cls' | 'type_name' | 'type_inference' | 'overload';
 
 /**
  * A call site the resolution ladder refused to bind because more than one candidate
@@ -388,6 +390,21 @@ export type FileExtractResult = {
   classRelationships?: ClassRelationshipFact[];
   /** Unresolved handler references are resolved only after all repository nodes exist. */
   dynamicDispatch?: DynamicDispatchFacts;
+  /** Plain outbound HTTP call-site facts, reused by Pass 2 without reparsing the file. */
+  httpCalls?: Array<{
+    file: string;
+    method: string;
+    url: string;
+    normalizedUrl: string;
+    line: number;
+    offset?: number;
+    client: string;
+  }>;
+  httpDegradations?: Array<{
+    file: string;
+    reason: 'budget-exceeded' | 'parse-failure' | 'traversal-budget';
+    budgetMs?: number;
+  }>;
   /** Plain-data receipt that survives the worker-thread structured-clone boundary. */
   grammarUnavailable?: Omit<GrammarUnavailableBoundary, 'fileCount'>;
 };
@@ -435,6 +452,13 @@ export interface CallGraphResult {
    * {@link SerializedCallGraph}.
    */
   parseHealthByFile?: Map<string, FileParseHealth>;
+  /** Optional HTTP client projection failures. The primary graph parse may still
+   * be healthy, so these are disclosed separately from whole-file parse health. */
+  httpClientDegradations?: Array<{
+    file: string;
+    reason: 'budget-exceeded' | 'parse-failure' | 'traversal-budget';
+    budgetMs?: number;
+  }>;
   /** Language-level grammar failures aggregated across Pass-1 files. */
   grammarUnavailable?: GrammarUnavailableBoundary[];
   /**

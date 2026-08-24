@@ -27,6 +27,7 @@ import { STYLE_FINGERPRINT_LANGUAGES as STY } from './style-fingerprint.js';
 import {
   ERROR_PROPAGATION_LANGUAGES as ERRP,
   extractExceptionFactsFromSource,
+  extractGoErrorFactsFromSource,
 } from './exception-flow.js';
 import { usesTsxGrammar } from './language-detection.js';
 import { TEST_DETECTION_DECISIONS } from './test-file.js';
@@ -38,6 +39,7 @@ import {
   extractTsRouteDefinitions,
   extractJavaRouteDefinitions,
 } from './http-route-parser.js';
+import { HTTP_CLIENT_LANGUAGES } from './http-capability.js';
 
 // ── registry is DERIVED from the live sources: exact cross-checks ──
 
@@ -126,6 +128,9 @@ const ERRP_FIXTURES: Record<string, string> = {
   TypeScript: 'function f() {\n  throw new TypeError("x");\n}',
   JavaScript: 'function f() {\n  throw new TypeError("x");\n}',
   Python: 'def f():\n    raise ValueError("x")',
+  Go: 'package p\nfunc f() { panic("x") }',
+  Java: 'class C { void f(){ throw new IllegalStateException(); } }',
+  'C#': 'class C { void F(){ throw new InvalidOperationException(); } }',
 };
 describe('errorPropagation is behaviorally faithful (no silent over-claim)', () => {
   it('every ERROR_PROPAGATION_LANGUAGES member has a fixture wired (guard cannot rot)', () => {
@@ -136,6 +141,12 @@ describe('errorPropagation is behaviorally faithful (no silent over-claim)', () 
 
   for (const lang of ERRP) {
     it(`${lang}: the live extractor finds a throw site`, async () => {
+      if (lang === 'Go') {
+        const facts = await extractGoErrorFactsFromSource(ERRP_FIXTURES[lang]);
+        expect(facts.supported, `${lang} should be supported`).toBe(true);
+        expect(facts.escapes.length, `${lang} extracted no returned error or panic`).toBeGreaterThan(0);
+        return;
+      }
       const facts = await extractExceptionFactsFromSource(ERRP_FIXTURES[lang], lang);
       expect(facts.supported, `${lang} should be supported`).toBe(true);
       expect(facts.throwSites.length, `${lang} extracted no throw site`).toBeGreaterThan(0);
@@ -175,6 +186,13 @@ const CROSS_SERVICE_FIXTURES: Record<string, { name: string; content: string; ki
   JavaScript: { name: 'client.js', content: 'export async function load() {\n  return fetch("/api/items");\n}', kind: 'client' },
   Python: { name: 'api.py', content: '@app.get("/api/items")\nasync def list_items():\n    return []', kind: 'route' },
   Java: { name: 'Api.java', content: '@RestController\nclass Api {\n  @GetMapping("/api/items")\n  public String list() { return ""; }\n}', kind: 'route' },
+  Go: { name: 'client.go', content: 'package p\nimport "net/http"\nfunc Load(){ http.Get("http://svc/api/items") }', kind: 'client' },
+};
+const HTTP_CLIENT_FIXTURES: Record<string, { name: string; content: string }> = {
+  TypeScript: { name: 'client-only.ts', content: 'fetch("/api/items")' },
+  JavaScript: { name: 'client-only.js', content: 'fetch("/api/items")' },
+  Python: { name: 'client-only.py', content: 'import requests\nrequests.get("http://svc/api/items")' },
+  Go: { name: 'client-only.go', content: 'package p\nimport "net/http"\nfunc Load(){ http.Get("http://svc/api/items") }' },
 };
 describe('crossServiceHttp is behaviorally faithful (no silent over-claim)', () => {
   let dir: string;
@@ -184,6 +202,16 @@ describe('crossServiceHttp is behaviorally faithful (no silent over-claim)', () 
   it('every CROSS_SERVICE_HTTP_LANGUAGES member has a fixture wired (guard cannot rot)', () => {
     for (const lang of XSVC) {
       expect(CROSS_SERVICE_FIXTURES[lang], `add a CROSS_SERVICE_FIXTURES entry for ${lang}`).toBeDefined();
+    }
+  });
+
+  it('every HTTP client language exercises its client extractor', async () => {
+    for (const lang of HTTP_CLIENT_LANGUAGES) {
+      const fx = HTTP_CLIENT_FIXTURES[lang];
+      expect(fx, `add an HTTP_CLIENT_FIXTURES entry for ${lang}`).toBeDefined();
+      const fp = join(dir, fx.name);
+      await writeFile(fp, fx.content, 'utf-8');
+      expect((await extractHttpCalls(fp)).length, `${lang} client extractor`).toBeGreaterThan(0);
     }
   });
 
@@ -214,6 +242,7 @@ const TYPE_INFERENCE_FIXTURES: Record<string, string> = {
   Python: 'x = Foo()', 'C++': 'Foo x;', TypeScript: 'const x = new Foo();',
   JavaScript: 'const x = new Foo();', Go: 'x := Foo{}', Rust: 'let x = Foo::new();',
   Java: 'Foo x = new Foo();', 'C#': 'var x = new Foo();', Ruby: 'x = Foo.new',
+  Kotlin: 'val x = Foo()', Dart: 'final x = Foo();',
 };
 const SIGNATURE_FIXTURES: Record<string, string> = {
   Python: 'x.py||def foo(a):\n    return a',
@@ -265,8 +294,8 @@ describe('every capability-set member is exercised against the real extractor (n
       expect(fx, `missing typeInference fixture for set member ${lang}`).toBeDefined();
       expect(inferTypesFromSource(fx, lang).size, `${lang} infers a type`).toBeGreaterThan(0);
     }
-    expect(TI.has('Kotlin')).toBe(false);
-    expect(inferTypesFromSource('val x = Foo()', 'Kotlin').size).toBe(0);
+    expect(TI.has('Bash')).toBe(false);
+    expect(inferTypesFromSource('x=Foo', 'Bash').size).toBe(0);
   });
 
   it('signatures: every member produces ≥1 dedicated entry', () => {
@@ -348,6 +377,10 @@ describe('every capability-set member is exercised against the real extractor (n
       PHP: ['cfg_Php.php', '<?php\nfunction f($x){ if($x>0){return $x;} return -$x; }'],
       Rust: ['cfg_Rust.rs', 'fn f(x: i32) -> i32 { if x>0 { x } else { -x } }'],
       Ruby: ['cfg_Ruby.rb', 'def f(x)\n  if x>0\n    x\n  else\n    -x\n  end\nend'],
+      Kotlin: ['cfg_Kotlin.kt', 'fun f(x:Int):Int { var y=0; if(x>0){y=1}else{y=2}; while(y<3){y=y+1}; return y }'],
+      Swift: ['cfg_Swift.swift', 'func f(_ x:Int)->Int { var y=0; if x>0 {y=1}else{y=2}; while y<3 {y += 1}; return y }'],
+      Dart: ['cfg_Dart.dart', 'int f(int x){ var y=0; if(x>0){y=1;}else{y=2;} while(y<3){y++;} return y;}'],
+      Scala: ['cfg_Scala.scala', 'object C { def f(x:Int):Int = { var y=0; if(x>0){y=1}else{y=2}; while(y<3){y += 1}; y } }'],
     };
     const files = [...CFG_LANGUAGES].map(lang => {
       const fx = branchFixtures[lang];

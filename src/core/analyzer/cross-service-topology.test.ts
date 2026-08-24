@@ -89,6 +89,63 @@ describe('cross-service API topology — single-repo projection', () => {
     expect(callersOf(b, 'get_user')).toContain(idByName(b, 'loadUser'));
   });
 
+  for (const client of [
+    {
+      label: 'Python requests', path: 'client/load.py', language: 'Python', caller: 'load_items',
+      content: 'import requests\n\ndef load_items():\n    return requests.get("http://svc/api/items")\n',
+    },
+    {
+      label: 'Go net/http', path: 'client/load.go', language: 'Go', caller: 'LoadItems',
+      content: 'package client\nimport "net/http"\nfunc LoadItems(){ http.Get("http://svc/api/items") }\n',
+    },
+  ]) {
+    it(`${client.label} client links to an extracted route handler`, async () => {
+      const b = await buildFixture([
+        client,
+        {
+          path: 'api/items.py', language: 'Python',
+          content: '@app.get("/api/items")\ndef list_items():\n    return []\n',
+        },
+      ]);
+      expect(crossServiceEdge(b, client.caller, 'list_items')).toBeDefined();
+    });
+  }
+
+  it('preserves two Python call sites in one file that target the same handler', async () => {
+    const b = await buildFixture([
+      {
+        path: 'client/load.py', language: 'Python',
+        content: [
+          'import requests as rq',
+          'def load_first():',
+          '    return rq.get("http://svc/api/items")',
+          'def load_second():',
+          '    return rq.get("http://svc/api/items")',
+        ].join('\n'),
+      },
+      {
+        path: 'api/items.py', language: 'Python',
+        content: '@app.get("/api/items")\ndef list_items():\n    return []\n',
+      },
+    ]);
+    expect(crossServiceEdge(b, 'load_first', 'list_items')).toBeDefined();
+    expect(crossServiceEdge(b, 'load_second', 'list_items')).toBeDefined();
+  });
+
+  it('does not project a Go request whose method or URL is dynamic', async () => {
+    const b = await buildFixture([
+      {
+        path: 'client/load.go', language: 'Go',
+        content: 'package client\nimport "net/http"\nfunc Load(method, url string){ req,_:=http.NewRequest(method,url,nil); http.DefaultClient.Do(req) }\n',
+      },
+      {
+        path: 'api/items.py', language: 'Python',
+        content: '@app.get("/api/items")\ndef list_items():\n    return []\n',
+      },
+    ]);
+    expect(httpEdges(b)).toEqual([]);
+  });
+
   it('A monorepo full-stack link needs no federation (TS client → TS Express handler)', async () => {
     const b = await buildFixture([
       {

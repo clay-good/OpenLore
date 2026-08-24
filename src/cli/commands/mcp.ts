@@ -1940,7 +1940,9 @@ export const TOOL_DEFINITIONS = [
       'function/file/line, whether it is a direct throw or propagated from a callee, and the call ' +
       'path) and `handledInternally` (exceptions thrown in the reachable subtree but caught within ' +
       'this function, so callers are shielded). Computed live from the cached call graph + a re-read ' +
-      'of the source it spans (no new artifact). SCOPE: TypeScript / JavaScript / Python — a symbol in ' +
+      'of the source it spans (no new artifact). SCOPE: TypeScript / JavaScript / Python / Java / C# exceptions, ' +
+      'plus a separate Go returned-error and panic/recover value model (`errorModel: go-value`, with `value` ' +
+      'rather than exception `type` entries) — a symbol in ' +
       'any other language returns an explicit `unsupported` result, never an empty escape set. HONEST: ' +
       'a SOUND LOWER BOUND — an un-analyzable callee (external/bodyless/unsupported/over-bound) is ' +
       'disclosed in `boundaries`, never assumed exception-free; a re-raise/throw whose static type is ' +

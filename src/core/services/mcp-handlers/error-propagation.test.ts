@@ -16,7 +16,7 @@ const HELPER = `function helper() {\n  throw new TypeError("boom");\n}\n`;
 const CALLER = `function caller() {\n  helper();\n}\n`;
 const GUARDED = `function guarded() {\n  try {\n    helper();\n  } catch (e) {\n    return;\n  }\n}\n`;
 const EXTCALLER = `function extCaller() {\n  fetch();\n}\n`;
-const GOFN = `func goFn() error {\n  return nil\n}\n`;
+const GOFN = `package p\nfunc goFn() error {\n  return errors.New("boom")\n}\n`;
 const AMBIGCALLER = `function ambigCaller() {\n  run();\n}\n`;
 
 interface Node {
@@ -52,7 +52,7 @@ beforeEach(() => {
     node('caller', 'caller', 'caller.ts', CALLER),
     node('guarded', 'guarded', 'guarded.ts', GUARDED),
     node('extCaller', 'extCaller', 'extcaller.ts', EXTCALLER),
-    node('goFn', 'goFn', 'gofn.go', GOFN, 'Go'),
+    { ...node('goFn', 'goFn', 'gofn.go', GOFN, 'Go'), startIndex: GOFN.indexOf('func'), endIndex: GOFN.lastIndexOf('}') + 1 },
     node('ambigCaller', 'ambigCaller', 'ambigcaller.ts', AMBIGCALLER),
     { id: 'fetchExt', name: 'fetch', filePath: 'lib.ts', startIndex: 0, endIndex: 0, startLine: 0, endLine: 0, language: 'TypeScript', isExternal: true },
   ];
@@ -124,10 +124,14 @@ describe('handleAnalyzeErrorPropagation', () => {
     expect(res.boundaries.some(b => /external\/unresolved callee/.test(b))).toBe(true);
   });
 
-  it('returns an explicit unsupported result for a non-supported language', async () => {
-    const res = (await handleAnalyzeErrorPropagation({ directory: dir, symbol: 'goFn' })) as Result;
-    expect(res.unsupported).toBe(true);
-    expect(res.escapes).toBeUndefined();
+  it('returns Go value-flow output without exception-shaped fields or wording', async () => {
+    const res = (await handleAnalyzeErrorPropagation({ directory: dir, symbol: 'goFn' })) as {
+      errorModel: string; escapes: Array<Record<string, unknown>>; note: string;
+    };
+    expect(res.errorModel).toBe('go-value');
+    expect(res.escapes).toEqual([expect.objectContaining({ value: 'error', kind: 'returned_error' })]);
+    expect(res.escapes[0]).not.toHaveProperty('type');
+    expect(res.note).not.toMatch(/exception|throw|caught/i);
   });
 
   it('returns an explicit not-found (with candidates) for an unknown symbol', async () => {
@@ -192,6 +196,131 @@ describe('handleAnalyzeErrorPropagation', () => {
     const a = await handleAnalyzeErrorPropagation({ directory: dir, symbol: 'caller' });
     const b = await handleAnalyzeErrorPropagation({ directory: dir, symbol: 'caller' });
     expect(JSON.stringify(a)).toBe(JSON.stringify(b));
+  });
+
+  it('chooses the lexicographically smaller equal-length path regardless of edge order', async () => {
+    const sources = {
+      q: 'function q() { a(); b(); }\n',
+      a: 'function a() { leaf(); }\n',
+      b: 'function b() { leaf(); }\n',
+      leaf: 'function leaf() { throw new Boom(); }\n',
+    };
+    for (const [name, source] of Object.entries(sources)) writeFileSync(join(dir, `${name}.ts`), source);
+    const nodes = Object.entries(sources).map(([name, source]) => node(name, name, `${name}.ts`, source));
+    const qa = { callerId: 'q', calleeId: 'a', calleeName: 'a', line: 1, confidence: 'same_file' };
+    const qb = { callerId: 'q', calleeId: 'b', calleeName: 'b', line: 1, confidence: 'same_file' };
+    const al = { callerId: 'a', calleeId: 'leaf', calleeName: 'leaf', line: 1, confidence: 'same_file' };
+    const bl = { callerId: 'b', calleeId: 'leaf', calleeName: 'leaf', line: 1, confidence: 'same_file' };
+
+    writeCache(dir, nodes, [qb, bl, qa, al]);
+    const reversed = (await handleAnalyzeErrorPropagation({ directory: dir, symbol: 'q' })) as Result;
+    writeCache(dir, nodes, [qa, al, qb, bl]);
+    const forward = (await handleAnalyzeErrorPropagation({ directory: dir, symbol: 'q' })) as Result;
+
+    expect(reversed.escapes[0].path).toEqual(['q::q.ts', 'a::a.ts', 'leaf::leaf.ts']);
+    expect(forward.escapes).toEqual(reversed.escapes);
+  });
+
+  it('applies traversal budgets in stable edge order', async () => {
+    const count = 801;
+    const querySource = `function budgeted() { ${Array.from({ length: count }, (_, i) => `leaf${i}();`).join(' ')} }\n`;
+    writeFileSync(join(dir, 'budgeted.ts'), querySource);
+    const nodes: Node[] = [node('budgeted', 'budgeted', 'budgeted.ts', querySource)];
+    const edges: Array<Record<string, unknown>> = [];
+    for (let i = 0; i < count; i++) {
+      const source = `function leaf${i}() { throw new E${i}(); }\n`;
+      const file = `leaf${i}.ts`;
+      writeFileSync(join(dir, file), source);
+      nodes.push(node(`leaf${i}`, `leaf${i}`, file, source));
+      edges.push({ callerId: 'budgeted', calleeId: `leaf${i}`, calleeName: `leaf${i}`, line: 1, confidence: 'import' });
+    }
+
+    writeCache(dir, nodes, edges);
+    const forward = (await handleAnalyzeErrorPropagation({ directory: dir, symbol: 'budgeted' })) as Result;
+    writeCache(dir, nodes, [...edges].reverse());
+    const reversed = (await handleAnalyzeErrorPropagation({ directory: dir, symbol: 'budgeted' })) as Result;
+
+    expect(forward.boundaries.some(boundary => /analysis bounded/.test(boundary))).toBe(true);
+    expect(reversed.escapes).toEqual(forward.escapes);
+    expect(reversed.boundaries).toEqual(forward.boundaries);
+  });
+
+  it('retains distinct recovered Go callees regardless of edge order', async () => {
+    const sources = {
+      q: 'package p\nfunc q(){ defer func(){ recover() }(); a(); b() }',
+      a: 'package p\nfunc a(){ panic("x") }',
+      b: 'package p\nfunc b(){ panic("x") }',
+    };
+    const nodes = Object.entries(sources).map(([name, source]) => {
+      writeFileSync(join(dir, `${name}.go`), source);
+      return {
+        ...node(name, name, `${name}.go`, source, 'Go'),
+        startIndex: source.indexOf(`func ${name}`),
+      };
+    });
+    const qa = { callerId: 'q', calleeId: 'a', calleeName: 'a', line: 2, confidence: 'same_file' };
+    const qb = { callerId: 'q', calleeId: 'b', calleeName: 'b', line: 2, confidence: 'same_file' };
+
+    writeCache(dir, nodes, [qb, qa]);
+    const reversed = await handleAnalyzeErrorPropagation({ directory: dir, symbol: 'q' }) as {
+      handledInternally: Array<{ fromCallee?: string }>;
+    };
+    writeCache(dir, nodes, [qa, qb]);
+    const forward = await handleAnalyzeErrorPropagation({ directory: dir, symbol: 'q' }) as {
+      handledInternally: Array<{ fromCallee?: string }>;
+    };
+
+    expect(forward.handledInternally.map(item => item.fromCallee)).toEqual(['a::a.go', 'b::b.go']);
+    expect(reversed.handledInternally).toEqual(forward.handledInternally);
+  });
+
+  it('discloses malformed current source instead of returning recovered parser facts', async () => {
+    writeFileSync(join(dir, 'helper.ts'), `function helper() { throw new TypeError("boom");`, 'utf-8');
+    const res = (await handleAnalyzeErrorPropagation({ directory: dir, symbol: 'helper' })) as Result;
+    expect(res.escapes).toEqual([]);
+    expect(res.boundaries.some(b => /syntax errors/.test(b))).toBe(true);
+  });
+
+  it('discloses and skips a source file above the per-file byte budget', async () => {
+    const source = `function huge() { /*${'x'.repeat(4 * 1024 * 1024)}*/ throw new HiddenError(); }\n`;
+    writeFileSync(join(dir, 'huge.ts'), source);
+    writeCache(dir, [node('huge', 'huge', 'huge.ts', source)], []);
+
+    const res = (await handleAnalyzeErrorPropagation({ directory: dir, symbol: 'huge' })) as Result;
+
+    expect(res.escapes).toEqual([]);
+    expect(res.boundaries.some(boundary => /per-file byte budget/.test(boundary))).toBe(true);
+    expect(JSON.stringify(res)).not.toContain('HiddenError');
+  });
+
+  it('rejects a stale range that crosses into a sibling function', async () => {
+    const oldSource = `class C { void f(){ risky(); risky(); risky(); } void g(){ throw new Boom(); } }`;
+    const currentSource = `class C { void f(){} void g(){ throw new Boom(); } }`;
+    writeFileSync(join(dir, 'stale.java'), currentSource, 'utf-8');
+    const startIndex = oldSource.indexOf('void f');
+    const endIndex = oldSource.indexOf(' void g');
+    writeCache(dir, [{
+      ...node('f', 'f', 'stale.java', oldSource, 'Java'), startIndex, endIndex,
+    }], []);
+
+    const res = (await handleAnalyzeErrorPropagation({ directory: dir, symbol: 'f' })) as Result;
+    expect(res.escapes).toEqual([]);
+    expect(res.boundaries.some(b => /span is stale/.test(b))).toBe(true);
+    expect(JSON.stringify(res)).not.toContain('Boom');
+  });
+
+  it('fails soft before recursively resolving a hostile deep function span', async () => {
+    const depth = 600;
+    const source = `package p\nfunc deep() error {\n${'{\n'.repeat(depth)}return nil\n${'}\n'.repeat(depth + 1)}`;
+    writeFileSync(join(dir, 'deep.go'), source, 'utf-8');
+    writeCache(dir, [{
+      ...node('deep', 'deep', 'deep.go', source, 'Go'),
+      startIndex: source.indexOf('func'), endIndex: source.lastIndexOf('}') + 1,
+    }], []);
+
+    const res = (await handleAnalyzeErrorPropagation({ directory: dir, symbol: 'deep' })) as Result;
+    expect(res.escapes).toEqual([]);
+    expect(res.boundaries.some(b => /AST traversal budget exceeded/.test(b))).toBe(true);
   });
 });
 
@@ -332,5 +461,199 @@ describe('handleAnalyzeErrorPropagation — unresolved intra-object call disclos
     expect(res.summary.unresolvedSelfCalls).toBe(0);
     expect(res.unresolvedSelfCalls).toBeUndefined();
     expect(res.escapes.some(e => e.type === 'TypeError')).toBe(true);
+  });
+});
+
+describe('handleAnalyzeErrorPropagation — Go propagation and recovery', () => {
+  let d: string;
+  const G = `package p\nfunc g() error { return errors.New("x") }\n`;
+  const CALL = `package p\nfunc caller() error { return g() }\n`;
+  const BOOM = `package p\nfunc boom() { panic("x") }\n`;
+  const RECOVER = `package p\nfunc recoverer() { defer func(){ recover() }(); boom() }\n`;
+  const LOOKUP = `package p\ntype T struct{}\nfunc lookup() *T { return nil }\n`;
+  const PTR = `package p\nfunc pointerCheck() { p := lookup(); if p != nil { use(p) } }\n`;
+  const MIXED = `package p\nfunc mixed() error {\n  err := g()\n  if err != nil { log.Print(err) }\n  err = g()\n  if err != nil { return err }\n  return nil\n}\n`;
+  const BODY_CALLER = `package p\nfunc bodyCaller() { missing() }\n`;
+  const TEST_CALLER = `package p\nfunc testCaller() { testErr() }\n`;
+  const TEST_ERR = `package p\nfunc testErr() error { return errors.New("x") }\n`;
+  const SAME_LINE = `package p\nfunc sameLine() error { err := g(); if err != nil { log.Print(err) }; err = g(); if err != nil { return err }; return nil }\n`;
+  const PAIR = `package p\nfunc pair() (int, error) { return 1, errors.New("x") }\n`;
+  const DISCARD_VALUE = `package p\nfunc discardValue() { _, err := pair(); if err != nil { log.Print(err) } }\n`;
+  const DISCARD_ERROR = `package p\nfunc discardError() { value, _ := pair(); use(value) }\n`;
+  const CHECK_THEN_RETURN = `package p\nfunc checkThenReturn() error { err := g(); if err != nil { log.Print(err) }; return err }\n`;
+  const goNode = (id: string, name: string, filePath: string, source: string): Node => ({
+    ...node(id, name, filePath, source, 'Go'),
+    startIndex: source.indexOf('func'),
+    endIndex: source.lastIndexOf('}') + 1,
+  });
+  beforeEach(() => {
+    d = mkdtempSync(join(tmpdir(), 'errprop-go-'));
+    for (const [file, source] of [['g.go', G], ['caller.go', CALL], ['boom.go', BOOM], ['recover.go', RECOVER], ['lookup.go', LOOKUP], ['ptr.go', PTR], ['mixed.go', MIXED], ['body.go', BODY_CALLER], ['testcaller.go', TEST_CALLER], ['helper_test.go', TEST_ERR], ['same.go', SAME_LINE], ['pair.go', PAIR], ['discard-value.go', DISCARD_VALUE], ['discard-error.go', DISCARD_ERROR], ['check-return.go', CHECK_THEN_RETURN]] as const) writeFileSync(join(d, file), source);
+    writeCache(d, [goNode('g', 'g', 'g.go', G), goNode('caller', 'caller', 'caller.go', CALL), goNode('boom', 'boom', 'boom.go', BOOM), goNode('recoverer', 'recoverer', 'recover.go', RECOVER), goNode('lookup', 'lookup', 'lookup.go', LOOKUP), goNode('pointerCheck', 'pointerCheck', 'ptr.go', PTR), goNode('mixed', 'mixed', 'mixed.go', MIXED), goNode('bodyCaller', 'bodyCaller', 'body.go', BODY_CALLER), { ...goNode('testCaller', 'testCaller', 'testcaller.go', TEST_CALLER) }, { ...goNode('testErr', 'testErr', 'helper_test.go', TEST_ERR), isTest: true }, goNode('sameLine', 'sameLine', 'same.go', SAME_LINE), goNode('pair', 'pair', 'pair.go', PAIR), goNode('discardValue', 'discardValue', 'discard-value.go', DISCARD_VALUE), goNode('discardError', 'discardError', 'discard-error.go', DISCARD_ERROR), goNode('checkThenReturn', 'checkThenReturn', 'check-return.go', CHECK_THEN_RETURN), { ...node('missing', 'missing', 'missing.go', '', 'Go'), startIndex: 0, endIndex: 0 }], [
+      { callerId: 'caller', calleeId: 'g', calleeName: 'g', line: 2, confidence: 'import' },
+      { callerId: 'recoverer', calleeId: 'boom', calleeName: 'boom', line: 2, confidence: 'import' },
+      { callerId: 'pointerCheck', calleeId: 'lookup', calleeName: 'lookup', line: 2, confidence: 'import' },
+      { callerId: 'mixed', calleeId: 'g', calleeName: 'g', line: 3, confidence: 'import' },
+      { callerId: 'mixed', calleeId: 'g', calleeName: 'g', line: 5, confidence: 'import' },
+      { callerId: 'bodyCaller', calleeId: 'missing', calleeName: 'missing', line: 2, confidence: 'import' },
+      { callerId: 'testCaller', calleeId: 'testErr', calleeName: 'testErr', line: 2, confidence: 'import' },
+      { callerId: 'sameLine', calleeId: 'g', calleeName: 'g', line: 2, confidence: 'import' },
+      { callerId: 'sameLine', calleeId: 'g', calleeName: 'g', line: 2, confidence: 'import' },
+      { callerId: 'discardValue', calleeId: 'pair', calleeName: 'pair', line: 2, confidence: 'import' },
+      { callerId: 'discardError', calleeId: 'pair', calleeName: 'pair', line: 2, confidence: 'import' },
+      { callerId: 'checkThenReturn', calleeId: 'g', calleeName: 'g', line: 2, confidence: 'import' },
+    ]);
+  });
+  afterEach(() => rmSync(d, { recursive: true, force: true }));
+
+  it('attributes a returned callee error to its origin with a propagated path', async () => {
+    const res = await handleAnalyzeErrorPropagation({ directory: d, symbol: 'caller' }) as { escapes: Array<Record<string, unknown>> };
+    expect(res.escapes).toEqual([expect.objectContaining({ kind: 'propagated_error', originFunction: 'g::g.go', path: ['caller::caller.go', 'g::g.go'] })]);
+  });
+
+  it('a deferred recovery shields a callee panic', async () => {
+    const res = await handleAnalyzeErrorPropagation({ directory: d, symbol: 'recoverer' }) as { escapes: unknown[]; handledInternally: Array<Record<string, unknown>> };
+    expect(res.escapes).toEqual([]);
+    expect(res.handledInternally).toEqual(expect.arrayContaining([expect.objectContaining({ kind: 'recovered_panic', fromCallee: 'boom::boom.go' })]));
+  });
+
+  it('does not classify a nil-checked pointer result as a handled error', async () => {
+    const res = await handleAnalyzeErrorPropagation({ directory: d, symbol: 'pointerCheck' }) as { handledInternally: unknown[] };
+    expect(res.handledInternally).toEqual([]);
+  });
+
+  it('correlates handling and returning to separate call sites of the same callee', async () => {
+    const res = await handleAnalyzeErrorPropagation({ directory: d, symbol: 'mixed' }) as { escapes: Array<Record<string, unknown>>; handledInternally: Array<Record<string, unknown>> };
+    expect(res.escapes).toEqual([expect.objectContaining({ kind: 'propagated_error', originFunction: 'g::g.go' })]);
+    expect(res.handledInternally).toEqual([expect.objectContaining({ kind: 'checked_error', handledAtLine: 4 })]);
+  });
+
+  it('discloses bodyless and test-only Go callees honestly', async () => {
+    const bodyless = await handleAnalyzeErrorPropagation({ directory: d, symbol: 'bodyCaller' }) as { boundaries: string[] };
+    expect(bodyless.boundaries.some(b => /no extractable body/.test(b))).toBe(true);
+    expect(bodyless.boundaries.join(' ')).not.toMatch(/unsupported language.*Go/i);
+    const testOnly = await handleAnalyzeErrorPropagation({ directory: d, symbol: 'testCaller' }) as { boundaries: string[] };
+    expect(testOnly.boundaries.some(b => /test-only callee/.test(b))).toBe(true);
+  });
+
+  it('does not conflate two same-callee call sites on one physical line', async () => {
+    const res = await handleAnalyzeErrorPropagation({ directory: d, symbol: 'sameLine' }) as { escapes: Array<Record<string, unknown>>; handledInternally: unknown[]; boundaries: string[] };
+    expect(res.escapes).toEqual([expect.objectContaining({ kind: 'returned_error', originFunction: 'sameLine::same.go' })]);
+    expect(res.handledInternally).toEqual([]);
+    expect(res.boundaries.some(b => /multiple g call sites on one line/.test(b))).toBe(true);
+  });
+
+  it('correlates discarded positions to the callee error result', async () => {
+    const value = await handleAnalyzeErrorPropagation({ directory: d, symbol: 'discardValue' }) as { boundaries: string[] };
+    expect(value.boundaries.join(' ')).not.toMatch(/discard(?:s|ed).*error result/i);
+    const error = await handleAnalyzeErrorPropagation({ directory: d, symbol: 'discardError' }) as { boundaries: string[] };
+    expect(error.boundaries.some(b => /discards error result 1/.test(b))).toBe(true);
+  });
+
+  it('does not report a checked error handled when the same result is returned later', async () => {
+    const result = await handleAnalyzeErrorPropagation({ directory: d, symbol: 'checkThenReturn' }) as { escapes: Array<Record<string, unknown>>; handledInternally: unknown[] };
+    expect(result.escapes).toEqual([expect.objectContaining({ kind: 'propagated_error', originFunction: 'g::g.go' })]);
+    expect(result.handledInternally).toEqual([]);
+  });
+});
+
+describe('handleAnalyzeErrorPropagation — Java and C# follow-on', () => {
+  let d: string;
+  const JAVA = `class C {\n  void risky() throws IOException { throw new IOException(); }\n}\n`;
+  const JAVA_CALLER = `class D {\n  void caller() { try { risky(); } catch (IOException e) {} }\n}\n`;
+  const JAVA_SUPPRESS = `class E {\n  void suppress() { try { risky(); } finally { return; } }\n}\n`;
+  const CSHARP = `class C {\n  void Risky() { throw new InvalidOperationException(); }\n}\n`;
+  const methodNode = (id: string, name: string, filePath: string, source: string, language: string): Node => {
+    const startIndex = source.indexOf('void');
+    const endIndex = source.indexOf('\n}', startIndex);
+    return { ...node(id, name, filePath, source, language), startIndex, endIndex };
+  };
+  beforeEach(() => {
+    d = mkdtempSync(join(tmpdir(), 'errprop-jvm-'));
+    writeFileSync(join(d, 'C.java'), JAVA);
+    writeFileSync(join(d, 'D.java'), JAVA_CALLER);
+    writeFileSync(join(d, 'E.java'), JAVA_SUPPRESS);
+    writeFileSync(join(d, 'C.cs'), CSHARP);
+    writeCache(d, [methodNode('java', 'risky', 'C.java', JAVA, 'Java'), methodNode('javaCaller', 'caller', 'D.java', JAVA_CALLER, 'Java'), methodNode('javaSuppress', 'suppress', 'E.java', JAVA_SUPPRESS, 'Java'), methodNode('cs', 'Risky', 'C.cs', CSHARP, 'C#')], [
+      { callerId: 'javaCaller', calleeId: 'java', calleeName: 'risky', line: 2, confidence: 'import' },
+      { callerId: 'javaSuppress', calleeId: 'java', calleeName: 'risky', line: 2, confidence: 'import' },
+    ]);
+  });
+  afterEach(() => rmSync(d, { recursive: true, force: true }));
+
+  it('reports Java throws declarations separately from direct throws', async () => {
+    const res = await handleAnalyzeErrorPropagation({ directory: d, symbol: 'risky' }) as { escapes: Array<Record<string, unknown>>; summary: Record<string, number>; boundaries: string[] };
+    expect(res.escapes).toEqual(expect.arrayContaining([expect.objectContaining({ type: 'IOException', kind: 'declared' }), expect.objectContaining({ type: 'IOException', kind: 'direct' })]));
+    expect(res.summary.declared).toBe(1);
+    expect(res.summary.propagated).toBe(0);
+    expect(res.boundaries.some(b => /constructor call/.test(b))).toBe(true);
+  });
+
+  it('reports a direct C# throw in the exception-shaped result', async () => {
+    const res = await handleAnalyzeErrorPropagation({ directory: d, symbol: 'Risky' }) as { escapes: Array<Record<string, unknown>> };
+    expect(res.escapes).toEqual([expect.objectContaining({ type: 'InvalidOperationException', kind: 'direct' })]);
+  });
+
+  it('does not propagate a callee exception through a definitely abrupt finally', async () => {
+    const res = await handleAnalyzeErrorPropagation({ directory: d, symbol: 'suppress' }) as { escapes: unknown[]; boundaries: string[] };
+    expect(res.escapes).toEqual([]);
+    expect(res.boundaries.some(b => /abrupt finally suppresses/.test(b))).toBe(true);
+  });
+
+  it('contains Java callee escapes in a matching typed catch', async () => {
+    const res = await handleAnalyzeErrorPropagation({ directory: d, symbol: 'caller' }) as { escapes: unknown[]; handledInternally: Array<Record<string, unknown>> };
+    expect(res.escapes).toEqual([]);
+    expect(res.handledInternally).toEqual([expect.objectContaining({ type: 'IOException', caughtIn: 'caller::D.java' })]);
+  });
+});
+
+describe('handleAnalyzeErrorPropagation — Go truncation memo safety', () => {
+  let d: string;
+  const sources: Record<string, string> = {
+    q: `package p\nfunc q(){ a(); c() }\n`, a: `package p\nfunc a(){ b() }\n`,
+    b: `package p\nfunc b(){ c() }\n`, c: `package p\nfunc c(){ d() }\n`,
+    d: `package p\nfunc d(){ panic("deep") }\n`,
+  };
+  beforeEach(() => {
+    d = mkdtempSync(join(tmpdir(), 'errprop-go-memo-'));
+    const nodes = Object.entries(sources).map(([name, source]) => {
+      writeFileSync(join(d, `${name}.go`), source);
+      return { ...node(name, name, `${name}.go`, source, 'Go'), startIndex: source.indexOf('func'), endIndex: source.lastIndexOf('}') + 1 };
+    });
+    writeCache(d, nodes, [
+      { callerId: 'q', calleeId: 'a', calleeName: 'a', line: 2 }, { callerId: 'a', calleeId: 'b', calleeName: 'b', line: 2 },
+      { callerId: 'b', calleeId: 'c', calleeName: 'c', line: 2 }, { callerId: 'c', calleeId: 'd', calleeName: 'd', line: 2 },
+      { callerId: 'q', calleeId: 'c', calleeName: 'c', line: 2 },
+    ]);
+  });
+  afterEach(() => rmSync(d, { recursive: true, force: true }));
+
+  it('recomputes a shallow path after a deeper path truncates the same node', async () => {
+    const res = await handleAnalyzeErrorPropagation({ directory: d, symbol: 'q', maxDepth: 3 }) as { escapes: Array<Record<string, unknown>> };
+    expect(res.escapes).toEqual([expect.objectContaining({ kind: 'panic', originFunction: 'd::d.go' })]);
+  });
+
+  it('does not let a shallow memo bypass the bound on a later deep path, regardless of edge order', async () => {
+    const nodes = Object.entries(sources).map(([name, source]) => ({
+      ...node(name, name, `${name}.go`, source, 'Go'),
+      startIndex: source.indexOf('func'),
+      endIndex: source.lastIndexOf('}') + 1,
+    }));
+    const deep = [
+      { callerId: 'q', calleeId: 'a', calleeName: 'a', line: 2 },
+      { callerId: 'a', calleeId: 'b', calleeName: 'b', line: 2 },
+      { callerId: 'b', calleeId: 'c', calleeName: 'c', line: 2 },
+      { callerId: 'c', calleeId: 'd', calleeName: 'd', line: 2 },
+    ];
+    const shallow = { callerId: 'q', calleeId: 'c', calleeName: 'c', line: 2 };
+    const snapshots: string[] = [];
+    for (const edges of [[shallow, ...deep], [...deep, shallow]]) {
+      writeCache(d, nodes, edges);
+      snapshots.push(JSON.stringify(await handleAnalyzeErrorPropagation({ directory: d, symbol: 'q', maxDepth: 2 })));
+    }
+    expect(snapshots[0]).toBe(snapshots[1]);
+    expect(JSON.parse(snapshots[0]).escapes).toEqual([
+      expect.objectContaining({ originFunction: 'd::d.go', path: ['q::q.go', 'c::c.go', 'd::d.go'] }),
+    ]);
   });
 });

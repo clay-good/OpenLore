@@ -70,7 +70,7 @@ export const CAPABILITY_DESCRIPTIONS: Record<Capability, string> = {
   styleFingerprint: 'Descriptive idiom fingerprint (function form, binding, naming case, …) with an evidence floor + enforcement-awareness.',
   iacProjection: 'Infrastructure-as-code projection (resources/edges) onto the unified graph.',
   crossServiceHttp: 'Cross-service API topology: outbound HTTP client call sites and/or server route registrations matched into `http_endpoint` edges across the process (and, under federation, the repo) boundary.',
-  errorPropagation: 'Exception escape/handled analysis (`analyze_error_propagation`): static throw/raise + typed/untyped catch extraction, so the exceptions that escape a function vs. those caught within it can be computed.',
+  errorPropagation: 'Error-flow analysis (`analyze_error_propagation`): exception escape/handler extraction for TS/JS/Python/Java/C#, plus Go returned-error and panic/recover value flow.',
 };
 
 /**
