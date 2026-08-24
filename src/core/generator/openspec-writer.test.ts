@@ -835,7 +835,7 @@ rules:
       expect(report.timestamp).toBeDefined();
       expect(report.openloreVersion).toBe(OPENLORE_PACKAGE_VERSION);
       expect(report.configSchemaVersion).toBe('1.5.0');
-      expect(report.openspecVersion).toBe('1.9.0');
+      expect(report.openspecVersion).toBe('1.10.0');
       expect(report.filesWritten).toBeDefined();
       expect(report.filesSkipped).toBeDefined();
       expect(report.filesBackedUp).toBeDefined();

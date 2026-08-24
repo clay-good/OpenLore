@@ -8,6 +8,8 @@ They intentionally do not move with the current schema.
   missing `generation.domains` field that was accepted before strict validation.
 - `2.2.0-default.json` captures the configuration factory shape from tag `v2.2.0`.
 - `3.0.0-default.json` captures the configuration factory shape for the v3 release candidate.
+- `3.0.1-default.json` captures the unchanged configuration factory shape for the v3.0.1
+  release-pipeline patch.
 
 For each release, add at least one `<package-version>-*.json` fixture before changing the package
 version. Include both a factory-default shape and a realistic customized shape when the release
