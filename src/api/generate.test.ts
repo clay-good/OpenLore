@@ -306,7 +306,7 @@ describe('openloreGenerate', () => {
       expect(result.dryRun).toBe(true);
       expect(result.report.filesWritten).toHaveLength(0);
       expect(result.report.openloreVersion).toBe(OPENLORE_PACKAGE_VERSION);
-      expect(result.report.openspecVersion).toBe('1.9.0');
+      expect(result.report.openspecVersion).toBe('1.10.0');
       expect(result.report.configSchemaVersion).toBe(MOCK_CONFIG.version);
       expect('pipelineResult' in result).toBe(false);
       expect(mockCreateLLMService).not.toHaveBeenCalled();
@@ -374,7 +374,7 @@ describe('openloreGenerate', () => {
       expect(OpenSpecWriter).toHaveBeenCalled();
       expect(result.report.filesWritten).toContain('openspec/auth/spec.md');
       expect(result.report.openloreVersion).toBe(OPENLORE_PACKAGE_VERSION);
-      expect(result.report.openspecVersion).toBe('1.9.0');
+      expect(result.report.openspecVersion).toBe('1.10.0');
       expect(result.report.configSchemaVersion).toBe(MOCK_CONFIG.version);
       expect(withGenerationLock).toHaveBeenCalledWith(ROOT, expect.any(Function), { signal: undefined });
     });

@@ -24,7 +24,7 @@
 
             npmDepsFetcherVersion = 2;
             makeCacheWritable = true;
-            npmDepsHash = "sha256-ShIHDCDAhCQbC9Gq5nCdXG9vHgsOqioeBZVzegqIJE0=";
+            npmDepsHash = "sha256-Hte7M3ApqZXg5Q/TE132/j3DuiKZigkX0L1hIJKv9Oo=";
 
             # Build TypeScript
             buildPhase = ''

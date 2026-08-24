@@ -8,6 +8,8 @@ All notable changes to OpenLore are documented here. This project adheres to
 - Release validation now builds the trusted OpenLore launcher before exercising hook
   installation tests, matching the required CI lane and preserving the production
   fail-closed behavior. No runtime behavior or public API changed from 3.0.0.
+- Refreshes the compatible release toolchain and development stack: OpenSpec 1.10,
+  Vitest 4.1.11, TypeBox 1.3.16, Vite 8.2.2, Inquirer 8.6, and CodeQL Action 4.37.8.
 
 **Upgrade:** `npm i -g openlore@3.0.1`
 
