@@ -19,6 +19,8 @@ import {
   hookManagerWarning,
   isResolvedGitRepository,
   resolveGitHookTarget,
+  resolveTrustedHookLauncher,
+  renderTrustedHookCommand,
   updateHookFile,
 } from '../git-hooks.js';
 
@@ -28,12 +30,12 @@ import {
 
 const HOOK_MARKER = '# openlore-refresh-hook';
 
-const HOOK_CONTENT = `
+const renderHookContent = (command: string) => `
 ${HOOK_MARKER}
 # Automatically refresh stale risk_context in story files after structural changes.
 # Installed by: openlore refresh-stories --install-hook
 
-npx --yes openlore refresh-stories 2>/dev/null || true
+${command} 2>/dev/null || true
 # end-openlore-refresh-hook
 `.trimStart();
 
@@ -50,12 +52,15 @@ export async function installPostCommitHook(rootPath: string): Promise<void> {
     logger.warning(hookManagerWarning(target, 'openlore refresh-stories'));
     return;
   }
+  const launcher = await resolveTrustedHookLauncher(rootPath);
+  if (!launcher) { logger.error('Cannot pin an OpenLore installation outside this repository. Install OpenLore globally and retry.'); process.exitCode = 1; return; }
+  const hookContent = renderHookContent(renderTrustedHookCommand(launcher, ['refresh-stories']));
   let alreadyInstalled = false;
   let appended = false;
   const result = await updateHookFile(hookPath, (existing) => {
-    if (existing?.includes(HOOK_MARKER)) { alreadyInstalled = true; return null; }
+    if (existing?.includes(HOOK_MARKER)) { alreadyInstalled = true; const refreshed = existing.replace(/# openlore-refresh-hook[\s\S]*?# end-openlore-refresh-hook/, hookContent.trimEnd()); return refreshed === existing ? null : refreshed; }
     appended = existing !== null;
-    return existing ? existing.trimEnd() + '\n\n' + HOOK_CONTENT : '#!/bin/sh\n\n' + HOOK_CONTENT;
+    return existing ? existing.trimEnd() + '\n\n' + hookContent : '#!/bin/sh\n\n' + hookContent;
   });
   if (result.status === 'unavailable') {
     logger.warning(`Cannot install the refresh-stories hook at ${displayHookPath(hookPath)}: ${result.reason}`);

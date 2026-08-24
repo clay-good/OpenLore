@@ -178,11 +178,11 @@ describe('runAnalysis integration — excludePatterns', () => {
     expect(repoMap.summary.analyzedFiles).toBe(1);
   });
 
-  it('includePatterns override gitignore exclusions', async () => {
+  it('repository includePatterns cannot override gitignore exclusions', async () => {
     await createFile(tmpDir, '.openlore/config.json',
       OPENLORE_CONFIG([], ['*.graphql']));
 
-    // schema.graphql gitignored — should be force-included
+    // A committed config must not resurrect a developer-local ignored file.
     await createFile(tmpDir, '.gitignore', '*.graphql');
     await createFile(tmpDir, 'app/main.py', 'def main(): pass');
     await createFile(tmpDir, 'app/schema.graphql', 'type Query { hello: String }');
@@ -194,7 +194,7 @@ describe('runAnalysis integration — excludePatterns', () => {
     const paths = repoMap.allFiles.map(f => f.path);
 
     expect(paths.some(p => p.includes('main.py'))).toBe(true);
-    expect(paths.some(p => p.includes('schema.graphql'))).toBe(true);
+    expect(paths.some(p => p.includes('schema.graphql'))).toBe(false);
   });
 
   it('caller-supplied includePatterns also override gitignore exclusions', async () => {

@@ -18,14 +18,13 @@
         {
           default = pkgs.buildNpmPackage {
             pname = "openlore";
-            version = "1.3.1";
+            version = "3.0.0";
 
             src = ./.;
 
             npmDepsFetcherVersion = 2;
             makeCacheWritable = true;
-            npmDepsHash = "sha256-Ym+mY2roiSWw5pp5IIbTfDKYCB9bQ6mFccvj+m5ODsQ=";
-            npmFlags = [ "--omit=optional" ];
+            npmDepsHash = "sha256-4LknIuY4oBlrLTWa21IiCWceZiPKsR6ZWtT1t9UBThY=";
 
             # Build TypeScript
             buildPhase = ''
@@ -43,8 +42,7 @@
               # Copy node_modules for runtime dependencies
               cp -r node_modules $out/lib/node_modules/openlore/
 
-              # tree-sitter-swift creates a stub symlink for tree-sitter-cli
-              # that dangles when optional deps are omitted — remove it.
+              # The local tree-sitter-cli build stub is not shipped at runtime.
               find $out -xtype l -name tree-sitter-cli -delete
 
               # Create bin wrapper (ESM — must use import(), not require())

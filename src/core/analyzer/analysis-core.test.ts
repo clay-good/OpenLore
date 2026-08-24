@@ -6,13 +6,13 @@ import { computeProjectFingerprint } from '../services/mcp-handlers/utils.js';
 import { isAnalysisCacheFresh, mergeAnalysisPatterns, type AnalysisReporter } from './analysis-core.js';
 
 describe('shared analysis core', () => {
-  it('merges configured and caller patterns without duplicates', () => {
+  it('accepts includes only from the trusted caller while merging all excludes', () => {
     expect(mergeAnalysisPatterns(
       { includePatterns: ['**/*.graphql'], excludePatterns: ['vendor/**'] },
       ['**/*.prisma', '**/*.graphql'],
       ['generated/**', 'vendor/**'],
     )).toEqual({
-      includePatterns: ['**/*.graphql', '**/*.prisma'],
+      includePatterns: ['**/*.prisma', '**/*.graphql'],
       excludePatterns: ['vendor/**', 'generated/**'],
     });
   });

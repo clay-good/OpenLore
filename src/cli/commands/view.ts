@@ -731,7 +731,7 @@ export const viewCommand = new Command('view')
       const descriptorPath = join(rootPath, OPENLORE_DIR, 'view.json');
       try {
         // 0600 — the descriptor carries the instance token that gates /api/chat.
-        await writeInstanceDescriptor(descriptorPath, {
+        await writeInstanceDescriptor(rootPath, descriptorPath, {
           port,
           pid: process.pid,
           host,

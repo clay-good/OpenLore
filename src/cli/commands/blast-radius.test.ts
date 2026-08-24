@@ -50,7 +50,7 @@ describe('blast-radius git hook install/uninstall', () => {
     const h = await readHook(root);
     expect(h.startsWith('#!/bin/sh')).toBe(true);
     expect(h).toContain(HOOK_MARKER);
-    expect(h).toContain('blast-radius --hook');
+    expect(h).toContain("'blast-radius' '--hook'");
     // advisory by default: only a configured pattern (nonzero exit) ever propagates
     expect(h).toContain('if [ "$BLAST_EXIT" -ne 0 ]; then');
   });

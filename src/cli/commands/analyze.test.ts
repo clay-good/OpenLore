@@ -487,6 +487,12 @@ describe('analyze command', () => {
       return ((calls[calls.length - 1][1] as { includePatterns?: string[] })?.includePatterns) ?? [];
     }
 
+    function getMapperRestrictedIncludePatterns(): string[] {
+      const calls = MockRepositoryMapper.mock.calls;
+      expect(calls.length).toBeGreaterThan(0);
+      return ((calls[calls.length - 1][1] as { restrictedIncludePatterns?: string[] })?.restrictedIncludePatterns) ?? [];
+    }
+
     it('passes config includePatterns to RepositoryMapper when caller passes none', async () => {
       readOpenLoreConfig.mockResolvedValue(makeConfig(['*.graphql', '*.prisma']));
 
@@ -494,9 +500,10 @@ describe('analyze command', () => {
         maxFiles: 100000, include: [], exclude: [],
       });
 
-      expect(getMapperIncludePatterns()).toEqual(
+      expect(getMapperRestrictedIncludePatterns()).toEqual(
         expect.arrayContaining(['*.graphql', '*.prisma'])
       );
+      expect(getMapperIncludePatterns()).toEqual([]);
     });
 
     it('merges config includePatterns with caller-supplied include patterns', async () => {
@@ -506,9 +513,8 @@ describe('analyze command', () => {
         maxFiles: 100000, include: ['*.proto'], exclude: [],
       });
 
-      expect(getMapperIncludePatterns()).toEqual(
-        expect.arrayContaining(['*.graphql', '*.proto'])
-      );
+      expect(getMapperRestrictedIncludePatterns()).toEqual(['*.graphql']);
+      expect(getMapperIncludePatterns()).toEqual(['*.proto']);
     });
 
     it('deduplicates include patterns present in both config and caller', async () => {
@@ -520,6 +526,7 @@ describe('analyze command', () => {
 
       const patterns = getMapperIncludePatterns();
       expect(patterns.filter(p => p === '*.graphql')).toHaveLength(1);
+      expect(getMapperRestrictedIncludePatterns()).toEqual([]);
     });
   });
 

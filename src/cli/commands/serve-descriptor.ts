@@ -30,6 +30,9 @@ import { realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { isLoopbackHost } from './local-http-guard.js';
 
+/** Increment only when the daemon HTTP tool/health contract becomes incompatible. */
+export const SERVE_PROTOCOL_VERSION = 1;
+
 /**
  * The validated daemon-discovery descriptor. `startedAt` / `version` are
  * advisory metadata (normalized to '' when absent or ill-typed); the other four
@@ -41,6 +44,7 @@ export interface ServeDescriptor {
   pid: number;
   host: string;
   token?: string;
+  protocolVersion: typeof SERVE_PROTOCOL_VERSION;
   startedAt: string;
   version: string;
   state?: 'ready' | 'draining';
@@ -48,6 +52,7 @@ export interface ServeDescriptor {
 
 export interface ServeHealth {
   ok: true;
+  protocolVersion: typeof SERVE_PROTOCOL_VERSION;
   presetDispatchEnforced: true;
   root: string;
   pid: number;
@@ -57,6 +62,11 @@ export interface ServeHealth {
   tokenAuthenticated: boolean;
   draining: boolean;
 }
+
+export type ServeDescriptorRead =
+  | { kind: 'compatible'; descriptor: ServeDescriptor }
+  | { kind: 'incompatible'; descriptor: { port: number; pid: number; host: string; token?: string } }
+  | { kind: 'absent' };
 
 /** Build the loopback HTTP origin, including the brackets required by IPv6 URLs. */
 export function serveHttpBaseUrl(host: string, port: number): string {
@@ -79,12 +89,13 @@ export function canonicalServeRoot(root: string): string {
 export function validateServeHealth(
   parsed: unknown,
   expectedRoot: string,
-  descriptor?: Pick<ServeDescriptor, 'pid' | 'token'>,
+  descriptor?: Pick<ServeDescriptor, 'pid' | 'token' | 'protocolVersion'>,
 ): ServeHealth | null {
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
   const h = parsed as Record<string, unknown>;
   if (
     h.ok !== true
+    || h.protocolVersion !== SERVE_PROTOCOL_VERSION
     || h.presetDispatchEnforced !== true
     || typeof h.root !== 'string'
     || canonicalServeRoot(h.root) !== canonicalServeRoot(expectedRoot)
@@ -98,10 +109,12 @@ export function validateServeHealth(
     || h.tokenAuthenticated !== true
     || typeof h.draining !== 'boolean'
     || (descriptor !== undefined && h.pid !== descriptor.pid)
+    || (descriptor !== undefined && descriptor.protocolVersion !== h.protocolVersion)
     || (descriptor !== undefined && h.tokenProtected !== Boolean(descriptor.token))
   ) return null;
   return {
     ok: true,
+    protocolVersion: SERVE_PROTOCOL_VERSION,
     presetDispatchEnforced: true,
     root: canonicalServeRoot(h.root),
     pid: h.pid,
@@ -128,14 +141,16 @@ export function validateServeDescriptor(parsed: unknown): ServeDescriptor | null
   // outbound fetch target during liveness probing (egress / SSRF).
   const hostOk = typeof d.host === 'string' && isLoopbackHost(d.host);
   const tokenOk = d.token === undefined || typeof d.token === 'string';
+  const protocolOk = d.protocolVersion === SERVE_PROTOCOL_VERSION;
   const stateOk = d.state === undefined || d.state === 'ready' || d.state === 'draining';
-  if (!portOk || !pidOk || !hostOk || !tokenOk || !stateOk) return null;
+  if (!portOk || !pidOk || !hostOk || !tokenOk || !protocolOk || !stateOk) return null;
   const state = d.state === 'ready' || d.state === 'draining' ? d.state : undefined;
   return {
     port: d.port as number,
     pid: d.pid as number,
     host: d.host as string,
     token: d.token as string | undefined,
+    protocolVersion: SERVE_PROTOCOL_VERSION,
     startedAt: typeof d.startedAt === 'string' ? d.startedAt : '',
     version: typeof d.version === 'string' ? d.version : '',
     ...(state === undefined ? {} : { state }),
@@ -160,4 +175,52 @@ export async function readServeDescriptor(
   }
   const descriptor = validateServeDescriptor(parsed);
   return descriptor?.state === 'draining' && !options.includeDraining ? null : descriptor;
+}
+
+/** Distinguish a narrowly safe legacy/incompatible announcement from absence. */
+export async function readServeDescriptorState(
+  descriptorPath: string,
+  options: { includeDraining?: boolean } = {},
+): Promise<ServeDescriptorRead> {
+  let parsed: unknown;
+  try { parsed = JSON.parse(await readFile(descriptorPath, 'utf-8')); } catch { return { kind: 'absent' }; }
+  const descriptor = validateServeDescriptor(parsed);
+  if (descriptor) {
+    if (descriptor.state === 'draining' && !options.includeDraining) return { kind: 'absent' };
+    return { kind: 'compatible', descriptor };
+  }
+  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    const d = parsed as Record<string, unknown>;
+    const safe = typeof d.port === 'number' && Number.isInteger(d.port) && d.port >= 1 && d.port <= 65535
+      && typeof d.pid === 'number' && Number.isInteger(d.pid) && d.pid > 0
+      && typeof d.host === 'string' && isLoopbackHost(d.host)
+      && (d.token === undefined || typeof d.token === 'string');
+    if (safe && d.protocolVersion !== SERVE_PROTOCOL_VERSION) return {
+      kind: 'incompatible',
+      descriptor: { port: d.port as number, pid: d.pid as number, host: d.host as string, ...(typeof d.token === 'string' ? { token: d.token } : {}) },
+    };
+  }
+  return { kind: 'absent' };
+}
+
+/** A stale legacy file must not become a permanent repository-local denial of service. */
+export async function incompatibleServeDescriptorIsLive(
+  descriptor: { port: number; pid: number; host: string; token?: string },
+  expectedRoot: string,
+): Promise<boolean> {
+  try {
+    const response = await fetch(`${serveHttpBaseUrl(descriptor.host, descriptor.port)}/health`, {
+      headers: descriptor.token ? { 'x-openlore-token': descriptor.token } : undefined,
+      signal: AbortSignal.timeout(500),
+      redirect: 'error',
+    });
+    if (!response.ok) return false;
+    const health = await response.json().catch(() => null) as Record<string, unknown> | null;
+    return health?.ok === true
+      && health.pid === descriptor.pid
+      && typeof health.root === 'string'
+      && canonicalServeRoot(health.root) === canonicalServeRoot(expectedRoot);
+  } catch {
+    return false;
+  }
 }

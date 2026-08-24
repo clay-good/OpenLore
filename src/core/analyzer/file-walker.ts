@@ -78,6 +78,8 @@ export interface FileWalkerOptions {
   maxFiles?: number;
   /** Additional glob patterns to include */
   includePatterns?: string[];
+  /** Repo-authored includes that cannot override .gitignore/.openlore-ignore. */
+  restrictedIncludePatterns?: string[];
   /** Additional glob patterns to exclude */
   excludePatterns?: string[];
   /** Paths that cannot be force-included (generated analysis/spec output). */
@@ -446,6 +448,19 @@ async function loadIgnorePatterns(rootPath: string): Promise<Ignore> {
   return ig;
 }
 
+/** Ignore files are an operator boundary that repo-authored includes cannot cross. */
+async function loadRepositoryIgnorePatterns(rootPath: string): Promise<Ignore> {
+  const ig = ignore();
+  for (const name of ['.gitignore', '.openlore-ignore']) {
+    try {
+      ig.add(await readFile(join(rootPath, name), 'utf-8'));
+    } catch {
+      // Optional ignore file.
+    }
+  }
+  return ig;
+}
+
 /**
  * FileWalker class for traversing codebases
  */
@@ -455,6 +470,8 @@ export class FileWalker {
   private ig: Ignore | null = null;
   /** Separate ignore instance used to check if a file matches includePatterns. */
   private igInclude: Ignore | null = null;
+  private igRestrictedInclude: Ignore | null = null;
+  private igRepositoryIgnore: Ignore | null = null;
   /**
    * Glob-free directory prefixes of the include patterns. A directory on the lineage of any
    * of these must be descended even when a built-in skip / gitignore / excludePatterns rule
@@ -469,6 +486,8 @@ export class FileWalker {
    * silent no-op inside pruned trees.
    */
   private includeMatchesAnyDir = false;
+  private restrictedIncludePrefixes: string[] = [];
+  private restrictedIncludeMatchesAnyDir = false;
   /**
    * Where the walk stopped when it hit `maxFiles`, if it did. Non-null means the corpus is a
    * truncated prefix of the repository, and the walk summary must say so rather than present
@@ -502,6 +521,7 @@ export class FileWalker {
     this.options = {
       maxFiles: options.maxFiles ?? DEFAULT_MAX_FILES,
       includePatterns: options.includePatterns ?? [],
+      restrictedIncludePatterns: options.restrictedIncludePatterns ?? [],
       excludePatterns: options.excludePatterns ?? [],
       protectedExcludePatterns: options.protectedExcludePatterns ?? [],
       maxDepth: options.maxDepth ?? DEFAULT_MAX_WALK_DEPTH,
@@ -578,6 +598,15 @@ export class FileWalker {
       }
     }
     return false;
+  }
+
+  private matchesRestrictedIncludeLineage(relativeDir: string): boolean {
+    if (this.restrictedIncludeMatchesAnyDir) return true;
+    if (this.restrictedIncludePrefixes.length === 0) return false;
+    const dir = toPosixPath(relativeDir);
+    if (dir === '' || dir === '.') return true;
+    return this.restrictedIncludePrefixes.some(prefix =>
+      dir === prefix || dir.startsWith(prefix + '/') || prefix.startsWith(dir + '/'));
   }
 
   /**
@@ -670,6 +699,12 @@ export class FileWalker {
     }
     // includePatterns override all exclusions — check first
     if (this.igInclude && this.igInclude.ignores(posixPath)) {
+      return false;
+    }
+    if (
+      this.igRestrictedInclude?.ignores(posixPath)
+      && !this.igRepositoryIgnore?.ignores(posixPath)
+    ) {
       return false;
     }
 
@@ -811,7 +846,11 @@ export class FileWalker {
           this.recordSkip('pattern');
           continue;
         }
-        const forceInclude = this.matchesIncludeLineage(relativeSubPath);
+        const trustedForceInclude = this.matchesIncludeLineage(relativeSubPath);
+        const restrictedForceInclude = this.matchesRestrictedIncludeLineage(relativeSubPath)
+          && !this.igRepositoryIgnore?.ignores(posixSubPath + '/')
+          && !this.isIgnoredByNested(posixSubPath + '/', activeNested);
+        const forceInclude = trustedForceInclude || restrictedForceInclude;
 
         if (!forceInclude) {
           if (this.shouldSkipDirectory(entry.name, depth, relativeSubPath)) {
@@ -882,8 +921,8 @@ export class FileWalker {
 
         // A nested `.gitignore` excludes its own subtree's files — unless an include pattern
         // overrides it, keeping includePatterns supreme over every exclusion layer.
-        const includedByPattern = this.igInclude?.ignores(posixPath) ?? false;
-        if (!includedByPattern && this.isIgnoredByNested(posixPath, activeNested)) {
+        const includedByTrustedPattern = this.igInclude?.ignores(posixPath) ?? false;
+        if (!includedByTrustedPattern && this.isIgnoredByNested(posixPath, activeNested)) {
           this.recordSkip('gitignore');
           continue;
         }
@@ -987,9 +1026,12 @@ export class FileWalker {
     this.symlinkFollowedCount = 0;
     this.includePrefixes = [];
     this.includeMatchesAnyDir = false;
+    this.restrictedIncludePrefixes = [];
+    this.restrictedIncludeMatchesAnyDir = false;
 
     // Load ignore patterns
     this.ig = await loadIgnorePatterns(this.rootPath);
+    this.igRepositoryIgnore = await loadRepositoryIgnorePatterns(this.rootPath);
 
     // Add user-specified exclude patterns
     for (const pattern of this.options.excludePatterns) {
@@ -1019,6 +1061,16 @@ export class FileWalker {
         return t.length > 0 && !t.startsWith('/') && includePatternPrefix(t) === '';
       });
     }
+    if (this.options.restrictedIncludePatterns.length > 0) {
+      this.igRestrictedInclude = ignore().add(this.options.restrictedIncludePatterns);
+      this.restrictedIncludePrefixes = this.options.restrictedIncludePatterns
+        .map(includePatternPrefix)
+        .filter((p) => p.length > 0);
+      this.restrictedIncludeMatchesAnyDir = this.options.restrictedIncludePatterns.some((p) => {
+        const t = p.trim();
+        return t.length > 0 && !t.startsWith('/') && includePatternPrefix(t) === '';
+      });
+    }
 
     // Start walking from root
     await this.walkDirectory(this.rootPath, 0);
@@ -1029,9 +1081,13 @@ export class FileWalker {
     // visible rather than silently doing nothing. Checked against the admitted corpus; each
     // pattern gets its own matcher once, tested over the (usually scoped) file set.
     let includePatternsUnmatched: string[] | undefined;
-    if (this.options.includePatterns.length > 0 && !this.truncatedAtPath) {
+    const allIncludePatterns = [
+      ...this.options.includePatterns,
+      ...this.options.restrictedIncludePatterns,
+    ];
+    if (allIncludePatterns.length > 0 && !this.truncatedAtPath) {
       const admitted = this.files.map((f) => toPosixPath(f.path));
-      const unmatched = this.options.includePatterns.filter((pat) => {
+      const unmatched = allIncludePatterns.filter((pat) => {
         if (pat.trim().length === 0) return false;
         const matcher = ignore().add(pat);
         return !admitted.some((p) => matcher.ignores(p));

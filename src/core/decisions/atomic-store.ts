@@ -23,8 +23,8 @@
  *      `*.corrupt-<n>` and signal it, instead of silently substituting empty.
  */
 
-import { open, rename, unlink, mkdir, access, link } from 'node:fs/promises';
-import { linkSync, unlinkSync, renameSync, existsSync } from 'node:fs';
+import { open, rename, unlink, mkdir, access, link, stat } from 'node:fs/promises';
+import { constants, linkSync, unlinkSync, renameSync, existsSync } from 'node:fs';
 import { dirname, basename, join } from 'node:path';
 import { logger } from '../../utils/logger.js';
 import { acquireLockAt, isLockHeld } from '../runtime/advisory-lock.js';
@@ -45,7 +45,7 @@ let tmpCounter = 0;
  * `rename`. A crash or interruption before the rename leaves the previously
  * committed file untouched — never a partially written (torn) file.
  */
-export async function atomicWriteFile(path: string, data: string): Promise<void> {
+export async function atomicWriteFile(path: string, data: string, newFileMode = 0o666): Promise<void> {
   const dir = dirname(path);
   await mkdir(dir, { recursive: true });
   // Unique temp name per in-flight write (pid + monotonic counter): concurrent
@@ -53,8 +53,10 @@ export async function atomicWriteFile(path: string, data: string): Promise<void>
   // shared temp file.
   const tmp = join(dir, `.${basename(path)}.tmp-${process.pid}-${tmpCounter++}`);
   let renamed = false;
+  let mode = newFileMode;
+  try { mode = (await stat(path)).mode & 0o777; } catch { /* new file: respect process umask */ }
   try {
-    const fh = await open(tmp, 'w');
+    const fh = await open(tmp, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, mode);
     try {
       await fh.writeFile(data, 'utf-8');
       await fh.sync(); // durability barrier: bytes are on disk before the rename

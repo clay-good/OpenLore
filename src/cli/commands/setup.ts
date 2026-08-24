@@ -28,6 +28,7 @@ import { validatePanicSignal, readPanicTelemetry } from '../../core/services/mcp
 import type { PanicGateReport } from '../../core/services/mcp-handlers/panic-validation.js';
 import type { PanicResponseMode } from '../../types/index.js';
 import { atomicWriteFile } from '../../core/decisions/atomic-store.js';
+import { confinedAtomicWriteFile, safeJoin } from '../../utils/path-confinement.js';
 
 // ============================================================================
 // TYPES
@@ -108,15 +109,18 @@ async function detectOmoa(projectRoot: string): Promise<boolean> {
 async function copyFile(
   src: string,
   dest: string,
+  confinementRoot: string,
   force: boolean,
   transform?: (content: string) => string,
 ): Promise<'created' | 'updated' | 'skipped'> {
-  const exists = await fileExists(dest);
+  const confinedDest = safeJoin(confinementRoot, relative(confinementRoot, dest));
+  const exists = await fileExists(confinedDest);
   if (exists && !force) return 'skipped';
   const raw = await readFile(src, 'utf-8');
   const content = transform ? transform(raw) : raw;
-  await mkdir(dirname(dest), { recursive: true });
-  await writeFile(dest, content, 'utf-8');
+  await mkdir(dirname(confinedDest), { recursive: true });
+  const verifiedDest = safeJoin(confinementRoot, relative(confinementRoot, confinedDest));
+  await confinedAtomicWriteFile(confinementRoot, verifiedDest, content, { preserveMode: true });
   return exists ? 'updated' : 'created';
 }
 
@@ -277,16 +281,19 @@ async function runSetup(
         logger.warning(`setup: source not found — ${entry.src} (re-install openlore to fix)`);
         continue;
       }
+      const confinementRoot = tool === 'pi' && piGlobal ? homedir() : projectRoot;
+      const confinedDest = safeJoin(confinementRoot, relative(confinementRoot, entry.dest));
       // Remove the old .ts counterpart when installing the .js Pi extension.
       // Prior versions of setup distributed openlore.ts; Pi loads all files in the
       // extensions dir, so both registering the same tools causes a conflict.
-      if (tool === 'pi' && entry.dest.endsWith('.js')) {
-        const oldTs = entry.dest.slice(0, -3) + '.ts';
+      if (tool === 'pi' && confinedDest.endsWith('.js')) {
+        const oldTs = safeJoin(confinementRoot, relative(confinementRoot, confinedDest.slice(0, -3) + '.ts'));
         if (await fileExists(oldTs)) await unlink(oldTs);
       }
       const status = await copyFile(
         entry.src,
-        entry.dest,
+        confinedDest,
+        confinementRoot,
         force,
         /[/\\]SKILL\.md$/.test(entry.dest) ? content => adaptSkillForHost(content, tool) : undefined,
       );
@@ -514,7 +521,8 @@ async function readClaudeSettings(settingsPath: string): Promise<ClaudeHookSetti
 
 /** Install `openlore panic-check` as a PreToolUse hook (idempotent). */
 export async function installPanicCheckHook(rootPath: string, format: string = 'claude'): Promise<void> {
-  const settingsPath = join(rootPath, '.claude', 'settings.json');
+  const settingsPath = await verifiedCheckEditSettingsPath(rootPath, true);
+  if (!settingsPath) return;
   let settings: ClaudeHookSettings;
   try { settings = await readClaudeSettings(settingsPath); }
   catch (e) { logger.error((e as Error).message); return; }
@@ -537,21 +545,20 @@ export async function installPanicCheckHook(rootPath: string, format: string = '
     updated[existingIdx] = hookEntry;
     settings.hooks ??= {};
     settings.hooks.PreToolUse = updated;
-    await mkdir(join(rootPath, '.claude'), { recursive: true });
-    await writeFile(settingsPath, JSON.stringify(settings, null, 2) + '\n', 'utf-8');
+    await confinedAtomicWriteFile(rootPath, settingsPath, JSON.stringify(settings, null, 2) + '\n', { preserveMode: true });
     logger.success(`panic-check PreToolUse hook updated to format: ${format}`);
     return;
   }
   settings.hooks ??= {};
   settings.hooks.PreToolUse = [...hooks, hookEntry];
-  await mkdir(join(rootPath, '.claude'), { recursive: true });
-  await writeFile(settingsPath, JSON.stringify(settings, null, 2) + '\n', 'utf-8');
+  await confinedAtomicWriteFile(rootPath, settingsPath, JSON.stringify(settings, null, 2) + '\n', { preserveMode: true });
   logger.success(`panic-check PreToolUse hook added to .claude/settings.json (format: ${format})`);
 }
 
 /** Install `openlore gryph-watch` as a UserPromptSubmit hook (idempotent). */
 export async function installGryphWatchHook(rootPath: string): Promise<void> {
-  const settingsPath = join(rootPath, '.claude', 'settings.json');
+  const settingsPath = await verifiedCheckEditSettingsPath(rootPath, true);
+  if (!settingsPath) return;
   let settings: ClaudeHookSettings;
   try { settings = await readClaudeSettings(settingsPath); }
   catch (e) { logger.error((e as Error).message); return; }
@@ -567,15 +574,15 @@ export async function installGryphWatchHook(rootPath: string): Promise<void> {
   };
   settings.hooks ??= {};
   settings.hooks.UserPromptSubmit = [...hooks, hookEntry];
-  await mkdir(join(rootPath, '.claude'), { recursive: true });
-  await writeFile(settingsPath, JSON.stringify(settings, null, 2) + '\n', 'utf-8');
+  await confinedAtomicWriteFile(rootPath, settingsPath, JSON.stringify(settings, null, 2) + '\n', { preserveMode: true });
   logger.success('gryph-watch UserPromptSubmit hook added to .claude/settings.json');
 }
 
 /** Remove the opt-in panic-check + gryph-watch hooks (idempotent — the inverse of
  *  `setup --hooks <format>`). Only strips openlore-marked entries; leaves user hooks. */
 export async function uninstallPanicHooks(rootPath: string): Promise<void> {
-  const settingsPath = join(rootPath, '.claude', 'settings.json');
+  const settingsPath = await verifiedCheckEditSettingsPath(rootPath, false);
+  if (!settingsPath) return;
   if (!(await fileExists(settingsPath))) return;
   let settings: ClaudeHookSettings;
   try { settings = await readClaudeSettings(settingsPath); }
@@ -598,7 +605,7 @@ export async function uninstallPanicHooks(rootPath: string): Promise<void> {
     logger.success('No openlore panic hooks found in .claude/settings.json');
     return;
   }
-  await writeFile(settingsPath, JSON.stringify(settings, null, 2) + '\n', 'utf-8');
+  await confinedAtomicWriteFile(rootPath, settingsPath, JSON.stringify(settings, null, 2) + '\n', { preserveMode: true });
   logger.success('Removed openlore panic hooks (panic-check + gryph-watch) from .claude/settings.json');
 }
 

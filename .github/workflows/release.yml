@@ -113,6 +113,9 @@ jobs:
       - name: Run tests
         run: npm run test:run
 
+      - name: Run deterministic integration tests
+        run: npm run test:integration:ci
+
       - name: Audit dependencies
         run: npm run audit:gate
 

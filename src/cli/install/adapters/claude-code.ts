@@ -10,14 +10,15 @@
  * server never loaded; `apply` now migrates that stale entry away.
  */
 
-import { mkdir, readFile, writeFile, unlink } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { mkdir, readFile, unlink } from 'node:fs/promises';
+import { dirname } from 'node:path';
 import { applyMarkdownBlock, uninstallMarkdownBlock, hasManagedBlock } from './markdown-block.js';
 import { mergeEntries, readMeta, removeManaged, isHandEdited, editJsonPreservingFormat, type JsonPathEdit } from '../json-managed.js';
 import { previewCreate, previewDiff } from '../diff.js';
 import type { Adapter, ApplyContext, ApplyResult, PlannedChange } from './types.js';
 import { LEAN_DEFAULT_PRESET } from '../../../constants.js';
 import { formatPlatformCommand, resolvePlatformCommand } from '../../../utils/platform-command.js';
+import { confinedAtomicWriteFile, safeJoin } from '../../../utils/path-confinement.js';
 
 const MD_FILE = 'CLAUDE.md';
 const SETTINGS_PATH = '.claude/settings.json';
@@ -206,6 +207,9 @@ export const claudeCodeAdapter: Adapter = {
   name: 'claude-code',
   isConnected: (root) => hasManagedBlock(root, MD_FILE),
   async apply(ctx: ApplyContext): Promise<ApplyResult> {
+    const mcpPath = safeJoin(ctx.root, MCP_PATH);
+    const settingsPath = safeJoin(ctx.root, SETTINGS_PATH);
+    const localPath = safeJoin(ctx.root, SETTINGS_LOCAL_PATH);
     const mdResult = await applyMarkdownBlock(ctx, {
       fileName: MD_FILE,
       createIfMissing: true,
@@ -213,7 +217,6 @@ export const claudeCodeAdapter: Adapter = {
     });
 
     // --- 1. MCP server registration → .mcp.json (the file Claude Code reads) ---
-    const mcpPath = join(ctx.root, MCP_PATH);
     const existingMcp = await readJsonOrEmpty(mcpPath);
     const hadMcp = await fileExists(mcpPath);
     const prevMcpMeta = readMeta(existingMcp);
@@ -255,12 +258,11 @@ export const claudeCodeAdapter: Adapter = {
     });
     if (!ctx.dryRun && (mcpAction !== 'noop' || !hadMcp)) {
       await mkdir(dirname(mcpPath), { recursive: true });
-      await writeFile(mcpPath, mcpAfter, 'utf8');
+      await confinedAtomicWriteFile(ctx.root, mcpPath, mcpAfter, { preserveMode: true });
     }
 
     // --- 2. Hooks → .claude/settings.json (marker-identified) ------------------
     // SessionStart (whole-repo primer) + UserPromptSubmit (task-scoped injection).
-    const settingsPath = join(ctx.root, SETTINGS_PATH);
     const rawSettings = await readRawOrNull(settingsPath);
     const had = rawSettings != null;
     const existing = await readJsonOrEmpty(settingsPath);
@@ -315,7 +317,7 @@ export const claudeCodeAdapter: Adapter = {
 
     if (!ctx.dryRun && changed) {
       await mkdir(dirname(settingsPath), { recursive: true });
-      await writeFile(settingsPath, after, 'utf8');
+      await confinedAtomicWriteFile(ctx.root, settingsPath, after, { preserveMode: true });
     }
 
     mdResult.changes.push(change);
@@ -324,7 +326,6 @@ export const claudeCodeAdapter: Adapter = {
     // Allow the agent to run the `openlore` CLI without a per-call approval. We
     // append our single sentinel permission string to permissions.allow if absent
     // (idempotent), preserving any permissions the user already configured.
-    const localPath = join(ctx.root, SETTINGS_LOCAL_PATH);
     const rawLocal = await readRawOrNull(localPath);
     const hadLocal = rawLocal != null;
     const existingLocal = await readJsonOrEmpty(localPath);
@@ -354,7 +355,7 @@ export const claudeCodeAdapter: Adapter = {
       });
       if (!ctx.dryRun) {
         await mkdir(dirname(localPath), { recursive: true });
-        await writeFile(localPath, localAfter, 'utf8');
+        await confinedAtomicWriteFile(ctx.root, localPath, localAfter, { preserveMode: true });
       }
     }
 
@@ -362,6 +363,9 @@ export const claudeCodeAdapter: Adapter = {
   },
 
   async uninstall(ctx: ApplyContext): Promise<ApplyResult> {
+    const mcpPath = safeJoin(ctx.root, MCP_PATH);
+    const settingsPath = safeJoin(ctx.root, SETTINGS_PATH);
+    const localPath = safeJoin(ctx.root, SETTINGS_LOCAL_PATH);
     // deleteIfBlockOnly: remove CLAUDE.md when stripping our block empties it
     // (i.e. install created it). A CLAUDE.md with the user's own content is left
     // in place — only the OpenLore block is removed — so this never clobbers user
@@ -369,7 +373,6 @@ export const claudeCodeAdapter: Adapter = {
     const md = await uninstallMarkdownBlock(ctx, MD_FILE, true);
 
     // Strip mcpServers.openlore from .mcp.json; delete the file if it was ours.
-    const mcpPath = join(ctx.root, MCP_PATH);
     try {
       const rawMcp = await readFile(mcpPath, 'utf8');
       const parsedMcp = JSON.parse(rawMcp) as Record<string, unknown>;
@@ -383,7 +386,7 @@ export const claudeCodeAdapter: Adapter = {
             summary: `remove ${MCP_PATH} (was OpenLore-only)`,
           });
         } else {
-          if (!ctx.dryRun) await writeFile(mcpPath, serializeManaged(rawMcp, next, managedRemovalEdits(parsedMcp)), 'utf8');
+          if (!ctx.dryRun) await confinedAtomicWriteFile(ctx.root, mcpPath, serializeManaged(rawMcp, next, managedRemovalEdits(parsedMcp)), { preserveMode: true });
           md.changes.push({
             path: mcpPath,
             kind: 'update',
@@ -395,7 +398,6 @@ export const claudeCodeAdapter: Adapter = {
       /* no .mcp.json — nothing to do */
     }
 
-    const settingsPath = join(ctx.root, SETTINGS_PATH);
     const rawSettings = await readRawOrNull(settingsPath);
     if (rawSettings == null) return md;
     let parsed: Record<string, unknown>;
@@ -448,7 +450,7 @@ export const claudeCodeAdapter: Adapter = {
         summary: `remove ${SETTINGS_PATH} (was OpenLore-only)`,
       });
     } else {
-      if (!ctx.dryRun) await writeFile(settingsPath, serializeManaged(rawSettings, next, removalEdits), 'utf8');
+      if (!ctx.dryRun) await confinedAtomicWriteFile(ctx.root, settingsPath, serializeManaged(rawSettings, next, removalEdits), { preserveMode: true });
       md.changes.push({
         path: settingsPath,
         kind: 'update',
@@ -457,7 +459,6 @@ export const claudeCodeAdapter: Adapter = {
     }
 
     // Strip our permission from .claude/settings.local.json (mirror of apply step 3).
-    const localPath = join(ctx.root, SETTINGS_LOCAL_PATH);
     const rawLocal = await readRawOrNull(localPath);
     if (rawLocal != null) {
       let parsedLocal: Record<string, unknown>;
@@ -489,7 +490,7 @@ export const claudeCodeAdapter: Adapter = {
             summary: `remove ${SETTINGS_LOCAL_PATH} (was OpenLore-only)`,
           });
         } else {
-          if (!ctx.dryRun) await writeFile(localPath, serializeManaged(rawLocal, parsedLocal, localEdits), 'utf8');
+          if (!ctx.dryRun) await confinedAtomicWriteFile(ctx.root, localPath, serializeManaged(rawLocal, parsedLocal, localEdits), { preserveMode: true });
           md.changes.push({
             path: localPath,
             kind: 'update',

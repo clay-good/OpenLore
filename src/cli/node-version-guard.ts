@@ -1,7 +1,7 @@
 /**
  * Fail-fast Node-version guard for the OpenLore CLI.
  *
- * Why this exists: OpenLore requires Node >=22.13, but OpenSpec requires only
+ * Why this exists: OpenLore requires Node >=22.19, but OpenSpec requires only
  * >=20.19. When OpenLore runs as an OpenSpec plugin, a user on Node 20/21 can run
  * `openspec lore generate`, which spawns `openlore` under a Node OpenLore does not
  * support. `engines` in package.json is advisory at install time and does NOT
@@ -14,18 +14,19 @@
  * commander and the heavy command modules. Keep it dependency-free.
  */
 
-/** Minimum supported Node. This is the first line where `node:sqlite` — imported
- * at module load by EdgeStore, the epistemic lease, and preflight scoring — is
- * available WITHOUT `--experimental-sqlite` (unflagged in Node 22.13.0 / 23.4.0,
- * nodejs/node#55854). MUST stay in sync with the FLOOR in package.json
- * `engines.node` (`^22.13.0 || >=23.5.0`) and constants.ts's `MIN_NODE_*` (a test
+/** Minimum supported Node. Runtime dependencies require Node 22.19 or newer;
+ * `node:sqlite` — imported at module load by EdgeStore, the epistemic lease, and
+ * preflight scoring — is also available without `--experimental-sqlite` at this
+ * floor (unflagged in Node 22.13.0 / 23.4.0, nodejs/node#55854). MUST stay in sync
+ * with the FLOOR in package.json `engines.node` (`^22.19.0 || >=23.5.0`) and
+ * constants.ts's `MIN_NODE_*` (a test
  * asserts all three).
  *
  * This is a major.minor floor, so it admits 23.0-23.4 even though `node:sqlite` was
  * still flagged there. That gap is deliberate and covered: the capability probe
  * below has the final word, so such a runtime fails naming the missing builtin
  * rather than passing the arithmetic and crashing later. */
-export const MIN_NODE = { major: 22, minor: 13 } as const;
+export const MIN_NODE = { major: 22, minor: 19 } as const;
 
 /** Stable, dedicated exit code for "unsupported Node" (documented contract). */
 export const EXIT_UNSUPPORTED_NODE = 78;

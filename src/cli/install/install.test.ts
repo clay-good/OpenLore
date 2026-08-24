@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtemp, rm, writeFile, readFile, mkdir, stat } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, readFile, mkdir, stat, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { formatProveGuidance, runInstall } from './index.js';
@@ -59,6 +59,33 @@ describe('openlore install (end-to-end)', () => {
     const md = await readFile(join(dir, 'AGENTS.md'), 'utf8');
     expect(md).toContain('BEGIN OPENLORE');
     expect(md).toContain('orient()');
+  });
+
+  it('rejects an outbound AGENTS.md symlink even with --force', async () => {
+    const outside = await mkdtemp(join(tmpdir(), 'openlore-install-outside-'));
+    const target = join(outside, 'AGENTS.md');
+    await writeFile(target, 'operator-owned\n', 'utf8');
+    await symlink(target, join(dir, 'AGENTS.md'));
+    try {
+      await expect(runInstall({ cwd: dir, agent: 'agents-md', force: true, analyze: false }))
+        .rejects.toThrow(/canonicalizes outside/);
+      expect(await readFile(target, 'utf8')).toBe('operator-owned\n');
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('preflights Cursor destinations before writing through an outbound parent symlink', async () => {
+    const outside = await mkdtemp(join(tmpdir(), 'openlore-cursor-outside-'));
+    await symlink(outside, join(dir, '.cursor'), 'dir');
+    try {
+      await expect(runInstall({ cwd: dir, agent: 'cursor', force: true, analyze: false }))
+        .rejects.toThrow(/canonicalizes outside/);
+      expect(await exists(join(dir, '.cursorrules'))).toBe(false);
+      expect(await exists(join(outside, 'mcp.json'))).toBe(false);
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
   });
 
   it('claude-code install writes mcpServers to .mcp.json and SessionStart to settings.json', async () => {

@@ -4,7 +4,7 @@
  * and registers the OpenLore MCP server in `.cursor/mcp.json`.
  */
 
-import { mkdir, readFile, writeFile, unlink } from 'node:fs/promises';
+import { mkdir, readFile, unlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { applyMarkdownBlock, uninstallMarkdownBlock, hasManagedBlock } from './markdown-block.js';
@@ -14,6 +14,7 @@ import { previewCreate, previewDiff } from '../diff.js';
 import type { Adapter, ApplyContext, ApplyResult, PlannedChange } from './types.js';
 import { LEAN_DEFAULT_PRESET } from '../../../constants.js';
 import { resolvePlatformCommand } from '../../../utils/platform-command.js';
+import { confinedAtomicWriteFile, safeJoin } from '../../../utils/path-confinement.js';
 
 const RULES_FILE = '.cursorrules';
 const MDC_FILE = '.cursor/rules/openlore.mdc';
@@ -68,13 +69,14 @@ export const cursorAdapter: Adapter = {
   name: 'cursor',
   isConnected: (root) => hasManagedBlock(root, RULES_FILE),
   async apply(ctx: ApplyContext): Promise<ApplyResult> {
+    const mdcPath = safeJoin(ctx.root, MDC_FILE);
+    const mcpPath = safeJoin(ctx.root, MCP_FILE);
     const rulesResult = await applyMarkdownBlock(ctx, {
       fileName: RULES_FILE,
       createIfMissing: true,
       blockBody: ctx.instructionTemplate,
     });
 
-    const mdcPath = join(ctx.root, MDC_FILE);
     const desired = await renderMdc(ctx.instructionTemplate);
     let existing: string | null;
     try {
@@ -123,13 +125,12 @@ export const cursorAdapter: Adapter = {
       };
       if (!ctx.dryRun) {
         await mkdir(dirname(mdcPath), { recursive: true });
-        await writeFile(mdcPath, desired, 'utf8');
+        await confinedAtomicWriteFile(ctx.root, mdcPath, desired, { preserveMode: true });
       }
       rulesResult.changes.push(change);
     }
 
     // MCP server registration via .cursor/mcp.json (standard Cursor path).
-    const mcpPath = join(ctx.root, MCP_FILE);
     let mcpExisting: Record<string, unknown> = {};
     let mcpHad = true;
     try {
@@ -175,14 +176,15 @@ export const cursorAdapter: Adapter = {
     });
     if (!ctx.dryRun && (mcpAction !== 'noop' || !mcpHad)) {
       await mkdir(dirname(mcpPath), { recursive: true });
-      await writeFile(mcpPath, JSON.stringify(nextMcp, null, 2) + '\n', 'utf8');
+      await confinedAtomicWriteFile(ctx.root, mcpPath, JSON.stringify(nextMcp, null, 2) + '\n', { preserveMode: true });
     }
     return rulesResult;
   },
 
   async uninstall(ctx: ApplyContext): Promise<ApplyResult> {
+    const mdcPath = safeJoin(ctx.root, MDC_FILE);
+    const mcpPath = safeJoin(ctx.root, MCP_FILE);
     const rules = await uninstallMarkdownBlock(ctx, RULES_FILE, true);
-    const mdcPath = join(ctx.root, MDC_FILE);
     try {
       const raw = await readFile(mdcPath, 'utf8');
       if (/^openlore-fingerprint:/m.test(raw)) {
@@ -198,7 +200,6 @@ export const cursorAdapter: Adapter = {
     }
 
     // Strip our MCP entry from .cursor/mcp.json.
-    const mcpPath = join(ctx.root, MCP_FILE);
     try {
       const parsed = JSON.parse(await readFile(mcpPath, 'utf8')) as Record<string, unknown>;
       const { next, removed } = removeManaged(parsed);
@@ -212,7 +213,7 @@ export const cursorAdapter: Adapter = {
             summary: `remove ${MCP_FILE} (was OpenLore-only)`,
           });
         } else {
-          if (!ctx.dryRun) await writeFile(mcpPath, JSON.stringify(next, null, 2) + '\n', 'utf8');
+          if (!ctx.dryRun) await confinedAtomicWriteFile(ctx.root, mcpPath, JSON.stringify(next, null, 2) + '\n', { preserveMode: true });
           rules.changes.push({
             path: mcpPath,
             kind: 'update',

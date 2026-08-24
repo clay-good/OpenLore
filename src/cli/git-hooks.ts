@@ -9,13 +9,43 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { isAbsolute, basename, dirname, join, resolve, sep } from 'node:path';
-import { access, lstat, mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
+import { access, lstat, mkdir, open, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileExists } from '../utils/command-helpers.js';
 import { sanitizeForTerminal } from '../utils/misc.js';
+import { isConfinedPath } from '../utils/path-confinement.js';
 
 const execFileAsync = promisify(execFile);
+
+export interface TrustedHookLauncher { node: string; cli: string }
+
+/** Resolve the exact external Node + OpenLore entry used by an installed hook. */
+export async function resolveTrustedHookLauncher(rootPath: string): Promise<TrustedHookLauncher | null> {
+  try {
+    const moduleDir = dirname(fileURLToPath(import.meta.url));
+    let cli: string;
+    try { cli = await realpath(join(moduleDir, 'index.js')); }
+    catch { cli = await realpath(resolve(moduleDir, '../../dist/cli/index.js')); }
+    const node = await realpath(process.execPath);
+    if (isConfinedPath(rootPath, node) || isConfinedPath(rootPath, cli)) return null;
+    return { node, cli };
+  } catch {
+    return null;
+  }
+}
+
+export function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
+export function renderTrustedHookCommand(
+  launcher: TrustedHookLauncher,
+  args: string[],
+): string {
+  return [launcher.node, launcher.cli, ...args].map(shellQuote).join(' ');
+}
 
 export interface GitHookTarget {
   effectiveHooksDir: string;

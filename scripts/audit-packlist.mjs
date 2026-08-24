@@ -18,6 +18,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 
 /** Anything matching these must never ship. */
 const FORBIDDEN = [
@@ -57,6 +58,16 @@ const REQUIRED = [
   'skills/openlore-repair/SKILL.md',
   'examples/opencode-skills/openlore-generate/SKILL.md',
   'examples/mistral-vibe/skills/openlore-generate/SKILL.md',
+];
+
+/** High-confidence credential shapes checked inside every textual packed file. */
+const CONTENT_SECRETS = [
+  { pattern: /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/, why: 'private-key block' },
+  { pattern: /\bAKIA[0-9A-Z]{16}\b/, why: 'AWS access-key id' },
+  { pattern: /\bgh[pousr]_[A-Za-z0-9_]{30,}\b/, why: 'GitHub token' },
+  { pattern: /\bnpm_[A-Za-z0-9]{36,}\b/, why: 'npm access token' },
+  { pattern: /\bsk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{32,}\b/, why: 'provider API key' },
+  { pattern: /\bxox[baprs]-[A-Za-z0-9-]{20,}\b/, why: 'Slack token' },
 ];
 
 /**
@@ -105,6 +116,19 @@ const violations = [];
 for (const file of files) {
   for (const { pattern, why } of FORBIDDEN) {
     if (pattern.test(file)) violations.push({ file, why });
+  }
+  let bytes;
+  try {
+    bytes = readFileSync(file);
+  } catch (error) {
+    fatal(`Could not read packed file "${file}" for content scanning.`, error.message);
+  }
+  // Credential formats are textual; avoid decoding native binaries and WASM.
+  if (!bytes.includes(0)) {
+    const content = bytes.toString('utf-8');
+    for (const { pattern, why } of CONTENT_SECRETS) {
+      if (pattern.test(content)) violations.push({ file, why });
+    }
   }
 }
 

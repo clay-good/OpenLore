@@ -15,6 +15,7 @@ import { createServer, request as httpRequest } from 'node:http';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { startServe, readDescriptor, idleTimeoutMs, drainServeRebuilds, type ServeHandle } from './serve.js';
+import { SERVE_PROTOCOL_VERSION } from './serve-descriptor.js';
 import { TOOL_PRESETS } from './mcp.js';
 import { EdgeStore } from '../../core/services/edge-store.js';
 import * as analyzeApi from '../../api/analyze.js';
@@ -82,7 +83,13 @@ describe('host-scoped cold-read repair', () => {
 async function boot(opts: { token?: string; preset?: string } = {}): Promise<ServeHandle> {
   root = await mkdtemp(join(tmpdir(), 'openlore-serve-'));
   // watch:false — these are transport tests; the watcher has its own coverage.
-  const h = await startServe({ directory: root, port: '0', watch: false, ...opts });
+  const h = await startServe({
+    directory: root,
+    port: '0',
+    watch: false,
+    allowUnauthenticatedForTesting: opts.token === undefined,
+    ...opts,
+  });
   if (!h) throw new Error('startServe returned no handle');
   handle = h;
   return h;
@@ -249,6 +256,7 @@ describe('idle self-shutdown', () => {
         directory: dir,
         port: '0',
         watch: false,
+        allowUnauthenticatedForTesting: true,
         preset: 'navigation',
         idleTimeout: '0.01',
       });
@@ -274,7 +282,7 @@ describe('idle self-shutdown', () => {
     const exit = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
     const dir = await mkdtemp(join(tmpdir(), 'openlore-idle-'));
     try {
-      const h = await startServe({ directory: dir, port: '0', watch: false, idleTimeout: '0' });
+      const h = await startServe({ directory: dir, port: '0', watch: false, idleTimeout: '0', allowUnauthenticatedForTesting: true });
       await sleep(700);
       expect(exit).not.toHaveBeenCalled();
       expect(await readDescriptor(dir)).not.toBeNull(); // still serving
@@ -308,6 +316,18 @@ describe('openlore serve', () => {
     // A governance read that IS in substrate but NOT in navigation — proves the
     // default is the both-faces surface, not the navigate-only escape.
     expect(body.tools).toContain('recall');
+  });
+
+  it('protects a default daemon with a generated descriptor token', async () => {
+    root = await mkdtemp(join(tmpdir(), 'openlore-serve-protected-default-'));
+    const h = await startServe({ directory: root, port: '0', watch: false });
+    expect(h?.token).toMatch(/^[0-9a-f]{48}$/);
+    handle = h;
+    expect(await jsonOf(await fetch(`${h!.baseUrl}/health`))).toEqual({ ok: true, tokenProtected: true });
+    const authenticated = await jsonOf(await fetch(`${h!.baseUrl}/health`, {
+      headers: { 'x-openlore-token': h!.token! },
+    }));
+    expect(authenticated).toMatchObject({ root: await realpath(root), tokenAuthenticated: true });
   });
 
   it('writes serve.json on start and removes it on close', async () => {
@@ -513,8 +533,7 @@ describe('openlore serve', () => {
     // /health stays public for liveness but reports whether the candidate token
     // actually authenticated, so descriptor consumers can fail closed.
     const publicHealth = await jsonOf(await fetch(`${h.baseUrl}/health`));
-    expect(publicHealth.tokenProtected).toBe(true);
-    expect(publicHealth.tokenAuthenticated).toBe(false);
+    expect(publicHealth).toEqual({ ok: true, tokenProtected: true });
     const authenticatedHealth = await jsonOf(await fetch(`${h.baseUrl}/health`, {
       headers: { 'x-openlore-token': 'sekret' },
     }));
@@ -544,7 +563,7 @@ describe('openlore serve', () => {
     // (pid 1). The health probe must fail → file removed, no shutdown request.
     await writeFile(
       descPath,
-      JSON.stringify({ port: 1, pid: 1, host: '127.0.0.1', version: 'x', startedAt: '' }),
+      JSON.stringify({ port: 1, pid: 1, host: '127.0.0.1', protocolVersion: SERVE_PROTOCOL_VERSION, version: 'x', startedAt: '' }),
       'utf-8',
     );
     const h = await startServe({ directory: root, stop: true });
@@ -608,7 +627,7 @@ describe('openlore serve', () => {
     }
 
     // A well-formed loopback descriptor is accepted.
-    await write({ port: 8080, pid: 1, host: '127.0.0.1', version: 'x', startedAt: '', token: 't' });
+    await write({ port: 8080, pid: 1, host: '127.0.0.1', protocolVersion: SERVE_PROTOCOL_VERSION, version: 'x', startedAt: '', token: 't' });
     const ok = await readDescriptor(root);
     expect(ok).not.toBeNull();
     expect(ok!.host).toBe('127.0.0.1');
@@ -619,7 +638,7 @@ describe('openlore serve', () => {
     const h1 = await boot();
     // Second start for the same root must detect the live daemon and return its
     // endpoint (same port), not bind a new server.
-    const h2 = await startServe({ directory: root, port: '0', watch: false });
+    const h2 = await startServe({ directory: root, port: '0', watch: false, allowUnauthenticatedForTesting: true });
     expect(h2).toBeDefined();
     expect(h2!.port).toBe(h1.port);
     // close() on the reused handle is a no-op — must not tear down h1.
@@ -672,7 +691,7 @@ describe('openlore serve', () => {
     const descriptor = await readDescriptor(root);
     await writeFile(path, JSON.stringify({ ...descriptor!, state: 'draining' }));
 
-    const reused = await startServe({ directory: root, port: '0', watch: false });
+    const reused = await startServe({ directory: root, port: '0', watch: false, allowUnauthenticatedForTesting: true });
     expect(reused?.port).toBe(first.port);
     expect((await readDescriptor(root))?.state).toBe('ready');
     await reused!.close();
@@ -774,7 +793,10 @@ describe('openlore serve', () => {
         expect(output.join('')).toContain('reusing');
       }, { timeout: 15_000, interval: 50 });
 
-      await fetch(`http://${descriptor!.host}:${descriptor!.port}/shutdown`, { method: 'POST' });
+      await fetch(`http://${descriptor!.host}:${descriptor!.port}/shutdown`, {
+        method: 'POST',
+        headers: { 'x-openlore-token': descriptor!.token! },
+      });
       await vi.waitFor(() => expect(winner.exitCode).not.toBeNull(), { timeout: 15_000, interval: 50 });
     } finally {
       await Promise.all(children.map(terminateChild));
@@ -841,7 +863,7 @@ describe('openlore serve', () => {
 
   it('treats all and full as the same security surface when reusing a daemon', async () => {
     const h1 = await boot({ preset: 'full' });
-    const h2 = await startServe({ directory: root, port: '0', watch: false, preset: 'all' });
+    const h2 = await startServe({ directory: root, port: '0', watch: false, preset: 'all', allowUnauthenticatedForTesting: true });
     expect(h2).toBeDefined();
     expect(h2!.port).toBe(h1.port);
   });
@@ -910,6 +932,7 @@ describe('openlore serve', () => {
       pid: process.pid,
       host: '127.0.0.1',
       token: 'descriptor-token',
+      protocolVersion: SERVE_PROTOCOL_VERSION,
       startedAt: '',
       version: 'test',
     }));
@@ -968,6 +991,7 @@ describe('openlore serve', () => {
       port: address.port,
       pid: process.pid,
       host: '127.0.0.1',
+      protocolVersion: SERVE_PROTOCOL_VERSION,
       startedAt: '',
       version: '2.1.6',
     }));
@@ -978,6 +1002,7 @@ describe('openlore serve', () => {
         port: '0',
         watch: false,
         preset: 'navigation',
+        allowUnauthenticatedForTesting: true,
       });
       expect(reused).toBeUndefined();
       expect(process.exitCode).toBe(1);
@@ -1107,7 +1132,13 @@ describe('openlore serve', () => {
   it('refuses a non-loopback bind without a token', async () => {
     root = await mkdtemp(join(tmpdir(), 'openlore-serve-'));
     const prev = process.exitCode;
-    const h = await startServe({ directory: root, port: '0', watch: false, host: '0.0.0.0' });
+    const h = await startServe({
+      directory: root,
+      port: '0',
+      watch: false,
+      host: '0.0.0.0',
+      allowUnauthenticatedForTesting: true,
+    });
     expect(h).toBeUndefined();
     expect(process.exitCode).toBe(1);
     expect(await fileExists(join(root, OPENLORE_DIR))).toBe(false);
@@ -1192,7 +1223,7 @@ describe('openlore serve', () => {
     expect(health1.ok).toBe(true);
 
     // Second startServe → reuse path, no second server bound.
-    const h2 = await startServe({ directory: root, port: '0', watch: false });
+    const h2 = await startServe({ directory: root, port: '0', watch: false, allowUnauthenticatedForTesting: true });
     expect(h2!.port).toBe(h1.port); // same port = same server
 
     // Original server still alive after h2.close()

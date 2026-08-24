@@ -8,6 +8,9 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
   isLoopbackHost,
@@ -20,7 +23,26 @@ import {
   createBrowserSessionGuard,
   readCookie,
   parseAuthority,
+  writeInstanceDescriptor,
 } from './local-http-guard.js';
+
+describe('writeInstanceDescriptor', () => {
+  it('rejects an outbound descriptor symlink without modifying its target', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'openlore-descriptor-root-'));
+    const outside = await mkdtemp(join(tmpdir(), 'openlore-descriptor-outside-'));
+    try {
+      await mkdir(join(root, '.openlore'));
+      const target = join(outside, 'target.json');
+      await writeFile(target, 'preserve');
+      await symlink(target, join(root, '.openlore', 'serve.json'));
+      await expect(writeInstanceDescriptor(root, join(root, '.openlore', 'serve.json'), { token: 'secret' })).rejects.toThrow(/blocked|symbolic/i);
+      expect(await readFile(target, 'utf-8')).toBe('preserve');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+});
 
 /** Minimal IncomingMessage stand-in — only headers/url are read by the guard. */
 function fakeReq(headers: Record<string, string | undefined>, url = '/'): IncomingMessage {

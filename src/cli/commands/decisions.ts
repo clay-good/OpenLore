@@ -11,10 +11,12 @@
 import { Command } from 'commander';
 import { sanitizeForTerminal as safe } from '../../utils/misc.js';
 import { readFile, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 const execFileAsync = promisify(execFile);
 import { join } from 'node:path';
+import { confinedAtomicWriteFile, safeJoin } from '../../utils/path-confinement.js';
 
 import { logger } from '../../utils/logger.js';
 import { resolveTrustedApiBase, resolveTrustedSslVerify } from '../../core/services/repo-config-trust.js';
@@ -46,7 +48,7 @@ import {
   withVerificationOutcome,
   type DraftDisposition,
 } from '../../core/decisions/disposition.js';
-import { classifyGateState } from '../../core/decisions/gate-state.js';
+import { classifyGateState, matchesConsolidationReceipt } from '../../core/decisions/gate-state.js';
 import { acquireDecisionsLock } from '../../core/runtime/advisory-lock.js';
 import { extractFromDiff } from '../../core/decisions/extractor.js';
 import { markVerificationEvidenceAbsent, verifyDecisions } from '../../core/decisions/verifier.js';
@@ -70,6 +72,8 @@ import {
   isResolvedGitRepository,
   resolveGitHookTarget,
   resolveGitPath,
+  resolveTrustedHookLauncher,
+  renderTrustedHookCommand,
   updateHookFile,
 } from '../git-hooks.js';
 
@@ -132,23 +136,23 @@ If no: retry with \`git commit --no-verify\` to skip the gate.
 `;
 
 /** Inject decisions instructions into an existing agent file, idempotently. */
-async function injectAgentInstructions(filePath: string): Promise<'injected' | 'already' | 'missing'> {
+async function injectAgentInstructions(rootPath: string, filePath: string): Promise<'injected' | 'already' | 'missing'> {
   if (!(await fileExists(filePath))) return 'missing';
   const content = await readFile(filePath, 'utf-8');
   if (content.includes(AGENT_INSTRUCTIONS_MARKER)) return 'already';
-  await writeFile(filePath, content.trimEnd() + '\n\n' + AGENT_INSTRUCTIONS_BLOCK, 'utf-8');
+  await confinedAtomicWriteFile(rootPath, filePath, content.trimEnd() + '\n\n' + AGENT_INSTRUCTIONS_BLOCK, { preserveMode: true });
   return 'injected';
 }
 
 /** Remove decisions instructions block from an agent file. */
-async function removeAgentInstructions(filePath: string): Promise<void> {
+async function removeAgentInstructions(rootPath: string, filePath: string): Promise<void> {
   if (!(await fileExists(filePath))) return;
   const content = await readFile(filePath, 'utf-8');
   if (!content.includes(AGENT_INSTRUCTIONS_MARKER)) return;
   const cleaned = content
     .replace(/\n*<!-- openlore-decisions-instructions -->[\s\S]*?<!-- end-openlore-decisions-instructions -->\n*/g, '')
     .trim();
-  await writeFile(filePath, cleaned + '\n', 'utf-8');
+  await confinedAtomicWriteFile(rootPath, filePath, cleaned + '\n', { preserveMode: true });
 }
 
 // ============================================================================
@@ -156,27 +160,66 @@ async function removeAgentInstructions(filePath: string): Promise<void> {
 // ============================================================================
 
 const HOOK_MARKER = '# openlore-decisions-hook';
+const SOURCE_EXTS = /\.(ts|js|tsx|jsx|py|go|rs|rb|java|cpp|cc|swift)$/;
 
-const HOOK_CONTENT = `${HOOK_MARKER}
+async function sourceSnapshotFingerprint(
+  rootPath: string,
+  staged: boolean,
+): Promise<{ fingerprint: string; hasSourceChanges: boolean } | null> {
+  try {
+    const diffArgs = staged
+      ? gitPathArgs('diff', '--cached', '--name-only', '--diff-filter=ACDMR', '-z')
+      : gitPathArgs('diff', '--name-only', '--diff-filter=ACDMR', '-z', 'HEAD');
+    const { stdout } = await execFileAsync('git', diffArgs, { cwd: rootPath });
+    const paths = stdout.split('\0').filter((path) => SOURCE_EXTS.test(path));
+    if (!staged) {
+      const { stdout: untracked } = await execFileAsync(
+        'git', gitPathArgs('ls-files', '--others', '--exclude-standard', '-z'),
+        { cwd: rootPath },
+      );
+      paths.push(...untracked.split('\0').filter((path) => SOURCE_EXTS.test(path)));
+    }
+
+    const entries: Array<[string, string]> = [];
+    for (const path of [...new Set(paths)].sort()) {
+      let objectId = 'deleted';
+      try {
+        if (staged) {
+          const { stdout: stagedEntry } = await execFileAsync(
+            'git', gitPathArgs('ls-files', '--stage', '--', path),
+            { cwd: rootPath },
+          );
+          objectId = stagedEntry.trim().split(/\s+/)[1] ?? 'deleted';
+        } else {
+          const { stdout: worktreeHash } = await execFileAsync(
+            'git', gitPathArgs('hash-object', '--', path),
+            { cwd: rootPath },
+          );
+          objectId = worktreeHash.trim();
+        }
+      } catch {
+        // A changed path absent from the selected snapshot is a deletion.
+      }
+      entries.push([path, objectId]);
+    }
+    return {
+      fingerprint: createHash('sha256').update(JSON.stringify(entries)).digest('hex'),
+      hasSourceChanges: entries.length > 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function renderHookContent(invocation: string): string {
+  return `${HOOK_MARKER}
 # Gate commits until architectural decisions are reviewed.
 # Installed by: openlore setup --tools claude
 
-# Prefer local build over global install.
-if [ -f "./node_modules/.bin/openlore" ]; then
-  ./node_modules/.bin/openlore decisions --gate 2>&1
-  DECISIONS_EXIT=$?
-elif [ -f "./dist/cli/index.js" ]; then
-  node ./dist/cli/index.js decisions --gate 2>&1
-  DECISIONS_EXIT=$?
-else
-  OPENLORE=$(command -v openlore 2>/dev/null)
-  if [ -n "$OPENLORE" ] && "$OPENLORE" decisions --help 2>&1 | grep -q -- '--gate'; then
-    "$OPENLORE" decisions --gate 2>&1
-    DECISIONS_EXIT=$?
-  else
-    DECISIONS_EXIT=0
-  fi
-fi
+# Pin the trusted installation that created this hook. Never execute mutable
+# node_modules/dist content from the repository being committed.
+${invocation} 2>&1
+DECISIONS_EXIT=$?
 if [ "$DECISIONS_EXIT" -ne 0 ]; then
   exit "$DECISIONS_EXIT"
 fi
@@ -184,6 +227,7 @@ fi
 touch "$(git rev-parse --git-dir 2>/dev/null || echo .git)/OPENLORE_GATE_RAN" 2>/dev/null || true
 # end-openlore-decisions-hook
 `;
+}
 
 const POST_COMMIT_HOOK_MARKER = '# openlore-decisions-post-hook';
 const POST_COMMIT_HOOK_CONTENT = `${POST_COMMIT_HOOK_MARKER}
@@ -203,7 +247,7 @@ fi
 `;
 
 async function ensureGitignored(rootPath: string, entry: string): Promise<void> {
-  const gitignorePath = join(rootPath, '.gitignore');
+  const gitignorePath = safeJoin(rootPath, '.gitignore');
   let content = '';
   if (await fileExists(gitignorePath)) {
     content = await readFile(gitignorePath, 'utf-8');
@@ -219,23 +263,23 @@ async function ensureGitignored(rootPath: string, entry: string): Promise<void> 
       if (have.length <= want.length && have.every((s, i) => s === want[i])) return;
     }
   }
-  await writeFile(gitignorePath, content.trimEnd() + '\n' + entry + '\n', 'utf-8');
+  await confinedAtomicWriteFile(rootPath, gitignorePath, content.trimEnd() + '\n' + entry + '\n', { preserveMode: true });
   logger.discovery(`  → added ${entry} to .gitignore`);
 }
 
 async function ensureDecisionSupportFiles(rootPath: string): Promise<void> {
   await ensureGitignored(rootPath, '.openlore/decisions/');
   const agentFiles = [
-    { path: join(rootPath, 'CLAUDE.md'), label: 'CLAUDE.md' },
-    { path: join(rootPath, 'AGENTS.md'), label: 'AGENTS.md' },
-    { path: join(rootPath, '.cursorrules'), label: '.cursorrules' },
-    { path: join(rootPath, '.clinerules', 'openlore.md'), label: '.clinerules/openlore.md' },
-    { path: join(rootPath, '.github', 'copilot-instructions.md'), label: '.github/copilot-instructions.md' },
-    { path: join(rootPath, '.windsurf', 'rules.md'), label: '.windsurf/rules.md' },
-    { path: join(rootPath, '.vibe', 'skills', 'openlore.md'), label: '.vibe/skills/openlore.md' },
+    { path: safeJoin(rootPath, 'CLAUDE.md'), label: 'CLAUDE.md' },
+    { path: safeJoin(rootPath, 'AGENTS.md'), label: 'AGENTS.md' },
+    { path: safeJoin(rootPath, '.cursorrules'), label: '.cursorrules' },
+    { path: safeJoin(rootPath, '.clinerules/openlore.md'), label: '.clinerules/openlore.md' },
+    { path: safeJoin(rootPath, '.github/copilot-instructions.md'), label: '.github/copilot-instructions.md' },
+    { path: safeJoin(rootPath, '.windsurf/rules.md'), label: '.windsurf/rules.md' },
+    { path: safeJoin(rootPath, '.vibe/skills/openlore.md'), label: '.vibe/skills/openlore.md' },
   ];
   for (const { path: filePath, label } of agentFiles) {
-    const result = await injectAgentInstructions(filePath);
+    const result = await injectAgentInstructions(rootPath, filePath);
     if (result === 'injected') logger.discovery(`  → record_decision instructions added to ${label}`);
   }
 }
@@ -259,6 +303,13 @@ export async function installPreCommitHook(rootPath: string): Promise<void> {
     process.exitCode = 1;
     return;
   }
+  const launcher = await resolveTrustedHookLauncher(rootPath);
+  if (!launcher) {
+    logger.error('Refusing to install a security hook that executes mutable code from this repository. Install OpenLore globally and retry.');
+    process.exitCode = 1;
+    return;
+  }
+  const hookContent = renderHookContent(renderTrustedHookCommand(launcher, ['decisions', '--gate']));
   await ensureDecisionSupportFiles(rootPath);
   if (!target.canInstall) {
     logger.warning(hookManagerWarning(target, 'openlore decisions --gate'));
@@ -268,14 +319,15 @@ export async function installPreCommitHook(rootPath: string): Promise<void> {
   }
 
   let preAlreadyInstalled = false;
-  let removedLegacyBlock = false;
   let appendedPre = false;
   const preResult = await updateHookFile(hookPath, (existing) => {
     if (existing?.includes(HOOK_MARKER)) {
-      preAlreadyInstalled = true;
-      const cleaned = existing.replace(/\n*# spec-gen-decisions-hook[\s\S]*?# end-spec-gen-decisions-hook\n*/g, '');
-      removedLegacyBlock = cleaned !== existing;
-      return removedLegacyBlock ? cleaned : null;
+      const refreshed = existing.replace(
+        /# openlore-decisions-hook[\s\S]*?# end-openlore-decisions-hook/,
+        hookContent.trimEnd(),
+      );
+      preAlreadyInstalled = refreshed === existing;
+      return preAlreadyInstalled ? null : refreshed;
     }
     appendedPre = existing !== null;
     const stripped = existing
@@ -283,14 +335,13 @@ export async function installPreCommitHook(rootPath: string): Promise<void> {
       .trimEnd()
       .replace(/\n*\nexit 0\s*$/, '');
     return stripped
-      ? stripped + '\n\n' + HOOK_CONTENT
-      : '#!/bin/sh\n\n' + HOOK_CONTENT;
+      ? stripped + '\n\n' + hookContent
+      : '#!/bin/sh\n\n' + hookContent;
   });
   if (preResult.status === 'unavailable') {
     logger.warning(`Cannot install the decisions hook at ${displayHookPath(hookPath)}: ${preResult.reason}`);
     return;
   }
-  if (removedLegacyBlock) logger.discovery('Removed legacy spec-gen-decisions-hook block.');
   if (preAlreadyInstalled) logger.success('Pre-commit hook already installed.');
   else {
     if (appendedPre) logger.discovery('Existing pre-commit hook found. Appending decisions gate.');
@@ -383,7 +434,7 @@ export async function uninstallPreCommitHook(rootPath: string): Promise<void> {
     join(rootPath, '.windsurf', 'rules.md'),
     join(rootPath, '.vibe', 'skills', 'openlore.md'),
   ];
-  for (const filePath of agentFiles) await removeAgentInstructions(filePath);
+  for (const filePath of agentFiles) await removeAgentInstructions(rootPath, filePath);
 }
 
 // Marker for the legacy full-`analyze` PostToolUse hook. The MCP server's
@@ -957,6 +1008,7 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
         dispositions.filter((disposition) => !unassessedIds.has(disposition.id)),
         new Set(phantom.map((d) => d.id)),
       );
+      const consolidationSnapshot = await sourceSnapshotFingerprint(rootPath, false);
       const updatedStore = await updateDecisionStore(rootPath, (s) => {
         // Every input draft's verdict, written alongside the status transition.
         const next = applyConsolidationOutcome(s, {
@@ -969,7 +1021,11 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
           supersededIds,
           dispositions: finalDispositions,
         });
-        return { ...next, lastConsolidatedAt: new Date().toISOString() };
+        return {
+          ...next,
+          lastConsolidatedAt: new Date().toISOString(),
+          lastConsolidatedSourceFingerprint: consolidationSnapshot?.fingerprint,
+        };
       });
       const classifications = reconcileDecisionClassifications(updatedStore, {
         verified,
@@ -1141,24 +1197,29 @@ the gate auto-accepts verified decisions, syncs them to specs marked "Auto-accep
       // Phantom decisions ("recorded but no code evidence") are excluded — stale
       // phantoms from previous sessions would otherwise silently bypass the gate.
       const activeCount = store.decisions.filter((d) => !INACTIVE_STATUSES.has(d.status)).length;
-      const consolidatedRecently = !!store.lastConsolidatedAt
-        && (Date.now() - new Date(store.lastConsolidatedAt).getTime()) < CONSOLIDATION_GRACE_PERIOD_MS;
+      const stagedSnapshot = await sourceSnapshotFingerprint(rootPath, true);
+      const consolidatedRecently = matchesConsolidationReceipt(
+        store.lastConsolidatedAt,
+        store.lastConsolidatedSourceFingerprint,
+        stagedSnapshot?.fingerprint,
+        Date.now(),
+        CONSOLIDATION_GRACE_PERIOD_MS,
+      );
 
       // The staged-source check is the only input requiring git; resolve it lazily,
       // only in the state where it can change the outcome (nothing else gates).
       let isGitRepo = false;
-      let hasStagedSourceChanges = false;
+      let hasStagedSourceChanges = stagedSnapshot?.hasSourceChanges ?? false;
       if (approved.length === 0 && verified.length === 0 && drafts.length === 0
           && !consolidatedRecently && activeCount === 0) {
         isGitRepo = await isGitRepositoryRoot(rootPath);
-        if (isGitRepo) {
+        if (isGitRepo && stagedSnapshot === null) {
           try {
             const { stdout } = await execFileAsync(
               'git', gitPathArgs('diff', '--cached', '--name-only', '--diff-filter=ACDMR'),
               { cwd: rootPath },
             );
             const stagedFiles = stdout.trim().split('\n').filter(Boolean);
-            const SOURCE_EXTS = /\.(ts|js|tsx|jsx|py|go|rs|rb|java|cpp|cc|swift)$/;
             hasStagedSourceChanges = stagedFiles.some((f) => SOURCE_EXTS.test(f));
           } catch { /* git unavailable — skip */ }
         }

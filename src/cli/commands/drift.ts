@@ -42,6 +42,8 @@ import {
   hookManagerWarning,
   isResolvedGitRepository,
   resolveGitHookTarget,
+  resolveTrustedHookLauncher,
+  shellQuote,
   updateHookFile,
 } from '../git-hooks.js';
 
@@ -188,33 +190,19 @@ function usesShellInterpreter(shebang: string): boolean {
   return SHELL_INTERPRETERS.has(interpreter);
 }
 
-const HOOK_CONTENT = `
+const renderHookContent = (nodePath: string, cliPath: string) => `
 ${HOOK_MARKER}
 OPENLORE_DRIFT_PREVIOUS_EXIT=$?
 # Automatically check for spec drift before committing
 # Installed by: openlore drift --install-hook
 
-# Run openlore drift in static mode (fast, no LLM)
-# Prefer the repository-local binary so the hook checks with the same OpenLore
-# version as the repository. Fall back to the published package via npx only
-# when no local binary is installed; npx may download or use another version.
-if [ -x "./node_modules/.bin/openlore" ]; then
-  OPENLORE_DRIFT_COMMAND=./node_modules/.bin/openlore
-else
-  OPENLORE_DRIFT_COMMAND=npx
-fi
-
 # Bound both runtime and captured output. A broken/skewed launcher is an
 # infrastructure failure, never evidence of drift and never an unbounded commit hang.
-if OPENLORE_DRIFT_OUTPUT=$(node -e '
+if OPENLORE_DRIFT_OUTPUT=$(${shellQuote(nodePath)} -e '
 const { spawn, spawnSync } = require("node:child_process");
 const requestedCommand = process.argv[1];
-const command = process.platform === "win32"
-  ? (requestedCommand === "npx" ? "npx.cmd" : requestedCommand + ".cmd")
-  : requestedCommand;
-const args = requestedCommand === "npx"
-  ? ["--yes", "openlore", "drift", "--fail-on", "warning", "--json"]
-  : ["drift", "--fail-on", "warning", "--json"];
+const command = process.execPath;
+const args = [requestedCommand, "drift", "--fail-on", "warning", "--json"];
 const cap = 1024 * 1024;
 const stdoutChunks = [];
 const stderrChunks = [];
@@ -275,13 +263,13 @@ child.on("close", code => {
   if (launchError) console.error("openlore: drift launcher failed: " + launchError.message);
   process.exitCode = forcedReason || launchError ? 2 : (Number.isInteger(code) ? code : 2);
 });
-' "$OPENLORE_DRIFT_COMMAND"); then
+' ${shellQuote(cliPath)}); then
   OPENLORE_DRIFT_EXIT=0
 else
   OPENLORE_DRIFT_EXIT=$?
 fi
 
-if OPENLORE_DRIFT_VERDICT=$(printf '%s\n' "$OPENLORE_DRIFT_OUTPUT" | node -e '
+if OPENLORE_DRIFT_VERDICT=$(printf '%s\n' "$OPENLORE_DRIFT_OUTPUT" | ${shellQuote(nodePath)} -e '
 let input = "";
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", chunk => { input += chunk; });
@@ -310,7 +298,7 @@ if [ "$OPENLORE_DRIFT_EXIT" -eq 1 ] && [ "$OPENLORE_DRIFT_VERDICT" = "drift" ]; 
   echo ""
   # Node is guaranteed by OpenLore. Sanitize repository-controlled strings
   # before printing them to a terminal and keep the summary bounded.
-  printf '%s\n' "$OPENLORE_DRIFT_OUTPUT" | node -e '
+  printf '%s\n' "$OPENLORE_DRIFT_OUTPUT" | ${shellQuote(nodePath)} -e '
 let input = "";
 const safe = value => Array.from(String(value ?? ""))
   .map(ch => { const code = ch.charCodeAt(0); return code < 32 || (code >= 127 && code <= 159) ? " " : ch; })
@@ -376,6 +364,9 @@ export async function installPreCommitHook(rootPath: string): Promise<void> {
     logger.warning(hookManagerWarning(target, 'openlore drift --fail-on warning --quiet'));
     return;
   }
+  const launcher = await resolveTrustedHookLauncher(rootPath);
+  if (!launcher) { logger.error('Cannot pin an OpenLore installation outside this repository. Install OpenLore globally and retry.'); process.exitCode = 2; return; }
+  const hookContent = renderHookContent(launcher.node, launcher.cli);
 
   let updated = false;
   let appended = false;
@@ -396,7 +387,7 @@ export async function installPreCommitHook(rootPath: string): Promise<void> {
       }
       if (block) {
         updated = true;
-        return existing.slice(0, block.start) + HOOK_CONTENT.trimEnd() + existing.slice(block.end);
+        return existing.slice(0, block.start) + hookContent.trimEnd() + existing.slice(block.end);
       }
     }
     appended = existing !== null;
@@ -406,8 +397,8 @@ export async function installPreCommitHook(rootPath: string): Promise<void> {
       return null;
     }
     return existing
-      ? existing.trimEnd() + '\n\n' + HOOK_CONTENT
-      : '#!/bin/sh\n\n' + HOOK_CONTENT;
+      ? existing.trimEnd() + '\n\n' + hookContent
+      : '#!/bin/sh\n\n' + hookContent;
   });
   if (result.status === 'unavailable') {
     logger.warning(`Cannot install the drift hook at ${displayHookPath(hookPath)}: ${result.reason}`);

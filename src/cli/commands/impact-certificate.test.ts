@@ -51,7 +51,7 @@ describe('impact-certificate git hook install/uninstall', () => {
     const h = await readHook(root);
     expect(h.startsWith('#!/bin/sh')).toBe(true);
     expect(h).toContain(HOOK_MARKER);
-    expect(h).toContain('impact-certificate --hook');
+    expect(h).toContain("'impact-certificate' '--hook'");
     expect(h).toContain('if [ "$CERT_EXIT" -ne 0 ]; then'); // advisory: only a configured severity propagates
   });
 

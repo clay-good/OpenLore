@@ -9,12 +9,12 @@
  * gated behind a follow-up TODO.
  */
 
-import { mkdir, readFile, writeFile, unlink } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { readFile, unlink } from 'node:fs/promises';
 import { mergeEntries, readMeta, removeManaged, isHandEdited } from '../json-managed.js';
 import { previewCreate, previewDiff } from '../diff.js';
 import type { Adapter, ApplyContext, ApplyResult, PlannedChange } from './types.js';
 import { formatPlatformCommand, resolvePlatformCommand } from '../../../utils/platform-command.js';
+import { confinedAtomicWriteFile, safeJoin } from '../../../utils/path-confinement.js';
 
 const CONFIG_PATH = '.continue/config.json';
 
@@ -33,14 +33,14 @@ export const continueAdapter: Adapter = {
   name: 'continue',
   async isConnected(root: string): Promise<boolean> {
     try {
-      const parsed = JSON.parse(await readFile(join(root, CONFIG_PATH), 'utf8')) as Record<string, unknown>;
+      const parsed = JSON.parse(await readFile(safeJoin(root, CONFIG_PATH), 'utf8')) as Record<string, unknown>;
       return readMeta(parsed) !== null;
     } catch {
       return false;
     }
   },
   async apply(ctx: ApplyContext): Promise<ApplyResult> {
-    const configPath = join(ctx.root, CONFIG_PATH);
+    const configPath = safeJoin(ctx.root, CONFIG_PATH);
     let had = true;
     let existing: Record<string, unknown>;
     try {
@@ -99,15 +99,14 @@ export const continueAdapter: Adapter = {
     ];
 
     if (!ctx.dryRun && (action !== 'noop' || !had)) {
-      await mkdir(dirname(configPath), { recursive: true });
-      await writeFile(configPath, JSON.stringify(next, null, 2) + '\n', 'utf8');
+      await confinedAtomicWriteFile(ctx.root, configPath, JSON.stringify(next, null, 2) + '\n', { preserveMode: true });
     }
 
     return { changes: [change], warnings, conflict: false };
   },
 
   async uninstall(ctx: ApplyContext): Promise<ApplyResult> {
-    const configPath = join(ctx.root, CONFIG_PATH);
+    const configPath = safeJoin(ctx.root, CONFIG_PATH);
     let parsed: Record<string, unknown>;
     try {
       parsed = JSON.parse(await readFile(configPath, 'utf8'));
@@ -135,7 +134,7 @@ export const continueAdapter: Adapter = {
         conflict: false,
       };
     }
-    if (!ctx.dryRun) await writeFile(configPath, JSON.stringify(next, null, 2) + '\n', 'utf8');
+    if (!ctx.dryRun) await confinedAtomicWriteFile(ctx.root, configPath, JSON.stringify(next, null, 2) + '\n', { preserveMode: true });
     return {
       changes: [{ path: configPath, kind: 'update', summary: `strip OpenLore entries from ${CONFIG_PATH}` }],
       warnings: [],

@@ -22,11 +22,13 @@ import {
   validateServeHealth,
   readServeDescriptor,
   serveHttpBaseUrl,
+  SERVE_PROTOCOL_VERSION,
 } from './serve-descriptor.js';
 
-const HEALTHY = { port: 8080, pid: 4242, host: '127.0.0.1', token: 't', startedAt: 's', version: 'v' };
+const HEALTHY = { port: 8080, pid: 4242, host: '127.0.0.1', token: 't', protocolVersion: SERVE_PROTOCOL_VERSION, startedAt: 's', version: 'v' } as const;
 const HEALTH = {
   ok: true,
+  protocolVersion: SERVE_PROTOCOL_VERSION,
   presetDispatchEnforced: true,
   root: '/tmp/project',
   pid: 4242,
@@ -97,13 +99,19 @@ describe('validateServeDescriptor', () => {
   });
 
   it('normalizes missing/ill-typed startedAt and version to empty strings', () => {
-    const d = validateServeDescriptor({ port: 8080, pid: 1, host: '127.0.0.1' });
-    expect(d).toEqual({ port: 8080, pid: 1, host: '127.0.0.1', token: undefined, startedAt: '', version: '' });
+    const d = validateServeDescriptor({ port: 8080, pid: 1, host: '127.0.0.1', protocolVersion: SERVE_PROTOCOL_VERSION });
+    expect(d).toEqual({ port: 8080, pid: 1, host: '127.0.0.1', token: undefined, protocolVersion: SERVE_PROTOCOL_VERSION, startedAt: '', version: '' });
   });
 
   it('accepts an absent token but rejects a non-string one', () => {
-    expect(validateServeDescriptor({ port: 8080, pid: 1, host: '127.0.0.1' })).not.toBeNull();
-    expect(validateServeDescriptor({ port: 8080, pid: 1, host: '127.0.0.1', token: 5 })).toBeNull();
+    expect(validateServeDescriptor({ port: 8080, pid: 1, host: '127.0.0.1', protocolVersion: SERVE_PROTOCOL_VERSION })).not.toBeNull();
+    expect(validateServeDescriptor({ port: 8080, pid: 1, host: '127.0.0.1', protocolVersion: SERVE_PROTOCOL_VERSION, token: 5 })).toBeNull();
+  });
+
+  it('rejects legacy or incompatible daemon protocols', () => {
+    expect(validateServeDescriptor({ ...HEALTHY, protocolVersion: undefined })).toBeNull();
+    expect(validateServeDescriptor({ ...HEALTHY, protocolVersion: SERVE_PROTOCOL_VERSION + 1 })).toBeNull();
+    expect(validateServeHealth({ ...HEALTH, protocolVersion: SERVE_PROTOCOL_VERSION + 1 }, '/tmp/project', HEALTHY)).toBeNull();
   });
 
   it('accepts only the ready/draining lifecycle states', () => {

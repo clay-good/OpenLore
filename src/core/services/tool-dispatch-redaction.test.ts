@@ -13,6 +13,7 @@ async function fixtureRoot(): Promise<string> {
 }
 
 afterEach(async () => {
+  delete process.env.OPENLORE_UNREDACT_TOOL_OUTPUT;
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })));
 });
 
@@ -65,7 +66,7 @@ describe('source-carrying tool output redaction', () => {
     expect(result.redactions).toEqual({ count: 1, kinds: ['secret-field'] });
   });
 
-  it('honors the trusted-solo config opt-out without a false disclosure', async () => {
+  it('does not let repository config disable tool-output redaction', async () => {
     const root = await fixtureRoot();
     const secret = `sk-${'b'.repeat(24)}`;
     await writeFile(join(root, 'auth.ts'), `export function auth() {\n  return "${secret}";\n}\n`);
@@ -86,6 +87,21 @@ describe('source-carrying tool output redaction', () => {
       filePath: 'auth.ts',
       functionName: 'auth',
     }, root) as Record<string, unknown>;
+
+    expect(result.body).not.toContain(secret);
+    expect(result).toHaveProperty('redactions');
+  });
+
+  it('honors the explicit operator environment opt-out', async () => {
+    const root = await fixtureRoot();
+    const secret = `sk-${'o'.repeat(24)}`;
+    process.env.OPENLORE_UNREDACT_TOOL_OUTPUT = '1';
+
+    const result = await redactSourceToolResult(
+      'get_function_body',
+      { body: secret },
+      root,
+    ) as Record<string, unknown>;
 
     expect(result.body).toContain(secret);
     expect(result).not.toHaveProperty('redactions');

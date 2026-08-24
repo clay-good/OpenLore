@@ -7,11 +7,12 @@
  * packaging/homebrew/openlore.rb. The rest of the formula (desc, deps, install,
  * test) is preserved, so hand-edits there survive a bump.
  *
- * Used two ways:
- *   - locally:  node scripts/update-homebrew-formula.mjs            (uses package.json version, edits in place)
- *               node scripts/update-homebrew-formula.mjs --version 2.0.17
- *   - in CI:    the release workflow runs it after `npm publish`, then copies the
- *               result into the homebrew tap repo (see .github/workflows/release.yml).
+ * Run manually after publishing:
+ *   node scripts/update-homebrew-formula.mjs            (uses package.json version, edits in place)
+ *   node scripts/update-homebrew-formula.mjs --version 3.0.0
+ *
+ * The formula is staged for a future homebrew-core submission and is not updated
+ * by the npm release workflow.
  *
  * Flags:
  *   --version <x.y.z>   version to pin (default: package.json version; a leading "v" is stripped)

@@ -20,16 +20,17 @@
 
 import { appendFile, mkdir, readFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { DECISIONS_LEDGER_FILE, OPENLORE_DIR, OPENLORE_DECISIONS_SUBDIR } from '../../constants.js';
 import { fileExists } from '../../utils/command-helpers.js';
 import type { DecisionStatus, DecisionStore } from '../../types/index.js';
 import { logger } from '../../utils/logger.js';
+import { safeJoin } from '../../utils/path-confinement.js';
 
 // Path is built locally (not via store.ts) to keep this module dependency-free
 // of the store, which imports the ledger — no import cycle.
 function ledgerDir(rootPath: string): string {
-  return join(rootPath, OPENLORE_DIR, OPENLORE_DECISIONS_SUBDIR);
+  return safeJoin(resolve(rootPath), join(OPENLORE_DIR, OPENLORE_DECISIONS_SUBDIR));
 }
 
 export type LedgerActor = 'human' | 'autopilot' | 'agent' | 'sync';
@@ -49,7 +50,7 @@ export interface LedgerEntry {
 }
 
 export function ledgerPath(rootPath: string): string {
-  return join(ledgerDir(rootPath), DECISIONS_LEDGER_FILE);
+  return safeJoin(resolve(rootPath), join(OPENLORE_DIR, OPENLORE_DECISIONS_SUBDIR, DECISIONS_LEDGER_FILE));
 }
 
 /**

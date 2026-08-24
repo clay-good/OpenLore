@@ -94,7 +94,8 @@ describe('shared analysis index builder', () => {
       llmContext: { phase1_survey: { purpose: '', files: [] }, phase2_deep: { purpose: '', files: [] }, phase3_validation: { purpose: '', files: [] } } as never,
     });
     expect(FileWalker).toHaveBeenCalledWith('/repo', {
-      includePatterns: ['generated/keep.ts', 'vendor/keep.ts'],
+      includePatterns: ['vendor/keep.ts'],
+      restrictedIncludePatterns: ['generated/keep.ts'],
       excludePatterns: ['private/**', 'tmp/**'],
       protectedExcludePatterns: ['.openlore/analysis/**', 'openspec/**'],
     });
