@@ -10,7 +10,7 @@
  * Plain .test.ts so CI runs it.
  */
 import { describe, it, expect } from 'vitest';
-import { classifyGateState, type GateState, type GateOutcome } from './gate-state.js';
+import { classifyGateState, matchesConsolidationReceipt, type GateState, type GateOutcome } from './gate-state.js';
 import { GATE_REASONS } from '../../constants.js';
 
 const ALL_REASONS = new Set<string>(Object.values(GATE_REASONS));
@@ -50,6 +50,23 @@ describe('classifyGateState — totality', () => {
         expect(o.reason, `passing state ${JSON.stringify(s)} carries a reason`).toBeNull();
       }
     }
+  });
+});
+
+describe('matchesConsolidationReceipt', () => {
+  const now = Date.parse('2026-08-23T12:00:00.000Z');
+  const grace = 60 * 60 * 1000;
+
+  it('accepts only a recent receipt for the exact source snapshot', () => {
+    expect(matchesConsolidationReceipt('2026-08-23T11:30:00.000Z', 'same', 'same', now, grace)).toBe(true);
+    expect(matchesConsolidationReceipt('2026-08-23T11:30:00.000Z', 'old', 'new', now, grace)).toBe(false);
+  });
+
+  it('rejects future, expired, malformed, and legacy timestamp-only receipts', () => {
+    expect(matchesConsolidationReceipt('2026-08-23T12:00:01.000Z', 'same', 'same', now, grace)).toBe(false);
+    expect(matchesConsolidationReceipt('2026-08-23T10:59:59.000Z', 'same', 'same', now, grace)).toBe(false);
+    expect(matchesConsolidationReceipt('not-a-date', 'same', 'same', now, grace)).toBe(false);
+    expect(matchesConsolidationReceipt('2026-08-23T11:30:00.000Z', undefined, 'same', now, grace)).toBe(false);
   });
 });
 

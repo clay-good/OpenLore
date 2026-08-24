@@ -16,6 +16,7 @@ import { join } from 'node:path';
 import { createServer } from 'node:http';
 import { serveCommand, startServe, type ServeHandle } from '../../cli/commands/serve.js';
 import { ensureServeDaemon, callServeTool, isServePresetRejection, ServeHttpError, serveSpawnArgs } from './serve-client.js';
+import { incompatibleServeDescriptorIsLive } from '../../cli/commands/serve-descriptor.js';
 
 let handle: ServeHandle | undefined;
 let root = '';
@@ -89,6 +90,12 @@ describe('serve-client', () => {
       await new Promise<void>((resolve) => legacy.close(() => resolve()));
       await rm(dir, { recursive: true, force: true });
     }
+  });
+
+  it('does not treat an unreachable legacy announcement as a live incompatible daemon', async () => {
+    const started = Date.now();
+    expect(await incompatibleServeDescriptorIsLive({ host: '127.0.0.1', port: 65534, pid: process.pid }, tmpdir())).toBe(false);
+    expect(Date.now() - started).toBeLessThan(1_000);
   });
 
   it('calls a tool and returns its body (handler error object on a bare root)', async () => {

@@ -9,7 +9,7 @@
  */
 
 import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { fileExists } from '../../utils/command-helpers.js';
 import {
@@ -19,13 +19,14 @@ import {
 } from '../../constants.js';
 import { atomicWriteFile, casUpdate, quarantineCorrupt } from './atomic-store.js';
 import type { MemoryStore, StructuralAnchor } from '../../types/index.js';
+import { safeJoin } from '../../utils/path-confinement.js';
 
 export function memoryDir(rootPath: string): string {
-  return join(rootPath, OPENLORE_DIR, OPENLORE_MEMORY_SUBDIR);
+  return safeJoin(resolve(rootPath), join(OPENLORE_DIR, OPENLORE_MEMORY_SUBDIR));
 }
 
 function memoryPath(rootPath: string): string {
-  return join(memoryDir(rootPath), MEMORY_NOTES_FILE);
+  return safeJoin(resolve(rootPath), join(OPENLORE_DIR, OPENLORE_MEMORY_SUBDIR, MEMORY_NOTES_FILE));
 }
 
 function emptyStore(): MemoryStore {
@@ -72,7 +73,7 @@ export async function saveMemoryStore(rootPath: string, store: MemoryStore): Pro
     updatedAt: new Date().toISOString(),
     sequence: (store.sequence ?? 0) + 1,
   };
-  await atomicWriteFile(memoryPath(rootPath), JSON.stringify(updated, null, 2) + '\n');
+  await atomicWriteFile(memoryPath(rootPath), JSON.stringify(updated, null, 2) + '\n', 0o600);
 }
 
 /**

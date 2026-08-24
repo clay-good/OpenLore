@@ -376,7 +376,12 @@ export class McpWatcher {
         // no-op (the pre-hardening behavior). An async watcher error must never
         // pass silently on the long-lived host: disclose once and keep serving —
         // pending file changes are still caught at the next full analyze.
-        if (!watcherReady) { reject(err); return; }
+        if (!watcherReady) {
+          const failedWatcher = this.fsWatcher;
+          if (this.fsWatcher === failedWatcher) this.fsWatcher = undefined;
+          void failedWatcher?.close().finally(() => reject(err));
+          return;
+        }
         process.stderr.write(
           `[mcp-watcher] source watcher error (${(err as Error)?.message ?? String(err)}); ` +
           `continuing — changes may lag until the next analyze\n`

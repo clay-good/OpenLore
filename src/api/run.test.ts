@@ -6,6 +6,7 @@ import { openloreGenerate } from './generate.js';
 import { readOpenLoreConfig } from '../core/services/config-manager.js';
 import { OpenLoreError, errors } from '../utils/errors.js';
 import { resolve } from 'node:path';
+import { OPENLORE_PACKAGE_VERSION } from '../core/runtime/package-versions.js';
 
 vi.mock('./init.js', () => ({ openloreInit: vi.fn() }));
 vi.mock('./analyze.js', () => ({ openloreAnalyze: vi.fn() }));
@@ -165,7 +166,7 @@ describe('openloreRun', () => {
       generation: {
         dryRun: true,
         report: {
-          openloreVersion: '2.2.0',
+          openloreVersion: OPENLORE_PACKAGE_VERSION,
           configSchemaVersion: 'unknown',
           filesWritten: [],
         },

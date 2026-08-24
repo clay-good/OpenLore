@@ -13,19 +13,23 @@
  */
 import fc from 'fast-check';
 import { describe, it, expect } from 'vitest';
-import { validateServeHealth, canonicalServeRoot } from '../cli/commands/serve-descriptor.js';
+import { SERVE_PROTOCOL_VERSION, validateServeHealth, canonicalServeRoot } from '../cli/commands/serve-descriptor.js';
 
 const SHARED_ROOT = '/tmp/openlore-fuzz-root';
 
 describe('fuzz: serve health validation (daemon identity containment)', () => {
   it('never throws on arbitrary input', () => {
     const descriptorArb = fc.option(
-      fc.record({ pid: fc.integer(), token: fc.option(fc.string(), { nil: undefined }) }),
+      fc.record({ pid: fc.integer(), token: fc.option(fc.string(), { nil: undefined }), protocolVersion: fc.anything() }),
       { nil: undefined },
     );
     fc.assert(
       fc.property(fc.anything(), fc.string(), descriptorArb, (parsed, expectedRoot, descriptor) => {
-        validateServeHealth(parsed, expectedRoot, descriptor);
+        validateServeHealth(
+          parsed,
+          expectedRoot,
+          descriptor as Parameters<typeof validateServeHealth>[2],
+        );
         return true; // reaching this line is the property: it completed without throwing
       }),
       { numRuns: 2000 },
@@ -41,6 +45,10 @@ describe('fuzz: serve health validation (daemon identity containment)', () => {
     const healthLike = fc.record(
       {
         ok: fc.oneof({ weight: 4, arbitrary: fc.constant(true) }, { weight: 1, arbitrary: fc.anything() }),
+        protocolVersion: fc.oneof(
+          { weight: 4, arbitrary: fc.constant(SERVE_PROTOCOL_VERSION) },
+          { weight: 1, arbitrary: fc.anything() },
+        ),
         presetDispatchEnforced: fc.oneof(
           { weight: 4, arbitrary: fc.constant(true) },
           { weight: 1, arbitrary: fc.anything() },
@@ -95,6 +103,7 @@ describe('fuzz: serve health validation (daemon identity containment)', () => {
         const h = input as Record<string, unknown>;
         return (
           h.ok === true &&
+          h.protocolVersion === SERVE_PROTOCOL_VERSION &&
           h.presetDispatchEnforced === true &&
           h.tokenAuthenticated === true &&
           typeof h.root === 'string' &&
@@ -123,6 +132,7 @@ describe('fuzz: serve health validation (daemon identity containment)', () => {
   it('rejects an otherwise-valid health object whose root differs', () => {
     const validExceptRoot = fc.record({
       ok: fc.constant(true),
+      protocolVersion: fc.constant(SERVE_PROTOCOL_VERSION),
       presetDispatchEnforced: fc.constant(true),
       pid: fc.integer({ min: 1, max: 2 ** 31 }),
       preset: fc.string(),
@@ -145,6 +155,7 @@ describe('fuzz: serve health validation (daemon identity containment)', () => {
   it('rejects when a descriptor pid or token-presence disagrees', () => {
     const validHealth = {
       ok: true,
+      protocolVersion: SERVE_PROTOCOL_VERSION,
       presetDispatchEnforced: true,
       root: SHARED_ROOT,
       pid: 4321,
@@ -156,19 +167,19 @@ describe('fuzz: serve health validation (daemon identity containment)', () => {
     } as const;
 
     // Sanity: it accepts with a matching descriptor.
-    expect(validateServeHealth(validHealth, SHARED_ROOT, { pid: 4321, token: 't' })).not.toBeNull();
+    expect(validateServeHealth(validHealth, SHARED_ROOT, { pid: 4321, token: 't', protocolVersion: SERVE_PROTOCOL_VERSION })).not.toBeNull();
 
     // pid mismatch → reject.
-    expect(validateServeHealth(validHealth, SHARED_ROOT, { pid: 9999, token: 't' })).toBeNull();
+    expect(validateServeHealth(validHealth, SHARED_ROOT, { pid: 9999, token: 't', protocolVersion: SERVE_PROTOCOL_VERSION })).toBeNull();
 
     // token-presence disagreement: health says tokenProtected=true but descriptor
     // has no token → reject.
-    expect(validateServeHealth(validHealth, SHARED_ROOT, { pid: 4321, token: undefined })).toBeNull();
+    expect(validateServeHealth(validHealth, SHARED_ROOT, { pid: 4321, token: undefined, protocolVersion: SERVE_PROTOCOL_VERSION })).toBeNull();
 
     // token-presence disagreement, other direction: health says tokenProtected=false
     // but descriptor carries a token → reject.
     const unprotected = { ...validHealth, tokenProtected: false };
-    expect(validateServeHealth(unprotected, SHARED_ROOT, { pid: 4321, token: 't' })).toBeNull();
+    expect(validateServeHealth(unprotected, SHARED_ROOT, { pid: 4321, token: 't', protocolVersion: SERVE_PROTOCOL_VERSION })).toBeNull();
   });
 
   it('accepts a concrete well-formed health object', () => {
@@ -176,6 +187,7 @@ describe('fuzz: serve health validation (daemon identity containment)', () => {
       validateServeHealth(
         {
           ok: true,
+          protocolVersion: SERVE_PROTOCOL_VERSION,
           presetDispatchEnforced: true,
           root: '/tmp/x',
           pid: 123,
@@ -186,7 +198,7 @@ describe('fuzz: serve health validation (daemon identity containment)', () => {
           draining: false,
         },
         '/tmp/x',
-        { pid: 123, token: 't' },
+        { pid: 123, token: 't', protocolVersion: SERVE_PROTOCOL_VERSION },
       ),
     ).not.toBeNull();
   });

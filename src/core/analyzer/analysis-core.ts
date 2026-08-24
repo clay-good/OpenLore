@@ -71,7 +71,10 @@ export function mergeAnalysisPatterns(
   exclude: string[],
 ): { includePatterns: string[]; excludePatterns: string[] } {
   return {
-    includePatterns: [...new Set([...(configured?.includePatterns ?? []), ...include])],
+    // Operator includes retain their force-include semantics. Repository-configured
+    // includes are passed separately to the walker below so they can widen built-in
+    // corpus defaults without resurrecting files protected by ignore files.
+    includePatterns: [...new Set(include)],
     excludePatterns: [...new Set([...(configured?.excludePatterns ?? []), ...exclude])],
   };
 }
@@ -113,6 +116,13 @@ export async function runAnalysisCore(
   };
 
   const config = options.config ?? await readOpenLoreConfig(rootPath);
+  if (config?.analysis.includePatterns?.length) {
+    emit({
+      stage: 'mapping',
+      status: 'warning',
+      detail: 'Repository-configured analysis.includePatterns cannot override .gitignore or .openlore-ignore; use the explicit --include option for an operator-approved override.',
+    });
+  }
   const patterns = mergeAnalysisPatterns(
     config?.analysis,
     options.include ?? [],
@@ -125,6 +135,9 @@ export async function runAnalysisCore(
   const mapper = new RepositoryMapper(rootPath, {
     maxFiles: options.maxFiles,
     includePatterns: patterns.includePatterns.length > 0 ? patterns.includePatterns : undefined,
+    restrictedIncludePatterns: config?.analysis.includePatterns?.filter(
+      pattern => !patterns.includePatterns.includes(pattern),
+    ),
     excludePatterns: patterns.excludePatterns.length > 0 ? patterns.excludePatterns : undefined,
     protectedExcludePatterns,
   });

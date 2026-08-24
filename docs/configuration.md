@@ -86,15 +86,12 @@ OpenLore redacts credential-shaped repository content before source-carrying too
 agent. Redacted results include a count and the matched credential kinds. Persisted LLM request logs
 use the same pattern set for both prompts and responses and record the redaction count per request.
 
-The tool-output boundary is enabled by default. A trusted solo operator who requires byte-exact tool
-output can opt out explicitly:
+The tool-output boundary is enabled by default. Repository config cannot disable it because cloned
+code is not trusted to choose whether source secrets are disclosed. A trusted solo operator who
+requires byte-exact tool output can opt out explicitly for one process:
 
-```json
-{
-  "secretRedaction": {
-    "toolOutput": false
-  }
-}
+```bash
+OPENLORE_UNREDACT_TOOL_OUTPUT=1 openlore mcp
 ```
 
 This opt-out does not disable redaction in LLM logs, errors, or telemetry.

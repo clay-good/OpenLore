@@ -70,6 +70,8 @@ import {
   hookManagerWarning,
   isResolvedGitRepository,
   resolveGitHookTarget,
+  resolveTrustedHookLauncher,
+  renderTrustedHookCommand,
   updateHookFile,
 } from '../git-hooks.js';
 
@@ -77,25 +79,11 @@ const HOOK_MARKER = '# openlore-enforcement-hook';
 const execFileAsync = promisify(execFile);
 const ENFORCEMENT_BASELINE_REPO_PATH = '.openlore/enforcement-baseline.jsonl';
 
-const HOOK_CONTENT = `${HOOK_MARKER}
+const renderHookContent = (command: string) => `${HOOK_MARKER}
 # Unified finding-enforcement gate before each commit.
 # Advisory by default; fails closed for configured blocking/frozen policy and unverifiable execution.
-if [ -f "./node_modules/.bin/openlore" ] && ./node_modules/.bin/openlore enforce --help 2>/dev/null | grep -q -- '--hook'; then
-  ./node_modules/.bin/openlore enforce --hook 2>&1
-  ENFORCE_EXIT=$?
-elif [ -f "./dist/cli/index.js" ] && node ./dist/cli/index.js enforce --help 2>/dev/null | grep -q -- '--hook'; then
-  node ./dist/cli/index.js enforce --hook 2>&1
-  ENFORCE_EXIT=$?
-else
-  OPENLORE=$(command -v openlore 2>/dev/null)
-  if [ -n "$OPENLORE" ] && "$OPENLORE" enforce --help 2>/dev/null | grep -q -- '--hook'; then
-    "$OPENLORE" enforce --hook 2>&1
-    ENFORCE_EXIT=$?
-  else
-    echo "openlore enforce hook unavailable: install a compatible OpenLore CLI or rebuild this checkout before committing." >&2
-    ENFORCE_EXIT=1
-  fi
-fi
+${command} 2>&1
+ENFORCE_EXIT=$?
 if [ "$ENFORCE_EXIT" -ne 0 ]; then
   exit "$ENFORCE_EXIT"
 fi
@@ -115,16 +103,24 @@ export async function installEnforcementHook(rootPath: string): Promise<void> {
     logger.warning(hookManagerWarning(target, 'openlore enforce --hook'));
     return;
   }
+  const launcher = await resolveTrustedHookLauncher(rootPath);
+  if (!launcher) {
+    logger.error('Cannot pin an OpenLore installation outside this repository. Install OpenLore globally and retry.');
+    process.exitCode = 1;
+    return;
+  }
+  const hookContent = renderHookContent(renderTrustedHookCommand(launcher, ['enforce', '--hook']));
   let alreadyInstalled = false;
   const result = await updateHookFile(hookPath, (existing) => {
     if (existing?.includes(HOOK_MARKER)) {
       alreadyInstalled = true;
-      return null;
+      const refreshed = existing.replace(/# openlore-enforcement-hook[\s\S]*?# end-openlore-enforcement-hook/, hookContent.trimEnd());
+      return refreshed === existing ? null : refreshed;
     }
     const stripped = existing?.trimEnd().replace(/\n*\nexit 0\s*$/, '');
     return stripped
-      ? stripped + '\n\n' + HOOK_CONTENT
-      : '#!/bin/sh\n\n' + HOOK_CONTENT;
+      ? stripped + '\n\n' + hookContent
+      : '#!/bin/sh\n\n' + hookContent;
   });
   if (result.status === 'unavailable') {
     logger.warning(`Cannot install the enforcement hook at ${displayHookPath(hookPath)}: ${result.reason}`);

@@ -79,16 +79,48 @@ function fatal(message, detail = '') {
 
 const report = parseReport(runAudit());
 const vulnerabilities = report.vulnerabilities;
+const severityCounts = report.metadata.vulnerabilities;
+
+if (typeof severityCounts !== 'object' || severityCounts === null) {
+  fatal('npm audit returned no `metadata.vulnerabilities` counts — treating as "did not run".');
+}
+for (const severity of GATED) {
+  if (!Number.isSafeInteger(severityCounts[severity]) || severityCounts[severity] < 0) {
+    fatal(`npm audit returned an invalid metadata count for ${severity}.`);
+  }
+}
 
 // Collect root advisories: a `via` entry that is an object is an advisory itself,
 // whereas a string entry only names a dependent that inherits one.
 const found = new Map(); // ghsaId -> { package, severity, title }
-for (const vuln of Object.values(vulnerabilities)) {
-  for (const via of vuln.via ?? []) {
+const malformed = [];
+let gatedVulnerabilities = 0;
+for (const [packageName, vuln] of Object.entries(vulnerabilities)) {
+  if (typeof vuln !== 'object' || vuln === null || !Array.isArray(vuln.via)) {
+    malformed.push(`${packageName}: invalid vulnerability shape`);
+    continue;
+  }
+  if (GATED.has(vuln.severity)) gatedVulnerabilities++;
+  for (const via of vuln.via) {
     if (typeof via !== 'object' || !GATED.has(via.severity)) continue;
     const id = String(via.url ?? '').split('/').pop();
-    if (id) found.set(id, { package: via.name, severity: via.severity, title: via.title });
+    if (!id) {
+      malformed.push(`${packageName}: ${via.severity} advisory has no stable URL-derived id`);
+      continue;
+    }
+    found.set(id, { package: via.name ?? packageName, severity: via.severity, title: via.title ?? 'untitled advisory' });
   }
+}
+
+const reportedGated = severityCounts.high + severityCounts.critical;
+if (gatedVulnerabilities !== reportedGated) {
+  malformed.push(
+    `metadata reports ${reportedGated} high/critical vulnerabilities, ` +
+    `but the vulnerabilities map contains ${gatedVulnerabilities}`
+  );
+}
+if (reportedGated > 0 && found.size === 0) {
+  malformed.push('high/critical vulnerabilities were reported but no identifiable root advisory was found');
 }
 
 const unexpected = [...found].filter(([id]) => !ALLOWLIST[id]);
@@ -106,8 +138,15 @@ if (stale.length) {
   );
 }
 
-if (unexpected.length || stale.length) {
-  console.error(`\naudit-gate: FAILED (${unexpected.length} unallowed, ${stale.length} stale)`);
+if (malformed.length) {
+  console.error(`\n✖ Malformed npm audit report:\n${malformed.map(item => `  - ${item}`).join('\n')}`);
+}
+
+if (unexpected.length || stale.length || malformed.length) {
+  console.error(
+    `\naudit-gate: FAILED (${unexpected.length} unallowed, ${stale.length} stale, ` +
+    `${malformed.length} malformed)`
+  );
   process.exit(1);
 }
 

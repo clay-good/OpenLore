@@ -125,6 +125,8 @@ export async function syncApprovedDecisions(
         ...snapshot,
         sessionId: disk.sessionId,
         lastConsolidatedAt: disk.lastConsolidatedAt ?? snapshot.lastConsolidatedAt,
+        lastConsolidatedSourceFingerprint:
+          disk.lastConsolidatedSourceFingerprint ?? snapshot.lastConsolidatedSourceFingerprint,
         decisions: [
           ...snapshot.decisions.filter((decision) => !conflictIds.has(decision.id)),
           ...changedDuringSync,

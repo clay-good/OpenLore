@@ -14,8 +14,9 @@
  */
 
 import { constants, realpathSync, lstatSync, readlinkSync, type Stats } from 'node:fs';
-import { open, realpath, stat } from 'node:fs/promises';
-import { dirname, resolve, sep } from 'node:path';
+import { lstat, mkdir, open, realpath, rename, stat, unlink } from 'node:fs/promises';
+import { basename, dirname, relative, resolve, sep } from 'node:path';
+import { randomUUID } from 'node:crypto';
 
 /** Upper bound on a symlink chain, so a cycle cannot spin the resolver. */
 const MAX_SYMLINK_HOPS = 64;
@@ -238,6 +239,76 @@ export function isConfinedPath(absRoot: string, absPath: string): boolean {
     return true;
   } catch {
     return false;
+  }
+}
+
+/** Atomically replace a repository file without following any repository symlink. */
+export async function confinedAtomicWriteFile(
+  absRoot: string,
+  absPath: string,
+  data: string,
+  options: { mode?: number; preserveMode?: boolean } = {},
+): Promise<void> {
+  const lexicalRoot = resolve(absRoot);
+  const canonicalRoot = await realpath(lexicalRoot);
+  const requested = resolve(absPath);
+  const base = requested === canonicalRoot || requested.startsWith(canonicalRoot + sep)
+    ? canonicalRoot
+    : lexicalRoot;
+  const target = safeJoin(base, relative(base, requested));
+  const parent = dirname(target);
+  await mkdir(parent, { recursive: true });
+
+  const expectedParent = resolve(canonicalRoot, relative(base, parent));
+  const canonicalParent = await realpath(parent);
+  if (canonicalParent !== expectedParent) {
+    throw new Error(`Path escape blocked: symbolic-link path component in "${target}"`);
+  }
+
+  let existingMode: number | undefined;
+  try {
+    const existing = await lstat(target);
+    if (existing.isSymbolicLink() || !existing.isFile()) {
+      throw new Error(`Path escape blocked: write target is not a regular file: "${target}"`);
+    }
+    existingMode = existing.mode & 0o777;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+
+  const mode = options.preserveMode && existingMode !== undefined
+    ? existingMode
+    : (options.mode ?? 0o666);
+  const temp = resolve(canonicalParent, `.${basename(target)}.${process.pid}.${randomUUID()}.tmp`);
+  let published = false;
+  try {
+    const handle = await open(
+      temp,
+      constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW,
+      mode,
+    );
+    try {
+      await handle.writeFile(data, 'utf-8');
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    if (await realpath(parent) !== canonicalParent) {
+      throw new Error(`Path escape blocked: write parent changed during publication: "${target}"`);
+    }
+    try {
+      if ((await lstat(target)).isSymbolicLink()) {
+        throw new Error(`Path escape blocked: symbolic-link write target: "${target}"`);
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    // Publish through the already-canonical parent, not the repository-controlled
+    // lexical parent that could be swapped for a symlink after validation.
+    await rename(temp, resolve(canonicalParent, basename(target)));
+    published = true;
+  } finally {
+    if (!published) await unlink(temp).catch(() => {});
   }
 }
 

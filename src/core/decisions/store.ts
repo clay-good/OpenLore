@@ -3,7 +3,7 @@
  */
 
 import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import {
   OPENLORE_DIR,
@@ -14,13 +14,14 @@ import { fileExists } from '../../utils/command-helpers.js';
 import { atomicWriteFile, casUpdate, quarantineCorrupt } from './atomic-store.js';
 import { appendLedgerEntries, currentHeadCommit, diffStoreTransitions, type LedgerActor } from './ledger.js';
 import type { PendingDecision, DecisionStore, DecisionStatus } from '../../types/index.js';
+import { safeJoin } from '../../utils/path-confinement.js';
 
 export function decisionsDir(rootPath: string): string {
-  return join(rootPath, OPENLORE_DIR, OPENLORE_DECISIONS_SUBDIR);
+  return safeJoin(resolve(rootPath), join(OPENLORE_DIR, OPENLORE_DECISIONS_SUBDIR));
 }
 
 function decisionsPath(rootPath: string): string {
-  return join(decisionsDir(rootPath), DECISIONS_PENDING_FILE);
+  return safeJoin(resolve(rootPath), join(OPENLORE_DIR, OPENLORE_DECISIONS_SUBDIR, DECISIONS_PENDING_FILE));
 }
 
 export async function loadDecisionStore(rootPath: string): Promise<DecisionStore> {
@@ -69,7 +70,7 @@ export async function saveDecisionStore(rootPath: string, store: DecisionStore):
     updatedAt: new Date().toISOString(),
     sequence: (store.sequence ?? 0) + 1,
   };
-  await atomicWriteFile(decisionsPath(rootPath), JSON.stringify(updated, null, 2) + '\n');
+  await atomicWriteFile(decisionsPath(rootPath), JSON.stringify(updated, null, 2) + '\n', 0o600);
 }
 
 /**

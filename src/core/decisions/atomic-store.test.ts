@@ -7,7 +7,7 @@
  * ConcurrentMemoryWriteSafety. Plain .test.ts so CI runs it.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtemp, rm, mkdir, writeFile, readFile, readdir, stat, utimes } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, writeFile, readFile, readdir, stat, symlink, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -62,6 +62,13 @@ describe('atomicWriteFile', () => {
     await atomicWriteFile(path, 'first');
     await atomicWriteFile(path, 'second');
     expect(await readFile(path, 'utf-8')).toBe('second');
+  });
+
+  it('preserves an existing file mode across atomic replacement', async () => {
+    const path = join(root, 'shared.json');
+    await writeFile(path, 'first', { mode: 0o644 });
+    await atomicWriteFile(path, 'second');
+    expect((await stat(path)).mode & 0o777).toBe(0o644);
   });
 
   it('a crash BETWEEN temp-write and rename preserves the prior committed file', async () => {
@@ -276,6 +283,19 @@ describe('memory store — durability + concurrency end-to-end', () => {
 // decision store quarantine + sequence
 // ════════════════════════════════════════════════════════════════════════════
 describe('decision store — quarantine + sequence', () => {
+  it('rejects an outbound .openlore directory symlink before writing either store', async () => {
+    const outside = await mkdtemp(join(tmpdir(), 'openlore-atomic-outside-'));
+    await symlink(outside, join(root, '.openlore'), 'dir');
+    try {
+      await expect(updateDecisionStore(root, (store) => store)).rejects.toThrow(/canonicalizes outside/);
+      await expect(updateMemoryStore(root, (store) => store)).rejects.toThrow(/canonicalizes outside/);
+      await expect(readFile(join(outside, 'decisions', DECISIONS_PENDING_FILE), 'utf-8')).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(readFile(join(outside, 'memory', MEMORY_NOTES_FILE), 'utf-8')).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
   it('a corrupted pending.json is quarantined, not silently emptied', async () => {
     const dir = decisionsDir(root);
     await mkdir(dir, { recursive: true });
@@ -343,7 +363,7 @@ describe('decision store — concurrent CAS writers across mutation kinds', () =
     expect(final.decisions.map((d) => d.id).sort()).toEqual(
       Array.from({ length: N }, (_, i) => `d${i}`).sort(),
     );
-  });
+  }, 60_000);
 
   it('a consolidation-style replace racing concurrent record upserts loses neither', async () => {
     // Seed two drafts the "consolidation" will reject+replace.

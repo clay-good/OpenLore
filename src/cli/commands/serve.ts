@@ -36,6 +36,7 @@
 import { Command } from 'commander';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createRequire } from 'node:module';
+import { randomBytes } from 'node:crypto';
 import { access, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { logger } from '../../utils/logger.js';
@@ -59,9 +60,12 @@ import {
 } from './local-http-guard.js';
 import {
   readServeDescriptor,
+  readServeDescriptorState,
+  incompatibleServeDescriptorIsLive,
   canonicalServeRoot,
   serveHttpBaseUrl,
   validateServeHealth,
+  SERVE_PROTOCOL_VERSION,
   type ServeDescriptor,
   type ServeHealth,
 } from './serve-descriptor.js';
@@ -184,6 +188,8 @@ interface ServeCliOptions {
   idleTimeout?: string;
   /** Internal test seam; the CLI always uses the production startup-lock bound. */
   startupLockWaitMs?: number;
+  /** Internal test seam for legacy unauthenticated transport cases. */
+  allowUnauthenticatedForTesting?: boolean;
 }
 
 /** Live daemon handle. Returned by {@link startServe} so callers (tests) can
@@ -295,6 +301,17 @@ async function probeDaemon(
 /** Stop the verified daemon and wait until its listener has actually closed. */
 async function stopDaemon(root: string): Promise<boolean> {
   const path = serveFilePath(root);
+  const announced = await readServeDescriptorState(path, { includeDraining: true });
+  if (announced.kind === 'incompatible') {
+    if (await incompatibleServeDescriptorIsLive(announced.descriptor, root)) {
+      logger.error('A legacy or incompatible OpenLore daemon is announced for this repository. Stop it with the matching OpenLore version before upgrading.');
+      process.exitCode = 1;
+      return false;
+    }
+    await unlink(path).catch(() => {});
+    logger.warning(`Removed stale incompatible ${SERVE_FILE}.`);
+    return true;
+  }
   const desc = await readDescriptor(root);
   if (!desc) {
     logger.warning(`No running openlore serve daemon found for ${root}.`);
@@ -306,7 +323,7 @@ async function stopDaemon(root: string): Promise<boolean> {
       // A stopper can die after publishing draining but before POST /shutdown.
       // The verified daemon says no teardown began, so resume the stop safely.
       desc.state = 'ready';
-      await writeInstanceDescriptor(path, desc);
+      await writeInstanceDescriptor(root, path, desc);
     } else {
     const deadline = Date.now() + SERVE_STOP_WAIT_MS;
     while (Date.now() < deadline) {
@@ -333,7 +350,7 @@ async function stopDaemon(root: string): Promise<boolean> {
   }
   try {
     const headers = desc.token ? { [OPENLORE_TOKEN_HEADER]: desc.token } : undefined;
-    await writeInstanceDescriptor(path, { ...desc, state: 'draining' });
+    await writeInstanceDescriptor(root, path, { ...desc, state: 'draining' });
     // INTENTIONAL EGRESS: the authenticated health probe bound this loopback descriptor to this repo.
     // codeql[js/file-access-to-http]
     const res = await fetch(`${serveHttpBaseUrl(desc.host, desc.port)}/shutdown`, {
@@ -358,7 +375,7 @@ async function stopDaemon(root: string): Promise<boolean> {
     process.exitCode = 1;
     return false;
   } catch {
-    await writeInstanceDescriptor(path, { ...desc, state: 'ready' }).catch(() => {});
+    await writeInstanceDescriptor(root, path, { ...desc, state: 'ready' }).catch(() => {});
     logger.warning('The verified daemon did not accept the shutdown request.');
     return false;
   }
@@ -367,7 +384,10 @@ async function stopDaemon(root: string): Promise<boolean> {
 export async function startServe(options: ServeCliOptions): Promise<ServeHandle | undefined> {
   const root = canonicalServeRoot(options.directory ?? process.cwd());
   const host = options.host ?? '127.0.0.1';
-  const token = options.token ?? (process.env.OPENLORE_SERVE_TOKEN || undefined);
+  const configuredToken = options.token ?? process.env.OPENLORE_SERVE_TOKEN;
+  let token = options.allowUnauthenticatedForTesting
+    ? undefined
+    : configuredToken || randomBytes(24).toString('hex');
   const discoveryHost = discoveryHostForBind(host);
   const presetName = options.preset ?? LEAN_DEFAULT_PRESET;
   const isFullSurface = presetName === FULL_PRESET_ALIAS || presetName === FULL_PRESET;
@@ -505,14 +525,29 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
   // Don't start a second daemon for a root already served by a healthy one —
   // a concurrent spawn (two MCP clients, or pi + MCP) would otherwise leave two
   // watchers racing on the same .openlore/analysis. Reuse the live one instead.
+  const announcedDescriptor = await readServeDescriptorState(serveFilePath(root), { includeDraining: true });
+  if (announcedDescriptor.kind === 'incompatible') {
+    if (await incompatibleServeDescriptorIsLive(announcedDescriptor.descriptor, root)) {
+      logger.error('A legacy or incompatible OpenLore daemon is already announced for this repository. Stop it with the matching OpenLore version before starting this release.');
+      process.exitCode = 1;
+      return;
+    }
+    await unlink(serveFilePath(root)).catch(() => {});
+  }
   let existing = await readDescriptor(root);
+  if (!options.allowUnauthenticatedForTesting && !configuredToken && existing?.token) {
+    // A generated token is instance state, not launch configuration. Reuse the
+    // descriptor's owner-only token instead of generating a different one and
+    // falsely reporting a posture mismatch on every default invocation.
+    token = existing.token;
+  }
   if (existing?.state === 'draining') {
     const drainingProbe = await probeDaemon(existing, root);
     if (drainingProbe.health && !drainingProbe.health.draining) {
       // Recover a stopper that crashed between publishing draining and sending
       // the shutdown request. Identity/token/root were proved by the probe.
       existing.state = 'ready';
-      await writeInstanceDescriptor(serveFilePath(root), existing);
+      await writeInstanceDescriptor(root, serveFilePath(root), existing);
     } else {
     const deadline = Date.now() + SERVE_STOP_WAIT_MS;
     while (Date.now() < deadline && existing?.state === 'draining') {
@@ -690,12 +725,13 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
       // the repository path, PID, version, preset, or tool surface to a remote caller
       // that merely supplies the allowed wildcard Host header. Authenticated clients
       // still receive the full root-bound identity proof used by descriptor validation.
-      if (!isLoopbackHost(host) && token && !tokenAuthenticated) {
+      if (token && !tokenAuthenticated) {
         sendJson(res, 200, { ok: true, tokenProtected: true });
         return;
       }
       sendJson(res, 200, {
         ok: true,
+        protocolVersion: SERVE_PROTOCOL_VERSION,
         presetDispatchEnforced: true,
         version: _pkgVersion,
         root,
@@ -976,7 +1012,7 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
       const announced = await readDescriptor(root);
       if (announced?.state === 'draining') return true;
       try {
-        await writeInstanceDescriptor(serveFilePath(root), { ...descriptor, state: 'draining' });
+        await writeInstanceDescriptor(root, serveFilePath(root), { ...descriptor, state: 'draining' });
         return true;
       } catch (err) {
         logger.warning(
@@ -1027,12 +1063,13 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
     pid: process.pid,
     host: discoveryHost,
     token,
+    protocolVersion: SERVE_PROTOCOL_VERSION,
     startedAt,
     version: _pkgVersion,
     state: 'ready',
   };
   try {
-    await writeInstanceDescriptor(serveFilePath(root), descriptor);
+    await writeInstanceDescriptor(root, serveFilePath(root), descriptor);
   } catch (err) {
     await releaseStartupLock();
     await teardown();
@@ -1075,7 +1112,7 @@ export const serveCommand = new Command('serve')
     `Callable tool surface enforced at dispatch (navigation, substrate, minimal, or all/full). Default: ${LEAN_DEFAULT_PRESET}`,
     LEAN_DEFAULT_PRESET,
   )
-  .option('--token <token>', 'Require this token as the x-openlore-token header (default: $OPENLORE_SERVE_TOKEN)')
+  .option('--token <token>', 'Require this token as the x-openlore-token header (default: $OPENLORE_SERVE_TOKEN or a generated per-daemon token)')
   .option('--no-watch', 'Disable the freshness watcher + debounced call-graph re-analyze')
   .option('--idle-timeout <minutes>', `Self-terminate after this many minutes with no requests, so orphaned daemons can't pile up in RAM (0 disables). Default: ${DEFAULT_IDLE_TIMEOUT_MIN}`)
   .option('--stop', 'Stop a running daemon for --directory and exit')

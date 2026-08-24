@@ -3,24 +3,35 @@
 All notable changes to OpenLore are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [3.0.0] - 2026-08-23
 
 - **Programmatic API migration:** analysis results now require `fromCache` and make
   `depGraph` optional when the persisted graph is missing or corrupt. Generation and full-run
   results are discriminated by `dryRun`; callers must narrow on `result.dryRun` before reading
-  `pipelineResult`, `init`, or `analysis`. Dry runs no longer fabricate results for stages that
-  did not execute. These are intentional breaking type-shape corrections for embedders.
+  `pipelineResult`, `init`, or `analysis`. `GenerationReport.configSchemaVersion` is now required,
+  and `openloreVersion` now consistently identifies the OpenLore package rather than the config
+  schema. Dry runs no longer fabricate results for stages that did not execute. These are
+  intentional breaking type-shape corrections for embedders.
 - LLM prompt/response diagnostics are now disabled by default, require exact
   `OPENLORE_LLM_LOGS=1` opt-in, redact secrets, and retain at most six files or 300 MB;
   local telemetry documentation now matches its exact gate and recorded event domains.
+- Repository config can no longer disable source-output secret redaction or force ignored files
+  into generated LLM context; trusted operators retain explicit environment/CLI overrides.
+- The minimum supported Node.js version is now 22.19, matching the runtime dependency floor;
+  CI exercises that exact version before release.
 - Drift results now carry required `analyzedFiles` and `filesOmitted` receipts. The drift CLI
   reserves exit `1` for confirmed drift and uses exit `2` when the check cannot run; reinstalled
   pre-commit hooks upgrade in place, validate JSON before blocking, preserve existing hook
   failures, and allow infrastructure failures with an explicit warning.
 - Interference maps now retain unassessable branches, reject unsafe base guesses,
   disclose enumeration limits/failures, and stop treating shared reads as conflicts.
-- Enforcement JSON schema version 2 normalizes governance finding severity to
-  `info`, `warning`, `error`, or `critical` (`warn` is now `warning`).
+- Enforcement JSON schema version 3 normalizes governance finding severity to
+  `info`, `warning`, `error`, or `critical` (`warn` is now `warning`) and adds frozen-baseline
+  ratchet evidence.
+
+**Upgrade:** `npm i -g openlore@3.0.0`
+
+**Full Changelog**: https://github.com/clay-good/OpenLore/compare/v2.2.0...v3.0.0
 
 ## [2.2.0] - 2026-08-16
 

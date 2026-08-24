@@ -19,9 +19,8 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
-import { mkdir, writeFile, chmod } from 'node:fs/promises';
-import { dirname } from 'node:path';
 import { LOOPBACK_HOSTNAMES, isLoopbackHost } from '../../utils/loopback.js';
+import { confinedAtomicWriteFile } from '../../utils/path-confinement.js';
 
 /** Header a client presents to authenticate to a local OpenLore HTTP surface. */
 export const OPENLORE_TOKEN_HEADER = 'x-openlore-token';
@@ -121,15 +120,16 @@ export function constantTimeEqual(a: string, b: string): boolean {
  * pre-created by another local user) would otherwise keep its permissive mode.
  */
 export async function writeInstanceDescriptor(
+  rootPath: string,
   descriptorPath: string,
   value: unknown,
 ): Promise<void> {
-  await mkdir(dirname(descriptorPath), { recursive: true, mode: 0o700 });
-  await writeFile(descriptorPath, JSON.stringify(value, null, 2) + '\n', {
-    encoding: 'utf-8',
-    mode: 0o600,
-  });
-  await chmod(descriptorPath, 0o600);
+  await confinedAtomicWriteFile(
+    rootPath,
+    descriptorPath,
+    JSON.stringify(value, null, 2) + '\n',
+    { mode: 0o600 },
+  );
 }
 
 /**

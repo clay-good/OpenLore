@@ -41,6 +41,22 @@ export type GateOutcome =
   | { gated: false; reason: null }
   | { gated: true; reason: GateReason };
 
+/** A grace receipt is valid only for the exact source snapshot it assessed. */
+export function matchesConsolidationReceipt(
+  consolidatedAt: string | undefined,
+  recordedFingerprint: string | undefined,
+  currentFingerprint: string | undefined,
+  nowMs: number,
+  gracePeriodMs: number,
+): boolean {
+  if (!consolidatedAt || !recordedFingerprint || !currentFingerprint) return false;
+  const age = nowMs - new Date(consolidatedAt).getTime();
+  return Number.isFinite(age)
+    && age >= 0
+    && age < gracePeriodMs
+    && recordedFingerprint === currentFingerprint;
+}
+
 /**
  * Classify a gate state into exactly one outcome. The priority order mirrors the
  * commit gate: a not-yet-synced approval blocks first, then verified decisions

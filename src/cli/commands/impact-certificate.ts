@@ -25,29 +25,18 @@ import {
   hookManagerWarning,
   isResolvedGitRepository,
   resolveGitHookTarget,
+  resolveTrustedHookLauncher,
+  renderTrustedHookCommand,
   updateHookFile,
 } from '../git-hooks.js';
 
 const HOOK_MARKER = '# openlore-impact-certificate-hook';
 
-const HOOK_CONTENT = `${HOOK_MARKER}
+const renderHookContent = (command: string) => `${HOOK_MARKER}
 # Advisory change-impact certificate before each commit.
 # Advisory by default (exit 0); blocks only on a configured surface severity.
-if [ -f "./node_modules/.bin/openlore" ] && ./node_modules/.bin/openlore impact-certificate --help 2>/dev/null | grep -q -- '--hook'; then
-  ./node_modules/.bin/openlore impact-certificate --hook 2>&1
-  CERT_EXIT=$?
-elif [ -f "./dist/cli/index.js" ] && node ./dist/cli/index.js impact-certificate --help 2>/dev/null | grep -q -- '--hook'; then
-  node ./dist/cli/index.js impact-certificate --hook 2>&1
-  CERT_EXIT=$?
-else
-  OPENLORE=$(command -v openlore 2>/dev/null)
-  if [ -n "$OPENLORE" ] && "$OPENLORE" impact-certificate --help 2>/dev/null | grep -q -- '--hook'; then
-    "$OPENLORE" impact-certificate --hook 2>&1
-    CERT_EXIT=$?
-  else
-    CERT_EXIT=0
-  fi
-fi
+${command} 2>&1
+CERT_EXIT=$?
 if [ "$CERT_EXIT" -ne 0 ]; then
   exit "$CERT_EXIT"
 fi
@@ -67,11 +56,14 @@ export async function installImpactCertificateHook(rootPath: string): Promise<vo
     logger.warning(hookManagerWarning(target, 'openlore impact-certificate --hook'));
     return;
   }
+  const launcher = await resolveTrustedHookLauncher(rootPath);
+  if (!launcher) { logger.error('Cannot pin an OpenLore installation outside this repository. Install OpenLore globally and retry.'); process.exitCode = 1; return; }
+  const hookContent = renderHookContent(renderTrustedHookCommand(launcher, ['impact-certificate', '--hook']));
   let alreadyInstalled = false;
   const result = await updateHookFile(hookPath, (existing) => {
-    if (existing?.includes(HOOK_MARKER)) { alreadyInstalled = true; return null; }
+    if (existing?.includes(HOOK_MARKER)) { alreadyInstalled = true; const refreshed = existing.replace(/# openlore-impact-certificate-hook[\s\S]*?# end-openlore-impact-certificate-hook/, hookContent.trimEnd()); return refreshed === existing ? null : refreshed; }
     const stripped = existing?.trimEnd().replace(/\n*\nexit 0\s*$/, '');
-    return stripped ? stripped + '\n\n' + HOOK_CONTENT : '#!/bin/sh\n\n' + HOOK_CONTENT;
+    return stripped ? stripped + '\n\n' + hookContent : '#!/bin/sh\n\n' + hookContent;
   });
   if (result.status === 'unavailable') {
     logger.warning(`Cannot install the impact-certificate hook at ${displayHookPath(hookPath)}: ${result.reason}`);

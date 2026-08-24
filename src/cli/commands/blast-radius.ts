@@ -23,29 +23,18 @@ import {
   hookManagerWarning,
   isResolvedGitRepository,
   resolveGitHookTarget,
+  resolveTrustedHookLauncher,
+  renderTrustedHookCommand,
   updateHookFile,
 } from '../git-hooks.js';
 
 const HOOK_MARKER = '# openlore-blast-radius-hook';
 
-const HOOK_CONTENT = `${HOOK_MARKER}
+const renderHookContent = (command: string) => `${HOOK_MARKER}
 # Advisory pre-flight blast-radius briefing before each commit.
 # Advisory by default (exit 0); blocks only on a configured high-risk pattern.
-if [ -f "./node_modules/.bin/openlore" ] && ./node_modules/.bin/openlore blast-radius --help 2>/dev/null | grep -q -- '--hook'; then
-  ./node_modules/.bin/openlore blast-radius --hook 2>&1
-  BLAST_EXIT=$?
-elif [ -f "./dist/cli/index.js" ] && node ./dist/cli/index.js blast-radius --help 2>/dev/null | grep -q -- '--hook'; then
-  node ./dist/cli/index.js blast-radius --hook 2>&1
-  BLAST_EXIT=$?
-else
-  OPENLORE=$(command -v openlore 2>/dev/null)
-  if [ -n "$OPENLORE" ] && "$OPENLORE" blast-radius --help 2>/dev/null | grep -q -- '--hook'; then
-    "$OPENLORE" blast-radius --hook 2>&1
-    BLAST_EXIT=$?
-  else
-    BLAST_EXIT=0
-  fi
-fi
+${command} 2>&1
+BLAST_EXIT=$?
 if [ "$BLAST_EXIT" -ne 0 ]; then
   exit "$BLAST_EXIT"
 fi
@@ -65,11 +54,14 @@ export async function installBlastRadiusHook(rootPath: string): Promise<void> {
     logger.warning(hookManagerWarning(target, 'openlore blast-radius --hook'));
     return;
   }
+  const launcher = await resolveTrustedHookLauncher(rootPath);
+  if (!launcher) { logger.error('Cannot pin an OpenLore installation outside this repository. Install OpenLore globally and retry.'); process.exitCode = 1; return; }
+  const hookContent = renderHookContent(renderTrustedHookCommand(launcher, ['blast-radius', '--hook']));
   let alreadyInstalled = false;
   const result = await updateHookFile(hookPath, (existing) => {
-    if (existing?.includes(HOOK_MARKER)) { alreadyInstalled = true; return null; }
+    if (existing?.includes(HOOK_MARKER)) { alreadyInstalled = true; const refreshed = existing.replace(/# openlore-blast-radius-hook[\s\S]*?# end-openlore-blast-radius-hook/, hookContent.trimEnd()); return refreshed === existing ? null : refreshed; }
     const stripped = existing?.trimEnd().replace(/\n*\nexit 0\s*$/, '');
-    return stripped ? stripped + '\n\n' + HOOK_CONTENT : '#!/bin/sh\n\n' + HOOK_CONTENT;
+    return stripped ? stripped + '\n\n' + hookContent : '#!/bin/sh\n\n' + hookContent;
   });
   if (result.status === 'unavailable') {
     logger.warning(`Cannot install the blast-radius hook at ${displayHookPath(hookPath)}: ${result.reason}`);

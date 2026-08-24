@@ -169,7 +169,7 @@ it('accepts a daemon only when it covers the full Pi surface', () => {
   expect(missingDaemonTools(['orient'], required)).toContain('record_decision');
 });
 
-it('reports a legacy daemon without tools immediately as incompatible', async () => {
+it('rejects a legacy daemon without a compatible protocol immediately', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'openlore-pi-legacy-'));
   const server = createServer((_req, res) => {
     res.writeHead(200, { 'content-type': 'application/json' });
@@ -190,9 +190,7 @@ it('reports a legacy daemon without tools immediately as incompatible', async ()
     const startedAt = Date.now();
     const discovered = await ensureDaemon(dir);
     expect(Date.now() - startedAt).toBeLessThan(1000);
-    const result = await callTool(discovered!, 'orient', { task: 'x' }, dir) as { error?: string };
-    expect(result.error).toMatch(/does not report an authenticated, enforced tool surface/);
-    expect(result.error).toMatch(/stop the legacy or incompatible process manually/i);
+    expect(discovered).toBeNull();
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await rm(dir, { recursive: true, force: true });

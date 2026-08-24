@@ -202,23 +202,19 @@ describe('enforce git hook install/uninstall', () => {
     const h = await readHook(root);
     expect(h.startsWith('#!/bin/sh')).toBe(true);
     expect(h).toContain('# openlore-enforcement-hook');
-    expect(h).toContain('enforce --hook');
-    expect(h).toContain('openlore enforce hook unavailable');
-    expect(h).toContain('ENFORCE_EXIT=1');
+    expect(h).toContain("'enforce' '--hook'");
+    expect(h).not.toContain('node_modules/.bin/openlore');
+    expect(h).not.toContain('command -v openlore');
   });
 
-  it('installed hook fails actionably when no compatible CLI can run', async () => {
+  it('pins an absolute launcher instead of relying on PATH', async () => {
     const root = await mkRepo();
     await mkdir(join(root, '.git'), { recursive: true });
     await installEnforcementHook(root);
 
-    await expect(execFileAsync('/bin/sh', [join(root, '.git', 'hooks', 'pre-commit')], {
-      cwd: root,
-      env: { ...process.env, PATH: '' },
-    })).rejects.toMatchObject({
-      code: 1,
-      stderr: expect.stringMatching(/hook unavailable.*install a compatible OpenLore CLI/i),
-    });
+    const h = await readHook(root);
+    expect(h).toContain(process.execPath);
+    expect(h).not.toContain('npx');
   });
 
   it('appends after an existing decisions-gate hook, stripping a trailing `exit 0`', async () => {
@@ -272,7 +268,7 @@ describe('enforce git hook install/uninstall', () => {
       cwd: root,
       env: { ...process.env, PATH: `${join(root, 'test-bin')}${delimiter}${process.env.PATH ?? ''}` },
     });
-    expect(await readFile(join(root, 'openlore-hook-ran'), 'utf-8')).toBe('ran');
+    await expect(readFile(join(root, 'openlore-hook-ran'), 'utf-8')).rejects.toThrow();
   });
 });
 

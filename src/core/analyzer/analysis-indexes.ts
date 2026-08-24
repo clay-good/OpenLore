@@ -87,6 +87,7 @@ async function buildTextIndex(
   const patterns = mergeAnalysisPatterns(configured, include, exclude);
   const walk = await new FileWalker(rootPath, {
     includePatterns: patterns.includePatterns,
+    restrictedIncludePatterns: configured?.includePatterns,
     excludePatterns: patterns.excludePatterns,
     protectedExcludePatterns,
   }).walk();

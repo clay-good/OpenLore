@@ -5,8 +5,8 @@
  * just a one-liner.
  */
 
-import { readFile, writeFile, unlink } from 'node:fs/promises';
-import { join } from 'node:path';
+import { readFile, unlink } from 'node:fs/promises';
+import { confinedAtomicWriteFile, safeJoin } from '../../../utils/path-confinement.js';
 import {
   upsertBlock,
   extractBlock,
@@ -21,7 +21,7 @@ import {
  */
 export async function hasManagedBlock(root: string, fileName: string): Promise<boolean> {
   try {
-    const content = await readFile(join(root, fileName), 'utf8');
+    const content = await readFile(safeJoin(root, fileName), 'utf8');
     return extractBlock(content) !== null;
   } catch {
     return false;
@@ -43,7 +43,7 @@ export async function applyMarkdownBlock(
   ctx: ApplyContext,
   opts: MarkdownBlockOptions
 ): Promise<ApplyResult> {
-  const filePath = join(ctx.root, opts.fileName);
+  const filePath = safeJoin(ctx.root, opts.fileName);
   const warnings: string[] = [];
   let existing: string | null;
   try {
@@ -107,7 +107,7 @@ export async function applyMarkdownBlock(
   };
 
   if (!ctx.dryRun && action !== 'noop') {
-    await writeFile(filePath, next, 'utf8');
+    await confinedAtomicWriteFile(ctx.root, filePath, next, { preserveMode: true });
   }
 
   return { changes: [change], warnings, conflict: false };
@@ -119,7 +119,7 @@ export async function uninstallMarkdownBlock(
   /** If true, delete the file when removing the block empties it. */
   deleteIfBlockOnly: boolean
 ): Promise<ApplyResult> {
-  const filePath = join(ctx.root, fileName);
+  const filePath = safeJoin(ctx.root, fileName);
   let existing: string;
   try {
     existing = await readFile(filePath, 'utf8');
@@ -139,7 +139,7 @@ export async function uninstallMarkdownBlock(
       conflict: false,
     };
   }
-  if (!ctx.dryRun) await writeFile(filePath, removed, 'utf8');
+  if (!ctx.dryRun) await confinedAtomicWriteFile(ctx.root, filePath, removed, { preserveMode: true });
   return {
     changes: [
       {

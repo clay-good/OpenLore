@@ -888,6 +888,8 @@ export interface DecisionStore {
   sequence?: number;
   /** Set after consolidation runs — gate uses this to skip no_decisions_recorded warning */
   lastConsolidatedAt?: string;
+  /** Hash of the changed source snapshot assessed by the last consolidation. */
+  lastConsolidatedSourceFingerprint?: string;
   decisions: PendingDecision[];
 }
 

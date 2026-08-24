@@ -10,7 +10,7 @@
  */
 import fc from 'fast-check';
 import { describe, it, expect } from 'vitest';
-import { validateServeDescriptor } from '../cli/commands/serve-descriptor.js';
+import { SERVE_PROTOCOL_VERSION, validateServeDescriptor } from '../cli/commands/serve-descriptor.js';
 import { isLoopbackHost } from '../utils/loopback.js';
 
 // Hosts that must NEVER be treated as loopback: public IPs, the cloud metadata
@@ -75,6 +75,10 @@ describe('fuzz: serve descriptor validation (SSRF containment)', () => {
         token: fc.oneof(fc.string(), fc.constant(undefined)),
         startedAt: fc.oneof(fc.string(), fc.constant(undefined)),
         version: fc.oneof(fc.string(), fc.constant(undefined)),
+        protocolVersion: fc.oneof(
+          { weight: 4, arbitrary: fc.constant(SERVE_PROTOCOL_VERSION) },
+          { weight: 1, arbitrary: fc.anything() },
+        ),
       },
       { requiredKeys: ['host', 'port', 'pid'] },
     );
@@ -113,7 +117,7 @@ describe('fuzz: serve descriptor validation (SSRF containment)', () => {
   });
 
   it('accepts a well-formed loopback descriptor and preserves its host', () => {
-    const result = validateServeDescriptor({ host: '127.0.0.1', port: 8080, pid: 1234, token: 'abc' });
+    const result = validateServeDescriptor({ host: '127.0.0.1', port: 8080, pid: 1234, token: 'abc', protocolVersion: SERVE_PROTOCOL_VERSION });
     expect(result).not.toBeNull();
     expect(result?.host).toBe('127.0.0.1');
     expect(result?.port).toBe(8080);

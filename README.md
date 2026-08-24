@@ -10,7 +10,7 @@
   <a href="https://www.npmjs.com/package/openlore"><img src="https://img.shields.io/npm/v/openlore?color=2563eb&label=npm&logo=npm&logoColor=white" alt="npm version"></a>
   <a href="https://github.com/clay-good/OpenLore/actions/workflows/ci.yml"><img src="https://github.com/clay-good/OpenLore/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
   <a href="LICENSE"><img src="https://img.shields.io/npm/l/openlore?color=22c55e" alt="MIT License"></a>
-  <img src="https://img.shields.io/node/v/openlore?color=339933&logo=node.js&logoColor=white" alt="Node >=22.13">
+  <img src="https://img.shields.io/node/v/openlore?color=339933&logo=node.js&logoColor=white" alt="Node >=22.19">
   <br>
   <img src="https://img.shields.io/badge/MCP-ready-7c3aed?logo=anthropic&logoColor=white" alt="MCP ready">
   <img src="https://img.shields.io/badge/languages-18%20%2B%2012%20IaC-f97316" alt="18 languages + 12 IaC ecosystems">
@@ -424,7 +424,7 @@ We'd rather you know these up front. Last validated against the code on 2026-07-
 
 ## Requirements
 
-- **Node.js 22.13+** (the first line where the built-in `node:sqlite` is available without runtime flags).
+- **Node.js 22.19+** (`node:sqlite` is available without runtime flags and all runtime dependencies support this floor).
 - **No API key** for `analyze`, `drift`, `mcp`, `init`, and every governance/navigation tool.
 - **Provider access** only for standalone `generate`, `verify`, and `drift --use-llm`. Agent-hosted Generate/Repair uses the connected host model and needs no additional OpenLore key:
   ```bash

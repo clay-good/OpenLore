@@ -141,6 +141,8 @@ export interface RepositoryMapperOptions {
   maxFiles?: number;
   /** Patterns to force-include, overriding gitignore and excludePatterns */
   includePatterns?: string[];
+  /** Repository patterns that may override defaults, but never ignore files. */
+  restrictedIncludePatterns?: string[];
   /** Additional patterns to exclude */
   excludePatterns?: string[];
   /** Generated directories that cannot be brought into the source corpus by an include. */
@@ -562,6 +564,7 @@ export class RepositoryMapper {
     this.options = {
       maxFiles: options.maxFiles ?? DEFAULT_MAX_FILES,
       includePatterns: options.includePatterns ?? [],
+      restrictedIncludePatterns: options.restrictedIncludePatterns ?? [],
       excludePatterns: options.excludePatterns ?? [],
       scoringConfig: options.scoringConfig ?? {},
       onProgress: options.onProgress ?? (() => {}),
@@ -800,6 +803,7 @@ export class RepositoryMapper {
     const walkerOptions: FileWalkerOptions = {
       maxFiles: this.options.maxFiles,
       includePatterns: this.options.includePatterns,
+      restrictedIncludePatterns: this.options.restrictedIncludePatterns,
       excludePatterns: this.options.excludePatterns,
       protectedExcludePatterns: this.options.protectedExcludePatterns,
       onProgress: (progress) => {

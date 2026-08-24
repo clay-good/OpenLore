@@ -9,6 +9,11 @@ import { tmpdir } from 'node:os';
 import { viewCommand, sanitizeErrorMessage, safePath } from './view.js';
 import { safeJoin } from '../../utils/path-confinement.js';
 
+vi.mock('../../utils/path-confinement.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../utils/path-confinement.js')>()),
+  confinedAtomicWriteFile: vi.fn().mockResolvedValue(undefined),
+}));
+
 // ============================================================================
 // MOCKS
 // ============================================================================
@@ -424,19 +429,17 @@ describe('view server API guard wiring', () => {
 
   it('writes a discovery descriptor on start', async () => {
     await captureViteConfig();
-    const { writeFile } = await import('node:fs/promises');
-    const wrote = vi.mocked(writeFile).mock.calls.find(([p]) => String(p).endsWith('view.json'));
+    const { confinedAtomicWriteFile } = await import('../../utils/path-confinement.js');
+    const wrote = vi.mocked(confinedAtomicWriteFile).mock.calls.find(([, p]) => String(p).endsWith('view.json'));
     expect(wrote).toBeDefined();
-    const payload = JSON.parse(String(wrote![1]));
+    const payload = JSON.parse(String(wrote![2]));
     expect(payload).toMatchObject({ pid: process.pid, host: expect.any(String) });
     expect(typeof payload.token).toBe('string');
     expect(payload.token.length).toBeGreaterThan(0);
     // The descriptor carries the token that gates /api/chat, so it must not be
     // world-readable: another local process could otherwise read it and drive the
     // LLM-backed route the token exists to protect.
-    expect(wrote![2]).toMatchObject({ mode: 0o600 });
-    const { chmod } = await import('node:fs/promises');
-    expect(vi.mocked(chmod).mock.calls.some(([p, m]) => String(p).endsWith('view.json') && m === 0o600)).toBe(true);
+    expect(wrote![3]).toMatchObject({ mode: 0o600 });
   });
 
   it('routes spec traversal through the bounded symlink-skipping collector', async () => {

@@ -12,15 +12,19 @@
  */
 
 import { spawn } from 'node:child_process';
+import { closeSync, mkdirSync, openSync } from 'node:fs';
 import { join } from 'node:path';
 import { FULL_PRESET, OPENLORE_DIR } from '../../constants.js';
 import {
   readServeDescriptor,
+  readServeDescriptorState,
+  incompatibleServeDescriptorIsLive,
   serveHttpBaseUrl,
   validateServeHealth,
   type ServeDescriptor,
 } from '../../cli/commands/serve-descriptor.js';
 import { OPENLORE_TOKEN_HEADER } from '../../cli/commands/local-http-guard.js';
+import { safeJoin } from '../../utils/path-confinement.js';
 
 /** A resolved, reachable daemon. */
 export interface ServeEndpoint {
@@ -45,7 +49,7 @@ export function isServePresetRejection(error: unknown): error is ServeHttpError 
     && /not available in the active .* preset/i.test(error.message);
 }
 
-const SPAWN_HEALTH_TIMEOUT_MS = 8000;
+const SPAWN_HEALTH_TIMEOUT_MS = 30_000;
 const HEALTH_POLL_MS = 150;
 // Per-probe timeout for the reuse check. Generous so a cold Node HTTP server on
 // Windows isn't misread as dead — a false negative spawns a second daemon and
@@ -121,6 +125,8 @@ export async function ensureServeDaemon(
   directory: string,
   opts: { spawn?: boolean } = {},
 ): Promise<ServeEndpoint | null> {
+  const announced = await readServeDescriptorState(descriptorPath(directory));
+  if (announced.kind === 'incompatible' && await incompatibleServeDescriptorIsLive(announced.descriptor, directory)) return null;
   const existing = await readDescriptor(directory);
   if (existing && (await healthy(existing, directory))) return endpointOf(existing);
 
@@ -129,16 +135,30 @@ export async function ensureServeDaemon(
   // Spawn via the same CLI entry that's running us (works installed or in dev).
   const cli = process.argv[1];
   if (!cli) return null;
+  let logFd: number | undefined;
   try {
+    const isWin = process.platform === 'win32';
+    if (isWin) {
+      const openloreDir = safeJoin(directory, OPENLORE_DIR);
+      mkdirSync(openloreDir, { recursive: true });
+      logFd = openSync(safeJoin(directory, join(OPENLORE_DIR, 'serve.log')), 'a');
+    }
     const child = spawn(
       process.execPath,
       [cli, ...serveSpawnArgs(directory)],
-      { cwd: directory, stdio: 'ignore', detached: true, windowsHide: true },
+      {
+        cwd: directory,
+        stdio: isWin ? ['ignore', logFd!, logFd!] : 'ignore',
+        detached: !isWin,
+        windowsHide: true,
+      },
     );
     child.on('error', () => {}); // swallow — caller falls back to in-process
     child.unref();
   } catch {
     return null;
+  } finally {
+    if (logFd !== undefined) closeSync(logFd);
   }
 
   const deadline = Date.now() + SPAWN_HEALTH_TIMEOUT_MS;
