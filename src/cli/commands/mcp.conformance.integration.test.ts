@@ -24,6 +24,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { ErrorCode, SUPPORTED_PROTOCOL_VERSIONS } from '@modelcontextprotocol/sdk/types.js';
 import { TOOL_DEFINITIONS, TOOL_PRESETS } from './mcp.js';
 import { startServe } from './serve.js';
+import { SERVE_PROTOCOL_VERSION } from './serve-descriptor.js';
 
 const REPO_ROOT = resolve(import.meta.dirname, '../../../');
 const MCP_BIN = join(REPO_ROOT, 'dist/cli/index.js');
@@ -401,6 +402,7 @@ describe('spec — lean default surface + breadth pointer (via SDK Client over s
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify({
           ok: true,
+          protocolVersion: SERVE_PROTOCOL_VERSION,
           presetDispatchEnforced: true,
           root: dir,
           pid: process.pid,
@@ -429,6 +431,7 @@ describe('spec — lean default surface + breadth pointer (via SDK Client over s
       port: address.port,
       pid: process.pid,
       host: '127.0.0.1',
+      protocolVersion: SERVE_PROTOCOL_VERSION,
       startedAt: new Date().toISOString(),
       version: 'test',
     }));
