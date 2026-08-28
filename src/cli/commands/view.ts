@@ -6,7 +6,7 @@
  */
 
 import { Command } from 'commander';
-import { withRelaxedTls } from '../../core/services/tls-scope.js';
+import { llmTlsRelaxed, withRelaxedTls } from '../../core/services/tls-scope.js';
 import { readFile, unlink } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { fileExists } from '../../utils/command-helpers.js';
@@ -604,7 +604,7 @@ export const viewCommand = new Command('view')
                     const r = await withRelaxedTls(() => fetch(
                       `https://generativelanguage.googleapis.com/v1beta/models?key=${cfg.apiKey}`,
                       { signal: modelTimeout }
-                    ));
+                    ), llmTlsRelaxed());
                     if (r.ok) {
                       const data = await r.json() as { models?: Array<{ name: string; supportedGenerationMethods?: string[] }> };
                       models = (data.models ?? [])
@@ -615,7 +615,7 @@ export const viewCommand = new Command('view')
                     const r = await withRelaxedTls(() => fetch(`${cfg.baseUrl}/models`, {
                       headers: { 'x-api-key': cfg.apiKey, 'anthropic-version': '2023-06-01' },
                       signal: modelTimeout,
-                    }));
+                    }), llmTlsRelaxed());
                     if (r.ok) {
                       const data = await r.json() as { data?: Array<{ id: string }> };
                       models = (data.data ?? []).map(m => m.id);
@@ -635,7 +635,7 @@ export const viewCommand = new Command('view')
                     }
                     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
                     if (cfg.apiKey) headers['Authorization'] = `Bearer ${cfg.apiKey}`;
-                    const r = await withRelaxedTls(() => fetch(`${cfg.baseUrl}/models`, { headers, signal: modelTimeout }));
+                    const r = await withRelaxedTls(() => fetch(`${cfg.baseUrl}/models`, { headers, signal: modelTimeout }), llmTlsRelaxed());
                     if (r.ok) {
                       const data = await r.json() as { data?: Array<{ id: string }> };
                       models = (data.data ?? []).map(m => m.id).sort();

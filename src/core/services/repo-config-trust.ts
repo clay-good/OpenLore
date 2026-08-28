@@ -30,6 +30,7 @@
 
 import { logger } from '../../utils/logger.js';
 import { isLoopbackHost } from '../../utils/loopback.js';
+import { LLM_TLS_ENV, envTlsOptOut } from './tls-scope.js';
 
 /** True when `url` names the loopback interface (and so cannot reach the network). */
 function isLoopbackUrl(url: string): boolean {
@@ -111,7 +112,8 @@ export function rejectRepoConfiguredTlsOptOut(field: string, value: boolean | un
     logger.warning(
       `Ignoring ${field}=true from .openlore/config.json: a repository may not disable ` +
         'TLS verification. Set it outside the repo to do so deliberately — ' +
-        '--insecure for the LLM path, EMBED_SKIP_SSL_VERIFY=1 for embeddings.',
+        '--insecure or LLM_SKIP_SSL_VERIFY=1 for the LLM path, ' +
+        'EMBED_SKIP_SSL_VERIFY=1 for embeddings.',
     );
   }
   return false;
@@ -156,10 +158,15 @@ export function resolveTrustedSslVerify(
   configSslVerify: boolean | undefined,
 ): boolean {
   if (flagInsecure != null) return !flagInsecure;
+  // The operator's environment ranks with the flag, not with the repo config: it is
+  // supplied by the person running the command. It is the only lever reaching the
+  // paths that never see a command line (the mcp daemon, the pre-commit gate).
+  if (envTlsOptOut(LLM_TLS_ENV)) return false;
   if (configSslVerify === false) {
     logger.warning(
       'Ignoring llm.sslVerify=false from .openlore/config.json: a repository may not ' +
-        'disable TLS verification. Pass --insecure to do so deliberately.',
+        'disable TLS verification. Pass --insecure, or set LLM_SKIP_SSL_VERIFY=1, ' +
+        'to do so deliberately.',
     );
   }
   return true;

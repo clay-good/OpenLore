@@ -46,6 +46,15 @@ EMBED_API_KEY=sk-...         # optional for local servers
 openlore analyze             # embedding is automatic when configured
 ```
 
+Both `EMBED_BASE_URL` and `EMBED_MODEL` are required — setting only the URL falls back to the
+keyword index (openlore warns when it sees that). For an endpoint with a self-signed
+certificate, see [Self-signed certificates](configuration.md#self-signed-certificates):
+prefer `NODE_EXTRA_CA_CERTS`, or `EMBED_SKIP_SSL_VERIFY=1` when the CA is unavailable.
+
+> A non-loopback `embedding.baseUrl` committed in `.openlore/config.json` is **refused** —
+> a repository may not choose where its own source text is sent. Set `EMBED_BASE_URL` in your
+> environment to select a remote endpoint deliberately.
+
 **Config file (`.openlore/config.json`):**
 ```json
 {
