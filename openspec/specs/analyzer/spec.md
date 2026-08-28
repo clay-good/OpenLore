@@ -8110,6 +8110,19 @@ numbers of imports below it.
 > Change: fix-export-parser-fidelity
 > Date: 2026-07-19
 
+### Requirement: ScopeEveryTlsOptoutToOneNetworkSurfaceAddNoUnionSwitch
+
+This domain SHALL conform to the canonical statement of decision `b8520b68`, which lives in the
+`llm` domain — see [llm/spec.md](../llm/spec.md).
+
+#### Scenario: The canonical statement governs
+
+- **GIVEN** decision `b8520b68` recorded in the `llm` domain
+- **WHEN** this domain's behavior touches that decision's surface
+- **THEN** it satisfies the canonical requirement as stated in [llm/spec.md](../llm/spec.md)
+
+> Decision pointer: b8520b68 — "Scope every TLS opt-out to one network surface; add no union switch" is recorded in `openspec/specs/llm/spec.md`; it also affects this domain.
+
 ## Technical Notes
 
 - **Implementation**: `src/core/analyzer/repository-mapper.ts, src/api/types.ts, src/core/analyzer/embedding-service.ts, src/core/analyzer/subgraph-extractor.ts, src/core/analyzer/architecture-writer.ts, src/core/analyzer/dependency-graph.ts, src/core/analyzer/spec-vector-index.ts, src/core/analyzer/file-walker.ts, src/core/analyzer/import-resolver-bridge.ts, src/core/analyzer/refactor-analyzer.ts, src/core/analyzer/vector-index.ts, src/core/analyzer/import-parser.ts, src/core/analyzer/signature-extractor.ts, src/core/analyzer/artifact-generator.ts, src/core/analyzer/cpp-header-resolver.ts, src/core/analyzer/call-graph.ts, src/core/analyzer/duplicate-detector.ts, src/core/analyzer/type-inference-engine.ts, src/core/analyzer/significance-scorer.ts, src/core/analyzer/http-route-parser.ts, src/core/analyzer/ast-chunker.ts, src/core/analyzer/codebase-digest.ts, src/utils/progress.ts, src/utils/prompts.ts, src/utils/logger.ts, src/utils/shutdown.ts`
