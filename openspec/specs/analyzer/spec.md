@@ -5497,6 +5497,19 @@ site with a statically-known method and path SHALL match extracted routes into t
 - **WHEN** the projection runs
 - **THEN** no `http_endpoint` edge is emitted for that call site
 
+### Requirement: ScopeEveryTlsOptoutToOneNetworkSurfaceAddNoUnionSwitch
+
+This domain SHALL conform to the canonical statement of decision `b8520b68`, which lives in the
+`llm` domain — see [llm/spec.md](../llm/spec.md).
+
+#### Scenario: The canonical statement governs
+
+- **GIVEN** decision `b8520b68` recorded in the `llm` domain
+- **WHEN** this domain's behavior touches that decision's surface
+- **THEN** it satisfies the canonical requirement as stated in [llm/spec.md](../llm/spec.md)
+
+> Decision pointer: b8520b68 — "Scope every TLS opt-out to one network surface; add no union switch" is recorded in `openspec/specs/llm/spec.md`; it also affects this domain.
+
 ## Sub-components
 
 > `SignatureExtractor` is an orchestrator. Each sub-component below implements one logical block.
@@ -8109,19 +8122,6 @@ numbers of imports below it.
 
 > Change: fix-export-parser-fidelity
 > Date: 2026-07-19
-
-### Requirement: ScopeEveryTlsOptoutToOneNetworkSurfaceAddNoUnionSwitch
-
-This domain SHALL conform to the canonical statement of decision `b8520b68`, which lives in the
-`llm` domain — see [llm/spec.md](../llm/spec.md).
-
-#### Scenario: The canonical statement governs
-
-- **GIVEN** decision `b8520b68` recorded in the `llm` domain
-- **WHEN** this domain's behavior touches that decision's surface
-- **THEN** it satisfies the canonical requirement as stated in [llm/spec.md](../llm/spec.md)
-
-> Decision pointer: b8520b68 — "Scope every TLS opt-out to one network surface; add no union switch" is recorded in `openspec/specs/llm/spec.md`; it also affects this domain.
 
 ## Technical Notes
 
