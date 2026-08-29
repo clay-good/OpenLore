@@ -72,7 +72,7 @@ Every existing language is wired in exactly four places. Replicate this for each
 - A `.h` in a project that contains any `.cpp`/`.cc`/`.cxx` → treat as **C++** (current behavior; keep it).
 - A `.h` in a project with `.c` files and no C++ files → treat as **C**.
 - Ambiguous / standalone `.h` → default to **C++** (status quo; C++ grammar is a superset and parses C headers acceptably).
-Implement this as a small, tested heuristic. Because the C++ grammar is a superset, misclassifying a C header as C++ is low-harm; the reverse (a C++ header as C) loses templates/namespaces, so bias toward C++. Document the rule in `docs/languages.md`.
+Implement this as a small, tested heuristic. Because the C++ grammar is a superset, misclassifying a C header as C++ is low-harm; the reverse (a C++ header as C) loses templates/namespaces, so bias toward C++. Document the rule in `docs/language-support.md`.
 
 ## Per-language deliverables and gotchas
 
@@ -121,7 +121,7 @@ src/core/analyzer/signature-extractor.ts    # detectLanguage extensions; .h heur
 src/core/analyzer/file-walker.ts            # confirm extensions walked (likely no change)
 package.json                                # tree-sitter-c-sharp, -kotlin, -php, -c, -scala, -dart,
                                             #   -lua, -elixir, -bash (justify each in PR body)
-docs/languages.md                           # supported languages, per-language extraction limits, .h rule
+docs/language-support.md                    # supported languages, per-language extraction limits, .h rule
 README.md                                   # "Languages" section: add the nine; note phantom-bug fix
 test/  →  co-located *.test.ts + fixtures   # NOTE: top-level test/ is gitignored here. Co-locate tests
                                             #   next to source; put fixtures under

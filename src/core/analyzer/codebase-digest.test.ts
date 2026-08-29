@@ -2,7 +2,7 @@
  * Tests for codebase-digest — generateCodebaseDigest
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { mkdtemp, readFile, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -102,7 +102,7 @@ describe('generateCodebaseDigest', () => {
     expect(content).toContain('get_language_support');       // points to the runtime tool
   });
 
-  it('renders language coverage byte-identically for a fixed registry and graph', async () => {
+  it('renders the digest byte-identically across dates for a fixed registry and graph', async () => {
     const tmpDir = await mkdtemp(join(tmpdir(), 'digest-test-'));
     const cg = makeCallGraph({
       nodes: [
@@ -110,12 +110,31 @@ describe('generateCodebaseDigest', () => {
       ],
     });
 
-    await generateCodebaseDigest(makeContext(cg), null, { rootPath: tmpDir, outputDir: tmpDir });
-    const first = await readFile(join(tmpDir, 'CODEBASE.md'), 'utf-8');
-    await generateCodebaseDigest(makeContext(cg), null, { rootPath: tmpDir, outputDir: tmpDir });
-    const second = await readFile(join(tmpDir, 'CODEBASE.md'), 'utf-8');
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+      await generateCodebaseDigest(makeContext(cg), null, { rootPath: tmpDir, outputDir: tmpDir });
+      const first = await readFile(join(tmpDir, 'CODEBASE.md'), 'utf-8');
+      vi.setSystemTime(new Date('2027-12-31T23:59:59Z'));
+      await generateCodebaseDigest(makeContext(cg), null, { rootPath: tmpDir, outputDir: tmpDir });
+      const second = await readFile(join(tmpDir, 'CODEBASE.md'), 'utf-8');
 
-    expect(second).toBe(first);
+      expect(second).toBe(first);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('discloses full registry backing when the repository detects no languages', async () => {
+    const tmpDir = await mkdtemp(join(tmpdir(), 'digest-test-'));
+
+    await generateCodebaseDigest(makeContext(makeCallGraph()), null, { rootPath: tmpDir, outputDir: tmpDir });
+    const content = await readFile(join(tmpDir, 'CODEBASE.md'), 'utf-8');
+
+    expect(content).toContain('## Language coverage');
+    expect(content).toContain('| Language | signatures | callGraph | testDetection |');
+    expect(content).not.toMatch(/^\| [^|]+ \| [✓·] \|/m);
+    expect(content).toMatch(/Registry additionally backs: [^.]*Java[^.]*Rust[^.]*Swift/);
   });
 
   it('includes Entry points section when entryPoints are present', async () => {
