@@ -46,7 +46,6 @@ New here? Start with [install.md](install.md) — one command wires your agent a
 | I want to… | Canonical page |
 |------------|----------------|
 | Know what OpenLore extracts per language (matrix, add-a-language) | **[language-support.md](language-support.md)** |
-| Read the per-language narrative / examples | [languages.md](languages.md) (cross-links to the canonical matrix above) |
 | Understand Infrastructure-as-Code support | [iac.md](iac.md) |
 
 ## Specs & OpenSpec

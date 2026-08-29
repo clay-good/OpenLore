@@ -93,9 +93,29 @@ describe('generateCodebaseDigest', () => {
     await generateCodebaseDigest(makeContext(cg), null, { rootPath: tmpDir, outputDir: tmpDir });
     const content = await readFile(join(tmpDir, 'CODEBASE.md'), 'utf-8');
     expect(content).toContain('## Language coverage');
+    expect(content).toContain('scoped to languages detected in this repository');
     expect(content).toContain('| Language | signatures | callGraph | testDetection |');
     expect(content).toMatch(/\| Go \| ✓ \| ✓ \| ✓ \|/);    // Go: signatures + callGraph + test detection
+    expect(content).toContain('Registry additionally backs:');
+    expect(content).toMatch(/Registry additionally backs: [^.]*Java[^.]*Rust[^.]*Swift/);
+    expect(content).not.toMatch(/Registry additionally backs: [^.]*TypeScript/);
     expect(content).toContain('get_language_support');       // points to the runtime tool
+  });
+
+  it('renders language coverage byte-identically for a fixed registry and graph', async () => {
+    const tmpDir = await mkdtemp(join(tmpdir(), 'digest-test-'));
+    const cg = makeCallGraph({
+      nodes: [
+        { id: 'a::fn', name: 'fn', filePath: 'a.ts', fanIn: 0, fanOut: 0, isAsync: false, language: 'TypeScript', startIndex: 0, endIndex: 1 },
+      ],
+    });
+
+    await generateCodebaseDigest(makeContext(cg), null, { rootPath: tmpDir, outputDir: tmpDir });
+    const first = await readFile(join(tmpDir, 'CODEBASE.md'), 'utf-8');
+    await generateCodebaseDigest(makeContext(cg), null, { rootPath: tmpDir, outputDir: tmpDir });
+    const second = await readFile(join(tmpDir, 'CODEBASE.md'), 'utf-8');
+
+    expect(second).toBe(first);
   });
 
   it('includes Entry points section when entryPoints are present', async () => {

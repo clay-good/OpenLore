@@ -135,11 +135,19 @@ export async function generateCodebaseDigest(
         cg.nodes.filter(n => !n.isExternal && n.language && n.language !== 'unknown').map(n => n.language),
       )].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
       if (detected.length > 0) {
+        const detectedSet = new Set(detected);
+        const additionallyBacked = languageCoverageMatrix().rows
+          .filter(row => row.supportedCount > 0 && !detectedSet.has(row.language))
+          .map(row => row.language);
         lines.push('## Language coverage');
-        lines.push('What OpenLore extracts per detected language (`✓` backed, `·` fail-soft / not claimed). A `·` cell means a quiet result for that capability is "unsupported here", not "nothing found".');
+        lines.push('This table is scoped to languages detected in this repository (`✓` backed, `·` fail-soft / not claimed). A `·` cell means a quiet result for that capability is "unsupported here", not "nothing found".');
         lines.push('');
         lines.push(...renderCoverageMatrixMarkdown(languageCoverageMatrix(detected)));
         lines.push('');
+        if (additionallyBacked.length > 0) {
+          lines.push(`Registry additionally backs: ${additionallyBacked.join(', ')}. Query \`get_language_support\` for the full matrix.`);
+          lines.push('');
+        }
         lines.push('> Query this at runtime with the `get_language_support` MCP tool (opt-in). See the "add a language" checklist in the docs.');
         lines.push('');
       }

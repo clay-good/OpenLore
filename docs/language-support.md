@@ -2,8 +2,7 @@
 
 OpenLore's reach is its languages. This page is the canonical reference for **what OpenLore
 extracts per language**, how that is made observable, and the minimal checklist for adding or
-widening a language. (For the per-language narrative and examples, see
-[languages.md](languages.md).)
+widening a language.
 
 ## The capability set
 
@@ -20,7 +19,7 @@ Each language backs a fixed, closed set of capabilities. A capability is either 
 | `typeInference` | Lightweight receiver-type inference, used to resolve method calls to their class. | `TYPE_INFERENCE_LANGUAGES` (`type-inference-engine.ts`) |
 | `styleFingerprint` | Descriptive per-language idiom-frequency profile (function form, binding, conditional, async, string, naming case) with an evidence floor + enforcement-awareness. Backed for TypeScript/JavaScript/Python/Go. | `STYLE_FINGERPRINT_LANGUAGES` (`style-fingerprint.ts`) |
 | `iacProjection` | Infrastructure-as-code projection (resources/edges) onto the unified graph. | `isIacLanguage()` / `IAC_LANGUAGES` (`iac/types.ts`) |
-| `crossServiceHttp` | Cross-service API topology: outbound HTTP client call sites and/or server route registrations are matched into `http_endpoint` edges across the process (and, under federation, the repo) boundary. Clients: TS/JS (`fetch`/`axios`/`ky`/`got`), Python (`requests`/`httpx`), and Go (`net/http`); routes: TS/JS (Express/NestJS/Next), Python (FastAPI/Flask/Django), Java (Spring/JAX-RS). | `CROSS_SERVICE_HTTP_LANGUAGES` (`http-route-parser.ts`) |
+| `crossServiceHttp` | Cross-service API topology: outbound HTTP client call sites and/or server route registrations are matched into `http_endpoint` edges across the process (and, under federation, the repo) boundary. Clients: TS/JS (`fetch`/`axios`/`ky`/`got`), Python (`requests`/`httpx`), and Go (`net/http`); routes: TS/JS (Express/NestJS/Next), Python (FastAPI/Flask/Django), Java (Spring/JAX-RS). | `CROSS_SERVICE_HTTP_LANGUAGES` (`http-capability.ts`) |
 | `errorPropagation` | Static exception escape/handler extraction for TypeScript, JavaScript, Python, Java, and C#; Java/C# typed handlers are exact-name lower bounds, with finally/resource-cleanup limits disclosed. Go uses a separate value-shaped model for proven returned-error positions and a narrow unconditional deferred-recover pattern; ambiguous result types, unwind ordering, and unresolved calls are boundaries, never exception terminology. | `ERROR_PROPAGATION_LANGUAGES` (`exception-flow.ts`) |
 
 ## The registry is derived, not hand-listed
@@ -43,6 +42,55 @@ coverage matrix is worse than none.
 > its detected language as `TypeScript` in some repo-level views even though JS is a first-class
 > registry key (named-mode `get_language_support` for `JavaScript` reports its real capabilities, and
 > the style fingerprint slices JS and TS apart by the file's actual language).
+
+## Supported languages
+
+OpenLore extracts a static call graph using the same `FunctionNode`, `CallEdge`, and `ClassNode`
+primitives for every language below. A call becomes an edge only when its target resolves to a
+function declared in the project. Dynamic dispatch, reflection, `eval`, and computed or variable
+call targets emit no edge rather than a guessed one.
+
+| Language | Extensions | Grouping | Notes |
+|---|---|---|---|
+| TypeScript | `.ts` `.tsx` `.mts` `.cts` | classes | TSX uses the TSX grammar. |
+| JavaScript | `.js` `.jsx` `.mjs` `.cjs` | classes | Parsed by the TypeScript extractor. |
+| Python | `.py` | classes | — |
+| Go | `.go` | structs (file-module) | — |
+| Rust | `.rs` | impl/traits | — |
+| Ruby | `.rb` | classes/modules | — |
+| Java | `.java` | classes/interfaces | — |
+| C++ | `.cpp` `.cc` `.cxx` `.hpp` `.h` | classes/namespaces | `.h` defaults to C++; see below. |
+| Swift | `.swift` | classes/structs | — |
+| C# | `.cs` | namespace/class/struct/record/interface | Methods, constructors, and local functions. |
+| Kotlin | `.kt` `.kts` | class/object/interface/companion | Extension functions record the receiver type in `className`. |
+| PHP | `.php` `.phtml` | class/trait/interface/enum | Instance, static, and free-function calls. |
+| C | `.c` `.h` | file scope | Functions and calls; no classes. |
+| Scala | `.scala` `.sc` | object/class/trait | Methods plus instance and object calls. |
+| Dart | `.dart` | class/mixin/extension/enum | Functions, methods, and constructors. |
+| Lua | `.lua` | file scope | Named, local, dotted, and method functions. |
+| Elixir | `.ex` `.exs` | `defmodule` | Multi-clause definitions collapse to one node with a clause count. |
+| Bash | `.sh` `.bash` | file scope | Edges target project-defined functions, not external binaries. |
+
+### The `.h` rule
+
+Both C and C++ claim `.h` headers. A header in a project containing any C++ source (`.cpp`, `.cc`,
+`.cxx`, or `.hpp`) is C++; a header in a project with C sources and no C++ source is C; and a
+standalone or ambiguous header defaults to C++. The C++ grammar is a superset, so this bias avoids
+losing templates and namespaces.
+
+### Graceful grammar degradation
+
+If a native grammar is unavailable or ABI-incompatible, OpenLore warns once, keeps the file in
+keyword search, and skips graph extraction for that language without aborting analysis. Lua and
+Dart use portable WASM grammars because their native builds do not match the pinned host binding.
+Each uses an isolated WASM module; if that backend is unavailable, they degrade in the same way.
+
+### Out of scope
+
+SQL, R, MATLAB, HTML/CSS, and Markdown/JSON/YAML configuration are not call-graph-shaped (except
+where a format is explicitly supported as Infrastructure-as-Code). Deferred general-purpose
+languages include Objective-C, Perl, Haskell, Clojure, F#, Groovy, OCaml, Zig, Nim, Julia, Erlang,
+VB.NET, PowerShell, Fortran, and COBOL.
 
 ## The fail-soft contract (uniform)
 
@@ -90,7 +138,7 @@ an existing one to a new capability:
    - `iacProjection`: add the ecosystem to `IAC_LANGUAGES` and its projector under `analyzer/iac/`.
    - `crossServiceHttp`: add a client idiom to `extractHttpCalls` and/or a route framework to the
      route extractors (`extractRouteDefinitions`/`extractTsRouteDefinitions`/`extractJavaRouteDefinitions`),
-     then add `L` to `HTTP_CLIENT_LANGUAGES` and/or `HTTP_ROUTE_LANGUAGES` (`http-route-parser.ts`);
+     then add `L` to `HTTP_CLIENT_LANGUAGES` and/or `HTTP_ROUTE_LANGUAGES` (`http-capability.ts`);
      the union `CROSS_SERVICE_HTTP_LANGUAGES` drives the registry column.
    - `errorPropagation`: add an `L` branch to `specFor`/`getExceptionParser` in `exception-flow.ts`
      (the per-language throw/try/catch node-type spec + a tree-sitter parser) and add `L` to
