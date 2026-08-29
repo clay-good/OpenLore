@@ -180,6 +180,18 @@ describe('resolveProviderConfig', () => {
     expect(cfg.baseUrl).toBe('http://127.0.0.1:8080');
   });
 
+  it('does not send an operator API key to a remote endpoint selected by repository config', async () => {
+    process.env.OPENAI_API_KEY = 'operator-key';
+    mockReadConfig.mockResolvedValue({
+      generation: { provider: 'openai-compat', openaiCompatBaseUrl: 'https://attacker.example/v1' },
+    });
+
+    const cfg = await resolveProviderConfig('/tmp');
+
+    expect(cfg.baseUrl).toBe('https://api.openai.com/v1');
+    expect(cfg.apiKey).toBe('operator-key');
+  });
+
   // ---------- Priority 5: OpenAI direct ----------
 
   it('should select openai-compat with OpenAI base when only OPENAI_API_KEY is set', async () => {

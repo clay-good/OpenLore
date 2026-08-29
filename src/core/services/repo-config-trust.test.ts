@@ -91,6 +91,21 @@ describe('rejectRepoConfiguredTlsOptOut', () => {
     );
   });
 
+  it('names the operator-supplied alternative so the refusal is actionable', () => {
+    // Spec `operator-tls-trust`: the refusal must tell the operator how to opt out
+    // deliberately, otherwise a legitimate internal endpoint is simply a dead end.
+    rejectRepoConfiguredTlsOptOut('embedding.skipSslVerify', true);
+    const message = vi.mocked(logger.warning).mock.calls[0][0];
+    expect(message).toContain('EMBED_SKIP_SSL_VERIFY');
+    expect(message).toContain('LLM_SKIP_SSL_VERIFY');
+
+    vi.mocked(logger.warning).mockClear();
+    resolveTrustedSslVerify(undefined, false);
+    const llmMessage = vi.mocked(logger.warning).mock.calls[0][0];
+    expect(llmMessage).toMatch(/--insecure/);
+    expect(llmMessage).toContain('LLM_SKIP_SSL_VERIFY');
+  });
+
   it('stays quiet when the field was never set', () => {
     expect(rejectRepoConfiguredTlsOptOut('embedding.skipSslVerify', undefined)).toBe(false);
     expect(vi.mocked(logger.warning)).not.toHaveBeenCalled();
@@ -204,5 +219,47 @@ describe('every credential-bearing config read goes through the trust boundary',
     };
     for (const r of ['src/api', 'src/cli/commands', 'src/core']) walk(r);
     expect(offenders, `Repo-config TLS opt-outs still honoured:\n${offenders.join('\n')}`).toEqual([]);
+  });
+});
+
+/**
+ * `LLM_SKIP_SSL_VERIFY` closes the asymmetry where embeddings had an env-only opt-out
+ * and the LLM path had a flag-only one — leaving the surfaces that never see a command
+ * line (the `openlore mcp` daemon, the pre-commit decisions gate) with no lever at all.
+ *
+ * It ranks WITH the flag, not with the repo config: it comes from the operator's
+ * environment. The repo's own `llm.sslVerify: false` stays refused regardless.
+ */
+describe('resolveTrustedSslVerify — operator env opt-out', () => {
+  beforeEach(() => {
+    delete process.env.LLM_SKIP_SSL_VERIFY;
+  });
+
+  it('verifies by default', () => {
+    expect(resolveTrustedSslVerify(undefined, undefined)).toBe(true);
+  });
+
+  it('honours LLM_SKIP_SSL_VERIFY=1 where no flag was passed (daemon / pre-commit gate)', () => {
+    process.env.LLM_SKIP_SSL_VERIFY = '1';
+    expect(resolveTrustedSslVerify(undefined, undefined)).toBe(false);
+    delete process.env.LLM_SKIP_SSL_VERIFY;
+  });
+
+  it('lets an explicit --insecure=false override the ambient env', () => {
+    process.env.LLM_SKIP_SSL_VERIFY = '1';
+    // `--insecure` absent-but-resolved (false) is an explicit operator decision on
+    // this invocation and must win over the ambient variable.
+    expect(resolveTrustedSslVerify(false, undefined)).toBe(true);
+    delete process.env.LLM_SKIP_SSL_VERIFY;
+  });
+
+  it('still refuses a repo-supplied opt-out when the env is not set', () => {
+    expect(resolveTrustedSslVerify(undefined, false)).toBe(true);
+  });
+
+  it('does not respond to the embedding-scoped key', () => {
+    process.env.EMBED_SKIP_SSL_VERIFY = '1';
+    expect(resolveTrustedSslVerify(undefined, undefined)).toBe(true);
+    delete process.env.EMBED_SKIP_SSL_VERIFY;
   });
 });

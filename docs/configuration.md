@@ -39,6 +39,9 @@
 | `EMBED_BASE_URL` | embedding (remote) | Base URL for a remote OpenAI-compatible embedding API (e.g. `http://localhost:11434/v1`) |
 | `EMBED_MODEL` | embedding (remote) | Remote embedding model name (e.g. `nomic-embed-text`) |
 | `EMBED_API_KEY` | embedding (remote) | API key for the remote embedding service (defaults to `OPENAI_API_KEY`) |
+| `EMBED_SKIP_SSL_VERIFY` | embedding (remote) | Set to `1`/`true` to skip TLS certificate verification for **embedding** requests only (self-signed internal server). See [Self-signed certificates](#self-signed-certificates) |
+| `LLM_SKIP_SSL_VERIFY` | LLM providers | Set to `1`/`true` to skip TLS certificate verification for **LLM** requests only. Equivalent to `--insecure`, but reaches the paths that never see a command line (the `openlore mcp` daemon, the pre-commit decisions gate) |
+| `NODE_EXTRA_CA_CERTS` | -- | Path to a PEM **CA** certificate to trust in addition to the system roots. Preferred over either skip flag: it makes the certificate verify rather than disabling the check |
 | `DEBUG` | -- | Enable stack traces on errors |
 | `CI` | -- | Auto-detected; enables timestamps in output |
 | `OPENLORE_NO_AUTO_ANALYZE` | -- | Disable the MCP server's cold-start self-bootstrap (no background index build on first run) |
@@ -51,6 +54,42 @@
 | `OPENLORE_HEAP_MB` | CLI | Force the analyzer's V8 old-space heap to this many MB (skips auto-detection). Equivalent to setting `--max-old-space-size` yourself, but as an env knob |
 | `OPENLORE_HEAP_FRACTION` | CLI | Fraction of available memory used for the heap when sizing automatically (default `0.75`) |
 | `OPENLORE_FORCE_MEMORY_TIER` | `analyze` | Force the [graceful-degradation tier](#analyzing-at-any-repository-size): `full`, `shed-overlay`, or `shed-overlay-and-deep-analysis`. Overrides the pre-flight estimate — for a memory-constrained CI job that wants reduced fidelity deterministically, or to reproduce the degraded path |
+
+### Self-signed certificates
+
+An internal embedding server or LLM gateway with a self-signed certificate fails with
+`UNABLE_TO_VERIFY_LEAF_SIGNATURE`. There are two ways out, and they are not equivalent.
+
+**Preferred — trust the signing CA.** Verification stays on; the certificate simply validates:
+
+```bash
+export NODE_EXTRA_CA_CERTS=/path/to/internal-ca.crt   # Windows: setx NODE_EXTRA_CA_CERTS "C:\certs\internal-ca.crt"
+```
+
+Point it at the **CA that signed** the certificate, not the server certificate itself, or the
+chain will not validate. It is read once at process start, so restart the daemon/IDE after
+setting it. It covers both surfaces, including the `openlore mcp` daemon and the pre-commit
+decisions gate.
+
+**Fallback — skip verification for one surface.** Only when the CA is not available. The keys
+are scoped on purpose: an internal embedding server does not justify relaxing an LLM vendor's
+perfectly valid certificate, so there is no global switch.
+
+```bash
+export EMBED_SKIP_SSL_VERIFY=1   # embedding requests only
+export LLM_SKIP_SSL_VERIFY=1     # LLM requests only  (or pass --insecure for one command)
+```
+
+Verification is relaxed per request rather than for the process lifetime, but it is still
+process-global while a request is in flight — use these only on a trusted network.
+
+A repository's own `.openlore/config.json` can never disable verification: `llm.sslVerify:
+false` and `embedding.skipSslVerify: true` are refused with a warning, because a clone must
+not be able to turn off certificate checking on the machine analyzing it. Only the operator's
+flags and environment can.
+
+**Remote embeddings need both variables.** `EMBED_BASE_URL` without `EMBED_MODEL` is a no-op
+that falls back to the keyword (BM25) index — openlore warns when it sees that combination.
 
 > **The extraction cache costs disk.** `analyze` memoizes each file's extracted facts inside
 > `call-graph.db`, keyed by content hash, so a later run re-parses only what changed. It is

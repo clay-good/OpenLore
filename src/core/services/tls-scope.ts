@@ -81,6 +81,64 @@ export function announceInsecureTls(reason: string, opts: { announce?: boolean }
   );
 }
 
+/**
+ * The operator's TLS opt-out, read from the environment.
+ *
+ * WHY AN ENV VAR AT ALL, given `--insecure` already exists: `--insecure` is a CLI
+ * flag, and the paths that most often face an internal self-signed endpoint never
+ * see a command line — the long-lived `openlore mcp` daemon, and the decisions gate
+ * spawned by the git pre-commit hook. Those had NO operator lever for the LLM path;
+ * embeddings had one (`EMBED_SKIP_SSL_VERIFY`) and the LLM did not.
+ *
+ * WHY EVERY KEY IS SURFACE-SCOPED, and there is deliberately NO global one: needing
+ * to relax verification for one surface and not the other is the ordinary case — an
+ * internal self-signed embedding server alongside an LLM vendor with a perfectly
+ * valid certificate. A single switch would force the operator to relax BOTH to fix
+ * one, a strictly larger exposure than the problem requires, and it would be the
+ * broadest ambient lever in the codebase while an `openlore mcp` daemon is running.
+ * The case it would serve — every outbound endpoint behind one internal CA — is
+ * exactly what `NODE_EXTRA_CA_CERTS` handles properly, by making the certificates
+ * VERIFY rather than skipping the check. So two scoped keys, and no union:
+ *
+ *   - `EMBED_SKIP_SSL_VERIFY` — embedding requests only
+ *   - `LLM_SKIP_SSL_VERIFY`   — LLM provider requests only
+ *
+ * The trust boundary is unchanged: this reads the OPERATOR's environment, never the
+ * analyzed repository's `.openlore/config.json` (see `repo-config-trust.ts`). A clone
+ * still cannot disable verification on the machine analyzing it.
+ *
+ * Prefer `NODE_EXTRA_CA_CERTS` over either key wherever the signing CA is available.
+ */
+
+/** Env spelling that relaxes embedding requests only. */
+export const EMBED_TLS_ENV = 'EMBED_SKIP_SSL_VERIFY';
+/** Env spelling that relaxes LLM provider requests only. */
+export const LLM_TLS_ENV = 'LLM_SKIP_SSL_VERIFY';
+
+/** True when the operator set `scopeKey` to an affirmative value. */
+export function envTlsOptOut(scopeKey: string): boolean {
+  const value = process.env[scopeKey];
+  return value === '1' || value === 'true';
+}
+
+/**
+ * Whether verification is relaxed for a surface right now: the operator's scoped env key,
+ * OR the process-wide `--insecure` capability.
+ *
+ * Every relaxable request site MUST go through one of these rather than deciding for itself.
+ * Passing an explicit `false` to `withRelaxedTls` silently opts a site OUT of the CLI flag,
+ * and omitting the argument silently opts it out of the env key — the codebase had one of
+ * each, so `--insecure` did not reach embeddings and `LLM_SKIP_SSL_VERIFY` did not reach the
+ * viewer's chat and model-listing requests.
+ */
+export function llmTlsRelaxed(): boolean {
+  return envTlsOptOut(LLM_TLS_ENV) || insecureAllowed;
+}
+
+export function embeddingTlsRelaxed(): boolean {
+  return envTlsOptOut(EMBED_TLS_ENV) || insecureAllowed;
+}
+
 /** Whether the user has opted out of certificate verification. */
 export function isInsecureTlsAllowed(): boolean {
   return insecureAllowed;
@@ -120,4 +178,6 @@ export function resetTlsScopeForTests(): void {
   openScopes = 0;
   savedValue = undefined;
   delete process.env[ENV_KEY];
+  delete process.env[EMBED_TLS_ENV];
+  delete process.env[LLM_TLS_ENV];
 }

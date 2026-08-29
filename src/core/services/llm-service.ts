@@ -13,7 +13,7 @@ import { join, resolve } from 'node:path';
 import logger from '../../utils/logger.js';
 import { redactSecretsWithReport } from './secret-redaction.js';
 import { protectPrompt } from '../../utils/prompt-boundary.js';
-import { announceInsecureTls, withRelaxedTls } from './tls-scope.js';
+import { LLM_TLS_ENV, announceInsecureTls, envTlsOptOut, withRelaxedTls } from './tls-scope.js';
 import { safeJoin } from '../../utils/path-confinement.js';
 import { acquireLockAt, isLockHeld } from '../runtime/advisory-lock.js';
 import {
@@ -540,7 +540,7 @@ interface RetryConfig {
  * lifetime of the process (see tls-scope.ts).
  */
 function disableSslVerification(): void {
-  announceInsecureTls('--insecure or llm.sslVerify=false');
+  announceInsecureTls('--insecure, LLM_SKIP_SSL_VERIFY, or llm.sslVerify=false');
 }
 
 /**
@@ -2320,7 +2320,11 @@ export class LLMService {
  */
 export function createLLMService(options: LLMServiceOptions = {}): LLMService {
   const providerName = options.provider ?? 'anthropic';
-  const sslVerify = options.sslVerify ?? true;
+  // Callers that resolve the flag themselves pass `sslVerify` explicitly (see
+  // `resolveTrustedSslVerify`, which already folds the env in). This fallback covers
+  // the callers that pass nothing at all — the mcp daemon and the embedded API —
+  // which is where the operator previously had no lever whatsoever.
+  const sslVerify = options.sslVerify ?? !envTlsOptOut(LLM_TLS_ENV);
   let provider: LLMProvider;
 
   if (providerName === 'anthropic') {

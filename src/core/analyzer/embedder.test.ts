@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -6,6 +6,7 @@ import { resolveEmbedder, embedderMode, servedRetrievalMode } from './embedder.j
 import { LocalEmbeddingService, DEFAULT_LOCAL_MODEL } from './local-embedding-service.js';
 import { EmbeddingService, type Embedder } from './embedding-service.js';
 import type { OpenLoreConfig } from '../../types/index.js';
+import { logger } from '../../utils/logger.js';
 
 const cfg = (embedding?: OpenLoreConfig['embedding']): OpenLoreConfig =>
   ({ version: '1.0', embedding } as unknown as OpenLoreConfig);
@@ -118,5 +119,54 @@ describe('LocalEmbeddingService', () => {
 
   it('returns [] for an empty input without loading the model', async () => {
     expect(await new LocalEmbeddingService().embed([])).toEqual([]);
+  });
+});
+
+/**
+ * A half-configured environment is an operator mistake, not a preference. Silently
+ * degrading to BM25 left the operator staring at an EMBED_BASE_URL they had
+ * demonstrably set, with nothing in the output explaining why it did nothing.
+ */
+describe('resolveEmbedder — half-configured environment is disclosed', () => {
+  const saved = { ...process.env };
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    delete process.env.EMBED_BASE_URL;
+    delete process.env.EMBED_MODEL;
+  });
+  afterEach(() => {
+    process.env = { ...saved };
+  });
+
+  it('warns and falls back to BM25 when EMBED_BASE_URL is set without EMBED_MODEL', async () => {
+    const warn = vi.spyOn(logger, 'warning').mockImplementation(() => {});
+    process.env.EMBED_BASE_URL = 'https://embeddings.internal:8443/v1';
+    expect(await resolveEmbedder(null)).toBeNull();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toMatch(/EMBED_MODEL/);
+  });
+
+  it('warns and falls back to BM25 when EMBED_MODEL is set without EMBED_BASE_URL', async () => {
+    // The mirrored half-configured case: `fromEnv` throws on the missing base URL, so the
+    // disclosure must not be keyed on the base URL being present.
+    const warn = vi.spyOn(logger, 'warning').mockImplementation(() => {});
+    process.env.EMBED_MODEL = 'nomic-embed-text';
+    expect(await resolveEmbedder(null)).toBeNull();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toMatch(/EMBED_BASE_URL/);
+  });
+
+  it('does not frame the keyword index as a degraded fallback', async () => {
+    // `config` / KeywordIndexIsAFirstClassDefaultNotADegradedFallback forbids that framing.
+    const warn = vi.spyOn(logger, 'warning').mockImplementation(() => {});
+    process.env.EMBED_BASE_URL = 'https://embeddings.internal:8443/v1';
+    await resolveEmbedder(null);
+    expect(warn.mock.calls[0][0]).not.toMatch(/fall(ing|s)? back|degraded/i);
+  });
+
+  it('stays silent when nothing at all is configured (the ordinary default)', async () => {
+    const warn = vi.spyOn(logger, 'warning').mockImplementation(() => {});
+    expect(await resolveEmbedder(null)).toBeNull();
+    expect(warn).not.toHaveBeenCalled();
   });
 });

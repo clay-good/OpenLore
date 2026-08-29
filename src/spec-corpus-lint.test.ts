@@ -50,6 +50,16 @@ function requirementNames(text: string): string[] {
   return [...text.matchAll(/^### Requirement: (.+)$/gm)].map(m => m[1].trim());
 }
 
+/** Return only the main Requirements section, excluding later sections. */
+function requirementsSection(text: string): string {
+  const header = /^## Requirements\s*$/m.exec(text);
+  if (!header || header.index === undefined) return '';
+  const afterHeader = header.index + header[0].length;
+  const tail = text.slice(afterHeader);
+  const nextSection = /^##\s+.+$/m.exec(tail);
+  return tail.slice(0, nextSection?.index);
+}
+
 describe('spec-corpus lint: every requirement lives in the Requirements section', () => {
   // openspec parses a main spec's requirements ONLY from inside `## Requirements`. A
   // `### Requirement:` header anywhere else is invisible to validate/list — and, worse, makes
@@ -178,7 +188,7 @@ describe('spec-corpus lint: a synced decision requirement lives in exactly one d
     const MARK = /^> Decision recorded: [0-9a-f]{8}$/m;
     const domainsByName = new Map<string, Set<string>>();
     for (const domain of DOMAINS) {
-      const blocks = specOf(domain).split(/(?=^### Requirement: )/m);
+      const blocks = requirementsSection(specOf(domain)).split(/(?=^### Requirement: )/m);
       for (const b of blocks) {
         const nameM = /^### Requirement: (.+)$/m.exec(b);
         if (nameM && MARK.test(b)) {
