@@ -1,0 +1,3 @@
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"u1","name":"mcp__openlore__orient","input":{}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"u1","content":"orientation"}]}}
+{"type":"result","usage":{"input_tokens":100,"cache_creation_input_tokens":20,"cache_read_input_tokens":30,"output_tokens":10},"total_cost_usd":0.01,"num_turns":2,"result":"done"}

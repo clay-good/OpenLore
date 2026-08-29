@@ -28,9 +28,9 @@ the SUBJECT under measurement, never in the computation: every score is determin
 extraction from logged runs.
 
 1. **A `bench/` harness generalizing the ADR-0023 scripts** from "navigation vs substrate" to
-   "preset A vs preset B" (the existing scripts become the first conforming instance —
-   promotion, not rewrite; `bench-agent.ts`'s corpus/oracle/isolation and
-   `src/bench/transcript-metrics.ts`'s deterministic transcript extraction are reused as-is):
+   "preset A vs preset B" (the existing scripts are promoted from a legacy precursor;
+   `bench-agent.ts`'s corpus/oracle/isolation and
+   `src/bench/transcript-metrics.ts`'s deterministic transcript extraction are reused):
    - **Distractor-aware task corpus:** each task declares its expected tool AND the plausible
      distractors that must be present in the surface under test (the MCP-Atlas/LiveMCPBench
      pattern) — exactly what preset-size decisions need to be repeatable.
@@ -40,14 +40,15 @@ extraction from logged runs.
      rejected: LLM-as-judge** — MCP-Atlas itself moved away from it; scoring stays independent
      oracles (`expect.mustInclude`) + counted trajectory facts.
    - **Containerized task pinning** (terminal-bench style): repo SHA pinning exists in
-     `bench-agent.ts`; add a pinned container image per corpus so runs compare across machines
-     and months.
+     `bench-agent.ts`; add a digest-pinned base image and checked-in benchmark Dockerfile so runs
+     compare across machines and months.
 2. **A protocol document** (`bench/PROTOCOL.md`) every future default-surface change must ride:
-   pre-register the decision rule before any run (the `bench-preset-completion.ts` precedent —
-   its rule constants are pre-registered experiment parameters, not product tuning constants);
+   pre-register the decision rule before any run (formalizing the fixed-parameter intent of the
+   historical `bench-preset-completion.ts` experiment);
    run both repo tiers and both models; check the results artifact in with the change; the ADR
-   cites the run. `reconcile-substrate-write-face`'s eventual flip evaluation is the first
-   intended client.
+   cites the run. ADR-0023 is the legacy precursor, not a retroactively conforming run;
+   `reconcile-substrate-write-face`'s eventual flip evaluation is the first intended conforming
+   client.
 
 ## Why this is in scope
 

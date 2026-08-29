@@ -42,6 +42,13 @@ export interface PinnedRepo {
   tier: RepoTier;
 }
 
+/** Immutable execution environment shared by this corpus's repository tasks. */
+export const BENCH_AGENT_CORPUS = {
+  id: 'agent-repo-tasks-v1',
+  image: 'docker.io/library/node:24-bookworm',
+  digest: 'sha256:be23f54a88d34e8824c741b19b91064094f92c1c97b194144bfc8b50d67258e2',
+} as const;
+
 export type TaskKind =
   | 'callers'       // enumerate callers of a symbol (relational — graph beats grep)
   | 'blast-radius'  // what breaks if this signature changes (relational)

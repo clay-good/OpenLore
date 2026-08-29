@@ -929,8 +929,43 @@ the shared dispatch inputs or semantic conclusion diverge.
 - **THEN** it states when the command-line path is preferable and when the tool surface is
 - **AND** neither is presented as superseding the other
 
+### Requirement: DefaultSurfaceDecisionsRideTheBenchmarkProtocol
+
+Any change to the composition of the default MCP tool surface (the preset wired by a bare
+`openlore mcp` / `openlore install`) SHALL be gated by the checked-in benchmark protocol: a
+decision rule pre-registered before any measured run, evaluation on a distractor-aware task
+corpus across both repo tiers and at least two models, and a results artifact checked in with the
+change and cited by the governing ADR. Scoring SHALL be deterministic — independent oracles and
+post-hoc trajectory metrics computed from logged runs — with no LLM-as-judge in any scoring path.
+A default-surface change without a conforming benchmark run SHALL NOT be merged on assertion.
+
+#### Scenario: A proposed default-surface widening must present a conforming run
+
+- **GIVEN** a change proposing to add a tool to the default preset
+- **WHEN** the change is reviewed
+- **THEN** it carries a results artifact from the protocol (pre-registered rule, distractor-aware
+  corpus, both tiers, two models) and the ADR cites that run
+
+#### Scenario: The decision rule cannot be tuned after the results
+
+- **GIVEN** a benchmark run whose results narrowly miss the pre-registered rule
+- **WHEN** the outcome is evaluated
+- **THEN** the verdict is HOLD under the pre-registered rule
+- **AND** relaxing the rule requires a new pre-registration and a fresh run, stated in the change
+
+#### Scenario: Selection accuracy is measured against distractors
+
+- **GIVEN** a task whose corpus entry declares an expected tool and required distractor tools
+- **WHEN** the selection benchmark runs against a surface missing a declared distractor
+- **THEN** the run reports the absent distractor rather than silently scoring the task
+
 ## Technical Notes
 
+- **Implementation**: `bench/PROTOCOL.md`, `bench/corpora/default-surface.json`,
+  `bench/rules/adr-0023.json`, `bench/results/adr-0023-default-surface.json`, `bench/run.ts`,
+  `scripts/bench-preset-surface.ts`, `scripts/bench-preset-selection.ts`,
+  `scripts/bench-preset-completion.ts`, `src/bench/preset-protocol.ts`, and
+  `src/bench/preset-surface.ts`.
 - **Tension to manage:** description conciseness (token budget) vs. agent guidance ("USE THIS
   WHEN", preconditions). Resolve by leading with a tight summary, keeping triggers to one
   line, and moving long-form guidance to resources/README rather than deleting useful cues.

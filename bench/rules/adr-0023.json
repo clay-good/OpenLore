@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "id": "default-surface-reveals-all-faces-v1",
+  "sharedSelectionRegressionMax": 0,
+  "tierCorrectnessRegressionMax": 0.05,
+  "medianCostIncreaseMax": 0.2,
+  "requiredCandidateFamilies": ["navigate", "change", "remember", "verify"]
+}

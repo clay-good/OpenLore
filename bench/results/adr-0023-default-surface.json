@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 0,
+  "status": "legacy-nonconforming",
+  "decision": "ADR-0023",
+  "corpus": "default-surface-v1",
+  "presets": ["navigation", "substrate"],
+  "environment": {
+    "replayImage": "docker.io/library/node:24-bookworm@sha256:be23f54a88d34e8824c741b19b91064094f92c1c97b194144bfc8b50d67258e2",
+    "repositoryPins": "scripts/bench-agent.tasks.ts"
+  },
+  "agentConfig": {
+    "models": ["sonnet", "haiku"],
+    "repoTiers": ["small-familiar", "large-unfamiliar"]
+  },
+  "selection": {
+    "sharedAccuracy": { "navigation": 0.8, "substrate": 0.9 },
+    "governanceAccuracy": { "navigation": 0, "substrate": 1 }
+  },
+  "completion": {
+    "correctness": "100% for both presets, both models, and both repository tiers",
+    "cost": "substrate was cheaper in 3 of 4 model-by-tier cells"
+  },
+  "historicalVerdict": "FLIP",
+  "source": "openspec/decisions/adr-0023-flip-default-mcp-surface-to-the-substrate-both-fac.md",
+  "limitations": [
+    "The decision rule was not committed before the historical measured run.",
+    "Raw selection and completion trajectories were not retained for deterministic replay.",
+    "The runtime container identity was not independently verified during the historical run."
+  ],
+  "note": "This is a retrospective summary of the ADR-0023 evidence, not a conforming artifact from the generalized protocol."
+}

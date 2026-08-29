@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "id": "default-surface-v1",
+  "environment": {
+    "image": "docker.io/library/node:24-bookworm",
+    "digest": "sha256:be23f54a88d34e8824c741b19b91064094f92c1c97b194144bfc8b50d67258e2"
+  },
+  "agentConfig": {
+    "models": ["sonnet", "haiku"],
+    "runs": 3
+  },
+  "repoTiers": ["small-familiar", "large-unfamiliar"],
+  "tasks": [
+    {
+      "id": "s1",
+      "class": "shared",
+      "prompt": "I'm starting a task to add rate limiting to the HTTP API. Get oriented to the relevant code first.",
+      "expectedTools": ["orient"],
+      "distractors": ["search_code", "get_map"]
+    },
+    {
+      "id": "s2",
+      "class": "shared",
+      "prompt": "Find the function that validates JWT tokens, by meaning (I don't know its name).",
+      "expectedTools": ["search_code"],
+      "distractors": ["orient", "get_subgraph"]
+    },
+    {
+      "id": "s3",
+      "class": "shared",
+      "prompt": "What breaks if I change the parseConfig function? Give me the blast radius of that one symbol.",
+      "expectedTools": ["analyze_impact"],
+      "distractors": ["get_subgraph", "suggest_insertion_points"]
+    },
+    {
+      "id": "s4",
+      "class": "shared",
+      "prompt": "Show me the cheapest call path from handleRequest to the database query layer.",
+      "expectedTools": ["find_path"],
+      "distractors": ["trace_execution_path", "get_subgraph"]
+    },
+    {
+      "id": "s5",
+      "class": "shared",
+      "prompt": "Show the depth-2 call neighborhood around processPayment.",
+      "expectedTools": ["get_subgraph"],
+      "distractors": ["find_path", "analyze_impact"]
+    },
+    {
+      "id": "g1",
+      "class": "governance",
+      "prompt": "Before I edit billing, what durable notes or decisions are anchored to that code?",
+      "expectedTools": ["recall"],
+      "distractors": ["orient", "search_code"]
+    },
+    {
+      "id": "g2",
+      "class": "governance",
+      "prompt": "Before I say processPayment is dead code, settle that claim with a citation.",
+      "expectedTools": ["verify_claim"],
+      "distractors": ["search_code", "analyze_impact"]
+    },
+    {
+      "id": "g3",
+      "class": "governance",
+      "prompt": "I have staged a diff. Give me the pre-commit blast-radius briefing.",
+      "expectedTools": ["blast_radius"],
+      "distractors": ["analyze_impact", "orient"]
+    }
+  ]
+}
