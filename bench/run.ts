@@ -9,7 +9,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, existsSync, lstatSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { TOOL_DEFINITIONS } from '../src/cli/commands/mcp.js';
@@ -214,8 +214,12 @@ function main(): void {
     verdict,
     scoring: 'independent oracle plus deterministic post-hoc transcript metrics; no LLM-as-judge',
   };
-  mkdirSync(dirname(outputPath), { recursive: true });
-  writeFileSync(outputPath, `${JSON.stringify(artifact, null, 2)}\n`, 'utf8');
+  const outputFd = openSync(outputPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
+  try {
+    writeFileSync(outputFd, `${JSON.stringify(artifact, null, 2)}\n`, 'utf8');
+  } finally {
+    closeSync(outputFd);
+  }
   process.stdout.write(`${JSON.stringify(artifact, null, 2)}\n`);
 }
 

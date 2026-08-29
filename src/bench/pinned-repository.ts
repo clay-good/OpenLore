@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 export interface RepositoryPin {
@@ -33,5 +34,12 @@ export function assertPinnedAnalysis(repo: RepositoryPin, directory: string): vo
 export function markPinnedAnalysis(repo: RepositoryPin, directory: string): void {
   const marker = analysisMarkerPath(directory);
   mkdirSync(dirname(marker), { recursive: true });
-  writeFileSync(marker, `${repo.sha}\n`, 'utf8');
+  const candidate = `${marker}.${process.pid}.${randomUUID()}`;
+  const fd = openSync(candidate, 'wx', 0o600);
+  try {
+    writeFileSync(fd, `${repo.sha}\n`, 'utf8');
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(candidate, marker);
 }
