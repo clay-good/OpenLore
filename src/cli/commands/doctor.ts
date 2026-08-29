@@ -809,6 +809,8 @@ async function checkEmbeddingConnection(rootPath: string): Promise<CheckResult |
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), DOCTOR_TIMEOUT_MS);
+    // INTENTIONAL EGRESS: doctor sends a constant probe to the operator-selected endpoint or repo-selected loopback.
+    // codeql[js/file-access-to-http]
     const response = await withRelaxedTls(() => fetch(`${url}/embeddings`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },

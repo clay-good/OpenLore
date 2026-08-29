@@ -396,7 +396,7 @@ describe('workflow security: supply-chain automation is wired', () => {
 });
 
 describe('workflow security: reviewed CodeQL egress stays narrow and auditable', () => {
-  it('allows only the fourteen reviewed file-to-HTTP egress sinks', () => {
+  it('allows only the fifteen reviewed file-to-HTTP egress sinks', () => {
     const markers: Record<string, number> = {};
     const unexplained: string[] = [];
 
@@ -418,6 +418,7 @@ describe('workflow security: reviewed CodeQL egress stays narrow and auditable',
       'Every reviewed CodeQL egress marker must name one query and have an immediately preceding rationale.'
     ).toEqual([]);
     expect(markers, 'Changing the reviewed egress set requires explicit security review.').toEqual({
+      'src/cli/commands/doctor.ts': 1,
       'src/cli/commands/serve.ts': 2,
       'src/cli/commands/view.ts': 1,
       'src/core/analyzer/embedding-service.ts': 1,
