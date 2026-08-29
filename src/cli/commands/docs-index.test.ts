@@ -10,6 +10,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
+import { CALLGRAPH_LANGUAGES } from '../../core/analyzer/call-graph.js';
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const docsDir = join(repoRoot, 'docs');
@@ -49,5 +50,22 @@ describe('documentation index (DocumentationSingleSourceOfTruth)', () => {
     for (const canonical of ['install.md', 'language-support.md', 'configuration.md', 'providers.md', 'mcp-tools.md']) {
       expect(md.includes(canonical), `index should reference canonical page ${canonical}`).toBe(true);
     }
+  });
+
+  it('the canonical language page names every call-graph-backed language', () => {
+    const md = readFileSync(join(docsDir, 'language-support.md'), 'utf8');
+    const documented = new Set(
+      [...md.matchAll(/^\| ([^|]+?) \|/gm)].map(match => match[1].trim()),
+    );
+    const missing = [...CALLGRAPH_LANGUAGES].filter(language => !documented.has(language)).sort();
+
+    expect(missing, `language-support.md is missing call-graph-backed rows: ${missing.join(', ')}`).toEqual([]);
+  });
+
+  it('keeps the legacy language page as a redirect to the canonical page', () => {
+    const legacy = readFileSync(join(docsDir, 'languages.md'), 'utf8');
+
+    expect(legacy).toContain('[language support guide](language-support.md)');
+    expect(legacy).not.toContain('| Language | Extensions |');
   });
 });
