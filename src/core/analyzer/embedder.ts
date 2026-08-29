@@ -48,7 +48,27 @@ export async function resolveEmbedder(cfg?: OpenLoreConfig | null): Promise<Embe
   try {
     return EmbeddingService.fromEnv();
   } catch {
-    /* no env config — fall through to file config */
+    // Falling through is correct when NOTHING is set in the environment — that is the
+    // ordinary unconfigured case. But a HALF-configured environment is an operator
+    // mistake, not a preference: EMBED_BASE_URL alone makes `fromEnv` throw, and
+    // silently using BM25 left the operator staring at a variable they had demonstrably
+    // set, with no output explaining why it did nothing. The message names the
+    // misconfiguration, NOT a degraded index: the keyword index is a first-class default
+    // (spec `config` / KeywordIndexIsAFirstClassDefaultNotADegradedFallback), so it must
+    // never be framed as a fallback.
+    const missing = !process.env.EMBED_BASE_URL
+      ? 'EMBED_BASE_URL'
+      : !process.env.EMBED_MODEL
+        ? 'EMBED_MODEL'
+        : null;
+    // Exactly one of the pair supplied is the half-configured case, in EITHER direction.
+    if (missing && (process.env.EMBED_BASE_URL || process.env.EMBED_MODEL)) {
+      const { logger } = await import('../../utils/logger.js');
+      logger.warning(
+        `${missing} is not set — a remote embedding endpoint needs both EMBED_BASE_URL and ` +
+          'EMBED_MODEL. Using the keyword (BM25) index.',
+      );
+    }
   }
   // Remote (or unconfigured): fromConfig returns null when no remote endpoint
   // is set, which is the first-class keyword default.

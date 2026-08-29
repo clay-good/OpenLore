@@ -13,7 +13,13 @@
  */
 
 import type { OpenLoreConfig } from '../../types/index.js';
-import { announceInsecureTls, withRelaxedTls } from '../services/tls-scope.js';
+import {
+  EMBED_TLS_ENV,
+  announceInsecureTls,
+  envTlsOptOut,
+  isInsecureTlsAllowed,
+  withRelaxedTls,
+} from '../services/tls-scope.js';
 import { refuseRepoConfiguredEndpoint, rejectRepoConfiguredTlsOptOut } from '../services/repo-config-trust.js';
 
 // ============================================================================
@@ -98,7 +104,7 @@ export class EmbeddingService implements Embedder {
       baseUrl,
       model,
       apiKey: process.env.EMBED_API_KEY,
-      skipSslVerify: process.env.EMBED_SKIP_SSL_VERIFY === '1' || process.env.EMBED_SKIP_SSL_VERIFY === 'true',
+      skipSslVerify: envTlsOptOut(EMBED_TLS_ENV),
     });
   }
 
@@ -126,10 +132,12 @@ export class EmbeddingService implements Embedder {
       baseUrl: trustedBaseUrl,
       model: cfg.embedding.model,
       apiKey: cfg.embedding.apiKey,
-      skipSslVerify: rejectRepoConfiguredTlsOptOut(
-        'embedding.skipSslVerify',
-        cfg.embedding.skipSslVerify,
-      ),
+      // The repository's own opt-out is refused (always false); the OPERATOR's
+      // environment still applies, so a config-selected loopback endpoint with a
+      // self-signed certificate is reachable without inventing a repo-trusted flag.
+      skipSslVerify:
+        rejectRepoConfiguredTlsOptOut('embedding.skipSslVerify', cfg.embedding.skipSslVerify) ||
+        envTlsOptOut(EMBED_TLS_ENV),
       batchSize: cfg.embedding.batchSize,
     });
   }
@@ -178,7 +186,7 @@ export class EmbeddingService implements Embedder {
       method: 'POST',
       headers,
       body: JSON.stringify({ input: truncated, model: this.model }),
-    }), this.relaxTls);
+    }), this.relaxTls || isInsecureTlsAllowed());
 
     if (!response.ok) {
       const body = await response.text().catch(() => '');

@@ -7,7 +7,7 @@
 
 import { Command } from 'commander';
 import { sanitizeForTerminal as safe } from '../../utils/misc.js';
-import { withRelaxedTls } from '../../core/services/tls-scope.js';
+import { embeddingTlsRelaxed, withRelaxedTls } from '../../core/services/tls-scope.js';
 import { access, stat, readFile } from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
 import { join, relative } from 'node:path';
@@ -789,8 +789,20 @@ async function checkEmbeddingConnection(rootPath: string): Promise<CheckResult |
   // Refused, not honoured: this value comes from the analyzed repo's config.
   rejectRepoConfiguredTlsOptOut('embedding.skipSslVerify', emb?.skipSslVerify);
 
-  const apiKey = emb?.apiKey ?? process.env.EMBED_API_KEY ?? 'none';
-  const model = emb?.model ?? process.env.EMBED_MODEL ?? 'text-embedding-ada-002';
+  // Mirror `EmbeddingService.fromEnv` exactly. When EMBED_BASE_URL is set the real
+  // embedding path is env-ONLY (fromEnv wins in `resolveEmbedder` and never consults
+  // the config), so preferring config values here would test a different model or key
+  // than the one actually used — a doctor that reports on a setup nobody runs.
+  const envConfigured = envBaseUrl != null;
+  const apiKey =
+    (envConfigured ? process.env.EMBED_API_KEY : emb?.apiKey ?? process.env.EMBED_API_KEY) ?? 'none';
+  const model =
+    (envConfigured ? process.env.EMBED_MODEL : emb?.model ?? process.env.EMBED_MODEL) ??
+    'text-embedding-ada-002';
+  // The operator's env opt-out is honoured (the repo's, refused above, is not). Without
+  // this the check reported a certificate failure against a self-signed endpoint that
+  // `openlore analyze` talks to perfectly well.
+  const relaxTls = embeddingTlsRelaxed();
   const url = baseUrl.replace(/\/$/, '');
 
   const t0 = Date.now();
@@ -802,7 +814,7 @@ async function checkEmbeddingConnection(rootPath: string): Promise<CheckResult |
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
       body: JSON.stringify({ model, input: 'ping' }),
       signal: controller.signal,
-    })).finally(() => clearTimeout(timeout));
+    }), relaxTls).finally(() => clearTimeout(timeout));
 
     const ms = Date.now() - t0;
     if (!response.ok) {
