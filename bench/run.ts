@@ -113,7 +113,6 @@ function main(): void {
 
   const out = arg('--out');
   const outputPath = resolveBenchmarkResultPath(root, out ?? '');
-  if (existsSync(outputPath)) throw new Error(`Benchmark result already exists; choose a fresh --out path: ${out}.`);
   const insideContainer = process.argv.includes('--inside-container');
   const rule = insideContainer
     ? {
