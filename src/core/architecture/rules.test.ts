@@ -42,6 +42,24 @@ describe('parseArchitectureRules', () => {
     expect(parseArchitectureRules(42, 'config').warnings).toHaveLength(1);
   });
 
+  it('preserves prototype-named layers as own data without prototype pollution', () => {
+    const { rules, warnings } = parseArchitectureRules(
+      JSON.parse('{"layers":{"__proto__":["src/a"],"constructor":["src/b"],"prototype":["src/c"]}}'),
+      'config',
+    );
+
+    expect(warnings).toEqual([]);
+    expect(rules).toHaveLength(1);
+    const rule = rules[0];
+    expect(rule.kind).toBe('layers');
+    if (rule.kind !== 'layers') throw new Error('expected layers rule');
+    expect(Object.keys(rule.layers)).toEqual(['__proto__', 'constructor', 'prototype']);
+    expect(Object.hasOwn(rule.layers, '__proto__')).toBe(true);
+    expect(rule.layers.__proto__).toEqual(['src/a']);
+    expect(Object.getPrototypeOf(rule.layers)).toBe(Object.prototype);
+    expect(Object.prototype).not.toHaveProperty('0', 'src/a');
+  });
+
   it('rulesAreInert reflects an empty rule set', () => {
     expect(rulesAreInert({ rules: [], warnings: [] })).toBe(true);
     expect(rulesAreInert(parseArchitectureRules({ forbidden: [{ from: 'a', to: 'b' }] }, 'config'))).toBe(false);

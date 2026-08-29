@@ -19,6 +19,7 @@ import { claudeCodeAdapter } from './adapters/claude-code.js';
 import { cursorAdapter } from './adapters/cursor.js';
 import { clineAdapter } from './adapters/cline.js';
 import { continueAdapter } from './adapters/continue.js';
+import { piAdapter } from './adapters/pi.js';
 import type { ProveEligibility } from '../../core/agent-eval/tasks.js';
 
 const ADAPTERS: Record<AgentName, Adapter> = {
@@ -27,6 +28,7 @@ const ADAPTERS: Record<AgentName, Adapter> = {
   cursor: cursorAdapter,
   cline: clineAdapter,
   continue: continueAdapter,
+  pi: piAdapter,
 };
 
 async function loadTemplate(): Promise<string> {
@@ -390,10 +392,10 @@ export function formatProveGuidance(eligibility: ProveEligibility): { title: str
 
 export const installCommand = new Command('install')
   .description(
-    'One-command setup: configure agent surfaces (Claude Code, Cursor, Cline, Continue, AGENTS.md) ' +
+    'One-command setup: configure agent surfaces (Claude Code, Cursor, Cline, Continue, Pi, AGENTS.md) ' +
     'to call orient(), then build the index so orient works on your first session.'
   )
-  .option('--agent <name>', 'Install only for a specific surface (claude-code, cursor, cline, continue, agents-md)')
+  .option('--agent <name>', 'Install only for a specific surface (claude-code, cursor, cline, continue, pi, agents-md)')
   .option('--preset <name>', `Wire the registered MCP server to a tool preset (navigation, substrate, minimal, memory, verify, federation, coordination, or full). Default (no preset) wires the "${LEAN_DEFAULT_PRESET}" surface — the navigation core, prepare_spec_generation + prepare_spec_repair, and the governance reads recall + verify_claim + blast_radius; "navigation" is the lean navigate-only escape; pass "full" to wire the full surface (the prior default).`)
   .option('--all-tools', 'Wire the full surface (alias of --preset full). Matches `openlore mcp --all-tools`.')
   .option('--dry-run', 'Print the planned changes without writing any files', false)
@@ -407,9 +409,15 @@ export const installCommand = new Command('install')
 Examples:
   $ openlore install                 Detect agents, wire them up, build the index
   $ openlore install --agent claude-code
+  $ openlore install --agent pi       Install the Pi extension (.pi/extensions/openlore.js)
   $ openlore install --no-analyze    Wire up surfaces only (skip index build)
   $ openlore install --dry-run       Preview changes without writing
   $ openlore install --uninstall     Remove OpenLore-managed entries
+
+Pi (pi.dev) loads a JS extension rather than MCP: the \`pi\` surface writes
+\`.pi/extensions/openlore.js\`, which starts \`openlore serve\` on demand and injects
+context itself. \`pi install npm:openlore\` and \`openlore setup --tools pi --global\`
+(all projects, ~/.pi) are the equivalent host-side and global routes.
 
 After install, orient() is available immediately — the configured MCP server
 (\`openlore mcp\`) starts automatically when your agent launches, and the index

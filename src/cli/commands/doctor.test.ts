@@ -476,6 +476,108 @@ describe('doctor command', () => {
       }
     });
 
+    /**
+     * Covers spec `operator-tls-trust` / DiagnosticsReflectTheOptOutTheRealPathUses.
+     *
+     * The relaxation MECHANISM is proven against a real handshake in `tls-scope.test.ts`.
+     * What is asserted here is doctor's DECISION: that it hands `withRelaxedTls` an
+     * enabled scope, observable as NODE_TLS_REJECT_UNAUTHORIZED being '0' at the moment
+     * the request is issued. Before this change doctor passed nothing, so a self-signed
+     * endpoint that `analyze` reaches was reported as a certificate failure.
+     */
+    it('honours the operator embedding opt-out, so a self-signed endpoint is not a false failure', async () => {
+      const configManager = await import('../../core/services/config-manager.js');
+      const saved = { base: process.env.EMBED_BASE_URL, model: process.env.EMBED_MODEL, skip: process.env.EMBED_SKIP_SSL_VERIFY };
+      process.env.EMBED_BASE_URL = 'https://embeddings.internal:8443/v1';
+      process.env.EMBED_MODEL = 'nomic-embed-text';
+      process.env.EMBED_SKIP_SSL_VERIFY = '1';
+
+      let relaxedAtCallTime: string | undefined = 'unset';
+      const fetchSpy = vi.fn().mockImplementation(async () => {
+        relaxedAtCallTime = process.env.NODE_TLS_REJECT_UNAUTHORIZED;
+        return { ok: true, json: vi.fn().mockResolvedValue({ data: [{ embedding: [0, 1, 2] }] }) };
+      });
+      vi.stubGlobal('fetch', fetchSpy);
+
+      try {
+        const checks = await runDoctorJson();
+        const check = checks.find(c => c.name === 'Embedding connection')!;
+        expect(check.status).toBe('ok');
+        // The request really was issued inside a relaxed scope...
+        expect(relaxedAtCallTime).toBe('0');
+        // ...and the scope closed again afterwards.
+        expect(process.env.NODE_TLS_REJECT_UNAUTHORIZED).toBeUndefined();
+      } finally {
+        vi.unstubAllGlobals();
+        for (const [k, v] of [['EMBED_BASE_URL', saved.base], ['EMBED_MODEL', saved.model], ['EMBED_SKIP_SSL_VERIFY', saved.skip]] as const) {
+          if (v === undefined) delete process.env[k]; else process.env[k] = v;
+        }
+        vi.mocked(configManager.readOpenLoreConfig).mockResolvedValue({
+          projectType: 'nodejs', createdAt: '2024-01-01T00:00:00Z', openspecPath: './openspec', maxFiles: 500,
+        } as never);
+      }
+    });
+
+    it('does not relax the scope when the operator set no opt-out', async () => {
+      const saved = { base: process.env.EMBED_BASE_URL, model: process.env.EMBED_MODEL, skip: process.env.EMBED_SKIP_SSL_VERIFY };
+      delete process.env.EMBED_SKIP_SSL_VERIFY;
+      process.env.EMBED_BASE_URL = 'https://embeddings.internal:8443/v1';
+      process.env.EMBED_MODEL = 'nomic-embed-text';
+
+      let relaxedAtCallTime: string | undefined = 'unset';
+      const fetchSpy = vi.fn().mockImplementation(async () => {
+        relaxedAtCallTime = process.env.NODE_TLS_REJECT_UNAUTHORIZED;
+        return { ok: true, json: vi.fn().mockResolvedValue({ data: [{ embedding: [0] }] }) };
+      });
+      vi.stubGlobal('fetch', fetchSpy);
+      try {
+        await runDoctorJson();
+        expect(relaxedAtCallTime).toBeUndefined();
+      } finally {
+        vi.unstubAllGlobals();
+        for (const [k, v] of [['EMBED_BASE_URL', saved.base], ['EMBED_MODEL', saved.model], ['EMBED_SKIP_SSL_VERIFY', saved.skip]] as const) {
+          if (v === undefined) delete process.env[k]; else process.env[k] = v;
+        }
+      }
+    });
+
+    /**
+     * Covers spec `operator-tls-trust` / "Doctor reports on the settings actually in
+     * effect". When EMBED_BASE_URL is set the real path is `fromEnv`, which never reads
+     * the config — so a doctor that preferred config values described a setup nobody runs.
+     */
+    it('exercises the environment model, not the config model, when the endpoint came from the environment', async () => {
+      const configManager = await import('../../core/services/config-manager.js');
+      const saved = { base: process.env.EMBED_BASE_URL, model: process.env.EMBED_MODEL };
+      process.env.EMBED_BASE_URL = 'https://embeddings.internal:8443/v1';
+      process.env.EMBED_MODEL = 'env-model';
+      vi.mocked(configManager.readOpenLoreConfig).mockResolvedValue({
+        projectType: 'nodejs', createdAt: '2024-01-01T00:00:00Z', openspecPath: './openspec', maxFiles: 500,
+        embedding: { model: 'config-model', apiKey: 'config-key' },
+      } as never);
+      const fetchSpy = vi.fn().mockResolvedValue({
+        ok: true, json: vi.fn().mockResolvedValue({ data: [{ embedding: [0] }] }),
+      });
+      vi.stubGlobal('fetch', fetchSpy);
+
+      try {
+        await runDoctorJson();
+        const body = JSON.parse((fetchSpy.mock.calls[0][1] as { body: string }).body);
+        expect(body.model).toBe('env-model');
+        expect(body.model).not.toBe('config-model');
+        const headers = (fetchSpy.mock.calls[0][1] as { headers: Record<string, string> }).headers;
+        expect(headers.Authorization).not.toContain('config-key');
+      } finally {
+        vi.unstubAllGlobals();
+        for (const [k, v] of [['EMBED_BASE_URL', saved.base], ['EMBED_MODEL', saved.model]] as const) {
+          if (v === undefined) delete process.env[k]; else process.env[k] = v;
+        }
+        vi.mocked(configManager.readOpenLoreConfig).mockResolvedValue({
+          projectType: 'nodejs', createdAt: '2024-01-01T00:00:00Z', openspecPath: './openspec', maxFiles: 500,
+        } as never);
+      }
+    });
+
     it.each([
       ['JSON', runDoctorJson],
       ['human-readable', runDoctorText],

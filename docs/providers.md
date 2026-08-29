@@ -211,3 +211,5 @@ The providers above are for **LLM** spec generation. Semantic search uses a sepa
 | Remote (OpenAI-compatible) | `EMBED_BASE_URL`/`EMBED_MODEL` or an `embedding` block, then `openlore analyze` | optional (`EMBED_API_KEY`) | Any `/embeddings` endpoint: Ollama, OpenAI, Mistral, vLLM, LM Studio… |
 
 Revert to keyword with `openlore embed --off`. See [docs/semantic-search.md](semantic-search.md#retrieval-modes) for the full reference.
+
+Behind a self-signed certificate — for either the LLM or the embedding endpoint — see [Self-signed certificates](configuration.md#self-signed-certificates). Prefer `NODE_EXTRA_CA_CERTS` over the per-surface skip flags.

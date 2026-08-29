@@ -30,7 +30,25 @@ openlore analyze          # build the structural index at least once
 
 ## Install
 
-### Recommended — Pi gallery
+### Recommended — openlore install
+
+```bash
+openlore install --agent pi   # → .pi/extensions/openlore.js (this project)
+openlore connect pi           # same thing, from the interactive connect surface
+```
+
+Pi is a first-class `openlore install` surface: a bare `openlore install` detects it
+from `.pi/` (or `~/.pi/` when the tree carries no agent marker at all) and wires it
+alongside your other agents. `--dry-run`, `--force`, and `--uninstall` all apply.
+
+The installed file is a re-export shim, not a copy: the shipped extension is plain
+`tsc` output whose relative imports resolve only inside the openlore package, so a
+copy throws `Cannot find module '../cli/commands/orient-inject-render.js'` when Pi
+loads it. The shim's target path is absolute — re-run install after moving or
+reinstalling openlore. If `.pi/` is committed and shared across machines, use the Pi
+gallery route below instead.
+
+### Pi gallery
 
 ```bash
 pi install npm:openlore
@@ -39,10 +57,9 @@ pi install npm:openlore
 Pi discovers the extension automatically via the `"pi"` field in openlore's
 `package.json`. On first session it launches the config wizard.
 
-### Alternative — openlore setup
+### All projects — openlore setup --global
 
 ```bash
-openlore setup --tools pi            # → .pi/extensions/openlore.js (this project)
 openlore setup --tools pi --global   # → ~/.pi/agent/extensions/openlore.js (all projects)
 ```
 

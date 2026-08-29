@@ -18,8 +18,13 @@ import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  EMBED_TLS_ENV,
+  LLM_TLS_ENV,
   allowInsecureTls,
+  embeddingTlsRelaxed,
+  envTlsOptOut,
   isInsecureTlsAllowed,
+  llmTlsRelaxed,
   withRelaxedTls,
   resetTlsScopeForTests,
 } from './tls-scope.js';
@@ -184,6 +189,151 @@ describe('tls-scope: real TLS behaviour', () => {
 
       // 4. A NEW request is rejected again — the relaxation did not persist.
       await expect(fetch(url)).rejects.toThrow();
+    },
+    20_000
+  );
+});
+
+/**
+ * The operator's TLS opt-out is deliberately SCOPED per surface: an internal
+ * self-signed embedding server must not drag the LLM provider's (valid) certificate
+ * verification down with it. There is intentionally no global union key — see the
+ * rationale on `envTlsOptOut`.
+ */
+describe('envTlsOptOut — scoped operator opt-out', () => {
+  beforeEach(() => {
+    delete process.env[EMBED_TLS_ENV];
+    delete process.env[LLM_TLS_ENV];
+  });
+  afterEach(() => {
+    delete process.env[EMBED_TLS_ENV];
+    delete process.env[LLM_TLS_ENV];
+  });
+
+  it('is off when the variable is unset', () => {
+    expect(envTlsOptOut(EMBED_TLS_ENV)).toBe(false);
+    expect(envTlsOptOut(LLM_TLS_ENV)).toBe(false);
+  });
+
+  it('accepts "1" and "true", and nothing else', () => {
+    for (const affirmative of ['1', 'true']) {
+      process.env[EMBED_TLS_ENV] = affirmative;
+      expect(envTlsOptOut(EMBED_TLS_ENV)).toBe(true);
+    }
+    // A truthy-looking value that is not one of the two accepted spellings must not
+    // silently disable verification — failing closed is the safe direction here.
+    for (const other of ['yes', 'TRUE', 'on', '0', 'false', '']) {
+      process.env[EMBED_TLS_ENV] = other;
+      expect(envTlsOptOut(EMBED_TLS_ENV)).toBe(false);
+    }
+  });
+
+  it('does not leak across surfaces: the embedding key never relaxes the LLM', () => {
+    process.env[EMBED_TLS_ENV] = '1';
+    expect(envTlsOptOut(EMBED_TLS_ENV)).toBe(true);
+    expect(envTlsOptOut(LLM_TLS_ENV)).toBe(false);
+  });
+
+  it('does not leak across surfaces: the LLM key never relaxes embeddings', () => {
+    process.env[LLM_TLS_ENV] = '1';
+    expect(envTlsOptOut(LLM_TLS_ENV)).toBe(true);
+    expect(envTlsOptOut(EMBED_TLS_ENV)).toBe(false);
+  });
+});
+
+/**
+ * Surface isolation asserted at the REAL boundary — an actual TLS handshake against a
+ * self-signed server — rather than only on the reader's return value. A reader-level
+ * assertion would keep passing if a request site forgot to consult it, which is exactly
+ * the defect this change fixes (six sites passed an explicit `false` or nothing at all).
+ *
+ * Covers spec `operator-tls-trust`:
+ *   - Relaxing embeddings leaves LLM verification intact
+ *   - Relaxing the LLM leaves embedding verification intact
+ *   - An unrecognised value fails closed
+ *   - The operator's environment is honoured where no flag can reach
+ *   - A long-running daemon does not stay unverified
+ */
+describe('tls-scope: scoped opt-out at the real TLS boundary', () => {
+  let server: Server | undefined;
+  let url = '';
+
+  beforeEach(async () => {
+    resetTlsScopeForTests();
+    if (!tlsFixture) return;
+    const { key, cert } = tlsFixture;
+    server = createServer({ key, cert }, (_req, res) => { res.writeHead(200); res.end('ok'); });
+    await new Promise<void>((r) => server!.listen(0, '127.0.0.1', () => r()));
+    url = `https://127.0.0.1:${(server.address() as { port: number }).port}/`;
+  });
+  afterEach(() => {
+    server?.close();
+    server = undefined;
+    resetTlsScopeForTests();
+  });
+
+  it.skipIf(!tlsFixture)(
+    'an embedding opt-out reaches embedding requests and NOT LLM requests',
+    async () => {
+      process.env[EMBED_TLS_ENV] = '1';
+
+      const embedRes = await withRelaxedTls(() => fetch(url), embeddingTlsRelaxed());
+      expect(embedRes.status).toBe(200);
+
+      // The LLM surface must still verify: an internal embedding server says nothing
+      // about the certificate an LLM vendor presents.
+      await expect(withRelaxedTls(() => fetch(url), llmTlsRelaxed())).rejects.toThrow();
+    },
+    20_000
+  );
+
+  it.skipIf(!tlsFixture)(
+    'an LLM opt-out reaches LLM requests and NOT embedding requests',
+    async () => {
+      process.env[LLM_TLS_ENV] = '1';
+
+      const llmRes = await withRelaxedTls(() => fetch(url), llmTlsRelaxed());
+      expect(llmRes.status).toBe(200);
+
+      await expect(withRelaxedTls(() => fetch(url), embeddingTlsRelaxed())).rejects.toThrow();
+    },
+    20_000
+  );
+
+  it.skipIf(!tlsFixture)(
+    'the env lever works with no CLI flag in play — the daemon / git-hook case',
+    async () => {
+      expect(isInsecureTlsAllowed()).toBe(false); // nothing granted a process-wide capability
+      process.env[LLM_TLS_ENV] = 'true';
+
+      const res = await withRelaxedTls(() => fetch(url), llmTlsRelaxed());
+      expect(res.status).toBe(200);
+
+      // ...and it did not leave verification off behind it (the long-lived daemon case).
+      expect(process.env.NODE_TLS_REJECT_UNAUTHORIZED).toBeUndefined();
+      await expect(fetch(url)).rejects.toThrow();
+    },
+    20_000
+  );
+
+  it.skipIf(!tlsFixture)(
+    'an unrecognised value fails closed at the handshake, not just in the reader',
+    async () => {
+      process.env[LLM_TLS_ENV] = 'yes';
+      process.env[EMBED_TLS_ENV] = 'on';
+
+      await expect(withRelaxedTls(() => fetch(url), llmTlsRelaxed())).rejects.toThrow();
+      await expect(withRelaxedTls(() => fetch(url), embeddingTlsRelaxed())).rejects.toThrow();
+    },
+    20_000
+  );
+
+  it.skipIf(!tlsFixture)(
+    'a CLI --insecure still reaches both surfaces (it is the operator too)',
+    async () => {
+      allowInsecureTls('test');
+      expect((await withRelaxedTls(() => fetch(url), llmTlsRelaxed())).status).toBe(200);
+      expect((await withRelaxedTls(() => fetch(url), embeddingTlsRelaxed())).status).toBe(200);
     },
     20_000
   );
