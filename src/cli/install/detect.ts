@@ -10,13 +10,14 @@ import { access, stat, readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 
-export type AgentName = 'claude-code' | 'cursor' | 'cline' | 'continue' | 'agents-md';
+export type AgentName = 'claude-code' | 'cursor' | 'cline' | 'continue' | 'pi' | 'agents-md';
 
 export const ALL_AGENTS: AgentName[] = [
   'claude-code',
   'cursor',
   'cline',
   'continue',
+  'pi',
   'agents-md',
 ];
 
@@ -92,6 +93,14 @@ async function detectInDir(dir: string): Promise<DetectedSurface[]> {
     if (markers.length) found.push({ agent: 'continue', root: dir, markers });
   }
 
+  // pi — project-local extension/settings dir (pi.dev)
+  {
+    const markers: string[] = [];
+    if (await isDir(join(dir, '.pi'))) markers.push('.pi/');
+    if (await exists(join(dir, '.pi', 'settings.json'))) markers.push('.pi/settings.json');
+    if (markers.length) found.push({ agent: 'pi', root: dir, markers });
+  }
+
   return found;
 }
 
@@ -114,16 +123,19 @@ export async function detect(startDir: string): Promise<DetectedSurface[]> {
     if (parent === dir) break;
     dir = parent;
   }
-  // No in-tree markers at all: bias toward Claude Code when the user has a
-  // ~/.claude home (the headline audience) rather than silently targeting only
-  // AGENTS.md and mis-wiring a clean repo (Spec 26 B6B).
+  // No in-tree markers at all: bias toward the agent homes the user actually has
+  // (~/.claude — the headline audience; ~/.pi — a global Pi install writes no
+  // project marker) rather than silently targeting only AGENTS.md and mis-wiring
+  // a clean repo (Spec 26 B6B).
   if (out.length === 0) {
-    try {
-      if ((await stat(join(homedir(), '.claude'))).isDirectory()) {
-        out.push({ agent: 'claude-code', root: resolve(startDir), markers: ['(~/.claude present)'] });
+    const homes: Array<[AgentName, string]> = [
+      ['claude-code', '.claude'],
+      ['pi', '.pi'],
+    ];
+    for (const [agent, homeDir] of homes) {
+      if (await isDir(join(homedir(), homeDir))) {
+        out.push({ agent, root: resolve(startDir), markers: [`(~/${homeDir} present)`] });
       }
-    } catch {
-      /* no ~/.claude — fall through to the AGENTS.md fallback */
     }
   }
 
