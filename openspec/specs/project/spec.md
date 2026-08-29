@@ -96,4 +96,9 @@ the deterministic sub-benchmarks SHALL remain runnable without agent credentials
 
 ## Technical Notes
 
-- **Implementation**: `src/core/services/project-detector.ts`
+- **Implementation**: `src/core/services/project-detector.ts`, `bench/Dockerfile`,
+  `bench/container-entrypoint.sh`,
+  `bench/container/package.json`, `bench/container/package-lock.json`, `bench/run.ts`,
+  `scripts/bench-agent.ts`, `src/bench/container-launch.ts`, `src/bench/pinned-repository.ts`,
+  `src/bench/preregistered-rule.ts`, `src/bench/protocol-verdict.ts`, `src/bench/result-path.ts`,
+  and `src/bench/fixtures/trajectory.txt`.

@@ -14,7 +14,7 @@
       pinning; runs record image digest + SHA + agent config in the results artifact
 - [x] `bench/PROTOCOL.md`: pre-registered decision rule (fixed before any run), both repo tiers,
       both models, results artifact checked in with the change, ADR cites the run; the
-      DefaultSurfaceRevealsAllFaces run documented as the first conforming instance
+      DefaultSurfaceRevealsAllFaces run documented honestly as the legacy, nonconforming precursor
 - [x] Keep bench out of per-commit CI (manual/scheduled only); deterministic sub-benchmarks
       (surface arithmetic) remain runnable at $0 via `--dry-run`
 

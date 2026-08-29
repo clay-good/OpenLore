@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   scorePresetTrajectory,
+  scoreSelectionResponse,
   validatePresetBenchmarkCorpus,
   type PresetBenchmarkCorpus,
 } from './preset-protocol.js';
@@ -55,26 +56,19 @@ describe('preset benchmark corpus validation', () => {
       toolId: 'search_code',
     }));
   });
+
+  it('rejects duplicate model ids that would make the two-model gate vacuous', () => {
+    const input = corpus({ agentConfig: { models: ['model-a', 'model-a'], runs: 1 } });
+    expect(validatePresetBenchmarkCorpus(input, known, { navigation: known }))
+      .toContainEqual(expect.objectContaining({
+        code: 'invalid-corpus',
+        message: 'Corpus must declare at least two distinct models.',
+      }));
+  });
 });
 
 describe('preset benchmark deterministic trajectory scoring', () => {
-  const raw = [
-    JSON.stringify({
-      type: 'assistant',
-      message: { content: [{ type: 'tool_use', id: 'u1', name: 'mcp__openlore__orient', input: {} }] },
-    }),
-    JSON.stringify({
-      type: 'user',
-      message: { content: [{ type: 'tool_result', tool_use_id: 'u1', content: 'orientation' }] },
-    }),
-    JSON.stringify({
-      type: 'result',
-      usage: { input_tokens: 100, cache_creation_input_tokens: 20, cache_read_input_tokens: 30, output_tokens: 10 },
-      total_cost_usd: 0.01,
-      num_turns: 2,
-      result: 'done',
-    }),
-  ].join('\n');
+  const raw = readFileSync(join(process.cwd(), 'src', 'bench', 'fixtures', 'trajectory.txt'), 'utf8');
 
   it('scores the same logged transcript identically across replays without a model', () => {
     const first = scorePresetTrajectory(corpus().tasks[0], raw);
@@ -86,6 +80,18 @@ describe('preset benchmark deterministic trajectory scoring', () => {
       steps: 1,
       tokenCost: 160,
       costUsd: 0.01,
+    });
+  });
+
+  it('replays a logged selection response without a model', () => {
+    const logged = JSON.stringify({
+      result: '{"tool":"orient"}',
+      usage: { input_tokens: 10, cache_creation_input_tokens: 2, cache_read_input_tokens: 3, output_tokens: 1 },
+    });
+    expect(scoreSelectionResponse(corpus().tasks[0], logged)).toEqual({
+      selectedTool: 'orient',
+      selectionCorrect: true,
+      tokenCost: 16,
     });
   });
 });

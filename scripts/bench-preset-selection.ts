@@ -6,9 +6,10 @@
  */
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { TOOL_DEFINITIONS, selectActiveTools } from '../src/cli/commands/mcp.js';
 import {
+  scoreSelectionResponse,
   validatePresetBenchmarkCorpus,
   type PresetBenchmarkCorpus,
   type PresetBenchmarkTask,
@@ -45,45 +46,15 @@ function buildPrompt(menu: string, task: PresetBenchmarkTask): string {
   ].join('\n');
 }
 
-function parseChoice(text: string): string | null {
-  const object = text.match(/\{\s*"tool"\s*:\s*"([^"]+)"\s*\}/);
-  if (object) return object[1].trim();
-  const bare = text.trim().match(/^[`"']?([a-z_]+)[`"']?$/);
-  return bare?.[1] ?? null;
-}
-
-function askClaude(prompt: string, model: string): { chosen: string | null; tokenCost: number } {
-  let raw: string;
+function askClaude(prompt: string, model: string): string {
   try {
-    raw = execFileSync('claude', ['-p', prompt, '--output-format', 'json', '--model', model], {
+    return execFileSync('claude', ['-p', prompt, '--output-format', 'json', '--model', model], {
       encoding: 'utf8',
       maxBuffer: 8 * 1024 * 1024,
       timeout: 90_000,
     });
   } catch {
-    return { chosen: null, tokenCost: 0 };
-  }
-  try {
-    const parsed = JSON.parse(raw) as {
-      result?: string;
-      usage?: {
-        input_tokens?: number;
-        cache_creation_input_tokens?: number;
-        cache_read_input_tokens?: number;
-        output_tokens?: number;
-      };
-    };
-    const usage = parsed.usage ?? {};
-    return {
-      chosen: parseChoice(parsed.result ?? ''),
-      tokenCost:
-        (usage.input_tokens ?? 0) +
-        (usage.cache_creation_input_tokens ?? 0) +
-        (usage.cache_read_input_tokens ?? 0) +
-        (usage.output_tokens ?? 0),
-    };
-  } catch {
-    return { chosen: parseChoice(raw), tokenCost: 0 };
+    return '';
   }
 }
 
@@ -97,6 +68,7 @@ function main(): void {
   const presetA = arg('--preset-a', 'navigation');
   const presetB = arg('--preset-b', 'substrate');
   const model = arg('--model', 'sonnet');
+  const artifactsDirectory = arg('--artifacts-dir', '');
   const corpusPath = resolve(arg('--corpus', 'bench/corpora/default-surface.json'));
   const corpus = JSON.parse(readFileSync(corpusPath, 'utf8')) as PresetBenchmarkCorpus;
   const menus = { [presetA]: toolMenu(presetA), [presetB]: toolMenu(presetB) };
@@ -132,14 +104,26 @@ function main(): void {
         };
         continue;
       }
-      const result = askClaude(buildPrompt(menus[preset].menu, task), model);
+      const raw = askClaude(buildPrompt(menus[preset].menu, task), model);
+      const result = scoreSelectionResponse(task, raw);
+      const rawPath = artifactsDirectory
+        ? join(artifactsDirectory, model, preset, `${task.id}.json`)
+        : undefined;
+      if (rawPath) {
+        mkdirSync(dirname(rawPath), { recursive: true });
+        writeFileSync(rawPath, raw, 'utf8');
+      }
       const cell = score[preset];
       cell.total += 1;
       cell.tokenCost += result.tokenCost;
-      if (result.chosen === null) cell.unparsed += 1;
-      const correct = result.chosen !== null && task.expectedTools.includes(result.chosen);
-      if (correct) cell.correct += 1;
-      row[preset] = { chosen: result.chosen, correct, tokenCost: result.tokenCost };
+      if (result.selectedTool === null) cell.unparsed += 1;
+      if (result.selectionCorrect) cell.correct += 1;
+      row[preset] = {
+        chosen: result.selectedTool,
+        correct: result.selectionCorrect,
+        tokenCost: result.tokenCost,
+        rawArtifact: rawPath ? relative(process.cwd(), rawPath) : undefined,
+      };
     }
     rows.push(row);
   }

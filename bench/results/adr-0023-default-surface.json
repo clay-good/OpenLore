@@ -1,5 +1,6 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 0,
+  "status": "legacy-nonconforming",
   "decision": "ADR-0023",
   "corpus": "default-surface-v1",
   "presets": ["navigation", "substrate"],
@@ -19,7 +20,12 @@
     "correctness": "100% for both presets, both models, and both repository tiers",
     "cost": "substrate was cheaper in 3 of 4 model-by-tier cells"
   },
-  "verdict": "FLIP",
+  "historicalVerdict": "FLIP",
   "source": "openspec/decisions/adr-0023-flip-default-mcp-surface-to-the-substrate-both-fac.md",
-  "note": "This artifact consolidates the checked-in ADR-0023 run evidence. The immutable container pin is the protocol replay environment; the original run predates the generalized runner."
+  "limitations": [
+    "The decision rule was not committed before the historical measured run.",
+    "Raw selection and completion trajectories were not retained for deterministic replay.",
+    "The runtime container identity was not independently verified during the historical run."
+  ],
+  "note": "This is a retrospective summary of the ADR-0023 evidence, not a conforming artifact from the generalized protocol."
 }

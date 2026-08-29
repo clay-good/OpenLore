@@ -961,6 +961,11 @@ A default-surface change without a conforming benchmark run SHALL NOT be merged 
 
 ## Technical Notes
 
+- **Implementation**: `bench/PROTOCOL.md`, `bench/corpora/default-surface.json`,
+  `bench/rules/adr-0023.json`, `bench/results/adr-0023-default-surface.json`, `bench/run.ts`,
+  `scripts/bench-preset-surface.ts`, `scripts/bench-preset-selection.ts`,
+  `scripts/bench-preset-completion.ts`, `src/bench/preset-protocol.ts`, and
+  `src/bench/preset-surface.ts`.
 - **Tension to manage:** description conciseness (token budget) vs. agent guidance ("USE THIS
   WHEN", preconditions). Resolve by leading with a tight summary, keeping triggers to one
   line, and moving long-form guidance to resources/README rather than deleting useful cues.

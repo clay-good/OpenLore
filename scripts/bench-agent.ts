@@ -23,6 +23,11 @@ import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { BENCH_AGENT_CORPUS, REPOS, TASKS, type PinnedRepo, type BenchTask, type RepoTier } from './bench-agent.tasks.js';
 import { parseAgentOutput, analyzeAgentTranscript } from '../src/bench/transcript-metrics.js';
+import {
+  assertPinnedAnalysis,
+  markPinnedAnalysis,
+  verifyPinnedRepository,
+} from '../src/bench/pinned-repository.js';
 
 // ── CLI args ────────────────────────────────────────────────────────────────
 interface Opts {
@@ -40,6 +45,7 @@ interface Opts {
   withPreset: string;       // lean tool preset for the WITH arm (default: navigation)
   leanOrient: boolean;      // instruct the WITH arm to call orient with lean:true (Spec 27)
   resultsJson?: string;     // also emit machine-readable per-task cells to this path (for orchestrators)
+  artifactsDirectory?: string; // persist raw stream-json trajectories for deterministic replay
   withOnly: boolean;        // skip the WITHOUT baseline arm (preset-vs-preset orchestration reruns the WITH arm)
 }
 
@@ -67,6 +73,7 @@ function parseArgs(argv: string[]): Opts {
     withPreset: get('--with-preset') ?? 'navigation',
     leanOrient: argv.includes('--lean-orient'),
     resultsJson: get('--results-json'),
+    artifactsDirectory: get('--artifacts-dir'),
     withOnly: argv.includes('--with-only'),
   };
 }
@@ -93,6 +100,9 @@ interface Metrics {
   fileReadOps?: number;     // source re-reads (Read/Grep/cat…) — what a certificate lets the agent skip
   fileReadTokens?: number;  // tokens those reads loaded into the model — the re-derivation cost
   certifiedFacts?: number;  // verified-current certificates openlore returned (WITH arm only)
+  rawArtifact?: string;
+  steps?: number;
+  tokenCost?: number;
 }
 
 type Condition = 'without' | 'with';
@@ -113,20 +123,28 @@ function ensureRepo(repo: PinnedRepo, work: string): string {
     sh('git', ['init', '-q'], dir);
     sh('git', ['remote', 'add', 'origin', repo.url], dir);
   }
+  if (sh('git', ['status', '--porcelain', '--untracked-files=no'], dir).trim()) {
+    throw new Error(`Pinned benchmark repository has tracked modifications: ${repo.id}`);
+  }
   // Fetch only the pinned commit's history shallowly, then check it out.
   sh('git', ['fetch', '-q', '--depth', '1', 'origin', repo.sha], dir);
-  sh('git', ['checkout', '-q', repo.sha], dir);
+  sh('git', ['checkout', '-q', '--detach', repo.sha], dir);
+  verifyPinnedRepository(repo, dir);
   return dir;
 }
 
-function ensureAnalyzed(repoDir: string): void {
-  if (existsSync(join(repoDir, '.openlore', 'analysis', 'llm-context.json'))) return;
+function ensureAnalyzed(repo: PinnedRepo, repoDir: string, reuseOnly: boolean): void {
+  if (reuseOnly) {
+    assertPinnedAnalysis(repo, repoDir);
+    return;
+  }
   // `analyze` requires an .openlore/config.json — `init` creates it (idempotent).
   if (!existsSync(join(repoDir, '.openlore', 'config.json'))) {
-    sh('openlore', ['init'], repoDir);
+    sh(process.execPath, [localCli(), 'init'], repoDir);
   }
   // Deterministic, no LLM, no network: BM25/structural index only.
-  sh('openlore', ['analyze', '--no-embed'], repoDir);
+  sh(process.execPath, [localCli(), 'analyze', '--no-embed', '--force'], repoDir);
+  markPinnedAnalysis(repo, repoDir);
 }
 
 /**
@@ -224,6 +242,8 @@ function runAgent(task: BenchTask, repoDir: string, condition: Condition, opts: 
       answer,
       correct: score(task, answer),
       ...reread,
+      steps: withCond ? 1 : 0,
+      tokenCost: withCond ? 34300 + base * 610 : 20900 + base * 630,
     };
   }
 
@@ -272,14 +292,42 @@ function runAgent(task: BenchTask, repoDir: string, condition: Condition, opts: 
     const e = err as { stdout?: Buffer | string; message?: string };
     const out = e.stdout ? e.stdout.toString() : '';
     if (!out) {
-      return { freshInputTokens: 0, cacheReadTokens: 0, outputTokens: 0, costUsd: 0, numTurns: 0, durationMs: Date.now() - t0, answer: '', correct: false, error: e.message ?? 'agent failed' };
+      raw = '';
+    } else {
+      raw = out; // some non-zero exits still emit the result json
     }
-    raw = out; // some non-zero exits still emit the result json
   }
 
   const { transcript, result } = parseAgentOutput(raw);
+  let rawArtifact: string | undefined;
+  if (opts.artifactsDirectory) {
+    const artifactPath = join(
+      opts.artifactsDirectory,
+      opts.model,
+      opts.withPreset,
+      task.repo,
+      task.id,
+      `${condition}-${runIdx + 1}.jsonl`,
+    );
+    mkdirSync(dirname(artifactPath), { recursive: true });
+    writeFileSync(artifactPath, raw, 'utf8');
+    rawArtifact = relative(process.cwd(), artifactPath);
+  }
   if (!result) {
-    return { freshInputTokens: 0, cacheReadTokens: 0, outputTokens: 0, costUsd: 0, numTurns: 0, durationMs: Date.now() - t0, answer: '', correct: false, error: 'no result event in agent output' };
+    return {
+      freshInputTokens: 0,
+      cacheReadTokens: 0,
+      outputTokens: 0,
+      costUsd: 0,
+      numTurns: 0,
+      durationMs: Date.now() - t0,
+      answer: '',
+      correct: false,
+      error: 'no result event in agent output',
+      rawArtifact,
+      steps: transcript.toolUses.length,
+      tokenCost: 0,
+    };
   }
   const reread = analyzeAgentTranscript(transcript);
   return {
@@ -295,6 +343,9 @@ function runAgent(task: BenchTask, repoDir: string, condition: Condition, opts: 
     fileReadTokens: reread.fileReadTokens,
     // openlore certificates exist only in the WITH arm; the WITHOUT transcript has none.
     certifiedFacts: condition === 'with' ? reread.certifiedFacts : 0,
+    rawArtifact,
+    steps: transcript.toolUses.length,
+    tokenCost: result.freshInputTokens + result.cacheReadTokens + result.outputTokens,
   };
 }
 
@@ -309,7 +360,7 @@ const median = (xs: number[]): number => {
 interface Cell {
   costUsd: number; costMin: number; costMax: number;   // bottom line + variance
   freshInputTokens: number; cacheReadTokens: number; outputTokens: number;
-  numTurns: number; durationMs: number; correctRate: number; n: number;
+  numTurns: number; durationMs: number; correctRate: number; n: number; failures: number;
   // Re-read economy medians — undefined when no run produced transcript data.
   fileReadOps?: number; fileReadTokens?: number; certifiedFacts?: number;
 }
@@ -331,6 +382,7 @@ function summarize(runs: Metrics[]): Cell {
     durationMs: median(runs.map((r) => r.durationMs)),
     correctRate: runs.length ? runs.filter((r) => r.correct).length / runs.length : 0,
     n: runs.length,
+    failures: runs.filter((r) => r.error !== undefined).length,
     fileReadOps: medianDefined(runs.map((r) => r.fileReadOps)),
     fileReadTokens: medianDefined(runs.map((r) => r.fileReadTokens)),
     certifiedFacts: medianDefined(runs.map((r) => r.certifiedFacts)),
@@ -469,7 +521,8 @@ async function main(): Promise<void> {
   const repoDirs = new Map<string, string>();
   for (const repo of repos) {
     const dir = opts.skipSetup ? join(opts.work, repo.id) : ensureRepo(repo, opts.work);
-    if (!opts.skipSetup) ensureAnalyzed(dir);
+    verifyPinnedRepository(repo, dir);
+    ensureAnalyzed(repo, dir, opts.skipSetup);
     repoDirs.set(repo.id, dir);
     console.error(`[bench-agent] ready: ${repo.id} @ ${repo.sha.slice(0, 8)}`);
   }
@@ -488,7 +541,7 @@ async function main(): Promise<void> {
   }
 
   // Run.
-  const perTask: Array<{ task: BenchTask; without: Cell; with: Cell }> = [];
+  const perTask: Array<{ task: BenchTask; without: Cell; with: Cell; withRuns: Metrics[] }> = [];
   for (const task of tasks) {
     const dir = repoDirs.get(task.repo)!;
     const without: Metrics[] = [];
@@ -499,7 +552,7 @@ async function main(): Promise<void> {
       if (!opts.withOnly) without.push(runAgent(task, dir, 'without', opts, configs, i));
       withRuns.push(runAgent(task, dir, 'with', opts, configs, i));
     }
-    perTask.push({ task, without: summarize(without), with: summarize(withRuns) });
+    perTask.push({ task, without: summarize(without), with: summarize(withRuns), withRuns });
     console.error(`[bench-agent] done: ${task.id}`);
   }
 
@@ -517,6 +570,7 @@ async function main(): Promise<void> {
         tier: REPOS.find((r) => r.id === p.task.repo)?.tier ?? 'large-unfamiliar',
         without: p.without,
         with: p.with,
+        trajectories: p.withRuns.map(({ rawArtifact, steps, tokenCost }) => ({ rawArtifact, steps, tokenCost })),
       })),
     };
     writeFileSync(opts.resultsJson, JSON.stringify(payload, null, 2), 'utf-8');

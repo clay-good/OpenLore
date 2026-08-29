@@ -44,6 +44,12 @@ export interface TrajectoryScore {
   reread: ReturnType<typeof analyzeAgentTranscript>;
 }
 
+export interface SelectionScore {
+  selectedTool: string | null;
+  selectionCorrect: boolean;
+  tokenCost: number;
+}
+
 const IMAGE_DIGEST = /^sha256:[a-f0-9]{64}$/;
 
 export function validatePresetBenchmarkCorpus(
@@ -63,6 +69,7 @@ export function validatePresetBenchmarkCorpus(
     invalid('Corpus environment digest must be an immutable sha256 digest.');
   }
   if (corpus.agentConfig.models.length < 2) invalid('Corpus must declare at least two models.');
+  if (new Set(corpus.agentConfig.models).size < 2) invalid('Corpus must declare at least two distinct models.');
   if (!Number.isSafeInteger(corpus.agentConfig.runs) || corpus.agentConfig.runs < 1) {
     invalid('Corpus agentConfig.runs must be a positive integer.');
   }
@@ -111,6 +118,46 @@ function normalizeToolName(name: string): string {
   const marker = '__openlore__';
   const markerIndex = name.indexOf(marker);
   return markerIndex >= 0 ? name.slice(markerIndex + marker.length) : name;
+}
+
+function parseSelectionChoice(text: string): string | null {
+  const object = text.match(/\{\s*"tool"\s*:\s*"([^"]+)"\s*\}/);
+  if (object) return object[1].trim();
+  const bare = text.trim().match(/^[`"']?([a-z_]+)[`"']?$/);
+  return bare?.[1] ?? null;
+}
+
+/** Deterministically score one logged first-tool selection response. */
+export function scoreSelectionResponse(task: PresetBenchmarkTask, rawResponse: string): SelectionScore {
+  try {
+    const parsed = JSON.parse(rawResponse) as {
+      result?: string;
+      usage?: {
+        input_tokens?: number;
+        cache_creation_input_tokens?: number;
+        cache_read_input_tokens?: number;
+        output_tokens?: number;
+      };
+    };
+    const usage = parsed.usage ?? {};
+    const selectedTool = parseSelectionChoice(parsed.result ?? '');
+    return {
+      selectedTool,
+      selectionCorrect: selectedTool !== null && task.expectedTools.includes(selectedTool),
+      tokenCost:
+        (usage.input_tokens ?? 0) +
+        (usage.cache_creation_input_tokens ?? 0) +
+        (usage.cache_read_input_tokens ?? 0) +
+        (usage.output_tokens ?? 0),
+    };
+  } catch {
+    const selectedTool = parseSelectionChoice(rawResponse);
+    return {
+      selectedTool,
+      selectionCorrect: selectedTool !== null && task.expectedTools.includes(selectedTool),
+      tokenCost: 0,
+    };
+  }
 }
 
 /** Deterministically score one logged agent trajectory. No model is called here. */
