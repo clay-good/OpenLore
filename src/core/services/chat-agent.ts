@@ -21,7 +21,7 @@
  */
 
 import { CHAT_TOOLS, toChatToolDefinitions } from './chat-tools.js';
-import { withRelaxedTls } from './tls-scope.js';
+import { llmTlsRelaxed, withRelaxedTls } from './tls-scope.js';
 import { readOpenLoreConfig } from './config-manager.js';
 import {
   DEFAULT_ANTHROPIC_MODEL,
@@ -428,7 +428,7 @@ async function runOpenAILoop(
           // codeql[js/file-access-to-http]
           body: JSON.stringify({ model: cfg.model, messages: history, tools: toolDefs, tool_choice: 'auto' }),
           signal: attemptSignal,
-        })),
+        }), llmTlsRelaxed()),
         signal,
       );
     } catch (error) {
@@ -534,7 +534,7 @@ async function runGeminiLoop(
             body: JSON.stringify(body),
             signal: attemptSignal,
           },
-        )),
+        ), llmTlsRelaxed()),
         signal,
       );
     } catch (error) {
@@ -649,7 +649,7 @@ async function runAnthropicLoop(
             messages: history,
           }),
           signal: attemptSignal,
-        })),
+        }), llmTlsRelaxed()),
         signal,
       );
     } catch (error) {

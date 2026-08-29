@@ -704,8 +704,12 @@ curl -XPOST 127.0.0.1:$PORT/tool/orient -d '{"args":{"task":"add rate limiting"}
 
 ### Pi integration
 
-`openlore setup --tools pi` installs the Pi extension to `.pi/extensions/openlore.ts`
-(add `--global` for `~/.pi/agent/extensions/`). It auto-starts and talks to the
+`openlore install --agent pi` (or `openlore connect pi`) installs the Pi extension
+to `.pi/extensions/openlore.js` — a re-export shim pointing into the openlore
+package, at parity with every other agent surface. Two
+equivalent routes: `pi install npm:openlore` (Pi's own package route, via the `"pi"`
+field in openlore's `package.json`) and `openlore setup --tools pi --global`
+(`~/.pi/agent/extensions/`, every project). It auto-starts and talks to the
 serve daemon, injecting structural context and exposing Pi's curated tool surface.
 Pi starts a full-preset backing daemon and curates the model-visible tools itself;
 if an existing narrow daemon owns the repository, stop it before starting Pi.

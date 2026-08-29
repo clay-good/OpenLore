@@ -218,6 +218,8 @@ jobs:
         run: |
           npm run build
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npx vitest run src/cli/install/pi-surface.test.ts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $package = (npm pack --silent | Select-Object -Last 1).Trim()
           if (-not (Test-Path $package)) { throw 'npm pack did not produce a tarball' }
           npm install --global "./$package"

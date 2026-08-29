@@ -41,7 +41,7 @@ OpenLore fixes both halves. It runs a **one-time static analysis** of your repo 
 npm install -g openlore && openlore install
 ```
 
-That one command **auto-detects your agent** (Claude Code, Cursor, Cline, Continue, AGENTS.md), **wires it to call `orient()` automatically**, **registers the MCP server**, and **builds the index** — no API key, no config, no questions. Then ask your agent:
+That one command **auto-detects your agent** (Claude Code, Cursor, Cline, Continue, Pi, AGENTS.md), **wires it to call `orient()` automatically**, **registers the MCP server**, and **builds the index** — no API key, no config, no questions. Then ask your agent:
 
 > **`orient("add a payment method")`**
 

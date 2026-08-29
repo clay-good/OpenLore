@@ -167,6 +167,27 @@ describe('syncApprovedDecisions — filesystem writes', () => {
     expect(content).not.toContain('The system SHALL The system SHALL');
   });
 
+  it('inserts a synced requirement before Sub-components', async () => {
+    const specDir = join(tmpDir, 'openspec', 'specs', 'services');
+    await mkdir(specDir, { recursive: true });
+    const specPath = join(specDir, 'spec.md');
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(specPath, MINIMAL_SPEC.replace(
+      '## Technical Notes',
+      '## Sub-components\n\n### Sub-component: Worker\n\nDetails.\n\n## Technical Notes',
+    ), 'utf-8');
+
+    await syncApprovedDecisions(makeStore([makeDecision()]), {
+      rootPath: tmpDir,
+      openspecPath: join(tmpDir, 'openspec'),
+      specMap: makeSpecMap('services', 'openspec/specs/services/spec.md'),
+    });
+
+    const content = await readFile(specPath, 'utf-8');
+    expect(content.indexOf('### Requirement: UseRedisForCaching'))
+      .toBeLessThan(content.indexOf('## Sub-components'));
+  });
+
   it('preserves a requirement with its own subject and normative modal', async () => {
     const specDir = join(tmpDir, 'openspec', 'specs', 'services');
     await mkdir(specDir, { recursive: true });

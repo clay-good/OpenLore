@@ -2229,6 +2229,19 @@ same two states produce byte-identical output, with no timestamps in the compare
 - **WHEN** its standard output is captured
 - **THEN** the captured bytes parse as the documented payload with no diagnostic text mixed in
 
+### Requirement: ScopeEveryTlsOptoutToOneNetworkSurfaceAddNoUnionSwitch
+
+This domain SHALL conform to the canonical statement of decision `b8520b68`, which lives in the
+`llm` domain — see [llm/spec.md](../llm/spec.md).
+
+#### Scenario: The canonical statement governs
+
+- **GIVEN** decision `b8520b68` recorded in the `llm` domain
+- **WHEN** this domain's behavior touches that decision's surface
+- **THEN** it satisfies the canonical requirement as stated in [llm/spec.md](../llm/spec.md)
+
+> Decision pointer: b8520b68 — "Scope every TLS opt-out to one network surface; add no union switch" is recorded in `openspec/specs/llm/spec.md`; it also affects this domain.
+
 ## Technical Notes
 
 - **Dependencies**: ora, logger, ProgressIndicator, showNextSteps, @inquirer/prompts

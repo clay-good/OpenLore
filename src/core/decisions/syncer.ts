@@ -522,19 +522,25 @@ function validateDecisionRequirementBlock(block: string, decisionId: string): vo
 }
 
 function insertRequirementBlock(content: string, block: string): string {
-
-  // Insert before ## Technical Notes or ## Architecture Notes or append before ## Decisions
-  const sectionMatch = content.match(
-    /^(##\s+(Technical Notes|Architecture Notes|Decisions))/m,
-  );
-  if (sectionMatch && sectionMatch.index !== undefined) {
+  // Keep requirement blocks inside the Requirements section. Specs can contain
+  // arbitrary later sections (notably ## Sub-components), so stopping only at
+  // a named set of sections can create a schema-invalid requirement.
+  const requirementsMatch = /^##\s+Requirements\s*$/m.exec(content);
+  if (requirementsMatch?.index !== undefined) {
+    const afterRequirements = requirementsMatch.index + requirementsMatch[0].length;
+    const nextSection = /^##\s+.+$/gm;
+    nextSection.lastIndex = afterRequirements;
+    const boundary = nextSection.exec(content);
+    const insertAt = boundary?.index ?? content.length;
     return (
-      content.slice(0, sectionMatch.index).trimEnd() +
+      content.slice(0, insertAt).trimEnd() +
       '\n\n' + block.trim() + '\n\n' +
-      content.slice(sectionMatch.index)
+      content.slice(insertAt).trimStart()
     );
   }
 
+  // Legacy/incomplete specs have no Requirements section. Preserve the former
+  // fallback so the caller can surface schema validation for the emitted block.
   return content.trimEnd() + '\n\n' + block.trim() + '\n';
 }
 

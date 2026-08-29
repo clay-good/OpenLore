@@ -101,14 +101,15 @@ export function parseArchitectureRules(raw: unknown, source: RuleSource): Archit
   // layers
   if (cfg.layers !== undefined) {
     if (cfg.layers && typeof cfg.layers === 'object' && !Array.isArray(cfg.layers)) {
-      const layers: Record<string, string[]> = {};
+      const layerEntries: Array<[string, string[]]> = [];
       for (const [name, prefixes] of Object.entries(cfg.layers)) {
         if (isStringArray(prefixes) && prefixes.length > 0) {
-          layers[name] = prefixes;
+          layerEntries.push([name, prefixes]);
         } else {
           warnings.push(`layers.${name}: expected a non-empty array of path prefixes — skipped`);
         }
       }
+      const layers = Object.fromEntries(layerEntries);
       if (Object.keys(layers).length >= 2) {
         rules.push({ kind: 'layers', layers, source });
       } else if (Object.keys(layers).length > 0) {
