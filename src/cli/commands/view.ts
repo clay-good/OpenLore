@@ -635,10 +635,13 @@ export const viewCommand = new Command('view')
                     }
                     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
                     if (cfg.apiKey) headers['Authorization'] = `Bearer ${cfg.apiKey}`;
-                    // Repository config reaches baseUrl only through resolveTrustedCompatBase,
-                    // which accepts loopback endpoints; remote endpoints are operator-supplied.
-                    // codeql[js/file-access-to-http]
-                    const r = await withRelaxedTls(() => fetch(`${cfg.baseUrl}/models`, { headers, signal: modelTimeout }), llmTlsRelaxed());
+                    const r = await withRelaxedTls(
+                      () =>
+                        // INTENTIONAL EGRESS: repo config can select only loopback; remote endpoints are operator-supplied.
+                        // codeql[js/file-access-to-http]
+                        fetch(`${cfg.baseUrl}/models`, { headers, signal: modelTimeout }),
+                      llmTlsRelaxed(),
+                    );
                     if (r.ok) {
                       const data = await r.json() as { data?: Array<{ id: string }> };
                       models = (data.data ?? []).map(m => m.id).sort();
