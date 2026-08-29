@@ -1,0 +1,5 @@
+{
+  "schemaVersion": 1,
+  "id": "default-surface-reveals-all-faces-v1",
+  "verdict": "FLIP only when candidate selection correctness does not regress on shared tasks, every repo tier stays within 5 percentage points of current-preset correctness, median cost stays within 20%, and the candidate reveals navigate, change, remember, and verify faces. Otherwise HOLD."
+}

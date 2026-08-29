@@ -21,7 +21,7 @@ import { mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync, statSy
 import { join, relative, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
-import { REPOS, TASKS, type PinnedRepo, type BenchTask, type RepoTier } from './bench-agent.tasks.js';
+import { BENCH_AGENT_CORPUS, REPOS, TASKS, type PinnedRepo, type BenchTask, type RepoTier } from './bench-agent.tasks.js';
 import { parseAgentOutput, analyzeAgentTranscript } from '../src/bench/transcript-metrics.js';
 
 // ── CLI args ────────────────────────────────────────────────────────────────
@@ -508,6 +508,8 @@ async function main(): Promise<void> {
   // without re-parsing the markdown report. Additive — the markdown report is unchanged.
   if (opts.resultsJson) {
     const payload = {
+      corpus: BENCH_AGENT_CORPUS,
+      repositories: repos.map(({ id, url, sha, tier }) => ({ id, url, sha, tier })),
       opts: { model: opts.model, runs: opts.runs, withPreset: opts.withPreset, withFullTools: opts.withFullTools, dryRun: opts.dryRun },
       perTask: perTask.map((p) => ({
         taskId: p.task.id,

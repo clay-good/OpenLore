@@ -32,6 +32,7 @@
     "bench:surface": "tsx scripts/bench-preset-surface.ts",
     "bench:selection": "tsx scripts/bench-preset-selection.ts",
     "bench:completion": "tsx scripts/bench-preset-completion.ts",
+    "bench:protocol": "node --import tsx bench/run.ts",
     "measure:certified-scale": "tsx scripts/measure-certified-scale.ts",
     "test": "vitest",
     "test:run": "vitest run",

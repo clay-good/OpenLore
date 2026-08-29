@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "decision": "ADR-0023",
+  "corpus": "default-surface-v1",
+  "presets": ["navigation", "substrate"],
+  "environment": {
+    "replayImage": "docker.io/library/node:24-bookworm@sha256:be23f54a88d34e8824c741b19b91064094f92c1c97b194144bfc8b50d67258e2",
+    "repositoryPins": "scripts/bench-agent.tasks.ts"
+  },
+  "agentConfig": {
+    "models": ["sonnet", "haiku"],
+    "repoTiers": ["small-familiar", "large-unfamiliar"]
+  },
+  "selection": {
+    "sharedAccuracy": { "navigation": 0.8, "substrate": 0.9 },
+    "governanceAccuracy": { "navigation": 0, "substrate": 1 }
+  },
+  "completion": {
+    "correctness": "100% for both presets, both models, and both repository tiers",
+    "cost": "substrate was cheaper in 3 of 4 model-by-tier cells"
+  },
+  "verdict": "FLIP",
+  "source": "openspec/decisions/adr-0023-flip-default-mcp-surface-to-the-substrate-both-fac.md",
+  "note": "This artifact consolidates the checked-in ADR-0023 run evidence. The immutable container pin is the protocol replay environment; the original run predates the generalized runner."
+}

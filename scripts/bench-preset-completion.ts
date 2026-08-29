@@ -3,8 +3,8 @@
  * validation (change: refine-happy-path-and-defaults).
  *
  * `bench-preset-selection.ts` measured first-tool SELECTION on a hand-authored corpus.
- * This measures the thing the default actually affects: END-TO-END TASK COMPLETION under
- * `navigation` vs `substrate`, on pinned real repos, scored by an INDEPENDENT oracle.
+ * This measures end-to-end task completion for arbitrary preset A and preset B on
+ * pinned real repos, scored by an INDEPENDENT oracle.
  *
  * It does not reimplement the agent loop — it drives the existing `bench-agent.ts`
  * (clone @ SHA → analyze → run headless `claude` → score by `expect.mustInclude` →
@@ -13,10 +13,8 @@
  * harness means the corpus, oracle, isolation (`--strict-mcp-config`) and metrics are
  * the audited ones, not a second implementation.
  *
- * Pre-registered decision rule (fixed BEFORE looking at results):
- *   FLIP the default to `substrate` iff, on EVERY tier, substrate's correctness is not
- *   worse than navigation's by more than NOISE_MARGIN, AND substrate's median cost is
- *   within COST_TOLERANCE of navigation's. Otherwise HOLD.
+ * The outer protocol runner binds the pre-registered rule before invoking this
+ * compatibility command. This command applies the ADR-0023 correctness and cost limits.
  *
  * Setup runs ONCE (clone+analyze) and is reused across both presets (same index; only
  * the wired MCP preset differs). Uses the Claude Code CLI — subscription auth, no API key.
@@ -31,17 +29,15 @@ import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
-import { REPOS } from './bench-agent.tasks.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BENCH_AGENT = join(__dirname, 'bench-agent.ts');
 
 // ── Pre-registered decision rule (do not tune after seeing results) ──────────
-const NOISE_MARGIN = 0.05;    // substrate may trail navigation by at most 5pp correctness on any tier
-const COST_TOLERANCE = 0.20;  // substrate median cost may exceed navigation's by at most 20%
+const NOISE_MARGIN = 0.05;
+const COST_TOLERANCE = 0.20;
 
-const PRESETS = ['navigation', 'substrate'] as const;
-type Preset = (typeof PRESETS)[number];
+type Preset = string;
 type Tier = 'small-familiar' | 'large-unfamiliar';
 
 interface Cell { costUsd: number; correctRate: number; n: number; freshInputTokens: number; cacheReadTokens: number }
@@ -73,7 +69,7 @@ function runArm(preset: Preset, work: string, resultsPath: string, firstArm: boo
   // work dir + index. A caller-supplied --skip-setup forces reuse for both.
   if (hasFlag('--skip-setup') || !firstArm) args.push('--skip-setup');
 
-  execFileSync('npx', ['tsx', ...args], { stdio: ['ignore', 'inherit', 'inherit'] });
+  execFileSync(process.execPath, ['--import', 'tsx', ...args], { stdio: ['ignore', 'inherit', 'inherit'] });
   return JSON.parse(readFileSync(resultsPath, 'utf-8')) as AgentResults;
 }
 
@@ -108,33 +104,35 @@ function main(): void {
   const work = arg('--work', join(tmpdir(), 'openlore-bench-preset-completion'))!;
   mkdirSync(work, { recursive: true });
   const json = hasFlag('--json');
+  const presets = [arg('--preset-a', 'navigation')!, arg('--preset-b', 'substrate')!];
 
   if (!hasFlag('--dry-run')) {
     console.error('[bench-preset-completion] LIVE run — clones repos and makes real agent calls (Claude Code CLI). Ctrl-C to abort.');
   }
 
-  const byPreset: Record<Preset, AgentResults> = {} as Record<Preset, AgentResults>;
-  PRESETS.forEach((preset, idx) => {
+  const byPreset: Record<Preset, AgentResults> = {};
+  presets.forEach((preset, idx) => {
     console.error(`\n[bench-preset-completion] === arm: ${preset} ===`);
     byPreset[preset] = runArm(preset, work, join(work, `results-${preset}.json`), idx === 0);
   });
 
-  const aggNav = aggregate(byPreset.navigation);
-  const aggSub = aggregate(byPreset.substrate);
+  const aggA = aggregate(byPreset[presets[0]]);
+  const aggB = aggregate(byPreset[presets[1]]);
 
   // Apply the pre-registered rule.
   const perTier = TIERS.map((tier) => {
-    const nav = aggNav[tier], sub = aggSub[tier];
-    const correctnessRegression = sub.tasks > 0 && nav.tasks > 0 && sub.correctness < nav.correctness - NOISE_MARGIN;
-    const costDelta = nav.costUsd > 0 ? sub.costUsd / nav.costUsd - 1 : 0;
+    const current = aggA[tier], candidate = aggB[tier];
+    const correctnessRegression = candidate.tasks > 0 && current.tasks > 0 && candidate.correctness < current.correctness - NOISE_MARGIN;
+    const costDelta = current.costUsd > 0 ? candidate.costUsd / current.costUsd - 1 : 0;
     const costOver = costDelta > COST_TOLERANCE;
-    return { tier, nav, sub, correctnessRegression, costDelta, costOver };
+    return { tier, current, candidate, correctnessRegression, costDelta, costOver };
   });
   const anyRegression = perTier.some((t) => t.correctnessRegression);
   const anyCostOver = perTier.some((t) => t.costOver);
   const flipCleared = !anyRegression && !anyCostOver;
 
   const summary = {
+    presets,
     rule: { noiseMargin: NOISE_MARGIN, costTolerance: COST_TOLERANCE },
     perTier,
     anyRegression,
@@ -152,13 +150,13 @@ function main(): void {
 
   if (json) { process.stdout.write(JSON.stringify(summary, null, 2) + '\n'); return; }
 
-  const L: string[] = ['', 'Task-completion comparison — navigation vs substrate (end-to-end, oracle-scored):', ''];
-  L.push('  tier              tasks   correctness(nav→sub)    median cost(nav→sub)   Δcost');
+  const L: string[] = ['', `Task-completion comparison — ${presets[0]} vs ${presets[1]} (end-to-end, oracle-scored):`, ''];
+  L.push('  tier              tasks   correctness(A→B)      median cost(A→B)     Δcost');
   L.push('  ' + '-'.repeat(78));
   for (const t of perTier) {
-    L.push('  ' + t.tier.padEnd(18) + String(t.sub.tasks).padStart(3) + '     ' +
-      `${pctOrDash(t.nav.correctness)} → ${pctOrDash(t.sub.correctness)}`.padEnd(22) +
-      `$${t.nav.costUsd.toFixed(3)} → $${t.sub.costUsd.toFixed(3)}`.padEnd(22) +
+    L.push('  ' + t.tier.padEnd(18) + String(t.candidate.tasks).padStart(3) + '     ' +
+      `${pctOrDash(t.current.correctness)} → ${pctOrDash(t.candidate.correctness)}`.padEnd(22) +
+      `$${t.current.costUsd.toFixed(3)} → $${t.candidate.costUsd.toFixed(3)}`.padEnd(22) +
       `${t.costDelta >= 0 ? '+' : ''}${Math.round(t.costDelta * 100)}%` +
       (t.correctnessRegression ? '  ⚠ REGRESSION' : '') + (t.costOver ? '  ⚠ COST' : ''));
   }
