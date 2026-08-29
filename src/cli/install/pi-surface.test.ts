@@ -3,6 +3,7 @@ import { mkdtemp, rm, mkdir, writeFile, readFile, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { discoverAndLoadExtensions } from '@earendil-works/pi-coding-agent';
 import { runInstall, surfaceStatus } from './index.js';
 import { detect, ALL_AGENTS } from './detect.js';
 import { PI_EXTENSION_SOURCE, renderPiShim } from './pi-extension.js';
@@ -66,6 +67,19 @@ describe('pi surface — install/connect parity', () => {
     await runInstall({ cwd: dir, agent: 'pi', analyze: false });
     const mod = await import(pathToFileURL(join(dir, EXT_REL)).href);
     expect(typeof mod.default).toBe('function');
+  });
+
+  it('loads through Pi\'s own extension loader in a CommonJS project', async () => {
+    await writeFile(join(dir, 'package.json'), JSON.stringify({ type: 'commonjs' }));
+    await runInstall({ cwd: dir, agent: 'pi', analyze: false });
+
+    const agentDir = join(dir, '.pi-agent-test');
+    await mkdir(agentDir, { recursive: true });
+    const loaded = await discoverAndLoadExtensions([], dir, agentDir);
+
+    expect(loaded.errors).toEqual([]);
+    expect(loaded.extensions).toHaveLength(1);
+    expect(loaded.extensions[0]?.path).toBe(join(dir, EXT_REL));
   });
 
   it('refuses to overwrite a foreign openlore.js without --force', async () => {
