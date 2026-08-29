@@ -9,7 +9,7 @@ cd your-project
 openlore install
 ```
 
-That auto-detects which agent surfaces are present (Claude Code, Cursor, Cline, Continue, plus
+That auto-detects which agent surfaces are present (Claude Code, Cursor, Cline, Continue, Pi, plus
 the universal `AGENTS.md` fallback) and writes the minimal config needed for each agent to call
 `orient()` before reading source files.
 
@@ -34,7 +34,7 @@ The happy path needs no flags and never touches your repo on `npm install`:
 
 | Flag | Effect |
 |------|--------|
-| `--agent <name>` | Install only for one surface. Names: `claude-code`, `cursor`, `cline`, `continue`, `agents-md`. |
+| `--agent <name>` | Install only for one surface. Names: `claude-code`, `cursor`, `cline`, `continue`, `pi`, `agents-md`. |
 | `--preset <name>` | Wire the MCP server to a tool preset: `substrate` (the default — the navigation core, governance reads `recall` + `verify_claim` + `blast_radius`, and `prepare_spec_generation` + `prepare_spec_repair`; the write face `remember`/`record_decision` stays opt-in), `navigation` (the lean navigate-only escape), `minimal`, `memory`, `verify`, `federation`, `coordination`, or `full`. Omit it for the `substrate` default; pass `--preset navigation` for the lean core, or `--preset full` to wire all 76 tools. |
 | `--dry-run` | Print the planned changes; write nothing. |
 | `--force` | Overwrite OpenLore-managed blocks even when hand-edited. |
@@ -67,7 +67,33 @@ the block we refuse to overwrite unless you pass `--force`.
 | `cursor` | `.cursor/` or `.cursorrules` | append block to `.cursorrules`; write `.cursor/rules/openlore.mdc`; `mcpServers.openlore` in `.cursor/mcp.json` |
 | `cline` | `.clinerules` or `.vscode/settings.json` (`cline.*`) | append block to `.clinerules` |
 | `continue` | `.continue/` | add `/orient` entry to `.continue/config.json` (MCP server registration is TODO — see below) |
+| `pi` | `.pi/` (or `~/.pi/` when the tree has no marker at all) | write `.pi/extensions/openlore.js` — a fingerprinted re-export shim pointing at the extension inside the openlore package. No markdown block, no MCP entry: Pi does not consume MCP; the extension starts `openlore serve` on demand and injects the digest itself. See [Pi](#pi-pidev). |
 | `agents-md` | always applies | append block to `AGENTS.md` (creates if absent) |
+
+## Pi (pi.dev)
+
+[Pi](https://pi.dev) loads JavaScript extensions rather than MCP servers, so its footprint is a
+single file. Three equivalent routes, pick one:
+
+```bash
+openlore install --agent pi          # .pi/extensions/openlore.js (this project)
+pi install npm:openlore              # Pi's own package route — reads the "pi" field in package.json
+openlore setup --tools pi --global   # ~/.pi/agent/extensions/openlore.js (every project)
+```
+
+The extension registers the navigation tools (`openlore_orient`, `openlore_search_code`,
+`openlore_get_subgraph`, …), injects `CODEBASE.md` plus a task-specific `orient` on
+`session_start`, and talks to a warm `openlore serve` daemon over loopback so calls hit warm
+caches. Requires Pi ≥ 0.78.1 and one `openlore analyze` beforehand. Full detail in
+[`examples/pi/README.md`](../examples/pi/README.md).
+
+> **What the file contains.** `.pi/extensions/openlore.js` is a four-line re-export shim, not a
+> copy of the extension. The shipped extension is plain `tsc` output whose relative imports only
+> resolve inside the openlore package, so a copy fails to load. The shim's target path is
+> **absolute**: re-run `openlore install --agent pi` after moving or reinstalling openlore, and
+> prefer `pi install npm:openlore` when `.pi/` is committed and shared across machines. The file
+> carries an `openlore-fingerprint` marker — hand-edit it and install refuses to overwrite it
+> without `--force`.
 
 ## Pre-commit hooks (opt-in)
 

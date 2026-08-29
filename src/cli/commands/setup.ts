@@ -29,6 +29,7 @@ import type { PanicGateReport } from '../../core/services/mcp-handlers/panic-val
 import type { PanicResponseMode } from '../../types/index.js';
 import { atomicWriteFile } from '../../core/decisions/atomic-store.js';
 import { confinedAtomicWriteFile, safeJoin } from '../../utils/path-confinement.js';
+import { classifyPiFile, looksLikeOpenLoreExtension, renderPiShim } from '../install/pi-extension.js';
 
 // ============================================================================
 // TYPES
@@ -64,6 +65,14 @@ async function fileExists(p: string): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+async function readFileOrNull(p: string): Promise<string | null> {
+  try {
+    return await readFile(p, 'utf-8');
+  } catch {
+    return null;
   }
 }
 
@@ -283,20 +292,45 @@ async function runSetup(
       }
       const confinementRoot = tool === 'pi' && piGlobal ? homedir() : projectRoot;
       const confinedDest = safeJoin(confinementRoot, relative(confinementRoot, entry.dest));
-      // Remove the old .ts counterpart when installing the .js Pi extension.
-      // Prior versions of setup distributed openlore.ts; Pi loads all files in the
-      // extensions dir, so both registering the same tools causes a conflict.
-      if (tool === 'pi' && confinedDest.endsWith('.js')) {
-        const oldTs = safeJoin(confinementRoot, relative(confinementRoot, confinedDest.slice(0, -3) + '.ts'));
-        if (await fileExists(oldTs)) await unlink(oldTs);
+      // Pi gets a re-export shim, never a copy of the compiled bundle: the bundle
+      // is plain tsc output whose relative imports only resolve inside the package
+      // (see src/cli/install/pi-extension.ts). A copied bundle from any version is
+      // broken, and a shim left over from a previous openlore location points at a
+      // path that no longer exists — both are ours to repair, so replace them
+      // without demanding --force; anything else at that path is still skipped.
+      const isPi = tool === 'pi';
+      let effectiveForce = force;
+      if (isPi && !force) {
+        const existing = await readFileOrNull(confinedDest);
+        const state = classifyPiFile(existing, renderPiShim());
+        if (state.kind === 'legacy-copy' || state.kind === 'stale') effectiveForce = true;
       }
       const status = await copyFile(
         entry.src,
         confinedDest,
         confinementRoot,
-        force,
-        /[/\\]SKILL\.md$/.test(entry.dest) ? content => adaptSkillForHost(content, tool) : undefined,
+        effectiveForce,
+        isPi
+          ? () => renderPiShim()
+          : /[/\\]SKILL\.md$/.test(entry.dest)
+            ? content => adaptSkillForHost(content, tool)
+            : undefined,
       );
+      // Remove the old .ts counterpart only once the .js shim is actually in
+      // place. Prior versions distributed openlore.ts; Pi loads every file in the
+      // extensions dir, so both registering the same tools causes a conflict — but
+      // deleting the working .ts while the .js write was skipped (a foreign or
+      // hand-edited openlore.js) would leave the project with no extension at all.
+      if (isPi && confinedDest.endsWith('.js')) {
+        const written = await readFileOrNull(confinedDest);
+        if (written === renderPiShim()) {
+          const oldTs = safeJoin(confinementRoot, relative(confinementRoot, confinedDest.slice(0, -3) + '.ts'));
+          // Only when it is recognisably ours: an unrelated openlore.ts is the
+          // user's own extension, and deleting it would destroy their code.
+          const oldContent = await readFileOrNull(oldTs);
+          if (oldContent !== null && (looksLikeOpenLoreExtension(oldContent) || force)) await unlink(oldTs);
+        }
+      }
       const rel = entry.dest.startsWith(projectRoot)
         ? entry.dest.slice(projectRoot.length).replace(/^\//, '')
         : entry.dest;
