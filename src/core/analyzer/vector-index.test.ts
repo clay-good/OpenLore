@@ -315,6 +315,25 @@ describe('VectorIndex', () => {
       expect(results[0].scoreKind).toBe('cosine_distance');
     });
 
+    it('uses cosine distance when dense results are labeled cosine_distance', async () => {
+      let call = 0;
+      const embedSvc = {
+        modelName: 'cosine-test',
+        embed: vi.fn().mockImplementation(async (texts: string[]) => {
+          call++;
+          return call === 1
+            ? texts.map((_, index) => index === 0 ? [1, 0] : [0, 1])
+            : [[10, 0]];
+        }),
+      } as unknown as EmbeddingService;
+      await VectorIndex.build(tmpDir, SAMPLE_NODES, SAMPLE_SIGNATURES, new Set(), new Set(), embedSvc);
+
+      const results = await VectorIndex.search(tmpDir, 'query', embedSvc, { limit: 1, hybrid: false });
+
+      expect(results[0].scoreKind).toBe('cosine_distance');
+      expect(results[0].score).toBeCloseTo(0, 5);
+    });
+
     it('emits honest evidence for hybrid and dense-only production paths', async () => {
       const embedSvc = makeMockEmbedSvc();
       await VectorIndex.build(tmpDir, SAMPLE_NODES, SAMPLE_SIGNATURES, new Set(), new Set(), embedSvc);

@@ -119,7 +119,7 @@ describe('McpWatcher.handleChange', () => {
     const { McpWatcher } = await import('./mcp-watcher.js');
     await new McpWatcher({ rootPath, outputPath }).handleChange(specFile);
 
-    expect(SpecVectorIndex.freshness(outputPath)).toMatchObject({
+    expect(await SpecVectorIndex.freshness(outputPath)).toMatchObject({
       changedFileCount: 1,
       changedFiles: ['openspec/specs/auth/spec.md'],
     });
@@ -153,7 +153,7 @@ describe('McpWatcher.handleChange', () => {
     await watcher.handleChange(adrFile);
     await watcher.handleChange(deltaFile);
 
-    expect(SpecVectorIndex.freshness(outputPath)).toMatchObject({
+    expect(await SpecVectorIndex.freshness(outputPath)).toMatchObject({
       changedFileCount: 2,
       changedFiles: [
         'docs/spec-root/decisions/adr-0001-cache.md',
@@ -186,7 +186,7 @@ describe('McpWatcher.handleChange', () => {
       flushBatchWithBusyRetry(batch: string[], deletions: string[]): Promise<void>;
     }).flushBatchWithBusyRetry([srcFile, specFile], []);
 
-    expect(SpecVectorIndex.freshness(outputPath)).toMatchObject({
+    expect(await SpecVectorIndex.freshness(outputPath)).toMatchObject({
       changedFileCount: 1,
       changedFiles: ['openspec/specs/auth/spec.md'],
     });

@@ -1717,7 +1717,7 @@ export class VectorIndex {
     }
 
     const denseFetch = hybrid ? Math.min(limit * 5, 500) : Math.min(limit * 10, 1000);
-    let denseQuery = table.query().nearestTo(queryVector);
+    let denseQuery = table.query().nearestTo(queryVector).distanceType('cosine');
     const densePredicate = functionSearchPredicate(language, minFanIn);
     // LanceDB applies where() before ANN by default. This prevents a post-fetch
     // filter from starving otherwise-valid results (change: refine-search-serving-quality).

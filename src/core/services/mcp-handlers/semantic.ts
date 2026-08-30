@@ -600,15 +600,19 @@ export async function handleSearchSpecs(
   const searchMode = retrievalMode === 'keyword' ? 'bm25_fallback' : 'hybrid';
 
   limit = Math.max(1, Math.min(limit, 50));
-  const [results, mappingIdx] = await Promise.all([
-    SpecVectorIndex.search(outputDir, query, embedSvc, { limit, domain, section }),
+  const [searchSnapshot, mappingIdx] = await Promise.all([
+    typeof SpecVectorIndex.searchWithFreshness === 'function'
+      ? SpecVectorIndex.searchWithFreshness(outputDir, query, embedSvc, { limit, domain, section })
+      : SpecVectorIndex.search(outputDir, query, embedSvc, { limit, domain, section }).then(async results => ({
+        results,
+        // Optional guard keeps legacy injected test doubles compatible.
+        indexFreshness: typeof SpecVectorIndex.freshness === 'function'
+          ? await SpecVectorIndex.freshness(outputDir)
+          : null,
+      })),
     loadMappingIndex(absDir),
   ]);
-  // Optional guard keeps legacy injected test doubles compatible; the production
-  // SpecVectorIndex always exposes freshness().
-  const indexFreshness = typeof SpecVectorIndex.freshness === 'function'
-    ? SpecVectorIndex.freshness(outputDir)
-    : null;
+  const { results, indexFreshness } = searchSnapshot;
   const servedResults = await Promise.all(results.map(async (r) => ({
     score: r.score,
     scoreKind: r.scoreKind ?? (retrievalMode === 'keyword' ? 'bm25' : 'cosine_distance'),

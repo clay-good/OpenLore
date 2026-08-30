@@ -5696,6 +5696,32 @@ The system SHALL apply supported language and minimum fan-in predicates before a
 - **WHEN** the affected behavior is evaluated
 - **THEN** The system SHALL apply supported language and minimum fan-in predicates before approximate-nearest-neighbor candidate limiting in vector code searches.
 
+### Requirement: ServeSearchResultsAndFreshnessMetadataFromOneLockedIndexGeneration
+
+The system SHALL return specification search results and freshness metadata from the same locked index generation, fail lock acquisition after 30 seconds, and report freshness as unavailable when tracking history is corrupt or exceeds its storage bound.
+
+> Decision recorded: a0115a70
+> Date: 2026-08-30
+
+#### Scenario: The decision requirement is enforced
+
+- **GIVEN** approved decision `a0115a70`
+- **WHEN** the affected behavior is evaluated
+- **THEN** The system SHALL return specification search results and freshness metadata from the same locked index generation, fail lock acquisition after 30 seconds, and report freshness as unavailable when tracking history is corrupt or exceeds its storage bound.
+
+### Requirement: UseCosineDistanceExplicitlyForDenseVectorRetrieval
+
+The system SHALL use cosine distance for dense nearest-neighbor searches over function and specification embeddings.
+
+> Decision recorded: db55278e
+> Date: 2026-08-30
+
+#### Scenario: The decision requirement is enforced
+
+- **GIVEN** approved decision `db55278e`
+- **WHEN** the affected behavior is evaluated
+- **THEN** The system SHALL use cosine distance for dense nearest-neighbor searches over function and specification embeddings.
+
 ## Sub-components
 
 > `SignatureExtractor` is an orchestrator. Each sub-component below implements one logical block.
@@ -9131,3 +9157,27 @@ Spec search, watcher updates, and full analysis can run in separate processes ag
 Post-filtering a small approximate-nearest-neighbor result set can discard valid language or fan-in matches and underfill results. Pushing supported predicates into LanceDB makes candidate selection honor the requested scope.
 
 **Consequences:** Vector code search applies language and minimum fan-in predicates in the database query before ANN limiting while preserving bounded result limits.
+
+### Serve search results and freshness metadata from one locked index generation
+
+**Status:** Approved
+**Date:** 2026-08-30
+**ID:** a0115a70
+
+
+
+Returning results and freshness as a single snapshot prevents concurrent index updates from producing freshness metadata that describes a different generation, while a 30-second lock timeout avoids indefinite request blocking. Corrupt or oversized freshness history is treated as unavailable rather than under-reporting stale files.
+
+**Consequences:** Spec searches and standalone freshness reads now acquire the spec-index lock and may fail after 30 seconds of contention. The freshness API becomes asynchronous, callers should prefer searchWithFreshness for coherent serving, and unavailable tracking remains sticky until a full rebuild establishes a trustworthy baseline.
+
+### Use cosine distance explicitly for dense vector retrieval
+
+**Status:** Approved
+**Date:** 2026-08-30
+**ID:** db55278e
+
+
+
+Explicitly selecting cosine distance makes similarity semantics independent of LanceDB defaults and aligns dense retrieval with the score interpretation used by the analyzer.
+
+**Consequences:** Both function and specification vector searches use cosine-based nearest-neighbor ranking, which may change result ordering from indexes previously queried with another default distance metric.

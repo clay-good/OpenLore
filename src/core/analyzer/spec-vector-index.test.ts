@@ -532,6 +532,29 @@ describe('SpecVectorIndex', () => {
       expect(results.every(result => result.scoreKind === 'bm25')).toBe(true);
     });
 
+    it('uses cosine distance when dense results are labeled cosine_distance', async () => {
+      const specsDir = await createSpecsDir(tmpDir, {
+        auth: SAMPLE_SPEC_AUTH,
+        crawler: SAMPLE_SPEC_CRAWLER,
+      });
+      let call = 0;
+      const embedSvc = {
+        modelName: 'cosine-test',
+        embed: vi.fn().mockImplementation(async (texts: string[]) => {
+          call++;
+          return call === 1
+            ? texts.map((_, index) => index === 0 ? [1, 0] : [0, 1])
+            : [[10, 0]];
+        }),
+      } as unknown as EmbeddingService;
+      await SpecVectorIndex.build(tmpDir, specsDir, embedSvc);
+
+      const results = await SpecVectorIndex.search(tmpDir, 'query', embedSvc, { limit: 1 });
+
+      expect(results[0].scoreKind).toBe('cosine_distance');
+      expect(results[0].score).toBeCloseTo(0, 5);
+    });
+
     it('returns an exact count with a bounded path list after more than 1,000 changes', async () => {
       const specsDir = await createSpecsDir(tmpDir, { auth: SAMPLE_SPEC_AUTH });
       await SpecVectorIndex.build(tmpDir, specsDir, null);
@@ -540,12 +563,36 @@ describe('SpecVectorIndex', () => {
         Array.from({ length: 1_001 }, (_, index) => `openspec/specs/domain-${index}/spec.md`),
       );
 
-      expect(SpecVectorIndex.freshness(tmpDir)).toMatchObject({
+      expect(await SpecVectorIndex.freshness(tmpDir)).toMatchObject({
         tracking: 'tracked',
         changedFileCount: 1_001,
         changedFilesTruncated: true,
       });
-      expect(SpecVectorIndex.freshness(tmpDir)?.changedFiles).toHaveLength(1_000);
+      expect((await SpecVectorIndex.freshness(tmpDir))?.changedFiles).toHaveLength(1_000);
+    });
+
+    it('keeps freshness unavailable after the receipt exceeds its storage bound', async () => {
+      const specsDir = await createSpecsDir(tmpDir, { auth: SAMPLE_SPEC_AUTH });
+      await SpecVectorIndex.build(tmpDir, specsDir, null);
+      await SpecVectorIndex.noteSpecFilesChanged(
+        tmpDir,
+        Array.from(
+          { length: 400 },
+          (_, index) => `openspec/specs/${index}-${'x'.repeat(900)}/spec.md`,
+        ),
+      );
+
+      expect(await SpecVectorIndex.freshness(tmpDir)).toMatchObject({
+        tracking: 'unavailable',
+        changedFileCount: null,
+      });
+      expect((await stat(join(tmpDir, 'spec-index-freshness.json'))).size).toBeLessThan(1_000);
+
+      await SpecVectorIndex.noteSpecFilesChanged(tmpDir, ['openspec/specs/new/spec.md']);
+      expect(await SpecVectorIndex.freshness(tmpDir)).toMatchObject({
+        tracking: 'unavailable',
+        changedFileCount: null,
+      });
     });
 
     it('prefilters ANN recall so a domain match below the old fetch horizon is returned', async () => {
@@ -579,7 +626,7 @@ describe('SpecVectorIndex', () => {
         'openspec/specs/auth/spec.md',
       ]);
 
-      expect(SpecVectorIndex.freshness(tmpDir)).toMatchObject({
+      expect(await SpecVectorIndex.freshness(tmpDir)).toMatchObject({
         changedFileCount: 1,
         changedFiles: ['openspec/specs/auth/spec.md'],
       });
@@ -594,7 +641,7 @@ describe('SpecVectorIndex', () => {
         SpecVectorIndex.noteSpecFilesChanged(tmpDir, ['openspec/decisions/adr-0001.md']),
       ]);
 
-      expect(SpecVectorIndex.freshness(tmpDir)).toMatchObject({
+      expect(await SpecVectorIndex.freshness(tmpDir)).toMatchObject({
         changedFileCount: 2,
         changedFiles: [
           'openspec/decisions/adr-0001.md',
@@ -624,10 +671,44 @@ describe('SpecVectorIndex', () => {
       releaseEmbed();
       await Promise.all([build, note]);
 
-      expect(SpecVectorIndex.freshness(tmpDir)).toMatchObject({
+      expect(await SpecVectorIndex.freshness(tmpDir)).toMatchObject({
         changedFileCount: 1,
         changedFiles: ['openspec/specs/auth/spec.md'],
       });
+    });
+
+    it('returns search results and freshness from one generation while a rebuild waits', async () => {
+      const specsDir = await createSpecsDir(tmpDir, { auth: SAMPLE_SPEC_AUTH });
+      const initialEmbedder = makeMockEmbedSvc();
+      await SpecVectorIndex.build(tmpDir, specsDir, initialEmbedder);
+      const initialMeta = JSON.parse(await readFile(join(tmpDir, 'spec-index-meta.json'), 'utf8')) as {
+        builtAt: string;
+      };
+
+      let releaseSearch!: () => void;
+      let markSearchStarted!: () => void;
+      const searchStarted = new Promise<void>(resolve => { markSearchStarted = resolve; });
+      const searchGate = new Promise<void>(resolve => { releaseSearch = resolve; });
+      const searchEmbedder = {
+        modelName: 'search-model',
+        embed: vi.fn().mockImplementation(async () => {
+          markSearchStarted();
+          await searchGate;
+          return [makeVector(0)];
+        }),
+      } as unknown as EmbeddingService;
+      const rebuildEmbedder = makeMockEmbedSvc();
+
+      const search = SpecVectorIndex.searchWithFreshness(tmpDir, 'email', searchEmbedder);
+      await searchStarted;
+      const rebuild = SpecVectorIndex.build(tmpDir, specsDir, rebuildEmbedder);
+      await new Promise(resolve => setTimeout(resolve, 20));
+      expect(rebuildEmbedder.embed).not.toHaveBeenCalled();
+
+      releaseSearch();
+      const snapshot = await search;
+      expect(snapshot.indexFreshness?.builtAt).toBe(initialMeta.builtAt);
+      await rebuild;
     });
 
     it('clears tracked changes after a verified no-op rebuild', async () => {
@@ -637,7 +718,7 @@ describe('SpecVectorIndex', () => {
 
       await SpecVectorIndex.build(tmpDir, specsDir, null);
 
-      expect(SpecVectorIndex.freshness(tmpDir)).toMatchObject({
+      expect(await SpecVectorIndex.freshness(tmpDir)).toMatchObject({
         tracking: 'tracked',
         changedFileCount: 0,
         changedFiles: [],
@@ -649,7 +730,7 @@ describe('SpecVectorIndex', () => {
       await SpecVectorIndex.build(tmpDir, specsDir, null);
       await unlink(join(tmpDir, 'spec-index-meta.json'));
 
-      expect(SpecVectorIndex.freshness(tmpDir)).toEqual({
+      expect(await SpecVectorIndex.freshness(tmpDir)).toEqual({
         builtAt: null,
         tracking: 'unavailable',
         changedFileCount: null,
@@ -669,7 +750,7 @@ describe('SpecVectorIndex', () => {
         changedFiles: ['../outside.md'],
       }));
 
-      expect(SpecVectorIndex.freshness(tmpDir)).toMatchObject({
+      expect(await SpecVectorIndex.freshness(tmpDir)).toMatchObject({
         tracking: 'unavailable',
         changedFileCount: null,
         changedFiles: [],

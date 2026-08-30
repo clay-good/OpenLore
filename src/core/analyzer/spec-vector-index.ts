@@ -84,6 +84,7 @@ const SPEC_ARTIFACT_MAX_BYTES = 4 * 1024 * 1024;
 const FRESHNESS_MAX_BYTES = 256 * 1024;
 const FRESHNESS_RETURNED_FILES = 1_000;
 const FRESHNESS_MAX_PATH_BYTES = 1_024;
+const SPEC_INDEX_LOCK_MAX_WAIT_MS = 30_000;
 
 interface SpecIndexMeta {
   hasEmbeddings: boolean;
@@ -106,10 +107,16 @@ export interface SpecIndexFreshness {
   changedFilesTruncated?: boolean;
 }
 
+export interface SpecSearchSnapshot {
+  results: SpecSearchResult[];
+  indexFreshness: SpecIndexFreshness | null;
+}
+
 interface SpecFreshnessReceipt {
   schemaVersion: 1;
   indexBuiltAt: string;
   changedFiles: string[];
+  trackingUnavailable?: true;
 }
 
 type SpecMetaState =
@@ -136,9 +143,11 @@ function hasControlCharacters(value: string): boolean {
 async function acquireSpecIndexLock(outputDir: string): Promise<() => Promise<void>> {
   const result = await acquireLockAt(outputDir, SPEC_INDEX_LOCK_FILE, {
     bestEffortAfterMaxWait: false,
-    maxWaitMs: Number.POSITIVE_INFINITY,
+    maxWaitMs: SPEC_INDEX_LOCK_MAX_WAIT_MS,
   });
-  if (isLockHeld(result)) throw new Error('spec-index lock acquisition ended without ownership');
+  if (isLockHeld(result)) {
+    throw new Error(`spec-index lock was not acquired within ${SPEC_INDEX_LOCK_MAX_WAIT_MS}ms`);
+  }
   return result.release;
 }
 
@@ -150,6 +159,7 @@ function readSpecFreshnessReceipt(outputDir: string): SpecFreshnessReceipt | nul
     if (!value || typeof value !== 'object') return null;
     const receipt = value as Record<string, unknown>;
     if (receipt.schemaVersion !== 1 || typeof receipt.indexBuiltAt !== 'string'
+      || receipt.trackingUnavailable === true
       || !Array.isArray(receipt.changedFiles)
       || !receipt.changedFiles.every(file => typeof file === 'string'
         && Buffer.byteLength(file) <= FRESHNESS_MAX_PATH_BYTES
@@ -690,6 +700,41 @@ export class SpecVectorIndex {
       traceCandidates?: boolean;
     } = {}
   ): Promise<SpecSearchResult[]> {
+    return (await SpecVectorIndex.searchWithFreshness(outputDir, query, embedSvc, opts)).results;
+  }
+
+  /** Read search results and their freshness disclosure from one locked index generation. */
+  static async searchWithFreshness(
+    outputDir: string,
+    query: string,
+    embedSvc: Embedder | null | undefined,
+    opts: {
+      limit?: number;
+      domain?: string;
+      section?: string;
+      traceCandidates?: boolean;
+    } = {},
+  ): Promise<SpecSearchSnapshot> {
+    const release = await acquireSpecIndexLock(outputDir);
+    try {
+      const results = await SpecVectorIndex._searchLocked(outputDir, query, embedSvc, opts);
+      return { results, indexFreshness: SpecVectorIndex._freshnessUnlocked(outputDir) };
+    } finally {
+      await release();
+    }
+  }
+
+  private static async _searchLocked(
+    outputDir: string,
+    query: string,
+    embedSvc: Embedder | null | undefined,
+    opts: {
+      limit?: number;
+      domain?: string;
+      section?: string;
+      traceCandidates?: boolean;
+    },
+  ): Promise<SpecSearchResult[]> {
     const { connect } = await import('@lancedb/lancedb');
 
     const { limit = 10, domain, section, traceCandidates = false } = opts;
@@ -738,7 +783,7 @@ export class SpecVectorIndex {
     }
 
     const fetchLimit = Math.min(limit * 10, 500);
-    let denseQuery = table.query().nearestTo(queryVector);
+    let denseQuery = table.query().nearestTo(queryVector).distanceType('cosine');
     const densePredicate = specSearchPredicate(domain, section);
     // where() is a LanceDB prefilter by default, so filtered rows participate in
     // ANN recall instead of being discarded after a bounded fetch.
@@ -843,23 +888,47 @@ export class SpecVectorIndex {
       const state = readSpecMeta(outputDir);
       if (state.kind !== 'current' && state.kind !== 'legacy') return;
       const builtAt = state.meta.builtAt;
+      const receiptPath = specFreshnessPath(outputDir);
       const previous = readSpecFreshnessReceipt(outputDir);
+      // A present but unreadable receipt means prior history cannot be recovered.
+      // Keep that state sticky until a full rebuild establishes a new zero point;
+      // resetting to the current batch would falsely under-report staleness.
+      if (existsSync(receiptPath) && !previous) return;
       const changedFiles = new Set(
         previous?.indexBuiltAt === builtAt ? previous.changedFiles : [],
       );
       for (const file of files) changedFiles.add(file.split('\\').join('/'));
-      await atomicWriteFile(specFreshnessPath(outputDir), JSON.stringify({
+      const nextReceipt: SpecFreshnessReceipt = {
         schemaVersion: 1,
         indexBuiltAt: builtAt,
         changedFiles: [...changedFiles].sort(),
-      } satisfies SpecFreshnessReceipt, null, 2) + '\n');
+      };
+      let payload = JSON.stringify(nextReceipt, null, 2) + '\n';
+      if (Buffer.byteLength(payload) > FRESHNESS_MAX_BYTES) {
+        payload = JSON.stringify({
+          schemaVersion: 1,
+          indexBuiltAt: builtAt,
+          changedFiles: [],
+          trackingUnavailable: true,
+        } satisfies SpecFreshnessReceipt, null, 2) + '\n';
+      }
+      await atomicWriteFile(receiptPath, payload);
     } finally {
       await release();
     }
   }
 
   /** Honest spec-index freshness for serving; malformed/stale receipts report unavailable. */
-  static freshness(outputDir: string): SpecIndexFreshness | null {
+  static async freshness(outputDir: string): Promise<SpecIndexFreshness | null> {
+    const release = await acquireSpecIndexLock(outputDir);
+    try {
+      return SpecVectorIndex._freshnessUnlocked(outputDir);
+    } finally {
+      await release();
+    }
+  }
+
+  private static _freshnessUnlocked(outputDir: string): SpecIndexFreshness | null {
     const state = readSpecMeta(outputDir);
     if (state.kind !== 'current' && state.kind !== 'legacy') {
       return existsSync(join(outputDir, DB_FOLDER, `${TABLE_NAME}.lance`))
