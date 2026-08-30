@@ -27,6 +27,14 @@
  * that parses C headers acceptably); a project-aware C-vs-C++ decision is a separate
  * concern — see `resolveHeaderLanguage` in `signature-extractor.ts`.
  */
+export const SCRIPT_CONTAINER_FORMATS = ['Vue', 'Svelte', 'Astro'] as const;
+export type ScriptContainerFormat = (typeof SCRIPT_CONTAINER_FORMATS)[number];
+
+/** The canonical extension subset for script-container formats. */
+export const SCRIPT_CONTAINER_EXTENSIONS: Readonly<Record<string, ScriptContainerFormat>> = {
+  vue: 'Vue', svelte: 'Svelte', astro: 'Astro',
+};
+
 export const EXTENSION_TO_LANGUAGE: Readonly<Record<string, string>> = {
   py: 'Python',
   ts: 'TypeScript', tsx: 'TypeScript', mts: 'TypeScript', cts: 'TypeScript',
@@ -46,6 +54,7 @@ export const EXTENSION_TO_LANGUAGE: Readonly<Record<string, string>> = {
   lua: 'Lua',
   ex: 'Elixir', exs: 'Elixir',
   sh: 'Bash', bash: 'Bash',
+  ...SCRIPT_CONTAINER_EXTENSIONS,
 };
 
 /**

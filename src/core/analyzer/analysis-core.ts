@@ -24,6 +24,7 @@ import { buildRouteInventory } from './http-route-parser.js';
 import { extractMiddleware } from './middleware-extractor.js';
 import { describeMemoryDegradation } from './memory-strategy.js';
 import { describeExclusions } from './parse-health.js';
+import { describeScriptContainerBoundaries } from './sfc-script-extractor.js';
 import { RepositoryMapper, type RepositoryMap } from './repository-mapper.js';
 import { extractSchemas } from './schema-extractor.js';
 import { captureSourceState, reconcileSourceStates } from './source-state.js';
@@ -249,6 +250,8 @@ export async function runAnalysisCore(
   if (artifacts.pass1CacheNote) emit({ stage: 'artifacts', status: 'info', detail: artifacts.pass1CacheNote });
   const excludedNote = describeExclusions(artifacts.parseHealth);
   if (excludedNote) emit({ stage: 'artifacts', status: 'warning', detail: excludedNote });
+  const scriptContainerNote = describeScriptContainerBoundaries(artifacts.parseHealth?.scriptContainers);
+  if (scriptContainerNote) emit({ stage: 'artifacts', status: 'warning', detail: scriptContainerNote });
   const memoryNote = describeMemoryDegradation(artifacts.memoryDegradation);
   if (memoryNote) emit({ stage: 'artifacts', status: 'warning', detail: memoryNote });
 

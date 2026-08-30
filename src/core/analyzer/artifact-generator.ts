@@ -1422,6 +1422,7 @@ export class AnalysisArtifactGenerator {
     const { CallGraphBuilder, serializeCallGraph } = await import('./call-graph.js');
     const { describeExtractionLane } = await import('./extraction-pool.js');
     const { extractHtmlScripts } = await import('./html-script-extractor.js');
+    const { extractScriptContainer, summarizeScriptContainers } = await import('./sfc-script-extractor.js');
     const { detectDuplicates } = await import('./duplicate-detector.js');
     const { analyzeForRefactoring } = await import('./refactor-analyzer.js');
     const { classifyYaml, isDockerfilePath } = await import('./iac/index.js');
@@ -1476,6 +1477,7 @@ export class AnalysisArtifactGenerator {
     // silent exclusion — the file simply never reached the graph, and nothing said so (change:
     // fix-analyze-native-abort-and-file-cost-budget).
     const sizeCapped: Array<{ path: string; language: string }> = [];
+    const scriptContainerFiles: import('./sfc-script-extractor.js').ScriptContainerFileRecord[] = [];
 
     for (const file of repoMap.allFiles) {
       try {
@@ -1484,6 +1486,15 @@ export class AnalysisArtifactGenerator {
         const bytes = await readFile(file.absolutePath);
         const content = bytes.toString('utf-8');
         const isTest = isTestFile(file.path);
+        const scriptContainer = extractScriptContainer(file.path, content);
+        if (scriptContainer) {
+          scriptContainerFiles.push({
+            filePath: file.path,
+            format: scriptContainer.format,
+            scriptBlockCount: scriptContainer.scriptBlockCount,
+            extractedScriptBlockCount: scriptContainer.extractedScriptBlockCount,
+          });
+        }
 
         // Signatures: exclude test files
         if (!isTest) {
@@ -1497,6 +1508,19 @@ export class AnalysisArtifactGenerator {
         // builder marks test nodes `isTest` (excluded from hubs/entry-points/stats) and
         // derives `tested_by` edges from them, which the test-impact tools (spec-19) need.
         // Test nodes/edges are filtered out again when writing the production edge store.
+        if (scriptContainer) {
+          if (scriptContainer.sizeCapped) {
+            sizeCapped.push({ path: file.path, language: scriptContainer.format });
+          } else if (scriptContainer.lanes.length > 0) {
+            if (isLossyUtf8(bytes)) encodingFallback.set(file.path, scriptContainer.format);
+            callGraphFiles.push({
+              path: file.path,
+              content,
+              language: scriptContainer.format,
+            });
+          }
+          continue;
+        }
         const lang = resolveLang(file.path, content);
         if (CALL_GRAPH_LANGS.has(lang)) {
           if (isLossyUtf8(bytes)) encodingFallback.set(file.path, lang);
@@ -1611,6 +1635,7 @@ export class AnalysisArtifactGenerator {
       undefined,
       this._memoryDegradation,
       callGraphResult.grammarUnavailable,
+      summarizeScriptContainers(scriptContainerFiles),
     );
 
     // Intra-procedural CFG/def-use overlay (spec: add-intraprocedural-cfg-dataflow-overlay).

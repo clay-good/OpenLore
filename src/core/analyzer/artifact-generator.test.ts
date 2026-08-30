@@ -284,6 +284,44 @@ describe('AnalysisArtifactGenerator', () => {
     });
   });
 
+  describe('SFC script extraction (change: add-sfc-script-extraction)', () => {
+    it('extracts Vue script nodes and persists the narrowed container boundary', async () => {
+      await mkdir(join(tempDir, 'src'), { recursive: true });
+      const vueRel = 'src/App.vue';
+      const helperRel = 'src/helper.ts';
+      await writeFile(join(tempDir, vueRel), [
+        '<template><button @click="save()" /></template>',
+        '<script lang="ts">',
+        "import { helper } from './helper';",
+        'export function save(flag: boolean) { if (flag) { helper(); } }',
+        '</script>',
+      ].join('\n'));
+      await writeFile(join(tempDir, helperRel), 'export function helper() {}\n');
+      const files = [
+        createScoredFile({ name: 'App.vue', path: vueRel, absolutePath: join(tempDir, vueRel), extension: '.vue' }),
+        createScoredFile({ name: 'helper.ts', path: helperRel, absolutePath: join(tempDir, helperRel) }),
+      ];
+      const artifacts = await generateArtifacts(createMockRepoMap({ allFiles: files, highValueFiles: [] }), createMockDepGraph({}), {
+        rootDir: tempDir, outputDir, maxDeepAnalysisFiles: 0, maxValidationFiles: 0,
+      });
+      const graph = artifacts.llmContext.callGraph!;
+      const save = graph.nodes.find(node => node.name === 'save');
+      const helper = graph.nodes.find(node => node.name === 'helper');
+
+      expect(save?.startLine).toBe(4);
+      expect(graph.edges.some(edge => edge.callerId === save?.id && edge.calleeId === helper?.id)).toBe(true);
+      expect(artifacts.llmContext.signatures?.find(map => map.path === vueRel)?.entries.map(entry => entry.name))
+        .toContain('save');
+      const vueStyle = artifacts.styleFingerprint?.files.find(file => file.filePath === vueRel);
+      expect(vueStyle?.language).toBe('Vue');
+      expect(vueStyle?.functionsSampled).toBeGreaterThan(0);
+      expect(artifacts.parseHealth?.scriptContainers?.[0]).toMatchObject({
+        format: 'Vue', fileCount: 1, scriptBlockCount: 1, extractedScriptBlockCount: 1,
+      });
+      expect(artifacts.parseHealth?.scriptContainers?.[0].limitations).toContain('template expressions');
+    });
+  });
+
   describe('RepoStructure Generation', () => {
     it('discloses an analyzed source with no callable node that belongs to no domain', async () => {
       const scriptDir = join(tempDir, 'scripts');

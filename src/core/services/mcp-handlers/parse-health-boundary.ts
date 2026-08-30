@@ -14,6 +14,7 @@ import { readFile } from 'node:fs/promises';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_PARSE_HEALTH } from '../../../constants.js';
 import { EXCLUSION_REASON_LABEL, type ParseHealthReport, type FileParseHealth } from '../../analyzer/parse-health.js';
 import { describeMemoryDegradation } from '../../analyzer/memory-strategy.js';
+import { describeScriptContainerBoundaries } from '../../analyzer/sfc-script-extractor.js';
 
 /** Load the persisted parse-health report, or `null` when absent/unreadable (a clean repo). */
 export async function loadParseHealthReport(absDir: string): Promise<ParseHealthReport | null> {
@@ -108,5 +109,7 @@ export function parseHealthBoundary(
   }
   const degradation = describeMemoryDegradation(report.memoryDegradation);
   if (degradation) sentences.push(`${degradation}.`);
+  const containers = describeScriptContainerBoundaries(report.scriptContainers);
+  if (containers) sentences.push(`Script-container boundary — ${containers}.`);
   return sentences.length > 0 ? sentences.join(' ') : undefined;
 }

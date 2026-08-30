@@ -51,6 +51,7 @@ import {
   resolveTrustedSslVerify,
 } from '../../core/services/repo-config-trust.js';
 import { describeExclusions, totalExcluded, type ParseHealthReport } from '../../core/analyzer/parse-health.js';
+import { describeScriptContainerBoundaries } from '../../core/analyzer/sfc-script-extractor.js';
 import { describeMemoryDegradation } from '../../core/analyzer/memory-strategy.js';
 import type { GovernanceFinding } from '../../core/services/mcp-handlers/enforcement-policy.js';
 import { detectCorpusIntegrity } from '../../core/decisions/corpus-integrity.js';
@@ -536,7 +537,8 @@ export async function checkParseHealth(rootPath: string): Promise<CheckResult> {
     // deep-analysis breadth) — its coverage is REDUCED even when no file parsed with errors and
     // nothing was excluded. Disclose it so doctor cannot bless a false-clean degraded index.
     const memoryReduction = describeMemoryDegradation(report.memoryDegradation);
-    if (degradedByParse === 0 && !excluded && !memoryReduction) {
+    const scriptContainers = describeScriptContainerBoundaries(report.scriptContainers);
+    if (degradedByParse === 0 && !excluded && !memoryReduction && !scriptContainers) {
       return { name: 'Parse health', status: 'ok', detail: 'no files parsed with errors' };
     }
     const langs = (report.byLanguage ?? [])
@@ -549,6 +551,7 @@ export async function checkParseHealth(rootPath: string): Promise<CheckResult> {
     }
     if (excluded) parts.push(`${excluded} — those files were not analyzed at all`);
     if (memoryReduction) parts.push(memoryReduction);
+    if (scriptContainers) parts.push(`script-container boundary: ${scriptContainers}`);
     const fixes: string[] = [];
     if (memoryReduction) {
       fixes.push(
@@ -562,6 +565,9 @@ export async function checkParseHealth(rootPath: string): Promise<CheckResult> {
       );
     } else if (excluded) {
       fixes.push('Raise or disable the per-file bound with OPENLORE_PARSE_BUDGET_MS, or exclude the file from analysis');
+    }
+    if (scriptContainers) {
+      fixes.push('Treat template expressions and framework macros as unanalyzed when reviewing graph conclusions');
     }
     return {
       name: 'Parse health',

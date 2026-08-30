@@ -49,10 +49,25 @@ describe('detectLanguage', () => {
     ['util.cc',   'C++'],
     ['util.cxx',  'C++'],
     ['main.c',    'C'],
+    ['App.vue',   'Vue'],
+    ['App.svelte', 'Svelte'],
+    ['App.astro', 'Astro'],
     ['query.sql', 'unknown'],
     ['Makefile',  'unknown'],
   ])('%s → %s', (path, expected) => {
     expect(detectLanguage(path)).toBe(expected);
+  });
+});
+
+describe('extractSignatures — script containers', () => {
+  it.each([
+    ['App.vue', '<script lang="ts">export function save(): void {}</script>', 'Vue'],
+    ['App.svelte', '<script>export function save() {}</script>', 'Svelte'],
+    ['App.astro', '<script>export function save() {}</script>', 'Astro'],
+  ])('%s extracts script signatures and retains the container language', (path, source, language) => {
+    const map = extractSignatures(path, source);
+    expect(map.language).toBe(language);
+    expect(map.entries.map(entry => entry.name)).toContain('save');
   });
 });
 

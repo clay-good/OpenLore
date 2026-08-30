@@ -20,6 +20,7 @@
  */
 
 import type { MemoryDegradation } from './memory-strategy.js';
+import type { ScriptContainerBoundary } from './sfc-script-extractor.js';
 
 /** Bump when the persisted artifact shape changes incompatibly. */
 export const PARSE_HEALTH_SCHEMA_VERSION = 1;
@@ -290,6 +291,8 @@ export interface ParseHealthReport {
    * never as genuine structural absence.
    */
   memoryDegradation?: MemoryDegradation;
+  /** Recognized SFC files, extracted script counts, and the framework semantics still omitted. */
+  scriptContainers?: ScriptContainerBoundary[];
 }
 
 /** Total files excluded (any reason). `0` when nothing was excluded. */
@@ -327,6 +330,7 @@ export function buildParseHealthReport(
   topN = 10,
   memoryDegradation?: MemoryDegradation,
   grammarUnavailable: GrammarUnavailableBoundary[] = [],
+  scriptContainers: ScriptContainerBoundary[] = [],
 ): ParseHealthReport | undefined {
   const degraded = records.filter(isDegraded);
   const grammarBoundaries = [...grammarUnavailable].sort(
@@ -337,7 +341,7 @@ export function buildParseHealthReport(
   // yet has zero degraded files. Emit a minimal report carrying just the degradation so the
   // disclosure still reaches every consumer (change: make-analyze-scale-to-any-repo).
   if (degraded.length === 0) {
-    if (!memoryDegradation && grammarBoundaries.length === 0) return undefined;
+    if (!memoryDegradation && grammarBoundaries.length === 0 && scriptContainers.length === 0) return undefined;
     return {
       version: PARSE_HEALTH_SCHEMA_VERSION,
       totalDegradedFiles: 0,
@@ -347,6 +351,7 @@ export function buildParseHealthReport(
       files: [],
       ...(memoryDegradation ? { memoryDegradation } : {}),
       ...(grammarBoundaries.length > 0 ? { grammarUnavailable: grammarBoundaries } : {}),
+      ...(scriptContainers.length > 0 ? { scriptContainers } : {}),
     };
   }
 
@@ -390,6 +395,7 @@ export function buildParseHealthReport(
     ...(Object.keys(excludedByReason).length > 0 ? { excludedByReason } : {}),
     // Present only under memory pressure; a full-fidelity run omits it and stays byte-identical.
     ...(memoryDegradation ? { memoryDegradation } : {}),
+    ...(scriptContainers.length > 0 ? { scriptContainers } : {}),
   };
 }
 

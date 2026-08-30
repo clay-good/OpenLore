@@ -59,6 +59,7 @@ import {
 // synchronous native call nothing else can interrupt.
 import { parseWithBudget as rawParseWithBudget, parseBudgetOverrunMs, type BudgetableParser } from './parse-budget.js';
 import { usesTsxGrammar } from './language-detection.js';
+import { extractScriptContainer, SCRIPT_CONTAINER_FORMATS } from './sfc-script-extractor.js';
 // Pass-1 extraction lane (change: optimize-parallel-extraction-pool). The pool holds no
 // extraction logic of its own — it dispatches `dispatchFileExtract` to worker threads and
 // merges by input index, with the serial loop as both reference and fallback.
@@ -406,11 +407,13 @@ let _ScalaLanguage: object | undefined;
 let _ExLanguage: object | undefined;
 
 async function getTSParser(
-  filePath?: string
+  filePath?: string,
+  languageOverride?: 'JavaScript' | 'TypeScript',
 ): Promise<{ parser: Parser; lang: object } | null> {
-  const NP = await loadNativeParserFor(filePath && /\.(?:[cm]?js|jsx)$/i.test(filePath) ? 'JavaScript' : 'TypeScript');
+  const language = languageOverride
+    ?? (filePath && /\.(?:[cm]?js|jsx)$/i.test(filePath) ? 'JavaScript' : 'TypeScript');
+  const NP = await loadNativeParserFor(language);
   if (!NP) return null;
-  const language = filePath && /\.(?:[cm]?js|jsx)$/i.test(filePath) ? 'JavaScript' : 'TypeScript';
   if (grammarStatus(language) === 'unavailable') return null;
   if (usesTsxGrammar(filePath)) {
     if (!_tsxParser) {
@@ -1158,10 +1161,12 @@ const TS_CALL_QUERY = `
 
 async function extractTSGraph(
   filePath: string,
-  content: string
+  content: string,
+  languageOverride?: 'JavaScript' | 'TypeScript',
 ): Promise<FileExtractResult> {
-  const language = /\.(?:[cm]?js|jsx)$/i.test(filePath) ? 'JavaScript' : 'TypeScript';
-  const r = await getTSParser(filePath);
+  const language = languageOverride
+    ?? (/\.(?:[cm]?js|jsx)$/i.test(filePath) ? 'JavaScript' : 'TypeScript');
+  const r = await getTSParser(filePath, language);
   if (!r) return emptyForUnavailable(language);
   const { parser, lang } = r;
   const tree = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, content);
@@ -4947,6 +4952,9 @@ export async function synthesizeDynamicDispatchEdges(
  */
 function isEmptyExtractResult(result: FileExtractResult | undefined): boolean {
   if (!result) return false;
+  // Runtime grammar failures are never trustworthy or cacheable, including a mixed
+  // container whose other lane produced facts. A repaired process must re-extract it.
+  if (result.grammarUnavailable || result.grammarUnavailableAll?.length) return true;
   return result.nodes.length === 0
     && result.rawEdges.length === 0
     && !result.parseHealth
@@ -5017,6 +5025,18 @@ export class CallGraphBuilder {
     importMap?: ImportMap,
     resolutionNodes?: FunctionNode[],
   ): Promise<CallGraphResult> {
+    const structuralFiles = files.map(file => {
+      const container = extractScriptContainer(file.path, file.content);
+      return container
+        ? {
+            ...file,
+            content: container.content ?? '',
+            language: container.lanes.some(lane => lane.language === 'TypeScript')
+              ? 'TypeScript'
+              : 'JavaScript',
+          }
+        : file;
+    });
     const allNodes = new Map<string, FunctionNode>();
     const allRawEdges: RawEdge[] = [];
     const allCfgs = new Map<string, FunctionCfg>();
@@ -5084,8 +5104,9 @@ export class CallGraphBuilder {
       try {
         if (outcome.status === 'error') throw outcome.error;
         const result = outcome.value;
-        if (result?.grammarUnavailable) {
-          const failure = result.grammarUnavailable;
+        const grammarFailures = result?.grammarUnavailableAll
+          ?? (result?.grammarUnavailable ? [result.grammarUnavailable] : []);
+        for (const failure of grammarFailures) {
           warnGrammarUnavailable(failure);
           const existing = grammarUnavailableByLanguage.get(failure.language);
           grammarUnavailableByLanguage.set(failure.language, {
@@ -5241,8 +5262,8 @@ export class CallGraphBuilder {
       [...parseHealthByFile.values()].filter(h => h.exclusion === 'budget-exceeded').map(h => h.filePath),
     );
     const reparsableFiles = abandonedPaths.size > 0
-      ? files.filter(f => !abandonedPaths.has(f.path))
-      : files;
+      ? structuralFiles.filter(f => !abandonedPaths.has(f.path))
+      : structuralFiles;
     if (this.legacyLatePassesForTesting) {
       relationships = await _extractClassRelationshipsLegacyForTesting(reparsableFiles);
     }
@@ -5276,7 +5297,7 @@ export class CallGraphBuilder {
 
     // Build per-function-body content slices for type inference (keyed by functionId)
     const fileContents = new Map<string, string>();
-    for (const file of files) fileContents.set(file.path, file.content);
+    for (const file of structuralFiles) fileContents.set(file.path, file.content);
 
     // Re-export-aware import resolution for Pass 2 call edges (change: add-call-resolution-recall).
     // Production callers never thread `importMap`, so derive a re-export-following map from the
@@ -5288,7 +5309,7 @@ export class CallGraphBuilder {
       ? { map: importMap, reExported: new Set<string>() }
       // NOT `reparsableFiles` — see the note there. This is a regex scan, and an abandoned file's
       // exports are still readable and still load-bearing for OTHER files' resolution.
-      : buildResolvedImportMap(files);
+      : buildResolvedImportMap(structuralFiles);
 
     // Class inheritance facts were collected inside Pass 1 while each tree was already alive.
     // They are plain data, so fresh serial extraction, worker extraction, and fact-cache reuse all
@@ -5668,7 +5689,7 @@ export class CallGraphBuilder {
     // Pass 2b: HTTP cross-language edges (JS/TS caller → Python handler)
     const httpClientDegradations: HttpExtractionDegradation[] = [...pass1HttpDegradations];
     try {
-      const { edges: httpEdges, degradations } = await extractAllHttpEdges(files, httpCallFacts);
+      const { edges: httpEdges, degradations } = await extractAllHttpEdges(structuralFiles, httpCallFacts);
       httpClientDegradations.push(...degradations);
       // Group once, then look up per edge. Rebuilt per edge this was an O(edges × nodes) scan.
       const httpNodesByFile = new Map<string, FunctionNode[]>();
@@ -5733,7 +5754,7 @@ export class CallGraphBuilder {
     // IaC resources/references project onto the existing node/edge primitives.
     let iacClasses: ClassNode[] = [];
     try {
-      const iac = buildProjectedIac(files);
+      const iac = buildProjectedIac(structuralFiles);
       for (const n of iac.nodes) if (!allNodes.has(n.id)) allNodes.set(n.id, n);
       edges.push(...iac.edges);
       iacClasses = iac.classes;
@@ -5825,10 +5846,10 @@ export class CallGraphBuilder {
     // Source 2: import-based — every name imported by a test file from a production file.
     // Catches mocked functions that are imported but never directly called in the test.
     // Build a lightweight import map from file content (only test files, TS/JS).
-    const allFilePaths = files.map(f => f.path);
+    const allFilePaths = structuralFiles.map(f => f.path);
     const NAMED_IMPORT_RE = /^\s*import\s+(?:type\s+)?\{([^{}]+)\}\s+from\s+['"](\.[^'"]+)['"]/gm;
     const DEFAULT_IMPORT_RE = /^\s*import\s+(?:type\s+)?(\w+)\s+from\s+['"](\.[^'"]+)['"]/gm;
-    for (const file of files) {
+    for (const file of structuralFiles) {
       if (!isTestFile(file.path)) continue;
       if (file.language !== 'TypeScript' && file.language !== 'JavaScript') continue;
       const dir = dirname(file.path);
@@ -6151,6 +6172,15 @@ function assignClassStableIds(classes: ClassNode[]): void {
 export async function dispatchFileExtract(
   file: { path: string; content: string; language: string },
 ): Promise<FileExtractResult | undefined> {
+  const container = (SCRIPT_CONTAINER_FORMATS as readonly string[]).includes(file.language)
+    ? extractScriptContainer(file.path, file.content)
+    : null;
+  if (container) {
+    const results = await Promise.all(container.lanes.map(lane =>
+      extractTSGraph(file.path, lane.content, lane.language),
+    ));
+    return mergeScriptContainerResults(file.path, results);
+  }
   if (file.language === 'Python') return extractPyGraph(file.path, file.content);
   if (file.language === 'TypeScript' || file.language === 'JavaScript') return extractTSGraph(file.path, file.content);
   if (file.language === 'Go') return extractGoGraph(file.path, file.content);
@@ -6176,6 +6206,12 @@ export async function extractFileStyle(
   file: { path: string; content: string; language: string },
 ): Promise<FileStyleRaw | undefined> {
   try {
+    const container = extractScriptContainer(file.path, file.content);
+    if (container) {
+      const result = await dispatchFileExtract(file);
+      if (result?.style) result.style.language = file.language;
+      return result?.style;
+    }
     let result: { style?: FileStyleRaw } | undefined;
     if (file.language === 'Python') result = await extractPyGraph(file.path, file.content);
     else if (file.language === 'TypeScript' || file.language === 'JavaScript') result = await extractTSGraph(file.path, file.content);
@@ -6186,6 +6222,80 @@ export async function extractFileStyle(
   } catch {
     return undefined;
   }
+}
+
+function mergeScriptContainerResults(
+  filePath: string,
+  results: FileExtractResult[],
+): FileExtractResult {
+  const merged: FileExtractResult = { nodes: [], rawEdges: [], cfg: new Map() };
+  const styles = results.flatMap(result => result.style ? [result.style] : []);
+  const health = results.flatMap(result => result.parseHealth ? [result.parseHealth] : []);
+
+  for (const result of results) {
+    merged.nodes.push(...result.nodes);
+    merged.rawEdges.push(...result.rawEdges);
+    for (const [id, cfg] of result.cfg ?? []) merged.cfg!.set(id, cfg);
+    if (result.classRelationships?.length) {
+      merged.classRelationships = [...(merged.classRelationships ?? []), ...result.classRelationships];
+    }
+    if (result.dynamicDispatch) {
+      merged.dynamicDispatch ??= { events: [], callbacks: [] };
+      merged.dynamicDispatch.events.push(...result.dynamicDispatch.events);
+      merged.dynamicDispatch.callbacks.push(...result.dynamicDispatch.callbacks);
+    }
+    if (result.httpCalls?.length) merged.httpCalls = [...(merged.httpCalls ?? []), ...result.httpCalls];
+    if (result.httpDegradations?.length) {
+      merged.httpDegradations = [...(merged.httpDegradations ?? []), ...result.httpDegradations];
+    }
+    const grammarFailures = result.grammarUnavailableAll
+      ?? (result.grammarUnavailable ? [result.grammarUnavailable] : []);
+    if (grammarFailures.length > 0) {
+      merged.grammarUnavailableAll = [...(merged.grammarUnavailableAll ?? []), ...grammarFailures];
+    }
+  }
+
+  if (merged.grammarUnavailableAll?.length === 1) {
+    merged.grammarUnavailable = merged.grammarUnavailableAll[0];
+    delete merged.grammarUnavailableAll;
+  }
+
+  if (styles.length > 0) {
+    const counters: FileStyleRaw['counters'] = {};
+    for (const style of styles) {
+      for (const [idiom, tally] of Object.entries(style.counters)) {
+        const target = (counters as Record<string, Record<string, number>>)[idiom] ??= {};
+        for (const [option, count] of Object.entries(tally ?? {})) {
+          target[option] = (target[option] ?? 0) + count;
+        }
+      }
+    }
+    merged.style = {
+      filePath,
+      language: styles[0].language,
+      counters,
+      functionsSampled: styles.reduce((sum, style) => sum + style.functionsSampled, 0),
+    };
+  }
+
+  if (health.length > 0) {
+    const exclusions = health.flatMap(item => item.exclusion ? [item.exclusion] : []);
+    const budgets = health.flatMap(item => item.budgetMs === undefined ? [] : [item.budgetMs]);
+    merged.parseHealth = {
+      filePath,
+      language: health[0].language,
+      errorCount: health.reduce((sum, item) => sum + item.errorCount, 0),
+      missingCount: health.reduce((sum, item) => sum + item.missingCount, 0),
+      errorLines: [...new Set(health.flatMap(item => item.errorLines))].sort((a, b) => a - b),
+      ...(health.some(item => item.truncated) ? { truncated: true } : {}),
+      ...(health.some(item => item.parseFailed) ? { parseFailed: true } : {}),
+      ...(health.some(item => item.encodingFallback) ? { encodingFallback: true } : {}),
+      ...(exclusions[0] ? { exclusion: exclusions[0] } : {}),
+      ...(budgets.length > 0 ? { budgetMs: Math.max(...budgets) } : {}),
+    };
+  }
+
+  return merged;
 }
 
 /**

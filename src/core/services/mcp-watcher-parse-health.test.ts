@@ -44,10 +44,11 @@ function watcherIn(): { watcher: McpWatcher; outputPath: string } {
 async function spliceParseHealth(
   watcher: McpWatcher,
   changed: Array<{ rel: string; content: string }>,
+  deleted: string[] = [],
 ): Promise<void> {
   await (watcher as unknown as {
     updateParseHealth(c: Array<{ rel: string; content: string }>, d?: string[]): Promise<void>;
-  }).updateParseHealth(changed);
+  }).updateParseHealth(changed, deleted);
 }
 
 function readReport(outputPath: string): ParseHealthReport | null {
@@ -169,6 +170,20 @@ describe('watcher parse-health lane — the exclusion vocabulary matches the ful
     await spliceParseHealth(watcher, [{ rel: 'src/huge.html', content: '<html><body>ok</body></html>' }]);
     expect(readReport(outputPath)).toBeNull();
   }, 60_000);
+
+  it('removes a container-only artifact when the final SFC is deleted', async () => {
+    const { watcher, outputPath } = watcherIn();
+    await spliceParseHealth(watcher, [{
+      rel: 'src/App.vue',
+      content: '<script>function save() {}</script>',
+    }]);
+    expect(readReport(outputPath)?.scriptContainers?.[0]).toMatchObject({
+      format: 'Vue', fileCount: 1, scriptBlockCount: 1,
+    });
+
+    await spliceParseHealth(watcher, [], ['src/App.vue']);
+    expect(readReport(outputPath)).toBeNull();
+  });
 
   it('CONTROL: an ordinary file is unaffected by the default budget', async () => {
     // Guards the direction that would be worst: a bound tight enough to start excluding real

@@ -71,6 +71,22 @@ call targets emit no edge rather than a guessed one.
 | Elixir | `.ex` `.exs` | `defmodule` | Multi-clause definitions collapse to one node with a clause count. |
 | Bash | `.sh` `.bash` | file scope | Edges target project-defined functions, not external binaries. |
 
+### Script containers
+
+Vue (`.vue`), Svelte (`.svelte`), and Astro (`.astro`) are recognized script containers. Their support
+records distinguish direct container semantics from the capabilities backed inside extracted scripts.
+OpenLore extracts plain `<script>` blocks through the JavaScript lane and `<script lang="ts">` blocks
+through the TypeScript lane. The surrounding file is blanked without changing offsets or newlines, so
+functions, calls, signatures, CFG, and style facts retain their true container-file positions.
+`get_language_support` accepts the format name or extension (for example, `.svelte`) and reports those
+script-scoped capabilities alongside the remaining container limitations.
+
+Template expressions, framework macros, and Svelte reactive statements remain unanalyzed. Analyze,
+orient, and doctor disclose that boundary and report the number of container files and script blocks;
+they never treat a function reached only through framework magic as proven dead.
+Container files over 1,000,000 characters are excluded before parser-lane allocation and reported as
+`size-cap` parse-health exclusions.
+
 ### The `.h` rule
 
 Both C and C++ claim `.h` headers. A header in a project containing any C++ source (`.cpp`, `.cc`,
@@ -87,7 +103,7 @@ Each uses an isolated WASM module; if that backend is unavailable, they degrade 
 
 ### Out of scope
 
-SQL, R, MATLAB, HTML/CSS, and Markdown/JSON/YAML configuration are not call-graph-shaped (except
+SQL, R, MATLAB, HTML/CSS markup, and Markdown/JSON/YAML configuration are not call-graph-shaped (except
 where a format is explicitly supported as Infrastructure-as-Code). Deferred general-purpose
 languages include Objective-C, Perl, Haskell, Clojure, F#, Groovy, OCaml, Zig, Nim, Julia, Erlang,
 VB.NET, PowerShell, Fortran, and COBOL.

@@ -830,6 +830,22 @@ describe('doctor command', () => {
       expect(result.detail).toBe('no files parsed with errors');
     });
 
+    it('warns when script containers retain unanalyzed framework semantics', async () => {
+      const result = await withParseHealth({
+        totalDegradedFiles: 0, files: [], byLanguage: [],
+        scriptContainers: [{
+          format: 'Vue', extension: '.vue', fileCount: 2, scriptBlockCount: 3,
+          extractedScriptBlockCount: 3,
+          limitations: ['template expressions', 'framework macros', 'Svelte reactive statements'],
+          files: [],
+        }],
+      });
+      expect(result.status).toBe('warn');
+      expect(result.detail).toContain('script-container boundary');
+      expect(result.detail).toContain('2 .vue files');
+      expect(result.detail).toContain('template expressions');
+    });
+
     it('warns mentioning both per-file errors and the memory reduction when both apply', async () => {
       const result = await withParseHealth({
         totalDegradedFiles: 2,

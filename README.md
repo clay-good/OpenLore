@@ -13,7 +13,7 @@
   <img src="https://img.shields.io/node/v/openlore?color=339933&logo=node.js&logoColor=white" alt="Node >=22.19">
   <br>
   <img src="https://img.shields.io/badge/MCP-ready-7c3aed?logo=anthropic&logoColor=white" alt="MCP ready">
-  <img src="https://img.shields.io/badge/languages-18%20%2B%2012%20IaC-f97316" alt="18 languages + 12 IaC ecosystems">
+  <img src="https://img.shields.io/badge/languages-21%20%2B%2012%20IaC-f97316" alt="21 languages + 12 IaC ecosystems">
   <img src="https://img.shields.io/badge/tests-5500%2B-success" alt="5500+ tests">
   <img src="https://img.shields.io/badge/API_key-not_required-0ea5e9" alt="No API key required">
   <a href="https://github.com/clay-good/OpenLore/stargazers"><img src="https://img.shields.io/github/stars/clay-good/OpenLore?style=social" alt="GitHub stars"></a>

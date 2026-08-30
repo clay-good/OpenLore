@@ -40,6 +40,13 @@ import { CROSS_SERVICE_HTTP_LANGUAGES } from './http-capability.js';
 import { ERROR_PROPAGATION_LANGUAGES } from './exception-flow.js';
 import { TEST_DETECTION_DECISIONS } from './test-file.js';
 import { COMPLEXITY_LANGUAGES } from './call-graph-complexity.js';
+import {
+  SCRIPT_CONTAINER_LIMITATIONS,
+} from './sfc-script-extractor.js';
+import {
+  detectLanguage as detectCanonicalLanguage,
+  SCRIPT_CONTAINER_FORMATS,
+} from './language-detection.js';
 
 /** The closed set of capabilities the registry tracks, in deterministic column order. */
 export const CAPABILITIES = [
@@ -81,6 +88,7 @@ export const CAPABILITY_DESCRIPTIONS: Record<Capability, string> = {
 export const CODE_LANGUAGES: readonly string[] = [
   'TypeScript', 'JavaScript', 'Python', 'Go', 'Rust', 'Ruby', 'Java', 'Kotlin', 'PHP',
   'C#', 'C++', 'C', 'Swift', 'Scala', 'Dart', 'Lua', 'Elixir', 'Bash', 'Terraform', 'Bicep',
+  ...SCRIPT_CONTAINER_FORMATS,
 ];
 
 /**
@@ -115,6 +123,14 @@ export interface LanguageSupportRecord {
   capabilities: Capability[];
   /** Whether the language is even a known registry key (false → fail-soft "nothing claimed"). */
   known: boolean;
+  /** Script-container extraction scope, present only for Vue/Svelte/Astro. */
+  container?: {
+    recognized: true;
+    extraction: 'script-blocks';
+    /** Capabilities backed inside extracted JS/TS script blocks only. */
+    capabilities: Capability[];
+    limitations: string[];
+  };
 }
 
 /** Derive the live capability set for a language from the authoritative source structures. */
@@ -135,13 +151,33 @@ function deriveCapabilities(language: string): Capability[] {
   return CAPABILITIES.filter(c => out.includes(c));
 }
 
+const SCRIPT_CONTAINER_CAPABILITIES = CAPABILITIES.filter(capability =>
+  deriveCapabilities('JavaScript').includes(capability)
+  && deriveCapabilities('TypeScript').includes(capability),
+);
+
 /**
  * The declarative registry: language → its derived support record, for every known
  * language. Computed once from the authoritative capability sources — never hand-listed,
  * so it cannot drift from what the extractors actually do.
  */
 export const LANGUAGE_SUPPORT: ReadonlyMap<string, LanguageSupportRecord> = new Map(
-  ALL_LANGUAGES.map(language => [language, { language, capabilities: deriveCapabilities(language), known: true }]),
+  ALL_LANGUAGES.map(language => {
+    const isContainer = (SCRIPT_CONTAINER_FORMATS as readonly string[]).includes(language);
+    return [language, {
+      language,
+      capabilities: deriveCapabilities(language),
+      known: true,
+      ...(isContainer ? {
+        container: {
+          recognized: true as const,
+          extraction: 'script-blocks' as const,
+          capabilities: SCRIPT_CONTAINER_CAPABILITIES,
+          limitations: [...SCRIPT_CONTAINER_LIMITATIONS],
+        },
+      } : {}),
+    }];
+  }),
 );
 
 /**
@@ -165,7 +201,13 @@ const CANONICAL_BY_LOWER = new Map(ALL_LANGUAGES.map(l => [l.toLowerCase(), l]))
  * being honest about genuinely-unknown languages.
  */
 export function resolveLanguageName(input: string): string | null {
-  return CANONICAL_BY_LOWER.get(input.trim().toLowerCase()) ?? null;
+  const normalized = input.trim().toLowerCase();
+  const extension = normalized.startsWith('.') ? normalized.slice(1) : normalized;
+  const detected = detectCanonicalLanguage(`container.${extension}`);
+  const container = (SCRIPT_CONTAINER_FORMATS as readonly string[]).includes(detected)
+    ? detected
+    : null;
+  return CANONICAL_BY_LOWER.get(normalized) ?? container;
 }
 
 /** A single cell-resolved coverage matrix: deterministic language × capability booleans. */

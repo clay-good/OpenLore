@@ -14,6 +14,7 @@ const tsFiles = [
 ];
 
 afterEach(() => {
+  vi.doUnmock('tree-sitter-javascript');
   vi.doUnmock('tree-sitter-typescript');
   vi.restoreAllMocks();
   __resetGrammarCacheForTests();
@@ -65,5 +66,29 @@ describe('core grammar availability disclosure', () => {
     expect(grammarStatus('TypeScript')).toBe('unavailable');
     expect(warning.mock.calls.filter(call => String(call[0]).includes('TypeScript grammar unavailable')))
       .toHaveLength(1);
+  });
+
+  it('discloses every unavailable lane in a mixed-language script container', async () => {
+    const file = {
+      path: 'src/App.vue',
+      language: 'Vue',
+      content: [
+        '<script>function plain() {}</script>',
+        '<script lang="ts">function typed(value: number) { return value; }</script>',
+      ].join('\n'),
+    };
+    await new CallGraphBuilder().build([file]);
+    class IncompatibleQuery {
+      constructor() {
+        throw new Error('invalid node type at position 17');
+      }
+    }
+    __setNativeQueryForTests(IncompatibleQuery as never);
+    vi.spyOn(logger, 'warning').mockImplementation(() => {});
+
+    const result = await new CallGraphBuilder().build([file]);
+
+    expect(result.grammarUnavailable?.map(boundary => boundary.language))
+      .toEqual(['JavaScript', 'TypeScript']);
   });
 });

@@ -407,6 +407,8 @@ export type FileExtractResult = {
   }>;
   /** Plain-data receipt that survives the worker-thread structured-clone boundary. */
   grammarUnavailable?: Omit<GrammarUnavailableBoundary, 'fileCount'>;
+  /** Multiple unavailable parser lanes, used by mixed-language script containers. */
+  grammarUnavailableAll?: Array<Omit<GrammarUnavailableBoundary, 'fileCount'>>;
 };
 
 export interface CallGraphResult {

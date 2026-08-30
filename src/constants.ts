@@ -862,6 +862,8 @@ export const SLOW_FILE_DISCLOSURE_MS = 5_000;
  * fix-analyze-native-abort-and-file-cost-budget).
  */
 export const MAX_HTML_INLINE_SCRIPT_CHARS = 1_000_000;
+/** The same bounded extraction budget applies to Vue/Svelte/Astro script containers. */
+export const MAX_SCRIPT_CONTAINER_CHARS = MAX_HTML_INLINE_SCRIPT_CHARS;
 
 /**
  * How many files ONE repository-wide source scan may hold open at a time (change:

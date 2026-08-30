@@ -13,6 +13,7 @@
 // module's existing importers keep working. The definition and its extension map live
 // once, in the dependency-free `language-detection.ts` leaf.
 import { detectLanguage } from './language-detection.js';
+import { extractScriptContainer } from './sfc-script-extractor.js';
 import { blankCommentsPreservingLayout } from './comment-blanking.js';
 export { detectLanguage };
 
@@ -966,6 +967,14 @@ export const SIGNATURE_LANGUAGES: ReadonlySet<string> = new Set<string>([
 export function extractSignatures(filePath: string, content: string): FileSignatureMap {
   const language = detectLanguage(filePath);
   let entries: ExtractedSignature[];
+
+  const container = extractScriptContainer(filePath, content);
+  if (container) {
+    entries = container.lanes
+      .flatMap(lane => extractTypeScript(lane.content))
+      .slice(0, MAX_SIGS_PER_FILE);
+    return { path: filePath, language, entries };
+  }
 
   switch (language) {
     case 'Python':

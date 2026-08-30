@@ -45,6 +45,13 @@ export interface LanguageSupportView {
   supportedCount: number;
   /** Runtime availability of the grammar behind `callGraph`. */
   grammarStatus: GrammarStatus;
+  /** Recognized script-container scope and the framework semantics still outside extraction. */
+  container?: {
+    recognized: true;
+    extraction: 'script-blocks';
+    capabilities: Capability[];
+    limitations: string[];
+  };
 }
 
 export interface GetLanguageSupportResult {
@@ -89,14 +96,16 @@ function viewFor(
   persistedGrammarStatus?: GrammarStatus,
 ): LanguageSupportView {
   const rec = languageSupport(language);
+  const supported = rec.container?.capabilities ?? rec.capabilities;
   return {
     language,
     known: rec.known,
     ...(detectedInRepo === undefined ? {} : { detectedInRepo }),
-    supported: rec.capabilities,
-    unsupported: CAPABILITIES.filter(c => !rec.capabilities.includes(c)),
-    supportedCount: rec.capabilities.length,
+    supported,
+    unsupported: CAPABILITIES.filter(c => !supported.includes(c)),
+    supportedCount: supported.length,
     grammarStatus: persistedGrammarStatus ?? liveGrammarStatus(language),
+    ...(rec.container ? { container: rec.container } : {}),
   };
 }
 
@@ -125,7 +134,9 @@ export async function computeGetLanguageSupport(
     const canon = resolveLanguageName(raw) ?? raw;
     const view = viewFor(canon);
     const summary = view.known
-      ? `${canon} supports ${view.supportedCount}/${CAPABILITIES.length} capabilities: ${view.supported.join(', ') || 'none'}.`
+      ? view.container
+        ? `${canon} extracts script blocks with ${view.supportedCount}/${CAPABILITIES.length} capabilities: ${view.supported.join(', ') || 'none'}; ${view.container.limitations.join(', ')} remain unanalyzed.`
+        : `${canon} supports ${view.supportedCount}/${CAPABILITIES.length} capabilities: ${view.supported.join(', ') || 'none'}.`
       : `${raw} is not a recognized language; nothing is claimed for it (fail-soft).`;
     return { mode: 'language', languages: [view], capabilities: CAP_META, summary, disclosure: DISCLOSURE };
   }
@@ -141,6 +152,8 @@ export async function computeGetLanguageSupport(
     phReport?.grammarUnavailable?.map(boundary => boundary.language) ?? [],
   );
   const detected = [...new Set([...detectedLanguages(cg), ...unavailableLanguages])]
+    .concat(phReport?.scriptContainers?.map(boundary => boundary.format) ?? [])
+    .filter((language, index, all) => all.indexOf(language) === index)
     .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   // `detected` may be empty (a docs-only repo) — pass it straight through; an empty list
   // yields NO rows (not the whole registry), so `languages` never contradicts

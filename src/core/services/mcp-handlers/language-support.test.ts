@@ -82,6 +82,17 @@ describe('get_language_support — named-language mode (pure registry, no analys
     // multi-word IaC tag resolves case-insensitively too
     expect((await run({ directory: '/p', language: 'docker compose' })).languages[0].language).toBe('Docker Compose');
   });
+
+  it('recognizes an SFC extension and names its supported extraction scope', async () => {
+    const view = (await run({ directory: '/p', language: '.svelte' })).languages[0];
+    expect(view.language).toBe('Svelte');
+    expect(view.known).toBe(true);
+    expect(view.container?.extraction).toBe('script-blocks');
+    expect(view.supported).toContain('callGraph');
+    expect(view.supported).toContain('cfgOverlay');
+    expect(view.container?.capabilities).toEqual(view.supported);
+    expect(view.container?.limitations).toContain('Svelte reactive statements');
+  });
 });
 
 describe('get_language_support — repo mode (coverage over detected languages)', () => {
@@ -124,6 +135,22 @@ describe('get_language_support — repo mode (coverage over detected languages)'
     expect(kotlin.supported).toContain('cfgOverlay');
     expect(kotlin.supported).toContain('typeInference');
     expect(kotlin.detectedInRepo).toBe(true);
+  });
+
+  it('includes script-container formats from the persisted boundary record', async () => {
+    vi.mocked(readCachedContext).mockResolvedValue({ callGraph: graph([]) } as never);
+    vi.mocked(loadParseHealthReport).mockResolvedValue({
+      version: 1, totalDegradedFiles: 0, totalErrorRegions: 0, byLanguage: [], topFiles: [], files: [],
+      scriptContainers: [{
+        format: 'Astro', extension: '.astro', fileCount: 1, scriptBlockCount: 1,
+        extractedScriptBlockCount: 1,
+        limitations: ['template expressions', 'framework macros', 'Svelte reactive statements'],
+        files: [{ filePath: 'src/Page.astro', format: 'Astro', scriptBlockCount: 1, extractedScriptBlockCount: 1 }],
+      }],
+    });
+    const res = await run({ directory: '/p' });
+    expect(res.detectedLanguages).toEqual(['Astro']);
+    expect(res.languages[0].container?.extraction).toBe('script-blocks');
   });
 
   it('errors when no analysis is cached (repo mode)', async () => {
