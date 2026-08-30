@@ -51,7 +51,8 @@
  * writers at once.
  */
 import { randomUUID } from 'node:crypto';
-import { link, open, readFile, rename, stat, unlink, mkdir } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { link, open, rename, stat, unlink, mkdir, type FileHandle } from 'node:fs/promises';
 import { join } from 'node:path';
 import { OPENLORE_DECISIONS_SUBDIR, OPENLORE_DIR } from '../../constants.js';
 
@@ -65,6 +66,7 @@ const MAX_WAIT_MS = 180_000;
 // event loop for several seconds. Match the serve/start bound before declaring a
 // complete PID-bearing gate stranded; explicit test policies can use shorter waits.
 const NAMESPACE_GATE_MAX_WAIT_MS = 30_000;
+const MAX_LOCK_PAYLOAD_BYTES = 64 * 1024;
 /**
  * Ownership heartbeat window. An owner refreshes its payload at least this often
  * (the progress sidecar runs at 15s, so a live owner refreshes well inside it);
@@ -73,6 +75,19 @@ const NAMESPACE_GATE_MAX_WAIT_MS = 30_000;
  */
 const OWNERSHIP_HEARTBEAT_STALE_MS = 90_000;
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+async function readBoundedLockPayload(handle: FileHandle, lockPath: string): Promise<string> {
+  const buffer = Buffer.alloc(MAX_LOCK_PAYLOAD_BYTES + 1);
+  const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+  if (bytesRead > MAX_LOCK_PAYLOAD_BYTES) {
+    throw new Error(`Advisory lock payload exceeds ${MAX_LOCK_PAYLOAD_BYTES} bytes: ${lockPath}`);
+  }
+  return buffer.subarray(0, bytesRead).toString('utf8');
+}
+
+function assertRegularLockFile(isFile: boolean, lockPath: string): void {
+  if (!isFile) throw new Error(`Advisory lock path is not a regular file: ${lockPath}`);
+}
 
 /** What a contender does when the lock is held by a live holder. */
 export type LockContention =
@@ -223,7 +238,11 @@ async function acquireNamespaceGate(
     // PID-bearing gate, never an empty gate that nobody can safely reclaim.
     const candidate = `${gatePath}.${process.pid}.${randomUUID()}.candidate`;
     try {
-      const handle = await open(candidate, 'wx');
+      const handle = await open(
+        candidate,
+        constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW,
+        0o600,
+      );
       try {
         await handle.writeFile(String(process.pid));
         await handle.sync();
@@ -245,7 +264,6 @@ async function acquireNamespaceGate(
       // contender can replace it between our read and unlink, after which we delete
       // the successor's live gate. Never reclaim automatically; a stranded gate is
       // an explicit, bounded, fail-closed operator-recovery condition.
-      await readFile(gatePath, 'utf8').catch(() => '');
       if (Date.now() - startedAt >= maxWaitMs) throw new NamespaceGateHeldError(gatePath);
       await sleep(10);
     }
@@ -287,7 +305,11 @@ export async function acquireLockAt(
     try {
       throwIfAborted(signal);
       try {
-        const fh = await open(lockPath, 'wx'); // exclusive create — fails if held
+        const fh = await open(
+          lockPath,
+          constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW,
+          0o600,
+        ); // exclusive create — fails if held
         try {
           await fh.writeFile(payloadOf());
         } catch (err) {
@@ -368,17 +390,19 @@ export async function acquireLockAt(
         // payload — and that pair is exactly what the staleness policy judges, and
         // what the post-rename mtime comparison below re-checks. Reading them from
         // the same inode makes both decisions describe the same file.
-        const handle = await open(lockPath, 'r');
+        const handle = await open(lockPath, constants.O_RDONLY | constants.O_NOFOLLOW);
         try {
           const info = await handle.stat();
+          assertRegularLockFile(info.isFile(), lockPath);
           mtimeMs = info.mtimeMs;
           inode = info.ino;
-          contents = await handle.readFile('utf8');
+          contents = await readBoundedLockPayload(handle, lockPath);
         } finally {
           await handle.close();
         }
-        } catch {
-          continue; // lock vanished between open and stat — retry acquire
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+          throw error;
         }
         if (isStale(mtimeMs, contents)) {
         // Steal by RENAME, not by unlink-on-path. Two contenders can both judge the
@@ -499,9 +523,11 @@ export async function withAnalysisLock<T>(analysisDir: string, fn: () => Promise
 export async function isDecisionsLockHeld(rootPath: string): Promise<boolean> {
   const lockPath = join(decisionsDir(rootPath), DECISIONS_LOCK_FILE);
   try {
-    const handle = await open(lockPath, 'r');
+    const handle = await open(lockPath, constants.O_RDONLY | constants.O_NOFOLLOW);
     try {
-      const [s, contents] = await Promise.all([handle.stat(), handle.readFile('utf8')]);
+      const s = await handle.stat();
+      if (!s.isFile()) return false;
+      const contents = await readBoundedLockPayload(handle, lockPath);
       return !defaultIsStale(s.mtimeMs, contents);
     } finally {
       await handle.close();

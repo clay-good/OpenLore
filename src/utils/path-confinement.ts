@@ -20,6 +20,7 @@ import { randomUUID } from 'node:crypto';
 
 /** Upper bound on a symlink chain, so a cycle cannot spin the resolver. */
 const MAX_SYMLINK_HOPS = 64;
+const MAX_RECOVERY_JOURNAL_BYTES = 4 * 1024;
 import { OPENSPEC_DIR } from '../constants.js';
 
 /**
@@ -268,7 +269,16 @@ export async function recoverConfinedAtomicWriteFile(
   let journal: { guard?: unknown };
   try {
     const handle = await open(recoveryJournalPath, constants.O_RDONLY | constants.O_NOFOLLOW);
-    try { journal = JSON.parse(await handle.readFile('utf-8')) as { guard?: unknown }; }
+    try {
+      const info = await handle.stat();
+      if (!info.isFile()) throw new Error(`Confined write recovery journal is not a regular file: "${recoveryJournalPath}"`);
+      const buffer = Buffer.alloc(MAX_RECOVERY_JOURNAL_BYTES + 1);
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+      if (bytesRead > MAX_RECOVERY_JOURNAL_BYTES) {
+        throw new Error(`Confined write recovery journal is too large: "${recoveryJournalPath}"`);
+      }
+      journal = JSON.parse(buffer.subarray(0, bytesRead).toString('utf-8')) as { guard?: unknown };
+    }
     finally { await handle.close(); }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
@@ -450,14 +460,23 @@ export async function confinedAtomicWriteFile(
         }
         throw error;
       }
-      const captured = await lstat(guard);
+      const capturedHandle = await open(guard, constants.O_RDONLY | constants.O_NOFOLLOW);
+      let captured: Stats;
+      let capturedAfterRead: Stats;
       let capturedContent: string | undefined;
-      if (options.expectedContent !== undefined) {
-        const capturedHandle = await open(guard, constants.O_RDONLY | constants.O_NOFOLLOW);
-        try { capturedContent = await capturedHandle.readFile('utf-8'); }
-        finally { await capturedHandle.close(); }
+      try {
+        captured = await capturedHandle.stat();
+        if (options.expectedContent !== undefined) capturedContent = await capturedHandle.readFile('utf-8');
+        capturedAfterRead = await capturedHandle.stat();
+      } finally {
+        await capturedHandle.close();
       }
       if (!captured.isFile()
+          || !sameFile(captured, capturedAfterRead)
+          || captured.size !== capturedAfterRead.size
+          || captured.mtimeMs !== capturedAfterRead.mtimeMs
+          || captured.ctimeMs !== capturedAfterRead.ctimeMs
+          || captured.mode !== capturedAfterRead.mode
           || !sameFile(options.expectedIdentity, captured)
           || captured.size !== options.expectedIdentity.size
           || captured.mtimeMs !== options.expectedIdentity.mtimeMs

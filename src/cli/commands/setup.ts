@@ -16,10 +16,10 @@
  */
 
 import { Command } from 'commander';
-import { readFile, writeFile, mkdir, access, unlink, lstat, realpath } from 'node:fs/promises';
-import { join, dirname, relative, isAbsolute } from 'node:path';
+import { readFile, writeFile, mkdir, access, unlink, lstat, realpath, chmod } from 'node:fs/promises';
+import { join, dirname, relative, isAbsolute, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
-import { homedir, tmpdir } from 'node:os';
+import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { checkbox } from '@inquirer/prompts';
 import { logger } from '../../utils/logger.js';
@@ -419,12 +419,19 @@ async function withClaudeSettingsMutationLock(
   mutate: (recoveryJournalPath: string) => Promise<boolean>,
 ): Promise<boolean> {
   const lockName = `.openlore-claude-settings-${createHash('sha256').update(settingsPath).digest('hex').slice(0, 24)}.lock`;
-  const recoveryJournalPath = join(tmpdir(), `${lockName}.journal`);
+  let coordinationDir: string;
+  try {
+    coordinationDir = await verifiedSettingsCoordinationDir();
+  } catch (error) {
+    logger.error(`OpenLore's private hook-settings runtime directory is unavailable — refusing to update ${settingsPath}. ${(error as Error).message}`);
+    return false;
+  }
+  const recoveryJournalPath = join(coordinationDir, `${lockName}.journal`);
   let lock: Awaited<ReturnType<typeof acquireLockAt>>;
   try {
-    // The repository may replace `.claude` with a symlink after validation, so
-    // keep coordination state in the OS-owned temporary directory instead.
-    lock = await acquireLockAt(tmpdir(), lockName, {
+    // Coordination is per-user, private, durable across process crashes, and
+    // outside both the repository and the shared OS temporary namespace.
+    lock = await acquireLockAt(coordinationDir, lockName, {
       maxWaitMs: 5_000,
     });
   } catch (error) {
@@ -444,6 +451,42 @@ async function withClaudeSettingsMutationLock(
   } finally {
     await lock.release();
   }
+}
+
+const SETTINGS_RUNTIME_OVERRIDE = 'OPENLORE_SETTINGS_RUNTIME_DIR';
+
+async function verifiedSettingsCoordinationDir(): Promise<string> {
+  const override = process.env[SETTINGS_RUNTIME_OVERRIDE];
+  if (override) {
+    const requested = resolve(override);
+    try { await mkdir(requested, { mode: 0o700 }); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+    const info = await lstat(requested);
+    if (info.isSymbolicLink() || !info.isDirectory()) throw new Error(`${requested} is not a real directory`);
+    const canonical = await realpath(requested);
+    if (process.platform !== 'win32') await chmod(canonical, 0o700);
+    if (typeof process.getuid === 'function' && info.uid !== process.getuid()) {
+      throw new Error(`${requested} is not owned by the current user`);
+    }
+    return canonical;
+  }
+
+  const canonicalHome = await realpath(homedir());
+  let current = canonicalHome;
+  for (const segment of ['.openlore', 'runtime', 'settings-writes']) {
+    current = join(current, segment);
+    try { await mkdir(current, { mode: 0o700 }); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+    const info = await lstat(current);
+    if (info.isSymbolicLink() || !info.isDirectory()) throw new Error(`${current} is not a real directory`);
+    if (await realpath(current) !== current) throw new Error(`${current} contains a symbolic-link path component`);
+  }
+  if (process.platform !== 'win32') await chmod(current, 0o700);
+  const info = await lstat(current);
+  if (typeof process.getuid === 'function' && info.uid !== process.getuid()) {
+    throw new Error(`${current} is not owned by the current user`);
+  }
+  return current;
 }
 
 /** Install the opt-in enforcement gate in Claude Code's Stop loop. */

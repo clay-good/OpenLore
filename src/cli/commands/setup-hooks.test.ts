@@ -21,6 +21,21 @@ interface Settings {
   };
 }
 
+let settingsRuntimeDir: string;
+let previousSettingsRuntimeDir: string | undefined;
+
+beforeEach(async () => {
+  settingsRuntimeDir = await mkdtemp(join(tmpdir(), 'openlore-settings-runtime-'));
+  previousSettingsRuntimeDir = process.env.OPENLORE_SETTINGS_RUNTIME_DIR;
+  process.env.OPENLORE_SETTINGS_RUNTIME_DIR = settingsRuntimeDir;
+});
+
+afterEach(async () => {
+  if (previousSettingsRuntimeDir === undefined) delete process.env.OPENLORE_SETTINGS_RUNTIME_DIR;
+  else process.env.OPENLORE_SETTINGS_RUNTIME_DIR = previousSettingsRuntimeDir;
+  await rm(settingsRuntimeDir, { recursive: true, force: true });
+});
+
 describe('agent enforcement Stop hook lifecycle', () => {
   let dir: string;
 
@@ -129,6 +144,18 @@ describe('agent enforcement Stop hook lifecycle', () => {
     await writeFile(path, '{broken', 'utf-8');
     expect(await installAgentEnforcementHook(dir)).toBe(false);
     expect(await readFile(path, 'utf-8')).toBe('{broken');
+  });
+
+  it.runIf(process.platform !== 'win32')('refuses a symlinked private runtime directory', async () => {
+    const outside = await mkdtemp(join(tmpdir(), 'openlore-runtime-outside-'));
+    await rm(settingsRuntimeDir, { recursive: true, force: true });
+    await symlink(outside, settingsRuntimeDir);
+    try {
+      expect(await installAgentEnforcementHook(dir)).toBe(false);
+      await expect(readFile(join(dir, '.claude', 'settings.json'), 'utf-8')).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
   });
 
   it('converges duplicate owned entries to one canonical hook', async () => {
