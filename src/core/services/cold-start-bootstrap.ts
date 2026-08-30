@@ -27,7 +27,8 @@
  */
 
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { join, resolve, win32 } from 'node:path';
 import {
   OPENLORE_ANALYSIS_REL_PATH,
 } from '../../constants.js';
@@ -59,6 +60,10 @@ const attempted = new Set<string>();
 
 /** In-flight repairs, keyed by directory, so a read can disclose "refresh started". */
 const inFlight = new Map<string, { reason: RepairReason; startedAt: number }>();
+
+/** Analyzer children owned by the MCP transport lifetime. */
+const activeBuildChildren = new Set<ChildProcess>();
+let childBuildsStopping = false;
 
 /**
  * The default index builder, registered once by the MCP server at startup. Lets a
@@ -176,6 +181,150 @@ export interface RepairOptions {
   now?: () => number;
 }
 
+export interface ChildProcessBuildOptions {
+  /** Rebuild even when the source fingerprint is unchanged. */
+  repair?: boolean;
+  /** Test seam; production uses the current OpenLore CLI entry point. */
+  cliPath?: string;
+  /** Test seam for observing the child-process boundary. */
+  spawnProcess?: typeof spawn;
+}
+
+/** Open a fresh MCP transport lifetime for child-process builds. */
+export function enableChildProcessBuilds(): void {
+  childBuildsStopping = false;
+}
+
+function terminateBuildChild(
+  child: ChildProcess,
+  signal: NodeJS.Signals,
+  platform = process.platform,
+  spawnTreeKiller: typeof spawn = spawn,
+): void {
+  // Detached POSIX children lead their own process group. Analyze may heap-
+  // reexec beneath that leader, so signal the group before falling back to the
+  // supervisor PID. Windows has no negative-PID process-group signaling.
+  if (platform === 'win32' && child.pid !== undefined) {
+    const fallback = () => {
+      try { child.kill(signal); } catch { /* already gone */ }
+    };
+    try {
+      const configuredRoot = process.env.SystemRoot ?? process.env.WINDIR;
+      const systemRoot = configuredRoot && win32.isAbsolute(configuredRoot)
+        ? configuredRoot
+        : 'C:\\Windows';
+      const killer = spawnTreeKiller(
+        win32.join(systemRoot, 'System32', 'taskkill.exe'),
+        ['/PID', String(child.pid), '/T', ...(signal === 'SIGKILL' ? ['/F'] : [])],
+        { stdio: 'ignore', windowsHide: true },
+      );
+      let settled = false;
+      killer.once('error', () => {
+        if (settled) return;
+        settled = true;
+        fallback();
+      });
+      killer.once('close', code => {
+        if (settled) return;
+        settled = true;
+        if (code !== 0) fallback();
+      });
+      killer.unref();
+      return;
+    } catch {
+      fallback();
+      return;
+    }
+  }
+  if (platform !== 'win32' && child.pid !== undefined) {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch {
+      // The group may already be gone or unavailable; try the leader below.
+    }
+  }
+  child.kill(signal);
+}
+
+/** Test seam for the platform-specific process-tree termination contract. */
+export function _terminateBuildChildForTesting(
+  child: ChildProcess,
+  signal: NodeJS.Signals,
+  platform: NodeJS.Platform,
+  spawnTreeKiller: typeof spawn,
+): void {
+  terminateBuildChild(child, signal, platform, spawnTreeKiller);
+}
+
+/** Terminate analyzer children when their owning MCP transport closes. */
+export async function stopChildProcessBuilds(graceMs = 1_000): Promise<void> {
+  childBuildsStopping = true;
+  const children = [...activeBuildChildren];
+  await Promise.all(children.map(child => new Promise<void>(resolveStop => {
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      activeBuildChildren.delete(child);
+      resolveStop();
+    };
+    const timer = setTimeout(() => {
+      try { terminateBuildChild(child, 'SIGKILL'); } catch { /* already gone */ }
+      done();
+    }, graceMs);
+    child.once('close', done);
+    child.once('error', done);
+    try { terminateBuildChild(child, 'SIGTERM'); } catch { done(); }
+  })));
+}
+
+/**
+ * Build the complete first-use index outside the MCP server's event loop.
+ * Initialization is also delegated when the repository has no config yet, so
+ * the parent process performs no analyzer or install work.
+ */
+export async function buildIndexInChildProcess(
+  directory: string,
+  opts: ChildProcessBuildOptions = {},
+): Promise<void> {
+  const cliPath = opts.cliPath ?? process.argv[1];
+  if (!cliPath) throw new Error('Cannot locate the OpenLore CLI entry point');
+  const spawnProcess = opts.spawnProcess ?? spawn;
+
+  const run = (args: string[]): Promise<void> => new Promise((resolveRun, rejectRun) => {
+    if (childBuildsStopping) {
+      rejectRun(new Error('OpenLore child build canceled during shutdown'));
+      return;
+    }
+    let settled = false;
+    const child: ChildProcess = spawnProcess(
+      process.execPath,
+      [cliPath, ...args],
+      { cwd: directory, stdio: 'ignore', detached: true },
+    );
+    activeBuildChildren.add(child);
+    child.once('error', error => {
+      if (settled) return;
+      settled = true;
+      activeBuildChildren.delete(child);
+      rejectRun(error);
+    });
+    child.once('close', code => {
+      if (settled) return;
+      settled = true;
+      activeBuildChildren.delete(child);
+      if (code === 0) resolveRun();
+      else rejectRun(new Error(`OpenLore ${args[0]} child exited with code ${code ?? 'unknown'}`));
+    });
+    child.unref();
+  });
+
+  if (!existsSync(resolveOpenLoreConfigPath(directory))) await run(['init']);
+  await run(['analyze', ...(opts.repair ? ['--reanalyze'] : []), '--embedded']);
+}
+
 /**
  * Kick a one-time background repair for `directory` using the caller-supplied or
  * process-registered builder. Returns the in-flight build promise (so tests can
@@ -272,4 +421,6 @@ export function _resetRepairServiceForTesting(): void {
   inFlight.clear();
   repairHosts.clear();
   registeredBuilder = null;
+  activeBuildChildren.clear();
+  childBuildsStopping = false;
 }

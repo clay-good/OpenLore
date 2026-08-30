@@ -216,6 +216,99 @@ describe('incremental watch converges to analyze --force (parity oracle)', () =>
     expect(findings.map(f => f.location?.path).sort()).toEqual(['src/a.ts', 'src/b.ts']);
   });
 
+  it('loads the internal node table once and re-parses a shared caller once per batch', async () => {
+    const v1: Files = {
+      'src/a.ts': 'export function a() { return 1; }\n',
+      'src/b.ts': 'export function b() { return 2; }\n',
+      'src/caller.ts': "import { a } from './a';\nimport { b } from './b';\nexport function caller() { return a() + b(); }\n",
+    };
+    await writeFiles(v1);
+    const store = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    seedStore(store, v1, await fullBuild(v1));
+    store.close();
+    await writeFiles({
+      'src/a.ts': 'export function a() { return 10; }\n',
+      'src/b.ts': 'export function b() { return 20; }\n',
+    });
+
+    const nodeLoads = vi.spyOn(EdgeStore.prototype, 'getAllInternalNodes');
+    const { CallGraphBuilder } = await import('../analyzer/call-graph.js');
+    const builds = vi.spyOn(CallGraphBuilder.prototype, 'build');
+    const { McpWatcher } = await import('./mcp-watcher.js');
+    const watcher = new McpWatcher({ rootPath: root, outputPath, embed: false, bulkThreshold: 10 });
+    await (watcher as unknown as { handleBatch(paths: string[]): Promise<void> }).handleBatch([
+      join(root, 'src/a.ts'),
+      join(root, 'src/b.ts'),
+    ]);
+
+    expect(nodeLoads).toHaveBeenCalledTimes(1);
+    const parsedPaths = builds.mock.calls.flatMap(call =>
+      (call[0] as Array<{ path: string }>).map(file => file.path),
+    );
+    expect(parsedPaths.filter(path => path === 'src/caller.ts')).toHaveLength(1);
+  });
+
+  it('repairs a changed consumer that arrives before its changed producer', async () => {
+    const v1: Files = {
+      'src/api.ts': 'export function oldName() { return 1; }\n',
+      'src/consumer.ts': "import { oldName } from './api';\nexport function consume() { return oldName(); }\n",
+    };
+    await writeFiles(v1);
+    const store = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    seedStore(store, v1, await fullBuild(v1));
+    store.close();
+
+    const v2: Files = {
+      'src/api.ts': 'export function newName() { return 2; }\n',
+      'src/consumer.ts': "import { newName } from './api';\nexport function consume() { return newName(); }\n",
+    };
+    await writeFiles(v2);
+    const { McpWatcher } = await import('./mcp-watcher.js');
+    const watcher = new McpWatcher({ rootPath: root, outputPath, embed: false, bulkThreshold: 10 });
+    await (watcher as unknown as { handleBatch(paths: string[]): Promise<void> }).handleBatch([
+      join(root, 'src/consumer.ts'),
+      join(root, 'src/api.ts'),
+    ]);
+
+    const actual = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    expect(outgoingSig(actual, 'src/consumer.ts')).toEqual(
+      oracleOutgoingSig((await fullBuild(v2)).edges, 'src/consumer.ts'),
+    );
+    expect(actual.getStaleFiles()).toEqual([]);
+    actual.close();
+  });
+
+  it('routes a 30-file batch to one rebuild and persists the full stale region', async () => {
+    vi.useFakeTimers();
+    const store = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    store.close();
+    const paths = Array.from({ length: 30 }, (_, index) => join(root, `src/file-${index}.ts`));
+    const nodeLoads = vi.spyOn(EdgeStore.prototype, 'getAllInternalNodes');
+    const rebuilds: string[] = [];
+    const { McpWatcher } = await import('./mcp-watcher.js');
+    const watcher = new McpWatcher({
+      rootPath: root,
+      outputPath,
+      embed: false,
+      bulkThreshold: 25,
+      onGraphStale: reason => rebuilds.push(reason),
+    });
+
+    await (watcher as unknown as {
+      flushBatchWithBusyRetry(batch: string[], deletions: string[]): Promise<void>;
+    }).flushBatchWithBusyRetry(paths, []);
+
+    const staleStore = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    expect(staleStore.getStaleFiles()).toEqual(paths.map(path => path.slice(root.length + 1)).sort());
+    staleStore.close();
+    expect(nodeLoads).toHaveBeenCalledTimes(0);
+    expect(rebuilds).toEqual([]);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(rebuilds).toEqual(['stale-region']);
+    await watcher.stop();
+    vi.useRealTimers();
+  });
+
   it('refreshes export facts and reports only a surviving exact named import', async () => {
     const v1: Files = {
       'src/api.ts': 'export function target() { return 1; }\n',

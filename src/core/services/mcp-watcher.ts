@@ -287,6 +287,7 @@ export class McpWatcher {
   private flushPromise?: Promise<void>;              // lets stop() join the active flush
   private stopping = false;                          // reject events once shutdown begins
   private vcsBulkFlag = false;                       // set by the .git ref watcher
+  private vcsSettling = false;                       // preserve the VCS settle window across file events
 
   // ── Embedding lane (Step 4 — decoupled, lower priority) ─────────────────────
   private embed: boolean;
@@ -485,7 +486,7 @@ export class McpWatcher {
     this.pending.clear();
     if (shutdownDeletions.length > 0 || shutdownBatch.length > 0) {
       try {
-        await this.flushBatchWithBusyRetry(shutdownBatch, shutdownDeletions);
+        await this.flushBatchWithBusyRetry(shutdownBatch, shutdownDeletions, { syncFlush: true });
       } catch (err) {
         process.stderr.write(`[mcp-watcher] shutdown flush error: ${(err as Error).message}\n`);
       }
@@ -536,6 +537,10 @@ export class McpWatcher {
 
   private armFlush(): void {
     if (this.debounceTimer) clearTimeout(this.debounceTimer);
+    if (this.vcsSettling) {
+      this.debounceTimer = this.armTimer(() => this.flush(), WATCH_VCS_SETTLE_MS);
+      return;
+    }
     this.debounceTimer = this.armTimer(() => this.flush(), this.debounceMs);
     if (!this.maxBatchTimer) {
       this.maxBatchTimer = this.armTimer(() => this.flush(), this.maxBatchMs);
@@ -546,7 +551,9 @@ export class McpWatcher {
   private onVcsEvent(): void {
     if (this.stopping) return;
     this.vcsBulkFlag = true;
+    this.vcsSettling = true;
     if (this.debounceTimer) clearTimeout(this.debounceTimer);
+    if (this.maxBatchTimer) { clearTimeout(this.maxBatchTimer); this.maxBatchTimer = undefined; }
     this.debounceTimer = this.armTimer(() => this.flush(), WATCH_VCS_SETTLE_MS);
     if (this.debug) {
       process.stderr.write('[mcp-watcher] VCS operation detected — coalescing into one refresh\n');
@@ -566,6 +573,7 @@ export class McpWatcher {
 
     const batch = Array.from(this.pending);
     const deletions = Array.from(this.pendingDeletions);
+    this.vcsSettling = false;
     this.pending.clear();
     this.pendingDeletions.clear();
     this.running = true;
@@ -586,12 +594,17 @@ export class McpWatcher {
    * The queue is drained only after a successful pass, so a long external write
    * lock delays freshness but never silently loses the file events.
    */
-  private async flushBatchWithBusyRetry(batch: string[], deletions: string[]): Promise<void> {
+  private async flushBatchWithBusyRetry(
+    batch: string[],
+    deletions: string[],
+    opts: { syncFlush?: boolean } = {},
+  ): Promise<void> {
     for (let attempt = 0; ; attempt++) {
       try {
+        if (await this.fallbackBulkBatch(batch, deletions)) return;
         // Deletions first (remove stale state), then re-index changed/added files.
         if (deletions.length > 0) await this.handleDeletions(deletions);
-        if (batch.length > 0) await this.handleBatch(batch);
+        if (batch.length > 0) await this.handleBatch(batch, opts);
         return;
       } catch (err) {
         if (!isSqliteBusyError(err)) throw err;
@@ -614,6 +627,48 @@ export class McpWatcher {
         return;
       }
     }
+  }
+
+  /**
+   * A VCS-scale batch is cheaper and safer as one full rebuild than as hundreds
+   * of incremental swaps. Persist the whole affected region as stale before
+   * handing it to the host's existing coalesced rebuild lane.
+   */
+  // change: optimize-incremental-and-coldstart-scale
+  private async fallbackBulkBatch(batch: string[], deletions: string[]): Promise<boolean> {
+    // Shutdown cannot hand work to a future rebuild: drain it incrementally.
+    if (this.stopping) return false;
+    if (batch.length + deletions.length <= this.bulkThreshold) return false;
+    if (!this.onGraphStale && !this.selfRebuild) return false;
+
+    const staleFiles = [...new Set([...batch, ...deletions]
+      .map(abs => relative(this.rootPath, abs))
+      .filter(rel => !isTestFile(rel))
+      .filter(rel => detectLanguage(rel) !== 'unknown' || HTML_EXTENSIONS.test(rel)))]
+      .sort();
+    if (staleFiles.length === 0) return false;
+
+    const releaseAnalysis = await acquireAnalysisLock(this.outputPath);
+    try {
+      if (EdgeStore.exists(this.outputPath)) {
+        const store = EdgeStore.open(EdgeStore.dbPath(this.outputPath));
+        try {
+          if (!store.notReady) store.markFilesStale(staleFiles);
+        } finally {
+          store.close();
+        }
+      }
+    } finally {
+      await releaseAnalysis();
+    }
+
+    const scheduled = this.scheduleGraphRebuild('stale-region');
+    if (!scheduled) return false;
+    this.vcsBulkFlag = false;
+    process.stderr.write(
+      `[mcp-watcher] bulk fallback: marked ${staleFiles.length} file(s) stale and scheduled one full rebuild\n`,
+    );
+    return true;
   }
 
   // ── Core re-index ──────────────────────────────────────────────────────────
@@ -746,7 +801,26 @@ export class McpWatcher {
           basisSnapshots: Map<string, string>;
         }> = [];
 
-        for (const item of work) {
+        // Load the cross-file resolution seed once for the whole batch. Patch it
+        // after each changed file so later subset builds observe the same state
+        // they would have received from reloading the node table.
+        const resolutionNodes = store.notReady ? [] : store.getAllInternalNodes();
+        const batchMemberIndex = new Map(work.map((item, index) => [item.f.rel, index]));
+        const directCallersByFile = new Map<string, string[]>();
+        const directCallerOwner = new Map<string, number>();
+        for (const [index, item] of work.entries()) {
+          const callers = store.getCallerFiles(item.f.rel)
+            .filter(caller => caller !== item.f.rel)
+            // A later batch member rebuilds itself against this producer. An
+            // earlier member has already used old nodes, so repair it here.
+            .filter(caller => {
+              const callerIndex = batchMemberIndex.get(caller);
+              return callerIndex === undefined || callerIndex < index;
+            });
+          directCallersByFile.set(item.f.rel, callers);
+          for (const caller of callers) directCallerOwner.set(caller, index);
+        }
+        for (const [itemIndex, item] of work.entries()) {
           if (store.notReady) break;
           const { f, newHash, oldNodes, oldIncoming, preTests, preTestHashes } = item;
 
@@ -757,13 +831,12 @@ export class McpWatcher {
           // Re-parse BEFORE mutating DB — graph stays readable (old state) during
           // parse. Seed resolution with all known nodes so re-parsed callers'
           // cross-file calls don't degrade to `external::`.
-          const resolutionNodes = store.getAllInternalNodes();
-
           // ── Change-driven reverse-dependency closure ───────────────────────────
           // Converge with `analyze --force`, or mark the remainder explicitly
           // stale (fix-transitive-incremental-staleness). Direct callers first —
           // the files whose edges point INTO this one — bounded by the work budget.
-          const directCallers = store.getCallerFiles(f.rel).filter((cf) => cf !== f.rel);
+          const directCallers = (directCallersByFile.get(f.rel) ?? [])
+            .filter(caller => directCallerOwner.get(caller) === itemIndex);
           let recompute = directCallers.slice(0, this.closureBudget);
           let dropped = directCallers.slice(this.closureBudget);
 
@@ -790,7 +863,9 @@ export class McpWatcher {
             for (const [name, addedId] of addedIdByName) {
               // `external` consumers were unresolved — they always rebind to the new symbol.
               for (const cf of store.getExternalConsumerFiles(name)) {
-                if (cf !== f.rel && cf !== 'external' && !recompute.includes(cf)) extra.add(cf);
+                const memberIndex = batchMemberIndex.get(cf);
+                if (cf !== f.rel && cf !== 'external' &&
+                    (memberIndex === undefined || memberIndex < itemIndex) && !recompute.includes(cf)) extra.add(cf);
               }
               // `name_only` consumers currently resolve the name to a UNIQUE cross-file
               // definition. Adding a SECOND definition of that name makes the bare call
@@ -801,7 +876,10 @@ export class McpWatcher {
               // only a lower-id add flipped the pick, would now leave higher-id adds
               // silently holding a stale unique edge). `!==` guards the same-node no-op.
               for (const { file: cf, calleeId } of store.getNameOnlyConsumers(name)) {
-                if (cf !== f.rel && cf !== 'external' && !recompute.includes(cf) && addedId !== calleeId) extra.add(cf);
+                const memberIndex = batchMemberIndex.get(cf);
+                if (cf !== f.rel && cf !== 'external' &&
+                    (memberIndex === undefined || memberIndex < itemIndex) &&
+                    !recompute.includes(cf) && addedId !== calleeId) extra.add(cf);
               }
             }
             if (extra.size > 0) {
@@ -824,7 +902,6 @@ export class McpWatcher {
           // it stale instead, so it is honestly flagged until it can be re-read.
           const skippedSet = new Set(skipped);
           const recomputed = recompute.filter((cf) => !skippedSet.has(cf));
-
           // Atomic swap so concurrent MCP reads never see a torn graph.
           store.transaction(() => {
             store.deleteEdgesForFile(f.rel);
@@ -851,6 +928,8 @@ export class McpWatcher {
               this.scheduleGraphRebuild('stale-region');
             }
           });
+          const retainedResolutionNodes = resolutionNodes.filter(node => node.filePath !== f.rel);
+          resolutionNodes.splice(0, resolutionNodes.length, ...retainedResolutionNodes, ...newNodes);
 
           const staleNow = skipped.length > 0 ? [...dropped, ...skipped] : dropped;
           pendingVerdicts.push({
@@ -865,7 +944,7 @@ export class McpWatcher {
             basisSnapshots: new Map([...preTestHashes, ...sub.analyzedFileHashes]),
           });
 
-          changedFiles.push({ rel: f.rel, content: f.content });
+          changedFiles.push(f);
           for (const n of newNodes) changedNodes.push(n);
           if (this.debug) {
             const staleCount = dropped.length + skipped.length;
@@ -926,7 +1005,7 @@ export class McpWatcher {
       }
     } else {
       // No edge store yet — still refresh signatures for every candidate.
-      for (const f of files) changedFiles.push({ rel: f.rel, content: f.content });
+      for (const f of files) changedFiles.push(f);
     }
 
     if (changedFiles.length === 0) return; // every event was a no-op autosave
@@ -1028,6 +1107,11 @@ export class McpWatcher {
 
     // 5. One summary line per batch (Step 6). Per-file detail is behind debug.
     const n = changedFiles.length;
+    // Every downstream lane has consumed the source or copied it into its own
+    // queue. Release potentially large batch strings before callbacks retain
+    // this frame any longer.
+    for (const file of changedFiles) file.content = '';
+    files.length = 0;
     process.stderr.write(
       `[mcp-watcher] ${isBulk ? `coalesced ${n} changes` : `updated ${n} file${n === 1 ? '' : 's'}`} (${Date.now() - t0}ms)\n`
     );
@@ -1274,10 +1358,14 @@ export class McpWatcher {
       this.embedTimer = this.armTimer(() => void this.runEmbedLane(), this.debounceMs);
       return;
     }
-    if (this.embedFiles.size === 0 || !this.lastEmbedContext) return;
+    if (this.embedFiles.size === 0 || !this.lastEmbedContext) {
+      if (this.embedFiles.size === 0) this.lastEmbedContext = undefined;
+      return;
+    }
     const changedFiles: ChangedFile[] = Array.from(this.embedFiles, ([rel, content]) => ({ rel, content }));
     const nodes = Array.from(this.embedNodes.values());
     const context = this.lastEmbedContext;
+    this.lastEmbedContext = undefined;
     this.embedFiles.clear();
     this.embedNodes.clear();
     this.embedRunning = true;

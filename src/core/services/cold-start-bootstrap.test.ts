@@ -1,10 +1,16 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
+import { EventEmitter } from 'node:events';
+import type { ChildProcess, spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   bootstrapAnalysisInBackground,
+  buildIndexInChildProcess,
+  enableChildProcessBuilds,
+  stopChildProcessBuilds,
+  _terminateBuildChildForTesting,
   repairInBackground,
   repairStatusFor,
   registerRepairBuilder,
@@ -27,6 +33,7 @@ function freshDir(withAnalysis = false): string {
 
 afterEach(() => {
   delete process.env.OPENLORE_NO_AUTO_ANALYZE;
+  _resetRepairServiceForTesting();
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 
@@ -104,6 +111,152 @@ describe('bootstrapAnalysisInBackground', () => {
     const src = readFileSync(fileURLToPath(new URL('./cold-start-bootstrap.ts', import.meta.url)), 'utf8');
     expect(src).not.toMatch(/api\/(analyze|init|run)/);
     expect(src).not.toMatch(/install\/index/);
+  });
+});
+
+describe('buildIndexInChildProcess', () => {
+  function spawnHarness(calls: Array<{ command: string; args: readonly string[]; options: unknown }>): typeof spawn {
+    return ((command: string, args: readonly string[], options: unknown) => {
+      calls.push({ command, args, options });
+      const child = new EventEmitter() as ChildProcess;
+      child.unref = vi.fn();
+      queueMicrotask(() => child.emit('close', 0));
+      return child;
+    }) as typeof spawn;
+  }
+
+  it('initializes and analyzes an unconfigured repository in child processes', async () => {
+    const dir = freshDir(false);
+    const calls: Array<{ command: string; args: readonly string[]; options: unknown }> = [];
+    await buildIndexInChildProcess(dir, {
+      cliPath: '/openlore/dist/cli/index.js',
+      spawnProcess: spawnHarness(calls),
+    });
+
+    expect(calls.map(call => call.args)).toEqual([
+      ['/openlore/dist/cli/index.js', 'init'],
+      ['/openlore/dist/cli/index.js', 'analyze', '--embedded'],
+    ]);
+    expect(calls.every(call => call.command === process.execPath)).toBe(true);
+    expect(calls.every(call => (call.options as { detached: boolean }).detached)).toBe(true);
+    expect(calls.every(call => (call.options as { stdio: string }).stdio === 'ignore')).toBe(true);
+  });
+
+  it('runs a repair analyze without blocking on in-process analyzer work', async () => {
+    const dir = freshDir(true);
+    mkdirSync(join(dir, '.openlore'), { recursive: true });
+    writeFileSync(join(dir, OPENLORE_CONFIG_REL_PATH), '{}');
+    const calls: Array<{ command: string; args: readonly string[]; options: unknown }> = [];
+
+    await buildIndexInChildProcess(dir, {
+      repair: true,
+      cliPath: '/openlore/dist/cli/index.js',
+      spawnProcess: spawnHarness(calls),
+    });
+
+    expect(calls.map(call => call.args)).toEqual([
+      ['/openlore/dist/cli/index.js', 'analyze', '--reanalyze', '--embedded'],
+    ]);
+  });
+
+  it('keeps the parent event loop responsive while the analyzer child is running', async () => {
+    const dir = freshDir(true);
+    writeFileSync(join(dir, OPENLORE_CONFIG_REL_PATH), '{}');
+    let child!: ChildProcess;
+    const build = buildIndexInChildProcess(dir, {
+      cliPath: '/openlore/dist/cli/index.js',
+      spawnProcess: ((() => {
+        child = new EventEmitter() as ChildProcess;
+        child.unref = vi.fn();
+        return child;
+      }) as typeof spawn),
+    });
+
+    let ticked = false;
+    await new Promise<void>(resolve => setImmediate(() => { ticked = true; resolve(); }));
+    expect(ticked).toBe(true);
+    child.emit('close', 0);
+    await expect(build).resolves.toBeUndefined();
+  });
+
+  it('terminates an analyzer child when the MCP transport shuts down', async () => {
+    const dir = freshDir(true);
+    writeFileSync(join(dir, OPENLORE_CONFIG_REL_PATH), '{}');
+    enableChildProcessBuilds();
+    let child!: ChildProcess;
+    const build = buildIndexInChildProcess(dir, {
+      cliPath: '/openlore/dist/cli/index.js',
+      spawnProcess: ((() => {
+        child = new EventEmitter() as ChildProcess;
+        child.unref = vi.fn();
+        child.kill = vi.fn(() => {
+          queueMicrotask(() => child.emit('close', null));
+          return true;
+        });
+        return child;
+      }) as typeof spawn),
+    });
+    await new Promise<void>(resolve => setImmediate(resolve));
+
+    await stopChildProcessBuilds();
+
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+    await expect(build).rejects.toThrow(/exited with code unknown/);
+  });
+
+  it('terminates the detached POSIX process group so heap-reexec descendants cannot survive', async () => {
+    if (process.platform === 'win32') return;
+    const dir = freshDir(true);
+    writeFileSync(join(dir, OPENLORE_CONFIG_REL_PATH), '{}');
+    enableChildProcessBuilds();
+    let child!: ChildProcess;
+    const processKill = vi.spyOn(process, 'kill').mockImplementation((_pid, _signal) => {
+      queueMicrotask(() => child.emit('close', null));
+      return true;
+    });
+    const build = buildIndexInChildProcess(dir, {
+      cliPath: '/openlore/dist/cli/index.js',
+      spawnProcess: ((() => {
+        child = new EventEmitter() as ChildProcess;
+        Object.defineProperty(child, 'pid', { value: 43_210 });
+        child.unref = vi.fn();
+        child.kill = vi.fn();
+        return child;
+      }) as typeof spawn),
+    });
+    await new Promise<void>(resolve => setImmediate(resolve));
+
+    await stopChildProcessBuilds();
+
+    expect(processKill).toHaveBeenCalledWith(-43_210, 'SIGTERM');
+    expect(child.kill).not.toHaveBeenCalled();
+    await expect(build).rejects.toThrow(/exited with code unknown/);
+  });
+
+  it('uses shell-free Windows process-tree termination with forced escalation', () => {
+    const child = new EventEmitter() as ChildProcess;
+    Object.defineProperty(child, 'pid', { value: 54_321 });
+    child.kill = vi.fn();
+    const calls: Array<{ command: string; args: readonly string[]; options: unknown }> = [];
+    const spawnTreeKiller = ((command: string, args: readonly string[], options: unknown) => {
+      calls.push({ command, args, options });
+      const killer = new EventEmitter() as ChildProcess;
+      killer.unref = vi.fn();
+      return killer;
+    }) as typeof spawn;
+
+    _terminateBuildChildForTesting(child, 'SIGTERM', 'win32', spawnTreeKiller);
+    _terminateBuildChildForTesting(child, 'SIGKILL', 'win32', spawnTreeKiller);
+
+    expect(calls.map(call => call.args)).toEqual([
+      ['/PID', '54321', '/T'],
+      ['/PID', '54321', '/T', '/F'],
+    ]);
+    expect(calls.every(call => win32.isAbsolute(call.command))).toBe(true);
+    expect(calls.every(call => call.command.toLowerCase().endsWith('\\system32\\taskkill.exe'))).toBe(true);
+    expect(calls.every(call => (call.options as { stdio: string; windowsHide: boolean }).stdio === 'ignore')).toBe(true);
+    expect(calls.every(call => (call.options as { windowsHide: boolean }).windowsHide)).toBe(true);
+    expect(child.kill).not.toHaveBeenCalled();
   });
 });
 
