@@ -31,7 +31,7 @@
       staleness) without a full analyze
 - [x] Payload budget re-asserted (`src/cli/commands/mcp-presets.test.ts`, 56 tests); `scoreKind`
       is a result field and does not enlarge the standing `tools/list` schema payload
-- [ ] Full suite green; ranking snapshots unchanged where normalization was not taken
+- [x] Full suite green on the supported CI matrix; ranking snapshots unchanged where normalization was not taken
 
 ## Spec
 - [x] `analyzer` delta: ADD FilteredSearchRecallIsHonest, SearchIndexMaintenanceAndSpecFreshness

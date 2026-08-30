@@ -5748,6 +5748,51 @@ The system SHALL return the retrieval mode actually used for spec searches and r
 - **WHEN** the affected behavior is evaluated
 - **THEN** The system SHALL return the retrieval mode actually used for spec searches and report keyword fallback whenever semantic retrieval cannot be safely executed.
 
+### Requirement: FilteredSearchRecallIsHonest
+
+Search filters (`language`, `minFanIn` on code search; `domain`, `section` on spec search) SHALL
+be applied as database prefilters on the recall query, or the fetch SHALL be widened until the
+filtered set fills the requested limit or the table is exhausted. A filtered query SHALL NOT
+return fewer results than the limit while matching rows exist in the index without disclosing
+that the filter constrained recall. Prefilter predicates SHALL use the established
+backtick-quoted column discipline.
+
+#### Scenario: A filtered query finds rows below the old fetch horizon
+
+- **GIVEN** an index where the top ANN candidates are all TypeScript but matching Rust rows exist
+  further down
+- **WHEN** the user searches with `language: "rust"` and limit 10
+- **THEN** the Rust rows are returned (prefilter or widened fetch), not an empty result
+
+#### Scenario: Constrained recall is disclosed
+
+- **GIVEN** a filtered query whose matching rows genuinely number fewer than the limit
+- **WHEN** results are served
+- **THEN** the response distinguishes "few matches exist" from "the filter constrained recall",
+  never leaving a short result set unexplained
+
+### Requirement: SearchIndexMaintenanceAndSpecFreshness
+
+The watcher SHALL periodically compact the LanceDB tables it mutates (on an idle or
+every-N-batches cadence, and after large deletions), so a long-lived session's query latency and
+disk footprint do not grow without bound. The spec index SHALL NOT be silently staler than the
+code index: spec-file edits under watch SHALL either update the specs table incrementally (or via
+a scoped rebuild), or `search_specs` SHALL disclose the index's `builtAt` and the number of spec
+files changed since.
+
+#### Scenario: Fragments are compacted
+
+- **GIVEN** a long-lived watch session that has processed many incremental batches
+- **WHEN** the compaction cadence fires
+- **THEN** the table is optimized and query results are unchanged before and after
+
+#### Scenario: A spec edit is not silently invisible
+
+- **GIVEN** a running watcher and an edit to `openspec/specs/<domain>/spec.md`
+- **WHEN** the user calls `search_specs`
+- **THEN** the result reflects the edit, or carries a disclosure naming the index's build time and
+  the count of spec files changed since
+
 ## Sub-components
 
 > `SignatureExtractor` is an orchestrator. Each sub-component below implements one logical block.
@@ -9142,8 +9187,6 @@ The injection relevance gate must use the same identifier-aware tokenization as 
 **Date:** 2026-08-30
 **ID:** 58cd7afe
 
-
-
 The approved spec permits incremental rebuilding or honest staleness disclosure. A bounded receipt avoids rebuilding the full spec index on every edit while making stale results explicit across processes.
 
 **Consequences:** The watcher atomically records the exact changed spec files and the last index build time; search_specs returns bounded freshness metadata, and a full analysis resets the receipt.
@@ -9153,8 +9196,6 @@ The approved spec permits incremental rebuilding or honest staleness disclosure.
 **Status:** Approved
 **Date:** 2026-08-30
 **ID:** 9eb51001
-
-
 
 Code and spec searches can return BM25, cosine-distance, or reciprocal-rank-fusion scores whose numeric values are not directly comparable. Each result must name its score kind so clients can interpret and rank it honestly.
 
@@ -9166,8 +9207,6 @@ Code and spec searches can return BM25, cosine-distance, or reciprocal-rank-fusi
 **Date:** 2026-08-30
 **ID:** f61d6a80
 
-
-
 Spec search, watcher updates, and full analysis can run in separate processes against the same LanceDB tables. A shared advisory file lock prevents concurrent readers and writers from observing or producing partial index state.
 
 **Consequences:** All specification-index reads and mutations acquire the same bounded lock, stale lock owners are recoverable, and callers fail clearly when the lock cannot be obtained.
@@ -9177,8 +9216,6 @@ Spec search, watcher updates, and full analysis can run in separate processes ag
 **Status:** Approved
 **Date:** 2026-08-30
 **ID:** dc82420c
-
-
 
 Post-filtering a small approximate-nearest-neighbor result set can discard valid language or fan-in matches and underfill results. Pushing supported predicates into LanceDB makes candidate selection honor the requested scope.
 
@@ -9190,8 +9227,6 @@ Post-filtering a small approximate-nearest-neighbor result set can discard valid
 **Date:** 2026-08-30
 **ID:** a0115a70
 
-
-
 Returning results and freshness as a single snapshot prevents concurrent index updates from producing freshness metadata that describes a different generation, while a 30-second lock timeout avoids indefinite request blocking. Corrupt or oversized freshness history is treated as unavailable rather than under-reporting stale files.
 
 **Consequences:** Spec searches and standalone freshness reads now acquire the spec-index lock and may fail after 30 seconds of contention. The freshness API becomes asynchronous, callers should prefer searchWithFreshness for coherent serving, and unavailable tracking remains sticky until a full rebuild establishes a trustworthy baseline.
@@ -9201,8 +9236,6 @@ Returning results and freshness as a single snapshot prevents concurrent index u
 **Status:** Approved
 **Date:** 2026-08-30
 **ID:** db55278e
-
-
 
 Explicitly selecting cosine distance makes similarity semantics independent of LanceDB defaults and aligns dense retrieval with the score interpretation used by the analyzer.
 
@@ -9214,8 +9247,6 @@ Explicitly selecting cosine distance makes similarity semantics independent of L
 **Date:** 2026-08-30
 **ID:** 705d4deb
 
-
-
 Embedding can involve slow or unavailable remote services, so holding the index lock during that work would unnecessarily block index updates and watcher processing. A typed lock-timeout error allows the watcher to distinguish contention from other failures and defer the complete change batch for retry without losing deletions.
 
 **Consequences:** Search performs a short locked metadata check before embedding and reacquires the lock for index access, so index state may change between those operations and must be revalidated. Watcher batches that exceed the lock wait limit are requeued instead of failing or being partially processed.
@@ -9225,8 +9256,6 @@ Embedding can involve slow or unavailable remote services, so holding the index 
 **Status:** Approved
 **Date:** 2026-08-30
 **ID:** d4d55961
-
-
 
 Configured semantic retrieval can degrade to keyword search when embeddings are unavailable, incompatible with the index model or dimensions, or fail to generate. Returning the executed mode with the search snapshot prevents API metadata from incorrectly claiming hybrid semantic retrieval.
 

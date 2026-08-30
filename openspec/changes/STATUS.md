@@ -31,15 +31,15 @@ validate`**, and the archive machinery works again. This pass:
   because their requirements were already synced verbatim (`fix-pi-parity-drift`,
   `fix-redaction-module-gaps`).
 
-## Complete — 146 in `archive/`
+## Complete — 147 in `archive/`
 
 Everything in `openspec/changes/archive/` is shipped (or a settled won't-do), with its
 requirements reflected in the main specs. `openspec list` shows only open work.
 
-## In flight — 1
+## In flight — 0
 
-`refine-search-serving-quality` is under implementation and verification. A change belongs here
-the moment its implementation starts; archive it once its marker/spec evidence lands.
+No open change has partial code on `main`. A change belongs here the moment its implementation
+starts; move it back out (archive it) the moment its marker/spec evidence lands.
 
 ## To build — 108
 
