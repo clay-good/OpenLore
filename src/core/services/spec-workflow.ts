@@ -713,6 +713,7 @@ async function specValidationDisclosure(root: string, specRoot: string): Promise
   packageVersion?: string;
   specRoot: string;
   specRootIsDefault: boolean;
+  cliValidationAvailable: boolean;
 }> {
   const version = await detectOpenSpecPackageVersion(root);
   const normalized = specRoot.replaceAll('\\', '/').replace(/^\.\//, '').replace(/\/+$/, '');
@@ -723,6 +724,11 @@ async function specValidationDisclosure(root: string, specRoot: string): Promise
     ...(version === 'unknown' ? {} : { packageVersion: version }),
     specRoot: normalized,
     specRootIsDefault: normalized === OPENSPEC_DIR,
+    // The CLI can only validate a corpus it can find, which means the default
+    // tree. Reported as fact so a host never treats a relocated corpus's silence
+    // as a pass (verified: the command fails "No OpenSpec root found" both from
+    // the repository root and from inside the relocated corpus).
+    cliValidationAvailable: normalized === OPENSPEC_DIR,
   };
 }
 
@@ -749,12 +755,22 @@ function specValidationFollowUp(
   root: string,
   disclosure: { packageResolution: 'resolved' | 'unresolved'; specRoot: string; specRootIsDefault: boolean }
 ): SpecWorkflowFollowUp {
-  // The OpenSpec CLI resolves its own root; OpenLore's `openspecPath` is an
-  // OpenLore setting it knows nothing about. When the two differ, say so rather
-  // than implying the command validates the corpus this evidence came from.
-  const relocated = disclosure.specRootIsDefault
-    ? ''
-    : ` This project's spec corpus is at \`${disclosure.specRoot}/\`, which the OpenSpec CLI does not read from OpenLore's configuration — run the command against that root (or from inside it) and confirm it validated the corpus you just edited, not an empty or unrelated one.`;
+  // The OpenSpec CLI resolves its own root by looking for an `openspec/` tree;
+  // OpenLore's `openspecPath` is an OpenLore setting it knows nothing about. With
+  // a relocated corpus the command fails with "No OpenSpec root found" from the
+  // repository root AND from inside the corpus, so there is no invocation to
+  // advertise. Say the validation is unavailable instead of emitting advice that
+  // cannot be followed — an unrunnable follow-up is worse than an honest gap.
+  if (!disclosure.specRootIsDefault) {
+    return {
+      tool: 'disclose:validation-unavailable',
+      arguments: { directory: root, specRoot: disclosure.specRoot },
+      reason:
+        `OpenLore does not validate OpenSpec structure, and the CLI cannot validate this corpus: it lives at ` +
+        `\`${disclosure.specRoot}/\`, while the OpenSpec CLI locates its own root by looking for an \`openspec/\` tree and does not ` +
+        `read OpenLore's configuration. Report the spec as NOT validated, and validate it by hand or through a registered OpenSpec store.`,
+    };
+  }
   const unresolved = disclosure.packageResolution === 'unresolved'
     ? ' No OpenSpec package resolves from this project (a global install would not either), so the CLI may be absent.'
     : '';
@@ -763,7 +779,7 @@ function specValidationFollowUp(
     arguments: { directory: root, specRoot: disclosure.specRoot },
     reason:
       `OpenLore does not validate OpenSpec structure. Run \`${OPENSPEC_VALIDATE_COMMAND}\` after editing, and report the spec as ` +
-      `NOT validated if it cannot run.${unresolved}${relocated}`,
+      `NOT validated if it cannot run.${unresolved}`,
   };
 }
 

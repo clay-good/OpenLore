@@ -492,16 +492,25 @@ export async function handleSuggestInsertionPoints(
 /**
  * Return the full content of a spec domain's spec.md plus its mapping entries.
  */
+/**
+ * The spec root this project actually uses, normalized.
+ *
+ * A repo that moved `openspec/` would otherwise have every spec resolved to a
+ * path that does not exist — `get_spec` reporting not-found for files plainly on
+ * disk, and `list_spec_domains` answering with an empty list.
+ */
+async function configuredSpecRoot(absDir: string): Promise<string> {
+  const configured = (await readOpenLoreConfig(absDir).catch(() => null))?.openspecPath ?? OPENSPEC_DIR;
+  return configured.replaceAll('\\', '/').replace(/^\.\//, '').replace(/\/+$/, '') || OPENSPEC_DIR;
+}
+
 export async function handleGetSpec(directory: string, domain: string): Promise<unknown> {
   const { existsSync } = await import('node:fs');
   const { readFile } = await import('node:fs/promises');
   const { join: pjoin } = await import('node:path');
   const absDir = await validateDirectory(directory);
 
-  // Honor the configured spec root: a repo that moved `openspec/` would otherwise
-  // resolve every spec to a path that does not exist, and Repair would report
-  // `spec-not-found` for specs that are plainly on disk.
-  const openspecPath = (await readOpenLoreConfig(absDir).catch(() => null))?.openspecPath ?? OPENSPEC_DIR;
+  const openspecPath = await configuredSpecRoot(absDir);
 
   // `domain` is an untrusted tool arg; confine it to the repo so e.g.
   // domain="../../../../etc" can't escape to read arbitrary spec.md files.
@@ -539,19 +548,24 @@ export async function handleGetSpec(directory: string, domain: string): Promise<
 }
 
 /**
- * List all spec domains available in the project (reads openspec/specs/ directory).
+ * List all spec domains available in the project (reads the configured specs directory).
  * Useful for the agent to discover what domains exist before doing a targeted search.
+ *
+ * Honors the configured spec root for the same reason `handleGetSpec` does, and
+ * because that handler's not-found error sends the agent here: a relocated corpus
+ * would otherwise answer with an empty list of domains `get_spec` opens happily.
  */
 export async function handleListSpecDomains(directory: string): Promise<unknown> {
   const { readdir } = await import('node:fs/promises');
   const { join: pjoin } = await import('node:path');
   const absDir = await validateDirectory(directory);
 
-  const specsDir = pjoin(absDir, OPENSPEC_DIR, OPENSPEC_SPECS_SUBDIR);
+  const openspecPath = await configuredSpecRoot(absDir);
+  const specsDir = pjoin(absDir, openspecPath, OPENSPEC_SPECS_SUBDIR);
   if (!(await fileExists(specsDir))) {
     return {
       domains: [],
-      note: 'No openspec/specs/ directory found. Run "openlore generate" first.',
+      note: `No ${openspecPath}/${OPENSPEC_SPECS_SUBDIR}/ directory found. Run "openlore generate" first.`,
     };
   }
 
@@ -569,7 +583,7 @@ export async function handleListSpecDomains(directory: string): Promise<unknown>
   return {
     domains,
     count: domains.length,
-    provenance: await reviewedFileContentProvenance(absDir, 'openspec/specs'),
+    provenance: await reviewedFileContentProvenance(absDir, `${openspecPath}/${OPENSPEC_SPECS_SUBDIR}`),
   };
 }
 

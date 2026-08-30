@@ -163,6 +163,11 @@ export function isTechnicalDomainRole(name: string): boolean {
  * how `LICENSE`, `NOTICE`, and `COPYING` are recognised — they carry no
  * extension and would otherwise fall through to production source.
  */
+// `.mdx` is prose HERE because the analyzer does not parse it: no extractor, no
+// language mapping, so an `.mdx` file yields no signature, route, or call edge
+// and can carry no requirement anchor. In a Next.js or Docusaurus project those
+// files are executable, and the day an extractor reads them this classification
+// must move with it — otherwise real routes would be classified as prose.
 const DOCUMENTATION_EXTENSIONS = new Set(['.md', '.mdx', '.mdc', '.markdown', '.rst', '.adoc', '.txt']);
 
 /**

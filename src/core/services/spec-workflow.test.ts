@@ -608,9 +608,18 @@ describe('spec workflow composites', () => {
     writeFileSync(join(root, 'contracts', 'specs', 'billing', 'spec.md'), '# Billing\n\n### Requirement: Bills\n');
 
     const result = await prepareSpecRepair({ directory: root, domain: 'billing' });
-    expect(result.evidence?.specValidation).toMatchObject({ specRoot: 'contracts', specRootIsDefault: false });
-    const validation = result.receipt.followUps.find(f => f.tool === 'cli:openspec validate --specs --strict');
-    expect(validation!.reason).toMatch(/`contracts\/`/);
+    expect(result.evidence?.specValidation).toMatchObject({
+      specRoot: 'contracts', specRootIsDefault: false, cliValidationAvailable: false,
+    });
+    // No runnable command exists for a relocated corpus — the CLI fails with
+    // "No OpenSpec root found" from the repo root and from inside it alike — so
+    // the follow-up discloses the gap instead of advertising an invocation that
+    // cannot be followed.
+    expect(result.receipt.followUps.some(f => f.tool.startsWith('cli:openspec validate'))).toBe(false);
+    const disclosure = result.receipt.followUps.find(f => f.tool === 'disclose:validation-unavailable');
+    expect(disclosure).toBeDefined();
+    expect(disclosure!.reason).toMatch(/`contracts\/`/);
+    expect(disclosure!.reason).toMatch(/NOT validated/);
   });
 
   it('discloses that OpenLore did not validate the spec, and names the OpenSpec command', async () => {

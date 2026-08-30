@@ -121,7 +121,7 @@ This is an observation, never a decision: the system MUST NOT declare such a dom
 #### Scenario: A relocated specification root is honored
 - **GIVEN** a repository whose configured specification root is not the default directory name
 - **WHEN** a specification under it is loaded or its corpus files are excluded from prose evidence
-- **THEN** the configured root is used, so the specification resolves and no corpus-level specification is misread as a prose-only orphan
+- **THEN** the configured root is used for retrieval, for domain discovery, and for the corpus exclusion, so the specification resolves and no corpus-level specification is misread as a prose-only orphan
 
 #### Scenario: A corpus-level spec stays repairable
 - **GIVEN** a specification that owns no analyzed domain and cites only other specifications
