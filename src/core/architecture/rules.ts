@@ -118,10 +118,12 @@ export type ArchitectureRule =
   | OrphanRule
   | MoreUnstableRule;
 
-/** The parsed rule set plus any non-fatal warnings collected while loading. */
+/** The parsed rule set plus warnings and whether declared config was fully assessed. */
 export interface ArchitectureRules {
   rules: ArchitectureRule[];
   warnings: string[];
+  /** False when a declared config could not be read or fully parsed. */
+  assessmentComplete?: boolean;
 }
 
 /** The on-disk shape of `.openlore/architecture.json` (all keys optional). */
@@ -137,6 +139,9 @@ interface RawArchitectureConfig {
 }
 
 const ARCHITECTURE_CONFIG_FILE = 'architecture.json';
+const ARCHITECTURE_CONFIG_KEYS = new Set<keyof RawArchitectureConfig>([
+  'layers', 'forbidden', 'allowedOnly', 'required', 'circular', 'reachable', 'orphan', 'moreUnstable',
+]);
 
 function isStringArray(v: unknown): v is string[] {
   return Array.isArray(v) && v.every(x => typeof x === 'string');
@@ -167,13 +172,18 @@ export function parseArchitectureRules(raw: unknown, source: RuleSource): Archit
     return { rules, warnings: ['architecture rules: expected a JSON object'] };
   }
   const cfg = raw as RawArchitectureConfig;
+  for (const key of Object.keys(cfg)) {
+    if (!ARCHITECTURE_CONFIG_KEYS.has(key as keyof RawArchitectureConfig)) {
+      warnings.push(`architecture rules: unknown top-level key ${JSON.stringify(key)} — skipped`);
+    }
+  }
 
   // layers
   if (cfg.layers !== undefined) {
     if (cfg.layers && typeof cfg.layers === 'object' && !Array.isArray(cfg.layers)) {
       const layerEntries: Array<[string, string[]]> = [];
       for (const [name, prefixes] of Object.entries(cfg.layers)) {
-        if (isStringArray(prefixes) && prefixes.length > 0) {
+        if (isStringArray(prefixes) && prefixes.length > 0 && prefixes.every(isPathPattern)) {
           layerEntries.push([name, prefixes]);
         } else {
           warnings.push(`layers.${name}: expected a non-empty array of path prefixes — skipped`);
@@ -279,6 +289,7 @@ export function parseArchitectureRules(raw: unknown, source: RuleSource): Archit
           && isPathPattern(entry.scope)
           && (entry.allowed === undefined
             || (isStringArray(entry.allowed) && entry.allowed.every(isPathPattern)))
+          && captureCanResolve(entry.scope, entry.allowed ?? [])
         ) {
           rules.push({
             kind: 'circular',
@@ -503,6 +514,7 @@ export async function loadArchitectureRules(
 ): Promise<ArchitectureRules> {
   const rules: ArchitectureRule[] = [];
   const warnings: string[] = [];
+  let assessmentComplete = true;
 
   // Config file (opt-in).
   try {
@@ -511,13 +523,21 @@ export async function loadArchitectureRules(
     try {
       parsed = JSON.parse(raw);
     } catch {
-      return { rules, warnings: [`${OPENLORE_DIR}/${ARCHITECTURE_CONFIG_FILE}: invalid JSON — ignored`] };
+      warnings.push(`${OPENLORE_DIR}/${ARCHITECTURE_CONFIG_FILE}: invalid JSON — ignored`);
+      assessmentComplete = false;
+      parsed = undefined;
     }
-    const fromConfig = parseArchitectureRules(parsed, 'config');
-    rules.push(...fromConfig.rules);
-    warnings.push(...fromConfig.warnings);
-  } catch {
-    /* no config file — inert */
+    if (parsed !== undefined) {
+      const fromConfig = parseArchitectureRules(parsed, 'config');
+      rules.push(...fromConfig.rules);
+      warnings.push(...fromConfig.warnings);
+      if (fromConfig.warnings.length > 0) assessmentComplete = false;
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      warnings.push(`${OPENLORE_DIR}/${ARCHITECTURE_CONFIG_FILE}: could not read — ${error instanceof Error ? error.message : String(error)}`);
+      assessmentComplete = false;
+    }
   }
 
   // Decision-sourced invariants (spec-16 tie), opt-in via flag.
@@ -536,7 +556,7 @@ export async function loadArchitectureRules(
     }
   }
 
-  return { rules, warnings };
+  return { rules, warnings, assessmentComplete };
 }
 
 /** True when no rules are declared — the instrument is fully inert. */

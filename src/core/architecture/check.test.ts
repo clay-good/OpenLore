@@ -125,6 +125,16 @@ describe('scanViolations', () => {
     expect(scan.violations[0]).toMatchObject({ kind: 'circular', path: ['src/a.ts', 'src/b.ts'] });
   });
 
+  it('reports a self-dependency as a one-file cycle', () => {
+    const scan = scanViolations(depGraph([['src/a.ts', 'src/a.ts']]), rules({
+      kind: 'circular', scope: 'src', allowed: [], source: 'config',
+    }));
+
+    expect(scan.violations).toEqual([expect.objectContaining({
+      kind: 'circular', path: ['src/a.ts'],
+    })]);
+  });
+
   it('does not let a capture exception hide a cross-capture cycle', () => {
     const g = depGraph([
       ['domains/billing/a.ts', 'domains/orders/b.ts'],
@@ -152,6 +162,43 @@ describe('scanViolations', () => {
       path: ['src/rogue.ts', 'src/middle.ts', 'src/internal/service.ts'],
       relatedConclusion: 'find_dead_code',
     });
+  });
+
+  it('preserves capture binding between a reachable target and its permitted origin', () => {
+    const scan = scanViolations(depGraph([
+      ['domains/orders/public/api.ts', 'domains/billing/internal/db.ts'],
+      ['domains/orders/internal/proxy.ts', 'domains/billing/internal/db.ts'],
+      ['domains/billing/public/api.ts', 'domains/billing/internal/db.ts'],
+    ]), rules({
+      kind: 'reachable', from: 'domains/$1/public', to: 'domains/$1/internal', source: 'config',
+    }));
+
+    expect(scan.violations.map(violation => violation.from)).toEqual([
+      'domains/orders/internal/proxy.ts',
+      'domains/orders/public/api.ts',
+    ]);
+  });
+
+  it('emits one deterministic reachability receipt for same-capture targets', () => {
+    const scan = scanViolations(depGraph([
+      ['src/rogue.ts', 'src/internal/a.ts'],
+      ['src/rogue.ts', 'src/internal/b.ts'],
+    ]), rules({
+      kind: 'reachable', from: 'src/public', to: 'src/internal', source: 'config',
+    }));
+
+    expect(scan.violations).toHaveLength(1);
+    expect(scan.violations[0]).toMatchObject({ from: 'src/rogue.ts', to: 'src/internal/a.ts' });
+  });
+
+  it('allows any bound origin when a reachable target has no capture', () => {
+    const scan = scanViolations(depGraph([
+      ['domains/orders/public/api.ts', 'shared/internal/db.ts'],
+    ]), rules({
+      kind: 'reachable', from: 'domains/$1/public', to: 'shared/internal', source: 'config',
+    }));
+
+    expect(scan.violations).toEqual([]);
   });
 
   it('flags only matched files with no incoming dependency as orphans', () => {
@@ -218,6 +265,29 @@ describe('scanViolations', () => {
     expect(scan.violations[0].confidence).toBe('name_only');
   });
 
+  it('marks weak-only required and orphan evidence incomplete without false findings', () => {
+    const g = depGraph([
+      ['src/handler.ts', 'src/sanitizer.ts'],
+      ['src/caller.ts', 'src/lib/possibly-used.ts'],
+    ]);
+    for (const edge of g.edges) {
+      edge.isCallEdge = true;
+      edge.resolutionConfidence = 'name_only';
+    }
+
+    const required = scanViolations(g, rules({
+      kind: 'required', from: 'src/handler.ts', to: 'src/sanitizer.ts', source: 'config',
+    }));
+    expect(required).toMatchObject({ violations: [], assessmentComplete: false, incompleteKinds: ['required'] });
+    expect(required.warnings.join(' ')).toContain('name_only');
+
+    const orphan = scanViolations(g, rules({
+      kind: 'orphan', scope: 'src/lib', source: 'config',
+    }));
+    expect(orphan).toMatchObject({ violations: [], assessmentComplete: false, incompleteKinds: ['orphan'] });
+    expect(orphan.warnings.join(' ')).toContain('name_only');
+  });
+
   it('is fully inert with no rules', () => {
     const g = depGraph([['src/a.ts', 'src/b.ts']]);
     const scan = scanViolations(g, rules());
@@ -263,5 +333,23 @@ describe('canImport (pre-edit query)', () => {
 
   it('is inert with no rules declared', () => {
     expect(canImport('a.ts', 'b.ts', rules()).allowed).toBe(true);
+  });
+
+  it('denies a direct edge that breaches a reachable rule', () => {
+    const verdict = canImport(
+      'domains/orders/public/api.ts',
+      'domains/billing/internal/db.ts',
+      rules({ kind: 'reachable', from: 'domains/$1/public', to: 'domains/$1/internal', source: 'config' }),
+    );
+    expect(verdict).toMatchObject({ allowed: false, rule: { kind: 'reachable' } });
+  });
+
+  it('denies a cross-capture protected source reaching another capture target', () => {
+    const verdict = canImport(
+      'domains/orders/internal/proxy.ts',
+      'domains/billing/internal/db.ts',
+      rules({ kind: 'reachable', from: 'domains/$1/public', to: 'domains/$1/internal', source: 'config' }),
+    );
+    expect(verdict).toMatchObject({ allowed: false, rule: { kind: 'reachable' } });
   });
 });

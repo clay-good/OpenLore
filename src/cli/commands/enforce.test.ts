@@ -24,6 +24,7 @@ import {
   blastRadiusAssessmentComplete,
   impactCertificateFindings,
   corpusIntentGovernanceFindings,
+  collectGovernanceFindings,
 } from './enforce.js';
 import { classifyFindings } from '../../core/services/mcp-handlers/enforcement-policy.js';
 import { applyEnforcementBaseline } from '../../core/services/mcp-handlers/enforcement-baseline.js';
@@ -191,6 +192,64 @@ async function gateHookHuman(root: string): Promise<{ code: number; stderr: stri
     process.stderr.write = orig;
   }
 }
+
+describe('architecture assessment hardening', () => {
+  it('fails configured architecture codes when declared config is malformed', async () => {
+    const root = await mkRepo();
+    await writeFile(join(root, '.openlore', 'architecture.json'), '{not-json');
+
+    const collected = await collectGovernanceFindings(root, null, {
+      'architecture-forbidden-dependency': 'blocking',
+    });
+
+    expect(collected.failedCodes).toContain('architecture-forbidden-dependency');
+    expect(collected.caveats.join(' ')).toContain('architecture rule assessment incomplete');
+  });
+
+  it('fails configured architecture codes for a misspelled rule key', async () => {
+    const root = await mkRepo();
+    await writeFile(join(root, '.openlore', 'architecture.json'), JSON.stringify({
+      forbiden: [{ from: 'src/domain', to: 'src/infra' }],
+    }));
+
+    const collected = await collectGovernanceFindings(root, null, {
+      'architecture-forbidden-dependency': 'blocking',
+    });
+
+    expect(collected.failedCodes).toContain('architecture-forbidden-dependency');
+    expect(collected.assessedCodes).not.toContain('architecture-forbidden-dependency');
+  });
+
+  it('never assesses a valid rule from a partially malformed config', async () => {
+    const root = await mkRepo();
+    await writeFile(join(root, '.openlore', 'architecture.json'), JSON.stringify({
+      forbidden: [{ from: 'src/domain', to: 'src/infra' }],
+      forbiden: [{ from: 'src/domain', to: 'src/infra' }],
+    }));
+
+    const collected = await collectGovernanceFindings(root, null, {
+      'architecture-forbidden-dependency': 'frozen',
+    });
+
+    expect(collected.failedCodes).toContain('architecture-forbidden-dependency');
+    expect(collected.assessedCodes).not.toContain('architecture-forbidden-dependency');
+  });
+
+  it('does not fail an unrelated architecture code when an active rule lacks a graph', async () => {
+    const root = await mkRepo();
+    await writeFile(join(root, '.openlore', 'architecture.json'), JSON.stringify({
+      orphan: [{ scope: 'src/lib' }],
+    }));
+
+    const collected = await collectGovernanceFindings(root, null, {
+      'architecture-cycle': 'blocking',
+    });
+
+    expect(collected.failedCodes).toContain('architecture-orphan');
+    expect(collected.failedCodes).not.toContain('architecture-cycle');
+    expect(collected.assessedCodes).toContain('architecture-cycle');
+  });
+});
 
 describe('enforce git hook install/uninstall', () => {
   const readHook = (root: string) => readFile(join(root, '.git', 'hooks', 'pre-commit'), 'utf-8');

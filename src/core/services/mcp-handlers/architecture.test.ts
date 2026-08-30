@@ -38,6 +38,40 @@ describe('handleCheckArchitecture', () => {
     expect(res).toMatchObject({ mode: 'pre-edit', rulesDeclared: false, allowed: true });
   });
 
+  it('does not certify malformed architecture config as an inert clean result', async () => {
+    await mkdir(join(dir, '.openlore'), { recursive: true });
+    await writeFile(join(dir, '.openlore', 'architecture.json'), '{not-json');
+
+    const scan = await handleCheckArchitecture({ directory: dir }) as Record<string, unknown>;
+    expect(scan).toMatchObject({ mode: 'scan', violationCount: null, assessmentComplete: false });
+
+    const preEdit = await handleCheckArchitecture({
+      directory: dir, from: 'src/a.ts', to: 'src/b.ts',
+    }) as Record<string, unknown>;
+    expect(preEdit).toMatchObject({ mode: 'pre-edit', allowed: null, assessmentComplete: false });
+  });
+
+  it('confines absolute pre-edit paths to the repository', async () => {
+    await mkdir(join(dir, '.openlore'), { recursive: true });
+    await writeFile(join(dir, '.openlore', 'architecture.json'), JSON.stringify({
+      reachable: [{ from: 'src/public', to: 'src/internal' }],
+    }));
+
+    const denied = await handleCheckArchitecture({
+      directory: dir,
+      from: join(dir, 'src/rogue.ts'),
+      to: join(dir, 'src/internal/db.ts'),
+    }) as Record<string, unknown>;
+    expect(denied).toMatchObject({ mode: 'pre-edit', allowed: false });
+
+    const escaped = await handleCheckArchitecture({
+      directory: dir,
+      from: join(dir, '..', 'outside.ts'),
+      to: join(dir, 'src/internal/db.ts'),
+    }) as Record<string, unknown>;
+    expect(escaped).toMatchObject({ mode: 'pre-edit', allowed: null, assessmentComplete: false });
+  });
+
   it('scans violations and answers a pre-edit query when rules are declared', async () => {
     await mkdir(join(dir, '.openlore', 'analysis'), { recursive: true });
     await writeFile(

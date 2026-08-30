@@ -65,6 +65,7 @@ import {
 } from '../../core/decisions/constraint-ledger.js';
 import {
   architectureViolationFindings,
+  ARCHITECTURE_CODE_BY_KIND,
   loadDepGraph,
 } from '../../core/services/mcp-handlers/architecture.js';
 import { loadArchitectureRules } from '../../core/architecture/rules.js';
@@ -381,15 +382,34 @@ export async function collectGovernanceFindings(
     if (architectureRules.warnings.length > 0) {
       caveats.push(...architectureRules.warnings.map(warning => `architecture rule warning: ${warning}`));
     }
-    if (architectureRules.rules.length === 0) {
+    const activeArchitectureCodes = new Set(
+      architectureRules.rules.map(rule => ARCHITECTURE_CODE_BY_KIND[rule.kind]),
+    );
+    if (architectureRules.assessmentComplete === false) {
+      caveats.push('architecture rule assessment incomplete: config is malformed or unreadable');
+      for (const code of ARCHITECTURE_FINDING_CODES) failedCodes.add(code);
+    } else {
+      for (const code of ARCHITECTURE_FINDING_CODES) {
+        if (!activeArchitectureCodes.has(code)) assessedCodes.add(code);
+      }
+    }
+    if (architectureRules.assessmentComplete === false) {
+      // Never assess or reconcile frozen baselines from a partially parsed corpus.
+    } else if (architectureRules.rules.length === 0) {
       for (const code of ARCHITECTURE_FINDING_CODES) assessedCodes.add(code);
     } else {
       const graph = await loadDepGraph(cwd);
       if (!graph) {
         caveats.push('architecture rule check unavailable: no dependency graph; run openlore analyze');
-        for (const code of ARCHITECTURE_FINDING_CODES) failedCodes.add(code);
+        for (const code of activeArchitectureCodes) failedCodes.add(code);
       } else {
-        findings.push(...architectureViolationFindings(scanViolations(graph, architectureRules).violations));
+        const scan = scanViolations(graph, architectureRules);
+        findings.push(...architectureViolationFindings(scan.violations));
+        if (!scan.assessmentComplete) {
+          caveats.push(...scan.warnings
+            .filter(warning => warning.includes('lower-confidence'))
+            .map(warning => `architecture rule warning: ${warning}`));
+        }
         const freshness = await assessStalenessForAnalysis(
           cwd,
           join(cwd, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR),
@@ -398,9 +418,16 @@ export async function collectGovernanceFindings(
         );
         if (!freshness.indexCommit || freshness.changedSourceFiles !== 0) {
           caveats.push('architecture rule assessment incomplete: dependency graph is stale or its freshness is unknown; run openlore analyze');
-          for (const code of ARCHITECTURE_FINDING_CODES) failedCodes.add(code);
+          for (const code of activeArchitectureCodes) failedCodes.add(code);
         } else {
-          for (const code of ARCHITECTURE_FINDING_CODES) assessedCodes.add(code);
+          for (const [kind, code] of Object.entries(ARCHITECTURE_CODE_BY_KIND)) {
+            if (!activeArchitectureCodes.has(code)) continue;
+            if (scan.incompleteKinds.includes(kind as keyof typeof ARCHITECTURE_CODE_BY_KIND)) {
+              failedCodes.add(code);
+            } else {
+              assessedCodes.add(code);
+            }
+          }
         }
       }
     }

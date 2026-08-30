@@ -58,10 +58,11 @@ describe('parseArchitectureRules', () => {
       forbidden: [{ from: 'domains', to: 'domains/$1' }],
       allowedOnly: [{ module: 'domains', mayDependOn: ['domains/$1'] }],
       required: [{ from: 'handlers', to: 'sanitizers/$1' }],
+      circular: [{ scope: 'domains', allowed: ['domains/$1'] }],
     }, 'config');
 
     expect(parsed.rules).toEqual([]);
-    expect(parsed.warnings).toHaveLength(3);
+    expect(parsed.warnings).toHaveLength(4);
   });
 
   it('warns and skips malformed entries — never throws', () => {
@@ -77,6 +78,17 @@ describe('parseArchitectureRules', () => {
     expect(rules).toHaveLength(1);
     expect(rules[0]).toMatchObject({ kind: 'forbidden', from: 'a', to: 'b' });
     expect(warnings.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('warns on unknown keys and invalid layer path patterns', () => {
+    const parsed = parseArchitectureRules({
+      forbiden: [{ from: 'src/a', to: 'src/b' }],
+      layers: { app: ['src/app'], core: ['domains/$2'] },
+    }, 'config');
+
+    expect(parsed.rules).toEqual([]);
+    expect(parsed.warnings.join(' ')).toContain('unknown top-level key "forbiden"');
+    expect(parsed.warnings.join(' ')).toContain('layers.core');
   });
 
   it('returns a warning (not a throw) on non-object input', () => {
@@ -105,6 +117,17 @@ describe('parseArchitectureRules', () => {
   it('rulesAreInert reflects an empty rule set', () => {
     expect(rulesAreInert({ rules: [], warnings: [] })).toBe(true);
     expect(rulesAreInert(parseArchitectureRules({ forbidden: [{ from: 'a', to: 'b' }] }, 'config'))).toBe(false);
+  });
+
+  it('distinguishes an absent config from malformed declared config', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'openlore-architecture-config-'));
+    expect((await loadArchitectureRules(root, { includeDecisions: false })).assessmentComplete).toBe(true);
+
+    await mkdir(join(root, '.openlore'), { recursive: true });
+    await writeFile(join(root, '.openlore', 'architecture.json'), '{not-json');
+    const loaded = await loadArchitectureRules(root, { includeDecisions: false });
+    expect(loaded).toMatchObject({ rules: [], assessmentComplete: false });
+    expect(loaded.warnings.join(' ')).toContain('invalid JSON');
   });
 });
 

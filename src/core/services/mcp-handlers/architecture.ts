@@ -10,7 +10,7 @@
  */
 
 import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import {
   OPENLORE_DIR,
   OPENLORE_ANALYSIS_SUBDIR,
@@ -81,7 +81,13 @@ export interface CheckArchitectureArgs {
   to?: string;
 }
 
-const ARCHITECTURE_CODE_BY_KIND: Record<ArchitectureRule['kind'], string> = {
+function confinedRepoPath(absDir: string, input: string): string | null {
+  const absolute = isAbsolute(input) ? resolve(input) : resolve(absDir, input);
+  const rel = relative(absDir, absolute).replace(/\\/g, '/');
+  return rel === '' || rel === '..' || rel.startsWith('../') || isAbsolute(rel) ? null : rel;
+}
+
+export const ARCHITECTURE_CODE_BY_KIND: Record<ArchitectureRule['kind'], string> = {
   layers: 'architecture-layer-violation',
   forbidden: 'architecture-forbidden-dependency',
   allowedOnly: 'architecture-allowed-only-violation',
@@ -146,6 +152,14 @@ export async function handleCheckArchitecture(args: CheckArchitectureArgs): Prom
 
   // ---- Pre-edit verdict mode ----
   if (preEdit) {
+    if (rules.assessmentComplete === false) {
+      return {
+        mode: 'pre-edit', rulesDeclared: rules.rules.length > 0, allowed: null,
+        reason: 'architecture config assessment incomplete — repair the malformed or unreadable config before relying on an allow verdict',
+        assessmentComplete: false,
+        warnings: rules.warnings,
+      };
+    }
     if (decisionConstraintError) {
       return {
         mode: 'pre-edit', rulesDeclared: rules.rules.length > 0, allowed: null,
@@ -181,7 +195,16 @@ export async function handleCheckArchitecture(args: CheckArchitectureArgs): Prom
           : { complete: true },
       };
     }
-    const verdict = canImport(args.from!, args.to!, rules, depGraph ?? undefined);
+    const from = confinedRepoPath(absDir, args.from!);
+    const toLooksLikePath = isAbsolute(args.to!) || args.to!.includes('/') || /\.[a-z]{1,5}$/i.test(args.to!);
+    const to = toLooksLikePath ? confinedRepoPath(absDir, args.to!) : args.to!;
+    if (!from || !to) {
+      return {
+        mode: 'pre-edit', rulesDeclared: true, allowed: null, assessmentComplete: false,
+        reason: 'pre-edit paths must remain within the repository root',
+      };
+    }
+    const verdict = canImport(from, to, rules, depGraph ?? undefined);
     return {
       mode: 'pre-edit',
       rulesDeclared: true,
@@ -209,6 +232,14 @@ export async function handleCheckArchitecture(args: CheckArchitectureArgs): Prom
   }
 
   // ---- Full scan mode ----
+  if (rules.assessmentComplete === false) {
+    return {
+      mode: 'scan', rulesDeclared: rules.rules.length > 0, assessmentComplete: false,
+      violationCount: null, violations: [], findings: [],
+      reason: 'architecture config assessment incomplete — malformed or unreadable rules prevent a clean scan',
+      warnings: rules.warnings,
+    };
+  }
   if (decisionConstraintError && rules.rules.length === 0) {
     return {
       mode: 'scan', rulesDeclared: false, assessmentComplete: false,
@@ -260,7 +291,7 @@ export async function handleCheckArchitecture(args: CheckArchitectureArgs): Prom
 
   const scan = scanViolations(depGraph, rules);
   const capped = scan.violations.slice(0, VIOLATION_REPORT_CAP);
-  const assessmentComplete = !decisionConstraintError && graphAssessmentComplete;
+  const assessmentComplete = !decisionConstraintError && graphAssessmentComplete && scan.assessmentComplete;
   return {
     mode: 'scan',
     rulesDeclared: true,

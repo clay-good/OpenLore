@@ -42,6 +42,8 @@ export interface ScanResult {
   warnings: string[];
   checkedEdges: number;
   rulesApplied: number;
+  assessmentComplete: boolean;
+  incompleteKinds: ArchitectureRule['kind'][];
 }
 
 /** Verdict for a hypothetical (pre-edit) import. */
@@ -122,10 +124,21 @@ function edgeViolation(fromRel: string, toRel: string, rule: ArchitectureRule): 
     }
     case 'required':
     case 'circular':
-    case 'reachable':
     case 'orphan':
     case 'moreUnstable':
       return null;
+    case 'reachable': {
+      const capture = matchPathPattern(toRel, rule.to);
+      if (capture === null) return null;
+      const permittedOrigin = rule.to.split('/').includes('$1')
+        ? withCapture(rule.from, capture)
+        : rule.from;
+      const protectedTarget = rule.to.split('/').includes('$1')
+        ? withCapture(rule.to, capture)
+        : rule.to;
+      if (pathMatches(fromRel, permittedOrigin) || pathMatches(fromRel, protectedTarget)) return null;
+      return rule.reason ?? `files outside "${permittedOrigin}" must not reach "${rule.to}"`;
+    }
   }
 }
 
@@ -186,7 +199,6 @@ function graphIndex(depGraph: DependencyGraphResult, rels: Map<string, string>):
   for (const edge of depGraph.edges) {
     const from = toRel(edge.source, rels);
     const to = toRel(edge.target, rels);
-    if (from === to) continue;
     outgoing.get(from)?.push({ to, edge });
     incoming.get(to)?.push({ from, edge });
   }
@@ -250,7 +262,9 @@ function stronglyConnected(
         }
       }
     }
-    if (component.length > 1) components.push(component.sort());
+    if (component.length > 1 || (outgoing.get(component[0]) ?? []).some(edge => edge.to === component[0])) {
+      components.push(component.sort());
+    }
   }
   return components.sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
 }
@@ -270,7 +284,7 @@ function componentMatchesAllowedPattern(component: string[], pattern: string): b
 export function scanViolations(depGraph: DependencyGraphResult, rules: ArchitectureRules): ScanResult {
   const warnings = [...rules.warnings];
   if (rules.rules.length === 0) {
-    return { violations: [], warnings, checkedEdges: 0, rulesApplied: 0 };
+    return { violations: [], warnings, checkedEdges: 0, rulesApplied: 0, assessmentComplete: true, incompleteKinds: [] };
   }
 
   const rels = relMap(depGraph);
@@ -291,11 +305,15 @@ export function scanViolations(depGraph: DependencyGraphResult, rules: Architect
 
   const violations: Violation[] = [];
   const seen = new Set<string>();
+  const incompleteKinds = new Set<ArchitectureRule['kind']>();
   for (const edge of depGraph.edges) {
     const fromRel = toRel(edge.source, rels);
     const toRelPath = toRel(edge.target, rels);
     if (fromRel === toRelPath) continue;
     for (const rule of rules.rules) {
+      // Reachability is evaluated below as one graph-global pass so direct edges
+      // and transitive paths share one deterministic finding shape.
+      if (rule.kind === 'reachable') continue;
       const reason = edgeViolation(fromRel, toRelPath, rule);
       if (reason) {
         const key = `${rule.kind}|${rule.decision?.id ?? ''}|${rule.ruleId ?? ''}|${fromRel}|${toRelPath}|${reason}`;
@@ -318,7 +336,15 @@ export function scanViolations(depGraph: DependencyGraphResult, rules: Architect
         const capture = matchPathPattern(from, rule.from);
         if (capture === null) continue;
         const target = withCapture(rule.to, capture);
-        if ((index.outgoing.get(from) ?? []).some(edge => pathMatches(edge.to, target))) continue;
+        const matching = (index.outgoing.get(from) ?? []).filter(edge => pathMatches(edge.to, target));
+        if (matching.length > 0) {
+          const weak = matching.map(edge => edgeConfidence(edge.edge)).filter(Boolean);
+          if (weak.length === matching.length) {
+            incompleteKinds.add('required');
+            warnings.push(`required rule for "${from}" has only lower-confidence edge evidence (${[...new Set(weak)].sort().join(',')})`);
+          }
+          continue;
+        }
         violations.push({
           ...violationBase(rule),
           from,
@@ -330,10 +356,11 @@ export function scanViolations(depGraph: DependencyGraphResult, rules: Architect
       const scoped = index.nodes.filter(node => pathMatches(node, rule.scope));
       for (const component of stronglyConnected(scoped, index.outgoing, index.incoming)) {
         if (rule.allowed.some(pattern => componentMatchesAllowedPattern(component, pattern))) continue;
+        const componentSet = new Set(component);
         const confidences = new Set<string>();
         for (const from of component) {
           for (const edge of index.outgoing.get(from) ?? []) {
-            if (component.includes(edge.to)) {
+            if (componentSet.has(edge.to)) {
               const confidence = edgeConfidence(edge.edge);
               if (confidence) confidences.add(confidence);
             }
@@ -350,43 +377,65 @@ export function scanViolations(depGraph: DependencyGraphResult, rules: Architect
       }
     } else if (rule.kind === 'reachable') {
       const targets = index.nodes.filter(node => pathMatches(node, rule.to));
-      const queue = [...targets];
-      const nextHop = new Map<string, { to: string; edge: DependencyEdge }>();
-      const reached = new Set(targets);
-      for (let cursor = 0; cursor < queue.length; cursor++) {
-        const node = queue[cursor];
-        for (const edge of index.incoming.get(node) ?? []) {
-          if (reached.has(edge.from)) continue;
-          reached.add(edge.from);
-          nextHop.set(edge.from, { to: node, edge: edge.edge });
-          queue.push(edge.from);
-        }
+      const targetHasCapture = rule.to.split('/').includes('$1');
+      const targetGroups = new Map<string, string[]>();
+      for (const target of targets) {
+        const capture = targetHasCapture ? (matchPathPattern(target, rule.to) ?? '') : '';
+        const group = targetGroups.get(capture) ?? [];
+        group.push(target);
+        targetGroups.set(capture, group);
       }
-      for (const from of [...reached].sort()) {
-        if (pathMatches(from, rule.from) || pathMatches(from, rule.to)) continue;
-        const path = [from];
-        const confidences = new Set<string>();
-        let current = from;
-        while (nextHop.has(current)) {
-          const hop = nextHop.get(current)!;
-          const confidence = edgeConfidence(hop.edge);
-          if (confidence) confidences.add(confidence);
-          current = hop.to;
-          path.push(current);
+      for (const [capture, groupTargets] of [...targetGroups].sort(([a], [b]) => a.localeCompare(b))) {
+        const permittedOrigin = rule.to.split('/').includes('$1')
+          ? withCapture(rule.from, capture)
+          : rule.from;
+        const protectedTarget = targetHasCapture ? withCapture(rule.to, capture) : rule.to;
+        const queue = [...groupTargets].sort();
+        const nextHop = new Map<string, { to: string; edge: DependencyEdge }>();
+        const reached = new Set(queue);
+        for (let cursor = 0; cursor < queue.length; cursor++) {
+          const node = queue[cursor];
+          for (const edge of index.incoming.get(node) ?? []) {
+            if (reached.has(edge.from)) continue;
+            reached.add(edge.from);
+            nextHop.set(edge.from, { to: node, edge: edge.edge });
+            queue.push(edge.from);
+          }
         }
-        violations.push({
-          ...violationBase(rule),
-          from,
-          to: path[path.length - 1],
-          path,
-          reason: rule.reason ?? `files outside "${rule.from}" must not reach "${rule.to}"`,
-          relatedConclusion: 'find_dead_code',
-          ...(confidences.size > 0 ? { confidence: [...confidences].sort().join(',') } : {}),
-        });
+        for (const from of [...reached].sort()) {
+          if (pathMatches(from, permittedOrigin) || pathMatches(from, protectedTarget)) continue;
+          const path = [from];
+          const confidences = new Set<string>();
+          let current = from;
+          while (nextHop.has(current)) {
+            const hop = nextHop.get(current)!;
+            const confidence = edgeConfidence(hop.edge);
+            if (confidence) confidences.add(confidence);
+            current = hop.to;
+            path.push(current);
+          }
+          violations.push({
+            ...violationBase(rule),
+            from,
+            to: path[path.length - 1],
+            path,
+            reason: rule.reason ?? `files outside "${permittedOrigin}" must not reach "${path[path.length - 1]}"`,
+            relatedConclusion: 'find_dead_code',
+            ...(confidences.size > 0 ? { confidence: [...confidences].sort().join(',') } : {}),
+          });
+        }
       }
     } else if (rule.kind === 'orphan') {
       for (const node of index.nodes.filter(candidate => pathMatches(candidate, rule.scope))) {
-        if ((index.incoming.get(node) ?? []).length > 0) continue;
+        const incoming = (index.incoming.get(node) ?? []).filter(edge => edge.from !== node);
+        if (incoming.length > 0) {
+          const weak = incoming.map(edge => edgeConfidence(edge.edge)).filter(Boolean);
+          if (weak.length === incoming.length) {
+            incompleteKinds.add('orphan');
+            warnings.push(`orphan rule for "${node}" has only lower-confidence incoming evidence (${[...new Set(weak)].sort().join(',')})`);
+          }
+          continue;
+        }
         violations.push({
           ...violationBase(rule),
           from: node,
@@ -428,7 +477,14 @@ export function scanViolations(depGraph: DependencyGraphResult, rules: Architect
           : `${a.decision?.id ?? ''}\0${a.ruleId ?? ''}` < `${b.decision?.id ?? ''}\0${b.ruleId ?? ''}` ? -1
             : `${a.decision?.id ?? ''}\0${a.ruleId ?? ''}` > `${b.decision?.id ?? ''}\0${b.ruleId ?? ''}` ? 1 : 0);
 
-  return { violations, warnings, checkedEdges: depGraph.edges.length, rulesApplied: rules.rules.length };
+  return {
+    violations,
+    warnings,
+    checkedEdges: depGraph.edges.length,
+    rulesApplied: rules.rules.length,
+    assessmentComplete: incompleteKinds.size === 0,
+    incompleteKinds: [...incompleteKinds].sort(),
+  };
 }
 
 /**

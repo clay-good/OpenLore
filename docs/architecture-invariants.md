@@ -73,7 +73,12 @@ Eight deterministic rule kinds:
 
 Paths are **directory prefixes** (matched against repo-relative paths). Trailing `/`, `/*`, `/**`,
 or `*` are tolerated. A rule prefix that matches no file in the repo is reported as a warning (likely
-a typo), never a crash. Malformed entries are skipped with a warning — loading rules never throws.
+a typo), never a crash. Malformed entries are skipped with a warning and mark the assessment
+incomplete; a blocking architecture policy therefore fails closed instead of treating bad config
+as an empty rule set. Loading rules never throws.
+
+When `required` or `orphan` can be decided only from lower-confidence inferred call edges, OpenLore
+reports an incomplete assessment instead of inventing a violation or certifying the rule as clean.
 
 A pattern may contain one `$1` path-segment capture. The captured segment is substituted into the
 rule's target/allowlist patterns, so `domains/$1` can keep each domain within its own folder without
