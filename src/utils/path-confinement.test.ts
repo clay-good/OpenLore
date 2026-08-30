@@ -237,6 +237,41 @@ describe('confinedAtomicWriteFile expected identity', () => {
     await expect(readFile(path, 'utf-8')).resolves.toBe('# original\n');
   });
 
+  it('never publishes a partial recovery journal when its write fails', async () => {
+    const path = join(root, 'openspec', 'specs', 'core', 'partial-journal.md');
+    const journal = join(root, 'partial-journal.journal');
+    await writeFile(path, '# original\n');
+    const snapshot = await readFileConfinedWithStat(root, 'openspec/specs/core/partial-journal.md');
+    const probe = await open(path, 'r');
+    const prototype = Object.getPrototypeOf(probe) as { writeFile: (...args: unknown[]) => Promise<void> };
+    await probe.close();
+    const originalWriteFile = prototype.writeFile;
+    let calls = 0;
+    const writeSpy = vi.spyOn(prototype, 'writeFile').mockImplementation(function (this: unknown, ...args: unknown[]) {
+      calls += 1;
+      if (calls === 2) return Promise.reject(Object.assign(new Error('injected journal write failure'), { code: 'EIO' }));
+      return originalWriteFile.apply(this, args);
+    });
+
+    try {
+      await expect(confinedAtomicWriteFile(root, path, '# replacement\n', {
+        expectedIdentity: snapshot.stat,
+        expectedContent: snapshot.content,
+        recoveryJournalPath: journal,
+      })).rejects.toThrow(/injected journal write failure/);
+    } finally {
+      writeSpy.mockRestore();
+    }
+
+    await expect(readFile(journal, 'utf-8')).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(readFile(path, 'utf-8')).resolves.toBe('# original\n');
+    await expect(confinedAtomicWriteFile(root, path, '# replacement\n', {
+      expectedIdentity: snapshot.stat,
+      expectedContent: snapshot.content,
+      recoveryJournalPath: journal,
+    })).resolves.toBeUndefined();
+  });
+
   it('refuses to overwrite a regular file that changed after its confined read', async () => {
     const path = join(root, 'openspec', 'specs', 'core', 'cas.md');
     await writeFile(path, '# first\n');

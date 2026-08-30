@@ -38,7 +38,7 @@ describe('agent enforcement Stop hook lifecycle', () => {
     expect(await installAgentEnforcementHook(dir)).toBe(true);
     const settings = await readSettings(dir);
     expect(settings.hooks?.Stop).toHaveLength(1);
-    expect(settings.hooks?.Stop?.[0]?.hooks?.[0]?.command).toBe('openlore enforce --agent-hook');
+    expect(settings.hooks?.Stop?.[0]?.hooks?.[0]?.command).toBe('openlore enforce --agent-hook --git-root');
 
     settings.hooks!.Stop!.push({ command: 'my-own-stop-check' });
     settings.hooks!.Stop!.push({ command: 'echo openlore enforce --agent-hook' });
@@ -88,7 +88,7 @@ describe('agent enforcement Stop hook lifecycle', () => {
     };
     expect(installed.description).toBe('user hooks');
     expect(installed.hooks?.Stop?.flatMap(group => group.hooks ?? [])
-      .filter(handler => handler.command === 'openlore enforce --agent-hook')).toHaveLength(1);
+      .filter(handler => handler.command === 'openlore enforce --agent-hook --git-root')).toHaveLength(1);
     expect(installed.hooks?.Stop?.flatMap(group => group.hooks ?? [])
       .some(handler => handler.command === 'my-stop-hook')).toBe(true);
 
@@ -98,6 +98,21 @@ describe('agent enforcement Stop hook lifecycle', () => {
     };
     expect(uninstalled.hooks?.Stop?.flatMap(group => group.hooks ?? []))
       .toEqual([{ type: 'command', command: 'my-stop-hook' }]);
+  });
+
+  it('upgrades the legacy Codex command without leaving a duplicate', async () => {
+    await mkdir(join(dir, '.codex'), { recursive: true });
+    const path = join(dir, '.codex', 'hooks.json');
+    await writeFile(path, JSON.stringify({
+      hooks: { Stop: [{ hooks: [{ type: 'command', command: 'openlore enforce --agent-hook' }] }] },
+    }), 'utf-8');
+
+    expect(await installCodexAgentEnforcementHook(dir)).toBe(true);
+    const installed = JSON.parse(await readFile(path, 'utf-8')) as {
+      hooks?: { Stop?: Array<{ hooks?: Array<{ command?: string }> }> };
+    };
+    expect(installed.hooks?.Stop?.flatMap(group => group.hooks ?? []))
+      .toEqual([expect.objectContaining({ command: 'openlore enforce --agent-hook --git-root' })]);
   });
 
   it('refuses corrupt Codex hooks without changing their bytes', async () => {
@@ -127,7 +142,7 @@ describe('agent enforcement Stop hook lifecycle', () => {
     const stop = (await readSettings(dir)).hooks?.Stop ?? [];
     expect(stop.filter(entry => entry._openloreAgentEnforcement)).toHaveLength(1);
     expect(stop.find(entry => entry._openloreAgentEnforcement)?.hooks?.[0]?.command)
-      .toBe('openlore enforce --agent-hook');
+      .toBe('openlore enforce --agent-hook --git-root');
     expect(stop.some(entry => entry.command === 'user-hook')).toBe(true);
   });
 

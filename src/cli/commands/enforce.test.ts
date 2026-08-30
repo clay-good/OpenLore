@@ -206,6 +206,39 @@ async function gateAgentHook(root: string): Promise<{ code: number; stderr: stri
 }
 
 describe('agent-loop enforcement hook', () => {
+  it('resolves the repository root when the agent starts in a subdirectory', async () => {
+    const root = await mkRepo();
+    await initializeGitHead(root);
+    await writeStaleScenario(root);
+    await writePolicy(root, { 'stale-decision-reference': 'blocking' });
+    const nested = join(root, 'packages', 'client');
+    await mkdir(nested, { recursive: true });
+
+    const out: string[] = [];
+    const original = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((value: string | Uint8Array) => { out.push(String(value)); return true; }) as typeof process.stderr.write;
+    try {
+      expect(await runEnforceCli({ cwd: nested, gitRoot: true, agentHook: true })).toBe(2);
+    } finally {
+      process.stderr.write = original;
+    }
+    expect(out.join('')).toContain('[blocking] Stale decision reference: decision:aaaaaaaa');
+  });
+
+  it('fails open with a caveat when the repository root cannot be resolved', async () => {
+    const root = await mkRepo();
+    const out: string[] = [];
+    const original = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((value: string | Uint8Array) => { out.push(String(value)); return true; }) as typeof process.stderr.write;
+    try {
+      expect(await runEnforceCli({ cwd: root, gitRoot: true, agentHook: true })).toBe(0);
+    } finally {
+      process.stderr.write = original;
+    }
+    expect(out.join('')).toMatch(/repository root unavailable/i);
+    expect(out.join('')).toMatch(/agent turn was not blocked/i);
+  });
+
   it('exits 2 only for blocking findings and renders the remediation first', async () => {
     const root = await mkRepo();
     await initializeGitHead(root);

@@ -566,6 +566,7 @@ async function candidateBaselineExists(cwd: string): Promise<boolean> {
 
 export interface EnforceCliOptions {
   cwd?: string;
+  gitRoot?: boolean;
   base?: string;
   json?: boolean;
   hook?: boolean;
@@ -575,11 +576,30 @@ export interface EnforceCliOptions {
 }
 
 export async function runEnforceCli(opts: EnforceCliOptions): Promise<number> {
-  const cwd = opts.cwd ?? process.cwd();
-
   if (opts.agentHook && (opts.hook || opts.json || opts.installHook || opts.uninstallHook)) {
     process.stderr.write('openlore enforce: --agent-hook cannot be combined with --hook, --json, --install-hook, or --uninstall-hook.\n');
     return 1;
+  }
+
+  let cwd = opts.cwd ?? process.cwd();
+  if (opts.gitRoot) {
+    try {
+      const { stdout } = await execFileAsync('git', ['rev-parse', '--show-toplevel'], { cwd });
+      const resolvedRoot = stdout.trim();
+      if (!resolvedRoot) throw new Error('git returned an empty repository root');
+      cwd = resolvedRoot;
+    } catch (error) {
+      const message = `repository root unavailable: ${error instanceof Error ? error.message : String(error)}`;
+      if (opts.agentHook) {
+        process.stderr.write(sanitizeForTerminal(
+          `OpenLore agent enforcement:\n- Caveat: ${message}\n- Caveat: enforcement was incomplete; the agent turn was not blocked.\n`,
+          { keepNewlines: true },
+        ));
+        return 0;
+      }
+      process.stderr.write(sanitizeForTerminal(`openlore enforce: ${message}\n`, { keepNewlines: true }));
+      return 1;
+    }
   }
 
   if (opts.installHook) { await installEnforcementHook(cwd); return typeof process.exitCode === 'number' ? process.exitCode : 0; }
@@ -862,11 +882,12 @@ export const enforceCommand = new Command('enforce')
   .option('--json', 'Emit the gate result as JSON', false)
   .option('--hook', 'Hook mode: exit 1 on blocking/new frozen findings, invalid config, incomplete frozen assessment, or unverifiable staged bytes', false)
   .option('--agent-hook', 'Agent-loop hook mode: exit 2 only on blocking findings; infrastructure failures exit 0', false)
+  .option('--git-root', 'Resolve the repository root with Git before enforcement', false)
   .option('--install-hook', 'Install the unified enforcement pre-commit hook', false)
   .option('--uninstall-hook', 'Remove the unified enforcement pre-commit hook', false)
-  .action(async (opts: { base?: string; json?: boolean; hook?: boolean; agentHook?: boolean; installHook?: boolean; uninstallHook?: boolean }) => {
+  .action(async (opts: { base?: string; json?: boolean; hook?: boolean; agentHook?: boolean; gitRoot?: boolean; installHook?: boolean; uninstallHook?: boolean }) => {
     const code = await runEnforceCli({
-      base: opts.base, json: opts.json, hook: opts.hook, agentHook: opts.agentHook,
+      base: opts.base, json: opts.json, hook: opts.hook, agentHook: opts.agentHook, gitRoot: opts.gitRoot,
       installHook: opts.installHook, uninstallHook: opts.uninstallHook,
     });
     process.exit(code);

@@ -354,7 +354,8 @@ async function runSetup(
 const PANIC_CHECK_HOOK_MARKER = 'openlore panic-check';
 const GRYPH_WATCH_HOOK_MARKER = 'openlore gryph-watch';
 const CHECK_EDIT_HOOK_MARKER = 'openlore check-edit --hook';
-const AGENT_ENFORCEMENT_HOOK_MARKER = 'openlore enforce --agent-hook';
+const LEGACY_AGENT_ENFORCEMENT_HOOK_MARKER = 'openlore enforce --agent-hook';
+const AGENT_ENFORCEMENT_HOOK_MARKER = 'openlore enforce --agent-hook --git-root';
 
 /** Sentinel written by `setup --panic off|observe`. When present, the guarded PreToolUse hook skips
  *  spawning Node entirely (the hook is a pure no-op in those modes) — off/observe cost nothing per
@@ -548,7 +549,8 @@ function isCodexAgentEnforcementHandler(value: unknown): boolean {
     && typeof value === 'object'
     && !Array.isArray(value)
     && (value as Record<string, unknown>).type === 'command'
-    && (value as Record<string, unknown>).command === AGENT_ENFORCEMENT_HOOK_MARKER;
+    && [AGENT_ENFORCEMENT_HOOK_MARKER, LEGACY_AGENT_ENFORCEMENT_HOOK_MARKER]
+      .includes((value as Record<string, unknown>).command as string);
 }
 
 const CODEX_AGENT_ENFORCEMENT_ENTRY = {

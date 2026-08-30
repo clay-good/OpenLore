@@ -412,16 +412,25 @@ export async function confinedAtomicWriteFile(
       // user file; callers serialize and recover this target with a settings lock.
       const guard = resolve(canonicalParent, `.${basename(target)}.openlore-cas-backup.${randomUUID()}`);
       if (options.recoveryJournalPath) {
-        const journalHandle = await open(
-          options.recoveryJournalPath,
-          constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW,
-          0o600,
-        );
+        const journalTemp = `${options.recoveryJournalPath}.${process.pid}.${randomUUID()}.tmp`;
         try {
-          await journalHandle.writeFile(JSON.stringify({ guard: basename(guard) }), 'utf-8');
-          await journalHandle.sync();
+          const journalHandle = await open(
+            journalTemp,
+            constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW,
+            0o600,
+          );
+          try {
+            await journalHandle.writeFile(JSON.stringify({ guard: basename(guard) }), 'utf-8');
+            await journalHandle.sync();
+          } finally {
+            await journalHandle.close();
+          }
+          // The lock-bound final pathname is either absent or points at a fully
+          // written journal. A crash during the temp write leaves only an inert,
+          // uniquely named temp file and cannot poison future recovery.
+          await link(journalTemp, options.recoveryJournalPath);
         } finally {
-          await journalHandle.close();
+          await unlink(journalTemp).catch(() => {});
         }
       }
       const restoreGuard = async (): Promise<void> => {

@@ -2254,6 +2254,9 @@ SHALL degrade to a caveat and exit 0, never a block. The mode SHALL be wireable 
 corrupt-settings refusal (settings that exist but do not parse are never overwritten). The
 existing git pre-commit `--hook` mode and the advisory-by-default doctrine are unchanged.
 
+Installed agent hooks SHALL resolve the Git repository root before enforcement so a host session
+started in a repository subdirectory evaluates the same project-level policy and findings.
+
 #### Scenario: A blocking finding stops the turn with an actionable message
 
 - **GIVEN** an `enforcement.policy` mapping a finding code to `blocking` and a working tree
@@ -2279,6 +2282,12 @@ existing git pre-commit `--hook` mode and the advisory-by-default doctrine are u
 - **GIVEN** a `.claude/settings.json` or `.codex/hooks.json` that exists but is not valid JSON
 - **WHEN** the user requests agent-hook installation via `openlore setup`
 - **THEN** the installer refuses with an explanatory error and leaves the file untouched
+
+#### Scenario: A nested agent session enforces the repository policy
+
+- **GIVEN** an installed agent hook and a host session whose working directory is a repository subdirectory
+- **WHEN** the Stop hook runs
+- **THEN** enforcement resolves the Git repository root and evaluates the root `.openlore/config.json`
 
 ## Technical Notes
 
