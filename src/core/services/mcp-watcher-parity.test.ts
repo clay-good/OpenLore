@@ -248,6 +248,36 @@ describe('incremental watch converges to analyze --force (parity oracle)', () =>
     expect(parsedPaths.filter(path => path === 'src/caller.ts')).toHaveLength(1);
   });
 
+  it('repairs a changed consumer that arrives before its changed producer', async () => {
+    const v1: Files = {
+      'src/api.ts': 'export function oldName() { return 1; }\n',
+      'src/consumer.ts': "import { oldName } from './api';\nexport function consume() { return oldName(); }\n",
+    };
+    await writeFiles(v1);
+    const store = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    seedStore(store, v1, await fullBuild(v1));
+    store.close();
+
+    const v2: Files = {
+      'src/api.ts': 'export function newName() { return 2; }\n',
+      'src/consumer.ts': "import { newName } from './api';\nexport function consume() { return newName(); }\n",
+    };
+    await writeFiles(v2);
+    const { McpWatcher } = await import('./mcp-watcher.js');
+    const watcher = new McpWatcher({ rootPath: root, outputPath, embed: false, bulkThreshold: 10 });
+    await (watcher as unknown as { handleBatch(paths: string[]): Promise<void> }).handleBatch([
+      join(root, 'src/consumer.ts'),
+      join(root, 'src/api.ts'),
+    ]);
+
+    const actual = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    expect(outgoingSig(actual, 'src/consumer.ts')).toEqual(
+      oracleOutgoingSig((await fullBuild(v2)).edges, 'src/consumer.ts'),
+    );
+    expect(actual.getStaleFiles()).toEqual([]);
+    actual.close();
+  });
+
   it('routes a 30-file batch to one rebuild and persists the full stale region', async () => {
     vi.useFakeTimers();
     const store = EdgeStore.open(EdgeStore.dbPath(outputPath));

@@ -48,6 +48,8 @@ import {
   registerRepairBuilder,
   registerRepairHost,
   buildIndexInChildProcess,
+  enableChildProcessBuilds,
+  stopChildProcessBuilds,
   repairStatusFor,
   REPAIR_REASON_DETAIL,
 } from '../../core/services/cold-start-bootstrap.js';
@@ -2689,6 +2691,8 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
   // event loop alive after the client closes the pipe, leaking a zombie process
   // per agent session.
   const lifecycle = createShutdownCoordinator();
+  enableChildProcessBuilds();
+  lifecycle.register(stopChildProcessBuilds);
 
   // Serve-daemon delegation: when a shared `openlore serve` daemon is available
   // for a directory, forward tool calls to it (one warm process + one watcher

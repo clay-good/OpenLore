@@ -247,6 +247,8 @@ describe('McpWatcher — Spec 13.1 freshness', () => {
     expect(internals.maxBatchTimer).toBeDefined();
     internals.onVcsEvent();
     expect(internals.maxBatchTimer).toBeUndefined();
+    internals.enqueue(join(root, 'later-checkout-event.ts'));
+    expect(internals.maxBatchTimer).toBeUndefined();
     await watcher.stop();
   });
 
@@ -263,6 +265,25 @@ describe('McpWatcher — Spec 13.1 freshness', () => {
     await internals.runEmbedLane();
     expect(internals.embedFiles.size).toBe(0);
     expect(internals.lastEmbedContext).toBeUndefined();
+    await watcher.stop();
+  });
+
+  it('releases source strings after downstream lanes consume the batch', async () => {
+    await writeFile(contextPath, JSON.stringify({ signatures: [], callGraph: { nodes: [], edges: [] } }), 'utf-8');
+    const sourcePath = join(root, 'large-batch-member.ts');
+    await writeFile(sourcePath, `export const payload = '${'x'.repeat(32_000)}';\n`, 'utf-8');
+    const watcher = new McpWatcher({ rootPath: root, outputPath: analysisDir, embed: true });
+    const internals = watcher as unknown as {
+      handleBatch(paths: string[]): Promise<void>;
+      scheduleEmbed(context: unknown, files: Array<{ rel: string; content: string }>, nodes: unknown[]): void;
+    };
+    let captured: Array<{ rel: string; content: string }> = [];
+    vi.spyOn(internals, 'scheduleEmbed').mockImplementation((_context, files) => { captured = files; });
+
+    await internals.handleBatch([sourcePath]);
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0].content).toBe('');
     await watcher.stop();
   });
 
@@ -322,5 +343,32 @@ describe('McpWatcher — Spec 13.1 freshness', () => {
 
     internals.enqueue(join(root, 'after-stop.ts'));
     expect(internals.pending.size).toBe(0);
+  });
+
+  it('drains an over-threshold shutdown batch instead of discarding it', async () => {
+    await writeFile(contextPath, JSON.stringify({ signatures: [], callGraph: { nodes: [], edges: [] } }), 'utf-8');
+    const paths = ['shutdown-a.ts', 'shutdown-b.ts', 'shutdown-c.ts'].map(name => join(root, name));
+    await Promise.all(paths.map((path, index) =>
+      writeFile(path, `export function shutdown${index}() {}\n`, 'utf-8')));
+    const watcher = new McpWatcher({ rootPath: root, embed: true, bulkThreshold: 2 });
+    const internals = watcher as unknown as {
+      pending: Set<string>;
+      updateVectors(context: unknown, files: Array<{ rel: string; content: string }>, nodes: unknown[]): Promise<void>;
+    };
+    const vectorUpdate = vi.spyOn(internals, 'updateVectors').mockResolvedValue(undefined);
+    for (const path of paths) internals.pending.add(path);
+
+    await watcher.stop();
+
+    const context = JSON.parse(await readFile(contextPath, 'utf-8')) as {
+      signatures: Array<{ path: string }>;
+    };
+    expect(context.signatures.map(signature => signature.path).sort()).toEqual([
+      'shutdown-a.ts',
+      'shutdown-b.ts',
+      'shutdown-c.ts',
+    ]);
+    expect(vectorUpdate).toHaveBeenCalledTimes(1);
+    expect(vectorUpdate.mock.calls[0][1]).toHaveLength(3);
   });
 });
