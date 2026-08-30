@@ -16,7 +16,7 @@
  */
 
 import { Command } from 'commander';
-import { readFile, writeFile, mkdir, access, unlink, lstat, realpath, chmod } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, access, unlink, lstat, realpath } from 'node:fs/promises';
 import { join, dirname, relative, isAbsolute, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
@@ -464,9 +464,11 @@ async function verifiedSettingsCoordinationDir(): Promise<string> {
     const info = await lstat(requested);
     if (info.isSymbolicLink() || !info.isDirectory()) throw new Error(`${requested} is not a real directory`);
     const canonical = await realpath(requested);
-    if (process.platform !== 'win32') await chmod(canonical, 0o700);
     if (typeof process.getuid === 'function' && info.uid !== process.getuid()) {
       throw new Error(`${requested} is not owned by the current user`);
+    }
+    if (process.platform !== 'win32' && (info.mode & 0o777) !== 0o700) {
+      throw new Error(`${requested} must already have mode 0700`);
     }
     return canonical;
   }
@@ -481,10 +483,12 @@ async function verifiedSettingsCoordinationDir(): Promise<string> {
     if (info.isSymbolicLink() || !info.isDirectory()) throw new Error(`${current} is not a real directory`);
     if (await realpath(current) !== current) throw new Error(`${current} contains a symbolic-link path component`);
   }
-  if (process.platform !== 'win32') await chmod(current, 0o700);
   const info = await lstat(current);
   if (typeof process.getuid === 'function' && info.uid !== process.getuid()) {
     throw new Error(`${current} is not owned by the current user`);
+  }
+  if (process.platform !== 'win32' && (info.mode & 0o777) !== 0o700) {
+    throw new Error(`${current} must have mode 0700`);
   }
   return current;
 }

@@ -4,7 +4,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, symlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, symlink, chmod, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { installPanicCheckHook, installGryphWatchHook, uninstallPanicHooks, installCheckEditHook, uninstallCheckEditHook, installAgentEnforcementHook, uninstallAgentEnforcementHook, installCodexAgentEnforcementHook, uninstallCodexAgentEnforcementHook, panicCheckHookCommand, evaluatePanicActivation, PANIC_DISABLED_SENTINEL } from './setup.js';
@@ -156,6 +156,13 @@ describe('agent enforcement Stop hook lifecycle', () => {
     } finally {
       await rm(outside, { recursive: true, force: true });
     }
+  });
+
+  it.runIf(process.platform !== 'win32')('refuses but never chmods a permissive runtime override', async () => {
+    await chmod(settingsRuntimeDir, 0o750);
+    expect(await installAgentEnforcementHook(dir)).toBe(false);
+    expect((await stat(settingsRuntimeDir)).mode & 0o777).toBe(0o750);
+    await expect(readFile(join(dir, '.claude', 'settings.json'), 'utf-8')).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('converges duplicate owned entries to one canonical hook', async () => {
