@@ -225,6 +225,26 @@ describe('agent-loop enforcement hook', () => {
     expect(out.join('')).toContain('[blocking] Stale decision reference: decision:aaaaaaaa');
   });
 
+  it('preserves trailing whitespace in the resolved repository path', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'openlore-enforce-parent-'));
+    created.push(parent);
+    const root = join(parent, 'repo ');
+    await mkdir(join(root, OPENLORE_DIR), { recursive: true });
+    await initializeGitHead(root);
+    await writeStaleScenario(root);
+    await writePolicy(root, { 'stale-decision-reference': 'blocking' });
+
+    const out: string[] = [];
+    const original = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((value: string | Uint8Array) => { out.push(String(value)); return true; }) as typeof process.stderr.write;
+    try {
+      expect(await runEnforceCli({ cwd: root, gitRoot: true, agentHook: true })).toBe(2);
+    } finally {
+      process.stderr.write = original;
+    }
+    expect(out.join('')).toContain('[blocking] Stale decision reference: decision:aaaaaaaa');
+  });
+
   it('fails open with a caveat when the repository root cannot be resolved', async () => {
     const root = await mkRepo();
     const out: string[] = [];

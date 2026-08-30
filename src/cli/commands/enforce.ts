@@ -585,7 +585,7 @@ export async function runEnforceCli(opts: EnforceCliOptions): Promise<number> {
   if (opts.gitRoot) {
     try {
       const { stdout } = await execFileAsync('git', ['rev-parse', '--show-toplevel'], { cwd });
-      const resolvedRoot = stdout.trim();
+      const resolvedRoot = stdout.replace(/\r?\n$/, '');
       if (!resolvedRoot) throw new Error('git returned an empty repository root');
       cwd = resolvedRoot;
     } catch (error) {
