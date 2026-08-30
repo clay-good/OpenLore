@@ -324,7 +324,6 @@ export async function confinedAtomicWriteFile(
     if (await realpath(parent) !== canonicalParent) {
       throw new Error(`Path escape blocked: write parent changed during publication: "${target}"`);
     }
-    await assertExpectedIdentity();
     try {
       if ((await lstat(target)).isSymbolicLink()) {
         throw new Error(`Path escape blocked: symbolic-link write target: "${target}"`);
@@ -332,6 +331,7 @@ export async function confinedAtomicWriteFile(
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
+    await assertExpectedIdentity();
     // Publish through the already-canonical parent, not the repository-controlled
     // lexical parent that could be swapped for a symlink after validation.
     await rename(temp, resolve(canonicalParent, basename(target)));
