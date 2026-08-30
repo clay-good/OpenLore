@@ -168,7 +168,7 @@ export function isTechnicalDomainRole(name: string): boolean {
 // and can carry no requirement anchor. In a Next.js or Docusaurus project those
 // files are executable, and the day an extractor reads them this classification
 // must move with it — otherwise real routes would be classified as prose.
-const DOCUMENTATION_EXTENSIONS = new Set(['.md', '.mdx', '.mdc', '.markdown', '.rst', '.adoc', '.txt']);
+const DOCUMENTATION_EXTENSIONS = new Set(['.md', '.mdx', '.mdc', '.markdown', '.rst', '.adoc', '.txt', '.cff']);
 
 /**
  * `.txt` carries prose (`README.txt`, `LICENSE.txt`) and build configuration
@@ -186,7 +186,24 @@ function isBuildConfigText(name: string): boolean {
   return BUILD_CONFIG_TEXT.test(name);
 }
 const DOCUMENTATION_STEMS = new Set([
-  'license', 'licence', 'notice', 'copying', 'authors', 'contributors', 'readme', 'changelog',
+  'authors',
+  'changelog',
+  'citation',
+  'code_of_conduct',
+  'codeowners',
+  'contributors',
+  'contributing',
+  'copying',
+  'governance',
+  'licence',
+  'license',
+  'maintainers',
+  'notice',
+  'patents',
+  'readme',
+  'security',
+  'support',
+  'third_party_notices',
 ]);
 
 export function isDocumentationFile(path: string): boolean {
@@ -203,16 +220,22 @@ function classifyProseFile(path: string): 'documentation' | 'build-config' | 'ne
   if (extension.length > 0 && DOCUMENTATION_EXTENSIONS.has(extension)) return 'documentation';
 
   // Conventional project files carry a qualifier rather than a file type:
-  // `LICENSE-MIT`, `LICENSE_APACHE`, `COPYING.LESSER`. Match the stem up to the
-  // first separator, and require the conventional UPPER-CASE spelling that marks
-  // project metadata. Without that, an extensionless executable (`bin/readme`,
-  // `scripts/changelog`, `src/license`) and a source file (`license.ts`,
-  // `readme-generator.ts`) would read as prose, and a domain made of such
-  // scripts would be discarded. Under-matching is the safe direction: a
-  // lower-case `license` at the root is merely missed, never misread.
-  const stem = name.split(/[.\-_]/)[0];
-  if (!DOCUMENTATION_STEMS.has(stem)) return 'neither';
-  return rawName === rawName.toUpperCase() ? 'documentation' : 'neither';
+  // `LICENSE-MIT`, `LICENSE_APACHE`, `COPYING.LESSER`. Match a complete known
+  // name plus an optional qualifier, and require the conventional UPPER-CASE
+  // spelling that marks project metadata. Without that, an extensionless
+  // executable (`bin/readme`, `scripts/changelog`, `src/license`) and a source
+  // file (`license.ts`, `readme-generator.ts`) would read as prose, and a domain
+  // made of such scripts would be discarded. Matching a complete known name also
+  // keeps compound conventions such as `CODE_OF_CONDUCT` precise without treating
+  // a generic executable named `CODE` as supporting prose. Under-matching is the safe
+  // direction: a lower-case `license` at the root is merely missed, never misread.
+  if (rawName !== rawName.toUpperCase()) return 'neither';
+  for (const stem of DOCUMENTATION_STEMS) {
+    if (name === stem || name.startsWith(`${stem}.`) || name.startsWith(`${stem}-`) || name.startsWith(`${stem}_`)) {
+      return 'documentation';
+    }
+  }
+  return 'neither';
 }
 
 /**

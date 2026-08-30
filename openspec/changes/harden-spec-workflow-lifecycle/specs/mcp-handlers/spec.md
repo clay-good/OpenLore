@@ -123,6 +123,11 @@ This is an observation, never a decision: the system MUST NOT declare such a dom
 - **WHEN** a specification under it is loaded or its corpus files are excluded from prose evidence
 - **THEN** the configured root is used for retrieval, for domain discovery, and for the corpus exclusion, so the specification resolves and no corpus-level specification is misread as a prose-only orphan
 
+#### Scenario: A configured specification root cannot escape the project
+- **GIVEN** repository configuration names an absolute or parent-relative specification root outside the project
+- **WHEN** a specification workflow or MCP domain lookup resolves that root
+- **THEN** the existing confined resolver falls back to the in-project default, discloses the fallback, and reads no specification content from outside the project
+
 #### Scenario: A corpus-level spec stays repairable
 - **GIVEN** a specification that owns no analyzed domain and cites only other specifications
 - **WHEN** Repair evidence is prepared for it
@@ -142,4 +147,3 @@ This is an observation, never a decision: the system MUST NOT declare such a dom
 - **GIVEN** a resolved domain whose evidence names at least one symbol
 - **WHEN** Generate or Repair evidence is prepared
 - **THEN** the domain is disclosed as behavioral and no stop-and-ask follow-up is emitted
-

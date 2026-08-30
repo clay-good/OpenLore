@@ -94,7 +94,9 @@ describe('domain file roles', () => {
     // the qualified variants (`LICENSE-MIT`, `COPYING.LESSER`) real repos ship.
     for (const path of [
       'LICENSE', 'NOTICE', 'COPYING', 'AUTHORS', 'packages/api/LICENSE',
-      'LICENSE-MIT', 'LICENSE_APACHE', 'COPYING.LESSER',
+      'LICENSE-MIT', 'LICENSE_APACHE', 'COPYING.LESSER', 'CODE_OF_CONDUCT',
+      'CONTRIBUTING', 'SECURITY', 'SUPPORT', 'GOVERNANCE', 'CODEOWNERS',
+      'THIRD_PARTY_NOTICES', 'CITATION.cff',
     ]) {
       expect(classifyDomainFile(file(path)), path).toEqual({ role: 'supporting', reason: 'documentation-file' });
     }
@@ -120,7 +122,7 @@ describe('domain file roles', () => {
     // extensionless executable would read as prose and its domain would vanish.
     for (const path of [
       'src/license/license.ts', 'src/docs/readme-generator.ts', 'src/changelog.ts',
-      'bin/readme', 'scripts/changelog', 'src/license',
+      'bin/readme', 'scripts/changelog', 'src/license', 'bin/CODE',
     ]) {
       expect(classifyDomainFile(file(path)), path).toEqual({ role: 'defining', reason: 'production-source' });
     }

@@ -498,6 +498,49 @@ describe('spec workflow composites', () => {
     expect(result.receipt.followUps.some(f => f.tool === 'ask:human-decision')).toBe(false);
   });
 
+  it('confines an escaping configured spec root to the project default', async () => {
+    const root = fixture();
+    const outside = mkdtempSync(join(tmpdir(), 'openlore-spec-workflow-outside-'));
+    roots.push(outside);
+    writeFileSync(join(root, '.openlore', 'config.json'), JSON.stringify({
+      version: '1', projectType: 'nodejs', openspecPath: outside,
+      analysis: { maxFiles: 100, includePatterns: ['**/*.ts'], excludePatterns: ['node_modules/**'] },
+      generation: { domains: 'auto' },
+      createdAt: new Date().toISOString(), lastRun: new Date().toISOString(),
+    }));
+    mkdirSync(join(root, 'openspec', 'specs', 'billing'), { recursive: true });
+    writeFileSync(join(root, 'openspec', 'specs', 'billing', 'spec.md'), '# Billing\n\n### Requirement: Bills\n');
+    mkdirSync(join(outside, 'specs', 'billing'), { recursive: true });
+    writeFileSync(join(outside, 'specs', 'billing', 'spec.md'), '# Outside Secret\n');
+
+    const result = await prepareSpecRepair({ directory: root, domain: 'billing' });
+    expect(result.evidence?.specValidation).toMatchObject({
+      specRoot: 'openspec', specRootIsDefault: true, cliValidationAvailable: true,
+    });
+    expect(JSON.stringify(result)).not.toContain('Outside Secret');
+  });
+
+  it('supports a spec corpus configured at the project root', async () => {
+    const root = fixture();
+    writeFileSync(join(root, '.openlore', 'config.json'), JSON.stringify({
+      version: '1', projectType: 'nodejs', openspecPath: '.',
+      analysis: { maxFiles: 100, includePatterns: ['**/*.ts'], excludePatterns: ['node_modules/**'] },
+      generation: { domains: 'auto' },
+      createdAt: new Date().toISOString(), lastRun: new Date().toISOString(),
+    }));
+    mkdirSync(join(root, 'specs', 'overview'), { recursive: true });
+    writeFileSync(
+      join(root, 'specs', 'overview', 'spec.md'),
+      '# Overview\n\nSee [analyzer](../analyzer/spec.md).\n\n### Requirement: Describes The System\n',
+    );
+
+    const result = await prepareSpecRepair({ directory: root, domain: 'overview' });
+    expect(result.error).toBeUndefined();
+    expect(result.evidence?.specValidation).toMatchObject({ specRoot: '.', specRootIsDefault: false });
+    expect(result.evidence?.domainBehavior).toMatchObject({ proseOnlyOrphan: false });
+    expect(result.receipt.followUps.some(f => f.tool === 'ask:human-decision')).toBe(false);
+  });
+
   it('keeps a corpus-level spec repairable even though it owns no analyzed domain', async () => {
     // `overview` and `architecture` are structural specs by design: they own no
     // source, and cite other specs. Absence of a bundle is not evidence of prose,

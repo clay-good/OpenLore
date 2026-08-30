@@ -9,8 +9,10 @@ import {
   OPENLORE_ANALYSIS_SUBDIR,
   OPENLORE_DIR,
   OPENSPEC_DIR,
+  OPENSPEC_SPECS_SUBDIR,
   REPO_CONTENT_PROVENANCE,
 } from '../../constants.js';
+import { resolveOpenspecDir } from '../../utils/openspec-dir.js';
 import type { LLMContext, RepoStructure } from '../analyzer/artifact-generator.js';
 import type { DependencyGraphResult } from '../analyzer/dependency-graph.js';
 import { isDocumentationFile } from '../analyzer/domain-naming.js';
@@ -147,7 +149,8 @@ async function loadAnalysisSnapshot(directory: string): Promise<
 > {
   const root = await validateDirectory(directory);
   const analysisDir = join(root, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
-  const openspecPath = (await readOpenLoreConfig(root).catch(() => null))?.openspecPath ?? OPENSPEC_DIR;
+  const configuredPath = (await readOpenLoreConfig(root).catch(() => null))?.openspecPath ?? OPENSPEC_DIR;
+  const openspecPath = relative(root, resolveOpenspecDir(root, configuredPath)).replaceAll('\\', '/') || '.';
   const snapshot = await readGenerationSnapshot(
     analysisDir,
     [...REQUIRED_ANALYSIS_ARTIFACTS],
@@ -716,7 +719,7 @@ async function specValidationDisclosure(root: string, specRoot: string): Promise
   cliValidationAvailable: boolean;
 }> {
   const version = await detectOpenSpecPackageVersion(root);
-  const normalized = specRoot.replaceAll('\\', '/').replace(/^\.\//, '').replace(/\/+$/, '');
+  const normalized = normalizeSpecRoot(specRoot);
   return {
     validatedByOpenLore: false,
     command: OPENSPEC_VALIDATE_COMMAND,
@@ -730,6 +733,11 @@ async function specValidationDisclosure(root: string, specRoot: string): Promise
     // the repository root and from inside the relocated corpus).
     cliValidationAvailable: normalized === OPENSPEC_DIR,
   };
+}
+
+function normalizeSpecRoot(specRoot: string): string {
+  const normalized = specRoot.replaceAll('\\', '/').replace(/^\.\//, '').replace(/\/+$/, '');
+  return normalized || '.';
 }
 
 /**
@@ -831,9 +839,12 @@ function domainBehaviorOf(
     // `scopedPaths` are already normalized (no `./` prefix, no trailing slash), so
     // the configured root is normalized the same way before comparing — a common
     // `./openspec` value would otherwise match nothing and leave the corpus in.
-    const normalizedRoot = specRoot.replaceAll('\\', '/').replace(/^\.\//, '').replace(/\/+$/, '');
+    const normalizedRoot = normalizeSpecRoot(specRoot);
+    const corpusRoot = normalizedRoot === '.'
+      ? OPENSPEC_SPECS_SUBDIR
+      : `${normalizedRoot}/${OPENSPEC_SPECS_SUBDIR}`;
     const sourcePaths = scopedPaths
-      .filter(path => !path.startsWith(`${normalizedRoot}/`))
+      .filter(path => path !== corpusRoot && !path.startsWith(`${corpusRoot}/`))
       .map(path => path.split('#')[0]);
     const documentationPaths = sourcePaths.filter(isDocumentationFile).length;
     return {

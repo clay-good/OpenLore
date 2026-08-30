@@ -3,7 +3,7 @@
  * search_code, suggest_insertion_points, search_specs.
  */
 
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import {
   INSERTION_SEMANTIC_WEIGHT,
   INSERTION_STRUCTURAL_WEIGHT,
@@ -19,6 +19,7 @@ import {
   OPENSPEC_SPECS_SUBDIR,
 } from '../../../constants.js';
 import { fileExists } from '../../../utils/command-helpers.js';
+import { resolveOpenspecDir } from '../../../utils/openspec-dir.js';
 import { validateDirectory, safeJoin, loadMappingIndex, specsForFile, functionsForDomain, queryTooLongError, notReadyResult, readCachedContext, getCachedNodeStartLine } from './utils.js';
 import { expandHandle, applyTokenBudget, collapseExactDuplicates, omissionNote } from './progressive.js';
 import { readOpenLoreConfig } from '../config-manager.js';
@@ -499,9 +500,11 @@ export async function handleSuggestInsertionPoints(
  * path that does not exist — `get_spec` reporting not-found for files plainly on
  * disk, and `list_spec_domains` answering with an empty list.
  */
-async function configuredSpecRoot(absDir: string): Promise<string> {
+async function configuredSpecRoot(absDir: string): Promise<{ absolute: string; relative: string }> {
   const configured = (await readOpenLoreConfig(absDir).catch(() => null))?.openspecPath ?? OPENSPEC_DIR;
-  return configured.replaceAll('\\', '/').replace(/^\.\//, '').replace(/\/+$/, '') || OPENSPEC_DIR;
+  const absolute = resolveOpenspecDir(absDir, configured);
+  const relativePath = relative(absDir, absolute).replaceAll('\\', '/');
+  return { absolute, relative: relativePath || '.' };
 }
 
 export async function handleGetSpec(directory: string, domain: string): Promise<unknown> {
@@ -510,13 +513,14 @@ export async function handleGetSpec(directory: string, domain: string): Promise<
   const { join: pjoin } = await import('node:path');
   const absDir = await validateDirectory(directory);
 
-  const openspecPath = await configuredSpecRoot(absDir);
+  const openspecRoot = await configuredSpecRoot(absDir);
+  const specsRoot = pjoin(openspecRoot.absolute, OPENSPEC_SPECS_SUBDIR);
 
   // `domain` is an untrusted tool arg; confine it to the repo so e.g.
   // domain="../../../../etc" can't escape to read arbitrary spec.md files.
   let specFile: string;
   try {
-    specFile = safeJoin(absDir, pjoin(openspecPath, 'specs', domain, 'spec.md'));
+    specFile = safeJoin(specsRoot, pjoin(domain, 'spec.md'));
   } catch {
     return {
       error: `No spec found for domain "${domain}". Run list_spec_domains to see available domains.`,
@@ -537,7 +541,12 @@ export async function handleGetSpec(directory: string, domain: string): Promise<
   // Both the reported path and the provenance must name the file actually read.
   // Querying git about `openspec/...` while serving a relocated spec would report
   // a clean, unrelated path — a modified spec could then be served as reviewed.
-  const relativeSpecFile = `${openspecPath.replace(/^\.\//, '').replace(/\/$/, '')}/specs/${domain}/spec.md`;
+  const relativeSpecFile = [
+    ...(openspecRoot.relative === '.' ? [] : [openspecRoot.relative]),
+    OPENSPEC_SPECS_SUBDIR,
+    domain,
+    'spec.md',
+  ].join('/');
   return {
     domain,
     specFile: relativeSpecFile,
@@ -560,12 +569,16 @@ export async function handleListSpecDomains(directory: string): Promise<unknown>
   const { join: pjoin } = await import('node:path');
   const absDir = await validateDirectory(directory);
 
-  const openspecPath = await configuredSpecRoot(absDir);
-  const specsDir = pjoin(absDir, openspecPath, OPENSPEC_SPECS_SUBDIR);
+  const openspecRoot = await configuredSpecRoot(absDir);
+  const specsDir = pjoin(openspecRoot.absolute, OPENSPEC_SPECS_SUBDIR);
+  const relativeSpecsDir = [
+    ...(openspecRoot.relative === '.' ? [] : [openspecRoot.relative]),
+    OPENSPEC_SPECS_SUBDIR,
+  ].join('/');
   if (!(await fileExists(specsDir))) {
     return {
       domains: [],
-      note: `No ${openspecPath}/${OPENSPEC_SPECS_SUBDIR}/ directory found. Run "openlore generate" first.`,
+      note: `No ${relativeSpecsDir}/ directory found. Run "openlore generate" first.`,
     };
   }
 
@@ -583,7 +596,7 @@ export async function handleListSpecDomains(directory: string): Promise<unknown>
   return {
     domains,
     count: domains.length,
-    provenance: await reviewedFileContentProvenance(absDir, `${openspecPath}/${OPENSPEC_SPECS_SUBDIR}`),
+    provenance: await reviewedFileContentProvenance(absDir, relativeSpecsDir),
   };
 }
 
