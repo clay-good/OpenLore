@@ -30,10 +30,27 @@ The persisted mapping artifact SHALL be a rebuildable cache whose provenance bin
 
 The standalone generator and agent-hosted Generate/Repair workflows SHALL leave specifications eligible for the same deterministic link-index derivation. Canonical agent skills SHALL validate edited specs and refresh the persisted mapping cache when the local CLI is available; correctness of subsequent audit and Repair MUST NOT depend on that cache refresh having occurred.
 
+The system MUST NOT validate OpenSpec structure itself: the format is owned by the `openspec` CLI, and OpenLore SHALL NOT reimplement its rules in the agent-hosted workflows. The Generate and Repair composites SHALL therefore each disclose, on every page, that they validated nothing, and SHALL name the exact validation command as a follow-up on the terminal page. That command SHALL be scoped to specifications and run strictly, so an unrelated invalid change in flight cannot fail a valid baseline specification and a warning is not accepted as a pass. When the configured specification root is not the default, the follow-up SHALL disclose it, because the OpenSpec CLI resolves its own root and does not read OpenLore's configuration. This applies identically to both: a specification authored by Generate is no more self-validating than one edited by Repair. Neither skill SHALL restate the format's rules; a restated copy drifts from the tool it describes. Both workflows author a BASELINE corpus specification, not a change delta, so they SHALL take their shape from an existing specification — the one Repair edits, or a sibling in the same corpus for Generate — and SHALL use `openspec validate` as the judge of the result. They MUST NOT follow the CLI's change-artifact instructions for this purpose: those describe the change-local delta form, and writing its operation headers into a baseline specification corrupts what archive later merges. What the composite can observe about the CLI SHALL be reported as fact, never as a verdict: an OpenSpec package that resolves from neither the project nor OpenLore is `unresolved`, which is a disclosed unknown and MUST NOT be reported as the CLI being absent. A host that cannot run validation SHALL report the edited specification as NOT validated rather than as finalized.
+
 #### Scenario: Agent-hosted generation updates observable coverage
 - **GIVEN** an agent authors a specification from deterministic generation evidence and includes exact implementation anchors
 - **WHEN** the skill completes validation and a later audit runs
 - **THEN** the new links are derived from the edited spec whether or not a prior `mapping refresh` persisted the cache
+
+#### Scenario: A spec the host could not validate is reported as unvalidated
+- **GIVEN** a host authors or edits a specification from Generate or Repair evidence and the `openspec` CLI cannot run
+- **WHEN** the host finalizes the workflow
+- **THEN** the outcome states the specification is NOT validated, and no OpenLore-computed structural verdict is presented in its place
+
+#### Scenario: A baseline spec is not shaped by delta instructions
+- **GIVEN** a host authoring or repairing a baseline corpus specification while a change is in flight
+- **WHEN** it needs the specification format
+- **THEN** it takes the shape from an existing specification in the corpus and validates with `openspec validate`, and does not apply the change-artifact delta instructions
+
+#### Scenario: Validation is named, never performed by OpenLore
+- **GIVEN** any Generate or Repair page
+- **WHEN** the receipt is built
+- **THEN** the page discloses that OpenLore validated nothing, the terminal page carries the exact `openspec validate` follow-up, and an OpenSpec package resolving from neither scope is disclosed as unresolved rather than as absent
 
 #### Scenario: Standalone generation uses the same link contract
 - **GIVEN** standalone generation writes specifications

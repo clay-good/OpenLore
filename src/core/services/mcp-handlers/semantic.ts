@@ -498,11 +498,16 @@ export async function handleGetSpec(directory: string, domain: string): Promise<
   const { join: pjoin } = await import('node:path');
   const absDir = await validateDirectory(directory);
 
+  // Honor the configured spec root: a repo that moved `openspec/` would otherwise
+  // resolve every spec to a path that does not exist, and Repair would report
+  // `spec-not-found` for specs that are plainly on disk.
+  const openspecPath = (await readOpenLoreConfig(absDir).catch(() => null))?.openspecPath ?? OPENSPEC_DIR;
+
   // `domain` is an untrusted tool arg; confine it to the repo so e.g.
   // domain="../../../../etc" can't escape to read arbitrary spec.md files.
   let specFile: string;
   try {
-    specFile = safeJoin(absDir, pjoin('openspec', 'specs', domain, 'spec.md'));
+    specFile = safeJoin(absDir, pjoin(openspecPath, 'specs', domain, 'spec.md'));
   } catch {
     return {
       error: `No spec found for domain "${domain}". Run list_spec_domains to see available domains.`,
@@ -520,11 +525,15 @@ export async function handleGetSpec(directory: string, domain: string): Promise<
   ]);
   const linkedFunctions = mappingIdx ? functionsForDomain(mappingIdx, domain) : undefined;
 
+  // Both the reported path and the provenance must name the file actually read.
+  // Querying git about `openspec/...` while serving a relocated spec would report
+  // a clean, unrelated path — a modified spec could then be served as reviewed.
+  const relativeSpecFile = `${openspecPath.replace(/^\.\//, '').replace(/\/$/, '')}/specs/${domain}/spec.md`;
   return {
     domain,
-    specFile: `openspec/specs/${domain}/spec.md`,
+    specFile: relativeSpecFile,
     content,
-    provenance: await reviewedFileContentProvenance(absDir, `openspec/specs/${domain}/spec.md`),
+    provenance: await reviewedFileContentProvenance(absDir, relativeSpecFile),
     linkedFunctions,
   };
 }

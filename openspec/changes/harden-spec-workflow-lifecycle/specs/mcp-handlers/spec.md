@@ -97,3 +97,49 @@ Generation preparation SHALL compare the requested analyzed domain footprint wit
 - **GIVEN** a candidate domain with a complete footprint comparison and no shared files or symbols
 - **WHEN** generation preparation runs
 - **THEN** it reports an available empty overlap set rather than omitting the observation
+
+### Requirement: Domains Without Behavior Are Disclosed, Not Specified
+
+The Generate and Repair composites SHALL report, as a page-global observation, whether the resolved domain contains any symbol a requirement could describe. The no-behavior state SHALL be decided on POSITIVE evidence of prose — every file that defines the domain is documentation — and MUST NOT be inferred from the absence of extracted signatures, which a declarative or bootstrap-style domain also lacks. A documentation-only domain SHALL be disclosed as such together with the evidence behind it (symbol count, defining-file count, documentation-file count), and the terminal page SHALL carry a stop-and-ask follow-up rather than a verdict. The symbol count SHALL count symbols, not the files that carry them, and SHALL count DEFINING symbols only: a requirement anchors to the implementation, never to a test, so a domain whose only symbols live in an attached test file SHALL still be reported as having no behavior. Supporting symbols SHALL be disclosed alongside rather than folded into the count.
+
+When no analyzed domain backs the request at all, the behavior state SHALL be `unavailable` with null counts, never a fabricated zero. The stop-and-ask follow-up SHALL then be emitted only on positive evidence of prose — every source file the specification cites is documentation — a cited path carrying an anchor (`README.md#Installation`) SHALL be classified by the file it names rather than the fragment, and the specification corpus's own files SHALL be excluded from that evidence using the CONFIGURED specification root rather than the default directory name, so a corpus-level specification such as `overview` or `architecture`, which owns no source by design and cites other specifications, SHALL remain repairable.
+
+This is an observation, never a decision: the system MUST NOT declare such a domain illegitimate, and MUST NOT author or withhold a specification on its own. Canonical agent skills SHALL key their stop on the emitted follow-up rather than on the behavior state alone — a bare `unavailable` without that follow-up is not a stop — and SHALL then ask the human whether the domain should be specified at all. They MUST NOT paraphrase documentation into requirement statements.
+
+- **Implementation**: `domainBehaviorOf::src/core/services/spec-workflow.ts`
+
+#### Scenario: A behavior-free domain raises a stop, not a spec
+- **GIVEN** a resolved domain every one of whose defining files is documentation
+- **WHEN** Generate or Repair evidence is prepared
+- **THEN** the page discloses the domain has no behavior with its supporting counts, and the terminal page carries a stop-and-ask follow-up
+
+#### Scenario: A surviving prose-only spec whose domain is gone still raises the stop
+- **GIVEN** a specification whose domain is no longer produced by the analysis and whose every cited source file is documentation
+- **WHEN** Repair evidence is prepared for it
+- **THEN** the behavior state is `unavailable` with null counts, and the terminal page carries the stop-and-ask follow-up
+
+#### Scenario: A relocated specification root is honored
+- **GIVEN** a repository whose configured specification root is not the default directory name
+- **WHEN** a specification under it is loaded or its corpus files are excluded from prose evidence
+- **THEN** the configured root is used, so the specification resolves and no corpus-level specification is misread as a prose-only orphan
+
+#### Scenario: A corpus-level spec stays repairable
+- **GIVEN** a specification that owns no analyzed domain and cites only other specifications
+- **WHEN** Repair evidence is prepared for it
+- **THEN** the behavior state is `unavailable` and no stop-and-ask follow-up is emitted
+
+#### Scenario: A code domain without extracted signatures is behavior
+- **GIVEN** a domain defined by source files that yield no extracted signatures
+- **WHEN** Generate or Repair evidence is prepared
+- **THEN** the domain is reported as behavioral and no stop-and-ask follow-up is emitted
+
+#### Scenario: Test-only symbols do not count as behavior
+- **GIVEN** a domain defined only by documentation whose attached test file carries symbols
+- **WHEN** Generate or Repair evidence is prepared
+- **THEN** the domain is reported as documentation-only, the supporting symbols are disclosed separately, and the stop-and-ask follow-up is emitted
+
+#### Scenario: A domain with symbols raises no stop
+- **GIVEN** a resolved domain whose evidence names at least one symbol
+- **WHEN** Generate or Repair evidence is prepared
+- **THEN** the domain is disclosed as behavioral and no stop-and-ask follow-up is emitted
+

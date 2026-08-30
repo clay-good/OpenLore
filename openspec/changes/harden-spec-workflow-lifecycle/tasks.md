@@ -56,6 +56,9 @@
 - [x] 7.3 Preserve the free generate `--dry-run` contract and expose the same plan-only behavior under `--plan`, including CLI/API regression coverage before provider resolution.
 - [x] 7.4 Implement explicit paid `generate --preview` in isolated temporary output with provider/cost disclosure, normalized candidate-spec summary, and zero writes to project specs, mapping, configuration, manifests, backups, or analysis artifacts.
 - [x] 7.5 Add snapshot/integration tests for dry-run/plan without provider calls, paid-preview candidate diffs, external output directories, provider failure cleanup, and byte-identical project state before/after preview.
+- [x] 7.6 Close the unvalidated-finalization hole 7.1 left open, at parity across BOTH authoring paths: give each a format reference OpenLore does not own — an existing baseline spec in the corpus, judged by `openspec validate`, explicitly NOT the CLI's change-delta instructions, disclose on every Repair page that OpenLore validated nothing, name the exact `openspec validate` command as a terminal-page follow-up, report an OpenSpec package resolving from neither scope as unresolved rather than absent, and require the host to report an unvalidated edit as NOT validated.
+- [x] 7.7 Stop the workflows offering documentation as behavior: classify prose (docs, licences, project meta) as `supporting` so a documentation-only tree is dropped by the existing `non-defining-only` rule, disclose a symbol-free domain as having no behavior with its supporting counts, emit a terminal-page stop-and-ask follow-up, and make both canonical skills refuse to paraphrase prose into SHALL statements.
+- [x] 7.8 Honor the configured specification root in spec retrieval, its reported path and provenance, and the prose-evidence corpus filter (normalizing a `./`-prefixed root), so a repository that moved `openspec/` can load and repair its specifications instead of reporting them not found.
 
 ## 8. Validation And Dogfood
 
