@@ -107,6 +107,20 @@ export interface OpenLoreConfig {
   };
   /** Trusted producers for optional signed graph-bundle imports. */
   bundle?: BundleConfig;
+  /** Optional explicit workspace boundaries. When absent, analyzer manifests are detected. */
+  workspace?: WorkspaceConfig;
+}
+
+export interface WorkspaceShardConfig {
+  /** Stable CLI name used by `analyze --shard`. */
+  name: string;
+  /** Repository-relative package root. */
+  root: string;
+}
+
+export interface WorkspaceConfig {
+  /** Explicit boundaries replace manifest detection; unmatched files belong to `root`. */
+  shards?: WorkspaceShardConfig[];
 }
 
 export interface BundleTrustedSigner {

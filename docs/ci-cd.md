@@ -90,6 +90,19 @@ fi
 
 See [shareable-bundle.md](shareable-bundle.md#ci-bootstrap-recipe).
 
+### Shard a monorepo analysis
+
+After restoring or building one complete index, CI jobs may update only the packages they own:
+
+```bash
+openlore analyze --shard payments --shard shared-contracts
+```
+
+The command retains the whole graph and re-resolves cross-package callers. It does not publish a
+repository-wide freshness fingerprint or rebuild repository-wide artifacts from partial input.
+Inspect `.openlore/analysis/workspace-shards.json` for retained-shard freshness and any explicitly
+stale frontier. If no prior index exists, the command performs a disclosed full analysis instead.
+
 ### Deterministic vs. LLM-Enhanced
 
 | | Deterministic (Default) | LLM-Enhanced |

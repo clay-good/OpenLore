@@ -1,7 +1,10 @@
 import { join, relative, resolve } from 'node:path';
+import { readFile } from 'node:fs/promises';
 import {
   ARTIFACT_DEPENDENCY_GRAPH,
   ARTIFACT_FINGERPRINT,
+  ARTIFACT_LLM_CONTEXT,
+  ARTIFACT_REPO_STRUCTURE,
   DEEP_ANALYSIS_FILE_RATIO,
   MAX_DEEP_ANALYSIS_FILES,
   MAX_VALIDATION_FILES,
@@ -31,6 +34,13 @@ import { captureSourceState, reconcileSourceStates } from './source-state.js';
 import { extractUIComponents } from './ui-component-extractor.js';
 import { writeJsonAtomicStreaming } from './json-stream.js';
 import { isConfinedPath } from '../../utils/path-confinement.js';
+import { EdgeStore } from '../services/edge-store.js';
+import { detectWorkspaceShards, resolveWorkspaceShardSelection, type WorkspaceShardReport } from './workspace-shards.js';
+import {
+  runShardScopedAnalysis,
+  writeFullShardReceipt,
+  type ShardScopedAnalysisReceipt,
+} from './workspace-shard-analysis.js';
 
 export { isAnalysisCacheFresh } from '../services/mcp-handlers/utils.js';
 
@@ -54,6 +64,8 @@ export interface AnalysisCoreResult {
   artifacts: AnalysisArtifacts;
   duration: number;
   generationId?: string;
+  workspaceShards?: WorkspaceShardReport;
+  shardReceipt?: ShardScopedAnalysisReceipt;
 }
 
 export interface AnalysisCoreOptions {
@@ -64,6 +76,8 @@ export interface AnalysisCoreOptions {
   ownership?: AnalysisOwnership & { state: 'owned' };
   reporter?: AnalysisReporter;
   config?: OpenLoreConfig | null;
+  /** Explicit workspace shard names. Omit for the legacy full-analysis path. */
+  shards?: string[];
 }
 
 export function mergeAnalysisPatterns(
@@ -145,6 +159,19 @@ export async function runAnalysisCore(
   const fingerprintHash = await computeProjectFingerprint(rootPath, { configuration: fingerprintConfig, protectedExcludePatterns });
   const sourceStateBefore = await captureSourceState(rootPath);
   const repoMap = await mapper.map();
+  const workspaceShards = await detectWorkspaceShards(
+    rootPath,
+    repoMap.allFiles.map(file => file.path),
+    config?.workspace?.shards,
+  );
+  emit({
+    stage: 'mapping',
+    status: 'info',
+    detail: `Workspace shards (${workspaceShards.source}): ${workspaceShards.shards.map(shard => `${shard.name} ${shard.files.length}`).join(', ')}`,
+  });
+  for (const ignored of workspaceShards.ignoredMembers) {
+    emit({ stage: 'mapping', status: 'warning', detail: `Ignored workspace member '${ignored.member}' from ${ignored.manifest}: ${ignored.reason}.` });
+  }
   emit({ stage: 'mapping', status: 'complete', detail: `${repoMap.summary.analyzedFiles} files` });
   const skipReasons = Object.entries(repoMap.summary.skippedReasons ?? {})
     .filter(([, count]) => count > 0)
@@ -160,6 +187,55 @@ export async function runAnalysisCore(
   }
   if (repoMap.summary.truncated) {
     emit({ stage: 'mapping', status: 'warning', detail: `Partial corpus: walk stopped at the ${repoMap.summary.truncated.limit}-file cap (at ${repoMap.summary.truncated.atPath}).` });
+  }
+
+  if (options.shards && options.shards.length > 0) {
+    const selected = resolveWorkspaceShardSelection(workspaceShards, options.shards);
+    if (EdgeStore.exists(outputPath) && options.reExtract !== true) {
+      await stage('artifacts', 50, `Recomputing workspace shard(s): ${selected.map(shard => shard.name).join(', ')}`);
+      const shardReceipt = await runShardScopedAnalysis({
+        rootPath,
+        outputPath,
+        report: workspaceShards,
+        selectedNames: selected.map(shard => shard.name),
+      });
+      // Scoped publication deliberately retains repo-wide JSON artifacts. Load them
+      // for API compatibility; callers use shardReceipt to avoid presenting them as
+      // freshly re-aggregated results.
+      const [depGraphRaw, repoStructureRaw, llmContextRaw, summaryMarkdown, dependencyDiagram] = await Promise.all([
+        readFile(join(outputPath, ARTIFACT_DEPENDENCY_GRAPH), 'utf8'),
+        readFile(join(outputPath, ARTIFACT_REPO_STRUCTURE), 'utf8'),
+        readFile(join(outputPath, ARTIFACT_LLM_CONTEXT), 'utf8'),
+        readFile(join(outputPath, 'SUMMARY.md'), 'utf8'),
+        readFile(join(outputPath, 'dependencies.mermaid'), 'utf8'),
+      ]);
+      emit({
+        stage: 'complete',
+        status: shardReceipt.staleFiles.length > 0 ? 'warning' : 'complete',
+        percent: 100,
+        detail: `Scoped graph update: recomputed ${shardReceipt.recomputed.join(', ')}; retained ${shardReceipt.retained.join(', ') || 'none'}; frontier ${shardReceipt.frontierFiles.length}; stale ${shardReceipt.staleFiles.length}. Repo-wide artifacts retained until a full analyze.`,
+      });
+      return {
+        repoMap,
+        depGraph: JSON.parse(depGraphRaw) as DependencyGraphResult,
+        artifacts: {
+          repoStructure: JSON.parse(repoStructureRaw) as AnalysisArtifacts['repoStructure'],
+          llmContext: JSON.parse(llmContextRaw) as AnalysisArtifacts['llmContext'],
+          summaryMarkdown,
+          dependencyDiagram,
+        },
+        duration: Date.now() - startedAt,
+        workspaceShards,
+        shardReceipt,
+      };
+    }
+    emit({
+      stage: 'mapping',
+      status: 'warning',
+      detail: options.reExtract === true
+        ? '`--shard` with `--force` performs a disclosed full rebuild; shard scoping is not applied.'
+        : '`--shard` requested but no prior graph index exists; performing a disclosed full rebuild.',
+    });
   }
 
   await stage('dependency-graph', 25, 'Building dependency graph');
@@ -226,6 +302,7 @@ export async function runAnalysisCore(
       precomputed: artifacts,
       acquireLock: false,
     });
+    await writeFullShardReceipt(outputPath, workspaceShards, rootPath);
     await writeJsonAtomicStreaming(join(outputPath, ARTIFACT_DEPENDENCY_GRAPH), depGraph);
     await atomicWriteFile(join(outputPath, ARTIFACT_FINGERPRINT), JSON.stringify({
       hash: fingerprintHash,
@@ -269,5 +346,5 @@ export async function runAnalysisCore(
   emit({ stage: 'artifacts', status: 'complete' });
   await options.ownership?.update('complete', { percent: 100 }).catch(() => {});
   emit({ stage: 'complete', status: 'complete', percent: 100 });
-  return { repoMap, depGraph, artifacts, duration: Date.now() - startedAt, generationId: generationId! };
+  return { repoMap, depGraph, artifacts, duration: Date.now() - startedAt, generationId: generationId!, workspaceShards };
 }

@@ -8,7 +8,7 @@
 
 ```json
 {
-  "version": "1.1.0",
+  "version": "1.2.0",
   "projectType": "nodejs",
   "openspecPath": "./openspec",
   "analysis": {
@@ -22,6 +22,31 @@
   }
 }
 ```
+
+### Workspace shards
+
+`analyze` detects monorepo package boundaries from existing manifests. Usually no configuration
+is needed. To replace detection with explicit repository-relative roots, add:
+
+```json
+{
+  "workspace": {
+    "shards": [
+      { "name": "payments", "root": "services/payments" },
+      { "name": "web", "root": "apps/web" }
+    ]
+  }
+}
+```
+
+After one full analysis, `openlore analyze --shard payments` recomputes that package and every
+outside call site whose resolution may change. Files matching no configured root belong to the
+nameable `root` shard. Boundaries partition the corpus after `analysis.includePatterns` and
+`analysis.excludePatterns`; they never widen it. The scoped receipt is
+`.openlore/analysis/workspace-shards.json`. See [Analyze options](cli-reference.md#analyze-options).
+Configured names and roots must be non-empty and unique; `root` is reserved. OpenLore bounds
+workspace declarations to 2,000 manifest patterns and 5,000 resolved shards so repository-owned
+metadata cannot turn discovery into an unbounded scan.
 
 ### Repository vocabulary expansion
 

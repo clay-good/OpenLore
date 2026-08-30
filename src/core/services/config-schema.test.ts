@@ -44,12 +44,26 @@ const FULLY_POPULATED: Required<OpenLoreConfig> = {
   enforcement: {},
   secretRedaction: {},
   bundle: {},
+  workspace: { shards: [{ name: 'api', root: 'packages/api' }] },
 };
 
 describe('config-schema — type-completeness bind', () => {
-  it('signals the additive frozen-policy enum with schema version 1.1.0', () => {
-    expect(CONFIG_SCHEMA_VERSION).toBe('1.1.0');
+  it('signals the workspace schema addition with schema version 1.2.0', () => {
+    expect(CONFIG_SCHEMA_VERSION).toBe('1.2.0');
     expect(checkConfigVersion('1.0.0')).toEqual([]);
+  });
+
+  it('rejects duplicate and reserved workspace shard names', () => {
+    const findings = validateOpenLoreConfig({
+      ...FULLY_POPULATED,
+      workspace: { shards: [
+        { name: 'root', root: 'packages/root' },
+        { name: 'api', root: 'packages/api' },
+        { name: 'api', root: 'packages/api-copy' },
+      ] },
+    });
+    expect(findings.filter(finding => finding.key?.endsWith('.name'))).toHaveLength(2);
+    expect(findings.every(finding => finding.fatal === true)).toBe(true);
   });
 
   it('validator field map covers exactly the keys of a fully-populated OpenLoreConfig', () => {
@@ -67,6 +81,36 @@ describe('config-schema — type-completeness bind', () => {
 
   it('a fully-populated, correctly-typed config yields zero findings', () => {
     expect(validateOpenLoreConfig(FULLY_POPULATED)).toEqual([]);
+  });
+
+  it('rejects absolute workspace shard roots at config validation', () => {
+    const findings = validateOpenLoreConfig({
+      ...FULLY_POPULATED,
+      workspace: { shards: [{ name: 'api', root: '/repo/packages/api' }] },
+    });
+    expect(findings).toContainEqual(expect.objectContaining({
+      key: 'workspace.shards[0].root', fatal: true,
+    }));
+  });
+
+  it('rejects control characters in workspace shard names', () => {
+    const findings = validateOpenLoreConfig({
+      ...FULLY_POPULATED,
+      workspace: { shards: [{ name: 'bad\nname', root: 'packages/api' }] },
+    });
+    expect(findings).toContainEqual(expect.objectContaining({
+      key: 'workspace.shards[0].name', fatal: true,
+    }));
+  });
+
+  it('rejects C1 terminal controls in workspace shard names', () => {
+    const findings = validateOpenLoreConfig({
+      ...FULLY_POPULATED,
+      workspace: { shards: [{ name: 'bad\u009b31m', root: 'packages/api' }] },
+    });
+    expect(findings).toContainEqual(expect.objectContaining({
+      key: 'workspace.shards[0].name', fatal: true,
+    }));
   });
 
   it('accepts frozen as a categorical enforcement policy class', () => {

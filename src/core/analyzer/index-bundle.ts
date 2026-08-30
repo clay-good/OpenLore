@@ -398,6 +398,12 @@ function attestExportedStore(dbPath: string): IndexAttestation {
     throw new Error(`cannot export graph index: ${fault.message}`);
   }
   try {
+    const staleFiles = store.getStaleFiles();
+    if (staleFiles.length > 0) {
+      throw new Error(
+        `cannot export graph index: ${staleFiles.length} file(s) are explicitly stale; run \`openlore analyze --force\` first`,
+      );
+    }
     const nodes = store.getAllInternalNodes().map(n => ({ id: n.id, filePath: n.filePath }));
     const edges = store.getAllEdges().map(e => ({ callerId: e.callerId, calleeId: e.calleeId, calleeName: e.calleeName }));
     const classes = store.getAllClasses().map(c => ({ id: c.id }));
