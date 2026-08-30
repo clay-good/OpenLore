@@ -1853,6 +1853,10 @@ export async function writeEdgesToSQLite(
       store.insertEdges(prodEdges);
       store.insertInheritanceEdges(inheritanceEdges);
       store.insertClasses(classes);
+      // SQLite is explicitly the production graph. Recompute its structural
+      // metrics from the persisted production edges so full and scoped
+      // publications share one contract even when llm-context retains test edges.
+      store.recomputeStructuralMetrics();
 
     // CFG/def-use overlay (spec: add-intraprocedural-cfg-dataflow-overlay).
     // Production functions only — keyed by the same normalized ids as nodes.

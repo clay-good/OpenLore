@@ -481,6 +481,15 @@ describe('index-bundle: export', () => {
     await writeAttestation(src, computeAttestation(SCHEMA_VERSION, [], [], []));
     await expect(buildBundle(src, VERSION)).rejects.toMatchObject({ code: 'no-index' });
   });
+
+  it('refuses to export a graph carrying an explicitly stale shard frontier', async () => {
+    const src = join(work, 'stale-analysis');
+    await buildAnalysisDir(src, 'abc1234');
+    const store = EdgeStore.open(EdgeStore.dbPath(src));
+    try { store.markFilesStale(['src/b.ts']); }
+    finally { store.close(); }
+    await expect(buildBundle(src, VERSION)).rejects.toThrow(/explicitly stale.*analyze --force/);
+  });
 });
 
 describe('index-bundle: round-trip materialization (the "identical index" property)', () => {

@@ -7,7 +7,7 @@ import type { DecisionNode, DecisionAffectsEdge } from '../decisions/project.js'
 import type { FileProvenance } from '../provenance/git-provenance.js';
 import type { FileChangeCoupling, CoupledFile, ChangeCouplingResult } from '../provenance/change-coupling.js';
 import type { DecisionStatus } from '../../types/index.js';
-import { ARTIFACT_CALL_GRAPH_DB } from '../../constants.js';
+import { ARTIFACT_CALL_GRAPH_DB, HUB_THRESHOLD } from '../../constants.js';
 import { quarantineCorruptSync } from '../decisions/atomic-store.js';
 import {
   combineStaleFileCompositions,
@@ -642,6 +642,27 @@ export class EdgeStore {
     });
   }
 
+  replaceInheritanceEdges(edges: InheritanceEdge[]): void {
+    this.db.exec('DELETE FROM inheritance_edges');
+    this.insertInheritanceEdges(edges);
+  }
+
+  getAllInheritanceEdges(): InheritanceEdge[] {
+    return this.db.prepare(`
+      SELECT parent_id AS parentId, child_id AS childId, kind
+      FROM inheritance_edges
+      ORDER BY parent_id, child_id, kind
+    `).all().map(row => {
+      const edge = row as { parentId: string; childId: string; kind: string | null };
+      return {
+        id: `${edge.parentId}->${edge.childId}`,
+        parentId: edge.parentId,
+        childId: edge.childId,
+        kind: (edge.kind ?? 'extends') as InheritanceEdge['kind'],
+      };
+    });
+  }
+
   // ── Node queries ──────────────────────────────────────────────────────────────
 
   getNode(id: string): FunctionNode | null {
@@ -787,6 +808,54 @@ export class EdgeStore {
       const placeholders = ids.map(() => '?').join(',');
       this.db.prepare(`DELETE FROM nodes_fts WHERE node_id IN (${placeholders})`).run(...ids);
     }
+  }
+
+  /** Remove synthetic external nodes no longer referenced by any persisted edge. */
+  deleteOrphanExternalNodes(): void {
+    const orphanPredicate = `
+      is_external = 1
+      AND NOT EXISTS (
+        SELECT 1 FROM edges
+        WHERE edges.caller_id = nodes.id OR edges.callee_id = nodes.id
+      )
+    `;
+    this.db.exec(`
+      DELETE FROM nodes_fts WHERE node_id IN (SELECT id FROM nodes WHERE ${orphanPredicate});
+      DELETE FROM nodes WHERE ${orphanPredicate};
+    `);
+  }
+
+  /** Recompute graph-derived node/class degrees and classifications after a partial edge swap. */
+  recomputeStructuralMetrics(): void {
+    this.db.exec(`
+      UPDATE nodes SET
+        fan_in = (
+          SELECT COUNT(*) FROM (
+            SELECT DISTINCT caller_id FROM edges
+            WHERE callee_id = nodes.id AND confidence <> 'synthesized'
+          )
+        ),
+        fan_out = (
+          SELECT COUNT(*) FROM (
+            SELECT DISTINCT callee_id FROM edges
+            WHERE caller_id = nodes.id AND confidence <> 'synthesized'
+          )
+        );
+      UPDATE nodes SET
+        is_hub = CASE WHEN is_external = 0 AND fan_in >= ${HUB_THRESHOLD} THEN 1 ELSE 0 END,
+        is_entry_point = CASE WHEN is_external = 0 AND NOT EXISTS (
+          SELECT 1 FROM edges WHERE callee_id = nodes.id
+        ) THEN 1 ELSE 0 END;
+      UPDATE classes SET
+        fan_in = COALESCE((
+          SELECT SUM(nodes.fan_in) FROM json_each(classes.method_ids)
+          JOIN nodes ON nodes.id = json_each.value
+        ), 0),
+        fan_out = COALESCE((
+          SELECT SUM(nodes.fan_out) FROM json_each(classes.method_ids)
+          JOIN nodes ON nodes.id = json_each.value
+        ), 0);
+    `);
   }
 
   /**
@@ -1134,6 +1203,16 @@ export class EdgeStore {
         'INSERT OR REPLACE INTO file_hashes (file_path, content_hash, updated_at) VALUES (?, ?, ?)'
       )
       .run(filePath, hash, Date.now());
+  }
+
+
+  deleteFileHash(filePath: string): void {
+    this.db.prepare('DELETE FROM file_hashes WHERE file_path = ?').run(filePath);
+  }
+
+  deletePass1FactsForFile(filePath: string): void {
+    if (!this.hasPass1Facts()) return;
+    this.db.prepare('DELETE FROM pass1_facts WHERE file_path = ?').run(filePath);
   }
 
   // ── Pass-1 fact memo (optimize-hash-keyed-analyze) ────────────────────────────

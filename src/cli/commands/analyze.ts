@@ -27,6 +27,7 @@ import type { RepositoryMap } from '../../core/analyzer/repository-mapper.js';
 import type { CloneGroup, CloneInstance } from '../../core/analyzer/duplicate-detector.js';
 import type { DependencyGraphResult } from '../../core/analyzer/dependency-graph.js';
 import type { AnalysisArtifacts } from '../../core/analyzer/artifact-generator.js';
+import { ARTIFACT_WORKSPACE_SHARDS } from '../../core/analyzer/workspace-shard-analysis.js';
 import {
   buildArchitectureOverview,
   writeArchitectureMd,
@@ -79,6 +80,8 @@ interface ExtendedAnalyzeOptions extends AnalyzeOptions {
   freshSpecDirectory?: boolean;
   /** Follow an analysis another process already owns instead of exiting. */
   wait?: boolean;
+  /** Repeatable workspace package names to recompute against the retained graph. */
+  shard?: string[];
 }
 
 interface AnalysisResult {
@@ -87,6 +90,8 @@ interface AnalysisResult {
   artifacts: AnalysisArtifacts;
   duration: number;
   generationId?: string;
+  workspaceShards?: import('../../core/analyzer/workspace-shards.js').WorkspaceShardReport;
+  shardReceipt?: import('../../core/analyzer/workspace-shard-analysis.js').ShardScopedAnalysisReceipt;
 }
 
 // ============================================================================
@@ -194,6 +199,7 @@ export async function runAnalysis(
     exclude: string[];
     reExtract?: boolean;
     ownership?: AnalysisOwnership & { state: 'owned' };
+    shards?: string[];
   },
 ): Promise<AnalysisResult> {
   const reporter = {
@@ -232,6 +238,12 @@ export const analyzeCommand = new Command('analyze')
   .option(
     '--exclude <glob>',
     'Additional glob patterns to exclude (repeatable)',
+    collect,
+    []
+  )
+  .option(
+    '--shard <name>',
+    'Recompute one workspace shard against the retained whole-repository graph (repeatable)',
     collect,
     []
   )
@@ -284,6 +296,8 @@ Examples:
                                      Include additional file types
   $ openlore analyze --exclude "legacy/**"
                                      Exclude specific directories
+  $ openlore analyze --shard payments
+                                     Recompute one workspace package while retaining the whole graph
   $ openlore analyze --output ./my-analysis
                                      Custom output location
   $ openlore analyze --force         Re-extract every file (ignore the extraction cache)
@@ -312,6 +326,7 @@ After analysis, run 'openlore generate' to create OpenSpec files.
         : options.maxFiles ?? DEFAULT_MAX_FILES,
       include: options.include ?? [],
       exclude: options.exclude ?? [],
+      shard: options.shard ?? [],
       force: options.force ?? false,
       reanalyze: options.reanalyze ?? false,
       embed: options.embed ?? false,
@@ -356,6 +371,7 @@ After analysis, run 'openlore generate' to create OpenSpec files.
       if (opts.exclude.length > 0) {
         logger.info('Exclude patterns', opts.exclude.join(', '));
       }
+      if ((opts.shard?.length ?? 0) > 0) logger.info('Workspace shards', opts.shard!.join(', '));
       logger.blank();
 
       // ========================================================================
@@ -400,7 +416,7 @@ After analysis, run 'openlore generate' to create OpenSpec files.
       const cacheFresh = analysisAge !== null && (await isAnalysisCacheFresh(rootPath, outputPath, fingerprintConfig));
       // `--reanalyze` and `--force` both defeat the skip; they differ only in whether the
       // per-file extraction cache is also thrown away (change: optimize-hash-keyed-analyze).
-      const skipSuppressed = (opts.force ?? false) || (opts.reanalyze ?? false);
+      const skipSuppressed = (opts.force ?? false) || (opts.reanalyze ?? false) || (opts.shard?.length ?? 0) > 0;
       if (analysisAge !== null && !skipSuppressed) {
         if (cacheFresh) {
           logger.discovery(`Analysis is up to date — source unchanged (${formatAge(analysisAge)})`);
@@ -533,6 +549,7 @@ After analysis, run 'openlore generate' to create OpenSpec files.
           exclude: opts.exclude,
           reExtract: opts.force ?? false,
           ownership,
+          shards: opts.shard,
         });
       } finally {
         await ownership.release();
@@ -543,6 +560,21 @@ After analysis, run 'openlore generate' to create OpenSpec files.
       // ========================================================================
       logger.blank();
       logger.section('Analysis Complete');
+
+      if (result.shardReceipt?.mode === 'scoped') {
+        logger.info('Mode', 'Scoped graph update; repo-wide artifacts retained');
+        logger.info('Recomputed shards', result.shardReceipt.recomputed.join(', '));
+        const retainedStates = result.shardReceipt.shards
+          .filter(shard => result.shardReceipt!.retained.includes(shard.name))
+          .map(shard => `${shard.name} (${shard.freshness}${shard.lastRecomputedAt ? `; last ${shard.lastRecomputedAt}` : ''})`);
+        logger.info('Retained shards', retainedStates.join(', ') || 'None');
+        logger.info('Resolution frontier', `${result.shardReceipt.frontierFiles.length} files`);
+        logger.info('Explicitly stale', result.shardReceipt.staleFiles.length > 0 ? result.shardReceipt.staleFiles.join(', ') : 'None');
+        logger.info('Recomputed artifacts', result.shardReceipt.artifacts.recomputed.join(', '));
+        logger.info('Retained artifacts', result.shardReceipt.artifacts.retained.join(', '));
+        logger.info('Receipt', join(opts.output, ARTIFACT_WORKSPACE_SHARDS));
+        return;
+      }
 
       const { repoMap, depGraph, artifacts } = result;
 

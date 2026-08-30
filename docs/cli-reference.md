@@ -243,6 +243,9 @@ openlore analyze [options]
   --max-files <n>        # Max files (default: 500)
   --include <glob>       # Additional include patterns
   --exclude <glob>       # Additional exclude patterns
+  --shard <name>         # Recompute one detected/configured workspace package against the
+                         #   retained whole graph. Repeatable. Requires an existing index;
+                         #   without one, performs and discloses a full build.
   --force                # Re-analyze from scratch: analyze even when the source is unchanged,
                          #   and re-extract every file instead of reusing the extraction cache.
                          #   An ordinary `analyze` already re-parses only what changed.
@@ -256,6 +259,14 @@ openlore analyze [options]
   --reindex-specs        # Re-index OpenSpec specs into the vector index without re-running full analysis
                          #   (uses the configured embedding provider — local or remote — else keyword)
 ```
+
+Workspace shards are detected from npm/yarn/pnpm workspaces, Cargo members, Go modules,
+`pyproject.toml`, Gradle settings, and Maven modules. Files outside every package belong to the
+implicit `root` shard. A scoped run replaces only the selected package and its cross-package
+resolution frontier in the SQLite graph. Repo-wide JSON and search artifacts are retained, never
+rewritten from partial input; `workspace-shards.json` records recomputed and retained shards,
+per-shard freshness, frontier files, and explicit stale regions. `--shard` with `--force` is a
+full rebuild. An unknown name fails with the available and nearest shard names.
 
 `analyze` also carries anchored memory across refactors: if a symbol with anchored memories/decisions was
 renamed or moved since the last analysis, its anchors are re-pointed to the new symbol (deterministically,

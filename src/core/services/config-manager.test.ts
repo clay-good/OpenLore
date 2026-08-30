@@ -74,7 +74,7 @@ describe('config-manager', () => {
     it('should return config with correct defaults', () => {
       const config = getDefaultConfig('nodejs', './openspec');
 
-      expect(config.version).toBe('1.1.0');
+      expect(config.version).toBe('1.2.0');
       expect(config.projectType).toBe('nodejs');
       expect(config.openspecPath).toBe('./openspec');
       expect(config.analysis.maxFiles).toBe(100_000);

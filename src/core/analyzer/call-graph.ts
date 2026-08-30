@@ -3484,6 +3484,8 @@ function buildClassNodes(
   allNodes: Map<string, FunctionNode>,
   relationships: Map<string, { parentClasses: string[]; interfaces: string[] }>,
   importMap?: ImportMap,
+  resolutionClasses: readonly ClassNode[] = [],
+  resolutionNodes: readonly FunctionNode[] = [],
 ): { classes: ClassNode[]; inheritanceEdges: InheritanceEdge[] } {
   // Group FunctionNodes by (filePath, className).
   // Free functions use a synthetic "[basename]" module name keyed by filePath alone.
@@ -3513,7 +3515,12 @@ function buildClassNodes(
   }
 
   // Build ClassNode[]
-  const classMap = new Map<string, ClassNode>();
+  // Retained classes seed hierarchy resolution during a scoped rebuild, just as
+  // retained functions seed call resolution. Newly extracted classes overwrite
+  // same-id seeds below and are the only rows the scoped publisher replaces.
+  const classMap = new Map<string, ClassNode>(
+    resolutionClasses.map(cls => [cls.id, { ...cls }]),
+  );
   for (const [id, g] of groups) {
     const rel = relationships.get(id) ?? { parentClasses: [], interfaces: [] };
     const cls: ClassNode = {
@@ -3609,11 +3616,13 @@ function buildClassNodes(
   }
 
   // OVERRIDES edges: child defines method with same name as parent — language-agnostic
+  const hierarchyNodes = new Map(resolutionNodes.map(node => [node.id, node]));
+  for (const [id, node] of allNodes) hierarchyNodes.set(id, node);
   const methodNameSet = new Map<string, Set<string>>();
   for (const [id, cls] of classMap) {
     const names = new Set<string>();
     for (const memberId of cls.methodIds) {
-      const fn = allNodes.get(memberId);
+      const fn = hierarchyNodes.get(memberId);
       if (fn && !fn.isExternal) names.add(fn.name);
     }
     methodNameSet.set(id, names);
@@ -5023,6 +5032,7 @@ export class CallGraphBuilder {
     layers?: Record<string, string[]>,
     importMap?: ImportMap,
     resolutionNodes?: FunctionNode[],
+    resolutionClasses?: ClassNode[],
   ): Promise<CallGraphResult> {
     const structuralFiles = files.map(file => {
       const container = extractScriptContainer(file.path, file.content);
@@ -6020,7 +6030,13 @@ export class CallGraphBuilder {
     // outranks a same-named class in its own directory (precision: avoid wiring a false
     // base). Reuse the re-export-aware map derived for Pass 2 so a base class imported
     // through a barrel resolves to its true definition too (change: add-call-resolution-recall).
-    const { classes, inheritanceEdges } = buildClassNodes(allNodes, relationships, callImportMap);
+    const { classes, inheritanceEdges } = buildClassNodes(
+      allNodes,
+      relationships,
+      callImportMap,
+      resolutionClasses,
+      resolutionNodes,
+    );
     // Merge IaC module groupings (deduped by id) into the class set.
     const classIds = new Set(classes.map(c => c.id));
     for (const c of iacClasses) if (!classIds.has(c.id)) classes.push(c);
@@ -6054,8 +6070,10 @@ export class CallGraphBuilder {
           offset: raw.offset,
         });
       }
+      const hierarchyNodes = new Map((resolutionNodes ?? []).map(node => [node.id, node]));
+      for (const [id, node] of allNodes) hierarchyNodes.set(id, node);
       edges.push(...synthesizeTypeHierarchyEdges({
-        nodes: allNodes,
+        nodes: hierarchyNodes,
         classes,
         inheritanceEdges,
         rawMethodCalls,

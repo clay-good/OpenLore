@@ -37,10 +37,12 @@ import type {
   OpenLoreConfig,
   RetrievalConfig,
   SpecStoreConfig,
+  WorkspaceConfig,
+  WorkspaceShardConfig,
 } from '../../types/index.js';
 
 /** The current config-schema version stamped into `.openlore/config.json`. */
-export const CONFIG_SCHEMA_VERSION = '1.1.0';
+export const CONFIG_SCHEMA_VERSION = '1.2.0';
 
 /**
  * Top-level value shapes retained as the public compatibility map for callers and tests.
@@ -235,6 +237,22 @@ const bundleRule: ConfigRule = {
   required: requiredFor<BundleConfig>({}),
 };
 
+const workspaceShardRule: ConfigRule = {
+  kind: 'object',
+  strict: true,
+  fields: fieldsFor<WorkspaceShardConfig>({ name: stringRule, root: stringRule }),
+  required: requiredFor<WorkspaceShardConfig>({ name: true, root: true }),
+};
+
+const workspaceRule: ConfigRule = {
+  kind: 'object',
+  strict: true,
+  fields: fieldsFor<WorkspaceConfig>({
+    shards: { kind: 'array', element: workspaceShardRule },
+  }),
+  required: requiredFor<WorkspaceConfig>({}),
+};
+
 const CONFIG_RULE: Extract<ConfigRule, { kind: 'object' }> = {
   kind: 'object',
   fields: fieldsFor<OpenLoreConfig>({
@@ -257,6 +275,7 @@ const CONFIG_RULE: Extract<ConfigRule, { kind: 'object' }> = {
     enforcement: enforcementRule,
     secretRedaction: secretRedactionRule,
     bundle: bundleRule,
+    workspace: workspaceRule,
   }),
   required: requiredFor<OpenLoreConfig>({
     version: true,
@@ -294,6 +313,7 @@ export const CONFIG_FIELD_KINDS: Record<keyof OpenLoreConfig, ConfigFieldKind> =
   enforcement: 'object',
   secretRedaction: 'object',
   bundle: 'object',
+  workspace: 'object',
 };
 
 /** The known top-level config keys, derived from the type-bound field map. */
@@ -694,6 +714,50 @@ export function validateOpenLoreConfig(
     mismatches: [] as ConfigValidationFinding[],
   };
   validateRule(parsed, CONFIG_RULE, '', findings, true);
+  if (isConfigObject(parsed)) {
+    const workspace = parsed.workspace;
+    const shards = isConfigObject(workspace) && Array.isArray(workspace.shards)
+      ? workspace.shards
+      : null;
+    if (shards) {
+      const names = new Set<string>();
+      const roots = new Set<string>();
+      if (shards.length > 5_000) {
+        findings.mismatches.push({
+          kind: 'type-mismatch', key: 'workspace.shards', fatal: true,
+          message: "config key 'workspace.shards' supports at most 5,000 entries — reduce the configured shard set",
+        });
+      }
+      shards.forEach((value, index) => {
+        if (!isConfigObject(value) || typeof value.name !== 'string' || typeof value.root !== 'string') return;
+        const nameHasControl = [...value.name].some(char => {
+          const code = char.codePointAt(0) ?? 0;
+          return code <= 0x1f || (code >= 0x7f && code <= 0x9f);
+        });
+        const rootHasControl = [...value.root].some(char => {
+          const code = char.codePointAt(0) ?? 0;
+          return code <= 0x1f || (code >= 0x7f && code <= 0x9f);
+        });
+        const name = value.name.trim();
+        const root = value.root.trim().replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/$/, '');
+        if (!name || name === 'root' || nameHasControl || Buffer.byteLength(name, 'utf8') > 256 || names.has(name)) {
+          findings.mismatches.push({
+            kind: 'type-mismatch', key: `workspace.shards[${index}].name`, fatal: true,
+            message: `config key 'workspace.shards[${index}].name' must be unique, non-empty, at most 256 characters, and not reserved name 'root'`,
+          });
+        }
+        const absolute = root.startsWith('/') || /^[A-Za-z]:\//.test(root) || root.startsWith('//');
+        if (!root || absolute || rootHasControl || Buffer.byteLength(root, 'utf8') > 1_024 || roots.has(root)) {
+          findings.mismatches.push({
+            kind: 'type-mismatch', key: `workspace.shards[${index}].root`, fatal: true,
+            message: `config key 'workspace.shards[${index}].root' must be repository-relative, unique, non-empty, and at most 1,024 UTF-8 bytes`,
+          });
+        }
+        names.add(name);
+        roots.add(root);
+      });
+    }
+  }
   const versionFindings = typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
     ? checkConfigVersion((parsed as Record<string, unknown>).version, opts)
     : [];

@@ -83,8 +83,9 @@ symbols, edges, or overlay records belonging to shards it did not recompute.
 
 **Freshness SHALL be recorded per shard.** A shard-scoped analyze SHALL NOT write a
 repository-wide freshness fingerprint asserting currency for shards it did not recompute, and
-SHALL NOT be recorded as a full analyze for epistemic-lease purposes. A retained shard whose
-files have changed on disk since it was last recomputed SHALL be reported stale, not current.
+SHALL NOT be recorded as a full analyze for epistemic-lease purposes. Retained shards outside the
+bounded resolution frontier SHALL report freshness as unknown without rereading their source files;
+a retained frontier file found to have changed SHALL be reported stale, not current.
 
 Every shard-scoped analyze SHALL report the shards recomputed, the shards retained with their
 last-recomputed state, the frontier size, and any region marked stale.
