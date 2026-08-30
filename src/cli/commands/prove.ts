@@ -40,6 +40,11 @@ import {
 } from '../../core/agent-eval/measure.js';
 import { estimateCells } from '../../core/agent-eval/estimate.js';
 import {
+  estimateVocabularyRecall,
+  type RetrievalRecallEstimate,
+  type RetrievalRecallNode,
+} from '../../core/agent-eval/retrieval-recall-estimate.js';
+import {
   computeScorecard, renderScorecard, serializeScorecard, renderScorecardMarkdown, money,
   type Scorecard, type ScorecardMeta, type ProveMode,
 } from '../../core/agent-eval/scorecard.js';
@@ -86,6 +91,18 @@ export async function loadGraphFacts(absDir: string): Promise<GraphFact[] | null
     // Entry point = no internal callers (matches the analyzer's definition).
     return { name: n.name, filePath: n.filePath, isEntryPoint: callerNames.length === 0, callerNames, calleeNames };
   });
+}
+
+async function loadRetrievalRecallNodes(absDir: string): Promise<RetrievalRecallNode[]> {
+  const ctx = await readCachedContext(absDir);
+  return ctx?.edgeStore?.getAllInternalNodes().map((node) => ({
+    id: node.id,
+    name: node.name,
+    filePath: node.filePath,
+    className: node.className,
+    signature: node.signature,
+    docstring: node.docstring,
+  })) ?? [];
 }
 
 /** Read prove's structural precondition with one bounded aggregate query. */
@@ -189,6 +206,8 @@ export interface ProveResult {
   scorecard?: Scorecard;
   meta?: ScorecardMeta;
   raw?: ProveRaw;
+  /** Present only for the deterministic estimate arm. */
+  retrievalRecall?: RetrievalRecallEstimate;
 }
 
 /**
@@ -270,12 +289,21 @@ export async function runProve(opts: {
     const meta: ScorecardMeta = {
       mode, generatedAt: opts.generatedAt, repoSha: opts.repoSha, model: null, tasks: tasks.length,
     };
+    const retrievalRecall = estimateVocabularyRecall(
+      join(absDir, OPENLORE_ANALYSIS_REL_PATH),
+      await loadRetrievalRecallNodes(absDir),
+    );
+    const recallLine = `Retrieval recall@${retrievalRecall.recallAt} (estimate, symbol/doc-comment pairs): `
+      + `${retrievalRecall.baselineRecall.toFixed(2)}% → ${retrievalRecall.vocabularyRecall.toFixed(2)}% `
+      + `(${retrievalRecall.deltaPercentagePoints >= 0 ? '+' : ''}${retrievalRecall.deltaPercentagePoints.toFixed(2)} pp; `
+      + `${retrievalRecall.evaluatedPairs}/${retrievalRecall.availablePairs} pairs evaluated)`;
     return {
       ok: true,
-      message: renderScorecard(sc, { tasks: tasks.length, mode }),
+      message: `${renderScorecard(sc, { tasks: tasks.length, mode })}\n\n${recallLine}`,
       scorecard: sc,
       meta,
       raw: { withoutCell: cells.without, withCell: cells.with },
+      retrievalRecall,
     };
   }
 
@@ -334,7 +362,11 @@ export function saveScorecard(absDir: string, result: ProveResult): string {
   mkdirSync(dir, { recursive: true });
   const day = meta.generatedAt.slice(0, 10); // YYYY-MM-DD
   const payload = JSON.stringify(
-    { ...serializeScorecard(sc, meta), raw: result.raw ? roundRawCosts(result.raw) : undefined },
+    {
+      ...serializeScorecard(sc, meta),
+      raw: result.raw ? roundRawCosts(result.raw) : undefined,
+      retrievalRecall: result.retrievalRecall,
+    },
     null, 2,
   ) + '\n';
   // Pick a non-clobbering name ATOMICALLY: open each candidate with O_CREAT|O_EXCL
@@ -457,9 +489,16 @@ Examples:
     }
 
     if (json) {
-      console.log(JSON.stringify(serializeScorecard(result.scorecard!, result.meta!), null, 2));
+      console.log(JSON.stringify({
+        ...serializeScorecard(result.scorecard!, result.meta!),
+        retrievalRecall: result.retrievalRecall,
+      }, null, 2));
     } else if (markdown) {
-      console.log(renderScorecardMarkdown(result.scorecard!, result.meta!));
+      const recall = result.retrievalRecall;
+      console.log(renderScorecardMarkdown(result.scorecard!, result.meta!)
+        + (recall
+          ? `\n\nRetrieval recall@${recall.recallAt} (estimate): ${recall.baselineRecall.toFixed(2)}% → ${recall.vocabularyRecall.toFixed(2)}%.`
+          : ''));
     } else {
       console.log(result.message);
     }

@@ -19,13 +19,21 @@
 import { constants, existsSync, readFileSync, writeFileSync, rmSync, openSync, readSync, writeSync, closeSync, statSync, fstatSync, realpathSync, renameSync, unlinkSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join, resolve } from 'node:path';
-import type { FunctionNode } from './call-graph.js';
+import type { CallEdge, FunctionNode } from './call-graph.js';
 import type { FileSignatureMap } from './signature-extractor.js';
 import type { Embedder } from './embedding-service.js';
 import { getSkeletonContent, isSkeletonWorthIncluding } from './code-shaper.js';
 import { quietNativeLoggingOnce } from './lance-logging.js';
 import { noteUpdateAndMaybeCompact } from './index-compaction.js';
 import { TOKENIZER_VERSION, tokenize } from './bm25-tokenizer.js';
+import {
+  expandVocabularyQuery,
+  compareVocabularyRank,
+  invalidateRepositoryVocabulary,
+  mineRepositoryVocabulary,
+  persistRepositoryVocabulary,
+  scoredExpansionTerms,
+} from './repo-vocabulary.js';
 import { atomicWriteFile } from '../decisions/atomic-store.js';
 import { acquireLockAt } from '../runtime/advisory-lock.js';
 import {
@@ -72,6 +80,8 @@ export interface SearchResult {
   scoreKind?: 'rrf' | 'bm25' | 'cosine_distance';
   /** Optional for legacy test doubles; every production search path emits it. */
   matchEvidence?: MatchEvidence;
+  /** Vocabulary terms that contributed a non-zero score to this result. */
+  expansionTerms?: string[];
 }
 
 export interface KeywordMissDiagnostics {
@@ -110,6 +120,8 @@ export interface VectorIndexMeta {
    * full rebuild re-stamps. A legacy meta without this field is treated as v1.
    */
   tokenizerVersion?: number;
+  /** Corpus identity of the verified repository-vocabulary sidecar, when present. */
+  vocabularyContentStamp?: string;
   /** Present only when an incremental update could neither add nor restore rows. */
   degraded?: {
     reason: 'incremental-update-restore-failed';
@@ -213,6 +225,9 @@ function isVectorIndexMeta(value: unknown): value is VectorIndexMeta {
   if (meta.fullBuildAt !== undefined && typeof meta.fullBuildAt !== 'string') return false;
   if (meta.schemaVersion !== META_SCHEMA_VERSION) return false;
   if (meta.tokenizerVersion !== undefined && !Number.isInteger(meta.tokenizerVersion)) return false;
+  if (meta.vocabularyContentStamp !== undefined
+      && (typeof meta.vocabularyContentStamp !== 'string'
+        || !/^[a-f0-9]{64}$/.test(meta.vocabularyContentStamp))) return false;
   if (meta.hasEmbeddings) {
     if ((meta.dim as number) === 0 || typeof meta.model !== 'string' || meta.model.length === 0) return false;
   } else if (meta.dim !== 0 || meta.model !== null) {
@@ -491,6 +506,7 @@ function patchBm25Cache(dbPath: string, changedFilePaths: Set<string>, newRows: 
   // hot-path optimisation). Done before the early return so invalidation happens
   // even when there is no in-memory corpus to patch.
   deleteCorpusSidecar(dbPath);
+  invalidateRepositoryVocabulary(dbPath);
   const entry = _bm25Cache.get(dbPath);
   if (!entry) return;
   const patched = patchBm25Corpus(entry.corpus, entry.rows, changedFilePaths, newRows);
@@ -802,7 +818,7 @@ let corpusTempCounter = 0;
 function persistCorpusSidecarStreaming(
   dbPath: string,
   records: Iterable<{ id: string; text: string }>,
-): void {
+): { df: Map<string, number>; contentHash: string } | null {
   let fd: number | undefined;
   const target = corpusFilePath(dbPath);
   const temp = `${target}.tmp-${process.pid}-${corpusTempCounter++}`;
@@ -856,8 +872,10 @@ function persistCorpusSidecarStreaming(
     fd = undefined;
     renameSync(temp, target);
     renamed = true;
+    return { df, contentHash };
   } catch {
     /* optional cache — ignore */
+    return null;
   } finally {
     if (fd !== undefined) {
       try { closeSync(fd); } catch { /* already closed */ }
@@ -873,6 +891,33 @@ function deleteCorpusSidecar(dbPath: string): void {
     rmSync(corpusFilePath(dbPath), { force: true });
   } catch {
     /* ignore */
+  }
+  invalidateRepositoryVocabulary(dbPath);
+}
+
+async function persistVocabularyForRecords(
+  dbPath: string,
+  records: readonly Omit<FunctionRecord, 'vector'>[],
+  enabled: boolean,
+  corpusSummary: { df: ReadonlyMap<string, number>; contentHash: string } | null,
+  contextForSource?: (source: { id: string }) => string | undefined,
+  callEdges?: readonly Pick<CallEdge, 'callerId' | 'calleeId'>[],
+): Promise<string | null> {
+  invalidateRepositoryVocabulary(dbPath);
+  if (!enabled || !corpusSummary) return null;
+  try {
+    const vocabulary = mineRepositoryVocabulary(
+      records,
+      corpusSummary.df,
+      corpusSummary.contentHash,
+      { contextForSource, callEdges },
+    );
+    await persistRepositoryVocabulary(dbPath, vocabulary);
+    return vocabulary.contentStamp;
+  } catch {
+    // Vocabulary is an optional, fail-soft recall layer. Plain BM25 remains valid.
+    invalidateRepositoryVocabulary(dbPath);
+    return null;
   }
 }
 
@@ -951,23 +996,26 @@ function buildText(
   if (docstring) parts.push(docstring);
 
   // Append skeleton body when file contents are available.
-  // The skeleton strips noise (logs, comments) while preserving business-logic signals
-  // (variable names, control flow, calls, return/throw). Only included when it provides
-  // meaningful reduction over the raw body (≥20% smaller).
   if (fileContents && node.startIndex < node.endIndex) {
     const src = fileContents.get(node.filePath);
     if (src) {
       const body = src.slice(node.startIndex, node.endIndex);
       if (body.trim()) {
         const skeleton = getSkeletonContent(body, node.language);
-        if (isSkeletonWorthIncluding(body, skeleton)) {
-          parts.push(skeleton);
-        }
+        if (isSkeletonWorthIncluding(body, skeleton)) parts.push(skeleton);
       }
     }
   }
 
   return parts.join('\n');
+}
+
+/** Mining-only function context; never changes the persisted search corpus. */
+function buildVocabularyContext(node: FunctionNode, fileContents?: Map<string, string>): string {
+  const source = fileContents?.get(node.filePath);
+  return source && node.startIndex < node.endIndex
+    ? source.slice(node.startIndex, Math.min(node.endIndex, node.startIndex + 2_048))
+    : '';
 }
 
 export function searchableFieldsForFunctionRow(row: Record<string, unknown>): SearchableFields {
@@ -1066,7 +1114,9 @@ export class VectorIndex {
     /** Optional map of filePath → source content for skeleton-based body indexing */
     fileContents?: Map<string, string>,
     /** When true, reuse cached vectors for unchanged functions */
-    incremental = false
+    incremental = false,
+    vocabularyExpansion = true,
+    callEdges?: readonly Pick<CallEdge, 'callerId' | 'calleeId'>[],
   ): Promise<{
     embedded: number;
     reused: number;
@@ -1078,6 +1128,7 @@ export class VectorIndex {
   }> {
     return withVectorIndexMutation(outputDir, () => VectorIndex.buildUnlocked(
       outputDir, nodes, signatures, hubIds, entryPointIds, embedSvc, fileContents, incremental,
+      vocabularyExpansion, callEdges,
     ));
   }
 
@@ -1090,6 +1141,8 @@ export class VectorIndex {
     embedSvc: Embedder | null,
     fileContents?: Map<string, string>,
     incremental = false,
+    vocabularyExpansion = true,
+    callEdges?: readonly Pick<CallEdge, 'callerId' | 'calleeId'>[],
   ): Promise<{
     embedded: number;
     reused: number;
@@ -1106,7 +1159,8 @@ export class VectorIndex {
     const sigIndex = buildSignatureIndex(signatures);
 
     // Build candidate records (without vectors)
-    const nodeIds = new Set(repoNodes.map(n => n.id));
+    const nodeById = new Map(repoNodes.map(node => [node.id, node]));
+    const nodeIds = new Set(nodeById.keys());
     const candidates: Omit<FunctionRecord, 'vector'>[] = repoNodes.map(node => {
       const cgDoc = node.docstring ?? '';
       const cgSig = node.signature ?? '';
@@ -1132,6 +1186,10 @@ export class VectorIndex {
         text: buildText(node, signature, docstring, fileContents),
       };
     });
+    const vocabularyContext = (source: { id: string }): string | undefined => {
+      const node = nodeById.get(source.id);
+      return node ? buildVocabularyContext(node, fileContents) : undefined;
+    };
 
     // Also index signature entries that have no call graph node (constants, type aliases, etc.)
     //
@@ -1184,6 +1242,7 @@ export class VectorIndex {
     // searched with ANN, and record `hasEmbeddings: false` in the sidecar.
     if (!embedSvc) {
       const db = await connect(dbPath);
+      invalidateRepositoryVocabulary(dbPath, true);
       deleteCorpusSidecar(dbPath);
       await db.createTable(
         TABLE_NAME,
@@ -1193,9 +1252,12 @@ export class VectorIndex {
       const builtAt = new Date().toISOString();
       // Publish corpus first and metadata LAST: the meta rename is the coherence
       // commit point observed by warm readers in other processes.
-      persistCorpusSidecarStreaming(
+      const corpusSummary = persistCorpusSidecarStreaming(
         dbPath,
         (function* () { for (const r of candidates) yield { id: r.id, text: r.text }; })(),
+      );
+      const vocabularyContentStamp = await persistVocabularyForRecords(
+        dbPath, candidates, vocabularyExpansion, corpusSummary, vocabularyContext, callEdges,
       );
       await writeMeta(outputDir, {
         hasEmbeddings: false,
@@ -1205,6 +1267,7 @@ export class VectorIndex {
         fullBuildAt: builtAt,
         schemaVersion: META_SCHEMA_VERSION,
         tokenizerVersion: TOKENIZER_VERSION,
+        ...(vocabularyContentStamp ? { vocabularyContentStamp } : {}),
       });
       _degradedFallback.delete(dbPath);
       invalidateDbPathCaches(dbPath);
@@ -1299,14 +1362,18 @@ export class VectorIndex {
 
     // ── Write table ──────────────────────────────────────────────────────────
     const db = await connect(dbPath);
+    invalidateRepositoryVocabulary(dbPath, true);
     deleteCorpusSidecar(dbPath);
     await db.createTable(TABLE_NAME, fullRecords as unknown as Record<string, unknown>[], { mode: 'overwrite' });
 
     const builtAt = new Date().toISOString();
     // As above, metadata is the last-published coherence commit.
-    persistCorpusSidecarStreaming(
+    const corpusSummary = persistCorpusSidecarStreaming(
       dbPath,
       (function* () { for (const r of fullRecords) yield { id: r.id, text: r.text }; })(),
+    );
+    const vocabularyContentStamp = await persistVocabularyForRecords(
+      dbPath, fullRecords, vocabularyExpansion, corpusSummary, vocabularyContext, callEdges,
     );
     await writeMeta(outputDir, {
       hasEmbeddings: true,
@@ -1319,6 +1386,7 @@ export class VectorIndex {
       fullBuildAt: builtAt,
       schemaVersion: META_SCHEMA_VERSION,
       tokenizerVersion: TOKENIZER_VERSION,
+      ...(vocabularyContentStamp ? { vocabularyContentStamp } : {}),
     });
 
     // Invalidate search caches — index was just rebuilt
@@ -1478,6 +1546,10 @@ export class VectorIndex {
     const previousRows = predicate
       ? await table.query().where(predicate).toArray() as Record<string, unknown>[]
       : [];
+    // Fail closed before exposing any changed rows. A crash at any later point
+    // can only leave plain keyword retrieval, never a stale vocabulary whose old
+    // stamp still agrees with old metadata.
+    invalidateRepositoryVocabulary(dbPath, true);
     const markDegraded = async (): Promise<void> => {
       const marker: NonNullable<VectorIndexMeta['degraded']> = {
         reason: 'incremental-update-restore-failed',
@@ -1507,14 +1579,17 @@ export class VectorIndex {
       const fallback = _degradedFallback.get(dbPath);
       const publishedAt = new Date().toISOString();
       const validExistingMeta = existingMeta === INVALID_META ? null : existingMeta;
-      const updatedMeta: VectorIndexMeta = {
-        ...(validExistingMeta ?? {
+      const retainedMeta: VectorIndexMeta = { ...(validExistingMeta ?? {
           hasEmbeddings: indexHasEmbeddings,
           dim: 0,
           model: null,
+          builtAt: publishedAt,
           schemaVersion: META_SCHEMA_VERSION,
           tokenizerVersion: TOKENIZER_VERSION,
-        }),
+        }) };
+      delete retainedMeta.vocabularyContentStamp;
+      const updatedMeta: VectorIndexMeta = {
+        ...retainedMeta,
         builtAt: publishedAt,
         fullBuildAt: validExistingMeta?.fullBuildAt ?? validExistingMeta?.builtAt ?? publishedAt,
         ...(validExistingMeta?.degraded || fallback
@@ -1662,9 +1737,21 @@ export class VectorIndex {
       hybrid?: boolean;
       /** Internal diagnostic: return the ordinary bounded candidate window before result cutoff. */
       traceCandidates?: boolean;
+      /** Disable repository-vocabulary query expansion without rebuilding. */
+      vocabularyExpansion?: boolean;
+      /** Reports the retrieval mode that actually produced this result set. */
+      onRetrievalMode?: (mode: 'keyword' | 'keyword+vocabulary' | 'semantic') => void;
     } = {}
   ): Promise<SearchResult[]> {
-    const { limit = 10, language, minFanIn, hybrid = true, traceCandidates = false } = opts;
+    const {
+      limit = 10,
+      language,
+      minFanIn,
+      hybrid = true,
+      traceCandidates = false,
+      vocabularyExpansion = true,
+      onRetrievalMode,
+    } = opts;
 
     if (!VectorIndex.exists(outputDir)) {
       throw new Error('Vector index not found. Run "openlore analyze --embed" first.');
@@ -1695,7 +1782,7 @@ export class VectorIndex {
     // truth: a missing sidecar (legacy index) is treated as embeddings-present.
     const indexHasEmbeddings = metaHasEmbeddings(meta);
     if (!embedSvc || !indexHasEmbeddings) {
-      return VectorIndex._bm25Only(table, dbPath, query, limit, language, minFanIn, traceCandidates);
+      return VectorIndex._bm25Only(table, dbPath, outputDir, query, limit, language, minFanIn, traceCandidates, vocabularyExpansion, onRetrievalMode);
     }
 
     // ── Dense recall ──────────────────────────────────────────────────────────
@@ -1704,7 +1791,7 @@ export class VectorIndex {
       [queryVector] = await embedSvc.embed([query]);
     } catch {
       // Embedding server unreachable — fall back to BM25
-      return VectorIndex._bm25Only(table, dbPath, query, limit, language, minFanIn, traceCandidates);
+      return VectorIndex._bm25Only(table, dbPath, outputDir, query, limit, language, minFanIn, traceCandidates, vocabularyExpansion, onRetrievalMode);
     }
     if (!queryVector) throw new Error('Failed to embed query');
 
@@ -1713,8 +1800,9 @@ export class VectorIndex {
     // full rebuild), ANN search would throw deep inside LanceDB. Degrade to BM25
     // rather than crashing the tool — the index is stale, not broken.
     if (meta !== null && meta !== INVALID_META && meta.dim > 0 && queryVector.length !== meta.dim) {
-      return VectorIndex._bm25Only(table, dbPath, query, limit, language, minFanIn, traceCandidates);
+      return VectorIndex._bm25Only(table, dbPath, outputDir, query, limit, language, minFanIn, traceCandidates, vocabularyExpansion, onRetrievalMode);
     }
+    onRetrievalMode?.('semantic');
 
     const denseFetch = hybrid ? Math.min(limit * 5, 500) : Math.min(limit * 10, 1000);
     let denseQuery = table.query().nearestTo(queryVector).distanceType('cosine');
@@ -1762,11 +1850,18 @@ export class VectorIndex {
 
     const { corpus } = cachedEntry;
     const queryTokens = tokenize(query);
+    const expandedQuery = expandVocabularyQuery(outputDir, queryTokens, vocabularyExpansion);
 
     // Score all corpus documents with BM25
     const sparseScored = corpus.docs
-      .map((_, i) => ({ idx: i, score: bm25Score(corpus, queryTokens, i) }))
-      .sort((a, b) => b.score - a.score)
+      .map((doc, i) => ({
+        idx: i,
+        score: bm25Score(corpus, queryTokens, i),
+        expansionScore: bm25Score(corpus, expandedQuery.expansionTokens, i),
+        id: doc.id,
+      }))
+      .filter(({ score, expansionScore }) => score > 0 || expansionScore > 0)
+      .sort(compareVocabularyRank)
       .slice(0, limit * 5);
 
     // Build id→row map from allRows for sparse candidates
@@ -1784,8 +1879,7 @@ export class VectorIndex {
       if (!candidates.has(id)) candidates.set(id, row);
     }
 
-    for (const { idx, score: bm25 } of sparseScored) {
-      if (bm25 === 0) continue; // no BM25 signal — skip
+    for (const { idx } of sparseScored) {
       const id = corpus.docs[idx].id;
       const row = rowById.get(id);
       if (!row) continue;
@@ -1796,14 +1890,17 @@ export class VectorIndex {
     // candidate never appeared in the sparse list, and vice versa).
     const denseRankById = new Map(denseRows.map((r, i) => [r.id as string, i]));
     const sparseRankById = new Map(sparseScored.map(({ idx }, i) => [corpus.docs[idx].id, i]));
+    const sparseScoreById = new Map(sparseScored.map((candidate) => [candidate.id, candidate]));
     const sparseEvidenceById = new Map(
       sparseScored
-        .filter(({ score }) => score > 0)
         .map(({ idx }) => {
           const id = corpus.docs[idx].id;
           const row = rowById.get(id);
+          const scoredTokens = sparseScoreById.get(id)?.score
+            ? queryTokens
+            : expandedQuery.expansionTokens;
           return [id, row
-            ? bm25MatchEvidence(corpus, queryTokens, idx, searchableFieldsForFunctionRow(row), 2)
+            ? bm25MatchEvidence(corpus, scoredTokens, idx, searchableFieldsForFunctionRow(row), 2)
             : vectorMatchEvidence(2)] as const;
         }),
     );
@@ -1815,16 +1912,25 @@ export class VectorIndex {
       return {
         row,
         score: rrfScore(dr, sr),
+        originalMatch: (sparseScoreById.get(id)?.score ?? 0) > 0,
         matchEvidence: sparseEvidenceById.get(id) ?? vectorMatchEvidence(2),
+        expansionTerms: scoredExpansionTerms(
+          expandedQuery.expansionTokens,
+          corpus.docs[sparseScoreById.get(id)?.idx ?? -1]?.tfMap ?? new Map(),
+        ),
       };
     });
 
     return merged
-      .sort((a, b) => b.score - a.score)
+      .sort((a, b) => expandedQuery.expansionTokens.length > 0
+        ? Number(b.originalMatch) - Number(a.originalMatch) || b.score - a.score
+        : b.score - a.score,
+      )
       .filter(({ row }) => passesFilters(row))
       .slice(0, traceCandidates ? undefined : limit)
-      .map(({ row, score, matchEvidence }) => ({
+      .map(({ row, score, matchEvidence, expansionTerms }) => ({
         record: rowToRecord(row), score, scoreKind: 'rrf' as const, matchEvidence,
+        ...(expansionTerms.length > 0 ? { expansionTerms } : {}),
       }));
   }
 
@@ -1835,11 +1941,14 @@ export class VectorIndex {
   private static async _bm25Only(
     table: { query(): { toArray(): Promise<Record<string, unknown>[]> } },
     dbPath: string,
+    outputDir: string,
     query: string,
     limit: number,
     language?: string,
     minFanIn?: number,
     traceCandidates = false,
+    vocabularyExpansion = true,
+    onRetrievalMode?: (mode: 'keyword' | 'keyword+vocabulary' | 'semantic') => void,
   ): Promise<SearchResult[]> {
     let cachedEntry = _bm25Cache.get(dbPath);
     let allRows: Record<string, unknown>[];
@@ -1858,20 +1967,27 @@ export class VectorIndex {
 
     const { corpus } = cachedEntry;
     const queryTokens = tokenize(query);
+    const expandedQuery = expandVocabularyQuery(outputDir, queryTokens, vocabularyExpansion);
+    onRetrievalMode?.(expandedQuery.vocabularyAvailable ? 'keyword+vocabulary' : 'keyword');
     const rowById = new Map(allRows.map(r => [r.id as string, r]));
 
     return corpus.docs
-      .map((_, i) => ({ idx: i, score: bm25Score(corpus, queryTokens, i) }))
-      .filter(({ score }) => score > 0)
+      .map((doc, i) => ({
+        idx: i,
+        score: bm25Score(corpus, queryTokens, i),
+        expansionScore: bm25Score(corpus, expandedQuery.expansionTokens, i),
+        id: doc.id,
+      }))
+      .filter(({ score, expansionScore }) => score > 0 || expansionScore > 0)
       // Sort by score desc; break ties by id asc so ranking is deterministic
       // across runs for a fixed query + corpus.
-      .sort((a, b) => b.score - a.score || (corpus.docs[a.idx].id < corpus.docs[b.idx].id ? -1 : 1))
+      .sort(compareVocabularyRank)
       .slice(0, limit * 3) // oversample before filtering
-      .map(({ idx, score }) => {
+      .map(({ idx, score, expansionScore }) => {
         const row = rowById.get(corpus.docs[idx].id);
-        return row ? { row, idx, score } : null;
+        return row ? { row, idx, score, expansionScore } : null;
       })
-      .filter((x): x is { row: Record<string, unknown>; idx: number; score: number } => x !== null)
+      .filter((x): x is { row: Record<string, unknown>; idx: number; score: number; expansionScore: number } => x !== null)
       .filter(({ row }) => {
         if (!isRepoFunctionRow(row)) return false;
         if (language && (row.language as string) !== language) return false;
@@ -1879,11 +1995,21 @@ export class VectorIndex {
         return true;
       })
       .slice(0, traceCandidates ? undefined : limit)
-      .map(({ row, idx, score }) => ({
+      .map(({ row, idx, score, expansionScore }) => ({
         record: rowToRecord(row),
-        score,
+        score: score > 0 ? score : expansionScore,
         scoreKind: 'bm25' as const,
-        matchEvidence: bm25MatchEvidence(corpus, queryTokens, idx, searchableFieldsForFunctionRow(row), 1),
+        matchEvidence: bm25MatchEvidence(
+          corpus,
+          score > 0 ? queryTokens : expandedQuery.expansionTokens,
+          idx,
+          searchableFieldsForFunctionRow(row),
+          score > 0 ? 1 : 2,
+        ),
+        ...(() => {
+          const terms = scoredExpansionTerms(expandedQuery.expansionTokens, corpus.docs[idx].tfMap);
+          return terms.length > 0 ? { expansionTerms: terms } : {};
+        })(),
       }));
   }
 

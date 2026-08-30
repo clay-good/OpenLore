@@ -24,6 +24,8 @@ export interface OpenLoreConfig {
   generation: GenerationConfig;
   llm?: LLMConfig;
   embedding?: EmbeddingConfig;
+  /** Deterministic retrieval enhancements. Vocabulary expansion defaults on. */
+  retrieval?: RetrievalConfig;
   panicResponse?: {
     /**
      * Controls the panic response subsystem. Default: 'off'.
@@ -252,6 +254,11 @@ export interface EmbeddingConfig {
   batchSize?: number;
   /** Disable SSL certificate verification (e.g. self-signed certs on local servers) */
   skipSslVerify?: boolean;
+}
+
+export interface RetrievalConfig {
+  /** Set false to disable repository-vocabulary query expansion without rebuilding indexes. */
+  vocabularyExpansion?: boolean;
 }
 
 export interface AnalysisConfig {

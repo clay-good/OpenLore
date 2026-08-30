@@ -32,6 +32,7 @@ const FULLY_POPULATED: Required<OpenLoreConfig> = {
   generation: { domains: 'auto' },
   llm: {},
   embedding: {},
+  retrieval: {},
   panicResponse: { mode: 'off' },
   createdAt: '2026-07-18T00:00:00.000Z',
   lastRun: null,
@@ -262,12 +263,14 @@ describe('config-schema — type mismatches', () => {
     const findings = validateOpenLoreConfig({
       ...FULLY_POPULATED,
       embedding: { provider: 'remote', batchSize: 'many' },
+      retrieval: { vocabularyExpansion: 'yes' },
       contextInjection: { tokenBudget: false },
       secretRedaction: { toolOutput: 'yes' },
     });
 
     expect(findings.filter(f => f.kind === 'type-mismatch').map(f => f.key)).toEqual([
       'embedding.batchSize',
+      'retrieval.vocabularyExpansion',
       'contextInjection.tokenBudget',
       'secretRedaction.toolOutput',
     ]);

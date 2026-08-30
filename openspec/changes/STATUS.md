@@ -31,7 +31,7 @@ validate`**, and the archive machinery works again. This pass:
   because their requirements were already synced verbatim (`fix-pi-parity-drift`,
   `fix-redaction-module-gaps`).
 
-## Complete — 148 in `archive/`
+## Complete — 149 in `archive/`
 
 Everything in `openspec/changes/archive/` is shipped (or a settled won't-do), with its
 requirements reflected in the main specs. `openspec list` shows only open work.
@@ -41,7 +41,7 @@ requirements reflected in the main specs. `openspec list` shows only open work.
 No open change has partial code on `main`. A change belongs here the moment its implementation
 starts; move it back out (archive it) the moment its marker/spec evidence lands.
 
-## To build — 107
+## To build — 106
 
 The whole open set is unbuilt backlog. Newest additions: 7 proposals from the 2026-07-27
 first-run e2e (`E2E-FIRSTRUN-2026-07-27.md`). Other thematic indexes:
@@ -176,7 +176,6 @@ trust boundary for served content.
 | `shrink-traversal-index-invalidation-scope` | The traversal structure is invalidated by edits it does not depend on |
 | `unify-onboarding-entrypoint` | install once, auto-init on every repo you touch |
 | `widen-architecture-rule-vocabulary` | required, circular, reachable/orphan, captures, instability |
-| `widen-keyword-recall-with-repo-vocabulary` | close the natural-language gap without an embedder |
 | `widen-overlay-language-coverage` | Go error flow, Kotlin/Dart types, four CFG languages, Python/Go HTTP clients |
 
 ## Maintenance rules (what kept this table honest)

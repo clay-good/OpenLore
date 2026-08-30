@@ -151,6 +151,7 @@ export function compositeScore(semanticRelevance: number, role: InsertionRole): 
 interface TextSearchPayload {
   query: string;
   searchMode: 'text' | 'text_fallback';
+  retrievalMode: 'keyword' | 'keyword+vocabulary';
   count: number;
   results: Array<{
     filePath: string;
@@ -160,6 +161,7 @@ interface TextSearchPayload {
     scoreKind: 'bm25';
     kind: 'text';
     matchEvidence: import('../../analyzer/retrieval-evidence.js').MatchEvidence;
+    expansionTerms?: string[];
     provenance: AnalysisContentProvenance;
   }>;
   note?: string;
@@ -171,18 +173,25 @@ async function searchTextLines(
   limit: number,
   searchMode: 'text' | 'text_fallback',
   provenance: AnalysisContentProvenance,
+  vocabularyExpansion = true,
 ): Promise<TextSearchPayload | null> {
   const { TextLineIndex } = await import('../../analyzer/text-line-index.js');
+  const { servedRetrievalMode } = await import('../../analyzer/embedder.js');
+  const retrievalMode = servedRetrievalMode(null, outputDir, 'code', vocabularyExpansion) as 'keyword' | 'keyword+vocabulary';
   if (!TextLineIndex.exists(outputDir)) {
     return searchMode === 'text'
-      ? { query, searchMode, count: 0, results: [], note: 'No text line index found. Run "openlore analyze".' }
+      ? { query, searchMode, retrievalMode, count: 0, results: [], note: 'No text line index found. Run "openlore analyze".' }
       : null;
   }
-  const hits = await TextLineIndex.searchText(outputDir, query, { limit: Math.max(1, Math.min(limit, 100)) });
+  const hits = await TextLineIndex.searchText(outputDir, query, {
+    limit: Math.max(1, Math.min(limit, 100)),
+    vocabularyExpansion,
+  });
   if (hits.length === 0 && searchMode === 'text_fallback') return null;
   return {
     query,
     searchMode,
+    retrievalMode,
     ...(searchMode === 'text_fallback'
       ? { note: 'No code symbols matched; these are literal-text matches from markup/text files.' }
       : {}),
@@ -195,6 +204,7 @@ async function searchTextLines(
       scoreKind: 'bm25' as const,
       kind: 'text' as const,
       matchEvidence: h.matchEvidence,
+      ...(h.expansionTerms?.length ? { expansionTerms: h.expansionTerms } : {}),
       provenance,
     })),
   };
@@ -215,13 +225,15 @@ export async function handleSearchCode(
   const analysisProvenance = await readAnalysisContentProvenance(absDir);
 
   const { VectorIndex } = await import('../../analyzer/vector-index.js');
-  const { resolveEmbedder, servedRetrievalMode } = await import('../../analyzer/embedder.js');
+  const { embedderMode, resolveEmbedder, servedRetrievalMode, isKeywordRetrievalMode } = await import('../../analyzer/embedder.js');
+  const cfg = await readOpenLoreConfig(absDir);
+  const vocabularyExpansion = cfg?.retrieval?.vocabularyExpansion !== false;
 
   // Forced literal-text mode: query the separate line index directly, bypassing
   // symbol search. Use when hunting a literal string (UI copy, error text).
   if (mode === 'text') {
     const [result, freshnessCtx] = await Promise.all([
-      searchTextLines(outputDir, query, limit, 'text', analysisProvenance),
+      searchTextLines(outputDir, query, limit, 'text', analysisProvenance, vocabularyExpansion),
       readCachedContext(absDir),
     ]);
     return result
@@ -238,17 +250,24 @@ export async function handleSearchCode(
 
   // Resolve the active embedder (env → local provider → remote config); null is
   // the first-class keyword default. retrievalMode is the honest, served mode.
-  const cfg = await readOpenLoreConfig(absDir);
   const embedSvc = await resolveEmbedder(cfg);
-  const retrievalMode = servedRetrievalMode(embedSvc, outputDir, 'code');
-  const searchMode = retrievalMode === 'keyword' ? 'bm25_fallback' : 'hybrid';
+  let retrievalMode = servedRetrievalMode(embedSvc, outputDir, 'code', vocabularyExpansion);
 
   limit = Math.max(1, Math.min(limit, 100));
   const [results, mappingIdx, llmCtx] = await Promise.all([
-    VectorIndex.search(outputDir, query, embedSvc, { limit, language, minFanIn }),
+    VectorIndex.search(outputDir, query, embedSvc, {
+      limit,
+      language,
+      minFanIn,
+      vocabularyExpansion,
+      onRetrievalMode: mode => {
+        retrievalMode = mode === 'semantic' ? embedderMode(embedSvc) : mode;
+      },
+    }),
     loadMappingIndex(absDir),
     readCachedContext(absDir),
   ]);
+  const searchMode = isKeywordRetrievalMode(retrievalMode) ? 'bm25_fallback' : 'hybrid';
   const indexDegraded = VectorIndex.degradationNotice?.(outputDir) ?? null;
   // Zero symbol hits: the string may live in static markup/text that extracts
   // no symbols (UI copy, error messages). Fall back to the literal-text line
@@ -257,7 +276,9 @@ export async function handleSearchCode(
   // so a throw degrades silently to the normal empty response below.
   if (results.length === 0) {
     try {
-      const textFallback = await searchTextLines(outputDir, query, limit, 'text_fallback', analysisProvenance);
+      const textFallback = await searchTextLines(
+        outputDir, query, limit, 'text_fallback', analysisProvenance, vocabularyExpansion,
+      );
       if (textFallback) {
         return withIndexStaleness(
           absDir,
@@ -302,8 +323,9 @@ export async function handleSearchCode(
     const startLine = getCachedNodeStartLine(llmCtx, r.record.id);
     return {
       score: r.score,
-      scoreKind: r.scoreKind ?? (retrievalMode === 'keyword' ? 'bm25' : 'rrf'),
+      scoreKind: r.scoreKind ?? (isKeywordRetrievalMode(retrievalMode) ? 'bm25' : 'rrf'),
       matchEvidence: requireMatchEvidence(r.matchEvidence),
+      ...(r.expansionTerms?.length ? { expansionTerms: r.expansionTerms } : {}),
       name: r.record.name,
       filePath: r.record.filePath,
       ...(startLine !== undefined ? { startLine } : {}),
@@ -343,7 +365,7 @@ export async function handleSearchCode(
     query,
     searchMode,
     retrievalMode,
-    ...(retrievalMode === 'keyword'
+    ...(isKeywordRetrievalMode(retrievalMode)
       ? {
           note: 'Keyword (BM25) search — the zero-config default. For semantic ranking, run "openlore embed --local" (on-device, no API key) or set EMBED_* for a remote endpoint.',
         }
@@ -390,7 +412,11 @@ export async function handleSuggestInsertionPoints(
   limit = Math.max(1, Math.min(limit, 20));
   const { readCachedContext } = await import('./utils.js');
   const [rawResults, llmCtx] = await Promise.all([
-    VectorIndex.search(outputDir, description, embedSvc, { limit: limit * 4, language }),
+    VectorIndex.search(outputDir, description, embedSvc, {
+      limit: limit * 4,
+      language,
+      vocabularyExpansion: cfg?.retrieval?.vocabularyExpansion !== false,
+    }),
     readCachedContext(absDir),
   ]);
   const indexDegraded = VectorIndex.degradationNotice?.(outputDir) ?? null;
@@ -619,7 +645,7 @@ export async function handleSearchSpecs(
   const outputDir = join(absDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
 
   const { SpecVectorIndex } = await import('../../analyzer/spec-vector-index.js');
-  const { resolveEmbedder, embedderMode } = await import('../../analyzer/embedder.js');
+  const { resolveEmbedder, embedderMode, isKeywordRetrievalMode } = await import('../../analyzer/embedder.js');
 
   if (!SpecVectorIndex.exists(outputDir)) {
     return {
@@ -632,13 +658,14 @@ export async function handleSearchSpecs(
   // the first-class keyword default for spec search.
   const cfg = await readOpenLoreConfig(absDir);
   const embedSvc = await resolveEmbedder(cfg);
+  const vocabularyExpansion = cfg?.retrieval?.vocabularyExpansion !== false;
   const semanticRetrievalMode = embedderMode(embedSvc);
 
   limit = Math.max(1, Math.min(limit, 50));
   const [searchSnapshot, mappingIdx] = await Promise.all([
     typeof SpecVectorIndex.searchWithFreshness === 'function'
-      ? SpecVectorIndex.searchWithFreshness(outputDir, query, embedSvc, { limit, domain, section })
-      : SpecVectorIndex.search(outputDir, query, embedSvc, { limit, domain, section }).then(async results => ({
+      ? SpecVectorIndex.searchWithFreshness(outputDir, query, embedSvc, { limit, domain, section, vocabularyExpansion })
+      : SpecVectorIndex.search(outputDir, query, embedSvc, { limit, domain, section, vocabularyExpansion }).then(async results => ({
         results,
         retrievalMode: results.length > 0 && results.every(result => result.scoreKind === 'bm25')
           ? 'keyword' as const
@@ -651,14 +678,15 @@ export async function handleSearchSpecs(
     loadMappingIndex(absDir),
   ]);
   const { results, indexFreshness, retrievalMode: snapshotRetrievalMode } = searchSnapshot;
-  const retrievalMode = snapshotRetrievalMode === 'keyword'
-    ? 'keyword'
+  const retrievalMode = isKeywordRetrievalMode(snapshotRetrievalMode)
+    ? snapshotRetrievalMode
     : semanticRetrievalMode;
-  const searchMode = retrievalMode === 'keyword' ? 'bm25_fallback' : 'hybrid';
+  const searchMode = isKeywordRetrievalMode(retrievalMode) ? 'bm25_fallback' : 'hybrid';
   const servedResults = await Promise.all(results.map(async (r) => ({
     score: r.score,
-    scoreKind: r.scoreKind ?? (retrievalMode === 'keyword' ? 'bm25' : 'cosine_distance'),
+    scoreKind: r.scoreKind ?? (isKeywordRetrievalMode(retrievalMode) ? 'bm25' : 'cosine_distance'),
     matchEvidence: requireMatchEvidence(r.matchEvidence),
+    ...(r.expansionTerms?.length ? { expansionTerms: r.expansionTerms } : {}),
     id: r.record.id,
     domain: r.record.domain,
     section: r.record.section,
@@ -677,7 +705,7 @@ export async function handleSearchSpecs(
     query,
     searchMode,
     retrievalMode,
-    ...(retrievalMode === 'keyword'
+    ...(isKeywordRetrievalMode(retrievalMode)
       ? {
           note: 'Keyword (BM25) spec search — the zero-config default. For semantic ranking, run "openlore embed --local" (on-device, no API key) or set EMBED_* for a remote endpoint.',
         }
@@ -725,6 +753,7 @@ export async function handleUnifiedSearch(
     language,
     domain,
     section,
+    vocabularyExpansion: cfg?.retrieval?.vocabularyExpansion !== false,
   });
   const analysisProvenance = await readAnalysisContentProvenance(absDir);
   const servedResults = await Promise.all(results.map(async result => ({

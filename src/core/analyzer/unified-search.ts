@@ -248,9 +248,10 @@ export class UnifiedSearch {
       domain?: string;
       section?: string;
       config?: Partial<CrossScoringConfig>;
+      vocabularyExpansion?: boolean;
     } = {}
   ): Promise<UnifiedSearchResult[]> {
-    const { limit = 10, language, domain, section, config = {} } = opts;
+    const { limit = 10, language, domain, section, config = {}, vocabularyExpansion = true } = opts;
     const scoringConfig = { ...DEFAULT_CONFIG, ...config };
 
     // Import index classes dynamically
@@ -275,9 +276,11 @@ export class UnifiedSearch {
     // Execute parallel searches
     const svc = embedSvc ?? null;
     const [codeResults, specResults] = await Promise.all([
-      VectorIndex.search(outputDir, query, svc, { limit: limit * 3, language }).catch(() => []),
+      VectorIndex.search(outputDir, query, svc, { limit: limit * 3, language, vocabularyExpansion }).catch(() => []),
       svc
-        ? SpecVectorIndex.search(outputDir, query, svc, { limit: limit * 3, domain, section }).catch(() => [])
+        ? SpecVectorIndex.search(outputDir, query, svc, {
+            limit: limit * 3, domain, section, vocabularyExpansion,
+          }).catch(() => [])
         : Promise.resolve([]),
     ]);
 

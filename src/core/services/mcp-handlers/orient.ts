@@ -122,6 +122,7 @@ interface OrientFunction {
   startLine?: number;
   score: number;
   matchEvidence: MatchEvidence;
+  expansionTerms?: string[];
   /** Exact expansion handle (Spec 25 P2): get_function_body(directory, filePath, name). */
   expand: string;
   signature?: string;
@@ -171,6 +172,7 @@ interface OrientSpecMatch {
   title: string;
   score: number;
   matchEvidence: MatchEvidence;
+  expansionTerms?: string[];
   text: string;
   provenance: Extract<ServedContentProvenance, 'reviewed-corpus' | 'local-unreviewed'>;
 }
@@ -203,7 +205,7 @@ export async function handleOrient(
   const outputDir = join(absDir, '.openlore', 'analysis');
 
   const { VectorIndex } = await import('../../analyzer/vector-index.js');
-  const { resolveEmbedder, servedRetrievalMode } = await import('../../analyzer/embedder.js');
+  const { embedderMode, resolveEmbedder, servedRetrievalMode, isKeywordRetrievalMode } = await import('../../analyzer/embedder.js');
   const { SpecVectorIndex } = await import('../../analyzer/spec-vector-index.js');
 
   const hasCodeIndex = VectorIndex.exists(outputDir);
@@ -227,17 +229,24 @@ export async function handleOrient(
   // relevance gate; `retrievalMode` is the honest, human-facing mode.
   const cfg = await readOpenLoreConfig(absDir);
   const embedSvc = await resolveEmbedder(cfg);
-  const retrievalMode = servedRetrievalMode(embedSvc, outputDir, 'code');
-  const searchMode = retrievalMode === 'keyword' ? 'bm25_fallback' : 'hybrid';
+  const vocabularyExpansion = cfg?.retrieval?.vocabularyExpansion !== false;
+  let retrievalMode = servedRetrievalMode(embedSvc, outputDir, 'code', vocabularyExpansion);
 
   const clampedLimit = Math.max(1, Math.min(limit, 20));
 
   // ── Parallel data loading ──────────────────────────────────────────────────
   const [rawResults, mappingIdx, llmCtx] = await Promise.all([
-    VectorIndex.search(outputDir, task, embedSvc, { limit: clampedLimit * 3 }),
+    VectorIndex.search(outputDir, task, embedSvc, {
+      limit: clampedLimit * 3,
+      vocabularyExpansion,
+      onRetrievalMode: mode => {
+        retrievalMode = mode === 'semantic' ? embedderMode(embedSvc) : mode;
+      },
+    }),
     loadMappingIndex(absDir),
     readCachedContext(absDir),
   ]);
+  const searchMode = isKeywordRetrievalMode(retrievalMode) ? 'bm25_fallback' : 'hybrid';
 
 
   // ── Relevant functions (top-N) ────────────────────────────────────────────
@@ -254,6 +263,7 @@ export async function handleOrient(
       ...(startLine !== undefined ? { startLine } : {}),
       score: parseFloat(r.score.toFixed(3)),
       matchEvidence: requireMatchEvidence(r.matchEvidence),
+      ...(r.expansionTerms?.length ? { expansionTerms: r.expansionTerms } : {}),
       expand: expandHandle(r.record.name, r.record.filePath),
       signature: r.record.signature || undefined,
       docstring: r.record.docstring || undefined,
@@ -383,13 +393,17 @@ export async function handleOrient(
   let matchingSpecs: OrientSpecMatch[] | undefined;
   if (!lean && hasSpecIndex) {  // embedSvc may be null — SpecVectorIndex.search falls back to BM25
     try {
-      const specResults = await SpecVectorIndex.search(outputDir, task, embedSvc, { limit: 3 });
+      const specResults = await SpecVectorIndex.search(outputDir, task, embedSvc, {
+        limit: 3,
+        vocabularyExpansion,
+      });
       matchingSpecs = await Promise.all(specResults.map(async r => ({
         domain: r.record.domain,
         section: r.record.section,
         title: r.record.title,
         score: parseFloat(r.score.toFixed(3)),
         matchEvidence: requireMatchEvidence(r.matchEvidence),
+        ...(r.expansionTerms?.length ? { expansionTerms: r.expansionTerms } : {}),
         text: r.record.text.slice(0, 300) + (r.record.text.length > 300 ? '…' : ''),
         provenance: await indexedSpecContentProvenance(
           absDir,
@@ -929,7 +943,7 @@ export async function handleOrient(
     searchMode,
     retrievalMode,
     ...(parseHealthNote ? { parseHealth: parseHealthNote } : {}),
-    ...(retrievalMode === 'keyword'
+    ...(isKeywordRetrievalMode(retrievalMode)
       ? { note: 'Keyword (BM25) search — the zero-config default. For semantic ranking, run "openlore embed --local" (on-device, no API key) or set EMBED_* for a remote endpoint.' }
       : {}),
     ...(graphIndexStale

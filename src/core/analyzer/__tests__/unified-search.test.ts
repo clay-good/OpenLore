@@ -140,14 +140,14 @@ describe('UnifiedSearch', () => {
         mockOutputDir,
         'validate token',
         mockEmbedSvc,
-        { limit: 30, language: undefined }
+        { limit: 30, language: undefined, vocabularyExpansion: true }
       );
 
       expect(SpecVectorIndex.search).toHaveBeenCalledWith(
         mockOutputDir,
         'validate token',
         mockEmbedSvc,
-        { limit: 30, domain: undefined, section: undefined }
+        { limit: 30, domain: undefined, section: undefined, vocabularyExpansion: true }
       );
 
       expect(results).toHaveLength(2);
