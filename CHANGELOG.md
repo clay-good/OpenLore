@@ -3,6 +3,41 @@
 All notable changes to OpenLore are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.0] - 2026-08-30
+
+**The release where OpenLore learns the shape and vocabulary of a whole workspace.**
+
+- **Analyze large workspaces by shard.** OpenLore detects package boundaries, supports explicit
+  `workspace.shards` configuration and targeted `analyze --shard` runs, then assembles bounded,
+  attributable workspace results without making a monorepo behave like one giant package.
+- **Catch imported bundles up instead of starting over.** A clean bundle from an ancestor commit
+  now applies the exact repository delta through the watcher's bounded converge-or-flag path;
+  unverifiable, diverged, or oversized gaps still rebuild and disclose why.
+- **Find code using the repository's own language.** Keyword search now expands queries through a
+  bounded repository vocabulary, semantic results disclose score meaning and index freshness, and
+  stale regions retain enough structural context to explain what needs rebuilding.
+- **Understand more real-world source files.** Vue, Svelte, and Astro script containers participate
+  in structural analysis, while the digest distinguishes languages with structural backing from
+  files that are only counted.
+- **Keep the agent loop honest.** New Claude Code and Codex enforcement hooks run repository policy
+  checks during agent work, preserve concurrent settings edits, and fail safely at trust boundaries.
+  Generate and Repair also disclose when OpenSpec validation did not run instead of presenting
+  unvalidated prose as a completed specification.
+- **Treat Pi as a first-class install target.** `install`, `connect`, dry-run, force, and uninstall
+  flows now detect and configure Pi. The generated extension shim fixes the previously broken copied
+  artifact while refusing to overwrite user-owned extensions by default.
+- **Harden network, path, and architecture boundaries.** TLS verification opt-outs are scoped to one
+  outbound surface at a time; configured spec roots and architecture-layer patterns are confined;
+  incremental watcher work is bounded and preserves explicit freshness receipts under races.
+- Adds a reproducible default-surface benchmark protocol and refreshes `web-tree-sitter` to 0.25.10.
+
+This release is backward-compatible with 3.0.x. The programmatic API adds optional workspace,
+retrieval, and stale-region receipt types; configuration schema 1.2.0 adds only optional sections.
+
+**Upgrade:** `npm i -g openlore@3.1.0` — or `openlore update`.
+
+**Full Changelog**: https://github.com/clay-good/OpenLore/compare/v3.0.1...v3.1.0
+
 ## [3.0.1] - 2026-08-23
 
 - Release validation now builds the trusted OpenLore launcher before exercising hook

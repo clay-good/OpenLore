@@ -1,0 +1,36 @@
+{
+  "version": "1.2.0",
+  "projectType": "nodejs",
+  "openspecPath": "./openspec",
+  "analysis": {
+    "maxFiles": 100000,
+    "includePatterns": [],
+    "excludePatterns": [
+      "**/generated/**"
+    ]
+  },
+  "generation": {
+    "model": "claude-sonnet-4-6",
+    "domains": "auto"
+  },
+  "retrieval": {
+    "vocabularyExpansion": true
+  },
+  "workspace": {
+    "shards": [
+      {
+        "name": "api",
+        "root": "packages/api"
+      },
+      {
+        "name": "web",
+        "root": "packages/web"
+      }
+    ]
+  },
+  "panicResponse": {
+    "mode": "off"
+  },
+  "createdAt": "2026-08-30T00:00:00.000Z",
+  "lastRun": null
+}
