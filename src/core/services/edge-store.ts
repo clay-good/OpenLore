@@ -55,6 +55,18 @@ function missingSchemaVersionFault(): StoreLifecycleFault {
   };
 }
 
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isStaleRegionSymbol(value: unknown): value is StaleRegionSymbol {
+  if (typeof value !== 'object' || value === null) return false;
+  const symbol = value as Partial<StaleRegionSymbol>;
+  return typeof symbol.id === 'string' && typeof symbol.name === 'string' &&
+    typeof symbol.filePath === 'string' && isNonNegativeSafeInteger(symbol.fanIn) &&
+    isNonNegativeSafeInteger(symbol.fanOut);
+}
+
 function schemaMismatchFault(onDiskVersion: number): StoreLifecycleFault {
   return {
     reason: 'schema-mismatch',
@@ -1217,6 +1229,7 @@ export class EdgeStore {
         (file_path, symbol_count, hub_count, chokepoint_count, top_symbol)
       VALUES (?, ?, ?, ?, ?)
     `);
+    const clearCompositionStmt = this.db.prepare('DELETE FROM stale_file_composition WHERE file_path = ?');
     runTransaction(this.db, () => {
       for (const f of files) {
         stmt.run(f, at);
@@ -1229,6 +1242,8 @@ export class EdgeStore {
             receipt.chokepointCount,
             receipt.topSymbol ? JSON.stringify(receipt.topSymbol) : null,
           );
+        } else {
+          clearCompositionStmt.run(f);
         }
       }
     });
@@ -1268,24 +1283,33 @@ export class EdgeStore {
     return row.n;
   }
 
-  /** Structural composition persisted with the current stale-file receipt. */
-  getStaleRegionComposition(): StaleRegionComposition {
-    const fileCount = this.countStaleFiles();
+  /** One-statement snapshot of stale membership and its persisted composition. */
+  getStaleRegionSnapshot(): { files: string[]; composition: StaleRegionComposition } {
     try {
       const rows = this.db.prepare(`
-        SELECT symbol_count, hub_count, chokepoint_count, top_symbol
-        FROM stale_file_composition
-        WHERE file_path IN (SELECT file_path FROM stale_files)
+        SELECT sf.file_path, sfc.symbol_count, sfc.hub_count,
+               sfc.chokepoint_count, sfc.top_symbol
+        FROM stale_files sf
+        LEFT JOIN stale_file_composition sfc ON sfc.file_path = sf.file_path
+        ORDER BY sf.file_path
       `).all() as unknown as Array<{
-        symbol_count: number;
-        hub_count: number;
-        chokepoint_count: number;
+        file_path: string;
+        symbol_count: number | null;
+        hub_count: number | null;
+        chokepoint_count: number | null;
         top_symbol: string | null;
       }>;
-      const receipts: StaleFileComposition[] = rows.map(row => {
+      const receipts: StaleFileComposition[] = rows.flatMap(row => {
+        if (!isNonNegativeSafeInteger(row.symbol_count) ||
+            !isNonNegativeSafeInteger(row.hub_count) ||
+            !isNonNegativeSafeInteger(row.chokepoint_count)) return [];
         let topSymbol: StaleRegionSymbol | undefined;
         if (row.top_symbol) {
-          try { topSymbol = JSON.parse(row.top_symbol) as StaleRegionSymbol; } catch { /* corrupt optional context stays absent */ }
+          try {
+            const parsed: unknown = JSON.parse(row.top_symbol);
+            if (!isStaleRegionSymbol(parsed)) return [];
+            topSymbol = parsed;
+          } catch { return []; }
         }
         return {
           symbolCount: row.symbol_count,
@@ -1294,12 +1318,21 @@ export class EdgeStore {
           ...(topSymbol ? { topSymbol } : {}),
         };
       });
-      return combineStaleFileCompositions(receipts, fileCount);
+      return {
+        files: rows.map(row => row.file_path),
+        composition: combineStaleFileCompositions(receipts, rows.length),
+      };
     } catch {
       // Preserve the stale verdict with neutral context if an independently
       // damaged store lost only this optional reporting table.
-      return combineStaleFileCompositions([], fileCount);
+      const files = this.getStaleFiles();
+      return { files, composition: combineStaleFileCompositions([], files.length) };
     }
+  }
+
+  /** Structural composition persisted with the current stale-file receipt. */
+  getStaleRegionComposition(): StaleRegionComposition {
+    return this.getStaleRegionSnapshot().composition;
   }
 
   /**

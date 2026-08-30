@@ -94,12 +94,47 @@ describe('EdgeStore', () => {
         hubCount: 0,
         topSymbol: { name: 'leaf' },
       });
+
+      store.markFilesStale(['src/b.ts']);
+      expect(store.getStaleRegionComposition()).toEqual({
+        fileCount: 1,
+        symbolCount: 0,
+        hubCount: 0,
+        chokepointCount: 0,
+        unclassifiedFileCount: 1,
+      });
       store.clearAll();
       expect(store.getStaleRegionComposition()).toEqual({
         fileCount: 0,
         symbolCount: 0,
         hubCount: 0,
         chokepointCount: 0,
+      });
+    });
+
+    it('treats malformed persisted composition as unclassified context', () => {
+      store.markFilesStale(['src/a.ts'], Date.now(), new Map([['src/a.ts', {
+        symbolCount: 1,
+        hubCount: 1,
+        chokepointCount: 1,
+        topSymbol: { id: 'src/a.ts::hub', name: 'hub', filePath: 'src/a.ts', fanIn: 8, fanOut: 2 },
+      }]]));
+      const raw = new DatabaseSync(dbPath);
+      try {
+        raw.prepare(`
+          UPDATE stale_file_composition
+          SET symbol_count = -1, top_symbol = '"not-a-symbol"'
+          WHERE file_path = 'src/a.ts'
+        `).run();
+      } finally {
+        raw.close();
+      }
+      expect(store.getStaleRegionComposition()).toEqual({
+        fileCount: 1,
+        symbolCount: 0,
+        hubCount: 0,
+        chokepointCount: 0,
+        unclassifiedFileCount: 1,
       });
     });
   });

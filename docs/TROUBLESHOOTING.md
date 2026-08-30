@@ -289,6 +289,11 @@ signal and may temporarily be a lower bound after recent edits. Files with no us
 back to stable path order. Test callers receive a bounded budget slot so test-to-production
 reachability is not systematically deferred.
 
+If `closureBudget` is explicitly configured to `1`, one update cannot reserve work for both
+production and test callers. OpenLore keeps the highest-significance production caller, and the
+debug summary discloses that test reachability was deferred. The default budget of 40 does not
+have this limitation.
+
 ## Drift Detection Issues
 
 ### No Base Branch Detected

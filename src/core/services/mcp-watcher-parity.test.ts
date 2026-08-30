@@ -93,6 +93,7 @@ beforeEach(async () => {
 afterEach(async () => {
   _resetContextCacheForTesting();
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   await rm(root, { recursive: true, force: true });
 });
 
@@ -1073,6 +1074,32 @@ describe('adversarial regressions (PR #189 review findings)', () => {
     s.close();
     // Converge-or-flag: either x now resolves to c::addSym, OR x is flagged stale.
     expect(xResolved || xStale).toBe(true);
+  });
+
+  it('a dropped direct caller is not counted again as a Class-P consumer', async () => {
+    const v1: Files = {
+      'src/c.ts': 'export function placeholder() { return 0; }\n',
+      'src/x.ts': 'export function useBoth() { return placeholder() + addSym(); }\n',
+    };
+    await writeFiles(v1);
+    const store = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    seedStore(store, v1, await fullBuild(v1));
+    store.close();
+
+    vi.stubEnv('OPENLORE_WATCH_DEBUG', '1');
+    await writeFiles({
+      'src/c.ts': 'export function placeholder() { return 0; }\nexport function addSym() { return 1; }\n',
+    });
+    const { McpWatcher } = await import('./mcp-watcher.js');
+    await new McpWatcher({ rootPath: root, outputPath, embed: false, closureBudget: 0 })
+      .handleChange(join(root, 'src/c.ts'));
+
+    const stale = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    expect(stale.getStaleFiles()).toEqual(['src/x.ts']);
+    stale.close();
+    const output = vi.mocked(process.stderr.write).mock.calls.map(call => String(call[0])).join('');
+    expect(output).toMatch(/1 file, 0 hubs, 0 chokepoints/);
+    expect(output).not.toMatch(/2 files/);
   });
 
   it('F2: adding a duplicate of an existing name_only symbol converges its consumers to analyze --force', async () => {

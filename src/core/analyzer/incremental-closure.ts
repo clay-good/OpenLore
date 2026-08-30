@@ -44,17 +44,18 @@ export function closureFileSignificance(
   nodes: readonly FunctionNode[],
 ): ClosureFileSignificance[] {
   const wanted = new Set(paths);
-  const byFile = new Map<string, FunctionNode[]>();
+  const winnerByFile = new Map<string, FunctionNode>();
   for (const node of nodes) {
     if (node.isExternal || node.isTest || !wanted.has(node.filePath)) continue;
-    const group = byFile.get(node.filePath) ?? [];
-    group.push(node);
-    byFile.set(node.filePath, group);
+    const current = winnerByFile.get(node.filePath);
+    if (!current || node.fanIn > current.fanIn ||
+        (node.fanIn === current.fanIn && (node.fanOut > current.fanOut ||
+          (node.fanOut === current.fanOut && compareText(node.id, current.id) < 0)))) {
+      winnerByFile.set(node.filePath, node);
+    }
   }
   return paths.map(path => {
-    const winner = (byFile.get(path) ?? []).sort((a, b) =>
-      b.fanIn - a.fanIn || b.fanOut - a.fanOut || compareText(a.id, b.id),
-    )[0];
+    const winner = winnerByFile.get(path);
     return {
       path,
       fanIn: winner?.fanIn ?? 0,
@@ -75,27 +76,51 @@ export function spendClosureBudget(
   candidates: readonly string[],
   budget: number,
   nodes: readonly FunctionNode[],
-): { selected: string[]; dropped: string[]; usedPathFallback: boolean } {
+): {
+  selected: string[];
+  dropped: string[];
+  usedPathFallback: boolean;
+  testReachabilityDegraded: boolean;
+} {
   if (candidates.length <= budget) {
-    return { selected: [...candidates], dropped: [], usedPathFallback: false };
+    return {
+      selected: [...candidates],
+      dropped: [],
+      usedPathFallback: false,
+      testReachabilityDegraded: false,
+    };
   }
 
   const ranked = closureFileSignificance(candidates, nodes);
-  const usedPathFallback = ranked.some(file => !file.hasInternalNode);
-  if (budget <= 0) return { selected: [], dropped: ranked.sort(compareClosureSignificance).map(file => file.path), usedPathFallback };
+  const usedPathFallback = ranked.some(file => !file.hasInternalNode) ||
+    ranked.every(file => !file.hasInternalNode || (file.fanIn === 0 && file.fanOut === 0));
   const production = ranked.filter(file => !file.isTest).sort(compareClosureSignificance);
   const tests = ranked.filter(file => file.isTest).sort(compareClosureSignificance);
+  if (budget <= 0) {
+    return {
+      selected: [],
+      dropped: [...production, ...tests].map(file => file.path),
+      usedPathFallback,
+      testReachabilityDegraded: tests.length > 0,
+    };
+  }
   if (production.length === 0 || tests.length === 0) {
     const ordered = [...production, ...tests];
     return {
       selected: ordered.slice(0, budget).map(file => file.path),
       dropped: ordered.slice(budget).map(file => file.path),
       usedPathFallback,
+      testReachabilityDegraded: false,
     };
   }
 
-  const productionSlots = Math.max(0, budget - 1);
-  const selectedRecords = [...production.slice(0, productionSlots), ...tests.slice(0, 1)];
+  // With one slot no stateless allocator can serve both classes across repeated
+  // identical saves. Preserve hub-first usefulness and disclose that configured
+  // limit; budgets >=2 reserve one test slot and avoid the degradation.
+  const reservedTestSlots = budget === 1 ? 0 : 1;
+  const productionSlots = Math.min(production.length, budget - reservedTestSlots);
+  const testSlots = Math.min(tests.length, budget - productionSlots);
+  const selectedRecords = [...production.slice(0, productionSlots), ...tests.slice(0, testSlots)];
   const selectedPaths = new Set(selectedRecords.map(file => file.path));
   return {
     selected: selectedRecords.map(file => file.path),
@@ -103,6 +128,7 @@ export function spendClosureBudget(
       .filter(file => !selectedPaths.has(file.path))
       .map(file => file.path),
     usedPathFallback,
+    testReachabilityDegraded: reservedTestSlots === 0,
   };
 }
 

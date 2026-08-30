@@ -23,7 +23,10 @@ describe('incremental closure significance', () => {
       node('src/hub.ts', 'hub', 12, 2),
     ];
     expect(spendClosureBudget(candidates, 2, nodes)).toEqual({
-      selected: ['src/hub.ts', 'src/leaf-a.ts'], dropped: ['src/leaf-b.ts'], usedPathFallback: false,
+      selected: ['src/hub.ts', 'src/leaf-a.ts'],
+      dropped: ['src/leaf-b.ts'],
+      usedPathFallback: false,
+      testReachabilityDegraded: false,
     });
     expect(spendClosureBudget(candidates, 2, nodes)).toEqual(spendClosureBudget(candidates, 2, nodes));
   });
@@ -47,6 +50,31 @@ describe('incremental closure significance', () => {
       node('test/hub.test.ts', 'testHub', 0, 7, true),
     ];
     expect(spendClosureBudget(candidates, 2, nodes).selected).toEqual(['src/hub.ts', 'test/hub.test.ts']);
+  });
+
+  it('fills an asymmetric mixed budget and discloses the unavoidable one-slot limit', () => {
+    const candidates = ['src/hub.ts', ...Array.from({ length: 5 }, (_, i) => `test/case-${i}.test.ts`)];
+    const nodes = [
+      node('src/hub.ts', 'hub', 20, 2),
+      ...candidates.slice(1).map((file, i) => node(file, `case${i}`, 0, i, true)),
+    ];
+    const roomy = spendClosureBudget(candidates, 4, nodes);
+    expect(roomy.selected).toHaveLength(4);
+    expect(roomy.selected).toContain('src/hub.ts');
+    expect(roomy.testReachabilityDegraded).toBe(false);
+
+    const oneSlot = spendClosureBudget(candidates, 1, nodes);
+    expect(oneSlot.selected).toEqual(['src/hub.ts']);
+    expect(oneSlot.testReachabilityDegraded).toBe(true);
+  });
+
+  it('discloses path fallback when every resident significance counter is zero', () => {
+    const result = spendClosureBudget(['src/b.ts', 'src/a.ts'], 1, [
+      node('src/a.ts', 'a', 0, 0),
+      node('src/b.ts', 'b', 0, 0),
+    ]);
+    expect(result.selected).toEqual(['src/a.ts']);
+    expect(result.usedPathFallback).toBe(true);
   });
 });
 

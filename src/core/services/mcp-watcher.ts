@@ -889,6 +889,7 @@ export class McpWatcher {
           let recompute = directBudget.selected;
           let dropped = directBudget.dropped;
           let usedPathFallback = directBudget.usedPathFallback;
+          let testReachabilityDegraded = directBudget.testReachabilityDegraded;
 
           // Re-parse the changed file + the callers we can afford, as ONE build so
           // cross-file calls resolve against each other (not to `external::`).
@@ -915,7 +916,7 @@ export class McpWatcher {
               for (const cf of store.getExternalConsumerFiles(name)) {
                 const memberIndex = batchMemberIndex.get(cf);
                 if (cf !== f.rel && cf !== 'external' &&
-                    (memberIndex === undefined || memberIndex < itemIndex) && !recompute.includes(cf)) extra.add(cf);
+                    (memberIndex === undefined || memberIndex < itemIndex) && !directCallers.includes(cf)) extra.add(cf);
               }
               // `name_only` consumers currently resolve the name to a UNIQUE cross-file
               // definition. Adding a SECOND definition of that name makes the bare call
@@ -929,13 +930,14 @@ export class McpWatcher {
                 const memberIndex = batchMemberIndex.get(cf);
                 if (cf !== f.rel && cf !== 'external' &&
                     (memberIndex === undefined || memberIndex < itemIndex) &&
-                    !recompute.includes(cf) && addedId !== calleeId) extra.add(cf);
+                    !directCallers.includes(cf) && addedId !== calleeId) extra.add(cf);
               }
             }
             if (extra.size > 0) {
               const room = Math.max(0, this.closureBudget - recompute.length);
               const extraBudget = spendClosureBudget([...extra], room, resolutionNodes);
               usedPathFallback ||= extraBudget.usedPathFallback;
+              testReachabilityDegraded ||= extraBudget.testReachabilityDegraded;
               const take = extraBudget.selected;
               dropped = dropped.concat(extraBudget.dropped);
               if (take.length > 0) {
@@ -953,6 +955,7 @@ export class McpWatcher {
           // it stale instead, so it is honestly flagged until it can be re-read.
           const skippedSet = new Set(skipped);
           const recomputed = recompute.filter((cf) => !skippedSet.has(cf));
+          const staleNow = [...new Set([...dropped, ...skipped])];
           // Atomic swap so concurrent MCP reads never see a torn graph.
           store.transaction(() => {
             store.deleteEdgesForFile(f.rel);
@@ -970,7 +973,6 @@ export class McpWatcher {
             // not afford to recompute (over budget) OR could not read (skipped) are
             // marked stale (over-approximate, never silent).
             store.clearFilesStale([f.rel, ...recomputed]);
-            const staleNow = skipped.length > 0 ? [...dropped, ...skipped] : dropped;
             if (staleNow.length > 0) {
               store.markFilesStale(staleNow, Date.now(), composeStaleFiles(staleNow, resolutionNodes));
               // The incremental closure hit its work budget and left files explicitly
@@ -982,7 +984,6 @@ export class McpWatcher {
           const retainedResolutionNodes = resolutionNodes.filter(node => node.filePath !== f.rel);
           resolutionNodes.splice(0, resolutionNodes.length, ...retainedResolutionNodes, ...newNodes);
 
-          const staleNow = skipped.length > 0 ? [...dropped, ...skipped] : dropped;
           pendingVerdicts.push({
             file: f.rel,
             contentHash: newHash,
@@ -998,7 +999,6 @@ export class McpWatcher {
           changedFiles.push(f);
           for (const n of newNodes) changedNodes.push(n);
           if (this.debug) {
-            const staleNow = skipped.length > 0 ? [...dropped, ...skipped] : dropped;
             const staleComposition = combineStaleFileCompositions(
               [...composeStaleFiles(staleNow, resolutionNodes).values()],
               staleNow.length,
@@ -1006,7 +1006,7 @@ export class McpWatcher {
             process.stderr.write(
               `[mcp-watcher] graph: ${sanitizeForTerminal(f.rel)} (+${newNodes.length} nodes, +${newEdges.length} edges, ` +
               `${recomputed.length} re-resolved` +
-              `${staleNow.length ? `, ${formatStaleRegionComposition(staleComposition)} → stale${usedPathFallback ? ', stable-path fallback' : ''}${skipped.length ? ` (${skipped.length} unreadable)` : ''}` : ''})\n`,
+              `${staleNow.length ? `, ${formatStaleRegionComposition(staleComposition)} → stale${usedPathFallback ? ', stable-path fallback' : ''}${testReachabilityDegraded ? ', one-file budget defers test reachability' : ''}${skipped.length ? ` (${skipped.length} unreadable)` : ''}` : ''})\n`,
             );
           }
         }
