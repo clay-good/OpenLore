@@ -105,6 +105,7 @@ stays reachable):
 | Hook | Install | Blocks when |
 |------|---------|-------------|
 | **Enforcement gate** (recommended, unified) | `openlore enforce --install-hook` | a governance finding resolves to `blocking` under [`enforcement.policy`](configuration.md#enforcement-policy) — the single posture over all findings |
+| **Agent-loop enforcement** (opt-in, Claude Code) | `openlore setup --agent-enforcement-hook claude` | a finding is explicitly mapped to `blocking`; remediation is fed back to the agent through the Stop hook |
 | Decisions gate | wired by the decisions workflow (`openlore decisions`) | verified architectural decisions await review/sync |
 | Blast-radius guard | `openlore blast-radius --install-hook` | the diff triggers a configured `blastRadius.block` pattern |
 | Change-impact certificate | `openlore impact-certificate --install-hook` | the diff opens a new path into a `impactCertificate.block` surface severity |

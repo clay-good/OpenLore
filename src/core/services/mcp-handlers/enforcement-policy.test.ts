@@ -225,4 +225,29 @@ describe('classifyFindings — one gate over one policy', () => {
     expect(r.gated).toBe(false);
     expect(r.frozen.map((f) => f.code)).toEqual(['stale-decision-reference']);
   });
+
+  it('instantiates registered remediation templates deterministically without inventing missing ones', () => {
+    const architecture: GovernanceFinding = {
+      code: 'architecture-layer-violation', severity: 'error', source: 'architecture-rules',
+      subject: 'src/ui → src/db', message: 'crosses a declared layer boundary',
+    };
+    const first = classifyFindings([architecture], {}).classified[0]!;
+    const second = classifyFindings([architecture], {}).classified[0]!;
+    expect(first.remediation).toBe(
+      'Layer violation: src/ui → src/db; route through the declared interface layer instead of importing directly.',
+    );
+    expect(second.remediation).toBe(first.remediation);
+
+    const withoutTemplate = classifyFindings([findings[1]!], {}).classified[0]!;
+    expect(withoutTemplate).not.toHaveProperty('remediation');
+  });
+
+  it('preserves a source-provided remediation instead of replacing it', () => {
+    const finding: GovernanceFinding = {
+      code: 'architecture-cycle', severity: 'error', source: 'architecture-rules',
+      subject: 'a → b → a', message: 'cycle detected', remediation: 'Split the shared contract into c.',
+    };
+    expect(classifyFindings([finding], {}).classified[0]?.remediation)
+      .toBe('Split the shared contract into c.');
+  });
 });

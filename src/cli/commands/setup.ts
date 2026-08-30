@@ -353,6 +353,7 @@ async function runSetup(
 const PANIC_CHECK_HOOK_MARKER = 'openlore panic-check';
 const GRYPH_WATCH_HOOK_MARKER = 'openlore gryph-watch';
 const CHECK_EDIT_HOOK_MARKER = 'openlore check-edit --hook';
+const AGENT_ENFORCEMENT_HOOK_MARKER = 'openlore enforce --agent-hook';
 
 /** Sentinel written by `setup --panic off|observe`. When present, the guarded PreToolUse hook skips
  *  spawning Node entirely (the hook is a pure no-op in those modes) — off/observe cost nothing per
@@ -396,10 +397,65 @@ interface ClaudeHookSettings {
   hooks?: {
     PreToolUse?: Array<{ _comment?: string; [key: string]: unknown }>;
     PostToolUse?: Array<{ _comment?: string; [key: string]: unknown }>;
+    Stop?: Array<{ _comment?: string; [key: string]: unknown }>;
     UserPromptSubmit?: Array<{ _comment?: string; [key: string]: unknown }>;
     [key: string]: unknown;
   };
   [key: string]: unknown;
+}
+
+/** Install the opt-in enforcement gate in Claude Code's Stop loop. */
+export async function installAgentEnforcementHook(rootPath: string): Promise<boolean> {
+  const settingsPath = await verifiedCheckEditSettingsPath(rootPath, true);
+  if (!settingsPath) return false;
+  let settings: ClaudeHookSettings;
+  try { settings = await readClaudeSettings(settingsPath); }
+  catch (error) { logger.error((error as Error).message); return false; }
+  if (settings.hooks !== undefined
+      && (settings.hooks === null || typeof settings.hooks !== 'object' || Array.isArray(settings.hooks))) {
+    logger.error(`${settingsPath} has a non-object hooks field — refusing to overwrite it.`);
+    return false;
+  }
+  if (settings.hooks?.Stop !== undefined && !Array.isArray(settings.hooks.Stop)) {
+    logger.error(`${settingsPath} has a non-array hooks.Stop field — refusing to overwrite it.`);
+    return false;
+  }
+  const hooks = settings.hooks?.Stop ?? [];
+  const ownedIndex = hooks.findIndex(entry => entry._openloreAgentEnforcement === true);
+  const canonicalEntry = {
+    _comment: 'openlore: opt-in governance gate for the agent loop',
+    _openloreAgentEnforcement: true,
+    hooks: [{ type: 'command', command: AGENT_ENFORCEMENT_HOOK_MARKER }],
+  };
+  if (ownedIndex >= 0 && JSON.stringify(hooks[ownedIndex]) === JSON.stringify(canonicalEntry)) {
+    logger.success('agent enforcement Stop hook already present in .claude/settings.json');
+    return true;
+  }
+  settings.hooks ??= {};
+  settings.hooks.Stop = ownedIndex >= 0
+    ? hooks.map((entry, index) => index === ownedIndex ? canonicalEntry : entry)
+    : [...hooks, canonicalEntry];
+  await confinedAtomicWriteFile(rootPath, settingsPath, JSON.stringify(settings, null, 2) + '\n', { preserveMode: true });
+  logger.success('agent enforcement Stop hook added to .claude/settings.json');
+  return true;
+}
+
+/** Remove only OpenLore's opt-in agent enforcement entry. */
+export async function uninstallAgentEnforcementHook(rootPath: string): Promise<boolean> {
+  const settingsPath = await verifiedCheckEditSettingsPath(rootPath, false);
+  if (!settingsPath || !(await fileExists(settingsPath))) return true;
+  let settings: ClaudeHookSettings;
+  try { settings = await readClaudeSettings(settingsPath); }
+  catch (error) { logger.error((error as Error).message); return false; }
+  const hooks = settings.hooks?.Stop;
+  if (!Array.isArray(hooks)) return true;
+  const filtered = hooks.filter(entry => entry._openloreAgentEnforcement !== true);
+  if (filtered.length === hooks.length) return true;
+  if (filtered.length === 0) delete settings.hooks!.Stop;
+  else settings.hooks!.Stop = filtered;
+  await confinedAtomicWriteFile(rootPath, settingsPath, JSON.stringify(settings, null, 2) + '\n', { preserveMode: true });
+  logger.success('Removed the agent enforcement Stop hook from .claude/settings.json');
+  return true;
 }
 
 /** Install the read-only per-edit verdict consumer as a Claude Code PostToolUse hook. */
@@ -710,9 +766,10 @@ export const setupCommand = new Command('setup')
   .option('--global', 'For the pi target: install the extension to ~/.pi/agent/extensions/ instead of the project', false)
   .option('--hooks <format>', 'Install the opt-in panic-check + gryph-watch hooks for the given agent format: claude|kilo|codex (use "none" to remove them)')
   .option('--check-edit-hook <mode>', 'Install the read-only per-edit verdict hook: claude|none')
+  .option('--agent-enforcement-hook <mode>', 'Install the opt-in agent enforcement Stop hook: claude|none')
   .option('--panic <mode>', 'Set panic response mode in .openlore/config.json: off|observe|advisory|experimental_blocking')
   .option('--acknowledge-unvalidated', 'Activate an interventional panic mode even though the accuracy gate has not CLEARED (recorded)', false)
-  .action(async (options: { tools?: string; force: boolean; dir: string; global: boolean; hooks?: string; checkEditHook?: string; panic?: string; acknowledgeUnvalidated: boolean }) => {
+  .action(async (options: { tools?: string; force: boolean; dir: string; global: boolean; hooks?: string; checkEditHook?: string; agentEnforcementHook?: string; panic?: string; acknowledgeUnvalidated: boolean }) => {
     const projectRoot = options.dir;
 
     // Opt-in panic setup — runs independently of skill install and needs no TTY.
@@ -745,10 +802,27 @@ export const setupCommand = new Command('setup')
       if (!ok) { process.exitCode = 1; return; }
       // This explicit lifecycle request is self-contained; do not unexpectedly
       // continue into the interactive skill picker when no tools were requested.
-      if (!options.tools && !options.hooks && options.panic === undefined) return;
+      if (!options.tools && !options.hooks && !options.agentEnforcementHook && options.panic === undefined) return;
+    }
+    if (options.agentEnforcementHook) {
+      const ok = options.agentEnforcementHook === 'none' || options.agentEnforcementHook === 'off'
+        ? await uninstallAgentEnforcementHook(projectRoot)
+        : options.agentEnforcementHook === 'claude'
+          ? await installAgentEnforcementHook(projectRoot)
+          : false;
+      if (!ok) {
+        if (options.agentEnforcementHook !== 'claude'
+            && options.agentEnforcementHook !== 'none'
+            && options.agentEnforcementHook !== 'off') {
+          logger.error(`Unknown agent-enforcement-hook mode "${options.agentEnforcementHook}". Valid: claude, none`);
+        }
+        process.exitCode = 1;
+        return;
+      }
+      if (!options.tools && !options.hooks && !options.checkEditHook && options.panic === undefined) return;
     }
     // If only panic flags were requested (no skill install), we're done — don't prompt.
-    if (!options.tools && (options.hooks || options.checkEditHook || options.panic !== undefined) && !process.stdout.isTTY) {
+    if (!options.tools && (options.hooks || options.checkEditHook || options.agentEnforcementHook || options.panic !== undefined) && !process.stdout.isTTY) {
       return;
     }
     const allTools: ToolName[] = ['vibe', 'cline', 'gsd', 'bmad', 'claude', 'opencode', 'omoa', 'pi'];

@@ -25,6 +25,7 @@ import {
   impactCertificateFindings,
   corpusIntentGovernanceFindings,
   collectGovernanceFindings,
+  renderAgentHook,
 } from './enforce.js';
 import { classifyFindings } from '../../core/services/mcp-handlers/enforcement-policy.js';
 import { applyEnforcementBaseline } from '../../core/services/mcp-handlers/enforcement-baseline.js';
@@ -192,6 +193,81 @@ async function gateHookHuman(root: string): Promise<{ code: number; stderr: stri
     process.stderr.write = orig;
   }
 }
+
+async function gateAgentHook(root: string): Promise<{ code: number; stderr: string }> {
+  const out: string[] = [];
+  const orig = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((s: string | Uint8Array) => { out.push(String(s)); return true; }) as typeof process.stderr.write;
+  try {
+    return { code: await runEnforceCli({ cwd: root, agentHook: true }), stderr: out.join('') };
+  } finally {
+    process.stderr.write = orig;
+  }
+}
+
+describe('agent-loop enforcement hook', () => {
+  it('exits 2 only for blocking findings and renders the remediation first', async () => {
+    const root = await mkRepo();
+    await initializeGitHead(root);
+    await writeStaleScenario(root);
+    await writePolicy(root, { 'stale-decision-reference': 'blocking' });
+
+    const result = await gateAgentHook(root);
+    expect(result.code).toBe(2);
+    expect(result.stderr).toContain('[blocking] Stale decision reference: decision:aaaaaaaa');
+    expect(result.stderr.indexOf('Stale decision reference:')).toBeLessThan(result.stderr.indexOf('stale-decision-reference:'));
+  });
+
+  it('keeps advisory and frozen findings non-blocking in the agent loop', async () => {
+    const root = await mkRepo();
+    await initializeGitHead(root);
+    await writeStaleScenario(root);
+
+    const advisory = await gateAgentHook(root);
+    expect(advisory.code).toBe(0);
+    expect(advisory.stderr).toContain('[advisory]');
+
+    await writePolicy(root, { 'stale-decision-reference': 'frozen' });
+    const frozen = await gateAgentHook(root);
+    expect(frozen.code).toBe(0);
+    expect(frozen.stderr).toContain('[frozen:advisory]');
+  });
+
+  it('reports infrastructure caveats and exits 0 when config cannot be read', async () => {
+    const root = await mkRepo();
+    await initializeGitHead(root);
+    await writeFile(join(root, OPENLORE_DIR, OPENLORE_CONFIG_FILENAME), '{broken', 'utf-8');
+
+    const result = await gateAgentHook(root);
+    expect(result.code).toBe(0);
+    expect(result.stderr).toMatch(/config unavailable/i);
+    expect(result.stderr).toMatch(/incomplete; the agent turn was not blocked/i);
+  });
+
+  it('reports an unavailable configured source and exits 0 instead of blocking', async () => {
+    const root = await mkRepo();
+    await initializeGitHead(root);
+    await writePolicy(root, { 'architecture-forbidden-dependency': 'blocking' });
+    await writeFile(join(root, '.openlore', 'architecture.json'), JSON.stringify({
+      forbidden: [{ from: 'src/domain', to: 'src/infra' }],
+    }), 'utf-8');
+
+    const result = await gateAgentHook(root);
+    expect(result.code).toBe(0);
+    expect(result.stderr).toMatch(/architecture rule check unavailable/i);
+    expect(result.stderr).toMatch(/incomplete; the agent turn was not blocked/i);
+  });
+
+  it('does not fabricate remediation for finding codes without a template', () => {
+    const result = classifyFindings([{
+      code: 'surface-info', severity: 'info', source: 'impact-certificate',
+      subject: 'client', message: 'informational reachability change',
+    }], {});
+    const output = renderAgentHook(result, []);
+    expect(output).toContain('[advisory] surface-info: informational reachability change');
+    expect(output).not.toContain('Action:');
+  });
+});
 
 describe('architecture assessment hardening', () => {
   it('fails configured architecture codes when declared config is malformed', async () => {

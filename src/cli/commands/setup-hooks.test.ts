@@ -7,7 +7,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { installPanicCheckHook, installGryphWatchHook, uninstallPanicHooks, installCheckEditHook, uninstallCheckEditHook, panicCheckHookCommand, evaluatePanicActivation, PANIC_DISABLED_SENTINEL } from './setup.js';
+import { installPanicCheckHook, installGryphWatchHook, uninstallPanicHooks, installCheckEditHook, uninstallCheckEditHook, installAgentEnforcementHook, uninstallAgentEnforcementHook, panicCheckHookCommand, evaluatePanicActivation, PANIC_DISABLED_SENTINEL } from './setup.js';
 import { validatePanicSignal } from '../../core/services/mcp-handlers/panic-validation.js';
 import type { PanicTelemetryEvent } from '../../core/services/mcp-handlers/panic-validation.js';
 import { PANIC_GATE } from '../../core/services/mcp-handlers/panic-validation.js';
@@ -16,9 +16,48 @@ interface Settings {
   hooks?: {
     PreToolUse?: Array<{ command?: string }>;
     PostToolUse?: Array<{ matcher?: string; _openlore?: boolean; hooks?: Array<{ command?: string }> }>;
+    Stop?: Array<{ command?: string; _openloreAgentEnforcement?: boolean; hooks?: Array<{ command?: string }> }>;
     UserPromptSubmit?: Array<{ command?: string }>;
   };
 }
+
+describe('agent enforcement Stop hook lifecycle', () => {
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'openlore-agent-enforce-hook-'));
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('installs idempotently and uninstalls only the OpenLore entry', async () => {
+    expect(await installAgentEnforcementHook(dir)).toBe(true);
+    expect(await installAgentEnforcementHook(dir)).toBe(true);
+    const settings = await readSettings(dir);
+    expect(settings.hooks?.Stop).toHaveLength(1);
+    expect(settings.hooks?.Stop?.[0]?.hooks?.[0]?.command).toBe('openlore enforce --agent-hook');
+
+    settings.hooks!.Stop!.push({ command: 'my-own-stop-check' });
+    settings.hooks!.Stop!.push({ command: 'echo openlore enforce --agent-hook' });
+    await writeFile(join(dir, '.claude', 'settings.json'), JSON.stringify(settings, null, 2), 'utf-8');
+    expect(await uninstallAgentEnforcementHook(dir)).toBe(true);
+    expect((await readSettings(dir)).hooks?.Stop).toEqual([
+      { command: 'my-own-stop-check' },
+      { command: 'echo openlore enforce --agent-hook' },
+    ]);
+  });
+
+  it('refuses corrupt settings without changing their bytes', async () => {
+    await mkdir(join(dir, '.claude'), { recursive: true });
+    const path = join(dir, '.claude', 'settings.json');
+    await writeFile(path, '{broken', 'utf-8');
+    expect(await installAgentEnforcementHook(dir)).toBe(false);
+    expect(await readFile(path, 'utf-8')).toBe('{broken');
+  });
+});
 
 async function readSettings(dir: string): Promise<Settings> {
   return JSON.parse(await readFile(join(dir, '.claude', 'settings.json'), 'utf-8')) as Settings;

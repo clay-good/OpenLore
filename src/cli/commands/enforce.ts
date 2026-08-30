@@ -569,6 +569,7 @@ export interface EnforceCliOptions {
   base?: string;
   json?: boolean;
   hook?: boolean;
+  agentHook?: boolean;
   installHook?: boolean;
   uninstallHook?: boolean;
 }
@@ -587,8 +588,9 @@ export async function runEnforceCli(opts: EnforceCliOptions): Promise<number> {
   } catch (error) {
     configReadError = error instanceof Error ? error.message : String(error);
   }
+  const explicitPolicy = normalizeEnforcementPolicy(config?.enforcement);
   const policy = effectivePolicy(config);
-  const unknown = unknownPolicyCodes(normalizeEnforcementPolicy(config?.enforcement));
+  const unknown = unknownPolicyCodes(explicitPolicy);
 
   let collected: Awaited<ReturnType<typeof collectGovernanceFindings>>;
   try {
@@ -606,6 +608,16 @@ export async function runEnforceCli(opts: EnforceCliOptions): Promise<number> {
   }
 
   const classified = classifyFindings(collected.findings, policy);
+  if (opts.agentHook) {
+    const unavailable = configReadError !== null || collected.failedCodes.size > 0;
+    if (configReadError) collected.caveats.push(`enforcement config unavailable: ${configReadError}`);
+    const output = renderAgentHook(classified, collected.caveats, unavailable);
+    process.stderr.write(sanitizeForTerminal(output + '\n', { keepNewlines: true }));
+    const explicitlyBlocking = classified.blocking.some(
+      (finding) => explicitPolicy[finding.code] === 'blocking',
+    );
+    return !unavailable && explicitlyBlocking ? 2 : 0;
+  }
   const activeFrozenAssessment = collected.assessedCodes.size > 0 && Object.entries(policy)
     .some(([code, enforcementClass]) => enforcementClass === 'frozen' && collected.assessedCodes.has(code));
   const activeGatePolicy = Object.values(policy)
@@ -775,6 +787,7 @@ function renderHuman(
       const label = f.enforcementClass === 'frozen'
         ? f.baselineState === 'new' ? 'frozen:new' : f.baselineState === 'frozen' ? 'frozen' : 'frozen:invalid'
         : f.enforcementClass;
+      if (f.remediation) lines.push(`      Action: ${f.remediation}`);
       lines.push(`   ${ICON[f.enforcementClass]} [${label}] ${f.code} (${f.source}): ${f.message}`);
     }
   }
@@ -813,16 +826,35 @@ function renderHuman(
   return lines.join('\n');
 }
 
+/** Concise Claude Code Stop-hook rendering: action first, one finding per line. */
+export function renderAgentHook(
+  result: ReturnType<typeof classifyFindings>,
+  caveats: readonly string[],
+  infrastructureUnavailable = false,
+): string {
+  const lines = ['OpenLore agent enforcement:'];
+  for (const finding of result.classified) {
+    const label = finding.enforcementClass === 'frozen' ? 'frozen:advisory' : finding.enforcementClass;
+    const conclusion = `${finding.code}: ${finding.message}`;
+    lines.push(`- [${label}] ${finding.remediation ? `${finding.remediation} — ${conclusion}` : conclusion}`);
+  }
+  if (result.classified.length === 0) lines.push('- No governance findings.');
+  for (const caveat of caveats) lines.push(`- Caveat: ${caveat}`);
+  if (infrastructureUnavailable) lines.push('- Caveat: enforcement was incomplete; the agent turn was not blocked.');
+  return lines.join('\n');
+}
+
 export const enforceCommand = new Command('enforce')
   .description('Unified finding-enforcement gate: each source declares its default; frozen adopts existing debt and blocks only new findings.')
   .option('--base <ref>', 'Git ref to diff the working tree against for diff-based sources (default HEAD)')
   .option('--json', 'Emit the gate result as JSON', false)
   .option('--hook', 'Hook mode: exit 1 on blocking/new frozen findings, invalid config, incomplete frozen assessment, or unverifiable staged bytes', false)
+  .option('--agent-hook', 'Agent-loop hook mode: exit 2 only on blocking findings; infrastructure failures exit 0', false)
   .option('--install-hook', 'Install the unified enforcement pre-commit hook', false)
   .option('--uninstall-hook', 'Remove the unified enforcement pre-commit hook', false)
-  .action(async (opts: { base?: string; json?: boolean; hook?: boolean; installHook?: boolean; uninstallHook?: boolean }) => {
+  .action(async (opts: { base?: string; json?: boolean; hook?: boolean; agentHook?: boolean; installHook?: boolean; uninstallHook?: boolean }) => {
     const code = await runEnforceCli({
-      base: opts.base, json: opts.json, hook: opts.hook,
+      base: opts.base, json: opts.json, hook: opts.hook, agentHook: opts.agentHook,
       installHook: opts.installHook, uninstallHook: opts.uninstallHook,
     });
     process.exit(code);

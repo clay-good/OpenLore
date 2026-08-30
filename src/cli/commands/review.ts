@@ -81,7 +81,7 @@ export interface ReviewBriefing {
     retired: number;
     requiresInitialization: string[];
     /** Bounded evidence for the blast-radius orphan findings that caused the gate. */
-    evidence: Array<{ code: string; state: 'blocking' | 'frozen:new' | 'frozen:uninitialized' | 'frozen:invalid' | 'config:invalid' }>;
+    evidence: Array<{ code: string; state: 'blocking' | 'frozen:new' | 'frozen:uninitialized' | 'frozen:invalid' | 'config:invalid'; remediation?: string }>;
     omittedEvidence: number;
   };
   /** `ok` when at least one of the two analyses produced a real result; `unavailable`
@@ -377,6 +377,9 @@ export function renderMarkdown(b: ReviewBriefing): string {
     L.push('### Blast-radius orphan enforcement');
     L.push(`- **State:** ${b.enforcement.frozen} frozen, ${b.enforcement.new} new, ${b.enforcement.retired} retired${b.enforcement.gated ? ' — gate blocked' : ''}.`);
     if (b.enforcement.evidence.length) {
+      for (const item of b.enforcement.evidence) {
+        if (item.remediation) L.push(`- **Action:** ${markdownText(item.remediation, 500)}`);
+      }
       L.push(`- **Gate evidence:** ${inlineList(b.enforcement.evidence.map((item) => `${inlineCode(item.code)} (${markdownText(item.state, 24)})`))}${b.enforcement.omittedEvidence ? `; …and ${b.enforcement.omittedEvidence} more` : ''}.`);
     }
     if (b.enforcement.requiresInitialization.length) {
@@ -625,6 +628,7 @@ export async function runReviewCli(opts: ReviewCliOptions): Promise<number> {
   const gateEvidence: NonNullable<ReviewBriefing['enforcement']>['evidence'] = reconciled.gate.blocking.map((finding) => ({
     code: finding.code,
     state: finding.enforcementClass === 'frozen' ? 'frozen:new' as const : 'blocking' as const,
+    ...(finding.remediation ? { remediation: finding.remediation } : {}),
   }));
   const evidenceByCode = new Map(gateEvidence.map((item) => [item.code, item]));
   if (candidateConfigError) evidenceByCode.set('enforcement-config', { code: 'enforcement-config', state: 'config:invalid' });
