@@ -1004,6 +1004,36 @@ export class EdgeStore {
     this.db.prepare('DELETE FROM classes WHERE file_path = ?').run(file);
   }
 
+  /** Rebuild synthetic external class/module rows after incremental edge repair. */
+  refreshExternalClasses(): void {
+    const nodes = (
+      this.db.prepare('SELECT * FROM nodes WHERE is_external = 1 ORDER BY id').all() as unknown as RawNode[]
+    ).map(rawToFunctionNode);
+    this.deleteClassesForFile('external');
+    const groups = new Map<string, ClassNode>();
+    for (const node of nodes) {
+      const id = node.className ? `external::${node.className}` : 'external';
+      const current = groups.get(id);
+      if (current) {
+        current.methodIds.push(node.id);
+        continue;
+      }
+      groups.set(id, {
+        id,
+        name: node.className ?? '[external]',
+        filePath: 'external',
+        language: node.language,
+        parentClasses: [],
+        interfaces: [],
+        methodIds: [node.id],
+        fanIn: 0,
+        fanOut: 0,
+        isModule: !node.className,
+      });
+    }
+    this.insertClasses([...groups.values()]);
+  }
+
   insertClasses(classes: ClassNode[]): void {
     const stmt: StatementSync = this.db.prepare(`
       INSERT OR REPLACE INTO classes

@@ -35,7 +35,7 @@ import {
   readCurrentGeneration,
 } from '../runtime/analysis-generation.js';
 import { createHash } from 'node:crypto';
-import { join, relative, posix } from 'node:path';
+import { join, relative, resolve, posix } from 'node:path';
 import { spawn } from 'node:child_process';
 import chokidar, { type FSWatcher } from 'chokidar';
 import { extractSignatures, detectLanguage } from '../analyzer/signature-extractor.js';
@@ -52,6 +52,7 @@ import {
   type ScriptContainerFileRecord,
 } from '../analyzer/sfc-script-extractor.js';
 import { isTestFile } from '../analyzer/test-file.js';
+import { toRepositoryPath } from '../analyzer/file-walker.js';
 import {
   combineStaleFileCompositions,
   composeStaleFiles,
@@ -72,7 +73,7 @@ import {
   MAX_EDIT_VERDICT_BASIS_FILE_BYTES,
   MAX_EDIT_VERDICT_BASIS_TOTAL_BYTES,
 } from './edit-verdict.js';
-import { readFileConfined } from '../../utils/path-confinement.js';
+import { isConfinedPath, readFileConfined } from '../../utils/path-confinement.js';
 import { sanitizeForTerminal } from '../../utils/misc.js';
 import {
   OPENLORE_DIR,
@@ -198,6 +199,13 @@ export interface McpWatcherOptions {
 /** Why the call graph fell behind in a way only a full rebuild can repair. */
 export type GraphStaleReason = 'head-change' | 'stale-region';
 
+export interface RepositoryDeltaResult {
+  changedFiles: string[];
+  deletedFiles: string[];
+  closureFiles: string[];
+  staleFiles: string[];
+}
+
 interface ChangedFile {
   rel: string;
   content: string;
@@ -313,6 +321,7 @@ export class McpWatcher {
   private stopping = false;                          // reject events once shutdown begins
   private vcsBulkFlag = false;                       // set by the .git ref watcher
   private vcsSettling = false;                       // preserve the VCS settle window across file events
+  private appliedClosureFiles?: Set<string>;         // populated only by explicit repository-delta callers
 
   // ── Embedding lane (Step 4 — decoupled, lower priority) ─────────────────────
   private embed: boolean;
@@ -726,6 +735,113 @@ export class McpWatcher {
   }
 
   /**
+   * Apply an already-bounded, repository-relative delta through the exact same
+   * mutation lanes as watch mode. This does not start a filesystem watcher and
+   * never schedules a full rebuild; callers receive the explicit stale region.
+   * (change: add-incremental-bundle-delta)
+   */
+  async applyRepositoryDelta(
+    changedFiles: readonly string[],
+    deletedFiles: readonly string[],
+  ): Promise<RepositoryDeltaResult> {
+    const normalize = (files: readonly string[]): string[] => [...new Set(files.map(file => {
+      if (!file || file.includes('\0')) throw new Error('Repository delta contains an invalid path.');
+      const absolute = resolve(this.rootPath, file);
+      if (!isConfinedPath(this.rootPath, absolute) || absolute === this.rootPath) {
+        throw new Error(`Repository delta path escapes the project root: ${file}`);
+      }
+      return toRepositoryPath(relative(this.rootPath, absolute));
+    }))].sort();
+    const changed = normalize(changedFiles);
+    const deleted = normalize(deletedFiles);
+    let deletionRepair: string[] = [];
+    let deletionStale: string[] = [];
+    if (deleted.length > 0 && EdgeStore.exists(this.outputPath)) {
+      const store = EdgeStore.open(EdgeStore.dbPath(this.outputPath));
+      try {
+        if (!store.notReady) {
+          const resolutionNodes = store.getAllInternalNodes();
+          const deletedNames = new Set(deleted.flatMap(file =>
+            store.getNodesForFile(file).map(node => node.name)));
+          const nameCounts = new Map<string, number>();
+          for (const node of resolutionNodes) {
+            nameCounts.set(node.name, (nameCounts.get(node.name) ?? 0) + 1);
+          }
+          const ambiguityCandidates = [...deletedNames].some(name => (nameCounts.get(name) ?? 0) > 1)
+            ? resolutionNodes.map(node => node.filePath)
+            : [];
+          const callers = [...new Set([
+            ...deleted.flatMap(file => store.getCallerFiles(file)),
+            ...[...deletedNames].flatMap(name => store.getExternalConsumerFiles(name)),
+            ...ambiguityCandidates,
+          ])]
+            .filter(file => !deleted.includes(file));
+          const budget = spendClosureBudget(callers, this.closureBudget, resolutionNodes);
+          deletionRepair = budget.selected;
+          deletionStale = budget.dropped;
+        }
+      } finally {
+        store.close();
+      }
+    }
+    this.appliedClosureFiles = new Set<string>();
+    try {
+      if (deleted.length > 0) {
+        await this.handleDeletions(deleted.map(file => join(this.rootPath, file)), false);
+      }
+      const repair = [...new Set([...changed, ...deletionRepair])].sort();
+      if (repair.length > 0) {
+        await this.handleBatch(repair.map(file => join(this.rootPath, file)), {
+          syncFlush: true,
+          recordSpecChanges: false,
+          forceFiles: new Set(deletionRepair),
+        });
+      }
+      let staleFiles: string[] = [];
+      if (EdgeStore.exists(this.outputPath)) {
+        const store = EdgeStore.open(EdgeStore.dbPath(this.outputPath));
+        try {
+          if (!store.notReady) {
+            const unapplied: string[] = [];
+            for (const file of [...new Set([...changed, ...deletionRepair])]) {
+              if (this.appliedClosureFiles.has(file)) continue;
+              try {
+                const content = await readFileConfined(this.rootPath, file, MAX_EDIT_VERDICT_BASIS_FILE_BYTES);
+                const hash = createHash('sha256').update(content).digest('hex');
+                if (store.getFileHash(file) === hash) continue;
+              } catch {
+                // Unreadable or oversized changed files cannot be asserted fresh.
+              }
+              unapplied.push(file);
+            }
+            if (unapplied.length > 0) {
+              store.markFilesStale(unapplied, Date.now(), composeStaleFiles(unapplied, store.getAllInternalNodes()));
+            }
+            if (deletionStale.length > 0) {
+              store.markFilesStale(
+                deletionStale,
+                Date.now(),
+                composeStaleFiles(deletionStale, store.getAllInternalNodes()),
+              );
+            }
+            staleFiles = store.getStaleFiles();
+          }
+        } finally {
+          store.close();
+        }
+      }
+      return {
+        changedFiles: changed,
+        deletedFiles: deleted,
+        closureFiles: [...this.appliedClosureFiles].sort(),
+        staleFiles,
+      };
+    } finally {
+      this.appliedClosureFiles = undefined;
+    }
+  }
+
+  /**
    * Process a coalesced batch of changed files as ONE pipeline pass:
    *   • per-file incremental edge update (content-hash skip), all under one open
    *     EdgeStore;
@@ -734,7 +850,7 @@ export class McpWatcher {
    */
   private async handleBatch(
     absPaths: string[],
-    opts: { syncFlush?: boolean; recordSpecChanges?: boolean } = {},
+    opts: { syncFlush?: boolean; recordSpecChanges?: boolean; forceFiles?: ReadonlySet<string> } = {},
   ): Promise<void> {
     const t0 = Date.now();
     const consumedVcsBulk = this.vcsBulkFlag;
@@ -745,7 +861,7 @@ export class McpWatcher {
     // 1. Resolve + read candidate files (skip tests / unknown langs / deleted).
     const files: Array<{ rel: string; abs: string; content: string }> = [];
     for (const abs of absPaths) {
-      const rel = relative(this.rootPath, abs);
+      const rel = toRepositoryPath(relative(this.rootPath, abs));
       if (isTestFile(rel)) continue;
       // HTML is 'unknown' to detectLanguage but takes the dedicated HTML path
       // (text-line + inline-script call graph + dependency asset edges).
@@ -808,7 +924,7 @@ export class McpWatcher {
         }> = [];
         for (const f of store.notReady ? [] : files) {
           const newHash = createHash('sha256').update(f.content).digest('hex');
-          if (store.getFileHash(f.rel) === newHash) continue;
+          if (!opts.forceFiles?.has(f.rel) && store.getFileHash(f.rel) === newHash) continue;
           const oldNodes = store.getNodesForFile(f.rel);
           const oldIncoming: EditCallSite[] = [];
           for (const node of oldNodes) {
@@ -853,6 +969,7 @@ export class McpWatcher {
         // after each changed file so later subset builds observe the same state
         // they would have received from reloading the node table.
         const resolutionNodes = store.notReady ? [] : store.getAllInternalNodes();
+        const resolutionClasses = store.notReady ? [] : store.getAllClasses();
         const batchMemberIndex = new Map(work.map((item, index) => [item.f.rel, index]));
         const directCallersByFile = new Map<string, string[]>();
         const directCallerOwner = new Map<string, number>();
@@ -894,7 +1011,14 @@ export class McpWatcher {
 
           // Re-parse the changed file + the callers we can afford, as ONE build so
           // cross-file calls resolve against each other (not to `external::`).
-          let sub = await buildGraphSubset(f.rel, f.content, recompute, this.rootPath, resolutionNodes);
+          let sub = await buildGraphSubset(
+            f.rel,
+            f.content,
+            recompute,
+            this.rootPath,
+            resolutionNodes,
+            resolutionClasses,
+          );
 
           // Class-P closure: a symbol this edit ADDED can newly bind a previously-
           // `external` call site, or turn a previously-UNIQUE `name_only` bind into
@@ -943,12 +1067,26 @@ export class McpWatcher {
               dropped = dropped.concat(extraBudget.dropped);
               if (take.length > 0) {
                 recompute = [...recompute, ...take];
-                sub = await buildGraphSubset(f.rel, f.content, recompute, this.rootPath, resolutionNodes);
+                sub = await buildGraphSubset(
+                  f.rel,
+                  f.content,
+                  recompute,
+                  this.rootPath,
+                  resolutionNodes,
+                  resolutionClasses,
+                );
               }
             }
           }
 
-          const { edges: newEdges, nodes: newNodes, cfgs: newCfgs, skipped } = sub;
+          const {
+            edges: newEdges,
+            nodes: newNodes,
+            cfgs: newCfgs,
+            classes: newClasses,
+            inheritanceEdges: newInheritanceEdges,
+            skipped,
+          } = sub;
           // A file we INTENDED to recompute but could not READ (permissions /
           // transient I/O / a lock) must not have its edges deleted and then be
           // asserted fresh — that is the one silent-divergence the converge-or-flag
@@ -957,17 +1095,25 @@ export class McpWatcher {
           const skippedSet = new Set(skipped);
           const recomputed = recompute.filter((cf) => !skippedSet.has(cf));
           const staleNow = [...new Set([...dropped, ...skipped])];
+          this.appliedClosureFiles?.add(f.rel);
+          for (const cf of recomputed) this.appliedClosureFiles?.add(cf);
           // Atomic swap so concurrent MCP reads never see a torn graph.
           store.transaction(() => {
             store.deleteEdgesForFile(f.rel);
             for (const cf of recomputed) store.deleteOutgoingEdgesForFile(cf);
             store.deleteNodesForFile(f.rel);
+            store.deleteClassesForFile(f.rel);
             // Recompute only THIS file's overlay records — intra-procedural, so
             // caller files' overlays stay valid (spec: add-intraprocedural-cfg-dataflow-overlay).
             store.deleteCfgForFile(f.rel);
             store.insertNodes(newNodes);
             store.insertEdges(newEdges);
             store.insertCfgs(newCfgs);
+            store.insertClasses(newClasses);
+            store.replaceInheritanceEdges(newInheritanceEdges);
+            store.deleteOrphanExternalNodes();
+            store.refreshExternalClasses();
+            store.recomputeStructuralMetrics();
             store.setFileHash(f.rel, newHash);
             // Self-heal: every file we actually recomputed has converged, so it
             // leaves the explicit stale region. Soundness fallback: files we could
@@ -984,6 +1130,8 @@ export class McpWatcher {
           });
           const retainedResolutionNodes = resolutionNodes.filter(node => node.filePath !== f.rel);
           resolutionNodes.splice(0, resolutionNodes.length, ...retainedResolutionNodes, ...newNodes);
+          const retainedResolutionClasses = resolutionClasses.filter(cls => cls.filePath !== f.rel);
+          resolutionClasses.splice(0, resolutionClasses.length, ...retainedResolutionClasses, ...newClasses);
 
           pendingVerdicts.push({
             file: f.rel,
@@ -1946,7 +2094,7 @@ export class McpWatcher {
     // Deletion is idempotent removal, so no need to filter — each lane no-ops for
     // a path it never indexed. (Watch-ignored paths like *.test.ts never reach
     // here anyway: chokidar prunes them, so no unlink fires.)
-    const rels = absPaths.map((abs) => relative(this.rootPath, abs));
+    const rels = absPaths.map((abs) => toRepositoryPath(relative(this.rootPath, abs)));
     if (rels.length === 0) return;
     const releaseAnalysis = await acquireAnalysisLock(this.outputPath);
     try {
@@ -1970,6 +2118,12 @@ export class McpWatcher {
             store.deleteCfgForFile(rel);
             store.deleteClassesForFile(rel);
           }
+          const survivingClassIds = new Set(store.getAllClasses().map(cls => cls.id));
+          store.replaceInheritanceEdges(store.getAllInheritanceEdges().filter(edge =>
+            survivingClassIds.has(edge.parentId) && survivingClassIds.has(edge.childId)));
+          store.deleteOrphanExternalNodes();
+          store.refreshExternalClasses();
+          store.recomputeStructuralMetrics();
           // A deleted file leaves no topology to be stale about — drop any stale
           // mark so the region doesn't accumulate phantom rows for gone files
           // (fix-transitive-incremental-staleness).
@@ -2102,12 +2256,16 @@ export class McpWatcher {
         return;
       }
       const graph = JSON.parse(raw) as {
-        nodes: Array<{ id: string; metrics?: Record<string, number> }>;
+        nodes: Array<{ id: string; file?: { path?: string }; metrics?: Record<string, number> }>;
         edges: Array<{ source: string; target: string }>;
       };
       if (!Array.isArray(graph.nodes) || !Array.isArray(graph.edges)) return;
 
-      const removed = new Set(absPaths);
+      const removedPaths = new Set(absPaths.map(abs => toRepositoryPath(relative(this.rootPath, abs))));
+      const removed = new Set(graph.nodes
+        .filter(node => absPaths.includes(node.id) ||
+          (typeof node.file?.path === 'string' && removedPaths.has(node.file.path)))
+        .map(node => node.id));
       const nodesBefore = graph.nodes.length;
       graph.nodes = graph.nodes.filter((n) => !removed.has(n.id));
       const edgesBefore = graph.edges.length;
@@ -2179,10 +2337,13 @@ export async function buildGraphSubset(
   callerFiles: string[],
   rootDir: string,
   resolutionNodes?: import('../analyzer/call-graph.js').FunctionNode[],
+  resolutionClasses?: import('../analyzer/call-graph.js').ClassNode[],
 ): Promise<{
   edges: import('../analyzer/call-graph.js').CallEdge[];
   nodes: import('../analyzer/call-graph.js').FunctionNode[];
   cfgs: Array<{ functionId: string; filePath: string; cfg: import('../analyzer/cfg.js').FunctionCfg }>;
+  classes: import('../analyzer/call-graph.js').ClassNode[];
+  inheritanceEdges: import('../analyzer/call-graph.js').InheritanceEdge[];
   /**
    * callerFiles the caller asked to re-resolve but that could NOT be read
    * (permissions / transient I/O / a lock). The caller must NOT delete-and-empty
@@ -2206,11 +2367,11 @@ export async function buildGraphSubset(
   if (lang === 'unknown' && HTML_EXTENSIONS.test(changedRel)) {
     const { extractHtmlScripts } = await import('../analyzer/html-script-extractor.js');
     const blanked = extractHtmlScripts(changedContent);
-    if (!blanked) return { edges: [], nodes: [], cfgs: [], skipped: [], analyzedFileHashes: new Map([[changedRel, createHash('sha256').update(changedContent).digest('hex')]]) }; // no inline JS
+    if (!blanked) return { edges: [], nodes: [], cfgs: [], classes: [], inheritanceEdges: [], skipped: [], analyzedFileHashes: new Map([[changedRel, createHash('sha256').update(changedContent).digest('hex')]]) }; // no inline JS
     content = blanked;
     lang = 'JavaScript';
   }
-  if (!CALL_GRAPH_LANGS.has(lang)) return { edges: [], nodes: [], cfgs: [], skipped: [], analyzedFileHashes: new Map([[changedRel, createHash('sha256').update(changedContent).digest('hex')]]) };
+  if (!CALL_GRAPH_LANGS.has(lang)) return { edges: [], nodes: [], cfgs: [], classes: [], inheritanceEdges: [], skipped: [], analyzedFileHashes: new Map([[changedRel, createHash('sha256').update(changedContent).digest('hex')]]) };
 
   const { CallGraphBuilder } = await import('../analyzer/call-graph.js');
   // Use relative paths as node IDs (consistent with analyze output)
@@ -2334,11 +2495,12 @@ export async function buildGraphSubset(
   const buildInput = [...files, ...contextFiles, ...barrels];
 
   const builder = new CallGraphBuilder();
-  const result = await builder.build(buildInput, undefined, undefined, resolutionNodes);
+  const retainedClasses = resolutionClasses?.filter(cls => cls.filePath !== changedRel);
+  const result = await builder.build(buildInput, undefined, undefined, resolutionNodes, retainedClasses);
 
-  // Only return nodes from changedFile — callerFiles nodes are already in DB and unchanged.
-  // Barrel context files are resolution-only: never persist their nodes or edges.
-  const changedNodes = Array.from(result.nodes.values()).filter((n) => n.filePath === changedRel);
+  // Caller-file nodes are already in DB and unchanged. Barrel context files are
+  // resolution-only. Newly synthesized external endpoints must be returned too,
+  // or their foreign-keyed edges cannot be inserted after a deletion rebind.
   const primaryPaths = new Set(files.map(file => file.path));
   const resultEdges = result.edges.filter((edge) => {
     const callerFile = edge.callerId.slice(0, edge.callerId.indexOf('::'));
@@ -2347,6 +2509,10 @@ export async function buildGraphSubset(
     if (edge.confidence !== 'http_endpoint') return false;
     return result.nodes.get(edge.calleeId)?.filePath === changedRel;
   });
+  const persistedIds = new Set(resultEdges.flatMap(edge => [edge.callerId, edge.calleeId]));
+  const changedNodes = Array.from(result.nodes.values()).filter((node) =>
+    node.filePath === changedRel || (node.isExternal && persistedIds.has(node.id)));
+  const changedClasses = result.classes.filter(cls => cls.filePath === changedRel);
 
   // CFG/def-use overlay (spec: add-intraprocedural-cfg-dataflow-overlay) for the
   // changed file's functions only — intra-procedural, so caller files' overlays
@@ -2359,5 +2525,13 @@ export async function buildGraphSubset(
     }
   }
 
-  return { edges: resultEdges, nodes: changedNodes, cfgs, skipped, analyzedFileHashes };
+  return {
+    edges: resultEdges,
+    nodes: changedNodes,
+    cfgs,
+    classes: changedClasses,
+    inheritanceEdges: result.inheritanceEdges,
+    skipped,
+    analyzedFileHashes,
+  };
 }

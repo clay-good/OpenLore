@@ -63,7 +63,7 @@
 | `openlore preflight` | CI staleness gate: fail when the analysis graph is stale relative to the working tree | No |
 | `openlore export scip` | Export the analysis graph as an SCIP index for the Sourcegraph / Glean ecosystem | No |
 | `openlore export bundle` | Export the persisted graph index as a portable integrity-stamped artifact (`--out <path>`), optionally authenticated with Ed25519 (`--sign-key <pkcs8.pem>`). Deterministic, offline. See [Shareable bundle](shareable-bundle.md) | No |
-| `openlore import <artifact>` | Import a portable graph artifact with separate integrity, optional producer-authentication, and currency receipts; stale artifacts rebuild, while invalid/untrusted signatures are rejected | No |
+| `openlore import <artifact>` | Import a portable graph artifact with separate integrity, optional producer-authentication, and currency receipts; clean ancestor bundles catch up through a bounded exact delta, unsafe gaps rebuild, and invalid/untrusted signatures are rejected | No |
 | `openlore telemetry` | Analyze EpistemicLease cognitive-load telemetry | No |
 | `openlore panic-*` | Agent behavioral-governance ("panic") commands — `panic-check`/`panic-level`/`panic-validate`/`panic-hotspots`/`panic-calibrate`/`panic-replay`. Opt-in, off by default; install hooks via `openlore setup --hooks` | No |
 | `openlore gryph-watch` | Background Gryph behavioral observer (opt-in; install via `openlore setup --hooks`) | No |

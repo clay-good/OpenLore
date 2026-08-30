@@ -12,7 +12,7 @@
  */
 
 import { opendir, readFile, realpath, stat } from 'node:fs/promises';
-import { join, relative, basename, extname, dirname } from 'node:path';
+import { join, relative, basename, extname, dirname, sep } from 'node:path';
 import ignoreModule from 'ignore';
 import { isConfinedPath } from '../../utils/path-confinement.js';
 import { DEFAULT_MAX_FILES, OPENLORE_DIR, OPENSPEC_DIR } from '../../constants.js';
@@ -35,6 +35,11 @@ import type { FileMetadata, FileWalkerResult } from '../../types/index.js';
  */
 export function toPosixPath(p: string): string {
   return p.replace(/\\/g, '/');
+}
+
+/** Convert an OS-native relative path into a stable repository key without rewriting POSIX names. */
+export function toRepositoryPath(p: string, nativeSeparator = sep): string {
+  return nativeSeparator === '\\' ? toPosixPath(p) : p;
 }
 
 /**
@@ -557,7 +562,7 @@ export class FileWalker {
    */
   private markTruncated(atPath: string): void {
     if (this.truncatedAtPath === null) {
-      this.truncatedAtPath = atPath.length > 0 ? toPosixPath(atPath) : '.';
+      this.truncatedAtPath = atPath.length > 0 ? toRepositoryPath(atPath) : '.';
     }
   }
 
@@ -590,7 +595,7 @@ export class FileWalker {
     // may be pruned — every one is on its lineage.
     if (this.includeMatchesAnyDir) return true;
     if (this.includePrefixes.length === 0) return false;
-    const dir = toPosixPath(relativeDir);
+    const dir = toRepositoryPath(relativeDir);
     if (dir === '' || dir === '.') return true;
     for (const prefix of this.includePrefixes) {
       if (dir === prefix || dir.startsWith(prefix + '/') || prefix.startsWith(dir + '/')) {
@@ -603,7 +608,7 @@ export class FileWalker {
   private matchesRestrictedIncludeLineage(relativeDir: string): boolean {
     if (this.restrictedIncludeMatchesAnyDir) return true;
     if (this.restrictedIncludePrefixes.length === 0) return false;
-    const dir = toPosixPath(relativeDir);
+    const dir = toRepositoryPath(relativeDir);
     if (dir === '' || dir === '.') return true;
     return this.restrictedIncludePrefixes.some(prefix =>
       dir === prefix || dir.startsWith(prefix + '/') || prefix.startsWith(dir + '/'));
@@ -649,7 +654,7 @@ export class FileWalker {
       const content = await readFile(join(dirPath, '.gitignore'), 'utf-8');
       const ig = ignore();
       ig.add(content);
-      return { baseDir: toPosixPath(relativeDirPath), ig };
+      return { baseDir: toRepositoryPath(relativeDirPath), ig };
     } catch {
       return null;
     }
@@ -737,7 +742,7 @@ export class FileWalker {
       return;
     }
     if (depth > this.options.maxDepth) {
-      this.fatalBudgetError = new Error(`Repository walk depth budget exceeded (${this.options.maxDepth}) at ${toPosixPath(relative(this.rootPath, dirPath))}`);
+      this.fatalBudgetError = new Error(`Repository walk depth budget exceeded (${this.options.maxDepth}) at ${toRepositoryPath(relative(this.rootPath, dirPath))}`);
       this.stopWalk = true;
       return;
     }
@@ -831,7 +836,7 @@ export class FileWalker {
 
         const subPath = join(dirPath, entry.name);
         const relativeSubPath = relative(this.rootPath, subPath);
-        const posixSubPath = toPosixPath(relativeSubPath);
+        const posixSubPath = toRepositoryPath(relativeSubPath);
 
         // includePatterns override EVERY exclusion layer, including directory pruning: a
         // directory on the lineage of an include pattern is descended even when a built-in
@@ -917,7 +922,7 @@ export class FileWalker {
 
         const filePath = join(dirPath, entry.name);
         const relativePath = relative(this.rootPath, filePath);
-        const posixPath = toPosixPath(relativePath);
+        const posixPath = toRepositoryPath(relativePath);
 
         // A nested `.gitignore` excludes its own subtree's files — unless an include pattern
         // overrides it, keeping includePatterns supreme over every exclusion layer.
@@ -968,11 +973,12 @@ export class FileWalker {
     try {
       const fileStat = await stat(absolutePath);
       const extension = extname(fileName);
-      const directory = dirname(relativePath);
+      const repositoryPath = toRepositoryPath(relativePath);
+      const directory = dirname(repositoryPath);
       const lines = await countLines(absolutePath);
 
       const metadata: FileMetadata = {
-        path: relativePath,
+        path: repositoryPath,
         absolutePath,
         name: fileName,
         extension,
@@ -980,10 +986,10 @@ export class FileWalker {
         lines,
         depth,
         directory: directory === '.' ? '' : directory,
-        isEntryPoint: await isEntryPoint(fileName, relativePath, absolutePath, depth),
+        isEntryPoint: await isEntryPoint(fileName, repositoryPath, absolutePath, depth),
         isConfig: isConfigFile(fileName),
-        isTest: isTestFile(relativePath, fileName),
-        isGenerated: isGeneratedFile(fileName, relativePath),
+        isTest: isTestFile(repositoryPath, fileName),
+        isGenerated: isGeneratedFile(fileName, repositoryPath),
       };
 
       this.files.push(metadata);
@@ -1086,7 +1092,7 @@ export class FileWalker {
       ...this.options.restrictedIncludePatterns,
     ];
     if (allIncludePatterns.length > 0 && !this.truncatedAtPath) {
-      const admitted = this.files.map((f) => toPosixPath(f.path));
+      const admitted = this.files.map((f) => f.path);
       const unmatched = allIncludePatterns.filter((pat) => {
         if (pat.trim().length === 0) return false;
         const matcher = ignore().add(pat);

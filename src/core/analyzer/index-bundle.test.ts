@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtemp, rm, readFile, writeFile, open } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, win32 } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EdgeStore, SCHEMA_VERSION } from '../services/edge-store.js';
 import { ARTIFACT_CALL_GRAPH_DB, ARTIFACT_FINGERPRINT, OPENLORE_ANALYSIS_REL_PATH } from '../../constants.js';
@@ -36,6 +36,7 @@ import {
 import {
   preMaterializeRebuildReason,
   currencyDecision,
+  parseGitNameStatus,
   readBundledSignatures,
   runImport,
 } from '../../cli/commands/import.js';
@@ -44,8 +45,10 @@ import { logger } from '../../utils/logger.js';
 import { getDefaultConfig } from '../services/config-manager.js';
 import { CallGraphBuilder, serializeCallGraph } from './call-graph.js';
 import { semanticAnswerBytes } from './derived-artifact-equivalence.js';
+import { SpecVectorIndex } from './spec-vector-index.js';
+import { toRepositoryPath } from './file-walker.js';
 import { handleAnalyzeImpact, handleGetSubgraph } from '../services/mcp-handlers/graph.js';
-import { _resetContextCacheForTesting } from '../services/mcp-handlers/utils.js';
+import { _resetContextCacheForTesting, fingerprintHashOfConfiguration } from '../services/mcp-handlers/utils.js';
 
 const VERSION = '9.9.9-test';
 
@@ -145,7 +148,14 @@ async function buildStructuralAnalysis(
   await writeAttestation(analysisDir, attestation);
   await writeFile(
     join(analysisDir, ARTIFACT_FINGERPRINT),
-    JSON.stringify({ hash: 'structural-fixture-v1', commit, sourceTreeState: 'clean', computedAt: 'fixture', fileCount: Object.keys(files).length }),
+    JSON.stringify({
+      hash: 'structural-fixture-v1',
+      commit,
+      sourceTreeState: 'clean',
+      computedAt: 'fixture',
+      fileCount: Object.keys(files).length,
+      analysisConfigHash: fingerprintHashOfConfiguration({ includePatterns: [], excludePatterns: [], maxFiles: 100_000 }),
+    }),
   );
   await writeFile(join(analysisDir, 'llm-context.json'), JSON.stringify({ callGraph: graph, signatures: [] }));
   await writeFile(join(analysisDir, 'repo-structure.json'), JSON.stringify({ layers: ['src'] }));
@@ -575,6 +585,23 @@ describe('index-bundle: promoteStagedIndex clears orphaned search indexes', () =
     const { readdir } = await import('node:fs/promises');
     expect(await readdir(live)).not.toEqual(expect.arrayContaining([expect.stringMatching(/^\.import-/)]));
   });
+
+  it('marks a generation unavailable when post-publication validation rejects it', async () => {
+    const src = join(work, 'post-publish-analysis');
+    await buildAnalysisDir(src, 'next');
+    const bundle = parseBundle((await buildBundle(src, VERSION)).buffer);
+    const staging = join(work, 'post-publish-staging');
+    await materializeBundle(bundle, staging);
+    const live = join(work, 'post-publish-live');
+
+    await expect(promoteStagedIndex(bundle, staging, live, {
+      afterPublish: () => {
+        throw new Error('source changed after publication');
+      },
+    })).rejects.toThrow(/source changed after publication/);
+
+    expect(await readCurrentGeneration(live, [...REQUIRED_ANALYSIS_ARTIFACTS])).toBeNull();
+  });
 });
 
 describe('index-bundle: parse + tamper detection', () => {
@@ -770,9 +797,14 @@ describe('index-bundle: currencyDecision', () => {
     expect(d.action).toBe('import-current');
   });
 
-  it('rebuilds (never serves stale) when the artifact is built at an ancestor commit', () => {
+  it('catches up when a clean artifact is built at an ancestor commit', () => {
     const d = currencyDecision({ isGitRepo: true, sourceCommit: 'abc', sourceTreeState: 'clean', commitMatchesHead: false, commitIsAncestor: true });
-    expect(d).toMatchObject({ action: 'rebuild', reason: 'stale' });
+    expect(d).toMatchObject({ action: 'import-delta', reason: 'stale' });
+  });
+
+  it('rebuilds an ancestor bundle whose producer tree was not proven clean', () => {
+    const d = currencyDecision({ isGitRepo: true, sourceCommit: 'abc', sourceTreeState: 'dirty', commitMatchesHead: false, commitIsAncestor: true });
+    expect(d).toMatchObject({ action: 'rebuild', reason: 'stale-tree-state' });
   });
 
   it('rebuilds when the artifact commit is unrelated/diverged', () => {
@@ -814,6 +846,45 @@ describe('index-bundle: currencyDecision', () => {
   });
 });
 
+describe('index-bundle: git delta parsing', () => {
+  it('canonicalizes Windows walker paths to Git and bundle path keys', () => {
+    expect(toRepositoryPath(win32.relative('C:\\repo', 'C:\\repo\\src\\a.ts'), win32.sep)).toBe('src/a.ts');
+  });
+
+  it('classifies additions, modifications, deletions, renames, and copies', () => {
+    const raw = Buffer.from(
+      'M\0src/changed.ts\0A\0src/added.ts\0D\0src/deleted.ts\0' +
+      'R100\0src/old.ts\0src/new.ts\0C090\0src/template.ts\0src/copied.ts\0',
+    );
+    expect(parseGitNameStatus(raw)).toEqual({
+      changed: ['src/added.ts', 'src/changed.ts', 'src/copied.ts', 'src/new.ts'],
+      deleted: ['src/deleted.ts', 'src/old.ts'],
+    });
+  });
+
+  it('rejects a truncated rename record', () => {
+    expect(() => parseGitNameStatus(Buffer.from('R100\0src/old.ts\0'))).toThrow(/Malformed git delta entry/);
+  });
+
+  it('rejects a path record without its terminal NUL', () => {
+    expect(() => parseGitNameStatus(Buffer.from('M\0src/changed.ts'))).toThrow(/terminal NUL/);
+  });
+
+  it('rejects malformed status tokens and out-of-range similarity scores', () => {
+    expect(() => parseGitNameStatus(Buffer.from('M100\0src/changed.ts\0'))).toThrow(/cannot be caught up safely/);
+    expect(() => parseGitNameStatus(Buffer.from('R101\0src/old.ts\0src/new.ts\0'))).toThrow(/cannot be caught up safely/);
+  });
+
+  it('fails closed before materializing an unbounded path count', () => {
+    const records = Array.from({ length: 4_097 }, (_, index) => `M\0src/f${index}.ts\0`).join('');
+    expect(() => parseGitNameStatus(Buffer.from(records))).toThrow(/path-work budget/);
+  });
+
+  it('rejects unmerged paths instead of treating a conflicted checkout as exact', () => {
+    expect(() => parseGitNameStatus(Buffer.from('U\0src/conflict.ts\0'))).toThrow(/cannot be caught up safely/);
+  });
+});
+
 describe('index-bundle: runImport trust boundary', () => {
   async function gitProject(publicKey?: string): Promise<{ root: string; head: string; analysis: string }> {
     const root = join(work, 'consumer');
@@ -848,6 +919,324 @@ describe('index-bundle: runImport trust boundary', () => {
     expect(success.mock.calls.flat().join(' ')).toMatch(/provenance UNVERIFIED/i);
     expect(await readCurrentGeneration(project.analysis, [...REQUIRED_ANALYSIS_ARTIFACTS])).not.toBeNull();
     expect(existsSync(join(project.analysis, 'vector-index', 'bm25-corpus.json'))).toBe(true);
+  });
+
+  it('applies a clean ancestor bundle and catches up only the exact git delta', async () => {
+    const producer = join(work, 'delta-producer');
+    const consumer = join(work, 'delta-consumer');
+    const baseFiles = {
+      'src/a.ts': 'export function a(): number { return b(); }\n',
+      'src/b.ts': 'export function b(): number { return 1; }\n',
+    } as const;
+    await mkdir(join(producer, 'src'), { recursive: true });
+    for (const [path, content] of Object.entries(baseFiles)) await writeFile(join(producer, path), content);
+    await writeFile(join(producer, '.gitignore'), '.openlore/analysis/\n');
+    const git = (cwd: string, ...args: string[]) => execFileSync(
+      'git',
+      ['-c', 'user.email=test@example.com', '-c', 'user.name=Test', '-c', 'commit.gpgsign=false', ...args],
+      { cwd },
+    ).toString().trim();
+    git(producer, 'init', '-q');
+    git(producer, 'add', '.');
+    git(producer, 'commit', '-q', '-m', 'base');
+    const base = git(producer, 'rev-parse', 'HEAD');
+    const analysis = await buildStructuralAnalysis(producer, baseFiles, base);
+    const artifact = join(work, 'ancestor.olbundle');
+    await writeFile(artifact, (await buildBundle(analysis, VERSION)).buffer);
+
+    execFileSync('git', ['clone', '-q', producer, consumer]);
+    const currentB = 'export function b(): number { return c(); }\nexport function c(): number { return 2; }\n';
+    await writeFile(join(consumer, 'src/b.ts'), currentB);
+    git(consumer, 'add', 'src/b.ts');
+    git(consumer, 'commit', '-q', '-m', 'change b');
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => {});
+
+    expect(await runImport(artifact, { projectRoot: consumer })).toBe(0);
+    expect(info.mock.calls.flat().join(' ')).toMatch(/delta 1 file.*closure .*explicitly stale 0/i);
+
+    const expected = serializeCallGraph(await new CallGraphBuilder().build([
+      { path: 'src/a.ts', content: baseFiles['src/a.ts'], language: 'TypeScript' },
+      { path: 'src/b.ts', content: currentB, language: 'TypeScript' },
+    ]));
+    const actual = EdgeStore.open(join(consumer, OPENLORE_ANALYSIS_REL_PATH, ARTIFACT_CALL_GRAPH_DB));
+    try {
+      expect(actual.getAllInternalNodes().map(node => node.id).sort()).toEqual(expected.nodes.map(node => node.id).sort());
+      expect(actual.getAllEdges().map(edge => [edge.callerId, edge.calleeId, edge.calleeName]).sort()).toEqual(
+        expected.edges.map(edge => [edge.callerId, edge.calleeId, edge.calleeName]).sort(),
+      );
+      expect(actual.getStaleFiles()).toEqual([]);
+    } finally {
+      actual.close();
+    }
+  });
+
+  it('rebuilds a current bundle carrying legacy Windows-native test-only context keys', async () => {
+    const producer = join(work, 'legacy-windows-producer');
+    const consumer = join(work, 'legacy-windows-consumer');
+    const base = 'export function testA(): number { return 1; }\n';
+    await mkdir(join(producer, 'src'), { recursive: true });
+    await writeFile(join(producer, 'src', 'a.test.ts'), base);
+    await writeFile(join(producer, '.gitignore'), '.openlore/analysis/\n');
+    const git = (cwd: string, ...args: string[]) => execFileSync(
+      'git',
+      ['-c', 'user.email=test@example.com', '-c', 'user.name=Test', '-c', 'commit.gpgsign=false', ...args],
+      { cwd },
+    ).toString().trim();
+    git(producer, 'init', '-q');
+    git(producer, 'add', '.');
+    git(producer, 'commit', '-q', '-m', 'base');
+    const baseCommit = git(producer, 'rev-parse', 'HEAD');
+    const analysis = await buildStructuralAnalysis(producer, { 'src\\a.test.ts': base }, baseCommit);
+    const legacyStore = EdgeStore.open(join(analysis, ARTIFACT_CALL_GRAPH_DB));
+    try {
+      legacyStore.clearAll();
+      legacyStore.checkpoint();
+    } finally {
+      legacyStore.close();
+    }
+    await writeAttestation(analysis, computeAttestation(SCHEMA_VERSION, [], [], []));
+    await publishGeneration(analysis, [
+      ...REQUIRED_ANALYSIS_ARTIFACTS,
+      ARTIFACT_CALL_GRAPH_DB,
+      'index-attestation.json',
+    ]);
+    const artifact = join(work, 'legacy-windows.olbundle');
+    await writeFile(artifact, (await buildBundle(analysis, VERSION)).buffer);
+
+    execFileSync('git', ['clone', '-q', producer, consumer]);
+    const warning = vi.spyOn(logger, 'warning').mockImplementation(() => {});
+
+    expect(await runImport(artifact, { projectRoot: consumer })).toBe(0);
+    expect(warning.mock.calls.flat().join(' ')).toMatch(/legacy native-separator repository keys/i);
+    const context = JSON.parse(await readFile(
+      join(consumer, OPENLORE_ANALYSIS_REL_PATH, 'llm-context.json'),
+      'utf8',
+    )) as { callGraph?: { nodes?: Array<{ filePath: string }> } };
+    expect(context.callGraph?.nodes?.some(node => node.filePath === 'src/a.test.ts')).toBe(true);
+    expect(context.callGraph?.nodes?.some(node => node.filePath.includes('\\'))).toBe(false);
+  });
+
+  it('removes a deleted zero-node source admitted by the prior dependency corpus', async () => {
+    const producer = join(work, 'zero-node-producer');
+    const consumer = join(work, 'zero-node-consumer');
+    const files = {
+      'src/a.ts': 'export function a(): number { return 1; }\n',
+      'src/empty.ts': '',
+    } as const;
+    await mkdir(join(producer, 'src'), { recursive: true });
+    for (const [path, content] of Object.entries(files)) await writeFile(join(producer, path), content);
+    await writeFile(join(producer, '.gitignore'), '.openlore/analysis/\n');
+    const git = (cwd: string, ...args: string[]) => execFileSync(
+      'git',
+      ['-c', 'user.email=test@example.com', '-c', 'user.name=Test', '-c', 'commit.gpgsign=false', ...args],
+      { cwd },
+    ).toString().trim();
+    git(producer, 'init', '-q');
+    git(producer, 'add', '.');
+    git(producer, 'commit', '-q', '-m', 'base');
+    const baseCommit = git(producer, 'rev-parse', 'HEAD');
+    const analysis = await buildStructuralAnalysis(producer, files, baseCommit);
+    await writeFile(join(analysis, 'dependency-graph.json'), JSON.stringify({
+      nodes: Object.keys(files).map(path => ({
+        id: join(producer, path),
+        file: { path, absolutePath: join(producer, path) },
+        metrics: { inDegree: 0, outDegree: 0 },
+      })),
+      edges: [],
+    }));
+    await publishGeneration(analysis, [
+      ...REQUIRED_ANALYSIS_ARTIFACTS,
+      ARTIFACT_CALL_GRAPH_DB,
+      'index-attestation.json',
+    ]);
+    const artifact = join(work, 'zero-node.olbundle');
+    await writeFile(artifact, (await buildBundle(analysis, VERSION)).buffer);
+
+    execFileSync('git', ['clone', '-q', producer, consumer]);
+    await rm(join(consumer, 'src', 'empty.ts'));
+    git(consumer, 'add', 'src/empty.ts');
+    git(consumer, 'commit', '-q', '-m', 'delete empty');
+
+    expect(await runImport(artifact, { projectRoot: consumer })).toBe(0);
+    const dependency = JSON.parse(await readFile(
+      join(consumer, OPENLORE_ANALYSIS_REL_PATH, 'dependency-graph.json'),
+      'utf8',
+    )) as { nodes: Array<{ file?: { path?: string } }> };
+    expect(dependency.nodes.some(node => node.file?.path === 'src/empty.ts')).toBe(false);
+  });
+
+  it('rebuilds when an ancestor delta deletes test-impact graph input', async () => {
+    const producer = join(work, 'test-delta-producer');
+    const consumer = join(work, 'test-delta-consumer');
+    const base = 'export function oldTest(): number { return 1; }\n';
+    await mkdir(join(producer, 'src'), { recursive: true });
+    await writeFile(join(producer, 'src', 'a.test.ts'), base);
+    await writeFile(join(producer, '.gitignore'), '.openlore/analysis/\n');
+    const git = (cwd: string, ...args: string[]) => execFileSync(
+      'git',
+      ['-c', 'user.email=test@example.com', '-c', 'user.name=Test', '-c', 'commit.gpgsign=false', ...args],
+      { cwd },
+    ).toString().trim();
+    git(producer, 'init', '-q');
+    git(producer, 'add', '.');
+    git(producer, 'commit', '-q', '-m', 'base');
+    const baseCommit = git(producer, 'rev-parse', 'HEAD');
+    const analysis = await buildStructuralAnalysis(producer, { 'src/a.test.ts': base }, baseCommit);
+    await writeFile(join(analysis, 'dependency-graph.json'), JSON.stringify({
+      nodes: [{
+        id: join(producer, 'src', 'a.test.ts'),
+        file: { path: 'src/a.test.ts', absolutePath: join(producer, 'src', 'a.test.ts') },
+        metrics: { inDegree: 0, outDegree: 0 },
+      }],
+      edges: [],
+    }));
+    await publishGeneration(analysis, [
+      ...REQUIRED_ANALYSIS_ARTIFACTS,
+      ARTIFACT_CALL_GRAPH_DB,
+      'index-attestation.json',
+    ]);
+    const artifact = join(work, 'test-delta.olbundle');
+    await writeFile(artifact, (await buildBundle(analysis, VERSION)).buffer);
+
+    execFileSync('git', ['clone', '-q', producer, consumer]);
+    await rm(join(consumer, 'src', 'a.test.ts'));
+    git(consumer, 'add', 'src/a.test.ts');
+    git(consumer, 'commit', '-q', '-m', 'delete test');
+    const warning = vi.spyOn(logger, 'warning').mockImplementation(() => {});
+
+    expect(await runImport(artifact, { projectRoot: consumer })).toBe(0);
+    expect(warning.mock.calls.flat().join(' ')).toMatch(/test-source changes require a full rebuild/i);
+    const context = JSON.parse(await readFile(
+      join(consumer, OPENLORE_ANALYSIS_REL_PATH, 'llm-context.json'),
+      'utf8',
+    )) as { callGraph?: { nodes?: Array<{ name: string }> } };
+    expect(context.callGraph?.nodes?.some(node => node.name === 'oldTest')).toBe(false);
+  });
+
+  it('rebuilds when an ignore-file delta changes analysis corpus membership', async () => {
+    const producer = join(work, 'ignore-delta-producer');
+    const consumer = join(work, 'ignore-delta-consumer');
+    const baseFiles = {
+      'src/a.ts': 'export function a(): number { return b(); }\n',
+      'src/b.ts': 'export function b(): number { return 1; }\n',
+    } as const;
+    await mkdir(join(producer, 'src'), { recursive: true });
+    for (const [path, content] of Object.entries(baseFiles)) await writeFile(join(producer, path), content);
+    await writeFile(join(producer, '.gitignore'), '.openlore/analysis/\n');
+    const git = (cwd: string, ...args: string[]) => execFileSync(
+      'git',
+      ['-c', 'user.email=test@example.com', '-c', 'user.name=Test', '-c', 'commit.gpgsign=false', ...args],
+      { cwd },
+    ).toString().trim();
+    git(producer, 'init', '-q');
+    git(producer, 'add', '.');
+    git(producer, 'commit', '-q', '-m', 'base');
+    const base = git(producer, 'rev-parse', 'HEAD');
+    const analysis = await buildStructuralAnalysis(producer, baseFiles, base);
+    const artifact = join(work, 'ignore-ancestor.olbundle');
+    await writeFile(artifact, (await buildBundle(analysis, VERSION)).buffer);
+
+    execFileSync('git', ['clone', '-q', producer, consumer]);
+    await writeFile(join(consumer, '.gitignore'), '.openlore/analysis/\nsrc/b.ts\n');
+    git(consumer, 'add', '.gitignore');
+    git(consumer, 'commit', '-q', '-m', 'ignore b');
+    const warning = vi.spyOn(logger, 'warning').mockImplementation(() => {});
+
+    expect(await runImport(artifact, { projectRoot: consumer })).toBe(0);
+    expect(warning.mock.calls.flat().join(' ')).toMatch(/analysis corpus rules changed.*\.gitignore/i);
+    const actual = EdgeStore.open(join(consumer, OPENLORE_ANALYSIS_REL_PATH, ARTIFACT_CALL_GRAPH_DB));
+    try {
+      expect(actual.getNodesForFile('src/b.ts')).toEqual([]);
+    } finally {
+      actual.close();
+    }
+  });
+
+  it('refuses publication when admitted source changes inside the promotion lock', async () => {
+    const producer = join(work, 'race-producer');
+    const consumer = join(work, 'race-consumer');
+    const baseFiles = { 'src/a.ts': 'export function a(): number { return 1; }\n' } as const;
+    await mkdir(join(producer, 'src'), { recursive: true });
+    await writeFile(join(producer, 'src/a.ts'), baseFiles['src/a.ts']);
+    await writeFile(join(producer, '.gitignore'), '.openlore/analysis/\n');
+    const git = (cwd: string, ...args: string[]) => execFileSync(
+      'git',
+      ['-c', 'user.email=test@example.com', '-c', 'user.name=Test', '-c', 'commit.gpgsign=false', ...args],
+      { cwd },
+    ).toString().trim();
+    git(producer, 'init', '-q');
+    git(producer, 'add', '.');
+    git(producer, 'commit', '-q', '-m', 'base');
+    const base = git(producer, 'rev-parse', 'HEAD');
+    const analysis = await buildStructuralAnalysis(producer, baseFiles, base);
+    const artifact = join(work, 'race-ancestor.olbundle');
+    await writeFile(artifact, (await buildBundle(analysis, VERSION)).buffer);
+
+    execFileSync('git', ['clone', '-q', producer, consumer]);
+    await writeFile(join(consumer, 'src/a.ts'), 'export function a(): number { return 2; }\n');
+    git(consumer, 'add', 'src/a.ts');
+    git(consumer, 'commit', '-q', '-m', 'change a');
+    await mkdir(join(consumer, 'openspec', 'specs', 'fixture'), { recursive: true });
+    await writeFile(join(consumer, 'openspec', 'specs', 'fixture', 'spec.md'), '# Fixture\n');
+    const latest = 'export function latest(): number { return 3; }\n';
+    vi.spyOn(SpecVectorIndex, 'build').mockImplementationOnce(async () => {
+      await writeFile(join(consumer, 'src/a.ts'), latest);
+      return { recordCount: 0, hasEmbeddings: false };
+    });
+    const warning = vi.spyOn(logger, 'warning').mockImplementation(() => {});
+
+    expect(await runImport(artifact, { projectRoot: consumer })).toBe(0);
+    expect(warning.mock.calls.flat().join(' ')).toMatch(/content fingerprint changed before bundle catch-up publication/i);
+    const actual = EdgeStore.open(join(consumer, OPENLORE_ANALYSIS_REL_PATH, ARTIFACT_CALL_GRAPH_DB));
+    try {
+      expect(actual.getAllInternalNodes().map(node => node.name)).toContain('latest');
+    } finally {
+      actual.close();
+    }
+  });
+
+  it('refuses publication when a tracked non-corpus file dirties the source tree', async () => {
+    const producer = join(work, 'tree-race-producer');
+    const consumer = join(work, 'tree-race-consumer');
+    const baseFiles = { 'src/a.ts': 'export function a(): number { return 1; }\n' } as const;
+    await mkdir(join(producer, 'src'), { recursive: true });
+    await mkdir(join(producer, 'openspec', 'specs', 'fixture'), { recursive: true });
+    await writeFile(join(producer, 'src/a.ts'), baseFiles['src/a.ts']);
+    await writeFile(join(producer, 'logo.png'), 'v1');
+    await writeFile(join(producer, 'openspec', 'specs', 'fixture', 'spec.md'), '# Fixture\n');
+    await writeFile(join(producer, '.gitignore'), '.openlore/analysis/\n');
+    const git = (cwd: string, ...args: string[]) => execFileSync(
+      'git',
+      ['-c', 'user.email=test@example.com', '-c', 'user.name=Test', '-c', 'commit.gpgsign=false', ...args],
+      { cwd },
+    ).toString().trim();
+    git(producer, 'init', '-q');
+    git(producer, 'add', '.');
+    git(producer, 'commit', '-q', '-m', 'base');
+    const base = git(producer, 'rev-parse', 'HEAD');
+    const analysis = await buildStructuralAnalysis(producer, baseFiles, base);
+    const artifact = join(work, 'tree-race-ancestor.olbundle');
+    await writeFile(artifact, (await buildBundle(analysis, VERSION)).buffer);
+
+    execFileSync('git', ['clone', '-q', producer, consumer]);
+    const current = 'export function a(): number { return 2; }\n';
+    await writeFile(join(consumer, 'src/a.ts'), current);
+    git(consumer, 'add', 'src/a.ts');
+    git(consumer, 'commit', '-q', '-m', 'change a');
+    vi.spyOn(SpecVectorIndex, 'build').mockImplementationOnce(async () => {
+      await writeFile(join(consumer, 'logo.png'), 'v2');
+      return { recordCount: 0, hasEmbeddings: false };
+    });
+    const warning = vi.spyOn(logger, 'warning').mockImplementation(() => {});
+
+    expect(await runImport(artifact, { projectRoot: consumer })).toBe(0);
+    expect(warning.mock.calls.flat().join(' ')).toMatch(/tree state changed before bundle catch-up publication/i);
+    const actual = EdgeStore.open(join(consumer, OPENLORE_ANALYSIS_REL_PATH, ARTIFACT_CALL_GRAPH_DB));
+    try {
+      expect(actual.getAllInternalNodes().map(node => node.name)).toContain('a');
+    } finally {
+      actual.close();
+    }
   });
 
   it('rejects an oversized compressed artifact before reading it into memory', async () => {
