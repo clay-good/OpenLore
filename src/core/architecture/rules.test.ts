@@ -22,6 +22,48 @@ describe('parseArchitectureRules', () => {
     expect(forbidden).toMatchObject({ from: 'src/core', to: 'src/cli', reason: 'core stays UI-agnostic', source: 'config' });
   });
 
+  it('parses the widened deterministic rule vocabulary', () => {
+    const parsed = parseArchitectureRules({
+      required: [{ from: 'src/handlers', to: 'src/sanitizer' }],
+      circular: [{ scope: 'src', allowed: ['src/generated'] }],
+      reachable: [{ from: 'src/public', to: 'src/internal' }],
+      orphan: [{ scope: 'src/lib' }],
+      moreUnstable: [{ scope: 'src/core' }],
+    }, 'config');
+
+    expect(parsed.warnings).toEqual([]);
+    expect(parsed.rules.map(rule => rule.kind)).toEqual([
+      'required', 'reachable', 'circular', 'orphan', 'moreUnstable',
+    ]);
+    expect(parsed.rules.find(rule => rule.kind === 'circular')).toMatchObject({
+      scope: 'src', allowed: ['src/generated'], source: 'config',
+    });
+  });
+
+  it('warns and skips malformed widened rules and unsafe capture syntax', () => {
+    const parsed = parseArchitectureRules({
+      required: [{ from: 'domains/$2', to: 'shared' }],
+      circular: [{ scope: '', allowed: 'src/generated' }],
+      reachable: [{ from: 'src/public' }],
+      orphan: [{}],
+      moreUnstable: 'src/core',
+    }, 'config');
+
+    expect(parsed.rules).toEqual([]);
+    expect(parsed.warnings).toHaveLength(5);
+  });
+
+  it('requires target captures to be bound by the source pattern', () => {
+    const parsed = parseArchitectureRules({
+      forbidden: [{ from: 'domains', to: 'domains/$1' }],
+      allowedOnly: [{ module: 'domains', mayDependOn: ['domains/$1'] }],
+      required: [{ from: 'handlers', to: 'sanitizers/$1' }],
+    }, 'config');
+
+    expect(parsed.rules).toEqual([]);
+    expect(parsed.warnings).toHaveLength(3);
+  });
+
   it('warns and skips malformed entries — never throws', () => {
     const { rules, warnings } = parseArchitectureRules(
       {

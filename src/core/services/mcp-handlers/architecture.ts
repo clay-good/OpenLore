@@ -24,6 +24,7 @@ import type { DependencyGraphResult } from '../../analyzer/dependency-graph.js';
 import { readOpenLoreConfig } from '../config-manager.js';
 import { assessStalenessForAnalysis } from './confidence-boundary.js';
 import type { DecisionConstraintState } from '../../decisions/constraint-ledger.js';
+import type { GovernanceFinding } from './enforcement-policy.js';
 
 const VIOLATION_REPORT_CAP = 200;
 
@@ -48,12 +49,23 @@ function describeRule(rule: ArchitectureRule): string {
       return `forbidden (${rule.source}): ${rule.from} ⇏ ${rule.to}${rule.reason ? ` — ${rule.reason}` : ''}`;
     case 'allowedOnly':
       return `allowedOnly (${rule.source}): ${rule.module} → [${rule.mayDependOn.join(', ')}]${rule.reason ? ` — ${rule.reason}` : ''}`;
+    case 'required':
+      return `required (${rule.source}): ${rule.from} → ${rule.to}${rule.reason ? ` — ${rule.reason}` : ''}`;
+    case 'circular':
+      return `circular (${rule.source}): ${rule.scope}${rule.allowed.length ? ` except [${rule.allowed.join(', ')}]` : ''}`;
+    case 'reachable':
+      return `reachable (${rule.source}): only ${rule.from} may reach ${rule.to}${rule.reason ? ` — ${rule.reason}` : ''}`;
+    case 'orphan':
+      return `orphan (${rule.source}): ${rule.scope}${rule.reason ? ` — ${rule.reason}` : ''}`;
+    case 'moreUnstable':
+      return `moreUnstable (${rule.source}): ${rule.scope}${rule.reason ? ` — ${rule.reason}` : ''}`;
   }
 }
 
 const INERT_NOTE =
   'No architecture rules declared. This guardrail is opt-in and inert: add a ' +
-  '.openlore/architecture.json (layers / forbidden / allowedOnly) or an "Invariant:" ' +
+  '.openlore/architecture.json (layers / forbidden / allowedOnly / required / circular / ' +
+  'reachable / orphan / moreUnstable) or an "Invariant:" ' +
   'marker in a synced ADR to enable it.';
 
 const ACTIVE_NOTE =
@@ -67,6 +79,40 @@ export interface CheckArchitectureArgs {
   from?: string;
   /** Pre-edit mode: the target file path or exported symbol being imported. */
   to?: string;
+}
+
+const ARCHITECTURE_CODE_BY_KIND: Record<ArchitectureRule['kind'], string> = {
+  layers: 'architecture-layer-violation',
+  forbidden: 'architecture-forbidden-dependency',
+  allowedOnly: 'architecture-allowed-only-violation',
+  required: 'architecture-required-missing',
+  circular: 'architecture-cycle',
+  reachable: 'architecture-unreachable-breach',
+  orphan: 'architecture-orphan',
+  moreUnstable: 'architecture-instability-inversion',
+};
+
+export function architectureViolationFindings(
+  violations: ReturnType<typeof scanViolations>['violations'],
+): GovernanceFinding[] {
+  return violations.map(violation => ({
+    code: ARCHITECTURE_CODE_BY_KIND[violation.kind],
+    severity: 'warning',
+    source: 'architecture',
+    subject: violation.from === violation.to ? violation.from : `${violation.from} → ${violation.to}`,
+    message: `${violation.reason}${violation.confidence ? `; edge confidence: ${violation.confidence}` : ''}`,
+    discriminator: [violation.kind, violation.ruleId ?? '', violation.to, violation.path?.join('→') ?? ''].join('|'),
+    location: { path: violation.from },
+    ...(violation.decision && violation.ruleId ? {
+      decision: {
+        id: violation.decision.id,
+        title: violation.decision.title,
+        rationale: violation.decision.rationale,
+        ruleId: violation.ruleId,
+        servedContentMetadata: violation.decision.servedContentMetadata,
+      },
+    } : {}),
+  }));
 }
 
 export async function handleCheckArchitecture(args: CheckArchitectureArgs): Promise<unknown> {
@@ -222,6 +268,7 @@ export async function handleCheckArchitecture(args: CheckArchitectureArgs): Prom
     ruleSummary: rules.rules.map(describeRule),
     violationCount: scan.violations.length,
     violations: capped,
+    findings: architectureViolationFindings(capped),
     truncated: scan.violations.length > capped.length
       ? `showing first ${capped.length} of ${scan.violations.length}`
       : undefined,

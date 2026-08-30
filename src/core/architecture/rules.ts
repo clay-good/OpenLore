@@ -1,5 +1,5 @@
 /**
- * Architecture invariant rules (spec-23).
+ * Architecture invariant rules (spec-23; change: widen-architecture-rule-vocabulary).
  *
  * A small, opt-in, fully declarative rule format for dependency / layer /
  * module-boundary constraints. Rules are author-declared in
@@ -65,7 +65,58 @@ export interface AllowedOnlyRule extends RuleProvenance {
   source: RuleSource;
 }
 
-export type ArchitectureRule = LayersRule | ForbiddenRule | AllowedOnlyRule;
+/** "Every file under `from` must directly depend on at least one file under `to`." */
+export interface RequiredRule extends RuleProvenance {
+  kind: 'required';
+  from: string;
+  to: string;
+  reason?: string;
+  source: RuleSource;
+}
+
+/** "Dependency cycles under `scope` are forbidden except within allowed prefixes." */
+export interface CircularRule extends RuleProvenance {
+  kind: 'circular';
+  scope: string;
+  allowed: string[];
+  reason?: string;
+  source: RuleSource;
+}
+
+/** "Files outside `from` must not transitively reach files under `to`." */
+export interface ReachableRule extends RuleProvenance {
+  kind: 'reachable';
+  from: string;
+  to: string;
+  reason?: string;
+  source: RuleSource;
+}
+
+/** "Files under `scope` must have at least one incoming dependency." */
+export interface OrphanRule extends RuleProvenance {
+  kind: 'orphan';
+  scope: string;
+  reason?: string;
+  source: RuleSource;
+}
+
+/** "Files under `scope` must not depend on a strictly more-unstable file." */
+export interface MoreUnstableRule extends RuleProvenance {
+  kind: 'moreUnstable';
+  scope: string;
+  reason?: string;
+  source: RuleSource;
+}
+
+export type ArchitectureRule =
+  | LayersRule
+  | ForbiddenRule
+  | AllowedOnlyRule
+  | RequiredRule
+  | CircularRule
+  | ReachableRule
+  | OrphanRule
+  | MoreUnstableRule;
 
 /** The parsed rule set plus any non-fatal warnings collected while loading. */
 export interface ArchitectureRules {
@@ -78,12 +129,31 @@ interface RawArchitectureConfig {
   layers?: Record<string, string[]>;
   forbidden?: Array<{ from?: unknown; to?: unknown; reason?: unknown }>;
   allowedOnly?: Array<{ module?: unknown; mayDependOn?: unknown; reason?: unknown }>;
+  required?: Array<{ from?: unknown; to?: unknown; reason?: unknown }>;
+  circular?: Array<{ scope?: unknown; allowed?: unknown; reason?: unknown }>;
+  reachable?: Array<{ from?: unknown; to?: unknown; reason?: unknown }>;
+  orphan?: Array<{ scope?: unknown; reason?: unknown }>;
+  moreUnstable?: Array<{ scope?: unknown; reason?: unknown }>;
 }
 
 const ARCHITECTURE_CONFIG_FILE = 'architecture.json';
 
 function isStringArray(v: unknown): v is string[] {
   return Array.isArray(v) && v.every(x => typeof x === 'string');
+}
+
+function isPathPattern(v: unknown): v is string {
+  if (typeof v !== 'string' || v.trim() === '') return false;
+  const captureSegments = v.split('/').filter(segment => segment.includes('$'));
+  return captureSegments.every(segment => segment === '$1') && captureSegments.length <= 1;
+}
+
+function hasCapture(pattern: string): boolean {
+  return pattern.split('/').includes('$1');
+}
+
+function captureCanResolve(source: string, targets: readonly string[]): boolean {
+  return hasCapture(source) || targets.every(target => !hasCapture(target));
 }
 
 /**
@@ -124,7 +194,7 @@ export function parseArchitectureRules(raw: unknown, source: RuleSource): Archit
   if (cfg.forbidden !== undefined) {
     if (Array.isArray(cfg.forbidden)) {
       cfg.forbidden.forEach((r, i) => {
-        if (r && typeof r.from === 'string' && typeof r.to === 'string') {
+        if (r && isPathPattern(r.from) && isPathPattern(r.to) && captureCanResolve(r.from, [r.to])) {
           rules.push({
             kind: 'forbidden',
             from: r.from,
@@ -145,7 +215,13 @@ export function parseArchitectureRules(raw: unknown, source: RuleSource): Archit
   if (cfg.allowedOnly !== undefined) {
     if (Array.isArray(cfg.allowedOnly)) {
       cfg.allowedOnly.forEach((r, i) => {
-        if (r && typeof r.module === 'string' && isStringArray(r.mayDependOn)) {
+        if (
+          r
+          && isPathPattern(r.module)
+          && isStringArray(r.mayDependOn)
+          && r.mayDependOn.every(isPathPattern)
+          && captureCanResolve(r.module, r.mayDependOn)
+        ) {
           rules.push({
             kind: 'allowedOnly',
             module: r.module,
@@ -161,6 +237,90 @@ export function parseArchitectureRules(raw: unknown, source: RuleSource): Archit
       warnings.push('allowedOnly: expected an array — skipped');
     }
   }
+
+
+  const parseFromTo = (
+    kind: 'required' | 'reachable',
+    entries: unknown,
+  ): void => {
+    if (entries === undefined) return;
+    if (!Array.isArray(entries)) {
+      warnings.push(`${kind}: expected an array — skipped`);
+      return;
+    }
+    entries.forEach((entry, i) => {
+      const rule = entry as { from?: unknown; to?: unknown; reason?: unknown } | null;
+      if (
+        rule
+        && isPathPattern(rule.from)
+        && isPathPattern(rule.to)
+        && captureCanResolve(rule.from, [rule.to])
+      ) {
+        rules.push({
+          kind,
+          from: rule.from,
+          to: rule.to,
+          reason: typeof rule.reason === 'string' ? rule.reason : undefined,
+          source,
+        });
+      } else {
+        warnings.push(`${kind}[${i}]: requires non-empty path-pattern strings "from" and "to" — skipped`);
+      }
+    });
+  };
+  parseFromTo('required', cfg.required);
+  parseFromTo('reachable', cfg.reachable);
+
+  if (cfg.circular !== undefined) {
+    if (Array.isArray(cfg.circular)) {
+      cfg.circular.forEach((entry, i) => {
+        if (
+          entry
+          && isPathPattern(entry.scope)
+          && (entry.allowed === undefined
+            || (isStringArray(entry.allowed) && entry.allowed.every(isPathPattern)))
+        ) {
+          rules.push({
+            kind: 'circular',
+            scope: entry.scope,
+            allowed: entry.allowed ?? [],
+            reason: typeof entry.reason === 'string' ? entry.reason : undefined,
+            source,
+          });
+        } else {
+          warnings.push(`circular[${i}]: requires a non-empty "scope" and optional string[] "allowed" — skipped`);
+        }
+      });
+    } else {
+      warnings.push('circular: expected an array — skipped');
+    }
+  }
+
+  const parseScoped = (
+    kind: 'orphan' | 'moreUnstable',
+    entries: unknown,
+  ): void => {
+    if (entries === undefined) return;
+    if (!Array.isArray(entries)) {
+      warnings.push(`${kind}: expected an array — skipped`);
+      return;
+    }
+    entries.forEach((entry, i) => {
+      const rule = entry as { scope?: unknown; reason?: unknown } | null;
+      if (rule && isPathPattern(rule.scope)) {
+        rules.push({
+          kind,
+          scope: rule.scope,
+          reason: typeof rule.reason === 'string' ? rule.reason : undefined,
+          source,
+        });
+      } else {
+        warnings.push(`${kind}[${i}]: requires a non-empty path-pattern string "scope" — skipped`);
+      }
+    });
+  };
+  parseScoped('orphan', cfg.orphan);
+  parseScoped('moreUnstable', cfg.moreUnstable);
 
   return { rules, warnings };
 }

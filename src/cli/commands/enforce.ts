@@ -42,6 +42,7 @@ import {
   resolveEnforcementClass,
   type GovernanceFinding,
   CORPUS_INTENT_FINDING_CODES,
+  ARCHITECTURE_FINDING_CODES,
 } from '../../core/services/mcp-handlers/enforcement-policy.js';
 import { applyEnforcementBaseline } from '../../core/services/mcp-handlers/enforcement-baseline.js';
 import { detectStaleDecisionReferences } from '../../core/services/mcp-handlers/stale-decision-reference.js';
@@ -62,7 +63,12 @@ import {
   loadDecisionConstraintState,
   type DecisionConstraintState,
 } from '../../core/decisions/constraint-ledger.js';
-import { loadDepGraph } from '../../core/services/mcp-handlers/architecture.js';
+import {
+  architectureViolationFindings,
+  loadDepGraph,
+} from '../../core/services/mcp-handlers/architecture.js';
+import { loadArchitectureRules } from '../../core/architecture/rules.js';
+import { scanViolations } from '../../core/architecture/check.js';
 import { assessStalenessForAnalysis } from '../../core/services/mcp-handlers/confidence-boundary.js';
 import type { OpenLoreConfig } from '../../types/index.js';
 import {
@@ -366,6 +372,41 @@ export async function collectGovernanceFindings(
     caveats.push(`decision-constraint check unavailable: ${err instanceof Error ? err.message : String(err)}`);
     failedCodes.add('decision-constraint-malformed');
     failedCodes.add('decision-constraint-violation');
+  }
+
+  // Author-declared architecture rules — deterministic and opt-in. Decision-carried
+  // constraints are excluded here because the lifecycle-aware source above owns them.
+  try {
+    const architectureRules = await loadArchitectureRules(cwd, { includeDecisions: false });
+    if (architectureRules.warnings.length > 0) {
+      caveats.push(...architectureRules.warnings.map(warning => `architecture rule warning: ${warning}`));
+    }
+    if (architectureRules.rules.length === 0) {
+      for (const code of ARCHITECTURE_FINDING_CODES) assessedCodes.add(code);
+    } else {
+      const graph = await loadDepGraph(cwd);
+      if (!graph) {
+        caveats.push('architecture rule check unavailable: no dependency graph; run openlore analyze');
+        for (const code of ARCHITECTURE_FINDING_CODES) failedCodes.add(code);
+      } else {
+        findings.push(...architectureViolationFindings(scanViolations(graph, architectureRules).violations));
+        const freshness = await assessStalenessForAnalysis(
+          cwd,
+          join(cwd, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR),
+          Date.now(),
+          false,
+        );
+        if (!freshness.indexCommit || freshness.changedSourceFiles !== 0) {
+          caveats.push('architecture rule assessment incomplete: dependency graph is stale or its freshness is unknown; run openlore analyze');
+          for (const code of ARCHITECTURE_FINDING_CODES) failedCodes.add(code);
+        } else {
+          for (const code of ARCHITECTURE_FINDING_CODES) assessedCodes.add(code);
+        }
+      }
+    }
+  } catch (err) {
+    caveats.push(`architecture rule check unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    for (const code of ARCHITECTURE_FINDING_CODES) failedCodes.add(code);
   }
 
   // Governance-corpus integrity — always (bounded local artifact walk, no LLM).

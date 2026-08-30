@@ -412,7 +412,7 @@ Features reported (active/inactive detected from config + markers):
 | Semantic embeddings | `openlore embed --local` |
 | Task-scoped context injection | on by default (`contextInjection.mode`) |
 | MCP tool surface | `openlore connect --preset <name>` |
-| Architecture invariants | `.openlore/architecture.json` (layer/forbidden rules) |
+| Architecture invariants | `.openlore/architecture.json` (layer, boundary, cycle, reachability, orphan, and instability rules) |
 | Change-impact certificate | `impactCertificate.surfaces` in config |
 | Enforcement policy | `enforcement.policy` in config |
 | Blast-radius blocking | `blastRadius.block` in config |

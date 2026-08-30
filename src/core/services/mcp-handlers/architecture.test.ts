@@ -3,6 +3,11 @@ import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { handleCheckArchitecture } from './architecture.js';
+import {
+  classifyFindings,
+  FINDING_CODE_REGISTRY,
+  type GovernanceFinding,
+} from './enforcement-policy.js';
 
 function depGraphJson(dir: string, edges: Array<[string, string]>): string {
   const files = new Set<string>();
@@ -74,5 +79,30 @@ describe('handleCheckArchitecture', () => {
 
     const scan = await handleCheckArchitecture({ directory: dir }) as Record<string, unknown>;
     expect(scan).toMatchObject({ mode: 'scan', violationCount: null, assessmentComplete: false });
+  });
+
+  it('emits registered architecture findings that are advisory unless policy blocks them', async () => {
+    await mkdir(join(dir, '.openlore', 'analysis'), { recursive: true });
+    await writeFile(
+      join(dir, '.openlore', 'architecture.json'),
+      JSON.stringify({ forbidden: [{ from: 'src/domain', to: 'src/infra' }] }),
+    );
+    await writeFile(
+      join(dir, '.openlore', 'analysis', 'dependency-graph.json'),
+      depGraphJson(dir, [['src/domain/order.ts', 'src/infra/db.ts']]),
+    );
+
+    const result = await handleCheckArchitecture({ directory: dir }) as { findings: GovernanceFinding[] };
+    expect(result.findings).toEqual([expect.objectContaining({
+      code: 'architecture-forbidden-dependency',
+      subject: 'src/domain/order.ts → src/infra/db.ts',
+    })]);
+    expect(FINDING_CODE_REGISTRY['architecture-forbidden-dependency']).toMatchObject({
+      defaultClass: 'advisory', source: 'architecture',
+    });
+    expect(classifyFindings(result.findings, {}).gated).toBe(false);
+    expect(classifyFindings(result.findings, {
+      'architecture-forbidden-dependency': 'blocking',
+    }).gated).toBe(true);
   });
 });

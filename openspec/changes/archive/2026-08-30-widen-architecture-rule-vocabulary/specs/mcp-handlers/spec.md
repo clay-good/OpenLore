@@ -15,6 +15,15 @@ no new constant or threshold. A verdict resting on lower-confidence edges (e.g. 
 disclose that confidence, and `orphan`/`reachable` conclusions SHALL cross-reference
 `find_dead_code` as their sibling rather than duplicating its report.
 
+The config shapes SHALL be `required: [{ from, to, reason? }]`,
+`circular: [{ scope, allowed?: string[], reason? }]`,
+`reachable: [{ from, to, reason? }]`, `orphan: [{ scope, reason? }]`, and
+`moreUnstable: [{ scope, reason? }]`. `required` SHALL require a direct dependency from every
+matched source file. For `reachable`, `from` SHALL name the permitted origin prefix and `to` the
+protected target prefix. A path pattern MAY contain one whole-segment `$1` capture; target patterns
+MUST NOT reference `$1` unless the source pattern binds it. No general regular expression SHALL be
+evaluated.
+
 #### Scenario: A required dependency is missing
 
 - **GIVEN** a rule `{ kind: "required", from: "src/handlers/", to: "src/sanitizer" }` and a handler

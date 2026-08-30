@@ -19,7 +19,12 @@ function depGraph(
     exports: (exportsByFile[rel] ?? []).map(name => ({
       name, isDefault: false, isType: false, isReExport: false, kind: 'function' as const, line: 1,
     })),
-    metrics: { inDegree: 0, outDegree: 0, betweenness: 0, pageRank: 0 },
+    metrics: {
+      inDegree: edges.filter(([, target]) => target === rel).length,
+      outDegree: edges.filter(([source]) => source === rel).length,
+      betweenness: 0,
+      pageRank: 0,
+    },
   }));
   const depEdges = edges.map(([a, b]) => ({
     source: ROOT + a, target: ROOT + b, importedNames: [], isTypeOnly: false, weight: 1,
@@ -90,6 +95,127 @@ describe('scanViolations', () => {
     const scan = scanViolations(g, r);
     expect(scan.violations).toHaveLength(1);
     expect(scan.violations[0]).toMatchObject({ to: 'src/db/conn.ts' });
+  });
+
+  it('flags each missing required dependency while accepting a conforming peer', () => {
+    const g = depGraph([
+      ['src/handlers/clean.ts', 'src/sanitizer/index.ts'],
+      ['src/handlers/raw.ts', 'src/model.ts'],
+    ]);
+    const scan = scanViolations(g, rules({
+      kind: 'required', from: 'src/handlers', to: 'src/sanitizer', source: 'config',
+    }));
+
+    expect(scan.violations).toHaveLength(1);
+    expect(scan.violations[0]).toMatchObject({
+      kind: 'required', from: 'src/handlers/raw.ts', to: 'src/sanitizer',
+    });
+  });
+
+  it('reports deterministic cycles and honors scoped exceptions', () => {
+    const g = depGraph([
+      ['src/a.ts', 'src/b.ts'], ['src/b.ts', 'src/a.ts'],
+      ['src/generated/x.ts', 'src/generated/y.ts'], ['src/generated/y.ts', 'src/generated/x.ts'],
+    ]);
+    const scan = scanViolations(g, rules({
+      kind: 'circular', scope: 'src', allowed: ['src/generated'], source: 'config',
+    }));
+
+    expect(scan.violations).toHaveLength(1);
+    expect(scan.violations[0]).toMatchObject({ kind: 'circular', path: ['src/a.ts', 'src/b.ts'] });
+  });
+
+  it('does not let a capture exception hide a cross-capture cycle', () => {
+    const g = depGraph([
+      ['domains/billing/a.ts', 'domains/orders/b.ts'],
+      ['domains/orders/b.ts', 'domains/billing/a.ts'],
+    ]);
+    const scan = scanViolations(g, rules({
+      kind: 'circular', scope: 'domains', allowed: ['domains/$1'], source: 'config',
+    }));
+
+    expect(scan.violations).toHaveLength(1);
+  });
+
+  it('distinguishes an outside reachability breach from an allowed origin', () => {
+    const g = depGraph([
+      ['src/public/api.ts', 'src/internal/service.ts'],
+      ['src/rogue.ts', 'src/middle.ts'],
+      ['src/middle.ts', 'src/internal/service.ts'],
+    ]);
+    const scan = scanViolations(g, rules({
+      kind: 'reachable', from: 'src/public', to: 'src/internal', source: 'config',
+    }));
+
+    expect(scan.violations.map(violation => violation.from)).toEqual(['src/middle.ts', 'src/rogue.ts']);
+    expect(scan.violations.find(violation => violation.from === 'src/rogue.ts')).toMatchObject({
+      path: ['src/rogue.ts', 'src/middle.ts', 'src/internal/service.ts'],
+      relatedConclusion: 'find_dead_code',
+    });
+  });
+
+  it('flags only matched files with no incoming dependency as orphans', () => {
+    const g = depGraph([
+      ['src/app.ts', 'src/lib/used.ts'],
+      ['src/lib/orphan.ts', 'src/shared.ts'],
+    ]);
+    const scan = scanViolations(g, rules({ kind: 'orphan', scope: 'src/lib', source: 'config' }));
+
+    expect(scan.violations).toHaveLength(1);
+    expect(scan.violations[0]).toMatchObject({
+      kind: 'orphan', from: 'src/lib/orphan.ts', relatedConclusion: 'find_dead_code',
+    });
+  });
+
+  it('flags only strict instability inversions using stored graph degrees', () => {
+    const g = depGraph([
+      ['src/client-a.ts', 'src/core/stable.ts'],
+      ['src/client-b.ts', 'src/core/stable.ts'],
+      ['src/core/stable.ts', 'src/util/unstable.ts'],
+      ['src/util/unstable.ts', 'src/leaf-a.ts'],
+      ['src/util/unstable.ts', 'src/leaf-b.ts'],
+    ]);
+    const scan = scanViolations(g, rules({
+      kind: 'moreUnstable', scope: 'src/core', source: 'config',
+    }));
+
+    expect(scan.violations).toHaveLength(1);
+    expect(scan.violations[0]).toMatchObject({
+      kind: 'moreUnstable',
+      from: 'src/core/stable.ts',
+      to: 'src/util/unstable.ts',
+      instability: { dependent: 1 / 3, dependency: 2 / 3 },
+    });
+  });
+
+  it('binds one path-segment capture across allowedOnly patterns', () => {
+    const g = depGraph([
+      ['domains/billing/a.ts', 'domains/billing/b.ts'],
+      ['domains/billing/a.ts', 'shared/log.ts'],
+      ['domains/billing/a.ts', 'domains/orders/b.ts'],
+    ]);
+    const scan = scanViolations(g, rules({
+      kind: 'allowedOnly',
+      module: 'domains/$1',
+      mayDependOn: ['domains/$1', 'shared'],
+      source: 'config',
+    }));
+
+    expect(scan.violations).toHaveLength(1);
+    expect(scan.violations[0]).toMatchObject({
+      from: 'domains/billing/a.ts', to: 'domains/orders/b.ts',
+    });
+  });
+
+  it('discloses lower-confidence call edges used by a verdict', () => {
+    const g = depGraph([['src/core/a.ts', 'src/cli/b.ts']]);
+    g.edges[0].isCallEdge = true;
+    g.edges[0].resolutionConfidence = 'name_only';
+    const scan = scanViolations(g, rules({
+      kind: 'forbidden', from: 'src/core', to: 'src/cli', source: 'config',
+    }));
+
+    expect(scan.violations[0].confidence).toBe('name_only');
   });
 
   it('is fully inert with no rules', () => {
