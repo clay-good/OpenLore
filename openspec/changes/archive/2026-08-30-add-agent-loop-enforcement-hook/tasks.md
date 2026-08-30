@@ -13,9 +13,9 @@
       action exists (never invent one)
 - [x] Render remediation (when present) in agent-hook, git-hook (renderHuman, enforce.ts:299-318),
       and `openlore review` output
-- [x] Opt-in `openlore setup` wiring: register the agent-hook as a Stop/PostToolUse entry in
-      .claude/settings.json via the existing readClaudeSettings corrupt-refusal + idempotent
-      merge (setup.ts:306-324, :327); never installed by default
+- [x] Opt-in `openlore setup` wiring: register the agent-hook as a Stop entry in
+      `.claude/settings.json`, `.codex/hooks.json`, or both via corrupt-refusal + idempotent
+      merges; never installed by default
 
 ## Verification
 - [x] Exit-contract tests: blocking-classed finding → exit 2 with remediation-first stderr;
@@ -23,8 +23,8 @@
       injected source throw → caveat + exit 0
 - [x] Remediation tests: code with template → instantiated remediation on the finding; code
       without template → message-only, no remediation field; template output deterministic
-- [x] Installer tests: idempotent re-run adds one entry; corrupt settings.json → refusal, file
-      untouched; uninstall removes only the openlore entry
+- [x] Installer tests: Claude and Codex idempotent re-runs add one entry; corrupt hook settings →
+      refusal, file untouched; uninstall removes only the OpenLore entry
 - [x] Frozen-class composition test (with add-enforcement-baseline-ratchet, if landed): a frozen
       finding renders labeled-advisory in agent-hook mode and never exits 2
 - [x] Full suite green

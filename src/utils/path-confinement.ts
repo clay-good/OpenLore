@@ -14,7 +14,7 @@
  */
 
 import { constants, realpathSync, lstatSync, readlinkSync, type Stats } from 'node:fs';
-import { link, lstat, mkdir, open, readdir, realpath, rename, stat, unlink } from 'node:fs/promises';
+import { link, lstat, mkdir, open, realpath, rename, stat, unlink } from 'node:fs/promises';
 import { basename, dirname, relative, resolve, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
@@ -249,6 +249,7 @@ export function isConfinedPath(absRoot: string, absPath: string): boolean {
 export async function recoverConfinedAtomicWriteFile(
   absRoot: string,
   absPath: string,
+  recoveryJournalPath: string,
 ): Promise<void> {
   const lexicalRoot = resolve(absRoot);
   const canonicalRoot = await realpath(lexicalRoot);
@@ -264,25 +265,42 @@ export async function recoverConfinedAtomicWriteFile(
     throw new Error(`Path escape blocked: symbolic-link path component in "${target}"`);
   }
 
+  let journal: { guard?: unknown };
+  try {
+    const handle = await open(recoveryJournalPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try { journal = JSON.parse(await handle.readFile('utf-8')) as { guard?: unknown }; }
+    finally { await handle.close(); }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw error;
+  }
+
   const prefix = `.${basename(target)}.openlore-cas-backup.`;
   const uuidSuffix = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-  const guards = (await readdir(canonicalParent, { withFileTypes: true }))
-    .filter(entry => entry.isFile()
-      && entry.name.startsWith(prefix)
-      && uuidSuffix.test(entry.name.slice(prefix.length)))
-    .map(entry => resolve(canonicalParent, entry.name));
-  if (guards.length === 0) return;
+  if (typeof journal.guard !== 'string'
+      || !journal.guard.startsWith(prefix)
+      || !uuidSuffix.test(journal.guard.slice(prefix.length))) {
+    throw new Error(`Confined write recovery journal is invalid for "${target}"`);
+  }
+  const guard = resolve(canonicalParent, journal.guard);
+  let guardExists = false;
+  try { guardExists = (await lstat(guard)).isFile(); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  if (!guardExists) {
+    await unlink(recoveryJournalPath);
+    return;
+  }
 
   let targetExists = false;
   try { targetExists = (await lstat(target)).isFile(); }
   catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   }
-  if (!targetExists && guards.length !== 1) {
-    throw new Error(`Confined write recovery is ambiguous for "${target}"`);
-  }
-  if (!targetExists) await link(guards[0]!, target);
-  await Promise.all(guards.map(guard => unlink(guard)));
+  if (!targetExists) await link(guard, target);
+  await unlink(guard);
+  await unlink(recoveryJournalPath);
 }
 
 /** Atomically replace a repository file without following any repository symlink. */
@@ -294,7 +312,11 @@ export async function confinedAtomicWriteFile(
     mode?: number;
     preserveMode?: boolean;
     /** Publish only if the target still has this identity; null means it must remain absent. */
-    expectedIdentity?: Pick<Stats, 'dev' | 'ino' | 'size' | 'mtimeMs' | 'ctimeMs'> | null;
+    expectedIdentity?: Pick<Stats, 'dev' | 'ino' | 'size' | 'mtimeMs' | 'ctimeMs' | 'mode'> | null;
+    /** Exact bytes read with expectedIdentity, for the decisive post-rename comparison. */
+    expectedContent?: string;
+    /** Trusted, lock-bound journal used to recover an interrupted guarded publication. */
+    recoveryJournalPath?: string;
   } = {},
 ): Promise<void> {
   const lexicalRoot = resolve(absRoot);
@@ -352,6 +374,7 @@ export async function confinedAtomicWriteFile(
     : (options.mode ?? 0o666);
   const temp = resolve(canonicalParent, `.${basename(target)}.${process.pid}.${randomUUID()}.tmp`);
   let published = false;
+  let recoveryPending = false;
   try {
     const handle = await open(
       temp,
@@ -388,15 +411,30 @@ export async function confinedAtomicWriteFile(
       // OpenLore never overwrites it. The unique guard avoids colliding with a
       // user file; callers serialize and recover this target with a settings lock.
       const guard = resolve(canonicalParent, `.${basename(target)}.openlore-cas-backup.${randomUUID()}`);
+      if (options.recoveryJournalPath) {
+        const journalHandle = await open(
+          options.recoveryJournalPath,
+          constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW,
+          0o600,
+        );
+        try {
+          await journalHandle.writeFile(JSON.stringify({ guard: basename(guard) }), 'utf-8');
+          await journalHandle.sync();
+        } finally {
+          await journalHandle.close();
+        }
+      }
       const restoreGuard = async (): Promise<void> => {
         try { await link(guard, target); }
         catch (error) {
           if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
         }
         await unlink(guard).catch(() => {});
+        recoveryPending = false;
       };
       try {
         await rename(target, guard);
+        recoveryPending = true;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
           throw new Error(`Confined write conflict: target changed after it was read: "${target}"`, { cause: error });
@@ -404,10 +442,18 @@ export async function confinedAtomicWriteFile(
         throw error;
       }
       const captured = await lstat(guard);
+      let capturedContent: string | undefined;
+      if (options.expectedContent !== undefined) {
+        const capturedHandle = await open(guard, constants.O_RDONLY | constants.O_NOFOLLOW);
+        try { capturedContent = await capturedHandle.readFile('utf-8'); }
+        finally { await capturedHandle.close(); }
+      }
       if (!captured.isFile()
           || !sameFile(options.expectedIdentity, captured)
           || captured.size !== options.expectedIdentity.size
-          || captured.mtimeMs !== options.expectedIdentity.mtimeMs) {
+          || captured.mtimeMs !== options.expectedIdentity.mtimeMs
+          || captured.mode !== options.expectedIdentity.mode
+          || capturedContent !== options.expectedContent) {
         await restoreGuard();
         throw new Error(`Confined write conflict: target changed after it was read: "${target}"`);
       }
@@ -423,6 +469,8 @@ export async function confinedAtomicWriteFile(
       published = true;
       await unlink(temp).catch(() => {});
       await unlink(guard).catch(() => {});
+      recoveryPending = false;
+      if (options.recoveryJournalPath) await unlink(options.recoveryJournalPath).catch(() => {});
       return;
     }
     try {
@@ -439,6 +487,9 @@ export async function confinedAtomicWriteFile(
     published = true;
   } finally {
     if (!published) await unlink(temp).catch(() => {});
+    if (!published && !recoveryPending && options.recoveryJournalPath) {
+      await unlink(options.recoveryJournalPath).catch(() => {});
+    }
   }
 }
 

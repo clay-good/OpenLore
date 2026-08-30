@@ -415,9 +415,10 @@ function isValidClaudeHookEntry(value: unknown): value is Record<string, unknown
 async function withClaudeSettingsMutationLock(
   rootPath: string,
   settingsPath: string,
-  mutate: () => Promise<boolean>,
+  mutate: (recoveryJournalPath: string) => Promise<boolean>,
 ): Promise<boolean> {
   const lockName = `.openlore-claude-settings-${createHash('sha256').update(settingsPath).digest('hex').slice(0, 24)}.lock`;
+  const recoveryJournalPath = join(tmpdir(), `${lockName}.journal`);
   let lock: Awaited<ReturnType<typeof acquireLockAt>>;
   try {
     // The repository may replace `.claude` with a symlink after validation, so
@@ -434,8 +435,8 @@ async function withClaudeSettingsMutationLock(
     return false;
   }
   try {
-    await recoverConfinedAtomicWriteFile(rootPath, settingsPath);
-    return await mutate();
+    await recoverConfinedAtomicWriteFile(rootPath, settingsPath, recoveryJournalPath);
+    return await mutate(recoveryJournalPath);
   } catch (error) {
     logger.error(`${settingsPath} changed while hook settings were being updated — refusing to overwrite it. ${(error as Error).message}`);
     return false;
@@ -446,15 +447,17 @@ async function withClaudeSettingsMutationLock(
 
 /** Install the opt-in enforcement gate in Claude Code's Stop loop. */
 export async function installAgentEnforcementHook(rootPath: string): Promise<boolean> {
-  const settingsPath = await verifiedCheckEditSettingsPath(rootPath, true);
+  const settingsPath = await verifiedProjectSettingsPath(rootPath, true);
   if (!settingsPath) return false;
-  return withClaudeSettingsMutationLock(rootPath, settingsPath, async () => {
+  return withClaudeSettingsMutationLock(rootPath, settingsPath, async (recoveryJournalPath) => {
   let settings: ClaudeHookSettings;
   let expectedIdentity: Awaited<ReturnType<typeof readClaudeSettingsSnapshot>>['expectedIdentity'];
+  let expectedContent: string | undefined;
   try {
     const snapshot = await readClaudeSettingsSnapshot(rootPath, settingsPath);
     settings = snapshot.settings;
     expectedIdentity = snapshot.expectedIdentity;
+    expectedContent = snapshot.expectedContent;
   }
   catch (error) { logger.error((error as Error).message); return false; }
   if (settings.hooks !== undefined
@@ -495,6 +498,8 @@ export async function installAgentEnforcementHook(rootPath: string): Promise<boo
   await confinedAtomicWriteFile(rootPath, settingsPath, JSON.stringify(settings, null, 2) + '\n', {
     preserveMode: true,
     expectedIdentity,
+    expectedContent,
+    recoveryJournalPath,
   });
   logger.success('agent enforcement Stop hook added to .claude/settings.json');
   return true;
@@ -503,16 +508,18 @@ export async function installAgentEnforcementHook(rootPath: string): Promise<boo
 
 /** Remove only OpenLore's opt-in agent enforcement entry. */
 export async function uninstallAgentEnforcementHook(rootPath: string): Promise<boolean> {
-  const settingsPath = await verifiedCheckEditSettingsPath(rootPath, false);
+  const settingsPath = await verifiedProjectSettingsPath(rootPath, false);
   if (!settingsPath) return !(await fileExists(join(rootPath, '.claude')));
   if (!(await fileExists(settingsPath))) return true;
-  return withClaudeSettingsMutationLock(rootPath, settingsPath, async () => {
+  return withClaudeSettingsMutationLock(rootPath, settingsPath, async (recoveryJournalPath) => {
   let settings: ClaudeHookSettings;
   let expectedIdentity: Awaited<ReturnType<typeof readClaudeSettingsSnapshot>>['expectedIdentity'];
+  let expectedContent: string | undefined;
   try {
     const snapshot = await readClaudeSettingsSnapshot(rootPath, settingsPath);
     settings = snapshot.settings;
     expectedIdentity = snapshot.expectedIdentity;
+    expectedContent = snapshot.expectedContent;
   }
   catch (error) { logger.error((error as Error).message); return false; }
   const hooks = settings.hooks?.Stop;
@@ -528,23 +535,152 @@ export async function uninstallAgentEnforcementHook(rootPath: string): Promise<b
   await confinedAtomicWriteFile(rootPath, settingsPath, JSON.stringify(settings, null, 2) + '\n', {
     preserveMode: true,
     expectedIdentity,
+    expectedContent,
+    recoveryJournalPath,
   });
   logger.success('Removed the agent enforcement Stop hook from .claude/settings.json');
   return true;
   });
 }
 
+function isCodexAgentEnforcementHandler(value: unknown): boolean {
+  return value !== null
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && (value as Record<string, unknown>).type === 'command'
+    && (value as Record<string, unknown>).command === AGENT_ENFORCEMENT_HOOK_MARKER;
+}
+
+const CODEX_AGENT_ENFORCEMENT_ENTRY = {
+  hooks: [{
+    type: 'command',
+    command: AGENT_ENFORCEMENT_HOOK_MARKER,
+    timeout: 30,
+    statusMessage: 'Checking OpenLore governance',
+  }],
+};
+
+function withoutCodexAgentEnforcementHandlers(
+  groups: Array<Record<string, unknown>>,
+): Array<Record<string, unknown>> {
+  return groups.flatMap(group => {
+    if (!Array.isArray(group.hooks)) return [group];
+    const hooks = group.hooks.filter(handler => !isCodexAgentEnforcementHandler(handler));
+    if (hooks.length === group.hooks.length) return [group];
+    return hooks.length > 0 ? [{ ...group, hooks }] : [];
+  });
+}
+
+/** Install the opt-in enforcement gate in Codex's project-local Stop loop. */
+export async function installCodexAgentEnforcementHook(rootPath: string): Promise<boolean> {
+  const settingsPath = await verifiedProjectSettingsPath(rootPath, true, '.codex', 'hooks.json');
+  if (!settingsPath) return false;
+  return withClaudeSettingsMutationLock(rootPath, settingsPath, async (recoveryJournalPath) => {
+    let settings: ClaudeHookSettings;
+    let expectedIdentity: Awaited<ReturnType<typeof readClaudeSettingsSnapshot>>['expectedIdentity'];
+    let expectedContent: string | undefined;
+    try {
+      const snapshot = await readClaudeSettingsSnapshot(rootPath, settingsPath);
+      settings = snapshot.settings;
+      expectedIdentity = snapshot.expectedIdentity;
+      expectedContent = snapshot.expectedContent;
+    } catch (error) {
+      logger.error((error as Error).message);
+      return false;
+    }
+    if (settings.hooks !== undefined
+        && (settings.hooks === null || typeof settings.hooks !== 'object' || Array.isArray(settings.hooks))) {
+      logger.error(`${settingsPath} has a non-object hooks field — refusing to overwrite it.`);
+      return false;
+    }
+    if (settings.hooks?.Stop !== undefined && !Array.isArray(settings.hooks.Stop)) {
+      logger.error(`${settingsPath} has a non-array hooks.Stop field — refusing to overwrite it.`);
+      return false;
+    }
+    const groups = settings.hooks?.Stop ?? [];
+    if (!groups.every(isValidClaudeHookEntry)) {
+      logger.error(`${settingsPath} has a malformed hooks.Stop entry — refusing to overwrite it.`);
+      return false;
+    }
+    const ownedCount = groups.reduce(
+      (count, group) => count + (Array.isArray(group.hooks)
+        ? group.hooks.filter(isCodexAgentEnforcementHandler).length
+        : 0),
+      0,
+    );
+    if (ownedCount === 1 && groups.some(group => JSON.stringify(group) === JSON.stringify(CODEX_AGENT_ENFORCEMENT_ENTRY))) {
+      logger.success('agent enforcement Stop hook already present in .codex/hooks.json');
+      return true;
+    }
+    settings.hooks ??= {};
+    settings.hooks.Stop = [
+      ...withoutCodexAgentEnforcementHandlers(groups),
+      CODEX_AGENT_ENFORCEMENT_ENTRY,
+    ];
+    await confinedAtomicWriteFile(rootPath, settingsPath, JSON.stringify(settings, null, 2) + '\n', {
+      preserveMode: true,
+      expectedIdentity,
+      expectedContent,
+      recoveryJournalPath,
+    });
+    logger.success('agent enforcement Stop hook added to .codex/hooks.json');
+    return true;
+  });
+}
+
+/** Remove only OpenLore's Codex Stop handler, preserving other groups and handlers. */
+export async function uninstallCodexAgentEnforcementHook(rootPath: string): Promise<boolean> {
+  const settingsPath = await verifiedProjectSettingsPath(rootPath, false, '.codex', 'hooks.json');
+  if (!settingsPath) return !(await fileExists(join(rootPath, '.codex')));
+  if (!(await fileExists(settingsPath))) return true;
+  return withClaudeSettingsMutationLock(rootPath, settingsPath, async (recoveryJournalPath) => {
+    let settings: ClaudeHookSettings;
+    let expectedIdentity: Awaited<ReturnType<typeof readClaudeSettingsSnapshot>>['expectedIdentity'];
+    let expectedContent: string | undefined;
+    try {
+      const snapshot = await readClaudeSettingsSnapshot(rootPath, settingsPath);
+      settings = snapshot.settings;
+      expectedIdentity = snapshot.expectedIdentity;
+      expectedContent = snapshot.expectedContent;
+    } catch (error) {
+      logger.error((error as Error).message);
+      return false;
+    }
+    const groups = settings.hooks?.Stop;
+    if (!Array.isArray(groups)) return true;
+    if (!groups.every(isValidClaudeHookEntry)) {
+      logger.error(`${settingsPath} has a malformed hooks.Stop entry — refusing to overwrite it.`);
+      return false;
+    }
+    const filtered = withoutCodexAgentEnforcementHandlers(groups);
+    if (filtered.length === groups.length
+        && filtered.every((group, index) => group === groups[index])) return true;
+    if (filtered.length === 0) delete settings.hooks!.Stop;
+    else settings.hooks!.Stop = filtered;
+    await confinedAtomicWriteFile(rootPath, settingsPath, JSON.stringify(settings, null, 2) + '\n', {
+      preserveMode: true,
+      expectedIdentity,
+      expectedContent,
+      recoveryJournalPath,
+    });
+    logger.success('Removed the agent enforcement Stop hook from .codex/hooks.json');
+    return true;
+  });
+}
+
 /** Install the read-only per-edit verdict consumer as a Claude Code PostToolUse hook. */
 export async function installCheckEditHook(rootPath: string): Promise<boolean> {
-  const settingsPath = await verifiedCheckEditSettingsPath(rootPath, true);
+  const settingsPath = await verifiedProjectSettingsPath(rootPath, true);
   if (!settingsPath) return false;
-  return withClaudeSettingsMutationLock(rootPath, settingsPath, async () => {
+  return withClaudeSettingsMutationLock(rootPath, settingsPath, async (recoveryJournalPath) => {
   let settings: ClaudeHookSettings;
   let expectedIdentity: Awaited<ReturnType<typeof readClaudeSettingsSnapshot>>['expectedIdentity'];
+  let expectedContent: string | undefined;
   try {
     const snapshot = await readClaudeSettingsSnapshot(rootPath, settingsPath);
     settings = snapshot.settings;
     expectedIdentity = snapshot.expectedIdentity;
+    expectedContent = snapshot.expectedContent;
   }
   catch (e) { logger.error((e as Error).message); return false; }
 
@@ -578,6 +714,8 @@ export async function installCheckEditHook(rootPath: string): Promise<boolean> {
   await confinedAtomicWriteFile(rootPath, settingsPath, JSON.stringify(settings, null, 2) + '\n', {
     preserveMode: true,
     expectedIdentity,
+    expectedContent,
+    recoveryJournalPath,
   });
   logger.success('check-edit PostToolUse hook added to .claude/settings.json');
   return true;
@@ -586,16 +724,18 @@ export async function installCheckEditHook(rootPath: string): Promise<boolean> {
 
 /** Remove only OpenLore's check-edit PostToolUse entry, preserving user hooks. */
 export async function uninstallCheckEditHook(rootPath: string): Promise<boolean> {
-  const settingsPath = await verifiedCheckEditSettingsPath(rootPath, false);
+  const settingsPath = await verifiedProjectSettingsPath(rootPath, false);
   if (!settingsPath) return !(await fileExists(join(rootPath, '.claude')));
   if (!(await fileExists(settingsPath))) return true;
-  return withClaudeSettingsMutationLock(rootPath, settingsPath, async () => {
+  return withClaudeSettingsMutationLock(rootPath, settingsPath, async (recoveryJournalPath) => {
   let settings: ClaudeHookSettings;
   let expectedIdentity: Awaited<ReturnType<typeof readClaudeSettingsSnapshot>>['expectedIdentity'];
+  let expectedContent: string | undefined;
   try {
     const snapshot = await readClaudeSettingsSnapshot(rootPath, settingsPath);
     settings = snapshot.settings;
     expectedIdentity = snapshot.expectedIdentity;
+    expectedContent = snapshot.expectedContent;
   }
   catch (e) { logger.error((e as Error).message); return false; }
 
@@ -612,6 +752,8 @@ export async function uninstallCheckEditHook(rootPath: string): Promise<boolean>
   await confinedAtomicWriteFile(rootPath, settingsPath, JSON.stringify(settings, null, 2) + '\n', {
     preserveMode: true,
     expectedIdentity,
+    expectedContent,
+    recoveryJournalPath,
   });
   logger.success('Removed the check-edit PostToolUse hook from .claude/settings.json');
   return true;
@@ -629,14 +771,19 @@ function isContainedPath(root: string, candidate: string): boolean {
 /** Resolve the check-edit hook settings destination without following a user-controlled
  * `.claude` directory or `settings.json` symlink. The destination is checked again
  * immediately before the atomic rename so an observed escape is always refused. */
-async function verifiedCheckEditSettingsPath(rootPath: string, createDirectory: boolean): Promise<string | undefined> {
+async function verifiedProjectSettingsPath(
+  rootPath: string,
+  createDirectory: boolean,
+  configDirectory = '.claude',
+  configFile = 'settings.json',
+): Promise<string | undefined> {
   let root: string;
   try { root = await realpath(rootPath); }
   catch {
     logger.error(`setup --check-edit-hook: repository root is missing or unreadable — refusing to write.`);
     return undefined;
   }
-  const claudeDir = join(root, '.claude');
+  const claudeDir = join(root, configDirectory);
   try {
     const info = await lstat(claudeDir);
     if (info.isSymbolicLink() || !info.isDirectory()) {
@@ -662,7 +809,7 @@ async function verifiedCheckEditSettingsPath(rootPath: string, createDirectory: 
     logger.error(`${claudeDir} resolves outside the repository — refusing to write hook settings.`);
     return undefined;
   }
-  const settingsPath = join(canonicalDir, 'settings.json');
+  const settingsPath = join(canonicalDir, configFile);
   try {
     const info = await lstat(settingsPath);
     if (info.isSymbolicLink() || !info.isFile()) {
@@ -689,6 +836,7 @@ async function readClaudeSettingsSnapshot(
 ): Promise<{
   settings: ClaudeHookSettings;
   expectedIdentity: Awaited<ReturnType<typeof readFileConfinedWithStat>>['stat'] | null;
+  expectedContent?: string;
 }> {
   let raw: string;
   let expectedIdentity: Awaited<ReturnType<typeof readFileConfinedWithStat>>['stat'];
@@ -707,13 +855,13 @@ async function readClaudeSettingsSnapshot(
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { settings: {}, expectedIdentity: null };
     throw new CorruptSettingsError(`${settingsPath} is unreadable — refusing to overwrite it.`);
   }
-  if (raw.trim() === '') return { settings: {}, expectedIdentity }; // empty file → start fresh
+  if (raw.trim() === '') return { settings: {}, expectedIdentity, expectedContent: raw }; // empty file → start fresh
   try {
     const parsed = JSON.parse(raw) as unknown;
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
       throw new Error('settings root is not an object');
     }
-    return { settings: parsed as ClaudeHookSettings, expectedIdentity };
+    return { settings: parsed as ClaudeHookSettings, expectedIdentity, expectedContent: raw };
   } catch {
     // Exists with content but is invalid JSON — refuse to clobber the user's file.
     throw new CorruptSettingsError(
@@ -724,15 +872,17 @@ async function readClaudeSettingsSnapshot(
 
 /** Install `openlore panic-check` as a PreToolUse hook (idempotent). */
 export async function installPanicCheckHook(rootPath: string, format: string = 'claude'): Promise<void> {
-  const settingsPath = await verifiedCheckEditSettingsPath(rootPath, true);
+  const settingsPath = await verifiedProjectSettingsPath(rootPath, true);
   if (!settingsPath) return;
-  await withClaudeSettingsMutationLock(rootPath, settingsPath, async () => {
+  await withClaudeSettingsMutationLock(rootPath, settingsPath, async (recoveryJournalPath) => {
   let settings: ClaudeHookSettings;
   let expectedIdentity: Awaited<ReturnType<typeof readClaudeSettingsSnapshot>>['expectedIdentity'];
+  let expectedContent: string | undefined;
   try {
     const snapshot = await readClaudeSettingsSnapshot(rootPath, settingsPath);
     settings = snapshot.settings;
     expectedIdentity = snapshot.expectedIdentity;
+    expectedContent = snapshot.expectedContent;
   }
   catch (e) { logger.error((e as Error).message); return false; }
   const hooks = settings.hooks?.PreToolUse ?? [];
@@ -757,6 +907,8 @@ export async function installPanicCheckHook(rootPath: string, format: string = '
     await confinedAtomicWriteFile(rootPath, settingsPath, JSON.stringify(settings, null, 2) + '\n', {
       preserveMode: true,
       expectedIdentity,
+      expectedContent,
+      recoveryJournalPath,
     });
     logger.success(`panic-check PreToolUse hook updated to format: ${format}`);
     return true;
@@ -766,6 +918,8 @@ export async function installPanicCheckHook(rootPath: string, format: string = '
   await confinedAtomicWriteFile(rootPath, settingsPath, JSON.stringify(settings, null, 2) + '\n', {
     preserveMode: true,
     expectedIdentity,
+    expectedContent,
+    recoveryJournalPath,
   });
   logger.success(`panic-check PreToolUse hook added to .claude/settings.json (format: ${format})`);
   return true;
@@ -774,15 +928,17 @@ export async function installPanicCheckHook(rootPath: string, format: string = '
 
 /** Install `openlore gryph-watch` as a UserPromptSubmit hook (idempotent). */
 export async function installGryphWatchHook(rootPath: string): Promise<void> {
-  const settingsPath = await verifiedCheckEditSettingsPath(rootPath, true);
+  const settingsPath = await verifiedProjectSettingsPath(rootPath, true);
   if (!settingsPath) return;
-  await withClaudeSettingsMutationLock(rootPath, settingsPath, async () => {
+  await withClaudeSettingsMutationLock(rootPath, settingsPath, async (recoveryJournalPath) => {
   let settings: ClaudeHookSettings;
   let expectedIdentity: Awaited<ReturnType<typeof readClaudeSettingsSnapshot>>['expectedIdentity'];
+  let expectedContent: string | undefined;
   try {
     const snapshot = await readClaudeSettingsSnapshot(rootPath, settingsPath);
     settings = snapshot.settings;
     expectedIdentity = snapshot.expectedIdentity;
+    expectedContent = snapshot.expectedContent;
   }
   catch (e) { logger.error((e as Error).message); return false; }
   const hooks = settings.hooks?.UserPromptSubmit ?? [];
@@ -800,6 +956,8 @@ export async function installGryphWatchHook(rootPath: string): Promise<void> {
   await confinedAtomicWriteFile(rootPath, settingsPath, JSON.stringify(settings, null, 2) + '\n', {
     preserveMode: true,
     expectedIdentity,
+    expectedContent,
+    recoveryJournalPath,
   });
   logger.success('gryph-watch UserPromptSubmit hook added to .claude/settings.json');
   return true;
@@ -809,16 +967,18 @@ export async function installGryphWatchHook(rootPath: string): Promise<void> {
 /** Remove the opt-in panic-check + gryph-watch hooks (idempotent — the inverse of
  *  `setup --hooks <format>`). Only strips openlore-marked entries; leaves user hooks. */
 export async function uninstallPanicHooks(rootPath: string): Promise<void> {
-  const settingsPath = await verifiedCheckEditSettingsPath(rootPath, false);
+  const settingsPath = await verifiedProjectSettingsPath(rootPath, false);
   if (!settingsPath) return;
   if (!(await fileExists(settingsPath))) return;
-  await withClaudeSettingsMutationLock(rootPath, settingsPath, async () => {
+  await withClaudeSettingsMutationLock(rootPath, settingsPath, async (recoveryJournalPath) => {
   let settings: ClaudeHookSettings;
   let expectedIdentity: Awaited<ReturnType<typeof readClaudeSettingsSnapshot>>['expectedIdentity'];
+  let expectedContent: string | undefined;
   try {
     const snapshot = await readClaudeSettingsSnapshot(rootPath, settingsPath);
     settings = snapshot.settings;
     expectedIdentity = snapshot.expectedIdentity;
+    expectedContent = snapshot.expectedContent;
   }
   catch (e) { logger.error((e as Error).message); return false; }
 
@@ -842,6 +1002,8 @@ export async function uninstallPanicHooks(rootPath: string): Promise<void> {
   await confinedAtomicWriteFile(rootPath, settingsPath, JSON.stringify(settings, null, 2) + '\n', {
     preserveMode: true,
     expectedIdentity,
+    expectedContent,
+    recoveryJournalPath,
   });
   logger.success('Removed openlore panic hooks (panic-check + gryph-watch) from .claude/settings.json');
   return true;
@@ -915,7 +1077,7 @@ export const setupCommand = new Command('setup')
   .option('--global', 'For the pi target: install the extension to ~/.pi/agent/extensions/ instead of the project', false)
   .option('--hooks <format>', 'Install the opt-in panic-check + gryph-watch hooks for the given agent format: claude|kilo|codex (use "none" to remove them)')
   .option('--check-edit-hook <mode>', 'Install the read-only per-edit verdict hook: claude|none')
-  .option('--agent-enforcement-hook <mode>', 'Install the opt-in agent enforcement Stop hook: claude|none')
+  .option('--agent-enforcement-hook <mode>', 'Install the opt-in agent enforcement Stop hook: claude|codex|all|none')
   .option('--panic <mode>', 'Set panic response mode in .openlore/config.json: off|observe|advisory|experimental_blocking')
   .option('--acknowledge-unvalidated', 'Activate an interventional panic mode even though the accuracy gate has not CLEARED (recorded)', false)
   .action(async (options: { tools?: string; force: boolean; dir: string; global: boolean; hooks?: string; checkEditHook?: string; agentEnforcementHook?: string; panic?: string; acknowledgeUnvalidated: boolean }) => {
@@ -954,16 +1116,27 @@ export const setupCommand = new Command('setup')
       if (!options.tools && !options.hooks && !options.agentEnforcementHook && options.panic === undefined) return;
     }
     if (options.agentEnforcementHook) {
-      const ok = options.agentEnforcementHook === 'none' || options.agentEnforcementHook === 'off'
-        ? await uninstallAgentEnforcementHook(projectRoot)
-        : options.agentEnforcementHook === 'claude'
-          ? await installAgentEnforcementHook(projectRoot)
-          : false;
+      let ok = false;
+      if (options.agentEnforcementHook === 'none' || options.agentEnforcementHook === 'off') {
+        const claudeOk = await uninstallAgentEnforcementHook(projectRoot);
+        const codexOk = await uninstallCodexAgentEnforcementHook(projectRoot);
+        ok = claudeOk && codexOk;
+      } else if (options.agentEnforcementHook === 'claude') {
+        ok = await installAgentEnforcementHook(projectRoot);
+      } else if (options.agentEnforcementHook === 'codex') {
+        ok = await installCodexAgentEnforcementHook(projectRoot);
+      } else if (options.agentEnforcementHook === 'all') {
+        const claudeOk = await installAgentEnforcementHook(projectRoot);
+        const codexOk = await installCodexAgentEnforcementHook(projectRoot);
+        ok = claudeOk && codexOk;
+      }
       if (!ok) {
         if (options.agentEnforcementHook !== 'claude'
+            && options.agentEnforcementHook !== 'codex'
+            && options.agentEnforcementHook !== 'all'
             && options.agentEnforcementHook !== 'none'
             && options.agentEnforcementHook !== 'off') {
-          logger.error(`Unknown agent-enforcement-hook mode "${options.agentEnforcementHook}". Valid: claude, none`);
+          logger.error(`Unknown agent-enforcement-hook mode "${options.agentEnforcementHook}". Valid: claude, codex, all, none`);
         }
         process.exitCode = 1;
         return;
@@ -971,7 +1144,7 @@ export const setupCommand = new Command('setup')
       if (!options.tools && !options.hooks && !options.checkEditHook && options.panic === undefined) return;
     }
     // If only panic flags were requested (no skill install), we're done — don't prompt.
-    if (!options.tools && (options.hooks || options.checkEditHook || options.agentEnforcementHook || options.panic !== undefined) && !process.stdout.isTTY) {
+    if (!options.tools && (options.hooks || options.checkEditHook || options.agentEnforcementHook || options.panic !== undefined)) {
       return;
     }
     const allTools: ToolName[] = ['vibe', 'cline', 'gsd', 'bmad', 'claude', 'opencode', 'omoa', 'pi'];

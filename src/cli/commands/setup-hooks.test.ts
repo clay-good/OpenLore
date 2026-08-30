@@ -7,7 +7,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { installPanicCheckHook, installGryphWatchHook, uninstallPanicHooks, installCheckEditHook, uninstallCheckEditHook, installAgentEnforcementHook, uninstallAgentEnforcementHook, panicCheckHookCommand, evaluatePanicActivation, PANIC_DISABLED_SENTINEL } from './setup.js';
+import { installPanicCheckHook, installGryphWatchHook, uninstallPanicHooks, installCheckEditHook, uninstallCheckEditHook, installAgentEnforcementHook, uninstallAgentEnforcementHook, installCodexAgentEnforcementHook, uninstallCodexAgentEnforcementHook, panicCheckHookCommand, evaluatePanicActivation, PANIC_DISABLED_SENTINEL } from './setup.js';
 import { validatePanicSignal } from '../../core/services/mcp-handlers/panic-validation.js';
 import type { PanicTelemetryEvent } from '../../core/services/mcp-handlers/panic-validation.js';
 import { PANIC_GATE } from '../../core/services/mcp-handlers/panic-validation.js';
@@ -70,6 +70,42 @@ describe('agent enforcement Stop hook lifecycle', () => {
     expect(hooks?.PostToolUse).toHaveLength(1);
     expect(hooks?.PreToolUse).toHaveLength(1);
     expect(hooks?.UserPromptSubmit).toHaveLength(1);
+  });
+
+  it('installs and uninstalls the Codex Stop hook without disturbing user handlers', async () => {
+    await mkdir(join(dir, '.codex'), { recursive: true });
+    const path = join(dir, '.codex', 'hooks.json');
+    await writeFile(path, JSON.stringify({
+      description: 'user hooks',
+      hooks: { Stop: [{ hooks: [{ type: 'command', command: 'my-stop-hook' }] }] },
+    }), 'utf-8');
+
+    expect(await installCodexAgentEnforcementHook(dir)).toBe(true);
+    expect(await installCodexAgentEnforcementHook(dir)).toBe(true);
+    const installed = JSON.parse(await readFile(path, 'utf-8')) as {
+      description?: string;
+      hooks?: { Stop?: Array<{ hooks?: Array<{ command?: string }> }> };
+    };
+    expect(installed.description).toBe('user hooks');
+    expect(installed.hooks?.Stop?.flatMap(group => group.hooks ?? [])
+      .filter(handler => handler.command === 'openlore enforce --agent-hook')).toHaveLength(1);
+    expect(installed.hooks?.Stop?.flatMap(group => group.hooks ?? [])
+      .some(handler => handler.command === 'my-stop-hook')).toBe(true);
+
+    expect(await uninstallCodexAgentEnforcementHook(dir)).toBe(true);
+    const uninstalled = JSON.parse(await readFile(path, 'utf-8')) as {
+      hooks?: { Stop?: Array<{ hooks?: Array<{ command?: string }> }> };
+    };
+    expect(uninstalled.hooks?.Stop?.flatMap(group => group.hooks ?? []))
+      .toEqual([{ type: 'command', command: 'my-stop-hook' }]);
+  });
+
+  it('refuses corrupt Codex hooks without changing their bytes', async () => {
+    await mkdir(join(dir, '.codex'), { recursive: true });
+    const path = join(dir, '.codex', 'hooks.json');
+    await writeFile(path, '{broken', 'utf-8');
+    expect(await installCodexAgentEnforcementHook(dir)).toBe(false);
+    expect(await readFile(path, 'utf-8')).toBe('{broken');
   });
 
   it('refuses corrupt settings without changing their bytes', async () => {
