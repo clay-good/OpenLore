@@ -198,6 +198,8 @@ interface RecalledMemory {
    * (fix-transitive-incremental-staleness).
    */
   staleRegion?: boolean;
+  /** Structural context for a pure stale-region downgrade. */
+  staleRegionComposition?: import('../../../types/index.js').StaleRegionComposition;
   anchors: ReturnType<typeof summarizeVerdict>[];
   recordedAt?: string;
   /** Why this memory ranked where it did (set only when a task was given). */
@@ -335,6 +337,9 @@ export async function handleRecall(
           ...(invalidated ? { invalidated: true } : {}),
           verify: f.freshness === 'drifted' || staleRefs.length > 0 ? true : undefined,
           ...(isStaleRegionOnly(f.verdicts) ? { staleRegion: true } : {}),
+          ...(f.verdicts.find(v => v.staleRegionComposition)?.staleRegionComposition
+            ? { staleRegionComposition: f.verdicts.find(v => v.staleRegionComposition)!.staleRegionComposition }
+            : {}),
           anchors: f.verdicts.map(summarizeVerdict),
           recordedAt: m.recordedAt,
           match: hasQuery ? { fields: r.matched, anchorBoost: r.anchorBoost } : undefined,
@@ -367,6 +372,9 @@ export async function handleRecall(
             anchored: f.anchored,
             verify: f.freshness === 'drifted' ? true : undefined,
             ...(isStaleRegionOnly(f.verdicts) ? { staleRegion: true } : {}),
+            ...(f.verdicts.find(v => v.staleRegionComposition)?.staleRegionComposition
+              ? { staleRegionComposition: f.verdicts.find(v => v.staleRegionComposition)!.staleRegionComposition }
+              : {}),
             anchors: f.verdicts.map(summarizeVerdict),
             recordedAt: d.recordedAt,
             match: hasQuery ? { fields: r.matched, anchorBoost: r.anchorBoost } : undefined,
@@ -591,6 +599,7 @@ function summarizeVerdict(v: AnchorVerdict): {
   freshness: 'fresh' | 'drifted' | 'orphaned';
   relocatedTo?: string;
   staleRegion?: boolean;
+  staleRegionComposition?: import('../../../types/index.js').StaleRegionComposition;
   carriedAcross?: StructuralAnchor['carriedAcross'];
   possiblyMovedTo?: string[];
 } {
@@ -601,6 +610,7 @@ function summarizeVerdict(v: AnchorVerdict): {
     // Distinguishes "drifted because its topology wasn't recomputed yet" from
     // "drifted because the code changed" (fix-transitive-incremental-staleness).
     ...(v.staleRegion ? { staleRegion: true } : {}),
+    ...(v.staleRegionComposition ? { staleRegionComposition: v.staleRegionComposition } : {}),
     // This anchor was carried across a rename/move; recall surfaces the provenance
     // so the agent sees the fact survived a refactor (add-symbol-identity-continuity).
     ...(v.anchor.carriedAcross ? { carriedAcross: v.anchor.carriedAcross } : {}),

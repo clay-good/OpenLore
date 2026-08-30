@@ -51,6 +51,20 @@ describe('McpWatcher graph-rebuild trigger', () => {
     expect(fired).toEqual(['stale-region']);
   });
 
+  it('a later trigger lengthens rather than shortens the armed rebuild window', () => {
+    vi.useFakeTimers();
+    const fired: GraphStaleReason[] = [];
+    const w = new McpWatcher({ rootPath: freshDir(), onGraphStale: (r) => fired.push(r) });
+
+    w._triggerGraphStaleForTesting('head-change');
+    vi.advanceTimersByTime(1_000);
+    w._triggerGraphStaleForTesting('stale-region');
+    vi.advanceTimersByTime(600);
+    expect(fired).toEqual([]);
+    vi.advanceTimersByTime(900);
+    expect(fired).toEqual(['head-change']);
+  });
+
   it('fires again for a later, separate trigger (repeatable across the session)', () => {
     vi.useFakeTimers();
     const fired: GraphStaleReason[] = [];

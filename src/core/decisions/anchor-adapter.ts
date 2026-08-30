@@ -120,6 +120,8 @@ export function makeFreshnessView(
       return node ? store.isFileStale(node.filePath) : false;
     },
     fileInStaleRegion: (filePath: string): boolean => store.isFileStale(filePath),
+    staleRegionComposition: (filePath: string) =>
+      store.isFileStale(filePath) ? store.getStaleRegionComposition() : undefined,
     renameOf,
   };
 }

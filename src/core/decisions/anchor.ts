@@ -21,6 +21,7 @@ import type {
   AnchorVerdict,
   MemoryFreshness,
   PendingDecision,
+  StaleRegionComposition,
 } from '../../types/index.js';
 
 /** Stable, reproducible hash of a source span (or whole file). Unnormalized. */
@@ -86,6 +87,8 @@ export interface GraphFreshnessView {
    * no `nodeId` (fix-transitive-incremental-staleness).
    */
   fileInStaleRegion?(filePath: string): boolean;
+  /** Persisted structural context for a stale file's region. */
+  staleRegionComposition?(filePath: string): StaleRegionComposition | undefined;
 }
 
 /**
@@ -149,7 +152,12 @@ export function anchorFreshness(
       // to `drifted` so it is never served as authoritative
       // (fix-transitive-incremental-staleness, FreshnessVerdictsHonorTheStaleRegion).
       if (current === anchor.contentHash && view.inStaleRegion?.(anchor.nodeId)) {
-        return { anchor, freshness: 'drifted', staleRegion: true };
+        return {
+          anchor,
+          freshness: 'drifted',
+          staleRegion: true,
+          staleRegionComposition: view.staleRegionComposition?.(anchor.filePath),
+        };
       }
       return { anchor, freshness: current === anchor.contentHash ? 'fresh' : 'drifted' };
     }
@@ -185,11 +193,21 @@ export function anchorFreshness(
   const stale = view.fileInStaleRegion?.(anchor.filePath) ?? false;
   // A truly legacy anchor has no baseline hash — existence is all we can prove.
   if (anchor.contentHash === undefined) {
-    return stale ? { anchor, freshness: 'drifted', staleRegion: true } : { anchor, freshness: 'fresh' };
+    return stale ? {
+      anchor,
+      freshness: 'drifted',
+      staleRegion: true,
+      staleRegionComposition: view.staleRegionComposition?.(anchor.filePath),
+    } : { anchor, freshness: 'fresh' };
   }
   const current = view.fileHash(anchor.filePath);
   if (current === anchor.contentHash) {
-    return stale ? { anchor, freshness: 'drifted', staleRegion: true } : { anchor, freshness: 'fresh' };
+    return stale ? {
+      anchor,
+      freshness: 'drifted',
+      staleRegion: true,
+      staleRegionComposition: view.staleRegionComposition?.(anchor.filePath),
+    } : { anchor, freshness: 'fresh' };
   }
   return { anchor, freshness: 'drifted' };
 }

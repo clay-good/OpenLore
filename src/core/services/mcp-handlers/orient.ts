@@ -474,6 +474,7 @@ export async function handleOrient(
      * fix-transitive-incremental-staleness).
      */
     staleRegion?: boolean;
+    staleRegionComposition?: import('../../../types/index.js').StaleRegionComposition;
   }
   let pendingDecisions: DecisionSummary[] | undefined;
   // Decisions whose code anchors are gone — surfaced separately, NEVER as
@@ -536,7 +537,10 @@ export async function handleOrient(
           if (f.freshness === 'drifted') base.verify = true;
           // Label a pure stale-region downgrade honestly (not "the code changed"),
           // consistent with recall (fix-transitive-incremental-staleness).
-          if (isStaleRegionOnly(f.verdicts)) base.staleRegion = true;
+          if (isStaleRegionOnly(f.verdicts)) {
+            base.staleRegion = true;
+            base.staleRegionComposition = f.verdicts.find(v => v.staleRegionComposition)?.staleRegionComposition;
+          }
           if (f.freshness === 'orphaned') { stale.push(base); continue; }
           contradictionItems.push({ id: d.id, anchors, freshness: f.freshness });
         }

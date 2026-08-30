@@ -52,6 +52,12 @@ import {
   type ScriptContainerFileRecord,
 } from '../analyzer/sfc-script-extractor.js';
 import { isTestFile } from '../analyzer/test-file.js';
+import {
+  combineStaleFileCompositions,
+  composeStaleFiles,
+  formatStaleRegionComposition,
+  spendClosureBudget,
+} from '../analyzer/incremental-closure.js';
 import { EdgeStore } from './edge-store.js';
 import { refreshAttestationCounts } from '../analyzer/index-attestation.js';
 import { primeContextCache, type CachedContext } from './mcp-handlers/utils.js';
@@ -67,6 +73,7 @@ import {
   MAX_EDIT_VERDICT_BASIS_TOTAL_BYTES,
 } from './edit-verdict.js';
 import { readFileConfined } from '../../utils/path-confinement.js';
+import { sanitizeForTerminal } from '../../utils/misc.js';
 import {
   OPENLORE_DIR,
   OPENLORE_ANALYSIS_SUBDIR,
@@ -291,6 +298,7 @@ export class McpWatcher {
   // ── Graph-rebuild trigger (make-index-self-healing) ────────────────────────
   private graphStaleTimer?: ReturnType<typeof setTimeout>;
   private graphStalePendingReason?: GraphStaleReason;
+  private graphStaleDeadline?: number;
   private graphRebuildRunning = false;   // singleflight for the self-spawned rebuild
   private graphRebuildPending = false;   // a trigger arrived mid-rebuild → run once more
   private rebuildChildren = new Set<ReturnType<typeof spawn>>();
@@ -465,6 +473,7 @@ export class McpWatcher {
     if (this.embedTimer) clearTimeout(this.embedTimer);
     if (this.graphStaleTimer) clearTimeout(this.graphStaleTimer);
     this.debounceTimer = this.maxBatchTimer = this.embedTimer = this.graphStaleTimer = undefined;
+    this.graphStaleDeadline = undefined;
     // Close event sources before joining the active flush. Once close resolves,
     // the stopping guard below makes the pending sets a finite shutdown queue.
     await this.fsWatcher?.close();
@@ -876,8 +885,10 @@ export class McpWatcher {
           // the files whose edges point INTO this one — bounded by the work budget.
           const directCallers = (directCallersByFile.get(f.rel) ?? [])
             .filter(caller => directCallerOwner.get(caller) === itemIndex);
-          let recompute = directCallers.slice(0, this.closureBudget);
-          let dropped = directCallers.slice(this.closureBudget);
+          const directBudget = spendClosureBudget(directCallers, this.closureBudget, resolutionNodes);
+          let recompute = directBudget.selected;
+          let dropped = directBudget.dropped;
+          let usedPathFallback = directBudget.usedPathFallback;
 
           // Re-parse the changed file + the callers we can afford, as ONE build so
           // cross-file calls resolve against each other (not to `external::`).
@@ -923,9 +934,10 @@ export class McpWatcher {
             }
             if (extra.size > 0) {
               const room = Math.max(0, this.closureBudget - recompute.length);
-              const extraList = [...extra];
-              const take = extraList.slice(0, room);
-              dropped = dropped.concat(extraList.slice(room));
+              const extraBudget = spendClosureBudget([...extra], room, resolutionNodes);
+              usedPathFallback ||= extraBudget.usedPathFallback;
+              const take = extraBudget.selected;
+              dropped = dropped.concat(extraBudget.dropped);
               if (take.length > 0) {
                 recompute = [...recompute, ...take];
                 sub = await buildGraphSubset(f.rel, f.content, recompute, this.rootPath, resolutionNodes);
@@ -960,7 +972,7 @@ export class McpWatcher {
             store.clearFilesStale([f.rel, ...recomputed]);
             const staleNow = skipped.length > 0 ? [...dropped, ...skipped] : dropped;
             if (staleNow.length > 0) {
-              store.markFilesStale(staleNow);
+              store.markFilesStale(staleNow, Date.now(), composeStaleFiles(staleNow, resolutionNodes));
               // The incremental closure hit its work budget and left files explicitly
               // stale. Rather than let that region grow unbounded until a manual
               // analyze, schedule the debounced full rebuild (make-index-self-healing).
@@ -986,11 +998,15 @@ export class McpWatcher {
           changedFiles.push(f);
           for (const n of newNodes) changedNodes.push(n);
           if (this.debug) {
-            const staleCount = dropped.length + skipped.length;
+            const staleNow = skipped.length > 0 ? [...dropped, ...skipped] : dropped;
+            const staleComposition = combineStaleFileCompositions(
+              [...composeStaleFiles(staleNow, resolutionNodes).values()],
+              staleNow.length,
+            );
             process.stderr.write(
-              `[mcp-watcher] graph: ${f.rel} (+${newNodes.length} nodes, +${newEdges.length} edges, ` +
+              `[mcp-watcher] graph: ${sanitizeForTerminal(f.rel)} (+${newNodes.length} nodes, +${newEdges.length} edges, ` +
               `${recomputed.length} re-resolved` +
-              `${staleCount ? `, ${staleCount} → stale${skipped.length ? ` (${skipped.length} unreadable)` : ''}` : ''})\n`,
+              `${staleNow.length ? `, ${formatStaleRegionComposition(staleComposition)} → stale${usedPathFallback ? ', stable-path fallback' : ''}${skipped.length ? ` (${skipped.length} unreadable)` : ''}` : ''})\n`,
             );
           }
         }
@@ -1265,17 +1281,24 @@ export class McpWatcher {
     // Keep the first reason of a coalesced burst — HEAD-change is the more
     // salient cause when both fire together, and it arrives first on a switch.
     if (this.graphStalePendingReason === undefined) this.graphStalePendingReason = reason;
+    const candidateDeadline = Date.now() + GRAPH_STALE_DEBOUNCE_MS;
+    // Coalescing may lengthen an armed settle window, never shorten it. Keeping
+    // the absolute deadline explicit preserves that invariant if a future stale
+    // composition selects a longer delay.
+    const deadline = Math.max(this.graphStaleDeadline ?? 0, candidateDeadline);
     if (this.graphStaleTimer) clearTimeout(this.graphStaleTimer);
+    this.graphStaleDeadline = deadline;
     this.graphStaleTimer = setTimeout(() => {
       const r = this.graphStalePendingReason ?? reason;
       this.graphStalePendingReason = undefined;
       this.graphStaleTimer = undefined;
+      this.graphStaleDeadline = undefined;
       if (this.onGraphStale) {
         try { this.onGraphStale(r); } catch { /* host lane is best-effort */ }
       } else {
         this.spawnGraphRebuild(r);
       }
-    }, GRAPH_STALE_DEBOUNCE_MS);
+    }, Math.max(0, deadline - Date.now()));
     this.graphStaleTimer.unref?.();
     return true;
   }

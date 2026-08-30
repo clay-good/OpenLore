@@ -63,6 +63,45 @@ describe('EdgeStore', () => {
       const consumers = store.getNameOnlyConsumers('foo');
       expect(consumers).toEqual([{ file: 'src/c.ts', calleeId: 'src/a.ts::foo' }]);
     });
+
+    it('persists composition with stale marks and removes each healed contribution', () => {
+      store.markFilesStale(['src/a.ts', 'src/b.ts'], Date.now(), new Map([
+        ['src/a.ts', {
+          symbolCount: 2,
+          hubCount: 1,
+          chokepointCount: 1,
+          topSymbol: { id: 'src/a.ts::hub', name: 'hub', filePath: 'src/a.ts', fanIn: 8, fanOut: 2 },
+        }],
+        ['src/b.ts', {
+          symbolCount: 1,
+          hubCount: 0,
+          chokepointCount: 0,
+          topSymbol: { id: 'src/b.ts::leaf', name: 'leaf', filePath: 'src/b.ts', fanIn: 1, fanOut: 0 },
+        }],
+      ]));
+      expect(store.getStaleRegionComposition()).toMatchObject({
+        fileCount: 2,
+        symbolCount: 3,
+        hubCount: 1,
+        chokepointCount: 1,
+        topSymbol: { name: 'hub' },
+      });
+
+      store.clearFilesStale(['src/a.ts']);
+      expect(store.getStaleRegionComposition()).toMatchObject({
+        fileCount: 1,
+        symbolCount: 1,
+        hubCount: 0,
+        topSymbol: { name: 'leaf' },
+      });
+      store.clearAll();
+      expect(store.getStaleRegionComposition()).toEqual({
+        fileCount: 0,
+        symbolCount: 0,
+        hubCount: 0,
+        chokepointCount: 0,
+      });
+    });
   });
 
   /** Write a store at an old SCHEMA_VERSION with one node — a pre-upgrade index. */

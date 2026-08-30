@@ -31,7 +31,7 @@ validate`**, and the archive machinery works again. This pass:
   because their requirements were already synced verbatim (`fix-pi-parity-drift`,
   `fix-redaction-module-gaps`).
 
-## Complete — 147 in `archive/`
+## Complete — 148 in `archive/`
 
 Everything in `openspec/changes/archive/` is shipped (or a settled won't-do), with its
 requirements reflected in the main specs. `openspec list` shows only open work.
@@ -41,7 +41,7 @@ requirements reflected in the main specs. `openspec list` shows only open work.
 No open change has partial code on `main`. A change belongs here the moment its implementation
 starts; move it back out (archive it) the moment its marker/spec evidence lands.
 
-## To build — 108
+## To build — 107
 
 The whole open set is unbuilt backlog. Newest additions: 7 proposals from the 2026-07-27
 first-run e2e (`E2E-FIRSTRUN-2026-07-27.md`). Other thematic indexes:
@@ -166,7 +166,6 @@ trust boundary for served content.
 | `harden-view-server-file-confinement` | The view server's file access is lexical-only — a symlink in a cloned repo escapes the project root; and it serves arbitrarily stale analysis as current |
 | `optimize-incremental-and-coldstart-scale` | A branch switch grinds through the per-file incremental pipeline with no bulk fallback, reloading the full node table once per changed file |
 | `optimize-serving-hot-path-caches` | The default tools rebuild derived graph structures and re-parse multi-MB artifacts on every call, and re-scan the whole corpus per keyword search |
-| `prioritize-incremental-closure-budget` | significance-ordered convergence, and a stale region that says how much it costs you |
 | `promote-backed-language-visibility` | the generated matrix discloses its scope, the docs get one canonical page |
 | `refine-first-run-partial-serving` | minutes of "no index found" before the first answer |
 | `refine-orient-context-budgeting` | exact-fit payloads, cold-start breadth, seed-conditioned shaping |

@@ -9,6 +9,12 @@ import type { FileChangeCoupling, CoupledFile, ChangeCouplingResult } from '../p
 import type { DecisionStatus } from '../../types/index.js';
 import { ARTIFACT_CALL_GRAPH_DB } from '../../constants.js';
 import { quarantineCorruptSync } from '../decisions/atomic-store.js';
+import {
+  combineStaleFileCompositions,
+  type StaleFileComposition,
+  type StaleRegionComposition,
+  type StaleRegionSymbol,
+} from '../analyzer/incremental-closure.js';
 
 /**
  * Why a just-opened graph store cannot be trusted to answer a read (change:
@@ -141,7 +147,7 @@ async function runTransactionAsync<T>(db: DatabaseSync, fn: () => Promise<T>): P
 }
 
 /** Bump when schema changes. Old DBs are dropped and rebuilt on next analyze --force. */
-export const SCHEMA_VERSION = 10;
+export const SCHEMA_VERSION = 11;
 
 export class EdgeStore {
   /**
@@ -220,6 +226,7 @@ export class EdgeStore {
         DROP TABLE IF EXISTS change_coupling;
         DROP TABLE IF EXISTS cfg_overlay;
         DROP TABLE IF EXISTS stale_files;
+        DROP TABLE IF EXISTS stale_file_composition;
         DROP TABLE IF EXISTS schema_version;
         CREATE TABLE schema_version (version INTEGER NOT NULL);
       `);
@@ -394,6 +401,18 @@ export class EdgeStore {
       CREATE TABLE IF NOT EXISTS stale_files (
         file_path  TEXT PRIMARY KEY,
         marked_at  INTEGER NOT NULL
+      );
+
+      -- Per-file structural receipt for the stale region. One row per stale
+      -- file lets self-healing DELETE the file and its contribution together
+      -- instead of leaving a stale aggregate behind. The schema-version bump
+      -- rebuilds older stores before a watcher can write this receipt.
+      CREATE TABLE IF NOT EXISTS stale_file_composition (
+        file_path        TEXT PRIMARY KEY,
+        symbol_count     INTEGER NOT NULL,
+        hub_count        INTEGER NOT NULL,
+        chokepoint_count INTEGER NOT NULL,
+        top_symbol       TEXT
       );
     `);
 
@@ -1186,11 +1205,32 @@ export class EdgeStore {
    * budget-exceeded incremental update. Idempotent (re-marking refreshes the
    * timestamp). Sound over-approximation: it is always safe to mark more.
    */
-  markFilesStale(files: readonly string[], at: number = Date.now()): void {
+  markFilesStale(
+    files: readonly string[],
+    at: number = Date.now(),
+    composition?: ReadonlyMap<string, StaleFileComposition>,
+  ): void {
     if (files.length === 0) return;
     const stmt = this.db.prepare('INSERT OR REPLACE INTO stale_files (file_path, marked_at) VALUES (?, ?)');
+    const compositionStmt = this.db.prepare(`
+      INSERT OR REPLACE INTO stale_file_composition
+        (file_path, symbol_count, hub_count, chokepoint_count, top_symbol)
+      VALUES (?, ?, ?, ?, ?)
+    `);
     runTransaction(this.db, () => {
-      for (const f of files) stmt.run(f, at);
+      for (const f of files) {
+        stmt.run(f, at);
+        const receipt = composition?.get(f);
+        if (receipt) {
+          compositionStmt.run(
+            f,
+            receipt.symbolCount,
+            receipt.hubCount,
+            receipt.chokepointCount,
+            receipt.topSymbol ? JSON.stringify(receipt.topSymbol) : null,
+          );
+        }
+      }
     });
   }
 
@@ -1201,8 +1241,12 @@ export class EdgeStore {
   clearFilesStale(files: readonly string[]): void {
     if (files.length === 0) return;
     const stmt = this.db.prepare('DELETE FROM stale_files WHERE file_path = ?');
+    const compositionStmt = this.db.prepare('DELETE FROM stale_file_composition WHERE file_path = ?');
     runTransaction(this.db, () => {
-      for (const f of files) stmt.run(f);
+      for (const f of files) {
+        stmt.run(f);
+        compositionStmt.run(f);
+      }
     });
   }
 
@@ -1224,6 +1268,40 @@ export class EdgeStore {
     return row.n;
   }
 
+  /** Structural composition persisted with the current stale-file receipt. */
+  getStaleRegionComposition(): StaleRegionComposition {
+    const fileCount = this.countStaleFiles();
+    try {
+      const rows = this.db.prepare(`
+        SELECT symbol_count, hub_count, chokepoint_count, top_symbol
+        FROM stale_file_composition
+        WHERE file_path IN (SELECT file_path FROM stale_files)
+      `).all() as unknown as Array<{
+        symbol_count: number;
+        hub_count: number;
+        chokepoint_count: number;
+        top_symbol: string | null;
+      }>;
+      const receipts: StaleFileComposition[] = rows.map(row => {
+        let topSymbol: StaleRegionSymbol | undefined;
+        if (row.top_symbol) {
+          try { topSymbol = JSON.parse(row.top_symbol) as StaleRegionSymbol; } catch { /* corrupt optional context stays absent */ }
+        }
+        return {
+          symbolCount: row.symbol_count,
+          hubCount: row.hub_count,
+          chokepointCount: row.chokepoint_count,
+          ...(topSymbol ? { topSymbol } : {}),
+        };
+      });
+      return combineStaleFileCompositions(receipts, fileCount);
+    } catch {
+      // Preserve the stale verdict with neutral context if an independently
+      // damaged store lost only this optional reporting table.
+      return combineStaleFileCompositions([], fileCount);
+    }
+  }
+
   /**
    * Drop all graph data — used by the full analyze rebuild.
    *
@@ -1236,7 +1314,7 @@ export class EdgeStore {
    * removes it with the index, and a SCHEMA_VERSION bump drops it with everything else.
    */
   clearAll(): void {
-    this.db.exec('DELETE FROM edges; DELETE FROM inheritance_edges; DELETE FROM nodes; DELETE FROM classes; DELETE FROM nodes_fts; DELETE FROM file_hashes; DELETE FROM decisions; DELETE FROM decision_edges; DELETE FROM provenance; DELETE FROM change_coupling; DELETE FROM cfg_overlay; DELETE FROM stale_files;');
+    this.db.exec('DELETE FROM edges; DELETE FROM inheritance_edges; DELETE FROM nodes; DELETE FROM classes; DELETE FROM nodes_fts; DELETE FROM file_hashes; DELETE FROM decisions; DELETE FROM decision_edges; DELETE FROM provenance; DELETE FROM change_coupling; DELETE FROM cfg_overlay; DELETE FROM stale_file_composition; DELETE FROM stale_files;');
   }
 
   /** Run fn inside a single SQLite transaction. */
