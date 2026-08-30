@@ -50,6 +50,12 @@ describe('agent enforcement Stop hook lifecycle', () => {
     ]);
   });
 
+  it('serializes concurrent installers without losing or duplicating entries', async () => {
+    const results = await Promise.all(Array.from({ length: 4 }, () => installAgentEnforcementHook(dir)));
+    expect(results).toEqual([true, true, true, true]);
+    expect((await readSettings(dir)).hooks?.Stop).toHaveLength(1);
+  });
+
   it('refuses corrupt settings without changing their bytes', async () => {
     await mkdir(join(dir, '.claude'), { recursive: true });
     const path = join(dir, '.claude', 'settings.json');

@@ -28,6 +28,7 @@ import { validatePanicSignal, readPanicTelemetry } from '../../core/services/mcp
 import type { PanicGateReport } from '../../core/services/mcp-handlers/panic-validation.js';
 import type { PanicResponseMode } from '../../types/index.js';
 import { atomicWriteFile } from '../../core/decisions/atomic-store.js';
+import { acquireLockAt, isLockHeld } from '../../core/runtime/advisory-lock.js';
 import { confinedAtomicWriteFile, readFileConfinedWithStat, safeJoin } from '../../utils/path-confinement.js';
 import { classifyPiFile, looksLikeOpenLoreExtension, renderPiShim } from '../install/pi-extension.js';
 
@@ -411,10 +412,38 @@ function isValidClaudeHookEntry(value: unknown): value is Record<string, unknown
     && nested.every(hook => hook !== null && typeof hook === 'object' && !Array.isArray(hook)));
 }
 
+async function withClaudeSettingsMutationLock(
+  settingsPath: string,
+  mutate: () => Promise<boolean>,
+): Promise<boolean> {
+  let lock: Awaited<ReturnType<typeof acquireLockAt>>;
+  try {
+    lock = await acquireLockAt(dirname(settingsPath), '.openlore-agent-enforcement.lock', {
+      maxWaitMs: 5_000,
+    });
+  } catch (error) {
+    logger.error(`${settingsPath} could not acquire its hook-settings lock — retry the setup. ${(error as Error).message}`);
+    return false;
+  }
+  if (isLockHeld(lock)) {
+    logger.error(`${settingsPath} is being updated by another OpenLore process — retry the hook setup.`);
+    return false;
+  }
+  try {
+    return await mutate();
+  } catch (error) {
+    logger.error(`${settingsPath} changed while hook settings were being updated — refusing to overwrite it. ${(error as Error).message}`);
+    return false;
+  } finally {
+    await lock.release();
+  }
+}
+
 /** Install the opt-in enforcement gate in Claude Code's Stop loop. */
 export async function installAgentEnforcementHook(rootPath: string): Promise<boolean> {
   const settingsPath = await verifiedCheckEditSettingsPath(rootPath, true);
   if (!settingsPath) return false;
+  return withClaudeSettingsMutationLock(settingsPath, async () => {
   let settings: ClaudeHookSettings;
   let expectedIdentity: Awaited<ReturnType<typeof readClaudeSettingsSnapshot>>['expectedIdentity'];
   try {
@@ -464,6 +493,7 @@ export async function installAgentEnforcementHook(rootPath: string): Promise<boo
   });
   logger.success('agent enforcement Stop hook added to .claude/settings.json');
   return true;
+  });
 }
 
 /** Remove only OpenLore's opt-in agent enforcement entry. */
@@ -471,6 +501,7 @@ export async function uninstallAgentEnforcementHook(rootPath: string): Promise<b
   const settingsPath = await verifiedCheckEditSettingsPath(rootPath, false);
   if (!settingsPath) return !(await fileExists(join(rootPath, '.claude')));
   if (!(await fileExists(settingsPath))) return true;
+  return withClaudeSettingsMutationLock(settingsPath, async () => {
   let settings: ClaudeHookSettings;
   let expectedIdentity: Awaited<ReturnType<typeof readClaudeSettingsSnapshot>>['expectedIdentity'];
   try {
@@ -495,6 +526,7 @@ export async function uninstallAgentEnforcementHook(rootPath: string): Promise<b
   });
   logger.success('Removed the agent enforcement Stop hook from .claude/settings.json');
   return true;
+  });
 }
 
 /** Install the read-only per-edit verdict consumer as a Claude Code PostToolUse hook. */
@@ -592,7 +624,12 @@ async function verifiedCheckEditSettingsPath(rootPath: string, createDirectory: 
     }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || !createDirectory) return undefined;
-    await mkdir(claudeDir);
+    await mkdir(claudeDir, { recursive: true });
+    const created = await lstat(claudeDir);
+    if (created.isSymbolicLink() || !created.isDirectory()) {
+      logger.error(`${claudeDir} is not a real in-repository directory — refusing to write hook settings.`);
+      return undefined;
+    }
   }
   let canonicalDir: string;
   try { canonicalDir = await realpath(claudeDir); }
