@@ -771,7 +771,7 @@ export const TOOL_DEFINITIONS = [
     description:
       'USE THIS BEFORE adding an import to check it against the repo\'s architecture rules, or to ' +
       'list current architecture violations. Opt-in and inert unless the repo declares rules in ' +
-      '.openlore/architecture.json (layers / forbidden / allowedOnly) or via an "Invariant:" marker ' +
+      '.openlore/architecture.json (layers / forbidden / allowedOnly / required / circular / reachable / orphan / moreUnstable) or via an "Invariant:" marker ' +
       'in a synced ADR. Pre-edit mode: pass {from, to} ("may a file under <from> import <to>?") for a ' +
       'deterministic allowed/denied + the governing rule + why, BEFORE you write the code. Scan mode: ' +
       'pass only {directory} for the full current-violations report. Cross-language, offline, ' +

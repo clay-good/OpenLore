@@ -246,7 +246,7 @@ Memory makes an agent fast. Governance makes it *safe*. As agents get more auton
 |---|---|---|
 | **`change_impact_certificate`** | Whether a diff **newly opens a path into a sensitive boundary you declared** — reachable *after* the change but not before — plus blast radius, drifted specs, and tests to run. | `openlore impact-certificate --base main` |
 | **`certify_public_surface`** | A breaking-change verdict per changed export, each break paired with the in-repo consumers it hits. What it can't prove safe is never called safe. | `openlore certify-public-surface --base main` |
-| **`check_architecture`** | "May a file under A import B?" against your declared layer / forbidden rules — a **pre-write** verdict, cross-language, instead of a post-hoc CI failure. | declare rules in `.openlore/architecture.json` |
+| **`check_architecture`** | "May a file under A import B?" plus required dependencies, cycles, reachability, orphans, and instability checks — deterministic and cross-language. | declare rules in `.openlore/architecture.json` |
 | **`verify_claim`** | A `confirmed / refuted / unverifiable` verdict **with a citation receipt** before an agent asserts "X is dead" or "decision `abc12345` still governs this." | MCP tool (`verify` preset) |
 | **`openlore enforce`** | One commit gate over **every** governance finding. Map each finding → `blocking / frozen / advisory / off`; `frozen` adopts existing debt but blocks new findings. | `openlore enforce --hook` |
 | **Epistemic Lease** | Tells the agent when its context has gone stale so a long session can't drift onto confident-but-wrong assumptions. **Facts, never commands.** | automatic on every MCP response |
@@ -369,7 +369,7 @@ Everything else (read a file, grep, list files) uses your native tools. Full ref
 - **`find_dead_code`** *(no key)* — cross-language mark-and-sweep, "what dies if I delete X?" Confidence-tagged candidates, never deletion authority. → [docs/reachability-dead-code.md](docs/reachability-dead-code.md)
 - **`change_impact_certificate`** *(no key)* — certifies whether a diff newly opens a path into a declared surface (differential reachability), plus blast radius and tests. CLI: `openlore impact-certificate`.
 - **`certify_public_surface`** *(no key, opt-in)* — breaking-change verdict per export, consumers named. Renamed exports detected via symbol-identity continuity. CLI: `openlore certify-public-surface`.
-- **`check_architecture`** *(no key)* — turns a layer rule into a pre-write verdict. Declare `layers` / `forbidden` in `.openlore/architecture.json`. → [docs/architecture-invariants.md](docs/architecture-invariants.md)
+- **`check_architecture`** *(no key)* — enforces author-declared layer, boundary, dependency, cycle, reachability, orphan, and instability rules. → [docs/architecture-invariants.md](docs/architecture-invariants.md)
 - **`verify_claim`** *(no key, opt-in)* — `confirmed / refuted / unverifiable` with a citation receipt, never an LLM guess.
 - **`openlore enforce`** *(no key, advisory)* — the unified gate over all governance findings; one `enforcement.policy` maps each finding → `blocking / frozen / advisory / off`. → [docs/configuration.md](docs/configuration.md#enforcement-policy)
 - **Decisions on the graph** *(API key for consolidation)* — `record_decision` before writing code; a pre-commit hook gates until reviewed. Decisions become `decision::` nodes joined to the files they govern, so `analyze_impact` returns them as neighbors.

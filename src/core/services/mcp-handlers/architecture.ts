@@ -10,7 +10,7 @@
  */
 
 import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import {
   OPENLORE_DIR,
   OPENLORE_ANALYSIS_SUBDIR,
@@ -24,6 +24,7 @@ import type { DependencyGraphResult } from '../../analyzer/dependency-graph.js';
 import { readOpenLoreConfig } from '../config-manager.js';
 import { assessStalenessForAnalysis } from './confidence-boundary.js';
 import type { DecisionConstraintState } from '../../decisions/constraint-ledger.js';
+import type { GovernanceFinding } from './enforcement-policy.js';
 
 const VIOLATION_REPORT_CAP = 200;
 
@@ -48,12 +49,23 @@ function describeRule(rule: ArchitectureRule): string {
       return `forbidden (${rule.source}): ${rule.from} ⇏ ${rule.to}${rule.reason ? ` — ${rule.reason}` : ''}`;
     case 'allowedOnly':
       return `allowedOnly (${rule.source}): ${rule.module} → [${rule.mayDependOn.join(', ')}]${rule.reason ? ` — ${rule.reason}` : ''}`;
+    case 'required':
+      return `required (${rule.source}): ${rule.from} → ${rule.to}${rule.reason ? ` — ${rule.reason}` : ''}`;
+    case 'circular':
+      return `circular (${rule.source}): ${rule.scope}${rule.allowed.length ? ` except [${rule.allowed.join(', ')}]` : ''}`;
+    case 'reachable':
+      return `reachable (${rule.source}): only ${rule.from} may reach ${rule.to}${rule.reason ? ` — ${rule.reason}` : ''}`;
+    case 'orphan':
+      return `orphan (${rule.source}): ${rule.scope}${rule.reason ? ` — ${rule.reason}` : ''}`;
+    case 'moreUnstable':
+      return `moreUnstable (${rule.source}): ${rule.scope}${rule.reason ? ` — ${rule.reason}` : ''}`;
   }
 }
 
 const INERT_NOTE =
   'No architecture rules declared. This guardrail is opt-in and inert: add a ' +
-  '.openlore/architecture.json (layers / forbidden / allowedOnly) or an "Invariant:" ' +
+  '.openlore/architecture.json (layers / forbidden / allowedOnly / required / circular / ' +
+  'reachable / orphan / moreUnstable) or an "Invariant:" ' +
   'marker in a synced ADR to enable it.';
 
 const ACTIVE_NOTE =
@@ -67,6 +79,46 @@ export interface CheckArchitectureArgs {
   from?: string;
   /** Pre-edit mode: the target file path or exported symbol being imported. */
   to?: string;
+}
+
+function confinedRepoPath(absDir: string, input: string): string | null {
+  const absolute = isAbsolute(input) ? resolve(input) : resolve(absDir, input);
+  const rel = relative(absDir, absolute).replace(/\\/g, '/');
+  return rel === '' || rel === '..' || rel.startsWith('../') || isAbsolute(rel) ? null : rel;
+}
+
+export const ARCHITECTURE_CODE_BY_KIND: Record<ArchitectureRule['kind'], string> = {
+  layers: 'architecture-layer-violation',
+  forbidden: 'architecture-forbidden-dependency',
+  allowedOnly: 'architecture-allowed-only-violation',
+  required: 'architecture-required-missing',
+  circular: 'architecture-cycle',
+  reachable: 'architecture-unreachable-breach',
+  orphan: 'architecture-orphan',
+  moreUnstable: 'architecture-instability-inversion',
+};
+
+export function architectureViolationFindings(
+  violations: ReturnType<typeof scanViolations>['violations'],
+): GovernanceFinding[] {
+  return violations.map(violation => ({
+    code: ARCHITECTURE_CODE_BY_KIND[violation.kind],
+    severity: 'warning',
+    source: 'architecture',
+    subject: violation.from === violation.to ? violation.from : `${violation.from} → ${violation.to}`,
+    message: `${violation.reason}${violation.confidence ? `; edge confidence: ${violation.confidence}` : ''}`,
+    discriminator: [violation.kind, violation.ruleId ?? '', violation.to, violation.path?.join('→') ?? ''].join('|'),
+    location: { path: violation.from },
+    ...(violation.decision && violation.ruleId ? {
+      decision: {
+        id: violation.decision.id,
+        title: violation.decision.title,
+        rationale: violation.decision.rationale,
+        ruleId: violation.ruleId,
+        servedContentMetadata: violation.decision.servedContentMetadata,
+      },
+    } : {}),
+  }));
 }
 
 export async function handleCheckArchitecture(args: CheckArchitectureArgs): Promise<unknown> {
@@ -100,6 +152,14 @@ export async function handleCheckArchitecture(args: CheckArchitectureArgs): Prom
 
   // ---- Pre-edit verdict mode ----
   if (preEdit) {
+    if (rules.assessmentComplete === false) {
+      return {
+        mode: 'pre-edit', rulesDeclared: rules.rules.length > 0, allowed: null,
+        reason: 'architecture config assessment incomplete — repair the malformed or unreadable config before relying on an allow verdict',
+        assessmentComplete: false,
+        warnings: rules.warnings,
+      };
+    }
     if (decisionConstraintError) {
       return {
         mode: 'pre-edit', rulesDeclared: rules.rules.length > 0, allowed: null,
@@ -135,7 +195,16 @@ export async function handleCheckArchitecture(args: CheckArchitectureArgs): Prom
           : { complete: true },
       };
     }
-    const verdict = canImport(args.from!, args.to!, rules, depGraph ?? undefined);
+    const from = confinedRepoPath(absDir, args.from!);
+    const toLooksLikePath = isAbsolute(args.to!) || args.to!.includes('/') || /\.[a-z]{1,5}$/i.test(args.to!);
+    const to = toLooksLikePath ? confinedRepoPath(absDir, args.to!) : args.to!;
+    if (!from || !to) {
+      return {
+        mode: 'pre-edit', rulesDeclared: true, allowed: null, assessmentComplete: false,
+        reason: 'pre-edit paths must remain within the repository root',
+      };
+    }
+    const verdict = canImport(from, to, rules, depGraph ?? undefined);
     return {
       mode: 'pre-edit',
       rulesDeclared: true,
@@ -163,6 +232,14 @@ export async function handleCheckArchitecture(args: CheckArchitectureArgs): Prom
   }
 
   // ---- Full scan mode ----
+  if (rules.assessmentComplete === false) {
+    return {
+      mode: 'scan', rulesDeclared: rules.rules.length > 0, assessmentComplete: false,
+      violationCount: null, violations: [], findings: [],
+      reason: 'architecture config assessment incomplete — malformed or unreadable rules prevent a clean scan',
+      warnings: rules.warnings,
+    };
+  }
   if (decisionConstraintError && rules.rules.length === 0) {
     return {
       mode: 'scan', rulesDeclared: false, assessmentComplete: false,
@@ -214,7 +291,7 @@ export async function handleCheckArchitecture(args: CheckArchitectureArgs): Prom
 
   const scan = scanViolations(depGraph, rules);
   const capped = scan.violations.slice(0, VIOLATION_REPORT_CAP);
-  const assessmentComplete = !decisionConstraintError && graphAssessmentComplete;
+  const assessmentComplete = !decisionConstraintError && graphAssessmentComplete && scan.assessmentComplete;
   return {
     mode: 'scan',
     rulesDeclared: true,
@@ -222,6 +299,7 @@ export async function handleCheckArchitecture(args: CheckArchitectureArgs): Prom
     ruleSummary: rules.rules.map(describeRule),
     violationCount: scan.violations.length,
     violations: capped,
+    findings: architectureViolationFindings(capped),
     truncated: scan.violations.length > capped.length
       ? `showing first ${capped.length} of ${scan.violations.length}`
       : undefined,

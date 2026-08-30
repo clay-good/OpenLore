@@ -103,7 +103,51 @@ export const CORPUS_INTENT_FINDING_CODES = [
   'corpus-delta-orphaned',
 ] as const;
 
+export const ARCHITECTURE_FINDING_CODES = [
+  'architecture-layer-violation',
+  'architecture-forbidden-dependency',
+  'architecture-allowed-only-violation',
+  'architecture-required-missing',
+  'architecture-cycle',
+  'architecture-unreachable-breach',
+  'architecture-orphan',
+  'architecture-instability-inversion',
+] as const;
+
 export const FINDING_CODE_REGISTRY: Record<string, FindingCodeSpec> = {
+  // ── author-declared architecture rules (widen-architecture-rule-vocabulary) ──
+  'architecture-layer-violation': {
+    defaultClass: 'advisory', source: 'architecture',
+    description: 'A dependency points upward through the declared architecture layers.',
+  },
+  'architecture-forbidden-dependency': {
+    defaultClass: 'advisory', source: 'architecture',
+    description: 'A dependency crosses a path boundary declared forbidden.',
+  },
+  'architecture-allowed-only-violation': {
+    defaultClass: 'advisory', source: 'architecture',
+    description: 'A module depends on a path outside its declared allowlist.',
+  },
+  'architecture-required-missing': {
+    defaultClass: 'advisory', source: 'architecture',
+    description: 'A matched module is missing a declared required dependency.',
+  },
+  'architecture-cycle': {
+    defaultClass: 'advisory', source: 'architecture',
+    description: 'Matched modules form a dependency cycle outside the declared exceptions.',
+  },
+  'architecture-unreachable-breach': {
+    defaultClass: 'advisory', source: 'architecture',
+    description: 'A file outside the permitted origin transitively reaches the protected target.',
+  },
+  'architecture-orphan': {
+    defaultClass: 'advisory', source: 'architecture',
+    description: 'A matched module has no incoming dependency in the indexed graph.',
+  },
+  'architecture-instability-inversion': {
+    defaultClass: 'advisory', source: 'architecture',
+    description: 'A stable matched module depends on a strictly more-unstable module.',
+  },
   // ── decision-bound architecture constraints ──
   'decision-constraint-violation': {
     defaultClass: 'advisory',

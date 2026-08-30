@@ -1089,7 +1089,7 @@ export function d() {}
       const barId = `${fileB}::bar`;
       injectCallGraphEdges(
         depGraph,
-        [{ callerId: fooId, calleeId: barId }],
+        [{ callerId: fooId, calleeId: barId, confidence: 'name_only' }],
         id => (id === fooId ? fileA : id === barId ? fileB : undefined),
       );
 
@@ -1097,6 +1097,7 @@ export function d() {}
       expect(depGraph.edges).toHaveLength(1);
       expect(depGraph.edges[0].source).toBe(fileA);
       expect(depGraph.edges[0].target).toBe(fileB);
+      expect(depGraph.edges[0].resolutionConfidence).toBe('name_only');
       expect(depGraph.statistics.avgDegree).toBeGreaterThan(0);
     });
 

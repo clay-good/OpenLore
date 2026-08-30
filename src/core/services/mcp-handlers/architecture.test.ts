@@ -3,6 +3,11 @@ import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { handleCheckArchitecture } from './architecture.js';
+import {
+  classifyFindings,
+  FINDING_CODE_REGISTRY,
+  type GovernanceFinding,
+} from './enforcement-policy.js';
 
 function depGraphJson(dir: string, edges: Array<[string, string]>): string {
   const files = new Set<string>();
@@ -31,6 +36,40 @@ describe('handleCheckArchitecture', () => {
   it('is inert (pre-edit) when no rules are declared', async () => {
     const res = (await handleCheckArchitecture({ directory: dir, from: 'a.ts', to: 'b.ts' })) as Record<string, unknown>;
     expect(res).toMatchObject({ mode: 'pre-edit', rulesDeclared: false, allowed: true });
+  });
+
+  it('does not certify malformed architecture config as an inert clean result', async () => {
+    await mkdir(join(dir, '.openlore'), { recursive: true });
+    await writeFile(join(dir, '.openlore', 'architecture.json'), '{not-json');
+
+    const scan = await handleCheckArchitecture({ directory: dir }) as Record<string, unknown>;
+    expect(scan).toMatchObject({ mode: 'scan', violationCount: null, assessmentComplete: false });
+
+    const preEdit = await handleCheckArchitecture({
+      directory: dir, from: 'src/a.ts', to: 'src/b.ts',
+    }) as Record<string, unknown>;
+    expect(preEdit).toMatchObject({ mode: 'pre-edit', allowed: null, assessmentComplete: false });
+  });
+
+  it('confines absolute pre-edit paths to the repository', async () => {
+    await mkdir(join(dir, '.openlore'), { recursive: true });
+    await writeFile(join(dir, '.openlore', 'architecture.json'), JSON.stringify({
+      reachable: [{ from: 'src/public', to: 'src/internal' }],
+    }));
+
+    const denied = await handleCheckArchitecture({
+      directory: dir,
+      from: join(dir, 'src/rogue.ts'),
+      to: join(dir, 'src/internal/db.ts'),
+    }) as Record<string, unknown>;
+    expect(denied).toMatchObject({ mode: 'pre-edit', allowed: false });
+
+    const escaped = await handleCheckArchitecture({
+      directory: dir,
+      from: join(dir, '..', 'outside.ts'),
+      to: join(dir, 'src/internal/db.ts'),
+    }) as Record<string, unknown>;
+    expect(escaped).toMatchObject({ mode: 'pre-edit', allowed: null, assessmentComplete: false });
   });
 
   it('scans violations and answers a pre-edit query when rules are declared', async () => {
@@ -74,5 +113,30 @@ describe('handleCheckArchitecture', () => {
 
     const scan = await handleCheckArchitecture({ directory: dir }) as Record<string, unknown>;
     expect(scan).toMatchObject({ mode: 'scan', violationCount: null, assessmentComplete: false });
+  });
+
+  it('emits registered architecture findings that are advisory unless policy blocks them', async () => {
+    await mkdir(join(dir, '.openlore', 'analysis'), { recursive: true });
+    await writeFile(
+      join(dir, '.openlore', 'architecture.json'),
+      JSON.stringify({ forbidden: [{ from: 'src/domain', to: 'src/infra' }] }),
+    );
+    await writeFile(
+      join(dir, '.openlore', 'analysis', 'dependency-graph.json'),
+      depGraphJson(dir, [['src/domain/order.ts', 'src/infra/db.ts']]),
+    );
+
+    const result = await handleCheckArchitecture({ directory: dir }) as { findings: GovernanceFinding[] };
+    expect(result.findings).toEqual([expect.objectContaining({
+      code: 'architecture-forbidden-dependency',
+      subject: 'src/domain/order.ts → src/infra/db.ts',
+    })]);
+    expect(FINDING_CODE_REGISTRY['architecture-forbidden-dependency']).toMatchObject({
+      defaultClass: 'advisory', source: 'architecture',
+    });
+    expect(classifyFindings(result.findings, {}).gated).toBe(false);
+    expect(classifyFindings(result.findings, {
+      'architecture-forbidden-dependency': 'blocking',
+    }).gated).toBe(true);
   });
 });

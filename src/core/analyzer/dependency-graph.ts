@@ -76,6 +76,8 @@ export interface DependencyEdge {
   httpEdge?: HttpEdge;
   /** True when this edge was synthesized from a call-graph cross-file call (implicit import) */
   isCallEdge?: boolean;
+  /** Resolution evidence retained when a call-graph edge becomes a file dependency. */
+  resolutionConfidence?: string;
   /** Present when this edge is an HTML page → asset reference (decision b555b680) */
   assetKind?: 'script' | 'stylesheet';
 }
@@ -908,7 +910,7 @@ const SAME_PACKAGE_IMPLICIT_LANGS = new Set(['Java', 'Kotlin']);
  */
 export function injectCallGraphEdges(
   depGraph: DependencyGraphResult,
-  callEdges: Array<{ callerId: string; calleeId: string }>,
+  callEdges: Array<{ callerId: string; calleeId: string; confidence?: string }>,
   nodeFilePath: (id: string) => string | undefined,
 ): void {
   // Build a Set of node IDs for quick membership test
@@ -930,7 +932,15 @@ export function injectCallGraphEdges(
     const key = `${callerFile}→${calleeFile}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    newEdges.push({ source: callerFile, target: calleeFile, importedNames: [], isTypeOnly: false, weight: 1, isCallEdge: true });
+    newEdges.push({
+      source: callerFile,
+      target: calleeFile,
+      importedNames: [],
+      isTypeOnly: false,
+      weight: 1,
+      isCallEdge: true,
+      ...(ce.confidence ? { resolutionConfidence: ce.confidence } : {}),
+    });
   }
 
   if (newEdges.length === 0) return;

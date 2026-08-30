@@ -39,21 +39,50 @@ It complements, it does not replace, your CI linters.
   ],
   "allowedOnly": [
     { "module": "src/api", "mayDependOn": ["src/core", "src/types"], "reason": "transport-agnostic API" }
+  ],
+  "required": [
+    { "from": "src/handlers", "to": "src/sanitizer" }
+  ],
+  "circular": [
+    { "scope": "src", "allowed": ["src/generated"] }
+  ],
+  "reachable": [
+    { "from": "src/public", "to": "src/internal" }
+  ],
+  "orphan": [
+    { "scope": "src/lib" }
+  ],
+  "moreUnstable": [
+    { "scope": "src/core" }
   ]
 }
 ```
 
-Three deterministic rule kinds:
+Eight deterministic rule kinds:
 
 | Kind | Shape | Means |
 |------|-------|-------|
 | `layers` | ordered `{ layer: pathPrefix[] }` | Key order is **top → bottom**; a lower layer depending on an upper layer is a violation. Compiles to the same `classifyLayerEdge` primitive the analyzer already uses for `CODEBASE.md`. |
 | `forbidden` | `{ from, to, reason? }` | Files under `from` must not depend on files under `to`. |
 | `allowedOnly` | `{ module, mayDependOn[], reason? }` | Files under `module` may depend only on the listed prefixes (intra-module deps always allowed). |
+| `required` | `{ from, to, reason? }` | Every matched `from` file must directly depend on at least one matched `to` file. |
+| `circular` | `{ scope, allowed?[], reason? }` | Dependency cycles within `scope` are violations unless every member is within an allowed prefix. |
+| `reachable` | `{ from, to, reason? }` | Files outside the permitted `from` prefix must not transitively reach `to`. |
+| `orphan` | `{ scope, reason? }` | Matched files with no incoming dependency are reported and cross-reference `find_dead_code`. |
+| `moreUnstable` | `{ scope, reason? }` | A matched file must not depend on a file with strictly higher `fanOut / (fanIn + fanOut)`. |
 
 Paths are **directory prefixes** (matched against repo-relative paths). Trailing `/`, `/*`, `/**`,
 or `*` are tolerated. A rule prefix that matches no file in the repo is reported as a warning (likely
-a typo), never a crash. Malformed entries are skipped with a warning — loading rules never throws.
+a typo), never a crash. Malformed entries are skipped with a warning and mark the assessment
+incomplete; a blocking architecture policy therefore fails closed instead of treating bad config
+as an empty rule set. Loading rules never throws.
+
+When `required` or `orphan` can be decided only from lower-confidence inferred call edges, OpenLore
+reports an incomplete assessment instead of inventing a violation or certifying the rule as clean.
+
+A pattern may contain one `$1` path-segment capture. The captured segment is substituted into the
+rule's target/allowlist patterns, so `domains/$1` can keep each domain within its own folder without
+maintaining one rule per domain. No general regular expressions are evaluated.
 
 ## Rules from decisions (Spec 16 tie)
 
@@ -85,7 +114,7 @@ the dependency graph. When the target can't be resolved, the verdict is **permis
 
 ```jsonc
 check_architecture({ directory })
-// → { violations: [{ kind, from, to, reason, source }], violationCount, ruleSummary, warnings }
+// → { violations: [{ kind, from, to, reason, source }], findings: [{ code, ... }], violationCount, ruleSummary, warnings }
 ```
 
 **In `orient`** — when rules are declared and a task's relevant files participate in a violation,
@@ -97,3 +126,5 @@ Omitted entirely when no rules exist.
 - Offline and deterministic — no network, no API key, reproducible from a fixed graph.
 - Reuses the existing dependency graph and the `classifyLayerEdge` layer primitive.
 - Inert by default; additive to every existing tool.
+- Findings are registered and advisory by default; only an explicit `enforcement.policy` entry can
+  make an architecture code blocking.
