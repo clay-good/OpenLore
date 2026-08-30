@@ -56,6 +56,22 @@ describe('agent enforcement Stop hook lifecycle', () => {
     expect((await readSettings(dir)).hooks?.Stop).toHaveLength(1);
   });
 
+  it('serializes different OpenLore hook installers without losing entries', async () => {
+    const [agent, checkEdit] = await Promise.all([
+      installAgentEnforcementHook(dir),
+      installCheckEditHook(dir),
+      installPanicCheckHook(dir),
+      installGryphWatchHook(dir),
+    ]);
+    expect(agent).toBe(true);
+    expect(checkEdit).toBe(true);
+    const hooks = (await readSettings(dir)).hooks;
+    expect(hooks?.Stop).toHaveLength(1);
+    expect(hooks?.PostToolUse).toHaveLength(1);
+    expect(hooks?.PreToolUse).toHaveLength(1);
+    expect(hooks?.UserPromptSubmit).toHaveLength(1);
+  });
+
   it('refuses corrupt settings without changing their bytes', async () => {
     await mkdir(join(dir, '.claude'), { recursive: true });
     const path = join(dir, '.claude', 'settings.json');

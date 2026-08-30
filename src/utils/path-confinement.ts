@@ -14,7 +14,7 @@
  */
 
 import { constants, realpathSync, lstatSync, readlinkSync, type Stats } from 'node:fs';
-import { lstat, mkdir, open, realpath, rename, stat, unlink } from 'node:fs/promises';
+import { link, lstat, mkdir, open, readdir, realpath, rename, stat, unlink } from 'node:fs/promises';
 import { basename, dirname, relative, resolve, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
@@ -242,6 +242,49 @@ export function isConfinedPath(absRoot: string, absPath: string): boolean {
   }
 }
 
+/**
+ * Recover an interrupted expected-identity publication. Callers must serialize
+ * this target with the same advisory lock used for the corresponding write.
+ */
+export async function recoverConfinedAtomicWriteFile(
+  absRoot: string,
+  absPath: string,
+): Promise<void> {
+  const lexicalRoot = resolve(absRoot);
+  const canonicalRoot = await realpath(lexicalRoot);
+  const requested = resolve(absPath);
+  const base = requested === canonicalRoot || requested.startsWith(canonicalRoot + sep)
+    ? canonicalRoot
+    : lexicalRoot;
+  const target = safeJoin(base, relative(base, requested));
+  const parent = dirname(target);
+  const expectedParent = resolve(canonicalRoot, relative(base, parent));
+  const canonicalParent = await realpath(parent);
+  if (canonicalParent !== expectedParent) {
+    throw new Error(`Path escape blocked: symbolic-link path component in "${target}"`);
+  }
+
+  const prefix = `.${basename(target)}.openlore-cas-backup.`;
+  const uuidSuffix = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  const guards = (await readdir(canonicalParent, { withFileTypes: true }))
+    .filter(entry => entry.isFile()
+      && entry.name.startsWith(prefix)
+      && uuidSuffix.test(entry.name.slice(prefix.length)))
+    .map(entry => resolve(canonicalParent, entry.name));
+  if (guards.length === 0) return;
+
+  let targetExists = false;
+  try { targetExists = (await lstat(target)).isFile(); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  if (!targetExists && guards.length !== 1) {
+    throw new Error(`Confined write recovery is ambiguous for "${target}"`);
+  }
+  if (!targetExists) await link(guards[0]!, target);
+  await Promise.all(guards.map(guard => unlink(guard)));
+}
+
 /** Atomically replace a repository file without following any repository symlink. */
 export async function confinedAtomicWriteFile(
   absRoot: string,
@@ -323,6 +366,64 @@ export async function confinedAtomicWriteFile(
     }
     if (await realpath(parent) !== canonicalParent) {
       throw new Error(`Path escape blocked: write parent changed during publication: "${target}"`);
+    }
+    if (options.expectedIdentity !== undefined) {
+      if (options.expectedIdentity === null) {
+        try {
+          await link(temp, target); // atomic no-replace publication
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+            throw new Error(`Confined write conflict: target was created after it was read: "${target}"`, { cause: error });
+          }
+          throw error;
+        }
+        published = true;
+        await unlink(temp).catch(() => {});
+        return;
+      }
+
+      // POSIX rename has no portable compare-and-swap form. Move the current
+      // target to a guarded sibling atomically, verify the captured inode, then
+      // publish with hard-link no-replace. A concurrent external create wins;
+      // OpenLore never overwrites it. The unique guard avoids colliding with a
+      // user file; callers serialize and recover this target with a settings lock.
+      const guard = resolve(canonicalParent, `.${basename(target)}.openlore-cas-backup.${randomUUID()}`);
+      const restoreGuard = async (): Promise<void> => {
+        try { await link(guard, target); }
+        catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        }
+        await unlink(guard).catch(() => {});
+      };
+      try {
+        await rename(target, guard);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          throw new Error(`Confined write conflict: target changed after it was read: "${target}"`, { cause: error });
+        }
+        throw error;
+      }
+      const captured = await lstat(guard);
+      if (!captured.isFile()
+          || !sameFile(options.expectedIdentity, captured)
+          || captured.size !== options.expectedIdentity.size
+          || captured.mtimeMs !== options.expectedIdentity.mtimeMs) {
+        await restoreGuard();
+        throw new Error(`Confined write conflict: target changed after it was read: "${target}"`);
+      }
+      try {
+        await link(temp, target); // atomic no-replace; preserves any external writer
+      } catch (error) {
+        await restoreGuard();
+        if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+          throw new Error(`Confined write conflict: target changed during publication: "${target}"`, { cause: error });
+        }
+        throw error;
+      }
+      published = true;
+      await unlink(temp).catch(() => {});
+      await unlink(guard).catch(() => {});
+      return;
     }
     try {
       if ((await lstat(target)).isSymbolicLink()) {
