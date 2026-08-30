@@ -17,7 +17,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync } from 'node:fs';
 import { readdir, readFile } from 'node:fs/promises';
 import { join, basename, dirname, relative, isAbsolute } from 'node:path';
 import { fileExists } from '../../utils/command-helpers.js';
@@ -179,8 +179,23 @@ async function acquireSpecIndexLock(outputDir: string): Promise<() => Promise<vo
 function readSpecFreshnessReceipt(outputDir: string): SpecFreshnessReceipt | null {
   try {
     const path = specFreshnessPath(outputDir);
-    if (statSync(path).size > FRESHNESS_MAX_BYTES) return null;
-    const value = JSON.parse(readFileSync(path, 'utf8')) as unknown;
+    const fd = openSync(path, 'r');
+    let serialized: string;
+    try {
+      if (fstatSync(fd).size > FRESHNESS_MAX_BYTES) return null;
+      const buffer = Buffer.alloc(FRESHNESS_MAX_BYTES + 1);
+      let bytesRead = 0;
+      while (bytesRead < buffer.length) {
+        const count = readSync(fd, buffer, bytesRead, buffer.length - bytesRead, bytesRead);
+        if (count === 0) break;
+        bytesRead += count;
+      }
+      if (bytesRead > FRESHNESS_MAX_BYTES) return null;
+      serialized = buffer.subarray(0, bytesRead).toString('utf8');
+    } finally {
+      closeSync(fd);
+    }
+    const value = JSON.parse(serialized) as unknown;
     if (!value || typeof value !== 'object') return null;
     const receipt = value as Record<string, unknown>;
     if (receipt.schemaVersion !== 1 || typeof receipt.indexBuiltAt !== 'string'
