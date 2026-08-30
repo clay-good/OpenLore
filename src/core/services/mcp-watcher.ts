@@ -885,6 +885,7 @@ export class McpWatcher {
           // the files whose edges point INTO this one — bounded by the work budget.
           const directCallers = (directCallersByFile.get(f.rel) ?? [])
             .filter(caller => directCallerOwner.get(caller) === itemIndex);
+          const directCallerSet = new Set(directCallers);
           const directBudget = spendClosureBudget(directCallers, this.closureBudget, resolutionNodes);
           let recompute = directBudget.selected;
           let dropped = directBudget.dropped;
@@ -916,7 +917,7 @@ export class McpWatcher {
               for (const cf of store.getExternalConsumerFiles(name)) {
                 const memberIndex = batchMemberIndex.get(cf);
                 if (cf !== f.rel && cf !== 'external' &&
-                    (memberIndex === undefined || memberIndex < itemIndex) && !directCallers.includes(cf)) extra.add(cf);
+                    (memberIndex === undefined || memberIndex < itemIndex) && !directCallerSet.has(cf)) extra.add(cf);
               }
               // `name_only` consumers currently resolve the name to a UNIQUE cross-file
               // definition. Adding a SECOND definition of that name makes the bare call
@@ -930,7 +931,7 @@ export class McpWatcher {
                 const memberIndex = batchMemberIndex.get(cf);
                 if (cf !== f.rel && cf !== 'external' &&
                     (memberIndex === undefined || memberIndex < itemIndex) &&
-                    !directCallers.includes(cf) && addedId !== calleeId) extra.add(cf);
+                    !directCallerSet.has(cf) && addedId !== calleeId) extra.add(cf);
               }
             }
             if (extra.size > 0) {
@@ -1006,7 +1007,7 @@ export class McpWatcher {
             process.stderr.write(
               `[mcp-watcher] graph: ${sanitizeForTerminal(f.rel)} (+${newNodes.length} nodes, +${newEdges.length} edges, ` +
               `${recomputed.length} re-resolved` +
-              `${staleNow.length ? `, ${formatStaleRegionComposition(staleComposition)} → stale${usedPathFallback ? ', stable-path fallback' : ''}${testReachabilityDegraded ? ', one-file budget defers test reachability' : ''}${skipped.length ? ` (${skipped.length} unreadable)` : ''}` : ''})\n`,
+              `${staleNow.length ? `, ${formatStaleRegionComposition(staleComposition)} → stale${usedPathFallback ? ', stable-path fallback' : ''}${testReachabilityDegraded ? ', configured budget defers test reachability' : ''}${skipped.length ? ` (${skipped.length} unreadable)` : ''}` : ''})\n`,
             );
           }
         }

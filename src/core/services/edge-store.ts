@@ -62,8 +62,10 @@ function isNonNegativeSafeInteger(value: unknown): value is number {
 function isStaleRegionSymbol(value: unknown): value is StaleRegionSymbol {
   if (typeof value !== 'object' || value === null) return false;
   const symbol = value as Partial<StaleRegionSymbol>;
-  return typeof symbol.id === 'string' && typeof symbol.name === 'string' &&
-    typeof symbol.filePath === 'string' && isNonNegativeSafeInteger(symbol.fanIn) &&
+  return typeof symbol.id === 'string' && symbol.id.length > 0 &&
+    typeof symbol.name === 'string' && symbol.name.length > 0 &&
+    typeof symbol.filePath === 'string' && symbol.filePath.length > 0 &&
+    isNonNegativeSafeInteger(symbol.fanIn) &&
     isNonNegativeSafeInteger(symbol.fanOut);
 }
 
@@ -1302,12 +1304,17 @@ export class EdgeStore {
       const receipts: StaleFileComposition[] = rows.flatMap(row => {
         if (!isNonNegativeSafeInteger(row.symbol_count) ||
             !isNonNegativeSafeInteger(row.hub_count) ||
-            !isNonNegativeSafeInteger(row.chokepoint_count)) return [];
+            !isNonNegativeSafeInteger(row.chokepoint_count) ||
+            row.hub_count > row.symbol_count || row.chokepoint_count > row.hub_count) return [];
+        const hasTopSymbol = typeof row.top_symbol === 'string' && row.top_symbol.length > 0;
+        if ((row.symbol_count > 0) !== hasTopSymbol) return [];
         let topSymbol: StaleRegionSymbol | undefined;
-        if (row.top_symbol) {
+        if (hasTopSymbol) {
           try {
-            const parsed: unknown = JSON.parse(row.top_symbol);
-            if (!isStaleRegionSymbol(parsed)) return [];
+            const encodedTopSymbol = row.top_symbol;
+            if (typeof encodedTopSymbol !== 'string') return [];
+            const parsed: unknown = JSON.parse(encodedTopSymbol);
+            if (!isStaleRegionSymbol(parsed) || parsed.filePath !== row.file_path) return [];
             topSymbol = parsed;
           } catch { return []; }
         }

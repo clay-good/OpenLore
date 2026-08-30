@@ -136,6 +136,29 @@ describe('EdgeStore', () => {
         chokepointCount: 0,
         unclassifiedFileCount: 1,
       });
+
+      const malformed = new DatabaseSync(dbPath);
+      try {
+        const update = malformed.prepare(`
+          UPDATE stale_file_composition
+          SET symbol_count = ?, hub_count = ?, chokepoint_count = ?, top_symbol = ?
+          WHERE file_path = 'src/a.ts'
+        `);
+        const validTop = '{"id":"src/a.ts::hub","name":"hub","filePath":"src/a.ts","fanIn":8,"fanOut":2}';
+        const invalidRows: Array<[number, number, number, string | null]> = [
+          [0, 1, 0, null],
+          [1, 0, 1, validTop],
+          [0, 0, 0, validTop],
+          [1, 0, 0, ''],
+          [1, 1, 1, '{"id":"src/b.ts::hub","name":"hub","filePath":"src/b.ts","fanIn":8,"fanOut":2}'],
+        ];
+        for (const row of invalidRows) {
+          update.run(...row);
+          expect(store.getStaleRegionComposition().unclassifiedFileCount).toBe(1);
+        }
+      } finally {
+        malformed.close();
+      }
     });
   });
 
