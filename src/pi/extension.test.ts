@@ -931,7 +931,7 @@ describe('NAV_TOOLS surface', () => {
 
   it('surfaces every Generate/Repair protocol observation or documents an exclusion', () => {
     const required = {
-      generation: ['domainEvidence'],
+      generation: ['domainEvidence', 'domainBehavior', 'specValidation'],
       repair: [
         'domainEvidence',
         'existingSpec',
@@ -941,6 +941,8 @@ describe('NAV_TOOLS surface', () => {
         'orphanRequirement',
         'structuralChange',
         'mappingCoverage',
+        'specValidation',
+        'domainBehavior',
       ],
     } as const;
     for (const [workflow, observations] of Object.entries(required)) {

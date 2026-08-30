@@ -48,3 +48,26 @@ Every long-running analysis stage, including artifact generation, SHALL update o
 - **GIVEN** an analysis lock with a live owner and current heartbeat
 - **WHEN** preflight/status is requested
 - **THEN** it reports `ANALYSIS_IN_PROGRESS` and owner metadata rather than `STALE` or `FRESH`
+
+### Requirement: Documentation Never Defines A Domain
+
+Domain file classification SHALL treat documentation, licences, and project meta as `supporting`, never as `defining`. Scope is prose by extension (`.md`, `.mdx`, `.mdc`, `.markdown`, `.rst`, `.adoc`, `.txt`, `.cff`) — `.txt` excepting the build-configuration names that share it (`requirements*.txt`, `constraints*.txt`, `CMakeLists.txt`), which SHALL be excluded as configuration on their own merit rather than depending on the file walker's config flag, since it does not name them — and conventional project names (`LICENSE`, `NOTICE`, `COPYING`, `AUTHORS`, `CONTRIBUTING`, `CODE_OF_CONDUCT`, `SECURITY`, `SUPPORT`, `GOVERNANCE`, `CODEOWNERS`, and equivalents), including their qualified variants (`LICENSE-MIT`, `COPYING.LESSER`). A conventional project name SHALL match only in its conventional UPPER-CASE spelling, so neither a source file (`license.ts`, `readme-generator.ts`) nor an extensionless executable (`bin/readme`, `scripts/changelog`) is read as prose and stripped of its ability to define a domain. Under-matching is the required direction: a missed prose file is merely supporting, whereas a misread source file would silently remove its domain. Prose describes a system and does not implement one, so no requirement can ever be anchored to it.
+
+Because a candidate whose files are all non-defining is already excluded as `non-defining-only`, this classification alone SHALL prevent a documentation-only tree from being promoted to a domain. Documentation MUST remain `supporting` rather than `excluded`, so a code domain keeps its own documentation as footprint evidence.
+
+- **Implementation**: `classifyDomainFile::src/core/analyzer/domain-naming.ts`
+
+#### Scenario: A documentation-only tree is not a domain
+- **GIVEN** a candidate whose files are all documentation, licences, or project meta
+- **WHEN** repository domains are reconciled
+- **THEN** the candidate is excluded as `non-defining-only` and no domain is produced for it
+
+#### Scenario: An extensionless executable is not prose
+- **GIVEN** a domain defined by extensionless executables whose names resemble project metadata in lower case
+- **WHEN** repository domains are reconciled
+- **THEN** those files remain defining and the domain is retained
+
+#### Scenario: A code domain keeps its own documentation
+- **GIVEN** a domain whose files include source code and a README
+- **WHEN** repository domains are reconciled
+- **THEN** the source file is defining, the README is supporting, and the domain is retained

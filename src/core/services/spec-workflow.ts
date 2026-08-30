@@ -9,11 +9,15 @@ import {
   OPENLORE_ANALYSIS_SUBDIR,
   OPENLORE_DIR,
   OPENSPEC_DIR,
+  OPENSPEC_SPECS_SUBDIR,
   REPO_CONTENT_PROVENANCE,
 } from '../../constants.js';
+import { resolveOpenspecDir } from '../../utils/openspec-dir.js';
 import type { LLMContext, RepoStructure } from '../analyzer/artifact-generator.js';
 import type { DependencyGraphResult } from '../analyzer/dependency-graph.js';
+import { isDocumentationFile } from '../analyzer/domain-naming.js';
 import { parseSpecHeader, parseSpecReferences } from '../drift/spec-mapper.js';
+import { detectOpenSpecPackageVersion } from '../runtime/package-versions.js';
 import { buildDomainEvidence, type DomainEvidenceBundle } from '../generator/domain-evidence.js';
 import { loadSpecCorpus, mappingViewOf, resolveSpecLinkIndex } from '../generator/spec-link-service.js';
 import {
@@ -56,8 +60,8 @@ import { redactSecretsWithReport } from './secret-redaction.js';
  * document an exclusion.
  */
 export const SPEC_WORKFLOW_SECTIONS = {
-  generation: GENERATION_STREAM_SECTIONS,
-  repair: [...REPAIR_STREAM_SECTIONS, 'mappingCoverage'] as const,
+  generation: [...GENERATION_STREAM_SECTIONS, 'domainBehavior', 'specValidation'] as const,
+  repair: [...REPAIR_STREAM_SECTIONS, 'mappingCoverage', 'specValidation', 'domainBehavior'] as const,
 } as const;
 
 export type SpecWorkflow = keyof typeof SPEC_WORKFLOW_SECTIONS;
@@ -145,7 +149,8 @@ async function loadAnalysisSnapshot(directory: string): Promise<
 > {
   const root = await validateDirectory(directory);
   const analysisDir = join(root, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
-  const openspecPath = (await readOpenLoreConfig(root).catch(() => null))?.openspecPath ?? OPENSPEC_DIR;
+  const configuredPath = (await readOpenLoreConfig(root).catch(() => null))?.openspecPath ?? OPENSPEC_DIR;
+  const openspecPath = relative(root, resolveOpenspecDir(root, configuredPath)).replaceAll('\\', '/') || '.';
   const snapshot = await readGenerationSnapshot(
     analysisDir,
     [...REQUIRED_ANALYSIS_ARTIFACTS],
@@ -359,6 +364,7 @@ export async function prepareSpecGeneration(input: PrepareSpecInput): Promise<Sp
   if ('receipt' in preliminary) return preliminary;
 
   const overlap = await computeSpecOverlap(loaded, bundle);
+  const specValidation = await specValidationDisclosure(loaded.root, loaded.openspecPath);
   input.signal?.throwIfAborted();
   const sections = buildGenerationStream({
     root: loaded.root, bundle, repo: loaded.repo, graph: loaded.graph, overlap: overlap.observations,
@@ -373,6 +379,8 @@ export async function prepareSpecGeneration(input: PrepareSpecInput): Promise<Sp
       ...(bundle.candidateDecisionSummary ? { candidateDecisionSummary: bundle.candidateDecisionSummary } : {}),
     },
     specOverlap: overlap.provenance,
+    domainBehavior: domainBehaviorOf(bundle),
+    specValidation,
     streamSections: [...GENERATION_STREAM_SECTIONS],
   };
   const streamIdentity = compositionFingerprint({ sections, pageGlobal });
@@ -391,7 +399,12 @@ export async function prepareSpecGeneration(input: PrepareSpecInput): Promise<Sp
     maxItems: resolved.maxItems,
     baseRef: '',
     streamIdentity,
-    followUpsFor: (page, cursor) => continuationFollowUps('generation', { ...input, domain: bundle.name }, page, cursor, resolved),
+    followUpsFor: (page, cursor) => [
+      ...continuationFollowUps('generation', { ...input, domain: bundle.name }, page, cursor, resolved),
+      ...(page.next && cursor
+        ? []
+        : [specValidationFollowUp(loaded.root, specValidation), ...behaviorFollowUp(pageGlobal.domainBehavior)]),
+    ],
   });
 }
 
@@ -616,6 +629,7 @@ export async function prepareSpecRepair(input: PrepareSpecInput): Promise<SpecWo
     provenance: mapping.provenance,
     stats: mapping.stats,
   };
+  const specValidation = await specValidationDisclosure(loaded.root, loaded.openspecPath);
   const sections = buildRepairStream({
     specContent,
     coveredFunction: mappingUnavailable ? [] : allCoveredFunctions,
@@ -642,6 +656,8 @@ export async function prepareSpecRepair(input: PrepareSpecInput): Promise<SpecWo
     driftSummary: { state: typeof objectResult(drift).error === 'string' ? 'unavailable' : 'available', summary: objectResult(drift).summary },
     structuralChangeSummary: structuralChangeSummary(structuralChange),
     structuralScopeTotal: scopedPaths.length,
+    specValidation,
+    domainBehavior: domainBehaviorOf(bundle, scopedPaths, loaded.openspecPath),
     streamSections: [...REPAIR_STREAM_SECTIONS],
   };
   const streamIdentity = compositionFingerprint({
@@ -666,9 +682,237 @@ export async function prepareSpecRepair(input: PrepareSpecInput): Promise<SpecWo
     followUpsFor: (page, cursor) => [
       ...continuationFollowUps('repair', { ...input, domain: resolvedDomain, baseRef }, page, cursor, resolved),
       ...(mappingUnavailable ? [mappingRemediation(loaded.root, objectResult(mappingCoverage))] : []),
+      // Only on the terminal page: authoring — and therefore validation — happens
+      // once the evidence stream is exhausted, and a mid-stream copy would spend
+      // response budget the deferred sections need.
+      ...(page.next && cursor
+        ? []
+        : [specValidationFollowUp(loaded.root, specValidation), ...behaviorFollowUp(pageGlobal.domainBehavior)]),
     ],
     extraOmissions: coverageOmissions,
   });
+}
+
+/**
+ * What OpenLore can observe about the OpenSpec CLI, as fact — never as a verdict.
+ *
+ * OpenLore does not own the OpenSpec format and does not validate specs itself
+ * (see the overview spec: the change lifecycle is delegated to the `openspec`
+ * CLI rather than reimplemented). An authored or repaired spec is therefore only
+ * as validated as the host's `openspec validate` run, and a host that cannot run
+ * it must say so instead of implying the spec passed. Both authoring paths carry
+ * this identically: a spec written by Generate is no more self-validating than
+ * one edited by Repair.
+ *
+ * `packageResolution` is exactly what it says: whether an OpenSpec package
+ * resolves from the project or from OpenLore. `unresolved` is NOT "the CLI is
+ * absent" — a globally installed binary resolves from neither scope. It is a
+ * disclosed unknown, which is why the follow-up is emitted either way.
+ */
+async function specValidationDisclosure(root: string, specRoot: string): Promise<{
+  validatedByOpenLore: false;
+  command: string;
+  packageResolution: 'resolved' | 'unresolved';
+  packageVersion?: string;
+  specRoot: string;
+  specRootIsDefault: boolean;
+  cliValidationAvailable: boolean;
+}> {
+  const version = await detectOpenSpecPackageVersion(root);
+  const normalized = normalizeSpecRoot(specRoot);
+  return {
+    validatedByOpenLore: false,
+    command: OPENSPEC_VALIDATE_COMMAND,
+    packageResolution: version === 'unknown' ? 'unresolved' : 'resolved',
+    ...(version === 'unknown' ? {} : { packageVersion: version }),
+    specRoot: normalized,
+    specRootIsDefault: normalized === OPENSPEC_DIR,
+    // The CLI can only validate a corpus it can find, which means the default
+    // tree. Reported as fact so a host never treats a relocated corpus's silence
+    // as a pass (verified: the command fails "No OpenSpec root found" both from
+    // the repository root and from inside the relocated corpus).
+    cliValidationAvailable: normalized === OPENSPEC_DIR,
+  };
+}
+
+function normalizeSpecRoot(specRoot: string): string {
+  const normalized = specRoot.replaceAll('\\', '/').replace(/^\.\//, '').replace(/\/+$/, '');
+  return normalized || '.';
+}
+
+/**
+ * The OpenSpec structure check these workflows are judged by. Named, never run,
+ * by OpenLore.
+ *
+ * `--specs`, not `--all`: both workflows write a BASELINE corpus spec, and an
+ * unrelated invalid change in flight would otherwise fail the check for a spec
+ * that is perfectly valid. `--strict` because the skills promise to treat a
+ * warning as a failure, which the default mode does not.
+ */
+const OPENSPEC_VALIDATE_COMMAND = 'openspec validate --specs --strict';
+
+/**
+ * Emitted on the terminal page whether or not an OpenSpec package resolved: the
+ * point is that an unvalidated spec is disclosed as unvalidated. A host that
+ * cannot run the command reports that outcome; it never reports the repair as
+ * validated. `evidence.specValidation` carries the same disclosure on every page
+ * (page-global observations are spread into `evidence`), so a host reading only
+ * one page still knows OpenLore validated nothing.
+ */
+function specValidationFollowUp(
+  root: string,
+  disclosure: { packageResolution: 'resolved' | 'unresolved'; specRoot: string; specRootIsDefault: boolean }
+): SpecWorkflowFollowUp {
+  // The OpenSpec CLI resolves its own root by looking for an `openspec/` tree;
+  // OpenLore's `openspecPath` is an OpenLore setting it knows nothing about. With
+  // a relocated corpus the command fails with "No OpenSpec root found" from the
+  // repository root AND from inside the corpus, so there is no invocation to
+  // advertise. Say the validation is unavailable instead of emitting advice that
+  // cannot be followed — an unrunnable follow-up is worse than an honest gap.
+  if (!disclosure.specRootIsDefault) {
+    return {
+      tool: 'disclose:validation-unavailable',
+      arguments: { directory: root, specRoot: disclosure.specRoot },
+      reason:
+        `OpenLore does not validate OpenSpec structure, and the CLI cannot validate this corpus: it lives at ` +
+        `\`${disclosure.specRoot}/\`, while the OpenSpec CLI locates its own root by looking for an \`openspec/\` tree and does not ` +
+        `read OpenLore's configuration. Report the spec as NOT validated, and validate it by hand or through a registered OpenSpec store.`,
+    };
+  }
+  const unresolved = disclosure.packageResolution === 'unresolved'
+    ? ' No OpenSpec package resolves from this project (a global install would not either), so the CLI may be absent.'
+    : '';
+  return {
+    tool: `cli:${OPENSPEC_VALIDATE_COMMAND}`,
+    arguments: { directory: root, specRoot: disclosure.specRoot },
+    reason:
+      `OpenLore does not validate OpenSpec structure. Run \`${OPENSPEC_VALIDATE_COMMAND}\` after editing, and report the spec as ` +
+      `NOT validated if it cannot run.${unresolved}`,
+  };
+}
+
+/**
+ * Whether the resolved domain contains anything a requirement could describe.
+ *
+ * A requirement states behavior, and behavior lives in symbols. A domain whose
+ * files are documentation, licences, or project meta has none — prose describes
+ * a system, it does not implement one — so a spec authored over it can only
+ * paraphrase text back as SHALL statements, and no requirement in it can ever
+ * carry a resolvable implementation anchor.
+ *
+ * This is an observation, never a verdict: OpenLore does not decide that such a
+ * domain is illegitimate, it reports that there is no behavior in it and lets
+ * the host stop and ask. `documentationFileCount` is the evidence behind the
+ * observation, not a separate judgement
+ * (change: stop-specifying-documentation-as-behavior).
+ */
+function domainBehaviorOf(
+  bundle: DomainEvidenceBundle | undefined,
+  scopedPaths: string[] = [],
+  specRoot: string = OPENSPEC_DIR,
+): {
+  state: 'behavioral' | 'documentation-only' | 'unavailable';
+  /** Set only when no bundle backs the request: every source the spec cites is prose. */
+  proseOnlyOrphan?: boolean;
+  symbolCount: number | null;
+  routeCount: number | null;
+  schemaCount: number | null;
+  supportingSymbolCount: number | null;
+  definingFileCount: number | null;
+  documentationFileCount: number | null;
+} {
+  if (!bundle) {
+    // No analyzed domain. Symbols cannot be counted, so every count stays null —
+    // never a fabricated zero — and the state is `unavailable`.
+    //
+    // Whether that is a documentation-only orphan is decided the same way as
+    // everywhere else: on POSITIVE evidence of prose, never on the absence of a
+    // bundle. `overview` and `architecture` are corpus-level specs that own no
+    // source by design and must stay repairable, so the spec corpus's own files
+    // are excluded from the evidence — a spec that only cites other specs is
+    // structural, not prose-only.
+    // A cited path may carry an anchor (`README.md#Installation`); classify the
+    // file it names, not the fragment, or a prose-only orphan reads as behavior.
+    // `specRoot` is the CONFIGURED spec root, not the default name: a repo that
+    // moved `openspec/` would otherwise keep its own corpus in the evidence, and
+    // its Markdown would make every corpus-level spec read as a prose-only orphan.
+    // `scopedPaths` are already normalized (no `./` prefix, no trailing slash), so
+    // the configured root is normalized the same way before comparing — a common
+    // `./openspec` value would otherwise match nothing and leave the corpus in.
+    const normalizedRoot = normalizeSpecRoot(specRoot);
+    const corpusRoot = normalizedRoot === '.'
+      ? OPENSPEC_SPECS_SUBDIR
+      : `${normalizedRoot}/${OPENSPEC_SPECS_SUBDIR}`;
+    const sourcePaths = scopedPaths
+      .filter(path => path !== corpusRoot && !path.startsWith(`${corpusRoot}/`))
+      .map(path => path.split('#')[0]);
+    const documentationPaths = sourcePaths.filter(isDocumentationFile).length;
+    return {
+      state: 'unavailable',
+      proseOnlyOrphan: sourcePaths.length > 0 && documentationPaths === sourcePaths.length,
+      symbolCount: null,
+      routeCount: null,
+      schemaCount: null,
+      supportingSymbolCount: null,
+      definingFileCount: null,
+      documentationFileCount: sourcePaths.length > 0 ? documentationPaths : null,
+    };
+  }
+  // `signatures` is one FileSignatureMap per FILE; the symbols are its `entries`.
+  // Counting the maps would report a 25-symbol file as one symbol.
+  const countEntries = (maps: DomainEvidenceBundle['signatures']): number =>
+    maps.reduce((total, map) => total + (map.entries?.length ?? 0), 0);
+  // Only DEFINING symbols decide the state. A requirement anchors to the
+  // implementation, never to a test: a domain whose sole symbols live in an
+  // attached test file has nothing a requirement could anchor to, and must still
+  // raise the stop. Supporting symbols are disclosed beside it, not folded in.
+  const symbolCount = countEntries(bundle.signatures);
+  const definingFiles = bundle.definingFiles;
+  // The stop fires on POSITIVE evidence of prose — every file that defines the
+  // domain is documentation — not on the absence of extracted signatures.
+  // Absence is a bad proxy: a declarative Vue/Svelte domain, or a bootstrap of
+  // top-level `app.get(...)` calls, yields no signatures and is still behavior.
+  // Only a domain defined entirely by prose has nothing a requirement could
+  // state and nothing an anchor could resolve to.
+  const documentationDefining = definingFiles.filter(isDocumentationFile).length;
+  const proseOnly = definingFiles.length > 0 && documentationDefining === definingFiles.length;
+  return {
+    state: proseOnly ? 'documentation-only' : 'behavioral',
+    proseOnlyOrphan: false,
+    symbolCount,
+    routeCount: bundle.routes?.length ?? 0,
+    schemaCount: bundle.schemas?.length ?? 0,
+    supportingSymbolCount: countEntries(bundle.supportingSignatures),
+    definingFileCount: definingFiles.length,
+    documentationFileCount: bundle.files.filter(isDocumentationFile).length,
+  };
+}
+
+/**
+ * Emitted on the terminal page only when the domain has no behavior to specify.
+ * Shaped like Generate's overlap rule: deterministic evidence handed to the
+ * human, never a decision taken for them.
+ */
+function behaviorFollowUp(behavior: {
+  state: string;
+  proseOnlyOrphan?: boolean;
+  documentationFileCount: number | null;
+}): SpecWorkflowFollowUp[] {
+  // Positive evidence of prose only. A missing bundle on its own is NOT a stop:
+  // `overview` and `architecture` own no source by design and stay repairable.
+  if (behavior.state === 'behavioral') return [];
+  if (behavior.state === 'unavailable' && !behavior.proseOnlyOrphan) return [];
+  const confirmedEmpty = behavior.state === 'documentation-only';
+  return [{
+    tool: 'ask:human-decision',
+    arguments: { state: behavior.state, documentationFileCount: behavior.documentationFileCount },
+    reason:
+      (confirmedEmpty
+        ? 'Every file that defines this domain is documentation, so it has no behavior a requirement could state and no anchor a requirement could resolve to. '
+        : 'This spec resolves to no analyzed domain, and every source file it cites is documentation — the shape a prose-only domain ' +
+          'leaves behind once it stops being promoted. Nothing in it can carry a verifiable anchor. ') +
+      'Stop and ask whether it should be specified at all, folded into a code domain, or left as documentation — do not paraphrase prose into SHALL statements.',
+  }];
 }
 
 /**

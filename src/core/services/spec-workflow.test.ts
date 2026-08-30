@@ -27,10 +27,14 @@ function fixture(fileCount = 12, signaturePad = 0): string {
     edges: [], clusters: [], cycles: [], statistics: {},
   }));
   writeFileSync(join(analysis, 'llm-context.json'), JSON.stringify({
-    signatures: files.map(path => ({
-      path,
-      signatures: [`export function ${path.split('/').at(-1)?.replace('.ts', '')}(): void${'/'.repeat(signaturePad)}`],
-    })),
+    signatures: files.map(path => {
+      const name = path.split('/').at(-1)?.replace('.ts', '') ?? '';
+      return {
+        path,
+        language: 'TypeScript',
+        entries: [{ name, kind: 'function', signature: `export function ${name}(): void${'/'.repeat(signaturePad)}` }],
+      };
+    }),
     phase2_deep: { files: [] },
   }));
   return root;
@@ -143,7 +147,7 @@ describe('spec workflow composites', () => {
     writeFileSync(join(root, '.openlore', 'config.json'), JSON.stringify({ secretRedaction: { toolOutput: false } }));
     const contextPath = join(root, '.openlore', 'analysis', 'llm-context.json');
     const context = JSON.parse(String(await import('node:fs/promises').then(fs => fs.readFile(contextPath))));
-    context.signatures[0].signatures[0] += ' password=abcdefgh';
+    context.signatures[0].entries[0].signature += ' password=abcdefgh';
     writeFileSync(contextPath, JSON.stringify(context));
     const result = await prepareSpecGeneration({ directory: root, domain: 'billing', maxResponseBytes: 8 * 1024 });
     expect(JSON.stringify(result)).not.toContain('password=abcdefgh');
@@ -419,6 +423,280 @@ describe('spec workflow composites', () => {
 
     const switched = await prepareSpecRepair({ directory: root, domain: 'orders', cursor: first.receipt.continuationCursor });
     expect(switched.error?.code).toBe('analysis-changed');
+  });
+
+  it('discloses a documentation-only domain as having no behavior to specify', async () => {
+    // The failure this closes: a domain of prose (docs, LICENSE, project meta)
+    // came back as a complete receipt with no caveat, so the host authored SHALL
+    // requirements over documentation without flinching.
+    const root = mkdtempSync(join(tmpdir(), 'openlore-spec-workflow-docs-'));
+    roots.push(root);
+    const analysis = join(root, '.openlore', 'analysis');
+    mkdirSync(analysis, { recursive: true });
+    const files = ['README.md', 'LICENSE', 'CODE_OF_CONDUCT.md'];
+    writeFileSync(join(analysis, 'repo-structure.json'), JSON.stringify({
+      projectName: 'fixture', projectType: 'nodejs', frameworks: [], architecture: { pattern: 'modular', layers: [] },
+      domains: [{ name: 'papers', files, definingFiles: files, supportingFiles: [], entities: [], keyFile: files[0] }],
+      undomained: [], entryPoints: [], dataFlow: {}, keyFiles: {}, schemas: [], routeInventory: { routes: [] }, statistics: {},
+    }));
+    writeFileSync(join(analysis, 'dependency-graph.json'), JSON.stringify({
+      nodes: files.map(path => ({ id: path, file: { path }, exports: [] })),
+      edges: [], clusters: [], cycles: [], statistics: {},
+    }));
+    writeFileSync(join(analysis, 'llm-context.json'), JSON.stringify({ signatures: [], phase2_deep: { files: [] } }));
+
+    const result = await prepareSpecGeneration({ directory: root, domain: 'papers' });
+    expect(result.evidence?.domainBehavior).toMatchObject({
+      state: 'documentation-only', symbolCount: 0, definingFileCount: 3, documentationFileCount: 3,
+    });
+    const stop = result.receipt.followUps.find(f => f.tool === 'ask:human-decision');
+    expect(stop).toBeDefined();
+    expect(stop!.reason).toMatch(/no behavior a requirement could state/);
+  });
+
+  it('keeps the no-behavior stop when the prose-only domain is gone but its spec remains', async () => {
+    // After documentation stopped defining domains, a prose-only domain vanishes
+    // from the analysis while its spec file survives. Repair must still stop:
+    // symbols cannot be counted, so the state is `unavailable` — never a
+    // fabricated zero — and the stop fires on unconfirmable behavior.
+    const root = fixture();
+    mkdirSync(join(root, 'openspec', 'specs', 'papers'), { recursive: true });
+    writeFileSync(
+      join(root, 'openspec', 'specs', 'papers', 'spec.md'),
+      // Anchored citations must classify by the file they name, not the fragment.
+      '# Papers\n\n> Source files: README.md#Installation, LICENSE\n\n### Requirement: Documents Things\n',
+    );
+
+    const result = await prepareSpecRepair({ directory: root, domain: 'papers' });
+    expect(result.evidence?.domainBehavior).toMatchObject({
+      state: 'unavailable', proseOnlyOrphan: true, symbolCount: null,
+    });
+    const stop = result.receipt.followUps.find(f => f.tool === 'ask:human-decision');
+    expect(stop).toBeDefined();
+    expect(stop!.reason).toMatch(/every source file it cites is documentation/);
+  });
+
+  it('keeps a corpus-level spec repairable under a relocated spec root', async () => {
+    // The corpus exclusion must follow the CONFIGURED root: with `openspec/` moved,
+    // a hard-coded name leaves the repo's own Markdown in the evidence and every
+    // corpus-level spec reads as a prose-only orphan.
+    const root = fixture();
+    writeFileSync(join(root, '.openlore', 'config.json'), JSON.stringify({
+      version: '1', projectType: 'nodejs', openspecPath: 'contracts',
+      analysis: { maxFiles: 100, includePatterns: ['**/*.ts'], excludePatterns: ['node_modules/**'] },
+      generation: { domains: 'auto' },
+      createdAt: new Date().toISOString(), lastRun: new Date().toISOString(),
+    }));
+    mkdirSync(join(root, 'contracts', 'specs', 'overview'), { recursive: true });
+    writeFileSync(
+      join(root, 'contracts', 'specs', 'overview', 'spec.md'),
+      '# Overview\n\nSee [analyzer](../analyzer/spec.md).\n\n### Requirement: Describes The System\n',
+    );
+
+    const result = await prepareSpecRepair({ directory: root, domain: 'overview' });
+    expect(result.evidence?.domainBehavior).toMatchObject({ proseOnlyOrphan: false });
+    expect(result.receipt.followUps.some(f => f.tool === 'ask:human-decision')).toBe(false);
+  });
+
+  it('confines an escaping configured spec root to the project default', async () => {
+    const root = fixture();
+    const outside = mkdtempSync(join(tmpdir(), 'openlore-spec-workflow-outside-'));
+    roots.push(outside);
+    writeFileSync(join(root, '.openlore', 'config.json'), JSON.stringify({
+      version: '1', projectType: 'nodejs', openspecPath: outside,
+      analysis: { maxFiles: 100, includePatterns: ['**/*.ts'], excludePatterns: ['node_modules/**'] },
+      generation: { domains: 'auto' },
+      createdAt: new Date().toISOString(), lastRun: new Date().toISOString(),
+    }));
+    mkdirSync(join(root, 'openspec', 'specs', 'billing'), { recursive: true });
+    writeFileSync(join(root, 'openspec', 'specs', 'billing', 'spec.md'), '# Billing\n\n### Requirement: Bills\n');
+    mkdirSync(join(outside, 'specs', 'billing'), { recursive: true });
+    writeFileSync(join(outside, 'specs', 'billing', 'spec.md'), '# Outside Secret\n');
+
+    const result = await prepareSpecRepair({ directory: root, domain: 'billing' });
+    expect(result.evidence?.specValidation).toMatchObject({
+      specRoot: 'openspec', specRootIsDefault: true, cliValidationAvailable: true,
+    });
+    expect(JSON.stringify(result)).not.toContain('Outside Secret');
+  });
+
+  it('supports a spec corpus configured at the project root', async () => {
+    const root = fixture();
+    writeFileSync(join(root, '.openlore', 'config.json'), JSON.stringify({
+      version: '1', projectType: 'nodejs', openspecPath: '.',
+      analysis: { maxFiles: 100, includePatterns: ['**/*.ts'], excludePatterns: ['node_modules/**'] },
+      generation: { domains: 'auto' },
+      createdAt: new Date().toISOString(), lastRun: new Date().toISOString(),
+    }));
+    mkdirSync(join(root, 'specs', 'overview'), { recursive: true });
+    writeFileSync(
+      join(root, 'specs', 'overview', 'spec.md'),
+      '# Overview\n\nSee [analyzer](../analyzer/spec.md).\n\n### Requirement: Describes The System\n',
+    );
+
+    const result = await prepareSpecRepair({ directory: root, domain: 'overview' });
+    expect(result.error).toBeUndefined();
+    expect(result.evidence?.specValidation).toMatchObject({ specRoot: '.', specRootIsDefault: false });
+    expect(result.evidence?.domainBehavior).toMatchObject({ proseOnlyOrphan: false });
+    expect(result.receipt.followUps.some(f => f.tool === 'ask:human-decision')).toBe(false);
+  });
+
+  it('keeps a corpus-level spec repairable even though it owns no analyzed domain', async () => {
+    // `overview` and `architecture` are structural specs by design: they own no
+    // source, and cite other specs. Absence of a bundle is not evidence of prose,
+    // so the stop must not fire or these become impossible to repair.
+    const root = fixture();
+    mkdirSync(join(root, 'openspec', 'specs', 'overview'), { recursive: true });
+    writeFileSync(
+      join(root, 'openspec', 'specs', 'overview', 'spec.md'),
+      '# Overview\n\nSee [analyzer](../analyzer/spec.md).\n\n### Requirement: Describes The System\n',
+    );
+
+    const result = await prepareSpecRepair({ directory: root, domain: 'overview' });
+    expect(result.evidence?.domainBehavior).toMatchObject({ state: 'unavailable', proseOnlyOrphan: false });
+    expect(result.receipt.followUps.some(f => f.tool === 'ask:human-decision')).toBe(false);
+  });
+
+  it('still stops when the only symbols in the domain live in a test file', async () => {
+    // A requirement anchors to the implementation, never to a test: symbols that
+    // exist only in an attached test give nothing to anchor to.
+    const root = mkdtempSync(join(tmpdir(), 'openlore-spec-workflow-tests-'));
+    roots.push(root);
+    const analysis = join(root, '.openlore', 'analysis');
+    mkdirSync(analysis, { recursive: true });
+    const impl = 'src/papers/render.md';
+    const test = 'src/papers/render.test.ts';
+    writeFileSync(join(analysis, 'repo-structure.json'), JSON.stringify({
+      projectName: 'fixture', projectType: 'nodejs', frameworks: [], architecture: { pattern: 'modular', layers: [] },
+      domains: [{ name: 'papers', files: [impl, test], definingFiles: [impl], supportingFiles: [test], entities: [], keyFile: impl }],
+      undomained: [], entryPoints: [], dataFlow: {}, keyFiles: {}, schemas: [], routeInventory: { routes: [] }, statistics: {},
+    }));
+    writeFileSync(join(analysis, 'dependency-graph.json'), JSON.stringify({
+      nodes: [{ id: impl, file: { path: impl }, exports: [] }, { id: test, file: { path: test }, exports: [] }],
+      edges: [], clusters: [], cycles: [], statistics: {},
+    }));
+    writeFileSync(join(analysis, 'llm-context.json'), JSON.stringify({
+      signatures: [{ path: test, language: 'TypeScript', entries: [{ name: 'itRenders', kind: 'function', signature: 'function itRenders(): void' }] }],
+      phase2_deep: { files: [] },
+    }));
+
+    const result = await prepareSpecGeneration({ directory: root, domain: 'papers' });
+    expect(result.evidence?.domainBehavior).toMatchObject({
+      state: 'documentation-only', symbolCount: 0, supportingSymbolCount: 1,
+    });
+    expect(result.receipt.followUps.some(f => f.tool === 'ask:human-decision')).toBe(true);
+  });
+
+  it('treats a code domain with no extracted signatures as behavior, not as prose', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'openlore-spec-workflow-routes-'));
+    roots.push(root);
+    const analysis = join(root, '.openlore', 'analysis');
+    mkdirSync(analysis, { recursive: true });
+    const boot = 'src/api/server.ts';
+    writeFileSync(join(analysis, 'repo-structure.json'), JSON.stringify({
+      projectName: 'fixture', projectType: 'nodejs', frameworks: [], architecture: { pattern: 'modular', layers: [] },
+      domains: [{ name: 'api', files: [boot], definingFiles: [boot], supportingFiles: [], entities: [], keyFile: boot }],
+      undomained: [], entryPoints: [], dataFlow: {}, keyFiles: {}, schemas: [],
+      routeInventory: { routes: [{ method: 'GET', path: '/health', file: boot }] }, statistics: {},
+    }));
+    writeFileSync(join(analysis, 'dependency-graph.json'), JSON.stringify({
+      nodes: [{ id: boot, file: { path: boot }, exports: [] }], edges: [], clusters: [], cycles: [], statistics: {},
+    }));
+    writeFileSync(join(analysis, 'llm-context.json'), JSON.stringify({ signatures: [], phase2_deep: { files: [] } }));
+
+    const result = await prepareSpecGeneration({ directory: root, domain: 'api' });
+    expect(result.evidence?.domainBehavior).toMatchObject({ state: 'behavioral', symbolCount: 0, routeCount: 1 });
+    expect(result.receipt.followUps.some(f => f.tool === 'ask:human-decision')).toBe(false);
+  });
+
+  it('does not raise the no-behavior stop on a domain that has symbols', async () => {
+    const result = await prepareSpecGeneration({ directory: fixture(), domain: 'billing' });
+    expect(result.evidence?.domainBehavior).toMatchObject({ state: 'behavioral' });
+    expect(result.receipt.followUps.some(f => f.tool === 'ask:human-decision')).toBe(false);
+  });
+
+  it('discloses on BOTH authoring paths that OpenLore validated nothing', async () => {
+    // A spec written by Generate is no more self-validating than one edited by
+    // Repair, so the disclosure and the command are identical on both.
+    const root = fixture();
+    mkdirSync(join(root, 'openspec', 'specs', 'billing'), { recursive: true });
+    writeFileSync(join(root, 'openspec', 'specs', 'billing', 'spec.md'), '# Billing\n\n### Requirement: Bills\n');
+
+    for (const result of [
+      await prepareSpecGeneration({ directory: root, domain: 'billing' }),
+      await prepareSpecRepair({ directory: root, domain: 'billing' }),
+    ]) {
+      expect(result.evidence?.specValidation).toMatchObject({
+        validatedByOpenLore: false,
+        command: 'openspec validate --specs --strict',
+      });
+      const validation = result.receipt.followUps.find(f => f.tool === 'cli:openspec validate --specs --strict');
+      expect(validation).toBeDefined();
+      expect(validation!.reason).toMatch(/NOT validated/);
+      // `--specs`, not `--all`: an unrelated invalid change in flight must not
+      // fail the check for a baseline spec that is perfectly valid.
+      expect(validation!.tool).not.toMatch(/--all/);
+    }
+  });
+
+  it('names the relocated spec corpus the CLI will not learn from OpenLore config', async () => {
+    const root = fixture();
+    writeFileSync(join(root, '.openlore', 'config.json'), JSON.stringify({
+      version: '1', projectType: 'nodejs', openspecPath: 'contracts',
+      analysis: { maxFiles: 100, includePatterns: ['**/*.ts'], excludePatterns: ['node_modules/**'] },
+      generation: { domains: 'auto' },
+      createdAt: new Date().toISOString(), lastRun: new Date().toISOString(),
+    }));
+    mkdirSync(join(root, 'contracts', 'specs', 'billing'), { recursive: true });
+    writeFileSync(join(root, 'contracts', 'specs', 'billing', 'spec.md'), '# Billing\n\n### Requirement: Bills\n');
+
+    const result = await prepareSpecRepair({ directory: root, domain: 'billing' });
+    expect(result.evidence?.specValidation).toMatchObject({
+      specRoot: 'contracts', specRootIsDefault: false, cliValidationAvailable: false,
+    });
+    // No runnable command exists for a relocated corpus — the CLI fails with
+    // "No OpenSpec root found" from the repo root and from inside it alike — so
+    // the follow-up discloses the gap instead of advertising an invocation that
+    // cannot be followed.
+    expect(result.receipt.followUps.some(f => f.tool.startsWith('cli:openspec validate'))).toBe(false);
+    const disclosure = result.receipt.followUps.find(f => f.tool === 'disclose:validation-unavailable');
+    expect(disclosure).toBeDefined();
+    expect(disclosure!.reason).toMatch(/`contracts\/`/);
+    expect(disclosure!.reason).toMatch(/NOT validated/);
+  });
+
+  it('discloses that OpenLore did not validate the spec, and names the OpenSpec command', async () => {
+    // OpenLore does not own the OpenSpec format and never validates it. The receipt
+    // must say so and name the command, so a host without a working `openspec` CLI
+    // reports the repair as UNVALIDATED instead of implying it passed.
+    const root = fixture(1);
+    mkdirSync(join(root, 'openspec', 'specs', 'billing'), { recursive: true });
+    writeFileSync(join(root, 'openspec', 'specs', 'billing', 'spec.md'), '# Billing\n\n### Requirement: Bills\n');
+
+    const result = await prepareSpecRepair({ directory: root, domain: 'billing' });
+    expect(result.evidence?.specValidation).toMatchObject({
+      validatedByOpenLore: false,
+      command: 'openspec validate --specs --strict',
+    });
+    const validation = result.receipt.followUps.find(f => f.tool === 'cli:openspec validate --specs --strict');
+    expect(validation).toBeDefined();
+    expect(validation!.reason).toMatch(/NOT validated/);
+  });
+
+  it('reports an unresolvable OpenSpec package as unknown, not as absent', async () => {
+    // A globally installed CLI resolves from neither scope, so `unresolved` is a
+    // disclosed unknown — the follow-up is emitted either way, never suppressed.
+    const root = fixture(1);
+    mkdirSync(join(root, 'openspec', 'specs', 'billing'), { recursive: true });
+    writeFileSync(join(root, 'openspec', 'specs', 'billing', 'spec.md'), '# Billing\n\n### Requirement: Bills\n');
+
+    const result = await prepareSpecRepair({ directory: root, domain: 'billing' });
+    const validation = result.evidence?.specValidation as Record<string, unknown>;
+    expect(['resolved', 'unresolved']).toContain(validation.packageResolution);
+    expect(validation.validatedByOpenLore).toBe(false);
+    expect(
+      result.receipt.followUps.some(f => f.tool === 'cli:openspec validate --specs --strict')
+    ).toBe(true);
   });
 
   it('withholds coverage metrics for a spec outside the link corpus', async () => {

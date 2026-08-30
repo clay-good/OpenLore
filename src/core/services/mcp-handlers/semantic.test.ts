@@ -31,6 +31,19 @@ async function writeAnalysisFile(dir: string, filename: string, content: object)
   await writeFile(join(analysisDir, filename), JSON.stringify(content), 'utf-8');
 }
 
+async function writeOpenLoreConfig(dir: string, openspecPath: string) {
+  await mkdir(join(dir, '.openlore'), { recursive: true });
+  await writeFile(join(dir, '.openlore', 'config.json'), JSON.stringify({
+    version: '1.0.0',
+    projectType: 'nodejs',
+    openspecPath,
+    analysis: { maxFiles: 100, includePatterns: [], excludePatterns: [] },
+    generation: { domains: 'auto' },
+    createdAt: '2026-08-30T00:00:00.000Z',
+    lastRun: null,
+  }), 'utf-8');
+}
+
 // ============================================================================
 // MOCK validateDirectory
 // ============================================================================
@@ -180,6 +193,32 @@ describe('handleListSpecDomains', () => {
     const result = await handleListSpecDomains(tmpDir) as { domains: string[]; count: number };
     expect(result.count).toBe(result.domains.length);
   });
+
+  it('reads domains from the configured in-project spec root', async () => {
+    await writeOpenLoreConfig(tmpDir, 'contracts');
+    const specsDir = join(tmpDir, 'contracts', 'specs', 'billing');
+    await mkdir(specsDir, { recursive: true });
+    await writeFile(join(specsDir, 'spec.md'), '# Billing', 'utf-8');
+
+    const { handleListSpecDomains } = await import('./semantic.js');
+    const result = await handleListSpecDomains(tmpDir) as { domains: string[]; count: number };
+    expect(result).toMatchObject({ domains: ['billing'], count: 1 });
+  });
+
+  it('confines a configured spec root that escapes the project', async () => {
+    const outside = await mkdtemp(join(tmpdir(), 'openlore-semantic-outside-'));
+    try {
+      await mkdir(join(outside, 'specs', 'secret'), { recursive: true });
+      await writeFile(join(outside, 'specs', 'secret', 'spec.md'), '# Secret', 'utf-8');
+      await writeOpenLoreConfig(tmpDir, outside);
+
+      const { handleListSpecDomains } = await import('./semantic.js');
+      const result = await handleListSpecDomains(tmpDir) as { domains: string[] };
+      expect(result.domains).not.toContain('secret');
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
 });
 
 // ============================================================================
@@ -238,6 +277,21 @@ describe('handleGetSpec', () => {
     expect(result.domain).toBe('auth');
     expect(result.content).toContain('Auth Spec');
     expect(result.specFile).toBe('openspec/specs/auth/spec.md');
+    expect(result.provenance).toBe('local-unreviewed');
+  });
+
+  it('returns spec content from the configured in-project spec root', async () => {
+    await writeOpenLoreConfig(tmpDir, './contracts/');
+    const specsDir = join(tmpDir, 'contracts', 'specs', 'auth');
+    await mkdir(specsDir, { recursive: true });
+    await writeFile(join(specsDir, 'spec.md'), '# Relocated Auth', 'utf-8');
+
+    const { handleGetSpec } = await import('./semantic.js');
+    const result = await handleGetSpec(tmpDir, 'auth') as {
+      content: string; specFile: string; provenance: string;
+    };
+    expect(result.content).toContain('Relocated Auth');
+    expect(result.specFile).toBe('contracts/specs/auth/spec.md');
     expect(result.provenance).toBe('local-unreviewed');
   });
 

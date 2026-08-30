@@ -507,6 +507,8 @@ export const PI_DAEMON_PRESET = 'full';
 export const PI_SPEC_WORKFLOW_OBSERVATIONS = {
   generation: {
     domainEvidence: 'prepare_spec_generation',
+    domainBehavior: 'prepare_spec_generation',
+    specValidation: 'prepare_spec_generation',
   },
   repair: {
     domainEvidence: 'prepare_spec_repair',
@@ -517,6 +519,8 @@ export const PI_SPEC_WORKFLOW_OBSERVATIONS = {
     orphanRequirement: 'prepare_spec_repair',
     structuralChange: 'prepare_spec_repair',
     mappingCoverage: 'prepare_spec_repair',
+    specValidation: 'prepare_spec_repair',
+    domainBehavior: 'prepare_spec_repair',
   },
 } as const;
 

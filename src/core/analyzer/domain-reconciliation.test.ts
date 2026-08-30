@@ -82,6 +82,51 @@ describe('domain file roles', () => {
     expect(classifyDomainFile(file('src/generated/client.ts', { isGenerated: true }))).toEqual({ role: 'excluded', reason: 'generated-file' });
     expect(classifyDomainFile(file('AGENTS.md', { tooling: true }))).toEqual({ role: 'excluded', reason: 'tooling-file' });
   });
+
+  it('keeps documentation supporting so prose never defines a domain', () => {
+    // Prose describes a system, it does not implement one: a requirement can never
+    // be anchored to it. `supporting` (not `excluded`) so a code domain still keeps
+    // its docs as footprint evidence.
+    for (const path of ['README.md', 'docs/guide.mdx', 'CHANGELOG.md', 'doc/manual.rst', '.cursor/rules/x.mdc', 'README.txt', 'LICENSE.txt']) {
+      expect(classifyDomainFile(file(path)), path).toEqual({ role: 'supporting', reason: 'documentation-file' });
+    }
+    // Extension-less project meta is matched by its conventional stem, including
+    // the qualified variants (`LICENSE-MIT`, `COPYING.LESSER`) real repos ship.
+    for (const path of [
+      'LICENSE', 'NOTICE', 'COPYING', 'AUTHORS', 'packages/api/LICENSE',
+      'LICENSE-MIT', 'LICENSE_APACHE', 'COPYING.LESSER', 'CODE_OF_CONDUCT',
+      'CONTRIBUTING', 'SECURITY', 'SUPPORT', 'GOVERNANCE', 'CODEOWNERS',
+      'THIRD_PARTY_NOTICES', 'CITATION.cff',
+    ]) {
+      expect(classifyDomainFile(file(path)), path).toEqual({ role: 'supporting', reason: 'documentation-file' });
+    }
+    // Prose about configuration is still prose, even though the walker flags the
+    // name as config.
+    expect(classifyDomainFile(file('docs/config.md', { isConfig: true })))
+      .toEqual({ role: 'supporting', reason: 'documentation-file' });
+    // `.txt` carries prose and build config alike, so the config names are named:
+    // these fall through to the ordinary config rule instead of becoming prose.
+    // The walker's CONFIG_PATTERNS names none of these, so `isConfig` is false and
+    // they must be excluded on their own merit — otherwise a Python or CMake
+    // project's dependency file could define a domain.
+    for (const path of ['requirements.txt', 'requirements-dev.txt', 'constraints.txt', 'CMakeLists.txt']) {
+      expect(classifyDomainFile(file(path)), path).toEqual({ role: 'excluded', reason: 'config-file' });
+    }
+    // The exception is anchored on the whole basename: prose that merely contains
+    // one of those words stays prose, so it can never define a domain.
+    for (const path of ['docs/product-requirements.txt', 'docs/security-constraints.txt']) {
+      expect(classifyDomainFile(file(path)), path).toEqual({ role: 'supporting', reason: 'documentation-file' });
+    }
+
+    // Project metadata is conventionally UPPER-CASE. Without that requirement an
+    // extensionless executable would read as prose and its domain would vanish.
+    for (const path of [
+      'src/license/license.ts', 'src/docs/readme-generator.ts', 'src/changelog.ts',
+      'bin/readme', 'scripts/changelog', 'src/license', 'bin/CODE',
+    ]) {
+      expect(classifyDomainFile(file(path)), path).toEqual({ role: 'defining', reason: 'production-source' });
+    }
+  });
 });
 
 describe('reconcileRepositoryDomains', () => {
@@ -102,6 +147,56 @@ describe('reconcileRepositoryDomains', () => {
     expect(result.decisions).toContainEqual(expect.objectContaining({ candidate: 'stages', disposition: 'merged', reason: 'technical-child', owner: 'generator' }));
     expect(result.decisions).toContainEqual(expect.objectContaining({ candidate: 'stages', sources: ['dependency-cluster', 'technical-role'] }));
     expect(result.decisions).toContainEqual(expect.objectContaining({ candidate: test.path, disposition: 'attached', reason: 'supporting-path-owner', owner: 'generator' }));
+  });
+
+  it('never promotes a documentation-only tree to a domain', () => {
+    // The failure this closes: a docs/licence tree became a domain, the spec
+    // workflows offered it as a target, and the host authored SHALL requirements
+    // over prose. No new mechanism — documentation is non-defining, so the
+    // existing `non-defining-only` rule drops the candidate.
+    const readme = file('docs/README.md');
+    const guide = file('docs/guide.md');
+    const licence = file('docs/LICENSE');
+    const files = [readme, guide, licence];
+    const result = reconcileRepositoryDomains(
+      repo(files, { docs: files }),
+      graph(files, [cluster('docs', 'docs', files)]),
+    );
+
+    expect(result.domains).toEqual([]);
+    expect(result.decisions).toContainEqual(expect.objectContaining({
+      candidate: 'docs', disposition: 'excluded', reason: 'non-defining-only',
+    }));
+  });
+
+  it('records a documentation-only DIRECTORY candidate as excluded, never promoted', () => {
+    // The directory path decides on `candidate.files`, which is already filtered to
+    // defining files at construction — so a prose-only directory reaches the
+    // zero-length branch and is disclosed as excluded, not promoted-then-emptied.
+    const readme = file('docs/README.md');
+    const guide = file('docs/guide.md');
+    const files = [readme, guide];
+    const result = reconcileRepositoryDomains(repo(files, { docs: files }), graph(files, []));
+
+    expect(result.domains).toEqual([]);
+    expect(result.decisions).toContainEqual(expect.objectContaining({
+      candidate: 'docs', disposition: 'excluded', reason: 'non-defining-only',
+    }));
+    expect(result.decisions.some(item => item.candidate === 'docs' && item.disposition === 'promoted')).toBe(false);
+  });
+
+  it('keeps a code domain\'s own documentation attached as supporting evidence', () => {
+    const service = file('src/billing/service.ts');
+    const readme = file('src/billing/README.md');
+    const files = [service, readme];
+    const result = reconcileRepositoryDomains(
+      repo(files, { billing: [service] }),
+      graph(files, [cluster('billing', 'src/billing', [service])]),
+    );
+
+    expect(result.domains.map(item => item.name)).toEqual(['billing']);
+    expect(result.domains[0].definingFiles.map(item => item.path)).toEqual([service.path]);
+    expect(result.domains[0].supportingFiles.map(item => item.path)).toEqual([readme.path]);
   });
 
   it('excludes fixture-only clusters and discloses their files', () => {

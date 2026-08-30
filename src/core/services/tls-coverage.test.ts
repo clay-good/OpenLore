@@ -45,9 +45,9 @@ const EXEMPT: { file: string; line: number; why: string }[] = [
   { file: 'src/cli/commands/serve.ts', line: 284, why: 'loopback http:// health and compatibility probe' },
   { file: 'src/cli/commands/serve.ts', line: 356, why: 'loopback http:// authenticated shutdown request' },
   { file: 'src/cli/commands/serve-descriptor.ts', line: 212, why: 'loopback http:// legacy liveness probe' },
-  { file: 'src/pi/extension.ts', line: 546, why: 'loopback http:// health probe' },
-  { file: 'src/pi/extension.ts', line: 721, why: 'loopback http:// daemon call' },
-  { file: 'src/pi/extension.ts', line: 1563, why: 'loopback http:// health probe' },
+  { file: 'src/pi/extension.ts', line: 550, why: 'loopback http:// health probe' },
+  { file: 'src/pi/extension.ts', line: 725, why: 'loopback http:// daemon call' },
+  { file: 'src/pi/extension.ts', line: 1567, why: 'loopback http:// health probe' },
   {
     file: 'src/pi/extension.ts',
     line: 195,
