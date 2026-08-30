@@ -141,7 +141,7 @@ function isLocalOnlyDebris(name: string): boolean {
  * `openlore analyze`; the features that use it degrade gracefully rather than serve stale results).
  */
 const REBUILDABLE_INDEX_SUBDIRS = ['vector-index', 'text-line-index'];
-const IMPORT_STAGE_PREFIX = '.openlore-import-next-';
+export const IMPORT_STAGE_PREFIX = '.openlore-import-next-';
 
 function processIsAlive(pid: number): boolean {
   try {
@@ -780,6 +780,9 @@ export async function promoteStagedIndex(
   testHooks: {
     afterStep?: (step: string) => void | Promise<void>;
     beforePublish?: () => void | Promise<void>;
+    afterPublish?: () => void | Promise<void>;
+    /** Flat artifact basenames derived locally in staging after bundle validation. */
+    localFiles?: readonly string[];
   } = {},
 ): Promise<void> {
   await mkdir(analysisDir, { recursive: true });
@@ -791,7 +794,11 @@ export async function promoteStagedIndex(
   // Copy every candidate onto the destination filesystem before the commit begins. Each final
   // rename is therefore an atomic file replacement, including when os.tmpdir() is another mount.
   try {
-    for (const name of Object.keys(bundle.payload).sort()) {
+    const candidateNames = [...new Set([
+      ...Object.keys(bundle.payload),
+      ...(testHooks.localFiles ?? []),
+    ])].sort();
+    for (const name of candidateNames) {
       if (!isSafeBundleFileName(name)) {
         throw new BundleError('unreadable', `Unsafe bundled file name: ${JSON.stringify(name)}.`);
       }
@@ -895,6 +902,7 @@ export async function promoteStagedIndex(
           );
         }
         await syncDirectory(analysisDir);
+        await testHooks.afterPublish?.();
         await testHooks.afterStep?.('generation-published');
       } catch (err) {
         if (replacements === 0) {
@@ -903,6 +911,9 @@ export async function promoteStagedIndex(
           }
           if (priorManifest) await atomicWriteFile(join(analysisDir, GENERATION_MANIFEST_FILE), priorManifest);
           else await rm(join(analysisDir, GENERATION_MANIFEST_FILE), { force: true });
+        } else {
+          // A validation failure after publication must not leave the rejected generation readable.
+          await markGenerationUnavailable(analysisDir);
         }
         throw err;
       }

@@ -83,9 +83,14 @@ Currency outcomes once the artifact has validated:
   state never means clean.
 - **no git repo / no recorded build commit** → imported as-is, but currency is **disclosed as
   UNVERIFIED** (run `openlore analyze` if the source has changed).
-- **stale (built at an ancestor commit)** or **diverged/unknown** → **full local rebuild**, so the index is
-  current. (Incremental-delta update of only the changed files is a deferred optimization; the rebuild
-  result is identical to a fresh analyze at the working-tree commit.)
+- **clean stale ancestor** → the validated bundle is applied in staging, then the exact Git delta
+  (including local tracked and untracked changes) is intersected with the configured analysis corpus
+  and passed through the watcher's bounded converge-or-flag path. The receipt reports delta size,
+  closure size, and any explicitly stale remainder.
+- **dirty/unknown ancestor, changed analysis configuration or ignore rules, configured include
+  patterns not represented by a legacy bundle fingerprint, oversized/truncated delta, or
+  diverged/unknown history** → **full local rebuild**. These cases cannot prove an exact baseline or
+  bounded corpus, so import does not guess.
 
 Any *unexpected* failure during materialization or validation (e.g. a structurally-valid bundle whose
 `call-graph.db` turns out to be corrupt) also degrades to a rebuild rather than crashing the command.
@@ -160,16 +165,16 @@ against the checked-out commit, it is safe to run unconditionally:
     fi
 ```
 
-If the committed artifact is at the CI checkout's commit (the regenerate-don't-merge discipline keeps it
-there), import is a fast file-materialization with separate integrity, provenance, and currency
-receipts. If the artifact lags the checkout, import rebuilds — correct, just not free.
+If the committed artifact is at the CI checkout's commit, import is a fast file-materialization with
+separate integrity, provenance, and currency receipts. If a clean artifact lags on the same history,
+import catches up the bounded source delta; larger or unverifiable gaps rebuild.
 
 ## What this is not
 
 - Not a new on-disk graph schema and not a graph merge algorithm — it exports the existing index and
   regenerates on divergence.
 - Not a hosted cache or registry — it is git-distributed and offline.
-- Not a way to serve a stale graph — validate-or-rebuild is mandatory.
+- Not a way to serve undisclosed stale state — bounded catch-up either converges or names its
+  explicit-stale remainder; unsafe corpus or history changes rebuild.
 
-Deferred follow-ups: incremental-delta import for the stale path and cross-repo/federated bundles
-(federation already has its own index-of-indexes).
+Deferred follow-up: cross-repo/federated bundles (federation already has its own index-of-indexes).

@@ -2319,6 +2319,19 @@ SHALL NOT describe the run as a complete repository analysis.
 - **WHEN** the command runs
 - **THEN** it performs and reports a full rebuild rather than a partial forced extraction
 
+### Requirement: ReuseWatcherRepositorydeltaSemanticsForAncestorBundleCatchup
+
+The system SHALL apply clean ancestor bundle catch-up changes through the same repository-scoped watcher mutation path used for live updates.
+
+> Decision recorded: fbf129f7
+> Date: 2026-08-30
+
+#### Scenario: The decision requirement is enforced
+
+- **GIVEN** approved decision `fbf129f7`
+- **WHEN** the affected behavior is evaluated
+- **THEN** The system SHALL apply clean ancestor bundle catch-up changes through the same repository-scoped watcher mutation path used for live updates.
+
 ## Technical Notes
 
 - **Dependencies**: ora, logger, ProgressIndicator, showNextSteps, @inquirer/prompts
@@ -2602,3 +2615,15 @@ Benchmark-cleared. The DefaultSurfaceRevealsAllFaces gate ran all three quantiti
 The injection relevance gate must use the same identifier-aware tokenization as BM25 while the Pi host must not import the analyzer-backed vector index. Extracting the pure tokenizer into a dependency-light module preserves one tokenization contract without loading analyzer dependencies.
 
 **Consequences:** The vector index re-exports the tokenizer for compatibility, while injection and Pi consume the lightweight implementation directly.
+
+### Reuse watcher repository-delta semantics for ancestor bundle catch-up
+
+**Status:** Approved
+**Date:** 2026-08-30
+**ID:** fbf129f7
+
+
+
+Clean ancestor bundle imports must apply Git changes through the same closure, rebinding, budget, and stale-region behavior as live watcher updates while keeping validation and diverged rebuild behavior unchanged.
+
+**Consequences:** McpWatcher exposes a repository-scoped delta method that import invokes against validated staging; the shared boundary remains the watcher mutation lane and no second incremental algorithm is introduced.

@@ -28,13 +28,13 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { EdgeStore } from './edge-store.js';
 import { _resetContextCacheForTesting } from './mcp-handlers/utils.js';
-import type { CallEdge, FunctionNode } from '../analyzer/call-graph.js';
+import type { CallEdge, ClassNode, FunctionNode, InheritanceEdge } from '../analyzer/call-graph.js';
 import { semanticAnswerBytes } from '../analyzer/derived-artifact-equivalence.js';
 import { registerRepairHost } from './cold-start-bootstrap.js';
 import { computeIndexStaleness } from './mcp-handlers/index-staleness.js';
 import { ServeWatchRepairCoordinator } from '../../cli/commands/serve.js';
 import * as analyzeApi from '../../api/analyze.js';
-import { readEditVerdictStore } from './edit-verdict.js';
+import { MAX_EDIT_VERDICT_BASIS_FILE_BYTES, readEditVerdictStore } from './edit-verdict.js';
 
 // Prevent a real chokidar watcher from opening (handleChange path never starts one,
 // but retain an event-complete deterministic watcher harness for the serve/watch
@@ -109,13 +109,27 @@ async function writeFiles(files: Files): Promise<void> {
 }
 
 /** From-scratch ("analyze --force") build over the whole file-set — the oracle. */
-async function fullBuild(files: Files): Promise<{ nodes: FunctionNode[]; edges: CallEdge[] }> {
+async function fullBuild(files: Files): Promise<{
+  nodes: FunctionNode[];
+  edges: CallEdge[];
+  classes: ClassNode[];
+  inheritanceEdges: InheritanceEdge[];
+  hubFunctions: FunctionNode[];
+  entryPoints: FunctionNode[];
+}> {
   const { CallGraphBuilder } = await import('../analyzer/call-graph.js');
   const input = Object.entries(files).map(([path, content]) => ({
     path, content, language: path.endsWith('.py') ? 'Python' : 'TypeScript',
   }));
   const r = await new CallGraphBuilder().build(input);
-  return { nodes: Array.from(r.nodes.values()), edges: r.edges };
+  return {
+    nodes: Array.from(r.nodes.values()),
+    edges: r.edges,
+    classes: r.classes,
+    inheritanceEdges: r.inheritanceEdges,
+    hubFunctions: r.hubFunctions,
+    entryPoints: r.entryPoints,
+  };
 }
 
 /** Read the authoritative post-change source snapshot from disk. */
@@ -158,10 +172,18 @@ function storedGraphProjection(store: EdgeStore): unknown {
 }
 
 /** Seed the edge store with a complete graph + per-file content hashes. */
-function seedStore(store: EdgeStore, files: Files, graph: { nodes: FunctionNode[]; edges: CallEdge[] }): void {
+function seedStore(store: EdgeStore, files: Files, graph: {
+  nodes: FunctionNode[];
+  edges: CallEdge[];
+  classes?: ClassNode[];
+  inheritanceEdges?: InheritanceEdge[];
+}): void {
   store.transaction(() => {
     store.insertNodes(graph.nodes);
     store.insertEdges(graph.edges);
+    store.insertClasses(graph.classes ?? []);
+    store.insertInheritanceEdges(graph.inheritanceEdges ?? []);
+    store.recomputeStructuralMetrics();
     for (const [rel, content] of Object.entries(files)) {
       store.setFileHash(rel, createHash('sha256').update(content).digest('hex'));
     }
@@ -215,6 +237,169 @@ describe('incremental watch converges to analyze --force (parity oracle)', () =>
       'edit-broken-reference',
     ]);
     expect(findings.map(f => f.location?.path).sort()).toEqual(['src/a.ts', 'src/b.ts']);
+  });
+
+  it('applies an explicit repository delta and reports the over-budget remainder stale', async () => {
+    const v1: Files = {
+      'src/api.ts': 'export function target() { return 1; }\n',
+      'src/use.ts': "import { target } from './api';\nexport function use() { return target(); }\n",
+    };
+    await writeFiles(v1);
+    const store = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    seedStore(store, v1, await fullBuild(v1));
+    store.close();
+    await writeFile(join(root, 'src/api.ts'), 'export function renamed() { return 1; }\n');
+
+    const { McpWatcher } = await import('./mcp-watcher.js');
+    const result = await new McpWatcher({ rootPath: root, outputPath, embed: false, closureBudget: 0 })
+      .applyRepositoryDelta(['src/api.ts'], []);
+
+    expect(result.changedFiles).toEqual(['src/api.ts']);
+    expect(result.closureFiles).toEqual(['src/api.ts']);
+    expect(result.staleFiles).toEqual(['src/use.ts']);
+  });
+
+  it('re-resolves surviving callers after a repository-delta deletion', async () => {
+    const v1: Files = {
+      'src/a.ts': 'export function a() { return b(); }\n',
+      'src/b.ts': 'export function b() { return 1; }\n',
+    };
+    await writeFiles(v1);
+    const store = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    seedStore(store, v1, await fullBuild(v1));
+    store.close();
+    await rm(join(root, 'src/b.ts'));
+
+    const { McpWatcher } = await import('./mcp-watcher.js');
+    const result = await new McpWatcher({ rootPath: root, outputPath, embed: false, closureBudget: 10 })
+      .applyRepositoryDelta([], ['src/b.ts']);
+
+    const actual = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    expect(storedGraphProjection(actual)).toEqual(graphProjection(await fullBuild({ 'src/a.ts': v1['src/a.ts'] })));
+    expect(actual.getStaleFiles()).toEqual([]);
+    expect(result.closureFiles).toContain('src/a.ts');
+    actual.close();
+  });
+
+  it('force-repairs an unchanged-content caller reported changed alongside a deletion', async () => {
+    const v1: Files = {
+      'src/a.ts': 'export function a() { return b(); }\n',
+      'src/b.ts': 'export function b() { return 1; }\n',
+    };
+    await writeFiles(v1);
+    const store = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    seedStore(store, v1, await fullBuild(v1));
+    store.close();
+    await rm(join(root, 'src/b.ts'));
+
+    const { McpWatcher } = await import('./mcp-watcher.js');
+    const result = await new McpWatcher({ rootPath: root, outputPath, embed: false, closureBudget: 10 })
+      .applyRepositoryDelta(['src/a.ts'], ['src/b.ts']);
+
+    const actual = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    expect(storedGraphProjection(actual)).toEqual(graphProjection(await fullBuild({ 'src/a.ts': v1['src/a.ts'] })));
+    expect(actual.getStaleFiles()).toEqual([]);
+    expect(result.closureFiles).toContain('src/a.ts');
+    actual.close();
+  });
+
+  it('re-resolves an ambiguous consumer when deleting one duplicate definition', async () => {
+    const v1: Files = {
+      'src/a.ts': 'export function foo() { return 1; }\n',
+      'src/b.ts': 'export function foo() { return 2; }\n',
+      'src/use.ts': 'export function use() { return foo(); }\n',
+    };
+    await writeFiles(v1);
+    const store = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    seedStore(store, v1, await fullBuild(v1));
+    store.close();
+    await rm(join(root, 'src/b.ts'));
+
+    const { McpWatcher } = await import('./mcp-watcher.js');
+    const result = await new McpWatcher({ rootPath: root, outputPath, embed: false, closureBudget: 10 })
+      .applyRepositoryDelta([], ['src/b.ts']);
+
+    const actual = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    expect(storedGraphProjection(actual)).toEqual(graphProjection(await fullBuild({
+      'src/a.ts': v1['src/a.ts'],
+      'src/use.ts': v1['src/use.ts'],
+    })));
+    expect(actual.getStaleFiles()).toEqual([]);
+    expect(result.closureFiles).toContain('src/use.ts');
+    actual.close();
+  });
+
+  it('marks a selected deletion caller stale when it cannot be read within the bound', async () => {
+    const v1: Files = {
+      'src/a.ts': 'export function a() { return b(); }\n',
+      'src/b.ts': 'export function b() { return 1; }\n',
+    };
+    await writeFiles(v1);
+    const store = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    seedStore(store, v1, await fullBuild(v1));
+    store.close();
+    await writeFile(
+      join(root, 'src/a.ts'),
+      v1['src/a.ts'] + ' '.repeat(MAX_EDIT_VERDICT_BASIS_FILE_BYTES),
+    );
+    await rm(join(root, 'src/b.ts'));
+
+    const { McpWatcher } = await import('./mcp-watcher.js');
+    const result = await new McpWatcher({ rootPath: root, outputPath, embed: false, closureBudget: 10 })
+      .applyRepositoryDelta([], ['src/b.ts']);
+
+    expect(result.staleFiles).toContain('src/a.ts');
+  });
+
+  it('replaces class hierarchy overlays and recomputes structural metrics', async () => {
+    const v1: Files = {
+      'src/base.ts': 'export class Base { value() { return 1; } }\n',
+      'src/child.ts': "import { Base } from './base';\nexport class Child extends Base { child() { return 4; } }\n",
+      'src/use.ts': "import { Base } from './base';\nexport function use(v: Base) { return v.value(); }\n",
+    };
+    await writeFiles(v1);
+    const store = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    seedStore(store, v1, await fullBuild(v1));
+    store.close();
+    const currentBase = 'export class Parent { value() { return 2; } added() { return 3; } }\n';
+    await writeFile(join(root, 'src/base.ts'), currentBase);
+
+    const { McpWatcher } = await import('./mcp-watcher.js');
+    await new McpWatcher({ rootPath: root, outputPath, embed: false, closureBudget: 10 })
+      .applyRepositoryDelta(['src/base.ts'], []);
+
+    const oracle = await fullBuild({ ...v1, 'src/base.ts': currentBase });
+    const actual = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    const classProjection = (classes: ClassNode[]) => classes.map(cls => ({
+      id: cls.id,
+      parentClasses: cls.parentClasses,
+      methodIds: cls.methodIds,
+      fanIn: cls.fanIn,
+      fanOut: cls.fanOut,
+    })).sort((a, b) => a.id.localeCompare(b.id));
+    const metricProjection = (nodes: FunctionNode[]) => nodes.map(node => ({
+      id: node.id,
+      fanIn: node.fanIn,
+      fanOut: node.fanOut,
+    })).sort((a, b) => a.id.localeCompare(b.id));
+    expect(classProjection(actual.getAllClasses())).toEqual(classProjection(oracle.classes));
+    expect(actual.getAllInheritanceEdges()).toEqual(oracle.inheritanceEdges);
+    expect(metricProjection(actual.getAllInternalNodes())).toEqual(
+      metricProjection(oracle.nodes.filter(node => !node.isExternal)),
+    );
+    expect(actual.getHubs(1_000).map(node => node.id).sort()).toEqual(
+      oracle.hubFunctions.map(node => node.id).sort(),
+    );
+    expect(actual.getEntryPoints(1_000).map(node => node.id).sort()).toEqual(
+      oracle.entryPoints.map(node => node.id).sort(),
+    );
+    actual.close();
+  });
+
+  it('rejects repository delta paths outside the project root', async () => {
+    const { McpWatcher } = await import('./mcp-watcher.js');
+    const watcher = new McpWatcher({ rootPath: root, outputPath, embed: false });
+    await expect(watcher.applyRepositoryDelta(['../escape.ts'], [])).rejects.toThrow(/escapes the project root/);
   });
 
   it('loads the internal node table once and re-parses a shared caller once per batch', async () => {

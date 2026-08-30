@@ -78,7 +78,8 @@ openlore drift --no-color                # Plain output for CI logs
 
 Turn per-run cold indexing into a validated import plus (at most) a rebuild: commit a `.olbundle`
 artifact and `openlore import` it at the top of the job. Because import validates against the checked-out
-commit and falls back to a rebuild when it can't be trusted, it is safe to run unconditionally.
+commit, catches up a bounded clean-ancestor delta, and falls back to a rebuild when it cannot prove
+that path safe, so it is safe to run unconditionally.
 
 ```bash
 if [ -f .openlore/index-bundle.olbundle ]; then

@@ -12,29 +12,32 @@
  *        clean build + commit == HEAD → import as-is (current versus that commit)
  *        dirty / legacy-unknown build → import as-is with approximate/unknown currency
  *        no git / commit unknown   → import as-is, currency disclosed as UNVERIFIED
- *        stale (ancestor) / diverged → full local rebuild (incremental-delta is a deferred optimization)
+ *        clean ancestor → apply the exact bounded delta through the watcher convergence path
+ *        diverged / dirty ancestor / oversized delta → full local rebuild
  * Any validation failure degrades transparently to a local rebuild — import never leaves the
  * consumer worse off than having no artifact. The mechanism is offline and deterministic.
  */
 
 import { Command } from 'commander';
 import { existsSync } from 'node:fs';
-import { readFile, mkdtemp, open, rm } from 'node:fs/promises';
-import { resolve, join } from 'node:path';
+import { readFile, mkdtemp, open, readdir, rm } from 'node:fs/promises';
+import { basename, resolve, join, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { logger } from '../../utils/logger.js';
+import { gitPathArgs } from '../../utils/git-args.js';
 import {
-  OPENLORE_ANALYSIS_REL_PATH, ARTIFACT_CALL_GRAPH_DB, DEFAULT_MAX_FILES,
+  OPENLORE_ANALYSIS_REL_PATH, ARTIFACT_CALL_GRAPH_DB, ARTIFACT_FINGERPRINT, DEFAULT_MAX_FILES,
   OPENSPEC_DIR, OPENSPEC_SPECS_SUBDIR, OPENSPEC_DECISIONS_SUBDIR,
+  WATCH_BULK_THRESHOLD,
 } from '../../constants.js';
 import { EdgeStore, SCHEMA_VERSION } from '../../core/services/edge-store.js';
 import { VectorIndex } from '../../core/analyzer/vector-index.js';
 import { mapFilesBounded } from '../../core/analyzer/bounded-file-scan.js';
 import { SpecVectorIndex } from '../../core/analyzer/spec-vector-index.js';
 import type { FileSignatureMap } from '../../core/analyzer/signature-extractor.js';
-import { reconcile } from '../../core/analyzer/index-attestation.js';
+import { computeAttestation, reconcile, writeAttestation } from '../../core/analyzer/index-attestation.js';
 import { isGitRepository, validateGitRef } from '../../core/drift/git-diff.js';
 import {
   parseBundle,
@@ -48,14 +51,24 @@ import {
   BundleError,
   BUNDLE_VERSION,
   BUNDLE_MAX_COMPRESSED_BYTES,
+  IMPORT_STAGE_PREFIX,
   type Bundle,
   type BundleSignatureVerdict,
 } from '../../core/analyzer/index-bundle.js';
 import { runAnalysis } from './analyze.js';
 import { readOpenLoreConfig, retargetPrimaryConfigRoot } from '../../core/services/config-manager.js';
 import { captureSourceState, type SourceTreeState } from '../../core/analyzer/source-state.js';
+import { FileWalker } from '../../core/analyzer/file-walker.js';
+import { analysisGeneratedExcludes, mergeAnalysisPatterns } from '../../core/analyzer/analysis-core.js';
+import { detectLanguage } from '../../core/analyzer/signature-extractor.js';
+import { isTestFile } from '../../core/analyzer/test-file.js';
+import { computeProjectFingerprint, fingerprintHashOfConfiguration } from '../../core/services/mcp-handlers/utils.js';
+import { McpWatcher } from '../../core/services/mcp-watcher.js';
+import { atomicWriteFile } from '../../core/decisions/atomic-store.js';
 
 const execFileAsync = promisify(execFile);
+const GIT_DELTA_MAX_PATHS = 4_096;
+const GIT_DELTA_MAX_PATH_BYTES = 1024 * 1024;
 
 export interface ImportOptions {
   projectRoot?: string;
@@ -87,7 +100,7 @@ export function preMaterializeRebuildReason(
   return null;
 }
 
-export type ImportAction = 'import-current' | 'import-approximate' | 'import-currency-unknown' | 'rebuild';
+export type ImportAction = 'import-current' | 'import-delta' | 'import-approximate' | 'import-currency-unknown' | 'rebuild';
 
 /** Decide currency once the artifact has materialized and validated. Pure — unit-tested. */
 export function currencyDecision(facts: {
@@ -141,12 +154,17 @@ export function currencyDecision(facts: {
     return { action: 'import-current', reason: 'commit-matches-head', detail: `Current at commit ${facts.sourceCommit}.` };
   }
   if (facts.commitIsAncestor) {
+    if (facts.sourceTreeState !== 'clean') {
+      return {
+        action: 'rebuild',
+        reason: 'stale-tree-state',
+        detail: 'Artifact was built from an ancestor whose source tree was not proven clean; an exact commit delta cannot reconstruct that baseline, so rebuilding locally.',
+      };
+    }
     return {
-      action: 'rebuild',
+      action: 'import-delta',
       reason: 'stale',
-      detail:
-        'Artifact was built at an ancestor commit — rebuilding locally so the index is current ' +
-        '(never serving a stale graph as current).',
+      detail: 'Artifact was built at an ancestor commit — applying the validated bundle and catching up its exact source delta.',
     };
   }
   return {
@@ -154,6 +172,291 @@ export function currencyDecision(facts: {
     reason: 'unrelated-commit',
     detail: 'Artifact build commit is not an ancestor of the working tree (diverged/unknown) — rebuilding locally.',
   };
+}
+
+export interface GitDeltaPaths {
+  changed: string[];
+  deleted: string[];
+}
+
+/** Parse `git diff --name-status -z -M` without treating repository paths as shell input. */
+export function parseGitNameStatus(raw: Buffer): GitDeltaPaths {
+  if (raw.length > 0 && raw[raw.length - 1] !== 0) {
+    throw new Error('Malformed git delta: missing terminal NUL.');
+  }
+  let offset = 0;
+  let pathCount = 0;
+  let pathBytes = 0;
+  const nextField = (): string | null => {
+    if (offset >= raw.length) return null;
+    const end = raw.indexOf(0, offset);
+    if (end < 0) throw new Error('Malformed git delta: unterminated field.');
+    const value = raw.toString('utf8', offset, end);
+    offset = end + 1;
+    return value;
+  };
+  const nextPath = (status: string): string => {
+    const path = nextField();
+    if (!path) throw new Error(`Malformed git delta entry for status ${status}.`);
+    pathCount++;
+    pathBytes += Buffer.byteLength(path);
+    if (pathCount > GIT_DELTA_MAX_PATHS || pathBytes > GIT_DELTA_MAX_PATH_BYTES) {
+      throw new Error('Git delta exceeds the bounded path-work budget; rebuilding is required.');
+    }
+    return path;
+  };
+  const changed = new Set<string>();
+  const deleted = new Set<string>();
+  for (;;) {
+    const status = nextField();
+    if (status === null) break;
+    if (!status) throw new Error('Malformed git delta: missing status.');
+    const code = status[0];
+    const scored = /^[RC](\d{1,3})$/.exec(status);
+    const validStatus = /^[ADMT]$/.test(status) ||
+      (scored !== null && Number(scored[1]) <= 100);
+    if (!validStatus || !'ACDMRT'.includes(code)) {
+      throw new Error(`Git delta status ${status} cannot be caught up safely.`);
+    }
+    const first = nextPath(status);
+    if (code === 'R' || code === 'C') {
+      const second = nextPath(status);
+      if (code === 'R') deleted.add(first);
+      changed.add(second);
+    } else if (code === 'D') {
+      deleted.add(first);
+    } else {
+      changed.add(first);
+    }
+  }
+  return { changed: [...changed].sort(), deleted: [...deleted].sort() };
+}
+
+function parseNulPaths(raw: Buffer, existingPathCount: number): string[] {
+  if (raw.length > 0 && raw[raw.length - 1] !== 0) {
+    throw new Error('Malformed git path list: missing terminal NUL.');
+  }
+  const paths: string[] = [];
+  let offset = 0;
+  let bytes = 0;
+  while (offset < raw.length) {
+    const end = raw.indexOf(0, offset);
+    if (end < 0) throw new Error('Malformed git path list: unterminated path.');
+    if (end === offset) throw new Error('Malformed git path list: empty path.');
+    const path = raw.toString('utf8', offset, end);
+    paths.push(path);
+    bytes += end - offset;
+    if (existingPathCount + paths.length > GIT_DELTA_MAX_PATHS || bytes > GIT_DELTA_MAX_PATH_BYTES) {
+      throw new Error('Git delta exceeds the bounded path-work budget; rebuilding is required.');
+    }
+    offset = end + 1;
+  }
+  return paths;
+}
+
+async function collectGitDelta(rootPath: string, sourceCommit: string): Promise<GitDeltaPaths> {
+  const [{ stdout: diff }, { stdout: untracked }] = await Promise.all([
+    execFileAsync('git', gitPathArgs('diff', '--name-status', '-z', '-M', sourceCommit, '--'), {
+      cwd: rootPath,
+      encoding: 'buffer',
+      maxBuffer: 16 * 1024 * 1024,
+    }),
+    execFileAsync('git', gitPathArgs('ls-files', '--others', '--exclude-standard', '-z'), {
+      cwd: rootPath,
+      encoding: 'buffer',
+      maxBuffer: 16 * 1024 * 1024,
+    }),
+  ]);
+  const parsed = parseGitNameStatus(diff as Buffer);
+  const existingPathCount = parsed.changed.length + parsed.deleted.length;
+  parsed.changed.push(...parseNulPaths(untracked as Buffer, existingPathCount));
+  parsed.changed = [...new Set(parsed.changed)].sort();
+  return parsed;
+}
+
+async function intersectDeltaWithAnalysisCorpus(
+  rootPath: string,
+  analysisDir: string,
+  delta: GitDeltaPaths,
+): Promise<GitDeltaPaths> {
+  const changedCorpusRule = [...delta.changed, ...delta.deleted].find(file =>
+    basename(file) === '.gitignore' || basename(file) === '.openlore-ignore' ||
+    file.replace(/\\/g, '/') === '.openlore/config.json');
+  if (changedCorpusRule) {
+    throw new Error(
+      `Analysis corpus rules changed at ${changedCorpusRule}; rebuilding is required to establish exact membership.`,
+    );
+  }
+  const config = await readOpenLoreConfig(rootPath);
+  if ((config?.analysis.includePatterns?.length ?? 0) > 0) {
+    throw new Error(
+      'Configured analysis include patterns are not represented in legacy bundle fingerprints; rebuilding is required to prove exact membership.',
+    );
+  }
+  const patterns = mergeAnalysisPatterns(config?.analysis, [], []);
+  const protectedExcludePatterns = analysisGeneratedExcludes(
+    rootPath,
+    join(rootPath, OPENLORE_ANALYSIS_REL_PATH),
+    config?.openspecPath,
+  );
+  const walk = await new FileWalker(rootPath, {
+    maxFiles: config?.analysis.maxFiles ?? DEFAULT_MAX_FILES,
+    includePatterns: patterns.includePatterns,
+    restrictedIncludePatterns: config?.analysis.includePatterns,
+    excludePatterns: patterns.excludePatterns,
+    protectedExcludePatterns,
+  }).walk();
+  if (walk.summary.truncated) {
+    throw new Error('The configured analysis corpus is truncated; bundle catch-up cannot prove exact membership, so a full rebuild is required.');
+  }
+  const currentConfigHash = fingerprintHashOfConfiguration({
+    ...patterns,
+    maxFiles: config?.analysis.maxFiles ?? DEFAULT_MAX_FILES,
+    protectedExcludePatterns,
+  });
+  const bundledFingerprint = JSON.parse(await readFile(join(analysisDir, ARTIFACT_FINGERPRINT), 'utf8')) as {
+    analysisConfigHash?: unknown;
+  };
+  if (bundledFingerprint.analysisConfigHash !== currentConfigHash) {
+    throw new Error('Analysis configuration changed since the bundle was built; rebuilding is required to establish the exact corpus.');
+  }
+  const admitted = new Set(walk.files.map(file => file.path));
+  const priorCorpus = new Set(await readBundledDependencyPaths(analysisDir));
+  const changedTests = [
+    ...delta.changed.filter(file => admitted.has(file) && isTestFile(file)),
+    ...delta.deleted.filter(file => priorCorpus.has(file) && isTestFile(file)),
+  ];
+  if (changedTests.length > 0) {
+    throw new Error(
+      `Test-source changes require a full rebuild to preserve full-graph test impact data (${changedTests[0]}).`,
+    );
+  }
+  const store = EdgeStore.open(join(analysisDir, ARTIFACT_CALL_GRAPH_DB));
+  try {
+    return {
+      changed: delta.changed.filter(file => admitted.has(file) && !isTestFile(file) &&
+        (detectLanguage(file) !== 'unknown' || /\.html?$/i.test(file))),
+      deleted: delta.deleted.filter(file => priorCorpus.has(file) ||
+        store.getFileHash(file) !== null || store.getNodesForFile(file).length > 0),
+    };
+  } finally {
+    store.close();
+  }
+}
+
+async function refreshCaughtUpIdentity(rootPath: string, analysisDir: string): Promise<void> {
+  const config = await readOpenLoreConfig(rootPath);
+  const protectedExcludePatterns = analysisGeneratedExcludes(
+    rootPath,
+    join(rootPath, OPENLORE_ANALYSIS_REL_PATH),
+    config?.openspecPath,
+  );
+  const fingerprintConfig = {
+    ...mergeAnalysisPatterns(config?.analysis, [], []),
+    maxFiles: config?.analysis.maxFiles ?? DEFAULT_MAX_FILES,
+    protectedExcludePatterns,
+  };
+  const walk = await new FileWalker(rootPath, {
+    maxFiles: fingerprintConfig.maxFiles,
+    includePatterns: fingerprintConfig.includePatterns,
+    restrictedIncludePatterns: config?.analysis.includePatterns,
+    excludePatterns: fingerprintConfig.excludePatterns,
+    protectedExcludePatterns,
+  }).walk();
+  if (walk.summary.truncated) {
+    throw new Error('The configured analysis corpus became truncated during catch-up; refusing to publish it.');
+  }
+  const state = await captureSourceState(rootPath);
+  const hash = await computeProjectFingerprint(rootPath, { configuration: fingerprintConfig, protectedExcludePatterns });
+  await atomicWriteFile(join(analysisDir, ARTIFACT_FINGERPRINT), JSON.stringify({
+    hash,
+    commit: state.commit,
+    sourceTreeState: state.treeState,
+    computedAt: new Date().toISOString(),
+    fileCount: walk.files.length,
+    analysisConfigHash: fingerprintHashOfConfiguration(fingerprintConfig),
+  }));
+  const store = EdgeStore.open(join(analysisDir, ARTIFACT_CALL_GRAPH_DB));
+  try {
+    const nodes = store.getAllInternalNodes();
+    await writeAttestation(analysisDir, computeAttestation(
+      store.getSchemaVersion(),
+      nodes.map(node => ({ id: node.id, filePath: node.filePath })),
+      store.getAllEdges().map(edge => ({ callerId: edge.callerId, calleeId: edge.calleeId, calleeName: edge.calleeName })),
+      store.getAllClasses().map(cls => ({ id: cls.id })),
+    ));
+  } finally {
+    store.close();
+  }
+  const finalState = await captureSourceState(rootPath);
+  if (finalState.commit !== state.commit || finalState.treeState !== state.treeState ||
+      await computeProjectFingerprint(rootPath, { configuration: fingerprintConfig, protectedExcludePatterns }) !== hash) {
+    throw new Error('Source files changed during bundle catch-up; refusing to publish a stale artifact generation.');
+  }
+}
+
+async function assertCaughtUpIdentityCurrent(rootPath: string, analysisDir: string): Promise<void> {
+  const fingerprint = JSON.parse(await readFile(join(analysisDir, ARTIFACT_FINGERPRINT), 'utf8')) as {
+    hash?: unknown;
+    commit?: unknown;
+    sourceTreeState?: unknown;
+  };
+  if (typeof fingerprint.hash !== 'string') {
+    throw new Error('Caught-up fingerprint is missing its source hash.');
+  }
+  const config = await readOpenLoreConfig(rootPath);
+  const protectedExcludePatterns = analysisGeneratedExcludes(
+    rootPath,
+    join(rootPath, OPENLORE_ANALYSIS_REL_PATH),
+    config?.openspecPath,
+  );
+  const fingerprintConfig = {
+    ...mergeAnalysisPatterns(config?.analysis, [], []),
+    maxFiles: config?.analysis.maxFiles ?? DEFAULT_MAX_FILES,
+    protectedExcludePatterns,
+  };
+  const capturePublishTreeState = async (): Promise<SourceTreeState> => execFileAsync(
+      'git',
+      gitPathArgs(
+        'status',
+        '--porcelain=v1',
+        '--untracked-files=all',
+        '--',
+        '.',
+        `:(exclude)${OPENLORE_ANALYSIS_REL_PATH}/**`,
+        `:(exclude)${OPENLORE_ANALYSIS_REL_PATH}`,
+        `:(exclude).openlore/${IMPORT_STAGE_PREFIX}*`,
+        `:(exclude).openlore/${IMPORT_STAGE_PREFIX}*/**`,
+      ),
+      { cwd: rootPath },
+    ).then(({ stdout }) => stdout.length === 0 ? 'clean' : 'dirty')
+      .catch(() => 'unknown');
+  const beforeState = await captureSourceState(rootPath);
+  const beforeTreeState = await capturePublishTreeState();
+  const firstHash = await computeProjectFingerprint(rootPath, {
+    configuration: fingerprintConfig,
+    protectedExcludePatterns,
+  });
+  const middleState = await captureSourceState(rootPath);
+  const middleTreeState = await capturePublishTreeState();
+  const secondHash = await computeProjectFingerprint(rootPath, {
+    configuration: fingerprintConfig,
+    protectedExcludePatterns,
+  });
+  const afterState = await captureSourceState(rootPath);
+  const afterTreeState = await capturePublishTreeState();
+  const changed = [
+    ...(firstHash !== fingerprint.hash || secondHash !== fingerprint.hash ? ['content fingerprint'] : []),
+    ...([beforeState.commit, middleState.commit, afterState.commit]
+      .some(commit => commit !== fingerprint.commit) ? ['commit'] : []),
+    ...([beforeTreeState, middleTreeState, afterTreeState]
+      .some(treeState => treeState !== fingerprint.sourceTreeState) ? ['tree state'] : []),
+  ];
+  if (changed.length > 0) {
+    throw new Error(
+      `Source ${changed.join(', ')} changed before bundle catch-up publication; refusing to publish a stale generation.`,
+    );
+  }
 }
 
 export function provenanceDetail(verdict: BundleSignatureVerdict): string {
@@ -192,6 +495,54 @@ export async function readBundledSignatures(analysisDir: string): Promise<FileSi
   } catch {
     return [];
   }
+}
+
+async function readBundledDependencyPaths(analysisDir: string): Promise<string[]> {
+  try {
+    const raw = JSON.parse(await readFile(join(analysisDir, 'dependency-graph.json'), 'utf8')) as {
+      nodes?: Array<{ file?: { path?: unknown }; path?: unknown }>;
+    };
+    if (!Array.isArray(raw.nodes)) return [];
+    return raw.nodes.flatMap(node => {
+      const path = node.file?.path ?? node.path;
+      return typeof path === 'string' ? [path] : [];
+    });
+  } catch {
+    return [];
+  }
+}
+
+async function hasLegacyNativeRepositoryKeys(rootPath: string, analysisDir: string): Promise<boolean> {
+  const paths = await readBundledDependencyPaths(analysisDir);
+  try {
+    const raw = JSON.parse(await readFile(join(analysisDir, 'llm-context.json'), 'utf8')) as {
+      signatures?: Array<{ path?: unknown }>;
+      callGraph?: {
+        nodes?: Array<{ filePath?: unknown }>;
+        classes?: Array<{ filePath?: unknown }>;
+      };
+    };
+    for (const signature of raw.signatures ?? []) {
+      if (typeof signature.path === 'string') paths.push(signature.path);
+    }
+    for (const node of raw.callGraph?.nodes ?? []) {
+      if (typeof node.filePath === 'string') paths.push(node.filePath);
+    }
+    for (const cls of raw.callGraph?.classes ?? []) {
+      if (typeof cls.filePath === 'string') paths.push(cls.filePath);
+    }
+  } catch {
+    // The validation ladder reports malformed required artifacts separately.
+  }
+  const store = EdgeStore.open(join(analysisDir, ARTIFACT_CALL_GRAPH_DB));
+  try {
+    paths.push(...store.getAllInternalNodes().map(node => node.filePath));
+    paths.push(...store.getAllClasses().map(cls => cls.filePath));
+  } finally {
+    store.close();
+  }
+  return paths.some(path => path.includes('\\') &&
+    (sep === '\\' || !existsSync(join(rootPath, path))));
 }
 
 /**
@@ -358,6 +709,7 @@ async function runImportWithEffectiveConfig(artifact: string, opts: ImportOption
   const sourceCommit = bundle.manifest.sourceCommit;
   const staging = await mkdtemp(join(tmpdir(), 'openlore-import-'));
   let rebuildReason: string | null = null;
+  let deltaReport: Awaited<ReturnType<McpWatcher['applyRepositoryDelta']>> | null = null;
   try {
     await materializeBundle(bundle, staging);
 
@@ -390,15 +742,20 @@ async function runImportWithEffectiveConfig(artifact: string, opts: ImportOption
       rebuildReason = 'materialized graph digest does not match the bundled attestation (tampered).';
     } else if (!reconcileHealthy) {
       rebuildReason = 'materialized index does not reconcile against its attestation.';
+    } else if (await hasLegacyNativeRepositoryKeys(projectRoot, staging)) {
+      rebuildReason =
+        'The bundle contains legacy native-separator repository keys; rebuilding is required to canonicalize Windows paths.';
     } else {
       // (5) currency vs the working tree.
       const isGitRepo = await isGitRepository(projectRoot);
       const consumerSourceState = await captureSourceState(projectRoot);
       let commitMatchesHead = false;
       let commitIsAncestor = false;
+      let resolvedSourceCommit: string | null = null;
       if (isGitRepo && sourceCommit) {
         const head = consumerSourceState.commit;
         const source = await gitResolveCommit(projectRoot, sourceCommit);
+        resolvedSourceCommit = source;
         commitMatchesHead = !!head && !!source && head === source;
         if (!commitMatchesHead && source && head) {
           commitIsAncestor = await gitIsAncestor(projectRoot, source, head);
@@ -415,47 +772,92 @@ async function runImportWithEffectiveConfig(artifact: string, opts: ImportOption
       if (decision.action === 'rebuild') {
         rebuildReason = decision.detail;
       } else {
-        let searchBuilt = false;
-        await promoteStagedIndex(bundle, staging, analysisDir, {
-          beforePublish: async () => {
-            // Rebuild derived indexes inside the same writer transaction so another analyze
-            // cannot publish a different graph between graph promotion and search construction.
-            try {
-              searchBuilt = await buildKeywordSearchIndex(projectRoot, analysisDir);
-            } catch (err) {
-              searchBuilt = false;
-              await rm(join(analysisDir, 'vector-index'), { recursive: true, force: true });
-              await rm(join(analysisDir, 'vector-index-meta.json'), { force: true });
-              logger.debug(`import: keyword search index not built (${err instanceof Error ? err.message : String(err)})`);
+        if (decision.action === 'import-delta') {
+          const delta = await intersectDeltaWithAnalysisCorpus(
+            projectRoot,
+            staging,
+            await collectGitDelta(projectRoot, resolvedSourceCommit!),
+          );
+          if (delta.changed.length + delta.deleted.length > WATCH_BULK_THRESHOLD) {
+            rebuildReason =
+              `Artifact delta contains ${delta.changed.length + delta.deleted.length} indexed files, ` +
+              `above the bounded catch-up threshold of ${WATCH_BULK_THRESHOLD}; rebuilding locally.`;
+          } else {
+            const watcher = new McpWatcher({
+              rootPath: projectRoot,
+              outputPath: staging,
+              embed: false,
+              selfRebuild: false,
+            });
+            deltaReport = await watcher.applyRepositoryDelta(delta.changed, delta.deleted);
+            await refreshCaughtUpIdentity(projectRoot, staging);
+          }
+        }
+        if (!rebuildReason) {
+          let searchBuilt = false;
+          const localFiles = deltaReport
+            ? (await readdir(staging, { withFileTypes: true }))
+                .filter(entry => entry.isFile() && !entry.name.startsWith('.'))
+                .map(entry => entry.name)
+            : undefined;
+          await promoteStagedIndex(bundle, staging, analysisDir, {
+            localFiles,
+            beforePublish: async () => {
+              // Rebuild derived indexes inside the same writer transaction so another analyze
+              // cannot publish a different graph between graph promotion and search construction.
+              try {
+                searchBuilt = await buildKeywordSearchIndex(projectRoot, analysisDir);
+              } catch (err) {
+                searchBuilt = false;
+                await rm(join(analysisDir, 'vector-index'), { recursive: true, force: true });
+                await rm(join(analysisDir, 'vector-index-meta.json'), { force: true });
+                logger.debug(`import: keyword search index not built (${err instanceof Error ? err.message : String(err)})`);
+              }
+              try {
+                await buildSpecSearchIndex(projectRoot, analysisDir);
+              } catch (err) {
+                logger.debug(`import: spec search index not built (${err instanceof Error ? err.message : String(err)})`);
+              }
+              if (deltaReport) await assertCaughtUpIdentityCurrent(projectRoot, analysisDir);
+            },
+            afterPublish: async () => {
+              if (deltaReport) await assertCaughtUpIdentityCurrent(projectRoot, analysisDir);
+            },
+          });
+          const finalConsumerState = await captureSourceState(projectRoot);
+          const reportedDecision = finalConsumerState.commit === consumerSourceState.commit
+            && finalConsumerState.treeState === consumerSourceState.treeState
+            ? decision
+            : {
+                action: 'import-currency-unknown' as const,
+                reason: 'consumer-changed-during-import',
+                detail: 'Currency is unknown because the checkout changed while the bundle was being imported.',
+              };
+          logger.success(
+            `Imported graph bundle (${bundle.manifest.files.length} files, schema v${bundle.manifest.schemaVersion}). ` +
+            provenanceDetail(signatureVerdict),
+          );
+          if (reportedDecision.action === 'import-current') logger.info('Currency', reportedDecision.detail);
+          else if (reportedDecision.action === 'import-delta' && deltaReport) {
+            const deltaSize = deltaReport.changedFiles.length + deltaReport.deletedFiles.length;
+            logger.info(
+              'Currency',
+              `Caught up from ancestor bundle: delta ${deltaSize} file(s), closure ${deltaReport.closureFiles.length} file(s), ` +
+              `explicitly stale ${deltaReport.staleFiles.length}.`,
+            );
+            if (deltaReport.staleFiles.length > 0) {
+              logger.warning(
+                `${deltaReport.staleFiles.length} file(s) remain explicitly stale after bounded catch-up; run "openlore analyze --force" to converge them.`,
+              );
             }
-            try {
-              await buildSpecSearchIndex(projectRoot, analysisDir);
-            } catch (err) {
-              logger.debug(`import: spec search index not built (${err instanceof Error ? err.message : String(err)})`);
-            }
-          },
-        });
-        const finalConsumerState = await captureSourceState(projectRoot);
-        const reportedDecision = finalConsumerState.commit === consumerSourceState.commit
-          && finalConsumerState.treeState === consumerSourceState.treeState
-          ? decision
-          : {
-              action: 'import-currency-unknown' as const,
-              reason: 'consumer-changed-during-import',
-              detail: 'Currency is unknown because the checkout changed while the bundle was being imported.',
-            };
-        logger.success(
-          `Imported graph bundle (${bundle.manifest.files.length} files, schema v${bundle.manifest.schemaVersion}). ` +
-          provenanceDetail(signatureVerdict),
-        );
-        if (reportedDecision.action === 'import-current') logger.info('Currency', reportedDecision.detail);
-        else logger.warning(reportedDecision.detail);
-        logger.info(
-          'Search',
-          searchBuilt
-            ? 'keyword (BM25) index rebuilt — orient/search_code ready. For semantic search: openlore embed --local'
-            : 'keyword index not built — run "openlore embed" (BM25) or "openlore embed --local" (semantic) to enable orient/search_code',
-        );
+          } else logger.warning(reportedDecision.detail);
+          logger.info(
+            'Search',
+            searchBuilt
+              ? 'keyword (BM25) index rebuilt — orient/search_code ready. For semantic search: openlore embed --local'
+              : 'keyword index not built — run "openlore embed" (BM25) or "openlore embed --local" (semantic) to enable orient/search_code',
+          );
+        }
       }
     }
   } catch (err) {
@@ -481,7 +883,7 @@ export async function runImport(artifact: string, opts: ImportOptions): Promise<
 }
 
 export const importCommand = new Command('import')
-  .description('Import a portable graph artifact (openlore export bundle); validates it and falls back to a local rebuild if stale, schema-skewed, or tampered.')
+  .description('Import a portable graph artifact; validates it, catches up bounded clean-ancestor deltas, and rebuilds when safety cannot be proven.')
   .argument('<artifact>', 'Path to the .olbundle artifact to import')
   .option('--project-root <path>', 'Project root to import into (default: current directory)')
   .action(async (artifact: string, opts: ImportOptions) => {

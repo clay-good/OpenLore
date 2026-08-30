@@ -43,6 +43,16 @@ describe('FileWalker', () => {
       expect(result.files.map((f) => f.path)).toContain('README.md');
     });
 
+    it.skipIf(process.platform === 'win32')('preserves a literal POSIX backslash without colliding with a directory separator', async () => {
+      await mkdir(join(testDir, 'src', 'a'), { recursive: true });
+      await writeFile(join(testDir, 'src', 'a\\b.ts'), 'export const literal = 1;');
+      await writeFile(join(testDir, 'src', 'a', 'b.ts'), 'export const nested = 2;');
+
+      const result = await walkDirectory(testDir);
+
+      expect(result.files.map(file => file.path).sort()).toEqual(['src/a/b.ts', 'src/a\\b.ts']);
+    });
+
     it('should collect correct file metadata', async () => {
       await writeFile(join(testDir, 'app.ts'), 'const x = 1;\nconst y = 2;\nconst z = 3;');
 
