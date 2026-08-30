@@ -1509,7 +1509,9 @@ export class AnalysisArtifactGenerator {
         // derives `tested_by` edges from them, which the test-impact tools (spec-19) need.
         // Test nodes/edges are filtered out again when writing the production edge store.
         if (scriptContainer) {
-          if (scriptContainer.content) {
+          if (scriptContainer.sizeCapped) {
+            sizeCapped.push({ path: file.path, language: scriptContainer.format });
+          } else if (scriptContainer.lanes.length > 0) {
             if (isLossyUtf8(bytes)) encodingFallback.set(file.path, scriptContainer.format);
             callGraphFiles.push({
               path: file.path,

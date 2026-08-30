@@ -123,6 +123,30 @@ describe('handleFindDeadCode', () => {
     expect(orphan.reason).toMatch(/module IS imported elsewhere/);
   });
 
+  it('caps script-container candidates because framework entrypoints are unanalyzed', async () => {
+    const vueNode = node({ id: 'src/App.vue::save', filePath: 'src/App.vue', language: 'TypeScript' });
+    vi.mocked(readCachedContext).mockResolvedValueOnce({ callGraph: graph([vueNode], []) } as never);
+    vi.mocked(readFile).mockImplementation(async path => {
+      if (String(path).endsWith('parse-health.json')) {
+        return JSON.stringify({
+          version: 1, totalDegradedFiles: 0, totalErrorRegions: 0, byLanguage: [], topFiles: [], files: [],
+          scriptContainers: [{
+            format: 'Vue', extension: '.vue', fileCount: 1, scriptBlockCount: 1,
+            extractedScriptBlockCount: 1, limitations: ['template expressions'],
+            files: [{ filePath: 'src/App.vue', format: 'Vue', scriptBlockCount: 1, extractedScriptBlockCount: 1 }],
+          }],
+        });
+      }
+      return JSON.stringify({ edges: [] });
+    });
+
+    const result = await handleFindDeadCode({ directory: '/p' }) as {
+      candidateDead: Array<{ name: string; confidence: string; reason: string }>;
+    };
+    expect(result.candidateDead[0]).toMatchObject({ name: 'save', confidence: 'low' });
+    expect(result.candidateDead[0].reason).toMatch(/framework macros are unanalyzed/);
+  });
+
   it('soundness banner refuses deletion authority and warns on dynamic dispatch', async () => {
     const r = await handleFindDeadCode({ directory: '/p' }) as { soundness: { posture: string; caveats: string[] } };
     expect(r.soundness.posture).toBe('candidates-not-authority');

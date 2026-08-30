@@ -1767,7 +1767,6 @@ export class McpWatcher {
           .flatMap(boundary => boundary.files ?? [])
           .map(file => [file.filePath, file]),
       );
-      const before = byPath.size;
       let touched = false;
 
       for (const rel of deletedRels) {
@@ -1821,6 +1820,14 @@ export class McpWatcher {
           touched = true;
           continue;
         }
+        if (container?.sizeCapped) {
+          byPath.set(f.rel, {
+            filePath: f.rel, language, errorCount: 0, missingCount: 0, errorLines: [],
+            exclusion: 'size-cap',
+          });
+          touched = true;
+          continue;
+        }
         if (health && priorEncoding) health.encodingFallback = true;
         if (health) { health.language = language; byPath.set(f.rel, health); touched = true; }
         else if (priorEncoding) { byPath.set(f.rel, { filePath: f.rel, language, errorCount: 0, missingCount: 0, errorLines: [], encodingFallback: true }); touched = true; }
@@ -1845,7 +1852,7 @@ export class McpWatcher {
       );
       if (!report) {
         // The repo is now clean AND no degradation stands — remove the stale artifact.
-        if (before > 0) await unlink(phPath).catch(() => {});
+        if (raw !== null) await unlink(phPath).catch(() => {});
         return;
       }
       await atomicWriteFile(phPath, JSON.stringify(report, null, 2));
@@ -2118,12 +2125,6 @@ export async function buildGraphSubset(
   let content = changedContent;
   const scriptContainer = extractScriptContainer(changedRel, changedContent);
   if (scriptContainer) {
-    if (!scriptContainer.content) {
-      return {
-        edges: [], nodes: [], cfgs: [], skipped: [],
-        analyzedFileHashes: new Map([[changedRel, createHash('sha256').update(changedContent).digest('hex')]]),
-      };
-    }
     lang = scriptContainer.format;
   }
   // HTML: blank everything outside inline <script> bodies (offset-preserving) so
@@ -2161,7 +2162,6 @@ export async function buildGraphSubset(
     const cfHash = createHash('sha256').update(cfContent).digest('hex');
     const callerContainer = extractScriptContainer(cf, cfContent);
     if (callerContainer) {
-      if (!callerContainer.content) continue;
       cfLang = callerContainer.format;
     }
     if (!CALL_GRAPH_LANGS.has(cfLang)) continue; // ungraphable lang — never had edges; not stale

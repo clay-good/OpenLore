@@ -970,7 +970,9 @@ export function extractSignatures(filePath: string, content: string): FileSignat
 
   const container = extractScriptContainer(filePath, content);
   if (container) {
-    entries = container.content ? extractTypeScript(container.content) : [];
+    entries = container.lanes
+      .flatMap(lane => extractTypeScript(lane.content))
+      .slice(0, MAX_SIGS_PER_FILE);
     return { path: filePath, language, entries };
   }
 

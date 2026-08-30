@@ -276,6 +276,12 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
   // ── Candidate dead-code report ──────────────────────────────────────────────
   let candidates = codeNodes.filter(n => !n.isTest && !live.has(n.id));
   if (input.filePattern) candidates = candidates.filter(n => n.filePath.includes(input.filePattern!));
+  const parseHealthReport = await loadParseHealthReport(absDir);
+  const scriptContainerFiles = new Set(
+    (parseHealthReport?.scriptContainers ?? [])
+      .flatMap(boundary => boundary.files ?? [])
+      .map(file => file.filePath),
+  );
 
   const ranked = candidates
     .map(n => {
@@ -312,6 +318,11 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
       if (ambiguousCandidateIds.has(n.id)) {
         confidence = 'low';
         reasons.push('listed as a candidate by an unresolved-ambiguous call site — a potential caller was not bound, so it may be live');
+      }
+
+      if (scriptContainerFiles.has(n.filePath)) {
+        confidence = 'low';
+        reasons.push('script-container templates and framework macros are unanalyzed and may invoke this symbol');
       }
 
       return {
@@ -373,7 +384,7 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
   // parsed with errors may be FALSELY dead — a swallowed parse error can drop the very caller that
   // keeps it live. Disclose it so the candidate is not trusted as absent. Absent on a clean repo.
   const parseHealthNote = parseHealthBoundary(
-    await loadParseHealthReport(absDir),
+    parseHealthReport,
     finalRanked.map(r => r.file),
   );
 

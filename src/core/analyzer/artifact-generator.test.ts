@@ -293,7 +293,7 @@ describe('AnalysisArtifactGenerator', () => {
         '<template><button @click="save()" /></template>',
         '<script lang="ts">',
         "import { helper } from './helper';",
-        'export function save() { helper(); }',
+        'export function save(flag: boolean) { if (flag) { helper(); } }',
         '</script>',
       ].join('\n'));
       await writeFile(join(tempDir, helperRel), 'export function helper() {}\n');
@@ -312,6 +312,9 @@ describe('AnalysisArtifactGenerator', () => {
       expect(graph.edges.some(edge => edge.callerId === save?.id && edge.calleeId === helper?.id)).toBe(true);
       expect(artifacts.llmContext.signatures?.find(map => map.path === vueRel)?.entries.map(entry => entry.name))
         .toContain('save');
+      const vueStyle = artifacts.styleFingerprint?.files.find(file => file.filePath === vueRel);
+      expect(vueStyle?.language).toBe('Vue');
+      expect(vueStyle?.functionsSampled).toBeGreaterThan(0);
       expect(artifacts.parseHealth?.scriptContainers?.[0]).toMatchObject({
         format: 'Vue', fileCount: 1, scriptBlockCount: 1, extractedScriptBlockCount: 1,
       });

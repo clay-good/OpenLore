@@ -49,6 +49,7 @@ export interface LanguageSupportView {
   container?: {
     recognized: true;
     extraction: 'script-blocks';
+    capabilities: Capability[];
     limitations: string[];
   };
 }
@@ -95,13 +96,14 @@ function viewFor(
   persistedGrammarStatus?: GrammarStatus,
 ): LanguageSupportView {
   const rec = languageSupport(language);
+  const supported = rec.container?.capabilities ?? rec.capabilities;
   return {
     language,
     known: rec.known,
     ...(detectedInRepo === undefined ? {} : { detectedInRepo }),
-    supported: rec.capabilities,
-    unsupported: CAPABILITIES.filter(c => !rec.capabilities.includes(c)),
-    supportedCount: rec.capabilities.length,
+    supported,
+    unsupported: CAPABILITIES.filter(c => !supported.includes(c)),
+    supportedCount: supported.length,
     grammarStatus: persistedGrammarStatus ?? liveGrammarStatus(language),
     ...(rec.container ? { container: rec.container } : {}),
   };
@@ -132,7 +134,9 @@ export async function computeGetLanguageSupport(
     const canon = resolveLanguageName(raw) ?? raw;
     const view = viewFor(canon);
     const summary = view.known
-      ? `${canon} supports ${view.supportedCount}/${CAPABILITIES.length} capabilities: ${view.supported.join(', ') || 'none'}.`
+      ? view.container
+        ? `${canon} extracts script blocks with ${view.supportedCount}/${CAPABILITIES.length} capabilities: ${view.supported.join(', ') || 'none'}; ${view.container.limitations.join(', ')} remain unanalyzed.`
+        : `${canon} supports ${view.supportedCount}/${CAPABILITIES.length} capabilities: ${view.supported.join(', ') || 'none'}.`
       : `${raw} is not a recognized language; nothing is claimed for it (fail-soft).`;
     return { mode: 'language', languages: [view], capabilities: CAP_META, summary, disclosure: DISCLOSURE };
   }

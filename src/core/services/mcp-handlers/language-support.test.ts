@@ -88,6 +88,9 @@ describe('get_language_support — named-language mode (pure registry, no analys
     expect(view.language).toBe('Svelte');
     expect(view.known).toBe(true);
     expect(view.container?.extraction).toBe('script-blocks');
+    expect(view.supported).toContain('callGraph');
+    expect(view.supported).toContain('cfgOverlay');
+    expect(view.container?.capabilities).toEqual(view.supported);
     expect(view.container?.limitations).toContain('Svelte reactive statements');
   });
 });

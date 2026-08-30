@@ -41,10 +41,12 @@ import { ERROR_PROPAGATION_LANGUAGES } from './exception-flow.js';
 import { TEST_DETECTION_DECISIONS } from './test-file.js';
 import { COMPLEXITY_LANGUAGES } from './call-graph-complexity.js';
 import {
-  SCRIPT_CONTAINER_FORMATS,
   SCRIPT_CONTAINER_LIMITATIONS,
-  type ScriptContainerFormat,
 } from './sfc-script-extractor.js';
+import {
+  detectLanguage as detectCanonicalLanguage,
+  SCRIPT_CONTAINER_FORMATS,
+} from './language-detection.js';
 
 /** The closed set of capabilities the registry tracks, in deterministic column order. */
 export const CAPABILITIES = [
@@ -125,6 +127,8 @@ export interface LanguageSupportRecord {
   container?: {
     recognized: true;
     extraction: 'script-blocks';
+    /** Capabilities backed inside extracted JS/TS script blocks only. */
+    capabilities: Capability[];
     limitations: string[];
   };
 }
@@ -147,6 +151,11 @@ function deriveCapabilities(language: string): Capability[] {
   return CAPABILITIES.filter(c => out.includes(c));
 }
 
+const SCRIPT_CONTAINER_CAPABILITIES = CAPABILITIES.filter(capability =>
+  deriveCapabilities('JavaScript').includes(capability)
+  && deriveCapabilities('TypeScript').includes(capability),
+);
+
 /**
  * The declarative registry: language → its derived support record, for every known
  * language. Computed once from the authoritative capability sources — never hand-listed,
@@ -163,6 +172,7 @@ export const LANGUAGE_SUPPORT: ReadonlyMap<string, LanguageSupportRecord> = new 
         container: {
           recognized: true as const,
           extraction: 'script-blocks' as const,
+          capabilities: SCRIPT_CONTAINER_CAPABILITIES,
           limitations: [...SCRIPT_CONTAINER_LIMITATIONS],
         },
       } : {}),
@@ -193,10 +203,11 @@ const CANONICAL_BY_LOWER = new Map(ALL_LANGUAGES.map(l => [l.toLowerCase(), l]))
 export function resolveLanguageName(input: string): string | null {
   const normalized = input.trim().toLowerCase();
   const extension = normalized.startsWith('.') ? normalized.slice(1) : normalized;
-  const containerByExtension: Record<string, ScriptContainerFormat> = {
-    vue: 'Vue', svelte: 'Svelte', astro: 'Astro',
-  };
-  return CANONICAL_BY_LOWER.get(normalized) ?? containerByExtension[extension] ?? null;
+  const detected = detectCanonicalLanguage(`container.${extension}`);
+  const container = (SCRIPT_CONTAINER_FORMATS as readonly string[]).includes(detected)
+    ? detected
+    : null;
+  return CANONICAL_BY_LOWER.get(normalized) ?? container;
 }
 
 /** A single cell-resolved coverage matrix: deterministic language × capability booleans. */

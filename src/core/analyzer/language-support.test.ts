@@ -537,6 +537,10 @@ describe('completeness + fail-soft + determinism', () => {
       expect(record.known).toBe(true);
       expect(record.capabilities).toEqual([]);
       expect(record.container?.extraction).toBe('script-blocks');
+      expect(record.container?.capabilities).toContain('callGraph');
+      expect(record.container?.capabilities).toContain('signatures');
+      expect(record.container?.capabilities).toContain('cfgOverlay');
+      expect(record.container?.capabilities).toContain('styleFingerprint');
       expect(record.container?.limitations).toContain('template expressions');
     }
   });
@@ -630,6 +634,9 @@ describe('single-source language detection', () => {
       const src = readFileSync(join(SRC, rel), 'utf-8');
       if (defRe.test(src)) offenders.push(`${rel} (detectLanguage definition)`);
       if (/\bEXT_TO_LANGUAGE\b/.test(src)) offenders.push(`${rel} (EXT_TO_LANGUAGE map)`);
+      if (/\b(?:FORMAT_BY_EXTENSION|containerByExtension)\b/.test(src)) {
+        offenders.push(`${rel} (duplicate script-container extension map)`);
+      }
     }
 
     expect(
