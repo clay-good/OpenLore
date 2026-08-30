@@ -19,6 +19,7 @@ vi.mock('../../analyzer/text-line-index.js', () => ({
 }));
 vi.mock('../../analyzer/embedder.js', () => ({
   resolveEmbedder: vi.fn().mockResolvedValue(null),
+  embedderMode: vi.fn().mockReturnValue('remote-semantic'),
   servedRetrievalMode: vi.fn().mockReturnValue('keyword'),
   isKeywordRetrievalMode: vi.fn().mockReturnValue(true),
 }));

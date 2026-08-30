@@ -115,7 +115,8 @@ export function servedRetrievalMode(
   kind: 'code' | 'spec' = 'code',
   vocabularyExpansion = true,
 ): RetrievalMode {
-  const keywordMode = (): RetrievalMode => vocabularyExpansion && loadRepositoryVocabulary(outputDir)
+  const keywordMode = (): RetrievalMode => vocabularyExpansion
+    && (loadRepositoryVocabulary(outputDir)?.entries.length ?? 0) > 0
     ? 'keyword+vocabulary'
     : 'keyword';
   if (!embedSvc) return keywordMode();

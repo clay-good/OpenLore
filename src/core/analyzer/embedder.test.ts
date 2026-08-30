@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { resolveEmbedder, embedderMode, servedRetrievalMode } from './embedder.js';
@@ -7,6 +7,7 @@ import { LocalEmbeddingService, DEFAULT_LOCAL_MODEL } from './local-embedding-se
 import { EmbeddingService, type Embedder } from './embedding-service.js';
 import type { OpenLoreConfig } from '../../types/index.js';
 import { logger } from '../../utils/logger.js';
+import { mineRepositoryVocabulary, persistRepositoryVocabulary } from './repo-vocabulary.js';
 
 const cfg = (embedding?: OpenLoreConfig['embedding']): OpenLoreConfig =>
   ({ version: '1.0', embedding } as unknown as OpenLoreConfig);
@@ -86,6 +87,22 @@ describe('servedRetrievalMode — honest about what the index actually serves', 
   });
 
   it('reports keyword when no embedder is resolved', () => {
+    expect(servedRetrievalMode(null, dir, 'code')).toBe('keyword');
+  });
+
+  it('reports keyword when the verified repository vocabulary is empty', async () => {
+    const stamp = 'e'.repeat(64);
+    const vocabulary = mineRepositoryVocabulary([], new Map(), stamp);
+    await mkdir(join(dir, 'vector-index'));
+    await persistRepositoryVocabulary(
+      join(dir, 'vector-index'),
+      vocabulary,
+    );
+    await writeFile(join(dir, 'vector-index-meta.json'), JSON.stringify({
+      hasEmbeddings: false,
+      vocabularyContentStamp: vocabulary.contentStamp,
+    }));
+
     expect(servedRetrievalMode(null, dir, 'code')).toBe('keyword');
   });
 

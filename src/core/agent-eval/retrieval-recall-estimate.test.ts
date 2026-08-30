@@ -19,7 +19,9 @@ describe('retrieval recall estimate', () => {
       { id: 'bind-b', name: 'pmtQueue', signature: 'pmt: Payment', filePath: 'b.ts' },
     ], new Map([['pmt', 3], ['payment', 2]]), stamp);
     await persistRepositoryVocabulary(join(outputDir, 'vector-index'), vocabulary);
-    writeFileSync(join(outputDir, 'vector-index-meta.json'), JSON.stringify({ vocabularyContentStamp: stamp }));
+    writeFileSync(join(outputDir, 'vector-index-meta.json'), JSON.stringify({
+      vocabularyContentStamp: vocabulary.contentStamp,
+    }));
 
     const estimate = estimateVocabularyRecall(outputDir, [
       { id: 'target', name: 'PmtSvc', filePath: 'target.ts', docstring: 'Payment processing service' },

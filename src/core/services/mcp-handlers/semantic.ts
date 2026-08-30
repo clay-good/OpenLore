@@ -225,7 +225,7 @@ export async function handleSearchCode(
   const analysisProvenance = await readAnalysisContentProvenance(absDir);
 
   const { VectorIndex } = await import('../../analyzer/vector-index.js');
-  const { resolveEmbedder, servedRetrievalMode, isKeywordRetrievalMode } = await import('../../analyzer/embedder.js');
+  const { embedderMode, resolveEmbedder, servedRetrievalMode, isKeywordRetrievalMode } = await import('../../analyzer/embedder.js');
   const cfg = await readOpenLoreConfig(absDir);
   const vocabularyExpansion = cfg?.retrieval?.vocabularyExpansion !== false;
 
@@ -251,15 +251,23 @@ export async function handleSearchCode(
   // Resolve the active embedder (env → local provider → remote config); null is
   // the first-class keyword default. retrievalMode is the honest, served mode.
   const embedSvc = await resolveEmbedder(cfg);
-  const retrievalMode = servedRetrievalMode(embedSvc, outputDir, 'code', vocabularyExpansion);
-  const searchMode = isKeywordRetrievalMode(retrievalMode) ? 'bm25_fallback' : 'hybrid';
+  let retrievalMode = servedRetrievalMode(embedSvc, outputDir, 'code', vocabularyExpansion);
 
   limit = Math.max(1, Math.min(limit, 100));
   const [results, mappingIdx, llmCtx] = await Promise.all([
-    VectorIndex.search(outputDir, query, embedSvc, { limit, language, minFanIn, vocabularyExpansion }),
+    VectorIndex.search(outputDir, query, embedSvc, {
+      limit,
+      language,
+      minFanIn,
+      vocabularyExpansion,
+      onRetrievalMode: mode => {
+        retrievalMode = mode === 'semantic' ? embedderMode(embedSvc) : mode;
+      },
+    }),
     loadMappingIndex(absDir),
     readCachedContext(absDir),
   ]);
+  const searchMode = isKeywordRetrievalMode(retrievalMode) ? 'bm25_fallback' : 'hybrid';
   const indexDegraded = VectorIndex.degradationNotice?.(outputDir) ?? null;
   // Zero symbol hits: the string may live in static markup/text that extracts
   // no symbols (UI copy, error messages). Fall back to the literal-text line

@@ -16,6 +16,7 @@ import {
 import { detectLanguage, languageSupport } from '../../analyzer/language-support.js';
 import { queryTooLongError, validateDirectory } from './utils.js';
 import { requireMatchEvidence, type SearchableFields } from '../../analyzer/retrieval-evidence.js';
+import { expandVocabularyQuery } from '../../analyzer/repo-vocabulary.js';
 
 export type RetrievalSurface = 'code' | 'spec';
 export type RetrievalTarget = {
@@ -105,10 +106,10 @@ function targetIds(rows: IndexedRow[]): Set<string> {
   return new Set(rows.map((row) => String(row.id)));
 }
 
-function hasLexicalMatch(rows: IndexedRow[], query: string, fieldsFor: (row: IndexedRow) => SearchableFields): boolean {
-  const queryTerms = new Set(tokenize(query));
+function hasLexicalMatch(rows: IndexedRow[], queryTerms: readonly string[], fieldsFor: (row: IndexedRow) => SearchableFields): boolean {
+  const terms = new Set(queryTerms);
   return rows.some((row) => Object.values(fieldsFor(row)).some((value) =>
-    tokenize(value ?? '').some((token) => queryTerms.has(token)),
+    tokenize(value ?? '').some((token) => terms.has(token)),
   ));
 }
 
@@ -208,12 +209,15 @@ async function explainRetrievalMiss(
     const limit = Math.max(1, Math.min(input.limit ?? 10, 100));
     const cfg = await readOpenLoreConfig(absDir);
     const embedSvc = await resolveEmbedder(cfg);
+    const vocabularyExpansion = cfg?.retrieval?.vocabularyExpansion !== false;
+    const expandedQuery = expandVocabularyQuery(outputDir, tokenize(input.query), vocabularyExpansion);
+    const diagnosticTerms = [...expandedQuery.originalTokens, ...expandedQuery.expansionTokens];
     const candidates = await VectorIndex.search(outputDir, input.query, embedSvc, {
       limit,
       language: input.language,
       minFanIn: input.minFanIn,
       traceCandidates: true,
-      vocabularyExpansion: cfg?.retrieval?.vocabularyExpansion !== false,
+      vocabularyExpansion,
     });
     if (generation !== indexGenerationStamp(outputDir, input.surface)) {
       return snapshotRetry === 0
@@ -237,13 +241,20 @@ async function explainRetrievalMiss(
           return { surfaced: true, target: input.target, rank, matchEvidence: textCandidates[textRank].matchEvidence };
         }
         if (await TextLineIndex.hasFile(outputDir, input.target.value)) {
-          return { cause: 'no-term-matched', target: input.target };
+          const targetMatches = await TextLineIndex.searchText(outputDir, input.query, {
+            limit: 1,
+            filePath: input.target.value,
+            vocabularyExpansion,
+          });
+          return targetMatches.length > 0
+            ? { cause: 'budget-truncated', target: input.target, budget: 'candidate-window' }
+            : { cause: 'no-term-matched', target: input.target };
         }
       }
     }
     if (eligible.length === 0) return { cause: 'not-indexed', target: input.target };
     const rankIndex = candidates.findIndex((result) => ids.has(result.record.id));
-    if (rankIndex < 0 && !hasLexicalMatch(eligible, input.query, searchableFieldsForFunctionRow)) {
+    if (rankIndex < 0 && !hasLexicalMatch(eligible, diagnosticTerms, searchableFieldsForFunctionRow)) {
       return { cause: 'no-term-matched', target: input.target };
     }
     if (rankIndex < 0) return { cause: 'budget-truncated', target: input.target, budget: 'candidate-window' };
@@ -274,12 +285,15 @@ async function explainRetrievalMiss(
   const limit = Math.max(1, Math.min(input.limit ?? 10, 50));
   const cfg = await readOpenLoreConfig(absDir);
   const embedSvc = await resolveEmbedder(cfg);
+  const vocabularyExpansion = cfg?.retrieval?.vocabularyExpansion !== false;
+  const expandedQuery = expandVocabularyQuery(outputDir, tokenize(input.query), vocabularyExpansion);
+  const diagnosticTerms = [...expandedQuery.originalTokens, ...expandedQuery.expansionTokens];
   const candidates = await SpecVectorIndex.search(outputDir, input.query, embedSvc, {
     limit,
     domain: input.domain,
     section: input.section,
     traceCandidates: true,
-    vocabularyExpansion: cfg?.retrieval?.vocabularyExpansion !== false,
+    vocabularyExpansion,
   });
   if (generation !== indexGenerationStamp(outputDir, input.surface)) {
     return snapshotRetry === 0
@@ -287,7 +301,7 @@ async function explainRetrievalMiss(
       : { error: 'Retrieval index changed during diagnosis. Retry the request.', retryable: true };
   }
   const rankIndex = candidates.findIndex((result) => ids.has(result.record.id));
-  if (rankIndex < 0 && !hasLexicalMatch(resolved, input.query, searchableFieldsForSpecRow)) {
+  if (rankIndex < 0 && !hasLexicalMatch(resolved, diagnosticTerms, searchableFieldsForSpecRow)) {
     return { cause: 'no-term-matched', target: input.target };
   }
   if (rankIndex < 0) return { cause: 'budget-truncated', target: input.target, budget: 'candidate-window' };

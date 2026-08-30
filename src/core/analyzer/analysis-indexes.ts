@@ -14,7 +14,7 @@ import { safeJoin } from '../../utils/path-confinement.js';
 import { mapFilesBounded, readSourceCapped } from './bounded-file-scan.js';
 import type { LLMContext } from './artifact-generator.js';
 import type { Embedder } from './embedding-service.js';
-import { resolveEmbedder } from './embedder.js';
+import { embedderMode, resolveEmbedder } from './embedder.js';
 import { mergeAnalysisPatterns } from './analysis-core.js';
 import { FileWalker } from './file-walker.js';
 import { SpecVectorIndex } from './spec-vector-index.js';
@@ -260,14 +260,15 @@ async function buildAnalysisIndexesUnlocked(options: BuildAnalysisIndexesOptions
           fileContents,
           !(options.force ?? false),
           options.config?.retrieval?.vocabularyExpansion !== false,
+          graph?.edges,
         );
         result.functionIndex = 'built';
         const vocabulary = loadRepositoryVocabulary(options.outputPath);
         const mode = built.hasEmbeddings
-          ? 'semantic'
-          : vocabulary ? 'keyword+vocabulary' : 'keyword';
+          ? embedderMode(embedder)
+          : vocabulary?.entries.length ? 'keyword+vocabulary' : 'keyword';
         const vocabularyDetail = vocabulary?.status === 'partial'
-          ? `; vocabulary partial, ${vocabulary.omittedCandidateCount} candidate(s) omitted`
+          ? `; vocabulary partial, ${vocabulary.omittedCandidateInputCount} candidate input(s) omitted`
           : '';
         emit({
           index: 'function',

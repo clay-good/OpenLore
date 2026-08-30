@@ -205,7 +205,7 @@ export async function handleOrient(
   const outputDir = join(absDir, '.openlore', 'analysis');
 
   const { VectorIndex } = await import('../../analyzer/vector-index.js');
-  const { resolveEmbedder, servedRetrievalMode, isKeywordRetrievalMode } = await import('../../analyzer/embedder.js');
+  const { embedderMode, resolveEmbedder, servedRetrievalMode, isKeywordRetrievalMode } = await import('../../analyzer/embedder.js');
   const { SpecVectorIndex } = await import('../../analyzer/spec-vector-index.js');
 
   const hasCodeIndex = VectorIndex.exists(outputDir);
@@ -230,17 +230,23 @@ export async function handleOrient(
   const cfg = await readOpenLoreConfig(absDir);
   const embedSvc = await resolveEmbedder(cfg);
   const vocabularyExpansion = cfg?.retrieval?.vocabularyExpansion !== false;
-  const retrievalMode = servedRetrievalMode(embedSvc, outputDir, 'code', vocabularyExpansion);
-  const searchMode = isKeywordRetrievalMode(retrievalMode) ? 'bm25_fallback' : 'hybrid';
+  let retrievalMode = servedRetrievalMode(embedSvc, outputDir, 'code', vocabularyExpansion);
 
   const clampedLimit = Math.max(1, Math.min(limit, 20));
 
   // ── Parallel data loading ──────────────────────────────────────────────────
   const [rawResults, mappingIdx, llmCtx] = await Promise.all([
-    VectorIndex.search(outputDir, task, embedSvc, { limit: clampedLimit * 3, vocabularyExpansion }),
+    VectorIndex.search(outputDir, task, embedSvc, {
+      limit: clampedLimit * 3,
+      vocabularyExpansion,
+      onRetrievalMode: mode => {
+        retrievalMode = mode === 'semantic' ? embedderMode(embedSvc) : mode;
+      },
+    }),
     loadMappingIndex(absDir),
     readCachedContext(absDir),
   ]);
+  const searchMode = isKeywordRetrievalMode(retrievalMode) ? 'bm25_fallback' : 'hybrid';
 
 
   // ── Relevant functions (top-N) ────────────────────────────────────────────

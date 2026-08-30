@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -8,6 +8,7 @@ import {
   loadRepositoryVocabulary,
   mineRepositoryVocabulary,
   persistRepositoryVocabulary,
+  REPO_VOCABULARY_FILE,
   type RepositoryVocabularySource,
 } from './repo-vocabulary.js';
 
@@ -54,6 +55,20 @@ describe('repository vocabulary mining', () => {
     expect(entries.get('pmt') ?? []).not.toContain('payment');
   });
 
+  it('uses immediate call-neighborhood symbol context as binding evidence', () => {
+    const vocabulary = mineRepositoryVocabulary([
+      source('a', 'pmtHandler', ''),
+      source('b', 'pmtQueue', ''),
+      source('payment', 'paymentService', 'function paymentService()'),
+    ], df('pmt', 'payment'), '6'.repeat(64), {
+      callEdges: [
+        { callerId: 'a', calleeId: 'payment' },
+        { callerId: 'b', calleeId: 'payment' },
+      ],
+    });
+    expect(new Map(vocabulary.entries).get('payment')).toContain('pmt');
+  });
+
   it('allows only the declared seed set to create an unevidenced abbreviation', () => {
     const vocabulary = mineRepositoryVocabulary([
       source('a', 'cfgReader', 'Config'),
@@ -86,17 +101,45 @@ describe('repository vocabulary mining', () => {
     expect(JSON.stringify(first)).toBe(JSON.stringify(second));
   });
 
-  it('stops at the declared budget and discloses omitted candidates', () => {
+  it('stops at the declared budget and discloses omitted candidate inputs', () => {
     let ticks = 0;
     const terms = Array.from({ length: 300 }, (_, index) => `a${index.toString(36).padStart(3, '0')}`);
     const vocabulary = mineRepositoryVocabulary(
       [source('a', terms.join(' '), terms.join(' ')), source('b', terms.join(' '), terms.join(' '))],
       df(...terms),
       'e'.repeat(64),
-      { budgetMs: 1, now: () => ticks++ },
+      { budgetMs: 1, now: () => ticks++, callEdges: [{ callerId: 'a', calleeId: 'b' }] },
     );
     expect(vocabulary.status).toBe('partial');
-    expect(vocabulary.omittedCandidateCount).toBeGreaterThan(0);
+    expect(vocabulary.omittedCandidateInputCount).toBe(303);
+  });
+
+  it('uses ordinal source ordering for deterministic partial artifacts', () => {
+    const sources = [
+      source('site-ä', 'cfgReader', 'Config'),
+      source('site-z', 'cfgReader', 'Config'),
+    ];
+    const first = mineRepositoryVocabulary(sources, df('cfg', 'config'), '7'.repeat(64));
+    const second = mineRepositoryVocabulary([...sources].reverse(), df('config', 'cfg'), '7'.repeat(64));
+    expect(JSON.stringify(first)).toBe(JSON.stringify(second));
+  });
+
+  it('binds the content stamp to effective local and call-neighborhood inputs', () => {
+    const sources = [source('a', 'pmtHandler', ''), source('payment', 'paymentService', '')];
+    const first = mineRepositoryVocabulary(sources, df('pmt', 'payment'), '5'.repeat(64), {
+      contextForSource: () => 'const pmt = payment()',
+      callEdges: [{ callerId: 'a', calleeId: 'payment' }],
+    });
+    const changedContext = mineRepositoryVocabulary(sources, df('pmt', 'payment'), '5'.repeat(64), {
+      contextForSource: () => 'const pmt = paymentLater()',
+      callEdges: [{ callerId: 'a', calleeId: 'payment' }],
+    });
+    const changedEdges = mineRepositoryVocabulary(sources, df('pmt', 'payment'), '5'.repeat(64), {
+      contextForSource: () => 'const pmt = payment()',
+      callEdges: [],
+    });
+    expect(changedContext.contentStamp).not.toBe(first.contentStamp);
+    expect(changedEdges.contentStamp).not.toBe(first.contentStamp);
   });
 
   it('emits identical partial bytes regardless of the cutoff position', () => {
@@ -119,6 +162,21 @@ describe('repository vocabulary mining', () => {
 });
 
 describe('repository vocabulary serving', () => {
+  it('rejects oversized and final-component-symlink sidecars', () => {
+    const oversizedOutput = tempOutput();
+    const stamp = 'a'.repeat(64);
+    writeFileSync(join(oversizedOutput, 'vector-index-meta.json'), JSON.stringify({ vocabularyContentStamp: stamp }));
+    writeFileSync(join(oversizedOutput, 'vector-index', REPO_VOCABULARY_FILE), Buffer.alloc(8 * 1024 * 1024 + 1));
+    expect(loadRepositoryVocabulary(oversizedOutput)).toBeNull();
+
+    const symlinkOutput = tempOutput();
+    const external = join(symlinkOutput, 'external-vocabulary.json');
+    writeFileSync(join(symlinkOutput, 'vector-index-meta.json'), JSON.stringify({ vocabularyContentStamp: stamp }));
+    writeFileSync(external, '{}');
+    symlinkSync(external, join(symlinkOutput, 'vector-index', REPO_VOCABULARY_FILE));
+    expect(loadRepositoryVocabulary(symlinkOutput)).toBeNull();
+  });
+
   it('loads only a content-stamp-matched, untampered sidecar', async () => {
     const outputDir = tempOutput();
     const stamp = 'f'.repeat(64);
@@ -127,7 +185,7 @@ describe('repository vocabulary serving', () => {
       source('b', 'pmtQueue', 'pmt: Payment'),
     ], df('pmt', 'payment'), stamp);
     await persistRepositoryVocabulary(join(outputDir, 'vector-index'), vocabulary);
-    writeFileSync(join(outputDir, 'vector-index-meta.json'), JSON.stringify({ vocabularyContentStamp: stamp }));
+    writeFileSync(join(outputDir, 'vector-index-meta.json'), JSON.stringify({ vocabularyContentStamp: vocabulary.contentStamp }));
     expect(loadRepositoryVocabulary(outputDir)?.entries.length).toBeGreaterThan(0);
 
     writeFileSync(join(outputDir, 'vector-index-meta.json'), JSON.stringify({ vocabularyContentStamp: '0'.repeat(64) }));
@@ -142,7 +200,7 @@ describe('repository vocabulary serving', () => {
       source('b', 'pmtQueue', 'pmt: Payment'),
     ], df('pmt', 'payment'), stamp);
     await persistRepositoryVocabulary(join(outputDir, 'vector-index'), vocabulary);
-    writeFileSync(join(outputDir, 'vector-index-meta.json'), JSON.stringify({ vocabularyContentStamp: stamp }));
+    writeFileSync(join(outputDir, 'vector-index-meta.json'), JSON.stringify({ vocabularyContentStamp: vocabulary.contentStamp }));
     expect(expandVocabularyQuery(outputDir, ['payment']).expansionTokens).toContain('pmt');
     expect(expandVocabularyQuery(outputDir, ['payment'], false)).toEqual({
       originalTokens: ['payment'], expansionTokens: [], vocabularyAvailable: false,
