@@ -59,6 +59,7 @@ import {
 // synchronous native call nothing else can interrupt.
 import { parseWithBudget as rawParseWithBudget, parseBudgetOverrunMs, type BudgetableParser } from './parse-budget.js';
 import { usesTsxGrammar } from './language-detection.js';
+import { extractScriptContainer, SCRIPT_CONTAINER_FORMATS } from './sfc-script-extractor.js';
 // Pass-1 extraction lane (change: optimize-parallel-extraction-pool). The pool holds no
 // extraction logic of its own — it dispatches `dispatchFileExtract` to worker threads and
 // merges by input index, with the serial loop as both reference and fallback.
@@ -406,11 +407,13 @@ let _ScalaLanguage: object | undefined;
 let _ExLanguage: object | undefined;
 
 async function getTSParser(
-  filePath?: string
+  filePath?: string,
+  languageOverride?: 'JavaScript' | 'TypeScript',
 ): Promise<{ parser: Parser; lang: object } | null> {
-  const NP = await loadNativeParserFor(filePath && /\.(?:[cm]?js|jsx)$/i.test(filePath) ? 'JavaScript' : 'TypeScript');
+  const language = languageOverride
+    ?? (filePath && /\.(?:[cm]?js|jsx)$/i.test(filePath) ? 'JavaScript' : 'TypeScript');
+  const NP = await loadNativeParserFor(language);
   if (!NP) return null;
-  const language = filePath && /\.(?:[cm]?js|jsx)$/i.test(filePath) ? 'JavaScript' : 'TypeScript';
   if (grammarStatus(language) === 'unavailable') return null;
   if (usesTsxGrammar(filePath)) {
     if (!_tsxParser) {
@@ -1158,10 +1161,12 @@ const TS_CALL_QUERY = `
 
 async function extractTSGraph(
   filePath: string,
-  content: string
+  content: string,
+  languageOverride?: 'JavaScript' | 'TypeScript',
 ): Promise<FileExtractResult> {
-  const language = /\.(?:[cm]?js|jsx)$/i.test(filePath) ? 'JavaScript' : 'TypeScript';
-  const r = await getTSParser(filePath);
+  const language = languageOverride
+    ?? (/\.(?:[cm]?js|jsx)$/i.test(filePath) ? 'JavaScript' : 'TypeScript');
+  const r = await getTSParser(filePath, language);
   if (!r) return emptyForUnavailable(language);
   const { parser, lang } = r;
   const tree = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, content);
@@ -5017,6 +5022,11 @@ export class CallGraphBuilder {
     importMap?: ImportMap,
     resolutionNodes?: FunctionNode[],
   ): Promise<CallGraphResult> {
+    files = files.flatMap(file => {
+      const container = extractScriptContainer(file.path, file.content);
+      if (!container?.content) return container ? [] : [file];
+      return [{ path: file.path, content: container.content, language: container.language }];
+    });
     const allNodes = new Map<string, FunctionNode>();
     const allRawEdges: RawEdge[] = [];
     const allCfgs = new Map<string, FunctionCfg>();
@@ -6151,6 +6161,13 @@ function assignClassStableIds(classes: ClassNode[]): void {
 export async function dispatchFileExtract(
   file: { path: string; content: string; language: string },
 ): Promise<FileExtractResult | undefined> {
+  const container = (SCRIPT_CONTAINER_FORMATS as readonly string[]).includes(file.language)
+    ? extractScriptContainer(file.path, file.content)
+    : null;
+  if (container) {
+    if (!container.content) return undefined;
+    return extractTSGraph(file.path, container.content, container.language);
+  }
   if (file.language === 'Python') return extractPyGraph(file.path, file.content);
   if (file.language === 'TypeScript' || file.language === 'JavaScript') return extractTSGraph(file.path, file.content);
   if (file.language === 'Go') return extractGoGraph(file.path, file.content);
@@ -6176,6 +6193,13 @@ export async function extractFileStyle(
   file: { path: string; content: string; language: string },
 ): Promise<FileStyleRaw | undefined> {
   try {
+    const container = extractScriptContainer(file.path, file.content);
+    if (container) {
+      if (!container.content) return undefined;
+      const result = await extractTSGraph(file.path, container.content, container.language);
+      if (result.style) result.style.language = file.language;
+      return result.style;
+    }
     let result: { style?: FileStyleRaw } | undefined;
     if (file.language === 'Python') result = await extractPyGraph(file.path, file.content);
     else if (file.language === 'TypeScript' || file.language === 'JavaScript') result = await extractTSGraph(file.path, file.content);

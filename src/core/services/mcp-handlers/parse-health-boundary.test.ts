@@ -75,6 +75,23 @@ describe('parseHealthBoundary', () => {
     expect(note).toContain('TypeScript: 7 files indexed for search but not graphed');
     expect(note).toContain('LOWER BOUND');
   });
+
+  it('surfaces recognized script containers and the framework semantics still outside the graph', () => {
+    const report: ParseHealthReport = {
+      version: 1, totalDegradedFiles: 0, totalErrorRegions: 0, byLanguage: [], topFiles: [], files: [],
+      scriptContainers: [{
+        format: 'Vue', extension: '.vue', fileCount: 1, scriptBlockCount: 2,
+        extractedScriptBlockCount: 2,
+        limitations: ['template expressions', 'framework macros', 'Svelte reactive statements'],
+        files: [{ filePath: 'src/App.vue', format: 'Vue', scriptBlockCount: 2, extractedScriptBlockCount: 2 }],
+      }],
+    };
+    const note = parseHealthBoundary(report, [])!;
+    expect(note).toContain('Script-container boundary');
+    expect(note).toContain('1 .vue file');
+    expect(note).toContain('2 script blocks extracted');
+    expect(note).toContain('template expressions');
+  });
 });
 
 describe('parseHealthBoundary surfaces a memory-pressure degradation (change: make-analyze-scale-to-any-repo)', () => {

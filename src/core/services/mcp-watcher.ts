@@ -44,6 +44,11 @@ import { assembleFromRegions, type StyleFingerprint, type FileStyleRaw } from '.
 import { invalidateVectorIndexCaches } from '../analyzer/vector-index.js';
 import { buildParseHealthReport, type ParseHealthReport, type FileParseHealth } from '../analyzer/parse-health.js';
 import { parseBudgetOverrunMs } from '../analyzer/parse-budget.js';
+import {
+  extractScriptContainer,
+  summarizeScriptContainers,
+  type ScriptContainerFileRecord,
+} from '../analyzer/sfc-script-extractor.js';
 import { isTestFile } from '../analyzer/test-file.js';
 import { EdgeStore } from './edge-store.js';
 import { refreshAttestationCounts } from '../analyzer/index-attestation.js';
@@ -84,7 +89,7 @@ import {
 // soft to empty and the file simply isn't re-graphed (same as full analyze).
 const CALL_GRAPH_LANGS = new Set([
   'Python', 'TypeScript', 'JavaScript', 'Go', 'Rust', 'Ruby', 'Java', 'C++', 'Swift',
-  'C', 'C#', 'PHP', 'Kotlin',
+  'C', 'C#', 'PHP', 'Kotlin', 'Vue', 'Svelte', 'Astro',
 ]);
 /**
  * Per-changed-file work budget for the incremental closure: how many OTHER files
@@ -187,7 +192,7 @@ interface ChangedFile {
   content: string;
 }
 
-const SOURCE_EXTENSIONS = /\.(ts|tsx|js|jsx|py|go|rs|rb|java|kt|php|cs|cpp|cc|cxx|h|hpp|c|swift)$/;
+const SOURCE_EXTENSIONS = /\.(ts|tsx|js|jsx|py|go|rs|rb|java|kt|php|cs|cpp|cc|cxx|h|hpp|c|swift|vue|svelte|astro)$/;
 // HTML is watched too. detectLanguage() returns 'unknown' for it, so it takes a
 // dedicated path: an edit refreshes the literal-text line index, the inline-
 // <script> call-graph nodes (blanked → JavaScript in buildGraphSubset), and the
@@ -1757,14 +1762,32 @@ export class McpWatcher {
       const byPath = new Map<string, FileParseHealth>(
         Array.isArray(existing?.files) ? existing!.files.map(f => [f.filePath, f]) : [],
       );
+      const containerFiles = new Map<string, ScriptContainerFileRecord>(
+        (existing?.scriptContainers ?? [])
+          .flatMap(boundary => boundary.files ?? [])
+          .map(file => [file.filePath, file]),
+      );
       const before = byPath.size;
       let touched = false;
 
       for (const rel of deletedRels) {
         if (byPath.delete(rel)) touched = true;
+        if (containerFiles.delete(rel)) touched = true;
       }
       for (const f of changedFiles) {
         const language = detectLanguage(f.rel);
+        const container = extractScriptContainer(f.rel, f.content);
+        if (container) {
+          containerFiles.set(f.rel, {
+            filePath: f.rel,
+            format: container.format,
+            scriptBlockCount: container.scriptBlockCount,
+            extractedScriptBlockCount: container.extractedScriptBlockCount,
+          });
+          touched = true;
+        } else if (containerFiles.delete(f.rel)) {
+          touched = true;
+        }
         let health: FileParseHealth | undefined;
         try {
           // The watcher sees already-decoded content, so it maintains the tree-derived signals
@@ -1818,6 +1841,7 @@ export class McpWatcher {
         undefined,
         existing?.memoryDegradation,
         existing?.grammarUnavailable,
+        summarizeScriptContainers([...containerFiles.values()]),
       );
       if (!report) {
         // The repo is now clean AND no degradation stands — remove the stale artifact.
@@ -2092,6 +2116,16 @@ export async function buildGraphSubset(
 }> {
   let lang = detectLanguage(changedRel);
   let content = changedContent;
+  const scriptContainer = extractScriptContainer(changedRel, changedContent);
+  if (scriptContainer) {
+    if (!scriptContainer.content) {
+      return {
+        edges: [], nodes: [], cfgs: [], skipped: [],
+        analyzedFileHashes: new Map([[changedRel, createHash('sha256').update(changedContent).digest('hex')]]),
+      };
+    }
+    lang = scriptContainer.format;
+  }
   // HTML: blank everything outside inline <script> bodies (offset-preserving) so
   // the JS extractor parses the inline scripts at their true positions. Without
   // this, html is 'unknown' → empty result → the caller's atomic swap would
@@ -2116,17 +2150,23 @@ export async function buildGraphSubset(
 
   const skipped: string[] = [];
   for (const cf of callerFiles) {
-    const cfLang = detectLanguage(cf);
-    if (!CALL_GRAPH_LANGS.has(cfLang)) continue; // ungraphable lang — never had edges; not stale
+    let cfLang = detectLanguage(cf);
+    let cfContent: string;
     try {
-      const cfContent = await readFileConfined(rootDir, cf, MAX_EDIT_VERDICT_BASIS_FILE_BYTES);
-      files.push({ path: cf, content: cfContent, language: cfLang });
-      analyzedFileHashes.set(cf, createHash('sha256').update(cfContent).digest('hex'));
+      cfContent = await readFileConfined(rootDir, cf, MAX_EDIT_VERDICT_BASIS_FILE_BYTES);
     } catch {
-      // Present-but-unreadable: report it so the caller marks it stale rather
-      // than deleting its edges and asserting it fresh.
       skipped.push(cf);
+      continue;
     }
+    const cfHash = createHash('sha256').update(cfContent).digest('hex');
+    const callerContainer = extractScriptContainer(cf, cfContent);
+    if (callerContainer) {
+      if (!callerContainer.content) continue;
+      cfLang = callerContainer.format;
+    }
+    if (!CALL_GRAPH_LANGS.has(cfLang)) continue; // ungraphable lang — never had edges; not stale
+    files.push({ path: cf, content: cfContent, language: cfLang });
+    analyzedFileHashes.set(cf, cfHash);
   }
 
   // HTTP topology has no import/call edge before the first client↔route match,

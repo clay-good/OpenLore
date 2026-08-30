@@ -46,6 +46,7 @@ export const EXTENSION_TO_LANGUAGE: Readonly<Record<string, string>> = {
   lua: 'Lua',
   ex: 'Elixir', exs: 'Elixir',
   sh: 'Bash', bash: 'Bash',
+  vue: 'Vue', svelte: 'Svelte', astro: 'Astro',
 };
 
 /**

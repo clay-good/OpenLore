@@ -471,6 +471,7 @@ describe('completeness + fail-soft + determinism', () => {
       Ruby: 'x.rb', Java: 'x.java', Kotlin: 'x.kt', PHP: 'x.php', 'C#': 'x.cs',
       'C++': 'x.cpp', C: 'x.c', Swift: 'x.swift', Scala: 'x.scala', Dart: 'x.dart',
       Lua: 'x.lua', Elixir: 'x.ex', Bash: 'x.sh', Terraform: 'x.tf', Bicep: 'x.bicep',
+      Vue: 'x.vue', Svelte: 'x.svelte', Astro: 'x.astro',
     };
     for (const lang of CODE_LANGUAGES) {
       const path = ext[lang];
@@ -508,6 +509,7 @@ describe('completeness + fail-soft + determinism', () => {
     expect(resolveLanguageName('  TYPESCRIPT ')).toBe('TypeScript');
     expect(resolveLanguageName('c++')).toBe('C++');
     expect(resolveLanguageName('docker compose')).toBe('Docker Compose');
+    expect(resolveLanguageName('.svelte')).toBe('Svelte');
     expect(resolveLanguageName('cobol')).toBeNull();
     expect(resolveLanguageName('')).toBeNull();
   });
@@ -526,6 +528,16 @@ describe('completeness + fail-soft + determinism', () => {
     const ts = languageSupport('TypeScript').capabilities;
     for (const c of ['signatures', 'callGraph', 'imports', 'cfgOverlay', 'typeInference'] as Capability[]) {
       expect(ts, `TypeScript should support ${c}`).toContain(c);
+    }
+  });
+
+  it('script containers are recognized and disclose their extraction scope', () => {
+    for (const format of ['Vue', 'Svelte', 'Astro']) {
+      const record = languageSupport(format);
+      expect(record.known).toBe(true);
+      expect(record.capabilities).toEqual([]);
+      expect(record.container?.extraction).toBe('script-blocks');
+      expect(record.container?.limitations).toContain('template expressions');
     }
   });
 });
@@ -558,6 +570,7 @@ describe('single-source language detection', () => {
       Ruby: 'x.rb', Java: 'x.java', Kotlin: 'x.kt', PHP: 'x.php', 'C#': 'x.cs',
       'C++': 'x.cpp', C: 'x.c', Swift: 'x.swift', Scala: 'x.scala', Dart: 'x.dart',
       Lua: 'x.lua', Elixir: 'x.ex', Bash: 'x.sh', Terraform: 'x.tf', Bicep: 'x.bicep',
+      Vue: 'x.vue', Svelte: 'x.svelte', Astro: 'x.astro',
     };
     for (const lang of CODE_LANGUAGES) {
       const path = rep[lang];

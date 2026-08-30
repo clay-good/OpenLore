@@ -29,7 +29,7 @@ Static analysis output is stored in `.openlore/analysis/`:
 | `llm-context.json` | Context prepared for LLM (signatures, call graph) |
 | `dependencies.mermaid` | Visual dependency graph |
 | `SUMMARY.md` | Human-readable analysis summary |
-| `call-graph.json` | Function-level call graph (18 languages: TS/JS, Python, Go, Rust, Ruby, Java, C/C++, C#, Swift, Kotlin, PHP, Scala, Dart, Lua, Elixir, Bash — query coverage with get_language_support) |
+| `call-graph.json` | Function-level call graph (21 languages: TS/JS, Python, Go, Rust, Ruby, Java, C/C++, C#, Swift, Kotlin, PHP, Scala, Dart, Lua, Elixir, Bash, Vue, Svelte, Astro — query coverage with get_language_support) |
 | `refactor-priorities.json` | Refactoring issues by file and function |
 | `mapping.json` | Requirement->function mapping (produced by `generate`) |
 | `spec-snapshot.json` | Compact coverage summary: git state, per-domain coverage %, uncovered hub functions (auto-updated after `analyze` and `generate`) |
@@ -38,4 +38,3 @@ Static analysis output is stored in `.openlore/analysis/`:
 | `vector-index/` | LanceDB search index — keyword (BM25) by default; a semantic vector index after `openlore embed --local` or when `EMBED_*` is configured |
 
 `openlore analyze` also writes **`ARCHITECTURE.md`** into `.openlore/analysis/` -- a Markdown overview of module clusters, entry points, and critical hubs, refreshed on every run.
-

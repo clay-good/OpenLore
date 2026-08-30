@@ -45,6 +45,12 @@ export interface LanguageSupportView {
   supportedCount: number;
   /** Runtime availability of the grammar behind `callGraph`. */
   grammarStatus: GrammarStatus;
+  /** Recognized script-container scope and the framework semantics still outside extraction. */
+  container?: {
+    recognized: true;
+    extraction: 'script-blocks';
+    limitations: string[];
+  };
 }
 
 export interface GetLanguageSupportResult {
@@ -97,6 +103,7 @@ function viewFor(
     unsupported: CAPABILITIES.filter(c => !rec.capabilities.includes(c)),
     supportedCount: rec.capabilities.length,
     grammarStatus: persistedGrammarStatus ?? liveGrammarStatus(language),
+    ...(rec.container ? { container: rec.container } : {}),
   };
 }
 
@@ -141,6 +148,8 @@ export async function computeGetLanguageSupport(
     phReport?.grammarUnavailable?.map(boundary => boundary.language) ?? [],
   );
   const detected = [...new Set([...detectedLanguages(cg), ...unavailableLanguages])]
+    .concat(phReport?.scriptContainers?.map(boundary => boundary.format) ?? [])
+    .filter((language, index, all) => all.indexOf(language) === index)
     .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   // `detected` may be empty (a docs-only repo) — pass it straight through; an empty list
   // yields NO rows (not the whole registry), so `languages` never contradicts
