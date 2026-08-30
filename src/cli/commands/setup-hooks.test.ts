@@ -57,6 +57,50 @@ describe('agent enforcement Stop hook lifecycle', () => {
     expect(await installAgentEnforcementHook(dir)).toBe(false);
     expect(await readFile(path, 'utf-8')).toBe('{broken');
   });
+
+  it('converges duplicate owned entries to one canonical hook', async () => {
+    await mkdir(join(dir, '.claude'), { recursive: true });
+    const owned = { _openloreAgentEnforcement: true, hooks: [{ command: 'stale-command' }] };
+    await writeFile(join(dir, '.claude', 'settings.json'), JSON.stringify({
+      hooks: { Stop: [owned, { command: 'user-hook' }, owned] },
+    }), 'utf-8');
+
+    expect(await installAgentEnforcementHook(dir)).toBe(true);
+    const stop = (await readSettings(dir)).hooks?.Stop ?? [];
+    expect(stop.filter(entry => entry._openloreAgentEnforcement)).toHaveLength(1);
+    expect(stop.find(entry => entry._openloreAgentEnforcement)?.hooks?.[0]?.command)
+      .toBe('openlore enforce --agent-hook');
+    expect(stop.some(entry => entry.command === 'user-hook')).toBe(true);
+  });
+
+  it.each([null, 42, { hooks: null }, { hooks: [null] }])(
+    'refuses malformed Stop entry %j during install and uninstall without changing bytes',
+    async (entry) => {
+      await mkdir(join(dir, '.claude'), { recursive: true });
+      const path = join(dir, '.claude', 'settings.json');
+      const original = JSON.stringify({ hooks: { Stop: [entry] } }, null, 2) + '\n';
+      await writeFile(path, original, 'utf-8');
+      expect(await installAgentEnforcementHook(dir)).toBe(false);
+      expect(await uninstallAgentEnforcementHook(dir)).toBe(false);
+      expect(await readFile(path, 'utf-8')).toBe(original);
+    },
+  );
+
+  it('rejects a symlinked settings file without reading or mutating its outside target', async () => {
+    const outside = await mkdtemp(join(tmpdir(), 'openlore-agent-hook-outside-'));
+    const outsideSettings = join(outside, 'settings.json');
+    const original = '{"outside":true}\n';
+    await writeFile(outsideSettings, original, 'utf-8');
+    await mkdir(join(dir, '.claude'), { recursive: true });
+    await symlink(outsideSettings, join(dir, '.claude', 'settings.json'));
+    try {
+      expect(await installAgentEnforcementHook(dir)).toBe(false);
+      expect(await uninstallAgentEnforcementHook(dir)).toBe(false);
+      expect(await readFile(outsideSettings, 'utf-8')).toBe(original);
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
 });
 
 async function readSettings(dir: string): Promise<Settings> {

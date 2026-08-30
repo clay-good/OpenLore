@@ -250,4 +250,13 @@ describe('classifyFindings — one gate over one policy', () => {
     expect(classifyFindings([finding], {}).classified[0]?.remediation)
       .toBe('Split the shared contract into c.');
   });
+
+  it('interpolates replacement-like subject text literally', () => {
+    const finding: GovernanceFinding = {
+      code: 'architecture-orphan', severity: 'warning', source: 'architecture-rules',
+      subject: 'src/$&.ts', message: 'orphan detected',
+    };
+    expect(classifyFindings([finding], {}).classified[0]?.remediation)
+      .toContain('src/$&.ts');
+  });
 });

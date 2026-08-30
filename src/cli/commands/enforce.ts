@@ -577,6 +577,11 @@ export interface EnforceCliOptions {
 export async function runEnforceCli(opts: EnforceCliOptions): Promise<number> {
   const cwd = opts.cwd ?? process.cwd();
 
+  if (opts.agentHook && (opts.hook || opts.json || opts.installHook || opts.uninstallHook)) {
+    process.stderr.write('openlore enforce: --agent-hook cannot be combined with --hook, --json, --install-hook, or --uninstall-hook.\n');
+    return 1;
+  }
+
   if (opts.installHook) { await installEnforcementHook(cwd); return typeof process.exitCode === 'number' ? process.exitCode : 0; }
   if (opts.uninstallHook) { await uninstallEnforcementHook(cwd); return 0; }
 
@@ -611,12 +616,14 @@ export async function runEnforceCli(opts: EnforceCliOptions): Promise<number> {
   if (opts.agentHook) {
     const unavailable = configReadError !== null || collected.failedCodes.size > 0;
     if (configReadError) collected.caveats.push(`enforcement config unavailable: ${configReadError}`);
-    const output = renderAgentHook(classified, collected.caveats, unavailable);
-    process.stderr.write(sanitizeForTerminal(output + '\n', { keepNewlines: true }));
-    const explicitlyBlocking = classified.blocking.some(
-      (finding) => explicitPolicy[finding.code] === 'blocking',
+    const configuredBlockingCodes = new Set(
+      classified.blocking
+        .filter((finding) => policy[finding.code] === 'blocking')
+        .map((finding) => finding.code),
     );
-    return !unavailable && explicitlyBlocking ? 2 : 0;
+    const output = renderAgentHook(classified, collected.caveats, unavailable, configuredBlockingCodes);
+    process.stderr.write(sanitizeForTerminal(output + '\n', { keepNewlines: true }));
+    return !unavailable && configuredBlockingCodes.size > 0 ? 2 : 0;
   }
   const activeFrozenAssessment = collected.assessedCodes.size > 0 && Object.entries(policy)
     .some(([code, enforcementClass]) => enforcementClass === 'frozen' && collected.assessedCodes.has(code));
@@ -831,10 +838,15 @@ export function renderAgentHook(
   result: ReturnType<typeof classifyFindings>,
   caveats: readonly string[],
   infrastructureUnavailable = false,
+  configuredBlockingCodes: ReadonlySet<string> = new Set(result.blocking.map((finding) => finding.code)),
 ): string {
   const lines = ['OpenLore agent enforcement:'];
   for (const finding of result.classified) {
-    const label = finding.enforcementClass === 'frozen' ? 'frozen:advisory' : finding.enforcementClass;
+    const label = finding.enforcementClass === 'frozen'
+      ? 'frozen:advisory'
+      : finding.enforcementClass === 'blocking' && !configuredBlockingCodes.has(finding.code)
+        ? 'advisory'
+        : finding.enforcementClass;
     const conclusion = `${finding.code}: ${finding.message}`;
     lines.push(`- [${label}] ${finding.remediation ? `${finding.remediation} — ${conclusion}` : conclusion}`);
   }

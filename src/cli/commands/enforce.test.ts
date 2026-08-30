@@ -267,6 +267,32 @@ describe('agent-loop enforcement hook', () => {
     expect(output).toContain('[advisory] surface-info: informational reachability change');
     expect(output).not.toContain('Action:');
   });
+
+  it('renders a source-default blocking finding as advisory when no policy configured it', () => {
+    const result = classifyFindings([{
+      code: 'corpus-reference-unresolved', severity: 'error', source: 'corpus-integrity',
+      subject: 'ADR-1', message: 'target is missing',
+    }], {});
+    expect(result.blocking).toHaveLength(1);
+    expect(renderAgentHook(result, [], false, new Set())).toContain('[advisory]');
+  });
+
+  it('rejects incompatible output, hook, and lifecycle modes', async () => {
+    const root = await mkRepo();
+    for (const options of [
+      { json: true }, { hook: true }, { installHook: true }, { uninstallHook: true },
+    ]) {
+      const out: string[] = [];
+      const original = process.stderr.write.bind(process.stderr);
+      process.stderr.write = ((value: string | Uint8Array) => { out.push(String(value)); return true; }) as typeof process.stderr.write;
+      try {
+        expect(await runEnforceCli({ cwd: root, agentHook: true, ...options })).toBe(1);
+      } finally {
+        process.stderr.write = original;
+      }
+      expect(out.join('')).toMatch(/cannot be combined/i);
+    }
+  });
 });
 
 describe('architecture assessment hardening', () => {

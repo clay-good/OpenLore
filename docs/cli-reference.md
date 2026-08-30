@@ -617,7 +617,7 @@ openlore briefing-since --base main --json           # machine-readable (stable 
 openlore enforce                 # human-readable gate report for the working tree (advisory)
 openlore enforce --json          # schemaVersion:3 JSON: gated, blocking[], new[], frozen[], advisory[], off[], ratchet{}, caveats[]
 openlore enforce --hook          # hook mode: exit 1 on policy or frozen-baseline gate failures
-openlore enforce --agent-hook    # agent-loop mode: stderr; exit 2 only for explicit blocking policy findings
+openlore enforce --agent-hook    # agent-loop mode: stderr; exit 2 only for configured blocking policy findings
 openlore enforce --install-hook  # install the unified pre-commit hook (coexists with the decisions gate)
 openlore enforce --uninstall-hook
 ```

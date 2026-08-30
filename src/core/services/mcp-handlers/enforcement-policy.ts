@@ -511,7 +511,7 @@ export function classifyFindings(
     const template = FINDING_CODE_REGISTRY[finding.code]?.remediation;
     const classified = {
       ...finding,
-      ...(finding.remediation ? {} : template ? { remediation: template.replaceAll('{subject}', finding.subject) } : {}),
+      ...(finding.remediation ? {} : template ? { remediation: template.replaceAll('{subject}', () => finding.subject) } : {}),
       enforcementClass: resolveEnforcementClass(finding.code, policy, finding.severity),
     };
     const key = findingKey(classified);

@@ -28,7 +28,7 @@ import { validatePanicSignal, readPanicTelemetry } from '../../core/services/mcp
 import type { PanicGateReport } from '../../core/services/mcp-handlers/panic-validation.js';
 import type { PanicResponseMode } from '../../types/index.js';
 import { atomicWriteFile } from '../../core/decisions/atomic-store.js';
-import { confinedAtomicWriteFile, safeJoin } from '../../utils/path-confinement.js';
+import { confinedAtomicWriteFile, readFileConfined, safeJoin } from '../../utils/path-confinement.js';
 import { classifyPiFile, looksLikeOpenLoreExtension, renderPiShim } from '../install/pi-extension.js';
 
 // ============================================================================
@@ -404,12 +404,19 @@ interface ClaudeHookSettings {
   [key: string]: unknown;
 }
 
+function isValidClaudeHookEntry(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const nested = (value as Record<string, unknown>).hooks;
+  return nested === undefined || (Array.isArray(nested)
+    && nested.every(hook => hook !== null && typeof hook === 'object' && !Array.isArray(hook)));
+}
+
 /** Install the opt-in enforcement gate in Claude Code's Stop loop. */
 export async function installAgentEnforcementHook(rootPath: string): Promise<boolean> {
   const settingsPath = await verifiedCheckEditSettingsPath(rootPath, true);
   if (!settingsPath) return false;
   let settings: ClaudeHookSettings;
-  try { settings = await readClaudeSettings(settingsPath); }
+  try { settings = await readClaudeSettings(rootPath, settingsPath); }
   catch (error) { logger.error((error as Error).message); return false; }
   if (settings.hooks !== undefined
       && (settings.hooks === null || typeof settings.hooks !== 'object' || Array.isArray(settings.hooks))) {
@@ -421,20 +428,31 @@ export async function installAgentEnforcementHook(rootPath: string): Promise<boo
     return false;
   }
   const hooks = settings.hooks?.Stop ?? [];
-  const ownedIndex = hooks.findIndex(entry => entry._openloreAgentEnforcement === true);
+  if (!hooks.every(isValidClaudeHookEntry)) {
+    logger.error(`${settingsPath} has a malformed hooks.Stop entry — refusing to overwrite it.`);
+    return false;
+  }
+  const ownedIndices = hooks
+    .map((entry, index) => entry._openloreAgentEnforcement === true ? index : -1)
+    .filter(index => index >= 0);
   const canonicalEntry = {
     _comment: 'openlore: opt-in governance gate for the agent loop',
     _openloreAgentEnforcement: true,
     hooks: [{ type: 'command', command: AGENT_ENFORCEMENT_HOOK_MARKER }],
   };
-  if (ownedIndex >= 0 && JSON.stringify(hooks[ownedIndex]) === JSON.stringify(canonicalEntry)) {
+  if (ownedIndices.length === 1 && JSON.stringify(hooks[ownedIndices[0]!]) === JSON.stringify(canonicalEntry)) {
     logger.success('agent enforcement Stop hook already present in .claude/settings.json');
     return true;
   }
   settings.hooks ??= {};
-  settings.hooks.Stop = ownedIndex >= 0
-    ? hooks.map((entry, index) => index === ownedIndex ? canonicalEntry : entry)
-    : [...hooks, canonicalEntry];
+  let inserted = false;
+  settings.hooks.Stop = hooks.flatMap((entry) => {
+    if (entry._openloreAgentEnforcement !== true) return [entry];
+    if (inserted) return [];
+    inserted = true;
+    return [canonicalEntry];
+  });
+  if (!inserted) settings.hooks.Stop.push(canonicalEntry);
   await confinedAtomicWriteFile(rootPath, settingsPath, JSON.stringify(settings, null, 2) + '\n', { preserveMode: true });
   logger.success('agent enforcement Stop hook added to .claude/settings.json');
   return true;
@@ -443,12 +461,17 @@ export async function installAgentEnforcementHook(rootPath: string): Promise<boo
 /** Remove only OpenLore's opt-in agent enforcement entry. */
 export async function uninstallAgentEnforcementHook(rootPath: string): Promise<boolean> {
   const settingsPath = await verifiedCheckEditSettingsPath(rootPath, false);
-  if (!settingsPath || !(await fileExists(settingsPath))) return true;
+  if (!settingsPath) return !(await fileExists(join(rootPath, '.claude')));
+  if (!(await fileExists(settingsPath))) return true;
   let settings: ClaudeHookSettings;
-  try { settings = await readClaudeSettings(settingsPath); }
+  try { settings = await readClaudeSettings(rootPath, settingsPath); }
   catch (error) { logger.error((error as Error).message); return false; }
   const hooks = settings.hooks?.Stop;
   if (!Array.isArray(hooks)) return true;
+  if (!hooks.every(isValidClaudeHookEntry)) {
+    logger.error(`${settingsPath} has a malformed hooks.Stop entry — refusing to overwrite it.`);
+    return false;
+  }
   const filtered = hooks.filter(entry => entry._openloreAgentEnforcement !== true);
   if (filtered.length === hooks.length) return true;
   if (filtered.length === 0) delete settings.hooks!.Stop;
@@ -463,7 +486,7 @@ export async function installCheckEditHook(rootPath: string): Promise<boolean> {
   const settingsPath = await verifiedCheckEditSettingsPath(rootPath, true);
   if (!settingsPath) return false;
   let settings: ClaudeHookSettings;
-  try { settings = await readClaudeSettings(settingsPath); }
+  try { settings = await readClaudeSettings(rootPath, settingsPath); }
   catch (e) { logger.error((e as Error).message); return false; }
 
   if (settings.hooks !== undefined &&
@@ -506,7 +529,7 @@ export async function uninstallCheckEditHook(rootPath: string): Promise<boolean>
   if (!settingsPath) return !(await fileExists(join(rootPath, '.claude')));
   if (!(await fileExists(settingsPath))) return true;
   let settings: ClaudeHookSettings;
-  try { settings = await readClaudeSettings(settingsPath); }
+  try { settings = await readClaudeSettings(rootPath, settingsPath); }
   catch (e) { logger.error((e as Error).message); return false; }
 
   const hooks = settings.hooks?.PostToolUse;
@@ -586,10 +609,11 @@ async function verifiedCheckEditSettingsPath(rootPath: string, createDirectory: 
   return settingsPath;
 }
 
-async function readClaudeSettings(settingsPath: string): Promise<ClaudeHookSettings> {
+async function readClaudeSettings(rootPath: string, settingsPath: string): Promise<ClaudeHookSettings> {
   let raw: string;
   try {
-    raw = await readFile(settingsPath, 'utf-8');
+    const canonicalRoot = await realpath(rootPath);
+    raw = await readFileConfined(canonicalRoot, relative(canonicalRoot, settingsPath), 1024 * 1024, true, true);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {};
     throw new CorruptSettingsError(`${settingsPath} is unreadable — refusing to overwrite it.`);
@@ -614,7 +638,7 @@ export async function installPanicCheckHook(rootPath: string, format: string = '
   const settingsPath = await verifiedCheckEditSettingsPath(rootPath, true);
   if (!settingsPath) return;
   let settings: ClaudeHookSettings;
-  try { settings = await readClaudeSettings(settingsPath); }
+  try { settings = await readClaudeSettings(rootPath, settingsPath); }
   catch (e) { logger.error((e as Error).message); return; }
   const hooks = settings.hooks?.PreToolUse ?? [];
   const hookEntry = {
@@ -650,7 +674,7 @@ export async function installGryphWatchHook(rootPath: string): Promise<void> {
   const settingsPath = await verifiedCheckEditSettingsPath(rootPath, true);
   if (!settingsPath) return;
   let settings: ClaudeHookSettings;
-  try { settings = await readClaudeSettings(settingsPath); }
+  try { settings = await readClaudeSettings(rootPath, settingsPath); }
   catch (e) { logger.error((e as Error).message); return; }
   const hooks = settings.hooks?.UserPromptSubmit ?? [];
   if (hooks.some((h) => JSON.stringify(h).includes(GRYPH_WATCH_HOOK_MARKER))) {
@@ -675,7 +699,7 @@ export async function uninstallPanicHooks(rootPath: string): Promise<void> {
   if (!settingsPath) return;
   if (!(await fileExists(settingsPath))) return;
   let settings: ClaudeHookSettings;
-  try { settings = await readClaudeSettings(settingsPath); }
+  try { settings = await readClaudeSettings(rootPath, settingsPath); }
   catch (e) { logger.error((e as Error).message); return; }
 
   let changed = false;
