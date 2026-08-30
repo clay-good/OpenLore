@@ -13,5 +13,8 @@ export async function resolveGenerationSemanticSearch(
   const embedder = await resolveEmbedder(config);
   if (!embedder) return undefined;
 
-  return (query, limit) => VectorIndex.search(analysisPath, query, embedder, { limit });
+  return (query, limit) => VectorIndex.search(analysisPath, query, embedder, {
+    limit,
+    vocabularyExpansion: config.retrieval?.vocabularyExpansion !== false,
+  });
 }

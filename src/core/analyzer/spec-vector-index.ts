@@ -28,6 +28,7 @@ import type { MatchEvidence, SearchableFields } from './retrieval-evidence.js';
 import { vectorMatchEvidence } from './retrieval-evidence.js';
 import { atomicWriteFile } from '../decisions/atomic-store.js';
 import { acquireLockAt, isLockHeld } from '../runtime/advisory-lock.js';
+import { compareVocabularyRank, expandVocabularyQuery, scoredExpansionTerms } from './repo-vocabulary.js';
 
 // ============================================================================
 // TYPES
@@ -61,6 +62,7 @@ export interface SpecSearchResult {
   scoreKind?: 'bm25' | 'cosine_distance';
   /** Optional for legacy test doubles; every production search path emits it. */
   matchEvidence?: MatchEvidence;
+  expansionTerms?: string[];
 }
 
 // ============================================================================
@@ -110,12 +112,12 @@ export interface SpecIndexFreshness {
 export interface SpecSearchSnapshot {
   results: SpecSearchResult[];
   indexFreshness: SpecIndexFreshness | null;
-  retrievalMode: 'semantic' | 'keyword';
+  retrievalMode: 'semantic' | 'keyword' | 'keyword+vocabulary';
 }
 
 interface LockedSpecSearchResult {
   results: SpecSearchResult[];
-  retrievalMode: 'semantic' | 'keyword';
+  retrievalMode: 'semantic' | 'keyword' | 'keyword+vocabulary';
 }
 
 export class SpecIndexLockTimeoutError extends Error {
@@ -738,6 +740,7 @@ export class SpecVectorIndex {
       section?: string;
       /** Internal diagnostic: return the ordinary bounded candidate window before result cutoff. */
       traceCandidates?: boolean;
+      vocabularyExpansion?: boolean;
     } = {}
   ): Promise<SpecSearchResult[]> {
     return (await SpecVectorIndex.searchWithFreshness(outputDir, query, embedSvc, opts)).results;
@@ -753,6 +756,7 @@ export class SpecVectorIndex {
       domain?: string;
       section?: string;
       traceCandidates?: boolean;
+      vocabularyExpansion?: boolean;
     } = {},
   ): Promise<SpecSearchSnapshot> {
     const queryVector = await SpecVectorIndex._embedQueryOutsideLock(outputDir, query, embedSvc);
@@ -808,11 +812,12 @@ export class SpecVectorIndex {
       domain?: string;
       section?: string;
       traceCandidates?: boolean;
+      vocabularyExpansion?: boolean;
     },
   ): Promise<LockedSpecSearchResult> {
     const { connect } = await import('@lancedb/lancedb');
 
-    const { limit = 10, domain, section, traceCandidates = false } = opts;
+    const { limit = 10, domain, section, traceCandidates = false, vocabularyExpansion = true } = opts;
 
     if (!SpecVectorIndex.exists(outputDir)) {
       throw new Error('No spec index found. Run "openlore analyze" first.');
@@ -842,8 +847,10 @@ export class SpecVectorIndex {
       || meta.model === (embedSvc?.modelName ?? null);
     if (!embedSvc || !indexHasEmbeddings || !queryVector || !indexMatchesEmbedder) {
       return {
-        results: await SpecVectorIndex._bm25Only(table, query, limit, domain, section, traceCandidates),
-        retrievalMode: 'keyword',
+        results: await SpecVectorIndex._bm25Only(outputDir, table, query, limit, domain, section, traceCandidates, vocabularyExpansion),
+        retrievalMode: expandVocabularyQuery(outputDir, [], vocabularyExpansion).vocabularyAvailable
+          ? 'keyword+vocabulary'
+          : 'keyword',
       };
     }
 
@@ -851,8 +858,10 @@ export class SpecVectorIndex {
     // the query vector's dimension disagree with the stored vectors and crash ANN.
     if (meta && meta.dim > 0 && queryVector.length !== meta.dim) {
       return {
-        results: await SpecVectorIndex._bm25Only(table, query, limit, domain, section, traceCandidates),
-        retrievalMode: 'keyword',
+        results: await SpecVectorIndex._bm25Only(outputDir, table, query, limit, domain, section, traceCandidates, vocabularyExpansion),
+        retrievalMode: expandVocabularyQuery(outputDir, [], vocabularyExpansion).vocabularyAvailable
+          ? 'keyword+vocabulary'
+          : 'keyword',
       };
     }
 
@@ -901,37 +910,45 @@ export class SpecVectorIndex {
    * corpus with BM25 and returns the top `limit` matching sections.
    */
   private static async _bm25Only(
+    outputDir: string,
     table: { query(): { toArray(): Promise<Record<string, unknown>[]> } },
     query: string,
     limit: number,
     domain?: string,
     section?: string,
     traceCandidates = false,
+    vocabularyExpansion = true,
   ): Promise<SpecSearchResult[]> {
     const allRows = await table.query().toArray() as Record<string, unknown>[];
     const corpus = buildBm25Corpus(
       allRows.map(r => ({ id: r.id as string, text: r.text as string }))
     );
     const queryTokens = tokenize(query);
+    const expandedQuery = expandVocabularyQuery(outputDir, queryTokens, vocabularyExpansion);
     const rowById = new Map(allRows.map(r => [r.id as string, r]));
 
     return corpus.docs
-      .map((_, i) => ({ idx: i, score: bm25Score(corpus, queryTokens, i) }))
-      .filter(({ score }) => score > 0)
+      .map((doc, i) => ({
+        idx: i,
+        score: bm25Score(corpus, queryTokens, i),
+        expansionScore: bm25Score(corpus, expandedQuery.expansionTokens, i),
+        id: doc.id,
+      }))
+      .filter(({ score, expansionScore }) => score > 0 || expansionScore > 0)
       // Deterministic ordering: score desc, ties broken by id asc.
-      .sort((a, b) => b.score - a.score || (corpus.docs[a.idx].id < corpus.docs[b.idx].id ? -1 : 1))
-      .map(({ idx, score }) => {
+      .sort(compareVocabularyRank)
+      .map(({ idx, score, expansionScore }) => {
         const row = rowById.get(corpus.docs[idx].id);
-        return row ? { row, idx, score } : null;
+        return row ? { row, idx, score, expansionScore } : null;
       })
-      .filter((x): x is { row: Record<string, unknown>; idx: number; score: number } => x !== null)
+      .filter((x): x is { row: Record<string, unknown>; idx: number; score: number; expansionScore: number } => x !== null)
       .filter(({ row }) => {
         if (domain && (row.domain as string) !== domain) return false;
         if (section && (row.section as string) !== section) return false;
         return true;
       })
       .slice(0, traceCandidates ? limit * 3 : limit)
-      .map(({ row, idx, score }) => {
+      .map(({ row, idx, score, expansionScore }) => {
         let linkedFiles: string[] = [];
         try {
           linkedFiles = JSON.parse(row.linkedFiles as string) as string[];
@@ -945,9 +962,19 @@ export class SpecVectorIndex {
             text: row.text as string,
             linkedFiles,
           },
-          score,
+          score: score > 0 ? score : expansionScore,
           scoreKind: 'bm25' as const,
-          matchEvidence: bm25MatchEvidence(corpus, queryTokens, idx, searchableFieldsForSpecRow(row), 1),
+          matchEvidence: bm25MatchEvidence(
+            corpus,
+            score > 0 ? queryTokens : expandedQuery.expansionTokens,
+            idx,
+            searchableFieldsForSpecRow(row),
+            score > 0 ? 1 : 2,
+          ),
+          ...(() => {
+            const terms = scoredExpansionTerms(expandedQuery.expansionTokens, corpus.docs[idx].tfMap);
+            return terms.length > 0 ? { expansionTerms: terms } : {};
+          })(),
         };
       });
   }

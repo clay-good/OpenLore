@@ -26,6 +26,14 @@ import { getSkeletonContent, isSkeletonWorthIncluding } from './code-shaper.js';
 import { quietNativeLoggingOnce } from './lance-logging.js';
 import { noteUpdateAndMaybeCompact } from './index-compaction.js';
 import { TOKENIZER_VERSION, tokenize } from './bm25-tokenizer.js';
+import {
+  expandVocabularyQuery,
+  compareVocabularyRank,
+  invalidateRepositoryVocabulary,
+  mineRepositoryVocabulary,
+  persistRepositoryVocabulary,
+  scoredExpansionTerms,
+} from './repo-vocabulary.js';
 import { atomicWriteFile } from '../decisions/atomic-store.js';
 import { acquireLockAt } from '../runtime/advisory-lock.js';
 import {
@@ -72,6 +80,8 @@ export interface SearchResult {
   scoreKind?: 'rrf' | 'bm25' | 'cosine_distance';
   /** Optional for legacy test doubles; every production search path emits it. */
   matchEvidence?: MatchEvidence;
+  /** Vocabulary terms that contributed a non-zero score to this result. */
+  expansionTerms?: string[];
 }
 
 export interface KeywordMissDiagnostics {
@@ -110,6 +120,8 @@ export interface VectorIndexMeta {
    * full rebuild re-stamps. A legacy meta without this field is treated as v1.
    */
   tokenizerVersion?: number;
+  /** Corpus identity of the verified repository-vocabulary sidecar, when present. */
+  vocabularyContentStamp?: string;
   /** Present only when an incremental update could neither add nor restore rows. */
   degraded?: {
     reason: 'incremental-update-restore-failed';
@@ -213,6 +225,9 @@ function isVectorIndexMeta(value: unknown): value is VectorIndexMeta {
   if (meta.fullBuildAt !== undefined && typeof meta.fullBuildAt !== 'string') return false;
   if (meta.schemaVersion !== META_SCHEMA_VERSION) return false;
   if (meta.tokenizerVersion !== undefined && !Number.isInteger(meta.tokenizerVersion)) return false;
+  if (meta.vocabularyContentStamp !== undefined
+      && (typeof meta.vocabularyContentStamp !== 'string'
+        || !/^[a-f0-9]{64}$/.test(meta.vocabularyContentStamp))) return false;
   if (meta.hasEmbeddings) {
     if ((meta.dim as number) === 0 || typeof meta.model !== 'string' || meta.model.length === 0) return false;
   } else if (meta.dim !== 0 || meta.model !== null) {
@@ -491,6 +506,7 @@ function patchBm25Cache(dbPath: string, changedFilePaths: Set<string>, newRows: 
   // hot-path optimisation). Done before the early return so invalidation happens
   // even when there is no in-memory corpus to patch.
   deleteCorpusSidecar(dbPath);
+  invalidateRepositoryVocabulary(dbPath);
   const entry = _bm25Cache.get(dbPath);
   if (!entry) return;
   const patched = patchBm25Corpus(entry.corpus, entry.rows, changedFilePaths, newRows);
@@ -874,6 +890,31 @@ function deleteCorpusSidecar(dbPath: string): void {
   } catch {
     /* ignore */
   }
+  invalidateRepositoryVocabulary(dbPath);
+}
+
+async function persistVocabularyForRecords(
+  dbPath: string,
+  records: readonly Omit<FunctionRecord, 'vector'>[],
+  enabled: boolean,
+): Promise<string | null> {
+  invalidateRepositoryVocabulary(dbPath);
+  if (!enabled) return null;
+  try {
+    const df = new Map<string, number>();
+    for (const record of records) {
+      const unique = new Set(tokenize(record.text));
+      for (const token of unique) df.set(token, (df.get(token) ?? 0) + 1);
+    }
+    const contentStamp = hashIndexedRows(records);
+    const vocabulary = mineRepositoryVocabulary(records, df, contentStamp);
+    await persistRepositoryVocabulary(dbPath, vocabulary);
+    return contentStamp;
+  } catch {
+    // Vocabulary is an optional, fail-soft recall layer. Plain BM25 remains valid.
+    invalidateRepositoryVocabulary(dbPath);
+    return null;
+  }
 }
 
 /**
@@ -1066,7 +1107,8 @@ export class VectorIndex {
     /** Optional map of filePath → source content for skeleton-based body indexing */
     fileContents?: Map<string, string>,
     /** When true, reuse cached vectors for unchanged functions */
-    incremental = false
+    incremental = false,
+    vocabularyExpansion = true,
   ): Promise<{
     embedded: number;
     reused: number;
@@ -1078,6 +1120,7 @@ export class VectorIndex {
   }> {
     return withVectorIndexMutation(outputDir, () => VectorIndex.buildUnlocked(
       outputDir, nodes, signatures, hubIds, entryPointIds, embedSvc, fileContents, incremental,
+      vocabularyExpansion,
     ));
   }
 
@@ -1090,6 +1133,7 @@ export class VectorIndex {
     embedSvc: Embedder | null,
     fileContents?: Map<string, string>,
     incremental = false,
+    vocabularyExpansion = true,
   ): Promise<{
     embedded: number;
     reused: number;
@@ -1197,6 +1241,7 @@ export class VectorIndex {
         dbPath,
         (function* () { for (const r of candidates) yield { id: r.id, text: r.text }; })(),
       );
+      const vocabularyContentStamp = await persistVocabularyForRecords(dbPath, candidates, vocabularyExpansion);
       await writeMeta(outputDir, {
         hasEmbeddings: false,
         dim: 0,
@@ -1205,6 +1250,7 @@ export class VectorIndex {
         fullBuildAt: builtAt,
         schemaVersion: META_SCHEMA_VERSION,
         tokenizerVersion: TOKENIZER_VERSION,
+        ...(vocabularyContentStamp ? { vocabularyContentStamp } : {}),
       });
       _degradedFallback.delete(dbPath);
       invalidateDbPathCaches(dbPath);
@@ -1308,6 +1354,7 @@ export class VectorIndex {
       dbPath,
       (function* () { for (const r of fullRecords) yield { id: r.id, text: r.text }; })(),
     );
+    const vocabularyContentStamp = await persistVocabularyForRecords(dbPath, fullRecords, vocabularyExpansion);
     await writeMeta(outputDir, {
       hasEmbeddings: true,
       dim: fullRecords[0]?.vector.length ?? 0,
@@ -1319,6 +1366,7 @@ export class VectorIndex {
       fullBuildAt: builtAt,
       schemaVersion: META_SCHEMA_VERSION,
       tokenizerVersion: TOKENIZER_VERSION,
+      ...(vocabularyContentStamp ? { vocabularyContentStamp } : {}),
     });
 
     // Invalidate search caches — index was just rebuilt
@@ -1662,9 +1710,18 @@ export class VectorIndex {
       hybrid?: boolean;
       /** Internal diagnostic: return the ordinary bounded candidate window before result cutoff. */
       traceCandidates?: boolean;
+      /** Disable repository-vocabulary query expansion without rebuilding. */
+      vocabularyExpansion?: boolean;
     } = {}
   ): Promise<SearchResult[]> {
-    const { limit = 10, language, minFanIn, hybrid = true, traceCandidates = false } = opts;
+    const {
+      limit = 10,
+      language,
+      minFanIn,
+      hybrid = true,
+      traceCandidates = false,
+      vocabularyExpansion = true,
+    } = opts;
 
     if (!VectorIndex.exists(outputDir)) {
       throw new Error('Vector index not found. Run "openlore analyze --embed" first.');
@@ -1695,7 +1752,7 @@ export class VectorIndex {
     // truth: a missing sidecar (legacy index) is treated as embeddings-present.
     const indexHasEmbeddings = metaHasEmbeddings(meta);
     if (!embedSvc || !indexHasEmbeddings) {
-      return VectorIndex._bm25Only(table, dbPath, query, limit, language, minFanIn, traceCandidates);
+      return VectorIndex._bm25Only(table, dbPath, outputDir, query, limit, language, minFanIn, traceCandidates, vocabularyExpansion);
     }
 
     // ── Dense recall ──────────────────────────────────────────────────────────
@@ -1704,7 +1761,7 @@ export class VectorIndex {
       [queryVector] = await embedSvc.embed([query]);
     } catch {
       // Embedding server unreachable — fall back to BM25
-      return VectorIndex._bm25Only(table, dbPath, query, limit, language, minFanIn, traceCandidates);
+      return VectorIndex._bm25Only(table, dbPath, outputDir, query, limit, language, minFanIn, traceCandidates, vocabularyExpansion);
     }
     if (!queryVector) throw new Error('Failed to embed query');
 
@@ -1713,7 +1770,7 @@ export class VectorIndex {
     // full rebuild), ANN search would throw deep inside LanceDB. Degrade to BM25
     // rather than crashing the tool — the index is stale, not broken.
     if (meta !== null && meta !== INVALID_META && meta.dim > 0 && queryVector.length !== meta.dim) {
-      return VectorIndex._bm25Only(table, dbPath, query, limit, language, minFanIn, traceCandidates);
+      return VectorIndex._bm25Only(table, dbPath, outputDir, query, limit, language, minFanIn, traceCandidates, vocabularyExpansion);
     }
 
     const denseFetch = hybrid ? Math.min(limit * 5, 500) : Math.min(limit * 10, 1000);
@@ -1762,11 +1819,18 @@ export class VectorIndex {
 
     const { corpus } = cachedEntry;
     const queryTokens = tokenize(query);
+    const expandedQuery = expandVocabularyQuery(outputDir, queryTokens, vocabularyExpansion);
 
     // Score all corpus documents with BM25
     const sparseScored = corpus.docs
-      .map((_, i) => ({ idx: i, score: bm25Score(corpus, queryTokens, i) }))
-      .sort((a, b) => b.score - a.score)
+      .map((doc, i) => ({
+        idx: i,
+        score: bm25Score(corpus, queryTokens, i),
+        expansionScore: bm25Score(corpus, expandedQuery.expansionTokens, i),
+        id: doc.id,
+      }))
+      .filter(({ score, expansionScore }) => score > 0 || expansionScore > 0)
+      .sort(compareVocabularyRank)
       .slice(0, limit * 5);
 
     // Build id→row map from allRows for sparse candidates
@@ -1784,8 +1848,7 @@ export class VectorIndex {
       if (!candidates.has(id)) candidates.set(id, row);
     }
 
-    for (const { idx, score: bm25 } of sparseScored) {
-      if (bm25 === 0) continue; // no BM25 signal — skip
+    for (const { idx } of sparseScored) {
       const id = corpus.docs[idx].id;
       const row = rowById.get(id);
       if (!row) continue;
@@ -1796,14 +1859,17 @@ export class VectorIndex {
     // candidate never appeared in the sparse list, and vice versa).
     const denseRankById = new Map(denseRows.map((r, i) => [r.id as string, i]));
     const sparseRankById = new Map(sparseScored.map(({ idx }, i) => [corpus.docs[idx].id, i]));
+    const sparseScoreById = new Map(sparseScored.map((candidate) => [candidate.id, candidate]));
     const sparseEvidenceById = new Map(
       sparseScored
-        .filter(({ score }) => score > 0)
         .map(({ idx }) => {
           const id = corpus.docs[idx].id;
           const row = rowById.get(id);
+          const scoredTokens = sparseScoreById.get(id)?.score
+            ? queryTokens
+            : expandedQuery.expansionTokens;
           return [id, row
-            ? bm25MatchEvidence(corpus, queryTokens, idx, searchableFieldsForFunctionRow(row), 2)
+            ? bm25MatchEvidence(corpus, scoredTokens, idx, searchableFieldsForFunctionRow(row), 2)
             : vectorMatchEvidence(2)] as const;
         }),
     );
@@ -1816,6 +1882,10 @@ export class VectorIndex {
         row,
         score: rrfScore(dr, sr),
         matchEvidence: sparseEvidenceById.get(id) ?? vectorMatchEvidence(2),
+        expansionTerms: scoredExpansionTerms(
+          expandedQuery.expansionTokens,
+          corpus.docs[sparseScoreById.get(id)?.idx ?? -1]?.tfMap ?? new Map(),
+        ),
       };
     });
 
@@ -1823,8 +1893,9 @@ export class VectorIndex {
       .sort((a, b) => b.score - a.score)
       .filter(({ row }) => passesFilters(row))
       .slice(0, traceCandidates ? undefined : limit)
-      .map(({ row, score, matchEvidence }) => ({
+      .map(({ row, score, matchEvidence, expansionTerms }) => ({
         record: rowToRecord(row), score, scoreKind: 'rrf' as const, matchEvidence,
+        ...(expansionTerms.length > 0 ? { expansionTerms } : {}),
       }));
   }
 
@@ -1835,11 +1906,13 @@ export class VectorIndex {
   private static async _bm25Only(
     table: { query(): { toArray(): Promise<Record<string, unknown>[]> } },
     dbPath: string,
+    outputDir: string,
     query: string,
     limit: number,
     language?: string,
     minFanIn?: number,
     traceCandidates = false,
+    vocabularyExpansion = true,
   ): Promise<SearchResult[]> {
     let cachedEntry = _bm25Cache.get(dbPath);
     let allRows: Record<string, unknown>[];
@@ -1858,20 +1931,26 @@ export class VectorIndex {
 
     const { corpus } = cachedEntry;
     const queryTokens = tokenize(query);
+    const expandedQuery = expandVocabularyQuery(outputDir, queryTokens, vocabularyExpansion);
     const rowById = new Map(allRows.map(r => [r.id as string, r]));
 
     return corpus.docs
-      .map((_, i) => ({ idx: i, score: bm25Score(corpus, queryTokens, i) }))
-      .filter(({ score }) => score > 0)
+      .map((doc, i) => ({
+        idx: i,
+        score: bm25Score(corpus, queryTokens, i),
+        expansionScore: bm25Score(corpus, expandedQuery.expansionTokens, i),
+        id: doc.id,
+      }))
+      .filter(({ score, expansionScore }) => score > 0 || expansionScore > 0)
       // Sort by score desc; break ties by id asc so ranking is deterministic
       // across runs for a fixed query + corpus.
-      .sort((a, b) => b.score - a.score || (corpus.docs[a.idx].id < corpus.docs[b.idx].id ? -1 : 1))
+      .sort(compareVocabularyRank)
       .slice(0, limit * 3) // oversample before filtering
-      .map(({ idx, score }) => {
+      .map(({ idx, score, expansionScore }) => {
         const row = rowById.get(corpus.docs[idx].id);
-        return row ? { row, idx, score } : null;
+        return row ? { row, idx, score, expansionScore } : null;
       })
-      .filter((x): x is { row: Record<string, unknown>; idx: number; score: number } => x !== null)
+      .filter((x): x is { row: Record<string, unknown>; idx: number; score: number; expansionScore: number } => x !== null)
       .filter(({ row }) => {
         if (!isRepoFunctionRow(row)) return false;
         if (language && (row.language as string) !== language) return false;
@@ -1879,11 +1958,21 @@ export class VectorIndex {
         return true;
       })
       .slice(0, traceCandidates ? undefined : limit)
-      .map(({ row, idx, score }) => ({
+      .map(({ row, idx, score, expansionScore }) => ({
         record: rowToRecord(row),
-        score,
+        score: score > 0 ? score : expansionScore,
         scoreKind: 'bm25' as const,
-        matchEvidence: bm25MatchEvidence(corpus, queryTokens, idx, searchableFieldsForFunctionRow(row), 1),
+        matchEvidence: bm25MatchEvidence(
+          corpus,
+          score > 0 ? queryTokens : expandedQuery.expansionTokens,
+          idx,
+          searchableFieldsForFunctionRow(row),
+          score > 0 ? 1 : 2,
+        ),
+        ...(() => {
+          const terms = scoredExpansionTerms(expandedQuery.expansionTokens, corpus.docs[idx].tfMap);
+          return terms.length > 0 ? { expansionTerms: terms } : {};
+        })(),
       }));
   }
 

@@ -35,6 +35,7 @@ import type {
   ImpactCertificateConfig,
   LLMConfig,
   OpenLoreConfig,
+  RetrievalConfig,
   SpecStoreConfig,
 } from '../../types/index.js';
 
@@ -125,6 +126,12 @@ const embeddingRule: ConfigRule = {
     skipSslVerify: booleanRule,
   }),
   required: requiredFor<EmbeddingConfig>({}),
+};
+
+const retrievalRule: ConfigRule = {
+  kind: 'object',
+  fields: fieldsFor<RetrievalConfig>({ vocabularyExpansion: booleanRule }),
+  required: requiredFor<RetrievalConfig>({}),
 };
 
 const panicRule: ConfigRule = {
@@ -238,6 +245,7 @@ const CONFIG_RULE: Extract<ConfigRule, { kind: 'object' }> = {
     generation: generationRule,
     llm: llmRule,
     embedding: embeddingRule,
+    retrieval: retrievalRule,
     panicResponse: panicRule,
     createdAt: stringRule,
     lastRun: { kind: 'string-or-null' },
@@ -274,6 +282,7 @@ export const CONFIG_FIELD_KINDS: Record<keyof OpenLoreConfig, ConfigFieldKind> =
   generation: 'object',
   llm: 'object',
   embedding: 'object',
+  retrieval: 'object',
   panicResponse: 'object',
   createdAt: 'string',
   lastRun: 'string-or-null',

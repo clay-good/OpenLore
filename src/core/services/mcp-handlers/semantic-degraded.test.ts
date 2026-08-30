@@ -20,6 +20,7 @@ vi.mock('../../analyzer/text-line-index.js', () => ({
 vi.mock('../../analyzer/embedder.js', () => ({
   resolveEmbedder: vi.fn().mockResolvedValue(null),
   servedRetrievalMode: vi.fn().mockReturnValue('keyword'),
+  isKeywordRetrievalMode: vi.fn().mockReturnValue(true),
 }));
 vi.mock('../config-manager.js', () => ({ readOpenLoreConfig: vi.fn().mockResolvedValue(null) }));
 vi.mock('./utils.js', async (importOriginal) => {

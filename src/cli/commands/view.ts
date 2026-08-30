@@ -681,8 +681,12 @@ export const viewCommand = new Command('view')
                     return;
                   }
                   const { readOpenLoreConfig } = await import('../../core/services/config-manager.js');
-                  const embedSvc = await resolveEmbedder(await readOpenLoreConfig(rootPath));
-                  const results = await VectorIndex.search(analysisDir, q, embedSvc, { limit: 5 });
+                  const config = await readOpenLoreConfig(rootPath);
+                  const embedSvc = await resolveEmbedder(config);
+                  const results = await VectorIndex.search(analysisDir, q, embedSvc, {
+                    limit: 5,
+                    vocabularyExpansion: config?.retrieval?.vocabularyExpansion !== false,
+                  });
                   res.setHeader('Content-Type', 'application/json; charset=utf-8');
                   res.statusCode = 200;
                   res.end(JSON.stringify(results.map(r => ({

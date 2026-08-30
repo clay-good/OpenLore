@@ -20,6 +20,7 @@ import { FileWalker } from './file-walker.js';
 import { SpecVectorIndex } from './spec-vector-index.js';
 import { TextLineIndex } from './text-line-index.js';
 import { VectorIndex } from './vector-index.js';
+import { loadRepositoryVocabulary } from './repo-vocabulary.js';
 import { atomicWriteFile } from '../decisions/atomic-store.js';
 import { analysisGeneratedExcludes } from './analysis-core.js';
 
@@ -164,6 +165,7 @@ function indexConfigurationHash(options: BuildAnalysisIndexesOptions): string {
   return createHash('sha256').update(JSON.stringify({
     keywordOnly: options.keywordOnly ?? false,
     embedding: options.config?.embedding ?? null,
+    retrieval: options.config?.retrieval ?? null,
     generation: options.config?.generation ?? null,
     openspecPath: options.config?.openspecPath ?? null,
     analysis: options.config?.analysis ?? null,
@@ -257,10 +259,21 @@ async function buildAnalysisIndexesUnlocked(options: BuildAnalysisIndexesOptions
           embedder,
           fileContents,
           !(options.force ?? false),
+          options.config?.retrieval?.vocabularyExpansion !== false,
         );
         result.functionIndex = 'built';
-        const mode = built.hasEmbeddings ? 'semantic' : 'keyword';
-        emit({ index: 'function', status: 'complete', detail: `[${mode}] (${describePopulation(built)})` });
+        const vocabulary = loadRepositoryVocabulary(options.outputPath);
+        const mode = built.hasEmbeddings
+          ? 'semantic'
+          : vocabulary ? 'keyword+vocabulary' : 'keyword';
+        const vocabularyDetail = vocabulary?.status === 'partial'
+          ? `; vocabulary partial, ${vocabulary.omittedCandidateCount} candidate(s) omitted`
+          : '';
+        emit({
+          index: 'function',
+          status: 'complete',
+          detail: `[${mode}] (${describePopulation(built)})${vocabularyDetail}`,
+        });
       } catch (error) {
         if (!embedder) throw error;
         const reason = `Semantic index failed; keyword index used: ${(error as Error).message}`;
@@ -275,6 +288,7 @@ async function buildAnalysisIndexesUnlocked(options: BuildAnalysisIndexesOptions
           null,
           fileContents,
           false,
+          options.config?.retrieval?.vocabularyExpansion !== false,
         );
         result.functionIndex = 'degraded';
       }

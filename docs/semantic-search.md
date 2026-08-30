@@ -16,7 +16,16 @@ The result: a single `orient` or `search_code` call returns not just "functions 
 
 Keyword (BM25) search is the **first-class default** — `openlore analyze` builds a working keyword index with zero configuration, no network, and no API key, and `orient` / `search_code` / `search_specs` / `suggest_insertion_points` all work immediately. Semantic (dense) embeddings are an **optional ranking upgrade** that improves recall on synonym/paraphrase queries; they are never required and structural correctness never depends on them.
 
-Each surface states the active mode plainly — `keyword`, `local-semantic`, or `remote-semantic` (in `analyze` summaries, the `orient` CLI, and the `retrievalMode` field of the `orient` / `search_code` / `search_specs` responses). The keyword default is never framed as a degraded fallback.
+Each surface states the active mode plainly — `keyword`, `keyword+vocabulary`, `local-semantic`, or `remote-semantic` (in `analyze` summaries, the `orient` CLI, and the `retrievalMode` field of the `orient` / `search_code` / `search_specs` responses). The keyword default is never framed as a degraded fallback.
+
+After a full analysis, keyword mode may use a repository-derived vocabulary. OpenLore mines
+abbreviation, repeated local co-occurrence, and conservative attested morphology links from the
+same symbol/doc/signature material it indexes. The artifact is deterministic, bounded, and tied to
+the BM25 corpus content stamp. Expansion happens at query time only: the corpus never grows, any
+original-term match ranks above every expansion-only match, and an incremental index mutation
+invalidates the vocabulary until the next full analysis. Set
+`retrieval.vocabularyExpansion: false` to disable this layer without rebuilding. This is a lexical
+recall improvement, not semantic retrieval; the local/remote semantic guidance remains unchanged.
 
 There are two ways to turn on semantic ranking:
 
@@ -73,4 +82,3 @@ prefer `NODE_EXTRA_CA_CERTS`, or `EMBED_SKIP_SSL_VERIFY=1` when the CA is unavai
 > Switching the embedding model or provider re-embeds the whole index (`openlore embed` runs a forced rebuild). Cached vectors from a different model are never reused, so the index can never end up with mixed dimensions; if a stale index is ever queried with a mismatched model, search degrades to keyword (BM25) rather than erroring.
 
 The index is stored in `.openlore/analysis/vector-index/` and is automatically used by the viewer's search bar and the `search_code` / `suggest_insertion_points` MCP tools. With the keyword default the directory holds a BM25-only index (no `vector` column).
-

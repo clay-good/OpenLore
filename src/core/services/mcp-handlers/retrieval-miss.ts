@@ -213,6 +213,7 @@ async function explainRetrievalMiss(
       language: input.language,
       minFanIn: input.minFanIn,
       traceCandidates: true,
+      vocabularyExpansion: cfg?.retrieval?.vocabularyExpansion !== false,
     });
     if (generation !== indexGenerationStamp(outputDir, input.surface)) {
       return snapshotRetry === 0
@@ -224,7 +225,11 @@ async function explainRetrievalMiss(
     if (input.target.kind === 'file' && candidates.length === 0) {
       const { TextLineIndex } = await import('../../analyzer/text-line-index.js');
       if (TextLineIndex.exists(outputDir)) {
-        const textCandidates = await TextLineIndex.searchText(outputDir, input.query, { limit, traceCandidates: true });
+        const textCandidates = await TextLineIndex.searchText(outputDir, input.query, {
+          limit,
+          traceCandidates: true,
+          vocabularyExpansion: cfg?.retrieval?.vocabularyExpansion !== false,
+        });
         const textRank = textCandidates.findIndex((result) => result.filePath === input.target.value);
         if (textRank >= 0) {
           const rank = textRank + 1;
@@ -274,6 +279,7 @@ async function explainRetrievalMiss(
     domain: input.domain,
     section: input.section,
     traceCandidates: true,
+    vocabularyExpansion: cfg?.retrieval?.vocabularyExpansion !== false,
   });
   if (generation !== indexGenerationStamp(outputDir, input.surface)) {
     return snapshotRetry === 0

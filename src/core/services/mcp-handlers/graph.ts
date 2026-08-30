@@ -543,7 +543,10 @@ export async function handleGetSubgraph(
         const cfg = await readOpenLoreConfig(absDir);
         const embedSvc = await resolveEmbedder(cfg);
         if (embedSvc) {
-          const results = await VectorIndex.search(outputDir, functionName, embedSvc, { limit: 1 });
+          const results = await VectorIndex.search(outputDir, functionName, embedSvc, {
+            limit: 1,
+            vocabularyExpansion: cfg?.retrieval?.vocabularyExpansion !== false,
+          });
           if (results.length > 0) {
             const matched = ctx.edgeStore.getNode(results[0].record.id);
             if (matched) seeds = [matched];
@@ -707,7 +710,10 @@ export async function handleAnalyzeImpact(
         const cfg = await readOpenLoreConfig(absDir);
         const embedSvc = await resolveEmbedder(cfg);
         if (embedSvc) {
-          const results = await VectorIndex.search(outputDir, symbol, embedSvc, { limit: 1 });
+          const results = await VectorIndex.search(outputDir, symbol, embedSvc, {
+            limit: 1,
+            vocabularyExpansion: cfg?.retrieval?.vocabularyExpansion !== false,
+          });
           if (results.length > 0) {
             const matched = ctx.edgeStore.getNode(results[0].record.id);
             if (matched) seeds = [matched];

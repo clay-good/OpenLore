@@ -30,7 +30,7 @@ describe('resolveGenerationSemanticSearch', () => {
     await search?.('authentication', 7);
 
     expect(VectorIndex.search).toHaveBeenCalledWith(
-      '/custom/analysis', 'authentication', embedder, { limit: 7 },
+      '/custom/analysis', 'authentication', embedder, { limit: 7, vocabularyExpansion: true },
     );
   });
 });

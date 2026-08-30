@@ -23,6 +23,30 @@
 }
 ```
 
+### Repository vocabulary expansion
+
+Keyword search mines a deterministic abbreviation and co-occurrence vocabulary from the
+repository during `openlore analyze`. A verified vocabulary is applied only to queries: it does
+not add terms to the BM25 corpus or change index size. Results with an original query-term match
+always rank ahead of expansion-only results, and responses name only expansion terms that actually
+scored. The served mode is `keyword+vocabulary`; if the artifact is missing, stale, invalid, or
+disabled, OpenLore serves ordinary `keyword` mode.
+
+Expansion is enabled by default. Disable it without rebuilding the index:
+
+```json
+{
+  "retrieval": {
+    "vocabularyExpansion": false
+  }
+}
+```
+
+Disabling expansion restores ordinary keyword ranking. Semantic retrieval remains the higher-recall
+opt-in path, and the `openlore embed --local` guidance stays visible in both keyword modes.
+`openlore prove --estimate` reports a separately labeled recall@10 comparison over up to 100 of the
+repository's own symbol/doc-comment pairs; it is not an agent-cost benchmark.
+
 ### Environment Variables
 
 | Variable | Provider | Description |

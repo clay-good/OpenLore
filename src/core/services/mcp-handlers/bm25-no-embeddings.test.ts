@@ -96,6 +96,40 @@ describe('spec-06: handlers serve a BM25-only index with no embedder', () => {
     expect(res.relevantFunctions.some(f => f.name === 'authenticate')).toBe(true);
   });
 
+  it('discloses keyword+vocabulary without changing the keyword scale or semantic hint', async () => {
+    const vocabularyNodes = [
+      makeNode({ id: 'src/target.ts::PmtSvc', name: 'PmtSvc', filePath: 'src/target.ts' }),
+      makeNode({ id: 'src/a.ts::bindPayment', name: 'bindPayment', filePath: 'src/a.ts', signature: 'function bindPayment(pmt: Payment)' }),
+      makeNode({ id: 'src/b.ts::queuePayment', name: 'queuePayment', filePath: 'src/b.ts', signature: 'function queuePayment(pmt: Payment)' }),
+    ];
+    await VectorIndex.build(outputDir, vocabularyNodes, [], new Set(), new Set(), null);
+    _resetVectorIndexCachesForTesting();
+
+    const { handleSearchCode } = await import('./semantic.js');
+    const res = await handleSearchCode(projectDir, 'payment', 10) as {
+      searchMode: string;
+      retrievalMode: string;
+      note: string;
+      results: Array<{ name: string; expansionTerms?: string[] }>;
+    };
+    expect(res.searchMode).toBe('bm25_fallback');
+    expect(res.retrievalMode).toBe('keyword+vocabulary');
+    expect(res.note).toContain('openlore embed --local');
+    expect(res.results.find(result => result.name === 'PmtSvc')?.expansionTerms).toContain('pmt');
+
+    const { handleOrient } = await import('./orient.js');
+    const oriented = await handleOrient(projectDir, 'payment', 10) as {
+      searchMode: string;
+      retrievalMode: string;
+      note: string;
+      relevantFunctions: Array<{ name: string; expansionTerms?: string[] }>;
+    };
+    expect(oriented.searchMode).toBe('bm25_fallback');
+    expect(oriented.retrievalMode).toBe('keyword+vocabulary');
+    expect(oriented.note).toContain('openlore embed --local');
+    expect(oriented.relevantFunctions.find(result => result.name === 'PmtSvc')?.expansionTerms).toContain('pmt');
+  });
+
   it('suggest_insertion_points returns ranked candidates over a BM25 index', async () => {
     const { handleSuggestInsertionPoints } = await import('./semantic.js');
     const res = await handleSuggestInsertionPoints(projectDir, 'authenticate user token', 5) as {

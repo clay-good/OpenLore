@@ -37,6 +37,7 @@ import {
   type Bm25Corpus,
 } from './vector-index.js';
 import type { MatchEvidence } from './retrieval-evidence.js';
+import { compareVocabularyRank, expandVocabularyQuery, scoredExpansionTerms } from './repo-vocabulary.js';
 
 // ============================================================================
 // TYPES
@@ -60,6 +61,7 @@ export interface TextSearchResult {
   /** BM25 relevance score, higher = more relevant. */
   score: number;
   matchEvidence: MatchEvidence;
+  expansionTerms?: string[];
 }
 
 /** A file to index: its repo-relative path and full content. */
@@ -374,9 +376,9 @@ export class TextLineIndex {
   static async searchText(
     outputDir: string,
     query: string,
-    opts: { limit?: number; filePath?: string; traceCandidates?: boolean } = {},
+    opts: { limit?: number; filePath?: string; traceCandidates?: boolean; vocabularyExpansion?: boolean } = {},
   ): Promise<TextSearchResult[]> {
-    const { limit = 10, filePath, traceCandidates = false } = opts;
+    const { limit = 10, filePath, traceCandidates = false, vocabularyExpansion = true } = opts;
     if (!TextLineIndex.exists(outputDir)) return [];
 
     const dbPath = join(outputDir, DB_FOLDER);
@@ -406,30 +408,43 @@ export class TextLineIndex {
     const { corpus, rows } = cached;
     const queryTokens = tokenize(query);
     if (queryTokens.length === 0) return [];
+    const expandedQuery = expandVocabularyQuery(outputDir, queryTokens, vocabularyExpansion);
 
     const recById = new Map(rows.map((r) => [r.id, r]));
 
     return corpus.docs
-      .map((_, i) => ({ idx: i, score: bm25Score(corpus, queryTokens, i) }))
-      .filter(({ score }) => score > 0)
+      .map((doc, i) => ({
+        idx: i,
+        score: bm25Score(corpus, queryTokens, i),
+        expansionScore: bm25Score(corpus, expandedQuery.expansionTokens, i),
+        id: doc.id,
+      }))
+      .filter(({ score, expansionScore }) => score > 0 || expansionScore > 0)
       // Deterministic ordering: score desc, then id asc on ties.
-      .sort((a, b) =>
-        b.score - a.score ||
-        (corpus.docs[a.idx].id < corpus.docs[b.idx].id ? -1 : 1),
-      )
-      .map(({ idx, score }) => {
+      .sort(compareVocabularyRank)
+      .map(({ idx, score, expansionScore }) => {
         const rec = recById.get(corpus.docs[idx].id);
-        return rec ? { rec, idx, score } : null;
+        return rec ? { rec, idx, score, expansionScore } : null;
       })
-      .filter((x): x is { rec: TextLineRecord; idx: number; score: number } => x !== null)
+      .filter((x): x is { rec: TextLineRecord; idx: number; score: number; expansionScore: number } => x !== null)
       .filter(({ rec }) => (filePath ? rec.filePath === filePath : true))
       .slice(0, traceCandidates ? limit * 3 : limit)
-      .map(({ rec, idx, score }) => ({
+      .map(({ rec, idx, score, expansionScore }) => ({
         filePath: rec.filePath,
         lineNumber: rec.lineNumber,
         text: rec.text,
-        score,
-        matchEvidence: bm25MatchEvidence(corpus, queryTokens, idx, { body: rec.text }, 1),
+        score: score > 0 ? score : expansionScore,
+        matchEvidence: bm25MatchEvidence(
+          corpus,
+          score > 0 ? queryTokens : expandedQuery.expansionTokens,
+          idx,
+          { body: rec.text },
+          score > 0 ? 1 : 2,
+        ),
+        ...(() => {
+          const terms = scoredExpansionTerms(expandedQuery.expansionTokens, corpus.docs[idx].tfMap);
+          return terms.length > 0 ? { expansionTerms: terms } : {};
+        })(),
       }));
   }
 

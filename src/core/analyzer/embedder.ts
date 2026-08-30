@@ -12,9 +12,14 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Embedder } from './embedding-service.js';
 import type { OpenLoreConfig } from '../../types/index.js';
+import { loadRepositoryVocabulary } from './repo-vocabulary.js';
 
 /** Honest, served retrieval mode — first-class keyword default or a semantic upgrade. */
-export type RetrievalMode = 'keyword' | 'local-semantic' | 'remote-semantic';
+export type RetrievalMode = 'keyword' | 'keyword+vocabulary' | 'local-semantic' | 'remote-semantic';
+
+export function isKeywordRetrievalMode(mode: RetrievalMode | string): boolean {
+  return mode === 'keyword' || mode === 'keyword+vocabulary';
+}
 
 // Sidecar filenames, kept in sync with VectorIndex.META_FILE /
 // SpecVectorIndex.META_FILE. Referenced as literals (not imported) so this module
@@ -108,9 +113,13 @@ export function servedRetrievalMode(
   embedSvc: Embedder | null | undefined,
   outputDir: string,
   kind: 'code' | 'spec' = 'code',
+  vocabularyExpansion = true,
 ): RetrievalMode {
-  if (!embedSvc) return 'keyword';
+  const keywordMode = (): RetrievalMode => vocabularyExpansion && loadRepositoryVocabulary(outputDir)
+    ? 'keyword+vocabulary'
+    : 'keyword';
+  if (!embedSvc) return keywordMode();
   const metaFile = kind === 'spec' ? SPEC_INDEX_META : CODE_INDEX_META;
-  if (!indexHasVectors(join(outputDir, metaFile))) return 'keyword';
+  if (!indexHasVectors(join(outputDir, metaFile))) return keywordMode();
   return embedderMode(embedSvc);
 }
