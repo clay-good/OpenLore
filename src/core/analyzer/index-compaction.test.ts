@@ -112,6 +112,15 @@ describe('search-index compaction', () => {
     expect(b.length, 'B had reached the threshold').toBe(1);
   });
 
+  it('compacts immediately after a large deletion', async () => {
+    const calls: number[] = [];
+    const fake = { optimize: async () => { calls.push(1); return {}; } };
+
+    await noteUpdateAndMaybeCompact('/idx/large-delete', fake, 5);
+
+    expect(calls).toHaveLength(1);
+  });
+
   it('never lets a compaction failure break the update that triggered it', async () => {
     // Compaction is a space optimization. Surfacing its error would turn a disk-space chore into
     // a failed file save, which is a strictly worse outcome than staying bloated.

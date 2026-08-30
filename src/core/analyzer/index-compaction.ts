@@ -49,15 +49,20 @@ interface CompactableTable {
 }
 
 /**
- * Record one incremental update against `dbPath`, and compact if enough have accumulated.
+ * Record one incremental update against `dbPath`, and compact if enough have accumulated or the
+ * update deleted at least one cadence's worth of rows/files.
  *
  * Best-effort by construction: compaction is a space optimization, never a correctness
  * requirement, so a failure is swallowed and the counter still resets. The alternative — letting
  * an optimize error surface — would turn a disk-space chore into a failed file save.
  */
-export async function noteUpdateAndMaybeCompact(dbPath: string, table: CompactableTable): Promise<boolean> {
+export async function noteUpdateAndMaybeCompact(
+  dbPath: string,
+  table: CompactableTable,
+  deletedRows = 0,
+): Promise<boolean> {
   const next = (_updatesSinceCompaction.get(dbPath) ?? 0) + 1;
-  if (next < COMPACT_EVERY_UPDATES) {
+  if (next < COMPACT_EVERY_UPDATES && deletedRows < COMPACT_EVERY_UPDATES) {
     _updatesSinceCompaction.set(dbPath, next);
     return false;
   }

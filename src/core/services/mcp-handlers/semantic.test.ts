@@ -422,7 +422,14 @@ describe('handleSearchSpecs — success path', () => {
   });
 
   it('falls back to BM25 (no error) when no embedding config exists but the spec index is present', async () => {
-    const search = vi.fn().mockResolvedValue([]);
+    const search = vi.fn().mockResolvedValue([{
+      score: 2.5,
+      matchEvidence: TEST_MATCH_EVIDENCE,
+      record: {
+        id: 'auth::requirements::auth1', domain: 'auth', section: 'Requirements',
+        title: 'Auth', text: 'Authentication requirement', linkedFiles: [],
+      },
+    }]);
     vi.doMock('../../analyzer/spec-vector-index.js', () => ({
       SpecVectorIndex: { exists: vi.fn().mockReturnValue(true), search },
     }));
@@ -434,7 +441,10 @@ describe('handleSearchSpecs — success path', () => {
     }));
 
     const { handleSearchSpecs } = await import('./semantic.js');
-    const result = await handleSearchSpecs(tmpDir, 'auth') as { error?: string; searchMode: string; retrievalMode?: string; note?: string };
+    const result = await handleSearchSpecs(tmpDir, 'auth') as {
+      error?: string; searchMode: string; retrievalMode?: string; note?: string;
+      results: Array<{ scoreKind: string }>;
+    };
     expect(result.error).toBeUndefined();
     expect(result.searchMode).toBe('bm25_fallback');
     expect(result.retrievalMode).toBe('keyword');
@@ -443,6 +453,7 @@ describe('handleSearchSpecs — success path', () => {
     expect(result.note).toContain('Keyword (BM25)');
     expect(result.note).toContain('embed --local');
     expect(result.note).not.toContain('unavailable');
+    expect(result.results[0].scoreKind).toBe('bm25');
     expect(search).toHaveBeenCalledWith(expect.any(String), 'auth', null, expect.anything());
   });
 
@@ -820,6 +831,12 @@ describe('handleSearchSpecs — success path', () => {
       SpecVectorIndex: {
         exists: vi.fn().mockReturnValue(true),
         search: vi.fn().mockResolvedValue(mockResults),
+        freshness: vi.fn().mockReturnValue({
+          builtAt: '2026-08-30T12:00:00.000Z',
+          tracking: 'tracked',
+          changedFileCount: 1,
+          changedFiles: ['openspec/specs/auth/spec.md'],
+        }),
       },
     }));
     vi.doMock('../../analyzer/embedding-service.js', () => ({
@@ -833,8 +850,15 @@ describe('handleSearchSpecs — success path', () => {
     const results = result.results as Array<Record<string, unknown>>;
     expect(results[0].domain).toBe('auth');
     expect(results[0].score).toBe(0.9);
+    expect(results[0].scoreKind).toBe('cosine_distance');
     expect(results[0].text).toContain('authenticate');
     expect(results[0].linkedFiles).toEqual(['src/auth.ts']);
+    expect(result.indexFreshness).toEqual({
+      builtAt: '2026-08-30T12:00:00.000Z',
+      tracking: 'tracked',
+      changedFileCount: 1,
+      changedFiles: ['openspec/specs/auth/spec.md'],
+    });
   });
 
   it('clamps limit to [1, 50]', async () => {

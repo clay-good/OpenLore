@@ -156,6 +156,7 @@ interface TextSearchPayload {
     line: number;
     text: string;
     score: number;
+    scoreKind: 'bm25';
     kind: 'text';
     matchEvidence: import('../../analyzer/retrieval-evidence.js').MatchEvidence;
     provenance: AnalysisContentProvenance;
@@ -190,6 +191,7 @@ async function searchTextLines(
       line: h.lineNumber,
       text: h.text,
       score: h.score,
+      scoreKind: 'bm25' as const,
       kind: 'text' as const,
       matchEvidence: h.matchEvidence,
       provenance,
@@ -299,6 +301,7 @@ export async function handleSearchCode(
     const startLine = getCachedNodeStartLine(llmCtx, r.record.id);
     return {
       score: r.score,
+      scoreKind: r.scoreKind ?? (retrievalMode === 'keyword' ? 'bm25' : 'rrf'),
       matchEvidence: requireMatchEvidence(r.matchEvidence),
       name: r.record.name,
       filePath: r.record.filePath,
@@ -601,8 +604,14 @@ export async function handleSearchSpecs(
     SpecVectorIndex.search(outputDir, query, embedSvc, { limit, domain, section }),
     loadMappingIndex(absDir),
   ]);
+  // Optional guard keeps legacy injected test doubles compatible; the production
+  // SpecVectorIndex always exposes freshness().
+  const indexFreshness = typeof SpecVectorIndex.freshness === 'function'
+    ? SpecVectorIndex.freshness(outputDir)
+    : null;
   const servedResults = await Promise.all(results.map(async (r) => ({
     score: r.score,
+    scoreKind: r.scoreKind ?? (retrievalMode === 'keyword' ? 'bm25' : 'cosine_distance'),
     matchEvidence: requireMatchEvidence(r.matchEvidence),
     id: r.record.id,
     domain: r.record.domain,
@@ -629,6 +638,7 @@ export async function handleSearchSpecs(
       : {}),
     count: servedResults.length,
     results: servedResults,
+    ...(indexFreshness ? { indexFreshness } : {}),
   };
 }
 

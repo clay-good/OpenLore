@@ -517,8 +517,163 @@ describe('SpecVectorIndex', () => {
       const results = await SpecVectorIndex.search(tmpDir, 'email', embedSvc, { limit: 10 });
       for (const r of results) {
         expect(typeof r.score).toBe('number');
+        expect(r.scoreKind).toBe('cosine_distance');
         expect(r.matchEvidence).toEqual({ field: 'vector', terms: [], tier: 3 });
       }
+    });
+
+    it('labels keyword results as higher-is-better BM25 scores', async () => {
+      const specsDir = await createSpecsDir(tmpDir, { auth: SAMPLE_SPEC_AUTH });
+      await SpecVectorIndex.build(tmpDir, specsDir, null);
+
+      const results = await SpecVectorIndex.search(tmpDir, 'email', null, { limit: 10 });
+
+      expect(results.length).toBeGreaterThan(0);
+      expect(results.every(result => result.scoreKind === 'bm25')).toBe(true);
+    });
+
+    it('returns an exact count with a bounded path list after more than 1,000 changes', async () => {
+      const specsDir = await createSpecsDir(tmpDir, { auth: SAMPLE_SPEC_AUTH });
+      await SpecVectorIndex.build(tmpDir, specsDir, null);
+      await SpecVectorIndex.noteSpecFilesChanged(
+        tmpDir,
+        Array.from({ length: 1_001 }, (_, index) => `openspec/specs/domain-${index}/spec.md`),
+      );
+
+      expect(SpecVectorIndex.freshness(tmpDir)).toMatchObject({
+        tracking: 'tracked',
+        changedFileCount: 1_001,
+        changedFilesTruncated: true,
+      });
+      expect(SpecVectorIndex.freshness(tmpDir)?.changedFiles).toHaveLength(1_000);
+    });
+
+    it('prefilters ANN recall so a domain match below the old fetch horizon is returned', async () => {
+      const specs = Object.fromEntries([
+        ...Array.from({ length: 29 }, (_, i) => [
+          `other-${i}`,
+          `# Other ${i}\n\n## Purpose\n\nShared query text ${i}.\n`,
+        ]),
+        ['target', '# Target\n\n## Purpose\n\nShared query text target.\n'],
+      ]);
+      const specsDir = await createSpecsDir(tmpDir, specs);
+      const embedSvc = makeMockEmbedSvc();
+      await SpecVectorIndex.build(tmpDir, specsDir, embedSvc);
+
+      const results = await SpecVectorIndex.search(tmpDir, 'query', embedSvc, {
+        limit: 1,
+        domain: 'target',
+      });
+
+      expect(results).toHaveLength(1);
+      expect(results[0].record.domain).toBe('target');
+      expect(results[0].scoreKind).toBe('cosine_distance');
+    });
+
+    it('tracks changed spec files against the current index build', async () => {
+      const specsDir = await createSpecsDir(tmpDir, { auth: SAMPLE_SPEC_AUTH });
+      await SpecVectorIndex.build(tmpDir, specsDir, null);
+
+      await SpecVectorIndex.noteSpecFilesChanged(tmpDir, [
+        'openspec/specs/auth/spec.md',
+        'openspec/specs/auth/spec.md',
+      ]);
+
+      expect(SpecVectorIndex.freshness(tmpDir)).toMatchObject({
+        changedFileCount: 1,
+        changedFiles: ['openspec/specs/auth/spec.md'],
+      });
+    });
+
+    it('merges concurrent watcher receipts without losing paths', async () => {
+      const specsDir = await createSpecsDir(tmpDir, { auth: SAMPLE_SPEC_AUTH });
+      await SpecVectorIndex.build(tmpDir, specsDir, null);
+
+      await Promise.all([
+        SpecVectorIndex.noteSpecFilesChanged(tmpDir, ['openspec/specs/auth/spec.md']),
+        SpecVectorIndex.noteSpecFilesChanged(tmpDir, ['openspec/decisions/adr-0001.md']),
+      ]);
+
+      expect(SpecVectorIndex.freshness(tmpDir)).toMatchObject({
+        changedFileCount: 2,
+        changedFiles: [
+          'openspec/decisions/adr-0001.md',
+          'openspec/specs/auth/spec.md',
+        ],
+      });
+    });
+
+    it('records an edit that arrives while the initial index build is publishing', async () => {
+      const specsDir = await createSpecsDir(tmpDir, { auth: SAMPLE_SPEC_AUTH });
+      let releaseEmbed!: () => void;
+      let markEmbedStarted!: () => void;
+      const embedStarted = new Promise<void>(resolve => { markEmbedStarted = resolve; });
+      const embedGate = new Promise<void>(resolve => { releaseEmbed = resolve; });
+      const embedSvc = {
+        modelName: 'test-model',
+        embed: vi.fn().mockImplementation(async (texts: string[]) => {
+          markEmbedStarted();
+          await embedGate;
+          return texts.map((_, index) => makeVector(index));
+        }),
+      } as unknown as EmbeddingService;
+
+      const build = SpecVectorIndex.build(tmpDir, specsDir, embedSvc);
+      await embedStarted;
+      const note = SpecVectorIndex.noteSpecFilesChanged(tmpDir, ['openspec/specs/auth/spec.md']);
+      releaseEmbed();
+      await Promise.all([build, note]);
+
+      expect(SpecVectorIndex.freshness(tmpDir)).toMatchObject({
+        changedFileCount: 1,
+        changedFiles: ['openspec/specs/auth/spec.md'],
+      });
+    });
+
+    it('clears tracked changes after a verified no-op rebuild', async () => {
+      const specsDir = await createSpecsDir(tmpDir, { auth: SAMPLE_SPEC_AUTH });
+      await SpecVectorIndex.build(tmpDir, specsDir, null);
+      await SpecVectorIndex.noteSpecFilesChanged(tmpDir, ['openspec/specs/auth/spec.md']);
+
+      await SpecVectorIndex.build(tmpDir, specsDir, null);
+
+      expect(SpecVectorIndex.freshness(tmpDir)).toMatchObject({
+        tracking: 'tracked',
+        changedFileCount: 0,
+        changedFiles: [],
+      });
+    });
+
+    it('reports tracking unavailable when a legacy table has no metadata', async () => {
+      const specsDir = await createSpecsDir(tmpDir, { auth: SAMPLE_SPEC_AUTH });
+      await SpecVectorIndex.build(tmpDir, specsDir, null);
+      await unlink(join(tmpDir, 'spec-index-meta.json'));
+
+      expect(SpecVectorIndex.freshness(tmpDir)).toEqual({
+        builtAt: null,
+        tracking: 'unavailable',
+        changedFileCount: null,
+        changedFiles: [],
+      });
+    });
+
+    it('rejects unsafe paths in a hand-edited freshness receipt', async () => {
+      const specsDir = await createSpecsDir(tmpDir, { auth: SAMPLE_SPEC_AUTH });
+      await SpecVectorIndex.build(tmpDir, specsDir, null);
+      const meta = JSON.parse(await readFile(join(tmpDir, 'spec-index-meta.json'), 'utf8')) as {
+        builtAt: string;
+      };
+      await writeFile(join(tmpDir, 'spec-index-freshness.json'), JSON.stringify({
+        schemaVersion: 1,
+        indexBuiltAt: meta.builtAt,
+        changedFiles: ['../outside.md'],
+      }));
+
+      expect(SpecVectorIndex.freshness(tmpDir)).toMatchObject({
+        tracking: 'unavailable',
+        changedFileCount: null,
+        changedFiles: [],
+      });
     });
 
     it('result records have linkedFiles as string[]', async () => {

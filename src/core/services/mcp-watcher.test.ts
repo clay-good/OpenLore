@@ -107,6 +107,91 @@ describe('McpWatcher.handleChange', () => {
     expect(entry!.language).toBe('TypeScript');
   });
 
+  it('records spec-index staleness when a spec file changes', async () => {
+    const { rootPath, outputPath } = await setupProject(makeContext());
+    const specDir = join(rootPath, 'openspec', 'specs', 'auth');
+    await mkdir(specDir, { recursive: true });
+    const specFile = join(specDir, 'spec.md');
+    await writeFile(specFile, '# Auth\n\n## Purpose\n\nAuthentication.\n', 'utf8');
+    const { SpecVectorIndex } = await import('../analyzer/spec-vector-index.js');
+    await SpecVectorIndex.build(outputPath, join(rootPath, 'openspec', 'specs'), null);
+
+    const { McpWatcher } = await import('./mcp-watcher.js');
+    await new McpWatcher({ rootPath, outputPath }).handleChange(specFile);
+
+    expect(SpecVectorIndex.freshness(outputPath)).toMatchObject({
+      changedFileCount: 1,
+      changedFiles: ['openspec/specs/auth/spec.md'],
+    });
+  });
+
+  it('tracks the configured spec root and indexed ADRs, but ignores change deltas', async () => {
+    const { rootPath, outputPath } = await setupProject(makeContext());
+    const openspecRoot = join(rootPath, 'docs', 'spec-root');
+    const specsDir = join(openspecRoot, 'specs', 'auth');
+    const decisionsDir = join(openspecRoot, 'decisions');
+    const changeDir = join(openspecRoot, 'changes', 'draft', 'specs', 'auth');
+    await mkdir(specsDir, { recursive: true });
+    await mkdir(decisionsDir, { recursive: true });
+    await mkdir(changeDir, { recursive: true });
+    const specFile = join(specsDir, 'spec.md');
+    const adrFile = join(decisionsDir, 'adr-0001-cache.md');
+    const deltaFile = join(changeDir, 'spec.md');
+    await writeFile(specFile, '# Auth\n\n## Purpose\n\nAuthentication.\n', 'utf8');
+    await writeFile(adrFile, '# ADR-0001: Cache policy\n\nUse a bounded cache.\n', 'utf8');
+    await writeFile(deltaFile, '# Draft delta\n', 'utf8');
+    const { SpecVectorIndex } = await import('../analyzer/spec-vector-index.js');
+    await SpecVectorIndex.build(outputPath, join(openspecRoot, 'specs'), null, undefined, decisionsDir);
+
+    const { McpWatcher } = await import('./mcp-watcher.js');
+    const watcher = new McpWatcher({
+      rootPath,
+      outputPath,
+      openspecPath: 'docs/spec-root',
+    });
+    await watcher.handleChange(specFile);
+    await watcher.handleChange(adrFile);
+    await watcher.handleChange(deltaFile);
+
+    expect(SpecVectorIndex.freshness(outputPath)).toMatchObject({
+      changedFileCount: 2,
+      changedFiles: [
+        'docs/spec-root/decisions/adr-0001-cache.md',
+        'docs/spec-root/specs/auth/spec.md',
+      ],
+    });
+  });
+
+  it('records spec changes before a mixed batch takes the bulk fallback', async () => {
+    const { rootPath, outputPath } = await setupProject(makeContext());
+    const specDir = join(rootPath, 'openspec', 'specs', 'auth');
+    const srcDir = join(rootPath, 'src');
+    await mkdir(specDir, { recursive: true });
+    await mkdir(srcDir, { recursive: true });
+    const specFile = join(specDir, 'spec.md');
+    const srcFile = join(srcDir, 'auth.ts');
+    await writeFile(specFile, '# Auth\n\n## Purpose\n\nAuthentication.\n', 'utf8');
+    await writeFile(srcFile, 'export function auth() {}\n', 'utf8');
+    const { SpecVectorIndex } = await import('../analyzer/spec-vector-index.js');
+    await SpecVectorIndex.build(outputPath, join(rootPath, 'openspec', 'specs'), null);
+
+    const { McpWatcher } = await import('./mcp-watcher.js');
+    const watcher = new McpWatcher({
+      rootPath,
+      outputPath,
+      bulkThreshold: 1,
+      onGraphStale: () => {},
+    });
+    await (watcher as unknown as {
+      flushBatchWithBusyRetry(batch: string[], deletions: string[]): Promise<void>;
+    }).flushBatchWithBusyRetry([srcFile, specFile], []);
+
+    expect(SpecVectorIndex.freshness(outputPath)).toMatchObject({
+      changedFileCount: 1,
+      changedFiles: ['openspec/specs/auth/spec.md'],
+    });
+  });
+
   it('fires onBatchFlushed with changed paths on a real change, not on a no-op', async () => {
     const ctx = makeContext();
     const { rootPath, outputPath } = await setupProject(ctx);

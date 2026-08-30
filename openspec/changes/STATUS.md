@@ -36,10 +36,10 @@ validate`**, and the archive machinery works again. This pass:
 Everything in `openspec/changes/archive/` is shipped (or a settled won't-do), with its
 requirements reflected in the main specs. `openspec list` shows only open work.
 
-## In flight — 0
+## In flight — 1
 
-No open change has partial code on `main`. A change belongs here the moment its implementation
-starts; move it back out (archive it) the moment its marker/spec evidence lands.
+`refine-search-serving-quality` is under implementation and verification. A change belongs here
+the moment its implementation starts; archive it once its marker/spec evidence lands.
 
 ## To build — 108
 
@@ -171,7 +171,6 @@ trust boundary for served content.
 | `refine-first-run-partial-serving` | minutes of "no index found" before the first answer |
 | `refine-orient-context-budgeting` | exact-fit payloads, cold-start breadth, seed-conditioned shaping |
 | `refine-public-surface-certification` | rule codes + semver bump, an accepted-breakage baseline, consumer-weighted verdicts |
-| `refine-search-serving-quality` | filters that filter, scores that say what they are, an index that stays fit |
 | `resolve-literal-reflective-dispatch` | recover the *structurally* decidable subset, and refuse the rest loudly |
 | `scale-analyze-to-workspace-shards` | a monorepo stops paying for the whole repo on every analyze |
 | `shrink-receiver-resolution-boundary` | Shrink the intra-object receiver boundary with deterministic per-file type registries |

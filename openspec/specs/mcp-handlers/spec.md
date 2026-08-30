@@ -2358,6 +2358,32 @@ evaluated.
 - **THEN** the finding is reported but does not block
 - **AND** a policy mapping the code to `blocking` makes the same finding gate
 
+### Requirement: DiscloseSpecIndexStalenessThroughAnAtomicReceipt
+
+This domain SHALL conform to the canonical statement of decision `58cd7afe`, which lives in the
+`analyzer` domain — see [analyzer/spec.md](../analyzer/spec.md).
+
+#### Scenario: The canonical statement governs
+
+- **GIVEN** decision `58cd7afe` recorded in the `analyzer` domain
+- **WHEN** this domain's behavior touches that decision's surface
+- **THEN** it satisfies the canonical requirement as stated in [analyzer/spec.md](../analyzer/spec.md)
+
+> Decision pointer: 58cd7afe — "Disclose spec index staleness through an atomic receipt" is recorded in `openspec/specs/analyzer/spec.md`; it also affects this domain.
+
+### Requirement: ExposeScoreSemanticsOnSearchResults
+
+This domain SHALL conform to the canonical statement of decision `9eb51001`, which lives in the
+`analyzer` domain — see [analyzer/spec.md](../analyzer/spec.md).
+
+#### Scenario: The canonical statement governs
+
+- **GIVEN** decision `9eb51001` recorded in the `analyzer` domain
+- **WHEN** this domain's behavior touches that decision's surface
+- **THEN** it satisfies the canonical requirement as stated in [analyzer/spec.md](../analyzer/spec.md)
+
+> Decision pointer: 9eb51001 — "Expose score semantics on search results" is recorded in `openspec/specs/analyzer/spec.md`; it also affects this domain.
+
 ## Decisions
 
 ### Build the MCP live-data test harness as an integration-only, behavior-neutral verification layer

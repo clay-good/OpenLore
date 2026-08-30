@@ -218,7 +218,7 @@ Most tools run on **pure static analysis** — no LLM quota consumed. Exceptions
 | Tool | Description | Requires prior analysis |
 |------|-------------|:---:|
 | `orient` | **Single entry point for any new task.** Given a natural-language task description, returns relevant functions with stored declaration `startLine`, source files, spec domains, call neighbourhoods, insertion-point candidates, matching spec sections, and ranked `suggestedTools`. Start here. | Yes (+ embedding) |
-| `search_code` | Natural-language semantic search over indexed functions. Returns the closest matches by meaning with similarity score, declaration `startLine` when stored, call-graph neighbourhood enrichment, and spec-linked peer functions. Falls back to BM25 keyword search when no embedding server is configured. | Yes (+ embedding) |
+| `search_code` | Natural-language semantic search over indexed functions. Returns the closest matches by meaning with a self-describing `scoreKind`, declaration `startLine` when stored, call-graph neighbourhood enrichment, and spec-linked peer functions. Falls back to BM25 keyword search when no embedding server is configured. | Yes (+ embedding) |
 | `explain_retrieval_miss` | Full-preset, read-only diagnostic for one exact symbol, file, or canonical requirement ID. Reuses the ordinary requested-limit candidate window and reports a surfaced rank/evidence or one closed miss cause. It never enumerates all misses. | Yes |
 | `suggest_insertion_points` | Semantic search over the vector index to find the best existing functions to extend or hook into when implementing a new feature. Returns ranked candidates with role and strategy. Falls back to BM25 keyword search when no embedding server is configured. | Yes (+ embedding) |
 | `get_subgraph` | Depth-limited subgraph centred on a function. Direction: `downstream` (what it calls), `upstream` (who calls it), or `both`. Output as JSON or Mermaid diagram. | Yes |
@@ -271,7 +271,7 @@ Most tools run on **pure static analysis** — no LLM quota consumed. Exceptions
 | `get_spec` | Read the full content of an OpenSpec domain spec by domain name. | Yes (generate) |
 | `get_mapping` | Requirement->function mapping produced by `openlore generate`. Shows which functions implement which spec requirements, confidence level, and orphan functions with no spec coverage. | Yes (generate) |
 | `check_spec_drift` | Detect code changes not reflected in OpenSpec specs. Compares git-changed files against spec coverage maps. Issues: gap / stale / uncovered / orphaned-spec / adr-gap. | Yes (generate) |
-| `search_specs` | Semantic search over OpenSpec specifications to find requirements, design notes, and architecture decisions by meaning. Also searches ADR files (`openspec/decisions/adr-*.md`) indexed under domain `decisions`. Returns linked source files for graph highlighting. Use this when asked "which spec covers X?" or "where should we implement Z?" or "what decisions were made about Y?". Requires a spec index built with `openlore analyze` or `--reindex-specs`. | Yes (generate) |
+| `search_specs` | Semantic search over OpenSpec specifications to find requirements, design notes, and architecture decisions by meaning. Also searches ADR files (`decisions/adr-*.md` under the configured OpenSpec root) indexed under domain `decisions`. Returns linked source files, a self-describing `scoreKind`, and index freshness (`builtAt` plus changed authoritative files) for graph highlighting and staleness checks. Use this when asked "which spec covers X?" or "where should we implement Z?" or "what decisions were made about Y?". Requires a spec index built with `openlore analyze` or `--reindex-specs`. | Yes (generate) |
 | `list_spec_domains` | List all OpenSpec domains available in this project. Use this to discover what domains exist before doing a targeted `search_specs` call. | Yes (generate) |
 | `audit_spec_coverage` | Parity audit: uncovered functions (in call graph, no spec), hub gaps (high fan-in + no spec), orphan requirements (spec with no implementation found), and stale domains (source changed after spec). Run before starting a feature to understand coverage health. No LLM required. | Yes (analyze) |
 | `generate_tests` | Generate spec-driven test files from OpenSpec scenarios — vitest, playwright (JS/TS), pytest (Python), gtest/catch2 (C++), junit (Java/Kotlin), gotest (Go). | Yes (generate) |
@@ -601,6 +601,12 @@ limit      number   Maximum number of results to return (default: 10)
 domain     string   Filter by domain name (e.g. "auth", "analyzer")
 section    string   Filter by section type: "requirements" | "purpose" | "design" | "architecture" | "entities"
 ```
+
+Search hits carry `scoreKind`: `rrf` and `bm25` are higher-is-better, while
+`cosine_distance` is lower-is-better. `search_specs.indexFreshness` reports the
+index `builtAt` timestamp, tracking status, and the count/list of indexed spec or ADR
+files changed under the configured OpenSpec root since that build; run `openlore analyze --reindex-specs` when the
+count is nonzero. An unavailable receipt reports a `null` count, never a false zero.
 
 **`explain_retrieval_miss`** *(full preset only)*
 ```

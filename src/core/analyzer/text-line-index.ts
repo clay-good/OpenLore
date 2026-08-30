@@ -349,6 +349,7 @@ export class TextLineIndex {
     }
 
     const predicate = filePathInPredicate(affectedPaths);
+    const deletedRows = predicate ? await table.countRows(predicate) as number : 0;
     if (predicate) await table.delete(predicate);
     if (newRecords.length > 0) {
       await table.add(newRecords as unknown as Record<string, unknown>[]);
@@ -358,7 +359,11 @@ export class TextLineIndex {
     // Reclaim the versions this delete+add left behind. LanceDB is append-only, so without this
     // the index grows without bound for as long as the watcher runs — measured at 401 MB holding
     // 36 MB of live rows on a repository whose source is ~9 MB.
-    await noteUpdateAndMaybeCompact(dbPath, table as unknown as Parameters<typeof noteUpdateAndMaybeCompact>[1]);
+    await noteUpdateAndMaybeCompact(
+      dbPath,
+      table as unknown as Parameters<typeof noteUpdateAndMaybeCompact>[1],
+      deletedRows,
+    );
     return { lines: newRecords.length };
   }
 

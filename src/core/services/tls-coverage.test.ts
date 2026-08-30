@@ -42,8 +42,8 @@ const SRC = join(REPO_ROOT, 'src');
 const EXEMPT: { file: string; line: number; why: string }[] = [
   { file: 'src/core/services/serve-client.ts', line: 97, why: 'loopback http:// health probe' },
   { file: 'src/core/services/serve-client.ts', line: 187, why: 'loopback http:// daemon call' },
-  { file: 'src/cli/commands/serve.ts', line: 284, why: 'loopback http:// health and compatibility probe' },
-  { file: 'src/cli/commands/serve.ts', line: 356, why: 'loopback http:// authenticated shutdown request' },
+  { file: 'src/cli/commands/serve.ts', line: 285, why: 'loopback http:// health and compatibility probe' },
+  { file: 'src/cli/commands/serve.ts', line: 357, why: 'loopback http:// authenticated shutdown request' },
   { file: 'src/cli/commands/serve-descriptor.ts', line: 212, why: 'loopback http:// legacy liveness probe' },
   { file: 'src/pi/extension.ts', line: 546, why: 'loopback http:// health probe' },
   { file: 'src/pi/extension.ts', line: 721, why: 'loopback http:// daemon call' },

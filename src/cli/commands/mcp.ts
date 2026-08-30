@@ -2831,8 +2831,10 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
           });
           const { McpWatcher } = await import('../../core/services/mcp-watcher.js');
           const debounceMs = parseInt(options.watchDebounce ?? '400', 10);
+          const watchConfig = await readOpenLoreConfig(resolve(dir));
           autoWatcher = new McpWatcher({
             rootPath: resolve(dir),
+            openspecPath: watchConfig?.openspecPath,
             debounceMs: isNaN(debounceMs) ? 400 : debounceMs,
             embed: !options.watchNoEmbed,
             // selfRebuild (make-index-self-healing): the in-process watcher has no
@@ -3117,8 +3119,10 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
     if (!existingDaemon) {
       const { McpWatcher } = await import('../../core/services/mcp-watcher.js');
       const debounceMs = parseInt(options.watchDebounce ?? '400', 10);
+      const watchConfig = await readOpenLoreConfig(watchDir);
       const watcher = new McpWatcher({
         rootPath: watchDir,
+        openspecPath: watchConfig?.openspecPath,
         debounceMs: isNaN(debounceMs) ? 400 : debounceMs,
         embed: !options.watchNoEmbed,
         selfRebuild: true,
