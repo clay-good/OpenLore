@@ -208,7 +208,7 @@ describe('McpWatcher — Spec 13.1 freshness', () => {
     expect(afterRead).toBe(primed);
   });
 
-  it('G3: a batch ≥ BULK_THRESHOLD is reported as a single coalesced refresh', async () => {
+  it('G3: a batch above BULK_THRESHOLD switches to one disclosed full rebuild', async () => {
     await writeContext([]);
     const files = ['x.ts', 'y.ts', 'z.ts'];
     for (const f of files) await writeFile(join(root, f), `export const ${f.replace('.ts', '')} = 1;\n`, 'utf-8');
@@ -216,17 +216,54 @@ describe('McpWatcher — Spec 13.1 freshness', () => {
     const summaries: string[] = [];
     vi.spyOn(process.stderr, 'write').mockImplementation((chunk: string | Uint8Array): boolean => {
       const s = chunk.toString();
-      if (/\[mcp-watcher\] (updated|coalesced)/.test(s)) summaries.push(s);
+      if (/\[mcp-watcher\] bulk fallback/.test(s)) summaries.push(s);
       return true;
     });
 
-    const watcher = new McpWatcher({ rootPath: root, embed: false, debounceMs: 30, bulkThreshold: 3 });
+    const watcher = new McpWatcher({
+      rootPath: root,
+      embed: false,
+      debounceMs: 30,
+      bulkThreshold: 2,
+      onGraphStale: () => {},
+    });
     for (const f of files) (watcher as unknown as { enqueue(p: string): void }).enqueue(join(root, f));
     await until(() => summaries.length > 0);
     await watcher.stop();
 
     expect(summaries.length).toBe(1);
-    expect(summaries[0]).toContain('coalesced 3 changes');
+    expect(summaries[0]).toContain('marked 3 file(s) stale and scheduled one full rebuild');
+  });
+
+  it('clears the hard batch timer when a VCS settle window starts', async () => {
+    await writeContext([]);
+    const watcher = new McpWatcher({ rootPath: root, embed: false });
+    const internals = watcher as unknown as {
+      enqueue(path: string): void;
+      onVcsEvent(): void;
+      maxBatchTimer?: ReturnType<typeof setTimeout>;
+    };
+    internals.enqueue(join(root, 'branch.ts'));
+    expect(internals.maxBatchTimer).toBeDefined();
+    internals.onVcsEvent();
+    expect(internals.maxBatchTimer).toBeUndefined();
+    await watcher.stop();
+  });
+
+  it('releases the retained context when the embed lane drains', async () => {
+    const watcher = new McpWatcher({ rootPath: root, outputPath: analysisDir, embed: true });
+    const internals = watcher as unknown as {
+      scheduleEmbed(context: unknown, files: Array<{ rel: string; content: string }>, nodes: unknown[]): void;
+      runEmbedLane(): Promise<void>;
+      lastEmbedContext?: unknown;
+      embedFiles: Map<string, string>;
+    };
+    internals.scheduleEmbed({ callGraph: null }, [{ rel: 'a.ts', content: 'export const a = 1;' }], []);
+    expect(internals.lastEmbedContext).toBeDefined();
+    await internals.runEmbedLane();
+    expect(internals.embedFiles.size).toBe(0);
+    expect(internals.lastEmbedContext).toBeUndefined();
+    await watcher.stop();
   });
 
   it('the watcher-path flush persists the patched context to disk (freshness survives a process restart)', async () => {

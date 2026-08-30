@@ -1,10 +1,13 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
+import { EventEmitter } from 'node:events';
+import type { ChildProcess, spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   bootstrapAnalysisInBackground,
+  buildIndexInChildProcess,
   repairInBackground,
   repairStatusFor,
   registerRepairBuilder,
@@ -104,6 +107,72 @@ describe('bootstrapAnalysisInBackground', () => {
     const src = readFileSync(fileURLToPath(new URL('./cold-start-bootstrap.ts', import.meta.url)), 'utf8');
     expect(src).not.toMatch(/api\/(analyze|init|run)/);
     expect(src).not.toMatch(/install\/index/);
+  });
+});
+
+describe('buildIndexInChildProcess', () => {
+  function spawnHarness(calls: Array<{ command: string; args: readonly string[]; options: unknown }>): typeof spawn {
+    return ((command: string, args: readonly string[], options: unknown) => {
+      calls.push({ command, args, options });
+      const child = new EventEmitter() as ChildProcess;
+      child.unref = vi.fn();
+      queueMicrotask(() => child.emit('close', 0));
+      return child;
+    }) as typeof spawn;
+  }
+
+  it('initializes and analyzes an unconfigured repository in child processes', async () => {
+    const dir = freshDir(false);
+    const calls: Array<{ command: string; args: readonly string[]; options: unknown }> = [];
+    await buildIndexInChildProcess(dir, {
+      cliPath: '/openlore/dist/cli/index.js',
+      spawnProcess: spawnHarness(calls),
+    });
+
+    expect(calls.map(call => call.args)).toEqual([
+      ['/openlore/dist/cli/index.js', 'init'],
+      ['/openlore/dist/cli/index.js', 'analyze', '--embedded'],
+    ]);
+    expect(calls.every(call => call.command === process.execPath)).toBe(true);
+    expect(calls.every(call => (call.options as { detached: boolean }).detached)).toBe(true);
+    expect(calls.every(call => (call.options as { stdio: string[] }).stdio[1] === 'ignore')).toBe(true);
+  });
+
+  it('runs a repair analyze without blocking on in-process analyzer work', async () => {
+    const dir = freshDir(true);
+    mkdirSync(join(dir, '.openlore'), { recursive: true });
+    writeFileSync(join(dir, OPENLORE_CONFIG_REL_PATH), '{}');
+    const calls: Array<{ command: string; args: readonly string[]; options: unknown }> = [];
+
+    await buildIndexInChildProcess(dir, {
+      repair: true,
+      cliPath: '/openlore/dist/cli/index.js',
+      spawnProcess: spawnHarness(calls),
+    });
+
+    expect(calls.map(call => call.args)).toEqual([
+      ['/openlore/dist/cli/index.js', 'analyze', '--reanalyze', '--embedded'],
+    ]);
+  });
+
+  it('keeps the parent event loop responsive while the analyzer child is running', async () => {
+    const dir = freshDir(true);
+    writeFileSync(join(dir, OPENLORE_CONFIG_REL_PATH), '{}');
+    let child!: ChildProcess;
+    const build = buildIndexInChildProcess(dir, {
+      cliPath: '/openlore/dist/cli/index.js',
+      spawnProcess: ((() => {
+        child = new EventEmitter() as ChildProcess;
+        child.unref = vi.fn();
+        return child;
+      }) as typeof spawn),
+    });
+
+    let ticked = false;
+    await new Promise<void>(resolve => setImmediate(() => { ticked = true; resolve(); }));
+    expect(ticked).toBe(true);
+    child.emit('close', 0);
+    await expect(build).resolves.toBeUndefined();
   });
 });
 

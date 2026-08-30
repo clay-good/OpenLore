@@ -124,7 +124,10 @@ Freshness is **O(change), not O(repo)** (Spec 13.1): per-file save events are co
 into a single batched flush, the patched signatures are handed directly to the MCP read
 cache (so the next tool call is a cache hit, not a cold re-parse of `llm-context.json`),
 and the vector index is updated with row-level ops rather than a full-table rewrite.
-A bulk event (branch switch / rebase / formatter) collapses to a single refresh. On large
+A bulk event above the watcher threshold (branch switch / rebase / formatter) marks the
+affected region explicitly stale and hands it to one background full rebuild instead of
+reloading the node table and re-parsing caller closures once per changed file. Cold-start
+analysis runs in a child process, and watcher startup does not gate the first tool call. On large
 repos (> 5000 source files) live embedding auto-degrades to signatures-only (logged once);
 embeddings then refresh at commit. Set `OPENLORE_WATCH_DEBUG=1` for per-file stderr detail
 (default is one summary line per batch).

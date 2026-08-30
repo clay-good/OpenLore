@@ -47,6 +47,7 @@ import type { EpistemicTracker } from '../../core/services/mcp-handlers/epistemi
 import {
   registerRepairBuilder,
   registerRepairHost,
+  buildIndexInChildProcess,
   repairStatusFor,
   REPAIR_REASON_DETAIL,
 } from '../../core/services/cold-start-bootstrap.js';
@@ -2639,8 +2640,7 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
   // FULL parity, not just the structural graph. Injected here so the dependency-
   // light read path never imports the analyzer/install layer itself.
   registerRepairBuilder(async (dir) => {
-    const { buildIndex } = await import('../install/index.js');
-    await buildIndex(dir, { repair: true });
+    await buildIndexInChildProcess(dir, { repair: true });
   });
 
   const selectorOpts = { minimal: options.minimal, preset: options.preset, allTools: options.allTools };
@@ -2823,10 +2823,7 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
           // key) so orient is warmed to full parity, not just the structural graph.
           const { bootstrapAnalysisInBackground } = await import('../../core/services/cold-start-bootstrap.js');
           bootstrapAnalysisInBackground(resolve(dir), {
-            analyze: async (d) => {
-              const { buildIndex } = await import('../install/index.js');
-              await buildIndex(d);
-            },
+            analyze: buildIndexInChildProcess,
           });
           const { McpWatcher } = await import('../../core/services/mcp-watcher.js');
           const debounceMs = parseInt(options.watchDebounce ?? '400', 10);
@@ -2841,7 +2838,10 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
             // without a post-commit hook or a running daemon.
             selfRebuild: true,
           });
-          await autoWatcher.start();
+          const watcherStart = autoWatcher.start();
+          void watcherStart.catch(error => {
+            process.stderr.write(`[mcp-watcher] startup failed: ${(error as Error).message}\n`);
+          });
           const unregisterRepairHost = registerRepairHost(resolve(dir), staleFiles =>
             autoWatcher?.requestColdReadRepair(staleFiles) ?? false,
           );
@@ -2850,6 +2850,7 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
           // transport and no signal implements a partial teardown of its own.
           lifecycle.register(async () => {
             unregisterRepairHost();
+            await watcherStart.catch(() => {});
             await autoWatcher!.stop();
           });
         }
@@ -3118,13 +3119,17 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
         embed: !options.watchNoEmbed,
         selfRebuild: true,
       });
-      await watcher.start();
+      const watcherStart = watcher.start();
+      void watcherStart.catch(error => {
+        process.stderr.write(`[mcp-watcher] startup failed: ${(error as Error).message}\n`);
+      });
       const unregisterRepairHost = registerRepairHost(watchDir, staleFiles =>
         watcher.requestColdReadRepair(staleFiles),
       );
       // Route this watcher's teardown through the same one lifecycle path.
       lifecycle.register(async () => {
         unregisterRepairHost();
+        await watcherStart.catch(() => {});
         await watcher.stop();
       });
     }

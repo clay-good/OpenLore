@@ -27,6 +27,7 @@
  */
 
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { join, resolve } from 'node:path';
 import {
   OPENLORE_ANALYSIS_REL_PATH,
@@ -174,6 +175,53 @@ export interface RepairOptions {
   seen?: Set<string>;
   /** Injectable clock (tests). Defaults to Date.now. */
   now?: () => number;
+}
+
+export interface ChildProcessBuildOptions {
+  /** Rebuild even when the source fingerprint is unchanged. */
+  repair?: boolean;
+  /** Test seam; production uses the current OpenLore CLI entry point. */
+  cliPath?: string;
+  /** Test seam for observing the child-process boundary. */
+  spawnProcess?: typeof spawn;
+}
+
+/**
+ * Build the complete first-use index outside the MCP server's event loop.
+ * Initialization is also delegated when the repository has no config yet, so
+ * the parent process performs no analyzer or install work.
+ */
+export async function buildIndexInChildProcess(
+  directory: string,
+  opts: ChildProcessBuildOptions = {},
+): Promise<void> {
+  const cliPath = opts.cliPath ?? process.argv[1];
+  if (!cliPath) throw new Error('Cannot locate the OpenLore CLI entry point');
+  const spawnProcess = opts.spawnProcess ?? spawn;
+
+  const run = (args: string[]): Promise<void> => new Promise((resolveRun, rejectRun) => {
+    let settled = false;
+    const child: ChildProcess = spawnProcess(
+      process.execPath,
+      [cliPath, ...args],
+      { cwd: directory, stdio: ['ignore', 'ignore', 'inherit'], detached: true },
+    );
+    child.once('error', error => {
+      if (settled) return;
+      settled = true;
+      rejectRun(error);
+    });
+    child.once('close', code => {
+      if (settled) return;
+      settled = true;
+      if (code === 0) resolveRun();
+      else rejectRun(new Error(`OpenLore ${args[0]} child exited with code ${code ?? 'unknown'}`));
+    });
+    child.unref();
+  });
+
+  if (!existsSync(resolveOpenLoreConfigPath(directory))) await run(['init']);
+  await run(['analyze', ...(opts.repair ? ['--reanalyze'] : []), '--embedded']);
 }
 
 /**

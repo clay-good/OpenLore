@@ -68,7 +68,8 @@ describe('harden-artifact-write-atomicity: every artifact writer adopts the shar
     expect(sqlite).toBeGreaterThan(acquire);
     expect(publication).toBeGreaterThan(sqlite);
     expect(release).toBeGreaterThan(publication);
-    expect(src.match(/acquireAnalysisLock\(this\.outputPath\)/g)).toHaveLength(2);
+    // Change, deletion, and bulk-fallback lanes each fence their SQLite writes.
+    expect(src.match(/acquireAnalysisLock\(this\.outputPath\)/g)).toHaveLength(3);
   });
 
   it('persistContext itself stays lock-free (it runs inside a lane that already holds the lock)', () => {
