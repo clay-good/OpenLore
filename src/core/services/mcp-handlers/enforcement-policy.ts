@@ -55,6 +55,8 @@ export interface GovernanceFinding {
   subject: string;
   /** Human-readable conclusion. */
   message: string;
+  /** Static, source-declared action for this code and subject. */
+  remediation?: string;
   /** Stable source-owned discriminator when one code can fire repeatedly for one subject. */
   discriminator?: string;
   /** Grounded source location; line is omitted when the dependency artifact has none. */
@@ -90,6 +92,8 @@ export interface FindingCodeSpec {
   defaultClass: EnforcementClass;
   source: string;
   description: string;
+  /** Static template; `{subject}` is replaced literally with the finding subject. */
+  remediation?: string;
 }
 
 /** Finding codes emitted by the deterministic corpus-intent delta reviewer. */
@@ -119,34 +123,42 @@ export const FINDING_CODE_REGISTRY: Record<string, FindingCodeSpec> = {
   'architecture-layer-violation': {
     defaultClass: 'advisory', source: 'architecture',
     description: 'A dependency points upward through the declared architecture layers.',
+    remediation: 'Layer violation: {subject}; route through the declared interface layer instead of importing directly.',
   },
   'architecture-forbidden-dependency': {
     defaultClass: 'advisory', source: 'architecture',
     description: 'A dependency crosses a path boundary declared forbidden.',
+    remediation: 'Forbidden dependency: {subject}; remove the edge or route it through an allowed boundary.',
   },
   'architecture-allowed-only-violation': {
     defaultClass: 'advisory', source: 'architecture',
     description: 'A module depends on a path outside its declared allowlist.',
+    remediation: 'Allowlist violation: {subject}; use a declared dependency or update the reviewed architecture rule.',
   },
   'architecture-required-missing': {
     defaultClass: 'advisory', source: 'architecture',
     description: 'A matched module is missing a declared required dependency.',
+    remediation: 'Required dependency missing: {subject}; add the declared dependency or revise the reviewed rule.',
   },
   'architecture-cycle': {
     defaultClass: 'advisory', source: 'architecture',
     description: 'Matched modules form a dependency cycle outside the declared exceptions.',
+    remediation: 'Architecture cycle: {subject}; break one dependency edge or add a reviewed exception.',
   },
   'architecture-unreachable-breach': {
     defaultClass: 'advisory', source: 'architecture',
     description: 'A file outside the permitted origin transitively reaches the protected target.',
+    remediation: 'Reachability breach: {subject}; remove the path or route it through a permitted origin.',
   },
   'architecture-orphan': {
     defaultClass: 'advisory', source: 'architecture',
     description: 'A matched module has no incoming dependency in the indexed graph.',
+    remediation: 'Architecture orphan: {subject}; wire it from an intended owner or remove the unused module.',
   },
   'architecture-instability-inversion': {
     defaultClass: 'advisory', source: 'architecture',
     description: 'A stable matched module depends on a strictly more-unstable module.',
+    remediation: 'Instability inversion: {subject}; invert the dependency through a stable interface.',
   },
   // ── decision-bound architecture constraints ──
   'decision-constraint-violation': {
@@ -164,11 +176,13 @@ export const FINDING_CODE_REGISTRY: Record<string, FindingCodeSpec> = {
     defaultClass: 'advisory',
     source: 'blast-radius',
     description: 'The change orphans one or more code-anchored memories (their anchor symbols are removed).',
+    remediation: 'Orphaned memory: {subject}; re-anchor or supersede the affected memory before continuing.',
   },
   'orphans-anchored-decision': {
     defaultClass: 'advisory',
     source: 'blast-radius',
     description: 'The change orphans one or more anchored architectural decisions.',
+    remediation: 'Orphaned decision: {subject}; re-anchor or supersede the affected decision before continuing.',
   },
   // ── change-impact certificate (add-change-impact-certificate) ──
   // Per-severity codes so `impactCertificate.block` lowers onto the policy exactly.
@@ -214,6 +228,7 @@ export const FINDING_CODE_REGISTRY: Record<string, FindingCodeSpec> = {
     defaultClass: 'advisory',
     source: 'stale-decision-reference',
     description: 'A live, authoritative artifact references a decision that has since been superseded/retired.',
+    remediation: 'Stale decision reference: {subject}; point it at the authoritative superseding decision.',
   },
   // ── footprint escape detection (add-footprint-escape-detection) ──
   'footprint-escape': {
@@ -493,8 +508,10 @@ export function classifyFindings(
 ): GateResult {
   const unique = new Map<string, ClassifiedFinding>();
   for (const finding of findings) {
+    const template = FINDING_CODE_REGISTRY[finding.code]?.remediation;
     const classified = {
       ...finding,
+      ...(finding.remediation ? {} : template ? { remediation: template.replaceAll('{subject}', () => finding.subject) } : {}),
       enforcementClass: resolveEnforcementClass(finding.code, policy, finding.severity),
     };
     const key = findingKey(classified);

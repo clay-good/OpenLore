@@ -118,6 +118,21 @@ describe('renderMarkdown (conclusion-shaped briefing)', () => {
     expect(md).toContain('…and 3 more');
   });
 
+  it('renders a finding remediation before its gate conclusion', () => {
+    const action = 'Re-anchor memory-1 before continuing.';
+    const md = renderMarkdown({
+      base: 'main', head: 'working tree', structural: structuralWithDelta, blast: blastBriefing,
+      caveats: [], status: 'ok',
+      enforcement: {
+        gated: true, frozen: 0, new: 0, retired: 0, requiresInitialization: [],
+        evidence: [{ code: 'orphans-anchored-memory', state: 'blocking', remediation: action }],
+        omittedEvidence: 0,
+      },
+    });
+    expect(md).toContain(`**Action:** ${action}`);
+    expect(md.indexOf(action)).toBeLessThan(md.indexOf('`orphans-anchored-memory` (blocking)'));
+  });
+
   it('preserves gate evidence when hostile caveats force the GitHub-size clamp', () => {
     const hostile = '`'.repeat(80) + '<&'.repeat(100);
     const md = renderMarkdown({

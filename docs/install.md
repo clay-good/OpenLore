@@ -105,6 +105,7 @@ stays reachable):
 | Hook | Install | Blocks when |
 |------|---------|-------------|
 | **Enforcement gate** (recommended, unified) | `openlore enforce --install-hook` | a governance finding resolves to `blocking` under [`enforcement.policy`](configuration.md#enforcement-policy) — the single posture over all findings |
+| **Agent-loop enforcement** (opt-in, Claude Code + Codex) | `openlore setup --agent-enforcement-hook all` | a finding resolves to `blocking`; remediation is fed back through each agent's Stop hook |
 | Decisions gate | wired by the decisions workflow (`openlore decisions`) | verified architectural decisions await review/sync |
 | Blast-radius guard | `openlore blast-radius --install-hook` | the diff triggers a configured `blastRadius.block` pattern |
 | Change-impact certificate | `openlore impact-certificate --install-hook` | the diff opens a new path into a `impactCertificate.block` surface severity |
@@ -112,6 +113,8 @@ stays reachable):
 `openlore enforce` is the recommended single gate: it resolves every governance finding through one
 `enforcement.policy`, and the per-surface `blastRadius.block` / `impactCertificate.block` configs lower
 onto it. All hooks are advisory by default — nothing blocks until you opt a finding into `blocking`.
+Use `claude` or `codex` instead of `all` to install only one agent host; use `none` to remove
+OpenLore's entries from both without changing user-authored hooks.
 See [cli-reference.md](cli-reference.md#enforcement-gate).
 
 ## Task-scoped context injection

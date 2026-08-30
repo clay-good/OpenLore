@@ -3,7 +3,7 @@
  * `decisions --consolidate` processes from clobbering pending.json.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, mkdir, readdir, writeFile, readFile, utimes, stat, access } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, readdir, writeFile, readFile, utimes, stat, access, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { acquireDecisionsLock, acquireLockAt, isDecisionsLockHeld, isLockHeld, acquireAnalysisLock, withAnalysisLock, NamespaceGateHeldError } from './advisory-lock.js';
@@ -89,6 +89,25 @@ describe('stale steal — exactly one winner', () => {
 });
 
 describe('a live holder is never superseded', () => {
+  it.runIf(process.platform !== 'win32')('creates owner-only lock files', async () => {
+    const dir = join(root, 'private-mode');
+    const held = await acquireLockAt(dir, '.x.lock');
+    if (isLockHeld(held)) throw new Error('setup acquire must own the lock');
+    expect((await stat(join(dir, '.x.lock'))).mode & 0o777).toBe(0o600);
+    await held.release();
+  });
+
+  it.runIf(process.platform !== 'win32')('fails closed without reading a symlinked lock target', async () => {
+    const dir = join(root, 'symlink-lock');
+    await mkdir(dir, { recursive: true });
+    const outside = join(root, 'outside-lock-payload');
+    await writeFile(outside, '99999 crashed');
+    await symlink(outside, join(dir, '.x.lock'));
+
+    await expect(acquireLockAt(dir, '.x.lock', { onContended: 'report' })).rejects.toMatchObject({ code: 'ELOOP' });
+    expect(await readFile(outside, 'utf8')).toBe('99999 crashed');
+  });
+
   it('refuses to steal a stale-looking lock while its PID is alive', async () => {
     const dir = join(root, 'live-holder');
     const first = await acquireLockAt(dir, '.x.lock');

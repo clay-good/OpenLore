@@ -11,10 +11,10 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
-import { mkdtemp, mkdir, writeFile, symlink, rm, realpath, open } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, symlink, rm, realpath, open, rename } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { readFileConfined, readFileConfinedWithStat, safeJoin, safeOpenspecDir, isConfinedPath } from './path-confinement.js';
+import { confinedAtomicWriteFile, readFileConfined, readFileConfinedWithStat, recoverConfinedAtomicWriteFile, safeJoin, safeOpenspecDir, isConfinedPath } from './path-confinement.js';
 
 let root: string;
 let outside: string;
@@ -181,6 +181,141 @@ describe('readFileConfined', () => {
   it('refuses an escaping symlink before returning any bytes', async () => {
     await expect(readFileConfined(root, 'openspec/escaping-spec.md')).rejects.toThrow(/Path escape blocked/);
     await expect(readFileConfinedWithStat(root, 'openspec/escaping-spec.md')).rejects.toThrow(/Path escape blocked/);
+  });
+});
+
+describe('confinedAtomicWriteFile expected identity', () => {
+  it('recovers the original file after an interrupted conditional publication', async () => {
+    const path = join(root, 'openspec', 'specs', 'core', 'recover-cas.md');
+    const guard = join(root, 'openspec', 'specs', 'core', '.recover-cas.md.openlore-cas-backup.36b8f84d-0a96-4eeb-8694-73f7a330e775');
+    const journal = join(root, 'recover-cas.journal');
+    await writeFile(path, '# original\n');
+    await rename(path, guard);
+    await writeFile(journal, JSON.stringify({ guard: '.recover-cas.md.openlore-cas-backup.36b8f84d-0a96-4eeb-8694-73f7a330e775' }));
+
+    await recoverConfinedAtomicWriteFile(root, path, journal);
+
+    await expect(readFileConfined(root, 'openspec/specs/core/recover-cas.md'))
+      .resolves.toBe('# original\n');
+  });
+
+  it('ignores repository files that only resemble recovery guards', async () => {
+    const path = join(root, 'openspec', 'specs', 'core', 'no-journal.md');
+    const guard = join(root, 'openspec', 'specs', 'core', '.no-journal.md.openlore-cas-backup.36b8f84d-0a96-4eeb-8694-73f7a330e775');
+    const journal = join(root, 'missing-recovery.journal');
+    await writeFile(guard, '# user file\n');
+
+    await recoverConfinedAtomicWriteFile(root, path, journal);
+
+    await expect(readFile(guard, 'utf-8')).resolves.toBe('# user file\n');
+    await expect(readFile(path, 'utf-8')).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('keeps the journal when a post-rename read fails, then recovers', async () => {
+    const path = join(root, 'openspec', 'specs', 'core', 'recover-after-read-error.md');
+    const journal = join(root, 'recover-after-read-error.journal');
+    await writeFile(path, '# original\n');
+    const snapshot = await readFileConfinedWithStat(root, 'openspec/specs/core/recover-after-read-error.md');
+    const probe = await open(path, 'r');
+    const prototype = Object.getPrototypeOf(probe) as { readFile: (...args: unknown[]) => Promise<Buffer> };
+    await probe.close();
+    const readSpy = vi.spyOn(prototype, 'readFile').mockRejectedValueOnce(
+      Object.assign(new Error('injected read failure'), { code: 'EIO' }),
+    );
+
+    try {
+      await expect(confinedAtomicWriteFile(root, path, '# replacement\n', {
+        expectedIdentity: snapshot.stat,
+        expectedContent: snapshot.content,
+        recoveryJournalPath: journal,
+      })).rejects.toThrow(/injected read failure/);
+    } finally {
+      readSpy.mockRestore();
+    }
+
+    await recoverConfinedAtomicWriteFile(root, path, journal);
+    await expect(readFile(path, 'utf-8')).resolves.toBe('# original\n');
+  });
+
+  it('never publishes a partial recovery journal when its write fails', async () => {
+    const path = join(root, 'openspec', 'specs', 'core', 'partial-journal.md');
+    const journal = join(root, 'partial-journal.journal');
+    await writeFile(path, '# original\n');
+    const snapshot = await readFileConfinedWithStat(root, 'openspec/specs/core/partial-journal.md');
+    const probe = await open(path, 'r');
+    const prototype = Object.getPrototypeOf(probe) as { writeFile: (...args: unknown[]) => Promise<void> };
+    await probe.close();
+    const originalWriteFile = prototype.writeFile;
+    let calls = 0;
+    const writeSpy = vi.spyOn(prototype, 'writeFile').mockImplementation(function (this: unknown, ...args: unknown[]) {
+      calls += 1;
+      if (calls === 2) return Promise.reject(Object.assign(new Error('injected journal write failure'), { code: 'EIO' }));
+      return originalWriteFile.apply(this, args);
+    });
+
+    try {
+      await expect(confinedAtomicWriteFile(root, path, '# replacement\n', {
+        expectedIdentity: snapshot.stat,
+        expectedContent: snapshot.content,
+        recoveryJournalPath: journal,
+      })).rejects.toThrow(/injected journal write failure/);
+    } finally {
+      writeSpy.mockRestore();
+    }
+
+    await expect(readFile(journal, 'utf-8')).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(readFile(path, 'utf-8')).resolves.toBe('# original\n');
+    await expect(confinedAtomicWriteFile(root, path, '# replacement\n', {
+      expectedIdentity: snapshot.stat,
+      expectedContent: snapshot.content,
+      recoveryJournalPath: journal,
+    })).resolves.toBeUndefined();
+  });
+
+  it('refuses to overwrite a regular file that changed after its confined read', async () => {
+    const path = join(root, 'openspec', 'specs', 'core', 'cas.md');
+    await writeFile(path, '# first\n');
+    const snapshot = await readFileConfinedWithStat(root, 'openspec/specs/core/cas.md');
+    await writeFile(path, '# concurrent user edit\n');
+
+    await expect(confinedAtomicWriteFile(root, path, '# installer edit\n', {
+      expectedIdentity: snapshot.stat,
+    })).rejects.toThrow(/changed after it was read/);
+    await expect(readFileConfined(root, 'openspec/specs/core/cas.md'))
+      .resolves.toBe('# concurrent user edit\n');
+  });
+
+  it('preserves a replacement that lands during publication', async () => {
+    const path = join(root, 'openspec', 'specs', 'core', 'cas-during-publish.md');
+    await writeFile(path, '# first\n');
+    const snapshot = await readFileConfinedWithStat(root, 'openspec/specs/core/cas-during-publish.md');
+    const probe = await open(path, 'r');
+    const prototype = Object.getPrototypeOf(probe) as { sync: () => Promise<void> };
+    await probe.close();
+    const originalSync = prototype.sync;
+    const syncSpy = vi.spyOn(prototype, 'sync').mockImplementationOnce(async function (
+      this: { sync: () => Promise<void> },
+    ) {
+      await originalSync.call(this);
+      await writeFile(path, '# concurrent replacement\n');
+    });
+    try {
+      await expect(confinedAtomicWriteFile(root, path, '# installer edit\n', {
+        expectedIdentity: snapshot.stat,
+      })).rejects.toThrow(/changed after it was read/);
+      await expect(readFileConfined(root, 'openspec/specs/core/cas-during-publish.md'))
+        .resolves.toBe('# concurrent replacement\n');
+    } finally {
+      syncSpy.mockRestore();
+    }
+  });
+
+  it('refuses to overwrite a file created after an absent read', async () => {
+    const path = join(root, 'openspec', 'specs', 'core', 'created-concurrently.md');
+    await writeFile(path, '# concurrent create\n');
+    await expect(confinedAtomicWriteFile(root, path, '# installer create\n', {
+      expectedIdentity: null,
+    })).rejects.toThrow(/created after it was read/);
   });
 });
 

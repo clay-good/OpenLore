@@ -4,10 +4,10 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, symlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, symlink, chmod, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { installPanicCheckHook, installGryphWatchHook, uninstallPanicHooks, installCheckEditHook, uninstallCheckEditHook, panicCheckHookCommand, evaluatePanicActivation, PANIC_DISABLED_SENTINEL } from './setup.js';
+import { installPanicCheckHook, installGryphWatchHook, uninstallPanicHooks, installCheckEditHook, uninstallCheckEditHook, installAgentEnforcementHook, uninstallAgentEnforcementHook, installCodexAgentEnforcementHook, uninstallCodexAgentEnforcementHook, panicCheckHookCommand, evaluatePanicActivation, PANIC_DISABLED_SENTINEL } from './setup.js';
 import { validatePanicSignal } from '../../core/services/mcp-handlers/panic-validation.js';
 import type { PanicTelemetryEvent } from '../../core/services/mcp-handlers/panic-validation.js';
 import { PANIC_GATE } from '../../core/services/mcp-handlers/panic-validation.js';
@@ -16,9 +16,199 @@ interface Settings {
   hooks?: {
     PreToolUse?: Array<{ command?: string }>;
     PostToolUse?: Array<{ matcher?: string; _openlore?: boolean; hooks?: Array<{ command?: string }> }>;
+    Stop?: Array<{ command?: string; _openloreAgentEnforcement?: boolean; hooks?: Array<{ command?: string }> }>;
     UserPromptSubmit?: Array<{ command?: string }>;
   };
 }
+
+let settingsRuntimeDir: string;
+let previousSettingsRuntimeDir: string | undefined;
+
+beforeEach(async () => {
+  settingsRuntimeDir = await mkdtemp(join(tmpdir(), 'openlore-settings-runtime-'));
+  previousSettingsRuntimeDir = process.env.OPENLORE_SETTINGS_RUNTIME_DIR;
+  process.env.OPENLORE_SETTINGS_RUNTIME_DIR = settingsRuntimeDir;
+});
+
+afterEach(async () => {
+  if (previousSettingsRuntimeDir === undefined) delete process.env.OPENLORE_SETTINGS_RUNTIME_DIR;
+  else process.env.OPENLORE_SETTINGS_RUNTIME_DIR = previousSettingsRuntimeDir;
+  await rm(settingsRuntimeDir, { recursive: true, force: true });
+});
+
+describe('agent enforcement Stop hook lifecycle', () => {
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'openlore-agent-enforce-hook-'));
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('installs idempotently and uninstalls only the OpenLore entry', async () => {
+    expect(await installAgentEnforcementHook(dir)).toBe(true);
+    expect(await installAgentEnforcementHook(dir)).toBe(true);
+    const settings = await readSettings(dir);
+    expect(settings.hooks?.Stop).toHaveLength(1);
+    expect(settings.hooks?.Stop?.[0]?.hooks?.[0]?.command).toBe('openlore enforce --agent-hook --git-root');
+
+    settings.hooks!.Stop!.push({ command: 'my-own-stop-check' });
+    settings.hooks!.Stop!.push({ command: 'echo openlore enforce --agent-hook' });
+    await writeFile(join(dir, '.claude', 'settings.json'), JSON.stringify(settings, null, 2), 'utf-8');
+    expect(await uninstallAgentEnforcementHook(dir)).toBe(true);
+    expect((await readSettings(dir)).hooks?.Stop).toEqual([
+      { command: 'my-own-stop-check' },
+      { command: 'echo openlore enforce --agent-hook' },
+    ]);
+  });
+
+  it('serializes concurrent installers without losing or duplicating entries', async () => {
+    const results = await Promise.all(Array.from({ length: 4 }, () => installAgentEnforcementHook(dir)));
+    expect(results).toEqual([true, true, true, true]);
+    expect((await readSettings(dir)).hooks?.Stop).toHaveLength(1);
+  });
+
+  it('serializes different OpenLore hook installers without losing entries', async () => {
+    const [agent, checkEdit] = await Promise.all([
+      installAgentEnforcementHook(dir),
+      installCheckEditHook(dir),
+      installPanicCheckHook(dir),
+      installGryphWatchHook(dir),
+    ]);
+    expect(agent).toBe(true);
+    expect(checkEdit).toBe(true);
+    const hooks = (await readSettings(dir)).hooks;
+    expect(hooks?.Stop).toHaveLength(1);
+    expect(hooks?.PostToolUse).toHaveLength(1);
+    expect(hooks?.PreToolUse).toHaveLength(1);
+    expect(hooks?.UserPromptSubmit).toHaveLength(1);
+  });
+
+  it('installs and uninstalls the Codex Stop hook without disturbing user handlers', async () => {
+    await mkdir(join(dir, '.codex'), { recursive: true });
+    const path = join(dir, '.codex', 'hooks.json');
+    await writeFile(path, JSON.stringify({
+      description: 'user hooks',
+      hooks: { Stop: [{ hooks: [{ type: 'command', command: 'my-stop-hook' }] }] },
+    }), 'utf-8');
+
+    expect(await installCodexAgentEnforcementHook(dir)).toBe(true);
+    expect(await installCodexAgentEnforcementHook(dir)).toBe(true);
+    const installed = JSON.parse(await readFile(path, 'utf-8')) as {
+      description?: string;
+      hooks?: { Stop?: Array<{ hooks?: Array<{ command?: string }> }> };
+    };
+    expect(installed.description).toBe('user hooks');
+    expect(installed.hooks?.Stop?.flatMap(group => group.hooks ?? [])
+      .filter(handler => handler.command === 'openlore enforce --agent-hook --git-root')).toHaveLength(1);
+    expect(installed.hooks?.Stop?.flatMap(group => group.hooks ?? [])
+      .some(handler => handler.command === 'my-stop-hook')).toBe(true);
+
+    expect(await uninstallCodexAgentEnforcementHook(dir)).toBe(true);
+    const uninstalled = JSON.parse(await readFile(path, 'utf-8')) as {
+      hooks?: { Stop?: Array<{ hooks?: Array<{ command?: string }> }> };
+    };
+    expect(uninstalled.hooks?.Stop?.flatMap(group => group.hooks ?? []))
+      .toEqual([{ type: 'command', command: 'my-stop-hook' }]);
+  });
+
+  it('upgrades the legacy Codex command without leaving a duplicate', async () => {
+    await mkdir(join(dir, '.codex'), { recursive: true });
+    const path = join(dir, '.codex', 'hooks.json');
+    await writeFile(path, JSON.stringify({
+      hooks: { Stop: [{ hooks: [{ type: 'command', command: 'openlore enforce --agent-hook' }] }] },
+    }), 'utf-8');
+
+    expect(await installCodexAgentEnforcementHook(dir)).toBe(true);
+    const installed = JSON.parse(await readFile(path, 'utf-8')) as {
+      hooks?: { Stop?: Array<{ hooks?: Array<{ command?: string }> }> };
+    };
+    expect(installed.hooks?.Stop?.flatMap(group => group.hooks ?? []))
+      .toEqual([expect.objectContaining({ command: 'openlore enforce --agent-hook --git-root' })]);
+  });
+
+  it('refuses corrupt Codex hooks without changing their bytes', async () => {
+    await mkdir(join(dir, '.codex'), { recursive: true });
+    const path = join(dir, '.codex', 'hooks.json');
+    await writeFile(path, '{broken', 'utf-8');
+    expect(await installCodexAgentEnforcementHook(dir)).toBe(false);
+    expect(await readFile(path, 'utf-8')).toBe('{broken');
+  });
+
+  it('refuses corrupt settings without changing their bytes', async () => {
+    await mkdir(join(dir, '.claude'), { recursive: true });
+    const path = join(dir, '.claude', 'settings.json');
+    await writeFile(path, '{broken', 'utf-8');
+    expect(await installAgentEnforcementHook(dir)).toBe(false);
+    expect(await readFile(path, 'utf-8')).toBe('{broken');
+  });
+
+  it.runIf(process.platform !== 'win32')('refuses a symlinked private runtime directory', async () => {
+    const outside = await mkdtemp(join(tmpdir(), 'openlore-runtime-outside-'));
+    await rm(settingsRuntimeDir, { recursive: true, force: true });
+    await symlink(outside, settingsRuntimeDir);
+    try {
+      expect(await installAgentEnforcementHook(dir)).toBe(false);
+      await expect(readFile(join(dir, '.claude', 'settings.json'), 'utf-8')).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it.runIf(process.platform !== 'win32')('refuses but never chmods a permissive runtime override', async () => {
+    await chmod(settingsRuntimeDir, 0o750);
+    expect(await installAgentEnforcementHook(dir)).toBe(false);
+    expect((await stat(settingsRuntimeDir)).mode & 0o777).toBe(0o750);
+    await expect(readFile(join(dir, '.claude', 'settings.json'), 'utf-8')).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('converges duplicate owned entries to one canonical hook', async () => {
+    await mkdir(join(dir, '.claude'), { recursive: true });
+    const owned = { _openloreAgentEnforcement: true, hooks: [{ command: 'stale-command' }] };
+    await writeFile(join(dir, '.claude', 'settings.json'), JSON.stringify({
+      hooks: { Stop: [owned, { command: 'user-hook' }, owned] },
+    }), 'utf-8');
+
+    expect(await installAgentEnforcementHook(dir)).toBe(true);
+    const stop = (await readSettings(dir)).hooks?.Stop ?? [];
+    expect(stop.filter(entry => entry._openloreAgentEnforcement)).toHaveLength(1);
+    expect(stop.find(entry => entry._openloreAgentEnforcement)?.hooks?.[0]?.command)
+      .toBe('openlore enforce --agent-hook --git-root');
+    expect(stop.some(entry => entry.command === 'user-hook')).toBe(true);
+  });
+
+  it.each([null, 42, { hooks: null }, { hooks: [null] }])(
+    'refuses malformed Stop entry %j during install and uninstall without changing bytes',
+    async (entry) => {
+      await mkdir(join(dir, '.claude'), { recursive: true });
+      const path = join(dir, '.claude', 'settings.json');
+      const original = JSON.stringify({ hooks: { Stop: [entry] } }, null, 2) + '\n';
+      await writeFile(path, original, 'utf-8');
+      expect(await installAgentEnforcementHook(dir)).toBe(false);
+      expect(await uninstallAgentEnforcementHook(dir)).toBe(false);
+      expect(await readFile(path, 'utf-8')).toBe(original);
+    },
+  );
+
+  it('rejects a symlinked settings file without reading or mutating its outside target', async () => {
+    const outside = await mkdtemp(join(tmpdir(), 'openlore-agent-hook-outside-'));
+    const outsideSettings = join(outside, 'settings.json');
+    const original = '{"outside":true}\n';
+    await writeFile(outsideSettings, original, 'utf-8');
+    await mkdir(join(dir, '.claude'), { recursive: true });
+    await symlink(outsideSettings, join(dir, '.claude', 'settings.json'));
+    try {
+      expect(await installAgentEnforcementHook(dir)).toBe(false);
+      expect(await uninstallAgentEnforcementHook(dir)).toBe(false);
+      expect(await readFile(outsideSettings, 'utf-8')).toBe(original);
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+});
 
 async function readSettings(dir: string): Promise<Settings> {
   return JSON.parse(await readFile(join(dir, '.claude', 'settings.json'), 'utf-8')) as Settings;
