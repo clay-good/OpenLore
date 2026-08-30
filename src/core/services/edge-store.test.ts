@@ -63,6 +63,103 @@ describe('EdgeStore', () => {
       const consumers = store.getNameOnlyConsumers('foo');
       expect(consumers).toEqual([{ file: 'src/c.ts', calleeId: 'src/a.ts::foo' }]);
     });
+
+    it('persists composition with stale marks and removes each healed contribution', () => {
+      store.markFilesStale(['src/a.ts', 'src/b.ts'], Date.now(), new Map([
+        ['src/a.ts', {
+          symbolCount: 2,
+          hubCount: 1,
+          chokepointCount: 1,
+          topSymbol: { id: 'src/a.ts::hub', name: 'hub', filePath: 'src/a.ts', fanIn: 8, fanOut: 2 },
+        }],
+        ['src/b.ts', {
+          symbolCount: 1,
+          hubCount: 0,
+          chokepointCount: 0,
+          topSymbol: { id: 'src/b.ts::leaf', name: 'leaf', filePath: 'src/b.ts', fanIn: 1, fanOut: 0 },
+        }],
+      ]));
+      expect(store.getStaleRegionComposition()).toMatchObject({
+        fileCount: 2,
+        symbolCount: 3,
+        hubCount: 1,
+        chokepointCount: 1,
+        topSymbol: { name: 'hub' },
+      });
+
+      store.clearFilesStale(['src/a.ts']);
+      expect(store.getStaleRegionComposition()).toMatchObject({
+        fileCount: 1,
+        symbolCount: 1,
+        hubCount: 0,
+        topSymbol: { name: 'leaf' },
+      });
+
+      store.markFilesStale(['src/b.ts']);
+      expect(store.getStaleRegionComposition()).toEqual({
+        fileCount: 1,
+        symbolCount: 0,
+        hubCount: 0,
+        chokepointCount: 0,
+        unclassifiedFileCount: 1,
+      });
+      store.clearAll();
+      expect(store.getStaleRegionComposition()).toEqual({
+        fileCount: 0,
+        symbolCount: 0,
+        hubCount: 0,
+        chokepointCount: 0,
+      });
+    });
+
+    it('treats malformed persisted composition as unclassified context', () => {
+      store.markFilesStale(['src/a.ts'], Date.now(), new Map([['src/a.ts', {
+        symbolCount: 1,
+        hubCount: 1,
+        chokepointCount: 1,
+        topSymbol: { id: 'src/a.ts::hub', name: 'hub', filePath: 'src/a.ts', fanIn: 8, fanOut: 2 },
+      }]]));
+      const raw = new DatabaseSync(dbPath);
+      try {
+        raw.prepare(`
+          UPDATE stale_file_composition
+          SET symbol_count = -1, top_symbol = '"not-a-symbol"'
+          WHERE file_path = 'src/a.ts'
+        `).run();
+      } finally {
+        raw.close();
+      }
+      expect(store.getStaleRegionComposition()).toEqual({
+        fileCount: 1,
+        symbolCount: 0,
+        hubCount: 0,
+        chokepointCount: 0,
+        unclassifiedFileCount: 1,
+      });
+
+      const malformed = new DatabaseSync(dbPath);
+      try {
+        const update = malformed.prepare(`
+          UPDATE stale_file_composition
+          SET symbol_count = ?, hub_count = ?, chokepoint_count = ?, top_symbol = ?
+          WHERE file_path = 'src/a.ts'
+        `);
+        const validTop = '{"id":"src/a.ts::hub","name":"hub","filePath":"src/a.ts","fanIn":8,"fanOut":2}';
+        const invalidRows: Array<[number, number, number, string | null]> = [
+          [0, 1, 0, null],
+          [1, 0, 1, validTop],
+          [0, 0, 0, validTop],
+          [1, 0, 0, ''],
+          [1, 1, 1, '{"id":"src/b.ts::hub","name":"hub","filePath":"src/b.ts","fanIn":8,"fanOut":2}'],
+        ];
+        for (const row of invalidRows) {
+          update.run(...row);
+          expect(store.getStaleRegionComposition().unclassifiedFileCount).toBe(1);
+        }
+      } finally {
+        malformed.close();
+      }
+    });
   });
 
   /** Write a store at an old SCHEMA_VERSION with one node — a pre-upgrade index. */

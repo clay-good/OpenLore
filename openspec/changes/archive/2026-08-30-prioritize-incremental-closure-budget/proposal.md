@@ -108,7 +108,7 @@ composition.
 - **Risk:** (a) *ordering instability across runs* — mitigated by a total, deterministic
   comparator with a path tie-break and a test asserting stability. (b) *a rebuild storm from
   significance-driven urgency* — mitigated by keeping the existing debounce, coalescing, and
-  at-most-once guarantees, and by only ever *shortening* the window for high-significance regions
-  within the existing bounds. (c) *reading prioritization as a soundness improvement* — mitigated
+  at-most-once guarantees, and by never shortening an already-armed window. (c) *reading
+  prioritization as a soundness improvement* — mitigated
   by the spec stating that the convergence contract and the stale set's size are unchanged; this
   changes which files are stale, not whether staleness is disclosed.

@@ -9,6 +9,12 @@ import type { FileChangeCoupling, CoupledFile, ChangeCouplingResult } from '../p
 import type { DecisionStatus } from '../../types/index.js';
 import { ARTIFACT_CALL_GRAPH_DB } from '../../constants.js';
 import { quarantineCorruptSync } from '../decisions/atomic-store.js';
+import {
+  combineStaleFileCompositions,
+  type StaleFileComposition,
+  type StaleRegionComposition,
+  type StaleRegionSymbol,
+} from '../analyzer/incremental-closure.js';
 
 /**
  * Why a just-opened graph store cannot be trusted to answer a read (change:
@@ -47,6 +53,20 @@ function missingSchemaVersionFault(): StoreLifecycleFault {
     reason: 'schema-mismatch',
     message: `graph index has no valid schema version — run \`openlore analyze\` to rebuild it`,
   };
+}
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isStaleRegionSymbol(value: unknown): value is StaleRegionSymbol {
+  if (typeof value !== 'object' || value === null) return false;
+  const symbol = value as Partial<StaleRegionSymbol>;
+  return typeof symbol.id === 'string' && symbol.id.length > 0 &&
+    typeof symbol.name === 'string' && symbol.name.length > 0 &&
+    typeof symbol.filePath === 'string' && symbol.filePath.length > 0 &&
+    isNonNegativeSafeInteger(symbol.fanIn) &&
+    isNonNegativeSafeInteger(symbol.fanOut);
 }
 
 function schemaMismatchFault(onDiskVersion: number): StoreLifecycleFault {
@@ -141,7 +161,7 @@ async function runTransactionAsync<T>(db: DatabaseSync, fn: () => Promise<T>): P
 }
 
 /** Bump when schema changes. Old DBs are dropped and rebuilt on next analyze --force. */
-export const SCHEMA_VERSION = 10;
+export const SCHEMA_VERSION = 11;
 
 export class EdgeStore {
   /**
@@ -220,6 +240,7 @@ export class EdgeStore {
         DROP TABLE IF EXISTS change_coupling;
         DROP TABLE IF EXISTS cfg_overlay;
         DROP TABLE IF EXISTS stale_files;
+        DROP TABLE IF EXISTS stale_file_composition;
         DROP TABLE IF EXISTS schema_version;
         CREATE TABLE schema_version (version INTEGER NOT NULL);
       `);
@@ -394,6 +415,18 @@ export class EdgeStore {
       CREATE TABLE IF NOT EXISTS stale_files (
         file_path  TEXT PRIMARY KEY,
         marked_at  INTEGER NOT NULL
+      );
+
+      -- Per-file structural receipt for the stale region. One row per stale
+      -- file lets self-healing DELETE the file and its contribution together
+      -- instead of leaving a stale aggregate behind. The schema-version bump
+      -- rebuilds older stores before a watcher can write this receipt.
+      CREATE TABLE IF NOT EXISTS stale_file_composition (
+        file_path        TEXT PRIMARY KEY,
+        symbol_count     INTEGER NOT NULL,
+        hub_count        INTEGER NOT NULL,
+        chokepoint_count INTEGER NOT NULL,
+        top_symbol       TEXT
       );
     `);
 
@@ -1186,11 +1219,35 @@ export class EdgeStore {
    * budget-exceeded incremental update. Idempotent (re-marking refreshes the
    * timestamp). Sound over-approximation: it is always safe to mark more.
    */
-  markFilesStale(files: readonly string[], at: number = Date.now()): void {
+  markFilesStale(
+    files: readonly string[],
+    at: number = Date.now(),
+    composition?: ReadonlyMap<string, StaleFileComposition>,
+  ): void {
     if (files.length === 0) return;
     const stmt = this.db.prepare('INSERT OR REPLACE INTO stale_files (file_path, marked_at) VALUES (?, ?)');
+    const compositionStmt = this.db.prepare(`
+      INSERT OR REPLACE INTO stale_file_composition
+        (file_path, symbol_count, hub_count, chokepoint_count, top_symbol)
+      VALUES (?, ?, ?, ?, ?)
+    `);
+    const clearCompositionStmt = this.db.prepare('DELETE FROM stale_file_composition WHERE file_path = ?');
     runTransaction(this.db, () => {
-      for (const f of files) stmt.run(f, at);
+      for (const f of files) {
+        stmt.run(f, at);
+        const receipt = composition?.get(f);
+        if (receipt) {
+          compositionStmt.run(
+            f,
+            receipt.symbolCount,
+            receipt.hubCount,
+            receipt.chokepointCount,
+            receipt.topSymbol ? JSON.stringify(receipt.topSymbol) : null,
+          );
+        } else {
+          clearCompositionStmt.run(f);
+        }
+      }
     });
   }
 
@@ -1201,8 +1258,12 @@ export class EdgeStore {
   clearFilesStale(files: readonly string[]): void {
     if (files.length === 0) return;
     const stmt = this.db.prepare('DELETE FROM stale_files WHERE file_path = ?');
+    const compositionStmt = this.db.prepare('DELETE FROM stale_file_composition WHERE file_path = ?');
     runTransaction(this.db, () => {
-      for (const f of files) stmt.run(f);
+      for (const f of files) {
+        stmt.run(f);
+        compositionStmt.run(f);
+      }
     });
   }
 
@@ -1224,6 +1285,63 @@ export class EdgeStore {
     return row.n;
   }
 
+  /** One-statement snapshot of stale membership and its persisted composition. */
+  getStaleRegionSnapshot(): { files: string[]; composition: StaleRegionComposition } {
+    try {
+      const rows = this.db.prepare(`
+        SELECT sf.file_path, sfc.symbol_count, sfc.hub_count,
+               sfc.chokepoint_count, sfc.top_symbol
+        FROM stale_files sf
+        LEFT JOIN stale_file_composition sfc ON sfc.file_path = sf.file_path
+        ORDER BY sf.file_path
+      `).all() as unknown as Array<{
+        file_path: string;
+        symbol_count: number | null;
+        hub_count: number | null;
+        chokepoint_count: number | null;
+        top_symbol: string | null;
+      }>;
+      const receipts: StaleFileComposition[] = rows.flatMap(row => {
+        if (!isNonNegativeSafeInteger(row.symbol_count) ||
+            !isNonNegativeSafeInteger(row.hub_count) ||
+            !isNonNegativeSafeInteger(row.chokepoint_count) ||
+            row.hub_count > row.symbol_count || row.chokepoint_count > row.hub_count) return [];
+        const hasTopSymbol = typeof row.top_symbol === 'string' && row.top_symbol.length > 0;
+        if ((row.symbol_count > 0) !== hasTopSymbol) return [];
+        let topSymbol: StaleRegionSymbol | undefined;
+        if (hasTopSymbol) {
+          try {
+            const encodedTopSymbol = row.top_symbol;
+            if (typeof encodedTopSymbol !== 'string') return [];
+            const parsed: unknown = JSON.parse(encodedTopSymbol);
+            if (!isStaleRegionSymbol(parsed) || parsed.filePath !== row.file_path) return [];
+            topSymbol = parsed;
+          } catch { return []; }
+        }
+        return {
+          symbolCount: row.symbol_count,
+          hubCount: row.hub_count,
+          chokepointCount: row.chokepoint_count,
+          ...(topSymbol ? { topSymbol } : {}),
+        };
+      });
+      return {
+        files: rows.map(row => row.file_path),
+        composition: combineStaleFileCompositions(receipts, rows.length),
+      };
+    } catch {
+      // Preserve the stale verdict with neutral context if an independently
+      // damaged store lost only this optional reporting table.
+      const files = this.getStaleFiles();
+      return { files, composition: combineStaleFileCompositions([], files.length) };
+    }
+  }
+
+  /** Structural composition persisted with the current stale-file receipt. */
+  getStaleRegionComposition(): StaleRegionComposition {
+    return this.getStaleRegionSnapshot().composition;
+  }
+
   /**
    * Drop all graph data — used by the full analyze rebuild.
    *
@@ -1236,7 +1354,7 @@ export class EdgeStore {
    * removes it with the index, and a SCHEMA_VERSION bump drops it with everything else.
    */
   clearAll(): void {
-    this.db.exec('DELETE FROM edges; DELETE FROM inheritance_edges; DELETE FROM nodes; DELETE FROM classes; DELETE FROM nodes_fts; DELETE FROM file_hashes; DELETE FROM decisions; DELETE FROM decision_edges; DELETE FROM provenance; DELETE FROM change_coupling; DELETE FROM cfg_overlay; DELETE FROM stale_files;');
+    this.db.exec('DELETE FROM edges; DELETE FROM inheritance_edges; DELETE FROM nodes; DELETE FROM classes; DELETE FROM nodes_fts; DELETE FROM file_hashes; DELETE FROM decisions; DELETE FROM decision_edges; DELETE FROM provenance; DELETE FROM change_coupling; DELETE FROM cfg_overlay; DELETE FROM stale_file_composition; DELETE FROM stale_files;');
   }
 
   /** Run fn inside a single SQLite transaction. */

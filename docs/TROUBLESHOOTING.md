@@ -267,6 +267,34 @@ Focus on core business domains only. Ignore utilities, helpers, and infrastructu
 2. Reduce scope per run
 3. Use the agents.md approach which can work incrementally
 
+### Watch Mode Reports a Stale Region
+
+**Problem**: A watcher debug line reports files as stale, or a recalled anchor has
+`staleRegion: true`.
+
+**Cause**: One edit affected more reverse dependencies than the incremental closure budget can
+recompute without stalling the watcher. OpenLore recomputes the most structurally significant
+files first and explicitly marks every deferred file stale. The reported hub/chokepoint counts
+and top symbol describe the affected region; they do not make a low-significance stale result
+authoritative.
+
+**Solution**: Let the scheduled background rebuild converge. If it cannot run, execute:
+
+```bash
+openlore analyze --reanalyze
+```
+
+The ordering uses fan-in/fan-out from the graph being updated, so it is a best-effort priority
+signal and may temporarily be a lower bound after recent edits. Files with no usable signal fall
+back to stable path order. Test callers receive a bounded budget slot so test-to-production
+reachability is not systematically deferred.
+
+If a closure phase has only one remaining budget slot, it cannot reserve work for both production
+and test callers. This can happen with an explicitly small `closureBudget`, or when direct callers
+consume most of the default budget before Class-P rebind candidates are discovered. OpenLore keeps
+the highest-significance production caller, and the debug summary discloses that test reachability
+was deferred.
+
 ## Drift Detection Issues
 
 ### No Base Branch Detected

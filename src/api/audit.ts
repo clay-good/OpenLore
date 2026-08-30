@@ -16,6 +16,7 @@ import {
   ARTIFACT_DEPENDENCY_GRAPH,
   ARTIFACT_AUDIT_REPORT,
   OPENSPEC_DIR,
+  HUB_THRESHOLD,
 } from '../constants.js';
 import type {
   AuditReport,
@@ -40,7 +41,6 @@ import { errors, isOpenLoreError } from '../utils/errors.js';
 import { resolveOpenspecDir } from '../utils/openspec-dir.js';
 
 const DEFAULT_MAX_UNCOVERED = 50;
-const DEFAULT_HUB_THRESHOLD = 5;
 
 // ============================================================================
 // HELPERS
@@ -75,7 +75,7 @@ function toAuditFunction(node: FunctionNode, isHub: boolean): AuditUncoveredFunc
 async function audit(options: AuditApiOptions): Promise<AuditReport> {
   const rootPath = resolve(options.rootPath ?? process.cwd());
   const maxUncovered = options.maxUncovered ?? DEFAULT_MAX_UNCOVERED;
-  const hubThreshold = options.hubThreshold ?? DEFAULT_HUB_THRESHOLD;
+  const hubThreshold = options.hubThreshold ?? HUB_THRESHOLD;
   const shouldSave = options.save ?? true;
   const fileScope = options.files ? new Set(options.files) : null;
   const domainScope = options.domains ? new Set(options.domains) : null;

@@ -978,6 +978,30 @@ export interface ContinuityProvenance {
 /** Deterministic freshness verdict for a single anchor or an aggregated memory. */
 export type MemoryFreshness = 'fresh' | 'drifted' | 'orphaned';
 
+/** Highest-significance symbol retained in a stale-region receipt. */
+export interface StaleRegionSymbol {
+  id: string;
+  name: string;
+  filePath: string;
+  fanIn: number;
+  fanOut: number;
+}
+
+/** Per-file structural contribution persisted beside a stale mark. */
+export interface StaleFileComposition {
+  symbolCount: number;
+  hubCount: number;
+  chokepointCount: number;
+  topSymbol?: StaleRegionSymbol;
+}
+
+/** Aggregate context for the explicitly stale region. */
+export interface StaleRegionComposition extends StaleFileComposition {
+  fileCount: number;
+  /** Stale files whose resident node facts were unavailable for classification. */
+  unclassifiedFileCount?: number;
+}
+
 /** The freshness of one anchor, with the new location when a rename was detected. */
 export interface AnchorVerdict {
   anchor: StructuralAnchor;
@@ -992,6 +1016,8 @@ export interface AnchorVerdict {
    * (fix-transitive-incremental-staleness).
    */
   staleRegion?: boolean;
+  /** Structural context for the stale region; never changes the drifted verdict. */
+  staleRegionComposition?: StaleRegionComposition;
 }
 
 /**

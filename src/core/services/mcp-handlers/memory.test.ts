@@ -103,15 +103,28 @@ describe('handleRecall — bullet-proof guarantee', () => {
     // (fix-transitive-incremental-staleness).
     const dir = join(root, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
     const store = EdgeStore.open(EdgeStore.dbPath(dir));
-    store.markFilesStale(['src/foo.ts']);
+    store.markFilesStale(['src/foo.ts'], Date.now(), new Map([['src/foo.ts', {
+      symbolCount: 1,
+      hubCount: 1,
+      chokepointCount: 1,
+      topSymbol: { id: 'src/foo.ts::foo', name: 'foo', filePath: 'src/foo.ts', fanIn: 7, fanOut: 1 },
+    }]]));
     store.close();
 
     const r = (await handleRecall(root, 'foo')) as {
-      authoritative: Array<{ freshness: string; verify?: boolean; staleRegion?: boolean }>;
+      authoritative: Array<{
+        freshness: string;
+        verify?: boolean;
+        staleRegion?: boolean;
+        staleRegionComposition?: { fileCount: number; hubCount: number };
+        anchors: Array<{ staleRegionComposition?: { topSymbol?: { name: string } } }>;
+      }>;
     };
     expect(r.authoritative[0].freshness).toBe('drifted');
     expect(r.authoritative[0].verify).toBe(true);
     expect(r.authoritative[0].staleRegion).toBe(true); // distinguishes from a real code change
+    expect(r.authoritative[0].staleRegionComposition).toMatchObject({ fileCount: 1, hubCount: 1 });
+    expect(r.authoritative[0].anchors[0].staleRegionComposition?.topSymbol?.name).toBe('foo');
   });
 
   it('NEVER serves an orphaned memory as authoritative', async () => {

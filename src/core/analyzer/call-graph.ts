@@ -46,6 +46,7 @@ import { type FunctionCfg, type CfgNode } from './cfg.js';
 import { stableSymbolId, stableClassId } from '../scip/moniker.js';
 import { synthesizeTypeHierarchyEdges, type RawMethodCall } from './cha.js';
 import { logger } from '../../utils/logger.js';
+import { HUB_THRESHOLD } from '../../constants.js';
 import { tallyFileStyle, type FileStyleRaw, type StyleAstNode } from './style-fingerprint.js';
 import {
   tallyParseHealth,
@@ -140,8 +141,6 @@ export { computeCyclomaticComplexity } from './call-graph-complexity.js';
 // ============================================================================
 // CONSTANTS
 // ============================================================================
-
-const HUB_THRESHOLD = 5;
 
 const analyzerWorkCounters = { enabled: false, parses: 0, nativeQueryCompiles: 0, typeInferences: 0 };
 let nextTestGrammarId = 1;

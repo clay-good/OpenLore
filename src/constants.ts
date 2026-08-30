@@ -472,6 +472,9 @@ export const RISK_SCORE_MEDIUM_THRESHOLD = 45;
 /** Fan-out at or above which a function is treated as a god-function */
 export const GOD_FUNCTION_FAN_OUT_THRESHOLD = 8;
 
+/** Minimum internal fan-in for a function to be classified as a structural hub. */
+export const HUB_THRESHOLD = 5;
+
 /** Fan-out threshold for SRP (single-responsibility) refactoring recommendation */
 export const REFACTOR_SRP_FAN_OUT_THRESHOLD = 5;
 

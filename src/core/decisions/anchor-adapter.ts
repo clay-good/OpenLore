@@ -97,6 +97,19 @@ export function makeFreshnessView(
   renameOf?: (nodeId: string) => string | undefined,
 ): GraphFreshnessView {
   const cache = new Map<string, string | null>();
+  let staleSnapshot: ReturnType<EdgeStore['getStaleRegionSnapshot']> | undefined;
+  let staleFiles: Set<string> | undefined;
+  const staleRegion = () => {
+    if (!staleSnapshot) {
+      staleSnapshot = store.getStaleRegionSnapshot();
+      staleFiles = new Set(staleSnapshot.files);
+    }
+    return staleSnapshot;
+  };
+  const fileIsStale = (filePath: string) => {
+    staleRegion();
+    return staleFiles!.has(filePath);
+  };
   return {
     nodeHash: (nodeId: string): string | undefined => {
       const node = store.getNode(nodeId);
@@ -117,9 +130,11 @@ export function makeFreshnessView(
     // budget-exceeded incremental update (fix-transitive-incremental-staleness).
     inStaleRegion: (nodeId: string): boolean => {
       const node = store.getNode(nodeId);
-      return node ? store.isFileStale(node.filePath) : false;
+      return node ? fileIsStale(node.filePath) : false;
     },
-    fileInStaleRegion: (filePath: string): boolean => store.isFileStale(filePath),
+    fileInStaleRegion: (filePath: string): boolean => fileIsStale(filePath),
+    staleRegionComposition: (filePath: string) =>
+      fileIsStale(filePath) ? staleRegion().composition : undefined,
     renameOf,
   };
 }

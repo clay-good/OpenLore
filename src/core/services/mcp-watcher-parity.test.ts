@@ -93,6 +93,7 @@ beforeEach(async () => {
 afterEach(async () => {
   _resetContextCacheForTesting();
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   await rm(root, { recursive: true, force: true });
 });
 
@@ -978,6 +979,41 @@ describe('budget-exceeded incremental update marks the remainder stale (not sile
     store.close();
   });
 
+  it('recomputes the highest-significance caller and persists the stale composition', async () => {
+    const v1: Files = {
+      'src/c.ts': 'export function target() { return 1; }\n',
+      'src/important-a.ts': 'export function importantA() { return target(); }\n',
+      'src/important-b.ts': 'export function importantB() { return target(); }\n',
+      'src/leaf.ts': 'export function leaf() { return target(); }\n',
+    };
+    for (let i = 0; i < 10; i++) {
+      v1[`src/a-user-${i}.ts`] = `export function useA${i}() { return importantA(); }\n`;
+    }
+    for (let i = 0; i < 5; i++) {
+      v1[`src/b-user-${i}.ts`] = `export function useB${i}() { return importantB(); }\n`;
+    }
+    await writeFiles(v1);
+    const seeded = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    seedStore(seeded, v1, await fullBuild(v1));
+    seeded.close();
+
+    await writeFiles({ 'src/c.ts': 'export function renamed() { return 1; }\n' });
+    const { McpWatcher } = await import('./mcp-watcher.js');
+    await new McpWatcher({ rootPath: root, outputPath, embed: false, closureBudget: 1 })
+      .handleChange(join(root, 'src/c.ts'));
+
+    const store = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    expect(store.isFileStale('src/important-a.ts')).toBe(false);
+    expect(store.getStaleFiles()).toEqual(['src/important-b.ts', 'src/leaf.ts']);
+    expect(store.getStaleRegionComposition()).toMatchObject({
+      fileCount: 2,
+      hubCount: 1,
+      chokepointCount: 1,
+      topSymbol: { name: 'importantB', filePath: 'src/important-b.ts', fanIn: 5 },
+    });
+    store.close();
+  });
+
   it('a stale region self-heals: re-editing a stale file clears its mark; full clearAll wipes the region', async () => {
     await seedHub(5);
     await writeFiles({ 'src/c.ts': 'export function renamed() { return 1; }\n' });
@@ -1038,6 +1074,32 @@ describe('adversarial regressions (PR #189 review findings)', () => {
     s.close();
     // Converge-or-flag: either x now resolves to c::addSym, OR x is flagged stale.
     expect(xResolved || xStale).toBe(true);
+  });
+
+  it('a dropped direct caller is not counted again as a Class-P consumer', async () => {
+    const v1: Files = {
+      'src/c.ts': 'export function placeholder() { return 0; }\n',
+      'src/x.ts': 'export function useBoth() { return placeholder() + addSym(); }\n',
+    };
+    await writeFiles(v1);
+    const store = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    seedStore(store, v1, await fullBuild(v1));
+    store.close();
+
+    vi.stubEnv('OPENLORE_WATCH_DEBUG', '1');
+    await writeFiles({
+      'src/c.ts': 'export function placeholder() { return 0; }\nexport function addSym() { return 1; }\n',
+    });
+    const { McpWatcher } = await import('./mcp-watcher.js');
+    await new McpWatcher({ rootPath: root, outputPath, embed: false, closureBudget: 0 })
+      .handleChange(join(root, 'src/c.ts'));
+
+    const stale = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    expect(stale.getStaleFiles()).toEqual(['src/x.ts']);
+    stale.close();
+    const output = vi.mocked(process.stderr.write).mock.calls.map(call => String(call[0])).join('');
+    expect(output).toMatch(/1 file, 0 hubs, 0 chokepoints/);
+    expect(output).not.toMatch(/2 files/);
   });
 
   it('F2: adding a duplicate of an existing name_only symbol converges its consumers to analyze --force', async () => {

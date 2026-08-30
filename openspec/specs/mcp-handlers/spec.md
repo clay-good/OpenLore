@@ -2408,6 +2408,19 @@ permitted but optional; the self-describing field is the requirement.
 - **WHEN** the result reaches a tool consumer
 - **THEN** the score is accompanied by its `scoreKind`, including on branches that are latent today
 
+### Requirement: PersistStaleregionCompositionInTheEdgeStore
+
+This domain SHALL conform to the canonical statement of decision `fda1fc53`, which lives in the
+`analyzer` domain — see [analyzer/spec.md](../analyzer/spec.md).
+
+#### Scenario: The canonical statement governs
+
+- **GIVEN** decision `fda1fc53` recorded in the `analyzer` domain
+- **WHEN** this domain's behavior touches that decision's surface
+- **THEN** it satisfies the canonical requirement as stated in [analyzer/spec.md](../analyzer/spec.md)
+
+> Decision pointer: fda1fc53 — "Persist stale-region composition in the edge store" is recorded in `openspec/specs/analyzer/spec.md`; it also affects this domain.
+
 ## Decisions
 
 ### Build the MCP live-data test harness as an integration-only, behavior-neutral verification layer
