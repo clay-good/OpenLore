@@ -27,6 +27,7 @@
 import { readFile, readdir, realpath, unlink } from 'node:fs/promises';
 import { atomicWriteFile } from '../decisions/atomic-store.js';
 import { acquireAnalysisLock } from '../runtime/advisory-lock.js';
+import { resolveOpenspecDir } from '../../utils/openspec-dir.js';
 import {
   REQUIRED_ANALYSIS_ARTIFACTS,
   discardGeneration,
@@ -42,6 +43,7 @@ import type { FunctionNode } from '../analyzer/call-graph.js';
 import { extractFileStyle, extractFileParseHealth } from '../analyzer/call-graph.js';
 import { assembleFromRegions, type StyleFingerprint, type FileStyleRaw } from '../analyzer/style-fingerprint.js';
 import { invalidateVectorIndexCaches } from '../analyzer/vector-index.js';
+import { isSpecIndexLockTimeoutError, SpecVectorIndex } from '../analyzer/spec-vector-index.js';
 import { buildParseHealthReport, type ParseHealthReport, type FileParseHealth } from '../analyzer/parse-health.js';
 import { parseBudgetOverrunMs } from '../analyzer/parse-budget.js';
 import {
@@ -137,6 +139,8 @@ export interface McpWatcherOptions {
   rootPath: string;
   /** Absolute path to .openlore/analysis/ — where llm-context.json lives */
   outputPath?: string;
+  /** Configured OpenSpec root, relative to rootPath (default: openspec). */
+  openspecPath?: string;
   /** Milliseconds to debounce file-change events (default: WATCH_DEBOUNCE_MS) */
   debounceMs?: number;
   /** Hard flush ceiling under a continuous change stream (default: WATCH_MAX_BATCH_MS) */
@@ -200,6 +204,13 @@ const SOURCE_EXTENSIONS = /\.(ts|tsx|js|jsx|py|go|rs|rb|java|kt|php|cs|cpp|cc|cx
 // into the call-graph loop REQUIRES the buildGraphSubset blanking — otherwise the
 // atomic swap would delete a page's inline-script nodes on every edit.
 const HTML_EXTENSIONS = /\.html?$/i;
+const INDEXED_SPEC_FILE = /^specs[/\\][^/\\]+[/\\]spec\.md$/;
+const INDEXED_ADR_FILE = /^decisions[/\\]adr-\d+.*\.md$/i;
+
+function isIndexedOpenSpecFile(openspecRoot: string, filePath: string): boolean {
+  const rel = relative(openspecRoot, filePath);
+  return INDEXED_SPEC_FILE.test(rel) || INDEXED_ADR_FILE.test(rel);
+}
 
 // Directory NAMES that must never be watched. Build-output and dependency
 // directories can hold hundreds of thousands of files (a Rust `target/` is
@@ -261,6 +272,7 @@ export function isIgnoredRelPath(relPath: string): boolean {
 export class McpWatcher {
   private readonly rootPath: string;
   private readonly outputPath: string;
+  private readonly openspecRoot: string;
   private readonly contextPath: string;
   private readonly debounceMs: number;
   private readonly maxBatchMs: number;
@@ -308,6 +320,7 @@ export class McpWatcher {
     this.rootPath   = options.rootPath;
     this.outputPath = options.outputPath
       ?? join(options.rootPath, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
+    this.openspecRoot = resolveOpenspecDir(options.rootPath, options.openspecPath);
     this.contextPath = join(this.outputPath, ARTIFACT_LLM_CONTEXT);
     this.debounceMs  = options.debounceMs ?? WATCH_DEBOUNCE_MS;
     this.maxBatchMs  = options.maxBatchMs ?? WATCH_MAX_BATCH_MS;
@@ -357,7 +370,8 @@ export class McpWatcher {
         awaitWriteFinish: { stabilityThreshold: 100, pollInterval: 50 },
       });
 
-      const watched = (p: string): boolean => SOURCE_EXTENSIONS.test(p) || HTML_EXTENSIONS.test(p);
+      const watched = (p: string): boolean =>
+        SOURCE_EXTENSIONS.test(p) || HTML_EXTENSIONS.test(p) || isIndexedOpenSpecFile(this.openspecRoot, p);
       this.fsWatcher.on('change', (absPath: string) => {
         if (watched(absPath)) this.enqueue(absPath);
       });
@@ -606,12 +620,27 @@ export class McpWatcher {
   ): Promise<void> {
     for (let attempt = 0; ; attempt++) {
       try {
+        await this.recordSpecIndexChanges([...batch, ...deletions]);
         if (await this.fallbackBulkBatch(batch, deletions)) return;
         // Deletions first (remove stale state), then re-index changed/added files.
-        if (deletions.length > 0) await this.handleDeletions(deletions);
-        if (batch.length > 0) await this.handleBatch(batch, opts);
+        if (deletions.length > 0) await this.handleDeletions(deletions, false);
+        if (batch.length > 0) await this.handleBatch(batch, { ...opts, recordSpecChanges: false });
         return;
       } catch (err) {
+        if (isSpecIndexLockTimeoutError(err)) {
+          for (const path of deletions) {
+            this.pendingDeletions.add(path);
+            this.pending.delete(path);
+          }
+          for (const path of batch) {
+            if (!this.pendingDeletions.has(path)) this.pending.add(path);
+          }
+          process.stderr.write(
+            `[mcp-watcher] spec index remained locked for ${err.timeoutMs}ms; ` +
+            `deferred ${batch.length} change(s) and ${deletions.length} deletion(s) for retry\n`,
+          );
+          return;
+        }
         if (!isSqliteBusyError(err)) throw err;
         const delay = SQLITE_BUSY_RETRY_DELAYS_MS[attempt];
         if (delay !== undefined) {
@@ -694,10 +723,15 @@ export class McpWatcher {
    *   • ONE signature patch + ONE llm-context persist + ONE read-cache handoff;
    *   • ONE vector update (inline when syncFlush, else on the embed lane).
    */
-  private async handleBatch(absPaths: string[], opts: { syncFlush?: boolean } = {}): Promise<void> {
+  private async handleBatch(
+    absPaths: string[],
+    opts: { syncFlush?: boolean; recordSpecChanges?: boolean } = {},
+  ): Promise<void> {
     const t0 = Date.now();
     const consumedVcsBulk = this.vcsBulkFlag;
     this.vcsBulkFlag = false;
+
+    if (opts.recordSpecChanges !== false) await this.recordSpecIndexChanges(absPaths);
 
     // 1. Resolve + read candidate files (skip tests / unknown langs / deleted).
     const files: Array<{ rel: string; abs: string; content: string }> = [];
@@ -1126,6 +1160,19 @@ export class McpWatcher {
     // a meaningful batch was processed (the no-op early returns above skip it).
     // Best-effort: a host callback error must never break the watcher.
     try { this.onBatchFlushed?.(absPaths); } catch { /* host lane is best-effort */ }
+  }
+
+  /**
+   * The spec index is full-build-only. Keep that bounded behavior and persist an
+   * honest receipt instead of silently serving stale spec rows.
+   */
+  private async recordSpecIndexChanges(absPaths: string[]): Promise<void> {
+    const changedSpecs = [...new Set(absPaths
+      .filter(path => isIndexedOpenSpecFile(this.openspecRoot, path))
+      .map(path => relative(this.rootPath, path).split('\\').join('/')))]
+      .sort();
+    if (changedSpecs.length === 0) return;
+    await SpecVectorIndex.noteSpecFilesChanged(this.outputPath, changedSpecs);
   }
 
   /**
@@ -1870,7 +1917,8 @@ export class McpWatcher {
    * text-line rows, vector rows, and dependency-graph node + edges. Best-effort;
    * a failure in one lane does not block the others.
    */
-  private async handleDeletions(absPaths: string[]): Promise<void> {
+  private async handleDeletions(absPaths: string[], recordSpecChanges = true): Promise<void> {
+    if (recordSpecChanges) await this.recordSpecIndexChanges(absPaths);
     // Deletion is idempotent removal, so no need to filter — each lane no-ops for
     // a path it never indexed. (Watch-ignored paths like *.test.ts never reach
     // here anyway: chokidar prunes them, so no unlink fires.)

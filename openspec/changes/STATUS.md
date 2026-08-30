@@ -31,7 +31,7 @@ validate`**, and the archive machinery works again. This pass:
   because their requirements were already synced verbatim (`fix-pi-parity-drift`,
   `fix-redaction-module-gaps`).
 
-## Complete — 146 in `archive/`
+## Complete — 147 in `archive/`
 
 Everything in `openspec/changes/archive/` is shipped (or a settled won't-do), with its
 requirements reflected in the main specs. `openspec list` shows only open work.
@@ -171,7 +171,6 @@ trust boundary for served content.
 | `refine-first-run-partial-serving` | minutes of "no index found" before the first answer |
 | `refine-orient-context-budgeting` | exact-fit payloads, cold-start breadth, seed-conditioned shaping |
 | `refine-public-surface-certification` | rule codes + semver bump, an accepted-breakage baseline, consumer-weighted verdicts |
-| `refine-search-serving-quality` | filters that filter, scores that say what they are, an index that stays fit |
 | `resolve-literal-reflective-dispatch` | recover the *structurally* decidable subset, and refuse the rest loudly |
 | `scale-analyze-to-workspace-shards` | a monorepo stops paying for the whole repo on every analyze |
 | `shrink-receiver-resolution-boundary` | Shrink the intra-object receiver boundary with deterministic per-file type registries |

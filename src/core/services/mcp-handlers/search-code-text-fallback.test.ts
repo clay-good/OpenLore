@@ -57,11 +57,12 @@ describe('search_code → literal-text fallback', () => {
     const { handleSearchCode } = await import('./semantic.js');
     const res = await handleSearchCode(projectDir, 'Message completed banner', 5) as {
       searchMode: string; count: number;
-      results: Array<{ filePath: string; line: number; text: string; kind: string }>;
+      results: Array<{ filePath: string; line: number; text: string; scoreKind: string; kind: string }>;
     };
     expect(res.searchMode).toBe('text_fallback');
     expect(res.count).toBeGreaterThan(0);
     expect(res.results[0].filePath).toBe('public/index.html');
+    expect(res.results[0].scoreKind).toBe('bm25');
     expect(res.results[0].kind).toBe('text');
     expect(res.results[0].text).toContain('Message completed');
     expect(res.results[0].line).toBe(1);
@@ -70,9 +71,10 @@ describe('search_code → literal-text fallback', () => {
   it('mode:"text" searches the text index directly', async () => {
     const { handleSearchCode } = await import('./semantic.js');
     const res = await handleSearchCode(projectDir, 'completed', 5, undefined, undefined, undefined, 'text') as {
-      searchMode: string; results: Array<{ text: string; kind: string }>;
+      searchMode: string; results: Array<{ text: string; scoreKind: string; kind: string }>;
     };
     expect(res.searchMode).toBe('text');
+    expect(res.results.every((r) => r.scoreKind === 'bm25')).toBe(true);
     expect(res.results.some((r) => r.text.includes('Message completed'))).toBe(true);
   });
 

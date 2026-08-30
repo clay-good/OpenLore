@@ -46,6 +46,7 @@ import { resolveCanonicalToolName } from '../../core/services/mcp-handlers/tool-
 import { releaseContextCache, validateDirectory, waitForGraphRebuild } from '../../core/services/mcp-handlers/utils.js';
 import { EdgeStore } from '../../core/services/edge-store.js';
 import { McpWatcher } from '../../core/services/mcp-watcher.js';
+import { readOpenLoreConfig } from '../../core/services/config-manager.js';
 import { registerRepairHost } from '../../core/services/cold-start-bootstrap.js';
 import { acquireLockAt, isLockHeld } from '../../core/runtime/advisory-lock.js';
 import { openloreAnalyze } from '../../api/analyze.js';
@@ -966,12 +967,14 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
   }
 
   if (options.watch !== false) {
+    const watchConfig = await readOpenLoreConfig(root);
     // onGraphStale (make-index-self-healing): a HEAD change (branch switch / pull)
     // or a budget-exceeded stale region routes through the SAME rebuild coordinator
     // as edits, so call-graph freshness no longer depends on the post-commit hook and
     // the two rebuild paths coalesce into one.
     watcher = new McpWatcher({
       rootPath: root,
+      openspecPath: watchConfig?.openspecPath,
       onBatchFlushed: () => scheduleReanalyze(),
       onGraphStale: () => scheduleReanalyze(),
     });

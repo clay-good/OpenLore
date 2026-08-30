@@ -1,6 +1,6 @@
 # Refine search serving quality: filters that filter, scores that say what they are, an index that stays fit
 
-> Status: PROPOSED (2026-07-03, e2e audit pass 3). Four quality gaps in how search results are
+> Status: IN PROGRESS (2026-08-30). Four quality gaps in how search results are
 > served: filters applied in JS after the top-N ANN fetch can return zero despite matching rows;
 > the score field's meaning flips between retrieval modes with no per-result disclosure; no
 > LanceDB compaction ever runs, so long-lived sessions accrete fragments; and the spec index has
@@ -49,10 +49,9 @@
 3. **Periodic compaction.** The watcher runs `table.optimize()` on an idle/every-N-batches cadence
    and after large deletions — reusing the watcher's existing batch bookkeeping, no new tuning
    constant beyond the cadence choice, which is documented and conservative.
-4. **A spec-file lane.** The watcher watches `openspec/**/spec.md` and performs an incremental
-   update or scoped rebuild of the specs table on change; at minimum, `search_specs` disclosures
-   state "spec index built at <builtAt>, N spec files changed since" (the sidecar already stamps
-   `builtAt`).
+4. **A spec-file lane.** The watcher tracks the exact indexed specs and ADRs under the configured
+   OpenSpec root. At minimum, `search_specs` disclosures state "spec index built at <builtAt>, N
+   authoritative files changed since" (the sidecar already stamps `builtAt`).
 
 Cross-reference siblings: `fix-bm25-identifier-tokenization` owns the tokenizer (not touched
 here); `harden-vector-index-coherence` owns cache invalidation and delete/add atomicity — this

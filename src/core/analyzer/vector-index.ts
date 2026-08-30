@@ -69,6 +69,8 @@ export interface SearchResult {
    */
   score: number;
   /** Optional for legacy test doubles; every production search path emits it. */
+  scoreKind?: 'rrf' | 'bm25' | 'cosine_distance';
+  /** Optional for legacy test doubles; every production search path emits it. */
   matchEvidence?: MatchEvidence;
 }
 
@@ -916,6 +918,16 @@ function filePathInPredicate(paths: Set<string>): string | null {
   return `\`filePath\` IN (${list})`;
 }
 
+/** Build a prefilter for ANN recall; identifiers stay backtick-quoted. */
+function functionSearchPredicate(language?: string, minFanIn?: number): string | null {
+  const clauses: string[] = [];
+  if (language) clauses.push(`\`language\` = '${language.replace(/'/g, "''")}'`);
+  if (minFanIn !== undefined && minFanIn > 0 && Number.isFinite(minFanIn)) {
+    clauses.push(`\`fanIn\` >= ${minFanIn}`);
+  }
+  return clauses.length > 0 ? clauses.join(' AND ') : null;
+}
+
 // ============================================================================
 // HELPERS
 // ============================================================================
@@ -1562,7 +1574,11 @@ export class VectorIndex {
       await publishMutationOrRestore();
       patchBm25Cache(dbPath, changedFilePaths, candidates as unknown as Record<string, unknown>[]);
       // Reclaim the versions this delete+add left behind (see index-compaction).
-      await noteUpdateAndMaybeCompact(dbPath, table as unknown as Parameters<typeof noteUpdateAndMaybeCompact>[1]);
+      await noteUpdateAndMaybeCompact(
+        dbPath,
+        table as unknown as Parameters<typeof noteUpdateAndMaybeCompact>[1],
+        previousRows.length,
+      );
       return { embedded: 0, reused: 0, total: candidates.length, hasEmbeddings: false };
     }
 
@@ -1611,7 +1627,11 @@ export class VectorIndex {
     );
     await publishMutationOrRestore();
     // Reclaim the versions this delete+add left behind (see index-compaction).
-    await noteUpdateAndMaybeCompact(dbPath, table as unknown as Parameters<typeof noteUpdateAndMaybeCompact>[1]);
+    await noteUpdateAndMaybeCompact(
+      dbPath,
+      table as unknown as Parameters<typeof noteUpdateAndMaybeCompact>[1],
+      previousRows.length,
+    );
 
     // Keep the table handle (_tableCache) — row ops don't invalidate it. Patch
     // the BM25 corpus cache in place for the changed files.
@@ -1697,7 +1717,12 @@ export class VectorIndex {
     }
 
     const denseFetch = hybrid ? Math.min(limit * 5, 500) : Math.min(limit * 10, 1000);
-    const denseRows = await table.query().nearestTo(queryVector).limit(denseFetch).toArray() as Record<string, unknown>[];
+    let denseQuery = table.query().nearestTo(queryVector).distanceType('cosine');
+    const densePredicate = functionSearchPredicate(language, minFanIn);
+    // LanceDB applies where() before ANN by default. This prevents a post-fetch
+    // filter from starving otherwise-valid results (change: refine-search-serving-quality).
+    if (densePredicate) denseQuery = denseQuery.where(densePredicate);
+    const denseRows = await denseQuery.limit(denseFetch).toArray() as Record<string, unknown>[];
 
     const passesFilters = (row: Record<string, unknown>): boolean => {
       if (!isRepoFunctionRow(row)) return false;
@@ -1714,6 +1739,7 @@ export class VectorIndex {
         .map(row => ({
           record: rowToRecord(row),
           score: row._distance as number,
+          scoreKind: 'cosine_distance' as const,
           matchEvidence: vectorMatchEvidence(3),
         }));
     }
@@ -1797,7 +1823,9 @@ export class VectorIndex {
       .sort((a, b) => b.score - a.score)
       .filter(({ row }) => passesFilters(row))
       .slice(0, traceCandidates ? undefined : limit)
-      .map(({ row, score, matchEvidence }) => ({ record: rowToRecord(row), score, matchEvidence }));
+      .map(({ row, score, matchEvidence }) => ({
+        record: rowToRecord(row), score, scoreKind: 'rrf' as const, matchEvidence,
+      }));
   }
 
   /**
@@ -1854,6 +1882,7 @@ export class VectorIndex {
       .map(({ row, idx, score }) => ({
         record: rowToRecord(row),
         score,
+        scoreKind: 'bm25' as const,
         matchEvidence: bm25MatchEvidence(corpus, queryTokens, idx, searchableFieldsForFunctionRow(row), 1),
       }));
   }

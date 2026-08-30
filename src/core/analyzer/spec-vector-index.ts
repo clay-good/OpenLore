@@ -17,9 +17,9 @@
  */
 
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync } from 'node:fs';
 import { readdir, readFile } from 'node:fs/promises';
-import { join, basename, dirname, relative } from 'node:path';
+import { join, basename, dirname, relative, isAbsolute } from 'node:path';
 import { fileExists } from '../../utils/command-helpers.js';
 import { isConfinedPath, readFileConfined } from '../../utils/path-confinement.js';
 import type { Embedder } from './embedding-service.js';
@@ -27,6 +27,7 @@ import { tokenize, buildBm25Corpus, bm25MatchEvidence, bm25Score } from './vecto
 import type { MatchEvidence, SearchableFields } from './retrieval-evidence.js';
 import { vectorMatchEvidence } from './retrieval-evidence.js';
 import { atomicWriteFile } from '../decisions/atomic-store.js';
+import { acquireLockAt, isLockHeld } from '../runtime/advisory-lock.js';
 
 // ============================================================================
 // TYPES
@@ -57,6 +58,8 @@ export interface SpecSearchResult {
   };
   score: number;
   /** Optional for legacy test doubles; every production search path emits it. */
+  scoreKind?: 'bm25' | 'cosine_distance';
+  /** Optional for legacy test doubles; every production search path emits it. */
   matchEvidence?: MatchEvidence;
 }
 
@@ -74,8 +77,14 @@ const TABLE_NAME = 'specs';
  * supports ANN search.
  */
 const META_FILE = 'spec-index-meta.json';
+const FRESHNESS_FILE = 'spec-index-freshness.json';
+const SPEC_INDEX_LOCK_FILE = '.spec-index.lock';
 const META_SCHEMA_VERSION = 2;
 const SPEC_ARTIFACT_MAX_BYTES = 4 * 1024 * 1024;
+const FRESHNESS_MAX_BYTES = 256 * 1024;
+const FRESHNESS_RETURNED_FILES = 1_000;
+const FRESHNESS_MAX_PATH_BYTES = 1_024;
+const SPEC_INDEX_LOCK_MAX_WAIT_MS = 30_000;
 
 interface SpecIndexMeta {
   hasEmbeddings: boolean;
@@ -90,6 +99,51 @@ interface SpecIndexMeta {
   tableDigest: string;
 }
 
+export interface SpecIndexFreshness {
+  builtAt: string | null;
+  tracking: 'tracked' | 'unavailable';
+  changedFileCount: number | null;
+  changedFiles: string[];
+  changedFilesTruncated?: boolean;
+}
+
+export interface SpecSearchSnapshot {
+  results: SpecSearchResult[];
+  indexFreshness: SpecIndexFreshness | null;
+  retrievalMode: 'semantic' | 'keyword';
+}
+
+interface LockedSpecSearchResult {
+  results: SpecSearchResult[];
+  retrievalMode: 'semantic' | 'keyword';
+}
+
+export class SpecIndexLockTimeoutError extends Error {
+  readonly code = 'SPEC_INDEX_LOCK_TIMEOUT';
+
+  constructor(readonly timeoutMs: number) {
+    super(`spec-index lock was not acquired within ${timeoutMs}ms`);
+    this.name = 'SpecIndexLockTimeoutError';
+  }
+}
+
+export function isSpecIndexLockTimeoutError(
+  error: unknown,
+): error is SpecIndexLockTimeoutError {
+  if (!error || typeof error !== 'object') return false;
+  const candidate = error as { code?: unknown; timeoutMs?: unknown };
+  return candidate.code === 'SPEC_INDEX_LOCK_TIMEOUT'
+    && typeof candidate.timeoutMs === 'number'
+    && Number.isFinite(candidate.timeoutMs);
+}
+
+interface SpecFreshnessReceipt {
+  schemaVersion: 1;
+  indexBuiltAt: string;
+  changedFiles: string[];
+  trackingUnavailable?: true;
+}
+
 type SpecMetaState =
   | { kind: 'missing' }
   | { kind: 'legacy'; meta: Omit<SpecIndexMeta, 'recordsDigest' | 'recordCount' | 'tableDigest'> }
@@ -98,6 +152,71 @@ type SpecMetaState =
 
 function specMetaPath(outputDir: string): string {
   return join(outputDir, META_FILE);
+}
+
+function specFreshnessPath(outputDir: string): string {
+  return join(outputDir, FRESHNESS_FILE);
+}
+
+function hasControlCharacters(value: string): boolean {
+  return [...value].some(character => {
+    const code = character.charCodeAt(0);
+    return code <= 31 || code === 127;
+  });
+}
+
+async function acquireSpecIndexLock(outputDir: string): Promise<() => Promise<void>> {
+  const result = await acquireLockAt(outputDir, SPEC_INDEX_LOCK_FILE, {
+    bestEffortAfterMaxWait: false,
+    maxWaitMs: SPEC_INDEX_LOCK_MAX_WAIT_MS,
+  });
+  if (isLockHeld(result)) {
+    throw new SpecIndexLockTimeoutError(SPEC_INDEX_LOCK_MAX_WAIT_MS);
+  }
+  return result.release;
+}
+
+function readSpecFreshnessReceipt(outputDir: string): SpecFreshnessReceipt | null {
+  try {
+    const path = specFreshnessPath(outputDir);
+    const fd = openSync(path, 'r');
+    let serialized: string;
+    try {
+      if (fstatSync(fd).size > FRESHNESS_MAX_BYTES) return null;
+      const buffer = Buffer.alloc(FRESHNESS_MAX_BYTES + 1);
+      let bytesRead = 0;
+      while (bytesRead < buffer.length) {
+        const count = readSync(fd, buffer, bytesRead, buffer.length - bytesRead, bytesRead);
+        if (count === 0) break;
+        bytesRead += count;
+      }
+      if (bytesRead > FRESHNESS_MAX_BYTES) return null;
+      serialized = buffer.subarray(0, bytesRead).toString('utf8');
+    } finally {
+      closeSync(fd);
+    }
+    const value = JSON.parse(serialized) as unknown;
+    if (!value || typeof value !== 'object') return null;
+    const receipt = value as Record<string, unknown>;
+    if (receipt.schemaVersion !== 1 || typeof receipt.indexBuiltAt !== 'string'
+      || receipt.trackingUnavailable === true
+      || !Array.isArray(receipt.changedFiles)
+      || !receipt.changedFiles.every(file => typeof file === 'string'
+        && Buffer.byteLength(file) <= FRESHNESS_MAX_PATH_BYTES
+        && !isAbsolute(file)
+        && !file.split(/[\\/]/).includes('..')
+        && !hasControlCharacters(file))) return null;
+    return receipt as unknown as SpecFreshnessReceipt;
+  } catch {
+    return null;
+  }
+}
+
+function specSearchPredicate(domain?: string, section?: string): string | null {
+  const clauses: string[] = [];
+  if (domain) clauses.push(`\`domain\` = '${domain.replace(/'/g, "''")}'`);
+  if (section) clauses.push(`\`section\` = '${section.replace(/'/g, "''")}'`);
+  return clauses.length > 0 ? clauses.join(' AND ') : null;
 }
 
 function isLegacySpecMeta(
@@ -143,6 +262,13 @@ function readSpecMeta(outputDir: string): SpecMetaState {
 
 async function writeSpecMeta(outputDir: string, meta: SpecIndexMeta): Promise<void> {
   await atomicWriteFile(specMetaPath(outputDir), JSON.stringify(meta, null, 2) + '\n');
+  // Establish an explicit zero point. If this second write is interrupted,
+  // freshness() reports unavailable rather than claiming a false zero.
+  await atomicWriteFile(specFreshnessPath(outputDir), JSON.stringify({
+    schemaVersion: 1,
+    indexBuiltAt: meta.builtAt,
+    changedFiles: [],
+  } satisfies SpecFreshnessReceipt, null, 2) + '\n');
 }
 
 type AuthoritativeSpecRecord = Omit<SpecRecord, 'vector'>;
@@ -418,6 +544,27 @@ export class SpecVectorIndex {
     mappingJsonPath?: string,
     decisionsDir?: string
   ): Promise<{ recordCount: number; hasEmbeddings: boolean }> {
+    const release = await acquireSpecIndexLock(outputDir);
+    try {
+      return await SpecVectorIndex._buildLocked(
+        outputDir,
+        specsDir,
+        embedSvc,
+        mappingJsonPath,
+        decisionsDir,
+      );
+    } finally {
+      await release();
+    }
+  }
+
+  private static async _buildLocked(
+    outputDir: string,
+    specsDir: string,
+    embedSvc: Embedder | null,
+    mappingJsonPath?: string,
+    decisionsDir?: string,
+  ): Promise<{ recordCount: number; hasEmbeddings: boolean }> {
     const { connect } = await import('@lancedb/lancedb');
 
     // Load mapping index (optional)
@@ -513,6 +660,9 @@ export class SpecVectorIndex {
       && metaState.meta.model === (embedSvc?.modelName ?? null)
       && SpecVectorIndex.exists(outputDir)
       && await SpecVectorIndex._tableMatchesDigest(outputDir, metaState.meta)) {
+      // A verified no-op rebuild is still an authoritative freshness check.
+      // Clear watcher changes that were reverted or did not affect indexed rows.
+      await writeSpecMeta(outputDir, metaState.meta);
       return { recordCount: records.length, hasEmbeddings: metaState.meta.hasEmbeddings };
     }
 
@@ -590,6 +740,76 @@ export class SpecVectorIndex {
       traceCandidates?: boolean;
     } = {}
   ): Promise<SpecSearchResult[]> {
+    return (await SpecVectorIndex.searchWithFreshness(outputDir, query, embedSvc, opts)).results;
+  }
+
+  /** Read search results and their freshness disclosure from one locked index generation. */
+  static async searchWithFreshness(
+    outputDir: string,
+    query: string,
+    embedSvc: Embedder | null | undefined,
+    opts: {
+      limit?: number;
+      domain?: string;
+      section?: string;
+      traceCandidates?: boolean;
+    } = {},
+  ): Promise<SpecSearchSnapshot> {
+    const queryVector = await SpecVectorIndex._embedQueryOutsideLock(outputDir, query, embedSvc);
+    const release = await acquireSpecIndexLock(outputDir);
+    try {
+      const searchResult = await SpecVectorIndex._searchLocked(outputDir, query, embedSvc, queryVector, opts);
+      return { ...searchResult, indexFreshness: SpecVectorIndex._freshnessUnlocked(outputDir) };
+    } finally {
+      await release();
+    }
+  }
+
+  private static async _embedQueryOutsideLock(
+    outputDir: string,
+    query: string,
+    embedSvc: Embedder | null | undefined,
+  ): Promise<number[] | null> {
+    if (!embedSvc) return null;
+
+    // Avoid remote work for a known BM25-only generation. This metadata read is
+    // short and locked; the network call itself deliberately is not.
+    const release = await acquireSpecIndexLock(outputDir);
+    let shouldEmbed = true;
+    try {
+      const state = readSpecMeta(outputDir);
+      const tableExists = existsSync(join(outputDir, DB_FOLDER, `${TABLE_NAME}.lance`));
+      if (!tableExists || state.kind === 'malformed') {
+        shouldEmbed = false;
+      } else if (state.kind === 'current' || state.kind === 'legacy') {
+        shouldEmbed = state.meta.hasEmbeddings
+          && state.meta.model === (embedSvc.modelName ?? null);
+      }
+    } finally {
+      await release();
+    }
+    if (!shouldEmbed) return null;
+
+    try {
+      const [queryVector] = await embedSvc.embed([query]);
+      return queryVector ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  private static async _searchLocked(
+    outputDir: string,
+    query: string,
+    embedSvc: Embedder | null | undefined,
+    queryVector: number[] | null,
+    opts: {
+      limit?: number;
+      domain?: string;
+      section?: string;
+      traceCandidates?: boolean;
+    },
+  ): Promise<LockedSpecSearchResult> {
     const { connect } = await import('@lancedb/lancedb');
 
     const { limit = 10, domain, section, traceCandidates = false } = opts;
@@ -618,27 +838,31 @@ export class SpecVectorIndex {
     const indexHasEmbeddings = metaState.kind === 'current'
       ? metaState.meta.hasEmbeddings
       : (await table.schema()).fields.some((field: { name: string }) => field.name === 'vector');
-    if (!embedSvc || !indexHasEmbeddings) {
-      return SpecVectorIndex._bm25Only(table, query, limit, domain, section, traceCandidates);
+    const indexMatchesEmbedder = !meta
+      || meta.model === (embedSvc?.modelName ?? null);
+    if (!embedSvc || !indexHasEmbeddings || !queryVector || !indexMatchesEmbedder) {
+      return {
+        results: await SpecVectorIndex._bm25Only(table, query, limit, domain, section, traceCandidates),
+        retrievalMode: 'keyword',
+      };
     }
-
-    let queryVector: number[];
-    try {
-      [queryVector] = await embedSvc.embed([query]);
-    } catch {
-      // Embedder unreachable / unavailable — degrade to BM25 rather than erroring.
-      return SpecVectorIndex._bm25Only(table, query, limit, domain, section, traceCandidates);
-    }
-    if (!queryVector) throw new Error('Failed to embed query');
 
     // Dimension safety-net: a model switch without a spec-index rebuild would make
     // the query vector's dimension disagree with the stored vectors and crash ANN.
     if (meta && meta.dim > 0 && queryVector.length !== meta.dim) {
-      return SpecVectorIndex._bm25Only(table, query, limit, domain, section, traceCandidates);
+      return {
+        results: await SpecVectorIndex._bm25Only(table, query, limit, domain, section, traceCandidates),
+        retrievalMode: 'keyword',
+      };
     }
 
     const fetchLimit = Math.min(limit * 10, 500);
-    const rows = await table.query().nearestTo(queryVector).limit(fetchLimit).toArray();
+    let denseQuery = table.query().nearestTo(queryVector).distanceType('cosine');
+    const densePredicate = specSearchPredicate(domain, section);
+    // where() is a LanceDB prefilter by default, so filtered rows participate in
+    // ANN recall instead of being discarded after a bounded fetch.
+    if (densePredicate) denseQuery = denseQuery.where(densePredicate);
+    const rows = await denseQuery.limit(fetchLimit).toArray();
 
     const filtered = rows
       .filter((row: Record<string, unknown>) => {
@@ -648,7 +872,7 @@ export class SpecVectorIndex {
       })
       .slice(0, traceCandidates ? undefined : limit);
 
-    return filtered.map((row: Record<string, unknown>) => {
+    const results = filtered.map((row: Record<string, unknown>) => {
       let linkedFiles: string[] = [];
       try {
         linkedFiles = JSON.parse(row.linkedFiles as string) as string[];
@@ -664,9 +888,11 @@ export class SpecVectorIndex {
           linkedFiles,
         },
         score: row._distance as number,
+        scoreKind: 'cosine_distance' as const,
         matchEvidence: vectorMatchEvidence(3),
       };
     });
+    return { results, retrievalMode: 'semantic' };
   }
 
   /**
@@ -720,9 +946,95 @@ export class SpecVectorIndex {
             linkedFiles,
           },
           score,
+          scoreKind: 'bm25' as const,
           matchEvidence: bm25MatchEvidence(corpus, queryTokens, idx, searchableFieldsForSpecRow(row), 1),
         };
       });
+  }
+
+  /**
+   * Record spec files changed since the current index build. The receipt is
+   * versioned and tied to builtAt, so a later full build makes an older receipt
+   * inert without requiring a racy delete.
+   */
+  static async noteSpecFilesChanged(outputDir: string, files: string[]): Promise<void> {
+    const release = await acquireSpecIndexLock(outputDir);
+    try {
+      const state = readSpecMeta(outputDir);
+      if (state.kind !== 'current' && state.kind !== 'legacy') return;
+      const builtAt = state.meta.builtAt;
+      const receiptPath = specFreshnessPath(outputDir);
+      const previous = readSpecFreshnessReceipt(outputDir);
+      // Missing, malformed, oversized, or generation-mismatched history cannot
+      // be reconstructed from the current batch. Persist an explicit sticky
+      // unavailable state until a full rebuild establishes a new zero point.
+      if (!previous || previous.indexBuiltAt !== builtAt) {
+        await atomicWriteFile(receiptPath, JSON.stringify({
+          schemaVersion: 1,
+          indexBuiltAt: builtAt,
+          changedFiles: [],
+          trackingUnavailable: true,
+        } satisfies SpecFreshnessReceipt, null, 2) + '\n');
+        return;
+      }
+      const changedFiles = new Set(
+        previous.changedFiles,
+      );
+      for (const file of files) changedFiles.add(file.split('\\').join('/'));
+      const nextReceipt: SpecFreshnessReceipt = {
+        schemaVersion: 1,
+        indexBuiltAt: builtAt,
+        changedFiles: [...changedFiles].sort(),
+      };
+      let payload = JSON.stringify(nextReceipt, null, 2) + '\n';
+      if (Buffer.byteLength(payload) > FRESHNESS_MAX_BYTES) {
+        payload = JSON.stringify({
+          schemaVersion: 1,
+          indexBuiltAt: builtAt,
+          changedFiles: [],
+          trackingUnavailable: true,
+        } satisfies SpecFreshnessReceipt, null, 2) + '\n';
+      }
+      await atomicWriteFile(receiptPath, payload);
+    } finally {
+      await release();
+    }
+  }
+
+  /** Honest spec-index freshness for serving; malformed/stale receipts report unavailable. */
+  static async freshness(outputDir: string): Promise<SpecIndexFreshness | null> {
+    const release = await acquireSpecIndexLock(outputDir);
+    try {
+      return SpecVectorIndex._freshnessUnlocked(outputDir);
+    } finally {
+      await release();
+    }
+  }
+
+  private static _freshnessUnlocked(outputDir: string): SpecIndexFreshness | null {
+    const state = readSpecMeta(outputDir);
+    if (state.kind !== 'current' && state.kind !== 'legacy') {
+      return existsSync(join(outputDir, DB_FOLDER, `${TABLE_NAME}.lance`))
+        ? { builtAt: null, tracking: 'unavailable', changedFileCount: null, changedFiles: [] }
+        : null;
+    }
+    const receipt = readSpecFreshnessReceipt(outputDir);
+    if (!receipt || receipt.indexBuiltAt !== state.meta.builtAt) {
+      return {
+        builtAt: state.meta.builtAt,
+        tracking: 'unavailable',
+        changedFileCount: null,
+        changedFiles: [],
+      };
+    }
+    const changedFiles = [...receipt.changedFiles].sort();
+    return {
+      builtAt: state.meta.builtAt,
+      tracking: 'tracked',
+      changedFileCount: changedFiles.length,
+      changedFiles: changedFiles.slice(0, FRESHNESS_RETURNED_FILES),
+      ...(changedFiles.length > FRESHNESS_RETURNED_FILES ? { changedFilesTruncated: true } : {}),
+    };
   }
 
   /**
