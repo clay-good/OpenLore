@@ -28,7 +28,7 @@ import { validatePanicSignal, readPanicTelemetry } from '../../core/services/mcp
 import type { PanicGateReport } from '../../core/services/mcp-handlers/panic-validation.js';
 import type { PanicResponseMode } from '../../types/index.js';
 import { atomicWriteFile } from '../../core/decisions/atomic-store.js';
-import { confinedAtomicWriteFile, readFileConfined, safeJoin } from '../../utils/path-confinement.js';
+import { confinedAtomicWriteFile, readFileConfinedWithStat, safeJoin } from '../../utils/path-confinement.js';
 import { classifyPiFile, looksLikeOpenLoreExtension, renderPiShim } from '../install/pi-extension.js';
 
 // ============================================================================
@@ -416,7 +416,12 @@ export async function installAgentEnforcementHook(rootPath: string): Promise<boo
   const settingsPath = await verifiedCheckEditSettingsPath(rootPath, true);
   if (!settingsPath) return false;
   let settings: ClaudeHookSettings;
-  try { settings = await readClaudeSettings(rootPath, settingsPath); }
+  let expectedIdentity: Awaited<ReturnType<typeof readClaudeSettingsSnapshot>>['expectedIdentity'];
+  try {
+    const snapshot = await readClaudeSettingsSnapshot(rootPath, settingsPath);
+    settings = snapshot.settings;
+    expectedIdentity = snapshot.expectedIdentity;
+  }
   catch (error) { logger.error((error as Error).message); return false; }
   if (settings.hooks !== undefined
       && (settings.hooks === null || typeof settings.hooks !== 'object' || Array.isArray(settings.hooks))) {
@@ -453,7 +458,10 @@ export async function installAgentEnforcementHook(rootPath: string): Promise<boo
     return [canonicalEntry];
   });
   if (!inserted) settings.hooks.Stop.push(canonicalEntry);
-  await confinedAtomicWriteFile(rootPath, settingsPath, JSON.stringify(settings, null, 2) + '\n', { preserveMode: true });
+  await confinedAtomicWriteFile(rootPath, settingsPath, JSON.stringify(settings, null, 2) + '\n', {
+    preserveMode: true,
+    expectedIdentity,
+  });
   logger.success('agent enforcement Stop hook added to .claude/settings.json');
   return true;
 }
@@ -464,7 +472,12 @@ export async function uninstallAgentEnforcementHook(rootPath: string): Promise<b
   if (!settingsPath) return !(await fileExists(join(rootPath, '.claude')));
   if (!(await fileExists(settingsPath))) return true;
   let settings: ClaudeHookSettings;
-  try { settings = await readClaudeSettings(rootPath, settingsPath); }
+  let expectedIdentity: Awaited<ReturnType<typeof readClaudeSettingsSnapshot>>['expectedIdentity'];
+  try {
+    const snapshot = await readClaudeSettingsSnapshot(rootPath, settingsPath);
+    settings = snapshot.settings;
+    expectedIdentity = snapshot.expectedIdentity;
+  }
   catch (error) { logger.error((error as Error).message); return false; }
   const hooks = settings.hooks?.Stop;
   if (!Array.isArray(hooks)) return true;
@@ -476,7 +489,10 @@ export async function uninstallAgentEnforcementHook(rootPath: string): Promise<b
   if (filtered.length === hooks.length) return true;
   if (filtered.length === 0) delete settings.hooks!.Stop;
   else settings.hooks!.Stop = filtered;
-  await confinedAtomicWriteFile(rootPath, settingsPath, JSON.stringify(settings, null, 2) + '\n', { preserveMode: true });
+  await confinedAtomicWriteFile(rootPath, settingsPath, JSON.stringify(settings, null, 2) + '\n', {
+    preserveMode: true,
+    expectedIdentity,
+  });
   logger.success('Removed the agent enforcement Stop hook from .claude/settings.json');
   return true;
 }
@@ -610,21 +626,40 @@ async function verifiedCheckEditSettingsPath(rootPath: string, createDirectory: 
 }
 
 async function readClaudeSettings(rootPath: string, settingsPath: string): Promise<ClaudeHookSettings> {
+  return (await readClaudeSettingsSnapshot(rootPath, settingsPath)).settings;
+}
+
+async function readClaudeSettingsSnapshot(
+  rootPath: string,
+  settingsPath: string,
+): Promise<{
+  settings: ClaudeHookSettings;
+  expectedIdentity: Awaited<ReturnType<typeof readFileConfinedWithStat>>['stat'] | null;
+}> {
   let raw: string;
+  let expectedIdentity: Awaited<ReturnType<typeof readFileConfinedWithStat>>['stat'];
   try {
     const canonicalRoot = await realpath(rootPath);
-    raw = await readFileConfined(canonicalRoot, relative(canonicalRoot, settingsPath), 1024 * 1024, true, true);
+    const confined = await readFileConfinedWithStat(
+      canonicalRoot,
+      relative(canonicalRoot, settingsPath),
+      1024 * 1024,
+      true,
+      true,
+    );
+    raw = confined.content;
+    expectedIdentity = confined.stat;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {};
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { settings: {}, expectedIdentity: null };
     throw new CorruptSettingsError(`${settingsPath} is unreadable — refusing to overwrite it.`);
   }
-  if (raw.trim() === '') return {}; // empty file → start fresh
+  if (raw.trim() === '') return { settings: {}, expectedIdentity }; // empty file → start fresh
   try {
     const parsed = JSON.parse(raw) as unknown;
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
       throw new Error('settings root is not an object');
     }
-    return parsed as ClaudeHookSettings;
+    return { settings: parsed as ClaudeHookSettings, expectedIdentity };
   } catch {
     // Exists with content but is invalid JSON — refuse to clobber the user's file.
     throw new CorruptSettingsError(

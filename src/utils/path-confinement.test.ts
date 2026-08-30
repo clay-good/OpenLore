@@ -14,7 +14,7 @@ import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { mkdtemp, mkdir, writeFile, symlink, rm, realpath, open } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { readFileConfined, readFileConfinedWithStat, safeJoin, safeOpenspecDir, isConfinedPath } from './path-confinement.js';
+import { confinedAtomicWriteFile, readFileConfined, readFileConfinedWithStat, safeJoin, safeOpenspecDir, isConfinedPath } from './path-confinement.js';
 
 let root: string;
 let outside: string;
@@ -181,6 +181,29 @@ describe('readFileConfined', () => {
   it('refuses an escaping symlink before returning any bytes', async () => {
     await expect(readFileConfined(root, 'openspec/escaping-spec.md')).rejects.toThrow(/Path escape blocked/);
     await expect(readFileConfinedWithStat(root, 'openspec/escaping-spec.md')).rejects.toThrow(/Path escape blocked/);
+  });
+});
+
+describe('confinedAtomicWriteFile expected identity', () => {
+  it('refuses to overwrite a regular file that changed after its confined read', async () => {
+    const path = join(root, 'openspec', 'specs', 'core', 'cas.md');
+    await writeFile(path, '# first\n');
+    const snapshot = await readFileConfinedWithStat(root, 'openspec/specs/core/cas.md');
+    await writeFile(path, '# concurrent user edit\n');
+
+    await expect(confinedAtomicWriteFile(root, path, '# installer edit\n', {
+      expectedIdentity: snapshot.stat,
+    })).rejects.toThrow(/changed after it was read/);
+    await expect(readFileConfined(root, 'openspec/specs/core/cas.md'))
+      .resolves.toBe('# concurrent user edit\n');
+  });
+
+  it('refuses to overwrite a file created after an absent read', async () => {
+    const path = join(root, 'openspec', 'specs', 'core', 'created-concurrently.md');
+    await writeFile(path, '# concurrent create\n');
+    await expect(confinedAtomicWriteFile(root, path, '# installer create\n', {
+      expectedIdentity: null,
+    })).rejects.toThrow(/created after it was read/);
   });
 });
 

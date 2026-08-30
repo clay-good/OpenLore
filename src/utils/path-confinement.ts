@@ -247,7 +247,12 @@ export async function confinedAtomicWriteFile(
   absRoot: string,
   absPath: string,
   data: string,
-  options: { mode?: number; preserveMode?: boolean } = {},
+  options: {
+    mode?: number;
+    preserveMode?: boolean;
+    /** Publish only if the target still has this identity; null means it must remain absent. */
+    expectedIdentity?: Pick<Stats, 'dev' | 'ino' | 'size' | 'mtimeMs' | 'ctimeMs'> | null;
+  } = {},
 ): Promise<void> {
   const lexicalRoot = resolve(absRoot);
   const canonicalRoot = await realpath(lexicalRoot);
@@ -265,9 +270,32 @@ export async function confinedAtomicWriteFile(
     throw new Error(`Path escape blocked: symbolic-link path component in "${target}"`);
   }
 
+  const assertExpectedIdentity = async (): Promise<Stats | undefined> => {
+    let current: Stats | undefined;
+    try { current = await lstat(target); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    if (options.expectedIdentity === undefined) return current;
+    if (options.expectedIdentity === null) {
+      if (current) throw new Error(`Confined write conflict: target was created after it was read: "${target}"`);
+      return current;
+    }
+    if (!current
+        || !current.isFile()
+        || !sameFile(options.expectedIdentity, current)
+        || current.size !== options.expectedIdentity.size
+        || current.mtimeMs !== options.expectedIdentity.mtimeMs
+        || current.ctimeMs !== options.expectedIdentity.ctimeMs) {
+      throw new Error(`Confined write conflict: target changed after it was read: "${target}"`);
+    }
+    return current;
+  };
+
   let existingMode: number | undefined;
   try {
-    const existing = await lstat(target);
+    const existing = await assertExpectedIdentity();
+    if (!existing) throw Object.assign(new Error('missing'), { code: 'ENOENT' });
     if (existing.isSymbolicLink() || !existing.isFile()) {
       throw new Error(`Path escape blocked: write target is not a regular file: "${target}"`);
     }
@@ -296,6 +324,7 @@ export async function confinedAtomicWriteFile(
     if (await realpath(parent) !== canonicalParent) {
       throw new Error(`Path escape blocked: write parent changed during publication: "${target}"`);
     }
+    await assertExpectedIdentity();
     try {
       if ((await lstat(target)).isSymbolicLink()) {
         throw new Error(`Path escape blocked: symbolic-link write target: "${target}"`);
