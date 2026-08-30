@@ -43,6 +43,7 @@ import type { FunctionNode } from '../analyzer/call-graph.js';
 import { extractFileStyle, extractFileParseHealth } from '../analyzer/call-graph.js';
 import { assembleFromRegions, type StyleFingerprint, type FileStyleRaw } from '../analyzer/style-fingerprint.js';
 import { invalidateVectorIndexCaches } from '../analyzer/vector-index.js';
+import { isSpecIndexLockTimeoutError, SpecVectorIndex } from '../analyzer/spec-vector-index.js';
 import { buildParseHealthReport, type ParseHealthReport, type FileParseHealth } from '../analyzer/parse-health.js';
 import { parseBudgetOverrunMs } from '../analyzer/parse-budget.js';
 import {
@@ -626,6 +627,20 @@ export class McpWatcher {
         if (batch.length > 0) await this.handleBatch(batch, { ...opts, recordSpecChanges: false });
         return;
       } catch (err) {
+        if (isSpecIndexLockTimeoutError(err)) {
+          for (const path of deletions) {
+            this.pendingDeletions.add(path);
+            this.pending.delete(path);
+          }
+          for (const path of batch) {
+            if (!this.pendingDeletions.has(path)) this.pending.add(path);
+          }
+          process.stderr.write(
+            `[mcp-watcher] spec index remained locked for ${err.timeoutMs}ms; ` +
+            `deferred ${batch.length} change(s) and ${deletions.length} deletion(s) for retry\n`,
+          );
+          return;
+        }
         if (!isSqliteBusyError(err)) throw err;
         const delay = SQLITE_BUSY_RETRY_DELAYS_MS[attempt];
         if (delay !== undefined) {
@@ -1157,7 +1172,6 @@ export class McpWatcher {
       .map(path => relative(this.rootPath, path).split('\\').join('/')))]
       .sort();
     if (changedSpecs.length === 0) return;
-    const { SpecVectorIndex } = await import('../analyzer/spec-vector-index.js');
     await SpecVectorIndex.noteSpecFilesChanged(this.outputPath, changedSpecs);
   }
 

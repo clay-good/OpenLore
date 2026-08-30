@@ -583,7 +583,7 @@ export async function handleSearchSpecs(
   const outputDir = join(absDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
 
   const { SpecVectorIndex } = await import('../../analyzer/spec-vector-index.js');
-  const { resolveEmbedder, servedRetrievalMode } = await import('../../analyzer/embedder.js');
+  const { resolveEmbedder, embedderMode } = await import('../../analyzer/embedder.js');
 
   if (!SpecVectorIndex.exists(outputDir)) {
     return {
@@ -596,8 +596,7 @@ export async function handleSearchSpecs(
   // the first-class keyword default for spec search.
   const cfg = await readOpenLoreConfig(absDir);
   const embedSvc = await resolveEmbedder(cfg);
-  const retrievalMode = servedRetrievalMode(embedSvc, outputDir, 'spec');
-  const searchMode = retrievalMode === 'keyword' ? 'bm25_fallback' : 'hybrid';
+  const semanticRetrievalMode = embedderMode(embedSvc);
 
   limit = Math.max(1, Math.min(limit, 50));
   const [searchSnapshot, mappingIdx] = await Promise.all([
@@ -605,6 +604,9 @@ export async function handleSearchSpecs(
       ? SpecVectorIndex.searchWithFreshness(outputDir, query, embedSvc, { limit, domain, section })
       : SpecVectorIndex.search(outputDir, query, embedSvc, { limit, domain, section }).then(async results => ({
         results,
+        retrievalMode: results.length > 0 && results.every(result => result.scoreKind === 'bm25')
+          ? 'keyword' as const
+          : 'semantic' as const,
         // Optional guard keeps legacy injected test doubles compatible.
         indexFreshness: typeof SpecVectorIndex.freshness === 'function'
           ? await SpecVectorIndex.freshness(outputDir)
@@ -612,7 +614,11 @@ export async function handleSearchSpecs(
       })),
     loadMappingIndex(absDir),
   ]);
-  const { results, indexFreshness } = searchSnapshot;
+  const { results, indexFreshness, retrievalMode: snapshotRetrievalMode } = searchSnapshot;
+  const retrievalMode = snapshotRetrievalMode === 'keyword'
+    ? 'keyword'
+    : semanticRetrievalMode;
+  const searchMode = retrievalMode === 'keyword' ? 'bm25_fallback' : 'hybrid';
   const servedResults = await Promise.all(results.map(async (r) => ({
     score: r.score,
     scoreKind: r.scoreKind ?? (retrievalMode === 'keyword' ? 'bm25' : 'cosine_distance'),

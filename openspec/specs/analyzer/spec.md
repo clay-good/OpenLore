@@ -5722,6 +5722,32 @@ The system SHALL use cosine distance for dense nearest-neighbor searches over fu
 - **WHEN** the affected behavior is evaluated
 - **THEN** The system SHALL use cosine distance for dense nearest-neighbor searches over function and specification embeddings.
 
+### Requirement: KeepRemoteQueryEmbeddingOutsideTheSpecindexLock
+
+The system SHALL perform remote query embedding outside the spec-index lock and defer watcher batches for retry when acquisition of that lock times out.
+
+> Decision recorded: 705d4deb
+> Date: 2026-08-30
+
+#### Scenario: The decision requirement is enforced
+
+- **GIVEN** approved decision `705d4deb`
+- **WHEN** the affected behavior is evaluated
+- **THEN** The system SHALL perform remote query embedding outside the spec-index lock and defer watcher batches for retry when acquisition of that lock times out.
+
+### Requirement: ReportTheRetrievalModeActuallyUsedBySpecSearch
+
+The system SHALL return the retrieval mode actually used for spec searches and report keyword fallback whenever semantic retrieval cannot be safely executed.
+
+> Decision recorded: d4d55961
+> Date: 2026-08-30
+
+#### Scenario: The decision requirement is enforced
+
+- **GIVEN** approved decision `d4d55961`
+- **WHEN** the affected behavior is evaluated
+- **THEN** The system SHALL return the retrieval mode actually used for spec searches and report keyword fallback whenever semantic retrieval cannot be safely executed.
+
 ## Sub-components
 
 > `SignatureExtractor` is an orchestrator. Each sub-component below implements one logical block.
@@ -9181,3 +9207,27 @@ Returning results and freshness as a single snapshot prevents concurrent index u
 Explicitly selecting cosine distance makes similarity semantics independent of LanceDB defaults and aligns dense retrieval with the score interpretation used by the analyzer.
 
 **Consequences:** Both function and specification vector searches use cosine-based nearest-neighbor ranking, which may change result ordering from indexes previously queried with another default distance metric.
+
+### Keep remote query embedding outside the spec-index lock
+
+**Status:** Approved
+**Date:** 2026-08-30
+**ID:** 705d4deb
+
+
+
+Embedding can involve slow or unavailable remote services, so holding the index lock during that work would unnecessarily block index updates and watcher processing. A typed lock-timeout error allows the watcher to distinguish contention from other failures and defer the complete change batch for retry without losing deletions.
+
+**Consequences:** Search performs a short locked metadata check before embedding and reacquires the lock for index access, so index state may change between those operations and must be revalidated. Watcher batches that exceed the lock wait limit are requeued instead of failing or being partially processed.
+
+### Report the retrieval mode actually used by spec search
+
+**Status:** Approved
+**Date:** 2026-08-30
+**ID:** d4d55961
+
+
+
+Configured semantic retrieval can degrade to keyword search when embeddings are unavailable, incompatible with the index model or dimensions, or fail to generate. Returning the executed mode with the search snapshot prevents API metadata from incorrectly claiming hybrid semantic retrieval.
+
+**Consequences:** Spec search snapshots now include a semantic-or-keyword retrieval contract, all semantic preconditions are validated before vector search, and failures transparently fall back to BM25. MCP responses derive their search mode and score interpretation from the snapshot's actual retrieval behavior while retaining compatibility with legacy injected search implementations.

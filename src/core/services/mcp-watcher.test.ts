@@ -17,6 +17,7 @@ import { spawn } from 'node:child_process';
 import type { LLMContext } from '../analyzer/artifact-generator.js';
 import type { SerializedCallGraph } from '../analyzer/call-graph.js';
 import { EdgeStore } from './edge-store.js';
+import { SpecIndexLockTimeoutError } from '../analyzer/spec-vector-index.js';
 import type { CallEdge } from '../analyzer/call-graph.js';
 import { _resetContextCacheForTesting } from './mcp-handlers/utils.js';
 
@@ -754,6 +755,23 @@ describe('McpWatcher coalescing queue', () => {
 
     expect(handleBatch).toHaveBeenCalledTimes(5);
     expect(handleBatch.mock.calls[4][0]).toEqual(['/tmp/proj/src/contended.ts']);
+    expect(stderr).toHaveBeenCalledWith(expect.stringContaining('deferred 1 change(s)'));
+    stderr.mockRestore();
+  });
+
+  it('defers a batch when the spec-index lock times out', async () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const { McpWatcher } = await import('./mcp-watcher.js');
+    const watcher = new McpWatcher({ rootPath: '/tmp/proj', debounceMs: 100, embed: false });
+    const specFile = '/tmp/proj/openspec/specs/auth/spec.md';
+    vi.spyOn(watcher as any, 'recordSpecIndexChanges')
+      .mockRejectedValue(new SpecIndexLockTimeoutError(30_000));
+
+    await (watcher as unknown as {
+      flushBatchWithBusyRetry(batch: string[], deletions: string[]): Promise<void>;
+    }).flushBatchWithBusyRetry([specFile], []);
+
+    expect((watcher as unknown as { pending: Set<string> }).pending.has(specFile)).toBe(true);
     expect(stderr).toHaveBeenCalledWith(expect.stringContaining('deferred 1 change(s)'));
     stderr.mockRestore();
   });

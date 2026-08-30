@@ -555,6 +555,25 @@ describe('SpecVectorIndex', () => {
       expect(results[0].score).toBeCloseTo(0, 5);
     });
 
+    it('falls back to BM25 when a same-dimension query embedder uses another model', async () => {
+      const specsDir = await createSpecsDir(tmpDir, { auth: SAMPLE_SPEC_AUTH });
+      const indexEmbedder = {
+        ...makeMockEmbedSvc(),
+        modelName: 'model-a',
+      } as unknown as EmbeddingService;
+      const queryEmbedder = {
+        ...makeMockEmbedSvc(),
+        modelName: 'model-b',
+      } as unknown as EmbeddingService;
+      await SpecVectorIndex.build(tmpDir, specsDir, indexEmbedder);
+
+      const results = await SpecVectorIndex.search(tmpDir, 'email', queryEmbedder, { limit: 10 });
+
+      expect(queryEmbedder.embed).not.toHaveBeenCalled();
+      expect(results.length).toBeGreaterThan(0);
+      expect(results.every(result => result.scoreKind === 'bm25')).toBe(true);
+    });
+
     it('returns an exact count with a bounded path list after more than 1,000 changes', async () => {
       const specsDir = await createSpecsDir(tmpDir, { auth: SAMPLE_SPEC_AUTH });
       await SpecVectorIndex.build(tmpDir, specsDir, null);
@@ -589,6 +608,36 @@ describe('SpecVectorIndex', () => {
       expect((await stat(join(tmpDir, 'spec-index-freshness.json'))).size).toBeLessThan(1_000);
 
       await SpecVectorIndex.noteSpecFilesChanged(tmpDir, ['openspec/specs/new/spec.md']);
+      expect(await SpecVectorIndex.freshness(tmpDir)).toMatchObject({
+        tracking: 'unavailable',
+        changedFileCount: null,
+      });
+    });
+
+    it('keeps freshness unavailable when the receipt is missing before an edit', async () => {
+      const specsDir = await createSpecsDir(tmpDir, { auth: SAMPLE_SPEC_AUTH });
+      await SpecVectorIndex.build(tmpDir, specsDir, null);
+      await unlink(join(tmpDir, 'spec-index-freshness.json'));
+
+      await SpecVectorIndex.noteSpecFilesChanged(tmpDir, ['openspec/specs/auth/spec.md']);
+
+      expect(await SpecVectorIndex.freshness(tmpDir)).toMatchObject({
+        tracking: 'unavailable',
+        changedFileCount: null,
+      });
+    });
+
+    it('keeps freshness unavailable when the receipt belongs to an older build', async () => {
+      const specsDir = await createSpecsDir(tmpDir, { auth: SAMPLE_SPEC_AUTH });
+      await SpecVectorIndex.build(tmpDir, specsDir, null);
+      await writeFile(join(tmpDir, 'spec-index-freshness.json'), JSON.stringify({
+        schemaVersion: 1,
+        indexBuiltAt: '2026-01-01T00:00:00.000Z',
+        changedFiles: ['openspec/specs/old/spec.md'],
+      }));
+
+      await SpecVectorIndex.noteSpecFilesChanged(tmpDir, ['openspec/specs/auth/spec.md']);
+
       expect(await SpecVectorIndex.freshness(tmpDir)).toMatchObject({
         tracking: 'unavailable',
         changedFileCount: null,
@@ -677,38 +726,37 @@ describe('SpecVectorIndex', () => {
       });
     });
 
-    it('returns search results and freshness from one generation while a rebuild waits', async () => {
+    it('returns search results and freshness from the rebuilt generation after lock contention', async () => {
       const specsDir = await createSpecsDir(tmpDir, { auth: SAMPLE_SPEC_AUTH });
       const initialEmbedder = makeMockEmbedSvc();
       await SpecVectorIndex.build(tmpDir, specsDir, initialEmbedder);
-      const initialMeta = JSON.parse(await readFile(join(tmpDir, 'spec-index-meta.json'), 'utf8')) as {
-        builtAt: string;
-      };
 
-      let releaseSearch!: () => void;
-      let markSearchStarted!: () => void;
-      const searchStarted = new Promise<void>(resolve => { markSearchStarted = resolve; });
-      const searchGate = new Promise<void>(resolve => { releaseSearch = resolve; });
-      const searchEmbedder = {
-        modelName: 'search-model',
-        embed: vi.fn().mockImplementation(async () => {
-          markSearchStarted();
-          await searchGate;
-          return [makeVector(0)];
+      let releaseRebuild!: () => void;
+      let markRebuildStarted!: () => void;
+      const rebuildStarted = new Promise<void>(resolve => { markRebuildStarted = resolve; });
+      const rebuildGate = new Promise<void>(resolve => { releaseRebuild = resolve; });
+      const rebuildEmbedder = {
+        modelName: 'rebuild-model',
+        embed: vi.fn().mockImplementation(async (texts: string[]) => {
+          markRebuildStarted();
+          await rebuildGate;
+          return texts.map((_, index) => makeVector(index));
         }),
       } as unknown as EmbeddingService;
-      const rebuildEmbedder = makeMockEmbedSvc();
+      const searchEmbedder = makeMockEmbedSvc();
 
-      const search = SpecVectorIndex.searchWithFreshness(tmpDir, 'email', searchEmbedder);
-      await searchStarted;
       const rebuild = SpecVectorIndex.build(tmpDir, specsDir, rebuildEmbedder);
+      await rebuildStarted;
+      const search = SpecVectorIndex.searchWithFreshness(tmpDir, 'email', searchEmbedder);
       await new Promise(resolve => setTimeout(resolve, 20));
-      expect(rebuildEmbedder.embed).not.toHaveBeenCalled();
 
-      releaseSearch();
-      const snapshot = await search;
-      expect(snapshot.indexFreshness?.builtAt).toBe(initialMeta.builtAt);
+      releaseRebuild();
       await rebuild;
+      const rebuiltMeta = JSON.parse(await readFile(join(tmpDir, 'spec-index-meta.json'), 'utf8')) as {
+        builtAt: string;
+      };
+      const snapshot = await search;
+      expect(snapshot.indexFreshness?.builtAt).toBe(rebuiltMeta.builtAt);
     });
 
     it('clears tracked changes after a verified no-op rebuild', async () => {
@@ -804,6 +852,7 @@ describe('SpecVectorIndex', () => {
       await expect(
         SpecVectorIndex.search(tmpDir, 'query', embedSvc, { limit: 5 })
       ).rejects.toThrow('No spec index found');
+      expect(embedSvc.embed).not.toHaveBeenCalled();
     });
 
     it('invalidates persisted table content that disagrees with current metadata', async () => {

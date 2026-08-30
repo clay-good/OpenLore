@@ -482,6 +482,69 @@ describe('handleSearchSpecs — success path', () => {
     expect(result.error).toBeUndefined();
     expect(result.searchMode).toBe('bm25_fallback');
   });
+
+  it('reports the keyword mode actually served after a semantic fallback', async () => {
+    vi.doMock('../../analyzer/spec-vector-index.js', () => ({
+      SpecVectorIndex: {
+        exists: vi.fn().mockReturnValue(true),
+        searchWithFreshness: vi.fn().mockResolvedValue({
+          results: [],
+          indexFreshness: null,
+          retrievalMode: 'keyword',
+        }),
+      },
+    }));
+    vi.doMock('../../analyzer/embedder.js', async importOriginal => ({
+      ...await importOriginal<typeof import('../../analyzer/embedder.js')>(),
+      resolveEmbedder: vi.fn().mockResolvedValue({ modelName: 'model-b' }),
+      embedderMode: vi.fn().mockReturnValue('remote-semantic'),
+    }));
+
+    const { handleSearchSpecs } = await import('./semantic.js');
+    const result = await handleSearchSpecs(tmpDir, 'auth') as {
+      searchMode: string;
+      retrievalMode: string;
+      note?: string;
+    };
+
+    expect(result.searchMode).toBe('bm25_fallback');
+    expect(result.retrievalMode).toBe('keyword');
+    expect(result.note).toContain('Keyword (BM25)');
+  });
+
+  it.each(['local-semantic', 'remote-semantic'] as const)(
+    'preserves %s provider provenance when a rebuild makes retrieval semantic',
+    async expectedMode => {
+      vi.doMock('../../analyzer/spec-vector-index.js', () => ({
+        SpecVectorIndex: {
+          exists: vi.fn().mockReturnValue(true),
+          searchWithFreshness: vi.fn().mockResolvedValue({
+            results: [],
+            indexFreshness: null,
+            retrievalMode: 'semantic',
+          }),
+        },
+      }));
+      vi.doMock('../../analyzer/embedder.js', async importOriginal => ({
+        ...await importOriginal<typeof import('../../analyzer/embedder.js')>(),
+        resolveEmbedder: vi.fn().mockResolvedValue({ modelName: 'model-b' }),
+        // Simulate the stale pre-search sidecar view from a keyword generation.
+        servedRetrievalMode: vi.fn().mockReturnValue('keyword'),
+        embedderMode: vi.fn().mockReturnValue(expectedMode),
+      }));
+
+      const { handleSearchSpecs } = await import('./semantic.js');
+      const result = await handleSearchSpecs(tmpDir, 'auth') as {
+        searchMode: string;
+        retrievalMode: string;
+        note?: string;
+      };
+
+      expect(result.searchMode).toBe('hybrid');
+      expect(result.retrievalMode).toBe(expectedMode);
+      expect(result.note).toBeUndefined();
+    },
+  );
 });
 
 describe('handleUnifiedSearch — served provenance', () => {
