@@ -10,6 +10,9 @@ They intentionally do not move with the current schema.
 - `3.0.0-default.json` captures the configuration factory shape for the v3 release candidate.
 - `3.0.1-default.json` captures the unchanged configuration factory shape for the v3.0.1
   release-pipeline patch.
+- `3.1.0-default.json` captures the default configuration factory shape for v3.1.0 and schema 1.2.0.
+- `3.1.0-workspace.json` captures the optional workspace-shard and retrieval settings introduced in
+  v3.1.0.
 
 For each release, add at least one `<package-version>-*.json` fixture before changing the package
 version. Include both a factory-default shape and a realistic customized shape when the release
