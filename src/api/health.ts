@@ -102,9 +102,14 @@ async function inspectArtifacts(analysisDir: string): Promise<{ present: number;
 async function watcherState(root: string, signal?: AbortSignal): Promise<'healthy' | 'stopped' | 'unknown'> {
   const descriptor = await readDescriptor(root).catch(() => null);
   if (!descriptor) return 'unknown'; // no daemon announced → no request is issued at all
+  // Hoisted so the whole file-to-network flow is attributed to the one reviewed call below,
+  // exactly as `serve-client` does for the identical probe.
+  const headers = descriptor.token ? { 'x-openlore-token': descriptor.token } : undefined;
   try {
+    // INTENTIONAL EGRESS: validated descriptors are loopback-only and redirects are disabled.
+    // codeql[js/file-access-to-http]
     const response = await fetch(`${serveHttpBaseUrl(descriptor.host, descriptor.port)}/health`, {
-      headers: descriptor.token ? { 'x-openlore-token': descriptor.token } : {},
+      headers,
       // The descriptor is attacker-writable, and this request carries the daemon token. A followed
       // redirect would send it off-loopback — the exact egress the shared validator exists to
       // prevent. Every other descriptor reader refuses redirects; so does this one.

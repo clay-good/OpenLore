@@ -4,7 +4,7 @@ import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 
 /** Run a node child with the smoke module hooks installed. */
@@ -42,18 +42,30 @@ async function daemonCheck(root, cli, repo, optional) {
   daemon.stdout.on('data', (chunk) => { daemonOutput += chunk; });
   daemon.stderr.on('data', (chunk) => { daemonOutput += chunk; });
   try {
+    // Read the descriptor through the SUBPATH this change publishes, not a raw JSON.parse: the
+    // harness is a consumer like any other, so it takes the same loopback-only, integer-port,
+    // integer-pid validation every reader takes (mcp-security: ServeDescriptorValidatedAtEveryReader).
+    const { readServeDescriptor, serveHttpBaseUrl } = await import(
+      pathToFileURL(join(root, 'dist', 'api', 'serve-descriptor.js')).href
+    );
     const descriptorPath = join(repo, '.openlore', 'serve.json');
     let descriptor = null;
     for (let attempt = 0; attempt < 60 && descriptor === null; attempt += 1) {
-      try { descriptor = JSON.parse(readFileSync(descriptorPath, 'utf8')); }
-      catch { await new Promise((resolve) => setTimeout(resolve, 500)); }
+      descriptor = await readServeDescriptor(descriptorPath);
+      if (descriptor === null) await new Promise((resolve) => setTimeout(resolve, 500));
     }
     if (descriptor === null) {
       fail('the HTTP daemon did not announce itself with the optional packages absent', daemonOutput);
     }
-    const response = await fetch(`http://${descriptor.host}:${descriptor.port}/tool/get_map`, {
+    const headers = {
+      'content-type': 'application/json',
+      ...(descriptor.token ? { 'x-openlore-token': descriptor.token } : {}),
+    };
+    // INTENTIONAL EGRESS: validated descriptors are loopback-only and redirects are disabled.
+    // codeql[js/file-access-to-http]
+    const response = await fetch(`${serveHttpBaseUrl(descriptor.host, descriptor.port)}/tool/get_map`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', ...(descriptor.token ? { 'x-openlore-token': descriptor.token } : {}) },
+      headers,
       body: JSON.stringify({ directory: repo, args: {} }),
       redirect: 'error',
     });
