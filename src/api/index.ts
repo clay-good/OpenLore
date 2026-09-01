@@ -33,6 +33,15 @@ export { openloreRun } from './run.js';
 export { openloreAudit } from './audit.js';
 export { openloreGetSpecRequirements } from './specs.js';
 export { openloreRecordDecision, openloreConsolidateDecisions, openloreSyncDecisions } from './decisions.js';
+// Daemon lifecycle for supervising hosts (change: extend-api-for-supervising-hosts). The
+// serve-descriptor CONTRACT is deliberately NOT re-exported here — it ships on the
+// `openlore/serve-descriptor` subpath so a host can import it without loading the analyzer this
+// barrel pulls in. See src/api/serve-descriptor.ts.
+export { openloreServe, ServeAlreadyRunningError } from './serve.js';
+export { openloreHealth } from './health.js';
+export { openloreIndexState } from './index-state.js';
+export { openloreAnalysisStatus } from './analysis-status.js';
+export { openloreFederationList } from './federation.js';
 
 // API option/result types
 export type {
@@ -75,5 +84,13 @@ export type { PipelineResult } from '../core/generator/spec-pipeline.js';
 export type { GenerationReport } from '../core/generator/openspec-writer.js';
 export type { VerificationReport } from '../core/verifier/verification-engine.js';
 export type { SpecRequirement } from './specs.js';
+export type { ServeApiOptions } from './serve.js';
+export type { HealthResult, HealthIndexDegradation, HealthReasonCode } from './health.js';
+export type { IndexStateResult, IndexFingerprintConfig } from './index-state.js';
+export type { AnalysisStatusResult } from './analysis-status.js';
+export type { FederationListResult } from './federation.js';
+export type { AnalysisOwnerPayload } from '../core/runtime/analysis-ownership.js';
+export type { FederationRepoEntry, ConsultedRepo, RepoIndexState } from '../core/federation/types.js';
+export type { ServeHandle } from '../cli/commands/serve.js';
 export { OpenLoreError, errors, isOpenLoreError } from '../utils/errors.js';
 export type { ErrorCode, ApiErrorCode } from '../utils/errors.js';

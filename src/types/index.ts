@@ -109,6 +109,19 @@ export interface OpenLoreConfig {
   bundle?: BundleConfig;
   /** Optional explicit workspace boundaries. When absent, analyzer manifests are detected. */
   workspace?: WorkspaceConfig;
+  /** Pi extension settings, including who owns daemon spawn authority. */
+  pi?: PiConfig;
+}
+
+export interface PiConfig {
+  /**
+   * Whether the Pi extension may spawn its own daemon when none is discovered. Default `true`.
+   * Set to `false` when a supervising host already runs one daemon per working tree: an
+   * extension-initiated spawn would then be a second, unsupervised process outliving the session
+   * (change: extend-api-for-supervising-hosts). Discovery and use of an existing daemon are
+   * unaffected. The `OPENLORE_PI_NO_SPAWN` environment variable overrides this.
+   */
+  spawnDaemon?: boolean;
 }
 
 export interface WorkspaceShardConfig {

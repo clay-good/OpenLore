@@ -39,6 +39,31 @@ const HEALTH = {
   draining: false,
 };
 
+describe('optional watcher field (change: extend-api-for-supervising-hosts)', () => {
+  it('projects a valid watcher value through', () => {
+    const health = validateServeHealth({ ...HEALTH, watcher: 'stopped' }, '/tmp/project');
+    expect(health?.watcher).toBe('stopped');
+  });
+
+  it('validates a payload that omits watcher, and reports it absent rather than guessing', () => {
+    const health = validateServeHealth(HEALTH, '/tmp/project');
+    expect(health).not.toBeNull();
+    expect(health?.watcher).toBeUndefined();
+  });
+
+  it('drops an ill-typed watcher instead of passing it through', () => {
+    const health = validateServeHealth({ ...HEALTH, watcher: 'sort-of-ok' }, '/tmp/project');
+    expect(health).not.toBeNull(); // an advisory field must not make a valid daemon unreadable
+    expect(health?.watcher).toBeUndefined();
+  });
+
+  it('did not tighten or loosen any security-critical field', () => {
+    expect(validateServeHealth({ ...HEALTH, tokenAuthenticated: false }, '/tmp/project')).toBeNull();
+    expect(validateServeHealth({ ...HEALTH, root: '/tmp/other' }, '/tmp/project')).toBeNull();
+    expect(validateServeHealth({ ...HEALTH, protocolVersion: 999 }, '/tmp/project')).toBeNull();
+  });
+});
+
 it('formats IPv4 and IPv6 loopback origins safely', () => {
   expect(serveHttpBaseUrl('127.0.0.1', 8080)).toBe('http://127.0.0.1:8080');
   expect(serveHttpBaseUrl('::1', 8080)).toBe('http://[::1]:8080');
@@ -254,5 +279,36 @@ describe('serve.json reader coverage (mcp-security: ServeDescriptorValidatedAtEv
       const src = readFileSync(reader, 'utf-8');
       expect(src.includes('readServeDescriptor'), `${reader} must route through readServeDescriptor`).toBe(true);
     }
+  });
+
+  // An embedding host that discovers a daemon is a FOURTH reader, one package boundary away
+  // (change: extend-api-for-supervising-hosts). It cannot be made to import the validator by a
+  // source guard — it is not our source. The only lever we have is to publish the validator, so
+  // the host's cheapest path is to share ours instead of copying it. These pin that lever.
+  it('the published subpath exposes the validator to an embedding host', () => {
+    const entry = join(srcRoot, 'api', 'serve-descriptor.ts');
+    const src = readFileSync(entry, 'utf-8');
+    for (const name of [
+      'readServeDescriptor',
+      'readServeDescriptorState',
+      'validateServeDescriptor',
+      'validateServeHealth',
+      'serveHttpBaseUrl',
+      'canonicalServeRoot',
+      'SERVE_PROTOCOL_VERSION',
+    ]) {
+      expect(src.includes(name), `${entry} must re-export ${name} for embedding hosts`).toBe(true);
+    }
+    // It must expose OUR validator, not a reimplementation of it.
+    expect(src.includes("from '../cli/commands/serve-descriptor.js'")).toBe(true);
+  });
+
+  it('package.json publishes the subpath, so the validator is reachable outside the package', () => {
+    const pkg = JSON.parse(readFileSync(join(srcRoot, '..', 'package.json'), 'utf-8')) as {
+      exports?: Record<string, { import?: string; types?: string }>;
+    };
+    const subpath = pkg.exports?.['./serve-descriptor'];
+    expect(subpath?.import, 'exports must publish ./serve-descriptor').toBe('./dist/api/serve-descriptor.js');
+    expect(subpath?.types).toBe('./dist/api/serve-descriptor.d.ts');
   });
 });

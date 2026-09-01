@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:http';
 
-import openloreExtension, { createPiExtension, modelsUrl, stripMarker, isUsableConfig, readConfig, loadExistingConfig, runConfigWizard, readSpecIndex, formatToolResult, formatCallArgs, compositeToolResult, NAV_TOOLS, PI_DAEMON_PRESET, PI_EXCLUDED_CONCLUSION_TOOLS, PI_SPEC_WORKFLOW_OBSERVATIONS, PI_SPEC_WORKFLOW_EXCLUSIONS, ensureDaemon, ensureDaemonResult, callTool, isUsableDaemon, missingDaemonTools, piDaemonSpawnCommand, PiDaemonConnectionError, PI_SPEC_INDEX_MAX_DOMAINS, shouldNegativeCacheDaemonFailure } from './extension.js';
+import openloreExtension, { createPiExtension, modelsUrl, stripMarker, isUsableConfig, readConfig, loadExistingConfig, runConfigWizard, readSpecIndex, formatToolResult, formatCallArgs, compositeToolResult, NAV_TOOLS, PI_DAEMON_PRESET, PI_EXCLUDED_CONCLUSION_TOOLS, PI_SPEC_WORKFLOW_OBSERVATIONS, PI_SPEC_WORKFLOW_EXCLUSIONS, ensureDaemon, ensureDaemonResult, callTool, isUsableDaemon, missingDaemonTools, piDaemonSpawnCommand, PiDaemonConnectionError, PI_SPEC_INDEX_MAX_DOMAINS, shouldNegativeCacheDaemonFailure, piMaySpawnDaemon } from './extension.js';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { TOOL_DEFINITIONS } from '../cli/commands/mcp.js';
 import { startServe } from '../cli/commands/serve.js';
@@ -103,9 +103,168 @@ it('reports the packaged launch error code without waiting for a health timeout'
 it('does not hide draining or just-late daemons behind the long negative cache', () => {
   expect(shouldNegativeCacheDaemonFailure('draining')).toBe(false);
   expect(shouldNegativeCacheDaemonFailure('health-timeout')).toBe(false);
+  expect(shouldNegativeCacheDaemonFailure('spawn-disabled')).toBe(false);
   expect(shouldNegativeCacheDaemonFailure('launch')).toBe(true);
   expect(shouldNegativeCacheDaemonFailure('preparation')).toBe(true);
   expect(shouldNegativeCacheDaemonFailure('early-exit')).toBe(true);
+});
+
+/**
+ * Daemon spawn authority (change: extend-api-for-supervising-hosts, spec
+ * `PiDaemonSpawnAuthorityIsOverridable`).
+ *
+ * A supervising host runs one daemon per working tree with its own restart bound and a handle it
+ * releases at shutdown. An extension-initiated spawn there is a second, unsupervised process that
+ * can outlive the session — so the opt-out must reach the DEFAULT acquisition path, and the "no
+ * daemon" outcome must stay an honest, immediately retryable failure rather than a silent spawn.
+ */
+describe('Pi daemon spawn authority', () => {
+  const roots: string[] = [];
+  afterEach(async () => {
+    for (const dir of roots.splice(0)) await rm(dir, { recursive: true, force: true });
+    vi.unstubAllEnvs();
+  });
+
+  async function root(): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), 'openlore-pi-spawn-authority-'));
+    roots.push(dir);
+    return dir;
+  }
+
+  /** A launch that leaves a sentinel behind, so an unexpected spawn cannot go unnoticed. */
+  function sentinelLaunch(path: string): { command: string; args: string[] } {
+    return {
+      command: process.execPath,
+      args: ['-e', `require('fs').writeFileSync(${JSON.stringify(path)}, 'spawned')`],
+    };
+  }
+
+  it('reads the opt-out from the environment and from the pi config key', async () => {
+    const dir = await root();
+    expect(await piMaySpawnDaemon(dir)).toBe(true);
+
+    vi.stubEnv('OPENLORE_PI_NO_SPAWN', '1');
+    expect(await piMaySpawnDaemon(dir)).toBe(false);
+    // An explicit negative is not an opt-out — the host said "spawning is fine".
+    vi.stubEnv('OPENLORE_PI_NO_SPAWN', '0');
+    expect(await piMaySpawnDaemon(dir)).toBe(true);
+    vi.unstubAllEnvs();
+
+    await mkdir(join(dir, '.openlore'), { recursive: true });
+    await writeFile(join(dir, '.openlore', 'config.json'), JSON.stringify({ pi: { spawnDaemon: false } }));
+    expect(await piMaySpawnDaemon(dir)).toBe(false);
+  });
+
+  it('honours the config key on a repository with no configured LLM provider', async () => {
+    const dir = await root();
+    await mkdir(join(dir, '.openlore'), { recursive: true });
+    // No `generation.provider`, so `readConfig` returns null — the opt-out must survive that,
+    // or a headless session that never ran the wizard silently regains spawn authority.
+    await writeFile(join(dir, '.openlore', 'config.json'), JSON.stringify({
+      version: '1.2.0', projectType: 'nodejs', pi: { spawnDaemon: false },
+    }));
+    expect(await readConfig(dir)).toBeNull();
+    expect(await piMaySpawnDaemon(dir)).toBe(false);
+  });
+
+  it('survives the config wizard as an unknown-key-preserving round trip', async () => {
+    const dir = await root();
+    await mkdir(join(dir, '.openlore'), { recursive: true });
+    const configPath = join(dir, '.openlore', 'config.json');
+    const existing = {
+      version: '1.2.0',
+      projectType: 'nodejs',
+      openspecPath: 'openspec',
+      analysis: { maxFiles: 1, includePatterns: [], excludePatterns: [] },
+      generation: { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+      createdAt: new Date().toISOString(),
+      lastRun: null,
+      pi: { spawnDaemon: false },
+    };
+    await writeFile(configPath, JSON.stringify(existing));
+    const saveImmediately = {
+      cwd: dir, mode: 'tui', hasUI: true,
+      ui: {
+        select: vi.fn(async () => '✓ Save & close'),
+        input: vi.fn(),
+        confirm: vi.fn(async () => false),
+        notify: vi.fn(),
+      },
+    } as unknown as ExtensionContext;
+
+    // The wizard owns only the fields it renders; `pi` is not one of them, so a configuration UI
+    // from any release must carry it through rather than silently restoring spawn authority.
+    await runConfigWizard(saveImmediately, existing);
+
+    const written = JSON.parse(await readFile(configPath, 'utf8')) as { pi?: { spawnDaemon?: boolean } };
+    expect(written.pi).toEqual({ spawnDaemon: false });
+    expect(await piMaySpawnDaemon(dir)).toBe(false);
+  });
+
+  it('uses a healthy discovered daemon and launches nothing of its own', async () => {
+    const dir = await root();
+    const sentinel = join(dir, 'spawned.marker');
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        ok: true, protocolVersion: 1, presetDispatchEnforced: true, root: dir, pid: process.pid,
+        preset: 'full', tools: NAV_TOOLS.map((tool) => tool.name),
+        tokenProtected: false, tokenAuthenticated: true, draining: false, watcher: 'healthy',
+      }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('supervised daemon did not bind');
+    try {
+      await mkdir(join(dir, '.openlore'), { recursive: true });
+      await writeFile(join(dir, '.openlore', 'serve.json'), JSON.stringify({
+        port: address.port, pid: process.pid, host: '127.0.0.1', protocolVersion: 1,
+        startedAt: new Date().toISOString(), version: 'test',
+      }));
+      vi.stubEnv('OPENLORE_PI_NO_SPAWN', '1');
+
+      const result = await ensureDaemonResult(dir, { timeoutMs: 500, launch: sentinelLaunch(sentinel) });
+
+      expect(result.daemon).not.toBeNull();
+      expect(result.daemon?.baseUrl).toBe(`http://127.0.0.1:${address.port}`);
+      await expect(access(sentinel)).rejects.toThrow();
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it('reports an absent daemon as an immediately retryable failure instead of spawning one', async () => {
+    const dir = await root();
+    const sentinel = join(dir, 'spawned.marker');
+    vi.stubEnv('OPENLORE_PI_NO_SPAWN', '1');
+
+    const result = await ensureDaemonResult(dir, { timeoutMs: 500, launch: sentinelLaunch(sentinel) });
+
+    expect(result).toMatchObject({ daemon: null, failureKind: 'spawn-disabled' });
+    expect(result.failure).toContain('OPENLORE_PI_NO_SPAWN');
+    // The cause is the absent daemon, not an unanalyzed repository: a remediation pointing at
+    // analysis would send the operator to fix something that is not broken.
+    expect(result.failure).not.toMatch(/openlore analyze/);
+    // Immediately retryable: the host may start its daemon a moment later.
+    expect(shouldNegativeCacheDaemonFailure('spawn-disabled')).toBe(false);
+    await expect(access(sentinel)).rejects.toThrow();
+    // The default acquisition path, not only the result seam, honours the opt-out.
+    expect(await ensureDaemon(dir)).toBeNull();
+  });
+
+  it('still launches a daemon when the opt-out is unset', async () => {
+    const dir = await root();
+    const sentinel = join(dir, 'spawned.marker');
+
+    const result = await ensureDaemonResult(dir, { timeoutMs: 300, launch: sentinelLaunch(sentinel) });
+
+    expect(result.daemon).toBeNull();
+    // The sentinel process is the launch: it exits before health, which is the existing bounded
+    // failure path, unchanged.
+    expect(['early-exit', 'health-timeout']).toContain(result.daemon === null ? result.failureKind : undefined);
+    await access(sentinel);
+  });
 });
 
 it('arms keepalive immediately after a late daemon becomes usable', async () => {

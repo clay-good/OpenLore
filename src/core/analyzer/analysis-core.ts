@@ -311,6 +311,13 @@ export async function runAnalysisCore(
       computedAt: new Date().toISOString(),
       fileCount: repoMap.allFiles.length,
       analysisConfigHash: fingerprintHashOfConfiguration(fingerprintConfig),
+      // The fingerprint configuration VALUES, not just their hash (change:
+      // extend-api-for-supervising-hosts). `--include` / `--exclude` / `--max-files` are
+      // per-invocation CLI inputs that are never persisted anywhere else, and they decide which
+      // files the hash covers. Without them a later reader cannot RECOMPUTE this hash: it would
+      // fingerprint a different corpus and report a mismatch on an unchanged tree. Recording them
+      // is what makes `openloreIndexState` able to answer at all.
+      fingerprintConfig,
     }));
     await writeAnalysisContentProvenance(outputPath, 'source-derived');
     if (await computeProjectFingerprint(rootPath, { configuration: fingerprintConfig, protectedExcludePatterns }) !== fingerprintHash) {

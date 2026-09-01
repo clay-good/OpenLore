@@ -28,6 +28,8 @@ export type ErrorCode = ApiErrorCode
   | 'FILE_READ_ERROR'
   | 'DRIFT_DETECTED'
   | 'NO_SPECS_FOUND'
+  | 'SERVE_REFUSED'
+  | 'SERVE_ALREADY_RUNNING'
   | 'UNKNOWN_ERROR';
 
 /**

@@ -42,6 +42,7 @@ import { detectLanguage } from '../../core/analyzer/language-detection.js';
 import { runChatAgent, resolveProviderConfig } from '../../core/services/chat-agent.js';
 import { collectSpecMarkdown, readConfinedFile } from './view-files.js';
 import { readViewerFreshness, setViewerFreshnessHeaders } from './viewer-freshness.js';
+import { loadViewerToolchain, OptionalFeatureError } from './optional-features.js';
 
 /** Strip internal filesystem paths and API keys from error messages before sending to clients. */
 export function sanitizeErrorMessage(msg: string): string {
@@ -186,8 +187,19 @@ export const viewCommand = new Command('view')
 
       // Dynamic imports — vite and @vitejs/plugin-react are only needed for `openlore view`,
       // so we load them at runtime to avoid ERR_MODULE_NOT_FOUND for other commands (#24).
-      const { createServer } = await import('vite');
-      const { default: react } = await import('@vitejs/plugin-react');
+      // They are optional dependencies, so absence is reported as an uninstalled feature with its
+      // install line, never a raw module-resolution error
+      // (cli: OptionalFeatureDependenciesDegradeAtTheirOwnCommand).
+      let createServer: Awaited<ReturnType<typeof loadViewerToolchain>>['createServer'];
+      let react: Awaited<ReturnType<typeof loadViewerToolchain>>['react'];
+      try {
+        ({ createServer, react } = await loadViewerToolchain());
+      } catch (err) {
+        if (!(err instanceof OptionalFeatureError)) throw err;
+        logger.error(err.message);
+        process.exitCode = 1;
+        return;
+      }
 
       const server = await createServer({
         root: viewerRoot,
