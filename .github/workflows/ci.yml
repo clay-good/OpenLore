@@ -253,6 +253,118 @@ jobs:
             throw 'Windows analyze did not produce llm-context.json'
           }
 
+      - name: Exercise the MCP transport and the serve daemon
+        shell: pwsh
+        working-directory: src/core/scip/fixtures/tiny-repo
+        run: |
+          # The paths an agent takes to reach OpenLore on Windows: the stdio
+          # JSON-RPC transport, and the daemon spawn branch in serve-client
+          # (log-redirected, non-detached). Nothing else in CI runs either on
+          # Windows, so a "the agents cannot connect any more" regression lands
+          # here or nowhere.
+          $ErrorActionPreference = 'Stop'
+          $entry = Join-Path (npm root -g) 'openlore/dist/cli/index.js'
+          if (-not (Test-Path $entry)) { throw "Global openlore entry not found: $entry" }
+
+          # The server closes on stdin EOF WITHOUT draining in-flight requests,
+          # so stdin is held open until every expected id has answered.
+          function Invoke-McpSession {
+            param(
+              [string[]]$ExtraArgs = @(),
+              [Parameter(Mandatory)][string[]]$Requests,
+              [Parameter(Mandatory)][int[]]$ExpectIds,
+              [int]$TimeoutSec = 240
+            )
+            $psi = [System.Diagnostics.ProcessStartInfo]::new()
+            $psi.FileName = 'node'
+            foreach ($a in @($script:entry) + $ExtraArgs) { $psi.ArgumentList.Add($a) }
+            $psi.RedirectStandardInput = $true
+            $psi.RedirectStandardOutput = $true
+            # stderr is left attached to the job log: it is the crash diagnostic,
+            # and draining it here after the process runs risks a full-pipe stall.
+            $psi.UseShellExecute = $false
+            $proc = [System.Diagnostics.Process]::Start($psi)
+            foreach ($r in $Requests) { $proc.StandardInput.WriteLine($r) }
+            $proc.StandardInput.Flush()
+
+            $seen = @{}
+            $deadline = (Get-Date).AddSeconds($TimeoutSec)
+            while ($true) {
+              $remaining = [int](($deadline - (Get-Date)).TotalMilliseconds)
+              if ($remaining -le 0) { break }
+              $read = $proc.StandardOutput.ReadLineAsync()
+              if (-not $read.Wait($remaining)) { break }
+              $line = $read.Result
+              if ($null -eq $line) { break }
+              if (-not $line.Trim()) { continue }
+              try { $obj = $line | ConvertFrom-Json } catch { continue }
+              if ($null -ne $obj.id) { $seen[[int]$obj.id] = $obj }
+              if (@($ExpectIds | Where-Object { -not $seen.ContainsKey($_) }).Count -eq 0) { break }
+            }
+            $proc.StandardInput.Close()
+            if (-not $proc.WaitForExit(60000)) { $proc.Kill(); throw 'MCP server did not exit after stdin closed' }
+            foreach ($id in $ExpectIds) {
+              if (-not $seen.ContainsKey($id)) { throw "MCP request id $id got no response within ${TimeoutSec}s" }
+            }
+            return $seen
+          }
+
+          $init = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"windows-smoke","version":"1.0.0"}}}'
+          $ready = '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}'
+          $list = '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+          $call = '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"orient","arguments":{"task":"windows smoke"}}}'
+
+          # 1. stdio transport, no daemon: handshake, tool surface, in-process dispatch.
+          $r = Invoke-McpSession -ExtraArgs @('mcp','--preset','full') `
+                 -Requests @($init, $ready, $list, $call) -ExpectIds @(1, 2, 3)
+          if ($r[1].result.serverInfo.name -ne 'openlore') {
+            throw "MCP initialize did not return the openlore serverInfo: $($r[1] | ConvertTo-Json -Depth 6)"
+          }
+          if ($r[2].result.tools.name -notcontains 'orient') { throw 'MCP tools/list did not advertise orient' }
+          if (-not $r[3].result) { throw "MCP tools/call orient returned no result: $($r[3] | ConvertTo-Json -Depth 6)" }
+
+          # 2. daemon spawn: --daemon starts a shared `openlore serve` and delegates.
+          Remove-Item .openlore/serve.json,.openlore/serve.log -ErrorAction SilentlyContinue
+          $r = Invoke-McpSession -ExtraArgs @('mcp','--preset','full','--daemon') `
+                 -Requests @($init, $ready, $call) -ExpectIds @(1, 3)
+          if (-not $r[3].result) { throw "MCP --daemon tools/call returned no result: $($r[3] | ConvertTo-Json -Depth 6)" }
+          if (-not (Test-Path .openlore/serve.json)) {
+            throw 'MCP --daemon never spawned a serve daemon on Windows (no .openlore/serve.json)'
+          }
+          if (-not (Test-Path .openlore/serve.log)) {
+            throw 'Windows daemon spawn did not redirect the child output to .openlore/serve.log'
+          }
+
+          # 3. the daemon must OUTLIVE the agent that spawned it — that is the whole
+          #    point of a shared warm process, and the Windows spawn is not detached.
+          $desc = Get-Content .openlore/serve.json -Raw | ConvertFrom-Json
+          $headers = @{}
+          if ($desc.token) { $headers['x-openlore-token'] = $desc.token }
+          $base = "http://$($desc.host):$($desc.port)"
+          try {
+            $health = Invoke-RestMethod -Uri "$base/health" -Headers $headers -TimeoutSec 30
+          } catch {
+            Get-Content .openlore/serve.log -ErrorAction SilentlyContinue
+            throw "Windows serve daemon did not survive the MCP session that spawned it ($base): $_"
+          }
+          if (-not $health.ok) {
+            Get-Content .openlore/serve.log -ErrorAction SilentlyContinue
+            throw "Windows serve daemon /health was not ok: $($health | ConvertTo-Json -Depth 6)"
+          }
+
+          # 4. tool dispatch over HTTP — the transport a second agent reuses.
+          $body = @{ directory = (Get-Location).Path; args = @{ task = 'windows smoke' } } | ConvertTo-Json -Depth 6
+          try {
+            $tool = Invoke-RestMethod -Uri "$base/tool/orient" -Method Post `
+              -Body $body -ContentType 'application/json' -Headers $headers -TimeoutSec 120
+          } catch {
+            Get-Content .openlore/serve.log -ErrorAction SilentlyContinue
+            throw "Windows serve daemon rejected a tool dispatch: $_"
+          }
+          if ($null -eq $tool) { throw 'Windows serve daemon returned no body for orient' }
+
+          node $entry serve --stop --directory .
+
   ci-success:
     name: CI Success
     runs-on: ubuntu-latest
