@@ -55,6 +55,19 @@ it('launches the Pi daemon without a shell and preserves hostile paths as one ar
   expect(source).not.toMatch(/shell\s*:\s*true/);
 });
 
+it('detaches the Pi daemon on every platform, with its output on a real file handle', async () => {
+  // The daemon is shared and must outlive Pi. Windows was once excluded here
+  // and in serve-client; windows-smoke caught the daemon dying with its
+  // spawner. Guard the contract in source, matching the assertion above: the
+  // spawn options are not reachable without launching a real detached daemon.
+  const source = await readFile(new URL('./extension.ts', import.meta.url), 'utf8');
+  expect(source).toMatch(/detached:\s*true/);
+  expect(source).not.toMatch(/detached:\s*!isWin/);
+  // Detaching means no inherited console: stdio:'ignore' (NUL) makes Win10 kill
+  // the daemon before it writes .openlore/serve.json.
+  expect(source).toContain("stdio: ['ignore', logFd, logFd],");
+});
+
 it('does not create a Pi daemon log through an outbound .openlore symlink', async () => {
   const root = await mkdtemp(join(tmpdir(), 'openlore-pi-root-'));
   const outside = await mkdtemp(join(tmpdir(), 'openlore-pi-outside-'));

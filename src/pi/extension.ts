@@ -686,10 +686,13 @@ export async function ensureDaemonResult(
     // Windows 10 kills a child whose stdout/stderr are NUL (stdio:'ignore') —
     // it dies before writing the descriptor (Win11 tolerates it). Give it a
     // real file handle (serve.log) instead; that's the fix validated on Win10.
-    // On Windows we also drop `detached`: it allocates a console window that
-    // windowsHide can't suppress, and Windows doesn't reap the child on parent
-    // exit anyway. macOS/Linux need `detached` (setsid) to outlive us.
-    const isWin = process.platform === 'win32';
+    // `detached` applies on every platform: macOS/Linux need it (setsid) to
+    // outlive us, and so does Windows — this once excluded Windows on the
+    // belief that it "doesn't reap the child on parent exit anyway", which the
+    // windows-smoke job disproved (the daemon died with its spawner, killed,
+    // with no shutdown trace in serve.log). windowsHide keeps DETACHED_PROCESS
+    // from surfacing a console. Caveat: libuv deliberately does not set
+    // CREATE_BREAKAWAY_FROM_JOB, so this does not escape a parent Job Object.
     const openloreDir = safeJoin(cwd, OPENLORE_DIR);
     const logPath = safeJoin(cwd, join(OPENLORE_DIR, 'serve.log'));
     await mkdir(openloreDir, { recursive: true });
@@ -702,7 +705,7 @@ export async function ensureDaemonResult(
         const child = spawn(launch.command, launch.args, {
           stdio: ['ignore', logFd, logFd],
           windowsHide: true,
-          detached: !isWin,
+          detached: true,
         });
         child.once('spawn', () => resolve({ ok: true, child }));
         child.once('error', (error) => {
