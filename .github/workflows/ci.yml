@@ -379,8 +379,14 @@ jobs:
           #    in CI runs Pi's spawn on Windows.
           node $entry serve --stop --directory .
           Remove-Item .openlore/serve.json,.openlore/serve.log -ErrorAction SilentlyContinue
-          $piEntry = Join-Path (npm root -g) 'openlore/dist/pi/extension.js'
-          if (-not (Test-Path $piEntry)) { throw "Pi extension missing from the global install: $piEntry" }
+          $piPackaged = Join-Path (npm root -g) 'openlore/dist/pi/extension.js'
+          if (-not (Test-Path $piPackaged)) { throw "Pi entry missing from the packaged install: $piPackaged" }
+          # Import the checkout's own build, not the global install: the Pi host
+          # supplies @earendil-works/* at runtime, so they are devDependencies here
+          # and resolve only from the checkout's node_modules. Same build either
+          # way - the global install was packed from this dist a few steps up.
+          $piEntry = Join-Path $env:GITHUB_WORKSPACE 'dist/pi/extension.js'
+          if (-not (Test-Path $piEntry)) { throw "Built Pi extension not found: $piEntry" }
           $driver = @'
           import { pathToFileURL } from 'node:url';
 
