@@ -363,6 +363,72 @@ jobs:
           }
           if ($null -eq $tool) { throw 'Windows serve daemon returned no body for orient' }
 
+          # 3. a SECOND client kind reuses that daemon instead of starting its own.
+          #    Plain `mcp` (no --daemon) only ever discovers a running one.
+          $before = (Get-Content .openlore/serve.json -Raw | ConvertFrom-Json).pid
+          $r = Invoke-McpSession -ExtraArgs @('mcp','--preset','full') `
+                 -Requests @($init, $ready, $call) -ExpectIds @(1, 3)
+          if (-not $r[3].result) { throw 'The reusing MCP client got no result from the shared daemon' }
+          $after = (Get-Content .openlore/serve.json -Raw | ConvertFrom-Json).pid
+          if ($after -ne $before) {
+            throw "A second client displaced the shared daemon (pid $before -> $after)"
+          }
+
+          # 4. the Pi extension brings up its own daemon on Windows. Pi has no in-process
+          #    fallback, so this path failing is a hard outage for it - and nothing else
+          #    in CI runs Pi's spawn on Windows.
+          node $entry serve --stop --directory .
+          Remove-Item .openlore/serve.json,.openlore/serve.log -ErrorAction SilentlyContinue
+          $piEntry = Join-Path (npm root -g) 'openlore/dist/pi/extension.js'
+          if (-not (Test-Path $piEntry)) { throw "Pi extension missing from the global install: $piEntry" }
+          $driver = @'
+          import { pathToFileURL } from 'node:url';
+
+          const [entry, cwd, label] = process.argv.slice(2);
+          const pi = await import(pathToFileURL(entry).href);
+
+          // Generous: a cold daemon boot on a Windows runner outruns Pi's 8s default.
+          const result = await pi.ensureDaemonResult(cwd, { timeoutMs: 120000 });
+          if (!result.daemon) {
+            console.error(`${label}: no daemon (${result.failureKind}) - ${result.failure}`);
+            process.exit(1);
+          }
+          if (!pi.isUsableDaemon(result.daemon)) {
+            console.error(`${label}: daemon unusable - ${result.daemon.incompatibility}`);
+            process.exit(1);
+          }
+          const out = await pi.callTool(result.daemon, 'orient', { task: 'windows smoke' }, cwd);
+          if (out === null || out === undefined || out.error) {
+            console.error(`${label}: orient failed - ${JSON.stringify(out)}`);
+            process.exit(1);
+          }
+          console.log(`${label}: ${result.daemon.baseUrl}`);
+          '@
+          Set-Content -Path pi-daemon-probe.mjs -Value $driver
+          node pi-daemon-probe.mjs $piEntry (Get-Location).Path first
+          if ($LASTEXITCODE -ne 0) {
+            Get-Content .openlore/serve.log -ErrorAction SilentlyContinue
+            throw 'The Pi extension could not bring up a daemon on Windows'
+          }
+          if (-not (Test-Path .openlore/serve.json)) { throw 'Pi announced no daemon descriptor' }
+          if (-not (Test-Path .openlore/serve.log)) {
+            throw 'Pi did not redirect its Windows daemon output to .openlore/serve.log'
+          }
+          $piPid = (Get-Content .openlore/serve.json -Raw | ConvertFrom-Json).pid
+
+          # 5. a second Pi client reuses the first one's daemon. This is the shared warm
+          #    process the design promises, and it only holds if the daemon outlived the
+          #    process that launched it.
+          node pi-daemon-probe.mjs $piEntry (Get-Location).Path second
+          if ($LASTEXITCODE -ne 0) {
+            Get-Content .openlore/serve.log -ErrorAction SilentlyContinue
+            throw 'A second Pi client could not reach the daemon the first one launched'
+          }
+          $piPidAgain = (Get-Content .openlore/serve.json -Raw | ConvertFrom-Json).pid
+          if ($piPidAgain -ne $piPid) {
+            throw "The second Pi client started its own daemon instead of reusing (pid $piPid -> $piPidAgain)"
+          }
+
           node $entry serve --stop --directory .
 
   ci-success:
