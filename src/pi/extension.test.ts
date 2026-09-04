@@ -152,6 +152,21 @@ describe('Pi daemon spawn authority', () => {
     };
   }
 
+  /**
+   * Wait for a launched process to leave its sentinel. `ensureDaemonResult` never kills the
+   * child, so on a 'health-timeout' it returns while that child is still booting — asserting
+   * the file immediately races Node's startup against the health deadline.
+   */
+  async function waitForSentinel(path: string, timeoutMs = 5000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      try { return await access(path); } catch {
+        if (Date.now() >= deadline) throw new Error(`launch sentinel never appeared: ${path}`);
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    }
+  }
+
   it('reads the opt-out from the environment and from the pi config key', async () => {
     const dir = await root();
     expect(await piMaySpawnDaemon(dir)).toBe(true);
@@ -276,7 +291,7 @@ describe('Pi daemon spawn authority', () => {
     // The sentinel process is the launch: it exits before health, which is the existing bounded
     // failure path, unchanged.
     expect(['early-exit', 'health-timeout']).toContain(result.daemon === null ? result.failureKind : undefined);
-    await access(sentinel);
+    await waitForSentinel(sentinel);
   });
 });
 
