@@ -121,7 +121,7 @@ function spawnCall(): { command: string; args: string[]; opts: SpawnOptions } {
 }
 
 describe('serve-client daemon spawn', () => {
-  it('on Windows redirects the daemon to .openlore/serve.log and does not detach', async () => {
+  it('on Windows redirects the daemon to .openlore/serve.log and detaches it', async () => {
     root = await mkdtemp(join(tmpdir(), 'openlore-spawn-win-'));
     stubPlatform('win32');
     spawnAnnouncesDaemon();
@@ -134,9 +134,12 @@ describe('serve-client daemon spawn', () => {
     expect(args.slice(1)).toEqual(['serve', '--directory', root, '--preset', 'full']);
     expect(opts.cwd).toBe(root);
 
-    // Windows has no detached-with-ignored-stdio equivalent: the child's output
-    // must land in a file or the daemon blocks on a full pipe buffer.
-    expect(opts.detached).toBe(false);
+    // The daemon is shared, so it must outlive the agent that started it —
+    // windows-smoke caught it dying with its spawner when this was false.
+    expect(opts.detached).toBe(true);
+    // Detaching on Windows means no inherited console, so the child's output
+    // must land in a file: stdio:'ignore' (NUL) makes Win10 kill the daemon
+    // before it writes its descriptor.
     expect(opts.windowsHide).toBe(true);
     expect(Array.isArray(opts.stdio)).toBe(true);
     const stdio = opts.stdio as [string, number, number];
@@ -158,6 +161,7 @@ describe('serve-client daemon spawn', () => {
 
     const { opts } = spawnCall();
     expect(opts.detached).toBe(true);
+    // POSIX needs no log file: a detached child with ignored stdio is safe there.
     expect(opts.stdio).toBe('ignore');
     expect(existsSync(join(root, '.openlore', 'serve.log'))).toBe(false);
   });

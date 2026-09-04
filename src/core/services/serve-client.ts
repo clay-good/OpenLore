@@ -149,7 +149,14 @@ export async function ensureServeDaemon(
       {
         cwd: directory,
         stdio: isWin ? ['ignore', logFd!, logFd!] : 'ignore',
-        detached: !isWin,
+        // Detach on EVERY platform: this daemon is shared, so it must outlive
+        // whichever agent happened to start it. Windows was excluded here on the
+        // belief that "Windows doesn't reap the child on parent exit anyway";
+        // the windows-smoke job disproved that — the daemon died with the MCP
+        // session that spawned it. `windowsHide` keeps DETACHED_PROCESS from
+        // surfacing a console. Caveat: libuv deliberately does NOT set
+        // CREATE_BREAKAWAY_FROM_JOB, so this does not escape a parent Job Object.
+        detached: true,
         windowsHide: true,
       },
     );
