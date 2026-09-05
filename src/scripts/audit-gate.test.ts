@@ -32,7 +32,12 @@ afterEach(async () => {
   for (const path of created.splice(0)) await rm(path, { recursive: true, force: true });
 });
 
-describe('audit-gate malformed report handling', () => {
+// The gate is driven by a fake `npm` on PATH, written as a `#!/bin/sh` script with an exec bit.
+// Windows honours neither: an extension-less file is not executable there, so the shim can never be
+// invoked and every case fails on scaffolding rather than on the behaviour under test. The gate's
+// report parsing is platform-independent and is covered on the Linux and macOS runners. Matches the
+// repo's existing `skipIf(win32)` convention for POSIX-only test scaffolding.
+describe.skipIf(process.platform === 'win32')('audit-gate malformed report handling', () => {
   it('accepts a complete clean npm audit report', async () => {
     const result = await runGate({
       vulnerabilities: {},
