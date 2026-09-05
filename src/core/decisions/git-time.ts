@@ -9,12 +9,10 @@
  * argument-injection guard (`validateGitRef`); adds no new git surface.
  */
 
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { logger } from '../../utils/logger.js';
 import { validateGitRef } from '../drift/git-diff.js';
+import { execFileGit as execFileAsync } from '../../utils/git-exec.js';
 
-const execFileAsync = promisify(execFile);
 
 /**
  * The current `HEAD` commit SHA, or `undefined` when not a git repo / no commits yet

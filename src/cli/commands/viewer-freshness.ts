@@ -1,12 +1,10 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { ARTIFACT_FINGERPRINT } from '../../constants.js';
 import { assessStalenessForAnalysis } from '../../core/services/mcp-handlers/confidence-boundary.js';
 import { validateGitRef } from '../../core/drift/git-diff.js';
+import { execFileGit as execFileAsync } from '../../utils/git-exec.js';
 
-const execFileAsync = promisify(execFile);
 
 export interface ViewerFreshness {
   generatedAt: string;

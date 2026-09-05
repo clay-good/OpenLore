@@ -33,8 +33,6 @@
  *   covers this repo's own branches, local PRs, and supplied descriptors.
  */
 
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { resolve } from 'node:path';
 import { validateDirectory, readCachedContext } from './utils.js';
 import {
@@ -52,8 +50,8 @@ import { CallGraphBuilder, serializeCallGraph } from '../../analyzer/call-graph.
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
 import { detectLanguage } from '../../analyzer/signature-extractor.js';
 import type { ServedContentProvenance } from '../served-content.js';
+import { execFileGit as execFileAsync } from '../../../utils/git-exec.js';
 
-const execFileAsync = promisify(execFile);
 
 // ── caps (mirrors plan_parallel_work: the schedule is O(N), evidence lists O(N²)) ──
 

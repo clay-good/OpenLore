@@ -7,17 +7,15 @@
  * by the `openspec` CLI.
  */
 
-import { execFile } from 'node:child_process';
 import { readFile, readdir } from 'node:fs/promises';
 import { join, relative, sep } from 'node:path';
-import { promisify } from 'node:util';
 import { Command } from 'commander';
 import { glob } from 'glob';
 import { parse as parseYaml } from 'yaml';
 import { safeJoin } from '../../utils/path-confinement.js';
 import { writeStdout } from '../output.js';
+import { execFileGit as execFileAsync } from '../../utils/git-exec.js';
 
-const execFileAsync = promisify(execFile);
 const CHANGE_NAME_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
 
 export const EVIDENCE_DISCLAIMER =

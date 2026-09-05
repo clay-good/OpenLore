@@ -16,16 +16,14 @@
  * computed at analyze time except the optional build commit.
  */
 
-import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { extname, join } from 'node:path';
-import { promisify } from 'node:util';
 import { ARTIFACT_FINGERPRINT, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR } from '../../../constants.js';
 import { gitPathArgs } from '../../../utils/git-args.js';
 import type { IndexIntegrity } from '../../analyzer/index-attestation.js';
 import { repairStatusFor, REPAIR_REASON_DETAIL } from '../cold-start-bootstrap.js';
+import { execFileGit as execFileAsync } from '../../../utils/git-exec.js';
 
-const execFileAsync = promisify(execFile);
 
 // Source extensions whose change can alter the call graph — mirrors the fingerprint
 // source set. A docs-only or config-only change does not stale the graph.

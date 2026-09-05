@@ -7,13 +7,12 @@
  */
 
 import { constants as fsConstants } from 'node:fs';
-import { execFile } from 'node:child_process';
 import { lstat, open, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
-import { promisify } from 'node:util';
 import { ENFORCEMENT_BASELINE_FILENAME, ENFORCEMENT_BASELINE_REL_PATH, OPENLORE_DIR } from '../../../constants.js';
 import { atomicWriteFile } from '../../decisions/atomic-store.js';
 import { acquireLockAt } from '../../runtime/advisory-lock.js';
+import { execFileGit as execFileAsync } from '../../../utils/git-exec.js';
 import type {
   ClassifiedFinding,
   EnforcementPolicy,
@@ -37,7 +36,6 @@ const BASELINE_HEADER = '# OpenLore frozen enforcement baseline v1';
 const MAX_BASELINE_BYTES = 1_048_576;
 const MAX_GITIGNORE_BYTES = 1_048_576;
 const MAX_GIT_OUTPUT_BYTES = 4_096;
-const execFileAsync = promisify(execFile);
 
 export interface EnforcementBaselineSummary {
   path: string;

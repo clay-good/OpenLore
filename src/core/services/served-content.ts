@@ -1,6 +1,5 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
-import { promisify } from 'node:util';
 import { ARTIFACT_ANALYSIS_ORIGIN, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR } from '../../constants.js';
 import type { PendingDecision } from '../../types/index.js';
 
@@ -62,17 +61,16 @@ export async function reviewedFileContentProvenance(
   relativePath: string,
 ): Promise<Extract<ServedContentProvenance, 'reviewed-corpus' | 'local-unreviewed'>> {
   try {
-    const { execFile } = await import('node:child_process');
-    const execFileAsync = promisify(execFile);
+    const { execFileGit } = await import('../../utils/git-exec.js');
     const { resolveBaseRef } = await import('../drift/git-diff.js');
-    const status = await execFileAsync(
+    const status = await execFileGit(
       'git',
       ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--', relativePath],
       { cwd: rootPath },
     );
     if (status.stdout.length > 0) return 'local-unreviewed';
     const baseRef = await resolveBaseRef(rootPath, 'auto');
-    await execFileAsync('git', ['diff', '--quiet', baseRef, '--', relativePath], { cwd: rootPath });
+    await execFileGit('git', ['diff', '--quiet', baseRef, '--', relativePath], { cwd: rootPath });
     return 'reviewed-corpus';
   } catch {
     return 'local-unreviewed';

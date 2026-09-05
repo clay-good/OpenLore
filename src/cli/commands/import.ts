@@ -23,8 +23,6 @@ import { existsSync } from 'node:fs';
 import { readFile, mkdtemp, open, readdir, rm } from 'node:fs/promises';
 import { basename, resolve, join, sep } from 'node:path';
 import { tmpdir } from 'node:os';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { logger } from '../../utils/logger.js';
 import { gitPathArgs } from '../../utils/git-args.js';
 import {
@@ -65,8 +63,8 @@ import { isTestFile } from '../../core/analyzer/test-file.js';
 import { computeProjectFingerprint, fingerprintHashOfConfiguration } from '../../core/services/mcp-handlers/utils.js';
 import { McpWatcher } from '../../core/services/mcp-watcher.js';
 import { atomicWriteFile } from '../../core/decisions/atomic-store.js';
+import { execFileGit as execFileAsync } from '../../utils/git-exec.js';
 
-const execFileAsync = promisify(execFile);
 const GIT_DELTA_MAX_PATHS = 4_096;
 const GIT_DELTA_MAX_PATH_BYTES = 1024 * 1024;
 

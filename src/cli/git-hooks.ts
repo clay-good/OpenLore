@@ -5,8 +5,6 @@
  * and GIT_DIR.  The fallback preserves the old behavior when Git itself is not
  * available, but callers can distinguish that from a Git-verified repository.
  */
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { isAbsolute, basename, dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -16,8 +14,8 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileExists } from '../utils/command-helpers.js';
 import { sanitizeForTerminal } from '../utils/misc.js';
 import { isConfinedPath } from '../utils/path-confinement.js';
+import { execFileGit as execFileAsync } from '../utils/git-exec.js';
 
-const execFileAsync = promisify(execFile);
 
 export interface TrustedHookLauncher { node: string; cli: string }
 

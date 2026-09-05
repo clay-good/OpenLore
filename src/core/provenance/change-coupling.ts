@@ -20,12 +20,10 @@
  * bulk-commit size filter, and presentation as a SIGNAL, never a rule.
  */
 
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { isGitRepository, getRepoPrefix, reframeRepoPath, validateGitRef } from '../drift/git-diff.js';
 import { gitPathArgs } from '../../utils/git-args.js';
+import { execFileGit as execFileAsync } from '../../utils/git-exec.js';
 
-const execFileAsync = promisify(execFile);
 
 // Documented bounds & thresholds.
 export const COUPLING_MAX_COMMITS = 1000;     // history window scanned

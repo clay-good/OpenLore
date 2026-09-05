@@ -22,8 +22,6 @@
  */
 
 import { writeFile } from 'node:fs/promises';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { Command } from 'commander';
 import { gitPathArgs } from '../../utils/git-args.js';
 import { logger, configureLogger } from '../../utils/logger.js';
@@ -39,6 +37,7 @@ import { frameServedContent, type ServedContentProvenance } from '../../core/ser
 import { ENFORCEMENT_BASELINE_REL_PATH, OPENLORE_CONFIG_REL_PATH } from '../../constants.js';
 import type { GovernanceFinding } from '../../core/services/mcp-handlers/enforcement-policy.js';
 import type { OpenLoreConfig } from '../../types/index.js';
+import { execFileGit as execFileAsync } from '../../utils/git-exec.js';
 
 /** Hidden HTML marker the GitHub Action greps for to find-and-update its single
  * sticky comment (create once, update in place, never duplicate). MUST be the first
@@ -89,7 +88,6 @@ export interface ReviewBriefing {
   status: 'ok' | 'unavailable';
 }
 
-const execFileAsync = promisify(execFile);
 
 /** True when two git refs resolve to the same commit. On any git error returns false
  * (conservative — we'd rather emit the divergence caveat than silently hide it). */

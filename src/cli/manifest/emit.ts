@@ -9,7 +9,6 @@
  * arrays are sorted, so re-emitting on the same graph + commit is byte-stable.
  */
 
-import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -23,6 +22,7 @@ import {
   ARTIFACT_ROUTE_INVENTORY,
 } from '../../constants.js';
 import type { FunctionNode, SerializedCallGraph } from '../../core/analyzer/call-graph.js';
+import { execFileGitSync } from '../../utils/git-exec.js';
 import { derivePublicSymbols, type ExportEntry, type PublicSymbol } from './detect/public-symbols.js';
 import { deriveHttpRoutes, type ManifestRoute, type RouteInventoryEntry } from './detect/http-routes.js';
 import {
@@ -72,7 +72,7 @@ export interface Manifest {
 
 function git(cwd: string, args: string[]): string | null {
   try {
-    return execFileSync('git', args, { cwd, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim() || null;
+    return execFileGitSync('git', args, { cwd, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim() || null;
   } catch {
     return null;
   }

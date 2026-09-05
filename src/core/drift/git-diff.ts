@@ -5,17 +5,16 @@
  * working tree and a base ref (typically main/master).
  */
 
-import { execFile, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { lstat, opendir, realpath, stat } from 'node:fs/promises';
 import { extname, basename, posix, resolve } from 'node:path';
-import { promisify } from 'node:util';
 import type { ChangedFile } from '../../types/index.js';
 import { logger } from '../../utils/logger.js';
 import { DIFF_MAX_CHARS } from '../../constants.js';
 import { gitPathArgs } from '../../utils/git-args.js';
 import { readFileConfined, safeJoin } from '../../utils/path-confinement.js';
+import { execFileGit as execFileAsync } from '../../utils/git-exec.js';
 
-const execFileAsync = promisify(execFile);
 
 /** Git's well-known empty tree SHA — used as base ref for single-commit repos */
 const GIT_EMPTY_TREE_SHA = '4b825dc642cb6eb9a060e54bf899d15f71049056';

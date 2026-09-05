@@ -10,11 +10,10 @@
  */
 
 import { Command } from 'commander';
-import { spawn, execFile } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { existsSync, readFileSync } from 'node:fs';
-import { promisify } from 'node:util';
 import { logger } from '../../utils/logger.js';
 import {
   formatPlatformCommand,
@@ -22,9 +21,9 @@ import {
   type PlatformCommandRuntime,
 } from '../../utils/platform-command.js';
 import { fetchLatestVersion, isNewer } from '../../core/services/update-notifier.js';
+import { execFileGit as execFileAsync } from '../../utils/git-exec.js';
 
 const require = createRequire(import.meta.url);
-const execFileAsync = promisify(execFile);
 
 export type InstallMethod = 'homebrew' | 'npm-global' | 'npm-local' | 'npx' | 'unknown';
 
