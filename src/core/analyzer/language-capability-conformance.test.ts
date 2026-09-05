@@ -18,6 +18,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { mkdtempSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CallGraphBuilder } from './call-graph.js';
@@ -97,6 +98,39 @@ describe('language conformance — grammar availability (diagnostic, runs first)
       + `optional dependency rather than a code defect: ${unavailable.join(', ')}. `
       + `Reinstall (npm ci) and re-run before investigating the extractor.`,
     ).toEqual([]);
+  });
+
+  // Dart and Lua have no host-ABI-compatible native build, so they are the only two
+  // languages that reach the WASM lane: `tree-sitter-wasms` binaries loaded through
+  // `web-tree-sitter`. Those two packages are versioned independently and are NOT
+  // freely upgradable together.
+  //
+  // Measured 2026-09-05: `web-tree-sitter` 0.25.10 loads them; 0.26.0 and every version
+  // after it reject them outright. The binaries in `tree-sitter-wasms@0.1.13` — the
+  // newest published build, with no successor — carry an emscripten dylink section the
+  // 0.26+ loader refuses. It throws an Error with an EMPTY message, so the only symptom
+  // is Dart and Lua quietly dropping out of the capability matrix while it still claims
+  // them. That is exactly the over-claim this file exists to prevent, and it cost a day
+  // to trace, so the constraint is asserted here rather than left as a comment.
+  //
+  // Lift this only when `tree-sitter-wasms` publishes binaries built for the new loader.
+  it('keeps web-tree-sitter on a version whose loader accepts the pinned tree-sitter-wasms binaries', () => {
+    const pkg = createRequire(import.meta.url)('../../../package.json') as {
+      dependencies: Record<string, string>;
+    };
+    const wts = pkg.dependencies['web-tree-sitter'];
+    const wasms = pkg.dependencies['tree-sitter-wasms'];
+    const [major, minor] = wts.replace(/^\D+/, '').split('.').map(Number);
+
+    expect(
+      major === 0 && minor <= 25,
+      `web-tree-sitter is pinned at ${wts} with tree-sitter-wasms at ${wasms}. Every `
+      + `web-tree-sitter >= 0.26 rejects the tree-sitter-wasms 0.1.13 binaries (empty-message `
+      + `throw from its dylink parser), which silently removes Dart and Lua from the call `
+      + `graph while the capability matrix still claims them. Upgrade only alongside a `
+      + `tree-sitter-wasms release built for the new loader, and re-run this suite to confirm `
+      + `Dart and Lua still load.`,
+    ).toBe(true);
   });
 });
 

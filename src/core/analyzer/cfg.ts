@@ -139,6 +139,17 @@ interface CfgLangSpec {
   throwTypes: Set<string>;
   /** Statement-container (compound) node types whose children are statements. */
   blockTypes: Set<string>;
+  /**
+   * Grammar-only wrapper nodes that sit between a statement container and its
+   * statements, carrying no semantics of their own.
+   *
+   * tree-sitter-go 0.25 introduced `statement_list` under `block` and under each
+   * switch/select case. It is neither a statement nor a lexical scope, so it is
+   * FLATTENED here rather than listed in {@link blockTypes}: a block type opens a
+   * scope when `blockScoped` is set, and a spurious scope level would change which
+   * scope owns a `:=` declaration and break shadow resolution.
+   */
+  transparentTypes?: Set<string>;
   /** Plain assignment node types (target = value). */
   assignTypes: Set<string>;
   /** Augmented assignment node types (target op= value) — target is both use+def. */
@@ -271,6 +282,8 @@ const GO_SPEC: CfgLangSpec = {
   continueTypes: new Set(['continue_statement']),
   throwTypes: new Set([]),
   blockTypes: new Set(['block']),
+  // tree-sitter-go 0.25 wraps a block's (and each case's) statements in this node.
+  transparentTypes: new Set(['statement_list']),
   assignTypes: new Set(['assignment_statement']),
   augAssignTypes: new Set([]),
   declTypes: new Set(['short_var_declaration', 'var_spec', 'const_spec']),
@@ -871,7 +884,7 @@ class CfgBuilder {
 
     // Compound block (bare `{ ... }`) — recurse into its statements.
     if (spec.blockTypes.has(t)) {
-      return this.processSeq(stmt.namedChildren, current, loop);
+      return this.processSeq(flattenTransparent(stmt.namedChildren, spec), current, loop);
     }
 
     // Straight-line statement: record defs/uses into the current block.
@@ -1270,7 +1283,7 @@ class CfgBuilder {
     }
     // TS switch_case/switch_default, C/C++ case_statement, Go expression_case/etc.
     const value = cs.childForFieldName('value');
-    const stmts = cs.namedChildren.filter(c => !sameNode(c, value));
+    const stmts = flattenTransparent(cs.namedChildren.filter(c => !sameNode(c, value)), this.spec);
     return { labels: value ? [value] : [], stmts, isDefault: t.includes('default') || (!value && (t === 'case_statement' || t === 'switch_case')) };
   }
 
@@ -1561,7 +1574,7 @@ class CfgBuilder {
 
   /** Children of a compound/block node, or the node itself wrapped as one statement. */
   private stmtChildren(node: CfgNode): CfgNode[] {
-    if (this.spec.blockTypes.has(node.type)) return node.namedChildren;
+    if (this.spec.blockTypes.has(node.type)) return flattenTransparent(node.namedChildren, this.spec);
     return [node];
   }
 
@@ -1981,6 +1994,20 @@ function collectDeclNames(node: CfgNode, spec: CfgLangSpec, into: Set<string>): 
   const name = node.childForFieldName('name') ?? node.childForFieldName(spec.leftField);
   if (name) { collectIdentLeaves(name, spec, into); return; }
   for (const c of node.namedChildren) if (spec.identTypes.has(c.type)) into.add(c.text);
+}
+
+/**
+ * Statement list with grammar-only wrappers flattened away — see
+ * {@link CfgLangSpec.transparentTypes}. A no-op for languages that declare none.
+ */
+function flattenTransparent(nodes: CfgNode[], spec: CfgLangSpec): CfgNode[] {
+  if (!spec.transparentTypes?.size) return nodes;
+  const out: CfgNode[] = [];
+  for (const n of nodes) {
+    if (spec.transparentTypes.has(n.type)) out.push(...flattenTransparent(n.namedChildren, spec));
+    else out.push(n);
+  }
+  return out;
 }
 
 /** Does this node open a new lexical scope (in the given language)? */
