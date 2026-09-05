@@ -794,7 +794,16 @@ async function runServe(options: ServeCliOptions): Promise<ServeOutcome> {
           ? { ok: true, shuttingDown: true }
           : { error: 'shutdown began, but the draining descriptor could not be published' },
       );
-      void shutdown;
+      // SIGINT/SIGTERM and the idle-timeout path both exit via exitAfterTeardown() once
+      // teardown() settles; this path used to just fire teardown() and return, trusting the
+      // event loop to drain naturally. On Windows that isn't reliable — teardown() can finish
+      // (watcher closed, descriptor unlinked) while some handle still holds the process open,
+      // leaving a zombie daemon behind even though the client sees success (change:
+      // extend-api-for-supervising-hosts). Exit explicitly here too, once the response has
+      // actually gone out so the client still gets its 202 first.
+      res.on('finish', () => {
+        void shutdown.then(() => process.exit(0));
+      });
       return;
     }
 

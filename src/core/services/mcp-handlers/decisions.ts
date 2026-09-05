@@ -79,7 +79,8 @@ async function spawnConsolidateBackground(rootPath: string): Promise<Consolidate
     };
     let child;
     try {
-      child = spawn(cmd, args, { cwd: rootPath, detached: true, stdio: 'ignore' });
+      // windowsHide: detached alone surfaces a console window on Windows.
+      child = spawn(cmd, args, { cwd: rootPath, detached: true, stdio: 'ignore', windowsHide: true });
     } catch (err) {
       // Synchronous throw (rare — e.g. invalid args) is contained, never rethrown.
       settle({ outcome: 'failed', detail: (err as Error).message });

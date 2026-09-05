@@ -80,7 +80,8 @@ function openBrowser(url: string): void {
 
   const args = platform === 'win32' ? ['/c', 'start', '', url] : [url];
 
-  const child = spawn(cmd, args, { stdio: 'ignore', detached: true });
+  // windowsHide: without it, the `cmd /c start` launcher itself flashes a console window.
+  const child = spawn(cmd, args, { stdio: 'ignore', detached: true, windowsHide: true });
   child.unref();
 }
 
