@@ -33,7 +33,10 @@ import { STANDING_CONTEXT_BUDGETS, TOOL_DEFINITIONS, TOOL_PRESETS, toolAnnotatio
 
 // src/<this> → repo root is one level up.
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-const read = (rel: string) => readFileSync(join(REPO_ROOT, rel), 'utf-8');
+// Line endings normalised at the read. Git checks these docs out with CRLF on Windows, so an
+// exact-match assertion against a `\n`-joined expectation compares the same content and fails
+// on the separator alone. Every claim here is about content, never about line endings.
+const read = (rel: string) => readFileSync(join(REPO_ROOT, rel), 'utf-8').replace(/\r\n/g, '\n');
 
 // The badge reads "18 languages + 12 IaC". The "18" is the general-purpose code languages —
 // NOT `CODE_LANGUAGES.length` (which is 20 because Terraform and Bicep are extension-detected

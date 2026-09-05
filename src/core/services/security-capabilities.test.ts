@@ -27,6 +27,10 @@ function surfaceSources(): string[] {
   }
   return out;
 }
+/** Repo-relative, POSIX-spelled — these values are compared against `/`-spelled expectations,
+ *  and `join`/`readdir` yield `\\` on Windows. */
+const toRepoPath = (abs: string): string => abs.replace(SRC, 'src').replace(/\\/g, '/');
+
 const SURFACE = surfaceSources();
 function surfaceText(): string {
   return SURFACE.map(f => readFileSync(f, 'utf-8')).join('\n');
@@ -86,7 +90,8 @@ describe('Capability declaration — matches observed behavior (mcp-security)', 
     const SHELL_INVOKE = /(?:exec|execFile|execFileSync|spawn|spawnSync)\(\s*['"`](?:\/bin\/)?(?:sh|bash|zsh|dash)['"`]\s*,\s*\[\s*['"`]-c['"`]/;
     for (const f of SURFACE) {
       const src = readFileSync(f, 'utf-8');
-      if (/shell\s*:\s*true/.test(src) || SHELL_INVOKE.test(src)) offenders.push(f.replace(SRC, 'src'));
+      // POSIX-normalised: compared against `/`-spelled expectations below.
+      if (/shell\s*:\s*true/.test(src) || SHELL_INVOKE.test(src)) offenders.push(toRepoPath(f));
     }
     expect(offenders, `declaration claims no shell on surface, but found: ${offenders.join(', ')}`).toEqual([]);
 
@@ -99,7 +104,7 @@ describe('Capability declaration — matches observed behavior (mcp-security)', 
       ...SURFACE,
       join(SRC, 'utils', 'platform-command.ts'),
     ].filter((file) => /['"]\/c['"]/.test(readFileSync(file, 'utf-8')))
-      .map((file) => file.replace(SRC, 'src'))
+      .map((file) => toRepoPath(file))
       .sort();
     expect(cmdShellFiles).toEqual([
       'src/cli/commands/view.ts',

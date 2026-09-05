@@ -195,6 +195,55 @@ jobs:
       - name: Run deterministic integration tests
         run: npm run test:integration:ci
 
+  windows-unit:
+    name: Windows Unit Tests
+    runs-on: windows-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - run: npm ci
+
+      # Before this job, exactly ONE test file ran on Windows in CI, so every path, filesystem and
+      # subprocess suite — where a Windows-only defect actually lives — went unexercised on the
+      # platform (issue #434).
+      #
+      # The WHOLE suite runs here; nothing is filtered. The known-failing files are judged against
+      # .github/windows-unit-exclusions.json in the next step instead of being skipped, so one run
+      # answers both "did anything new break?" and "has anything on the list been fixed?". Running
+      # them costs about a minute, and it is the only way the two answers cannot contradict
+      # each other.
+      #
+      # --retry=2: a Windows runner is slower than the Linux one, and a handful of fixture-heavy
+      # suites sit close to the 30s timeout there. Retries absorb that without weakening the gate —
+      # a deterministic failure still fails all three attempts. The Linux job runs with no retries.
+      - name: Unit suite
+        shell: pwsh
+        run: |
+          npx vitest run src examples --retry=2 --reporter=json --outputFile=windows-unit.json
+          # The suite is EXPECTED to exit non-zero while the deny-list is non-empty; the report,
+          # not the exit code, is the verdict.
+          exit 0
+
+      - name: Judge the run against the tracked backlog
+        shell: pwsh
+        run: node scripts/windows-unit-report.mjs windows-unit.json
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: windows-unit-report
+          path: windows-unit.json
+
   windows-smoke:
     name: Windows Smoke
     runs-on: windows-latest
@@ -459,7 +508,7 @@ jobs:
   ci-success:
     name: CI Success
     runs-on: ubuntu-latest
-    needs: [lint, test, build, integration, node-floor, windows-smoke]
+    needs: [lint, test, build, integration, node-floor, windows-smoke, windows-unit]
     if: always()
     permissions:
       contents: read
@@ -471,7 +520,8 @@ jobs:
              [[ "${{ needs.build.result }}" != "success" ]] || \
              [[ "${{ needs.integration.result }}" != "success" ]] || \
              [[ "${{ needs.node-floor.result }}" != "success" ]] || \
-             [[ "${{ needs.windows-smoke.result }}" != "success" ]]; then
+             [[ "${{ needs.windows-smoke.result }}" != "success" ]] || \
+             [[ "${{ needs.windows-unit.result }}" != "success" ]]; then
             echo "One or more required jobs failed"
             exit 1
           fi

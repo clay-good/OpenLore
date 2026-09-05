@@ -164,8 +164,11 @@ describe('telemetry identity', () => {
     });
 
     const [event] = readEvents('mcp');
-    expect(event['error']).toContain('src/payments.ts:12');
-    expect(event['error']).toContain('~/private/outside.ts');
+    // Platform-spelled, like the `module` assertion below: redaction strips the absolute PREFIX and
+    // leaves the remainder as the OS spelled it, so on Windows this is `src\payments.ts`. Hardcoding
+    // `/` here (while `module` used `join`) made the same behaviour pass and fail in one test.
+    expect(event['error']).toContain(`${join('src', 'payments.ts')}:12`);
+    expect(event['error']).toContain(`~/${join('private', 'outside.ts')}`);
     expect(event['module']).toBe(join('src', 'payments.ts'));
     expect(event['untouched']).toBe(projectFile);
   });

@@ -16,6 +16,7 @@ New here? Start with [install.md](install.md) — one command wires your agent a
 | Configure `.openlore/config.json` | **[configuration.md](configuration.md)** |
 | Choose / configure an LLM provider (optional) | **[providers.md](providers.md)** |
 | Fix a setup problem | [TROUBLESHOOTING.md](TROUBLESHOOTING.md) (and `openlore doctor`) |
+| Know what is verified on Windows | [windows-support.md](windows-support.md) |
 
 ## Navigate the code (the read face)
 
