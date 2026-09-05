@@ -28,7 +28,7 @@
  */
 
 import { constants } from 'node:fs';
-import { open, stat, type FileHandle } from 'node:fs/promises';
+import { lstat, open, stat, type FileHandle } from 'node:fs/promises';
 
 /** Format an identity stamp from a stat result: `dev:ino:mtimeNs:ctimeNs:size`. */
 function stampOf(s: { dev: bigint; ino: bigint; mtimeNs: bigint; ctimeNs: bigint; size: bigint }): string {
@@ -91,13 +91,18 @@ export interface StampedArtifact {
  *    cache store the old content under the new file's stamp, so every later call
  *    serves stale content believing it current. An `fstat` on the open descriptor,
  *    plus a pre/post identity check, cannot mis-attribute that way.
- *  - **No symlink, no special file.** `O_NOFOLLOW` plus an `isFile` check, so a
- *    symlink committed into `.openlore/analysis/` cannot redirect the read and a FIFO
- *    cannot stall the handler.
+ *  - **No symlink, no special file.** A symlink committed into `.openlore/analysis/`
+ *    must not redirect the read, and a FIFO must not stall the handler. `O_NOFOLLOW`
+ *    is the race-free form and is what POSIX honours; libuv does NOT implement it on
+ *    Windows, where the flag is silently ignored and the link is followed. So the
+ *    check is also made explicitly with `lstat` — a check-then-open, and therefore
+ *    not race-free, but the difference between refusing a symlink and following one.
+ *    The `isFile` check on the open descriptor rejects FIFOs and directories.
  */
 async function readArtifactBounded(path: string): Promise<StampedArtifact | null> {
   let handle: FileHandle | undefined;
   try {
+    if ((await lstat(path)).isSymbolicLink()) return null;
     handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
     const opened = await handle.stat({ bigint: true });
     if (!opened.isFile() || opened.size > BigInt(MAX_ARTIFACT_BYTES)) return null;
