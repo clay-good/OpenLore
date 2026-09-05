@@ -208,11 +208,6 @@
       "suspectedProductionBug": true
     },
     {
-      "file": "src/core/drift/git-diff-corpus-materialization.test.ts",
-      "failingTests": 1,
-      "reason": "real-filesystem fixture: POSIX-only shim, exec bit, or temp-dir teardown semantics"
-    },
-    {
       "file": "src/core/drift/spec-mapper.test.ts",
       "failingTests": 1,
       "reason": "spec-mapper emits decision paths with platform separators",
