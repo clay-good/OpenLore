@@ -1276,7 +1276,10 @@ describe('handleGetMinimalContext', () => {
     expect(JSON.stringify(result)).not.toContain(secret);
   });
 
-  it('does not read a node path through an in-root symlink that escapes the root', async () => {
+  // Creating a symlink on Windows needs elevated privileges / Developer Mode, so
+  // the scenario can't even be set up on a stock runner — matches this repo's
+  // existing skipIf(win32) convention for symlink-confinement tests.
+  it.skipIf(process.platform === 'win32')('does not read a node path through an in-root symlink that escapes the root', async () => {
     const outside = await createTmpDir();
     const secret = 'outside-symlink-secret';
     const secretPath = join(outside, 'secret.ts');
