@@ -59,8 +59,14 @@ describe('Capability declaration — matches observed behavior (mcp-security)', 
   it('declared subprocess spawns are exercised by real code (git)', () => {
     const bins = decl.capabilities.subprocess.spawns.map((s: { bin: string }) => s.bin);
     expect(bins.some((b: string) => b === 'git')).toBe(true);
-    // git is genuinely spawned somewhere on the surface.
-    expect(surfaceText()).toMatch(/(?:execFile|execFileSync|spawn|spawnSync)\(\s*['"`]git['"`]/);
+    // git is genuinely spawned somewhere on the surface. The call SHAPE moved behind one home —
+    // every git spawn now routes through src/utils/git-exec.ts so `windowsHide` is applied in a
+    // single place (cli: SubprocessesNeverSurfaceAConsoleWindow), reaching the surface under the
+    // helper names or a local alias of them. The capability claim is unchanged: git is still
+    // spawned. Longest-first alternation, so `execFile` cannot match the prefix of `execFileGit`.
+    expect(surfaceText()).toMatch(
+      /\b(?:execFileGitSync|execFileGit|spawnGitSync|spawnGit|execFileAsync|execFileSync|execFile|spawnSync|spawn)\(\s*['"`]git['"`]/,
+    );
   });
 
   it('declared egress hosts include the real configured-provider defaults', () => {

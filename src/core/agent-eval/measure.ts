@@ -89,7 +89,7 @@ export const claudeRunner: AgentRunner = (input) => {
   ];
   if (input.systemPrompt) args.push('--append-system-prompt', input.systemPrompt);
   try {
-    return execFileSync('claude', args, { cwd: input.cwd, encoding: 'utf-8', maxBuffer: 64 * 1024 * 1024 });
+    return execFileSync('claude', args, { cwd: input.cwd, encoding: 'utf-8', maxBuffer: 64 * 1024 * 1024, windowsHide: true });
   } catch (err) {
     // Some non-zero exits still emit the result JSON on stdout.
     const e = err as { stdout?: Buffer | string };

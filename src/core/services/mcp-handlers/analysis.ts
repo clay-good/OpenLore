@@ -19,7 +19,7 @@ import { join, relative, sep } from 'node:path';
 function servedRelPath(fromDir: string, target: string): string {
   return relative(fromDir, target).split(sep).join('/');
 }
-import { spawnSync } from 'node:child_process';
+import { spawnGitSync } from '../../../utils/git-exec.js';
 import { mkdtempSync, readFileSync, rmSync, openSync, closeSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { escapeRegExp } from '../../../utils/misc.js';
@@ -1628,9 +1628,9 @@ function runGit(args: string[], cwd: string): Promise<string> {
     const errPath = join(tmp, 'e');
     const outFd = openSync(outPath, 'w');
     const errFd = openSync(errPath, 'w');
-    let r: ReturnType<typeof spawnSync>;
+    let r: ReturnType<typeof spawnGitSync>;
     try {
-      r = spawnSync('git', args, {
+      r = spawnGitSync('git', args, {
         cwd,
         stdio: ['ignore', outFd, errFd],
         env: { ...process.env, PATH },

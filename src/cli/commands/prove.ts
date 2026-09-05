@@ -120,7 +120,7 @@ export async function loadProveEligibility(absDir: string): Promise<ReturnType<t
 }
 
 function claudeAvailable(): boolean {
-  try { execFileSync('claude', ['--version'], { stdio: 'ignore' }); return true; } catch { return false; }
+  try { execFileSync('claude', ['--version'], { stdio: 'ignore', windowsHide: true }); return true; } catch { return false; }
 }
 
 /** Best-effort short repo SHA for scorecard provenance; null when unavailable. */

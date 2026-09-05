@@ -801,8 +801,17 @@ async function runServe(options: ServeCliOptions): Promise<ServeOutcome> {
       // leaving a zombie daemon behind even though the client sees success (change:
       // extend-api-for-supervising-hosts). Exit explicitly here too, once the response has
       // actually gone out so the client still gets its 202 first.
+      // `finally`, not `then`. teardown()'s awaited steps are individually guarded (the watcher
+      // stop is `.catch`ed, drainServeRebuilds uses allSettled), but its synchronous ones are not:
+      // a throw from watchRepair.cancel(), unregisterRepairHost() or releaseContextCache() rejects
+      // teardownPromise. On `then` that skips process.exit entirely AND surfaces as an unhandled
+      // rejection — the zombie daemon returns in precisely the failure case this code exists to
+      // prevent, after the client has already been told the stop succeeded. Defensive rather than a
+      // reproduced failure, but exiting regardless is the right call either way: the draining
+      // descriptor is published before any of this runs, so the daemon is already unreachable and
+      // all that remains is whether its OS process lingers.
       res.on('finish', () => {
-        void shutdown.then(() => process.exit(0));
+        void shutdown.finally(() => process.exit(0));
       });
       return;
     }
@@ -1105,8 +1114,13 @@ async function runServe(options: ServeCliOptions): Promise<ServeOutcome> {
     return teardownPromise;
   };
   async function exitAfterTeardown(): Promise<void> {
-    await teardown();
-    process.exit(0);
+    // try/finally for the same reason as the /shutdown path below: if teardown() rejects on one of
+    // its unguarded synchronous steps, a SIGINT/SIGTERM'd daemon must still exit rather than linger.
+    try {
+      await teardown();
+    } finally {
+      process.exit(0);
+    }
   }
   const onSigInt  = () => void exitAfterTeardown();
   const onSigTerm = () => void exitAfterTeardown();

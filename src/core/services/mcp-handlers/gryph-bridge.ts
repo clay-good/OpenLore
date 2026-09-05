@@ -156,6 +156,8 @@ function isGryphAvailable(): boolean {
   const result = spawnSync('which', ['gryph'], {
     timeout: GRYPH_DETECT_TIMEOUT_MS,
     stdio: ['ignore', 'pipe', 'ignore'],
+    // Runs from the MCP daemon, which has no console of its own on Windows.
+    windowsHide: true,
   });
   const fromPath = result.status === 0 ? result.stdout?.toString().trim() : '';
   if (fromPath) {
@@ -199,7 +201,8 @@ function queryGryphSync(action: 'exec' | 'write', since: string): unknown[] {
   const result = spawnSync(
     _gryphBin,
     ['query', '--format', 'json', '--action', action, '--since', since],
-    { timeout: GRYPH_TIMEOUT_MS, stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf-8' },
+    // windowsHide: same console-less daemon parent as the detached async query below.
+    { timeout: GRYPH_TIMEOUT_MS, stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf-8', windowsHide: true },
   );
   if (result.status !== 0 || !result.stdout) return [];
   try {
