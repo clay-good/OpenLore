@@ -60,7 +60,12 @@ describe('harden-artifact-write-atomicity: every artifact writer adopts the shar
   it('the watcher fences SQLite and JSON as one change generation, plus the deletion lane', () => {
     const src = read(WATCHER);
     expect(src).toMatch(/import\s*\{\s*acquireAnalysisLock\s*\}\s*from\s*['"]\.\.\/runtime\/advisory-lock\.js['"]/);
-    const acquire = src.indexOf('acquireAnalysisLock(this.outputPath)');
+    // Anchor to the CHANGE lane's own acquisition. The abandoned-events
+    // disclosure lane (issue #451) also fences a stale marking and is defined
+    // earlier in the file, so "the first acquire" no longer names this lane.
+    const changeLane = src.indexOf('private async handleBatch');
+    expect(changeLane).toBeGreaterThan(-1);
+    const acquire = src.indexOf('acquireAnalysisLock(this.outputPath)', changeLane);
     const sqlite = src.indexOf('EdgeStore.open(EdgeStore.dbPath(this.outputPath))', acquire);
     const publication = src.indexOf('await this.republishGeneration()', sqlite);
     const release = src.indexOf('await releaseAnalysis()', publication);
@@ -68,8 +73,9 @@ describe('harden-artifact-write-atomicity: every artifact writer adopts the shar
     expect(sqlite).toBeGreaterThan(acquire);
     expect(publication).toBeGreaterThan(sqlite);
     expect(release).toBeGreaterThan(publication);
-    // Change, deletion, and bulk-fallback lanes each fence their SQLite writes.
-    expect(src.match(/acquireAnalysisLock\(this\.outputPath\)/g)).toHaveLength(3);
+    // Change, deletion, bulk-fallback and abandoned-events lanes each fence
+    // their SQLite writes.
+    expect(src.match(/acquireAnalysisLock\(this\.outputPath\)/g)).toHaveLength(4);
   });
 
   it('persistContext itself stays lock-free (it runs inside a lane that already holds the lock)', () => {

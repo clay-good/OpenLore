@@ -128,6 +128,48 @@ const GRAPH_STALE_DEBOUNCE_MS = 1500;
 /** Additional attempts after SQLite's own busy_timeout expires. */
 const SQLITE_BUSY_RETRY_DELAYS_MS = [50, 150, 450] as const;
 
+/**
+ * How many times one file event is re-queued after a failed flush before the
+ * watcher gives up on it (change: harden-watcher-flush-durability, issue #451).
+ *
+ * A drained batch used to be unrecoverable: `flush` empties `pending` before the
+ * first await, and only two error classes — a spec-index lock timeout and a busy
+ * SQLite — put the paths back. Every other failure (a Windows `EPERM` on the
+ * artifact rename, a sharing violation on the lock's hard link, ENOSPC) reached
+ * one stderr line and the change was gone until the next full `analyze`. A
+ * transient error must cost freshness for one debounce, not until someone
+ * notices. The bound is what keeps a DETERMINISTIC failure from becoming a hot
+ * retry loop: after it, the watcher discloses the drop and — where a graph store
+ * exists — records the files as stale, so the staleness outlives the log line.
+ */
+const WATCH_MAX_EVENT_RETRIES = 3;
+
+/**
+ * How long a single flush may run before the watcher says so, once, on stderr.
+ *
+ * `acquireAnalysisLock` waits without bound by design (a serialization promise
+ * must not be abandoned), and a live-but-wedged holder is never stolen. The
+ * failure mode is therefore a flush that is neither finished nor failed: every
+ * later flush no-ops on the single-flight guard, `pending` grows, and nothing is
+ * ever written. Silence there is the exact defect issue #451 names, so the wait
+ * is disclosed rather than shortened.
+ */
+const WATCH_FLUSH_STALL_DISCLOSURE_MS = 30_000;
+
+/**
+ * True when a read failed because the file is not there any more.
+ *
+ * The watch lane reads a path some milliseconds after the event that named it,
+ * so "it was deleted in between" is expected and must be skipped in silence.
+ * Everything else — a confinement or descriptor-identity rejection, a sharing
+ * violation, a permission error — is a read that COULD have succeeded, and
+ * treating it as a deletion is what let a change disappear with no signal.
+ */
+function isMissingFileError(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException | undefined)?.code;
+  return code === 'ENOENT' || code === 'ENOTDIR';
+}
+
 function isSqliteBusyError(err: unknown): boolean {
   const message = (err as Error | undefined)?.message?.toLowerCase() ?? '';
   return /sqlite_(?:busy|locked)|database(?: table)? is (?:locked|busy)/.test(message);
@@ -321,6 +363,8 @@ export class McpWatcher {
   private stopping = false;                          // reject events once shutdown begins
   private vcsBulkFlag = false;                       // set by the .git ref watcher
   private vcsSettling = false;                       // preserve the VCS settle window across file events
+  private eventRetries = new Map<string, number>();  // abs path → consecutive failed flush attempts
+  private flushStallTimer?: ReturnType<typeof setTimeout>; // discloses a flush that neither ends nor fails
   private appliedClosureFiles?: Set<string>;         // populated only by explicit repository-delta callers
 
   // ── Embedding lane (Step 4 — decoupled, lower priority) ─────────────────────
@@ -481,7 +525,9 @@ export class McpWatcher {
     if (this.maxBatchTimer) clearTimeout(this.maxBatchTimer);
     if (this.embedTimer) clearTimeout(this.embedTimer);
     if (this.graphStaleTimer) clearTimeout(this.graphStaleTimer);
+    if (this.flushStallTimer) clearTimeout(this.flushStallTimer);
     this.debounceTimer = this.maxBatchTimer = this.embedTimer = this.graphStaleTimer = undefined;
+    this.flushStallTimer = undefined;
     this.graphStaleDeadline = undefined;
     // Close event sources before joining the active flush. Once close resolves,
     // the stopping guard below makes the pending sets a finite shutdown queue.
@@ -526,6 +572,14 @@ export class McpWatcher {
         await this.flushBatchWithBusyRetry(shutdownBatch, shutdownDeletions, { syncFlush: true });
       } catch (err) {
         process.stderr.write(`[mcp-watcher] shutdown flush error: ${(err as Error).message}\n`);
+        // Put the work back before the disclosure below counts it. Dropping it
+        // here made the "still deferred" line read an empty queue and stay silent
+        // in exactly the case where it mattered most: the batch was not deferred,
+        // it was lost, and shutdown reported a clean stop (issue #451).
+        for (const path of shutdownDeletions) this.pendingDeletions.add(path);
+        for (const path of shutdownBatch) {
+          if (!this.pendingDeletions.has(path)) this.pending.add(path);
+        }
       }
     }
     if (this.pending.size > 0 || this.pendingDeletions.size > 0) {
@@ -601,12 +655,29 @@ export class McpWatcher {
    * Drain the pending set into a single batch. Single-flight: if a flush is
    * already running, leave the new paths in `pending` and reschedule once it
    * finishes — never interleave two flushes.
+   *
+   * DURABILITY (issue #451): the drain is destructive — `pending` is emptied
+   * before the first await — so every exit from the batch must either commit the
+   * work, re-queue it, or say out loud that it was dropped. There is no fourth
+   * option in which a change simply disappears.
    */
   private flush(): void {
     if (this.debounceTimer) { clearTimeout(this.debounceTimer); this.debounceTimer = undefined; }
     if (this.maxBatchTimer) { clearTimeout(this.maxBatchTimer); this.maxBatchTimer = undefined; }
     if (this.running) return;            // a follow-up is scheduled in finally{}
-    if (this.pending.size === 0 && this.pendingDeletions.size === 0) return;
+    if (this.pending.size === 0 && this.pendingDeletions.size === 0) {
+      // Close the settle window even on an empty drain. A `.git` write with no
+      // indexable file change — `git commit`, `git fetch`, a checkout touching
+      // only tests — used to leave `vcsSettling` latched forever, because it is
+      // cleared below and this return happens first. Once latched, armFlush()
+      // takes its settle branch on every later event and NEVER re-arms the hard
+      // ceiling, so a steady sub-settle-window write stream postpones the flush
+      // without bound: the index goes stale with a timer always armed and
+      // nothing to say so (issue #451).
+      this.vcsSettling = false;
+      this.vcsBulkFlag = false;
+      return;
+    }
 
     const batch = Array.from(this.pending);
     const deletions = Array.from(this.pendingDeletions);
@@ -614,22 +685,217 @@ export class McpWatcher {
     this.pending.clear();
     this.pendingDeletions.clear();
     this.running = true;
+    this.armFlushStallDisclosure(batch.length + deletions.length);
     const operation = this.flushBatchWithBusyRetry(batch, deletions)
-      .catch((err) => { process.stderr.write(`[mcp-watcher] error: ${(err as Error).message}\n`); });
+      // An unrecognized failure must not vaporize the drained batch. `pending`
+      // was emptied above, so without this the file events exist only in the
+      // local arrays and the index silently goes stale (issue #451).
+      // `?? err` matters: a thrown non-Error would make `.message` throw inside
+      // the handler, and the batch would be lost by the very code that exists to
+      // save it.
+      .catch((err: unknown) => this.deferFailedBatch(
+        batch, deletions, String((err as Error | undefined)?.message ?? err),
+      ));
     this.flushPromise = operation;
     void operation.finally(() => {
-      if (this.flushPromise === operation) this.flushPromise = undefined;
-      this.running = false;
-      if (!this.stopping && (this.pending.size > 0 || this.pendingDeletions.size > 0)) {
-        this.debounceTimer = this.armTimer(() => this.flush(), this.debounceMs);
+      // Guarded: a throw here would leave `running` true forever and wedge every
+      // future flush behind the single-flight guard, as an unhandled rejection.
+      try {
+        if (this.flushStallTimer) clearTimeout(this.flushStallTimer);
+        this.flushStallTimer = undefined;
+        if (this.flushPromise === operation) this.flushPromise = undefined;
+        if (!this.stopping && (this.pending.size > 0 || this.pendingDeletions.size > 0)) {
+          if (this.debounceTimer) clearTimeout(this.debounceTimer);
+          this.debounceTimer = this.armTimer(() => this.flush(), this.debounceMs);
+        }
+      } finally {
+        this.running = false;
       }
-    });
+    })
+      // `p.finally(cb)` REJECTS when cb throws, and a voided rejection ends a
+      // strict Node process. The guard above keeps the watcher unwedged; this
+      // keeps the epilogue from taking the host down with it.
+      .catch(() => {});
+  }
+
+  /**
+   * Say once, on stderr, that a flush has been running implausibly long.
+   *
+   * The wait itself is legitimate — `acquireAnalysisLock` blocks until a full
+   * `analyze` finishes its artifact write — so this neither cancels nor shortens
+   * it. It only removes the silence: a wedged holder otherwise leaves the
+   * watcher single-flight-blocked with a growing queue and no output at all.
+   */
+  private armFlushStallDisclosure(batchSize: number): void {
+    if (this.flushStallTimer) clearTimeout(this.flushStallTimer);
+    this.flushStallTimer = this.armTimer(() => {
+      this.flushStallTimer = undefined;
+      process.stderr.write(
+        `[mcp-watcher] a flush of ${batchSize} change(s) is still running after ` +
+        `${Math.round(WATCH_FLUSH_STALL_DISCLOSURE_MS / 1000)}s — later changes are queued behind it ` +
+        `(a large batch, or another writer holding the analysis lock)\n`,
+      );
+    }, WATCH_FLUSH_STALL_DISCLOSURE_MS);
+  }
+
+  /**
+   * Put a batch that failed for an unrecognized reason back in the queue.
+   *
+   * Bounded by {@link WATCH_MAX_EVENT_RETRIES} so a deterministic failure
+   * degrades to one loud drop instead of a retry loop. The re-queue is what
+   * `flush`'s `finally` sees, so the retry rides the existing debounce re-arm —
+   * no second scheduling path.
+   */
+  private async deferFailedBatch(
+    batch: readonly string[],
+    deletions: readonly string[],
+    reason: string,
+  ): Promise<void> {
+    process.stderr.write(`[mcp-watcher] error: ${reason}\n`);
+    const requeued: string[] = [];
+    const abandoned: string[] = [];
+    const requeue = (paths: readonly string[], into: Set<string>): void => {
+      for (const path of paths) {
+        // Shutdown cannot retry, but it must not drop the work either: put it
+        // back so stop()'s ONE "still deferred" disclosure counts it. Spending
+        // retry budget there would be a lie — no retry is coming.
+        if (this.stopping) {
+          into.add(path);
+          requeued.push(path);
+          continue;
+        }
+        const attempts = (this.eventRetries.get(path) ?? 0) + 1;
+        if (attempts > WATCH_MAX_EVENT_RETRIES) {
+          this.eventRetries.delete(path);
+          abandoned.push(path);
+          continue;
+        }
+        this.eventRetries.set(path, attempts);
+        into.add(path);
+        requeued.push(path);
+      }
+    };
+    // Deletions first, then the changes that are not superseded by one — the
+    // same order and the same disjointness rule the two contention deferrals use.
+    requeue(deletions, this.pendingDeletions);
+    requeue(batch.filter(path => !this.pendingDeletions.has(path)), this.pending);
+    if (requeued.length > 0 && !this.stopping) {
+      process.stderr.write(
+        `[mcp-watcher] deferred ${requeued.length} change(s) for retry after that error\n`,
+      );
+    }
+    if (abandoned.length > 0) await this.abandonEvents(abandoned, WATCH_MAX_EVENT_RETRIES, reason);
+  }
+
+  /**
+   * Disclose files the batch could not read, and put them back for one more try.
+   *
+   * `discloseOnly` is the explicit-caller lane (`handleChange`,
+   * `applyRepositoryDelta`). Those await a single pass and have no debounce to
+   * ride, so re-queueing would schedule work their caller never asked for — and
+   * `applyRepositoryDelta` already reports its own unapplied files as stale, so
+   * a second stale marking here would only duplicate it. They get the
+   * disclosure; what to do about it is theirs to decide.
+   */
+  private async deferUnreadable(
+    unreadable: ReadonlyArray<{ abs: string; reason: string }>,
+    discloseOnly: boolean,
+  ): Promise<void> {
+    const reason = unreadable[0].reason;
+    process.stderr.write(
+      `[mcp-watcher] could not read ${unreadable.length} changed file(s) — ${sanitizeForTerminal(reason)}\n`,
+    );
+    // The explicit lane neither retries nor spends the watch lane's budget:
+    // clearing the counter here would refill a budget the watch lane is spending
+    // on the same path.
+    if (discloseOnly) return;
+    const requeued: string[] = [];
+    const abandoned: string[] = [];
+    for (const { abs } of unreadable) {
+      if (this.stopping) { abandoned.push(abs); continue; }
+      const attempts = (this.eventRetries.get(abs) ?? 0) + 1;
+      if (attempts > WATCH_MAX_EVENT_RETRIES) {
+        this.eventRetries.delete(abs);
+        abandoned.push(abs);
+        continue;
+      }
+      this.eventRetries.set(abs, attempts);
+      if (!this.pendingDeletions.has(abs)) this.pending.add(abs);
+      requeued.push(abs);
+    }
+    // No re-arm here: this lane is only reached from inside a running flush, and
+    // its finally{} re-arms the debounce for whatever is back in the queue.
+    if (requeued.length > 0) {
+      process.stderr.write(`[mcp-watcher] deferred ${requeued.length} unreadable change(s) for retry\n`);
+    }
+    if (abandoned.length > 0) {
+      await this.abandonEvents(abandoned, this.stopping ? 1 : WATCH_MAX_EVENT_RETRIES, reason);
+    }
+  }
+
+  /**
+   * Give up on file events the watcher could not apply, leaving a signal that
+   * outlives the log line.
+   *
+   * A stderr line in a long-lived daemon is not a signal an agent can read. Where
+   * a graph store exists, the abandoned files are recorded stale through the same
+   * mechanism `fallbackBulkBatch` uses, so every later freshness read discloses
+   * them instead of serving a silently incomplete index.
+   *
+   * PRE-CONDITION: the analysis lock is NOT held by the caller — this acquires it.
+   * Both call sites (the pre-lock candidate loop in `handleBatch`, and `flush`'s
+   * error handler) run outside the artifact critical section.
+   */
+  private async abandonEvents(
+    absPaths: readonly string[],
+    attempts: number,
+    reason: string,
+  ): Promise<void> {
+    process.stderr.write(
+      `[mcp-watcher] gave up on ${absPaths.length} change(s) after ${attempts} ` +
+      `attempt(s) (${reason}) — run analyze to reconcile: ` +
+      `${absPaths.map(path => sanitizeForTerminal(relative(this.rootPath, path))).sort().join(', ')}\n`,
+    );
+    // Same candidate filter as the bulk-fallback lane: `stale_files` rows are
+    // about SOURCE the graph indexes. A watched OpenSpec markdown file has no
+    // nodes, so a row for it would be a permanent stale entry that no re-parse
+    // can ever clear.
+    const staleFiles = [...new Set(absPaths
+      .map(abs => toRepositoryPath(relative(this.rootPath, abs)))
+      .filter(rel => !isTestFile(rel))
+      .filter(rel => detectLanguage(rel) !== 'unknown' || HTML_EXTENSIONS.test(rel)))]
+      .sort();
+    try {
+      if (staleFiles.length === 0 || !EdgeStore.exists(this.outputPath)) return;
+      const releaseAnalysis = await acquireAnalysisLock(this.outputPath);
+      try {
+        const store = EdgeStore.open(EdgeStore.dbPath(this.outputPath));
+        try {
+          if (!store.notReady) store.markFilesStale(staleFiles);
+        } finally {
+          store.close();
+        }
+      } finally {
+        await releaseAnalysis();
+      }
+    } catch (err) {
+      // Disclosure is best-effort by construction: the stderr line above already
+      // named the drop, and failing here must not mask it with a second error.
+      process.stderr.write(
+        `[mcp-watcher] could not record ${staleFiles.length} abandoned change(s) as stale: ` +
+        `${(err as Error).message}\n`,
+      );
+    }
   }
 
   /**
    * Retry a contended SQLite batch, then put it back in the in-memory queue.
-   * The queue is drained only after a successful pass, so a long external write
-   * lock delays freshness but never silently loses the file events.
+   * A long external write lock delays freshness but never loses the file events.
+   *
+   * This handles the two RECOGNIZED contention classes. Everything else is
+   * re-queued one level up, by `flush`'s error handler — the claim that no event
+   * is silently lost holds for the whole lane, not just for these two branches
+   * (it did not before issue #451).
    */
   private async flushBatchWithBusyRetry(
     batch: string[],
@@ -643,6 +909,14 @@ export class McpWatcher {
         // Deletions first (remove stale state), then re-index changed/added files.
         if (deletions.length > 0) await this.handleDeletions(deletions, false);
         if (batch.length > 0) await this.handleBatch(batch, { ...opts, recordSpecChanges: false });
+        // The pass landed. Reset the retry budget of every path it actually
+        // consumed — but NOT of one the pass itself put back (an unreadable
+        // file), or a permanently failing file would refill its budget on every
+        // attempt and retry forever.
+        for (const path of [...batch, ...deletions]) {
+          if (this.pending.has(path) || this.pendingDeletions.has(path)) continue;
+          this.eventRetries.delete(path);
+        }
         return;
       } catch (err) {
         if (isSpecIndexLockTimeoutError(err)) {
@@ -860,6 +1134,16 @@ export class McpWatcher {
 
     // 1. Resolve + read candidate files (skip tests / unknown langs / deleted).
     const files: Array<{ rel: string; abs: string; content: string }> = [];
+    // A read that failed for a reason OTHER than "the file is gone". This used to
+    // be indistinguishable from a deletion — one bare `continue` covered both —
+    // and when it was the batch's only file the method returned at `files.length
+    // === 0` writing nothing at all. That is the whole of issue #451's observable
+    // behaviour: llm-context.json untouched, zero diagnostic output, intermittent.
+    // The read genuinely can fail transiently: `readFileConfined` fails CLOSED
+    // when the path stat and the descriptor stat disagree on identity or
+    // timestamps, which a Windows sharing violation (an indexer or AV holding the
+    // file) produces by making libuv fall back to an attribute-only stat.
+    const unreadable: Array<{ abs: string; reason: string }> = [];
     for (const abs of absPaths) {
       const rel = toRepositoryPath(relative(this.rootPath, abs));
       if (isTestFile(rel)) continue;
@@ -869,11 +1153,18 @@ export class McpWatcher {
       let content: string;
       try {
         content = await readFileConfined(this.rootPath, rel, MAX_EDIT_VERDICT_BASIS_FILE_BYTES);
-      } catch {
-        continue; // file may have been deleted between the event and now
+      } catch (err) {
+        // Deleted between the event and now: expected, and handleDeletions owns it.
+        if (isMissingFileError(err)) continue;
+        unreadable.push({ abs, reason: (err as Error).message });
+        continue;
       }
       files.push({ rel, abs, content });
     }
+    // Re-queue only on the watch lane. `handleChange` and `applyRepositoryDelta`
+    // are synchronous callers with no debounce behind them: they get the
+    // disclosure and decide for themselves.
+    if (unreadable.length > 0) await this.deferUnreadable(unreadable, opts.syncFlush === true);
     if (files.length === 0) return;
 
     // The graph database and required JSON artifacts are one logical generation.
