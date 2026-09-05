@@ -40,10 +40,79 @@ export interface SequencedStore {
 let tmpCounter = 0;
 
 /**
+ * Backoff for a rename that lost a race with another handle on the destination.
+ *
+ * POSIX `rename(2)` replaces the destination unconditionally. Windows does not:
+ * `MoveFileExW(REPLACE_EXISTING)` needs DELETE access to the target, so it returns
+ * `EPERM`/`EACCES`/`EBUSY` while ANY other handle is open on it without
+ * `FILE_SHARE_DELETE` — an antivirus or Search Indexer scanning the file it just
+ * saw written, or a reader that opened it a millisecond earlier. The window is
+ * milliseconds wide and the operation is idempotent (the temp file is still
+ * there, fully fsync'd), so the correct response is to wait and try again.
+ *
+ * Observed, not theorised: a Windows CI runner produced
+ * `EPERM: operation not permitted, rename '….llm-context.json.tmp-…' -> '…llm-context.json'`
+ * on the watcher's artifact write, which left the artifact at its previous
+ * content — one of the two mechanisms behind issue #451.
+ *
+ * These codes essentially never occur for a same-directory rename on POSIX, so
+ * this changes nothing there. The retries are bounded and the ORIGINAL error is
+ * rethrown when they run out: a genuine permission problem still fails, loudly
+ * and with its real message.
+ *
+ * The ~3.2s ceiling is dimensioned against the tail, not the median: a Defender
+ * hold on a small just-written file is usually 10-100ms, but a first-touch scan
+ * or a cloud-lookup can run far longer, and the machine that reported #451 was a
+ * loaded one. It is deliberately far below the commit lock's own limits — 10s
+ * before a lock is even a stale candidate, 30s before a waiter gives up — so a
+ * writer that spends its whole budget still cannot cause a lock timeout or a
+ * steal. (`graceful-fs` retries this same Windows class for 60s; that is sized
+ * for arbitrary third-party writes, not for a section under our own lock.)
+ */
+const RENAME_CONTENTION_DELAYS_MS = [10, 25, 50, 100, 200, 400, 800, 1600] as const;
+
+const isRenameContention = (err: unknown): boolean => {
+  const code = (err as NodeJS.ErrnoException | undefined)?.code;
+  return code === 'EPERM' || code === 'EACCES' || code === 'EBUSY';
+};
+
+/**
+ * NOT unref'd — deliberately, and unlike the watcher's SQLite backoff.
+ *
+ * This sleep sits between a fsync'd temp file and its commit rename. An unref'd
+ * timer does not hold the event loop open, so if this were the last handle the
+ * process would drain and exit 0 with the promise never settling: the caller's
+ * `await` never resumes, the `finally` that removes the temp never runs, and any
+ * commit lock above is never released. That is a silently dropped write in the
+ * one module whose stated contract is that no write is ever silently lost. The
+ * watcher's backoff can afford to be unref'd because dropping it only defers a
+ * batch; this cannot. The added liveness is bounded by the ladder above.
+ */
+const sleepMs = (ms: number): Promise<void> => new Promise((resolve) => { setTimeout(resolve, ms); });
+
+/** {@link rename}, retried while the destination is briefly held by another handle. */
+async function renameWithContentionRetry(tmp: string, path: string): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await rename(tmp, path);
+      return;
+    } catch (err) {
+      const delay = RENAME_CONTENTION_DELAYS_MS[attempt];
+      if (delay === undefined || !isRenameContention(err)) throw err;
+      await sleepMs(delay);
+    }
+  }
+}
+
+/**
  * Write `data` to `path` atomically. The data goes to a sibling temp file, is
  * flushed to disk (`fsync`), and is moved into place with a single atomic
  * `rename`. A crash or interruption before the rename leaves the previously
  * committed file untouched — never a partially written (torn) file.
+ *
+ * The rename is retried while the destination is held by another handle: see
+ * {@link RENAME_CONTENTION_DELAYS_MS}. Atomicity is unaffected — each attempt is
+ * the same single atomic replace.
  */
 export async function atomicWriteFile(path: string, data: string, newFileMode = 0o666): Promise<void> {
   const dir = dirname(path);
@@ -63,7 +132,7 @@ export async function atomicWriteFile(path: string, data: string, newFileMode = 
     } finally {
       await fh.close();
     }
-    await rename(tmp, path); // atomic replace
+    await renameWithContentionRetry(tmp, path); // atomic replace
     renamed = true;
   } finally {
     // If we never renamed (write/sync threw), remove the orphaned temp so a failed
