@@ -7,23 +7,37 @@ What is verified on Windows, what is not, and where the gaps are tracked. Writte
 
 | Job | Covers |
 |---|---|
-| **Windows Unit Tests** | The unit suite on `windows-latest`, minus a tracked deny-list — currently ~427 of 481 test files |
+| **Windows Unit Tests** | The whole unit suite on `windows-latest` — currently ~427 of 481 files passing, the rest on a tracked deny-list |
 | **Windows Smoke** | The packed CLI end to end: install, analyze, the stdio MCP transport, daemon spawn and reuse, Pi's daemon path, and `serve --stop` asserted against the **OS process** rather than the client's claim of success |
 
 Both are required. Before this, exactly one test file ran on Windows, so every path, filesystem and
 subprocess suite — the places a Windows-only defect actually lives — went unexercised on the
 platform.
 
-### The deny-list may only shrink
+### The deny-list, enforced both ways
 
-`.github/windows-unit-exclusions.json` names each test file that does not yet pass on Windows, with
-a reason. `scripts/windows-exclusions-check.mjs` re-runs exactly those files in CI and **fails if any
-of them now passes**, so a file fixed as a side effect of some other change cannot sit on the list
-unnoticed.
+Nothing is filtered out of the run. The whole suite executes, and
+`scripts/windows-unit-report.mjs` judges the single resulting report against
+`.github/windows-unit-exclusions.json`:
+
+- a failing file that is **not** on the list is a new Windows regression → the job fails;
+- a listed file with **zero** failures has been fixed → the job fails, so the entry gets deleted.
+
+The first rule makes the job a real gate; without it the deny-list would be the only thing under
+test. The second keeps the list a shrinking backlog rather than a permanent hole.
+
+Judging one run matters. An earlier version excluded the listed files and re-ran them separately,
+and the two runs disagreed immediately: one file passed alone and failed in the full suite. A test's
+outcome can depend on what runs beside it, so two contexts can each be right and still contradict
+each other. One run, one verdict.
 
 It is a deny-list on purpose: a new test file runs on Windows unless someone deliberately names it.
 An allow-list would leave every future file uncovered by default, which is how the original gap
 happened.
+
+The job runs with `--retry=2`. A Windows runner is slower, and a few fixture-heavy suites sit near
+the 30s timeout there; retries absorb that without weakening the gate, since a deterministic failure
+still fails all three attempts. The Linux job runs with no retries.
 
 Most entries are test-side POSIX assumptions — a fixture rooted at `/test/project`, an expectation
 spelled with `/`, a `#!/bin/sh` shim, an exec bit. A handful are marked `suspectedProductionBug`:

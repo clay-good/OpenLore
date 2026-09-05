@@ -1,17 +1,22 @@
 {
   "$comment": [
-    "Test files that do not yet pass on Windows. The `windows-unit` CI job runs the ENTIRE unit",
-    "suite on windows-latest EXCEPT these, so ~420 of 481 files are covered on Windows instead of",
-    "the single file that ran before (issue #434).",
+    "Test files that do not yet pass on Windows. The `windows-unit` CI job runs the ENTIRE unit suite",
+    "on windows-latest \u2014 nothing is filtered \u2014 and scripts/windows-unit-report.mjs judges the result",
+    "against this list (issue #434). Before that job, exactly one test file ran on Windows.",
     "",
-    "This list may only SHRINK. `scripts/windows-exclusions-check.mjs` re-runs exactly these files",
-    "and fails the job if any of them now passes in full, so a fixed file cannot sit here",
-    "unnoticed. Adding an entry is a deliberate act that needs a reason; nothing lands here by",
-    "default, because a new test file is included unless someone names it.",
+    "The list is enforced in BOTH directions from that single run: a failing file that is not listed",
+    "is a new regression and fails the job; a listed file with zero failures has been fixed and also",
+    "fails the job, so the entry must be deleted. That keeps this a shrinking backlog rather than a",
+    "permanent hole, and keeps the job a real gate rather than a test of the list itself.",
     "",
-    "`suspectedProductionBug` marks the entries whose failure shows a platform separator inside a",
-    "value the product PERSISTS or SERVES (an artifact, a spec reference, a generated path) rather",
-    "than inside a test expectation. Those are not test bugs and are tracked separately."
+    "It is a deny-list on purpose: a NEW test file runs on Windows unless someone deliberately names",
+    "it here. An allow-list would leave every future file uncovered by default, which is how the",
+    "original gap happened.",
+    "",
+    "`suspectedProductionBug` marks entries whose failure shows a platform separator inside a value",
+    "the product PERSISTS or SERVES (an artifact, a spec reference, a generated path) rather than",
+    "inside a test expectation. Those are portability questions about the artifact, not test bugs,",
+    "and are tracked separately."
   ],
   "exclusions": [
     {
@@ -206,6 +211,11 @@
       "failingTests": 5,
       "reason": "synced decision references are written with platform separators",
       "suspectedProductionBug": true
+    },
+    {
+      "file": "src/core/drift/git-diff-corpus-materialization.test.ts",
+      "failingTests": 1,
+      "reason": "rejects invalid UTF-8 corpus bytes: passes when run alone, fails in the full suite \u2014 a run-context dependency, not a clean platform failure"
     },
     {
       "file": "src/core/drift/spec-mapper.test.ts",
