@@ -203,12 +203,15 @@ describe('every credential-bearing config read goes through the trust boundary',
         const full = join(dir, name);
         if (statSync(full).isDirectory()) { walk(full); continue; }
         if (!name.endsWith('.ts') || name.includes('.test.')) continue;
-        if (TLS_EXEMPT.some(e => full.endsWith(e.file))) continue;
+        // Compare POSIX-normalised: TLS_EXEMPT entries are spelled with `/`, while `join` yields
+        // `\` on Windows, so an un-normalised endsWith never matches and every exempted file is
+        // reported as a live TLS opt-out.
+        if (TLS_EXEMPT.some(e => full.replace(/\\/g, '/').endsWith(e.file))) continue;
         const src = readFileSync(full, 'utf-8');
         // `allowInsecureTls(...)` guarded by, or passed, a skipSslVerify value.
         src.split('\n').forEach((line, i) => {
           if (/allowInsecureTls\s*\(/.test(line) && /skipSslVerify/.test(line)) {
-            offenders.push(`${full}:${i + 1} — ${line.trim().slice(0, 90)}`);
+            offenders.push(`${full.replace(/\\/g, '/')}:${i + 1} — ${line.trim().slice(0, 90)}`);
           }
           if (/if\s*\(.*skipSslVerify.*\)\s*\{?\s*$/.test(line) && /skipSslVerify/.test(line)
               && !/rejectRepoConfiguredTlsOptOut/.test(line)) {

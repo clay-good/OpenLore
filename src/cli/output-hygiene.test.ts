@@ -12,7 +12,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, basename } from 'node:path';
 import { palette } from '../utils/colors.js';
 
 /** Files that legitimately contain raw ANSI: interactive full-screen renderers. */
@@ -39,7 +39,10 @@ describe('CLI output hygiene — raw ANSI guard', () => {
     const offenders: string[] = [];
 
     for (const file of walkTsFiles(cliDir)) {
-      const base = file.split('/').pop()!;
+      // `basename`, not `split('/')`: on Windows the walker yields `\`-joined paths, so the split
+      // returns the whole path and the allow-list never matches — the guard then reports its own
+      // exempted file as an offender.
+      const base = basename(file);
       if (ANSI_ALLOWLIST.has(base)) continue;
       if (rawAnsi.test(readFileSync(file, 'utf-8'))) {
         offenders.push(file);

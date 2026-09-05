@@ -72,7 +72,10 @@ const COMPOSITE_ACTIONS = [
 
 const ALL_ACTION_FILES = [...workflowFiles.map(f => join(WORKFLOW_DIR, f)), ...COMPOSITE_ACTIONS];
 
-const rel = (abs: string) => abs.slice(REPO_ROOT.length + 1);
+// POSIX-normalised: this value is a KEY compared against a hand-written allow-list spelled with
+// `/`. On Windows `join`/`readdir` produce `\`, so an un-normalised key matches nothing and the
+// reviewed-egress set reads as entirely changed.
+const rel = (abs: string) => abs.slice(REPO_ROOT.length + 1).replace(/\\/g, '/');
 
 function sourceFiles(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
