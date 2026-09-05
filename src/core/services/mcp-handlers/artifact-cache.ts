@@ -30,17 +30,25 @@
 import { constants } from 'node:fs';
 import { open, stat, type FileHandle } from 'node:fs/promises';
 
-/** Format an identity stamp from a stat result: `dev:ino:mtimeNs:size`. */
-function stampOf(s: { dev: bigint; ino: bigint; mtimeNs: bigint; size: bigint }): string {
-  return `${s.dev}:${s.ino}:${s.mtimeNs}:${s.size}`;
+/** Format an identity stamp from a stat result: `dev:ino:mtimeNs:ctimeNs:size`. */
+function stampOf(s: { dev: bigint; ino: bigint; mtimeNs: bigint; ctimeNs: bigint; size: bigint }): string {
+  return `${s.dev}:${s.ino}:${s.mtimeNs}:${s.ctimeNs}:${s.size}`;
 }
 
 /**
  * Identity stamp of an on-disk artifact, or `null` when it is absent or unreadable.
  *
  * `mtimeNs` (not `mtimeMs`) is what makes the stamp usable when a file is rewritten
- * twice inside the same millisecond, and `dev`/`ino` catch an atomic tmp-file rename
- * that lands carrying an older mtime.
+ * twice inside the same millisecond; `dev`/`ino` catch an atomic tmp-file rename that
+ * lands carrying an older mtime; `ctimeNs` catches a same-size in-place rewrite that
+ * an mtime-only stamp would miss. The same fields `vector-index.ts` stamps with.
+ *
+ * The resolution is the filesystem's, not ours: where timestamps are coarser than the
+ * interval between two writes (NTFS is the common case), two same-size rewrites inside
+ * one tick are indistinguishable and the cached value is served until the next change.
+ * Every writer of these artifacts goes through the atomic tmp-file-and-rename path,
+ * which changes `ino`, so this is a bound on a case the repo does not produce rather
+ * than on ordinary operation.
  */
 export async function artifactStamp(path: string): Promise<string | null> {
   try {
