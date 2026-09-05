@@ -15,7 +15,7 @@ import { createServer, request as httpRequest } from 'node:http';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { startServe, readDescriptor, idleTimeoutMs, drainServeRebuilds, type ServeHandle } from './serve.js';
-import { SERVE_PROTOCOL_VERSION } from './serve-descriptor.js';
+import { SERVE_PROTOCOL_VERSION, canonicalServeRoot } from './serve-descriptor.js';
 import { TOOL_PRESETS } from './mcp.js';
 import { EdgeStore } from '../../core/services/edge-store.js';
 import * as analyzeApi from '../../api/analyze.js';
@@ -302,7 +302,10 @@ describe('openlore serve', () => {
     const body = await jsonOf(res);
     expect(body.ok).toBe(true);
     expect(body.presetDispatchEnforced).toBe(true);
-    expect(body.root).toBe(await realpath(root));
+    // The server reports its canonicalized root (lowercased on Windows, where the
+    // filesystem is case-insensitive — see canonicalServeRoot), not realpath's
+    // filesystem-preserved casing.
+    expect(body.root).toBe(canonicalServeRoot(root));
     expect(body.pid).toBe(process.pid);
     expect(body.tokenProtected).toBe(false);
     expect(body.tokenAuthenticated).toBe(true);
@@ -327,7 +330,7 @@ describe('openlore serve', () => {
     const authenticated = await jsonOf(await fetch(`${h!.baseUrl}/health`, {
       headers: { 'x-openlore-token': h!.token! },
     }));
-    expect(authenticated).toMatchObject({ root: await realpath(root), tokenAuthenticated: true });
+    expect(authenticated).toMatchObject({ root: canonicalServeRoot(root), tokenAuthenticated: true });
   });
 
   it('writes serve.json on start and removes it on close', async () => {
@@ -492,7 +495,7 @@ describe('openlore serve', () => {
         });
         expect(res.status).toBe(400);
         const body = await jsonOf(res);
-        expect(String(body.error)).toContain(`serves only ${await realpath(root)}`);
+        expect(String(body.error)).toContain(`serves only ${canonicalServeRoot(root)}`);
         expect(String(body.error)).toMatch(/separate openlore serve daemon/i);
       }
       expect(await fileExists(join(otherRoot, OPENLORE_DIR))).toBe(false);
@@ -822,7 +825,13 @@ describe('openlore serve', () => {
     }
   }, 30_000);
 
-  it('handles a real SIGTERM and removes discovery only after clean process exit', async () => {
+  // Windows has no real POSIX signal delivery: child.kill('SIGTERM') there calls
+  // TerminateProcess directly (empirically verified — the child's own
+  // process.on('SIGTERM', ...) handler never runs; it exits { code: null, signal:
+  // 'SIGTERM' }, never code 0), so serve.ts's SIGTERM handler / exitAfterTeardown
+  // never fires and neither assertion below can hold. Not a gap in serve.ts —
+  // there is no userland way to ask Windows to deliver a real signal.
+  it.skipIf(process.platform === 'win32')('handles a real SIGTERM and removes discovery only after clean process exit', async () => {
     root = await mkdtemp(join(tmpdir(), 'openlore-serve-sigterm-'));
     const child = spawn(process.execPath, [
       '--import', 'tsx', join(process.cwd(), 'src', 'cli', 'index.ts'),
@@ -1195,7 +1204,7 @@ describe('openlore serve', () => {
       ok: true,
       tokenProtected: true,
       tokenAuthenticated: true,
-      root: await realpath(root),
+      root: canonicalServeRoot(root),
       pid: process.pid,
       preset: 'substrate',
     });
