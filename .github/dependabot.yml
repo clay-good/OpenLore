@@ -22,6 +22,18 @@ updates:
     open-pull-requests-limit: 5
     versioning-strategy: increase-if-necessary
     groups:
+      # The ABI-sensitive parser/vector stack, in its own PR. These are NOT ignored
+      # (see the note below) — they are separated, because bundling them with routine
+      # drift is what stalled #429: seven grammar majors broke 34 analyzer tests and
+      # held six harmless bumps hostage for the whole cycle. Grouping only changes
+      # which PR they arrive in, so advisory-driven security updates are unaffected.
+      parser-stack:
+        applies-to: version-updates
+        patterns:
+          - 'tree-sitter'
+          - 'tree-sitter-*'
+          - 'web-tree-sitter'
+          - '@lancedb/lancedb'
       # One PR for routine dev-tooling drift (eslint, vitest, tsx, types).
       dev-dependencies:
         applies-to: version-updates
