@@ -43,7 +43,9 @@ Most entries are test-side POSIX assumptions — a fixture rooted at `/test/proj
 spelled with `/`, a `#!/bin/sh` shim, an exec bit. A handful are marked `suspectedProductionBug`:
 their failure shows a platform separator inside a value the product *persists or serves* — a bundle,
 a spec reference, a generated path — which is a portability question about the artifact, not a test
-bug. Those are tracked separately.
+bug.
+
+The whole backlog, grouped by root cause, is [issue #452](https://github.com/clay-good/OpenLore/issues/452).
 
 ## Known issue: a libuv assertion during MCP session spawn
 

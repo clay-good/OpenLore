@@ -16,7 +16,9 @@
     "`suspectedProductionBug` marks entries whose failure shows a platform separator inside a value",
     "the product PERSISTS or SERVES (an artifact, a spec reference, a generated path) rather than",
     "inside a test expectation. Those are portability questions about the artifact, not test bugs,",
-    "and are tracked separately."
+    "and are tracked separately.",
+    "",
+    "Backlog tracked in https://github.com/clay-good/OpenLore/issues/452"
   ],
   "exclusions": [
     {
