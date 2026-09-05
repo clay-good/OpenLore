@@ -12,13 +12,11 @@
  * `authored_by` / `changed_in_pr` graph edges.
  */
 
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { logger } from '../../utils/logger.js';
 import { isGitRepository, getRepoPrefix, reframeRepoPath } from '../drift/git-diff.js';
 import { gitPathArgs } from '../../utils/git-args.js';
+import { execFileGit as execFileAsync } from '../../utils/git-exec.js';
 
-const execFileAsync = promisify(execFile);
 
 // Bounds (documented caps — never import unbounded history; never bloat the graph).
 export const PROVENANCE_MAX_COMMITS = 1000; // history depth scanned per pass

@@ -15,14 +15,12 @@
  * by the caller via the node table.
  */
 
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { stat, readdir, readFile, access } from 'node:fs/promises';
 import { join, relative, resolve, sep } from 'node:path';
 import { OPENLORE_DIR } from '../../constants.js';
 import { gitPathArgs } from '../../utils/git-args.js';
+import { execFileGit as execFileAsync } from '../../utils/git-exec.js';
 
-const execFileAsync = promisify(execFile);
 
 export interface DiffResult {
   /** Repo-relative paths of files that may have changed since graph build. */

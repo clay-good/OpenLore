@@ -24,6 +24,7 @@ import { fileURLToPath } from 'node:url';
 import { logger } from '../../utils/logger.js';
 import { readCachedContext } from '../../core/services/mcp-handlers/utils.js';
 import { EdgeStore } from '../../core/services/edge-store.js';
+import { execFileGitSync } from '../../utils/git-exec.js';
 import { OPENLORE_ANALYSIS_REL_PATH, OPENLORE_PROVE_REL_PATH } from '../../constants.js';
 import {
   deriveTasks,
@@ -127,7 +128,7 @@ function gitShortSha(cwd: string): string | null {
   try {
     // Silence the child's stderr ('fatal: not a git repository' / 'Needed a single
     // revision') — the throw is handled here; we don't want it on our stderr.
-    return execFileSync('git', ['rev-parse', '--short', 'HEAD'], {
+    return execFileGitSync('git', ['rev-parse', '--short', 'HEAD'], {
       cwd, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'],
     }).trim() || null;
   } catch {

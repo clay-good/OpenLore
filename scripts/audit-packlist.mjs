@@ -50,6 +50,7 @@ const REQUIRED = [
   'LICENSE',
   'dist/cli/index.js', // the `openlore` bin
   'dist/api/index.js', // the library entrypoint
+  'dist/api/serve-descriptor.js', // the `openlore/serve-descriptor` subpath (change: extend-api-for-supervising-hosts)
   'scripts/postinstall.mjs', // referenced by the postinstall lifecycle script
   // `skills/` is canonical. Keep one representative old path from each former
   // host-specific catalog so a release cannot silently break direct consumers
@@ -103,7 +104,11 @@ function packManifest() {
     fatal('`npm pack --json` did not return JSON.', raw.slice(0, 400));
   }
 
-  const entry = Array.isArray(parsed) ? parsed[0] : parsed;
+  // npm <= 11 returns `[ { files: [...] } ]`; npm >= 12 returns `{ "<pkg>": { files: [...] } }`.
+  // Accept both, and never treat an unrecognized shape as "nothing forbidden shipped".
+  const entry = Array.isArray(parsed)
+    ? parsed[0]
+    : (Array.isArray(parsed?.files) ? parsed : Object.values(parsed ?? {})[0]);
   if (!Array.isArray(entry?.files) || entry.files.length === 0) {
     fatal('`npm pack --json` returned no file list — treating as "did not run".');
   }

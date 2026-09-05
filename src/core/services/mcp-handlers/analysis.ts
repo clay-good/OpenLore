@@ -8,7 +8,17 @@
 
 import { readFile, stat } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import { join, relative } from 'node:path';
+import { join, relative, sep } from 'node:path';
+
+/**
+ * A repo-relative path served to an agent, always POSIX-separated. Every other
+ * structural path OpenLore emits (call-graph node ids, spec anchors, orient
+ * results) uses `/` regardless of host OS; `relative()` alone would hand a
+ * Windows agent `src\a.ts` next to an `id` of `src/a.ts::fn` it cannot match.
+ */
+function servedRelPath(fromDir: string, target: string): string {
+  return relative(fromDir, target).split(sep).join('/');
+}
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, openSync, closeSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -1203,7 +1213,7 @@ export async function handleAuditSpecCoverage(
       summary,
       mappingCoverage: {
         ...report.mappingCoverage,
-        artifactPath: relative(absDir, report.mappingCoverage.artifactPath),
+        artifactPath: servedRelPath(absDir, report.mappingCoverage.artifactPath),
       },
     };
   } catch (err) {
@@ -1426,7 +1436,7 @@ export async function handleGetMinimalContext(
       const n = nodeMap.get(id);
       if (!n || n.isExternal) return null;
       const callType = callTypeByEdge.get(`${id}\0${r.predecessor}`) ?? 'direct';
-      return { id, name: n.name, file: relative(absDir, confinedPath(n)!), sig: sig(n), callType, isExternal: false, distance: r.distance, hops: r.hops, _rank: n.fanIn, _rel: callerScores.get(id) ?? 0 };
+      return { id, name: n.name, file: servedRelPath(absDir, confinedPath(n)!), sig: sig(n), callType, isExternal: false, distance: r.distance, hops: r.hops, _rank: n.fanIn, _rel: callerScores.get(id) ?? 0 };
     })
     .filter((n): n is NonNullable<typeof n> => !!n);
   const { list: callers, omitted: callersOmitted } = select(callerItems);
@@ -1440,7 +1450,7 @@ export async function handleGetMinimalContext(
       const n = nodeMap.get(id);
       if (!n || n.isExternal) return null;
       const callType = callTypeByEdge.get(`${r.predecessor}\0${id}`) ?? 'direct';
-      return { id, name: n.name, file: relative(absDir, confinedPath(n)!), sig: sig(n), callType, isExternal: false, kind: undefined as string | undefined, distance: r.distance, hops: r.hops, _rank: n.fanOut, _rel: calleeScores.get(id) ?? 0 };
+      return { id, name: n.name, file: servedRelPath(absDir, confinedPath(n)!), sig: sig(n), callType, isExternal: false, kind: undefined as string | undefined, distance: r.distance, hops: r.hops, _rank: n.fanOut, _rel: calleeScores.get(id) ?? 0 };
     })
     .filter((n): n is NonNullable<typeof n> => !!n);
 
@@ -1485,7 +1495,7 @@ export async function handleGetMinimalContext(
   return {
     function: {
       name: target.name,
-      file: relative(absDir, targetPath),
+      file: servedRelPath(absDir, targetPath),
       signature: target.signature ?? target.name,
       language: target.language,
       className: target.className ?? null,

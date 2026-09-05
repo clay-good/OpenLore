@@ -13,7 +13,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EdgeStore, SCHEMA_VERSION } from '../edge-store.js';
 import { computeAttestation, writeAttestation } from '../../analyzer/index-attestation.js';
-import { readCachedContext } from './utils.js';
+import { readCachedContext, _resetContextCacheForTesting } from './utils.js';
 import { handleFindDeadCode } from './reachability.js';
 import { handleGetHealthMap } from './health-map.js';
 import { handleAnalyzeImpact } from './graph.js';
@@ -79,7 +79,8 @@ describe('index integrity — load-path reconciliation', () => {
   const dirs: string[] = [];
   const track = async (p: Promise<string>): Promise<string> => { const d = await p; dirs.push(d); return d; };
   afterEach(async () => {
-    for (const d of dirs.splice(0)) await rm(d, { recursive: true, force: true });
+    _resetContextCacheForTesting(); // close cached EdgeStore handles before rm (Windows locks open .db files)
+    for (const d of dirs.splice(0)) await rm(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   });
 
   it('healthy: a fully-landed index reconciles and attaches the store', async () => {
@@ -129,7 +130,7 @@ describe('index integrity — load-path reconciliation', () => {
 describe('index integrity — surfaced to agents end-to-end', () => {
   const dirs: string[] = [];
   const track = async (p: Promise<string>): Promise<string> => { const d = await p; dirs.push(d); return d; };
-  afterEach(async () => { for (const d of dirs.splice(0)) await rm(d, { recursive: true, force: true }); });
+  afterEach(async () => { _resetContextCacheForTesting(); for (const d of dirs.splice(0)) await rm(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); });
 
   it('find_dead_code over a degraded index carries the verdict and is NOT marked complete', async () => {
     const dir = await track(layIndex({ committed: TOTAL, storedNodeCount: 5 }));

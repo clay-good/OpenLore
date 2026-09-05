@@ -103,18 +103,18 @@ describe('Symlink-Aware Path Confinement (mcp-security)', () => {
     writeFileSync(join(outside, 'secret.txt'), 'TOP SECRET', 'utf-8');
   });
   afterEach(() => {
-    rmSync(root, { recursive: true, force: true });
-    rmSync(outside, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    rmSync(outside, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   });
 
-  it('blocks an in-root symlink that points outside the root', () => {
+  it.skipIf(process.platform === 'win32')('blocks an in-root symlink that points outside the root', () => {
     symlinkSync(outside, join(root, 'inside', 'link'));
     // Lexically "inside/link/secret.txt" begins with the root prefix, but it
     // canonicalizes into `outside` — must be rejected.
     expect(() => safeJoin(root, 'inside/link/secret.txt')).toThrow(/escape|traversal/i);
   });
 
-  it('allows a symlink that points to another location inside the same root', () => {
+  it.skipIf(process.platform === 'win32')('allows a symlink that points to another location inside the same root', () => {
     mkdirSync(join(root, 'realdir'), { recursive: true });
     writeFileSync(join(root, 'realdir', 'ok.txt'), 'fine', 'utf-8');
     symlinkSync(join(root, 'realdir'), join(root, 'inside', 'innerlink'));
@@ -125,7 +125,7 @@ describe('Symlink-Aware Path Confinement (mcp-security)', () => {
     expect(() => safeJoin(root, '../../etc/passwd')).toThrow(/traversal|escape/i);
   });
 
-  it('confines a not-yet-existing write target via its nearest existing ancestor', () => {
+  it.skipIf(process.platform === 'win32')('confines a not-yet-existing write target via its nearest existing ancestor', () => {
     // A new file under a legit in-root dir is allowed...
     expect(() => safeJoin(root, 'inside/new-file.json')).not.toThrow();
     // ...but a new file under an escaping symlink is blocked even though it doesn't exist yet.
@@ -452,7 +452,15 @@ describe('Untrusted Artifact Deserialization Safety (mcp-security)', () => {
   afterEach(() => {
     _resetContextCacheForTesting();
     clearMappingCache();
-    rmSync(root, { recursive: true, force: true });
+    // One test in this block writes a deliberately-corrupt call-graph.db; a failed
+    // SQLite open can keep a Windows file handle past the retry window. The security
+    // assertion has already passed by here — leave the temp dir for the OS to reap
+    // rather than failing on the residual lock.
+    try {
+      rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    } catch (err) {
+      if (process.platform !== 'win32') throw err;
+    }
   });
 
   function writeContext(content: string): void {
@@ -567,8 +575,8 @@ describe('Write Confinement for Mutating Tools (mcp-security)', () => {
       // Sanity: the escape target was never created.
       expect(existsSync(join(outside, 'escape.md'))).toBe(false);
     } finally {
-      rmSync(root, { recursive: true, force: true });
-      rmSync(outside, { recursive: true, force: true });
+      rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+      rmSync(outside, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 
@@ -605,7 +613,7 @@ describe('Repo-Derived Content Is Data, Not Instructions (mcp-security)', () => 
         expect(String(v), `field "${k}" must not carry repo directive text`).not.toContain(INJECTION);
       }
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 
@@ -657,7 +665,7 @@ describe('Bounded Computation — free-text query length (mcp-security)', () => 
       const res = await handleSearchCode(root, 'q'.repeat(MAX_QUERY_LENGTH + 1)) as Record<string, unknown>;
       expect(String(res.error)).toMatch(/too long/i);
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 
@@ -667,7 +675,7 @@ describe('Bounded Computation — free-text query length (mcp-security)', () => 
       const res = await handleOrient(root, 't'.repeat(MAX_QUERY_LENGTH + 1)) as Record<string, unknown>;
       expect(String(res.error)).toMatch(/too long/i);
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 });

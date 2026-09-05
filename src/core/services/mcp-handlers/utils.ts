@@ -320,6 +320,24 @@ interface ContextCacheEntry {
  */
 const _contextCache = new Map<string, ContextCacheEntry>();
 
+/**
+ * Normalize a directory string before using it as a `_contextCache` key.
+ *
+ * Callers reach this cache with independently-derived path strings:
+ * `validateDirectory` (every MCP handler's read path) preserves whatever casing
+ * the caller passed, while `serve.ts`'s `canonicalServeRoot` (the daemon's own
+ * `root`, used by `releaseContextCache` at teardown) lowercases on `win32`. On a
+ * case-sensitive filesystem those never differ; on Windows a mixed-case populate
+ * key and a lowercased evict key are different Map keys for the SAME directory —
+ * `releaseContextCache` would silently no-op, leaking the entry's open
+ * EdgeStore/SQLite handle for the life of the process instead of releasing it on
+ * `serve --stop`. Lowercasing here on win32 (a no-op everywhere else) makes every
+ * caller agree on one key regardless of the casing it happened to arrive with.
+ */
+function contextCacheKey(directory: string): string {
+  return process.platform === 'win32' ? directory.toLowerCase() : directory;
+}
+
 /** Grace period before closing an evicted EdgeStore so concurrent in-flight
  * requests holding the old handle across an await can drain first. */
 const STALE_STORE_CLOSE_DELAY_MS = 30_000;
@@ -331,16 +349,21 @@ const ARTIFACT_MAX_BYTES = 512 * 1024 * 1024;
 
 /** Test-only: clear in-memory context cache to force cold path. */
 export function _resetContextCacheForTesting(): void {
-  for (const entry of _contextCache.values()) entry.ctx.edgeStore?.close();
+  // Swallow a double-close: a test may already have closed a cached store by hand
+  // (as releaseContextCache does on the production path).
+  for (const entry of _contextCache.values()) {
+    try { entry.ctx.edgeStore?.close(); } catch { /* already closed */ }
+  }
   _contextCache.clear();
   _startLineByContext = new WeakMap();
 }
 
 /** Release the parsed context and EdgeStore owned by one long-lived host. */
 export function releaseContextCache(directory: string): void {
-  const entry = _contextCache.get(directory);
+  const key = contextCacheKey(directory);
+  const entry = _contextCache.get(key);
   if (!entry) return;
-  _contextCache.delete(directory);
+  _contextCache.delete(key);
   _startLineByContext.delete(entry.ctx);
   try { entry.ctx.edgeStore?.close(); } catch { /* already closed by an in-process consumer */ }
 }
@@ -374,14 +397,15 @@ export async function primeContextCache(directory: string, ctx: CachedContext): 
   } catch {
     return; // no artifact on disk yet — nothing to stay fresh against
   }
-  const existing = _contextCache.get(directory);
+  const key = contextCacheKey(directory);
+  const existing = _contextCache.get(key);
   // Preserve an already-open EdgeStore handle if the new ctx doesn't carry one.
   if (existing?.ctx.edgeStore && !ctx.edgeStore) {
     ctx.edgeStore = existing.ctx.edgeStore;
   }
   bindArtifactMtime(ctx, mtime);
   const generation = (await readCurrentGeneration(analysisDir, [...REQUIRED_ANALYSIS_ARTIFACTS]))?.generationId ?? null;
-  _contextCache.set(directory, { ctx, mtime, generation });
+  _contextCache.set(key, { ctx, mtime, generation });
 }
 
 export async function readCachedContext(directory: string, timeout?: number): Promise<CachedContext | null> {
@@ -416,7 +440,7 @@ export async function readCachedContext(directory: string, timeout?: number): Pr
         emit(directory, 'cache', { event: 'cache_read', hit: false, reason: 'analysis_generation_changed' });
         return null;
       }
-      const cached = _contextCache.get(directory);
+      const cached = _contextCache.get(contextCacheKey(directory));
       if (cached && cached.mtime === mtime && cached.generation === generation) {
         emit(directory, 'cache', { event: 'cache_read', hit: true });
         return cached.ctx;
@@ -569,8 +593,9 @@ export async function readCachedContext(directory: string, timeout?: number): Pr
       // the old handle across an await (e.g. get_subgraph awaits a vector search
       // between edgeStore reads). A grace delay lets in-flight requests drain
       // before release, bounding live handles to ~grace/reanalyze-interval.
-      const prev = _contextCache.get(directory);
-      _contextCache.set(directory, { ctx, mtime, generation });
+      const cacheKey = contextCacheKey(directory);
+      const prev = _contextCache.get(cacheKey);
+      _contextCache.set(cacheKey, { ctx, mtime, generation });
       if (prev?.ctx.edgeStore && prev.ctx.edgeStore !== ctx.edgeStore) {
         const stale = prev.ctx.edgeStore;
         const t = setTimeout(() => { try { stale.close(); } catch { /* already closed */ } }, STALE_STORE_CLOSE_DELAY_MS);

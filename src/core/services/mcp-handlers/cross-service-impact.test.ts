@@ -17,6 +17,7 @@ import { OPENLORE_ANALYSIS_REL_PATH, ARTIFACT_LLM_CONTEXT, ARTIFACT_ROUTE_INVENT
 import { addRepo } from '../../federation/registry.js';
 import { handleAnalyzeImpact } from './graph.js';
 import type { FunctionNode, CallEdge } from '../../analyzer/call-graph.js';
+import { _resetContextCacheForTesting } from './utils.js';
 
 const created: string[] = [];
 
@@ -55,7 +56,7 @@ function makeRepo(prefix: string, nodes: FunctionNode[], edges: CallEdge[], sour
   return dir;
 }
 
-afterEach(() => { for (const d of created.splice(0)) rmSync(d, { recursive: true, force: true }); });
+afterEach(() => { _resetContextCacheForTesting(); for (const d of created.splice(0)) rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); });
 
 describe('analyze_impact cross-service consumers across a federation', () => {
   let api: string; // repo B: registers GET /api/users/:id → getUser

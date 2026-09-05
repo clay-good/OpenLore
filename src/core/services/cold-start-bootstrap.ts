@@ -302,7 +302,8 @@ export async function buildIndexInChildProcess(
     const child: ChildProcess = spawnProcess(
       process.execPath,
       [cliPath, ...args],
-      { cwd: directory, stdio: 'ignore', detached: true },
+      // windowsHide: detached alone surfaces a console window on Windows.
+      { cwd: directory, stdio: 'ignore', detached: true, windowsHide: true },
     );
     activeBuildChildren.add(child);
     child.once('error', error => {

@@ -200,7 +200,7 @@ describe('safeJoin', () => {
   });
 
   it('resolves a relative path within the project root', () => {
-    expect(safeJoin(realRoot, 'src/auth.ts')).toBe(`${realRoot}/src/auth.ts`);
+    expect(safeJoin(realRoot, 'src/auth.ts')).toBe(join(realRoot, 'src/auth.ts'));
   });
 
   it('throws on path traversal via ../', () => {
@@ -213,7 +213,7 @@ describe('safeJoin', () => {
 
   it('allows nested paths within project root', () => {
     expect(safeJoin(realRoot, 'src/core/services/mcp-handlers/utils.ts'))
-      .toBe(`${realRoot}/src/core/services/mcp-handlers/utils.ts`);
+      .toBe(join(realRoot, 'src/core/services/mcp-handlers/utils.ts'));
   });
 
   it('blocks traversal that starts within root but escapes', () => {

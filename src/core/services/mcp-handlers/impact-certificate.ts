@@ -29,8 +29,6 @@
 
 import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, basename } from 'node:path';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { validateDirectory, readCachedContext, safeJoin } from './utils.js';
 import { computeBlastRadius, type BlastRadiusBriefing } from './blast-radius.js';
 import { CallGraphBuilder, serializeCallGraph } from '../../analyzer/call-graph.js';
@@ -41,6 +39,7 @@ import { readOpenLoreConfig } from '../config-manager.js';
 import { OPENLORE_DIR } from '../../../constants.js';
 import { gitPathArgs } from '../../../utils/git-args.js';
 import type { SerializedCallGraph, FunctionNode, CallEdge } from '../../analyzer/call-graph.js';
+import { execFileGit as execFileAsync } from '../../../utils/git-exec.js';
 import type {
   StructuralAnchor,
   CoveringSurfaceConfig,
@@ -49,7 +48,6 @@ import type {
   ImpactCertificateConfig,
 } from '../../../types/index.js';
 
-const execFileAsync = promisify(execFile);
 
 /** Where persisted certificates live in a repo (so the health check can re-fire them). */
 const CERT_SUBDIR = 'impact-certificates';

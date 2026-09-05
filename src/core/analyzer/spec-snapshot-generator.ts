@@ -6,8 +6,6 @@
  * to produce spec-snapshot.json.
  */
 
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { readFile, stat, readdir, writeFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import {
@@ -23,8 +21,8 @@ import type { SpecSnapshot, SpecSnapshotDomain, SpecSnapshotHub } from '../../ty
 import type { LLMContext } from './artifact-generator.js';
 import type { MappingArtifact } from '../generator/mapping-generator.js';
 import type { SerializedCallGraph, FunctionNode } from './call-graph.js';
+import { execFileGit as execFileAsync } from '../../utils/git-exec.js';
 
-const execFileAsync = promisify(execFile);
 
 // ============================================================================
 // GIT HELPERS

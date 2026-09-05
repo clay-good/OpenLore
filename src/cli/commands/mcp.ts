@@ -23,17 +23,11 @@ const _require = createRequire(import.meta.url);
 const _pkgVersion = (_require('../../../package.json') as { version: string }).version;
 
 import { Command } from 'commander';
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import {
-  CallToolRequestSchema,
-  InitializeRequestSchema,
-  ListToolsRequestSchema,
-  McpError,
-  ErrorCode,
-  LATEST_PROTOCOL_VERSION,
-  SUPPORTED_PROTOCOL_VERSIONS,
-} from '@modelcontextprotocol/sdk/types.js';
+// The stdio transport SDK is an OPTIONAL dependency, loaded inside the command action rather than
+// here: a module-scope import makes every `import openlore` — the CLI's own `--help`, the
+// programmatic API, the HTTP daemon — load an SDK only `openlore mcp` uses, and fail outright when
+// a host declined it (cli: OptionalFeatureDependenciesDegradeAtTheirOwnCommand).
+import { loadMcpSdk, OptionalFeatureError } from './optional-features.js';
 import {
   validateToolArgs,
   withToolTimeout,
@@ -2619,6 +2613,28 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
     process.stdout.write(surface + '\n');
     return;
   }
+
+  // Everything above this line — including `--list-tools` — works with the SDK absent. From here
+  // on the JSON-RPC transport is the whole job, so this is where the optional package is required.
+  let sdk: Awaited<ReturnType<typeof loadMcpSdk>>;
+  try {
+    sdk = await loadMcpSdk();
+  } catch (err) {
+    if (!(err instanceof OptionalFeatureError)) throw err;
+    // stdout is the protocol channel; a diagnostic there would corrupt a client that did connect.
+    process.stderr.write(`${err.message}\n`);
+    process.exit(2);
+  }
+  const { Server, StdioServerTransport } = sdk;
+  const {
+    CallToolRequestSchema,
+    InitializeRequestSchema,
+    ListToolsRequestSchema,
+    McpError,
+    ErrorCode,
+    LATEST_PROTOCOL_VERSION,
+    SUPPORTED_PROTOCOL_VERSIONS,
+  } = sdk.types;
 
   // The MCP stdio transport uses stdout EXCLUSIVELY for the JSON-RPC stream.
   // Any stray write to stdout — e.g. logger.success("Successfully validated

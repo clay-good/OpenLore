@@ -61,6 +61,13 @@ export interface ServeHealth {
   tokenProtected: boolean;
   tokenAuthenticated: boolean;
   draining: boolean;
+  /**
+   * Freshness-watcher state, when the daemon reports it (change:
+   * extend-api-for-supervising-hosts). OPTIONAL on purpose: a daemon from an older release omits
+   * it, and a reader must then say 'unknown' rather than assume either value — which is why this
+   * addition needs no `SERVE_PROTOCOL_VERSION` bump.
+   */
+  watcher?: 'healthy' | 'stopped';
 }
 
 export type ServeDescriptorRead =
@@ -112,6 +119,10 @@ export function validateServeHealth(
     || (descriptor !== undefined && descriptor.protocolVersion !== h.protocolVersion)
     || (descriptor !== undefined && h.tokenProtected !== Boolean(descriptor.token))
   ) return null;
+  // Projected, not passed through: an ill-typed or unknown value is dropped, exactly as every
+  // other field here is allowlisted. Absent stays absent so the caller can distinguish
+  // "watcher stopped" from "this daemon does not report a watcher".
+  const watcher = h.watcher === 'healthy' || h.watcher === 'stopped' ? h.watcher : undefined;
   return {
     ok: true,
     protocolVersion: SERVE_PROTOCOL_VERSION,
@@ -123,6 +134,7 @@ export function validateServeHealth(
     tokenProtected: h.tokenProtected,
     tokenAuthenticated: true,
     draining: h.draining,
+    ...(watcher !== undefined ? { watcher } : {}),
   };
 }
 

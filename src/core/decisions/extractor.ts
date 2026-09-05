@@ -12,11 +12,8 @@ import {
   DECISIONS_DIFF_MAX_CHARS,
   DECISIONS_CONSOLIDATION_MAX_TOKENS,
 } from '../../constants.js';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { getChangedFiles, getFileDiff, resolveBaseRef } from '../drift/git-diff.js';
 import { gitPathArgs } from '../../utils/git-args.js';
-const execFileAsync = promisify(execFile);
 import { matchFileToDomains, getSpecContent } from '../drift/spec-mapper.js';
 import type { LLMService } from '../services/llm-service.js';
 import type { PendingDecision, SpecMap, DecisionScope } from '../../types/index.js';
@@ -24,6 +21,7 @@ import { makeDecisionId } from './store.js';
 import { parseJSON } from '../../utils/misc.js';
 import { createPromptBoundary } from '../../utils/prompt-boundary.js';
 import { logger } from '../../utils/logger.js';
+import { execFileGit as execFileAsync } from '../../utils/git-exec.js';
 
 const SYSTEM_PROMPT = `You are an architectural decision extractor for a software project.
 

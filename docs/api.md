@@ -50,6 +50,11 @@ if (analysis.degraded) console.warn(`${analysis.degraded.artifact}: ${analysis.d
 | `openloreRun(options?)` | Full pipeline: init + analyze + generate | Yes |
 | `openloreAudit(options?)` | Parity audit: uncovered functions, hub gaps, orphan requirements, stale domains | No |
 | `openloreGetSpecRequirements(options?)` | Read requirement blocks from generated specs | No |
+| `openloreHealth(options?)` | Functional readiness: runtime, index state and degradations, watcher, repair-in-progress | No |
+| `openloreIndexState(options?)` | Does the persisted index still represent the working tree? | No |
+| `openloreAnalysisStatus(options?)` | Is an analysis running right now, and who owns it? | No |
+| `openloreFederationList(options?)` | The federation registry and each repo's index state (read-only) | No |
+| `openloreServe(options?)` | Start the local HTTP daemon in-process and get a `ServeHandle` | No |
 
 \* `openloreDrift` requires an API key only when `llmEnhanced: true`.
 
@@ -69,6 +74,75 @@ if (generated.dryRun) {
   console.log(generated.pipelineResult);
 }
 ```
+
+### Supervising-host reads
+
+A host that runs OpenLore for many working trees needs facts OpenLore already owns — is it ready,
+is the index still current, is an analysis already running, what does a federated answer cover — and
+has otherwise had to infer them by provoking work. These four reads answer them directly. None
+writes anything, none needs an LLM provider, all are console-silent, all honour `signal`.
+
+```typescript
+import { openloreHealth, openloreIndexState, openloreAnalysisStatus, openloreFederationList } from 'openlore';
+
+const health = await openloreHealth({ rootPath });
+if (health.index === 'degraded') console.warn(health.indexDegradations);
+// `reasonCode` is the typed switch ('no-index' | 'building' | 'analysis-changed' | …);
+// `reason` beside it is the human sentence — never parse that one.
+// `watcher` is 'unknown' unless a daemon is discoverable: a stopped watcher and an unobservable
+// one are different facts, and neither is guessed.
+
+const state = await openloreIndexState({ rootPath });
+if (!state.matchesWorkingTree) console.log(`re-analysis needed: ${state.reason}`);
+```
+
+`openloreIndexState` re-hashes the analyzed corpus, so it is O(repo bytes) of I/O — cheap next to an
+analysis, but not an O(1) metadata check. Call it per checkout, not per keystroke. It compares under
+the configuration the index recorded; an index built before that field existed reports
+`config-unrecorded` rather than a guessed (and possibly false) mismatch.
+
+`openloreFederationList` never baselines an unbaselined entry — that write stays behind the CLI — so
+a host may see `unbaselined` where `openlore federation status` would have adopted the live hash.
+
+### Running the daemon in-process
+
+```typescript
+import { openloreServe, ServeAlreadyRunningError } from 'openlore';
+
+const handle = await openloreServe({ rootPath, port: 0, ifRunning: 'reject' });
+console.log(handle.baseUrl, handle.owned); // owned: true — close() really stops it
+await handle.close();
+```
+
+`ifRunning` defaults to `'reject'`, which throws `ServeAlreadyRunningError` carrying the running
+daemon's host, port and base URL. `'adopt'` instead returns a handle marked `owned: false` whose
+`close()` detaches without stopping a daemon this process did not start — so `close()` never lies
+about what it did.
+
+### The `openlore/serve-descriptor` subpath
+
+`.openlore/serve.json` is an attacker-writable artifact whose host/port a reader then fetches and
+POSTs tool arguments to. A host that discovers a daemon must validate it with the SAME validator
+OpenLore uses, not a copy — so the validator is published:
+
+```typescript
+import { readServeDescriptor, validateServeHealth, serveHttpBaseUrl } from 'openlore/serve-descriptor';
+```
+
+It is a **separate subpath, deliberately not on `"."`**. The package root re-exports the analyzer-backed
+functions statically, so importing anything from `"."` loads the analyzer — which would defeat the
+whole point for a supervising process that only needs 100 lines of validation. The subpath imports
+node builtins and the loopback predicate, and nothing else; a test asserts it never reaches the
+analyzer, both statically and at runtime.
+
+### Optional feature dependencies
+
+The graph viewer's toolchain (`vite`, `@vitejs/plugin-react`, `react`, `react-dom`) and the stdio MCP
+transport SDK (`@modelcontextprotocol/sdk`) are `optionalDependencies`, loaded at their own command.
+They install by default; an installation that skips them still starts the CLI, lists every command,
+runs analysis, serves the HTTP daemon, and drives the whole programmatic API. `openlore view` and
+`openlore mcp` then report the missing package and its install command rather than a module-
+resolution error.
 
 ### Error handling
 

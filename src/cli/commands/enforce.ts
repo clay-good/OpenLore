@@ -23,10 +23,8 @@
  * Deterministic, no LLM (north star `c6d1ad07`).
  */
 
-import { execFile } from 'node:child_process';
 import { lstat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { promisify } from 'node:util';
 import { Command } from 'commander';
 import { OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR } from '../../constants.js';
 import { gitPathArgs } from '../../utils/git-args.js';
@@ -72,6 +70,7 @@ import { loadArchitectureRules } from '../../core/architecture/rules.js';
 import { scanViolations } from '../../core/architecture/check.js';
 import { assessStalenessForAnalysis } from '../../core/services/mcp-handlers/confidence-boundary.js';
 import type { OpenLoreConfig } from '../../types/index.js';
+import { execFileGit as execFileAsync } from '../../utils/git-exec.js';
 import {
   displayHookPath,
   hookManagerWarning,
@@ -83,7 +82,6 @@ import {
 } from '../git-hooks.js';
 
 const HOOK_MARKER = '# openlore-enforcement-hook';
-const execFileAsync = promisify(execFile);
 const ENFORCEMENT_BASELINE_REPO_PATH = '.openlore/enforcement-baseline.jsonl';
 
 const renderHookContent = (command: string) => `${HOOK_MARKER}

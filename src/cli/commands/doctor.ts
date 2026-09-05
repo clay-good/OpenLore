@@ -11,8 +11,6 @@ import { embeddingTlsRelaxed, withRelaxedTls } from '../../core/services/tls-sco
 import { access, stat, readFile } from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
 import { join, relative } from 'node:path';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { logger } from '../../utils/logger.js';
 import { palette } from '../../utils/colors.js';
 import {
@@ -57,13 +55,13 @@ import type { GovernanceFinding } from '../../core/services/mcp-handlers/enforce
 import { detectCorpusIntegrity } from '../../core/decisions/corpus-integrity.js';
 import { detectInjectionShapes, INJECTION_SHAPE_LIMITS } from '../../core/services/served-content.js';
 import { redactSecretTextWithKnownValues } from '../../core/services/secret-redaction.js';
+import { execFileGit as execFileAsync } from '../../utils/git-exec.js';
 import {
   hookManagerWarning,
   isResolvedGitRepository,
   resolveGitHookTarget,
 } from '../git-hooks.js';
 
-const execFileAsync = promisify(execFile);
 
 // ============================================================================
 // TYPES

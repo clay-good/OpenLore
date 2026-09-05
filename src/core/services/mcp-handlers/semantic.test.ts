@@ -5,6 +5,9 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EdgeStore } from '../edge-store.js';
+// Real function (the ./utils.js mock below is partial — `...actual`). Closes cached
+// EdgeStore handles in afterEach so Windows can rm the temp dir holding call-graph.db.
+import { _resetContextCacheForTesting } from './utils.js';
 import { TextLineIndex } from '../../analyzer/text-line-index.js';
 
 // ── helpers ────────────────────────────────────────────────────────────────
@@ -216,7 +219,7 @@ describe('handleListSpecDomains', () => {
       const result = await handleListSpecDomains(tmpDir) as { domains: string[] };
       expect(result.domains).not.toContain('secret');
     } finally {
-      await rm(outside, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 });
@@ -310,7 +313,7 @@ describe('handleGetSpec', () => {
       expect(deep.content).toBeUndefined();
       expect(deep.error).toBeTruthy();
     } finally {
-      await rm(outside, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 });
@@ -1037,7 +1040,7 @@ describe('handleSearchCode — edgeStore fast path', () => {
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), 'semantic-edgestore-test-'));
     const analysisDir = join(tmpDir, '.openlore', 'analysis');
-    rmSync(analysisDir, { recursive: true, force: true });
+    rmSync(analysisDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     mkdirSync(analysisDir, { recursive: true });
     // Write minimal llm-context.json (no callGraph — edgeStore is the only source)
     writeFileSync(
@@ -1054,7 +1057,8 @@ describe('handleSearchCode — edgeStore fast path', () => {
   });
 
   afterEach(() => {
-    rmSync(tmpDir, { recursive: true, force: true });
+    _resetContextCacheForTesting();
+    rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   });
 
   it('enriches results with callers from edgeStore (not JSON scan)', async () => {
@@ -1099,7 +1103,8 @@ describe('handleSuggestInsertionPoints — edgeStore RIG-13 fast path', () => {
   });
 
   afterEach(() => {
-    rmSync(tmpDir, { recursive: true, force: true });
+    _resetContextCacheForTesting();
+    rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   });
 
   it('RIG-13 expands results with caller from edgeStore', async () => {

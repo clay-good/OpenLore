@@ -200,8 +200,48 @@ export interface ServeHandle {
   host: string;
   token?: string;
   baseUrl: string;
+  /**
+   * True when THIS process started the server the handle addresses, so `close()` stops it.
+   * False for a handle onto a daemon someone else started: `close()` then merely detaches
+   * (change: extend-api-for-supervising-hosts). A supervising host that closed a handle and
+   * believed it had released the daemon would otherwise leak a live process per workspace, so a
+   * handle whose `close()` does not stop a server must never look like one that does.
+   */
+  owned: boolean;
   close(): Promise<void>;
 }
+
+/** Why {@link runServe} declined to start. The CLI logs these; the API throws them. */
+export type ServeRefusalCode =
+  | 'non-loopback-without-token'
+  | 'non-loopback-discovery-host'
+  | 'unknown-preset'
+  | 'startup-lock-unavailable'
+  | 'startup-lock-timeout'
+  | 'incompatible-daemon-announced'
+  | 'daemon-draining'
+  | 'token-posture-mismatch'
+  | 'unverified-daemon-health'
+  | 'preset-posture-mismatch'
+  | 'descriptor-publish-failed'
+  | 'bind-failed';
+
+/**
+ * The outcome of a serve attempt, as a value.
+ *
+ * `runServe` never writes to the console and never sets `process.exitCode`: every exit path is one
+ * of these variants. `startServe` is the CLI adapter that renders them back into today's log lines
+ * and exit codes; `openloreServe` maps `refused` to a thrown error. A library that mutated the exit
+ * code of a process it does not own could not honour the API contract, and a partial extraction —
+ * only the three static refusals — would still have logged and exited on the nine runtime paths
+ * below before it ever got to throw (change: extend-api-for-supervising-hosts).
+ */
+export type ServeOutcome =
+  | { kind: 'started'; handle: ServeHandle }
+  | { kind: 'reusing'; handle: ServeHandle }
+  | { kind: 'stopped'; stopped: boolean }
+  | { kind: 'no-daemon'; message: string }
+  | { kind: 'refused'; code: ServeRefusalCode; message: string };
 
 interface DaemonProbe {
   alive: boolean;
@@ -382,7 +422,18 @@ async function stopDaemon(root: string): Promise<boolean> {
   }
 }
 
-export async function startServe(options: ServeCliOptions): Promise<ServeHandle | undefined> {
+/** Build a refusal outcome. Kept tiny so every refusal site reads as a return, not a side effect. */
+function refused(code: ServeRefusalCode, message: string): ServeOutcome {
+  return { kind: 'refused', code, message };
+}
+
+/**
+ * The serve startup core. Returns its outcome as a value — it never calls `logger.error` and never
+ * writes `process.exitCode`, on any path (change: extend-api-for-supervising-hosts). Operational
+ * logging a running daemon does (warnings, discovery lines) stays: a caller that needs silence
+ * passes `quiet` and gets it from the logger, not from a second copy of this function.
+ */
+async function runServe(options: ServeCliOptions): Promise<ServeOutcome> {
   const root = canonicalServeRoot(options.directory ?? process.cwd());
   const host = options.host ?? '127.0.0.1';
   const configuredToken = options.token ?? process.env.OPENLORE_SERVE_TOKEN;
@@ -395,33 +446,26 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
 
   // Reject static configuration errors before creating .openlore or its lock.
   if (!isLoopbackHost(host) && !token) {
-    logger.error(
+    return refused('non-loopback-without-token',
       `Refusing to bind non-loopback host "${host}" without a token. ` +
       `A non-loopback bind exposes openlore tools to the network; pass --token <secret> ` +
       `(or set OPENLORE_SERVE_TOKEN) to require authentication.`,
     );
-    process.exitCode = 1;
-    return;
   }
   if (!discoveryHost) {
-    logger.error(
+    return refused('non-loopback-discovery-host',
       `Refusing non-loopback host "${host}" because safe local daemon discovery requires ` +
       'a loopback host or wildcard bind (0.0.0.0 or ::).',
     );
-    process.exitCode = 1;
-    return;
   }
   if (!isFullSurface && !TOOL_PRESETS[presetName]) {
-    logger.error(`Unknown --preset "${presetName}". Known: ${Object.keys(TOOL_PRESETS).join(', ')}, ${FULL_PRESET_ALIAS}, ${FULL_PRESET}.`);
-    process.exitCode = 1;
-    return;
+    return refused('unknown-preset', `Unknown --preset "${presetName}". Known: ${Object.keys(TOOL_PRESETS).join(', ')}, ${FULL_PRESET_ALIAS}, ${FULL_PRESET}.`);
   }
   if (options.stop) {
     const openloreDirectory = join(root, OPENLORE_DIR);
     const exists = await access(openloreDirectory).then(() => true).catch(() => false);
     if (!exists) {
-      logger.warning(`No running openlore serve daemon found for ${root}.`);
-      return;
+      return { kind: 'no-daemon', message: `No running openlore serve daemon found for ${root}.` };
     }
   }
 
@@ -437,20 +481,16 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
         : {}),
     });
   } catch (err) {
-    logger.error(
+    return refused('startup-lock-unavailable',
       `The serve startup lock for ${root} is unavailable: ${err instanceof Error ? err.message : String(err)} ` +
       `Verify that no starter is running, then remove the stranded lock gate under ${join(root, OPENLORE_DIR)}.`,
     );
-    process.exitCode = 1;
-    return;
   }
   if (isLockHeld(lockResult)) {
-    logger.error(
+    return refused('startup-lock-timeout',
       `Timed out waiting for ${lockResult.lockPath}. Verify its recorded owner is no longer running ` +
       'before removing the lock file.',
     );
-    process.exitCode = 1;
-    return;
   }
   let releaseAttempted = false;
   let startupLockReleased = false;
@@ -474,8 +514,9 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
 
   try {
   if (options.stop) {
-    preserveStartupLock = !(await stopDaemon(root));
-    return undefined;
+    const stopped = await stopDaemon(root);
+    preserveStartupLock = !stopped;
+    return { kind: 'stopped', stopped };
   }
 
   // A loopback bind with no token is still reachable by other local processes.
@@ -529,9 +570,7 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
   const announcedDescriptor = await readServeDescriptorState(serveFilePath(root), { includeDraining: true });
   if (announcedDescriptor.kind === 'incompatible') {
     if (await incompatibleServeDescriptorIsLive(announcedDescriptor.descriptor, root)) {
-      logger.error('A legacy or incompatible OpenLore daemon is already announced for this repository. Stop it with the matching OpenLore version before starting this release.');
-      process.exitCode = 1;
-      return;
+      return refused('incompatible-daemon-announced', 'A legacy or incompatible OpenLore daemon is already announced for this repository. Stop it with the matching OpenLore version before starting this release.');
     }
     await unlink(serveFilePath(root)).catch(() => {});
   }
@@ -556,25 +595,21 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
       existing = await readDescriptor(root);
     }
     if (existing?.state === 'draining') {
-      logger.error(
+      preserveStartupLock = true;
+      return refused('daemon-draining',
         `The daemon for ${root} is still draining. No replacement was started; ` +
         'verify the descriptor PID before manual cleanup.',
       );
-      process.exitCode = 1;
-      preserveStartupLock = true;
-      return;
     }
     }
   }
   if (existing && existing.token !== token) {
-    logger.error(
+    return refused('token-posture-mismatch',
       `Refusing to reuse the daemon announced for ${root}: requested token posture ` +
       `(${token ? 'protected' : 'none'}) does not match the descriptor ` +
       `(${existing.token ? 'protected' : 'none'}). No request was sent. Stop the existing ` +
       'daemon before changing its security settings.',
     );
-    process.exitCode = 1;
-    return;
   }
   let existingProbe = existing ? await probeDaemon(existing, root) : null;
   let existingHealth = existingProbe?.health ?? null;
@@ -585,22 +620,18 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
     }
     existing = await readDescriptor(root);
     if (existing) {
-      logger.error(`The daemon for ${root} did not finish draining; no replacement was started.`);
-      process.exitCode = 1;
       preserveStartupLock = true;
-      return;
+      return refused('daemon-draining', `The daemon for ${root} did not finish draining; no replacement was started.`);
     }
     existingProbe = null;
     existingHealth = null;
   }
   if (existing && existingProbe?.alive && !existingHealth) {
-    logger.error(
+    return refused('unverified-daemon-health',
       `Refusing to reuse the daemon already serving ${root} because its health response ` +
       'does not declare an authenticated, root-bound preset/tool surface. Stop or upgrade ' +
       'the incompatible process manually before restarting it.',
     );
-    process.exitCode = 1;
-    return;
   }
   if (existing && existingHealth) {
     const requestedPreset = isFullSurface ? FULL_PRESET : presetName;
@@ -611,25 +642,26 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
       existingTools.size === activeNames.size
       && [...activeNames].every((tool) => existingTools.has(tool));
     if (existingPreset !== requestedPreset || !surfaceMatches || existingHealth.tokenProtected !== Boolean(token)) {
-      logger.error(
+      return refused('preset-posture-mismatch',
         `Refusing to reuse the daemon already serving ${root}: requested preset/token ` +
         `(${requestedPreset}/${token ? 'protected' : 'none'}) does not match the live daemon ` +
         `(${existingPreset}/${existingHealth.tokenProtected ? 'protected' : 'none'}), or its advertised tools ` +
         'do not match that preset. Run ' +
         '`openlore serve --stop` before starting it with different security settings.',
       );
-      process.exitCode = 1;
-      return;
     }
-    logger.success(
-      `openlore serve already running for ${root} at ${serveHttpBaseUrl(existing.host, existing.port)} — reusing.`,
-    );
     return {
-      port: existing.port,
-      host: existing.host,
-      token,
-      baseUrl: serveHttpBaseUrl(existing.host, existing.port),
-      close: async () => {}, // never tear down a daemon this process didn't start
+      kind: 'reusing',
+      handle: {
+        port: existing.port,
+        host: existing.host,
+        token,
+        baseUrl: serveHttpBaseUrl(existing.host, existing.port),
+        // Not ours to stop. `owned: false` is what stops a supervising host from reading this
+        // detach as a shutdown (change: extend-api-for-supervising-hosts).
+        owned: false,
+        close: async () => {}, // never tear down a daemon this process didn't start
+      },
     };
   }
 
@@ -743,6 +775,11 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
         tokenAuthenticated,
         draining: teardownRequested,
         uptimeMs: Date.now() - startMs,
+        // Freshness-watcher state (change: extend-api-for-supervising-hosts). Nothing on disk
+        // records this, so a supervising host asking "is my index silently ageing?" has no other
+        // source. Optional and allowlist-projected: an older daemon omits it and readers report
+        // 'unknown' rather than guessing, so no protocol bump is warranted.
+        watcher: watcher ? 'healthy' : 'stopped',
       });
       return;
     }
@@ -757,7 +794,16 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
           ? { ok: true, shuttingDown: true }
           : { error: 'shutdown began, but the draining descriptor could not be published' },
       );
-      void shutdown;
+      // SIGINT/SIGTERM and the idle-timeout path both exit via exitAfterTeardown() once
+      // teardown() settles; this path used to just fire teardown() and return, trusting the
+      // event loop to drain naturally. On Windows that isn't reliable — teardown() can finish
+      // (watcher closed, descriptor unlinked) while some handle still holds the process open,
+      // leaving a zombie daemon behind even though the client sees success (change:
+      // extend-api-for-supervising-hosts). Exit explicitly here too, once the response has
+      // actually gone out so the client still gets its 202 first.
+      res.on('finish', () => {
+        void shutdown.then(() => process.exit(0));
+      });
       return;
     }
 
@@ -917,10 +963,19 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
 
   // Bind (port 0 → OS picks a free ephemeral port).
   const port = options.port ? parseInt(options.port, 10) : 0;
-  await new Promise<void>((resolve_, reject) => {
-    server.once('error', reject);
-    server.listen(port, host, resolve_);
-  });
+  try {
+    await new Promise<void>((resolve_, reject) => {
+      server.once('error', reject);
+      server.listen(port, host, resolve_);
+    });
+  } catch (err) {
+    // An occupied, privileged or invalid port is a refusal like any other. Letting the raw Node
+    // system error escape would bypass the outcome contract entirely — the CLI would print a stack
+    // instead of a message, and `openloreServe` would throw something other than an OpenLoreError
+    // on the single most common startup failure there is.
+    const detail = err instanceof Error ? err.message : String(err);
+    return refused('bind-failed', `Could not bind ${host}:${port}: ${detail}`);
+  }
   const addr = server.address();
   const boundPort = typeof addr === 'object' && addr ? addr.port : port;
 
@@ -1076,12 +1131,10 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
   } catch (err) {
     await releaseStartupLock();
     await teardown();
-    logger.error(
+    return refused('descriptor-publish-failed',
       `Could not publish ${serveFilePath(root)} (${err instanceof Error ? err.message : String(err)}); ` +
       'the unannounced daemon was closed.',
     );
-    process.exitCode = 1;
-    return;
   }
   await releaseStartupLock();
 
@@ -1094,16 +1147,53 @@ export async function startServe(options: ServeCliOptions): Promise<ServeHandle 
   if (idleMs > 0) logger.discovery(`[serve] idle shutdown after ${idleMs / 60_000}min of inactivity`);
 
   return {
-    port: boundPort,
-    host,
-    token,
-    baseUrl: serveHttpBaseUrl(host, boundPort),
-    close: teardown,
+    kind: 'started',
+    handle: {
+      port: boundPort,
+      host,
+      token,
+      baseUrl: serveHttpBaseUrl(host, boundPort),
+      owned: true,
+      close: teardown,
+    },
   };
   } finally {
     await releaseStartupLock();
   }
 }
+
+/**
+ * CLI adapter over {@link runServe}: renders each outcome into the log line and exit code the
+ * `openlore serve` command has always produced. Every `process.exitCode` write for a serve start
+ * lives here, so the core stays embeddable (`openloreServe`) without a second copy of the startup
+ * rules — duplicating the loopback/token refusal in an API wrapper would be a second security
+ * posture for one rule, which is the mistake this change exists to stop making.
+ */
+export async function startServe(options: ServeCliOptions): Promise<ServeHandle | undefined> {
+  const outcome = await runServe(options);
+  switch (outcome.kind) {
+    case 'refused':
+      logger.error(outcome.message);
+      process.exitCode = 1;
+      return undefined;
+    case 'no-daemon':
+      logger.warning(outcome.message);
+      return undefined;
+    case 'stopped':
+      return undefined;
+    case 'reusing':
+      logger.success(
+        `openlore serve already running for ${canonicalServeRoot(options.directory ?? process.cwd())} `
+        + `at ${outcome.handle.baseUrl} — reusing.`,
+      );
+      return outcome.handle;
+    case 'started':
+      return outcome.handle;
+  }
+}
+
+/** The startup core, for in-process callers that must not have their exit code mutated. */
+export { runServe };
 
 export const serveCommand = new Command('serve')
   .description('Start a warm local HTTP daemon exposing openlore tools (loopback, for editor/agent integrations like Pi)')

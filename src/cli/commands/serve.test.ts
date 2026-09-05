@@ -15,7 +15,7 @@ import { createServer, request as httpRequest } from 'node:http';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { startServe, readDescriptor, idleTimeoutMs, drainServeRebuilds, type ServeHandle } from './serve.js';
-import { SERVE_PROTOCOL_VERSION } from './serve-descriptor.js';
+import { SERVE_PROTOCOL_VERSION, canonicalServeRoot } from './serve-descriptor.js';
 import { TOOL_PRESETS } from './mcp.js';
 import { EdgeStore } from '../../core/services/edge-store.js';
 import * as analyzeApi from '../../api/analyze.js';
@@ -302,7 +302,10 @@ describe('openlore serve', () => {
     const body = await jsonOf(res);
     expect(body.ok).toBe(true);
     expect(body.presetDispatchEnforced).toBe(true);
-    expect(body.root).toBe(await realpath(root));
+    // The server reports its canonicalized root (lowercased on Windows, where the
+    // filesystem is case-insensitive — see canonicalServeRoot), not realpath's
+    // filesystem-preserved casing.
+    expect(body.root).toBe(canonicalServeRoot(root));
     expect(body.pid).toBe(process.pid);
     expect(body.tokenProtected).toBe(false);
     expect(body.tokenAuthenticated).toBe(true);
@@ -327,7 +330,7 @@ describe('openlore serve', () => {
     const authenticated = await jsonOf(await fetch(`${h!.baseUrl}/health`, {
       headers: { 'x-openlore-token': h!.token! },
     }));
-    expect(authenticated).toMatchObject({ root: await realpath(root), tokenAuthenticated: true });
+    expect(authenticated).toMatchObject({ root: canonicalServeRoot(root), tokenAuthenticated: true });
   });
 
   it('writes serve.json on start and removes it on close', async () => {
@@ -492,7 +495,7 @@ describe('openlore serve', () => {
         });
         expect(res.status).toBe(400);
         const body = await jsonOf(res);
-        expect(String(body.error)).toContain(`serves only ${await realpath(root)}`);
+        expect(String(body.error)).toContain(`serves only ${canonicalServeRoot(root)}`);
         expect(String(body.error)).toMatch(/separate openlore serve daemon/i);
       }
       expect(await fileExists(join(otherRoot, OPENLORE_DIR))).toBe(false);
@@ -578,6 +581,12 @@ describe('openlore serve', () => {
   });
 
   it('--stop asks the root-bound daemon to shut itself down without signalling descriptor PID data', async () => {
+    // /shutdown now calls process.exit(0) once teardown settles (correct for the real
+    // detached daemon; see the idle-shutdown tests above for the established pattern).
+    // Stub it here too so the test runner survives — teardown() itself still fully
+    // runs and is what the assertions below actually observe. Restored by the global
+    // afterEach's vi.restoreAllMocks().
+    vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
     const h = await boot();
     const kill = vi.spyOn(process, 'kill');
     await startServe({ directory: root, stop: true });
@@ -591,6 +600,9 @@ describe('openlore serve', () => {
   });
 
   it('does not remove a replacement descriptor during slower shutdown teardown', async () => {
+    // /shutdown calls process.exit(0) once teardown settles — stub it (see the
+    // idle-shutdown tests' established pattern) so the test runner survives.
+    vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
     const old = await boot();
     await startServe({ directory: root, stop: true });
     const replacement = await startServe({ directory: root, port: '0', watch: false });
@@ -698,6 +710,9 @@ describe('openlore serve', () => {
   });
 
   it('lets a repeated --stop finish a healthy daemon with a stranded draining marker', async () => {
+    // /shutdown calls process.exit(0) once teardown settles — stub it (see the
+    // idle-shutdown tests' established pattern) so the test runner survives.
+    vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
     const first = await boot();
     const path = join(root, OPENLORE_DIR, 'serve.json');
     const descriptor = await readDescriptor(root);
@@ -710,6 +725,9 @@ describe('openlore serve', () => {
   });
 
   it('announces shutdown before acknowledging a direct shutdown request', async () => {
+    // /shutdown calls process.exit(0) once teardown settles — stub it (see the
+    // idle-shutdown tests' established pattern) so the test runner survives.
+    vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
     const h = await boot({ token: 'protected' });
     const response = await fetch(`${h.baseUrl}/shutdown`, {
       method: 'POST',
@@ -723,6 +741,10 @@ describe('openlore serve', () => {
   });
 
   it('does not acknowledge shutdown when the draining descriptor cannot be published', async () => {
+    // teardown() still runs (and still ends in process.exit(0)) even when the
+    // draining announcement itself failed to publish — stub exit (see the
+    // idle-shutdown tests' established pattern) so the test runner survives.
+    vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
     const h = await boot({ token: 'protected' });
     const descriptorPath = join(root, OPENLORE_DIR, 'serve.json');
     await rm(descriptorPath);
@@ -803,7 +825,13 @@ describe('openlore serve', () => {
     }
   }, 30_000);
 
-  it('handles a real SIGTERM and removes discovery only after clean process exit', async () => {
+  // Windows has no real POSIX signal delivery: child.kill('SIGTERM') there calls
+  // TerminateProcess directly (empirically verified — the child's own
+  // process.on('SIGTERM', ...) handler never runs; it exits { code: null, signal:
+  // 'SIGTERM' }, never code 0), so serve.ts's SIGTERM handler / exitAfterTeardown
+  // never fires and neither assertion below can hold. Not a gap in serve.ts —
+  // there is no userland way to ask Windows to deliver a real signal.
+  it.skipIf(process.platform === 'win32')('handles a real SIGTERM and removes discovery only after clean process exit', async () => {
     root = await mkdtemp(join(tmpdir(), 'openlore-serve-sigterm-'));
     const child = spawn(process.execPath, [
       '--import', 'tsx', join(process.cwd(), 'src', 'cli', 'index.ts'),
@@ -1176,7 +1204,7 @@ describe('openlore serve', () => {
       ok: true,
       tokenProtected: true,
       tokenAuthenticated: true,
-      root: await realpath(root),
+      root: canonicalServeRoot(root),
       pid: process.pid,
       preset: 'substrate',
     });

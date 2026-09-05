@@ -418,6 +418,7 @@ describe('workflow security: reviewed CodeQL egress stays narrow and auditable',
       'Every reviewed CodeQL egress marker must name one query and have an immediately preceding rationale.'
     ).toEqual([]);
     expect(markers, 'Changing the reviewed egress set requires explicit security review.').toEqual({
+      'src/api/health.ts': 1,
       'src/cli/commands/doctor.ts': 1,
       'src/cli/commands/serve.ts': 2,
       'src/cli/commands/view.ts': 1,

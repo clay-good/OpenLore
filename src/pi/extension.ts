@@ -142,6 +142,34 @@ export async function readContextInjection(cwd: string): Promise<ContextInjectio
   } catch { return undefined; }
 }
 
+/**
+ * Environment override for daemon spawn authority (change: extend-api-for-supervising-hosts).
+ * Set by a supervising host that already runs one daemon per working tree, so an
+ * extension-initiated spawn would produce a second, unsupervised process outliving the session.
+ */
+const PI_NO_SPAWN_ENV = 'OPENLORE_PI_NO_SPAWN';
+
+/**
+ * May this extension spawn a daemon of its own?
+ *
+ * Read like `readContextInjection` and NOT through `readConfig`: the opt-out must work before an
+ * LLM provider is configured, and `readConfig` returns null until `generation.provider` is set —
+ * which would silently restore spawn authority the operator revoked. The environment variable wins
+ * over the config key, because it is the host's per-process statement about who owns the process.
+ * Only the exact `false` disables spawning; an absent or malformed key leaves today's default.
+ */
+export async function piMaySpawnDaemon(cwd: string): Promise<boolean> {
+  const env = process.env[PI_NO_SPAWN_ENV]?.trim().toLowerCase();
+  if (env !== undefined && env !== '' && env !== '0' && env !== 'false') return false;
+  try {
+    const raw = JSON.parse(await readFile(safeJoin(cwd, join(OPENLORE_DIR, 'config.json')), 'utf-8')) as unknown;
+    const pi = raw && typeof raw === 'object' ? (raw as { pi?: { spawnDaemon?: unknown } }).pi : undefined;
+    return pi?.spawnDaemon !== false;
+  } catch {
+    return true; // no config, or unreadable — the default is unchanged
+  }
+}
+
 async function writeConfig(cwd: string, config: OpenLoreConfig): Promise<void> {
   const configPath = safeJoin(cwd, join(OPENLORE_DIR, 'config.json'));
   await mkdir(safeJoin(cwd, OPENLORE_DIR), { recursive: true });
@@ -607,13 +635,15 @@ export type EnsureDaemonResult =
   | {
       daemon: null;
       failure: string;
-      failureKind: 'draining' | 'launch' | 'preparation' | 'early-exit' | 'health-timeout';
+      failureKind: 'draining' | 'launch' | 'preparation' | 'early-exit' | 'health-timeout' | 'spawn-disabled';
     };
 
 export function shouldNegativeCacheDaemonFailure(
   kind: Exclude<EnsureDaemonResult, { daemon: Daemon }>['failureKind'],
 ): boolean {
-  return kind !== 'draining' && kind !== 'health-timeout';
+  // `spawn-disabled` joins the non-cached kinds: the host may start its daemon at any moment, and
+  // a cooldown would make the extension keep reporting "absent" for 30s after it appeared.
+  return kind !== 'draining' && kind !== 'health-timeout' && kind !== 'spawn-disabled';
 }
 
 export async function ensureDaemonResult(
@@ -638,15 +668,31 @@ export async function ensureDaemonResult(
     if (probe.health) return { daemon: daemonFromHealth(existing, probe.health) };
     if (probe.alive) return { daemon: incompatibleDaemon(existing) };
   }
+  // Spawn authority is checked HERE, not at the `options.launch` seam, so the default path every
+  // Pi tool call takes honours the opt-out — a seam only an explicit caller can reach would leave
+  // the extension spawning exactly as before (spec: PiDaemonSpawnAuthorityIsOverridable).
+  if (!(await piMaySpawnDaemon(cwd))) {
+    return {
+      daemon: null,
+      failure:
+        `No healthy openlore daemon was found for this working tree, and daemon spawning is ` +
+        `disabled (${PI_NO_SPAWN_ENV} or "pi.spawnDaemon": false). Start the daemon from the ` +
+        `supervising host, then retry.`,
+      failureKind: 'spawn-disabled',
+    };
+  }
   try {
     // The daemon must outlive this process and write .openlore/serve.json.
     // Windows 10 kills a child whose stdout/stderr are NUL (stdio:'ignore') —
     // it dies before writing the descriptor (Win11 tolerates it). Give it a
     // real file handle (serve.log) instead; that's the fix validated on Win10.
-    // On Windows we also drop `detached`: it allocates a console window that
-    // windowsHide can't suppress, and Windows doesn't reap the child on parent
-    // exit anyway. macOS/Linux need `detached` (setsid) to outlive us.
-    const isWin = process.platform === 'win32';
+    // `detached` applies on every platform: macOS/Linux need it (setsid) to
+    // outlive us, and so does Windows — this once excluded Windows on the
+    // belief that it "doesn't reap the child on parent exit anyway", which the
+    // windows-smoke job disproved (the daemon died with its spawner, killed,
+    // with no shutdown trace in serve.log). windowsHide keeps DETACHED_PROCESS
+    // from surfacing a console. Caveat: libuv deliberately does not set
+    // CREATE_BREAKAWAY_FROM_JOB, so this does not escape a parent Job Object.
     const openloreDir = safeJoin(cwd, OPENLORE_DIR);
     const logPath = safeJoin(cwd, join(OPENLORE_DIR, 'serve.log'));
     await mkdir(openloreDir, { recursive: true });
@@ -659,7 +705,7 @@ export async function ensureDaemonResult(
         const child = spawn(launch.command, launch.args, {
           stdio: ['ignore', logFd, logFd],
           windowsHide: true,
-          detached: !isWin,
+          detached: true,
         });
         child.once('spawn', () => resolve({ ok: true, child }));
         child.once('error', (error) => {

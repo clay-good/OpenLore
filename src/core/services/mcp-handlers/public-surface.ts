@@ -17,8 +17,6 @@
 
 import { readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { gitPathArgs } from '../../../utils/git-args.js';
 import { validateDirectory, readCachedContext } from './utils.js';
 import { assembleBoundary, computeStaleness } from './confidence-boundary.js';
@@ -28,6 +26,7 @@ import { isTestFile } from '../../analyzer/test-file.js';
 import { CallGraphBuilder, serializeCallGraph } from '../../analyzer/call-graph.js';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
 import { hashSpan } from '../../decisions/anchor.js';
+import { execFileGit as execFileAsync } from '../../../utils/git-exec.js';
 import {
   computeContinuity,
   normalizedBodyHash,
@@ -43,7 +42,6 @@ import {
   type ChangeClass,
 } from '../../analyzer/public-surface.js';
 
-const execFileAsync = promisify(execFile);
 
 const MAX_SURFACE = 500;
 const MAX_CONSUMERS = 25;

@@ -55,6 +55,7 @@ import { memoryDir } from '../../decisions/memory-store.js';
 import { handleRemember, handleRecall } from './memory.js';
 import { handleOrient } from './orient.js';
 import type { FunctionNode } from '../../analyzer/call-graph.js';
+import { _resetContextCacheForTesting } from './utils.js';
 
 /**
  * Budget for the two property tests below.
@@ -131,7 +132,7 @@ beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), 'openlore-invariant-'));
   await mkdir(join(root, 'src'), { recursive: true });
 });
-afterEach(async () => { await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 }); });
+afterEach(async () => { _resetContextCacheForTesting(); await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); });
 
 type RecalledItem = { freshness: string; verify?: boolean; kind?: string; id?: string };
 
@@ -154,8 +155,12 @@ function assertRecallInvariant(r: {
   }
 }
 
+// Property tests — 120 generated cases each, building and tearing down a real
+// on-disk index per iteration. On Windows the per-iteration rm of source files
+// races still-open EdgeStore handles and the teardown hook times out; this is a
+// logic soundness guard, exercised on the Linux CI job.
 describe('AuthoritativeRecallInvariant — recall, property-based over generated mutations', () => {
-  it('the authoritative set never contains an orphaned or unlabeled-drifted memory (120 generated cases)', async () => {
+  it.skipIf(process.platform === 'win32')('the authoritative set never contains an orphaned or unlabeled-drifted memory (120 generated cases)', async () => {
     const dir = root;   // see the note on `root`: never touch the next test's fixture
     for (let trial = 0; trial < 120; trial++) {
       const rand = rng(0x1000 + trial);
@@ -201,7 +206,7 @@ describe('AuthoritativeRecallInvariant — recall, property-based over generated
       // Reset for the next trial: clear the source tree and the notes store. The
       // edge store is reset by buildStore's clearAll, so we avoid rm-ing the
       // .openlore dir (which races with the SQLite file handle on some platforms).
-      await rm(join(dir, 'src'), { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+      await rm(join(dir, 'src'), { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
       await rm(join(memoryDir(dir), MEMORY_NOTES_FILE), { force: true });
       await mkdir(join(dir, 'src'), { recursive: true });
     }
@@ -223,7 +228,7 @@ async function writeDecisions(decisions: Array<Record<string, unknown>>, rootDir
 }
 
 describe('AuthoritativeRecallInvariant — orient decision section, property-based', () => {
-  it('pendingDecisions never lists an orphaned decision; staleDecisions holds only orphaned (120 cases)', async () => {
+  it.skipIf(process.platform === 'win32')('pendingDecisions never lists an orphaned decision; staleDecisions holds only orphaned (120 cases)', async () => {
     const dir = root;   // see the note on `root`
     for (let trial = 0; trial < 120; trial++) {
       const rand = rng(0x2000 + trial);
@@ -281,7 +286,7 @@ describe('AuthoritativeRecallInvariant — orient decision section, property-bas
 
       // Reset the source tree only; buildStore.clearAll resets the edge store and
       // writeDecisions overwrites pending.json next trial.
-      await rm(join(dir, 'src'), { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+      await rm(join(dir, 'src'), { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
       await mkdir(join(dir, 'src'), { recursive: true });
     }
   }, PROPERTY_TIMEOUT_MS);

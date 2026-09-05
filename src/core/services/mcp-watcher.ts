@@ -1368,7 +1368,10 @@ export class McpWatcher {
         // below — which fires on ordinary staleness and is the one that repeats — does keep
         // its cache.
         [cli, 'analyze', '--reanalyze', '--no-embed', '--output', this.outputPath],
-        { cwd: this.rootPath, stdio: 'ignore', detached: true }
+        // windowsHide: detached alone surfaces a console window on Windows (same reason
+        // serve-client's daemon spawn sets it) — without it, every self-heal here flashes
+        // a visible cmd window (change: extend-api-for-supervising-hosts).
+        { cwd: this.rootPath, stdio: 'ignore', detached: true, windowsHide: true }
       );
       this.rebuildChildren.add(child);
       child.once('close', (code) => {
@@ -1476,7 +1479,9 @@ export class McpWatcher {
         // cache exists for, on the path that repeats most — this one re-fires on every branch
         // switch for the life of the session (change: optimize-hash-keyed-analyze).
         [cli, 'analyze', '--reanalyze', '--no-embed', '--output', this.outputPath],
-        { cwd: this.rootPath, stdio: 'ignore', detached: true }
+        // windowsHide: this path re-fires on every branch switch and coalesces retries —
+        // without windowsHide it flashes a new console window each time on Windows.
+        { cwd: this.rootPath, stdio: 'ignore', detached: true, windowsHide: true }
       );
       this.rebuildChildren.add(child);
       child.once('close', (code) => {

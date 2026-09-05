@@ -10,14 +10,12 @@
  *     single explicit log line — never a silent pass.
  */
 
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { existsSync } from 'node:fs';
 import { join, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { FixtureRepo, PLACEHOLDER_SHA } from './fixture-repos.js';
+import { execFileGit as execFileAsync } from '../../../../utils/git-exec.js';
 
-const execFileAsync = promisify(execFile);
 
 /** Repo root = six levels up from this file (src/core/services/mcp-handlers/live-data/). */
 function repoRoot(): string {

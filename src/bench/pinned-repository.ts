@@ -1,7 +1,7 @@
-import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { execFileGitSync } from '../utils/git-exec.js';
 
 export interface RepositoryPin {
   id: string;
@@ -10,9 +10,9 @@ export interface RepositoryPin {
 
 export function verifyPinnedRepository(repo: RepositoryPin, directory: string): void {
   if (!existsSync(join(directory, '.git'))) throw new Error(`Pinned benchmark repository is missing: ${repo.id}`);
-  const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: directory, encoding: 'utf8' }).trim();
+  const head = execFileGitSync('git', ['rev-parse', 'HEAD'], { cwd: directory, encoding: 'utf8' }).trim();
   if (head !== repo.sha) throw new Error(`Pinned benchmark repository SHA mismatch for ${repo.id}: ${head}`);
-  const status = execFileSync('git', ['status', '--porcelain', '--untracked-files=no'], {
+  const status = execFileGitSync('git', ['status', '--porcelain', '--untracked-files=no'], {
     cwd: directory,
     encoding: 'utf8',
   }).trim();

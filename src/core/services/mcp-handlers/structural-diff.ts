@@ -21,9 +21,7 @@
  * reported, never silently guessed.
  */
 
-import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
-import { promisify } from 'node:util';
 import { validateDirectory, readCachedContext, safeJoin } from './utils.js';
 import { isGitRepository, getRepoPrefix, resolveBaseRef, validateGitRef, getChangedFiles } from '../../drift/git-diff.js';
 import { gitPathArgs } from '../../../utils/git-args.js';
@@ -40,8 +38,8 @@ import {
   type DeclaredFootprintInput,
 } from './footprint-escape.js';
 import type { SerializedCallGraph, FunctionNode } from '../../analyzer/call-graph.js';
+import { execFileGit as execFileAsync } from '../../../utils/git-exec.js';
 
-const execFileAsync = promisify(execFile);
 
 export interface StructuralDiffInput {
   directory: string;

@@ -216,7 +216,9 @@ async function queryGryphAsync(action: 'exec' | 'write', since: string): Promise
     const child = spawn(
       _gryphBin,
       ['query', '--format', 'json', '--action', action, '--since', since],
-      { stdio: ['ignore', 'pipe', 'ignore'], detached: true }, // own group → reap grandchildren on timeout
+      // own group → reap grandchildren on timeout; windowsHide — detached alone surfaces
+      // a console window on Windows, and this path polls, so it would flash repeatedly.
+      { stdio: ['ignore', 'pipe', 'ignore'], detached: true, windowsHide: true },
     );
     const timer = setTimeout(() => { killGryphGroup(child.pid, child); resolve([]); }, GRYPH_TIMEOUT_MS);
     let output = '';

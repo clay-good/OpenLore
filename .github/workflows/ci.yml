@@ -253,6 +253,209 @@ jobs:
             throw 'Windows analyze did not produce llm-context.json'
           }
 
+      - name: Exercise the MCP transport and the serve daemon
+        shell: pwsh
+        working-directory: src/core/scip/fixtures/tiny-repo
+        run: |
+          # The paths an agent takes to reach OpenLore on Windows: the stdio
+          # JSON-RPC transport, and the daemon spawn branch in serve-client
+          # (log-redirected, non-detached). Nothing else in CI runs either on
+          # Windows, so a "the agents cannot connect any more" regression lands
+          # here or nowhere.
+          $ErrorActionPreference = 'Stop'
+          $entry = Join-Path (npm root -g) 'openlore/dist/cli/index.js'
+          if (-not (Test-Path $entry)) { throw "Global openlore entry not found: $entry" }
+
+          # The server closes on stdin EOF WITHOUT draining in-flight requests,
+          # so stdin is held open until every expected id has answered.
+          function Invoke-McpSession {
+            param(
+              [string[]]$ExtraArgs = @(),
+              [Parameter(Mandatory)][string[]]$Requests,
+              [Parameter(Mandatory)][int[]]$ExpectIds,
+              [int]$TimeoutSec = 240
+            )
+            $psi = [System.Diagnostics.ProcessStartInfo]::new()
+            $psi.FileName = 'node'
+            foreach ($a in @($script:entry) + $ExtraArgs) { $psi.ArgumentList.Add($a) }
+            $psi.RedirectStandardInput = $true
+            $psi.RedirectStandardOutput = $true
+            # stderr is left attached to the job log: it is the crash diagnostic,
+            # and draining it here after the process runs risks a full-pipe stall.
+            $psi.UseShellExecute = $false
+            $proc = [System.Diagnostics.Process]::Start($psi)
+            foreach ($r in $Requests) { $proc.StandardInput.WriteLine($r) }
+            $proc.StandardInput.Flush()
+
+            $seen = @{}
+            $deadline = (Get-Date).AddSeconds($TimeoutSec)
+            while ($true) {
+              $remaining = [int](($deadline - (Get-Date)).TotalMilliseconds)
+              if ($remaining -le 0) { break }
+              $read = $proc.StandardOutput.ReadLineAsync()
+              if (-not $read.Wait($remaining)) { break }
+              $line = $read.Result
+              if ($null -eq $line) { break }
+              if (-not $line.Trim()) { continue }
+              try { $obj = $line | ConvertFrom-Json } catch { continue }
+              if ($null -ne $obj.id) { $seen[[int]$obj.id] = $obj }
+              if (@($ExpectIds | Where-Object { -not $seen.ContainsKey($_) }).Count -eq 0) { break }
+            }
+            $proc.StandardInput.Close()
+            if (-not $proc.WaitForExit(60000)) { $proc.Kill(); throw 'MCP server did not exit after stdin closed' }
+            foreach ($id in $ExpectIds) {
+              if (-not $seen.ContainsKey($id)) { throw "MCP request id $id got no response within ${TimeoutSec}s" }
+            }
+            return $seen
+          }
+
+          $init = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"windows-smoke","version":"1.0.0"}}}'
+          $ready = '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}'
+          $list = '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+          $call = '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"orient","arguments":{"task":"windows smoke"}}}'
+
+          # 1. stdio transport, no daemon: handshake, tool surface, in-process dispatch.
+          $r = Invoke-McpSession -ExtraArgs @('mcp','--preset','full') `
+                 -Requests @($init, $ready, $list, $call) -ExpectIds @(1, 2, 3)
+          if ($r[1].result.serverInfo.name -ne 'openlore') {
+            throw "MCP initialize did not return the openlore serverInfo: $($r[1] | ConvertTo-Json -Depth 6)"
+          }
+          if ($r[2].result.tools.name -notcontains 'orient') { throw 'MCP tools/list did not advertise orient' }
+          if (-not $r[3].result) { throw "MCP tools/call orient returned no result: $($r[3] | ConvertTo-Json -Depth 6)" }
+
+          # 2. daemon spawn: --daemon starts a shared `openlore serve` and delegates.
+          Remove-Item .openlore/serve.json,.openlore/serve.log -ErrorAction SilentlyContinue
+          $r = Invoke-McpSession -ExtraArgs @('mcp','--preset','full','--daemon') `
+                 -Requests @($init, $ready, $call) -ExpectIds @(1, 3)
+          if (-not $r[3].result) { throw "MCP --daemon tools/call returned no result: $($r[3] | ConvertTo-Json -Depth 6)" }
+          if (-not (Test-Path .openlore/serve.json)) {
+            throw 'MCP --daemon never spawned a serve daemon on Windows (no .openlore/serve.json)'
+          }
+          if (-not (Test-Path .openlore/serve.log)) {
+            throw 'Windows daemon spawn did not redirect the child output to .openlore/serve.log'
+          }
+
+          # 3. the daemon must OUTLIVE the agent that spawned it — that is the whole
+          #    point of a shared warm process, and the Windows spawn is not detached.
+          $desc = Get-Content .openlore/serve.json -Raw | ConvertFrom-Json
+          $headers = @{}
+          if ($desc.token) { $headers['x-openlore-token'] = $desc.token }
+          $base = "http://$($desc.host):$($desc.port)"
+          try {
+            $health = Invoke-RestMethod -Uri "$base/health" -Headers $headers -TimeoutSec 30
+          } catch {
+            Get-Content .openlore/serve.log -ErrorAction SilentlyContinue
+            throw "Windows serve daemon did not survive the MCP session that spawned it ($base): $_"
+          }
+          if (-not $health.ok) {
+            Get-Content .openlore/serve.log -ErrorAction SilentlyContinue
+            throw "Windows serve daemon /health was not ok: $($health | ConvertTo-Json -Depth 6)"
+          }
+
+          # 4. tool dispatch over HTTP — the transport a second agent reuses.
+          $body = @{ directory = (Get-Location).Path; args = @{ task = 'windows smoke' } } | ConvertTo-Json -Depth 6
+          try {
+            $tool = Invoke-RestMethod -Uri "$base/tool/orient" -Method Post `
+              -Body $body -ContentType 'application/json' -Headers $headers -TimeoutSec 120
+          } catch {
+            Get-Content .openlore/serve.log -ErrorAction SilentlyContinue
+            throw "Windows serve daemon rejected a tool dispatch: $_"
+          }
+          if ($null -eq $tool) { throw 'Windows serve daemon returned no body for orient' }
+
+          # 3. a SECOND client kind reuses that daemon instead of starting its own.
+          #    Plain `mcp` (no --daemon) only ever discovers a running one.
+          $before = (Get-Content .openlore/serve.json -Raw | ConvertFrom-Json).pid
+          $r = Invoke-McpSession -ExtraArgs @('mcp','--preset','full') `
+                 -Requests @($init, $ready, $call) -ExpectIds @(1, 3)
+          if (-not $r[3].result) { throw 'The reusing MCP client got no result from the shared daemon' }
+          $after = (Get-Content .openlore/serve.json -Raw | ConvertFrom-Json).pid
+          if ($after -ne $before) {
+            throw "A second client displaced the shared daemon (pid $before -> $after)"
+          }
+
+          # 4. the Pi extension brings up its own daemon on Windows. Pi has no in-process
+          #    fallback, so this path failing is a hard outage for it - and nothing else
+          #    in CI runs Pi's spawn on Windows.
+          node $entry serve --stop --directory .
+          Remove-Item .openlore/serve.json,.openlore/serve.log -ErrorAction SilentlyContinue
+          $piPackaged = Join-Path (npm root -g) 'openlore/dist/pi/extension.js'
+          if (-not (Test-Path $piPackaged)) { throw "Pi entry missing from the packaged install: $piPackaged" }
+          # Import the checkout's own build, not the global install: the Pi host
+          # supplies @earendil-works/* at runtime, so they are devDependencies here
+          # and resolve only from the checkout's node_modules. Same build either
+          # way - the global install was packed from this dist a few steps up.
+          $piEntry = Join-Path $env:GITHUB_WORKSPACE 'dist/pi/extension.js'
+          if (-not (Test-Path $piEntry)) { throw "Built Pi extension not found: $piEntry" }
+          $driver = @'
+          import { pathToFileURL } from 'node:url';
+
+          const [entry, cwd, label] = process.argv.slice(2);
+          const pi = await import(pathToFileURL(entry).href);
+
+          // Generous: a cold daemon boot on a Windows runner outruns Pi's 8s default.
+          const result = await pi.ensureDaemonResult(cwd, { timeoutMs: 120000 });
+          if (!result.daemon) {
+            console.error(`${label}: no daemon (${result.failureKind}) - ${result.failure}`);
+            process.exit(1);
+          }
+          if (!pi.isUsableDaemon(result.daemon)) {
+            console.error(`${label}: daemon unusable - ${result.daemon.incompatibility}`);
+            process.exit(1);
+          }
+          const out = await pi.callTool(result.daemon, 'orient', { task: 'windows smoke' }, cwd);
+          if (out === null || out === undefined || out.error) {
+            console.error(`${label}: orient failed - ${JSON.stringify(out)}`);
+            process.exit(1);
+          }
+          console.log(`${label}: ${result.daemon.baseUrl}`);
+          '@
+          Set-Content -Path pi-daemon-probe.mjs -Value $driver
+          node pi-daemon-probe.mjs $piEntry (Get-Location).Path first
+          if ($LASTEXITCODE -ne 0) {
+            Get-Content .openlore/serve.log -ErrorAction SilentlyContinue
+            throw 'The Pi extension could not bring up a daemon on Windows'
+          }
+          if (-not (Test-Path .openlore/serve.json)) { throw 'Pi announced no daemon descriptor' }
+          if (-not (Test-Path .openlore/serve.log)) {
+            throw 'Pi did not redirect its Windows daemon output to .openlore/serve.log'
+          }
+          $piPid = (Get-Content .openlore/serve.json -Raw | ConvertFrom-Json).pid
+
+          # 5. a second Pi client reuses the first one's daemon. This is the shared warm
+          #    process the design promises, and it only holds if the daemon outlived the
+          #    process that launched it.
+          node pi-daemon-probe.mjs $piEntry (Get-Location).Path second
+          if ($LASTEXITCODE -ne 0) {
+            Get-Content .openlore/serve.log -ErrorAction SilentlyContinue
+            throw 'A second Pi client could not reach the daemon the first one launched'
+          }
+          $piPidAgain = (Get-Content .openlore/serve.json -Raw | ConvertFrom-Json).pid
+          if ($piPidAgain -ne $piPid) {
+            throw "The second Pi client started its own daemon instead of reusing (pid $piPid -> $piPidAgain)"
+          }
+
+          # 6. `serve --stop` must kill the actual OS process, not just remove the
+          #    descriptor file. The daemon's own /shutdown HTTP handler used to fire
+          #    teardown() and return without ever calling process.exit(): teardown
+          #    completed (descriptor gone, watcher closed) but the process itself
+          #    stayed alive on Windows, because nothing forced the event loop to
+          #    drain. A client that only checks the descriptor sees success and
+          #    reports a clean stop while a zombie node.exe lingers. Assert on the
+          #    OS process, not the client's own claim of success.
+          $stopPid = (Get-Content .openlore/serve.json -Raw | ConvertFrom-Json).pid
+          node $entry serve --stop --directory .
+          if ($LASTEXITCODE -ne 0) { throw "serve --stop exited non-zero ($LASTEXITCODE)" }
+          $deadline = (Get-Date).AddSeconds(15)
+          $stillAlive = $true
+          while ((Get-Date) -lt $deadline) {
+            if (-not (Get-Process -Id $stopPid -ErrorAction SilentlyContinue)) { $stillAlive = $false; break }
+            Start-Sleep -Milliseconds 200
+          }
+          if ($stillAlive) {
+            throw "serve --stop reported success but the daemon OS process (pid $stopPid) is still running 15s later"
+          }
+
   ci-success:
     name: CI Success
     runs-on: ubuntu-latest

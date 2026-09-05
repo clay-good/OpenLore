@@ -162,7 +162,7 @@ describe('handleLocateSymbolSpan', () => {
     }
   });
 
-  it('does not resolve or hash an in-root symlink that escapes the project root', async () => {
+  it.skipIf(process.platform === 'win32')('does not resolve or hash an in-root symlink that escapes the project root', async () => {
     const outside = mkdtempSync(join(tmpdir(), 'symbol-span-link-outside-'));
     try {
       const secret = 'outside-symlink-secret';

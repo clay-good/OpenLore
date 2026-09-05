@@ -12,9 +12,6 @@ import { Command } from 'commander';
 import { sanitizeForTerminal as safe } from '../../utils/misc.js';
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-const execFileAsync = promisify(execFile);
 import { join } from 'node:path';
 import { confinedAtomicWriteFile, safeJoin } from '../../utils/path-confinement.js';
 
@@ -66,6 +63,7 @@ import type { DecisionStore, PendingDecision } from '../../types/index.js';
 import { runTuiApproval } from '../tui-approval.js';
 import { emit } from '../../core/services/telemetry.js';
 import { resolveOpenspecDir } from '../../utils/openspec-dir.js';
+import { execFileGit as execFileAsync } from '../../utils/git-exec.js';
 import {
   displayHookPath,
   hookManagerWarning,

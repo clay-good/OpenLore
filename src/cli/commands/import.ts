@@ -23,8 +23,6 @@ import { existsSync } from 'node:fs';
 import { readFile, mkdtemp, open, readdir, rm } from 'node:fs/promises';
 import { basename, resolve, join, sep } from 'node:path';
 import { tmpdir } from 'node:os';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { logger } from '../../utils/logger.js';
 import { gitPathArgs } from '../../utils/git-args.js';
 import {
@@ -65,8 +63,8 @@ import { isTestFile } from '../../core/analyzer/test-file.js';
 import { computeProjectFingerprint, fingerprintHashOfConfiguration } from '../../core/services/mcp-handlers/utils.js';
 import { McpWatcher } from '../../core/services/mcp-watcher.js';
 import { atomicWriteFile } from '../../core/decisions/atomic-store.js';
+import { execFileGit as execFileAsync } from '../../utils/git-exec.js';
 
-const execFileAsync = promisify(execFile);
 const GIT_DELTA_MAX_PATHS = 4_096;
 const GIT_DELTA_MAX_PATH_BYTES = 1024 * 1024;
 
@@ -375,6 +373,13 @@ async function refreshCaughtUpIdentity(rootPath: string, analysisDir: string): P
     computedAt: new Date().toISOString(),
     fileCount: walk.files.length,
     analysisConfigHash: fingerprintHashOfConfiguration(fingerprintConfig),
+    // The fingerprint configuration VALUES, not just their hash (change:
+    // extend-api-for-supervising-hosts). `--include` / `--exclude` / `--max-files` are
+    // per-invocation CLI inputs that are never persisted anywhere else, and they decide which
+    // files the hash covers. Without them a later reader cannot RECOMPUTE this hash: it would
+    // fingerprint a different corpus and report a mismatch on an unchanged tree. Recording them
+    // is what makes `openloreIndexState` able to answer at all.
+    fingerprintConfig,
   }));
   const store = EdgeStore.open(join(analysisDir, ARTIFACT_CALL_GRAPH_DB));
   try {

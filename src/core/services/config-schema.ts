@@ -35,6 +35,7 @@ import type {
   ImpactCertificateConfig,
   LLMConfig,
   OpenLoreConfig,
+  PiConfig,
   RetrievalConfig,
   SpecStoreConfig,
   WorkspaceConfig,
@@ -253,6 +254,13 @@ const workspaceRule: ConfigRule = {
   required: requiredFor<WorkspaceConfig>({}),
 };
 
+const piRule: ConfigRule = {
+  kind: 'object',
+  strict: true,
+  fields: fieldsFor<PiConfig>({ spawnDaemon: booleanRule }),
+  required: requiredFor<PiConfig>({}),
+};
+
 const CONFIG_RULE: Extract<ConfigRule, { kind: 'object' }> = {
   kind: 'object',
   fields: fieldsFor<OpenLoreConfig>({
@@ -276,6 +284,7 @@ const CONFIG_RULE: Extract<ConfigRule, { kind: 'object' }> = {
     secretRedaction: secretRedactionRule,
     bundle: bundleRule,
     workspace: workspaceRule,
+    pi: piRule,
   }),
   required: requiredFor<OpenLoreConfig>({
     version: true,
@@ -314,6 +323,7 @@ export const CONFIG_FIELD_KINDS: Record<keyof OpenLoreConfig, ConfigFieldKind> =
   secretRedaction: 'object',
   bundle: 'object',
   workspace: 'object',
+  pi: 'object',
 };
 
 /** The known top-level config keys, derived from the type-bound field map. */
