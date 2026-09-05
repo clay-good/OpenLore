@@ -17,6 +17,15 @@ import {
 import type { GeneratedSpec } from './openspec-format-generator.js';
 import type { ProjectSurveyResult } from './spec-pipeline.js';
 import { OPENLORE_PACKAGE_VERSION } from '../runtime/package-versions.js';
+import { createRequire } from 'node:module';
+
+// The report echoes the OpenSpec version actually installed. Deriving the
+// expectation from the pinned devDependency keeps this true across bumps
+// instead of breaking on every OpenSpec release.
+const OPENSPEC_PINNED_VERSION = (
+  createRequire(import.meta.url)('../../../package.json') as { devDependencies: Record<string, string> }
+).devDependencies['@fission-ai/openspec'];
+
 
 // ============================================================================
 // TEST HELPERS
@@ -835,7 +844,7 @@ rules:
       expect(report.timestamp).toBeDefined();
       expect(report.openloreVersion).toBe(OPENLORE_PACKAGE_VERSION);
       expect(report.configSchemaVersion).toBe('1.5.0');
-      expect(report.openspecVersion).toBe('1.10.0');
+      expect(report.openspecVersion).toBe(OPENSPEC_PINNED_VERSION);
       expect(report.filesWritten).toBeDefined();
       expect(report.filesSkipped).toBeDefined();
       expect(report.filesBackedUp).toBeDefined();

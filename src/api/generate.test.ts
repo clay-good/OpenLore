@@ -99,6 +99,15 @@ import { readGenerationSnapshot } from '../core/runtime/analysis-generation.js';
 import { withGenerationLock } from '../core/runtime/generation-lock.js';
 import { resolveGenerationSemanticSearch } from '../core/runtime/generation-semantic-search.js';
 import { OPENLORE_PACKAGE_VERSION } from '../core/runtime/package-versions.js';
+import { createRequire } from 'node:module';
+
+// The report echoes the OpenSpec version actually installed. Deriving the
+// expectation from the pinned devDependency keeps this true across bumps
+// instead of breaking on every OpenSpec release.
+const OPENSPEC_PINNED_VERSION = (
+  createRequire(import.meta.url)('../../package.json') as { devDependencies: Record<string, string> }
+).devDependencies['@fission-ai/openspec'];
+
 
 const mockReadFile = vi.mocked(readFile);
 const mockAccess = vi.mocked(access);
@@ -306,7 +315,7 @@ describe('openloreGenerate', () => {
       expect(result.dryRun).toBe(true);
       expect(result.report.filesWritten).toHaveLength(0);
       expect(result.report.openloreVersion).toBe(OPENLORE_PACKAGE_VERSION);
-      expect(result.report.openspecVersion).toBe('1.10.0');
+      expect(result.report.openspecVersion).toBe(OPENSPEC_PINNED_VERSION);
       expect(result.report.configSchemaVersion).toBe(MOCK_CONFIG.version);
       expect('pipelineResult' in result).toBe(false);
       expect(mockCreateLLMService).not.toHaveBeenCalled();
@@ -374,7 +383,7 @@ describe('openloreGenerate', () => {
       expect(OpenSpecWriter).toHaveBeenCalled();
       expect(result.report.filesWritten).toContain('openspec/auth/spec.md');
       expect(result.report.openloreVersion).toBe(OPENLORE_PACKAGE_VERSION);
-      expect(result.report.openspecVersion).toBe('1.10.0');
+      expect(result.report.openspecVersion).toBe(OPENSPEC_PINNED_VERSION);
       expect(result.report.configSchemaVersion).toBe(MOCK_CONFIG.version);
       expect(withGenerationLock).toHaveBeenCalledWith(ROOT, expect.any(Function), { signal: undefined });
     });
