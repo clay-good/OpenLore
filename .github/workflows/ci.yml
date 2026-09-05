@@ -286,13 +286,28 @@ jobs:
           if (-not $mcp.mcpServers.openlore.command.EndsWith('\node.exe')) {
             throw 'Windows install did not emit a launchable MCP command'
           }
-          if (-not $mcp.mcpServers.openlore.args[0].EndsWith('\npm\bin\npx-cli.js')) {
-            throw 'Windows install did not emit the absolute npx CLI path'
+          # fix-windows-console-flash-from-npx-shim: the wired command must be OUR OWN CLI
+          # entry, never `npx openlore`. npx resolves the target bin to openlore.cmd, and a
+          # .cmd can only start through cmd.exe - one visible console window per invocation,
+          # i.e. one per agent turn for the UserPromptSubmit hook.
+          if (-not $mcp.mcpServers.openlore.args[0].EndsWith('\dist\cli\index.js')) {
+            throw 'Windows install did not emit OpenLore''s own CLI entry'
           }
+          if (($mcp.mcpServers.openlore.args -join ' ') -match 'npx') {
+            throw 'Windows install routed the MCP server through npx (cmd.exe shim)'
+          }
+          $settings = Get-Content .claude/settings.json -Raw | ConvertFrom-Json
+          foreach ($key in 'SessionStart', 'UserPromptSubmit') {
+            $hook = $settings.hooks.$key[0].hooks[0].command
+            if ($hook -match 'npx') {
+              throw "Windows install routed the $key hook through npx (cmd.exe shim)"
+            }
+          }
+          # A hostile npx.cmd in the working directory must now be irrelevant: the launcher
+          # never reaches npx at all. Kept as a regression probe on exactly that property.
           Set-Content -Path npx.cmd -Value '@exit /b 91'
           $command = $mcp.mcpServers.openlore.command
-          $probeArgs = @($mcp.mcpServers.openlore.args[0..2]) + '--version'
-          & $command @probeArgs
+          & $command $mcp.mcpServers.openlore.args[0] '--version'
           if ($LASTEXITCODE -ne 0) { throw 'Generated Windows launcher did not execute successfully' }
           openlore init
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
