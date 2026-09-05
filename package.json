@@ -195,7 +195,7 @@
   },
   "optionalDependencies": {
     "@huggingface/transformers": "^4.2.0",
-    "@lancedb/lancedb": "0.22.4-beta.3",
+    "@lancedb/lancedb": "0.37.1",
     "apache-arrow": "^21.1.0",
     "protobufjs": "^8.8.0",
     "tree-sitter": "^0.22.4",
