@@ -578,6 +578,12 @@ describe('openlore serve', () => {
   });
 
   it('--stop asks the root-bound daemon to shut itself down without signalling descriptor PID data', async () => {
+    // /shutdown now calls process.exit(0) once teardown settles (correct for the real
+    // detached daemon; see the idle-shutdown tests above for the established pattern).
+    // Stub it here too so the test runner survives — teardown() itself still fully
+    // runs and is what the assertions below actually observe. Restored by the global
+    // afterEach's vi.restoreAllMocks().
+    vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
     const h = await boot();
     const kill = vi.spyOn(process, 'kill');
     await startServe({ directory: root, stop: true });
@@ -591,6 +597,9 @@ describe('openlore serve', () => {
   });
 
   it('does not remove a replacement descriptor during slower shutdown teardown', async () => {
+    // /shutdown calls process.exit(0) once teardown settles — stub it (see the
+    // idle-shutdown tests' established pattern) so the test runner survives.
+    vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
     const old = await boot();
     await startServe({ directory: root, stop: true });
     const replacement = await startServe({ directory: root, port: '0', watch: false });
@@ -698,6 +707,9 @@ describe('openlore serve', () => {
   });
 
   it('lets a repeated --stop finish a healthy daemon with a stranded draining marker', async () => {
+    // /shutdown calls process.exit(0) once teardown settles — stub it (see the
+    // idle-shutdown tests' established pattern) so the test runner survives.
+    vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
     const first = await boot();
     const path = join(root, OPENLORE_DIR, 'serve.json');
     const descriptor = await readDescriptor(root);
@@ -710,6 +722,9 @@ describe('openlore serve', () => {
   });
 
   it('announces shutdown before acknowledging a direct shutdown request', async () => {
+    // /shutdown calls process.exit(0) once teardown settles — stub it (see the
+    // idle-shutdown tests' established pattern) so the test runner survives.
+    vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
     const h = await boot({ token: 'protected' });
     const response = await fetch(`${h.baseUrl}/shutdown`, {
       method: 'POST',
@@ -723,6 +738,10 @@ describe('openlore serve', () => {
   });
 
   it('does not acknowledge shutdown when the draining descriptor cannot be published', async () => {
+    // teardown() still runs (and still ends in process.exit(0)) even when the
+    // draining announcement itself failed to publish — stub exit (see the
+    // idle-shutdown tests' established pattern) so the test runner survives.
+    vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
     const h = await boot({ token: 'protected' });
     const descriptorPath = join(root, OPENLORE_DIR, 'serve.json');
     await rm(descriptorPath);
