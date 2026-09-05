@@ -529,7 +529,10 @@ describe('incremental watch converges to analyze --force (parity oracle)', () =>
     expect(verdictStore?.entries[0]?.findings.map(f => f.code)).toContain('edit-import-breakage');
   });
 
-  it('reuses canonical dependency node identities when the watcher root is a symlink alias', async () => {
+  // skipIf(win32): creating a symlink on Windows needs elevated privileges or Developer
+  // Mode, so the alias this test is ABOUT cannot be set up on a stock runner. The
+  // canonicalisation it guards is platform-independent and is exercised on Linux.
+  it.skipIf(process.platform === 'win32')('reuses canonical dependency node identities when the watcher root is a symlink alias', async () => {
     const aliasParent = await mkdtemp(join(tmpdir(), 'ol-parity-alias-'));
     try {
       const canonicalRoot = await realpath(root);
@@ -1394,7 +1397,11 @@ describe('adversarial regressions (PR #189 review findings)', () => {
     });
   }
 
-  it('round2: a present-but-unreadable consumer file is marked stale (not silently emptied + asserted fresh)', async () => {
+  // skipIf(win32): the premise is a file that EXISTS but cannot be read. chmod(0o000) does
+  // not express that on Windows - Node maps the mode to the read-only attribute alone, so
+  // the file stays readable and the scenario never happens. Reproducing it would need an
+  // ACL denial (icacls), which is a different test. Exercised on Linux.
+  it.skipIf(process.platform === 'win32')('round2: a present-but-unreadable consumer file is marked stale (not silently emptied + asserted fresh)', async () => {
     const v1: Files = {
       'src/c.ts': 'export function bar() { return 1; }\n',
       'src/x.ts': 'export function useFoo() { return foo(); }\n', // foo external → consumer of an added foo

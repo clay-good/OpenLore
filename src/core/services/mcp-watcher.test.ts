@@ -12,12 +12,26 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, writeFile, readFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import type { LLMContext } from '../analyzer/artifact-generator.js';
 import type { SerializedCallGraph } from '../analyzer/call-graph.js';
 import { EdgeStore } from './edge-store.js';
 import { SpecIndexLockTimeoutError } from '../analyzer/spec-vector-index.js';
+
+/**
+ * An absolute fixture root ON THIS PLATFORM.
+ *
+ * A POSIX literal such as '/tmp/proj' is NOT an absolute Windows path, so safeJoin's
+ * lexical containment check (resolved.startsWith(absDir + sep)) can never hold there:
+ * resolve() turns the child into a drive-rooted path while the root keeps its leading
+ * slash, so every watcher construction throws "Path traversal blocked". Same class as
+ * the mock-safeJoin fix in 513b12dc.
+ *
+ * resolve() is a no-op on POSIX and yields a drive-rooted path on win32, so these tests
+ * assert identical behaviour on both platforms rather than being skipped on one.
+ */
+const FIXTURE_ROOT = resolve('/tmp/proj');
 import type { CallEdge } from '../analyzer/call-graph.js';
 import { _resetContextCacheForTesting } from './mcp-handlers/utils.js';
 
@@ -682,12 +696,12 @@ describe('McpWatcher coalescing queue', () => {
 
   it('coalesces rapid changes to the same file into a single batch flush', async () => {
     const { McpWatcher } = await import('./mcp-watcher.js');
-    const watcher = new McpWatcher({ rootPath: '/tmp/proj', debounceMs: 200, embed: false });
+    const watcher = new McpWatcher({ rootPath: FIXTURE_ROOT, debounceMs: 200, embed: false });
      
     const spy = vi.spyOn(watcher as any, 'handleBatch').mockResolvedValue(undefined);
     const enqueue = (watcher as unknown as { enqueue(p: string): void }).enqueue.bind(watcher);
 
-    for (let i = 0; i < 5; i++) enqueue('/tmp/proj/src/foo.ts');
+    for (let i = 0; i < 5; i++) enqueue(join(FIXTURE_ROOT, 'src', 'foo.ts'));
 
     await vi.runAllTimersAsync();
     expect(spy).toHaveBeenCalledTimes(1);
@@ -695,24 +709,24 @@ describe('McpWatcher coalescing queue', () => {
 
   it('coalesces changes across DIFFERENT files into ONE batch (G2)', async () => {
     const { McpWatcher } = await import('./mcp-watcher.js');
-    const watcher = new McpWatcher({ rootPath: '/tmp/proj', debounceMs: 200, embed: false });
+    const watcher = new McpWatcher({ rootPath: FIXTURE_ROOT, debounceMs: 200, embed: false });
      
     const spy = vi.spyOn(watcher as any, 'handleBatch').mockResolvedValue(undefined);
     const enqueue = (watcher as unknown as { enqueue(p: string): void }).enqueue.bind(watcher);
 
-    enqueue('/tmp/proj/src/a.ts');
-    enqueue('/tmp/proj/src/b.ts');
+    enqueue(join(FIXTURE_ROOT, 'src', 'a.ts'));
+    enqueue(join(FIXTURE_ROOT, 'src', 'b.ts'));
 
     await vi.runAllTimersAsync();
     // One flush carrying both paths — not one flush per file.
     expect(spy).toHaveBeenCalledTimes(1);
     const batch = spy.mock.calls[0][0] as string[];
-    expect(new Set(batch)).toEqual(new Set(['/tmp/proj/src/a.ts', '/tmp/proj/src/b.ts']));
+    expect(new Set(batch)).toEqual(new Set([join(FIXTURE_ROOT, 'src', 'a.ts'), join(FIXTURE_ROOT, 'src', 'b.ts')]));
   });
 
   it('processes changes that arrive while a flush is in flight (no drop, single-flight)', async () => {
     const { McpWatcher } = await import('./mcp-watcher.js');
-    const watcher = new McpWatcher({ rootPath: '/tmp/proj', debounceMs: 100, embed: false });
+    const watcher = new McpWatcher({ rootPath: FIXTURE_ROOT, debounceMs: 100, embed: false });
 
     let resolveFirst!: () => void;
     const firstCall = new Promise<void>(r => { resolveFirst = r; });
@@ -724,12 +738,12 @@ describe('McpWatcher coalescing queue', () => {
     });
     const enqueue = (watcher as unknown as { enqueue(p: string): void }).enqueue.bind(watcher);
 
-    enqueue('/tmp/proj/src/a.ts');
+    enqueue(join(FIXTURE_ROOT, 'src', 'a.ts'));
     await vi.advanceTimersByTimeAsync(100);
     expect(calls).toBe(1); // first flush running, blocked
 
     // New change arrives while busy — accumulates in pending, not dropped.
-    enqueue('/tmp/proj/src/b.ts');
+    enqueue(join(FIXTURE_ROOT, 'src', 'b.ts'));
     await vi.advanceTimersByTimeAsync(100);
     expect(calls).toBe(1); // still single-flight
 
@@ -741,7 +755,7 @@ describe('McpWatcher coalescing queue', () => {
   it('retries SQLITE_BUSY, then defers the batch without dropping it', async () => {
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const { McpWatcher } = await import('./mcp-watcher.js');
-    const watcher = new McpWatcher({ rootPath: '/tmp/proj', debounceMs: 100, embed: false });
+    const watcher = new McpWatcher({ rootPath: FIXTURE_ROOT, debounceMs: 100, embed: false });
 
     let calls = 0;
     const handleBatch = vi.spyOn(watcher as any, 'handleBatch').mockImplementation(async () => {
@@ -750,11 +764,11 @@ describe('McpWatcher coalescing queue', () => {
     });
     const enqueue = (watcher as unknown as { enqueue(p: string): void }).enqueue.bind(watcher);
 
-    enqueue('/tmp/proj/src/contended.ts');
+    enqueue(join(FIXTURE_ROOT, 'src', 'contended.ts'));
     await vi.runAllTimersAsync();
 
     expect(handleBatch).toHaveBeenCalledTimes(5);
-    expect(handleBatch.mock.calls[4][0]).toEqual(['/tmp/proj/src/contended.ts']);
+    expect(handleBatch.mock.calls[4][0]).toEqual([join(FIXTURE_ROOT, 'src', 'contended.ts')]);
     expect(stderr).toHaveBeenCalledWith(expect.stringContaining('deferred 1 change(s)'));
     stderr.mockRestore();
   });
@@ -762,8 +776,8 @@ describe('McpWatcher coalescing queue', () => {
   it('defers a batch when the spec-index lock times out', async () => {
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const { McpWatcher } = await import('./mcp-watcher.js');
-    const watcher = new McpWatcher({ rootPath: '/tmp/proj', debounceMs: 100, embed: false });
-    const specFile = '/tmp/proj/openspec/specs/auth/spec.md';
+    const watcher = new McpWatcher({ rootPath: FIXTURE_ROOT, debounceMs: 100, embed: false });
+    const specFile = join(FIXTURE_ROOT, 'openspec', 'specs', 'auth', 'spec.md');
     vi.spyOn(watcher as any, 'recordSpecIndexChanges')
       .mockRejectedValue(new SpecIndexLockTimeoutError(30_000));
 
@@ -829,7 +843,7 @@ describe('McpWatcher start/stop', () => {
   it('starts without throwing and stop resolves', async () => {
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const { McpWatcher } = await import('./mcp-watcher.js');
-    const watcher = new McpWatcher({ rootPath: '/tmp/proj' });
+    const watcher = new McpWatcher({ rootPath: FIXTURE_ROOT });
     await expect(watcher.start()).resolves.not.toThrow();
     await expect(watcher.stop()).resolves.not.toThrow();
   });
@@ -839,9 +853,9 @@ describe('McpWatcher start/stop', () => {
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     try {
       const { McpWatcher } = await import('./mcp-watcher.js');
-      const watcher = new McpWatcher({ rootPath: '/tmp/proj', embed: false });
+      const watcher = new McpWatcher({ rootPath: FIXTURE_ROOT, embed: false });
       vi.spyOn(watcher as any, 'handleBatch').mockRejectedValue(new Error('SQLITE_LOCKED: database table is locked'));
-      (watcher as unknown as { enqueue(path: string): void }).enqueue('/tmp/proj/src/a.ts');
+      (watcher as unknown as { enqueue(path: string): void }).enqueue(join(FIXTURE_ROOT, 'src', 'a.ts'));
 
       const stopped = watcher.stop();
       await vi.runAllTimersAsync();

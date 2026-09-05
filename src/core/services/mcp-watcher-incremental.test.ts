@@ -50,20 +50,28 @@ afterEach(async () => {
 });
 
 /**
- * Wait until `done()` reports the debounced flush has landed, or give up after `budget` ms.
- *
- * These tests used to sleep a fixed 150-200ms and assert immediately. That encodes a guess
- * about how fast the machine is: on a loaded CI runner the flush had not run yet and the
- * assertion failed for a reason that has nothing to do with the behavior under test. Polling
- * for the observable outcome keeps the same assertions while removing the guess — a fast
- * machine still finishes in one tick, and a slow one is simply given room.
+ * Windows filesystem work inside a parallel vitest run is several times slower than Linux;
+ * the debounced flush genuinely needs longer there. Budgeting for it is not papering over a
+ * race - the assertion still fails if the flush never lands.
  */
-async function until(done: () => boolean | Promise<boolean>, budget = 5_000): Promise<void> {
+const UNTIL_BUDGET_MS = process.platform === 'win32' ? 20_000 : 5_000;
+
+/**
+ * Wait until `done()` reports the debounced flush has landed.
+ *
+ * THROWS on timeout. It used to return silently, so a flush that never landed surfaced as a
+ * baffling assertion about the CONTENT ("expected undefined to be defined") rather than as
+ * the timeout it was - the caller went on to assert against whatever stale snapshot it had.
+ * That cost a full investigation to diagnose on Windows, where the timeout actually fires.
+ * A test that gives up must say so.
+ */
+async function until(done: () => boolean | Promise<boolean>, budget = UNTIL_BUDGET_MS): Promise<void> {
   const deadline = Date.now() + budget;
   while (Date.now() < deadline) {
     if (await done()) return;
     await new Promise((r) => setTimeout(r, 10));
   }
+  throw new Error(`until(): condition was still false after ${budget}ms (the flush never landed)`);
 }
 
 describe('McpWatcher — Spec 13.1 freshness', () => {
@@ -294,11 +302,16 @@ describe('McpWatcher — Spec 13.1 freshness', () => {
 
     const watcher = new McpWatcher({ rootPath: root, embed: false, debounceMs: 20, maxBatchMs: 1000 });
     (watcher as unknown as { enqueue(p: string): void }).enqueue(fooAbs);
+    // Read ONCE: assert against the exact snapshot the wait approved, not a later re-read.
+    let published = '';
     await until(async () => {
-      try { return (await readFile(contextPath, 'utf-8')).includes('delta'); } catch { return false; }
+      try {
+        published = await readFile(contextPath, 'utf-8');
+        return published.includes('delta');
+      } catch { return false; }
     });
 
-    const onDisk = JSON.parse(await readFile(contextPath, 'utf-8')) as { signatures: Array<{ path: string; entries: Array<{ name: string }> }> };
+    const onDisk = JSON.parse(published) as { signatures: Array<{ path: string; entries: Array<{ name: string }> }> };
     const foo = onDisk.signatures.find((s) => s.path === 'foo.ts');
     expect(foo).toBeDefined();
     expect(foo!.entries.some((e) => e.name === 'delta')).toBe(true);
