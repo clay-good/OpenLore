@@ -30,7 +30,7 @@
  *   - stale    → one-line factual note prepended (visible before the result)
  */
 
-import { spawnSync } from 'node:child_process';
+import { spawnGitSync } from '../../../utils/git-exec.js';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import {
@@ -400,7 +400,7 @@ export function updatePanic(
 
 function getGitHash(directory: string): string {
   try {
-    const result = spawnSync('git', ['rev-parse', 'HEAD'], {
+    const result = spawnGitSync('git', ['rev-parse', 'HEAD'], {
       cwd: directory,
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'ignore'],

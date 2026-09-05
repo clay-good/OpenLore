@@ -12,13 +12,31 @@
  *
  * Usage: `execFileGit('git', args, opts)` in place of a locally
  * `promisify(execFile)`'d call; `execFileGitSync('git', args, opts)` in place of
- * a direct `execFileSync('git', ...)` call. Typed like `execFile`/`execFileSync`
- * themselves: plain options → `string` output, `{ encoding: 'buffer' }` → `Buffer`
- * output. A structural guard (`git-exec.guard.test.ts`) fails CI on a new `git`
- * spawn that skips this file.
+ * a direct `execFileSync('git', ...)` call; `spawnGit` / `spawnGitSync` in place
+ * of a direct `spawn`/`spawnSync` of `git` — the streaming shapes (`git cat-file
+ * --batch`, a fd-redirected `spawnSync`) that the execFile helpers cannot express.
+ *
+ * Typed like the `node:child_process` functions they wrap. The ONE deliberate
+ * difference is `execFileGitSync`'s default encoding: `execFileSync` returns a
+ * `Buffer` unless an encoding is given, which makes the ergonomic
+ * `execFileGitSync('git', args, { cwd }).trim()` a runtime `TypeError`. This
+ * module defaults that call to `'utf-8'` so a plain-options call really does
+ * return the `string` its signature promises; pass `{ encoding: 'buffer' }` for
+ * bytes.
+ *
+ * Structural guards fail CI on a regression: `git-exec.test.ts` on a new `git`
+ * spawn that skips this file, and `windows-hidden-spawn-guard.test.ts` on ANY
+ * subprocess spawned without `windowsHide` and without an inherited console.
  */
 
-import { execFile, execFileSync, type ExecFileOptions, type ExecFileSyncOptions } from 'node:child_process';
+import {
+  execFile,
+  execFileSync,
+  spawn,
+  spawnSync,
+  type ExecFileOptions,
+  type ExecFileSyncOptions,
+} from 'node:child_process';
 import { promisify } from 'node:util';
 
 const rawExecFileAsync = promisify(execFile);
@@ -43,7 +61,13 @@ export function execFileGit(
   return rawExecFileAsync(file, args as string[], { ...options, windowsHide: true });
 }
 
-/** `execFileSync`, `windowsHide: true` always applied. */
+/**
+ * `execFileSync`, `windowsHide: true` always applied.
+ *
+ * Also defaults `encoding` to `'utf-8'`. Node's own `execFileSync` returns a `Buffer` when no
+ * encoding is given, so the `string` overload below would otherwise be a lie that only fails at
+ * runtime (`.trim()` on a Buffer). Callers that want bytes ask for them: `{ encoding: 'buffer' }`.
+ */
 export function execFileGitSync(
   file: string,
   args: readonly string[] | undefined,
@@ -60,5 +84,33 @@ export function execFileGitSync(
   options?: ExecFileSyncOptions,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- implementation signature for the overloads above
 ): any {
-  return execFileSync(file, args, { ...options, windowsHide: true });
+  return execFileSync(file, args, { encoding: 'utf-8', ...options, windowsHide: true });
 }
+
+/**
+ * `spawn`, `windowsHide: true` always applied — for the streaming shapes `execFile` cannot
+ * express (a long-lived `git cat-file --batch` fed over stdin).
+ *
+ * Typed as `typeof spawn` rather than re-declared, so every one of Node's overloads survives the
+ * wrapper — including the stdio-tuple narrowing that makes `child.stdin`/`stdout` non-nullable for
+ * a `{ stdio: ['pipe', 'pipe', 'pipe'] }` call. Re-declaring a single signature here would widen
+ * those back to `| null` at every call site.
+ */
+export const spawnGit: typeof spawn = (
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- transparent pass-through to the overloads above
+  file: any, args?: any, options?: any,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ditto
+): any => spawn(file, args, { ...(options ?? {}), windowsHide: true });
+
+/**
+ * `spawnSync`, `windowsHide: true` always applied — for the synchronous shapes `execFileSync`
+ * cannot express (redirecting the child's stdout/stderr straight onto file descriptors).
+ *
+ * Typed as `typeof spawnSync` for the same reason as {@link spawnGit}: it preserves the
+ * encoding-dependent `SpawnSyncReturns<string>` / `SpawnSyncReturns<Buffer>` split.
+ */
+export const spawnGitSync: typeof spawnSync = (
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- transparent pass-through to the overloads above
+  file: any, args?: any, options?: any,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ditto
+): any => spawnSync(file, args, { ...(options ?? {}), windowsHide: true });

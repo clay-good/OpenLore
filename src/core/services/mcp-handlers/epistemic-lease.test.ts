@@ -12,7 +12,11 @@ import type { EpistemicTracker } from './epistemic-lease.js';
 // Mock git hash — default returns stable hash
 // ============================================================================
 
-vi.mock('node:child_process', () => ({
+// Partial, not wholesale: `getGitHash` now spawns through `utils/git-exec.js`, which promisifies
+// `execFile` at import time. A mock that returns only `spawnSync` leaves that export undefined and
+// the whole suite fails to import. Spread the real module and override the one function under test.
+vi.mock('node:child_process', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('node:child_process')>()),
   spawnSync: vi.fn(() => ({ stdout: 'deadbeef1234\n', status: 0 })),
 }));
 

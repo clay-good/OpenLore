@@ -463,7 +463,9 @@ export async function runConfigWizard(ctx: ExtensionContext, existing?: Existing
           const chunks: Buffer[] = [];
           const proc = process.platform === 'win32'
             ? spawn('cmd.exe', ['/c', cmd, ...args], { cwd: ctx.cwd, stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true })
-            : spawn(cmd, args, { cwd: ctx.cwd, stdio: ['ignore', 'ignore', 'pipe'] });
+            // windowsHide is a documented no-op off Windows; set here too so the invariant is
+            // uniform across both branches rather than a carve-out the guard has to know about.
+            : spawn(cmd, args, { cwd: ctx.cwd, stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
           proc.stderr?.on('data', (d: Buffer) => chunks.push(d));
           proc.on('close', (code) => res([code ?? 1, Buffer.concat(chunks).toString().trim()]));
           proc.on('error', () => res(null));

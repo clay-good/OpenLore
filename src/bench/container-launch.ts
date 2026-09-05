@@ -46,6 +46,7 @@ export function launchBenchmarkContainer(
   const imageId = execFileSync('docker', ['image', 'inspect', '--format', '{{.Id}}', spec.tag], {
     cwd: root,
     encoding: 'utf8',
+    windowsHide: true,
   }).trim();
   if (!/^sha256:[a-f0-9]{64}$/.test(imageId)) throw new Error(`Docker returned an invalid benchmark image id: ${imageId}.`);
 

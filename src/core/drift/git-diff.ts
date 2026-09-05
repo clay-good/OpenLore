@@ -5,7 +5,6 @@
  * working tree and a base ref (typically main/master).
  */
 
-import { spawn } from 'node:child_process';
 import { lstat, opendir, realpath, stat } from 'node:fs/promises';
 import { extname, basename, posix, resolve } from 'node:path';
 import type { ChangedFile } from '../../types/index.js';
@@ -13,7 +12,7 @@ import { logger } from '../../utils/logger.js';
 import { DIFF_MAX_CHARS } from '../../constants.js';
 import { gitPathArgs } from '../../utils/git-args.js';
 import { readFileConfined, safeJoin } from '../../utils/path-confinement.js';
-import { execFileGit as execFileAsync } from '../../utils/git-exec.js';
+import { execFileGit as execFileAsync, spawnGit } from '../../utils/git-exec.js';
 
 
 /** Git's well-known empty tree SHA — used as base ref for single-commit repos */
@@ -597,7 +596,7 @@ async function readRevisionBlobsBatch(
   if (entries.length === 0) return new Map();
   const maxOutput = entries.reduce((sum, entry) => sum + entry.bytes + 128, 0);
   return new Promise((resolveBatch, rejectBatch) => {
-    const child = spawn('git', ['cat-file', '--batch'], { cwd: rootPath, stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawnGit('git', ['cat-file', '--batch'], { cwd: rootPath, stdio: ['pipe', 'pipe', 'pipe'] });
     const errors: Buffer[] = [];
     const files = new Map<string, string>();
     const decoder = new TextDecoder('utf-8', { fatal: true });
