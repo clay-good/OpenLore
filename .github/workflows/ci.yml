@@ -435,7 +435,26 @@ jobs:
             throw "The second Pi client started its own daemon instead of reusing (pid $piPid -> $piPidAgain)"
           }
 
+          # 6. `serve --stop` must kill the actual OS process, not just remove the
+          #    descriptor file. The daemon's own /shutdown HTTP handler used to fire
+          #    teardown() and return without ever calling process.exit(): teardown
+          #    completed (descriptor gone, watcher closed) but the process itself
+          #    stayed alive on Windows, because nothing forced the event loop to
+          #    drain. A client that only checks the descriptor sees success and
+          #    reports a clean stop while a zombie node.exe lingers. Assert on the
+          #    OS process, not the client's own claim of success.
+          $stopPid = (Get-Content .openlore/serve.json -Raw | ConvertFrom-Json).pid
           node $entry serve --stop --directory .
+          if ($LASTEXITCODE -ne 0) { throw "serve --stop exited non-zero ($LASTEXITCODE)" }
+          $deadline = (Get-Date).AddSeconds(15)
+          $stillAlive = $true
+          while ((Get-Date) -lt $deadline) {
+            if (-not (Get-Process -Id $stopPid -ErrorAction SilentlyContinue)) { $stillAlive = $false; break }
+            Start-Sleep -Milliseconds 200
+          }
+          if ($stillAlive) {
+            throw "serve --stop reported success but the daemon OS process (pid $stopPid) is still running 15s later"
+          }
 
   ci-success:
     name: CI Success

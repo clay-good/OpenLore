@@ -268,5 +268,17 @@ Section 'Findings'
 if ($findings.Count -eq 0) { Write-Host '  (none)' } else { $findings | ForEach-Object { Write-Host "  - $_" } }
 
 if (-not $KeepDaemon) {
+  $stopPid = if ($desc) { $desc.pid } else { $null }
   & node $cliEntry serve --stop --directory $Directory *> $null
+  if ($stopPid) {
+    $deadline = (Get-Date).AddSeconds(15)
+    $stillAlive = $true
+    while ((Get-Date) -lt $deadline) {
+      if (-not (Get-Process -Id $stopPid -ErrorAction SilentlyContinue)) { $stillAlive = $false; break }
+      Start-Sleep -Milliseconds 200
+    }
+    if ($stillAlive) {
+      Write-Host "[warn] serve --stop reported success but pid $stopPid is still running 15s later (zombie daemon)"
+    }
+  }
 }
