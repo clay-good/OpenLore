@@ -6,6 +6,7 @@
  */
 
 import { validateDirectory, readCachedContext, notReadyResult } from './utils.js';
+import { readDependencyGraphCached } from './artifact-cache.js';
 import { loadTraversalIndex } from './traversal.js';
 import { resolveFederationScope, findCrossRepoConsumersBatch, findCrossRepoClientCallers } from '../../federation/resolver.js';
 import { extractRoutesFromFile, normalizeUrl, type RouteDefinition, type RouteInventory } from '../../analyzer/http-route-parser.js';
@@ -201,12 +202,39 @@ export interface WeightedReach {
   predecessor: string | null;
 }
 
+type WeightedAdjacency = {
+  forward: Map<string, Array<{ to: string; cost: number }>>;
+  backward: Map<string, Array<{ to: string; cost: number }>>;
+};
+
+/**
+ * Memoized per call-graph OBJECT, which is exactly per analysis version: the cached
+ * context holds one `callGraph` per artifact generation, and a new generation is a new
+ * object. Weighted adjacency is a pure function of that graph, so recomputing it per
+ * tool call — orient, blast_radius, find_path and analyze_impact each did — was an
+ * O(edges) rebuild of two full-graph maps that could only ever produce the same
+ * answer. Weak, so it is collected with the graph it describes.
+ * (spec: DerivedGraphStructuresAreMemoizedPerAnalysis, change: optimize-serving-hot-path-caches)
+ */
+const _weightedAdjacencyByGraph = new WeakMap<SerializedCallGraph, WeightedAdjacency>();
+
 /**
  * Build weighted forward/backward adjacency from `calls` edges, each weighted by
  * {@link callDistance}. External (Infinity-cost) edges are omitted so internal
  * scoping never routes through synthetic stdlib/HTTP leaves.
+ *
+ * The returned maps are SHARED across callers and must be treated as read-only.
  */
-export function buildWeightedAdjacency(cg: SerializedCallGraph) {
+export function buildWeightedAdjacency(cg: SerializedCallGraph): WeightedAdjacency {
+  const memo = _weightedAdjacencyByGraph.get(cg);
+  if (memo) return memo;
+  const built = computeWeightedAdjacency(cg);
+  _weightedAdjacencyByGraph.set(cg, built);
+  return built;
+}
+
+/** The uncached computation. Exported for the equivalence test, not for callers. */
+export function computeWeightedAdjacency(cg: SerializedCallGraph): WeightedAdjacency {
   const forward  = new Map<string, Array<{ to: string; cost: number }>>(); // callerId → callees
   const backward = new Map<string, Array<{ to: string; cost: number }>>(); // calleeId → callers
   for (const e of cg.edges) {
@@ -1320,20 +1348,19 @@ export async function handleGetFileDependencies(
   }
   interface DepGraph { nodes: DepNode[]; edges: DepEdge[] }
 
-  let graph: DepGraph;
-  try {
-    const { readFile } = await import('node:fs/promises');
-    const raw = await readFile(depGraphPath, 'utf-8');
-    graph = JSON.parse(raw) as DepGraph;
-  } catch {
+  // One parse per version of the artifact, not one per call: returning a single file's
+  // edges used to cost a full parse of a repo-sized dependency graph every invocation.
+  // Shares `readDependencyGraphCached` with orient's architecture-rule scan, so the
+  // artifact is parsed, validated and retained once for both.
+  // (change: optimize-serving-hot-path-caches)
+  const graph = await readDependencyGraphCached<DepGraph>(depGraphPath);
+  if (!graph) {
     return notReadyResult('No dependency graph found. Run "openlore analyze" first.', 'index-absent');
   }
-
-  // A valid-but-partial artifact (e.g. {} or an interrupted analyze) parses fine but has
-  // no nodes/edges arrays — guard the shape so .find()/.map() can't throw out of the handler.
-  if (!Array.isArray(graph.nodes) || !Array.isArray(graph.edges)) {
-    return notReadyResult('No dependency graph found. Run "openlore analyze" first.', 'index-absent');
-  }
+  // The id→path index is rebuilt per call rather than cached alongside the graph: it is
+  // an O(nodes) walk of an already-parsed array, and caching it under a second
+  // derivation key would retain a SECOND copy of a repo-sized artifact.
+  const nodeIdToPath = new Map(graph.nodes.map(n => [n.id, n.file?.path ?? n.id]));
 
   // Resolve the file path to the same form used in the graph (relative or absolute).
   // node.file may be absent on a malformed node — access it defensively.
@@ -1343,8 +1370,6 @@ export async function handleGetFileDependencies(
   if (!node) {
     return { error: `File not found in dependency graph: ${filePath}`, hint: 'Use a relative path from the project root, e.g. "src/core/analyzer/vector-index.ts"' };
   }
-
-  const nodeIdToPath = new Map(graph.nodes.map(n => [n.id, n.file?.path ?? n.id]));
 
   const imports = (direction === 'imports' || direction === 'both')
     ? graph.edges

@@ -163,6 +163,31 @@ async function runTransactionAsync<T>(db: DatabaseSync, fn: () => Promise<T>): P
 /** Bump when schema changes. Old DBs are dropped and rebuilt on next analyze --force. */
 export const SCHEMA_VERSION = 11;
 
+/**
+ * Bound on the number of bound parameters in one generated `IN (…)` list.
+ *
+ * SQLite refuses a statement with more bound variables than `SQLITE_MAX_VARIABLE_NUMBER`
+ * — 999 on builds compiled before 3.32, 32766 after. Node's bundled SQLite is the newer
+ * one, but the ceiling is a *compile-time* property of whatever libsqlite the running
+ * Node was built against, so a caller-supplied array that is graph-sized (a whole BFS
+ * frontier; a hub's fan-out) must not be trusted to fit. 900 sits under the lowest
+ * ceiling with room for the handful of other bound values a statement may carry.
+ *
+ * Chunking is transparent: the caller sees one concatenated result, in per-chunk order.
+ * (change: optimize-serving-hot-path-caches)
+ */
+const SQL_MAX_BOUND_PARAMS = 900;
+
+/** Split `values` into consecutive chunks of at most {@link SQL_MAX_BOUND_PARAMS}. */
+function chunkForSqlIn<T>(values: readonly T[]): T[][] {
+  if (values.length <= SQL_MAX_BOUND_PARAMS) return [values as T[]];
+  const chunks: T[][] = [];
+  for (let i = 0; i < values.length; i += SQL_MAX_BOUND_PARAMS) {
+    chunks.push(values.slice(i, i + SQL_MAX_BOUND_PARAMS) as T[]);
+  }
+  return chunks;
+}
+
 export class EdgeStore {
   /**
    * True when opening this DB found a stale SCHEMA_VERSION and wiped it (rebuild-on-bump).
@@ -561,22 +586,34 @@ export class EdgeStore {
     ).map((r) => r.callee_name);
   }
 
-  /** Batch: outgoing edges for a set of caller IDs — one query instead of N. */
+  /**
+   * Batch: outgoing edges for a set of caller IDs — one query instead of N.
+   *
+   * `callerIds` is a BFS frontier, so it is graph-sized: chunked at
+   * {@link SQL_MAX_BOUND_PARAMS} rather than bound as one unbounded `IN (…)` list,
+   * which raises "too many SQL variables" on a large frontier.
+   */
   getCalleesForIds(callerIds: string[]): CallEdge[] {
     if (callerIds.length === 0) return [];
-    const placeholders = callerIds.map(() => '?').join(',');
-    return (
-      this.db.prepare(`SELECT * FROM edges WHERE caller_id IN (${placeholders})`).all(...callerIds) as unknown as RawEdge[]
-    ).flatMap(rawToCallEdge);
+    const out: CallEdge[] = [];
+    for (const chunk of chunkForSqlIn(callerIds)) {
+      const placeholders = chunk.map(() => '?').join(',');
+      const rows = this.db.prepare(`SELECT * FROM edges WHERE caller_id IN (${placeholders})`).all(...chunk) as unknown as RawEdge[];
+      for (const r of rows) out.push(...rawToCallEdge(r));
+    }
+    return out;
   }
 
-  /** Batch: incoming edges for a set of callee IDs — one query instead of N. */
+  /** Batch: incoming edges for a set of callee IDs — one query instead of N. Chunked, see {@link EdgeStore.getCalleesForIds}. */
   getCallersForIds(calleeIds: string[]): CallEdge[] {
     if (calleeIds.length === 0) return [];
-    const placeholders = calleeIds.map(() => '?').join(',');
-    return (
-      this.db.prepare(`SELECT * FROM edges WHERE callee_id IN (${placeholders})`).all(...calleeIds) as unknown as RawEdge[]
-    ).flatMap(rawToCallEdge);
+    const out: CallEdge[] = [];
+    for (const chunk of chunkForSqlIn(calleeIds)) {
+      const placeholders = chunk.map(() => '?').join(',');
+      const rows = this.db.prepare(`SELECT * FROM edges WHERE callee_id IN (${placeholders})`).all(...chunk) as unknown as RawEdge[];
+      for (const r of rows) out.push(...rawToCallEdge(r));
+    }
+    return out;
   }
 
   /**
@@ -701,6 +738,19 @@ export class EdgeStore {
     ).map(rawToFunctionNode);
   }
 
+  /**
+   * Internal nodes with this exact name, through `idx_node_name`.
+   *
+   * The complete set for the name, so a caller can still tell "one match" from
+   * "ambiguous" — it is {@link EdgeStore.getAllInternalNodes} filtered by name, not a
+   * sample. (change: optimize-serving-hot-path-caches)
+   */
+  getInternalNodesByName(name: string): FunctionNode[] {
+    return (
+      this.db.prepare('SELECT * FROM nodes WHERE is_external = 0 AND name = ?').all(name) as unknown as RawNode[]
+    ).map(rawToFunctionNode);
+  }
+
   /** Case-insensitive substring search on node name. FTS5 trigram for ≥3 chars, LIKE fallback otherwise. */
   searchNodes(pattern: string, limit = 50): FunctionNode[] {
     if (pattern.length >= 3) {
@@ -800,14 +850,18 @@ export class EdgeStore {
   // ── Node mutations ────────────────────────────────────────────────────────────
 
   deleteNodesForFile(file: string): void {
-    const ids = (
-      this.db.prepare('SELECT id FROM nodes WHERE file_path = ?').all(file) as unknown as Array<{ id: string }>
-    ).map(r => r.id);
-    this.db.prepare('DELETE FROM nodes WHERE file_path = ?').run(file);
-    if (ids.length > 0) {
-      const placeholders = ids.map(() => '?').join(',');
-      this.db.prepare(`DELETE FROM nodes_fts WHERE node_id IN (${placeholders})`).run(...ids);
-    }
+    // FTS rows first, selected by subquery against the still-present node rows: a
+    // generated or vendored file can hold more symbols than SQLite's bound-variable
+    // ceiling, so the id list never becomes a parameter list.
+    //
+    // In one transaction: this order means a failure between the two statements would
+    // otherwise leave nodes present with their FTS rows gone — a silent search hole,
+    // where the previous order left only orphaned FTS rows that the join drops anyway.
+    // (change: optimize-serving-hot-path-caches)
+    runTransaction(this.db, () => {
+      this.db.prepare('DELETE FROM nodes_fts WHERE node_id IN (SELECT id FROM nodes WHERE file_path = ?)').run(file);
+      this.db.prepare('DELETE FROM nodes WHERE file_path = ?').run(file);
+    });
   }
 
   /** Remove synthetic external nodes no longer referenced by any persisted edge. */
@@ -1165,15 +1219,13 @@ export class EdgeStore {
    * Provenance for a set of files. Path forms differ across callers (edge-store
    * nodes are repo-relative; some callers pass absolute paths), so match with the
    * same tolerant comparator used for decisions (spec-18).
+   *
+   * Answered through the `file_path` primary-key index — a briefing for a handful of
+   * touched files must not materialize every mined file in the repository.
+   * (change: optimize-serving-hot-path-caches)
    */
   getProvenanceForFiles(files: string[]): FileProvenance[] {
-    if (files.length === 0) return [];
-    const rows = this.db.prepare('SELECT * FROM provenance').all() as unknown as RawProvenance[];
-    if (rows.length === 0) return [];
-    const wanted = files.filter(Boolean);
-    return rows
-      .filter(r => wanted.some(f => pathsMatch(f, r.file_path)))
-      .map(rawToProvenance);
+    return selectRowsForFiles<RawProvenance>(this.db, 'provenance', files).map(rawToProvenance);
   }
 
   // ── Change coupling & volatility (spec-22) ─────────────────────────────────────
@@ -1201,13 +1253,12 @@ export class EdgeStore {
     return row.n;
   }
 
-  /** Change-coupling records for a set of files (tolerant path match, spec-22). */
+  /**
+   * Change-coupling records for a set of files (tolerant path match, spec-22).
+   * Index-answered, see {@link EdgeStore.getProvenanceForFiles}.
+   */
   getChangeCouplingForFiles(files: string[]): FileChangeCoupling[] {
-    if (files.length === 0) return [];
-    const rows = this.db.prepare('SELECT * FROM change_coupling').all() as unknown as RawCoupling[];
-    if (rows.length === 0) return [];
-    const wanted = files.filter(Boolean);
-    return rows.filter(r => wanted.some(f => pathsMatch(f, r.file_path))).map(rawToCoupling);
+    return selectRowsForFiles<RawCoupling>(this.db, 'change_coupling', files).map(rawToCoupling);
   }
 
   /** Top-churn (most volatile) files, descending. */
@@ -1653,6 +1704,89 @@ function rawToProvenance(r: RawProvenance): FileProvenance {
     recentAuthors: JSON.parse(r.recent_authors) as FileProvenance['recentAuthors'],
     prs:           JSON.parse(r.prs) as FileProvenance['prs'],
   };
+}
+
+/**
+ * Every `/`-delimited proper suffix of `path`, plus `path` itself and its
+ * leading-slash-stripped form.
+ *
+ * `pathsMatch(a, b)` holds when the two are equal ignoring leading slashes, or when
+ * either is a `/`-delimited suffix of the other. Both directions of that relation are
+ * "one side appears in the other's suffix set", so this one function answers both:
+ * applied to the WANTED path it enumerates the stored values an indexed lookup can
+ * find directly; applied to a STORED path it says whether a wanted path matches it
+ * with a Set probe, independent of how many paths were requested.
+ * (change: optimize-serving-hot-path-caches)
+ */
+function pathSuffixSet(path: string): string[] {
+  const stripped = path.replace(/^\/+/, '');
+  const out = new Set<string>([path, stripped]);
+  let rest = stripped;
+  for (let cut = rest.indexOf('/'); cut !== -1; cut = rest.indexOf('/')) {
+    rest = rest.slice(cut + 1);
+    if (rest) out.add(rest);
+  }
+  return [...out];
+}
+
+/**
+ * Rows of `table` whose `file_path` {@link pathsMatch} any of `files`.
+ *
+ * Two passes, together exactly `pathsMatch` and never a full row materialization:
+ *
+ *  1. An indexed `file_path IN (…)` over each wanted path's suffix set. This answers
+ *     every case except "the stored path is strictly longer than the wanted one".
+ *  2. That remaining case cannot be enumerated from the wanted paths, so it needs a
+ *     scan — but only of the `file_path` column, which SQLite answers from the primary
+ *     key as a COVERING INDEX scan. Each stored path is then probed against a Set of
+ *     the wanted paths, so this pass costs O(rows x path depth) regardless of how many
+ *     files were requested, and the rows themselves are fetched by key afterwards.
+ *
+ * Both the probe and the `IN` compare with BINARY semantics, matching `pathsMatch`. A
+ * SQL `LIKE '%/x'` form would NOT: `LIKE` is ASCII-case-insensitive by default, so it
+ * would accept `src/Utils.ts` for a request for `utils.ts`.
+ *
+ * Rows come back in the table's own `rowid` order — the order the previous full-scan
+ * implementation returned them in. Callers take `records[0]` and `slice(0, 10)` from
+ * these lists, so the order is observable and is preserved deliberately.
+ */
+function selectRowsForFiles<T>(db: DatabaseSync, table: 'provenance' | 'change_coupling', files: string[]): T[] {
+  const wanted = files.filter(Boolean);
+  if (wanted.length === 0) return [];
+
+  const byPath = new Map<string, { rowid: number; row: T }>();
+  const collect = (rows: unknown[]): void => {
+    for (const raw of rows as Array<T & { file_path: string; __rowid: number }>) {
+      const { __rowid, ...row } = raw;
+      byPath.set(raw.file_path, { rowid: __rowid, row: row as unknown as T });
+    }
+  };
+  const fetchByPath = (paths: string[]): void => {
+    for (const chunk of chunkForSqlIn(paths)) {
+      const placeholders = chunk.map(() => '?').join(',');
+      collect(db.prepare(`SELECT rowid AS __rowid, * FROM ${table} WHERE file_path IN (${placeholders})`).all(...chunk));
+    }
+  };
+
+  // Both the bare and leading-slash forms: a stored path may carry a leading slash and
+  // still be a suffix of the wanted one, which `pathsMatch` accepts.
+  const exact = new Set<string>();
+  for (const suffix of wanted.flatMap(pathSuffixSet)) {
+    exact.add(suffix);
+    if (!suffix.startsWith('/')) exact.add(`/${suffix}`);
+  }
+  fetchByPath([...exact]);
+
+  const wantedStripped = new Set(wanted.map((f) => f.replace(/^\/+/, '')));
+  const storedPaths = db.prepare(`SELECT file_path FROM ${table}`).all() as unknown as Array<{ file_path: string }>;
+  const longerMatches: string[] = [];
+  for (const { file_path } of storedPaths) {
+    if (byPath.has(file_path)) continue;
+    if (pathSuffixSet(file_path).some((suffix) => wantedStripped.has(suffix))) longerMatches.push(file_path);
+  }
+  if (longerMatches.length > 0) fetchByPath(longerMatches);
+
+  return [...byPath.values()].sort((a, b) => a.rowid - b.rowid).map(({ row }) => row);
 }
 
 /** Tolerant path equality: exact, or one path is a suffix of the other. */

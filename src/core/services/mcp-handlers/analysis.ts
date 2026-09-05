@@ -530,12 +530,15 @@ async function handleGetFunctionBodyUnfocused(
     return { error: `File not found: ${filePath}` };
   }
 
-  // Try call graph first: exact byte-range slice, no ambiguity
-  const contextPath = join(absDir, '.openlore', 'analysis', 'llm-context.json');
+  // Try call graph first: exact byte-range slice, no ambiguity.
+  //
+  // Read through the shared context cache, not a bare readFile+JSON.parse: this is a
+  // single-symbol tool, and parsing the whole multi-megabyte artifact per call — outside
+  // the cache, so without its size ceiling or generation check — made it as expensive as
+  // get_call_graph. (change: optimize-serving-hot-path-caches)
   try {
-    const raw = await readFile(contextPath, 'utf-8');
-    const ctx = JSON.parse(raw) as { callGraph?: { nodes: Array<{ name: string; filePath: string; startIndex: number; endIndex: number; language: string; className?: string }> } };
-    if (ctx.callGraph?.nodes) {
+    const ctx = await readCachedContext(absDir);
+    if (ctx?.callGraph?.nodes) {
       const node = ctx.callGraph.nodes.find(
         n => n.name === functionName && (n.filePath === filePath || n.filePath.endsWith('/' + filePath.replace(/^\//, '')))
       );
@@ -1835,10 +1838,12 @@ export async function handleDetectChanges(
   // Distance-weighted BFS: Σ weight/d² — clamped to prevent cross-repo drift
   const transitiveScore = (startId: string): number => {
     const visited = new Set<string>();
+    // Head-index drain — the caller frontier is graph-sized and shift() is O(n).
+    // (change: optimize-serving-hot-path-caches)
     const queue: Array<{ id: string; depth: number }> = [{ id: startId, depth: 1 }];
     let score = 0;
-    while (queue.length) {
-      const { id, depth } = queue.shift()!;
+    for (let head = 0; head < queue.length; head++) {
+      const { id, depth } = queue[head];
       for (const caller of callerIndex.get(id) ?? []) {
         if (!visited.has(caller.id)) {
           visited.add(caller.id);

@@ -195,6 +195,29 @@ describe('resolveInputAnchors (remember hints)', () => {
   it('drops a hint with neither a resolvable symbol nor a file', () => {
     expect(ctx.resolveInputAnchors([{ symbol: 'doesNotExist' }])).toEqual([]);
   });
+
+  // A symbol-only hint used to build an AnchorNode for EVERY internal node, reading and
+  // hashing each one's source span — i.e. the whole repository, to resolve one symbol.
+  // (change: optimize-serving-hot-path-caches)
+  it('resolves a symbol-only hint by reading only that symbol\'s file', () => {
+    const anchors = ctx.resolveInputAnchors([{ symbol: 'foo' }]);
+    expect(anchors).toHaveLength(1);
+    expect(anchors[0]).toMatchObject({ symbolName: 'foo', filePath: 'src/x.ts' });
+    // src/y.ts holds an unrelated symbol and must not have been read.
+    expect(ctx._filesReadForTesting()).toBe(1);
+  });
+
+  it('still detects ambiguity on a symbol-only hint, and reads no more than the ambiguous files', () => {
+    // 'dup' exists in both x.ts and y.ts: unresolvable without a file, and with no file
+    // hint to fall back on the hint is dropped entirely.
+    expect(ctx.resolveInputAnchors([{ symbol: 'dup' }])).toEqual([]);
+    expect(ctx._filesReadForTesting()).toBeLessThanOrEqual(2);
+  });
+
+  it('an unknown symbol-only hint reads nothing at all', () => {
+    expect(ctx.resolveInputAnchors([{ symbol: 'noSuchSymbolAnywhere' }])).toEqual([]);
+    expect(ctx._filesReadForTesting()).toBe(0);
+  });
 });
 
 describe('isNamedIn', () => {

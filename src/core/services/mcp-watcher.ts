@@ -1225,11 +1225,26 @@ export class McpWatcher {
     // (change: harden-artifact-write-atomicity). loadContext is INSIDE the lock so
     // our persist can never clobber a fresh full write that landed after we read.
       if (!loaded.signatures) loaded.signatures = [];
+      // One path→position index for the whole batch instead of a linear findIndex per
+      // changed file: the scan was O(changedFiles x signatures), so a multi-file save
+      // in a large repository walked the signature list once per file. Positions are
+      // preserved exactly — an existing path is replaced in place, a new one appended
+      // (and recorded, so two events for the same new path still collapse to one
+      // entry). (change: optimize-serving-hot-path-caches)
+      const signatureIndex = new Map<string, number>();
+      // First occurrence wins, exactly as the findIndex it replaces did, so a list that
+      // somehow holds duplicate paths is patched at the same position as before.
+      for (let i = 0; i < loaded.signatures.length; i++) {
+        if (!signatureIndex.has(loaded.signatures[i].path)) signatureIndex.set(loaded.signatures[i].path, i);
+      }
       for (const f of changedFiles) {
         const newMap = extractSignatures(f.rel, f.content);
-        const idx = loaded.signatures.findIndex((m) => m.path === f.rel);
-        if (idx >= 0) loaded.signatures[idx] = newMap;
-        else loaded.signatures.push(newMap);
+        const idx = signatureIndex.get(f.rel);
+        if (idx !== undefined) loaded.signatures[idx] = newMap;
+        else {
+          signatureIndex.set(f.rel, loaded.signatures.length);
+          loaded.signatures.push(newMap);
+        }
       }
       await this.persistContext(loaded);
 
