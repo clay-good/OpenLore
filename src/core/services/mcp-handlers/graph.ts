@@ -6,7 +6,7 @@
  */
 
 import { validateDirectory, readCachedContext, notReadyResult } from './utils.js';
-import { readJsonArtifactCached } from './artifact-cache.js';
+import { readDependencyGraphCached } from './artifact-cache.js';
 import { loadTraversalIndex } from './traversal.js';
 import { resolveFederationScope, findCrossRepoConsumersBatch, findCrossRepoClientCallers } from '../../federation/resolver.js';
 import { extractRoutesFromFile, normalizeUrl, type RouteDefinition, type RouteInventory } from '../../analyzer/http-route-parser.js';
@@ -1323,20 +1323,16 @@ export async function handleGetFileDependencies(
 
   // One parse per version of the artifact, not one per call: returning a single file's
   // edges used to cost a full parse of a repo-sized dependency graph every invocation.
-  // The derived value carries the id→path index built alongside it, so a warm call does
-  // no O(nodes) work beyond the lookup. (change: optimize-serving-hot-path-caches)
-  //
-  // A valid-but-partial artifact (e.g. {} or an interrupted analyze) parses fine but has
-  // no nodes/edges arrays — the derivation returns null so .find()/.map() can't throw.
-  const derived = await readJsonArtifactCached(depGraphPath, 'file-dependencies', (parsed) => {
-    const g = parsed as DepGraph;
-    if (!g || typeof g !== 'object' || !Array.isArray(g.nodes) || !Array.isArray(g.edges)) return null;
-    return { graph: g, nodeIdToPath: new Map(g.nodes.map(n => [n.id, n.file?.path ?? n.id])) };
-  });
-  if (!derived) {
+  // Shares the `'raw'` derivation with orient's architecture-rule scan, so the artifact
+  // is parsed and retained once. (change: optimize-serving-hot-path-caches)
+  const graph = await readDependencyGraphCached<DepGraph>(depGraphPath);
+  if (!graph) {
     return notReadyResult('No dependency graph found. Run "openlore analyze" first.', 'index-absent');
   }
-  const { graph, nodeIdToPath } = derived;
+  // The id→path index is rebuilt per call rather than cached alongside the graph: it is
+  // an O(nodes) walk of an already-parsed array, and caching it under a second
+  // derivation key would retain a SECOND copy of a repo-sized artifact.
+  const nodeIdToPath = new Map(graph.nodes.map(n => [n.id, n.file?.path ?? n.id]));
 
   // Resolve the file path to the same form used in the graph (relative or absolute).
   // node.file may be absent on a malformed node — access it defensively.

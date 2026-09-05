@@ -31,7 +31,15 @@ import {
   _jsonArtifactCacheSizeForTesting,
 } from './artifact-cache.js';
 import { EdgeStore } from '../edge-store.js';
-import { buildBm25Corpus, bm25CandidateDocs, bm25Score, _patchBm25CorpusForTesting } from '../../analyzer/vector-index.js';
+import {
+  buildBm25Corpus,
+  bm25CandidateDocs,
+  bm25Score,
+  _patchBm25CorpusForTesting,
+  _patchBm25CorpusCarryingPostingsForTesting,
+  _bm25WorkCountersForTesting,
+  _resetBm25WorkCountersForTesting,
+} from '../../analyzer/vector-index.js';
 import type { FileProvenance } from '../../provenance/git-provenance.js';
 
 const SRC_ROOT = fileURLToPath(new URL('../../..', import.meta.url));
@@ -179,11 +187,40 @@ describe('keyword search work is bounded by what the query can match', () => {
     expect(candidates.length).toBe(3);
   });
 
-  it('candidate work does not grow with corpus size for a fixed match count', () => {
-    const small = bm25CandidateDocs(corpusWithNeedles(500, [1, 2, 3]), ['needleterm']);
-    const large = bm25CandidateDocs(corpusWithNeedles(20_000, [1, 2, 3]), ['needleterm']);
-    expect(small.length).toBe(3);
-    expect(large.length).toBe(3);
+  // The requirement is about WORK, so count it — a length comparison would pass even
+  // if every document were scored.
+  it('the number of documents scored is the match count, whatever the corpus size', () => {
+    for (const size of [500, 20_000]) {
+      _resetBm25WorkCountersForTesting();
+      const found = bm25CandidateDocs(corpusWithNeedles(size, [1, 2, 3]), ['needleterm']);
+      expect(found.length).toBe(3);
+      expect(_bm25WorkCountersForTesting().docsScored).toBe(3);
+    }
+    _resetBm25WorkCountersForTesting();
+  });
+
+  // Regression: the postings index was memoized on the corpus OBJECT, and an incremental
+  // patch returns a NEW object — so every watcher save threw the index away and the next
+  // search rebuilt it over the whole corpus. In an edit-heavy agent loop that is the
+  // common case, and it made keyword search several times SLOWER than the full scan it
+  // replaced. The patch must carry the index forward.
+  it('an incremental patch carries the postings index forward instead of rebuilding it', () => {
+    const before = Array.from({ length: 400 }, (_, i) => ({
+      id: `src/f${i}.ts::fn`, filePath: `src/f${i}.ts`, text: `alpha token${i}`,
+    }));
+    const corpus = buildBm25Corpus(before.map(r => ({ id: r.id, text: r.text })));
+
+    _resetBm25WorkCountersForTesting();
+    bm25CandidateDocs(corpus, ['token7']);
+    expect(_bm25WorkCountersForTesting().postingsBuilds).toBe(1);
+
+    const added = [{ id: 'src/f7.ts::fn', filePath: 'src/f7.ts', text: 'alpha replacedToken' }];
+    const patched = _patchBm25CorpusCarryingPostingsForTesting(corpus, before, new Set(['src/f7.ts']), added);
+
+    // No second build: the patch handed the derived index to the cache.
+    bm25CandidateDocs(patched, ['replacedtoken']);
+    expect(_bm25WorkCountersForTesting().postingsBuilds).toBe(1);
+    _resetBm25WorkCountersForTesting();
   });
 
   it('several token sets union without duplicates and stay ascending', () => {

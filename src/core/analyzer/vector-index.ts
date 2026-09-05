@@ -311,29 +311,112 @@ const BM25_K1 = 1.2;
 const BM25_B  = 0.75;
 
 /**
- * term → ascending indices of the docs containing it, built once per corpus OBJECT.
+ * The per-corpus lookup structures a keyword query needs, built once per corpus OBJECT
+ * and carried across an incremental patch rather than rebuilt.
  *
- * Keyed weakly on the corpus so it is rebuilt exactly when the corpus is replaced (a
- * rebuild, or an incremental patch — `patchBm25Corpus` returns a new object) and
- * collected with it. It is not part of {@link Bm25Corpus} and never reaches the
- * persisted sidecar: it is derivable from `docs[].tfMap` in one pass.
+ * `byTerm` maps a term to the ids of the documents containing it; `indexById` maps a
+ * document id back to its position in `corpus.docs`. Postings are keyed by ID rather
+ * than by position precisely so a patch can maintain them in O(edit): a patch drops
+ * removed documents from the middle of `docs`, which renumbers every position after
+ * them, but leaves every surviving document's id alone.
+ *
+ * Neither structure is part of {@link Bm25Corpus} and neither reaches the persisted
+ * sidecar — both are derivable from `docs`.
  * (change: optimize-serving-hot-path-caches)
  */
-const _postingsByCorpus = new WeakMap<Bm25Corpus, Map<string, number[]>>();
+interface Bm25Postings {
+  byTerm: Map<string, Set<string>>;
+  indexById: Map<string, number>;
+  /** False when two documents share an id, which would make `indexById` lossy. */
+  idsAreUnique: boolean;
+}
 
-function bm25Postings(corpus: Bm25Corpus): Map<string, number[]> {
-  const memo = _postingsByCorpus.get(corpus);
-  if (memo) return memo;
-  const postings = new Map<string, number[]>();
+const _postingsByCorpus = new WeakMap<Bm25Corpus, Bm25Postings>();
+
+/**
+ * Test-only counters proving the postings index is built once and that scoring is
+ * scoped to candidates. Not timings — exact counts.
+ */
+const _bm25Work = { postingsBuilds: 0, docsScored: 0 };
+export function _bm25WorkCountersForTesting(): { postingsBuilds: number; docsScored: number } {
+  return { ..._bm25Work };
+}
+export function _resetBm25WorkCountersForTesting(): void {
+  _bm25Work.postingsBuilds = 0;
+  _bm25Work.docsScored = 0;
+}
+
+function buildBm25Postings(corpus: Bm25Corpus): Bm25Postings {
+  _bm25Work.postingsBuilds++;
+  const byTerm = new Map<string, Set<string>>();
+  const indexById = new Map<string, number>();
   for (let i = 0; i < corpus.docs.length; i++) {
-    for (const term of corpus.docs[i].tfMap.keys()) {
-      const list = postings.get(term);
-      if (list) list.push(i);
-      else postings.set(term, [i]);
+    const doc = corpus.docs[i];
+    indexById.set(doc.id, i);
+    for (const term of doc.tfMap.keys()) {
+      const ids = byTerm.get(term);
+      if (ids) ids.add(doc.id);
+      else byTerm.set(term, new Set([doc.id]));
     }
   }
+  return { byTerm, indexById, idsAreUnique: indexById.size === corpus.docs.length };
+}
+
+function bm25Postings(corpus: Bm25Corpus): Bm25Postings {
+  const memo = _postingsByCorpus.get(corpus);
+  if (memo) return memo;
+  const postings = buildBm25Postings(corpus);
   _postingsByCorpus.set(corpus, postings);
   return postings;
+}
+
+/**
+ * Derive the postings for a patched corpus from the previous corpus's, touching only
+ * the terms the edit moved.
+ *
+ * `byTerm` is shallow-copied and its Sets are cloned lazily, so a search still holding
+ * the previous corpus never observes a half-applied update — the same reason the patch
+ * copies `df` instead of mutating it. `indexById` is rebuilt outright because a removal
+ * renumbers positions; that is an O(docs) Map build the patch already pays for once in
+ * its doc walk, not the O(document x term) rebuild `byTerm` would cost.
+ */
+function patchBm25Postings(
+  previous: Bm25Postings,
+  removedDocs: ReadonlyArray<Bm25Corpus['docs'][number]>,
+  addedDocs: ReadonlyArray<Bm25Corpus['docs'][number]>,
+  nextDocs: Bm25Corpus['docs'],
+): Bm25Postings {
+  const byTerm = new Map(previous.byTerm);
+  const cloned = new Set<string>();
+  const mutableSet = (term: string): Set<string> | undefined => {
+    const ids = byTerm.get(term);
+    if (!ids) return undefined;
+    if (cloned.has(term)) return ids;
+    const copy = new Set(ids);
+    byTerm.set(term, copy);
+    cloned.add(term);
+    return copy;
+  };
+
+  for (const doc of removedDocs) {
+    for (const term of doc.tfMap.keys()) {
+      const ids = mutableSet(term);
+      if (!ids) continue;
+      ids.delete(doc.id);
+      if (ids.size === 0) byTerm.delete(term);
+    }
+  }
+  for (const doc of addedDocs) {
+    for (const term of doc.tfMap.keys()) {
+      const ids = mutableSet(term);
+      if (ids) ids.add(doc.id);
+      else { byTerm.set(term, new Set([doc.id])); cloned.add(term); }
+    }
+  }
+
+  const indexById = new Map<string, number>();
+  for (let i = 0; i < nextDocs.length; i++) indexById.set(nextDocs[i].id, i);
+  return { byTerm, indexById, idsAreUnique: indexById.size === nextDocs.length };
 }
 
 /**
@@ -344,8 +427,33 @@ function bm25Postings(corpus: Bm25Corpus): Map<string, number[]> {
  * and the tf-norm factors are strictly positive whenever those hold — so "appears in
  * some posting list" and "scores above zero" are the same predicate. Scoring the
  * candidates instead of every document is what keeps a keyword query from walking the
- * whole corpus. (change: optimize-serving-hot-path-caches)
+ * whole corpus.
+ *
+ * If two documents ever share an id the position map is lossy, so this returns every
+ * index rather than silently dropping one — a slow answer, never a wrong one.
+ * (change: optimize-serving-hot-path-caches)
  */
+export function bm25CandidateDocs(corpus: Bm25Corpus, ...tokenSets: ReadonlyArray<readonly string[]>): number[] {
+  const postings = bm25Postings(corpus);
+  if (!postings.idsAreUnique) {
+    _bm25Work.docsScored += corpus.docs.length;
+    return corpus.docs.map((_, i) => i);
+  }
+  const candidates = new Set<number>();
+  for (const tokens of tokenSets) {
+    for (const token of new Set(tokens)) {
+      const ids = postings.byTerm.get(token);
+      if (!ids) continue;
+      for (const id of ids) {
+        const idx = postings.indexById.get(id);
+        if (idx !== undefined) candidates.add(idx);
+      }
+    }
+  }
+  _bm25Work.docsScored += candidates.size;
+  return [...candidates].sort((a, b) => a - b);
+}
+
 /**
  * Copy rows the keyword cache is about to RETAIN, without the embedding column.
  *
@@ -369,18 +477,6 @@ function withoutEmbeddingColumn(rows: Record<string, unknown>[]): Record<string,
     for (const key of keys) if (key !== 'vector') copy[key] = row[key];
     return copy;
   });
-}
-
-export function bm25CandidateDocs(corpus: Bm25Corpus, ...tokenSets: ReadonlyArray<readonly string[]>): number[] {
-  const postings = bm25Postings(corpus);
-  const candidates = new Set<number>();
-  for (const tokens of tokenSets) {
-    for (const token of new Set(tokens)) {
-      const list = postings.get(token);
-      if (list) for (const idx of list) candidates.add(idx);
-    }
-  }
-  return [...candidates].sort((a, b) => a - b);
 }
 
 export function bm25Score(corpus: Bm25Corpus, queryTokens: string[], docIdx: number): number {
@@ -584,7 +680,11 @@ function patchBm25Cache(dbPath: string, changedFilePaths: Set<string>, newRows: 
   if (!entry) return;
   // Strip here too: otherwise the first incremental patch puts vector-bearing rows
   // back into the cache the cold load had just cleaned.
-  const patched = patchBm25Corpus(entry.corpus, entry.rows, changedFilePaths, withoutEmbeddingColumn(newRows));
+  const patched = patchBm25Corpus(
+    entry.corpus, entry.rows, changedFilePaths, withoutEmbeddingColumn(newRows),
+    _postingsByCorpus.get(entry.corpus),
+  );
+  if (patched.postings) _postingsByCorpus.set(patched.corpus, patched.postings);
   _bm25Cache.set(dbPath, { corpus: patched.corpus, rowCount: patched.rows.length, rows: patched.rows });
 }
 
@@ -598,8 +698,9 @@ function patchBm25Corpus(
   previous: Bm25Corpus,
   previousRows: Record<string, unknown>[],
   changedFilePaths: Set<string>,
-  newRows: Record<string, unknown>[]
-): { corpus: Bm25Corpus; rows: Record<string, unknown>[] } {
+  newRows: Record<string, unknown>[],
+  previousPostings?: Bm25Postings,
+): { corpus: Bm25Corpus; rows: Record<string, unknown>[]; postings?: Bm25Postings } {
   // Patched incrementally rather than rebuilt. `buildBm25Corpus` over every kept row re-tokenized
   // the WHOLE repository on every save — the corpus is per-symbol text for the entire index, so
   // saving one file paid for all of it. That is the cost that matters most for this tool, because
@@ -632,8 +733,12 @@ function patchBm25Corpus(
   const docs: Bm25Corpus['docs'] = [];
   let totalLen = 0;
 
+  const removedDocs: Bm25Corpus['docs'] = [];
+  const addedDocs: Bm25Corpus['docs'] = [];
+
   for (const [i, doc] of previous.docs.entries()) {
     if (removedIdx.has(i)) {
+      removedDocs.push(doc);
       for (const t of doc.tfMap.keys()) {
         const next = (df.get(t) ?? 0) - 1;
         if (next > 0) df.set(t, next); else df.delete(t);
@@ -650,7 +755,9 @@ function patchBm25Corpus(
     const tokens = tokenize(r.text as string);
     const tfMap = new Map<string, number>();
     for (const t of tokens) tfMap.set(t, (tfMap.get(t) ?? 0) + 1);
-    docs.push({ id: r.id as string, tfMap, length: tokens.length });
+    const doc = { id: r.id as string, tfMap, length: tokens.length };
+    docs.push(doc);
+    addedDocs.push(doc);
     totalLen += tokens.length;
     for (const t of tfMap.keys()) df.set(t, (df.get(t) ?? 0) + 1);
   }
@@ -661,11 +768,37 @@ function patchBm25Corpus(
     avgLength: docs.length > 0 ? totalLen / docs.length : 1,
     N: docs.length,
   };
-  return { corpus, rows: kept };
+  // Carry the query-side lookup structures across the patch when the caller had them.
+  // Without this the postings index — which is what makes a keyword query cost the
+  // number of MATCHES rather than the size of the corpus — would be discarded on every
+  // watcher save and rebuilt from scratch on the next search, which in an edit-heavy
+  // agent loop is the common case. (change: optimize-serving-hot-path-caches)
+  const postings = previousPostings
+    ? patchBm25Postings(previousPostings, removedDocs, addedDocs, docs)
+    : undefined;
+  return { corpus, rows: kept, ...(postings ? { postings } : {}) };
 }
 
 /** Test-only: drive {@link patchBm25Corpus} directly, to diff it against a full rebuild. */
 export const _patchBm25CorpusForTesting = patchBm25Corpus;
+
+/**
+ * Test-only: patch a corpus the way {@link patchBm25Cache} does — carrying the memoized
+ * postings index across the new corpus object instead of leaving it to be rebuilt.
+ * The cache-side half of the pure {@link patchBm25Corpus}, isolated from LanceDB.
+ */
+export function _patchBm25CorpusCarryingPostingsForTesting(
+  previous: Bm25Corpus,
+  previousRows: Record<string, unknown>[],
+  changedFilePaths: Set<string>,
+  newRows: Record<string, unknown>[],
+): Bm25Corpus {
+  const patched = patchBm25Corpus(
+    previous, previousRows, changedFilePaths, newRows, _postingsByCorpus.get(previous),
+  );
+  if (patched.postings) _postingsByCorpus.set(patched.corpus, patched.postings);
+  return patched.corpus;
+}
 
 // ── Persisted BM25 corpus sidecar ───────────────────────────────────────────
 // The keyword corpus is otherwise rebuilt in-memory from the raw `text` column on

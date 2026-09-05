@@ -853,9 +853,15 @@ export class EdgeStore {
     // FTS rows first, selected by subquery against the still-present node rows: a
     // generated or vendored file can hold more symbols than SQLite's bound-variable
     // ceiling, so the id list never becomes a parameter list.
+    //
+    // In one transaction: this order means a failure between the two statements would
+    // otherwise leave nodes present with their FTS rows gone — a silent search hole,
+    // where the previous order left only orphaned FTS rows that the join drops anyway.
     // (change: optimize-serving-hot-path-caches)
-    this.db.prepare('DELETE FROM nodes_fts WHERE node_id IN (SELECT id FROM nodes WHERE file_path = ?)').run(file);
-    this.db.prepare('DELETE FROM nodes WHERE file_path = ?').run(file);
+    runTransaction(this.db, () => {
+      this.db.prepare('DELETE FROM nodes_fts WHERE node_id IN (SELECT id FROM nodes WHERE file_path = ?)').run(file);
+      this.db.prepare('DELETE FROM nodes WHERE file_path = ?').run(file);
+    });
   }
 
   /** Remove synthetic external nodes no longer referenced by any persisted edge. */
@@ -1701,22 +1707,20 @@ function rawToProvenance(r: RawProvenance): FileProvenance {
 }
 
 /**
- * The stored `file_path` values that {@link pathsMatch} would accept for `wanted`,
- * expressed as an exact-match set — i.e. every case except "the stored path is
- * strictly longer than the wanted one".
+ * Every `/`-delimited proper suffix of `path`, plus `path` itself and its
+ * leading-slash-stripped form.
  *
- * `pathsMatch(a, b)` is true when the paths are equal ignoring leading slashes, or
- * when either is a `/`-delimited suffix of the other. The first three of those four
- * cases are enumerable from `wanted` alone (it, its slash-stripped form, and each of
- * its proper suffixes), so they can be answered by an indexed `file_path IN (…)`
- * lookup instead of materializing the whole table. The fourth (`stored.endsWith('/'
- * + wanted)`) is not enumerable and is handled by a separate `LIKE` predicate.
+ * `pathsMatch(a, b)` holds when the two are equal ignoring leading slashes, or when
+ * either is a `/`-delimited suffix of the other. Both directions of that relation are
+ * "one side appears in the other's suffix set", so this one function answers both:
+ * applied to the WANTED path it enumerates the stored values an indexed lookup can
+ * find directly; applied to a STORED path it says whether a wanted path matches it
+ * with a Set probe, independent of how many paths were requested.
  * (change: optimize-serving-hot-path-caches)
  */
-function exactMatchCandidates(wanted: string): string[] {
-  const stripped = wanted.replace(/^\/+/, '');
-  const out = new Set<string>([wanted, stripped]);
-  // Proper suffixes: 'a/b/c.ts' → 'b/c.ts', 'c.ts'. Covers stripped.endsWith('/' + stored).
+function pathSuffixSet(path: string): string[] {
+  const stripped = path.replace(/^\/+/, '');
+  const out = new Set<string>([path, stripped]);
   let rest = stripped;
   for (let cut = rest.indexOf('/'); cut !== -1; cut = rest.indexOf('/')) {
     rest = rest.slice(cut + 1);
@@ -1725,22 +1729,24 @@ function exactMatchCandidates(wanted: string): string[] {
   return [...out];
 }
 
-
 /**
- * Rows of `table` whose `file_path` {@link pathsMatch} any of `files`, read through
- * the `file_path` primary-key index rather than by materializing the whole table.
+ * Rows of `table` whose `file_path` {@link pathsMatch} any of `files`.
  *
- * Two predicates, together exactly `pathsMatch`:
- *  - an indexed `file_path IN (…)` over {@link exactMatchCandidates}, and
- *  - a suffix test for the one case that cannot be enumerated — a stored path strictly
- *    longer than the wanted one, of which the wanted one is a `/`-delimited suffix.
+ * Two passes, together exactly `pathsMatch` and never a full row materialization:
  *
- * The suffix test is `substr(file_path, -n) = ?`, NOT `LIKE '%/x'`: SQLite's `LIKE` is
- * ASCII-case-INSENSITIVE by default, so a `LIKE` form would accept `src/Utils.ts` for a
- * request for `utils.ts` — rows `pathsMatch` rejects. `substr` compares with the
- * column's BINARY collation, which is what `pathsMatch` does.
+ *  1. An indexed `file_path IN (…)` over each wanted path's suffix set. This answers
+ *     every case except "the stored path is strictly longer than the wanted one".
+ *  2. That remaining case cannot be enumerated from the wanted paths, so it needs a
+ *     scan — but only of the `file_path` column, which SQLite answers from the primary
+ *     key as a COVERING INDEX scan. Each stored path is then probed against a Set of
+ *     the wanted paths, so this pass costs O(rows x path depth) regardless of how many
+ *     files were requested, and the rows themselves are fetched by key afterwards.
  *
- * Rows come back in the table's own `rowid` order, the order the previous full-scan
+ * Both the probe and the `IN` compare with BINARY semantics, matching `pathsMatch`. A
+ * SQL `LIKE '%/x'` form would NOT: `LIKE` is ASCII-case-insensitive by default, so it
+ * would accept `src/Utils.ts` for a request for `utils.ts`.
+ *
+ * Rows come back in the table's own `rowid` order — the order the previous full-scan
  * implementation returned them in. Callers take `records[0]` and `slice(0, 10)` from
  * these lists, so the order is observable and is preserved deliberately.
  */
@@ -1755,21 +1761,23 @@ function selectRowsForFiles<T>(db: DatabaseSync, table: 'provenance' | 'change_c
       byPath.set(raw.file_path, { rowid: __rowid, row: row as unknown as T });
     }
   };
+  const fetchByPath = (paths: string[]): void => {
+    for (const chunk of chunkForSqlIn(paths)) {
+      const placeholders = chunk.map(() => '?').join(',');
+      collect(db.prepare(`SELECT rowid AS __rowid, * FROM ${table} WHERE file_path IN (${placeholders})`).all(...chunk));
+    }
+  };
 
-  const candidates = [...new Set(wanted.flatMap(exactMatchCandidates))];
-  for (const chunk of chunkForSqlIn(candidates)) {
-    const placeholders = chunk.map(() => '?').join(',');
-    collect(db.prepare(`SELECT rowid AS __rowid, * FROM ${table} WHERE file_path IN (${placeholders})`).all(...chunk));
-  }
+  fetchByPath([...new Set(wanted.flatMap(pathSuffixSet))]);
 
-  // Not index-answerable (the match is on a suffix), but still a single-column scan
-  // rather than a full row materialization plus an O(rows x files) JS filter.
-  const suffixes = [...new Set(wanted.map((f) => `/${f.replace(/^\/+/, '')}`))];
-  for (const chunk of chunkForSqlIn(suffixes)) {
-    const predicate = chunk.map(() => 'substr(file_path, -length(?)) = ?').join(' OR ');
-    const params = chunk.flatMap((suffix) => [suffix, suffix]);
-    collect(db.prepare(`SELECT rowid AS __rowid, * FROM ${table} WHERE ${predicate}`).all(...params));
+  const wantedStripped = new Set(wanted.map((f) => f.replace(/^\/+/, '')));
+  const storedPaths = db.prepare(`SELECT file_path FROM ${table}`).all() as unknown as Array<{ file_path: string }>;
+  const longerMatches: string[] = [];
+  for (const { file_path } of storedPaths) {
+    if (byPath.has(file_path)) continue;
+    if (pathSuffixSet(file_path).some((suffix) => wantedStripped.has(suffix))) longerMatches.push(file_path);
   }
+  if (longerMatches.length > 0) fetchByPath(longerMatches);
 
   return [...byPath.values()].sort((a, b) => a.rowid - b.rowid).map(({ row }) => row);
 }

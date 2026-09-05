@@ -15,7 +15,7 @@
  * (spec: ServingCachesInvalidateOnExternalAnalyze, change: optimize-serving-hot-path-caches)
  */
 
-import { readFile, stat } from 'node:fs/promises';
+import { open, stat } from 'node:fs/promises';
 
 /**
  * Identity stamp of an on-disk artifact — `dev:ino:mtimeNs:size`, or `null` when the
@@ -33,6 +33,17 @@ export async function artifactStamp(path: string): Promise<string | null> {
     return null;
   }
 }
+
+/**
+ * Ceiling on a sibling artifact before it is deserialized.
+ *
+ * These artifacts are repository-controlled input. Real ones are single-digit
+ * megabytes; the cap exists so a poisoned or runaway file fails closed instead of
+ * being parsed and then RETAINED for the process lifetime, which is what a cache
+ * makes newly dangerous. Deliberately lower than the analysis artifact's own ceiling:
+ * nothing routed through here is the multi-hundred-megabyte call graph.
+ */
+const MAX_ARTIFACT_BYTES = 64 * 1024 * 1024;
 
 const _jsonArtifactCache = new Map<string, { stamp: string; value: unknown }>();
 
@@ -72,7 +83,20 @@ export async function readJsonArtifactCached<T>(
 
   let value: T | null;
   try {
-    value = derive(JSON.parse(await readFile(path, 'utf-8')) as unknown);
+    // Size-check and read through ONE descriptor. A path-based stat followed by a
+    // path-based read would let the file be swapped between them, so the check would
+    // not describe the bytes actually parsed.
+    const handle = await open(path, 'r');
+    try {
+      const { size } = await handle.stat();
+      if (size > MAX_ARTIFACT_BYTES) {
+        _jsonArtifactCache.delete(key);
+        return null;
+      }
+      value = derive(JSON.parse(await handle.readFile('utf-8')) as unknown);
+    } finally {
+      await handle.close();
+    }
   } catch {
     _jsonArtifactCache.delete(key);
     return null;
@@ -103,4 +127,27 @@ export function _resetJsonArtifactCacheForTesting(): void {
 /** Test-only: how many artifacts the sibling-artifact cache currently holds. */
 export function _jsonArtifactCacheSizeForTesting(): number {
   return _jsonArtifactCache.size;
+}
+
+/**
+ * The parsed `dependency-graph.json` for a project, or `null` when it is absent or
+ * structurally unusable.
+ *
+ * One shared entry point rather than two call-site derivations, because two callers
+ * caching different derivations of the SAME repo-sized artifact would retain two
+ * copies of it — and, worse, would disagree about validation: whichever ran first
+ * would decide whether the other saw a shape-checked graph or a raw one. A
+ * valid-but-partial artifact (`{}`, or an interrupted analyze) parses fine but has no
+ * `nodes`/`edges` arrays, so it is rejected here for every caller.
+ *
+ * The returned object is SHARED and must be treated as read-only.
+ * (change: optimize-serving-hot-path-caches)
+ */
+export async function readDependencyGraphCached<T>(path: string): Promise<T | null> {
+  return readJsonArtifactCached<T>(path, 'dependency-graph', (parsed) => {
+    if (!parsed || typeof parsed !== 'object') return null;
+    const g = parsed as { nodes?: unknown; edges?: unknown };
+    if (!Array.isArray(g.nodes) || !Array.isArray(g.edges)) return null;
+    return parsed as T;
+  });
 }

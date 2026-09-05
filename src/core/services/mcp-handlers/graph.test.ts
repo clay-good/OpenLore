@@ -10,19 +10,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EdgeStore } from '../edge-store.js';
 
-// Mock node:fs/promises so handleGetFileDependencies can be tested without disk I/O.
-// Default: readFile throws (simulates missing dep-graph file).
-vi.mock('node:fs/promises', () => {
-  // dependency-graph.json is now read through the stamp-keyed artifact cache, so the
-  // mock must answer `stat` too. A fresh stamp per call means each test's fixture is
-  // read rather than served from the entry the previous test left behind — these tests
-  // all use the same path with different content.
-  let tick = 0n;
-  return {
-    readFile: vi.fn(async () => { throw new Error('ENOENT'); }),
-    stat: vi.fn(async () => ({ dev: 1n, ino: 1n, mtimeNs: ++tick, size: 1n })),
-  };
-});
+// handleGetFileDependencies reads dependency-graph.json through the shared, stamp-keyed
+// artifact cache. Mock that one function rather than the filesystem: the handler's
+// contract is "given this graph (or none), produce this answer", and mocking the reader
+// keeps the test independent of how the cache reads and validates bytes.
+vi.mock('./artifact-cache.js', () => ({
+  readDependencyGraphCached: vi.fn(async () => null),
+}));
 
 // Static mocks for handler tests
 vi.mock('./utils.js', () => ({
@@ -686,13 +680,13 @@ const DEP_GRAPH_FIXTURE = JSON.stringify({
 
 describe('handleGetFileDependencies — direction branches', () => {
   afterEach(async () => {
-    const fs = await import('node:fs/promises');
-    vi.mocked(fs.readFile).mockRejectedValue(new Error('ENOENT'));
+    const { readDependencyGraphCached } = await import('./artifact-cache.js');
+    vi.mocked(readDependencyGraphCached).mockResolvedValue(null);
   });
 
   async function mockDepGraph() {
-    const fs = await import('node:fs/promises');
-    vi.mocked(fs.readFile).mockResolvedValue(DEP_GRAPH_FIXTURE as never);
+    const { readDependencyGraphCached } = await import('./artifact-cache.js');
+    vi.mocked(readDependencyGraphCached).mockResolvedValue(JSON.parse(DEP_GRAPH_FIXTURE) as never);
   }
 
   it('returns imports only when direction is "imports"', async () => {
@@ -732,15 +726,16 @@ describe('handleGetFileDependencies — direction branches', () => {
 
   it('returns the friendly error (not a TypeError) on a valid-but-partial graph artifact', async () => {
     // {} parses fine but has no nodes array — must not crash on graph.nodes.find().
-    const fs = await import('node:fs/promises');
-    vi.mocked(fs.readFile).mockResolvedValue('{}' as never);
+    // A valid-but-partial artifact is rejected by the shared reader, which returns null.
+    const { readDependencyGraphCached } = await import('./artifact-cache.js');
+    vi.mocked(readDependencyGraphCached).mockResolvedValue(null);
     const result = await handleGetFileDependencies('/proj', 'src/a.ts') as { error: string };
     expect(result.error).toContain('No dependency graph found');
   });
 
   it('does not throw on a node missing its file field', async () => {
-    const fs = await import('node:fs/promises');
-    vi.mocked(fs.readFile).mockResolvedValue(JSON.stringify({
+    const { readDependencyGraphCached } = await import('./artifact-cache.js');
+    vi.mocked(readDependencyGraphCached).mockResolvedValue(({
       nodes: [{ id: 'n1' }, { id: 'n2', file: { path: 'src/b.ts', absolutePath: '/proj/src/b.ts' } }],
       edges: [],
     }) as never);
