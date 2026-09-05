@@ -317,6 +317,39 @@ jobs:
             throw 'Windows analyze did not produce llm-context.json'
           }
 
+      - name: Exercise the file watcher on Windows
+        shell: pwsh
+        run: |
+          # The watcher had never run on Windows: vitest is an ubuntu-only job, so every
+          # path-separator and file-locking difference in the component that keeps the index
+          # fresh was unverified there. Running it found 9 real failures (fixed in this PR).
+          #
+          # mcp-watcher-incremental.test.ts is EXCLUDED on purpose, not forgotten: it carries a
+          # known intermittent failure where a debounced flush never lands (~1 run in 3, only
+          # alongside other files, unaffected by --no-file-parallelism). It is already excluded
+          # from `npm run test:unit` for unrelated cost reasons. Wiring a flake into CI buys
+          # noise, not signal; it is tracked separately and its `until()` helper now reports the
+          # timeout honestly instead of failing as a content assertion.
+          $ErrorActionPreference = 'Stop'
+          npx vitest run `
+            src/core/services/mcp-watcher.test.ts `
+            src/core/services/mcp-watcher.graph-rebuild.test.ts `
+            src/core/services/mcp-watcher-event-resilience.test.ts `
+            src/core/services/mcp-watcher-parse-health.test.ts `
+            src/core/services/mcp-watcher-style-fingerprint.test.ts `
+            src/core/services/mcp-watcher-vector-cache.test.ts `
+            src/core/services/mcp-watcher-parity.test.ts
+          if ($LASTEXITCODE -ne 0) { throw 'Windows watcher unit tests failed' }
+
+      - name: Exercise a real branch switch on Windows
+        shell: pwsh
+        run: |
+          # Real git + real chokidar + real filesystem. This is the only place the chain
+          # `git checkout` -> .git/HEAD -> rebuild lane runs on any platform in CI: the
+          # existing unit test injects the trigger instead of performing it.
+          $ErrorActionPreference = 'Stop'
+          npx vitest run --config vitest.integration.config.ts src/core/services/mcp-watcher.integration.test.ts
+          if ($LASTEXITCODE -ne 0) { throw 'Windows watcher integration tests failed' }
       - name: Exercise the MCP transport and the serve daemon
         shell: pwsh
         working-directory: src/core/scip/fixtures/tiny-repo

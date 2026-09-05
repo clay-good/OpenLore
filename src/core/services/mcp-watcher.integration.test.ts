@@ -15,6 +15,7 @@ import type { LLMContext } from '../analyzer/artifact-generator.js';
 import { McpWatcher } from './mcp-watcher.js';
 import * as utils from './mcp-handlers/utils.js';
 import { readCachedContext, _resetContextCacheForTesting } from './mcp-handlers/utils.js';
+import { execFileGit } from '../../utils/git-exec.js';
 
 // ── Timing ────────────────────────────────────────────────────────────────────
 //   stabilityThreshold 100ms  +  debounce 100ms  +  processing slack 200ms
@@ -392,4 +393,86 @@ describe('McpWatcher — real fs watcher', () => {
     const after = await readFile(contextPath, 'utf-8');
     expect(after).toBe(before);
   }, 10_000);
+});
+
+/**
+ * add-real-branch-switch-coverage.
+ *
+ * The watcher rebuilds the call graph when .git/HEAD moves (branch switch / pull /
+ * merge) - an incremental signature patch cannot repair that. Until now every test of
+ * this path INJECTED the trigger: mcp-watcher.graph-rebuild.test.ts drives
+ * scheduleGraphRebuild directly, so it proves the coalescing window, never that a real
+ * `git checkout` reaches it. The chain under test here is the untested half:
+ *
+ *     git checkout -> .git/HEAD rewritten -> chokidar ref watch -> 'head-change'
+ *
+ * Real git, real chokidar, real filesystem. Nothing is stubbed.
+ */
+describe('McpWatcher - a real branch switch reaches the rebuild lane', () => {
+  const watchers: McpWatcher[] = [];
+
+  afterEach(async () => {
+    for (const w of watchers) await w.stop();
+    watchers.length = 0;
+  });
+
+  async function initRepo(root: string): Promise<void> {
+    await execFileGit('git', ['init', '--initial-branch=main'], { cwd: root });
+    await execFileGit('git', ['config', 'user.email', 'test@example.com'], { cwd: root });
+    await execFileGit('git', ['config', 'user.name', 'Test'], { cwd: root });
+    await execFileGit('git', ['config', 'commit.gpgsign', 'false'], { cwd: root });
+    await writeFile(join(root, 'seed.ts'), 'export function seed() {}\n', 'utf-8');
+    await execFileGit('git', ['add', '-A'], { cwd: root });
+    await execFileGit('git', ['commit', '-m', 'seed', '--no-verify'], { cwd: root });
+  }
+
+  it('fires onGraphStale(head-change) for an actual `git checkout`', async () => {
+    const { rootPath } = await setupProject();
+    await initRepo(rootPath);
+
+    const reasons: string[] = [];
+    const watcher = new McpWatcher({
+      rootPath,
+      embed: false,
+      debounceMs: DEBOUNCE_MS,
+      onGraphStale: (reason) => { reasons.push(reason); },
+    });
+    watchers.push(watcher);
+    await watcher.start();
+    await wait(WAIT_MS);
+
+    // The real event: git rewrites .git/HEAD to point at the new branch.
+    await execFileGit('git', ['checkout', '-b', 'feature'], { cwd: rootPath });
+
+    // The rebuild lane coalesces deliberately, so poll rather than sleeping once.
+    const deadline = Date.now() + 20_000;
+    while (reasons.length === 0 && Date.now() < deadline) await wait(100);
+
+    expect(reasons, 'a real branch switch must reach the graph-rebuild lane').toContain('head-change');
+  }, 40_000);
+
+  it('does NOT rebuild for a bare `git add` (staging churn, not a branch switch)', async () => {
+    // The complement, and the reason the handler inspects the ref basename: .git/index
+    // moves on every `git add`. Treating that as a branch switch would rebuild the whole
+    // graph on routine staging.
+    const { rootPath } = await setupProject();
+    await initRepo(rootPath);
+
+    const reasons: string[] = [];
+    const watcher = new McpWatcher({
+      rootPath,
+      embed: false,
+      debounceMs: DEBOUNCE_MS,
+      onGraphStale: (reason) => { reasons.push(reason); },
+    });
+    watchers.push(watcher);
+    await watcher.start();
+    await wait(WAIT_MS);
+
+    await writeFile(join(rootPath, 'staged.ts'), 'export function staged() {}\n', 'utf-8');
+    await execFileGit('git', ['add', 'staged.ts'], { cwd: rootPath });
+    await wait(2_000);
+
+    expect(reasons).not.toContain('head-change');
+  }, 40_000);
 });
