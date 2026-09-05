@@ -347,18 +347,28 @@ function bm25Postings(corpus: Bm25Corpus): Map<string, number[]> {
  * whole corpus. (change: optimize-serving-hot-path-caches)
  */
 /**
- * Drop the embedding column from rows the keyword cache is about to RETAIN.
+ * Copy rows the keyword cache is about to RETAIN, without the embedding column.
  *
  * The keyword path never reads `vector` — `rowToRecord` omits it, and the filters read
  * `language`/`fanIn` — but the cache held every row verbatim for the life of the
  * process, pinning one float array per indexed symbol (at 50k symbols x 1536 dims,
- * hundreds of megabytes) that nothing on this path would ever look at. Mutates in
- * place: these rows are freshly materialized by `toArray()` and owned by the cache.
+ * hundreds of megabytes) that nothing on this path would ever look at.
+ *
+ * Copies rather than deleting in place: `toArray()` hands back Arrow-backed rows that
+ * may be proxies whose `deleteProperty` trap refuses (it throws in strict mode), and a
+ * fresh plain object also releases the Arrow buffer the row was a view onto. A row that
+ * exposes no enumerable keys is passed through untouched rather than replaced by an
+ * empty object — a caching optimization must never be able to erase a row.
  * (change: optimize-serving-hot-path-caches)
  */
-function dropEmbeddingColumn(rows: Record<string, unknown>[]): Record<string, unknown>[] {
-  for (const row of rows) if ('vector' in row) delete row.vector;
-  return rows;
+function withoutEmbeddingColumn(rows: Record<string, unknown>[]): Record<string, unknown>[] {
+  return rows.map((row) => {
+    const keys = Object.keys(row);
+    if (keys.length === 0) return row;
+    const copy: Record<string, unknown> = {};
+    for (const key of keys) if (key !== 'vector') copy[key] = row[key];
+    return copy;
+  });
 }
 
 export function bm25CandidateDocs(corpus: Bm25Corpus, ...tokenSets: ReadonlyArray<readonly string[]>): number[] {
@@ -1901,7 +1911,7 @@ export class VectorIndex {
 
     if (!cachedEntry) {
       _cacheStats.bm25Misses++;
-      allRows = dropEmbeddingColumn(
+      allRows = withoutEmbeddingColumn(
         (await table.query().toArray() as Record<string, unknown>[]).filter(isRepoFunctionRow),
       );
       const corpus = loadOrBuildBm25Corpus(dbPath, allRows);
@@ -2022,7 +2032,7 @@ export class VectorIndex {
 
     if (!cachedEntry) {
       _cacheStats.bm25Misses++;
-      allRows = dropEmbeddingColumn(
+      allRows = withoutEmbeddingColumn(
         (await table.query().toArray() as Record<string, unknown>[]).filter(isRepoFunctionRow),
       );
       const corpus = loadOrBuildBm25Corpus(dbPath, allRows);

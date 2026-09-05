@@ -23,13 +23,13 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
+import { loadMappingIndex, clearMappingCache } from './utils.js';
 import {
-  loadMappingIndex,
-  readJsonArtifactCached,
   artifactStamp,
-  clearMappingCache,
+  readJsonArtifactCached,
   _resetJsonArtifactCacheForTesting,
-} from './utils.js';
+  _jsonArtifactCacheSizeForTesting,
+} from './artifact-cache.js';
 import { EdgeStore } from '../edge-store.js';
 import { buildBm25Corpus, bm25CandidateDocs, bm25Score, _patchBm25CorpusForTesting } from '../../analyzer/vector-index.js';
 import type { FileProvenance } from '../../provenance/git-provenance.js';
@@ -114,8 +114,8 @@ describe('serving caches invalidate when another process rewrites the artifact',
   it('two derivations of the same artifact do not read each other’s cached value', async () => {
     const path = join(dir, 'shared.json');
     await writeFile(path, JSON.stringify({ n: 7 }));
-    const asNumber = await readJsonArtifactCached(path, 'as-number', (p) => (p as { n: number }).n);
-    const asString = await readJsonArtifactCached(path, 'as-string', (p) => String((p as { n: number }).n));
+    const asNumber = await readJsonArtifactCached(path, 'as-number', (p: unknown) => (p as { n: number }).n);
+    const asString = await readJsonArtifactCached(path, 'as-string', (p: unknown) => String((p as { n: number }).n));
     expect(asNumber).toBe(7);
     expect(asString).toBe('7');
   });
@@ -123,9 +123,9 @@ describe('serving caches invalidate when another process rewrites the artifact',
   it('a malformed artifact caches nothing, so a repaired one is picked up', async () => {
     const path = join(dir, 'half-written.json');
     await writeFile(path, '{"n": ');
-    expect(await readJsonArtifactCached(path, 'k', (p) => p)).toBeNull();
+    expect(await readJsonArtifactCached(path, 'k', (p: unknown) => p)).toBeNull();
     await writeFile(path, '{"n": 3}');
-    expect(await readJsonArtifactCached(path, 'k', (p) => p)).toEqual({ n: 3 });
+    expect(await readJsonArtifactCached(path, 'k', (p: unknown) => p)).toEqual({ n: 3 });
   });
 
   it('artifactStamp distinguishes two writes of equal length inside the same millisecond', async () => {
@@ -140,6 +140,17 @@ describe('serving caches invalidate when another process rewrites the artifact',
 
   it('artifactStamp is null for an absent file rather than throwing', async () => {
     expect(await artifactStamp(join(dir, 'nope.json'))).toBeNull();
+  });
+
+  it('the sibling-artifact cache is bounded — a caller-supplied path cannot grow it forever', async () => {
+    for (let i = 0; i < 200; i++) {
+      const path = join(dir, `artifact-${i}.json`);
+      await writeFile(path, JSON.stringify({ i }));
+      await readJsonArtifactCached(path, 'k', (p: unknown) => p);
+    }
+    expect(_jsonArtifactCacheSizeForTesting()).toBeLessThanOrEqual(64);
+    // The most recent entry survived eviction.
+    expect(await readJsonArtifactCached(join(dir, 'artifact-199.json'), 'k', (p: unknown) => p)).toEqual({ i: 199 });
   });
 });
 
@@ -221,7 +232,7 @@ describe('keyword search work is bounded by what the query can match', () => {
     // Both cold-load sites must pass their rows through the stripper before caching.
     const cachedLoads = source.match(/allRows = [\s\S]{0,200}?isRepoFunctionRow\)/g) ?? [];
     expect(cachedLoads.length).toBeGreaterThan(0);
-    for (const load of cachedLoads) expect(load).toContain('dropEmbeddingColumn');
+    for (const load of cachedLoads) expect(load).toContain('withoutEmbeddingColumn');
   });
 });
 
@@ -287,7 +298,8 @@ describe('per-file store reads are answered through the file_path index', () => 
   it('change coupling answers the same way', () => {
     store.insertChangeCoupling({
       churn: new Map([['src/a.ts', 4], ['src/b.ts', 9]]),
-      coupling: new Map([['src/a.ts', [{ file: 'src/b.ts', count: 3 }]]]),
+      coupling: new Map([['src/a.ts', [{ file: 'src/b.ts', support: 3, confidence: 0.75 }]]]),
+      stats: { commitsScanned: 10, bulkCommitsFiltered: 0, filesTracked: 2 },
     });
     expect(store.getChangeCouplingForFiles(['src/b.ts']).map(r => r.filePath)).toEqual(['src/b.ts']);
     expect(store.getChangeCouplingForFiles(['/repo/src/a.ts']).map(r => r.filePath)).toEqual(['src/a.ts']);

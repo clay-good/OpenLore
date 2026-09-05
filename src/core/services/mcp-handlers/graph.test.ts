@@ -12,9 +12,17 @@ import { EdgeStore } from '../edge-store.js';
 
 // Mock node:fs/promises so handleGetFileDependencies can be tested without disk I/O.
 // Default: readFile throws (simulates missing dep-graph file).
-vi.mock('node:fs/promises', () => ({
-  readFile: vi.fn(async () => { throw new Error('ENOENT'); }),
-}));
+vi.mock('node:fs/promises', () => {
+  // dependency-graph.json is now read through the stamp-keyed artifact cache, so the
+  // mock must answer `stat` too. A fresh stamp per call means each test's fixture is
+  // read rather than served from the entry the previous test left behind — these tests
+  // all use the same path with different content.
+  let tick = 0n;
+  return {
+    readFile: vi.fn(async () => { throw new Error('ENOENT'); }),
+    stat: vi.fn(async () => ({ dev: 1n, ino: 1n, mtimeNs: ++tick, size: 1n })),
+  };
+});
 
 // Static mocks for handler tests
 vi.mock('./utils.js', () => ({

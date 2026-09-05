@@ -17,7 +17,8 @@
 import { join, relative } from 'node:path';
 import { readFile, stat } from 'node:fs/promises';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
-import { validateDirectory, loadMappingIndex, specsForFile, functionsForDomain, readCachedContext, safeJoin, safeOpenspecDir, queryTooLongError, notReadyResult, getCachedNodeStartLine, readJsonArtifactCached } from './utils.js';
+import { validateDirectory, loadMappingIndex, specsForFile, functionsForDomain, readCachedContext, safeJoin, safeOpenspecDir, queryTooLongError, notReadyResult, getCachedNodeStartLine } from './utils.js';
+import { readJsonArtifactCached } from './artifact-cache.js';
 import { expandHandle, applyTokenBudget, collapseExactDuplicates, omissionNote } from './progressive.js';
 import { readOpenLoreConfig } from '../config-manager.js';
 import { repairStatusFor, REPAIR_REASON_DETAIL } from '../cold-start-bootstrap.js';
@@ -32,6 +33,7 @@ import {
   type LanguageProfile,
 } from '../../analyzer/style-fingerprint.js';
 import { scanViolations } from '../../architecture/check.js';
+import type { DependencyGraphResult } from '../../analyzer/dependency-graph.js';
 import { requireMatchEvidence, type MatchEvidence } from '../../analyzer/retrieval-evidence.js';
 import { loadParseHealthReport, parseHealthBoundary } from './parse-health-boundary.js';
 import {
@@ -691,8 +693,9 @@ export async function handleOrient(
     if (rules.rules.length > 0 && relevantFiles.length > 0) {
       // Parsed once per version of the artifact, not once per orient.
       // (change: optimize-serving-hot-path-caches)
-      const depGraph = await readJsonArtifactCached(
-        join(outputDir, 'dependency-graph.json'), 'raw', (parsed) => parsed ?? null,
+      const depGraph = await readJsonArtifactCached<DependencyGraphResult>(
+        join(outputDir, 'dependency-graph.json'), 'raw',
+        (parsed) => (parsed as DependencyGraphResult | null) ?? null,
       );
       if (depGraph) {
         const norm = (p: string) => p.replace(/\\/g, '/').replace(/^\.\//, '');

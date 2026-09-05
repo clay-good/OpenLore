@@ -5,7 +5,8 @@
  * trace_execution_path.
  */
 
-import { validateDirectory, readCachedContext, notReadyResult, readJsonArtifactCached } from './utils.js';
+import { validateDirectory, readCachedContext, notReadyResult } from './utils.js';
+import { readJsonArtifactCached } from './artifact-cache.js';
 import { loadTraversalIndex } from './traversal.js';
 import { resolveFederationScope, findCrossRepoConsumersBatch, findCrossRepoClientCallers } from '../../federation/resolver.js';
 import { extractRoutesFromFile, normalizeUrl, type RouteDefinition, type RouteInventory } from '../../analyzer/http-route-parser.js';
