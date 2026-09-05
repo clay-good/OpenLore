@@ -128,14 +128,59 @@ export function capOutput(text: string, maxBytes: number): { text: string; trunc
   return { text: slice + note, truncated: true };
 }
 
-/** Largest n (0..len) for which pred(n) holds, found by binary search. pred must be monotone. */
-function largestFitting(len: number, pred: (n: number) => boolean): number {
-  let lo = 0, hi = len, best = 0;
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1;
-    if (pred(mid)) { best = mid; lo = mid + 1; } else hi = mid - 1;
+/**
+ * Bytes `JSON.stringify` emits for one code point, excluding the surrounding quotes.
+ *
+ * Mirrors the JSON string grammar exactly: the two mandatory escapes, the short
+ * control escapes, `\u00XX` for the remaining C0 range, and otherwise the UTF-8
+ * width of the code point.
+ */
+function jsonEscapedCodePointBytes(cp: number): number {
+  if (cp === 0x22 /* " */ || cp === 0x5c /* \ */) return 2;
+  if (cp < 0x20) return (cp === 0x08 || cp === 0x09 || cp === 0x0a || cp === 0x0c || cp === 0x0d) ? 2 : 6;
+  if (cp < 0x80) return 1;
+  if (cp < 0x800) return 2;
+  // A LONE surrogate — `for…of` only ever yields one when the text is not well-formed,
+  // since it yields a valid pair as its combined code point. JSON.stringify emits it as
+  // the six-byte `\udXXX` escape, not as UTF-8.
+  if (cp >= 0xd800 && cp <= 0xdfff) return 6;
+  if (cp < 0x10000) return 3;
+  return 4;
+}
+
+/** Bytes `JSON.stringify(text)` emits, excluding the surrounding quotes. */
+function jsonEscapedBytes(text: string): number {
+  let total = 0;
+  for (const ch of text) total += jsonEscapedCodePointBytes(ch.codePointAt(0)!);
+  return total;
+}
+
+/**
+ * The largest cut index into `text` — always on a code-point boundary — whose
+ * JSON-escaped form fits `budget` bytes.
+ *
+ * Replaces a binary search whose predicate re-serialized the ENTIRE enclosing result
+ * on every probe (~20-27 full pretty-prints of a multi-megabyte object). Escaped byte
+ * length is a prefix sum over code points, so one O(len) pass answers every probe in
+ * O(1) — and the answer is exact rather than estimated.
+ *
+ * Cutting on a code-point boundary is also why the sums are additive: splitting a
+ * surrogate pair would leave a lone surrogate, which JSON escapes to six bytes rather
+ * than contributing its half of a four-byte character. The cut can therefore land one
+ * code point earlier than a byte-exact search would, never later, and never inside a
+ * character. (change: optimize-serving-hot-path-caches)
+ */
+function largestFittingJsonCut(text: string, budget: number): number {
+  if (budget <= 0) return 0;
+  let bytes = 0;
+  let cut = 0;
+  for (const ch of text) {
+    const next = bytes + jsonEscapedCodePointBytes(ch.codePointAt(0)!);
+    if (next > budget) return cut;
+    bytes = next;
+    cut += ch.length;
   }
-  return best;
+  return cut;
 }
 
 /**
@@ -168,9 +213,13 @@ export function capStructuredResult(result: unknown, maxBytes: number): { text: 
     if (key) {
       const field = obj[key] as string;
       const marker = '\n\n…[truncated — this field exceeded the response byte budget; narrow the query]';
-      const within = (n: number): boolean =>
-        Buffer.byteLength(JSON.stringify({ ...obj, [key!]: field.slice(0, n) + marker, truncated: true }, null, 2), 'utf8') <= maxBytes;
-      const best = largestFitting(field.length, within);
+      // Serialize the enclosing shape ONCE with the field emptied; the field's own
+      // contribution is then pure arithmetic. `""` in the shell is the 2 quote bytes
+      // the real field also pays, so the shell's size needs no adjustment.
+      const shellBytes = Buffer.byteLength(
+        JSON.stringify({ ...obj, [key]: '', truncated: true }, null, 2), 'utf8',
+      );
+      const best = largestFittingJsonCut(field, maxBytes - shellBytes - jsonEscapedBytes(marker));
       const capped = { ...obj, [key]: field.slice(0, best) + marker, truncated: true };
       const text = JSON.stringify(capped, null, 2);
       if (Buffer.byteLength(text, 'utf8') <= maxBytes) return { text, truncated: true };
@@ -234,8 +283,8 @@ export function capStructuredResult(result: unknown, maxBytes: number): { text: 
     // truncation envelope (change: disclose-stale-serving-on-cold-reads).
     ...envelopeWith(partial, preservedIndexStaleness),
   });
-  const best = largestFitting(full.length, (n) =>
-    Buffer.byteLength(JSON.stringify(envelope(full.slice(0, n)), null, 2), 'utf8') <= maxBytes);
+  const envelopeShellBytes = Buffer.byteLength(JSON.stringify(envelope(''), null, 2), 'utf8');
+  const best = largestFittingJsonCut(full, maxBytes - envelopeShellBytes);
   return { text: JSON.stringify(envelope(full.slice(0, best)), null, 2), truncated: true };
 }
 

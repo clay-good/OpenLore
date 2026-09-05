@@ -496,10 +496,11 @@ function reverse(fwd: Map<string, Set<string>>): Map<string, Set<string>> {
 /** All nodes that can reach any seed (backward BFS over a reverse adjacency). */
 function backwardReach(seeds: Iterable<string>, rev: Map<string, Set<string>>): Set<string> {
   const seen = new Set<string>(seeds);
+  // Drained with a head index, not Array.prototype.shift(): the frontier is graph-sized,
+  // and shift() re-indexes the whole array per node. (change: optimize-serving-hot-path-caches)
   const queue = [...seen];
-  while (queue.length) {
-    const id = queue.shift()!;
-    for (const caller of rev.get(id) ?? []) if (!seen.has(caller)) { seen.add(caller); queue.push(caller); }
+  for (let head = 0; head < queue.length; head++) {
+    for (const caller of rev.get(queue[head]) ?? []) if (!seen.has(caller)) { seen.add(caller); queue.push(caller); }
   }
   return seen;
 }
@@ -509,9 +510,10 @@ function shortestForwardPath(start: string, targets: Set<string>, fwd: Map<strin
   if (targets.has(start)) return [start];
   const prev = new Map<string, string>();
   const seen = new Set<string>([start]);
+  // Head-index drain, see backwardReach.
   const queue = [start];
-  while (queue.length) {
-    const id = queue.shift()!;
+  for (let head = 0; head < queue.length; head++) {
+    const id = queue[head];
     for (const next of fwd.get(id) ?? []) {
       if (seen.has(next)) continue;
       seen.add(next); prev.set(next, id);

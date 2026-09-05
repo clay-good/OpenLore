@@ -1,33 +1,74 @@
 # Tasks — optimize-serving-hot-path-caches
 
+The proposal was written 2026-07-03. Four of its claims were re-verified against the code at
+implementation time and had already been closed by later work; they are recorded below as
+**already fixed** rather than silently dropped, so the delta between proposal and build is
+readable.
+
+## Already fixed before this change (verified, not rebuilt)
+
+- [x] (b) `buildAdjacency` per tool call — closed by `optimize-reachability-precompute`; the
+      traversal index serves every handler and `buildAdjacency` has no production caller.
+      A guard test now pins that it stays that way.
+- [x] (c2) `patchBm25Cache` rebuilding the corpus per watcher batch — it patches df/length
+      incrementally today.
+- [x] (c4) An external `openlore analyze` leaving the server on a stale BM25 corpus — closed by
+      the `vector-index-meta.json` stamp check in `readMeta`.
+- [x] (a2-iv) The non-atomic `llm-context.json` write — closed by
+      `harden-artifact-write-atomicity`; the watcher uses `atomicWriteFile` under the analysis
+      lock, with its own guard test.
+
 ## Implementation
-- [ ] Memoize {forward, backward, nodeMap, landmarkById} under the _contextCache mtime key;
-      primeContextCache carries them; the 10 buildAdjacency callers + orient reuse them
-- [ ] mtime-key mappingCache (utils.ts:554-599), dependency-graph.json reads (graph.ts:1054-1074,
-      orient.ts:619-621), per-orient scanViolations + style-fingerprint (:806-807); hoist the
-      triplicate readOpenLoreConfig (:201,360,769)
-- [ ] Make EdgeStore the primary graph source for handlers; shard/lazy-load the JSON callGraph;
-      index signatures by path; compact-JSON + tmp-rename the watcher llm-context write (:717)
-- [ ] BM25: project columns excluding vector; incremental df/length patch (:213-220); top-k
-      early termination (:783-803); mtime/attestation invalidation on external analyze (:195-198)
-- [ ] Tail costs: WHERE file_path = ? before full scans in provenance/coupling
-      (edge-store.ts:818-859); indexed anchor resolve in remember (anchor-adapter.ts:247-254);
-      compact size estimate before the output-cap binary search (tool-guard.ts:100-129); chunk
-      IN(...) at ~900 (edge-store.ts:362-377); index-pointer BFS queues
+
+- [x] Stamp-key the `mappingCache` on `mapping.json` (`dev:ino:mtimeNs:size`) — an external
+      `generate` was invisible for the process lifetime, so a daemon served the previous
+      generation's spec links forever
+- [x] Add the shared `artifactStamp` / `readJsonArtifactCached` sibling-artifact cache and route
+      `dependency-graph.json` (`get_file_dependencies`, `orient`) and the style-fingerprint
+      artifact through it
+- [x] Hoist orient's triplicate `readOpenLoreConfig` to the one read it already does
+- [x] Route `get_function_body`'s unfocused path through `readCachedContext` — a single-symbol
+      tool was parsing the whole artifact outside the cache, without its size ceiling or
+      generation check
+- [x] BM25: score only the documents a query term can reach (per-corpus postings index), and
+      drop the never-read embedding column from the rows the keyword cache retains
+- [x] Tail costs: index-answered provenance/coupling reads; indexed anchor resolve in
+      `remember`; exact prefix-sum truncation cut instead of ~24 full re-serializations;
+      chunked SQL `IN (…)` lists; head-index BFS drains on the graph-sized queues; one
+      path→position index for the watcher's per-batch signature patch
+
+## Deliberately not built (scope, recorded so the next reader does not re-derive it)
+
+- Sharding / lazy-loading the monolithic `llm-context.json`, and making the EdgeStore the
+  primary graph source for handlers. Both are structural rewrites of the artifact contract
+  with their own correctness surface (the watcher's `graphDigest` round-trip invariant, the
+  generation-manifest binding); they do not belong in a caching change.
+- Compact (non-pretty) serialization of `llm-context.json`. Byte-for-byte artifact
+  determinism is separately pinned; changing the encoding is its own change.
+- `bfs()` in `mcp-handlers/graph.ts` keeps its `shift()` drain: it is the frozen reference the
+  traversal index is pinned against, not a serving path.
 
 ## Verification
-- [ ] Counter test: one orient call after priming performs 0 full-graph loads / adjacency
-      rebuilds; blast_radius/select_tests/verify_claim reuse the memoized adjacency
-- [ ] Search test: keyword search work does not scale with corpus size beyond top-k; an
-      incremental update patches df/length without full re-tokenization
-- [ ] Invalidation test: an external `openlore analyze` refreshes the server's mapping and BM25
-      caches (no stale spec links, no stale corpus)
-- [ ] Scope test: get_change_coupling for one file does not materialize all rows; remember with
-      a symbol anchor does not hash the whole repo
-- [ ] Correctness: memoized results equal freshly-computed ones on the same artifact
-- [ ] Full suite green
+
+- [x] Guard test: `buildAdjacency` has no production caller; orient reads config once and its
+      sibling artifacts through the stamp-keyed cache; `get_function_body` reads through the
+      shared context cache
+- [x] Search test: the candidate set equals the documents that score above zero, and does not
+      grow with corpus size for a fixed match count
+- [x] Invalidation test: a `mapping.json` rewritten by another process is picked up on the next
+      read; an unchanged one is parsed once; a deleted one stops being served; the stamp
+      separates two writes inside the same millisecond
+- [x] Scope test: per-file provenance/coupling reads return exactly what the tolerant full-scan
+      comparator returned (exact, leading-slash, both suffix directions, LIKE metacharacters,
+      no match); `remember` with a symbol-only anchor reads only that symbol's file
+- [x] Correctness: the truncation cut is byte-exact and maximal for every JSON escape class
+      (quote, backslash, short/long control, 2/3/4-byte UTF-8, lone surrogate) and never splits
+      an astral character
+- [x] Scale test: a 2,500-id frontier crosses the SQLite bound-variable ceiling in one call
+- [x] Full suite green
 
 ## Spec
-- [ ] `mcp-handlers` delta: ADD DerivedGraphStructuresAreMemoizedPerAnalysis,
+
+- [x] `mcp-handlers` delta: ADD DerivedGraphStructuresAreMemoizedPerAnalysis,
       ServingCachesInvalidateOnExternalAnalyze
-- [ ] `analyzer` delta: ADD KeywordSearchDoesNotScanTheWholeCorpusPerQuery
+- [x] `analyzer` delta: ADD KeywordSearchDoesNotScanTheWholeCorpusPerQuery

@@ -794,6 +794,74 @@ export interface MappingEntry {
   functions: Array<{ name: string; file: string; line: number; kind: string; confidence: string }>;
 }
 
+/**
+ * Identity stamp of an on-disk artifact — `dev:ino:mtimeNs:size`, or `null` when the
+ * file is absent or unreadable.
+ *
+ * Every serving cache in this module keys on one of these rather than on the project
+ * directory alone. The artifacts these caches hold are written by OTHER processes
+ * (`openlore analyze`, `openlore generate`), so a directory-only key makes an external
+ * rewrite invisible for the life of a daemon. `mtimeNs` (not `mtimeMs`) is what makes
+ * the stamp usable in a test that rewrites a file twice inside the same millisecond,
+ * and `dev`/`ino` catch an atomic tmp-file rename that lands with an older mtime.
+ * (spec: ServingCachesInvalidateOnExternalAnalyze, change: optimize-serving-hot-path-caches)
+ */
+export async function artifactStamp(path: string): Promise<string | null> {
+  try {
+    const s = await stat(path, { bigint: true });
+    return `${s.dev}:${s.ino}:${s.mtimeNs}:${s.size}`;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read-and-parse a JSON artifact at most once per version of that artifact.
+ *
+ * Shared by the sibling-artifact readers (`dependency-graph.json`, the style
+ * fingerprint) that a single `orient` would otherwise re-read and re-parse on every
+ * call. `derive` runs only on a stamp miss; its result is cached against the stamp of
+ * the bytes that produced it. A parse failure (or a missing file) caches nothing and
+ * returns `null`, so a half-written artifact is retried rather than pinned.
+ *
+ * `derivationKey` namespaces the entry: two callers deriving DIFFERENT shapes from the
+ * same file must not read each other's cached value. Derived values are shared across
+ * callers and MUST be treated as read-only.
+ */
+export async function readJsonArtifactCached<T>(
+  path: string,
+  derivationKey: string,
+  derive: (parsed: unknown) => T | null,
+): Promise<T | null> {
+  const key = `${derivationKey}\0${path}`;
+  const stamp = await artifactStamp(path);
+  if (stamp === null) {
+    _jsonArtifactCache.delete(key);
+    return null;
+  }
+  const cached = _jsonArtifactCache.get(key);
+  if (cached && cached.stamp === stamp) return cached.value as T | null;
+
+  let value: T | null;
+  try {
+    value = derive(JSON.parse(await readFile(path, 'utf-8')) as unknown);
+  } catch {
+    _jsonArtifactCache.delete(key);
+    return null;
+  }
+  const readStamp = await artifactStamp(path);
+  if (readStamp !== null) _jsonArtifactCache.set(key, { stamp: readStamp, value });
+  else _jsonArtifactCache.delete(key);
+  return value;
+}
+
+const _jsonArtifactCache = new Map<string, { stamp: string; value: unknown }>();
+
+/** Test-only: drop every stamp-keyed sibling-artifact entry. */
+export function _resetJsonArtifactCacheForTesting(): void {
+  _jsonArtifactCache.clear();
+}
+
 export interface MappingIndex {
   /** filePath → list of mapping entries that reference it */
   byFile: Map<string, MappingEntry[]>;
@@ -802,21 +870,32 @@ export interface MappingIndex {
   entries: MappingEntry[];
 }
 
-/** Cache for mapping indices, keyed by directory path */
-const mappingCache = new Map<string, MappingIndex>();
+/**
+ * Cache for mapping indices, keyed by directory path — and, since the entry also
+ * carries the stamp of the `mapping.json` it was built from, invalidated whenever
+ * that file moves underneath a long-lived server.
+ */
+const mappingCache = new Map<string, { stamp: string; index: MappingIndex }>();
 
 /** Load and index mapping.json for bidirectional lookup. Returns null if not found. */
 export async function loadMappingIndex(absDir: string, retryCount: number = 1): Promise<MappingIndex | null> {
-  // Check cache first
+  const mappingPath = join(absDir, '.openlore', 'analysis', 'mapping.json');
+  // Check cache first — but only against the artifact currently on disk. `mapping.json`
+  // is rewritten by an EXTERNAL process (`openlore generate` / `openlore mapping refresh`),
+  // so a directory-only key made a rewrite invisible for the whole process lifetime and a
+  // daemon served the previous generation's spec links forever.
+  // (spec: ServingCachesInvalidateOnExternalAnalyze, change: optimize-serving-hot-path-caches)
   const cacheKey = absDir;
+  const stamp = await artifactStamp(mappingPath);
   const cached = mappingCache.get(cacheKey);
-  if (cached) {
-    return cached;
+  if (cached && stamp !== null && cached.stamp === stamp) {
+    return cached.index;
   }
-  
+  if (stamp === null) mappingCache.delete(cacheKey);
+
   const loadAttempt = async (attempt: number): Promise<MappingIndex | null> => {
     try {
-      const raw = await readFile(join(absDir, '.openlore', 'analysis', 'mapping.json'), 'utf-8');
+      const raw = await readFile(mappingPath, 'utf-8');
       const parsed: unknown = JSON.parse(raw);
       // Untrusted artifact: validate top-level shape before use. A malformed
       // mapping.json (non-object, or no `mappings` array) fails closed — retrying
@@ -847,8 +926,12 @@ export async function loadMappingIndex(absDir: string, retryCount: number = 1): 
       }
       
       const result = { byFile, byDomain, entries };
-      // Cache the result
-      mappingCache.set(cacheKey, result);
+      // Cache against the stamp of the bytes actually parsed. Re-stamping here (rather
+      // than reusing the pre-read stamp) closes the window where the file was rewritten
+      // between the stat and the read: a mismatched stamp simply misses next time.
+      const readStamp = await artifactStamp(mappingPath);
+      if (readStamp !== null) mappingCache.set(cacheKey, { stamp: readStamp, index: result });
+      else mappingCache.delete(cacheKey);
       return result;
     } catch (error) {
       if (attempt < retryCount && error instanceof Error) {

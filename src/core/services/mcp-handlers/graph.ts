@@ -5,7 +5,7 @@
  * trace_execution_path.
  */
 
-import { validateDirectory, readCachedContext, notReadyResult } from './utils.js';
+import { validateDirectory, readCachedContext, notReadyResult, readJsonArtifactCached } from './utils.js';
 import { loadTraversalIndex } from './traversal.js';
 import { resolveFederationScope, findCrossRepoConsumersBatch, findCrossRepoClientCallers } from '../../federation/resolver.js';
 import { extractRoutesFromFile, normalizeUrl, type RouteDefinition, type RouteInventory } from '../../analyzer/http-route-parser.js';
@@ -1320,20 +1320,22 @@ export async function handleGetFileDependencies(
   }
   interface DepGraph { nodes: DepNode[]; edges: DepEdge[] }
 
-  let graph: DepGraph;
-  try {
-    const { readFile } = await import('node:fs/promises');
-    const raw = await readFile(depGraphPath, 'utf-8');
-    graph = JSON.parse(raw) as DepGraph;
-  } catch {
-    return notReadyResult('No dependency graph found. Run "openlore analyze" first.', 'index-absent');
-  }
-
+  // One parse per version of the artifact, not one per call: returning a single file's
+  // edges used to cost a full parse of a repo-sized dependency graph every invocation.
+  // The derived value carries the id→path index built alongside it, so a warm call does
+  // no O(nodes) work beyond the lookup. (change: optimize-serving-hot-path-caches)
+  //
   // A valid-but-partial artifact (e.g. {} or an interrupted analyze) parses fine but has
-  // no nodes/edges arrays — guard the shape so .find()/.map() can't throw out of the handler.
-  if (!Array.isArray(graph.nodes) || !Array.isArray(graph.edges)) {
+  // no nodes/edges arrays — the derivation returns null so .find()/.map() can't throw.
+  const derived = await readJsonArtifactCached(depGraphPath, 'file-dependencies', (parsed) => {
+    const g = parsed as DepGraph;
+    if (!g || typeof g !== 'object' || !Array.isArray(g.nodes) || !Array.isArray(g.edges)) return null;
+    return { graph: g, nodeIdToPath: new Map(g.nodes.map(n => [n.id, n.file?.path ?? n.id])) };
+  });
+  if (!derived) {
     return notReadyResult('No dependency graph found. Run "openlore analyze" first.', 'index-absent');
   }
+  const { graph, nodeIdToPath } = derived;
 
   // Resolve the file path to the same form used in the graph (relative or absolute).
   // node.file may be absent on a malformed node — access it defensively.
@@ -1343,8 +1345,6 @@ export async function handleGetFileDependencies(
   if (!node) {
     return { error: `File not found in dependency graph: ${filePath}`, hint: 'Use a relative path from the project root, e.g. "src/core/analyzer/vector-index.ts"' };
   }
-
-  const nodeIdToPath = new Map(graph.nodes.map(n => [n.id, n.file?.path ?? n.id]));
 
   const imports = (direction === 'imports' || direction === 'both')
     ? graph.edges

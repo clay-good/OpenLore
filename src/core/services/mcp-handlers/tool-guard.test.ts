@@ -206,6 +206,74 @@ describe('capStructuredResult', () => {
     expect(parsed.indexStaleness.staleFilesOmitted).toBe(199);
     expect(parsed.indexStaleness.repairScheduled).toBe(true);
   });
+
+  // The truncation search used to re-serialize the ENTIRE result on every binary-search
+  // probe. It now computes the fitting cut from JSON-escaped byte prefix sums, so these
+  // pin that the arithmetic is exact for every character class JSON escapes differently.
+  // (change: optimize-serving-hot-path-caches)
+  describe('the truncation cut is byte-exact for every JSON escape class', () => {
+    const classes: Array<[string, string]> = [
+      ['ascii',            'a'],
+      ['quote',            '"'],
+      ['backslash',        '\\'],
+      ['short control',    '\n'],
+      ['long control',     '\u0001'],
+      ['two-byte utf-8',   'é'],
+      ['three-byte utf-8', '☃'],
+      ['astral pair',      '😀'],
+      ['lone surrogate',   '\ud800'],
+    ];
+
+    for (const [label, ch] of classes) {
+      it(`stays within budget and stays parseable: ${label}`, () => {
+        const field = ch.repeat(20_000);
+        for (const maxBytes of [512, 1_024, 4_096]) {
+          const capped = capStructuredResult({ kind: 'x', body: field }, maxBytes);
+          expect(capped.truncated).toBe(true);
+          expect(Buffer.byteLength(capped.text, 'utf8')).toBeLessThanOrEqual(maxBytes);
+          expect(() => JSON.parse(capped.text)).not.toThrow();
+        }
+      });
+
+      it(`keeps as much as fits: ${label}`, () => {
+        // The cut is maximal, not merely safe: one more code point overflows the budget.
+        const marker = '\n\n…[truncated — this field exceeded the response byte budget; narrow the query]';
+        const field = ch.repeat(20_000);
+        const maxBytes = 2_048;
+        const capped = capStructuredResult({ kind: 'x', body: field }, maxBytes);
+        const kept = (JSON.parse(capped.text) as { body: string }).body;
+        const keptField = kept.slice(0, kept.length - marker.length);
+        const oneMore = keptField + ch;
+        const overflowing = JSON.stringify({ kind: 'x', body: oneMore + marker, truncated: true }, null, 2);
+        expect(Buffer.byteLength(overflowing, 'utf8')).toBeGreaterThan(maxBytes);
+      });
+    }
+
+    it('never splits an astral character in half', () => {
+      const capped = capStructuredResult({ kind: 'x', body: '😀'.repeat(2_000) }, 700);
+      const body = (JSON.parse(capped.text) as { body: string }).body;
+      const emoji = body.slice(0, body.indexOf('\n\n…'));
+      expect([...emoji].every((c) => c === '😀')).toBe(true);
+      expect(emoji.length % 2).toBe(0);
+    });
+
+    it('falls back to the envelope when the shell leaves no room for the field', () => {
+      // 320 bytes is below the truncated-field shape's own floor (the marker alone is
+      // ~90 bytes) but above the envelope's, so the envelope path takes over.
+      const capped = capStructuredResult({ kind: 'x', body: 'z'.repeat(5_000) }, 320);
+      expect(capped.truncated).toBe(true);
+      expect(Buffer.byteLength(capped.text, 'utf8')).toBeLessThanOrEqual(320);
+      expect(() => JSON.parse(capped.text)).not.toThrow();
+    });
+
+    it('a budget below even the envelope’s own floor still yields valid JSON', () => {
+      // Pre-existing, unchanged behaviour: the envelope's explanatory note cannot be
+      // shrunk, so a pathological budget is exceeded rather than producing torn output.
+      const capped = capStructuredResult({ kind: 'x', body: 'z'.repeat(5_000) }, 64);
+      expect(capped.truncated).toBe(true);
+      expect(() => JSON.parse(capped.text)).not.toThrow();
+    });
+  });
 });
 
 describe('classifyToolError', () => {

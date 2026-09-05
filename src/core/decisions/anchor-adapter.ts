@@ -170,6 +170,16 @@ export class AnchorContext {
     try { this.store.close(); } catch { /* ignore */ }
   }
 
+  /**
+   * Test-only: how many distinct files this adapter has read from disk.
+   *
+   * The observable that pins anchor resolution to the symbol's own file rather than
+   * the whole repository. (change: optimize-serving-hot-path-caches)
+   */
+  _filesReadForTesting(): number {
+    return this.fileCache.size;
+  }
+
   private spanHash(node: FunctionNode): string | undefined {
     return hashNodeSpan(this.rootPath, node, this.fileCache);
   }
@@ -265,15 +275,29 @@ export class AnchorContext {
     hints: ReadonlyArray<{ symbol?: string; file?: string }>,
   ): StructuralAnchor[] {
     const files = hints.map((h) => h.file).filter((f): f is string => !!f);
+    // Candidate set. With a file hint, the file's nodes; WITHOUT one, only the nodes
+    // that carry a hinted name — read through `idx_node_name`.
+    //
+    // The fallback used to materialize every internal node in the repository and hash
+    // each one's source span, so `remember` with a symbol-only anchor read and hashed
+    // the whole repo to resolve one symbol. Resolution matches names EXACTLY
+    // (`resolveSymbolAnchors`), so a name-scoped candidate set is the same set for that
+    // name — including when it holds several nodes, which is what makes the hint
+    // ambiguous and is still detected. (change: optimize-serving-hot-path-caches)
+    const toAnchorNode = (node: FunctionNode): AnchorNode | null => {
+      const contentHash = this.spanHash(node);
+      if (contentHash === undefined) return null;
+      return { id: node.id, name: node.name, filePath: node.filePath, contentHash, ...(node.stableId ? { stableId: node.stableId } : {}) };
+    };
     const nodes = files.length
       ? this.anchorNodesForFiles(files)
-      : this.store.getAllInternalNodes().reduce<AnchorNode[]>((acc, node) => {
-          const contentHash = this.spanHash(node);
-          if (contentHash !== undefined) {
-            acc.push({ id: node.id, name: node.name, filePath: node.filePath, contentHash, ...(node.stableId ? { stableId: node.stableId } : {}) });
-          }
-          return acc;
-        }, []);
+      : [...new Set(hints.map((h) => h.symbol).filter((s): s is string => !!s))]
+          .flatMap((symbol) => this.store.getInternalNodesByName(symbol))
+          .reduce<AnchorNode[]>((acc, node) => {
+            const anchor = toAnchorNode(node);
+            if (anchor) acc.push(anchor);
+            return acc;
+          }, []);
 
     const out: StructuralAnchor[] = [];
     const seen = new Set<string>();

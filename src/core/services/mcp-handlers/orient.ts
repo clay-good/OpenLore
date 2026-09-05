@@ -17,7 +17,7 @@
 import { join, relative } from 'node:path';
 import { readFile, stat } from 'node:fs/promises';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
-import { validateDirectory, loadMappingIndex, specsForFile, functionsForDomain, readCachedContext, safeJoin, safeOpenspecDir, queryTooLongError, notReadyResult, getCachedNodeStartLine } from './utils.js';
+import { validateDirectory, loadMappingIndex, specsForFile, functionsForDomain, readCachedContext, safeJoin, safeOpenspecDir, queryTooLongError, notReadyResult, getCachedNodeStartLine, readJsonArtifactCached } from './utils.js';
 import { expandHandle, applyTokenBudget, collapseExactDuplicates, omissionNote } from './progressive.js';
 import { readOpenLoreConfig } from '../config-manager.js';
 import { repairStatusFor, REPAIR_REASON_DETAIL } from '../cold-start-bootstrap.js';
@@ -420,7 +420,8 @@ export async function handleOrient(
   let inlineSpecs: InlineSpec[] | undefined;
   if (!lean && specDomains.length > 0) {
     try {
-      const cfg = await readOpenLoreConfig(absDir);
+      // Reuses the config read once at the top of this handler — a single orient parsed
+      // .openlore/config.json three times. (change: optimize-serving-hot-path-caches)
       // Confine the configured openspec dir to the root (config is untrusted input).
       const manifestPath = join(safeOpenspecDir(absDir, cfg?.openspecPath), ARTIFACT_RAG_MANIFEST);
       const manifestCache = await loadManifestCached(manifestPath, absDir);
@@ -688,9 +689,12 @@ export async function handleOrient(
   if (!lean) try {
     const rules = await loadArchitectureRules(absDir);
     if (rules.rules.length > 0 && relevantFiles.length > 0) {
-      const depRaw = await readFile(join(outputDir, 'dependency-graph.json'), 'utf-8').catch(() => null);
-      if (depRaw) {
-        const depGraph = JSON.parse(depRaw);
+      // Parsed once per version of the artifact, not once per orient.
+      // (change: optimize-serving-hot-path-caches)
+      const depGraph = await readJsonArtifactCached(
+        join(outputDir, 'dependency-graph.json'), 'raw', (parsed) => parsed ?? null,
+      );
+      if (depGraph) {
         const norm = (p: string) => p.replace(/\\/g, '/').replace(/^\.\//, '');
         const rels = relevantFiles.map(norm);
         const involvesRelevant = (vf: string) => {
@@ -854,7 +858,6 @@ export async function handleOrient(
     | undefined;
   if (!lean) {
     try {
-      const cfg = await readOpenLoreConfig(absDir);
       if ((cfg?.panicResponse?.mode ?? 'off') !== 'off') {
         const report = readHotspotArtifact(outputDir);
         if (report && report.hotspots.length > 0 && relevantFiles.length > 0) {
@@ -891,8 +894,11 @@ export async function handleOrient(
     | undefined;
   if (!lean && relevantFunctions.length > 0) {
     try {
-      const raw = await readFile(join(outputDir, ARTIFACT_STYLE_FINGERPRINT), 'utf-8').catch(() => null);
-      const fp = raw ? (JSON.parse(raw) as StyleFingerprint) : null;
+      // Cached against the artifact's stamp — a non-lean orient re-read and re-parsed
+      // this file on every call. (change: optimize-serving-hot-path-caches)
+      const fp = await readJsonArtifactCached(
+        join(outputDir, ARTIFACT_STYLE_FINGERPRINT), 'raw', (parsed) => (parsed ?? null) as StyleFingerprint | null,
+      );
       if (fp && Array.isArray(fp.byLanguage)) {
         // Dominant supported language among the matched functions.
         const langCounts = new Map<string, number>();

@@ -310,6 +310,69 @@ export function buildBm25Corpus(records: Array<{ id: string; text: string }>): B
 const BM25_K1 = 1.2;
 const BM25_B  = 0.75;
 
+/**
+ * term → ascending indices of the docs containing it, built once per corpus OBJECT.
+ *
+ * Keyed weakly on the corpus so it is rebuilt exactly when the corpus is replaced (a
+ * rebuild, or an incremental patch — `patchBm25Corpus` returns a new object) and
+ * collected with it. It is not part of {@link Bm25Corpus} and never reaches the
+ * persisted sidecar: it is derivable from `docs[].tfMap` in one pass.
+ * (change: optimize-serving-hot-path-caches)
+ */
+const _postingsByCorpus = new WeakMap<Bm25Corpus, Map<string, number[]>>();
+
+function bm25Postings(corpus: Bm25Corpus): Map<string, number[]> {
+  const memo = _postingsByCorpus.get(corpus);
+  if (memo) return memo;
+  const postings = new Map<string, number[]>();
+  for (let i = 0; i < corpus.docs.length; i++) {
+    for (const term of corpus.docs[i].tfMap.keys()) {
+      const list = postings.get(term);
+      if (list) list.push(i);
+      else postings.set(term, [i]);
+    }
+  }
+  _postingsByCorpus.set(corpus, postings);
+  return postings;
+}
+
+/**
+ * The doc indices that can score above zero for any of `tokenSets`, ascending.
+ *
+ * Exactly the set the caller's `score > 0 || expansionScore > 0` filter would keep:
+ * `bm25Score` contributes only for a term with `df > 0` AND `tf > 0`, and both the idf
+ * and the tf-norm factors are strictly positive whenever those hold — so "appears in
+ * some posting list" and "scores above zero" are the same predicate. Scoring the
+ * candidates instead of every document is what keeps a keyword query from walking the
+ * whole corpus. (change: optimize-serving-hot-path-caches)
+ */
+/**
+ * Drop the embedding column from rows the keyword cache is about to RETAIN.
+ *
+ * The keyword path never reads `vector` — `rowToRecord` omits it, and the filters read
+ * `language`/`fanIn` — but the cache held every row verbatim for the life of the
+ * process, pinning one float array per indexed symbol (at 50k symbols x 1536 dims,
+ * hundreds of megabytes) that nothing on this path would ever look at. Mutates in
+ * place: these rows are freshly materialized by `toArray()` and owned by the cache.
+ * (change: optimize-serving-hot-path-caches)
+ */
+function dropEmbeddingColumn(rows: Record<string, unknown>[]): Record<string, unknown>[] {
+  for (const row of rows) if ('vector' in row) delete row.vector;
+  return rows;
+}
+
+export function bm25CandidateDocs(corpus: Bm25Corpus, ...tokenSets: ReadonlyArray<readonly string[]>): number[] {
+  const postings = bm25Postings(corpus);
+  const candidates = new Set<number>();
+  for (const tokens of tokenSets) {
+    for (const token of new Set(tokens)) {
+      const list = postings.get(token);
+      if (list) for (const idx of list) candidates.add(idx);
+    }
+  }
+  return [...candidates].sort((a, b) => a - b);
+}
+
 export function bm25Score(corpus: Bm25Corpus, queryTokens: string[], docIdx: number): number {
   const doc = corpus.docs[docIdx];
   let score = 0;
@@ -1838,7 +1901,9 @@ export class VectorIndex {
 
     if (!cachedEntry) {
       _cacheStats.bm25Misses++;
-      allRows = (await table.query().toArray() as Record<string, unknown>[]).filter(isRepoFunctionRow);
+      allRows = dropEmbeddingColumn(
+        (await table.query().toArray() as Record<string, unknown>[]).filter(isRepoFunctionRow),
+      );
       const corpus = loadOrBuildBm25Corpus(dbPath, allRows);
       cachedEntry = { corpus, rowCount: allRows.length, rows: allRows };
       _bm25Cache.set(dbPath, cachedEntry);
@@ -1852,13 +1917,15 @@ export class VectorIndex {
     const queryTokens = tokenize(query);
     const expandedQuery = expandVocabularyQuery(outputDir, queryTokens, vocabularyExpansion);
 
-    // Score all corpus documents with BM25
-    const sparseScored = corpus.docs
-      .map((doc, i) => ({
+    // Score only the docs a query term can reach (see bm25CandidateDocs) — not the
+    // whole corpus. The zero-score filter is kept: it is now a no-op the candidate set
+    // already guarantees, and it pins that equivalence if scoring ever changes.
+    const sparseScored = bm25CandidateDocs(corpus, queryTokens, expandedQuery.expansionTokens)
+      .map((i) => ({
         idx: i,
         score: bm25Score(corpus, queryTokens, i),
         expansionScore: bm25Score(corpus, expandedQuery.expansionTokens, i),
-        id: doc.id,
+        id: corpus.docs[i].id,
       }))
       .filter(({ score, expansionScore }) => score > 0 || expansionScore > 0)
       .sort(compareVocabularyRank)
@@ -1955,7 +2022,9 @@ export class VectorIndex {
 
     if (!cachedEntry) {
       _cacheStats.bm25Misses++;
-      allRows = (await table.query().toArray() as Record<string, unknown>[]).filter(isRepoFunctionRow);
+      allRows = dropEmbeddingColumn(
+        (await table.query().toArray() as Record<string, unknown>[]).filter(isRepoFunctionRow),
+      );
       const corpus = loadOrBuildBm25Corpus(dbPath, allRows);
       cachedEntry = { corpus, rowCount: allRows.length, rows: allRows };
       _bm25Cache.set(dbPath, cachedEntry);
@@ -1971,12 +2040,13 @@ export class VectorIndex {
     onRetrievalMode?.(expandedQuery.vocabularyAvailable ? 'keyword+vocabulary' : 'keyword');
     const rowById = new Map(allRows.map(r => [r.id as string, r]));
 
-    return corpus.docs
-      .map((doc, i) => ({
+    // Candidate-scoped scoring — see the hybrid path above.
+    return bm25CandidateDocs(corpus, queryTokens, expandedQuery.expansionTokens)
+      .map((i) => ({
         idx: i,
         score: bm25Score(corpus, queryTokens, i),
         expansionScore: bm25Score(corpus, expandedQuery.expansionTokens, i),
-        id: doc.id,
+        id: corpus.docs[i].id,
       }))
       .filter(({ score, expansionScore }) => score > 0 || expansionScore > 0)
       // Sort by score desc; break ties by id asc so ranking is deterministic
