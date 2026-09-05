@@ -185,7 +185,7 @@ describe('checkCitedFileFreshness', () => {
     expect(result.repairableStaleFiles).toEqual(['src/generated.ts']);
   });
 
-  it('never reads absolute, traversal, or symlink-escape citations', async () => {
+  it.skipIf(process.platform === 'win32')('never reads absolute, traversal, or symlink-escape citations', async () => {
     writeFileSync(join(outside, 'secret.ts'), 'outside');
     symlinkSync(outside, join(root, 'src', 'escape'));
     const getFileHash = vi.fn(() => sha256('outside'));

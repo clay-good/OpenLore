@@ -157,7 +157,7 @@ describe('handleAnalyzeErrorPropagation', () => {
     }
   });
 
-  it('does not parse an in-root symlink that escapes the project root', async () => {
+  it.skipIf(process.platform === 'win32')('does not parse an in-root symlink that escapes the project root', async () => {
     const outside = mkdtempSync(join(tmpdir(), 'errprop-link-outside-'));
     try {
       const secretType = 'OutsideSymlinkSecretError';

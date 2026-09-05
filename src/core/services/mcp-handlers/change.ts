@@ -338,7 +338,9 @@ export async function handleGenerateChangeProposal(
 
   return {
     slug: safeSlug,
-    proposalPath: join('openspec', 'changes', safeSlug, 'proposal.md'),
+    // Served field — POSIX-separated on every OS, like every other path OpenLore
+    // returns (a Windows agent shouldn't get `openspec\changes\…` here).
+    proposalPath: `openspec/changes/${safeSlug}/proposal.md`,
     domainsAffected: domains,
     functionsFound: (orient.relevantFunctions ?? []).length,
     requirementsTouched: (specSearch.results ?? []).length,

@@ -8,16 +8,22 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { join, resolve } from 'node:path';
 
 // ── Static mocks (hoisted) ────────────────────────────────────────────────────
 
 vi.mock('./utils.js', async () => {
-  const { resolve, sep } = await import('node:path');
+  const { resolve, relative, sep, isAbsolute } = await import('node:path');
   return {
     validateDirectory: vi.fn(async (dir: string) => dir),
+    // Portable containment check: `absDir + sep` prefix matching breaks on Windows
+    // where a POSIX-style test fixture like '/proj' makes resolve() emit
+    // 'C:\proj\…' that can never start with '/proj\'. Compare via a relative path
+    // instead — an escape yields '..' segments or an absolute path on any OS.
     safeJoin: vi.fn((absDir: string, filePath: string) => {
       const resolved = resolve(absDir, filePath);
-      if (!resolved.startsWith(absDir + sep) && resolved !== absDir) {
+      const rel = relative(resolve(absDir), resolved);
+      if (rel === '..' || rel.startsWith('..' + sep) || isAbsolute(rel)) {
         throw new Error(`Path traversal blocked: "${filePath}" resolves outside project directory`);
       }
       return resolved;
@@ -100,7 +106,7 @@ describe('handleGenerateChangeProposal', () => {
   it('writes proposal.md to the correct path', async () => {
     await handleGenerateChangeProposal('/proj', 'Add payment retry', 'add-payment-retry');
     expect(mockFs.mkdir).toHaveBeenCalledWith(
-      expect.stringContaining('openspec/changes/add-payment-retry'),
+      expect.stringContaining(join('openspec', 'changes', 'add-payment-retry')),
       { recursive: true },
     );
     expect(mockFs.writeFile).toHaveBeenCalledWith(
@@ -267,7 +273,9 @@ As a user I want payments to retry automatically.
 
   it('writes back to the same file path', async () => {
     await handleAnnotateStory('/proj', STORY_PATH, 'Add retry');
-    expect(mockFs.writeFile).toHaveBeenCalledWith(STORY_PATH, expect.any(String), 'utf8');
+    // safeJoin resolves against the project dir, so the write target is the
+    // OS-native resolved path (identical to STORY_PATH on POSIX).
+    expect(mockFs.writeFile).toHaveBeenCalledWith(resolve('/proj', STORY_PATH), expect.any(String), 'utf8');
   });
 
   it('inserts ## Risk Context before ## Tasks when section absent', async () => {
@@ -351,7 +359,7 @@ As a user I want payments to retry automatically.
   it('accepts relative story path (resolved against project dir)', async () => {
     await handleAnnotateStory('/proj', 'stories/my-story.md', 'desc');
     expect(mockFs.readFile).toHaveBeenCalledWith(
-      expect.stringContaining('stories/my-story.md'),
+      expect.stringContaining(join('stories', 'my-story.md')),
       'utf8',
     );
   });

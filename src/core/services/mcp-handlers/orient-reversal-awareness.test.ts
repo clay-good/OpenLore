@@ -39,6 +39,7 @@ import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_LLM_CONTEXT } from '..
 import { handleOrient } from './orient.js';
 import { handleRemember } from './memory.js';
 import type { FunctionNode } from '../../analyzer/call-graph.js';
+import { _resetContextCacheForTesting } from './utils.js';
 
 let root: string;
 const SRC = 'export function fooHandler() {\n  return 1;\n}\n';
@@ -121,7 +122,7 @@ beforeEach(async () => {
   await buildStore(nodes);
   await writeLlmContext(nodes);
 });
-afterEach(async () => { await rm(root, { recursive: true, force: true }); });
+afterEach(async () => { _resetContextCacheForTesting(); await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); });
 
 describe('orient — ReversalAwareness (do-not-repeat)', () => {
   it('surfaces a decision superseded by another as a do-not-repeat warning, not as authoritative', async () => {

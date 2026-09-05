@@ -349,7 +349,11 @@ const ARTIFACT_MAX_BYTES = 512 * 1024 * 1024;
 
 /** Test-only: clear in-memory context cache to force cold path. */
 export function _resetContextCacheForTesting(): void {
-  for (const entry of _contextCache.values()) entry.ctx.edgeStore?.close();
+  // Swallow a double-close: a test may already have closed a cached store by hand
+  // (as releaseContextCache does on the production path).
+  for (const entry of _contextCache.values()) {
+    try { entry.ctx.edgeStore?.close(); } catch { /* already closed */ }
+  }
   _contextCache.clear();
   _startLineByContext = new WeakMap();
 }
