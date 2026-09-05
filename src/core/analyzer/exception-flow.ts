@@ -172,6 +172,19 @@ export interface GoDiscardedResult {
   resultIndex: number;
 }
 
+/**
+ * A Go block's own statements, descending through the `statement_list` wrapper that
+ * tree-sitter-go 0.25 inserts between `block` and its statements.
+ *
+ * Only that grammar-only node is flattened, so "at the top level of the function body"
+ * keeps its meaning: a `defer` nested inside an `if` still does not count as
+ * unconditional, which is what the proven-recovery analysis below depends on.
+ */
+function goBlockStatements(block: Node | null | undefined): Node[] {
+  if (!block) return [];
+  return block.namedChildren.flatMap(c => (c.type === 'statement_list' ? c.namedChildren : [c]));
+}
+
 /** Go uses returned values and panic/recover, deliberately separate from exception facts. */
 export interface GoErrorFacts {
   language: 'Go';
@@ -972,7 +985,7 @@ export function extractGoErrorFacts(
     const binding = createBinding(name, fnBody ?? fnNode, fnNode.startIndex - 1);
     binding.events.push({ index: fnNode.startIndex - 1, nil: true });
   }
-  const topLevelDefers = fnBody?.namedChildren.filter(c => c.type === 'defer_statement') ?? [];
+  const topLevelDefers = goBlockStatements(fnBody).filter(c => c.type === 'defer_statement');
   const deferRecovers = (deferStmt: Node): boolean => {
     const call = deferStmt.namedChildren.find(c => c.type === 'call_expression');
     const fn = call?.childForFieldName('function');

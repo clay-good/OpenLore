@@ -2551,11 +2551,21 @@ async function loadWasmGrammarSoft(
     }
     const TS = req('web-tree-sitter') as Record<string, unknown>;
     const WasmQuery = TS.Query as new (lang: unknown, src: string) => { matches(root: TsNodeLike): TsMatch[]; delete?(): void };
-    const ParserCtor = (TS.default ?? TS.Parser ?? TS) as {
+    // Pick the entry that is actually the Parser CONSTRUCTOR, not merely the first
+    // defined one. web-tree-sitter's export shape moved between majors: 0.25 has no
+    // `default`, so `TS.default ?? TS.Parser` fell through to the real class; 0.26+ adds
+    // a self-referential `default` (`TS.default === TS`), so the same expression selects
+    // the namespace OBJECT. That object has no `init`, so the emscripten runtime was
+    // never initialised and `Language.load` failed with "Cannot read properties of
+    // undefined (reading 'loadWebAssemblyModule')" — silently dropping Dart and Lua
+    // while the capability matrix still claimed them. Requiring a function makes the
+    // selection shape-proof in both directions.
+    const ParserCtor = [TS.Parser, TS.default, TS].find(c => typeof c === 'function') as {
       new (): { setLanguage(l: unknown): void; parse(s: string): { rootNode: TsNodeLike } };
       init?: () => Promise<void>;
       Language?: { load(p: Uint8Array): Promise<{ query(src: string): { matches(root: TsNodeLike): TsMatch[] } }> };
-    };
+    } | undefined;
+    if (!ParserCtor) throw new Error('web-tree-sitter exposes no Parser constructor');
     if (typeof ParserCtor.init === 'function') await ParserCtor.init();
     const LanguageNs = (TS.Language ?? ParserCtor.Language) as { load(p: Uint8Array): Promise<{ query(src: string): { matches(root: TsNodeLike): TsMatch[] } }> };
     const lang = await LanguageNs.load(wasmBytes) as {
