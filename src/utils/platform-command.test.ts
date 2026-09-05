@@ -1,5 +1,6 @@
+import { win32 } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { formatPlatformCommand, resolvePlatformCommand } from './platform-command.js';
+import { formatPlatformCommand, resolvePlatformCommand, resolveOpenloreCommand } from './platform-command.js';
 
 describe('resolvePlatformCommand', () => {
   const windowsRuntime = {
@@ -82,5 +83,79 @@ describe('resolvePlatformCommand', () => {
       pathValue: '',
       fileExists: () => false,
     })).toThrow('Could not locate npx-cli.js');
+  });
+});
+
+/**
+ * fix-windows-console-flash-from-npx-shim.
+ *
+ * resolvePlatformCommand removes the shim for `npx` ITSELF, but npx then launches the
+ * TARGET package's bin through `cmd.exe /d /s /c openlore ...` - a visible console
+ * window on every run, i.e. every agent turn for a UserPromptSubmit hook.
+ * resolveOpenloreCommand wires OpenLore's own entry, so no cmd.exe is ever in the chain.
+ *
+ * Paths are built with win32.join so this file carries no literal backslashes.
+ */
+describe('resolveOpenloreCommand', () => {
+  const NODE = win32.join('C:', 'Program Files', 'nodejs', 'node.exe');
+  const NPM_PREFIX = win32.join('C:', 'Users', 'me', 'AppData', 'Roaming', 'npm');
+  const ENTRY = win32.join(NPM_PREFIX, 'node_modules', 'openlore', 'dist', 'cli', 'index.js');
+  const NPX_CLI = win32.join(NPM_PREFIX, 'node_modules', 'npm', 'bin', 'npx-cli.js');
+  const CACHED = win32.join('C:', 'Users', 'me', 'AppData', 'Local', 'npm-cache', '_npx', 'a1b2', 'openlore', 'dist', 'cli', 'index.js');
+
+  it('wires our own CLI entry, so no cmd.exe shim is in the chain', () => {
+    const cmd = resolveOpenloreCommand(['orient', '--inject'], 'win32', {
+      nodeExecutable: NODE,
+      openloreCliEntry: ENTRY,
+    });
+    expect(cmd.command).toBe(NODE);
+    expect(cmd.args).toEqual([ENTRY, 'orient', '--inject']);
+    // The regression itself: nothing may route through npx, whose Windows bin shim is a
+    // .cmd and therefore needs cmd.exe.
+    const line = [cmd.command, ...cmd.args].join(' ');
+    expect(line).not.toContain('npx');
+    expect(line).not.toContain('.cmd');
+  });
+
+  it('falls back to the portable npx form when we have no usable entry', () => {
+    const cmd = resolveOpenloreCommand(['mcp', '--preset', 'substrate'], 'win32', {
+      nodeExecutable: NODE,
+      openloreCliEntry: null,
+      pathValue: NPM_PREFIX,
+      fileExists: (p) => p === NPX_CLI,
+    });
+    expect(cmd.command).toBe(NODE);
+    expect(cmd.args).toEqual([NPX_CLI, '--yes', 'openlore', 'mcp', '--preset', 'substrate']);
+  });
+
+  it('never bakes in an npx cache path, which npm is free to evict', () => {
+    const cmd = resolveOpenloreCommand(['orient', '--json'], 'win32', {
+      nodeExecutable: NODE,
+      openloreCliEntry: CACHED,
+      pathValue: NPM_PREFIX,
+      fileExists: (p) => p === NPX_CLI,
+    });
+    expect(cmd.args).not.toContain(CACHED);
+    expect(cmd.args).toContain('--yes');
+  });
+
+  it('passes the entry through unchanged off Windows', () => {
+    const cmd = resolveOpenloreCommand(['orient', '--json'], 'linux', {
+      nodeExecutable: '/usr/bin/node',
+      openloreCliEntry: '/usr/lib/node_modules/openlore/dist/cli/index.js',
+    });
+    expect(cmd.command).toBe('/usr/bin/node');
+    expect(cmd.args[0]).toBe('/usr/lib/node_modules/openlore/dist/cli/index.js');
+  });
+
+  it('keeps the existing refusal to emit a Windows command with a relative node path', () => {
+    // Same contract resolvePlatformCommand already enforces: a dead launcher is worse
+    // than a loud failure.
+    expect(() => resolveOpenloreCommand(['orient', '--json'], 'win32', {
+      nodeExecutable: 'node',
+      openloreCliEntry: ENTRY,
+      pathValue: NPM_PREFIX,
+      fileExists: (p) => p === NPX_CLI,
+    })).toThrow('absolute Node executable');
   });
 });

@@ -17,7 +17,7 @@ import { mergeEntries, readMeta, removeManaged, isHandEdited, editJsonPreserving
 import { previewCreate, previewDiff } from '../diff.js';
 import type { Adapter, ApplyContext, ApplyResult, PlannedChange } from './types.js';
 import { LEAN_DEFAULT_PRESET } from '../../../constants.js';
-import { formatPlatformCommand, resolvePlatformCommand } from '../../../utils/platform-command.js';
+import { formatPlatformCommand, resolveOpenloreCommand } from '../../../utils/platform-command.js';
 import { confinedAtomicWriteFile, safeJoin } from '../../../utils/path-confinement.js';
 import { isGuardedWriteFailure, withGuardedConfigWrite } from '../guarded-config-write.js';
 
@@ -193,9 +193,8 @@ function mcpEntry(
   platform: NodeJS.Platform,
   runtime: ApplyContext['platformCommandRuntime'],
 ): { command: string; args: string[] } {
-  return resolvePlatformCommand(
-    'npx',
-    ['--yes', 'openlore', 'mcp', '--preset', preset ?? LEAN_DEFAULT_PRESET],
+  return resolveOpenloreCommand(
+    ['mcp', '--preset', preset ?? LEAN_DEFAULT_PRESET],
     platform,
     runtime,
   );
@@ -222,11 +221,11 @@ function managedHooks(
   return [
     {
       key: 'SessionStart',
-      command: formatPlatformCommand(resolvePlatformCommand('npx', ['--yes', 'openlore', 'orient', '--json'], platform, runtime)),
+      command: formatPlatformCommand(resolveOpenloreCommand(['orient', '--json'], platform, runtime)),
     },
     {
       key: 'UserPromptSubmit',
-      command: formatPlatformCommand(resolvePlatformCommand('npx', ['--yes', 'openlore', 'orient', '--inject'], platform, runtime)),
+      command: formatPlatformCommand(resolveOpenloreCommand(['orient', '--inject'], platform, runtime)),
     },
   ];
 }

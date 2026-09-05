@@ -13,7 +13,7 @@ import { mergeEntries, readMeta, removeManaged, isHandEdited } from '../json-man
 import { previewCreate, previewDiff } from '../diff.js';
 import type { Adapter, ApplyContext, ApplyResult, PlannedChange } from './types.js';
 import { LEAN_DEFAULT_PRESET } from '../../../constants.js';
-import { resolvePlatformCommand } from '../../../utils/platform-command.js';
+import { resolveOpenloreCommand } from '../../../utils/platform-command.js';
 import { confinedAtomicWriteFile, safeJoin } from '../../../utils/path-confinement.js';
 
 const RULES_FILE = '.cursorrules';
@@ -32,9 +32,8 @@ function mcpEntry(
   platform: NodeJS.Platform,
   runtime: ApplyContext['platformCommandRuntime'],
 ): { command: string; args: string[] } {
-  return resolvePlatformCommand(
-    'npx',
-    ['--yes', 'openlore', 'mcp', '--preset', preset ?? LEAN_DEFAULT_PRESET],
+  return resolveOpenloreCommand(
+    ['mcp', '--preset', preset ?? LEAN_DEFAULT_PRESET],
     platform,
     runtime,
   );
