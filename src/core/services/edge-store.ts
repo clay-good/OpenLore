@@ -1768,7 +1768,14 @@ function selectRowsForFiles<T>(db: DatabaseSync, table: 'provenance' | 'change_c
     }
   };
 
-  fetchByPath([...new Set(wanted.flatMap(pathSuffixSet))]);
+  // Both the bare and leading-slash forms: a stored path may carry a leading slash and
+  // still be a suffix of the wanted one, which `pathsMatch` accepts.
+  const exact = new Set<string>();
+  for (const suffix of wanted.flatMap(pathSuffixSet)) {
+    exact.add(suffix);
+    if (!suffix.startsWith('/')) exact.add(`/${suffix}`);
+  }
+  fetchByPath([...exact]);
 
   const wantedStripped = new Set(wanted.map((f) => f.replace(/^\/+/, '')));
   const storedPaths = db.prepare(`SELECT file_path FROM ${table}`).all() as unknown as Array<{ file_path: string }>;

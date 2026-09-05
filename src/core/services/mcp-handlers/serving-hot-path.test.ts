@@ -29,6 +29,7 @@ import {
   readJsonArtifactCached,
   _resetJsonArtifactCacheForTesting,
   _jsonArtifactCacheSizeForTesting,
+  _readArtifactBoundedForTesting,
 } from './artifact-cache.js';
 import { EdgeStore } from '../edge-store.js';
 import {
@@ -136,14 +137,50 @@ describe('serving caches invalidate when another process rewrites the artifact',
     expect(await readJsonArtifactCached(path, 'k', (p: unknown) => p)).toEqual({ n: 3 });
   });
 
-  it('artifactStamp distinguishes two writes of equal length inside the same millisecond', async () => {
+  it('artifactStamp distinguishes two same-length writes that land in the same millisecond', async () => {
+    const { stat } = await import('node:fs/promises');
     const path = join(dir, 'rapid.json');
-    await writeFile(path, '{"a":1}');
-    const before = await artifactStamp(path);
-    await writeFile(path, '{"a":2}');
-    const after = await artifactStamp(path);
-    expect(before).not.toBeNull();
-    expect(after).not.toBe(before);
+    // Keep writing until two consecutive writes actually share an mtimeMs — otherwise
+    // this would pass against a millisecond-resolution stamp and prove nothing.
+    let observed = false;
+    for (let i = 0; i < 400 && !observed; i++) {
+      await writeFile(path, '{"a":1}');
+      const first = await stat(path, { bigint: true });
+      const before = await artifactStamp(path);
+      await writeFile(path, '{"a":2}');
+      const second = await stat(path, { bigint: true });
+      if (first.mtimeMs !== second.mtimeMs) continue;
+      observed = true;
+      expect(before).not.toBeNull();
+      expect(await artifactStamp(path)).not.toBe(before);
+    }
+    // Nanosecond resolution is what makes this reachable; if the filesystem never
+    // produced a collision, say so rather than reporting a pass that proved nothing.
+    expect(observed, 'no same-millisecond write pair occurred on this filesystem').toBe(true);
+  });
+
+  // Regression: the stamp used to be re-taken from the PATH after the read. A writer
+  // landing in that window made the cache store the OLD content under the NEW file's
+  // stamp — strictly worse than no stamp, because every later call then hit the cache
+  // and served stale content believing it current.
+  it('the stamp describes the bytes actually read, not whatever is on the path afterwards', async () => {
+    const path = join(dir, 'raced.json');
+    await writeFile(path, '{"v":"OLD"}');
+    const read = await _readArtifactBoundedForTesting(path);
+    expect(read?.text).toBe('{"v":"OLD"}');
+    // Same length, so only the identity part of the stamp can separate them.
+    await writeFile(path, '{"v":"NEW"}');
+    expect(await artifactStamp(path)).not.toBe(read?.stamp);
+  });
+
+  it('a symlink in place of an artifact is refused, not followed', async () => {
+    const { symlink } = await import('node:fs/promises');
+    const real = join(dir, 'elsewhere.json');
+    const link = join(dir, 'linked.json');
+    await writeFile(real, '{"v":1}');
+    await symlink(real, link);
+    expect(await _readArtifactBoundedForTesting(link)).toBeNull();
+    expect(await readJsonArtifactCached(link, 'k', (p: unknown) => p)).toBeNull();
   });
 
   it('artifactStamp is null for an absent file rather than throwing', async () => {
@@ -264,12 +301,37 @@ describe('keyword search work is bounded by what the query can match', () => {
     expect(bm25CandidateDocs(corpus, ['oldtoken'])).toHaveLength(1);
   });
 
-  it('the keyword cache does not retain the embedding column', async () => {
+  it('every keyword-cache insertion strips the embedding column', async () => {
     const source = await readFile(join(SRC_ROOT, 'core/analyzer/vector-index.ts'), 'utf-8');
-    // Both cold-load sites must pass their rows through the stripper before caching.
-    const cachedLoads = source.match(/allRows = [\s\S]{0,200}?isRepoFunctionRow\)/g) ?? [];
-    expect(cachedLoads.length).toBeGreaterThan(0);
-    for (const load of cachedLoads) expect(load).toContain('withoutEmbeddingColumn');
+    // Every place rows are materialized from the table and then RETAINED must pass
+    // through the stripper — a guard covering only some of them would stay green while
+    // one path put vectors straight back into the cache.
+    const materializations = source.match(/(?:const rows|allRows) = [\s\S]{0,240}?isRepoFunctionRow\)/g) ?? [];
+    expect(materializations.length).toBeGreaterThanOrEqual(3);
+    for (const site of materializations) expect(site).toContain('withoutEmbeddingColumn');
+    // And the patch path, which splices caller-supplied rows into the same cache.
+    expect(source).toMatch(/patchBm25Corpus\([\s\S]{0,160}?withoutEmbeddingColumn\(newRows\)/);
+  });
+
+  // Regression: the postings index is keyed by document id, so a corpus with duplicate
+  // ids cannot be patched by id — removing one of the twins would delete the SURVIVOR
+  // from its terms. The guard that catches this must survive the patch, or the survivor
+  // silently disappears from keyword search for the life of the cache.
+  it('a corpus with duplicate document ids is not patched by id', () => {
+    const before = [
+      { id: 'X', filePath: 'a.ts', text: 'foo' },
+      { id: 'X', filePath: 'b.ts', text: 'foo' },
+      { id: 'Y', filePath: 'c.ts', text: 'bar' },
+    ];
+    const corpus = buildBm25Corpus(before.map(r => ({ id: r.id, text: r.text })));
+    bm25CandidateDocs(corpus, ['foo']);  // build the postings, duplicates and all
+
+    const patched = _patchBm25CorpusCarryingPostingsForTesting(corpus, before, new Set(['a.ts']), []);
+
+    const found = bm25CandidateDocs(patched, ['foo']);
+    const bruteForce = patched.docs.map((_, i) => i).filter(i => bm25Score(patched, ['foo'], i) > 0);
+    expect(found).toEqual(bruteForce);
+    expect(found.length).toBe(1);  // b.ts survived and is still findable
   });
 });
 
@@ -347,12 +409,27 @@ describe('per-file store reads are answered through the file_path index', () => 
     expect(store.getProvenanceForFiles(['a_b.ts'])).toEqual([]);
   });
 
-  it('one file out of many is answered without materializing the rest', () => {
+  it('one file out of many is answered without materializing the rest', async () => {
     store.insertProvenance(
       Array.from({ length: 5_000 }, (_, i) => provenanceFor(`src/gen/file-${i}.ts`)),
     );
     const rows = store.getProvenanceForFiles(['src/gen/file-4321.ts']);
     expect(rows.map(r => r.filePath)).toEqual(['src/gen/file-4321.ts']);
+
+    // Observable, not merely asserted by the title: the row fetch is answered from the
+    // primary key, and the pass that must scan reads only the indexed column.
+    const { DatabaseSync } = await import('node:sqlite');
+    const db = new DatabaseSync(join(dir, 'call-graph.db'), { readOnly: true });
+    try {
+      const planOf = (sql: string): string =>
+        (db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all() as unknown as Array<{ detail: string }>)
+          .map(r => r.detail).join(' | ');
+      expect(planOf('SELECT rowid AS __rowid, * FROM provenance WHERE file_path IN (?)'))
+        .toMatch(/USING (PRIMARY KEY|INDEX)/i);
+      expect(planOf('SELECT file_path FROM provenance')).toMatch(/COVERING INDEX/i);
+    } finally {
+      db.close();
+    }
   });
 
   it('change coupling answers the same way', () => {
@@ -372,7 +449,21 @@ describe('per-file store reads are answered through the file_path index', () => 
     expect(source).not.toContain("'SELECT * FROM change_coupling'");
   });
 
-  it('an id list larger than SQLite’s bound-variable ceiling is chunked, not rejected', () => {
+  it('both batch edge reads chunk their bound-parameter lists', async () => {
+    // Behavioural proof is not available here: this Node build's SQLite accepts far more
+    // bound parameters than the 999 of a pre-3.32 build, so an over-long IN list does not
+    // fail on this runtime. The chunking exists for the builds where it does, so pin it
+    // structurally — the way the repo pins its other portability invariants.
+    const source = await readFile(join(SRC_ROOT, 'core/services/edge-store.ts'), 'utf-8');
+    for (const method of ['getCalleesForIds', 'getCallersForIds']) {
+      const body = source.slice(source.indexOf(`${method}(`), source.indexOf(`${method}(`) + 700);
+      expect(body, `${method} must chunk its IN list`).toContain('chunkForSqlIn');
+    }
+    // And no unbounded id list is built anywhere in the file.
+    expect(source).not.toMatch(/ids\.map\(\(\) => '\?'\)/);
+  });
+
+  it('a graph-sized frontier is answered correctly in a single call', () => {
     const callerIds = Array.from({ length: 2_500 }, (_, i) => `src/f${i}.ts::fn${i}`);
     store.insertEdges(callerIds.map((callerId, i) => ({
       callerId,
@@ -410,10 +501,30 @@ describe('graph-walking tools do not rebuild adjacency per invocation', () => {
         if (/\bbuildAdjacency\s*\(/.test(body)) offenders.push(rel);
       }
     };
-    await walk('core');
+    await walk('.');
     expect(offenders).toEqual([]);
   });
 
+  it('weighted adjacency is memoized per call graph, and the memo equals a fresh build', async () => {
+    const { buildWeightedAdjacency, computeWeightedAdjacency } = await import('./graph.js');
+    const cg = {
+      nodes: [
+        { id: 'a::f', name: 'f', filePath: 'a.ts' },
+        { id: 'b::g', name: 'g', filePath: 'b.ts' },
+      ],
+      edges: [{ callerId: 'a::f', calleeId: 'b::g', calleeName: 'g', confidence: 'import', kind: 'calls' }],
+    } as never;
+
+    const first = buildWeightedAdjacency(cg);
+    expect(buildWeightedAdjacency(cg)).toBe(first);            // same object: not rebuilt
+    const fresh = computeWeightedAdjacency(cg);
+    expect(fresh).not.toBe(first);                              // …and the memo is not trivial
+    expect([...first.forward.entries()]).toEqual([...fresh.forward.entries()]);
+    expect([...first.backward.entries()]).toEqual([...fresh.backward.entries()]);
+  });
+
+  // Not a cache — config is re-read, never cached — so what this pins is that ONE orient
+  // does not parse .openlore/config.json three times, which is what it used to do.
   it('orient reads the repository config once per call', async () => {
     const source = await readFile(join(SRC_ROOT, 'core/services/mcp-handlers/orient.ts'), 'utf-8');
     const reads = source.match(/await readOpenLoreConfig\(/g) ?? [];

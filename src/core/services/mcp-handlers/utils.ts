@@ -19,7 +19,7 @@ import { ANALYSIS_AGE_WARNING_HOURS, ANALYSIS_STALE_THRESHOLD_MS, ARTIFACT_CALL_
 import { repairInBackground, type RepairReason } from '../cold-start-bootstrap.js';
 import { isConfinedPath } from '../../../utils/path-confinement.js';
 import { FileWalker } from '../../analyzer/file-walker.js';
-import { artifactStamp } from './artifact-cache.js';
+import { artifactStamp, readJsonArtifactCached, _resetJsonArtifactCacheForTesting } from './artifact-cache.js';
 
 /**
  * LLMContext with optional SQLite edge store attached (present when call-graph.db
@@ -804,84 +804,69 @@ export interface MappingIndex {
 }
 
 /**
- * Cache for mapping indices, keyed by directory path — and, since the entry also
- * carries the stamp of the `mapping.json` it was built from, invalidated whenever
- * that file moves underneath a long-lived server.
+ * Build the bidirectional index for one parsed `mapping.json`, or null when the
+ * artifact is not the shape this reads.
+ *
+ * Untrusted artifact: the top-level shape is validated before use. A malformed
+ * mapping (non-object, or no `mappings` array) fails closed.
  */
-const mappingCache = new Map<string, { stamp: string; index: MappingIndex }>();
+function buildMappingIndex(parsed: unknown): MappingIndex | null {
+  if (parsed === null || typeof parsed !== 'object' || !Array.isArray((parsed as { mappings?: unknown }).mappings)) {
+    return null;
+  }
+  const entries = (parsed as { mappings: MappingEntry[] }).mappings ?? [];
 
-/** Load and index mapping.json for bidirectional lookup. Returns null if not found. */
+  const byFile = new Map<string, MappingEntry[]>();
+  const byDomain = new Map<string, MappingEntry[]>();
+
+  for (const entry of entries) {
+    // index by domain
+    const domainList = byDomain.get(entry.domain) ?? [];
+    domainList.push(entry);
+    byDomain.set(entry.domain, domainList);
+
+    // index by each referenced file
+    for (const fn of entry.functions) {
+      if (!fn.file || fn.file === '*') continue;
+      const fileList = byFile.get(fn.file) ?? [];
+      // avoid duplicates (same requirement may appear multiple times per file)
+      if (!fileList.includes(entry)) fileList.push(entry);
+      byFile.set(fn.file, fileList);
+    }
+  }
+
+  return { byFile, byDomain, entries };
+}
+
+/**
+ * Load and index mapping.json for bidirectional lookup. Returns null if not found.
+ *
+ * Read through the shared stamp-keyed artifact cache. `mapping.json` is rewritten by
+ * an EXTERNAL process (`openlore generate`, `openlore mapping refresh`), so a
+ * directory-keyed cache made a rewrite invisible for the whole process lifetime and a
+ * daemon served the previous generation's spec links forever. The shared reader is
+ * also what bounds and identity-checks the read.
+ * (spec: ServingCachesInvalidateOnExternalAnalyze, change: optimize-serving-hot-path-caches)
+ *
+ * `retryCount` retries a transient read failure; a shape mismatch is not retried,
+ * because re-reading the same bytes cannot fix it.
+ */
 export async function loadMappingIndex(absDir: string, retryCount: number = 1): Promise<MappingIndex | null> {
   const mappingPath = join(absDir, '.openlore', 'analysis', 'mapping.json');
-  // Check cache first — but only against the artifact currently on disk. `mapping.json`
-  // is rewritten by an EXTERNAL process (`openlore generate` / `openlore mapping refresh`),
-  // so a directory-only key made a rewrite invisible for the whole process lifetime and a
-  // daemon served the previous generation's spec links forever.
-  // (spec: ServingCachesInvalidateOnExternalAnalyze, change: optimize-serving-hot-path-caches)
-  const cacheKey = absDir;
-  const stamp = await artifactStamp(mappingPath);
-  const cached = mappingCache.get(cacheKey);
-  if (cached && stamp !== null && cached.stamp === stamp) {
-    return cached.index;
+  for (let attempt = 1; ; attempt++) {
+    const index = await readJsonArtifactCached(mappingPath, 'mapping-index', buildMappingIndex);
+    if (index !== null) return index;
+    // Absent or malformed — nothing to retry against.
+    if (attempt >= retryCount || (await artifactStamp(mappingPath)) === null) return null;
+    await new Promise(resolve => setTimeout(resolve, Math.pow(2, attempt) * 100));
   }
-  if (stamp === null) mappingCache.delete(cacheKey);
-
-  const loadAttempt = async (attempt: number): Promise<MappingIndex | null> => {
-    try {
-      const raw = await readFile(mappingPath, 'utf-8');
-      const parsed: unknown = JSON.parse(raw);
-      // Untrusted artifact: validate top-level shape before use. A malformed
-      // mapping.json (non-object, or no `mappings` array) fails closed — retrying
-      // can't fix a shape mismatch, so return null directly.
-      if (parsed === null || typeof parsed !== 'object' || !Array.isArray((parsed as { mappings?: unknown }).mappings)) {
-        return null;
-      }
-      const data = parsed as { mappings: MappingEntry[] };
-      const entries = data.mappings ?? [];
-      
-      const byFile = new Map<string, MappingEntry[]>();
-      const byDomain = new Map<string, MappingEntry[]>();
-      
-      for (const entry of entries) {
-        // index by domain
-        const domainList = byDomain.get(entry.domain) ?? [];
-        domainList.push(entry);
-        byDomain.set(entry.domain, domainList);
-        
-        // index by each referenced file
-        for (const fn of entry.functions) {
-          if (!fn.file || fn.file === '*') continue;
-          const fileList = byFile.get(fn.file) ?? [];
-          // avoid duplicates (same requirement may appear multiple times per file)
-          if (!fileList.includes(entry)) fileList.push(entry);
-          byFile.set(fn.file, fileList);
-        }
-      }
-      
-      const result = { byFile, byDomain, entries };
-      // Cache against the stamp of the bytes actually parsed. Re-stamping here (rather
-      // than reusing the pre-read stamp) closes the window where the file was rewritten
-      // between the stat and the read: a mismatched stamp simply misses next time.
-      const readStamp = await artifactStamp(mappingPath);
-      if (readStamp !== null) mappingCache.set(cacheKey, { stamp: readStamp, index: result });
-      else mappingCache.delete(cacheKey);
-      return result;
-    } catch (error) {
-      if (attempt < retryCount && error instanceof Error) {
-        const delay = Math.pow(2, attempt) * 100; // Exponential backoff: 200ms, 400ms, 800ms...
-        await new Promise(resolve => setTimeout(resolve, delay));
-        return loadAttempt(attempt + 1);
-      }
-      return null;
-    }
-  };
-  
-  return loadAttempt(1);
 }
 
 /** Clear the mapping cache. Useful for tests to reset state. */
 export function clearMappingCache(): void {
-  mappingCache.clear();
+  // The mapping index now lives in the shared stamp-keyed artifact cache; clearing that
+  // is what resets it. Kept under its old name so existing callers and tests still work.
+  _resetJsonArtifactCacheForTesting();
 }
 
 /** Summarise which specs cover a given file path (for search_code enrichment). */

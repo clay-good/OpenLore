@@ -386,6 +386,13 @@ function patchBm25Postings(
   addedDocs: ReadonlyArray<Bm25Corpus['docs'][number]>,
   nextDocs: Bm25Corpus['docs'],
 ): Bm25Postings {
+  // A previous corpus with duplicate ids cannot be patched by id at all: removing one
+  // of two documents sharing an id would delete the SURVIVOR from its terms' posting
+  // sets, and recomputing `idsAreUnique` from the patched docs would then report the
+  // corrupted index as trustworthy. Rebuild instead — the case is degenerate, and a
+  // slow answer beats a document silently vanishing from search.
+  if (!previous.idsAreUnique) return buildBm25Postings({ docs: nextDocs } as Bm25Corpus);
+
   const byTerm = new Map(previous.byTerm);
   const cloned = new Set<string>();
   const mutableSet = (term: string): Set<string> | undefined => {
@@ -2238,6 +2245,10 @@ export class VectorIndex {
     query: string,
   ): Promise<KeywordMissDiagnostics> {
     const dbPath = dbPathFor(outputDir);
+    // Same cross-process coherence check `search` performs: readMeta invalidates the
+    // corpus and table handles when another process rewrote the index, so diagnostics
+    // never explain a miss against a corpus that no longer exists on disk.
+    readMeta(outputDir);
     let cachedEntry = _bm25Cache.get(dbPath);
 
     if (!cachedEntry) {

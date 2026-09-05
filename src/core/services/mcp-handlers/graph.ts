@@ -202,12 +202,39 @@ export interface WeightedReach {
   predecessor: string | null;
 }
 
+type WeightedAdjacency = {
+  forward: Map<string, Array<{ to: string; cost: number }>>;
+  backward: Map<string, Array<{ to: string; cost: number }>>;
+};
+
+/**
+ * Memoized per call-graph OBJECT, which is exactly per analysis version: the cached
+ * context holds one `callGraph` per artifact generation, and a new generation is a new
+ * object. Weighted adjacency is a pure function of that graph, so recomputing it per
+ * tool call — orient, blast_radius, find_path and analyze_impact each did — was an
+ * O(edges) rebuild of two full-graph maps that could only ever produce the same
+ * answer. Weak, so it is collected with the graph it describes.
+ * (spec: DerivedGraphStructuresAreMemoizedPerAnalysis, change: optimize-serving-hot-path-caches)
+ */
+const _weightedAdjacencyByGraph = new WeakMap<SerializedCallGraph, WeightedAdjacency>();
+
 /**
  * Build weighted forward/backward adjacency from `calls` edges, each weighted by
  * {@link callDistance}. External (Infinity-cost) edges are omitted so internal
  * scoping never routes through synthetic stdlib/HTTP leaves.
+ *
+ * The returned maps are SHARED across callers and must be treated as read-only.
  */
-export function buildWeightedAdjacency(cg: SerializedCallGraph) {
+export function buildWeightedAdjacency(cg: SerializedCallGraph): WeightedAdjacency {
+  const memo = _weightedAdjacencyByGraph.get(cg);
+  if (memo) return memo;
+  const built = computeWeightedAdjacency(cg);
+  _weightedAdjacencyByGraph.set(cg, built);
+  return built;
+}
+
+/** The uncached computation. Exported for the equivalence test, not for callers. */
+export function computeWeightedAdjacency(cg: SerializedCallGraph): WeightedAdjacency {
   const forward  = new Map<string, Array<{ to: string; cost: number }>>(); // callerId → callees
   const backward = new Map<string, Array<{ to: string; cost: number }>>(); // calleeId → callers
   for (const e of cg.edges) {
@@ -1323,8 +1350,9 @@ export async function handleGetFileDependencies(
 
   // One parse per version of the artifact, not one per call: returning a single file's
   // edges used to cost a full parse of a repo-sized dependency graph every invocation.
-  // Shares the `'raw'` derivation with orient's architecture-rule scan, so the artifact
-  // is parsed and retained once. (change: optimize-serving-hot-path-caches)
+  // Shares `readDependencyGraphCached` with orient's architecture-rule scan, so the
+  // artifact is parsed, validated and retained once for both.
+  // (change: optimize-serving-hot-path-caches)
   const graph = await readDependencyGraphCached<DepGraph>(depGraphPath);
   if (!graph) {
     return notReadyResult('No dependency graph found. Run "openlore analyze" first.', 'index-absent');
