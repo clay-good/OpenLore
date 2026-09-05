@@ -59,7 +59,7 @@ vi.mock('../../decisions/syncer.js', () => ({
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { DecisionStore, PendingDecision } from '../../../types/index.js';
 import {
@@ -321,6 +321,30 @@ describe('handleRecordDecision', () => {
     expect(result.consolidation).toBe('started');
     expect(result.message).toMatch(/running in background/i);
     expect(spawn).toHaveBeenCalledTimes(1);
+  });
+
+  it('never spawns a binary resolved from the analyzed tree', async () => {
+    // CodeQL js/command-line-injection (alert 554): rootPath is arbitrary caller input —
+    // validateDirectory proves only that it exists — so the consolidator must come from
+    // OpenLore's own installation. Plant both paths the old resolution preferred; neither
+    // may appear in the spawned command line.
+    const planted = [
+      join(tmpDir, 'node_modules', '.bin', 'openlore'),
+      join(tmpDir, 'dist', 'cli', 'index.js'),
+    ];
+    for (const p of planted) {
+      await mkdir(dirname(p), { recursive: true });
+      await writeFile(p, 'echo pwned', 'utf-8');
+    }
+
+    await handleRecordDecision(tmpDir, 'A decision', 'Some rationale');
+
+    expect(spawn).toHaveBeenCalledTimes(1);
+    const [cmd, args] = vi.mocked(spawn).mock.calls[0] as unknown as [string, string[]];
+    for (const token of [cmd, ...args]) {
+      expect(token).not.toContain(tmpDir);
+    }
+    expect(planted).not.toContain(cmd);
   });
 
   it('survives a failed spawn (ENOENT) and reports it honestly with a recovery command', async () => {

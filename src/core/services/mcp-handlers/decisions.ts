@@ -24,7 +24,7 @@ import { isDecisionsLockHeld } from '../../runtime/advisory-lock.js';
 import { buildSpecMap, matchFileToDomains } from '../../../core/drift/spec-mapper.js';
 import { AnchorContext } from '../../decisions/anchor-adapter.js';
 import { readOpenLoreConfig } from '../config-manager.js';
-import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { DecisionConstraintBlock, PendingDecision, DecisionScope } from '../../../types/index.js';
 import { decisionContentProvenance } from '../served-content.js';
 import {
@@ -58,17 +58,26 @@ async function spawnConsolidateBackground(rootPath: string): Promise<Consolidate
     return { outcome: 'coalesced' };
   }
 
-  // Resolve binary: prefer local build over global install (same order as pre-commit hook)
-  const localDist = join(rootPath, 'dist', 'cli', 'index.js');
-  const localBin = join(rootPath, 'node_modules', '.bin', 'openlore');
+  // Resolve the consolidator from OUR OWN installation, never from the analyzed tree.
+  // rootPath is an arbitrary caller-supplied directory — validateDirectory proves only
+  // that it exists and is a directory, not that it is trusted — so honouring
+  // <rootPath>/node_modules/.bin/openlore or <rootPath>/dist/cli/index.js would execute a
+  // binary chosen by the code under analysis. OpenLore is pointed at untrusted repositories
+  // by design; a static analyzer must not run what it is reading.
+  // (CodeQL js/command-line-injection, alert 554.)
+  //
+  // process.execPath and this module's own path are both fixed by how OpenLore itself was
+  // launched, so neither is reachable from tool input. Local-build dogfooding is preserved
+  // in the setup that matters: running the repo's own dist resolves ownCli to that dist.
+  const ownCli = fileURLToPath(new URL('../../../cli/index.js', import.meta.url));
   const { existsSync } = await import('node:fs');
   let cmd: string;
   let args: string[];
-  if (existsSync(localBin)) {
-    cmd = localBin; args = ['decisions', '--consolidate'];
-  } else if (existsSync(localDist)) {
-    cmd = process.execPath; args = [localDist, 'decisions', '--consolidate'];
+  if (existsSync(ownCli)) {
+    cmd = process.execPath; args = [ownCli, 'decisions', '--consolidate'];
   } else {
+    // Running from TypeScript source (vitest/tsx): no built sibling. PATH resolution is the
+    // operator's own environment, still never rootPath's.
     cmd = 'openlore'; args = ['decisions', '--consolidate'];
   }
 
