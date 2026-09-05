@@ -272,8 +272,9 @@ describe('per-file store reads are answered through the file_path index', () => 
     // The wanted path is longer: a stored path is its suffix.
     expect(store.getProvenanceForFiles(['/abs/repo/src/nested/b.ts']).map(r => r.filePath))
       .toEqual(['src/nested/b.ts']);
-    // The wanted path is shorter: it is a suffix of stored paths — BOTH match.
-    expect(store.getProvenanceForFiles(['a.ts']).map(r => r.filePath)).toEqual(['other/a.ts', 'src/a.ts']);
+    // The wanted path is shorter: it is a suffix of stored paths — BOTH match, in
+    // table order (src/a.ts was inserted first).
+    expect(store.getProvenanceForFiles(['a.ts']).map(r => r.filePath)).toEqual(['src/a.ts', 'other/a.ts']);
     // No match is empty, not everything.
     expect(store.getProvenanceForFiles(['src/missing.ts'])).toEqual([]);
     // An empty request short-circuits.
@@ -281,7 +282,29 @@ describe('per-file store reads are answered through the file_path index', () => 
     expect(store.getProvenanceForFiles([''])).toEqual([]);
   });
 
-  it('a path holding SQL LIKE wildcards matches literally', () => {
+  // Regression: an earlier form of the suffix predicate used SQL `LIKE`, which is
+  // ASCII-case-INSENSITIVE by default, so `get_change_coupling {file: "Utils.ts"}`
+  // silently answered with `src/utils.ts`'s record. Path matching is case-sensitive.
+  it('the suffix match is case-sensitive, like the comparator it replaced', () => {
+    store.insertProvenance(['src/Utils.ts'].map(provenanceFor));
+    expect(store.getProvenanceForFiles(['Utils.ts']).map(r => r.filePath)).toEqual(['src/Utils.ts']);
+    expect(store.getProvenanceForFiles(['utils.ts'])).toEqual([]);
+    expect(store.getProvenanceForFiles(['UTILS.TS'])).toEqual([]);
+    expect(store.getProvenanceForFiles(['src/utils.ts'])).toEqual([]);
+  });
+
+  // Callers take `records[0]` and `slice(0, 10)` from these lists, so the order the
+  // previous full-scan implementation returned (the table's own order) is observable.
+  it('rows come back in table order, not sorted by path', () => {
+    const inserted = ['src/z.ts', 'src/a.ts', 'src/m.ts'];
+    store.insertProvenance(inserted.map(provenanceFor));
+    expect(store.getProvenanceForFiles(inserted).map(r => r.filePath)).toEqual(inserted);
+    // A basename hint matching several rows keeps insertion order too.
+    store.insertProvenance(['b/dup.ts', 'a/dup.ts'].map(provenanceFor));
+    expect(store.getProvenanceForFiles(['dup.ts']).map(r => r.filePath)).toEqual(['b/dup.ts', 'a/dup.ts']);
+  });
+
+  it('a path holding SQL wildcard characters matches literally', () => {
     store.insertProvenance(['src/a%b.ts', 'src/axb.ts'].map(provenanceFor));
     expect(store.getProvenanceForFiles(['src/a%b.ts']).map(r => r.filePath)).toEqual(['src/a%b.ts']);
     expect(store.getProvenanceForFiles(['a_b.ts'])).toEqual([]);

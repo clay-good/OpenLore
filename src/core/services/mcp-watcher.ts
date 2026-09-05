@@ -1232,7 +1232,11 @@ export class McpWatcher {
       // (and recorded, so two events for the same new path still collapse to one
       // entry). (change: optimize-serving-hot-path-caches)
       const signatureIndex = new Map<string, number>();
-      for (let i = 0; i < loaded.signatures.length; i++) signatureIndex.set(loaded.signatures[i].path, i);
+      // First occurrence wins, exactly as the findIndex it replaces did, so a list that
+      // somehow holds duplicate paths is patched at the same position as before.
+      for (let i = 0; i < loaded.signatures.length; i++) {
+        if (!signatureIndex.has(loaded.signatures[i].path)) signatureIndex.set(loaded.signatures[i].path, i);
+      }
       for (const f of changedFiles) {
         const newMap = extractSignatures(f.rel, f.content);
         const idx = signatureIndex.get(f.rel);

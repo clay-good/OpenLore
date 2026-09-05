@@ -582,7 +582,9 @@ function patchBm25Cache(dbPath: string, changedFilePaths: Set<string>, newRows: 
   invalidateRepositoryVocabulary(dbPath);
   const entry = _bm25Cache.get(dbPath);
   if (!entry) return;
-  const patched = patchBm25Corpus(entry.corpus, entry.rows, changedFilePaths, newRows);
+  // Strip here too: otherwise the first incremental patch puts vector-bearing rows
+  // back into the cache the cold load had just cleaned.
+  const patched = patchBm25Corpus(entry.corpus, entry.rows, changedFilePaths, withoutEmbeddingColumn(newRows));
   _bm25Cache.set(dbPath, { corpus: patched.corpus, rowCount: patched.rows.length, rows: patched.rows });
 }
 
@@ -2110,7 +2112,9 @@ export class VectorIndex {
       const { connect } = await import('@lancedb/lancedb');
       const db = await connect(dbPath);
       const table = await db.openTable(TABLE_NAME);
-      const rows = (await table.query().toArray() as Record<string, unknown>[]).filter(isRepoFunctionRow);
+      const rows = withoutEmbeddingColumn(
+        (await table.query().toArray() as Record<string, unknown>[]).filter(isRepoFunctionRow),
+      );
       const corpus = loadOrBuildBm25Corpus(dbPath, rows);
       cachedEntry = { corpus, rowCount: rows.length, rows };
       _bm25Cache.set(dbPath, cachedEntry);

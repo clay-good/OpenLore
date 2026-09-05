@@ -1725,43 +1725,53 @@ function exactMatchCandidates(wanted: string): string[] {
   return [...out];
 }
 
-/** Escape a literal for use inside a SQL `LIKE` pattern with `ESCAPE '\'`. */
-function escapeLikeLiteral(value: string): string {
-  return value.replace(/[\\%_]/g, (ch) => `\\${ch}`);
-}
 
 /**
  * Rows of `table` whose `file_path` {@link pathsMatch} any of `files`, read through
  * the `file_path` primary-key index rather than by materializing the whole table.
  *
- * Ordered by `file_path` so the result is deterministic regardless of which of the
- * two predicates matched a row or how the rows were inserted.
+ * Two predicates, together exactly `pathsMatch`:
+ *  - an indexed `file_path IN (…)` over {@link exactMatchCandidates}, and
+ *  - a suffix test for the one case that cannot be enumerated — a stored path strictly
+ *    longer than the wanted one, of which the wanted one is a `/`-delimited suffix.
+ *
+ * The suffix test is `substr(file_path, -n) = ?`, NOT `LIKE '%/x'`: SQLite's `LIKE` is
+ * ASCII-case-INSENSITIVE by default, so a `LIKE` form would accept `src/Utils.ts` for a
+ * request for `utils.ts` — rows `pathsMatch` rejects. `substr` compares with the
+ * column's BINARY collation, which is what `pathsMatch` does.
+ *
+ * Rows come back in the table's own `rowid` order, the order the previous full-scan
+ * implementation returned them in. Callers take `records[0]` and `slice(0, 10)` from
+ * these lists, so the order is observable and is preserved deliberately.
  */
 function selectRowsForFiles<T>(db: DatabaseSync, table: 'provenance' | 'change_coupling', files: string[]): T[] {
   const wanted = files.filter(Boolean);
   if (wanted.length === 0) return [];
 
-  const byPath = new Map<string, T>();
+  const byPath = new Map<string, { rowid: number; row: T }>();
   const collect = (rows: unknown[]): void => {
-    for (const row of rows as Array<T & { file_path: string }>) byPath.set(row.file_path, row);
+    for (const raw of rows as Array<T & { file_path: string; __rowid: number }>) {
+      const { __rowid, ...row } = raw;
+      byPath.set(raw.file_path, { rowid: __rowid, row: row as unknown as T });
+    }
   };
 
   const candidates = [...new Set(wanted.flatMap(exactMatchCandidates))];
   for (const chunk of chunkForSqlIn(candidates)) {
     const placeholders = chunk.map(() => '?').join(',');
-    collect(db.prepare(`SELECT * FROM ${table} WHERE file_path IN (${placeholders})`).all(...chunk));
+    collect(db.prepare(`SELECT rowid AS __rowid, * FROM ${table} WHERE file_path IN (${placeholders})`).all(...chunk));
   }
 
-  // The remaining case: a stored path strictly longer than the wanted one, of which
-  // the wanted one is a '/'-delimited suffix. Not index-answerable (leading wildcard),
-  // but still a single-column scan rather than a full row materialization.
-  const suffixPatterns = [...new Set(wanted.map((f) => `%/${escapeLikeLiteral(f.replace(/^\/+/, ''))}`))];
-  for (const chunk of chunkForSqlIn(suffixPatterns)) {
-    const predicate = chunk.map(() => `file_path LIKE ? ESCAPE '\\'`).join(' OR ');
-    collect(db.prepare(`SELECT * FROM ${table} WHERE ${predicate}`).all(...chunk));
+  // Not index-answerable (the match is on a suffix), but still a single-column scan
+  // rather than a full row materialization plus an O(rows x files) JS filter.
+  const suffixes = [...new Set(wanted.map((f) => `/${f.replace(/^\/+/, '')}`))];
+  for (const chunk of chunkForSqlIn(suffixes)) {
+    const predicate = chunk.map(() => 'substr(file_path, -length(?)) = ?').join(' OR ');
+    const params = chunk.flatMap((suffix) => [suffix, suffix]);
+    collect(db.prepare(`SELECT rowid AS __rowid, * FROM ${table} WHERE ${predicate}`).all(...params));
   }
 
-  return [...byPath.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)).map(([, row]) => row);
+  return [...byPath.values()].sort((a, b) => a.rowid - b.rowid).map(({ row }) => row);
 }
 
 /** Tolerant path equality: exact, or one path is a suffix of the other. */
