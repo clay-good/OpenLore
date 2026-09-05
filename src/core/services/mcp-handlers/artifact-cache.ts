@@ -93,19 +93,45 @@ export interface StampedArtifact {
  *    plus a pre/post identity check, cannot mis-attribute that way.
  *  - **No symlink, no special file.** A symlink committed into `.openlore/analysis/`
  *    must not redirect the read, and a FIFO must not stall the handler. `O_NOFOLLOW`
- *    is the race-free form and is what POSIX honours; libuv does NOT implement it on
- *    Windows, where the flag is silently ignored and the link is followed. So the
- *    check is also made explicitly with `lstat` — a check-then-open, and therefore
- *    not race-free, but the difference between refusing a symlink and following one.
- *    The `isFile` check on the open descriptor rejects FIFOs and directories.
+ *    is the race-free form and is what POSIX honours, but libuv does NOT implement it
+ *    on Windows: there the flag is silently ignored and the link is followed. So the
+ *    open is also VERIFIED afterwards — the descriptor's identity is compared against
+ *    the path entry's, and a path that is a link (or resolves to a different inode
+ *    than the descriptor holds) is refused. Verifying after the open rather than
+ *    checking before it is what makes this sound: the bytes come from the descriptor,
+ *    so an entry swapped after the open cannot redirect the read, and an entry that
+ *    was already a link is caught. The `isFile` check on the descriptor rejects FIFOs
+ *    and directories.
  */
+/**
+ * Whether the open descriptor is the very entry `path` names, rather than something a
+ * link at that path pointed to.
+ *
+ * A comparison, not a pre-flight check: the caller already holds the descriptor it will
+ * read from, so this can only ever reject a read — it cannot be raced into accepting a
+ * substituted file. `lstat` describes the path entry without following it, so a link
+ * reports `isSymbolicLink()`, and where a platform reports usable inode numbers a
+ * mismatch catches the case regardless.
+ */
+async function descriptorIsThePathEntry(handle: FileHandle, path: string): Promise<boolean> {
+  try {
+    const entry = await lstat(path, { bigint: true });
+    if (entry.isSymbolicLink()) return false;
+    const held = await handle.stat({ bigint: true });
+    if (entry.ino === 0n || held.ino === 0n) return true;  // platform reports no usable inode
+    return entry.ino === held.ino && entry.dev === held.dev;
+  } catch {
+    return false;
+  }
+}
+
 async function readArtifactBounded(path: string): Promise<StampedArtifact | null> {
   let handle: FileHandle | undefined;
   try {
-    if ((await lstat(path)).isSymbolicLink()) return null;
     handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
     const opened = await handle.stat({ bigint: true });
     if (!opened.isFile() || opened.size > BigInt(MAX_ARTIFACT_BYTES)) return null;
+    if (!(await descriptorIsThePathEntry(handle, path))) return null;
 
     const chunks: Buffer[] = [];
     let total = 0;
