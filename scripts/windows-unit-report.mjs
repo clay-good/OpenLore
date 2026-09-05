@@ -8,6 +8,12 @@
  *   1. a failing file that is NOT on the list is a NEW Windows regression → fail;
  *   2. a listed file with zero failures has been fixed → fail, so the entry must be deleted.
  *
+ * An entry marked `flaky: true` is exempt from BOTH rules and merely reported. A file that
+ * oscillates run to run cannot satisfy either one — listed and passing trips rule 2, unlisted and
+ * failing trips rule 1 — so without this a single unstable file would fail the build whichever way
+ * it was recorded. The flag is a last resort, not a mute button: it demands observed evidence in
+ * the entry's reason, it prints on every run, and it is tracked as a bug to fix.
+ *
  * Rule 2 is what keeps the list a shrinking backlog rather than a permanent hole. Rule 1 is what
  * makes the job a real gate: without it, the deny-list would be the only thing under test.
  *
@@ -76,17 +82,32 @@ for (const [file, count] of failuresByFile) {
   if (count > 0 && !excluded.has(file)) regressions.push({ file, count });
 }
 
-const fixed = exclusions.filter((entry) => (failuresByFile.get(entry.file) ?? 0) === 0);
+const flaky = exclusions.filter((entry) => entry.flaky);
+const fixed = exclusions.filter(
+  (entry) => !entry.flaky && (failuresByFile.get(entry.file) ?? 0) === 0,
+);
 
 const total = report.numTotalTests ?? 0;
 const failed = report.numFailedTests ?? 0;
-const stillFailing = exclusions.length - fixed.length;
+const stillFailing = exclusions.filter(
+  (entry) => !entry.flaky && (failuresByFile.get(entry.file) ?? 0) > 0,
+).length;
 const filesRun = failuresByFile.size;
 process.stdout.write(
   `windows-unit-report: ${total - failed}/${total} tests passed across ${filesRun} files; ` +
-    `${stillFailing} of ${exclusions.length} deny-listed files still failing, ` +
-    `${regressions.length} new.\n`,
+    `${stillFailing} of ${exclusions.length - flaky.length} deny-listed files still failing, ` +
+    `${flaky.length} tolerated flaky, ${regressions.length} new.\n`,
 );
+
+// Reported every run, passing or failing, so a tolerated flake stays visible rather than becoming
+// invisible permanent debt.
+for (const entry of flaky) {
+  const count = failuresByFile.get(entry.file) ?? 0;
+  process.stdout.write(
+    `windows-unit-report: flaky (tolerated, tracked): ${entry.file} — ` +
+      `${count === 0 ? 'passed' : `${count} failing`} this run.\n`,
+  );
+}
 
 if (regressions.length > 0) {
   die(

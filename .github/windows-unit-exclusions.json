@@ -17,6 +17,7 @@
     "the product PERSISTS or SERVES (an artifact, a spec reference, a generated path) rather than",
     "inside a test expectation. Those are portability questions about the artifact, not test bugs,",
     "and are tracked separately.",
+    "`flaky: true` marks an entry that is NOT deterministically failing \u2014 it is exempt from both rules, because a file that oscillates would otherwise fail the build whichever list it sits on. It is a last resort: it needs observed evidence in its reason, it is reported on every run so it stays visible, and it belongs in the backlog issue as a bug to fix rather than a state to keep.",
     "",
     "Backlog tracked in https://github.com/clay-good/OpenLore/issues/452"
   ],
@@ -217,7 +218,8 @@
     {
       "file": "src/core/drift/git-diff-corpus-materialization.test.ts",
       "failingTests": 1,
-      "reason": "rejects invalid UTF-8 corpus bytes: passes when run alone, fails in the full suite \u2014 a run-context dependency, not a clean platform failure"
+      "reason": "FLAKY on Windows, not deterministically failing: observed passing, then failing on 'rejects invalid UTF-8 corpus bytes', then passing across three consecutive CI runs of the same tree, and failing with ENOENT in an earlier probe. Reads a `git cat-file --batch` child's stdout, so a stream race is the likely cause. Not root-caused: needs a Windows machine to debug, not a 12-minute CI cycle.",
+      "flaky": true
     },
     {
       "file": "src/core/drift/spec-mapper.test.ts",

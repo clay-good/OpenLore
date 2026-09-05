@@ -26,6 +26,13 @@ Nothing is filtered out of the run. The whole suite executes, and
 The first rule makes the job a real gate; without it the deny-list would be the only thing under
 test. The second keeps the list a shrinking backlog rather than a permanent hole.
 
+An entry marked `flaky: true` is exempt from both rules and merely reported. A file that oscillates
+run to run cannot satisfy either — listed and passing trips the second rule, unlisted and failing
+trips the first — so one unstable file would otherwise fail the build whichever way it was recorded.
+The flag is a last resort rather than a mute button: it requires observed evidence in the entry's
+reason, it prints on every run, and it is tracked as a bug to fix. Exactly one entry carries it
+today.
+
 Judging one run matters. An earlier version excluded the listed files and re-ran them separately,
 and the two runs disagreed immediately: one file passed alone and failed in the full suite. A test's
 outcome can depend on what runs beside it, so two contexts can each be right and still contradict
