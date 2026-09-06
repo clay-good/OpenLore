@@ -215,7 +215,8 @@ describe('analysis ownership — reclamation', () => {
 // PROGRESS AND HEARTBEAT
 // ============================================================================
 
-describe('analysis ownership — progress sidecar', () => {  // skipIf(win32): creating a symlink there needs elevated privileges or Developer Mode,
+describe('analysis ownership — progress sidecar', () => {
+  // skipIf(win32): creating a symlink there needs elevated privileges or Developer Mode,
   // so this cannot build the premise it asserts about and would test a plain file instead.
   // What it guards is platform-independent and is exercised on Linux.
 
@@ -253,7 +254,8 @@ describe('analysis ownership — progress sidecar', () => {  // skipIf(win32): 
     expect(held.state).toBe('owned');
     await new Promise(resolve => setTimeout(resolve, 100));
     expect(await readFile(victim, 'utf8')).toBe('SAFE');
-  });  // skipIf(win32): creating a symlink there needs elevated privileges or Developer Mode,
+  });
+  // skipIf(win32): creating a symlink there needs elevated privileges or Developer Mode,
   // so this cannot build the premise it asserts about and would test a plain file instead.
   // What it guards is platform-independent and is exercised on Linux.
 
@@ -393,7 +395,11 @@ describe('analysis ownership — progress sidecar', () => {  // skipIf(win32): 
 
 /** Run a snippet in a real child process against this module. */
 function runChild(source: string): ReturnType<typeof spawn> {
-  const modulePath = new URL('./analysis-ownership.ts', import.meta.url).pathname;
+  // The URL's `href`, not its `pathname`: this string is interpolated into a dynamic `import()`
+  // in the child, and on Windows a pathname is `/D:/a/...` — an invalid specifier there, so the
+  // child died before it could take ownership and the parent read the failure as "never owned".
+  // A `file://` URL is a valid import specifier on every platform.
+  const modulePath = new URL('./analysis-ownership.ts', import.meta.url).href;
   return spawn(
     process.execPath,
     ['--import', 'tsx', '--input-type=module', '-e', source.replace('__MODULE__', modulePath)],

@@ -155,8 +155,15 @@ const isRenameContention = (err: unknown): boolean => {
  */
 const sleepMs = (ms: number): Promise<void> => new Promise((resolve) => { setTimeout(resolve, ms); });
 
-/** {@link rename}, retried while the destination is briefly held by another handle. */
-async function renameWithContentionRetry(tmp: string, path: string): Promise<void> {
+/**
+ * {@link rename}, retried while the destination is briefly held by another handle.
+ *
+ * Exported because it is not specific to this store: any write-temp-then-rename publish has the
+ * same Windows failure mode, and a second copy of the ladder would drift from the one that was
+ * actually measured. The analysis progress sidecar publishes that way under concurrency and hit
+ * exactly this `EPERM`.
+ */
+export async function renameWithContentionRetry(tmp: string, path: string): Promise<void> {
   const delays = renameRetryDelaysMs();
   for (let attempt = 0; ; attempt++) {
     try {

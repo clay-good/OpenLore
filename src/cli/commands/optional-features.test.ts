@@ -10,6 +10,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import {
   installCommandFor,
   loadMcpSdk,
@@ -107,7 +108,10 @@ describe('optional dependency placement', () => {
     const pkg = JSON.parse(await readFile(new URL('../../../package.json', import.meta.url), 'utf8')) as {
       dependencies: Record<string, string>;
     };
-    const srcDir = new URL('../../', import.meta.url).pathname;
+    // `fileURLToPath`, not `.pathname`: on Windows a file URL's pathname is `/D:/a/...`, and
+    // `readdirSync` resolves that leading slash against the current drive — the observed failure
+    // was `scandir 'D:\D:\a\OpenLore\OpenLore\src\'`.
+    const srcDir = fileURLToPath(new URL('../../', import.meta.url));
     const sources = await Promise.all(audit.collectSources(srcDir).map(file => readFile(file, 'utf8')));
 
     expect(audit.findUnreferencedDependencies(Object.keys(pkg.dependencies), sources)).toEqual([]);

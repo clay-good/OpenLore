@@ -48,11 +48,6 @@
       "reason": "real-filesystem fixture: POSIX-only shim, exec bit, or temp-dir teardown semantics"
     },
     {
-      "file": "src/cli/commands/optional-features.test.ts",
-      "failingTests": 1,
-      "reason": "real-filesystem fixture: POSIX-only shim, exec bit, or temp-dir teardown semantics"
-    },
-    {
       "file": "src/cli/commands/serve-descriptor.test.ts",
       "failingTests": 2,
       "reason": "POSIX-specific fixture or assertion"
@@ -108,11 +103,6 @@
       "file": "src/core/generator/openspec-writer.test.ts",
       "failingTests": 2,
       "reason": "POSIX-specific fixture or assertion"
-    },
-    {
-      "file": "src/core/runtime/analysis-ownership.test.ts",
-      "failingTests": 2,
-      "reason": "real-filesystem fixture: POSIX-only shim, exec bit, or temp-dir teardown semantics"
     },
     {
       "file": "src/core/runtime/generation-core.test.ts",

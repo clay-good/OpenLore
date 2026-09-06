@@ -23,7 +23,8 @@
  */
 
 import { statSync, unlinkSync } from 'node:fs';
-import { open, readFile, rename, mkdir, unlink } from 'node:fs/promises';
+import { open, readFile, mkdir, unlink } from 'node:fs/promises';
+import { renameWithContentionRetry } from '../decisions/atomic-store.js';
 import { dirname, join } from 'node:path';
 import { Worker } from 'node:worker_threads';
 import { randomUUID } from 'node:crypto';
@@ -164,7 +165,11 @@ async function writeProgress(progressPath: string, progress: AnalysisProgress): 
     } finally {
       await handle.close();
     }
-    await rename(tmp, progressPath);
+    // Through the shared, measured retry ladder — not a bare rename. On Windows ANY open
+    // descriptor on the destination blocks the replace, and this sidecar is republished on every
+    // stage update: 100 concurrent updates raised `EPERM: operation not permitted, rename` there,
+    // which is precisely the "no temp-file collisions or torn lock JSON" promise this write makes.
+    await renameWithContentionRetry(tmp, progressPath);
     renamed = true;
   } finally {
     if (!renamed) await unlink(tmp).catch(() => {});
