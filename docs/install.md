@@ -139,7 +139,7 @@ caches. Requires Pi ≥ 0.78.1 and one `openlore analyze` beforehand. Full detai
 `openlore install` wires **one** gate: the decisions commit gate, in non-blocking **autopilot**
 mode (`governance.autopilot: true`). Verified architectural decisions are recorded and synced to
 specs at commit time, and no commit is ever blocked by it. That is what makes one command yield
-both faces — navigation and a decision trail. Set `governance.autopilot: false` before installing
+structural navigation *and* a decision trail. Set `governance.autopilot: false` before installing
 to keep the gate in blocking human-review mode instead; an explicit `false` is never flipped.
 
 Every other git hook below is installed explicitly and is advisory by default. All of them coexist
