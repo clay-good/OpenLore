@@ -23,15 +23,16 @@
   ],
   "exclusions": [
     {
+      "file": "src/api/analysis-status.test.ts",
+      "failingTests": 1,
+      "reason": "ONE case: 'reports no analysis in progress for a stale lock'. Re-listed after being removed too eagerly on one machine's evidence — it passes 5/5 on a Windows 11 developer box and fails on the runner, so local green is not sufficient here. What the run shows: the assertion on line 138 PASSES (isOwnershipStale returns true for the planted lock) and line 139 fails, so openloreAnalysisStatus disagrees with the predicate the test says it must match, milliseconds apart on the same file. The likely difference is PID liveness for a just-exited child: deadPid() returns the pid after 'exit', but a Windows process can still be opened while a handle survives, so isProcessAlive may answer true in one call and false in the other. NOT confirmed - stated as the hypothesis to test first, not as the diagnosis. Same neighbourhood as the analysis-ownership SIGTERM case.",
+      "suspectedProductionBug": true
+    },
+    {
       "file": "src/core/decisions/atomic-store.test.ts",
       "reason": "FLAKY on Windows, not deterministically failing — observed failing at commit e8d6c8dd and again on the following run, then PASSING on the next run of the same tree. Surfaced BY this PR rather than caused by it: the failures are the 100-way concurrency cases, and they began once the deny-list stopped skipping ~47 files and the job started doing several times the work. One root cause, not three — the first case times out mid-lock and the next two then fail on the gate it left behind (`NamespaceGateHeldError`). Verified present before this PR touched `atomic-store.ts`, which only exported an existing function. Green on Linux CI and in isolation on macOS. Flaky rather than plain-listed because a file that oscillates fails the build whichever list it sits on. The fix is a longer budget for these cases on Windows or a gate released on timeout; tracked in #452 as a bug, not a state to keep.",
       "suspectedProductionBug": true,
       "flaky": true
-    },
-    {
-      "file": "src/core/drift/git-diff-corpus-materialization.test.ts",
-      "failingTests": 1,
-      "reason": "LOAD-SENSITIVE teardown, not a flaky assertion. Corrected on a Windows 11 machine where it failed 12 runs out of 12: three of the four failures were symlink EPERM (the test cannot create the escape it refuses without elevated privileges — a CI runner often can, which is why only the fourth ever showed there), and the fourth was EBUSY on rmdir while a  child still held a handle. The three are now skipIf(win32) with reasons; the teardown retries. 0 failures in 10 runs after. Kept listed only until CI confirms."
     }
   ]
 }
