@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import type { CallEdge, FunctionNode, ClassNode, InheritanceEdge } from '../analyzer/call-graph.js';
+import { EDGE_CONFIDENCE_VALUES } from '../analyzer/call-graph-types.js';
 import type { FunctionCfg } from '../analyzer/cfg.js';
 import type { DecisionNode, DecisionAffectsEdge } from '../decisions/project.js';
 import type { FileProvenance } from '../provenance/git-provenance.js';
@@ -160,8 +161,18 @@ async function runTransactionAsync<T>(db: DatabaseSync, fn: () => Promise<T>): P
   }
 }
 
-/** Bump when schema changes. Old DBs are dropped and rebuilt on next analyze --force. */
-export const SCHEMA_VERSION = 11;
+/**
+ * Bump when schema changes. Old DBs are dropped and rebuilt on next analyze --force.
+ *
+ * v12 adds no column — it marks the `receiver_inferred` confidence value (change:
+ * shrink-receiver-resolution-boundary). `edges.confidence` is an unconstrained TEXT column, so a
+ * NEWER database opened by an OLDER OpenLore would otherwise pass the version gate and then have
+ * every `receiver_inferred` row silently dropped by that build's validator — and, worse, an
+ * `.olbundle` import would recompute its digest through the same dropping reader and reject a
+ * perfectly valid bundle as TAMPERED. A version bump turns both into the honest
+ * `schema-mismatch` + rebuild path this store already documents.
+ */
+export const SCHEMA_VERSION = 12;
 
 /**
  * Bound on the number of bound parameters in one generated `IN (…)` list.
@@ -1814,10 +1825,7 @@ function rawToDecisionNode(r: RawDecision): DecisionNode {
   };
 }
 
-const EDGE_CONFIDENCES = new Set<CallEdge['confidence']>([
-  'self_cls', 'type_inference', 'import', 're_export', 'http_endpoint',
-  'same_file', 'name_only', 'type_name', 'synthesized', 'external',
-]);
+const EDGE_CONFIDENCES = EDGE_CONFIDENCE_VALUES;
 const EDGE_KINDS = new Set<NonNullable<CallEdge['kind']>>([
   'calls', 'overrides', 'tested_by', 'references', 'depends_on',
   'affects', 'authored_by', 'changed_in_pr',

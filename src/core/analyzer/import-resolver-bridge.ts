@@ -53,6 +53,22 @@ export const GO_IMPORT_PACKAGE_PREFIX = '\0go-package:';
 
 /** Reserved metadata entry mapping a source-level qualifier to its declared type name. */
 export const IMPORT_QUALIFIER_PREFIX = '\0qualifier:';
+
+/**
+ * Key prefix marking a name the file imports from a specifier this map could NOT resolve to an
+ * in-project file — a package, or a path alias (change: shrink-receiver-resolution-boundary).
+ *
+ * The source STATES where that name comes from, and it is not here. Without this, a consumer that
+ * only checks "did the map bind it?" cannot tell "not imported at all" from "imported from
+ * somewhere I cannot see", and binds `import { Client } from 'pg'` to an in-project class that
+ * happens to share the name and the method. `\0`-prefixed like the other reserved keys, so it can
+ * never collide with a real identifier.
+ */
+export const EXTERNAL_IMPORT_PREFIX = '\0external:';
+
+/** Conventional directories a package root sits under, stripped when deciding whether an absolute
+ *  import names an in-project module. Declared and shallow — see {@link EXTERNAL_IMPORT_PREFIX}. */
+const PACKAGE_ROOT_PREFIXES = ['src/', 'lib/', 'app/'] as const;
 export const IMPORT_TOP_LEVEL_QUALIFIER = '\0top-level';
 
 type TargetIndex = Map<string, Set<string>>;
@@ -533,6 +549,31 @@ export function buildResolvedImportMap(
 
   const map: ImportMap = buildStaticLanguageImportMaps(files);
   const reExported = new Set<string>();
+  // Extensionless paths of every file in the analysis, so a Python absolute import can be told
+  // apart from a third-party one (`from repo import Repo` vs `from psycopg import Client`).
+  const projectModules = new Set<string>();
+  const addModulePath = (path: string): void => {
+    projectModules.add(path);
+    // An absolute import is written relative to the PACKAGE root, not the repository root:
+    // `src/myapp/models.py` is imported as `myapp.models`, and the `src/` layout is the
+    // packaging default for a large share of Python projects. Matching only the full path would
+    // refuse every intra-project import in them — with a message claiming the source said the
+    // type was elsewhere, which would be false.
+    //
+    // The prefix list is DECLARED and shallow on purpose. Registering every path suffix instead
+    // would make any file whose basename collides with a real module look in-project — a
+    // `vendor/shims/logging.py` would vouch for `import logging` — which reopens exactly the
+    // namesake door this marker exists to close.
+    for (const prefix of PACKAGE_ROOT_PREFIXES) {
+      if (path.startsWith(prefix)) projectModules.add(path.slice(prefix.length));
+    }
+  };
+  for (const f of files) {
+    // `stripModuleExt` knows only the TS/JS extensions; a Python module path needs `.py` off too.
+    addModulePath(stripModuleExt(f.path).replace(/\.py$/, ''));
+    // A package import (`from pkg import X`) reaches `pkg/__init__.py`.
+    if (f.path.endsWith('/__init__.py')) addModulePath(f.path.slice(0, -'/__init__.py'.length));
+  }
   for (const f of files) {
     let imports;
     const tsjs = f.language === 'TypeScript' || f.language === 'JavaScript';
@@ -543,7 +584,33 @@ export function buildResolvedImportMap(
     const fileMap = new Map<string, string>();
     const dir = posix.dirname(f.path);
     for (const imp of imports) {
-      if (!imp.isRelative) continue;
+      if (!imp.isRelative) {
+        // A non-relative specifier is not automatically third-party. In TS/JS a bare specifier
+        // resolves through node_modules (or a path alias this map cannot follow), so the name is
+        // NOT from this project. In Python an absolute import is the ordinary way to reach a
+        // sibling package, so it is external only when no project file matches the dotted module.
+        // Recording which names arrive from an unresolvable specifier lets a consumer REFUSE
+        // instead of falling back to a repo-wide namesake, which the source has just contradicted
+        // (change: shrink-receiver-resolution-boundary). No binding is recorded either way —
+        // there is no in-project target to bind to.
+        const pythonModule = f.language === 'Python'
+          ? imp.source.replaceAll('.', '/')
+          : undefined;
+        // A path ALIAS (`@/repo`, `~/lib`, `#internal`) is an in-project specifier this map
+        // simply cannot follow — the source did NOT say the type is external, so refusing on it
+        // would be a false claim and would cost every aliased repo its chained-receiver recall.
+        //
+        // The leading `@` alone does NOT mean alias: `@nestjs/common` is a scoped PACKAGE, and
+        // treating it as in-project restores exactly the false edge this marker exists to stop.
+        // The alias convention has an EMPTY scope segment (`@/`); a scoped package names one.
+        const aliased = !pythonModule && /^(?:@\/|~\/|~$|#)/.test(imp.source);
+        if (!aliased && (!pythonModule || !projectModules.has(pythonModule))) {
+          for (const name of imp.importedNames) {
+            fileMap.set(`${EXTERNAL_IMPORT_PREFIX}${name}`, imp.source);
+          }
+        }
+        continue;
+      }
       // Python relative imports use leading-dot module syntax (`from .impl import x`,
       // `from ..pkg.mod import y`) — N dots = package levels up (1 = current), the rest
       // is a dotted path. posix.join would treat `.impl` as a filename, so resolve the

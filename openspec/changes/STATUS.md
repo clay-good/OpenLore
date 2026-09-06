@@ -36,12 +36,16 @@ validate`**, and the archive machinery works again. This pass:
 Everything in `openspec/changes/archive/` is shipped (or a settled won't-do), with its
 requirements reflected in the main specs. `openspec list` shows only open work.
 
-## In flight — 0
+## In flight — 1
 
-No open change has partial code on `main`. A change belongs here the moment its implementation
-starts; move it back out (archive it) the moment its marker/spec evidence lands.
+`shrink-receiver-resolution-boundary` — chained intra-object receiver resolution
+(`this.<field>.m()` / `self.<field>.m()`), on a branch with its `change:` markers in `src/`. Archive
+it the moment it merges.
 
-## To build — 104
+A change belongs here the moment its implementation starts; move it back out (archive it) the
+moment its marker/spec evidence lands.
+
+## To build — 103
 
 The whole open set is unbuilt backlog. Newest additions: 7 proposals from the 2026-07-27
 first-run e2e (`E2E-FIRSTRUN-2026-07-27.md`). Other thematic indexes:
@@ -174,7 +178,6 @@ trust boundary for served content.
 | `refine-public-surface-certification` | rule codes + semver bump, an accepted-breakage baseline, consumer-weighted verdicts |
 | `resolve-literal-reflective-dispatch` | recover the *structurally* decidable subset, and refuse the rest loudly |
 | `scale-analyze-to-workspace-shards` | a monorepo stops paying for the whole repo on every analyze |
-| `shrink-receiver-resolution-boundary` | Shrink the intra-object receiver boundary with deterministic per-file type registries |
 | `shrink-traversal-index-invalidation-scope` | The traversal structure is invalidated by edits it does not depend on |
 | `unify-onboarding-entrypoint` | install once, auto-init on every repo you touch |
 | `widen-architecture-rule-vocabulary` | required, circular, reachable/orphan, captures, instability |

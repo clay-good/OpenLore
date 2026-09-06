@@ -82,13 +82,14 @@ interface Result {
   unsupported?: boolean;
   error?: string;
   candidates?: string[];
-  summary: { escapes: number; direct: number; propagated: number; handledInternally: number; unresolvedSelfCalls: number; ambiguousCallSites: number };
+  summary: { escapes: number; direct: number; propagated: number; handledInternally: number; unresolvedSelfCalls: number; untypedReceiverCalls: number; ambiguousCallSites: number };
   escapes: Array<{ type: string; kind: string; originFunction: string; path: string[] }>;
   handledInternally: Array<{ type: string; caughtIn: string; fromCallee: string }>;
   boundaries: string[];
   dynamicBoundaries?: { kind: string; count: number; sites?: Array<{ file: string; line: number; kind: string }>; detail: string };
   externalCalleesNotAnalyzed?: { count: number; sample: string[] };
   unresolvedSelfCalls?: { count: number; sample: string[] };
+  untypedReceiverCalls?: { count: number; sample: string[] };
   ambiguousCallSites?: { count: number; sample: string[] };
 }
 
@@ -466,6 +467,55 @@ describe('handleAnalyzeErrorPropagation — unresolved intra-object call disclos
     expect(res.summary.unresolvedSelfCalls).toBe(0);
     expect(res.unresolvedSelfCalls).toBeUndefined();
     expect(res.escapes.some(e => e.type === 'TypeError')).toBe(true);
+  });
+});
+
+describe('handleAnalyzeErrorPropagation — chained intra-object receiver disclosure', () => {
+  // change: shrink-receiver-resolution-boundary. `this.<field>.m()` used to produce no edge AND
+  // no disclosure, so a clean escape set silently covered it. It must now be either analyzed
+  // (the registry typed the receiver) or disclosed under its OWN boundary — the callee's
+  // provenance is unknown here, which is a different claim from "in-project but unreached".
+  let d: string;
+  const UNTYPED = `class K {\n  untyped() {\n    this.dep.run();\n  }\n}\n`;
+  const TYPED = `class K {\n  typed() {\n    this.dep.run();\n  }\n}\n`;
+  const DEP = `class Dep {\n  run() {\n    throw new TypeError("boom");\n  }\n}\n`;
+
+  beforeEach(() => {
+    d = mkdtempSync(join(tmpdir(), 'errprop-chained-'));
+    writeFileSync(join(d, 'untyped.ts'), UNTYPED, 'utf-8');
+    writeFileSync(join(d, 'typed.ts'), TYPED, 'utf-8');
+    writeFileSync(join(d, 'dep.ts'), DEP, 'utf-8');
+    const nodes: Node[] = [
+      node('untyped', 'untyped', 'untyped.ts', UNTYPED),
+      node('typed', 'typed', 'typed.ts', TYPED),
+      node('run', 'run', 'dep.ts', DEP),
+    ];
+    // `typed` got a receiver_inferred edge; `untyped` got nothing.
+    const edges = [
+      { callerId: 'typed', calleeId: 'run', calleeName: 'run', line: 3, confidence: 'receiver_inferred' },
+    ];
+    writeCache(d, nodes, edges);
+  });
+  afterEach(() => rmSync(d, { recursive: true, force: true }));
+
+  it('discloses an unbound chained receiver under its own boundary, not as exception-free', async () => {
+    const res = (await handleAnalyzeErrorPropagation({ directory: d, symbol: 'untyped' })) as Result;
+    expect(res.summary.escapes).toBe(0);
+    expect(res.summary.untypedReceiverCalls).toBe(1);
+    expect(res.untypedReceiverCalls?.count).toBe(1);
+    expect(res.untypedReceiverCalls?.sample.some(x => /untyped::untyped\.ts:3 \(run\)/.test(x))).toBe(true);
+    expect(res.boundaries.some(b => /chained intra-object call site/.test(b))).toBe(true);
+    // It is NOT folded into the unresolved-intra-object bucket, which claims the callee is
+    // provably in-project — a stronger claim than we can make here.
+    expect(res.summary.unresolvedSelfCalls).toBe(0);
+  });
+
+  it('does NOT disclose a chained receiver the registry resolved — it analyzes it', async () => {
+    const res = (await handleAnalyzeErrorPropagation({ directory: d, symbol: 'typed' })) as Result;
+    expect(res.summary.untypedReceiverCalls).toBe(0);
+    expect(res.untypedReceiverCalls).toBeUndefined();
+    expect(res.escapes.some(e => e.type === 'TypeError')).toBe(true);
+    expect(res.boundaries.some(b => /chained intra-object call site/.test(b))).toBe(false);
   });
 });
 

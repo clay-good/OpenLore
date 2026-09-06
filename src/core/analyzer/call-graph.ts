@@ -19,6 +19,7 @@ import type { ImportMap } from './import-resolver-bridge.js';
 import {
   buildResolvedImportMap,
   GO_IMPORT_PACKAGE_PREFIX,
+  EXTERNAL_IMPORT_PREFIX,
   IMPORT_QUALIFIER_PREFIX,
   IMPORT_TOP_LEVEL_QUALIFIER,
   PACKAGE_SCOPE_IMPORT,
@@ -45,6 +46,13 @@ import { isTestFile } from './test-file.js';
 import { type FunctionCfg, type CfgNode } from './cfg.js';
 import { stableSymbolId, stableClassId } from '../scip/moniker.js';
 import { synthesizeTypeHierarchyEdges, type RawMethodCall } from './cha.js';
+import {
+  buildReceiverFieldRegistry,
+  collectReceiverFieldFacts,
+  finalizeReceiverFieldFacts,
+  receiverFieldKey,
+  type ReceiverFieldFact,
+} from './receiver-registry.js';
 import { logger } from '../../utils/logger.js';
 import { HUB_THRESHOLD } from '../../constants.js';
 import { tallyFileStyle, type FileStyleRaw, type StyleAstNode } from './style-fingerprint.js';
@@ -1205,6 +1213,11 @@ const TS_CALL_QUERY = `
                  property: (property_identifier) @call.name)
                (member_expression
                  object: (super) @call.object
+                 property: (property_identifier) @call.name)
+               (member_expression
+                 object: (member_expression
+                   object: [(this) (super)] @call.self
+                   property: [(property_identifier) (private_property_identifier)] @call.field)
                  property: (property_identifier) @call.name)]) @call.node
 `;
 
@@ -1333,12 +1346,19 @@ async function extractTSGraph(
     const nameCapture = match.captures.find(c => c.name === 'call.name');
     const nodeCapture = match.captures.find(c => c.name === 'call.node');
     const objectCapture = match.captures.find(c => c.name === 'call.object');
+    // A CHAINED intra-object receiver — `this.repo.save()` (change:
+    // shrink-receiver-resolution-boundary). Its receiver is a nested member_expression, so it
+    // matches the `call.self`/`call.field` alternative rather than `call.object`.
+    const selfCapture = match.captures.find(c => c.name === 'call.self');
+    const fieldCapture = match.captures.find(c => c.name === 'call.field');
     if (!nameCapture || !nodeCapture) continue;
 
     const calleeName = nameCapture.node.text;
     // A `this.parse()` / `super.map()` is a real intra-object method call — bypass the
     // name-only noise filter (which targets `arr.map()` / `JSON.parse()`), or common
-    // method names would be dropped before resolution ever sees them.
+    // method names would be dropped before resolution ever sees them. A chained
+    // `this.<field>.map()` gets no such exemption: the field's type is the thing under
+    // question, so a builtin-shaped callee on it is exactly the noise the filter exists for.
     if (!isSelfReceiver(objectCapture?.node.text) && isIgnoredCallee(calleeName, 'TypeScript')) continue;
 
     const callPos = nodeCapture.node.startIndex;
@@ -1346,7 +1366,7 @@ async function extractTSGraph(
     if (!caller) continue;
 
     // Detect call type from AST parent context
-    let callType: CallType = objectCapture ? 'method' : 'direct';
+    let callType: CallType = objectCapture || selfCapture ? 'method' : 'direct';
     const parentType = nodeCapture.node.parent?.type;
     if (parentType === 'await_expression') callType = 'awaited';
     else if (parentType === 'new_expression') callType = 'constructor';
@@ -1355,7 +1375,8 @@ async function extractTSGraph(
       callerId: caller.id,
       calleeName,
       line: nodeCapture.node.startPosition.row + 1,
-      calleeObject: objectCapture?.node.text,
+      calleeObject: objectCapture?.node.text ?? selfCapture?.node.text,
+      ...(selfCapture && fieldCapture ? { receiverField: fieldCapture.node.text } : {}),
       callType,
       ...callArgumentFacts(nodeCapture.node, language),
     });
@@ -1367,9 +1388,16 @@ async function extractTSGraph(
   const cfg = materializeCfgByNodeId(nodes, cfgByStart);
   const classRelationships = collectClassRelationshipFacts('TypeScript', source =>
     safeQuery(lang, source, tree.rootNode) as unknown as TsMatch[]);
+  // Field facts are only ever read for a caller in THIS file (the registry is keyed by the
+  // caller's path), so a file with no chained intra-object call site can never consult them —
+  // skip the collection queries entirely. Exact, not heuristic: the raw edges ARE the demand.
+  const receiverFields = rawEdges.some(e => e.receiverField)
+    ? collectReceiverFieldFacts(language, source =>
+      safeQuery(lang, source, tree.rootNode) as unknown as TsMatch[])
+    : [];
   const dynamicDispatch = collectPass1DynamicDispatch('TypeScript', content, tree.rootNode as unknown as TsNodeLike, nodes, filePath);
   const httpCalls = await extractHttpCalls(filePath, content);
-  return { nodes, rawEdges, cfg, style, parseHealth, dynamicBoundary, classRelationships, dynamicDispatch, httpCalls };
+  return { nodes, rawEdges, cfg, style, parseHealth, dynamicBoundary, classRelationships, receiverFields, dynamicDispatch, httpCalls };
 }
 
 // ============================================================================
@@ -1405,6 +1433,22 @@ const PY_METHOD_CALL_QUERY = `
   (call
     function: (attribute
       object: (identifier) @call.object
+      attribute: (identifier) @call.name)) @call.node
+`;
+
+/**
+ * Chained intra-object calls: `self.<field>.<method>()`. The single-hop query above cannot match
+ * these (their receiver is an `attribute`, not an `identifier`), so before
+ * `shrink-receiver-resolution-boundary` they produced no raw edge at all — neither resolved nor
+ * external, and so not even disclosable. The receiver identifier is captured so resolution can
+ * restrict the shape to `self`/`cls`.
+ */
+const PY_SELF_FIELD_CALL_QUERY = `
+  (call
+    function: (attribute
+      object: (attribute
+        object: (identifier) @call.self
+        attribute: (identifier) @call.field)
       attribute: (identifier) @call.name)) @call.node
 `;
 
@@ -1543,16 +1587,52 @@ async function extractPyGraph(
     });
   }
 
+  // Chained intra-object calls: `self.repo.save()` (change: shrink-receiver-resolution-boundary).
+  // The receiver is a nested attribute, so the single-hop query above never matched it and the
+  // call site produced no raw edge at all. The builtin filter still applies: unlike a direct
+  // `self.map()`, the field's type is precisely what is in question here, so a builtin-shaped
+  // callee on it is the noise the filter exists for.
+  const selfFieldCallQuery = nativeQuerySoft('Python', lang, PY_SELF_FIELD_CALL_QUERY);
+  for (const match of selfFieldCallQuery?.matches(tree.rootNode) ?? []) {
+    const selfCapture = match.captures.find(c => c.name === 'call.self');
+    const fieldCapture = match.captures.find(c => c.name === 'call.field');
+    const nameCapture = match.captures.find(c => c.name === 'call.name');
+    const nodeCapture = match.captures.find(c => c.name === 'call.node');
+    if (!selfCapture || !fieldCapture || !nameCapture || !nodeCapture) continue;
+    if (!isSelfReceiver(selfCapture.node.text)) continue;
+
+    const calleeName = nameCapture.node.text;
+    if (isIgnoredCallee(calleeName, 'Python')) continue;
+
+    const caller = findEnclosingFunction(nodes, nodeCapture.node.startIndex);
+    if (!caller) continue;
+
+    rawEdges.push({
+      callerId: caller.id,
+      calleeName,
+      line: nodeCapture.node.startPosition.row + 1,
+      calleeObject: selfCapture.node.text,
+      receiverField: fieldCapture.node.text,
+      callType: nodeCapture.node.parent?.type === 'await' ? 'awaited' : 'method',
+      ...callArgumentFacts(nodeCapture.node, 'Python'),
+    });
+  }
+
   const style = tallyStyle('Python', tree, nodes, filePath);
   const parseHealth = tallyParseHealth('Python', tree.rootNode as unknown as ParseHealthNode, filePath);
   const dynamicBoundary = tallyDynamicBoundary('Python', tree.rootNode, nodes, content);
   const cfg = materializeCfgByNodeId(nodes, cfgByStart);
   const classRelationships = collectClassRelationshipFacts('Python', source =>
     safeQuery(lang, source, tree.rootNode) as unknown as TsMatch[]);
+  // See the TypeScript extractor: no chained call site in this file ⇒ no reader for its facts.
+  const receiverFields = rawEdges.some(e => e.receiverField)
+    ? collectReceiverFieldFacts('Python', source =>
+      safeQuery(lang, source, tree.rootNode) as unknown as TsMatch[])
+    : [];
   const dynamicDispatch = collectPass1DynamicDispatch('Python', content, tree.rootNode as unknown as TsNodeLike, nodes, filePath);
   const httpDegradations: HttpExtractionDegradation[] = [];
   const httpCalls = extractPythonHttpCallsFromRoot(filePath, tree.rootNode, d => httpDegradations.push(d));
-  return { nodes, rawEdges, cfg, style, parseHealth, dynamicBoundary, classRelationships, dynamicDispatch, httpCalls, httpDegradations };
+  return { nodes, rawEdges, cfg, style, parseHealth, dynamicBoundary, classRelationships, receiverFields, dynamicDispatch, httpCalls, httpDegradations };
 }
 
 // ============================================================================
@@ -5115,6 +5195,7 @@ function isEmptyExtractResult(result: FileExtractResult | undefined): boolean {
     && !result.parseHealth
     && !result.style
     && !result.classRelationships?.length
+    && !result.receiverFields?.length
     && !result.dynamicDispatch
     && !result.dynamicBoundary?.length
     && !result.httpCalls?.length
@@ -5205,6 +5286,9 @@ export class CallGraphBuilder {
     const dynamicBoundaryCandidates = new Map<string, { language: string; candidates: AttributedCandidate[] }>();
     const grammarUnavailableByLanguage = new Map<string, GrammarUnavailableBoundary>();
     let relationships = new Map<string, { parentClasses: string[]; interfaces: string[] }>();
+    // `Class.field → Type` observations per file, folded into the refusing registry after Pass 1
+    // (change: shrink-receiver-resolution-boundary).
+    const receiverFieldFacts = new Map<string, ReceiverFieldFact[]>();
     const dynamicDispatchFacts: DynamicDispatchFacts[] = [];
     const httpCallFacts = new Map<string, HttpCall[]>();
     const pass1HttpDegradations: HttpExtractionDegradation[] = [];
@@ -5350,6 +5434,12 @@ export class CallGraphBuilder {
             language: file.language,
             candidates: result.dynamicBoundary,
           });
+        }
+        if (result.receiverFields?.length) {
+          receiverFieldFacts.set(file.path, [
+            ...(receiverFieldFacts.get(file.path) ?? []),
+            ...result.receiverFields,
+          ]);
         }
         for (const fact of result.classRelationships ?? []) {
           const key = `${file.path}::${fact.className}`;
@@ -5567,6 +5657,105 @@ export class CallGraphBuilder {
       return firstAmbiguous ? { ambiguous: firstAmbiguous } : {};
     };
 
+    /** `filePath::Class.field → Type`, with every conflicting observation already refused
+     *  (change: shrink-receiver-resolution-boundary). */
+    const receiverFields = buildReceiverFieldRegistry(receiverFieldFacts);
+
+    /**
+     * Pick the target of a chained intra-object call, given the receiver's DECLARED type name.
+     *
+     * This deliberately does NOT reuse {@link pickByAffinity}. That ladder's last rung binds a
+     * lone repository-wide candidate, which is safe for its original callers — they pass the
+     * CALLER'S OWN CLASS as the qualifier, so the own-file rung has almost always fired already.
+     * Here the qualifier is an arbitrary type name that is usually declared somewhere else, so
+     * that rung becomes the DOMINANT path on a name whose true origin the import map often knows.
+     * `import { Client } from './sdk'` next to an unrelated `Client` elsewhere in the repository
+     * would bind to the unrelated one; a `Client` imported from an npm package — a type that
+     * leaves the project entirely — would bind to an in-project namesake.
+     *
+     * So an import binding, WHERE ONE EXISTS, is decisive rather than advisory:
+     *  - the caller imports the type name ⇒ only a candidate from that import target may bind.
+     *    No such candidate is a REFUSAL — never a fall-through to a namesake elsewhere, which is
+     *    the defect above;
+     *  - otherwise the type declared in the caller's own file wins;
+     *  - otherwise a single repository-wide definition binds, and two or more are disclosed as
+     *    ambiguous rather than guessed.
+     *
+     * The last rung is deliberate, not an oversight: import maps do not bind every real import
+     * (Python's absolute intra-project `from repo import Repo` resolves to nothing), so refusing
+     * there would refuse the ordinary case in a whole language. Its residual risk — a type
+     * imported from OUTSIDE the project that happens to share both its name and the called
+     * method with an in-project class — is the same unique-name inference the rest of the
+     * resolution ladder already makes, and is narrower here because the search is confined to
+     * one type's members rather than a global name space.
+     */
+    const pickReceiverTarget = (
+      cands: FunctionNode[],
+      callerFile: string,
+      typeName: string,
+    ): AffinityPick => {
+      if (cands.length === 0) return { kind: 'none' };
+      const fileImports = callImportMap.get(callerFile);
+      const importedFrom = fileImports?.get(typeName);
+      // The file imports this name from a specifier that resolved to no in-project file — a
+      // package. The source SAYS the type is not from here, so a repo-wide namesake is not a
+      // fallback, it is a contradiction. A CONCRETE binding for the same name wins, though: a
+      // `try: from cjson import X / except ImportError: from local import X` records both, and
+      // the one that resolves is the better evidence.
+      if (!importedFrom && fileImports?.has(`${EXTERNAL_IMPORT_PREFIX}${typeName}`)) {
+        return { kind: 'none' };
+      }
+      if (importedFrom) {
+        const matched = cands.filter(c => matchesImportedTarget(c.filePath, importedFrom));
+        if (matched.length === 1) return { kind: 'unique', node: matched[0] };
+        return matched.length > 1 ? { kind: 'ambiguous', candidates: matched } : { kind: 'none' };
+      }
+      const own = cands.filter(c => c.filePath === callerFile);
+      if (own.length === 1) return { kind: 'unique', node: own[0] };
+      if (own.length > 1) return { kind: 'ambiguous', candidates: own };
+      return cands.length === 1
+        ? { kind: 'unique', node: cands[0] }
+        : { kind: 'ambiguous', candidates: cands };
+    };
+
+    /** Type of a chained intra-object receiver (`repo` in `this.repo.save()`), walking the
+     *  enclosing class chain exactly as {@link resolveSelfMethod} does, so a field inherited from
+     *  a base class declared IN THE CALLER'S OWN FILE still types. Both lookups are keyed on the
+     *  caller's path, so a base class in another file is a miss — honest-direction, and the same
+     *  limitation `resolveSelfMethod` already has. Returns nothing when the registry never saw the
+     *  field, or refused it for carrying two types; the caller then leaves the site unresolved
+     *  rather than guessing. */
+    const resolveReceiverFieldType = (
+      callerNode: FunctionNode,
+      field: string,
+      includeOwnClass: boolean,
+    ): string | undefined => {
+      if (!callerNode.className) return undefined;
+      const seen = new Set<string>();
+      // `super.<field>` reads the PARENT's slot; seeding the walk with the caller's own class
+      // would let a subclass field of a different type answer for it.
+      const queue: string[] = includeOwnClass
+        ? [callerNode.className]
+        : [...(relationships.get(`${callerNode.filePath}::${callerNode.className}`)?.parentClasses ?? [])];
+      // Collect from the WHOLE ancestor set rather than stopping at the first hit. Which
+      // declaration a language actually picks depends on its own linearization — Python's C3
+      // puts a shared base LAST, so neither a breadth-first nor a depth-first walk is right in
+      // general, and each is wrong on a different hierarchy shape. So: one distinct type across
+      // the ancestors binds, and two refuse. That is the registry's existing conflict rule
+      // applied one level up, and it costs only the genuinely ambiguous hierarchy.
+      const found = new Set<string>();
+      while (queue.length > 0) {
+        const cls = queue.shift()!;
+        if (seen.has(cls)) continue;
+        seen.add(cls);
+        const type = receiverFields.get(receiverFieldKey(callerNode.filePath, cls, field));
+        if (type) found.add(type);
+        const rel = relationships.get(`${callerNode.filePath}::${cls}`);
+        for (const p of rel?.parentClasses ?? []) if (!seen.has(p)) queue.push(p);
+      }
+      return found.size === 1 ? [...found][0] : undefined;
+    };
+
     const edges: CallEdge[] = [];
     // Call sites the ladder refused to bind because the candidate set was ambiguous
     // (change: harden-call-resolution-ambiguity). Recorded instead of an arbitrary
@@ -5584,6 +5773,7 @@ export class CallGraphBuilder {
         callerId: r.callerId,
         calleeName: r.calleeName,
         calleeObject: r.calleeObject,
+        ...(r.receiverField ? { receiverField: r.receiverField } : {}),
         line: r.line,
         strategy,
         candidateIds: ids.slice(0, AMBIGUOUS_CANDIDATE_CAP),
@@ -5599,13 +5789,44 @@ export class CallGraphBuilder {
       let calleeNode: FunctionNode | undefined;
       let confidence: EdgeConfidence = 'name_only';
 
+      // Strategy 1r — CHAINED intra-object receiver: `this.repo.save()` / `self.repo.save()`
+      // (change: shrink-receiver-resolution-boundary). Before this change the call query matched
+      // no alternative for a nested receiver, so the site produced NO raw edge — not a resolved
+      // one, not an `external::` leaf, and so nothing any conclusion could disclose. The receiver
+      // now types from the per-file registry (declared field type, `new T()`, a parameter
+      // property, or a local factory's declared return type) and the method resolves within that
+      // one type, never across the global name space. This shape owns its own branch: the
+      // strategies below key off the exact receiver token, and the import strategy would bind
+      // `this.parser.parse()` to an unrelated imported `parser`.
+      if (raw.receiverField) {
+        const fieldType = resolveReceiverFieldType(
+          callerNode,
+          raw.receiverField,
+          raw.calleeObject !== 'super',
+        );
+        if (fieldType) {
+          const picked = pickReceiverTarget(
+            trie.findByQualifiedName(fieldType, raw.calleeName),
+            callerNode.filePath,
+            fieldType,
+          );
+          if (picked.kind === 'unique') { calleeNode = picked.node; confidence = 'receiver_inferred'; }
+          else if (picked.kind === 'ambiguous') { recordAmbiguous(raw, 'receiver_inferred', picked.candidates); continue; }
+        }
+        // Residue — the registry could not type the receiver unambiguously, or the type has no
+        // such member. Emit NOTHING: not a guessed edge, and not an `external::this.repo.save`
+        // leaf, which would assert the callee leaves the project when we simply do not know.
+        // `exception-flow.ts` records the site so the boundary is disclosed, not silent.
+        if (!calleeNode) continue;
+      }
+
       // Strategy 1 — self/cls intra-class (Python self.*, cls.* or same-class method).
       // Shares the this/super affinity ladder (own-file → imported-from → single
       // candidate), walking ancestors so an inherited method still resolves. Two
       // same-named classes in different files no longer bind by insertion order:
       // the caller's own class wins, and a genuinely ambiguous set is disclosed, never
       // guessed (change: harden-call-resolution-ambiguity).
-      if (raw.calleeObject === 'self' || raw.calleeObject === 'cls') {
+      if (!calleeNode && (raw.calleeObject === 'self' || raw.calleeObject === 'cls')) {
         if (callerNode.className) {
           const res = resolveSelfMethod(callerNode, raw.calleeName, true);
           if (res.node) { calleeNode = res.node; confidence = 'self_cls'; }
@@ -6221,6 +6442,12 @@ export class CallGraphBuilder {
       const rawMethodCalls: RawMethodCall[] = [];
       for (const raw of allRawEdges) {
         if (!raw.calleeObject) continue;
+        // A CHAINED intra-object receiver is not a `recv.m()` CHA can reason about: its
+        // `calleeObject` is the bare `this`/`self` token, so feeding it here would make CHA
+        // resolve `this.repo.save()` as if it were `this.save()` and name-bind it inside the
+        // CALLER's own hierarchy — a fabricated edge, and precisely the guess the receiver
+        // registry refuses (change: shrink-receiver-resolution-boundary).
+        if (raw.receiverField) continue;
         rawMethodCalls.push({
           callerId: raw.callerId,
           recv: raw.calleeObject,
@@ -6416,6 +6643,14 @@ function mergeScriptContainerResults(
     for (const [id, cfg] of result.cfg ?? []) merged.cfg!.set(id, cfg);
     if (result.classRelationships?.length) {
       merged.classRelationships = [...(merged.classRelationships ?? []), ...result.classRelationships];
+    }
+    if (result.receiverFields?.length) {
+      // Re-finalized after the concat: each script lane finalized its OWN facts, so the union can
+      // hold duplicates in lane order, which would break the sorted-and-deduped invariant the
+      // persisted fact row is documented to have.
+      merged.receiverFields = finalizeReceiverFieldFacts(
+        [...(merged.receiverFields ?? []), ...result.receiverFields],
+      );
     }
     if (result.dynamicDispatch) {
       merged.dynamicDispatch ??= { events: [], callbacks: [] };

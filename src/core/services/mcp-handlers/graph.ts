@@ -41,7 +41,8 @@ import {
   TRACE_PATH_DEFAULT_MAX_DEPTH,
   TRACE_PATH_MAX_PATHS,
 } from '../../../constants.js';
-import type { SerializedCallGraph, FunctionNode, AmbiguousCallSite, CallEdge, EdgeConfidence } from '../../analyzer/call-graph.js';
+import type { SerializedCallGraph, FunctionNode, AmbiguousCallSite, CallEdge } from '../../analyzer/call-graph.js';
+import { EDGE_CONFIDENCE_VALUES } from '../../analyzer/call-graph-types.js';
 import { callDistance } from '../../analyzer/call-graph.js';
 import type { DecisionNode } from '../../decisions/project.js';
 import { decisionContentProvenance } from '../served-content.js';
@@ -395,10 +396,7 @@ interface EdgeReceipt {
 
 const CALL_SITE_EVIDENCE_LIMIT = 8;
 const IMPACT_EVIDENCE_ENTRY_LIMIT = 128;
-const CALL_EDGE_CONFIDENCES = new Set<EdgeConfidence>([
-  'self_cls', 'type_inference', 'import', 're_export', 'http_endpoint',
-  'same_file', 'name_only', 'type_name', 'synthesized', 'external',
-]);
+const CALL_EDGE_CONFIDENCES = EDGE_CONFIDENCE_VALUES;
 
 function byteCompare(left: string, right: string): number {
   return Buffer.compare(Buffer.from(left), Buffer.from(right));
@@ -942,7 +940,12 @@ export async function handleAnalyzeImpact(
             'potential hidden upstream caller. The blast radius is a lower bound here.',
           sample: ambiguousInScope.slice(0, 10).map((s: AmbiguousCallSite) => ({
             caller: ctx.edgeStore!.getNode(s.callerId)?.name ?? s.callerId,
-            callee: s.calleeObject ? `${s.calleeObject}.${s.calleeName}` : s.calleeName,
+            // A chained intra-object site's receiver is `this.<field>`, not the bare `this` the
+            // raw edge carries; rendering the bare token names a call the source does not have
+            // (change: shrink-receiver-resolution-boundary — same rule as error-propagation.ts).
+            callee: s.calleeObject
+              ? `${s.calleeObject}.${s.receiverField ? `${s.receiverField}.` : ''}${s.calleeName}`
+              : s.calleeName,
             strategy: s.strategy,
             candidates: s.candidateCount,
           })),

@@ -40,6 +40,7 @@ import { STYLE_FINGERPRINT_LANGUAGES } from './style-fingerprint.js';
 import { supportsDynamicBoundary } from './dynamic-boundary.js';
 import { CROSS_SERVICE_HTTP_LANGUAGES } from './http-capability.js';
 import { ERROR_PROPAGATION_LANGUAGES } from './exception-flow.js';
+import { RECEIVER_REGISTRY_LANGUAGES } from './receiver-registry.js';
 import { TEST_DETECTION_DECISIONS } from './test-file.js';
 import { COMPLEXITY_LANGUAGES } from './call-graph-complexity.js';
 import {
@@ -59,6 +60,7 @@ export const CAPABILITIES = [
   'imports',
   'cfgOverlay',
   'typeInference',
+  'receiverResolution',
   'styleFingerprint',
   'iacProjection',
   'crossServiceHttp',
@@ -77,6 +79,7 @@ export const CAPABILITY_DESCRIPTIONS: Record<Capability, string> = {
   imports: 'Relative-import resolution into the `import`-confidence cross-file edge path (raises call-resolution recall).',
   cfgOverlay: 'A control-flow-graph overlay (branches/loops) via the data-driven CFG SPECS table.',
   typeInference: 'Lightweight receiver-type inference, used to resolve method calls to their class.',
+  receiverResolution: 'Chained intra-object receiver resolution (`this.<field>.m()` / `self.<field>.m()`) through a per-file registry of declared field and return types, with the residue disclosed as a boundary by `analyze_error_propagation` rather than left silent (that tool is the only surface that discloses it). A language WITHOUT this does NOT bind that call shape; what it does instead varies by that language\'s own call query — Java, C# and Ruby capture the chained receiver and fall through to their ordinary member-call handling, while Go captures no chained receiver at all and so records nothing for it.',
   styleFingerprint: 'Descriptive idiom fingerprint (function form, binding, naming case, …) with an evidence floor + enforcement-awareness.',
   iacProjection: 'Infrastructure-as-code projection (resources/edges) onto the unified graph.',
   crossServiceHttp: 'Cross-service API topology: outbound HTTP client call sites and/or server route registrations matched into `http_endpoint` edges across the process (and, under federation, the repo) boundary.',
@@ -147,6 +150,7 @@ function deriveCapabilities(language: string): Capability[] {
   if (IMPORT_RESOLUTION_LANGUAGES.has(language)) out.push('imports');
   if (cfgSupportsLanguage(language)) out.push('cfgOverlay');
   if (TYPE_INFERENCE_LANGUAGES.has(language)) out.push('typeInference');
+  if (RECEIVER_REGISTRY_LANGUAGES.has(language)) out.push('receiverResolution');
   if (STYLE_FINGERPRINT_LANGUAGES.has(language)) out.push('styleFingerprint');
   if (isIacLanguage(language)) out.push('iacProjection');
   if (CROSS_SERVICE_HTTP_LANGUAGES.has(language)) out.push('crossServiceHttp');

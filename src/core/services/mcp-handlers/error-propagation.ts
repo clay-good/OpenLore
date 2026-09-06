@@ -418,10 +418,17 @@ export async function handleAnalyzeErrorPropagation(
   const externalCallees = new Set<string>();
   const testCallees = new Set<string>();
   // Intra-object call sites (`this.x()` / `super.x()` / `self.x()` / `cls.x()`)
-  // the call graph produced NO edge for — the one call shape that gets neither a
-  // resolved nor an `external::` edge, so without this it would be silently
-  // assumed exception-free. Disclosed, never dropped. Keyed by caller+line+name.
+  // the call graph produced NO edge for — a call shape that gets neither a resolved
+  // nor an `external::` edge, so without this it would be silently assumed
+  // exception-free. Disclosed, never dropped. Keyed by caller+line+name. Its chained
+  // sibling (`this.<field>.x()`) is disclosed separately just below.
   const unresolvedSelfCalls = new Map<string, string>();
+  // Chained intra-object call sites (`this.<field>.x()` / `self.<field>.x()`) whose receiver the
+  // per-file type registry could not type (change: shrink-receiver-resolution-boundary). Kept
+  // SEPARATE from `unresolvedSelfCalls`: there the callee is provably an in-project method we
+  // failed to reach, here the callee's very provenance is unknown, so folding them together would
+  // overclaim. Both are boundaries; only one of them is about resolution failure.
+  const untypedReceiverCalls = new Map<string, string>();
   // Unresolved-ambiguous call sites reached during the traversal (change:
   // harden-call-resolution-ambiguity). Keyed by caller+line+name so a site is
   // disclosed once regardless of how often the node is revisited.
@@ -576,7 +583,24 @@ export async function handleAnalyzeErrorPropagation(
     // self-call with a matching edge DID resolve and is analyzed normally.
     const myEdges = calleesByCaller.get(n.id) ?? [];
     const resolvedHere = new Set(myEdges.map(e => `${e.calleeName}@${e.line ?? -1}`));
+    const ambiguousHere = new Set(
+      (ambiguousByCaller.get(n.id) ?? []).map(s => `${s.calleeName}@${s.line ?? -1}`),
+    );
     for (const cs of facts.callSites) {
+      if (cs.receiver === 'self-field') {
+        // Resolved by the receiver registry ⇒ an edge exists and the callee is analyzed
+        // normally. No edge ⇒ the callee could not be bound, which is a boundary, never a clean
+        // absence (change: shrink-receiver-resolution-boundary). A site the resolver already
+        // refused for AMBIGUITY is disclosed by the ambiguity boundary below with its candidate
+        // count; counting it here too would report one call as two boundaries with two causes.
+        if (resolvedHere.has(`${cs.calleeName}@${cs.line}`)) continue;
+        if (ambiguousHere.has(`${cs.calleeName}@${cs.line}`)) continue;
+        untypedReceiverCalls.set(
+          `${n.id}@${cs.line}@${cs.calleeName}`,
+          `${selfLabel}:${cs.line} (${cs.calleeName})`,
+        );
+        continue;
+      }
       if (cs.receiver !== 'self' && cs.receiver !== 'constructor') continue;
       if (resolvedHere.has(`${cs.calleeName}@${cs.line}`)) continue;
       unresolvedSelfCalls.set(`${n.id}@${cs.line}@${cs.calleeName}`, `${selfLabel}:${cs.line} (${cs.calleeName})`);
@@ -587,7 +611,12 @@ export async function handleAnalyzeErrorPropagation(
     // exceptions are out of scope — a clean escape set does not clear these paths
     // (change: harden-call-resolution-ambiguity).
     for (const site of ambiguousByCaller.get(n.id) ?? []) {
-      const recv = site.calleeObject ? `${site.calleeObject}.` : '';
+      // A chained intra-object site's receiver is `this.<field>`, not the bare `this` the raw
+      // edge carries — rendering the bare token would name a call site the source does not have
+      // (change: shrink-receiver-resolution-boundary).
+      const recv = site.calleeObject
+        ? `${site.calleeObject}.${site.receiverField ? `${site.receiverField}.` : ''}`
+        : '';
       ambiguousCallSites.set(
         `${n.id}@${site.line ?? -1}@${site.calleeName}`,
         `${selfLabel}:${site.line ?? '?'} (${recv}${site.calleeName} → ${site.candidateCount} candidates)`,
@@ -698,6 +727,17 @@ export async function handleAnalyzeErrorPropagation(
         'scope, NEVER assumed none. A clean escape set does not clear these paths.',
     );
   }
+  const untypedReceiverSample = [...untypedReceiverCalls.values()].sort();
+  if (untypedReceiverCalls.size > 0) {
+    boundaries.add(
+      `${untypedReceiverCalls.size} chained intra-object call site(s) (\`this.<field>.m()\`) whose ` +
+        'callee could not be BOUND — an untypeable or conflicting receiver, a receiver type with ' +
+        'no such member, a deeper chain the resolver does not read, or a builtin-shaped callee ' +
+        'filtered before resolution. The callee is of UNKNOWN provenance (in-project or ' +
+        'external), so its exceptions are out of scope, NEVER assumed none. A clean escape set ' +
+        'does not clear these paths.',
+    );
+  }
   const ambiguousSample = [...ambiguousCallSites.values()].sort();
   if (ambiguousCallSites.size > 0) {
     boundaries.add(
@@ -737,6 +777,7 @@ export async function handleAnalyzeErrorPropagation(
       functionsAnalyzed: parsedCount,
       externalCalleesNotAnalyzed: externalCallees.size,
       unresolvedSelfCalls: unresolvedSelfCalls.size,
+      untypedReceiverCalls: untypedReceiverCalls.size,
       ambiguousCallSites: ambiguousCallSites.size,
     },
     escapes: escapeList,
@@ -748,6 +789,9 @@ export async function handleAnalyzeErrorPropagation(
       : {}),
     ...(unresolvedSelfCalls.size > 0
       ? { unresolvedSelfCalls: { count: unresolvedSelfCalls.size, sample: unresolvedSelfSample.slice(0, 15) } }
+      : {}),
+    ...(untypedReceiverCalls.size > 0
+      ? { untypedReceiverCalls: { count: untypedReceiverCalls.size, sample: untypedReceiverSample.slice(0, 15) } }
       : {}),
     ...(ambiguousCallSites.size > 0
       ? { ambiguousCallSites: { count: ambiguousCallSites.size, sample: ambiguousSample.slice(0, 15) } }

@@ -240,6 +240,36 @@ describe('renderInjectionBlock', () => {
     expect(block).not.toContain('Suggested tools');
   });
 
+  // change: shrink-receiver-resolution-boundary. After a schema bump the briefing carries no call
+  // paths, provenance, decisions or change-coupling. Without saying so, a reader cannot tell
+  // "nothing calls this" from "I could not look" — and the SessionStart hook injects this block
+  // on every turn, so silence here is the widest-reaching version of that confusion.
+  it('states an unreadable graph index ahead of the detail it invalidates', () => {
+    const degraded = {
+      ...richResult,
+      graphIndexNote: 'Graph index unavailable — call paths, provenance, decisions, and change-coupling are omitted. Run analyze_codebase to (re)build it (a version upgrade resets the graph index until the next analyze).',
+    };
+    const block = renderInjectionBlock(degraded, cfg());
+    expect(block).toContain('Graph index unavailable');
+    const detailIndex = block.indexOf('Relevant functions');
+    if (detailIndex >= 0) {
+      expect(block.indexOf('Graph index unavailable')).toBeLessThan(detailIndex);
+    }
+  });
+
+  it('survives a tight budget — the boundary outranks the detail it qualifies', () => {
+    const degraded = {
+      ...richResult,
+      graphIndexNote: 'Graph index unavailable — call paths, provenance, decisions, and change-coupling are omitted.',
+    };
+    const block = renderInjectionBlock(degraded, cfg({ tokenBudget: 60 }));
+    expect(block).toContain('Graph index unavailable');
+  });
+
+  it('says nothing when the graph index is readable', () => {
+    expect(renderInjectionBlock(richResult, cfg())).not.toContain('Graph index unavailable');
+  });
+
   it('keeps cited-file staleness ahead of optional detail inside the budgeted block', () => {
     const stale = {
       ...richResult,
