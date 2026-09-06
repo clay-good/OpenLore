@@ -83,18 +83,8 @@
       "reason": "POSIX-specific fixture or assertion"
     },
     {
-      "file": "src/cli/git-hooks.test.ts",
-      "failingTests": 33,
-      "reason": "real-filesystem fixture: POSIX-only shim, exec bit, or temp-dir teardown semantics"
-    },
-    {
       "file": "src/cli/install/guidance-preset-regeneration.test.ts",
       "failingTests": 1,
-      "reason": "POSIX-specific fixture or assertion"
-    },
-    {
-      "file": "src/cli/install/install.test.ts",
-      "failingTests": 13,
       "reason": "POSIX-specific fixture or assertion"
     },
     {
@@ -163,26 +153,6 @@
       "failingTests": 1,
       "reason": "FLAKY on Windows, not deterministically failing: observed passing, then failing on 'rejects invalid UTF-8 corpus bytes', then passing across three consecutive CI runs of the same tree, and failing with ENOENT in an earlier probe. Reads a `git cat-file --batch` child's stdout, so a stream race is the likely cause. Not root-caused: needs a Windows machine to debug, not a 12-minute CI cycle.",
       "flaky": true
-    },
-    {
-      "file": "src/core/federation/cross-service-resolver.test.ts",
-      "failingTests": 4,
-      "reason": "real-filesystem fixture: POSIX-only shim, exec bit, or temp-dir teardown semantics"
-    },
-    {
-      "file": "src/core/federation/fleet-memory.test.ts",
-      "failingTests": 11,
-      "reason": "real-filesystem fixture: POSIX-only shim, exec bit, or temp-dir teardown semantics"
-    },
-    {
-      "file": "src/core/federation/registry.test.ts",
-      "failingTests": 1,
-      "reason": "POSIX-specific fixture or assertion"
-    },
-    {
-      "file": "src/core/federation/resolver.test.ts",
-      "failingTests": 11,
-      "reason": "real-filesystem fixture: POSIX-only shim, exec bit, or temp-dir teardown semantics"
     },
     {
       "file": "src/core/generator/openspec-writer.test.ts",

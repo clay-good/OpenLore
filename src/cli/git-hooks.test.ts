@@ -145,7 +145,7 @@ describe('effective Git hook delivery', () => {
     await expect(readFile(join(root, '.githooks', 'post-commit'), 'utf-8')).rejects.toThrow();
   });
 
-  it('allows a commit when drift could not be checked and preserves the failure evidence', async () => {
+  it.skipIf(process.platform === 'win32')('allows a commit when drift could not be checked and preserves the failure evidence', async () => {
     const root = await repository('openlore-drift-infrastructure-failure-');
     const localBin = join(root, 'node_modules', '.bin');
     await mkdir(localBin, { recursive: true });
@@ -190,7 +190,7 @@ describe('effective Git hook delivery', () => {
     expect(hook).not.toMatch(/openlore drift[^\n]*2>\/dev\/null/);
   });
 
-  it('does not let inherited errexit suppress an infrastructure-failure disclosure', async () => {
+  it.skipIf(process.platform === 'win32')('does not let inherited errexit suppress an infrastructure-failure disclosure', async () => {
     const root = await repository('openlore-drift-errexit-');
     const hookPath = join(root, '.git', 'hooks', 'pre-commit');
     await writeFile(hookPath, '#!/bin/sh\nset -e\n', { mode: 0o755 });
@@ -204,7 +204,7 @@ describe('effective Git hook delivery', () => {
     expect(result.stdout).toContain('could not be checked');
   });
 
-  it('does not let a verifier launch failure escape inherited errexit', async () => {
+  it.skipIf(process.platform === 'win32')('does not let a verifier launch failure escape inherited errexit', async () => {
     const root = await repository('openlore-drift-verifier-errexit-');
     const hookPath = join(root, '.git', 'hooks', 'pre-commit');
     await writeFile(hookPath, '#!/bin/sh\nset -e\n', { mode: 0o755 });
@@ -218,7 +218,11 @@ describe('effective Git hook delivery', () => {
     expect(result.stdout).toContain('could not be checked');
   });
 
-  it.each([
+  // skipIf(win32): these EXECUTE the installed hook, which is a `#!/bin/sh` script. Node's
+  // execFile cannot run one on Windows — it fails ENOENT with no shell to honour the shebang —
+  // so the assertion would report a spawn failure rather than the hook's own exit semantics.
+  // The hook is shell logic and is exercised on Linux.
+  it.skipIf(process.platform === 'win32').each([
     ['', 'empty output'],
     ['not-json', 'malformed output'],
     ['{"hasDrift":false,"totalChangedFiles":1,"analyzedFiles":0,"filesOmitted":0,"specRelevantFiles":0}', 'a contradictory clean result'],
@@ -238,7 +242,7 @@ describe('effective Git hook delivery', () => {
     expect(result.stdout).not.toContain('Spec drift detected!');
   });
 
-  it('ignores a repository-local launcher that fabricates a clean truncated result', async () => {
+  it.skipIf(process.platform === 'win32')('ignores a repository-local launcher that fabricates a clean truncated result', async () => {
     const root = await repository('openlore-drift-truncated-');
     const localBin = join(root, 'node_modules', '.bin');
     await mkdir(localBin, { recursive: true });
@@ -253,7 +257,7 @@ describe('effective Git hook delivery', () => {
     expect(result.stdout).not.toContain('could not be fully checked (50 changed file(s) omitted)');
   });
 
-  it('preserves a failure from hook content that precedes the appended drift block', async () => {
+  it.skipIf(process.platform === 'win32')('preserves a failure from hook content that precedes the appended drift block', async () => {
     const root = await repository('openlore-drift-preserve-prior-');
     const hookPath = join(root, '.git', 'hooks', 'pre-commit');
     await writeFile(hookPath, '#!/bin/sh\nfalse\n', { mode: 0o755 });
@@ -361,7 +365,7 @@ describe('effective Git hook delivery', () => {
     expect(warning).toHaveBeenCalledWith(expect.stringMatching(/malformed or duplicate markers/i));
   });
 
-  it('treats contradictory receipt counts as an invalid check result', async () => {
+  it.skipIf(process.platform === 'win32')('treats contradictory receipt counts as an invalid check result', async () => {
     const root = await repository('openlore-drift-invalid-receipt-');
     const localBin = join(root, 'node_modules', '.bin');
     await mkdir(localBin, { recursive: true });
@@ -508,7 +512,7 @@ describe('effective Git hook delivery', () => {
     expect(hook).toContain('# openlore-impact-certificate-hook');
   });
 
-  it('refuses to overwrite a symlinked hook target', async () => {
+  it.skipIf(process.platform === 'win32')('refuses to overwrite a symlinked hook target', async () => {
     const root = await repository('openlore-symlink-hook-');
     await execFileAsync('git', ['config', 'core.hooksPath', '.githooks'], { cwd: root });
     await mkdir(join(root, '.githooks'), { recursive: true });
@@ -522,7 +526,7 @@ describe('effective Git hook delivery', () => {
     expect(await readFile(join(root, 'outside-hook'), 'utf-8')).toBe('#!/bin/sh\noriginal\n');
   });
 
-  it('refuses a dangling hooks-directory symlink with an actionable warning', async () => {
+  it.skipIf(process.platform === 'win32')('refuses a dangling hooks-directory symlink with an actionable warning', async () => {
     const root = await repository('openlore-dangling-hooks-');
     const hooksPath = join(root, 'dangling-hooks');
     await symlink(join(root, 'missing-target'), hooksPath);
@@ -563,7 +567,7 @@ describe('effective Git hook delivery', () => {
     await expect(readFile(join(root, '.githooks', 'pre-commit'), 'utf-8')).rejects.toThrow();
   });
 
-  it('preserves default install bytes and mode when targeting a custom hooksPath', async () => {
+  it.skipIf(process.platform === 'win32')('preserves default install bytes and mode when targeting a custom hooksPath', async () => {
     const defaultRoot = await repository('openlore-default-hook-bytes-');
     const customRoot = await repository('openlore-custom-hook-bytes-');
     await execFileAsync('git', ['config', 'core.hooksPath', '.githooks'], { cwd: customRoot });
