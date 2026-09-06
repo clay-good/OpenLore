@@ -1,7 +1,7 @@
 {
   "$comment": [
     "Test files that do not yet pass on Windows. The `windows-unit` CI job runs the ENTIRE unit suite",
-    "on windows-latest — nothing is filtered — and scripts/windows-unit-report.mjs judges the result",
+    "on windows-latest \u2014 nothing is filtered \u2014 and scripts/windows-unit-report.mjs judges the result",
     "against this list (issue #434). Before that job, exactly one test file ran on Windows.",
     "",
     "The list is enforced in BOTH directions from that single run: a failing file that is not listed",
@@ -17,7 +17,7 @@
     "the product PERSISTS or SERVES (an artifact, a spec reference, a generated path) rather than",
     "inside a test expectation. Those are portability questions about the artifact, not test bugs,",
     "and are tracked separately.",
-    "`flaky: true` marks an entry that is NOT deterministically failing — it is exempt from both rules, because a file that oscillates would otherwise fail the build whichever list it sits on. It is a last resort: it needs observed evidence in its reason, it is reported on every run so it stays visible, and it belongs in the backlog issue as a bug to fix rather than a state to keep.",
+    "`flaky: true` marks an entry that is NOT deterministically failing \u2014 it is exempt from both rules, because a file that oscillates would otherwise fail the build whichever list it sits on. It is a last resort: it needs observed evidence in its reason, it is reported on every run so it stays visible, and it belongs in the backlog issue as a bug to fix rather than a state to keep.",
     "",
     "Backlog tracked in https://github.com/clay-good/OpenLore/issues/452"
   ],
@@ -90,17 +90,12 @@
     {
       "file": "src/core/analyzer/index-bundle.test.ts",
       "failingTests": 1,
-      "reason": "runImport trust boundary: the imported answer's confidenceBoundary.basis reports a different directEdges count than the same query against the local index — an edge-resolution divergence in the round trip, NOT a separator inside a string. Diagnosed from the windows-unit-report artifact; the earlier 'bundle JSON embeds platform separators' reason was wrong.",
+      "reason": "runImport trust boundary: the imported answer's confidenceBoundary.basis reports a different directEdges count than the same query against the local index \u2014 an edge-resolution divergence in the round trip, NOT a separator inside a string. Diagnosed from the windows-unit-report artifact; the earlier 'bundle JSON embeds platform separators' reason was wrong.",
       "suspectedProductionBug": true
     },
     {
       "file": "src/core/analyzer/spec-vector-index.test.ts",
       "failingTests": 1,
-      "reason": "POSIX-specific fixture or assertion"
-    },
-    {
-      "file": "src/core/analyzer/tested-by-derivation.test.ts",
-      "failingTests": 2,
       "reason": "POSIX-specific fixture or assertion"
     },
     {
