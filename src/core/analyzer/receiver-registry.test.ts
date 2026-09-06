@@ -13,7 +13,9 @@ import { CallGraphBuilder } from './call-graph.js';
 import type { CallEdge, CallGraphResult } from './call-graph.js';
 import {
   buildReceiverFieldRegistry,
+  finalizeReceiverFieldFacts,
   receiverFieldKey,
+  RECEIVER_FIELD_FACT_CAP,
   RECEIVER_REGISTRY_LANGUAGES,
   type ReceiverFieldFact,
 } from './receiver-registry.js';
@@ -747,8 +749,11 @@ describe('round-2 refusals', () => {
       `),
     ]);
     const edge = edgeTo(result, 'run', 'save');
-    // The parent's slot is a `B`; binding the subclass's `A` would be a wrong edge.
-    if (edge) expect(result.nodes.get(edge.calleeId)?.className).toBe('B');
+    // The parent's slot is a `B`; binding the subclass's `A` would be a wrong edge. Asserted
+    // unconditionally: an `if (edge)` guard would let a future recall regression silently pass
+    // the only test protecting this fix.
+    expect(edge).toBeDefined();
+    expect(result.nodes.get(edge!.calleeId)?.className).toBe('B');
   });
 });
 
@@ -789,7 +794,7 @@ describe('round-3 refusals and recall', () => {
     expect(anyEdgeNamed(result, 'run', 'save')).toEqual([]);
   });
 
-  it('walks Python bases depth-first, matching attribute lookup order', async () => {
+  it('refuses when the ancestor set offers two different types for one field', async () => {
     const result = await new CallGraphBuilder().build([
       py('repo.py', 'class Repo:\n    def save(self, x):\n        return x\n'),
       py('other.py', 'class Other:\n    def save(self, x):\n        return x + 1\n'),
@@ -814,9 +819,77 @@ describe('round-3 refusals and recall', () => {
         '',
       ].join('\n')),
     ]);
-    const edge = edgeTo(result, 'run', 'save');
-    // MRO of C is C, A, Z, B — so Z's `Other` answers, never B's `Repo`.
-    if (edge) expect(result.nodes.get(edge.calleeId)?.className).toBe('Other');
+    // `C(A, B)` reaches `Other` through A→Z and `Repo` through B. WHICH one Python picks depends
+    // on C3 linearization, and a shared base makes both a breadth-first and a depth-first walk
+    // wrong on some shape — so two distinct types across the ancestors refuse, exactly as two
+    // declarations of one field do.
+    expect(anyEdgeNamed(result, 'run', 'save')).toEqual([]);
+  });
+
+  it('still binds when the ancestor set agrees on one type', async () => {
+    const result = await new CallGraphBuilder().build([
+      py('repo.py', 'class Repo:\n    def save(self, x):\n        return x\n'),
+      py('s.py', [
+        'from repo import Repo',
+        '',
+        'class Base:',
+        '    def __init__(self):',
+        '        self.dep = Repo()',
+        '',
+        'class Service(Base):',
+        '    def run(self):',
+        '        return self.dep.save(1)',
+        '',
+      ].join('\n')),
+    ]);
+    expect(edgeTo(result, 'run', 'save')?.confidence).toBe('receiver_inferred');
+  });
+
+  it('sees `static` through a DECORATOR, and still reads a decorated parameter property', async () => {
+    const decorated = await new CallGraphBuilder().build([
+      ts('caches.ts', 'export class GlobalCache { fetch(k: string) { return k; } }'),
+      ts('svc.ts', `
+        import { GlobalCache } from './caches';
+        export class Service {
+          @Inject() static cache: GlobalCache;
+          run() { return this.cache.fetch('k'); }
+        }
+      `),
+    ]);
+    expect(anyEdgeNamed(decorated, 'run', 'fetch')).toEqual([]);
+
+    // The canonical NestJS/Angular injection shape — and the most common real chained receiver
+    // in TypeScript. A decorator must not make it look like a plain local parameter.
+    const injected = await new CallGraphBuilder().build([
+      ts('repo.ts', 'export class Repo { save(x: number) { return x; } }'),
+      ts('svc.ts', `
+        import { Repo } from './repo';
+        export class Service {
+          constructor(@Inject() private readonly repo: Repo) {}
+          run() { return this.repo.save(1); }
+        }
+      `),
+    ]);
+    expect(edgeTo(injected, 'run', 'save')?.confidence).toBe('receiver_inferred');
+  });
+
+  it('refuses a third-party Python import that a same-named repo file would otherwise vouch for', async () => {
+    const result = await new CallGraphBuilder().build([
+      py('src/app/requests.py', 'def helper():\n    return 1\n'),
+      py('src/app/http.py', 'class Session:\n    def get(self, url):\n        return url\n'),
+      py('src/app/svc.py', [
+        'from requests import Session',
+        '',
+        'class Service:',
+        '    def __init__(self, s: Session):',
+        '        self.s = s',
+        '',
+        '    def run(self):',
+        '        return self.s.get(1)',
+        '',
+      ].join('\n')),
+    ]);
+    expect(anyEdgeNamed(result, 'run', 'get')).toEqual([]);
   });
 
   it('resolves an absolute Python import in a `src/`-layout package', async () => {
@@ -869,6 +942,19 @@ describe('round-3 refusals and recall', () => {
 // ---------------------------------------------------------------------------
 // Additivity & scope
 // ---------------------------------------------------------------------------
+
+describe('the per-file fact cap', () => {
+  it('truncates deterministically and never past the cap', () => {
+    const facts = Array.from({ length: RECEIVER_FIELD_FACT_CAP + 50 }, (_, i) => ({
+      className: 'C', field: `f${String(i).padStart(5, '0')}`, type: 'T',
+    }));
+    const a = finalizeReceiverFieldFacts([...facts]);
+    const b = finalizeReceiverFieldFacts([...facts].reverse());
+    expect(a.length).toBe(RECEIVER_FIELD_FACT_CAP);
+    // Sorted before slicing, so WHICH facts survive is a function of the set, not of parse order.
+    expect(b).toEqual(a);
+  });
+});
 
 describe('receiver resolution scope', () => {
   it('declares exactly the languages whose extractors collect facts', () => {

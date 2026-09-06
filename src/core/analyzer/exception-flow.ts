@@ -663,8 +663,10 @@ function isSelfRootedMember(node: Node, language: string): boolean {
   // so a single peel yields the cast/await node itself and the member test below then fails.
   // `type_assertion` (`<Dep>this.dep`) puts its type arguments FIRST, so its expression is the
   // last named child, not the first.
+  // The hop budget only guards against a pathological tree; real code never nests wrappers
+  // deeply, and exhausting it falls back to `other`, the pre-existing classification.
   let peeled: Node | null = node;
-  for (let hops = 0; peeled && RECEIVER_WRAPPER_TYPES.has(peeled.type) && hops < 8; hops++) {
+  for (let hops = 0; peeled && RECEIVER_WRAPPER_TYPES.has(peeled.type) && hops < 64; hops++) {
     peeled = peeled.type === 'type_assertion'
       ? peeled.namedChildren[peeled.namedChildren.length - 1] ?? null
       : peeled.namedChildren[0] ?? null;

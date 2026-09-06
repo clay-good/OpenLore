@@ -49,7 +49,7 @@ import { synthesizeTypeHierarchyEdges, type RawMethodCall } from './cha.js';
 import {
   buildReceiverFieldRegistry,
   collectReceiverFieldFacts,
-  finalize as finalizeReceiverFieldFacts,
+  finalizeReceiverFieldFacts,
   receiverFieldKey,
   type ReceiverFieldFact,
 } from './receiver-registry.js';
@@ -5737,21 +5737,23 @@ export class CallGraphBuilder {
       const queue: string[] = includeOwnClass
         ? [callerNode.className]
         : [...(relationships.get(`${callerNode.filePath}::${callerNode.className}`)?.parentClasses ?? [])];
+      // Collect from the WHOLE ancestor set rather than stopping at the first hit. Which
+      // declaration a language actually picks depends on its own linearization — Python's C3
+      // puts a shared base LAST, so neither a breadth-first nor a depth-first walk is right in
+      // general, and each is wrong on a different hierarchy shape. So: one distinct type across
+      // the ancestors binds, and two refuse. That is the registry's existing conflict rule
+      // applied one level up, and it costs only the genuinely ambiguous hierarchy.
+      const found = new Set<string>();
       while (queue.length > 0) {
         const cls = queue.shift()!;
         if (seen.has(cls)) continue;
         seen.add(cls);
         const type = receiverFields.get(receiverFieldKey(callerNode.filePath, cls, field));
-        if (type) return type;
-        // DEPTH-first, left to right — a field is resolved by the language's own attribute
-        // lookup order, and Python's C3 linearization walks the first base's ancestors before
-        // the second base. A breadth-first queue answers `class C(A, B)` with B's declaration
-        // when A's grandparent declares the field, which is a wrong callee, not a missing one.
+        if (type) found.add(type);
         const rel = relationships.get(`${callerNode.filePath}::${cls}`);
-        const parents = (rel?.parentClasses ?? []).filter(p => !seen.has(p));
-        queue.unshift(...parents);
+        for (const p of rel?.parentClasses ?? []) if (!seen.has(p)) queue.push(p);
       }
-      return undefined;
+      return found.size === 1 ? [...found][0] : undefined;
     };
 
     const edges: CallEdge[] = [];
