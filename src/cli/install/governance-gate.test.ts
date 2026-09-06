@@ -12,10 +12,24 @@ import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runInstall, wireGovernanceGate } from './index.js';
+import { resolveTrustedHookLauncher } from '../git-hooks.js';
 import { OPENLORE_CONFIG_REL_PATH } from '../../constants.js';
 import { getDefaultConfig } from '../../core/services/config-manager.js';
 
 const execFileAsync = promisify(execFile);
+
+/**
+ * A commit gate must pin an EXTERNAL, immutable launcher — it must never execute
+ * code the repository being committed to can change — so `installPreCommitHook`
+ * refuses without a built `dist/`. The Linux unit job builds it first for exactly
+ * this reason ("Build trusted hook launcher", .github/workflows/ci.yml); the
+ * Windows job does not.
+ *
+ * Gated on that PRECONDITION rather than on the platform, so these tests run
+ * wherever the launcher resolves and are honestly skipped where it cannot — on any
+ * OS, including a developer machine that has not run `npm run build`.
+ */
+const launcherAvailable = (await resolveTrustedHookLauncher(tmpdir())) !== null;
 
 async function exists(p: string): Promise<boolean> {
   try {
@@ -34,7 +48,7 @@ async function writeConfig(dir: string, overrides: Record<string, unknown> = {})
   );
 }
 
-describe('install wires the decision trail', () => {
+describe.skipIf(!launcherAvailable)('install wires the decision trail', () => {
   let dir: string;
   let home: string;
 
@@ -150,7 +164,7 @@ describe('install wires the decision trail', () => {
   });
 });
 
-describe('the gate reports honestly when it cannot be installed', () => {
+describe.skipIf(!launcherAvailable)('the gate reports honestly when it cannot be installed', () => {
   let dir: string;
 
   beforeEach(async () => {
