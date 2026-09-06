@@ -104,6 +104,12 @@ function enclosingClassName(node: RegistryNode | null, language: string): string
       // A `method_definition` under a `class_body` is a class method (keeps `this`); anywhere
       // else it is an object-literal method, which does not.
       if (cur.type === 'method_definition' && cur.parent?.type !== 'class_body') return undefined;
+      // In a STATIC method or a static block, `this` is the constructor, not an instance — so
+      // `this.cache = new T()` there writes the static slot, a different one from the instance
+      // field of the same name. The registry key has no static/instance dimension, so this must
+      // refuse for the same reason a `static` field declaration does.
+      if (cur.type === 'class_static_block') return undefined;
+      if (cur.type === 'method_definition' && isStaticMember(cur)) return undefined;
     }
     if (
       cur.type === 'class_declaration' ||
@@ -180,10 +186,11 @@ function isParameterProperty(parameter: RegistryNode): boolean {
   return /^\s*(?:public|private|protected|readonly)\b/.test(parameter.text);
 }
 
-/** A `static` field is a different slot from the instance field of the same name, and the registry
- *  key has no static/instance dimension — so a static declaration must never type a `this.` receiver.
+/** Is this member declared `static`? A static slot is a different one from the instance member of
+ *  the same name, and the registry key has no static/instance dimension — so neither a `static`
+ *  field declaration nor an assignment made inside a `static` method may type a `this.` receiver.
  *  The grammar uses one node type for both, so the modifier is read off the declaration text. */
-function isStaticField(declaration: RegistryNode): boolean {
+function isStaticMember(declaration: RegistryNode): boolean {
   return /^\s*static\b/.test(declaration.text);
 }
 
@@ -206,7 +213,7 @@ function collectTypeScriptFacts(runQuery: (source: string) => RegistryMatch[]): 
       type: (type_annotation (type_identifier) @type)) @node
   `)) {
     const declaration = capture(m, 'node');
-    if (!declaration || isStaticField(declaration)) continue;
+    if (!declaration || isStaticMember(declaration)) continue;
     push(declaration, capture(m, 'field')?.text, capture(m, 'type')?.text);
   }
 
@@ -217,7 +224,7 @@ function collectTypeScriptFacts(runQuery: (source: string) => RegistryMatch[]): 
       value: (new_expression constructor: (identifier) @type)) @node
   `)) {
     const declaration = capture(m, 'node');
-    if (!declaration || isStaticField(declaration)) continue;
+    if (!declaration || isStaticMember(declaration)) continue;
     push(declaration, capture(m, 'field')?.text, capture(m, 'type')?.text);
   }
 

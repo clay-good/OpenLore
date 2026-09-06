@@ -53,6 +53,18 @@ export const GO_IMPORT_PACKAGE_PREFIX = '\0go-package:';
 
 /** Reserved metadata entry mapping a source-level qualifier to its declared type name. */
 export const IMPORT_QUALIFIER_PREFIX = '\0qualifier:';
+
+/**
+ * Key prefix marking a name the file imports from a specifier this map could NOT resolve to an
+ * in-project file — a package, or a path alias (change: shrink-receiver-resolution-boundary).
+ *
+ * The source STATES where that name comes from, and it is not here. Without this, a consumer that
+ * only checks "did the map bind it?" cannot tell "not imported at all" from "imported from
+ * somewhere I cannot see", and binds `import { Client } from 'pg'` to an in-project class that
+ * happens to share the name and the method. `\0`-prefixed like the other reserved keys, so it can
+ * never collide with a real identifier.
+ */
+export const EXTERNAL_IMPORT_PREFIX = '\0external:';
 export const IMPORT_TOP_LEVEL_QUALIFIER = '\0top-level';
 
 type TargetIndex = Map<string, Set<string>>;
@@ -533,6 +545,15 @@ export function buildResolvedImportMap(
 
   const map: ImportMap = buildStaticLanguageImportMaps(files);
   const reExported = new Set<string>();
+  // Extensionless paths of every file in the analysis, so a Python absolute import can be told
+  // apart from a third-party one (`from repo import Repo` vs `from psycopg import Client`).
+  const projectModules = new Set<string>();
+  for (const f of files) {
+    // `stripModuleExt` knows only the TS/JS extensions; a Python module path needs `.py` off too.
+    projectModules.add(stripModuleExt(f.path).replace(/\.py$/, ''));
+    // A package import (`from pkg import X`) reaches `pkg/__init__.py`.
+    if (f.path.endsWith('/__init__.py')) projectModules.add(f.path.slice(0, -'/__init__.py'.length));
+  }
   for (const f of files) {
     let imports;
     const tsjs = f.language === 'TypeScript' || f.language === 'JavaScript';
@@ -543,7 +564,25 @@ export function buildResolvedImportMap(
     const fileMap = new Map<string, string>();
     const dir = posix.dirname(f.path);
     for (const imp of imports) {
-      if (!imp.isRelative) continue;
+      if (!imp.isRelative) {
+        // A non-relative specifier is not automatically third-party. In TS/JS a bare specifier
+        // resolves through node_modules (or a path alias this map cannot follow), so the name is
+        // NOT from this project. In Python an absolute import is the ordinary way to reach a
+        // sibling package, so it is external only when no project file matches the dotted module.
+        // Recording which names arrive from an unresolvable specifier lets a consumer REFUSE
+        // instead of falling back to a repo-wide namesake, which the source has just contradicted
+        // (change: shrink-receiver-resolution-boundary). No binding is recorded either way —
+        // there is no in-project target to bind to.
+        const pythonModule = f.language === 'Python'
+          ? imp.source.replaceAll('.', '/')
+          : undefined;
+        if (!pythonModule || !projectModules.has(pythonModule)) {
+          for (const name of imp.importedNames) {
+            fileMap.set(`${EXTERNAL_IMPORT_PREFIX}${name}`, imp.source);
+          }
+        }
+        continue;
+      }
       // Python relative imports use leading-dot module syntax (`from .impl import x`,
       // `from ..pkg.mod import y`) — N dots = package levels up (1 = current), the rest
       // is a dotted path. posix.join would treat `.impl` as a filename, so resolve the

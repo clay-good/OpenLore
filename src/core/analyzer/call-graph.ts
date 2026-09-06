@@ -19,6 +19,7 @@ import type { ImportMap } from './import-resolver-bridge.js';
 import {
   buildResolvedImportMap,
   GO_IMPORT_PACKAGE_PREFIX,
+  EXTERNAL_IMPORT_PREFIX,
   IMPORT_QUALIFIER_PREFIX,
   IMPORT_TOP_LEVEL_QUALIFIER,
   PACKAGE_SCOPE_IMPORT,
@@ -5694,7 +5695,12 @@ export class CallGraphBuilder {
       typeName: string,
     ): AffinityPick => {
       if (cands.length === 0) return { kind: 'none' };
-      const importedFrom = callImportMap.get(callerFile)?.get(typeName);
+      const fileImports = callImportMap.get(callerFile);
+      // The file imports this name from a specifier that resolved to no in-project file — a
+      // package, or a path alias. The source SAYS the type is not from here, so a repo-wide
+      // namesake is not a fallback, it is a contradiction.
+      if (fileImports?.has(`${EXTERNAL_IMPORT_PREFIX}${typeName}`)) return { kind: 'none' };
+      const importedFrom = fileImports?.get(typeName);
       if (importedFrom) {
         const matched = cands.filter(c => matchesImportedTarget(c.filePath, importedFrom));
         if (matched.length === 1) return { kind: 'unique', node: matched[0] };
@@ -5718,10 +5724,15 @@ export class CallGraphBuilder {
     const resolveReceiverFieldType = (
       callerNode: FunctionNode,
       field: string,
+      includeOwnClass: boolean,
     ): string | undefined => {
       if (!callerNode.className) return undefined;
       const seen = new Set<string>();
-      const queue: string[] = [callerNode.className];
+      // `super.<field>` reads the PARENT's slot; seeding the walk with the caller's own class
+      // would let a subclass field of a different type answer for it.
+      const queue: string[] = includeOwnClass
+        ? [callerNode.className]
+        : [...(relationships.get(`${callerNode.filePath}::${callerNode.className}`)?.parentClasses ?? [])];
       while (queue.length > 0) {
         const cls = queue.shift()!;
         if (seen.has(cls)) continue;
@@ -5777,7 +5788,11 @@ export class CallGraphBuilder {
       // strategies below key off the exact receiver token, and the import strategy would bind
       // `this.parser.parse()` to an unrelated imported `parser`.
       if (raw.receiverField) {
-        const fieldType = resolveReceiverFieldType(callerNode, raw.receiverField);
+        const fieldType = resolveReceiverFieldType(
+          callerNode,
+          raw.receiverField,
+          raw.calleeObject !== 'super',
+        );
         if (fieldType) {
           const picked = pickReceiverTarget(
             trie.findByQualifiedName(fieldType, raw.calleeName),
