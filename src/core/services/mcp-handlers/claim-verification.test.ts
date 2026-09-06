@@ -420,7 +420,7 @@ describe('verify_claim — a negative verdict is capped at a dynamic boundary', 
       files: files.map(f => ({
         filePath: f.filePath,
         language: f.language,
-        sites: [{ line: f.line, kind: f.kind, refusal: 'no-static-target', evidence: 'obj[name]()', moduleLevel: true }],
+        sites: [{ line: f.line, kind: f.kind, refusal: 'no-static-target', evidence: 'obj[name]()', unattributed: true }],
       })),
     }));
   }

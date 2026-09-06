@@ -40,7 +40,7 @@ function site(
   line: number,
   kind: DynamicBoundaryKind = 'reflective-invoke',
 ): DynamicBoundarySite {
-  return { line, kind, refusal: 'no-static-target', evidence: 'getattr(o, n)()', moduleLevel: true };
+  return { line, kind, refusal: 'no-static-target', evidence: 'getattr(o, n)()', unattributed: true };
 }
 
 function file(

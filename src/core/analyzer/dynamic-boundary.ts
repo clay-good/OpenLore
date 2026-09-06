@@ -142,10 +142,25 @@ export interface DynamicBoundarySite {
   line: number;
   kind: DynamicBoundaryKind;
   refusal: DynamicBoundaryRefusal;
-  /** The enclosing function's node id. Absent when the construct sits outside any function. */
+  /** The enclosing function's node id. Absent when no indexed symbol contains the construct. */
   symbolId?: string;
-  /** The construct is at module level — explicit, so an absent `symbolId` is never ambiguous. */
-  moduleLevel?: true;
+  /**
+   * No indexed symbol contains this construct. Explicit, so an absent `symbolId` is never silently
+   * ambiguous — but deliberately NOT called "module level", because the extractor cannot tell the
+   * two apart and one of them would be a false statement.
+   *
+   * `findEnclosingFunction` maps an offset onto the nodes the language extractor emitted. A miss
+   * means either the construct really is at module scope, OR it sits inside something that
+   * extractor does not model — and the second case is common: OpenLore's Python extractor emits no
+   * node for a dunder other than `__init__`, so every `getattr` inside `__eq__`, `__getstate__` or
+   * `__init_subclass__` misses. Dogfooding found 23 such sites across two Python repositories, each
+   * one asserting module scope from inside a function.
+   *
+   * Claiming module scope there would convert an UNKNOWN attribution into a confident false one,
+   * inside the one feature whose premise is disclosing unknown rather than implying absent. So the
+   * marker says only what is actually known: nothing in the index contains this.
+   */
+  unattributed?: true;
   /** Redacted, terminal-neutralized, truncated source of the matched construct. */
   evidence: string;
   /** `evidence` hit {@link DYNAMIC_BOUNDARY_EVIDENCE_MAX}. */
@@ -282,6 +297,30 @@ interface LanguageSpec {
    */
   nonLiteralArg?: Record<string, { index: number; kind: DynamicBoundaryKind }>;
   /**
+   * Rules that fire only when the call's RESULT IS INVOKED — `getattr(o, a)()` is a dispatch,
+   * `getattr(o, a)` is an attribute read. Recording the read would caveat every conclusion in the
+   * region on the strength of a dispatch that never happens; this module already excludes
+   * `operator.attrgetter` for exactly that reason, and the same reasoning applies to the bare form.
+   *
+   * The declared cost is a false negative: `h = getattr(o, a)` followed later by `h()` is not
+   * recorded. That is the module's stated bias, and it is the safer one — a false positive at a hub
+   * propagates its caveat across every file the hub can name.
+   */
+  invokeOnlyKinds?: Record<string, DynamicBoundaryKind>;
+  /**
+   * Rules suppressed when the declared argument is a literal that cannot be a callable — `None`,
+   * a number, a string. `setattr(self, "raw", None)` defines nothing dispatchable; it is
+   * `self.raw = None` spelled reflectively.
+   */
+  nonCallableValueArg?: Record<string, number>;
+  /**
+   * Node types that, as the RECEIVER of a computed member call, mean the subscript is a type
+   * expression rather than a dispatch table. See {@link isGenericSubscription}.
+   */
+  genericSubscriptReceiverPattern?: RegExp;
+  /** Require a lowercase letter in the receiver, so SCREAMING_CASE constants stay dispatch tables. */
+  genericSubscriptRequiresLowercase?: boolean;
+  /**
    * Whether a {@link LanguageSpec.calleeKinds} name still counts when called on an arbitrary
    * receiver (`mailer.send(:deliver)`).
    *
@@ -310,7 +349,7 @@ export const DYNAMIC_BOUNDARY_LANG_SPECS: Record<string, LanguageSpec> = {
       eval: 'code-eval',
       exec: 'code-eval',
       compile: 'code-eval',
-      getattr: 'reflective-invoke',
+      // `getattr` lives in `invokeOnlyKinds`: the bare form reads an attribute, it does not dispatch.
       setattr: 'metaprogrammed-definition',
       // `__import__` is handled by `nonLiteralArg`, not here: `__import__("os")` names its module
       // statically and is an ordinary resolvable import, so only a computed name is a boundary.
@@ -326,6 +365,18 @@ export const DYNAMIC_BOUNDARY_LANG_SPECS: Record<string, LanguageSpec> = {
     staticIndexTypes: ['string', 'integer'],
     literalTypes: ['string'],
     selectorIndex: { getattr: 1, setattr: 1, import_module: 1, methodcaller: 0 },
+    // `getattr` is an attribute READ unless its result is called.
+    invokeOnlyKinds: { getattr: 'reflective-invoke' },
+    // `setattr(o, "x", None)` is an assignment, not a definition.
+    nonCallableValueArg: { setattr: 2 },
+    // PEP 484 generic subscription — `ConfigAttribute[bool]("TESTING")` — parses as a subscript
+    // call indistinguishable from `handlers[name]()`. All three of Flask's `computed-member` sites
+    // were this. Narrowing on the receiver's casing is a documented false-negative trade: a
+    // dispatch table named in PascalCase stops being recorded, which is the safe direction.
+    genericSubscriptReceiverPattern: /^[A-Z][A-Za-z0-9_]*(\.[A-Z][A-Za-z0-9_]*)*$/,
+    // A SCREAMING_CASE receiver is a module constant — `TABLE[action]()` is the dispatch table this
+    // rule exists to catch, not a generic. Only a name carrying a lowercase letter reads as a type.
+    genericSubscriptRequiresLowercase: true,
     nonLiteralArg: { __import__: { index: 0, kind: 'dynamic-import' } },
     diPackages: ['dependency_injector', 'injector', 'punq', 'lagom'],
     diMethods: ['resolve', 'provide'],
@@ -788,7 +839,7 @@ export function matchDynamicBoundaries(
         const index = field(fn, 'index') ?? field(fn, 'subscript')
           ?? childrenOf(fn).slice(1).find(c => c.type !== '[' && c.type !== ']');
         const staticIndex = !!index && !!spec.staticIndexTypes?.includes(index.type);
-        if (!staticIndex) record('computed-member', n);
+        if (!staticIndex && !isGenericSubscription(source, fn, spec)) record('computed-member', n);
       } else if (text) {
         // A dotted rule is checked first, on the FULL dotted text: `Reflect.get` must never be read
         // as a bare `get`.
@@ -799,11 +850,30 @@ export function matchDynamicBoundaries(
           || isSelfDotted(text)
           || !!spec.calleeKindsOnAnyReceiver;
         const bare = lastSegment(text);
+        // 0. An invoke-only rule fires from the OUTER call, reading the inner call's selector:
+        //    `getattr(o, a)()` dispatches, `getattr(o, a)` reads. Checked before every other rule
+        //    so the inner call's own visit (which shares this offset) is already deduped away.
+        if (fn && spec.callTypes.includes(fn.type) && spec.invokeOnlyKinds) {
+          const innerName = lastSegment(calleeText(source, fn) ?? '');
+          const innerKind = spec.invokeOnlyKinds[innerName];
+          if (innerKind) {
+            record(innerKind, n, literalTargetOf(source, fn, spec, spec.selectorIndex?.[innerName]));
+            for (const c of childrenOf(n).reverse()) stack.push(c);
+            continue;
+          }
+        }
         // 2. A rule that fires only on a NON-literal argument: `import(spec)` is a boundary,
         //    `import('./known')` is an ordinary statically resolvable import.
         const dyn = bareApplies ? spec.nonLiteralArg?.[bare] : undefined;
         const kind = dotted ?? (bareApplies ? spec.calleeKinds[bare] : undefined);
-        if (dyn && !kind) {
+        // A rule whose declared value argument is a literal that cannot be a callable defines
+        // nothing dispatchable — `setattr(self, "raw", None)` is `self.raw = None`.
+        const nonCallableAt = bareApplies ? spec.nonCallableValueArg?.[bare] : undefined;
+        const inert = nonCallableAt !== undefined
+          && isNonCallableLiteral(source, n, spec, nonCallableAt);
+        if (inert) {
+          // Recognised and deliberately not recorded.
+        } else if (dyn && !kind) {
           if (literalTargetOfAnyShape(source, n, spec, dyn.index) === undefined) record(dyn.kind, n);
         } else if (kind) {
           record(kind, n, literalTargetOf(source, n, spec, spec.selectorIndex?.[bare]));
@@ -862,6 +932,47 @@ function literalTargetOfAnyShape(
     if (spec.literalTypes.includes(c.type)) return textOf(source, c);
   }
   return undefined;
+}
+
+/**
+ * Is this subscript a TYPE expression rather than a dispatch table?
+ *
+ * `ConfigAttribute[bool]("TESTING")` and `handlers[name]()` parse identically — a subscript in
+ * callee position with an identifier index — and only types tell them apart, which a tree-sitter
+ * walk does not have. The receiver's casing is the one syntactic signal available, and the trade is
+ * declared: a dispatch table named in PascalCase stops being recorded. That is a false negative,
+ * which is the direction this module always errs in.
+ */
+function isGenericSubscription(
+  source: string,
+  subscript: DynamicBoundaryNode,
+  spec: LanguageSpec,
+): boolean {
+  if (!spec.genericSubscriptReceiverPattern) return false;
+  const receiver = field(subscript, 'value') ?? field(subscript, 'object') ?? childrenOf(subscript)[0];
+  if (!receiver) return false;
+  const text = textOf(source, receiver).trim();
+  if (!spec.genericSubscriptReceiverPattern.test(text)) return false;
+  return !spec.genericSubscriptRequiresLowercase || /[a-z]/.test(text);
+}
+
+/**
+ * Is the declared argument a literal that cannot be a callable? `None`/`null`, a number, a string,
+ * a boolean. Used to suppress a "definition" rule whose value plainly defines no dispatch.
+ */
+function isNonCallableLiteral(
+  source: string,
+  call: DynamicBoundaryNode,
+  spec: LanguageSpec,
+  index: number,
+): boolean {
+  const args = field(call, 'arguments') ?? childrenOf(call).find(c => /argument/.test(c.type));
+  if (!args) return false;
+  const actual = childrenOf(args).filter(c => c.type !== ',' && c.type !== '(' && c.type !== ')');
+  const value = actual[index];
+  if (!value) return false;
+  if (spec.literalTypes.includes(value.type)) return true;
+  return /^(none|null|nil|true|false|-?\d[\d_.]*)$/i.test(textOf(source, value).trim());
 }
 
 /**
@@ -948,7 +1059,7 @@ export function finalizeDynamicBoundarySites(
       line: c.line,
       kind: c.kind,
       refusal,
-      ...(c.symbolId ? { symbolId: c.symbolId } : { moduleLevel: true as const }),
+      ...(c.symbolId ? { symbolId: c.symbolId } : { unattributed: true as const }),
       evidence: c.evidence,
       ...(c.evidenceTruncated ? { evidenceTruncated: true as const } : {}),
     });

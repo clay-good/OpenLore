@@ -120,11 +120,11 @@ describe('per-language matching', () => {
     const sites = await sitesOf('a.py', 'Python', `
 import importlib
 
-def dispatch(handler, action, name):
+def dispatch(handler, action, name, fn):
     getattr(handler, action)()
     eval("1 + 1")
     importlib.import_module(name)
-    setattr(handler, name, None)
+    setattr(handler, name, fn)
     TABLE[action]()
 `);
     expect(kindsOf(sites)).toEqual([
@@ -250,7 +250,7 @@ import importlib
 mod = importlib.import_module(NAME)
 `);
     expect(sites).toHaveLength(1);
-    expect(sites[0].moduleLevel).toBe(true);
+    expect(sites[0].unattributed).toBe(true);
     expect(sites[0].symbolId).toBeUndefined();
   });
 
@@ -370,7 +370,7 @@ def f():
 
 describe('bounding and rollup', () => {
   const site = (line: number, kind: DynamicBoundaryKind = 'code-eval'): DynamicBoundarySite => ({
-    line, kind, refusal: 'no-static-target', evidence: 'eval(x)', moduleLevel: true,
+    line, kind, refusal: 'no-static-target', evidence: 'eval(x)', unattributed: true,
   });
 
   it('a file over the site cap keeps the exact count and discloses truncation', () => {
@@ -746,8 +746,7 @@ def run():
     return 1
 
 def dispatch(o):
-    x = getattr(o, "run"); run()
-    return x
+    getattr(o, "run")(); run()
 `);
     expect(sites.some(s => s.kind === 'reflective-invoke')).toBe(true);
   });
@@ -852,5 +851,66 @@ func Go(o any) {
 `);
     expect(sites).toHaveLength(1);
     expect(sites[0].refusal).not.toBe('no-static-target');
+  });
+});
+
+describe('narrowings found by dogfooding real repositories', () => {
+  it('a bare getattr is an attribute READ, not a dispatch', async () => {
+    // `self[key] = getattr(obj, key)` invokes nothing. Recording it caveats every conclusion in
+    // the region on the strength of a dispatch that never happens — and a false positive at a hub
+    // propagates its caveat across every file the hub can name.
+    const read = await sitesOf('a.py', 'Python', `
+def copy(obj, target, key):
+    target[key] = getattr(obj, key)
+`);
+    expect(read).toEqual([]);
+
+    const invoked = await sitesOf('b.py', 'Python', `
+def dispatch(obj, action):
+    return getattr(obj, action)()
+`);
+    expect(kindsOf(invoked)).toEqual(['reflective-invoke']);
+  });
+
+  it('setattr with a value that cannot be a callable defines nothing dispatchable', async () => {
+    // `setattr(self, "raw", None)` is `self.raw = None` spelled reflectively.
+    expect(await sitesOf('a.py', 'Python', 'def f(o):\n    setattr(o, "raw", None)\n')).toEqual([]);
+    expect(await sitesOf('b.py', 'Python', 'def f(o):\n    setattr(o, "n", 0)\n')).toEqual([]);
+    // …but rebinding a name to a callable is exactly what the kind is for.
+    const real = await sitesOf('c.py', 'Python', 'def f(o, fn):\n    setattr(o, "read", fn)\n');
+    expect(kindsOf(real)).toEqual(['metaprogrammed-definition']);
+  });
+
+  it('a PEP 484 generic subscription is a type, not a dispatch table', async () => {
+    // `ConfigAttribute[bool]("TESTING")` parses identically to `handlers[name]()`; only the
+    // receiver's casing separates them. All three of Flask's computed-member sites were this.
+    const generic = await sitesOf('a.py', 'Python', `
+class Config:
+    testing = ConfigAttribute[bool]("TESTING")
+`);
+    expect(generic).toEqual([]);
+
+    // A SCREAMING_CASE receiver is a module constant — the dispatch table this rule exists for.
+    const table = await sitesOf('b.py', 'Python', 'def f(action):\n    return TABLE[action]()\n');
+    expect(kindsOf(table)).toEqual(['computed-member']);
+
+    // …and so is an ordinary lowercase one.
+    const lower = await sitesOf('c.py', 'Python', 'def f(handlers, name):\n    return handlers[name]()\n');
+    expect(kindsOf(lower)).toEqual(['computed-member']);
+  });
+
+  it('a construct no indexed symbol contains is unattributed, never claimed module-level', async () => {
+    // Python's extractor emits no node for a dunder other than `__init__`, so a construct inside
+    // `__eq__` finds no enclosing symbol. Claiming module scope there is a false statement — 23 such
+    // sites were found across two real repositories.
+    const sites = await sitesOf('a.py', 'Python', `
+class Response:
+    def __eq__(self, other):
+        return getattr(other, "value", None)()
+`);
+    expect(sites).toHaveLength(1);
+    expect(sites[0].symbolId).toBeUndefined();
+    expect(sites[0].unattributed).toBe(true);
+    expect(JSON.stringify(sites[0])).not.toContain('moduleLevel');
   });
 });

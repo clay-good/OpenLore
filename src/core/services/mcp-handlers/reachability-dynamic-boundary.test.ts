@@ -89,7 +89,7 @@ async function mockArtifacts(sites: SiteSpec[], imports: Array<[string, string]>
     version: 1, totalSites: sites.length, totalFiles: sites.length, byKind: [], byLanguage: [],
     files: sites.map(s => ({
       filePath: s.filePath, language: s.language,
-      sites: [{ line: s.line, kind: s.kind, refusal: 'no-static-target', evidence: 'o[n]()', moduleLevel: true }],
+      sites: [{ line: s.line, kind: s.kind, refusal: 'no-static-target', evidence: 'o[n]()', unattributed: true }],
     })),
   }));
   // The loaders memoize per directory for a few seconds so a burst of composed handler calls does

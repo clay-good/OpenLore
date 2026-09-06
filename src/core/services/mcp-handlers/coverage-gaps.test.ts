@@ -367,7 +367,7 @@ describe('the also-dead label is withheld behind a dynamic boundary', () => {
       version: 1, totalSites: entries.length, totalFiles: entries.length, byKind: [], byLanguage: [],
       files: entries.map(e => ({
         filePath: e.filePath, language: e.language,
-        sites: [{ line: e.line, kind: e.kind, refusal: 'no-static-target', evidence: 'o[n]()', moduleLevel: true }],
+        sites: [{ line: e.line, kind: e.kind, refusal: 'no-static-target', evidence: 'o[n]()', unattributed: true }],
       })),
     }));
   }
