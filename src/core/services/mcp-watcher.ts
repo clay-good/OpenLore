@@ -143,7 +143,40 @@ const SQLITE_BUSY_RETRY_DELAYS_MS = [50, 150, 450] as const;
  * retry loop: after it, the watcher discloses the drop and — where a graph store
  * exists — records the files as stale, so the staleness outlives the log line.
  */
-const WATCH_MAX_EVENT_RETRIES = 3;
+export const WATCH_MAX_EVENT_RETRIES = 3;
+
+/**
+ * The budget for a failure that is TRANSIENT BY CONSTRUCTION, rather than possibly
+ * deterministic (issue #457).
+ *
+ * The bound above exists to stop a deterministic failure — ENOSPC, a genuine permission
+ * error — becoming a hot retry loop. Windows rename contention is not that. Measured on
+ * Windows: any open descriptor on the destination blocks the atomic replace, share-delete
+ * included, and the holder is usually OUR OWN reader — a tool call serving
+ * `llm-context.json` while the watcher publishes it. That descriptor WILL close. Waiting is
+ * the only way through, because there is no share mode a reader can adopt to step aside.
+ *
+ * Spending the same 3-strike budget on it is what turned a recoverable wait into an
+ * abandoned change: three attempts against a reader that happens to be busy, and the file
+ * was dropped until a full `analyze`. A read-heavy period must cost freshness for a few
+ * debounces, not until someone notices.
+ *
+ * Still BOUNDED, so the hot-loop protection the smaller budget buys is not given up: a
+ * destination held forever still ends in one loud, stale-recorded drop, just later.
+ */
+export const WATCH_MAX_CONTENTION_RETRIES = 12;
+
+/**
+ * Does `reason` name the Windows rename-contention class?
+ *
+ * Matched on the error CODE inside the message because that is what the flush lane carries
+ * — the batch handler stringifies before it gets here. Deliberately narrow: these three
+ * codes on a rename are the sharing-violation class, and anything else keeps the smaller
+ * budget.
+ */
+function isTransientContention(reason: string): boolean {
+  return /\b(EPERM|EACCES|EBUSY)\b/.test(reason) && /\brename\b/.test(reason);
+}
 
 /**
  * How long a single flush may run before the watcher says so, once, on stderr.
@@ -817,6 +850,7 @@ export class McpWatcher {
     reason: string,
   ): Promise<void> {
     process.stderr.write(`[mcp-watcher] error: ${reason}\n`);
+    const budget = isTransientContention(reason) ? WATCH_MAX_CONTENTION_RETRIES : WATCH_MAX_EVENT_RETRIES;
     const requeued: string[] = [];
     const abandoned: string[] = [];
     const requeue = (paths: readonly string[], into: Set<string>): void => {
@@ -830,7 +864,7 @@ export class McpWatcher {
           continue;
         }
         const attempts = (this.eventRetries.get(path) ?? 0) + 1;
-        if (attempts > WATCH_MAX_EVENT_RETRIES) {
+        if (attempts > budget) {
           this.eventRetries.delete(path);
           abandoned.push(path);
           continue;
@@ -849,7 +883,7 @@ export class McpWatcher {
         `[mcp-watcher] deferred ${requeued.length} change(s) for retry after that error\n`,
       );
     }
-    if (abandoned.length > 0) await this.abandonEvents(abandoned, WATCH_MAX_EVENT_RETRIES, reason);
+    if (abandoned.length > 0) await this.abandonEvents(abandoned, budget, reason);
   }
 
   /**

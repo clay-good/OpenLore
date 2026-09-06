@@ -50,7 +50,7 @@ vi.mock('../../utils/path-confinement.js', async (importOriginal) => {
   };
 });
 
-const { McpWatcher } = await import('./mcp-watcher.js');
+const { McpWatcher, WATCH_MAX_EVENT_RETRIES, WATCH_MAX_CONTENTION_RETRIES } = await import('./mcp-watcher.js');
 type Watcher = InstanceType<typeof McpWatcher>;
 
 interface Internals {
@@ -201,7 +201,9 @@ describe('McpWatcher flush durability (issue #451)', () => {
     // Bounded: the queue is empty, so nothing is left spinning.
     await until(() => inside(watcher).pending.size === 0 && !inside(watcher).running, 'the queue to settle');
     const attempts = stderr.filter((line) => /could not read/.test(line)).length;
-    expect(attempts).toBe(4); // 1 initial + WATCH_MAX_EVENT_RETRIES
+    // One initial attempt plus the budget. The unreadable lane is not the contention class,
+    // so it keeps the smaller of the two.
+    expect(attempts).toBe(1 + WATCH_MAX_EVENT_RETRIES);
   });
 
   it('re-queues a batch whose flush failed for an unrecognized reason', async () => {
@@ -238,7 +240,10 @@ describe('McpWatcher flush durability (issue #451)', () => {
 
     await until(() => said(/gave up on 1 change/), 'the watcher to disclose the abandoned batch');
     await until(() => internals.pending.size === 0 && !internals.running, 'the queue to settle');
-    expect(stderr.filter((line) => /error: EIO/.test(line)).length).toBe(4); // 1 + 3 retries
+    // Derived, like the others: EIO is the DETERMINISTIC class, so it draws that budget.
+    // The last literal '4' in this file, and the same trap - correct today, quietly wrong
+    // the day either budget moves, while still reading as a deliberate expectation.
+    expect(stderr.filter((line) => /error: EIO/.test(line)).length).toBe(1 + WATCH_MAX_EVENT_RETRIES);
     // The single-flight guard is released, so the watcher is not wedged.
     expect(internals.running).toBe(false);
   });
@@ -295,8 +300,34 @@ describe('McpWatcher flush durability (issue #451)', () => {
 
     await until(() => said(/gave up on 1 change/), 'the watcher to abandon the change');
     await until(() => internals.pending.size === 0 && !internals.running, 'the queue to settle');
-    expect(stderr.filter((line) => /error: EPERM/.test(line)).length).toBe(4); // 1 + 3 retries
+    // One initial attempt plus the budget — DERIVED, because an `EPERM … rename` is the
+    // transient-contention class and spends the larger budget (#457). A literal here would
+    // assert the number this test was written against rather than the property it names.
+    expect(stderr.filter((line) => /error: EPERM/.test(line)).length)
+      .toBe(1 + WATCH_MAX_CONTENTION_RETRIES);
     expect(internals.eventRetries.size).toBe(0);
+  });
+
+  it('outwaits a reader far longer than it retries a failure that may be deterministic', async () => {
+    // The whole of #457: the blocking descriptor on Windows is usually OUR OWN reader, and no
+    // share mode lets it step aside, so waiting is the only way through. Spending the
+    // deterministic-failure budget on that wait is what dropped a change while a reader
+    // happened to be busy. Both budgets stay BOUNDED — a destination held forever still ends
+    // in one loud, stale-recorded drop.
+    expect(WATCH_MAX_CONTENTION_RETRIES).toBeGreaterThan(WATCH_MAX_EVENT_RETRIES);
+
+    const foo = join(root, 'contended.ts');
+    await writeFile(foo, 'export function delta() {}\n', 'utf-8');
+    const watcher = makeWatcher();
+    const internals = inside(watcher);
+    vi.spyOn(internals, 'persistContext').mockRejectedValue(new Error('EIO: i/o error, write'));
+
+    internals.enqueue(foo);
+    await until(() => said(/gave up on 1 change/), 'the watcher to abandon the change');
+    await until(() => internals.pending.size === 0 && !internals.running, 'the queue to settle');
+    // An EIO is NOT the contention class, so it keeps the smaller budget.
+    expect(stderr.filter((line) => /error: EIO/.test(line)).length)
+      .toBe(1 + WATCH_MAX_EVENT_RETRIES);
   });
 
   it('lands the readable half of a mixed batch and still retries the unreadable half', async () => {
