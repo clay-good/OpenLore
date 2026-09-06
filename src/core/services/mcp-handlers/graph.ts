@@ -41,7 +41,8 @@ import {
   TRACE_PATH_DEFAULT_MAX_DEPTH,
   TRACE_PATH_MAX_PATHS,
 } from '../../../constants.js';
-import type { SerializedCallGraph, FunctionNode, AmbiguousCallSite, CallEdge, EdgeConfidence } from '../../analyzer/call-graph.js';
+import type { SerializedCallGraph, FunctionNode, AmbiguousCallSite, CallEdge } from '../../analyzer/call-graph.js';
+import { EDGE_CONFIDENCE_VALUES } from '../../analyzer/call-graph-types.js';
 import { callDistance } from '../../analyzer/call-graph.js';
 import type { DecisionNode } from '../../decisions/project.js';
 import { decisionContentProvenance } from '../served-content.js';
@@ -395,10 +396,7 @@ interface EdgeReceipt {
 
 const CALL_SITE_EVIDENCE_LIMIT = 8;
 const IMPACT_EVIDENCE_ENTRY_LIMIT = 128;
-const CALL_EDGE_CONFIDENCES = new Set<EdgeConfidence>([
-  'self_cls', 'type_inference', 'import', 're_export', 'http_endpoint',
-  'same_file', 'name_only', 'type_name', 'synthesized', 'external',
-]);
+const CALL_EDGE_CONFIDENCES = EDGE_CONFIDENCE_VALUES;
 
 function byteCompare(left: string, right: string): number {
   return Buffer.compare(Buffer.from(left), Buffer.from(right));

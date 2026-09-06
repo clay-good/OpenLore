@@ -291,6 +291,367 @@ describe('chained intra-object receivers the registry cannot type', () => {
 });
 
 // ---------------------------------------------------------------------------
+// The owner of a field write — receiver rebinding and unnameable owners
+// (round-1 adversarial review: five confirmed false-edge sources)
+// ---------------------------------------------------------------------------
+
+describe('the class that owns a field write', () => {
+  const repo = ts('repo.ts', 'export class WrongRepo { save(x: number) { return x; } }');
+
+  it('refuses a write inside a `function` expression, which rebinds `this`', async () => {
+    const result = await new CallGraphBuilder().build([
+      repo,
+      ts('service.ts', `
+        import { WrongRepo } from './repo';
+        export class Service {
+          init(emitter: any) { emitter.on('x', function () { this.store = new WrongRepo(); }); }
+          run() { return this.store.save(1); }
+        }
+      `),
+    ]);
+    expect(anyEdgeNamed(result, 'run', 'save')).toEqual([]);
+  });
+
+  it('refuses a write inside an object-literal method, which also rebinds `this`', async () => {
+    const result = await new CallGraphBuilder().build([
+      repo,
+      ts('service.ts', `
+        import { WrongRepo } from './repo';
+        export class Service {
+          setup() { return { boot() { this.store = new WrongRepo(); } }; }
+          run() { return this.store.save(1); }
+        }
+      `),
+    ]);
+    expect(anyEdgeNamed(result, 'run', 'save')).toEqual([]);
+  });
+
+  it('keeps a write inside an arrow function, which does NOT rebind `this`', async () => {
+    const result = await new CallGraphBuilder().build([
+      ts('repo.ts', 'export class Repo { save(x: number) { return x; } }'),
+      ts('service.ts', `
+        import { Repo } from './repo';
+        export class Service {
+          private repo: Repo;
+          init() { [1].forEach(() => { this.repo = new Repo(); }); }
+          run() { return this.repo.save(1); }
+        }
+      `),
+    ]);
+    expect(edgeTo(result, 'run', 'save')?.confidence).toBe('receiver_inferred');
+  });
+
+  it('refuses a field of an anonymous class expression rather than crediting the outer class', async () => {
+    const result = await new CallGraphBuilder().build([
+      repo,
+      ts('service.ts', `
+        import { WrongRepo } from './repo';
+        export class Service {
+          make() { return class { private store = new WrongRepo(); }; }
+          run() { return this.store.save(1); }
+        }
+      `),
+    ]);
+    expect(anyEdgeNamed(result, 'run', 'save')).toEqual([]);
+  });
+
+  it('refuses a Python write inside a nested `def`, which rebinds `self`', async () => {
+    const result = await new CallGraphBuilder().build([
+      py('repo.py', 'class WrongRepo:\n    def save(self, x):\n        return x\n'),
+      py('service.py', [
+        'from repo import WrongRepo',
+        '',
+        'class Service:',
+        '    def init(self):',
+        '        def handler(self):',
+        '            self.store = WrongRepo()',
+        '        return handler',
+        '',
+        '    def run(self):',
+        '        return self.store.save(1)',
+        '',
+      ].join('\n')),
+    ]);
+    expect(anyEdgeNamed(result, 'run', 'save')).toEqual([]);
+  });
+
+  it('does not let a `static` field type an instance receiver', async () => {
+    const result = await new CallGraphBuilder().build([
+      repo,
+      ts('service.ts', `
+        import { WrongRepo } from './repo';
+        export class Service {
+          static store: WrongRepo;
+          constructor(store: unknown) { (this as any).store = store; }
+          run() { return this.store.save(1); }
+        }
+      `),
+    ]);
+    expect(anyEdgeNamed(result, 'run', 'save')).toEqual([]);
+  });
+
+  it('does not treat a plain constructor parameter as a field', async () => {
+    const result = await new CallGraphBuilder().build([
+      ts('repo.ts', 'export class Repo { save(x: number) { return x; } }'),
+      ts('service.ts', `
+        import { Repo } from './repo';
+        export class Service {
+          constructor(repo: Repo) { void repo; }
+          run() { return this.repo.save(1); }
+        }
+      `),
+    ]);
+    expect(anyEdgeNamed(result, 'run', 'save')).toEqual([]);
+  });
+
+  it('does not mistake a capitalized LOCAL FUNCTION for a Python class', async () => {
+    const result = await new CallGraphBuilder().build([
+      py('repo.py', 'class Repo:\n    def save(self, x):\n        return x\n'),
+      py('service.py', [
+        'def Repo(a, b):',
+        '    return 1',
+        '',
+        'class Service:',
+        '    def __init__(self):',
+        '        self.repo = Repo(1, 2)',
+        '',
+        '    def run(self):',
+        '        return self.repo.save(1)',
+        '',
+      ].join('\n')),
+    ]);
+    expect(anyEdgeNamed(result, 'run', 'save')).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The type name's ORIGIN must be proven, not assumed
+// ---------------------------------------------------------------------------
+
+describe('binding the declared type name', () => {
+  it('never binds a namesake elsewhere when the import says the type comes from another file', async () => {
+    const result = await new CallGraphBuilder().build([
+      ts('sdk.ts', 'export class Client { connect() { return 1; } }'),
+      ts('unrelated/client.ts', 'export class Client { send(x: number) { return x; } }'),
+      ts('svc.ts', `
+        import { Client } from './sdk';
+        export class Service {
+          constructor(private client: Client) {}
+          run() { return this.client.send(1); }
+        }
+      `),
+    ]);
+    expect(anyEdgeNamed(result, 'run', 'send')).toEqual([]);
+  });
+
+  it('prefers the imported declaration over a same-named local one', async () => {
+    const result = await new CallGraphBuilder().build([
+      ts('sdk.ts', 'export class Client { send(x: number) { return x; } }'),
+      ts('svc.ts', `
+        import { Client } from './sdk';
+        export class Service {
+          constructor(private client: Client) {}
+          run() { return this.client.send(1); }
+        }
+      `),
+    ]);
+    const edge = edgeTo(result, 'run', 'send');
+    expect(edge?.confidence).toBe('receiver_inferred');
+    expect(result.nodes.get(edge!.calleeId)?.filePath).toBe('sdk.ts');
+  });
+
+  it('refuses a factory whose local declarations disagree on the return type', async () => {
+    const result = await new CallGraphBuilder().build([
+      ts('repo.ts', 'export class Repo { save(x: number) { return x; } }'),
+      ts('other.ts', 'export class Other { save(x: number) { return x; } }'),
+      ts('service.ts', `
+        import { Repo } from './repo';
+        import { Other } from './other';
+        // Two declarations of one name disagreeing on the return type. Invalid TypeScript,
+        // deliberately: the registry must refuse the name rather than pick whichever parsed
+        // first, and a parser-level fixture is the only way to reach that branch.
+        function makeRepo(): Repo { return new Repo(); }
+        function makeRepo(): Other { return new Other(); }
+        export class Service {
+          private repo: unknown;
+          constructor() { this.repo = makeRepo(); }
+          run() { return this.repo.save(1); }
+        }
+      `),
+    ]);
+    expect(anyEdgeNamed(result, 'run', 'save')).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Shapes the resolver must NOT quietly fabricate an edge for
+// ---------------------------------------------------------------------------
+
+describe('residue never falls through to another strategy', () => {
+  it('does not resolve a Python residue to the CALLER’s own same-named method', async () => {
+    const result = await new CallGraphBuilder().build([
+      py('service.py', [
+        'class Service:',
+        '    def save(self, x):',
+        '        return x',
+        '',
+        '    def run(self):',
+        '        return self.repo.save(1)',
+        '',
+      ].join('\n')),
+    ]);
+    expect(anyEdgeNamed(result, 'run', 'save')).toEqual([]);
+  });
+
+  it('mints no external leaf for a Python residue', async () => {
+    const result = await new CallGraphBuilder().build([
+      py('service.py', [
+        'class Service:',
+        '    def run(self):',
+        '        return self.repo.persist(1)',
+        '',
+      ].join('\n')),
+    ]);
+    expect(anyEdgeNamed(result, 'run', 'persist')).toEqual([]);
+    expect([...result.nodes.values()].some(n => n.isExternal && n.name.includes('persist'))).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Shapes that DO resolve, and the ones deliberately left to disclosure
+// ---------------------------------------------------------------------------
+
+describe('chained receiver shapes', () => {
+  const repo = ts('repo.ts', 'export class Repo { save(x: number) { return x; } }');
+  const svc = (body: string) => ts('service.ts', `
+    import { Repo } from './repo';
+    export class Service {
+      constructor(private repo: Repo) {}
+      ${body}
+    }
+  `);
+
+  it('resolves through `super.<field>`', async () => {
+    const result = await new CallGraphBuilder().build([
+      repo,
+      ts('service.ts', `
+        import { Repo } from './repo';
+        class Base { constructor(protected repo: Repo) {} }
+        export class Service extends Base {
+          run() { return super.repo.save(1); }
+        }
+      `),
+    ]);
+    expect(edgeTo(result, 'run', 'save')?.confidence).toBe('receiver_inferred');
+  });
+
+  it('resolves an awaited chained call', async () => {
+    const result = await new CallGraphBuilder().build([repo, svc('async run() { return await this.repo.save(1); }')]);
+    const edge = edgeTo(result, 'run', 'save');
+    expect(edge?.confidence).toBe('receiver_inferred');
+    expect(edge?.callType).toBe('awaited');
+  });
+
+  it('resolves inside a nested arrow within a class method', async () => {
+    const result = await new CallGraphBuilder().build([repo, svc('run() { return [1].map(n => this.repo.save(n)); }')]);
+    expect(edgeTo(result, 'run', 'save')?.confidence).toBe('receiver_inferred');
+  });
+
+  it('resolves a `#private` field receiver', async () => {
+    const result = await new CallGraphBuilder().build([
+      repo,
+      ts('service.ts', `
+        import { Repo } from './repo';
+        export class Service {
+          #repo: Repo;
+          constructor(repo: Repo) { this.#repo = repo; }
+          run() { return this.#repo.save(1); }
+        }
+      `),
+    ]);
+    expect(edgeTo(result, 'run', 'save')?.confidence).toBe('receiver_inferred');
+  });
+
+  it('resolves a JavaScript field constructed in place', async () => {
+    const result = await new CallGraphBuilder().build([
+      { path: 'repo.js', content: 'export class Repo { save(x) { return x; } }', language: 'JavaScript' },
+      {
+        path: 'service.js',
+        content: "import { Repo } from './repo';\nexport class Service {\n  constructor() { this.repo = new Repo(); }\n  run() { return this.repo.save(1); }\n}\n",
+        language: 'JavaScript',
+      },
+    ]);
+    expect(edgeTo(result, 'run', 'save')?.confidence).toBe('receiver_inferred');
+  });
+
+  it('resolves a Python class-body annotated field', async () => {
+    const result = await new CallGraphBuilder().build([
+      py('repo.py', 'class Repo:\n    def save(self, x):\n        return x\n'),
+      py('service.py', [
+        'from repo import Repo',
+        '',
+        'class Service:',
+        '    repo: Repo',
+        '',
+        '    def run(self):',
+        '        return self.repo.save(1)',
+        '',
+      ].join('\n')),
+    ]);
+    expect(edgeTo(result, 'run', 'save')?.confidence).toBe('receiver_inferred');
+  });
+
+  // DECLARED limitations. Each is a recall gap the change accepts, not a silent one: the sites
+  // are still classified `self-field` by exception-flow, so `analyze_error_propagation` discloses
+  // them. Pinned so a future change that closes one has to say so.
+  it('does NOT read a deeper chain (`this.a.b.m()`) — disclosed, never bound', async () => {
+    const result = await new CallGraphBuilder().build([
+      repo,
+      ts('service.ts', `
+        import { Repo } from './repo';
+        export class Service {
+          private inner = { repo: new Repo() };
+          run() { return this.inner.repo.save(1); }
+        }
+      `),
+    ]);
+    expect(anyEdgeNamed(result, 'run', 'save')).toEqual([]);
+  });
+
+  it('does NOT bind a builtin-shaped callee on a typed field — the noise filter runs first', async () => {
+    const result = await new CallGraphBuilder().build([
+      ts('coll.ts', 'export class Coll { map(x: number) { return x; } }'),
+      ts('service.ts', `
+        import { Coll } from './coll';
+        export class Service {
+          constructor(private items: Coll) {}
+          run() { return this.items.map(1); }
+        }
+      `),
+    ]);
+    expect(anyEdgeNamed(result, 'run', 'map')).toEqual([]);
+  });
+
+  it('requires a capitalized type name — a lowercase declaration does not type the field', async () => {
+    const result = await new CallGraphBuilder().build([
+      py('repo.py', 'class thing:\n    def save(self, x):\n        return x\n'),
+      py('service.py', [
+        'from repo import thing',
+        '',
+        'class Service:',
+        '    def __init__(self):',
+        '        self.repo = thing()',
+        '',
+        '    def run(self):',
+        '        return self.repo.save(1)',
+        '',
+      ].join('\n')),
+    ]);
+    expect(anyEdgeNamed(result, 'run', 'save')).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Additivity & scope
 // ---------------------------------------------------------------------------
 

@@ -416,6 +416,10 @@ describe('serialization round-trips the extractor’s own answer', () => {
     expect(facts).toBeDefined();
     expect(facts!.cfg?.size ?? 0).toBeGreaterThan(0);
     facts!.classRelationships = [{ className: 'Child', parentClasses: ['Base'], interfaces: [] }];
+    // change: shrink-receiver-resolution-boundary. Dropping these on a cache hit would silently
+    // un-resolve every chained intra-object edge in the file, so the cached graph would differ
+    // from a cold build — the exact failure the FACT_FORMAT_VERSION bump exists to prevent.
+    facts!.receiverFields = [{ className: 'Child', field: 'repo', type: 'Repo' }];
     facts!.dynamicDispatch = {
       events: [{
         group: 'TypeScript',
@@ -441,6 +445,7 @@ describe('serialization round-trips the extractor’s own answer', () => {
     expect(back.style).toEqual(facts!.style);
     expect(back.parseHealth).toEqual(facts!.parseHealth);
     expect(back.classRelationships).toEqual(facts!.classRelationships);
+    expect(back.receiverFields).toEqual(facts!.receiverFields);
     expect(back.dynamicDispatch).toEqual(facts!.dynamicDispatch);
     expect(back.httpCalls).toEqual(facts!.httpCalls);
     expect(back.httpDegradations).toEqual(facts!.httpDegradations);

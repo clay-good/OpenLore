@@ -40,9 +40,12 @@ set silently, and left the field's type looking uncalled.
    unresolved-intra-object one: here the callee's *provenance* is unknown, not merely unreached.
 
 **Explicitly NOT built:** flow-sensitive or cross-file type inference; typing a field from its
-usage; reassignment analysis; imported-factory return types (unreadable from this tree); and
-non-registry languages, which keep today's behaviour and are reported unsupported in the matrix
-rather than quietly unresolved.
+usage; reassignment analysis; imported-factory return types (unreadable from this tree); deeper
+chains (`this.a.b.m()`), computed receivers (`this.map['k'].m()`) and receivers obtained from a
+call (`self.get_dep().m()`), all of which stay disclosed rather than bound; callees dropped by the
+language's builtin-noise filter; and non-registry languages, which keep today's behaviour. Go is
+named as an open gap: its call query captures no chained receiver at all, so it records nothing for
+the shape — the capability matrix says so rather than implying every other language discloses it.
 
 ## Why this is in scope
 
@@ -58,11 +61,17 @@ LSP or type checker — the same posture as the rest of the analyzer.
   (`FACT_FORMAT_VERSION` bump, so a pre-change cached row cannot silently un-resolve a file),
   `exception-flow.ts`, `error-propagation.ts`, `language-support.ts`, `docs/language-support.md`,
   `docs/mcp-tools.md`.
-- **Specs:** `analyzer` — 2 ADDED (IntraObjectReceiverResolutionViaTypeRegistries,
-  ResidualReceiverBoundaryStaysDisclosed).
+- **Specs:** `analyzer` — 3 ADDED (IntraObjectReceiverResolutionViaTypeRegistries,
+  ResidualReceiverBoundaryStaysDisclosed, ChainedReceiverResidueIsScopedAndDeclared).
 - **Tool surface:** unchanged.
 - **Risk:** a wrong receiver type produces a wrong edge. Mitigated by binding only DECLARED types,
-  by refusing a field with conflicting declarations, by searching within one type rather than the
+  by treating an import binding for the type name as DECISIVE where one exists, by attributing a
+  field only to the class that provably owns it (no `this`-rebinding construct, no unnameable class
+  expression, no `static` slot, no plain constructor parameter, no capitalized local function), by
+  refusing a field with conflicting declarations, by searching within one type rather than the
   global name space, by requiring a unique candidate, and by keeping the chained shape out of every
   strategy that keys off the bare receiver token — including CHA, which would otherwise name-bind
-  `this.repo.save()` inside the caller's own hierarchy.
+  `this.repo.save()` inside the caller's own hierarchy. The one inference that remains is binding a
+  single repository-wide definition when no import binding exists — the same unique-name step the
+  rest of the ladder already makes, and unavoidable because Python's absolute intra-project imports
+  resolve to nothing.

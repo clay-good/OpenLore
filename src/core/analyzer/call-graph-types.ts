@@ -200,6 +200,11 @@ export interface AmbiguousCallSite {
   /** 1-based call-site line, when known. */
   line?: number;
   /** Which strategy hit the ambiguity. */
+  /** Field name of a chained intra-object receiver, when the refused site was one
+   *  (`repo` in `this.repo.save()`). Without it a disclosure renders the site as `this.save`,
+   *  naming a call that does not exist in the source
+   *  (change: shrink-receiver-resolution-boundary). */
+  receiverField?: string;
   strategy: AmbiguousStrategy;
   /** Candidate node ids (id-sorted, bounded to {@link AMBIGUOUS_CANDIDATE_CAP}). */
   candidateIds: string[];
@@ -265,6 +270,19 @@ export const CALL_DISTANCE_COSTS: Record<EdgeConfidence, number> = {
   // Unresolved external/stdlib leaf — excluded from internal traversal.
   external: Infinity,
 };
+
+/**
+ * Every {@link EdgeConfidence} value, DERIVED from {@link CALL_DISTANCE_COSTS} rather than restated.
+ *
+ * Three runtime validators used to carry their own hand-written copy of this set, and a new tier
+ * (`receiver_inferred`) was added to the union without them: the edges were written to SQLite and
+ * then silently dropped on every read, with one path declaring the freshly-written artifact
+ * invalid. `CALL_DISTANCE_COSTS` is a `Record<EdgeConfidence, number>`, so the compiler already
+ * forces it to be exhaustive — deriving from it makes that guarantee reach the validators too
+ * (change: shrink-receiver-resolution-boundary).
+ */
+export const EDGE_CONFIDENCE_VALUES: ReadonlySet<EdgeConfidence> =
+  new Set(Object.keys(CALL_DISTANCE_COSTS) as EdgeConfidence[]);
 
 /** Fallback cost for a malformed/legacy confidence value not in the enum. */
 const CALL_DISTANCE_FALLBACK = 3;

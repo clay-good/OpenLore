@@ -48,6 +48,7 @@ import { synthesizeTypeHierarchyEdges, type RawMethodCall } from './cha.js';
 import {
   buildReceiverFieldRegistry,
   collectReceiverFieldFacts,
+  finalize as finalizeReceiverFieldFacts,
   receiverFieldKey,
   type ReceiverFieldFact,
 } from './receiver-registry.js';
@@ -1215,7 +1216,7 @@ const TS_CALL_QUERY = `
                (member_expression
                  object: (member_expression
                    object: [(this) (super)] @call.self
-                   property: (property_identifier) @call.field)
+                   property: [(property_identifier) (private_property_identifier)] @call.field)
                  property: (property_identifier) @call.name)]) @call.node
 `;
 
@@ -5659,10 +5660,61 @@ export class CallGraphBuilder {
      *  (change: shrink-receiver-resolution-boundary). */
     const receiverFields = buildReceiverFieldRegistry(receiverFieldFacts);
 
+    /**
+     * Pick the target of a chained intra-object call, given the receiver's DECLARED type name.
+     *
+     * This deliberately does NOT reuse {@link pickByAffinity}. That ladder's last rung binds a
+     * lone repository-wide candidate, which is safe for its original callers — they pass the
+     * CALLER'S OWN CLASS as the qualifier, so the own-file rung has almost always fired already.
+     * Here the qualifier is an arbitrary type name that is usually declared somewhere else, so
+     * that rung becomes the DOMINANT path on a name whose true origin the import map often knows.
+     * `import { Client } from './sdk'` next to an unrelated `Client` elsewhere in the repository
+     * would bind to the unrelated one; a `Client` imported from an npm package — a type that
+     * leaves the project entirely — would bind to an in-project namesake.
+     *
+     * So an import binding, WHERE ONE EXISTS, is decisive rather than advisory:
+     *  - the caller imports the type name ⇒ only a candidate from that import target may bind.
+     *    No such candidate is a REFUSAL — never a fall-through to a namesake elsewhere, which is
+     *    the defect above;
+     *  - otherwise the type declared in the caller's own file wins;
+     *  - otherwise a single repository-wide definition binds, and two or more are disclosed as
+     *    ambiguous rather than guessed.
+     *
+     * The last rung is deliberate, not an oversight: import maps do not bind every real import
+     * (Python's absolute intra-project `from repo import Repo` resolves to nothing), so refusing
+     * there would refuse the ordinary case in a whole language. Its residual risk — a type
+     * imported from OUTSIDE the project that happens to share both its name and the called
+     * method with an in-project class — is the same unique-name inference the rest of the
+     * resolution ladder already makes, and is narrower here because the search is confined to
+     * one type's members rather than a global name space.
+     */
+    const pickReceiverTarget = (
+      cands: FunctionNode[],
+      callerFile: string,
+      typeName: string,
+    ): AffinityPick => {
+      if (cands.length === 0) return { kind: 'none' };
+      const importedFrom = callImportMap.get(callerFile)?.get(typeName);
+      if (importedFrom) {
+        const matched = cands.filter(c => matchesImportedTarget(c.filePath, importedFrom));
+        if (matched.length === 1) return { kind: 'unique', node: matched[0] };
+        return matched.length > 1 ? { kind: 'ambiguous', candidates: matched } : { kind: 'none' };
+      }
+      const own = cands.filter(c => c.filePath === callerFile);
+      if (own.length === 1) return { kind: 'unique', node: own[0] };
+      if (own.length > 1) return { kind: 'ambiguous', candidates: own };
+      return cands.length === 1
+        ? { kind: 'unique', node: cands[0] }
+        : { kind: 'ambiguous', candidates: cands };
+    };
+
     /** Type of a chained intra-object receiver (`repo` in `this.repo.save()`), walking the
-     *  enclosing class chain exactly as {@link resolveSelfMethod} does so an INHERITED field
-     *  still types. Returns nothing when the registry never saw the field, or refused it for
-     *  carrying two types — the caller then leaves the site unresolved rather than guessing. */
+     *  enclosing class chain exactly as {@link resolveSelfMethod} does, so a field inherited from
+     *  a base class declared IN THE CALLER'S OWN FILE still types. Both lookups are keyed on the
+     *  caller's path, so a base class in another file is a miss — honest-direction, and the same
+     *  limitation `resolveSelfMethod` already has. Returns nothing when the registry never saw the
+     *  field, or refused it for carrying two types; the caller then leaves the site unresolved
+     *  rather than guessing. */
     const resolveReceiverFieldType = (
       callerNode: FunctionNode,
       field: string,
@@ -5699,6 +5751,7 @@ export class CallGraphBuilder {
         callerId: r.callerId,
         calleeName: r.calleeName,
         calleeObject: r.calleeObject,
+        ...(r.receiverField ? { receiverField: r.receiverField } : {}),
         line: r.line,
         strategy,
         candidateIds: ids.slice(0, AMBIGUOUS_CANDIDATE_CAP),
@@ -5726,7 +5779,7 @@ export class CallGraphBuilder {
       if (raw.receiverField) {
         const fieldType = resolveReceiverFieldType(callerNode, raw.receiverField);
         if (fieldType) {
-          const picked = pickByAffinity(
+          const picked = pickReceiverTarget(
             trie.findByQualifiedName(fieldType, raw.calleeName),
             callerNode.filePath,
             fieldType,
@@ -6566,7 +6619,12 @@ function mergeScriptContainerResults(
       merged.classRelationships = [...(merged.classRelationships ?? []), ...result.classRelationships];
     }
     if (result.receiverFields?.length) {
-      merged.receiverFields = [...(merged.receiverFields ?? []), ...result.receiverFields];
+      // Re-finalized after the concat: each script lane finalized its OWN facts, so the union can
+      // hold duplicates in lane order, which would break the sorted-and-deduped invariant the
+      // persisted fact row is documented to have.
+      merged.receiverFields = finalizeReceiverFieldFacts(
+        [...(merged.receiverFields ?? []), ...result.receiverFields],
+      );
     }
     if (result.dynamicDispatch) {
       merged.dynamicDispatch ??= { events: [], callbacks: [] };

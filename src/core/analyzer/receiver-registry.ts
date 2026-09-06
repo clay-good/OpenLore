@@ -71,17 +71,46 @@ function isTypeName(name: string | undefined): name is string {
   return !!name && /^[A-Z]/.test(name);
 }
 
-/** Nearest enclosing class name, or undefined outside a class. Walks the parent chain, so it is
- *  correct for a field assigned deep inside a method body, not only at the class-body top level. */
-function enclosingClassName(node: RegistryNode | null): string | undefined {
+/**
+ * The class that OWNS a `this.`/`self.` field write at `node`, or undefined when no class provably
+ * does. Walks the parent chain, so it is correct for a field assigned deep inside a method body —
+ * but it refuses in the two cases where the nearest class is NOT the owner:
+ *
+ *  - **A receiver rebinding.** In TS/JS a `function` expression/declaration and an object-literal
+ *    method get their own `this`, so `emitter.on('x', function () { this.store = new T(); })`
+ *    inside a method says nothing about the enclosing class's `store`. Arrow functions and class
+ *    methods keep `this`, so they are walked through. In Python `self` is a parameter, so a `def`
+ *    nested inside another `def` rebinds it; one function hop (the method itself) is expected,
+ *    a second is a rebinding.
+ *  - **An unnameable owner.** A class EXPRESSION with no name (`return class { … }`) owns the
+ *    field, but cannot be named — so the field belongs to nobody the registry can key, and
+ *    continuing outward would misattribute it to the enclosing named class.
+ */
+function enclosingClassName(node: RegistryNode | null, language: string): string | undefined {
+  const python = language === 'Python';
+  let functionHops = 0;
   for (let cur = node; cur; cur = cur.parent) {
+    if (python) {
+      if (cur.type === 'function_definition' && ++functionHops > 1) return undefined;
+    } else {
+      if (
+        cur.type === 'function_declaration' ||
+        cur.type === 'function_expression' ||
+        cur.type === 'generator_function' ||
+        cur.type === 'generator_function_declaration'
+      ) {
+        return undefined;
+      }
+      // A `method_definition` under a `class_body` is a class method (keeps `this`); anywhere
+      // else it is an object-literal method, which does not.
+      if (cur.type === 'method_definition' && cur.parent?.type !== 'class_body') return undefined;
+    }
     if (
       cur.type === 'class_declaration' ||
       cur.type === 'class_definition' ||
       cur.type === 'class'
     ) {
-      const name = cur.childForFieldName('name')?.text;
-      if (name) return name;
+      return cur.childForFieldName('name')?.text;
     }
   }
   return undefined;
@@ -111,8 +140,24 @@ export function collectReceiverFieldFacts(
   }
 }
 
+/**
+ * Maximum facts retained per file. A generated file — 2,000 classes of 20 annotated fields each —
+ * would otherwise serialize a 2 MB `pass1_facts` row and hold it for the whole build, crossing the
+ * extraction-worker structured clone on the way. Real code is nowhere near this (60 facts across
+ * this repository's 997 TypeScript files), so the cap is a hazard bound, not a working limit.
+ * Truncation costs recall on the overflow, never correctness: an absent fact refuses the receiver,
+ * which is the registry's own contract.
+ */
+export const RECEIVER_FIELD_FACT_CAP = 2_000;
+
+/** Byte-ordered comparison. `localeCompare` collation varies with the Node build's ICU data, which
+ *  would make "byte-identical across machines" false for the persisted fact row. */
+function byteCompare(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 /** Deduplicate and order facts so two analyses of an unchanged file emit byte-identical payloads. */
-function finalize(facts: ReceiverFieldFact[]): ReceiverFieldFact[] {
+export function finalize(facts: ReceiverFieldFact[]): ReceiverFieldFact[] {
   const seen = new Set<string>();
   const out: ReceiverFieldFact[] = [];
   for (const fact of facts) {
@@ -122,10 +167,11 @@ function finalize(facts: ReceiverFieldFact[]): ReceiverFieldFact[] {
     out.push(fact);
   }
   out.sort((a, b) =>
-    a.className.localeCompare(b.className) ||
-    a.field.localeCompare(b.field) ||
-    a.type.localeCompare(b.type));
-  return out;
+    byteCompare(a.className, b.className) ||
+    byteCompare(a.field, b.field) ||
+    byteCompare(a.type, b.type));
+  // Sorted first, so which facts survive truncation is deterministic rather than parse-order.
+  return out.length > RECEIVER_FIELD_FACT_CAP ? out.slice(0, RECEIVER_FIELD_FACT_CAP) : out;
 }
 
 /** Does a `required_parameter` declare a parameter PROPERTY (`constructor(private repo: Repo)`)?
@@ -134,10 +180,17 @@ function isParameterProperty(parameter: RegistryNode): boolean {
   return /^\s*(?:public|private|protected|readonly)\b/.test(parameter.text);
 }
 
+/** A `static` field is a different slot from the instance field of the same name, and the registry
+ *  key has no static/instance dimension — so a static declaration must never type a `this.` receiver.
+ *  The grammar uses one node type for both, so the modifier is read off the declaration text. */
+function isStaticField(declaration: RegistryNode): boolean {
+  return /^\s*static\b/.test(declaration.text);
+}
+
 function collectTypeScriptFacts(runQuery: (source: string) => RegistryMatch[]): ReceiverFieldFact[] {
   const facts: ReceiverFieldFact[] = [];
   const push = (node: RegistryNode | null, field: string | undefined, type: string | undefined): void => {
-    const className = enclosingClassName(node);
+    const className = enclosingClassName(node, 'TypeScript');
     if (!className || !field || !isTypeName(type)) return;
     facts.push({ className, field, type });
   };
@@ -149,19 +202,23 @@ function collectTypeScriptFacts(runQuery: (source: string) => RegistryMatch[]): 
   //    excludes it: a container's `get`/`set` is not an in-project method.
   for (const m of runQuery(`
     (public_field_definition
-      name: (property_identifier) @field
+      name: [(property_identifier) (private_property_identifier)] @field
       type: (type_annotation (type_identifier) @type)) @node
   `)) {
-    push(capture(m, 'node') ?? null, capture(m, 'field')?.text, capture(m, 'type')?.text);
+    const declaration = capture(m, 'node');
+    if (!declaration || isStaticField(declaration)) continue;
+    push(declaration, capture(m, 'field')?.text, capture(m, 'type')?.text);
   }
 
   // 2. `private repo = new Repo();` — a field initialized by construction, annotated or not.
   for (const m of runQuery(`
     (public_field_definition
-      name: (property_identifier) @field
+      name: [(property_identifier) (private_property_identifier)] @field
       value: (new_expression constructor: (identifier) @type)) @node
   `)) {
-    push(capture(m, 'node') ?? null, capture(m, 'field')?.text, capture(m, 'type')?.text);
+    const declaration = capture(m, 'node');
+    if (!declaration || isStaticField(declaration)) continue;
+    push(declaration, capture(m, 'field')?.text, capture(m, 'type')?.text);
   }
 
   // 3. `constructor(private readonly repo: Repo)` — a parameter property. A plain parameter with
@@ -185,7 +242,7 @@ function collectTypeScriptFacts(runQuery: (source: string) => RegistryMatch[]): 
     (assignment_expression
       left: (member_expression
         object: (this)
-        property: (property_identifier) @field)
+        property: [(property_identifier) (private_property_identifier)] @field)
       right: (new_expression constructor: (identifier) @type)) @node
   `)) {
     push(capture(m, 'node') ?? null, capture(m, 'field')?.text, capture(m, 'type')?.text);
@@ -200,7 +257,7 @@ function collectTypeScriptFacts(runQuery: (source: string) => RegistryMatch[]): 
     (assignment_expression
       left: (member_expression
         object: (this)
-        property: (property_identifier) @field)
+        property: [(property_identifier) (private_property_identifier)] @field)
       right: (call_expression function: (identifier) @callee)) @node
   `);
   if (factoryAssignments.length > 0) {
@@ -246,7 +303,7 @@ function collectPythonFacts(runQuery: (source: string) => RegistryMatch[]): Rece
     m.captures.find(c => c.name === name)?.node;
   const push = (m: RegistryMatch, type: string | undefined): void => {
     if (!PY_SELF_RECEIVERS.has(capture(m, 'recv')?.text ?? '')) return;
-    const className = enclosingClassName(capture(m, 'node') ?? null);
+    const className = enclosingClassName(capture(m, 'node') ?? null, 'Python');
     const field = capture(m, 'field')?.text;
     if (!className || !field || !isTypeName(type)) return;
     facts.push({ className, field, type });
@@ -263,14 +320,37 @@ function collectPythonFacts(runQuery: (source: string) => RegistryMatch[]): Rece
 
   // 2. `self.repo = Repo()` — construction. Capitalization is the class convention Python's own
   //    style guide fixes, and is the same signal `type-inference-engine.ts` already relies on.
+  //    But convention is not proof: a capitalized name this file DECLARES AS A FUNCTION is a
+  //    factory call, not a construction, and typing the field by it would contradict the same
+  //    build's own `same_file` edge to that function. Where the file answers the question, the
+  //    file wins over the convention.
+  const localFunctions = pythonLocalFunctionNames(runQuery);
   for (const m of runQuery(`
     (assignment
       left: (attribute object: (identifier) @recv attribute: (identifier) @field)
       right: (call function: (identifier) @type)) @node
   `)) {
-    push(m, capture(m, 'type')?.text);
+    const type = capture(m, 'type')?.text;
+    if (type && localFunctions.has(type)) continue;
+    push(m, type);
   }
 
+  // 2b. A class-body annotated attribute: `class Service:\n    repo: Repo`. The spec's
+  //     "a field's type annotation" covers this as much as the `self.repo: Repo` form, and it is
+  //     the idiom dataclasses and Pydantic models use. The enclosing node must be the class body
+  //     itself, which `enclosingClassName`'s function-hop rule already guarantees.
+  for (const m of runQuery(`
+    (class_definition
+      body: (block (expression_statement
+        (assignment
+          left: (identifier) @field
+          type: (type (identifier) @type))))) @node
+  `)) {
+    const className = capture(m, 'node')?.childForFieldName('name')?.text;
+    const field = capture(m, 'field')?.text;
+    const type = capture(m, 'type')?.text;
+    if (className && field && isTypeName(type)) facts.push({ className, field, type });
+  }
   // 3. `def __init__(self, repo: Repo): self.repo = repo` — an annotated parameter forwarded to a
   //    field. Both halves must be present: an annotation alone declares a local.
   const forwarded = runQuery(`
@@ -281,7 +361,7 @@ function collectPythonFacts(runQuery: (source: string) => RegistryMatch[]): Rece
   if (forwarded.length > 0) {
     const paramTypes = pythonInitParamTypes(runQuery);
     for (const m of forwarded) {
-      const className = enclosingClassName(capture(m, 'node') ?? null);
+      const className = enclosingClassName(capture(m, 'node') ?? null, 'Python');
       const value = capture(m, 'value')?.text;
       if (!className || !value) continue;
       push(m, paramTypes.get(`${className}\0${value}`));
@@ -289,6 +369,17 @@ function collectPythonFacts(runQuery: (source: string) => RegistryMatch[]): Rece
   }
 
   return finalize(facts);
+}
+
+/** Every `def` name declared anywhere in this file. A capitalized one is a function, not a class,
+ *  however conventional the capitalization looks. */
+function pythonLocalFunctionNames(runQuery: (source: string) => RegistryMatch[]): ReadonlySet<string> {
+  const names = new Set<string>();
+  for (const m of runQuery(`(function_definition name: (identifier) @fn)`)) {
+    const name = m.captures.find(c => c.name === 'fn')?.node.text;
+    if (name) names.add(name);
+  }
+  return names;
 }
 
 /** `Class\0param → annotated type` for `__init__` parameters. Keyed by class so two classes'
@@ -303,7 +394,7 @@ function pythonInitParamTypes(runQuery: (source: string) => RegistryMatch[]): Ma
         (typed_parameter (identifier) @param type: (type (identifier) @type)))) @node
   `)) {
     if (m.captures.find(c => c.name === 'fn')?.node.text !== '__init__') continue;
-    const className = enclosingClassName(m.captures.find(c => c.name === 'node')?.node ?? null);
+    const className = enclosingClassName(m.captures.find(c => c.name === 'node')?.node ?? null, 'Python');
     const param = m.captures.find(c => c.name === 'param')?.node.text;
     const type = m.captures.find(c => c.name === 'type')?.node.text;
     if (!className || !param || !isTypeName(type)) continue;

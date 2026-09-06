@@ -455,6 +455,60 @@ describe('extractExceptionFacts — call-site receiver classification', () => {
     expect(r('c')).toBe('other');
     expect(r('d')).toBe('none');
   });
+
+  // change: shrink-receiver-resolution-boundary. A chained intra-object receiver is neither
+  // `self` (the callee is NOT provably in-project — it is whatever the field's type is) nor
+  // `other` (whose contract promises an `external::` edge that this shape never gets). It gets
+  // its own kind so `analyze_error_propagation` can disclose it under its own boundary. Losing
+  // this classification is the silent hole the whole change exists to close.
+  it('classifies a chained intra-object receiver as self-field, in every wrapper it hides behind', async () => {
+    const facts = await extractExceptionFactsFromSource(
+      'class K {\n  m() {\n' +
+      '    this.dep.a();\n' +
+      '    super.dep.b();\n' +
+      '    this.dep!.c();\n' +
+      '    (this.dep).d();\n' +
+      "    this.map['k'].e();\n" +
+      '    this.a.b.f();\n' +
+      '    this.g();\n' +
+      '    obj.h();\n' +
+      '  }\n}',
+      'TypeScript',
+    );
+    const r = (name: string) => facts.callSites.find(c => c.calleeName === name)?.receiver;
+    for (const name of ['a', 'b', 'c', 'd', 'e', 'f']) {
+      expect(r(name), `${name} is a chained intra-object receiver`).toBe('self-field');
+    }
+    expect(r('g')).toBe('self');
+    expect(r('h')).toBe('other');
+  });
+
+  it('classifies a chained Python self receiver as self-field, including index and call hops', async () => {
+    const facts = await extractExceptionFactsFromSource(
+      'class K:\n    def m(self):\n' +
+      '        self.dep.a()\n' +
+      '        cls.dep.b()\n' +
+      "        self.reg['k'].c()\n" +
+      '        self.get_dep().d()\n' +
+      '        self.e()\n' +
+      '        obj.f()\n',
+      'Python',
+    );
+    const r = (name: string) => facts.callSites.find(c => c.calleeName === name)?.receiver;
+    for (const name of ['a', 'b', 'c', 'd']) {
+      expect(r(name), `${name} is a chained intra-object receiver`).toBe('self-field');
+    }
+    expect(r('e')).toBe('self');
+    expect(r('f')).toBe('other');
+  });
+
+  it('leaves a language outside the receiver registry on its pre-existing classification', async () => {
+    const facts = await extractExceptionFactsFromSource(
+      'class K {\n  void m() {\n    this.dep.a();\n  }\n}',
+      'Java',
+    );
+    expect(facts.callSites.find(c => c.calleeName === 'a')?.receiver).toBe('other');
+  });
 });
 
 describe('extractExceptionFacts — hostile AST bounds', () => {

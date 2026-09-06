@@ -46,6 +46,23 @@
 - [x] Additivity: direct `self_cls` resolution unchanged; determinism across repeated builds
 - [x] Full suite green
 
+## Hardening (four adversarial review rounds)
+- [x] Round 1 — soundness: an import binding for the type name is DECISIVE where present (a
+      namesake elsewhere was binding); a write inside a `this`-rebinding construct, a field of an
+      anonymous class expression, a `static` declaration, a plain constructor parameter, and a
+      capitalized Python LOCAL FUNCTION no longer type a receiver
+- [x] Round 1 — disclosure: `isSelfRootedMember` now peels `!`/parens and accepts index and call
+      hops, so `this.dep!.m()`, `(this.dep).m()`, `this.map['k'].m()` and `self.get_dep().m()` are
+      disclosed instead of silently absent; the boundary sentence names every refusal cause, not
+      just an untypeable receiver; an ambiguous site is disclosed ONCE and renders `this.repo.save`
+      rather than the non-existent `this.save`
+- [x] Round 1 — scope: `#private` field receivers and Python class-body annotations now resolve;
+      the capability description no longer claims other languages disclose this shape (Go records
+      nothing for it — named as an open gap)
+- [x] Round 1 — tests: every finding above pinned; the disclosure half (`self-field` classification
+      and `untypedReceiverCalls`) pinned in `exception-flow.test.ts` and
+      `error-propagation.test.ts`; `receiverFields` added to the fact-cache round-trip
+
 ## Spec
 - [x] `analyzer` delta: ADD IntraObjectReceiverResolutionViaTypeRegistries,
-      ResidualReceiverBoundaryStaysDisclosed
+      ResidualReceiverBoundaryStaysDisclosed, ChainedReceiverResidueIsScopedAndDeclared

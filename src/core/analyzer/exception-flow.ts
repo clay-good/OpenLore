@@ -637,15 +637,30 @@ function receiverKindOf(callNode: Node, spec: LangSpec, language: string): CallR
  *  `this.a.b`? One hop is the common case; deeper chains root the same way, and the whole chain
  *  is equally untypeable, so they share one classification.
  *
- *  Scoped to the languages whose extractors feed the receiver registry: elsewhere the shape is
- *  still extracted as an ordinary member call with an `external::` fallback, so calling it a
- *  `self-field` boundary would disclose a gap that language does not actually have. */
+ *  Scoped to the languages whose extractors feed the receiver registry, because only there does a
+ *  `self-field` verdict correspond to this change's binding rules. Other languages keep their own
+ *  pre-existing handling for the shape, which this change did not touch. */
 function isSelfRootedMember(node: Node, language: string): boolean {
   if (!RECEIVER_REGISTRY_LANGUAGES.has(language)) return false;
-  if (node.type !== 'member_expression' && node.type !== 'attribute' && node.type !== 'member_access_expression') {
+  // Wrappers that change nothing about what the receiver IS. Left un-peeled, `this.dep!.run()`
+  // and `(this.dep).run()` fall through to `other`, whose contract promises an edge — and no edge
+  // exists for them, which is the silence this whole change removes.
+  const peeled = node.type === 'non_null_expression' || node.type === 'parenthesized_expression'
+    ? node.namedChildren[0] ?? null
+    : node;
+  if (!peeled) return false;
+  // A member access, an index (`this.map['k']`) and a call (`self.get_dep()`) are all still
+  // rooted at the enclosing object; none of them is bound by the registry, so all of them are
+  // residue to disclose rather than shapes to omit.
+  if (
+    peeled.type !== 'member_expression' && peeled.type !== 'attribute' &&
+    peeled.type !== 'member_access_expression' && peeled.type !== 'subscript_expression' &&
+    peeled.type !== 'subscript' && peeled.type !== 'call_expression' && peeled.type !== 'call'
+  ) {
     return false;
   }
-  const inner = node.childForFieldName('object') ?? node.childForFieldName('expression') ?? node.namedChildren[0] ?? null;
+  const inner = peeled.childForFieldName('object') ?? peeled.childForFieldName('function')
+    ?? peeled.childForFieldName('expression') ?? peeled.namedChildren[0] ?? null;
   if (!inner) return false;
   if (inner.type === 'this' || inner.type === 'super') return true;
   if (inner.type === 'identifier' && PY_SELF_RECEIVERS.has(inner.text)) return true;

@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import type { CallEdge, FunctionNode, ClassNode, InheritanceEdge } from '../analyzer/call-graph.js';
+import { EDGE_CONFIDENCE_VALUES } from '../analyzer/call-graph-types.js';
 import type { FunctionCfg } from '../analyzer/cfg.js';
 import type { DecisionNode, DecisionAffectsEdge } from '../decisions/project.js';
 import type { FileProvenance } from '../provenance/git-provenance.js';
@@ -1814,10 +1815,7 @@ function rawToDecisionNode(r: RawDecision): DecisionNode {
   };
 }
 
-const EDGE_CONFIDENCES = new Set<CallEdge['confidence']>([
-  'self_cls', 'type_inference', 'import', 're_export', 'http_endpoint',
-  'same_file', 'name_only', 'type_name', 'synthesized', 'external',
-]);
+const EDGE_CONFIDENCES = EDGE_CONFIDENCE_VALUES;
 const EDGE_KINDS = new Set<NonNullable<CallEdge['kind']>>([
   'calls', 'overrides', 'tested_by', 'references', 'depends_on',
   'affects', 'authored_by', 'changed_in_pr',
