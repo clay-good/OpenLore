@@ -10,7 +10,7 @@ import { sanitizeForTerminal as safe } from '../../utils/misc.js';
 import { embeddingTlsRelaxed, withRelaxedTls } from '../../core/services/tls-scope.js';
 import { access, stat, readFile } from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
-import { join, relative } from 'node:path';
+import { join, relative, isAbsolute, win32 } from 'node:path';
 import { logger } from '../../utils/logger.js';
 import { palette } from '../../utils/colors.js';
 import {
@@ -647,9 +647,51 @@ async function checkMcpWiring(rootPath: string): Promise<CheckResult | null> {
     };
   }
   if (inMcp) {
+    // Since fix-windows-console-flash-from-npx-shim the entry names an ABSOLUTE launcher
+    // (this Node binary, this build's CLI) instead of `npx`, which resolved afresh every
+    // time. That removes a console window per agent turn on Windows and a resolution hop
+    // everywhere — at the cost of a path that a moved install, an uninstalled global, or a
+    // removed Node version can invalidate. Without this check the only symptom is a hook
+    // that fails silently on every turn.
+    const missing = await missingLauncherPaths(
+      (await readJson('.mcp.json'))?.mcpServers as Record<string, unknown> | undefined,
+    );
+    if (missing.length > 0) {
+      return {
+        name: 'MCP wiring',
+        status: 'warn',
+        detail: `.mcp.json points at a launcher that no longer exists: ${missing.join(', ')}`,
+        fix: "Run 'openlore install --agent claude-code --force' to re-wire it to this install",
+        remediation: { kind: 'rewire-mcp', label: 'openlore install --agent claude-code --force' },
+      };
+    }
     return { name: 'MCP wiring', status: 'ok', detail: '.mcp.json registers the openlore MCP server' };
   }
   return null;
+}
+
+/**
+ * Absolute paths in the wired MCP entry that are no longer on disk.
+ *
+ * Only ABSOLUTE paths are checked: a bare command (`npx`, `node`) is resolved through
+ * PATH by the host, so its absence here would say nothing. Empty means nothing to report,
+ * which is also the answer for a malformed entry — doctor reports what it observed, and
+ * this check cannot see anything wrong with a shape it does not recognise.
+ */
+async function missingLauncherPaths(servers: Record<string, unknown> | undefined): Promise<string[]> {
+  const entry = servers?.openlore as { command?: unknown; args?: unknown } | undefined;
+  if (!entry) return [];
+  const candidates = [entry.command, Array.isArray(entry.args) ? entry.args[0] : undefined]
+    .filter((v): v is string => typeof v === 'string' && (isAbsolute(v) || win32.isAbsolute(v)));
+  const missing: string[] = [];
+  for (const candidate of candidates) {
+    try {
+      await access(candidate, fsConstants.F_OK);
+    } catch {
+      missing.push(candidate);
+    }
+  }
+  return missing;
 }
 
 const CLI_PROVIDERS: Record<string, () => string> = {

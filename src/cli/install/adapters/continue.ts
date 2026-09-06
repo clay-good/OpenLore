@@ -13,7 +13,7 @@ import { readFile, unlink } from 'node:fs/promises';
 import { mergeEntries, readMeta, removeManaged, isHandEdited } from '../json-managed.js';
 import { previewCreate, previewDiff } from '../diff.js';
 import type { Adapter, ApplyContext, ApplyResult, PlannedChange } from './types.js';
-import { formatPlatformCommand, resolvePlatformCommand } from '../../../utils/platform-command.js';
+import { formatPlatformCommand, resolveOpenloreCommand } from '../../../utils/platform-command.js';
 import { confinedAtomicWriteFile, safeJoin } from '../../../utils/path-confinement.js';
 
 const CONFIG_PATH = '.continue/config.json';
@@ -25,7 +25,7 @@ function slashCommand(
   return {
     name: 'orient',
     description: 'Call openlore orient() for the current task context',
-    run: formatPlatformCommand(resolvePlatformCommand('npx', ['--yes', 'openlore', 'orient', '--json'], platform, runtime)),
+    run: formatPlatformCommand(resolveOpenloreCommand(['orient', '--json'], platform, runtime), platform),
   };
 }
 

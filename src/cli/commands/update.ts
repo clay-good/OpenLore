@@ -236,7 +236,7 @@ export async function runUpdate(
     logger.info(
       'Project dependency',
       `openlore is a project-local dependency here. Upgrade it in your project with:\n  ` +
-        formatPlatformCommand({ command: local.cmd, args: local.args })
+        formatPlatformCommand({ command: local.cmd, args: local.args }, platform)
     );
     return 0;
   }
@@ -251,7 +251,7 @@ export async function runUpdate(
     return 1;
   }
 
-  const printable = formatPlatformCommand({ command: upgrade.cmd, args: upgrade.args });
+  const printable = formatPlatformCommand({ command: upgrade.cmd, args: upgrade.args }, platform);
   if (opts.dryRun) {
     logger.info('Would run', printable);
     return 0;
