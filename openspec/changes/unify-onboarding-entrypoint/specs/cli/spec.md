@@ -6,14 +6,18 @@
 
 Bare `openlore install` SHALL, by default and with no flags, register the MCP server, the
 orientation hooks, and the agent-instruction block at the *user* scope for every adapter that
-supports one, using the same managed, marker-identified entries as per-repo install — and,
-when run inside a git repository, SHALL additionally wire and index that repository
-immediately. After one install, opening any git repository with a wired agent SHALL reach
+supports one — selected by that CAPABILITY, not by whether the adapter's markers happen to be
+present in the current directory — using the same managed, marker-identified entries as
+per-repo install; an explicit `--agent`/`--agents` SHALL narrow both scopes, on install and on
+uninstall alike. When run inside a git repository it SHALL additionally wire and index that
+repository immediately. After one install, opening any git repository with a wired agent SHALL reach
 the MCP server and trigger the existing background cold-start bootstrap without any further
 command, ever. An adapter with no user scope SHALL fall back to per-repo wiring with an
-honest note, never a failure. `--repo-only` SHALL confine wiring to the current repository;
-repo-scope managed entries SHALL take precedence over user-scope entries where both exist;
-and `--uninstall` SHALL remove only OpenLore-managed entries from both scopes.
+honest note, never a failure. `--repo-only` SHALL confine wiring to the current repository, and
+`--uninstall` SHALL remove only OpenLore-managed entries from both scopes. Where both scopes
+are wired, the agent's own resolution decides what runs — for Claude Code, one MCP server by
+name, but BOTH scopes' hooks and instruction blocks — and the documentation SHALL state that
+plainly rather than implying the repo scope supersedes the user scope.
 
 #### Scenario: One command, then every repo just works
 
@@ -29,6 +33,15 @@ and `--uninstall` SHALL remove only OpenLore-managed entries from both scopes.
 - **WHEN** the command completes
 - **THEN** only that repository is wired, no user-scope entry is written, and the summary
   says so
+
+#### Scenario: A user-scope config OpenLore does not own is never lost
+
+- **GIVEN** a user-scope configuration file that another agent owns and writes
+- **WHEN** install would write it, and it does not parse as JSON, is a symbolic link, or has
+  changed since OpenLore read it
+- **THEN** OpenLore refuses that write, names the cause, leaves the file exactly as it was, and
+  writes no instruction block claiming a registration it did not make — and the command still
+  wires the current repository and exits 0
 
 #### Scenario: Unsupported adapter degrades honestly
 
@@ -75,15 +88,26 @@ wired by an explicit `openlore install` only.
 
 ### Requirement: ZeroInteractionOnboarding
 
-The zero-interaction path SHALL extend from "one command per repo" to "one command per
+The onboarding path SHALL reach a working setup with no required user interaction and without modifying
+the user's project on package install. Installing the package (`npm install`) SHALL NOT analyze, write
+configuration, or modify any project file; it MAY print a single non-interactive next-step hint, and
+that hint SHALL be suppressed in CI, in non-interactive (non-TTY) contexts, when opted out via
+`OPENLORE_SKIP_POSTINSTALL`, and when the package is installed as a transitive dependency. The
+post-install step SHALL always exit 0 and SHALL never fail an install.
+
+The setup commands SHALL offer a fully non-interactive path: `openlore install` SHALL auto-detect agent
+surfaces and wire them with no prompt, and `openlore connect --yes` SHALL wire every detected agent
+without the interactive picker. These wiring operations SHALL remain idempotent and SHALL preserve
+user-authored content (merge, not clobber).
+
+The zero-interaction path SHALL further extend from "one command per repo" to "one command per
 user": the postinstall hint SHALL stay exactly `openlore install` (which now wires the user
 scope by default), and every EXPLICIT repo wiring SHALL include the decisions pre-commit hook
-in autopilot (non-blocking, trail-only) mode, so the single entrypoint yields both the
-navigation face and the governance trail with no additional command or flag. A repository
+in autopilot (non-blocking, trail-only) mode, so the single entrypoint yields structural
+navigation and the governance trail with no additional command or flag. A repository
 whose config already sets `governance.autopilot: false` SHALL keep blocking review mode —
 an explicit choice is never flipped — and blocking review mode SHALL remain an explicit
-opt-in everywhere else. All existing zero-interaction behavior (CI/TTY-guarded postinstall,
-non-blocking cold-start build, `connect --yes`, passive update notifier) is unchanged.
+opt-in everywhere else.
 
 #### Scenario: Installing the package does not touch the project
 
@@ -99,7 +123,15 @@ non-blocking cold-start build, `connect --yes`, passive update notifier) is unch
 - **WHEN** `openlore connect --yes` runs
 - **THEN** every detected agent is wired with no prompt, idempotently, preserving existing content
 
-#### Scenario: One entrypoint yields both faces
+#### Scenario: Wiring preserves user-authored content
+
+- **GIVEN** a project whose `CLAUDE.md`, `.mcp.json`, or `.claude/settings.json` already holds
+  content OpenLore did not write
+- **WHEN** `openlore install` runs, at either scope, once or repeatedly
+- **THEN** only OpenLore-managed entries are added or updated, everything else is preserved
+  byte-for-byte, and a re-run with nothing to change writes nothing
+
+#### Scenario: One entrypoint yields navigation and a decision trail
 
 - **GIVEN** a repo with no OpenLore state
 - **WHEN** the user runs `openlore install`

@@ -33,11 +33,19 @@ and LLM/embedding setup, and prints the exact command to fix anything that is mi
 | **user** (default) | `~/.claude.json` (`mcpServers.openlore`), `~/.claude/settings.json` (hooks + `Bash(openlore:*)`), `~/.claude/CLAUDE.md` | every repository you open reaches OpenLore |
 | **repo** (always, when you run install inside one) | `.mcp.json`, `.claude/settings.json`, `.claude/settings.local.json`, `CLAUDE.md` | this repository, wired and indexed immediately |
 
-Claude Code resolves project scope over user scope, so a repository wired explicitly keeps its own
-entry. Adapters with no user-scope surface (`cursor`, `cline`, `continue`, `pi`, `agents-md`) are
-wired per repository and named as such in the summary — an honest note, never a failure.
+Adapters with no user-scope surface (`cursor`, `cline`, `continue`, `pi`, `agents-md`) are wired
+per repository and named as such in the summary — an honest note, never a failure.
 `openlore connect list` shows both scopes; `--uninstall` removes OpenLore-managed entries from
-both, and never deletes `~/.claude.json` itself.
+both, and never deletes `~/.claude.json` or `~/.claude/settings.json` themselves. An explicit
+`--agent` narrows both scopes, on install and on uninstall alike.
+
+> **Both scopes wired means both scopes active.** Claude Code resolves *MCP servers* by name, so
+> one server runs. It does not do that for hooks or instructions: user-level and project-level
+> `SessionStart` / `UserPromptSubmit` hooks both fire, and `~/.claude/CLAUDE.md` and the project
+> `CLAUDE.md` are both loaded. A repository wired at both scopes therefore runs `orient` twice per
+> session and `orient --inject` twice per prompt, and carries the instruction block twice. If that
+> matters to you, wire one scope: `openlore install --repo-only` for per-repository control, or
+> `openlore install --agent claude-code` from outside a repository for user scope alone.
 
 `OPENLORE_HOME` overrides where the user scope is written (sandboxes, CI images, containers whose
 `$HOME` is not the profile you mean to configure).
@@ -55,9 +63,11 @@ consent-guarded:
   environment with `OPENLORE_NO_AUTO_ANALYZE=1`. An index-absent answer in an opted-out repository
   names the opt-out rather than reading as a broken install. `openlore features` shows the
   current state.
-- **Degrades on large trees.** Above 5,000 files the background build sheds its semantic-embedding
-  pass and builds signatures plus the keyword (BM25) index only, and says so. An explicit
-  `openlore analyze` is never degraded — you asked for it.
+- **Degrades on large trees.** Above the file-count ceiling (`AUTO_INIT_DEGRADED_FILE_CEILING`, currently 5,000 files) the background build sheds its semantic-embedding pass and builds
+  signatures plus the keyword (BM25) index only, and says so. An explicit `openlore analyze` is
+  never degraded — you asked for it.
+- **Writes no git hook.** Auto-init runs `init` and `analyze`, nothing else. The commit gate below
+  is wired only by an explicit `openlore install` in that repository.
 
 ## Zero-interaction onboarding
 
@@ -108,6 +118,11 @@ the block we refuse to overwrite unless you pass `--force`.
 | `continue` | `.continue/` | add `/orient` entry to `.continue/config.json` (MCP server registration is TODO — see below) |
 | `pi` | `.pi/` (or `~/.pi/` when the tree has no marker at all) | write `.pi/extensions/openlore.js` — a fingerprinted re-export shim pointing at the extension inside the openlore package. No markdown block, no MCP entry: Pi does not consume MCP; the extension starts `openlore serve` on demand and injects the digest itself. See [Pi](#pi-pidev). |
 | `agents-md` | always applies | append block to `AGENTS.md` (creates if absent) |
+
+Plus, in any git repository, `openlore install` writes `.git/hooks/pre-commit` (the decisions gate,
+non-blocking — see below) and `.git/hooks/post-commit` (its `--no-verify` bypass detector). Both are
+marker-delimited blocks appended to whatever is already there, and `--uninstall` removes exactly
+those blocks.
 
 ## Pi (pi.dev)
 

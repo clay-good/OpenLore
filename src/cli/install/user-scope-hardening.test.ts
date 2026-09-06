@@ -7,11 +7,11 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, readFile, writeFile, mkdir, stat, symlink } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, readdir, writeFile, mkdir, stat, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runInstall } from './index.js';
-import { claudeCodeAdapter } from './adapters/claude-code.js';
+import { claudeCodeAdapter, _publishManagedFileForTesting } from './adapters/claude-code.js';
 import type { ApplyContext } from './adapters/types.js';
 
 async function exists(p: string): Promise<boolean> {
@@ -87,13 +87,17 @@ describe('user-scope hardening', () => {
       expect(await exists(join(dir, '.mcp.json'))).toBe(true);
     });
 
-    it('a symlinked ~/.claude does not abort the command', async () => {
+    it('a symlinked ~/.claude does not abort the command, and nothing escapes through it', async () => {
       const outside = await mkdtemp(join(tmpdir(), 'openlore-outside-'));
       try {
         await symlink(outside, join(home, '.claude'), 'dir');
-        // Whatever the confinement layer decides, the command must not die on it.
+
         expect(await install()).toBe(0);
+        // The repository is wired regardless of what the user scope decided.
         expect(await exists(join(dir, '.mcp.json'))).toBe(true);
+        // And whatever it decided, no OpenLore file landed outside the home root
+        // by way of the symlink.
+        expect(await readdir(outside)).toEqual([]);
       } finally {
         await rm(outside, { recursive: true, force: true });
       }
@@ -157,42 +161,94 @@ describe('user-scope hardening', () => {
   });
 
   describe('a concurrent writer wins; OpenLore refuses', () => {
-    it('does not discard a change another process made while install was writing', async () => {
+    const ctxFor = (dryRun = false): ApplyContext => ({
+      root: home,
+      scope: 'user',
+      platform: process.platform,
+      platformCommandRuntime: {
+        nodeExecutable: process.execPath,
+        npmExecPath: undefined,
+        pathValue: process.env.PATH,
+        cwd: process.cwd(),
+      },
+      instructionTemplate: '# test\n',
+      dryRun,
+      force: false,
+    });
+
+    it('refuses when the file changed between being read and being written', async () => {
       const path = join(home, '.claude.json');
-      await writeFile(path, JSON.stringify({ numStartups: 1 }, null, 2));
+      const observed = JSON.stringify({ numStartups: 1 }, null, 2);
+      await writeFile(path, observed);
 
-      const ctx: ApplyContext = {
-        root: home,
-        scope: 'user',
-        platform: process.platform,
-        platformCommandRuntime: {
-          nodeExecutable: process.execPath,
-          npmExecPath: undefined,
-          pathValue: process.env.PATH,
-          cwd: process.cwd(),
-        },
-        instructionTemplate: '# test\n',
-        dryRun: false,
-        force: false,
-      };
+      // The concurrent write lands after we captured `observed` — precisely the
+      // window a running Claude Code writes in.
+      const live = JSON.stringify({ numStartups: 2, sessionId: 'live' }, null, 2);
+      await writeFile(path, live);
 
-      // Simulate the race precisely: the file changes between the adapter's read
-      // and its write. `apply` reads first, so mutating here is the same window a
-      // running Claude Code writes in.
-      const applying = claudeCodeAdapter.apply(ctx);
-      await writeFile(path, JSON.stringify({ numStartups: 2, sessionId: 'live' }, null, 2));
-      const result = await applying;
+      const result = await _publishManagedFileForTesting(
+        ctxFor(),
+        path,
+        JSON.stringify({ mcpServers: { openlore: {} } }, null, 2),
+        observed,
+      );
 
-      const after = JSON.parse(await readFile(path, 'utf8'));
-      if (result.conflict) {
-        // Refused: the concurrent write survives intact.
-        expect(after.sessionId).toBe('live');
-        expect(after.numStartups).toBe(2);
-      } else {
-        // Won the race: our entry landed and the concurrent write had not happened
-        // yet from the writer's point of view.
-        expect(after.mcpServers.openlore).toBeDefined();
+      expect(result.ok).toBe(false);
+      expect(result.ok === false && result.reason).toMatch(/another process changed it/);
+      // The concurrent write survives intact — that is the whole point.
+      expect(await readFile(path, 'utf8')).toBe(live);
+    });
+
+    it('publishes when nothing changed under it', async () => {
+      const path = join(home, '.claude.json');
+      const observed = JSON.stringify({ numStartups: 1 }, null, 2);
+      await writeFile(path, observed);
+
+      const next = JSON.stringify({ numStartups: 1, mcpServers: {} }, null, 2);
+      const result = await _publishManagedFileForTesting(ctxFor(), path, next, observed);
+
+      expect(result.ok).toBe(true);
+      expect(await readFile(path, 'utf8')).toBe(next);
+    });
+
+    it('refuses a symlink that points outside the scope root, and does not write through it', async () => {
+      const outside = await mkdtemp(join(tmpdir(), 'openlore-symlink-target-'));
+      try {
+        const victim = join(outside, 'real.json');
+        await writeFile(victim, JSON.stringify({ notOurs: true }, null, 2));
+        await symlink(victim, join(home, '.claude.json'));
+
+        // Confinement catches this before any write: the link canonicalizes out of
+        // the scope root. The adapter throws; `runInstall` contains it for the user
+        // scope (asserted separately above) rather than writing through the link.
+        await expect(claudeCodeAdapter.apply(ctxFor())).rejects.toThrow(/canonicalizes outside/);
+        expect(JSON.parse(await readFile(victim, 'utf8'))).toEqual({ notOurs: true });
+        expect(await exists(join(home, '.claude', 'CLAUDE.md'))).toBe(false);
+      } finally {
+        await rm(outside, { recursive: true, force: true });
       }
+    });
+
+    it('refuses a symlink that stays inside the scope root, naming it as a link', async () => {
+      const victim = join(home, 'real.json');
+      await writeFile(victim, JSON.stringify({ notOurs: true }, null, 2));
+      await symlink(victim, join(home, '.claude.json'));
+
+      const result = await claudeCodeAdapter.apply(ctxFor());
+
+      expect(result.conflict).toBe(true);
+      expect(result.warnings.join(' ')).toMatch(/symbolic link|non-regular file/);
+      expect(JSON.parse(await readFile(victim, 'utf8'))).toEqual({ notOurs: true });
+      expect(await exists(join(home, '.claude', 'CLAUDE.md'))).toBe(false);
+    });
+
+    it('leaves no instruction block behind when a registration is refused', async () => {
+      // The block tells an agent to call tools the MCP registration would have
+      // wired. A refusal must not leave that claim on disk.
+      await writeFile(join(home, '.claude.json'), '\uFEFF{}');
+      const result = await claudeCodeAdapter.apply(ctxFor());
+      expect(result.conflict).toBe(true);
+      expect(await exists(join(home, '.claude', 'CLAUDE.md'))).toBe(false);
     });
   });
 });

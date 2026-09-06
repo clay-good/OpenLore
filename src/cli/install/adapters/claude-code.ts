@@ -10,7 +10,7 @@
  * server never loaded; `apply` now migrates that stale entry away.
  */
 
-import { mkdir, readFile, stat, unlink } from 'node:fs/promises';
+import { mkdir, lstat, readFile, unlink } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { applyMarkdownBlock, uninstallMarkdownBlock, hasManagedBlock } from './markdown-block.js';
 import { mergeEntries, readMeta, removeManaged, isHandEdited, editJsonPreservingFormat, type JsonPathEdit } from '../json-managed.js';
@@ -19,6 +19,7 @@ import type { Adapter, ApplyContext, ApplyResult, PlannedChange } from './types.
 import { LEAN_DEFAULT_PRESET } from '../../../constants.js';
 import { formatPlatformCommand, resolvePlatformCommand } from '../../../utils/platform-command.js';
 import { confinedAtomicWriteFile, safeJoin } from '../../../utils/path-confinement.js';
+import { isGuardedWriteFailure, withGuardedConfigWrite } from '../guarded-config-write.js';
 
 const MD_FILE = 'CLAUDE.md';
 const SETTINGS_PATH = '.claude/settings.json';
@@ -114,35 +115,57 @@ async function publishManagedFile(
   path: string,
   data: string,
   observedRaw: string | null,
-): Promise<boolean> {
-  await mkdir(dirname(path), { recursive: true });
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  await mkdir(dirname(path), { recursive: true, ...(ctx.scope === 'user' ? { mode: 0o700 } : {}) });
   const options = writeOptionsFor(ctx);
   if (ctx.scope !== 'user') {
     await confinedAtomicWriteFile(ctx.root, path, data, options);
-    return true;
+    return { ok: true };
   }
-  let identity: Awaited<ReturnType<typeof stat>> | null = null;
+
+  // lstat, not stat: the confinement layer checks identity with lstat, and a
+  // SYMLINKED target is a confinement problem, not a concurrency one. Diagnosing it
+  // as "another process changed it" sent a user whose ~/.claude.json is symlinked
+  // into a dotfiles repository into a retry loop that could never succeed.
+  let identity: Awaited<ReturnType<typeof lstat>> | null = null;
   try {
-    identity = await stat(path);
+    identity = await lstat(path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   }
-  // A file we never observed cannot be compare-and-swapped against its bytes.
-  if ((identity === null) !== (observedRaw === null)) return false;
-  try {
-    await confinedAtomicWriteFile(ctx.root, path, data, {
-      ...options,
-      expectedIdentity: identity,
-      ...(observedRaw !== null ? { expectedContent: observedRaw } : {}),
-    });
-    return true;
-  } catch (error) {
-    if (/Confined write conflict/.test((error as Error).message)) return false;
-    throw error;
+  if (identity !== null && !identity.isFile()) {
+    return { ok: false, reason: 'it is a symbolic link or another non-regular file, which OpenLore will not write through' };
   }
+  // A file we never observed cannot be compare-and-swapped against its bytes.
+  if ((identity === null) !== (observedRaw === null)) {
+    return { ok: false, reason: 'it appeared or vanished between being read and being written' };
+  }
+
+  // The compare-and-swap branch of confinedAtomicWriteFile moves the target aside
+  // before republishing it, so it REQUIRES the caller to serialize and to leave a
+  // recovery journal — otherwise a crash in that window leaves ~/.claude.json
+  // missing and nothing ever puts it back. `openlore setup` already had this right;
+  // the machinery is now shared (change: unify-onboarding-entrypoint).
+  const result = await withGuardedConfigWrite(ctx.root, path, async recoveryJournalPath => {
+    try {
+      await confinedAtomicWriteFile(ctx.root, path, data, {
+        ...options,
+        expectedIdentity: identity,
+        ...(observedRaw !== null ? { expectedContent: observedRaw } : {}),
+        recoveryJournalPath,
+      });
+      return { ok: true as const };
+    } catch (error) {
+      if (/Confined write conflict/.test((error as Error).message)) {
+        return { ok: false as const, reason: 'another process changed it during this install' };
+      }
+      throw error;
+    }
+  });
+  if (isGuardedWriteFailure(result)) return { ok: false, reason: result.reason };
+  return result;
 }
 
-/** Permission that lets the agent run the `openlore` CLI without a per-call prompt. */
 const OPENLORE_PERMISSION = 'Bash(openlore:*)';
 
 /**
@@ -369,18 +392,67 @@ function isOurMcpEntry(entry: unknown): boolean {
   return flat.includes('openlore') && flat.includes('mcp');
 }
 
-/** Record a refused write: the file changed under us, so nothing was published. */
-function concurrentWriteRefusal(result: ApplyResult, path: string, displayName: string): ApplyResult {
+/** Record a refused write, naming the cause the code actually observed. */
+function refusedWrite(
+  result: ApplyResult,
+  path: string,
+  displayName: string,
+  reason: string,
+): ApplyResult {
   result.changes.push({
     path,
     kind: 'noop',
-    summary: `${displayName}: another process changed it during this install; nothing was written`,
+    summary: `${displayName}: not written — ${reason}`,
   });
   result.warnings.push(
-    `${displayName} was modified by another process (a running agent, most likely) while install `
-    + 'was writing it. OpenLore refused to overwrite it rather than discard that change. Re-run install.',
+    `${displayName} was not written because ${reason}. OpenLore refused rather than overwrite it. `
+    + 'Re-run install once the cause is resolved.',
   );
   result.conflict = true;
+  return result;
+}
+
+/**
+ * Test seam for the compare-and-swap contract.
+ *
+ * The race it guards — a running Claude Code rewriting `~/.claude.json` between our
+ * read and our write — cannot be scheduled deterministically from outside, and a
+ * test that races the real scheduler asserts nothing. This exposes the exact
+ * question instead: given the bytes we observed, does a publication whose target
+ * has since changed refuse, and leave the change intact?
+ */
+export function _publishManagedFileForTesting(
+  ctx: ApplyContext,
+  path: string,
+  data: string,
+  observedRaw: string | null,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  return publishManagedFile(ctx, path, data, observedRaw);
+}
+
+/**
+ * Append the managed instruction block, LAST, once every registration this scope
+ * needs has actually been written.
+ *
+ * Order matters for honesty: the block tells an agent to call `orient` and the rest
+ * of the tool surface. Written first, a refused MCP registration left a scope whose
+ * instructions describe tools nothing wired — the half-wired state the pre-flight
+ * exists to prevent, reached through the one refusal a pre-flight cannot predict
+ * (change: unify-onboarding-entrypoint).
+ */
+async function withInstructionBlock(
+  ctx: ApplyContext,
+  layout: ClaudeLayout,
+  result: ApplyResult,
+): Promise<ApplyResult> {
+  const md = await applyMarkdownBlock(ctx, {
+    fileName: layout.md,
+    createIfMissing: true,
+    blockBody: ctx.instructionTemplate,
+  });
+  result.changes.push(...md.changes);
+  result.warnings.push(...md.warnings);
+  if (md.conflict) result.conflict = true;
   return result;
 }
 
@@ -413,9 +485,15 @@ export const claudeCodeAdapter: Adapter = {
     // (change: unify-onboarding-entrypoint).
     const rawMcpOriginal = await readRawOrNull(mcpPath);
     const rawSettingsOriginal = await readRawOrNull(settingsPath);
+    const rawLocalOriginal = localPath === settingsPath
+      ? rawSettingsOriginal
+      : await readRawOrNull(localPath);
     const preflight = [
       refusalForUnreadableJson(mcpPath, rawMcpOriginal, layout.mcp),
       refusalForUnreadableJson(settingsPath, rawSettingsOriginal, layout.settings),
+      ...(localPath === settingsPath
+        ? []
+        : [refusalForUnreadableJson(localPath, rawLocalOriginal, layout.permissions)]),
     ].filter((refusal): refusal is PlannedChange => refusal !== null);
     if (preflight.length > 0) {
       return {
@@ -427,11 +505,12 @@ export const claudeCodeAdapter: Adapter = {
       };
     }
 
-    const mdResult = await applyMarkdownBlock(ctx, {
-      fileName: layout.md,
-      createIfMissing: true,
-      blockBody: ctx.instructionTemplate,
-    });
+    // The instruction block is written LAST (below). Written first, a refusal on any
+    // JSON file left the scope carrying instructions that tell an agent to call
+    // tools no MCP registration had been written for — the half-wired state the
+    // pre-flight exists to prevent, reached by the one refusal the pre-flight
+    // cannot predict (change: unify-onboarding-entrypoint).
+    const mdResult: ApplyResult = { changes: [], warnings: [], conflict: false };
 
     // --- 1. MCP server registration → .mcp.json (the file Claude Code reads) ---
     const existingMcp = await readJsonOrEmpty(mcpPath);
@@ -474,9 +553,8 @@ export const claudeCodeAdapter: Adapter = {
           : previewDiff(mcpPath, mcpBefore, mcpAfter),
     });
     if (!ctx.dryRun && (mcpAction !== 'noop' || !hadMcp)) {
-      if (!await publishManagedFile(ctx, mcpPath, mcpAfter, rawMcpOriginal)) {
-        return concurrentWriteRefusal(mdResult, mcpPath, layout.mcp);
-      }
+      const published = await publishManagedFile(ctx, mcpPath, mcpAfter, rawMcpOriginal);
+      if (!published.ok) return refusedWrite(mdResult, mcpPath, layout.mcp, published.reason);
     }
 
     // --- 2. Hooks → .claude/settings.json (marker-identified) ------------------
@@ -550,9 +628,8 @@ export const claudeCodeAdapter: Adapter = {
     };
 
     if (!ctx.dryRun && changed) {
-      if (!await publishManagedFile(ctx, settingsPath, after, rawSettingsOriginal)) {
-        return concurrentWriteRefusal(mdResult, settingsPath, layout.settings);
-      }
+      const published = await publishManagedFile(ctx, settingsPath, after, rawSettingsOriginal);
+      if (!published.ok) return refusedWrite(mdResult, settingsPath, layout.settings, published.reason);
     }
 
     mdResult.changes.push(change);
@@ -562,16 +639,8 @@ export const claudeCodeAdapter: Adapter = {
     // append our single sentinel permission string to permissions.allow if absent
     // (idempotent), preserving any permissions the user already configured. Skipped
     // in the user scope, where it was folded into the single settings write above.
-    if (permissionSharesSettingsFile) return mdResult;
-    const rawLocal = await readRawOrNull(localPath);
-    const localRefusal = refusalForUnreadableJson(localPath, rawLocal, layout.permissions);
-    if (localRefusal) {
-      mdResult.changes.push(localRefusal);
-      mdResult.warnings.push(
-        `${layout.permissions} could not be parsed as JSON, so the ${OPENLORE_PERMISSION} permission was not added.`,
-      );
-      return mdResult;
-    }
+    if (permissionSharesSettingsFile) return withInstructionBlock(ctx, layout, mdResult);
+    const rawLocal = rawLocalOriginal;
     const hadLocal = rawLocal != null;
     const existingLocal = await readJsonOrEmpty(localPath);
     const perms = (existingLocal.permissions as Record<string, unknown>) ?? {};
@@ -598,12 +667,13 @@ export const claudeCodeAdapter: Adapter = {
           ? previewDiff(localPath, rawLocal ?? '', localAfter)
           : previewCreate(localPath, localAfter),
       });
-      if (!ctx.dryRun && !await publishManagedFile(ctx, localPath, localAfter, rawLocal)) {
-        return concurrentWriteRefusal(mdResult, localPath, layout.permissions);
+      if (!ctx.dryRun) {
+        const published = await publishManagedFile(ctx, localPath, localAfter, rawLocal);
+        if (!published.ok) return refusedWrite(mdResult, localPath, layout.permissions, published.reason);
       }
     }
 
-    return mdResult;
+    return withInstructionBlock(ctx, layout, mdResult);
   },
 
   async uninstall(ctx: ApplyContext): Promise<ApplyResult> {
@@ -650,7 +720,10 @@ export const claudeCodeAdapter: Adapter = {
             summary: `remove ${layout.mcp} (was OpenLore-only)`,
           });
         } else {
-          if (!ctx.dryRun) await confinedAtomicWriteFile(ctx.root, mcpPath, serializeManaged(rawMcp, next, removalEdits), { preserveMode: true });
+          if (!ctx.dryRun) {
+            const published = await publishManagedFile(ctx, mcpPath, serializeManaged(rawMcp, next, removalEdits), rawMcp);
+            if (!published.ok) return refusedWrite(md, mcpPath, layout.mcp, published.reason);
+          }
           md.changes.push({
             path: mcpPath,
             kind: 'update',
@@ -721,7 +794,10 @@ export const claudeCodeAdapter: Adapter = {
         summary: `remove ${layout.settings} (was OpenLore-only)`,
       });
     } else {
-      if (!ctx.dryRun) await confinedAtomicWriteFile(ctx.root, settingsPath, serializeManaged(rawSettings, next, removalEdits), { preserveMode: true });
+      if (!ctx.dryRun) {
+        const published = await publishManagedFile(ctx, settingsPath, serializeManaged(rawSettings, next, removalEdits), rawSettings);
+        if (!published.ok) return refusedWrite(md, settingsPath, layout.settings, published.reason);
+      }
       md.changes.push({
         path: settingsPath,
         kind: 'update',
@@ -785,7 +861,13 @@ async function stripPermission(
         summary: `remove ${layout.permissions} (was OpenLore-only)`,
       });
     } else {
-      if (!ctx.dryRun) await confinedAtomicWriteFile(ctx.root, localPath, serializeManaged(rawLocal, parsedLocal, localEdits), { preserveMode: true });
+      if (!ctx.dryRun) {
+        const published = await publishManagedFile(ctx, localPath, serializeManaged(rawLocal, parsedLocal, localEdits), rawLocal);
+        if (!published.ok) {
+          refusedWrite(md, localPath, layout.permissions, published.reason);
+          return;
+        }
+      }
       md.changes.push({
         path: localPath,
         kind: 'update',

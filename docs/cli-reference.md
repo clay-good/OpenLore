@@ -132,7 +132,8 @@ requirement IDs. Presentation token caps are not diagnosed.
 ### Install Options
 
 ```bash
-openlore install [options]   # detect agents, wire surfaces, build the index
+openlore install [options]   # wire agents (this repo AND your user scope),
+                             #   build the index, wire the decision trail
 
   --agent <name>         # Limit to one surface: claude-code, cursor, cline,
                          #   continue, agents-md
@@ -142,7 +143,8 @@ openlore install [options]   # detect agents, wire surfaces, build the index
   --all-tools            # Wire the full 76-tool surface (alias of --preset full)
   --dry-run              # Print planned changes without writing any files
   --force                # Overwrite OpenLore-managed blocks even if hand-edited
-  --uninstall            # Remove OpenLore-managed blocks and entries
+  --uninstall            # Remove OpenLore-managed blocks and entries (both scopes)
+  --repo-only            # Wire this repository only; write no user-scope entries
   --no-analyze           # Configure surfaces only; skip init + analyze
 ```
 

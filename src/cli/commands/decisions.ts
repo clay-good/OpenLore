@@ -302,20 +302,20 @@ export async function installPreCommitHook(
    * (change: unify-onboarding-entrypoint).
    */
   opts: { autopilot?: boolean } = {},
-): Promise<void> {
+): Promise<boolean> {
   const target = await resolveGitHookTarget(rootPath, 'pre-commit');
   const hookPath = target.hookPath;
 
   if (!(await isResolvedGitRepository(rootPath, target))) {
     logger.error('Not a git repository. Cannot install hook.');
     process.exitCode = 1;
-    return;
+    return false;
   }
   const launcher = await resolveTrustedHookLauncher(rootPath);
   if (!launcher) {
     logger.error('Refusing to install a security hook that executes mutable code from this repository. Install OpenLore globally and retry.');
     process.exitCode = 1;
-    return;
+    return false;
   }
   const hookContent = renderHookContent(renderTrustedHookCommand(launcher, ['decisions', '--gate']));
   await ensureDecisionSupportFiles(rootPath);
@@ -323,7 +323,7 @@ export async function installPreCommitHook(
     logger.warning(hookManagerWarning(target, 'openlore decisions --gate'));
     const postTarget = await resolveGitHookTarget(rootPath, 'post-commit');
     logger.warning(hookManagerWarning(postTarget, 'openlore decisions --post-commit-check'));
-    return;
+    return false;
   }
 
   let preAlreadyInstalled = false;
@@ -348,7 +348,7 @@ export async function installPreCommitHook(
   });
   if (preResult.status === 'unavailable') {
     logger.warning(`Cannot install the decisions hook at ${displayHookPath(hookPath)}: ${preResult.reason}`);
-    return;
+    return false;
   }
   if (preAlreadyInstalled) logger.success('Pre-commit hook already installed.');
   else {
@@ -364,7 +364,8 @@ export async function installPreCommitHook(
   const postCommitPath = postTarget.hookPath;
   if (!postTarget.canInstall) {
     logger.warning(hookManagerWarning(postTarget, 'openlore decisions --post-commit-check'));
-    return;
+    // The gate itself IS installed; only its bypass detector is not.
+    return true;
   }
   const postResult = await updateHookFile(postCommitPath, (existing) => {
     if (existing?.includes(POST_COMMIT_HOOK_MARKER)) return null;
@@ -375,9 +376,10 @@ export async function installPreCommitHook(
   });
   if (postResult.status === 'unavailable') {
     logger.warning(`Cannot install the decisions post-commit hook at ${displayHookPath(postCommitPath)}: ${postResult.reason}`);
-    return;
+    return true;
   }
   logger.success(`Post-commit hook installed at ${displayHookPath(postCommitPath)} (bypass detector)`);
+  return true;
 }
 
 export async function uninstallPreCommitHook(rootPath: string): Promise<void> {

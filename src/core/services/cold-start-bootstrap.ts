@@ -202,23 +202,27 @@ function autoInitDisabled(directory: string): boolean {
 export function isInsideGitWorkTree(directory: string, home = homedir()): boolean {
   let dir: string;
   try {
-    dir = resolve(directory);
+    dir = canonicalRoot(directory);
   } catch {
     return false;
   }
   // Never treat the repository's own metadata directory as a work tree.
   if (dir.split(sep).includes('.git')) return false;
-  const homeRoot = (() => {
-    try { return resolve(home); } catch { return null; }
-  })();
+  // Canonical on BOTH sides. A home directory reached through a symlink (a home on
+  // another volume, /home/u -> /mnt/data/u) or spelled with different case on
+  // Windows would otherwise compare unequal and let the very case below through.
+  let homeRoot: string | null;
+  try { homeRoot = canonicalRoot(home); } catch { homeRoot = null; }
   for (;;) {
     if (isGitDirEntry(join(dir, '.git'))) {
-      // A dotfiles repository rooted at the home directory makes EVERY directory
-      // under it — Downloads, Desktop, a scratch folder — pass a plain work-tree
-      // test, which would let one wired agent auto-index the user's whole home.
-      // A repository whose root IS the home directory is out of scope for
-      // auto-init; an explicit `openlore analyze` there still works.
-      return homeRoot === null || dir !== homeRoot;
+      // A repository at or ABOVE the home directory makes EVERY directory under it
+      // — Downloads, Desktop, a scratch folder — pass a plain work-tree test, which
+      // would let one wired agent auto-index the user's whole home. A dotfiles repo
+      // rooted at $HOME is the common shape; a `.git` at `/Users` or `/` is the
+      // pathological one. Both are out of scope for auto-init; an explicit
+      // `openlore analyze` there still works.
+      if (homeRoot === null) return true;
+      return !(homeRoot === dir || homeRoot.startsWith(dir + sep));
     }
     const parent = dirname(dir);
     if (parent === dir) return false;
@@ -598,7 +602,11 @@ function firstTouchNotice(
   const built = mode === 'degraded'
     ? `signatures + the keyword (BM25) index only — this tree is over the ${ceiling}-file ceiling `
       + `(counted ${sizedFiles}+), so the semantic-embedding pass was shed`
-    : 'the structural index (call graph, signatures, keyword search)';
+    // Names the embedding pass explicitly: it is the one step that can reach
+    // outside the repository (a local model in the user-level cache), and the
+    // degraded notice only makes sense if the full lane is understood to run it.
+    : 'the structural index (call graph, signatures, keyword search) and, if an embedding '
+      + 'provider is configured, the semantic index it needs';
   return (
     `First OpenLore touch in ${basename(resolve(directory)) || directory}: building ${built} in the background, `
     + `into ${OPENLORE_ANALYSIS_REL_PATH}. This call was not blocked and was answered from what exists now. `

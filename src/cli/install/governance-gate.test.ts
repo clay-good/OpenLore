@@ -125,6 +125,17 @@ describe('the gate reports honestly when it cannot be installed', () => {
     process.exitCode = undefined;
   });
 
+  it('does not read a SUCCESSFUL install as failed because an earlier step failed', async () => {
+    await execFileAsync('git', ['init', '-q'], { cwd: dir });
+    await writeConfig(dir);
+    // The index build runs before the gate and reports its own failure by setting
+    // the exit code. That must not be mistaken for the gate's outcome.
+    process.exitCode = 1;
+
+    expect(await wireGovernanceGate(dir)).toBe('wired');
+    expect(await exists(join(dir, '.git', 'hooks', 'pre-commit'))).toBe(true);
+  });
+
   it('does not read a hook failure as success when an earlier step already failed', async () => {
     await execFileAsync('git', ['init', '-q'], { cwd: dir });
     await writeConfig(dir);

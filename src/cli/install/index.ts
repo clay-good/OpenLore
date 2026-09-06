@@ -242,14 +242,15 @@ export async function wireGovernanceGate(cwd: string): Promise<'wired' | 'skippe
     }
     const { installPreCommitHook } = await import('../commands/decisions.js');
     const exitCodeBefore = process.exitCode;
-    await installPreCommitHook(cwd, { autopilot: config.governance?.autopilot !== false });
-    // installPreCommitHook reports its own failures by setting a nonzero exitCode.
-    // Compare against SUCCESS, not against the prior value: if something earlier had
-    // already set 1 and the hook install also fails with 1, a delta comparison reads
-    // the failure as success and prints "Decision trail on" for a gate that was
-    // never installed.
-    const failed = process.exitCode !== undefined && process.exitCode !== 0;
-    if (failed) {
+    // The installer REPORTS its own outcome. Inferring it from `process.exitCode`
+    // was wrong in both directions: comparing against the prior value read a
+    // genuine failure as success when something earlier had already failed, and
+    // comparing against zero read a successful install as failed when an earlier
+    // step (a failed index build, which now runs first) had set the code.
+    const installed = await installPreCommitHook(cwd, {
+      autopilot: config.governance?.autopilot !== false,
+    });
+    if (!installed) {
       // A commit gate that could not be installed must not fail the whole install.
       process.exitCode = exitCodeBefore;
       logger.info('Decision trail', 'the commit gate could not be installed — see the message above; everything else is wired');
@@ -456,13 +457,19 @@ export async function runInstall(opts: InstallOptions): Promise<number> {
   // in the same summary; Claude Code resolves project scope over user scope, so
   // the repo entry written below still wins where both exist.
   //
-  // On UNINSTALL the candidate set is every user-scope-capable adapter, not just
-  // the detected ones: a previous install wrote those entries from some other
-  // directory, and "remove OpenLore from both scopes" must not depend on which
-  // markers happen to sit in the directory the user runs the removal from.
+  // The user-scope candidate set is CAPABILITY-driven, not detection-driven.
+  //
+  // Detection answers "which agents does this repository use", which is the right
+  // question for the repo pass and the wrong one for the user pass: the promise is
+  // "install once, and every repository you open works", and a repo that happens to
+  // contain a `.cursor/` marker (which short-circuits the `~/.claude` fallback in
+  // detect()) would silently not get it. An explicit `--agent` / `--agents` still
+  // narrows both passes — including on uninstall, where honoring it matters more,
+  // not less (change: unify-onboarding-entrypoint).
   const detectedAgents = [...new Set(surfaces.map(surface => surface.agent))];
-  const globalAgents = (opts.uninstall ? ALL_AGENTS : detectedAgents)
-    .filter(agent => ADAPTERS[agent].supportsGlobal === true);
+  const explicitlySelected = opts.agents?.length ? opts.agents : opts.agent ? [opts.agent] : null;
+  const userScopeCandidates = explicitlySelected ?? ALL_AGENTS;
+  const globalAgents = userScopeCandidates.filter(agent => ADAPTERS[agent]?.supportsGlobal === true);
   const repoOnlyAgents = detectedAgents.filter(agent => ADAPTERS[agent].supportsGlobal !== true);
   const wiringUserScope = !opts.repoOnly && globalAgents.length > 0;
   // Resolved only when the user scope is actually written, so `--repo-only` never
@@ -585,12 +592,10 @@ function reportScopes(info: {
         : '--repo-only: no user-scope entry was written; only this repository is wired',
     );
   } else if (!info.uninstall) {
-    // No user-scope-capable surface was detected here, so the headline promise
-    // ("install once, every repo works") did not happen. Say so rather than
-    // leaving the user to infer it from silence.
+    // Only reachable when an explicit --agent named no user-scope-capable adapter.
     logger.info(
       'User scope',
-      'not written — no agent with a user-scope surface was detected here. '
+      'not written — the selected agent(s) have no user-scope surface. '
       + 'Run "openlore install --agent claude-code" to wire it for every repository.',
     );
   }

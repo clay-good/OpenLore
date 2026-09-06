@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, symlinkSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
 import type { ChildProcess, spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -598,6 +598,30 @@ describe('auto-init guardrails', () => {
     const project = join(home, 'code', 'project');
     mkdirSync(join(project, '.git'), { recursive: true });
     expect(isInsideGitWorkTree(project, home)).toBe(true);
+  });
+
+  it('recognizes the home directory through a symbolic link, not just by string equality', () => {
+    // A home on another volume (/home/u -> /mnt/data/u) or reached through any
+    // symlink would compare unequal under a naive `resolve()` check, and the
+    // dotfiles-repo refusal above would silently stop applying.
+    const real = freshDir(false); // the dotfiles repo, at its real path
+    const linkParent = mkdtempSync(join(tmpdir(), 'openlore-homelink-'));
+    dirs.push(linkParent);
+    const linked = join(linkParent, 'home');
+    symlinkSync(real, linked, 'dir');
+    const under = join(real, 'Downloads');
+    mkdirSync(under, { recursive: true });
+
+    // home spelled through the link, directory spelled really — and vice versa.
+    expect(isInsideGitWorkTree(under, linked)).toBe(false);
+    expect(isInsideGitWorkTree(join(linked, 'Downloads'), real)).toBe(false);
+  });
+
+  it('refuses a repository rooted ABOVE the home directory', () => {
+    const parent = freshDir(false); // a `.git` above $HOME
+    const home = join(parent, 'user');
+    mkdirSync(join(home, 'projects'), { recursive: true });
+    expect(isInsideGitWorkTree(join(home, 'projects'), home)).toBe(false);
   });
 
   it('reports the build mode in the in-progress status', async () => {
