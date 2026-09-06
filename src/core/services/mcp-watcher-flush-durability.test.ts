@@ -240,7 +240,10 @@ describe('McpWatcher flush durability (issue #451)', () => {
 
     await until(() => said(/gave up on 1 change/), 'the watcher to disclose the abandoned batch');
     await until(() => internals.pending.size === 0 && !internals.running, 'the queue to settle');
-    expect(stderr.filter((line) => /error: EIO/.test(line)).length).toBe(4); // 1 + 3 retries
+    // Derived, like the others: EIO is the DETERMINISTIC class, so it draws that budget.
+    // The last literal '4' in this file, and the same trap - correct today, quietly wrong
+    // the day either budget moves, while still reading as a deliberate expectation.
+    expect(stderr.filter((line) => /error: EIO/.test(line)).length).toBe(1 + WATCH_MAX_EVENT_RETRIES);
     // The single-flight guard is released, so the watcher is not wedged.
     expect(internals.running).toBe(false);
   });
