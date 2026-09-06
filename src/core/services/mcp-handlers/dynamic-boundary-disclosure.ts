@@ -30,8 +30,11 @@ import {
   ARTIFACT_DYNAMIC_BOUNDARY,
   ARTIFACT_DEPENDENCY_GRAPH,
 } from '../../../constants.js';
+import { sanitizeForTerminal } from '../../../utils/misc.js';
 import {
   DYNAMIC_BOUNDARY_SCHEMA_VERSION,
+  DYNAMIC_BOUNDARY_KINDS,
+  DYNAMIC_BOUNDARY_REFUSALS,
   DYNAMIC_BOUNDARY_KIND_LABEL,
   DYNAMIC_BOUNDARY_REFUSAL_LABEL,
   type DynamicBoundaryReport,
@@ -56,6 +59,25 @@ export const DYNAMIC_BOUNDARY_DISCLOSURE_CAP = 8;
 export const CALLER_HIDING_KINDS: readonly DynamicBoundaryKind[] = [
   'reflective-invoke',
   'computed-member',
+  'container-resolution',
+];
+
+/**
+ * The kinds whose reach extends beyond their own file.
+ *
+ * `computed-member` is deliberately absent. A computed subscript's receiver is a LOCAL expression —
+ * `paint[r.status](…)` indexes an object literal three lines up — so it can name only what its own
+ * file holds. Letting it qualify through the import closure was measured on this repository: two
+ * such lookups in `doctor.ts` qualified 431 of 845 files and moved 505 dead-flagged coverage gaps
+ * to "undecided", every one of them on the strength of a colour-table lookup that can reach none of
+ * them. That is precisely the crying-wolf this module's scoping exists to prevent.
+ *
+ * `reflective-invoke` and `container-resolution` do reach: the receiver of `getattr(o, name)()` is
+ * a parameter that can hold anything the module graph reaches, and a DI container resolves by token
+ * across the whole application.
+ */
+const CLOSURE_REACHING_KINDS: readonly DynamicBoundaryKind[] = [
+  'reflective-invoke',
   'container-resolution',
 ];
 
@@ -97,26 +119,40 @@ function memoized<T>(
   });
 }
 
+const KNOWN_KINDS = new Set<string>(DYNAMIC_BOUNDARY_KINDS);
+const KNOWN_REFUSALS = new Set<string>(DYNAMIC_BOUNDARY_REFUSALS);
+
 /**
  * Is this parsed value a usable site record? Anything else is dropped, never trusted.
  *
- * `refusal` is checked alongside `line` and `kind` because it is RENDERED: a record missing it
- * would print "(undefined)" into a disclosure an agent and a terminal both read.
+ * Checked against the CLOSED VOCABULARIES, not merely for `typeof === 'string'`. A `kind` of
+ * `"constructor"` or a `refusal` of `"toString"` resolves off `Object.prototype` in the label
+ * lookups and renders `function Object() { [native code] }` into a disclosure an agent reads — the
+ * `??` fallback never fires, because the lookup succeeded. Membership is the only check that holds.
+ *
+ * `totalSites` is checked as an integer no smaller than the retained list, because it is SUMMED
+ * into the crossing's `count`: an artifact carrying `"09"`, `1e308` or an object turns that number
+ * into a string, an infinity, or `"0[object Object]"` in a sentence a human reads.
  */
 function validRecord(f: unknown): f is FileDynamicBoundary {
   if (!f || typeof f !== 'object') return false;
   const r = f as Partial<FileDynamicBoundary>;
-  return typeof r.filePath === 'string' && typeof r.language === 'string' && Array.isArray(r.sites)
-    && r.sites.every(site => !!site && typeof site === 'object'
-      && typeof (site as DynamicBoundarySite).line === 'number'
-      && typeof (site as DynamicBoundarySite).kind === 'string'
-      && typeof (site as DynamicBoundarySite).refusal === 'string');
+  if (typeof r.filePath !== 'string' || typeof r.language !== 'string' || !Array.isArray(r.sites)) {
+    return false;
+  }
+  if (r.totalSites !== undefined
+    && (!Number.isSafeInteger(r.totalSites) || r.totalSites < r.sites.length)) return false;
+  return r.sites.every(site => !!site && typeof site === 'object'
+    && Number.isSafeInteger((site as DynamicBoundarySite).line)
+    && KNOWN_KINDS.has((site as DynamicBoundarySite).kind)
+    && KNOWN_REFUSALS.has((site as DynamicBoundarySite).refusal));
 }
 
 /**
  * Load the persisted report, or `null` when absent/unreadable (a repository with no site).
  *
- * Every record is validated before it is served. This artifact is read on the serving path by seven
+ * Every record is validated — shape, closed vocabularies, and the one numeric field that is summed
+ * — before it is served. This artifact is read on the serving path by seven
  * conclusions, and a *disclosure* sidecar must never be able to take down the conclusions it exists
  * to annotate: a malformed, truncated, hand-edited or hostile file degrades to "no boundary", never
  * to a thrown handler. The read is bounded and refuses to follow a symlink or block on a FIFO, for
@@ -256,24 +292,29 @@ export function dynamicBoundaryCrossing(
       + `across ${ordered.length} file/kind group(s); `
       + `${shown.length} listed (${shown.map(describeSite).join('; ')})`
       + `${omitted > 0 ? `, ${omitted} group(s) omitted` : ''}. `
-      + 'Edges through them are absent from the graph, so this answer is a LOWER BOUND — '
-      + 'verify before asserting that nothing else reaches these symbols.',
+      // The sentence stops at the general fact. Each surface's own directive differs — "nothing
+      // else reaches these symbols" is right for a reachability answer and wrong for an exception
+      // set, where the risk is a reflectively-reached callee whose throws are missing — so a shared
+      // directive would send half its readers to verify the wrong thing.
+      + 'Edges through them are absent from the graph, so this answer is a LOWER BOUND: '
+      + 'anything reached only through one of these sites is missing from it.',
   };
 }
 
-/** `src/a.ts:12 (reflective invocation)` — the shared phrasing for one disclosed site. */
-export function describeSite(s: DisclosedDynamicSite): string {
-  const label = DYNAMIC_BOUNDARY_KIND_LABEL[s.kind as DynamicBoundaryKind] ?? s.kind;
-  return `${s.file}:${s.line} (${label})`;
-}
-
 /**
- * Render a crossing as one sentence, for a surface whose disclosure is free text rather than the
- * structured `confidenceBoundary`. Rendered FROM the structured crossing — never assembled
- * independently — so the two can never say different things.
+ * `src/a.ts:12 (reflective invocation)` — the shared phrasing for one disclosed site.
+ *
+ * The file path is repository-controlled (a file name may legally contain a newline, and a hostile
+ * `.openlore/` may carry anything), and this string is embedded in a CLI line whose writer keeps
+ * newlines because it treats its input as an OpenLore-authored message. A newline in a VALUE inside
+ * that message forges an extra terminal line — a forged "all clear" under a warning block — so
+ * every untrusted value is neutralized here, at the one place they are rendered.
  */
-export function renderCrossing(crossing: KnownUnknowableCrossing | undefined): string | undefined {
-  return crossing?.detail;
+export function describeSite(s: DisclosedDynamicSite): string {
+  const label = Object.hasOwn(DYNAMIC_BOUNDARY_KIND_LABEL, s.kind)
+    ? DYNAMIC_BOUNDARY_KIND_LABEL[s.kind as DynamicBoundaryKind]
+    : sanitizeForTerminal(s.kind);
+  return `${sanitizeForTerminal(s.file)}:${s.line} (${label})`;
 }
 
 /** One site, with the file it lives in — what a qualification names. */
@@ -283,11 +324,17 @@ export interface QualifyingHit {
 }
 
 /**
- * Maximum files walked when computing what one site file can name, and the total the whole index
+ * Maximum files walked when computing what one site file can reach, and the total the whole index
  * may retain. Bounds, not tuning knobs: a closure that runs past the first stops widening and an
- * index that runs past the second stops growing, so the qualification can only ever be NARROWER
- * than the true naming set — the safe direction, since a missed qualification leaves the existing
- * whole-repository caveat carrying the case, while a spurious one would cry wolf everywhere.
+ * index that runs past the second stops growing.
+ *
+ * The closure is an OVER-approximation of naming, not an under-one: a site's file transitively
+ * importing a module does not prove it can name a symbol inside it (that needs a re-export). It is
+ * the direction to err in HERE, because the closure only ever WITHHOLDS a negative conclusion —
+ * over-qualifying declines to claim absence, which is conservative, while under-qualifying would
+ * serve a confident "nothing calls this" next to a dispatch that does. The kinds that reach at all
+ * are held down to {@link CLOSURE_REACHING_KINDS} for the same reason in reverse: a construct that
+ * demonstrably cannot reach past its own file must not withhold anything beyond it.
  */
 const NAMING_CLOSURE_CAP = 2000;
 const NAMING_INDEX_CAP = 50_000;
@@ -315,18 +362,22 @@ export function buildQualifier(
   report: DynamicBoundaryReport | null,
   imports: ReadonlyMap<string, string[]>,
 ): (file: string, language: string) => QualifyingHit | undefined {
-  const siteFiles = (report?.files ?? [])
-    .map(f => ({
-      file: f.filePath,
-      language: f.language,
-      site: [...f.sites]
-        .filter(s => CALLER_HIDING_KINDS.includes(s.kind))
-        .sort((a, b) => a.line - b.line)[0],
-    }))
+  // Two views of the same records: what may qualify the site's OWN file, and the narrower set that
+  // may also qualify a file the site can merely import.
+  const pick = (f: FileDynamicBoundary, kinds: readonly DynamicBoundaryKind[]) =>
+    [...f.sites].filter(s => kinds.includes(s.kind)).sort((a, b) => a.line - b.line)[0];
+
+  const ownFileSites = (report?.files ?? [])
+    .map(f => ({ file: f.filePath, language: f.language, site: pick(f, CALLER_HIDING_KINDS) }))
     .filter((f): f is { file: string; language: string; site: DynamicBoundarySite } => !!f.site)
     .sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0));
 
-  if (siteFiles.length === 0) return () => undefined;
+  const siteFiles = (report?.files ?? [])
+    .map(f => ({ file: f.filePath, language: f.language, site: pick(f, CLOSURE_REACHING_KINDS) }))
+    .filter((f): f is { file: string; language: string; site: DynamicBoundarySite } => !!f.site)
+    .sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0));
+
+  if (ownFileSites.length === 0 && siteFiles.length === 0) return () => undefined;
 
   // `language\u0000file` → the site that qualifies it. Built lazily so a repository whose
   // conclusions never touch a candidate pays nothing.
@@ -334,8 +385,9 @@ export function buildQualifier(
   const build = (): Map<string, QualifyingHit> => {
     const out = new Map<string, QualifyingHit>();
     // Own-file attribution first, across every site file, so it can never lose a race to a file
-    // that merely imports the candidate and happens to sort earlier.
-    for (const s of siteFiles) out.set(`${s.language}\u0000${s.file}`, { file: s.file, site: s.site });
+    // that merely imports the candidate and happens to sort earlier. Every caller-hiding kind
+    // qualifies its own file, including the ones that reach no further.
+    for (const s of ownFileSites) out.set(`${s.language}\u0000${s.file}`, { file: s.file, site: s.site });
     for (const s of siteFiles) {
       if (out.size >= NAMING_INDEX_CAP) break;
       const seen = new Set<string>([s.file]);
@@ -363,12 +415,15 @@ export function buildQualifier(
  * the reader learns which line bounds the answer instead of only that the language is dynamic.
  */
 export function qualificationReason(hit: QualifyingHit): string {
-  const label = DYNAMIC_BOUNDARY_KIND_LABEL[hit.site.kind] ?? hit.site.kind;
-  // A refusal from a newer or hand-edited artifact echoes its own value, and a blank one falls
-  // back to prose — never to the literal string "undefined" in a user-facing disclosure.
-  const why = DYNAMIC_BOUNDARY_REFUSAL_LABEL[hit.site.refusal]
-    ?? hit.site.refusal
-    ?? 'the resolver did not bind this dispatch';
-  return `a ${label} at ${hit.file}:${hit.site.line} can reach this symbol without a graph edge `
+  const label = Object.hasOwn(DYNAMIC_BOUNDARY_KIND_LABEL, hit.site.kind)
+    ? DYNAMIC_BOUNDARY_KIND_LABEL[hit.site.kind]
+    : sanitizeForTerminal(hit.site.kind);
+  // `Object.hasOwn`, not `??`: a refusal of `"toString"` resolves off `Object.prototype` and the
+  // fallback would never fire. An unrecognised value echoes, neutralized like every other
+  // repository-controlled value rendered here.
+  const why = Object.hasOwn(DYNAMIC_BOUNDARY_REFUSAL_LABEL, hit.site.refusal)
+    ? DYNAMIC_BOUNDARY_REFUSAL_LABEL[hit.site.refusal]
+    : sanitizeForTerminal(hit.site.refusal ?? '') || 'the resolver did not bind this dispatch';
+  return `a ${label} at ${sanitizeForTerminal(hit.file)}:${hit.site.line} can reach this symbol without a graph edge `
     + `(${why}) — absence of a caller is not established here`;
 }

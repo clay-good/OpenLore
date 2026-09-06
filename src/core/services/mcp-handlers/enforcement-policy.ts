@@ -169,7 +169,7 @@ export const FINDING_CODE_REGISTRY: Record<string, FindingCodeSpec> = {
     defaultClass: 'advisory',
     source: 'dynamic-boundary',
     description: 'A conclusion qualified or capped a verdict because a dispatch site the call graph cannot follow lies in its scope.',
-    remediation: 'Dynamic boundary in scope: {subject}; the negative conclusion is not established here — verify the reflective, computed, or container-resolved caller by hand.',
+    remediation: 'Dynamic boundary in scope: {subject}; the negative conclusion is not established here — verify the dispatch the call graph cannot follow (reflection, a computed member, `eval`, a dynamic import, a metaprogrammed definition, or a DI container) by hand.',
   },
   // ── decision-bound architecture constraints ──
   'decision-constraint-violation': {

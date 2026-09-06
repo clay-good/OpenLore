@@ -43,6 +43,9 @@ import { extractSignatures, detectLanguage } from '../analyzer/signature-extract
 import type { FunctionNode } from '../analyzer/call-graph.js';
 import { extractFileStyle, extractFileParseHealth, extractFileDynamicBoundary } from '../analyzer/call-graph.js';
 import { buildDynamicBoundaryReport, type DynamicBoundaryReport, type FileDynamicBoundary } from '../analyzer/dynamic-boundary.js';
+import { readArtifactBounded } from '../../utils/bounded-artifact-read.js';
+/** Matches the serving-side cap in `dynamic-boundary-disclosure.ts` — one artifact, one bound. */
+const DYNAMIC_BOUNDARY_MAX_ARTIFACT_BYTES = 32 * 1024 * 1024;
 import { assembleFromRegions, type StyleFingerprint, type FileStyleRaw } from '../analyzer/style-fingerprint.js';
 import { invalidateVectorIndexCaches } from '../analyzer/vector-index.js';
 import { isSpecIndexLockTimeoutError, SpecVectorIndex } from '../analyzer/spec-vector-index.js';
@@ -2388,7 +2391,12 @@ export class McpWatcher {
   private async updateDynamicBoundary(changedFiles: ChangedFile[], deletedRels: string[] = []): Promise<void> {
     const dbPath = join(this.outputPath, ARTIFACT_DYNAMIC_BOUNDARY);
     try {
-      const raw = await readFile(dbPath, 'utf-8').catch(() => null);
+      // Through the bounded reader, not `readFile`: `.openlore/` is repository-controlled, and a
+      // FIFO planted there blocks `open()` on a libuv worker forever — inside the analysis lock,
+      // so the watcher stops flushing AND the process stops being able to exit. The bounded reader
+      // refuses a FIFO, a directory and a symlink, and caps the read.
+      const raw = (await readArtifactBounded(dbPath, DYNAMIC_BOUNDARY_MAX_ARTIFACT_BYTES))?.text
+        ?? null;
       const existing = raw ? (JSON.parse(raw) as DynamicBoundaryReport) : null;
       const byPath = new Map<string, FileDynamicBoundary>(
         Array.isArray(existing?.files) ? existing!.files.map(f => [f.filePath, f]) : [],

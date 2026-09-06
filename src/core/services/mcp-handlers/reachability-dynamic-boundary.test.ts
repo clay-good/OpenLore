@@ -144,12 +144,26 @@ describe('find_dead_code — dynamic-boundary qualification', () => {
     expect(find(r, 'farOrphan').reason).not.toContain('src/plugins.ts');
   });
 
-  it('a site whose importer chain reaches the candidate DOES qualify it', async () => {
+  it('a REFLECTIVE site whose importer chain reaches the candidate qualifies it', async () => {
+    // A reflective invoke's receiver is a parameter that can hold anything the module graph
+    // reaches, so it qualifies through the import closure.
+    await mockArtifacts(
+      [{ filePath: 'src/plugins.ts', language: 'TypeScript', kind: 'reflective-invoke', line: 31 }],
+      [['src/plugins.ts', 'src/far/away.ts']],
+    );
+    expect(find(await run(), 'farOrphan').reason).toContain('src/plugins.ts:31');
+  });
+
+  it('a COMPUTED-MEMBER site never qualifies past its own file', async () => {
+    // Its receiver is a local expression — a colour table three lines up. Two such lookups in one
+    // CLI file were measured qualifying 431 of this repository's 845 files through the closure.
     await mockArtifacts(
       [{ filePath: 'src/plugins.ts', language: 'TypeScript', kind: 'computed-member', line: 31 }],
       [['src/plugins.ts', 'src/far/away.ts']],
     );
-    expect(find(await run(), 'farOrphan').reason).toContain('src/plugins.ts:31');
+    const r = await run();
+    expect(find(r, 'tsOrphan').reason, 'its own file still qualifies').toContain('src/plugins.ts:31');
+    expect(find(r, 'farOrphan').reason, 'an imported file must not').not.toContain('src/plugins.ts');
   });
 
   it('a site in another language never qualifies', async () => {

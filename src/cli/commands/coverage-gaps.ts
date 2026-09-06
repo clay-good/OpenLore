@@ -22,12 +22,29 @@ interface CoverageGapItem {
   signals: Array<{ label: string; evidence: Record<string, number | string> }>;
   alsoFlaggedDead?: true;
   deadReason?: 'no-callers' | 'dead-via-unreachable-callers';
+  /** The dead label was withheld at a dynamic boundary (change: disclose-dynamic-boundary-regions). */
+  deadLabelWithheld?: { reason: string; site: { file: string; line: number; kind: string } };
 }
 
-/** Live vs dead-flagged split of a gap list (change: demote-dead-flagged-coverage-gaps). */
+/**
+ * Live vs dead-flagged vs boundary-withheld split of a gap list (change:
+ * demote-dead-flagged-coverage-gaps; third bucket from disclose-dynamic-boundary-regions).
+ *
+ * Three buckets, not two: a gap whose dead label was withheld is UNDECIDED, and folding it into
+ * either side would publish it as decided. Rendering only two also made the printed line stop
+ * adding up — measured at 505 gaps missing from a 794-gap remainder.
+ */
 interface GapComposition {
   live: number;
   deadFlagged: number;
+  boundaryWithheld?: number;
+}
+
+/** `live · dead-flagged · undecided` — one phrasing, so the two composition lines cannot diverge. */
+function renderComposition(c: GapComposition): string {
+  const parts = [`${c.live} live`, `${c.deadFlagged} dead-flagged`];
+  if (c.boundaryWithheld) parts.push(`${c.boundaryWithheld} reachability undecided`);
+  return parts.join(' · ');
 }
 
 interface CoverageGapsResult {
@@ -54,8 +71,11 @@ interface CoverageGapsResult {
   };
 }
 
-/** Compact human rendering of the gap report. */
-function renderHuman(r: CoverageGapsResult): string {
+/**
+ * Compact human rendering of the gap report. Exported for its test: this renderer went a whole
+ * change without one, and silently stopped agreeing with the JSON it renders.
+ */
+export function renderHuman(r: CoverageGapsResult): string {
   const lines: string[] = [];
   lines.push('');
   lines.push('🧪 Structural test-coverage gaps (no reaching test)');
@@ -99,19 +119,24 @@ function renderHuman(r: CoverageGapsResult): string {
       const labels = g.signals.map(s => s.label).join(',');
       // Name WHY it is dead-flagged: "has callers, still unreachable" is a resolution
       // limit of the analysis, not a claim the code is unused.
-      const deadTag = g.deadReason === 'dead-via-unreachable-callers'
-        ? '(dead-flagged: callers unreachable — undecidable)'
-        : g.alsoFlaggedDead ? '(dead-flagged: no callers)' : '';
+      // A withheld gap must NOT render like a live one: without its own tag it printed identically
+      // to a genuinely-live untested gap, under a header promising "dead-flagged last" — the
+      // one-directionality rule broken on the human surface.
+      const deadTag = g.deadLabelWithheld
+        ? `(reachability undecided: dynamic boundary at ${g.deadLabelWithheld.site.file}:${g.deadLabelWithheld.site.line})`
+        : g.deadReason === 'dead-via-unreachable-callers'
+          ? '(dead-flagged: callers unreachable — undecidable)'
+          : g.alsoFlaggedDead ? '(dead-flagged: no callers)' : '';
       const tags = [labels && `[${labels}]`, deadTag].filter(Boolean).join(' ');
       lines.push(`   • ${g.name}  ${g.file}  fanIn=${g.fanIn}${tags ? '  ' + tags : ''}`);
     }
     if (r.composition) {
-      const { live, deadFlagged } = r.composition.returned;
-      lines.push(`   composition: ${live} live · ${deadFlagged} dead-flagged (of ${r.composition.total.live} live / ${r.composition.total.deadFlagged} dead-flagged overall)`);
+      lines.push(`   composition: ${renderComposition(r.composition.returned)}`
+        + ` (of ${renderComposition(r.composition.total)} overall)`);
     }
     if (r.omitted && r.omitted > 0) {
       const rest = r.composition?.omittedRemainder;
-      const detail = rest ? ` (${rest.live} live · ${rest.deadFlagged} dead-flagged)` : '';
+      const detail = rest ? ` (${renderComposition(rest)})` : '';
       lines.push(`   … and ${r.omitted} more${detail} (raise --max to see them)`);
     }
   }

@@ -802,8 +802,10 @@ function renderHeadline(cert: ImpactCertificate): string {
       // The claim is withheld, not softened: a reflective dispatch in the diff can open a path
       // without leaving an edge, so "no new paths" is not something this certificate established.
       ? 'no new paths into any declared surface FOUND — not established: '
-        + `${cert.dynamicBoundaries?.count ?? 0} dispatch site(s) in the diff are ones the call `
-        + 'graph cannot follow'
+        // "in the changed FILES", not "in the diff": the crossing counts every site in each changed
+        // file, including sites in hunks this change never touched.
+        + `${cert.dynamicBoundaries?.count ?? 0} dispatch site(s) in the changed file(s) are ones `
+        + 'the call graph cannot follow'
       : 'no new paths into any declared surface');
   }
   if (cert.highestSurfaceSeverity === 'critical') parts.push('⛔ critical surface newly reached');

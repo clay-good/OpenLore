@@ -360,7 +360,8 @@ export async function handleReportCoverageGaps(input: ReportCoverageGapsInput): 
   // add-confidence-boundary-disclosure)
   const reachBasis = edgeBasisWithinSet(cg.edges, reachedByTest);
   const staleness = await computeStaleness(absDir);
-  // Scoped to the files this report actually names, never the repository (change:
+  // Scoped to the files of every gap this report computed — including the remainder it reports only
+  // as a count, since those gaps are part of the answer too — never the repository (change:
   // disclose-dynamic-boundary-regions).
   const dynamicCrossing = dynamicBoundaryCrossing(dynamicReport, gaps.map(g => g.file));
   const confidenceBoundary = assembleBoundary({

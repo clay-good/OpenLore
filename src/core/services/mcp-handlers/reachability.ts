@@ -360,15 +360,17 @@ export async function handleFindDeadCode(input: FindDeadCodeInput): Promise<unkn
         reasons.push('script-container templates and framework macros are unanalyzed and may invoke this symbol');
       }
 
-      // A dynamic-boundary site that can NAME this symbol (change:
-      // disclose-dynamic-boundary-regions). Two rules make this a refinement rather than a third
+      // A dynamic-boundary site that can reach this symbol (change:
+      // disclose-dynamic-boundary-regions). Two properties make this a refinement, not a third
       // downgrade:
-      //   - it never lowers confidence a second time. `low` is already the floor the dynamic-language
-      //     rule sets, and a candidate a whole-language cap already covers is not made "more dead".
-      //   - it REPLACES the generic caveat with the specific site, so the reader learns which
-      //     construct bounds the answer rather than only that the language is dynamic.
-      // The shipped language-level cap remains the floor for a language with no matcher, because a
-      // language with no matcher records no sites and this simply never fires for it.
+      //   - `low` is the floor every cap here shares, so a candidate a whole-language or
+      //     synthesized-dispatch rule already capped is not made "more dead" by this one;
+      //   - the standing caveats say only THAT reflection may hide a caller. This ADDS the specific
+      //     site alongside them, so the reader learns WHICH construct bounds this answer. Nothing
+      //     is removed: the dynamic-language rule contributes no per-candidate reason to replace,
+      //     and `deadCodeSoundness` still emits its blanket caveat for the whole report.
+      // A language with no matcher records no sites, so this simply never fires for it and the
+      // shipped language-level cap remains its floor.
       const dynamicHit = qualifyDynamic(n.filePath, n.language);
       if (dynamicHit) {
         confidence = 'low';

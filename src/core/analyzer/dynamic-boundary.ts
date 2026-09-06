@@ -115,9 +115,13 @@ export const DYNAMIC_BOUNDARY_REFUSAL_LABEL: Record<DynamicBoundaryRefusal, stri
 };
 
 /**
- * Maximum characters of matched source retained as evidence. Evidence is untrusted repository text
- * that reaches an artifact, an MCP response, and a terminal — it is redacted, neutralized and
- * truncated at EXTRACTION time, before it can be persisted or crossing a worker boundary.
+ * Maximum characters of matched source retained as evidence.
+ *
+ * Evidence is untrusted repository text that is PERSISTED — into `dynamic-boundary.json`, through
+ * the Pass-1 fact cache, and across the extraction-worker boundary. It is neutralized, redacted and
+ * truncated at EXTRACTION time so none of those can ever hold a credential or a control sequence.
+ * (No conclusion surface renders it today — a disclosed site carries only file, line and kind — but
+ * the artifact is read by humans and committed by repositories, which is reason enough.)
  */
 export const DYNAMIC_BOUNDARY_EVIDENCE_MAX = 120;
 
@@ -128,11 +132,13 @@ export const DYNAMIC_BOUNDARY_EVIDENCE_MAX = 120;
 export const DYNAMIC_BOUNDARY_SITE_CAP = 50;
 
 /**
- * Declared density ceiling: recorded sites per thousand lines of a file's language, measured over
- * the substrate's own repository and every language fixture. A matcher that fires more often than
- * this is matching an ordinary idiom, not a boundary, and fails the suite rather than shipping.
+ * Declared density ceiling: recorded sites per thousand lines, asserted against realistically-sized
+ * fixtures of ordinary code. A matcher that fires more often than this on ordinary code is matching
+ * an idiom, not a boundary, and fails the suite rather than shipping.
  *
- * A ceiling, not a tuning knob: it is asserted in tests, never consulted at run time.
+ * A ceiling, not a tuning knob: it is asserted in tests, never consulted at run time. The figure the
+ * substrate's own repository produces is MEASURED by running `analyze` rather than asserted here —
+ * a full analyze is far too slow for a unit test. At the time of writing it is 5 sites.
  */
 export const DYNAMIC_BOUNDARY_DENSITY_CEILING_PER_KLOC = 12;
 
@@ -186,7 +192,13 @@ export interface DynamicBoundaryReport {
   totalSites: number;
   /** Files carrying at least one site. */
   totalFiles: number;
-  /** Per-kind rollup, sorted by the declared vocabulary order. */
+  /**
+   * Per-kind rollup, sorted by the declared vocabulary order.
+   *
+   * Counted over the RETAINED site lists, not over `totalSites`: a file past the per-file cap has
+   * sites whose kind nothing recorded, so these will not sum to `totalSites` for such a file. The
+   * exact figure is the one to quote; this breakdown is a shape, not a total.
+   */
   byKind: Array<{ kind: DynamicBoundaryKind; count: number }>;
   /** Per-language rollup, sorted by count desc then name. */
   byLanguage: Array<{ language: string; files: number; sites: number }>;
@@ -548,11 +560,10 @@ function tsSpec(): LanguageSpec {
   };
 }
 
-/** Languages the matcher declares support for — derived from the table, never hand-listed. */
-export const DYNAMIC_BOUNDARY_LANGUAGES: readonly string[] =
-  Object.keys(DYNAMIC_BOUNDARY_LANG_SPECS).sort();
-
-/** True when this language has a declared matcher. Consulted by the capability registry. */
+/**
+ * True when this language has a declared matcher — the one hook the capability registry consults,
+ * so the published matrix cannot claim coverage the table does not have.
+ */
 export function supportsDynamicBoundary(language: string): boolean {
   return Object.hasOwn(DYNAMIC_BOUNDARY_LANG_SPECS, language);
 }
@@ -605,18 +616,36 @@ function textOf(source: string, n: DynamicBoundaryNode): string {
 }
 
 /**
- * Redact, neutralize and truncate one matched construct's source into storable evidence.
+ * How much matched source is processed before truncation. A nested construct's node text can be
+ * most of the file, and every retained candidate would otherwise push the WHOLE thing through ~20
+ * credential regexes and two global replaces to produce 120 characters — measured at 2.2s and
+ * 320MB on a 1.9MB adversarial file, against 23ms for the same bytes with no trigger. The window is
+ * generous enough that redaction still sees whole tokens around the kept span.
+ */
+const EVIDENCE_SCAN_WINDOW = DYNAMIC_BOUNDARY_EVIDENCE_MAX * 8;
+
+/**
+ * Neutralize, redact, collapse and truncate one matched construct's source into storable evidence.
  *
- * Order matters: redaction first (so a credential is replaced while its shape is intact), then
- * terminal neutralization (so an ANSI sequence in the source can never reach a terminal), then
- * truncation and whitespace collapse. Applied HERE — at extraction — so the fact is already safe
- * before it crosses the worker boundary, enters the fact cache, or is persisted.
+ * **Order is load-bearing, and it is neutralization FIRST.** `sanitizeForTerminal` DELETES control
+ * characters, so redacting first leaves a credential split by one — `AIza…\0…` — invisible to the
+ * matcher, and then welds it back together whole. Every one of NUL, ESC, VT, DEL and C1 defeats a
+ * redact-first order that way, and the result is a real key persisted verbatim into an artifact
+ * repositories commonly commit. Neutralizing first removes the splitter before redaction looks.
+ * Whitespace collapse cannot reassemble anything (it leaves one space), so it follows.
+ *
+ * Applied HERE — at extraction — so the fact is already safe before it crosses the worker boundary,
+ * enters the fact cache, or is persisted.
  */
 export function toEvidence(raw: string): { evidence: string; truncated: boolean } {
-  const clean = sanitizeForTerminal(redactSecretString(raw))
+  const scanned = raw.length > EVIDENCE_SCAN_WINDOW ? raw.slice(0, EVIDENCE_SCAN_WINDOW) : raw;
+  const clean = redactSecretString(sanitizeForTerminal(scanned))
     .replace(/\s+/g, ' ')
     .trim();
-  if (clean.length <= DYNAMIC_BOUNDARY_EVIDENCE_MAX) return { evidence: clean, truncated: false };
+  const truncated = raw.length > scanned.length || clean.length > DYNAMIC_BOUNDARY_EVIDENCE_MAX;
+  if (clean.length <= DYNAMIC_BOUNDARY_EVIDENCE_MAX) {
+    return { evidence: clean, truncated };
+  }
   return { evidence: clean.slice(0, DYNAMIC_BOUNDARY_EVIDENCE_MAX) + '…', truncated: true };
 }
 
@@ -801,7 +830,15 @@ export function matchDynamicBoundaries(
     // specific selector to the candidate already retained.
     if (seen.has(node.startIndex)) {
       const existing = atOffset.get(node.startIndex);
-      if (existing && literalTarget && !existing.literalTarget) existing.literalTarget = literalTarget;
+      // SAME KIND only. `Class.forName("Foo").getMethod(name).invoke(o)` puts a `dynamic-import`
+      // rule and a `reflective-invoke` rule at one offset, and donating across them hands the CLASS
+      // name to a candidate whose METHOD is genuinely runtime-computed — the site then reads "the
+      // named target resolves to one symbol" about a dispatch that names nothing, and points the
+      // sibling resolver at the wrong symbol. The case the donation exists for
+      // (`getDeclaredMethod("run").invoke(o)`) is same-kind at both ends.
+      if (existing && literalTarget && !existing.literalTarget && existing.kind === kind) {
+        existing.literalTarget = literalTarget;
+      }
       return;
     }
     seen.add(node.startIndex);

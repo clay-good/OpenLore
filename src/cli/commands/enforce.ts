@@ -277,9 +277,12 @@ export function dynamicBoundaryFindings(cert: ImpactCertificate): GovernanceFind
     subject: 'no new paths into any declared surface',
     // Stable across re-runs of the same diff, so a frozen baseline adopts it once.
     discriminator: sites.map(s => `${s.file}:${s.line}:${s.kind}`).join(','),
-    message: `${crossing.count} dispatch site(s) in this change are ones the call graph cannot `
-      + `follow, so "no new path into a declared surface" is NOT established: ${listed}`
-      + `${omitted > 0 ? `, and ${omitted} further file/kind group(s)` : ''}.`,
+    // Both units are stated. `count` is SITES; the list and the omitted figure are file+kind
+    // GROUPS, so a message giving one and listing the other cannot be checked by its reader.
+    message: `${crossing.count} dispatch site(s) in the changed file(s) are ones the call graph `
+      + `cannot follow, across ${sites.length + omitted} file/kind group(s), so "no new path into `
+      + `a declared surface" is NOT established: ${listed}`
+      + `${omitted > 0 ? `, and ${omitted} group(s) not listed` : ''}.`,
   }];
 }
 

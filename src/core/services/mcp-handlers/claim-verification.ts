@@ -598,6 +598,9 @@ export async function handleVerifyClaim(input: VerifyClaimInput): Promise<unknow
     if (hit) {
       const crossing: KnownUnknowableCrossing = {
         kind: 'dynamic-boundary',
+        // The qualifier names ONE site — the lowest-line caller-hiding one in the file that
+        // qualified — so one is the honest count here. `count` is sites everywhere it appears; this
+        // path discloses a single site rather than a scope's worth, and says so by carrying 1.
         count: 1,
         sites: [{ file: hit.file, line: hit.site.line, kind: hit.site.kind }],
         detail: 'A dispatch the call graph cannot follow — '

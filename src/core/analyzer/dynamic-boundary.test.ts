@@ -6,7 +6,6 @@ import {
   DYNAMIC_BOUNDARY_REFUSALS,
   DYNAMIC_BOUNDARY_REFUSAL_LABEL,
   DYNAMIC_BOUNDARY_LANG_SPECS,
-  DYNAMIC_BOUNDARY_LANGUAGES,
   DYNAMIC_BOUNDARY_EVIDENCE_MAX,
   DYNAMIC_BOUNDARY_SITE_CAP,
   DYNAMIC_BOUNDARY_DENSITY_CEILING_PER_KLOC,
@@ -58,9 +57,10 @@ describe('the vocabulary is closed and source-declared', () => {
     }
   });
 
-  it('the supported-language list is derived from the table, not hand-listed', () => {
-    expect([...DYNAMIC_BOUNDARY_LANGUAGES])
-      .toEqual(Object.keys(DYNAMIC_BOUNDARY_LANG_SPECS).sort());
+  it('support is answered from the table, never from a hand-listed set', () => {
+    for (const language of Object.keys(DYNAMIC_BOUNDARY_LANG_SPECS)) {
+      expect(supportsDynamicBoundary(language), language).toBe(true);
+    }
     expect(supportsDynamicBoundary('Python')).toBe(true);
     // Honesty: an unmatched language reads as UNSUPPORTED, never as "clean".
     expect(supportsDynamicBoundary('Rust')).toBe(false);
@@ -334,10 +334,9 @@ end
 `);
     expect(sites).toHaveLength(1);
     expect(sites[0].kind).toBe('reflective-invoke');
-    // `process` IS defined here, so the honest reason is "resolves, but no edge was bound" — never
-    // "resolves to no symbol in this index", which would be a false statement about a symbol that
-    // is plainly right there.
-    expect(sites[0].refusal).toBe('resolvable-but-unbound');
+    // Derived from ONE file, which cannot count symbols repository-wide — so it refuses as
+    // file-scoped rather than claiming an absence or a uniqueness it never checked.
+    expect(sites[0].refusal).toBe('unresolved-in-file-scope');
   });
 });
 
@@ -538,10 +537,17 @@ func (r *Repo) Load(id string) int { return r.Get(id) }
 `],
     ];
     for (const [path, language, content] of fixtures) {
-      const rec = await extractFileDynamicBoundary({ path, content, language });
-      const kloc = Math.max(content.split('\n').length, 1) / 1000;
+      // Repeated to a realistic size. A 20-line fixture puts one site at a density of 50, so the
+      // assertion would be "zero sites" and every ceiling from 1 to 49 would behave identically —
+      // the constant would not be exercised as a ceiling at all.
+      const body = Array.from({ length: 60 }, (_, i) => content.replaceAll('Repo', `Repo${i}`)).join('\n');
+      const rec = await extractFileDynamicBoundary({ path, content: body, language });
+      const kloc = Math.max(body.split('\n').length, 1) / 1000;
+      const lines = body.split('\n').length;
+      expect(lines, `${language} fixture must be large enough to exercise the ceiling`)
+        .toBeGreaterThan(300);
       const density = (rec?.sites.length ?? 0) / kloc;
-      expect(density, `${language} fires ${rec?.sites.length ?? 0} times on ordinary code`)
+      expect(density, `${language} fires ${rec?.sites.length ?? 0} times in ${lines} lines of ordinary code`)
         .toBeLessThanOrEqual(DYNAMIC_BOUNDARY_DENSITY_CEILING_PER_KLOC);
     }
   });
@@ -697,26 +703,46 @@ class Command {
 });
 
 describe('the refusal reason is never a false statement', () => {
-  it('a target defined in the file reports resolvable-but-unbound, not "resolves to no symbol"', async () => {
-    const sites = await sitesOf('a.py', 'Python', `
-def run():
-    return 1
-
-def dispatch(o):
-    return getattr(o, "run")()
-`);
-    expect(sites[0].refusal).toBe('resolvable-but-unbound');
+  it('the FULL BUILD reports resolvable-but-unbound, not "resolves to no symbol"', async () => {
+    // The whole-repository build is the only lane that can count symbols by name, so it is the only
+    // one that may make a claim about how many there are. `run` exists, so saying "resolves to no
+    // symbol in this index" would be a false statement about a symbol plainly right there.
+    const { CallGraphBuilder } = await import('./call-graph.js');
+    const g = await new CallGraphBuilder().build([{
+      path: 'a.py', language: 'Python',
+      content: 'def run():\n    return 1\n\ndef dispatch(o):\n    return getattr(o, "run")()\n',
+    }]);
+    expect(g.dynamicBoundaryByFile?.get('a.py')?.sites[0].refusal).toBe('resolvable-but-unbound');
   });
 
-  it('a single-file derivation never claims a repository-wide absence', async () => {
-    // `extractFileDynamicBoundary` is the watcher's lane: it sees one file, so it cannot know
-    // whether `handle` exists elsewhere. Saying "resolves to no symbol in this index" would be a
-    // claim it never checked — and one the full build would not make for the same file.
-    const sites = await sitesOf('a.py', 'Python', `
-def dispatch(o):
-    return getattr(o, "handle")()
-`);
-    expect(sites[0].refusal).toBe('unresolved-in-file-scope');
+  it('the full build reports unresolved-external for a target nothing defines', async () => {
+    const { CallGraphBuilder } = await import('./call-graph.js');
+    const g = await new CallGraphBuilder().build([{
+      path: 'a.py', language: 'Python',
+      content: 'def dispatch(o):\n    return getattr(o, "nowhere")()\n',
+    }]);
+    expect(g.dynamicBoundaryByFile?.get('a.py')?.sites[0].refusal).toBe('unresolved-external');
+  });
+
+  it('the full build reports ambiguous-target when the name resolves more than once', async () => {
+    const { CallGraphBuilder } = await import('./call-graph.js');
+    const g = await new CallGraphBuilder().build([
+      { path: 'a.py', language: 'Python', content: 'def run():\n    return 1\n' },
+      { path: 'b.py', language: 'Python', content: 'def run():\n    return 2\n' },
+      { path: 'c.py', language: 'Python', content: 'def dispatch(o):\n    return getattr(o, "run")()\n' },
+    ]);
+    expect(g.dynamicBoundaryByFile?.get('c.py')?.sites[0].refusal).toBe('ambiguous-target');
+  });
+
+  it('a single-file derivation never claims a repository-wide count, in either direction', async () => {
+    // `extractFileDynamicBoundary` is the watcher's lane: it sees one file, so it can neither say
+    // "resolves to no symbol in this index" (it may resolve one file over) nor "resolves to ONE
+    // symbol" (this file establishes only a lower bound). Both are claims it never checked.
+    const absent = await sitesOf('a.py', 'Python', 'def dispatch(o):\n    return getattr(o, "handle")()\n');
+    expect(absent[0].refusal).toBe('unresolved-in-file-scope');
+    const present = await sitesOf('b.py', 'Python',
+      'def handle():\n    return 1\n\ndef dispatch(o):\n    return getattr(o, "handle")()\n');
+    expect(present[0].refusal).toBe('unresolved-in-file-scope');
   });
 
   it('the dispatch selector is read positionally, not "the first string anywhere"', async () => {
@@ -912,5 +938,62 @@ class Response:
     expect(sites[0].symbolId).toBeUndefined();
     expect(sites[0].unattributed).toBe(true);
     expect(JSON.stringify(sites[0])).not.toContain('moduleLevel');
+  });
+});
+
+describe('a selector is never donated across kinds', () => {
+  it('a dynamic-import class name does not become a reflective-invoke target', async () => {
+    // `Class.forName("Foo").getMethod(name).invoke(o)` puts two rules at one offset. Donating
+    // across them hands the CLASS name to a candidate whose METHOD is runtime-computed, and the
+    // site then reads "the named target resolves to one symbol" about a dispatch that names none.
+    const sites = await sitesOf('A.java', 'Java', `
+import java.lang.reflect.Method;
+
+class A {
+    void Foo() {}
+    void f(Object o, String name) throws Exception {
+        Class.forName("Foo").getMethod(name).invoke(o);
+    }
+}
+`);
+    expect(sites).toHaveLength(1);
+    expect(sites[0].refusal).toBe('no-static-target');
+  });
+});
+
+
+describe('a control character cannot smuggle a credential past redaction', () => {
+  const KEY = 'AIzaSyD-1234567890abcdefghijklmnopqrstuv';
+  const SPLITTERS: Array<[string, number]> = [
+    ['NUL', 0x00], ['ESC', 0x1b], ['VT', 0x0b], ['DEL', 0x7f], ['C1', 0x9b],
+  ];
+
+  it.each(SPLITTERS)('%s split mid-token does not survive as a whole key', (_name, code) => {
+    // Redacting BEFORE neutralization is what made this work: `sanitizeForTerminal` DELETES the
+    // splitter, so a credential broken by one is invisible to the matcher and then welded back
+    // together whole — persisted verbatim into an artifact repositories commonly commit.
+    const half = KEY.length >> 1;
+    const raw = `eval("${KEY.slice(0, half)}${String.fromCharCode(code)}${KEY.slice(half)}")`;
+    const { evidence } = toEvidence(raw);
+    expect(evidence).not.toContain(KEY);
+    expect(evidence).not.toContain(KEY.slice(0, half));
+  });
+
+  it('still redacts an unsplit key, and keeps the construct legible', () => {
+    const { evidence } = toEvidence(`eval("${KEY}")`);
+    expect(evidence).not.toContain(KEY);
+    expect(evidence).toContain('eval(');
+  });
+
+  it('bounds the work on a huge matched construct instead of scanning all of it', () => {
+    // A nested construct's node text can be most of the file. Pushing the whole thing through ~20
+    // credential regexes and two global replaces to produce 120 characters measured at 2.2s and
+    // 320MB on a 1.9MB input; the scan window makes the cost independent of file size.
+    const huge = `eval("${'a b '.repeat(500_000)}")`;
+    const started = Date.now();
+    const { evidence, truncated } = toEvidence(huge);
+    expect(Date.now() - started, 'evidence must not scan the whole construct').toBeLessThan(1_000);
+    expect(truncated).toBe(true);
+    expect(evidence.length).toBeLessThanOrEqual(DYNAMIC_BOUNDARY_EVIDENCE_MAX + 1);
   });
 });

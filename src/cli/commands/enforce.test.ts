@@ -1218,9 +1218,12 @@ describe('dynamicBoundaryFindings', () => {
     // The severity rides the emitted finding, never the registry entry.
     expect(findings[0].severity).toBe('info');
     expect(findings[0].subject).toBe('no new paths into any declared surface');
-    expect(findings[0].message).toContain('12 dispatch site(s)');
+    // Both units are stated: `count` is SITES, the list and the omitted figure are GROUPS, so a
+    // reader can check that 2 listed + 3 omitted is the group total.
+    expect(findings[0].message).toContain('12 dispatch site(s) in the changed file(s)');
+    expect(findings[0].message).toContain('across 5 file/kind group(s)');
     expect(findings[0].message).toContain('src/a.ts:9');
-    expect(findings[0].message).toContain('3 further file/kind group(s)');
+    expect(findings[0].message).toContain('3 group(s) not listed');
     // Sites are ordered, so the discriminator is stable across re-runs of the same diff and a
     // frozen baseline adopts it once.
     expect(findings[0].discriminator).toBe('src/a.ts:9:reflective-invoke,src/b.ts:4:computed-member');

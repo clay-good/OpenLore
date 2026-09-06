@@ -225,8 +225,9 @@ function tallyStyle(language: string, tree: Parser.Tree, nodes: FunctionNode[], 
  * Candidates, not sites: the partition between "the resolver bound this" and "the resolver refused
  * this" is decided after Pass 2, by `finalizeDynamicBoundarySites`. Attribution happens here
  * because this is where the file's `nodes` exist — `findEnclosingFunction` maps each construct's
- * byte offset to its enclosing symbol, and a construct outside any function is left unattributed so
- * the finalizer can mark it module-level.
+ * byte offset to its enclosing symbol. A construct the offset maps to nothing is left unattributed,
+ * and the finalizer marks it exactly that — never "module level", which the extractor cannot
+ * establish (see the `unattributed` field's own doc).
  *
  * Fail-soft and additive: any error, or a language with no declared matcher, yields `undefined`, and
  * nothing here can add a node or an edge.
@@ -6524,19 +6525,18 @@ export async function extractFileDynamicBoundary(
   const result = await dispatchFileExtract(file);
   const candidates = result?.dynamicBoundary;
   if (!candidates?.length) return undefined;
-  const localNames = new Set<string>();
-  for (const n of result!.nodes) if (!n.isExternal) localNames.add(n.name);
   const sites = finalizeDynamicBoundarySites(candidates, {
     // Pass-1 raw edges predate resolution entirely — no reflective-resolution edge can exist here,
     // so nothing retracts on this lane. Deliberate and sound in the disclosing direction: a
     // single-file re-derive can only ever report MORE boundaries than the full build, never fewer,
     // and an extra disclosed boundary is never a false claim of absence.
     resolvedToEdge: () => false,
-    // A single-file derivation has no repository-wide symbol table. Reporting 0 here would write
-    // "resolves to no symbol in this index" for a target that resolves perfectly well one file
-    // over — a false claim, and one the full build would not make for the same file. Only a name
-    // this file itself defines can be counted; anything else refuses as file-scoped.
-    countSymbolsNamed: (name) => (localNames.has(name) ? 1 : null),
+    // A single-file derivation has no repository-wide symbol table, so it can count NOTHING — not
+    // even a name this file defines. `0` would write "resolves to no symbol in this index" about a
+    // target that resolves perfectly well one file over; `1` would write "resolves to ONE symbol"
+    // when this file establishes only a lower bound of one and five more may exist elsewhere. Both
+    // are exactly the repository-wide claim `unresolved-in-file-scope` exists to refuse.
+    countSymbolsNamed: () => null,
   });
   return buildFileDynamicBoundary(file.path, file.language, sites, maxMatchedTotal(candidates));
 }
