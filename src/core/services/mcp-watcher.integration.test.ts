@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { mkdtemp, writeFile, readFile, mkdir, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, readFile, mkdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { LLMContext } from '../analyzer/artifact-generator.js';
@@ -18,9 +18,14 @@ import { readCachedContext, _resetContextCacheForTesting } from './mcp-handlers/
 import { execFileGit } from '../../utils/git-exec.js';
 
 // ── Timing ────────────────────────────────────────────────────────────────────
-//   stabilityThreshold 100ms  +  debounce 100ms  +  processing slack 200ms
-const WAIT_MS = 500;
+//   stabilityThreshold 100ms  +  debounce 100ms
 const DEBOUNCE_MS = 100;
+// The window a NEGATIVE test gives the watcher before concluding it stayed quiet. Positive
+// tests do not use it - they poll for the outcome instead; see settle().
+const QUIET_WINDOW_MS = 500;
+// Time for chokidar's initial scan after start(). Starting the watcher writes no artifact,
+// so this is the one wait settle() cannot replace.
+const WATCHER_WARMUP_MS = 500;
 
 const wait = (ms: number) => new Promise(r => setTimeout(r, ms));
 
@@ -49,6 +54,59 @@ async function setupProject(): Promise<{ rootPath: string; outputPath: string; c
   return { rootPath, outputPath, contextPath };
 }
 
+// ── Settling ──────────────────────────────────────────────────────────────────
+
+const QUIET_MS = 150;            // comfortably past stabilityThreshold + debounce
+const SETTLE_BUDGET_MS = 10_000;
+
+/**
+ * Wait until the watcher has REWRITTEN `artifactPath` and then left it alone.
+ *
+ * These tests used to sleep a flat 500ms and assert immediately after. That is a bet that
+ * chokidar's stabilityThreshold + debounce + parse + artifact write always fit in 500ms. It held
+ * on a developer machine and not on a loaded runner - and because this file ran in NO CI job, the
+ * bet was never called. It failed the moment the file was wired in: a Node 22.19 run went red on
+ * "adds a node for a file not yet in the graph" while the same commit's Integration job passed.
+ *
+ * Polling models the real condition - the debounced flush finished - instead of guessing its
+ * duration. Two phases, because quiet at the START is not done: first wait for a write, then for
+ * writes to stop.
+ *
+ * It takes ONE artifact, not the output directory, and the caller must pass the file its
+ * assertion reads. A flush rewrites several artifacts and NOT at the same instant: watching the
+ * directory returns as soon as any of them goes quiet, so a test asserting on
+ * dependency-graph.json could be released by llm-context.json and read the pre-flush graph.
+ * That reproduced as a ~1-in-6 failure of "keeps dependency-graph.json import edges live".
+ *
+ * It RETURNS on timeout rather than throwing, so the caller's own expect() still produces the
+ * assertion message. A genuine failure still fails - one budget later, not one guess earlier.
+ */
+async function settle(artifactPath: string, budget = SETTLE_BUDGET_MS): Promise<void> {
+  const stamp = async (): Promise<number> => {
+    try { return (await stat(artifactPath)).mtimeMs; } catch { return 0; }
+  };
+
+  const deadline = Date.now() + budget;
+  const baseline = await stamp();
+
+  // Phase 1 - the flush rewrites THIS artifact.
+  let last = baseline;
+  while (Date.now() < deadline) {
+    await wait(20);
+    last = await stamp();
+    if (last !== baseline) break;
+  }
+
+  // Phase 2 - it stops being rewritten.
+  let quietSince = Date.now();
+  while (Date.now() < deadline) {
+    await wait(20);
+    const now = await stamp();
+    if (now !== last) { last = now; quietSince = Date.now(); continue; }
+    if (Date.now() - quietSince >= QUIET_MS) return;
+  }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 describe('McpWatcher — real fs watcher', () => {
@@ -74,7 +132,7 @@ describe('McpWatcher — real fs watcher', () => {
     // Modify the file — triggers chokidar 'change' event
     await writeFile(srcFile, 'export function login(user: string): boolean { return true; }', 'utf-8');
 
-    await wait(WAIT_MS);
+    await settle(contextPath);
 
     const updated = JSON.parse(await readFile(contextPath, 'utf-8')) as LLMContext;
     const entry = updated.signatures?.find(s => s.path === 'src/auth.ts');
@@ -95,7 +153,7 @@ describe('McpWatcher — real fs watcher', () => {
     await watcher.start();
 
     await writeFile(srcFile, 'export function noop() { /* updated */ }', 'utf-8');
-    await wait(WAIT_MS);
+    await settle(contextPath);
 
     const updated = JSON.parse(await readFile(contextPath, 'utf-8')) as LLMContext;
     expect(updated.callGraph).toEqual(original.callGraph);
@@ -113,14 +171,14 @@ describe('McpWatcher — real fs watcher', () => {
 
     // First change
     await writeFile(srcFile, 'export function second() {}', 'utf-8');
-    await wait(WAIT_MS);
+    await settle(contextPath);
 
     const after1 = JSON.parse(await readFile(contextPath, 'utf-8')) as LLMContext;
     expect(after1.signatures?.find(s => s.path === 'service.ts')?.entries.some(e => e.name === 'second')).toBe(true);
 
     // Second change
     await writeFile(srcFile, 'export function third() {}', 'utf-8');
-    await wait(WAIT_MS);
+    await settle(contextPath);
 
     const after2 = JSON.parse(await readFile(contextPath, 'utf-8')) as LLMContext;
     const entry = after2.signatures?.find(s => s.path === 'service.ts');
@@ -156,7 +214,7 @@ describe('McpWatcher — real fs watcher', () => {
 
     // Re-point the import from ./b to ./c.
     await writeFile(aFile, "import { x } from './c';\nexport const y = x;\n", 'utf-8');
-    await wait(WAIT_MS);
+    await settle(graphPath);
 
     const g = JSON.parse(await readFile(graphPath, 'utf-8')) as {
       nodes: Array<{ id: string; metrics: { inDegree: number; outDegree: number } }>;
@@ -197,7 +255,7 @@ describe('McpWatcher — real fs watcher', () => {
 
     // Remove the import entirely.
     await writeFile(aFile, 'export const y = 42;\n', 'utf-8');
-    await wait(WAIT_MS);
+    await settle(graphPath);
 
     const g = JSON.parse(await readFile(graphPath, 'utf-8')) as {
       nodes: Array<{ id: string; metrics: { outDegree: number } }>;
@@ -233,7 +291,7 @@ describe('McpWatcher — real fs watcher', () => {
 
     // Re-point the script from old.js to app.js.
     await writeFile(htmlFile, '<html><body><script src="app.js"></script></body></html>\n', 'utf-8');
-    await wait(WAIT_MS);
+    await settle(graphPath);
 
     const g = JSON.parse(await readFile(graphPath, 'utf-8')) as {
       edges: Array<{ source: string; target: string; assetKind?: string }>;
@@ -262,7 +320,7 @@ describe('McpWatcher — real fs watcher', () => {
     watchers.push(watcher);
     await watcher.start();
     await writeFile(aFile, "import { z } from './other';\nexport const y = z + 1;\n", 'utf-8');
-    await wait(WAIT_MS);
+    await settle(graphPath);
 
     const g = JSON.parse(await readFile(graphPath, 'utf-8')) as {
       nodes: Array<{ id: string }>;
@@ -294,7 +352,7 @@ describe('McpWatcher — real fs watcher', () => {
 
     // Delete b.ts — fires chokidar 'unlink'.
     await rm(absB);
-    await wait(WAIT_MS);
+    await settle(graphPath);
 
     const g = JSON.parse(await readFile(graphPath, 'utf-8')) as {
       nodes: Array<{ id: string }>;
@@ -328,7 +386,7 @@ describe('McpWatcher — real fs watcher', () => {
     // delete → recreate (in event order) ends with a.ts present.
     await rm(absA);
     await writeFile(absA, "import { x } from './b';\nexport const y = x + 1;\n", 'utf-8');
-    await wait(WAIT_MS);
+    await settle(graphPath);
     expect((await nodes()).some(n => n.id === absA), 'delete→recreate ⇒ present').toBe(true);
 
     // recreate (change) → delete ends with a.ts removed (deletion wins — the
@@ -336,7 +394,7 @@ describe('McpWatcher — real fs watcher', () => {
     await seed();
     await writeFile(absA, "import { x } from './b';\nexport const y = x + 2;\n", 'utf-8');
     await rm(absA);
-    await wait(WAIT_MS);
+    await settle(graphPath);
     expect((await nodes()).some(n => n.id === absA), 'recreate→delete ⇒ removed').toBe(false);
   }, 20_000);
 
@@ -349,7 +407,7 @@ describe('McpWatcher — real fs watcher', () => {
     // the REAL chokidar → handleBatch → persistContext → primeContextCache chain,
     // then proves the next read returns that exact primed object (reference
     // identity ⇒ no disk re-parse).
-    const { rootPath } = await setupProject(); // standard .openlore/analysis layout
+    const { rootPath, outputPath } = await setupProject(); // standard .openlore/analysis layout
     _resetContextCacheForTesting();
     const primeSpy = vi.spyOn(utils, 'primeContextCache');
 
@@ -361,7 +419,7 @@ describe('McpWatcher — real fs watcher', () => {
     await watcher.start();
 
     await writeFile(srcFile, 'export function after() {}', 'utf-8');
-    await wait(WAIT_MS);
+    await settle(join(outputPath, 'llm-context.json'));
 
     // The real event path handed the patched context to the read cache.
     expect(primeSpy, 'watcher must prime the read cache after a save').toHaveBeenCalled();
@@ -388,7 +446,11 @@ describe('McpWatcher — real fs watcher', () => {
     await watcher.start();
 
     await writeFile(testFile, 'it("y", () => {})', 'utf-8');
-    await wait(WAIT_MS);
+    // NOT settle(): this assertion is negative. settle() waits for a write to appear, and
+    // here a write appearing IS the failure - so it would burn its whole budget on every
+    // healthy run and time the test out. A negative test can only give the watcher a fixed,
+    // generous window and then check that nothing happened.
+    await wait(QUIET_WINDOW_MS);
 
     const after = await readFile(contextPath, 'utf-8');
     expect(after).toBe(before);
@@ -439,7 +501,9 @@ describe('McpWatcher - a real branch switch reaches the rebuild lane', () => {
     });
     watchers.push(watcher);
     await watcher.start();
-    await wait(WAIT_MS);
+    // Not settle(): starting the watcher writes no artifact, so there is nothing to poll for.
+    // This only lets chokidar finish its initial scan before the git command runs.
+    await wait(WATCHER_WARMUP_MS);
 
     // The real event: git rewrites .git/HEAD to point at the new branch.
     await execFileGit('git', ['checkout', '-b', 'feature'], { cwd: rootPath });
@@ -467,7 +531,9 @@ describe('McpWatcher - a real branch switch reaches the rebuild lane', () => {
     });
     watchers.push(watcher);
     await watcher.start();
-    await wait(WAIT_MS);
+    // Not settle(): starting the watcher writes no artifact, so there is nothing to poll for.
+    // This only lets chokidar finish its initial scan before the git command runs.
+    await wait(WATCHER_WARMUP_MS);
 
     await writeFile(join(rootPath, 'staged.ts'), 'export function staged() {}\n', 'utf-8');
     await execFileGit('git', ['add', 'staged.ts'], { cwd: rootPath });
