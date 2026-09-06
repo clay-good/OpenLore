@@ -594,7 +594,11 @@ export function buildResolvedImportMap(
         // A path ALIAS (`@/repo`, `~/lib`, `#internal`) is an in-project specifier this map
         // simply cannot follow — the source did NOT say the type is external, so refusing on it
         // would be a false claim and would cost every aliased repo its chained-receiver recall.
-        const aliased = !pythonModule && /^[@~#]/.test(imp.source);
+        //
+        // The leading `@` alone does NOT mean alias: `@nestjs/common` is a scoped PACKAGE, and
+        // treating it as in-project restores exactly the false edge this marker exists to stop.
+        // The alias convention has an EMPTY scope segment (`@/`); a scoped package names one.
+        const aliased = !pythonModule && /^(?:@\/|~\/|~$|#)/.test(imp.source);
         if (!aliased && (!pythonModule || !projectModules.has(pythonModule))) {
           for (const name of imp.importedNames) {
             fileMap.set(`${EXTERNAL_IMPORT_PREFIX}${name}`, imp.source);
