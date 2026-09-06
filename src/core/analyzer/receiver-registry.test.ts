@@ -837,6 +837,20 @@ describe('round-3 refusals and recall', () => {
     expect(edgeTo(result, 'run', 'save')?.confidence).toBe('receiver_inferred');
   });
 
+  it('refuses a SCOPED npm package — a leading `@` is not by itself an alias', async () => {
+    const result = await new CallGraphBuilder().build([
+      ts('common/injectable.ts', 'export class Injectable { init(x: number) { return x; } }'),
+      ts('svc.ts', `
+        import { Injectable } from '@nestjs/common';
+        export class Service {
+          constructor(private dep: Injectable) {}
+          run() { return this.dep.init(1); }
+        }
+      `),
+    ]);
+    expect(anyEdgeNamed(result, 'run', 'init')).toEqual([]);
+  });
+
   it('resolves through a TypeScript path alias rather than calling it external', async () => {
     const result = await new CallGraphBuilder().build([
       ts('src/repo.ts', 'export class Repo { save(x: number) { return x; } }'),
