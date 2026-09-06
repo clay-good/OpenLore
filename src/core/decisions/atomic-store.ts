@@ -43,12 +43,25 @@ let tmpCounter = 0;
  * Backoff for a rename that lost a race with another handle on the destination.
  *
  * POSIX `rename(2)` replaces the destination unconditionally. Windows does not:
- * `MoveFileExW(REPLACE_EXISTING)` needs DELETE access to the target, so it returns
- * `EPERM`/`EACCES`/`EBUSY` while ANY other handle is open on it without
- * `FILE_SHARE_DELETE` — an antivirus or Search Indexer scanning the file it just
- * saw written, or a reader that opened it a millisecond earlier. The window is
- * milliseconds wide and the operation is idempotent (the temp file is still
- * there, fully fsync'd), so the correct response is to wait and try again.
+ * `MoveFileExW(REPLACE_EXISTING)` returns `EPERM`/`EACCES`/`EBUSY` while ANY other
+ * handle is open on the target. The window is milliseconds wide and the operation is
+ * idempotent (the temp file is still there, fully fsync'd), so the correct response
+ * is to wait and try again.
+ *
+ * WHO holds it is usually US, not an antivirus — measured on Windows 11 / Node 26
+ * while investigating issue #457, after an earlier version of this note guessed at a
+ * scanner and sent the investigation the wrong way:
+ *
+ *   - every open shape blocks it, `O_RDONLY` included (so `readFileConfined`'s
+ *     `O_NOFOLLOW` is not special), and
+ *   - `FILE_SHARE_DELETE` does NOT rescue it. A reader that explicitly grants
+ *     share-delete still blocks the replace, so there is no share mode a reader can
+ *     adopt to make this go away.
+ *
+ * That second point is why this ladder is the ARCHITECTURE and not a workaround: with
+ * nothing to fix on the read side, waiting for our own reader to close its descriptor
+ * is the only way through. Any concurrent read of the artifact — a tool call serving
+ * `llm-context.json` while the watcher publishes it — can cost a publish this way.
  *
  * Observed, not theorised: a Windows CI runner produced
  * `EPERM: operation not permitted, rename '….llm-context.json.tmp-…' -> '…llm-context.json'`

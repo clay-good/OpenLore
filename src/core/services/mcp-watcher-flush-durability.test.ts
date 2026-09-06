@@ -25,7 +25,7 @@
  * closed) is not reproducible here — the DURABILITY contract is.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -96,15 +96,53 @@ function makeWatcher(options: Record<string, unknown> = {}): Watcher {
 const UNTIL_BUDGET_MS = process.platform === 'win32' ? 20_000 : 10_000;
 
 /** Poll for an observable outcome; on timeout, say so AND show the watcher's own diagnostics. */
-async function until(done: () => boolean | Promise<boolean>, what: string, budget = UNTIL_BUDGET_MS): Promise<void> {
+async function until(
+  done: () => boolean | Promise<boolean>,
+  what: string,
+  budget = UNTIL_BUDGET_MS,
+  intervalMs = 10,
+): Promise<void> {
   const deadline = Date.now() + budget;
   for (;;) {
     if (await done()) return;
     if (Date.now() >= deadline) {
       throw new Error(`Timed out after ${budget}ms waiting for ${what}.\nWatcher said:\n${stderr.join('') || '(nothing)'}`);
     }
-    await new Promise((r) => setTimeout(r, 10));
+    await new Promise((r) => setTimeout(r, intervalMs));
   }
+}
+
+/**
+ * Poll llm-context.json for `needle` — WITHOUT standing on the writer's foot.
+ *
+ * On Windows an open handle on a file blocks `MoveFileEx(MOVEFILE_REPLACE_EXISTING)` onto
+ * it, whatever share mode the reader asked for. That is measured, not assumed: granting a
+ * reader FILE_SHARE_DELETE explicitly does not let the replace through (issue #457).
+ *
+ * The watcher publishes this exact file by temp+fsync+rename, so polling it with `readFile`
+ * every 10ms keeps a descriptor open across most of the publish window — and the test then
+ * manufactures the contention it trips over. Measured here: the rename ladder in
+ * atomicWriteFile exhausted roughly 1 run in 4, the watcher abandoned the change, and the
+ * assertion failed for a reason that has nothing to do with flush durability.
+ *
+ * Polling every 100ms and reading only when the mtime has moved cuts that duty cycle by more
+ * than an order of magnitude. The assertion is unchanged — the content still has to land.
+ *
+ * NOTE the product behaviour is real and stays open in #457: a concurrent reader CAN still
+ * cost a publish. This only stops the harness from being that reader.
+ */
+async function untilContext(needle: string, what: string): Promise<void> {
+  let lastMtimeMs = -1;
+  let cached = '';
+  await until(async () => {
+    let mtimeMs: number;
+    try { mtimeMs = (await stat(contextPath)).mtimeMs; } catch { return false; }
+    if (mtimeMs !== lastMtimeMs) {
+      lastMtimeMs = mtimeMs;
+      try { cached = await readFile(contextPath, 'utf-8'); } catch { return false; }
+    }
+    return cached.includes(needle);
+  }, what, UNTIL_BUDGET_MS, 100);
 }
 
 const said = (pattern: RegExp): boolean => stderr.some((line) => pattern.test(line));
@@ -143,10 +181,7 @@ describe('McpWatcher flush durability (issue #451)', () => {
 
     inside(makeWatcher()).enqueue(foo);
 
-    await until(
-      async () => (await readFile(contextPath, 'utf-8')).includes('delta'),
-      'the retried flush to reach disk',
-    );
+    await untilContext('delta', 'the retried flush to reach disk');
     // Before the fix this batch produced no output at all — the drop was invisible.
     expect(said(/could not read 1 changed file/)).toBe(true);
     expect(said(/deferred 1 unreadable change/)).toBe(true);
@@ -186,10 +221,7 @@ describe('McpWatcher flush durability (issue #451)', () => {
 
     // The change survives the failure and lands on the retry. Before the fix the
     // drained batch existed only in a local array and was garbage-collected.
-    await until(
-      async () => (await readFile(contextPath, 'utf-8')).includes('gamma'),
-      'the re-queued batch to land',
-    );
+    await untilContext('gamma', 'the re-queued batch to land');
     expect(said(/error: ENOSPC/)).toBe(true);
     expect(said(/deferred 1 change\(s\) for retry/)).toBe(true);
   });
@@ -279,9 +311,9 @@ describe('McpWatcher flush durability (issue #451)', () => {
     internals.enqueue(bad);
 
     // The readable file is not held hostage by its neighbour...
-    await until(async () => (await readFile(contextPath, 'utf-8')).includes('alpha'), 'the readable half to land');
+    await untilContext('alpha', 'the readable half to land');
     // ...and the unreadable one comes back on the retry rather than leaving with it.
-    await until(async () => (await readFile(contextPath, 'utf-8')).includes('beta'), 'the retried half to land');
+    await untilContext('beta', 'the retried half to land');
     expect(said(/could not read 1 changed file/)).toBe(true);
     expect(said(/gave up/)).toBe(false);
   });
@@ -316,7 +348,7 @@ describe('McpWatcher flush durability (issue #451)', () => {
     // fsync'd temp+rename on a runner where those are slow.
     readFailures.set('foo.ts', 1);
     internals.enqueue(foo);
-    await until(async () => (await readFile(contextPath, 'utf-8')).includes('alpha'), 'the first round to land');
+    await untilContext('alpha', 'the first round to land');
     await until(() => internals.eventRetries.size === 0, 'the retry ledger to clear');
 
     // Three more failures. With round 1's entry still in the ledger this is the
@@ -324,7 +356,7 @@ describe('McpWatcher flush durability (issue #451)', () => {
     await writeFile(foo, 'export function omega() {}\n', 'utf-8');
     readFailures.set('foo.ts', 3);
     internals.enqueue(foo);
-    await until(async () => (await readFile(contextPath, 'utf-8')).includes('omega'), 'the second round to land');
+    await untilContext('omega', 'the second round to land');
     expect(said(/gave up/)).toBe(false);
     await until(() => internals.eventRetries.size === 0, 'the retry ledger to clear again');
   });
