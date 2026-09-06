@@ -940,7 +940,12 @@ export async function handleAnalyzeImpact(
             'potential hidden upstream caller. The blast radius is a lower bound here.',
           sample: ambiguousInScope.slice(0, 10).map((s: AmbiguousCallSite) => ({
             caller: ctx.edgeStore!.getNode(s.callerId)?.name ?? s.callerId,
-            callee: s.calleeObject ? `${s.calleeObject}.${s.calleeName}` : s.calleeName,
+            // A chained intra-object site's receiver is `this.<field>`, not the bare `this` the
+            // raw edge carries; rendering the bare token names a call the source does not have
+            // (change: shrink-receiver-resolution-boundary — same rule as error-propagation.ts).
+            callee: s.calleeObject
+              ? `${s.calleeObject}.${s.receiverField ? `${s.receiverField}.` : ''}${s.calleeName}`
+              : s.calleeName,
             strategy: s.strategy,
             candidates: s.candidateCount,
           })),
