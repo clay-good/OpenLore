@@ -20,7 +20,13 @@ let dir: string;
 beforeEach(async () => { dir = await mkdtemp(join(tmpdir(), 'openlore-guidance-install-')); });
 afterEach(async () => { await rm(dir, { recursive: true, force: true }); });
 
-const readMd = () => readFile(join(dir, 'CLAUDE.md'), 'utf8');
+// Line endings normalised at the read: the block is copied verbatim from
+// `templates/agent-instructions.md` on disk, so a CRLF checkout (the Windows default)
+// puts CRLF into CLAUDE.md, and the multi-line literal below — spelled with `\n` —
+// misses text that is present. The property is what the block says, not how the
+// repository stores its newlines.
+const readMd = async (): Promise<string> =>
+  (await readFile(join(dir, 'CLAUDE.md'), 'utf8')).split('\r\n').join('\n');
 
 describe('install regenerates guidance on preset change', () => {
   it('names the wired surface in the block', async () => {

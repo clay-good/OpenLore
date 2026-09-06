@@ -51,7 +51,7 @@ const mockCreateLLMService = vi.mocked(createLLMService);
 // FIXTURES
 // ============================================================================
 
-const ROOT = '/test/project';
+const ROOT = resolve('/test/project');
 const MOCK_CONFIG = { version: '1.0.0', openspecPath: './openspec' };
 const MOCK_DEP_GRAPH = { statistics: { nodeCount: 5, edgeCount: 3, clusterCount: 1, cycleCount: 0, avgDegree: 0.6 } };
 const MOCK_VERIFY_REPORT = {

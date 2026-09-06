@@ -132,8 +132,10 @@ describe('config-manager', () => {
       const result = await readOpenLoreConfig(testDir);
       expect(result).toBe(null);
     });
-
-    it('refuses to write config through an outbound .openlore symlink', async () => {
+  // skipIf(win32): creating a symlink there needs elevated privileges or Developer Mode,
+  // so this cannot build the premise it asserts about and would test a plain file instead.
+  // What it guards is platform-independent and is exercised on Linux.
+    it.skipIf(process.platform === 'win32')('refuses to write config through an outbound .openlore symlink', async () => {
       const outside = join(tmpdir(), `openlore-config-outside-${Date.now()}-${Math.random().toString(36).slice(2)}`);
       try {
         await mkdir(outside, { recursive: true });
@@ -484,7 +486,12 @@ describe('config-manager', () => {
     it('rejects an empty config with an attributable file and remedy', async () => {
       await writeRawConfig({});
 
-      await expect(readOpenLoreConfig(testDir)).rejects.toThrow(/\.openlore\/config\.json/);
+      // The message attributes a HOST filesystem path the reader can open in their own
+      // shell, so it is correctly rendered with the platform separator (unlike a
+      // repository-relative path OpenLore SERVES, which is POSIX everywhere). Assert the
+      // same thing — the config file is named, inside its `.openlore` directory —
+      // separator-agnostically.
+      await expect(readOpenLoreConfig(testDir)).rejects.toThrow(/[\\/]\.openlore[\\/]config\.json/);
       await expect(readOpenLoreConfig(testDir)).rejects.toThrow(/analysis/);
       await expect(readOpenLoreConfig(testDir)).rejects.toThrow(/openlore init/);
     });

@@ -226,7 +226,12 @@ describe('agent-loop enforcement hook', () => {
     expect(out.join('')).toContain('[blocking] Stale decision reference: decision:aaaaaaaa');
   });
 
-  it('preserves trailing whitespace in the resolved repository path', async () => {
+  // POSIX-only fixture, like the trailing-`\r` case below: Windows silently strips
+  // trailing whitespace from a path component, so a repository directory named
+  // `repo ` cannot be created there and `git` cannot even be spawned with it as cwd.
+  // The property under test (git's reported root is not trimmed) is therefore not
+  // expressible on Windows; the subdirectory case above covers root resolution there.
+  it.runIf(process.platform !== 'win32')('preserves trailing whitespace in the resolved repository path', async () => {
     const parent = await mkdtemp(join(tmpdir(), 'openlore-enforce-parent-'));
     created.push(parent);
     const root = join(parent, 'repo ');

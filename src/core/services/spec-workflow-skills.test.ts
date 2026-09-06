@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { resolve, sep } from 'node:path';
 import { adaptSkillForHost, buildManifest } from '../../cli/commands/setup.js';
 
 describe('spec workflow host skills', () => {
@@ -125,18 +125,22 @@ describe('spec workflow host skills', () => {
   });
 
   it('installs the same canonical skill catalogue for every skill-based host', () => {
-    const projectRoot = '/project';
+    const projectRoot = resolve('/project');
     const manifest = buildManifest(projectRoot);
+    // A manifest dest is a NATIVE path, so it holds a backslash on Windows and every
+    // includes('/segment/') below matched nothing — the filters silently returned empty
+    // and the length assertion failed instead of the path check it looks like.
+    const posix = (p: string): string => p.split(sep).join('/');
     const expectedSources = manifest.vibe.map(({ src }) => src);
 
     for (const host of ['vibe', 'claude', 'opencode'] as const) {
       const entries = manifest[host];
-      const skillEntries = entries.filter(({ dest }) => dest.includes('/skills/'));
-      const generate = entries.find(({ dest }) => dest.includes('/openlore-generate/'));
-      const repair = entries.find(({ dest }) => dest.includes('/openlore-repair/'));
+      const skillEntries = entries.filter(({ dest }) => posix(dest).includes('/skills/'));
+      const generate = entries.find(({ dest }) => posix(dest).includes('/openlore-generate/'));
+      const repair = entries.find(({ dest }) => posix(dest).includes('/openlore-repair/'));
       expect(skillEntries).toHaveLength(10);
       expect(skillEntries.map(({ src }) => src)).toEqual(expectedSources);
-      expect(skillEntries.every(({ src }) => src.includes('/skills/openlore-'))).toBe(true);
+      expect(skillEntries.every(({ src }) => posix(src).includes('/skills/openlore-'))).toBe(true);
       expect(generate?.src).toBe(resolve('skills/openlore-generate/SKILL.md'));
       expect(repair?.src).toBe(resolve('skills/openlore-repair/SKILL.md'));
     }

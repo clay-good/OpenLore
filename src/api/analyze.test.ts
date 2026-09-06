@@ -3,6 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { join, resolve } from 'node:path';
 import { openloreAnalyze } from './analyze.js';
 
 // ============================================================================
@@ -120,7 +121,7 @@ const mockOwnershipRelease = vi.fn().mockResolvedValue(undefined);
 // FIXTURES
 // ============================================================================
 
-const ROOT = '/test/project';
+const ROOT = resolve('/test/project');
 const MOCK_CONFIG = { version: '1.0.0', openspecPath: './openspec' };
 const MOCK_REPO_STRUCTURE = JSON.stringify({ architecture: { pattern: 'layered' }, domains: [] });
 const MOCK_DEP_GRAPH = JSON.stringify({
@@ -152,7 +153,7 @@ function setupMocks() {
       startedAt: '2026-08-15T00:00:00.000Z',
       heartbeatAt: '2026-08-15T00:00:00.000Z',
       stage: 'starting',
-      progressPath: `${ROOT}/.openlore/runtime/analysis-progress.json`,
+      progressPath: join(ROOT, '.openlore', 'runtime', 'analysis-progress.json'),
     },
     waitedMs: 0,
     update: mockOwnershipUpdate,
@@ -312,7 +313,7 @@ describe('openloreAnalyze', () => {
 
     it('checks freshness against a custom analysis output directory', async () => {
       await openloreAnalyze({ rootPath: ROOT, outputPath: 'custom-analysis' });
-      expect(mockIsCacheFresh).toHaveBeenCalledWith(ROOT, `${ROOT}/custom-analysis`, {
+      expect(mockIsCacheFresh).toHaveBeenCalledWith(ROOT, join(ROOT, 'custom-analysis'), {
         includePatterns: [], excludePatterns: [], maxFiles: 100000,
       });
     });
@@ -330,7 +331,7 @@ describe('openloreAnalyze', () => {
 
       expect(mockAcquireAnalysisOwnership).toHaveBeenCalledWith(
         ROOT,
-        `${ROOT}/.openlore/analysis`,
+        join(ROOT, '.openlore', 'analysis'),
         { stage: 'starting' },
       );
       expect(mockAcquireAnalysisOwnership.mock.invocationCallOrder[0]).toBeLessThan(
@@ -348,11 +349,11 @@ describe('openloreAnalyze', () => {
           startedAt: '2026-08-15T00:00:00.000Z',
           heartbeatAt: '2026-08-15T00:00:01.000Z',
           stage: 'dependency-graph',
-          progressPath: `${ROOT}/.openlore/runtime/analysis-progress.json`,
+          progressPath: join(ROOT, '.openlore', 'runtime', 'analysis-progress.json'),
         },
         elapsedMs: 1_000,
         heartbeatAgeMs: 25,
-        progressPath: `${ROOT}/.openlore/runtime/analysis-progress.json`,
+        progressPath: join(ROOT, '.openlore', 'runtime', 'analysis-progress.json'),
       });
 
       const error = await openloreAnalyze({ rootPath: ROOT })

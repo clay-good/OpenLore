@@ -3,6 +3,7 @@ import { finalizeGeneration, resolveGenerationProvider } from './generation-core
 import { writeFile } from 'node:fs/promises';
 import { resolveSpecLinkIndex } from '../generator/spec-link-service.js';
 import { SpecSnapshotGenerator } from '../analyzer/spec-snapshot-generator.js';
+import { join, resolve } from 'node:path';
 
 vi.mock('node:fs/promises', async importOriginal => ({
   ...await importOriginal<typeof import('node:fs/promises')>(),
@@ -104,32 +105,38 @@ describe('resolveGenerationProvider', () => {
   });
 });
 
+// Resolve the root literal for the HOST platform and compose children with `join`:
+// a bare "/repo" is not a fully-qualified Windows path, so the product's `safeJoin`
+// confinement rejects every child of it and the manifest write never happens.
+const ROOT = resolve('/repo');
+const OPENSPEC_ROOT = join(ROOT, 'openspec');
+
 describe('finalizeGeneration', () => {
   beforeEach(() => vi.clearAllMocks());
 
   it('shares mapping, RAG manifest, and snapshot finalization', async () => {
     await finalizeGeneration({
-      rootPath: '/repo',
-      openspecRoot: '/repo/openspec',
+      rootPath: ROOT,
+      openspecRoot: OPENSPEC_ROOT,
       openspecPath: 'openspec',
       metadataSpecs: [] as never[],
     });
 
     expect(resolveSpecLinkIndex).toHaveBeenCalledWith(expect.objectContaining({
-      rootPath: '/repo', openspecPath: 'openspec', persist: true,
+      rootPath: ROOT, openspecPath: 'openspec', persist: true,
     }));
     expect(writeFile).toHaveBeenCalledWith(
-      '/repo/openspec/rag-manifest.json',
+      join(OPENSPEC_ROOT, 'rag-manifest.json'),
       expect.any(String),
       'utf-8',
     );
-    expect(SpecSnapshotGenerator).toHaveBeenCalledWith('/repo', 'openspec');
+    expect(SpecSnapshotGenerator).toHaveBeenCalledWith(ROOT, 'openspec');
   });
 
   it('does not replace the global RAG manifest for scoped generation', async () => {
     await finalizeGeneration({
-      rootPath: '/repo',
-      openspecRoot: '/repo/openspec',
+      rootPath: ROOT,
+      openspecRoot: OPENSPEC_ROOT,
       openspecPath: 'openspec',
       metadataSpecs: [] as never[],
       scoped: true,

@@ -19,6 +19,7 @@ import {
   type ArchitectureRules,
 } from '../architecture/rules.js';
 import { scanViolations } from '../architecture/check.js';
+import { sep } from 'node:path';
 import type { DependencyGraphResult } from '../analyzer/dependency-graph.js';
 import { loadDurableDecisionProjections } from './corpus-integrity.js';
 import { loadDecisionStore } from './store.js';
@@ -128,9 +129,23 @@ function boundedJsonBytes(value: unknown, limit: number): number | null {
   return visit(value) ? bytes : null;
 }
 
+/**
+ * Is this projection an ADR file under a `decisions/` directory?
+ *
+ * The separator normalisation is load-bearing. The test below is a regex over `/`, and a
+ * projection path can arrive with the host separator — on Windows
+ * `openspec\decisions\adr-0001-….md` failed it, so an ADR was not recognised as a decisions
+ * file, its constraint marker was judged against the WRONG shape, and the ledger reported
+ * "has a constraint marker outside decision <id>'s generated structural slot" for a file
+ * that was perfectly well formed. A fabricated governance error, on Windows only.
+ */
+function isDecisionsFile(path: string): boolean {
+  return /(?:^|\/)decisions\/[^/]+\.md$/i.test(path.split(sep).join('/'));
+}
+
 function markerOccupiesGeneratedSlot(projection: { path: string; text: string }, decisionId: string): boolean {
   const escapedId = decisionId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  if (/(?:^|\/)decisions\/[^/]+\.md$/i.test(projection.path)) {
+  if (isDecisionsFile(projection.path)) {
     return new RegExp(
       `^> Recorded by openlore decisions[^\\n]*\\n> Decision ID:\\s*${escapedId}\\s*\\n(?:> Supersedes:[^\\n]*\\n)?` +
       '> OpenLore constraints:\\s*[^\\n]+\\n?\\s*$',
@@ -146,7 +161,7 @@ function markerOccupiesGeneratedSlot(projection: { path: string; text: string },
 }
 
 function projectionConstraintText(projection: { path: string; text: string }): string {
-  if (!/(?:^|\/)decisions\/[^/]+\.md$/i.test(projection.path)) return projection.text;
+  if (!isDecisionsFile(projection.path)) return projection.text;
   const marker = '> Recorded by openlore decisions';
   const index = projection.text.lastIndexOf(marker);
   return index >= 0 ? projection.text.slice(index) : '';

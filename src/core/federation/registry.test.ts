@@ -115,7 +115,10 @@ describe('federation registry', () => {
   // tree is behind a symlink (macOS /tmp → /private/tmp, a symlinked checkout) a
   // plain string compare fails to match the same directory — so the home-repo
   // self-add guard and the path de-dup silently broke. canonicalize() fixes it.
-  it('canonicalizes symlinked paths: rejects the home repo and de-dups across spellings', () => {
+  // skipIf(win32): creating a directory symlink needs elevated privileges or Developer Mode,
+  // so the alias this is about cannot be built on a stock runner. Canonicalisation itself is
+  // platform-independent and is exercised on Linux.
+  it.skipIf(process.platform === 'win32')('canonicalizes symlinked paths: rejects the home repo and de-dups across spellings', () => {
     const realHome = realpathSync(home);
     const linkRoot = mkdtempSync(join(tmpdir(), 'fed-link-'));
     peers.push(linkRoot);
@@ -197,7 +200,12 @@ describe('federation registry', () => {
   // chmod is a no-op for root (write always permitted), so this assertion of a
   // failed write only holds for a non-root user.
   const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
-  (isRoot ? it.skip : it)('adoption is harmless on a read-only registry (no crash; state still honest)', () => {
+  // Also skipped on Windows: the premise is a directory that REFUSES a write, and chmod does
+  // not express that there — Node maps the mode to the read-only attribute, which does not stop
+  // a write inside the directory. saveRegistry therefore SUCCEEDS, the entry gets baselined,
+  // and the test reports 'indexed' vs 'unbaselined' — a result about the fixture, not the code.
+  // Expressing it would need an ACL denial (icacls), which is a different test.
+  (isRoot || process.platform === 'win32' ? it.skip : it)('adoption is harmless on a read-only registry (no crash; state still honest)', () => {
     const peer = makePeer('a'); // empty fingerprint
     addRepo(home, peer, { name: 'a' });
     writeFingerprint(peer, 'h1'); // index appears → would-be adoption

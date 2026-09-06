@@ -70,7 +70,7 @@ const mockEnsureGitignored = vi.mocked(ensureGitignored);
 // SETUP
 // ============================================================================
 
-const ROOT = '/test/project';
+const ROOT = resolve('/test/project');
 const DEFAULT_CONFIG = { version: '1.0.0', openspecPath: './openspec' } as ReturnType<typeof getDefaultConfig>;
 
 beforeEach(() => {
@@ -184,7 +184,11 @@ describe('openloreInit', () => {
       ).resolves.toBeDefined();
     });
 
-    it('rejects an openspec symlink that resolves outside the project', async () => {
+    // skipIf(win32): the premise is a directory symlink, and creating one on Windows needs
+    // elevated privileges or Developer Mode — so on a stock runner this cannot build the
+    // situation it is about, and would assert against a plain directory instead. The
+    // confinement it guards is platform-independent and is exercised on Linux.
+    it.skipIf(process.platform === 'win32')('rejects an openspec symlink that resolves outside the project', async () => {
       const root = await mkdtemp(join(tmpdir(), 'openlore-init-root-'));
       const outside = await mkdtemp(join(tmpdir(), 'openlore-init-outside-'));
       try {

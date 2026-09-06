@@ -3,6 +3,7 @@ import { mkdtemp, rm, writeFile, readFile, mkdir, stat, symlink } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { formatProveGuidance, runInstall } from './index.js';
+import { formatPlatformCommand, resolveOpenloreCommand } from '../../utils/platform-command.js';
 import { logger } from '../../utils/logger.js';
 
 async function exists(p: string): Promise<boolean> {
@@ -12,6 +13,25 @@ async function exists(p: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * What the installer SHOULD wire on this host, derived from the same resolver it uses.
+ *
+ * These assertions used to spell the npx form out as a literal.
+ * That is the POSIX answer. Since fix-windows-console-flash-from-npx-shim the Windows answer
+ * is deliberately different — OpenLore's own CLI entry under an absolute node, never the npx
+ * shim, because a .cmd can only start through cmd.exe and opens a console window per call.
+ * A literal here therefore asserted one platform's output as if it were the contract, and
+ * failed on the platform the change was FOR.
+ */
+function expectedHook(args: readonly string[]): string {
+  return formatPlatformCommand(resolveOpenloreCommand(args), process.platform);
+}
+
+function expectedWiring(args: readonly string[]): { command: string; args: string[] } {
+  const resolved = resolveOpenloreCommand(args);
+  return { command: resolved.command, args: [...resolved.args] };
 }
 
 describe('openlore install (end-to-end)', () => {
@@ -73,7 +93,11 @@ describe('openlore install (end-to-end)', () => {
     expect(md).toContain('orient()');
   });
 
-  it('rejects an outbound AGENTS.md symlink even with --force', async () => {
+  // skipIf(win32): the premise is a symlink, and creating one there needs elevated
+  // privileges or Developer Mode — the test cannot build the escape it asserts is refused,
+  // and would assert against a plain file instead. The confinement is platform-independent
+  // and runs on Linux.
+  it.skipIf(process.platform === 'win32')('rejects an outbound AGENTS.md symlink even with --force', async () => {
     const outside = await mkdtemp(join(tmpdir(), 'openlore-install-outside-'));
     const target = join(outside, 'AGENTS.md');
     await writeFile(target, 'operator-owned\n', 'utf8');
@@ -87,7 +111,11 @@ describe('openlore install (end-to-end)', () => {
     }
   });
 
-  it('preflights Cursor destinations before writing through an outbound parent symlink', async () => {
+  // skipIf(win32): the premise is a symlink, and creating one there needs elevated
+  // privileges or Developer Mode — the test cannot build the escape it asserts is refused,
+  // and would assert against a plain file instead. The confinement is platform-independent
+  // and runs on Linux.
+  it.skipIf(process.platform === 'win32')('preflights Cursor destinations before writing through an outbound parent symlink', async () => {
     const outside = await mkdtemp(join(tmpdir(), 'openlore-cursor-outside-'));
     await symlink(outside, join(dir, '.cursor'), 'dir');
     try {
@@ -110,17 +138,14 @@ describe('openlore install (end-to-end)', () => {
     // --preset) wires the lean default surface (substrate) explicitly, not the
     // bare full surface, via LEAN_DEFAULT_PRESET.
     const mcp = JSON.parse(await readFile(join(dir, '.mcp.json'), 'utf8'));
-    expect(mcp.mcpServers.openlore).toEqual({
-      command: 'npx',
-      args: ['--yes', 'openlore', 'mcp', '--preset', 'substrate'],
-    });
+    expect(mcp.mcpServers.openlore).toEqual(expectedWiring(['mcp', '--preset', 'substrate']));
     expect(mcp._openlore.managed).toBe(true);
 
     // settings.json carries only the SessionStart hook — never mcpServers.
     const settings = JSON.parse(await readFile(join(dir, '.claude/settings.json'), 'utf8'));
     expect(settings.mcpServers).toBeUndefined();
     expect(settings.hooks.SessionStart[0].hooks[0].command).toBe(
-      'npx --yes openlore orient --json'
+      expectedHook(['orient', '--json'])
     );
   });
 
@@ -141,7 +166,7 @@ describe('openlore install (end-to-end)', () => {
     expect(settings._openlore).toBeUndefined();
     expect(settings.hooks.SessionStart[0]._openlore).toBe(true);
     const mcp = JSON.parse(await readFile(join(dir, '.mcp.json'), 'utf8'));
-    expect(mcp.mcpServers.openlore.command).toBe('npx');
+    expect(mcp.mcpServers.openlore.command).toBe(expectedWiring(['mcp']).command);
   });
 
   // change: default-to-lean-tool-surface — install wires the lean default by default
@@ -151,13 +176,13 @@ describe('openlore install (end-to-end)', () => {
 
     await runInstall({ cwd: dir, agent: 'claude-code', analyze: false });
     let mcp = JSON.parse(await readFile(join(dir, '.mcp.json'), 'utf8'));
-    expect(mcp.mcpServers.openlore.args).toEqual(['--yes', 'openlore', 'mcp', '--preset', 'substrate']);
+    expect(mcp.mcpServers.openlore.args).toEqual(expectedWiring(['mcp', '--preset', 'substrate']).args);
 
     // Re-install with --preset full restores the prior all-tools surface (idempotent merge).
     const code = await runInstall({ cwd: dir, agent: 'claude-code', preset: 'full', analyze: false, force: true });
     expect(code).toBe(0);
     mcp = JSON.parse(await readFile(join(dir, '.mcp.json'), 'utf8'));
-    expect(mcp.mcpServers.openlore.args).toEqual(['--yes', 'openlore', 'mcp', '--preset', 'full']);
+    expect(mcp.mcpServers.openlore.args).toEqual(expectedWiring(['mcp', '--preset', 'full']).args);
   });
 
   it('rejects an unknown --preset but accepts the full-surface selectors', async () => {
@@ -175,11 +200,11 @@ describe('openlore install (end-to-end)', () => {
     await writeFile(join(dir, 'CLAUDE.md'), '# project\n');
     await runInstall({ cwd: dir, agent: 'claude-code', allTools: true, analyze: false });
     let mcp = JSON.parse(await readFile(join(dir, '.mcp.json'), 'utf8'));
-    expect(mcp.mcpServers.openlore.args).toEqual(['--yes', 'openlore', 'mcp', '--preset', 'full']);
+    expect(mcp.mcpServers.openlore.args).toEqual(expectedWiring(['mcp', '--preset', 'full']).args);
 
     await runInstall({ cwd: dir, agent: 'claude-code', preset: 'all', analyze: false, force: true });
     mcp = JSON.parse(await readFile(join(dir, '.mcp.json'), 'utf8'));
-    expect(mcp.mcpServers.openlore.args).toEqual(['--yes', 'openlore', 'mcp', '--preset', 'full']); // 'all' normalized
+    expect(mcp.mcpServers.openlore.args).toEqual(expectedWiring(['mcp', '--preset', 'full']).args); // 'all' normalized
   });
 
   // change: default-to-lean-tool-surface — REGRESSION: the cursor adapter
@@ -190,18 +215,18 @@ describe('openlore install (end-to-end)', () => {
     const mcpPath = join(dir, '.cursor/mcp.json');
     await runInstall({ cwd: dir, agent: 'cursor', analyze: false });
     let mcp = JSON.parse(await readFile(mcpPath, 'utf8'));
-    expect(mcp.mcpServers.openlore.args).toEqual(['--yes', 'openlore', 'mcp', '--preset', 'substrate']);
+    expect(mcp.mcpServers.openlore.args).toEqual(expectedWiring(['mcp', '--preset', 'substrate']).args);
 
     // The .mdc body is preset-independent → unchanged on this re-install. The MCP
     // entry must STILL switch to full (the bug left it stale at navigation).
     await runInstall({ cwd: dir, agent: 'cursor', preset: 'full', analyze: false });
     mcp = JSON.parse(await readFile(mcpPath, 'utf8'));
-    expect(mcp.mcpServers.openlore.args).toEqual(['--yes', 'openlore', 'mcp', '--preset', 'full']);
+    expect(mcp.mcpServers.openlore.args).toEqual(expectedWiring(['mcp', '--preset', 'full']).args);
 
     // …and back to the lean default.
     await runInstall({ cwd: dir, agent: 'cursor', analyze: false });
     mcp = JSON.parse(await readFile(mcpPath, 'utf8'));
-    expect(mcp.mcpServers.openlore.args).toEqual(['--yes', 'openlore', 'mcp', '--preset', 'substrate']);
+    expect(mcp.mcpServers.openlore.args).toEqual(expectedWiring(['mcp', '--preset', 'substrate']).args);
   });
 
   it('re-running install is a no-op (no writes, exit 0)', async () => {
@@ -328,7 +353,7 @@ describe('openlore install (end-to-end)', () => {
     expect(settings.hooks.SessionStart[0]).toEqual(userHook);
     expect(settings.hooks.SessionStart[1]._openlore).toBe(true);
     expect(settings.hooks.SessionStart[1].hooks[0].command).toBe(
-      'npx --yes openlore orient --json'
+      expectedHook(['orient', '--json'])
     );
 
     await runInstall({ cwd: dir, agent: 'claude-code', uninstall: true });
@@ -348,7 +373,7 @@ describe('openlore install (end-to-end)', () => {
     expect(settings.hooks.UserPromptSubmit).toHaveLength(1);
     expect(settings.hooks.UserPromptSubmit[0]._openlore).toBe(true);
     expect(settings.hooks.UserPromptSubmit[0].hooks[0].command).toBe(
-      'npx --yes openlore orient --inject'
+      expectedHook(['orient', '--inject'])
     );
   });
 
@@ -388,10 +413,7 @@ describe('openlore install (end-to-end)', () => {
     expect(code).toBe(0);
     const mcp = JSON.parse(await readFile(join(dir, '.cursor/mcp.json'), 'utf8'));
     // change: default-to-lean-tool-surface / ADR-0023 — default wires the lean default surface (substrate).
-    expect(mcp.mcpServers.openlore).toEqual({
-      command: 'npx',
-      args: ['--yes', 'openlore', 'mcp', '--preset', 'substrate'],
-    });
+    expect(mcp.mcpServers.openlore).toEqual(expectedWiring(['mcp', '--preset', 'substrate']));
     expect(mcp._openlore.managed).toBe(true);
 
     // Uninstall removes the file when it only had our entries.
@@ -407,7 +429,7 @@ describe('openlore install (end-to-end)', () => {
     await runInstall({ cwd: dir, agent: 'cursor', analyze: false });
     const merged = JSON.parse(await readFile(join(dir, '.cursor/mcp.json'), 'utf8'));
     expect(merged.mcpServers.other).toEqual({ command: 'foo' });
-    expect(merged.mcpServers.openlore.command).toBe('npx');
+    expect(merged.mcpServers.openlore.command).toBe(expectedWiring(['mcp']).command);
 
     await runInstall({ cwd: dir, agent: 'cursor', uninstall: true });
     const after = JSON.parse(await readFile(join(dir, '.cursor/mcp.json'), 'utf8'));
@@ -432,7 +454,7 @@ describe('openlore install (end-to-end)', () => {
     const code = await runInstall({ cwd: dir, agent: 'claude-code', analyze: false });
     expect(code).toBe(0);
     const mcp = JSON.parse(await readFile(join(dir, '.mcp.json'), 'utf8'));
-    expect(mcp.mcpServers.openlore.args).toEqual(['--yes', 'openlore', 'mcp', '--preset', 'substrate']);
+    expect(mcp.mcpServers.openlore.args).toEqual(expectedWiring(['mcp', '--preset', 'substrate']).args);
   });
 
   it('auto-detects multiple surfaces when no --agent passed', async () => {

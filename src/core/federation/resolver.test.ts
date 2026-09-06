@@ -78,7 +78,18 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  for (const d of created.splice(0)) rmSync(d, { recursive: true, force: true });
+  for (const d of created.splice(0)) {
+    // Windows refuses to delete a directory while any handle inside it is open, and these
+    // fixtures hold call-graph.db — the store is closed by the code under test, but the
+    // SQLite -shm/-wal siblings and the handle itself clear a beat later. A plain rmSync
+    // raced that and every test failed in TEARDOWN with EPERM naming a temp path, which
+    // reads as unrelated to the behaviour asserted. Deletion is not what any test here
+    // checks, so retry briefly and then leave it to the OS.
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try { rmSync(d, { recursive: true, force: true }); break; }
+      catch { /* handle still open; the next pass usually wins */ }
+    }
+  }
 });
 
 describe('resolveFederationScope', () => {

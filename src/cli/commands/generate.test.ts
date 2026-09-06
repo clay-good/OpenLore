@@ -157,7 +157,8 @@ describe('generate command', () => {
   describe('command options', () => {
     it('preserves absolute output directories and resolves relative ones from the project root', async () => {
       const { resolveGenerateOutputPath } = await import('./generate.js');
-      expect(resolveGenerateOutputPath('/project', '/private/tmp/specs')).toBe('/private/tmp/specs');
+      const absoluteOut = resolve('/private/tmp/specs');
+      expect(resolveGenerateOutputPath(resolve('/project'), absoluteOut)).toBe(absoluteOut);
       expect(resolveGenerateOutputPath('/project', 'artifacts/specs')).toBe(resolve('/project/artifacts/specs'));
     });
 
@@ -446,7 +447,9 @@ describe('generate preview modes', () => {
     expect(normalizeGenerateOptions({}).force).toBe(false);
   });
 
-  it('seeds a preview from regular project files without copying symlinks', async () => {
+  // skipIf(win32): the premise is a symlink, which needs elevated privileges or Developer
+  // Mode there — the test cannot build the thing it asserts is not copied. Exercised on Linux.
+  it.skipIf(process.platform === 'win32')('seeds a preview from regular project files without copying symlinks', async () => {
     const { copyRegularTree } = await import('./generate.js');
     const { mkdir, readFile, symlink, writeFile } = await import('node:fs/promises');
     const source = await specTree({ billing: '# Billing\nhuman content\n' });

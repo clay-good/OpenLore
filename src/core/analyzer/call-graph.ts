@@ -12,7 +12,7 @@
  *  - Layer violations — cross-layer calls in the wrong direction
  */
 
-import { dirname, join as joinPath, posix } from 'node:path';
+import { dirname, posix } from 'node:path';
 import type Parser from 'tree-sitter';
 import { FunctionRegistryTrie } from './function-registry-trie.js';
 import type { ImportMap } from './import-resolver-bridge.js';
@@ -6024,10 +6024,14 @@ export class CallGraphBuilder {
       const resolveSource = (rel: string): string | undefined => {
         // Strip .js extension: TS ESM imports use './foo.js' to refer to './foo.ts'
         const stripped = rel.replace(/\.js$/, '');
-        // Form-preserving join (NOT resolve): the analyze pipeline passes repo-relative
-        // paths, so resolve() would force an absolute path that never matches the
-        // relative allFilePaths — silently zeroing out import-based tested_by edges.
-        const base = joinPath(dir, stripped);
+        // POSIX join, not `path.join`: the analyze pipeline passes repo-relative paths that are
+        // POSIX on every host, and `path.join` is NOT form-preserving on Windows — it normalises
+        // `src` + `./calc` to `src\calc`, which matches no entry in `allFilePaths` and silently
+        // zeroed EVERY import-based tested_by edge there. `select_tests` depends on this data, so
+        // the whole tool answered empty on Windows. (`resolve()` was the earlier version of the
+        // same mistake, in the absolute direction; the comment claiming `join` is form-preserving
+        // was true only on POSIX, where the two spellings coincide.)
+        const base = posix.join(dir, stripped);
         return allFilePaths.find(p =>
           p === base || p === `${base}.ts` || p === `${base}.tsx` ||
           p === `${base}.js` || p === `${base}.jsx` || p === `${base}/index.ts`,

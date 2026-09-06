@@ -62,18 +62,29 @@ describe('detectInstallMethod', () => {
 });
 
 describe('upgradeCommandFor', () => {
+  // Platform pinned: `npm` is a `.cmd` shim on Windows, so upgradeCommandFor resolves it
+  // there through Node's own npm CLI entry — both `cmd` and the leading arg differ, and
+  // that exact invocation is asserted by the win32 case below. This case is the POSIX
+  // mapping, which the platform default silently swapped out when the suite ran on Windows.
   it('maps each method to the correct upgrade command', () => {
-    expect(upgradeCommandFor('homebrew')).toEqual({ cmd: 'brew', args: ['upgrade', 'openlore'] });
-    expect(upgradeCommandFor('npm-global')).toEqual({ cmd: 'npm', args: ['install', '-g', 'openlore@latest'] });
+    expect(upgradeCommandFor('homebrew', 'linux')).toEqual({ cmd: 'brew', args: ['upgrade', 'openlore'] });
+    expect(upgradeCommandFor('npm-global', 'linux')).toEqual({ cmd: 'npm', args: ['install', '-g', 'openlore@latest'] });
     // Project-local upgrade is per-project — no `-g`. runUpdate only prints it.
-    expect(upgradeCommandFor('npm-local')).toEqual({ cmd: 'npm', args: ['install', 'openlore@latest'] });
-    expect(upgradeCommandFor('npx')).toBeNull();
-    expect(upgradeCommandFor('unknown')).toBeNull();
+    expect(upgradeCommandFor('npm-local', 'linux')).toEqual({ cmd: 'npm', args: ['install', 'openlore@latest'] });
+    expect(upgradeCommandFor('npx', 'linux')).toBeNull();
+    expect(upgradeCommandFor('unknown', 'linux')).toBeNull();
   });
 
   it('never issues a global mutation for a project-local install', () => {
-    const local = upgradeCommandFor('npm-local');
-    expect(local?.args).not.toContain('-g');
+    // Asserted on both platform resolutions: the `-g` flag is part of the argv either way.
+    for (const platform of ['linux', 'win32'] as const) {
+      const local = upgradeCommandFor('npm-local', platform, {
+        nodeExecutable: 'C:\\Program Files\\nodejs\\node.exe',
+        pathValue: '',
+        fileExists: () => true,
+      });
+      expect(local?.args).not.toContain('-g');
+    }
   });
 
   it('resolves the exact Windows invocation printed by --dry-run', () => {

@@ -885,8 +885,10 @@ describe('ADR creation — always writes ADR regardless of content', () => {
     expect(result.result.errors[0]?.error).toContain('no durable owning spec or ADR target');
     expect(result.result.synced).toEqual([]);
   });
-
-  it('retains a constrained system decision when ADR confinement blocks the only durable write', async () => {
+  // skipIf(win32): creating a symlink there needs elevated privileges or Developer Mode,
+  // so this cannot build the premise it asserts about and would test a plain file instead.
+  // What it guards is platform-independent and is exercised on Linux.
+  it.skipIf(process.platform === 'win32')('retains a constrained system decision when ADR confinement blocks the only durable write', async () => {
     const outside = await createTempDir();
     await mkdir(join(tmpDir, 'openspec'), { recursive: true });
     await symlink(outside, join(tmpDir, 'openspec', 'decisions'));

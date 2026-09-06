@@ -216,7 +216,10 @@ describe('analysis ownership — reclamation', () => {
 // ============================================================================
 
 describe('analysis ownership — progress sidecar', () => {
-  it('never writes or executes the legacy repository-resident watchdog path', async () => {
+  // skipIf(win32): creating a symlink there needs elevated privileges or Developer Mode,
+  // so this cannot build the premise it asserts about and would test a plain file instead.
+  // What it guards is platform-independent and is exercised on Linux.
+  it.skipIf(process.platform === 'win32')('never writes or executes the legacy repository-resident watchdog path', async () => {
     const { root, analysisDir } = await fixture();
     const outside = await mkdtemp(join(tmpdir(), 'openlore-watchdog-victim-'));
     roots.push(outside);
@@ -251,8 +254,10 @@ describe('analysis ownership — progress sidecar', () => {
     await new Promise(resolve => setTimeout(resolve, 100));
     expect(await readFile(victim, 'utf8')).toBe('SAFE');
   });
-
-  it('replaces a hostile progress symlink without following it during acquire or watchdog beats', async () => {
+  // skipIf(win32): creating a symlink there needs elevated privileges or Developer Mode,
+  // so this cannot build the premise it asserts about and would test a plain file instead.
+  // What it guards is platform-independent and is exercised on Linux.
+  it.skipIf(process.platform === 'win32')('replaces a hostile progress symlink without following it during acquire or watchdog beats', async () => {
     const { root, analysisDir } = await fixture();
     const outside = await mkdtemp(join(tmpdir(), 'openlore-progress-victim-'));
     roots.push(outside);
@@ -387,7 +392,11 @@ describe('analysis ownership — progress sidecar', () => {
 
 /** Run a snippet in a real child process against this module. */
 function runChild(source: string): ReturnType<typeof spawn> {
-  const modulePath = new URL('./analysis-ownership.ts', import.meta.url).pathname;
+  // The URL's `href`, not its `pathname`: this string is interpolated into a dynamic `import()`
+  // in the child, and on Windows a pathname is `/D:/a/...` — an invalid specifier there, so the
+  // child died before it could take ownership and the parent read the failure as "never owned".
+  // A `file://` URL is a valid import specifier on every platform.
+  const modulePath = new URL('./analysis-ownership.ts', import.meta.url).href;
   return spawn(
     process.execPath,
     ['--import', 'tsx', '--input-type=module', '-e', source.replace('__MODULE__', modulePath)],
@@ -471,7 +480,15 @@ describe('analysis ownership — across processes', () => {
     child.kill('SIGKILL');
   }, 60_000);
 
-  it('a killed owner releases ownership on SIGTERM rather than holding it', async () => {
+  // skipIf(win32): this tests the SIGNAL-CLEANUP path, and Windows has none —
+  // `child.kill('SIGTERM')` maps to TerminateProcess, so no handler runs and the owner never
+  // releases. The lock therefore survives with a FRESH heartbeat, and `own()` answers
+  // `in-progress`, which is correct: `isOwnershipStale` requires BOTH a dead PID and a stale
+  // heartbeat before reclaiming, precisely so a long analysis is never mistaken for an
+  // abandoned one. The recorded suspicion — that the dead owner was not detected as dead —
+  // was checked and does not hold: detection was never reached, because the heartbeat had
+  // not aged. Nothing here is broken on Windows; the premise simply cannot occur.
+  it.skipIf(process.platform === 'win32')('a killed owner releases ownership on SIGTERM rather than holding it', async () => {
     const { root, analysisDir } = await fixture();
     const child = runChild(`
       const m = await import('__MODULE__');

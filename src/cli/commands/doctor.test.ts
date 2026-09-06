@@ -1047,11 +1047,18 @@ describe('doctor command', () => {
 
   // --------------------------------------------------------------------------
   describe('MCP wiring check', () => {
-    /** Make readFile return given JSON for matching relative paths, ENOENT otherwise. */
+    /**
+     * Make readFile return given JSON for matching relative paths, ENOENT otherwise.
+     *
+     * Separators normalised before matching: the code under test builds its paths with
+     * `join`, so on Windows it asks for `…\.claude\settings.json` and a POSIX-spelled
+     * suffix here would match nothing — the fixture would silently claim the file is
+     * absent instead of exercising the check.
+     */
     async function mockMcpFiles(files: Record<string, unknown>): Promise<void> {
       const { readFile } = await import('node:fs/promises');
       vi.mocked(readFile).mockImplementation(((p: any) => {
-        const path = String(p);
+        const path = String(p).split('\\').join('/');
         for (const [rel, content] of Object.entries(files)) {
           if (path.endsWith(rel)) return Promise.resolve(JSON.stringify(content));
         }

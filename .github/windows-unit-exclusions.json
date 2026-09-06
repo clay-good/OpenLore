@@ -1,7 +1,7 @@
 {
   "$comment": [
     "Test files that do not yet pass on Windows. The `windows-unit` CI job runs the ENTIRE unit suite",
-    "on windows-latest \u2014 nothing is filtered \u2014 and scripts/windows-unit-report.mjs judges the result",
+    "on windows-latest — nothing is filtered — and scripts/windows-unit-report.mjs judges the result",
     "against this list (issue #434). Before that job, exactly one test file ran on Windows.",
     "",
     "The list is enforced in BOTH directions from that single run: a failing file that is not listed",
@@ -17,7 +17,7 @@
     "the product PERSISTS or SERVES (an artifact, a spec reference, a generated path) rather than",
     "inside a test expectation. Those are portability questions about the artifact, not test bugs,",
     "and are tracked separately.",
-    "`flaky: true` marks an entry that is NOT deterministically failing \u2014 it is exempt from both rules, because a file that oscillates would otherwise fail the build whichever list it sits on. It is a last resort: it needs observed evidence in its reason, it is reported on every run so it stays visible, and it belongs in the backlog issue as a bug to fix rather than a state to keep.",
+    "`flaky: true` marks an entry that is NOT deterministically failing — it is exempt from both rules, because a file that oscillates would otherwise fail the build whichever list it sits on. It is a last resort: it needs observed evidence in its reason, it is reported on every run so it stays visible, and it belongs in the backlog issue as a bug to fix rather than a state to keep.",
     "",
     "Backlog tracked in https://github.com/clay-good/OpenLore/issues/452"
   ],
@@ -25,249 +25,14 @@
     {
       "file": "src/api/analysis-status.test.ts",
       "failingTests": 1,
-      "reason": "POSIX-specific fixture or assertion"
-    },
-    {
-      "file": "src/api/analyze.test.ts",
-      "failingTests": 14,
-      "reason": "POSIX-absolute fixture root resolves onto another drive, tripping path confinement"
-    },
-    {
-      "file": "src/api/drift.test.ts",
-      "failingTests": 1,
-      "reason": "mocked-fs unit test built on POSIX-absolute fixture paths"
-    },
-    {
-      "file": "src/api/generate.test.ts",
-      "failingTests": 10,
-      "reason": "mocked-fs unit test built on POSIX-absolute fixture paths"
-    },
-    {
-      "file": "src/api/init.test.ts",
-      "failingTests": 3,
-      "reason": "mocked-fs unit test built on POSIX-absolute fixture paths"
-    },
-    {
-      "file": "src/api/run.test.ts",
-      "failingTests": 1,
-      "reason": "mocked-fs unit test built on POSIX-absolute fixture paths"
-    },
-    {
-      "file": "src/api/verify.test.ts",
-      "failingTests": 1,
-      "reason": "mocked-fs unit test built on POSIX-absolute fixture paths"
-    },
-    {
-      "file": "src/cli/commands/analyze-no-embed.test.ts",
-      "failingTests": 4,
-      "reason": "POSIX-specific fixture or assertion"
-    },
-    {
-      "file": "src/cli/commands/analyze.test.ts",
-      "failingTests": 7,
-      "reason": "POSIX-absolute fixture root resolves onto another drive, tripping path confinement"
-    },
-    {
-      "file": "src/cli/commands/blast-radius.test.ts",
-      "failingTests": 3,
-      "reason": "real-filesystem fixture: POSIX-only shim, exec bit, or temp-dir teardown semantics"
-    },
-    {
-      "file": "src/cli/commands/check-edit.test.ts",
-      "failingTests": 1,
-      "reason": "POSIX-specific fixture or assertion"
-    },
-    {
-      "file": "src/cli/commands/connect.test.ts",
-      "failingTests": 5,
-      "reason": "POSIX-specific fixture or assertion"
-    },
-    {
-      "file": "src/cli/commands/doctor-served-content.test.ts",
-      "failingTests": 1,
-      "reason": "POSIX-specific fixture or assertion"
-    },
-    {
-      "file": "src/cli/commands/doctor.test.ts",
-      "failingTests": 2,
-      "reason": "POSIX-specific fixture or assertion"
-    },
-    {
-      "file": "src/cli/commands/enforce.test.ts",
-      "failingTests": 6,
-      "reason": "real-filesystem fixture: POSIX-only shim, exec bit, or temp-dir teardown semantics"
-    },
-    {
-      "file": "src/cli/commands/generate.test.ts",
-      "failingTests": 1,
-      "reason": "mocked-fs unit test built on POSIX-absolute fixture paths"
-    },
-    {
-      "file": "src/cli/commands/impact-certificate.test.ts",
-      "failingTests": 3,
-      "reason": "real-filesystem fixture: POSIX-only shim, exec bit, or temp-dir teardown semantics"
-    },
-    {
-      "file": "src/cli/commands/mcp.test.ts",
-      "failingTests": 61,
-      "reason": "real-filesystem fixture: POSIX-only shim, exec bit, or temp-dir teardown semantics"
-    },
-    {
-      "file": "src/cli/commands/optional-features.test.ts",
-      "failingTests": 1,
-      "reason": "real-filesystem fixture: POSIX-only shim, exec bit, or temp-dir teardown semantics"
-    },
-    {
-      "file": "src/cli/commands/serve-descriptor.test.ts",
-      "failingTests": 2,
-      "reason": "POSIX-specific fixture or assertion"
-    },
-    {
-      "file": "src/cli/commands/update.test.ts",
-      "failingTests": 1,
-      "reason": "POSIX-specific fixture or assertion"
-    },
-    {
-      "file": "src/cli/commands/view.test.ts",
-      "failingTests": 5,
-      "reason": "mocked-fs unit test built on POSIX-absolute fixture paths"
-    },
-    {
-      "file": "src/cli/git-hooks.test.ts",
-      "failingTests": 33,
-      "reason": "real-filesystem fixture: POSIX-only shim, exec bit, or temp-dir teardown semantics"
-    },
-    {
-      "file": "src/cli/install/guidance-preset-regeneration.test.ts",
-      "failingTests": 1,
-      "reason": "POSIX-specific fixture or assertion"
-    },
-    {
-      "file": "src/cli/install/install.test.ts",
-      "failingTests": 13,
-      "reason": "POSIX-specific fixture or assertion"
-    },
-    {
-      "file": "src/cli/install/pi-surface.test.ts",
-      "failingTests": 13,
-      "reason": "real-filesystem fixture: POSIX-only shim, exec bit, or temp-dir teardown semantics"
-    },
-    {
-      "file": "src/cli/install/skill-wrapper.test.ts",
-      "failingTests": 2,
-      "reason": "POSIX-specific fixture or assertion"
-    },
-    {
-      "file": "src/core/analyzer/analysis-indexes.test.ts",
-      "failingTests": 4,
-      "reason": "mocked-fs unit test built on POSIX-absolute fixture paths"
-    },
-    {
-      "file": "src/core/analyzer/artifact-generator.test.ts",
-      "failingTests": 1,
-      "reason": "real-filesystem fixture: POSIX-only shim, exec bit, or temp-dir teardown semantics"
-    },
-    {
-      "file": "src/core/analyzer/file-walker-corpus-boundary.test.ts",
-      "failingTests": 1,
-      "reason": "POSIX-specific fixture or assertion"
-    },
-    {
-      "file": "src/core/analyzer/index-bundle.test.ts",
-      "failingTests": 1,
-      "reason": "runImport trust boundary: the imported answer's confidenceBoundary.basis reports a different directEdges count than the same query against the local index \u2014 an edge-resolution divergence in the round trip, NOT a separator inside a string. Diagnosed from the windows-unit-report artifact; the earlier 'bundle JSON embeds platform separators' reason was wrong.",
+      "reason": "ONE case: 'reports no analysis in progress for a stale lock'. Re-listed after being removed too eagerly on one machine's evidence — it passes 5/5 on a Windows 11 developer box and fails on the runner, so local green is not sufficient here. What the run shows: the assertion on line 138 PASSES (isOwnershipStale returns true for the planted lock) and line 139 fails, so openloreAnalysisStatus disagrees with the predicate the test says it must match, milliseconds apart on the same file. The likely difference is PID liveness for a just-exited child: deadPid() returns the pid after 'exit', but a Windows process can still be opened while a handle survives, so isProcessAlive may answer true in one call and false in the other. NOT confirmed - stated as the hypothesis to test first, not as the diagnosis. Same neighbourhood as the analysis-ownership SIGTERM case.",
       "suspectedProductionBug": true
     },
     {
-      "file": "src/core/analyzer/spec-vector-index.test.ts",
-      "failingTests": 1,
-      "reason": "POSIX-specific fixture or assertion"
-    },
-    {
-      "file": "src/core/analyzer/tested-by-derivation.test.ts",
-      "failingTests": 2,
-      "reason": "POSIX-specific fixture or assertion"
-    },
-    {
-      "file": "src/core/decisions/anchor-adapter.test.ts",
-      "failingTests": 5,
-      "reason": "real-filesystem fixture: POSIX-only shim, exec bit, or temp-dir teardown semantics"
-    },
-    {
       "file": "src/core/decisions/atomic-store.test.ts",
-      "failingTests": 4,
-      "reason": "real-filesystem fixture: POSIX-only shim, exec bit, or temp-dir teardown semantics"
-    },
-    {
-      "file": "src/core/decisions/corpus-integrity.test.ts",
-      "failingTests": 1,
-      "reason": "POSIX-specific fixture or assertion"
-    },
-    {
-      "file": "src/core/decisions/syncer.test.ts",
-      "failingTests": 1,
-      "reason": "'round-trips a decision constraint through the owning spec and ADR before purging': loadDecisionConstraintState reports one malformedFinding on Windows where POSIX reports none. NOT the separator defect the other four tests in this file had (fixed in the POSIX-repository-path change) \u2014 a durable-projection/marker read that behaves differently there, and the report artifact truncates the finding, so it needs a Windows machine to name."
-    },
-    {
-      "file": "src/core/drift/git-diff-corpus-materialization.test.ts",
-      "failingTests": 1,
-      "reason": "FLAKY on Windows, not deterministically failing: observed passing, then failing on 'rejects invalid UTF-8 corpus bytes', then passing across three consecutive CI runs of the same tree, and failing with ENOENT in an earlier probe. Reads a `git cat-file --batch` child's stdout, so a stream race is the likely cause. Not root-caused: needs a Windows machine to debug, not a 12-minute CI cycle.",
+      "reason": "FLAKY on Windows, not deterministically failing — observed failing at commit e8d6c8dd and again on the following run, then PASSING on the next run of the same tree. Surfaced BY this PR rather than caused by it: the failures are the 100-way concurrency cases, and they began once the deny-list stopped skipping ~47 files and the job started doing several times the work. One root cause, not three — the first case times out mid-lock and the next two then fail on the gate it left behind (`NamespaceGateHeldError`). Verified present before this PR touched `atomic-store.ts`, which only exported an existing function. Green on Linux CI and in isolation on macOS. Flaky rather than plain-listed because a file that oscillates fails the build whichever list it sits on. The fix is a longer budget for these cases on Windows or a gate released on timeout; tracked in #452 as a bug, not a state to keep.",
+      "suspectedProductionBug": true,
       "flaky": true
-    },
-    {
-      "file": "src/core/federation/cross-service-resolver.test.ts",
-      "failingTests": 4,
-      "reason": "real-filesystem fixture: POSIX-only shim, exec bit, or temp-dir teardown semantics"
-    },
-    {
-      "file": "src/core/federation/fleet-memory.test.ts",
-      "failingTests": 11,
-      "reason": "real-filesystem fixture: POSIX-only shim, exec bit, or temp-dir teardown semantics"
-    },
-    {
-      "file": "src/core/federation/registry.test.ts",
-      "failingTests": 1,
-      "reason": "POSIX-specific fixture or assertion"
-    },
-    {
-      "file": "src/core/federation/resolver.test.ts",
-      "failingTests": 11,
-      "reason": "real-filesystem fixture: POSIX-only shim, exec bit, or temp-dir teardown semantics"
-    },
-    {
-      "file": "src/core/generator/openspec-writer.test.ts",
-      "failingTests": 2,
-      "reason": "POSIX-specific fixture or assertion"
-    },
-    {
-      "file": "src/core/runtime/analysis-ownership.test.ts",
-      "failingTests": 2,
-      "reason": "real-filesystem fixture: POSIX-only shim, exec bit, or temp-dir teardown semantics"
-    },
-    {
-      "file": "src/core/runtime/generation-core.test.ts",
-      "failingTests": 1,
-      "reason": "POSIX-specific fixture or assertion"
-    },
-    {
-      "file": "src/core/services/config-manager.test.ts",
-      "failingTests": 1,
-      "reason": "POSIX-specific fixture or assertion"
-    },
-    {
-      "file": "src/core/services/edge-store.test.ts",
-      "failingTests": 3,
-      "reason": "real-filesystem fixture: POSIX-only shim, exec bit, or temp-dir teardown semantics"
-    },
-    {
-      "file": "src/core/services/spec-workflow-skills.test.ts",
-      "failingTests": 1,
-      "reason": "POSIX-specific fixture or assertion"
-    },
-    {
-      "file": "src/pi/extension.test.ts",
-      "failingTests": 1,
-      "reason": "CRLF checkout: content compared against an LF-spelled literal"
     }
   ]
 }

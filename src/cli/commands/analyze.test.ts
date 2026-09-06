@@ -6,7 +6,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { analyzeCommand, formatIndexedFunctionPopulation, formatSpecIndexFailure, runAnalysis } from './analyze.js';
 import { ARTIFACT_FINGERPRINT } from '../../constants.js';
@@ -607,7 +607,10 @@ describe('analyze command', () => {
       // Default: source unchanged since the last analysis (the common skip case).
       vi.mocked(isCacheFresh).mockReset().mockResolvedValue(true);
 
-      cwdSpy     = vi.spyOn(process, 'cwd').mockReturnValue('/fake/root');
+      // resolve(): the command joins this against its own paths and hands the result to a
+      // confinement check, so a POSIX-absolute literal lands on another drive on Windows and
+      // every downstream mock stops being called.
+      cwdSpy     = vi.spyOn(process, 'cwd').mockReturnValue(resolve('/fake/root'));
       consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
       process.exitCode = undefined;
     });

@@ -67,8 +67,10 @@ it('detaches the Pi daemon on every platform, with its output on a real file han
   // the daemon before it writes .openlore/serve.json.
   expect(source).toContain("stdio: ['ignore', logFd, logFd],");
 });
-
-it('does not create a Pi daemon log through an outbound .openlore symlink', async () => {
+  // skipIf(win32): creating a symlink there needs elevated privileges or Developer Mode,
+  // so this cannot build the premise it asserts about and would test a plain file instead.
+  // What it guards is platform-independent and is exercised on Linux.
+it.skipIf(process.platform === 'win32')('does not create a Pi daemon log through an outbound .openlore symlink', async () => {
   const root = await mkdtemp(join(tmpdir(), 'openlore-pi-root-'));
   const outside = await mkdtemp(join(tmpdir(), 'openlore-pi-outside-'));
   try {
@@ -302,7 +304,12 @@ it('arms keepalive immediately after a late daemon becomes usable', async () => 
 });
 
 it('frames every Pi before-agent corpus block with the shared provenance boundary', async () => {
-  const source = await readFile(new URL('./extension.ts', import.meta.url), 'utf8');
+  // Line endings normalised: this reads SOURCE TEXT and matches a multi-line literal spelled
+  // with `\n`. A CRLF checkout — the default on Windows — makes every such literal miss, so
+  // the assertion would report a missing call that is present three lines away. The property
+  // is which call wraps the block, not how the file is stored.
+  const source = (await readFile(new URL('./extension.ts', import.meta.url), 'utf8'))
+    .split('\r\n').join('\n');
   expect(source).toContain("frameServedContent(\n      '# Codebase architecture");
   expect(source).toContain('frameServedContent(specIndex, specProvenance');
   expect(source).toContain('renderInjectionBlock(result, cfg)');

@@ -28,6 +28,22 @@ const exists = async (rel: string): Promise<boolean> => {
   try { await access(join(dir, rel)); return true; } catch { return false; }
 };
 
+/**
+ * The wired `openlore` server argv, with the platform's launcher prefix removed.
+ *
+ * Running from source there is no built `dist/cli/index.js` sibling, so the wiring
+ * falls back to the portable npx form (see resolveOpenloreCommand). On Windows `npx`
+ * is a `.cmd` shim that must not be spawned through a shell, so resolvePlatformCommand
+ * runs npm's own CLI entry through Node instead: `command` becomes the absolute
+ * node.exe and the argv gains a leading absolute `…/npm/bin/npx-cli.js`. Dropping that
+ * one prefix element lets the assertions below check the same openlore invocation —
+ * subcommand and preset — on every platform, without weakening the deep equality.
+ */
+const wiredArgs = (mcp: Record<string, unknown>): string[] => {
+  const args = (mcp.mcpServers as Record<string, { args: string[] }>).openlore.args;
+  return args[0]?.endsWith('npx-cli.js') ? args.slice(1) : args;
+};
+
 // Guard the `--preset` help string against the count/preset drift a v2.1.4 QA pass
 // caught (it said "all 62 tools" and omitted substrate + coordination). The preset
 // list must stay current. The hardcoded tool count was dropped in
@@ -51,7 +67,7 @@ describe('install --preset (PresetAwareConnect)', () => {
     const code = await runInstall({ agent: 'claude-code', preset: 'memory', analyze: false, cwd: dir });
     expect(code).toBe(0);
     const mcp = await readJson('.mcp.json');
-    expect((mcp.mcpServers as Record<string, { args: string[] }>).openlore.args).toEqual([
+    expect(wiredArgs(mcp)).toEqual([
       '--yes', 'openlore', 'mcp', '--preset', 'memory',
     ]);
   });
@@ -61,7 +77,7 @@ describe('install --preset (PresetAwareConnect)', () => {
   it('wires the substrate default when no preset is given', async () => {
     await runInstall({ agent: 'claude-code', analyze: false, cwd: dir });
     const mcp = await readJson('.mcp.json');
-    expect((mcp.mcpServers as Record<string, { args: string[] }>).openlore.args).toEqual([
+    expect(wiredArgs(mcp)).toEqual([
       '--yes', 'openlore', 'mcp', '--preset', 'substrate',
     ]);
   });
@@ -69,7 +85,7 @@ describe('install --preset (PresetAwareConnect)', () => {
   it('wires the full surface on explicit --preset full', async () => {
     await runInstall({ agent: 'claude-code', preset: 'full', analyze: false, cwd: dir });
     const mcp = await readJson('.mcp.json');
-    expect((mcp.mcpServers as Record<string, { args: string[] }>).openlore.args).toEqual([
+    expect(wiredArgs(mcp)).toEqual([
       '--yes', 'openlore', 'mcp', '--preset', 'full',
     ]);
   });
@@ -80,7 +96,7 @@ describe('install --preset (PresetAwareConnect)', () => {
   it('wires the full surface on --all-tools (alias of --preset full)', async () => {
     await runInstall({ agent: 'claude-code', allTools: true, analyze: false, cwd: dir });
     const mcp = await readJson('.mcp.json');
-    expect((mcp.mcpServers as Record<string, { args: string[] }>).openlore.args).toEqual([
+    expect(wiredArgs(mcp)).toEqual([
       '--yes', 'openlore', 'mcp', '--preset', 'full',
     ]);
   });
@@ -101,7 +117,7 @@ describe('connect --yes (zero-interaction)', () => {
     // The MCP server was wired without any interactive picker.
     expect(await exists('.mcp.json')).toBe(true);
     const mcp = await readJson('.mcp.json');
-    expect((mcp.mcpServers as Record<string, { args: string[] }>).openlore.args).toEqual([
+    expect(wiredArgs(mcp)).toEqual([
       '--yes', 'openlore', 'mcp', '--preset', 'substrate',
     ]);
   });

@@ -10,7 +10,7 @@
  */
 
 import { writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import type { DependencyGraphResult } from './dependency-graph.js';
 import type { LLMContext } from './artifact-generator.js';
 
@@ -81,7 +81,15 @@ export function buildArchitectureOverview(
 ): ArchitectureOverview {
   // Cluster files use absolute paths; call graph uses relative paths.
   // Normalise both to relative using absDir as base.
-  const toRel = (p: string) => p.startsWith(absDir) ? p.slice(absDir.length + 1) : p;
+  //
+  // The separator normalisation is load-bearing, not tidiness. A cluster path is a NATIVE
+  // absolute path, so slicing it on Windows leaves `src\cli\index.ts`, while the call graph
+  // serves `src/cli/index.ts` — every lookup in the hub/entry sets below then missed, and no
+  // cluster was ever classified `entry_layer`, `api_layer` or `orchestrator`. The overview
+  // still rendered, reporting every cluster as `internal`, which is why this survived: the
+  // answer was wrong, not absent. Invisible on POSIX, where the two spellings coincide.
+  const toRel = (p: string) =>
+    (p.startsWith(absDir) ? p.slice(absDir.length + 1) : p).split(sep).join('/');
 
   // Build sets of relative filePaths for hubs / entry points from call graph
   const hubFiles = new Set<string>(
