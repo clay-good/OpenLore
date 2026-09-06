@@ -43,12 +43,42 @@ let tmpCounter = 0;
  * Backoff for a rename that lost a race with another handle on the destination.
  *
  * POSIX `rename(2)` replaces the destination unconditionally. Windows does not:
- * `MoveFileExW(REPLACE_EXISTING)` needs DELETE access to the target, so it returns
- * `EPERM`/`EACCES`/`EBUSY` while ANY other handle is open on it without
- * `FILE_SHARE_DELETE` — an antivirus or Search Indexer scanning the file it just
- * saw written, or a reader that opened it a millisecond earlier. The window is
- * milliseconds wide and the operation is idempotent (the temp file is still
- * there, fully fsync'd), so the correct response is to wait and try again.
+ * `MoveFileExW(REPLACE_EXISTING)` returns `EPERM`/`EACCES`/`EBUSY` while ANY other
+ * handle is open on the target. The window is milliseconds wide and the operation is
+ * idempotent (the temp file is still there, fully fsync'd), so the correct response
+ * is to wait and try again.
+ *
+ * WHO holds it is usually US, not an antivirus — measured on Windows 11 / Node 26
+ * while investigating issue #457, after an earlier version of this note guessed at a
+ * scanner and sent the investigation the wrong way:
+ *
+ *   - every open shape blocks it, `O_RDONLY` included (so `readFileConfined`'s
+ *     `O_NOFOLLOW` is not special), and
+ *   - `FILE_SHARE_DELETE` does NOT rescue it. A reader that explicitly grants
+ *     share-delete still blocks the replace, so there is no share mode a reader can
+ *     adopt to make this go away.
+ *
+ * The second point is the load-bearing one, so here is how to re-measure it rather than
+ * take it on trust. Hold the destination open with `CreateFileW` called DIRECTLY — the
+ * share flags then are exactly what Win32 receives — while `node` performs the rename, so
+ * the call under test is the real libuv `MoveFileExW(MOVEFILE_REPLACE_EXISTING)`:
+ *
+ * ```
+ * share READ|WRITE (no delete)  -> node rename FAILED EPERM
+ * share READ|WRITE|DELETE       -> node rename FAILED EPERM
+ * share DELETE only             -> node rename FAILED EPERM
+ * no handle at all              -> node rename SUCCEEDED
+ * ```
+ *
+ * Both halves of that harness matter. A first attempt used .NET's `File.Move(overwrite)`
+ * to do the replacing and reported `ACCESS_DENIED` for every arm including the control —
+ * it is not the same call, and it would have "confirmed" the conclusion for the wrong
+ * reason.
+ *
+ * That second point is why this ladder is the ARCHITECTURE and not a workaround: with
+ * nothing to fix on the read side, waiting for our own reader to close its descriptor
+ * is the only way through. Any concurrent read of the artifact — a tool call serving
+ * `llm-context.json` while the watcher publishes it — can cost a publish this way.
  *
  * Observed, not theorised: a Windows CI runner produced
  * `EPERM: operation not permitted, rename '….llm-context.json.tmp-…' -> '…llm-context.json'`
@@ -74,22 +104,28 @@ const RENAME_CONTENTION_DELAYS_MS = [10, 25, 50, 100, 200, 400, 800, 1600] as co
 /**
  * Windows keeps retrying past the shared ladder; every other platform stops at it.
  *
- * MEASURED (issue #457, probe run 34043412177): the same code, the same test, on a clean
- * `windows-latest` CI runner — 10 consecutive runs, and the contention path did not fire
- * ONCE. On the reporting Windows 11 machine it fails about 1 run in 5. Identical code on
- * both, so the handle blocking the rename cannot be one of ours: it is the environment
- * (Defender's first-touch scan, the Search Indexer, a backup agent) opening a
- * just-published artifact. That is the arbitrary-third-party case the shared ladder's own
- * comment says it is NOT sized for, and `llm-context.json` is exactly the kind of file
- * those tools open — a freshly written artifact in a watched tree.
+ * The reason is the one measured above: on Windows ANY open descriptor on the destination
+ * blocks the replace, share-delete included, and the descriptor is usually our own reader.
+ * There is nothing to fix on the read side, so the only way through is to outwait the
+ * reader — which makes the LENGTH of this ladder the whole mitigation, and worth more here
+ * than on a platform where the failure cannot occur at all.
+ *
+ * A CORRECTION, recorded because the wrong version of it was committed here first: an
+ * earlier note claimed this same extension was warranted because a clean `windows-latest`
+ * runner never hit the contention in 10 runs while a real machine failed ~1 in 5, and
+ * concluded from that clean negative that the holder had to be external. That inference
+ * does not hold. The contention is timing-sensitive, so an idle runner simply never lands
+ * in the window; not reproducing says nothing about WHO holds the handle. The direct
+ * measurement — the holding pid read straight off the temp file name — says it is us.
  *
  * Extended to ~6.4s rather than `graceful-fs`'s 60s: the ceiling that matters is the commit
- * lock's, not the scanner's. 10s is when a lock becomes a stale candidate and 30s is when a
- * waiter gives up, so a writer that spends its whole budget must still finish well inside
- * both. This doubles the tolerated hold while keeping that property.
+ * lock's. 10s is when a lock becomes a stale candidate and 30s is when a waiter gives up,
+ * so a writer that spends its whole budget must still finish well inside both. This doubles
+ * the tolerated hold while keeping that property.
  *
- * POSIX is unchanged: there is no share-mode conflict there, so an `EPERM` on rename is a
- * genuine permission error, and spending seconds retrying it only delays a real failure.
+ * POSIX is unchanged: a rename there replaces the destination whatever has it open, so an
+ * `EPERM` is a genuine permission error and retrying it for seconds only delays a real
+ * failure.
  */
 const WINDOWS_EXTRA_RENAME_DELAYS_MS = [3200] as const;
 
